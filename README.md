@@ -55,9 +55,11 @@ The example below uses a point source and a dielectric cube, plots a vertical el
 import torch
 import witwin.maxwell as mw
 
+# Train the cube position directly.
 box_x = torch.tensor(0.10, device="cuda", requires_grad=True)
 box_position = torch.stack((box_x, box_x.new_tensor(0.0), box_x.new_tensor(0.06)))
 
+# Build a minimal scene: one dielectric cube and one point dipole.
 scene = mw.Scene(
     domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
     grid=mw.GridSpec.uniform(0.12),
@@ -94,6 +96,7 @@ sim = mw.Simulation.fdtd(
     full_field_dft=True,
 )
 
+# Run the simulation and backpropagate from a probe value.
 result = sim.run()
 probe = result.monitor("probe")["data"]
 loss = torch.abs(probe) ** 2
@@ -103,6 +106,7 @@ print("probe =", probe)
 print("loss =", float(loss.detach().item()))
 print("d(loss)/d(box_x) =", box_x.grad)
 
+# Plot a vertical field slice at y = 0.
 result.plot.field(axis="y", position=0.0, component="abs", field_log_scale=True)
 ```
 
