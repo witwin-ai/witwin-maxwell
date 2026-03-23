@@ -1,4 +1,4 @@
-# WiTwin Maxwell
+# WiTwin Maxwell - Differentiable Electromagnetic Solver
 
 WiTwin Maxwell is a PyTorch-native differentiable full-wave electromagnetic solver for Maxwell's equations, with inverse-design and optimization workflows staying inside standard PyTorch through `SceneModule`, `MaterialRegion`, and automatic backward support in the FDTD path.
 
@@ -11,6 +11,7 @@ Frequency-domain `FDFD` support is coming soon.
 ## Get Started
 
 Python 3.10+ and an NVIDIA GPU are required.
+This package depends on the base `witwin` package.
 
 ```bash
 pip install witwin[maxwell]
@@ -141,3 +142,9 @@ Benchmark assets live under:
 ## License
 
 GPL-3.0-or-later. See `COPYING` for the full license text.
+
+## Developer
+
+[![Asixa](https://github.com/Asixa.png)](https://github.com/Asixa)
+
+[Asixa](https://github.com/Asixa)
