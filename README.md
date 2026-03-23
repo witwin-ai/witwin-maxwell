@@ -145,6 +145,8 @@ GPL-3.0-or-later. See `COPYING` for the full license text.
 
 ## Developer
 
-[![Asixa](https://github.com/Asixa.png)](https://github.com/Asixa)
+<a href="http://xingyuchen.me/">
+  <img src="https://github.com/Asixa.png" alt="Xingyu Chen" width="48" height="48" style="border-radius:50%;">
+</a>
 
-[Asixa](https://github.com/Asixa)
+[Xingyu Chen](http://xingyuchen.me/)
