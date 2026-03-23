@@ -179,6 +179,7 @@ venv.bak/
 *.npz
 
 settings.local.json
+.claude/
 
 # mypy
 .mypy_cache/
