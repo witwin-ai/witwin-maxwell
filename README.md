@@ -90,6 +90,7 @@ sim = mw.Simulation.fdtd(
     frequencies=[1.0e9],
     run_time=mw.TimeConfig(time_steps=32),
     spectral_sampler=mw.SpectralSampler(window="none"),
+    full_field_dft=True,
 )
 
 result = sim.run()
