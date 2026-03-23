@@ -48,28 +48,27 @@ For the exhaustive user-visible capability inventory, see [`FEATURE_LIST.md`](FE
 
 ## Minimal Differentiable Example
 
-The example below builds a tiny trainable design region, runs an FDTD simulation, and backpropagates through `MaterialRegion.density`.
+The example below uses a point source and a dielectric cube, plots a vertical electric-field slice, and backpropagates to the cube position.
 
 ```python
-import matplotlib.pyplot as plt
 import torch
 import witwin.maxwell as mw
 
-logits = torch.zeros((24, 24, 1), device="cuda", requires_grad=True)
+box_x = torch.tensor(0.10, device="cuda", requires_grad=True)
+box_position = torch.stack((box_x, box_x.new_tensor(0.0), box_x.new_tensor(0.06)))
 
 scene = mw.Scene(
     domain=mw.Domain(bounds=((-0.24, 0.24), (-0.24, 0.24), (-0.24, 0.24))),
     grid=mw.GridSpec.uniform(0.12),
     boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
     device="cuda",
+    subpixel_samples=5,
 )
-scene.add_material_region(
-    mw.MaterialRegion(
-        name="design",
-        geometry=mw.Box(position=(0.0, 0.0, 0.06), size=(0.18, 0.18, 0.12)),
-        density=torch.sigmoid(logits),
-        eps_bounds=(1.0, 6.0),
-        mu_bounds=(1.0, 1.0),
+scene.add_structure(
+    mw.Structure(
+        name="cube",
+        geometry=mw.Box(position=box_position, size=(0.18, 0.18, 0.18)),
+        material=mw.Material(eps_r=20.0),
     )
 )
 scene.add_source(
@@ -100,17 +99,9 @@ loss.backward()
 
 print("probe =", probe)
 print("loss =", float(loss.detach().item()))
-print("grad =", logits.grad)
+print("d(loss)/d(box_x) =", box_x.grad)
 
-density = torch.sigmoid(logits).detach().squeeze(-1).cpu().numpy()
-plt.figure(figsize=(4, 4))
-plt.imshow(density, origin="lower", cmap="viridis")
-plt.colorbar(label="density")
-plt.title("Design Density")
-plt.xlabel("x")
-plt.ylabel("y")
-plt.tight_layout()
-plt.show()
+result.plot.field(axis="y", position=0.0, component="abs", field_log_scale=True)
 ```
 
 This example is intentionally minimal and does not require wrapping the scene in a class.
