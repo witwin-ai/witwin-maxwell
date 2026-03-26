@@ -6,7 +6,6 @@ from .plots import (
     visualize_material_slice,
     visualize_slice,
 )
-from .interactive import build_fdtd_pyvista_grid, show_pyvista_solution
 
 __all__ = [
     "build_fdtd_pyvista_grid",
@@ -18,3 +17,12 @@ __all__ = [
     "visualize_material_slice",
     "visualize_slice",
 ]
+
+
+def __getattr__(name):
+    if name in ("build_fdtd_pyvista_grid", "show_pyvista_solution"):
+        from .interactive import build_fdtd_pyvista_grid, show_pyvista_solution
+        globals()["build_fdtd_pyvista_grid"] = build_fdtd_pyvista_grid
+        globals()["show_pyvista_solution"] = show_pyvista_solution
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

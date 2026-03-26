@@ -1,5 +1,4 @@
 import numpy as np
-import pyvista as pv
 
 
 ZINC = {
@@ -15,6 +14,8 @@ ZINC = {
 
 
 def build_fdtd_pyvista_grid(fdtd, freq_solution):
+    import pyvista as pv
+
     field_mag, _, _, _ = fdtd._interpolate_yee_to_center(freq_solution)
     permittivity = fdtd._get_centered_permittivity().cpu().numpy()
     x0, _, y0, _, z0, _ = fdtd.scene.domain_range
@@ -435,6 +436,8 @@ def _add_control_widgets(plotter, grid, state, actors, window_size):
 
 
 def show_pyvista_solution(grid, iso_frac=0.35, headless=False, screenshot=None):
+    import pyvista as pv
+
     pv.global_theme.allow_empty_mesh = True
 
     off_screen = headless or screenshot is not None
