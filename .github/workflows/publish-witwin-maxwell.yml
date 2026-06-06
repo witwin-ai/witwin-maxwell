@@ -3,17 +3,15 @@ name: Publish witwin-maxwell
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
-  publish:
-    if: startsWith(github.event.release.tag_name, 'witwin-maxwell-v') && !github.event.release.prerelease
+  validate_release:
+    if: github.event_name != 'release' || (startsWith(github.event.release.tag_name, 'witwin-maxwell-v') && !github.event.release.prerelease)
+    name: Validate release
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    environment:
-      name: pypi
-      url: https://pypi.org/project/witwin-maxwell/
+    outputs:
+      package_dir: ${{ steps.package_dir.outputs.path }}
 
     steps:
       - name: Check out repository
@@ -38,6 +36,7 @@ jobs:
           fi
 
       - name: Validate release tag and package version
+        if: github.event_name == 'release'
         shell: bash
         env:
           PACKAGE_DIR: ${{ steps.package_dir.outputs.path }}
@@ -78,16 +77,100 @@ jobs:
           print(f"Validated {package_name} {package_version} from {pyproject_path}.")
           PY
 
+  compile_cuda:
+    name: CUDA compile / ${{ matrix.os }} / py${{ matrix.python_version }}
+    needs: validate_release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+        python_version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.29
+        with:
+          cuda: "12.5.0"
+          method: local
+          log-file-suffix: "${{ runner.os }}-py${{ matrix.python_version }}"
+
+      - name: Show toolchain
+        shell: bash
+        run: |
+          python --version
+          nvcc --version
+
+      - name: Install CUDA extension build dependencies
+        run: python -m pip install --upgrade pip setuptools wheel ninja torch
+
+      - name: Compile FDTD CUDA extension
+        env:
+          MAX_JOBS: "2"
+          TORCH_CUDA_ARCH_LIST: "7.0;8.0;8.6;8.9;9.0"
+          WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR: ${{ runner.temp }}/witwin_maxwell_fdtd_cuda
+        run: |
+          python -c "import importlib.util, pathlib; path = pathlib.Path('witwin/maxwell/fdtd/cuda/build.py'); spec = importlib.util.spec_from_file_location('witwin_maxwell_fdtd_cuda_build', path); module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module); extension = module.build_extension(verbose=True); print('Compiled', extension)"
+
+  build_distributions:
+    name: Build distributions
+    needs: validate_release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Build distributions
         shell: bash
         env:
-          PACKAGE_DIR: ${{ steps.package_dir.outputs.path }}
+          PACKAGE_DIR: ${{ needs.validate_release.outputs.package_dir }}
         run: |
           python -m pip install --upgrade pip build
           python -m build "$PACKAGE_DIR"
 
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: ${{ needs.validate_release.outputs.package_dir }}/dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    if: github.event_name == 'release'
+    needs:
+      - compile_cuda
+      - build_distributions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/project/witwin-maxwell/
+
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+
       - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: ${{ steps.package_dir.outputs.path }}/dist
-
+          packages-dir: dist
