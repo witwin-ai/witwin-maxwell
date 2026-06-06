@@ -4,13 +4,16 @@ import os
 import shutil
 import sys
 
-import slangtorch
 import torch
 
-os.environ["CC"] = "gcc-10"
-os.environ["CXX"] = "g++-10"
+import slangtorch
+
+if os.name != "nt":
+    os.environ.setdefault("CC", "gcc-10")
+    os.environ.setdefault("CXX", "g++-10")
 
 _FDTD_MODULE_CACHE = {}
+_VALID_FDTD_BACKENDS = {"slang", "cuda", "auto"}
 
 
 def ensure_slang_build_tools_on_path():
@@ -24,7 +27,27 @@ def ensure_slang_build_tools_on_path():
         os.environ["PATH"] = scripts_dir + os.pathsep + current_path
 
 
+def resolve_fdtd_backend_name(requested: str | None = None) -> str:
+    backend = (requested or os.environ.get("WITWIN_MAXWELL_FDTD_BACKEND", "slang")).strip().lower()
+    if backend not in _VALID_FDTD_BACKENDS:
+        choices = ", ".join(sorted(_VALID_FDTD_BACKENDS))
+        raise ValueError(f"WITWIN_MAXWELL_FDTD_BACKEND must be one of: {choices}.")
+    if backend == "auto":
+        try:
+            from ..cuda.backend import is_available
+
+            return "cuda" if is_available() else "slang"
+        except Exception:
+            return "slang"
+    return backend
+
+
 def get_fdtd_module(slang_path):
+    if resolve_fdtd_backend_name() == "cuda":
+        from ..cuda.backend import get_native_fdtd_module
+
+        return get_native_fdtd_module()
+
     slang_path = os.path.abspath(slang_path)
     stat = os.stat(slang_path)
     stem, ext = os.path.splitext(os.path.basename(slang_path))
