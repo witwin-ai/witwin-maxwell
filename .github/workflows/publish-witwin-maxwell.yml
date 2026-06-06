@@ -103,11 +103,26 @@ jobs:
           method: local
           log-file-suffix: "${{ runner.os }}-py${{ matrix.python_version }}"
 
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Export Windows CUDA_HOME
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "CUDA_HOME=$env:CUDA_PATH" >> $env:GITHUB_ENV
+          "CUDA_ROOT=$env:CUDA_PATH" >> $env:GITHUB_ENV
+          "CUDA_BIN_PATH=$env:CUDA_PATH" >> $env:GITHUB_ENV
+
       - name: Show toolchain
         shell: bash
         run: |
           python --version
           nvcc --version
+          command -v cl || true
 
       - name: Install CUDA extension build dependencies
         run: python -m pip install --upgrade pip setuptools wheel ninja torch
