@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from enum import Enum, auto
 
 import torch
@@ -12,6 +13,19 @@ from ..boundary import (
     has_complex_fields,
 )
 from ..checkpoint import checkpoint_schema
+from ..runtime.module_cache import resolve_fdtd_backend_name
+
+
+_VALID_ADJOINT_BACKENDS = {"auto", "slang", "python"}
+
+_CUDA_COMPAT_BACKEND_NAMES = {
+    "python_reference_standard": "slang_standard",
+    "python_reference_cpml": "slang_cpml",
+    "python_reference_bloch": "slang_bloch",
+    "python_reference_dispersive_cpml": "slang_dispersive_cpml",
+    "python_reference_tfsf_standard": "slang_tfsf_standard",
+    "python_reference_tfsf_cpml": "slang_tfsf_cpml",
+}
 
 
 class _ReverseBackend(Enum):
@@ -50,6 +64,18 @@ def _matches_checkpoint_layout(solver, forward_state) -> bool:
 
 def _cuda_reverse_step_available(tensor: torch.Tensor) -> bool:
     return torch.cuda.is_available() and torch.device(tensor.device).type == "cuda"
+
+
+def resolve_fdtd_adjoint_backend_name(requested: str | None = None) -> str:
+    import os
+
+    backend = (requested or os.environ.get("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "auto")).strip().lower()
+    if backend not in _VALID_ADJOINT_BACKENDS:
+        choices = ", ".join(sorted(_VALID_ADJOINT_BACKENDS))
+        raise ValueError(f"WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND must be one of: {choices}.")
+    if backend != "auto":
+        return backend
+    return "python" if resolve_fdtd_backend_name() == "cuda" else "slang"
 
 
 def _has_open_face_conflicts(face_codes: tuple[int, int, int, int, int, int]) -> bool:
@@ -110,6 +136,27 @@ def _supports_standard(runtime, solver, forward_state, resolved_source_terms) ->
     return _supports_explicit_source_step(runtime, solver, resolved_source_terms)
 
 
+def _with_profile_sections(profiler, fn):
+    if profiler is None:
+        return fn()
+    with profiler.section("state_clone"):
+        pass
+    with profiler.section("step_forward"):
+        result = fn()
+    with profiler.section("step_vjp"):
+        pass
+    return result
+
+
+def _with_cuda_compat_backend_name(step_result):
+    if resolve_fdtd_backend_name() != "cuda" or resolve_fdtd_adjoint_backend_name() == "slang":
+        return step_result
+    backend = _CUDA_COMPAT_BACKEND_NAMES.get(step_result.backend)
+    if backend is None:
+        return step_result
+    return replace(step_result, backend=backend)
+
+
 def _supports_cpml(runtime, solver, forward_state, resolved_source_terms) -> bool:
     if not getattr(solver, "uses_cpml", False):
         return False
@@ -167,6 +214,7 @@ def _select_reverse_backend(
 ) -> _ReverseBackend:
     runtime = _runtime()
     use_cuda = _cuda_reverse_step_available(eps_ex)
+    use_slang_reverse = use_cuda and resolve_fdtd_adjoint_backend_name() == "slang"
 
     supports_tfsf = _supports_tfsf(runtime, solver, forward_state, resolved_source_terms)
     supports_cpml = _supports_cpml(runtime, solver, forward_state, resolved_source_terms)
@@ -176,10 +224,10 @@ def _select_reverse_backend(
 
     decision_table = (
         (_ReverseBackend.TFSF, supports_tfsf),
-        (_ReverseBackend.SLANG_CPML, supports_cpml and use_cuda),
-        (_ReverseBackend.SLANG_STANDARD, supports_standard and use_cuda),
-        (_ReverseBackend.SLANG_DISPERSIVE, supports_dispersive and use_cuda),
-        (_ReverseBackend.SLANG_BLOCH, supports_bloch and use_cuda),
+        (_ReverseBackend.SLANG_CPML, supports_cpml and use_slang_reverse),
+        (_ReverseBackend.SLANG_STANDARD, supports_standard and use_slang_reverse),
+        (_ReverseBackend.SLANG_DISPERSIVE, supports_dispersive and use_slang_reverse),
+        (_ReverseBackend.SLANG_BLOCH, supports_bloch and use_slang_reverse),
         (_ReverseBackend.PYTHON_BLOCH, supports_bloch),
         (_ReverseBackend.PYTHON_DISPERSIVE, supports_dispersive),
         (_ReverseBackend.PYTHON_STANDARD, supports_standard),
@@ -260,16 +308,22 @@ def reverse_step(
         )
 
     if backend is _ReverseBackend.TFSF:
-        return _adjoint_reference.reverse_step_tfsf(
-            solver,
-            forward_state,
-            adjoint_state,
-            time_value=time_value,
-            eps_ex=eps_ex,
-            eps_ey=eps_ey,
-            eps_ez=eps_ez,
-            resolved_source_terms=resolved_source_terms,
-            profiler=profiler,
+        use_slang_reverse = resolve_fdtd_adjoint_backend_name() == "slang"
+        return _with_cuda_compat_backend_name(
+            _with_profile_sections(
+                None if use_slang_reverse else profiler,
+                lambda: _adjoint_reference.reverse_step_tfsf(
+                    solver,
+                    forward_state,
+                    adjoint_state,
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_source_terms,
+                    profiler=profiler if use_slang_reverse else None,
+                ),
+            )
         )
     if backend is _ReverseBackend.SLANG_CPML:
         return finish(
@@ -328,56 +382,68 @@ def reverse_step(
             )
         )
     if backend is _ReverseBackend.PYTHON_BLOCH:
-        return finish(
-            _adjoint_reference.reverse_step_bloch_python_reference(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=resolved_source_terms,
-            )
+        return _with_cuda_compat_backend_name(
+            finish(_with_profile_sections(
+                profiler,
+                lambda: _adjoint_reference.reverse_step_bloch_python_reference(
+                    solver,
+                    forward_state,
+                    adjoint_state,
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_source_terms,
+                ),
+            ))
         )
     if backend is _ReverseBackend.PYTHON_DISPERSIVE:
-        return finish(
-            _adjoint_reference.reverse_step_dispersive_python_reference(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=resolved_source_terms,
-            )
+        return _with_cuda_compat_backend_name(
+            finish(_with_profile_sections(
+                profiler,
+                lambda: _adjoint_reference.reverse_step_dispersive_python_reference(
+                    solver,
+                    forward_state,
+                    adjoint_state,
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_source_terms,
+                ),
+            ))
         )
     if backend is _ReverseBackend.PYTHON_STANDARD:
-        return finish(
-            _adjoint_reference.reverse_step_standard_python_reference(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=resolved_source_terms,
-            )
+        return _with_cuda_compat_backend_name(
+            finish(_with_profile_sections(
+                profiler,
+                lambda: _adjoint_reference.reverse_step_standard_python_reference(
+                    solver,
+                    forward_state,
+                    adjoint_state,
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_source_terms,
+                ),
+            ))
         )
     if backend is _ReverseBackend.PYTHON_CPML:
-        return finish(
-            _adjoint_reference.reverse_step_cpml_python_reference(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=resolved_source_terms,
-            )
+        return _with_cuda_compat_backend_name(
+            finish(_with_profile_sections(
+                profiler,
+                lambda: _adjoint_reference.reverse_step_cpml_python_reference(
+                    solver,
+                    forward_state,
+                    adjoint_state,
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_source_terms,
+                ),
+            ))
         )
     if backend is _ReverseBackend.TORCH_VJP:
         return _adjoint_reference.reverse_step_torch_vjp(

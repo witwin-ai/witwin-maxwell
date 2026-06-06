@@ -29,7 +29,7 @@ from .core import (
     _tfsf_magnetic_source_terms,
     _update_magnetic_component,
 )
-from .dispatch import _select_reverse_backend, _ReverseBackend
+from .dispatch import _select_reverse_backend, _ReverseBackend, resolve_fdtd_adjoint_backend_name
 
 __all__ = [
     "reverse_step_bloch_python_reference",
@@ -867,7 +867,7 @@ def reverse_step_tfsf(
         time_value=time_value,
         resolved_source_terms=resolved_source_terms,
     )
-    use_cuda_backend = (
+    use_slang_backend = (
         _select_reverse_backend(
             solver,
             forward_state,
@@ -877,10 +877,11 @@ def reverse_step_tfsf(
             resolved_source_terms=resolved_source_terms,
         )
         is _ReverseBackend.TFSF
+        and resolve_fdtd_adjoint_backend_name() == "slang"
         and torch.cuda.is_available()
         and torch.device(eps_ex.device).type == "cuda"
     )
-    if use_cuda_backend:
+    if use_slang_backend:
         if getattr(solver, "uses_cpml", False):
             base_result = _reverse_step_cpml_slang(
                 solver,
@@ -933,7 +934,7 @@ def reverse_step_tfsf(
             )
             backend = "python_reference_tfsf_standard"
 
-    if use_cuda_backend:
+    if use_slang_backend:
         auxiliary_grads = _reverse_tfsf_auxiliary_state_slang(
             solver,
             forward_state,

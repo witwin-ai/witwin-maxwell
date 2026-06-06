@@ -21,3 +21,10 @@ dependencies = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["witwin"]
+artifacts = [
+    "witwin/maxwell/fdtd/**/*.slang",
+    "witwin/maxwell/fdtd/cuda/**/*.cpp",
+    "witwin/maxwell/fdtd/cuda/**/*.cu",
+    "witwin/maxwell/fdtd/cuda/**/*.cuh",
+    "witwin/maxwell/fdtd/cuda/**/*.h",
+]

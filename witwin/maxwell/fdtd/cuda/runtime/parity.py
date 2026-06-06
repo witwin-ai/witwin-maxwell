@@ -1,0 +1,9 @@
+from __future__ import annotations
+
+FIELD_KERNEL_RTOL = 2.0e-6
+FIELD_KERNEL_ATOL = 2.0e-7
+LONG_SOLVE_RTOL = 5.0e-5
+LONG_SOLVE_ATOL = 5.0e-6
+GRADIENT_RTOL = 1.0e-3
+GRADIENT_ATOL = 1.0e-4
+
