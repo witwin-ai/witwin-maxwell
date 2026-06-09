@@ -539,13 +539,87 @@ def update_electric_fields_bloch(solver):
 
 
 def clamp_field_face(solver, field, axis, side):
-    del solver
-    index = 0 if side == "low" else field.shape[axis] - 1
+    side_code = 0 if side == "low" else 1
+    module = getattr(solver, "fdtd_module", None)
+    if module is not None and module.__class__.__name__ == "NativeFDTDModule":
+        module.clampFieldFace3D(field=field, axis=int(axis), side=side_code).launchRaw(
+            blockSize=getattr(solver, "kernel_block_size", None),
+            gridSize=None,
+        )
+        return
+    index = 0 if side_code == 0 else field.shape[axis] - 1
     field.select(axis, index).zero_()
+
+
+def _launch_native_clamp(solver, kernel_name, **kwargs):
+    module = getattr(solver, "fdtd_module", None)
+    if module is None or module.__class__.__name__ != "NativeFDTDModule":
+        return False
+    getattr(module, kernel_name)(**kwargs).launchRaw(
+        blockSize=getattr(solver, "kernel_block_size", None),
+        gridSize=None,
+    )
+    return True
+
+
+def _enforce_native_pec_field(solver, field, axis_a, low_a, high_a, axis_b, low_b, high_b):
+    sides_a = (low_a == BOUNDARY_PEC, high_a == BOUNDARY_PEC)
+    sides_b = (low_b == BOUNDARY_PEC, high_b == BOUNDARY_PEC)
+    if not any(sides_a) and not any(sides_b):
+        return True
+
+    if all(sides_a) and all(sides_b):
+        return _launch_native_clamp(solver, "clampPecBoundary3D", field=field, axisA=axis_a, axisB=axis_b)
+    if all(sides_a):
+        if not _launch_native_clamp(solver, "clampPecBoundary3D", field=field, axisA=axis_a, axisB=axis_a):
+            return False
+    else:
+        for side_code, is_pec in enumerate(sides_a):
+            if is_pec and not _launch_native_clamp(
+                solver, "clampFieldFace3D", field=field, axis=axis_a, side=side_code
+            ):
+                return False
+
+    if all(sides_b):
+        return _launch_native_clamp(solver, "clampPecBoundary3D", field=field, axisA=axis_b, axisB=axis_b)
+    for side_code, is_pec in enumerate(sides_b):
+        if is_pec and not _launch_native_clamp(solver, "clampFieldFace3D", field=field, axis=axis_b, side=side_code):
+            return False
+    return True
 
 
 def enforce_pec_boundaries(solver):
     if not getattr(solver, "has_pec_faces", False):
+        return
+
+    if _enforce_native_pec_field(
+        solver,
+        solver.Ex,
+        1,
+        solver.boundary_y_low_code,
+        solver.boundary_y_high_code,
+        2,
+        solver.boundary_z_low_code,
+        solver.boundary_z_high_code,
+    ) and _enforce_native_pec_field(
+        solver,
+        solver.Ey,
+        0,
+        solver.boundary_x_low_code,
+        solver.boundary_x_high_code,
+        2,
+        solver.boundary_z_low_code,
+        solver.boundary_z_high_code,
+    ) and _enforce_native_pec_field(
+        solver,
+        solver.Ez,
+        0,
+        solver.boundary_x_low_code,
+        solver.boundary_x_high_code,
+        1,
+        solver.boundary_y_low_code,
+        solver.boundary_y_high_code,
+    ):
         return
 
     face_specs = (

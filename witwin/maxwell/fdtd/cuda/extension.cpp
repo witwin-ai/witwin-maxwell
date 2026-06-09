@@ -547,13 +547,9 @@ void add_batched_reference_source_patches_cuda(
     at::Tensor field_z,
     const at::Tensor& coeff_data,
     const at::Tensor& incident,
-    const at::Tensor& term_starts,
-    const at::Tensor& term_shapes,
-    const at::Tensor& term_offsets,
-    const at::Tensor& field_codes,
-    const at::Tensor& sample_axis_codes,
-    const at::Tensor& sample_index_starts,
-    const at::Tensor& sample_indices);
+    const at::Tensor& field_codes_per_coeff,
+    const at::Tensor& field_offsets,
+    const at::Tensor& sample_indices_per_coeff);
 void add_batched_interpolated_source_patches_cuda(
     at::Tensor field_x,
     at::Tensor field_y,
@@ -561,10 +557,8 @@ void add_batched_interpolated_source_patches_cuda(
     const at::Tensor& coeff_data,
     const at::Tensor& incident,
     const at::Tensor& sample_positions,
-    const at::Tensor& term_starts,
-    const at::Tensor& term_shapes,
-    const at::Tensor& term_offsets,
-    const at::Tensor& field_codes,
+    const at::Tensor& field_codes_per_coeff,
+    const at::Tensor& field_offsets,
     double origin,
     double ds);
 void update_auxiliary_magnetic_cuda(
@@ -999,6 +993,7 @@ void reverse_tfsf_auxiliary_magnetic_cuda(
     const at::Tensor& adj_magnetic_after,
     const at::Tensor& magnetic_decay,
     const at::Tensor& magnetic_curl);
+void clamp_field_face_cuda(at::Tensor field, int64_t axis, int64_t side);
 void clamp_pec_boundary_cuda(at::Tensor field, int64_t axis_a, int64_t axis_b);
 void project_periodic_boundary_cuda(at::Tensor field, int64_t axis);
 void project_bloch_boundary_cuda(
@@ -1122,6 +1117,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("accumulate_tfsf_interpolated_sample_adjoint", &accumulate_tfsf_interpolated_sample_adjoint_cuda, "Accumulate interpolated TFSF sample adjoint.");
   m.def("reverse_tfsf_auxiliary_electric", &reverse_tfsf_auxiliary_electric_cuda, "Reverse TFSF auxiliary electric update.");
   m.def("reverse_tfsf_auxiliary_magnetic", &reverse_tfsf_auxiliary_magnetic_cuda, "Reverse TFSF auxiliary magnetic update.");
+  m.def("clamp_field_face", &clamp_field_face_cuda, "Clamp one boundary face.");
   m.def("clamp_pec_boundary", &clamp_pec_boundary_cuda, "Clamp PEC boundary faces.");
   m.def("project_periodic_boundary", &project_periodic_boundary_cuda, "Project periodic boundary faces.");
   m.def("project_bloch_boundary", &project_bloch_boundary_cuda, "Project Bloch boundary faces.");

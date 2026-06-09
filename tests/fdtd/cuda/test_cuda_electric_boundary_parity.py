@@ -6,7 +6,7 @@ import os
 import pytest
 import torch
 
-from witwin.maxwell.fdtd.boundary import BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_PERIODIC, BOUNDARY_PMC
+from witwin.maxwell.fdtd.boundary import BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_PERIODIC, BOUNDARY_PMC, BOUNDARY_PML
 from witwin.maxwell.fdtd.cuda import backend
 
 
@@ -32,6 +32,7 @@ def _coeff(shape: tuple[int, int, int], generator: torch.Generator) -> torch.Ten
         (BOUNDARY_PEC, BOUNDARY_PEC, BOUNDARY_PEC, BOUNDARY_PEC),
         (BOUNDARY_PMC, BOUNDARY_PMC, BOUNDARY_PMC, BOUNDARY_PMC),
         (BOUNDARY_PERIODIC, BOUNDARY_PERIODIC, BOUNDARY_PERIODIC, BOUNDARY_PERIODIC),
+        (BOUNDARY_PML, BOUNDARY_PML, BOUNDARY_PML, BOUNDARY_PML),
         (BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_PMC, BOUNDARY_PERIODIC),
     ],
 )
@@ -294,3 +295,19 @@ def test_compiled_cuda_periodic_and_bloch_projection_match_torch_dispatcher(monk
 
     torch.testing.assert_close(real_actual, real_expected, rtol=2.0e-6, atol=2.0e-7)
     torch.testing.assert_close(imag_actual, imag_expected, rtol=2.0e-6, atol=2.0e-7)
+
+    for axis in range(3):
+        real_expected = _seeded((4, 5, 3), generator)
+        imag_expected = _seeded((4, 5, 3), generator)
+        real_actual = real_expected.clone()
+        imag_actual = imag_expected.clone()
+
+        monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
+        backend._project_bloch_boundary(fieldReal=real_expected, fieldImag=imag_expected, axis=axis, phaseCos=-1.0, phaseSin=0.0)
+
+        monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
+        backend._project_bloch_boundary(fieldReal=real_actual, fieldImag=imag_actual, axis=axis, phaseCos=-1.0, phaseSin=0.0)
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(real_actual, real_expected, rtol=2.0e-6, atol=2.0e-7)
+        torch.testing.assert_close(imag_actual, imag_expected, rtol=2.0e-6, atol=2.0e-7)

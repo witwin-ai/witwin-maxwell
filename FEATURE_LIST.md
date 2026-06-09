@@ -162,6 +162,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - Internal checkpoint/replay support for adjoint-enabled FDTD runs, including CPML auxiliary state replay, TFSF auxiliary-line replay, and Bloch real/imag field checkpoints
 - Adjoint gradient pullback from Yee-grid electric permittivity coefficients back through `Scene.compile_material_tensors()` into trainable material-graph inputs
 - Solver stats including time steps, `dt`, absorber, requested frequencies, per-frequency DFT sample counts, elapsed time, milliseconds per step, and steps per second
+- Native CUDA extension builds on Windows can discover and load the Visual Studio x64 build environment automatically for accelerated FDTD kernels
 - FDTD result stats include CPML auxiliary-memory mode and allocated-versus-dense `psi` byte counts
 - Support for odd grid sizes in Yee-component field outputs
 

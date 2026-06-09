@@ -7,72 +7,85 @@
 
 namespace {
 
+dim3 field_block3d() {
+  return dim3(32, 4, 2);
+}
+
+dim3 field_grid3d(int64_t nx, int64_t ny, int64_t nz, dim3 block) {
+  return dim3(
+      static_cast<unsigned int>((nz + block.x - 1) / block.x),
+      static_cast<unsigned int>((ny + block.y - 1) / block.y),
+      static_cast<unsigned int>((nx + block.z - 1) / block.z));
+}
+
 __global__ void update_debye_kernel(
     int64_t total,
-    const float* electric,
-    const float* drive,
-    double decay,
-    double dt,
-    float* polarization,
-    float* current) {
+    const float* __restrict__ electric,
+    const float* __restrict__ drive,
+    float decay,
+    float inv_dt,
+    float* __restrict__ polarization,
+    float* __restrict__ current) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= total) {
     return;
   }
   const float previous = polarization[index];
-  const float next = static_cast<float>(decay) * previous + drive[index] * electric[index];
+  const float next = decay * previous + drive[index] * electric[index];
   polarization[index] = next;
-  current[index] = (next - previous) / static_cast<float>(dt);
+  current[index] = (next - previous) * inv_dt;
 }
 
 __global__ void update_drude_kernel(
     int64_t total,
-    const float* electric,
-    const float* drive,
-    double decay,
-    float* current) {
+    const float* __restrict__ electric,
+    const float* __restrict__ drive,
+    float decay,
+    float* __restrict__ current) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= total) {
     return;
   }
-  current[index] = static_cast<float>(decay) * current[index] + drive[index] * electric[index];
+  current[index] = decay * current[index] + drive[index] * electric[index];
 }
 
 __global__ void update_lorentz_kernel(
     int64_t total,
-    const float* electric,
-    const float* drive,
-    double decay,
-    double restoring,
-    double dt,
-    float* polarization,
-    float* current) {
+    const float* __restrict__ electric,
+    const float* __restrict__ drive,
+    float decay,
+    float restoring,
+    float dt,
+    float* __restrict__ polarization,
+    float* __restrict__ current) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= total) {
     return;
   }
+  const float previous_current = current[index];
+  const float previous_polarization = polarization[index];
   const float next_current =
-      static_cast<float>(decay) * current[index] -
-      static_cast<float>(restoring) * polarization[index] +
+      decay * previous_current -
+      restoring * previous_polarization +
       drive[index] * electric[index];
   current[index] = next_current;
-  polarization[index] += static_cast<float>(dt) * next_current;
+  polarization[index] = previous_polarization + dt * next_current;
 }
 
 __global__ void apply_polarization_kernel(
     int64_t total,
-    const float* current,
-    const float* inv_permittivity,
-    double dt,
-    float* electric) {
+    const float* __restrict__ current,
+    const float* __restrict__ inv_permittivity,
+    float dt,
+    float* __restrict__ electric) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= total) {
     return;
   }
-  electric[index] -= static_cast<float>(dt) * current[index] * inv_permittivity[index];
+  electric[index] -= dt * current[index] * inv_permittivity[index];
 }
 
-__device__ inline int clamp_index(int index, int size) {
+__device__ __forceinline__ int clamp_index(int index, int size) {
   if (index <= 0) {
     return 0;
   }
@@ -83,8 +96,23 @@ __device__ inline int clamp_index(int index, int size) {
   return index;
 }
 
-__device__ inline float sample_clamped(
-    const float* field,
+__device__ __forceinline__ float sample_direct(
+    const float* __restrict__ field,
+    int i,
+    int j,
+    int k,
+    int size_y,
+    int size_z) {
+  return field[offset3d(
+      static_cast<unsigned int>(i),
+      static_cast<unsigned int>(j),
+      static_cast<unsigned int>(k),
+      static_cast<unsigned int>(size_y),
+      static_cast<unsigned int>(size_z))];
+}
+
+__device__ __forceinline__ float sample_clamped(
+    const float* __restrict__ field,
     int i,
     int j,
     int k,
@@ -99,9 +127,9 @@ __device__ inline float sample_clamped(
       static_cast<unsigned int>(size_z))];
 }
 
+template <int Component>
 __global__ void update_kerr_curl_kernel(
-    int64_t total,
-    int component,
+    int dynamic_x,
     int dynamic_y,
     int dynamic_z,
     int ex_x,
@@ -113,82 +141,161 @@ __global__ void update_kerr_curl_kernel(
     int ez_x,
     int ez_y,
     int ez_z,
-    const float* ex,
-    const float* ey,
-    const float* ez,
-    const float* linear_permittivity,
-    const float* decay,
-    const float* chi3,
-    double dt,
-    double eps0,
-    float* dynamic_curl) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    const float* __restrict__ ex,
+    const float* __restrict__ ey,
+    const float* __restrict__ ez,
+    const float* __restrict__ linear_permittivity,
+    const float* __restrict__ decay,
+    const float* __restrict__ chi3,
+    float dt,
+    float eps0,
+    float* __restrict__ dynamic_curl) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i_u >= static_cast<unsigned int>(dynamic_x)
+      || j_u >= static_cast<unsigned int>(dynamic_y)
+      || k_u >= static_cast<unsigned int>(dynamic_z)) {
     return;
   }
-
-  const Index3D index = unflatten3d(
-      static_cast<unsigned int>(linear),
-      static_cast<unsigned int>(dynamic_y),
-      static_cast<unsigned int>(dynamic_z));
-  const int i = static_cast<int>(index.i);
-  const int j = static_cast<int>(index.j);
-  const int k = static_cast<int>(index.k);
+  const long long linear = offset3d(i_u, j_u, k_u, dynamic_y, dynamic_z);
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
 
   float ex_value;
   float ey_value;
   float ez_value;
-  if (component == 0) {
+  if constexpr (Component == 0) {
     ex_value = ex[linear];
-    ey_value = 0.25f * (
-        sample_clamped(ey, i, j - 1, k, ey_x, ey_y, ey_z) +
-        sample_clamped(ey, i, j, k, ey_x, ey_y, ey_z) +
-        sample_clamped(ey, i + 1, j - 1, k, ey_x, ey_y, ey_z) +
-        sample_clamped(ey, i + 1, j, k, ey_x, ey_y, ey_z));
-    ez_value = 0.25f * (
-        sample_clamped(ez, i, j, k - 1, ez_x, ez_y, ez_z) +
-        sample_clamped(ez, i, j, k, ez_x, ez_y, ez_z) +
-        sample_clamped(ez, i + 1, j, k - 1, ez_x, ez_y, ez_z) +
-        sample_clamped(ez, i + 1, j, k, ez_x, ez_y, ez_z));
-  } else if (component == 1) {
-    ex_value = 0.25f * (
-        sample_clamped(ex, i - 1, j, k, ex_x, ex_y, ex_z) +
-        sample_clamped(ex, i, j, k, ex_x, ex_y, ex_z) +
-        sample_clamped(ex, i - 1, j + 1, k, ex_x, ex_y, ex_z) +
-        sample_clamped(ex, i, j + 1, k, ex_x, ex_y, ex_z));
+    const bool ey_interior = i + 1 < ey_x && j > 0 && j < ey_y && k < ey_z;
+    ey_value = ey_interior
+        ? 0.25f * (
+              sample_direct(ey, i, j - 1, k, ey_y, ey_z) +
+              sample_direct(ey, i, j, k, ey_y, ey_z) +
+              sample_direct(ey, i + 1, j - 1, k, ey_y, ey_z) +
+              sample_direct(ey, i + 1, j, k, ey_y, ey_z))
+        : 0.25f * (
+              sample_clamped(ey, i, j - 1, k, ey_x, ey_y, ey_z) +
+              sample_clamped(ey, i, j, k, ey_x, ey_y, ey_z) +
+              sample_clamped(ey, i + 1, j - 1, k, ey_x, ey_y, ey_z) +
+              sample_clamped(ey, i + 1, j, k, ey_x, ey_y, ey_z));
+    const bool ez_interior = i + 1 < ez_x && j < ez_y && k > 0 && k < ez_z;
+    ez_value = ez_interior
+        ? 0.25f * (
+              sample_direct(ez, i, j, k - 1, ez_y, ez_z) +
+              sample_direct(ez, i, j, k, ez_y, ez_z) +
+              sample_direct(ez, i + 1, j, k - 1, ez_y, ez_z) +
+              sample_direct(ez, i + 1, j, k, ez_y, ez_z))
+        : 0.25f * (
+              sample_clamped(ez, i, j, k - 1, ez_x, ez_y, ez_z) +
+              sample_clamped(ez, i, j, k, ez_x, ez_y, ez_z) +
+              sample_clamped(ez, i + 1, j, k - 1, ez_x, ez_y, ez_z) +
+              sample_clamped(ez, i + 1, j, k, ez_x, ez_y, ez_z));
+  } else if constexpr (Component == 1) {
+    const bool ex_interior = i > 0 && i < ex_x && j + 1 < ex_y && k < ex_z;
+    ex_value = ex_interior
+        ? 0.25f * (
+              sample_direct(ex, i - 1, j, k, ex_y, ex_z) +
+              sample_direct(ex, i, j, k, ex_y, ex_z) +
+              sample_direct(ex, i - 1, j + 1, k, ex_y, ex_z) +
+              sample_direct(ex, i, j + 1, k, ex_y, ex_z))
+        : 0.25f * (
+              sample_clamped(ex, i - 1, j, k, ex_x, ex_y, ex_z) +
+              sample_clamped(ex, i, j, k, ex_x, ex_y, ex_z) +
+              sample_clamped(ex, i - 1, j + 1, k, ex_x, ex_y, ex_z) +
+              sample_clamped(ex, i, j + 1, k, ex_x, ex_y, ex_z));
     ey_value = ey[linear];
-    ez_value = 0.25f * (
-        sample_clamped(ez, i, j, k - 1, ez_x, ez_y, ez_z) +
-        sample_clamped(ez, i, j, k, ez_x, ez_y, ez_z) +
-        sample_clamped(ez, i, j + 1, k - 1, ez_x, ez_y, ez_z) +
-        sample_clamped(ez, i, j + 1, k, ez_x, ez_y, ez_z));
+    const bool ez_interior = i < ez_x && j + 1 < ez_y && k > 0 && k < ez_z;
+    ez_value = ez_interior
+        ? 0.25f * (
+              sample_direct(ez, i, j, k - 1, ez_y, ez_z) +
+              sample_direct(ez, i, j, k, ez_y, ez_z) +
+              sample_direct(ez, i, j + 1, k - 1, ez_y, ez_z) +
+              sample_direct(ez, i, j + 1, k, ez_y, ez_z))
+        : 0.25f * (
+              sample_clamped(ez, i, j, k - 1, ez_x, ez_y, ez_z) +
+              sample_clamped(ez, i, j, k, ez_x, ez_y, ez_z) +
+              sample_clamped(ez, i, j + 1, k - 1, ez_x, ez_y, ez_z) +
+              sample_clamped(ez, i, j + 1, k, ez_x, ez_y, ez_z));
   } else {
-    ex_value = 0.25f * (
-        sample_clamped(ex, i - 1, j, k, ex_x, ex_y, ex_z) +
-        sample_clamped(ex, i, j, k, ex_x, ex_y, ex_z) +
-        sample_clamped(ex, i - 1, j, k + 1, ex_x, ex_y, ex_z) +
-        sample_clamped(ex, i, j, k + 1, ex_x, ex_y, ex_z));
-    ey_value = 0.25f * (
-        sample_clamped(ey, i, j - 1, k, ey_x, ey_y, ey_z) +
-        sample_clamped(ey, i, j, k, ey_x, ey_y, ey_z) +
-        sample_clamped(ey, i, j - 1, k + 1, ey_x, ey_y, ey_z) +
-        sample_clamped(ey, i, j, k + 1, ey_x, ey_y, ey_z));
+    const bool ex_interior = i > 0 && i < ex_x && j < ex_y && k + 1 < ex_z;
+    ex_value = ex_interior
+        ? 0.25f * (
+              sample_direct(ex, i - 1, j, k, ex_y, ex_z) +
+              sample_direct(ex, i, j, k, ex_y, ex_z) +
+              sample_direct(ex, i - 1, j, k + 1, ex_y, ex_z) +
+              sample_direct(ex, i, j, k + 1, ex_y, ex_z))
+        : 0.25f * (
+              sample_clamped(ex, i - 1, j, k, ex_x, ex_y, ex_z) +
+              sample_clamped(ex, i, j, k, ex_x, ex_y, ex_z) +
+              sample_clamped(ex, i - 1, j, k + 1, ex_x, ex_y, ex_z) +
+              sample_clamped(ex, i, j, k + 1, ex_x, ex_y, ex_z));
+    const bool ey_interior = i < ey_x && j > 0 && j < ey_y && k + 1 < ey_z;
+    ey_value = ey_interior
+        ? 0.25f * (
+              sample_direct(ey, i, j - 1, k, ey_y, ey_z) +
+              sample_direct(ey, i, j, k, ey_y, ey_z) +
+              sample_direct(ey, i, j - 1, k + 1, ey_y, ey_z) +
+              sample_direct(ey, i, j, k + 1, ey_y, ey_z))
+        : 0.25f * (
+              sample_clamped(ey, i, j - 1, k, ey_x, ey_y, ey_z) +
+              sample_clamped(ey, i, j, k, ey_x, ey_y, ey_z) +
+              sample_clamped(ey, i, j - 1, k + 1, ey_x, ey_y, ey_z) +
+              sample_clamped(ey, i, j, k + 1, ey_x, ey_y, ey_z));
     ez_value = ez[linear];
   }
 
   float effective =
       linear_permittivity[linear] +
-      static_cast<float>(eps0) * chi3[linear] * (ex_value * ex_value + ey_value * ey_value + ez_value * ez_value);
-  const float floor = 1.0e-12f * static_cast<float>(eps0);
+      eps0 * chi3[linear] * (ex_value * ex_value + ey_value * ey_value + ez_value * ez_value);
+  const float floor = 1.0e-12f * eps0;
   if (effective < floor) {
     effective = floor;
   }
-  dynamic_curl[linear] = (static_cast<float>(dt) / effective) * decay[linear];
+  dynamic_curl[linear] = (dt / effective) * decay[linear];
+}
+
+template <int Component>
+void launch_kerr_curl_kernel(
+    at::Tensor dynamic_curl,
+    const at::Tensor& ex,
+    const at::Tensor& ey,
+    const at::Tensor& ez,
+    const at::Tensor& linear_permittivity,
+    const at::Tensor& decay,
+    const at::Tensor& chi3,
+    double dt,
+    double eps0) {
+  const dim3 block = field_block3d();
+  update_kerr_curl_kernel<Component><<<field_grid3d(dynamic_curl.size(0), dynamic_curl.size(1), dynamic_curl.size(2), block), block, 0, current_cuda_stream()>>>(
+      dynamic_curl.size(0),
+      dynamic_curl.size(1),
+      dynamic_curl.size(2),
+      ex.size(0),
+      ex.size(1),
+      ex.size(2),
+      ey.size(0),
+      ey.size(1),
+      ey.size(2),
+      ez.size(0),
+      ez.size(1),
+      ez.size(2),
+      ex.data_ptr<float>(),
+      ey.data_ptr<float>(),
+      ez.data_ptr<float>(),
+      linear_permittivity.data_ptr<float>(),
+      decay.data_ptr<float>(),
+      chi3.data_ptr<float>(),
+      static_cast<float>(dt),
+      static_cast<float>(eps0),
+      dynamic_curl.data_ptr<float>());
 }
 
 void check_matching_field(const at::Tensor& reference, const at::Tensor& value, const char* name) {
   check_float32_tensor(value, name);
   check_contiguous_tensor(value, name);
+  check_same_cuda_device(reference, value, name);
   TORCH_CHECK(value.sizes() == reference.sizes(), name, " must match field shape");
 }
 
@@ -213,9 +320,13 @@ void launch_kerr_curl(
   check_field3d(ex, "ex");
   check_field3d(ey, "ey");
   check_field3d(ez, "ez");
+  check_same_cuda_device(dynamic_curl, ex, "ex");
+  check_same_cuda_device(dynamic_curl, ey, "ey");
+  check_same_cuda_device(dynamic_curl, ez, "ez");
   check_matching_field(dynamic_curl, linear_permittivity, "linear_permittivity");
   check_matching_field(dynamic_curl, decay, "decay");
   check_matching_field(dynamic_curl, chi3, "chi3");
+  TORCH_CHECK(component >= 0 && component < 3, "component must be in [0, 3)");
   if (component == 0) {
     TORCH_CHECK(ex.sizes() == dynamic_curl.sizes(), "ex must match dynamic_curl shape");
   } else if (component == 1) {
@@ -224,29 +335,13 @@ void launch_kerr_curl(
     TORCH_CHECK(ez.sizes() == dynamic_curl.sizes(), "ez must match dynamic_curl shape");
   }
   c10::cuda::CUDAGuard guard(dynamic_curl.device());
-  update_kerr_curl_kernel<<<linear_grid(dynamic_curl.numel()), 256, 0, current_cuda_stream()>>>(
-      dynamic_curl.numel(),
-      component,
-      dynamic_curl.size(1),
-      dynamic_curl.size(2),
-      ex.size(0),
-      ex.size(1),
-      ex.size(2),
-      ey.size(0),
-      ey.size(1),
-      ey.size(2),
-      ez.size(0),
-      ez.size(1),
-      ez.size(2),
-      ex.data_ptr<float>(),
-      ey.data_ptr<float>(),
-      ez.data_ptr<float>(),
-      linear_permittivity.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      chi3.data_ptr<float>(),
-      dt,
-      eps0,
-      dynamic_curl.data_ptr<float>());
+  if (component == 0) {
+    launch_kerr_curl_kernel<0>(dynamic_curl, ex, ey, ez, linear_permittivity, decay, chi3, dt, eps0);
+  } else if (component == 1) {
+    launch_kerr_curl_kernel<1>(dynamic_curl, ex, ey, ez, linear_permittivity, decay, chi3, dt, eps0);
+  } else {
+    launch_kerr_curl_kernel<2>(dynamic_curl, ex, ey, ez, linear_permittivity, decay, chi3, dt, eps0);
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -269,8 +364,8 @@ void update_debye_current_cuda(
       electric.numel(),
       electric.data_ptr<float>(),
       drive.data_ptr<float>(),
-      decay,
-      dt,
+      static_cast<float>(decay),
+      static_cast<float>(1.0 / dt),
       polarization.data_ptr<float>(),
       current.data_ptr<float>());
   WITWIN_CUDA_CHECK();
@@ -290,7 +385,7 @@ void update_drude_current_cuda(
       electric.numel(),
       electric.data_ptr<float>(),
       drive.data_ptr<float>(),
-      decay,
+      static_cast<float>(decay),
       current.data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
@@ -313,9 +408,9 @@ void update_lorentz_current_cuda(
       electric.numel(),
       electric.data_ptr<float>(),
       drive.data_ptr<float>(),
-      decay,
-      restoring,
-      dt,
+      static_cast<float>(decay),
+      static_cast<float>(restoring),
+      static_cast<float>(dt),
       polarization.data_ptr<float>(),
       current.data_ptr<float>());
   WITWIN_CUDA_CHECK();
@@ -335,7 +430,7 @@ void apply_polarization_current_cuda(
       electric.numel(),
       current.data_ptr<float>(),
       inv_permittivity.data_ptr<float>(),
-      dt,
+      static_cast<float>(dt),
       electric.data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }

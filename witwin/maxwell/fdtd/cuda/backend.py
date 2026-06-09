@@ -1885,6 +1885,78 @@ def _add_interpolated_source_patch(
     _scatter_patch(field, coeffPatch, (offsetI, offsetJ, offsetK), coeffPatch * incident * float(scale))
 
 
+def _legacy_batched_flat_metadata(
+    *,
+    coeff_count: int,
+    termStarts,
+    termShapes,
+    termOffsets,
+    fieldCodes,
+    fieldShapes,
+    sampleAxisCodes=None,
+    sampleIndexStarts=None,
+    sampleIndices=None,
+):
+    device = termStarts.device
+    term_starts_cpu = termStarts.detach().to(device="cpu", dtype=torch.long)
+    term_shapes_cpu = termShapes.detach().to(device="cpu", dtype=torch.long)
+    term_offsets_cpu = termOffsets.detach().to(device="cpu", dtype=torch.long)
+    field_codes_cpu = fieldCodes.detach().to(device="cpu", dtype=torch.long)
+    sample_axis_cpu = (
+        sampleAxisCodes.detach().to(device="cpu", dtype=torch.long)
+        if sampleAxisCodes is not None
+        else None
+    )
+    sample_starts_cpu = (
+        sampleIndexStarts.detach().to(device="cpu", dtype=torch.long)
+        if sampleIndexStarts is not None
+        else None
+    )
+    field_offset_dtype = (
+        torch.int32
+        if all(int(shape[0]) * int(shape[1]) * int(shape[2]) <= torch.iinfo(torch.int32).max for shape in fieldShapes)
+        else torch.long
+    )
+    field_codes_flat = torch.empty(coeff_count, device=device, dtype=torch.int32)
+    field_offsets = torch.empty(coeff_count, device=device, dtype=field_offset_dtype)
+    sample_indices_flat = (
+        torch.empty(coeff_count, device=device, dtype=torch.int32)
+        if sampleIndices is not None
+        else None
+    )
+    term_count = int(term_starts_cpu.numel())
+    for term_index in range(term_count):
+        start = int(term_starts_cpu[term_index].item())
+        end = int(term_starts_cpu[term_index + 1].item()) if term_index + 1 < term_count else coeff_count
+        sx = int(term_shapes_cpu[term_index, 0].item())
+        sy = int(term_shapes_cpu[term_index, 1].item())
+        sz = int(term_shapes_cpu[term_index, 2].item())
+        count = end - start
+        local_linear = torch.arange(count, device=device, dtype=torch.int32)
+        stride_i = sy * sz
+        local_i = local_linear // stride_i
+        remainder = local_linear - local_i * stride_i
+        local_j = remainder // sz
+        local_k = remainder - local_j * sz
+        field_codes_flat[start:end] = int(field_codes_cpu[term_index].item())
+        field_i = local_i + int(term_offsets_cpu[term_index, 0].item())
+        field_j = local_j + int(term_offsets_cpu[term_index, 1].item())
+        field_k = local_k + int(term_offsets_cpu[term_index, 2].item())
+        field_code = int(field_codes_cpu[term_index].item())
+        field_shape = fieldShapes[field_code]
+        field_offsets[start:end] = (
+            field_i.to(dtype=torch.long) * (int(field_shape[1]) * int(field_shape[2]))
+            + field_j.to(dtype=torch.long) * int(field_shape[2])
+            + field_k.to(dtype=torch.long)
+        ).to(dtype=field_offset_dtype)
+        if sample_indices_flat is not None:
+            axis = int(sample_axis_cpu[term_index].item())
+            sample_linear = local_i if axis == 0 else (local_j if axis == 1 else local_k)
+            sample_start = int(sample_starts_cpu[term_index].item())
+            sample_indices_flat[start:end] = sampleIndices[sample_start + sample_linear.to(dtype=torch.long)]
+    return field_codes_flat, field_offsets, sample_indices_flat
+
+
 def _add_batched_reference_source_patches(
     *,
     fieldX,
@@ -1899,7 +1971,22 @@ def _add_batched_reference_source_patches(
     sampleAxisCodes,
     sampleIndexStarts,
     sampleIndices,
+    fieldCodesPerCoeff=None,
+    fieldOffsets=None,
+    sampleIndicesPerCoeff=None,
 ):
+    if fieldCodesPerCoeff is None or fieldOffsets is None or sampleIndicesPerCoeff is None:
+        fieldCodesPerCoeff, fieldOffsets, sampleIndicesPerCoeff = _legacy_batched_flat_metadata(
+            coeff_count=int(coeffData.numel()),
+            termStarts=termStarts,
+            termShapes=termShapes,
+            termOffsets=termOffsets,
+            fieldCodes=fieldCodes,
+            fieldShapes=(fieldX.shape, fieldY.shape, fieldZ.shape),
+            sampleAxisCodes=sampleAxisCodes,
+            sampleIndexStarts=sampleIndexStarts,
+            sampleIndices=sampleIndices,
+        )
     if _use_compiled_field_kernels():
         get_compiled_extension().add_batched_reference_source_patches(
             fieldX,
@@ -1907,13 +1994,9 @@ def _add_batched_reference_source_patches(
             fieldZ,
             coeffData,
             incidentField,
-            termStarts.to(dtype=torch.int32).contiguous(),
-            termShapes.to(dtype=torch.int32).contiguous(),
-            termOffsets.to(dtype=torch.int32).contiguous(),
-            fieldCodes.to(dtype=torch.int32).contiguous(),
-            sampleAxisCodes.to(dtype=torch.int32).contiguous(),
-            sampleIndexStarts.to(dtype=torch.int32).contiguous(),
-            sampleIndices.to(dtype=torch.int32).contiguous(),
+            fieldCodesPerCoeff.to(dtype=torch.int32).contiguous(),
+            fieldOffsets.contiguous(),
+            sampleIndicesPerCoeff.to(dtype=torch.int32).contiguous(),
         )
         return
     fields = (fieldX, fieldY, fieldZ)
@@ -1946,9 +2029,20 @@ def _add_batched_interpolated_source_patches(
     termShapes,
     termOffsets,
     fieldCodes,
+    fieldCodesPerCoeff=None,
+    fieldOffsets=None,
     origin,
     ds,
 ):
+    if fieldCodesPerCoeff is None or fieldOffsets is None:
+        fieldCodesPerCoeff, fieldOffsets, _ = _legacy_batched_flat_metadata(
+            coeff_count=int(coeffData.numel()),
+            termStarts=termStarts,
+            termShapes=termShapes,
+            termOffsets=termOffsets,
+            fieldCodes=fieldCodes,
+            fieldShapes=(fieldX.shape, fieldY.shape, fieldZ.shape),
+        )
     if _use_compiled_field_kernels():
         get_compiled_extension().add_batched_interpolated_source_patches(
             fieldX,
@@ -1957,10 +2051,8 @@ def _add_batched_interpolated_source_patches(
             coeffData,
             incidentField,
             samplePositions,
-            termStarts.to(dtype=torch.int32).contiguous(),
-            termShapes.to(dtype=torch.int32).contiguous(),
-            termOffsets.to(dtype=torch.int32).contiguous(),
-            fieldCodes.to(dtype=torch.int32).contiguous(),
+            fieldCodesPerCoeff.to(dtype=torch.int32).contiguous(),
+            fieldOffsets.contiguous(),
             float(origin),
             float(ds),
         )
@@ -2063,13 +2155,23 @@ def _accumulate_dft_batched(
     EzImagAccum.add_(Ez.unsqueeze(0) * sin)
 
 
-def _accumulate_point_observers(*, field, pointI, pointJ, pointK, realAccum, imagAccum, weightedCos, weightedSin):
+def _accumulate_point_observers(
+    *,
+    field,
+    pointI,
+    pointJ,
+    pointK,
+    realAccum,
+    imagAccum,
+    weightedCos,
+    weightedSin,
+):
     if _use_compiled_field_kernels():
         get_compiled_extension().accumulate_point_observers(
             field,
-            pointI.to(torch.long).contiguous(),
-            pointJ.to(torch.long).contiguous(),
-            pointK.to(torch.long).contiguous(),
+            pointI.contiguous(),
+            pointJ.contiguous(),
+            pointK.contiguous(),
             realAccum,
             imagAccum,
             float(weightedCos),
@@ -3507,6 +3609,14 @@ def _reverse_tfsf_auxiliary_magnetic(
     AdjElectricPrev.index_add_(0, indices + 1, -values)
 
 
+def _clamp_field_face(*, field, axis, side):
+    if _use_compiled_field_kernels():
+        get_compiled_extension().clamp_field_face(field, int(axis), int(side))
+        return
+    index = 0 if int(side) == 0 else field.shape[int(axis)] - 1
+    field.select(int(axis), index).zero_()
+
+
 def _clamp_pec_boundary(*, field, axisA, axisB):
     if _use_compiled_field_kernels():
         get_compiled_extension().clamp_pec_boundary(field, int(axisA), int(axisB))
@@ -3642,6 +3752,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "accumulateTfsfInterpolatedSampleAdjoint3D": _accumulate_tfsf_interpolated_sample_adjoint,
     "reverseTfsfAuxiliaryElectric1D": _reverse_tfsf_auxiliary_electric,
     "reverseTfsfAuxiliaryMagnetic1D": _reverse_tfsf_auxiliary_magnetic,
+    "clampFieldFace3D": _clamp_field_face,
     "clampPecBoundary3D": _clamp_pec_boundary,
     "projectPeriodicBoundary3D": _project_periodic_boundary,
     "projectBlochBoundary3D": _project_bloch_boundary,

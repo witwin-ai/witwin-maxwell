@@ -189,14 +189,50 @@ def _pack_batched_term_metadata(solver, terms):
     term_offsets = []
     field_codes = []
     coeff_chunks = []
-
+    field_code_chunks = []
+    field_offset_chunks = []
+    field_offset_dtype = torch.int32
     for term in terms:
+        field_shape = tuple(int(length) for length in getattr(solver, term["field_name"]).shape)
+        if math.prod(field_shape) > torch.iinfo(torch.int32).max:
+            field_offset_dtype = torch.int64
+            break
+
+    for term_index, term in enumerate(terms):
         coeff_flat = (term["coeff_patch"] * float(term["component_scale"])).reshape(-1)
+        shape = tuple(int(length) for length in term["coeff_patch"].shape)
+        offsets = tuple(int(offset) for offset in term["offsets"])
+        local_linear = torch.arange(int(coeff_flat.numel()), device=solver.device, dtype=torch.int32)
+        stride_i = shape[1] * shape[2]
+        local_i = local_linear // stride_i
+        remainder = local_linear - local_i * stride_i
+        local_j = remainder // shape[2]
+        local_k = remainder - local_j * shape[2]
+        field_code = _field_component_code(term["field_name"])
+        field_shape = tuple(int(length) for length in getattr(solver, term["field_name"]).shape)
+        field_i = local_i + offsets[0]
+        field_j = local_j + offsets[1]
+        field_k = local_k + offsets[2]
         coeff_chunks.append(coeff_flat)
+        field_code_chunks.append(
+            torch.full(
+                (int(coeff_flat.numel()),),
+                field_code,
+                device=solver.device,
+                dtype=torch.int32,
+            )
+        )
+        field_offset_chunks.append(
+            (
+                field_i.to(dtype=torch.int64) * (field_shape[1] * field_shape[2])
+                + field_j.to(dtype=torch.int64) * field_shape[2]
+                + field_k.to(dtype=torch.int64)
+            ).to(dtype=field_offset_dtype).contiguous()
+        )
         term_starts.append(coeff_cursor)
-        term_shapes.append([int(length) for length in term["coeff_patch"].shape])
-        term_offsets.append([int(offset) for offset in term["offsets"]])
-        field_codes.append(_field_component_code(term["field_name"]))
+        term_shapes.append(list(shape))
+        term_offsets.append(list(offsets))
+        field_codes.append(field_code)
         coeff_cursor += int(coeff_flat.numel())
 
     if not coeff_chunks:
@@ -209,6 +245,8 @@ def _pack_batched_term_metadata(solver, terms):
         "term_shapes": torch.tensor(term_shapes, device=solver.device, dtype=torch.int32),
         "term_offsets": torch.tensor(term_offsets, device=solver.device, dtype=torch.int32),
         "field_codes": torch.tensor(field_codes, device=solver.device, dtype=torch.int32),
+        "field_codes_per_coeff": torch.cat(field_code_chunks).contiguous(),
+        "field_offsets": torch.cat(field_offset_chunks).contiguous(),
         "grid": solver._compute_linear_launch_shape(int(coeff_data.numel())),
     }
 
@@ -222,16 +260,28 @@ def build_batched_reference_terms(solver, terms):
     sample_axis_codes = []
     sample_index_starts = []
     sample_chunks = []
+    sample_index_per_coeff_chunks = []
     for term in terms:
         sample_indices = term["sample_indices"].to(device=solver.device, dtype=torch.int32).reshape(-1)
+        shape = tuple(int(length) for length in term["coeff_patch"].shape)
+        local_linear = torch.arange(int(term["coeff_patch"].numel()), device=solver.device, dtype=torch.int32)
+        stride_i = shape[1] * shape[2]
+        local_i = local_linear // stride_i
+        remainder = local_linear - local_i * stride_i
+        local_j = remainder // shape[2]
+        local_k = remainder - local_j * shape[2]
+        axis = int(reference_sample_axis_code(term))
+        sample_linear = local_i if axis == 0 else (local_j if axis == 1 else local_k)
         sample_chunks.append(sample_indices)
-        sample_axis_codes.append(int(reference_sample_axis_code(term)))
+        sample_index_per_coeff_chunks.append(sample_indices[sample_linear.to(dtype=torch.long)])
+        sample_axis_codes.append(axis)
         sample_index_starts.append(sample_cursor)
         sample_cursor += int(sample_indices.numel())
 
     metadata["sample_axis_codes"] = torch.tensor(sample_axis_codes, device=solver.device, dtype=torch.int32)
     metadata["sample_index_starts"] = torch.tensor(sample_index_starts, device=solver.device, dtype=torch.int32)
     metadata["sample_indices"] = torch.cat(sample_chunks).contiguous()
+    metadata["sample_indices_per_coeff"] = torch.cat(sample_index_per_coeff_chunks).contiguous()
     return metadata
 
 

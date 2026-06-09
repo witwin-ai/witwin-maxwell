@@ -184,6 +184,34 @@ def test_compiled_cuda_extension_uniform_cw_and_time_shifted_sources_match_torch
         delay=0.1,
         causalGate=1,
     )
+    backend._add_source_patch(field=expected, sourcePatch=patch, offsetI=-1, offsetJ=4, offsetK=1, signal=-0.3)
+    backend._add_cw_phased_source_patch(
+        field=expected,
+        sourcePatchCos=patch,
+        sourcePatchSin=patch_sin,
+        offsetI=3,
+        offsetJ=-1,
+        offsetK=3,
+        signalCos=-0.4,
+        signalSin=0.15,
+    )
+    backend._add_time_shifted_source_patch(
+        field=expected,
+        sourcePatch=patch,
+        delayPatch=delay_patch,
+        activationDelayPatch=activation_delay,
+        offsetI=4,
+        offsetJ=2,
+        offsetK=-1,
+        timeKind=1,
+        time=0.25,
+        frequency=1.2,
+        fwidth=0.8,
+        amplitude=2.0,
+        phase=0.3,
+        delay=0.1,
+        causalGate=1,
+    )
 
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
     backend._add_source_patch(field=actual, sourcePatch=patch, offsetI=1, offsetJ=2, offsetK=1, signal=0.7)
@@ -214,9 +242,37 @@ def test_compiled_cuda_extension_uniform_cw_and_time_shifted_sources_match_torch
         delay=0.1,
         causalGate=1,
     )
+    backend._add_source_patch(field=actual, sourcePatch=patch, offsetI=-1, offsetJ=4, offsetK=1, signal=-0.3)
+    backend._add_cw_phased_source_patch(
+        field=actual,
+        sourcePatchCos=patch,
+        sourcePatchSin=patch_sin,
+        offsetI=3,
+        offsetJ=-1,
+        offsetK=3,
+        signalCos=-0.4,
+        signalSin=0.15,
+    )
+    backend._add_time_shifted_source_patch(
+        field=actual,
+        sourcePatch=patch,
+        delayPatch=delay_patch,
+        activationDelayPatch=activation_delay,
+        offsetI=4,
+        offsetJ=2,
+        offsetK=-1,
+        timeKind=1,
+        time=0.25,
+        frequency=1.2,
+        fwidth=0.8,
+        amplitude=2.0,
+        phase=0.3,
+        delay=0.1,
+        causalGate=1,
+    )
     torch.cuda.synchronize()
 
-    assert counted.calls == {name: 1 for name in method_names}
+    assert counted.calls == {name: 2 for name in method_names}
     torch.testing.assert_close(actual, expected, rtol=2.0e-6, atol=2.0e-7)
 
 
@@ -460,3 +516,68 @@ def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_d
         torch.testing.assert_close(actual_tensor, expected_tensor, rtol=2.0e-6, atol=2.0e-6)
     torch.testing.assert_close(actual_magnetic, expected_magnetic, rtol=2.0e-6, atol=2.0e-7)
     torch.testing.assert_close(actual_electric, expected_electric, rtol=2.0e-6, atol=2.0e-7)
+
+
+def test_compiled_cuda_extension_batched_source_duplicate_offsets_match_gpu_index_add():
+    ext = backend.get_compiled_extension()
+    field_shape = (2, 2, 4)
+    coeff = torch.linspace(-1.0, 1.0, 64, device="cuda", dtype=torch.float32)
+    incident = torch.linspace(0.25, 1.75, 8, device="cuda", dtype=torch.float32)
+    sample_indices = (torch.arange(64, device="cuda", dtype=torch.int32) % incident.numel()).contiguous()
+    field_codes = torch.cat(
+        (
+            torch.zeros(32, device="cuda", dtype=torch.int32),
+            torch.ones(16, device="cuda", dtype=torch.int32),
+            torch.full((16,), 2, device="cuda", dtype=torch.int32),
+        )
+    ).contiguous()
+    field_offsets = torch.full((64,), 3, device="cuda", dtype=torch.int32)
+
+    expected_ref = [torch.zeros(field_shape, device="cuda", dtype=torch.float32) for _ in range(3)]
+    actual_ref = [tensor.clone() for tensor in expected_ref]
+    ref_values = coeff * incident[sample_indices.to(dtype=torch.long)]
+    for code in range(3):
+        mask = field_codes == code
+        expected_ref[code].reshape(-1).index_add_(0, field_offsets[mask].to(dtype=torch.long), ref_values[mask])
+
+    ext.add_batched_reference_source_patches(
+        actual_ref[0],
+        actual_ref[1],
+        actual_ref[2],
+        coeff,
+        incident,
+        field_codes,
+        field_offsets,
+        sample_indices,
+    )
+
+    positions = (torch.arange(64, device="cuda", dtype=torch.float32) % 8) * 0.5
+    coord = torch.clamp(positions / 0.5, 0.0, float(incident.numel() - 1))
+    lower = torch.floor(coord).to(dtype=torch.long)
+    upper = torch.clamp(lower + 1, max=incident.numel() - 1)
+    frac = coord - lower.to(dtype=torch.float32)
+    interp_values = coeff * (incident[lower] + frac * (incident[upper] - incident[lower]))
+    expected_interp = [torch.zeros(field_shape, device="cuda", dtype=torch.float32) for _ in range(3)]
+    actual_interp = [tensor.clone() for tensor in expected_interp]
+    for code in range(3):
+        mask = field_codes == code
+        expected_interp[code].reshape(-1).index_add_(0, field_offsets[mask].to(dtype=torch.long), interp_values[mask])
+
+    ext.add_batched_interpolated_source_patches(
+        actual_interp[0],
+        actual_interp[1],
+        actual_interp[2],
+        coeff,
+        incident,
+        positions,
+        field_codes,
+        field_offsets,
+        0.0,
+        0.5,
+    )
+    torch.cuda.synchronize()
+
+    for actual_tensor, expected_tensor in zip(actual_ref, expected_ref, strict=True):
+        torch.testing.assert_close(actual_tensor, expected_tensor, rtol=2.0e-6, atol=2.0e-6)
+    for actual_tensor, expected_tensor in zip(actual_interp, expected_interp, strict=True):
+        torch.testing.assert_close(actual_tensor, expected_tensor, rtol=2.0e-6, atol=2.0e-6)

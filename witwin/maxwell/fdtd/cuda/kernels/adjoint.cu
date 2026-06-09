@@ -1,11 +1,25 @@
 #include <ATen/ATen.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#include <limits>
+#include <type_traits>
+
 #include "../launch.h"
 #include "../tensors.h"
 #include "common.cuh"
 
 namespace {
+
+dim3 field_block3d() {
+  return dim3(32, 4, 2);
+}
+
+dim3 field_grid3d(int64_t nx, int64_t ny, int64_t nz, dim3 block) {
+  return dim3(
+      static_cast<unsigned int>((nz + block.x - 1) / block.x),
+      static_cast<unsigned int>((ny + block.y - 1) / block.y),
+      static_cast<unsigned int>((nx + block.z - 1) / block.z));
+}
 
 void check_field(const at::Tensor& tensor, const char* name) {
   check_float32_tensor(tensor, name);
@@ -15,6 +29,7 @@ void check_field(const at::Tensor& tensor, const char* name) {
 
 void check_matching_field(const at::Tensor& reference, const at::Tensor& tensor, const char* name) {
   check_field(tensor, name);
+  check_same_cuda_device(reference, tensor, name);
   TORCH_CHECK(tensor.sizes() == reference.sizes(), name, " must match reference shape");
 }
 
@@ -26,6 +41,7 @@ void check_vector(const at::Tensor& tensor, const char* name) {
 
 void check_matching_vector(const at::Tensor& reference, const at::Tensor& tensor, const char* name) {
   check_vector(tensor, name);
+  check_same_cuda_device(reference, tensor, name);
   TORCH_CHECK(tensor.sizes() == reference.sizes(), name, " must match reference shape");
 }
 
@@ -36,39 +52,39 @@ void check_int32_vector(const at::Tensor& tensor, const char* name) {
   TORCH_CHECK(tensor.dim() == 1, name, " must be a contiguous 1D int32 CUDA tensor");
 }
 
-__device__ inline bool is_valid_index_3d(int i, int j, int k, int nx, int ny, int nz) {
+__device__ __forceinline__ bool is_valid_index_3d(int i, int j, int k, int nx, int ny, int nz) {
   return i >= 0 && i < nx && j >= 0 && j < ny && k >= 0 && k < nz;
 }
 
-__device__ inline bool is_interior_coordinate(int coordinate, int size) {
+__device__ __forceinline__ bool is_interior_coordinate(int coordinate, int size) {
   return coordinate > 0 && coordinate + 1 < size;
 }
 
-__device__ inline bool is_ex_active_index(int i, int j, int k, int nx, int ny, int nz) {
+__device__ __forceinline__ bool is_ex_active_index(int i, int j, int k, int nx, int ny, int nz) {
   return is_valid_index_3d(i, j, k, nx, ny, nz) && is_interior_coordinate(j, ny) && is_interior_coordinate(k, nz);
 }
 
-__device__ inline bool is_ey_active_index(int i, int j, int k, int nx, int ny, int nz) {
+__device__ __forceinline__ bool is_ey_active_index(int i, int j, int k, int nx, int ny, int nz) {
   return is_valid_index_3d(i, j, k, nx, ny, nz) && is_interior_coordinate(i, nx) && is_interior_coordinate(k, nz);
 }
 
-__device__ inline bool is_ez_active_index(int i, int j, int k, int nx, int ny, int nz) {
+__device__ __forceinline__ bool is_ez_active_index(int i, int j, int k, int nx, int ny, int nz) {
   return is_valid_index_3d(i, j, k, nx, ny, nz) && is_interior_coordinate(i, nx) && is_interior_coordinate(j, ny);
 }
 
-__device__ inline bool is_boundary_index(int coordinate, int size) {
+__device__ __forceinline__ bool is_boundary_index(int coordinate, int size) {
   return coordinate == 0 || coordinate + 1 == size;
 }
 
-__device__ inline int select_boundary_mode(int low_mode, int high_mode, int coordinate, int size) {
+__device__ __forceinline__ int select_boundary_mode(int low_mode, int high_mode, int coordinate, int size) {
   return coordinate == 0 ? low_mode : high_mode;
 }
 
-__device__ inline bool is_pec_boundary_mode(int mode) {
+__device__ __forceinline__ bool is_pec_boundary_mode(int mode) {
   return mode == BOUNDARY_PEC;
 }
 
-__device__ inline bool is_inactive_boundary_mode(int mode) {
+__device__ __forceinline__ bool is_inactive_boundary_mode(int mode) {
   return mode == BOUNDARY_NONE || mode == BOUNDARY_PML;
 }
 
@@ -78,7 +94,7 @@ struct ElectricCellStatus {
   bool pec;
 };
 
-__device__ inline ElectricCellStatus resolve_electric_cell_status(
+__device__ __forceinline__ ElectricCellStatus resolve_electric_cell_status(
     int coordinate_a,
     int size_a,
     int low_mode_a,
@@ -110,11 +126,11 @@ __device__ inline ElectricCellStatus resolve_electric_cell_status(
   return status;
 }
 
-__device__ inline bool diff_index_valid(int i, int j, int k, int nx, int ny, int nz) {
+__device__ __forceinline__ bool diff_index_valid(int i, int j, int k, int nx, int ny, int nz) {
   return i >= 0 && i < nx && j >= 0 && j < ny && k >= 0 && k < nz;
 }
 
-__device__ inline float diff_grad_value(const float* diff_grad, int i, int j, int k, int ny, int nz) {
+__device__ __forceinline__ float diff_grad_value(const float* __restrict__ diff_grad, int i, int j, int k, int ny, int nz) {
   return diff_grad[offset3d(
       static_cast<unsigned int>(i),
       static_cast<unsigned int>(j),
@@ -125,9 +141,9 @@ __device__ inline float diff_grad_value(const float* diff_grad, int i, int j, in
 
 __global__ void reverse_magnetic_decay_kernel(
     int64_t total,
-    float* adj_prev,
-    const float* adj_mid,
-    const float* decay) {
+    float* __restrict__ adj_prev,
+    const float* __restrict__ adj_mid,
+    const float* __restrict__ decay) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= total) {
     return;
@@ -136,7 +152,7 @@ __global__ void reverse_magnetic_decay_kernel(
 }
 
 __global__ void reverse_electric_to_hx_standard_kernel(
-    int64_t total,
+    int hx_nx,
     int hx_ny,
     int hx_nz,
     int ey_nx,
@@ -145,45 +161,47 @@ __global__ void reverse_electric_to_hx_standard_kernel(
     int ez_nx,
     int ez_ny,
     int ez_nz,
-    float* adj_hx_mid,
-    const float* adj_hx_post,
-    const float* adj_ey_post,
-    const float* adj_ez_post,
-    const float* ey_curl,
-    const float* ez_curl,
+    float* __restrict__ adj_hx_mid,
+    const float* __restrict__ adj_hx_post,
+    const float* __restrict__ adj_ey_post,
+    const float* __restrict__ adj_ez_post,
+    const float* __restrict__ ey_curl,
+    const float* __restrict__ ez_curl,
     float inv_dy,
     float inv_dz) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (static_cast<int>(i_u) >= hx_nx || static_cast<int>(j_u) >= hx_ny || static_cast<int>(k_u) >= hx_nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), hx_ny, hx_nz);
-  const int i = static_cast<int>(coord.i);
-  const int j = static_cast<int>(coord.j);
-  const int k = static_cast<int>(coord.k);
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
+  const long long linear = offset3d(i_u, j_u, k_u, hx_ny, hx_nz);
   float adjoint = adj_hx_post[linear];
 
   if (is_ey_active_index(i, j, k, ey_nx, ey_ny, ey_nz)) {
-    const long long ey_index = offset3d(coord.i, coord.j, coord.k, ey_ny, ey_nz);
+    const long long ey_index = offset3d(i_u, j_u, k_u, ey_ny, ey_nz);
     adjoint += ey_curl[ey_index] * inv_dz * adj_ey_post[ey_index];
   }
   if (is_ey_active_index(i, j, k + 1, ey_nx, ey_ny, ey_nz)) {
-    const long long ey_index = offset3d(coord.i, coord.j, coord.k + 1, ey_ny, ey_nz);
+    const long long ey_index = offset3d(i_u, j_u, k_u + 1, ey_ny, ey_nz);
     adjoint -= ey_curl[ey_index] * inv_dz * adj_ey_post[ey_index];
   }
   if (is_ez_active_index(i, j, k, ez_nx, ez_ny, ez_nz)) {
-    const long long ez_index = offset3d(coord.i, coord.j, coord.k, ez_ny, ez_nz);
+    const long long ez_index = offset3d(i_u, j_u, k_u, ez_ny, ez_nz);
     adjoint -= ez_curl[ez_index] * inv_dy * adj_ez_post[ez_index];
   }
   if (is_ez_active_index(i, j + 1, k, ez_nx, ez_ny, ez_nz)) {
-    const long long ez_index = offset3d(coord.i, coord.j + 1, coord.k, ez_ny, ez_nz);
+    const long long ez_index = offset3d(i_u, j_u + 1, k_u, ez_ny, ez_nz);
     adjoint += ez_curl[ez_index] * inv_dy * adj_ez_post[ez_index];
   }
   adj_hx_mid[linear] = adjoint;
 }
 
 __global__ void reverse_electric_to_hy_standard_kernel(
-    int64_t total,
+    int hy_nx,
     int hy_ny,
     int hy_nz,
     int ex_nx,
@@ -192,45 +210,47 @@ __global__ void reverse_electric_to_hy_standard_kernel(
     int ez_nx,
     int ez_ny,
     int ez_nz,
-    float* adj_hy_mid,
-    const float* adj_hy_post,
-    const float* adj_ex_post,
-    const float* adj_ez_post,
-    const float* ex_curl,
-    const float* ez_curl,
+    float* __restrict__ adj_hy_mid,
+    const float* __restrict__ adj_hy_post,
+    const float* __restrict__ adj_ex_post,
+    const float* __restrict__ adj_ez_post,
+    const float* __restrict__ ex_curl,
+    const float* __restrict__ ez_curl,
     float inv_dx,
     float inv_dz) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (static_cast<int>(i_u) >= hy_nx || static_cast<int>(j_u) >= hy_ny || static_cast<int>(k_u) >= hy_nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), hy_ny, hy_nz);
-  const int i = static_cast<int>(coord.i);
-  const int j = static_cast<int>(coord.j);
-  const int k = static_cast<int>(coord.k);
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
+  const long long linear = offset3d(i_u, j_u, k_u, hy_ny, hy_nz);
   float adjoint = adj_hy_post[linear];
 
   if (is_ex_active_index(i, j, k, ex_nx, ex_ny, ex_nz)) {
-    const long long ex_index = offset3d(coord.i, coord.j, coord.k, ex_ny, ex_nz);
+    const long long ex_index = offset3d(i_u, j_u, k_u, ex_ny, ex_nz);
     adjoint -= ex_curl[ex_index] * inv_dz * adj_ex_post[ex_index];
   }
   if (is_ex_active_index(i, j, k + 1, ex_nx, ex_ny, ex_nz)) {
-    const long long ex_index = offset3d(coord.i, coord.j, coord.k + 1, ex_ny, ex_nz);
+    const long long ex_index = offset3d(i_u, j_u, k_u + 1, ex_ny, ex_nz);
     adjoint += ex_curl[ex_index] * inv_dz * adj_ex_post[ex_index];
   }
   if (is_ez_active_index(i, j, k, ez_nx, ez_ny, ez_nz)) {
-    const long long ez_index = offset3d(coord.i, coord.j, coord.k, ez_ny, ez_nz);
+    const long long ez_index = offset3d(i_u, j_u, k_u, ez_ny, ez_nz);
     adjoint += ez_curl[ez_index] * inv_dx * adj_ez_post[ez_index];
   }
   if (is_ez_active_index(i + 1, j, k, ez_nx, ez_ny, ez_nz)) {
-    const long long ez_index = offset3d(coord.i + 1, coord.j, coord.k, ez_ny, ez_nz);
+    const long long ez_index = offset3d(i_u + 1, j_u, k_u, ez_ny, ez_nz);
     adjoint -= ez_curl[ez_index] * inv_dx * adj_ez_post[ez_index];
   }
   adj_hy_mid[linear] = adjoint;
 }
 
 __global__ void reverse_electric_to_hz_standard_kernel(
-    int64_t total,
+    int hz_nx,
     int hz_ny,
     int hz_nz,
     int ex_nx,
@@ -239,105 +259,111 @@ __global__ void reverse_electric_to_hz_standard_kernel(
     int ey_nx,
     int ey_ny,
     int ey_nz,
-    float* adj_hz_mid,
-    const float* adj_hz_post,
-    const float* adj_ex_post,
-    const float* adj_ey_post,
-    const float* ex_curl,
-    const float* ey_curl,
+    float* __restrict__ adj_hz_mid,
+    const float* __restrict__ adj_hz_post,
+    const float* __restrict__ adj_ex_post,
+    const float* __restrict__ adj_ey_post,
+    const float* __restrict__ ex_curl,
+    const float* __restrict__ ey_curl,
     float inv_dx,
     float inv_dy) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (static_cast<int>(i_u) >= hz_nx || static_cast<int>(j_u) >= hz_ny || static_cast<int>(k_u) >= hz_nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), hz_ny, hz_nz);
-  const int i = static_cast<int>(coord.i);
-  const int j = static_cast<int>(coord.j);
-  const int k = static_cast<int>(coord.k);
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
+  const long long linear = offset3d(i_u, j_u, k_u, hz_ny, hz_nz);
   float adjoint = adj_hz_post[linear];
 
   if (is_ex_active_index(i, j, k, ex_nx, ex_ny, ex_nz)) {
-    const long long ex_index = offset3d(coord.i, coord.j, coord.k, ex_ny, ex_nz);
+    const long long ex_index = offset3d(i_u, j_u, k_u, ex_ny, ex_nz);
     adjoint += ex_curl[ex_index] * inv_dy * adj_ex_post[ex_index];
   }
   if (is_ex_active_index(i, j + 1, k, ex_nx, ex_ny, ex_nz)) {
-    const long long ex_index = offset3d(coord.i, coord.j + 1, coord.k, ex_ny, ex_nz);
+    const long long ex_index = offset3d(i_u, j_u + 1, k_u, ex_ny, ex_nz);
     adjoint -= ex_curl[ex_index] * inv_dy * adj_ex_post[ex_index];
   }
   if (is_ey_active_index(i, j, k, ey_nx, ey_ny, ey_nz)) {
-    const long long ey_index = offset3d(coord.i, coord.j, coord.k, ey_ny, ey_nz);
+    const long long ey_index = offset3d(i_u, j_u, k_u, ey_ny, ey_nz);
     adjoint -= ey_curl[ey_index] * inv_dx * adj_ey_post[ey_index];
   }
   if (is_ey_active_index(i + 1, j, k, ey_nx, ey_ny, ey_nz)) {
-    const long long ey_index = offset3d(coord.i + 1, coord.j, coord.k, ey_ny, ey_nz);
+    const long long ey_index = offset3d(i_u + 1, j_u, k_u, ey_ny, ey_nz);
     adjoint += ey_curl[ey_index] * inv_dx * adj_ey_post[ey_index];
   }
   adj_hz_mid[linear] = adjoint;
 }
 
 __global__ void reverse_magnetic_to_ex_standard_kernel(
-    int64_t total,
+    int ex_nx,
     int ex_ny,
     int ex_nz,
     int hy_ny,
     int hy_nz,
     int hz_ny,
     int hz_nz,
-    float* adj_ex_prev,
-    float* grad_eps_ex,
-    const float* adj_ex_post,
-    const float* adj_hy_mid,
-    const float* adj_hz_mid,
-    const float* ex_decay,
-    const float* ex_curl,
-    const float* eps_ex,
-    const float* hy_mid,
-    const float* hz_mid,
-    const float* hy_curl,
-    const float* hz_curl,
+    float* __restrict__ adj_ex_prev,
+    float* __restrict__ grad_eps_ex,
+    const float* __restrict__ adj_ex_post,
+    const float* __restrict__ adj_hy_mid,
+    const float* __restrict__ adj_hz_mid,
+    const float* __restrict__ ex_decay,
+    const float* __restrict__ ex_curl,
+    const float* __restrict__ eps_ex,
+    const float* __restrict__ hy_mid,
+    const float* __restrict__ hz_mid,
+    const float* __restrict__ hy_curl,
+    const float* __restrict__ hz_curl,
     float inv_dy,
     float inv_dz,
     int y_low_mode,
     int y_high_mode,
     int z_low_mode,
     int z_high_mode) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= static_cast<unsigned int>(ex_nx)
+      || j >= static_cast<unsigned int>(ex_ny)
+      || k >= static_cast<unsigned int>(ex_nz)) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ex_ny, ex_nz);
+  const long long linear = offset3d(i, j, k, ex_ny, ex_nz);
   const ElectricCellStatus status = resolve_electric_cell_status(
-      static_cast<int>(coord.j), ex_ny, y_low_mode, y_high_mode,
-      static_cast<int>(coord.k), ex_nz, z_low_mode, z_high_mode);
+      static_cast<int>(j), ex_ny, y_low_mode, y_high_mode,
+      static_cast<int>(k), ex_nz, z_low_mode, z_high_mode);
   float adjoint = 0.0f;
   float grad = 0.0f;
   if (status.inactive) {
     adjoint = adj_ex_post[linear];
   } else if (status.active) {
-    const long long hy_index = offset3d(coord.i, coord.j, coord.k, hy_ny, hy_nz);
-    const long long hy_prev_k = offset3d(coord.i, coord.j, coord.k - 1, hy_ny, hy_nz);
-    const long long hz_index = offset3d(coord.i, coord.j, coord.k, hz_ny, hz_nz);
-    const long long hz_prev_j = offset3d(coord.i, coord.j - 1, coord.k, hz_ny, hz_nz);
+    const long long hy_index = offset3d(i, j, k, hy_ny, hy_nz);
+    const long long hy_prev_k = offset3d(i, j, k - 1, hy_ny, hy_nz);
+    const long long hz_index = offset3d(i, j, k, hz_ny, hz_nz);
+    const long long hz_prev_j = offset3d(i, j - 1, k, hz_ny, hz_nz);
     const float curl_h = (hz_mid[hz_index] - hz_mid[hz_prev_j]) * inv_dy
         - (hy_mid[hy_index] - hy_mid[hy_prev_k]) * inv_dz;
     adjoint = adj_ex_post[linear] * ex_decay[linear];
     grad = -adj_ex_post[linear] * ex_curl[linear] * curl_h / eps_ex[linear];
   }
-  if (static_cast<int>(coord.k) < hy_nz) {
-    const long long hy_index = offset3d(coord.i, coord.j, coord.k, hy_ny, hy_nz);
+  if (static_cast<int>(k) < hy_nz) {
+    const long long hy_index = offset3d(i, j, k, hy_ny, hy_nz);
     adjoint += hy_curl[hy_index] * inv_dz * adj_hy_mid[hy_index];
   }
-  if (coord.k > 0) {
-    const long long hy_index = offset3d(coord.i, coord.j, coord.k - 1, hy_ny, hy_nz);
+  if (k > 0) {
+    const long long hy_index = offset3d(i, j, k - 1, hy_ny, hy_nz);
     adjoint -= hy_curl[hy_index] * inv_dz * adj_hy_mid[hy_index];
   }
-  if (static_cast<int>(coord.j) < hz_ny) {
-    const long long hz_index = offset3d(coord.i, coord.j, coord.k, hz_ny, hz_nz);
+  if (static_cast<int>(j) < hz_ny) {
+    const long long hz_index = offset3d(i, j, k, hz_ny, hz_nz);
     adjoint -= hz_curl[hz_index] * inv_dy * adj_hz_mid[hz_index];
   }
-  if (coord.j > 0) {
-    const long long hz_index = offset3d(coord.i, coord.j - 1, coord.k, hz_ny, hz_nz);
+  if (j > 0) {
+    const long long hz_index = offset3d(i, j - 1, k, hz_ny, hz_nz);
     adjoint += hz_curl[hz_index] * inv_dy * adj_hz_mid[hz_index];
   }
   adj_ex_prev[linear] = adjoint;
@@ -345,7 +371,7 @@ __global__ void reverse_magnetic_to_ex_standard_kernel(
 }
 
 __global__ void reverse_magnetic_to_ey_standard_kernel(
-    int64_t total,
+    int ey_nx,
     int ey_ny,
     int ey_nz,
     int hx_ny,
@@ -353,61 +379,65 @@ __global__ void reverse_magnetic_to_ey_standard_kernel(
     int hz_nx,
     int hz_ny,
     int hz_nz,
-    float* adj_ey_prev,
-    float* grad_eps_ey,
-    const float* adj_ey_post,
-    const float* adj_hx_mid,
-    const float* adj_hz_mid,
-    const float* ey_decay,
-    const float* ey_curl,
-    const float* eps_ey,
-    const float* hx_mid,
-    const float* hz_mid,
-    const float* hx_curl,
-    const float* hz_curl,
+    float* __restrict__ adj_ey_prev,
+    float* __restrict__ grad_eps_ey,
+    const float* __restrict__ adj_ey_post,
+    const float* __restrict__ adj_hx_mid,
+    const float* __restrict__ adj_hz_mid,
+    const float* __restrict__ ey_decay,
+    const float* __restrict__ ey_curl,
+    const float* __restrict__ eps_ey,
+    const float* __restrict__ hx_mid,
+    const float* __restrict__ hz_mid,
+    const float* __restrict__ hx_curl,
+    const float* __restrict__ hz_curl,
     float inv_dx,
     float inv_dz,
     int x_low_mode,
     int x_high_mode,
     int z_low_mode,
     int z_high_mode) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= static_cast<unsigned int>(ey_nx)
+      || j >= static_cast<unsigned int>(ey_ny)
+      || k >= static_cast<unsigned int>(ey_nz)) {
     return;
   }
-  const int ey_nx = static_cast<int>(total / (ey_ny * ey_nz));
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ey_ny, ey_nz);
+  const long long linear = offset3d(i, j, k, ey_ny, ey_nz);
   const ElectricCellStatus status = resolve_electric_cell_status(
-      static_cast<int>(coord.i), ey_nx, x_low_mode, x_high_mode,
-      static_cast<int>(coord.k), ey_nz, z_low_mode, z_high_mode);
+      static_cast<int>(i), ey_nx, x_low_mode, x_high_mode,
+      static_cast<int>(k), ey_nz, z_low_mode, z_high_mode);
   float adjoint = 0.0f;
   float grad = 0.0f;
   if (status.inactive) {
     adjoint = adj_ey_post[linear];
   } else if (status.active) {
-    const long long hx_index = offset3d(coord.i, coord.j, coord.k, hx_ny, hx_nz);
-    const long long hx_prev_k = offset3d(coord.i, coord.j, coord.k - 1, hx_ny, hx_nz);
-    const long long hz_index = offset3d(coord.i, coord.j, coord.k, hz_ny, hz_nz);
-    const long long hz_prev_i = offset3d(coord.i - 1, coord.j, coord.k, hz_ny, hz_nz);
+    const long long hx_index = offset3d(i, j, k, hx_ny, hx_nz);
+    const long long hx_prev_k = offset3d(i, j, k - 1, hx_ny, hx_nz);
+    const long long hz_index = offset3d(i, j, k, hz_ny, hz_nz);
+    const long long hz_prev_i = offset3d(i - 1, j, k, hz_ny, hz_nz);
     const float curl_h = (hx_mid[hx_index] - hx_mid[hx_prev_k]) * inv_dz
         - (hz_mid[hz_index] - hz_mid[hz_prev_i]) * inv_dx;
-    adjoint = adj_ey_post[linear] * ey_decay[linear];
-    grad = -adj_ey_post[linear] * ey_curl[linear] * curl_h / eps_ey[linear];
+    const float adj_post = adj_ey_post[linear];
+    adjoint = adj_post * ey_decay[linear];
+    grad = -adj_post * ey_curl[linear] * curl_h / eps_ey[linear];
   }
-  if (static_cast<int>(coord.k) < hx_nz) {
-    const long long hx_index = offset3d(coord.i, coord.j, coord.k, hx_ny, hx_nz);
+  if (static_cast<int>(k) < hx_nz) {
+    const long long hx_index = offset3d(i, j, k, hx_ny, hx_nz);
     adjoint -= hx_curl[hx_index] * inv_dz * adj_hx_mid[hx_index];
   }
-  if (coord.k > 0) {
-    const long long hx_index = offset3d(coord.i, coord.j, coord.k - 1, hx_ny, hx_nz);
+  if (k > 0) {
+    const long long hx_index = offset3d(i, j, k - 1, hx_ny, hx_nz);
     adjoint += hx_curl[hx_index] * inv_dz * adj_hx_mid[hx_index];
   }
-  if (static_cast<int>(coord.i) < hz_nx) {
-    const long long hz_index = offset3d(coord.i, coord.j, coord.k, hz_ny, hz_nz);
+  if (static_cast<int>(i) < hz_nx) {
+    const long long hz_index = offset3d(i, j, k, hz_ny, hz_nz);
     adjoint += hz_curl[hz_index] * inv_dx * adj_hz_mid[hz_index];
   }
-  if (coord.i > 0) {
-    const long long hz_index = offset3d(coord.i - 1, coord.j, coord.k, hz_ny, hz_nz);
+  if (i > 0) {
+    const long long hz_index = offset3d(i - 1, j, k, hz_ny, hz_nz);
     adjoint -= hz_curl[hz_index] * inv_dx * adj_hz_mid[hz_index];
   }
   adj_ey_prev[linear] = adjoint;
@@ -415,7 +445,7 @@ __global__ void reverse_magnetic_to_ey_standard_kernel(
 }
 
 __global__ void reverse_magnetic_to_ez_standard_kernel(
-    int64_t total,
+    int ez_nx,
     int ez_ny,
     int ez_nz,
     int hx_ny,
@@ -423,61 +453,65 @@ __global__ void reverse_magnetic_to_ez_standard_kernel(
     int hy_nx,
     int hy_ny,
     int hy_nz,
-    float* adj_ez_prev,
-    float* grad_eps_ez,
-    const float* adj_ez_post,
-    const float* adj_hx_mid,
-    const float* adj_hy_mid,
-    const float* ez_decay,
-    const float* ez_curl,
-    const float* eps_ez,
-    const float* hx_mid,
-    const float* hy_mid,
-    const float* hx_curl,
-    const float* hy_curl,
+    float* __restrict__ adj_ez_prev,
+    float* __restrict__ grad_eps_ez,
+    const float* __restrict__ adj_ez_post,
+    const float* __restrict__ adj_hx_mid,
+    const float* __restrict__ adj_hy_mid,
+    const float* __restrict__ ez_decay,
+    const float* __restrict__ ez_curl,
+    const float* __restrict__ eps_ez,
+    const float* __restrict__ hx_mid,
+    const float* __restrict__ hy_mid,
+    const float* __restrict__ hx_curl,
+    const float* __restrict__ hy_curl,
     float inv_dx,
     float inv_dy,
     int x_low_mode,
     int x_high_mode,
     int y_low_mode,
     int y_high_mode) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= static_cast<unsigned int>(ez_nx)
+      || j >= static_cast<unsigned int>(ez_ny)
+      || k >= static_cast<unsigned int>(ez_nz)) {
     return;
   }
-  const int ez_nx = static_cast<int>(total / (ez_ny * ez_nz));
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ez_ny, ez_nz);
+  const long long linear = offset3d(i, j, k, ez_ny, ez_nz);
   const ElectricCellStatus status = resolve_electric_cell_status(
-      static_cast<int>(coord.i), ez_nx, x_low_mode, x_high_mode,
-      static_cast<int>(coord.j), ez_ny, y_low_mode, y_high_mode);
+      static_cast<int>(i), ez_nx, x_low_mode, x_high_mode,
+      static_cast<int>(j), ez_ny, y_low_mode, y_high_mode);
   float adjoint = 0.0f;
   float grad = 0.0f;
   if (status.inactive) {
     adjoint = adj_ez_post[linear];
   } else if (status.active) {
-    const long long hx_index = offset3d(coord.i, coord.j, coord.k, hx_ny, hx_nz);
-    const long long hx_prev_j = offset3d(coord.i, coord.j - 1, coord.k, hx_ny, hx_nz);
-    const long long hy_index = offset3d(coord.i, coord.j, coord.k, hy_ny, hy_nz);
-    const long long hy_prev_i = offset3d(coord.i - 1, coord.j, coord.k, hy_ny, hy_nz);
+    const long long hx_index = offset3d(i, j, k, hx_ny, hx_nz);
+    const long long hx_prev_j = offset3d(i, j - 1, k, hx_ny, hx_nz);
+    const long long hy_index = offset3d(i, j, k, hy_ny, hy_nz);
+    const long long hy_prev_i = offset3d(i - 1, j, k, hy_ny, hy_nz);
     const float curl_h = (hy_mid[hy_index] - hy_mid[hy_prev_i]) * inv_dx
         - (hx_mid[hx_index] - hx_mid[hx_prev_j]) * inv_dy;
-    adjoint = adj_ez_post[linear] * ez_decay[linear];
-    grad = -adj_ez_post[linear] * ez_curl[linear] * curl_h / eps_ez[linear];
+    const float adj_post = adj_ez_post[linear];
+    adjoint = adj_post * ez_decay[linear];
+    grad = -adj_post * ez_curl[linear] * curl_h / eps_ez[linear];
   }
-  if (static_cast<int>(coord.j) < hx_ny) {
-    const long long hx_index = offset3d(coord.i, coord.j, coord.k, hx_ny, hx_nz);
+  if (static_cast<int>(j) < hx_ny) {
+    const long long hx_index = offset3d(i, j, k, hx_ny, hx_nz);
     adjoint += hx_curl[hx_index] * inv_dy * adj_hx_mid[hx_index];
   }
-  if (coord.j > 0) {
-    const long long hx_index = offset3d(coord.i, coord.j - 1, coord.k, hx_ny, hx_nz);
+  if (j > 0) {
+    const long long hx_index = offset3d(i, j - 1, k, hx_ny, hx_nz);
     adjoint -= hx_curl[hx_index] * inv_dy * adj_hx_mid[hx_index];
   }
-  if (static_cast<int>(coord.i) < hy_nx) {
-    const long long hy_index = offset3d(coord.i, coord.j, coord.k, hy_ny, hy_nz);
+  if (static_cast<int>(i) < hy_nx) {
+    const long long hy_index = offset3d(i, j, k, hy_ny, hy_nz);
     adjoint -= hy_curl[hy_index] * inv_dx * adj_hy_mid[hy_index];
   }
-  if (coord.i > 0) {
-    const long long hy_index = offset3d(coord.i - 1, coord.j, coord.k, hy_ny, hy_nz);
+  if (i > 0) {
+    const long long hy_index = offset3d(i - 1, j, k, hy_ny, hy_nz);
     adjoint += hy_curl[hy_index] * inv_dx * adj_hy_mid[hy_index];
   }
   adj_ez_prev[linear] = adjoint;
@@ -489,39 +523,39 @@ struct Complex2 {
   float imag;
 };
 
-__device__ inline Complex2 complex_add(Complex2 lhs, Complex2 rhs) {
+__device__ __forceinline__ Complex2 complex_add(Complex2 lhs, Complex2 rhs) {
   return {lhs.real + rhs.real, lhs.imag + rhs.imag};
 }
 
-__device__ inline Complex2 complex_sub(Complex2 lhs, Complex2 rhs) {
+__device__ __forceinline__ Complex2 complex_sub(Complex2 lhs, Complex2 rhs) {
   return {lhs.real - rhs.real, lhs.imag - rhs.imag};
 }
 
-__device__ inline Complex2 complex_scale(Complex2 value, float scale) {
+__device__ __forceinline__ Complex2 complex_scale(Complex2 value, float scale) {
   return {value.real * scale, value.imag * scale};
 }
 
-__device__ inline float complex_inner_real(Complex2 lhs, Complex2 rhs) {
+__device__ __forceinline__ float complex_inner_real(Complex2 lhs, Complex2 rhs) {
   return lhs.real * rhs.real + lhs.imag * rhs.imag;
 }
 
-__device__ inline Complex2 complex_phase_positive(float phase_cos, float phase_sin, Complex2 value) {
+__device__ __forceinline__ Complex2 complex_phase_positive(float phase_cos, float phase_sin, Complex2 value) {
   return {
       phase_cos * value.real - phase_sin * value.imag,
       phase_sin * value.real + phase_cos * value.imag,
   };
 }
 
-__device__ inline Complex2 complex_phase_negative(float phase_cos, float phase_sin, Complex2 value) {
+__device__ __forceinline__ Complex2 complex_phase_negative(float phase_cos, float phase_sin, Complex2 value) {
   return {
       phase_cos * value.real + phase_sin * value.imag,
       phase_cos * value.imag - phase_sin * value.real,
   };
 }
 
-__device__ inline Complex2 load_complex_3d(
-    const float* real_field,
-    const float* imag_field,
+__device__ __forceinline__ Complex2 load_complex_3d(
+    const float* __restrict__ real_field,
+    const float* __restrict__ imag_field,
     int i,
     int j,
     int k,
@@ -536,10 +570,10 @@ __device__ inline Complex2 load_complex_3d(
   return {real_field[index], imag_field[index]};
 }
 
-__device__ inline Complex2 load_scaled_complex_adjoint(
-    const float* adj_real,
-    const float* adj_imag,
-    const float* curl,
+__device__ __forceinline__ Complex2 load_scaled_complex_adjoint(
+    const float* __restrict__ adj_real,
+    const float* __restrict__ adj_imag,
+    const float* __restrict__ curl,
     int i,
     int j,
     int k,
@@ -556,28 +590,28 @@ __device__ inline Complex2 load_scaled_complex_adjoint(
   return {adj_real[index] * scale, adj_imag[index] * scale};
 }
 
-__device__ inline Complex2 bloch_backward_diff_axis(
-    const float* real_field,
-    const float* imag_field,
+template <int Axis>
+__device__ __forceinline__ Complex2 bloch_backward_diff_axis(
+    const float* __restrict__ real_field,
+    const float* __restrict__ imag_field,
     int i,
     int j,
     int k,
     int size_x,
     int size_y,
     int size_z,
-    int axis,
     float phase_cos,
     float phase_sin,
     float inv_delta) {
-  const int coordinate = axis == 0 ? i : (axis == 1 ? j : k);
-  const int field_size = axis == 0 ? size_x : (axis == 1 ? size_y : size_z);
+  const int coordinate = Axis == 0 ? i : (Axis == 1 ? j : k);
+  const int field_size = Axis == 0 ? size_x : (Axis == 1 ? size_y : size_z);
   if (coordinate == 0 || coordinate == field_size) {
     Complex2 low;
     Complex2 high;
-    if (axis == 0) {
+    if constexpr (Axis == 0) {
       low = load_complex_3d(real_field, imag_field, 0, j, k, size_y, size_z);
       high = load_complex_3d(real_field, imag_field, size_x - 1, j, k, size_y, size_z);
-    } else if (axis == 1) {
+    } else if constexpr (Axis == 1) {
       low = load_complex_3d(real_field, imag_field, i, 0, k, size_y, size_z);
       high = load_complex_3d(real_field, imag_field, i, size_y - 1, k, size_y, size_z);
     } else {
@@ -592,10 +626,10 @@ __device__ inline Complex2 bloch_backward_diff_axis(
 
   Complex2 current;
   Complex2 previous;
-  if (axis == 0) {
+  if constexpr (Axis == 0) {
     current = load_complex_3d(real_field, imag_field, i, j, k, size_y, size_z);
     previous = load_complex_3d(real_field, imag_field, i - 1, j, k, size_y, size_z);
-  } else if (axis == 1) {
+  } else if constexpr (Axis == 1) {
     current = load_complex_3d(real_field, imag_field, i, j, k, size_y, size_z);
     previous = load_complex_3d(real_field, imag_field, i, j - 1, k, size_y, size_z);
   } else {
@@ -605,23 +639,23 @@ __device__ inline Complex2 bloch_backward_diff_axis(
   return complex_scale(complex_sub(current, previous), inv_delta);
 }
 
-__device__ inline Complex2 gather_bloch_backward_diff_adjoint_axis(
-    const float* adj_real,
-    const float* adj_imag,
-    const float* curl,
+template <int Axis>
+__device__ __forceinline__ Complex2 gather_bloch_backward_diff_adjoint_axis(
+    const float* __restrict__ adj_real,
+    const float* __restrict__ adj_imag,
+    const float* __restrict__ curl,
     int i,
     int j,
     int k,
     int adj_size_x,
     int adj_size_y,
     int adj_size_z,
-    int axis,
     float sign,
     float phase_cos,
     float phase_sin,
     float inv_delta) {
-  const int coordinate = axis == 0 ? i : (axis == 1 ? j : k);
-  const int adj_axis_size = axis == 0 ? adj_size_x : (axis == 1 ? adj_size_y : adj_size_z);
+  const int coordinate = Axis == 0 ? i : (Axis == 1 ? j : k);
+  const int adj_axis_size = Axis == 0 ? adj_size_x : (Axis == 1 ? adj_size_y : adj_size_z);
   const int field_size = adj_axis_size - 1;
   Complex2 value = {0.0f, 0.0f};
 
@@ -633,9 +667,9 @@ __device__ inline Complex2 gather_bloch_backward_diff_adjoint_axis(
     int next_i = i;
     int next_j = j;
     int next_k = k;
-    if (axis == 0) {
+    if constexpr (Axis == 0) {
       ++next_i;
-    } else if (axis == 1) {
+    } else if constexpr (Axis == 1) {
       ++next_j;
     } else {
       ++next_k;
@@ -644,31 +678,51 @@ __device__ inline Complex2 gather_bloch_backward_diff_adjoint_axis(
         adj_real, adj_imag, curl, next_i, next_j, next_k, adj_size_y, adj_size_z, sign), inv_delta));
   }
 
-  int low_i = i;
-  int low_j = j;
-  int low_k = k;
-  int high_i = i;
-  int high_j = j;
-  int high_k = k;
-  if (axis == 0) {
-    low_i = 0;
-    high_i = adj_size_x - 1;
-  } else if (axis == 1) {
-    low_j = 0;
-    high_j = adj_size_y - 1;
-  } else {
-    low_k = 0;
-    high_k = adj_size_z - 1;
-  }
-  const Complex2 low = load_scaled_complex_adjoint(
-      adj_real, adj_imag, curl, low_i, low_j, low_k, adj_size_y, adj_size_z, sign);
-  const Complex2 high = load_scaled_complex_adjoint(
-      adj_real, adj_imag, curl, high_i, high_j, high_k, adj_size_y, adj_size_z, sign);
   if (coordinate == 0) {
+    int low_i = i;
+    int low_j = j;
+    int low_k = k;
+    int high_i = i;
+    int high_j = j;
+    int high_k = k;
+    if constexpr (Axis == 0) {
+      low_i = 0;
+      high_i = adj_size_x - 1;
+    } else if constexpr (Axis == 1) {
+      low_j = 0;
+      high_j = adj_size_y - 1;
+    } else {
+      low_k = 0;
+      high_k = adj_size_z - 1;
+    }
+    const Complex2 low = load_scaled_complex_adjoint(
+        adj_real, adj_imag, curl, low_i, low_j, low_k, adj_size_y, adj_size_z, sign);
+    const Complex2 high = load_scaled_complex_adjoint(
+        adj_real, adj_imag, curl, high_i, high_j, high_k, adj_size_y, adj_size_z, sign);
     value = complex_add(value, complex_scale(low, inv_delta));
     value = complex_add(value, complex_scale(complex_phase_negative(phase_cos, phase_sin, high), inv_delta));
   }
   if (coordinate + 1 == field_size) {
+    int low_i = i;
+    int low_j = j;
+    int low_k = k;
+    int high_i = i;
+    int high_j = j;
+    int high_k = k;
+    if constexpr (Axis == 0) {
+      low_i = 0;
+      high_i = adj_size_x - 1;
+    } else if constexpr (Axis == 1) {
+      low_j = 0;
+      high_j = adj_size_y - 1;
+    } else {
+      low_k = 0;
+      high_k = adj_size_z - 1;
+    }
+    const Complex2 low = load_scaled_complex_adjoint(
+        adj_real, adj_imag, curl, low_i, low_j, low_k, adj_size_y, adj_size_z, sign);
+    const Complex2 high = load_scaled_complex_adjoint(
+        adj_real, adj_imag, curl, high_i, high_j, high_k, adj_size_y, adj_size_z, sign);
     value = complex_sub(value, complex_scale(complex_phase_positive(phase_cos, phase_sin, low), inv_delta));
     value = complex_sub(value, complex_scale(high, inv_delta));
   }
@@ -677,7 +731,7 @@ __device__ inline Complex2 gather_bloch_backward_diff_adjoint_axis(
 }
 
 __global__ void reverse_electric_to_hx_bloch_kernel(
-    int64_t total,
+    int hx_nx,
     int hx_ny,
     int hx_nz,
     int ey_nx,
@@ -686,43 +740,44 @@ __global__ void reverse_electric_to_hx_bloch_kernel(
     int ez_nx,
     int ez_ny,
     int ez_nz,
-    float* adj_hx_mid_real,
-    float* adj_hx_mid_imag,
-    const float* adj_hx_post_real,
-    const float* adj_hx_post_imag,
-    const float* adj_ey_post_real,
-    const float* adj_ey_post_imag,
-    const float* adj_ez_post_real,
-    const float* adj_ez_post_imag,
-    const float* ey_curl,
-    const float* ez_curl,
+    float* __restrict__ adj_hx_mid_real,
+    float* __restrict__ adj_hx_mid_imag,
+    const float* __restrict__ adj_hx_post_real,
+    const float* __restrict__ adj_hx_post_imag,
+    const float* __restrict__ adj_ey_post_real,
+    const float* __restrict__ adj_ey_post_imag,
+    const float* __restrict__ adj_ez_post_real,
+    const float* __restrict__ adj_ez_post_imag,
+    const float* __restrict__ ey_curl,
+    const float* __restrict__ ez_curl,
     float phase_cos_y,
     float phase_sin_y,
     float phase_cos_z,
     float phase_sin_z,
     float inv_dy,
     float inv_dz) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= static_cast<unsigned int>(hx_nx)
+      || j >= static_cast<unsigned int>(hx_ny)
+      || k >= static_cast<unsigned int>(hx_nz)) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), hx_ny, hx_nz);
-  const int i = static_cast<int>(coord.i);
-  const int j = static_cast<int>(coord.j);
-  const int k = static_cast<int>(coord.k);
-  Complex2 adjoint = load_complex_3d(adj_hx_post_real, adj_hx_post_imag, i, j, k, hx_ny, hx_nz);
-  adjoint = complex_add(adjoint, gather_bloch_backward_diff_adjoint_axis(
+  const long long linear = offset3d(i, j, k, hx_ny, hx_nz);
+  Complex2 adjoint = load_complex_3d(adj_hx_post_real, adj_hx_post_imag, static_cast<int>(i), static_cast<int>(j), static_cast<int>(k), hx_ny, hx_nz);
+  adjoint = complex_add(adjoint, gather_bloch_backward_diff_adjoint_axis<2>(
       adj_ey_post_real, adj_ey_post_imag, ey_curl, i, j, k, ey_nx, ey_ny, ey_nz,
-      2, 1.0f, phase_cos_z, phase_sin_z, inv_dz));
-  adjoint = complex_add(adjoint, gather_bloch_backward_diff_adjoint_axis(
+      1.0f, phase_cos_z, phase_sin_z, inv_dz));
+  adjoint = complex_add(adjoint, gather_bloch_backward_diff_adjoint_axis<1>(
       adj_ez_post_real, adj_ez_post_imag, ez_curl, i, j, k, ez_nx, ez_ny, ez_nz,
-      1, -1.0f, phase_cos_y, phase_sin_y, inv_dy));
+      -1.0f, phase_cos_y, phase_sin_y, inv_dy));
   adj_hx_mid_real[linear] = adjoint.real;
   adj_hx_mid_imag[linear] = adjoint.imag;
 }
 
 __global__ void reverse_electric_to_hy_bloch_kernel(
-    int64_t total,
+    int hy_nx,
     int hy_ny,
     int hy_nz,
     int ex_nx,
@@ -731,44 +786,44 @@ __global__ void reverse_electric_to_hy_bloch_kernel(
     int ez_nx,
     int ez_ny,
     int ez_nz,
-    float* adj_hy_mid_real,
-    float* adj_hy_mid_imag,
-    const float* adj_hy_post_real,
-    const float* adj_hy_post_imag,
-    const float* adj_ex_post_real,
-    const float* adj_ex_post_imag,
-    const float* adj_ez_post_real,
-    const float* adj_ez_post_imag,
-    const float* ex_curl,
-    const float* ez_curl,
+    float* __restrict__ adj_hy_mid_real,
+    float* __restrict__ adj_hy_mid_imag,
+    const float* __restrict__ adj_hy_post_real,
+    const float* __restrict__ adj_hy_post_imag,
+    const float* __restrict__ adj_ex_post_real,
+    const float* __restrict__ adj_ex_post_imag,
+    const float* __restrict__ adj_ez_post_real,
+    const float* __restrict__ adj_ez_post_imag,
+    const float* __restrict__ ex_curl,
+    const float* __restrict__ ez_curl,
     float phase_cos_x,
     float phase_sin_x,
     float phase_cos_z,
     float phase_sin_z,
     float inv_dx,
     float inv_dz) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= static_cast<unsigned int>(hy_nx)
+      || j >= static_cast<unsigned int>(hy_ny)
+      || k >= static_cast<unsigned int>(hy_nz)) {
     return;
   }
-  const int hy_nx = static_cast<int>(total / (hy_ny * hy_nz));
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), hy_ny, hy_nz);
-  const int i = static_cast<int>(coord.i);
-  const int j = static_cast<int>(coord.j);
-  const int k = static_cast<int>(coord.k);
-  Complex2 adjoint = load_complex_3d(adj_hy_post_real, adj_hy_post_imag, i, j, k, hy_ny, hy_nz);
-  adjoint = complex_add(adjoint, gather_bloch_backward_diff_adjoint_axis(
+  const long long linear = offset3d(i, j, k, hy_ny, hy_nz);
+  Complex2 adjoint = load_complex_3d(adj_hy_post_real, adj_hy_post_imag, static_cast<int>(i), static_cast<int>(j), static_cast<int>(k), hy_ny, hy_nz);
+  adjoint = complex_add(adjoint, gather_bloch_backward_diff_adjoint_axis<2>(
       adj_ex_post_real, adj_ex_post_imag, ex_curl, i, j, k, ex_nx, ex_ny, ex_nz,
-      2, -1.0f, phase_cos_z, phase_sin_z, inv_dz));
-  adjoint = complex_add(adjoint, gather_bloch_backward_diff_adjoint_axis(
+      -1.0f, phase_cos_z, phase_sin_z, inv_dz));
+  adjoint = complex_add(adjoint, gather_bloch_backward_diff_adjoint_axis<0>(
       adj_ez_post_real, adj_ez_post_imag, ez_curl, i, j, k, ez_nx, ez_ny, ez_nz,
-      0, 1.0f, phase_cos_x, phase_sin_x, inv_dx));
-  adj_hy_mid_real[offset3d(coord.i, coord.j, coord.k, static_cast<unsigned int>(hy_ny), static_cast<unsigned int>(hy_nz))] = adjoint.real;
-  adj_hy_mid_imag[offset3d(coord.i, coord.j, coord.k, static_cast<unsigned int>(hy_ny), static_cast<unsigned int>(hy_nz))] = adjoint.imag;
+      1.0f, phase_cos_x, phase_sin_x, inv_dx));
+  adj_hy_mid_real[linear] = adjoint.real;
+  adj_hy_mid_imag[linear] = adjoint.imag;
 }
 
 __global__ void reverse_electric_to_hz_bloch_kernel(
-    int64_t total,
+    int hz_nx,
     int hz_ny,
     int hz_nz,
     int ex_nx,
@@ -777,43 +832,44 @@ __global__ void reverse_electric_to_hz_bloch_kernel(
     int ey_nx,
     int ey_ny,
     int ey_nz,
-    float* adj_hz_mid_real,
-    float* adj_hz_mid_imag,
-    const float* adj_hz_post_real,
-    const float* adj_hz_post_imag,
-    const float* adj_ex_post_real,
-    const float* adj_ex_post_imag,
-    const float* adj_ey_post_real,
-    const float* adj_ey_post_imag,
-    const float* ex_curl,
-    const float* ey_curl,
+    float* __restrict__ adj_hz_mid_real,
+    float* __restrict__ adj_hz_mid_imag,
+    const float* __restrict__ adj_hz_post_real,
+    const float* __restrict__ adj_hz_post_imag,
+    const float* __restrict__ adj_ex_post_real,
+    const float* __restrict__ adj_ex_post_imag,
+    const float* __restrict__ adj_ey_post_real,
+    const float* __restrict__ adj_ey_post_imag,
+    const float* __restrict__ ex_curl,
+    const float* __restrict__ ey_curl,
     float phase_cos_x,
     float phase_sin_x,
     float phase_cos_y,
     float phase_sin_y,
     float inv_dx,
     float inv_dy) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= static_cast<unsigned int>(hz_nx)
+      || j >= static_cast<unsigned int>(hz_ny)
+      || k >= static_cast<unsigned int>(hz_nz)) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), hz_ny, hz_nz);
-  const int i = static_cast<int>(coord.i);
-  const int j = static_cast<int>(coord.j);
-  const int k = static_cast<int>(coord.k);
-  Complex2 adjoint = load_complex_3d(adj_hz_post_real, adj_hz_post_imag, i, j, k, hz_ny, hz_nz);
-  adjoint = complex_add(adjoint, gather_bloch_backward_diff_adjoint_axis(
+  const long long linear = offset3d(i, j, k, hz_ny, hz_nz);
+  Complex2 adjoint = load_complex_3d(adj_hz_post_real, adj_hz_post_imag, static_cast<int>(i), static_cast<int>(j), static_cast<int>(k), hz_ny, hz_nz);
+  adjoint = complex_add(adjoint, gather_bloch_backward_diff_adjoint_axis<1>(
       adj_ex_post_real, adj_ex_post_imag, ex_curl, i, j, k, ex_nx, ex_ny, ex_nz,
-      1, 1.0f, phase_cos_y, phase_sin_y, inv_dy));
-  adjoint = complex_add(adjoint, gather_bloch_backward_diff_adjoint_axis(
+      1.0f, phase_cos_y, phase_sin_y, inv_dy));
+  adjoint = complex_add(adjoint, gather_bloch_backward_diff_adjoint_axis<0>(
       adj_ey_post_real, adj_ey_post_imag, ey_curl, i, j, k, ey_nx, ey_ny, ey_nz,
-      0, -1.0f, phase_cos_x, phase_sin_x, inv_dx));
+      -1.0f, phase_cos_x, phase_sin_x, inv_dx));
   adj_hz_mid_real[linear] = adjoint.real;
   adj_hz_mid_imag[linear] = adjoint.imag;
 }
 
 __global__ void reverse_magnetic_to_ex_bloch_kernel(
-    int64_t total,
+    int ex_nx,
     int ex_ny,
     int ex_nz,
     int hy_nx,
@@ -822,65 +878,69 @@ __global__ void reverse_magnetic_to_ex_bloch_kernel(
     int hz_nx,
     int hz_ny,
     int hz_nz,
-    float* adj_ex_prev_real,
-    float* adj_ex_prev_imag,
-    float* grad_eps_ex,
-    const float* adj_ex_post_real,
-    const float* adj_ex_post_imag,
-    const float* adj_hy_mid_real,
-    const float* adj_hy_mid_imag,
-    const float* adj_hz_mid_real,
-    const float* adj_hz_mid_imag,
-    const float* ex_decay,
-    const float* ex_curl,
-    const float* eps_ex,
-    const float* hy_mid_real,
-    const float* hy_mid_imag,
-    const float* hz_mid_real,
-    const float* hz_mid_imag,
-    const float* hy_curl,
-    const float* hz_curl,
+    float* __restrict__ adj_ex_prev_real,
+    float* __restrict__ adj_ex_prev_imag,
+    float* __restrict__ grad_eps_ex,
+    const float* __restrict__ adj_ex_post_real,
+    const float* __restrict__ adj_ex_post_imag,
+    const float* __restrict__ adj_hy_mid_real,
+    const float* __restrict__ adj_hy_mid_imag,
+    const float* __restrict__ adj_hz_mid_real,
+    const float* __restrict__ adj_hz_mid_imag,
+    const float* __restrict__ ex_decay,
+    const float* __restrict__ ex_curl,
+    const float* __restrict__ eps_ex,
+    const float* __restrict__ hy_mid_real,
+    const float* __restrict__ hy_mid_imag,
+    const float* __restrict__ hz_mid_real,
+    const float* __restrict__ hz_mid_imag,
+    const float* __restrict__ hy_curl,
+    const float* __restrict__ hz_curl,
     float phase_cos_y,
     float phase_sin_y,
     float phase_cos_z,
     float phase_sin_z,
     float inv_dy,
     float inv_dz) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i_u >= static_cast<unsigned int>(ex_nx)
+      || j_u >= static_cast<unsigned int>(ex_ny)
+      || k_u >= static_cast<unsigned int>(ex_nz)) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ex_ny, ex_nz);
-  const int i = static_cast<int>(coord.i);
-  const int j = static_cast<int>(coord.j);
-  const int k = static_cast<int>(coord.k);
+  const long long linear = offset3d(i_u, j_u, k_u, ex_ny, ex_nz);
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
   const Complex2 adj_ex_post = load_complex_3d(adj_ex_post_real, adj_ex_post_imag, i, j, k, ex_ny, ex_nz);
-  const Complex2 d_hz_dy = bloch_backward_diff_axis(
-      hz_mid_real, hz_mid_imag, i, j, k, hz_nx, hz_ny, hz_nz, 1, phase_cos_y, phase_sin_y, inv_dy);
-  const Complex2 d_hy_dz = bloch_backward_diff_axis(
-      hy_mid_real, hy_mid_imag, i, j, k, hy_nx, hy_ny, hy_nz, 2, phase_cos_z, phase_sin_z, inv_dz);
+  const Complex2 d_hz_dy = bloch_backward_diff_axis<1>(
+      hz_mid_real, hz_mid_imag, i, j, k, hz_nx, hz_ny, hz_nz, phase_cos_y, phase_sin_y, inv_dy);
+  const Complex2 d_hy_dz = bloch_backward_diff_axis<2>(
+      hy_mid_real, hy_mid_imag, i, j, k, hy_nx, hy_ny, hy_nz, phase_cos_z, phase_sin_z, inv_dz);
   const Complex2 curl_h = complex_sub(d_hz_dy, d_hy_dz);
   float adjoint_real = adj_ex_post.real * ex_decay[linear];
   float adjoint_imag = adj_ex_post.imag * ex_decay[linear];
   float grad = -ex_curl[linear] * complex_inner_real(adj_ex_post, curl_h) / eps_ex[linear];
 
   if (k < hy_nz) {
-    const long long hy_index = offset3d(coord.i, coord.j, coord.k, static_cast<unsigned int>(hy_ny), static_cast<unsigned int>(hy_nz));
+    const long long hy_index = offset3d(i_u, j_u, k_u, static_cast<unsigned int>(hy_ny), static_cast<unsigned int>(hy_nz));
     adjoint_real += hy_curl[hy_index] * inv_dz * adj_hy_mid_real[hy_index];
     adjoint_imag += hy_curl[hy_index] * inv_dz * adj_hy_mid_imag[hy_index];
   }
   if (k > 0) {
-    const long long hy_index = offset3d(coord.i, coord.j, coord.k - 1, static_cast<unsigned int>(hy_ny), static_cast<unsigned int>(hy_nz));
+    const long long hy_index = offset3d(i_u, j_u, k_u - 1, static_cast<unsigned int>(hy_ny), static_cast<unsigned int>(hy_nz));
     adjoint_real -= hy_curl[hy_index] * inv_dz * adj_hy_mid_real[hy_index];
     adjoint_imag -= hy_curl[hy_index] * inv_dz * adj_hy_mid_imag[hy_index];
   }
   if (j < hz_ny) {
-    const long long hz_index = offset3d(coord.i, coord.j, coord.k, static_cast<unsigned int>(hz_ny), static_cast<unsigned int>(hz_nz));
+    const long long hz_index = offset3d(i_u, j_u, k_u, static_cast<unsigned int>(hz_ny), static_cast<unsigned int>(hz_nz));
     adjoint_real -= hz_curl[hz_index] * inv_dy * adj_hz_mid_real[hz_index];
     adjoint_imag -= hz_curl[hz_index] * inv_dy * adj_hz_mid_imag[hz_index];
   }
   if (j > 0) {
-    const long long hz_index = offset3d(coord.i, coord.j - 1, coord.k, static_cast<unsigned int>(hz_ny), static_cast<unsigned int>(hz_nz));
+    const long long hz_index = offset3d(i_u, j_u - 1, k_u, static_cast<unsigned int>(hz_ny), static_cast<unsigned int>(hz_nz));
     adjoint_real += hz_curl[hz_index] * inv_dy * adj_hz_mid_real[hz_index];
     adjoint_imag += hz_curl[hz_index] * inv_dy * adj_hz_mid_imag[hz_index];
   }
@@ -890,7 +950,7 @@ __global__ void reverse_magnetic_to_ex_bloch_kernel(
 }
 
 __global__ void reverse_magnetic_to_ey_bloch_kernel(
-    int64_t total,
+    int ey_nx,
     int ey_ny,
     int ey_nz,
     int hx_nx,
@@ -899,66 +959,69 @@ __global__ void reverse_magnetic_to_ey_bloch_kernel(
     int hz_nx,
     int hz_ny,
     int hz_nz,
-    float* adj_ey_prev_real,
-    float* adj_ey_prev_imag,
-    float* grad_eps_ey,
-    const float* adj_ey_post_real,
-    const float* adj_ey_post_imag,
-    const float* adj_hx_mid_real,
-    const float* adj_hx_mid_imag,
-    const float* adj_hz_mid_real,
-    const float* adj_hz_mid_imag,
-    const float* ey_decay,
-    const float* ey_curl,
-    const float* eps_ey,
-    const float* hx_mid_real,
-    const float* hx_mid_imag,
-    const float* hz_mid_real,
-    const float* hz_mid_imag,
-    const float* hx_curl,
-    const float* hz_curl,
+    float* __restrict__ adj_ey_prev_real,
+    float* __restrict__ adj_ey_prev_imag,
+    float* __restrict__ grad_eps_ey,
+    const float* __restrict__ adj_ey_post_real,
+    const float* __restrict__ adj_ey_post_imag,
+    const float* __restrict__ adj_hx_mid_real,
+    const float* __restrict__ adj_hx_mid_imag,
+    const float* __restrict__ adj_hz_mid_real,
+    const float* __restrict__ adj_hz_mid_imag,
+    const float* __restrict__ ey_decay,
+    const float* __restrict__ ey_curl,
+    const float* __restrict__ eps_ey,
+    const float* __restrict__ hx_mid_real,
+    const float* __restrict__ hx_mid_imag,
+    const float* __restrict__ hz_mid_real,
+    const float* __restrict__ hz_mid_imag,
+    const float* __restrict__ hx_curl,
+    const float* __restrict__ hz_curl,
     float phase_cos_x,
     float phase_sin_x,
     float phase_cos_z,
     float phase_sin_z,
     float inv_dx,
     float inv_dz) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i_u >= static_cast<unsigned int>(ey_nx)
+      || j_u >= static_cast<unsigned int>(ey_ny)
+      || k_u >= static_cast<unsigned int>(ey_nz)) {
     return;
   }
-  const int ey_nx = static_cast<int>(total / (ey_ny * ey_nz));
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ey_ny, ey_nz);
-  const int i = static_cast<int>(coord.i);
-  const int j = static_cast<int>(coord.j);
-  const int k = static_cast<int>(coord.k);
+  const long long linear = offset3d(i_u, j_u, k_u, ey_ny, ey_nz);
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
   const Complex2 adj_ey_post = load_complex_3d(adj_ey_post_real, adj_ey_post_imag, i, j, k, ey_ny, ey_nz);
-  const Complex2 d_hx_dz = bloch_backward_diff_axis(
-      hx_mid_real, hx_mid_imag, i, j, k, hx_nx, hx_ny, hx_nz, 2, phase_cos_z, phase_sin_z, inv_dz);
-  const Complex2 d_hz_dx = bloch_backward_diff_axis(
-      hz_mid_real, hz_mid_imag, i, j, k, hz_nx, hz_ny, hz_nz, 0, phase_cos_x, phase_sin_x, inv_dx);
+  const Complex2 d_hx_dz = bloch_backward_diff_axis<2>(
+      hx_mid_real, hx_mid_imag, i, j, k, hx_nx, hx_ny, hx_nz, phase_cos_z, phase_sin_z, inv_dz);
+  const Complex2 d_hz_dx = bloch_backward_diff_axis<0>(
+      hz_mid_real, hz_mid_imag, i, j, k, hz_nx, hz_ny, hz_nz, phase_cos_x, phase_sin_x, inv_dx);
   const Complex2 curl_h = complex_sub(d_hx_dz, d_hz_dx);
   float adjoint_real = adj_ey_post.real * ey_decay[linear];
   float adjoint_imag = adj_ey_post.imag * ey_decay[linear];
   float grad = -ey_curl[linear] * complex_inner_real(adj_ey_post, curl_h) / eps_ey[linear];
 
   if (k < hx_nz) {
-    const long long hx_index = offset3d(coord.i, coord.j, coord.k, static_cast<unsigned int>(hx_ny), static_cast<unsigned int>(hx_nz));
+    const long long hx_index = offset3d(i_u, j_u, k_u, static_cast<unsigned int>(hx_ny), static_cast<unsigned int>(hx_nz));
     adjoint_real -= hx_curl[hx_index] * inv_dz * adj_hx_mid_real[hx_index];
     adjoint_imag -= hx_curl[hx_index] * inv_dz * adj_hx_mid_imag[hx_index];
   }
   if (k > 0) {
-    const long long hx_index = offset3d(coord.i, coord.j, coord.k - 1, static_cast<unsigned int>(hx_ny), static_cast<unsigned int>(hx_nz));
+    const long long hx_index = offset3d(i_u, j_u, k_u - 1, static_cast<unsigned int>(hx_ny), static_cast<unsigned int>(hx_nz));
     adjoint_real += hx_curl[hx_index] * inv_dz * adj_hx_mid_real[hx_index];
     adjoint_imag += hx_curl[hx_index] * inv_dz * adj_hx_mid_imag[hx_index];
   }
   if (i < hz_nx) {
-    const long long hz_index = offset3d(coord.i, coord.j, coord.k, static_cast<unsigned int>(hz_ny), static_cast<unsigned int>(hz_nz));
+    const long long hz_index = offset3d(i_u, j_u, k_u, static_cast<unsigned int>(hz_ny), static_cast<unsigned int>(hz_nz));
     adjoint_real += hz_curl[hz_index] * inv_dx * adj_hz_mid_real[hz_index];
     adjoint_imag += hz_curl[hz_index] * inv_dx * adj_hz_mid_imag[hz_index];
   }
   if (i > 0) {
-    const long long hz_index = offset3d(coord.i - 1, coord.j, coord.k, static_cast<unsigned int>(hz_ny), static_cast<unsigned int>(hz_nz));
+    const long long hz_index = offset3d(i_u - 1, j_u, k_u, static_cast<unsigned int>(hz_ny), static_cast<unsigned int>(hz_nz));
     adjoint_real -= hz_curl[hz_index] * inv_dx * adj_hz_mid_real[hz_index];
     adjoint_imag -= hz_curl[hz_index] * inv_dx * adj_hz_mid_imag[hz_index];
   }
@@ -968,7 +1031,7 @@ __global__ void reverse_magnetic_to_ey_bloch_kernel(
 }
 
 __global__ void reverse_magnetic_to_ez_bloch_kernel(
-    int64_t total,
+    int ez_nx,
     int ez_ny,
     int ez_nz,
     int hx_nx,
@@ -977,66 +1040,69 @@ __global__ void reverse_magnetic_to_ez_bloch_kernel(
     int hy_nx,
     int hy_ny,
     int hy_nz,
-    float* adj_ez_prev_real,
-    float* adj_ez_prev_imag,
-    float* grad_eps_ez,
-    const float* adj_ez_post_real,
-    const float* adj_ez_post_imag,
-    const float* adj_hx_mid_real,
-    const float* adj_hx_mid_imag,
-    const float* adj_hy_mid_real,
-    const float* adj_hy_mid_imag,
-    const float* ez_decay,
-    const float* ez_curl,
-    const float* eps_ez,
-    const float* hx_mid_real,
-    const float* hx_mid_imag,
-    const float* hy_mid_real,
-    const float* hy_mid_imag,
-    const float* hx_curl,
-    const float* hy_curl,
+    float* __restrict__ adj_ez_prev_real,
+    float* __restrict__ adj_ez_prev_imag,
+    float* __restrict__ grad_eps_ez,
+    const float* __restrict__ adj_ez_post_real,
+    const float* __restrict__ adj_ez_post_imag,
+    const float* __restrict__ adj_hx_mid_real,
+    const float* __restrict__ adj_hx_mid_imag,
+    const float* __restrict__ adj_hy_mid_real,
+    const float* __restrict__ adj_hy_mid_imag,
+    const float* __restrict__ ez_decay,
+    const float* __restrict__ ez_curl,
+    const float* __restrict__ eps_ez,
+    const float* __restrict__ hx_mid_real,
+    const float* __restrict__ hx_mid_imag,
+    const float* __restrict__ hy_mid_real,
+    const float* __restrict__ hy_mid_imag,
+    const float* __restrict__ hx_curl,
+    const float* __restrict__ hy_curl,
     float phase_cos_x,
     float phase_sin_x,
     float phase_cos_y,
     float phase_sin_y,
     float inv_dx,
     float inv_dy) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i_u >= static_cast<unsigned int>(ez_nx)
+      || j_u >= static_cast<unsigned int>(ez_ny)
+      || k_u >= static_cast<unsigned int>(ez_nz)) {
     return;
   }
-  const int ez_nx = static_cast<int>(total / (ez_ny * ez_nz));
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ez_ny, ez_nz);
-  const int i = static_cast<int>(coord.i);
-  const int j = static_cast<int>(coord.j);
-  const int k = static_cast<int>(coord.k);
+  const long long linear = offset3d(i_u, j_u, k_u, ez_ny, ez_nz);
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
   const Complex2 adj_ez_post = load_complex_3d(adj_ez_post_real, adj_ez_post_imag, i, j, k, ez_ny, ez_nz);
-  const Complex2 d_hy_dx = bloch_backward_diff_axis(
-      hy_mid_real, hy_mid_imag, i, j, k, hy_nx, hy_ny, hy_nz, 0, phase_cos_x, phase_sin_x, inv_dx);
-  const Complex2 d_hx_dy = bloch_backward_diff_axis(
-      hx_mid_real, hx_mid_imag, i, j, k, hx_nx, hx_ny, hx_nz, 1, phase_cos_y, phase_sin_y, inv_dy);
+  const Complex2 d_hy_dx = bloch_backward_diff_axis<0>(
+      hy_mid_real, hy_mid_imag, i, j, k, hy_nx, hy_ny, hy_nz, phase_cos_x, phase_sin_x, inv_dx);
+  const Complex2 d_hx_dy = bloch_backward_diff_axis<1>(
+      hx_mid_real, hx_mid_imag, i, j, k, hx_nx, hx_ny, hx_nz, phase_cos_y, phase_sin_y, inv_dy);
   const Complex2 curl_h = complex_sub(d_hy_dx, d_hx_dy);
   float adjoint_real = adj_ez_post.real * ez_decay[linear];
   float adjoint_imag = adj_ez_post.imag * ez_decay[linear];
   float grad = -ez_curl[linear] * complex_inner_real(adj_ez_post, curl_h) / eps_ez[linear];
 
   if (j < hx_ny) {
-    const long long hx_index = offset3d(coord.i, coord.j, coord.k, static_cast<unsigned int>(hx_ny), static_cast<unsigned int>(hx_nz));
+    const long long hx_index = offset3d(i_u, j_u, k_u, static_cast<unsigned int>(hx_ny), static_cast<unsigned int>(hx_nz));
     adjoint_real += hx_curl[hx_index] * inv_dy * adj_hx_mid_real[hx_index];
     adjoint_imag += hx_curl[hx_index] * inv_dy * adj_hx_mid_imag[hx_index];
   }
   if (j > 0) {
-    const long long hx_index = offset3d(coord.i, coord.j - 1, coord.k, static_cast<unsigned int>(hx_ny), static_cast<unsigned int>(hx_nz));
+    const long long hx_index = offset3d(i_u, j_u - 1, k_u, static_cast<unsigned int>(hx_ny), static_cast<unsigned int>(hx_nz));
     adjoint_real -= hx_curl[hx_index] * inv_dy * adj_hx_mid_real[hx_index];
     adjoint_imag -= hx_curl[hx_index] * inv_dy * adj_hx_mid_imag[hx_index];
   }
   if (i < hy_nx) {
-    const long long hy_index = offset3d(coord.i, coord.j, coord.k, static_cast<unsigned int>(hy_ny), static_cast<unsigned int>(hy_nz));
+    const long long hy_index = offset3d(i_u, j_u, k_u, static_cast<unsigned int>(hy_ny), static_cast<unsigned int>(hy_nz));
     adjoint_real -= hy_curl[hy_index] * inv_dx * adj_hy_mid_real[hy_index];
     adjoint_imag -= hy_curl[hy_index] * inv_dx * adj_hy_mid_imag[hy_index];
   }
   if (i > 0) {
-    const long long hy_index = offset3d(coord.i - 1, coord.j, coord.k, static_cast<unsigned int>(hy_ny), static_cast<unsigned int>(hy_nz));
+    const long long hy_index = offset3d(i_u - 1, j_u, k_u, static_cast<unsigned int>(hy_ny), static_cast<unsigned int>(hy_nz));
     adjoint_real += hy_curl[hy_index] * inv_dx * adj_hy_mid_real[hy_index];
     adjoint_imag += hy_curl[hy_index] * inv_dx * adj_hy_mid_imag[hy_index];
   }
@@ -1045,188 +1111,221 @@ __global__ void reverse_magnetic_to_ez_bloch_kernel(
   grad_eps_ez[linear] = grad;
 }
 
+template <int Axis, bool Forward>
 __global__ void accumulate_diff_adjoint_kernel(
-    int64_t total,
+    int field_nx,
     int field_ny,
     int field_nz,
     int diff_nx,
     int diff_ny,
     int diff_nz,
-    int axis,
-    bool forward,
     float inv_delta,
-    float* field_grad,
-    const float* diff_grad) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ field_grad,
+    const float* __restrict__ diff_grad) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (static_cast<int>(i_u) >= field_nx || static_cast<int>(j_u) >= field_ny || static_cast<int>(k_u) >= field_nz) {
     return;
   }
-  const int field_nx = static_cast<int>(total / (field_ny * field_nz));
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), field_ny, field_nz);
-  const int coords[3] = {static_cast<int>(coord.i), static_cast<int>(coord.j), static_cast<int>(coord.k)};
-  const int field_sizes[3] = {field_nx, field_ny, field_nz};
-  const int diff_sizes[3] = {diff_nx, diff_ny, diff_nz};
+  const long long linear = offset3d(i_u, j_u, k_u, static_cast<unsigned int>(field_ny), static_cast<unsigned int>(field_nz));
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
+  const int axis_coord = Axis == 0 ? i : (Axis == 1 ? j : k);
+  const int axis_field_size = Axis == 0 ? field_nx : (Axis == 1 ? field_ny : field_nz);
+  const int axis_diff_size = Axis == 0 ? diff_nx : (Axis == 1 ? diff_ny : diff_nz);
 
   float value = 0.0f;
-  if (forward) {
-    if (coords[axis] < diff_sizes[axis] && diff_index_valid(coords[0], coords[1], coords[2], diff_nx, diff_ny, diff_nz)) {
-      value -= inv_delta * diff_grad_value(diff_grad, coords[0], coords[1], coords[2], diff_ny, diff_nz);
+  if constexpr (Forward) {
+    if (axis_coord < axis_diff_size && diff_index_valid(i, j, k, diff_nx, diff_ny, diff_nz)) {
+      value -= inv_delta * diff_grad_value(diff_grad, i, j, k, diff_ny, diff_nz);
     }
-    if (coords[axis] > 0) {
-      int prev[3] = {coords[0], coords[1], coords[2]};
-      prev[axis] -= 1;
-      if (diff_index_valid(prev[0], prev[1], prev[2], diff_nx, diff_ny, diff_nz)) {
-        value += inv_delta * diff_grad_value(diff_grad, prev[0], prev[1], prev[2], diff_ny, diff_nz);
+    if (axis_coord > 0) {
+      const int prev_i = i - (Axis == 0 ? 1 : 0);
+      const int prev_j = j - (Axis == 1 ? 1 : 0);
+      const int prev_k = k - (Axis == 2 ? 1 : 0);
+      if (diff_index_valid(prev_i, prev_j, prev_k, diff_nx, diff_ny, diff_nz)) {
+        value += inv_delta * diff_grad_value(diff_grad, prev_i, prev_j, prev_k, diff_ny, diff_nz);
       }
     }
   } else {
-    if (coords[axis] > 0 && diff_index_valid(coords[0], coords[1], coords[2], diff_nx, diff_ny, diff_nz)) {
-      value += inv_delta * diff_grad_value(diff_grad, coords[0], coords[1], coords[2], diff_ny, diff_nz);
+    if (axis_coord > 0 && diff_index_valid(i, j, k, diff_nx, diff_ny, diff_nz)) {
+      value += inv_delta * diff_grad_value(diff_grad, i, j, k, diff_ny, diff_nz);
     }
-    if (coords[axis] + 1 < field_sizes[axis]) {
-      int next[3] = {coords[0], coords[1], coords[2]};
-      next[axis] += 1;
-      if (diff_index_valid(next[0], next[1], next[2], diff_nx, diff_ny, diff_nz)) {
-        value -= inv_delta * diff_grad_value(diff_grad, next[0], next[1], next[2], diff_ny, diff_nz);
+    if (axis_coord + 1 < axis_field_size) {
+      const int next_i = i + (Axis == 0 ? 1 : 0);
+      const int next_j = j + (Axis == 1 ? 1 : 0);
+      const int next_k = k + (Axis == 2 ? 1 : 0);
+      if (diff_index_valid(next_i, next_j, next_k, diff_nx, diff_ny, diff_nz)) {
+        value -= inv_delta * diff_grad_value(diff_grad, next_i, next_j, next_k, diff_ny, diff_nz);
       }
     }
   }
   field_grad[linear] += value;
 }
 
+template <int Axis, bool Forward>
+void launch_accumulate_diff_adjoint(
+    const at::Tensor& field_grad,
+    const at::Tensor& diff_grad,
+    double inv_delta) {
+  const dim3 block = field_block3d();
+  accumulate_diff_adjoint_kernel<Axis, Forward><<<field_grid3d(field_grad.size(0), field_grad.size(1), field_grad.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(field_grad.size(0)),
+      static_cast<int>(field_grad.size(1)),
+      static_cast<int>(field_grad.size(2)),
+      static_cast<int>(diff_grad.size(0)),
+      static_cast<int>(diff_grad.size(1)),
+      static_cast<int>(diff_grad.size(2)),
+      static_cast<float>(inv_delta),
+      field_grad.data_ptr<float>(),
+      diff_grad.data_ptr<float>());
+}
+
 __global__ void reverse_debye_current_kernel(
     int64_t total,
-    float* adj_electric_prev,
-    float* adj_polarization_prev,
-    const float* adj_polarization_post,
-    const float* adj_current_post,
-    const float* drive,
-    double decay,
-    double dt) {
+    float* __restrict__ adj_electric_prev,
+    float* __restrict__ adj_polarization_prev,
+    const float* __restrict__ adj_polarization_post,
+    const float* __restrict__ adj_current_post,
+    const float* __restrict__ drive,
+    float decay,
+    float inv_dt) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= total) {
     return;
   }
-  const float adj_internal = adj_polarization_post[index] + adj_current_post[index] / static_cast<float>(dt);
-  adj_electric_prev[index] += drive[index] * adj_internal;
-  adj_polarization_prev[index] += static_cast<float>(decay) * adj_internal - adj_current_post[index] / static_cast<float>(dt);
+  const float adj_current_value = adj_current_post[index];
+  const float adj_polarization_value = adj_polarization_post[index];
+  const float drive_value = drive[index];
+  const float adj_current_scaled = adj_current_value * inv_dt;
+  const float adj_internal = adj_polarization_value + adj_current_scaled;
+  adj_electric_prev[index] += drive_value * adj_internal;
+  adj_polarization_prev[index] += decay * adj_internal - adj_current_scaled;
 }
 
 __global__ void reverse_drude_current_kernel(
     int64_t total,
-    float* adj_electric_prev,
-    float* adj_current_prev,
-    const float* adj_current_post,
-    const float* drive,
-    double decay) {
+    float* __restrict__ adj_electric_prev,
+    float* __restrict__ adj_current_prev,
+    const float* __restrict__ adj_current_post,
+    const float* __restrict__ drive,
+    float decay) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= total) {
     return;
   }
   adj_electric_prev[index] += drive[index] * adj_current_post[index];
-  adj_current_prev[index] += static_cast<float>(decay) * adj_current_post[index];
+  adj_current_prev[index] += decay * adj_current_post[index];
 }
 
 __global__ void reverse_lorentz_current_kernel(
     int64_t total,
-    float* adj_electric_prev,
-    float* adj_polarization_prev,
-    float* adj_current_prev,
-    const float* adj_polarization_post,
-    const float* adj_current_post,
-    const float* drive,
-    double decay,
-    double restoring,
-    double dt) {
+    float* __restrict__ adj_electric_prev,
+    float* __restrict__ adj_polarization_prev,
+    float* __restrict__ adj_current_prev,
+    const float* __restrict__ adj_polarization_post,
+    const float* __restrict__ adj_current_post,
+    const float* __restrict__ drive,
+    float decay,
+    float restoring,
+    float dt) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= total) {
     return;
   }
-  const float adj_internal = adj_current_post[index] + static_cast<float>(dt) * adj_polarization_post[index];
+  const float adj_internal = adj_current_post[index] + dt * adj_polarization_post[index];
   adj_electric_prev[index] += drive[index] * adj_internal;
-  adj_polarization_prev[index] += adj_polarization_post[index] - static_cast<float>(restoring) * adj_internal;
-  adj_current_prev[index] += static_cast<float>(decay) * adj_internal;
+  adj_polarization_prev[index] += adj_polarization_post[index] - restoring * adj_internal;
+  adj_current_prev[index] += decay * adj_internal;
 }
 
 __global__ void reverse_tfsf_auxiliary_electric_kernel(
     int64_t total,
     int64_t magnetic_total,
     int64_t source_index,
-    float* adj_electric_prev,
-    float* adj_magnetic_after,
-    const float* adj_electric_post,
-    const float* electric_decay,
-    const float* electric_curl) {
+    float* __restrict__ adj_electric_prev,
+    float* __restrict__ adj_magnetic_after,
+    const float* __restrict__ adj_electric_post,
+    const float* __restrict__ electric_decay,
+    const float* __restrict__ electric_curl) {
   const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index >= total) {
+  if (index >= total && index >= magnetic_total) {
     return;
   }
-  const bool overwritten = index == source_index || index == total - 1;
-  const float adjoint = adj_electric_post[index];
-  if (index == 0 && !overwritten) {
-    adj_electric_prev[index] += adjoint;
-    return;
+  if (index < total) {
+    const bool overwritten = index == source_index || index == total - 1;
+    const float adjoint = adj_electric_post[index];
+    if (index == 0 && !overwritten) {
+      adj_electric_prev[index] += adjoint;
+    } else if (index > 0 && index + 1 < total && !overwritten) {
+      adj_electric_prev[index] += electric_decay[index] * adjoint;
+    }
   }
-  if (index > 0 && index + 1 < total && !overwritten) {
-    adj_electric_prev[index] += electric_decay[index] * adjoint;
-    const float value = electric_curl[index] * adjoint;
-    const int64_t lower = index - 1;
-    const int64_t upper = index;
-    if (lower >= 0 && lower < magnetic_total) {
-      atomicAdd(adj_magnetic_after + lower, value);
+  if (index < magnetic_total) {
+    float adjoint = 0.0f;
+    const int64_t lower_electric = index;
+    const int64_t upper_electric = index + 1;
+    if (lower_electric > 0 && lower_electric + 1 < total && lower_electric != source_index) {
+      adjoint -= electric_curl[lower_electric] * adj_electric_post[lower_electric];
     }
-    if (upper >= 0 && upper < magnetic_total) {
-      atomicAdd(adj_magnetic_after + upper, -value);
+    if (upper_electric > 0 && upper_electric + 1 < total && upper_electric != source_index) {
+      adjoint += electric_curl[upper_electric] * adj_electric_post[upper_electric];
     }
+    adj_magnetic_after[index] += adjoint;
   }
 }
 
+template <int Component>
 __global__ void reverse_electric_component_cpml_kernel(
-    int64_t total,
-    int component,
+    int prev_nx,
     int prev_ny,
     int prev_nz,
     int h_pos_ny,
     int h_pos_nz,
     int h_neg_ny,
     int h_neg_nz,
-    float* adj_prev,
-    float* grad_eps,
-    float* adj_psi_pos_prev,
-    float* adj_psi_neg_prev,
-    float* adj_d_pos,
-    float* adj_d_neg,
-    const float* adj_post,
-    const float* adj_psi_pos_post,
-    const float* adj_psi_neg_post,
-    const float* decay,
-    const float* curl,
-    const float* eps,
-    const float* psi_pos,
-    const float* psi_neg,
-    const float* b_pos,
-    const float* c_pos,
-    const float* inv_kappa_pos,
-    const float* b_neg,
-    const float* c_neg,
-    const float* inv_kappa_neg,
-    const float* h_pos_mid,
-    const float* h_neg_mid,
+    float* __restrict__ adj_prev,
+    float* __restrict__ grad_eps,
+    float* __restrict__ adj_psi_pos_prev,
+    float* __restrict__ adj_psi_neg_prev,
+    float* __restrict__ adj_d_pos,
+    float* __restrict__ adj_d_neg,
+    const float* __restrict__ adj_post,
+    const float* __restrict__ adj_psi_pos_post,
+    const float* __restrict__ adj_psi_neg_post,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl,
+    const float* __restrict__ eps,
+    const float* __restrict__ psi_pos,
+    const float* __restrict__ psi_neg,
+    const float* __restrict__ b_pos,
+    const float* __restrict__ c_pos,
+    const float* __restrict__ inv_kappa_pos,
+    const float* __restrict__ b_neg,
+    const float* __restrict__ c_neg,
+    const float* __restrict__ inv_kappa_neg,
+    const float* __restrict__ h_pos_mid,
+    const float* __restrict__ h_neg_mid,
     float inv_pos,
     float inv_neg,
     int low_mode_a,
     int high_mode_a,
     int low_mode_b,
     int high_mode_b) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i_u >= static_cast<unsigned int>(prev_nx)
+      || j_u >= static_cast<unsigned int>(prev_ny)
+      || k_u >= static_cast<unsigned int>(prev_nz)) {
     return;
   }
-  const int prev_nx = static_cast<int>(total / (prev_ny * prev_nz));
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), prev_ny, prev_nz);
-  const int i = static_cast<int>(coord.i);
-  const int j = static_cast<int>(coord.j);
-  const int k = static_cast<int>(coord.k);
+  const long long linear = offset3d(i_u, j_u, k_u, prev_ny, prev_nz);
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
 
   int coord_a = j;
   int size_a = prev_ny;
@@ -1235,15 +1334,14 @@ __global__ void reverse_electric_component_cpml_kernel(
   int pos_coeff_index = j;
   int neg_coeff_index = k;
 
-  if (component == 0) {
-  } else if (component == 1) {
+  if constexpr (Component == 1) {
     coord_a = i;
     size_a = prev_nx;
     coord_b = k;
     size_b = prev_nz;
     pos_coeff_index = k;
     neg_coeff_index = i;
-  } else {
+  } else if constexpr (Component == 2) {
     coord_a = i;
     size_a = prev_nx;
     coord_b = j;
@@ -1255,45 +1353,56 @@ __global__ void reverse_electric_component_cpml_kernel(
   const ElectricCellStatus status = resolve_electric_cell_status(
       coord_a, size_a, low_mode_a, high_mode_a,
       coord_b, size_b, low_mode_b, high_mode_b);
+  const float adj_post_value = adj_post[linear];
   float adjoint = 0.0f;
   float grad = 0.0f;
-  float adj_psi_pos = adj_psi_pos_post[linear];
-  float adj_psi_neg = adj_psi_neg_post[linear];
+  const float adj_psi_pos_post_value = adj_psi_pos_post[linear];
+  const float adj_psi_neg_post_value = adj_psi_neg_post[linear];
+  float adj_psi_pos = adj_psi_pos_post_value;
+  float adj_psi_neg = adj_psi_neg_post_value;
   float out_adj_d_pos = 0.0f;
   float out_adj_d_neg = 0.0f;
 
   if (status.inactive) {
-    adjoint = adj_post[linear];
+    adjoint = adj_post_value;
   } else if (status.active) {
     float d_pos = 0.0f;
     float d_neg = 0.0f;
-    if (component == 0) {
-      d_pos = (h_pos_mid[offset3d(coord.i, coord.j, coord.k, h_pos_ny, h_pos_nz)]
-               - h_pos_mid[offset3d(coord.i, coord.j - 1, coord.k, h_pos_ny, h_pos_nz)]) * inv_pos;
-      d_neg = (h_neg_mid[offset3d(coord.i, coord.j, coord.k, h_neg_ny, h_neg_nz)]
-               - h_neg_mid[offset3d(coord.i, coord.j, coord.k - 1, h_neg_ny, h_neg_nz)]) * inv_neg;
-    } else if (component == 1) {
-      d_pos = (h_pos_mid[offset3d(coord.i, coord.j, coord.k, h_pos_ny, h_pos_nz)]
-               - h_pos_mid[offset3d(coord.i, coord.j, coord.k - 1, h_pos_ny, h_pos_nz)]) * inv_pos;
-      d_neg = (h_neg_mid[offset3d(coord.i, coord.j, coord.k, h_neg_ny, h_neg_nz)]
-               - h_neg_mid[offset3d(coord.i - 1, coord.j, coord.k, h_neg_ny, h_neg_nz)]) * inv_neg;
+    if constexpr (Component == 0) {
+      d_pos = (h_pos_mid[offset3d(i_u, j_u, k_u, h_pos_ny, h_pos_nz)]
+               - h_pos_mid[offset3d(i_u, j_u - 1, k_u, h_pos_ny, h_pos_nz)]) * inv_pos;
+      d_neg = (h_neg_mid[offset3d(i_u, j_u, k_u, h_neg_ny, h_neg_nz)]
+               - h_neg_mid[offset3d(i_u, j_u, k_u - 1, h_neg_ny, h_neg_nz)]) * inv_neg;
+    } else if constexpr (Component == 1) {
+      d_pos = (h_pos_mid[offset3d(i_u, j_u, k_u, h_pos_ny, h_pos_nz)]
+               - h_pos_mid[offset3d(i_u, j_u, k_u - 1, h_pos_ny, h_pos_nz)]) * inv_pos;
+      d_neg = (h_neg_mid[offset3d(i_u, j_u, k_u, h_neg_ny, h_neg_nz)]
+               - h_neg_mid[offset3d(i_u - 1, j_u, k_u, h_neg_ny, h_neg_nz)]) * inv_neg;
     } else {
-      d_pos = (h_pos_mid[offset3d(coord.i, coord.j, coord.k, h_pos_ny, h_pos_nz)]
-               - h_pos_mid[offset3d(coord.i - 1, coord.j, coord.k, h_pos_ny, h_pos_nz)]) * inv_pos;
-      d_neg = (h_neg_mid[offset3d(coord.i, coord.j, coord.k, h_neg_ny, h_neg_nz)]
-               - h_neg_mid[offset3d(coord.i, coord.j - 1, coord.k, h_neg_ny, h_neg_nz)]) * inv_neg;
+      d_pos = (h_pos_mid[offset3d(i_u, j_u, k_u, h_pos_ny, h_pos_nz)]
+               - h_pos_mid[offset3d(i_u - 1, j_u, k_u, h_pos_ny, h_pos_nz)]) * inv_pos;
+      d_neg = (h_neg_mid[offset3d(i_u, j_u, k_u, h_neg_ny, h_neg_nz)]
+               - h_neg_mid[offset3d(i_u, j_u - 1, k_u, h_neg_ny, h_neg_nz)]) * inv_neg;
     }
-    const float psi_pos_candidate = b_pos[pos_coeff_index] * psi_pos[linear] + c_pos[pos_coeff_index] * d_pos;
-    const float psi_neg_candidate = b_neg[neg_coeff_index] * psi_neg[linear] + c_neg[neg_coeff_index] * d_neg;
-    const float curl_h = (d_pos * inv_kappa_pos[pos_coeff_index] + psi_pos_candidate)
-        - (d_neg * inv_kappa_neg[neg_coeff_index] + psi_neg_candidate);
-    const float adj_curl_h = adj_post[linear] * curl[linear];
-    adjoint = adj_post[linear] * decay[linear];
-    grad = -adj_post[linear] * curl[linear] * curl_h / eps[linear];
-    adj_psi_pos = b_pos[pos_coeff_index] * (adj_psi_pos_post[linear] + adj_curl_h);
-    adj_psi_neg = b_neg[neg_coeff_index] * (adj_psi_neg_post[linear] - adj_curl_h);
-    out_adj_d_pos = inv_kappa_pos[pos_coeff_index] * adj_curl_h + c_pos[pos_coeff_index] * (adj_psi_pos_post[linear] + adj_curl_h);
-    out_adj_d_neg = -inv_kappa_neg[neg_coeff_index] * adj_curl_h + c_neg[neg_coeff_index] * (adj_psi_neg_post[linear] - adj_curl_h);
+    const float b_pos_value = b_pos[pos_coeff_index];
+    const float c_pos_value = c_pos[pos_coeff_index];
+    const float inv_kappa_pos_value = inv_kappa_pos[pos_coeff_index];
+    const float b_neg_value = b_neg[neg_coeff_index];
+    const float c_neg_value = c_neg[neg_coeff_index];
+    const float inv_kappa_neg_value = inv_kappa_neg[neg_coeff_index];
+    const float psi_pos_candidate = b_pos_value * psi_pos[linear] + c_pos_value * d_pos;
+    const float psi_neg_candidate = b_neg_value * psi_neg[linear] + c_neg_value * d_neg;
+    const float curl_h = (d_pos * inv_kappa_pos_value + psi_pos_candidate)
+        - (d_neg * inv_kappa_neg_value + psi_neg_candidate);
+    const float adj_curl_h = adj_post_value * curl[linear];
+    const float adj_psi_pos_total = adj_psi_pos_post_value + adj_curl_h;
+    const float adj_psi_neg_total = adj_psi_neg_post_value - adj_curl_h;
+    adjoint = adj_post_value * decay[linear];
+    grad = -adj_curl_h * curl_h / eps[linear];
+    adj_psi_pos = b_pos_value * adj_psi_pos_total;
+    adj_psi_neg = b_neg_value * adj_psi_neg_total;
+    out_adj_d_pos = inv_kappa_pos_value * adj_curl_h + c_pos_value * adj_psi_pos_total;
+    out_adj_d_neg = -inv_kappa_neg_value * adj_curl_h + c_neg_value * adj_psi_neg_total;
   }
 
   adj_prev[linear] = adjoint;
@@ -1304,50 +1413,82 @@ __global__ void reverse_electric_component_cpml_kernel(
   adj_d_neg[linear] = out_adj_d_neg;
 }
 
+template <int Component>
 __global__ void reverse_magnetic_component_cpml_kernel(
-    int64_t total,
-    int component,
+    int prev_nx,
     int prev_ny,
     int prev_nz,
-    float* adj_prev,
-    float* adj_psi_pos_prev,
-    float* adj_psi_neg_prev,
-    float* adj_d_pos,
-    float* adj_d_neg,
-    const float* adj_post,
-    const float* adj_psi_pos_post,
-    const float* adj_psi_neg_post,
-    const float* decay,
-    const float* curl,
-    const float* b_pos,
-    const float* c_pos,
-    const float* inv_kappa_pos,
-    const float* b_neg,
-    const float* c_neg,
-    const float* inv_kappa_neg) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ adj_prev,
+    float* __restrict__ adj_psi_pos_prev,
+    float* __restrict__ adj_psi_neg_prev,
+    float* __restrict__ adj_d_pos,
+    float* __restrict__ adj_d_neg,
+    const float* __restrict__ adj_post,
+    const float* __restrict__ adj_psi_pos_post,
+    const float* __restrict__ adj_psi_neg_post,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl,
+    const float* __restrict__ b_pos,
+    const float* __restrict__ c_pos,
+    const float* __restrict__ inv_kappa_pos,
+    const float* __restrict__ b_neg,
+    const float* __restrict__ c_neg,
+    const float* __restrict__ inv_kappa_neg) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i_u >= static_cast<unsigned int>(prev_nx)
+      || j_u >= static_cast<unsigned int>(prev_ny)
+      || k_u >= static_cast<unsigned int>(prev_nz)) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), prev_ny, prev_nz);
-  int pos_coeff_index = static_cast<int>(coord.j);
-  int neg_coeff_index = static_cast<int>(coord.k);
-  if (component == 1) {
-    pos_coeff_index = static_cast<int>(coord.k);
-    neg_coeff_index = static_cast<int>(coord.i);
-  } else if (component == 2) {
-    pos_coeff_index = static_cast<int>(coord.i);
-    neg_coeff_index = static_cast<int>(coord.j);
+  const long long linear = offset3d(i_u, j_u, k_u, prev_ny, prev_nz);
+  int pos_coeff_index = static_cast<int>(j_u);
+  int neg_coeff_index = static_cast<int>(k_u);
+  if constexpr (Component == 1) {
+    pos_coeff_index = static_cast<int>(k_u);
+    neg_coeff_index = static_cast<int>(i_u);
+  } else if constexpr (Component == 2) {
+    pos_coeff_index = static_cast<int>(i_u);
+    neg_coeff_index = static_cast<int>(j_u);
   }
 
-  const float adj_curl_e = -curl[linear] * adj_post[linear];
+  const float adj_post_value = adj_post[linear];
+  const float adj_curl_e = -curl[linear] * adj_post_value;
   const float adj_psi_pos_candidate = adj_psi_pos_post[linear] + adj_curl_e;
   const float adj_psi_neg_candidate = adj_psi_neg_post[linear] - adj_curl_e;
-  adj_prev[linear] = adj_post[linear] * decay[linear];
-  adj_psi_pos_prev[linear] = b_pos[pos_coeff_index] * adj_psi_pos_candidate;
-  adj_psi_neg_prev[linear] = b_neg[neg_coeff_index] * adj_psi_neg_candidate;
-  adj_d_pos[linear] = inv_kappa_pos[pos_coeff_index] * adj_curl_e + c_pos[pos_coeff_index] * adj_psi_pos_candidate;
-  adj_d_neg[linear] = -inv_kappa_neg[neg_coeff_index] * adj_curl_e + c_neg[neg_coeff_index] * adj_psi_neg_candidate;
+  const float b_pos_value = b_pos[pos_coeff_index];
+  const float c_pos_value = c_pos[pos_coeff_index];
+  const float inv_kappa_pos_value = inv_kappa_pos[pos_coeff_index];
+  const float b_neg_value = b_neg[neg_coeff_index];
+  const float c_neg_value = c_neg[neg_coeff_index];
+  const float inv_kappa_neg_value = inv_kappa_neg[neg_coeff_index];
+  adj_prev[linear] = adj_post_value * decay[linear];
+  adj_psi_pos_prev[linear] = b_pos_value * adj_psi_pos_candidate;
+  adj_psi_neg_prev[linear] = b_neg_value * adj_psi_neg_candidate;
+  adj_d_pos[linear] = inv_kappa_pos_value * adj_curl_e + c_pos_value * adj_psi_pos_candidate;
+  adj_d_neg[linear] = -inv_kappa_neg_value * adj_curl_e + c_neg_value * adj_psi_neg_candidate;
+}
+
+__device__ __forceinline__ float warp_reduce_sum(float value) {
+  value += __shfl_down_sync(0xffffffff, value, 16);
+  value += __shfl_down_sync(0xffffffff, value, 8);
+  value += __shfl_down_sync(0xffffffff, value, 4);
+  value += __shfl_down_sync(0xffffffff, value, 2);
+  value += __shfl_down_sync(0xffffffff, value, 1);
+  return value;
+}
+
+__device__ __forceinline__ float warp_reduce_sum_active(float value, unsigned int mask) {
+  const unsigned int lane = threadIdx.x & 31u;
+#pragma unroll
+  for (int delta = 16; delta > 0; delta >>= 1) {
+    const float other = __shfl_down_sync(mask, value, delta);
+    if ((lane + static_cast<unsigned int>(delta)) < 32u && ((mask >> (lane + delta)) & 1u) != 0u) {
+      value += other;
+    }
+  }
+  return value;
 }
 
 __global__ void accumulate_tfsf_scalar_sample_adjoint_kernel(
@@ -1356,58 +1497,140 @@ __global__ void accumulate_tfsf_scalar_sample_adjoint_kernel(
     int patch_nz,
     int64_t sample_index,
     float component_scale,
-    float* adj_aux_field,
-    const float* adj_field_patch,
-    const float* coeff_patch) {
+    float* __restrict__ adj_aux_field,
+    const float* __restrict__ adj_field_patch,
+    const float* __restrict__ coeff_patch) {
+  __shared__ float warp_sums[32];
   const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
-    return;
-  }
   (void)patch_ny;
   (void)patch_nz;
-  atomicAdd(adj_aux_field + sample_index, component_scale * adj_field_patch[linear] * coeff_patch[linear]);
+  float value = linear < total
+      ? component_scale * adj_field_patch[linear] * coeff_patch[linear]
+      : 0.0f;
+  value = warp_reduce_sum(value);
+  const unsigned int lane = threadIdx.x & 31u;
+  const unsigned int warp = threadIdx.x >> 5;
+  if (lane == 0) {
+    warp_sums[warp] = value;
+  }
+  __syncthreads();
+  value = threadIdx.x < ((blockDim.x + 31u) >> 5) ? warp_sums[lane] : 0.0f;
+  if (warp == 0) {
+    value = warp_reduce_sum(value);
+  }
+  if (threadIdx.x == 0) {
+    atomicAdd(adj_aux_field + sample_index, value);
+  }
 }
 
+template <int SampleAxis>
 __global__ void accumulate_tfsf_line_sample_adjoint_kernel(
-    int64_t total,
+    int patch_nx,
     int patch_ny,
     int patch_nz,
-    int sample_axis_code,
     float component_scale,
-    float* adj_aux_field,
-    const float* adj_field_patch,
-    const float* coeff_patch,
-    const int* sample_indices) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ adj_aux_field,
+    const float* __restrict__ adj_field_patch,
+    const float* __restrict__ coeff_patch,
+    const int* __restrict__ sample_indices) {
+  __shared__ float warp_sums[32];
+  const int sample_linear = static_cast<int>(blockIdx.x);
+  const int sample_count = SampleAxis == 0 ? patch_nx : (SampleAxis == 1 ? patch_ny : patch_nz);
+  if (sample_linear >= sample_count) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), patch_ny, patch_nz);
-  const int sample_linear = sample_axis_code == 0
-      ? static_cast<int>(coord.i)
-      : (sample_axis_code == 1 ? static_cast<int>(coord.j) : static_cast<int>(coord.k));
-  const int sample_index = sample_indices[sample_linear];
-  atomicAdd(adj_aux_field + sample_index, component_scale * adj_field_patch[linear] * coeff_patch[linear]);
+  float value = 0.0f;
+  if constexpr (SampleAxis == 0) {
+    const long long sample_base = static_cast<long long>(sample_linear) * patch_ny * patch_nz;
+    for (int j = static_cast<int>(threadIdx.y); j < patch_ny; j += static_cast<int>(blockDim.y)) {
+      long long linear = sample_base + static_cast<long long>(j) * patch_nz + threadIdx.x;
+      for (int k = static_cast<int>(threadIdx.x); k < patch_nz; k += static_cast<int>(blockDim.x)) {
+        value += adj_field_patch[linear] * coeff_patch[linear];
+        linear += blockDim.x;
+      }
+    }
+  } else if constexpr (SampleAxis == 1) {
+    const long long sample_offset = static_cast<long long>(sample_linear) * patch_nz;
+    for (int i = static_cast<int>(threadIdx.y); i < patch_nx; i += static_cast<int>(blockDim.y)) {
+      long long linear = static_cast<long long>(i) * patch_ny * patch_nz + sample_offset + threadIdx.x;
+      for (int k = static_cast<int>(threadIdx.x); k < patch_nz; k += static_cast<int>(blockDim.x)) {
+        value += adj_field_patch[linear] * coeff_patch[linear];
+        linear += blockDim.x;
+      }
+    }
+  } else {
+    for (int i = static_cast<int>(threadIdx.y); i < patch_nx; i += static_cast<int>(blockDim.y)) {
+      for (int j = static_cast<int>(threadIdx.x); j < patch_ny; j += static_cast<int>(blockDim.x)) {
+        const long long linear = offset3d(
+            static_cast<unsigned int>(i),
+            static_cast<unsigned int>(j),
+            static_cast<unsigned int>(sample_linear),
+            static_cast<unsigned int>(patch_ny),
+            static_cast<unsigned int>(patch_nz));
+        value += adj_field_patch[linear] * coeff_patch[linear];
+      }
+    }
+  }
+  value *= component_scale;
+  value = warp_reduce_sum(value);
+  const unsigned int thread_linear = threadIdx.y * blockDim.x + threadIdx.x;
+  const unsigned int lane = thread_linear & 31u;
+  const unsigned int warp = thread_linear >> 5;
+  if (lane == 0) {
+    warp_sums[warp] = value;
+  }
+  __syncthreads();
+  value = thread_linear < ((blockDim.x * blockDim.y + 31u) >> 5) ? warp_sums[lane] : 0.0f;
+  if (warp == 0) {
+    value = warp_reduce_sum(value);
+  }
+  if (thread_linear == 0) {
+    const int sample_index = sample_indices[sample_linear];
+    atomicAdd(adj_aux_field + sample_index, value);
+  }
+}
+
+template <int SampleAxis>
+void launch_tfsf_line_sample_adjoint(
+    int patch_nx,
+    int patch_ny,
+    int patch_nz,
+    float component_scale,
+    float* __restrict__ adj_aux_field,
+    const float* __restrict__ adj_field_patch,
+    const float* __restrict__ coeff_patch,
+    const int* __restrict__ sample_indices) {
+  constexpr dim3 block(8, 32, 1);
+  const int sample_count = SampleAxis == 0 ? patch_nx : (SampleAxis == 1 ? patch_ny : patch_nz);
+  accumulate_tfsf_line_sample_adjoint_kernel<SampleAxis><<<sample_count, block, 0, current_cuda_stream()>>>(
+      patch_nx,
+      patch_ny,
+      patch_nz,
+      component_scale,
+      adj_aux_field,
+      adj_field_patch,
+      coeff_patch,
+      sample_indices);
 }
 
 __global__ void accumulate_tfsf_interpolated_sample_adjoint_kernel(
     int64_t total,
     int64_t adj_aux_count,
     float origin,
-    float ds,
+    float inv_ds,
     float component_scale,
-    float* adj_aux_field,
-    const float* adj_field_patch,
-    const float* coeff_patch,
-    const float* sample_positions) {
+    float* __restrict__ adj_aux_field,
+    const float* __restrict__ adj_field_patch,
+    const float* __restrict__ coeff_patch,
+    const float* __restrict__ sample_positions) {
   const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (linear >= total || adj_aux_count <= 0) {
     return;
   }
   const int64_t last_index = adj_aux_count - 1;
-  float coord = ds > 0.0f ? (sample_positions[linear] - origin) / ds : 0.0f;
+  float coord = inv_ds > 0.0f ? (sample_positions[linear] - origin) * inv_ds : 0.0f;
   coord = fminf(fmaxf(coord, 0.0f), static_cast<float>(last_index));
-  const int64_t lower = static_cast<int64_t>(floorf(coord));
+  const int64_t lower = static_cast<int64_t>(coord);
   const int64_t upper = lower + 1 < last_index ? lower + 1 : last_index;
   const float frac = coord - static_cast<float>(lower);
   const float value = component_scale * adj_field_patch[linear] * coeff_patch[linear];
@@ -1417,22 +1640,101 @@ __global__ void accumulate_tfsf_interpolated_sample_adjoint_kernel(
   }
 }
 
-__global__ void reverse_tfsf_auxiliary_magnetic_kernel(
-    int64_t total,
-    float* adj_electric_prev,
-    float* adj_magnetic_prev,
-    const float* adj_magnetic_after,
-    const float* magnetic_decay,
-    const float* magnetic_curl) {
-  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index >= total) {
+__device__ __forceinline__ void warp_atomic_add_adjacent_repeats(
+    float* __restrict__ values,
+    int index,
+    float value) {
+  const unsigned int mask = __activemask();
+  const unsigned int lane = threadIdx.x & 31u;
+  const int prev_index = __shfl_up_sync(mask, index, 1);
+  const int next_index = __shfl_down_sync(mask, index, 1);
+  const bool adjacent_repeat =
+      ((lane > 0u) && (prev_index == index))
+      || ((lane < 31u) && (next_index == index));
+  if (!__any_sync(mask, adjacent_repeat)) {
+    atomicAdd(values + index, value);
     return;
   }
-  const float adjoint = adj_magnetic_after[index];
-  adj_magnetic_prev[index] = magnetic_decay[index] * adjoint;
-  const float value = magnetic_curl[index] * adjoint;
-  atomicAdd(adj_electric_prev + index, value);
-  atomicAdd(adj_electric_prev + index + 1, -value);
+
+  const unsigned int peers = __match_any_sync(mask, index);
+  if ((peers & (peers - 1u)) == 0u) {
+    atomicAdd(values + index, value);
+    return;
+  }
+  if (peers == mask) {
+    const float sum = warp_reduce_sum_active(value, mask);
+    if (lane == static_cast<unsigned int>(__ffs(peers) - 1)) {
+      atomicAdd(values + index, sum);
+    }
+    return;
+  }
+
+  float sum = 0.0f;
+  unsigned int remaining = peers;
+  while (remaining != 0u) {
+    const int source_lane = __ffs(remaining) - 1;
+    sum += __shfl_sync(peers, value, source_lane);
+    remaining &= remaining - 1u;
+  }
+  if (static_cast<int>(lane) == (__ffs(peers) - 1)) {
+    atomicAdd(values + index, sum);
+  }
+}
+
+__global__ void accumulate_tfsf_interpolated_sample_adjoint_warp_kernel(
+    int64_t total,
+    int adj_aux_count,
+    float origin,
+    float inv_ds,
+    float component_scale,
+    float* __restrict__ adj_aux_field,
+    const float* __restrict__ adj_field_patch,
+    const float* __restrict__ coeff_patch,
+    const float* __restrict__ sample_positions) {
+  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (linear >= total || adj_aux_count <= 0) {
+    return;
+  }
+  const int last_index = adj_aux_count - 1;
+  float coord = inv_ds > 0.0f ? (sample_positions[linear] - origin) * inv_ds : 0.0f;
+  coord = fminf(fmaxf(coord, 0.0f), static_cast<float>(last_index));
+  const int lower = static_cast<int>(coord);
+  const int upper = lower + 1 < last_index ? lower + 1 : last_index;
+  const float frac = coord - static_cast<float>(lower);
+  const float value = component_scale * adj_field_patch[linear] * coeff_patch[linear];
+  warp_atomic_add_adjacent_repeats(adj_aux_field, lower, value * (1.0f - frac));
+  if (upper != lower) {
+    warp_atomic_add_adjacent_repeats(adj_aux_field, upper, value * frac);
+  }
+}
+
+__global__ void reverse_tfsf_auxiliary_magnetic_kernel(
+    int64_t electric_total,
+    int64_t magnetic_total,
+    float* __restrict__ adj_electric_prev,
+    float* __restrict__ adj_magnetic_prev,
+    const float* __restrict__ adj_magnetic_after,
+    const float* __restrict__ magnetic_decay,
+    const float* __restrict__ magnetic_curl) {
+  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= electric_total && index >= magnetic_total) {
+    return;
+  }
+  if (index < magnetic_total) {
+    const float adjoint = adj_magnetic_after[index];
+    adj_magnetic_prev[index] = magnetic_decay[index] * adjoint;
+  }
+  if (index < electric_total) {
+    float adjoint = 0.0f;
+    if (index < magnetic_total) {
+      adjoint += magnetic_curl[index] * adj_magnetic_after[index];
+    }
+    if (index > 0) {
+      const int64_t lower = index - 1;
+      adjoint -= magnetic_curl[lower] * adj_magnetic_after[lower];
+    }
+    adj_electric_prev[index] += adjoint;
+  }
 }
 
 }  // namespace
@@ -1446,7 +1748,7 @@ void reverse_magnetic_adjoint_decay_cuda(
   check_matching_field(adj_prev, decay, "decay");
   const c10::cuda::CUDAGuard device_guard(adj_prev.device());
   const int64_t total = adj_prev.numel();
-  reverse_magnetic_decay_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
+  reverse_magnetic_decay_kernel<<<linear_grid(total, 512), 512, 0, current_cuda_stream()>>>(
       total,
       adj_prev.data_ptr<float>(),
       adj_mid.data_ptr<float>(),
@@ -1470,9 +1772,9 @@ void reverse_electric_adjoint_to_hx_standard_cuda(
   check_field(adj_ez_post, "adj_ez_post");
   check_matching_field(adj_ez_post, ez_curl, "ez_curl");
   const c10::cuda::CUDAGuard device_guard(adj_hx_mid.device());
-  const int64_t total = adj_hx_mid.numel();
-  reverse_electric_to_hx_standard_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  reverse_electric_to_hx_standard_kernel<<<field_grid3d(adj_hx_mid.size(0), adj_hx_mid.size(1), adj_hx_mid.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_hx_mid.size(0)),
       static_cast<int>(adj_hx_mid.size(1)),
       static_cast<int>(adj_hx_mid.size(2)),
       static_cast<int>(adj_ey_post.size(0)),
@@ -1508,9 +1810,9 @@ void reverse_electric_adjoint_to_hy_standard_cuda(
   check_field(adj_ez_post, "adj_ez_post");
   check_matching_field(adj_ez_post, ez_curl, "ez_curl");
   const c10::cuda::CUDAGuard device_guard(adj_hy_mid.device());
-  const int64_t total = adj_hy_mid.numel();
-  reverse_electric_to_hy_standard_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  reverse_electric_to_hy_standard_kernel<<<field_grid3d(adj_hy_mid.size(0), adj_hy_mid.size(1), adj_hy_mid.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_hy_mid.size(0)),
       static_cast<int>(adj_hy_mid.size(1)),
       static_cast<int>(adj_hy_mid.size(2)),
       static_cast<int>(adj_ex_post.size(0)),
@@ -1546,9 +1848,9 @@ void reverse_electric_adjoint_to_hz_standard_cuda(
   check_field(adj_ey_post, "adj_ey_post");
   check_matching_field(adj_ey_post, ey_curl, "ey_curl");
   const c10::cuda::CUDAGuard device_guard(adj_hz_mid.device());
-  const int64_t total = adj_hz_mid.numel();
-  reverse_electric_to_hz_standard_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  reverse_electric_to_hz_standard_kernel<<<field_grid3d(adj_hz_mid.size(0), adj_hz_mid.size(1), adj_hz_mid.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_hz_mid.size(0)),
       static_cast<int>(adj_hz_mid.size(1)),
       static_cast<int>(adj_hz_mid.size(2)),
       static_cast<int>(adj_ex_post.size(0)),
@@ -1600,9 +1902,9 @@ void reverse_magnetic_adjoint_to_ex_standard_cuda(
   check_matching_field(adj_hz_mid, hz_mid, "hz_mid");
   check_matching_field(adj_hz_mid, hz_curl, "hz_curl");
   const c10::cuda::CUDAGuard device_guard(adj_ex_prev.device());
-  const int64_t total = adj_ex_prev.numel();
-  reverse_magnetic_to_ex_standard_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  reverse_magnetic_to_ex_standard_kernel<<<field_grid3d(adj_ex_prev.size(0), adj_ex_prev.size(1), adj_ex_prev.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_ex_prev.size(0)),
       static_cast<int>(adj_ex_prev.size(1)),
       static_cast<int>(adj_ex_prev.size(2)),
       static_cast<int>(adj_hy_mid.size(1)),
@@ -1662,9 +1964,9 @@ void reverse_magnetic_adjoint_to_ey_standard_cuda(
   check_matching_field(adj_hz_mid, hz_mid, "hz_mid");
   check_matching_field(adj_hz_mid, hz_curl, "hz_curl");
   const c10::cuda::CUDAGuard device_guard(adj_ey_prev.device());
-  const int64_t total = adj_ey_prev.numel();
-  reverse_magnetic_to_ey_standard_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  reverse_magnetic_to_ey_standard_kernel<<<field_grid3d(adj_ey_prev.size(0), adj_ey_prev.size(1), adj_ey_prev.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_ey_prev.size(0)),
       static_cast<int>(adj_ey_prev.size(1)),
       static_cast<int>(adj_ey_prev.size(2)),
       static_cast<int>(adj_hx_mid.size(1)),
@@ -1725,9 +2027,9 @@ void reverse_magnetic_adjoint_to_ez_standard_cuda(
   check_matching_field(adj_hy_mid, hy_mid, "hy_mid");
   check_matching_field(adj_hy_mid, hy_curl, "hy_curl");
   const c10::cuda::CUDAGuard device_guard(adj_ez_prev.device());
-  const int64_t total = adj_ez_prev.numel();
-  reverse_magnetic_to_ez_standard_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  reverse_magnetic_to_ez_standard_kernel<<<field_grid3d(adj_ez_prev.size(0), adj_ez_prev.size(1), adj_ez_prev.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_ez_prev.size(0)),
       static_cast<int>(adj_ez_prev.size(1)),
       static_cast<int>(adj_ez_prev.size(2)),
       static_cast<int>(adj_hx_mid.size(1)),
@@ -1792,9 +2094,9 @@ void reverse_electric_adjoint_to_hx_bloch_cuda(
       && adj_ez_post_real.size(2) == adj_hx_mid_real.size(2),
       "Ez adjoint shape must match Hx Bloch stencil");
   const c10::cuda::CUDAGuard device_guard(adj_hx_mid_real.device());
-  const int64_t total = adj_hx_mid_real.numel();
-  reverse_electric_to_hx_bloch_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  reverse_electric_to_hx_bloch_kernel<<<field_grid3d(adj_hx_mid_real.size(0), adj_hx_mid_real.size(1), adj_hx_mid_real.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_hx_mid_real.size(0)),
       static_cast<int>(adj_hx_mid_real.size(1)),
       static_cast<int>(adj_hx_mid_real.size(2)),
       static_cast<int>(adj_ey_post_real.size(0)),
@@ -1858,9 +2160,9 @@ void reverse_electric_adjoint_to_hy_bloch_cuda(
       && adj_ez_post_real.size(2) == adj_hy_mid_real.size(2),
       "Ez adjoint shape must match Hy Bloch stencil");
   const c10::cuda::CUDAGuard device_guard(adj_hy_mid_real.device());
-  const int64_t total = adj_hy_mid_real.numel();
-  reverse_electric_to_hy_bloch_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  reverse_electric_to_hy_bloch_kernel<<<field_grid3d(adj_hy_mid_real.size(0), adj_hy_mid_real.size(1), adj_hy_mid_real.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_hy_mid_real.size(0)),
       static_cast<int>(adj_hy_mid_real.size(1)),
       static_cast<int>(adj_hy_mid_real.size(2)),
       static_cast<int>(adj_ex_post_real.size(0)),
@@ -1924,9 +2226,9 @@ void reverse_electric_adjoint_to_hz_bloch_cuda(
       && adj_ey_post_real.size(2) == adj_hz_mid_real.size(2),
       "Ey adjoint shape must match Hz Bloch stencil");
   const c10::cuda::CUDAGuard device_guard(adj_hz_mid_real.device());
-  const int64_t total = adj_hz_mid_real.numel();
-  reverse_electric_to_hz_bloch_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  reverse_electric_to_hz_bloch_kernel<<<field_grid3d(adj_hz_mid_real.size(0), adj_hz_mid_real.size(1), adj_hz_mid_real.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_hz_mid_real.size(0)),
       static_cast<int>(adj_hz_mid_real.size(1)),
       static_cast<int>(adj_hz_mid_real.size(2)),
       static_cast<int>(adj_ex_post_real.size(0)),
@@ -1998,9 +2300,9 @@ void reverse_magnetic_adjoint_to_ex_bloch_cuda(
   check_matching_field(hz_mid_real, adj_hz_mid_imag, "adj_hz_mid_imag");
   check_matching_field(hz_mid_real, hz_curl, "hz_curl");
   const c10::cuda::CUDAGuard device_guard(adj_ex_prev_real.device());
-  const int64_t total = adj_ex_prev_real.numel();
-  reverse_magnetic_to_ex_bloch_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  reverse_magnetic_to_ex_bloch_kernel<<<field_grid3d(adj_ex_prev_real.size(0), adj_ex_prev_real.size(1), adj_ex_prev_real.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_ex_prev_real.size(0)),
       static_cast<int>(adj_ex_prev_real.size(1)),
       static_cast<int>(adj_ex_prev_real.size(2)),
       static_cast<int>(hy_mid_real.size(0)),
@@ -2080,9 +2382,9 @@ void reverse_magnetic_adjoint_to_ey_bloch_cuda(
   check_matching_field(hz_mid_real, adj_hz_mid_imag, "adj_hz_mid_imag");
   check_matching_field(hz_mid_real, hz_curl, "hz_curl");
   const c10::cuda::CUDAGuard device_guard(adj_ey_prev_real.device());
-  const int64_t total = adj_ey_prev_real.numel();
-  reverse_magnetic_to_ey_bloch_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  reverse_magnetic_to_ey_bloch_kernel<<<field_grid3d(adj_ey_prev_real.size(0), adj_ey_prev_real.size(1), adj_ey_prev_real.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_ey_prev_real.size(0)),
       static_cast<int>(adj_ey_prev_real.size(1)),
       static_cast<int>(adj_ey_prev_real.size(2)),
       static_cast<int>(hx_mid_real.size(0)),
@@ -2162,9 +2464,9 @@ void reverse_magnetic_adjoint_to_ez_bloch_cuda(
   check_matching_field(hy_mid_real, adj_hy_mid_imag, "adj_hy_mid_imag");
   check_matching_field(hy_mid_real, hy_curl, "hy_curl");
   const c10::cuda::CUDAGuard device_guard(adj_ez_prev_real.device());
-  const int64_t total = adj_ez_prev_real.numel();
-  reverse_magnetic_to_ez_bloch_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  reverse_magnetic_to_ez_bloch_kernel<<<field_grid3d(adj_ez_prev_real.size(0), adj_ez_prev_real.size(1), adj_ez_prev_real.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_ez_prev_real.size(0)),
       static_cast<int>(adj_ez_prev_real.size(1)),
       static_cast<int>(adj_ez_prev_real.size(2)),
       static_cast<int>(hx_mid_real.size(0)),
@@ -2209,19 +2511,13 @@ void accumulate_forward_diff_adjoint_cuda(
   check_field(diff_grad, "diff_grad");
   TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
   const c10::cuda::CUDAGuard device_guard(field_grad.device());
-  const int64_t total = field_grad.numel();
-  accumulate_diff_adjoint_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
-      static_cast<int>(field_grad.size(1)),
-      static_cast<int>(field_grad.size(2)),
-      static_cast<int>(diff_grad.size(0)),
-      static_cast<int>(diff_grad.size(1)),
-      static_cast<int>(diff_grad.size(2)),
-      static_cast<int>(axis),
-      true,
-      static_cast<float>(inv_delta),
-      field_grad.data_ptr<float>(),
-      diff_grad.data_ptr<float>());
+  if (axis == 0) {
+    launch_accumulate_diff_adjoint<0, true>(field_grad, diff_grad, inv_delta);
+  } else if (axis == 1) {
+    launch_accumulate_diff_adjoint<1, true>(field_grad, diff_grad, inv_delta);
+  } else {
+    launch_accumulate_diff_adjoint<2, true>(field_grad, diff_grad, inv_delta);
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -2234,19 +2530,13 @@ void accumulate_backward_diff_adjoint_cuda(
   check_field(diff_grad, "diff_grad");
   TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
   const c10::cuda::CUDAGuard device_guard(field_grad.device());
-  const int64_t total = field_grad.numel();
-  accumulate_diff_adjoint_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
-      static_cast<int>(field_grad.size(1)),
-      static_cast<int>(field_grad.size(2)),
-      static_cast<int>(diff_grad.size(0)),
-      static_cast<int>(diff_grad.size(1)),
-      static_cast<int>(diff_grad.size(2)),
-      static_cast<int>(axis),
-      false,
-      static_cast<float>(inv_delta),
-      field_grad.data_ptr<float>(),
-      diff_grad.data_ptr<float>());
+  if (axis == 0) {
+    launch_accumulate_diff_adjoint<0, false>(field_grad, diff_grad, inv_delta);
+  } else if (axis == 1) {
+    launch_accumulate_diff_adjoint<1, false>(field_grad, diff_grad, inv_delta);
+  } else {
+    launch_accumulate_diff_adjoint<2, false>(field_grad, diff_grad, inv_delta);
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -2303,44 +2593,53 @@ void launch_reverse_electric_component_cpml(
   check_field(h_pos_mid, "h_pos_mid");
   check_field(h_neg_mid, "h_neg_mid");
   const c10::cuda::CUDAGuard device_guard(adj_prev.device());
-  const int64_t total = adj_prev.numel();
-  reverse_electric_component_cpml_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
-      component,
-      static_cast<int>(adj_prev.size(1)),
-      static_cast<int>(adj_prev.size(2)),
-      static_cast<int>(h_pos_mid.size(1)),
-      static_cast<int>(h_pos_mid.size(2)),
-      static_cast<int>(h_neg_mid.size(1)),
-      static_cast<int>(h_neg_mid.size(2)),
-      adj_prev.data_ptr<float>(),
-      grad_eps.data_ptr<float>(),
-      adj_psi_pos_prev.data_ptr<float>(),
-      adj_psi_neg_prev.data_ptr<float>(),
-      adj_d_pos.data_ptr<float>(),
-      adj_d_neg.data_ptr<float>(),
-      adj_post.data_ptr<float>(),
-      adj_psi_pos_post.data_ptr<float>(),
-      adj_psi_neg_post.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>(),
-      eps.data_ptr<float>(),
-      psi_pos.data_ptr<float>(),
-      psi_neg.data_ptr<float>(),
-      b_pos.data_ptr<float>(),
-      c_pos.data_ptr<float>(),
-      inv_kappa_pos.data_ptr<float>(),
-      b_neg.data_ptr<float>(),
-      c_neg.data_ptr<float>(),
-      inv_kappa_neg.data_ptr<float>(),
-      h_pos_mid.data_ptr<float>(),
-      h_neg_mid.data_ptr<float>(),
-      static_cast<float>(inv_pos),
-      static_cast<float>(inv_neg),
-      static_cast<int>(low_mode_a),
-      static_cast<int>(high_mode_a),
-      static_cast<int>(low_mode_b),
-      static_cast<int>(high_mode_b));
+  const dim3 block = field_block3d();
+  const auto launch = [&](auto component_tag) {
+    constexpr int component_value = decltype(component_tag)::value;
+    reverse_electric_component_cpml_kernel<component_value><<<field_grid3d(adj_prev.size(0), adj_prev.size(1), adj_prev.size(2), block), block, 0, current_cuda_stream()>>>(
+        static_cast<int>(adj_prev.size(0)),
+        static_cast<int>(adj_prev.size(1)),
+        static_cast<int>(adj_prev.size(2)),
+        static_cast<int>(h_pos_mid.size(1)),
+        static_cast<int>(h_pos_mid.size(2)),
+        static_cast<int>(h_neg_mid.size(1)),
+        static_cast<int>(h_neg_mid.size(2)),
+        adj_prev.data_ptr<float>(),
+        grad_eps.data_ptr<float>(),
+        adj_psi_pos_prev.data_ptr<float>(),
+        adj_psi_neg_prev.data_ptr<float>(),
+        adj_d_pos.data_ptr<float>(),
+        adj_d_neg.data_ptr<float>(),
+        adj_post.data_ptr<float>(),
+        adj_psi_pos_post.data_ptr<float>(),
+        adj_psi_neg_post.data_ptr<float>(),
+        decay.data_ptr<float>(),
+        curl.data_ptr<float>(),
+        eps.data_ptr<float>(),
+        psi_pos.data_ptr<float>(),
+        psi_neg.data_ptr<float>(),
+        b_pos.data_ptr<float>(),
+        c_pos.data_ptr<float>(),
+        inv_kappa_pos.data_ptr<float>(),
+        b_neg.data_ptr<float>(),
+        c_neg.data_ptr<float>(),
+        inv_kappa_neg.data_ptr<float>(),
+        h_pos_mid.data_ptr<float>(),
+        h_neg_mid.data_ptr<float>(),
+        static_cast<float>(inv_pos),
+        static_cast<float>(inv_neg),
+        static_cast<int>(low_mode_a),
+        static_cast<int>(high_mode_a),
+        static_cast<int>(low_mode_b),
+        static_cast<int>(high_mode_b));
+  };
+  if (component == 0) {
+    launch(std::integral_constant<int, 0>{});
+  } else if (component == 1) {
+    launch(std::integral_constant<int, 1>{});
+  } else {
+    launch(std::integral_constant<int, 2>{});
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -2487,28 +2786,37 @@ void launch_reverse_magnetic_component_cpml(
   check_matching_vector(b_neg, c_neg, "c_neg");
   check_matching_vector(b_neg, inv_kappa_neg, "inv_kappa_neg");
   const c10::cuda::CUDAGuard device_guard(adj_prev.device());
-  const int64_t total = adj_prev.numel();
-  reverse_magnetic_component_cpml_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
-      component,
-      static_cast<int>(adj_prev.size(1)),
-      static_cast<int>(adj_prev.size(2)),
-      adj_prev.data_ptr<float>(),
-      adj_psi_pos_prev.data_ptr<float>(),
-      adj_psi_neg_prev.data_ptr<float>(),
-      adj_d_pos.data_ptr<float>(),
-      adj_d_neg.data_ptr<float>(),
-      adj_post.data_ptr<float>(),
-      adj_psi_pos_post.data_ptr<float>(),
-      adj_psi_neg_post.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>(),
-      b_pos.data_ptr<float>(),
-      c_pos.data_ptr<float>(),
-      inv_kappa_pos.data_ptr<float>(),
-      b_neg.data_ptr<float>(),
-      c_neg.data_ptr<float>(),
-      inv_kappa_neg.data_ptr<float>());
+  const dim3 block = field_block3d();
+  const auto launch = [&](auto component_tag) {
+    constexpr int component_value = decltype(component_tag)::value;
+    reverse_magnetic_component_cpml_kernel<component_value><<<field_grid3d(adj_prev.size(0), adj_prev.size(1), adj_prev.size(2), block), block, 0, current_cuda_stream()>>>(
+        static_cast<int>(adj_prev.size(0)),
+        static_cast<int>(adj_prev.size(1)),
+        static_cast<int>(adj_prev.size(2)),
+        adj_prev.data_ptr<float>(),
+        adj_psi_pos_prev.data_ptr<float>(),
+        adj_psi_neg_prev.data_ptr<float>(),
+        adj_d_pos.data_ptr<float>(),
+        adj_d_neg.data_ptr<float>(),
+        adj_post.data_ptr<float>(),
+        adj_psi_pos_post.data_ptr<float>(),
+        adj_psi_neg_post.data_ptr<float>(),
+        decay.data_ptr<float>(),
+        curl.data_ptr<float>(),
+        b_pos.data_ptr<float>(),
+        c_pos.data_ptr<float>(),
+        inv_kappa_pos.data_ptr<float>(),
+        b_neg.data_ptr<float>(),
+        c_neg.data_ptr<float>(),
+        inv_kappa_neg.data_ptr<float>());
+  };
+  if (component == 0) {
+    launch(std::integral_constant<int, 0>{});
+  } else if (component == 1) {
+    launch(std::integral_constant<int, 1>{});
+  } else {
+    launch(std::integral_constant<int, 2>{});
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -2596,15 +2904,15 @@ void reverse_debye_current_cuda(
   check_matching_field(adj_electric_prev, drive, "drive");
   const c10::cuda::CUDAGuard device_guard(adj_electric_prev.device());
   const int64_t total = adj_electric_prev.numel();
-  reverse_debye_current_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
+  reverse_debye_current_kernel<<<linear_grid(total, 256), 256, 0, current_cuda_stream()>>>(
       total,
       adj_electric_prev.data_ptr<float>(),
       adj_polarization_prev.data_ptr<float>(),
       adj_polarization_post.data_ptr<float>(),
       adj_current_post.data_ptr<float>(),
       drive.data_ptr<float>(),
-      decay,
-      dt);
+      static_cast<float>(decay),
+      static_cast<float>(1.0 / dt));
   WITWIN_CUDA_CHECK();
 }
 
@@ -2620,13 +2928,13 @@ void reverse_drude_current_cuda(
   check_matching_field(adj_electric_prev, drive, "drive");
   const c10::cuda::CUDAGuard device_guard(adj_electric_prev.device());
   const int64_t total = adj_electric_prev.numel();
-  reverse_drude_current_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
+  reverse_drude_current_kernel<<<linear_grid(total, 256), 256, 0, current_cuda_stream()>>>(
       total,
       adj_electric_prev.data_ptr<float>(),
       adj_current_prev.data_ptr<float>(),
       adj_current_post.data_ptr<float>(),
       drive.data_ptr<float>(),
-      decay);
+      static_cast<float>(decay));
   WITWIN_CUDA_CHECK();
 }
 
@@ -2648,7 +2956,7 @@ void reverse_lorentz_current_cuda(
   check_matching_field(adj_electric_prev, drive, "drive");
   const c10::cuda::CUDAGuard device_guard(adj_electric_prev.device());
   const int64_t total = adj_electric_prev.numel();
-  reverse_lorentz_current_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
+  reverse_lorentz_current_kernel<<<linear_grid(total, 256), 256, 0, current_cuda_stream()>>>(
       total,
       adj_electric_prev.data_ptr<float>(),
       adj_polarization_prev.data_ptr<float>(),
@@ -2656,9 +2964,9 @@ void reverse_lorentz_current_cuda(
       adj_polarization_post.data_ptr<float>(),
       adj_current_post.data_ptr<float>(),
       drive.data_ptr<float>(),
-      decay,
-      restoring,
-      dt);
+      static_cast<float>(decay),
+      static_cast<float>(restoring),
+      static_cast<float>(dt));
   WITWIN_CUDA_CHECK();
 }
 
@@ -2670,11 +2978,17 @@ void accumulate_tfsf_scalar_sample_adjoint_cuda(
     double component_scale) {
   check_vector(adj_aux_field, "adj_aux_field");
   check_field(adj_field_patch, "adj_field_patch");
+  check_same_cuda_device(adj_aux_field, adj_field_patch, "adj_field_patch");
   check_matching_field(adj_field_patch, coeff_patch, "coeff_patch");
   TORCH_CHECK(sample_index >= 0 && sample_index < adj_aux_field.numel(), "sample_index is out of range");
   const c10::cuda::CUDAGuard device_guard(adj_aux_field.device());
   const int64_t total = adj_field_patch.numel();
-  accumulate_tfsf_scalar_sample_adjoint_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
+  constexpr int block_size = 512;
+  accumulate_tfsf_scalar_sample_adjoint_kernel<<<
+      linear_grid(total, block_size),
+      block_size,
+      0,
+      current_cuda_stream()>>>(
       total,
       static_cast<int>(adj_field_patch.size(1)),
       static_cast<int>(adj_field_patch.size(2)),
@@ -2695,22 +3009,44 @@ void accumulate_tfsf_line_sample_adjoint_cuda(
     double component_scale) {
   check_vector(adj_aux_field, "adj_aux_field");
   check_field(adj_field_patch, "adj_field_patch");
+  check_same_cuda_device(adj_aux_field, adj_field_patch, "adj_field_patch");
   check_matching_field(adj_field_patch, coeff_patch, "coeff_patch");
   check_int32_vector(sample_indices, "sample_indices");
+  check_same_cuda_device(adj_aux_field, sample_indices, "sample_indices");
   TORCH_CHECK(sample_axis_code >= 0 && sample_axis_code < 3, "sample_axis_code must be in [0, 3)");
   TORCH_CHECK(sample_indices.numel() == adj_field_patch.size(sample_axis_code), "sample_indices length must match the selected patch axis");
   const c10::cuda::CUDAGuard device_guard(adj_aux_field.device());
-  const int64_t total = adj_field_patch.numel();
-  accumulate_tfsf_line_sample_adjoint_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
-      static_cast<int>(adj_field_patch.size(1)),
-      static_cast<int>(adj_field_patch.size(2)),
-      static_cast<int>(sample_axis_code),
-      static_cast<float>(component_scale),
-      adj_aux_field.data_ptr<float>(),
-      adj_field_patch.data_ptr<float>(),
-      coeff_patch.data_ptr<float>(),
-      sample_indices.data_ptr<int>());
+  if (sample_axis_code == 0) {
+    launch_tfsf_line_sample_adjoint<0>(
+        static_cast<int>(adj_field_patch.size(0)),
+        static_cast<int>(adj_field_patch.size(1)),
+        static_cast<int>(adj_field_patch.size(2)),
+        static_cast<float>(component_scale),
+        adj_aux_field.data_ptr<float>(),
+        adj_field_patch.data_ptr<float>(),
+        coeff_patch.data_ptr<float>(),
+        sample_indices.data_ptr<int>());
+  } else if (sample_axis_code == 1) {
+    launch_tfsf_line_sample_adjoint<1>(
+        static_cast<int>(adj_field_patch.size(0)),
+        static_cast<int>(adj_field_patch.size(1)),
+        static_cast<int>(adj_field_patch.size(2)),
+        static_cast<float>(component_scale),
+        adj_aux_field.data_ptr<float>(),
+        adj_field_patch.data_ptr<float>(),
+        coeff_patch.data_ptr<float>(),
+        sample_indices.data_ptr<int>());
+  } else {
+    launch_tfsf_line_sample_adjoint<2>(
+        static_cast<int>(adj_field_patch.size(0)),
+        static_cast<int>(adj_field_patch.size(1)),
+        static_cast<int>(adj_field_patch.size(2)),
+        static_cast<float>(component_scale),
+        adj_aux_field.data_ptr<float>(),
+        adj_field_patch.data_ptr<float>(),
+        coeff_patch.data_ptr<float>(),
+        sample_indices.data_ptr<int>());
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -2724,15 +3060,32 @@ void accumulate_tfsf_interpolated_sample_adjoint_cuda(
     double component_scale) {
   check_vector(adj_aux_field, "adj_aux_field");
   check_field(adj_field_patch, "adj_field_patch");
+  check_same_cuda_device(adj_aux_field, adj_field_patch, "adj_field_patch");
   check_matching_field(adj_field_patch, coeff_patch, "coeff_patch");
   check_matching_field(adj_field_patch, sample_positions, "sample_positions");
   const c10::cuda::CUDAGuard device_guard(adj_aux_field.device());
   const int64_t total = adj_field_patch.numel();
+  const int64_t adj_aux_count = adj_aux_field.numel();
+  const float inv_ds = ds > 0.0 ? static_cast<float>(1.0 / ds) : 0.0f;
+  if (adj_aux_count <= static_cast<int64_t>(std::numeric_limits<int>::max())) {
+    accumulate_tfsf_interpolated_sample_adjoint_warp_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
+        total,
+        static_cast<int>(adj_aux_count),
+        static_cast<float>(origin),
+        inv_ds,
+        static_cast<float>(component_scale),
+        adj_aux_field.data_ptr<float>(),
+        adj_field_patch.data_ptr<float>(),
+        coeff_patch.data_ptr<float>(),
+        sample_positions.data_ptr<float>());
+    WITWIN_CUDA_CHECK();
+    return;
+  }
   accumulate_tfsf_interpolated_sample_adjoint_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
       total,
-      adj_aux_field.numel(),
+      adj_aux_count,
       static_cast<float>(origin),
-      static_cast<float>(ds),
+      inv_ds,
       static_cast<float>(component_scale),
       adj_aux_field.data_ptr<float>(),
       adj_field_patch.data_ptr<float>(),
@@ -2753,6 +3106,7 @@ void reverse_tfsf_auxiliary_electric_cuda(
   check_matching_vector(adj_electric_prev, electric_decay, "electric_decay");
   check_matching_vector(adj_electric_prev, electric_curl, "electric_curl");
   check_vector(adj_magnetic_after, "adj_magnetic_after");
+  check_same_cuda_device(adj_electric_prev, adj_magnetic_after, "adj_magnetic_after");
   TORCH_CHECK(adj_magnetic_after.numel() + 1 == adj_electric_prev.numel(), "adj_magnetic_after length must be electric length - 1");
   const c10::cuda::CUDAGuard device_guard(adj_electric_prev.device());
   const int64_t total = adj_electric_prev.numel();
@@ -2776,14 +3130,16 @@ void reverse_tfsf_auxiliary_magnetic_cuda(
     const at::Tensor& magnetic_curl) {
   check_vector(adj_electric_prev, "adj_electric_prev");
   check_vector(adj_magnetic_prev, "adj_magnetic_prev");
+  check_same_cuda_device(adj_electric_prev, adj_magnetic_prev, "adj_magnetic_prev");
   check_matching_vector(adj_magnetic_prev, adj_magnetic_after, "adj_magnetic_after");
   check_matching_vector(adj_magnetic_prev, magnetic_decay, "magnetic_decay");
   check_matching_vector(adj_magnetic_prev, magnetic_curl, "magnetic_curl");
   TORCH_CHECK(adj_magnetic_prev.numel() + 1 == adj_electric_prev.numel(), "adj_electric_prev length must be magnetic length + 1");
   const c10::cuda::CUDAGuard device_guard(adj_electric_prev.device());
-  const int64_t total = adj_magnetic_prev.numel();
-  reverse_tfsf_auxiliary_magnetic_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
+  const int64_t total = adj_electric_prev.numel();
+  reverse_tfsf_auxiliary_magnetic_kernel<<<linear_grid(total, 512), 512, 0, current_cuda_stream()>>>(
       total,
+      adj_magnetic_prev.numel(),
       adj_electric_prev.data_ptr<float>(),
       adj_magnetic_prev.data_ptr<float>(),
       adj_magnetic_after.data_ptr<float>(),

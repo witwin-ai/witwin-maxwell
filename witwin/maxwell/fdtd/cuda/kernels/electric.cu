@@ -7,7 +7,23 @@
 
 namespace {
 
-__device__ inline float boundary_diff_low(float low_value, float high_value, int low_mode, float inv_delta) {
+dim3 field_block3d() {
+  return dim3(32, 4, 2);
+}
+
+dim3 field_grid3d(int64_t nx, int64_t ny, int64_t nz, dim3 block) {
+  return dim3(
+      static_cast<unsigned int>((nz + block.x - 1) / block.x),
+      static_cast<unsigned int>((ny + block.y - 1) / block.y),
+      static_cast<unsigned int>((nx + block.z - 1) / block.z));
+}
+
+bool inactive_boundary_pair(int64_t low_mode, int64_t high_mode) {
+  return (low_mode == BOUNDARY_NONE || low_mode == BOUNDARY_PML) &&
+      (high_mode == BOUNDARY_NONE || high_mode == BOUNDARY_PML);
+}
+
+__device__ __forceinline__ float boundary_diff_low(float low_value, float high_value, int low_mode, float inv_delta) {
   if (low_mode == BOUNDARY_PERIODIC) {
     return (low_value - high_value) * inv_delta;
   }
@@ -17,7 +33,7 @@ __device__ inline float boundary_diff_low(float low_value, float high_value, int
   return 0.0f;
 }
 
-__device__ inline float boundary_diff_high(float low_value, float high_value, int high_mode, float inv_delta) {
+__device__ __forceinline__ float boundary_diff_high(float low_value, float high_value, int high_mode, float inv_delta) {
   if (high_mode == BOUNDARY_PERIODIC) {
     return (low_value - high_value) * inv_delta;
   }
@@ -27,18 +43,18 @@ __device__ inline float boundary_diff_high(float low_value, float high_value, in
   return 0.0f;
 }
 
-__device__ inline bool boundary_pec(unsigned int coord, unsigned int size, int low_mode, int high_mode) {
+__device__ __forceinline__ bool boundary_pec(unsigned int coord, unsigned int size, int low_mode, int high_mode) {
   return (coord == 0 && low_mode == BOUNDARY_PEC) || (coord + 1 == size && high_mode == BOUNDARY_PEC);
 }
 
-__device__ inline bool boundary_inactive(unsigned int coord, unsigned int size, int low_mode, int high_mode) {
+__device__ __forceinline__ bool boundary_inactive(unsigned int coord, unsigned int size, int low_mode, int high_mode) {
   const bool low = coord == 0 && (low_mode == BOUNDARY_NONE || low_mode == BOUNDARY_PML);
   const bool high = coord + 1 == size && (high_mode == BOUNDARY_NONE || high_mode == BOUNDARY_PML);
   return low || high;
 }
 
-__device__ inline float backward_diff_axis0(
-    const float* source,
+__device__ __forceinline__ float backward_diff_axis0(
+    const float* __restrict__ source,
     unsigned int target_x,
     unsigned int source_y,
     unsigned int source_z,
@@ -46,57 +62,63 @@ __device__ inline float backward_diff_axis0(
     unsigned int j,
     unsigned int k,
     int low_mode,
-    int high_mode,
-    float inv_delta) {
+  int high_mode,
+  float inv_delta) {
   const unsigned int source_x = target_x - 1;
-  const float low_value = source[offset3d(0, j, k, source_y, source_z)];
-  const float high_value = source[offset3d(source_x - 1, j, k, source_y, source_z)];
   if (i == 0) {
+    const float low_value = source[offset3d(0, j, k, source_y, source_z)];
+    const float high_value = source[offset3d(source_x - 1, j, k, source_y, source_z)];
     return boundary_diff_low(low_value, high_value, low_mode, inv_delta);
   }
   if (i + 1 == target_x) {
+    const float low_value = source[offset3d(0, j, k, source_y, source_z)];
+    const float high_value = source[offset3d(source_x - 1, j, k, source_y, source_z)];
     return boundary_diff_high(low_value, high_value, high_mode, inv_delta);
   }
   return (source[offset3d(i, j, k, source_y, source_z)] - source[offset3d(i - 1, j, k, source_y, source_z)]) * inv_delta;
 }
 
-__device__ inline float backward_diff_axis1(
-    const float* source,
+__device__ __forceinline__ float backward_diff_axis1(
+    const float* __restrict__ source,
     unsigned int source_y,
     unsigned int source_z,
     unsigned int i,
     unsigned int j,
     unsigned int k,
-    int low_mode,
-    int high_mode,
-    float inv_delta) {
-  const float low_value = source[offset3d(i, 0, k, source_y, source_z)];
-  const float high_value = source[offset3d(i, source_y - 1, k, source_y, source_z)];
+  int low_mode,
+  int high_mode,
+  float inv_delta) {
   if (j == 0) {
+    const float low_value = source[offset3d(i, 0, k, source_y, source_z)];
+    const float high_value = source[offset3d(i, source_y - 1, k, source_y, source_z)];
     return boundary_diff_low(low_value, high_value, low_mode, inv_delta);
   }
   if (j == source_y) {
+    const float low_value = source[offset3d(i, 0, k, source_y, source_z)];
+    const float high_value = source[offset3d(i, source_y - 1, k, source_y, source_z)];
     return boundary_diff_high(low_value, high_value, high_mode, inv_delta);
   }
   return (source[offset3d(i, j, k, source_y, source_z)] - source[offset3d(i, j - 1, k, source_y, source_z)]) * inv_delta;
 }
 
-__device__ inline float backward_diff_axis2(
-    const float* source,
+__device__ __forceinline__ float backward_diff_axis2(
+    const float* __restrict__ source,
     unsigned int source_y,
     unsigned int source_z,
     unsigned int i,
     unsigned int j,
     unsigned int k,
-    int low_mode,
-    int high_mode,
-    float inv_delta) {
-  const float low_value = source[offset3d(i, j, 0, source_y, source_z)];
-  const float high_value = source[offset3d(i, j, source_z - 1, source_y, source_z)];
+  int low_mode,
+  int high_mode,
+  float inv_delta) {
   if (k == 0) {
+    const float low_value = source[offset3d(i, j, 0, source_y, source_z)];
+    const float high_value = source[offset3d(i, j, source_z - 1, source_y, source_z)];
     return boundary_diff_low(low_value, high_value, low_mode, inv_delta);
   }
   if (k == source_z) {
+    const float low_value = source[offset3d(i, j, 0, source_y, source_z)];
+    const float high_value = source[offset3d(i, j, source_z - 1, source_y, source_z)];
     return boundary_diff_high(low_value, high_value, high_mode, inv_delta);
   }
   return (source[offset3d(i, j, k, source_y, source_z)] - source[offset3d(i, j, k - 1, source_y, source_z)]) * inv_delta;
@@ -107,17 +129,17 @@ struct ComplexValue {
   float imag;
 };
 
-__device__ inline ComplexValue phase_positive(float real, float imag, float phase_cos, float phase_sin) {
+__device__ __forceinline__ ComplexValue phase_positive(float real, float imag, float phase_cos, float phase_sin) {
   return {phase_cos * real - phase_sin * imag, phase_sin * real + phase_cos * imag};
 }
 
-__device__ inline ComplexValue phase_negative(float real, float imag, float phase_cos, float phase_sin) {
+__device__ __forceinline__ ComplexValue phase_negative(float real, float imag, float phase_cos, float phase_sin) {
   return {phase_cos * real + phase_sin * imag, phase_cos * imag - phase_sin * real};
 }
 
-__device__ inline ComplexValue bloch_backward_diff_axis0(
-    const float* real,
-    const float* imag,
+__device__ __forceinline__ ComplexValue bloch_backward_diff_axis0(
+    const float* __restrict__ real,
+    const float* __restrict__ imag,
     unsigned int target_x,
     unsigned int source_x,
     unsigned int source_y,
@@ -128,13 +150,15 @@ __device__ inline ComplexValue bloch_backward_diff_axis0(
     float phase_cos,
     float phase_sin,
     float inv_delta) {
-  const long long low = offset3d(0, j, k, source_y, source_z);
-  const long long high = offset3d(source_x - 1, j, k, source_y, source_z);
   if (i == 0) {
+    const long long low = offset3d(0, j, k, source_y, source_z);
+    const long long high = offset3d(source_x - 1, j, k, source_y, source_z);
     const ComplexValue shifted = phase_negative(real[high], imag[high], phase_cos, phase_sin);
     return {(real[low] - shifted.real) * inv_delta, (imag[low] - shifted.imag) * inv_delta};
   }
   if (i + 1 == target_x) {
+    const long long low = offset3d(0, j, k, source_y, source_z);
+    const long long high = offset3d(source_x - 1, j, k, source_y, source_z);
     const ComplexValue shifted = phase_positive(real[low], imag[low], phase_cos, phase_sin);
     return {(shifted.real - real[high]) * inv_delta, (shifted.imag - imag[high]) * inv_delta};
   }
@@ -143,9 +167,9 @@ __device__ inline ComplexValue bloch_backward_diff_axis0(
   return {(real[current] - real[previous]) * inv_delta, (imag[current] - imag[previous]) * inv_delta};
 }
 
-__device__ inline ComplexValue bloch_backward_diff_axis1(
-    const float* real,
-    const float* imag,
+__device__ __forceinline__ ComplexValue bloch_backward_diff_axis1(
+    const float* __restrict__ real,
+    const float* __restrict__ imag,
     unsigned int target_y,
     unsigned int source_y,
     unsigned int source_z,
@@ -155,13 +179,15 @@ __device__ inline ComplexValue bloch_backward_diff_axis1(
     float phase_cos,
     float phase_sin,
     float inv_delta) {
-  const long long low = offset3d(i, 0, k, source_y, source_z);
-  const long long high = offset3d(i, source_y - 1, k, source_y, source_z);
   if (j == 0) {
+    const long long low = offset3d(i, 0, k, source_y, source_z);
+    const long long high = offset3d(i, source_y - 1, k, source_y, source_z);
     const ComplexValue shifted = phase_negative(real[high], imag[high], phase_cos, phase_sin);
     return {(real[low] - shifted.real) * inv_delta, (imag[low] - shifted.imag) * inv_delta};
   }
   if (j + 1 == target_y) {
+    const long long low = offset3d(i, 0, k, source_y, source_z);
+    const long long high = offset3d(i, source_y - 1, k, source_y, source_z);
     const ComplexValue shifted = phase_positive(real[low], imag[low], phase_cos, phase_sin);
     return {(shifted.real - real[high]) * inv_delta, (shifted.imag - imag[high]) * inv_delta};
   }
@@ -170,9 +196,9 @@ __device__ inline ComplexValue bloch_backward_diff_axis1(
   return {(real[current] - real[previous]) * inv_delta, (imag[current] - imag[previous]) * inv_delta};
 }
 
-__device__ inline ComplexValue bloch_backward_diff_axis2(
-    const float* real,
-    const float* imag,
+__device__ __forceinline__ ComplexValue bloch_backward_diff_axis2(
+    const float* __restrict__ real,
+    const float* __restrict__ imag,
     unsigned int target_z,
     unsigned int source_y,
     unsigned int source_z,
@@ -182,13 +208,15 @@ __device__ inline ComplexValue bloch_backward_diff_axis2(
     float phase_cos,
     float phase_sin,
     float inv_delta) {
-  const long long low = offset3d(i, j, 0, source_y, source_z);
-  const long long high = offset3d(i, j, source_z - 1, source_y, source_z);
   if (k == 0) {
+    const long long low = offset3d(i, j, 0, source_y, source_z);
+    const long long high = offset3d(i, j, source_z - 1, source_y, source_z);
     const ComplexValue shifted = phase_negative(real[high], imag[high], phase_cos, phase_sin);
     return {(real[low] - shifted.real) * inv_delta, (imag[low] - shifted.imag) * inv_delta};
   }
   if (k + 1 == target_z) {
+    const long long low = offset3d(i, j, 0, source_y, source_z);
+    const long long high = offset3d(i, j, source_z - 1, source_y, source_z);
     const ComplexValue shifted = phase_positive(real[low], imag[low], phase_cos, phase_sin);
     return {(shifted.real - real[high]) * inv_delta, (shifted.imag - imag[high]) * inv_delta};
   }
@@ -198,385 +226,594 @@ __device__ inline ComplexValue bloch_backward_diff_axis2(
 }
 
 __global__ void update_electric_ex_standard_kernel(
-    int64_t total,
+    unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* hy,
-    const float* hz,
-    const float* decay,
-    const float* curl_coeff,
+    const float* __restrict__ hy,
+    const float* __restrict__ hz,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
     float inv_dy,
     float inv_dz,
     int y_low_mode,
     int y_high_mode,
     int z_low_mode,
     int z_high_mode,
-    float* ex) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ ex) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ny, nz);
-  if (boundary_pec(coord.j, ny, y_low_mode, y_high_mode) || boundary_pec(coord.k, nz, z_low_mode, z_high_mode)) {
+  const long long linear = offset3d(i, j, k, ny, nz);
+  if (boundary_pec(j, ny, y_low_mode, y_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
     ex[linear] = 0.0f;
     return;
   }
-  if (boundary_inactive(coord.j, ny, y_low_mode, y_high_mode) ||
-      boundary_inactive(coord.k, nz, z_low_mode, z_high_mode)) {
+  if (boundary_inactive(j, ny, y_low_mode, y_high_mode) ||
+      boundary_inactive(k, nz, z_low_mode, z_high_mode)) {
     return;
   }
-  const float d_y = backward_diff_axis1(hz, ny - 1, nz, coord.i, coord.j, coord.k, y_low_mode, y_high_mode, inv_dy);
-  const float d_z = backward_diff_axis2(hy, ny, nz - 1, coord.i, coord.j, coord.k, z_low_mode, z_high_mode, inv_dz);
+  const float d_y = backward_diff_axis1(hz, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
+  const float d_z = backward_diff_axis2(hy, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
+  ex[linear] = ex[linear] * decay[linear] + curl_coeff[linear] * (d_y - d_z);
+}
+
+__global__ void update_electric_ex_standard_interior_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ hy,
+    const float* __restrict__ hz,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    float inv_dy,
+    float inv_dz,
+    float* __restrict__ ex) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j + 1 >= ny || k + 1 >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const long long hz_current = offset3d(i, j, k, ny - 1, nz);
+  const long long hz_previous = offset3d(i, j - 1, k, ny - 1, nz);
+  const long long hy_current = offset3d(i, j, k, ny, nz - 1);
+  const long long hy_previous = offset3d(i, j, k - 1, ny, nz - 1);
+  const float d_y = (hz[hz_current] - hz[hz_previous]) * inv_dy;
+  const float d_z = (hy[hy_current] - hy[hy_previous]) * inv_dz;
   ex[linear] = ex[linear] * decay[linear] + curl_coeff[linear] * (d_y - d_z);
 }
 
 __global__ void update_electric_ey_standard_kernel(
-    int64_t total,
+    unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* hx,
-    const float* hz,
-    const float* decay,
-    const float* curl_coeff,
+    const float* __restrict__ hx,
+    const float* __restrict__ hz,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
     float inv_dx,
     float inv_dz,
     int x_low_mode,
     int x_high_mode,
     int z_low_mode,
     int z_high_mode,
-    float* ey) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ ey) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ny, nz);
-  const unsigned int nx = static_cast<unsigned int>(total / (ny * nz));
-  if (boundary_pec(coord.i, nx, x_low_mode, x_high_mode) || boundary_pec(coord.k, nz, z_low_mode, z_high_mode)) {
+  const long long linear = offset3d(i, j, k, ny, nz);
+  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
     ey[linear] = 0.0f;
     return;
   }
-  if (boundary_inactive(coord.i, nx, x_low_mode, x_high_mode) ||
-      boundary_inactive(coord.k, nz, z_low_mode, z_high_mode)) {
+  if (boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
+      boundary_inactive(k, nz, z_low_mode, z_high_mode)) {
     return;
   }
-  const float d_z = backward_diff_axis2(hx, ny, nz - 1, coord.i, coord.j, coord.k, z_low_mode, z_high_mode, inv_dz);
-  const float d_x = backward_diff_axis0(hz, nx, ny, nz, coord.i, coord.j, coord.k, x_low_mode, x_high_mode, inv_dx);
+  const float d_z = backward_diff_axis2(hx, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
+  const float d_x = backward_diff_axis0(hz, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
+  ey[linear] = ey[linear] * decay[linear] + curl_coeff[linear] * (d_z - d_x);
+}
+
+__global__ void update_electric_ey_standard_interior_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ hx,
+    const float* __restrict__ hz,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    float inv_dx,
+    float inv_dz,
+    float* __restrict__ ey) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  if (i + 1 >= nx || j >= ny || k + 1 >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const long long hx_current = offset3d(i, j, k, ny, nz - 1);
+  const long long hx_previous = offset3d(i, j, k - 1, ny, nz - 1);
+  const long long hz_current = offset3d(i, j, k, ny, nz);
+  const long long hz_previous = offset3d(i - 1, j, k, ny, nz);
+  const float d_z = (hx[hx_current] - hx[hx_previous]) * inv_dz;
+  const float d_x = (hz[hz_current] - hz[hz_previous]) * inv_dx;
   ey[linear] = ey[linear] * decay[linear] + curl_coeff[linear] * (d_z - d_x);
 }
 
 __global__ void update_electric_ez_standard_kernel(
-    int64_t total,
+    unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* hx,
-    const float* hy,
-    const float* decay,
-    const float* curl_coeff,
+    const float* __restrict__ hx,
+    const float* __restrict__ hy,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
     float inv_dx,
     float inv_dy,
     int x_low_mode,
     int x_high_mode,
     int y_low_mode,
     int y_high_mode,
-    float* ez) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ ez) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ny, nz);
-  const unsigned int nx = static_cast<unsigned int>(total / (ny * nz));
-  if (boundary_pec(coord.i, nx, x_low_mode, x_high_mode) || boundary_pec(coord.j, ny, y_low_mode, y_high_mode)) {
+  const long long linear = offset3d(i, j, k, ny, nz);
+  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(j, ny, y_low_mode, y_high_mode)) {
     ez[linear] = 0.0f;
     return;
   }
-  if (boundary_inactive(coord.i, nx, x_low_mode, x_high_mode) ||
-      boundary_inactive(coord.j, ny, y_low_mode, y_high_mode)) {
+  if (boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
+      boundary_inactive(j, ny, y_low_mode, y_high_mode)) {
     return;
   }
-  const float d_x = backward_diff_axis0(hy, nx, ny, nz, coord.i, coord.j, coord.k, x_low_mode, x_high_mode, inv_dx);
-  const float d_y = backward_diff_axis1(hx, ny - 1, nz, coord.i, coord.j, coord.k, y_low_mode, y_high_mode, inv_dy);
+  const float d_x = backward_diff_axis0(hy, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
+  const float d_y = backward_diff_axis1(hx, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
+  ez[linear] = ez[linear] * decay[linear] + curl_coeff[linear] * (d_x - d_y);
+}
+
+__global__ void update_electric_ez_standard_interior_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ hx,
+    const float* __restrict__ hy,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    float inv_dx,
+    float inv_dy,
+    float* __restrict__ ez) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  if (i + 1 >= nx || j + 1 >= ny || k >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const long long hy_current = offset3d(i, j, k, ny, nz);
+  const long long hy_previous = offset3d(i - 1, j, k, ny, nz);
+  const long long hx_current = offset3d(i, j, k, ny - 1, nz);
+  const long long hx_previous = offset3d(i, j - 1, k, ny - 1, nz);
+  const float d_x = (hy[hy_current] - hy[hy_previous]) * inv_dx;
+  const float d_y = (hx[hx_current] - hx[hx_previous]) * inv_dy;
   ez[linear] = ez[linear] * decay[linear] + curl_coeff[linear] * (d_x - d_y);
 }
 
 __global__ void update_electric_ex_bloch_kernel(
-    int64_t total,
+    unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* hy_real,
-    const float* hy_imag,
-    const float* hz_real,
-    const float* hz_imag,
-    const float* decay,
-    const float* curl_coeff,
+    const float* __restrict__ hy_real,
+    const float* __restrict__ hy_imag,
+    const float* __restrict__ hz_real,
+    const float* __restrict__ hz_imag,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
     float phase_cos_y,
     float phase_sin_y,
     float phase_cos_z,
     float phase_sin_z,
     float inv_dy,
     float inv_dz,
-    float* ex_real,
-    float* ex_imag) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ ex_real,
+    float* __restrict__ ex_imag) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ny, nz);
+  const long long linear = offset3d(i, j, k, ny, nz);
   const ComplexValue d_y = bloch_backward_diff_axis1(
-      hz_real, hz_imag, ny, ny - 1, nz, coord.i, coord.j, coord.k, phase_cos_y, phase_sin_y, inv_dy);
+      hz_real, hz_imag, ny, ny - 1, nz, i, j, k, phase_cos_y, phase_sin_y, inv_dy);
   const ComplexValue d_z = bloch_backward_diff_axis2(
-      hy_real, hy_imag, nz, ny, nz - 1, coord.i, coord.j, coord.k, phase_cos_z, phase_sin_z, inv_dz);
+      hy_real, hy_imag, nz, ny, nz - 1, i, j, k, phase_cos_z, phase_sin_z, inv_dz);
   ex_real[linear] = ex_real[linear] * decay[linear] + curl_coeff[linear] * (d_y.real - d_z.real);
   ex_imag[linear] = ex_imag[linear] * decay[linear] + curl_coeff[linear] * (d_y.imag - d_z.imag);
 }
 
 __global__ void update_electric_ey_bloch_kernel(
-    int64_t total,
+    unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* hx_real,
-    const float* hx_imag,
-    const float* hz_real,
-    const float* hz_imag,
-    const float* decay,
-    const float* curl_coeff,
+    const float* __restrict__ hx_real,
+    const float* __restrict__ hx_imag,
+    const float* __restrict__ hz_real,
+    const float* __restrict__ hz_imag,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
     float phase_cos_x,
     float phase_sin_x,
     float phase_cos_z,
     float phase_sin_z,
     float inv_dx,
     float inv_dz,
-    float* ey_real,
-    float* ey_imag) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ ey_real,
+    float* __restrict__ ey_imag) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ny, nz);
-  const unsigned int nx = static_cast<unsigned int>(total / (ny * nz));
+  const long long linear = offset3d(i, j, k, ny, nz);
   const ComplexValue d_z = bloch_backward_diff_axis2(
-      hx_real, hx_imag, nz, ny, nz - 1, coord.i, coord.j, coord.k, phase_cos_z, phase_sin_z, inv_dz);
+      hx_real, hx_imag, nz, ny, nz - 1, i, j, k, phase_cos_z, phase_sin_z, inv_dz);
   const ComplexValue d_x = bloch_backward_diff_axis0(
-      hz_real, hz_imag, nx, nx - 1, ny, nz, coord.i, coord.j, coord.k, phase_cos_x, phase_sin_x, inv_dx);
+      hz_real, hz_imag, nx, nx - 1, ny, nz, i, j, k, phase_cos_x, phase_sin_x, inv_dx);
   ey_real[linear] = ey_real[linear] * decay[linear] + curl_coeff[linear] * (d_z.real - d_x.real);
   ey_imag[linear] = ey_imag[linear] * decay[linear] + curl_coeff[linear] * (d_z.imag - d_x.imag);
 }
 
 __global__ void update_electric_ez_bloch_kernel(
-    int64_t total,
+    unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* hx_real,
-    const float* hx_imag,
-    const float* hy_real,
-    const float* hy_imag,
-    const float* decay,
-    const float* curl_coeff,
+    const float* __restrict__ hx_real,
+    const float* __restrict__ hx_imag,
+    const float* __restrict__ hy_real,
+    const float* __restrict__ hy_imag,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
     float phase_cos_x,
     float phase_sin_x,
     float phase_cos_y,
     float phase_sin_y,
     float inv_dx,
     float inv_dy,
-    float* ez_real,
-    float* ez_imag) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ ez_real,
+    float* __restrict__ ez_imag) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ny, nz);
-  const unsigned int nx = static_cast<unsigned int>(total / (ny * nz));
+  const long long linear = offset3d(i, j, k, ny, nz);
   const ComplexValue d_x = bloch_backward_diff_axis0(
-      hy_real, hy_imag, nx, nx - 1, ny, nz, coord.i, coord.j, coord.k, phase_cos_x, phase_sin_x, inv_dx);
+      hy_real, hy_imag, nx, nx - 1, ny, nz, i, j, k, phase_cos_x, phase_sin_x, inv_dx);
   const ComplexValue d_y = bloch_backward_diff_axis1(
-      hx_real, hx_imag, ny, ny - 1, nz, coord.i, coord.j, coord.k, phase_cos_y, phase_sin_y, inv_dy);
+      hx_real, hx_imag, ny, ny - 1, nz, i, j, k, phase_cos_y, phase_sin_y, inv_dy);
   ez_real[linear] = ez_real[linear] * decay[linear] + curl_coeff[linear] * (d_x.real - d_y.real);
   ez_imag[linear] = ez_imag[linear] * decay[linear] + curl_coeff[linear] * (d_x.imag - d_y.imag);
 }
 
 __global__ void update_electric_ex_cpml_kernel(
-    int64_t total,
+    unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* hy,
-    const float* hz,
-    const float* decay,
-    const float* curl_coeff,
-    const float* inv_kappa_y,
-    const float* b_y,
-    const float* c_y,
-    const float* inv_kappa_z,
-    const float* b_z,
-    const float* c_z,
+    const float* __restrict__ hy,
+    const float* __restrict__ hz,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ b_y,
+    const float* __restrict__ c_y,
+    const float* __restrict__ inv_kappa_z,
+    const float* __restrict__ b_z,
+    const float* __restrict__ c_z,
     float inv_dy,
     float inv_dz,
     int y_low_mode,
     int y_high_mode,
     int z_low_mode,
     int z_high_mode,
-    float* psi_y,
-    float* psi_z,
-    float* ex) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ psi_y,
+    float* __restrict__ psi_z,
+    float* __restrict__ ex) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ny, nz);
-  if (boundary_pec(coord.j, ny, y_low_mode, y_high_mode) || boundary_pec(coord.k, nz, z_low_mode, z_high_mode)) {
+  const long long linear = offset3d(i, j, k, ny, nz);
+  if (boundary_pec(j, ny, y_low_mode, y_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
     ex[linear] = 0.0f;
     return;
   }
-  if (boundary_inactive(coord.j, ny, y_low_mode, y_high_mode) ||
-      boundary_inactive(coord.k, nz, z_low_mode, z_high_mode)) {
+  if (boundary_inactive(j, ny, y_low_mode, y_high_mode) ||
+      boundary_inactive(k, nz, z_low_mode, z_high_mode)) {
     return;
   }
-  const float d_y = backward_diff_axis1(hz, ny - 1, nz, coord.i, coord.j, coord.k, y_low_mode, y_high_mode, inv_dy);
-  const float d_z = backward_diff_axis2(hy, ny, nz - 1, coord.i, coord.j, coord.k, z_low_mode, z_high_mode, inv_dz);
-  const float psi_y_value = b_y[coord.j] * psi_y[linear] + c_y[coord.j] * d_y;
-  const float psi_z_value = b_z[coord.k] * psi_z[linear] + c_z[coord.k] * d_z;
+  const float d_y = backward_diff_axis1(hz, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
+  const float d_z = backward_diff_axis2(hy, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
+  const float psi_y_value = b_y[j] * psi_y[linear] + c_y[j] * d_y;
+  const float psi_z_value = b_z[k] * psi_z[linear] + c_z[k] * d_z;
   psi_y[linear] = psi_y_value;
   psi_z[linear] = psi_z_value;
-  const float curl = d_y * inv_kappa_y[coord.j] + psi_y_value - d_z * inv_kappa_z[coord.k] - psi_z_value;
+  const float curl = d_y * inv_kappa_y[j] + psi_y_value - d_z * inv_kappa_z[k] - psi_z_value;
+  ex[linear] = ex[linear] * decay[linear] + curl_coeff[linear] * curl;
+}
+
+__global__ void update_electric_ex_cpml_interior_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ hy,
+    const float* __restrict__ hz,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ b_y,
+    const float* __restrict__ c_y,
+    const float* __restrict__ inv_kappa_z,
+    const float* __restrict__ b_z,
+    const float* __restrict__ c_z,
+    float inv_dy,
+    float inv_dz,
+    float* __restrict__ psi_y,
+    float* __restrict__ psi_z,
+    float* __restrict__ ex) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j + 1 >= ny || k + 1 >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const long long hz_current = offset3d(i, j, k, ny - 1, nz);
+  const long long hz_previous = offset3d(i, j - 1, k, ny - 1, nz);
+  const long long hy_current = offset3d(i, j, k, ny, nz - 1);
+  const long long hy_previous = offset3d(i, j, k - 1, ny, nz - 1);
+  const float d_y = (hz[hz_current] - hz[hz_previous]) * inv_dy;
+  const float d_z = (hy[hy_current] - hy[hy_previous]) * inv_dz;
+  const float psi_y_value = b_y[j] * psi_y[linear] + c_y[j] * d_y;
+  const float psi_z_value = b_z[k] * psi_z[linear] + c_z[k] * d_z;
+  psi_y[linear] = psi_y_value;
+  psi_z[linear] = psi_z_value;
+  const float curl = d_y * inv_kappa_y[j] + psi_y_value - d_z * inv_kappa_z[k] - psi_z_value;
   ex[linear] = ex[linear] * decay[linear] + curl_coeff[linear] * curl;
 }
 
 __global__ void update_electric_ey_cpml_kernel(
-    int64_t total,
+    unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* hx,
-    const float* hz,
-    const float* decay,
-    const float* curl_coeff,
-    const float* inv_kappa_x,
-    const float* b_x,
-    const float* c_x,
-    const float* inv_kappa_z,
-    const float* b_z,
-    const float* c_z,
+    const float* __restrict__ hx,
+    const float* __restrict__ hz,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ b_x,
+    const float* __restrict__ c_x,
+    const float* __restrict__ inv_kappa_z,
+    const float* __restrict__ b_z,
+    const float* __restrict__ c_z,
     float inv_dx,
     float inv_dz,
     int x_low_mode,
     int x_high_mode,
     int z_low_mode,
     int z_high_mode,
-    float* psi_x,
-    float* psi_z,
-    float* ey) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ psi_x,
+    float* __restrict__ psi_z,
+    float* __restrict__ ey) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ny, nz);
-  const unsigned int nx = static_cast<unsigned int>(total / (ny * nz));
-  if (boundary_pec(coord.i, nx, x_low_mode, x_high_mode) || boundary_pec(coord.k, nz, z_low_mode, z_high_mode)) {
+  const long long linear = offset3d(i, j, k, ny, nz);
+  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
     ey[linear] = 0.0f;
     return;
   }
-  if (boundary_inactive(coord.i, nx, x_low_mode, x_high_mode) ||
-      boundary_inactive(coord.k, nz, z_low_mode, z_high_mode)) {
+  if (boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
+      boundary_inactive(k, nz, z_low_mode, z_high_mode)) {
     return;
   }
-  const float d_z = backward_diff_axis2(hx, ny, nz - 1, coord.i, coord.j, coord.k, z_low_mode, z_high_mode, inv_dz);
-  const float d_x = backward_diff_axis0(hz, nx, ny, nz, coord.i, coord.j, coord.k, x_low_mode, x_high_mode, inv_dx);
-  const float psi_x_value = b_x[coord.i] * psi_x[linear] + c_x[coord.i] * d_x;
-  const float psi_z_value = b_z[coord.k] * psi_z[linear] + c_z[coord.k] * d_z;
+  const float d_z = backward_diff_axis2(hx, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
+  const float d_x = backward_diff_axis0(hz, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
+  const float psi_x_value = b_x[i] * psi_x[linear] + c_x[i] * d_x;
+  const float psi_z_value = b_z[k] * psi_z[linear] + c_z[k] * d_z;
   psi_x[linear] = psi_x_value;
   psi_z[linear] = psi_z_value;
-  const float curl = d_z * inv_kappa_z[coord.k] + psi_z_value - d_x * inv_kappa_x[coord.i] - psi_x_value;
+  const float curl = d_z * inv_kappa_z[k] + psi_z_value - d_x * inv_kappa_x[i] - psi_x_value;
+  ey[linear] = ey[linear] * decay[linear] + curl_coeff[linear] * curl;
+}
+
+__global__ void update_electric_ey_cpml_interior_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ hx,
+    const float* __restrict__ hz,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ b_x,
+    const float* __restrict__ c_x,
+    const float* __restrict__ inv_kappa_z,
+    const float* __restrict__ b_z,
+    const float* __restrict__ c_z,
+    float inv_dx,
+    float inv_dz,
+    float* __restrict__ psi_x,
+    float* __restrict__ psi_z,
+    float* __restrict__ ey) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  if (i + 1 >= nx || j >= ny || k + 1 >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const long long hx_current = offset3d(i, j, k, ny, nz - 1);
+  const long long hx_previous = offset3d(i, j, k - 1, ny, nz - 1);
+  const long long hz_current = offset3d(i, j, k, ny, nz);
+  const long long hz_previous = offset3d(i - 1, j, k, ny, nz);
+  const float d_z = (hx[hx_current] - hx[hx_previous]) * inv_dz;
+  const float d_x = (hz[hz_current] - hz[hz_previous]) * inv_dx;
+  const float psi_x_value = b_x[i] * psi_x[linear] + c_x[i] * d_x;
+  const float psi_z_value = b_z[k] * psi_z[linear] + c_z[k] * d_z;
+  psi_x[linear] = psi_x_value;
+  psi_z[linear] = psi_z_value;
+  const float curl = d_z * inv_kappa_z[k] + psi_z_value - d_x * inv_kappa_x[i] - psi_x_value;
   ey[linear] = ey[linear] * decay[linear] + curl_coeff[linear] * curl;
 }
 
 __global__ void update_electric_ez_cpml_kernel(
-    int64_t total,
+    unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* hx,
-    const float* hy,
-    const float* decay,
-    const float* curl_coeff,
-    const float* inv_kappa_x,
-    const float* b_x,
-    const float* c_x,
-    const float* inv_kappa_y,
-    const float* b_y,
-    const float* c_y,
+    const float* __restrict__ hx,
+    const float* __restrict__ hy,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ b_x,
+    const float* __restrict__ c_x,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ b_y,
+    const float* __restrict__ c_y,
     float inv_dx,
     float inv_dy,
     int x_low_mode,
     int x_high_mode,
     int y_low_mode,
     int y_high_mode,
-    float* psi_x,
-    float* psi_y,
-    float* ez) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ psi_x,
+    float* __restrict__ psi_y,
+    float* __restrict__ ez) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ny, nz);
-  const unsigned int nx = static_cast<unsigned int>(total / (ny * nz));
-  if (boundary_pec(coord.i, nx, x_low_mode, x_high_mode) || boundary_pec(coord.j, ny, y_low_mode, y_high_mode)) {
+  const long long linear = offset3d(i, j, k, ny, nz);
+  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(j, ny, y_low_mode, y_high_mode)) {
     ez[linear] = 0.0f;
     return;
   }
-  if (boundary_inactive(coord.i, nx, x_low_mode, x_high_mode) ||
-      boundary_inactive(coord.j, ny, y_low_mode, y_high_mode)) {
+  if (boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
+      boundary_inactive(j, ny, y_low_mode, y_high_mode)) {
     return;
   }
-  const float d_x = backward_diff_axis0(hy, nx, ny, nz, coord.i, coord.j, coord.k, x_low_mode, x_high_mode, inv_dx);
-  const float d_y = backward_diff_axis1(hx, ny - 1, nz, coord.i, coord.j, coord.k, y_low_mode, y_high_mode, inv_dy);
-  const float psi_x_value = b_x[coord.i] * psi_x[linear] + c_x[coord.i] * d_x;
-  const float psi_y_value = b_y[coord.j] * psi_y[linear] + c_y[coord.j] * d_y;
+  const float d_x = backward_diff_axis0(hy, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
+  const float d_y = backward_diff_axis1(hx, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
+  const float psi_x_value = b_x[i] * psi_x[linear] + c_x[i] * d_x;
+  const float psi_y_value = b_y[j] * psi_y[linear] + c_y[j] * d_y;
   psi_x[linear] = psi_x_value;
   psi_y[linear] = psi_y_value;
-  const float curl = d_x * inv_kappa_x[coord.i] + psi_x_value - d_y * inv_kappa_y[coord.j] - psi_y_value;
+  const float curl = d_x * inv_kappa_x[i] + psi_x_value - d_y * inv_kappa_y[j] - psi_y_value;
   ez[linear] = ez[linear] * decay[linear] + curl_coeff[linear] * curl;
 }
 
-__device__ inline float update_compact_electric_psi(
-    float* psi,
-    const float* b,
-    const float* c,
+__global__ void update_electric_ez_cpml_interior_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ hx,
+    const float* __restrict__ hy,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ b_x,
+    const float* __restrict__ c_x,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ b_y,
+    const float* __restrict__ c_y,
+    float inv_dx,
+    float inv_dy,
+    float* __restrict__ psi_x,
+    float* __restrict__ psi_y,
+    float* __restrict__ ez) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z + 1;
+  if (i + 1 >= nx || j + 1 >= ny || k >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const long long hy_current = offset3d(i, j, k, ny, nz);
+  const long long hy_previous = offset3d(i - 1, j, k, ny, nz);
+  const long long hx_current = offset3d(i, j, k, ny - 1, nz);
+  const long long hx_previous = offset3d(i, j - 1, k, ny - 1, nz);
+  const float d_x = (hy[hy_current] - hy[hy_previous]) * inv_dx;
+  const float d_y = (hx[hx_current] - hx[hx_previous]) * inv_dy;
+  const float psi_x_value = b_x[i] * psi_x[linear] + c_x[i] * d_x;
+  const float psi_y_value = b_y[j] * psi_y[linear] + c_y[j] * d_y;
+  psi_x[linear] = psi_x_value;
+  psi_y[linear] = psi_y_value;
+  const float curl = d_x * inv_kappa_x[i] + psi_x_value - d_y * inv_kappa_y[j] - psi_y_value;
+  ez[linear] = ez[linear] * decay[linear] + curl_coeff[linear] * curl;
+}
+
+template <int Axis>
+__device__ __forceinline__ float update_compact_electric_psi(
+    float* __restrict__ psi,
+    const float* __restrict__ b,
+    const float* __restrict__ c,
     unsigned int i,
     unsigned int j,
     unsigned int k,
     unsigned int size_y,
     unsigned int size_z,
-    int axis,
     unsigned int axis_coord,
     int low_length,
     int high_start,
     int high_length,
-    float derivative,
-    bool active) {
+    float derivative) {
   const int local = compact_local_index(axis_coord, low_length, high_start, high_length);
   if (local < 0) {
     return 0.0f;
   }
   const unsigned int compact_length = static_cast<unsigned int>(low_length + high_length);
-  const long long psi_offset = compact_offset3d(axis, i, j, k, size_y, size_z, local, compact_length);
-  if (!active) {
-    return psi[psi_offset];
-  }
+  const long long psi_offset = compact_offset3d_axis<Axis>(i, j, k, size_y, size_z, local, compact_length);
   const float value = b[axis_coord] * psi[psi_offset] + c[axis_coord] * derivative;
   psi[psi_offset] = value;
   return value;
 }
 
 __global__ void update_electric_ex_cpml_compressed_kernel(
-    int64_t total,
+    unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* hy,
-    const float* hz,
-    const float* decay,
-    const float* curl_coeff,
-    const float* inv_kappa_y,
-    const float* b_y,
-    const float* c_y,
-    const float* inv_kappa_z,
-    const float* b_z,
-    const float* c_z,
+    const float* __restrict__ hy,
+    const float* __restrict__ hz,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ b_y,
+    const float* __restrict__ c_y,
+    const float* __restrict__ inv_kappa_z,
+    const float* __restrict__ b_z,
+    const float* __restrict__ c_z,
     float inv_dy,
     float inv_dz,
     int y_low_mode,
@@ -589,47 +826,49 @@ __global__ void update_electric_ex_cpml_compressed_kernel(
     int z_low_length,
     int z_high_start,
     int z_high_length,
-    float* psi_y,
-    float* psi_z,
-    float* ex) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ psi_y,
+    float* __restrict__ psi_z,
+    float* __restrict__ ex) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ny, nz);
-  if (boundary_pec(coord.j, ny, y_low_mode, y_high_mode) || boundary_pec(coord.k, nz, z_low_mode, z_high_mode)) {
+  const long long linear = offset3d(i, j, k, ny, nz);
+  if (boundary_pec(j, ny, y_low_mode, y_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
     ex[linear] = 0.0f;
     return;
   }
-  const bool active = !(boundary_inactive(coord.j, ny, y_low_mode, y_high_mode) ||
-                        boundary_inactive(coord.k, nz, z_low_mode, z_high_mode));
-  const float d_y = backward_diff_axis1(hz, ny - 1, nz, coord.i, coord.j, coord.k, y_low_mode, y_high_mode, inv_dy);
-  const float d_z = backward_diff_axis2(hy, ny, nz - 1, coord.i, coord.j, coord.k, z_low_mode, z_high_mode, inv_dz);
-  const float psi_y_value = update_compact_electric_psi(
-      psi_y, b_y, c_y, coord.i, coord.j, coord.k, ny, nz, 1, coord.j, y_low_length, y_high_start, y_high_length, d_y, active);
-  const float psi_z_value = update_compact_electric_psi(
-      psi_z, b_z, c_z, coord.i, coord.j, coord.k, ny, nz, 2, coord.k, z_low_length, z_high_start, z_high_length, d_z, active);
+  const bool active = !(boundary_inactive(j, ny, y_low_mode, y_high_mode) ||
+                        boundary_inactive(k, nz, z_low_mode, z_high_mode));
   if (!active) {
     return;
   }
-  const float curl = d_y * inv_kappa_y[coord.j] + psi_y_value - d_z * inv_kappa_z[coord.k] - psi_z_value;
+  const float d_y = backward_diff_axis1(hz, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
+  const float d_z = backward_diff_axis2(hy, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
+  const float psi_y_value = update_compact_electric_psi<1>(
+      psi_y, b_y, c_y, i, j, k, ny, nz, j, y_low_length, y_high_start, y_high_length, d_y);
+  const float psi_z_value = update_compact_electric_psi<2>(
+      psi_z, b_z, c_z, i, j, k, ny, nz, k, z_low_length, z_high_start, z_high_length, d_z);
+  const float curl = d_y * inv_kappa_y[j] + psi_y_value - d_z * inv_kappa_z[k] - psi_z_value;
   ex[linear] = ex[linear] * decay[linear] + curl_coeff[linear] * curl;
 }
 
 __global__ void update_electric_ey_cpml_compressed_kernel(
-    int64_t total,
+    unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* hx,
-    const float* hz,
-    const float* decay,
-    const float* curl_coeff,
-    const float* inv_kappa_x,
-    const float* b_x,
-    const float* c_x,
-    const float* inv_kappa_z,
-    const float* b_z,
-    const float* c_z,
+    const float* __restrict__ hx,
+    const float* __restrict__ hz,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ b_x,
+    const float* __restrict__ c_x,
+    const float* __restrict__ inv_kappa_z,
+    const float* __restrict__ b_z,
+    const float* __restrict__ c_z,
     float inv_dx,
     float inv_dz,
     int x_low_mode,
@@ -642,48 +881,49 @@ __global__ void update_electric_ey_cpml_compressed_kernel(
     int z_low_length,
     int z_high_start,
     int z_high_length,
-    float* psi_x,
-    float* psi_z,
-    float* ey) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ psi_x,
+    float* __restrict__ psi_z,
+    float* __restrict__ ey) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ny, nz);
-  const unsigned int nx = static_cast<unsigned int>(total / (ny * nz));
-  if (boundary_pec(coord.i, nx, x_low_mode, x_high_mode) || boundary_pec(coord.k, nz, z_low_mode, z_high_mode)) {
+  const long long linear = offset3d(i, j, k, ny, nz);
+  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
     ey[linear] = 0.0f;
     return;
   }
-  const bool active = !(boundary_inactive(coord.i, nx, x_low_mode, x_high_mode) ||
-                        boundary_inactive(coord.k, nz, z_low_mode, z_high_mode));
-  const float d_z = backward_diff_axis2(hx, ny, nz - 1, coord.i, coord.j, coord.k, z_low_mode, z_high_mode, inv_dz);
-  const float d_x = backward_diff_axis0(hz, nx, ny, nz, coord.i, coord.j, coord.k, x_low_mode, x_high_mode, inv_dx);
-  const float psi_x_value = update_compact_electric_psi(
-      psi_x, b_x, c_x, coord.i, coord.j, coord.k, ny, nz, 0, coord.i, x_low_length, x_high_start, x_high_length, d_x, active);
-  const float psi_z_value = update_compact_electric_psi(
-      psi_z, b_z, c_z, coord.i, coord.j, coord.k, ny, nz, 2, coord.k, z_low_length, z_high_start, z_high_length, d_z, active);
+  const bool active = !(boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
+                        boundary_inactive(k, nz, z_low_mode, z_high_mode));
   if (!active) {
     return;
   }
-  const float curl = d_z * inv_kappa_z[coord.k] + psi_z_value - d_x * inv_kappa_x[coord.i] - psi_x_value;
+  const float d_z = backward_diff_axis2(hx, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
+  const float d_x = backward_diff_axis0(hz, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
+  const float psi_x_value = update_compact_electric_psi<0>(
+      psi_x, b_x, c_x, i, j, k, ny, nz, i, x_low_length, x_high_start, x_high_length, d_x);
+  const float psi_z_value = update_compact_electric_psi<2>(
+      psi_z, b_z, c_z, i, j, k, ny, nz, k, z_low_length, z_high_start, z_high_length, d_z);
+  const float curl = d_z * inv_kappa_z[k] + psi_z_value - d_x * inv_kappa_x[i] - psi_x_value;
   ey[linear] = ey[linear] * decay[linear] + curl_coeff[linear] * curl;
 }
 
 __global__ void update_electric_ez_cpml_compressed_kernel(
-    int64_t total,
+    unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* hx,
-    const float* hy,
-    const float* decay,
-    const float* curl_coeff,
-    const float* inv_kappa_x,
-    const float* b_x,
-    const float* c_x,
-    const float* inv_kappa_y,
-    const float* b_y,
-    const float* c_y,
+    const float* __restrict__ hx,
+    const float* __restrict__ hy,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ b_x,
+    const float* __restrict__ c_x,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ b_y,
+    const float* __restrict__ c_y,
     float inv_dx,
     float inv_dy,
     int x_low_mode,
@@ -696,31 +936,32 @@ __global__ void update_electric_ez_cpml_compressed_kernel(
     int y_low_length,
     int y_high_start,
     int y_high_length,
-    float* psi_x,
-    float* psi_y,
-    float* ez) {
-  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (linear >= total) {
+    float* __restrict__ psi_x,
+    float* __restrict__ psi_y,
+    float* __restrict__ ez) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
     return;
   }
-  const Index3D coord = unflatten3d(static_cast<unsigned int>(linear), ny, nz);
-  const unsigned int nx = static_cast<unsigned int>(total / (ny * nz));
-  if (boundary_pec(coord.i, nx, x_low_mode, x_high_mode) || boundary_pec(coord.j, ny, y_low_mode, y_high_mode)) {
+  const long long linear = offset3d(i, j, k, ny, nz);
+  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(j, ny, y_low_mode, y_high_mode)) {
     ez[linear] = 0.0f;
     return;
   }
-  const bool active = !(boundary_inactive(coord.i, nx, x_low_mode, x_high_mode) ||
-                        boundary_inactive(coord.j, ny, y_low_mode, y_high_mode));
-  const float d_x = backward_diff_axis0(hy, nx, ny, nz, coord.i, coord.j, coord.k, x_low_mode, x_high_mode, inv_dx);
-  const float d_y = backward_diff_axis1(hx, ny - 1, nz, coord.i, coord.j, coord.k, y_low_mode, y_high_mode, inv_dy);
-  const float psi_x_value = update_compact_electric_psi(
-      psi_x, b_x, c_x, coord.i, coord.j, coord.k, ny, nz, 0, coord.i, x_low_length, x_high_start, x_high_length, d_x, active);
-  const float psi_y_value = update_compact_electric_psi(
-      psi_y, b_y, c_y, coord.i, coord.j, coord.k, ny, nz, 1, coord.j, y_low_length, y_high_start, y_high_length, d_y, active);
+  const bool active = !(boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
+                        boundary_inactive(j, ny, y_low_mode, y_high_mode));
   if (!active) {
     return;
   }
-  const float curl = d_x * inv_kappa_x[coord.i] + psi_x_value - d_y * inv_kappa_y[coord.j] - psi_y_value;
+  const float d_x = backward_diff_axis0(hy, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
+  const float d_y = backward_diff_axis1(hx, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
+  const float psi_x_value = update_compact_electric_psi<0>(
+      psi_x, b_x, c_x, i, j, k, ny, nz, i, x_low_length, x_high_start, x_high_length, d_x);
+  const float psi_y_value = update_compact_electric_psi<1>(
+      psi_y, b_y, c_y, i, j, k, ny, nz, j, y_low_length, y_high_start, y_high_length, d_y);
+  const float curl = d_x * inv_kappa_x[i] + psi_x_value - d_y * inv_kappa_y[j] - psi_y_value;
   ez[linear] = ez[linear] * decay[linear] + curl_coeff[linear] * curl;
 }
 
@@ -736,14 +977,33 @@ void check_electric_inputs(
   check_float32_tensor(second, "second");
   check_float32_tensor(decay, "decay");
   check_float32_tensor(curl, "curl");
+  check_same_cuda_device(field, first, "first");
+  check_same_cuda_device(field, second, "second");
+  check_same_cuda_device(field, decay, "decay");
+  check_same_cuda_device(field, curl, "curl");
   check_contiguous_tensor(field, name);
   check_contiguous_tensor(first, "first");
   check_contiguous_tensor(second, "second");
   check_contiguous_tensor(decay, "decay");
   check_contiguous_tensor(curl, "curl");
   TORCH_CHECK(field.dim() == 3, name, " must be rank 3");
+  TORCH_CHECK(first.dim() == 3, "first must be rank 3");
+  TORCH_CHECK(second.dim() == 3, "second must be rank 3");
   TORCH_CHECK(decay.sizes() == field.sizes(), "decay must match field shape");
   TORCH_CHECK(curl.sizes() == field.sizes(), "curl must match field shape");
+}
+
+void check_rank3_shape(
+    const at::Tensor& tensor,
+    const char* name,
+    int64_t x,
+    int64_t y,
+    int64_t z) {
+  TORCH_CHECK(tensor.dim() == 3, name, " must be rank 3");
+  TORCH_CHECK(
+      tensor.size(0) == x && tensor.size(1) == y && tensor.size(2) == z,
+      name,
+      " has an incompatible Yee-grid shape");
 }
 
 void check_electric_bloch_inputs(
@@ -760,6 +1020,9 @@ void check_electric_bloch_inputs(
   check_float32_tensor(field_imag, "field_imag");
   check_float32_tensor(first_imag, "first_imag");
   check_float32_tensor(second_imag, "second_imag");
+  check_same_cuda_device(field_real, field_imag, "field_imag");
+  check_same_cuda_device(field_real, first_imag, "first_imag");
+  check_same_cuda_device(field_real, second_imag, "second_imag");
   check_contiguous_tensor(field_imag, "field_imag");
   check_contiguous_tensor(first_imag, "first_imag");
   check_contiguous_tensor(second_imag, "second_imag");
@@ -797,6 +1060,8 @@ void check_electric_cpml_inputs(
   check_electric_inputs(field, first, second, decay, curl, name);
   check_float32_tensor(psi_first, "psi_first");
   check_float32_tensor(psi_second, "psi_second");
+  check_same_cuda_device(field, psi_first, "psi_first");
+  check_same_cuda_device(field, psi_second, "psi_second");
   check_contiguous_tensor(psi_first, "psi_first");
   check_contiguous_tensor(psi_second, "psi_second");
   TORCH_CHECK(psi_first.sizes() == field.sizes(), "psi_first must match field shape");
@@ -807,6 +1072,12 @@ void check_electric_cpml_inputs(
   check_vector_input(inv_kappa_second, field.size(second_axis), "inv_kappa_second");
   check_vector_input(b_second, field.size(second_axis), "b_second");
   check_vector_input(c_second, field.size(second_axis), "c_second");
+  check_same_cuda_device(field, inv_kappa_first, "inv_kappa_first");
+  check_same_cuda_device(field, b_first, "b_first");
+  check_same_cuda_device(field, c_first, "c_first");
+  check_same_cuda_device(field, inv_kappa_second, "inv_kappa_second");
+  check_same_cuda_device(field, b_second, "b_second");
+  check_same_cuda_device(field, c_second, "c_second");
 }
 
 void check_compact_psi_input(
@@ -817,6 +1088,7 @@ void check_compact_psi_input(
     int64_t high_length,
     const char* name) {
   check_float32_tensor(psi, name);
+  check_same_cuda_device(field, psi, name);
   check_contiguous_tensor(psi, name);
   TORCH_CHECK(psi.dim() == 3, name, " must be rank 3");
   for (int64_t dim = 0; dim < 3; ++dim) {
@@ -855,6 +1127,12 @@ void check_electric_cpml_compressed_inputs(
   check_vector_input(inv_kappa_second, field.size(second_axis), "inv_kappa_second");
   check_vector_input(b_second, field.size(second_axis), "b_second");
   check_vector_input(c_second, field.size(second_axis), "c_second");
+  check_same_cuda_device(field, inv_kappa_first, "inv_kappa_first");
+  check_same_cuda_device(field, b_first, "b_first");
+  check_same_cuda_device(field, c_first, "c_first");
+  check_same_cuda_device(field, inv_kappa_second, "inv_kappa_second");
+  check_same_cuda_device(field, b_second, "b_second");
+  check_same_cuda_device(field, c_second, "c_second");
 }
 
 }  // namespace
@@ -872,24 +1150,42 @@ void update_electric_ex_standard_cuda(
     int64_t z_low_mode,
     int64_t z_high_mode) {
   check_electric_inputs(ex, hy, hz, decay, curl, "ex");
+  check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
+  check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
   c10::cuda::CUDAGuard guard(ex.device());
   const auto sizes = ex.sizes();
-  const int64_t total = ex.numel();
-  update_electric_ex_standard_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      hy.data_ptr<float>(),
-      hz.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>(),
-      static_cast<float>(inv_dy),
-      static_cast<float>(inv_dz),
-      static_cast<int>(y_low_mode),
-      static_cast<int>(y_high_mode),
-      static_cast<int>(z_low_mode),
-      static_cast<int>(z_high_mode),
-      ex.data_ptr<float>());
+  const dim3 block = field_block3d();
+  if (inactive_boundary_pair(y_low_mode, y_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
+    if (sizes[1] > 2 && sizes[2] > 2) {
+      update_electric_ex_standard_interior_kernel<<<field_grid3d(sizes[0], sizes[1] - 2, sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+          static_cast<unsigned int>(sizes[0]),
+          static_cast<unsigned int>(sizes[1]),
+          static_cast<unsigned int>(sizes[2]),
+          hy.data_ptr<float>(),
+          hz.data_ptr<float>(),
+          decay.data_ptr<float>(),
+          curl.data_ptr<float>(),
+          static_cast<float>(inv_dy),
+          static_cast<float>(inv_dz),
+          ex.data_ptr<float>());
+    }
+  } else {
+    update_electric_ex_standard_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        hy.data_ptr<float>(),
+        hz.data_ptr<float>(),
+        decay.data_ptr<float>(),
+        curl.data_ptr<float>(),
+        static_cast<float>(inv_dy),
+        static_cast<float>(inv_dz),
+        static_cast<int>(y_low_mode),
+        static_cast<int>(y_high_mode),
+        static_cast<int>(z_low_mode),
+        static_cast<int>(z_high_mode),
+        ex.data_ptr<float>());
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -906,24 +1202,42 @@ void update_electric_ey_standard_cuda(
     int64_t z_low_mode,
     int64_t z_high_mode) {
   check_electric_inputs(ey, hx, hz, decay, curl, "ey");
+  check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
+  check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
   c10::cuda::CUDAGuard guard(ey.device());
   const auto sizes = ey.sizes();
-  const int64_t total = ey.numel();
-  update_electric_ey_standard_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      hx.data_ptr<float>(),
-      hz.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>(),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dz),
-      static_cast<int>(x_low_mode),
-      static_cast<int>(x_high_mode),
-      static_cast<int>(z_low_mode),
-      static_cast<int>(z_high_mode),
-      ey.data_ptr<float>());
+  const dim3 block = field_block3d();
+  if (inactive_boundary_pair(x_low_mode, x_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
+    if (sizes[0] > 2 && sizes[2] > 2) {
+      update_electric_ey_standard_interior_kernel<<<field_grid3d(sizes[0] - 2, sizes[1], sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+          static_cast<unsigned int>(sizes[0]),
+          static_cast<unsigned int>(sizes[1]),
+          static_cast<unsigned int>(sizes[2]),
+          hx.data_ptr<float>(),
+          hz.data_ptr<float>(),
+          decay.data_ptr<float>(),
+          curl.data_ptr<float>(),
+          static_cast<float>(inv_dx),
+          static_cast<float>(inv_dz),
+          ey.data_ptr<float>());
+    }
+  } else {
+    update_electric_ey_standard_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        hx.data_ptr<float>(),
+        hz.data_ptr<float>(),
+        decay.data_ptr<float>(),
+        curl.data_ptr<float>(),
+        static_cast<float>(inv_dx),
+        static_cast<float>(inv_dz),
+        static_cast<int>(x_low_mode),
+        static_cast<int>(x_high_mode),
+        static_cast<int>(z_low_mode),
+        static_cast<int>(z_high_mode),
+        ey.data_ptr<float>());
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -940,24 +1254,42 @@ void update_electric_ez_standard_cuda(
     int64_t y_low_mode,
     int64_t y_high_mode) {
   check_electric_inputs(ez, hx, hy, decay, curl, "ez");
+  check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
+  check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
   c10::cuda::CUDAGuard guard(ez.device());
   const auto sizes = ez.sizes();
-  const int64_t total = ez.numel();
-  update_electric_ez_standard_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      hx.data_ptr<float>(),
-      hy.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>(),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dy),
-      static_cast<int>(x_low_mode),
-      static_cast<int>(x_high_mode),
-      static_cast<int>(y_low_mode),
-      static_cast<int>(y_high_mode),
-      ez.data_ptr<float>());
+  const dim3 block = field_block3d();
+  if (inactive_boundary_pair(x_low_mode, x_high_mode) && inactive_boundary_pair(y_low_mode, y_high_mode)) {
+    if (sizes[0] > 2 && sizes[1] > 2) {
+      update_electric_ez_standard_interior_kernel<<<field_grid3d(sizes[0] - 2, sizes[1] - 2, sizes[2], block), block, 0, current_cuda_stream()>>>(
+          static_cast<unsigned int>(sizes[0]),
+          static_cast<unsigned int>(sizes[1]),
+          static_cast<unsigned int>(sizes[2]),
+          hx.data_ptr<float>(),
+          hy.data_ptr<float>(),
+          decay.data_ptr<float>(),
+          curl.data_ptr<float>(),
+          static_cast<float>(inv_dx),
+          static_cast<float>(inv_dy),
+          ez.data_ptr<float>());
+    }
+  } else {
+    update_electric_ez_standard_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        hx.data_ptr<float>(),
+        hy.data_ptr<float>(),
+        decay.data_ptr<float>(),
+        curl.data_ptr<float>(),
+        static_cast<float>(inv_dx),
+        static_cast<float>(inv_dy),
+        static_cast<int>(x_low_mode),
+        static_cast<int>(x_high_mode),
+        static_cast<int>(y_low_mode),
+        static_cast<int>(y_high_mode),
+        ez.data_ptr<float>());
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -977,11 +1309,15 @@ void update_electric_ex_bloch_cuda(
     double inv_dy,
     double inv_dz) {
   check_electric_bloch_inputs(ex_real, ex_imag, hy_real, hy_imag, hz_real, hz_imag, decay, curl, "ex_real");
+  check_rank3_shape(hy_real, "hy_real", ex_real.size(0), ex_real.size(1), ex_real.size(2) - 1);
+  check_rank3_shape(hy_imag, "hy_imag", ex_real.size(0), ex_real.size(1), ex_real.size(2) - 1);
+  check_rank3_shape(hz_real, "hz_real", ex_real.size(0), ex_real.size(1) - 1, ex_real.size(2));
+  check_rank3_shape(hz_imag, "hz_imag", ex_real.size(0), ex_real.size(1) - 1, ex_real.size(2));
   c10::cuda::CUDAGuard guard(ex_real.device());
   const auto sizes = ex_real.sizes();
-  const int64_t total = ex_real.numel();
-  update_electric_ex_bloch_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  update_electric_ex_bloch_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
       hy_real.data_ptr<float>(),
@@ -1017,11 +1353,15 @@ void update_electric_ey_bloch_cuda(
     double inv_dx,
     double inv_dz) {
   check_electric_bloch_inputs(ey_real, ey_imag, hx_real, hx_imag, hz_real, hz_imag, decay, curl, "ey_real");
+  check_rank3_shape(hx_real, "hx_real", ey_real.size(0), ey_real.size(1), ey_real.size(2) - 1);
+  check_rank3_shape(hx_imag, "hx_imag", ey_real.size(0), ey_real.size(1), ey_real.size(2) - 1);
+  check_rank3_shape(hz_real, "hz_real", ey_real.size(0) - 1, ey_real.size(1), ey_real.size(2));
+  check_rank3_shape(hz_imag, "hz_imag", ey_real.size(0) - 1, ey_real.size(1), ey_real.size(2));
   c10::cuda::CUDAGuard guard(ey_real.device());
   const auto sizes = ey_real.sizes();
-  const int64_t total = ey_real.numel();
-  update_electric_ey_bloch_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  update_electric_ey_bloch_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
       hx_real.data_ptr<float>(),
@@ -1057,11 +1397,15 @@ void update_electric_ez_bloch_cuda(
     double inv_dx,
     double inv_dy) {
   check_electric_bloch_inputs(ez_real, ez_imag, hx_real, hx_imag, hy_real, hy_imag, decay, curl, "ez_real");
+  check_rank3_shape(hx_real, "hx_real", ez_real.size(0), ez_real.size(1) - 1, ez_real.size(2));
+  check_rank3_shape(hx_imag, "hx_imag", ez_real.size(0), ez_real.size(1) - 1, ez_real.size(2));
+  check_rank3_shape(hy_real, "hy_real", ez_real.size(0) - 1, ez_real.size(1), ez_real.size(2));
+  check_rank3_shape(hy_imag, "hy_imag", ez_real.size(0) - 1, ez_real.size(1), ez_real.size(2));
   c10::cuda::CUDAGuard guard(ez_real.device());
   const auto sizes = ez_real.sizes();
-  const int64_t total = ez_real.numel();
-  update_electric_ez_bloch_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  update_electric_ez_bloch_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
       hx_real.data_ptr<float>(),
@@ -1103,32 +1447,58 @@ void update_electric_ex_cpml_cuda(
     int64_t z_high_mode) {
   check_electric_cpml_inputs(
       ex, hy, hz, decay, curl, psi_y, psi_z, inv_kappa_y, b_y, c_y, inv_kappa_z, b_z, c_z, 1, 2, "ex");
+  check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
+  check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
   c10::cuda::CUDAGuard guard(ex.device());
   const auto sizes = ex.sizes();
-  const int64_t total = ex.numel();
-  update_electric_ex_cpml_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      hy.data_ptr<float>(),
-      hz.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>(),
-      inv_kappa_y.data_ptr<float>(),
-      b_y.data_ptr<float>(),
-      c_y.data_ptr<float>(),
-      inv_kappa_z.data_ptr<float>(),
-      b_z.data_ptr<float>(),
-      c_z.data_ptr<float>(),
-      static_cast<float>(inv_dy),
-      static_cast<float>(inv_dz),
-      static_cast<int>(y_low_mode),
-      static_cast<int>(y_high_mode),
-      static_cast<int>(z_low_mode),
-      static_cast<int>(z_high_mode),
-      psi_y.data_ptr<float>(),
-      psi_z.data_ptr<float>(),
-      ex.data_ptr<float>());
+  const dim3 block = field_block3d();
+  if (inactive_boundary_pair(y_low_mode, y_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
+    if (sizes[1] > 2 && sizes[2] > 2) {
+      update_electric_ex_cpml_interior_kernel<<<field_grid3d(sizes[0], sizes[1] - 2, sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+          static_cast<unsigned int>(sizes[0]),
+          static_cast<unsigned int>(sizes[1]),
+          static_cast<unsigned int>(sizes[2]),
+          hy.data_ptr<float>(),
+          hz.data_ptr<float>(),
+          decay.data_ptr<float>(),
+          curl.data_ptr<float>(),
+          inv_kappa_y.data_ptr<float>(),
+          b_y.data_ptr<float>(),
+          c_y.data_ptr<float>(),
+          inv_kappa_z.data_ptr<float>(),
+          b_z.data_ptr<float>(),
+          c_z.data_ptr<float>(),
+          static_cast<float>(inv_dy),
+          static_cast<float>(inv_dz),
+          psi_y.data_ptr<float>(),
+          psi_z.data_ptr<float>(),
+          ex.data_ptr<float>());
+    }
+  } else {
+    update_electric_ex_cpml_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        hy.data_ptr<float>(),
+        hz.data_ptr<float>(),
+        decay.data_ptr<float>(),
+        curl.data_ptr<float>(),
+        inv_kappa_y.data_ptr<float>(),
+        b_y.data_ptr<float>(),
+        c_y.data_ptr<float>(),
+        inv_kappa_z.data_ptr<float>(),
+        b_z.data_ptr<float>(),
+        c_z.data_ptr<float>(),
+        static_cast<float>(inv_dy),
+        static_cast<float>(inv_dz),
+        static_cast<int>(y_low_mode),
+        static_cast<int>(y_high_mode),
+        static_cast<int>(z_low_mode),
+        static_cast<int>(z_high_mode),
+        psi_y.data_ptr<float>(),
+        psi_z.data_ptr<float>(),
+        ex.data_ptr<float>());
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -1154,32 +1524,58 @@ void update_electric_ey_cpml_cuda(
     int64_t z_high_mode) {
   check_electric_cpml_inputs(
       ey, hx, hz, decay, curl, psi_x, psi_z, inv_kappa_x, b_x, c_x, inv_kappa_z, b_z, c_z, 0, 2, "ey");
+  check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
+  check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
   c10::cuda::CUDAGuard guard(ey.device());
   const auto sizes = ey.sizes();
-  const int64_t total = ey.numel();
-  update_electric_ey_cpml_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      hx.data_ptr<float>(),
-      hz.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>(),
-      inv_kappa_x.data_ptr<float>(),
-      b_x.data_ptr<float>(),
-      c_x.data_ptr<float>(),
-      inv_kappa_z.data_ptr<float>(),
-      b_z.data_ptr<float>(),
-      c_z.data_ptr<float>(),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dz),
-      static_cast<int>(x_low_mode),
-      static_cast<int>(x_high_mode),
-      static_cast<int>(z_low_mode),
-      static_cast<int>(z_high_mode),
-      psi_x.data_ptr<float>(),
-      psi_z.data_ptr<float>(),
-      ey.data_ptr<float>());
+  const dim3 block = field_block3d();
+  if (inactive_boundary_pair(x_low_mode, x_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
+    if (sizes[0] > 2 && sizes[2] > 2) {
+      update_electric_ey_cpml_interior_kernel<<<field_grid3d(sizes[0] - 2, sizes[1], sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+          static_cast<unsigned int>(sizes[0]),
+          static_cast<unsigned int>(sizes[1]),
+          static_cast<unsigned int>(sizes[2]),
+          hx.data_ptr<float>(),
+          hz.data_ptr<float>(),
+          decay.data_ptr<float>(),
+          curl.data_ptr<float>(),
+          inv_kappa_x.data_ptr<float>(),
+          b_x.data_ptr<float>(),
+          c_x.data_ptr<float>(),
+          inv_kappa_z.data_ptr<float>(),
+          b_z.data_ptr<float>(),
+          c_z.data_ptr<float>(),
+          static_cast<float>(inv_dx),
+          static_cast<float>(inv_dz),
+          psi_x.data_ptr<float>(),
+          psi_z.data_ptr<float>(),
+          ey.data_ptr<float>());
+    }
+  } else {
+    update_electric_ey_cpml_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        hx.data_ptr<float>(),
+        hz.data_ptr<float>(),
+        decay.data_ptr<float>(),
+        curl.data_ptr<float>(),
+        inv_kappa_x.data_ptr<float>(),
+        b_x.data_ptr<float>(),
+        c_x.data_ptr<float>(),
+        inv_kappa_z.data_ptr<float>(),
+        b_z.data_ptr<float>(),
+        c_z.data_ptr<float>(),
+        static_cast<float>(inv_dx),
+        static_cast<float>(inv_dz),
+        static_cast<int>(x_low_mode),
+        static_cast<int>(x_high_mode),
+        static_cast<int>(z_low_mode),
+        static_cast<int>(z_high_mode),
+        psi_x.data_ptr<float>(),
+        psi_z.data_ptr<float>(),
+        ey.data_ptr<float>());
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -1205,32 +1601,58 @@ void update_electric_ez_cpml_cuda(
     int64_t y_high_mode) {
   check_electric_cpml_inputs(
       ez, hx, hy, decay, curl, psi_x, psi_y, inv_kappa_x, b_x, c_x, inv_kappa_y, b_y, c_y, 0, 1, "ez");
+  check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
+  check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
   c10::cuda::CUDAGuard guard(ez.device());
   const auto sizes = ez.sizes();
-  const int64_t total = ez.numel();
-  update_electric_ez_cpml_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      hx.data_ptr<float>(),
-      hy.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>(),
-      inv_kappa_x.data_ptr<float>(),
-      b_x.data_ptr<float>(),
-      c_x.data_ptr<float>(),
-      inv_kappa_y.data_ptr<float>(),
-      b_y.data_ptr<float>(),
-      c_y.data_ptr<float>(),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dy),
-      static_cast<int>(x_low_mode),
-      static_cast<int>(x_high_mode),
-      static_cast<int>(y_low_mode),
-      static_cast<int>(y_high_mode),
-      psi_x.data_ptr<float>(),
-      psi_y.data_ptr<float>(),
-      ez.data_ptr<float>());
+  const dim3 block = field_block3d();
+  if (inactive_boundary_pair(x_low_mode, x_high_mode) && inactive_boundary_pair(y_low_mode, y_high_mode)) {
+    if (sizes[0] > 2 && sizes[1] > 2) {
+      update_electric_ez_cpml_interior_kernel<<<field_grid3d(sizes[0] - 2, sizes[1] - 2, sizes[2], block), block, 0, current_cuda_stream()>>>(
+          static_cast<unsigned int>(sizes[0]),
+          static_cast<unsigned int>(sizes[1]),
+          static_cast<unsigned int>(sizes[2]),
+          hx.data_ptr<float>(),
+          hy.data_ptr<float>(),
+          decay.data_ptr<float>(),
+          curl.data_ptr<float>(),
+          inv_kappa_x.data_ptr<float>(),
+          b_x.data_ptr<float>(),
+          c_x.data_ptr<float>(),
+          inv_kappa_y.data_ptr<float>(),
+          b_y.data_ptr<float>(),
+          c_y.data_ptr<float>(),
+          static_cast<float>(inv_dx),
+          static_cast<float>(inv_dy),
+          psi_x.data_ptr<float>(),
+          psi_y.data_ptr<float>(),
+          ez.data_ptr<float>());
+    }
+  } else {
+    update_electric_ez_cpml_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        hx.data_ptr<float>(),
+        hy.data_ptr<float>(),
+        decay.data_ptr<float>(),
+        curl.data_ptr<float>(),
+        inv_kappa_x.data_ptr<float>(),
+        b_x.data_ptr<float>(),
+        c_x.data_ptr<float>(),
+        inv_kappa_y.data_ptr<float>(),
+        b_y.data_ptr<float>(),
+        c_y.data_ptr<float>(),
+        static_cast<float>(inv_dx),
+        static_cast<float>(inv_dy),
+        static_cast<int>(x_low_mode),
+        static_cast<int>(x_high_mode),
+        static_cast<int>(y_low_mode),
+        static_cast<int>(y_high_mode),
+        psi_x.data_ptr<float>(),
+        psi_y.data_ptr<float>(),
+        ez.data_ptr<float>());
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -1263,11 +1685,13 @@ void update_electric_ex_cpml_compressed_cuda(
   check_electric_cpml_compressed_inputs(
       ex, hy, hz, decay, curl, psi_y, psi_z, inv_kappa_y, b_y, c_y, inv_kappa_z, b_z, c_z,
       1, 2, y_low_length, y_high_length, z_low_length, z_high_length, "ex");
+  check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
+  check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
   c10::cuda::CUDAGuard guard(ex.device());
   const auto sizes = ex.sizes();
-  const int64_t total = ex.numel();
-  update_electric_ex_cpml_compressed_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  update_electric_ex_cpml_compressed_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
       hy.data_ptr<float>(),
@@ -1327,11 +1751,13 @@ void update_electric_ey_cpml_compressed_cuda(
   check_electric_cpml_compressed_inputs(
       ey, hx, hz, decay, curl, psi_x, psi_z, inv_kappa_x, b_x, c_x, inv_kappa_z, b_z, c_z,
       0, 2, x_low_length, x_high_length, z_low_length, z_high_length, "ey");
+  check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
+  check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
   c10::cuda::CUDAGuard guard(ey.device());
   const auto sizes = ey.sizes();
-  const int64_t total = ey.numel();
-  update_electric_ey_cpml_compressed_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  update_electric_ey_cpml_compressed_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
       hx.data_ptr<float>(),
@@ -1391,11 +1817,13 @@ void update_electric_ez_cpml_compressed_cuda(
   check_electric_cpml_compressed_inputs(
       ez, hx, hy, decay, curl, psi_x, psi_y, inv_kappa_x, b_x, c_x, inv_kappa_y, b_y, c_y,
       0, 1, x_low_length, x_high_length, y_low_length, y_high_length, "ez");
+  check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
+  check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
   c10::cuda::CUDAGuard guard(ez.device());
   const auto sizes = ez.sizes();
-  const int64_t total = ez.numel();
-  update_electric_ez_cpml_compressed_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
-      total,
+  const dim3 block = field_block3d();
+  update_electric_ez_cpml_compressed_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
       hx.data_ptr<float>(),

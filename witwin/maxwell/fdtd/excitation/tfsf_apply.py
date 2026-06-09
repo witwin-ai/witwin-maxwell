@@ -35,6 +35,8 @@ def _apply_batched_aux_terms(solver, batch, *, sample_kind, field_names):
         termShapes=batch["term_shapes"],
         termOffsets=batch["term_offsets"],
         fieldCodes=batch["field_codes"],
+        fieldCodesPerCoeff=batch["field_codes_per_coeff"],
+        fieldOffsets=batch["field_offsets"],
         origin=sample_origin,
         ds=float(aux.ds),
     ).launchRaw(
@@ -62,6 +64,9 @@ def _apply_batched_reference_terms(solver, batch, *, sample_kind, field_names):
         sampleAxisCodes=batch["sample_axis_codes"],
         sampleIndexStarts=batch["sample_index_starts"],
         sampleIndices=batch["sample_indices"],
+        fieldCodesPerCoeff=batch["field_codes_per_coeff"],
+        fieldOffsets=batch["field_offsets"],
+        sampleIndicesPerCoeff=batch["sample_indices_per_coeff"],
     ).launchRaw(
         blockSize=solver.kernel_block_size,
         gridSize=batch["grid"],
