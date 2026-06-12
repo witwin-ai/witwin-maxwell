@@ -4,7 +4,6 @@ import math
 import os
 import weakref
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -111,16 +110,6 @@ def debug_linear_indices(
     return linear, i_index, j_index, k_index
 
 
-@dataclass
-class _Launch:
-    fn: Callable[[], None]
-
-    def launchRaw(self, *, blockSize=None, gridSize=None):  # noqa: N802 - mirrors slangtorch API
-        del blockSize, gridSize
-        self.fn()
-        return None
-
-
 def _call_with_contiguous(kernel: Callable[..., None], kwargs: dict) -> None:
     # The slangtorch module surface accepts strided tensor views (the adjoint
     # replay passes box slices of adjoint fields and real/imag views), while
@@ -128,7 +117,7 @@ def _call_with_contiguous(kernel: Callable[..., None], kwargs: dict) -> None:
     # copies and write back afterwards so in-place semantics are preserved.
     write_back = None
     for key, value in kwargs.items():
-        if torch.is_tensor(value) and not value.is_contiguous():
+        if type(value) is torch.Tensor and not value.is_contiguous():
             contiguous = value.contiguous()
             kwargs[key] = contiguous
             if write_back is None:
@@ -140,6 +129,19 @@ def _call_with_contiguous(kernel: Callable[..., None], kwargs: dict) -> None:
             original.copy_(contiguous)
 
 
+class _Launch:
+    __slots__ = ("kernel", "kwargs")
+
+    def __init__(self, kernel: Callable[..., None], kwargs: dict):
+        self.kernel = kernel
+        self.kwargs = kwargs
+
+    def launchRaw(self, *, blockSize=None, gridSize=None):  # noqa: N802 - mirrors slangtorch API
+        del blockSize, gridSize
+        _call_with_contiguous(self.kernel, self.kwargs)
+        return None
+
+
 class NativeFDTDModule:
     def __getattr__(self, name: str):
         kernel = _KERNELS.get(name)
@@ -147,8 +149,11 @@ class NativeFDTDModule:
             raise AttributeError(f"Native CUDA FDTD backend does not implement kernel {name!r}.")
 
         def bind(**kwargs):
-            return _Launch(lambda: _call_with_contiguous(kernel, kwargs))
+            return _Launch(kernel, kwargs)
 
+        bind.__name__ = name
+        # Cache on the instance so later lookups bypass __getattr__ entirely.
+        object.__setattr__(self, name, bind)
         return bind
 
 
