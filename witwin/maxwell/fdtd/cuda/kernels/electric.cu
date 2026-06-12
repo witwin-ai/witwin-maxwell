@@ -8,7 +8,7 @@
 namespace {
 
 dim3 field_block3d() {
-  return dim3(32, 4, 2);
+  return dim3(128, 2, 1);
 }
 
 dim3 field_grid3d(int64_t nx, int64_t ny, int64_t nz, dim3 block) {
