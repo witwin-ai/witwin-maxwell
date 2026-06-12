@@ -163,6 +163,9 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - Adjoint gradient pullback from Yee-grid electric permittivity coefficients back through `Scene.compile_material_tensors()` into trainable material-graph inputs
 - Solver stats including time steps, `dt`, absorber, requested frequencies, per-frequency DFT sample counts, elapsed time, milliseconds per step, and steps per second
 - Native CUDA extension builds on Windows can discover and load the Visual Studio x64 build environment automatically for accelerated FDTD kernels
+- Native CUDA extension builds resolve conda-distributed torch import libraries automatically, and `WITWIN_MAXWELL_FDTD_CUDA_PREBUILT=1` loads the already-built extension without invoking the build toolchain (required under profilers such as Nsight Systems)
+- Native CUDA CPML field updates skip full-volume coefficient reads when the decay/curl coefficient tensors are spatially uniform, detected automatically once per solve (about 1.4x faster forward stepping on homogeneous scenes)
+- The native CUDA module surface accepts strided tensor views, so the reverse-time adjoint with `WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND=slang` runs entirely on native CUDA reverse kernels for standard, CPML, TFSF, and Bloch scenes (about 1.7x faster backward than the default python-reference reverse path)
 - FDTD result stats include CPML auxiliary-memory mode and allocated-versus-dense `psi` byte counts
 - Support for odd grid sizes in Yee-component field outputs
 

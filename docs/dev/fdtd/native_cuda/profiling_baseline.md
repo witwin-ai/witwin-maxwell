@@ -1,8 +1,9 @@
 # Native CUDA FDTD Profiling Baseline
 
 Baseline established 2026-06-12 on NVIDIA GeForce RTX 5080 (16 GB, driver 596.49),
-torch 2.10.0+cu128, CUDA toolkit 12.9, Windows 11. All timings use the native CUDA
-backend with the compiled extension:
+torch 2.10.0+cu128, CUDA toolkit 12.9, Windows 11. The "optimized" numbers at the
+bottom reflect the state after the 2026-06-12 optimization pass. All timings use
+the native CUDA backend with the compiled extension:
 
 ```
 WITWIN_MAXWELL_FDTD_BACKEND=cuda
@@ -109,7 +110,64 @@ instead of TFSF, and 166300 + 53216 plane-observer launches (33/step) at 415 ms.
 5. Plane-observer batching across frequencies/planes (kernel side in scope,
    launch-loop side in `fdtd/observers.py`): 28-33 launches/step -> a handful.
 
+## Optimized state (2026-06-12 optimization pass)
+
+Correctness guardrail: `docs/dev/fdtd/native_cuda/snapshot_tool.py` (save once,
+check after each change; 34 tensors covering final fields, DFT accumulators,
+monitor planes, and adjoint gradients on both reverse paths). Every change below
+passed the snapshot at tight float32 tolerances and the full pytest suite.
+
+Changes landed (one commit each):
+
+1. Uniform-coefficient CPML-compressed kernels: decay tensors are exactly 1.0 in
+   all CPML scenes and curl tensors are uniform in homogeneous regions, yet both
+   were streamed as full-volume reads (2 of 6 streams). The kernels are templated
+   on `<UniformDecay, UniformCurl>` and `backend.py` derives the scalars with a
+   cached once-per-tensor `aminmax` check (Kerr dynamic-curl tensors are pinned
+   non-uniform). Six-kernel step at 128^3: 351 -> 162 us (vacuum), 351 -> 269 us
+   (decay-only), generic path unchanged.
+2. Module-surface dispatch trim (`__slots__` launch holder, `__getattr__`
+   caching): planewave 0.486 -> 0.459 ms/step once the loop became launch-bound.
+3. Update-kernel block shape (32,4,2) -> (128,2,1): six-kernel step 162 -> 155 us.
+
+| Scenario | Stage-1 baseline | Optimized | Speedup |
+| --- | ---: | ---: | ---: |
+| `dipole_vacuum` forward | 0.697 ms/step | 0.499 ms/step | 1.40x |
+| `planewave_vacuum` forward | 0.669 ms/step | 0.454 ms/step | 1.47x |
+| adjoint backward, native reverse kernels | 4.73 ms/step | 4.33 ms/step | 1.09x |
+| adjoint backward, default python-reference path | 8.26 ms/step | 7.5 ms/step | 1.10x |
+
+For reference the Slang backend runs the same forward scenarios at 0.74/0.69
+ms/step, so the native CUDA path is now ~1.5x faster than Slang.
+
+`python -m benchmark` reproduces all 14 scenario metrics against the Tidy3D
+caches to the last digit after the optimization pass.
+
+## Remaining opportunities (out of `cuda/**` scope)
+
+- The forward loop is now launch-bound: ~240 us/step GPU vs ~454 us/step wall at
+  ~40 launches/step on the WDDM ~7 us launch floor. CUDA Graph capture of the
+  steady-state step would remove most of the gap but requires solve-loop
+  integration in `fdtd/runtime/stepping.py` plus device-side per-step scalars
+  (time value, DFT phase) — `cuda/runtime/graph.py` has the capture utility.
+- Plane-observer accumulation launches once per (component, plane, frequency)
+  per step (28-33 launches). Batching the loop in `fdtd/observers.py` over a
+  packed descriptor table would collapse these into one launch.
+- The adjoint resolver defaults to the pure-torch python-reference reverse path
+  for the CUDA backend even though the native reverse kernels pass the full
+  FD-anchored gradient suite and are ~1.7x faster end to end
+  (`WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND=slang` resolves to the native module).
+  Flipping the `auto` default in `fdtd/adjoint/dispatch.py` is recommended.
+- Adjoint backward remains ~25x forward per step, dominated by per-step buffer
+  allocation and ~30 small launches in `fdtd/adjoint/` orchestration.
+
 ## History
 
 - 2026-06-12: baseline above; earlier smoke-run table (5.0/4.6 s mixed-overhead
   timings vs Slang) superseded by the warm-run protocol in `bench_baseline.py`.
+- 2026-06-12 (later): optimization pass; correctness audit found and fixed the
+  native module surface rejecting strided views (broke native TFSF/Bloch adjoint
+  paths), validated all kernels against physics oracles (FD gradients, physics
+  validation suites, Tidy3D cross-check). The Slang TFSF reverse path fails the
+  FD gradient oracle (`test_tfsf_gradient_per_element_matches_fd` on
+  `WITWIN_MAXWELL_FDTD_BACKEND=slang`); the native CUDA path passes it.
