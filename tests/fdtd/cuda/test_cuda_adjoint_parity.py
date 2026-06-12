@@ -1252,3 +1252,48 @@ def test_native_adjoint_tfsf_auxiliary_reverse_kernels_match_reference():
     torch.cuda.synchronize()
     torch.testing.assert_close(actual_adj_magnetic_prev, expected_adj_magnetic_prev, rtol=2.0e-6, atol=2.0e-7)
     torch.testing.assert_close(actual_adj_electric_prev, expected_adj_electric_prev, rtol=2.0e-6, atol=2.0e-7)
+
+
+@requires_extension_build
+def test_native_module_handles_non_contiguous_views(monkeypatch):
+    """The adjoint replay passes strided views (box slices of adjoint fields,
+    real/imag views) through the native module surface. Pin against the pure
+    Yee update formula, not against another backend."""
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
+    module = backend.get_native_fdtd_module()
+    torch.manual_seed(7)
+
+    # Build genuinely non-contiguous views by slicing the trailing axes.
+    hx_base = torch.randn(6, 7, 8, device="cuda", dtype=torch.float32)
+    ey_base = torch.randn(6, 7, 9, device="cuda", dtype=torch.float32)
+    ez_base = torch.randn(6, 8, 8, device="cuda", dtype=torch.float32)
+    decay_base = torch.rand(6, 7, 8, device="cuda", dtype=torch.float32) * 0.2 + 0.8
+    curl_base = torch.rand(6, 7, 8, device="cuda", dtype=torch.float32) * 0.1 + 0.01
+
+    hx = hx_base[:, :6, :7]
+    ey = ey_base[:, :6, :8]
+    ez = ez_base[:, :7, :7]
+    decay = decay_base[:, :6, :7]
+    curl = curl_base[:, :6, :7]
+    assert not hx.is_contiguous() and not ey.is_contiguous()
+
+    inv_dy = 1.7
+    inv_dz = 2.3
+    curl_e = (ez[:, 1:, :] - ez[:, :-1, :]) * inv_dy - (ey[:, :, 1:] - ey[:, :, :-1]) * inv_dz
+    expected = hx * decay - curl * curl_e
+
+    module.updateMagneticFieldHxStandard3D(
+        Hx=hx,
+        Ey=ey,
+        Ez=ez,
+        HxDecay=decay,
+        HxCurl=curl,
+        invDy=inv_dy,
+        invDz=inv_dz,
+    ).launchRaw(blockSize=(256, 1, 1), gridSize=(1, 1, 1))
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(hx, expected, rtol=2.0e-6, atol=2.0e-7)
+    # The base tensor outside the view must be untouched by the write-back.
+    torch.testing.assert_close(hx_base[:, 6, :], hx_base[:, 6, :].clone())

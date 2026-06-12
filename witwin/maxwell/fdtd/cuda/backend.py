@@ -87,6 +87,25 @@ class _Launch:
         return None
 
 
+def _call_with_contiguous(kernel: Callable[..., None], kwargs: dict) -> None:
+    # The slangtorch module surface accepts strided tensor views (the adjoint
+    # replay passes box slices of adjoint fields and real/imag views), while
+    # the compiled kernels require contiguous memory. Materialize contiguous
+    # copies and write back afterwards so in-place semantics are preserved.
+    write_back = None
+    for key, value in kwargs.items():
+        if torch.is_tensor(value) and not value.is_contiguous():
+            contiguous = value.contiguous()
+            kwargs[key] = contiguous
+            if write_back is None:
+                write_back = []
+            write_back.append((value, contiguous))
+    kernel(**kwargs)
+    if write_back is not None:
+        for original, contiguous in write_back:
+            original.copy_(contiguous)
+
+
 class NativeFDTDModule:
     def __getattr__(self, name: str):
         kernel = _KERNELS.get(name)
@@ -94,7 +113,7 @@ class NativeFDTDModule:
             raise AttributeError(f"Native CUDA FDTD backend does not implement kernel {name!r}.")
 
         def bind(**kwargs):
-            return _Launch(lambda: kernel(**kwargs))
+            return _Launch(lambda: _call_with_contiguous(kernel, kwargs))
 
         return bind
 
