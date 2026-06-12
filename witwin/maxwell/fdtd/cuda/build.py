@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -149,11 +150,44 @@ def extension_sources() -> list[Path]:
     ]
 
 
+def _conda_torch_ldflags() -> list[str]:
+    # Conda-distributed torch keeps c10.lib/torch_cuda.lib in <env>\Library\lib
+    # instead of site-packages\torch\lib, which cpp_extension does not search.
+    if os.name != "nt":
+        return []
+    library_lib = Path(sys.prefix) / "Library" / "lib"
+    if (library_lib / "c10.lib").exists():
+        return [f"/LIBPATH:{library_lib}"]
+    return []
+
+
+def _load_prebuilt_extension(build_directory: Path):
+    # Profilers such as Nsight Systems break torch's MSVC detection in child
+    # processes, which rewrites build.ninja and forces a rebuild that then
+    # fails under the profiler. Loading the already-built module directly
+    # avoids invoking the build toolchain entirely.
+    suffix = ".pyd" if os.name == "nt" else ".so"
+    module_path = build_directory / f"witwin_maxwell_fdtd_cuda{suffix}"
+    if not module_path.exists():
+        raise FileNotFoundError(
+            f"WITWIN_MAXWELL_FDTD_CUDA_PREBUILT=1 but {module_path} does not exist; "
+            "run a normal build first."
+        )
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("witwin_maxwell_fdtd_cuda", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def build_extension(*, verbose: bool = False):
-    _ensure_windows_build_tools_on_path()
     root = source_root()
     default_build_directory = Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda"
     build_directory = Path(os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR", default_build_directory))
+    if os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_PREBUILT") == "1":
+        return _load_prebuilt_extension(build_directory)
+    _ensure_windows_build_tools_on_path()
     build_directory.mkdir(parents=True, exist_ok=True)
     return load(
         name="witwin_maxwell_fdtd_cuda",
@@ -162,5 +196,6 @@ def build_extension(*, verbose: bool = False):
         extra_include_paths=[str(root), str(root / "kernels")],
         extra_cflags=["/O2"] if os.name == "nt" else ["-O3"],
         extra_cuda_cflags=["-O3"],
+        extra_ldflags=_conda_torch_ldflags(),
         verbose=verbose,
     )
