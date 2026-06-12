@@ -1,10 +1,32 @@
 #pragma once
 
+#include <type_traits>
+
 struct Index3D {
   unsigned int i;
   unsigned int j;
   unsigned int k;
 };
+
+// Dispatch a kernel templated on <UniformDecay, UniformCurl>. Uniform
+// coefficients skip the full-volume decay/curl tensor reads, which removes up
+// to two of the six global-memory streams of the field update.
+template <typename LaunchFn>
+inline void dispatch_uniform_coefficients(bool uniform_decay, bool uniform_curl, LaunchFn&& launch) {
+  if (uniform_decay) {
+    if (uniform_curl) {
+      launch(std::integral_constant<bool, true>{}, std::integral_constant<bool, true>{});
+    } else {
+      launch(std::integral_constant<bool, true>{}, std::integral_constant<bool, false>{});
+    }
+  } else {
+    if (uniform_curl) {
+      launch(std::integral_constant<bool, false>{}, std::integral_constant<bool, true>{});
+    } else {
+      launch(std::integral_constant<bool, false>{}, std::integral_constant<bool, false>{});
+    }
+  }
+}
 
 constexpr int BOUNDARY_NONE = 0;
 constexpr int BOUNDARY_PML = 1;

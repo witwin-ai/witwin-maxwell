@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -35,6 +36,39 @@ def get_compiled_extension(*, verbose: bool = False) -> Any:
 
 def _use_compiled_field_kernels() -> bool:
     return os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION") == "1"
+
+
+_UNIFORM_SCALAR_CACHE: dict[int, tuple[Any, int, int, float | None]] = {}
+
+
+def _uniform_scalar(tensor: torch.Tensor) -> float | None:
+    """Return the scalar value of a spatially uniform coefficient tensor.
+
+    Update coefficients (decay/curl) are static for the duration of a solve,
+    so the min==max reduction and its device synchronization run once per
+    tensor and the result is cached. Cache entries are validated against the
+    tensor identity (weakref), storage pointer, and autograd version counter;
+    kernels that mutate a coefficient tensor in place without bumping the
+    version counter (the Kerr dynamic-curl update) must call
+    _invalidate_uniform_scalar explicitly.
+    """
+    key = id(tensor)
+    entry = _UNIFORM_SCALAR_CACHE.get(key)
+    if entry is not None and entry[0]() is tensor:
+        if entry[1] is None:  # pinned non-uniform (mutated in place by kernels)
+            return None
+        if entry[1] == tensor.data_ptr() and entry[2] == tensor._version:
+            return entry[3]
+    minimum, maximum = torch.aminmax(tensor)
+    value = minimum.item() if bool((minimum == maximum).item()) else None
+    _UNIFORM_SCALAR_CACHE[key] = (weakref.ref(tensor), tensor.data_ptr(), tensor._version, value)
+    return value
+
+
+def _invalidate_uniform_scalar(tensor: torch.Tensor) -> None:
+    # Pin as non-uniform: the tensor is rewritten in place by a kernel every
+    # step, so re-deriving a scalar (with its device sync) would be wasted.
+    _UNIFORM_SCALAR_CACHE[id(tensor)] = (weakref.ref(tensor), None, None, None)
 
 
 def build_info() -> dict[str, Any]:
@@ -504,6 +538,8 @@ def _magnetic_hx_cpml_compressed(
             int(psiHxZLowLength),
             int(psiHxZHighStart),
             int(psiHxZHighLength),
+            _uniform_scalar(HxDecay),
+            _uniform_scalar(HxCurl),
         )
         return
     d_y = (Ez[:, 1:, :] - Ez[:, :-1, :]) * float(invDy)
@@ -580,6 +616,8 @@ def _magnetic_hy_cpml_compressed(
             int(psiHyZLowLength),
             int(psiHyZHighStart),
             int(psiHyZHighLength),
+            _uniform_scalar(HyDecay),
+            _uniform_scalar(HyCurl),
         )
         return
     d_z = (Ex[:, :, 1:] - Ex[:, :, :-1]) * float(invDz)
@@ -656,6 +694,8 @@ def _magnetic_hz_cpml_compressed(
             int(psiHzYLowLength),
             int(psiHzYHighStart),
             int(psiHzYHighLength),
+            _uniform_scalar(HzDecay),
+            _uniform_scalar(HzCurl),
         )
         return
     d_x = (Ey[1:, :, :] - Ey[:-1, :, :]) * float(invDx)
@@ -1221,6 +1261,8 @@ def _electric_ex_cpml_compressed(
             int(psiExZLowLength),
             int(psiExZHighStart),
             int(psiExZHighLength),
+            _uniform_scalar(ExDecay),
+            _uniform_scalar(ExCurl),
         )
         return
     d_y = _backward_diff(Hz, tuple(Ex.shape), 1, yLowBoundaryMode, yHighBoundaryMode, invDy)
@@ -1306,6 +1348,8 @@ def _electric_ey_cpml_compressed(
             int(psiEyZLowLength),
             int(psiEyZHighStart),
             int(psiEyZHighLength),
+            _uniform_scalar(EyDecay),
+            _uniform_scalar(EyCurl),
         )
         return
     d_z = _backward_diff(Hx, tuple(Ey.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
@@ -1391,6 +1435,8 @@ def _electric_ez_cpml_compressed(
             int(psiEzYLowLength),
             int(psiEzYHighStart),
             int(psiEzYHighLength),
+            _uniform_scalar(EzDecay),
+            _uniform_scalar(EzCurl),
         )
         return
     d_x = _backward_diff(Hy, tuple(Ez.shape), 0, xLowBoundaryMode, xHighBoundaryMode, invDx)
@@ -2305,6 +2351,7 @@ def _kerr_indices(shape, device):
 
 def _update_kerr_ex(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, ExDecay, KerrChi3, dt, eps0):
     if _use_compiled_field_kernels():
+        _invalidate_uniform_scalar(DynamicCurl)
         get_compiled_extension().update_kerr_ex_curl(
             DynamicCurl,
             Ex,
@@ -2332,6 +2379,7 @@ def _update_kerr_ex(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, ExDecay, Ker
 
 def _update_kerr_ey(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, EyDecay, KerrChi3, dt, eps0):
     if _use_compiled_field_kernels():
+        _invalidate_uniform_scalar(DynamicCurl)
         get_compiled_extension().update_kerr_ey_curl(
             DynamicCurl,
             Ex,
@@ -2359,6 +2407,7 @@ def _update_kerr_ey(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, EyDecay, Ker
 
 def _update_kerr_ez(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, EzDecay, KerrChi3, dt, eps0):
     if _use_compiled_field_kernels():
+        _invalidate_uniform_scalar(DynamicCurl)
         get_compiled_extension().update_kerr_ez_curl(
             DynamicCurl,
             Ex,

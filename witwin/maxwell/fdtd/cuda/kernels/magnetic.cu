@@ -1,6 +1,8 @@
 #include <ATen/ATen.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#include <type_traits>
+
 #include "../launch.h"
 #include "../tensors.h"
 #include "common.cuh"
@@ -242,6 +244,7 @@ __device__ __forceinline__ float update_compact_magnetic_psi(
   return value;
 }
 
+template <bool UniformDecay, bool UniformCurl>
 __global__ void update_magnetic_hx_cpml_compressed_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -250,6 +253,8 @@ __global__ void update_magnetic_hx_cpml_compressed_kernel(
     const float* __restrict__ ez,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    float decay_value,
+    float curl_value,
     const float* __restrict__ inv_kappa_y,
     const float* __restrict__ b_y,
     const float* __restrict__ c_y,
@@ -285,9 +290,12 @@ __global__ void update_magnetic_hx_cpml_compressed_kernel(
   const float psi_z_value = update_compact_magnetic_psi<2>(
       psi_z, b_z, c_z, i, j, k, ny, nz, k, z_low_length, z_high_start, z_high_length, d_z);
   const float curl = d_y * inv_kappa_y[j] + psi_y_value - d_z * inv_kappa_z[k] - psi_z_value;
-  hx[linear] = hx[linear] * decay[linear] - curl_coeff[linear] * curl;
+  const float decay_factor = UniformDecay ? decay_value : decay[linear];
+  const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
+  hx[linear] = hx[linear] * decay_factor - curl_factor * curl;
 }
 
+template <bool UniformDecay, bool UniformCurl>
 __global__ void update_magnetic_hy_cpml_compressed_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -296,6 +304,8 @@ __global__ void update_magnetic_hy_cpml_compressed_kernel(
     const float* __restrict__ ez,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    float decay_value,
+    float curl_value,
     const float* __restrict__ inv_kappa_x,
     const float* __restrict__ b_x,
     const float* __restrict__ c_x,
@@ -331,9 +341,12 @@ __global__ void update_magnetic_hy_cpml_compressed_kernel(
   const float psi_z_value = update_compact_magnetic_psi<2>(
       psi_z, b_z, c_z, i, j, k, ny, nz, k, z_low_length, z_high_start, z_high_length, d_z);
   const float curl = d_z * inv_kappa_z[k] + psi_z_value - d_x * inv_kappa_x[i] - psi_x_value;
-  hy[linear] = hy[linear] * decay[linear] - curl_coeff[linear] * curl;
+  const float decay_factor = UniformDecay ? decay_value : decay[linear];
+  const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
+  hy[linear] = hy[linear] * decay_factor - curl_factor * curl;
 }
 
+template <bool UniformDecay, bool UniformCurl>
 __global__ void update_magnetic_hz_cpml_compressed_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -342,6 +355,8 @@ __global__ void update_magnetic_hz_cpml_compressed_kernel(
     const float* __restrict__ ey,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    float decay_value,
+    float curl_value,
     const float* __restrict__ inv_kappa_x,
     const float* __restrict__ b_x,
     const float* __restrict__ c_x,
@@ -377,7 +392,9 @@ __global__ void update_magnetic_hz_cpml_compressed_kernel(
   const float psi_y_value = update_compact_magnetic_psi<1>(
       psi_y, b_y, c_y, i, j, k, ny, nz, j, y_low_length, y_high_start, y_high_length, d_y);
   const float curl = d_x * inv_kappa_x[i] + psi_x_value - d_y * inv_kappa_y[j] - psi_y_value;
-  hz[linear] = hz[linear] * decay[linear] - curl_coeff[linear] * curl;
+  const float decay_factor = UniformDecay ? decay_value : decay[linear];
+  const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
+  hz[linear] = hz[linear] * decay_factor - curl_factor * curl;
 }
 
 void check_magnetic_inputs(
@@ -765,7 +782,9 @@ void update_magnetic_hx_cpml_compressed_cuda(
     int64_t y_high_length,
     int64_t z_low_length,
     int64_t z_high_start,
-    int64_t z_high_length) {
+    int64_t z_high_length,
+    c10::optional<double> uniform_decay,
+    c10::optional<double> uniform_curl) {
   check_magnetic_cpml_compressed_inputs(
       hx, ey, ez, decay, curl, psi_y, psi_z, inv_kappa_y, b_y, c_y, inv_kappa_z, b_z, c_z,
       1, 2, y_low_length, y_high_length, z_low_length, z_high_length, "hx");
@@ -774,31 +793,35 @@ void update_magnetic_hx_cpml_compressed_cuda(
   c10::cuda::CUDAGuard guard(hx.device());
   const auto sizes = hx.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_hx_cpml_compressed_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-      static_cast<unsigned int>(sizes[0]),
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      ey.data_ptr<float>(),
-      ez.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>(),
-      inv_kappa_y.data_ptr<float>(),
-      b_y.data_ptr<float>(),
-      c_y.data_ptr<float>(),
-      inv_kappa_z.data_ptr<float>(),
-      b_z.data_ptr<float>(),
-      c_z.data_ptr<float>(),
-      static_cast<float>(inv_dy),
-      static_cast<float>(inv_dz),
-      static_cast<int>(y_low_length),
-      static_cast<int>(y_high_start),
-      static_cast<int>(y_high_length),
-      static_cast<int>(z_low_length),
-      static_cast<int>(z_high_start),
-      static_cast<int>(z_high_length),
-      psi_y.data_ptr<float>(),
-      psi_z.data_ptr<float>(),
-      hx.data_ptr<float>());
+  dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
+    update_magnetic_hx_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        ey.data_ptr<float>(),
+        ez.data_ptr<float>(),
+        decay.data_ptr<float>(),
+        curl.data_ptr<float>(),
+        static_cast<float>(uniform_decay.value_or(0.0)),
+        static_cast<float>(uniform_curl.value_or(0.0)),
+        inv_kappa_y.data_ptr<float>(),
+        b_y.data_ptr<float>(),
+        c_y.data_ptr<float>(),
+        inv_kappa_z.data_ptr<float>(),
+        b_z.data_ptr<float>(),
+        c_z.data_ptr<float>(),
+        static_cast<float>(inv_dy),
+        static_cast<float>(inv_dz),
+        static_cast<int>(y_low_length),
+        static_cast<int>(y_high_start),
+        static_cast<int>(y_high_length),
+        static_cast<int>(z_low_length),
+        static_cast<int>(z_high_start),
+        static_cast<int>(z_high_length),
+        psi_y.data_ptr<float>(),
+        psi_z.data_ptr<float>(),
+        hx.data_ptr<float>());
+  });
   WITWIN_CUDA_CHECK();
 }
 
@@ -823,7 +846,9 @@ void update_magnetic_hy_cpml_compressed_cuda(
     int64_t x_high_length,
     int64_t z_low_length,
     int64_t z_high_start,
-    int64_t z_high_length) {
+    int64_t z_high_length,
+    c10::optional<double> uniform_decay,
+    c10::optional<double> uniform_curl) {
   check_magnetic_cpml_compressed_inputs(
       hy, ex, ez, decay, curl, psi_x, psi_z, inv_kappa_x, b_x, c_x, inv_kappa_z, b_z, c_z,
       0, 2, x_low_length, x_high_length, z_low_length, z_high_length, "hy");
@@ -832,31 +857,35 @@ void update_magnetic_hy_cpml_compressed_cuda(
   c10::cuda::CUDAGuard guard(hy.device());
   const auto sizes = hy.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_hy_cpml_compressed_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-      static_cast<unsigned int>(sizes[0]),
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      ex.data_ptr<float>(),
-      ez.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>(),
-      inv_kappa_x.data_ptr<float>(),
-      b_x.data_ptr<float>(),
-      c_x.data_ptr<float>(),
-      inv_kappa_z.data_ptr<float>(),
-      b_z.data_ptr<float>(),
-      c_z.data_ptr<float>(),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dz),
-      static_cast<int>(x_low_length),
-      static_cast<int>(x_high_start),
-      static_cast<int>(x_high_length),
-      static_cast<int>(z_low_length),
-      static_cast<int>(z_high_start),
-      static_cast<int>(z_high_length),
-      psi_x.data_ptr<float>(),
-      psi_z.data_ptr<float>(),
-      hy.data_ptr<float>());
+  dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
+    update_magnetic_hy_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        ex.data_ptr<float>(),
+        ez.data_ptr<float>(),
+        decay.data_ptr<float>(),
+        curl.data_ptr<float>(),
+        static_cast<float>(uniform_decay.value_or(0.0)),
+        static_cast<float>(uniform_curl.value_or(0.0)),
+        inv_kappa_x.data_ptr<float>(),
+        b_x.data_ptr<float>(),
+        c_x.data_ptr<float>(),
+        inv_kappa_z.data_ptr<float>(),
+        b_z.data_ptr<float>(),
+        c_z.data_ptr<float>(),
+        static_cast<float>(inv_dx),
+        static_cast<float>(inv_dz),
+        static_cast<int>(x_low_length),
+        static_cast<int>(x_high_start),
+        static_cast<int>(x_high_length),
+        static_cast<int>(z_low_length),
+        static_cast<int>(z_high_start),
+        static_cast<int>(z_high_length),
+        psi_x.data_ptr<float>(),
+        psi_z.data_ptr<float>(),
+        hy.data_ptr<float>());
+  });
   WITWIN_CUDA_CHECK();
 }
 
@@ -881,7 +910,9 @@ void update_magnetic_hz_cpml_compressed_cuda(
     int64_t x_high_length,
     int64_t y_low_length,
     int64_t y_high_start,
-    int64_t y_high_length) {
+    int64_t y_high_length,
+    c10::optional<double> uniform_decay,
+    c10::optional<double> uniform_curl) {
   check_magnetic_cpml_compressed_inputs(
       hz, ex, ey, decay, curl, psi_x, psi_y, inv_kappa_x, b_x, c_x, inv_kappa_y, b_y, c_y,
       0, 1, x_low_length, x_high_length, y_low_length, y_high_length, "hz");
@@ -890,30 +921,34 @@ void update_magnetic_hz_cpml_compressed_cuda(
   c10::cuda::CUDAGuard guard(hz.device());
   const auto sizes = hz.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_hz_cpml_compressed_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-      static_cast<unsigned int>(sizes[0]),
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      ex.data_ptr<float>(),
-      ey.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>(),
-      inv_kappa_x.data_ptr<float>(),
-      b_x.data_ptr<float>(),
-      c_x.data_ptr<float>(),
-      inv_kappa_y.data_ptr<float>(),
-      b_y.data_ptr<float>(),
-      c_y.data_ptr<float>(),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dy),
-      static_cast<int>(x_low_length),
-      static_cast<int>(x_high_start),
-      static_cast<int>(x_high_length),
-      static_cast<int>(y_low_length),
-      static_cast<int>(y_high_start),
-      static_cast<int>(y_high_length),
-      psi_x.data_ptr<float>(),
-      psi_y.data_ptr<float>(),
-      hz.data_ptr<float>());
+  dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
+    update_magnetic_hz_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        ex.data_ptr<float>(),
+        ey.data_ptr<float>(),
+        decay.data_ptr<float>(),
+        curl.data_ptr<float>(),
+        static_cast<float>(uniform_decay.value_or(0.0)),
+        static_cast<float>(uniform_curl.value_or(0.0)),
+        inv_kappa_x.data_ptr<float>(),
+        b_x.data_ptr<float>(),
+        c_x.data_ptr<float>(),
+        inv_kappa_y.data_ptr<float>(),
+        b_y.data_ptr<float>(),
+        c_y.data_ptr<float>(),
+        static_cast<float>(inv_dx),
+        static_cast<float>(inv_dy),
+        static_cast<int>(x_low_length),
+        static_cast<int>(x_high_start),
+        static_cast<int>(x_high_length),
+        static_cast<int>(y_low_length),
+        static_cast<int>(y_high_start),
+        static_cast<int>(y_high_length),
+        psi_x.data_ptr<float>(),
+        psi_y.data_ptr<float>(),
+        hz.data_ptr<float>());
+  });
   WITWIN_CUDA_CHECK();
 }

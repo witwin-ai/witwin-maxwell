@@ -102,7 +102,9 @@ void update_magnetic_hx_cpml_compressed_cuda(
     int64_t y_high_length,
     int64_t z_low_length,
     int64_t z_high_start,
-    int64_t z_high_length);
+    int64_t z_high_length,
+    c10::optional<double> uniform_decay,
+    c10::optional<double> uniform_curl);
 void update_magnetic_hy_cpml_compressed_cuda(
     at::Tensor hy,
     const at::Tensor& ex,
@@ -124,7 +126,9 @@ void update_magnetic_hy_cpml_compressed_cuda(
     int64_t x_high_length,
     int64_t z_low_length,
     int64_t z_high_start,
-    int64_t z_high_length);
+    int64_t z_high_length,
+    c10::optional<double> uniform_decay,
+    c10::optional<double> uniform_curl);
 void update_magnetic_hz_cpml_compressed_cuda(
     at::Tensor hz,
     const at::Tensor& ex,
@@ -146,7 +150,9 @@ void update_magnetic_hz_cpml_compressed_cuda(
     int64_t x_high_length,
     int64_t y_low_length,
     int64_t y_high_start,
-    int64_t y_high_length);
+    int64_t y_high_length,
+    c10::optional<double> uniform_decay,
+    c10::optional<double> uniform_curl);
 void update_electric_ex_standard_cuda(
     at::Tensor ex,
     const at::Tensor& hy,
@@ -313,7 +319,9 @@ void update_electric_ex_cpml_compressed_cuda(
     int64_t y_high_length,
     int64_t z_low_length,
     int64_t z_high_start,
-    int64_t z_high_length);
+    int64_t z_high_length,
+    c10::optional<double> uniform_decay,
+    c10::optional<double> uniform_curl);
 void update_electric_ey_cpml_compressed_cuda(
     at::Tensor ey,
     const at::Tensor& hx,
@@ -339,7 +347,9 @@ void update_electric_ey_cpml_compressed_cuda(
     int64_t x_high_length,
     int64_t z_low_length,
     int64_t z_high_start,
-    int64_t z_high_length);
+    int64_t z_high_length,
+    c10::optional<double> uniform_decay,
+    c10::optional<double> uniform_curl);
 void update_electric_ez_cpml_compressed_cuda(
     at::Tensor ez,
     const at::Tensor& hx,
@@ -365,7 +375,9 @@ void update_electric_ez_cpml_compressed_cuda(
     int64_t x_high_length,
     int64_t y_low_length,
     int64_t y_high_start,
-    int64_t y_high_length);
+    int64_t y_high_length,
+    c10::optional<double> uniform_decay,
+    c10::optional<double> uniform_curl);
 void accumulate_dft_batched_cuda(
     const at::Tensor& ex,
     const at::Tensor& ey,
