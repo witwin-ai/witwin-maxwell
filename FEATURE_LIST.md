@@ -85,7 +85,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - `GaussianBeam` soft source for analytical Gaussian-beam injection with configurable waist and focus
 - Experimental `ModeSource` soft source for axis-aligned FDTD waveguide launching, using a full-vector generalized 2D eigenmode solve for forward source-plane assembly on real isotropic apertures, dense and sparse forward backends for that generalized solve, and a retained experimental torch-differentiable scalar eigensolve path for current trainable FDTD scenes
 - Experimental `TFSF(bounds=...)` injection descriptor for `PlaneWave` and `GaussianBeam`, with validated axis-aligned `PlaneWave` support for `CW` and `GaussianPulse`, and validated CW oblique `PlaneWave` support
-- CUDA `PlaneWave` TFSF forward stepping uses Slang auxiliary-line updates and fused patch-application kernels to reduce per-step launch overhead
+- CUDA `PlaneWave` TFSF forward stepping uses native CUDA auxiliary-line updates and fused patch-application kernels to reduce per-step launch overhead
 - `GaussianBeam` `TFSF` remains experimental and currently uses the analytical profile provider rather than the future angular-spectrum / discrete-face engine
 - Polarization specified by field name (`"Ex"`, `"Ey"`, `"Ez"`) or explicit 3-vector
 - Source amplitude and phase carried by `source_time`; spatial sources keep width / beam parameters and optional name
@@ -134,6 +134,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 
 - Time-domain simulation through `Simulation.fdtd(...)`
 - CUDA-only solver execution; `Simulation.fdtd(...)` requires `Scene(device="cuda")`
+- Native CUDA is the default FDTD runtime backend; the Slang runtime is retained only as an explicit comparison path via `WITWIN_MAXWELL_FDTD_BACKEND=slang`
 - Single- or multi-frequency DFT extraction through `frequency=` or `frequencies=[...]`
 - Source temporal frequency (`source_time.frequency`) remains distinct from simulation / monitor extraction frequencies; Maxwell does not infer extraction frequencies implicitly
 - ADE-based electric and magnetic dispersive-material updates for Debye, Drude, and Lorentz media
@@ -163,9 +164,10 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - Adjoint gradient pullback from Yee-grid electric permittivity coefficients back through `Scene.compile_material_tensors()` into trainable material-graph inputs
 - Solver stats including time steps, `dt`, absorber, requested frequencies, per-frequency DFT sample counts, elapsed time, milliseconds per step, and steps per second
 - Native CUDA extension builds on Windows can discover and load the Visual Studio x64 build environment automatically for accelerated FDTD kernels
-- Native CUDA extension builds resolve conda-distributed torch import libraries automatically, and `WITWIN_MAXWELL_FDTD_CUDA_PREBUILT=1` loads the already-built extension without invoking the build toolchain (required under profilers such as Nsight Systems)
+- Native CUDA extension platform wheels include the packaged FDTD CUDA extension, so ordinary `pip install witwin-maxwell` users can load the accelerated FDTD runtime without compiling locally
+- Native CUDA extension builds resolve conda-distributed torch import libraries automatically, and `WITWIN_MAXWELL_FDTD_CUDA_PREBUILT=1` loads an already-built extension from the configured build directory without invoking the build toolchain (required under profilers such as Nsight Systems)
 - Native CUDA CPML field updates skip full-volume coefficient reads when the decay/curl coefficient tensors are spatially uniform, detected automatically once per solve (about 1.4x faster forward stepping on homogeneous scenes)
-- The native CUDA module surface accepts strided tensor views, so the reverse-time adjoint with `WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND=slang` runs entirely on native CUDA reverse kernels for standard, CPML, TFSF, and Bloch scenes (about 1.7x faster backward than the default python-reference reverse path)
+- The native CUDA module surface accepts strided tensor views, so explicit Slang-oracle reverse-time adjoint checks can run on native CUDA reverse kernels for standard, CPML, Bloch, and dispersive scenes; TFSF adjoint uses the native reference composition after retiring the drifted Slang composite path
 - FDTD result stats include CPML auxiliary-memory mode and allocated-versus-dense `psi` byte counts
 - Support for odd grid sizes in Yee-component field outputs
 

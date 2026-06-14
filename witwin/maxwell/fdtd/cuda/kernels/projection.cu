@@ -114,7 +114,7 @@ __global__ void project_bloch_boundary_kernel(
 
 template <int Axis>
 void launch_periodic_projection(int nx, int ny, int nz, float* __restrict__ field) {
-  constexpr dim3 block(16, 16, 1);
+  const dim3 block(16, 16, 1);
   const unsigned int dim_b = Axis == 2 ? static_cast<unsigned int>(ny) : static_cast<unsigned int>(nz);
   const unsigned int dim_a = Axis == 0 ? static_cast<unsigned int>(ny) : static_cast<unsigned int>(nx);
   const dim3 grid((dim_b + block.x - 1) / block.x, (dim_a + block.y - 1) / block.y, 1);
@@ -134,7 +134,7 @@ void launch_bloch_projection(
     float phase_sin,
     float* __restrict__ field_real,
     float* __restrict__ field_imag) {
-  constexpr dim3 block(16, 16, 1);
+  const dim3 block(16, 16, 1);
   const unsigned int dim_b = Axis == 2 ? static_cast<unsigned int>(ny) : static_cast<unsigned int>(nz);
   const unsigned int dim_a = Axis == 0 ? static_cast<unsigned int>(ny) : static_cast<unsigned int>(nx);
   const dim3 grid((dim_b + block.x - 1) / block.x, (dim_a + block.y - 1) / block.y, 1);

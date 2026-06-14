@@ -1,6 +1,6 @@
 # Native CUDA FDTD Parity Matrix
 
-Default backend remains Slang. Set `WITWIN_MAXWELL_FDTD_BACKEND=cuda` to force the native torch-CUDA dispatcher. Set `WITWIN_RUN_SLANG_PARITY=1` to run optional Slang oracle tests in environments where Slang JIT is responsive. Set `WITWIN_RUN_CUDA_EXTENSION_BUILD=1` from a Visual Studio CUDA build environment to compile and run the explicit native C++/CUDA extension tests.
+Native CUDA is the default FDTD backend. Set `WITWIN_MAXWELL_FDTD_BACKEND=slang` only for explicit Slang oracle comparisons. Set `WITWIN_RUN_SLANG_PARITY=1` to run optional Slang oracle tests in environments where Slang JIT is responsive. Set `WITWIN_RUN_CUDA_EXTENSION_BUILD=1` from a Visual Studio CUDA build environment to compile and run the explicit native C++/CUDA extension tests.
 
 | Area | Coverage | Status |
 | --- | --- | --- |
@@ -28,4 +28,4 @@ Known validation limitations:
 
 - In this worktree, direct Slang JIT initialization for a fresh `fdtd.slang` shadow copy currently hangs, so the Slang oracle test is gated behind `WITWIN_RUN_SLANG_PARITY=1`. The main checkout baseline Slang public/FDTD tests passed before native migration work began.
 - Full gradient workflows under `WITWIN_MAXWELL_FDTD_BACKEND=cuda` still default to the Slang-free Python reference reverse path for conservative correctness. Explicit `WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND=slang` with CUDA backend now resolves the same Slang-style kernel names to the native module and is covered for Bloch no-Slang-JIT reverse-step parity.
-- Nsight Systems captures now exist for native CUDA and Slang on `dipole_vacuum` and `planewave_vacuum`. Default backend switch remains deferred, so Slang remains the default hidden reference backend until packaging/default-switch risk is resolved.
+- Nsight Systems captures now exist for native CUDA and Slang on `dipole_vacuum` and `planewave_vacuum`. Native CUDA is the default runtime; Slang profiles are retained only for explicit comparison runs.

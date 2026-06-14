@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/witwin-maxwell)](https://pypi.org/project/witwin-maxwell/) [![Downloads](https://img.shields.io/pypi/dm/witwin-maxwell)](https://pypi.org/project/witwin-maxwell/) ![Code Size](https://img.shields.io/github/languages/code-size/Asixa/witwin-platform)[![License](https://img.shields.io/github/license/Asixa/witwin-platform)](COPYING)
 
-WiTwin Maxwell is a differentiable full-wave electromagnetic solver with a **PyTorch-native interface** and **Slang-compiled CUDA kernels** at its core. The FDTD field-update loops run as hand-written GPU kernels compiled through [Slang](https://shader-slang.com/slang/), while the entire workflow — scene definition, simulation dispatch, result access, and automatic differentiation — stays inside standard PyTorch through `SceneModule`, `MaterialRegion`, and adjoint backward support.
+WiTwin Maxwell is a differentiable full-wave electromagnetic solver with a **PyTorch-native interface** and a native CUDA FDTD runtime at its core. The FDTD field-update loops run as hand-written GPU kernels shipped in prebuilt platform wheels, while the entire workflow — scene definition, simulation dispatch, result access, and automatic differentiation — stays inside standard PyTorch through `SceneModule`, `MaterialRegion`, and adjoint backward support.
 
 The main public solver workflow today is:
 
@@ -16,7 +16,7 @@ Python 3.10+ and an NVIDIA GPU are required.
 This package depends on the base `witwin` package.
 
 ```bash
-pip install witwin[maxwell]
+pip install witwin-maxwell
 ```
 
 ## Public API

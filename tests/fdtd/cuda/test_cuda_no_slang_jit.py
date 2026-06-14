@@ -18,13 +18,13 @@ def _minimal_cuda_scene() -> mw.Scene:
     )
 
 
-def test_cuda_backend_fdtd_solve_does_not_call_slang_load_module(monkeypatch):
+def test_default_fdtd_solve_does_not_call_slang_load_module(monkeypatch):
     import slangtorch
 
     def fail_load_module(*args, **kwargs):
         raise AssertionError("native CUDA backend must not call slangtorch.loadModule()")
 
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.delenv("WITWIN_MAXWELL_FDTD_BACKEND", raising=False)
     monkeypatch.setattr(slangtorch, "loadModule", fail_load_module)
 
     sim = mw.Simulation.fdtd(

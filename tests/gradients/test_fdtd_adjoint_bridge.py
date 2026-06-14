@@ -1032,9 +1032,11 @@ def test_reverse_step_tfsf_python_reference_matches_torch_vjp_without_auxiliary_
     assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for TFSF reverse dispatch")
 @pytest.mark.parametrize("provider", ["plane_wave_ref_x_ez", "plane_wave_aux"])
-def test_reverse_step_tfsf_slang_matches_python_reference(provider):
+def test_reverse_step_tfsf_uses_native_reference_when_slang_is_requested(provider, monkeypatch):
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
     torch.manual_seed(67)
     cpu_solver = _fake_tfsf_cpml_reverse_solver(provider=provider)
     cuda_solver = _move_solver_tensors_to_cuda(_fake_tfsf_cpml_reverse_solver(provider=provider))
@@ -1085,7 +1087,7 @@ def test_reverse_step_tfsf_slang_matches_python_reference(provider):
         eps_ez=cpu_eps_ez,
     )
 
-    assert actual.backend == "slang_tfsf_cpml"
+    assert actual.backend == "python_reference_tfsf_cpml"
     assert expected.backend == "python_reference_tfsf_cpml"
     for name in cuda_forward_state:
         assert torch.equal(cuda_forward_state[name], frozen_forward_state[name])
@@ -1097,7 +1099,9 @@ def test_reverse_step_tfsf_slang_matches_python_reference(provider):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
-def test_reverse_step_bloch_slang_matches_python_reference():
+def test_reverse_step_bloch_slang_matches_python_reference(monkeypatch):
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
     torch.manual_seed(31)
     solver = _move_solver_tensors_to_cuda(_fake_bloch_reverse_solver())
     state_shapes = _bloch_reverse_state_shapes()
@@ -1147,7 +1151,9 @@ def test_reverse_step_bloch_slang_matches_python_reference():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
-def test_reverse_step_bloch_slang_matches_python_reference_with_source_terms():
+def test_reverse_step_bloch_slang_matches_python_reference_with_source_terms(monkeypatch):
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
     torch.manual_seed(37)
     solver = _move_solver_tensors_to_cuda(_fake_bloch_reverse_solver())
     solver._source_terms = [
@@ -1215,7 +1221,9 @@ def test_reverse_step_bloch_slang_matches_python_reference_with_source_terms():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
-def test_reverse_step_dispersive_slang_matches_python_reference():
+def test_reverse_step_dispersive_slang_matches_python_reference(monkeypatch):
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
     torch.manual_seed(47)
     solver = _move_solver_tensors_to_cuda(_fake_dispersive_cpml_reverse_solver())
     state_shapes = _dispersive_cpml_reverse_state_shapes()
@@ -1267,7 +1275,9 @@ def test_reverse_step_dispersive_slang_matches_python_reference():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
-def test_reverse_step_dispersive_slang_matches_python_reference_with_source_terms():
+def test_reverse_step_dispersive_slang_matches_python_reference_with_source_terms(monkeypatch):
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
     torch.manual_seed(53)
     solver = _move_solver_tensors_to_cuda(_fake_dispersive_cpml_reverse_solver())
     solver._source_terms = [
@@ -1336,7 +1346,9 @@ def test_reverse_step_dispersive_slang_matches_python_reference_with_source_term
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
-def test_reverse_step_standard_slang_matches_python_reference():
+def test_reverse_step_standard_slang_matches_python_reference(monkeypatch):
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
     torch.manual_seed(11)
     solver = _move_solver_tensors_to_cuda(_fake_standard_reverse_solver())
     forward_state = {
@@ -1383,7 +1395,9 @@ def test_reverse_step_standard_slang_matches_python_reference():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
-def test_reverse_step_cpml_slang_matches_python_reference():
+def test_reverse_step_cpml_slang_matches_python_reference(monkeypatch):
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
     torch.manual_seed(17)
     solver = _move_solver_tensors_to_cuda(_fake_cpml_reverse_solver())
     state_shapes = _cpml_reverse_state_shapes()
@@ -2238,13 +2252,13 @@ def test_fdtd_gradient_bridge_backward_profile_reports_expected_sections():
     assert profile["material_pullback_backend"] == "autograd_material_graph"
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
-    assert profile["reverse_backend_counts"].get("slang_cpml", 0) == bridge._time_steps
+    assert profile["reverse_backend_counts"].get("python_reference_cpml", 0) == bridge._time_steps
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
 @pytest.mark.parametrize("source_kind", ["plane_wave", "gaussian_beam"])
-def test_fdtd_gradient_bridge_backward_profile_uses_slang_cpml_for_soft_surface_sources(source_kind):
+def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_cpml_for_soft_surface_sources(source_kind):
     model = _DensitySurfaceSourceScene(source_kind=source_kind, init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=24)
     bridge = _FDTDGradientBridge(simulation)
@@ -2254,13 +2268,13 @@ def test_fdtd_gradient_bridge_backward_profile_uses_slang_cpml_for_soft_surface_
 
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
-    assert profile["reverse_backend_counts"].get("slang_cpml", 0) == bridge._time_steps
+    assert profile["reverse_backend_counts"].get("python_reference_cpml", 0) == bridge._time_steps
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
 @pytest.mark.parametrize("source_kind", ["plane_wave", "gaussian_beam"])
-def test_fdtd_gradient_bridge_backward_profile_uses_slang_tfsf_for_tfsf_sources(source_kind):
+def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_tfsf_for_tfsf_sources(source_kind):
     model = _DensityTFSFScene(source_kind=source_kind, init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=24)
     bridge = _FDTDGradientBridge(simulation)
@@ -2270,12 +2284,12 @@ def test_fdtd_gradient_bridge_backward_profile_uses_slang_tfsf_for_tfsf_sources(
 
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
-    assert profile["reverse_backend_counts"].get("slang_tfsf_cpml", 0) == bridge._time_steps
+    assert profile["reverse_backend_counts"].get("python_reference_tfsf_cpml", 0) == bridge._time_steps
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
-def test_fdtd_gradient_bridge_backward_profile_uses_slang_bloch_for_bloch_boundaries():
+def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_bloch_for_bloch_boundaries():
     model = _DensityBlochScene(init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=40)
     bridge = _FDTDGradientBridge(simulation)
@@ -2285,12 +2299,12 @@ def test_fdtd_gradient_bridge_backward_profile_uses_slang_bloch_for_bloch_bounda
 
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
-    assert profile["reverse_backend_counts"].get("slang_bloch", 0) == bridge._time_steps
+    assert profile["reverse_backend_counts"].get("python_reference_bloch", 0) == bridge._time_steps
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
-def test_fdtd_gradient_bridge_backward_profile_uses_slang_dispersive_cpml_for_dispersive_materials():
+def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_dispersive_cpml_for_dispersive_materials():
     model = _DensityDispersiveScene(medium_kind="debye", init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=36)
     bridge = _FDTDGradientBridge(simulation)
@@ -2300,7 +2314,7 @@ def test_fdtd_gradient_bridge_backward_profile_uses_slang_dispersive_cpml_for_di
 
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
-    assert profile["reverse_backend_counts"].get("slang_dispersive_cpml", 0) == bridge._time_steps
+    assert profile["reverse_backend_counts"].get("python_reference_dispersive_cpml", 0) == bridge._time_steps
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 

@@ -129,8 +129,32 @@ def _ensure_windows_build_tools_on_path() -> None:
     os.environ["Path"] = merged_path
 
 
+def _ensure_cuda_home_from_nvcc() -> None:
+    if os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH"):
+        return
+    nvcc = shutil.which("nvcc")
+    if nvcc is None:
+        return
+    cuda_home = Path(nvcc).resolve().parents[1]
+    os.environ["CUDA_HOME"] = str(cuda_home)
+    if os.name == "nt":
+        os.environ["CUDA_PATH"] = str(cuda_home)
+
+
 def source_root() -> Path:
     return Path(__file__).resolve().parent
+
+
+def prebuilt_root() -> Path:
+    return source_root() / "prebuilt"
+
+
+def extension_suffix() -> str:
+    return ".pyd" if os.name == "nt" else ".so"
+
+
+def prebuilt_extension_path() -> Path:
+    return prebuilt_root() / f"witwin_maxwell_fdtd_cuda{extension_suffix()}"
 
 
 def extension_sources() -> list[Path]:
@@ -161,33 +185,50 @@ def _conda_torch_ldflags() -> list[str]:
     return []
 
 
+def _load_extension_file(module_path: Path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("witwin_maxwell_fdtd_cuda", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to create import spec for {module_path}.")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_packaged_prebuilt_extension():
+    module_path = prebuilt_extension_path()
+    if not module_path.exists():
+        return None
+    return _load_extension_file(module_path)
+
+
 def _load_prebuilt_extension(build_directory: Path):
     # Profilers such as Nsight Systems break torch's MSVC detection in child
     # processes, which rewrites build.ninja and forces a rebuild that then
     # fails under the profiler. Loading the already-built module directly
     # avoids invoking the build toolchain entirely.
-    suffix = ".pyd" if os.name == "nt" else ".so"
-    module_path = build_directory / f"witwin_maxwell_fdtd_cuda{suffix}"
+    module_path = build_directory / f"witwin_maxwell_fdtd_cuda{extension_suffix()}"
     if not module_path.exists():
         raise FileNotFoundError(
             f"WITWIN_MAXWELL_FDTD_CUDA_PREBUILT=1 but {module_path} does not exist; "
             "run a normal build first."
         )
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("witwin_maxwell_fdtd_cuda", module_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _load_extension_file(module_path)
 
 
 def build_extension(*, verbose: bool = False):
     root = source_root()
     default_build_directory = Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda"
     build_directory = Path(os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR", default_build_directory))
+    if os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_SKIP_PREBUILT") != "1":
+        module = _load_packaged_prebuilt_extension()
+        if module is not None:
+            return module
     if os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_PREBUILT") == "1":
         return _load_prebuilt_extension(build_directory)
     _ensure_windows_build_tools_on_path()
+    _ensure_cuda_home_from_nvcc()
     build_directory.mkdir(parents=True, exist_ok=True)
     return load(
         name="witwin_maxwell_fdtd_cuda",

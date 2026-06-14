@@ -1650,8 +1650,7 @@ def _electric_ez_bloch(
     EzImag.copy_(EzImag * EzDecay + EzCurl * (d_x_i - d_y_i))
 
 
-def _scatter_patch(field: torch.Tensor, patch: torch.Tensor, offsets, values: torch.Tensor) -> None:
-    _require_cuda_tensors(field, patch, values)
+def _patch_coords_and_mask(field: torch.Tensor, patch: torch.Tensor, offsets):
     grids = torch.meshgrid(
         torch.arange(patch.shape[0], device=field.device, dtype=torch.long),
         torch.arange(patch.shape[1], device=field.device, dtype=torch.long),
@@ -1667,6 +1666,10 @@ def _scatter_patch(field: torch.Tensor, patch: torch.Tensor, offsets, values: to
         & (coords[2] >= 0)
         & (coords[2] < field.shape[2])
     )
+    return coords, mask
+
+
+def _scatter_values(field: torch.Tensor, coords, mask: torch.Tensor, values: torch.Tensor) -> None:
     if not bool(mask.any().item()):
         return
     field.index_put_(
@@ -1674,6 +1677,58 @@ def _scatter_patch(field: torch.Tensor, patch: torch.Tensor, offsets, values: to
         values[mask],
         accumulate=True,
     )
+
+
+def _scatter_patch(field: torch.Tensor, patch: torch.Tensor, offsets, values: torch.Tensor) -> None:
+    _require_cuda_tensors(field, patch, values)
+    coords, mask = _patch_coords_and_mask(field, patch, offsets)
+    _scatter_values(field, coords, mask, values)
+
+
+def _boundary_duplicate_coords(field: torch.Tensor, patch: torch.Tensor, offsets, axes: tuple[int, ...]):
+    coords, mask = _patch_coords_and_mask(field, patch, offsets)
+    dst_coords = list(coords)
+    low_masks = []
+    for axis in axes:
+        low = coords[axis] == 0
+        high = coords[axis] + 1 >= field.shape[axis]
+        mask = mask & (low | high)
+        low_masks.append(low)
+        dst_coords[axis] = torch.where(low, torch.full_like(coords[axis], field.shape[axis] - 1), torch.zeros_like(coords[axis]))
+    return dst_coords, mask, tuple(low_masks)
+
+
+def _scatter_periodic_duplicate(
+    field: torch.Tensor,
+    patch: torch.Tensor,
+    offsets,
+    values: torch.Tensor,
+    axes: tuple[int, ...],
+) -> None:
+    dst_coords, mask, _ = _boundary_duplicate_coords(field, patch, offsets, axes)
+    _scatter_values(field, dst_coords, mask, values)
+
+
+def _scatter_bloch_duplicate(
+    real_field: torch.Tensor,
+    imag_field: torch.Tensor,
+    patch: torch.Tensor,
+    offsets,
+    real_values: torch.Tensor,
+    imag_values: torch.Tensor,
+    axes_and_phases: tuple[tuple[int, float, float], ...],
+) -> None:
+    axes = tuple(axis for axis, _, _ in axes_and_phases)
+    dst_coords, mask, low_masks = _boundary_duplicate_coords(real_field, patch, offsets, axes)
+    out_real = real_values
+    out_imag = imag_values
+    for low, (_, phase_cos, phase_sin) in zip(low_masks, axes_and_phases):
+        pos_real, pos_imag = _phase_positive(out_real, out_imag, phase_cos, phase_sin)
+        neg_real, neg_imag = _phase_negative(out_real, out_imag, phase_cos, phase_sin)
+        out_real = torch.where(low, pos_real, neg_real)
+        out_imag = torch.where(low, pos_imag, neg_imag)
+    _scatter_values(real_field, dst_coords, mask, out_real)
+    _scatter_values(imag_field, dst_coords, mask, out_imag)
 
 
 def _add_source_patch(*, field, sourcePatch, offsetI, offsetJ, offsetK, signal):
@@ -1799,28 +1854,17 @@ def _add_source_patch_periodic(*, signal, sourcePatch, offsetI, offsetJ, offsetK
             int(wrapAxisB),
         )
         return
-    _add_source_patch(field=field, sourcePatch=sourcePatch, offsetI=offsetI, offsetJ=offsetJ, offsetK=offsetK, signal=signal)
-    # Periodic duplicate additions are only needed when the source touches paired tangential faces.
+    offsets = (int(offsetI), int(offsetJ), int(offsetK))
+    values = sourcePatch * float(signal)
+    _scatter_patch(field, sourcePatch, offsets, values)
     tangential = (1, 2) if "Ex" in kwargs else ((0, 2) if "Ey" in kwargs else (0, 1))
-    offsets = [int(offsetI), int(offsetJ), int(offsetK)]
-    shape = tuple(sourcePatch.shape)
-    for enabled, axis in ((int(wrapAxisA) != 0, tangential[0]), (int(wrapAxisB) != 0, tangential[1])):
-        if not enabled:
-            continue
-        for local_index, paired_index in ((0, field.shape[axis] - 1), (shape[axis] - 1, 0)):
-            global_index = offsets[axis] + local_index
-            if global_index != (0 if local_index == 0 else field.shape[axis] - 1):
-                continue
-            src = [slice(None)] * 3
-            src[axis] = local_index
-            dst_offsets = list(offsets)
-            dst_offsets[axis] = paired_index
-            _scatter_patch(
-                field,
-                sourcePatch[tuple(src)].unsqueeze(axis),
-                dst_offsets,
-                (sourcePatch[tuple(src)] * float(signal)).unsqueeze(axis),
-            )
+    duplicate_axes = tuple(
+        axis for enabled, axis in ((int(wrapAxisA) != 0, tangential[0]), (int(wrapAxisB) != 0, tangential[1])) if enabled
+    )
+    for axis in duplicate_axes:
+        _scatter_periodic_duplicate(field, sourcePatch, offsets, values, (axis,))
+    if len(duplicate_axes) == 2:
+        _scatter_periodic_duplicate(field, sourcePatch, offsets, values, duplicate_axes)
 
 
 def _add_source_patch_bloch(
@@ -1864,10 +1908,20 @@ def _add_source_patch_bloch(
             float(phaseSinB),
         )
         return
-    del phaseCosA, phaseSinA, phaseCosB, phaseSinB
     fields = ((ExReal, ExImag), (EyReal, EyImag), (EzReal, EzImag))[int(axisCode)]
-    _scatter_patch(fields[0], sourcePatch, (offsetI, offsetJ, offsetK), sourcePatch * float(signalReal))
-    _scatter_patch(fields[1], sourcePatch, (offsetI, offsetJ, offsetK), sourcePatch * float(signalImag))
+    offsets = (int(offsetI), int(offsetJ), int(offsetK))
+    real_values = sourcePatch * float(signalReal)
+    imag_values = sourcePatch * float(signalImag)
+    _scatter_patch(fields[0], sourcePatch, offsets, real_values)
+    _scatter_patch(fields[1], sourcePatch, offsets, imag_values)
+    tangential = ((1, 2), (0, 2), (0, 1))[int(axisCode)]
+    phase_axes = (
+        (tangential[0], float(phaseCosA), float(phaseSinA)),
+        (tangential[1], float(phaseCosB), float(phaseSinB)),
+    )
+    _scatter_bloch_duplicate(fields[0], fields[1], sourcePatch, offsets, real_values, imag_values, (phase_axes[0],))
+    _scatter_bloch_duplicate(fields[0], fields[1], sourcePatch, offsets, real_values, imag_values, (phase_axes[1],))
+    _scatter_bloch_duplicate(fields[0], fields[1], sourcePatch, offsets, real_values, imag_values, phase_axes)
 
 
 def _add_scaled_slice_source_patch(*, field, sourcePatch, incidentField, sampleIndex, offsetI, offsetJ, offsetK, scale):

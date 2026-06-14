@@ -1,6 +1,6 @@
 # Native CUDA FDTD Kernel Mapping
 
-The current migration stage routes `WITWIN_MAXWELL_FDTD_BACKEND=cuda` to an internal native-CUDA module surface without calling `slangtorch.loadModule()`. The C++/CUDA source tree exists under `witwin/maxwell/fdtd/cuda/`; covered kernels build and run when `WITWIN_RUN_CUDA_EXTENSION_BUILD=1` and `WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION=1` are set. Slang remains the default hidden reference backend until packaging/default-switch risk is resolved.
+The default FDTD runtime routes to an internal native-CUDA module surface without calling `slangtorch.loadModule()`. The C++/CUDA source tree exists under `witwin/maxwell/fdtd/cuda/`; covered kernels build and run when `WITWIN_RUN_CUDA_EXTENSION_BUILD=1` and `WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION=1` are set. Slang is retained only as an explicit hidden reference backend for oracle comparisons.
 
 | Slang kernel | CUDA target function | Python caller | Parity test | Status |
 | --- | --- | --- | --- | --- |

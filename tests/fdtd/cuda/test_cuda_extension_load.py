@@ -38,12 +38,12 @@ def test_native_cuda_extension_builds_and_runs_debug_kernel():
     torch.testing.assert_close(k_index, expected % 4)
 
 
-def test_backend_selector_defaults_to_slang(monkeypatch):
+def test_backend_selector_defaults_to_cuda(monkeypatch):
     from witwin.maxwell.fdtd.runtime.module_cache import resolve_fdtd_backend_name
 
     monkeypatch.delenv("WITWIN_MAXWELL_FDTD_BACKEND", raising=False)
 
-    assert resolve_fdtd_backend_name() == "slang"
+    assert resolve_fdtd_backend_name() == "cuda"
 
 
 def test_backend_selector_accepts_cuda(monkeypatch):
@@ -56,3 +56,11 @@ def test_backend_selector_accepts_cuda(monkeypatch):
         return
 
     assert resolve_fdtd_backend_name() == "cuda"
+
+
+def test_backend_selector_accepts_explicit_slang(monkeypatch):
+    from witwin.maxwell.fdtd.runtime.module_cache import resolve_fdtd_backend_name
+
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "slang")
+
+    assert resolve_fdtd_backend_name() == "slang"

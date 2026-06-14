@@ -172,6 +172,9 @@ venv.bak/
 # mkdocs documentation
 /site
 .slangtorch_cache/
+.*_runtime_*.slang
+witwin/maxwell/fdtd/cuda/prebuilt/*.pyd
+witwin/maxwell/fdtd/cuda/prebuilt/*.so
 .fdtd_runtime_*.slang
 .adjoint_kernels_runtime_*.slang
 *.png

@@ -1,6 +1,11 @@
-name: Publish witwin-maxwell
+name: Build and publish witwin-maxwell
 
 on:
+  push:
+    branches:
+      - master
+      - "codex/**"
+  pull_request:
   release:
     types: [published]
   workflow_dispatch:
@@ -77,8 +82,8 @@ jobs:
           print(f"Validated {package_name} {package_version} from {pyproject_path}.")
           PY
 
-  compile_cuda:
-    name: CUDA compile / ${{ matrix.os }} / py${{ matrix.python_version }}
+  build_cuda_wheels:
+    name: Build CUDA wheel / ${{ matrix.os }} / py${{ matrix.python_version }}
     needs: validate_release
     runs-on: ${{ matrix.os }}
     strategy:
@@ -113,9 +118,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          "CUDA_HOME=$env:CUDA_PATH" >> $env:GITHUB_ENV
-          "CUDA_ROOT=$env:CUDA_PATH" >> $env:GITHUB_ENV
-          "CUDA_BIN_PATH=$env:CUDA_PATH" >> $env:GITHUB_ENV
+          $cudaRoot = $env:CUDA_PATH
+          if (-not $cudaRoot) {
+            $nvcc = (Get-Command nvcc -ErrorAction Stop).Source
+            $cudaRoot = Split-Path (Split-Path $nvcc -Parent) -Parent
+          }
+          "CUDA_HOME=$cudaRoot" >> $env:GITHUB_ENV
+          "CUDA_PATH=$cudaRoot" >> $env:GITHUB_ENV
+          "CUDA_ROOT=$cudaRoot" >> $env:GITHUB_ENV
+          "CUDA_BIN_PATH=$cudaRoot" >> $env:GITHUB_ENV
 
       - name: Show toolchain
         shell: bash
@@ -128,17 +139,62 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel ninja numpy
           python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+          python -m pip install build
 
-      - name: Compile FDTD CUDA extension
+      - name: Build packaged FDTD CUDA extension
         env:
           MAX_JOBS: "2"
-          TORCH_CUDA_ARCH_LIST: "7.0;8.0;8.6;8.9;9.0"
+          TORCH_CUDA_ARCH_LIST: "7.0;8.0;8.6;8.9;9.0+PTX"
           WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR: ${{ runner.temp }}/witwin_maxwell_fdtd_cuda
         run: |
-          python -c "import importlib.util, pathlib; path = pathlib.Path('witwin/maxwell/fdtd/cuda/build.py'); spec = importlib.util.spec_from_file_location('witwin_maxwell_fdtd_cuda_build', path); module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module); extension = module.build_extension(verbose=True); print('Compiled', extension)"
+          python scripts/build_fdtd_cuda_prebuilt.py --verbose
 
-  build_distributions:
-    name: Build distributions
+      - name: Build platform wheel
+        shell: bash
+        env:
+          PACKAGE_DIR: ${{ needs.validate_release.outputs.package_dir }}
+        run: |
+          python -m build --wheel "$PACKAGE_DIR"
+
+      - name: Smoke install prebuilt wheel
+        shell: bash
+        env:
+          PACKAGE_DIR: ${{ needs.validate_release.outputs.package_dir }}
+          WITWIN_MAXWELL_FDTD_CUDA_PREBUILT: "1"
+          WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR: ${{ runner.temp }}/missing_prebuilt_build_dir
+        run: |
+          python -m pip uninstall -y witwin-maxwell || true
+          python -m pip install --no-deps "$PACKAGE_DIR"/dist/*.whl
+          python - <<'PY'
+          import importlib.util
+          import site
+          from pathlib import Path
+
+          candidates = []
+          for root in site.getsitepackages() + [site.getusersitepackages()]:
+              candidates.append(Path(root) / "witwin" / "maxwell" / "fdtd" / "cuda" / "build.py")
+          build_path = next((path for path in candidates if path.exists()), None)
+          assert build_path is not None, f"installed build.py not found in {candidates}"
+
+          spec = importlib.util.spec_from_file_location("witwin_maxwell_fdtd_cuda_build", build_path)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+
+          path = module.prebuilt_extension_path()
+          assert path.exists(), f"missing packaged prebuilt extension: {path}"
+          extension = module.build_extension()
+          print(f"Loaded packaged FDTD CUDA extension from {extension.__file__}")
+          PY
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}-py${{ matrix.python_version }}
+          path: ${{ needs.validate_release.outputs.package_dir }}/dist/*.whl
+          if-no-files-found: error
+
+  build_sdist:
+    name: Build source distribution
     needs: validate_release
     runs-on: ubuntu-latest
 
@@ -157,21 +213,21 @@ jobs:
           PACKAGE_DIR: ${{ needs.validate_release.outputs.package_dir }}
         run: |
           python -m pip install --upgrade pip build
-          python -m build "$PACKAGE_DIR"
+          python -m build --sdist "$PACKAGE_DIR"
 
-      - name: Upload distribution artifacts
+      - name: Upload source distribution artifact
         uses: actions/upload-artifact@v4
         with:
-          name: distributions
-          path: ${{ needs.validate_release.outputs.package_dir }}/dist/*
+          name: sdist
+          path: ${{ needs.validate_release.outputs.package_dir }}/dist/*.tar.gz
           if-no-files-found: error
 
   publish:
     name: Publish to PyPI
     if: github.event_name == 'release'
     needs:
-      - compile_cuda
-      - build_distributions
+      - build_cuda_wheels
+      - build_sdist
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -184,8 +240,9 @@ jobs:
       - name: Download distribution artifacts
         uses: actions/download-artifact@v4
         with:
-          name: distributions
+          pattern: "*"
           path: dist
+          merge-multiple: true
 
       - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

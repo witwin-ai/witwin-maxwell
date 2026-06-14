@@ -1600,7 +1600,7 @@ void launch_tfsf_line_sample_adjoint(
     const float* __restrict__ adj_field_patch,
     const float* __restrict__ coeff_patch,
     const int* __restrict__ sample_indices) {
-  constexpr dim3 block(8, 32, 1);
+  const dim3 block(8, 32, 1);
   const int sample_count = SampleAxis == 0 ? patch_nx : (SampleAxis == 1 ? patch_ny : patch_nz);
   accumulate_tfsf_line_sample_adjoint_kernel<SampleAxis><<<sample_count, block, 0, current_cuda_stream()>>>(
       patch_nx,

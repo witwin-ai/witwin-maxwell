@@ -133,7 +133,7 @@ void launch_plane_observer(
     float weighted_sin,
     float* __restrict__ real_accum,
     float* __restrict__ imag_accum) {
-  constexpr dim3 block(64, 4, 1);
+  const dim3 block(64, 4, 1);
   const unsigned int dim_x = Axis == 2 ? ny : nz;
   const unsigned int dim_y = Axis == 0 ? ny : nx;
   const dim3 grid((dim_x + block.x - 1) / block.x, (dim_y + block.y - 1) / block.y, 1);

@@ -81,7 +81,7 @@ def test_cuda_standard_reverse_step_matches_python_reference_without_slang(monke
     )
     torch.cuda.synchronize()
 
-    assert actual.backend == "slang_standard"
+    assert actual.backend == "python_reference_standard"
     for name in forward_state:
         torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
     torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
@@ -123,7 +123,7 @@ def test_cuda_cpml_reverse_step_matches_python_reference_without_slang(monkeypat
     )
     torch.cuda.synchronize()
 
-    assert actual.backend == "slang_cpml"
+    assert actual.backend == "python_reference_cpml"
     for name in forward_state:
         torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
     torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)

@@ -300,7 +300,25 @@ def test_compiled_cuda_extension_periodic_sources_apply_face_and_corner_duplicat
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
 
     patch = torch.arange(1, math.prod(patch_shape) + 1, device="cuda", dtype=torch.float32).reshape(patch_shape)
+    expected = _periodic_expected(shape, patch, offsets, 0.5, axes)
+    fallback = torch.zeros(shape, device="cuda", dtype=torch.float32)
     actual = torch.zeros(shape, device="cuda", dtype=torch.float32)
+
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
+    backend._add_source_patch_periodic(
+        **{field_name: fallback},
+        sourcePatch=patch,
+        offsetI=offsets[0],
+        offsetJ=offsets[1],
+        offsetK=offsets[2],
+        signal=0.5,
+        wrapAxisA=1,
+        wrapAxisB=1,
+    )
+    torch.cuda.synchronize()
+    torch.testing.assert_close(fallback, expected, rtol=0.0, atol=0.0)
+
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
     backend._add_source_patch_periodic(
         **{field_name: actual},
         sourcePatch=patch,
@@ -314,7 +332,7 @@ def test_compiled_cuda_extension_periodic_sources_apply_face_and_corner_duplicat
     torch.cuda.synchronize()
 
     assert counted.calls[method_name] == 1
-    torch.testing.assert_close(actual, _periodic_expected(shape, patch, offsets, 0.5, axes), rtol=0.0, atol=0.0)
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
 @pytest.mark.parametrize("axis_code", [0, 1, 2])
@@ -329,10 +347,37 @@ def test_compiled_cuda_extension_bloch_sources_apply_phase_to_faces_and_corners(
     shape = (2, 2, 2)
     patch = torch.arange(1, 9, device="cuda", dtype=torch.float32).reshape(shape)
     fields = [torch.zeros(shape, device="cuda", dtype=torch.float32) for _ in range(6)]
+    fallback_fields = [torch.zeros(shape, device="cuda", dtype=torch.float32) for _ in range(6)]
     phase_a = (0.8, 0.6)
     phase_b = (0.5, -0.25)
     signal = (0.7, -0.2)
+    expected = _bloch_expected(shape, patch, (0, 0, 0), signal, axis_code, phase_a, phase_b)
 
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
+    backend._add_source_patch_bloch(
+        ExReal=fallback_fields[0],
+        ExImag=fallback_fields[1],
+        EyReal=fallback_fields[2],
+        EyImag=fallback_fields[3],
+        EzReal=fallback_fields[4],
+        EzImag=fallback_fields[5],
+        sourcePatch=patch,
+        offsetI=0,
+        offsetJ=0,
+        offsetK=0,
+        signalReal=signal[0],
+        signalImag=signal[1],
+        axisCode=axis_code,
+        phaseCosA=phase_a[0],
+        phaseSinA=phase_a[1],
+        phaseCosB=phase_b[0],
+        phaseSinB=phase_b[1],
+    )
+    torch.cuda.synchronize()
+    fallback_complex = torch.complex(fallback_fields[2 * axis_code], fallback_fields[2 * axis_code + 1])
+    torch.testing.assert_close(fallback_complex, expected, rtol=2.0e-6, atol=2.0e-6)
+
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
     backend._add_source_patch_bloch(
         ExReal=fields[0],
         ExImag=fields[1],
@@ -355,7 +400,6 @@ def test_compiled_cuda_extension_bloch_sources_apply_phase_to_faces_and_corners(
     torch.cuda.synchronize()
 
     assert counted.calls[method_name] == 1
-    expected = _bloch_expected(shape, patch, (0, 0, 0), signal, axis_code, phase_a, phase_b)
     actual_complex = torch.complex(fields[2 * axis_code], fields[2 * axis_code + 1])
     torch.testing.assert_close(actual_complex, expected, rtol=2.0e-6, atol=2.0e-6)
     for index, field in enumerate(fields):

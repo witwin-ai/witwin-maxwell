@@ -22,14 +22,10 @@ from .core import (
     _reverse_electric_component_standard,
     _reverse_magnetic_component_cpml,
     _reverse_magnetic_component_standard,
-    _reverse_step_cpml_slang,
-    _reverse_step_standard_slang,
     _reverse_tfsf_auxiliary_state_python_reference,
-    _reverse_tfsf_auxiliary_state_slang,
     _tfsf_magnetic_source_terms,
     _update_magnetic_component,
 )
-from .dispatch import _select_reverse_backend, _ReverseBackend, resolve_fdtd_adjoint_backend_name
 
 __all__ = [
     "reverse_step_bloch_python_reference",
@@ -867,82 +863,8 @@ def reverse_step_tfsf(
         time_value=time_value,
         resolved_source_terms=resolved_source_terms,
     )
-    use_slang_backend = (
-        _select_reverse_backend(
-            solver,
-            forward_state,
-            eps_ex=eps_ex,
-            eps_ey=eps_ey,
-            eps_ez=eps_ez,
-            resolved_source_terms=resolved_source_terms,
-        )
-        is _ReverseBackend.TFSF
-        and resolve_fdtd_adjoint_backend_name() == "slang"
-        and torch.cuda.is_available()
-        and torch.device(eps_ex.device).type == "cuda"
-    )
-    if use_slang_backend:
-        if getattr(solver, "uses_cpml", False):
-            base_result = _reverse_step_cpml_slang(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=tfsf_source_terms,
-                profiler=profiler,
-            )
-            backend = "slang_tfsf_cpml"
-        else:
-            base_result = _reverse_step_standard_slang(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=tfsf_source_terms,
-                profiler=profiler,
-            )
-            backend = "slang_tfsf_standard"
-    else:
-        if getattr(solver, "uses_cpml", False):
-            base_result = reverse_step_cpml_python_reference(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=tfsf_source_terms,
-            )
-            backend = "python_reference_tfsf_cpml"
-        else:
-            base_result = reverse_step_standard_python_reference(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=tfsf_source_terms,
-            )
-            backend = "python_reference_tfsf_standard"
-
-    if use_slang_backend:
-        auxiliary_grads = _reverse_tfsf_auxiliary_state_slang(
-            solver,
-            forward_state,
-            adjoint_state,
-            magnetic_output_adjoint=base_result.magnetic_output_adjoint,
-        )
-    else:
-        auxiliary_grads = _reverse_tfsf_auxiliary_state_python_reference(
+    if getattr(solver, "uses_cpml", False):
+        base_result = reverse_step_cpml_python_reference(
             solver,
             forward_state,
             adjoint_state,
@@ -950,7 +872,31 @@ def reverse_step_tfsf(
             eps_ex=eps_ex,
             eps_ey=eps_ey,
             eps_ez=eps_ez,
+            resolved_source_terms=tfsf_source_terms,
         )
+        backend = "python_reference_tfsf_cpml"
+    else:
+        base_result = reverse_step_standard_python_reference(
+            solver,
+            forward_state,
+            adjoint_state,
+            time_value=time_value,
+            eps_ex=eps_ex,
+            eps_ey=eps_ey,
+            eps_ez=eps_ez,
+            resolved_source_terms=tfsf_source_terms,
+        )
+        backend = "python_reference_tfsf_standard"
+
+    auxiliary_grads = _reverse_tfsf_auxiliary_state_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
     if not auxiliary_grads:
         return _ReverseStepResult(
             pre_step_adjoint=base_result.pre_step_adjoint,

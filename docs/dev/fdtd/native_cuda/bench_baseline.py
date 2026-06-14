@@ -135,7 +135,7 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=2)
     args = parser.parse_args()
 
-    backend = os.environ.get("WITWIN_MAXWELL_FDTD_BACKEND", "slang")
+    backend = os.environ.get("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
     use_ext = os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
     print(f"backend={backend} extension={use_ext} gpu={torch.cuda.get_device_name(0)}")
 
