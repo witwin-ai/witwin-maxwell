@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .common import BOUNDARY_BLOCH, BOUNDARY_KIND_TO_CODE, BOUNDARY_PEC, initialize_complex_fields
+from .bloch import resolve_bloch_phase_factors, resolve_bloch_wavevector, validate_grating_tfsf_slab_topology
 from .cpml import initialize_cpml_state, initialize_neutral_boundary_state, initialize_simple_pml_state
 
 
@@ -51,10 +52,17 @@ def _configure_face_boundary_codes(solver):
 
 def initialize_boundary_state(solver):
     solver.boundary_kind = solver.scene.boundary.kind
+    has_tfsf_slab = any(
+        source.get("injection", {}).get("kind") == "tfsf"
+        and source.get("injection", {}).get("mode") == "slab"
+        for source in getattr(solver, "_compiled_sources", ()) or ()
+    )
     if solver.scene.boundary.uses_kind("bloch") and solver.boundary_kind != "bloch":
-        raise NotImplementedError(
-            "FDTD mixed Bloch boundaries are not implemented yet. Use BoundarySpec.bloch(...) or remove Bloch faces."
-        )
+        if not has_tfsf_slab:
+            raise NotImplementedError(
+                "FDTD mixed Bloch boundaries are not implemented yet. Use BoundarySpec.bloch(...) or remove Bloch faces."
+            )
+        validate_grating_tfsf_slab_topology(solver)
     solver.boundary_code = (
         BOUNDARY_KIND_TO_CODE[solver.boundary_kind]
         if solver.boundary_kind in BOUNDARY_KIND_TO_CODE
@@ -66,7 +74,8 @@ def initialize_boundary_state(solver):
     if solver.complex_fields_enabled:
         initialize_complex_fields(solver)
 
-    phases = solver.scene.bloch_phase_factors
+    solver.resolved_bloch_wavevector = resolve_bloch_wavevector(solver)
+    phases = resolve_bloch_phase_factors(solver)
     solver.boundary_phase_cos = tuple(float(phase.real) for phase in phases)
     solver.boundary_phase_sin = tuple(float(phase.imag) for phase in phases)
     solver.active_absorber_type = solver.absorber_type if solver.scene.boundary.uses_kind("pml") else "none"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from ..boundary.bloch import validate_grating_tfsf_slab_topology
 from .spatial import AuxiliaryGrid1D
 from .tfsf_common import (
     box_center_tensor,
@@ -13,6 +14,7 @@ from .tfsf_common import (
     entry_projection,
     incident_profile,
     make_aux_term,
+    nearest_index,
     project_positions,
     projection_extrema,
     resolve_bounds_indices,
@@ -105,6 +107,40 @@ def _set_tfsf_state(
         state["phase_speed"] = phase_speed
     solver._tfsf_state = state
     solver.tfsf_enabled = True
+
+
+def _set_pending_tfsf_slab_state(solver, source):
+    injection = source["injection"]
+    axis = injection["axis"]
+    axis_index = "xyz".index(axis)
+    shape = (solver.Nx, solver.Ny, solver.Nz)
+    lower = []
+    upper = []
+    for current_axis, axis_coords, size in zip("xyz", (solver.scene.x, solver.scene.y, solver.scene.z), shape):
+        if current_axis == axis:
+            axis_bounds = injection["axis_bounds"]
+            lower.append(nearest_index(axis_coords, axis_bounds[0]))
+            upper.append(nearest_index(axis_coords, axis_bounds[1]))
+        else:
+            lower.append(int(solver.scene.pml_thickness_for_face(current_axis, "low")))
+            upper.append(int(size - solver.scene.pml_thickness_for_face(current_axis, "high") - 1))
+
+    if upper[axis_index] <= lower[axis_index] + 1:
+        raise ValueError(f"TFSF slab bounds must span at least two cells along {axis}.")
+
+    solver._tfsf_state = {
+        "provider": "pending_grating_slab",
+        "runtime_pending": True,
+        "mode": "slab",
+        "axis": axis,
+        "bounds": None,
+        "lower": tuple(lower),
+        "upper": tuple(upper),
+        "electric_terms": [],
+        "magnetic_terms": [],
+        "source": source,
+    }
+    solver.tfsf_enabled = False
 
 
 def _spec_positions(solver, spec):
@@ -525,6 +561,10 @@ def initialize_tfsf_state(solver):
     if source["kind"] not in {"plane_wave", "gaussian_beam"}:
         raise ValueError("TFSF injection currently supports PlaneWave and GaussianBeam only.")
     if source["injection"].get("mode", "box") == "slab":
+        if solver.scene.boundary.uses_kind("bloch"):
+            validate_grating_tfsf_slab_topology(solver)
+            _set_pending_tfsf_slab_state(solver, source)
+            return
         raise NotImplementedError("TFSF slab runtime support is not implemented yet.")
     if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
         raise NotImplementedError("TFSF injection currently supports only none, pml, pec, or pmc boundaries.")
