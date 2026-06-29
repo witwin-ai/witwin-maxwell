@@ -86,13 +86,46 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - `GaussianBeam` soft source for analytical Gaussian-beam injection with configurable waist and focus
 - Experimental `ModeSource` soft source for axis-aligned FDTD waveguide launching, using a full-vector generalized 2D eigenmode solve for forward source-plane assembly on real isotropic apertures, dense and sparse forward backends for that generalized solve, and a retained experimental torch-differentiable scalar eigensolve path for current trainable FDTD scenes
 - Experimental `TFSF(bounds=...)` injection descriptor for `PlaneWave` and `GaussianBeam`, with validated axis-aligned `PlaneWave` support for `CW` and `GaussianPulse`, and validated CW oblique `PlaneWave` support
-- Experimental `TFSF.slab(axis="z", bounds=...)` injection descriptor for grating-oriented CW `PlaneWave` workflows, spanning the transverse Bloch unit cell during solver preparation
+- Experimental `TFSF.slab(axis="z", bounds=...)` injection descriptor for grating-oriented CW `PlaneWave` workflows, spanning the transverse Bloch unit cell during solver preparation for periodic grating illumination
 - CUDA `PlaneWave` TFSF forward stepping uses native CUDA auxiliary-line updates and fused patch-application kernels to reduce per-step launch overhead
 - `GaussianBeam` `TFSF` remains experimental and currently uses the analytical profile provider rather than the future angular-spectrum / discrete-face engine
 - Polarization specified by field name (`"Ex"`, `"Ey"`, `"Ez"`) or explicit 3-vector
 - Source amplitude and phase carried by `source_time`; spatial sources keep width / beam parameters and optional name
 - Multiple sources per scene
 - Source compilation uses `compile_fdfd_sources(...)` / `compile_fdtd_sources(...)` list-based interfaces across both solvers
+
+## Grating TFSF Example
+
+```python
+import witwin.maxwell as mw
+
+scene = mw.Scene(
+    domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-1.0, 1.0))),
+    grid=mw.GridSpec.uniform(0.05),
+    boundary=mw.BoundarySpec.faces(
+        default="pml",
+        num_layers=12,
+        strength=1.0,
+        x="bloch",
+        y="bloch",
+        z="pml",
+        bloch_wavevector="auto",
+    ),
+)
+
+scene.add_source(
+    mw.PlaneWave(
+        direction=(0.25, 0.0, 0.9682458366),
+        polarization=(1.0, 0.0, -0.2581988897),
+        source_time=mw.CW(frequency=200e12),
+        injection=mw.TFSF.slab(axis="z", bounds=(-0.4, 0.4)),
+    )
+)
+
+scene.add_monitor(mw.FluxMonitor("transmission", axis="z", position=0.7))
+
+result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
+```
 
 ## Monitors
 
@@ -149,7 +182,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - CPML auxiliary `psi` storage auto-selects between a dense fast path and slab-allocated low-memory storage, with `cpml_config={"memory_mode": "auto"|"dense"|"slab"}` and optional `dense_memory_limit_mib` tuning
 - Non-absorbing FDTD boundary conditions: periodic, Bloch phase-shifted periodic, PEC, and PMC
 - Per-face FDTD boundary selection across `pml`, `periodic`, `pec`, `pmc`, and `none`, including mixed-axis combinations such as periodic-in-`y` plus PML-in-`x/z`
-- Mixed x/y Bloch + z PML FDTD forward stepping for grating-oriented CW `PlaneWave` TFSF slabs, including explicit Bloch wavevectors and solver-resolved automatic Bloch phase from the incident plane wave
+- Mixed x/y Bloch + z PML FDTD forward stepping for grating-oriented CW `PlaneWave` TFSF slabs, including explicit Bloch wavevectors and solver-resolved automatic Bloch phase from the incident CW plane wave
 - Mixed low-face symmetry plus high-face absorber workflows through `Scene(symmetry=...)` with `BoundarySpec.pml(...)`
 - Spectral window and normalization configuration through `SpectralSampler(window=..., normalize_source=...)`
 - Pulse-driven spectral extraction starts at the transient without steady-state apodization for `GaussianPulse` and `RickerWavelet`, while CW extraction still skips startup transients
@@ -251,7 +284,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - FDFD supports electric anisotropy only; static magnetic media and magnetic dispersion still fail explicitly
 - FDTD rejects static conductive `sigma_e` materials explicitly; use FDFD for frequency-domain conductivity or Maxwell dispersive poles for time-domain media
 - Mixed Bloch boundary configurations outside the supported x/y Bloch + z PML grating FDTD path still fail explicitly
-- TFSF slab runtime support is currently limited to CW `PlaneWave` grating slabs with `axis="z"`; non-Bloch slabs, non-`PlaneWave` slab sources, and broadband automatic fixed-angle Bloch workflows fail explicitly
+- TFSF slab runtime support is currently limited to CW `PlaneWave` grating slabs with `axis="z"`; non-Bloch slabs, non-`PlaneWave` slab sources, and broadband automatic fixed-angle Bloch workflows fail explicitly because automatic Bloch phase is single-frequency metadata
 - Automatic Bloch wavevectors are solver-preparation metadata and are rejected by unresolved Tidy3D export
 - FDFD currently supports per-face boundary mixing only for `none` and `pml`
 - Tidy3D export and the FDTD adjoint bridge reject anisotropy, magnetic dispersion, and Kerr media explicitly in v1

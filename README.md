@@ -36,9 +36,9 @@ For module-style inverse-design workflows, define a `SceneModule`, implement `to
 | Area | Currently supported | Notes |
 | --- | --- | --- |
 | Solvers | `Simulation.fdtd(...)` | FDTD supports time stepping and single- or multi-frequency DFT extraction. `Simulation.fdfd(...)` is coming soon. |
-| Sources | `PointDipole`, `PlaneWave`, `GaussianBeam`, `ModeSource`, `TFSF` | `PlaneWave` / `GaussianBeam` support soft injection and `TFSF(...)`. `ModeSource` is still experimental. |
+| Sources | `PointDipole`, `PlaneWave`, `GaussianBeam`, `ModeSource`, `TFSF` | `PlaneWave` / `GaussianBeam` support soft injection and `TFSF(...)`; CW `PlaneWave` supports `TFSF.slab(axis="z", ...)` for grating illumination. `ModeSource` is still experimental. |
 | Source time | `CW`, `GaussianPulse`, `RickerWavelet` | Shared waveform vocabulary across public source APIs. |
-| Boundaries | `none`, `pml`, `periodic`, `bloch`, `pec`, `pmc` | Per-axis and per-face mixed layouts are available through `BoundarySpec.faces(...)`. |
+| Boundaries | `none`, `pml`, `periodic`, `bloch`, `pec`, `pmc` | Per-axis and per-face mixed layouts are available through `BoundarySpec.faces(...)`, including x/y Bloch plus z PML for grating FDTD workflows. |
 | Materials | Isotropic `eps_r`, `mu_r`, `sigma_e`; `Debye`, `Drude`, `Lorentz`; `DiagonalTensor3`; `MaterialRegion` | `sigma_e` is the public frequency-domain conductivity path. `MaterialRegion` is the most direct differentiable design primitive. |
 | Geometry | `Box`, `Sphere`, `Cylinder`, `Ellipsoid`, `Cone`, `Pyramid`, `Prism`, `Torus`, `HollowBox`, `Mesh` | Geometry and `Structure` primitives are re-exported through `witwin.maxwell`. |
 | Monitors | `PointMonitor`, `PlaneMonitor`, `FluxMonitor`, `ModeMonitor` | Frequency selection is available through `Result.at(...)`. |
@@ -141,6 +141,7 @@ Benchmark assets live under:
 
 - Core Maxwell workflows are GPU/CUDA-first.
 - `Simulation.fdfd(...)` is coming soon.
+- `bloch_wavevector="auto"` is supported for fixed-angle CW TFSF grating slabs; broadband automatic Bloch phase requests are rejected.
 - Prefer `DiagonalTensor3` for anisotropic materials. Full rotated/off-diagonal `Tensor3x3` support is not implemented yet.
 - The public differentiable path currently focuses on trainable inputs that affect compiled material tensors.
 - `ModeSource`, `ModeMonitor`, and `ModePort` are available, but they are still marked experimental.
