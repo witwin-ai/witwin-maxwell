@@ -7,8 +7,16 @@ from ..sources import GaussianBeam, ModeSource, PlaneWave, PointDipole, TFSF, co
 
 def _compile_injection(injection) -> dict[str, object]:
     if isinstance(injection, TFSF):
+        if injection.mode == "slab":
+            return {
+                "kind": "tfsf",
+                "mode": "slab",
+                "axis": injection.axis,
+                "axis_bounds": injection.axis_bounds,
+            }
         return {
             "kind": "tfsf",
+            "mode": "box",
             "bounds": injection.bounds,
         }
     return {"kind": str(injection).lower()}

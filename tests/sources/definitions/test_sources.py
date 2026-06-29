@@ -100,7 +100,46 @@ def test_tfsf_injection_compiles_with_bounds():
 
     assert len(compiled) == 1
     assert compiled[0]["injection"]["kind"] == "tfsf"
+    assert compiled[0]["injection"]["mode"] == "box"
     assert compiled[0]["injection"]["bounds"] == ((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))
+
+
+def test_tfsf_slab_compiles_public_metadata():
+    source = mw.TFSF.slab(axis="z", bounds=(-0.2, 0.3))
+
+    assert source.kind == "tfsf"
+    assert source.mode == "slab"
+    assert source.axis == "z"
+    assert source.axis_bounds == (-0.2, 0.3)
+    assert source.bounds is None
+
+
+def test_tfsf_slab_rejects_invalid_axis_and_bounds():
+    with pytest.raises(ValueError, match="axis"):
+        mw.TFSF.slab(axis="q", bounds=(-0.2, 0.2))
+    with pytest.raises(ValueError, match="end > start"):
+        mw.TFSF.slab(axis="z", bounds=(0.2, -0.2))
+
+
+def test_tfsf_slab_injection_compiles_axis_metadata():
+    scene = _make_scene()
+    scene.add_source(
+        mw.PlaneWave(
+            direction=(0.0, 0.0, 1.0),
+            polarization=(1.0, 0.0, 0.0),
+            source_time=mw.CW(frequency=1.0e9),
+            injection=mw.TFSF.slab(axis="z", bounds=(-0.2, 0.3)),
+        )
+    )
+
+    compiled = compile_fdtd_sources(scene, default_frequency=1.0e9)
+
+    assert compiled[0]["injection"] == {
+        "kind": "tfsf",
+        "mode": "slab",
+        "axis": "z",
+        "axis_bounds": (-0.2, 0.3),
+    }
 
 
 def test_fdtd_sources_compile_to_list_in_scene_order():

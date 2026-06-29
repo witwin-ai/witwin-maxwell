@@ -497,6 +497,48 @@ class TestBoundary:
         assert phase_y == 1.0 + 0.0j
         assert phase_z == 1.0 + 0.0j
 
+    def test_mixed_bloch_boundary_accepts_auto_wavevector_marker(self):
+        boundary = mw.BoundarySpec.faces(
+            default="pml",
+            num_layers=4,
+            strength=1.0,
+            x="bloch",
+            y="bloch",
+            bloch_wavevector="auto",
+        )
+        assert boundary.kind == "mixed"
+        assert boundary.bloch_wavevector == "auto"
+
+    def test_auto_bloch_phase_requires_solver_resolution(self):
+        scene = make_scene(
+            resolution=0.1,
+            device="cpu",
+            boundary=mw.BoundarySpec.faces(
+                default="pml",
+                num_layers=4,
+                strength=1.0,
+                x="bloch",
+                bloch_wavevector="auto",
+            ),
+        )
+        with pytest.raises(ValueError, match="Simulation.prepare"):
+            _ = scene.bloch_phase_factors
+
+    def test_auto_bloch_wavevector_accessor_requires_solver_resolution(self):
+        scene = make_scene(
+            resolution=0.1,
+            device="cpu",
+            boundary=mw.BoundarySpec.faces(
+                default="pml",
+                num_layers=4,
+                strength=1.0,
+                x="bloch",
+                bloch_wavevector="auto",
+            ),
+        )
+        with pytest.raises(ValueError, match="Simulation.prepare"):
+            _ = scene.bloch_wavevector
+
     def test_with_faces_updates_existing_boundary_configuration(self):
         boundary = mw.BoundarySpec.pml(num_layers=4, strength=1.0).with_faces(
             y="periodic",

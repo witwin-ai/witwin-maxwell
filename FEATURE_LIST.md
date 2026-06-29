@@ -25,6 +25,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - `GridSpec.spacing` always returns `(dx, dy, dz)`, with `GridSpec.is_uniform` for uniform-grid checks
 - `BoundarySpec.none()`, `BoundarySpec.pml(...)`, `BoundarySpec.periodic()`, `BoundarySpec.bloch(...)`, `BoundarySpec.pec()`, and `BoundarySpec.pmc()`
 - Per-face boundary configuration through `BoundarySpec.faces(...)` and direct `BoundarySpec(kind=..., x=..., x_low=..., ...)` overrides, including global defaults plus per-axis or per-face specialization
+- `BoundarySpec.bloch_wavevector="auto"` marker for solver-resolved Bloch phase workflows during FDTD preparation
 - Public `BoundaryKind` literal type for boundary-mode selection across declarative scene APIs
 - Shared `witwin.core.Structure` records pairing geometry and material, with `priority`, `enabled`, and `tags`
 - `Geometry.with_material(...)` convenience path returns a shared `Structure`
@@ -85,6 +86,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - `GaussianBeam` soft source for analytical Gaussian-beam injection with configurable waist and focus
 - Experimental `ModeSource` soft source for axis-aligned FDTD waveguide launching, using a full-vector generalized 2D eigenmode solve for forward source-plane assembly on real isotropic apertures, dense and sparse forward backends for that generalized solve, and a retained experimental torch-differentiable scalar eigensolve path for current trainable FDTD scenes
 - Experimental `TFSF(bounds=...)` injection descriptor for `PlaneWave` and `GaussianBeam`, with validated axis-aligned `PlaneWave` support for `CW` and `GaussianPulse`, and validated CW oblique `PlaneWave` support
+- Experimental `TFSF.slab(axis=..., bounds=...)` injection descriptor for grating-oriented TFSF workflows that will span the transverse unit cell after solver preparation
 - CUDA `PlaneWave` TFSF forward stepping uses native CUDA auxiliary-line updates and fused patch-application kernels to reduce per-step launch overhead
 - `GaussianBeam` `TFSF` remains experimental and currently uses the analytical profile provider rather than the future angular-spectrum / discrete-face engine
 - Polarization specified by field name (`"Ex"`, `"Ey"`, `"Ez"`) or explicit 3-vector
@@ -248,6 +250,8 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - FDFD supports electric anisotropy only; static magnetic media and magnetic dispersion still fail explicitly
 - FDTD rejects static conductive `sigma_e` materials explicitly; use FDFD for frequency-domain conductivity or Maxwell dispersive poles for time-domain media
 - Mixed Bloch boundary configurations currently fail explicitly in FDTD; use homogeneous `BoundarySpec.bloch(...)` or avoid Bloch on mixed boundary layouts
+- TFSF slab descriptors currently fail explicitly in FDTD until the grating TFSF slab runtime is enabled
+- Automatic Bloch wavevectors are solver-preparation metadata and are rejected by unresolved Tidy3D export
 - FDFD currently supports per-face boundary mixing only for `none` and `pml`
 - Tidy3D export and the FDTD adjoint bridge reject anisotropy, magnetic dispersion, and Kerr media explicitly in v1
 - Experimental `ModeSource`, `ModeMonitor`, and `ModePort` are currently limited to FDTD `CW` soft injection / monitoring on an axis-aligned plane and no Tidy3D mode-source export support; forward mode solving now uses a full-vector generalized eigenproblem on real isotropic source apertures and can handle non-unit `mu_r`, but the differentiable path still inherits the older scalar restrictions, and the broader modal stack is still missing complex/lossy, anisotropic, bent, angled, and RF-style wave-port coverage

@@ -460,6 +460,10 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s):
 def _convert_boundary(boundary, td):
     """Convert maxwell BoundarySpec to Tidy3D BoundarySpec."""
     kind = boundary.kind
+    if boundary.bloch_wavevector == "auto":
+        raise ValueError(
+            "Automatic Bloch wavevectors require Simulation.prepare() and cannot be exported to Tidy3D unresolved."
+        )
 
     if kind == "pml":
         pml = td.PML(num_layers=boundary.num_layers)

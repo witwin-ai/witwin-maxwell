@@ -238,7 +238,10 @@ SourceTime = CW | GaussianPulse | RickerWavelet
 
 @dataclass(frozen=True)
 class TFSF:
-    bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+    bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None
+    mode: str = "box"
+    axis: str | None = None
+    axis_bounds: tuple[float, float] | None = None
     kind: str = "tfsf"
 
     def __init__(self, bounds):
@@ -253,7 +256,29 @@ class TFSF:
                 raise ValueError("Each TFSF axis bound must have end > start.")
             normalized.append((start, end))
         object.__setattr__(self, "bounds", tuple(normalized))
+        object.__setattr__(self, "mode", "box")
+        object.__setattr__(self, "axis", None)
+        object.__setattr__(self, "axis_bounds", None)
         object.__setattr__(self, "kind", "tfsf")
+
+    @classmethod
+    def slab(cls, *, axis, bounds) -> "TFSF":
+        axis_name = str(axis).lower()
+        if axis_name not in {"x", "y", "z"}:
+            raise ValueError("TFSF slab axis must be 'x', 'y', or 'z'.")
+        if len(bounds) != 2:
+            raise ValueError("TFSF slab bounds must contain exactly two values.")
+        start, end = float(bounds[0]), float(bounds[1])
+        if end <= start:
+            raise ValueError("TFSF slab bounds must have end > start.")
+
+        source = cls.__new__(cls)
+        object.__setattr__(source, "bounds", None)
+        object.__setattr__(source, "mode", "slab")
+        object.__setattr__(source, "axis", axis_name)
+        object.__setattr__(source, "axis_bounds", (start, end))
+        object.__setattr__(source, "kind", "tfsf")
+        return source
 
 
 Injection = str | TFSF

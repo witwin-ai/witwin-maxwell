@@ -524,6 +524,8 @@ def initialize_tfsf_state(solver):
     source = tfsf_sources[0]
     if source["kind"] not in {"plane_wave", "gaussian_beam"}:
         raise ValueError("TFSF injection currently supports PlaneWave and GaussianBeam only.")
+    if source["injection"].get("mode", "box") == "slab":
+        raise NotImplementedError("TFSF slab runtime support is not implemented yet.")
     if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
         raise NotImplementedError("TFSF injection currently supports only none, pml, pec, or pmc boundaries.")
 

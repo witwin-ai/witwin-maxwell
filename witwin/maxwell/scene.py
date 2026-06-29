@@ -19,6 +19,7 @@ from .compiler.materials import (
 
 BoundaryKind: TypeAlias = Literal["none", "pml", "periodic", "bloch", "pec", "pmc"]
 BoundaryAxisOverride: TypeAlias = BoundaryKind | tuple[BoundaryKind, BoundaryKind]
+BlochWavevector: TypeAlias = tuple[float, float, float] | Literal["auto"]
 
 _ResolvedBoundaryKind: TypeAlias = BoundaryKind | Literal["mixed"]
 _BOUNDARY_AXES = ("x", "y", "z")
@@ -133,7 +134,7 @@ class BoundarySpec:
     kind: BoundaryKind | Literal["mixed"] = "none"
     num_layers: int = 0
     strength: float = 0.0
-    bloch_wavevector: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    bloch_wavevector: BlochWavevector = (0.0, 0.0, 0.0)
     x: BoundaryAxisOverride | None = None
     y: BoundaryAxisOverride | None = None
     z: BoundaryAxisOverride | None = None
@@ -156,9 +157,14 @@ class BoundarySpec:
         if self.strength < 0:
             raise ValueError("BoundarySpec.strength must be >= 0.")
 
-        bloch_wavevector = tuple(float(value) for value in self.bloch_wavevector)
-        if len(bloch_wavevector) != 3:
-            raise ValueError("BoundarySpec.bloch_wavevector must contain exactly three values.")
+        if isinstance(self.bloch_wavevector, str):
+            if self.bloch_wavevector != "auto":
+                raise ValueError("BoundarySpec.bloch_wavevector must be a length-3 tuple or 'auto'.")
+            bloch_wavevector: BlochWavevector = "auto"
+        else:
+            bloch_wavevector = tuple(float(value) for value in self.bloch_wavevector)
+            if len(bloch_wavevector) != 3:
+                raise ValueError("BoundarySpec.bloch_wavevector must contain exactly three values.")
 
         axis_overrides = {
             "x": _normalize_boundary_axis_override("x", self.x),
@@ -203,6 +209,8 @@ class BoundarySpec:
 
         if uses_pml and self.num_layers <= 0:
             raise ValueError("PML boundaries require num_layers > 0.")
+        if bloch_wavevector == "auto" and not uses_bloch:
+            raise ValueError("BoundarySpec.bloch_wavevector='auto' requires at least one Bloch axis.")
         if uses_bloch:
             for axis, axis_index in _BOUNDARY_AXIS_TO_INDEX.items():
                 axis_face_kinds = normalized_face_kinds[axis_index]
@@ -210,7 +218,11 @@ class BoundarySpec:
                     continue
                 if axis_face_kinds[0] != "bloch" or axis_face_kinds[1] != "bloch":
                     raise ValueError(f"{axis}-axis Bloch boundaries must be configured on both faces.")
-                if resolved_kind != "bloch" and np.isclose(bloch_wavevector[axis_index], 0.0):
+                if (
+                    bloch_wavevector != "auto"
+                    and resolved_kind != "bloch"
+                    and np.isclose(bloch_wavevector[axis_index], 0.0)
+                ):
                     raise ValueError(
                         f"{axis}-axis Bloch boundaries require a non-zero bloch_wavevector component."
                     )
@@ -255,7 +267,7 @@ class BoundarySpec:
 
     @classmethod
     def bloch(cls, wavevector) -> "BoundarySpec":
-        return cls(kind="bloch", bloch_wavevector=tuple(wavevector))
+        return cls(kind="bloch", bloch_wavevector=wavevector)
 
     @classmethod
     def pec(cls) -> "BoundarySpec":
@@ -272,7 +284,7 @@ class BoundarySpec:
         default: BoundaryKind = "none",
         num_layers: int = 0,
         strength: float = 0.0,
-        bloch_wavevector=(0.0, 0.0, 0.0),
+        bloch_wavevector: BlochWavevector = (0.0, 0.0, 0.0),
         x: BoundaryAxisOverride | None = None,
         y: BoundaryAxisOverride | None = None,
         z: BoundaryAxisOverride | None = None,
@@ -287,7 +299,7 @@ class BoundarySpec:
             kind=default,
             num_layers=int(num_layers),
             strength=float(strength),
-            bloch_wavevector=tuple(bloch_wavevector),
+            bloch_wavevector=bloch_wavevector,
             x=x,
             y=y,
             z=z,
@@ -341,6 +353,10 @@ class BoundarySpec:
         self,
         domain_range,
     ) -> tuple[complex, complex, complex]:
+        if self.bloch_wavevector == "auto":
+            raise ValueError(
+                "Automatic Bloch phase factors require Simulation.prepare() to resolve the incident wavevector."
+            )
         lengths = (
             float(domain_range[1] - domain_range[0]),
             float(domain_range[3] - domain_range[2]),
@@ -607,6 +623,10 @@ class Scene(SceneBase):
     def bloch_wavevector(self):
         if not self.boundary.uses_kind("bloch"):
             return (0.0, 0.0, 0.0)
+        if self.boundary.bloch_wavevector == "auto":
+            raise ValueError(
+                "Automatic Bloch wavevectors require Simulation.prepare() to resolve the incident wavevector."
+            )
         return self.boundary.bloch_wavevector
 
     def boundary_face_kind(self, axis: str, side: str) -> BoundaryKind:

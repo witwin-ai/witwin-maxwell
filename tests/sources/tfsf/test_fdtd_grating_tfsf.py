@@ -48,3 +48,25 @@ def test_grating_tfsf_currently_rejected_until_implemented():
     simulation = mw.Simulation.fdtd(scene, frequencies=[1.0e9], run_time=mw.TimeConfig(time_steps=1))
     with pytest.raises(NotImplementedError, match="mixed Bloch boundaries"):
         simulation.prepare()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
+def test_tfsf_slab_runtime_reports_unsupported_until_state_exists():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
+        device="cuda",
+    )
+    scene.add_source(
+        mw.PlaneWave(
+            direction=(0.0, 0.0, 1.0),
+            polarization=(1.0, 0.0, 0.0),
+            source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
+            injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
+            name="slab_tfsf",
+        )
+    )
+    simulation = mw.Simulation.fdtd(scene, frequencies=[1.0e9], run_time=mw.TimeConfig(time_steps=1))
+    with pytest.raises(NotImplementedError, match="TFSF slab"):
+        simulation.prepare()

@@ -194,6 +194,26 @@ class TestBoundaryConversion:
         assert isinstance(result.z.minus, td.PECBoundary)
         assert isinstance(result.z.plus, td.PMCBoundary)
 
+    def test_auto_bloch_boundary_requires_solver_resolution(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        boundary = mw.BoundarySpec.bloch("auto")
+
+        with pytest.raises(ValueError, match="Simulation.prepare"):
+            _convert_boundary(boundary, td)
+
+    def test_mixed_auto_bloch_boundary_requires_solver_resolution(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        boundary = mw.BoundarySpec.faces(
+            default="pml",
+            num_layers=8,
+            x="bloch",
+            z="periodic",
+            bloch_wavevector="auto",
+        )
+
+        with pytest.raises(ValueError, match="Simulation.prepare"):
+            _convert_boundary(boundary, td)
+
 
 class TestMediumConversion:
     def test_simple_medium(self, inject_mock_tidy3d):
