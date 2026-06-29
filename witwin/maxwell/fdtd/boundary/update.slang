@@ -1703,6 +1703,108 @@ void updateElectricFieldExBloch3D(
 
 [AutoPyBindCUDA]
 [CUDAKernel]
+void updateElectricFieldExBlochYStandardZ3D(
+    TensorView<float> ExReal,
+    TensorView<float> ExImag,
+    TensorView<float> HyReal,
+    TensorView<float> HyImag,
+    TensorView<float> HzReal,
+    TensorView<float> HzImag,
+    TensorView<float> ExDecay,
+    TensorView<float> ExCurl,
+    float phaseCosY,
+    float phaseSinY,
+    float invDy,
+    float invDz,
+    uint zLowBoundaryMode,
+    uint zHighBoundaryMode
+)
+{
+    uint linearIndex = linearThreadIndex1D();
+    uint total = linearSize3D(ExReal);
+    if (linearIndex >= total)
+    {
+        return;
+    }
+
+    uint3 index = unflatten3D(linearIndex, ExReal.size(1), ExReal.size(2));
+    uint i = index.x;
+    uint j = index.y;
+    uint k = index.z;
+
+    bool yBoundary = isBoundaryIndex(j, ExReal.size(1));
+    bool zBoundary = isBoundaryIndex(k, ExReal.size(2));
+    uint zBoundaryMode = zBoundary ? selectBoundaryMode(zLowBoundaryMode, zHighBoundaryMode, k) : BOUNDARY_NONE;
+    if (zBoundary && isPecBoundaryMode(zBoundaryMode))
+    {
+        ExReal[i, j, k] = 0.0;
+        ExImag[i, j, k] = 0.0;
+        return;
+    }
+    if (zBoundary && isInactiveBoundaryMode(zBoundaryMode))
+    {
+        return;
+    }
+
+    float2 dHz_dy = float2(0.0, 0.0);
+    if (yBoundary)
+    {
+        DiffFloat2 diff = blochBackwardDiff(
+            j,
+            float2(HzReal[i, 0, k], HzImag[i, 0, k]),
+            float2(HzReal[i, HzReal.size(1) - 1, k], HzImag[i, HzImag.size(1) - 1, k]),
+            phaseCosY,
+            phaseSinY,
+            invDy
+        );
+        dHz_dy = diff.value;
+    }
+    else
+    {
+        dHz_dy = float2(
+            (HzReal[i, j, k] - HzReal[i, j - 1, k]) * invDy,
+            (HzImag[i, j, k] - HzImag[i, j - 1, k]) * invDy
+        );
+    }
+
+    float2 dHy_dz = float2(0.0, 0.0);
+    if (zBoundary)
+    {
+        DiffFloat diffReal = boundaryBackwardDiff(
+            zBoundaryMode,
+            k,
+            HyReal[i, j, 0],
+            HyReal[i, j, HyReal.size(2) - 1],
+            invDz
+        );
+        if (diffReal.skip)
+        {
+            return;
+        }
+        DiffFloat diffImag = boundaryBackwardDiff(
+            zBoundaryMode,
+            k,
+            HyImag[i, j, 0],
+            HyImag[i, j, HyImag.size(2) - 1],
+            invDz
+        );
+        dHy_dz = float2(diffReal.value, diffImag.value);
+    }
+    else
+    {
+        dHy_dz = float2(
+            (HyReal[i, j, k] - HyReal[i, j, k - 1]) * invDz,
+            (HyImag[i, j, k] - HyImag[i, j, k - 1]) * invDz
+        );
+    }
+
+    float2 curlH = dHz_dy - dHy_dz;
+    ExReal[i, j, k] = ExReal[i, j, k] * ExDecay[i, j, k] + ExCurl[i, j, k] * curlH.x;
+    ExImag[i, j, k] = ExImag[i, j, k] * ExDecay[i, j, k] + ExCurl[i, j, k] * curlH.y;
+}
+
+[AutoPyBindCUDA]
+[CUDAKernel]
 void updateElectricFieldEyBloch3D(
     TensorView<float> EyReal,
     TensorView<float> EyImag,
@@ -1747,6 +1849,108 @@ void updateElectricFieldEyBloch3D(
             invDz
         );
         dHx_dz = diff.value;
+    }
+    else
+    {
+        dHx_dz = float2(
+            (HxReal[i, j, k] - HxReal[i, j, k - 1]) * invDz,
+            (HxImag[i, j, k] - HxImag[i, j, k - 1]) * invDz
+        );
+    }
+
+    float2 dHz_dx = float2(0.0, 0.0);
+    if (xBoundary)
+    {
+        DiffFloat2 diff = blochBackwardDiff(
+            i,
+            float2(HzReal[0, j, k], HzImag[0, j, k]),
+            float2(HzReal[HzReal.size(0) - 1, j, k], HzImag[HzImag.size(0) - 1, j, k]),
+            phaseCosX,
+            phaseSinX,
+            invDx
+        );
+        dHz_dx = diff.value;
+    }
+    else
+    {
+        dHz_dx = float2(
+            (HzReal[i, j, k] - HzReal[i - 1, j, k]) * invDx,
+            (HzImag[i, j, k] - HzImag[i - 1, j, k]) * invDx
+        );
+    }
+
+    float2 curlH = dHx_dz - dHz_dx;
+    EyReal[i, j, k] = EyReal[i, j, k] * EyDecay[i, j, k] + EyCurl[i, j, k] * curlH.x;
+    EyImag[i, j, k] = EyImag[i, j, k] * EyDecay[i, j, k] + EyCurl[i, j, k] * curlH.y;
+}
+
+[AutoPyBindCUDA]
+[CUDAKernel]
+void updateElectricFieldEyBlochXStandardZ3D(
+    TensorView<float> EyReal,
+    TensorView<float> EyImag,
+    TensorView<float> HxReal,
+    TensorView<float> HxImag,
+    TensorView<float> HzReal,
+    TensorView<float> HzImag,
+    TensorView<float> EyDecay,
+    TensorView<float> EyCurl,
+    float phaseCosX,
+    float phaseSinX,
+    float invDx,
+    float invDz,
+    uint zLowBoundaryMode,
+    uint zHighBoundaryMode
+)
+{
+    uint linearIndex = linearThreadIndex1D();
+    uint total = linearSize3D(EyReal);
+    if (linearIndex >= total)
+    {
+        return;
+    }
+
+    uint3 index = unflatten3D(linearIndex, EyReal.size(1), EyReal.size(2));
+    uint i = index.x;
+    uint j = index.y;
+    uint k = index.z;
+
+    bool xBoundary = isBoundaryIndex(i, EyReal.size(0));
+    bool zBoundary = isBoundaryIndex(k, EyReal.size(2));
+    uint zBoundaryMode = zBoundary ? selectBoundaryMode(zLowBoundaryMode, zHighBoundaryMode, k) : BOUNDARY_NONE;
+    if (zBoundary && isPecBoundaryMode(zBoundaryMode))
+    {
+        EyReal[i, j, k] = 0.0;
+        EyImag[i, j, k] = 0.0;
+        return;
+    }
+    if (zBoundary && isInactiveBoundaryMode(zBoundaryMode))
+    {
+        return;
+    }
+
+    float2 dHx_dz = float2(0.0, 0.0);
+    if (zBoundary)
+    {
+        DiffFloat diffReal = boundaryBackwardDiff(
+            zBoundaryMode,
+            k,
+            HxReal[i, j, 0],
+            HxReal[i, j, HxReal.size(2) - 1],
+            invDz
+        );
+        if (diffReal.skip)
+        {
+            return;
+        }
+        DiffFloat diffImag = boundaryBackwardDiff(
+            zBoundaryMode,
+            k,
+            HxImag[i, j, 0],
+            HxImag[i, j, HxImag.size(2) - 1],
+            invDz
+        );
+        dHx_dz = float2(diffReal.value, diffImag.value);
     }
     else
     {

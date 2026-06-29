@@ -22,6 +22,7 @@ _CPML_STATE_NAMES = (
     "psi_hz_x",
     "psi_hz_y",
 )
+_CPML_COMPLEX_STATE_NAMES = tuple(f"{name}_imag" for name in _CPML_STATE_NAMES)
 _TFSF_AUXILIARY_STATE_NAMES = (
     "tfsf_aux_electric",
     "tfsf_aux_magnetic",
@@ -72,7 +73,11 @@ class FDTDCheckpointSchema:
 
 def checkpoint_schema(solver) -> FDTDCheckpointSchema:
     complex_field_names = _COMPLEX_FIELD_STATE_NAMES if bool(getattr(solver, "complex_fields_enabled", False)) else ()
-    cpml_state_names = _CPML_STATE_NAMES if getattr(solver, "uses_cpml", False) else ()
+    cpml_state_names = ()
+    if getattr(solver, "uses_cpml", False):
+        cpml_state_names = _CPML_STATE_NAMES
+        if bool(getattr(solver, "complex_fields_enabled", False)):
+            cpml_state_names = cpml_state_names + _CPML_COMPLEX_STATE_NAMES
 
     tfsf_auxiliary_state_names = ()
     if getattr(solver, "tfsf_enabled", False):
@@ -143,7 +148,7 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
         tensors.update(
             {
                 name: expand_cpml_memory_tensor(solver, name).detach().clone()
-                for name in _CPML_STATE_NAMES
+                for name in schema.cpml_state_names
             }
         )
     if getattr(solver, "tfsf_enabled", False):

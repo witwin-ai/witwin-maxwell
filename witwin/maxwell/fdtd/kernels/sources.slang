@@ -173,7 +173,9 @@ void addSourcePatchBloch3D(
     float phaseCosA,
     float phaseSinA,
     float phaseCosB,
-    float phaseSinB
+    float phaseSinB,
+    uint wrapAxisA,
+    uint wrapAxisB
 )
 {
     uint linearIndex = linearThreadIndex1D();
@@ -199,8 +201,8 @@ void addSourcePatchBloch3D(
         ExReal[uint(i), uint(j), uint(k)] += delta.x;
         ExImag[uint(i), uint(j), uint(k)] += delta.y;
 
-        bool boundaryA = j == 0 || j + 1 >= int(ExReal.size(1));
-        bool boundaryB = k == 0 || k + 1 >= int(ExReal.size(2));
+        bool boundaryA = wrapAxisA != 0 && (j == 0 || j + 1 >= int(ExReal.size(1)));
+        bool boundaryB = wrapAxisB != 0 && (k == 0 || k + 1 >= int(ExReal.size(2)));
         int pairA = (j == 0) ? int(ExReal.size(1)) - 1 : 0;
         int pairB = (k == 0) ? int(ExReal.size(2)) - 1 : 0;
 
@@ -244,8 +246,8 @@ void addSourcePatchBloch3D(
         EyReal[uint(i), uint(j), uint(k)] += delta.x;
         EyImag[uint(i), uint(j), uint(k)] += delta.y;
 
-        bool boundaryA = i == 0 || i + 1 >= int(EyReal.size(0));
-        bool boundaryB = k == 0 || k + 1 >= int(EyReal.size(2));
+        bool boundaryA = wrapAxisA != 0 && (i == 0 || i + 1 >= int(EyReal.size(0)));
+        bool boundaryB = wrapAxisB != 0 && (k == 0 || k + 1 >= int(EyReal.size(2)));
         int pairA = (i == 0) ? int(EyReal.size(0)) - 1 : 0;
         int pairB = (k == 0) ? int(EyReal.size(2)) - 1 : 0;
 
@@ -287,8 +289,8 @@ void addSourcePatchBloch3D(
     EzReal[uint(i), uint(j), uint(k)] += delta.x;
     EzImag[uint(i), uint(j), uint(k)] += delta.y;
 
-    bool boundaryA = i == 0 || i + 1 >= int(EzReal.size(0));
-    bool boundaryB = j == 0 || j + 1 >= int(EzReal.size(1));
+    bool boundaryA = wrapAxisA != 0 && (i == 0 || i + 1 >= int(EzReal.size(0)));
+    bool boundaryB = wrapAxisB != 0 && (j == 0 || j + 1 >= int(EzReal.size(1)));
     int pairA = (i == 0) ? int(EzReal.size(0)) - 1 : 0;
     int pairB = (j == 0) ? int(EzReal.size(1)) - 1 : 0;
 

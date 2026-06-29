@@ -205,6 +205,99 @@ def test_fdtd_mixed_bloch_xy_pml_z_runs_with_complex_fields():
     assert torch.isfinite(torch.as_tensor(value).abs()).all()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_fdtd_mixed_bloch_pml_preserves_xy_phase_relationship():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.faces(
+            default="pml",
+            num_layers=4,
+            strength=1.0,
+            x="bloch",
+            y="bloch",
+            z="pml",
+            bloch_wavevector=(math.pi / 1.2, math.pi / 2.4, 0.0),
+        ),
+        device="cuda",
+    )
+    scene.add_source(
+        mw.PointDipole(
+            position=(-0.48, 0.0, 0.0),
+            polarization="Ez",
+            width=0.08,
+            source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
+        )
+    )
+
+    result = mw.Simulation.fdtd(
+        scene,
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=8),
+        absorber="cpml",
+        full_field_dft=True,
+    ).run()
+
+    ez = result.tensor("Ez")
+    phase_x = complex(result.solver.boundary_phase_cos[0], result.solver.boundary_phase_sin[0])
+    phase_y = complex(result.solver.boundary_phase_cos[1], result.solver.boundary_phase_sin[1])
+    x_low = ez[0, ez.shape[1] // 2, ez.shape[2] // 2]
+    x_high = ez[-1, ez.shape[1] // 2, ez.shape[2] // 2]
+    y_low = ez[ez.shape[0] // 2, 0, ez.shape[2] // 2]
+    y_high = ez[ez.shape[0] // 2, -1, ez.shape[2] // 2]
+    assert torch.abs(x_high - phase_x * x_low) / torch.clamp(torch.abs(x_high), min=1e-12) < 5e-2
+    assert torch.abs(y_high - phase_y * y_low) / torch.clamp(torch.abs(y_high), min=1e-12) < 5e-2
+
+    z_cpml_memory = [
+        getattr(result.solver, name)
+        for name in (
+            "psi_ex_z",
+            "psi_ey_z",
+            "psi_hx_z",
+            "psi_hy_z",
+            "psi_ex_z_imag",
+            "psi_ey_z_imag",
+            "psi_hx_z_imag",
+            "psi_hy_z_imag",
+        )
+    ]
+    assert all(bool(torch.isfinite(tensor).all().item()) for tensor in z_cpml_memory)
+    assert any(torch.max(torch.abs(tensor)).item() > 0.0 for tensor in z_cpml_memory)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_fdtd_mixed_bloch_cpml_rejects_non_grating_update_layout():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+        grid=mw.GridSpec.uniform(0.2),
+        boundary=mw.BoundarySpec.faces(
+            default="pml",
+            num_layers=3,
+            strength=1.0,
+            x="bloch",
+            y="pml",
+            z="pml",
+            bloch_wavevector=(math.pi / 1.2, 0.0, 0.0),
+        ),
+        device="cuda",
+    )
+    scene.add_source(
+        mw.PointDipole(
+            position=(0.0, 0.0, 0.0),
+            polarization="Ez",
+            width=0.1,
+            source_time=mw.CW(frequency=1.0e9, amplitude=10.0),
+        )
+    )
+    with pytest.raises(NotImplementedError, match="x/y Bloch with z PML"):
+        mw.Simulation.fdtd(
+            scene,
+            frequencies=[1.0e9],
+            run_time=mw.TimeConfig(time_steps=2),
+            absorber="cpml",
+        ).run()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
 def test_fdtd_pec_boundary_keeps_tangential_electric_field_zero_with_edge_source():
     _, fields = _run_fdtd_boundary_case(

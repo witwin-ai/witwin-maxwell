@@ -380,6 +380,8 @@ __global__ void add_bloch_source_patch_kernel(
     float phase_sin_a,
     float phase_cos_b,
     float phase_sin_b,
+    int wrap_a,
+    int wrap_b,
     float* __restrict__ real,
     float* __restrict__ imag,
     const float* __restrict__ patch) {
@@ -404,8 +406,8 @@ __global__ void add_bloch_source_patch_kernel(
   const float amplitude = patch[linear];
   const float2 delta = make_float2(signal_real * amplitude, signal_imag * amplitude);
   const long long field_linear = offset_shape(ci, cj, ck, field_shape);
-  const bool boundary_a = axis_a_coord == 0 || axis_a_coord + 1 >= axis_a_size;
-  const bool boundary_b = axis_b_coord == 0 || axis_b_coord + 1 >= axis_b_size;
+  const bool boundary_a = wrap_a != 0 && (axis_a_coord == 0 || axis_a_coord + 1 >= axis_a_size);
+  const bool boundary_b = wrap_b != 0 && (axis_b_coord == 0 || axis_b_coord + 1 >= axis_b_size);
   if (!boundary_a && !boundary_b) {
     real[field_linear] += delta.x;
     imag[field_linear] += delta.y;
@@ -458,6 +460,8 @@ void launch_bloch_source_patch(
     float phase_sin_a,
     float phase_cos_b,
     float phase_sin_b,
+    int wrap_a,
+    int wrap_b,
     float* __restrict__ real,
     float* __restrict__ imag,
     const float* __restrict__ patch) {
@@ -474,6 +478,8 @@ void launch_bloch_source_patch(
       phase_sin_a,
       phase_cos_b,
       phase_sin_b,
+      wrap_a,
+      wrap_b,
       real,
       imag,
       patch);
@@ -1097,7 +1103,9 @@ void add_source_patch_bloch_cuda(
     double phase_cos_a,
     double phase_sin_a,
     double phase_cos_b,
-    double phase_sin_b) {
+    double phase_sin_b,
+    int64_t wrap_axis_a,
+    int64_t wrap_axis_b) {
   check_float_3d(ex_real, "ex_real");
   check_float_3d(ex_imag, "ex_imag");
   check_float_3d(ey_real, "ey_real");
@@ -1129,6 +1137,8 @@ void add_source_patch_bloch_cuda(
         static_cast<float>(phase_sin_a),
         static_cast<float>(phase_cos_b),
         static_cast<float>(phase_sin_b),
+        static_cast<int>(wrap_axis_a),
+        static_cast<int>(wrap_axis_b),
         ex_real.data_ptr<float>(),
         ex_imag.data_ptr<float>(),
         patch.data_ptr<float>());
@@ -1145,6 +1155,8 @@ void add_source_patch_bloch_cuda(
         static_cast<float>(phase_sin_a),
         static_cast<float>(phase_cos_b),
         static_cast<float>(phase_sin_b),
+        static_cast<int>(wrap_axis_a),
+        static_cast<int>(wrap_axis_b),
         ey_real.data_ptr<float>(),
         ey_imag.data_ptr<float>(),
         patch.data_ptr<float>());
@@ -1161,6 +1173,8 @@ void add_source_patch_bloch_cuda(
         static_cast<float>(phase_sin_a),
         static_cast<float>(phase_cos_b),
         static_cast<float>(phase_sin_b),
+        static_cast<int>(wrap_axis_a),
+        static_cast<int>(wrap_axis_b),
         ez_real.data_ptr<float>(),
         ez_imag.data_ptr<float>(),
         patch.data_ptr<float>());

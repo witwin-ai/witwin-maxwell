@@ -116,6 +116,18 @@ def _fake_checkpoint_solver():
             "psi_hy_z",
             "psi_hz_x",
             "psi_hz_y",
+            "psi_ex_y_imag",
+            "psi_ex_z_imag",
+            "psi_ey_x_imag",
+            "psi_ey_z_imag",
+            "psi_ez_x_imag",
+            "psi_ez_y_imag",
+            "psi_hx_y_imag",
+            "psi_hx_z_imag",
+            "psi_hy_x_imag",
+            "psi_hy_z_imag",
+            "psi_hz_x_imag",
+            "psi_hz_y_imag",
         )
     ):
         setattr(solver, name, torch.full((2,), float(index + 1)))
@@ -570,7 +582,20 @@ def test_capture_checkpoint_state_freezes_schema_layout():
         "psi_hy_z",
         "psi_hz_x",
         "psi_hz_y",
+        "psi_ex_y_imag",
+        "psi_ex_z_imag",
+        "psi_ey_x_imag",
+        "psi_ey_z_imag",
+        "psi_ez_x_imag",
+        "psi_ez_y_imag",
+        "psi_hx_y_imag",
+        "psi_hx_z_imag",
+        "psi_hy_x_imag",
+        "psi_hy_z_imag",
+        "psi_hz_x_imag",
+        "psi_hz_y_imag",
     )
+    assert torch.equal(state.tensors["psi_ex_z_imag"], torch.full((2,), 26.0))
     assert state.schema.tfsf_auxiliary_state_names == (
         "tfsf_aux_electric",
         "tfsf_aux_magnetic",

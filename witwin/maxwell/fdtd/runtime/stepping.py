@@ -6,7 +6,7 @@ import torch
 from tqdm import tqdm
 
 from ...visualization import visualize_slice
-from ..boundary import BOUNDARY_PEC, has_complex_fields, initialize_boundary_state
+from ..boundary import BOUNDARY_BLOCH, BOUNDARY_PEC, BOUNDARY_PML, has_complex_fields, initialize_boundary_state
 from ..excitation import (
     advance_tfsf_auxiliary_electric,
     advance_tfsf_auxiliary_magnetic,
@@ -86,15 +86,23 @@ def cpml_layout_params(solver, attr_name):
     return low_length, high_start, high_length
 
 
-def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez):
+def _cpml_memory_attr(attr_name, *, imag=False):
+    return f"{attr_name}_imag" if imag else attr_name
+
+
+def _cpml_memory_tensor(solver, attr_name, *, imag=False):
+    return getattr(solver, _cpml_memory_attr(attr_name, imag=imag))
+
+
+def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
     solver.fdtd_module.updateMagneticFieldHx3D(
         Hx=hx,
         Ey=ey,
         Ez=ez,
         HxDecay=solver.chx_decay,
         HxCurl=solver.chx_curl,
-        PsiHxY=solver.psi_hx_y,
-        PsiHxZ=solver.psi_hx_z,
+        PsiHxY=_cpml_memory_tensor(solver, "psi_hx_y", imag=imag),
+        PsiHxZ=_cpml_memory_tensor(solver, "psi_hx_z", imag=imag),
         InvKappaHxY=solver.cpml_inv_kappa_h_y,
         ByHxY=solver.cpml_b_h_y,
         CyHxY=solver.cpml_c_h_y,
@@ -110,8 +118,8 @@ def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez):
         Ez=ez,
         HyDecay=solver.chy_decay,
         HyCurl=solver.chy_curl,
-        PsiHyX=solver.psi_hy_x,
-        PsiHyZ=solver.psi_hy_z,
+        PsiHyX=_cpml_memory_tensor(solver, "psi_hy_x", imag=imag),
+        PsiHyZ=_cpml_memory_tensor(solver, "psi_hy_z", imag=imag),
         InvKappaHyX=solver.cpml_inv_kappa_h_x,
         ByHyX=solver.cpml_b_h_x,
         CyHyX=solver.cpml_c_h_x,
@@ -127,8 +135,8 @@ def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez):
         Ey=ey,
         HzDecay=solver.chz_decay,
         HzCurl=solver.chz_curl,
-        PsiHzX=solver.psi_hz_x,
-        PsiHzY=solver.psi_hz_y,
+        PsiHzX=_cpml_memory_tensor(solver, "psi_hz_x", imag=imag),
+        PsiHzY=_cpml_memory_tensor(solver, "psi_hz_y", imag=imag),
         InvKappaHzX=solver.cpml_inv_kappa_h_x,
         ByHzX=solver.cpml_b_h_x,
         CyHzX=solver.cpml_c_h_x,
@@ -140,13 +148,19 @@ def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez):
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hz"])
 
 
-def update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez):
-    psi_hx_y_low, psi_hx_y_high_start, psi_hx_y_high = cpml_layout_params(solver, "psi_hx_y")
-    psi_hx_z_low, psi_hx_z_high_start, psi_hx_z_high = cpml_layout_params(solver, "psi_hx_z")
-    psi_hy_x_low, psi_hy_x_high_start, psi_hy_x_high = cpml_layout_params(solver, "psi_hy_x")
-    psi_hy_z_low, psi_hy_z_high_start, psi_hy_z_high = cpml_layout_params(solver, "psi_hy_z")
-    psi_hz_x_low, psi_hz_x_high_start, psi_hz_x_high = cpml_layout_params(solver, "psi_hz_x")
-    psi_hz_y_low, psi_hz_y_high_start, psi_hz_y_high = cpml_layout_params(solver, "psi_hz_y")
+def update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
+    psi_hx_y_attr = _cpml_memory_attr("psi_hx_y", imag=imag)
+    psi_hx_z_attr = _cpml_memory_attr("psi_hx_z", imag=imag)
+    psi_hy_x_attr = _cpml_memory_attr("psi_hy_x", imag=imag)
+    psi_hy_z_attr = _cpml_memory_attr("psi_hy_z", imag=imag)
+    psi_hz_x_attr = _cpml_memory_attr("psi_hz_x", imag=imag)
+    psi_hz_y_attr = _cpml_memory_attr("psi_hz_y", imag=imag)
+    psi_hx_y_low, psi_hx_y_high_start, psi_hx_y_high = cpml_layout_params(solver, psi_hx_y_attr)
+    psi_hx_z_low, psi_hx_z_high_start, psi_hx_z_high = cpml_layout_params(solver, psi_hx_z_attr)
+    psi_hy_x_low, psi_hy_x_high_start, psi_hy_x_high = cpml_layout_params(solver, psi_hy_x_attr)
+    psi_hy_z_low, psi_hy_z_high_start, psi_hy_z_high = cpml_layout_params(solver, psi_hy_z_attr)
+    psi_hz_x_low, psi_hz_x_high_start, psi_hz_x_high = cpml_layout_params(solver, psi_hz_x_attr)
+    psi_hz_y_low, psi_hz_y_high_start, psi_hz_y_high = cpml_layout_params(solver, psi_hz_y_attr)
 
     solver.fdtd_module.updateMagneticFieldHxCpmlCompressed3D(
         Hx=hx,
@@ -154,8 +168,8 @@ def update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez):
         Ez=ez,
         HxDecay=solver.chx_decay,
         HxCurl=solver.chx_curl,
-        PsiHxY=solver.psi_hx_y,
-        PsiHxZ=solver.psi_hx_z,
+        PsiHxY=_cpml_memory_tensor(solver, "psi_hx_y", imag=imag),
+        PsiHxZ=_cpml_memory_tensor(solver, "psi_hx_z", imag=imag),
         InvKappaHxY=solver.cpml_inv_kappa_h_y,
         ByHxY=solver.cpml_b_h_y,
         CyHxY=solver.cpml_c_h_y,
@@ -177,8 +191,8 @@ def update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez):
         Ez=ez,
         HyDecay=solver.chy_decay,
         HyCurl=solver.chy_curl,
-        PsiHyX=solver.psi_hy_x,
-        PsiHyZ=solver.psi_hy_z,
+        PsiHyX=_cpml_memory_tensor(solver, "psi_hy_x", imag=imag),
+        PsiHyZ=_cpml_memory_tensor(solver, "psi_hy_z", imag=imag),
         InvKappaHyX=solver.cpml_inv_kappa_h_x,
         ByHyX=solver.cpml_b_h_x,
         CyHyX=solver.cpml_c_h_x,
@@ -200,8 +214,8 @@ def update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez):
         Ey=ey,
         HzDecay=solver.chz_decay,
         HzCurl=solver.chz_curl,
-        PsiHzX=solver.psi_hz_x,
-        PsiHzY=solver.psi_hz_y,
+        PsiHzX=_cpml_memory_tensor(solver, "psi_hz_x", imag=imag),
+        PsiHzY=_cpml_memory_tensor(solver, "psi_hz_y", imag=imag),
         InvKappaHzX=solver.cpml_inv_kappa_h_x,
         ByHzX=solver.cpml_b_h_x,
         CyHzX=solver.cpml_c_h_x,
@@ -219,11 +233,11 @@ def update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez):
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hz"])
 
 
-def update_magnetic_fields_cpml(solver, hx, hy, hz, ex, ey, ez):
+def update_magnetic_fields_cpml(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
     if solver._cpml_memory_mode == "dense":
-        update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez)
+        update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, imag=imag)
         return
-    update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez)
+    update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez, imag=imag)
 
 
 def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
@@ -256,9 +270,9 @@ def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hz"])
 
 
-def update_magnetic_fields(solver, hx, hy, hz, ex, ey, ez):
+def update_magnetic_fields(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
     if solver.uses_cpml:
-        update_magnetic_fields_cpml(solver, hx, hy, hz, ex, ey, ez)
+        update_magnetic_fields_cpml(solver, hx, hy, hz, ex, ey, ez, imag=imag)
     else:
         update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez)
 
@@ -538,6 +552,157 @@ def update_electric_fields_bloch(solver):
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
 
 
+def update_electric_fields_bloch_xy_standard_z(solver):
+    if getattr(solver, "kerr_enabled", False):
+        raise NotImplementedError("FDTD Kerr media are not implemented for Bloch / complex-field runs.")
+    solver.fdtd_module.updateElectricFieldExBlochYStandardZ3D(
+        ExReal=solver.Ex,
+        ExImag=solver.Ex_imag,
+        HyReal=solver.Hy,
+        HyImag=solver.Hy_imag,
+        HzReal=solver.Hz,
+        HzImag=solver.Hz_imag,
+        ExDecay=solver.cex_decay,
+        ExCurl=solver.cex_curl,
+        phaseCosY=solver.boundary_phase_cos[1],
+        phaseSinY=solver.boundary_phase_sin[1],
+        invDy=solver.inv_dy,
+        invDz=solver.inv_dz,
+        zLowBoundaryMode=solver.boundary_z_low_code,
+        zHighBoundaryMode=solver.boundary_z_high_code,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    solver.fdtd_module.updateElectricFieldEyBlochXStandardZ3D(
+        EyReal=solver.Ey,
+        EyImag=solver.Ey_imag,
+        HxReal=solver.Hx,
+        HxImag=solver.Hx_imag,
+        HzReal=solver.Hz,
+        HzImag=solver.Hz_imag,
+        EyDecay=solver.cey_decay,
+        EyCurl=solver.cey_curl,
+        phaseCosX=solver.boundary_phase_cos[0],
+        phaseSinX=solver.boundary_phase_sin[0],
+        invDx=solver.inv_dx,
+        invDz=solver.inv_dz,
+        zLowBoundaryMode=solver.boundary_z_low_code,
+        zHighBoundaryMode=solver.boundary_z_high_code,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    solver.fdtd_module.updateElectricFieldEzBloch3D(
+        EzReal=solver.Ez,
+        EzImag=solver.Ez_imag,
+        HxReal=solver.Hx,
+        HxImag=solver.Hx_imag,
+        HyReal=solver.Hy,
+        HyImag=solver.Hy_imag,
+        EzDecay=solver.cez_decay,
+        EzCurl=solver.cez_curl,
+        phaseCosX=solver.boundary_phase_cos[0],
+        phaseSinX=solver.boundary_phase_sin[0],
+        phaseCosY=solver.boundary_phase_cos[1],
+        phaseSinY=solver.boundary_phase_sin[1],
+        invDx=solver.inv_dx,
+        invDy=solver.inv_dy,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+
+
+def _validate_bloch_cpml_update_layout(solver):
+    if tuple(getattr(solver, "has_bloch_axes", ())) != ("x", "y"):
+        raise NotImplementedError("Mixed Bloch/CPML FDTD updates currently support x/y Bloch with z PML only.")
+    if (
+        solver.boundary_x_low_code != BOUNDARY_BLOCH
+        or solver.boundary_x_high_code != BOUNDARY_BLOCH
+        or solver.boundary_y_low_code != BOUNDARY_BLOCH
+        or solver.boundary_y_high_code != BOUNDARY_BLOCH
+        or solver.boundary_z_low_code != BOUNDARY_PML
+        or solver.boundary_z_high_code != BOUNDARY_PML
+    ):
+        raise NotImplementedError("Mixed Bloch/CPML FDTD updates currently support paired x/y Bloch faces and z PML faces only.")
+
+
+def _iter_cpml_field_regions(solver, field, curl, attr_name):
+    layout = getattr(solver, "_cpml_memory_layouts", {}).get(attr_name)
+    if layout is None:
+        field_key = "Ex" if attr_name.startswith("psi_ex_z") else "Ey"
+        yield {
+            "field": field,
+            "curl": curl,
+            "psi": getattr(solver, attr_name),
+            "offsets": (0, 0, 0),
+            "grid": solver._field_launch_shapes[field_key],
+        }
+        return
+
+    axis = int(layout["axis"])
+    for region in iter_cpml_memory_regions(solver, attr_name):
+        length = int(region["length"])
+        start = int(region["offsets"][axis])
+        yield {
+            "field": field.narrow(axis, start, length),
+            "curl": curl.narrow(axis, start, length),
+            "psi": region["psi"],
+            "offsets": region["offsets"],
+            "grid": region["grid"],
+        }
+
+
+def _apply_electric_z_cpml_corrections(solver, ex, ey, hx, hy, *, imag=False):
+    psi_ex_z_attr = _cpml_memory_attr("psi_ex_z", imag=imag)
+    psi_ey_z_attr = _cpml_memory_attr("psi_ey_z", imag=imag)
+    for region in _iter_cpml_field_regions(solver, ex, solver.cex_curl, psi_ex_z_attr):
+        offset_i, offset_j, offset_k = region["offsets"]
+        solver.fdtd_module.applyElectricFieldExCpmlZCorrection3D(
+            Ex=region["field"],
+            Hy=hy,
+            ExCurl=region["curl"],
+            PsiExZ=region["psi"],
+            InvKappaExZ=solver.cpml_inv_kappa_e_z,
+            BExZ=solver.cpml_b_e_z,
+            CExZ=solver.cpml_c_e_z,
+            invDz=solver.inv_dz,
+            offsetI=offset_i,
+            offsetJ=offset_j,
+            offsetK=offset_k,
+            yLowBoundaryMode=solver.boundary_y_low_code,
+            yHighBoundaryMode=solver.boundary_y_high_code,
+            fullSizeY=solver.Ex.shape[1],
+            fullSizeZ=solver.Ex.shape[2],
+        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
+
+    for region in _iter_cpml_field_regions(solver, ey, solver.cey_curl, psi_ey_z_attr):
+        offset_i, offset_j, offset_k = region["offsets"]
+        solver.fdtd_module.applyElectricFieldEyCpmlZCorrection3D(
+            Ey=region["field"],
+            Hx=hx,
+            EyCurl=region["curl"],
+            PsiEyZ=region["psi"],
+            InvKappaEyZ=solver.cpml_inv_kappa_e_z,
+            BEyZ=solver.cpml_b_e_z,
+            CEyZ=solver.cpml_c_e_z,
+            invDz=solver.inv_dz,
+            offsetI=offset_i,
+            offsetJ=offset_j,
+            offsetK=offset_k,
+            xLowBoundaryMode=solver.boundary_x_low_code,
+            xHighBoundaryMode=solver.boundary_x_high_code,
+            fullSizeX=solver.Ey.shape[0],
+            fullSizeZ=solver.Ey.shape[2],
+        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
+
+
+def update_electric_fields_bloch_cpml(solver):
+    _validate_bloch_cpml_update_layout(solver)
+    update_electric_fields_bloch_xy_standard_z(solver)
+    _apply_electric_z_cpml_corrections(solver, solver.Ex, solver.Ey, solver.Hx, solver.Hy, imag=False)
+    _apply_electric_z_cpml_corrections(
+        solver,
+        solver.Ex_imag,
+        solver.Ey_imag,
+        solver.Hx_imag,
+        solver.Hy_imag,
+        imag=True,
+    )
+
+
 def clamp_field_face(solver, field, axis, side):
     side_code = 0 if side == "low" else 1
     module = getattr(solver, "fdtd_module", None)
@@ -714,6 +879,7 @@ def solve(
                 solver.Ex_imag,
                 solver.Ey_imag,
                 solver.Ez_imag,
+                imag=True,
             )
         if solver.tfsf_enabled:
             apply_tfsf_h_correction(solver, time_value)
@@ -724,7 +890,10 @@ def solve(
 
         if has_complex_fields(solver):
             solver._advance_dispersive_state()
-            update_electric_fields_bloch(solver)
+            if solver.uses_cpml:
+                update_electric_fields_bloch_cpml(solver)
+            else:
+                update_electric_fields_bloch(solver)
         else:
             solver._advance_dispersive_state()
             if solver.kerr_enabled:

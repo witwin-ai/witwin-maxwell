@@ -93,16 +93,27 @@ def _launch_uniform_patch(solver, *, field_name, source_patch, offsets, signal, 
     )
 
 
-def _periodic_wrap_axes(solver, field_name):
-    tangential_axes = {
-        "Ex": ("y", "z"),
-        "Ey": ("x", "z"),
-        "Ez": ("x", "y"),
-    }[field_name]
+_FIELD_TANGENTIAL_AXES = {
+    "Ex": ("y", "z"),
+    "Ey": ("x", "z"),
+    "Ez": ("x", "y"),
+}
+
+
+def _wrap_axes_for_kind(solver, field_name, kind):
+    tangential_axes = _FIELD_TANGENTIAL_AXES[field_name]
     return tuple(
-        1 if solver.scene.boundary.axis_kind(axis) == "periodic" else 0
+        1 if solver.scene.boundary.axis_kind(axis) == kind else 0
         for axis in tangential_axes
     )
+
+
+def _periodic_wrap_axes(solver, field_name):
+    return _wrap_axes_for_kind(solver, field_name, "periodic")
+
+
+def _bloch_wrap_axes(solver, field_name):
+    return _wrap_axes_for_kind(solver, field_name, "bloch")
 
 
 def _launch_cw_patch(solver, *, field_name, term, signal_cos, signal_sin):
@@ -229,6 +240,7 @@ def _launch_periodic_patch(solver, *, field_name, term, signal):
 
 
 def _launch_bloch_patch(solver, *, field_name, term, signal):
+    wrap_axis_a, wrap_axis_b = _bloch_wrap_axes(solver, field_name)
     offset_i, offset_j, offset_k = term["offsets"]
     kernel_kwargs = {
         "sourcePatch": term["patch"],
@@ -238,6 +250,8 @@ def _launch_bloch_patch(solver, *, field_name, term, signal):
         "signalReal": float(signal) * float(term["phase_real"]),
         "signalImag": float(signal) * float(term["phase_imag"]),
         "axisCode": {"Ex": 0, "Ey": 1, "Ez": 2}[field_name],
+        "wrapAxisA": int(wrap_axis_a),
+        "wrapAxisB": int(wrap_axis_b),
         "ExReal": solver.Ex,
         "ExImag": solver.Ex_imag,
         "EyReal": solver.Ey,
@@ -327,7 +341,7 @@ def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value
                 signal=signal_cache[cache_key],
             )
             continue
-        if solver.boundary_kind == "bloch":
+        if solver.scene.boundary.uses_kind("bloch"):
             _launch_bloch_patch(
                 solver,
                 field_name=field_name,

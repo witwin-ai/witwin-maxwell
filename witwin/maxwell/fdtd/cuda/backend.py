@@ -1211,6 +1211,145 @@ def _electric_ez_cpml(
     )
 
 
+def _cpml_correction_active_mask(
+    size: int,
+    offset: int,
+    full_size: int,
+    low_mode: int,
+    high_mode: int,
+    *,
+    device,
+) -> torch.Tensor:
+    indices = torch.arange(size, device=device, dtype=torch.long) + int(offset)
+    active = torch.ones(size, device=device, dtype=torch.bool)
+    inactive_modes = (BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_PML)
+    if int(low_mode) in inactive_modes:
+        active &= indices != 0
+    if int(high_mode) in inactive_modes:
+        active &= indices + 1 != int(full_size)
+    return active
+
+
+def _cpml_z_local_range(local_size: int, offset: int, full_size: int) -> tuple[int, int]:
+    start = max(0, 1 - int(offset))
+    stop = min(local_size, int(full_size) - 1 - int(offset))
+    return start, stop
+
+
+def _apply_electric_ex_cpml_z_correction(
+    *,
+    Ex,
+    Hy,
+    ExCurl,
+    PsiExZ,
+    InvKappaExZ,
+    BExZ,
+    CExZ,
+    invDz,
+    offsetI,
+    offsetJ,
+    offsetK,
+    yLowBoundaryMode,
+    yHighBoundaryMode,
+    fullSizeY,
+    fullSizeZ,
+):
+    _require_cuda_tensors(Ex, Hy, ExCurl, PsiExZ, InvKappaExZ, BExZ, CExZ)
+    offset_i = int(offsetI)
+    offset_j = int(offsetJ)
+    offset_k = int(offsetK)
+    local_z_start, local_z_stop = _cpml_z_local_range(Ex.shape[2], offset_k, fullSizeZ)
+    if local_z_stop <= local_z_start:
+        return
+
+    x_slice = slice(offset_i, offset_i + Ex.shape[0])
+    y_slice = slice(offset_j, offset_j + Ex.shape[1])
+    local_z = slice(local_z_start, local_z_stop)
+    global_z_start = offset_k + local_z_start
+    global_z_stop = offset_k + local_z_stop
+    global_z = slice(global_z_start, global_z_stop)
+    global_z_prev = slice(global_z_start - 1, global_z_stop - 1)
+
+    derivative = (Hy[x_slice, y_slice, global_z] - Hy[x_slice, y_slice, global_z_prev]) * float(invDz)
+    psi_region = PsiExZ[:, :, local_z]
+    psi = _axis_view(BExZ[global_z], 2) * psi_region + _axis_view(CExZ[global_z], 2) * derivative
+    active = _axis_view(
+        _cpml_correction_active_mask(
+            Ex.shape[1],
+            offset_j,
+            fullSizeY,
+            yLowBoundaryMode,
+            yHighBoundaryMode,
+            device=Ex.device,
+        ),
+        1,
+    )
+    updated_psi = torch.where(active, psi, psi_region)
+    psi_region.copy_(updated_psi)
+
+    field_region = Ex[:, :, local_z]
+    correction = derivative * (_axis_view(InvKappaExZ[global_z], 2) - 1.0) + updated_psi
+    updated_field = field_region - ExCurl[:, :, local_z] * correction
+    field_region.copy_(torch.where(active, updated_field, field_region))
+
+
+def _apply_electric_ey_cpml_z_correction(
+    *,
+    Ey,
+    Hx,
+    EyCurl,
+    PsiEyZ,
+    InvKappaEyZ,
+    BEyZ,
+    CEyZ,
+    invDz,
+    offsetI,
+    offsetJ,
+    offsetK,
+    xLowBoundaryMode,
+    xHighBoundaryMode,
+    fullSizeX,
+    fullSizeZ,
+):
+    _require_cuda_tensors(Ey, Hx, EyCurl, PsiEyZ, InvKappaEyZ, BEyZ, CEyZ)
+    offset_i = int(offsetI)
+    offset_j = int(offsetJ)
+    offset_k = int(offsetK)
+    local_z_start, local_z_stop = _cpml_z_local_range(Ey.shape[2], offset_k, fullSizeZ)
+    if local_z_stop <= local_z_start:
+        return
+
+    x_slice = slice(offset_i, offset_i + Ey.shape[0])
+    y_slice = slice(offset_j, offset_j + Ey.shape[1])
+    local_z = slice(local_z_start, local_z_stop)
+    global_z_start = offset_k + local_z_start
+    global_z_stop = offset_k + local_z_stop
+    global_z = slice(global_z_start, global_z_stop)
+    global_z_prev = slice(global_z_start - 1, global_z_stop - 1)
+
+    derivative = (Hx[x_slice, y_slice, global_z] - Hx[x_slice, y_slice, global_z_prev]) * float(invDz)
+    psi_region = PsiEyZ[:, :, local_z]
+    psi = _axis_view(BEyZ[global_z], 2) * psi_region + _axis_view(CEyZ[global_z], 2) * derivative
+    active = _axis_view(
+        _cpml_correction_active_mask(
+            Ey.shape[0],
+            offset_i,
+            fullSizeX,
+            xLowBoundaryMode,
+            xHighBoundaryMode,
+            device=Ey.device,
+        ),
+        0,
+    )
+    updated_psi = torch.where(active, psi, psi_region)
+    psi_region.copy_(updated_psi)
+
+    field_region = Ey[:, :, local_z]
+    correction = derivative * (_axis_view(InvKappaEyZ[global_z], 2) - 1.0) + updated_psi
+    updated_field = field_region + EyCurl[:, :, local_z] * correction
+    field_region.copy_(torch.where(active, updated_field, field_region))
+
+
 def _electric_ex_cpml_compressed(
     *,
     Ex,
@@ -1609,6 +1748,54 @@ def _electric_ey_bloch(
     EyImag.copy_(EyImag * EyDecay + EyCurl * (d_z_i - d_x_i))
 
 
+def _electric_ex_bloch_y_standard_z(
+    *,
+    ExReal,
+    ExImag,
+    HyReal,
+    HyImag,
+    HzReal,
+    HzImag,
+    ExDecay,
+    ExCurl,
+    phaseCosY,
+    phaseSinY,
+    invDy,
+    invDz,
+    zLowBoundaryMode,
+    zHighBoundaryMode,
+):
+    d_y_r, d_y_i = _bloch_backward_diff(HzReal, HzImag, tuple(ExReal.shape), 1, phaseCosY, phaseSinY, invDy)
+    d_z_r = _backward_diff(HyReal, tuple(ExReal.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
+    d_z_i = _backward_diff(HyImag, tuple(ExImag.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
+    ExReal.copy_(ExReal * ExDecay + ExCurl * (d_y_r - d_z_r))
+    ExImag.copy_(ExImag * ExDecay + ExCurl * (d_y_i - d_z_i))
+
+
+def _electric_ey_bloch_x_standard_z(
+    *,
+    EyReal,
+    EyImag,
+    HxReal,
+    HxImag,
+    HzReal,
+    HzImag,
+    EyDecay,
+    EyCurl,
+    phaseCosX,
+    phaseSinX,
+    invDx,
+    invDz,
+    zLowBoundaryMode,
+    zHighBoundaryMode,
+):
+    d_z_r = _backward_diff(HxReal, tuple(EyReal.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
+    d_z_i = _backward_diff(HxImag, tuple(EyImag.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
+    d_x_r, d_x_i = _bloch_backward_diff(HzReal, HzImag, tuple(EyReal.shape), 0, phaseCosX, phaseSinX, invDx)
+    EyReal.copy_(EyReal * EyDecay + EyCurl * (d_z_r - d_x_r))
+    EyImag.copy_(EyImag * EyDecay + EyCurl * (d_z_i - d_x_i))
+
+
 def _electric_ez_bloch(
     *,
     EzReal,
@@ -1729,6 +1916,13 @@ def _scatter_bloch_duplicate(
         out_imag = torch.where(low, pos_imag, neg_imag)
     _scatter_values(real_field, dst_coords, mask, out_real)
     _scatter_values(imag_field, dst_coords, mask, out_imag)
+
+
+def _compiled_bloch_source_accepts_wrap_flags(extension) -> bool:
+    target_extension = getattr(extension, "_extension", extension)
+    method = getattr(target_extension, "add_source_patch_bloch", None)
+    doc = getattr(method, "__doc__", "") or ""
+    return "arg18:" in doc or "wrap_axis_b" in doc or "wrapAxisB" in doc
 
 
 def _add_source_patch(*, field, sourcePatch, offsetI, offsetJ, offsetK, signal):
@@ -1886,9 +2080,14 @@ def _add_source_patch_bloch(
     phaseSinA,
     phaseCosB,
     phaseSinB,
+    wrapAxisA=1,
+    wrapAxisB=1,
 ):
+    wrap_a = int(wrapAxisA) != 0
+    wrap_b = int(wrapAxisB) != 0
     if _use_compiled_field_kernels():
-        get_compiled_extension().add_source_patch_bloch(
+        extension = get_compiled_extension()
+        extension_args = (
             ExReal,
             ExImag,
             EyReal,
@@ -1907,7 +2106,12 @@ def _add_source_patch_bloch(
             float(phaseCosB),
             float(phaseSinB),
         )
-        return
+        if _compiled_bloch_source_accepts_wrap_flags(extension):
+            extension.add_source_patch_bloch(*extension_args, int(wrapAxisA), int(wrapAxisB))
+            return
+        if wrap_a and wrap_b:
+            extension.add_source_patch_bloch(*extension_args)
+            return
     fields = ((ExReal, ExImag), (EyReal, EyImag), (EzReal, EzImag))[int(axisCode)]
     offsets = (int(offsetI), int(offsetJ), int(offsetK))
     real_values = sourcePatch * float(signalReal)
@@ -1919,9 +2123,12 @@ def _add_source_patch_bloch(
         (tangential[0], float(phaseCosA), float(phaseSinA)),
         (tangential[1], float(phaseCosB), float(phaseSinB)),
     )
-    _scatter_bloch_duplicate(fields[0], fields[1], sourcePatch, offsets, real_values, imag_values, (phase_axes[0],))
-    _scatter_bloch_duplicate(fields[0], fields[1], sourcePatch, offsets, real_values, imag_values, (phase_axes[1],))
-    _scatter_bloch_duplicate(fields[0], fields[1], sourcePatch, offsets, real_values, imag_values, phase_axes)
+    if wrap_a:
+        _scatter_bloch_duplicate(fields[0], fields[1], sourcePatch, offsets, real_values, imag_values, (phase_axes[0],))
+    if wrap_b:
+        _scatter_bloch_duplicate(fields[0], fields[1], sourcePatch, offsets, real_values, imag_values, (phase_axes[1],))
+    if wrap_a and wrap_b:
+        _scatter_bloch_duplicate(fields[0], fields[1], sourcePatch, offsets, real_values, imag_values, phase_axes)
 
 
 def _add_scaled_slice_source_patch(*, field, sourcePatch, incidentField, sampleIndex, offsetI, offsetJ, offsetK, scale):
@@ -3817,8 +4024,12 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "updateElectricFieldExCpmlCompressed3D": _electric_ex_cpml_compressed,
     "updateElectricFieldEyCpmlCompressed3D": _electric_ey_cpml_compressed,
     "updateElectricFieldEzCpmlCompressed3D": _electric_ez_cpml_compressed,
+    "applyElectricFieldExCpmlZCorrection3D": _apply_electric_ex_cpml_z_correction,
+    "applyElectricFieldEyCpmlZCorrection3D": _apply_electric_ey_cpml_z_correction,
     "updateElectricFieldExBloch3D": _electric_ex_bloch,
     "updateElectricFieldEyBloch3D": _electric_ey_bloch,
+    "updateElectricFieldExBlochYStandardZ3D": _electric_ex_bloch_y_standard_z,
+    "updateElectricFieldEyBlochXStandardZ3D": _electric_ey_bloch_x_standard_z,
     "updateElectricFieldEzBloch3D": _electric_ez_bloch,
     "addSourcePatch3D": _add_source_patch,
     "addCwPhasedSourcePatch3D": _add_cw_phased_source_patch,

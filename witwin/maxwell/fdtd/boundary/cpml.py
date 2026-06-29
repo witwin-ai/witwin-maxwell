@@ -57,6 +57,7 @@ _CPML_MEMORY_ATTRS = (
     "psi_hz_x",
     "psi_hz_y",
 )
+_CPML_IMAG_MEMORY_ATTRS = tuple(f"{attr_name}_imag" for attr_name in _CPML_MEMORY_ATTRS)
 
 _CPML_MEMORY_SPECS = {
     "psi_ex_y": ("Ex", 1),
@@ -239,6 +240,9 @@ def _resolve_cpml_memory_mode(solver, dense_bytes):
 def _allocate_cpml_memory_variables(solver):
     layouts = {attr_name: _build_cpml_memory_layout(solver, attr_name) for attr_name in _CPML_MEMORY_ATTRS}
     dense_bytes, slab_bytes = _estimate_cpml_memory_bytes(layouts, solver)
+    memory_multiplier = 2 if bool(getattr(solver, "complex_fields_enabled", False)) else 1
+    dense_bytes *= memory_multiplier
+    slab_bytes *= memory_multiplier
     memory_mode = _resolve_cpml_memory_mode(solver, dense_bytes)
 
     solver._cpml_memory_layouts = {}
@@ -255,6 +259,13 @@ def _allocate_cpml_memory_variables(solver):
             solver._cpml_memory_layouts[attr_name] = layout
         solver._cpml_allocated_memory_bytes += tensor.numel() * tensor.element_size()
         setattr(solver, attr_name, tensor)
+        if bool(getattr(solver, "complex_fields_enabled", False)):
+            imag_attr_name = f"{attr_name}_imag"
+            imag_tensor = torch.zeros(target_shape, device=solver.device, dtype=field.dtype)
+            if memory_mode == "slab":
+                solver._cpml_memory_layouts[imag_attr_name] = layout
+            solver._cpml_allocated_memory_bytes += imag_tensor.numel() * imag_tensor.element_size()
+            setattr(solver, imag_attr_name, imag_tensor)
 
 
 def expand_cpml_memory_tensor(solver, attr_name):
@@ -313,7 +324,7 @@ def _set_inv_kappa_buffers(solver):
 
 
 def _clear_auxiliary_state(solver):
-    for attr in _CPML_VECTOR_ATTRS + _CPML_MEMORY_ATTRS + _SIGMA_ATTRS:
+    for attr in _CPML_VECTOR_ATTRS + _CPML_MEMORY_ATTRS + _CPML_IMAG_MEMORY_ATTRS + _SIGMA_ATTRS:
         setattr(solver, attr, None)
     solver._cpml_memory_layouts = {}
     solver._cpml_memory_mode = "none"

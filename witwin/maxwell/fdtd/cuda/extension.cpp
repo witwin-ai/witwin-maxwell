@@ -522,7 +522,9 @@ void add_source_patch_bloch_cuda(
     double phase_cos_a,
     double phase_sin_a,
     double phase_cos_b,
-    double phase_sin_b);
+    double phase_sin_b,
+    int64_t wrap_axis_a,
+    int64_t wrap_axis_b);
 void add_scaled_slice_source_patch_cuda(
     at::Tensor field,
     const at::Tensor& patch,
