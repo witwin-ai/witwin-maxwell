@@ -24,6 +24,8 @@ _OBLIQUE_TFSF_DIRECTION /= np.linalg.norm(_OBLIQUE_TFSF_DIRECTION)
 _OBLIQUE_TFSF_POLARIZATION = np.asarray((0.0, 0.514495755, -0.857492925), dtype=np.float64)
 _OBLIQUE_TFSF_POLARIZATION /= np.linalg.norm(_OBLIQUE_TFSF_POLARIZATION)
 _OBLIQUE_TFSF_PROBE_STEP = 0.12
+_GRATING_TFSF_DOMAIN_BOUNDS = ((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))
+_GRATING_TFSF_Z_BOUNDS = (-0.24, 0.24)
 
 
 def _tests_root() -> Path:
@@ -314,6 +316,33 @@ def _oblique_tfsf_scene():
     return scene
 
 
+def _grating_tfsf_scene():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=_GRATING_TFSF_DOMAIN_BOUNDS),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.faces(
+            default="pml",
+            num_layers=4,
+            strength=1.0,
+            x="bloch",
+            y="bloch",
+            z="pml",
+            bloch_wavevector="auto",
+        ),
+        device="cuda",
+    )
+    scene.add_source(
+        mw.PlaneWave(
+            direction=(0.2, 0.1, 0.9746794344808963),
+            polarization=(1.0, 0.0, -0.20519567041703082),
+            source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
+            injection=mw.TFSF.slab(axis="z", bounds=_GRATING_TFSF_Z_BOUNDS),
+            name="grating_tfsf",
+        )
+    )
+    return scene
+
+
 def _run_boundary_result(scene):
     return mw.Simulation.fdtd(
         scene,
@@ -332,6 +361,17 @@ def _run_tfsf_result(scene, *, steady_cycles=6, transient_cycles=15):
         run_time=mw.TimeConfig.auto(steady_cycles=steady_cycles, transient_cycles=transient_cycles),
         spectral_sampler=mw.SpectralSampler(window="hanning"),
         full_field_dft=True,
+    ).run()
+
+
+def _run_grating_tfsf_result(scene):
+    return mw.Simulation.fdtd(
+        scene,
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig(time_steps=64),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+        full_field_dft=True,
+        absorber="cpml",
     ).run()
 
 
@@ -676,6 +716,31 @@ def _tfsf_scatter_summary():
     return summary
 
 
+@lru_cache(maxsize=None)
+def _grating_tfsf_summary():
+    scene = _grating_tfsf_scene()
+    result = _run_grating_tfsf_result(scene)
+    ez, x, y, z = _component_volume(result, "Ez")
+    mid_y = int(np.argmin(np.abs(y)))
+    plot_path = _save_plane_magnitude_plot(
+        field=ez[:, mid_y, :],
+        coord_a=x,
+        coord_b=z,
+        axis="y",
+        output_name="grating_tfsf_xy_bloch_z_pml.png",
+        title="Grating TFSF (x/y Bloch + z PML): |Ez|",
+        overlay_bounds=(_GRATING_TFSF_DOMAIN_BOUNDS[0], _GRATING_TFSF_Z_BOUNDS),
+    )
+    summary = {
+        "ez_max": float(np.max(np.abs(ez))),
+        "finite": bool(np.isfinite(np.abs(ez)).all()),
+        "plot_path": plot_path,
+    }
+    del result
+    torch.cuda.empty_cache()
+    return summary
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for boundary/TFSF validation")
 def test_periodic_boundary_validation_matches_opposite_faces_and_saves_field_plot():
     summary = _periodic_summary()
@@ -751,3 +816,11 @@ def test_tfsf_scatter_scene_validation_produces_scattered_field_outside_box_and_
     assert scatter_summary["outside_max"] > null_summary["outside_max"] * 2.0
     assert scatter_summary["outside_max"] < scatter_summary["inside_max"]
     assert Path(scatter_summary["plot_path"]).exists()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for boundary/TFSF validation")
+def test_grating_tfsf_validation_saves_xy_bloch_z_pml_field_plot():
+    summary = _grating_tfsf_summary()
+    assert summary["finite"] is True
+    assert summary["ez_max"] > 0.0
+    assert Path(summary["plot_path"]).exists()

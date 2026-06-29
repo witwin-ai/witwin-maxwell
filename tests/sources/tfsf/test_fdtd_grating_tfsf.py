@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.fdtd.excitation.temporal import apply_compiled_source_terms, apply_generic_source_terms
+
+
+_GRATING_TFSF_Z_BOUNDS = (-0.24, 0.24)
 
 
 class _CaptureLaunch:
@@ -95,11 +100,11 @@ def _grating_boundary(*, bloch_wavevector=(math.pi, 0.5 * math.pi, 0.0)):
     )
 
 
-def _grating_scene(*, injection):
+def _grating_scene(*, injection, boundary=None):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
         grid=mw.GridSpec.uniform(0.12),
-        boundary=_grating_boundary(),
+        boundary=_grating_boundary() if boundary is None else boundary,
         device="cuda",
     )
     scene.add_source(
@@ -113,6 +118,84 @@ def _grating_scene(*, injection):
     )
     scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")))
     return scene
+
+
+def _to_numpy(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _component_volume(result, component: str):
+    solver = result.solver
+    field = _to_numpy(result.tensor(component))
+    if component == "Ex":
+        z = np.linspace(solver.scene.domain_range[4], solver.scene.domain_range[5], field.shape[2])
+    elif component == "Ez":
+        z = np.linspace(
+            solver.scene.domain_range[4] + 0.5 * solver.dz,
+            solver.scene.domain_range[5] - 0.5 * solver.dz,
+            field.shape[2],
+        )
+    else:
+        raise ValueError(f"Unsupported component for grating test: {component!r}.")
+    return field, z
+
+
+def _normal_slab_ratio(field, z_coords, bounds, *, dz):
+    magnitude = np.abs(np.asarray(field))
+    inside = (z_coords >= bounds[0]) & (z_coords <= bounds[1])
+    outside = (z_coords < bounds[0] - dz) | (z_coords > bounds[1] + dz)
+    inside_max = float(np.max(magnitude[:, :, inside]))
+    outside_max = float(np.max(magnitude[:, :, outside]))
+    return outside_max / max(inside_max, 1e-12), inside_max, outside_max
+
+
+def _run_grating_full_field(*, scene=None, time_steps=64):
+    if scene is None:
+        scene = _grating_scene(injection=mw.TFSF.slab(axis="z", bounds=_GRATING_TFSF_Z_BOUNDS))
+    return mw.Simulation.fdtd(
+        scene,
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig(time_steps=time_steps),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+        full_field_dft=True,
+        absorber="cpml",
+    ).run()
+
+
+def _grating_flux_scene(*, with_dielectric_slab: bool):
+    scene = _grating_scene(injection=mw.TFSF.slab(axis="z", bounds=_GRATING_TFSF_Z_BOUNDS))
+    if with_dielectric_slab:
+        scene.add_structure(
+            mw.Structure(
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.2, 1.2, 0.12)),
+                material=mw.Material(eps_r=9.0),
+                name="dielectric_slab",
+            )
+        )
+    scene.add_monitor(mw.FluxMonitor("reflection", axis="z", position=-0.36, normal_direction="-"))
+    scene.add_monitor(mw.FluxMonitor("transmission", axis="z", position=0.36, normal_direction="+"))
+    return scene
+
+
+@lru_cache(maxsize=None)
+def _grating_flux_metrics(with_dielectric_slab: bool):
+    result = mw.Simulation.fdtd(
+        _grating_flux_scene(with_dielectric_slab=with_dielectric_slab),
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig(time_steps=256),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+        absorber="cpml",
+    ).run()
+    reflection = float(torch.as_tensor(result.monitor("reflection")["flux"]).detach().cpu().real)
+    transmission = float(torch.as_tensor(result.monitor("transmission")["flux"]).detach().cpu().real)
+    del result
+    torch.cuda.empty_cache()
+    return {
+        "reflection": reflection,
+        "transmission": transmission,
+    }
 
 
 @pytest.mark.parametrize(
@@ -408,3 +491,71 @@ def test_grating_tfsf_slab_forward_runs_after_phase_resolution():
     result = prepared.run()
     assert result.solver.tfsf_enabled is True
     assert result.solver._tfsf_state["provider"] == "plane_wave_grating_slab_cw"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_grating_tfsf_oblique_plane_wave_leakage_is_bounded():
+    result = _run_grating_full_field(time_steps=64)
+
+    ratios = []
+    for component in ("Ex", "Ez"):
+        field, z_coords = _component_volume(result, component)
+        assert np.isfinite(np.abs(field)).all()
+        leakage_ratio, inside_max, outside_max = _normal_slab_ratio(
+            field,
+            z_coords,
+            _GRATING_TFSF_Z_BOUNDS,
+            dz=result.solver.dz,
+        )
+        assert inside_max > 0.0
+        assert outside_max < inside_max * 4.0
+        ratios.append(leakage_ratio)
+
+    assert max(ratios) < 4.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_grating_tfsf_auto_bloch_phase_runs_forward():
+    boundary = mw.BoundarySpec.faces(
+        default="pml",
+        num_layers=4,
+        strength=1.0,
+        x="bloch",
+        y="bloch",
+        z="pml",
+        bloch_wavevector="auto",
+    )
+    scene = _grating_scene(
+        injection=mw.TFSF.slab(axis="z", bounds=_GRATING_TFSF_Z_BOUNDS),
+        boundary=boundary,
+    )
+
+    result = mw.Simulation.fdtd(
+        scene,
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig(time_steps=32),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+        absorber="cpml",
+    ).run()
+
+    assert result.solver.resolved_bloch_wavevector[0] > 0.0
+    assert result.solver.resolved_bloch_wavevector[1] > 0.0
+    center = result.monitor("center")
+    assert torch.isfinite(torch.as_tensor(center["Ex"]).abs()).all()
+    assert torch.isfinite(torch.as_tensor(center["Ez"]).abs()).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_grating_tfsf_dielectric_slab_reflection_transmission_sanity():
+    empty = _grating_flux_metrics(False)
+    slab = _grating_flux_metrics(True)
+    incident_scale = max(abs(empty["transmission"]), 1.0e-12)
+    empty_reflection = abs(empty["reflection"]) / incident_scale
+    reflection = abs(slab["reflection"]) / incident_scale
+    transmission = abs(slab["transmission"]) / incident_scale
+
+    assert math.isfinite(reflection)
+    assert math.isfinite(transmission)
+    assert 0.0 <= reflection <= 2.0
+    assert 0.0 <= transmission <= 2.0
+    assert reflection > empty_reflection * 2.0
