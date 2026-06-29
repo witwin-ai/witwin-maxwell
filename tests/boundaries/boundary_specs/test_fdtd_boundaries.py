@@ -107,17 +107,30 @@ def test_mixed_boundary_initializes_per_face_codes_and_cpml_state():
     assert solver.has_pec_faces is True
 
 
-def test_mixed_bloch_boundaries_fail_fast():
-    with pytest.raises(NotImplementedError, match="mixed Bloch boundaries"):
-        DummyBoundarySolver(
-            mw.BoundarySpec.faces(
-                default="pml",
-                num_layers=4,
-                strength=1.0,
-                x="bloch",
-                bloch_wavevector=(np.pi / 8.0, 0.0, 0.0),
-            )
+def test_mixed_bloch_boundaries_initialize_complex_fields_and_cpml_state():
+    solver = DummyBoundarySolver(
+        mw.BoundarySpec.faces(
+            default="pml",
+            num_layers=4,
+            strength=1.0,
+            x="bloch",
+            bloch_wavevector=(np.pi / 8.0, 0.0, 0.0),
         )
+    )
+    assert solver.boundary_kind == "mixed"
+    assert solver.boundary_code is None
+    assert solver.boundary_x_low_code == BOUNDARY_BLOCH
+    assert solver.boundary_x_high_code == BOUNDARY_BLOCH
+    assert solver.boundary_y_low_code == BOUNDARY_PML
+    assert solver.boundary_y_high_code == BOUNDARY_PML
+    assert solver.complex_fields_enabled is True
+    assert solver.Ex_imag.shape == solver.Ex.shape
+    assert solver.active_absorber_type == "cpml"
+    assert solver.uses_cpml is True
+    assert solver.psi_ex_y is not None
+    expected_phase = np.exp(1j * (np.pi / 8.0) * 4.0)
+    assert np.isclose(solver.boundary_phase_cos[0], expected_phase.real, atol=1e-6)
+    assert np.isclose(solver.boundary_phase_sin[0], expected_phase.imag, atol=1e-6)
 
 
 def test_symmetry_overrides_only_low_faces():

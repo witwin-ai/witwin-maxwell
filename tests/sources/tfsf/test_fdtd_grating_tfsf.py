@@ -41,12 +41,31 @@ def _grating_scene(*, injection):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
-def test_grating_tfsf_currently_rejected_until_implemented():
+def test_grating_mixed_bloch_pml_prepare_enables_complex_and_cpml_state():
+    scene = _grating_scene(injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)))
+    prepared = mw.Simulation.fdtd(
+        scene,
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig(time_steps=1),
+        absorber="cpml",
+    ).prepare()
+    solver = prepared.solver
+    assert solver.boundary_kind == "mixed"
+    assert solver.has_bloch_axes == ("x", "y")
+    assert solver.has_pml_faces is True
+    assert solver.complex_fields_enabled is True
+    assert solver.uses_cpml is True
+    assert hasattr(solver, "Ex_imag")
+    assert hasattr(solver, "psi_ex_z")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
+def test_grating_box_tfsf_still_rejected_with_bloch_boundaries():
     scene = _grating_scene(
         injection=mw.TFSF(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.24, 0.24)))
     )
     simulation = mw.Simulation.fdtd(scene, frequencies=[1.0e9], run_time=mw.TimeConfig(time_steps=1))
-    with pytest.raises(NotImplementedError, match="mixed Bloch boundaries"):
+    with pytest.raises(NotImplementedError, match="TFSF injection"):
         simulation.prepare()
 
 

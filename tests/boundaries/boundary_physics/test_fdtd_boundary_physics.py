@@ -165,6 +165,47 @@ def test_fdtd_mixed_periodic_and_pml_boundary_preserves_periodic_axis():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+def test_fdtd_mixed_bloch_xy_pml_z_runs_with_complex_fields():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.faces(
+            default="pml",
+            num_layers=4,
+            strength=1.0,
+            x="bloch",
+            y="bloch",
+            z="pml",
+            bloch_wavevector=(math.pi / 1.2, math.pi / 2.4, 0.0),
+        ),
+        device="cuda",
+    )
+    scene.add_source(
+        mw.PointDipole(
+            position=(0.0, 0.0, 0.0),
+            polarization="Ez",
+            width=0.08,
+            source_time=mw.CW(frequency=1.0e9, amplitude=25.0),
+        )
+    )
+    scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ez",)))
+
+    result = mw.Simulation.fdtd(
+        scene,
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig(time_steps=8),
+        absorber="cpml",
+        spectral_sampler=mw.SpectralSampler(window="none"),
+    ).run()
+
+    solver = result.solver
+    assert solver.complex_fields_enabled is True
+    assert solver.uses_cpml is True
+    value = result.monitor("center")["Ez"]
+    assert torch.isfinite(torch.as_tensor(value).abs()).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
 def test_fdtd_pec_boundary_keeps_tangential_electric_field_zero_with_edge_source():
     _, fields = _run_fdtd_boundary_case(
         mw.BoundarySpec.pec(),
