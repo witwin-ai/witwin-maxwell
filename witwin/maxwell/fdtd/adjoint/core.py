@@ -709,18 +709,27 @@ def _complex_inner_real(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
     return lhs.real * rhs.real + lhs.imag * rhs.imag
 
 
+def _axis_uses_complex_source_wrap(solver, axis: int) -> bool:
+    scene = getattr(solver, "scene", None)
+    boundary = None if scene is None else getattr(scene, "boundary", None)
+    if boundary is None:
+        return getattr(solver, "boundary_kind", None) == "bloch"
+    return boundary.axis_kind("xyz"[int(axis)]) in {"bloch", "periodic"}
+
+
 def _bloch_phase_specs(solver, field_name: str):
-    if field_name == "Ex":
+    component = field_name[-1]
+    if component == "x":
         return (
             (1, float(solver.boundary_phase_cos[1]), float(solver.boundary_phase_sin[1])),
             (2, float(solver.boundary_phase_cos[2]), float(solver.boundary_phase_sin[2])),
         )
-    if field_name == "Ey":
+    if component == "y":
         return (
             (0, float(solver.boundary_phase_cos[0]), float(solver.boundary_phase_sin[0])),
             (2, float(solver.boundary_phase_cos[2]), float(solver.boundary_phase_sin[2])),
         )
-    if field_name == "Ez":
+    if component == "z":
         return (
             (0, float(solver.boundary_phase_cos[0]), float(solver.boundary_phase_sin[0])),
             (1, float(solver.boundary_phase_cos[1]), float(solver.boundary_phase_sin[1])),
@@ -731,6 +740,8 @@ def _bloch_phase_specs(solver, field_name: str):
 def _bloch_source_boundary_terms(solver, field_name: str, offsets, patch_shape, field_shape):
     boundary_terms = []
     for axis, phase_cos, phase_sin in _bloch_phase_specs(solver, field_name):
+        if not _axis_uses_complex_source_wrap(solver, axis):
+            continue
         axis_size = int(field_shape[axis])
         start = int(offsets[axis])
         end = start + int(patch_shape[axis])
@@ -793,41 +804,23 @@ def _bloch_source_term_adjoint_patch(adjoint_state, *, solver, field_name: str, 
     return adjoint_patch
 
 
-def _boundary_slice(patch: torch.Tensor, axis: int, side: str) -> torch.Tensor:
-    index = 0 if side == "low" else int(patch.shape[axis] - 1)
-    return patch.narrow(axis, index, 1)
-
-
-def _apply_bloch_uniform_source_term(
-    field_mapping,
-    *,
-    solver,
-    field_name: str,
-    offsets,
-    patch: torch.Tensor,
-    signal_real: float,
-    signal_imag: float,
-):
+def _add_complex_bloch_source_patch(field_mapping, *, solver, field_name: str, offsets, delta: torch.Tensor):
     real_name = field_name
     imag_name = f"{field_name}_imag"
     if imag_name not in field_mapping:
         raise KeyError(f"Bloch source injection requires {imag_name!r} in the replay state.")
 
     field = torch.complex(field_mapping[real_name], field_mapping[imag_name])
-    patch_real = patch.to(device=field.real.device, dtype=field.real.dtype)
-    delta = torch.complex(patch_real * float(signal_real), patch_real * float(signal_imag))
+    delta = delta.to(device=field.device, dtype=field.dtype)
     field = _add_patch(field, offsets, delta)
 
-    boundary_terms = []
-    for axis, phase_cos, phase_sin in _bloch_phase_specs(solver, field_name):
-        axis_size = int(field.shape[axis])
-        start = int(offsets[axis])
-        end = start + int(delta.shape[axis])
-        if start == 0:
-            boundary_terms.append((axis, "low", axis_size - 1, phase_cos, phase_sin))
-        elif end == axis_size:
-            boundary_terms.append((axis, "high", 0, phase_cos, phase_sin))
-
+    boundary_terms = _bloch_source_boundary_terms(
+        solver,
+        field_name,
+        offsets,
+        delta.shape,
+        field.shape,
+    )
     for axis, side, pair_index, phase_cos, phase_sin in boundary_terms:
         boundary_patch = _boundary_slice(delta, axis, side)
         phased_patch = (
@@ -861,6 +854,63 @@ def _apply_bloch_uniform_source_term(
     updated[real_name] = field.real
     updated[imag_name] = field.imag
     return updated
+
+
+def _boundary_slice(patch: torch.Tensor, axis: int, side: str) -> torch.Tensor:
+    index = 0 if side == "low" else int(patch.shape[axis] - 1)
+    return patch.narrow(axis, index, 1)
+
+
+def _apply_bloch_uniform_source_term(
+    field_mapping,
+    *,
+    solver,
+    field_name: str,
+    offsets,
+    patch: torch.Tensor,
+    signal_real: float,
+    signal_imag: float,
+):
+    real_name = field_name
+    imag_name = f"{field_name}_imag"
+    if imag_name not in field_mapping:
+        raise KeyError(f"Bloch source injection requires {imag_name!r} in the replay state.")
+
+    patch_real = patch.to(device=field_mapping[real_name].device, dtype=field_mapping[real_name].dtype)
+    delta = torch.complex(patch_real * float(signal_real), patch_real * float(signal_imag))
+    return _add_complex_bloch_source_patch(
+        field_mapping,
+        solver=solver,
+        field_name=field_name,
+        offsets=offsets,
+        delta=delta,
+    )
+
+
+def _apply_bloch_cw_source_term(
+    field_mapping,
+    *,
+    solver,
+    field_name: str,
+    offsets,
+    cw_cos_patch: torch.Tensor,
+    cw_sin_patch: torch.Tensor,
+    signal_cos: float,
+    signal_sin: float,
+):
+    patch_cos = cw_cos_patch.to(device=field_mapping[field_name].device, dtype=field_mapping[field_name].dtype)
+    patch_sin = cw_sin_patch.to(device=field_mapping[field_name].device, dtype=field_mapping[field_name].dtype)
+    delta = torch.complex(
+        float(signal_cos) * patch_cos + float(signal_sin) * patch_sin,
+        float(signal_sin) * patch_cos - float(signal_cos) * patch_sin,
+    )
+    return _add_complex_bloch_source_patch(
+        field_mapping,
+        solver=solver,
+        field_name=field_name,
+        offsets=offsets,
+        delta=delta,
+    )
 
 
 def _sample_auxiliary_field(field: torch.Tensor, *, origin: float, ds: float, positions: torch.Tensor) -> torch.Tensor:
@@ -945,7 +995,7 @@ def _apply_tfsf_terms(field_mapping, *, solver, auxiliary_state, term_key: str, 
         source_time=solver._source_time,
         omega=solver.source_omega,
         time_value=time_value,
-        solver=None,
+        solver=solver if has_complex_fields(solver) else None,
     )
 
 
@@ -1193,24 +1243,40 @@ def _apply_source_term_list(field_mapping, *, terms, source_time, omega, time_va
         return field_mapping
 
     updated = dict(field_mapping)
-    scalar_signal = evaluate_source_time(source_time, float(time_value))
-    signal_cos = None
-    signal_sin = None
+    signal_cache = {}
+    cw_cache = {}
     for term in terms:
+        term_source_time = term.get("source_time") or source_time
+        term_omega = float(omega if term.get("omega") is None else term["omega"])
+        cache_key = term.get("source_index")
+        if cache_key is None:
+            cache_key = (id(term_source_time), term_omega)
         literal_patch = term.get("literal_patch")
         if literal_patch is not None:
             updated[term["field_name"]] = _add_patch(updated[term["field_name"]], term["offsets"], literal_patch)
             continue
         if term["cw_cos_patch"] is not None:
-            if signal_cos is None or signal_sin is None:
-                signal_cos, signal_sin = _resolve_cw_signal(source_time, omega, time_value)
-            patch = (
-                float(signal_cos) * term["cw_cos_patch"]
-                + float(signal_sin) * term["cw_sin_patch"]
-            )
+            if cache_key not in cw_cache:
+                cw_cache[cache_key] = _resolve_cw_signal(term_source_time, term_omega, time_value)
+            signal_cos, signal_sin = cw_cache[cache_key]
+            if solver is not None and has_complex_fields(solver):
+                updated = _apply_bloch_cw_source_term(
+                    updated,
+                    solver=solver,
+                    field_name=term["field_name"],
+                    offsets=term["offsets"],
+                    cw_cos_patch=term["cw_cos_patch"],
+                    cw_sin_patch=term["cw_sin_patch"],
+                    signal_cos=signal_cos,
+                    signal_sin=signal_sin,
+                )
+                continue
+            patch = float(signal_cos) * term["cw_cos_patch"] + float(signal_sin) * term["cw_sin_patch"]
         elif term["delay_patch"] is not None:
+            if solver is not None and has_complex_fields(solver):
+                raise NotImplementedError("Bloch-boundary source replay requires CW phased source terms.")
             sample_time = time_value - term["delay_patch"]
-            patch = _evaluate_source_time_tensor(source_time, sample_time) * term["patch"]
+            patch = _evaluate_source_time_tensor(term_source_time, sample_time) * term["patch"]
             activation_delay_patch = term.get("activation_delay_patch")
             if activation_delay_patch is not None:
                 patch = torch.where(
@@ -1219,9 +1285,12 @@ def _apply_source_term_list(field_mapping, *, terms, source_time, omega, time_va
                     patch,
                 )
         else:
+            if cache_key not in signal_cache:
+                signal_cache[cache_key] = evaluate_source_time(term_source_time, float(time_value))
+            scalar_signal = signal_cache[cache_key]
             signal_real = float(scalar_signal) * float(term["phase_real"])
             signal_imag = float(scalar_signal) * float(term["phase_imag"])
-            if solver is not None and getattr(solver, "boundary_kind", None) == "bloch":
+            if solver is not None and has_complex_fields(solver):
                 updated = _apply_bloch_uniform_source_term(
                     updated,
                     solver=solver,
@@ -1719,6 +1788,179 @@ def _enforce_pec_boundaries(solver, fields):
     return updated
 
 
+def _complex_state_field(mapping, field_name: str) -> torch.Tensor:
+    return torch.complex(mapping[field_name], mapping[f"{field_name}_imag"])
+
+
+def _apply_complex_axis_boundary(candidate, previous, *, axis: int, low_mode: int, high_mode: int):
+    inactive_mask, pec_mask = _boundary_axis_masks(candidate.shape, axis, low_mode, high_mode, candidate.device)
+    return torch.where(
+        pec_mask,
+        torch.zeros_like(candidate),
+        torch.where(inactive_mask, previous, candidate),
+    )
+
+
+def _cpml_correction_mask(shape, *, normal_axis: int, tangent_axis: int, tangent_low_mode: int, tangent_high_mode: int, device):
+    mask = torch.ones(shape, device=device, dtype=torch.bool)
+    low_face = [slice(None)] * len(shape)
+    high_face = [slice(None)] * len(shape)
+    low_face[normal_axis] = 0
+    high_face[normal_axis] = -1
+    mask[tuple(low_face)] = False
+    mask[tuple(high_face)] = False
+    inactive_tangent, pec_tangent = _boundary_axis_masks(
+        shape,
+        tangent_axis,
+        tangent_low_mode,
+        tangent_high_mode,
+        device,
+    )
+    return mask & (~inactive_tangent) & (~pec_tangent)
+
+
+def _apply_complex_z_cpml_correction(
+    field: torch.Tensor,
+    psi: torch.Tensor,
+    derivative: torch.Tensor,
+    *,
+    curl: torch.Tensor,
+    inv_kappa: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    tangent_axis: int,
+    tangent_low_mode: int,
+    tangent_high_mode: int,
+    sign: float,
+):
+    b_term = _broadcast_vector(b, 2)
+    c_term = _broadcast_vector(c, 2)
+    inv_kappa_term = _broadcast_vector(inv_kappa, 2)
+    psi_candidate = b_term * psi + c_term * derivative
+    correction = curl * (derivative * (inv_kappa_term - 1.0) + psi_candidate)
+    candidate = field + float(sign) * correction
+    mask = _cpml_correction_mask(
+        field.shape,
+        normal_axis=2,
+        tangent_axis=tangent_axis,
+        tangent_low_mode=tangent_low_mode,
+        tangent_high_mode=tangent_high_mode,
+        device=field.device,
+    )
+    return torch.where(mask, candidate, field), torch.where(mask, psi_candidate, psi)
+
+
+def _update_mixed_bloch_cpml_electric_fields(solver, state, magnetic_fields, *, ex_curl, ey_curl, ez_curl):
+    hx_complex = _complex_state_field(magnetic_fields, "Hx")
+    hy_complex = _complex_state_field(magnetic_fields, "Hy")
+    hz_complex = _complex_state_field(magnetic_fields, "Hz")
+
+    previous_ex = _complex_state_field(state, "Ex")
+    d_hz_dy = _bloch_backward_diff(
+        hz_complex,
+        axis=1,
+        inv_delta=solver.inv_dy,
+        phase_cos=float(solver.boundary_phase_cos[1]),
+        phase_sin=float(solver.boundary_phase_sin[1]),
+    )
+    d_hy_dz = _backward_diff(hy_complex, axis=2, inv_delta=solver.inv_dz)
+    ex_complex = previous_ex * solver.cex_decay + ex_curl * (d_hz_dy - d_hy_dz)
+    ex_complex = _apply_complex_axis_boundary(
+        ex_complex,
+        previous_ex,
+        axis=2,
+        low_mode=solver.boundary_z_low_code,
+        high_mode=solver.boundary_z_high_code,
+    )
+    psi_ex_z = torch.complex(state["psi_ex_z"], state["psi_ex_z_imag"])
+    ex_complex, psi_ex_z = _apply_complex_z_cpml_correction(
+        ex_complex,
+        psi_ex_z,
+        d_hy_dz,
+        curl=ex_curl,
+        inv_kappa=solver.cpml_inv_kappa_e_z,
+        b=solver.cpml_b_e_z,
+        c=solver.cpml_c_e_z,
+        tangent_axis=1,
+        tangent_low_mode=solver.boundary_y_low_code,
+        tangent_high_mode=solver.boundary_y_high_code,
+        sign=-1.0,
+    )
+
+    previous_ey = _complex_state_field(state, "Ey")
+    d_hx_dz = _backward_diff(hx_complex, axis=2, inv_delta=solver.inv_dz)
+    d_hz_dx = _bloch_backward_diff(
+        hz_complex,
+        axis=0,
+        inv_delta=solver.inv_dx,
+        phase_cos=float(solver.boundary_phase_cos[0]),
+        phase_sin=float(solver.boundary_phase_sin[0]),
+    )
+    ey_complex = previous_ey * solver.cey_decay + ey_curl * (d_hx_dz - d_hz_dx)
+    ey_complex = _apply_complex_axis_boundary(
+        ey_complex,
+        previous_ey,
+        axis=2,
+        low_mode=solver.boundary_z_low_code,
+        high_mode=solver.boundary_z_high_code,
+    )
+    psi_ey_z = torch.complex(state["psi_ey_z"], state["psi_ey_z_imag"])
+    ey_complex, psi_ey_z = _apply_complex_z_cpml_correction(
+        ey_complex,
+        psi_ey_z,
+        d_hx_dz,
+        curl=ey_curl,
+        inv_kappa=solver.cpml_inv_kappa_e_z,
+        b=solver.cpml_b_e_z,
+        c=solver.cpml_c_e_z,
+        tangent_axis=0,
+        tangent_low_mode=solver.boundary_x_low_code,
+        tangent_high_mode=solver.boundary_x_high_code,
+        sign=1.0,
+    )
+
+    previous_ez = _complex_state_field(state, "Ez")
+    d_hy_dx = _bloch_backward_diff(
+        hy_complex,
+        axis=0,
+        inv_delta=solver.inv_dx,
+        phase_cos=float(solver.boundary_phase_cos[0]),
+        phase_sin=float(solver.boundary_phase_sin[0]),
+    )
+    d_hx_dy = _bloch_backward_diff(
+        hx_complex,
+        axis=1,
+        inv_delta=solver.inv_dy,
+        phase_cos=float(solver.boundary_phase_cos[1]),
+        phase_sin=float(solver.boundary_phase_sin[1]),
+    )
+    ez_complex = previous_ez * solver.cez_decay + ez_curl * (d_hy_dx - d_hx_dy)
+
+    electric_fields = {
+        "Ex": ex_complex.real,
+        "Ey": ey_complex.real,
+        "Ez": ez_complex.real,
+        "Ex_imag": ex_complex.imag,
+        "Ey_imag": ey_complex.imag,
+        "Ez_imag": ez_complex.imag,
+    }
+    electric_cpml_state = {
+        "psi_ex_y": state["psi_ex_y"],
+        "psi_ex_z": psi_ex_z.real,
+        "psi_ey_x": state["psi_ey_x"],
+        "psi_ey_z": psi_ey_z.real,
+        "psi_ez_x": state["psi_ez_x"],
+        "psi_ez_y": state["psi_ez_y"],
+        "psi_ex_y_imag": state["psi_ex_y_imag"],
+        "psi_ex_z_imag": psi_ex_z.imag,
+        "psi_ey_x_imag": state["psi_ey_x_imag"],
+        "psi_ey_z_imag": psi_ey_z.imag,
+        "psi_ez_x_imag": state["psi_ez_x_imag"],
+        "psi_ez_y_imag": state["psi_ez_y_imag"],
+    }
+    return electric_fields, electric_cpml_state
+
+
 def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
     source_terms, electric_source_terms, magnetic_source_terms = _resolved_source_term_lists(
         solver,
@@ -1728,6 +1970,7 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
     )
     auxiliary_state = _extract_tfsf_auxiliary_state(state)
     complex_fields = has_complex_fields(solver)
+    psi_hx_y_imag = psi_hx_z_imag = psi_hy_x_imag = psi_hy_z_imag = psi_hz_x_imag = psi_hz_y_imag = None
 
     d_ez_dy = _forward_diff(state["Ez"], axis=1, inv_delta=solver.inv_dy)
     d_ey_dz = _forward_diff(state["Ey"], axis=2, inv_delta=solver.inv_dz)
@@ -1797,36 +2040,60 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
     if complex_fields:
         d_ez_imag_dy = _forward_diff(state["Ez_imag"], axis=1, inv_delta=solver.inv_dy)
         d_ey_imag_dz = _forward_diff(state["Ey_imag"], axis=2, inv_delta=solver.inv_dz)
-        hx_imag, _, _ = _update_magnetic_component(
+        hx_imag, psi_hx_y_imag, psi_hx_z_imag = _update_magnetic_component(
             state["Hx_imag"],
             d_pos=d_ez_imag_dy,
             d_neg=d_ey_imag_dz,
             decay=solver.chx_decay,
             curl=solver.chx_curl,
+            psi_pos=state.get("psi_hx_y_imag") if getattr(solver, "uses_cpml", False) else None,
+            psi_neg=state.get("psi_hx_z_imag") if getattr(solver, "uses_cpml", False) else None,
+            b_pos=getattr(solver, "cpml_b_h_y", None),
+            c_pos=getattr(solver, "cpml_c_h_y", None),
+            inv_kappa_pos=getattr(solver, "cpml_inv_kappa_h_y", None),
+            b_neg=getattr(solver, "cpml_b_h_z", None),
+            c_neg=getattr(solver, "cpml_c_h_z", None),
+            inv_kappa_neg=getattr(solver, "cpml_inv_kappa_h_z", None),
             axis_pos=1,
             axis_neg=2,
         )
 
         d_ex_imag_dz = _forward_diff(state["Ex_imag"], axis=2, inv_delta=solver.inv_dz)
         d_ez_imag_dx = _forward_diff(state["Ez_imag"], axis=0, inv_delta=solver.inv_dx)
-        hy_imag, _, _ = _update_magnetic_component(
+        hy_imag, psi_hy_z_imag, psi_hy_x_imag = _update_magnetic_component(
             state["Hy_imag"],
             d_pos=d_ex_imag_dz,
             d_neg=d_ez_imag_dx,
             decay=solver.chy_decay,
             curl=solver.chy_curl,
+            psi_pos=state.get("psi_hy_z_imag") if getattr(solver, "uses_cpml", False) else None,
+            psi_neg=state.get("psi_hy_x_imag") if getattr(solver, "uses_cpml", False) else None,
+            b_pos=getattr(solver, "cpml_b_h_z", None),
+            c_pos=getattr(solver, "cpml_c_h_z", None),
+            inv_kappa_pos=getattr(solver, "cpml_inv_kappa_h_z", None),
+            b_neg=getattr(solver, "cpml_b_h_x", None),
+            c_neg=getattr(solver, "cpml_c_h_x", None),
+            inv_kappa_neg=getattr(solver, "cpml_inv_kappa_h_x", None),
             axis_pos=2,
             axis_neg=0,
         )
 
         d_ey_imag_dx = _forward_diff(state["Ey_imag"], axis=0, inv_delta=solver.inv_dx)
         d_ex_imag_dy = _forward_diff(state["Ex_imag"], axis=1, inv_delta=solver.inv_dy)
-        hz_imag, _, _ = _update_magnetic_component(
+        hz_imag, psi_hz_x_imag, psi_hz_y_imag = _update_magnetic_component(
             state["Hz_imag"],
             d_pos=d_ey_imag_dx,
             d_neg=d_ex_imag_dy,
             decay=solver.chz_decay,
             curl=solver.chz_curl,
+            psi_pos=state.get("psi_hz_x_imag") if getattr(solver, "uses_cpml", False) else None,
+            psi_neg=state.get("psi_hz_y_imag") if getattr(solver, "uses_cpml", False) else None,
+            b_pos=getattr(solver, "cpml_b_h_x", None),
+            c_pos=getattr(solver, "cpml_c_h_x", None),
+            inv_kappa_pos=getattr(solver, "cpml_inv_kappa_h_x", None),
+            b_neg=getattr(solver, "cpml_b_h_y", None),
+            c_neg=getattr(solver, "cpml_c_h_y", None),
+            inv_kappa_neg=getattr(solver, "cpml_inv_kappa_h_y", None),
             axis_pos=0,
             axis_neg=1,
         )
@@ -1860,69 +2127,93 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
     dispersive_state = _advance_dispersive_state(solver, state)
 
     if complex_fields:
-        hy_complex = torch.complex(magnetic_fields["Hy"], magnetic_fields["Hy_imag"])
-        hz_complex = torch.complex(magnetic_fields["Hz"], magnetic_fields["Hz_imag"])
         ex_curl = _dynamic_electric_curl(solver.cex_curl, solver.eps_Ex, eps_ex)
         ey_curl = _dynamic_electric_curl(solver.cey_curl, solver.eps_Ey, eps_ey)
         ez_curl = _dynamic_electric_curl(solver.cez_curl, solver.eps_Ez, eps_ez)
-        d_hz_dy = _bloch_backward_diff(
-            hz_complex,
-            axis=1,
-            inv_delta=solver.inv_dy,
-            phase_cos=float(solver.boundary_phase_cos[1]),
-            phase_sin=float(solver.boundary_phase_sin[1]),
-        )
-        d_hy_dz = _bloch_backward_diff(
-            hy_complex,
-            axis=2,
-            inv_delta=solver.inv_dz,
-            phase_cos=float(solver.boundary_phase_cos[2]),
-            phase_sin=float(solver.boundary_phase_sin[2]),
-        )
-        ex_complex = torch.complex(state["Ex"], state["Ex_imag"]) * solver.cex_decay + ex_curl * (d_hz_dy - d_hy_dz)
+        if getattr(solver, "uses_cpml", False):
+            if tuple(getattr(solver, "has_bloch_axes", ())) != ("x", "y"):
+                raise NotImplementedError("Complex-field CPML adjoint replay currently supports x/y Bloch with z PML only.")
+            electric_fields, electric_cpml_state = _update_mixed_bloch_cpml_electric_fields(
+                solver,
+                state,
+                magnetic_fields,
+                ex_curl=ex_curl,
+                ey_curl=ey_curl,
+                ez_curl=ez_curl,
+            )
+            psi_ex_y = electric_cpml_state["psi_ex_y"]
+            psi_ex_z = electric_cpml_state["psi_ex_z"]
+            psi_ey_x = electric_cpml_state["psi_ey_x"]
+            psi_ey_z = electric_cpml_state["psi_ey_z"]
+            psi_ez_x = electric_cpml_state["psi_ez_x"]
+            psi_ez_y = electric_cpml_state["psi_ez_y"]
+            psi_ex_y_imag = electric_cpml_state["psi_ex_y_imag"]
+            psi_ex_z_imag = electric_cpml_state["psi_ex_z_imag"]
+            psi_ey_x_imag = electric_cpml_state["psi_ey_x_imag"]
+            psi_ey_z_imag = electric_cpml_state["psi_ey_z_imag"]
+            psi_ez_x_imag = electric_cpml_state["psi_ez_x_imag"]
+            psi_ez_y_imag = electric_cpml_state["psi_ez_y_imag"]
+        else:
+            hy_complex = torch.complex(magnetic_fields["Hy"], magnetic_fields["Hy_imag"])
+            hz_complex = torch.complex(magnetic_fields["Hz"], magnetic_fields["Hz_imag"])
+            d_hz_dy = _bloch_backward_diff(
+                hz_complex,
+                axis=1,
+                inv_delta=solver.inv_dy,
+                phase_cos=float(solver.boundary_phase_cos[1]),
+                phase_sin=float(solver.boundary_phase_sin[1]),
+            )
+            d_hy_dz = _bloch_backward_diff(
+                hy_complex,
+                axis=2,
+                inv_delta=solver.inv_dz,
+                phase_cos=float(solver.boundary_phase_cos[2]),
+                phase_sin=float(solver.boundary_phase_sin[2]),
+            )
+            ex_complex = torch.complex(state["Ex"], state["Ex_imag"]) * solver.cex_decay + ex_curl * (d_hz_dy - d_hy_dz)
 
-        hx_complex = torch.complex(magnetic_fields["Hx"], magnetic_fields["Hx_imag"])
-        d_hx_dz = _bloch_backward_diff(
-            hx_complex,
-            axis=2,
-            inv_delta=solver.inv_dz,
-            phase_cos=float(solver.boundary_phase_cos[2]),
-            phase_sin=float(solver.boundary_phase_sin[2]),
-        )
-        d_hz_dx = _bloch_backward_diff(
-            hz_complex,
-            axis=0,
-            inv_delta=solver.inv_dx,
-            phase_cos=float(solver.boundary_phase_cos[0]),
-            phase_sin=float(solver.boundary_phase_sin[0]),
-        )
-        ey_complex = torch.complex(state["Ey"], state["Ey_imag"]) * solver.cey_decay + ey_curl * (d_hx_dz - d_hz_dx)
+            hx_complex = torch.complex(magnetic_fields["Hx"], magnetic_fields["Hx_imag"])
+            d_hx_dz = _bloch_backward_diff(
+                hx_complex,
+                axis=2,
+                inv_delta=solver.inv_dz,
+                phase_cos=float(solver.boundary_phase_cos[2]),
+                phase_sin=float(solver.boundary_phase_sin[2]),
+            )
+            d_hz_dx = _bloch_backward_diff(
+                hz_complex,
+                axis=0,
+                inv_delta=solver.inv_dx,
+                phase_cos=float(solver.boundary_phase_cos[0]),
+                phase_sin=float(solver.boundary_phase_sin[0]),
+            )
+            ey_complex = torch.complex(state["Ey"], state["Ey_imag"]) * solver.cey_decay + ey_curl * (d_hx_dz - d_hz_dx)
 
-        d_hy_dx = _bloch_backward_diff(
-            hy_complex,
-            axis=0,
-            inv_delta=solver.inv_dx,
-            phase_cos=float(solver.boundary_phase_cos[0]),
-            phase_sin=float(solver.boundary_phase_sin[0]),
-        )
-        d_hx_dy = _bloch_backward_diff(
-            hx_complex,
-            axis=1,
-            inv_delta=solver.inv_dy,
-            phase_cos=float(solver.boundary_phase_cos[1]),
-            phase_sin=float(solver.boundary_phase_sin[1]),
-        )
-        ez_complex = torch.complex(state["Ez"], state["Ez_imag"]) * solver.cez_decay + ez_curl * (d_hy_dx - d_hx_dy)
+            d_hy_dx = _bloch_backward_diff(
+                hy_complex,
+                axis=0,
+                inv_delta=solver.inv_dx,
+                phase_cos=float(solver.boundary_phase_cos[0]),
+                phase_sin=float(solver.boundary_phase_sin[0]),
+            )
+            d_hx_dy = _bloch_backward_diff(
+                hx_complex,
+                axis=1,
+                inv_delta=solver.inv_dy,
+                phase_cos=float(solver.boundary_phase_cos[1]),
+                phase_sin=float(solver.boundary_phase_sin[1]),
+            )
+            ez_complex = torch.complex(state["Ez"], state["Ez_imag"]) * solver.cez_decay + ez_curl * (d_hy_dx - d_hx_dy)
 
-        electric_fields = {
-            "Ex": ex_complex.real,
-            "Ey": ey_complex.real,
-            "Ez": ez_complex.real,
-            "Ex_imag": ex_complex.imag,
-            "Ey_imag": ey_complex.imag,
-            "Ez_imag": ez_complex.imag,
-        }
-        psi_ex_y = psi_ex_z = psi_ey_x = psi_ey_z = psi_ez_x = psi_ez_y = None
+            electric_fields = {
+                "Ex": ex_complex.real,
+                "Ey": ey_complex.real,
+                "Ez": ez_complex.real,
+                "Ex_imag": ex_complex.imag,
+                "Ey_imag": ey_complex.imag,
+                "Ez_imag": ez_complex.imag,
+            }
+            psi_ex_y = psi_ex_z = psi_ey_x = psi_ey_z = psi_ez_x = psi_ez_y = None
     else:
         d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy)
         d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz)
@@ -2084,6 +2375,23 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
                 "psi_hz_y": psi_hz_y,
             }
         )
+        if complex_fields:
+            next_state.update(
+                {
+                    "psi_ex_y_imag": psi_ex_y_imag,
+                    "psi_ex_z_imag": psi_ex_z_imag,
+                    "psi_ey_x_imag": psi_ey_x_imag,
+                    "psi_ey_z_imag": psi_ey_z_imag,
+                    "psi_ez_x_imag": psi_ez_x_imag,
+                    "psi_ez_y_imag": psi_ez_y_imag,
+                    "psi_hx_y_imag": psi_hx_y_imag,
+                    "psi_hx_z_imag": psi_hx_z_imag,
+                    "psi_hy_x_imag": psi_hy_x_imag,
+                    "psi_hy_z_imag": psi_hy_z_imag,
+                    "psi_hz_x_imag": psi_hz_x_imag,
+                    "psi_hz_y_imag": psi_hz_y_imag,
+                }
+            )
     if auxiliary_state is not None:
         next_state["tfsf_aux_electric"] = auxiliary_state["electric"]
         next_state["tfsf_aux_magnetic"] = auxiliary_state["magnetic"]

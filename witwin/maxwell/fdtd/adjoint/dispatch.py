@@ -8,6 +8,7 @@ from ..boundary import (
     BOUNDARY_BLOCH,
     BOUNDARY_NONE,
     BOUNDARY_PERIODIC,
+    BOUNDARY_PML,
     BOUNDARY_PMC,
     has_complex_fields,
 )
@@ -18,6 +19,7 @@ from ..runtime.module_cache import resolve_fdtd_backend_name
 _VALID_ADJOINT_BACKENDS = {"auto", "slang", "python"}
 
 class _ReverseBackend(Enum):
+    GRATING_TFSF = auto()
     TFSF = auto()
     SLANG_CPML = auto()
     SLANG_STANDARD = auto()
@@ -109,6 +111,44 @@ def _supports_tfsf(runtime, solver, forward_state, resolved_source_terms) -> boo
     return has_auxiliary_state
 
 
+def _supports_grating_tfsf(runtime, solver, forward_state, resolved_source_terms) -> bool:
+    if not getattr(solver, "tfsf_enabled", False):
+        return False
+    if not has_complex_fields(solver):
+        return False
+    if not getattr(solver, "uses_cpml", False):
+        return False
+    if getattr(solver, "dispersive_enabled", False):
+        return False
+    if runtime._has_resolved_source_terms(resolved_source_terms):
+        return False
+    if not _matches_checkpoint_layout(solver, forward_state):
+        return False
+    if tuple(getattr(solver, "has_bloch_axes", ())) != ("x", "y"):
+        return False
+    face_codes = _face_codes(solver)
+    if face_codes != (
+        BOUNDARY_BLOCH,
+        BOUNDARY_BLOCH,
+        BOUNDARY_BLOCH,
+        BOUNDARY_BLOCH,
+        BOUNDARY_PML,
+        BOUNDARY_PML,
+    ):
+        return False
+
+    tfsf_state = getattr(solver, "_tfsf_state", None)
+    if tfsf_state is None:
+        return False
+    return (
+        tfsf_state.get("provider") == "plane_wave_grating_slab_cw"
+        and tfsf_state.get("mode") == "slab"
+        and tfsf_state.get("axis") == "z"
+        and "tfsf_aux_electric" not in forward_state
+        and "tfsf_aux_magnetic" not in forward_state
+    )
+
+
 def _supports_standard(runtime, solver, forward_state, resolved_source_terms) -> bool:
     if tuple(forward_state.keys()) != ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         return False
@@ -197,12 +237,14 @@ def _select_reverse_backend(
     use_slang_reverse = use_cuda and resolve_fdtd_adjoint_backend_name() == "slang"
 
     supports_tfsf = _supports_tfsf(runtime, solver, forward_state, resolved_source_terms)
+    supports_grating_tfsf = _supports_grating_tfsf(runtime, solver, forward_state, resolved_source_terms)
     supports_cpml = _supports_cpml(runtime, solver, forward_state, resolved_source_terms)
     supports_standard = _supports_standard(runtime, solver, forward_state, resolved_source_terms)
     supports_dispersive = _supports_dispersive(runtime, solver, forward_state, resolved_source_terms)
     supports_bloch = _supports_bloch(runtime, solver, forward_state, resolved_source_terms)
 
     decision_table = (
+        (_ReverseBackend.GRATING_TFSF, supports_grating_tfsf),
         (_ReverseBackend.TFSF, supports_tfsf),
         (_ReverseBackend.SLANG_CPML, supports_cpml and use_slang_reverse),
         (_ReverseBackend.SLANG_STANDARD, supports_standard and use_slang_reverse),
@@ -302,6 +344,17 @@ def reverse_step(
                 resolved_source_terms=resolved_source_terms,
                 profiler=profiler if use_slang_reverse else None,
             ),
+        )
+    if backend is _ReverseBackend.GRATING_TFSF:
+        return _adjoint_reference.reverse_step_grating_tfsf(
+            solver,
+            forward_state,
+            adjoint_state,
+            time_value=time_value,
+            eps_ex=eps_ex,
+            eps_ey=eps_ey,
+            eps_ez=eps_ez,
+            profiler=profiler,
         )
     if backend is _ReverseBackend.SLANG_CPML:
         return finish(

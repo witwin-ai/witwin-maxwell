@@ -31,6 +31,7 @@ __all__ = [
     "reverse_step_bloch_python_reference",
     "reverse_step_cpml_python_reference",
     "reverse_step_dispersive_python_reference",
+    "reverse_step_grating_tfsf",
     "reverse_step_standard_python_reference",
     "reverse_step_tfsf",
     "reverse_step_torch_vjp",
@@ -934,6 +935,7 @@ def reverse_step_torch_vjp(
     eps_ey,
     eps_ez,
     profiler: _BackwardProfiler | None = None,
+    backend: str = "torch_vjp",
 ):
     _adjoint = importlib.import_module(__package__)
 
@@ -973,5 +975,29 @@ def reverse_step_torch_vjp(
         grad_eps_ex=_adjoint._safe_grad(gradients[-3], eps_ex).detach(),
         grad_eps_ey=_adjoint._safe_grad(gradients[-2], eps_ey).detach(),
         grad_eps_ez=_adjoint._safe_grad(gradients[-1], eps_ez).detach(),
-        backend="torch_vjp",
+        backend=backend,
+    )
+
+
+def reverse_step_grating_tfsf(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    profiler: _BackwardProfiler | None = None,
+):
+    return reverse_step_torch_vjp(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        profiler=profiler,
+        backend="python_reference_grating_tfsf",
     )

@@ -476,6 +476,53 @@ class _RigorousBlochScene(mw.SceneModule):
         return scene
 
 
+class _RigorousGratingTfsfScene(mw.SceneModule):
+    """Small grating TFSF scene for finite-difference adjoint validation."""
+
+    def __init__(self, init=0.0):
+        super().__init__()
+        self.logits = torch.nn.Parameter(
+            torch.full((1, 1, 1), float(init), device="cuda")
+        )
+
+    def to_scene(self):
+        density = torch.sigmoid(self.logits)
+        scene = mw.Scene(
+            domain=mw.Domain(bounds=((-0.45, 0.45), (-0.45, 0.45), (-0.75, 0.75))),
+            grid=mw.GridSpec.uniform(0.15),
+            boundary=mw.BoundarySpec.faces(
+                default="pml",
+                num_layers=2,
+                strength=1.0,
+                x="bloch",
+                y="bloch",
+                z="pml",
+                bloch_wavevector="auto",
+            ),
+            device="cuda",
+        )
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.15, 0.15, 0.15)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+        scene.add_source(
+            mw.PlaneWave(
+                name="grating_tfsf",
+                direction=(0.2, 0.1, 0.9746794344808963),
+                polarization=(1.0, 0.0, -0.20519567041703082),
+                source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
+                injection=mw.TFSF.slab(axis="z", bounds=(-0.30, 0.30)),
+            )
+        )
+        scene.add_monitor(mw.PointMonitor("probe", (0.15, 0.0, 0.0), fields=("Ex",)))
+        return scene
+
+
 # ---------------------------------------------------------------------------
 # 1. Multi-voxel spatial gradient: per-element finite difference
 # ---------------------------------------------------------------------------
@@ -677,6 +724,24 @@ def test_bloch_gradient_per_element_matches_fd():
 
     scale = torch.abs(fd_grad).max().item()
     assert torch.allclose(backward_grad, fd_grad, rtol=7e-2, atol=max(scale * 3e-3, 1e-15)), (
+        f"max absolute error: {(torch.abs(backward_grad - fd_grad)).max().item():.4e}, "
+        f"scale: {scale:.4e}"
+    )
+
+
+@_CUDA
+def test_grating_tfsf_gradient_per_element_matches_fd():
+    """Per-element FD validation for x/y Bloch, z-PML grating TFSF adjoint."""
+    model = _RigorousGratingTfsfScene(init=0.0).cuda()
+
+    def loss_fn():
+        result = _build_sim(model, time_steps=48).run()
+        return _abs2(result.monitor("probe")["data"])
+
+    backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn)
+
+    scale = torch.abs(fd_grad).max().item()
+    assert torch.allclose(backward_grad, fd_grad, rtol=1.5e-1, atol=max(scale * 1e-2, 1e-15)), (
         f"max absolute error: {(torch.abs(backward_grad - fd_grad)).max().item():.4e}, "
         f"scale: {scale:.4e}"
     )

@@ -14,6 +14,7 @@ from ..excitation import (
     apply_tfsf_e_correction,
     apply_tfsf_h_correction,
 )
+from ..runtime.stepping import update_electric_fields_bloch_cpml
 from .seeds import _build_output_seeds, _schedule_to_tensor_pack, _apply_seed_runtime
 from ..checkpoint import capture_checkpoint_state
 from ..material_pullback import pullback_material_input_gradients
@@ -210,7 +211,10 @@ class _FDTDGradientBridge:
 
             solver._advance_dispersive_state()
             if has_complex_fields(solver):
-                solver._update_electric_fields_bloch()
+                if getattr(solver, "uses_cpml", False):
+                    update_electric_fields_bloch_cpml(solver)
+                else:
+                    solver._update_electric_fields_bloch()
             else:
                 solver._update_electric_fields(solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
 

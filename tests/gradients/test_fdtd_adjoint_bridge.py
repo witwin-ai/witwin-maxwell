@@ -1853,6 +1853,49 @@ class _DensityBlochScene(mw.SceneModule):
         return scene
 
 
+class _DensityGratingTFSFScene(mw.SceneModule):
+    def __init__(self, init=0.0):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((1, 1, 1), float(init), device="cuda"))
+
+    def to_scene(self):
+        density = torch.sigmoid(self.logits)
+        scene = mw.Scene(
+            domain=mw.Domain(bounds=((-0.45, 0.45), (-0.45, 0.45), (-0.75, 0.75))),
+            grid=mw.GridSpec.uniform(0.15),
+            boundary=mw.BoundarySpec.faces(
+                default="pml",
+                num_layers=2,
+                strength=1.0,
+                x="bloch",
+                y="bloch",
+                z="pml",
+                bloch_wavevector="auto",
+            ),
+            device="cuda",
+        )
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.15, 0.15, 0.15)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+        scene.add_source(
+            mw.PlaneWave(
+                name="grating_tfsf",
+                direction=(0.2, 0.1, 0.9746794344808963),
+                polarization=(1.0, 0.0, -0.20519567041703082),
+                source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
+                injection=mw.TFSF.slab(axis="z", bounds=(-0.30, 0.30)),
+            )
+        )
+        scene.add_monitor(mw.PointMonitor("probe", (0.15, 0.0, 0.0), fields=("Ex",)))
+        return scene
+
+
 class _UnsupportedSceneParam(mw.SceneModule):
     def __init__(self):
         super().__init__()
@@ -1946,6 +1989,13 @@ def _loss_from_tfsf_probe(model):
 
 def _loss_from_bloch_probe(model):
     result = _build_simulation(model, time_steps=40).run()
+    data = result.monitor("probe")["data"]
+    loss = torch.abs(data) ** 2
+    return result, data, loss
+
+
+def _loss_from_grating_tfsf_probe(model):
+    result = _build_simulation(model, time_steps=48).run()
     data = result.monitor("probe")["data"]
     loss = torch.abs(data) ** 2
     return result, data, loss
@@ -2226,6 +2276,40 @@ def test_fdtd_gradient_bridge_matches_central_difference_for_bloch_boundaries():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+def test_fdtd_gradient_bridge_matches_central_difference_for_grating_tfsf():
+    model = _DensityGratingTFSFScene(init=0.0).cuda()
+
+    _, data, loss = _loss_from_grating_tfsf_probe(model)
+    assert torch.is_tensor(data)
+    assert data.is_cuda
+    assert data.requires_grad
+    assert torch.is_complex(data)
+
+    loss.backward()
+    backward_grad = model.logits.grad.detach().clone()
+    assert torch.isfinite(backward_grad).all()
+
+    delta = 1.0e-2
+    with torch.no_grad():
+        base = model.logits.detach().clone()
+        model.logits.copy_(base + delta)
+    _, _, loss_plus = _loss_from_grating_tfsf_probe(model)
+    with torch.no_grad():
+        model.logits.copy_(base - delta)
+    _, _, loss_minus = _loss_from_grating_tfsf_probe(model)
+    with torch.no_grad():
+        model.logits.copy_(base)
+
+    finite_difference = (loss_plus - loss_minus) / (2.0 * delta)
+    assert torch.allclose(
+        backward_grad,
+        torch.full_like(backward_grad, finite_difference.item()),
+        rtol=1.5e-1,
+        atol=1e-15,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
 def test_fdtd_gradient_bridge_optimizer_step_reduces_loss():
     model = _DensityPointScene(init=0.0).cuda()
     optimizer = torch.optim.SGD(model.parameters(), lr=1.0e13)
@@ -2325,6 +2409,21 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_bloch_for_b
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
     assert profile["reverse_backend_counts"].get("python_reference_bloch", 0) == bridge._time_steps
+    assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_grating_tfsf():
+    model = _DensityGratingTFSFScene(init=0.0).cuda()
+    simulation = _build_simulation(model, time_steps=32)
+    bridge = _FDTDGradientBridge(simulation)
+    bridge.forward(tuple(bridge.material_inputs))
+
+    profile = bridge.backward_profile()
+
+    assert profile["seed_injection_backend"] == "device_batched"
+    assert profile["seed_batch_counts"]["point"] > 0
+    assert profile["reverse_backend_counts"].get("python_reference_grating_tfsf", 0) == bridge._time_steps
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
