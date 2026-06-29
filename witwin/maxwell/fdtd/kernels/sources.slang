@@ -325,6 +325,181 @@ void addSourcePatchBloch3D(
 
 [AutoPyBindCUDA]
 [CUDAKernel]
+void addCwPhasedSourcePatchBloch3D(
+    TensorView<float> ExReal,
+    TensorView<float> ExImag,
+    TensorView<float> EyReal,
+    TensorView<float> EyImag,
+    TensorView<float> EzReal,
+    TensorView<float> EzImag,
+    TensorView<float> sourcePatchCos,
+    TensorView<float> sourcePatchSin,
+    int offsetI,
+    int offsetJ,
+    int offsetK,
+    float signalCos,
+    float signalSin,
+    uint axisCode,
+    float phaseCosA,
+    float phaseSinA,
+    float phaseCosB,
+    float phaseSinB,
+    uint wrapAxisA,
+    uint wrapAxisB
+)
+{
+    uint linearIndex = linearThreadIndex1D();
+    uint total = linearSize3D(sourcePatchCos);
+    if (linearIndex >= total)
+    {
+        return;
+    }
+
+    uint3 index = unflatten3D(linearIndex, sourcePatchCos.size(1), sourcePatchCos.size(2));
+    int i = offsetI + int(index.x);
+    int j = offsetJ + int(index.y);
+    int k = offsetK + int(index.z);
+    float patchCos = sourcePatchCos[index.x, index.y, index.z];
+    float patchSin = sourcePatchSin[index.x, index.y, index.z];
+    float2 delta = float2(
+        signalCos * patchCos + signalSin * patchSin,
+        signalSin * patchCos - signalCos * patchSin
+    );
+
+    if (axisCode == 0)
+    {
+        if (i < 0 || i >= int(ExReal.size(0)) || j < 0 || j >= int(ExReal.size(1)) || k < 0 || k >= int(ExReal.size(2)))
+        {
+            return;
+        }
+
+        ExReal[uint(i), uint(j), uint(k)] += delta.x;
+        ExImag[uint(i), uint(j), uint(k)] += delta.y;
+
+        bool boundaryA = wrapAxisA != 0 && (j == 0 || j + 1 >= int(ExReal.size(1)));
+        bool boundaryB = wrapAxisB != 0 && (k == 0 || k + 1 >= int(ExReal.size(2)));
+        int pairA = (j == 0) ? int(ExReal.size(1)) - 1 : 0;
+        int pairB = (k == 0) ? int(ExReal.size(2)) - 1 : 0;
+
+        if (boundaryA)
+        {
+            float2 deltaA = (j == 0)
+                ? complexPhasePositive(phaseCosA, phaseSinA, delta)
+                : complexPhaseNegative(phaseCosA, phaseSinA, delta);
+            ExReal[uint(i), uint(pairA), uint(k)] += deltaA.x;
+            ExImag[uint(i), uint(pairA), uint(k)] += deltaA.y;
+        }
+        if (boundaryB)
+        {
+            float2 deltaB = (k == 0)
+                ? complexPhasePositive(phaseCosB, phaseSinB, delta)
+                : complexPhaseNegative(phaseCosB, phaseSinB, delta);
+            ExReal[uint(i), uint(j), uint(pairB)] += deltaB.x;
+            ExImag[uint(i), uint(j), uint(pairB)] += deltaB.y;
+        }
+        if (boundaryA && boundaryB)
+        {
+            float2 deltaAB = (j == 0)
+                ? complexPhasePositive(phaseCosA, phaseSinA, delta)
+                : complexPhaseNegative(phaseCosA, phaseSinA, delta);
+            deltaAB = (k == 0)
+                ? complexPhasePositive(phaseCosB, phaseSinB, deltaAB)
+                : complexPhaseNegative(phaseCosB, phaseSinB, deltaAB);
+            ExReal[uint(i), uint(pairA), uint(pairB)] += deltaAB.x;
+            ExImag[uint(i), uint(pairA), uint(pairB)] += deltaAB.y;
+        }
+        return;
+    }
+
+    if (axisCode == 1)
+    {
+        if (i < 0 || i >= int(EyReal.size(0)) || j < 0 || j >= int(EyReal.size(1)) || k < 0 || k >= int(EyReal.size(2)))
+        {
+            return;
+        }
+
+        EyReal[uint(i), uint(j), uint(k)] += delta.x;
+        EyImag[uint(i), uint(j), uint(k)] += delta.y;
+
+        bool boundaryA = wrapAxisA != 0 && (i == 0 || i + 1 >= int(EyReal.size(0)));
+        bool boundaryB = wrapAxisB != 0 && (k == 0 || k + 1 >= int(EyReal.size(2)));
+        int pairA = (i == 0) ? int(EyReal.size(0)) - 1 : 0;
+        int pairB = (k == 0) ? int(EyReal.size(2)) - 1 : 0;
+
+        if (boundaryA)
+        {
+            float2 deltaA = (i == 0)
+                ? complexPhasePositive(phaseCosA, phaseSinA, delta)
+                : complexPhaseNegative(phaseCosA, phaseSinA, delta);
+            EyReal[uint(pairA), uint(j), uint(k)] += deltaA.x;
+            EyImag[uint(pairA), uint(j), uint(k)] += deltaA.y;
+        }
+        if (boundaryB)
+        {
+            float2 deltaB = (k == 0)
+                ? complexPhasePositive(phaseCosB, phaseSinB, delta)
+                : complexPhaseNegative(phaseCosB, phaseSinB, delta);
+            EyReal[uint(i), uint(j), uint(pairB)] += deltaB.x;
+            EyImag[uint(i), uint(j), uint(pairB)] += deltaB.y;
+        }
+        if (boundaryA && boundaryB)
+        {
+            float2 deltaAB = (i == 0)
+                ? complexPhasePositive(phaseCosA, phaseSinA, delta)
+                : complexPhaseNegative(phaseCosA, phaseSinA, delta);
+            deltaAB = (k == 0)
+                ? complexPhasePositive(phaseCosB, phaseSinB, deltaAB)
+                : complexPhaseNegative(phaseCosB, phaseSinB, deltaAB);
+            EyReal[uint(pairA), uint(j), uint(pairB)] += deltaAB.x;
+            EyImag[uint(pairA), uint(j), uint(pairB)] += deltaAB.y;
+        }
+        return;
+    }
+
+    if (i < 0 || i >= int(EzReal.size(0)) || j < 0 || j >= int(EzReal.size(1)) || k < 0 || k >= int(EzReal.size(2)))
+    {
+        return;
+    }
+
+    EzReal[uint(i), uint(j), uint(k)] += delta.x;
+    EzImag[uint(i), uint(j), uint(k)] += delta.y;
+
+    bool boundaryA = wrapAxisA != 0 && (i == 0 || i + 1 >= int(EzReal.size(0)));
+    bool boundaryB = wrapAxisB != 0 && (j == 0 || j + 1 >= int(EzReal.size(1)));
+    int pairA = (i == 0) ? int(EzReal.size(0)) - 1 : 0;
+    int pairB = (j == 0) ? int(EzReal.size(1)) - 1 : 0;
+
+    if (boundaryA)
+    {
+        float2 deltaA = (i == 0)
+            ? complexPhasePositive(phaseCosA, phaseSinA, delta)
+            : complexPhaseNegative(phaseCosA, phaseSinA, delta);
+        EzReal[uint(pairA), uint(j), uint(k)] += deltaA.x;
+        EzImag[uint(pairA), uint(j), uint(k)] += deltaA.y;
+    }
+    if (boundaryB)
+    {
+        float2 deltaB = (j == 0)
+            ? complexPhasePositive(phaseCosB, phaseSinB, delta)
+            : complexPhaseNegative(phaseCosB, phaseSinB, delta);
+        EzReal[uint(i), uint(pairB), uint(k)] += deltaB.x;
+        EzImag[uint(i), uint(pairB), uint(k)] += deltaB.y;
+    }
+    if (boundaryA && boundaryB)
+    {
+        float2 deltaAB = (i == 0)
+            ? complexPhasePositive(phaseCosA, phaseSinA, delta)
+            : complexPhaseNegative(phaseCosA, phaseSinA, delta);
+        deltaAB = (j == 0)
+            ? complexPhasePositive(phaseCosB, phaseSinB, deltaAB)
+            : complexPhaseNegative(phaseCosB, phaseSinB, deltaAB);
+        EzReal[uint(pairA), uint(pairB), uint(k)] += deltaAB.x;
+        EzImag[uint(pairA), uint(pairB), uint(k)] += deltaAB.y;
+    }
+}
+
+[AutoPyBindCUDA]
+[CUDAKernel]
 void addSourcePatch3D(
     TensorView<float> field,
     TensorView<float> sourcePatch,

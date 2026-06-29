@@ -137,6 +137,61 @@ def _bloch_expected(shape, patch, offsets, signal, axis_code, phase_a, phase_b, 
     return expected.to(device="cuda")
 
 
+def _bloch_expected_complex_patch(shape, real_patch, imag_patch, offsets, axis_code, phase_a, phase_b, wrap_axes=(1, 1)):
+    axes = ((1, 2), (0, 2), (0, 1))[axis_code]
+    expected = torch.zeros(shape, dtype=torch.complex64)
+    real_cpu = real_patch.detach().cpu()
+    imag_cpu = imag_patch.detach().cpu()
+    for i in range(real_cpu.shape[0]):
+        for j in range(real_cpu.shape[1]):
+            for k in range(real_cpu.shape[2]):
+                coords = [offsets[0] + i, offsets[1] + j, offsets[2] + k]
+                if any(coords[axis] < 0 or coords[axis] >= shape[axis] for axis in range(3)):
+                    continue
+                delta = complex(float(real_cpu[i, j, k]), float(imag_cpu[i, j, k]))
+                expected[coords[0], coords[1], coords[2]] += delta
+                boundary = []
+                pair = []
+                for axis, wrap_axis in zip(axes, wrap_axes):
+                    at_boundary = wrap_axis != 0 and (coords[axis] == 0 or coords[axis] + 1 >= shape[axis])
+                    boundary.append(at_boundary)
+                    pair.append(shape[axis] - 1 if coords[axis] == 0 else 0)
+                if boundary[0]:
+                    dst = list(coords)
+                    dst[axes[0]] = pair[0]
+                    value = (
+                        _phase_positive(delta, *phase_a)
+                        if coords[axes[0]] == 0
+                        else _phase_negative(delta, *phase_a)
+                    )
+                    expected[dst[0], dst[1], dst[2]] += value
+                if boundary[1]:
+                    dst = list(coords)
+                    dst[axes[1]] = pair[1]
+                    value = (
+                        _phase_positive(delta, *phase_b)
+                        if coords[axes[1]] == 0
+                        else _phase_negative(delta, *phase_b)
+                    )
+                    expected[dst[0], dst[1], dst[2]] += value
+                if boundary[0] and boundary[1]:
+                    dst = list(coords)
+                    dst[axes[0]] = pair[0]
+                    dst[axes[1]] = pair[1]
+                    value = (
+                        _phase_positive(delta, *phase_a)
+                        if coords[axes[0]] == 0
+                        else _phase_negative(delta, *phase_a)
+                    )
+                    value = (
+                        _phase_positive(value, *phase_b)
+                        if coords[axes[1]] == 0
+                        else _phase_negative(value, *phase_b)
+                    )
+                    expected[dst[0], dst[1], dst[2]] += value
+    return expected.to(device="cuda")
+
+
 def test_compiled_cuda_extension_uniform_cw_and_time_shifted_sources_match_torch_dispatcher(monkeypatch):
     method_names = ("add_source_patch", "add_cw_phased_source_patch", "add_time_shifted_source_patch")
     real_extension = backend.get_compiled_extension()
@@ -468,6 +523,51 @@ def test_compiled_cuda_extension_bloch_sources_respect_wrap_axis_flags(monkeypat
     assert counted.calls[method_name] == expected_extension_calls
     actual_complex = torch.complex(fields[0], fields[1])
     torch.testing.assert_close(actual_complex, expected, rtol=2.0e-6, atol=2.0e-6)
+
+
+def test_cuda_backend_bloch_cw_sources_use_delayed_phase_convention(monkeypatch):
+    shape = (2, 2, 2)
+    patch_cos = torch.arange(1, 9, device="cuda", dtype=torch.float32).reshape(shape) / 10.0
+    patch_sin = torch.arange(9, 17, device="cuda", dtype=torch.float32).reshape(shape) / 20.0
+    fields = [torch.zeros(shape, device="cuda", dtype=torch.float32) for _ in range(6)]
+    signal_cos = 0.7
+    signal_sin = -0.2
+    phase_a = (0.8, 0.6)
+    phase_b = (0.5, -0.25)
+    real_patch = signal_cos * patch_cos + signal_sin * patch_sin
+    imag_patch = signal_sin * patch_cos - signal_cos * patch_sin
+    expected = _bloch_expected_complex_patch(shape, real_patch, imag_patch, (0, 0, 0), 2, phase_a, phase_b)
+
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
+    backend._add_cw_phased_source_patch_bloch(
+        ExReal=fields[0],
+        ExImag=fields[1],
+        EyReal=fields[2],
+        EyImag=fields[3],
+        EzReal=fields[4],
+        EzImag=fields[5],
+        sourcePatchCos=patch_cos,
+        sourcePatchSin=patch_sin,
+        offsetI=0,
+        offsetJ=0,
+        offsetK=0,
+        signalCos=signal_cos,
+        signalSin=signal_sin,
+        axisCode=2,
+        phaseCosA=phase_a[0],
+        phaseSinA=phase_a[1],
+        phaseCosB=phase_b[0],
+        phaseSinB=phase_b[1],
+        wrapAxisA=1,
+        wrapAxisB=1,
+    )
+    torch.cuda.synchronize()
+
+    actual_complex = torch.complex(fields[4], fields[5])
+    torch.testing.assert_close(actual_complex, expected, rtol=2.0e-6, atol=2.0e-6)
+    for index, field in enumerate(fields):
+        if index not in (4, 5):
+            assert torch.count_nonzero(field).item() == 0
 
 
 def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_dispatcher(monkeypatch):

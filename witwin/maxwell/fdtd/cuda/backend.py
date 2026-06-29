@@ -1925,6 +1925,27 @@ def _compiled_bloch_source_accepts_wrap_flags(extension) -> bool:
     return "arg18:" in doc or "wrap_axis_b" in doc or "wrapAxisB" in doc
 
 
+def _scatter_bloch_patch_values(
+    fields,
+    source_patch,
+    offsets,
+    real_values,
+    imag_values,
+    phase_axes,
+    *,
+    wrap_a,
+    wrap_b,
+):
+    _scatter_patch(fields[0], source_patch, offsets, real_values)
+    _scatter_patch(fields[1], source_patch, offsets, imag_values)
+    if wrap_a:
+        _scatter_bloch_duplicate(fields[0], fields[1], source_patch, offsets, real_values, imag_values, (phase_axes[0],))
+    if wrap_b:
+        _scatter_bloch_duplicate(fields[0], fields[1], source_patch, offsets, real_values, imag_values, (phase_axes[1],))
+    if wrap_a and wrap_b:
+        _scatter_bloch_duplicate(fields[0], fields[1], source_patch, offsets, real_values, imag_values, phase_axes)
+
+
 def _add_source_patch(*, field, sourcePatch, offsetI, offsetJ, offsetK, signal):
     if _use_compiled_field_kernels():
         get_compiled_extension().add_source_patch(
@@ -2116,19 +2137,94 @@ def _add_source_patch_bloch(
     offsets = (int(offsetI), int(offsetJ), int(offsetK))
     real_values = sourcePatch * float(signalReal)
     imag_values = sourcePatch * float(signalImag)
-    _scatter_patch(fields[0], sourcePatch, offsets, real_values)
-    _scatter_patch(fields[1], sourcePatch, offsets, imag_values)
     tangential = ((1, 2), (0, 2), (0, 1))[int(axisCode)]
     phase_axes = (
         (tangential[0], float(phaseCosA), float(phaseSinA)),
         (tangential[1], float(phaseCosB), float(phaseSinB)),
     )
-    if wrap_a:
-        _scatter_bloch_duplicate(fields[0], fields[1], sourcePatch, offsets, real_values, imag_values, (phase_axes[0],))
-    if wrap_b:
-        _scatter_bloch_duplicate(fields[0], fields[1], sourcePatch, offsets, real_values, imag_values, (phase_axes[1],))
-    if wrap_a and wrap_b:
-        _scatter_bloch_duplicate(fields[0], fields[1], sourcePatch, offsets, real_values, imag_values, phase_axes)
+    _scatter_bloch_patch_values(
+        fields,
+        sourcePatch,
+        offsets,
+        real_values,
+        imag_values,
+        phase_axes,
+        wrap_a=wrap_a,
+        wrap_b=wrap_b,
+    )
+
+
+def _add_cw_phased_source_patch_bloch(
+    *,
+    ExReal,
+    ExImag,
+    EyReal,
+    EyImag,
+    EzReal,
+    EzImag,
+    sourcePatchCos,
+    sourcePatchSin,
+    offsetI,
+    offsetJ,
+    offsetK,
+    signalCos,
+    signalSin,
+    axisCode,
+    phaseCosA,
+    phaseSinA,
+    phaseCosB,
+    phaseSinB,
+    wrapAxisA=1,
+    wrapAxisB=1,
+):
+    wrap_a = int(wrapAxisA) != 0
+    wrap_b = int(wrapAxisB) != 0
+    if _use_compiled_field_kernels():
+        extension = get_compiled_extension()
+        extension_method = getattr(extension, "add_cw_phased_source_patch_bloch", None)
+        if extension_method is not None:
+            extension_method(
+                ExReal,
+                ExImag,
+                EyReal,
+                EyImag,
+                EzReal,
+                EzImag,
+                sourcePatchCos,
+                sourcePatchSin,
+                int(offsetI),
+                int(offsetJ),
+                int(offsetK),
+                float(signalCos),
+                float(signalSin),
+                int(axisCode),
+                float(phaseCosA),
+                float(phaseSinA),
+                float(phaseCosB),
+                float(phaseSinB),
+                int(wrapAxisA),
+                int(wrapAxisB),
+            )
+            return
+    fields = ((ExReal, ExImag), (EyReal, EyImag), (EzReal, EzImag))[int(axisCode)]
+    offsets = (int(offsetI), int(offsetJ), int(offsetK))
+    real_values = sourcePatchCos * float(signalCos) + sourcePatchSin * float(signalSin)
+    imag_values = sourcePatchCos * float(signalSin) - sourcePatchSin * float(signalCos)
+    tangential = ((1, 2), (0, 2), (0, 1))[int(axisCode)]
+    phase_axes = (
+        (tangential[0], float(phaseCosA), float(phaseSinA)),
+        (tangential[1], float(phaseCosB), float(phaseSinB)),
+    )
+    _scatter_bloch_patch_values(
+        fields,
+        sourcePatchCos,
+        offsets,
+        real_values,
+        imag_values,
+        phase_axes,
+        wrap_a=wrap_a,
+        wrap_b=wrap_b,
+    )
 
 
 def _add_scaled_slice_source_patch(*, field, sourcePatch, incidentField, sampleIndex, offsetI, offsetJ, offsetK, scale):
@@ -4038,6 +4134,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "addSourcePatchEyPeriodic3D": _add_source_patch_periodic,
     "addSourcePatchEzPeriodic3D": _add_source_patch_periodic,
     "addSourcePatchBloch3D": _add_source_patch_bloch,
+    "addCwPhasedSourcePatchBloch3D": _add_cw_phased_source_patch_bloch,
     "addScaledSliceSourcePatch3D": _add_scaled_slice_source_patch,
     "addScaledLineSourcePatch3D": _add_scaled_line_source_patch,
     "addInterpolatedSourcePatch3D": _add_interpolated_source_patch,

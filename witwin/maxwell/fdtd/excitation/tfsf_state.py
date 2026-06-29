@@ -24,6 +24,7 @@ from .tfsf_common import (
     validate_bounds,
 )
 from .tfsf_specs import (
+    AXIS_INDEX,
     DELTA_ATTR,
     E_CURL_ATTR,
     H_CURL_ATTR,
@@ -31,6 +32,7 @@ from .tfsf_specs import (
     axis_aligned_sample_indices,
     axis_aligned_sample_view,
     build_discrete_tfsf_specs,
+    build_slab_tfsf_specs,
     constant_line_index_tensor,
     discrete_plane_wave_vectors,
     is_reference_plane_wave_x_ez,
@@ -86,15 +88,20 @@ def _set_tfsf_state(
     magnetic_terms,
     auxiliary_grid=None,
     phase_speed=None,
+    bounds=None,
 ):
+    injection = source["injection"]
     state = {
         "provider": provider,
         "lower": lower,
         "upper": upper,
-        "bounds": source["injection"]["bounds"],
+        "bounds": injection.get("bounds") if bounds is None else bounds,
+        "mode": injection.get("mode", "box"),
         "electric_terms": electric_terms,
         "magnetic_terms": magnetic_terms,
     }
+    if injection.get("axis") is not None:
+        state["axis"] = injection["axis"]
     if provider in {"plane_wave_ref_x_ez", "plane_wave_axis_aligned"}:
         state["electric_batch"] = build_batched_reference_terms(solver, electric_terms)
         state["magnetic_batch"] = build_batched_reference_terms(solver, magnetic_terms)
@@ -109,38 +116,143 @@ def _set_tfsf_state(
     solver.tfsf_enabled = True
 
 
-def _set_pending_tfsf_slab_state(solver, source):
-    injection = source["injection"]
+def resolve_tfsf_region_indices(solver, injection):
+    mode = injection.get("mode", "box")
+    if mode == "box":
+        lower, upper = resolve_bounds_indices(solver.scene, injection["bounds"])
+        return lower, upper, injection["bounds"]
+    if mode != "slab":
+        raise ValueError(f"Unsupported TFSF injection mode: {mode!r}.")
+
     axis = injection["axis"]
-    axis_index = "xyz".index(axis)
+    axis_index = AXIS_INDEX[axis]
     shape = (solver.Nx, solver.Ny, solver.Nz)
     lower = []
     upper = []
+    bounds = []
     for current_axis, axis_coords, size in zip("xyz", (solver.scene.x, solver.scene.y, solver.scene.z), shape):
         if current_axis == axis:
             axis_bounds = injection["axis_bounds"]
             lower.append(nearest_index(axis_coords, axis_bounds[0]))
             upper.append(nearest_index(axis_coords, axis_bounds[1]))
+            bounds.append((float(axis_bounds[0]), float(axis_bounds[1])))
         else:
-            lower.append(int(solver.scene.pml_thickness_for_face(current_axis, "low")))
-            upper.append(int(size - solver.scene.pml_thickness_for_face(current_axis, "high") - 1))
+            lo = int(solver.scene.pml_thickness_for_face(current_axis, "low"))
+            hi = int(size - solver.scene.pml_thickness_for_face(current_axis, "high") - 1)
+            lower.append(lo)
+            upper.append(hi)
+            bounds.append((float(axis_coords[lo].item()), float(axis_coords[hi].item())))
 
     if upper[axis_index] <= lower[axis_index] + 1:
         raise ValueError(f"TFSF slab bounds must span at least two cells along {axis}.")
+    for transverse_axis, lo, hi in zip("xyz", lower, upper):
+        if hi <= lo:
+            raise ValueError(f"TFSF slab transverse span is empty along {transverse_axis}.")
+    return tuple(lower), tuple(upper), tuple(bounds)
 
-    solver._tfsf_state = {
-        "provider": "pending_grating_slab",
-        "runtime_pending": True,
-        "mode": "slab",
-        "axis": axis,
-        "bounds": None,
-        "lower": tuple(lower),
-        "upper": tuple(upper),
-        "electric_terms": [],
-        "magnetic_terms": [],
-        "source": source,
-    }
-    solver.tfsf_enabled = False
+
+def _validate_slab_interfaces_are_vacuum(solver, lower, upper, axis: str, tol=1e-5):
+    axis_index = AXIS_INDEX[axis]
+    for face_index in (lower[axis_index], upper[axis_index]):
+        face_slice = [
+            slice(lower[0], upper[0] + 1),
+            slice(lower[1], upper[1] + 1),
+            slice(lower[2], upper[2] + 1),
+        ]
+        face_slice[axis_index] = slice(face_index, face_index + 1)
+        face_slice = tuple(face_slice)
+        eps_face = solver.epsilon_r[face_slice]
+        mu_face = solver.mu_r[face_slice]
+        if not torch.allclose(eps_face, torch.ones_like(eps_face), atol=tol, rtol=0.0):
+            raise ValueError("TFSF slab interfaces must remain in vacuum.")
+        if not torch.allclose(mu_face, torch.ones_like(mu_face), atol=tol, rtol=0.0):
+            raise ValueError("TFSF slab interfaces must remain in vacuum.")
+
+
+def _validate_slab_normal_bounds(solver, lower, upper, axis: str):
+    axis_index = AXIS_INDEX[axis]
+    size = (solver.Nx, solver.Ny, solver.Nz)[axis_index]
+    lo = lower[axis_index]
+    hi = upper[axis_index]
+    low_margin = solver.scene.pml_thickness_for_face(axis, "low")
+    high_margin = solver.scene.pml_thickness_for_face(axis, "high")
+    if hi <= lo + 1:
+        raise ValueError(f"TFSF slab bounds must span at least two cells along {axis}.")
+    if lo < low_margin or hi > size - high_margin - 1:
+        raise ValueError("TFSF slab bounds must lie strictly inside the non-PML simulation region.")
+
+
+def _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds):
+    if source["kind"] != "plane_wave":
+        raise ValueError("Grating TFSF slab injection requires a PlaneWave source.")
+    axis = source["injection"]["axis"]
+    if axis != "z":
+        raise NotImplementedError("Grating TFSF slab support currently requires axis='z'.")
+    source_time = source["source_time"]
+    if source_time["kind"] != "cw":
+        raise ValueError("Grating TFSF slab injection with Bloch boundaries requires CW source_time.")
+
+    eta0 = (solver.mu0 / solver.eps0) ** 0.5
+    source_frequency = float(source_time["frequency"])
+    source_omega = 2.0 * np.pi * source_frequency
+    k_numeric = solve_numerical_wavenumber(solver, source["direction"], DELTA_ATTR)
+    phase_speed = solver.c if k_numeric <= 1e-12 else source_omega / k_numeric
+    electric_vector, magnetic_unit_vector_map = discrete_plane_wave_vectors(
+        solver,
+        source["direction"],
+        source["polarization"],
+        k_numeric,
+    )
+    magnetic_vector = {name: value / eta0 for name, value in magnetic_unit_vector_map.items()}
+    reference_point = box_center_tensor(solver, bounds)
+    electric_specs, magnetic_specs = build_slab_tfsf_specs(lower, upper, axis=axis)
+
+    def build_discrete_cw_term(spec, coeff_patch, component_scale):
+        _, delay_patch = incident_profile(
+            solver,
+            {"kind": "plane_wave", "direction": source["direction"]},
+            _spec_positions(solver, spec),
+            reference_point,
+            phase_speed=phase_speed,
+            source_frequency=source_frequency,
+        )
+        return build_term_from_profile(
+            solver,
+            field_name=spec["field_name"],
+            offsets=spec["offsets"],
+            scale=spec["sign"] * component_scale * coeff_patch,
+            delay_patch=delay_patch,
+            activation_delay_patch=None,
+            source_time=source_time,
+            omega=source_omega,
+        )
+
+    electric_terms = build_terms_from_specs(
+        solver,
+        electric_specs,
+        magnetic_vector,
+        E_CURL_ATTR,
+        build_discrete_cw_term,
+    )
+    magnetic_terms = build_terms_from_specs(
+        solver,
+        magnetic_specs,
+        electric_vector,
+        H_CURL_ATTR,
+        build_discrete_cw_term,
+    )
+
+    _set_tfsf_state(
+        solver,
+        provider="plane_wave_grating_slab_cw",
+        source=source,
+        lower=lower,
+        upper=upper,
+        bounds=bounds,
+        phase_speed=phase_speed,
+        electric_terms=electric_terms,
+        magnetic_terms=magnetic_terms,
+    )
 
 
 def _spec_positions(solver, spec):
@@ -563,13 +675,18 @@ def initialize_tfsf_state(solver):
     if source["injection"].get("mode", "box") == "slab":
         if solver.scene.boundary.uses_kind("bloch"):
             validate_grating_tfsf_slab_topology(solver)
-            _set_pending_tfsf_slab_state(solver, source)
+            lower, upper, bounds = resolve_tfsf_region_indices(solver, source["injection"])
+            _validate_slab_normal_bounds(solver, lower, upper, source["injection"]["axis"])
+            _validate_slab_interfaces_are_vacuum(solver, lower, upper, source["injection"]["axis"])
+            _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds)
             return
         raise NotImplementedError("TFSF slab runtime support is not implemented yet.")
-    if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
+    if solver.scene.boundary.uses_kind("bloch"):
+        raise NotImplementedError("TFSF slab mode is required for Bloch-boundary TFSF injection.")
+    if solver.scene.boundary.uses_kind("periodic"):
         raise NotImplementedError("TFSF injection currently supports only none, pml, pec, or pmc boundaries.")
 
-    lower, upper = resolve_bounds_indices(solver.scene, source["injection"]["bounds"])
+    lower, upper, _ = resolve_tfsf_region_indices(solver, source["injection"])
     validate_bounds(solver, lower, upper)
     validate_background_is_vacuum(solver, lower, upper)
     if source["kind"] == "plane_wave":

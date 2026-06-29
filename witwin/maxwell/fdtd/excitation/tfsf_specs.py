@@ -9,6 +9,14 @@ AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
 DELTA_ATTR = {"x": "dx", "y": "dy", "z": "dz"}
 E_CURL_ATTR = {"Ex": "cex_curl", "Ey": "cey_curl", "Ez": "cez_curl"}
 H_CURL_ATTR = {"Hx": "chx_curl", "Hy": "chy_curl", "Hz": "chz_curl"}
+_FACE_SPEC_RANGES = {
+    ("x", "low"): slice(0, 2),
+    ("x", "high"): slice(2, 4),
+    ("y", "low"): slice(4, 6),
+    ("y", "high"): slice(6, 8),
+    ("z", "low"): slice(8, 10),
+    ("z", "high"): slice(10, 12),
+}
 
 
 def make_discrete_spec(
@@ -310,6 +318,19 @@ def build_discrete_tfsf_specs(lower, upper):
         ),
     ]
     return electric_specs, magnetic_specs
+
+
+def build_slab_tfsf_specs(lower, upper, *, axis: str):
+    axis_name = str(axis).lower()
+    if axis_name not in AXIS_INDEX:
+        raise ValueError("TFSF slab axis must be 'x', 'y', or 'z'.")
+    electric_specs, magnetic_specs = build_discrete_tfsf_specs(lower, upper)
+    low_slice = _FACE_SPEC_RANGES[(axis_name, "low")]
+    high_slice = _FACE_SPEC_RANGES[(axis_name, "high")]
+    return (
+        electric_specs[low_slice] + electric_specs[high_slice],
+        magnetic_specs[low_slice] + magnetic_specs[high_slice],
+    )
 
 
 def magnetic_unit_vector(direction, polarization):

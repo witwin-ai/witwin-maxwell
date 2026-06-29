@@ -93,15 +93,20 @@ def _launch_uniform_patch(solver, *, field_name, source_patch, offsets, signal, 
     )
 
 
-_FIELD_TANGENTIAL_AXES = {
-    "Ex": ("y", "z"),
-    "Ey": ("x", "z"),
-    "Ez": ("x", "y"),
+_COMPONENT_TANGENTIAL_AXES = {
+    "x": ("y", "z"),
+    "y": ("x", "z"),
+    "z": ("x", "y"),
 }
+_COMPONENT_AXIS_CODE = {"x": 0, "y": 1, "z": 2}
+
+
+def _component_name(field_name):
+    return field_name[-1].lower()
 
 
 def _wrap_axes_for_kind(solver, field_name, kind):
-    tangential_axes = _FIELD_TANGENTIAL_AXES[field_name]
+    tangential_axes = _COMPONENT_TANGENTIAL_AXES[_component_name(field_name)]
     return tuple(
         1 if solver.scene.boundary.axis_kind(axis) == kind else 0
         for axis in tangential_axes
@@ -112,8 +117,12 @@ def _periodic_wrap_axes(solver, field_name):
     return _wrap_axes_for_kind(solver, field_name, "periodic")
 
 
-def _bloch_wrap_axes(solver, field_name):
-    return _wrap_axes_for_kind(solver, field_name, "bloch")
+def _complex_wrap_axes(solver, field_name):
+    tangential_axes = _COMPONENT_TANGENTIAL_AXES[_component_name(field_name)]
+    return tuple(
+        1 if solver.scene.boundary.axis_kind(axis) in {"bloch", "periodic"} else 0
+        for axis in tangential_axes
+    )
 
 
 def _launch_cw_patch(solver, *, field_name, term, signal_cos, signal_sin):
@@ -131,6 +140,80 @@ def _launch_cw_patch(solver, *, field_name, term, signal_cos, signal_sin):
         blockSize=solver.kernel_block_size,
         gridSize=term["grid"],
     )
+
+
+def _field_triplet_kwargs(solver, field_name):
+    if field_name[0] == "H":
+        return {
+            "ExReal": solver.Hx,
+            "ExImag": solver.Hx_imag,
+            "EyReal": solver.Hy,
+            "EyImag": solver.Hy_imag,
+            "EzReal": solver.Hz,
+            "EzImag": solver.Hz_imag,
+        }
+    return {
+        "ExReal": solver.Ex,
+        "ExImag": solver.Ex_imag,
+        "EyReal": solver.Ey,
+        "EyImag": solver.Ey_imag,
+        "EzReal": solver.Ez,
+        "EzImag": solver.Ez_imag,
+    }
+
+
+def _bloch_phase_kwargs(solver, field_name):
+    component = _component_name(field_name)
+    if component == "x":
+        return {
+            "phaseCosA": _phase_cos_for_axis(solver, "y"),
+            "phaseSinA": _phase_sin_for_axis(solver, "y"),
+            "phaseCosB": _phase_cos_for_axis(solver, "z"),
+            "phaseSinB": _phase_sin_for_axis(solver, "z"),
+        }
+    if component == "y":
+        return {
+            "phaseCosA": _phase_cos_for_axis(solver, "x"),
+            "phaseSinA": _phase_sin_for_axis(solver, "x"),
+            "phaseCosB": _phase_cos_for_axis(solver, "z"),
+            "phaseSinB": _phase_sin_for_axis(solver, "z"),
+        }
+    return {
+        "phaseCosA": _phase_cos_for_axis(solver, "x"),
+        "phaseSinA": _phase_sin_for_axis(solver, "x"),
+        "phaseCosB": _phase_cos_for_axis(solver, "y"),
+        "phaseSinB": _phase_sin_for_axis(solver, "y"),
+    }
+
+
+def _phase_cos_for_axis(solver, axis):
+    axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+    if solver.scene.boundary.axis_kind(axis) == "periodic":
+        return 1.0
+    return solver.boundary_phase_cos[axis_index]
+
+
+def _phase_sin_for_axis(solver, axis):
+    axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+    if solver.scene.boundary.axis_kind(axis) == "periodic":
+        return 0.0
+    return solver.boundary_phase_sin[axis_index]
+
+
+def _bloch_patch_common_kwargs(solver, field_name, term):
+    wrap_axis_a, wrap_axis_b = _complex_wrap_axes(solver, field_name)
+    offset_i, offset_j, offset_k = term["offsets"]
+    kernel_kwargs = {
+        "offsetI": int(offset_i),
+        "offsetJ": int(offset_j),
+        "offsetK": int(offset_k),
+        "axisCode": _COMPONENT_AXIS_CODE[_component_name(field_name)],
+        "wrapAxisA": int(wrap_axis_a),
+        "wrapAxisB": int(wrap_axis_b),
+    }
+    kernel_kwargs.update(_field_triplet_kwargs(solver, field_name))
+    kernel_kwargs.update(_bloch_phase_kwargs(solver, field_name))
+    return kernel_kwargs
 
 
 def _launch_time_shifted_patch(solver, *, field_name, term, source_time, time_value):
@@ -171,6 +254,15 @@ def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value,
             if cache_key not in cw_cache:
                 cw_cache[cache_key] = _resolve_cw_signal(term_omega, term_source_time, time_value)
             signal_cos, signal_sin = cw_cache[cache_key]
+            if solver.scene.boundary.uses_kind("bloch"):
+                _launch_bloch_cw_patch(
+                    solver,
+                    field_name=field_name,
+                    term=term,
+                    signal_cos=signal_cos,
+                    signal_sin=signal_sin,
+                )
+                continue
             _launch_cw_patch(
                 solver,
                 field_name=field_name,
@@ -180,6 +272,8 @@ def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value,
             )
             continue
         if term["delay_patch"] is not None:
+            if solver.scene.boundary.uses_kind("bloch"):
+                raise NotImplementedError("Bloch-boundary source patches require CW phased source terms.")
             _launch_time_shifted_patch(
                 solver,
                 field_name=field_name,
@@ -190,6 +284,22 @@ def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value,
             continue
         if cache_key not in signal_cache:
             signal_cache[cache_key] = evaluate_source_time(term_source_time, time_value)
+        if solver.scene.boundary.uses_kind("bloch"):
+            _launch_bloch_patch(
+                solver,
+                field_name=field_name,
+                term=term,
+                signal=signal_cache[cache_key],
+            )
+            continue
+        if solver.scene.boundary.uses_kind("periodic"):
+            _launch_periodic_patch(
+                solver,
+                field_name=field_name,
+                term=term,
+                signal=signal_cache[cache_key],
+            )
+            continue
         _launch_uniform_patch(
             solver,
             field_name=field_name,
@@ -217,14 +327,12 @@ def _launch_periodic_patch(solver, *, field_name, term, signal):
         )
         return
     offset_i, offset_j, offset_k = term["offsets"]
-    kernel_name = {
-        "Ex": "addSourcePatchExPeriodic3D",
-        "Ey": "addSourcePatchEyPeriodic3D",
-        "Ez": "addSourcePatchEzPeriodic3D",
-    }[field_name]
+    component = _component_name(field_name)
+    kernel_name = f"addSourcePatchE{component}Periodic3D"
+    field_arg_name = f"E{component}"
     getattr(solver.fdtd_module, kernel_name)(
         **{
-            field_name: getattr(solver, field_name),
+            field_arg_name: getattr(solver, field_name),
             "sourcePatch": term["patch"],
             "offsetI": int(offset_i),
             "offsetJ": int(offset_j),
@@ -240,53 +348,31 @@ def _launch_periodic_patch(solver, *, field_name, term, signal):
 
 
 def _launch_bloch_patch(solver, *, field_name, term, signal):
-    wrap_axis_a, wrap_axis_b = _bloch_wrap_axes(solver, field_name)
-    offset_i, offset_j, offset_k = term["offsets"]
-    kernel_kwargs = {
-        "sourcePatch": term["patch"],
-        "offsetI": int(offset_i),
-        "offsetJ": int(offset_j),
-        "offsetK": int(offset_k),
-        "signalReal": float(signal) * float(term["phase_real"]),
-        "signalImag": float(signal) * float(term["phase_imag"]),
-        "axisCode": {"Ex": 0, "Ey": 1, "Ez": 2}[field_name],
-        "wrapAxisA": int(wrap_axis_a),
-        "wrapAxisB": int(wrap_axis_b),
-        "ExReal": solver.Ex,
-        "ExImag": solver.Ex_imag,
-        "EyReal": solver.Ey,
-        "EyImag": solver.Ey_imag,
-        "EzReal": solver.Ez,
-        "EzImag": solver.Ez_imag,
-    }
-    if field_name == "Ex":
-        kernel_kwargs.update(
-            {
-                "phaseCosA": solver.boundary_phase_cos[1],
-                "phaseSinA": solver.boundary_phase_sin[1],
-                "phaseCosB": solver.boundary_phase_cos[2],
-                "phaseSinB": solver.boundary_phase_sin[2],
-            }
-        )
-    elif field_name == "Ey":
-        kernel_kwargs.update(
-            {
-                "phaseCosA": solver.boundary_phase_cos[0],
-                "phaseSinA": solver.boundary_phase_sin[0],
-                "phaseCosB": solver.boundary_phase_cos[2],
-                "phaseSinB": solver.boundary_phase_sin[2],
-            }
-        )
-    else:
-        kernel_kwargs.update(
-            {
-                "phaseCosA": solver.boundary_phase_cos[0],
-                "phaseSinA": solver.boundary_phase_sin[0],
-                "phaseCosB": solver.boundary_phase_cos[1],
-                "phaseSinB": solver.boundary_phase_sin[1],
-            }
-        )
+    kernel_kwargs = _bloch_patch_common_kwargs(solver, field_name, term)
+    kernel_kwargs.update(
+        {
+            "sourcePatch": term["patch"],
+            "signalReal": float(signal) * float(term["phase_real"]),
+            "signalImag": float(signal) * float(term["phase_imag"]),
+        }
+    )
     solver.fdtd_module.addSourcePatchBloch3D(**kernel_kwargs).launchRaw(
+        blockSize=solver.kernel_block_size,
+        gridSize=term["grid"],
+    )
+
+
+def _launch_bloch_cw_patch(solver, *, field_name, term, signal_cos, signal_sin):
+    kernel_kwargs = _bloch_patch_common_kwargs(solver, field_name, term)
+    kernel_kwargs.update(
+        {
+            "sourcePatchCos": term["cw_cos_patch"],
+            "sourcePatchSin": term["cw_sin_patch"],
+            "signalCos": float(signal_cos),
+            "signalSin": float(signal_sin),
+        }
+    )
+    solver.fdtd_module.addCwPhasedSourcePatchBloch3D(**kernel_kwargs).launchRaw(
         blockSize=solver.kernel_block_size,
         gridSize=term["grid"],
     )
@@ -311,6 +397,15 @@ def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value
             if cache_key not in cw_cache:
                 cw_cache[cache_key] = _resolve_cw_signal(term_omega, term_source_time, time_value)
             signal_cos, signal_sin = cw_cache[cache_key]
+            if solver.scene.boundary.uses_kind("bloch"):
+                _launch_bloch_cw_patch(
+                    solver,
+                    field_name=field_name,
+                    term=term,
+                    signal_cos=signal_cos,
+                    signal_sin=signal_sin,
+                )
+                continue
             _launch_cw_patch(
                 solver,
                 field_name=field_name,
@@ -320,6 +415,8 @@ def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value
             )
             continue
         if term["delay_patch"] is not None:
+            if solver.scene.boundary.uses_kind("bloch"):
+                raise NotImplementedError("Bloch-boundary source patches require CW phased source terms.")
             _launch_time_shifted_patch(
                 solver,
                 field_name=field_name,
@@ -333,16 +430,16 @@ def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value
                 signal_cache[cache_key] = signal
             else:
                 signal_cache[cache_key] = evaluate_source_time(term_source_time, time_value)
-        if solver.scene.boundary.uses_kind("periodic"):
-            _launch_periodic_patch(
+        if solver.scene.boundary.uses_kind("bloch"):
+            _launch_bloch_patch(
                 solver,
                 field_name=field_name,
                 term=term,
                 signal=signal_cache[cache_key],
             )
             continue
-        if solver.scene.boundary.uses_kind("bloch"):
-            _launch_bloch_patch(
+        if solver.scene.boundary.uses_kind("periodic"):
+            _launch_periodic_patch(
                 solver,
                 field_name=field_name,
                 term=term,
