@@ -54,6 +54,41 @@ def _support_slice_gpu(coords, center, cutoff):
     return int(indices[0]), int(indices[-1]) + 1
 
 
+def _add_point_dipole_component_gpu(b_component, x_coords, y_coords, z_coords,
+                                    position, amplitude, width, profile_kind):
+    """Accumulate one polarization component of a point dipole into the 3D view
+    of the source vector, restricted to the cutoff support slice."""
+    if profile_kind == 'ideal':
+        ix = _nearest_axis_index_gpu(x_coords, position[0])
+        iy = _nearest_axis_index_gpu(y_coords, position[1])
+        iz = _nearest_axis_index_gpu(z_coords, position[2])
+        b_component[ix, iy, iz] += amplitude * _ideal_point_dipole_mass_gpu(
+            x_coords, y_coords, z_coords, position
+        )
+        return
+
+    cutoff = 3 * max(width, 0.5 * POINT_DIPOLE_REFERENCE_WIDTH)
+    bounds = []
+    for coords, center in ((x_coords, position[0]), (y_coords, position[1]), (z_coords, position[2])):
+        start, end = _support_slice_gpu(coords, center, cutoff)
+        if end - start == 1 and float(cp.abs(coords[start] - center)) > cutoff:
+            return  # no grid point within the cutoff: zero contribution
+        bounds.append((start, end))
+    (ix0, ix1), (iy0, iy1), (iz0, iz1) = bounds
+
+    local_x = x_coords[ix0:ix1]
+    local_y = y_coords[iy0:iy1]
+    local_z = z_coords[iz0:iz1]
+    dist_sq = (
+        (local_x[:, None, None] - position[0]) ** 2
+        + (local_y[None, :, None] - position[1]) ** 2
+        + (local_z[None, None, :] - position[2]) ** 2
+    )
+    profile = cp.exp(-dist_sq / (2.0 * width ** 2))
+    profile = _normalize_point_dipole_profile_gpu(profile, dist_sq, width)
+    b_component[ix0:ix1, iy0:iy1, iz0:iz1] += amplitude * profile
+
+
 def _ideal_point_dipole_mass_gpu(x_coords, y_coords, z_coords, position):
     cutoff = 3.0 * POINT_DIPOLE_REFERENCE_WIDTH
     ix_start, ix_end = _support_slice_gpu(x_coords, position[0], cutoff)
@@ -413,83 +448,27 @@ class FDFD:
         y_ez = cp.asarray(self.scene.y, dtype=cp.float32)
         z_ez = cp.asarray(self.scene.z[:-1] + dz / 2.0, dtype=cp.float32)
 
+        # 3D views into b, one per field component (reshape of contiguous slices)
+        N_ex, N_ey = self.scene.N_ex, self.scene.N_ey
+        b_ex = b[:N_ex].reshape(self.scene.Nx_ex, self.scene.Ny_ex, self.scene.Nz_ex)
+        b_ey = b[N_ex:N_ex + N_ey].reshape(self.scene.Nx_ey, self.scene.Ny_ey, self.scene.Nz_ey)
+        b_ez = b[N_ex + N_ey:].reshape(self.scene.Nx_ez, self.scene.Ny_ez, self.scene.Nz_ez)
+
         for source in compiled_sources:
             pos = source['position']
             width = float(source['width'])
-            width_sq = 2 * width**2
             profile_kind = source.get('profile', 'gaussian')
-            cutoff = 3 * max(width, 0.5 * POINT_DIPOLE_REFERENCE_WIDTH)
             pol = source['polarization']
 
-            # Ex component - using broadcasting instead of meshgrid
             if pol[0] != 0:
-                if profile_kind == 'ideal':
-                    ix = _nearest_axis_index_gpu(x_ex, pos[0])
-                    iy = _nearest_axis_index_gpu(y_ex, pos[1])
-                    iz = _nearest_axis_index_gpu(z_ex, pos[2])
-                    linear_index = (ix * int(y_ex.size) + iy) * int(z_ex.size) + iz
-                    b[linear_index] += const * pol[0] * _ideal_point_dipole_mass_gpu(x_ex, y_ex, z_ex, pos)
-                else:
-                    dist_sq = ((x_ex[:, None, None] - pos[0])**2 +
-                               (y_ex[None, :, None] - pos[1])**2 +
-                               (z_ex[None, None, :] - pos[2])**2)
-                    profile = cp.exp(-dist_sq / width_sq)
-                    mask = (
-                        (cp.abs(x_ex - pos[0]) <= cutoff)[:, None, None]
-                        & (cp.abs(y_ex - pos[1]) <= cutoff)[None, :, None]
-                        & (cp.abs(z_ex - pos[2]) <= cutoff)[None, None, :]
-                    )
-                    profile = _normalize_point_dipole_profile_gpu(profile, dist_sq, width, mask=mask)
-                    b[:self.scene.N_ex] += const * pol[0] * profile.ravel()
-                    del profile, dist_sq, mask
-
-            # Ey component
+                _add_point_dipole_component_gpu(b_ex, x_ex, y_ex, z_ex, pos,
+                                                const * pol[0], width, profile_kind)
             if pol[1] != 0:
-                if profile_kind == 'ideal':
-                    ix = _nearest_axis_index_gpu(x_ey, pos[0])
-                    iy = _nearest_axis_index_gpu(y_ey, pos[1])
-                    iz = _nearest_axis_index_gpu(z_ey, pos[2])
-                    linear_index = (ix * int(y_ey.size) + iy) * int(z_ey.size) + iz
-                    b[self.scene.N_ex + linear_index] += (
-                        const * pol[1] * _ideal_point_dipole_mass_gpu(x_ey, y_ey, z_ey, pos)
-                    )
-                else:
-                    dist_sq = ((x_ey[:, None, None] - pos[0])**2 +
-                               (y_ey[None, :, None] - pos[1])**2 +
-                               (z_ey[None, None, :] - pos[2])**2)
-                    profile = cp.exp(-dist_sq / width_sq)
-                    mask = (
-                        (cp.abs(x_ey - pos[0]) <= cutoff)[:, None, None]
-                        & (cp.abs(y_ey - pos[1]) <= cutoff)[None, :, None]
-                        & (cp.abs(z_ey - pos[2]) <= cutoff)[None, None, :]
-                    )
-                    profile = _normalize_point_dipole_profile_gpu(profile, dist_sq, width, mask=mask)
-                    b[self.scene.N_ex : self.scene.N_ex + self.scene.N_ey] += const * pol[1] * profile.ravel()
-                    del profile, dist_sq, mask
-
-            # Ez component
+                _add_point_dipole_component_gpu(b_ey, x_ey, y_ey, z_ey, pos,
+                                                const * pol[1], width, profile_kind)
             if pol[2] != 0:
-                if profile_kind == 'ideal':
-                    ix = _nearest_axis_index_gpu(x_ez, pos[0])
-                    iy = _nearest_axis_index_gpu(y_ez, pos[1])
-                    iz = _nearest_axis_index_gpu(z_ez, pos[2])
-                    linear_index = (ix * int(y_ez.size) + iy) * int(z_ez.size) + iz
-                    b[self.scene.N_ex + self.scene.N_ey + linear_index] += (
-                        const * pol[2] * _ideal_point_dipole_mass_gpu(x_ez, y_ez, z_ez, pos)
-                    )
-                else:
-                    dist_sq = ((x_ez[:, None, None] - pos[0])**2 +
-                               (y_ez[None, :, None] - pos[1])**2 +
-                               (z_ez[None, None, :] - pos[2])**2)
-                    profile = cp.exp(-dist_sq / width_sq)
-                    mask = (
-                        (cp.abs(x_ez - pos[0]) <= cutoff)[:, None, None]
-                        & (cp.abs(y_ez - pos[1]) <= cutoff)[None, :, None]
-                        & (cp.abs(z_ez - pos[2]) <= cutoff)[None, None, :]
-                    )
-                    profile = _normalize_point_dipole_profile_gpu(profile, dist_sq, width, mask=mask)
-                    b[self.scene.N_ex + self.scene.N_ey:] += const * pol[2] * profile.ravel()
-                    del profile, dist_sq, mask
+                _add_point_dipole_component_gpu(b_ez, x_ez, y_ez, z_ez, pos,
+                                                const * pol[2], width, profile_kind)
 
         return b
 
