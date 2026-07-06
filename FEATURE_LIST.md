@@ -265,6 +265,12 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Auto-updated benchmark summary in `benchmark/RESULTS.md`, grouped by benchmark scene folder with per-metric better-direction and target-range guidance
 - Plane-wave benchmark runs enable source-spectrum normalization on the Maxwell side so pulsed `PlaneWave` scenarios compare against the same frequency-domain reference convention as the Tidy3D export
 
+## Performance Benchmarking
+
+- FDFD solver performance benchmark via `python -m benchmark.fdfd_performance`, sweeping cubic grid sizes on a canonical dipole + dielectric-cube scene
+- Per-size metrics: matrix assembly time, solve time, operator matvec count, convergence flag, explicit relative residual, and CuPy peak-GPU-memory high-water mark
+- Results written to `benchmark/FDFD_PERFORMANCE.md` with raw JSON runs archived under `benchmark/cache/fdfd_performance/`
+
 ## Validation and Reference Utilities
 
 - Shared material compiler used by scene construction and backend preparation
