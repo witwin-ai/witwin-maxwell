@@ -162,6 +162,8 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Configurable GMRES settings via `GMRES(max_iter, tol, restart, solver_type)`
 - Typed FDFD solver configuration through `FDFDConfig(solver=..., enable_plot=..., verbose=...)`
 - Prepared execution via `Simulation.prepare()` before running
+- System-matrix caching on the prepared solver: repeated `solve()` calls reuse the assembled matrix across source changes
+- Frequency switching on the prepared solver via `solver.set_frequency(...)`, reusing compiled material components when all materials are non-dispersive
 - Unified `Result` output containing `Ex`, `Ey`, and `Ez`
 - Solver stats including convergence flag, solver info, residual, and solver configuration
 

@@ -8,6 +8,7 @@ import time
 import cupyx.scipy.sparse.linalg as cupy_linalg
 from tqdm import tqdm
 
+from ..compiler.materials import _scene_has_dispersive_material
 from ..compiler.sources import compile_fdfd_sources
 from ..scene import prepare_scene
 from ..sources import CW, POINT_DIPOLE_IDEAL_PROFILE_SCALE, POINT_DIPOLE_REFERENCE_WIDTH, PointDipole
@@ -199,6 +200,7 @@ class FDFD:
         self.E_field = None  # Stores (Ex, Ey, Ez) as torch tensors
         self.E_field_raw = None  # Raw Yee grid data generated on demand {'Ex': np.ndarray, 'Ey': np.ndarray, 'Ez': np.ndarray}
         self.A_matrix = None
+        self._matrix_frequency = None  # Frequency the cached A_matrix was built for
         self.material_eps_r = None
         self.material_mu_r = None
         self.material_eps_components = None
@@ -210,6 +212,54 @@ class FDFD:
             print("Initializing full-vector FDFD solver based on Yee grid")
             print(f"Using solver: {solver_type.upper()}")
             print("Using device: GPU")
+
+    def set_frequency(self, frequency):
+        """Switch operating frequency, invalidating the cached system matrix.
+
+        Material components are reused when all scene materials are
+        non-dispersive; dispersive scenes recompile them on the next solve.
+        """
+        frequency = float(frequency)
+        if frequency == self.frequency:
+            return
+        self.frequency = frequency
+        self.omega = 2 * np.pi * frequency
+        self.k0 = self.omega / self.c0
+        self.A_matrix = None
+        self._matrix_frequency = None
+        if _scene_has_dispersive_material(self.scene):
+            self.material_eps_components = None
+            self.material_mu_components = None
+            self.material_eps_r = None
+            self.material_mu_r = None
+
+    def _ensure_material_components(self):
+        if self.material_eps_components is not None:
+            return
+        self.material_eps_components, self.material_mu_components = self.scene.compile_material_components(
+            frequency=self.frequency
+        )
+        self.material_eps_r = (
+            self.material_eps_components["x"]
+            + self.material_eps_components["y"]
+            + self.material_eps_components["z"]
+        ) / 3.0
+        self.material_mu_r = (
+            self.material_mu_components["x"]
+            + self.material_mu_components["y"]
+            + self.material_mu_components["z"]
+        ) / 3.0
+
+    def _ensure_system_matrix(self):
+        """Build the system matrix for the current frequency, reusing the
+        cached one when available. Only b changes across sources, so repeated
+        solves and frequency-swept non-dispersive runs skip reassembly."""
+        if self.A_matrix is not None and self._matrix_frequency == self.frequency:
+            return
+        self._ensure_material_components()
+        self.scene.release_meshgrid()
+        self.A_matrix = self._build_matrix_gpu_yee_3d()
+        self._matrix_frequency = self.frequency
 
     def _create_pml_3d(self):
         """Create PML complex stretching factors on main grid nodes"""
@@ -268,10 +318,7 @@ class FDFD:
         s_x_half = (s_x_main[:-1] + s_x_main[1:]) / 2
         s_y_half = (s_y_main[:-1] + s_y_main[1:]) / 2
         s_z_half = (s_z_main[:-1] + s_z_main[1:]) / 2
-        if self.material_eps_components is None:
-            self.material_eps_components, self.material_mu_components = self.scene.compile_material_components(
-                frequency=self.frequency
-            )
+        self._ensure_material_components()
         eps_x_main = cp.asarray(self.material_eps_components["x"])
         eps_y_main = cp.asarray(self.material_eps_components["y"])
         eps_z_main = cp.asarray(self.material_eps_components["z"])
@@ -475,21 +522,7 @@ class FDFD:
     def solve(self, max_iter=1000, tol=1e-6, restart=100):
         start_time = time.time()
 
-        self.material_eps_components, self.material_mu_components = self.scene.compile_material_components(
-            frequency=self.frequency
-        )
-        self.material_eps_r = (
-            self.material_eps_components["x"]
-            + self.material_eps_components["y"]
-            + self.material_eps_components["z"]
-        ) / 3.0
-        self.material_mu_r = (
-            self.material_mu_components["x"]
-            + self.material_mu_components["y"]
-            + self.material_mu_components["z"]
-        ) / 3.0
-        self.scene.release_meshgrid()
-        self.A_matrix = self._build_matrix_gpu_yee_3d()
+        self._ensure_system_matrix()
         b = self._build_source_vector_yee()
         matrix_time = time.time() - start_time
         if self.verbose:
@@ -656,20 +689,7 @@ def solve_isotropic(self, source_pos, source_width, source_amplitude, max_iter=1
         if verbose:
             print("Step 1/4: Pre-building system matrix A...")
         t0 = time.time()
-        self.material_eps_components, self.material_mu_components = self.scene.compile_material_components(
-            frequency=self.frequency
-        )
-        self.material_eps_r = (
-            self.material_eps_components["x"]
-            + self.material_eps_components["y"]
-            + self.material_eps_components["z"]
-        ) / 3.0
-        self.material_mu_r = (
-            self.material_mu_components["x"]
-            + self.material_mu_components["y"]
-            + self.material_mu_components["z"]
-        ) / 3.0
-        self.A_matrix = self._build_matrix_gpu_yee_3d()
+        self._ensure_system_matrix()
         if verbose:
             print(f"Matrix build complete, elapsed: {time.time() - t0:.2f}s")
     else:
