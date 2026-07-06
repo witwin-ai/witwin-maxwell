@@ -579,7 +579,6 @@ class FDFD:
                 self.solver_residuals = [self.final_residual]
                 if self.verbose:
                     print(f"Direct solve complete, relative residual: {self.final_residual:.2e}")
-            x = cp.asnumpy(x_gpu)
             solve_time = time.time() - solve_start
             if self.verbose:
                 print(f"GPU solve complete, elapsed: {solve_time:.2f}s")
@@ -598,15 +597,11 @@ class FDFD:
         Nx_ey, Ny_ey, Nz_ey = self.scene.Nx_ey, self.scene.Ny_ey, self.scene.Nz_ey
         Nx_ez, Ny_ez, Nz_ez = self.scene.Nx_ez, self.scene.Ny_ez, self.scene.Nz_ez
 
-        # Reshape into 3D arrays (view, no copy)
-        Ex_np = x[:N_ex].reshape((Nx_ex, Ny_ex, Nz_ex))
-        Ey_np = x[N_ex:N_ex+N_ey].reshape((Nx_ey, Ny_ey, Nz_ey))
-        Ez_np = x[N_ex+N_ey:].reshape((Nx_ez, Ny_ez, Nz_ez))
-
-        # Convert to torch tensors (primary storage)
-        Ex = torch.from_numpy(Ex_np).to(dtype=torch.complex64, device=self.scene.device)
-        Ey = torch.from_numpy(Ey_np).to(dtype=torch.complex64, device=self.scene.device)
-        Ez = torch.from_numpy(Ez_np).to(dtype=torch.complex64, device=self.scene.device)
+        # Zero-copy CuPy -> torch via DLPack; slice/reshape stay on device
+        x = torch.from_dlpack(x_gpu).to(dtype=torch.complex64)
+        Ex = x[:N_ex].reshape((Nx_ex, Ny_ex, Nz_ex))
+        Ey = x[N_ex:N_ex+N_ey].reshape((Nx_ey, Ny_ey, Nz_ey))
+        Ez = x[N_ex+N_ey:].reshape((Nx_ez, Ny_ez, Nz_ez))
         self.E_field = (Ex, Ey, Ez)
 
         # E_field_raw is generated on demand from E_field to avoid duplicate storage
@@ -792,7 +787,7 @@ def solve_isotropic(self, source_pos, source_width, source_amplitude, max_iter=1
         print("\nStep 4/4: Merging results from all polarizations...")
     final_E_magnitude_gpu = cp.sqrt(total_intensity_gpu)
 
-    final_E_magnitude = torch.from_numpy(cp.asnumpy(final_E_magnitude_gpu)).to(self.scene.device)
+    final_E_magnitude = torch.from_dlpack(final_E_magnitude_gpu)
 
     self.E_field = (final_E_magnitude, final_E_magnitude, final_E_magnitude)
     if verbose:
