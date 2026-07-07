@@ -54,11 +54,12 @@ class PerfCase:
     assembly_s: float
     precond_setup_s: float
     solve_s: float
+    reuse_solve_s: float
     matvecs: int
     converged: bool
     residual: float
     peak_gpu_gb: float
-    status: str  # "ok" or "oom"
+    status: str  # "ok", "oom", or "failed"
 
 
 def build_scene(size: int) -> mw.Scene:
@@ -97,6 +98,17 @@ def build_scene(size: int) -> mw.Scene:
     return scene
 
 
+def _failure_status(exc: Exception) -> str | None:
+    """Map capacity failures to a status string; None means re-raise."""
+    if isinstance(exc, cp.cuda.memory.OutOfMemoryError):
+        return "oom"
+    if type(exc).__name__ == "cuDSSError":
+        # ALLOC_FAILED is device-memory exhaustion; EXECUTION_FAILED at this
+        # scale is cuDSS hitting a capacity limit during factorization.
+        return "oom" if "ALLOC_FAILED" in str(exc) else "failed"
+    return None
+
+
 def _solve_counted(A, b, solver_type: str, max_iter: int, tol: float, restart: int, M=None):
     """Run the same cupy solver calls as FDFD.solve() with a matvec counter."""
     counter = {"matvecs": 0}
@@ -110,9 +122,6 @@ def _solve_counted(A, b, solver_type: str, max_iter: int, tol: float, restart: i
         x, info = cupy_linalg.gmres(A_op, b, M=M, maxiter=max_iter, tol=tol, restart=restart)
     elif solver_type == "cg":
         x, info = cupy_linalg.cg(A_op, b, M=M, maxiter=max_iter, tol=tol)
-    elif solver_type == "direct":
-        x = cupy_linalg.spsolve(A, b)
-        info = 0
     else:
         raise ValueError(f"Unsupported solver_type {solver_type!r}.")
     return x, info, counter["matvecs"]
@@ -146,10 +155,22 @@ def run_case(size: int, solver_type: str, max_iter: int, tol: float, restart: in
 
         b = solver._build_source_vector_yee()
 
-        t0 = time.perf_counter()
-        x, info, matvecs = _solve_counted(A, b, solver_type, max_iter, tol, restart, M=M)
-        cp.cuda.runtime.deviceSynchronize()
-        solve_s = time.perf_counter() - t0
+        reuse_solve_s = 0.0
+        if solver_type == "direct":
+            t0 = time.perf_counter()
+            x = solver._solve_direct(b)
+            cp.cuda.runtime.deviceSynchronize()
+            solve_s = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            x = solver._solve_direct(b)
+            cp.cuda.runtime.deviceSynchronize()
+            reuse_solve_s = time.perf_counter() - t0
+            info, matvecs = 0, 0
+        else:
+            t0 = time.perf_counter()
+            x, info, matvecs = _solve_counted(A, b, solver_type, max_iter, tol, restart, M=M)
+            cp.cuda.runtime.deviceSynchronize()
+            solve_s = time.perf_counter() - t0
 
         residual = float(cp.linalg.norm(A @ x - b) / cp.linalg.norm(b))
         return PerfCase(
@@ -164,13 +185,17 @@ def run_case(size: int, solver_type: str, max_iter: int, tol: float, restart: in
             assembly_s=assembly_s,
             precond_setup_s=precond_setup_s,
             solve_s=solve_s,
+            reuse_solve_s=reuse_solve_s,
             matvecs=matvecs,
             converged=(info == 0),
             residual=residual,
             peak_gpu_gb=pool.total_bytes() / 2**30,
             status="ok",
         )
-    except cp.cuda.memory.OutOfMemoryError:
+    except Exception as exc:
+        status = _failure_status(exc)
+        if status is None:
+            raise
         return PerfCase(
             size=size,
             unknowns=0,
@@ -183,13 +208,15 @@ def run_case(size: int, solver_type: str, max_iter: int, tol: float, restart: in
             assembly_s=0.0,
             precond_setup_s=0.0,
             solve_s=0.0,
+            reuse_solve_s=0.0,
             matvecs=0,
             converged=False,
             residual=float("nan"),
             peak_gpu_gb=pool.total_bytes() / 2**30,
-            status="oom",
+            status=status,
         )
     finally:
+        solver._release_direct_solver()
         pool.free_all_blocks()
 
 
@@ -211,8 +238,8 @@ def render_markdown(cases: list[PerfCase], *, timestamp: str) -> str:
         "(torch-side scene tensors excluded). Matvecs count operator applications, "
         "not preconditioner applications.",
         "",
-        "| Grid | Unknowns | Solver | Precond | Assembly (s) | Precond setup (s) | Solve (s) | Matvecs | Converged | Residual | Peak GPU (GB) | Status |",
-        "|------|----------|--------|---------|--------------|-------------------|-----------|---------|-----------|----------|---------------|--------|",
+        "| Grid | Unknowns | Solver | Precond | Assembly (s) | Precond setup (s) | Solve (s) | Reuse solve (s) | Matvecs | Converged | Residual | Peak GPU (GB) | Status |",
+        "|------|----------|--------|---------|--------------|-------------------|-----------|-----------------|---------|-----------|----------|---------------|--------|",
     ]
     for case in cases:
         label = f"{case.solver_type}(mi={case.max_iter},tol={case.tol:g}"
@@ -220,7 +247,7 @@ def render_markdown(cases: list[PerfCase], *, timestamp: str) -> str:
         lines.append(
             f"| {case.size}^3 | {case.unknowns:,} | {label} | {case.preconditioner} | "
             f"{case.assembly_s:.2f} | {case.precond_setup_s:.2f} | "
-            f"{case.solve_s:.2f} | {case.matvecs} | {'yes' if case.converged else 'no'} | "
+            f"{case.solve_s:.2f} | {case.reuse_solve_s:.3f} | {case.matvecs} | {'yes' if case.converged else 'no'} | "
             f"{case.residual:.2e} | {case.peak_gpu_gb:.2f} | {case.status} |"
         )
     lines.append("")
@@ -236,7 +263,7 @@ def run_benchmark(sizes, solver_type: str, max_iter: int, tol: float, restart: i
             case = run_case(size, solver_type, max_iter, tol, restart, preconditioner=preconditioner)
             print(
                 f"[fdfd-perf]   unknowns={case.unknowns:,} assembly={case.assembly_s:.2f}s "
-                f"precond={case.precond_setup_s:.2f}s solve={case.solve_s:.2f}s "
+                f"precond={case.precond_setup_s:.2f}s solve={case.solve_s:.2f}s reuse={case.reuse_solve_s:.3f}s "
                 f"matvecs={case.matvecs} converged={case.converged} "
                 f"residual={case.residual:.2e} peak={case.peak_gpu_gb:.2f}GB status={case.status}",
                 flush=True,

@@ -22,6 +22,12 @@ from .postprocess import (
     interpolate_yee_to_center as interpolate_yee_to_center_impl,
 )
 
+# Iterative-refinement steps for the cuDSS direct solver. The complex64 LU of
+# the strongly PML-graded operator loses several digits; refinement recovers
+# them at ~one matvec + one reuse-solve per step.
+FDFD_DIRECT_IR_STEPS = 10
+
+
 def print_gpu_memory(prefix=""):
     """Print current GPU memory usage."""
     import cupy as cp
@@ -211,6 +217,7 @@ class FDFD:
         self.A_matrix = None
         self._matrix_frequency = None  # Frequency the cached A_matrix was built for
         self._preconditioner_op = None  # Cached preconditioner for the cached A_matrix
+        self._direct_solver = None  # Cached cuDSS factorization for the cached A_matrix
         self.material_eps_r = None
         self.material_mu_r = None
         self.material_eps_components = None
@@ -238,6 +245,7 @@ class FDFD:
         self.A_matrix = None
         self._matrix_frequency = None
         self._preconditioner_op = None
+        self._release_direct_solver()
         if _scene_has_dispersive_material(self.scene):
             self.material_eps_components = None
             self.material_mu_components = None
@@ -272,6 +280,38 @@ class FDFD:
         self.A_matrix = self._build_matrix_gpu_yee_3d()
         self._matrix_frequency = self.frequency
         self._preconditioner_op = None
+        self._release_direct_solver()
+
+    def _release_direct_solver(self):
+        if self._direct_solver is not None:
+            self._direct_solver.free()
+            self._direct_solver = None
+
+    def _solve_direct(self, b):
+        """Solve Ax = b with the cuDSS sparse direct solver.
+
+        The factorization is computed once for the cached system matrix and
+        reused for every subsequent right-hand side. The LU is complex64;
+        iterative refinement recovers most of the accuracy lost to the
+        strongly graded PML scaling. Hybrid memory mode keeps factor storage
+        partially in host memory: it sidesteps device-allocation failures for
+        the large factor blocks and measures faster than pure-device
+        factorization on Windows/WDDM.
+        """
+        from nvmath.sparse.advanced import DirectSolver, ExecutionCUDA, HybridMemoryModeOptions
+
+        if self._direct_solver is None:
+            execution = ExecutionCUDA(
+                hybrid_memory_mode_options=HybridMemoryModeOptions(hybrid_memory_mode=True)
+            )
+            direct = DirectSolver(self.A_matrix, b, execution=execution)
+            direct.plan()
+            direct.factorize()
+            direct.solution_config.ir_num_steps = FDFD_DIRECT_IR_STEPS
+            self._direct_solver = direct
+        else:
+            self._direct_solver.reset_operands(b=b)
+        return self._direct_solver.solve()
 
     def _ensure_preconditioner(self):
         """Build (or reuse) the preconditioner operator for the cached matrix.
@@ -632,14 +672,12 @@ class FDFD:
                     plt.show()
                 x_gpu = x_gpu  # Keep consistent
             elif self.solver_type == 'direct':
-                # Direct solver - using cuSPARSE LU factorization
-                from cupyx.scipy.sparse.linalg import spsolve as cupy_spsolve
+                # cuDSS sparse direct solve; factorization cached across RHS
                 if self.verbose:
-                    print(f"Starting direct solve (matrix size: {self.A_matrix.shape[0]:,} x {self.A_matrix.shape[1]:,})...")
-                    print(f"Note: LU factorization for 3D problems may take a long time, please be patient...")
-                x_gpu = cupy_spsolve(self.A_matrix.tocsr(), b)
-                info = 0  # Direct solver succeeded
-                # Compute residual
+                    reuse = "cached factorization" if self._direct_solver is not None else "factorize + solve"
+                    print(f"Direct solve ({reuse}, matrix size: {self.A_matrix.shape[0]:,})...")
+                x_gpu = self._solve_direct(b)
+                info = 0
                 residual = cp.linalg.norm(self.A_matrix @ x_gpu - b) / cp.linalg.norm(b)
                 self.final_residual = float(cp.asnumpy(residual))
                 self.solver_residuals = [self.final_residual]

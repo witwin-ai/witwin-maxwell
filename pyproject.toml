@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 slang = ["slangtorch"]
+direct = ["nvmath-python[cu12]", "nvidia-cudss-cu12"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["witwin"]
