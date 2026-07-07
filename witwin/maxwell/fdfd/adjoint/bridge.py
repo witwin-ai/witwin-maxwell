@@ -92,6 +92,7 @@ class _FDFDGradientBridge:
                 "tol": solver_cfg.tol,
                 "restart": solver_cfg.restart,
                 "preconditioner": solver_cfg.preconditioner,
+                "precision": solver_cfg.precision,
             },
             "converged": getattr(solver, "converged", None),
             "solver_info": getattr(solver, "solver_info", None),

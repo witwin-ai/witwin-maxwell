@@ -90,6 +90,8 @@ class GMRES:
     restart: int = 200
     solver_type: str = "gmres"
     preconditioner: str = "jacobi"
+    precision: str = "single"  # 'single' | 'double': working precision of the iterative solve
+    ssor_omega: float = 0.8  # relaxation factor for the 'ssor' preconditioner
 
 
 @dataclass(frozen=True)
@@ -356,6 +358,8 @@ class Simulation:
             frequency=self.frequency,
             solver_type=solver_cfg.solver_type,
             preconditioner=solver_cfg.preconditioner,
+            precision=solver_cfg.precision,
+            ssor_omega=solver_cfg.ssor_omega,
             enable_plot=self.config.enable_plot,
             verbose=self.config.verbose,
         )
@@ -381,6 +385,7 @@ class Simulation:
                 "tol": solver_cfg.tol,
                 "restart": solver_cfg.restart,
                 "preconditioner": solver_cfg.preconditioner,
+                "precision": solver_cfg.precision,
             },
             "converged": getattr(solver, "converged", None),
             "solver_info": getattr(solver, "solver_info", None),

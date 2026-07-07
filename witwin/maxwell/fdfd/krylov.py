@@ -96,10 +96,11 @@ def bicgstab(A, b, M=None, tol=1e-6, maxiter=1000):
     return x, maxiter
 
 
-def sqmr(A, b, M=None, tol=1e-6, maxiter=1000):
+def sqmr(A, b, M=None, tol=1e-6, maxiter=1000, callback=None):
     """Freund's simplified QMR for complex-symmetric A (A = A^T, bilinear
     inner products, no transpose matvec). M should also be symmetric
-    (Jacobi and SSOR of a symmetric matrix are)."""
+    (Jacobi and SSOR of a symmetric matrix are). ``callback``, if given, is
+    invoked as ``callback(iteration, residual_norm)`` once per iteration."""
     matvec = _matvec(A)
     psolve = _matvec(M)
     x = cp.zeros_like(b)
@@ -128,6 +129,8 @@ def sqmr(A, b, M=None, tol=1e-6, maxiter=1000):
         tau = tau * theta_next * c
         d = (c * c * theta * theta) * d + (c * c * alpha) * q
         x = x + d
+        if callback is not None:
+            callback(iteration, r_norm)
         if r_norm <= target:
             return x, 0
         z = psolve(r)

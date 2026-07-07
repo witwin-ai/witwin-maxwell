@@ -54,9 +54,7 @@ def test_sqmr_converges_on_complex_symmetric_system(preconditioned):
     assert residual < 1e-5
 
 
-@requires_cuda
-@pytest.mark.parametrize("engine", ["bicgstab", "tfqmr", "idr", "sqmr"])
-def test_engines_run_through_public_fdfd_path(engine):
+def _dipole_scene():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.16, 0.16), (-0.16, 0.16), (-0.16, 0.16))),
         grid=mw.GridSpec.uniform(0.02),
@@ -72,8 +70,14 @@ def test_engines_run_through_public_fdfd_path(engine):
             name="src",
         )
     )
+    return scene
+
+
+@requires_cuda
+@pytest.mark.parametrize("engine", ["bicgstab", "tfqmr", "idr", "sqmr"])
+def test_engines_run_through_public_fdfd_path(engine):
     result = mw.Simulation.fdfd(
-        scene,
+        _dipole_scene(),
         frequency=1e9,
         solver=mw.GMRES(max_iter=400, tol=1e-6, solver_type=engine),
     ).run()
@@ -82,3 +86,45 @@ def test_engines_run_through_public_fdfd_path(engine):
     assert stats["final_residual"] is not None
     for name in ("EX", "EY", "EZ"):
         assert torch.isfinite(result.fields[name].abs()).all()
+
+
+@requires_cuda
+def test_double_precision_sqmr_ssor_converges_where_single_floors():
+    # float32 recurrence round-off floors the true residual around 1e-5 on
+    # this scene; complex128 recurrences push through to the 1e-6 target.
+    def run(precision):
+        return mw.Simulation.fdfd(
+            _dipole_scene(),
+            frequency=1e9,
+            solver=mw.GMRES(max_iter=3000, tol=1e-6, solver_type="sqmr",
+                            preconditioner="ssor", precision=precision),
+        ).run()
+
+    single = run("single")
+    assert single.stats()["final_residual"] < 1e-3
+
+    double = run("double")
+    stats = double.stats()
+    assert stats["solver"]["precision"] == "double"
+    assert stats["final_residual"] < 2e-6
+    for name in ("EX", "EY", "EZ"):
+        field = double.fields[name]
+        assert field.dtype == torch.complex64  # storage precision unchanged
+        assert torch.isfinite(field.abs()).all()
+
+
+@requires_cuda
+def test_precision_and_ssor_omega_reach_solver():
+    solver = mw.Simulation.fdfd(
+        _dipole_scene(),
+        frequency=1e9,
+        solver=mw.GMRES(solver_type="sqmr", preconditioner="ssor",
+                        precision="double", ssor_omega=0.7),
+    ).prepare().solver
+    assert solver.precision == "double"
+    assert solver.ssor_omega == 0.7
+    with pytest.raises(ValueError):
+        mw.Simulation.fdfd(
+            _dipole_scene(), frequency=1e9,
+            solver=mw.GMRES(precision="quad"),
+        ).prepare()

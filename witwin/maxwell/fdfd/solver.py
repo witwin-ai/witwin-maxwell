@@ -157,6 +157,7 @@ class FDFD:
     Runs on CUDA via CuPy sparse linear algebra and iterative solvers.
     """
     def __init__(self, scene, frequency=2.0e9, solver_type='gmres', preconditioner='jacobi',
+                 precision='single', ssor_omega=0.8,
                  enable_plot=True, tqdm_position=None, verbose=False):
         """
         Initialize the 3D FDFD solver.
@@ -172,6 +173,15 @@ class FDFD:
                 ('none', 'jacobi', 'ssor', 'ilu'). 'ilu' is ILU(0) and is
                 known to be unstable on the indefinite curl-curl operator;
                 see benchmark/FDFD_PERFORMANCE.md.
+            precision: Working precision of the iterative solve ('single' or
+                'double'). Assembly and returned fields stay complex64;
+                'double' casts the system and preconditioner to complex128
+                for the Krylov recurrences, which removes the float32
+                round-off stagnation (e.g. sqmr+ssor converges to 1e-7 at
+                48^3 where single precision stalls at ~2e-2). Ignored by
+                the 'direct' backend, which has its own iterative refinement.
+            ssor_omega: Relaxation factor for the 'ssor' preconditioner
+                (measured plateau of best convergence at 0.6-0.8).
             enable_plot: Whether to enable plotting (set False for batch data generation)
             tqdm_position: tqdm progress bar position (for multi-GPU parallelism, set different values per GPU)
             verbose: Whether to print detailed debug information
@@ -208,6 +218,10 @@ class FDFD:
         if preconditioner not in ['none', 'jacobi', 'ssor', 'ilu']:
             raise ValueError("preconditioner must be 'none', 'jacobi', 'ssor', or 'ilu'")
         self.preconditioner = preconditioner
+        if precision not in ['single', 'double']:
+            raise ValueError("precision must be 'single' or 'double'")
+        self.precision = precision
+        self.ssor_omega = float(ssor_omega)
 
         # Physical constants
         self.c0 = 299792458.0
@@ -224,6 +238,7 @@ class FDFD:
         self._preconditioner_op = None  # Cached preconditioner for the cached A_matrix
         self._direct_solver = None  # Cached cuDSS factorization for the cached A_matrix
         self._sym_scale = None  # Symmetrizing diagonal d = sqrt(sx*sy*sz), grid/PML-only
+        self._iteration_matrix_cache = None  # complex128 copy of A for precision='double'
         self.material_eps_r = None
         self.material_mu_r = None
         self.material_eps_components = None
@@ -251,6 +266,7 @@ class FDFD:
         self.A_matrix = None
         self._matrix_frequency = None
         self._preconditioner_op = None
+        self._iteration_matrix_cache = None
         self._release_direct_solver()
         if _scene_has_dispersive_material(self.scene):
             self.material_eps_components = None
@@ -286,7 +302,19 @@ class FDFD:
         self.A_matrix = self._build_matrix_gpu_yee_3d()
         self._matrix_frequency = self.frequency
         self._preconditioner_op = None
+        self._iteration_matrix_cache = None
         self._release_direct_solver()
+
+    def _iteration_matrix(self):
+        """System matrix in the working precision of the iterative solve."""
+        if self.precision == 'single':
+            return self.A_matrix
+        if self._iteration_matrix_cache is None:
+            self._iteration_matrix_cache = self.A_matrix.astype(cp.complex128)
+        return self._iteration_matrix_cache
+
+    def _iteration_dtype(self):
+        return cp.complex64 if self.precision == 'single' else cp.complex128
 
     def _release_direct_solver(self):
         if self._direct_solver is not None:
@@ -337,17 +365,24 @@ class FDFD:
             y = self._solve_direct(rhs_scaled)
         else:
             M = self._ensure_preconditioner()
+            A_iter = self._iteration_matrix()
+            rhs_iter = rhs_scaled.astype(self._iteration_dtype(), copy=False)
             if self.solver_type == 'cg':
-                y, _info = cupy_cg(self.A_matrix, rhs_scaled, M=M, maxiter=max_iter, tol=tol)
+                y, _info = cupy_cg(A_iter, rhs_iter, M=M, maxiter=max_iter, tol=tol)
+            elif self.solver_type in ('bicgstab', 'tfqmr', 'idr', 'sqmr'):
+                from . import krylov
+                y, _info = krylov.solve(self.solver_type, A_iter, rhs_iter, M=M,
+                                        tol=tol, maxiter=max_iter)
             else:
-                y, _info = cupy_gmres(self.A_matrix, rhs_scaled, M=M, maxiter=max_iter, tol=tol, restart=restart)
+                y, _info = cupy_gmres(A_iter, rhs_iter, M=M, maxiter=max_iter, tol=tol, restart=restart)
+            y = y.astype(cp.complex64, copy=False)
         return y * scale
 
     def _ensure_preconditioner(self):
         if self.preconditioner == 'none':
             return None
         if self._preconditioner_op is None:
-            self._preconditioner_op = self._build_preconditioner(self.A_matrix)
+            self._preconditioner_op = self._build_preconditioner(self._iteration_matrix())
         return self._preconditioner_op
 
     def _build_preconditioner(self, A):
@@ -365,16 +400,19 @@ class FDFD:
 
             operator = cupy_linalg.LinearOperator(A.shape, matvec=apply_jacobi, dtype=A.dtype)
         elif self.preconditioner == 'ssor':
-            # M = (D + L) D^-1 (D + U) using A's own triangles (omega = 1)
+            # SSOR(omega): M = (D + wL) [w(2-w)]^-1 D^-1 (D + wU),
+            # applied as M^-1 v via two triangular solves on A's own triangles
+            omega = self.ssor_omega
             diagonal = A.diagonal()
-            lower = cpsp.tril(A, k=0).tocsr()
-            upper = cpsp.triu(A, k=0).tocsr()
+            lower = cpsp.tril(A, k=-1).tocsr() * omega + cpsp.diags(diagonal).tocsr()
+            upper = cpsp.triu(A, k=1).tocsr() * omega + cpsp.diags(diagonal).tocsr()
+            scale_back = omega * (2.0 - omega)
 
             def apply_ssor(v):
                 y = cupy_linalg.spsolve_triangular(lower, v, lower=True)
                 y = y.astype(A.dtype, copy=False) * diagonal
                 y = cupy_linalg.spsolve_triangular(upper, y, lower=False)
-                return y.astype(A.dtype, copy=False)
+                return y.astype(A.dtype, copy=False) * scale_back
 
             operator = cupy_linalg.LinearOperator(A.shape, matvec=apply_ssor, dtype=A.dtype)
         else:  # 'ilu'
@@ -717,14 +755,17 @@ class FDFD:
         solve_start = time.time()
 
         try:
-            M = self._ensure_preconditioner()
+            if self.solver_type != 'direct':
+                M = self._ensure_preconditioner()
+                A_iter = self._iteration_matrix()
+                b_iter = b.astype(self._iteration_dtype(), copy=False)
             if self.solver_type == 'cg':
-                x_gpu, info = cupy_cg(self.A_matrix, b, M=M, maxiter=max_iter, tol=tol)
+                x_gpu, info = cupy_cg(A_iter, b_iter, M=M, maxiter=max_iter, tol=tol)
             elif self.solver_type in ('bicgstab', 'tfqmr', 'idr', 'sqmr'):
                 from . import krylov
-                x_gpu, info = krylov.solve(self.solver_type, self.A_matrix, b, M=M,
+                x_gpu, info = krylov.solve(self.solver_type, A_iter, b_iter, M=M,
                                            tol=tol, maxiter=max_iter)
-                self.final_residual = float(cp.linalg.norm(self.A_matrix @ x_gpu - b) / cp.linalg.norm(b))
+                self.final_residual = float(cp.linalg.norm(A_iter @ x_gpu - b_iter) / cp.linalg.norm(b_iter))
                 self.solver_residuals = [self.final_residual]
             elif self.solver_type == 'gmres':
                 residuals = []
@@ -744,7 +785,7 @@ class FDFD:
                     pbar.update(1)
                     pbar.set_postfix({'residual': f'{res_val:.2e}'})
 
-                x_gpu, info = cupy_gmres(self.A_matrix, b, M=M, maxiter=max_iter, tol=tol, restart=restart, callback=callback)
+                x_gpu, info = cupy_gmres(A_iter, b_iter, M=M, maxiter=max_iter, tol=tol, restart=restart, callback=callback)
                 pbar.close()
 
                 # Save residual info
@@ -785,7 +826,8 @@ class FDFD:
         if self.verbose:
             print(f"Total solve time: {total_time:.2f}s")
 
-        # Undo the symmetrization scaling to recover the physical solution
+        # Back to storage precision, then undo the symmetrization scaling
+        x_gpu = x_gpu.astype(cp.complex64, copy=False)
         x_gpu = x_gpu / self._ensure_symmetrization_scale()
 
         # Reshape results into 3D field components on the Yee grid
@@ -932,9 +974,11 @@ def solve_isotropic(self, source_pos, source_width, source_amplitude, max_iter=1
             pbar.update(1)
             pbar.set_postfix({'residual': f'{res_val:.2e}'})
 
-        x_gpu, info = cupy_gmres(self.A_matrix, b_gpu, M=self._ensure_preconditioner(),
+        x_gpu, info = cupy_gmres(self._iteration_matrix(),
+                                 b_gpu.astype(self._iteration_dtype(), copy=False),
+                                 M=self._ensure_preconditioner(),
                                  maxiter=max_iter, tol=tol, restart=restart, callback=iso_callback)
-        x_gpu = x_gpu / self._ensure_symmetrization_scale()
+        x_gpu = x_gpu.astype(cp.complex64, copy=False) / self._ensure_symmetrization_scale()
         pbar.close()
         if verbose:
             print(f"Solve complete, elapsed: {time.time() - solve_start:.2f}s. Convergence info: {info}")

@@ -48,6 +48,7 @@ class PerfCase:
     nnz: int
     solver_type: str
     preconditioner: str
+    precision: str
     max_iter: int
     tol: float
     restart: int
@@ -132,13 +133,14 @@ def _solve_counted(A, b, solver_type: str, max_iter: int, tol: float, restart: i
 
 
 def run_case(size: int, solver_type: str, max_iter: int, tol: float, restart: int,
-             preconditioner: str = "jacobi") -> PerfCase:
+             preconditioner: str = "jacobi", precision: str = "single") -> PerfCase:
     scene = build_scene(size)
     solver = mw.Simulation.fdfd(
         scene,
         frequency=FREQUENCY,
         solver=mw.GMRES(max_iter=max_iter, tol=tol, restart=restart,
-                        solver_type=solver_type, preconditioner=preconditioner),
+                        solver_type=solver_type, preconditioner=preconditioner,
+                        precision=precision),
     ).prepare().solver
 
     pool = cp.get_default_memory_pool()
@@ -153,7 +155,7 @@ def run_case(size: int, solver_type: str, max_iter: int, tol: float, restart: in
         A = solver.A_matrix
 
         t0 = time.perf_counter()
-        M = solver._ensure_preconditioner()
+        M = solver._ensure_preconditioner() if solver_type != "direct" else None
         cp.cuda.runtime.deviceSynchronize()
         precond_setup_s = time.perf_counter() - t0
 
@@ -171,18 +173,21 @@ def run_case(size: int, solver_type: str, max_iter: int, tol: float, restart: in
             reuse_solve_s = time.perf_counter() - t0
             info, matvecs = 0, 0
         else:
+            A_iter = solver._iteration_matrix()
+            b_iter = b.astype(solver._iteration_dtype(), copy=False)
             t0 = time.perf_counter()
-            x, info, matvecs = _solve_counted(A, b, solver_type, max_iter, tol, restart, M=M)
+            x, info, matvecs = _solve_counted(A_iter, b_iter, solver_type, max_iter, tol, restart, M=M)
             cp.cuda.runtime.deviceSynchronize()
             solve_s = time.perf_counter() - t0
 
-        residual = float(cp.linalg.norm(A @ x - b) / cp.linalg.norm(b))
+        residual = float(cp.linalg.norm(A @ x.astype(cp.complex64, copy=False) - b) / cp.linalg.norm(b))
         return PerfCase(
             size=size,
             unknowns=int(A.shape[0]),
             nnz=int(A.nnz),
             solver_type=solver_type,
             preconditioner=preconditioner,
+            precision=precision,
             max_iter=max_iter,
             tol=tol,
             restart=restart,
@@ -206,6 +211,7 @@ def run_case(size: int, solver_type: str, max_iter: int, tol: float, restart: in
             nnz=0,
             solver_type=solver_type,
             preconditioner=preconditioner,
+            precision=precision,
             max_iter=max_iter,
             tol=tol,
             restart=restart,
@@ -242,14 +248,14 @@ def render_markdown(cases: list[PerfCase], *, timestamp: str) -> str:
         "(torch-side scene tensors excluded). Matvecs count operator applications, "
         "not preconditioner applications.",
         "",
-        "| Grid | Unknowns | Solver | Precond | Assembly (s) | Precond setup (s) | Solve (s) | Reuse solve (s) | Matvecs | Converged | Residual | Peak GPU (GB) | Status |",
-        "|------|----------|--------|---------|--------------|-------------------|-----------|-----------------|---------|-----------|----------|---------------|--------|",
+        "| Grid | Unknowns | Solver | Precond | Precision | Assembly (s) | Precond setup (s) | Solve (s) | Reuse solve (s) | Matvecs | Converged | Residual | Peak GPU (GB) | Status |",
+        "|------|----------|--------|---------|-----------|--------------|-------------------|-----------|-----------------|---------|-----------|----------|---------------|--------|",
     ]
     for case in cases:
         label = f"{case.solver_type}(mi={case.max_iter},tol={case.tol:g}"
         label += f",r={case.restart})" if case.solver_type == "gmres" else ")"
         lines.append(
-            f"| {case.size}^3 | {case.unknowns:,} | {label} | {case.preconditioner} | "
+            f"| {case.size}^3 | {case.unknowns:,} | {label} | {case.preconditioner} | {case.precision} | "
             f"{case.assembly_s:.2f} | {case.precond_setup_s:.2f} | "
             f"{case.solve_s:.2f} | {case.reuse_solve_s:.3f} | {case.matvecs} | {'yes' if case.converged else 'no'} | "
             f"{case.residual:.2e} | {case.peak_gpu_gb:.2f} | {case.status} |"
@@ -259,15 +265,17 @@ def render_markdown(cases: list[PerfCase], *, timestamp: str) -> str:
 
 
 def run_benchmark(sizes, solver_types, max_iter: int, tol: float, restart: int,
-                  preconditioners=("jacobi",)) -> list[PerfCase]:
+                  preconditioners=("jacobi",), precision: str = "single") -> list[PerfCase]:
     if isinstance(solver_types, str):
         solver_types = (solver_types,)
     cases = []
     for size in sizes:
         for solver_type in solver_types:
             for preconditioner in preconditioners:
-                print(f"[fdfd-perf] size={size}^3 solver={solver_type} precond={preconditioner} ...", flush=True)
-                case = run_case(size, solver_type, max_iter, tol, restart, preconditioner=preconditioner)
+                print(f"[fdfd-perf] size={size}^3 solver={solver_type} precond={preconditioner} "
+                      f"precision={precision} ...", flush=True)
+                case = run_case(size, solver_type, max_iter, tol, restart,
+                                preconditioner=preconditioner, precision=precision)
                 print(
                     f"[fdfd-perf]   unknowns={case.unknowns:,} assembly={case.assembly_s:.2f}s "
                     f"precond={case.precond_setup_s:.2f}s solve={case.solve_s:.2f}s reuse={case.reuse_solve_s:.3f}s "
@@ -297,6 +305,8 @@ def main(argv=None) -> None:
     parser.add_argument("--precond", nargs="+", default=["jacobi"],
                         choices=("none", "jacobi", "ssor", "ilu"),
                         help="Preconditioner(s) to sweep for the iterative solvers.")
+    parser.add_argument("--precision", default="single", choices=("single", "double"),
+                        help="Working precision of the iterative solve.")
     parser.add_argument("--max-iter", type=int, default=2000)
     parser.add_argument("--tol", type=float, default=1e-6)
     parser.add_argument("--restart", type=int, default=200)
@@ -306,7 +316,7 @@ def main(argv=None) -> None:
         raise SystemExit("FDFD performance benchmark requires CUDA.")
 
     cases = run_benchmark(args.sizes, tuple(args.solver), args.max_iter, args.tol, args.restart,
-                          preconditioners=tuple(args.precond))
+                          preconditioners=tuple(args.precond), precision=args.precision)
     write_results(cases)
 
 

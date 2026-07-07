@@ -185,7 +185,7 @@ def test_fdtd_evaluation_compute_steps_accepts_public_scene(monkeypatch):
 
 def test_simulation_fdfd_wraps_solver(monkeypatch):
     class FakeFDFD:
-        def __init__(self, scene, frequency, solver_type, preconditioner, enable_plot, verbose):
+        def __init__(self, scene, frequency, solver_type, preconditioner, precision, ssor_omega, enable_plot, verbose):
             self.scene = scene
             self.frequency = frequency
             self.use_gpu = True
@@ -233,7 +233,7 @@ def test_simulation_fdfd_wraps_solver(monkeypatch):
 
 def test_simulation_accepts_scene_module_and_detects_trainable_parameters(monkeypatch):
     class FakeFDFD:
-        def __init__(self, scene, frequency, solver_type, preconditioner, enable_plot, verbose):
+        def __init__(self, scene, frequency, solver_type, preconditioner, precision, ssor_omega, enable_plot, verbose):
             self.scene = scene
             self.E_field = (
                 torch.ones((3, 4, 4), dtype=torch.complex64),

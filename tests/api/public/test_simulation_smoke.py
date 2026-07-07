@@ -22,7 +22,7 @@ def _scene() -> mw.Scene:
 
 def test_fdfd_smoke_scene_simulation_result(monkeypatch):
     class FakeFDFD:
-        def __init__(self, scene, frequency, solver_type, preconditioner, enable_plot, verbose):
+        def __init__(self, scene, frequency, solver_type, preconditioner, precision, ssor_omega, enable_plot, verbose):
             self.scene = scene
             self.frequency = frequency
             self.solver_type = solver_type
