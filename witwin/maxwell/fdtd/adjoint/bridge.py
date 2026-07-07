@@ -4,8 +4,11 @@ import time
 
 import torch
 
+from ...adjoint_inputs import (
+    material_dependent_inputs as _material_dependent_inputs,
+    scene_trainable_material_tensors as _scene_trainable_material_tensors,
+)
 from ...result import Result
-from ...scene import prepare_scene
 from ..boundary import BOUNDARY_BLOCH, BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_PML, has_complex_fields
 from .profiler import _BackwardProfiler, _clone_backward_profile, _empty_backward_profile
 from ..excitation import (
@@ -25,60 +28,6 @@ def _runtime():
     from . import core as _adjoint
 
     return _adjoint
-
-
-def _unique_trainable_tensors(candidates) -> tuple[torch.Tensor, ...]:
-    unique = []
-    seen = set()
-    for tensor in candidates:
-        if not isinstance(tensor, torch.Tensor) or not tensor.requires_grad:
-            continue
-        key = tensor.data_ptr() if tensor.data_ptr() != 0 else id(tensor)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(tensor)
-    return tuple(unique)
-
-
-def _scene_trainable_material_tensors(scene) -> tuple[torch.Tensor, ...]:
-    candidates = []
-    for structure in scene.structures:
-        geometry = getattr(structure, "geometry", None)
-        if geometry is not None:
-            candidates.extend(
-                value for value in vars(geometry).values() if isinstance(value, torch.Tensor) and value.requires_grad
-            )
-    for region in getattr(scene, "material_regions", ()):
-        density = getattr(region, "density", None)
-        if isinstance(density, torch.Tensor) and density.requires_grad:
-            candidates.append(density)
-    return _unique_trainable_tensors(candidates)
-
-
-def _material_dependent_inputs(scene, candidates) -> tuple[torch.Tensor, ...]:
-    inputs = _unique_trainable_tensors(candidates)
-    if not inputs:
-        return ()
-    dependencies = ()
-    prepared_scene = prepare_scene(scene)
-    try:
-        with torch.enable_grad():
-            eps_r, _mu_r = prepared_scene.compile_material_tensors()
-            if eps_r.requires_grad:
-                dependencies = torch.autograd.grad(
-                    eps_r.sum(),
-                    inputs,
-                    allow_unused=True,
-                    retain_graph=False,
-                )
-    finally:
-        prepared_scene.release_meshgrid()
-    return tuple(
-        tensor
-        for tensor, dependency in zip(inputs, dependencies)
-        if dependency is not None
-    )
 
 
 def _unsupported_adjoint_medium(scene):

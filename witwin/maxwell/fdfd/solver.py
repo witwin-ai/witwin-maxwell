@@ -218,6 +218,9 @@ class FDFD:
         self._matrix_frequency = None  # Frequency the cached A_matrix was built for
         self._preconditioner_op = None  # Cached preconditioner for the cached A_matrix
         self._direct_solver = None  # Cached cuDSS factorization for the cached A_matrix
+        self._adjoint_matrix = None  # Cached A^T for adjoint solves
+        self._adjoint_preconditioner_op = None  # Cached preconditioner for A^T
+        self._adjoint_direct_solver = None  # Cached cuDSS factorization of A^T
         self.material_eps_r = None
         self.material_mu_r = None
         self.material_eps_components = None
@@ -245,6 +248,8 @@ class FDFD:
         self.A_matrix = None
         self._matrix_frequency = None
         self._preconditioner_op = None
+        self._adjoint_matrix = None
+        self._adjoint_preconditioner_op = None
         self._release_direct_solver()
         if _scene_has_dispersive_material(self.scene):
             self.material_eps_components = None
@@ -280,52 +285,92 @@ class FDFD:
         self.A_matrix = self._build_matrix_gpu_yee_3d()
         self._matrix_frequency = self.frequency
         self._preconditioner_op = None
+        self._adjoint_matrix = None
+        self._adjoint_preconditioner_op = None
         self._release_direct_solver()
 
     def _release_direct_solver(self):
         if self._direct_solver is not None:
             self._direct_solver.free()
             self._direct_solver = None
+        if self._adjoint_direct_solver is not None:
+            self._adjoint_direct_solver.free()
+            self._adjoint_direct_solver = None
 
-    def _solve_direct(self, b):
-        """Solve Ax = b with the cuDSS sparse direct solver.
+    def _build_direct_solver(self, matrix, rhs):
+        """Plan and factorize a cuDSS direct solver for the given matrix.
 
-        The factorization is computed once for the cached system matrix and
-        reused for every subsequent right-hand side. The LU is complex64;
-        iterative refinement recovers most of the accuracy lost to the
-        strongly graded PML scaling. Hybrid memory mode keeps factor storage
-        partially in host memory: it sidesteps device-allocation failures for
-        the large factor blocks and measures faster than pure-device
-        factorization on Windows/WDDM.
+        The LU is complex64; iterative refinement recovers most of the
+        accuracy lost to the strongly graded PML scaling. Hybrid memory mode
+        keeps factor storage partially in host memory: it sidesteps
+        device-allocation failures for the large factor blocks and measures
+        faster than pure-device factorization on Windows/WDDM.
         """
         from nvmath.sparse.advanced import DirectSolver, ExecutionCUDA, HybridMemoryModeOptions
 
+        execution = ExecutionCUDA(
+            hybrid_memory_mode_options=HybridMemoryModeOptions(hybrid_memory_mode=True)
+        )
+        direct = DirectSolver(matrix, rhs, execution=execution)
+        direct.plan()
+        direct.factorize()
+        direct.solution_config.ir_num_steps = FDFD_DIRECT_IR_STEPS
+        return direct
+
+    def _solve_direct(self, b):
+        """Solve Ax = b with cuDSS, factorizing once and reusing across RHS."""
         if self._direct_solver is None:
-            execution = ExecutionCUDA(
-                hybrid_memory_mode_options=HybridMemoryModeOptions(hybrid_memory_mode=True)
-            )
-            direct = DirectSolver(self.A_matrix, b, execution=execution)
-            direct.plan()
-            direct.factorize()
-            direct.solution_config.ir_num_steps = FDFD_DIRECT_IR_STEPS
-            self._direct_solver = direct
+            self._direct_solver = self._build_direct_solver(self.A_matrix, b)
         else:
             self._direct_solver.reset_operands(b=b)
         return self._direct_solver.solve()
 
-    def _ensure_preconditioner(self):
-        """Build (or reuse) the preconditioner operator for the cached matrix.
+    def _ensure_adjoint_matrix(self):
+        if self._adjoint_matrix is None:
+            self._adjoint_matrix = self.A_matrix.transpose().tocsr()
+        return self._adjoint_matrix
 
-        Returns None when preconditioning is disabled. All variants construct
-        and apply on GPU. The cuSPARSE triangular solves upcast complex64 to
-        complex128, so results are cast back after each solve.
+    def solve_adjoint(self, rhs, max_iter=1000, tol=1e-6, restart=100):
+        """Solve the adjoint system A^T lam = rhs for a flat complex64 RHS.
+
+        Used by the FDFD gradient bridge. The transpose matrix, its
+        preconditioner, and (for the direct backend) its factorization are
+        cached alongside the forward system and reused across calls.
         """
+        self._ensure_system_matrix()
+        if self.solver_type == 'direct':
+            if self._adjoint_direct_solver is None:
+                self._adjoint_direct_solver = self._build_direct_solver(
+                    self._ensure_adjoint_matrix(), rhs
+                )
+            else:
+                self._adjoint_direct_solver.reset_operands(b=rhs)
+            return self._adjoint_direct_solver.solve()
+
+        transpose = self._ensure_adjoint_matrix()
+        if self._adjoint_preconditioner_op is None and self.preconditioner != 'none':
+            self._adjoint_preconditioner_op = self._build_preconditioner(transpose)
+        M = self._adjoint_preconditioner_op
+        if self.solver_type == 'cg':
+            lam, _info = cupy_cg(transpose, rhs, M=M, maxiter=max_iter, tol=tol)
+        else:
+            lam, _info = cupy_gmres(transpose, rhs, M=M, maxiter=max_iter, tol=tol, restart=restart)
+        return lam
+
+    def _ensure_preconditioner(self):
         if self.preconditioner == 'none':
             return None
-        if self._preconditioner_op is not None:
-            return self._preconditioner_op
-        A = self.A_matrix
+        if self._preconditioner_op is None:
+            self._preconditioner_op = self._build_preconditioner(self.A_matrix)
+        return self._preconditioner_op
 
+    def _build_preconditioner(self, A):
+        """Build the preconditioner operator for the given CSR matrix.
+
+        All variants construct and apply on GPU. The cuSPARSE triangular
+        solves upcast complex64 to complex128, so results are cast back
+        after each solve.
+        """
         if self.preconditioner == 'jacobi':
             inv_diagonal = cp.reciprocal(A.diagonal())
 
@@ -359,7 +404,6 @@ class FDFD:
 
             operator = cupy_linalg.LinearOperator(A.shape, matvec=apply_ilu, dtype=A.dtype)
 
-        self._preconditioner_op = operator
         return operator
 
     def _create_pml_3d(self):

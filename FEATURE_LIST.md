@@ -166,6 +166,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Direct-solve reuse composes with `solver.set_frequency(...)`, which releases the stale factorization automatically
 - Typed FDFD solver configuration through `FDFDConfig(solver=..., enable_plot=..., verbose=...)`
 - Prepared execution via `Simulation.prepare()` before running
+- Differentiable FDFD: scenes with trainable parameters (SceneModule parameters, `MaterialRegion` densities, trainable geometry tensors) route through an adjoint gradient bridge, so `loss.backward()` on `Result` fields propagates to material and geometry inputs; the adjoint solve reuses the cached system state (with the direct backend, a cached transpose factorization)
 - System-matrix caching on the prepared solver: repeated `solve()` calls reuse the assembled matrix across source changes
 - Frequency switching on the prepared solver via `solver.set_frequency(...)`, reusing compiled material components when all materials are non-dispersive
 - Unified `Result` output containing `Ex`, `Ey`, and `Ez`

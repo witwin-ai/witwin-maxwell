@@ -335,9 +335,16 @@ class Simulation:
             self.scene = self.scene_input
 
     def _run_fdfd(self) -> Result:
+        if self.has_trainable_parameters:
+            return self._run_fdfd_with_gradient_bridge()
         solver = self._build_fdfd_solver()
         solver_cfg = self.config.solver
         return self._build_fdfd_result(solver, solver_cfg)
+
+    def _run_fdfd_with_gradient_bridge(self) -> Result:
+        from .fdfd.adjoint import run_fdfd_with_gradient_bridge
+
+        return run_fdfd_with_gradient_bridge(self)
 
     def _build_fdfd_solver(self):
         prepared_scene = prepare_scene(self.scene)
