@@ -218,9 +218,7 @@ class FDFD:
         self._matrix_frequency = None  # Frequency the cached A_matrix was built for
         self._preconditioner_op = None  # Cached preconditioner for the cached A_matrix
         self._direct_solver = None  # Cached cuDSS factorization for the cached A_matrix
-        self._adjoint_matrix = None  # Cached A^T for adjoint solves
-        self._adjoint_preconditioner_op = None  # Cached preconditioner for A^T
-        self._adjoint_direct_solver = None  # Cached cuDSS factorization of A^T
+        self._sym_scale = None  # Symmetrizing diagonal d = sqrt(sx*sy*sz), grid/PML-only
         self.material_eps_r = None
         self.material_mu_r = None
         self.material_eps_components = None
@@ -248,8 +246,6 @@ class FDFD:
         self.A_matrix = None
         self._matrix_frequency = None
         self._preconditioner_op = None
-        self._adjoint_matrix = None
-        self._adjoint_preconditioner_op = None
         self._release_direct_solver()
         if _scene_has_dispersive_material(self.scene):
             self.material_eps_components = None
@@ -285,17 +281,12 @@ class FDFD:
         self.A_matrix = self._build_matrix_gpu_yee_3d()
         self._matrix_frequency = self.frequency
         self._preconditioner_op = None
-        self._adjoint_matrix = None
-        self._adjoint_preconditioner_op = None
         self._release_direct_solver()
 
     def _release_direct_solver(self):
         if self._direct_solver is not None:
             self._direct_solver.free()
             self._direct_solver = None
-        if self._adjoint_direct_solver is not None:
-            self._adjoint_direct_solver.free()
-            self._adjoint_direct_solver = None
 
     def _build_direct_solver(self, matrix, rhs):
         """Plan and factorize a cuDSS direct solver for the given matrix.
@@ -325,37 +316,27 @@ class FDFD:
             self._direct_solver.reset_operands(b=b)
         return self._direct_solver.solve()
 
-    def _ensure_adjoint_matrix(self):
-        if self._adjoint_matrix is None:
-            self._adjoint_matrix = self.A_matrix.transpose().tocsr()
-        return self._adjoint_matrix
-
     def solve_adjoint(self, rhs, max_iter=1000, tol=1e-6, restart=100):
         """Solve the adjoint system A^T lam = rhs for a flat complex64 RHS.
 
-        Used by the FDFD gradient bridge. The transpose matrix, its
-        preconditioner, and (for the direct backend) its factorization are
-        cached alongside the forward system and reused across calls.
+        The assembled scaled system S = D A D^-1 is complex-symmetric
+        (S^T = S), so A^T lam = rhs reduces to S (lam/d) = rhs/d and the
+        adjoint reuses the forward operator, preconditioner, and (direct
+        backend) factorization. rhs and the returned lam are in physical
+        (unscaled) space.
         """
         self._ensure_system_matrix()
+        scale = self._ensure_symmetrization_scale()
+        rhs_scaled = rhs / scale
         if self.solver_type == 'direct':
-            if self._adjoint_direct_solver is None:
-                self._adjoint_direct_solver = self._build_direct_solver(
-                    self._ensure_adjoint_matrix(), rhs
-                )
-            else:
-                self._adjoint_direct_solver.reset_operands(b=rhs)
-            return self._adjoint_direct_solver.solve()
-
-        transpose = self._ensure_adjoint_matrix()
-        if self._adjoint_preconditioner_op is None and self.preconditioner != 'none':
-            self._adjoint_preconditioner_op = self._build_preconditioner(transpose)
-        M = self._adjoint_preconditioner_op
-        if self.solver_type == 'cg':
-            lam, _info = cupy_cg(transpose, rhs, M=M, maxiter=max_iter, tol=tol)
+            y = self._solve_direct(rhs_scaled)
         else:
-            lam, _info = cupy_gmres(transpose, rhs, M=M, maxiter=max_iter, tol=tol, restart=restart)
-        return lam
+            M = self._ensure_preconditioner()
+            if self.solver_type == 'cg':
+                y, _info = cupy_cg(self.A_matrix, rhs_scaled, M=M, maxiter=max_iter, tol=tol)
+            else:
+                y, _info = cupy_gmres(self.A_matrix, rhs_scaled, M=M, maxiter=max_iter, tol=tol, restart=restart)
+        return y * scale
 
     def _ensure_preconditioner(self):
         if self.preconditioner == 'none':
@@ -441,13 +422,17 @@ class FDFD:
 
     def _build_matrix_gpu_yee_3d(self):
         """
-        [CORRECTED] Build the 3D full-vector coefficient matrix for the Yee grid using CuPy on GPU.
-        This version fixes sign errors in the original code.
+        Build the 3D full-vector coefficient matrix for the Yee grid using CuPy on GPU.
+
+        Uses the standard symmetric UPML discretization: same-field couplings
+        take the mixed form 1/(s_row * s_half) so the operator is a diagonal
+        similarity D A D^-1 (D = sqrt(sx*sy*sz) per unknown) away from
+        complex-symmetric. The returned matrix IS the scaled, complex-symmetric
+        system; solves must scale b -> d*b and unscale x -> x/d (see
+        _ensure_symmetrization_scale).
         """
         ds = float(self.scene.dx)
         k0 = self.k0
-
-        # ... (preceding code unchanged) ...
 
         Nx, Ny, Nz = self.scene.Nx, self.scene.Ny, self.scene.Nz
         Nx_ex, Ny_ex, Nz_ex = self.scene.Nx_ex, self.scene.Ny_ex, self.scene.Nz_ex
@@ -463,6 +448,11 @@ class FDFD:
         s_x_half = (s_x_main[:-1] + s_x_main[1:]) / 2
         s_y_half = (s_y_main[:-1] + s_y_main[1:]) / 2
         s_z_half = (s_z_main[:-1] + s_z_main[1:]) / 2
+        # Half-grid stretch factors padded at the walls so boundary rows reuse
+        # the edge value; index m addresses position (m - 1/2), m+1 -> (m + 1/2)
+        s_x_half_pad = cp.concatenate([s_x_half[:1], s_x_half, s_x_half[-1:]])
+        s_y_half_pad = cp.concatenate([s_y_half[:1], s_y_half, s_y_half[-1:]])
+        s_z_half_pad = cp.concatenate([s_z_half[:1], s_z_half, s_z_half[-1:]])
         self._ensure_material_components()
         eps_x_main = cp.asarray(self.material_eps_components["x"])
         eps_y_main = cp.asarray(self.material_eps_components["y"])
@@ -505,18 +495,24 @@ class FDFD:
         sy = s_y_main[iy_1d][None, :, None]
         sz = s_z_main[iz_1d][None, None, :]
         sx_half = s_x_half[ix_1d][:, None, None]
-        diag_val = (k02 * eps_r_x - 2 / (sy**2 * ds2) - 2 / (sz**2 * ds2))
+        sy_lo = s_y_half_pad[iy_1d][None, :, None]      # s_y at (j - 1/2)
+        sy_hi = s_y_half_pad[iy_1d + 1][None, :, None]  # s_y at (j + 1/2)
+        sz_lo = s_z_half_pad[iz_1d][None, None, :]
+        sz_hi = s_z_half_pad[iz_1d + 1][None, None, :]
+        diag_val = (k02 * eps_r_x
+                    - (1 / sy_lo + 1 / sy_hi) / (sy * ds2)
+                    - (1 / sz_lo + 1 / sz_hi) / (sz * ds2))
         add_entries(idx_ex, idx_ex, diag_val)
 
         # Neighbor indices (using slicing to avoid creating masks)
         # iy > 0: idx_ex[:, 1:, :]
-        add_entries(idx_ex[:, 1:, :], (ix_1d[:, None, None] * Ny_ex + (iy_1d[None, 1:, None]-1)) * Nz_ex + iz_1d[None, None, :], 1 / (sy[:, 1:, :]**2 * ds2))
+        add_entries(idx_ex[:, 1:, :], (ix_1d[:, None, None] * Ny_ex + (iy_1d[None, 1:, None]-1)) * Nz_ex + iz_1d[None, None, :], 1 / (sy[:, 1:, :] * sy_lo[:, 1:, :] * ds2))
         # iy < Ny_ex - 1: idx_ex[:, :-1, :]
-        add_entries(idx_ex[:, :-1, :], (ix_1d[:, None, None] * Ny_ex + (iy_1d[None, :-1, None]+1)) * Nz_ex + iz_1d[None, None, :], 1 / (sy[:, :-1, :]**2 * ds2))
+        add_entries(idx_ex[:, :-1, :], (ix_1d[:, None, None] * Ny_ex + (iy_1d[None, :-1, None]+1)) * Nz_ex + iz_1d[None, None, :], 1 / (sy[:, :-1, :] * sy_hi[:, :-1, :] * ds2))
         # iz > 0: idx_ex[:, :, 1:]
-        add_entries(idx_ex[:, :, 1:], (ix_1d[:, None, None] * Ny_ex + iy_1d[None, :, None]) * Nz_ex + (iz_1d[None, None, 1:]-1), 1 / (sz[:, :, 1:]**2 * ds2))
+        add_entries(idx_ex[:, :, 1:], (ix_1d[:, None, None] * Ny_ex + iy_1d[None, :, None]) * Nz_ex + (iz_1d[None, None, 1:]-1), 1 / (sz[:, :, 1:] * sz_lo[:, :, 1:] * ds2))
         # iz < Nz_ex - 1: idx_ex[:, :, :-1]
-        add_entries(idx_ex[:, :, :-1], (ix_1d[:, None, None] * Ny_ex + iy_1d[None, :, None]) * Nz_ex + (iz_1d[None, None, :-1]+1), 1 / (sz[:, :, :-1]**2 * ds2))
+        add_entries(idx_ex[:, :, :-1], (ix_1d[:, None, None] * Ny_ex + iy_1d[None, :, None]) * Nz_ex + (iz_1d[None, None, :-1]+1), 1 / (sz[:, :, :-1] * sz_hi[:, :, :-1] * ds2))
 
         # Coupling to Ey terms (d^2/dxdy)
         val = 1 / (sx_half * sy * ds2)
@@ -535,7 +531,7 @@ class FDFD:
         # iz < Nz_ez
         add_entries(idx_ex[:, :, :Nz_ez], N_ex + N_ey + (ix_1d[:, None, None] * Ny_ez + iy_1d[None, :, None]) * Nz_ez + iz_1d[None, None, :Nz_ez], val[:, :, :Nz_ez])
         add_entries(idx_ex[:, :, :Nz_ez], N_ex + N_ey + ((ix_1d[:, None, None]+1) * Ny_ez + iy_1d[None, :, None]) * Nz_ez + iz_1d[None, None, :Nz_ez], -val[:, :, :Nz_ez])
-        del ix_1d, iy_1d, iz_1d, idx_ex, sy, sz, sx_half, val  # Free memory
+        del ix_1d, iy_1d, iz_1d, idx_ex, sy, sz, sx_half, sy_lo, sy_hi, sz_lo, sz_hi, val  # Free memory
 
         # --- 4. Fill Ey equations --- (using broadcasting instead of meshgrid to save memory)
         ix_1d = cp.arange(Nx_ey, dtype=cp.int32)
@@ -545,14 +541,20 @@ class FDFD:
         sx = s_x_main[ix_1d][:, None, None]
         sz = s_z_main[iz_1d][None, None, :]
         sy_half = s_y_half[iy_1d][None, :, None]
-        diag_val = (k02 * eps_r_y - 2 / (sx**2 * ds2) - 2 / (sz**2 * ds2))
+        sx_lo = s_x_half_pad[ix_1d][:, None, None]      # s_x at (i - 1/2)
+        sx_hi = s_x_half_pad[ix_1d + 1][:, None, None]  # s_x at (i + 1/2)
+        sz_lo = s_z_half_pad[iz_1d][None, None, :]
+        sz_hi = s_z_half_pad[iz_1d + 1][None, None, :]
+        diag_val = (k02 * eps_r_y
+                    - (1 / sx_lo + 1 / sx_hi) / (sx * ds2)
+                    - (1 / sz_lo + 1 / sz_hi) / (sz * ds2))
         add_entries(idx_ey, idx_ey, diag_val)
 
         # Neighbor indices
-        add_entries(idx_ey[1:, :, :], N_ex + ((ix_1d[1:, None, None]-1) * Ny_ey + iy_1d[None, :, None]) * Nz_ey + iz_1d[None, None, :], 1 / (sx[1:, :, :]**2 * ds2))
-        add_entries(idx_ey[:-1, :, :], N_ex + ((ix_1d[:-1, None, None]+1) * Ny_ey + iy_1d[None, :, None]) * Nz_ey + iz_1d[None, None, :], 1 / (sx[:-1, :, :]**2 * ds2))
-        add_entries(idx_ey[:, :, 1:], N_ex + (ix_1d[:, None, None] * Ny_ey + iy_1d[None, :, None]) * Nz_ey + (iz_1d[None, None, 1:]-1), 1 / (sz[:, :, 1:]**2 * ds2))
-        add_entries(idx_ey[:, :, :-1], N_ex + (ix_1d[:, None, None] * Ny_ey + iy_1d[None, :, None]) * Nz_ey + (iz_1d[None, None, :-1]+1), 1 / (sz[:, :, :-1]**2 * ds2))
+        add_entries(idx_ey[1:, :, :], N_ex + ((ix_1d[1:, None, None]-1) * Ny_ey + iy_1d[None, :, None]) * Nz_ey + iz_1d[None, None, :], 1 / (sx[1:, :, :] * sx_lo[1:, :, :] * ds2))
+        add_entries(idx_ey[:-1, :, :], N_ex + ((ix_1d[:-1, None, None]+1) * Ny_ey + iy_1d[None, :, None]) * Nz_ey + iz_1d[None, None, :], 1 / (sx[:-1, :, :] * sx_hi[:-1, :, :] * ds2))
+        add_entries(idx_ey[:, :, 1:], N_ex + (ix_1d[:, None, None] * Ny_ey + iy_1d[None, :, None]) * Nz_ey + (iz_1d[None, None, 1:]-1), 1 / (sz[:, :, 1:] * sz_lo[:, :, 1:] * ds2))
+        add_entries(idx_ey[:, :, :-1], N_ex + (ix_1d[:, None, None] * Ny_ey + iy_1d[None, :, None]) * Nz_ey + (iz_1d[None, None, :-1]+1), 1 / (sz[:, :, :-1] * sz_hi[:, :, :-1] * ds2))
 
         # Coupling to Ex (d^2/dydx)
         val = 1 / (sy_half * sx * ds2)
@@ -571,7 +573,7 @@ class FDFD:
         # iz < Nz_ez
         add_entries(idx_ey[:, :, :Nz_ez], N_ex + N_ey + (ix_1d[:, None, None] * Ny_ez + iy_1d[None, :, None]) * Nz_ez + iz_1d[None, None, :Nz_ez], val[:, :, :Nz_ez])
         add_entries(idx_ey[:, :, :Nz_ez], N_ex + N_ey + (ix_1d[:, None, None] * Ny_ez + (iy_1d[None, :, None]+1)) * Nz_ez + iz_1d[None, None, :Nz_ez], -val[:, :, :Nz_ez])
-        del ix_1d, iy_1d, iz_1d, idx_ey, sx, sz, sy_half, val
+        del ix_1d, iy_1d, iz_1d, idx_ey, sx, sz, sy_half, sx_lo, sx_hi, sz_lo, sz_hi, val
 
         # --- 5. Fill Ez equations --- (using broadcasting instead of meshgrid to save memory)
         ix_1d = cp.arange(Nx_ez, dtype=cp.int32)
@@ -581,14 +583,20 @@ class FDFD:
         sx = s_x_main[ix_1d][:, None, None]
         sy = s_y_main[iy_1d][None, :, None]
         sz_half = s_z_half[iz_1d][None, None, :]
-        diag_val = (k02 * eps_r_z - 2 / (sx**2 * ds2) - 2 / (sy**2 * ds2))
+        sx_lo = s_x_half_pad[ix_1d][:, None, None]
+        sx_hi = s_x_half_pad[ix_1d + 1][:, None, None]
+        sy_lo = s_y_half_pad[iy_1d][None, :, None]
+        sy_hi = s_y_half_pad[iy_1d + 1][None, :, None]
+        diag_val = (k02 * eps_r_z
+                    - (1 / sx_lo + 1 / sx_hi) / (sx * ds2)
+                    - (1 / sy_lo + 1 / sy_hi) / (sy * ds2))
         add_entries(idx_ez, idx_ez, diag_val)
 
         # Neighbor indices
-        add_entries(idx_ez[1:, :, :], N_ex + N_ey + ((ix_1d[1:, None, None]-1) * Ny_ez + iy_1d[None, :, None]) * Nz_ez + iz_1d[None, None, :], 1 / (sx[1:, :, :]**2 * ds2))
-        add_entries(idx_ez[:-1, :, :], N_ex + N_ey + ((ix_1d[:-1, None, None]+1) * Ny_ez + iy_1d[None, :, None]) * Nz_ez + iz_1d[None, None, :], 1 / (sx[:-1, :, :]**2 * ds2))
-        add_entries(idx_ez[:, 1:, :], N_ex + N_ey + (ix_1d[:, None, None] * Ny_ez + (iy_1d[None, 1:, None]-1)) * Nz_ez + iz_1d[None, None, :], 1 / (sy[:, 1:, :]**2 * ds2))
-        add_entries(idx_ez[:, :-1, :], N_ex + N_ey + (ix_1d[:, None, None] * Ny_ez + (iy_1d[None, :-1, None]+1)) * Nz_ez + iz_1d[None, None, :], 1 / (sy[:, :-1, :]**2 * ds2))
+        add_entries(idx_ez[1:, :, :], N_ex + N_ey + ((ix_1d[1:, None, None]-1) * Ny_ez + iy_1d[None, :, None]) * Nz_ez + iz_1d[None, None, :], 1 / (sx[1:, :, :] * sx_lo[1:, :, :] * ds2))
+        add_entries(idx_ez[:-1, :, :], N_ex + N_ey + ((ix_1d[:-1, None, None]+1) * Ny_ez + iy_1d[None, :, None]) * Nz_ez + iz_1d[None, None, :], 1 / (sx[:-1, :, :] * sx_hi[:-1, :, :] * ds2))
+        add_entries(idx_ez[:, 1:, :], N_ex + N_ey + (ix_1d[:, None, None] * Ny_ez + (iy_1d[None, 1:, None]-1)) * Nz_ez + iz_1d[None, None, :], 1 / (sy[:, 1:, :] * sy_lo[:, 1:, :] * ds2))
+        add_entries(idx_ez[:, :-1, :], N_ex + N_ey + (ix_1d[:, None, None] * Ny_ez + (iy_1d[None, :-1, None]+1)) * Nz_ez + iz_1d[None, None, :], 1 / (sy[:, :-1, :] * sy_hi[:, :-1, :] * ds2))
 
         # Coupling to Ex (d^2/dzdx)
         val = 1 / (sz_half * sx * ds2)
@@ -607,15 +615,40 @@ class FDFD:
         # iy < Ny_ey
         add_entries(idx_ez[:, :Ny_ey, :], N_ex + (ix_1d[:, None, None] * Ny_ey + iy_1d[None, :Ny_ey, None]) * Nz_ey + iz_1d[None, None, :], val[:, :Ny_ey, :])
         add_entries(idx_ez[:, :Ny_ey, :], N_ex + (ix_1d[:, None, None] * Ny_ey + iy_1d[None, :Ny_ey, None]) * Nz_ey + (iz_1d[None, None, :]+1), -val[:, :Ny_ey, :])
-        del ix_1d, iy_1d, iz_1d, idx_ez, sx, sy, sz_half, val
-
-        # ... (following code unchanged) ...
+        del ix_1d, iy_1d, iz_1d, idx_ez, sx, sy, sz_half, sx_lo, sx_hi, sy_lo, sy_hi, val
 
         if self.verbose:
             print(f"Sparse matrix nonzero count: {nnz:,}")
             print(f"Sparsity: {nnz / (N_vec * N_vec) * 100:.6f}%")
+
+        # Apply the symmetrizing diagonal similarity: entry (m, n) -> d_m a_mn / d_n
+        scale = self._ensure_symmetrization_scale()
+        data[:nnz] *= scale[rows[:nnz]]
+        data[:nnz] /= scale[cols[:nnz]]
+
         A = cpsp.coo_matrix((data[:nnz], (rows[:nnz], cols[:nnz])), shape=(N_vec, N_vec))
         return A.tocsr()
+
+    def _ensure_symmetrization_scale(self):
+        """Diagonal similarity weight d = sqrt(sx*sy*sz) at each unknown's Yee
+        location. With the symmetric UPML stencil, D A D^-1 is exactly
+        complex-symmetric; the solver works on the scaled system throughout
+        (b -> d*b at source build, x -> x/d when fields are extracted). The
+        weight depends only on grid + PML, not frequency or materials."""
+        if self._sym_scale is not None:
+            return self._sym_scale
+        s_x, s_y, s_z = self._create_pml_3d()
+        s_x, s_y, s_z = cp.asarray(s_x), cp.asarray(s_y), cp.asarray(s_z)
+        s_x_half = (s_x[:-1] + s_x[1:]) / 2
+        s_y_half = (s_y[:-1] + s_y[1:]) / 2
+        s_z_half = (s_z[:-1] + s_z[1:]) / 2
+        d_ex = cp.sqrt(s_x_half[:, None, None] * s_y[None, :, None] * s_z[None, None, :])
+        d_ey = cp.sqrt(s_x[:, None, None] * s_y_half[None, :, None] * s_z[None, None, :])
+        d_ez = cp.sqrt(s_x[:, None, None] * s_y[None, :, None] * s_z_half[None, None, :])
+        self._sym_scale = cp.concatenate(
+            [d_ex.ravel(), d_ey.ravel(), d_ez.ravel()]
+        ).astype(cp.complex64)
+        return self._sym_scale
 
     def _build_source_vector_yee(self):
         """Build the total b vector for the Yee grid from the scene source list. Uses broadcasting instead of meshgrid to save memory."""
@@ -662,6 +695,8 @@ class FDFD:
                 _add_point_dipole_component_gpu(b_ez, x_ez, y_ez, z_ez, pos,
                                                 const * pol[2], width, profile_kind)
 
+        # The assembled system is the symmetrized D A D^-1; scale the RHS to match
+        b *= self._ensure_symmetrization_scale()
         return b
 
     def solve(self, max_iter=1000, tol=1e-6, restart=100):
@@ -738,6 +773,9 @@ class FDFD:
         total_time = time.time() - start_time
         if self.verbose:
             print(f"Total solve time: {total_time:.2f}s")
+
+        # Undo the symmetrization scaling to recover the physical solution
+        x_gpu = x_gpu / self._ensure_symmetrization_scale()
 
         # Reshape results into 3D field components on the Yee grid
         N_ex, N_ey = self.scene.N_ex, self.scene.N_ey
@@ -885,6 +923,7 @@ def solve_isotropic(self, source_pos, source_width, source_amplitude, max_iter=1
 
         x_gpu, info = cupy_gmres(self.A_matrix, b_gpu, M=self._ensure_preconditioner(),
                                  maxiter=max_iter, tol=tol, restart=restart, callback=iso_callback)
+        x_gpu = x_gpu / self._ensure_symmetrization_scale()
         pbar.close()
         if verbose:
             print(f"Solve complete, elapsed: {time.time() - solve_start:.2f}s. Convergence info: {info}")
