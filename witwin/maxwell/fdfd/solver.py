@@ -215,8 +215,8 @@ class FDFD:
                 "solver_type must be one of 'cg', 'gmres', 'direct', 'bicgstab', 'tfqmr', 'idr', 'sqmr'"
             )
         self.solver_type = solver_type
-        if preconditioner not in ['none', 'jacobi', 'ssor', 'ilu']:
-            raise ValueError("preconditioner must be 'none', 'jacobi', 'ssor', or 'ilu'")
+        if preconditioner not in ['none', 'jacobi', 'ssor', 'ilu', 'ams']:
+            raise ValueError("preconditioner must be 'none', 'jacobi', 'ssor', 'ilu', or 'ams'")
         self.preconditioner = preconditioner
         if precision not in ['single', 'double']:
             raise ValueError("precision must be 'single' or 'double'")
@@ -415,6 +415,10 @@ class FDFD:
                 return y.astype(A.dtype, copy=False) * scale_back
 
             operator = cupy_linalg.LinearOperator(A.shape, matvec=apply_ssor, dtype=A.dtype)
+        elif self.preconditioner == 'ams':
+            from .ams import build_ams_preconditioner
+
+            operator = build_ams_preconditioner(self)
         else:  # 'ilu'
             factors = A.copy()
             cupy_cusparse.csrilu02(factors)
