@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import cupy as cp
+import cupyx.cusparse as cupy_cusparse
 import cupyx.scipy.sparse as cpsp
 from cupyx.scipy.sparse.linalg import cg as cupy_cg, gmres as cupy_gmres
 import time
@@ -149,14 +150,19 @@ class FDFD:
     Full-vector 3D FDFD solver based on the Yee staggered grid.
     Runs on CUDA via CuPy sparse linear algebra and iterative solvers.
     """
-    def __init__(self, scene, frequency=2.0e9, solver_type='bicgstab', enable_plot=True, tqdm_position=None, verbose=False):
+    def __init__(self, scene, frequency=2.0e9, solver_type='gmres', preconditioner='jacobi',
+                 enable_plot=True, tqdm_position=None, verbose=False):
         """
         Initialize the 3D FDFD solver.
 
         Args:
             scene: Scene instance
             frequency: Operating frequency (Hz)
-            solver_type: Solver type ('cg', 'bicgstab', 'gmres')
+            solver_type: Solver type ('cg', 'gmres', 'direct')
+            preconditioner: Preconditioner for the iterative solvers
+                ('none', 'jacobi', 'ssor', 'ilu'). 'ilu' is ILU(0) and is
+                known to be unstable on the indefinite curl-curl operator;
+                see benchmark/FDFD_PERFORMANCE.md.
             enable_plot: Whether to enable plotting (set False for batch data generation)
             tqdm_position: tqdm progress bar position (for multi-GPU parallelism, set different values per GPU)
             verbose: Whether to print detailed debug information
@@ -185,9 +191,12 @@ class FDFD:
         _require_uniform_grid(self.scene)
         self.use_gpu = True
 
-        if solver_type not in ['cg', 'bicgstab', 'gmres', 'direct']:
-            raise ValueError("solver_type must be 'cg', 'bicgstab', 'gmres', or 'direct'")
+        if solver_type not in ['cg', 'gmres', 'direct']:
+            raise ValueError("solver_type must be 'cg', 'gmres', or 'direct'")
         self.solver_type = solver_type
+        if preconditioner not in ['none', 'jacobi', 'ssor', 'ilu']:
+            raise ValueError("preconditioner must be 'none', 'jacobi', 'ssor', or 'ilu'")
+        self.preconditioner = preconditioner
 
         # Physical constants
         self.c0 = 299792458.0
@@ -201,6 +210,7 @@ class FDFD:
         self.E_field_raw = None  # Raw Yee grid data generated on demand {'Ex': np.ndarray, 'Ey': np.ndarray, 'Ez': np.ndarray}
         self.A_matrix = None
         self._matrix_frequency = None  # Frequency the cached A_matrix was built for
+        self._preconditioner_op = None  # Cached preconditioner for the cached A_matrix
         self.material_eps_r = None
         self.material_mu_r = None
         self.material_eps_components = None
@@ -227,6 +237,7 @@ class FDFD:
         self.k0 = self.omega / self.c0
         self.A_matrix = None
         self._matrix_frequency = None
+        self._preconditioner_op = None
         if _scene_has_dispersive_material(self.scene):
             self.material_eps_components = None
             self.material_mu_components = None
@@ -260,6 +271,56 @@ class FDFD:
         self.scene.release_meshgrid()
         self.A_matrix = self._build_matrix_gpu_yee_3d()
         self._matrix_frequency = self.frequency
+        self._preconditioner_op = None
+
+    def _ensure_preconditioner(self):
+        """Build (or reuse) the preconditioner operator for the cached matrix.
+
+        Returns None when preconditioning is disabled. All variants construct
+        and apply on GPU. The cuSPARSE triangular solves upcast complex64 to
+        complex128, so results are cast back after each solve.
+        """
+        if self.preconditioner == 'none':
+            return None
+        if self._preconditioner_op is not None:
+            return self._preconditioner_op
+        A = self.A_matrix
+
+        if self.preconditioner == 'jacobi':
+            inv_diagonal = cp.reciprocal(A.diagonal())
+
+            def apply_jacobi(v):
+                return inv_diagonal * v
+
+            operator = cupy_linalg.LinearOperator(A.shape, matvec=apply_jacobi, dtype=A.dtype)
+        elif self.preconditioner == 'ssor':
+            # M = (D + L) D^-1 (D + U) using A's own triangles (omega = 1)
+            diagonal = A.diagonal()
+            lower = cpsp.tril(A, k=0).tocsr()
+            upper = cpsp.triu(A, k=0).tocsr()
+
+            def apply_ssor(v):
+                y = cupy_linalg.spsolve_triangular(lower, v, lower=True)
+                y = y.astype(A.dtype, copy=False) * diagonal
+                y = cupy_linalg.spsolve_triangular(upper, y, lower=False)
+                return y.astype(A.dtype, copy=False)
+
+            operator = cupy_linalg.LinearOperator(A.shape, matvec=apply_ssor, dtype=A.dtype)
+        else:  # 'ilu'
+            factors = A.copy()
+            cupy_cusparse.csrilu02(factors)
+            lower = cpsp.tril(factors, k=0).tocsr()
+            upper = cpsp.triu(factors, k=0).tocsr()
+
+            def apply_ilu(v):
+                y = cupy_linalg.spsolve_triangular(lower, v, lower=True, unit_diagonal=True)
+                y = cupy_linalg.spsolve_triangular(upper, y.astype(A.dtype, copy=False), lower=False)
+                return y.astype(A.dtype, copy=False)
+
+            operator = cupy_linalg.LinearOperator(A.shape, matvec=apply_ilu, dtype=A.dtype)
+
+        self._preconditioner_op = operator
+        return operator
 
     def _create_pml_3d(self):
         """Create PML complex stretching factors on main grid nodes"""
@@ -532,12 +593,9 @@ class FDFD:
         solve_start = time.time()
 
         try:
+            M = self._ensure_preconditioner()
             if self.solver_type == 'cg':
-                x_gpu, info = cupy_cg(self.A_matrix, b, maxiter=max_iter, tol=tol)
-            elif self.solver_type == 'bicgstab':
-                # Use bicgstab from cupyx.scipy.sparse.linalg
-                from cupyx.scipy.sparse.linalg import bicgstab as cupy_bicgstab
-                x_gpu, info = cupy_bicgstab(self.A_matrix, b, maxiter=max_iter, tol=tol)
+                x_gpu, info = cupy_cg(self.A_matrix, b, M=M, maxiter=max_iter, tol=tol)
             elif self.solver_type == 'gmres':
                 residuals = []
                 # GMRES(m) params: restart is the number of Arnoldi iterations before each restart
@@ -555,10 +613,6 @@ class FDFD:
                     residuals.append(res_val)
                     pbar.update(1)
                     pbar.set_postfix({'residual': f'{res_val:.2e}'})
-
-                diagonal = self.A_matrix.diagonal()
-                M_inv = cp.reciprocal(diagonal)  # 1 / diag
-                M = cupy_linalg.LinearOperator(self.A_matrix.shape, matvec=lambda x: M_inv * x)
 
                 x_gpu, info = cupy_gmres(self.A_matrix, b, M=M, maxiter=max_iter, tol=tol, restart=restart, callback=callback)
                 pbar.close()
@@ -747,7 +801,8 @@ def solve_isotropic(self, source_pos, source_width, source_amplitude, max_iter=1
             pbar.update(1)
             pbar.set_postfix({'residual': f'{res_val:.2e}'})
 
-        x_gpu, info = cupy_gmres(self.A_matrix, b_gpu, maxiter=max_iter, tol=tol, restart=restart, callback=iso_callback)
+        x_gpu, info = cupy_gmres(self.A_matrix, b_gpu, M=self._ensure_preconditioner(),
+                                 maxiter=max_iter, tol=tol, restart=restart, callback=iso_callback)
         pbar.close()
         if verbose:
             print(f"Solve complete, elapsed: {time.time() - solve_start:.2f}s. Convergence info: {info}")

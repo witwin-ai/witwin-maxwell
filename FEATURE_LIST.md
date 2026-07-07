@@ -159,7 +159,9 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Axis-aligned diagonal electric anisotropy and diagonal `sigma_e_tensor` support in the Yee-grid operator
 - Per-face `none` / `pml` boundary selection, including one-sided and mixed-axis PML layouts
 - Explicit fast-fail validation for unsupported magnetic response and Kerr media
-- Configurable GMRES settings via `GMRES(max_iter, tol, restart, solver_type)`
+- Configurable GMRES settings via `GMRES(max_iter, tol, restart, solver_type, preconditioner)`
+- GPU-native preconditioners for the iterative solvers: `none`, `jacobi` (default), `ssor`, and `ilu` (ILU(0); unstable on the indefinite curl-curl operator — see `benchmark/FDFD_PERFORMANCE.md` for measured behavior)
+- Supported `solver_type` values: `gmres`, `cg`, and `direct` (the previously advertised `bicgstab` never existed in CuPy and now fails fast at construction)
 - Typed FDFD solver configuration through `FDFDConfig(solver=..., enable_plot=..., verbose=...)`
 - Prepared execution via `Simulation.prepare()` before running
 - System-matrix caching on the prepared solver: repeated `solve()` calls reuse the assembled matrix across source changes

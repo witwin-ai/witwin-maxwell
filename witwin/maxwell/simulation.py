@@ -89,6 +89,7 @@ class GMRES:
     tol: float = 1e-6
     restart: int = 200
     solver_type: str = "gmres"
+    preconditioner: str = "jacobi"
 
 
 @dataclass(frozen=True)
@@ -347,6 +348,7 @@ class Simulation:
             prepared_scene,
             frequency=self.frequency,
             solver_type=solver_cfg.solver_type,
+            preconditioner=solver_cfg.preconditioner,
             enable_plot=self.config.enable_plot,
             verbose=self.config.verbose,
         )
@@ -371,6 +373,7 @@ class Simulation:
                 "max_iter": solver_cfg.max_iter,
                 "tol": solver_cfg.tol,
                 "restart": solver_cfg.restart,
+                "preconditioner": solver_cfg.preconditioner,
             },
             "converged": getattr(solver, "converged", None),
             "solver_info": getattr(solver, "solver_info", None),

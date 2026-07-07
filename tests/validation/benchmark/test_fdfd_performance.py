@@ -8,9 +8,12 @@ requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA r
 def test_fdfd_performance_case_reports_metrics():
     from benchmark import fdfd_performance as perf
 
-    case = perf.run_case(size=24, solver_type="gmres", max_iter=60, tol=1e-6, restart=20)
+    case = perf.run_case(size=24, solver_type="gmres", max_iter=60, tol=1e-6, restart=20,
+                         preconditioner="ssor")
 
     assert case.status == "ok"
+    assert case.preconditioner == "ssor"
+    assert case.precond_setup_s >= 0.0
     assert case.unknowns > 0
     assert case.nnz > 0
     assert case.assembly_s > 0.0
