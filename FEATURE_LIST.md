@@ -161,7 +161,8 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Explicit fast-fail validation for unsupported magnetic response and Kerr media
 - Configurable GMRES settings via `GMRES(max_iter, tol, restart, solver_type, preconditioner)`
 - GPU-native preconditioners for the iterative solvers: `none`, `jacobi` (default), `ssor`, and `ilu` (ILU(0); unstable on the indefinite curl-curl operator — see `benchmark/FDFD_PERFORMANCE.md` for measured behavior)
-- Supported `solver_type` values: `gmres`, `cg`, and `direct` (the previously advertised `bicgstab` never existed in CuPy and now fails fast at construction)
+- Supported `solver_type` values: `gmres`, `cg`, `direct`, plus in-repo GPU Krylov engines `bicgstab`, `tfqmr`, `idr` (IDR(s)), and `sqmr` (simplified QMR; exploits the complex-symmetric system)
+- The FDFD system is assembled in a symmetrized UPML formulation (exactly complex-symmetric via a diagonal similarity), which also measures far lower PML reflection than the previous discretization; the adjoint solve reuses the forward factorization/preconditioner as a consequence
 - `direct` solver backed by NVIDIA cuDSS (`pip install witwin-maxwell[direct]`): factorize-once / solve-many with the factorization cached on the prepared solver and reused across source changes; complex64 LU plus iterative refinement
 - Direct-solve reuse composes with `solver.set_frequency(...)`, which releases the stale factorization automatically
 - Typed FDFD solver configuration through `FDFDConfig(solver=..., enable_plot=..., verbose=...)`

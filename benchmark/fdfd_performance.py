@@ -122,6 +122,10 @@ def _solve_counted(A, b, solver_type: str, max_iter: int, tol: float, restart: i
         x, info = cupy_linalg.gmres(A_op, b, M=M, maxiter=max_iter, tol=tol, restart=restart)
     elif solver_type == "cg":
         x, info = cupy_linalg.cg(A_op, b, M=M, maxiter=max_iter, tol=tol)
+    elif solver_type in ("bicgstab", "tfqmr", "idr", "sqmr"):
+        from witwin.maxwell.fdfd import krylov
+
+        x, info = krylov.solve(solver_type, A_op, b, M=M, tol=tol, maxiter=max_iter)
     else:
         raise ValueError(f"Unsupported solver_type {solver_type!r}.")
     return x, info, counter["matvecs"]
@@ -254,21 +258,24 @@ def render_markdown(cases: list[PerfCase], *, timestamp: str) -> str:
     return "\n".join(lines)
 
 
-def run_benchmark(sizes, solver_type: str, max_iter: int, tol: float, restart: int,
+def run_benchmark(sizes, solver_types, max_iter: int, tol: float, restart: int,
                   preconditioners=("jacobi",)) -> list[PerfCase]:
+    if isinstance(solver_types, str):
+        solver_types = (solver_types,)
     cases = []
     for size in sizes:
-        for preconditioner in preconditioners:
-            print(f"[fdfd-perf] size={size}^3 solver={solver_type} precond={preconditioner} ...", flush=True)
-            case = run_case(size, solver_type, max_iter, tol, restart, preconditioner=preconditioner)
-            print(
-                f"[fdfd-perf]   unknowns={case.unknowns:,} assembly={case.assembly_s:.2f}s "
-                f"precond={case.precond_setup_s:.2f}s solve={case.solve_s:.2f}s reuse={case.reuse_solve_s:.3f}s "
-                f"matvecs={case.matvecs} converged={case.converged} "
-                f"residual={case.residual:.2e} peak={case.peak_gpu_gb:.2f}GB status={case.status}",
-                flush=True,
-            )
-            cases.append(case)
+        for solver_type in solver_types:
+            for preconditioner in preconditioners:
+                print(f"[fdfd-perf] size={size}^3 solver={solver_type} precond={preconditioner} ...", flush=True)
+                case = run_case(size, solver_type, max_iter, tol, restart, preconditioner=preconditioner)
+                print(
+                    f"[fdfd-perf]   unknowns={case.unknowns:,} assembly={case.assembly_s:.2f}s "
+                    f"precond={case.precond_setup_s:.2f}s solve={case.solve_s:.2f}s reuse={case.reuse_solve_s:.3f}s "
+                    f"matvecs={case.matvecs} converged={case.converged} "
+                    f"residual={case.residual:.2e} peak={case.peak_gpu_gb:.2f}GB status={case.status}",
+                    flush=True,
+                )
+                cases.append(case)
     return cases
 
 
@@ -285,8 +292,8 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="FDFD solver performance benchmark.")
     parser.add_argument("--sizes", type=int, nargs="+", default=list(DEFAULT_SIZES),
                         help="Cubic grid sizes to sweep (cells per axis).")
-    parser.add_argument("--solver", default="gmres",
-                        choices=("gmres", "cg", "direct"))
+    parser.add_argument("--solver", nargs="+", default=["gmres"],
+                        choices=("gmres", "cg", "direct", "bicgstab", "tfqmr", "idr", "sqmr"))
     parser.add_argument("--precond", nargs="+", default=["jacobi"],
                         choices=("none", "jacobi", "ssor", "ilu"),
                         help="Preconditioner(s) to sweep for the iterative solvers.")
@@ -298,7 +305,7 @@ def main(argv=None) -> None:
     if not torch.cuda.is_available():
         raise SystemExit("FDFD performance benchmark requires CUDA.")
 
-    cases = run_benchmark(args.sizes, args.solver, args.max_iter, args.tol, args.restart,
+    cases = run_benchmark(args.sizes, tuple(args.solver), args.max_iter, args.tol, args.restart,
                           preconditioners=tuple(args.precond))
     write_results(cases)
 

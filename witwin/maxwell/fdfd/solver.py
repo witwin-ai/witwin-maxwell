@@ -164,7 +164,10 @@ class FDFD:
         Args:
             scene: Scene instance
             frequency: Operating frequency (Hz)
-            solver_type: Solver type ('cg', 'gmres', 'direct')
+            solver_type: Solver type ('cg', 'gmres', 'direct', 'bicgstab',
+                'tfqmr', 'idr', 'sqmr'). The short-recurrence engines live in
+                fdfd/krylov.py; 'sqmr' relies on the complex-symmetric
+                system produced by the symmetrized UPML assembly.
             preconditioner: Preconditioner for the iterative solvers
                 ('none', 'jacobi', 'ssor', 'ilu'). 'ilu' is ILU(0) and is
                 known to be unstable on the indefinite curl-curl operator;
@@ -197,8 +200,10 @@ class FDFD:
         _require_uniform_grid(self.scene)
         self.use_gpu = True
 
-        if solver_type not in ['cg', 'gmres', 'direct']:
-            raise ValueError("solver_type must be 'cg', 'gmres', or 'direct'")
+        if solver_type not in ['cg', 'gmres', 'direct', 'bicgstab', 'tfqmr', 'idr', 'sqmr']:
+            raise ValueError(
+                "solver_type must be one of 'cg', 'gmres', 'direct', 'bicgstab', 'tfqmr', 'idr', 'sqmr'"
+            )
         self.solver_type = solver_type
         if preconditioner not in ['none', 'jacobi', 'ssor', 'ilu']:
             raise ValueError("preconditioner must be 'none', 'jacobi', 'ssor', or 'ilu'")
@@ -715,6 +720,12 @@ class FDFD:
             M = self._ensure_preconditioner()
             if self.solver_type == 'cg':
                 x_gpu, info = cupy_cg(self.A_matrix, b, M=M, maxiter=max_iter, tol=tol)
+            elif self.solver_type in ('bicgstab', 'tfqmr', 'idr', 'sqmr'):
+                from . import krylov
+                x_gpu, info = krylov.solve(self.solver_type, self.A_matrix, b, M=M,
+                                           tol=tol, maxiter=max_iter)
+                self.final_residual = float(cp.linalg.norm(self.A_matrix @ x_gpu - b) / cp.linalg.norm(b))
+                self.solver_residuals = [self.final_residual]
             elif self.solver_type == 'gmres':
                 residuals = []
                 # GMRES(m) params: restart is the number of Arnoldi iterations before each restart

@@ -67,4 +67,4 @@ def test_rejects_unknown_preconditioner_and_solver_type():
     from witwin.maxwell.fdfd import FDFD
 
     with pytest.raises(ValueError):
-        FDFD(scene_solver.scene, frequency=FREQ, solver_type="bicgstab")
+        FDFD(scene_solver.scene, frequency=FREQ, solver_type="spectral")
