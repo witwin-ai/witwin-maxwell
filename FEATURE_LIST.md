@@ -160,7 +160,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Per-face `none` / `pml` boundary selection, including one-sided and mixed-axis PML layouts
 - Explicit fast-fail validation for unsupported magnetic response and Kerr media
 - Configurable GMRES settings via `GMRES(max_iter, tol, restart, solver_type, preconditioner)`
-- GPU-native preconditioners for the iterative solvers: `none`, `jacobi` (default), `ssor` (relaxation via `GMRES(ssor_omega=...)`, default 0.8), and `ilu` (ILU(0); unstable on the indefinite curl-curl operator — see `benchmark/FDFD_PERFORMANCE.md` for measured behavior)
+- GPU-native preconditioners for the iterative solvers: `none`, `jacobi` (default), `ssor` (relaxation via `GMRES(ssor_omega=...)`, default 0.8), `ilu` (ILU(0); unstable on the indefinite curl-curl operator — see `benchmark/FDFD_PERFORMANCE.md`), and `ams` (experimental in-repo Hiptmair–Xu auxiliary-space preconditioner with geometric multigrid; measured non-contractive on the indefinite time-harmonic operator — see the module docstring for its scope)
 - Double-precision iterative solves via `GMRES(precision="double")`: the Krylov recurrences and preconditioner run in complex128 while assembly and returned fields stay complex64; removes the float32 round-off stagnation (measured: `sqmr`+`ssor` converges to 1e-7 at 48³ where single precision stalls at ~2e-2)
 - Supported `solver_type` values: `gmres`, `cg`, `direct`, plus in-repo GPU Krylov engines `bicgstab`, `tfqmr`, `idr` (IDR(s)), and `sqmr` (simplified QMR; exploits the complex-symmetric system)
 - The FDFD system is assembled in a symmetrized UPML formulation (exactly complex-symmetric via a diagonal similarity), which also measures far lower PML reflection than the previous discretization; the adjoint solve reuses the forward factorization/preconditioner as a consequence
@@ -276,7 +276,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 
 ## Performance Benchmarking
 
-- FDFD solver performance benchmark via `python -m benchmark.fdfd_performance`, sweeping cubic grid sizes on a canonical dipole + dielectric-cube scene
+- FDFD solver performance benchmark via `python -m benchmark.fdfd_performance`, sweeping cubic grid sizes (default 32³ through 128³) on a canonical dipole + dielectric-cube scene, with `--solver`/`--precond`/`--precision` axes
 - Per-size metrics: matrix assembly time, solve time, operator matvec count, convergence flag, explicit relative residual, and CuPy peak-GPU-memory high-water mark
 - Results written to `benchmark/FDFD_PERFORMANCE.md` with raw JSON runs archived under `benchmark/cache/fdfd_performance/`
 

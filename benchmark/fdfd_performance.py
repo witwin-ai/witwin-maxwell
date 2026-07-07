@@ -38,7 +38,7 @@ FREQUENCY = 1.0e9
 RESOLUTION = 0.02  # 15 cells per wavelength at 1 GHz
 PML_LAYERS = 8
 PML_STRENGTH = 1.0e6
-DEFAULT_SIZES = (32, 48, 64, 96)
+DEFAULT_SIZES = (32, 48, 64, 96, 128)
 
 
 @dataclass(frozen=True)
