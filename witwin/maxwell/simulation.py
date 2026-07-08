@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 import torch
 
+from .monitors import MediumMonitor, PermittivityMonitor
 from .result import Result
 from .scene import Scene, SceneModule, prepare_scene
 
@@ -444,6 +445,10 @@ class Simulation:
         seen = set(ordered)
         monitors = resolved_scene.resolved_monitors() if hasattr(resolved_scene, "resolved_monitors") else resolved_scene.monitors
         for monitor in monitors:
+            if isinstance(monitor, (PermittivityMonitor, MediumMonitor)):
+                # Material monitors are evaluated analytically from compiled tensors and
+                # do not require the simulation to accumulate a DFT at their frequencies.
+                continue
             monitor_frequencies = getattr(monitor, "frequencies", None)
             if monitor_frequencies is None:
                 continue

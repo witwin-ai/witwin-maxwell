@@ -412,6 +412,57 @@ class ClosedSurfaceMonitor:
         return cls(name, faces, frequencies=frequencies)
 
 
+def _material_monitor_bounds(
+    position: tuple[float, float, float],
+    size: tuple[float, float, float],
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+    bounds = []
+    for center, extent in zip(position, size):
+        half = 0.5 * float(extent)
+        bounds.append((float(center) - half, float(center) + half))
+    return tuple(bounds)
+
+
+@dataclass(frozen=True)
+class PermittivityMonitor:
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    frequencies: tuple[float, ...] | None
+    bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+    kind: str = "permittivity"
+
+    def __init__(self, name, position=(0.0, 0.0, 0.0), size=(0.0, 0.0, 0.0), frequencies=None):
+        resolved_position = _require_length3("position", position)
+        resolved_size = _require_nonnegative_length3("size", size)
+        object.__setattr__(self, "name", str(name))
+        object.__setattr__(self, "position", resolved_position)
+        object.__setattr__(self, "size", resolved_size)
+        object.__setattr__(self, "frequencies", _normalize_frequencies(frequencies))
+        object.__setattr__(self, "bounds", _material_monitor_bounds(resolved_position, resolved_size))
+        object.__setattr__(self, "kind", "permittivity")
+
+
+@dataclass(frozen=True)
+class MediumMonitor:
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    frequencies: tuple[float, ...] | None
+    bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+    kind: str = "medium"
+
+    def __init__(self, name, position=(0.0, 0.0, 0.0), size=(0.0, 0.0, 0.0), frequencies=None):
+        resolved_position = _require_length3("position", position)
+        resolved_size = _require_nonnegative_length3("size", size)
+        object.__setattr__(self, "name", str(name))
+        object.__setattr__(self, "position", resolved_position)
+        object.__setattr__(self, "size", resolved_size)
+        object.__setattr__(self, "frequencies", _normalize_frequencies(frequencies))
+        object.__setattr__(self, "bounds", _material_monitor_bounds(resolved_position, resolved_size))
+        object.__setattr__(self, "kind", "medium")
+
+
 def _validate_time_sampling(start, stop, interval) -> tuple[int, int | None, int]:
     resolved_start = int(start)
     if resolved_start < 0:

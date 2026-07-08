@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from .monitors import ClosedSurfaceMonitor, FinitePlaneMonitor
+from .monitors import ClosedSurfaceMonitor, FinitePlaneMonitor, MediumMonitor, PermittivityMonitor
 from .scene import prepare_scene
 from .visualization import extract_orthogonal_slice, plot_slice_image
 
@@ -339,6 +339,122 @@ def _crop_plane_monitor_payload(payload: dict[str, Any], monitor: FinitePlaneMon
         selected["flux"] = flux
         selected["power"] = flux
     return selected
+
+
+def _material_monitor_axis_indices(coord: torch.Tensor, bounds: tuple[float, float]) -> torch.Tensor:
+    lower, upper = float(bounds[0]), float(bounds[1])
+    center = 0.5 * (lower + upper)
+    if abs(upper - lower) <= 1e-12:
+        nearest = int(torch.argmin(torch.abs(coord - center)).item())
+        return torch.tensor([nearest], device=coord.device, dtype=torch.long)
+    scale = max(abs(lower), abs(upper), float(torch.max(torch.abs(coord)).item()), 1.0)
+    tolerance = 1e-9 * scale
+    mask = (coord >= lower - tolerance) & (coord <= upper + tolerance)
+    indices = torch.nonzero(mask, as_tuple=False).reshape(-1)
+    if indices.numel() == 0:
+        nearest = int(torch.argmin(torch.abs(coord - center)).item())
+        return torch.tensor([nearest], device=coord.device, dtype=torch.long)
+    return indices.to(device=coord.device, dtype=torch.long)
+
+
+def _crop_material_grid(tensor: torch.Tensor, ix: torch.Tensor, iy: torch.Tensor, iz: torch.Tensor) -> torch.Tensor:
+    return tensor.index_select(0, ix).index_select(1, iy).index_select(2, iz)
+
+
+def _stack_material_frequencies(items: list[torch.Tensor]) -> torch.Tensor:
+    if len(items) == 1:
+        return items[0]
+    return torch.stack(items, dim=0)
+
+
+def _resolve_material_monitor_frequencies(
+    result: "Result",
+    monitor,
+    *,
+    frequency,
+    freq_index,
+) -> tuple[float, ...]:
+    if frequency is not None and freq_index is not None:
+        raise ValueError("Pass either frequency or freq_index, not both.")
+    if freq_index is not None:
+        index = _resolve_frequency_index(result.frequencies, freq_index=freq_index)
+        return (result.frequencies[index],)
+    if frequency is not None:
+        return (float(frequency),)
+    if monitor.frequencies is not None:
+        return tuple(float(freq) for freq in monitor.frequencies)
+    return tuple(result.frequencies)
+
+
+def _build_material_monitor_payload(result: "Result", monitor, *, frequency, freq_index):
+    prepared = result.prepared_scene
+    ix = _material_monitor_axis_indices(prepared.x, monitor.bounds[0])
+    iy = _material_monitor_axis_indices(prepared.y, monitor.bounds[1])
+    iz = _material_monitor_axis_indices(prepared.z, monitor.bounds[2])
+
+    eval_frequencies = _resolve_material_monitor_frequencies(
+        result,
+        monitor,
+        frequency=frequency,
+        freq_index=freq_index,
+    )
+    is_medium = isinstance(monitor, MediumMonitor)
+
+    eps_x_list, eps_y_list, eps_z_list = [], [], []
+    mu_x_list, mu_y_list, mu_z_list = [], [], []
+    for freq in eval_frequencies:
+        eps_components, mu_components = prepared.compile_material_components(frequency=freq)
+        eps_x_list.append(_crop_material_grid(eps_components["x"], ix, iy, iz))
+        eps_y_list.append(_crop_material_grid(eps_components["y"], ix, iy, iz))
+        eps_z_list.append(_crop_material_grid(eps_components["z"], ix, iy, iz))
+        if is_medium:
+            mu_x_list.append(_crop_material_grid(mu_components["x"], ix, iy, iz))
+            mu_y_list.append(_crop_material_grid(mu_components["y"], ix, iy, iz))
+            mu_z_list.append(_crop_material_grid(mu_components["z"], ix, iy, iz))
+
+    eps_x = _stack_material_frequencies(eps_x_list)
+    eps_y = _stack_material_frequencies(eps_y_list)
+    eps_z = _stack_material_frequencies(eps_z_list)
+
+    payload: dict[str, Any] = {
+        "kind": monitor.kind,
+        "monitor_type": monitor.kind,
+        "name": monitor.name,
+        "bounds": monitor.bounds,
+        "x": prepared.x.index_select(0, ix),
+        "y": prepared.y.index_select(0, iy),
+        "z": prepared.z.index_select(0, iz),
+        "eps_x": eps_x,
+        "eps_y": eps_y,
+        "eps_z": eps_z,
+        "eps": (eps_x + eps_y + eps_z) / 3.0,
+    }
+
+    if is_medium:
+        mu_x = _stack_material_frequencies(mu_x_list)
+        mu_y = _stack_material_frequencies(mu_y_list)
+        mu_z = _stack_material_frequencies(mu_z_list)
+        sigma_components = prepared.compile_materials()["sigma_e_components"]
+        sigma_x = _crop_material_grid(sigma_components["x"], ix, iy, iz)
+        sigma_y = _crop_material_grid(sigma_components["y"], ix, iy, iz)
+        sigma_z = _crop_material_grid(sigma_components["z"], ix, iy, iz)
+        # sigma_e is real and frequency-independent; broadcast it across evaluated frequencies.
+        sigma_x = _stack_material_frequencies([sigma_x] * len(eval_frequencies))
+        sigma_y = _stack_material_frequencies([sigma_y] * len(eval_frequencies))
+        sigma_z = _stack_material_frequencies([sigma_z] * len(eval_frequencies))
+        payload["mu_x"] = mu_x
+        payload["mu_y"] = mu_y
+        payload["mu_z"] = mu_z
+        payload["mu"] = (mu_x + mu_y + mu_z) / 3.0
+        payload["sigma_e_x"] = sigma_x
+        payload["sigma_e_y"] = sigma_y
+        payload["sigma_e_z"] = sigma_z
+        payload["sigma_e"] = (sigma_x + sigma_y + sigma_z) / 3.0
+
+    if len(eval_frequencies) == 1:
+        payload["frequency"] = eval_frequencies[0]
+    payload["frequencies"] = eval_frequencies
+    return payload
 
 
 def _build_closed_surface_payload(result: "Result", monitor: ClosedSurfaceMonitor, *, frequency, freq_index):
@@ -698,6 +814,8 @@ class Result:
         public_monitor = _find_scene_monitor(self.scene, name)
         if isinstance(public_monitor, ClosedSurfaceMonitor):
             return _build_closed_surface_payload(self, public_monitor, frequency=frequency, freq_index=freq_index)
+        if isinstance(public_monitor, (PermittivityMonitor, MediumMonitor)):
+            return _build_material_monitor_payload(self, public_monitor, frequency=frequency, freq_index=freq_index)
 
         if name not in self._monitors:
             raise KeyError(f"Monitor {name!r} is not available in this result.")

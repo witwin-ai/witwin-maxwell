@@ -137,6 +137,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - `FieldTimeMonitor` for raw time-domain FDTD field recording (point, plane, or volume region) with `start` / `stop` / `interval` sampling controls, returning the sample-time tensor `t` and per-component GPU buffers through `Result.monitor(...)`
 - `FluxTimeMonitor` for instantaneous time-domain Poynting flux (`E x H`) recorded on an axis-aligned plane with `start` / `stop` / `interval` sampling controls, returning the sample-time tensor `t` and the flux time series through `Result.monitor(...)`
 - Experimental `ModeMonitor` for first-class modal decomposition on an axis-aligned port plane, reusing the current `ModeSource` mode specification and returning forward / backward modal amplitudes and power through `Result.monitor(...)`
+- `PermittivityMonitor` and `MediumMonitor` for first-class point / plane / volume sampling of the compiled material properties (`eps`, plus `mu` and `sigma_e` for `MediumMonitor`), resolved from the compiled material tensors at result time through `Result.monitor(...)` without requesting any time stepping or extra DFT frequencies
 - Optional per-monitor `frequencies=` on plane and modal monitors / ports
 - Named monitor results returned through the unified `Result` object
 - Multi-component plane monitors with aggregated `Result.monitor(...)` payloads and collocated tangential grids for postprocessing workflows
