@@ -275,6 +275,12 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - `PlaneWave` export places the source inside the physical interior and uses Tidy3D's infinite-plane aperture convention instead of a finite rectangular source patch
 - Supported mappings: Domain, GridSpec, BoundarySpec (uniform or per-face PML/periodic/PEC/PMC/Bloch export), Structure (Box/Sphere/Cylinder/Cone), Material (simple conductive / Drude / Lorentz / Debye / mixed PoleResidue with `mu_r = 1`), PointDipole, PlaneWave, GaussianBeam, PointMonitor, PlaneMonitor, FinitePlaneMonitor, FluxMonitor, symmetry
 
+## GDS Adapter
+
+- `maxwell.adapters.gds.from_gds(path, layer=..., bounds=..., ...)` imports GDS layout polygons as `PolySlab` geometries with cell selection (explicit name or unique top-level cell), layer/datatype filtering, recursive reference flattening, extrusion parameters (`axis`, `bounds`, `sidewall_angle`, `reference_plane`), and unit conversion from the file's user unit to metres (overridable via `length_scale`)
+- `maxwell.adapters.gds.to_gds_file(geometries, path, ...)` writes `PolySlab` / `ComplexPolySlab` cross-sections as GDS polygons on a chosen layer/datatype (multi-loop geometry is even-odd merged so holes survive as keyhole cuts), with the library unit derived from `length_scale` (micrometre user units by default)
+- Adapter module at `maxwell/adapters/gds.py` with optional `gdstk` import
+
 ## Tidy3D Benchmarking
 
 - `benchmark/` package as the unified Maxwell-vs-Tidy3D benchmarking entrypoint
