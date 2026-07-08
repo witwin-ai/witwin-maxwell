@@ -4,11 +4,14 @@ import numpy as np
 
 from ..sources import (
     AstigmaticGaussianBeam,
+    CustomCurrentSource,
+    CustomFieldSource,
     GaussianBeam,
     ModeSource,
     PlaneWave,
     PointDipole,
     TFSF,
+    UniformCurrentSource,
     compile_source_time,
 )
 
@@ -128,6 +131,36 @@ def _compile_astigmatic_gaussian_beam(source: AstigmaticGaussianBeam, *, default
     }
 
 
+def _compile_uniform_current_source(source: UniformCurrentSource, *, default_frequency: float) -> dict:
+    return {
+        "kind": "uniform_current",
+        "name": source.name,
+        "center": source.center,
+        "size": source.size,
+        "polarization": source.polarization,
+        "source_time": compile_source_time(source.source_time, default_frequency=default_frequency),
+    }
+
+
+def _compile_custom_current_source(source: CustomCurrentSource, *, default_frequency: float) -> dict:
+    return {
+        "kind": "custom_current",
+        "name": source.name,
+        "dataset": source.current_dataset,
+        "source_time": compile_source_time(source.source_time, default_frequency=default_frequency),
+    }
+
+
+def _compile_custom_field_source(source: CustomFieldSource, *, default_frequency: float) -> dict:
+    return {
+        "kind": "custom_field",
+        "name": source.name,
+        "dataset": source.field_dataset,
+        "normal_axis": source.normal_axis,
+        "source_time": compile_source_time(source.source_time, default_frequency=default_frequency),
+    }
+
+
 def _compile_mode_source(source: ModeSource, *, default_frequency: float) -> dict:
     source_time = compile_source_time(source.source_time, default_frequency=default_frequency)
     if source_time["kind"] != "cw":
@@ -170,6 +203,12 @@ def compile_fdtd_sources(scene, *, default_frequency: float):
             compiled.append(_compile_gaussian_beam(source, default_frequency=default_frequency))
         elif isinstance(source, ModeSource):
             compiled.append(_compile_mode_source(source, default_frequency=default_frequency))
+        elif isinstance(source, UniformCurrentSource):
+            compiled.append(_compile_uniform_current_source(source, default_frequency=default_frequency))
+        elif isinstance(source, CustomCurrentSource):
+            compiled.append(_compile_custom_current_source(source, default_frequency=default_frequency))
+        elif isinstance(source, CustomFieldSource):
+            compiled.append(_compile_custom_field_source(source, default_frequency=default_frequency))
         else:
             raise ValueError(f"Unsupported FDTD source type: {type(source).__name__}")
     return compiled

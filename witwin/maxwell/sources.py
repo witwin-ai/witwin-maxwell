@@ -652,6 +652,163 @@ class AstigmaticGaussianBeam:
             raise ValueError("AstigmaticGaussianBeam injection must be 'soft' or TFSF(...).")
 
 
+_FIELD_DATASET_COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+_CURRENT_DATASET_COMPONENTS = ("Jx", "Jy", "Jz", "Mx", "My", "Mz")
+
+
+def _normalize_dataset(coords, components, *, allowed, dataset_name):
+    if len(coords) != 3:
+        raise ValueError(f"{dataset_name} coords must contain three (x, y, z) sample arrays.")
+    axes = []
+    for axis_name, values in zip("xyz", coords):
+        axis = np.asarray(values, dtype=np.float64).reshape(-1)
+        if axis.size < 1:
+            raise ValueError(f"{dataset_name} {axis_name}-coordinates must be non-empty.")
+        if axis.size >= 2 and np.any(np.diff(axis) <= 0.0):
+            raise ValueError(f"{dataset_name} {axis_name}-coordinates must be strictly increasing.")
+        axes.append(axis)
+    grid_shape = tuple(int(axis.size) for axis in axes)
+
+    if not isinstance(components, dict) or not components:
+        raise ValueError(f"{dataset_name} requires a non-empty component mapping.")
+    normalized = {}
+    for key, values in components.items():
+        if key not in allowed:
+            raise ValueError(f"{dataset_name} component {key!r} must be one of {allowed}.")
+        data = np.asarray(values, dtype=np.float64)
+        if data.shape != grid_shape:
+            raise ValueError(
+                f"{dataset_name} component {key!r} has shape {data.shape}; expected coords grid {grid_shape}."
+            )
+        normalized[key] = np.ascontiguousarray(data)
+    coord_tuple = tuple(tuple(float(v) for v in axis) for axis in axes)
+    return coord_tuple, normalized
+
+
+@dataclass(frozen=True)
+class FieldDataset:
+    """Tangential E/H field distribution sampled on a rectilinear region.
+
+    ``coords`` holds three strictly increasing 1D coordinate arrays (x, y, z).
+    ``components`` maps field names (``Ex``..``Hz``) to arrays of shape
+    ``(len(x), len(y), len(z))``. CustomFieldSource requires exactly one axis to
+    be a single sample so the region defines a plane with a well-defined normal.
+    """
+
+    coords: tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]
+    components: dict
+
+    def __init__(self, coords, components):
+        coord_tuple, normalized = _normalize_dataset(
+            coords, components, allowed=_FIELD_DATASET_COMPONENTS, dataset_name="FieldDataset"
+        )
+        object.__setattr__(self, "coords", coord_tuple)
+        object.__setattr__(self, "components", normalized)
+
+
+@dataclass(frozen=True)
+class CurrentDataset:
+    """Electric/magnetic current distribution sampled on a rectilinear region.
+
+    ``coords`` holds three strictly increasing 1D coordinate arrays (x, y, z).
+    ``components`` maps current names (``Jx``..``Mz``) to arrays of shape
+    ``(len(x), len(y), len(z))``.
+    """
+
+    coords: tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]
+    components: dict
+
+    def __init__(self, coords, components):
+        coord_tuple, normalized = _normalize_dataset(
+            coords, components, allowed=_CURRENT_DATASET_COMPONENTS, dataset_name="CurrentDataset"
+        )
+        object.__setattr__(self, "coords", coord_tuple)
+        object.__setattr__(self, "components", normalized)
+
+
+@dataclass(frozen=True)
+class UniformCurrentSource:
+    """Uniform additive electric current filling an axis-aligned box region."""
+
+    size: tuple[float, float, float]
+    polarization: tuple[float, float, float]
+    center: tuple[float, float, float]
+    source_time: SourceTime | None
+    name: str | None
+    kind: str = "uniform_current"
+
+    def __init__(
+        self,
+        size,
+        polarization="Ez",
+        source_time=None,
+        center=(0.0, 0.0, 0.0),
+        name=None,
+    ):
+        resolved_size = _require_length3("size", size)
+        if any(component < 0.0 for component in resolved_size):
+            raise ValueError("size components must be >= 0.")
+        object.__setattr__(self, "size", resolved_size)
+        object.__setattr__(self, "polarization", polarization_vector(polarization))
+        object.__setattr__(self, "center", _require_length3("center", center))
+        object.__setattr__(self, "source_time", source_time)
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "kind", "uniform_current")
+
+
+@dataclass(frozen=True)
+class CustomCurrentSource:
+    """Arbitrary volume electric (J) and magnetic (M) current distribution."""
+
+    current_dataset: CurrentDataset
+    source_time: SourceTime | None
+    name: str | None
+    kind: str = "custom_current"
+
+    def __init__(self, current_dataset, source_time=None, name=None):
+        if not isinstance(current_dataset, CurrentDataset):
+            raise TypeError("current_dataset must be a CurrentDataset instance.")
+        object.__setattr__(self, "current_dataset", current_dataset)
+        object.__setattr__(self, "source_time", source_time)
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "kind", "custom_current")
+
+
+@dataclass(frozen=True)
+class CustomFieldSource:
+    """Tangential E/H distribution on a plane injected as equivalent currents.
+
+    The provided tangential fields are converted into equivalent surface currents
+    ``J = n x H`` and ``M = -n x E`` on the plane (with normal ``n`` along the
+    single-sample dataset axis, pointing toward +normal) and injected additively.
+    """
+
+    field_dataset: FieldDataset
+    source_time: SourceTime | None
+    name: str | None
+    kind: str = "custom_field"
+
+    def __init__(self, field_dataset, source_time=None, name=None):
+        if not isinstance(field_dataset, FieldDataset):
+            raise TypeError("field_dataset must be a FieldDataset instance.")
+        normal_axes = [axis for axis, values in zip("xyz", field_dataset.coords) if len(values) == 1]
+        if len(normal_axes) != 1:
+            raise ValueError(
+                "CustomFieldSource requires exactly one single-sample dataset axis to define the plane normal."
+            )
+        object.__setattr__(self, "field_dataset", field_dataset)
+        object.__setattr__(self, "source_time", source_time)
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "kind", "custom_field")
+
+    @property
+    def normal_axis(self) -> str:
+        for axis, values in zip("xyz", self.field_dataset.coords):
+            if len(values) == 1:
+                return axis
+        raise ValueError("CustomFieldSource dataset does not define a plane normal.")
+
+
 @dataclass(frozen=True)
 class ModeSource:
     position: tuple[float, float, float]

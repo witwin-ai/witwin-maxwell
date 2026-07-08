@@ -284,6 +284,252 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                 )
 
 
+_UNIFORM_CURRENT_COMPONENTS = (("Ex", 0), ("Ey", 1), ("Ez", 2))
+_CURRENT_ELECTRIC_MAP = {"Jx": "Ex", "Jy": "Ey", "Jz": "Ez"}
+_CURRENT_MAGNETIC_MAP = {"Mx": "Hx", "My": "Hy", "Mz": "Hz"}
+# Equivalent surface currents for a plane with outward normal +axis:
+# electric current J = n x H feeds the tangential E components; magnetic
+# current M = -n x E feeds the tangential H components. Each entry is
+# (target_field, source_component, sign).
+_CUSTOM_FIELD_CURRENT_MAP = {
+    "x": {
+        "electric": (("Ey", "Hz", -1.0), ("Ez", "Hy", 1.0)),
+        "magnetic": (("Hy", "Ez", 1.0), ("Hz", "Ey", -1.0)),
+    },
+    "y": {
+        "electric": (("Ex", "Hz", 1.0), ("Ez", "Hx", -1.0)),
+        "magnetic": (("Hx", "Ez", -1.0), ("Hz", "Ex", 1.0)),
+    },
+    "z": {
+        "electric": (("Ex", "Hy", -1.0), ("Ey", "Hx", 1.0)),
+        "magnetic": (("Hx", "Ey", 1.0), ("Hy", "Ex", -1.0)),
+    },
+}
+
+
+def _region_index_range(solver, field_name, lo, hi):
+    x0, _, y0, _, z0, _ = solver.scene.domain_range
+    origins = (x0, y0, z0)
+    steps = (solver.dx, solver.dy, solver.dz)
+    sizes = tuple(int(dim) for dim in getattr(solver, field_name).shape)
+    start = []
+    stop = []
+    for axis in range(3):
+        lo_index = max(0, int((lo[axis] - origins[axis]) / steps[axis]))
+        hi_index = min(sizes[axis], int((hi[axis] - origins[axis]) / steps[axis]) + 1)
+        start.append(int(lo_index))
+        stop.append(int(hi_index))
+    return tuple(start), tuple(stop)
+
+
+def _prepare_uniform_current_source(solver, source, *, source_index):
+    center = source["center"]
+    size = source["size"]
+    lo = tuple(center[axis] - 0.5 * size[axis] for axis in range(3))
+    hi = tuple(center[axis] + 0.5 * size[axis] for axis in range(3))
+    source_time = source["source_time"]
+    source_omega = 2.0 * np.pi * float(source_time["frequency"])
+    polarization = source["polarization"]
+
+    for field_name, axis in _UNIFORM_CURRENT_COMPONENTS:
+        pol_component = float(polarization[axis])
+        if np.isclose(pol_component, 0.0):
+            continue
+        start, stop = _region_index_range(solver, field_name, lo, hi)
+        if any(stop[a] <= start[a] for a in range(3)):
+            continue
+        field_eps = getattr(solver, f"eps_{field_name}")
+        eps_slice = field_eps[start[0]:stop[0], start[1]:stop[1], start[2]:stop[2]]
+        source_patch = (-solver.dt * pol_component / eps_slice)
+        append_source_term(
+            solver._source_terms,
+            solver,
+            field_name=field_name,
+            offsets=start,
+            patch=source_patch,
+            source_index=source_index,
+            source_time=source_time,
+            omega=source_omega,
+        )
+
+
+def _axis_interp_weights(coords, query):
+    count = int(coords.numel())
+    if count == 1:
+        index = torch.zeros_like(query, dtype=torch.long)
+        return index, index, torch.zeros_like(query)
+    upper = torch.searchsorted(coords, query.contiguous(), right=True).clamp(1, count - 1)
+    lower = upper - 1
+    lower_coord = coords[lower]
+    upper_coord = coords[upper]
+    fraction = (query - lower_coord) / (upper_coord - lower_coord)
+    return lower, upper, fraction.clamp(0.0, 1.0)
+
+
+def _trilinear_sample(values, axes, positions):
+    x = positions[..., 0]
+    y = positions[..., 1]
+    z = positions[..., 2]
+    ix0, ix1, wx = _axis_interp_weights(axes[0], x)
+    iy0, iy1, wy = _axis_interp_weights(axes[1], y)
+    iz0, iz1, wz = _axis_interp_weights(axes[2], z)
+
+    def gather(i, j, k):
+        return values[i, j, k]
+
+    c00 = gather(ix0, iy0, iz0) * (1.0 - wz) + gather(ix0, iy0, iz1) * wz
+    c01 = gather(ix0, iy1, iz0) * (1.0 - wz) + gather(ix0, iy1, iz1) * wz
+    c10 = gather(ix1, iy0, iz0) * (1.0 - wz) + gather(ix1, iy0, iz1) * wz
+    c11 = gather(ix1, iy1, iz0) * (1.0 - wz) + gather(ix1, iy1, iz1) * wz
+    c0 = c00 * (1.0 - wy) + c01 * wy
+    c1 = c10 * (1.0 - wy) + c11 * wy
+    return c0 * (1.0 - wx) + c1 * wx
+
+
+def _dataset_inside_mask(axes, positions):
+    mask = torch.ones(positions.shape[:-1], dtype=torch.bool, device=positions.device)
+    for index, coords in enumerate(axes):
+        if int(coords.numel()) > 1:
+            query = positions[..., index]
+            mask = mask & (query >= coords[0]) & (query <= coords[-1])
+    return mask
+
+
+def _dataset_axes_tensors(solver, dataset):
+    return tuple(
+        torch.tensor(axis, device=solver.device, dtype=solver.Ex.dtype)
+        for axis in dataset.coords
+    )
+
+
+def _dataset_region_bounds(dataset):
+    lo = tuple(float(axis[0]) for axis in dataset.coords)
+    hi = tuple(float(axis[-1]) for axis in dataset.coords)
+    return lo, hi
+
+
+def _append_interpolated_current(
+    solver,
+    *,
+    field_name,
+    values,
+    axes,
+    denom_tensor,
+    region_lo,
+    region_hi,
+    source_time,
+    source_omega,
+    source_index,
+    term_list,
+):
+    start, stop = _region_index_range(solver, field_name, region_lo, region_hi)
+    if any(stop[a] <= start[a] for a in range(3)):
+        return
+    shape = tuple(stop[a] - start[a] for a in range(3))
+    positions = solver._component_positions(field_name, start, shape, dtype=solver.Ex.dtype)
+    sampled = _trilinear_sample(values, axes, positions)
+    sampled = sampled * _dataset_inside_mask(axes, positions).to(sampled.dtype)
+    if torch.max(torch.abs(sampled)).item() <= 1e-30:
+        return
+    denom_slice = denom_tensor[start[0]:stop[0], start[1]:stop[1], start[2]:stop[2]]
+    source_patch = (-solver.dt / denom_slice) * sampled
+    append_source_term(
+        term_list,
+        solver,
+        field_name=field_name,
+        offsets=start,
+        patch=source_patch,
+        source_index=source_index,
+        source_time=source_time,
+        omega=source_omega,
+    )
+
+
+def _prepare_custom_current_source(solver, source, *, source_index):
+    dataset = source["dataset"]
+    source_time = source["source_time"]
+    source_omega = 2.0 * np.pi * float(source_time["frequency"])
+    axes = _dataset_axes_tensors(solver, dataset)
+    region_lo, region_hi = _dataset_region_bounds(dataset)
+
+    for key, array in dataset.components.items():
+        values = torch.tensor(array, device=solver.device, dtype=solver.Ex.dtype)
+        if key in _CURRENT_ELECTRIC_MAP:
+            field_name = _CURRENT_ELECTRIC_MAP[key]
+            denom_tensor = getattr(solver, f"eps_{field_name}")
+            term_list = solver._source_terms
+        else:
+            field_name = _CURRENT_MAGNETIC_MAP[key]
+            denom_tensor = getattr(solver, f"mu_{field_name}")
+            term_list = solver._magnetic_source_terms
+        _append_interpolated_current(
+            solver,
+            field_name=field_name,
+            values=values,
+            axes=axes,
+            denom_tensor=denom_tensor,
+            region_lo=region_lo,
+            region_hi=region_hi,
+            source_time=source_time,
+            source_omega=source_omega,
+            source_index=source_index,
+            term_list=term_list,
+        )
+
+
+def _prepare_custom_field_source(solver, source, *, source_index):
+    dataset = source["dataset"]
+    normal_axis = source["normal_axis"]
+    normal_step = {"x": solver.dx, "y": solver.dy, "z": solver.dz}[normal_axis]
+    source_time = source["source_time"]
+    source_omega = 2.0 * np.pi * float(source_time["frequency"])
+    axes = _dataset_axes_tensors(solver, dataset)
+    region_lo, region_hi = _dataset_region_bounds(dataset)
+    mapping = _CUSTOM_FIELD_CURRENT_MAP[normal_axis]
+
+    for target_field, source_component, sign in mapping["electric"]:
+        if source_component not in dataset.components:
+            continue
+        # J_s = n x H, converted to a one-cell-thick volume current (divide by dn).
+        values = (float(sign) / normal_step) * torch.tensor(
+            dataset.components[source_component], device=solver.device, dtype=solver.Ex.dtype
+        )
+        _append_interpolated_current(
+            solver,
+            field_name=target_field,
+            values=values,
+            axes=axes,
+            denom_tensor=getattr(solver, f"eps_{target_field}"),
+            region_lo=region_lo,
+            region_hi=region_hi,
+            source_time=source_time,
+            source_omega=source_omega,
+            source_index=source_index,
+            term_list=solver._source_terms,
+        )
+
+    for target_field, source_component, sign in mapping["magnetic"]:
+        if source_component not in dataset.components:
+            continue
+        # M_s = -n x E, converted to a one-cell-thick volume current (divide by dn).
+        values = (float(sign) / normal_step) * torch.tensor(
+            dataset.components[source_component], device=solver.device, dtype=solver.Ex.dtype
+        )
+        _append_interpolated_current(
+            solver,
+            field_name=target_field,
+            values=values,
+            axes=axes,
+            denom_tensor=getattr(solver, f"mu_{target_field}"),
+            region_lo=region_lo,
+            region_hi=region_hi,
+            source_time=source_time,
+            source_omega=source_omega,
+            source_index=source_index,
+            term_list=solver._magnetic_source_terms,
+        )
+
+
 def _prepare_surface_source(solver, source, *, source_index):
     if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
         raise NotImplementedError(
@@ -591,6 +837,15 @@ def initialize_source_terms(solver):
             continue
         if source["kind"] == "plane_wave":
             _prepare_plane_wave_surface_source(solver, source, source_index=source_index)
+            continue
+        if source["kind"] == "uniform_current":
+            _prepare_uniform_current_source(solver, source, source_index=source_index)
+            continue
+        if source["kind"] == "custom_current":
+            _prepare_custom_current_source(solver, source, source_index=source_index)
+            continue
+        if source["kind"] == "custom_field":
+            _prepare_custom_field_source(solver, source, source_index=source_index)
             continue
         _prepare_surface_source(solver, source, source_index=source_index)
 

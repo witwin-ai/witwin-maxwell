@@ -18,8 +18,12 @@ from .result import Result
 from .scene import BoundaryKind, BoundarySpec, Domain, GridSpec, MaterialRegion, Scene, SceneModule
 from .sources import (
     AstigmaticGaussianBeam,
+    CurrentDataset,
+    CustomCurrentSource,
+    CustomFieldSource,
     CustomSourceTime,
     CW,
+    FieldDataset,
     GaussianBeam,
     GaussianPulse,
     ModeSource,
@@ -27,6 +31,7 @@ from .sources import (
     PointDipole,
     RickerWavelet,
     TFSF,
+    UniformCurrentSource,
 )
 from .simulation import (
     AbsorberKind,
@@ -48,6 +53,9 @@ __all__ = [
     "Box",
     "ClosedSurfaceMonitor",
     "Cone",
+    "CurrentDataset",
+    "CustomCurrentSource",
+    "CustomFieldSource",
     "CW",
     "CustomSourceTime",
     "Cylinder",
@@ -55,6 +63,7 @@ __all__ = [
     "Domain",
     "DrudePole",
     "Ellipsoid",
+    "FieldDataset",
     "FieldTimeMonitor",
     "FluxMonitor",
     "FluxTimeMonitor",
@@ -96,6 +105,7 @@ __all__ = [
     "TimeConfig",
     "TFSF",
     "Torus",
+    "UniformCurrentSource",
     "DiagonalTensor3",
     "AbsorberKind",
     "run",
