@@ -304,6 +304,27 @@ def _source_time_kind_code(source_time) -> int:
     return int(source_time["kind_code"])
 
 
+def _custom_source_time_tensor(source_time, sample_time: torch.Tensor) -> torch.Tensor:
+    amplitude = float(source_time["amplitude"])
+    times = source_time.get("times")
+    if times is None:
+        raise NotImplementedError(
+            "Callable CustomSourceTime(fn) is not supported in the FDTD adjoint; "
+            "provide a sampled (times, amplitudes) table instead."
+        )
+    xp = sample_time.new_tensor(times)
+    fp = sample_time.new_tensor(source_time["amplitudes"])
+    upper = torch.searchsorted(xp, sample_time, right=True).clamp(1, xp.numel() - 1)
+    lower = upper - 1
+    x0 = xp[lower]
+    x1 = xp[upper]
+    weight = (sample_time - x0) / (x1 - x0)
+    interpolated = fp[lower] + weight * (fp[upper] - fp[lower])
+    inside = (sample_time >= xp[0]) & (sample_time <= xp[-1])
+    interpolated = torch.where(inside, interpolated, torch.zeros_like(interpolated))
+    return amplitude * interpolated
+
+
 def _evaluate_source_time_tensor(source_time, sample_time: torch.Tensor) -> torch.Tensor:
     kind_code = _source_time_kind_code(source_time)
     two_pi = 2.0 * math.pi
@@ -311,6 +332,9 @@ def _evaluate_source_time_tensor(source_time, sample_time: torch.Tensor) -> torc
     frequency = float(source_time["frequency"])
     phase = float(source_time.get("phase", 0.0))
     delay = float(source_time.get("delay", 0.0))
+
+    if kind_code == 3:
+        return _custom_source_time_tensor(source_time, sample_time)
 
     if kind_code == 0:
         return amplitude * torch.cos(two_pi * frequency * sample_time + phase)

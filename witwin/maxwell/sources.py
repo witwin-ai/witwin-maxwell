@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+import numpy as np
+
 
 SOURCE_TIME_KIND_CW = 0
 SOURCE_TIME_KIND_GAUSSIAN_PULSE = 1
 SOURCE_TIME_KIND_RICKER_WAVELET = 2
+SOURCE_TIME_KIND_CUSTOM = 3
 POINT_DIPOLE_REFERENCE_WIDTH = 0.02
 POINT_DIPOLE_IDEAL_PROFILE_SCALE = 0.75
 
@@ -242,7 +245,117 @@ class RickerWavelet:
         return float(self.delay) + 4.0 / max(self.frequency, 1e-30)
 
 
-SourceTime = CW | GaussianPulse | RickerWavelet
+def _table_characteristic_frequency(times: np.ndarray, amplitudes: np.ndarray) -> float:
+    spacing = np.diff(times)
+    mean_dt = float(np.mean(spacing))
+    if mean_dt <= 0.0:
+        return 0.0
+    spectrum = np.abs(np.fft.rfft(amplitudes))
+    freqs = np.fft.rfftfreq(times.size, d=mean_dt)
+    if spectrum.size <= 1:
+        return 0.0
+    peak_index = int(np.argmax(spectrum[1:]) + 1)
+    return float(freqs[peak_index])
+
+
+@dataclass(frozen=True)
+class CustomSourceTime:
+    """Arbitrary temporal waveform.
+
+    Construct either from a sampled table ``CustomSourceTime(times, amplitudes)``
+    or from a callable ``CustomSourceTime(fn)``. The signal is evaluated on the
+    solver time grid ``n * dt`` through the Python scalar injection path, so the
+    native CUDA time-shifted kernel is not involved.
+    """
+
+    times: tuple[float, ...] | None = None
+    amplitudes: tuple[float, ...] | None = None
+    amplitude: float = 1.0
+    kind: str = "custom"
+
+    def __init__(self, times=None, amplitudes=None, *, amplitude=1.0, characteristic_frequency=None):
+        fn = None
+        table_times = None
+        table_amplitudes = None
+        if callable(times):
+            if amplitudes is not None:
+                raise ValueError("CustomSourceTime(fn) does not accept a second positional argument.")
+            if characteristic_frequency is None:
+                raise ValueError("CustomSourceTime(fn) requires characteristic_frequency.")
+            fn = times
+            char_freq = _validate_frequency("characteristic_frequency", characteristic_frequency)
+            settling_time = 0.0
+            delay = 0.0
+        else:
+            if times is None or amplitudes is None:
+                raise ValueError("CustomSourceTime requires either fn or (times, amplitudes).")
+            table_times = np.asarray(times, dtype=np.float64)
+            table_amplitudes = np.asarray(amplitudes, dtype=np.float64)
+            if table_times.ndim != 1 or table_amplitudes.ndim != 1:
+                raise ValueError("times and amplitudes must be one-dimensional.")
+            if table_times.shape != table_amplitudes.shape:
+                raise ValueError("times and amplitudes must have the same length.")
+            if table_times.size < 2:
+                raise ValueError("times and amplitudes must contain at least two samples.")
+            order = np.argsort(table_times)
+            table_times = np.ascontiguousarray(table_times[order])
+            table_amplitudes = np.ascontiguousarray(table_amplitudes[order])
+            if characteristic_frequency is None:
+                char_freq = _table_characteristic_frequency(table_times, table_amplitudes)
+            else:
+                char_freq = float(characteristic_frequency)
+            delay = float(table_times[0])
+            settling_time = float(table_times[-1])
+
+        object.__setattr__(self, "times", None if table_times is None else tuple(float(v) for v in table_times))
+        object.__setattr__(
+            self, "amplitudes", None if table_amplitudes is None else tuple(float(v) for v in table_amplitudes)
+        )
+        object.__setattr__(self, "amplitude", _validate_amplitude(amplitude))
+        object.__setattr__(self, "kind", "custom")
+        object.__setattr__(self, "_fn", fn)
+        object.__setattr__(self, "_table_times", table_times)
+        object.__setattr__(self, "_table_amplitudes", table_amplitudes)
+        object.__setattr__(self, "_characteristic_frequency", char_freq)
+        object.__setattr__(self, "_delay", delay)
+        object.__setattr__(self, "_settling_time", settling_time)
+
+    @property
+    def fn(self):
+        return self._fn
+
+    def evaluate(self, t: float) -> float:
+        if self._fn is not None:
+            return float(self.amplitude) * float(self._fn(float(t)))
+        value = np.interp(float(t), self._table_times, self._table_amplitudes, left=0.0, right=0.0)
+        return float(self.amplitude) * float(value)
+
+    @property
+    def frequency(self) -> float:
+        return float(self._characteristic_frequency)
+
+    @property
+    def characteristic_frequency(self) -> float:
+        return float(self._characteristic_frequency)
+
+    @property
+    def phase(self) -> float:
+        return 0.0
+
+    @property
+    def fwidth(self) -> float:
+        return 0.0
+
+    @property
+    def delay(self) -> float:
+        return float(self._delay)
+
+    @property
+    def settling_time(self) -> float:
+        return float(self._settling_time)
+
+
+SourceTime = CW | GaussianPulse | RickerWavelet | CustomSourceTime
 
 
 @dataclass(frozen=True)
@@ -296,12 +409,12 @@ Injection = str | TFSF
 def resolve_source_time(source_time: SourceTime | None, *, default_frequency: float) -> SourceTime:
     if source_time is None:
         return CW(frequency=default_frequency)
-    if not isinstance(source_time, (CW, GaussianPulse, RickerWavelet)):
-        raise TypeError("source_time must be CW, GaussianPulse, RickerWavelet, or None.")
+    if not isinstance(source_time, (CW, GaussianPulse, RickerWavelet, CustomSourceTime)):
+        raise TypeError("source_time must be CW, GaussianPulse, RickerWavelet, CustomSourceTime, or None.")
     return source_time
 
 
-def compile_source_time(source_time: SourceTime | None, *, default_frequency: float) -> dict[str, float | int | str]:
+def compile_source_time(source_time: SourceTime | None, *, default_frequency: float) -> dict[str, object]:
     resolved = resolve_source_time(source_time, default_frequency=default_frequency)
     if isinstance(resolved, CW):
         return {
@@ -327,6 +440,21 @@ def compile_source_time(source_time: SourceTime | None, *, default_frequency: fl
             "characteristic_frequency": float(resolved.characteristic_frequency),
             "settling_time": float(resolved.settling_time),
         }
+    if isinstance(resolved, CustomSourceTime):
+        return {
+            "kind": "custom",
+            "kind_code": SOURCE_TIME_KIND_CUSTOM,
+            "frequency": float(resolved.characteristic_frequency),
+            "fwidth": 0.0,
+            "amplitude": float(resolved.amplitude),
+            "phase": 0.0,
+            "delay": float(resolved.delay),
+            "characteristic_frequency": float(resolved.characteristic_frequency),
+            "settling_time": float(resolved.settling_time),
+            "fn": resolved.fn,
+            "times": None if resolved.times is None else resolved.times,
+            "amplitudes": None if resolved.amplitudes is None else resolved.amplitudes,
+        }
     return {
         "kind": "ricker_wavelet",
         "kind_code": SOURCE_TIME_KIND_RICKER_WAVELET,
@@ -347,6 +475,14 @@ def evaluate_source_time(source_time: SourceTime | dict[str, float | int | str],
         amplitude = float(source_time["amplitude"])
         phase = float(source_time.get("phase", 0.0))
         delay = float(source_time.get("delay", 0.0))
+        if kind == "custom":
+            fn = source_time.get("fn")
+            if fn is not None:
+                return amplitude * float(fn(float(t)))
+            table_times = source_time["times"]
+            table_amplitudes = source_time["amplitudes"]
+            value = np.interp(float(t), table_times, table_amplitudes, left=0.0, right=0.0)
+            return amplitude * float(value)
         if kind == "cw":
             return amplitude * math.cos(2.0 * math.pi * frequency * float(t) + phase)
         if kind == "gaussian_pulse":

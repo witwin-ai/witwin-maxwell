@@ -67,6 +67,15 @@ def _compile_point_dipole(source: PointDipole, *, default_frequency: float) -> d
     }
 
 
+def _reject_custom_source_time(source_time: dict, *, source_kind: str) -> dict:
+    if source_time["kind"] == "custom":
+        raise ValueError(
+            f"{source_kind} does not support CustomSourceTime; it requires the native time-shifted "
+            "injection kernel. Use PointDipole for arbitrary custom waveforms."
+        )
+    return source_time
+
+
 def _compile_plane_wave(source: PlaneWave, *, default_frequency: float) -> dict:
     return {
         "kind": "plane_wave",
@@ -75,7 +84,10 @@ def _compile_plane_wave(source: PlaneWave, *, default_frequency: float) -> dict:
         "polarization": source.polarization,
         "injection": _compile_injection(source.injection),
         "injection_axis": source.injection_axis,
-        "source_time": compile_source_time(source.source_time, default_frequency=default_frequency),
+        "source_time": _reject_custom_source_time(
+            compile_source_time(source.source_time, default_frequency=default_frequency),
+            source_kind="PlaneWave",
+        ),
     }
 
 
@@ -89,7 +101,10 @@ def _compile_gaussian_beam(source: GaussianBeam, *, default_frequency: float) ->
         "focus": source.focus,
         "injection": _compile_injection(source.injection),
         "injection_axis": source.injection_axis,
-        "source_time": compile_source_time(source.source_time, default_frequency=default_frequency),
+        "source_time": _reject_custom_source_time(
+            compile_source_time(source.source_time, default_frequency=default_frequency),
+            source_kind="GaussianBeam",
+        ),
     }
 
 
@@ -106,7 +121,10 @@ def _compile_astigmatic_gaussian_beam(source: AstigmaticGaussianBeam, *, default
         "focus_v": source.focus_v,
         "injection": _compile_injection(source.injection),
         "injection_axis": source.injection_axis,
-        "source_time": compile_source_time(source.source_time, default_frequency=default_frequency),
+        "source_time": _reject_custom_source_time(
+            compile_source_time(source.source_time, default_frequency=default_frequency),
+            source_kind="AstigmaticGaussianBeam",
+        ),
     }
 
 

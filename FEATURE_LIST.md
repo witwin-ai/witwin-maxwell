@@ -77,6 +77,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 ## Sources
 
 - `CW`, `GaussianPulse`, and `RickerWavelet` source-time definitions
+- `CustomSourceTime` arbitrary temporal waveform from a sampled `(times, amplitudes)` table or a callable `fn`, evaluated on the solver time grid through the Python scalar injection path (no CUDA kernel change)
 - `PointDipole` source definition with `source_time` and selectable `profile="gaussian"|"ideal"`
 - `PointDipole`, `ModeSource`, `ModeMonitor`, and `ModePort` use `position=...` as the public spatial-location argument
 - `PointDipole` width compensation keeps narrow-source injected strength consistent with the default regularization width in FDTD/FDFD workflows
@@ -315,3 +316,4 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - First-class closed-surface postprocessing currently requires a homogeneous exterior medium immediately outside every face; layered or otherwise inhomogeneous exteriors are rejected explicitly
 - Closed-surface validation currently covers axis-aligned planar faces, including rectangular Huygens boxes and non-rectangular orthogonal polyhedra; curved/non-planar closed surfaces still need a separate workflow and validation path
 - Benchmark soft-plane-wave absolute calibration still needs separate validation/debugging and remains a known open correctness issue
+- `CustomSourceTime` v1 is limited to the Python scalar soft/uniform injection path: it is supported on `PointDipole` but rejected on `PlaneWave`, `GaussianBeam`, `AstigmaticGaussianBeam` (which require the native time-shifted kernel), and on `ModeSource` (CW-only); callable `fn` waveforms need an explicit `characteristic_frequency` and are not supported in the FDTD adjoint (only sampled `(times, amplitudes)` tables are), and custom-waveform samples are not differentiable

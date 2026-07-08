@@ -18,6 +18,7 @@ from .result import Result
 from .scene import BoundaryKind, BoundarySpec, Domain, GridSpec, MaterialRegion, Scene, SceneModule
 from .sources import (
     AstigmaticGaussianBeam,
+    CustomSourceTime,
     CW,
     GaussianBeam,
     GaussianPulse,
@@ -48,6 +49,7 @@ __all__ = [
     "ClosedSurfaceMonitor",
     "Cone",
     "CW",
+    "CustomSourceTime",
     "Cylinder",
     "DebyePole",
     "Domain",
