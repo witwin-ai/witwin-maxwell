@@ -16,7 +16,7 @@ from witwin.maxwell.fdtd.adjoint import core as adjoint_core
 from witwin.maxwell.fdtd.adjoint.dispatch import reverse_step, resolve_fdtd_adjoint_backend_name
 from witwin.maxwell.fdtd.boundary import BOUNDARY_NONE, BOUNDARY_PEC
 from witwin.maxwell.fdtd.checkpoint import checkpoint_schema
-from witwin.maxwell.fdtd.cuda import backend
+from tests.fdtd.cuda._parity_backend import backend
 from witwin.maxwell.fdtd.cuda import get_compiled_extension
 
 

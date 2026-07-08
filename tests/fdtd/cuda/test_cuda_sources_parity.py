@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from witwin.maxwell.fdtd.cuda import backend
+from tests.fdtd.cuda import torch_reference
 
 
 pytestmark = [
@@ -210,9 +211,8 @@ def test_compiled_cuda_extension_uniform_cw_and_time_shifted_sources_match_torch
     expected = torch.zeros((5, 6, 5), device="cuda", dtype=torch.float32)
     actual = torch.zeros_like(expected)
 
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
-    backend._add_source_patch(field=expected, sourcePatch=patch, offsetI=1, offsetJ=2, offsetK=1, signal=0.7)
-    backend._add_cw_phased_source_patch(
+    torch_reference._add_source_patch(field=expected, sourcePatch=patch, offsetI=1, offsetJ=2, offsetK=1, signal=0.7)
+    torch_reference._add_cw_phased_source_patch(
         field=expected,
         sourcePatchCos=patch,
         sourcePatchSin=patch_sin,
@@ -222,7 +222,7 @@ def test_compiled_cuda_extension_uniform_cw_and_time_shifted_sources_match_torch
         signalCos=0.25,
         signalSin=-0.5,
     )
-    backend._add_time_shifted_source_patch(
+    torch_reference._add_time_shifted_source_patch(
         field=expected,
         sourcePatch=patch,
         delayPatch=delay_patch,
@@ -239,8 +239,8 @@ def test_compiled_cuda_extension_uniform_cw_and_time_shifted_sources_match_torch
         delay=0.1,
         causalGate=1,
     )
-    backend._add_source_patch(field=expected, sourcePatch=patch, offsetI=-1, offsetJ=4, offsetK=1, signal=-0.3)
-    backend._add_cw_phased_source_patch(
+    torch_reference._add_source_patch(field=expected, sourcePatch=patch, offsetI=-1, offsetJ=4, offsetK=1, signal=-0.3)
+    torch_reference._add_cw_phased_source_patch(
         field=expected,
         sourcePatchCos=patch,
         sourcePatchSin=patch_sin,
@@ -250,7 +250,7 @@ def test_compiled_cuda_extension_uniform_cw_and_time_shifted_sources_match_torch
         signalCos=-0.4,
         signalSin=0.15,
     )
-    backend._add_time_shifted_source_patch(
+    torch_reference._add_time_shifted_source_patch(
         field=expected,
         sourcePatch=patch,
         delayPatch=delay_patch,
@@ -268,7 +268,6 @@ def test_compiled_cuda_extension_uniform_cw_and_time_shifted_sources_match_torch
         causalGate=1,
     )
 
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
     backend._add_source_patch(field=actual, sourcePatch=patch, offsetI=1, offsetJ=2, offsetK=1, signal=0.7)
     backend._add_cw_phased_source_patch(
         field=actual,
@@ -352,15 +351,13 @@ def test_compiled_cuda_extension_periodic_sources_apply_face_and_corner_duplicat
     _assert_methods(real_extension, (method_name,))
     counted = _CountingExtension(real_extension, (method_name,))
     monkeypatch.setattr(backend, "_COMPILED_EXTENSION", counted)
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
 
     patch = torch.arange(1, math.prod(patch_shape) + 1, device="cuda", dtype=torch.float32).reshape(patch_shape)
     expected = _periodic_expected(shape, patch, offsets, 0.5, axes)
     fallback = torch.zeros(shape, device="cuda", dtype=torch.float32)
     actual = torch.zeros(shape, device="cuda", dtype=torch.float32)
 
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
-    backend._add_source_patch_periodic(
+    torch_reference._add_source_patch_periodic(
         **{field_name: fallback},
         sourcePatch=patch,
         offsetI=offsets[0],
@@ -373,7 +370,6 @@ def test_compiled_cuda_extension_periodic_sources_apply_face_and_corner_duplicat
     torch.cuda.synchronize()
     torch.testing.assert_close(fallback, expected, rtol=0.0, atol=0.0)
 
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
     backend._add_source_patch_periodic(
         **{field_name: actual},
         sourcePatch=patch,
@@ -397,7 +393,6 @@ def test_compiled_cuda_extension_bloch_sources_apply_phase_to_faces_and_corners(
     _assert_methods(real_extension, (method_name,))
     counted = _CountingExtension(real_extension, (method_name,))
     monkeypatch.setattr(backend, "_COMPILED_EXTENSION", counted)
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
 
     shape = (2, 2, 2)
     patch = torch.arange(1, 9, device="cuda", dtype=torch.float32).reshape(shape)
@@ -408,8 +403,7 @@ def test_compiled_cuda_extension_bloch_sources_apply_phase_to_faces_and_corners(
     signal = (0.7, -0.2)
     expected = _bloch_expected(shape, patch, (0, 0, 0), signal, axis_code, phase_a, phase_b)
 
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
-    backend._add_source_patch_bloch(
+    torch_reference._add_source_patch_bloch(
         ExReal=fallback_fields[0],
         ExImag=fallback_fields[1],
         EyReal=fallback_fields[2],
@@ -432,7 +426,6 @@ def test_compiled_cuda_extension_bloch_sources_apply_phase_to_faces_and_corners(
     fallback_complex = torch.complex(fallback_fields[2 * axis_code], fallback_fields[2 * axis_code + 1])
     torch.testing.assert_close(fallback_complex, expected, rtol=2.0e-6, atol=2.0e-6)
 
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
     backend._add_source_patch_bloch(
         ExReal=fields[0],
         ExImag=fields[1],
@@ -493,8 +486,7 @@ def test_compiled_cuda_extension_bloch_sources_respect_wrap_axis_flags(monkeypat
         wrapAxisA=1,
         wrapAxisB=0,
     )
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
-    backend._add_source_patch_bloch(
+    torch_reference._add_source_patch_bloch(
         ExReal=fallback_fields[0],
         ExImag=fallback_fields[1],
         EyReal=fallback_fields[2],
@@ -507,7 +499,6 @@ def test_compiled_cuda_extension_bloch_sources_respect_wrap_axis_flags(monkeypat
     fallback_complex = torch.complex(fallback_fields[0], fallback_fields[1])
     torch.testing.assert_close(fallback_complex, expected, rtol=2.0e-6, atol=2.0e-6)
 
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
     backend._add_source_patch_bloch(
         ExReal=fields[0],
         ExImag=fields[1],
@@ -519,8 +510,7 @@ def test_compiled_cuda_extension_bloch_sources_respect_wrap_axis_flags(monkeypat
     )
     torch.cuda.synchronize()
 
-    expected_extension_calls = 1 if backend._compiled_bloch_source_accepts_wrap_flags(counted) else 0
-    assert counted.calls[method_name] == expected_extension_calls
+    assert counted.calls[method_name] == 1
     actual_complex = torch.complex(fields[0], fields[1])
     torch.testing.assert_close(actual_complex, expected, rtol=2.0e-6, atol=2.0e-6)
 
@@ -538,8 +528,7 @@ def test_cuda_backend_bloch_cw_sources_use_delayed_phase_convention(monkeypatch)
     imag_patch = signal_sin * patch_cos - signal_cos * patch_sin
     expected = _bloch_expected_complex_patch(shape, real_patch, imag_patch, (0, 0, 0), 2, phase_a, phase_b)
 
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
-    backend._add_cw_phased_source_patch_bloch(
+    torch_reference._add_cw_phased_source_patch_bloch(
         ExReal=fields[0],
         ExImag=fields[1],
         EyReal=fields[2],
@@ -607,8 +596,8 @@ def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_d
     batched_indices = torch.tensor([0, 3, 1, 4], device="cuda", dtype=torch.int32)
     batched_positions = torch.tensor([0.0, 0.4, 1.1, 2.0, 0.3, 1.7], device="cuda", dtype=torch.float32)
 
-    def launch_all(fields):
-        backend._add_scaled_slice_source_patch(
+    def launch_all(fields, module):
+        module._add_scaled_slice_source_patch(
             field=fields[0],
             sourcePatch=patch,
             incidentField=incident,
@@ -618,7 +607,7 @@ def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_d
             offsetK=0,
             scale=-0.75,
         )
-        backend._add_scaled_line_source_patch(
+        module._add_scaled_line_source_patch(
             field=fields[1],
             coeffPatch=line_patch,
             incidentField=incident,
@@ -629,7 +618,7 @@ def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_d
             offsetK=2,
             scale=0.5,
         )
-        backend._add_interpolated_source_patch(
+        module._add_interpolated_source_patch(
             field=fields[2],
             coeffPatch=interp_patch,
             incidentField=incident,
@@ -641,7 +630,7 @@ def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_d
             offsetK=1,
             scale=1.25,
         )
-        backend._add_batched_reference_source_patches(
+        module._add_batched_reference_source_patches(
             fieldX=fields[0],
             fieldY=fields[1],
             fieldZ=fields[2],
@@ -655,7 +644,7 @@ def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_d
             sampleIndexStarts=sample_index_starts,
             sampleIndices=batched_indices,
         )
-        backend._add_batched_interpolated_source_patches(
+        module._add_batched_interpolated_source_patches(
             fieldX=fields[0],
             fieldY=fields[1],
             fieldZ=fields[2],
@@ -670,10 +659,8 @@ def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_d
             ds=0.5,
         )
 
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
-    launch_all(expected)
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
-    launch_all(actual)
+    launch_all(expected, torch_reference)
+    launch_all(actual, backend)
 
     electric = torch.linspace(-0.25, 0.75, 6, device="cuda", dtype=torch.float32)
     magnetic = torch.linspace(0.1, 0.9, 5, device="cuda", dtype=torch.float32)
@@ -686,14 +673,13 @@ def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_d
     expected_electric = electric.clone()
     actual_electric = electric.clone()
 
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
-    backend._update_auxiliary_magnetic(
+    torch_reference._update_auxiliary_magnetic(
         Magnetic=expected_magnetic,
         Electric=electric,
         MagneticDecay=magnetic_decay,
         MagneticCurl=magnetic_curl,
     )
-    backend._update_auxiliary_electric(
+    torch_reference._update_auxiliary_electric(
         Electric=expected_electric,
         Magnetic=magnetic,
         ElectricDecay=electric_decay,
@@ -701,7 +687,6 @@ def test_compiled_cuda_extension_tfsf_and_auxiliary_source_kernels_match_torch_d
         sourceIndex=3,
         sourceValue=-1.25,
     )
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
     backend._update_auxiliary_magnetic(
         Magnetic=actual_magnetic,
         Electric=electric,

@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from witwin.maxwell.fdtd.boundary import BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_PERIODIC, BOUNDARY_PMC, BOUNDARY_PML
-from witwin.maxwell.fdtd.cuda import backend
+from tests.fdtd.cuda._parity_backend import backend
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for native FDTD backend tests.")

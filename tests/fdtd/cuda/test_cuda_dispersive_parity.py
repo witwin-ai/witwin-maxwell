@@ -3,7 +3,7 @@ import os
 import pytest
 import torch
 
-from witwin.maxwell.fdtd.cuda import backend
+from tests.fdtd.cuda._parity_backend import backend
 
 
 pytestmark = [
