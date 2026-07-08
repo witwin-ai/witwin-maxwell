@@ -1057,420 +1057,6 @@ def test_reverse_step_tfsf_python_reference_matches_torch_vjp_without_auxiliary_
     assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for TFSF reverse dispatch")
-@pytest.mark.parametrize("provider", ["plane_wave_ref_x_ez", "plane_wave_aux"])
-def test_reverse_step_tfsf_uses_native_reference_when_slang_is_requested(provider, monkeypatch):
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
-    torch.manual_seed(67)
-    cpu_solver = _fake_tfsf_cpml_reverse_solver(provider=provider)
-    cuda_solver = _move_solver_tensors_to_cuda(_fake_tfsf_cpml_reverse_solver(provider=provider))
-    state_shapes = _tfsf_cpml_reverse_state_shapes()
-    cpu_forward_state = {
-        name: torch.randn(state_shapes[name], dtype=torch.float32)
-        for name in checkpoint_schema(cpu_solver).state_names
-    }
-    cpu_adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in cpu_forward_state.items()
-    }
-    cuda_forward_state = {
-        name: tensor.to(device="cuda")
-        for name, tensor in cpu_forward_state.items()
-    }
-    frozen_forward_state = {
-        name: tensor.clone()
-        for name, tensor in cuda_forward_state.items()
-    }
-    cuda_adjoint_state = {
-        name: tensor.to(device="cuda")
-        for name, tensor in cpu_adjoint_state.items()
-    }
-    cpu_eps_ex = torch.full_like(cpu_forward_state["Ex"], 2.3, requires_grad=True)
-    cpu_eps_ey = torch.full_like(cpu_forward_state["Ey"], 2.7, requires_grad=True)
-    cpu_eps_ez = torch.full_like(cpu_forward_state["Ez"], 3.1, requires_grad=True)
-    cuda_eps_ex = cpu_eps_ex.detach().to(device="cuda").requires_grad_(True)
-    cuda_eps_ey = cpu_eps_ey.detach().to(device="cuda").requires_grad_(True)
-    cuda_eps_ez = cpu_eps_ez.detach().to(device="cuda").requires_grad_(True)
-
-    actual = reverse_step(
-        cuda_solver,
-        cuda_forward_state,
-        cuda_adjoint_state,
-        time_value=0.075,
-        eps_ex=cuda_eps_ex,
-        eps_ey=cuda_eps_ey,
-        eps_ez=cuda_eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_tfsf_python_reference(
-        cpu_solver,
-        cpu_forward_state,
-        cpu_adjoint_state,
-        time_value=0.075,
-        eps_ex=cpu_eps_ex,
-        eps_ey=cpu_eps_ey,
-        eps_ez=cpu_eps_ez,
-    )
-
-    assert actual.backend == "python_reference_tfsf_cpml"
-    assert expected.backend == "python_reference_tfsf_cpml"
-    for name in cuda_forward_state:
-        assert torch.equal(cuda_forward_state[name], frozen_forward_state[name])
-    for name in cpu_forward_state:
-        assert torch.allclose(actual.pre_step_adjoint[name].cpu(), expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ex.cpu(), expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ey.cpu(), expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ez.cpu(), expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
-def test_reverse_step_bloch_slang_matches_python_reference(monkeypatch):
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
-    torch.manual_seed(31)
-    solver = _move_solver_tensors_to_cuda(_fake_bloch_reverse_solver())
-    state_shapes = _bloch_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    frozen_forward_state = {
-        name: tensor.clone()
-        for name, tensor in forward_state.items()
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    actual = reverse_step(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_bloch_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    assert actual.backend == "slang_bloch"
-    assert expected.backend == "python_reference_bloch"
-    for name in forward_state:
-        assert torch.equal(forward_state[name], frozen_forward_state[name])
-    for name in forward_state:
-        assert torch.allclose(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
-def test_reverse_step_bloch_slang_matches_python_reference_with_source_terms(monkeypatch):
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
-    torch.manual_seed(37)
-    solver = _move_solver_tensors_to_cuda(_fake_bloch_reverse_solver())
-    solver._source_terms = [
-        {
-            "field_name": "Ez",
-            "offsets": (0, 0, 1),
-            "patch": torch.tensor([[[0.25, -0.4]]], device="cuda", dtype=torch.float32),
-            "phase_real": 0.6,
-            "phase_imag": -0.35,
-            "cw_cos_patch": None,
-            "cw_sin_patch": None,
-            "delay_patch": None,
-            "activation_delay_patch": None,
-        }
-    ]
-    state_shapes = _bloch_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    actual = reverse_step(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.125,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_bloch_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.125,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-        resolved_source_terms=adjoint_baselines.resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez),
-    )
-    expected = adjoint_baselines.accumulate_source_term_gradients(
-        expected,
-        solver=solver,
-        adjoint_state=adjoint_state,
-        time_value=0.125,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-        resolved_source_terms=adjoint_baselines.resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez),
-    )
-
-    assert actual.backend == "slang_bloch"
-    for name in forward_state:
-        assert torch.allclose(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
-def test_reverse_step_dispersive_slang_matches_python_reference(monkeypatch):
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
-    torch.manual_seed(47)
-    solver = _move_solver_tensors_to_cuda(_fake_dispersive_cpml_reverse_solver())
-    state_shapes = _dispersive_cpml_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    frozen_forward_state = {
-        name: tensor.clone()
-        for name, tensor in forward_state.items()
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    actual = reverse_step(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_dispersive_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-        resolved_source_terms=adjoint_baselines.resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez),
-    )
-
-    assert actual.backend == "slang_dispersive_cpml"
-    assert expected.backend == "python_reference_dispersive_cpml"
-    for name in forward_state:
-        assert torch.equal(forward_state[name], frozen_forward_state[name])
-    for name in forward_state:
-        assert torch.allclose(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
-def test_reverse_step_dispersive_slang_matches_python_reference_with_source_terms(monkeypatch):
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
-    torch.manual_seed(53)
-    solver = _move_solver_tensors_to_cuda(_fake_dispersive_cpml_reverse_solver())
-    solver._source_terms = [
-        {
-            "field_name": "Ez",
-            "offsets": (0, 0, 1),
-            "patch": torch.tensor([[[0.2, -0.15]]], device="cuda", dtype=torch.float32),
-            "phase_real": 0.55,
-            "phase_imag": 0.0,
-            "cw_cos_patch": None,
-            "cw_sin_patch": None,
-            "delay_patch": None,
-            "activation_delay_patch": None,
-        }
-    ]
-    state_shapes = _dispersive_cpml_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-    resolved_source_terms = adjoint_baselines.resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez)
-
-    actual = reverse_step(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.125,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_dispersive_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.125,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-        resolved_source_terms=resolved_source_terms,
-    )
-    expected = adjoint_baselines.accumulate_source_term_gradients(
-        expected,
-        solver=solver,
-        adjoint_state=adjoint_state,
-        time_value=0.125,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-        resolved_source_terms=resolved_source_terms,
-    )
-
-    assert actual.backend == "slang_dispersive_cpml"
-    for name in forward_state:
-        assert torch.allclose(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
-def test_reverse_step_standard_slang_matches_python_reference(monkeypatch):
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
-    torch.manual_seed(11)
-    solver = _move_solver_tensors_to_cuda(_fake_standard_reverse_solver())
-    forward_state = {
-        "Ex": torch.randn(2, 4, 5, device="cuda", dtype=torch.float32),
-        "Ey": torch.randn(3, 3, 5, device="cuda", dtype=torch.float32),
-        "Ez": torch.randn(3, 4, 4, device="cuda", dtype=torch.float32),
-        "Hx": torch.randn(3, 3, 4, device="cuda", dtype=torch.float32),
-        "Hy": torch.randn(2, 4, 4, device="cuda", dtype=torch.float32),
-        "Hz": torch.randn(2, 3, 5, device="cuda", dtype=torch.float32),
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    actual = reverse_step(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_standard_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    assert actual.backend == "slang_standard"
-    assert expected.backend == "python_reference_standard"
-    for name in forward_state:
-        assert torch.allclose(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang reverse kernels")
-def test_reverse_step_cpml_slang_matches_python_reference(monkeypatch):
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
-    torch.manual_seed(17)
-    solver = _move_solver_tensors_to_cuda(_fake_cpml_reverse_solver())
-    state_shapes = _cpml_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    frozen_forward_state = {
-        name: tensor.clone()
-        for name, tensor in forward_state.items()
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    actual = reverse_step(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_cpml_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    assert actual.backend == "slang_cpml"
-    assert expected.backend == "python_reference_cpml"
-    for name in forward_state:
-        assert torch.equal(forward_state[name], frozen_forward_state[name])
-    for name in forward_state:
-        assert torch.allclose(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
 def _build_material_pullback_scene(device: str):
     density_a = torch.tensor(
         [
@@ -2001,7 +1587,7 @@ def _loss_from_grating_tfsf_probe(model):
     return result, data, loss
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_backpropagates_to_scene_module_density_parameters():
     model = _DensityPointScene().cuda()
 
@@ -2018,7 +1604,7 @@ def test_fdtd_gradient_bridge_backpropagates_to_scene_module_density_parameters(
     assert result.monitor("probe")["data"].grad_fn is not None
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_backpropagates_to_direct_scene_geometry_parameters():
     position = torch.nn.Parameter(torch.tensor([0.10, 0.0, 0.06], device="cuda"))
     target_data = _geometry_target_probe(-0.08)
@@ -2037,7 +1623,7 @@ def test_fdtd_gradient_bridge_backpropagates_to_direct_scene_geometry_parameters
     assert result.monitor("probe")["data"].grad_fn is not None
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_backpropagates_to_scene_module_geometry_parameters():
     model = _AnalyticBoxPointScene(init_x=0.10).cuda()
     target_data = _geometry_target_probe(-0.08)
@@ -2055,7 +1641,7 @@ def test_fdtd_gradient_bridge_backpropagates_to_scene_module_geometry_parameters
     assert result.monitor("probe")["data"].grad_fn is not None
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_matches_central_difference_for_scene_module_geometry_position():
     model = _AnalyticBoxPointScene(init_x=0.10).cuda()
     target_data = _geometry_target_probe(-0.08)
@@ -2085,7 +1671,7 @@ def test_fdtd_gradient_bridge_matches_central_difference_for_scene_module_geomet
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_optimizer_step_reduces_geometry_target_loss():
     target_x = -0.08
     target_data = _geometry_target_probe(target_x)
@@ -2111,7 +1697,7 @@ def test_fdtd_gradient_bridge_optimizer_step_reduces_geometry_target_loss():
     assert abs(float(model.box_x.detach().item()) - target_x) < initial_distance
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_matches_central_difference_for_scene_module_logit():
     model = _DensityPointScene(init=0.0).cuda()
 
@@ -2140,7 +1726,7 @@ def test_fdtd_gradient_bridge_matches_central_difference_for_scene_module_logit(
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 @pytest.mark.parametrize("source_kind", ["plane_wave", "gaussian_beam"])
 def test_fdtd_gradient_bridge_matches_central_difference_for_soft_surface_source_pullback(source_kind):
     model = _DensitySurfaceSourceScene(source_kind=source_kind, init=0.0).cuda()
@@ -2173,7 +1759,7 @@ def test_fdtd_gradient_bridge_matches_central_difference_for_soft_surface_source
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 @pytest.mark.parametrize("medium_kind", ["debye", "drude", "lorentz"])
 def test_fdtd_gradient_bridge_matches_central_difference_for_dispersive_materials(medium_kind):
     model = _DensityDispersiveScene(medium_kind=medium_kind, init=0.0).cuda()
@@ -2207,7 +1793,7 @@ def test_fdtd_gradient_bridge_matches_central_difference_for_dispersive_material
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 @pytest.mark.parametrize("source_kind", ["plane_wave", "gaussian_beam"])
 def test_fdtd_gradient_bridge_matches_central_difference_for_tfsf_sources(source_kind):
     model = _DensityTFSFScene(source_kind=source_kind, init=0.0).cuda()
@@ -2241,7 +1827,7 @@ def test_fdtd_gradient_bridge_matches_central_difference_for_tfsf_sources(source
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_matches_central_difference_for_bloch_boundaries():
     model = _DensityBlochScene(init=0.0).cuda()
 
@@ -2275,7 +1861,7 @@ def test_fdtd_gradient_bridge_matches_central_difference_for_bloch_boundaries():
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_matches_central_difference_for_grating_tfsf():
     model = _DensityGratingTFSFScene(init=0.0).cuda()
 
@@ -2309,7 +1895,7 @@ def test_fdtd_gradient_bridge_matches_central_difference_for_grating_tfsf():
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_optimizer_step_reduces_loss():
     model = _DensityPointScene(init=0.0).cuda()
     optimizer = torch.optim.SGD(model.parameters(), lr=1.0e13)
@@ -2324,7 +1910,7 @@ def test_fdtd_gradient_bridge_optimizer_step_reduces_loss():
     assert float(final_loss.item()) < initial_value
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_backward_profile_reports_expected_sections():
     model = _DensityPointScene(init=0.0).cuda()
     simulation = _build_simulation(model)
@@ -2365,7 +1951,7 @@ def test_fdtd_gradient_bridge_backward_profile_reports_expected_sections():
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 @pytest.mark.parametrize("source_kind", ["plane_wave", "gaussian_beam"])
 def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_cpml_for_soft_surface_sources(source_kind):
     model = _DensitySurfaceSourceScene(source_kind=source_kind, init=0.0).cuda()
@@ -2381,7 +1967,7 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_cpml_for_so
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 @pytest.mark.parametrize("source_kind", ["plane_wave", "gaussian_beam"])
 def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_tfsf_for_tfsf_sources(source_kind):
     model = _DensityTFSFScene(source_kind=source_kind, init=0.0).cuda()
@@ -2397,7 +1983,7 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_tfsf_for_tf
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_bloch_for_bloch_boundaries():
     model = _DensityBlochScene(init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=40)
@@ -2412,7 +1998,7 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_bloch_for_b
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_grating_tfsf():
     model = _DensityGratingTFSFScene(init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=32)
@@ -2427,7 +2013,7 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_grating_tfs
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_dispersive_cpml_for_dispersive_materials():
     model = _DensityDispersiveScene(medium_kind="debye", init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=36)
@@ -2442,7 +2028,7 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_dispersive_
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_backward_profile_uses_device_batched_dense_seeds():
     model = _DensityPointScene(init=0.0).cuda()
     simulation = mw.Simulation.fdtd(
@@ -2462,7 +2048,7 @@ def test_fdtd_gradient_bridge_backward_profile_uses_device_batched_dense_seeds()
     assert profile["seed_batch_counts"]["point"] > 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_backward_profile_uses_device_batched_plane_seeds():
     model = _DensityFluxScene(init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=24)
@@ -2475,7 +2061,7 @@ def test_fdtd_gradient_bridge_backward_profile_uses_device_batched_plane_seeds()
     assert profile["seed_batch_counts"]["plane"] > 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_checkpoint_replay_matches_forward_state():
     model = _DensityPointScene(init=0.0).cuda()
     simulation = _build_simulation(model)
@@ -2499,7 +2085,7 @@ def test_fdtd_gradient_bridge_checkpoint_replay_matches_forward_state():
         assert torch.allclose(terminal_state[name], getattr(solver, name), rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_checkpoint_replay_matches_tfsf_forward_state():
     model = _DensityTFSFScene(source_kind="plane_wave", init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=48)
@@ -2528,7 +2114,7 @@ def test_fdtd_gradient_bridge_checkpoint_replay_matches_tfsf_forward_state():
     assert torch.allclose(terminal_state["tfsf_aux_magnetic"], auxiliary_grid.magnetic, rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_checkpoint_replay_matches_bloch_forward_state():
     model = _DensityBlochScene(init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=40)
@@ -2552,7 +2138,7 @@ def test_fdtd_gradient_bridge_checkpoint_replay_matches_bloch_forward_state():
         assert torch.allclose(terminal_state[name], getattr(solver, name), rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_checkpoint_replay_matches_dispersive_forward_state():
     model = _DensityDispersiveScene(medium_kind="debye", init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=36)
@@ -2587,7 +2173,7 @@ def test_fdtd_gradient_bridge_checkpoint_replay_matches_dispersive_forward_state
                 assert torch.allclose(terminal_state[current_name], entry["current"], rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_rejects_scene_module_parameters_outside_material_graph():
     model = _UnsupportedSceneParam().cuda()
 

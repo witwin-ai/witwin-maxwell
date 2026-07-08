@@ -56,11 +56,3 @@ def test_backend_selector_accepts_cuda(monkeypatch):
         return
 
     assert resolve_fdtd_backend_name() == "cuda"
-
-
-def test_backend_selector_accepts_explicit_slang(monkeypatch):
-    from witwin.maxwell.fdtd.runtime.module_cache import resolve_fdtd_backend_name
-
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "slang")
-
-    assert resolve_fdtd_backend_name() == "slang"

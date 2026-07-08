@@ -214,22 +214,18 @@ class AuxiliaryGrid1D:
         grid_x = max(1, (int(size) + threads_per_block - 1) // threads_per_block)
         return (grid_x, 1, 1)
 
-    def _can_use_slang_auxiliary(self) -> bool:
+    def _can_use_compiled_auxiliary(self) -> bool:
         return self.device.type == "cuda" and self.dtype == torch.float32
 
     def _resolve_fdtd_module(self):
         if self.fdtd_module is not None:
             return self.fdtd_module
-        if not self._can_use_slang_auxiliary():
+        if not self._can_use_compiled_auxiliary():
             return None
 
-        from ..solver import _get_fdtd_module
+        from ..cuda.backend import get_native_fdtd_module
 
-        slang_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "fdtd.slang",
-        )
-        self.fdtd_module = _get_fdtd_module(slang_path)
+        self.fdtd_module = get_native_fdtd_module()
         return self.fdtd_module
 
     def _build_loss_profiles(self):
@@ -274,7 +270,7 @@ class AuxiliaryGrid1D:
     def _apply_source(self):
         self.electric[self.source_index] = evaluate_source_time(self.source_time, self.electric_time)
 
-    def _advance_magnetic_slang(self):
+    def _advance_magnetic_compiled(self):
         self._resolve_fdtd_module().updateAuxiliaryMagnetic1D(
             Magnetic=self.magnetic,
             Electric=self.electric,
@@ -285,7 +281,7 @@ class AuxiliaryGrid1D:
             gridSize=self._magnetic_launch_shape,
         )
 
-    def _advance_electric_slang(self):
+    def _advance_electric_compiled(self):
         source_value = float(evaluate_source_time(self.source_time, self.electric_time))
         self._resolve_fdtd_module().updateAuxiliaryElectric1D(
             Electric=self.electric,
@@ -300,16 +296,16 @@ class AuxiliaryGrid1D:
         )
 
     def advance_magnetic(self):
-        if self._can_use_slang_auxiliary():
-            self._advance_magnetic_slang()
+        if self._can_use_compiled_auxiliary():
+            self._advance_magnetic_compiled()
             return
         if self.magnetic.numel() > 0:
             curl_e = self.electric[1:] - self.electric[:-1]
             self.magnetic = self.magnetic_decay * self.magnetic - self.magnetic_curl * curl_e
 
     def advance_electric(self):
-        if self._can_use_slang_auxiliary():
-            self._advance_electric_slang()
+        if self._can_use_compiled_auxiliary():
+            self._advance_electric_compiled()
             self.time_step += 1
             return
         if self.electric.numel() > 2:

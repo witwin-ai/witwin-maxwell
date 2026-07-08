@@ -55,11 +55,7 @@ def _scene_material_characteristic_frequency(scene) -> float:
     return characteristic
 
 
-def initialize_solver(solver, scene, frequency=1e9, slang_path=None, absorber_type="cpml", cpml_config=None):
-    if slang_path is None:
-        slang_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fdtd.slang")
-        slang_path = os.path.abspath(slang_path)
-
+def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_config=None):
     require_cuda_scene(scene)
     solver.scene = scene
     solver.Nx = scene.Nx
@@ -121,7 +117,7 @@ def initialize_solver(solver, scene, frequency=1e9, slang_path=None, absorber_ty
     solver.inv_dx = 1.0 / solver.dx
     solver.inv_dy = 1.0 / solver.dy
     solver.inv_dz = 1.0 / solver.dz
-    solver.fdtd_module = get_fdtd_module(slang_path)
+    solver.fdtd_module = get_fdtd_module()
 
     solver.dft_enabled = False
     solver.dft_frequency = None

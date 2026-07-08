@@ -178,7 +178,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 
 - Time-domain simulation through `Simulation.fdtd(...)`
 - CUDA-only solver execution; `Simulation.fdtd(...)` requires `Scene(device="cuda")`
-- Native CUDA is the default FDTD runtime backend; the Slang runtime is retained only as an explicit comparison path via `WITWIN_MAXWELL_FDTD_BACKEND=slang`
+- Compiled native CUDA kernels are the only FDTD runtime backend; the Torch reference path has been retired from the runtime and relocated to the CUDA parity tests
 - Single- or multi-frequency DFT extraction through `frequency=` or `frequencies=[...]`
 - Source temporal frequency (`source_time.frequency`) remains distinct from simulation / monitor extraction frequencies; Maxwell does not infer extraction frequencies implicitly
 - ADE-based electric and magnetic dispersive-material updates for Debye, Drude, and Lorentz media
@@ -212,7 +212,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Native CUDA extension platform wheels include the packaged FDTD CUDA extension, so ordinary `pip install witwin-maxwell` users can load the accelerated FDTD runtime without compiling locally
 - Native CUDA extension builds resolve conda-distributed torch import libraries automatically, and `WITWIN_MAXWELL_FDTD_CUDA_PREBUILT=1` loads an already-built extension from the configured build directory without invoking the build toolchain (required under profilers such as Nsight Systems)
 - Native CUDA CPML field updates skip full-volume coefficient reads when the decay/curl coefficient tensors are spatially uniform, detected automatically once per solve (about 1.4x faster forward stepping on homogeneous scenes)
-- The native CUDA module surface accepts strided tensor views, so explicit Slang-oracle reverse-time adjoint checks can run on native CUDA reverse kernels for standard, CPML, Bloch, and dispersive scenes; TFSF adjoint uses the native reference composition after retiring the drifted Slang composite path
+- The native CUDA module surface accepts strided tensor views, so reverse-time adjoint checks run on native CUDA reverse kernels for standard, CPML, Bloch, and dispersive scenes, validated against the relocated Torch reference; TFSF adjoint uses the native reference composition
 - FDTD result stats include CPML auxiliary-memory mode and allocated-versus-dense `psi` byte counts
 - Support for odd grid sizes in Yee-component field outputs
 

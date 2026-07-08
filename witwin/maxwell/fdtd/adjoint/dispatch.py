@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from enum import Enum, auto
 
-import torch
 
 from ..boundary import (
     BOUNDARY_BLOCH,
@@ -13,18 +12,13 @@ from ..boundary import (
     has_complex_fields,
 )
 from ..checkpoint import checkpoint_schema
-from ..runtime.module_cache import resolve_fdtd_backend_name
 
 
-_VALID_ADJOINT_BACKENDS = {"auto", "slang", "python"}
+_VALID_ADJOINT_BACKENDS = {"auto", "python"}
 
 class _ReverseBackend(Enum):
     GRATING_TFSF = auto()
     TFSF = auto()
-    SLANG_CPML = auto()
-    SLANG_STANDARD = auto()
-    SLANG_DISPERSIVE = auto()
-    SLANG_BLOCH = auto()
     PYTHON_BLOCH = auto()
     PYTHON_DISPERSIVE = auto()
     PYTHON_STANDARD = auto()
@@ -53,10 +47,6 @@ def _matches_checkpoint_layout(solver, forward_state) -> bool:
     return tuple(forward_state.keys()) == checkpoint_schema(solver).state_names
 
 
-def _cuda_reverse_step_available(tensor: torch.Tensor) -> bool:
-    return torch.cuda.is_available() and torch.device(tensor.device).type == "cuda"
-
-
 def resolve_fdtd_adjoint_backend_name(requested: str | None = None) -> str:
     import os
 
@@ -64,9 +54,7 @@ def resolve_fdtd_adjoint_backend_name(requested: str | None = None) -> str:
     if backend not in _VALID_ADJOINT_BACKENDS:
         choices = ", ".join(sorted(_VALID_ADJOINT_BACKENDS))
         raise ValueError(f"WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND must be one of: {choices}.")
-    if backend != "auto":
-        return backend
-    return "python" if resolve_fdtd_backend_name() == "cuda" else "slang"
+    return "python"
 
 
 def _has_open_face_conflicts(face_codes: tuple[int, int, int, int, int, int]) -> bool:
@@ -233,8 +221,6 @@ def _select_reverse_backend(
     resolved_source_terms,
 ) -> _ReverseBackend:
     runtime = _runtime()
-    use_cuda = _cuda_reverse_step_available(eps_ex)
-    use_slang_reverse = use_cuda and resolve_fdtd_adjoint_backend_name() == "slang"
 
     supports_tfsf = _supports_tfsf(runtime, solver, forward_state, resolved_source_terms)
     supports_grating_tfsf = _supports_grating_tfsf(runtime, solver, forward_state, resolved_source_terms)
@@ -246,10 +232,6 @@ def _select_reverse_backend(
     decision_table = (
         (_ReverseBackend.GRATING_TFSF, supports_grating_tfsf),
         (_ReverseBackend.TFSF, supports_tfsf),
-        (_ReverseBackend.SLANG_CPML, supports_cpml and use_slang_reverse),
-        (_ReverseBackend.SLANG_STANDARD, supports_standard and use_slang_reverse),
-        (_ReverseBackend.SLANG_DISPERSIVE, supports_dispersive and use_slang_reverse),
-        (_ReverseBackend.SLANG_BLOCH, supports_bloch and use_slang_reverse),
         (_ReverseBackend.PYTHON_BLOCH, supports_bloch),
         (_ReverseBackend.PYTHON_DISPERSIVE, supports_dispersive),
         (_ReverseBackend.PYTHON_STANDARD, supports_standard),
@@ -330,9 +312,8 @@ def reverse_step(
         )
 
     if backend is _ReverseBackend.TFSF:
-        use_slang_reverse = resolve_fdtd_adjoint_backend_name() == "slang"
         return _with_profile_sections(
-            None if use_slang_reverse else profiler,
+            profiler,
             lambda: _adjoint_reference.reverse_step_tfsf(
                 solver,
                 forward_state,
@@ -342,7 +323,7 @@ def reverse_step(
                 eps_ey=eps_ey,
                 eps_ez=eps_ez,
                 resolved_source_terms=resolved_source_terms,
-                profiler=profiler if use_slang_reverse else None,
+                profiler=None,
             ),
         )
     if backend is _ReverseBackend.GRATING_TFSF:
@@ -355,62 +336,6 @@ def reverse_step(
             eps_ey=eps_ey,
             eps_ez=eps_ez,
             profiler=profiler,
-        )
-    if backend is _ReverseBackend.SLANG_CPML:
-        return finish(
-            runtime._reverse_step_cpml_slang(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=resolved_source_terms,
-                profiler=profiler,
-            )
-        )
-    if backend is _ReverseBackend.SLANG_STANDARD:
-        return finish(
-            runtime._reverse_step_standard_slang(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=resolved_source_terms,
-                profiler=profiler,
-            )
-        )
-    if backend is _ReverseBackend.SLANG_DISPERSIVE:
-        return finish(
-            runtime._reverse_step_dispersive_slang(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=resolved_source_terms,
-                profiler=profiler,
-            )
-        )
-    if backend is _ReverseBackend.SLANG_BLOCH:
-        return finish(
-            runtime._reverse_step_bloch_slang(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=resolved_source_terms,
-                profiler=profiler,
-            )
         )
     if backend is _ReverseBackend.PYTHON_BLOCH:
         return finish(

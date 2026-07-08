@@ -58,18 +58,6 @@ class _DispersiveReverseContext:
     adjusted_adjoint_state: dict[str, torch.Tensor]
 
 
-def prepare_slang_reverse_step(solver, profiler: _BackwardProfiler | None):
-    runtime = _runtime()
-    active_profiler = profiler if profiler is not None else _BackwardProfiler(enabled=False, device=None)
-    return (
-        runtime,
-        active_profiler,
-        runtime._get_forward_slang_module(solver),
-        runtime._get_adjoint_slang_module(),
-        runtime._adjoint_kernel_block_size(solver),
-    )
-
-
 def allocate_reverse_buffers(forward_state, *, eps_ex, eps_ey, eps_ez):
     grad_eps_ex = torch.zeros_like(eps_ex)
     grad_eps_ey = torch.zeros_like(eps_ey)
@@ -255,7 +243,7 @@ def prepare_dispersive_reverse_context(
     return _DispersiveReverseContext(
         runtime=runtime,
         active_profiler=active_profiler,
-        adjoint_module=runtime._get_adjoint_slang_module(),
+        adjoint_module=solver.fdtd_module,
         block_size=runtime._adjoint_kernel_block_size(solver),
         dispersive_output_adjoint=dispersive_output_adjoint,
         correction_grad_eps=correction_grad_eps,

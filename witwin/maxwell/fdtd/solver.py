@@ -117,14 +117,13 @@ def calculate_required_steps(
 
 
 class FDTD:
-    def __init__(self, scene, frequency=1e9, slang_path=None, absorber_type="cpml", cpml_config=None):
+    def __init__(self, scene, frequency=1e9, absorber_type="cpml", cpml_config=None):
         runtime_initialization.get_fdtd_module = _get_fdtd_module
         runtime_initialization.require_cuda_scene = _require_cuda_scene
         initialize_solver(
             self,
             prepare_scene(scene),
             frequency=frequency,
-            slang_path=slang_path,
             absorber_type=absorber_type,
             cpml_config=cpml_config,
         )

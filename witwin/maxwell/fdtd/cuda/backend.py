@@ -91,10 +91,10 @@ def debug_linear_indices(
 
 
 def _call_with_contiguous(kernel: Callable[..., None], kwargs: dict) -> None:
-    # The slangtorch module surface accepts strided tensor views (the adjoint
-    # replay passes box slices of adjoint fields and real/imag views), while
-    # the compiled kernels require contiguous memory. Materialize contiguous
-    # copies and write back afterwards so in-place semantics are preserved.
+    # Callers may pass strided tensor views (the adjoint replay passes box
+    # slices of adjoint fields and real/imag views), while the compiled kernels
+    # require contiguous memory. Materialize contiguous copies and write back
+    # afterwards so in-place semantics are preserved.
     write_back = None
     for key, value in kwargs.items():
         if type(value) is torch.Tensor and not value.is_contiguous():
@@ -116,7 +116,7 @@ class _Launch:
         self.kernel = kernel
         self.kwargs = kwargs
 
-    def launchRaw(self, *, blockSize=None, gridSize=None):  # noqa: N802 - mirrors slangtorch API
+    def launchRaw(self, *, blockSize=None, gridSize=None):  # noqa: N802 - kernel launch entry point
         del blockSize, gridSize
         _call_with_contiguous(self.kernel, self.kwargs)
         return None

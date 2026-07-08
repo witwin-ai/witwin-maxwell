@@ -709,7 +709,7 @@ def test_fdtd_initialization_builds_dispersive_state(monkeypatch):
     class DummyModule:
         pass
 
-    monkeypatch.setattr("witwin.maxwell.fdtd.solver._get_fdtd_module", lambda slang_path: DummyModule())
+    monkeypatch.setattr("witwin.maxwell.fdtd.solver._get_fdtd_module", lambda: DummyModule())
     monkeypatch.setattr("witwin.maxwell.fdtd.solver._require_cuda_scene", lambda scene: None)
 
     scene = mw.Scene(

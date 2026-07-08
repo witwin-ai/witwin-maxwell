@@ -25,18 +25,6 @@ requires_extension_build = pytest.mark.skipif(
     not bool(__import__("os").environ.get("WITWIN_RUN_CUDA_EXTENSION_BUILD")),
     reason="native CUDA extension build is opt-in for adjoint kernel tests",
 )
-
-
-def _forbid_slang_reverse(monkeypatch):
-    def fail(*args, **kwargs):
-        raise AssertionError("native CUDA adjoint dispatch must not call Slang reverse kernels")
-
-    monkeypatch.setattr(adjoint_core, "_reverse_step_standard_slang", fail)
-    monkeypatch.setattr(adjoint_core, "_reverse_step_cpml_slang", fail)
-    monkeypatch.setattr(adjoint_core, "_reverse_step_bloch_slang", fail)
-    monkeypatch.setattr(adjoint_core, "_reverse_step_dispersive_slang", fail)
-
-
 def test_cuda_backend_selects_python_adjoint_reference_by_default(monkeypatch):
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
     monkeypatch.delenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", raising=False)
@@ -46,7 +34,6 @@ def test_cuda_backend_selects_python_adjoint_reference_by_default(monkeypatch):
 
 def test_cuda_standard_reverse_step_matches_python_reference_without_slang(monkeypatch):
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
-    _forbid_slang_reverse(monkeypatch)
     torch.manual_seed(101)
     solver = _move_solver_tensors_to_cuda(_fake_standard_reverse_solver())
     forward_state = {
@@ -91,7 +78,6 @@ def test_cuda_standard_reverse_step_matches_python_reference_without_slang(monke
 
 def test_cuda_cpml_reverse_step_matches_python_reference_without_slang(monkeypatch):
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
-    _forbid_slang_reverse(monkeypatch)
     torch.manual_seed(103)
     solver = _move_solver_tensors_to_cuda(_fake_cpml_reverse_solver())
     state_shapes = _cpml_reverse_state_shapes()
@@ -125,61 +111,6 @@ def test_cuda_cpml_reverse_step_matches_python_reference_without_slang(monkeypat
 
     assert actual.backend == "python_reference_cpml"
     for name in forward_state:
-        torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
-    torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
-    torch.testing.assert_close(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1.0e-5, atol=1.0e-6)
-    torch.testing.assert_close(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1.0e-5, atol=1.0e-6)
-
-
-@requires_extension_build
-def test_cuda_bloch_reverse_step_uses_native_module_without_slang_jit(monkeypatch):
-    import slangtorch
-
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "slang")
-    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
-
-    def fail_load_module(*args, **kwargs):
-        raise AssertionError("native CUDA Bloch adjoint must not call slangtorch.loadModule")
-
-    monkeypatch.setattr(slangtorch, "loadModule", fail_load_module)
-    torch.manual_seed(105)
-    solver = _move_solver_tensors_to_cuda(_fake_bloch_reverse_solver())
-    state_shapes = _bloch_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.rand(state_shapes["Ex"], device="cuda", dtype=torch.float32) + 2.0
-    eps_ey = torch.rand(state_shapes["Ey"], device="cuda", dtype=torch.float32) + 2.0
-    eps_ez = torch.rand(state_shapes["Ez"], device="cuda", dtype=torch.float32) + 2.0
-
-    expected = adjoint_baselines.reverse_step_bloch_python_reference(
-        solver,
-        {name: tensor.clone() for name, tensor in forward_state.items()},
-        {name: tensor.clone() for name, tensor in adjoint_state.items()},
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-        resolved_source_terms=([], [], []),
-    )
-    actual = reverse_step(
-        solver,
-        {name: tensor.clone() for name, tensor in forward_state.items()},
-        {name: tensor.clone() for name, tensor in adjoint_state.items()},
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    torch.cuda.synchronize()
-
-    assert actual.backend == "slang_bloch"
-    for name in expected.pre_step_adjoint:
         torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
     torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
     torch.testing.assert_close(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1.0e-5, atol=1.0e-6)

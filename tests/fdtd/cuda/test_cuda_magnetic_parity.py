@@ -30,31 +30,6 @@ def _prepared_solver(monkeypatch, backend: str, scene: mw.Scene):
     ).prepare().solver
 
 
-def _copy_runtime_state(source, target):
-    names = (
-        "Ex",
-        "Ey",
-        "Ez",
-        "Hx",
-        "Hy",
-        "Hz",
-        "cex_decay",
-        "cey_decay",
-        "cez_decay",
-        "chx_decay",
-        "chy_decay",
-        "chz_decay",
-        "cex_curl",
-        "cey_curl",
-        "cez_curl",
-        "chx_curl",
-        "chy_curl",
-        "chz_curl",
-    )
-    for name in names:
-        getattr(target, name).copy_(getattr(source, name))
-
-
 def _seed_standard_state(solver):
     generator = torch.Generator(device="cuda")
     generator.manual_seed(1234)
@@ -140,58 +115,6 @@ def test_native_cuda_standard_eh_one_step_matches_python_reference(monkeypatch):
         torch.testing.assert_close(
             getattr(native_solver, name),
             expected[name],
-            rtol=2.0e-6,
-            atol=2.0e-7,
-        )
-
-
-def test_native_cuda_standard_eh_one_step_matches_slang_when_enabled(monkeypatch):
-    if os.environ.get("WITWIN_RUN_SLANG_PARITY") != "1":
-        pytest.skip("Set WITWIN_RUN_SLANG_PARITY=1 to run Slang oracle parity in environments where Slang JIT is responsive.")
-    scene = _standard_scene()
-    slang_solver = _prepared_solver(monkeypatch, "slang", scene)
-    native_solver = _prepared_solver(monkeypatch, "cuda", scene)
-    _seed_standard_state(slang_solver)
-    _copy_runtime_state(slang_solver, native_solver)
-
-    slang_solver._update_magnetic_fields(
-        slang_solver.Hx,
-        slang_solver.Hy,
-        slang_solver.Hz,
-        slang_solver.Ex,
-        slang_solver.Ey,
-        slang_solver.Ez,
-    )
-    slang_solver._update_electric_fields(
-        slang_solver.Ex,
-        slang_solver.Ey,
-        slang_solver.Ez,
-        slang_solver.Hx,
-        slang_solver.Hy,
-        slang_solver.Hz,
-    )
-    native_solver._update_magnetic_fields(
-        native_solver.Hx,
-        native_solver.Hy,
-        native_solver.Hz,
-        native_solver.Ex,
-        native_solver.Ey,
-        native_solver.Ez,
-    )
-    native_solver._update_electric_fields(
-        native_solver.Ex,
-        native_solver.Ey,
-        native_solver.Ez,
-        native_solver.Hx,
-        native_solver.Hy,
-        native_solver.Hz,
-    )
-    torch.cuda.synchronize()
-
-    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
-        torch.testing.assert_close(
-            getattr(native_solver, name),
-            getattr(slang_solver, name),
             rtol=2.0e-6,
             atol=2.0e-7,
         )
