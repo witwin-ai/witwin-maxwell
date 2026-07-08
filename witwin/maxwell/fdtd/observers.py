@@ -1223,6 +1223,7 @@ def get_observer_results(solver):
                     "compute_flux": bool(observer.get("compute_flux", False)),
                     "normal_direction": observer.get("normal_direction", "+"),
                     "mode_spec": observer.get("mode_spec"),
+                    "diffraction_spec": observer.get("diffraction_spec"),
                 },
             )
             entry["components"][public_component] = {

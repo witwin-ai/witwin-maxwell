@@ -201,6 +201,10 @@ def _monitor_payload_is_mode(payload: dict[str, Any]) -> bool:
     return False
 
 
+def _monitor_payload_is_diffraction(payload: dict[str, Any]) -> bool:
+    return payload.get("monitor_type") == "diffraction"
+
+
 def _monitor_payload_is_closed_surface(payload: dict[str, Any]) -> bool:
     return payload.get("kind") == "closed_surface"
 
@@ -846,7 +850,15 @@ class Result:
         resolve_modal: bool = True,
     ):
         payload = self.raw_monitor(name, frequency=frequency, freq_index=freq_index)
-        if not resolve_modal or not _monitor_payload_is_mode(payload) or _monitor_payload_is_closed_surface(payload):
+        if not resolve_modal or _monitor_payload_is_closed_surface(payload):
+            return payload
+
+        if _monitor_payload_is_diffraction(payload):
+            from .postprocess.diffraction import compute_diffraction_from_payload
+
+            return compute_diffraction_from_payload(self, name, payload)
+
+        if not _monitor_payload_is_mode(payload):
             return payload
 
         from .postprocess.modal import _compute_mode_overlap_from_payload

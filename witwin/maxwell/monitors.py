@@ -641,3 +641,69 @@ class ModeMonitor:
             "polarization_axis": self.polarization_axis,
             "normal_axis": self.normal_axis,
         }
+
+
+@dataclass(frozen=True)
+class DiffractionMonitor:
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    frequencies: tuple[float, ...] | None
+    normal_direction: str
+    orders: int | None
+    axis: str
+    plane_position: float
+    tangential_axes: tuple[str, str]
+    periods: dict[str, float]
+    fields: tuple[str, ...]
+    compute_flux: bool = True
+    kind: str = "diffraction"
+
+    def __init__(
+        self,
+        name,
+        position=(0.0, 0.0, 0.0),
+        size=(1.0, 1.0, 0.0),
+        frequencies=None,
+        normal_direction="+",
+        orders=None,
+    ):
+        resolved_position, resolved_size, axis, plane_position, _ = _resolve_finite_plane_geometry(
+            position,
+            size,
+        )
+        transverse_axes = tuple(axis_name for axis_name in _AXES if axis_name != axis)
+        periods = {
+            axis_name: float(resolved_size[_AXES.index(axis_name)]) for axis_name in transverse_axes
+        }
+        if any(period <= 0.0 for period in periods.values()):
+            raise ValueError("DiffractionMonitor requires strictly positive transverse periods.")
+        resolved_orders = None if orders is None else int(orders)
+        if resolved_orders is not None and resolved_orders < 0:
+            raise ValueError("orders must be a non-negative integer or None.")
+
+        object.__setattr__(self, "name", str(name))
+        object.__setattr__(self, "position", resolved_position)
+        object.__setattr__(self, "size", resolved_size)
+        object.__setattr__(self, "frequencies", _normalize_frequencies(frequencies))
+        object.__setattr__(self, "normal_direction", _normalize_normal_direction(normal_direction))
+        object.__setattr__(self, "orders", resolved_orders)
+        object.__setattr__(self, "axis", axis)
+        object.__setattr__(self, "plane_position", plane_position)
+        object.__setattr__(self, "tangential_axes", transverse_axes)
+        object.__setattr__(self, "periods", periods)
+        object.__setattr__(self, "fields", required_flux_fields(axis))
+        object.__setattr__(self, "compute_flux", True)
+        object.__setattr__(self, "kind", "diffraction")
+
+    def diffraction_spec(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "position": self.position,
+            "size": self.size,
+            "normal_axis": self.axis,
+            "tangential_axes": self.tangential_axes,
+            "periods": dict(self.periods),
+            "orders": self.orders,
+            "normal_direction": self.normal_direction,
+        }

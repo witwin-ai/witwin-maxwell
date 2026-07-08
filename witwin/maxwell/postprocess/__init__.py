@@ -1,4 +1,5 @@
 from .RCS import compute_bistatic_rcs, infer_incident_plane_wave_amplitude, transform_to_bistatic_rcs
+from .diffraction import compute_diffraction_orders, enumerate_diffraction_orders
 from .directivity import compute_directivity
 from .modal import compute_mode_overlap
 from .nfft import NearFieldFarFieldTransformer
@@ -16,8 +17,10 @@ from .stratton_chu import (
 
 __all__ = [
     "compute_bistatic_rcs",
+    "compute_diffraction_orders",
     "compute_directivity",
     "compute_mode_overlap",
+    "enumerate_diffraction_orders",
     "compute_s_parameters",
     "infer_incident_plane_wave_amplitude",
     "NearFieldFarFieldTransformer",

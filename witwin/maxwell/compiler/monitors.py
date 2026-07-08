@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..monitors import (
+    DiffractionMonitor,
     FieldTimeMonitor,
     FinitePlaneMonitor,
     FluxMonitor,
@@ -59,7 +60,7 @@ def compile_fdtd_observers(scene):
                 observer["monitor_fields"] = normalized_fields
                 compiled.append(observer)
             continue
-        if isinstance(monitor, (PlaneMonitor, FinitePlaneMonitor, FluxMonitor, ModeMonitor)):
+        if isinstance(monitor, (PlaneMonitor, FinitePlaneMonitor, FluxMonitor, ModeMonitor, DiffractionMonitor)):
             monitor_plane_position = monitor.position if isinstance(monitor, PlaneMonitor) else monitor.plane_position
             for field in normalized_fields:
                 observer = _plane_observer_record(
@@ -76,6 +77,9 @@ def compile_fdtd_observers(scene):
                 if isinstance(monitor, ModeMonitor):
                     observer["monitor_type"] = "mode"
                     observer["mode_spec"] = monitor.mode_spec()
+                elif isinstance(monitor, DiffractionMonitor):
+                    observer["monitor_type"] = "diffraction"
+                    observer["diffraction_spec"] = monitor.diffraction_spec()
                 compiled.append(observer)
             continue
         raise ValueError(f"Unsupported monitor type: {type(monitor).__name__}")

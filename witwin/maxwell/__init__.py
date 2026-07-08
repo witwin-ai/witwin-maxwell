@@ -2,6 +2,7 @@ from witwin.core import Box, Cone, Cylinder, Ellipsoid, HollowBox, Mesh, Prism, 
 from .media import DebyePole, DiagonalTensor3, DrudePole, LorentzPole, Material, Tensor3x3
 from .monitors import (
     ClosedSurfaceMonitor,
+    DiffractionMonitor,
     FieldTimeMonitor,
     FinitePlaneMonitor,
     FluxMonitor,
@@ -52,6 +53,7 @@ __all__ = [
     "BoundaryKind",
     "Box",
     "ClosedSurfaceMonitor",
+    "DiffractionMonitor",
     "Cone",
     "CurrentDataset",
     "CustomCurrentSource",
