@@ -1,4 +1,5 @@
 from witwin.core import Box, Cone, Cylinder, Ellipsoid, HollowBox, Mesh, Prism, Pyramid, Sphere, Structure, Torus
+from witwin.core.geometry import ComplexPolySlab, PolySlab
 from .media import DebyePole, DiagonalTensor3, DrudePole, LorentzPole, Material, Tensor3x3
 from .monitors import (
     ClosedSurfaceMonitor,
@@ -54,6 +55,7 @@ __all__ = [
     "BoundaryKind",
     "Box",
     "ClosedSurfaceMonitor",
+    "ComplexPolySlab",
     "DiffractionMonitor",
     "Cone",
     "CurrentDataset",
@@ -92,6 +94,7 @@ __all__ = [
     "PlaneWave",
     "PointDipole",
     "PointMonitor",
+    "PolySlab",
     "postprocess",
     "Prism",
     "Pyramid",

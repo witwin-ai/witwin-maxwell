@@ -39,6 +39,8 @@ def test_top_level_exports_are_available():
     assert mw.TFSF(bounds=((-0.1, 0.1), (-0.1, 0.1), (-0.1, 0.1))).kind == "tfsf"
     assert mw.Material is not None
     assert mw.Material.drude(plasma_frequency=2e15, gamma=5e13).is_dispersive
+    assert mw.PolySlab is not None
+    assert mw.ComplexPolySlab is not None
     assert not hasattr(mw, "FDFD")
     assert not hasattr(mw, "FDTD")
     assert not hasattr(mw, "FieldMonitor")

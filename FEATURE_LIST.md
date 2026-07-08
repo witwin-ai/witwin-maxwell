@@ -42,6 +42,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 
 - Analytic geometry primitives:
   `Box`, `Sphere`, `Cylinder`, `Ellipsoid`, `Cone`, `Pyramid`, `Prism`, `Torus`, `HollowBox`
+- Extruded polygon geometry via `PolySlab(vertices, bounds, axis, sidewall_angle, reference_plane)` with Tidy3D-style linear sidewall taper and even-odd interior rule for non-convex cross-sections, plus `ComplexPolySlab(loops, ...)` for self-intersecting and multi-loop (hole-carving) cross-sections
 - Shared core geometry constructors use `position=...` consistently across analytic primitives, `Mesh`, and `SMPLBody`
 - Shared core geometry constructors default to `device=None`, while `Scene(...)` owns device placement and defaults to CUDA
 - Rotation support for applicable analytic geometries
@@ -71,6 +72,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - Structure overlap resolution uses `Structure.priority` first, then append order among equal-priority structures
 - Occupancy-based material blending on the scene grid, with SDF-driven soft occupancy for shared `Box`, `Sphere`, `Cylinder`, `Torus`, and `HollowBox`
 - Phase-1.5 primitive SDF coverage for shared `Ellipsoid`, `Cone`, `Pyramid`, and `Prism`
+- Differentiable SDF occupancy for `PolySlab` and `ComplexPolySlab`, with gradients through polygon vertices, axis bounds, and sidewall angle
 - Differentiable mesh occupancy compilation through shared mesh signed-distance evaluation, including Slang-accelerated CUDA forward/backward distance-sign queries for watertight solid fill, geometry-state-aware static mesh SDF caching, cached BVH acceleration for larger static CUDA meshes, and shared surface-band modes
 - Supersampled voxel averaging for smoother material interfaces on partial cells
 
