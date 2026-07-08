@@ -1,6 +1,15 @@
 from witwin.core import Box, Cone, Cylinder, Ellipsoid, HollowBox, Mesh, Prism, Pyramid, Sphere, Structure, Torus
 from .media import DebyePole, DiagonalTensor3, DrudePole, LorentzPole, Material, Tensor3x3
-from .monitors import ClosedSurfaceMonitor, FinitePlaneMonitor, FluxMonitor, ModeMonitor, PlaneMonitor, PointMonitor
+from .monitors import (
+    ClosedSurfaceMonitor,
+    FieldTimeMonitor,
+    FinitePlaneMonitor,
+    FluxMonitor,
+    FluxTimeMonitor,
+    ModeMonitor,
+    PlaneMonitor,
+    PointMonitor,
+)
 from .ports import ModePort
 from . import postprocess
 from .result import Result
@@ -31,7 +40,9 @@ __all__ = [
     "Domain",
     "DrudePole",
     "Ellipsoid",
+    "FieldTimeMonitor",
     "FluxMonitor",
+    "FluxTimeMonitor",
     "FDFDConfig",
     "FDTDConfig",
     "FinitePlaneMonitor",

@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import torch
 
@@ -726,6 +728,255 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
             entry["phase_step_sin"],
         )
     solver._sync_observer_primary_state()
+
+
+# ---------------------------------------------------------------------------
+# Time-domain observers (raw time-series fields and instantaneous flux).
+#
+# These are intentionally kept separate from the running-DFT spectral path:
+# they preallocate GPU buffers and copy the current real field slice on a fixed
+# sampling schedule, rather than accumulating phase-weighted spectral sums.
+# ---------------------------------------------------------------------------
+
+
+def _time_sample_steps(record, time_steps):
+    start = int(record["start"])
+    stop = time_steps if record["stop"] is None else int(record["stop"])
+    stop = min(stop, int(time_steps))
+    interval = int(record["interval"])
+    return [n for n in range(start, stop) if (n - start) % interval == 0]
+
+
+def _primary_plane_index(plane_samples):
+    primary = max(plane_samples, key=lambda sample: sample["weight"])
+    return int(primary["plane_index"])
+
+
+def _resolve_time_plane_component(solver, axis, position, component):
+    observer = {"axis": axis, "position": float(position), "component": component}
+    plane_samples, plane_coords = resolve_plane_observer(solver, observer)
+    axis_name = normalize_axis(axis)
+    plane_index = _primary_plane_index(plane_samples)
+    field_name = _field_name(component)
+    field = getattr(solver, field_name)
+    return {
+        "field_name": field_name,
+        "axis_code": _AXIS_CODES[axis_name],
+        "plane_index": plane_index,
+        "field_slice": _plane_field_slice(axis_name, plane_index),
+        "plane_coords": plane_coords,
+        "plane_shape": _plane_shape(field, axis_name),
+    }
+
+
+def _resolve_time_volume_box(solver, component, position, size):
+    x_coords, y_coords, z_coords = get_component_coords(solver, component)
+    axis_coords = (
+        np.asarray(x_coords, dtype=np.float64),
+        np.asarray(y_coords, dtype=np.float64),
+        np.asarray(z_coords, dtype=np.float64),
+    )
+    slices = []
+    coords_out = []
+    for axis_index in range(3):
+        coords = axis_coords[axis_index]
+        center = float(position[axis_index])
+        half = 0.5 * float(size[axis_index])
+        if half <= 1e-12:
+            index = int(np.argmin(np.abs(coords - center)))
+            slices.append(slice(index, index + 1))
+            coords_out.append(coords[index:index + 1])
+            continue
+        tolerance = 1e-12 * max(abs(center - half), abs(center + half), 1.0)
+        mask = (coords >= center - half - tolerance) & (coords <= center + half + tolerance)
+        indices = np.nonzero(mask)[0]
+        if indices.size == 0:
+            index = int(np.argmin(np.abs(coords - center)))
+            slices.append(slice(index, index + 1))
+            coords_out.append(coords[index:index + 1])
+            continue
+        lower = int(indices[0])
+        upper = int(indices[-1]) + 1
+        slices.append(slice(lower, upper))
+        coords_out.append(coords[lower:upper])
+    return tuple(slices), tuple(coords_out)
+
+
+def clear_time_observers(solver):
+    solver.time_observers = []
+    solver.time_observers_enabled = False
+
+
+def prepare_time_observers(solver, time_steps):
+    records = getattr(solver, "time_observers", None)
+    if not records:
+        solver.time_observers_enabled = False
+        return
+
+    for record in records:
+        sample_steps = _time_sample_steps(record, time_steps)
+        record["sample_steps"] = sample_steps
+        record["next_index"] = 0
+        num_samples = len(sample_steps)
+
+        if record["kind"] == "field_time":
+            region_kind = record["region_kind"]
+            record["buffers"] = {}
+            record["component_meta"] = {}
+            if region_kind == "point":
+                for component in record["components"]:
+                    field = getattr(solver, _field_name(component))
+                    index = resolve_point_observer(
+                        solver,
+                        {"component": component, "position": record["position"]},
+                    )
+                    record["component_meta"][component] = {"field_index": index}
+                    record["buffers"][component] = torch.zeros(
+                        (num_samples,), device=solver.device, dtype=field.dtype
+                    )
+            elif region_kind == "plane":
+                for component in record["components"]:
+                    meta = _resolve_time_plane_component(
+                        solver,
+                        record["axis"],
+                        record["plane_position"],
+                        component,
+                    )
+                    record["component_meta"][component] = meta
+                    field = getattr(solver, meta["field_name"])
+                    record["buffers"][component] = torch.zeros(
+                        (num_samples,) + meta["plane_shape"], device=solver.device, dtype=field.dtype
+                    )
+            else:
+                warnings.warn(
+                    f"FieldTimeMonitor {record['name']!r} records a volume time series; "
+                    "this preallocates a dense (num_samples, Nx, Ny, Nz) GPU buffer and can be memory-heavy.",
+                    stacklevel=2,
+                )
+                for component in record["components"]:
+                    field = getattr(solver, _field_name(component))
+                    slices, coords = _resolve_time_volume_box(
+                        solver, component, record["position"], record["size"]
+                    )
+                    sub_shape = tuple(field[slices].shape)
+                    record["component_meta"][component] = {
+                        "field_name": _field_name(component),
+                        "slices": slices,
+                        "coords": coords,
+                    }
+                    record["buffers"][component] = torch.zeros(
+                        (num_samples,) + sub_shape, device=solver.device, dtype=field.dtype
+                    )
+        else:
+            record["flux_components"] = {
+                component: _resolve_time_plane_component(
+                    solver, record["axis"], record["position"], component
+                )
+                for component in record["fields"]
+            }
+            record["buffer"] = torch.zeros((num_samples,), device=solver.device, dtype=torch.float32)
+
+    solver.time_observers_enabled = any(records)
+
+
+def accumulate_time_observers(solver, n):
+    if not getattr(solver, "time_observers_enabled", False):
+        return
+
+    for record in solver.time_observers:
+        sample_steps = record["sample_steps"]
+        next_index = record["next_index"]
+        if next_index >= len(sample_steps) or n != sample_steps[next_index]:
+            continue
+        k = next_index
+        record["next_index"] = next_index + 1
+
+        if record["kind"] == "field_time":
+            region_kind = record["region_kind"]
+            for component, meta in record["component_meta"].items():
+                field = getattr(solver, _field_name(component))
+                buffer = record["buffers"][component]
+                if region_kind == "point":
+                    i, j, l = meta["field_index"]
+                    buffer[k] = field[i, j, l]
+                elif region_kind == "plane":
+                    buffer[k] = field[meta["field_slice"]].squeeze(meta["axis_code"])
+                else:
+                    buffer[k] = field[meta["slices"]]
+            continue
+
+        axis = record["axis"]
+        component_payloads = {}
+        for component, meta in record["flux_components"].items():
+            field = getattr(solver, meta["field_name"])
+            plane = field[meta["field_slice"]].squeeze(meta["axis_code"])
+            component_payloads[component] = {"data": plane, "coords": meta["plane_coords"]}
+        aligned = _align_plane_monitor_payload(axis, component_payloads)
+        coord_names = _plane_coord_names(axis)
+        flux_input = {
+            "axis": axis,
+            coord_names[0]: aligned[coord_names[0]],
+            coord_names[1]: aligned[coord_names[1]],
+            "normal_direction": record["normal_direction"],
+            "frequency": 0.0,
+        }
+        for component_name, value in aligned["fields"].items():
+            flux_input[component_name] = value
+        # _compute_plane_flux applies the 0.5 * Re(E x conj(H)) time-average
+        # convention; for real instantaneous fields the physical Poynting flux is
+        # E x H, so multiply by 2 to remove that 0.5 factor.
+        record["buffer"][k] = 2.0 * _compute_plane_flux(flux_input)
+
+
+def get_time_observer_results(solver):
+    results = {}
+    for record in getattr(solver, "time_observers", ()):
+        sample_steps = record.get("sample_steps", [])
+        # An early auto-shutoff break freezes next_index below the planned sample
+        # count; truncate t and the buffers to what was actually recorded so the
+        # trace never carries zeros at time steps that were never simulated.
+        count = int(record.get("next_index", len(sample_steps)))
+        t = torch.tensor(sample_steps[:count], device=solver.device, dtype=torch.float64) * solver.dt
+        if record["kind"] == "field_time":
+            components = {name: buffer[:count] for name, buffer in record["buffers"].items()}
+            payload = {
+                "kind": "field_time",
+                "name": record["name"],
+                "t": t,
+                "components": dict(components),
+                "fields": tuple(record["components"]),
+                "start": record["start"],
+                "stop": record["stop"],
+                "interval": record["interval"],
+                "position": record["position"],
+                "size": record["size"],
+            }
+            first_component = record["components"][0]
+            first_meta = record["component_meta"][first_component]
+            if record["region_kind"] == "plane":
+                payload["coords"] = first_meta["plane_coords"]
+            elif record["region_kind"] == "volume":
+                payload["coords"] = first_meta["coords"]
+            if len(record["components"]) == 1:
+                buffer = components[first_component]
+                payload["data"] = buffer
+                payload["field"] = buffer
+            results[record["name"]] = payload
+        else:
+            payload = {
+                "kind": "flux_time",
+                "name": record["name"],
+                "t": t,
+                "flux": record["buffer"][:count],
+                "axis": record["axis"],
+                "position": record["position"],
+                "normal_direction": record["normal_direction"],
+                "start": record["start"],
+                "stop": record["stop"],
+                "interval": record["interval"],
+            }
+            results[record["name"]] = payload
+    return results
 
 
 def _compute_source_spectrum(entries, global_freq_indices, scale_fn):

@@ -134,6 +134,8 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - `FinitePlaneMonitor` for first-class finite rectangular plane sampling with explicit `position=(x, y, z)` and `size=(sx, sy, sz)` on a zero-thickness axis
 - `ClosedSurfaceMonitor` for first-class finite closed Huygens-surface workflows, including `ClosedSurfaceMonitor.box(...)` and custom multi-face axis-aligned surfaces built from `FinitePlaneMonitor` faces
 - `FluxMonitor` for plane-integrated power / flux extraction from tangential `E/H` fields
+- `FieldTimeMonitor` for raw time-domain FDTD field recording (point, plane, or volume region) with `start` / `stop` / `interval` sampling controls, returning the sample-time tensor `t` and per-component GPU buffers through `Result.monitor(...)`
+- `FluxTimeMonitor` for instantaneous time-domain Poynting flux (`E x H`) recorded on an axis-aligned plane with `start` / `stop` / `interval` sampling controls, returning the sample-time tensor `t` and the flux time series through `Result.monitor(...)`
 - Experimental `ModeMonitor` for first-class modal decomposition on an axis-aligned port plane, reusing the current `ModeSource` mode specification and returning forward / backward modal amplitudes and power through `Result.monitor(...)`
 - Optional per-monitor `frequencies=` on plane and modal monitors / ports
 - Named monitor results returned through the unified `Result` object

@@ -939,6 +939,8 @@ def solve(
     observer_frequency = dft_frequency if dft_frequency is not None else solver.source_frequency
     if solver.observers:
         solver._prepare_observers(observer_frequency, dft_window, time_steps)
+    if getattr(solver, "time_observers", None):
+        solver._prepare_time_observers(time_steps)
 
     solver._shutoff_triggered = False
     solver._shutoff_step = None
@@ -1003,6 +1005,7 @@ def solve(
             enforce_pec_boundaries(solver)
         solver.accumulate_dft(n)
         solver.accumulate_observers(n)
+        solver.accumulate_time_observers(n)
 
         if shutoff > 0 and (n + 1) % shutoff_check_interval == 0:
             e_energy = _electric_field_energy(solver)
@@ -1044,6 +1047,10 @@ def solve(
     output = {}
     if solver.dft_enabled:
         output.update(solver.get_frequency_solution(all_frequencies=True))
-    if solver.observers_enabled:
-        output["observers"] = solver.get_observer_results()
+    monitors = solver.get_observer_results() if solver.observers_enabled else {}
+    if getattr(solver, "time_observers_enabled", False):
+        monitors = dict(monitors)
+        monitors.update(solver.get_time_observer_results())
+    if monitors:
+        output["observers"] = monitors
     return output or None

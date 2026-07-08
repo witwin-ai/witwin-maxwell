@@ -412,6 +412,115 @@ class ClosedSurfaceMonitor:
         return cls(name, faces, frequencies=frequencies)
 
 
+def _validate_time_sampling(start, stop, interval) -> tuple[int, int | None, int]:
+    resolved_start = int(start)
+    if resolved_start < 0:
+        raise ValueError("start must be >= 0.")
+    resolved_interval = int(interval)
+    if resolved_interval < 1:
+        raise ValueError("interval must be >= 1.")
+    if stop is None:
+        resolved_stop = None
+    else:
+        resolved_stop = int(stop)
+        if resolved_stop <= resolved_start:
+            raise ValueError("stop must be greater than start.")
+    return resolved_start, resolved_stop, resolved_interval
+
+
+@dataclass(frozen=True)
+class FieldTimeMonitor:
+    name: str
+    components: tuple[str, ...]
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    start: int
+    stop: int | None
+    interval: int
+    region_kind: str
+    axis: str | None = None
+    plane_position: float | None = None
+    tangential_bounds: dict[str, tuple[float, float]] | None = None
+    kind: str = "field_time"
+
+    def __init__(
+        self,
+        name,
+        components=("Ez",),
+        position=(0.0, 0.0, 0.0),
+        size=(0.0, 0.0, 0.0),
+        start=0,
+        stop=None,
+        interval=1,
+    ):
+        normalized_components = tuple(normalize_component(component).capitalize() for component in _normalize_fields(components))
+        resolved_position = _require_length3("position", position)
+        resolved_size = _require_nonnegative_length3("size", size)
+        resolved_start, resolved_stop, resolved_interval = _validate_time_sampling(start, stop, interval)
+        zero_axes = [index for index, length in enumerate(resolved_size) if abs(length) <= 1e-12]
+        axis = None
+        plane_position = None
+        tangential_bounds = None
+        if len(zero_axes) == 3:
+            region_kind = "point"
+        elif len(zero_axes) == 1:
+            region_kind = "plane"
+            _, _, axis, plane_position, tangential_bounds = _resolve_finite_plane_geometry(
+                resolved_position,
+                resolved_size,
+            )
+        else:
+            region_kind = "volume"
+
+        object.__setattr__(self, "name", str(name))
+        object.__setattr__(self, "components", normalized_components)
+        object.__setattr__(self, "position", resolved_position)
+        object.__setattr__(self, "size", resolved_size)
+        object.__setattr__(self, "start", resolved_start)
+        object.__setattr__(self, "stop", resolved_stop)
+        object.__setattr__(self, "interval", resolved_interval)
+        object.__setattr__(self, "region_kind", region_kind)
+        object.__setattr__(self, "axis", axis)
+        object.__setattr__(self, "plane_position", plane_position)
+        object.__setattr__(self, "tangential_bounds", tangential_bounds)
+        object.__setattr__(self, "kind", "field_time")
+
+
+@dataclass(frozen=True)
+class FluxTimeMonitor:
+    name: str
+    axis: str
+    position: float
+    fields: tuple[str, ...]
+    normal_direction: str
+    start: int
+    stop: int | None
+    interval: int
+    kind: str = "flux_time"
+
+    def __init__(
+        self,
+        name,
+        axis="z",
+        position=0.0,
+        start=0,
+        stop=None,
+        interval=1,
+        normal_direction="+",
+    ):
+        axis_name = normalize_axis(axis)
+        resolved_start, resolved_stop, resolved_interval = _validate_time_sampling(start, stop, interval)
+        object.__setattr__(self, "name", str(name))
+        object.__setattr__(self, "axis", axis_name)
+        object.__setattr__(self, "position", float(position))
+        object.__setattr__(self, "fields", required_flux_fields(axis_name))
+        object.__setattr__(self, "normal_direction", _normalize_normal_direction(normal_direction))
+        object.__setattr__(self, "start", resolved_start)
+        object.__setattr__(self, "stop", resolved_stop)
+        object.__setattr__(self, "interval", resolved_interval)
+        object.__setattr__(self, "kind", "flux_time")
+
+
 @dataclass(frozen=True)
 class ModeMonitor:
     name: str

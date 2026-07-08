@@ -8,12 +8,16 @@ from .excitation import inject_source_terms
 from .io import save_frequency_solution as save_frequency_solution_impl
 from .observers import (
     accumulate_observers as accumulate_observers_impl,
+    accumulate_time_observers as accumulate_time_observers_impl,
     add_plane_observer as add_plane_observer_impl,
     add_point_observer as add_point_observer_impl,
     clear_observers as clear_observers_impl,
+    clear_time_observers as clear_time_observers_impl,
     get_component_coords as get_component_coords_impl,
     get_observer_results as get_observer_results_impl,
+    get_time_observer_results as get_time_observer_results_impl,
     prepare_observers as prepare_observers_impl,
+    prepare_time_observers as prepare_time_observers_impl,
     resolve_plane_observer as resolve_plane_observer_impl,
     resolve_point_observer as resolve_point_observer_impl,
 )
@@ -215,6 +219,18 @@ class FDTD:
 
     def get_observer_results(self):
         return get_observer_results_impl(self)
+
+    def clear_time_observers(self):
+        clear_time_observers_impl(self)
+
+    def _prepare_time_observers(self, time_steps):
+        prepare_time_observers_impl(self, time_steps)
+
+    def accumulate_time_observers(self, n):
+        accumulate_time_observers_impl(self, n)
+
+    def get_time_observer_results(self):
+        return get_time_observer_results_impl(self)
 
     def get_frequency_solution(self, *, frequency=None, freq_index=None, all_frequencies=False):
         return get_frequency_solution_impl(

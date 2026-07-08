@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from ..monitors import (
+    FieldTimeMonitor,
     FinitePlaneMonitor,
     FluxMonitor,
+    FluxTimeMonitor,
     ModeMonitor,
     PlaneMonitor,
     PointMonitor,
@@ -38,6 +40,10 @@ def compile_fdtd_observers(scene):
     compiled = []
     monitors = scene.resolved_monitors() if hasattr(scene, "resolved_monitors") else scene.monitors
     for monitor in monitors:
+        if isinstance(monitor, (FieldTimeMonitor, FluxTimeMonitor)):
+            # Time-domain monitors are handled by compile_fdtd_time_observers and
+            # must not become running-DFT spectral observers.
+            continue
         normalized_fields = tuple(normalize_component(field) for field in monitor.fields)
         if isinstance(monitor, PointMonitor):
             for field in normalized_fields:
@@ -70,4 +76,43 @@ def compile_fdtd_observers(scene):
                 compiled.append(observer)
             continue
         raise ValueError(f"Unsupported monitor type: {type(monitor).__name__}")
+    return compiled
+
+
+def compile_fdtd_time_observers(scene):
+    compiled = []
+    monitors = scene.resolved_monitors() if hasattr(scene, "resolved_monitors") else scene.monitors
+    for monitor in monitors:
+        if isinstance(monitor, FieldTimeMonitor):
+            record = {
+                "name": monitor.name,
+                "kind": "field_time",
+                "start": int(monitor.start),
+                "stop": None if monitor.stop is None else int(monitor.stop),
+                "interval": int(monitor.interval),
+                "region_kind": monitor.region_kind,
+                "components": tuple(normalize_component(field).capitalize() for field in monitor.components),
+                "position": tuple(float(value) for value in monitor.position),
+                "size": tuple(float(value) for value in monitor.size),
+            }
+            if monitor.region_kind == "plane":
+                record["axis"] = normalize_axis(monitor.axis)
+                record["plane_position"] = float(monitor.plane_position)
+            compiled.append(record)
+            continue
+        if isinstance(monitor, FluxTimeMonitor):
+            compiled.append(
+                {
+                    "name": monitor.name,
+                    "kind": "flux_time",
+                    "start": int(monitor.start),
+                    "stop": None if monitor.stop is None else int(monitor.stop),
+                    "interval": int(monitor.interval),
+                    "axis": normalize_axis(monitor.axis),
+                    "position": float(monitor.position),
+                    "fields": tuple(normalize_component(field).capitalize() for field in monitor.fields),
+                    "normal_direction": monitor.normal_direction,
+                }
+            )
+            continue
     return compiled
