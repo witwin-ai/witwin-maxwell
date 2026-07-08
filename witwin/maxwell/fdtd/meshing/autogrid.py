@@ -19,14 +19,28 @@ import math
 import numpy as np
 
 _C0 = 299_792_458.0
-_FACE_DEDUP_REL = 1e-9
+# Structure AABBs come from float32 ``to_mesh`` vertices, whose relative
+# precision is ~1.2e-7. A face nominally on a domain boundary (or on another
+# face) can therefore land that far away from it. Snap faces closer than this
+# together so a float32-rounded coordinate never spawns a sub-cell sliver
+# interval, which the ratio fixpoint would otherwise resolve into a fan of
+# near-zero-width cells (crushing the Courant limit).
+_FACE_SNAP_REL = 1e-6
 _SLACK = 1.0 + 1e-12
 _MAX_AXIS_CELLS = 10_000_000
 
 
+def _axis_tolerance(lo: float, hi: float) -> float:
+    """Face-snapping tolerance for one axis.
+
+    Scaled by ``max(span, |lo|, |hi|)`` so it stays valid for domains offset far
+    from the origin, where the float32 ULP grows with coordinate magnitude.
+    """
+    return _FACE_SNAP_REL * max(hi - lo, abs(lo), abs(hi))
+
+
 def _collect_boundaries(lo: float, hi: float, faces) -> np.ndarray:
-    span = hi - lo
-    tolerance = _FACE_DEDUP_REL * span
+    tolerance = _axis_tolerance(lo, hi)
     interior = sorted({min(max(float(face), lo), hi) for face in faces})
     boundaries = [lo]
     for value in interior:
@@ -39,7 +53,7 @@ def _collect_boundaries(lo: float, hi: float, faces) -> np.ndarray:
 def _interval_targets(boundaries, base_dl, constraints, layer_min_cells) -> np.ndarray:
     lengths = np.diff(boundaries)
     targets = np.full(lengths.size, float(base_dl), dtype=np.float64)
-    tolerance = _FACE_DEDUP_REL * float(boundaries[-1] - boundaries[0])
+    tolerance = _axis_tolerance(float(boundaries[0]), float(boundaries[-1]))
     for c_lo, c_hi, c_dl in constraints:
         overlap = (boundaries[:-1] < c_hi - tolerance) & (boundaries[1:] > c_lo + tolerance)
         targets[overlap] = np.minimum(targets[overlap], c_dl)
@@ -214,11 +228,38 @@ def _meshing_wavelength(scene) -> float:
     return _C0 / max(frequencies)
 
 
+def _uniformize_boundary_band(nodes: np.ndarray, n_low: int, n_high: int) -> np.ndarray:
+    """Force the outermost ``n_low`` / ``n_high`` cells to be uniform.
+
+    The CPML absorber occupies the outermost ``pml_thickness`` cells of the
+    domain and grades by physical depth, so a uniform absorber band gives the
+    cleanest absorption. This re-spaces only the cells inside each band: the
+    domain edges and the first interior node past each band stay fixed, so the
+    interior mesh (and its target / ratio invariants) is untouched. It is a
+    no-op where the band is already uniform (the common vacuum-edge case) and
+    only reshapes cells when a nearby structure let a graded ramp intrude into
+    the absorber. Bands are skipped (rather than overlapped) on domains too thin
+    to hold both plus an interior cell.
+    """
+    cells = nodes.size - 1
+    n_low = max(0, int(n_low))
+    n_high = max(0, int(n_high))
+    if n_low + n_high >= cells:
+        return nodes
+    out = nodes.copy()
+    if n_low > 0:
+        out[: n_low + 1] = np.linspace(out[0], out[n_low], n_low + 1)
+    if n_high > 0:
+        out[-(n_high + 1) :] = np.linspace(out[-(n_high + 1)], out[-1], n_high + 1)
+    return out
+
+
 def resolve_auto_grid(scene):
     """Materialize a ``GridSpec.auto`` scene grid into per-axis node arrays.
 
     Returns float64 ``(x_nodes, y_nodes, z_nodes)`` spanning the scene domain
-    exactly, suitable for ``GridSpec.custom``.
+    exactly, suitable for ``GridSpec.custom``. The outermost cells under each
+    PML face are uniformized so the absorber sees a clean, constant-step band.
     """
     grid = scene.grid
     wavelength = _meshing_wavelength(scene)
@@ -244,24 +285,29 @@ def resolve_auto_grid(scene):
     layer = grid.layer_refinement
     nodes = []
     for axis_index, (axis_lo, axis_hi) in enumerate(scene.domain.bounds):
+        axis = "xyz"[axis_index]
         layer_min_cells = (
-            layer.min_cells if layer is not None and layer.covers("xyz"[axis_index]) else None
+            layer.min_cells if layer is not None and layer.covers(axis) else None
         )
-        nodes.append(
-            mesh_axis(
-                axis_lo,
-                axis_hi,
-                wavelength=wavelength,
-                min_steps_per_wavelength=grid.min_steps_per_wavelength,
-                max_ratio=grid.max_ratio,
-                index_regions=[
-                    (lo[axis_index], hi[axis_index], index) for lo, hi, index in index_regions
-                ],
-                override_regions=[
-                    (lo[axis_index], hi[axis_index], dl[axis_index])
-                    for lo, hi, dl in override_regions
-                ],
-                layer_min_cells=layer_min_cells,
-            )
+        axis_nodes = mesh_axis(
+            axis_lo,
+            axis_hi,
+            wavelength=wavelength,
+            min_steps_per_wavelength=grid.min_steps_per_wavelength,
+            max_ratio=grid.max_ratio,
+            index_regions=[
+                (lo[axis_index], hi[axis_index], index) for lo, hi, index in index_regions
+            ],
+            override_regions=[
+                (lo[axis_index], hi[axis_index], dl[axis_index])
+                for lo, hi, dl in override_regions
+            ],
+            layer_min_cells=layer_min_cells,
         )
+        axis_nodes = _uniformize_boundary_band(
+            axis_nodes,
+            scene.pml_thickness_for_face(axis, "low"),
+            scene.pml_thickness_for_face(axis, "high"),
+        )
+        nodes.append(axis_nodes)
     return tuple(nodes)

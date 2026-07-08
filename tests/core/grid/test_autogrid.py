@@ -6,7 +6,11 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.fdtd.meshing import mesh_axis
-from witwin.maxwell.fdtd.meshing.autogrid import _collect_boundaries, _interval_targets
+from witwin.maxwell.fdtd.meshing.autogrid import (
+    _collect_boundaries,
+    _interval_targets,
+    _uniformize_boundary_band,
+)
 from witwin.maxwell.scene import prepare_scene
 
 _C0 = 299_792_458.0
@@ -345,6 +349,106 @@ def test_high_index_waveguide_uses_substantially_fewer_cells():
         * int(np.ceil(0.6 / core_dl))
     )
     assert prepared.N_total < 0.35 * uniform_fine
+
+
+@pytest.mark.parametrize(
+    "lo, hi, inset",
+    [
+        (-0.03, 0.03, 1e-8),      # 0.03 rounds inward under float32 (~6.7e-10)
+        (99.97, 100.03, 1e-5),    # offset domain: float32 ULP ~7.6e-6 at |x|~100
+    ],
+)
+def test_domain_spanning_face_does_not_spawn_degenerate_cells(lo, hi, inset):
+    """Regression: a structure face on (or a float-hair inside) a domain boundary
+    must not spawn a sub-cell sliver that the ratio fixpoint fans into near-zero
+    cells (which would crush the Courant limit). ``to_mesh`` yields float32 AABBs,
+    so a nominally-on-boundary face can land ~1e-7*|coord| inside; the snap
+    tolerance scales with coordinate magnitude to cover offset domains too."""
+    index = 3.5
+    fine_dl = _WAVELENGTH / (index * _MSW)
+    span = hi - lo
+    # Whole-axis region whose faces land ``inset`` inside the domain edges.
+    regions = [(lo + inset, hi - inset, index)]
+    nodes = mesh_axis(
+        lo, hi, wavelength=_WAVELENGTH, min_steps_per_wavelength=_MSW,
+        max_ratio=_RATIO, index_regions=regions,
+    )
+    sizes = np.diff(nodes)
+    target_count = int(np.ceil(span / fine_dl))
+    assert nodes[0] == lo and nodes[-1] == hi
+    # No degenerate cells: the smallest cell stays within a small factor of the
+    # clean uniform fill instead of collapsing to ~0.
+    assert sizes.min() > 0.5 * span / target_count
+    # The near-boundary faces snapped away, so the refinement is still honored
+    # across the full span and the count is the single-interval fill.
+    assert sizes.max() <= fine_dl * _TOL
+    assert nodes.size - 1 <= target_count + 3
+
+
+def test_full_span_slab_scene_has_healthy_transverse_mesh():
+    """Scene-level regression through the real float32 ``to_mesh`` AABB path: a
+    slab spanning the full transverse extent (its x/y faces coincide with the
+    domain boundary) must mesh cleanly, not explode into near-zero cells."""
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.16, 0.16), (-0.03, 0.03), (-0.16, 0.16))),
+        grid=mw.GridSpec.auto(min_steps_per_wavelength=_MSW, wavelength=0.15),
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.32, 0.06, 0.12)),
+            material=mw.Material(eps_r=12.0),
+        )
+    )
+    prepared = prepare_scene(scene)
+    fine_dl = 0.15 / (np.sqrt(12.0) * _MSW)
+    # x and y span the full domain -> uniformly at the box target, no slivers.
+    for nodes in (prepared.x_nodes64, prepared.y_nodes64):
+        d = np.diff(nodes)
+        assert d.min() > 0.5 * fine_dl
+        assert d.max() <= fine_dl * _TOL
+    assert prepared.y_nodes64.size - 1 <= np.ceil(0.06 / fine_dl) + 3
+
+
+def test_uniformize_boundary_band_forces_uniform_edges():
+    nodes = np.array([0.0, 0.001, 0.003, 0.007, 0.015, 0.03, 0.06, 0.10, 0.15, 0.20])
+    out = _uniformize_boundary_band(nodes, 3, 3)
+    dl = np.diff(out)
+    assert np.allclose(dl[:3], dl[0])       # low band uniform
+    assert np.allclose(dl[-3:], dl[-1])     # high band uniform
+    assert out[0] == nodes[0] and out[-1] == nodes[-1]     # domain edges fixed
+    assert np.allclose(out[3:-3], nodes[3:-3])             # interior untouched
+    # Bands that would overlap on a too-thin axis leave the mesh unchanged.
+    assert np.array_equal(_uniformize_boundary_band(nodes, 5, 5), nodes)
+    # No PML on a face -> no forced band.
+    assert np.array_equal(_uniformize_boundary_band(nodes, 0, 0), nodes)
+
+
+def test_autogrid_uniform_cells_under_pml_faces():
+    """The absorber sees a constant-step band: the outermost ``num_layers`` cells
+    under every PML face are uniform, even when a nearby structure would let a
+    graded ramp intrude into the absorber."""
+    NL = 8
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.auto(min_steps_per_wavelength=_MSW, wavelength=_WAVELENGTH),
+        boundary=mw.BoundarySpec.pml(num_layers=NL), device="cpu",
+    )
+    # High-index block hugging the high-z edge (its low/high faces are interior).
+    scene.add_structure(mw.Structure(
+        geometry=mw.Box(position=(0.0, 0.0, 0.32), size=(0.2, 0.2, 0.26)),
+        material=mw.Material(eps_r=12.0),
+    ))
+    prepared = prepare_scene(scene)
+    for nodes in (prepared.x_nodes64, prepared.y_nodes64, prepared.z_nodes64):
+        dl = np.diff(nodes)
+        assert np.allclose(dl[:NL], dl[0])      # low absorber band uniform
+        assert np.allclose(dl[-NL:], dl[-1])    # high absorber band uniform
+    # The band is genuinely reshaped: the raw mesh (no uniformization) is not
+    # uniform in the high-z absorber, so the assertion above exercises the fix.
+    raw = mesh_axis(-0.5, 0.5, wavelength=_WAVELENGTH, min_steps_per_wavelength=_MSW,
+                    max_ratio=_RATIO, index_regions=[(0.19, 0.45, 12.0 ** 0.5)])
+    assert not np.allclose(np.diff(raw)[-NL:], np.diff(raw)[-1])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
