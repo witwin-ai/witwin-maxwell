@@ -5,7 +5,7 @@ import math
 import torch
 
 from ..dispersion import solve_numerical_wavenumber
-from .spatial import gaussian_beam_profile, plane_wave_profile
+from .spatial import beam_profile_from_source, plane_wave_profile
 from .tfsf_specs import reference_sample_axis_code
 from .temporal import build_source_term
 
@@ -340,14 +340,12 @@ def incident_profile(
             reference_point=reference_point,
             propagation_speed=phase_speed,
         )
-    return gaussian_beam_profile(
+    return beam_profile_from_source(
         positions,
-        direction=source["direction"],
-        polarization=source["polarization"] if polarization_override is None else polarization_override,
-        beam_waist=source["beam_waist"],
-        focus=source["focus"],
+        source,
         frequency=solver.source_frequency if source_frequency is None else float(source_frequency),
         propagation_speed=phase_speed,
+        polarization=polarization_override,
     )
 
 

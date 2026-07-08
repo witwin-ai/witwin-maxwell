@@ -84,8 +84,9 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - `PlaneWave` soft source for analytical plane-wave injection on an auto-placed source plane
 - `PlaneWave` soft source uses a single-plane directional `E/H` equivalent-current injector with calibrated Tidy3D-style incident-power scaling
 - `GaussianBeam` soft source for analytical Gaussian-beam injection with configurable waist and focus
+- `AstigmaticGaussianBeam` soft source for elliptical Gaussian-beam injection with independent per-axis waist `(w0_u, w0_v)` and per-axis focal offsets `focus_u`/`focus_v`, reducing exactly to `GaussianBeam` for isotropic inputs and reusing the same soft and TFSF injection paths
 - Experimental `ModeSource` soft source for axis-aligned FDTD waveguide launching, using a full-vector generalized 2D eigenmode solve for forward source-plane assembly on real isotropic apertures, dense and sparse forward backends for that generalized solve, and a retained experimental torch-differentiable scalar eigensolve path for current trainable FDTD scenes
-- Experimental `TFSF(bounds=...)` injection descriptor for `PlaneWave` and `GaussianBeam`, with validated axis-aligned `PlaneWave` support for `CW` and `GaussianPulse`, and validated CW oblique `PlaneWave` support
+- Experimental `TFSF(bounds=...)` injection descriptor for `PlaneWave`, `GaussianBeam`, and `AstigmaticGaussianBeam`, with validated axis-aligned `PlaneWave` support for `CW` and `GaussianPulse`, and validated CW oblique `PlaneWave` support
 - Experimental `TFSF.slab(axis="z", bounds=...)` injection descriptor for grating-oriented CW `PlaneWave` workflows, spanning the transverse Bloch unit cell during solver preparation for periodic grating illumination
 - CUDA `PlaneWave` TFSF forward stepping uses native CUDA auxiliary-line updates and fused patch-application kernels to reduce per-step launch overhead
 - `GaussianBeam` `TFSF` remains experimental and currently uses the analytical profile provider rather than the future angular-spectrum / discrete-face engine

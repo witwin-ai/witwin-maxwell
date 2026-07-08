@@ -120,10 +120,12 @@ class _FDTDGradientBridge:
             "point_dipole",
             "plane_wave",
             "gaussian_beam",
+            "astigmatic_gaussian_beam",
             "mode_source",
         }:
             raise NotImplementedError(
-                "FDTD adjoint currently supports PointDipole, PlaneWave, GaussianBeam, and ModeSource source pullback only."
+                "FDTD adjoint currently supports PointDipole, PlaneWave, GaussianBeam, "
+                "AstigmaticGaussianBeam, and ModeSource source pullback only."
             )
 
     def _run_forward_with_checkpoints(self, solver, *, time_steps, dft_frequency, dft_window, full_field_dft, normalize_source):

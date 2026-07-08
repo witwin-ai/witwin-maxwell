@@ -576,7 +576,7 @@ def _initialize_analytic_tfsf_state(solver, source, lower, upper):
     phase_speed = solver.c if k_numeric <= 1e-12 else source_omega / k_numeric
     entry_s = entry_projection(source["injection"]["bounds"], source["direction"])
 
-    if source["kind"] == "gaussian_beam":
+    if source["kind"] in {"gaussian_beam", "astigmatic_gaussian_beam"}:
         electric_vector, magnetic_unit_vector_map = discrete_plane_wave_vectors(
             solver,
             source["direction"],
@@ -670,8 +670,10 @@ def initialize_tfsf_state(solver):
         raise ValueError("FDTD currently supports at most one TFSF source per scene.")
 
     source = tfsf_sources[0]
-    if source["kind"] not in {"plane_wave", "gaussian_beam"}:
-        raise ValueError("TFSF injection currently supports PlaneWave and GaussianBeam only.")
+    if source["kind"] not in {"plane_wave", "gaussian_beam", "astigmatic_gaussian_beam"}:
+        raise ValueError(
+            "TFSF injection currently supports PlaneWave, GaussianBeam, and AstigmaticGaussianBeam only."
+        )
     if source["injection"].get("mode", "box") == "slab":
         if solver.scene.boundary.uses_kind("bloch"):
             validate_grating_tfsf_slab_topology(solver)

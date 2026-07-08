@@ -16,7 +16,17 @@ from .ports import ModePort
 from . import postprocess
 from .result import Result
 from .scene import BoundaryKind, BoundarySpec, Domain, GridSpec, MaterialRegion, Scene, SceneModule
-from .sources import CW, GaussianBeam, GaussianPulse, ModeSource, PlaneWave, PointDipole, RickerWavelet, TFSF
+from .sources import (
+    AstigmaticGaussianBeam,
+    CW,
+    GaussianBeam,
+    GaussianPulse,
+    ModeSource,
+    PlaneWave,
+    PointDipole,
+    RickerWavelet,
+    TFSF,
+)
 from .simulation import (
     AbsorberKind,
     FDFDConfig,
@@ -31,6 +41,7 @@ from .simulation import (
 )
 
 __all__ = [
+    "AstigmaticGaussianBeam",
     "BoundarySpec",
     "BoundaryKind",
     "Box",

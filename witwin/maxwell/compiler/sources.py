@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..sources import GaussianBeam, ModeSource, PlaneWave, PointDipole, TFSF, compile_source_time
+from ..sources import (
+    AstigmaticGaussianBeam,
+    GaussianBeam,
+    ModeSource,
+    PlaneWave,
+    PointDipole,
+    TFSF,
+    compile_source_time,
+)
 
 
 def _compile_injection(injection) -> dict[str, object]:
@@ -85,6 +93,23 @@ def _compile_gaussian_beam(source: GaussianBeam, *, default_frequency: float) ->
     }
 
 
+def _compile_astigmatic_gaussian_beam(source: AstigmaticGaussianBeam, *, default_frequency: float) -> dict:
+    return {
+        "kind": "astigmatic_gaussian_beam",
+        "name": source.name,
+        "direction": source.direction,
+        "polarization": source.polarization,
+        "beam_waist_u": source.beam_waist[0],
+        "beam_waist_v": source.beam_waist[1],
+        "focus": source.focus,
+        "focus_u": source.focus_u,
+        "focus_v": source.focus_v,
+        "injection": _compile_injection(source.injection),
+        "injection_axis": source.injection_axis,
+        "source_time": compile_source_time(source.source_time, default_frequency=default_frequency),
+    }
+
+
 def _compile_mode_source(source: ModeSource, *, default_frequency: float) -> dict:
     source_time = compile_source_time(source.source_time, default_frequency=default_frequency)
     if source_time["kind"] != "cw":
@@ -121,6 +146,8 @@ def compile_fdtd_sources(scene, *, default_frequency: float):
             compiled.append(_compile_point_dipole(source, default_frequency=default_frequency))
         elif isinstance(source, PlaneWave):
             compiled.append(_compile_plane_wave(source, default_frequency=default_frequency))
+        elif isinstance(source, AstigmaticGaussianBeam):
+            compiled.append(_compile_astigmatic_gaussian_beam(source, default_frequency=default_frequency))
         elif isinstance(source, GaussianBeam):
             compiled.append(_compile_gaussian_beam(source, default_frequency=default_frequency))
         elif isinstance(source, ModeSource):

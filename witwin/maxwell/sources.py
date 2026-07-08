@@ -25,6 +25,15 @@ def _normalize_vector(name, value) -> tuple[float, float, float]:
     return tuple(component / norm for component in vector)
 
 
+def _require_beam_waist_pair(value) -> tuple[float, float]:
+    if len(value) != 2:
+        raise ValueError("beam_waist must contain exactly two values (w0_u, w0_v).")
+    waist = tuple(float(component) for component in value)
+    if any(component <= 0.0 for component in waist):
+        raise ValueError("beam_waist components must be > 0.")
+    return waist
+
+
 def _normalize_axis(axis) -> str | None:
     if axis is None:
         return None
@@ -458,6 +467,53 @@ class GaussianBeam:
             raise ValueError("beam_waist must be > 0.")
         if not isinstance(self.injection, TFSF) and self.injection != "soft":
             raise ValueError("GaussianBeam injection must be 'soft' or TFSF(...).")
+
+
+@dataclass(frozen=True)
+class AstigmaticGaussianBeam:
+    direction: tuple[float, float, float]
+    polarization: tuple[float, float, float]
+    beam_waist: tuple[float, float]
+    focus: tuple[float, float, float]
+    focus_u: float
+    focus_v: float
+    source_time: SourceTime | None = None
+    injection: Injection = "soft"
+    injection_axis: str | None = None
+    name: str | None = None
+    kind: str = "astigmatic_gaussian_beam"
+
+    def __init__(
+        self,
+        direction=(0.0, 0.0, 1.0),
+        polarization=(1.0, 0.0, 0.0),
+        beam_waist=(0.5, 0.5),
+        focus=(0.0, 0.0, 0.0),
+        focus_u=0.0,
+        focus_v=0.0,
+        source_time=None,
+        injection="soft",
+        injection_axis=None,
+        name=None,
+    ):
+        direction, polarization = _validate_transverse_polarization(direction, polarization)
+        object.__setattr__(self, "direction", direction)
+        object.__setattr__(self, "polarization", polarization)
+        object.__setattr__(self, "beam_waist", _require_beam_waist_pair(beam_waist))
+        object.__setattr__(self, "focus", _require_length3("focus", focus))
+        object.__setattr__(self, "focus_u", float(focus_u))
+        object.__setattr__(self, "focus_v", float(focus_v))
+        object.__setattr__(self, "source_time", source_time)
+        if isinstance(injection, TFSF):
+            normalized_injection = injection
+        else:
+            normalized_injection = str(injection).lower()
+        object.__setattr__(self, "injection_axis", _normalize_axis(injection_axis))
+        object.__setattr__(self, "injection", normalized_injection)
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "kind", "astigmatic_gaussian_beam")
+        if not isinstance(self.injection, TFSF) and self.injection != "soft":
+            raise ValueError("AstigmaticGaussianBeam injection must be 'soft' or TFSF(...).")
 
 
 @dataclass(frozen=True)

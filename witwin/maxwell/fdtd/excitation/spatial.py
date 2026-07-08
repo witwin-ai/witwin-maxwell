@@ -104,13 +104,29 @@ def plane_wave_profile(positions, *, direction, reference_point, propagation_spe
     return amplitude, delay
 
 
-def gaussian_beam_profile(
+def _astigmatic_curvature_delay(transverse, z, z_rayleigh, propagation_speed):
+    radius_of_curvature = torch.where(
+        torch.abs(z) > 1e-9,
+        z * (1.0 + (z_rayleigh / torch.clamp(torch.abs(z), min=1e-30)).square()),
+        torch.full_like(z, float("inf")),
+    )
+    return torch.where(
+        torch.isfinite(radius_of_curvature),
+        transverse.square() / (2.0 * radius_of_curvature * float(propagation_speed)),
+        torch.zeros_like(z),
+    )
+
+
+def _beam_profile_core(
     positions,
     *,
     direction,
     polarization,
-    beam_waist,
+    beam_waist_u,
+    beam_waist_v,
     focus,
+    focus_offset_u,
+    focus_offset_v,
     frequency,
     propagation_speed,
 ):
@@ -123,27 +139,118 @@ def gaussian_beam_profile(
     longitudinal = torch.sum(rel * direction_tensor, dim=-1)
     transverse_u = torch.sum(rel * polarization_tensor, dim=-1)
     transverse_v = torch.sum(rel * binormal_tensor, dim=-1)
-    rho_sq = transverse_u.square() + transverse_v.square()
+
+    # Per-axis longitudinal coordinate measured from each transverse-axis waist plane.
+    z_u = longitudinal - float(focus_offset_u)
+    z_v = longitudinal - float(focus_offset_v)
 
     wavelength = float(propagation_speed) / float(frequency)
-    z_rayleigh = math.pi * float(beam_waist) ** 2 / max(wavelength, 1e-30)
-    z_ratio = longitudinal / max(z_rayleigh, 1e-30)
-    beam_radius = float(beam_waist) * torch.sqrt(1.0 + z_ratio.square())
-    amplitude = (float(beam_waist) / beam_radius) * torch.exp(-rho_sq / beam_radius.square())
+    z_rayleigh_u = math.pi * float(beam_waist_u) ** 2 / max(wavelength, 1e-30)
+    z_rayleigh_v = math.pi * float(beam_waist_v) ** 2 / max(wavelength, 1e-30)
 
-    radius_of_curvature = torch.where(
-        torch.abs(longitudinal) > 1e-9,
-        longitudinal * (1.0 + (z_rayleigh / torch.clamp(torch.abs(longitudinal), min=1e-30)).square()),
-        torch.full_like(longitudinal, float("inf")),
+    beam_radius_u = float(beam_waist_u) * torch.sqrt(1.0 + (z_u / max(z_rayleigh_u, 1e-30)).square())
+    beam_radius_v = float(beam_waist_v) * torch.sqrt(1.0 + (z_v / max(z_rayleigh_v, 1e-30)).square())
+
+    amplitude = (
+        torch.sqrt(float(beam_waist_u) / beam_radius_u)
+        * torch.sqrt(float(beam_waist_v) / beam_radius_v)
+        * torch.exp(
+            -transverse_u.square() / beam_radius_u.square()
+            - transverse_v.square() / beam_radius_v.square()
+        )
     )
-    curvature_delay = torch.where(
-        torch.isfinite(radius_of_curvature),
-        rho_sq / (2.0 * radius_of_curvature * float(propagation_speed)),
-        torch.zeros_like(longitudinal),
+
+    curvature_delay = _astigmatic_curvature_delay(
+        transverse_u, z_u, z_rayleigh_u, propagation_speed
+    ) + _astigmatic_curvature_delay(transverse_v, z_v, z_rayleigh_v, propagation_speed)
+    gouy_phase = 0.5 * (
+        torch.atan(z_u / max(z_rayleigh_u, 1e-30)) + torch.atan(z_v / max(z_rayleigh_v, 1e-30))
     )
-    gouy_delay = torch.atan(z_ratio) / (2.0 * math.pi * float(frequency))
+    gouy_delay = gouy_phase / (2.0 * math.pi * float(frequency))
     delay = longitudinal / float(propagation_speed) + curvature_delay - gouy_delay
     return amplitude, delay
+
+
+def gaussian_beam_profile(
+    positions,
+    *,
+    direction,
+    polarization,
+    beam_waist,
+    focus,
+    frequency,
+    propagation_speed,
+):
+    return _beam_profile_core(
+        positions,
+        direction=direction,
+        polarization=polarization,
+        beam_waist_u=beam_waist,
+        beam_waist_v=beam_waist,
+        focus=focus,
+        focus_offset_u=0.0,
+        focus_offset_v=0.0,
+        frequency=frequency,
+        propagation_speed=propagation_speed,
+    )
+
+
+def astigmatic_gaussian_beam_profile(
+    positions,
+    *,
+    direction,
+    polarization,
+    beam_waist,
+    focus,
+    focus_offsets,
+    frequency,
+    propagation_speed,
+):
+    beam_waist_u, beam_waist_v = beam_waist
+    focus_offset_u, focus_offset_v = focus_offsets
+    return _beam_profile_core(
+        positions,
+        direction=direction,
+        polarization=polarization,
+        beam_waist_u=beam_waist_u,
+        beam_waist_v=beam_waist_v,
+        focus=focus,
+        focus_offset_u=focus_offset_u,
+        focus_offset_v=focus_offset_v,
+        frequency=frequency,
+        propagation_speed=propagation_speed,
+    )
+
+
+def beam_profile_from_source(
+    positions,
+    source,
+    *,
+    frequency,
+    propagation_speed,
+    polarization=None,
+):
+    polarization = source["polarization"] if polarization is None else polarization
+    if source["kind"] == "astigmatic_gaussian_beam":
+        return astigmatic_gaussian_beam_profile(
+            positions,
+            direction=source["direction"],
+            polarization=polarization,
+            beam_waist=(source["beam_waist_u"], source["beam_waist_v"]),
+            focus=source["focus"],
+            focus_offsets=(source["focus_u"], source["focus_v"]),
+            frequency=frequency,
+            propagation_speed=propagation_speed,
+        )
+    return gaussian_beam_profile(
+        positions,
+        direction=source["direction"],
+        polarization=polarization,
+        beam_waist=source["beam_waist"],
+        focus=source["focus"],
+        frequency=frequency,
+        propagation_speed=propagation_speed,
+    )
 
 
 class AuxiliaryGrid1D:

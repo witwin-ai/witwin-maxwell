@@ -6,7 +6,7 @@ import torch
 from ...sources import POINT_DIPOLE_IDEAL_PROFILE_SCALE, POINT_DIPOLE_REFERENCE_WIDTH
 from .spatial import (
     physical_interior_indices,
-    gaussian_beam_profile,
+    beam_profile_from_source,
     plane_center,
     plane_wave_profile,
     resolve_injection_axis,
@@ -319,12 +319,9 @@ def _prepare_surface_source(solver, source, *, source_index):
                 propagation_speed=solver.c,
             )
         else:
-            spatial_amplitude, delay_patch = gaussian_beam_profile(
+            spatial_amplitude, delay_patch = beam_profile_from_source(
                 positions,
-                direction=direction,
-                polarization=source["polarization"],
-                beam_waist=source["beam_waist"],
-                focus=source["focus"],
+                source,
                 frequency=source_frequency,
                 propagation_speed=solver.c,
             )
