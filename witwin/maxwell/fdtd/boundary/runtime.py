@@ -21,13 +21,19 @@ def _configure_face_boundary_codes(solver):
         ]
         for axis in ("x", "y", "z")
     }
-    for axis, mode in zip(("x", "y", "z"), symmetry):
-        if mode is not None:
-            if boundary.face_kind(axis, "low") not in {"none", "pml"}:
-                raise ValueError(
-                    f"Scene.symmetry on the {axis}-low face requires BoundarySpec.none() or BoundarySpec.pml(...)."
-                )
-            face_codes[axis][0] = BOUNDARY_KIND_TO_CODE[mode.lower()]
+    for axis, entry in zip(("x", "y", "z"), symmetry):
+        if entry is None:
+            continue
+        mode, face = entry
+        if boundary.face_kind(axis, face) not in {"none", "pml"}:
+            raise ValueError(
+                f"Scene.symmetry on the {axis}-{face} face requires "
+                "BoundarySpec.none() or BoundarySpec.pml(...)."
+            )
+        face_index = 0 if face == "low" else 1
+        face_codes[axis][face_index] = BOUNDARY_KIND_TO_CODE[mode.lower()]
+
+    _validate_symmetry_source_placement(solver.scene, symmetry)
 
     for axis in ("x", "y", "z"):
         low_code, high_code = (int(face_codes[axis][0]), int(face_codes[axis][1]))
@@ -61,6 +67,59 @@ def _configure_face_boundary_codes(solver):
         if boundary.face_kind(axis, side) == "mur"
     )
     solver.has_mur_faces = bool(solver.mur_faces)
+
+
+_AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
+
+
+def _source_center(source):
+    """Return a point-like source center coordinate tuple, or ``None`` if the
+    source spans the domain (e.g. plane waves) and has no single position."""
+    for attr in ("position", "center"):
+        value = getattr(source, attr, None)
+        if value is not None:
+            return tuple(float(v) for v in value)
+    return None
+
+
+def _validate_symmetry_source_placement(scene, symmetry):
+    """Reject point-like sources located in the folded-away half of the domain.
+
+    A source may sit on the symmetry plane or anywhere in the kept half; a source
+    beyond the plane lives in the removed half and cannot be represented on the
+    folded grid, so we raise clearly instead of silently dropping it.
+    """
+    if all(entry is None for entry in symmetry):
+        return
+    resolver = getattr(scene, "resolved_sources", None)
+    sources = resolver() if callable(resolver) else getattr(scene, "sources", ())
+    bounds = scene.domain.bounds
+    tol = 1e-9
+    for source in sources:
+        center = _source_center(source)
+        if center is None:
+            continue
+        for axis, entry in zip(("x", "y", "z"), symmetry):
+            if entry is None:
+                continue
+            _mode, face = entry
+            axis_idx = _AXIS_INDEX[axis]
+            low, high = float(bounds[axis_idx][0]), float(bounds[axis_idx][1])
+            coord = center[axis_idx]
+            span = max(high - low, tol)
+            plane = low if face == "low" else high
+            if face == "low" and coord < plane - tol * span:
+                raise ValueError(
+                    f"Source at {axis}={coord:g} lies in the folded-away half below the "
+                    f"{axis}-low symmetry plane at {plane:g}; place it on the plane or in "
+                    "the kept half of the domain."
+                )
+            if face == "high" and coord > plane + tol * span:
+                raise ValueError(
+                    f"Source at {axis}={coord:g} lies in the folded-away half above the "
+                    f"{axis}-high symmetry plane at {plane:g}; place it on the plane or in "
+                    "the kept half of the domain."
+                )
 
 
 def initialize_boundary_state(solver):

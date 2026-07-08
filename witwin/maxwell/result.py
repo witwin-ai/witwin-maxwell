@@ -163,14 +163,23 @@ def _expand_tensor_with_symmetry(tensor: torch.Tensor, scene, component: str | N
     spatial_axis_offset = expanded.ndim - 3
     if spatial_axis_offset < 0:
         raise ValueError(f"Expected tensor with at least 3 dimensions, got shape {tuple(expanded.shape)}.")
-    for axis, symmetry in enumerate(getattr(scene, "symmetry", (None, None, None))):
-        if symmetry is None:
+    for axis, entry in enumerate(getattr(scene, "symmetry", (None, None, None))):
+        if entry is None:
             continue
+        mode, face = entry
         tensor_axis = spatial_axis_offset + axis
         half_size = half_sizes[axis]
         dim_size = int(expanded.shape[tensor_axis])
+        # Components with a grid node on the symmetry plane have ``half_size``
+        # samples; that shared plane must not be duplicated when mirroring.
+        # Components staggered off the plane have ``half_size - 1`` samples and
+        # are mirrored in full. The shared node sits at index 0 for a low-face
+        # plane and at the last index for a high-face plane.
         if dim_size == half_size:
-            mirrored_source = expanded.narrow(tensor_axis, 1, max(dim_size - 1, 0))
+            if face == "low":
+                mirrored_source = expanded.narrow(tensor_axis, 1, max(dim_size - 1, 0))
+            else:
+                mirrored_source = expanded.narrow(tensor_axis, 0, max(dim_size - 1, 0))
         elif dim_size == half_size - 1:
             mirrored_source = expanded
         else:
@@ -178,10 +187,13 @@ def _expand_tensor_with_symmetry(tensor: torch.Tensor, scene, component: str | N
                 f"Cannot expand symmetry axis {axis} for tensor shape {tuple(expanded.shape)} and half-domain size {half_size}."
             )
         mirrored = torch.flip(mirrored_source, dims=(tensor_axis,))
-        sign = _mirror_sign(component, symmetry, axis)
+        sign = _mirror_sign(component, mode, axis)
         if sign < 0:
             mirrored = -mirrored
-        expanded = torch.cat((mirrored, expanded), dim=tensor_axis)
+        if face == "low":
+            expanded = torch.cat((mirrored, expanded), dim=tensor_axis)
+        else:
+            expanded = torch.cat((expanded, mirrored), dim=tensor_axis)
     return expanded
 
 

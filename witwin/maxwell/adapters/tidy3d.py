@@ -632,9 +632,12 @@ def scene_to_tidy3d(
     # -- symmetry --------------------------------------------------------------
     td_symmetry = (0, 0, 0)
     if scene.symmetry is not None:
-        sym_map = {None: 0, "PEC": -1, "PMC": 1}
+        # Tidy3D encodes symmetry about the domain center only; the folded face
+        # (low/high) has no Tidy3D counterpart and is dropped in the export.
+        sym_map = {"PEC": -1, "PMC": 1}
         td_symmetry = tuple(
-            sym_map.get(sym, 0) for sym in scene.symmetry
+            0 if entry is None else sym_map.get(entry[0], 0)
+            for entry in scene.symmetry
         )
 
     # -- build simulation ------------------------------------------------------

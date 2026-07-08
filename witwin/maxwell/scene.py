@@ -473,21 +473,41 @@ def _normalize_subpixel_samples(value) -> tuple[int, int, int]:
     return normalized
 
 
-def _normalize_symmetry(value) -> tuple[str | None, str | None, str | None]:
+def _normalize_symmetry_entry(axis_value) -> tuple[str, str] | None:
+    """Normalize a single axis symmetry declaration to ``(mode, face)`` or ``None``.
+
+    Accepted forms per axis:
+      - ``None``: no symmetry on this axis.
+      - ``"PEC"`` / ``"PMC"``: image plane on the domain low face (default).
+      - ``("PEC", "low")`` / ``("PMC", "high")``: explicit symmetry-plane face.
+
+    ``face`` selects which domain face carries the symmetry plane, i.e. which half
+    of the full domain was folded away. ``"low"`` keeps ``[plane, high]`` and mirrors
+    downward; ``"high"`` keeps ``[low, plane]`` and mirrors upward.
+    """
+    if axis_value is None:
+        return None
+    face = "low"
+    mode = axis_value
+    if isinstance(axis_value, (tuple, list)):
+        if len(axis_value) != 2:
+            raise ValueError("symmetry entry tuples must be (mode, face).")
+        mode, face = axis_value
+        face = str(face).lower()
+        if face not in {"low", "high"}:
+            raise ValueError("symmetry face must be 'low' or 'high'.")
+    label = str(mode).upper()
+    if label not in {"PEC", "PMC"}:
+        raise ValueError("symmetry entries must be None, 'PEC', 'PMC', or (mode, face).")
+    return (label, face)
+
+
+def _normalize_symmetry(value) -> tuple[tuple[str, str] | None, ...]:
     if value is None:
         return (None, None, None)
     if len(value) != 3:
         raise ValueError("symmetry must contain exactly three axis entries.")
-    normalized = []
-    for axis_value in value:
-        if axis_value is None:
-            normalized.append(None)
-            continue
-        label = str(axis_value).upper()
-        if label not in {"PEC", "PMC"}:
-            raise ValueError("symmetry entries must be None, 'PEC', or 'PMC'.")
-        normalized.append(label)
-    return tuple(normalized)
+    return tuple(_normalize_symmetry_entry(axis_value) for axis_value in value)
 
 
 def _to_like_tensor(value, *, reference: torch.Tensor) -> torch.Tensor:

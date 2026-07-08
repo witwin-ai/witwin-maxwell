@@ -34,7 +34,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - Scene-level modal port assembly with `Scene.add_port(...)`, plus `Scene.resolved_sources()` / `Scene.resolved_monitors()` to materialize first-class `ModePort` objects into the standard `Scene -> Simulation -> Result` workflow
 - `Scene.clone(...)` for scene-preserving validation, benchmarking, and device-transfer workflows
 - `Scene(...)` defaults to `device="cuda"` and requires an explicit `device="cpu"` override for scene-only CPU workflows
-- Optional low-face symmetry specification on `Scene(symmetry=(..., ..., ...))` with per-axis `None` / `"PEC"` / `"PMC"`
+- Optional domain symmetry on `Scene(symmetry=(..., ..., ...))` with per-axis `None` / `"PEC"` / `"PMC"` on either domain face, via bare mode strings (low face by default) or explicit `(mode, face)` pairs such as `("PEC", "high")`, folding the domain about any axis at either face with matching result-side expansion
 - Optional subpixel material averaging via `Scene(subpixel_samples=...)`, accepting only `int` or `(sx, sy, sz)`
 - Solver-side compiled scene inspection via `Simulation.prepare()`, where `prepared.solver.scene` materializes Yee-grid dimensions, lazy meshgrid allocation, material compilation, and orthogonal material cross sections without storing that state on the public `Scene`
 
@@ -206,7 +206,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Non-absorbing FDTD boundary conditions: periodic, Bloch phase-shifted periodic, PEC, and PMC
 - Per-face FDTD boundary selection across `pml`, `periodic`, `pec`, `pmc`, and `none`, including mixed-axis combinations such as periodic-in-`y` plus PML-in-`x/z`
 - Mixed x/y Bloch + z PML FDTD forward stepping for grating-oriented CW `PlaneWave` TFSF slabs, including explicit Bloch wavevectors and solver-resolved automatic Bloch phase from the incident CW plane wave
-- Mixed low-face symmetry plus high-face absorber workflows through `Scene(symmetry=...)` with `BoundarySpec.pml(...)`
+- Any-axis / either-face domain symmetry (PEC/PMC image plane on the chosen `low` or `high` face) combined with absorbing boundaries through `Scene(symmetry=...)` with `BoundarySpec.pml(...)`; point-like sources in the folded-away half are rejected with a clear error
 - Spectral window and normalization configuration through `SpectralSampler(window=..., normalize_source=...)`
 - Pulse-driven spectral extraction starts at the transient without steady-state apodization for `GaussianPulse` and `RickerWavelet`, while CW extraction still skips startup transients
 - Optional prepared execution via `Simulation.prepare()`
@@ -320,6 +320,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - TFSF slab runtime support is currently limited to CW `PlaneWave` grating slabs with `axis="z"`; non-Bloch slabs, non-`PlaneWave` slab sources, and broadband automatic fixed-angle Bloch workflows fail explicitly because automatic Bloch phase is single-frequency metadata
 - Automatic Bloch wavevectors are solver-preparation metadata and are rejected by unresolved Tidy3D export
 - FDFD currently supports per-face boundary mixing only for `none` and `pml`
+- Domain symmetry (`Scene(symmetry=...)`) is FDTD-only (FDFD rejects it), applies a single image plane per axis at the chosen `low`/`high` face, and requires the user to supply the pre-folded half/quarter domain with a physically symmetric source layout; the symmetry-plane face must be `none` or `pml`. Tidy3D export encodes symmetry about the domain center only and drops the per-face (`low`/`high`) selection
 - The first-order `BoundarySpec.mur()` absorbing boundary leaves a higher reflected residual than a PML absorber (single-snapshot residual energy roughly an order of magnitude above a reflecting PEC box, versus about two orders for PML), applies only to the real electric field so it cannot be combined with Bloch complex-field runs, and has no second-order variant in v1
 - The `"absorber"` and `"stablepml"` variants share the existing PML face plumbing (`BoundarySpec.pml(...)`); `"stablepml"` overrides the CPML grading/alpha profile, so a user-supplied `cpml_config` does not override the stable-profile grading keys
 - Tidy3D export and the FDTD adjoint bridge reject anisotropy, magnetic dispersion, and Kerr media explicitly in v1

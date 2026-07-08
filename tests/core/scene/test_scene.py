@@ -558,7 +558,8 @@ class TestBoundary:
             boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
             symmetry=("PMC", None, "PEC"),
         )
-        assert scene.symmetry == ("PMC", None, "PEC")
+        # Bare mode strings normalize to (mode, face) pairs defaulting to "low".
+        assert scene.symmetry == (("PMC", "low"), None, ("PEC", "low"))
         assert scene.has_symmetry is True
 
 
