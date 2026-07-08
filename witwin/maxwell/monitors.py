@@ -463,6 +463,30 @@ class MediumMonitor:
         object.__setattr__(self, "kind", "medium")
 
 
+@dataclass(frozen=True)
+class DipoleEmissionMonitor:
+    """Measure the power a named ``PointDipole`` delivers to the field.
+
+    The co-located electric field is sampled in the frequency domain at the
+    dipole cell, and ``P = -(1/2) Re(conj(J) . E)`` is formed from the known
+    dipole current spectrum. Normalizing this against the same dipole run in
+    vacuum yields the Purcell factor (local density of states). The vacuum
+    normalization is preferred over an analytic free-space formula because the
+    discrete Yee-grid effective source volume has no reliable closed form.
+    """
+
+    name: str
+    source_name: str
+    frequencies: tuple[float, ...] | None = None
+    kind: str = "dipole_emission"
+
+    def __init__(self, name, source_name, frequencies=None):
+        object.__setattr__(self, "name", str(name))
+        object.__setattr__(self, "source_name", str(source_name))
+        object.__setattr__(self, "frequencies", _normalize_frequencies(frequencies))
+        object.__setattr__(self, "kind", "dipole_emission")
+
+
 def _validate_time_sampling(start, stop, interval) -> tuple[int, int | None, int]:
     resolved_start = int(start)
     if resolved_start < 0:

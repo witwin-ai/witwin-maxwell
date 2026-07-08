@@ -480,6 +480,12 @@ def prepare_observers(solver, frequencies, window_type, time_steps):
 
     solver.observers_enabled = True
     solver.observer_window_type = solver._resolve_spectral_window_type(window_type)
+    # DipoleEmissionMonitor needs the source current spectrum (the running DFT of
+    # the injected source signal) to form the delivered power, independently of
+    # the source-field normalization pass.
+    solver._accumulate_source_spectrum = any(
+        observer.get("monitor_type") == "dipole_emission" for observer in solver.observers
+    )
     solver._point_observer_groups = {}
     solver._plane_observer_groups = {}
     requested_frequencies = _merge_frequency_lists(
@@ -638,7 +644,8 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
         return
 
     source_signal = None
-    if getattr(solver, '_normalize_source', False) and getattr(solver, '_source_time', None) is not None:
+    accumulate_source = getattr(solver, '_normalize_source', False) or getattr(solver, '_accumulate_source_spectrum', False)
+    if accumulate_source and getattr(solver, '_source_time', None) is not None:
         from ..sources import evaluate_source_time
         source_signal = evaluate_source_time(solver._source_time, n * solver.dt)
 
@@ -1195,6 +1202,7 @@ def get_observer_results(solver):
                 monitor_name,
                 {
                     "kind": "point",
+                    "monitor_type": observer.get("monitor_type", "point"),
                     "fields": monitor_fields,
                     "components": {},
                     "field_indices": {},
@@ -1202,6 +1210,9 @@ def get_observer_results(solver):
                     "frequency": monitor_frequencies[0],
                     "frequencies": monitor_frequencies,
                     "position": observer["position"],
+                    "dipole_polarization": observer.get("dipole_polarization"),
+                    "dipole_position": observer.get("dipole_position"),
+                    "source_name": observer.get("source_name"),
                 },
             )
             entry["components"][public_component] = data
@@ -1279,6 +1290,47 @@ def get_observer_results(solver):
             flux = _compute_plane_flux(result)
             result["flux"] = flux
             result["power"] = flux
+
+    # Dipole-emission power pass: P = -(1/2) Re(conj(J) . E) at the dipole cell.
+    # The delivered power is formed from the co-located E DFT and the known
+    # source current spectrum, then excluded from the field-normalization pass.
+    for monitor_name in list(results.keys()):
+        result = results[monitor_name]
+        if result.get("monitor_type") != "dipole_emission":
+            continue
+        global_freq_indices = monitor_source_indices.pop(monitor_name, None)
+        if global_freq_indices is None:
+            continue
+        current_spectrum = _compute_source_spectrum(
+            solver._observer_spectral_entries,
+            global_freq_indices,
+            _spectral_scale,
+        )
+        polarization = result.get("dipole_polarization") or (0.0, 0.0, 0.0)
+        components = result.get("components", {})
+        e_projected = None
+        for (comp_name, weight) in (("Ex", polarization[0]), ("Ey", polarization[1]), ("Ez", polarization[2])):
+            if weight == 0.0 or comp_name not in components:
+                continue
+            term = float(weight) * components[comp_name]
+            e_projected = term if e_projected is None else e_projected + term
+        if e_projected is None:
+            result["power_delivered"] = None
+            continue
+        if isinstance(e_projected, torch.Tensor):
+            current = current_spectrum
+            if not isinstance(current, torch.Tensor):
+                current = torch.as_tensor(current, device=e_projected.device, dtype=e_projected.dtype)
+            else:
+                current = current.to(device=e_projected.device, dtype=e_projected.dtype)
+            if current.ndim == 0 or e_projected.ndim == 0:
+                current = current.reshape(e_projected.shape)
+            power = -0.5 * torch.real(torch.conj(current) * e_projected)
+        else:
+            current = np.asarray(current_spectrum, dtype=np.complex128).reshape(np.asarray(e_projected).shape)
+            power = -0.5 * np.real(np.conj(current) * np.asarray(e_projected))
+        result["power_delivered"] = power
+        result["current_spectrum"] = current_spectrum
 
     # Source-spectrum normalization pass
     if getattr(solver, '_normalize_source', False) and getattr(solver, '_source_time', None) is not None:

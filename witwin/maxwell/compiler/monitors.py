@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ..monitors import (
     DiffractionMonitor,
+    DipoleEmissionMonitor,
     FieldTimeMonitor,
     FinitePlaneMonitor,
     FluxMonitor,
@@ -14,6 +15,19 @@ from ..monitors import (
     normalize_component,
     normalize_axis,
 )
+from ..sources import PointDipole
+
+_POLARIZATION_AXES = (("x", "Ex"), ("y", "Ey"), ("z", "Ez"))
+
+
+def _find_scene_dipole(scene, source_name: str) -> PointDipole:
+    for source in getattr(scene, "sources", ()):
+        if isinstance(source, PointDipole) and getattr(source, "name", None) == source_name:
+            return source
+    raise ValueError(
+        f"DipoleEmissionMonitor references PointDipole {source_name!r}, "
+        "which is not present in the scene."
+    )
 
 
 def _point_observer_record(name, position, *, component: str) -> dict[str, object]:
@@ -47,6 +61,31 @@ def compile_fdtd_observers(scene):
             # Time-domain monitors are handled by compile_fdtd_time_observers and
             # material monitors are resolved from compiled material tensors at result
             # time; neither must become a running-DFT spectral observer.
+            continue
+        if isinstance(monitor, DipoleEmissionMonitor):
+            dipole = _find_scene_dipole(scene, monitor.source_name)
+            polarization = tuple(float(value) for value in dipole.polarization)
+            position = tuple(float(value) for value in dipole.position)
+            active = tuple(
+                component
+                for (axis, component), weight in zip(_POLARIZATION_AXES, polarization)
+                if weight != 0.0
+            )
+            monitor_fields = tuple(normalize_component(component) for component in active)
+            for component in monitor_fields:
+                observer = _point_observer_record(
+                    _internal_observer_name(monitor.name, component),
+                    position,
+                    component=component,
+                )
+                observer["monitor_name"] = monitor.name
+                observer["monitor_fields"] = monitor_fields
+                observer["monitor_frequencies"] = monitor.frequencies
+                observer["monitor_type"] = "dipole_emission"
+                observer["dipole_polarization"] = polarization
+                observer["dipole_position"] = position
+                observer["source_name"] = monitor.source_name
+                compiled.append(observer)
             continue
         normalized_fields = tuple(normalize_component(field) for field in monitor.fields)
         if isinstance(monitor, PointMonitor):

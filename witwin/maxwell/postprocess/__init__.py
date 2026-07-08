@@ -1,6 +1,7 @@
 from .RCS import compute_bistatic_rcs, infer_incident_plane_wave_amplitude, transform_to_bistatic_rcs
 from .diffraction import compute_diffraction_orders, enumerate_diffraction_orders
 from .directivity import compute_directivity
+from .emission import purcell_factor
 from .modal import compute_mode_overlap
 from .nfft import NearFieldFarFieldTransformer
 from .scattering_parameters import compute_s_parameters
@@ -24,6 +25,7 @@ __all__ = [
     "compute_s_parameters",
     "infer_incident_plane_wave_amplitude",
     "NearFieldFarFieldTransformer",
+    "purcell_factor",
     "EquivalentCurrentsSurface",
     "PlanarEquivalentCurrents",
     "StrattonChuPropagator",

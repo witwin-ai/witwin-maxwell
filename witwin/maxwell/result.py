@@ -107,6 +107,10 @@ def _select_monitor_frequency(payload: dict[str, Any], frequencies: tuple[float,
         selected["flux"] = _slice_frequency_axis(payload["flux"], len(frequencies), index)
     if "power" in payload:
         selected["power"] = _slice_frequency_axis(payload["power"], len(frequencies), index)
+    if payload.get("power_delivered") is not None:
+        selected["power_delivered"] = _slice_frequency_axis(payload["power_delivered"], len(frequencies), index)
+    if payload.get("current_spectrum") is not None:
+        selected["current_spectrum"] = _slice_frequency_axis(payload["current_spectrum"], len(frequencies), index)
 
     if _monitor_payload_is_point(payload):
         components = {}
@@ -203,6 +207,10 @@ def _monitor_payload_is_mode(payload: dict[str, Any]) -> bool:
 
 def _monitor_payload_is_diffraction(payload: dict[str, Any]) -> bool:
     return payload.get("monitor_type") == "diffraction"
+
+
+def _monitor_payload_is_dipole_emission(payload: dict[str, Any]) -> bool:
+    return payload.get("monitor_type") == "dipole_emission"
 
 
 def _monitor_payload_is_closed_surface(payload: dict[str, Any]) -> bool:
@@ -857,6 +865,23 @@ class Result:
             from .postprocess.diffraction import compute_diffraction_from_payload
 
             return compute_diffraction_from_payload(self, name, payload)
+
+        if _monitor_payload_is_dipole_emission(payload):
+            emission = {
+                "kind": "dipole_emission",
+                "monitor_type": "dipole_emission",
+                "power_delivered": payload.get("power_delivered"),
+                "current_spectrum": payload.get("current_spectrum"),
+                "frequencies": tuple(payload.get("frequencies", (payload.get("frequency"),))),
+                "frequency": payload.get("frequency"),
+                "polarization": payload.get("dipole_polarization"),
+                "position": payload.get("dipole_position", payload.get("position")),
+                "source_name": payload.get("source_name"),
+                # The Purcell factor requires a vacuum reference run; combine two
+                # runs with postprocess.purcell_factor(structured, vacuum, name).
+                "purcell_factor": None,
+            }
+            return emission
 
         if not _monitor_payload_is_mode(payload):
             return payload
