@@ -153,9 +153,12 @@ def _fake_standard_reverse_solver():
         boundary_y_high_code=BOUNDARY_NONE,
         boundary_z_low_code=BOUNDARY_NONE,
         boundary_z_high_code=BOUNDARY_NONE,
-        inv_dx=1.25,
-        inv_dy=0.75,
-        inv_dz=1.5,
+        inv_dx_e=torch.full((3,), 1.25),
+        inv_dy_e=torch.full((4,), 0.75),
+        inv_dz_e=torch.full((5,), 1.5),
+        inv_dx_h=torch.full((2,), 1.25),
+        inv_dy_h=torch.full((3,), 0.75),
+        inv_dz_h=torch.full((4,), 1.5),
         chx_decay=torch.full(hx_shape, 0.97),
         chy_decay=torch.full(hy_shape, 0.96),
         chz_decay=torch.full(hz_shape, 0.95),
@@ -229,9 +232,12 @@ def _fake_cpml_reverse_solver():
         boundary_y_high_code=BOUNDARY_PML,
         boundary_z_low_code=BOUNDARY_PML,
         boundary_z_high_code=BOUNDARY_PML,
-        inv_dx=1.25,
-        inv_dy=0.75,
-        inv_dz=1.5,
+        inv_dx_e=torch.full((3,), 1.25),
+        inv_dy_e=torch.full((4,), 0.75),
+        inv_dz_e=torch.full((5,), 1.5),
+        inv_dx_h=torch.full((2,), 1.25),
+        inv_dy_h=torch.full((3,), 0.75),
+        inv_dz_h=torch.full((4,), 1.5),
         chx_decay=torch.full(hx_shape, 0.97),
         chy_decay=torch.full(hy_shape, 0.96),
         chz_decay=torch.full(hz_shape, 0.95),
@@ -505,9 +511,12 @@ def _fake_bloch_reverse_solver():
             [math.sin(phase_x), math.sin(phase_y), math.sin(phase_z)],
             dtype=torch.float32,
         ),
-        inv_dx=1.25,
-        inv_dy=0.75,
-        inv_dz=1.5,
+        inv_dx_e=torch.full((3,), 1.25),
+        inv_dy_e=torch.full((4,), 0.75),
+        inv_dz_e=torch.full((5,), 1.5),
+        inv_dx_h=torch.full((2,), 1.25),
+        inv_dy_h=torch.full((3,), 0.75),
+        inv_dz_h=torch.full((4,), 1.5),
         chx_decay=torch.full(shapes["Hx"], 0.97),
         chy_decay=torch.full(shapes["Hy"], 0.96),
         chz_decay=torch.full(shapes["Hz"], 0.95),
@@ -680,9 +689,34 @@ def test_reverse_step_shell_matches_inline_torch_vjp(monkeypatch):
     assert result.backend == "torch_vjp"
 
 
-def test_reverse_step_standard_python_reference_matches_torch_vjp():
+def _apply_nonuniform_spacing(solver, *, bloch=False):
+    # Replace the uniform per-axis spacing tensors with a graded-mesh set that
+    # is self-consistent (dual = midpoint distances of the primal cells) so the
+    # hand-written reverse steps are checked as the exact transpose of the
+    # nonuniform forward step.
+    def axis_arrays(node_count, base):
+        primal = base * (1.0 + 0.25 * torch.sin(torch.arange(node_count - 1, dtype=torch.float64) + 0.7))
+        dual = torch.empty(node_count, dtype=torch.float64)
+        dual[1:-1] = 0.5 * (primal[:-1] + primal[1:])
+        if bloch:
+            dual[0] = dual[-1] = 0.5 * (primal[0] + primal[-1])
+        else:
+            dual[0] = primal[0]
+            dual[-1] = primal[-1]
+        return (1.0 / dual).to(torch.float32), (1.0 / primal).to(torch.float32)
+
+    solver.inv_dx_e, solver.inv_dx_h = axis_arrays(3, 0.8)
+    solver.inv_dy_e, solver.inv_dy_h = axis_arrays(4, 1.3)
+    solver.inv_dz_e, solver.inv_dz_h = axis_arrays(5, 0.65)
+    return solver
+
+
+@pytest.mark.parametrize("nonuniform", [False, True])
+def test_reverse_step_standard_python_reference_matches_torch_vjp(nonuniform):
     torch.manual_seed(7)
     solver = _fake_standard_reverse_solver()
+    if nonuniform:
+        solver = _apply_nonuniform_spacing(solver)
     forward_state = {
         "Ex": torch.randn(2, 4, 5, dtype=torch.float32),
         "Ey": torch.randn(3, 3, 5, dtype=torch.float32),
@@ -727,9 +761,12 @@ def test_reverse_step_standard_python_reference_matches_torch_vjp():
     assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
 
 
-def test_reverse_step_cpml_python_reference_matches_torch_vjp():
+@pytest.mark.parametrize("nonuniform", [False, True])
+def test_reverse_step_cpml_python_reference_matches_torch_vjp(nonuniform):
     torch.manual_seed(13)
     solver = _fake_cpml_reverse_solver()
+    if nonuniform:
+        solver = _apply_nonuniform_spacing(solver)
     state_shapes = _cpml_reverse_state_shapes()
     forward_state = {
         name: torch.randn(state_shapes[name], dtype=torch.float32)
@@ -771,9 +808,12 @@ def test_reverse_step_cpml_python_reference_matches_torch_vjp():
     assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
 
 
-def test_reverse_step_bloch_python_reference_matches_torch_vjp():
+@pytest.mark.parametrize("nonuniform", [False, True])
+def test_reverse_step_bloch_python_reference_matches_torch_vjp(nonuniform):
     torch.manual_seed(23)
     solver = _fake_bloch_reverse_solver()
+    if nonuniform:
+        solver = _apply_nonuniform_spacing(solver, bloch=True)
     state_shapes = _bloch_reverse_state_shapes()
     forward_state = {
         name: torch.randn(state_shapes[name], dtype=torch.float32)
@@ -1254,7 +1294,10 @@ class _DensitySurfaceSourceScene(mw.SceneModule):
         scene.add_material_region(
             mw.MaterialRegion(
                 name="design",
-                geometry=mw.Box(position=(-0.12, 0.0, 0.0), size=(0.24, 0.12, 0.12)),
+                # The x faces are offset half a cell from the grid nodes so
+                # the voxel window is off the node-aligned knife edge and
+                # matches the placement this test was calibrated against.
+                geometry=mw.Box(position=(-0.06, 0.0, 0.0), size=(0.24, 0.12, 0.12)),
                 density=density,
                 eps_bounds=(1.0, 6.0),
                 mu_bounds=(1.0, 1.0),

@@ -21,6 +21,12 @@ def _coeff(shape: tuple[int, int, int], generator: torch.Generator) -> torch.Ten
     return 0.85 + 0.1 * torch.rand(shape, device="cuda", dtype=torch.float32, generator=generator)
 
 
+def _spacing(length: int, value: float) -> torch.Tensor:
+    # Graded per-element values (including distinct wrap entries at [0] and
+    # [-1]) so a kernel indexing regression cannot hide behind constant arrays.
+    return torch.linspace(value, 1.4 * value, length, device="cuda", dtype=torch.float32)
+
+
 @pytest.mark.skipif(
     os.environ.get("WITWIN_RUN_CUDA_EXTENSION_BUILD") != "1",
     reason="Set WITWIN_RUN_CUDA_EXTENSION_BUILD=1 to compile and run native CUDA field kernels.",
@@ -54,6 +60,7 @@ def test_compiled_cuda_standard_electric_boundary_modes_match_torch_dispatcher(
     hz = _seeded((3, 3, 5), generator)
     ex_decay, ey_decay, ez_decay = _coeff(tuple(ex.shape), generator), _coeff(tuple(ey.shape), generator), _coeff(tuple(ez.shape), generator)
     ex_curl, ey_curl, ez_curl = _coeff(tuple(ex.shape), generator) * 1.0e-3, _coeff(tuple(ey.shape), generator) * 1.0e-3, _coeff(tuple(ez.shape), generator) * 1.0e-3
+    inv_dx, inv_dy, inv_dz = _spacing(4, 1.5), _spacing(4, 0.75), _spacing(5, 1.25)
 
     expected_ex, actual_ex = ex.clone(), ex.clone()
     expected_ey, actual_ey = ey.clone(), ey.clone()
@@ -66,8 +73,8 @@ def test_compiled_cuda_standard_electric_boundary_modes_match_torch_dispatcher(
         Hz=hz,
         ExDecay=ex_decay,
         ExCurl=ex_curl,
-        invDy=0.75,
-        invDz=1.25,
+        invDy=inv_dy,
+        invDz=inv_dz,
         yLowBoundaryMode=low_a,
         yHighBoundaryMode=high_a,
         zLowBoundaryMode=low_b,
@@ -79,8 +86,8 @@ def test_compiled_cuda_standard_electric_boundary_modes_match_torch_dispatcher(
         Hz=hz,
         EyDecay=ey_decay,
         EyCurl=ey_curl,
-        invDx=1.5,
-        invDz=1.25,
+        invDx=inv_dx,
+        invDz=inv_dz,
         xLowBoundaryMode=low_a,
         xHighBoundaryMode=high_a,
         zLowBoundaryMode=low_b,
@@ -92,8 +99,8 @@ def test_compiled_cuda_standard_electric_boundary_modes_match_torch_dispatcher(
         Hy=hy,
         EzDecay=ez_decay,
         EzCurl=ez_curl,
-        invDx=1.5,
-        invDy=0.75,
+        invDx=inv_dx,
+        invDy=inv_dy,
         xLowBoundaryMode=low_a,
         xHighBoundaryMode=high_a,
         yLowBoundaryMode=low_b,
@@ -107,8 +114,8 @@ def test_compiled_cuda_standard_electric_boundary_modes_match_torch_dispatcher(
         Hz=hz,
         ExDecay=ex_decay,
         ExCurl=ex_curl,
-        invDy=0.75,
-        invDz=1.25,
+        invDy=inv_dy,
+        invDz=inv_dz,
         yLowBoundaryMode=low_a,
         yHighBoundaryMode=high_a,
         zLowBoundaryMode=low_b,
@@ -120,8 +127,8 @@ def test_compiled_cuda_standard_electric_boundary_modes_match_torch_dispatcher(
         Hz=hz,
         EyDecay=ey_decay,
         EyCurl=ey_curl,
-        invDx=1.5,
-        invDz=1.25,
+        invDx=inv_dx,
+        invDz=inv_dz,
         xLowBoundaryMode=low_a,
         xHighBoundaryMode=high_a,
         zLowBoundaryMode=low_b,
@@ -133,8 +140,8 @@ def test_compiled_cuda_standard_electric_boundary_modes_match_torch_dispatcher(
         Hy=hy,
         EzDecay=ez_decay,
         EzCurl=ez_curl,
-        invDx=1.5,
-        invDy=0.75,
+        invDx=inv_dx,
+        invDy=inv_dy,
         xLowBoundaryMode=low_a,
         xHighBoundaryMode=high_a,
         yLowBoundaryMode=low_b,
@@ -172,6 +179,7 @@ def test_compiled_cuda_bloch_electric_updates_match_torch_dispatcher(monkeypatch
     phase_x = (math.cos(0.23), math.sin(0.23))
     phase_y = (math.cos(-0.37), math.sin(-0.37))
     phase_z = (math.cos(0.61), math.sin(0.61))
+    inv_dx, inv_dy, inv_dz = _spacing(4, 1.5), _spacing(4, 0.75), _spacing(5, 1.25)
 
     expected = {
         "ex_real": ex_real.clone(),
@@ -197,8 +205,8 @@ def test_compiled_cuda_bloch_electric_updates_match_torch_dispatcher(monkeypatch
             phaseSinY=phase_y[1],
             phaseCosZ=phase_z[0],
             phaseSinZ=phase_z[1],
-            invDy=0.75,
-            invDz=1.25,
+            invDy=inv_dy,
+            invDz=inv_dz,
         )
         backend._electric_ey_bloch(
             EyReal=values["ey_real"],
@@ -213,8 +221,8 @@ def test_compiled_cuda_bloch_electric_updates_match_torch_dispatcher(monkeypatch
             phaseSinX=phase_x[1],
             phaseCosZ=phase_z[0],
             phaseSinZ=phase_z[1],
-            invDx=1.5,
-            invDz=1.25,
+            invDx=inv_dx,
+            invDz=inv_dz,
         )
         backend._electric_ez_bloch(
             EzReal=values["ez_real"],
@@ -229,8 +237,8 @@ def test_compiled_cuda_bloch_electric_updates_match_torch_dispatcher(monkeypatch
             phaseSinX=phase_x[1],
             phaseCosY=phase_y[0],
             phaseSinY=phase_y[1],
-            invDx=1.5,
-            invDy=0.75,
+            invDx=inv_dx,
+            invDy=inv_dy,
         )
 
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")

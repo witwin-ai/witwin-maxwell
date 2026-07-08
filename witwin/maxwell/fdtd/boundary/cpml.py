@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import torch
 
 from .common import BOUNDARY_PML
@@ -106,59 +107,102 @@ def _legacy_strength_scale(strength):
 
 
 def _cpml_profile_1d(
-    length,
+    positions64,
+    nodes64,
     thickness,
-    delta,
     dt,
     vacuum_constant,
     sigma_scale,
     impedance,
     config,
     *,
-    half_step=False,
+    high_positions64=None,
     apply_low=True,
     apply_high=True,
 ):
-    sigma = torch.zeros(length, device=sigma_scale.device, dtype=torch.float32)
-    kappa = torch.ones(length, device=sigma_scale.device, dtype=torch.float32)
-    alpha = torch.zeros(length, device=sigma_scale.device, dtype=torch.float32)
+    """Build (kappa, b, c) CPML profile vectors graded by physical depth.
 
+    ``positions64`` are the float64 sample positions of the profile (node
+    masters for E profiles, half-point masters for H profiles) and ``nodes64``
+    the axis node masters; ``thickness`` is the PML thickness in cells. The
+    per-side layer depth and peak conductivity derive from the physical layer
+    extents, so nonuniform grids grade correctly and uniform grids reproduce
+    the established index-based grading. ``high_positions64`` overrides the
+    sample positions used for the high-side depth (H profiles pass their
+    cell's outer node so the outermost H sample reaches full depth, matching
+    the calibrated legacy grading). Grading runs in float64; the returned
+    vectors are float32 on the device of ``sigma_scale``.
+    """
+    length = int(len(positions64))
+    device = sigma_scale.device
+
+    def _to_device(array):
+        return torch.tensor(array, dtype=torch.float32, device=device).contiguous()
+
+    thickness = int(thickness)
     if thickness <= 0:
-        b = torch.zeros_like(sigma)
-        c = torch.zeros_like(sigma)
-        return kappa, b, c
+        return (
+            _to_device(np.ones(length)),
+            _to_device(np.zeros(length)),
+            _to_device(np.zeros(length)),
+        )
+
+    def _interface(*, low):
+        # Layer interface measured `thickness` cells inward from the boundary.
+        # When the layer is thicker than the axis, extrapolate past the far
+        # end with the far-edge cell spacing so degenerate all-PML domains
+        # keep the established partial-depth grading.
+        cell_count = len(nodes64) - 1
+        if thickness <= cell_count:
+            return float(nodes64[thickness]) if low else float(nodes64[-1 - thickness])
+        extra = thickness - cell_count
+        if low:
+            return float(nodes64[-1]) + extra * float(nodes64[-1] - nodes64[-2])
+        return float(nodes64[0]) - extra * float(nodes64[1] - nodes64[0])
 
     grading_order = float(config["grading_order"])
     kappa_max = float(config["kappa_max"])
     alpha_max = float(config["alpha_max"])
     reflection = float(config["reflection"])
-    sigma_max = -(grading_order + 1.0) * math.log(reflection) / (2.0 * impedance * thickness * delta)
-    sigma_max *= float(sigma_scale.item())
+    strength = float(sigma_scale.item())
+    sigma_numerator = -(grading_order + 1.0) * math.log(reflection) / (2.0 * float(impedance))
 
-    positions = torch.arange(length, device=sigma_scale.device, dtype=torch.float32)
-    positions = positions + (0.5 if half_step else 0.0)
-    distance = torch.zeros_like(positions)
+    positions = np.asarray(positions64, dtype=np.float64)
+    high_positions = positions if high_positions64 is None else np.asarray(high_positions64, dtype=np.float64)
+    depth_low = np.zeros(length, dtype=np.float64)
+    depth_high = np.zeros(length, dtype=np.float64)
+    sigma_max_low = 0.0
+    sigma_max_high = 0.0
     if apply_low:
-        left_distance = torch.clamp(thickness - positions, min=0.0) / thickness
-        distance = torch.maximum(distance, left_distance)
+        low_interface = _interface(low=True)
+        layer_low = low_interface - float(nodes64[0])
+        depth_low = np.clip((low_interface - positions) / layer_low, 0.0, 1.0)
+        sigma_max_low = sigma_numerator / layer_low * strength
     if apply_high:
-        right_origin = length - thickness - (0.5 if half_step else 1.0)
-        right_distance = torch.clamp(positions - right_origin, min=0.0) / thickness
-        distance = torch.maximum(distance, right_distance)
-    active = distance > 0.0
-    graded = torch.zeros_like(distance)
-    graded[active] = distance[active] ** grading_order
-    sigma[active] = sigma_max * graded[active]
-    kappa[active] = 1.0 + (kappa_max - 1.0) * graded[active]
-    alpha[active] = alpha_max * (1.0 - distance[active])
+        high_interface = _interface(low=False)
+        layer_high = float(nodes64[-1]) - high_interface
+        depth_high = np.clip((high_positions - high_interface) / layer_high, 0.0, 1.0)
+        sigma_max_high = sigma_numerator / layer_high * strength
 
-    decay = torch.exp(-(sigma / kappa + alpha) * dt / vacuum_constant)
+    use_high = depth_high > depth_low
+    depth = np.where(use_high, depth_high, depth_low)
+    sigma_peak = np.where(use_high, sigma_max_high, sigma_max_low)
+
+    active = depth > 0.0
+    graded = np.zeros(length, dtype=np.float64)
+    graded[active] = depth[active] ** grading_order
+    sigma = sigma_peak * graded
+    kappa = np.ones(length, dtype=np.float64)
+    kappa[active] = 1.0 + (kappa_max - 1.0) * graded[active]
+    alpha = np.zeros(length, dtype=np.float64)
+    alpha[active] = alpha_max * (1.0 - depth[active])
+
+    decay = np.exp(-(sigma / kappa + alpha) * float(dt) / float(vacuum_constant))
     denom = sigma + alpha * kappa
-    c = torch.zeros_like(sigma)
+    c = np.zeros(length, dtype=np.float64)
     mask = denom > 1e-12
     c[mask] = sigma[mask] * (decay[mask] - 1.0) / (denom[mask] * kappa[mask])
-    b = decay
-    return kappa.contiguous(), b.contiguous(), c.contiguous()
+    return _to_device(kappa), _to_device(decay), _to_device(c)
 
 
 def _axis_face_uses_pml(solver, axis: str, *, low: bool) -> bool:
@@ -353,89 +397,50 @@ def _clear_auxiliary_state(solver):
 def build_cpml_profiles(solver):
     strength_scale = _legacy_strength_scale(solver.scene.pml_strength)
     scale_tensor = torch.tensor(strength_scale, device=solver.device, dtype=torch.float32)
+    magnetic_scale = scale_tensor * (solver.mu0 / solver.eps0)
     thickness = solver.scene.pml_thickness
     eta0 = math.sqrt(solver.mu0 / solver.eps0)
+    scene = solver.scene
 
-    solver.cpml_kappa_e_x, solver.cpml_b_e_x, solver.cpml_c_e_x = _cpml_profile_1d(
-        solver.Nx,
-        thickness,
-        solver.dx,
-        solver.dt,
-        solver.eps0,
-        scale_tensor,
-        eta0,
-        solver.cpml_config,
-        half_step=False,
-        apply_low=_axis_face_uses_pml(solver, "x", low=True),
-        apply_high=_axis_face_uses_pml(solver, "x", low=False),
-    )
-    solver.cpml_kappa_e_y, solver.cpml_b_e_y, solver.cpml_c_e_y = _cpml_profile_1d(
-        solver.Ny,
-        thickness,
-        solver.dy,
-        solver.dt,
-        solver.eps0,
-        scale_tensor,
-        eta0,
-        solver.cpml_config,
-        half_step=False,
-        apply_low=_axis_face_uses_pml(solver, "y", low=True),
-        apply_high=_axis_face_uses_pml(solver, "y", low=False),
-    )
-    solver.cpml_kappa_e_z, solver.cpml_b_e_z, solver.cpml_c_e_z = _cpml_profile_1d(
-        solver.Nz,
-        thickness,
-        solver.dz,
-        solver.dt,
-        solver.eps0,
-        scale_tensor,
-        eta0,
-        solver.cpml_config,
-        half_step=False,
-        apply_low=_axis_face_uses_pml(solver, "z", low=True),
-        apply_high=_axis_face_uses_pml(solver, "z", low=False),
-    )
-
-    magnetic_scale = scale_tensor * (solver.mu0 / solver.eps0)
-    solver.cpml_kappa_h_x, solver.cpml_b_h_x, solver.cpml_c_h_x = _cpml_profile_1d(
-        solver.Nx - 1,
-        thickness,
-        solver.dx,
-        solver.dt,
-        solver.mu0,
-        magnetic_scale,
-        eta0,
-        solver.cpml_config,
-        half_step=True,
-        apply_low=_axis_face_uses_pml(solver, "x", low=True),
-        apply_high=_axis_face_uses_pml(solver, "x", low=False),
-    )
-    solver.cpml_kappa_h_y, solver.cpml_b_h_y, solver.cpml_c_h_y = _cpml_profile_1d(
-        solver.Ny - 1,
-        thickness,
-        solver.dy,
-        solver.dt,
-        solver.mu0,
-        magnetic_scale,
-        eta0,
-        solver.cpml_config,
-        half_step=True,
-        apply_low=_axis_face_uses_pml(solver, "y", low=True),
-        apply_high=_axis_face_uses_pml(solver, "y", low=False),
-    )
-    solver.cpml_kappa_h_z, solver.cpml_b_h_z, solver.cpml_c_h_z = _cpml_profile_1d(
-        solver.Nz - 1,
-        thickness,
-        solver.dz,
-        solver.dt,
-        solver.mu0,
-        magnetic_scale,
-        eta0,
-        solver.cpml_config,
-        half_step=True,
-        apply_low=_axis_face_uses_pml(solver, "z", low=True),
-        apply_high=_axis_face_uses_pml(solver, "z", low=False),
-    )
+    axis_masters = {
+        "x": (scene.x_nodes64, scene.x_half64),
+        "y": (scene.y_nodes64, scene.y_half64),
+        "z": (scene.z_nodes64, scene.z_half64),
+    }
+    for axis, (nodes64, half64) in axis_masters.items():
+        apply_low = _axis_face_uses_pml(solver, axis, low=True)
+        apply_high = _axis_face_uses_pml(solver, axis, low=False)
+        kappa_e, b_e, c_e = _cpml_profile_1d(
+            nodes64,
+            nodes64,
+            thickness,
+            solver.dt,
+            solver.eps0,
+            scale_tensor,
+            eta0,
+            solver.cpml_config,
+            apply_low=apply_low,
+            apply_high=apply_high,
+        )
+        kappa_h, b_h, c_h = _cpml_profile_1d(
+            half64,
+            nodes64,
+            thickness,
+            solver.dt,
+            solver.mu0,
+            magnetic_scale,
+            eta0,
+            solver.cpml_config,
+            high_positions64=nodes64[1:],
+            apply_low=apply_low,
+            apply_high=apply_high,
+        )
+        setattr(solver, f"cpml_kappa_e_{axis}", kappa_e)
+        setattr(solver, f"cpml_b_e_{axis}", b_e)
+        setattr(solver, f"cpml_c_e_{axis}", c_e)
+        setattr(solver, f"cpml_kappa_h_{axis}", kappa_h)
+        setattr(solver, f"cpml_b_h_{axis}", b_h)
+        setattr(solver, f"cpml_c_h_{axis}", c_h)
 
 
 def initialize_cpml_state(solver):
@@ -462,7 +467,7 @@ def initialize_simple_pml_state(solver):
 
     thickness = solver.scene.pml_thickness
     _allocate_sigma_tensors(solver)
-    sigma_max = solver.scene.pml_strength * 2.0 / (solver.dt * min(solver.dx, solver.dy, solver.dz))
+    sigma_max = solver.scene.pml_strength * 2.0 / (solver.dt * min(solver.min_dx, solver.min_dy, solver.min_dz))
     for i in range(thickness):
         x = (thickness - i) / thickness
         sigma = sigma_max * x**4
@@ -491,7 +496,7 @@ def initialize_absorber_state(solver):
     _allocate_sigma_tensors(solver)
     eta0 = math.sqrt(solver.mu0 / solver.eps0)
     grading_order = ABSORBER_GRADING_ORDER
-    min_delta = min(solver.dx, solver.dy, solver.dz)
+    min_delta = min(solver.min_dx, solver.min_dy, solver.min_dz)
     # Physical peak conductivity (S/m) calibrated to the target round-trip
     # reflection, then converted to the 1/s scale that the semi-implicit sigma
     # update expects (the stored sigma multiplies dt directly, i.e. sigma/eps0).

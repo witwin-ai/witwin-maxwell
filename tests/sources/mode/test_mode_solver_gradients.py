@@ -20,7 +20,12 @@ def _mode_scene():
         device="cpu",
     )
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)).with_material(
+        # A rectangular, z-offset core: with a symmetric core the Ez profile on
+        # the z half-grid has an even interior window whose two central |peak|
+        # entries tie within float64 noise, making the peak-normalization
+        # argmax (and hence the implicit sparse gradient) a knife-edge function
+        # of the grid-derived transverse spacing.
+        mw.Box(position=(0.0, 0.0, 0.02), size=(1.28, 0.24, 0.32)).with_material(
             mw.Material(eps_r=12.0),
             name="core",
         )
@@ -28,7 +33,10 @@ def _mode_scene():
     scene.add_source(
         mw.ModeSource(
             position=(0.0, 0.0, 0.0),
-            size=(0.0, 0.56, 0.56),
+            # Aperture edges land exactly on grid nodes (+-0.24); a 0.56 span
+            # would place them exactly midway between nodes, where the nearest-
+            # node resolution is an ill-conditioned floating-point tie.
+            size=(0.0, 0.48, 0.48),
             polarization="Ez",
             source_time=mw.CW(frequency=1.0e9, amplitude=1.0),
             name="port0",

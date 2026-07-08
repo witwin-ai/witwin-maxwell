@@ -21,8 +21,10 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 
 - `Domain` with explicit 3D bounds and `from_domain_range(...)`
 - `GridSpec.uniform(...)` for isotropic grids
-- `GridSpec.anisotropic(...)` for nonuniform `dx`, `dy`, `dz`
-- `GridSpec.spacing` always returns `(dx, dy, dz)`, with `GridSpec.is_uniform` for uniform-grid checks
+- `GridSpec.anisotropic(...)` for per-axis constant `dx`, `dy`, `dz`
+- `GridSpec.custom(x_coords, y_coords, z_coords)` for nonuniform (graded) Yee grids from explicit node coordinates: any 1D float array-likes (list / NumPy / torch), validated per axis (strictly increasing, finite, at least two nodes) and stored as read-only float64 masters; a uniform axis is expressed by uniformly spaced coords, and the `Domain` bounds must equal the coordinate extents
+- `GridSpec.is_custom`, `GridSpec.min_spacing`, and `GridSpec.axis_coords(...)` for nonuniform-grid introspection
+- `GridSpec.spacing` returns `(dx, dy, dz)` for uniform specs, with `GridSpec.is_uniform` for uniform-grid checks; both raise on `GridSpec.custom`, as do the scalar `Scene.dx/dy/dz` / `Scene.grid_spacing` properties (use `scene.x/y/z`, the half-grid coordinates, or `grid.min_spacing` instead)
 - `BoundarySpec.none()`, `BoundarySpec.pml(...)`, `BoundarySpec.periodic()`, `BoundarySpec.bloch(...)`, `BoundarySpec.pec()`, and `BoundarySpec.pmc()`
 - Per-face boundary configuration through `BoundarySpec.faces(...)` and direct `BoundarySpec(kind=..., x=..., x_low=..., ...)` overrides, including global defaults plus per-axis or per-face specialization
 - `BoundarySpec.bloch_wavevector="auto"` marker for solver-resolved Bloch phase workflows during FDTD preparation
@@ -196,6 +198,8 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - ADE-based electric and magnetic dispersive-material updates for Debye, Drude, and Lorentz media
 - Static isotropic or diagonal electric conductivity (`sigma_e`) in the time-domain update, folded into the per-component lossy-dielectric `Ca`/`Cb` coefficients via the standard semi-implicit trapezoidal scheme so simple lossy dielectrics no longer require a fitted Drude pole
 - Axis-aligned diagonal anisotropy support for electric and magnetic material tensors on the Yee grid
+- Nonuniform (`GridSpec.custom`) Yee grids run on the single native CUDA kernel path through per-axis primal/dual spacing arrays, so a uniform grid is just the constant-array special case (a `GridSpec.custom` built from a uniform scene's node masters reproduces the `GridSpec.uniform` run bitwise); covers all field-update variants (standard, CPML dense/compressed, Bloch, mixed Bloch+PML), physical-depth-graded CPML profiles with per-side layer thicknesses, per-face local-cell Mur deltas, physically placed sources and monitors via the float64 coordinate masters, and `dt` from the per-axis minimum spacing
+- The reverse-time FDTD adjoint is the exact transpose of the nonuniform forward stencils (each reverse term reuses the same per-axis spacing element as its forward counterpart), so design-region gradients work unchanged on graded meshes
 - Instantaneous isotropic electric Kerr nonlinearity with GPU-resident dynamic update coefficients
 - Automatic run length estimation with `TimeConfig.auto(...)`
 - Explicit run-step control with `TimeConfig(time_steps=...)`
@@ -315,6 +319,9 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 
 ## Known Limitations
 
+- Nonuniform (`GridSpec.custom`) grids are FDTD-only in v1: FDFD and Tidy3D export both raise `NotImplementedError` for custom grids
+- On nonuniform grids, TFSF-kind injections (`PlaneWave` TFSF box, grating TFSF slab) require locally uniform spacing along all three axes over the injection region expanded by one cell, and `ModeSource` / `ModeMonitor` / `ModePort` require locally uniform transverse spacing across the mode plane; both are validated with explicit errors. Soft (non-TFSF) surface sources and `PointDipole` are fully generalized, but the soft `PlaneWave` numerical-dispersion phase correction uses the per-axis minimum spacing (exact on uniform grids, an approximation on graded ones)
+- Subpixel material averaging (`Scene(subpixel_samples=...)` with more than one sample) is not yet generalized to nonuniform grids and fails through the scalar `Scene.dx` accessor
 - Current subpixel material smoothing uses scalar arithmetic averaging on the scene grid
 - Yee-edge tangential versus normal permittivity averaging is not yet implemented
 - High-contrast interfaces can therefore show larger normal-field error than a true edge-aware subpixel scheme

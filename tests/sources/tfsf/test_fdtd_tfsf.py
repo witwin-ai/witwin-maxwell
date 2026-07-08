@@ -44,8 +44,8 @@ def _get_raw_component(result, component):
         field = np.abs(raw_field)
     if component == "Ex":
         x = np.linspace(
-            solver.scene.domain_range[0] + 0.5 * solver.dx,
-            solver.scene.domain_range[1] - 0.5 * solver.dx,
+            solver.scene.domain_range[0] + 0.5 * solver.scene.dx,
+            solver.scene.domain_range[1] - 0.5 * solver.scene.dx,
             field.shape[0],
         )
         y = np.linspace(solver.scene.domain_range[2], solver.scene.domain_range[3], field.shape[1])
@@ -54,8 +54,8 @@ def _get_raw_component(result, component):
     if component == "Ey":
         x = np.linspace(solver.scene.domain_range[0], solver.scene.domain_range[1], field.shape[0])
         y = np.linspace(
-            solver.scene.domain_range[2] + 0.5 * solver.dy,
-            solver.scene.domain_range[3] - 0.5 * solver.dy,
+            solver.scene.domain_range[2] + 0.5 * solver.scene.dy,
+            solver.scene.domain_range[3] - 0.5 * solver.scene.dy,
             field.shape[1],
         )
         z = np.linspace(solver.scene.domain_range[4], solver.scene.domain_range[5], field.shape[2])
@@ -63,8 +63,8 @@ def _get_raw_component(result, component):
     x = np.linspace(solver.scene.domain_range[0], solver.scene.domain_range[1], field.shape[0])
     y = np.linspace(solver.scene.domain_range[2], solver.scene.domain_range[3], field.shape[1])
     z = np.linspace(
-        solver.scene.domain_range[4] + 0.5 * solver.dz,
-        solver.scene.domain_range[5] - 0.5 * solver.dz,
+        solver.scene.domain_range[4] + 0.5 * solver.scene.dz,
+        solver.scene.domain_range[5] - 0.5 * solver.scene.dz,
         field.shape[2],
     )
     return field, x, y, z
@@ -123,9 +123,9 @@ def test_tfsf_axis_aligned_plane_wave_null_leakage_is_small(direction, polarizat
         y_coords,
         z_coords,
         TFSF_BOUNDS,
-        dx=result.solver.dx,
-        dy=result.solver.dy,
-        dz=result.solver.dz,
+        dx=result.solver.scene.dx,
+        dy=result.solver.scene.dy,
+        dz=result.solver.scene.dz,
     )
 
     assert inside_max > 0.0
@@ -172,9 +172,9 @@ def test_tfsf_axis_aligned_gaussian_pulse_null_leakage_is_small_across_dft_frequ
         y_coords,
         z_coords,
         TFSF_BOUNDS,
-        dx=result.solver.dx,
-        dy=result.solver.dy,
-        dz=result.solver.dz,
+        dx=result.solver.scene.dx,
+        dy=result.solver.scene.dy,
+        dz=result.solver.scene.dz,
     )
 
     assert inside_max > 0.0
@@ -204,9 +204,9 @@ def test_tfsf_oblique_plane_wave_keeps_leakage_bounded():
             y_coords,
             z_coords,
             TFSF_BOUNDS,
-            dx=result.solver.dx,
-            dy=result.solver.dy,
-            dz=result.solver.dz,
+            dx=result.solver.scene.dx,
+            dy=result.solver.scene.dy,
+            dz=result.solver.scene.dz,
         )
         assert inside_max > 0.0
         assert outside_max < inside_max
@@ -241,9 +241,9 @@ def test_tfsf_gaussian_beam_null_leakage_is_small():
         y_coords,
         z_coords,
         TFSF_BOUNDS,
-        dx=result.solver.dx,
-        dy=result.solver.dy,
-        dz=result.solver.dz,
+        dx=result.solver.scene.dx,
+        dy=result.solver.scene.dy,
+        dz=result.solver.scene.dz,
     )
 
     assert inside_max > 0.0
@@ -288,9 +288,9 @@ def test_tfsf_scatterer_generates_scattered_field_outside_box():
         y_coords,
         z_coords,
         TFSF_BOUNDS,
-        dx=null_result.solver.dx,
-        dy=null_result.solver.dy,
-        dz=null_result.solver.dz,
+        dx=null_result.solver.scene.dx,
+        dy=null_result.solver.scene.dy,
+        dz=null_result.solver.scene.dz,
     )
     _, _, scatter_outside_max = _guarded_region_ratio(
         scatter_field,
@@ -298,9 +298,9 @@ def test_tfsf_scatterer_generates_scattered_field_outside_box():
         y_coords,
         z_coords,
         TFSF_BOUNDS,
-        dx=scatter_result.solver.dx,
-        dy=scatter_result.solver.dy,
-        dz=scatter_result.solver.dz,
+        dx=scatter_result.solver.scene.dx,
+        dy=scatter_result.solver.scene.dy,
+        dz=scatter_result.solver.scene.dz,
     )
 
     assert scatter_outside_max > null_outside_max * 2.0

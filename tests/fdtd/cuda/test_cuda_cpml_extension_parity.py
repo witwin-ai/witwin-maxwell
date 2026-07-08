@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
 import pytest
 import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.fdtd.boundary import expand_cpml_memory_tensor
 from witwin.maxwell.fdtd.cuda import backend
+from tests.fdtd.cuda import torch_reference
 
 
 pytestmark = pytest.mark.skipif(
@@ -75,10 +77,25 @@ class _CountingExtension:
         return counted
 
 
-def _dense_cpml_scene() -> mw.Scene:
+# Strongly graded, per-axis-distinct node coordinates spanning (-0.48, 0.48)
+# with the same 8-cell count as the uniform 0.12 grid.
+_GRADED_NODES = {
+    "x": np.array([-0.48, -0.40, -0.29, -0.14, 0.02, 0.15, 0.26, 0.38, 0.48], dtype=np.float64),
+    "y": np.array([-0.48, -0.37, -0.28, -0.12, -0.01, 0.13, 0.22, 0.36, 0.48], dtype=np.float64),
+    "z": np.array([-0.48, -0.41, -0.27, -0.16, 0.03, 0.12, 0.28, 0.35, 0.48], dtype=np.float64),
+}
+
+
+def _grid_spec(grid_kind: str) -> mw.GridSpec:
+    if grid_kind == "graded":
+        return mw.GridSpec.custom(_GRADED_NODES["x"], _GRADED_NODES["y"], _GRADED_NODES["z"])
+    return mw.GridSpec.uniform(0.12)
+
+
+def _dense_cpml_scene(grid_kind: str) -> mw.Scene:
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.48, 0.48))),
-        grid=mw.GridSpec.uniform(0.12),
+        grid=_grid_spec(grid_kind),
         boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
         device="cuda",
     )
@@ -94,10 +111,10 @@ def _dense_cpml_scene() -> mw.Scene:
     return scene
 
 
-def _prepared_dense_cpml_solver(monkeypatch):
+def _prepared_dense_cpml_solver(monkeypatch, grid_kind):
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
     return mw.Simulation.fdtd(
-        _dense_cpml_scene(),
+        _dense_cpml_scene(grid_kind),
         frequencies=[1.0e9],
         absorber="cpml",
         cpml_config={"memory_mode": "dense"},
@@ -106,10 +123,10 @@ def _prepared_dense_cpml_solver(monkeypatch):
     ).prepare().solver
 
 
-def _prepared_slab_cpml_solver(monkeypatch):
+def _prepared_slab_cpml_solver(monkeypatch, grid_kind):
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
     return mw.Simulation.fdtd(
-        _dense_cpml_scene(),
+        _dense_cpml_scene(grid_kind),
         frequencies=[1.0e9],
         absorber="cpml",
         cpml_config={"memory_mode": "slab"},
@@ -141,16 +158,20 @@ def _advance_dense_cpml_one_step(solver):
     os.environ.get("WITWIN_RUN_CUDA_EXTENSION_BUILD") != "1",
     reason="Set WITWIN_RUN_CUDA_EXTENSION_BUILD=1 to compile and run native CUDA field kernels.",
 )
-def test_compiled_cuda_extension_dense_cpml_one_step_matches_torch_cuda_reference(monkeypatch):
+@pytest.mark.parametrize("grid_kind", ["uniform", "graded"])
+def test_compiled_cuda_extension_dense_cpml_one_step_matches_torch_cuda_reference(monkeypatch, grid_kind):
     monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", raising=False)
-    reference_solver = _prepared_dense_cpml_solver(monkeypatch)
-    extension_solver = _prepared_dense_cpml_solver(monkeypatch)
+    reference_solver = _prepared_dense_cpml_solver(monkeypatch, grid_kind)
+    extension_solver = _prepared_dense_cpml_solver(monkeypatch, grid_kind)
     assert reference_solver._cpml_memory_mode == "dense"
     assert extension_solver._cpml_memory_mode == "dense"
 
     _seed_dense_cpml_state(reference_solver)
     _copy_dense_cpml_state(reference_solver, extension_solver)
 
+    # Step the reference solver through the frozen Torch implementations so
+    # the comparison is independent of the compiled kernels.
+    reference_solver.fdtd_module = torch_reference.get_native_fdtd_module()
     _advance_dense_cpml_one_step(reference_solver)
 
     real_extension = backend.get_compiled_extension()
@@ -177,9 +198,10 @@ def test_compiled_cuda_extension_dense_cpml_one_step_matches_torch_cuda_referenc
     os.environ.get("WITWIN_RUN_CUDA_EXTENSION_BUILD") != "1",
     reason="Set WITWIN_RUN_CUDA_EXTENSION_BUILD=1 to compile and run native CUDA field kernels.",
 )
-def test_compiled_cuda_extension_compressed_cpml_one_step_matches_dense_reference(monkeypatch):
+@pytest.mark.parametrize("grid_kind", ["uniform", "graded"])
+def test_compiled_cuda_extension_compressed_cpml_one_step_matches_dense_reference(monkeypatch, grid_kind):
     monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", raising=False)
-    solver = _prepared_slab_cpml_solver(monkeypatch)
+    solver = _prepared_slab_cpml_solver(monkeypatch, grid_kind)
     assert solver._cpml_memory_mode == "slab"
 
     _seed_dense_cpml_state(solver)
@@ -203,8 +225,8 @@ def test_compiled_cuda_extension_compressed_cpml_one_step_matches_dense_referenc
         InvKappaHxZ=solver.cpml_inv_kappa_h_z,
         ByHxZ=solver.cpml_b_h_z,
         CyHxZ=solver.cpml_c_h_z,
-        invDy=solver.inv_dy,
-        invDz=solver.inv_dz,
+        invDy=solver.inv_dy_h,
+        invDz=solver.inv_dz_h,
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hx"])
     module.updateMagneticFieldHy3D(
         Hy=ref_hy,
@@ -220,8 +242,8 @@ def test_compiled_cuda_extension_compressed_cpml_one_step_matches_dense_referenc
         InvKappaHyZ=solver.cpml_inv_kappa_h_z,
         ByHyZ=solver.cpml_b_h_z,
         CyHyZ=solver.cpml_c_h_z,
-        invDx=solver.inv_dx,
-        invDz=solver.inv_dz,
+        invDx=solver.inv_dx_h,
+        invDz=solver.inv_dz_h,
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hy"])
     module.updateMagneticFieldHz3D(
         Hz=ref_hz,
@@ -237,8 +259,8 @@ def test_compiled_cuda_extension_compressed_cpml_one_step_matches_dense_referenc
         InvKappaHzY=solver.cpml_inv_kappa_h_y,
         ByHzY=solver.cpml_b_h_y,
         CyHzY=solver.cpml_c_h_y,
-        invDx=solver.inv_dx,
-        invDy=solver.inv_dy,
+        invDx=solver.inv_dx_h,
+        invDy=solver.inv_dy_h,
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hz"])
     module.updateElectricFieldExCpml3D(
         Ex=ref_ex,
@@ -254,8 +276,8 @@ def test_compiled_cuda_extension_compressed_cpml_one_step_matches_dense_referenc
         InvKappaExZ=solver.cpml_inv_kappa_e_z,
         BExZ=solver.cpml_b_e_z,
         CExZ=solver.cpml_c_e_z,
-        invDy=solver.inv_dy,
-        invDz=solver.inv_dz,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
@@ -275,8 +297,8 @@ def test_compiled_cuda_extension_compressed_cpml_one_step_matches_dense_referenc
         InvKappaEyZ=solver.cpml_inv_kappa_e_z,
         BEyZ=solver.cpml_b_e_z,
         CEyZ=solver.cpml_c_e_z,
-        invDx=solver.inv_dx,
-        invDz=solver.inv_dz,
+        invDx=solver.inv_dx_e,
+        invDz=solver.inv_dz_e,
         xLowBoundaryMode=solver.boundary_x_low_code,
         xHighBoundaryMode=solver.boundary_x_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
@@ -296,8 +318,8 @@ def test_compiled_cuda_extension_compressed_cpml_one_step_matches_dense_referenc
         InvKappaEzY=solver.cpml_inv_kappa_e_y,
         BEzY=solver.cpml_b_e_y,
         CEzY=solver.cpml_c_e_y,
-        invDx=solver.inv_dx,
-        invDy=solver.inv_dy,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
         xLowBoundaryMode=solver.boundary_x_low_code,
         xHighBoundaryMode=solver.boundary_x_high_code,
         yLowBoundaryMode=solver.boundary_y_low_code,

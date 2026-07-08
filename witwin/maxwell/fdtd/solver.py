@@ -133,6 +133,9 @@ class FDTD:
         )
 
     def auto_dt(self, dx, dy, dz, frequency, source_time=None, c=299792458.0, steps_per_cycle=30):
+        # dx/dy/dz are the per-axis MINIMUM primal spacings (identical to the
+        # uniform steps on a uniform grid), so the Courant bound holds on
+        # nonuniform grids as well.
         if source_time is not None:
             characteristic_frequency = (
                 float(source_time.get("characteristic_frequency", frequency))
@@ -351,38 +354,29 @@ class FDTD:
         shape[axis_index] = 1
         return tuple(offsets), tuple(shape)
 
-    def _component_positions(self, field_name, offsets, shape, dtype):
-        x0, _, y0, _, z0, _ = self.scene.domain_range
-        ix = torch.arange(offsets[0], offsets[0] + shape[0], device=self.device, dtype=dtype)
-        iy = torch.arange(offsets[1], offsets[1] + shape[1], device=self.device, dtype=dtype)
-        iz = torch.arange(offsets[2], offsets[2] + shape[2], device=self.device, dtype=dtype)
+    _COMPONENT_HALF_OFFSET_AXES = {
+        "Ex": (True, False, False),
+        "Ey": (False, True, False),
+        "Ez": (False, False, True),
+        "Hx": (False, True, True),
+        "Hy": (True, False, True),
+        "Hz": (True, True, False),
+    }
 
-        if field_name == "Ex":
-            px = x0 + (ix + 0.5) * self.dx
-            py = y0 + iy * self.dy
-            pz = z0 + iz * self.dz
-        elif field_name == "Ey":
-            px = x0 + ix * self.dx
-            py = y0 + (iy + 0.5) * self.dy
-            pz = z0 + iz * self.dz
-        elif field_name == "Ez":
-            px = x0 + ix * self.dx
-            py = y0 + iy * self.dy
-            pz = z0 + (iz + 0.5) * self.dz
-        elif field_name == "Hx":
-            px = x0 + ix * self.dx
-            py = y0 + (iy + 0.5) * self.dy
-            pz = z0 + (iz + 0.5) * self.dz
-        elif field_name == "Hy":
-            px = x0 + (ix + 0.5) * self.dx
-            py = y0 + iy * self.dy
-            pz = z0 + (iz + 0.5) * self.dz
-        elif field_name == "Hz":
-            px = x0 + (ix + 0.5) * self.dx
-            py = y0 + (iy + 0.5) * self.dy
-            pz = z0 + iz * self.dz
-        else:
+    def _component_positions(self, field_name, offsets, shape, dtype):
+        half_axes = self._COMPONENT_HALF_OFFSET_AXES.get(field_name)
+        if half_axes is None:
             raise ValueError(f"Unsupported field component {field_name!r}.")
+        scene = self.scene
+        axis_coords = (
+            (scene.x, scene.x_half),
+            (scene.y, scene.y_half),
+            (scene.z, scene.z_half),
+        )
+        px, py, pz = (
+            coords[half][offset : offset + size].to(device=self.device, dtype=dtype)
+            for coords, half, offset, size in zip(axis_coords, half_axes, offsets, shape)
+        )
 
         px = px[:, None, None].expand(shape[0], shape[1], shape[2])
         py = py[None, :, None].expand(shape[0], shape[1], shape[2])

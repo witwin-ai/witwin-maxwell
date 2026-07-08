@@ -233,8 +233,8 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         InvKappaHxZ=solver.cpml_inv_kappa_h_z,
         ByHxZ=solver.cpml_b_h_z,
         CyHxZ=solver.cpml_c_h_z,
-        invDy=solver.inv_dy,
-        invDz=solver.inv_dz,
+        invDy=solver.inv_dy_h,
+        invDz=solver.inv_dz_h,
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hx"])
     module.updateMagneticFieldHy3D(
         Hy=ref_hy,
@@ -250,8 +250,8 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         InvKappaHyZ=solver.cpml_inv_kappa_h_z,
         ByHyZ=solver.cpml_b_h_z,
         CyHyZ=solver.cpml_c_h_z,
-        invDx=solver.inv_dx,
-        invDz=solver.inv_dz,
+        invDx=solver.inv_dx_h,
+        invDz=solver.inv_dz_h,
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hy"])
     module.updateMagneticFieldHz3D(
         Hz=ref_hz,
@@ -267,8 +267,8 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         InvKappaHzY=solver.cpml_inv_kappa_h_y,
         ByHzY=solver.cpml_b_h_y,
         CyHzY=solver.cpml_c_h_y,
-        invDx=solver.inv_dx,
-        invDy=solver.inv_dy,
+        invDx=solver.inv_dx_h,
+        invDy=solver.inv_dy_h,
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hz"])
 
     module.updateElectricFieldExCpml3D(
@@ -285,8 +285,8 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         InvKappaExZ=solver.cpml_inv_kappa_e_z,
         BExZ=solver.cpml_b_e_z,
         CExZ=solver.cpml_c_e_z,
-        invDy=solver.inv_dy,
-        invDz=solver.inv_dz,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
@@ -306,8 +306,8 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         InvKappaEyZ=solver.cpml_inv_kappa_e_z,
         BEyZ=solver.cpml_b_e_z,
         CEyZ=solver.cpml_c_e_z,
-        invDx=solver.inv_dx,
-        invDz=solver.inv_dz,
+        invDx=solver.inv_dx_e,
+        invDz=solver.inv_dz_e,
         xLowBoundaryMode=solver.boundary_x_low_code,
         xHighBoundaryMode=solver.boundary_x_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
@@ -327,8 +327,8 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         InvKappaEzY=solver.cpml_inv_kappa_e_y,
         BEzY=solver.cpml_b_e_y,
         CEzY=solver.cpml_c_e_y,
-        invDx=solver.inv_dx,
-        invDy=solver.inv_dy,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
         xLowBoundaryMode=solver.boundary_x_low_code,
         xHighBoundaryMode=solver.boundary_x_high_code,
         yLowBoundaryMode=solver.boundary_y_low_code,

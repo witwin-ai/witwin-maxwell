@@ -15,24 +15,24 @@ void update_magnetic_hx_standard_cuda(
     const at::Tensor& ez,
     const at::Tensor& decay,
     const at::Tensor& curl,
-    double inv_dy,
-    double inv_dz);
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz);
 void update_magnetic_hy_standard_cuda(
     at::Tensor hy,
     const at::Tensor& ex,
     const at::Tensor& ez,
     const at::Tensor& decay,
     const at::Tensor& curl,
-    double inv_dx,
-    double inv_dz);
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz);
 void update_magnetic_hz_standard_cuda(
     at::Tensor hz,
     const at::Tensor& ex,
     const at::Tensor& ey,
     const at::Tensor& decay,
     const at::Tensor& curl,
-    double inv_dx,
-    double inv_dy);
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy);
 void update_magnetic_hx_cpml_cuda(
     at::Tensor hx,
     const at::Tensor& ey,
@@ -47,8 +47,8 @@ void update_magnetic_hx_cpml_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dy,
-    double inv_dz);
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz);
 void update_magnetic_hy_cpml_cuda(
     at::Tensor hy,
     const at::Tensor& ex,
@@ -63,8 +63,8 @@ void update_magnetic_hy_cpml_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dx,
-    double inv_dz);
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz);
 void update_magnetic_hz_cpml_cuda(
     at::Tensor hz,
     const at::Tensor& ex,
@@ -79,8 +79,8 @@ void update_magnetic_hz_cpml_cuda(
     const at::Tensor& inv_kappa_y,
     const at::Tensor& b_y,
     const at::Tensor& c_y,
-    double inv_dx,
-    double inv_dy);
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy);
 void update_magnetic_hx_cpml_compressed_cuda(
     at::Tensor hx,
     const at::Tensor& ey,
@@ -95,8 +95,8 @@ void update_magnetic_hx_cpml_compressed_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dy,
-    double inv_dz,
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz,
     int64_t y_low_length,
     int64_t y_high_start,
     int64_t y_high_length,
@@ -119,8 +119,8 @@ void update_magnetic_hy_cpml_compressed_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dx,
-    double inv_dz,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz,
     int64_t x_low_length,
     int64_t x_high_start,
     int64_t x_high_length,
@@ -143,8 +143,8 @@ void update_magnetic_hz_cpml_compressed_cuda(
     const at::Tensor& inv_kappa_y,
     const at::Tensor& b_y,
     const at::Tensor& c_y,
-    double inv_dx,
-    double inv_dy,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy,
     int64_t x_low_length,
     int64_t x_high_start,
     int64_t x_high_length,
@@ -159,8 +159,8 @@ void update_electric_ex_standard_cuda(
     const at::Tensor& hz,
     const at::Tensor& decay,
     const at::Tensor& curl,
-    double inv_dy,
-    double inv_dz,
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz,
     int64_t y_low_mode,
     int64_t y_high_mode,
     int64_t z_low_mode,
@@ -171,8 +171,8 @@ void update_electric_ey_standard_cuda(
     const at::Tensor& hz,
     const at::Tensor& decay,
     const at::Tensor& curl,
-    double inv_dx,
-    double inv_dz,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t z_low_mode,
@@ -183,8 +183,8 @@ void update_electric_ez_standard_cuda(
     const at::Tensor& hy,
     const at::Tensor& decay,
     const at::Tensor& curl,
-    double inv_dx,
-    double inv_dy,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t y_low_mode,
@@ -202,8 +202,8 @@ void update_electric_ex_bloch_cuda(
     double phase_sin_y,
     double phase_cos_z,
     double phase_sin_z,
-    double inv_dy,
-    double inv_dz);
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz);
 void update_electric_ey_bloch_cuda(
     at::Tensor ey_real,
     at::Tensor ey_imag,
@@ -217,8 +217,8 @@ void update_electric_ey_bloch_cuda(
     double phase_sin_x,
     double phase_cos_z,
     double phase_sin_z,
-    double inv_dx,
-    double inv_dz);
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz);
 void update_electric_ez_bloch_cuda(
     at::Tensor ez_real,
     at::Tensor ez_imag,
@@ -232,8 +232,8 @@ void update_electric_ez_bloch_cuda(
     double phase_sin_x,
     double phase_cos_y,
     double phase_sin_y,
-    double inv_dx,
-    double inv_dy);
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy);
 void update_electric_ex_cpml_cuda(
     at::Tensor ex,
     const at::Tensor& hy,
@@ -248,8 +248,8 @@ void update_electric_ex_cpml_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dy,
-    double inv_dz,
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz,
     int64_t y_low_mode,
     int64_t y_high_mode,
     int64_t z_low_mode,
@@ -268,8 +268,8 @@ void update_electric_ey_cpml_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dx,
-    double inv_dz,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t z_low_mode,
@@ -288,8 +288,8 @@ void update_electric_ez_cpml_cuda(
     const at::Tensor& inv_kappa_y,
     const at::Tensor& b_y,
     const at::Tensor& c_y,
-    double inv_dx,
-    double inv_dy,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t y_low_mode,
@@ -308,8 +308,8 @@ void update_electric_ex_cpml_compressed_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dy,
-    double inv_dz,
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz,
     int64_t y_low_mode,
     int64_t y_high_mode,
     int64_t z_low_mode,
@@ -336,8 +336,8 @@ void update_electric_ey_cpml_compressed_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dx,
-    double inv_dz,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t z_low_mode,
@@ -364,8 +364,8 @@ void update_electric_ez_cpml_compressed_cuda(
     const at::Tensor& inv_kappa_y,
     const at::Tensor& b_y,
     const at::Tensor& c_y,
-    double inv_dx,
-    double inv_dy,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t y_low_mode,
@@ -598,8 +598,8 @@ void reverse_electric_adjoint_to_hx_standard_cuda(
     const at::Tensor& adj_ez_post,
     const at::Tensor& ey_curl,
     const at::Tensor& ez_curl,
-    double inv_dy,
-    double inv_dz);
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz);
 void reverse_electric_adjoint_to_hy_standard_cuda(
     at::Tensor adj_hy_mid,
     const at::Tensor& adj_hy_post,
@@ -607,8 +607,8 @@ void reverse_electric_adjoint_to_hy_standard_cuda(
     const at::Tensor& adj_ez_post,
     const at::Tensor& ex_curl,
     const at::Tensor& ez_curl,
-    double inv_dx,
-    double inv_dz);
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz);
 void reverse_electric_adjoint_to_hz_standard_cuda(
     at::Tensor adj_hz_mid,
     const at::Tensor& adj_hz_post,
@@ -616,8 +616,8 @@ void reverse_electric_adjoint_to_hz_standard_cuda(
     const at::Tensor& adj_ey_post,
     const at::Tensor& ex_curl,
     const at::Tensor& ey_curl,
-    double inv_dx,
-    double inv_dy);
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy);
 void reverse_magnetic_adjoint_to_ex_standard_cuda(
     at::Tensor adj_ex_prev,
     at::Tensor grad_eps_ex,
@@ -631,8 +631,10 @@ void reverse_magnetic_adjoint_to_ex_standard_cuda(
     const at::Tensor& hz_mid,
     const at::Tensor& hy_curl,
     const at::Tensor& hz_curl,
-    double inv_dy,
-    double inv_dz,
+    const at::Tensor& inv_dy_e,
+    const at::Tensor& inv_dz_e,
+    const at::Tensor& inv_dy_h,
+    const at::Tensor& inv_dz_h,
     int64_t y_low_mode,
     int64_t y_high_mode,
     int64_t z_low_mode,
@@ -650,8 +652,10 @@ void reverse_magnetic_adjoint_to_ey_standard_cuda(
     const at::Tensor& hz_mid,
     const at::Tensor& hx_curl,
     const at::Tensor& hz_curl,
-    double inv_dx,
-    double inv_dz,
+    const at::Tensor& inv_dx_e,
+    const at::Tensor& inv_dz_e,
+    const at::Tensor& inv_dx_h,
+    const at::Tensor& inv_dz_h,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t z_low_mode,
@@ -669,8 +673,10 @@ void reverse_magnetic_adjoint_to_ez_standard_cuda(
     const at::Tensor& hy_mid,
     const at::Tensor& hx_curl,
     const at::Tensor& hy_curl,
-    double inv_dx,
-    double inv_dy,
+    const at::Tensor& inv_dx_e,
+    const at::Tensor& inv_dy_e,
+    const at::Tensor& inv_dx_h,
+    const at::Tensor& inv_dy_h,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t y_low_mode,
@@ -690,8 +696,8 @@ void reverse_electric_adjoint_to_hx_bloch_cuda(
     double phase_sin_y,
     double phase_cos_z,
     double phase_sin_z,
-    double inv_dy,
-    double inv_dz);
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz);
 void reverse_electric_adjoint_to_hy_bloch_cuda(
     at::Tensor adj_hy_mid_real,
     at::Tensor adj_hy_mid_imag,
@@ -707,8 +713,8 @@ void reverse_electric_adjoint_to_hy_bloch_cuda(
     double phase_sin_x,
     double phase_cos_z,
     double phase_sin_z,
-    double inv_dx,
-    double inv_dz);
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz);
 void reverse_electric_adjoint_to_hz_bloch_cuda(
     at::Tensor adj_hz_mid_real,
     at::Tensor adj_hz_mid_imag,
@@ -724,8 +730,8 @@ void reverse_electric_adjoint_to_hz_bloch_cuda(
     double phase_sin_x,
     double phase_cos_y,
     double phase_sin_y,
-    double inv_dx,
-    double inv_dy);
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy);
 void reverse_magnetic_adjoint_to_ex_bloch_cuda(
     at::Tensor adj_ex_prev_real,
     at::Tensor adj_ex_prev_imag,
@@ -749,8 +755,10 @@ void reverse_magnetic_adjoint_to_ex_bloch_cuda(
     double phase_sin_y,
     double phase_cos_z,
     double phase_sin_z,
-    double inv_dy,
-    double inv_dz);
+    const at::Tensor& inv_dy_e,
+    const at::Tensor& inv_dz_e,
+    const at::Tensor& inv_dy_h,
+    const at::Tensor& inv_dz_h);
 void reverse_magnetic_adjoint_to_ey_bloch_cuda(
     at::Tensor adj_ey_prev_real,
     at::Tensor adj_ey_prev_imag,
@@ -774,8 +782,10 @@ void reverse_magnetic_adjoint_to_ey_bloch_cuda(
     double phase_sin_x,
     double phase_cos_z,
     double phase_sin_z,
-    double inv_dx,
-    double inv_dz);
+    const at::Tensor& inv_dx_e,
+    const at::Tensor& inv_dz_e,
+    const at::Tensor& inv_dx_h,
+    const at::Tensor& inv_dz_h);
 void reverse_magnetic_adjoint_to_ez_bloch_cuda(
     at::Tensor adj_ez_prev_real,
     at::Tensor adj_ez_prev_imag,
@@ -799,18 +809,20 @@ void reverse_magnetic_adjoint_to_ez_bloch_cuda(
     double phase_sin_x,
     double phase_cos_y,
     double phase_sin_y,
-    double inv_dx,
-    double inv_dy);
+    const at::Tensor& inv_dx_e,
+    const at::Tensor& inv_dy_e,
+    const at::Tensor& inv_dx_h,
+    const at::Tensor& inv_dy_h);
 void accumulate_forward_diff_adjoint_cuda(
     at::Tensor field_grad,
     const at::Tensor& diff_grad,
     int64_t axis,
-    double inv_delta);
+    const at::Tensor& inv_delta);
 void accumulate_backward_diff_adjoint_cuda(
     at::Tensor field_grad,
     const at::Tensor& diff_grad,
     int64_t axis,
-    double inv_delta);
+    const at::Tensor& inv_delta);
 void reverse_electric_component_ex_cpml_cuda(
     at::Tensor adj_prev,
     at::Tensor grad_eps,
@@ -834,8 +846,8 @@ void reverse_electric_component_ex_cpml_cuda(
     const at::Tensor& inv_kappa_neg,
     const at::Tensor& hy_mid,
     const at::Tensor& hz_mid,
-    double inv_dy,
-    double inv_dz,
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz,
     int64_t y_low_mode,
     int64_t y_high_mode,
     int64_t z_low_mode,
@@ -863,8 +875,8 @@ void reverse_electric_component_ey_cpml_cuda(
     const at::Tensor& inv_kappa_neg,
     const at::Tensor& hx_mid,
     const at::Tensor& hz_mid,
-    double inv_dx,
-    double inv_dz,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t z_low_mode,
@@ -892,8 +904,8 @@ void reverse_electric_component_ez_cpml_cuda(
     const at::Tensor& inv_kappa_neg,
     const at::Tensor& hx_mid,
     const at::Tensor& hy_mid,
-    double inv_dx,
-    double inv_dy,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t y_low_mode,
@@ -1027,8 +1039,8 @@ void update_electric_ex_bloch_y_standard_z_cuda(
     const at::Tensor& curl,
     double phase_cos_y,
     double phase_sin_y,
-    double inv_dy,
-    double inv_dz,
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz,
     int64_t z_low_mode,
     int64_t z_high_mode);
 void update_electric_ey_bloch_x_standard_z_cuda(
@@ -1042,8 +1054,8 @@ void update_electric_ey_bloch_x_standard_z_cuda(
     const at::Tensor& curl,
     double phase_cos_x,
     double phase_sin_x,
-    double inv_dx,
-    double inv_dz,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz,
     int64_t z_low_mode,
     int64_t z_high_mode);
 void apply_electric_ex_cpml_z_correction_cuda(
@@ -1054,7 +1066,7 @@ void apply_electric_ex_cpml_z_correction_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dz,
+    const at::Tensor& inv_dz,
     int64_t offset_i,
     int64_t offset_j,
     int64_t offset_k,
@@ -1070,7 +1082,7 @@ void apply_electric_ey_cpml_z_correction_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dz,
+    const at::Tensor& inv_dz,
     int64_t offset_i,
     int64_t offset_j,
     int64_t offset_k,

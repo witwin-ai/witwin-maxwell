@@ -133,7 +133,9 @@ def test_native_adjoint_standard_h_decay_kernel_matches_reference():
 
 @requires_extension_build
 def test_native_adjoint_standard_electric_reverse_kernels_match_torch_dispatcher(monkeypatch):
-    monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", raising=False)
+    # Route the expected side through the frozen Torch reference so the CUDA
+    # kernels are checked against independent per-element math.
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
     ext = get_compiled_extension()
     torch.manual_seed(129)
     ex = torch.randn((2, 4, 5), device="cuda", dtype=torch.float32)
@@ -145,7 +147,10 @@ def test_native_adjoint_standard_electric_reverse_kernels_match_torch_dispatcher
     ex_curl = torch.rand_like(ex) * 0.3 + 0.1
     ey_curl = torch.rand_like(ey) * 0.3 + 0.1
     ez_curl = torch.rand_like(ez) * 0.3 + 0.1
-    inv_dx, inv_dy, inv_dz = 0.7, 0.8, 0.9
+    # Dual spacing arrays (length == electric size along each axis).
+    inv_dx = torch.linspace(0.6, 0.8, 3, device="cuda", dtype=torch.float32)
+    inv_dy = torch.linspace(0.7, 0.9, 4, device="cuda", dtype=torch.float32)
+    inv_dz = torch.linspace(0.8, 1.0, 5, device="cuda", dtype=torch.float32)
 
     expected_hx = torch.empty_like(hx)
     expected_hy = torch.empty_like(hy)
@@ -203,7 +208,7 @@ def test_native_adjoint_standard_electric_reverse_kernels_match_torch_dispatcher
     ],
 )
 def test_native_adjoint_standard_magnetic_reverse_kernels_match_torch_dispatcher(monkeypatch, boundary_modes):
-    monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", raising=False)
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
     ext = get_compiled_extension()
     torch.manual_seed(131)
     ex = torch.randn((2, 4, 5), device="cuda", dtype=torch.float32)
@@ -224,7 +229,13 @@ def test_native_adjoint_standard_magnetic_reverse_kernels_match_torch_dispatcher
     eps_ex = torch.rand_like(ex) + 2.0
     eps_ey = torch.rand_like(ey) + 2.0
     eps_ez = torch.rand_like(ez) + 2.0
-    inv_dx, inv_dy, inv_dz = 0.7, 0.8, 0.9
+    # Dual (electric-length) and primal (magnetic-length) spacing arrays.
+    inv_dx_e = torch.linspace(0.6, 0.8, 3, device="cuda", dtype=torch.float32)
+    inv_dy_e = torch.linspace(0.7, 0.9, 4, device="cuda", dtype=torch.float32)
+    inv_dz_e = torch.linspace(0.8, 1.0, 5, device="cuda", dtype=torch.float32)
+    inv_dx_h = torch.linspace(0.65, 0.75, 2, device="cuda", dtype=torch.float32)
+    inv_dy_h = torch.linspace(0.75, 0.85, 3, device="cuda", dtype=torch.float32)
+    inv_dz_h = torch.linspace(0.85, 0.95, 4, device="cuda", dtype=torch.float32)
     low_a, high_a, low_b, high_b = boundary_modes
 
     expected_ex = torch.empty_like(ex)
@@ -246,8 +257,10 @@ def test_native_adjoint_standard_magnetic_reverse_kernels_match_torch_dispatcher
         HzMid=hz,
         HyCurl=hy_curl,
         HzCurl=hz_curl,
-        invDy=inv_dy,
-        invDz=inv_dz,
+        invDyE=inv_dy_e,
+        invDzE=inv_dz_e,
+        invDyH=inv_dy_h,
+        invDzH=inv_dz_h,
         yLowBoundaryMode=low_a,
         yHighBoundaryMode=high_a,
         zLowBoundaryMode=low_b,
@@ -266,8 +279,10 @@ def test_native_adjoint_standard_magnetic_reverse_kernels_match_torch_dispatcher
         HzMid=hz,
         HxCurl=hx_curl,
         HzCurl=hz_curl,
-        invDx=inv_dx,
-        invDz=inv_dz,
+        invDxE=inv_dx_e,
+        invDzE=inv_dz_e,
+        invDxH=inv_dx_h,
+        invDzH=inv_dz_h,
         xLowBoundaryMode=low_a,
         xHighBoundaryMode=high_a,
         zLowBoundaryMode=low_b,
@@ -286,8 +301,10 @@ def test_native_adjoint_standard_magnetic_reverse_kernels_match_torch_dispatcher
         HyMid=hy,
         HxCurl=hx_curl,
         HyCurl=hy_curl,
-        invDx=inv_dx,
-        invDy=inv_dy,
+        invDxE=inv_dx_e,
+        invDyE=inv_dy_e,
+        invDxH=inv_dx_h,
+        invDyH=inv_dy_h,
         xLowBoundaryMode=low_a,
         xHighBoundaryMode=high_a,
         yLowBoundaryMode=low_b,
@@ -313,8 +330,10 @@ def test_native_adjoint_standard_magnetic_reverse_kernels_match_torch_dispatcher
         hz,
         hy_curl,
         hz_curl,
-        inv_dy,
-        inv_dz,
+        inv_dy_e,
+        inv_dz_e,
+        inv_dy_h,
+        inv_dz_h,
         low_a,
         high_a,
         low_b,
@@ -333,8 +352,10 @@ def test_native_adjoint_standard_magnetic_reverse_kernels_match_torch_dispatcher
         hz,
         hx_curl,
         hz_curl,
-        inv_dx,
-        inv_dz,
+        inv_dx_e,
+        inv_dz_e,
+        inv_dx_h,
+        inv_dz_h,
         low_a,
         high_a,
         low_b,
@@ -353,8 +374,10 @@ def test_native_adjoint_standard_magnetic_reverse_kernels_match_torch_dispatcher
         hy,
         hx_curl,
         hy_curl,
-        inv_dx,
-        inv_dy,
+        inv_dx_e,
+        inv_dy_e,
+        inv_dx_h,
+        inv_dy_h,
         low_a,
         high_a,
         low_b,
@@ -372,7 +395,7 @@ def test_native_adjoint_standard_magnetic_reverse_kernels_match_torch_dispatcher
 
 @requires_extension_build
 def test_native_adjoint_bloch_electric_reverse_kernels_match_torch_dispatcher(monkeypatch):
-    monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", raising=False)
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
     ext = get_compiled_extension()
     torch.manual_seed(132)
     ex_r = torch.randn((2, 4, 5), device="cuda", dtype=torch.float32)
@@ -393,7 +416,10 @@ def test_native_adjoint_bloch_electric_reverse_kernels_match_torch_dispatcher(mo
     phase_x = (0.37, 0.19)
     phase_y = (0.73, -0.28)
     phase_z = (0.58, 0.44)
-    inv_dx, inv_dy, inv_dz = 0.7, 0.8, 0.9
+    # Dual spacing arrays; the Bloch wrap entries at [0] and [-1] are equal.
+    inv_dx = torch.tensor([0.7, 0.65, 0.7], device="cuda", dtype=torch.float32)
+    inv_dy = torch.tensor([0.8, 0.75, 0.85, 0.8], device="cuda", dtype=torch.float32)
+    inv_dz = torch.tensor([0.9, 0.85, 0.95, 0.88, 0.9], device="cuda", dtype=torch.float32)
 
     expected_hx_r = torch.empty_like(hx_r)
     expected_hx_i = torch.empty_like(hx_i)
@@ -486,7 +512,7 @@ def test_native_adjoint_bloch_electric_reverse_kernels_match_torch_dispatcher(mo
 
 @requires_extension_build
 def test_native_adjoint_bloch_magnetic_reverse_kernels_match_torch_dispatcher(monkeypatch):
-    monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", raising=False)
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
     ext = get_compiled_extension()
     torch.manual_seed(134)
     ex_r = torch.randn((2, 4, 5), device="cuda", dtype=torch.float32)
@@ -522,7 +548,14 @@ def test_native_adjoint_bloch_magnetic_reverse_kernels_match_torch_dispatcher(mo
     phase_x = (0.37, 0.19)
     phase_y = (0.73, -0.28)
     phase_z = (0.58, 0.44)
-    inv_dx, inv_dy, inv_dz = 0.7, 0.8, 0.9
+    # Dual (electric-length, equal wrap entries) and primal (magnetic-length)
+    # spacing arrays.
+    inv_dx_e = torch.tensor([0.7, 0.65, 0.7], device="cuda", dtype=torch.float32)
+    inv_dy_e = torch.tensor([0.8, 0.75, 0.85, 0.8], device="cuda", dtype=torch.float32)
+    inv_dz_e = torch.tensor([0.9, 0.85, 0.95, 0.88, 0.9], device="cuda", dtype=torch.float32)
+    inv_dx_h = torch.tensor([0.68, 0.72], device="cuda", dtype=torch.float32)
+    inv_dy_h = torch.tensor([0.78, 0.82, 0.79], device="cuda", dtype=torch.float32)
+    inv_dz_h = torch.tensor([0.88, 0.92, 0.87, 0.91], device="cuda", dtype=torch.float32)
 
     expected_ex_r = torch.empty_like(ex_r)
     expected_ex_i = torch.empty_like(ex_i)
@@ -556,8 +589,10 @@ def test_native_adjoint_bloch_magnetic_reverse_kernels_match_torch_dispatcher(mo
         phaseSinY=phase_y[1],
         phaseCosZ=phase_z[0],
         phaseSinZ=phase_z[1],
-        invDy=inv_dy,
-        invDz=inv_dz,
+        invDyE=inv_dy_e,
+        invDzE=inv_dz_e,
+        invDyH=inv_dy_h,
+        invDzH=inv_dz_h,
     )
     backend._reverse_magnetic_ey_bloch(
         AdjEyPrevReal=expected_ey_r,
@@ -582,8 +617,10 @@ def test_native_adjoint_bloch_magnetic_reverse_kernels_match_torch_dispatcher(mo
         phaseSinX=phase_x[1],
         phaseCosZ=phase_z[0],
         phaseSinZ=phase_z[1],
-        invDx=inv_dx,
-        invDz=inv_dz,
+        invDxE=inv_dx_e,
+        invDzE=inv_dz_e,
+        invDxH=inv_dx_h,
+        invDzH=inv_dz_h,
     )
     backend._reverse_magnetic_ez_bloch(
         AdjEzPrevReal=expected_ez_r,
@@ -608,8 +645,10 @@ def test_native_adjoint_bloch_magnetic_reverse_kernels_match_torch_dispatcher(mo
         phaseSinX=phase_x[1],
         phaseCosY=phase_y[0],
         phaseSinY=phase_y[1],
-        invDx=inv_dx,
-        invDy=inv_dy,
+        invDxE=inv_dx_e,
+        invDyE=inv_dy_e,
+        invDxH=inv_dx_h,
+        invDyH=inv_dy_h,
     )
 
     actual_ex_r = torch.empty_like(ex_r)
@@ -624,17 +663,17 @@ def test_native_adjoint_bloch_magnetic_reverse_kernels_match_torch_dispatcher(mo
     ext.reverse_magnetic_adjoint_to_ex_bloch(
         actual_ex_r, actual_ex_i, actual_grad_ex, ex_r, ex_i, adj_hy_r, adj_hy_i, adj_hz_r, adj_hz_i,
         ex_decay, ex_curl, eps_ex, hy_mid_r, hy_mid_i, hz_mid_r, hz_mid_i, hy_curl, hz_curl,
-        phase_y[0], phase_y[1], phase_z[0], phase_z[1], inv_dy, inv_dz,
+        phase_y[0], phase_y[1], phase_z[0], phase_z[1], inv_dy_e, inv_dz_e, inv_dy_h, inv_dz_h,
     )
     ext.reverse_magnetic_adjoint_to_ey_bloch(
         actual_ey_r, actual_ey_i, actual_grad_ey, ey_r, ey_i, adj_hx_r, adj_hx_i, adj_hz_r, adj_hz_i,
         ey_decay, ey_curl, eps_ey, hx_mid_r, hx_mid_i, hz_mid_r, hz_mid_i, hx_curl, hz_curl,
-        phase_x[0], phase_x[1], phase_z[0], phase_z[1], inv_dx, inv_dz,
+        phase_x[0], phase_x[1], phase_z[0], phase_z[1], inv_dx_e, inv_dz_e, inv_dx_h, inv_dz_h,
     )
     ext.reverse_magnetic_adjoint_to_ez_bloch(
         actual_ez_r, actual_ez_i, actual_grad_ez, ez_r, ez_i, adj_hx_r, adj_hx_i, adj_hy_r, adj_hy_i,
         ez_decay, ez_curl, eps_ez, hx_mid_r, hx_mid_i, hy_mid_r, hy_mid_i, hx_curl, hy_curl,
-        phase_x[0], phase_x[1], phase_y[0], phase_y[1], inv_dx, inv_dy,
+        phase_x[0], phase_x[1], phase_y[0], phase_y[1], inv_dx_e, inv_dy_e, inv_dx_h, inv_dy_h,
     )
     torch.cuda.synchronize()
 
@@ -652,7 +691,7 @@ def test_native_adjoint_bloch_magnetic_reverse_kernels_match_torch_dispatcher(mo
 @requires_extension_build
 @pytest.mark.parametrize("axis, inv_delta", [(0, 0.7), (1, 0.8), (2, 0.9)])
 def test_native_adjoint_diff_accumulators_match_torch_dispatcher(monkeypatch, axis, inv_delta):
-    monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", raising=False)
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
     ext = get_compiled_extension()
     torch.manual_seed(133 + axis)
     field = torch.randn((4, 3, 5), device="cuda", dtype=torch.float32)
@@ -660,16 +699,19 @@ def test_native_adjoint_diff_accumulators_match_torch_dispatcher(monkeypatch, ax
     forward_shape[axis] -= 1
     forward_diff = torch.randn(tuple(forward_shape), device="cuda", dtype=torch.float32)
     backward_diff = torch.randn_like(field)
+    # Spacing arrays sized to the diff output along the accumulated axis.
+    forward_inv = torch.linspace(inv_delta, inv_delta + 0.2, forward_shape[axis], device="cuda", dtype=torch.float32)
+    backward_inv = torch.linspace(inv_delta, inv_delta + 0.2, field.shape[axis], device="cuda", dtype=torch.float32)
 
     expected_forward = field.clone()
     expected_backward = field.clone()
-    backend._accumulate_diff_adjoint(expected_forward, forward_diff, axis, inv_delta, forward=True)
-    backend._accumulate_diff_adjoint(expected_backward, backward_diff, axis, inv_delta, forward=False)
+    backend._accumulate_diff_adjoint(expected_forward, forward_diff, axis, forward_inv, forward=True)
+    backend._accumulate_diff_adjoint(expected_backward, backward_diff, axis, backward_inv, forward=False)
 
     actual_forward = field.clone()
     actual_backward = field.clone()
-    ext.accumulate_forward_diff_adjoint(actual_forward, forward_diff, axis, inv_delta)
-    ext.accumulate_backward_diff_adjoint(actual_backward, backward_diff, axis, inv_delta)
+    ext.accumulate_forward_diff_adjoint(actual_forward, forward_diff, axis, forward_inv)
+    ext.accumulate_backward_diff_adjoint(actual_backward, backward_diff, axis, backward_inv)
     torch.cuda.synchronize()
 
     torch.testing.assert_close(actual_forward, expected_forward, rtol=2.0e-6, atol=2.0e-7)
@@ -686,7 +728,7 @@ def _cpml_coeffs(length):
 
 @requires_extension_build
 def test_native_adjoint_cpml_electric_reverse_kernels_match_torch_dispatcher(monkeypatch):
-    monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", raising=False)
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
     ext = get_compiled_extension()
     torch.manual_seed(137)
     ex = torch.randn((2, 4, 5), device="cuda", dtype=torch.float32)
@@ -695,7 +737,10 @@ def test_native_adjoint_cpml_electric_reverse_kernels_match_torch_dispatcher(mon
     hx = torch.randn((3, 3, 4), device="cuda", dtype=torch.float32)
     hy = torch.randn((2, 4, 4), device="cuda", dtype=torch.float32)
     hz = torch.randn((2, 3, 5), device="cuda", dtype=torch.float32)
-    inv_dx, inv_dy, inv_dz = 0.7, 0.8, 0.9
+    # Dual spacing arrays (length == electric size along each axis).
+    inv_dx = torch.linspace(0.6, 0.8, 3, device="cuda", dtype=torch.float32)
+    inv_dy = torch.linspace(0.7, 0.9, 4, device="cuda", dtype=torch.float32)
+    inv_dz = torch.linspace(0.8, 1.0, 5, device="cuda", dtype=torch.float32)
 
     for field, method_name, backend_method, h_pos, h_neg, pos_len, neg_len, inv_pos, inv_neg, mode_keys in [
         (ex, "reverse_electric_component_ex_cpml", backend._reverse_electric_cpml_ex, hz, hy, ex.shape[1], ex.shape[2], inv_dy, inv_dz, ("y", "z")),
@@ -922,7 +967,7 @@ def test_native_adjoint_cpml_electric_reverse_kernels_match_torch_dispatcher(mon
 
 @requires_extension_build
 def test_native_adjoint_cpml_magnetic_reverse_kernels_match_torch_dispatcher(monkeypatch):
-    monkeypatch.delenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", raising=False)
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "0")
     ext = get_compiled_extension()
     torch.manual_seed(139)
     for field, backend_method, ext_method, pos_len, neg_len, prefix in [
@@ -1209,9 +1254,9 @@ def test_native_module_handles_non_contiguous_views(monkeypatch):
     curl = curl_base[:, :6, :7]
     assert not hx.is_contiguous() and not ey.is_contiguous()
 
-    inv_dy = 1.7
-    inv_dz = 2.3
-    curl_e = (ez[:, 1:, :] - ez[:, :-1, :]) * inv_dy - (ey[:, :, 1:] - ey[:, :, :-1]) * inv_dz
+    inv_dy = torch.full((6,), 1.7, device="cuda", dtype=torch.float32)
+    inv_dz = torch.full((7,), 2.3, device="cuda", dtype=torch.float32)
+    curl_e = (ez[:, 1:, :] - ez[:, :-1, :]) * inv_dy.view(1, -1, 1) - (ey[:, :, 1:] - ey[:, :, :-1]) * inv_dz.view(1, 1, -1)
     expected = hx * decay - curl * curl_e
 
     module.updateMagneticFieldHxStandard3D(

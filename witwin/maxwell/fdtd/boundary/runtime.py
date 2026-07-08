@@ -175,9 +175,12 @@ def initialize_mur_state(solver):
     if not getattr(solver, "has_mur_faces", False):
         return
 
-    axis_delta = {"x": solver.dx, "y": solver.dy, "z": solver.dz}
+    scene = solver.scene
+    axis_primal = {"x": scene.dx_primal64, "y": scene.dy_primal64, "z": scene.dz_primal64}
     for axis, side in solver.mur_faces:
-        delta = float(axis_delta[axis])
+        # Mur advection uses the local boundary-cell spacing of each face.
+        primal = axis_primal[axis]
+        delta = float(primal[0] if side == "low" else primal[-1])
         boundary_index = 0 if side == "low" else -1
         adjacent_index = 1 if side == "low" else -2
         for field_name, field_axis in _MUR_FACE_COMPONENTS[axis]:

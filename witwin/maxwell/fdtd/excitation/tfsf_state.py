@@ -17,6 +17,7 @@ from .tfsf_common import (
     nearest_index,
     project_positions,
     projection_extrema,
+    require_locally_uniform_axis,
     resolve_bounds_indices,
     solve_auxiliary_step,
     solve_numerical_wavenumber,
@@ -25,7 +26,6 @@ from .tfsf_common import (
 )
 from .tfsf_specs import (
     AXIS_INDEX,
-    DELTA_ATTR,
     E_CURL_ATTR,
     H_CURL_ATTR,
     axis_aligned_direction,
@@ -116,6 +116,24 @@ def _set_tfsf_state(
     solver.tfsf_enabled = True
 
 
+def _validate_locally_uniform_region(solver, lower, upper):
+    """Validate all three axes of a TFSF region and return the local spacings.
+
+    The specs touch the ``lower - 1`` / ``upper`` faces, so the primal-spacing
+    window is the region expanded by one cell on each side.
+    """
+    return {
+        axis: require_locally_uniform_axis(
+            solver,
+            axis,
+            int(lo) - 1,
+            int(hi) + 1,
+            context="TFSF/PlaneWave injection",
+        )
+        for axis, lo, hi in zip("xyz", lower, upper)
+    }
+
+
 def resolve_tfsf_region_indices(solver, injection):
     mode = injection.get("mode", "box")
     if mode == "box":
@@ -182,7 +200,7 @@ def _validate_slab_normal_bounds(solver, lower, upper, axis: str):
         raise ValueError("TFSF slab bounds must lie strictly inside the non-PML simulation region.")
 
 
-def _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds):
+def _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds, deltas):
     if source["kind"] != "plane_wave":
         raise ValueError("Grating TFSF slab injection requires a PlaneWave source.")
     axis = source["injection"]["axis"]
@@ -195,13 +213,13 @@ def _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds):
     eta0 = (solver.mu0 / solver.eps0) ** 0.5
     source_frequency = float(source_time["frequency"])
     source_omega = 2.0 * np.pi * source_frequency
-    k_numeric = solve_numerical_wavenumber(solver, source["direction"], DELTA_ATTR)
+    k_numeric = solve_numerical_wavenumber(solver, source["direction"], deltas)
     phase_speed = solver.c if k_numeric <= 1e-12 else source_omega / k_numeric
     electric_vector, magnetic_unit_vector_map = discrete_plane_wave_vectors(
-        solver,
         source["direction"],
         source["polarization"],
         k_numeric,
+        deltas,
     )
     magnetic_vector = {name: value / eta0 for name, value in magnetic_unit_vector_map.items()}
     reference_point = box_center_tensor(solver, bounds)
@@ -264,14 +282,16 @@ def _spec_positions(solver, spec):
     )
 
 
-def _initialize_axis_aligned_plane_wave_auxiliary_state(solver, source, lower, upper, axis: str, direction_sign: int):
+def _initialize_axis_aligned_plane_wave_auxiliary_state(
+    solver, source, lower, upper, axis: str, direction_sign: int, deltas
+):
     electric_vector = {
         "Ex": source["polarization"][0],
         "Ey": source["polarization"][1],
         "Ez": source["polarization"][2],
     }
     magnetic_vector = magnetic_unit_vector(source["direction"], source["polarization"])
-    aux = _make_directional_auxiliary_grid(solver, source["direction"], float(getattr(solver, DELTA_ATTR[axis])))
+    aux = _make_directional_auxiliary_grid(solver, source["direction"], float(deltas[axis]))
 
     electric_specs, magnetic_specs = build_discrete_tfsf_specs(lower, upper)
 
@@ -323,18 +343,18 @@ def _initialize_axis_aligned_plane_wave_auxiliary_state(solver, source, lower, u
     )
 
 
-def _initialize_plane_wave_discrete_cw_state(solver, source, lower, upper):
+def _initialize_plane_wave_discrete_cw_state(solver, source, lower, upper, deltas):
     eta0 = (solver.mu0 / solver.eps0) ** 0.5
     source_time = source["source_time"]
     source_frequency = float(source_time["frequency"])
     source_omega = 2.0 * np.pi * source_frequency
-    k_numeric = solve_numerical_wavenumber(solver, source["direction"], DELTA_ATTR)
+    k_numeric = solve_numerical_wavenumber(solver, source["direction"], deltas)
     phase_speed = solver.c if k_numeric <= 1e-12 else source_omega / k_numeric
     electric_vector, magnetic_unit_vector_map = discrete_plane_wave_vectors(
-        solver,
         source["direction"],
         source["polarization"],
         k_numeric,
+        deltas,
     )
     magnetic_vector = {name: value / eta0 for name, value in magnetic_unit_vector_map.items()}
     box_center = box_center_tensor(solver, source["injection"]["bounds"])
@@ -388,16 +408,19 @@ def _initialize_plane_wave_discrete_cw_state(solver, source, lower, upper):
     )
 
 
-def _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, upper):
+def _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, upper, deltas):
     ix0, iy0, iz0 = lower
     ix1, iy1, iz1 = upper
 
+    dx_local = float(deltas["x"])
+    dy_local = float(deltas["y"])
+    dz_local = float(deltas["z"])
     electric_scale = float(source["polarization"][2])
     aux = _make_auxiliary_grid(
         solver,
         s_min=float(solver.scene.domain_range[0]),
         s_max=float(solver.scene.domain_range[1]),
-        ds=float(solver.dx),
+        ds=dx_local,
     )
 
     magnetic_terms = [
@@ -405,7 +428,7 @@ def _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, uppe
             solver,
             field_name="Hy",
             offsets=(ix0 - 1, iy0, iz0),
-            coeff_patch=solver.chy_curl[ix0 - 1 : ix0, iy0 : iy1 + 1, iz0:iz1] / float(solver.dx),
+            coeff_patch=solver.chy_curl[ix0 - 1 : ix0, iy0 : iy1 + 1, iz0:iz1] / dx_local,
             sample_kind="electric",
             sample_indices=constant_line_index_tensor(solver, ix0),
             component_scale=+electric_scale,
@@ -414,7 +437,7 @@ def _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, uppe
             solver,
             field_name="Hy",
             offsets=(ix1, iy0, iz0),
-            coeff_patch=-solver.chy_curl[ix1 : ix1 + 1, iy0 : iy1 + 1, iz0:iz1] / float(solver.dx),
+            coeff_patch=-solver.chy_curl[ix1 : ix1 + 1, iy0 : iy1 + 1, iz0:iz1] / dx_local,
             sample_kind="electric",
             sample_indices=constant_line_index_tensor(solver, ix1),
             component_scale=+electric_scale,
@@ -423,7 +446,7 @@ def _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, uppe
             solver,
             field_name="Hx",
             offsets=(ix0, iy0 - 1, iz0),
-            coeff_patch=-solver.chx_curl[ix0 : ix1 + 1, iy0 - 1 : iy0, iz0:iz1] / float(solver.dy),
+            coeff_patch=-solver.chx_curl[ix0 : ix1 + 1, iy0 - 1 : iy0, iz0:iz1] / dy_local,
             sample_kind="electric",
             sample_indices=line_index_tensor(solver, ix0, ix1 - ix0 + 1),
             component_scale=+electric_scale,
@@ -432,7 +455,7 @@ def _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, uppe
             solver,
             field_name="Hx",
             offsets=(ix0, iy1, iz0),
-            coeff_patch=solver.chx_curl[ix0 : ix1 + 1, iy1 : iy1 + 1, iz0:iz1] / float(solver.dy),
+            coeff_patch=solver.chx_curl[ix0 : ix1 + 1, iy1 : iy1 + 1, iz0:iz1] / dy_local,
             sample_kind="electric",
             sample_indices=line_index_tensor(solver, ix0, ix1 - ix0 + 1),
             component_scale=+electric_scale,
@@ -444,7 +467,7 @@ def _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, uppe
             solver,
             field_name="Ez",
             offsets=(ix0, iy0, iz0),
-            coeff_patch=-solver.cez_curl[ix0 : ix0 + 1, iy0 : iy1 + 1, iz0:iz1] / float(solver.dx),
+            coeff_patch=-solver.cez_curl[ix0 : ix0 + 1, iy0 : iy1 + 1, iz0:iz1] / dx_local,
             sample_kind="magnetic",
             sample_indices=constant_line_index_tensor(solver, ix0 - 1),
             component_scale=1.0,
@@ -453,7 +476,7 @@ def _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, uppe
             solver,
             field_name="Ez",
             offsets=(ix1, iy0, iz0),
-            coeff_patch=solver.cez_curl[ix1 : ix1 + 1, iy0 : iy1 + 1, iz0:iz1] / float(solver.dx),
+            coeff_patch=solver.cez_curl[ix1 : ix1 + 1, iy0 : iy1 + 1, iz0:iz1] / dx_local,
             sample_kind="magnetic",
             sample_indices=constant_line_index_tensor(solver, ix1),
             component_scale=1.0,
@@ -462,7 +485,7 @@ def _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, uppe
             solver,
             field_name="Ex",
             offsets=(ix0, iy0, iz0),
-            coeff_patch=solver.cex_curl[ix0:ix1, iy0 : iy1 + 1, iz0 : iz0 + 1] / float(solver.dz),
+            coeff_patch=solver.cex_curl[ix0:ix1, iy0 : iy1 + 1, iz0 : iz0 + 1] / dz_local,
             sample_kind="magnetic",
             sample_indices=line_index_tensor(solver, ix0, ix1 - ix0),
             component_scale=1.0,
@@ -471,7 +494,7 @@ def _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, uppe
             solver,
             field_name="Ex",
             offsets=(ix0, iy0, iz1),
-            coeff_patch=-solver.cex_curl[ix0:ix1, iy0 : iy1 + 1, iz1 : iz1 + 1] / float(solver.dz),
+            coeff_patch=-solver.cex_curl[ix0:ix1, iy0 : iy1 + 1, iz1 : iz1 + 1] / dz_local,
             sample_kind="magnetic",
             sample_indices=line_index_tensor(solver, ix0, ix1 - ix0),
             component_scale=1.0,
@@ -490,9 +513,9 @@ def _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, uppe
     )
 
 
-def _initialize_plane_wave_auxiliary_state(solver, source, lower, upper):
+def _initialize_plane_wave_auxiliary_state(solver, source, lower, upper, deltas):
     if is_reference_plane_wave_x_ez(source):
-        _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, upper)
+        _initialize_reference_plane_wave_auxiliary_state(solver, source, lower, upper, deltas)
         return
 
     axis_direction = axis_aligned_direction(source["direction"])
@@ -504,21 +527,22 @@ def _initialize_plane_wave_auxiliary_state(solver, source, lower, upper):
             upper,
             axis_direction[0],
             axis_direction[1],
+            deltas,
         )
         return
 
     if source["source_time"]["kind"] == "cw":
-        _initialize_plane_wave_discrete_cw_state(solver, source, lower, upper)
+        _initialize_plane_wave_discrete_cw_state(solver, source, lower, upper, deltas)
         return
 
-    k_numeric = solve_numerical_wavenumber(solver, source["direction"], DELTA_ATTR)
+    k_numeric = solve_numerical_wavenumber(solver, source["direction"], deltas)
     source_omega = 2.0 * np.pi * float(source["source_time"]["frequency"])
     phase_speed = solver.c if k_numeric <= 1e-12 else source_omega / k_numeric
     electric_vector, magnetic_vector = discrete_plane_wave_vectors(
-        solver,
         source["direction"],
         source["polarization"],
         k_numeric,
+        deltas,
     )
     ds = solve_auxiliary_step(solver, k_numeric)
     if ds <= 0.0:
@@ -566,22 +590,22 @@ def _initialize_plane_wave_auxiliary_state(solver, source, lower, upper):
     )
 
 
-def _initialize_analytic_tfsf_state(solver, source, lower, upper):
+def _initialize_analytic_tfsf_state(solver, source, lower, upper, deltas):
     box_center = box_center_tensor(solver, source["injection"]["bounds"])
     eta0 = (solver.mu0 / solver.eps0) ** 0.5
     source_time = source["source_time"]
     source_frequency = float(source_time["frequency"])
     source_omega = 2.0 * np.pi * source_frequency
-    k_numeric = solve_numerical_wavenumber(solver, source["direction"], DELTA_ATTR)
+    k_numeric = solve_numerical_wavenumber(solver, source["direction"], deltas)
     phase_speed = solver.c if k_numeric <= 1e-12 else source_omega / k_numeric
     entry_s = entry_projection(source["injection"]["bounds"], source["direction"])
 
     if source["kind"] in {"gaussian_beam", "astigmatic_gaussian_beam"}:
         electric_vector, magnetic_unit_vector_map = discrete_plane_wave_vectors(
-            solver,
             source["direction"],
             source["polarization"],
             k_numeric,
+            deltas,
         )
         profile_polarization = (
             electric_vector["Ex"],
@@ -678,9 +702,10 @@ def initialize_tfsf_state(solver):
         if solver.scene.boundary.uses_kind("bloch"):
             validate_grating_tfsf_slab_topology(solver)
             lower, upper, bounds = resolve_tfsf_region_indices(solver, source["injection"])
+            deltas = _validate_locally_uniform_region(solver, lower, upper)
             _validate_slab_normal_bounds(solver, lower, upper, source["injection"]["axis"])
             _validate_slab_interfaces_are_vacuum(solver, lower, upper, source["injection"]["axis"])
-            _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds)
+            _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds, deltas)
             return
         raise NotImplementedError("TFSF slab runtime support is not implemented yet.")
     if solver.scene.boundary.uses_kind("bloch"):
@@ -689,9 +714,10 @@ def initialize_tfsf_state(solver):
         raise NotImplementedError("TFSF injection currently supports only none, pml, pec, or pmc boundaries.")
 
     lower, upper, _ = resolve_tfsf_region_indices(solver, source["injection"])
+    deltas = _validate_locally_uniform_region(solver, lower, upper)
     validate_bounds(solver, lower, upper)
     validate_background_is_vacuum(solver, lower, upper)
     if source["kind"] == "plane_wave":
-        _initialize_plane_wave_auxiliary_state(solver, source, lower, upper)
+        _initialize_plane_wave_auxiliary_state(solver, source, lower, upper, deltas)
         return
-    _initialize_analytic_tfsf_state(solver, source, lower, upper)
+    _initialize_analytic_tfsf_state(solver, source, lower, upper, deltas)

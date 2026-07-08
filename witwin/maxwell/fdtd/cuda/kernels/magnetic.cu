@@ -28,8 +28,8 @@ __global__ void update_magnetic_hx_standard_kernel(
     const float* __restrict__ ez,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
-    float inv_dy,
-    float inv_dz,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
     float* __restrict__ hx) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
   const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -42,7 +42,7 @@ __global__ void update_magnetic_hx_standard_kernel(
   const long long ez_lo = offset3d(i, j, k, ny + 1, nz);
   const long long ey_hi = offset3d(i, j, k + 1, ny, nz + 1);
   const long long ey_lo = offset3d(i, j, k, ny, nz + 1);
-  const float curl = (ez[ez_hi] - ez[ez_lo]) * inv_dy - (ey[ey_hi] - ey[ey_lo]) * inv_dz;
+  const float curl = (ez[ez_hi] - ez[ez_lo]) * inv_dy[j] - (ey[ey_hi] - ey[ey_lo]) * inv_dz[k];
   hx[linear] = hx[linear] * decay[linear] - curl_coeff[linear] * curl;
 }
 
@@ -54,8 +54,8 @@ __global__ void update_magnetic_hy_standard_kernel(
     const float* __restrict__ ez,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
-    float inv_dx,
-    float inv_dz,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dz,
     float* __restrict__ hy) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
   const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -68,7 +68,7 @@ __global__ void update_magnetic_hy_standard_kernel(
   const long long ex_lo = offset3d(i, j, k, ny, nz + 1);
   const long long ez_hi = offset3d(i + 1, j, k, ny, nz);
   const long long ez_lo = offset3d(i, j, k, ny, nz);
-  const float curl = (ex[ex_hi] - ex[ex_lo]) * inv_dz - (ez[ez_hi] - ez[ez_lo]) * inv_dx;
+  const float curl = (ex[ex_hi] - ex[ex_lo]) * inv_dz[k] - (ez[ez_hi] - ez[ez_lo]) * inv_dx[i];
   hy[linear] = hy[linear] * decay[linear] - curl_coeff[linear] * curl;
 }
 
@@ -80,8 +80,8 @@ __global__ void update_magnetic_hz_standard_kernel(
     const float* __restrict__ ey,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
-    float inv_dx,
-    float inv_dy,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
     float* __restrict__ hz) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
   const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -94,7 +94,7 @@ __global__ void update_magnetic_hz_standard_kernel(
   const long long ey_lo = offset3d(i, j, k, ny, nz);
   const long long ex_hi = offset3d(i, j + 1, k, ny + 1, nz);
   const long long ex_lo = offset3d(i, j, k, ny + 1, nz);
-  const float curl = (ey[ey_hi] - ey[ey_lo]) * inv_dx - (ex[ex_hi] - ex[ex_lo]) * inv_dy;
+  const float curl = (ey[ey_hi] - ey[ey_lo]) * inv_dx[i] - (ex[ex_hi] - ex[ex_lo]) * inv_dy[j];
   hz[linear] = hz[linear] * decay[linear] - curl_coeff[linear] * curl;
 }
 
@@ -112,8 +112,8 @@ __global__ void update_magnetic_hx_cpml_kernel(
     const float* __restrict__ inv_kappa_z,
     const float* __restrict__ b_z,
     const float* __restrict__ c_z,
-    float inv_dy,
-    float inv_dz,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
     float* __restrict__ psi_y,
     float* __restrict__ psi_z,
     float* __restrict__ hx) {
@@ -128,8 +128,8 @@ __global__ void update_magnetic_hx_cpml_kernel(
   const long long ez_hi = ez_lo + nz;
   const long long ey_lo = (static_cast<long long>(i) * ny + j) * (nz + 1u) + k;
   const long long ey_hi = ey_lo + 1;
-  const float d_y = (ez[ez_hi] - ez[ez_lo]) * inv_dy;
-  const float d_z = (ey[ey_hi] - ey[ey_lo]) * inv_dz;
+  const float d_y = (ez[ez_hi] - ez[ez_lo]) * inv_dy[j];
+  const float d_z = (ey[ey_hi] - ey[ey_lo]) * inv_dz[k];
   const float psi_y_value = b_y[j] * psi_y[linear] + c_y[j] * d_y;
   const float psi_z_value = b_z[k] * psi_z[linear] + c_z[k] * d_z;
   psi_y[linear] = psi_y_value;
@@ -152,8 +152,8 @@ __global__ void update_magnetic_hy_cpml_kernel(
     const float* __restrict__ inv_kappa_z,
     const float* __restrict__ b_z,
     const float* __restrict__ c_z,
-    float inv_dx,
-    float inv_dz,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dz,
     float* __restrict__ psi_x,
     float* __restrict__ psi_z,
     float* __restrict__ hy) {
@@ -168,8 +168,8 @@ __global__ void update_magnetic_hy_cpml_kernel(
   const long long ex_hi = ex_lo + 1;
   const long long ez_lo = linear;
   const long long ez_hi = ez_lo + static_cast<long long>(ny) * nz;
-  const float d_z = (ex[ex_hi] - ex[ex_lo]) * inv_dz;
-  const float d_x = (ez[ez_hi] - ez[ez_lo]) * inv_dx;
+  const float d_z = (ex[ex_hi] - ex[ex_lo]) * inv_dz[k];
+  const float d_x = (ez[ez_hi] - ez[ez_lo]) * inv_dx[i];
   const float psi_x_value = b_x[i] * psi_x[linear] + c_x[i] * d_x;
   const float psi_z_value = b_z[k] * psi_z[linear] + c_z[k] * d_z;
   psi_x[linear] = psi_x_value;
@@ -192,8 +192,8 @@ __global__ void update_magnetic_hz_cpml_kernel(
     const float* __restrict__ inv_kappa_y,
     const float* __restrict__ b_y,
     const float* __restrict__ c_y,
-    float inv_dx,
-    float inv_dy,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
     float* __restrict__ psi_x,
     float* __restrict__ psi_y,
     float* __restrict__ hz) {
@@ -208,8 +208,8 @@ __global__ void update_magnetic_hz_cpml_kernel(
   const long long ey_hi = ey_lo + static_cast<long long>(ny) * nz;
   const long long ex_lo = (static_cast<long long>(i) * (ny + 1u) + j) * nz + k;
   const long long ex_hi = ex_lo + nz;
-  const float d_x = (ey[ey_hi] - ey[ey_lo]) * inv_dx;
-  const float d_y = (ex[ex_hi] - ex[ex_lo]) * inv_dy;
+  const float d_x = (ey[ey_hi] - ey[ey_lo]) * inv_dx[i];
+  const float d_y = (ex[ex_hi] - ex[ex_lo]) * inv_dy[j];
   const float psi_x_value = b_x[i] * psi_x[linear] + c_x[i] * d_x;
   const float psi_y_value = b_y[j] * psi_y[linear] + c_y[j] * d_y;
   psi_x[linear] = psi_x_value;
@@ -261,8 +261,8 @@ __global__ void update_magnetic_hx_cpml_compressed_kernel(
     const float* __restrict__ inv_kappa_z,
     const float* __restrict__ b_z,
     const float* __restrict__ c_z,
-    float inv_dy,
-    float inv_dz,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
     int y_low_length,
     int y_high_start,
     int y_high_length,
@@ -283,8 +283,8 @@ __global__ void update_magnetic_hx_cpml_compressed_kernel(
   const long long ez_lo = offset3d(i, j, k, ny + 1, nz);
   const long long ey_hi = offset3d(i, j, k + 1, ny, nz + 1);
   const long long ey_lo = offset3d(i, j, k, ny, nz + 1);
-  const float d_y = (ez[ez_hi] - ez[ez_lo]) * inv_dy;
-  const float d_z = (ey[ey_hi] - ey[ey_lo]) * inv_dz;
+  const float d_y = (ez[ez_hi] - ez[ez_lo]) * inv_dy[j];
+  const float d_z = (ey[ey_hi] - ey[ey_lo]) * inv_dz[k];
   const float psi_y_value = update_compact_magnetic_psi<1>(
       psi_y, b_y, c_y, i, j, k, ny, nz, j, y_low_length, y_high_start, y_high_length, d_y);
   const float psi_z_value = update_compact_magnetic_psi<2>(
@@ -312,8 +312,8 @@ __global__ void update_magnetic_hy_cpml_compressed_kernel(
     const float* __restrict__ inv_kappa_z,
     const float* __restrict__ b_z,
     const float* __restrict__ c_z,
-    float inv_dx,
-    float inv_dz,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dz,
     int x_low_length,
     int x_high_start,
     int x_high_length,
@@ -334,8 +334,8 @@ __global__ void update_magnetic_hy_cpml_compressed_kernel(
   const long long ex_lo = offset3d(i, j, k, ny, nz + 1);
   const long long ez_hi = offset3d(i + 1, j, k, ny, nz);
   const long long ez_lo = offset3d(i, j, k, ny, nz);
-  const float d_z = (ex[ex_hi] - ex[ex_lo]) * inv_dz;
-  const float d_x = (ez[ez_hi] - ez[ez_lo]) * inv_dx;
+  const float d_z = (ex[ex_hi] - ex[ex_lo]) * inv_dz[k];
+  const float d_x = (ez[ez_hi] - ez[ez_lo]) * inv_dx[i];
   const float psi_x_value = update_compact_magnetic_psi<0>(
       psi_x, b_x, c_x, i, j, k, ny, nz, i, x_low_length, x_high_start, x_high_length, d_x);
   const float psi_z_value = update_compact_magnetic_psi<2>(
@@ -363,8 +363,8 @@ __global__ void update_magnetic_hz_cpml_compressed_kernel(
     const float* __restrict__ inv_kappa_y,
     const float* __restrict__ b_y,
     const float* __restrict__ c_y,
-    float inv_dx,
-    float inv_dy,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
     int x_low_length,
     int x_high_start,
     int x_high_length,
@@ -385,8 +385,8 @@ __global__ void update_magnetic_hz_cpml_compressed_kernel(
   const long long ey_lo = offset3d(i, j, k, ny, nz);
   const long long ex_hi = offset3d(i, j + 1, k, ny + 1, nz);
   const long long ex_lo = offset3d(i, j, k, ny + 1, nz);
-  const float d_x = (ey[ey_hi] - ey[ey_lo]) * inv_dx;
-  const float d_y = (ex[ex_hi] - ex[ex_lo]) * inv_dy;
+  const float d_x = (ey[ey_hi] - ey[ey_lo]) * inv_dx[i];
+  const float d_y = (ex[ex_hi] - ex[ex_lo]) * inv_dy[j];
   const float psi_x_value = update_compact_magnetic_psi<0>(
       psi_x, b_x, c_x, i, j, k, ny, nz, i, x_low_length, x_high_start, x_high_length, d_x);
   const float psi_y_value = update_compact_magnetic_psi<1>(
@@ -443,6 +443,15 @@ void check_vector_input(const at::Tensor& tensor, int64_t length, const char* na
   check_contiguous_tensor(tensor, name);
   TORCH_CHECK(tensor.dim() == 1, name, " must be rank 1");
   TORCH_CHECK(tensor.size(0) == length, name, " length must match CPML field axis");
+}
+
+void check_spacing_vector(
+    const at::Tensor& field,
+    const at::Tensor& inv_delta,
+    int64_t axis,
+    const char* name) {
+  check_vector_input(inv_delta, field.size(axis), name);
+  check_same_cuda_device(field, inv_delta, name);
 }
 
 void check_magnetic_cpml_inputs(
@@ -548,11 +557,13 @@ void update_magnetic_hx_standard_cuda(
     const at::Tensor& ez,
     const at::Tensor& decay,
     const at::Tensor& curl,
-    double inv_dy,
-    double inv_dz) {
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz) {
   check_magnetic_inputs(hx, ey, ez, decay, curl, "hx");
   check_rank3_shape(ey, "ey", hx.size(0), hx.size(1), hx.size(2) + 1);
   check_rank3_shape(ez, "ez", hx.size(0), hx.size(1) + 1, hx.size(2));
+  check_spacing_vector(hx, inv_dy, 1, "inv_dy");
+  check_spacing_vector(hx, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(hx.device());
   const auto sizes = hx.sizes();
   const dim3 block = field_block3d();
@@ -564,8 +575,8 @@ void update_magnetic_hx_standard_cuda(
       ez.data_ptr<float>(),
       decay.data_ptr<float>(),
       curl.data_ptr<float>(),
-      static_cast<float>(inv_dy),
-      static_cast<float>(inv_dz),
+      inv_dy.data_ptr<float>(),
+      inv_dz.data_ptr<float>(),
       hx.data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
@@ -576,11 +587,13 @@ void update_magnetic_hy_standard_cuda(
     const at::Tensor& ez,
     const at::Tensor& decay,
     const at::Tensor& curl,
-    double inv_dx,
-    double inv_dz) {
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz) {
   check_magnetic_inputs(hy, ex, ez, decay, curl, "hy");
   check_rank3_shape(ex, "ex", hy.size(0), hy.size(1), hy.size(2) + 1);
   check_rank3_shape(ez, "ez", hy.size(0) + 1, hy.size(1), hy.size(2));
+  check_spacing_vector(hy, inv_dx, 0, "inv_dx");
+  check_spacing_vector(hy, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(hy.device());
   const auto sizes = hy.sizes();
   const dim3 block = field_block3d();
@@ -592,8 +605,8 @@ void update_magnetic_hy_standard_cuda(
       ez.data_ptr<float>(),
       decay.data_ptr<float>(),
       curl.data_ptr<float>(),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dz),
+      inv_dx.data_ptr<float>(),
+      inv_dz.data_ptr<float>(),
       hy.data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
@@ -604,11 +617,13 @@ void update_magnetic_hz_standard_cuda(
     const at::Tensor& ey,
     const at::Tensor& decay,
     const at::Tensor& curl,
-    double inv_dx,
-    double inv_dy) {
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy) {
   check_magnetic_inputs(hz, ex, ey, decay, curl, "hz");
   check_rank3_shape(ex, "ex", hz.size(0), hz.size(1) + 1, hz.size(2));
   check_rank3_shape(ey, "ey", hz.size(0) + 1, hz.size(1), hz.size(2));
+  check_spacing_vector(hz, inv_dx, 0, "inv_dx");
+  check_spacing_vector(hz, inv_dy, 1, "inv_dy");
   c10::cuda::CUDAGuard guard(hz.device());
   const auto sizes = hz.sizes();
   const dim3 block = field_block3d();
@@ -620,8 +635,8 @@ void update_magnetic_hz_standard_cuda(
       ey.data_ptr<float>(),
       decay.data_ptr<float>(),
       curl.data_ptr<float>(),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dy),
+      inv_dx.data_ptr<float>(),
+      inv_dy.data_ptr<float>(),
       hz.data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
@@ -640,12 +655,14 @@ void update_magnetic_hx_cpml_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dy,
-    double inv_dz) {
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz) {
   check_magnetic_cpml_inputs(
       hx, ey, ez, decay, curl, psi_y, psi_z, inv_kappa_y, b_y, c_y, inv_kappa_z, b_z, c_z, 1, 2, "hx");
   check_rank3_shape(ey, "ey", hx.size(0), hx.size(1), hx.size(2) + 1);
   check_rank3_shape(ez, "ez", hx.size(0), hx.size(1) + 1, hx.size(2));
+  check_spacing_vector(hx, inv_dy, 1, "inv_dy");
+  check_spacing_vector(hx, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(hx.device());
   const auto sizes = hx.sizes();
   const dim3 block = field_block3d();
@@ -663,8 +680,8 @@ void update_magnetic_hx_cpml_cuda(
       inv_kappa_z.data_ptr<float>(),
       b_z.data_ptr<float>(),
       c_z.data_ptr<float>(),
-      static_cast<float>(inv_dy),
-      static_cast<float>(inv_dz),
+      inv_dy.data_ptr<float>(),
+      inv_dz.data_ptr<float>(),
       psi_y.data_ptr<float>(),
       psi_z.data_ptr<float>(),
       hx.data_ptr<float>());
@@ -685,12 +702,14 @@ void update_magnetic_hy_cpml_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dx,
-    double inv_dz) {
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz) {
   check_magnetic_cpml_inputs(
       hy, ex, ez, decay, curl, psi_x, psi_z, inv_kappa_x, b_x, c_x, inv_kappa_z, b_z, c_z, 0, 2, "hy");
   check_rank3_shape(ex, "ex", hy.size(0), hy.size(1), hy.size(2) + 1);
   check_rank3_shape(ez, "ez", hy.size(0) + 1, hy.size(1), hy.size(2));
+  check_spacing_vector(hy, inv_dx, 0, "inv_dx");
+  check_spacing_vector(hy, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(hy.device());
   const auto sizes = hy.sizes();
   const dim3 block = field_block3d();
@@ -708,8 +727,8 @@ void update_magnetic_hy_cpml_cuda(
       inv_kappa_z.data_ptr<float>(),
       b_z.data_ptr<float>(),
       c_z.data_ptr<float>(),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dz),
+      inv_dx.data_ptr<float>(),
+      inv_dz.data_ptr<float>(),
       psi_x.data_ptr<float>(),
       psi_z.data_ptr<float>(),
       hy.data_ptr<float>());
@@ -730,12 +749,14 @@ void update_magnetic_hz_cpml_cuda(
     const at::Tensor& inv_kappa_y,
     const at::Tensor& b_y,
     const at::Tensor& c_y,
-    double inv_dx,
-    double inv_dy) {
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy) {
   check_magnetic_cpml_inputs(
       hz, ex, ey, decay, curl, psi_x, psi_y, inv_kappa_x, b_x, c_x, inv_kappa_y, b_y, c_y, 0, 1, "hz");
   check_rank3_shape(ex, "ex", hz.size(0), hz.size(1) + 1, hz.size(2));
   check_rank3_shape(ey, "ey", hz.size(0) + 1, hz.size(1), hz.size(2));
+  check_spacing_vector(hz, inv_dx, 0, "inv_dx");
+  check_spacing_vector(hz, inv_dy, 1, "inv_dy");
   c10::cuda::CUDAGuard guard(hz.device());
   const auto sizes = hz.sizes();
   const dim3 block = field_block3d();
@@ -753,8 +774,8 @@ void update_magnetic_hz_cpml_cuda(
       inv_kappa_y.data_ptr<float>(),
       b_y.data_ptr<float>(),
       c_y.data_ptr<float>(),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dy),
+      inv_dx.data_ptr<float>(),
+      inv_dy.data_ptr<float>(),
       psi_x.data_ptr<float>(),
       psi_y.data_ptr<float>(),
       hz.data_ptr<float>());
@@ -775,8 +796,8 @@ void update_magnetic_hx_cpml_compressed_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dy,
-    double inv_dz,
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz,
     int64_t y_low_length,
     int64_t y_high_start,
     int64_t y_high_length,
@@ -790,6 +811,8 @@ void update_magnetic_hx_cpml_compressed_cuda(
       1, 2, y_low_length, y_high_length, z_low_length, z_high_length, "hx");
   check_rank3_shape(ey, "ey", hx.size(0), hx.size(1), hx.size(2) + 1);
   check_rank3_shape(ez, "ez", hx.size(0), hx.size(1) + 1, hx.size(2));
+  check_spacing_vector(hx, inv_dy, 1, "inv_dy");
+  check_spacing_vector(hx, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(hx.device());
   const auto sizes = hx.sizes();
   const dim3 block = field_block3d();
@@ -810,8 +833,8 @@ void update_magnetic_hx_cpml_compressed_cuda(
         inv_kappa_z.data_ptr<float>(),
         b_z.data_ptr<float>(),
         c_z.data_ptr<float>(),
-        static_cast<float>(inv_dy),
-        static_cast<float>(inv_dz),
+        inv_dy.data_ptr<float>(),
+        inv_dz.data_ptr<float>(),
         static_cast<int>(y_low_length),
         static_cast<int>(y_high_start),
         static_cast<int>(y_high_length),
@@ -839,8 +862,8 @@ void update_magnetic_hy_cpml_compressed_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dx,
-    double inv_dz,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz,
     int64_t x_low_length,
     int64_t x_high_start,
     int64_t x_high_length,
@@ -854,6 +877,8 @@ void update_magnetic_hy_cpml_compressed_cuda(
       0, 2, x_low_length, x_high_length, z_low_length, z_high_length, "hy");
   check_rank3_shape(ex, "ex", hy.size(0), hy.size(1), hy.size(2) + 1);
   check_rank3_shape(ez, "ez", hy.size(0) + 1, hy.size(1), hy.size(2));
+  check_spacing_vector(hy, inv_dx, 0, "inv_dx");
+  check_spacing_vector(hy, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(hy.device());
   const auto sizes = hy.sizes();
   const dim3 block = field_block3d();
@@ -874,8 +899,8 @@ void update_magnetic_hy_cpml_compressed_cuda(
         inv_kappa_z.data_ptr<float>(),
         b_z.data_ptr<float>(),
         c_z.data_ptr<float>(),
-        static_cast<float>(inv_dx),
-        static_cast<float>(inv_dz),
+        inv_dx.data_ptr<float>(),
+        inv_dz.data_ptr<float>(),
         static_cast<int>(x_low_length),
         static_cast<int>(x_high_start),
         static_cast<int>(x_high_length),
@@ -903,8 +928,8 @@ void update_magnetic_hz_cpml_compressed_cuda(
     const at::Tensor& inv_kappa_y,
     const at::Tensor& b_y,
     const at::Tensor& c_y,
-    double inv_dx,
-    double inv_dy,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy,
     int64_t x_low_length,
     int64_t x_high_start,
     int64_t x_high_length,
@@ -918,6 +943,8 @@ void update_magnetic_hz_cpml_compressed_cuda(
       0, 1, x_low_length, x_high_length, y_low_length, y_high_length, "hz");
   check_rank3_shape(ex, "ex", hz.size(0), hz.size(1) + 1, hz.size(2));
   check_rank3_shape(ey, "ey", hz.size(0) + 1, hz.size(1), hz.size(2));
+  check_spacing_vector(hz, inv_dx, 0, "inv_dx");
+  check_spacing_vector(hz, inv_dy, 1, "inv_dy");
   c10::cuda::CUDAGuard guard(hz.device());
   const auto sizes = hz.sizes();
   const dim3 block = field_block3d();
@@ -938,8 +965,8 @@ void update_magnetic_hz_cpml_compressed_cuda(
         inv_kappa_y.data_ptr<float>(),
         b_y.data_ptr<float>(),
         c_y.data_ptr<float>(),
-        static_cast<float>(inv_dx),
-        static_cast<float>(inv_dy),
+        inv_dx.data_ptr<float>(),
+        inv_dy.data_ptr<float>(),
         static_cast<int>(x_low_length),
         static_cast<int>(x_high_start),
         static_cast<int>(x_high_length),

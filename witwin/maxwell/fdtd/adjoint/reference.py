@@ -49,8 +49,8 @@ def reverse_step_standard_python_reference(
     eps_ez,
     resolved_source_terms=None,
 ):
-    d_ez_dy = _forward_diff(forward_state["Ez"], axis=1, inv_delta=solver.inv_dy)
-    d_ey_dz = _forward_diff(forward_state["Ey"], axis=2, inv_delta=solver.inv_dz)
+    d_ez_dy = _forward_diff(forward_state["Ez"], axis=1, inv_delta=solver.inv_dy_h)
+    d_ey_dz = _forward_diff(forward_state["Ey"], axis=2, inv_delta=solver.inv_dz_h)
     hx, _, _ = _update_magnetic_component(
         forward_state["Hx"],
         d_pos=d_ez_dy,
@@ -61,8 +61,8 @@ def reverse_step_standard_python_reference(
         axis_neg=2,
     )
 
-    d_ex_dz = _forward_diff(forward_state["Ex"], axis=2, inv_delta=solver.inv_dz)
-    d_ez_dx = _forward_diff(forward_state["Ez"], axis=0, inv_delta=solver.inv_dx)
+    d_ex_dz = _forward_diff(forward_state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
+    d_ez_dx = _forward_diff(forward_state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
     hy, _, _ = _update_magnetic_component(
         forward_state["Hy"],
         d_pos=d_ex_dz,
@@ -73,8 +73,8 @@ def reverse_step_standard_python_reference(
         axis_neg=0,
     )
 
-    d_ey_dx = _forward_diff(forward_state["Ey"], axis=0, inv_delta=solver.inv_dx)
-    d_ex_dy = _forward_diff(forward_state["Ex"], axis=1, inv_delta=solver.inv_dy)
+    d_ey_dx = _forward_diff(forward_state["Ey"], axis=0, inv_delta=solver.inv_dx_h)
+    d_ex_dy = _forward_diff(forward_state["Ex"], axis=1, inv_delta=solver.inv_dy_h)
     hz, _, _ = _update_magnetic_component(
         forward_state["Hz"],
         d_pos=d_ey_dx,
@@ -106,8 +106,8 @@ def reverse_step_standard_python_reference(
         "Hz": adjoint_state["Hz"].clone(),
     }
 
-    d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy)
-    d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz)
+    d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy_e)
+    d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz_e)
     adj_ex, adj_d_hz_dy, adj_d_hy_dz, grad_eps_ex_increment = _reverse_electric_component_standard(
         adjoint_state["Ex"],
         forward_state["Ex"],
@@ -124,12 +124,12 @@ def reverse_step_standard_python_reference(
         axis_neg=2,
     )
     pre_step_adjoint["Ex"] = pre_step_adjoint["Ex"] + adj_ex
-    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hz"], adj_d_hz_dy, axis=1, inv_delta=solver.inv_dy)
-    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hy"], adj_d_hy_dz, axis=2, inv_delta=solver.inv_dz)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hz"], adj_d_hz_dy, axis=1, inv_delta=solver.inv_dy_e)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hy"], adj_d_hy_dz, axis=2, inv_delta=solver.inv_dz_e)
     grad_eps_ex = grad_eps_ex + grad_eps_ex_increment
 
-    d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz)
-    d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx)
+    d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz_e)
+    d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx_e)
     adj_ey, adj_d_hx_dz, adj_d_hz_dx, grad_eps_ey_increment = _reverse_electric_component_standard(
         adjoint_state["Ey"],
         forward_state["Ey"],
@@ -146,12 +146,12 @@ def reverse_step_standard_python_reference(
         axis_neg=0,
     )
     pre_step_adjoint["Ey"] = pre_step_adjoint["Ey"] + adj_ey
-    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hx"], adj_d_hx_dz, axis=2, inv_delta=solver.inv_dz)
-    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hz"], adj_d_hz_dx, axis=0, inv_delta=solver.inv_dx)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hx"], adj_d_hx_dz, axis=2, inv_delta=solver.inv_dz_e)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hz"], adj_d_hz_dx, axis=0, inv_delta=solver.inv_dx_e)
     grad_eps_ey = grad_eps_ey + grad_eps_ey_increment
 
-    d_hy_dx = _backward_diff(magnetic_fields["Hy"], axis=0, inv_delta=solver.inv_dx)
-    d_hx_dy = _backward_diff(magnetic_fields["Hx"], axis=1, inv_delta=solver.inv_dy)
+    d_hy_dx = _backward_diff(magnetic_fields["Hy"], axis=0, inv_delta=solver.inv_dx_e)
+    d_hx_dy = _backward_diff(magnetic_fields["Hx"], axis=1, inv_delta=solver.inv_dy_e)
     adj_ez, adj_d_hy_dx, adj_d_hx_dy, grad_eps_ez_increment = _reverse_electric_component_standard(
         adjoint_state["Ez"],
         forward_state["Ez"],
@@ -168,8 +168,8 @@ def reverse_step_standard_python_reference(
         axis_neg=1,
     )
     pre_step_adjoint["Ez"] = pre_step_adjoint["Ez"] + adj_ez
-    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hy"], adj_d_hy_dx, axis=0, inv_delta=solver.inv_dx)
-    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hx"], adj_d_hx_dy, axis=1, inv_delta=solver.inv_dy)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hy"], adj_d_hy_dx, axis=0, inv_delta=solver.inv_dx_e)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hx"], adj_d_hx_dy, axis=1, inv_delta=solver.inv_dy_e)
     grad_eps_ez = grad_eps_ez + grad_eps_ez_increment
 
     adj_hx, adj_d_ez_dy, adj_d_ey_dz = _reverse_magnetic_component_standard(
@@ -178,8 +178,8 @@ def reverse_step_standard_python_reference(
         curl=solver.chx_curl,
     )
     pre_step_adjoint["Hx"] = pre_step_adjoint["Hx"] + adj_hx
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dy, axis=1, inv_delta=solver.inv_dy)
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dz, axis=2, inv_delta=solver.inv_dz)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dy, axis=1, inv_delta=solver.inv_dy_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dz, axis=2, inv_delta=solver.inv_dz_h)
 
     adj_hy, adj_d_ex_dz, adj_d_ez_dx = _reverse_magnetic_component_standard(
         magnetic_output_adjoint["Hy"],
@@ -187,8 +187,8 @@ def reverse_step_standard_python_reference(
         curl=solver.chy_curl,
     )
     pre_step_adjoint["Hy"] = pre_step_adjoint["Hy"] + adj_hy
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dz, axis=2, inv_delta=solver.inv_dz)
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dx, axis=0, inv_delta=solver.inv_dx)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dz, axis=2, inv_delta=solver.inv_dz_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dx, axis=0, inv_delta=solver.inv_dx_h)
 
     adj_hz, adj_d_ey_dx, adj_d_ex_dy = _reverse_magnetic_component_standard(
         magnetic_output_adjoint["Hz"],
@@ -196,8 +196,8 @@ def reverse_step_standard_python_reference(
         curl=solver.chz_curl,
     )
     pre_step_adjoint["Hz"] = pre_step_adjoint["Hz"] + adj_hz
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dx, axis=0, inv_delta=solver.inv_dx)
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dy, axis=1, inv_delta=solver.inv_dy)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dx, axis=0, inv_delta=solver.inv_dx_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dy, axis=1, inv_delta=solver.inv_dy_h)
 
     return _ReverseStepResult(
         pre_step_adjoint={name: tensor.detach() for name, tensor in pre_step_adjoint.items()},
@@ -220,8 +220,8 @@ def reverse_step_bloch_python_reference(
     eps_ez,
     resolved_source_terms=None,
 ):
-    d_ez_dy = _forward_diff(forward_state["Ez"], axis=1, inv_delta=solver.inv_dy)
-    d_ey_dz = _forward_diff(forward_state["Ey"], axis=2, inv_delta=solver.inv_dz)
+    d_ez_dy = _forward_diff(forward_state["Ez"], axis=1, inv_delta=solver.inv_dy_h)
+    d_ey_dz = _forward_diff(forward_state["Ey"], axis=2, inv_delta=solver.inv_dz_h)
     hx, _, _ = _update_magnetic_component(
         forward_state["Hx"],
         d_pos=d_ez_dy,
@@ -231,8 +231,8 @@ def reverse_step_bloch_python_reference(
         axis_pos=1,
         axis_neg=2,
     )
-    d_ez_imag_dy = _forward_diff(forward_state["Ez_imag"], axis=1, inv_delta=solver.inv_dy)
-    d_ey_imag_dz = _forward_diff(forward_state["Ey_imag"], axis=2, inv_delta=solver.inv_dz)
+    d_ez_imag_dy = _forward_diff(forward_state["Ez_imag"], axis=1, inv_delta=solver.inv_dy_h)
+    d_ey_imag_dz = _forward_diff(forward_state["Ey_imag"], axis=2, inv_delta=solver.inv_dz_h)
     hx_imag, _, _ = _update_magnetic_component(
         forward_state["Hx_imag"],
         d_pos=d_ez_imag_dy,
@@ -243,8 +243,8 @@ def reverse_step_bloch_python_reference(
         axis_neg=2,
     )
 
-    d_ex_dz = _forward_diff(forward_state["Ex"], axis=2, inv_delta=solver.inv_dz)
-    d_ez_dx = _forward_diff(forward_state["Ez"], axis=0, inv_delta=solver.inv_dx)
+    d_ex_dz = _forward_diff(forward_state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
+    d_ez_dx = _forward_diff(forward_state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
     hy, _, _ = _update_magnetic_component(
         forward_state["Hy"],
         d_pos=d_ex_dz,
@@ -254,8 +254,8 @@ def reverse_step_bloch_python_reference(
         axis_pos=2,
         axis_neg=0,
     )
-    d_ex_imag_dz = _forward_diff(forward_state["Ex_imag"], axis=2, inv_delta=solver.inv_dz)
-    d_ez_imag_dx = _forward_diff(forward_state["Ez_imag"], axis=0, inv_delta=solver.inv_dx)
+    d_ex_imag_dz = _forward_diff(forward_state["Ex_imag"], axis=2, inv_delta=solver.inv_dz_h)
+    d_ez_imag_dx = _forward_diff(forward_state["Ez_imag"], axis=0, inv_delta=solver.inv_dx_h)
     hy_imag, _, _ = _update_magnetic_component(
         forward_state["Hy_imag"],
         d_pos=d_ex_imag_dz,
@@ -266,8 +266,8 @@ def reverse_step_bloch_python_reference(
         axis_neg=0,
     )
 
-    d_ey_dx = _forward_diff(forward_state["Ey"], axis=0, inv_delta=solver.inv_dx)
-    d_ex_dy = _forward_diff(forward_state["Ex"], axis=1, inv_delta=solver.inv_dy)
+    d_ey_dx = _forward_diff(forward_state["Ey"], axis=0, inv_delta=solver.inv_dx_h)
+    d_ex_dy = _forward_diff(forward_state["Ex"], axis=1, inv_delta=solver.inv_dy_h)
     hz, _, _ = _update_magnetic_component(
         forward_state["Hz"],
         d_pos=d_ey_dx,
@@ -277,8 +277,8 @@ def reverse_step_bloch_python_reference(
         axis_pos=0,
         axis_neg=1,
     )
-    d_ey_imag_dx = _forward_diff(forward_state["Ey_imag"], axis=0, inv_delta=solver.inv_dx)
-    d_ex_imag_dy = _forward_diff(forward_state["Ex_imag"], axis=1, inv_delta=solver.inv_dy)
+    d_ey_imag_dx = _forward_diff(forward_state["Ey_imag"], axis=0, inv_delta=solver.inv_dx_h)
+    d_ex_imag_dy = _forward_diff(forward_state["Ex_imag"], axis=1, inv_delta=solver.inv_dy_h)
     hz_imag, _, _ = _update_magnetic_component(
         forward_state["Hz_imag"],
         d_pos=d_ey_imag_dx,
@@ -322,14 +322,14 @@ def reverse_step_bloch_python_reference(
     d_hz_dy = _bloch_backward_diff(
         hz_complex,
         axis=1,
-        inv_delta=solver.inv_dy,
+        inv_delta=solver.inv_dy_e,
         phase_cos=float(solver.boundary_phase_cos[1]),
         phase_sin=float(solver.boundary_phase_sin[1]),
     )
     d_hy_dz = _bloch_backward_diff(
         hy_complex,
         axis=2,
-        inv_delta=solver.inv_dz,
+        inv_delta=solver.inv_dz_e,
         phase_cos=float(solver.boundary_phase_cos[2]),
         phase_sin=float(solver.boundary_phase_sin[2]),
     )
@@ -347,7 +347,7 @@ def reverse_step_bloch_python_reference(
         magnetic_output_adjoint["Hz"],
         adj_d_hz_dy,
         axis=1,
-        inv_delta=solver.inv_dy,
+        inv_delta=solver.inv_dy_e,
         phase_cos=float(solver.boundary_phase_cos[1]),
         phase_sin=float(solver.boundary_phase_sin[1]),
     )
@@ -355,7 +355,7 @@ def reverse_step_bloch_python_reference(
         magnetic_output_adjoint["Hy"],
         adj_d_hy_dz,
         axis=2,
-        inv_delta=solver.inv_dz,
+        inv_delta=solver.inv_dz_e,
         phase_cos=float(solver.boundary_phase_cos[2]),
         phase_sin=float(solver.boundary_phase_sin[2]),
     )
@@ -365,14 +365,14 @@ def reverse_step_bloch_python_reference(
     d_hx_dz = _bloch_backward_diff(
         hx_complex,
         axis=2,
-        inv_delta=solver.inv_dz,
+        inv_delta=solver.inv_dz_e,
         phase_cos=float(solver.boundary_phase_cos[2]),
         phase_sin=float(solver.boundary_phase_sin[2]),
     )
     d_hz_dx = _bloch_backward_diff(
         hz_complex,
         axis=0,
-        inv_delta=solver.inv_dx,
+        inv_delta=solver.inv_dx_e,
         phase_cos=float(solver.boundary_phase_cos[0]),
         phase_sin=float(solver.boundary_phase_sin[0]),
     )
@@ -390,7 +390,7 @@ def reverse_step_bloch_python_reference(
         magnetic_output_adjoint["Hx"],
         adj_d_hx_dz,
         axis=2,
-        inv_delta=solver.inv_dz,
+        inv_delta=solver.inv_dz_e,
         phase_cos=float(solver.boundary_phase_cos[2]),
         phase_sin=float(solver.boundary_phase_sin[2]),
     )
@@ -398,7 +398,7 @@ def reverse_step_bloch_python_reference(
         magnetic_output_adjoint["Hz"],
         adj_d_hz_dx,
         axis=0,
-        inv_delta=solver.inv_dx,
+        inv_delta=solver.inv_dx_e,
         phase_cos=float(solver.boundary_phase_cos[0]),
         phase_sin=float(solver.boundary_phase_sin[0]),
     )
@@ -407,14 +407,14 @@ def reverse_step_bloch_python_reference(
     d_hy_dx = _bloch_backward_diff(
         hy_complex,
         axis=0,
-        inv_delta=solver.inv_dx,
+        inv_delta=solver.inv_dx_e,
         phase_cos=float(solver.boundary_phase_cos[0]),
         phase_sin=float(solver.boundary_phase_sin[0]),
     )
     d_hx_dy = _bloch_backward_diff(
         hx_complex,
         axis=1,
-        inv_delta=solver.inv_dy,
+        inv_delta=solver.inv_dy_e,
         phase_cos=float(solver.boundary_phase_cos[1]),
         phase_sin=float(solver.boundary_phase_sin[1]),
     )
@@ -432,7 +432,7 @@ def reverse_step_bloch_python_reference(
         magnetic_output_adjoint["Hy"],
         adj_d_hy_dx,
         axis=0,
-        inv_delta=solver.inv_dx,
+        inv_delta=solver.inv_dx_e,
         phase_cos=float(solver.boundary_phase_cos[0]),
         phase_sin=float(solver.boundary_phase_sin[0]),
     )
@@ -440,7 +440,7 @@ def reverse_step_bloch_python_reference(
         magnetic_output_adjoint["Hx"],
         adj_d_hx_dy,
         axis=1,
-        inv_delta=solver.inv_dy,
+        inv_delta=solver.inv_dy_e,
         phase_cos=float(solver.boundary_phase_cos[1]),
         phase_sin=float(solver.boundary_phase_sin[1]),
     )
@@ -452,16 +452,16 @@ def reverse_step_bloch_python_reference(
         curl=solver.chx_curl,
     )
     pre_step_adjoint["Hx"] = pre_step_adjoint["Hx"] + adj_hx
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dy, axis=1, inv_delta=solver.inv_dy)
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dz, axis=2, inv_delta=solver.inv_dz)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dy, axis=1, inv_delta=solver.inv_dy_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dz, axis=2, inv_delta=solver.inv_dz_h)
     adj_hx_imag, adj_d_ez_imag_dy, adj_d_ey_imag_dz = _reverse_magnetic_component_standard(
         magnetic_output_adjoint["Hx"].imag,
         decay=solver.chx_decay,
         curl=solver.chx_curl,
     )
     pre_step_adjoint["Hx_imag"] = pre_step_adjoint["Hx_imag"] + adj_hx_imag
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez_imag"], adj_d_ez_imag_dy, axis=1, inv_delta=solver.inv_dy)
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey_imag"], adj_d_ey_imag_dz, axis=2, inv_delta=solver.inv_dz)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez_imag"], adj_d_ez_imag_dy, axis=1, inv_delta=solver.inv_dy_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey_imag"], adj_d_ey_imag_dz, axis=2, inv_delta=solver.inv_dz_h)
 
     adj_hy, adj_d_ex_dz, adj_d_ez_dx = _reverse_magnetic_component_standard(
         magnetic_output_adjoint["Hy"].real,
@@ -469,16 +469,16 @@ def reverse_step_bloch_python_reference(
         curl=solver.chy_curl,
     )
     pre_step_adjoint["Hy"] = pre_step_adjoint["Hy"] + adj_hy
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dz, axis=2, inv_delta=solver.inv_dz)
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dx, axis=0, inv_delta=solver.inv_dx)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dz, axis=2, inv_delta=solver.inv_dz_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dx, axis=0, inv_delta=solver.inv_dx_h)
     adj_hy_imag, adj_d_ex_imag_dz, adj_d_ez_imag_dx = _reverse_magnetic_component_standard(
         magnetic_output_adjoint["Hy"].imag,
         decay=solver.chy_decay,
         curl=solver.chy_curl,
     )
     pre_step_adjoint["Hy_imag"] = pre_step_adjoint["Hy_imag"] + adj_hy_imag
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex_imag"], adj_d_ex_imag_dz, axis=2, inv_delta=solver.inv_dz)
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez_imag"], adj_d_ez_imag_dx, axis=0, inv_delta=solver.inv_dx)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex_imag"], adj_d_ex_imag_dz, axis=2, inv_delta=solver.inv_dz_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez_imag"], adj_d_ez_imag_dx, axis=0, inv_delta=solver.inv_dx_h)
 
     adj_hz, adj_d_ey_dx, adj_d_ex_dy = _reverse_magnetic_component_standard(
         magnetic_output_adjoint["Hz"].real,
@@ -486,16 +486,16 @@ def reverse_step_bloch_python_reference(
         curl=solver.chz_curl,
     )
     pre_step_adjoint["Hz"] = pre_step_adjoint["Hz"] + adj_hz
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dx, axis=0, inv_delta=solver.inv_dx)
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dy, axis=1, inv_delta=solver.inv_dy)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dx, axis=0, inv_delta=solver.inv_dx_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dy, axis=1, inv_delta=solver.inv_dy_h)
     adj_hz_imag, adj_d_ey_imag_dx, adj_d_ex_imag_dy = _reverse_magnetic_component_standard(
         magnetic_output_adjoint["Hz"].imag,
         decay=solver.chz_decay,
         curl=solver.chz_curl,
     )
     pre_step_adjoint["Hz_imag"] = pre_step_adjoint["Hz_imag"] + adj_hz_imag
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey_imag"], adj_d_ey_imag_dx, axis=0, inv_delta=solver.inv_dx)
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex_imag"], adj_d_ex_imag_dy, axis=1, inv_delta=solver.inv_dy)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey_imag"], adj_d_ey_imag_dx, axis=0, inv_delta=solver.inv_dx_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex_imag"], adj_d_ex_imag_dy, axis=1, inv_delta=solver.inv_dy_h)
 
     return _ReverseStepResult(
         pre_step_adjoint={name: tensor.detach() for name, tensor in pre_step_adjoint.items()},
@@ -591,8 +591,8 @@ def reverse_step_cpml_python_reference(
     eps_ez,
     resolved_source_terms=None,
 ):
-    d_ez_dy = _forward_diff(forward_state["Ez"], axis=1, inv_delta=solver.inv_dy)
-    d_ey_dz = _forward_diff(forward_state["Ey"], axis=2, inv_delta=solver.inv_dz)
+    d_ez_dy = _forward_diff(forward_state["Ez"], axis=1, inv_delta=solver.inv_dy_h)
+    d_ey_dz = _forward_diff(forward_state["Ey"], axis=2, inv_delta=solver.inv_dz_h)
     hx, _, _ = _update_magnetic_component(
         forward_state["Hx"],
         d_pos=d_ez_dy,
@@ -611,8 +611,8 @@ def reverse_step_cpml_python_reference(
         axis_neg=2,
     )
 
-    d_ex_dz = _forward_diff(forward_state["Ex"], axis=2, inv_delta=solver.inv_dz)
-    d_ez_dx = _forward_diff(forward_state["Ez"], axis=0, inv_delta=solver.inv_dx)
+    d_ex_dz = _forward_diff(forward_state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
+    d_ez_dx = _forward_diff(forward_state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
     hy, _, _ = _update_magnetic_component(
         forward_state["Hy"],
         d_pos=d_ex_dz,
@@ -631,8 +631,8 @@ def reverse_step_cpml_python_reference(
         axis_neg=0,
     )
 
-    d_ey_dx = _forward_diff(forward_state["Ey"], axis=0, inv_delta=solver.inv_dx)
-    d_ex_dy = _forward_diff(forward_state["Ex"], axis=1, inv_delta=solver.inv_dy)
+    d_ey_dx = _forward_diff(forward_state["Ey"], axis=0, inv_delta=solver.inv_dx_h)
+    d_ex_dy = _forward_diff(forward_state["Ex"], axis=1, inv_delta=solver.inv_dy_h)
     hz, _, _ = _update_magnetic_component(
         forward_state["Hz"],
         d_pos=d_ey_dx,
@@ -671,8 +671,8 @@ def reverse_step_cpml_python_reference(
         "Hz": adjoint_state["Hz"].clone(),
     }
 
-    d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy)
-    d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz)
+    d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy_e)
+    d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz_e)
     adj_ex, adj_d_hz_dy, adj_d_hy_dz, grad_eps_ex_increment, adj_psi_ex_y, adj_psi_ex_z = _reverse_electric_component_cpml(
         adjoint_state["Ex"],
         adjoint_state["psi_ex_y"],
@@ -701,12 +701,12 @@ def reverse_step_cpml_python_reference(
     pre_step_adjoint["Ex"] = pre_step_adjoint["Ex"] + adj_ex
     pre_step_adjoint["psi_ex_y"] = pre_step_adjoint["psi_ex_y"] + adj_psi_ex_y
     pre_step_adjoint["psi_ex_z"] = pre_step_adjoint["psi_ex_z"] + adj_psi_ex_z
-    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hz"], adj_d_hz_dy, axis=1, inv_delta=solver.inv_dy)
-    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hy"], adj_d_hy_dz, axis=2, inv_delta=solver.inv_dz)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hz"], adj_d_hz_dy, axis=1, inv_delta=solver.inv_dy_e)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hy"], adj_d_hy_dz, axis=2, inv_delta=solver.inv_dz_e)
     grad_eps_ex = grad_eps_ex + grad_eps_ex_increment
 
-    d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz)
-    d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx)
+    d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz_e)
+    d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx_e)
     adj_ey, adj_d_hx_dz, adj_d_hz_dx, grad_eps_ey_increment, adj_psi_ey_z, adj_psi_ey_x = _reverse_electric_component_cpml(
         adjoint_state["Ey"],
         adjoint_state["psi_ey_x"],
@@ -735,12 +735,12 @@ def reverse_step_cpml_python_reference(
     pre_step_adjoint["Ey"] = pre_step_adjoint["Ey"] + adj_ey
     pre_step_adjoint["psi_ey_z"] = pre_step_adjoint["psi_ey_z"] + adj_psi_ey_z
     pre_step_adjoint["psi_ey_x"] = pre_step_adjoint["psi_ey_x"] + adj_psi_ey_x
-    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hx"], adj_d_hx_dz, axis=2, inv_delta=solver.inv_dz)
-    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hz"], adj_d_hz_dx, axis=0, inv_delta=solver.inv_dx)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hx"], adj_d_hx_dz, axis=2, inv_delta=solver.inv_dz_e)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hz"], adj_d_hz_dx, axis=0, inv_delta=solver.inv_dx_e)
     grad_eps_ey = grad_eps_ey + grad_eps_ey_increment
 
-    d_hy_dx = _backward_diff(magnetic_fields["Hy"], axis=0, inv_delta=solver.inv_dx)
-    d_hx_dy = _backward_diff(magnetic_fields["Hx"], axis=1, inv_delta=solver.inv_dy)
+    d_hy_dx = _backward_diff(magnetic_fields["Hy"], axis=0, inv_delta=solver.inv_dx_e)
+    d_hx_dy = _backward_diff(magnetic_fields["Hx"], axis=1, inv_delta=solver.inv_dy_e)
     adj_ez, adj_d_hy_dx, adj_d_hx_dy, grad_eps_ez_increment, adj_psi_ez_x, adj_psi_ez_y = _reverse_electric_component_cpml(
         adjoint_state["Ez"],
         adjoint_state["psi_ez_x"],
@@ -769,8 +769,8 @@ def reverse_step_cpml_python_reference(
     pre_step_adjoint["Ez"] = pre_step_adjoint["Ez"] + adj_ez
     pre_step_adjoint["psi_ez_x"] = pre_step_adjoint["psi_ez_x"] + adj_psi_ez_x
     pre_step_adjoint["psi_ez_y"] = pre_step_adjoint["psi_ez_y"] + adj_psi_ez_y
-    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hy"], adj_d_hy_dx, axis=0, inv_delta=solver.inv_dx)
-    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hx"], adj_d_hx_dy, axis=1, inv_delta=solver.inv_dy)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hy"], adj_d_hy_dx, axis=0, inv_delta=solver.inv_dx_e)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hx"], adj_d_hx_dy, axis=1, inv_delta=solver.inv_dy_e)
     grad_eps_ez = grad_eps_ez + grad_eps_ez_increment
 
     adj_hx, adj_d_ez_dy, adj_d_ey_dz, adj_psi_hx_y, adj_psi_hx_z = _reverse_magnetic_component_cpml(
@@ -791,8 +791,8 @@ def reverse_step_cpml_python_reference(
     pre_step_adjoint["Hx"] = pre_step_adjoint["Hx"] + adj_hx
     pre_step_adjoint["psi_hx_y"] = pre_step_adjoint["psi_hx_y"] + adj_psi_hx_y
     pre_step_adjoint["psi_hx_z"] = pre_step_adjoint["psi_hx_z"] + adj_psi_hx_z
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dy, axis=1, inv_delta=solver.inv_dy)
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dz, axis=2, inv_delta=solver.inv_dz)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dy, axis=1, inv_delta=solver.inv_dy_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dz, axis=2, inv_delta=solver.inv_dz_h)
 
     adj_hy, adj_d_ex_dz, adj_d_ez_dx, adj_psi_hy_z, adj_psi_hy_x = _reverse_magnetic_component_cpml(
         magnetic_output_adjoint["Hy"],
@@ -812,8 +812,8 @@ def reverse_step_cpml_python_reference(
     pre_step_adjoint["Hy"] = pre_step_adjoint["Hy"] + adj_hy
     pre_step_adjoint["psi_hy_z"] = pre_step_adjoint["psi_hy_z"] + adj_psi_hy_z
     pre_step_adjoint["psi_hy_x"] = pre_step_adjoint["psi_hy_x"] + adj_psi_hy_x
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dz, axis=2, inv_delta=solver.inv_dz)
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dx, axis=0, inv_delta=solver.inv_dx)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dz, axis=2, inv_delta=solver.inv_dz_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dx, axis=0, inv_delta=solver.inv_dx_h)
 
     adj_hz, adj_d_ey_dx, adj_d_ex_dy, adj_psi_hz_x, adj_psi_hz_y = _reverse_magnetic_component_cpml(
         magnetic_output_adjoint["Hz"],
@@ -833,8 +833,8 @@ def reverse_step_cpml_python_reference(
     pre_step_adjoint["Hz"] = pre_step_adjoint["Hz"] + adj_hz
     pre_step_adjoint["psi_hz_x"] = pre_step_adjoint["psi_hz_x"] + adj_psi_hz_x
     pre_step_adjoint["psi_hz_y"] = pre_step_adjoint["psi_hz_y"] + adj_psi_hz_y
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dx, axis=0, inv_delta=solver.inv_dx)
-    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dy, axis=1, inv_delta=solver.inv_dy)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dx, axis=0, inv_delta=solver.inv_dx_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dy, axis=1, inv_delta=solver.inv_dy_h)
 
     return _ReverseStepResult(
         pre_step_adjoint={name: tensor.detach() for name, tensor in pre_step_adjoint.items()},

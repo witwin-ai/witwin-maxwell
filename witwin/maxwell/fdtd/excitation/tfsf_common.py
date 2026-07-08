@@ -6,7 +6,7 @@ import torch
 
 from ..dispersion import solve_numerical_wavenumber
 from .spatial import beam_profile_from_source, plane_wave_profile
-from .tfsf_specs import reference_sample_axis_code
+from .tfsf_specs import AXIS_INDEX, reference_sample_axis_code
 from .temporal import build_source_term
 
 
@@ -21,6 +21,31 @@ def resolve_bounds_indices(scene, bounds):
         lower.append(nearest_index(axis_coords, axis_bounds[0]))
         upper.append(nearest_index(axis_coords, axis_bounds[1]))
     return tuple(lower), tuple(upper)
+
+
+def require_locally_uniform_axis(solver, axis, start, stop, *, context):
+    """Validate that the primal spacings over cells [start, stop) are uniform
+    (within 1e-6 relative) and return the local spacing.
+
+    The auxiliary-grid TFSF machinery and its dispersion matching assume a
+    constant main-grid spacing over the injection region; nonuniform grids are
+    supported only when the region (expanded by one cell) is locally uniform.
+    """
+    primal = {
+        "x": solver.scene.dx_primal64,
+        "y": solver.scene.dy_primal64,
+        "z": solver.scene.dz_primal64,
+    }[axis]
+    window = primal[max(int(start), 0) : min(int(stop), len(primal))]
+    d_min = float(window.min())
+    d_max = float(window.max())
+    if (d_max - d_min) > 1e-6 * d_max:
+        raise ValueError(
+            f"{context} requires locally uniform grid spacing along axis '{axis}' over the "
+            f"injection region (+1 cell); found min={d_min:g}, max={d_max:g}. Refine "
+            "GridSpec.custom so the region is uniform, or move the region."
+        )
+    return d_min
 
 
 def validate_bounds(solver, lower, upper):
@@ -260,11 +285,22 @@ def build_batched_aux_terms(solver, terms):
 def slice_coeff_patch(solver, spec, curl_attr_map):
     offsets = spec["offsets"]
     shape = spec["shape"]
+    axis = spec["delta_axis"]
+    scene = solver.scene
+    # The spec is a one-cell curl correction: E-face terms divide by the dual
+    # spacing at the E element's coordinate, H-face terms by the primal
+    # spacing at the H element's coordinate (the spacing their field update
+    # uses along the derivative axis).
+    if spec["field_name"].startswith("E"):
+        spacing64 = {"x": scene.dx_dual64, "y": scene.dy_dual64, "z": scene.dz_dual64}[axis]
+    else:
+        spacing64 = {"x": scene.dx_primal64, "y": scene.dy_primal64, "z": scene.dz_primal64}[axis]
+    delta = float(spacing64[int(offsets[AXIS_INDEX[axis]])])
     return getattr(solver, curl_attr_map[spec["field_name"]])[
         offsets[0] : offsets[0] + shape[0],
         offsets[1] : offsets[1] + shape[1],
         offsets[2] : offsets[2] + shape[2],
-    ] / float(getattr(solver, spec["delta_attr"]))
+    ] / delta
 
 
 def build_terms_from_specs(solver, specs, vector, curl_attr_map, term_factory):

@@ -67,7 +67,7 @@ def resolve_bloch_wavevector(solver) -> tuple[float, float, float]:
     k_numeric = solve_numerical_wavenumber(
         solver,
         source["direction"],
-        {"x": "dx", "y": "dy", "z": "dz"},
+        {"x": solver.min_dx, "y": solver.min_dy, "z": solver.min_dz},
     )
     bloch_axes = set(_bloch_axes(solver))
     return tuple(

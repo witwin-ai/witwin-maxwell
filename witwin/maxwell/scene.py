@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
@@ -105,11 +106,30 @@ class Domain:
         )
 
 
-@dataclass(frozen=True)
+def _validate_custom_axis_coords(values, axis: str) -> np.ndarray:
+    if isinstance(values, torch.Tensor):
+        values = values.detach().cpu().numpy()
+    coords = np.array(np.asarray(values, dtype=np.float64), copy=True)
+    if coords.ndim != 1:
+        raise ValueError(f"GridSpec.custom {axis}_coords must be a 1D array of node coordinates.")
+    if coords.size < 2:
+        raise ValueError(f"GridSpec.custom {axis}_coords must contain at least two node coordinates.")
+    if not np.all(np.isfinite(coords)):
+        raise ValueError(f"GridSpec.custom {axis}_coords must contain only finite values.")
+    if not np.all(np.diff(coords) > 0.0):
+        raise ValueError(f"GridSpec.custom {axis}_coords must be strictly increasing.")
+    coords.setflags(write=False)
+    return coords
+
+
+@dataclass(frozen=True, eq=False)
 class GridSpec:
-    dx: float
-    dy: float
-    dz: float
+    dx: float | None
+    dy: float | None
+    dz: float | None
+    x_coords: np.ndarray | None = None
+    y_coords: np.ndarray | None = None
+    z_coords: np.ndarray | None = None
 
     @classmethod
     def uniform(cls, dl: float) -> "GridSpec":
@@ -120,13 +140,48 @@ class GridSpec:
     def anisotropic(cls, dx: float, dy: float, dz: float) -> "GridSpec":
         return cls(float(dx), float(dy), float(dz))
 
+    @classmethod
+    def custom(cls, x_coords, y_coords, z_coords) -> "GridSpec":
+        return cls(
+            None,
+            None,
+            None,
+            x_coords=_validate_custom_axis_coords(x_coords, "x"),
+            y_coords=_validate_custom_axis_coords(y_coords, "y"),
+            z_coords=_validate_custom_axis_coords(z_coords, "z"),
+        )
+
+    @property
+    def is_custom(self) -> bool:
+        return self.x_coords is not None or self.y_coords is not None or self.z_coords is not None
+
     @property
     def spacing(self) -> tuple[float, float, float]:
+        if self.is_custom:
+            raise ValueError("GridSpec.custom has no scalar spacing; use axis_coords()/min_spacing.")
         return (self.dx, self.dy, self.dz)
 
     @property
     def is_uniform(self) -> bool:
+        if self.is_custom:
+            raise ValueError("GridSpec.custom has no scalar spacing; use axis_coords()/min_spacing.")
         return bool(np.isclose(self.dx, self.dy) and np.isclose(self.dy, self.dz))
+
+    @property
+    def min_spacing(self) -> tuple[float, float, float]:
+        if self.is_custom:
+            return (
+                float(np.diff(self.x_coords).min()),
+                float(np.diff(self.y_coords).min()),
+                float(np.diff(self.z_coords).min()),
+            )
+        return (self.dx, self.dy, self.dz)
+
+    def axis_coords(self, axis: str) -> np.ndarray | None:
+        axis_name = str(axis).lower()
+        if axis_name not in _BOUNDARY_AXIS_TO_INDEX:
+            raise ValueError("axis must be 'x', 'y', or 'z'.")
+        return (self.x_coords, self.y_coords, self.z_coords)[_BOUNDARY_AXIS_TO_INDEX[axis_name]]
 
 
 @dataclass(frozen=True)
@@ -593,17 +648,24 @@ class Scene(SceneBase):
         self.ports = list(ports or [])
         self.lazy_meshgrid = bool(lazy_meshgrid)
 
+    def _scalar_grid_step(self, value: float | None) -> float:
+        if self.grid.is_custom:
+            raise ValueError(
+                "scalar spacing undefined on a nonuniform grid; use scene.x/y/z, x_half, or grid.min_spacing."
+            )
+        return float(value)
+
     @property
     def dx(self) -> float:
-        return float(self.grid.dx)
+        return self._scalar_grid_step(self.grid.dx)
 
     @property
     def dy(self) -> float:
-        return float(self.grid.dy)
+        return self._scalar_grid_step(self.grid.dy)
 
     @property
     def dz(self) -> float:
-        return float(self.grid.dz)
+        return self._scalar_grid_step(self.grid.dz)
 
     @property
     def grid_spacing(self) -> tuple[float, float, float]:
@@ -748,6 +810,47 @@ class Scene(SceneBase):
         return scene_to_tidy3d(self, frequencies=frequencies, run_time=run_time, **kwargs)
 
 
+def _axis_nodes64(grid: GridSpec, axis: str, axis_lo: float, axis_hi: float) -> np.ndarray:
+    coords = grid.axis_coords(axis)
+    if coords is None:
+        step = float(getattr(grid, f"d{axis}"))
+        count = max(0, int(math.ceil((float(axis_hi) - float(axis_lo)) / step)))
+        return float(axis_lo) + np.arange(count, dtype=np.float64) * step
+    span = float(axis_hi) - float(axis_lo)
+    tolerance = 1e-9 * span
+    if abs(float(coords[0]) - float(axis_lo)) > tolerance or abs(float(coords[-1]) - float(axis_hi)) > tolerance:
+        raise ValueError(
+            f"GridSpec.custom {axis}_coords must span the domain exactly along axis '{axis}'; "
+            f"build Domain from ({float(coords[0]):g}, {float(coords[-1]):g})."
+        )
+    return coords
+
+
+def _axis_dual_spacing64(primal: np.ndarray, boundary_kind: str) -> np.ndarray:
+    dual = np.empty(primal.size + 1, dtype=np.float64)
+    dual[1:-1] = 0.5 * (primal[:-1] + primal[1:])
+    if boundary_kind in ("periodic", "bloch"):
+        # Distance from the wrap image of the last half-point to the first half-point.
+        wrap = 0.5 * (primal[0] + primal[-1])
+        dual[0] = wrap
+        dual[-1] = wrap
+    else:
+        # PMC mirror distance across the boundary node; placeholder for PEC/none/PML.
+        dual[0] = primal[0]
+        dual[-1] = primal[-1]
+    return dual
+
+
+def _build_axis_grid64(
+    grid: GridSpec, axis: str, axis_lo: float, axis_hi: float, boundary_kind: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    nodes = _axis_nodes64(grid, axis, axis_lo, axis_hi)
+    primal = np.diff(nodes)
+    half = nodes[:-1] + 0.5 * primal
+    dual = _axis_dual_spacing64(primal, boundary_kind)
+    return nodes, primal, half, dual
+
+
 class PreparedScene(Scene):
     """Internal solver-ready scene with compiled grid state."""
 
@@ -773,9 +876,21 @@ class PreparedScene(Scene):
         self.domain_range = _domain_range_from_bounds(self.domain.bounds)
 
         x_start, x_end, y_start, y_end, z_start, z_end = self.domain_range
-        self.x = torch.arange(x_start, x_end, self.dx, device=self.device)
-        self.y = torch.arange(y_start, y_end, self.dy, device=self.device)
-        self.z = torch.arange(z_start, z_end, self.dz, device=self.device)
+        self.x_nodes64, self.dx_primal64, self.x_half64, self.dx_dual64 = _build_axis_grid64(
+            self.grid, "x", x_start, x_end, self.boundary.axis_kind("x")
+        )
+        self.y_nodes64, self.dy_primal64, self.y_half64, self.dy_dual64 = _build_axis_grid64(
+            self.grid, "y", y_start, y_end, self.boundary.axis_kind("y")
+        )
+        self.z_nodes64, self.dz_primal64, self.z_half64, self.dz_dual64 = _build_axis_grid64(
+            self.grid, "z", z_start, z_end, self.boundary.axis_kind("z")
+        )
+        self.x = torch.tensor(self.x_nodes64, dtype=torch.float32, device=self.device)
+        self.y = torch.tensor(self.y_nodes64, dtype=torch.float32, device=self.device)
+        self.z = torch.tensor(self.z_nodes64, dtype=torch.float32, device=self.device)
+        self.x_half = torch.tensor(self.x_half64, dtype=torch.float32, device=self.device)
+        self.y_half = torch.tensor(self.y_half64, dtype=torch.float32, device=self.device)
+        self.z_half = torch.tensor(self.z_half64, dtype=torch.float32, device=self.device)
 
         self._xx = None
         self._yy = None

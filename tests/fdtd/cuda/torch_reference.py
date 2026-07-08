@@ -41,12 +41,6 @@ def get_compiled_extension(*, verbose: bool = False) -> Any:
     return _COMPILED_EXTENSION
 
 
-def _use_compiled_field_kernels() -> bool:
-    # This module is the frozen Torch reference; it never dispatches to the
-    # compiled CUDA extension.
-    return False
-
-
 _UNIFORM_SCALAR_CACHE: dict[int, tuple[Any, int, int, float | None]] = {}
 
 
@@ -99,6 +93,20 @@ def _axis_view(values: torch.Tensor, axis: int, ndim: int = 3) -> torch.Tensor:
     shape = [1] * ndim
     shape[axis] = int(values.shape[0])
     return values.reshape(shape)
+
+
+def _spacing_factor(inv_delta, axis: int):
+    # Forward kernels take per-axis spacing arrays; accept a 1D tensor (or a
+    # scalar for uniform-spacing callers) and return a broadcastable factor.
+    if torch.is_tensor(inv_delta):
+        return _axis_view(inv_delta, axis)
+    return float(inv_delta)
+
+
+def _spacing_values(inv_delta, size: int, *, device, dtype) -> torch.Tensor:
+    if torch.is_tensor(inv_delta):
+        return inv_delta.to(device=device, dtype=dtype)
+    return torch.full((size,), float(inv_delta), device=device, dtype=dtype)
 
 
 def debug_linear_indices(
@@ -213,13 +221,14 @@ def _backward_diff(
     axis: int,
     low_mode: int,
     high_mode: int,
-    inv_delta: float,
+    inv_delta,
 ) -> torch.Tensor:
     device = source.device
     result = torch.zeros(target_shape, device=device, dtype=source.dtype)
     size = target_shape[axis]
     if size <= 0:
         return result
+    inv = _spacing_values(inv_delta, size, device=device, dtype=source.dtype)
 
     if size > 2:
         dst = [slice(None)] * 3
@@ -228,7 +237,7 @@ def _backward_diff(
         hi[axis] = slice(1, size - 1)
         lo = [slice(None)] * 3
         lo[axis] = slice(0, size - 2)
-        result[tuple(dst)] = (source[tuple(hi)] - source[tuple(lo)]) * float(inv_delta)
+        result[tuple(dst)] = (source[tuple(hi)] - source[tuple(lo)]) * _axis_view(inv[1 : size - 1], axis)
 
     low_src = [slice(None)] * 3
     low_src[axis] = 0
@@ -243,15 +252,15 @@ def _backward_diff(
     low_value = source[tuple(low_src)]
     high_value = source[tuple(high_src)]
     if low_mode == BOUNDARY_PERIODIC:
-        result[tuple(low_dst)] = (low_value - high_value) * float(inv_delta)
+        result[tuple(low_dst)] = (low_value - high_value) * inv[0]
     elif low_mode == BOUNDARY_PMC:
-        result[tuple(low_dst)] = 2.0 * low_value * float(inv_delta)
+        result[tuple(low_dst)] = 2.0 * low_value * inv[0]
 
     if size > 1:
         if high_mode == BOUNDARY_PERIODIC:
-            result[tuple(high_dst)] = (low_value - high_value) * float(inv_delta)
+            result[tuple(high_dst)] = (low_value - high_value) * inv[size - 1]
         elif high_mode == BOUNDARY_PMC:
-            result[tuple(high_dst)] = -2.0 * high_value * float(inv_delta)
+            result[tuple(high_dst)] = -2.0 * high_value * inv[size - 1]
     return result
 
 
@@ -294,28 +303,19 @@ def _compressed_psi_update(
 
 def _magnetic_hx_standard(*, Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz):
     _require_cuda_tensors(Hx, Ey, Ez, HxDecay, HxCurl)
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_magnetic_hx_standard(Hx, Ey, Ez, HxDecay, HxCurl, float(invDy), float(invDz))
-        return
-    curl = (Ez[:, 1:, :] - Ez[:, :-1, :]) * float(invDy) - (Ey[:, :, 1:] - Ey[:, :, :-1]) * float(invDz)
+    curl = (Ez[:, 1:, :] - Ez[:, :-1, :]) * _spacing_factor(invDy, 1) - (Ey[:, :, 1:] - Ey[:, :, :-1]) * _spacing_factor(invDz, 2)
     Hx.copy_(Hx * HxDecay - HxCurl * curl)
 
 
 def _magnetic_hy_standard(*, Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz):
     _require_cuda_tensors(Hy, Ex, Ez, HyDecay, HyCurl)
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_magnetic_hy_standard(Hy, Ex, Ez, HyDecay, HyCurl, float(invDx), float(invDz))
-        return
-    curl = (Ex[:, :, 1:] - Ex[:, :, :-1]) * float(invDz) - (Ez[1:, :, :] - Ez[:-1, :, :]) * float(invDx)
+    curl = (Ex[:, :, 1:] - Ex[:, :, :-1]) * _spacing_factor(invDz, 2) - (Ez[1:, :, :] - Ez[:-1, :, :]) * _spacing_factor(invDx, 0)
     Hy.copy_(Hy * HyDecay - HyCurl * curl)
 
 
 def _magnetic_hz_standard(*, Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy):
     _require_cuda_tensors(Hz, Ex, Ey, HzDecay, HzCurl)
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_magnetic_hz_standard(Hz, Ex, Ey, HzDecay, HzCurl, float(invDx), float(invDy))
-        return
-    curl = (Ey[1:, :, :] - Ey[:-1, :, :]) * float(invDx) - (Ex[:, 1:, :] - Ex[:, :-1, :]) * float(invDy)
+    curl = (Ey[1:, :, :] - Ey[:-1, :, :]) * _spacing_factor(invDx, 0) - (Ex[:, 1:, :] - Ex[:, :-1, :]) * _spacing_factor(invDy, 1)
     Hz.copy_(Hz * HzDecay - HzCurl * curl)
 
 
@@ -352,27 +352,8 @@ def _magnetic_hx_cpml(
         ByHxZ,
         CyHxZ,
     )
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_magnetic_hx_cpml(
-            Hx,
-            Ey,
-            Ez,
-            HxDecay,
-            HxCurl,
-            PsiHxY,
-            PsiHxZ,
-            InvKappaHxY,
-            ByHxY,
-            CyHxY,
-            InvKappaHxZ,
-            ByHxZ,
-            CyHxZ,
-            float(invDy),
-            float(invDz),
-        )
-        return
-    d_y = (Ez[:, 1:, :] - Ez[:, :-1, :]) * float(invDy)
-    d_z = (Ey[:, :, 1:] - Ey[:, :, :-1]) * float(invDz)
+    d_y = (Ez[:, 1:, :] - Ez[:, :-1, :]) * _spacing_factor(invDy, 1)
+    d_z = (Ey[:, :, 1:] - Ey[:, :, :-1]) * _spacing_factor(invDz, 2)
     psi_y = _axis_view(ByHxY, 1) * PsiHxY + _axis_view(CyHxY, 1) * d_y
     psi_z = _axis_view(ByHxZ, 2) * PsiHxZ + _axis_view(CyHxZ, 2) * d_z
     PsiHxY.copy_(psi_y)
@@ -414,27 +395,8 @@ def _magnetic_hy_cpml(
         ByHyZ,
         CyHyZ,
     )
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_magnetic_hy_cpml(
-            Hy,
-            Ex,
-            Ez,
-            HyDecay,
-            HyCurl,
-            PsiHyX,
-            PsiHyZ,
-            InvKappaHyX,
-            ByHyX,
-            CyHyX,
-            InvKappaHyZ,
-            ByHyZ,
-            CyHyZ,
-            float(invDx),
-            float(invDz),
-        )
-        return
-    d_z = (Ex[:, :, 1:] - Ex[:, :, :-1]) * float(invDz)
-    d_x = (Ez[1:, :, :] - Ez[:-1, :, :]) * float(invDx)
+    d_z = (Ex[:, :, 1:] - Ex[:, :, :-1]) * _spacing_factor(invDz, 2)
+    d_x = (Ez[1:, :, :] - Ez[:-1, :, :]) * _spacing_factor(invDx, 0)
     psi_x = _axis_view(ByHyX, 0) * PsiHyX + _axis_view(CyHyX, 0) * d_x
     psi_z = _axis_view(ByHyZ, 2) * PsiHyZ + _axis_view(CyHyZ, 2) * d_z
     PsiHyX.copy_(psi_x)
@@ -476,27 +438,8 @@ def _magnetic_hz_cpml(
         ByHzY,
         CyHzY,
     )
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_magnetic_hz_cpml(
-            Hz,
-            Ex,
-            Ey,
-            HzDecay,
-            HzCurl,
-            PsiHzX,
-            PsiHzY,
-            InvKappaHzX,
-            ByHzX,
-            CyHzX,
-            InvKappaHzY,
-            ByHzY,
-            CyHzY,
-            float(invDx),
-            float(invDy),
-        )
-        return
-    d_x = (Ey[1:, :, :] - Ey[:-1, :, :]) * float(invDx)
-    d_y = (Ex[:, 1:, :] - Ex[:, :-1, :]) * float(invDy)
+    d_x = (Ey[1:, :, :] - Ey[:-1, :, :]) * _spacing_factor(invDx, 0)
+    d_y = (Ex[:, 1:, :] - Ex[:, :-1, :]) * _spacing_factor(invDy, 1)
     psi_x = _axis_view(ByHzX, 0) * PsiHzX + _axis_view(CyHzX, 0) * d_x
     psi_y = _axis_view(ByHzY, 1) * PsiHzY + _axis_view(CyHzY, 1) * d_y
     PsiHzX.copy_(psi_x)
@@ -530,35 +473,8 @@ def _magnetic_hx_cpml_compressed(
     psiHxZHighLength,
 ):
     _require_cuda_tensors(Hx, Ey, Ez, PsiHxY, PsiHxZ)
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_magnetic_hx_cpml_compressed(
-            Hx,
-            Ey,
-            Ez,
-            HxDecay,
-            HxCurl,
-            PsiHxY,
-            PsiHxZ,
-            InvKappaHxY,
-            ByHxY,
-            CyHxY,
-            InvKappaHxZ,
-            ByHxZ,
-            CyHxZ,
-            float(invDy),
-            float(invDz),
-            int(psiHxYLowLength),
-            int(psiHxYHighStart),
-            int(psiHxYHighLength),
-            int(psiHxZLowLength),
-            int(psiHxZHighStart),
-            int(psiHxZHighLength),
-            _uniform_scalar(HxDecay),
-            _uniform_scalar(HxCurl),
-        )
-        return
-    d_y = (Ez[:, 1:, :] - Ez[:, :-1, :]) * float(invDy)
-    d_z = (Ey[:, :, 1:] - Ey[:, :, :-1]) * float(invDz)
+    d_y = (Ez[:, 1:, :] - Ez[:, :-1, :]) * _spacing_factor(invDy, 1)
+    d_z = (Ey[:, :, 1:] - Ey[:, :, :-1]) * _spacing_factor(invDz, 2)
     psi_y = _compressed_psi_update(
         PsiHxY,
         d_y,
@@ -608,35 +524,8 @@ def _magnetic_hy_cpml_compressed(
     psiHyZHighLength,
 ):
     _require_cuda_tensors(Hy, Ex, Ez, PsiHyX, PsiHyZ)
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_magnetic_hy_cpml_compressed(
-            Hy,
-            Ex,
-            Ez,
-            HyDecay,
-            HyCurl,
-            PsiHyX,
-            PsiHyZ,
-            InvKappaHyX,
-            ByHyX,
-            CyHyX,
-            InvKappaHyZ,
-            ByHyZ,
-            CyHyZ,
-            float(invDx),
-            float(invDz),
-            int(psiHyXLowLength),
-            int(psiHyXHighStart),
-            int(psiHyXHighLength),
-            int(psiHyZLowLength),
-            int(psiHyZHighStart),
-            int(psiHyZHighLength),
-            _uniform_scalar(HyDecay),
-            _uniform_scalar(HyCurl),
-        )
-        return
-    d_z = (Ex[:, :, 1:] - Ex[:, :, :-1]) * float(invDz)
-    d_x = (Ez[1:, :, :] - Ez[:-1, :, :]) * float(invDx)
+    d_z = (Ex[:, :, 1:] - Ex[:, :, :-1]) * _spacing_factor(invDz, 2)
+    d_x = (Ez[1:, :, :] - Ez[:-1, :, :]) * _spacing_factor(invDx, 0)
     psi_x = _compressed_psi_update(
         PsiHyX,
         d_x,
@@ -686,35 +575,8 @@ def _magnetic_hz_cpml_compressed(
     psiHzYHighLength,
 ):
     _require_cuda_tensors(Hz, Ex, Ey, PsiHzX, PsiHzY)
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_magnetic_hz_cpml_compressed(
-            Hz,
-            Ex,
-            Ey,
-            HzDecay,
-            HzCurl,
-            PsiHzX,
-            PsiHzY,
-            InvKappaHzX,
-            ByHzX,
-            CyHzX,
-            InvKappaHzY,
-            ByHzY,
-            CyHzY,
-            float(invDx),
-            float(invDy),
-            int(psiHzXLowLength),
-            int(psiHzXHighStart),
-            int(psiHzXHighLength),
-            int(psiHzYLowLength),
-            int(psiHzYHighStart),
-            int(psiHzYHighLength),
-            _uniform_scalar(HzDecay),
-            _uniform_scalar(HzCurl),
-        )
-        return
-    d_x = (Ey[1:, :, :] - Ey[:-1, :, :]) * float(invDx)
-    d_y = (Ex[:, 1:, :] - Ex[:, :-1, :]) * float(invDy)
+    d_x = (Ey[1:, :, :] - Ey[:-1, :, :]) * _spacing_factor(invDx, 0)
+    d_y = (Ex[:, 1:, :] - Ex[:, :-1, :]) * _spacing_factor(invDy, 1)
     psi_x = _compressed_psi_update(
         PsiHzX,
         d_x,
@@ -768,21 +630,6 @@ def _electric_ex_standard(
     zHighBoundaryMode,
 ):
     _require_cuda_tensors(Ex, Hy, Hz, ExDecay, ExCurl)
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ex_standard(
-            Ex,
-            Hy,
-            Hz,
-            ExDecay,
-            ExCurl,
-            float(invDy),
-            float(invDz),
-            int(yLowBoundaryMode),
-            int(yHighBoundaryMode),
-            int(zLowBoundaryMode),
-            int(zHighBoundaryMode),
-        )
-        return
     d_y = _backward_diff(Hz, tuple(Ex.shape), 1, yLowBoundaryMode, yHighBoundaryMode, invDy)
     d_z = _backward_diff(Hy, tuple(Ex.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     _electric_standard(
@@ -810,21 +657,6 @@ def _electric_ey_standard(
     zHighBoundaryMode,
 ):
     _require_cuda_tensors(Ey, Hx, Hz, EyDecay, EyCurl)
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ey_standard(
-            Ey,
-            Hx,
-            Hz,
-            EyDecay,
-            EyCurl,
-            float(invDx),
-            float(invDz),
-            int(xLowBoundaryMode),
-            int(xHighBoundaryMode),
-            int(zLowBoundaryMode),
-            int(zHighBoundaryMode),
-        )
-        return
     d_z = _backward_diff(Hx, tuple(Ey.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     d_x = _backward_diff(Hz, tuple(Ey.shape), 0, xLowBoundaryMode, xHighBoundaryMode, invDx)
     _electric_standard(
@@ -852,21 +684,6 @@ def _electric_ez_standard(
     yHighBoundaryMode,
 ):
     _require_cuda_tensors(Ez, Hx, Hy, EzDecay, EzCurl)
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ez_standard(
-            Ez,
-            Hx,
-            Hy,
-            EzDecay,
-            EzCurl,
-            float(invDx),
-            float(invDy),
-            int(xLowBoundaryMode),
-            int(xHighBoundaryMode),
-            int(yLowBoundaryMode),
-            int(yHighBoundaryMode),
-        )
-        return
     d_x = _backward_diff(Hy, tuple(Ez.shape), 0, xLowBoundaryMode, xHighBoundaryMode, invDx)
     d_y = _backward_diff(Hx, tuple(Ez.shape), 1, yLowBoundaryMode, yHighBoundaryMode, invDy)
     _electric_standard(
@@ -1012,29 +829,6 @@ def _electric_ex_cpml(
         BExZ,
         CExZ,
     )
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ex_cpml(
-            Ex,
-            Hy,
-            Hz,
-            ExDecay,
-            ExCurl,
-            PsiExY,
-            PsiExZ,
-            InvKappaExY,
-            BExY,
-            CExY,
-            InvKappaExZ,
-            BExZ,
-            CExZ,
-            float(invDy),
-            float(invDz),
-            int(yLowBoundaryMode),
-            int(yHighBoundaryMode),
-            int(zLowBoundaryMode),
-            int(zHighBoundaryMode),
-        )
-        return
     d_y = _backward_diff(Hz, tuple(Ex.shape), 1, yLowBoundaryMode, yHighBoundaryMode, invDy)
     d_z = _backward_diff(Hy, tuple(Ex.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     _electric_cpml(
@@ -1094,29 +888,6 @@ def _electric_ey_cpml(
         BEyZ,
         CEyZ,
     )
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ey_cpml(
-            Ey,
-            Hx,
-            Hz,
-            EyDecay,
-            EyCurl,
-            PsiEyX,
-            PsiEyZ,
-            InvKappaEyX,
-            BEyX,
-            CEyX,
-            InvKappaEyZ,
-            BEyZ,
-            CEyZ,
-            float(invDx),
-            float(invDz),
-            int(xLowBoundaryMode),
-            int(xHighBoundaryMode),
-            int(zLowBoundaryMode),
-            int(zHighBoundaryMode),
-        )
-        return
     d_z = _backward_diff(Hx, tuple(Ey.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     d_x = _backward_diff(Hz, tuple(Ey.shape), 0, xLowBoundaryMode, xHighBoundaryMode, invDx)
     _electric_cpml(
@@ -1176,29 +947,6 @@ def _electric_ez_cpml(
         BEzY,
         CEzY,
     )
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ez_cpml(
-            Ez,
-            Hx,
-            Hy,
-            EzDecay,
-            EzCurl,
-            PsiEzX,
-            PsiEzY,
-            InvKappaEzX,
-            BEzX,
-            CEzX,
-            InvKappaEzY,
-            BEzY,
-            CEzY,
-            float(invDx),
-            float(invDy),
-            int(xLowBoundaryMode),
-            int(xHighBoundaryMode),
-            int(yLowBoundaryMode),
-            int(yHighBoundaryMode),
-        )
-        return
     d_x = _backward_diff(Hy, tuple(Ez.shape), 0, xLowBoundaryMode, xHighBoundaryMode, invDx)
     d_y = _backward_diff(Hx, tuple(Ez.shape), 1, yLowBoundaryMode, yHighBoundaryMode, invDy)
     _electric_cpml(
@@ -1265,14 +1013,6 @@ def _apply_electric_ex_cpml_z_correction(
     fullSizeZ,
 ):
     _require_cuda_tensors(Ex, Hy, ExCurl, PsiExZ, InvKappaExZ, BExZ, CExZ)
-    if _use_compiled_field_kernels():
-        get_compiled_extension().apply_electric_ex_cpml_z_correction(
-            Ex, Hy, ExCurl, PsiExZ, InvKappaExZ, BExZ, CExZ, float(invDz),
-            int(offsetI), int(offsetJ), int(offsetK),
-            int(yLowBoundaryMode), int(yHighBoundaryMode),
-            int(fullSizeY), int(fullSizeZ),
-        )
-        return
     offset_i = int(offsetI)
     offset_j = int(offsetJ)
     offset_k = int(offsetK)
@@ -1288,7 +1028,8 @@ def _apply_electric_ex_cpml_z_correction(
     global_z = slice(global_z_start, global_z_stop)
     global_z_prev = slice(global_z_start - 1, global_z_stop - 1)
 
-    derivative = (Hy[x_slice, y_slice, global_z] - Hy[x_slice, y_slice, global_z_prev]) * float(invDz)
+    inv_dz = _spacing_values(invDz, int(fullSizeZ), device=Ex.device, dtype=Ex.dtype)
+    derivative = (Hy[x_slice, y_slice, global_z] - Hy[x_slice, y_slice, global_z_prev]) * _axis_view(inv_dz[global_z], 2)
     psi_region = PsiExZ[:, :, local_z]
     psi = _axis_view(BExZ[global_z], 2) * psi_region + _axis_view(CExZ[global_z], 2) * derivative
     active = _axis_view(
@@ -1330,14 +1071,6 @@ def _apply_electric_ey_cpml_z_correction(
     fullSizeZ,
 ):
     _require_cuda_tensors(Ey, Hx, EyCurl, PsiEyZ, InvKappaEyZ, BEyZ, CEyZ)
-    if _use_compiled_field_kernels():
-        get_compiled_extension().apply_electric_ey_cpml_z_correction(
-            Ey, Hx, EyCurl, PsiEyZ, InvKappaEyZ, BEyZ, CEyZ, float(invDz),
-            int(offsetI), int(offsetJ), int(offsetK),
-            int(xLowBoundaryMode), int(xHighBoundaryMode),
-            int(fullSizeX), int(fullSizeZ),
-        )
-        return
     offset_i = int(offsetI)
     offset_j = int(offsetJ)
     offset_k = int(offsetK)
@@ -1353,7 +1086,8 @@ def _apply_electric_ey_cpml_z_correction(
     global_z = slice(global_z_start, global_z_stop)
     global_z_prev = slice(global_z_start - 1, global_z_stop - 1)
 
-    derivative = (Hx[x_slice, y_slice, global_z] - Hx[x_slice, y_slice, global_z_prev]) * float(invDz)
+    inv_dz = _spacing_values(invDz, int(fullSizeZ), device=Ey.device, dtype=Ey.dtype)
+    derivative = (Hx[x_slice, y_slice, global_z] - Hx[x_slice, y_slice, global_z_prev]) * _axis_view(inv_dz[global_z], 2)
     psi_region = PsiEyZ[:, :, local_z]
     psi = _axis_view(BEyZ[global_z], 2) * psi_region + _axis_view(CEyZ[global_z], 2) * derivative
     active = _axis_view(
@@ -1404,37 +1138,6 @@ def _electric_ex_cpml_compressed(
     psiExZHighStart,
     psiExZHighLength,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ex_cpml_compressed(
-            Ex,
-            Hy,
-            Hz,
-            ExDecay,
-            ExCurl,
-            PsiExY,
-            PsiExZ,
-            InvKappaExY,
-            BExY,
-            CExY,
-            InvKappaExZ,
-            BExZ,
-            CExZ,
-            float(invDy),
-            float(invDz),
-            int(yLowBoundaryMode),
-            int(yHighBoundaryMode),
-            int(zLowBoundaryMode),
-            int(zHighBoundaryMode),
-            int(psiExYLowLength),
-            int(psiExYHighStart),
-            int(psiExYHighLength),
-            int(psiExZLowLength),
-            int(psiExZHighStart),
-            int(psiExZHighLength),
-            _uniform_scalar(ExDecay),
-            _uniform_scalar(ExCurl),
-        )
-        return
     d_y = _backward_diff(Hz, tuple(Ex.shape), 1, yLowBoundaryMode, yHighBoundaryMode, invDy)
     d_z = _backward_diff(Hy, tuple(Ex.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     _electric_cpml_compressed(
@@ -1491,37 +1194,6 @@ def _electric_ey_cpml_compressed(
     psiEyZHighStart,
     psiEyZHighLength,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ey_cpml_compressed(
-            Ey,
-            Hx,
-            Hz,
-            EyDecay,
-            EyCurl,
-            PsiEyX,
-            PsiEyZ,
-            InvKappaEyX,
-            BEyX,
-            CEyX,
-            InvKappaEyZ,
-            BEyZ,
-            CEyZ,
-            float(invDx),
-            float(invDz),
-            int(xLowBoundaryMode),
-            int(xHighBoundaryMode),
-            int(zLowBoundaryMode),
-            int(zHighBoundaryMode),
-            int(psiEyXLowLength),
-            int(psiEyXHighStart),
-            int(psiEyXHighLength),
-            int(psiEyZLowLength),
-            int(psiEyZHighStart),
-            int(psiEyZHighLength),
-            _uniform_scalar(EyDecay),
-            _uniform_scalar(EyCurl),
-        )
-        return
     d_z = _backward_diff(Hx, tuple(Ey.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     d_x = _backward_diff(Hz, tuple(Ey.shape), 0, xLowBoundaryMode, xHighBoundaryMode, invDx)
     _electric_cpml_compressed(
@@ -1578,37 +1250,6 @@ def _electric_ez_cpml_compressed(
     psiEzYHighStart,
     psiEzYHighLength,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ez_cpml_compressed(
-            Ez,
-            Hx,
-            Hy,
-            EzDecay,
-            EzCurl,
-            PsiEzX,
-            PsiEzY,
-            InvKappaEzX,
-            BEzX,
-            CEzX,
-            InvKappaEzY,
-            BEzY,
-            CEzY,
-            float(invDx),
-            float(invDy),
-            int(xLowBoundaryMode),
-            int(xHighBoundaryMode),
-            int(yLowBoundaryMode),
-            int(yHighBoundaryMode),
-            int(psiEzXLowLength),
-            int(psiEzXHighStart),
-            int(psiEzXHighLength),
-            int(psiEzYLowLength),
-            int(psiEzYHighStart),
-            int(psiEzYHighLength),
-            _uniform_scalar(EzDecay),
-            _uniform_scalar(EzCurl),
-        )
-        return
     d_x = _backward_diff(Hy, tuple(Ez.shape), 0, xLowBoundaryMode, xHighBoundaryMode, invDx)
     d_y = _backward_diff(Hx, tuple(Ez.shape), 1, yLowBoundaryMode, yHighBoundaryMode, invDy)
     _electric_cpml_compressed(
@@ -1658,11 +1299,12 @@ def _bloch_backward_diff(
     axis: int,
     phase_cos: float,
     phase_sin: float,
-    inv_delta: float,
+    inv_delta,
 ):
     real_diff = torch.zeros(target_shape, device=real.device, dtype=real.dtype)
     imag_diff = torch.zeros(target_shape, device=real.device, dtype=real.dtype)
     size = target_shape[axis]
+    inv = _spacing_values(inv_delta, size, device=real.device, dtype=real.dtype)
     if size > 2:
         dst = [slice(None)] * 3
         dst[axis] = slice(1, size - 1)
@@ -1670,8 +1312,9 @@ def _bloch_backward_diff(
         hi[axis] = slice(1, size - 1)
         lo = [slice(None)] * 3
         lo[axis] = slice(0, size - 2)
-        real_diff[tuple(dst)] = (real[tuple(hi)] - real[tuple(lo)]) * float(inv_delta)
-        imag_diff[tuple(dst)] = (imag[tuple(hi)] - imag[tuple(lo)]) * float(inv_delta)
+        interior = _axis_view(inv[1 : size - 1], axis)
+        real_diff[tuple(dst)] = (real[tuple(hi)] - real[tuple(lo)]) * interior
+        imag_diff[tuple(dst)] = (imag[tuple(hi)] - imag[tuple(lo)]) * interior
 
     low = [slice(None)] * 3
     low[axis] = 0
@@ -1683,12 +1326,12 @@ def _bloch_backward_diff(
     high_dst[axis] = size - 1
 
     neg_high_r, neg_high_i = _phase_negative(real[tuple(high)], imag[tuple(high)], phase_cos, phase_sin)
-    real_diff[tuple(low_dst)] = (real[tuple(low)] - neg_high_r) * float(inv_delta)
-    imag_diff[tuple(low_dst)] = (imag[tuple(low)] - neg_high_i) * float(inv_delta)
+    real_diff[tuple(low_dst)] = (real[tuple(low)] - neg_high_r) * inv[0]
+    imag_diff[tuple(low_dst)] = (imag[tuple(low)] - neg_high_i) * inv[0]
     if size > 1:
         pos_low_r, pos_low_i = _phase_positive(real[tuple(low)], imag[tuple(low)], phase_cos, phase_sin)
-        real_diff[tuple(high_dst)] = (pos_low_r - real[tuple(high)]) * float(inv_delta)
-        imag_diff[tuple(high_dst)] = (pos_low_i - imag[tuple(high)]) * float(inv_delta)
+        real_diff[tuple(high_dst)] = (pos_low_r - real[tuple(high)]) * inv[size - 1]
+        imag_diff[tuple(high_dst)] = (pos_low_i - imag[tuple(high)]) * inv[size - 1]
     return real_diff, imag_diff
 
 
@@ -1709,24 +1352,6 @@ def _electric_ex_bloch(
     invDy,
     invDz,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ex_bloch(
-            ExReal,
-            ExImag,
-            HyReal,
-            HyImag,
-            HzReal,
-            HzImag,
-            ExDecay,
-            ExCurl,
-            float(phaseCosY),
-            float(phaseSinY),
-            float(phaseCosZ),
-            float(phaseSinZ),
-            float(invDy),
-            float(invDz),
-        )
-        return
     d_y_r, d_y_i = _bloch_backward_diff(HzReal, HzImag, tuple(ExReal.shape), 1, phaseCosY, phaseSinY, invDy)
     d_z_r, d_z_i = _bloch_backward_diff(HyReal, HyImag, tuple(ExReal.shape), 2, phaseCosZ, phaseSinZ, invDz)
     ExReal.copy_(ExReal * ExDecay + ExCurl * (d_y_r - d_z_r))
@@ -1750,24 +1375,6 @@ def _electric_ey_bloch(
     invDx,
     invDz,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ey_bloch(
-            EyReal,
-            EyImag,
-            HxReal,
-            HxImag,
-            HzReal,
-            HzImag,
-            EyDecay,
-            EyCurl,
-            float(phaseCosX),
-            float(phaseSinX),
-            float(phaseCosZ),
-            float(phaseSinZ),
-            float(invDx),
-            float(invDz),
-        )
-        return
     d_z_r, d_z_i = _bloch_backward_diff(HxReal, HxImag, tuple(EyReal.shape), 2, phaseCosZ, phaseSinZ, invDz)
     d_x_r, d_x_i = _bloch_backward_diff(HzReal, HzImag, tuple(EyReal.shape), 0, phaseCosX, phaseSinX, invDx)
     EyReal.copy_(EyReal * EyDecay + EyCurl * (d_z_r - d_x_r))
@@ -1791,13 +1398,6 @@ def _electric_ex_bloch_y_standard_z(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ex_bloch_y_standard_z(
-            ExReal, ExImag, HyReal, HyImag, HzReal, HzImag, ExDecay, ExCurl,
-            float(phaseCosY), float(phaseSinY), float(invDy), float(invDz),
-            int(zLowBoundaryMode), int(zHighBoundaryMode),
-        )
-        return
     d_y_r, d_y_i = _bloch_backward_diff(HzReal, HzImag, tuple(ExReal.shape), 1, phaseCosY, phaseSinY, invDy)
     d_z_r = _backward_diff(HyReal, tuple(ExReal.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     d_z_i = _backward_diff(HyImag, tuple(ExImag.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
@@ -1822,13 +1422,6 @@ def _electric_ey_bloch_x_standard_z(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ey_bloch_x_standard_z(
-            EyReal, EyImag, HxReal, HxImag, HzReal, HzImag, EyDecay, EyCurl,
-            float(phaseCosX), float(phaseSinX), float(invDx), float(invDz),
-            int(zLowBoundaryMode), int(zHighBoundaryMode),
-        )
-        return
     d_z_r = _backward_diff(HxReal, tuple(EyReal.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     d_z_i = _backward_diff(HxImag, tuple(EyImag.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     d_x_r, d_x_i = _bloch_backward_diff(HzReal, HzImag, tuple(EyReal.shape), 0, phaseCosX, phaseSinX, invDx)
@@ -1853,24 +1446,6 @@ def _electric_ez_bloch(
     invDx,
     invDy,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_electric_ez_bloch(
-            EzReal,
-            EzImag,
-            HxReal,
-            HxImag,
-            HyReal,
-            HyImag,
-            EzDecay,
-            EzCurl,
-            float(phaseCosX),
-            float(phaseSinX),
-            float(phaseCosY),
-            float(phaseSinY),
-            float(invDx),
-            float(invDy),
-        )
-        return
     d_x_r, d_x_i = _bloch_backward_diff(HyReal, HyImag, tuple(EzReal.shape), 0, phaseCosX, phaseSinX, invDx)
     d_y_r, d_y_i = _bloch_backward_diff(HxReal, HxImag, tuple(EzReal.shape), 1, phaseCosY, phaseSinY, invDy)
     EzReal.copy_(EzReal * EzDecay + EzCurl * (d_x_r - d_y_r))
@@ -1987,16 +1562,6 @@ def _scatter_bloch_patch_values(
 
 
 def _add_source_patch(*, field, sourcePatch, offsetI, offsetJ, offsetK, signal):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().add_source_patch(
-            field,
-            sourcePatch,
-            int(offsetI),
-            int(offsetJ),
-            int(offsetK),
-            float(signal),
-        )
-        return
     _scatter_patch(field, sourcePatch, (offsetI, offsetJ, offsetK), sourcePatch * float(signal))
 
 
@@ -2011,18 +1576,6 @@ def _add_cw_phased_source_patch(
     signalCos,
     signalSin,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().add_cw_phased_source_patch(
-            field,
-            sourcePatchCos,
-            sourcePatchSin,
-            int(offsetI),
-            int(offsetJ),
-            int(offsetK),
-            float(signalCos),
-            float(signalSin),
-        )
-        return
     values = sourcePatchCos * float(signalCos) + sourcePatchSin * float(signalSin)
     _scatter_patch(field, sourcePatchCos, (offsetI, offsetJ, offsetK), values)
 
@@ -2060,25 +1613,6 @@ def _add_time_shifted_source_patch(
     delay,
     causalGate,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().add_time_shifted_source_patch(
-            field,
-            sourcePatch,
-            delayPatch,
-            activationDelayPatch,
-            int(offsetI),
-            int(offsetJ),
-            int(offsetK),
-            int(timeKind),
-            float(time),
-            float(frequency),
-            float(fwidth),
-            float(amplitude),
-            float(phase),
-            float(delay),
-            int(causalGate),
-        )
-        return
     sample_time = float(time) - delayPatch
     signal = _evaluate_source_time_sample(timeKind, sample_time, frequency, fwidth, amplitude, phase, delay)
     values = signal * sourcePatch
@@ -2097,18 +1631,6 @@ def _add_source_patch_periodic(*, signal, sourcePatch, offsetI, offsetJ, offsetK
     else:
         field = kwargs["Ez"]
         extension_method = "add_source_patch_ez_periodic"
-    if _use_compiled_field_kernels():
-        getattr(get_compiled_extension(), extension_method)(
-            field,
-            sourcePatch,
-            int(offsetI),
-            int(offsetJ),
-            int(offsetK),
-            float(signal),
-            int(wrapAxisA),
-            int(wrapAxisB),
-        )
-        return
     offsets = (int(offsetI), int(offsetJ), int(offsetK))
     values = sourcePatch * float(signal)
     _scatter_patch(field, sourcePatch, offsets, values)
@@ -2146,33 +1668,6 @@ def _add_source_patch_bloch(
 ):
     wrap_a = int(wrapAxisA) != 0
     wrap_b = int(wrapAxisB) != 0
-    if _use_compiled_field_kernels():
-        extension = get_compiled_extension()
-        extension_args = (
-            ExReal,
-            ExImag,
-            EyReal,
-            EyImag,
-            EzReal,
-            EzImag,
-            sourcePatch,
-            int(offsetI),
-            int(offsetJ),
-            int(offsetK),
-            float(signalReal),
-            float(signalImag),
-            int(axisCode),
-            float(phaseCosA),
-            float(phaseSinA),
-            float(phaseCosB),
-            float(phaseSinB),
-        )
-        if _compiled_bloch_source_accepts_wrap_flags(extension):
-            extension.add_source_patch_bloch(*extension_args, int(wrapAxisA), int(wrapAxisB))
-            return
-        if wrap_a and wrap_b:
-            extension.add_source_patch_bloch(*extension_args)
-            return
     fields = ((ExReal, ExImag), (EyReal, EyImag), (EzReal, EzImag))[int(axisCode)]
     offsets = (int(offsetI), int(offsetJ), int(offsetK))
     real_values = sourcePatch * float(signalReal)
@@ -2219,33 +1714,6 @@ def _add_cw_phased_source_patch_bloch(
 ):
     wrap_a = int(wrapAxisA) != 0
     wrap_b = int(wrapAxisB) != 0
-    if _use_compiled_field_kernels():
-        extension = get_compiled_extension()
-        extension_method = getattr(extension, "add_cw_phased_source_patch_bloch", None)
-        if extension_method is not None:
-            extension_method(
-                ExReal,
-                ExImag,
-                EyReal,
-                EyImag,
-                EzReal,
-                EzImag,
-                sourcePatchCos,
-                sourcePatchSin,
-                int(offsetI),
-                int(offsetJ),
-                int(offsetK),
-                float(signalCos),
-                float(signalSin),
-                int(axisCode),
-                float(phaseCosA),
-                float(phaseSinA),
-                float(phaseCosB),
-                float(phaseSinB),
-                int(wrapAxisA),
-                int(wrapAxisB),
-            )
-            return
     fields = ((ExReal, ExImag), (EyReal, EyImag), (EzReal, EzImag))[int(axisCode)]
     offsets = (int(offsetI), int(offsetJ), int(offsetK))
     real_values = sourcePatchCos * float(signalCos) + sourcePatchSin * float(signalSin)
@@ -2268,18 +1736,6 @@ def _add_cw_phased_source_patch_bloch(
 
 
 def _add_scaled_slice_source_patch(*, field, sourcePatch, incidentField, sampleIndex, offsetI, offsetJ, offsetK, scale):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().add_scaled_slice_source_patch(
-            field,
-            sourcePatch,
-            incidentField,
-            int(sampleIndex),
-            int(offsetI),
-            int(offsetJ),
-            int(offsetK),
-            float(scale),
-        )
-        return
     values = sourcePatch * incidentField[int(sampleIndex)] * float(scale)
     _scatter_patch(field, sourcePatch, (offsetI, offsetJ, offsetK), values)
 
@@ -2296,19 +1752,6 @@ def _add_scaled_line_source_patch(
     offsetK,
     scale,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().add_scaled_line_source_patch(
-            field,
-            coeffPatch,
-            incidentField,
-            sampleIndices.to(dtype=torch.int32).contiguous(),
-            int(sampleAxisCode),
-            int(offsetI),
-            int(offsetJ),
-            int(offsetK),
-            float(scale),
-        )
-        return
     axis = int(sampleAxisCode)
     index_shape = [1, 1, 1]
     index_shape[axis] = int(coeffPatch.shape[axis])
@@ -2330,20 +1773,6 @@ def _add_interpolated_source_patch(
     offsetK,
     scale,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().add_interpolated_source_patch(
-            field,
-            coeffPatch,
-            incidentField,
-            samplePositions,
-            float(origin),
-            float(ds),
-            int(offsetI),
-            int(offsetJ),
-            int(offsetK),
-            float(scale),
-        )
-        return
     coord = torch.clamp((samplePositions - float(origin)) / float(ds), 0.0, float(incidentField.numel() - 1))
     lower = torch.floor(coord).to(dtype=torch.long)
     upper = torch.clamp(lower + 1, max=incidentField.numel() - 1)
@@ -2454,18 +1883,6 @@ def _add_batched_reference_source_patches(
             sampleIndexStarts=sampleIndexStarts,
             sampleIndices=sampleIndices,
         )
-    if _use_compiled_field_kernels():
-        get_compiled_extension().add_batched_reference_source_patches(
-            fieldX,
-            fieldY,
-            fieldZ,
-            coeffData,
-            incidentField,
-            fieldCodesPerCoeff.to(dtype=torch.int32).contiguous(),
-            fieldOffsets.contiguous(),
-            sampleIndicesPerCoeff.to(dtype=torch.int32).contiguous(),
-        )
-        return
     fields = (fieldX, fieldY, fieldZ)
     term_count = int(termStarts.numel())
     total = int(coeffData.numel())
@@ -2510,20 +1927,6 @@ def _add_batched_interpolated_source_patches(
             fieldCodes=fieldCodes,
             fieldShapes=(fieldX.shape, fieldY.shape, fieldZ.shape),
         )
-    if _use_compiled_field_kernels():
-        get_compiled_extension().add_batched_interpolated_source_patches(
-            fieldX,
-            fieldY,
-            fieldZ,
-            coeffData,
-            incidentField,
-            samplePositions,
-            fieldCodesPerCoeff.to(dtype=torch.int32).contiguous(),
-            fieldOffsets.contiguous(),
-            float(origin),
-            float(ds),
-        )
-        return
     fields = (fieldX, fieldY, fieldZ)
     term_count = int(termStarts.numel())
     total = int(coeffData.numel())
@@ -2544,28 +1947,10 @@ def _add_batched_interpolated_source_patches(
 
 
 def _update_auxiliary_magnetic(*, Magnetic, Electric, MagneticDecay, MagneticCurl):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_auxiliary_magnetic(
-            Magnetic,
-            Electric,
-            MagneticDecay,
-            MagneticCurl,
-        )
-        return
     Magnetic.copy_(MagneticDecay * Magnetic - MagneticCurl * (Electric[1:] - Electric[:-1]))
 
 
 def _update_auxiliary_electric(*, Electric, Magnetic, ElectricDecay, ElectricCurl, sourceIndex, sourceValue):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_auxiliary_electric(
-            Electric,
-            Magnetic,
-            ElectricDecay,
-            ElectricCurl,
-            int(sourceIndex),
-            float(sourceValue),
-        )
-        return
     updated = Electric.clone()
     if Electric.numel() > 0:
         updated[-1] = 0.0
@@ -2596,21 +1981,6 @@ def _accumulate_dft_batched(
     weightedSin,
 ):
     _require_cuda_tensors(Ex, Ey, Ez, weightedCos, weightedSin)
-    if _use_compiled_field_kernels():
-        get_compiled_extension().accumulate_dft_batched(
-            Ex,
-            Ey,
-            Ez,
-            ExRealAccum,
-            ExImagAccum,
-            EyRealAccum,
-            EyImagAccum,
-            EzRealAccum,
-            EzImagAccum,
-            weightedCos,
-            weightedSin,
-        )
-        return
     view_shape = (weightedCos.shape[0],) + (1, 1, 1)
     cos = weightedCos.reshape(view_shape)
     sin = weightedSin.reshape(view_shape)
@@ -2633,35 +2003,12 @@ def _accumulate_point_observers(
     weightedCos,
     weightedSin,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().accumulate_point_observers(
-            field,
-            pointI.contiguous(),
-            pointJ.contiguous(),
-            pointK.contiguous(),
-            realAccum,
-            imagAccum,
-            float(weightedCos),
-            float(weightedSin),
-        )
-        return
     values = field[pointI.to(torch.long), pointJ.to(torch.long), pointK.to(torch.long)]
     realAccum.add_(values * float(weightedCos))
     imagAccum.add_(values * float(weightedSin))
 
 
 def _accumulate_plane_observer(*, field, planeRealAccum, planeImagAccum, axisCode, planeIndex, weightedCos, weightedSin):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().accumulate_plane_observer(
-            field,
-            planeRealAccum,
-            planeImagAccum,
-            int(axisCode),
-            int(planeIndex),
-            float(weightedCos),
-            float(weightedSin),
-        )
-        return
     axis = int(axisCode)
     if axis == 0:
         values = field[int(planeIndex), :, :]
@@ -2674,16 +2021,6 @@ def _accumulate_plane_observer(*, field, planeRealAccum, planeImagAccum, axisCod
 
 
 def _update_debye_current(*, ElectricField, Polarization, PolarizationCurrent, DebyeDrive, decay, dt):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_debye_current(
-            ElectricField,
-            Polarization,
-            PolarizationCurrent,
-            DebyeDrive,
-            float(decay),
-            float(dt),
-        )
-        return
     previous = Polarization.clone()
     next_polarization = float(decay) * previous + DebyeDrive * ElectricField
     Polarization.copy_(next_polarization)
@@ -2691,29 +2028,10 @@ def _update_debye_current(*, ElectricField, Polarization, PolarizationCurrent, D
 
 
 def _update_drude_current(*, ElectricField, PolarizationCurrent, DrudeDrive, decay):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_drude_current(
-            ElectricField,
-            PolarizationCurrent,
-            DrudeDrive,
-            float(decay),
-        )
-        return
     PolarizationCurrent.copy_(float(decay) * PolarizationCurrent + DrudeDrive * ElectricField)
 
 
 def _update_lorentz_current(*, ElectricField, Polarization, PolarizationCurrent, LorentzDrive, decay, restoring, dt):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().update_lorentz_current(
-            ElectricField,
-            Polarization,
-            PolarizationCurrent,
-            LorentzDrive,
-            float(decay),
-            float(restoring),
-            float(dt),
-        )
-        return
     next_current = (
         float(decay) * PolarizationCurrent
         - float(restoring) * Polarization
@@ -2724,14 +2042,6 @@ def _update_lorentz_current(*, ElectricField, Polarization, PolarizationCurrent,
 
 
 def _apply_polarization_current(*, ElectricField, PolarizationCurrent, InvPermittivity, dt):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().apply_polarization_current(
-            ElectricField,
-            PolarizationCurrent,
-            InvPermittivity,
-            float(dt),
-        )
-        return
     ElectricField.sub_(float(dt) * PolarizationCurrent * InvPermittivity)
 
 
@@ -2752,20 +2062,6 @@ def _kerr_indices(shape, device):
 
 
 def _update_kerr_ex(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, ExDecay, KerrChi3, dt, eps0):
-    if _use_compiled_field_kernels():
-        _invalidate_uniform_scalar(DynamicCurl)
-        get_compiled_extension().update_kerr_ex_curl(
-            DynamicCurl,
-            Ex,
-            Ey,
-            Ez,
-            LinearPermittivity,
-            ExDecay,
-            KerrChi3,
-            float(dt),
-            float(eps0),
-        )
-        return
     i, j, k = _kerr_indices(tuple(DynamicCurl.shape), DynamicCurl.device)
     ey = 0.25 * (
         _sample_clamped(Ey, i, j - 1, k) + _sample_clamped(Ey, i, j, k)
@@ -2780,20 +2076,6 @@ def _update_kerr_ex(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, ExDecay, Ker
 
 
 def _update_kerr_ey(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, EyDecay, KerrChi3, dt, eps0):
-    if _use_compiled_field_kernels():
-        _invalidate_uniform_scalar(DynamicCurl)
-        get_compiled_extension().update_kerr_ey_curl(
-            DynamicCurl,
-            Ex,
-            Ey,
-            Ez,
-            LinearPermittivity,
-            EyDecay,
-            KerrChi3,
-            float(dt),
-            float(eps0),
-        )
-        return
     i, j, k = _kerr_indices(tuple(DynamicCurl.shape), DynamicCurl.device)
     ex = 0.25 * (
         _sample_clamped(Ex, i - 1, j, k) + _sample_clamped(Ex, i, j, k)
@@ -2808,20 +2090,6 @@ def _update_kerr_ey(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, EyDecay, Ker
 
 
 def _update_kerr_ez(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, EzDecay, KerrChi3, dt, eps0):
-    if _use_compiled_field_kernels():
-        _invalidate_uniform_scalar(DynamicCurl)
-        get_compiled_extension().update_kerr_ez_curl(
-            DynamicCurl,
-            Ex,
-            Ey,
-            Ez,
-            LinearPermittivity,
-            EzDecay,
-            KerrChi3,
-            float(dt),
-            float(eps0),
-        )
-        return
     i, j, k = _kerr_indices(tuple(DynamicCurl.shape), DynamicCurl.device)
     ex = 0.25 * (
         _sample_clamped(Ex, i - 1, j, k) + _sample_clamped(Ex, i, j, k)
@@ -2863,68 +2131,59 @@ def _electric_cell_status(coord_a, size_a, low_a, high_a, coord_b, size_b, low_b
 
 
 def _reverse_electric_hx_standard(*, AdjHxMid, AdjHxPost, AdjEyPost, AdjEzPost, EyCurl, EzCurl, invDy, invDz):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_electric_adjoint_to_hx_standard(
-            AdjHxMid, AdjHxPost, AdjEyPost, AdjEzPost, EyCurl, EzCurl, float(invDy), float(invDz)
-        )
-        return
     nx, ny, nz = AdjHxMid.shape
+    inv_dy = _spacing_values(invDy, int(AdjEzPost.shape[1]), device=AdjHxMid.device, dtype=AdjHxMid.dtype)
+    inv_dz = _spacing_values(invDz, int(AdjEyPost.shape[2]), device=AdjHxMid.device, dtype=AdjHxMid.dtype)
     for i in range(nx):
         for j in range(ny):
             for k in range(nz):
                 adjoint = AdjHxPost[i, j, k]
                 if _idx_active(AdjEyPost.shape, i, j, k, "Ey"):
-                    adjoint = adjoint + EyCurl[i, j, k] * float(invDz) * AdjEyPost[i, j, k]
+                    adjoint = adjoint + EyCurl[i, j, k] * inv_dz[k] * AdjEyPost[i, j, k]
                 if _idx_active(AdjEyPost.shape, i, j, k + 1, "Ey"):
-                    adjoint = adjoint - EyCurl[i, j, k + 1] * float(invDz) * AdjEyPost[i, j, k + 1]
+                    adjoint = adjoint - EyCurl[i, j, k + 1] * inv_dz[k + 1] * AdjEyPost[i, j, k + 1]
                 if _idx_active(AdjEzPost.shape, i, j, k, "Ez"):
-                    adjoint = adjoint - EzCurl[i, j, k] * float(invDy) * AdjEzPost[i, j, k]
+                    adjoint = adjoint - EzCurl[i, j, k] * inv_dy[j] * AdjEzPost[i, j, k]
                 if _idx_active(AdjEzPost.shape, i, j + 1, k, "Ez"):
-                    adjoint = adjoint + EzCurl[i, j + 1, k] * float(invDy) * AdjEzPost[i, j + 1, k]
+                    adjoint = adjoint + EzCurl[i, j + 1, k] * inv_dy[j + 1] * AdjEzPost[i, j + 1, k]
                 AdjHxMid[i, j, k] = adjoint
 
 
 def _reverse_electric_hy_standard(*, AdjHyMid, AdjHyPost, AdjExPost, AdjEzPost, ExCurl, EzCurl, invDx, invDz):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_electric_adjoint_to_hy_standard(
-            AdjHyMid, AdjHyPost, AdjExPost, AdjEzPost, ExCurl, EzCurl, float(invDx), float(invDz)
-        )
-        return
     nx, ny, nz = AdjHyMid.shape
+    inv_dx = _spacing_values(invDx, int(AdjEzPost.shape[0]), device=AdjHyMid.device, dtype=AdjHyMid.dtype)
+    inv_dz = _spacing_values(invDz, int(AdjExPost.shape[2]), device=AdjHyMid.device, dtype=AdjHyMid.dtype)
     for i in range(nx):
         for j in range(ny):
             for k in range(nz):
                 adjoint = AdjHyPost[i, j, k]
                 if _idx_active(AdjExPost.shape, i, j, k, "Ex"):
-                    adjoint = adjoint - ExCurl[i, j, k] * float(invDz) * AdjExPost[i, j, k]
+                    adjoint = adjoint - ExCurl[i, j, k] * inv_dz[k] * AdjExPost[i, j, k]
                 if _idx_active(AdjExPost.shape, i, j, k + 1, "Ex"):
-                    adjoint = adjoint + ExCurl[i, j, k + 1] * float(invDz) * AdjExPost[i, j, k + 1]
+                    adjoint = adjoint + ExCurl[i, j, k + 1] * inv_dz[k + 1] * AdjExPost[i, j, k + 1]
                 if _idx_active(AdjEzPost.shape, i, j, k, "Ez"):
-                    adjoint = adjoint + EzCurl[i, j, k] * float(invDx) * AdjEzPost[i, j, k]
+                    adjoint = adjoint + EzCurl[i, j, k] * inv_dx[i] * AdjEzPost[i, j, k]
                 if _idx_active(AdjEzPost.shape, i + 1, j, k, "Ez"):
-                    adjoint = adjoint - EzCurl[i + 1, j, k] * float(invDx) * AdjEzPost[i + 1, j, k]
+                    adjoint = adjoint - EzCurl[i + 1, j, k] * inv_dx[i + 1] * AdjEzPost[i + 1, j, k]
                 AdjHyMid[i, j, k] = adjoint
 
 
 def _reverse_electric_hz_standard(*, AdjHzMid, AdjHzPost, AdjExPost, AdjEyPost, ExCurl, EyCurl, invDx, invDy):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_electric_adjoint_to_hz_standard(
-            AdjHzMid, AdjHzPost, AdjExPost, AdjEyPost, ExCurl, EyCurl, float(invDx), float(invDy)
-        )
-        return
     nx, ny, nz = AdjHzMid.shape
+    inv_dx = _spacing_values(invDx, int(AdjEyPost.shape[0]), device=AdjHzMid.device, dtype=AdjHzMid.dtype)
+    inv_dy = _spacing_values(invDy, int(AdjExPost.shape[1]), device=AdjHzMid.device, dtype=AdjHzMid.dtype)
     for i in range(nx):
         for j in range(ny):
             for k in range(nz):
                 adjoint = AdjHzPost[i, j, k]
                 if _idx_active(AdjExPost.shape, i, j, k, "Ex"):
-                    adjoint = adjoint + ExCurl[i, j, k] * float(invDy) * AdjExPost[i, j, k]
+                    adjoint = adjoint + ExCurl[i, j, k] * inv_dy[j] * AdjExPost[i, j, k]
                 if _idx_active(AdjExPost.shape, i, j + 1, k, "Ex"):
-                    adjoint = adjoint - ExCurl[i, j + 1, k] * float(invDy) * AdjExPost[i, j + 1, k]
+                    adjoint = adjoint - ExCurl[i, j + 1, k] * inv_dy[j + 1] * AdjExPost[i, j + 1, k]
                 if _idx_active(AdjEyPost.shape, i, j, k, "Ey"):
-                    adjoint = adjoint - EyCurl[i, j, k] * float(invDx) * AdjEyPost[i, j, k]
+                    adjoint = adjoint - EyCurl[i, j, k] * inv_dx[i] * AdjEyPost[i, j, k]
                 if _idx_active(AdjEyPost.shape, i + 1, j, k, "Ey"):
-                    adjoint = adjoint + EyCurl[i + 1, j, k] * float(invDx) * AdjEyPost[i + 1, j, k]
+                    adjoint = adjoint + EyCurl[i + 1, j, k] * inv_dx[i + 1] * AdjEyPost[i + 1, j, k]
                 AdjHzMid[i, j, k] = adjoint
 
 
@@ -2937,9 +2196,9 @@ def _accumulate_bloch_backward_diff_adjoint_complex(
     axis: int,
     phase_cos: float,
     phase_sin: float,
-    inv_delta: float,
+    inv_delta,
 ) -> None:
-    scale = float(inv_delta)
+    inv = _spacing_values(inv_delta, int(diff_grad_real.shape[axis]), device=diff_grad_real.device, dtype=diff_grad_real.dtype)
     if diff_grad_real.shape[axis] > 2:
         interior = [slice(None)] * 3
         interior[axis] = slice(1, -1)
@@ -2947,10 +2206,11 @@ def _accumulate_bloch_backward_diff_adjoint_complex(
         field_hi = [slice(None)] * 3
         field_lo[axis] = slice(0, -1)
         field_hi[axis] = slice(1, None)
-        field_grad_real[tuple(field_lo)].sub_(scale * diff_grad_real[tuple(interior)])
-        field_grad_imag[tuple(field_lo)].sub_(scale * diff_grad_imag[tuple(interior)])
-        field_grad_real[tuple(field_hi)].add_(scale * diff_grad_real[tuple(interior)])
-        field_grad_imag[tuple(field_hi)].add_(scale * diff_grad_imag[tuple(interior)])
+        interior_scale = _axis_view(inv[1:-1], axis)
+        field_grad_real[tuple(field_lo)].sub_(interior_scale * diff_grad_real[tuple(interior)])
+        field_grad_imag[tuple(field_lo)].sub_(interior_scale * diff_grad_imag[tuple(interior)])
+        field_grad_real[tuple(field_hi)].add_(interior_scale * diff_grad_real[tuple(interior)])
+        field_grad_imag[tuple(field_hi)].add_(interior_scale * diff_grad_imag[tuple(interior)])
 
     low_grad_real = diff_grad_real.select(axis, 0)
     low_grad_imag = diff_grad_imag.select(axis, 0)
@@ -2958,13 +2218,13 @@ def _accumulate_bloch_backward_diff_adjoint_complex(
     high_grad_imag = diff_grad_imag.select(axis, int(diff_grad_imag.shape[axis] - 1))
     neg_high_real, neg_high_imag = _phase_negative(high_grad_real, high_grad_imag, phase_cos, phase_sin)
     pos_low_real, pos_low_imag = _phase_positive(low_grad_real, low_grad_imag, phase_cos, phase_sin)
-    field_grad_real.select(axis, 0).add_(scale * low_grad_real + scale * neg_high_real)
-    field_grad_imag.select(axis, 0).add_(scale * low_grad_imag + scale * neg_high_imag)
+    field_grad_real.select(axis, 0).add_(inv[0] * low_grad_real + inv[-1] * neg_high_real)
+    field_grad_imag.select(axis, 0).add_(inv[0] * low_grad_imag + inv[-1] * neg_high_imag)
     field_grad_real.select(axis, int(field_grad_real.shape[axis] - 1)).add_(
-        -scale * pos_low_real - scale * high_grad_real
+        -inv[0] * pos_low_real - inv[-1] * high_grad_real
     )
     field_grad_imag.select(axis, int(field_grad_imag.shape[axis] - 1)).add_(
-        -scale * pos_low_imag - scale * high_grad_imag
+        -inv[0] * pos_low_imag - inv[-1] * high_grad_imag
     )
 
 
@@ -2978,7 +2238,7 @@ def _bloch_backward_diff_adjoint(
     sign: float,
     phase_cos: float,
     phase_sin: float,
-    inv_delta: float,
+    inv_delta,
 ):
     grad_real = torch.zeros(target_shape, device=adj_real.device, dtype=adj_real.dtype)
     grad_imag = torch.zeros(target_shape, device=adj_imag.device, dtype=adj_imag.dtype)
@@ -3015,14 +2275,6 @@ def _reverse_electric_hx_bloch(
     invDy,
     invDz,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_electric_adjoint_to_hx_bloch(
-            AdjHxMidReal, AdjHxMidImag, AdjHxPostReal, AdjHxPostImag,
-            AdjEyPostReal, AdjEyPostImag, AdjEzPostReal, AdjEzPostImag,
-            EyCurl, EzCurl, float(phaseCosY), float(phaseSinY), float(phaseCosZ), float(phaseSinZ),
-            float(invDy), float(invDz),
-        )
-        return
     ey_real, ey_imag = _bloch_backward_diff_adjoint(
         tuple(AdjHxMidReal.shape), AdjEyPostReal, AdjEyPostImag, EyCurl,
         axis=2, sign=1.0, phase_cos=phaseCosZ, phase_sin=phaseSinZ, inv_delta=invDz,
@@ -3054,14 +2306,6 @@ def _reverse_electric_hy_bloch(
     invDx,
     invDz,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_electric_adjoint_to_hy_bloch(
-            AdjHyMidReal, AdjHyMidImag, AdjHyPostReal, AdjHyPostImag,
-            AdjExPostReal, AdjExPostImag, AdjEzPostReal, AdjEzPostImag,
-            ExCurl, EzCurl, float(phaseCosX), float(phaseSinX), float(phaseCosZ), float(phaseSinZ),
-            float(invDx), float(invDz),
-        )
-        return
     ex_real, ex_imag = _bloch_backward_diff_adjoint(
         tuple(AdjHyMidReal.shape), AdjExPostReal, AdjExPostImag, ExCurl,
         axis=2, sign=-1.0, phase_cos=phaseCosZ, phase_sin=phaseSinZ, inv_delta=invDz,
@@ -3093,14 +2337,6 @@ def _reverse_electric_hz_bloch(
     invDx,
     invDy,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_electric_adjoint_to_hz_bloch(
-            AdjHzMidReal, AdjHzMidImag, AdjHzPostReal, AdjHzPostImag,
-            AdjExPostReal, AdjExPostImag, AdjEyPostReal, AdjEyPostImag,
-            ExCurl, EyCurl, float(phaseCosX), float(phaseSinX), float(phaseCosY), float(phaseSinY),
-            float(invDx), float(invDy),
-        )
-        return
     ex_real, ex_imag = _bloch_backward_diff_adjoint(
         tuple(AdjHzMidReal.shape), AdjExPostReal, AdjExPostImag, ExCurl,
         axis=1, sign=1.0, phase_cos=phaseCosY, phase_sin=phaseSinY, inv_delta=invDy,
@@ -3127,36 +2363,20 @@ def _reverse_magnetic_ex_standard(
     HzMid,
     HyCurl,
     HzCurl,
-    invDy,
-    invDz,
+    invDyE,
+    invDzE,
+    invDyH,
+    invDzH,
     yLowBoundaryMode,
     yHighBoundaryMode,
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_magnetic_adjoint_to_ex_standard(
-            AdjExPrev,
-            GradEpsEx,
-            AdjExPost,
-            AdjHyMid,
-            AdjHzMid,
-            ExDecay,
-            ExCurl,
-            EpsEx,
-            HyMid,
-            HzMid,
-            HyCurl,
-            HzCurl,
-            float(invDy),
-            float(invDz),
-            int(yLowBoundaryMode),
-            int(yHighBoundaryMode),
-            int(zLowBoundaryMode),
-            int(zHighBoundaryMode),
-        )
-        return
     nx, ny, nz = AdjExPrev.shape
+    inv_dy_e = _spacing_values(invDyE, ny, device=AdjExPrev.device, dtype=AdjExPrev.dtype)
+    inv_dz_e = _spacing_values(invDzE, nz, device=AdjExPrev.device, dtype=AdjExPrev.dtype)
+    inv_dy_h = _spacing_values(invDyH, int(AdjHzMid.shape[1]), device=AdjExPrev.device, dtype=AdjExPrev.dtype)
+    inv_dz_h = _spacing_values(invDzH, int(AdjHyMid.shape[2]), device=AdjExPrev.device, dtype=AdjExPrev.dtype)
     for i in range(nx):
         for j in range(ny):
             for k in range(nz):
@@ -3166,17 +2386,17 @@ def _reverse_magnetic_ex_standard(
                 if inactive:
                     adjoint = AdjExPost[i, j, k]
                 elif active:
-                    curl_h = (HzMid[i, j, k] - HzMid[i, j - 1, k]) * float(invDy) - (HyMid[i, j, k] - HyMid[i, j, k - 1]) * float(invDz)
+                    curl_h = (HzMid[i, j, k] - HzMid[i, j - 1, k]) * inv_dy_e[j] - (HyMid[i, j, k] - HyMid[i, j, k - 1]) * inv_dz_e[k]
                     adjoint = AdjExPost[i, j, k] * ExDecay[i, j, k]
                     grad = -AdjExPost[i, j, k] * ExCurl[i, j, k] * curl_h / EpsEx[i, j, k]
                 if k < AdjHyMid.shape[2]:
-                    adjoint = adjoint + HyCurl[i, j, k] * float(invDz) * AdjHyMid[i, j, k]
+                    adjoint = adjoint + HyCurl[i, j, k] * inv_dz_h[k] * AdjHyMid[i, j, k]
                 if k > 0:
-                    adjoint = adjoint - HyCurl[i, j, k - 1] * float(invDz) * AdjHyMid[i, j, k - 1]
+                    adjoint = adjoint - HyCurl[i, j, k - 1] * inv_dz_h[k - 1] * AdjHyMid[i, j, k - 1]
                 if j < AdjHzMid.shape[1]:
-                    adjoint = adjoint - HzCurl[i, j, k] * float(invDy) * AdjHzMid[i, j, k]
+                    adjoint = adjoint - HzCurl[i, j, k] * inv_dy_h[j] * AdjHzMid[i, j, k]
                 if j > 0:
-                    adjoint = adjoint + HzCurl[i, j - 1, k] * float(invDy) * AdjHzMid[i, j - 1, k]
+                    adjoint = adjoint + HzCurl[i, j - 1, k] * inv_dy_h[j - 1] * AdjHzMid[i, j - 1, k]
                 AdjExPrev[i, j, k] = adjoint
                 GradEpsEx[i, j, k] = grad
 
@@ -3195,36 +2415,20 @@ def _reverse_magnetic_ey_standard(
     HzMid,
     HxCurl,
     HzCurl,
-    invDx,
-    invDz,
+    invDxE,
+    invDzE,
+    invDxH,
+    invDzH,
     xLowBoundaryMode,
     xHighBoundaryMode,
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_magnetic_adjoint_to_ey_standard(
-            AdjEyPrev,
-            GradEpsEy,
-            AdjEyPost,
-            AdjHxMid,
-            AdjHzMid,
-            EyDecay,
-            EyCurl,
-            EpsEy,
-            HxMid,
-            HzMid,
-            HxCurl,
-            HzCurl,
-            float(invDx),
-            float(invDz),
-            int(xLowBoundaryMode),
-            int(xHighBoundaryMode),
-            int(zLowBoundaryMode),
-            int(zHighBoundaryMode),
-        )
-        return
     nx, ny, nz = AdjEyPrev.shape
+    inv_dx_e = _spacing_values(invDxE, nx, device=AdjEyPrev.device, dtype=AdjEyPrev.dtype)
+    inv_dz_e = _spacing_values(invDzE, nz, device=AdjEyPrev.device, dtype=AdjEyPrev.dtype)
+    inv_dx_h = _spacing_values(invDxH, int(AdjHzMid.shape[0]), device=AdjEyPrev.device, dtype=AdjEyPrev.dtype)
+    inv_dz_h = _spacing_values(invDzH, int(AdjHxMid.shape[2]), device=AdjEyPrev.device, dtype=AdjEyPrev.dtype)
     for i in range(nx):
         for j in range(ny):
             for k in range(nz):
@@ -3234,17 +2438,17 @@ def _reverse_magnetic_ey_standard(
                 if inactive:
                     adjoint = AdjEyPost[i, j, k]
                 elif active:
-                    curl_h = (HxMid[i, j, k] - HxMid[i, j, k - 1]) * float(invDz) - (HzMid[i, j, k] - HzMid[i - 1, j, k]) * float(invDx)
+                    curl_h = (HxMid[i, j, k] - HxMid[i, j, k - 1]) * inv_dz_e[k] - (HzMid[i, j, k] - HzMid[i - 1, j, k]) * inv_dx_e[i]
                     adjoint = AdjEyPost[i, j, k] * EyDecay[i, j, k]
                     grad = -AdjEyPost[i, j, k] * EyCurl[i, j, k] * curl_h / EpsEy[i, j, k]
                 if k < AdjHxMid.shape[2]:
-                    adjoint = adjoint - HxCurl[i, j, k] * float(invDz) * AdjHxMid[i, j, k]
+                    adjoint = adjoint - HxCurl[i, j, k] * inv_dz_h[k] * AdjHxMid[i, j, k]
                 if k > 0:
-                    adjoint = adjoint + HxCurl[i, j, k - 1] * float(invDz) * AdjHxMid[i, j, k - 1]
+                    adjoint = adjoint + HxCurl[i, j, k - 1] * inv_dz_h[k - 1] * AdjHxMid[i, j, k - 1]
                 if i < AdjHzMid.shape[0]:
-                    adjoint = adjoint + HzCurl[i, j, k] * float(invDx) * AdjHzMid[i, j, k]
+                    adjoint = adjoint + HzCurl[i, j, k] * inv_dx_h[i] * AdjHzMid[i, j, k]
                 if i > 0:
-                    adjoint = adjoint - HzCurl[i - 1, j, k] * float(invDx) * AdjHzMid[i - 1, j, k]
+                    adjoint = adjoint - HzCurl[i - 1, j, k] * inv_dx_h[i - 1] * AdjHzMid[i - 1, j, k]
                 AdjEyPrev[i, j, k] = adjoint
                 GradEpsEy[i, j, k] = grad
 
@@ -3263,36 +2467,20 @@ def _reverse_magnetic_ez_standard(
     HyMid,
     HxCurl,
     HyCurl,
-    invDx,
-    invDy,
+    invDxE,
+    invDyE,
+    invDxH,
+    invDyH,
     xLowBoundaryMode,
     xHighBoundaryMode,
     yLowBoundaryMode,
     yHighBoundaryMode,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_magnetic_adjoint_to_ez_standard(
-            AdjEzPrev,
-            GradEpsEz,
-            AdjEzPost,
-            AdjHxMid,
-            AdjHyMid,
-            EzDecay,
-            EzCurl,
-            EpsEz,
-            HxMid,
-            HyMid,
-            HxCurl,
-            HyCurl,
-            float(invDx),
-            float(invDy),
-            int(xLowBoundaryMode),
-            int(xHighBoundaryMode),
-            int(yLowBoundaryMode),
-            int(yHighBoundaryMode),
-        )
-        return
     nx, ny, nz = AdjEzPrev.shape
+    inv_dx_e = _spacing_values(invDxE, nx, device=AdjEzPrev.device, dtype=AdjEzPrev.dtype)
+    inv_dy_e = _spacing_values(invDyE, ny, device=AdjEzPrev.device, dtype=AdjEzPrev.dtype)
+    inv_dx_h = _spacing_values(invDxH, int(AdjHyMid.shape[0]), device=AdjEzPrev.device, dtype=AdjEzPrev.dtype)
+    inv_dy_h = _spacing_values(invDyH, int(AdjHxMid.shape[1]), device=AdjEzPrev.device, dtype=AdjEzPrev.dtype)
     for i in range(nx):
         for j in range(ny):
             for k in range(nz):
@@ -3302,17 +2490,17 @@ def _reverse_magnetic_ez_standard(
                 if inactive:
                     adjoint = AdjEzPost[i, j, k]
                 elif active:
-                    curl_h = (HyMid[i, j, k] - HyMid[i - 1, j, k]) * float(invDx) - (HxMid[i, j, k] - HxMid[i, j - 1, k]) * float(invDy)
+                    curl_h = (HyMid[i, j, k] - HyMid[i - 1, j, k]) * inv_dx_e[i] - (HxMid[i, j, k] - HxMid[i, j - 1, k]) * inv_dy_e[j]
                     adjoint = AdjEzPost[i, j, k] * EzDecay[i, j, k]
                     grad = -AdjEzPost[i, j, k] * EzCurl[i, j, k] * curl_h / EpsEz[i, j, k]
                 if j < AdjHxMid.shape[1]:
-                    adjoint = adjoint + HxCurl[i, j, k] * float(invDy) * AdjHxMid[i, j, k]
+                    adjoint = adjoint + HxCurl[i, j, k] * inv_dy_h[j] * AdjHxMid[i, j, k]
                 if j > 0:
-                    adjoint = adjoint - HxCurl[i, j - 1, k] * float(invDy) * AdjHxMid[i, j - 1, k]
+                    adjoint = adjoint - HxCurl[i, j - 1, k] * inv_dy_h[j - 1] * AdjHxMid[i, j - 1, k]
                 if i < AdjHyMid.shape[0]:
-                    adjoint = adjoint - HyCurl[i, j, k] * float(invDx) * AdjHyMid[i, j, k]
+                    adjoint = adjoint - HyCurl[i, j, k] * inv_dx_h[i] * AdjHyMid[i, j, k]
                 if i > 0:
-                    adjoint = adjoint + HyCurl[i - 1, j, k] * float(invDx) * AdjHyMid[i - 1, j, k]
+                    adjoint = adjoint + HyCurl[i - 1, j, k] * inv_dx_h[i - 1] * AdjHyMid[i - 1, j, k]
                 AdjEzPrev[i, j, k] = adjoint
                 GradEpsEz[i, j, k] = grad
 
@@ -3341,37 +2529,32 @@ def _reverse_magnetic_ex_bloch(
     phaseSinY,
     phaseCosZ,
     phaseSinZ,
-    invDy,
-    invDz,
+    invDyE,
+    invDzE,
+    invDyH,
+    invDzH,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_magnetic_adjoint_to_ex_bloch(
-            AdjExPrevReal, AdjExPrevImag, GradEpsEx, AdjExPostReal, AdjExPostImag,
-            AdjHyMidReal, AdjHyMidImag, AdjHzMidReal, AdjHzMidImag,
-            ExDecay, ExCurl, EpsEx, HyMidReal, HyMidImag, HzMidReal, HzMidImag,
-            HyCurl, HzCurl, float(phaseCosY), float(phaseSinY), float(phaseCosZ), float(phaseSinZ),
-            float(invDy), float(invDz),
-        )
-        return
     d_hz_dy_r, d_hz_dy_i = _bloch_backward_diff(
-        HzMidReal, HzMidImag, tuple(AdjExPrevReal.shape), 1, phaseCosY, phaseSinY, invDy,
+        HzMidReal, HzMidImag, tuple(AdjExPrevReal.shape), 1, phaseCosY, phaseSinY, invDyE,
     )
     d_hy_dz_r, d_hy_dz_i = _bloch_backward_diff(
-        HyMidReal, HyMidImag, tuple(AdjExPrevReal.shape), 2, phaseCosZ, phaseSinZ, invDz,
+        HyMidReal, HyMidImag, tuple(AdjExPrevReal.shape), 2, phaseCosZ, phaseSinZ, invDzE,
     )
+    inv_dy_h = _axis_view(_spacing_values(invDyH, int(HzMidReal.shape[1]), device=AdjExPrevReal.device, dtype=AdjExPrevReal.dtype), 1)
+    inv_dz_h = _axis_view(_spacing_values(invDzH, int(HyMidReal.shape[2]), device=AdjExPrevReal.device, dtype=AdjExPrevReal.dtype), 2)
     curl_h_r = d_hz_dy_r - d_hy_dz_r
     curl_h_i = d_hz_dy_i - d_hy_dz_i
     AdjExPrevReal.copy_(AdjExPostReal * ExDecay)
     AdjExPrevImag.copy_(AdjExPostImag * ExDecay)
     GradEpsEx.copy_(-ExCurl * (AdjExPostReal * curl_h_r + AdjExPostImag * curl_h_i) / EpsEx)
-    AdjExPrevReal[:, :, : HyMidReal.shape[2]].add_(HyCurl * float(invDz) * AdjHyMidReal)
-    AdjExPrevImag[:, :, : HyMidImag.shape[2]].add_(HyCurl * float(invDz) * AdjHyMidImag)
-    AdjExPrevReal[:, :, 1:].sub_(HyCurl * float(invDz) * AdjHyMidReal)
-    AdjExPrevImag[:, :, 1:].sub_(HyCurl * float(invDz) * AdjHyMidImag)
-    AdjExPrevReal[:, : HzMidReal.shape[1], :].sub_(HzCurl * float(invDy) * AdjHzMidReal)
-    AdjExPrevImag[:, : HzMidImag.shape[1], :].sub_(HzCurl * float(invDy) * AdjHzMidImag)
-    AdjExPrevReal[:, 1:, :].add_(HzCurl * float(invDy) * AdjHzMidReal)
-    AdjExPrevImag[:, 1:, :].add_(HzCurl * float(invDy) * AdjHzMidImag)
+    AdjExPrevReal[:, :, : HyMidReal.shape[2]].add_(HyCurl * inv_dz_h * AdjHyMidReal)
+    AdjExPrevImag[:, :, : HyMidImag.shape[2]].add_(HyCurl * inv_dz_h * AdjHyMidImag)
+    AdjExPrevReal[:, :, 1:].sub_(HyCurl * inv_dz_h * AdjHyMidReal)
+    AdjExPrevImag[:, :, 1:].sub_(HyCurl * inv_dz_h * AdjHyMidImag)
+    AdjExPrevReal[:, : HzMidReal.shape[1], :].sub_(HzCurl * inv_dy_h * AdjHzMidReal)
+    AdjExPrevImag[:, : HzMidImag.shape[1], :].sub_(HzCurl * inv_dy_h * AdjHzMidImag)
+    AdjExPrevReal[:, 1:, :].add_(HzCurl * inv_dy_h * AdjHzMidReal)
+    AdjExPrevImag[:, 1:, :].add_(HzCurl * inv_dy_h * AdjHzMidImag)
 
 
 def _reverse_magnetic_ey_bloch(
@@ -3398,37 +2581,32 @@ def _reverse_magnetic_ey_bloch(
     phaseSinX,
     phaseCosZ,
     phaseSinZ,
-    invDx,
-    invDz,
+    invDxE,
+    invDzE,
+    invDxH,
+    invDzH,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_magnetic_adjoint_to_ey_bloch(
-            AdjEyPrevReal, AdjEyPrevImag, GradEpsEy, AdjEyPostReal, AdjEyPostImag,
-            AdjHxMidReal, AdjHxMidImag, AdjHzMidReal, AdjHzMidImag,
-            EyDecay, EyCurl, EpsEy, HxMidReal, HxMidImag, HzMidReal, HzMidImag,
-            HxCurl, HzCurl, float(phaseCosX), float(phaseSinX), float(phaseCosZ), float(phaseSinZ),
-            float(invDx), float(invDz),
-        )
-        return
     d_hx_dz_r, d_hx_dz_i = _bloch_backward_diff(
-        HxMidReal, HxMidImag, tuple(AdjEyPrevReal.shape), 2, phaseCosZ, phaseSinZ, invDz,
+        HxMidReal, HxMidImag, tuple(AdjEyPrevReal.shape), 2, phaseCosZ, phaseSinZ, invDzE,
     )
     d_hz_dx_r, d_hz_dx_i = _bloch_backward_diff(
-        HzMidReal, HzMidImag, tuple(AdjEyPrevReal.shape), 0, phaseCosX, phaseSinX, invDx,
+        HzMidReal, HzMidImag, tuple(AdjEyPrevReal.shape), 0, phaseCosX, phaseSinX, invDxE,
     )
+    inv_dx_h = _axis_view(_spacing_values(invDxH, int(HzMidReal.shape[0]), device=AdjEyPrevReal.device, dtype=AdjEyPrevReal.dtype), 0)
+    inv_dz_h = _axis_view(_spacing_values(invDzH, int(HxMidReal.shape[2]), device=AdjEyPrevReal.device, dtype=AdjEyPrevReal.dtype), 2)
     curl_h_r = d_hx_dz_r - d_hz_dx_r
     curl_h_i = d_hx_dz_i - d_hz_dx_i
     AdjEyPrevReal.copy_(AdjEyPostReal * EyDecay)
     AdjEyPrevImag.copy_(AdjEyPostImag * EyDecay)
     GradEpsEy.copy_(-EyCurl * (AdjEyPostReal * curl_h_r + AdjEyPostImag * curl_h_i) / EpsEy)
-    AdjEyPrevReal[:, :, : HxMidReal.shape[2]].sub_(HxCurl * float(invDz) * AdjHxMidReal)
-    AdjEyPrevImag[:, :, : HxMidImag.shape[2]].sub_(HxCurl * float(invDz) * AdjHxMidImag)
-    AdjEyPrevReal[:, :, 1:].add_(HxCurl * float(invDz) * AdjHxMidReal)
-    AdjEyPrevImag[:, :, 1:].add_(HxCurl * float(invDz) * AdjHxMidImag)
-    AdjEyPrevReal[: HzMidReal.shape[0], :, :].add_(HzCurl * float(invDx) * AdjHzMidReal)
-    AdjEyPrevImag[: HzMidImag.shape[0], :, :].add_(HzCurl * float(invDx) * AdjHzMidImag)
-    AdjEyPrevReal[1:, :, :].sub_(HzCurl * float(invDx) * AdjHzMidReal)
-    AdjEyPrevImag[1:, :, :].sub_(HzCurl * float(invDx) * AdjHzMidImag)
+    AdjEyPrevReal[:, :, : HxMidReal.shape[2]].sub_(HxCurl * inv_dz_h * AdjHxMidReal)
+    AdjEyPrevImag[:, :, : HxMidImag.shape[2]].sub_(HxCurl * inv_dz_h * AdjHxMidImag)
+    AdjEyPrevReal[:, :, 1:].add_(HxCurl * inv_dz_h * AdjHxMidReal)
+    AdjEyPrevImag[:, :, 1:].add_(HxCurl * inv_dz_h * AdjHxMidImag)
+    AdjEyPrevReal[: HzMidReal.shape[0], :, :].add_(HzCurl * inv_dx_h * AdjHzMidReal)
+    AdjEyPrevImag[: HzMidImag.shape[0], :, :].add_(HzCurl * inv_dx_h * AdjHzMidImag)
+    AdjEyPrevReal[1:, :, :].sub_(HzCurl * inv_dx_h * AdjHzMidReal)
+    AdjEyPrevImag[1:, :, :].sub_(HzCurl * inv_dx_h * AdjHzMidImag)
 
 
 def _reverse_magnetic_ez_bloch(
@@ -3455,50 +2633,38 @@ def _reverse_magnetic_ez_bloch(
     phaseSinX,
     phaseCosY,
     phaseSinY,
-    invDx,
-    invDy,
+    invDxE,
+    invDyE,
+    invDxH,
+    invDyH,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_magnetic_adjoint_to_ez_bloch(
-            AdjEzPrevReal, AdjEzPrevImag, GradEpsEz, AdjEzPostReal, AdjEzPostImag,
-            AdjHxMidReal, AdjHxMidImag, AdjHyMidReal, AdjHyMidImag,
-            EzDecay, EzCurl, EpsEz, HxMidReal, HxMidImag, HyMidReal, HyMidImag,
-            HxCurl, HyCurl, float(phaseCosX), float(phaseSinX), float(phaseCosY), float(phaseSinY),
-            float(invDx), float(invDy),
-        )
-        return
     d_hy_dx_r, d_hy_dx_i = _bloch_backward_diff(
-        HyMidReal, HyMidImag, tuple(AdjEzPrevReal.shape), 0, phaseCosX, phaseSinX, invDx,
+        HyMidReal, HyMidImag, tuple(AdjEzPrevReal.shape), 0, phaseCosX, phaseSinX, invDxE,
     )
     d_hx_dy_r, d_hx_dy_i = _bloch_backward_diff(
-        HxMidReal, HxMidImag, tuple(AdjEzPrevReal.shape), 1, phaseCosY, phaseSinY, invDy,
+        HxMidReal, HxMidImag, tuple(AdjEzPrevReal.shape), 1, phaseCosY, phaseSinY, invDyE,
     )
+    inv_dx_h = _axis_view(_spacing_values(invDxH, int(HyMidReal.shape[0]), device=AdjEzPrevReal.device, dtype=AdjEzPrevReal.dtype), 0)
+    inv_dy_h = _axis_view(_spacing_values(invDyH, int(HxMidReal.shape[1]), device=AdjEzPrevReal.device, dtype=AdjEzPrevReal.dtype), 1)
     curl_h_r = d_hy_dx_r - d_hx_dy_r
     curl_h_i = d_hy_dx_i - d_hx_dy_i
     AdjEzPrevReal.copy_(AdjEzPostReal * EzDecay)
     AdjEzPrevImag.copy_(AdjEzPostImag * EzDecay)
     GradEpsEz.copy_(-EzCurl * (AdjEzPostReal * curl_h_r + AdjEzPostImag * curl_h_i) / EpsEz)
-    AdjEzPrevReal[:, : HxMidReal.shape[1], :].add_(HxCurl * float(invDy) * AdjHxMidReal)
-    AdjEzPrevImag[:, : HxMidImag.shape[1], :].add_(HxCurl * float(invDy) * AdjHxMidImag)
-    AdjEzPrevReal[:, 1:, :].sub_(HxCurl * float(invDy) * AdjHxMidReal)
-    AdjEzPrevImag[:, 1:, :].sub_(HxCurl * float(invDy) * AdjHxMidImag)
-    AdjEzPrevReal[: HyMidReal.shape[0], :, :].sub_(HyCurl * float(invDx) * AdjHyMidReal)
-    AdjEzPrevImag[: HyMidImag.shape[0], :, :].sub_(HyCurl * float(invDx) * AdjHyMidImag)
-    AdjEzPrevReal[1:, :, :].add_(HyCurl * float(invDx) * AdjHyMidReal)
-    AdjEzPrevImag[1:, :, :].add_(HyCurl * float(invDx) * AdjHyMidImag)
+    AdjEzPrevReal[:, : HxMidReal.shape[1], :].add_(HxCurl * inv_dy_h * AdjHxMidReal)
+    AdjEzPrevImag[:, : HxMidImag.shape[1], :].add_(HxCurl * inv_dy_h * AdjHxMidImag)
+    AdjEzPrevReal[:, 1:, :].sub_(HxCurl * inv_dy_h * AdjHxMidReal)
+    AdjEzPrevImag[:, 1:, :].sub_(HxCurl * inv_dy_h * AdjHxMidImag)
+    AdjEzPrevReal[: HyMidReal.shape[0], :, :].sub_(HyCurl * inv_dx_h * AdjHyMidReal)
+    AdjEzPrevImag[: HyMidImag.shape[0], :, :].sub_(HyCurl * inv_dx_h * AdjHyMidImag)
+    AdjEzPrevReal[1:, :, :].add_(HyCurl * inv_dx_h * AdjHyMidReal)
+    AdjEzPrevImag[1:, :, :].add_(HyCurl * inv_dx_h * AdjHyMidImag)
 
 
 def _accumulate_diff_adjoint(field_grad, diff_grad, axis, inv_delta, *, forward):
-    if _use_compiled_field_kernels():
-        method = (
-            get_compiled_extension().accumulate_forward_diff_adjoint
-            if forward
-            else get_compiled_extension().accumulate_backward_diff_adjoint
-        )
-        method(field_grad, diff_grad, int(axis), float(inv_delta))
-        return
     field_shape = tuple(int(size) for size in field_grad.shape)
     diff_shape = tuple(int(size) for size in diff_grad.shape)
+    inv = _spacing_values(inv_delta, diff_shape[axis], device=field_grad.device, dtype=field_grad.dtype)
     for i in range(field_shape[0]):
         for j in range(field_shape[1]):
             for k in range(field_shape[2]):
@@ -3506,20 +2672,20 @@ def _accumulate_diff_adjoint(field_grad, diff_grad, axis, inv_delta, *, forward)
                 value = field_grad.new_zeros(())
                 if forward:
                     if coords[axis] < diff_shape[axis] and all(coords[d] < diff_shape[d] for d in range(3)):
-                        value = value - float(inv_delta) * diff_grad[i, j, k]
+                        value = value - inv[coords[axis]] * diff_grad[i, j, k]
                     if coords[axis] > 0:
                         prev = list(coords)
                         prev[axis] -= 1
                         if all(prev[d] < diff_shape[d] for d in range(3)):
-                            value = value + float(inv_delta) * diff_grad[tuple(prev)]
+                            value = value + inv[coords[axis] - 1] * diff_grad[tuple(prev)]
                 else:
                     if coords[axis] > 0 and all(coords[d] < diff_shape[d] for d in range(3)):
-                        value = value + float(inv_delta) * diff_grad[i, j, k]
+                        value = value + inv[coords[axis]] * diff_grad[i, j, k]
                     if coords[axis] + 1 < field_shape[axis]:
                         next_coords = list(coords)
                         next_coords[axis] += 1
                         if all(next_coords[d] < diff_shape[d] for d in range(3)):
-                            value = value - float(inv_delta) * diff_grad[tuple(next_coords)]
+                            value = value - inv[coords[axis] + 1] * diff_grad[tuple(next_coords)]
                 field_grad[i, j, k].add_(value)
 
 
@@ -3579,6 +2745,8 @@ def _reverse_electric_cpml_torch(
     high_mode_b,
 ):
     nx, ny, nz = adj_prev.shape
+    inv_pos_values = _spacing_values(inv_pos, int(b_pos.shape[0]), device=adj_prev.device, dtype=adj_prev.dtype)
+    inv_neg_values = _spacing_values(inv_neg, int(b_neg.shape[0]), device=adj_prev.device, dtype=adj_prev.dtype)
     for i in range(nx):
         for j in range(ny):
             for k in range(nz):
@@ -3602,14 +2770,14 @@ def _reverse_electric_cpml_torch(
                     adjoint = adj_post[i, j, k]
                 elif active:
                     if component == 0:
-                        d_pos = (h_pos_mid[i, j, k] - h_pos_mid[i, j - 1, k]) * float(inv_pos)
-                        d_neg = (h_neg_mid[i, j, k] - h_neg_mid[i, j, k - 1]) * float(inv_neg)
+                        d_pos = (h_pos_mid[i, j, k] - h_pos_mid[i, j - 1, k]) * inv_pos_values[pos_idx]
+                        d_neg = (h_neg_mid[i, j, k] - h_neg_mid[i, j, k - 1]) * inv_neg_values[neg_idx]
                     elif component == 1:
-                        d_pos = (h_pos_mid[i, j, k] - h_pos_mid[i, j, k - 1]) * float(inv_pos)
-                        d_neg = (h_neg_mid[i, j, k] - h_neg_mid[i - 1, j, k]) * float(inv_neg)
+                        d_pos = (h_pos_mid[i, j, k] - h_pos_mid[i, j, k - 1]) * inv_pos_values[pos_idx]
+                        d_neg = (h_neg_mid[i, j, k] - h_neg_mid[i - 1, j, k]) * inv_neg_values[neg_idx]
                     else:
-                        d_pos = (h_pos_mid[i, j, k] - h_pos_mid[i - 1, j, k]) * float(inv_pos)
-                        d_neg = (h_neg_mid[i, j, k] - h_neg_mid[i, j - 1, k]) * float(inv_neg)
+                        d_pos = (h_pos_mid[i, j, k] - h_pos_mid[i - 1, j, k]) * inv_pos_values[pos_idx]
+                        d_neg = (h_neg_mid[i, j, k] - h_neg_mid[i, j - 1, k]) * inv_neg_values[neg_idx]
                     psi_pos_candidate = b_pos[pos_idx] * psi_pos[i, j, k] + c_pos[pos_idx] * d_pos
                     psi_neg_candidate = b_neg[neg_idx] * psi_neg[i, j, k] + c_neg[neg_idx] * d_neg
                     curl_h = (d_pos * inv_kappa_pos[pos_idx] + psi_pos_candidate) - (d_neg * inv_kappa_neg[neg_idx] + psi_neg_candidate)
@@ -3698,14 +2866,6 @@ def _reverse_electric_cpml_ex(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_electric_component_ex_cpml(
-            AdjExPrev, GradEpsEx, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
-            AdjExPost, AdjPsiPosPost, AdjPsiNegPost, ExDecay, ExCurl, EpsEx,
-            PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
-            HyMid, HzMid, float(invDy), float(invDz), int(yLowBoundaryMode), int(yHighBoundaryMode), int(zLowBoundaryMode), int(zHighBoundaryMode),
-        )
-        return
     _reverse_electric_cpml_torch(
         0, AdjExPrev, GradEpsEx, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
         AdjExPost, AdjPsiPosPost, AdjPsiNegPost, ExDecay, ExCurl, EpsEx, PsiPos, PsiNeg,
@@ -3745,14 +2905,6 @@ def _reverse_electric_cpml_ey(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_electric_component_ey_cpml(
-            AdjEyPrev, GradEpsEy, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
-            AdjEyPost, AdjPsiPosPost, AdjPsiNegPost, EyDecay, EyCurl, EpsEy,
-            PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
-            HxMid, HzMid, float(invDx), float(invDz), int(xLowBoundaryMode), int(xHighBoundaryMode), int(zLowBoundaryMode), int(zHighBoundaryMode),
-        )
-        return
     _reverse_electric_cpml_torch(
         1, AdjEyPrev, GradEpsEy, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
         AdjEyPost, AdjPsiPosPost, AdjPsiNegPost, EyDecay, EyCurl, EpsEy, PsiPos, PsiNeg,
@@ -3792,14 +2944,6 @@ def _reverse_electric_cpml_ez(
     yLowBoundaryMode,
     yHighBoundaryMode,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_electric_component_ez_cpml(
-            AdjEzPrev, GradEpsEz, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
-            AdjEzPost, AdjPsiPosPost, AdjPsiNegPost, EzDecay, EzCurl, EpsEz,
-            PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
-            HxMid, HyMid, float(invDx), float(invDy), int(xLowBoundaryMode), int(xHighBoundaryMode), int(yLowBoundaryMode), int(yHighBoundaryMode),
-        )
-        return
     _reverse_electric_cpml_torch(
         2, AdjEzPrev, GradEpsEz, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
         AdjEzPost, AdjPsiPosPost, AdjPsiNegPost, EzDecay, EzCurl, EpsEz, PsiPos, PsiNeg,
@@ -3809,13 +2953,6 @@ def _reverse_electric_cpml_ez(
 
 
 def _reverse_magnetic_cpml_hx(**kwargs):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_magnetic_component_hx_cpml(
-            kwargs["AdjHxPrev"], kwargs["AdjPsiPosPrev"], kwargs["AdjPsiNegPrev"], kwargs["AdjDPos"], kwargs["AdjDNeg"],
-            kwargs["AdjHxPost"], kwargs["AdjPsiPosPost"], kwargs["AdjPsiNegPost"], kwargs["HxDecay"], kwargs["HxCurl"],
-            kwargs["BPos"], kwargs["CPos"], kwargs["InvKappaPos"], kwargs["BNeg"], kwargs["CNeg"], kwargs["InvKappaNeg"],
-        )
-        return
     _reverse_magnetic_cpml_torch(
         0, kwargs["AdjHxPrev"], kwargs["AdjPsiPosPrev"], kwargs["AdjPsiNegPrev"], kwargs["AdjDPos"], kwargs["AdjDNeg"],
         kwargs["AdjHxPost"], kwargs["AdjPsiPosPost"], kwargs["AdjPsiNegPost"], kwargs["HxDecay"], kwargs["HxCurl"],
@@ -3824,13 +2961,6 @@ def _reverse_magnetic_cpml_hx(**kwargs):
 
 
 def _reverse_magnetic_cpml_hy(**kwargs):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_magnetic_component_hy_cpml(
-            kwargs["AdjHyPrev"], kwargs["AdjPsiPosPrev"], kwargs["AdjPsiNegPrev"], kwargs["AdjDPos"], kwargs["AdjDNeg"],
-            kwargs["AdjHyPost"], kwargs["AdjPsiPosPost"], kwargs["AdjPsiNegPost"], kwargs["HyDecay"], kwargs["HyCurl"],
-            kwargs["BPos"], kwargs["CPos"], kwargs["InvKappaPos"], kwargs["BNeg"], kwargs["CNeg"], kwargs["InvKappaNeg"],
-        )
-        return
     _reverse_magnetic_cpml_torch(
         1, kwargs["AdjHyPrev"], kwargs["AdjPsiPosPrev"], kwargs["AdjPsiNegPrev"], kwargs["AdjDPos"], kwargs["AdjDNeg"],
         kwargs["AdjHyPost"], kwargs["AdjPsiPosPost"], kwargs["AdjPsiNegPost"], kwargs["HyDecay"], kwargs["HyCurl"],
@@ -3839,13 +2969,6 @@ def _reverse_magnetic_cpml_hy(**kwargs):
 
 
 def _reverse_magnetic_cpml_hz(**kwargs):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_magnetic_component_hz_cpml(
-            kwargs["AdjHzPrev"], kwargs["AdjPsiPosPrev"], kwargs["AdjPsiNegPrev"], kwargs["AdjDPos"], kwargs["AdjDNeg"],
-            kwargs["AdjHzPost"], kwargs["AdjPsiPosPost"], kwargs["AdjPsiNegPost"], kwargs["HzDecay"], kwargs["HzCurl"],
-            kwargs["BPos"], kwargs["CPos"], kwargs["InvKappaPos"], kwargs["BNeg"], kwargs["CNeg"], kwargs["InvKappaNeg"],
-        )
-        return
     _reverse_magnetic_cpml_torch(
         2, kwargs["AdjHzPrev"], kwargs["AdjPsiPosPrev"], kwargs["AdjPsiNegPrev"], kwargs["AdjDPos"], kwargs["AdjDNeg"],
         kwargs["AdjHzPost"], kwargs["AdjPsiPosPost"], kwargs["AdjPsiNegPost"], kwargs["HzDecay"], kwargs["HzCurl"],
@@ -3854,23 +2977,14 @@ def _reverse_magnetic_cpml_hz(**kwargs):
 
 
 def _reverse_magnetic_hx_decay(*, AdjHxPrev, AdjHxMid, HxDecay):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_magnetic_adjoint_decay(AdjHxPrev, AdjHxMid, HxDecay)
-        return
     AdjHxPrev.copy_(AdjHxMid * HxDecay)
 
 
 def _reverse_magnetic_hy_decay(*, AdjHyPrev, AdjHyMid, HyDecay):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_magnetic_adjoint_decay(AdjHyPrev, AdjHyMid, HyDecay)
-        return
     AdjHyPrev.copy_(AdjHyMid * HyDecay)
 
 
 def _reverse_magnetic_hz_decay(*, AdjHzPrev, AdjHzMid, HzDecay):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_magnetic_adjoint_decay(AdjHzPrev, AdjHzMid, HzDecay)
-        return
     AdjHzPrev.copy_(AdjHzMid * HzDecay)
 
 
@@ -3884,32 +2998,12 @@ def _reverse_debye_current(
     decay,
     dt,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_debye_current(
-            AdjElectricPrev,
-            AdjPolarizationPrev,
-            AdjPolarizationPost,
-            AdjCurrentPost,
-            DebyeDrive,
-            float(decay),
-            float(dt),
-        )
-        return
     adj_internal = AdjPolarizationPost + AdjCurrentPost / float(dt)
     AdjElectricPrev.add_(DebyeDrive * adj_internal)
     AdjPolarizationPrev.add_(float(decay) * adj_internal - AdjCurrentPost / float(dt))
 
 
 def _reverse_drude_current(*, AdjElectricPrev, AdjCurrentPrev, AdjCurrentPost, DrudeDrive, decay):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_drude_current(
-            AdjElectricPrev,
-            AdjCurrentPrev,
-            AdjCurrentPost,
-            DrudeDrive,
-            float(decay),
-        )
-        return
     AdjElectricPrev.add_(DrudeDrive * AdjCurrentPost)
     AdjCurrentPrev.add_(float(decay) * AdjCurrentPost)
 
@@ -3926,19 +3020,6 @@ def _reverse_lorentz_current(
     restoring,
     dt,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_lorentz_current(
-            AdjElectricPrev,
-            AdjPolarizationPrev,
-            AdjCurrentPrev,
-            AdjPolarizationPost,
-            AdjCurrentPost,
-            LorentzDrive,
-            float(decay),
-            float(restoring),
-            float(dt),
-        )
-        return
     adj_internal = AdjCurrentPost + float(dt) * AdjPolarizationPost
     AdjElectricPrev.add_(LorentzDrive * adj_internal)
     AdjPolarizationPrev.add_(AdjPolarizationPost - float(restoring) * adj_internal)
@@ -3946,15 +3027,6 @@ def _reverse_lorentz_current(
 
 
 def _accumulate_tfsf_scalar_sample_adjoint(*, AdjAuxField, AdjFieldPatch, CoeffPatch, sampleIndex, componentScale):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().accumulate_tfsf_scalar_sample_adjoint(
-            AdjAuxField,
-            AdjFieldPatch,
-            CoeffPatch,
-            int(sampleIndex),
-            float(componentScale),
-        )
-        return
     AdjAuxField[int(sampleIndex)].add_(float(componentScale) * torch.sum(AdjFieldPatch * CoeffPatch))
 
 
@@ -3968,16 +3040,6 @@ def _accumulate_tfsf_line_sample_adjoint(
     componentScale,
 ):
     sample_indices = SampleIndices.to(device=AdjAuxField.device, dtype=torch.int32).contiguous()
-    if _use_compiled_field_kernels():
-        get_compiled_extension().accumulate_tfsf_line_sample_adjoint(
-            AdjAuxField,
-            AdjFieldPatch,
-            CoeffPatch,
-            sample_indices,
-            int(sampleAxisCode),
-            float(componentScale),
-        )
-        return
     axis = int(sampleAxisCode)
     weighted = (float(componentScale) * AdjFieldPatch * CoeffPatch).movedim(axis, 0).reshape(sample_indices.numel(), -1)
     AdjAuxField.index_add_(0, sample_indices.to(dtype=torch.long), weighted.sum(dim=1))
@@ -3993,17 +3055,6 @@ def _accumulate_tfsf_interpolated_sample_adjoint(
     ds,
     componentScale,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().accumulate_tfsf_interpolated_sample_adjoint(
-            AdjAuxField,
-            AdjFieldPatch,
-            CoeffPatch,
-            SamplePositions,
-            float(origin),
-            float(ds),
-            float(componentScale),
-        )
-        return
     if AdjAuxField.numel() == 0:
         return
     coord = (SamplePositions.to(device=AdjAuxField.device, dtype=AdjAuxField.dtype) - float(origin)) / float(ds) if float(ds) > 0.0 else torch.zeros_like(SamplePositions)
@@ -4027,16 +3078,6 @@ def _reverse_tfsf_auxiliary_electric(
     ElectricCurl,
     sourceIndex,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_tfsf_auxiliary_electric(
-            AdjElectricPrev,
-            AdjMagneticAfter,
-            AdjElectricPost,
-            ElectricDecay,
-            ElectricCurl,
-            int(sourceIndex),
-        )
-        return
     overwritten = torch.zeros_like(AdjElectricPost, dtype=torch.bool)
     if 0 <= int(sourceIndex) < AdjElectricPost.numel():
         overwritten[int(sourceIndex)] = True
@@ -4063,15 +3104,6 @@ def _reverse_tfsf_auxiliary_magnetic(
     MagneticDecay,
     MagneticCurl,
 ):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().reverse_tfsf_auxiliary_magnetic(
-            AdjElectricPrev,
-            AdjMagneticPrev,
-            AdjMagneticAfter,
-            MagneticDecay,
-            MagneticCurl,
-        )
-        return
     AdjMagneticPrev.copy_(MagneticDecay * AdjMagneticAfter)
     values = MagneticCurl * AdjMagneticAfter
     indices = torch.arange(AdjMagneticAfter.numel(), device=AdjMagneticAfter.device)
@@ -4080,17 +3112,11 @@ def _reverse_tfsf_auxiliary_magnetic(
 
 
 def _clamp_field_face(*, field, axis, side):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().clamp_field_face(field, int(axis), int(side))
-        return
     index = 0 if int(side) == 0 else field.shape[int(axis)] - 1
     field.select(int(axis), index).zero_()
 
 
 def _clamp_pec_boundary(*, field, axisA, axisB):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().clamp_pec_boundary(field, int(axisA), int(axisB))
-        return
     mask = torch.zeros_like(field, dtype=torch.bool)
     for axis in (int(axisA), int(axisB)):
         low = [slice(None)] * 3
@@ -4103,9 +3129,6 @@ def _clamp_pec_boundary(*, field, axisA, axisB):
 
 
 def _project_periodic_boundary(*, field, axis):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().project_periodic_boundary(field, int(axis))
-        return
     axis = int(axis)
     low = [slice(None)] * 3
     high = [slice(None)] * 3
@@ -4117,15 +3140,6 @@ def _project_periodic_boundary(*, field, axis):
 
 
 def _project_bloch_boundary(*, fieldReal, fieldImag, axis, phaseCos, phaseSin):
-    if _use_compiled_field_kernels():
-        get_compiled_extension().project_bloch_boundary(
-            fieldReal,
-            fieldImag,
-            int(axis),
-            float(phaseCos),
-            float(phaseSin),
-        )
-        return
     axis = int(axis)
     low = [slice(None)] * 3
     high = [slice(None)] * 3

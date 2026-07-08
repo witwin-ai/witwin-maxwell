@@ -96,24 +96,44 @@ def _resolve_tangential_bounds(scene, source, axis_coords_by_axis=None) -> tuple
     return (bounds[0], bounds[1]), tangential_axes
 
 
+def _local_uniform_plane_spacing(scene, axis: str, lower_index: int, upper_index: int) -> float:
+    """Local transverse spacing across a mode-plane aperture window.
+
+    The 2D mode solver assumes uniform transverse spacing, so the primal
+    spacings over the aperture node window (expanded by one cell) must be
+    locally uniform within 1e-6 relative; returns the local spacing.
+    """
+    primal = {"x": scene.dx_primal64, "y": scene.dy_primal64, "z": scene.dz_primal64}[axis]
+    window = primal[max(int(lower_index) - 1, 0) : min(int(upper_index) + 1, len(primal))]
+    d_min = float(window.min())
+    d_max = float(window.max())
+    if (d_max - d_min) > 1e-6 * d_max:
+        raise ValueError(
+            "ModeSource/ModeMonitor mode solving requires locally uniform grid spacing along "
+            f"axis '{axis}' across the mode plane; found min={d_min:g}, max={d_max:g}. "
+            "Refine GridSpec.custom so the mode plane is uniform, or move the plane."
+        )
+    return d_min
+
+
 def _field_component_axis_coords(scene, field_name: str, axis: str) -> torch.Tensor:
     if field_name == "Ex":
         mapping = {
-            "x": scene.x[:-1] + 0.5 * float(scene.dx),
+            "x": scene.x_half,
             "y": scene.y,
             "z": scene.z,
         }
     elif field_name == "Ey":
         mapping = {
             "x": scene.x,
-            "y": scene.y[:-1] + 0.5 * float(scene.dy),
+            "y": scene.y_half,
             "z": scene.z,
         }
     elif field_name == "Ez":
         mapping = {
             "x": scene.x,
             "y": scene.y,
-            "z": scene.z[:-1] + 0.5 * float(scene.dz),
+            "z": scene.z_half,
         }
     else:
         raise ValueError(f"Unsupported ModeSource field component {field_name!r}.")
@@ -964,8 +984,9 @@ def _assemble_vector_mode_data(
     if preferred_field_name not in field_names:
         raise ValueError("ModeSource polarization must be tangential to the source plane.")
 
-    du = float(getattr(solver, f"d{axis_u}"))
-    dv = float(getattr(solver, f"d{axis_v}"))
+    (u_lo, u_hi), (v_lo, v_hi) = tangential_bounds
+    du = _local_uniform_plane_spacing(solver.scene, axis_u, u_lo, u_hi)
+    dv = _local_uniform_plane_spacing(solver.scene, axis_v, v_lo, v_hi)
     k0 = 2.0 * math.pi * float(frequency) / float(solver.c)
     eps_real = torch.real(eps_slice) if torch.is_complex(eps_slice) else eps_slice
     mu_real = torch.real(mu_slice) if torch.is_complex(mu_slice) else mu_slice
@@ -1022,7 +1043,6 @@ def _assemble_vector_mode_data(
     lower = [0, 0, 0]
     upper = [0, 0, 0]
     normal_axis_index = _AXIS_TO_INDEX[normal_axis]
-    (u_lo, u_hi), (v_lo, v_hi) = tangential_bounds
     lower[_AXIS_TO_INDEX[axis_u]] = int(u_lo)
     upper[_AXIS_TO_INDEX[axis_u]] = int(u_hi)
     lower[_AXIS_TO_INDEX[axis_v]] = int(v_lo)
@@ -1171,8 +1191,8 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
     (u_lo, u_hi), (v_lo, v_hi) = tangential_bounds
     coords_u = tangential_coord_map[axis_u][u_lo : u_hi + 1]
     coords_v = tangential_coord_map[axis_v][v_lo : v_hi + 1]
-    du = float(getattr(solver, f"d{axis_u}"))
-    dv = float(getattr(solver, f"d{axis_v}"))
+    du = _local_uniform_plane_spacing(solver.scene, axis_u, u_lo, u_hi)
+    dv = _local_uniform_plane_spacing(solver.scene, axis_v, v_lo, v_hi)
     k0 = 2.0 * math.pi * frequency / float(solver.c)
     unknowns = max((int(eps_real.shape[0]) - 2) * (int(eps_real.shape[1]) - 2), 0)
 

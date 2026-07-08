@@ -16,7 +16,7 @@ from .spatial import (
 from .modes import sample_mode_source_component, sample_mode_source_profile, solve_mode_source_profile
 from .temporal import append_source_term, apply_compiled_source_terms, apply_generic_source_terms
 from .tfsf_common import build_term_from_profile, build_terms_from_specs, slice_coeff_patch, solve_numerical_wavenumber
-from .tfsf_specs import DELTA_ATTR, E_CURL_ATTR, H_CURL_ATTR, build_discrete_tfsf_specs, magnetic_physical_vector
+from .tfsf_specs import E_CURL_ATTR, H_CURL_ATTR, build_discrete_tfsf_specs, magnetic_physical_vector
 
 
 _FACE_SPEC_RANGES = {
@@ -120,8 +120,17 @@ def _ideal_point_dipole_term(
     return global_offsets, source_patch
 
 
+def _axis_index_window(nodes64, lo_value, hi_value, size_cap):
+    """Node-index window [lo, hi) covering [lo_value, hi_value] on an axis."""
+    if float(hi_value) < float(nodes64[0]) or float(lo_value) > float(nodes64[-1]):
+        return 0, 0
+    lo_index = max(0, int(np.searchsorted(nodes64, float(lo_value), side="right")) - 1)
+    hi_index = min(int(size_cap), int(np.searchsorted(nodes64, float(hi_value), side="left")) + 1)
+    return lo_index, hi_index
+
+
 def _prepare_point_dipole_source(solver, source, *, source_index):
-    x0, _, y0, _, z0, _ = solver.scene.domain_range
+    scene = solver.scene
     width = float(source["width"])
     polarization = source["polarization"]
     profile_kind = source.get("profile", "gaussian")
@@ -135,12 +144,9 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
 
     for image_position, phase_real, phase_imag in solver._iter_source_images(source["position"], cutoff):
         src_x, src_y, src_z = image_position
-        ix_start = max(0, int((src_x - cutoff - x0) / solver.dx))
-        ix_end = min(solver.Nx, int((src_x + cutoff - x0) / solver.dx) + 1)
-        iy_start = max(0, int((src_y - cutoff - y0) / solver.dy))
-        iy_end = min(solver.Ny, int((src_y + cutoff - y0) / solver.dy) + 1)
-        iz_start = max(0, int((src_z - cutoff - z0) / solver.dz))
-        iz_end = min(solver.Nz, int((src_z + cutoff - z0) / solver.dz) + 1)
+        ix_start, ix_end = _axis_index_window(scene.x_nodes64, src_x - cutoff, src_x + cutoff, solver.Nx)
+        iy_start, iy_end = _axis_index_window(scene.y_nodes64, src_y - cutoff, src_y + cutoff, solver.Ny)
+        iz_start, iz_end = _axis_index_window(scene.z_nodes64, src_z - cutoff, src_z + cutoff, solver.Nz)
 
         if ix_end <= ix_start or iy_end <= iy_start or iz_end <= iz_start:
             continue
@@ -148,12 +154,9 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
         if polarization[2] != 0:
             iz_end_ez = min(iz_end, solver.Nz - 1)
             if iz_end_ez > iz_start:
-                ix = torch.arange(ix_start, ix_end, device=solver.device, dtype=coord_dtype)
-                iy = torch.arange(iy_start, iy_end, device=solver.device, dtype=coord_dtype)
-                iz = torch.arange(iz_start, iz_end_ez, device=solver.device, dtype=coord_dtype)
-                px = x0 + ix * solver.dx
-                py = y0 + iy * solver.dy
-                pz = z0 + (iz + 0.5) * solver.dz
+                px = scene.x[ix_start:ix_end].to(dtype=coord_dtype)
+                py = scene.y[iy_start:iy_end].to(dtype=coord_dtype)
+                pz = scene.z_half[iz_start:iz_end_ez].to(dtype=coord_dtype)
                 dist_sq = (
                     (px[:, None, None] - src_x) ** 2
                     + (py[None, :, None] - src_y) ** 2
@@ -194,12 +197,9 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
         if polarization[0] != 0:
             ix_end_ex = min(ix_end, solver.Nx - 1)
             if ix_end_ex > ix_start:
-                ix = torch.arange(ix_start, ix_end_ex, device=solver.device, dtype=coord_dtype)
-                iy = torch.arange(iy_start, iy_end, device=solver.device, dtype=coord_dtype)
-                iz = torch.arange(iz_start, iz_end, device=solver.device, dtype=coord_dtype)
-                px = x0 + (ix + 0.5) * solver.dx
-                py = y0 + iy * solver.dy
-                pz = z0 + iz * solver.dz
+                px = scene.x_half[ix_start:ix_end_ex].to(dtype=coord_dtype)
+                py = scene.y[iy_start:iy_end].to(dtype=coord_dtype)
+                pz = scene.z[iz_start:iz_end].to(dtype=coord_dtype)
                 dist_sq = (
                     (px[:, None, None] - src_x) ** 2
                     + (py[None, :, None] - src_y) ** 2
@@ -240,12 +240,9 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
         if polarization[1] != 0:
             iy_end_ey = min(iy_end, solver.Ny - 1)
             if iy_end_ey > iy_start:
-                ix = torch.arange(ix_start, ix_end, device=solver.device, dtype=coord_dtype)
-                iy = torch.arange(iy_start, iy_end_ey, device=solver.device, dtype=coord_dtype)
-                iz = torch.arange(iz_start, iz_end, device=solver.device, dtype=coord_dtype)
-                px = x0 + ix * solver.dx
-                py = y0 + (iy + 0.5) * solver.dy
-                pz = z0 + iz * solver.dz
+                px = scene.x[ix_start:ix_end].to(dtype=coord_dtype)
+                py = scene.y_half[iy_start:iy_end_ey].to(dtype=coord_dtype)
+                pz = scene.z[iz_start:iz_end].to(dtype=coord_dtype)
                 dist_sq = (
                     (px[:, None, None] - src_x) ** 2
                     + (py[None, :, None] - src_y) ** 2
@@ -308,17 +305,15 @@ _CUSTOM_FIELD_CURRENT_MAP = {
 
 
 def _region_index_range(solver, field_name, lo, hi):
-    x0, _, y0, _, z0, _ = solver.scene.domain_range
-    origins = (x0, y0, z0)
-    steps = (solver.dx, solver.dy, solver.dz)
+    scene = solver.scene
+    axis_nodes = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)
     sizes = tuple(int(dim) for dim in getattr(solver, field_name).shape)
     start = []
     stop = []
     for axis in range(3):
-        lo_index = max(0, int((lo[axis] - origins[axis]) / steps[axis]))
-        hi_index = min(sizes[axis], int((hi[axis] - origins[axis]) / steps[axis]) + 1)
-        start.append(int(lo_index))
-        stop.append(int(hi_index))
+        lo_index, hi_index = _axis_index_window(axis_nodes[axis], lo[axis], hi[axis], sizes[axis])
+        start.append(lo_index)
+        stop.append(hi_index)
     return tuple(start), tuple(stop)
 
 
@@ -480,11 +475,20 @@ def _prepare_custom_current_source(solver, source, *, source_index):
 def _prepare_custom_field_source(solver, source, *, source_index):
     dataset = source["dataset"]
     normal_axis = source["normal_axis"]
-    normal_step = {"x": solver.dx, "y": solver.dy, "z": solver.dz}[normal_axis]
     source_time = source["source_time"]
     source_omega = 2.0 * np.pi * float(source_time["frequency"])
     axes = _dataset_axes_tensors(solver, dataset)
     region_lo, region_hi = _dataset_region_bounds(dataset)
+
+    # The equivalent surface currents are smeared over the E dual cell at the
+    # injection plane, so the normal step is the local dual spacing there.
+    scene = solver.scene
+    axis_index = _AXIS_TO_INDEX[normal_axis]
+    nodes64 = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)[axis_index]
+    dual64 = (scene.dx_dual64, scene.dy_dual64, scene.dz_dual64)[axis_index]
+    plane_coord = 0.5 * (float(region_lo[axis_index]) + float(region_hi[axis_index]))
+    plane_index = int(np.argmin(np.abs(nodes64 - plane_coord)))
+    normal_step = float(dual64[plane_index])
     mapping = _CUSTOM_FIELD_CURRENT_MAP[normal_axis]
 
     for target_field, source_component, sign in mapping["electric"]:
@@ -681,7 +685,13 @@ def _prepare_plane_wave_surface_source(solver, source, *, source_index):
     magnetic_specs = magnetic_specs[_FACE_SPEC_RANGES[(injection_axis, face_side)]]
 
     phase_speed = solver.c
-    k_numeric = solve_numerical_wavenumber(solver, direction, DELTA_ATTR)
+    # Numerical-dispersion phase correction with the per-axis minimum spacing
+    # (exact on uniform grids, a conservative estimate on nonuniform ones).
+    k_numeric = solve_numerical_wavenumber(
+        solver,
+        direction,
+        {"x": solver.min_dx, "y": solver.min_dy, "z": solver.min_dz},
+    )
     if k_numeric > 1e-12:
         phase_speed = source_omega / k_numeric
 

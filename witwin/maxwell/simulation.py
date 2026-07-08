@@ -365,6 +365,11 @@ class Simulation:
 
     def _build_fdfd_solver(self):
         prepared_scene = prepare_scene(self.scene)
+        if prepared_scene.grid.is_custom:
+            raise NotImplementedError(
+                "FDFD does not support nonuniform (GridSpec.custom) grids yet; "
+                "use Simulation.fdtd(...) or a uniform GridSpec."
+            )
         _require_cuda_scene(prepared_scene, method="fdfd")
         fdfd_backend = _resolve_fdfd_backend()
         solver_cfg = self.config.solver

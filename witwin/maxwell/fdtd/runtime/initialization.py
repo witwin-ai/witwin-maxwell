@@ -61,9 +61,9 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver.Nx = scene.Nx
     solver.Ny = scene.Ny
     solver.Nz = scene.Nz
-    solver.dx = scene.dx
-    solver.dy = scene.dy
-    solver.dz = scene.dz
+    solver.min_dx = float(scene.dx_primal64.min())
+    solver.min_dy = float(scene.dy_primal64.min())
+    solver.min_dz = float(scene.dz_primal64.min())
     solver.device = torch.device(scene.device)
     solver.verbose = bool(scene.verbose)
     solver.c = 299792458.0
@@ -113,10 +113,16 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver._cpml_auto_free_bytes = None
     solver.kernel_block_size = (256, 1, 1)
 
-    solver.dt = solver.auto_dt(solver.dx, solver.dy, solver.dz, time_step_frequency)
-    solver.inv_dx = 1.0 / solver.dx
-    solver.inv_dy = 1.0 / solver.dy
-    solver.inv_dz = 1.0 / solver.dz
+    solver.dt = solver.auto_dt(solver.min_dx, solver.min_dy, solver.min_dz, time_step_frequency)
+    # Per-axis spacing arrays: `_e` scales backward diffs in E updates (dual
+    # spacing, length N); `_h` scales forward diffs in H updates (primal
+    # spacing, length N-1). Reciprocals are computed in float64 then cast.
+    solver.inv_dx_e = torch.tensor(1.0 / scene.dx_dual64, dtype=torch.float32, device=solver.device)
+    solver.inv_dy_e = torch.tensor(1.0 / scene.dy_dual64, dtype=torch.float32, device=solver.device)
+    solver.inv_dz_e = torch.tensor(1.0 / scene.dz_dual64, dtype=torch.float32, device=solver.device)
+    solver.inv_dx_h = torch.tensor(1.0 / scene.dx_primal64, dtype=torch.float32, device=solver.device)
+    solver.inv_dy_h = torch.tensor(1.0 / scene.dy_primal64, dtype=torch.float32, device=solver.device)
+    solver.inv_dz_h = torch.tensor(1.0 / scene.dz_primal64, dtype=torch.float32, device=solver.device)
     solver.fdtd_module = get_fdtd_module()
 
     solver.dft_enabled = False

@@ -74,9 +74,6 @@ def _mode_overlap_context(result):
     device = torch.device(scene.device)
     return SimpleNamespace(
         scene=scene,
-        dx=scene.dx,
-        dy=scene.dy,
-        dz=scene.dz,
         Ex=torch.empty((1,), device=device, dtype=torch.float32),
         c=299792458.0,
         boundary_kind=scene.boundary.kind,

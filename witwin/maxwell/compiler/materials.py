@@ -226,7 +226,7 @@ def _coordinate_grids(scene, sample_offset):
 
 
 def _geometry_beta(scene) -> float:
-    return 0.05 * min(float(scene.dx), float(scene.dy), float(scene.dz))
+    return 0.05 * min(scene.grid.min_spacing)
 
 
 def _geometry_occupancy(scene, geometry, coords=None):
@@ -347,16 +347,23 @@ def _sample_offsets(scene, subpixel_samples):
     return list(product(x_offsets, y_offsets, z_offsets))
 
 
-def _region_axis_slice(axis_coords: torch.Tensor, lower: float, upper: float) -> slice | None:
-    indices = torch.nonzero((axis_coords >= lower) & (axis_coords <= upper), as_tuple=False).flatten()
-    if indices.numel() == 0:
+def _region_axis_slice(nodes64: np.ndarray, lower: float, upper: float) -> slice | None:
+    # Cells are indexed by their low-side node. The window is lower-inclusive
+    # and upper-exclusive so a box whose faces land exactly on grid nodes
+    # covers exactly size/spacing cells. The tolerance absorbs float32
+    # rounding of the geometry bounds (positions are stored as float32).
+    span = float(nodes64[-1] - nodes64[0])
+    tol = 1e-6 * span
+    start = int(np.searchsorted(nodes64, lower - tol, side="left"))
+    stop = int(np.searchsorted(nodes64, upper - tol, side="left"))
+    if stop <= start:
         return None
-    return slice(int(indices[0].item()), int(indices[-1].item()) + 1)
+    return slice(start, stop)
 
 
 def _density_kernel_size(scene, filter_radius: float) -> tuple[int, int, int]:
     kernel = []
-    for spacing in (scene.dx, scene.dy, scene.dz):
+    for spacing in scene.grid.min_spacing:
         cells = int(np.ceil(float(filter_radius) / float(spacing)))
         kernel.append(max(1, 2 * cells + 1))
     return tuple(kernel)
@@ -402,9 +409,9 @@ def _region_density_field(scene, region, reference: torch.Tensor):
     sz_vec = geometry.size
     cx, cy, cz = float(pos[0]), float(pos[1]), float(pos[2])
     sx, sy, sz = float(sz_vec[0]), float(sz_vec[1]), float(sz_vec[2])
-    x_slice = _region_axis_slice(scene.x, cx - sx / 2.0, cx + sx / 2.0)
-    y_slice = _region_axis_slice(scene.y, cy - sy / 2.0, cy + sy / 2.0)
-    z_slice = _region_axis_slice(scene.z, cz - sz / 2.0, cz + sz / 2.0)
+    x_slice = _region_axis_slice(scene.x_nodes64, cx - sx / 2.0, cx + sx / 2.0)
+    y_slice = _region_axis_slice(scene.y_nodes64, cy - sy / 2.0, cy + sy / 2.0)
+    z_slice = _region_axis_slice(scene.z_nodes64, cz - sz / 2.0, cz + sz / 2.0)
     if x_slice is None or y_slice is None or z_slice is None:
         empty = torch.zeros_like(reference)
         return empty, empty.to(dtype=torch.bool)

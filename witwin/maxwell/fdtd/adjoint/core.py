@@ -365,9 +365,9 @@ def _dynamic_electric_curl(base_curl: torch.Tensor, base_eps: torch.Tensor, eps:
 def _build_source_replay_solver(solver, compiled_source, eps_ex, eps_ey, eps_ez):
     return SimpleNamespace(
         scene=solver.scene,
-        dx=solver.dx,
-        dy=solver.dy,
-        dz=solver.dz,
+        min_dx=solver.min_dx,
+        min_dy=solver.min_dy,
+        min_dz=solver.min_dz,
         Nx=solver.Nx,
         Ny=solver.Ny,
         Nz=solver.Nz,
@@ -1214,7 +1214,9 @@ def _reverse_tfsf_auxiliary_state_python_reference(
     }
 
 
-def _bloch_backward_diff(field: torch.Tensor, *, axis: int, inv_delta: float, phase_cos: float, phase_sin: float):
+def _bloch_backward_diff(field: torch.Tensor, *, axis: int, inv_delta: torch.Tensor, phase_cos: float, phase_sin: float):
+    # inv_delta: 1D dual spacing reciprocals, length == field size + 1 along
+    # axis; wrap entries live at [0] and [-1] (equal on a Bloch axis).
     shape = list(field.shape)
     shape[axis] += 1
     diff = field.new_zeros(shape)
@@ -1223,7 +1225,7 @@ def _bloch_backward_diff(field: torch.Tensor, *, axis: int, inv_delta: float, ph
 
     low = field.select(axis, 0)
     high = field.select(axis, field.shape[axis] - 1)
-    low_value = (low - _complex_phase_negative(high, phase_cos, phase_sin)) * float(inv_delta)
+    low_value = (low - _complex_phase_negative(high, phase_cos, phase_sin)) * inv_delta[0]
     low_region = [slice(None)] * field.ndim
     low_region[axis] = 0
     diff[tuple(low_region)] = low_value
@@ -1231,7 +1233,7 @@ def _bloch_backward_diff(field: torch.Tensor, *, axis: int, inv_delta: float, ph
     if field.shape[axis] == 1:
         return diff
 
-    high_value = (_complex_phase_positive(low, phase_cos, phase_sin) - high) * float(inv_delta)
+    high_value = (_complex_phase_positive(low, phase_cos, phase_sin) - high) * inv_delta[-1]
     high_region = [slice(None)] * diff.ndim
     high_region[axis] = -1
     diff[tuple(high_region)] = high_value
@@ -1243,7 +1245,7 @@ def _bloch_backward_diff(field: torch.Tensor, *, axis: int, inv_delta: float, ph
         current[axis] = slice(1, None)
         previous = [slice(None)] * field.ndim
         previous[axis] = slice(0, -1)
-        diff[tuple(interior)] = (field[tuple(current)] - field[tuple(previous)]) * float(inv_delta)
+        diff[tuple(interior)] = (field[tuple(current)] - field[tuple(previous)]) * _broadcast_vector(inv_delta[1:-1], axis)
     return diff
 
 
@@ -1500,15 +1502,17 @@ def _broadcast_vector(vector: torch.Tensor, axis: int) -> torch.Tensor:
     return vector.view(*shape)
 
 
-def _forward_diff(field: torch.Tensor, axis: int, inv_delta: float) -> torch.Tensor:
+def _forward_diff(field: torch.Tensor, axis: int, inv_delta: torch.Tensor) -> torch.Tensor:
+    # inv_delta: 1D primal spacing reciprocals, length == field size - 1 along axis.
     slicer_lo = [slice(None)] * field.ndim
     slicer_hi = [slice(None)] * field.ndim
     slicer_lo[axis] = slice(0, -1)
     slicer_hi[axis] = slice(1, None)
-    return (field[tuple(slicer_hi)] - field[tuple(slicer_lo)]) * float(inv_delta)
+    return (field[tuple(slicer_hi)] - field[tuple(slicer_lo)]) * _broadcast_vector(inv_delta, axis)
 
 
-def _backward_diff(field: torch.Tensor, axis: int, inv_delta: float) -> torch.Tensor:
+def _backward_diff(field: torch.Tensor, axis: int, inv_delta: torch.Tensor) -> torch.Tensor:
+    # inv_delta: 1D dual spacing reciprocals, length == field size + 1 along axis.
     shape = list(field.shape)
     shape[axis] += 1
     diff = field.new_zeros(shape)
@@ -1518,25 +1522,27 @@ def _backward_diff(field: torch.Tensor, axis: int, inv_delta: float) -> torch.Te
     interior[axis] = slice(1, -1)
     field_hi[axis] = slice(1, None)
     field_lo[axis] = slice(0, -1)
-    diff[tuple(interior)] = (field[tuple(field_hi)] - field[tuple(field_lo)]) * float(inv_delta)
+    diff[tuple(interior)] = (field[tuple(field_hi)] - field[tuple(field_lo)]) * _broadcast_vector(inv_delta[1:-1], axis)
     return diff
 
 
-def _accumulate_forward_diff_adjoint(field_grad: torch.Tensor, diff_grad: torch.Tensor, *, axis: int, inv_delta: float):
-    scale = float(inv_delta)
+def _scatter_diff_adjoint(field_grad: torch.Tensor, scaled_grad: torch.Tensor, axis: int):
     field_lo = [slice(None)] * field_grad.ndim
     field_hi = [slice(None)] * field_grad.ndim
     field_lo[axis] = slice(0, -1)
     field_hi[axis] = slice(1, None)
-    field_grad[tuple(field_lo)] = field_grad[tuple(field_lo)] - scale * diff_grad
-    field_grad[tuple(field_hi)] = field_grad[tuple(field_hi)] + scale * diff_grad
+    field_grad[tuple(field_lo)] = field_grad[tuple(field_lo)] - scaled_grad
+    field_grad[tuple(field_hi)] = field_grad[tuple(field_hi)] + scaled_grad
 
 
-def _accumulate_backward_diff_adjoint(field_grad: torch.Tensor, diff_grad: torch.Tensor, *, axis: int, inv_delta: float):
+def _accumulate_forward_diff_adjoint(field_grad: torch.Tensor, diff_grad: torch.Tensor, *, axis: int, inv_delta: torch.Tensor):
+    _scatter_diff_adjoint(field_grad, _broadcast_vector(inv_delta, axis) * diff_grad, axis)
+
+
+def _accumulate_backward_diff_adjoint(field_grad: torch.Tensor, diff_grad: torch.Tensor, *, axis: int, inv_delta: torch.Tensor):
     interior = [slice(None)] * diff_grad.ndim
     interior[axis] = slice(1, -1)
-    interior_grad = diff_grad[tuple(interior)]
-    _accumulate_forward_diff_adjoint(field_grad, interior_grad, axis=axis, inv_delta=inv_delta)
+    _scatter_diff_adjoint(field_grad, _broadcast_vector(inv_delta[1:-1], axis) * diff_grad[tuple(interior)], axis)
 
 
 def _accumulate_bloch_backward_diff_adjoint(
@@ -1544,17 +1550,20 @@ def _accumulate_bloch_backward_diff_adjoint(
     diff_grad: torch.Tensor,
     *,
     axis: int,
-    inv_delta: float,
+    inv_delta: torch.Tensor,
     phase_cos: float,
     phase_sin: float,
 ):
     _accumulate_backward_diff_adjoint(field_grad, diff_grad, axis=axis, inv_delta=inv_delta)
-    scale = float(inv_delta)
+    # Wrap terms transpose the forward wrap differences: contributions from the
+    # low diff entry carry inv_delta[0], those from the high entry inv_delta[-1].
+    low_scale = inv_delta[0]
+    high_scale = inv_delta[-1]
     low_grad = diff_grad.select(axis, 0)
     high_grad = diff_grad.select(axis, int(diff_grad.shape[axis] - 1))
-    field_grad.select(axis, 0).add_(scale * low_grad + scale * _complex_phase_negative(high_grad, phase_cos, phase_sin))
+    field_grad.select(axis, 0).add_(low_scale * low_grad + high_scale * _complex_phase_negative(high_grad, phase_cos, phase_sin))
     field_grad.select(axis, int(field_grad.shape[axis] - 1)).add_(
-        -scale * _complex_phase_positive(low_grad, phase_cos, phase_sin) - scale * high_grad
+        -low_scale * _complex_phase_positive(low_grad, phase_cos, phase_sin) - high_scale * high_grad
     )
 
 
@@ -1868,11 +1877,11 @@ def _update_mixed_bloch_cpml_electric_fields(solver, state, magnetic_fields, *, 
     d_hz_dy = _bloch_backward_diff(
         hz_complex,
         axis=1,
-        inv_delta=solver.inv_dy,
+        inv_delta=solver.inv_dy_e,
         phase_cos=float(solver.boundary_phase_cos[1]),
         phase_sin=float(solver.boundary_phase_sin[1]),
     )
-    d_hy_dz = _backward_diff(hy_complex, axis=2, inv_delta=solver.inv_dz)
+    d_hy_dz = _backward_diff(hy_complex, axis=2, inv_delta=solver.inv_dz_e)
     ex_complex = previous_ex * solver.cex_decay + ex_curl * (d_hz_dy - d_hy_dz)
     ex_complex = _apply_complex_axis_boundary(
         ex_complex,
@@ -1897,11 +1906,11 @@ def _update_mixed_bloch_cpml_electric_fields(solver, state, magnetic_fields, *, 
     )
 
     previous_ey = _complex_state_field(state, "Ey")
-    d_hx_dz = _backward_diff(hx_complex, axis=2, inv_delta=solver.inv_dz)
+    d_hx_dz = _backward_diff(hx_complex, axis=2, inv_delta=solver.inv_dz_e)
     d_hz_dx = _bloch_backward_diff(
         hz_complex,
         axis=0,
-        inv_delta=solver.inv_dx,
+        inv_delta=solver.inv_dx_e,
         phase_cos=float(solver.boundary_phase_cos[0]),
         phase_sin=float(solver.boundary_phase_sin[0]),
     )
@@ -1932,14 +1941,14 @@ def _update_mixed_bloch_cpml_electric_fields(solver, state, magnetic_fields, *, 
     d_hy_dx = _bloch_backward_diff(
         hy_complex,
         axis=0,
-        inv_delta=solver.inv_dx,
+        inv_delta=solver.inv_dx_e,
         phase_cos=float(solver.boundary_phase_cos[0]),
         phase_sin=float(solver.boundary_phase_sin[0]),
     )
     d_hx_dy = _bloch_backward_diff(
         hx_complex,
         axis=1,
-        inv_delta=solver.inv_dy,
+        inv_delta=solver.inv_dy_e,
         phase_cos=float(solver.boundary_phase_cos[1]),
         phase_sin=float(solver.boundary_phase_sin[1]),
     )
@@ -1981,8 +1990,8 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
     complex_fields = has_complex_fields(solver)
     psi_hx_y_imag = psi_hx_z_imag = psi_hy_x_imag = psi_hy_z_imag = psi_hz_x_imag = psi_hz_y_imag = None
 
-    d_ez_dy = _forward_diff(state["Ez"], axis=1, inv_delta=solver.inv_dy)
-    d_ey_dz = _forward_diff(state["Ey"], axis=2, inv_delta=solver.inv_dz)
+    d_ez_dy = _forward_diff(state["Ez"], axis=1, inv_delta=solver.inv_dy_h)
+    d_ey_dz = _forward_diff(state["Ey"], axis=2, inv_delta=solver.inv_dz_h)
     hx, psi_hx_y, psi_hx_z = _update_magnetic_component(
         state["Hx"],
         d_pos=d_ez_dy,
@@ -2001,8 +2010,8 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
         axis_neg=2,
     )
 
-    d_ex_dz = _forward_diff(state["Ex"], axis=2, inv_delta=solver.inv_dz)
-    d_ez_dx = _forward_diff(state["Ez"], axis=0, inv_delta=solver.inv_dx)
+    d_ex_dz = _forward_diff(state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
+    d_ez_dx = _forward_diff(state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
     hy, psi_hy_x, psi_hy_z = _update_magnetic_component(
         state["Hy"],
         d_pos=d_ex_dz,
@@ -2021,8 +2030,8 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
         axis_neg=0,
     )
 
-    d_ey_dx = _forward_diff(state["Ey"], axis=0, inv_delta=solver.inv_dx)
-    d_ex_dy = _forward_diff(state["Ex"], axis=1, inv_delta=solver.inv_dy)
+    d_ey_dx = _forward_diff(state["Ey"], axis=0, inv_delta=solver.inv_dx_h)
+    d_ex_dy = _forward_diff(state["Ex"], axis=1, inv_delta=solver.inv_dy_h)
     hz, psi_hz_x, psi_hz_y = _update_magnetic_component(
         state["Hz"],
         d_pos=d_ey_dx,
@@ -2047,8 +2056,8 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
         "Hz": hz,
     }
     if complex_fields:
-        d_ez_imag_dy = _forward_diff(state["Ez_imag"], axis=1, inv_delta=solver.inv_dy)
-        d_ey_imag_dz = _forward_diff(state["Ey_imag"], axis=2, inv_delta=solver.inv_dz)
+        d_ez_imag_dy = _forward_diff(state["Ez_imag"], axis=1, inv_delta=solver.inv_dy_h)
+        d_ey_imag_dz = _forward_diff(state["Ey_imag"], axis=2, inv_delta=solver.inv_dz_h)
         hx_imag, psi_hx_y_imag, psi_hx_z_imag = _update_magnetic_component(
             state["Hx_imag"],
             d_pos=d_ez_imag_dy,
@@ -2067,8 +2076,8 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             axis_neg=2,
         )
 
-        d_ex_imag_dz = _forward_diff(state["Ex_imag"], axis=2, inv_delta=solver.inv_dz)
-        d_ez_imag_dx = _forward_diff(state["Ez_imag"], axis=0, inv_delta=solver.inv_dx)
+        d_ex_imag_dz = _forward_diff(state["Ex_imag"], axis=2, inv_delta=solver.inv_dz_h)
+        d_ez_imag_dx = _forward_diff(state["Ez_imag"], axis=0, inv_delta=solver.inv_dx_h)
         hy_imag, psi_hy_z_imag, psi_hy_x_imag = _update_magnetic_component(
             state["Hy_imag"],
             d_pos=d_ex_imag_dz,
@@ -2087,8 +2096,8 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             axis_neg=0,
         )
 
-        d_ey_imag_dx = _forward_diff(state["Ey_imag"], axis=0, inv_delta=solver.inv_dx)
-        d_ex_imag_dy = _forward_diff(state["Ex_imag"], axis=1, inv_delta=solver.inv_dy)
+        d_ey_imag_dx = _forward_diff(state["Ey_imag"], axis=0, inv_delta=solver.inv_dx_h)
+        d_ex_imag_dy = _forward_diff(state["Ex_imag"], axis=1, inv_delta=solver.inv_dy_h)
         hz_imag, psi_hz_x_imag, psi_hz_y_imag = _update_magnetic_component(
             state["Hz_imag"],
             d_pos=d_ey_imag_dx,
@@ -2168,14 +2177,14 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             d_hz_dy = _bloch_backward_diff(
                 hz_complex,
                 axis=1,
-                inv_delta=solver.inv_dy,
+                inv_delta=solver.inv_dy_e,
                 phase_cos=float(solver.boundary_phase_cos[1]),
                 phase_sin=float(solver.boundary_phase_sin[1]),
             )
             d_hy_dz = _bloch_backward_diff(
                 hy_complex,
                 axis=2,
-                inv_delta=solver.inv_dz,
+                inv_delta=solver.inv_dz_e,
                 phase_cos=float(solver.boundary_phase_cos[2]),
                 phase_sin=float(solver.boundary_phase_sin[2]),
             )
@@ -2185,14 +2194,14 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             d_hx_dz = _bloch_backward_diff(
                 hx_complex,
                 axis=2,
-                inv_delta=solver.inv_dz,
+                inv_delta=solver.inv_dz_e,
                 phase_cos=float(solver.boundary_phase_cos[2]),
                 phase_sin=float(solver.boundary_phase_sin[2]),
             )
             d_hz_dx = _bloch_backward_diff(
                 hz_complex,
                 axis=0,
-                inv_delta=solver.inv_dx,
+                inv_delta=solver.inv_dx_e,
                 phase_cos=float(solver.boundary_phase_cos[0]),
                 phase_sin=float(solver.boundary_phase_sin[0]),
             )
@@ -2201,14 +2210,14 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             d_hy_dx = _bloch_backward_diff(
                 hy_complex,
                 axis=0,
-                inv_delta=solver.inv_dx,
+                inv_delta=solver.inv_dx_e,
                 phase_cos=float(solver.boundary_phase_cos[0]),
                 phase_sin=float(solver.boundary_phase_sin[0]),
             )
             d_hx_dy = _bloch_backward_diff(
                 hx_complex,
                 axis=1,
-                inv_delta=solver.inv_dy,
+                inv_delta=solver.inv_dy_e,
                 phase_cos=float(solver.boundary_phase_cos[1]),
                 phase_sin=float(solver.boundary_phase_sin[1]),
             )
@@ -2224,8 +2233,8 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             }
             psi_ex_y = psi_ex_z = psi_ey_x = psi_ey_z = psi_ez_x = psi_ez_y = None
     else:
-        d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy)
-        d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz)
+        d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy_e)
+        d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz_e)
         ex, psi_ex_y, psi_ex_z = _update_electric_component(
             state["Ex"],
             d_pos=d_hz_dy,
@@ -2249,8 +2258,8 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             inv_kappa_neg=getattr(solver, "cpml_inv_kappa_e_z", None),
         )
 
-        d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz)
-        d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx)
+        d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz_e)
+        d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx_e)
         ey, psi_ey_x, psi_ey_z = _update_electric_component(
             state["Ey"],
             d_pos=d_hx_dz,
@@ -2274,8 +2283,8 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             inv_kappa_neg=getattr(solver, "cpml_inv_kappa_e_x", None),
         )
 
-        d_hy_dx = _backward_diff(magnetic_fields["Hy"], axis=0, inv_delta=solver.inv_dx)
-        d_hx_dy = _backward_diff(magnetic_fields["Hx"], axis=1, inv_delta=solver.inv_dy)
+        d_hy_dx = _backward_diff(magnetic_fields["Hy"], axis=0, inv_delta=solver.inv_dx_e)
+        d_hx_dy = _backward_diff(magnetic_fields["Hx"], axis=1, inv_delta=solver.inv_dy_e)
         ez, psi_ez_x, psi_ez_y = _update_electric_component(
             state["Ez"],
             d_pos=d_hy_dx,

@@ -133,8 +133,8 @@ def _component_volume(result, component: str):
         z = np.linspace(solver.scene.domain_range[4], solver.scene.domain_range[5], field.shape[2])
     elif component == "Ez":
         z = np.linspace(
-            solver.scene.domain_range[4] + 0.5 * solver.dz,
-            solver.scene.domain_range[5] - 0.5 * solver.dz,
+            solver.scene.domain_range[4] + 0.5 * solver.scene.dz,
+            solver.scene.domain_range[5] - 0.5 * solver.scene.dz,
             field.shape[2],
         )
     else:
@@ -505,7 +505,7 @@ def test_grating_tfsf_oblique_plane_wave_leakage_is_bounded():
             field,
             z_coords,
             _GRATING_TFSF_Z_BOUNDS,
-            dz=result.solver.dz,
+            dz=result.solver.scene.dz,
         )
         assert inside_max > 0.0
         assert outside_max < inside_max * 4.0

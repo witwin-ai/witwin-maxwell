@@ -63,19 +63,20 @@ __device__ __forceinline__ float backward_diff_axis0(
     unsigned int k,
     int low_mode,
   int high_mode,
-  float inv_delta) {
+  const float* __restrict__ inv_delta) {
+  const float inv = inv_delta[i];
   const unsigned int source_x = target_x - 1;
   if (i == 0) {
     const float low_value = source[offset3d(0, j, k, source_y, source_z)];
     const float high_value = source[offset3d(source_x - 1, j, k, source_y, source_z)];
-    return boundary_diff_low(low_value, high_value, low_mode, inv_delta);
+    return boundary_diff_low(low_value, high_value, low_mode, inv);
   }
   if (i + 1 == target_x) {
     const float low_value = source[offset3d(0, j, k, source_y, source_z)];
     const float high_value = source[offset3d(source_x - 1, j, k, source_y, source_z)];
-    return boundary_diff_high(low_value, high_value, high_mode, inv_delta);
+    return boundary_diff_high(low_value, high_value, high_mode, inv);
   }
-  return (source[offset3d(i, j, k, source_y, source_z)] - source[offset3d(i - 1, j, k, source_y, source_z)]) * inv_delta;
+  return (source[offset3d(i, j, k, source_y, source_z)] - source[offset3d(i - 1, j, k, source_y, source_z)]) * inv;
 }
 
 __device__ __forceinline__ float backward_diff_axis1(
@@ -87,18 +88,19 @@ __device__ __forceinline__ float backward_diff_axis1(
     unsigned int k,
   int low_mode,
   int high_mode,
-  float inv_delta) {
+  const float* __restrict__ inv_delta) {
+  const float inv = inv_delta[j];
   if (j == 0) {
     const float low_value = source[offset3d(i, 0, k, source_y, source_z)];
     const float high_value = source[offset3d(i, source_y - 1, k, source_y, source_z)];
-    return boundary_diff_low(low_value, high_value, low_mode, inv_delta);
+    return boundary_diff_low(low_value, high_value, low_mode, inv);
   }
   if (j == source_y) {
     const float low_value = source[offset3d(i, 0, k, source_y, source_z)];
     const float high_value = source[offset3d(i, source_y - 1, k, source_y, source_z)];
-    return boundary_diff_high(low_value, high_value, high_mode, inv_delta);
+    return boundary_diff_high(low_value, high_value, high_mode, inv);
   }
-  return (source[offset3d(i, j, k, source_y, source_z)] - source[offset3d(i, j - 1, k, source_y, source_z)]) * inv_delta;
+  return (source[offset3d(i, j, k, source_y, source_z)] - source[offset3d(i, j - 1, k, source_y, source_z)]) * inv;
 }
 
 __device__ __forceinline__ float backward_diff_axis2(
@@ -110,18 +112,19 @@ __device__ __forceinline__ float backward_diff_axis2(
     unsigned int k,
   int low_mode,
   int high_mode,
-  float inv_delta) {
+  const float* __restrict__ inv_delta) {
+  const float inv = inv_delta[k];
   if (k == 0) {
     const float low_value = source[offset3d(i, j, 0, source_y, source_z)];
     const float high_value = source[offset3d(i, j, source_z - 1, source_y, source_z)];
-    return boundary_diff_low(low_value, high_value, low_mode, inv_delta);
+    return boundary_diff_low(low_value, high_value, low_mode, inv);
   }
   if (k == source_z) {
     const float low_value = source[offset3d(i, j, 0, source_y, source_z)];
     const float high_value = source[offset3d(i, j, source_z - 1, source_y, source_z)];
-    return boundary_diff_high(low_value, high_value, high_mode, inv_delta);
+    return boundary_diff_high(low_value, high_value, high_mode, inv);
   }
-  return (source[offset3d(i, j, k, source_y, source_z)] - source[offset3d(i, j, k - 1, source_y, source_z)]) * inv_delta;
+  return (source[offset3d(i, j, k, source_y, source_z)] - source[offset3d(i, j, k - 1, source_y, source_z)]) * inv;
 }
 
 struct ComplexValue {
@@ -149,22 +152,23 @@ __device__ __forceinline__ ComplexValue bloch_backward_diff_axis0(
     unsigned int k,
     float phase_cos,
     float phase_sin,
-    float inv_delta) {
+    const float* __restrict__ inv_delta) {
+  const float inv = inv_delta[i];
   if (i == 0) {
     const long long low = offset3d(0, j, k, source_y, source_z);
     const long long high = offset3d(source_x - 1, j, k, source_y, source_z);
     const ComplexValue shifted = phase_negative(real[high], imag[high], phase_cos, phase_sin);
-    return {(real[low] - shifted.real) * inv_delta, (imag[low] - shifted.imag) * inv_delta};
+    return {(real[low] - shifted.real) * inv, (imag[low] - shifted.imag) * inv};
   }
   if (i + 1 == target_x) {
     const long long low = offset3d(0, j, k, source_y, source_z);
     const long long high = offset3d(source_x - 1, j, k, source_y, source_z);
     const ComplexValue shifted = phase_positive(real[low], imag[low], phase_cos, phase_sin);
-    return {(shifted.real - real[high]) * inv_delta, (shifted.imag - imag[high]) * inv_delta};
+    return {(shifted.real - real[high]) * inv, (shifted.imag - imag[high]) * inv};
   }
   const long long current = offset3d(i, j, k, source_y, source_z);
   const long long previous = offset3d(i - 1, j, k, source_y, source_z);
-  return {(real[current] - real[previous]) * inv_delta, (imag[current] - imag[previous]) * inv_delta};
+  return {(real[current] - real[previous]) * inv, (imag[current] - imag[previous]) * inv};
 }
 
 __device__ __forceinline__ ComplexValue bloch_backward_diff_axis1(
@@ -178,22 +182,23 @@ __device__ __forceinline__ ComplexValue bloch_backward_diff_axis1(
     unsigned int k,
     float phase_cos,
     float phase_sin,
-    float inv_delta) {
+    const float* __restrict__ inv_delta) {
+  const float inv = inv_delta[j];
   if (j == 0) {
     const long long low = offset3d(i, 0, k, source_y, source_z);
     const long long high = offset3d(i, source_y - 1, k, source_y, source_z);
     const ComplexValue shifted = phase_negative(real[high], imag[high], phase_cos, phase_sin);
-    return {(real[low] - shifted.real) * inv_delta, (imag[low] - shifted.imag) * inv_delta};
+    return {(real[low] - shifted.real) * inv, (imag[low] - shifted.imag) * inv};
   }
   if (j + 1 == target_y) {
     const long long low = offset3d(i, 0, k, source_y, source_z);
     const long long high = offset3d(i, source_y - 1, k, source_y, source_z);
     const ComplexValue shifted = phase_positive(real[low], imag[low], phase_cos, phase_sin);
-    return {(shifted.real - real[high]) * inv_delta, (shifted.imag - imag[high]) * inv_delta};
+    return {(shifted.real - real[high]) * inv, (shifted.imag - imag[high]) * inv};
   }
   const long long current = offset3d(i, j, k, source_y, source_z);
   const long long previous = offset3d(i, j - 1, k, source_y, source_z);
-  return {(real[current] - real[previous]) * inv_delta, (imag[current] - imag[previous]) * inv_delta};
+  return {(real[current] - real[previous]) * inv, (imag[current] - imag[previous]) * inv};
 }
 
 __device__ __forceinline__ ComplexValue bloch_backward_diff_axis2(
@@ -207,22 +212,23 @@ __device__ __forceinline__ ComplexValue bloch_backward_diff_axis2(
     unsigned int k,
     float phase_cos,
     float phase_sin,
-    float inv_delta) {
+    const float* __restrict__ inv_delta) {
+  const float inv = inv_delta[k];
   if (k == 0) {
     const long long low = offset3d(i, j, 0, source_y, source_z);
     const long long high = offset3d(i, j, source_z - 1, source_y, source_z);
     const ComplexValue shifted = phase_negative(real[high], imag[high], phase_cos, phase_sin);
-    return {(real[low] - shifted.real) * inv_delta, (imag[low] - shifted.imag) * inv_delta};
+    return {(real[low] - shifted.real) * inv, (imag[low] - shifted.imag) * inv};
   }
   if (k + 1 == target_z) {
     const long long low = offset3d(i, j, 0, source_y, source_z);
     const long long high = offset3d(i, j, source_z - 1, source_y, source_z);
     const ComplexValue shifted = phase_positive(real[low], imag[low], phase_cos, phase_sin);
-    return {(shifted.real - real[high]) * inv_delta, (shifted.imag - imag[high]) * inv_delta};
+    return {(shifted.real - real[high]) * inv, (shifted.imag - imag[high]) * inv};
   }
   const long long current = offset3d(i, j, k, source_y, source_z);
   const long long previous = offset3d(i, j, k - 1, source_y, source_z);
-  return {(real[current] - real[previous]) * inv_delta, (imag[current] - imag[previous]) * inv_delta};
+  return {(real[current] - real[previous]) * inv, (imag[current] - imag[previous]) * inv};
 }
 
 __global__ void update_electric_ex_standard_kernel(
@@ -233,8 +239,8 @@ __global__ void update_electric_ex_standard_kernel(
     const float* __restrict__ hz,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
-    float inv_dy,
-    float inv_dz,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
     int y_low_mode,
     int y_high_mode,
     int z_low_mode,
@@ -268,8 +274,8 @@ __global__ void update_electric_ex_standard_interior_kernel(
     const float* __restrict__ hz,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
-    float inv_dy,
-    float inv_dz,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
     float* __restrict__ ex) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
@@ -282,8 +288,8 @@ __global__ void update_electric_ex_standard_interior_kernel(
   const long long hz_previous = offset3d(i, j - 1, k, ny - 1, nz);
   const long long hy_current = offset3d(i, j, k, ny, nz - 1);
   const long long hy_previous = offset3d(i, j, k - 1, ny, nz - 1);
-  const float d_y = (hz[hz_current] - hz[hz_previous]) * inv_dy;
-  const float d_z = (hy[hy_current] - hy[hy_previous]) * inv_dz;
+  const float d_y = (hz[hz_current] - hz[hz_previous]) * inv_dy[j];
+  const float d_z = (hy[hy_current] - hy[hy_previous]) * inv_dz[k];
   ex[linear] = ex[linear] * decay[linear] + curl_coeff[linear] * (d_y - d_z);
 }
 
@@ -295,8 +301,8 @@ __global__ void update_electric_ey_standard_kernel(
     const float* __restrict__ hz,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
-    float inv_dx,
-    float inv_dz,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dz,
     int x_low_mode,
     int x_high_mode,
     int z_low_mode,
@@ -330,8 +336,8 @@ __global__ void update_electric_ey_standard_interior_kernel(
     const float* __restrict__ hz,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
-    float inv_dx,
-    float inv_dz,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dz,
     float* __restrict__ ey) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x + 1;
   const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -344,8 +350,8 @@ __global__ void update_electric_ey_standard_interior_kernel(
   const long long hx_previous = offset3d(i, j, k - 1, ny, nz - 1);
   const long long hz_current = offset3d(i, j, k, ny, nz);
   const long long hz_previous = offset3d(i - 1, j, k, ny, nz);
-  const float d_z = (hx[hx_current] - hx[hx_previous]) * inv_dz;
-  const float d_x = (hz[hz_current] - hz[hz_previous]) * inv_dx;
+  const float d_z = (hx[hx_current] - hx[hx_previous]) * inv_dz[k];
+  const float d_x = (hz[hz_current] - hz[hz_previous]) * inv_dx[i];
   ey[linear] = ey[linear] * decay[linear] + curl_coeff[linear] * (d_z - d_x);
 }
 
@@ -357,8 +363,8 @@ __global__ void update_electric_ez_standard_kernel(
     const float* __restrict__ hy,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
-    float inv_dx,
-    float inv_dy,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
     int x_low_mode,
     int x_high_mode,
     int y_low_mode,
@@ -392,8 +398,8 @@ __global__ void update_electric_ez_standard_interior_kernel(
     const float* __restrict__ hy,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
-    float inv_dx,
-    float inv_dy,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
     float* __restrict__ ez) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
   const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
@@ -406,8 +412,8 @@ __global__ void update_electric_ez_standard_interior_kernel(
   const long long hy_previous = offset3d(i - 1, j, k, ny, nz);
   const long long hx_current = offset3d(i, j, k, ny - 1, nz);
   const long long hx_previous = offset3d(i, j - 1, k, ny - 1, nz);
-  const float d_x = (hy[hy_current] - hy[hy_previous]) * inv_dx;
-  const float d_y = (hx[hx_current] - hx[hx_previous]) * inv_dy;
+  const float d_x = (hy[hy_current] - hy[hy_previous]) * inv_dx[i];
+  const float d_y = (hx[hx_current] - hx[hx_previous]) * inv_dy[j];
   ez[linear] = ez[linear] * decay[linear] + curl_coeff[linear] * (d_x - d_y);
 }
 
@@ -425,8 +431,8 @@ __global__ void update_electric_ex_bloch_kernel(
     float phase_sin_y,
     float phase_cos_z,
     float phase_sin_z,
-    float inv_dy,
-    float inv_dz,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
     float* __restrict__ ex_real,
     float* __restrict__ ex_imag) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
@@ -458,8 +464,8 @@ __global__ void update_electric_ey_bloch_kernel(
     float phase_sin_x,
     float phase_cos_z,
     float phase_sin_z,
-    float inv_dx,
-    float inv_dz,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dz,
     float* __restrict__ ey_real,
     float* __restrict__ ey_imag) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
@@ -491,8 +497,8 @@ __global__ void update_electric_ez_bloch_kernel(
     float phase_sin_x,
     float phase_cos_y,
     float phase_sin_y,
-    float inv_dx,
-    float inv_dy,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
     float* __restrict__ ez_real,
     float* __restrict__ ez_imag) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
@@ -524,8 +530,8 @@ __global__ void update_electric_ex_cpml_kernel(
     const float* __restrict__ inv_kappa_z,
     const float* __restrict__ b_z,
     const float* __restrict__ c_z,
-    float inv_dy,
-    float inv_dz,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
     int y_low_mode,
     int y_high_mode,
     int z_low_mode,
@@ -572,8 +578,8 @@ __global__ void update_electric_ex_cpml_interior_kernel(
     const float* __restrict__ inv_kappa_z,
     const float* __restrict__ b_z,
     const float* __restrict__ c_z,
-    float inv_dy,
-    float inv_dz,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
     float* __restrict__ psi_y,
     float* __restrict__ psi_z,
     float* __restrict__ ex) {
@@ -588,8 +594,8 @@ __global__ void update_electric_ex_cpml_interior_kernel(
   const long long hz_previous = offset3d(i, j - 1, k, ny - 1, nz);
   const long long hy_current = offset3d(i, j, k, ny, nz - 1);
   const long long hy_previous = offset3d(i, j, k - 1, ny, nz - 1);
-  const float d_y = (hz[hz_current] - hz[hz_previous]) * inv_dy;
-  const float d_z = (hy[hy_current] - hy[hy_previous]) * inv_dz;
+  const float d_y = (hz[hz_current] - hz[hz_previous]) * inv_dy[j];
+  const float d_z = (hy[hy_current] - hy[hy_previous]) * inv_dz[k];
   const float psi_y_value = b_y[j] * psi_y[linear] + c_y[j] * d_y;
   const float psi_z_value = b_z[k] * psi_z[linear] + c_z[k] * d_z;
   psi_y[linear] = psi_y_value;
@@ -612,8 +618,8 @@ __global__ void update_electric_ey_cpml_kernel(
     const float* __restrict__ inv_kappa_z,
     const float* __restrict__ b_z,
     const float* __restrict__ c_z,
-    float inv_dx,
-    float inv_dz,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dz,
     int x_low_mode,
     int x_high_mode,
     int z_low_mode,
@@ -660,8 +666,8 @@ __global__ void update_electric_ey_cpml_interior_kernel(
     const float* __restrict__ inv_kappa_z,
     const float* __restrict__ b_z,
     const float* __restrict__ c_z,
-    float inv_dx,
-    float inv_dz,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dz,
     float* __restrict__ psi_x,
     float* __restrict__ psi_z,
     float* __restrict__ ey) {
@@ -676,8 +682,8 @@ __global__ void update_electric_ey_cpml_interior_kernel(
   const long long hx_previous = offset3d(i, j, k - 1, ny, nz - 1);
   const long long hz_current = offset3d(i, j, k, ny, nz);
   const long long hz_previous = offset3d(i - 1, j, k, ny, nz);
-  const float d_z = (hx[hx_current] - hx[hx_previous]) * inv_dz;
-  const float d_x = (hz[hz_current] - hz[hz_previous]) * inv_dx;
+  const float d_z = (hx[hx_current] - hx[hx_previous]) * inv_dz[k];
+  const float d_x = (hz[hz_current] - hz[hz_previous]) * inv_dx[i];
   const float psi_x_value = b_x[i] * psi_x[linear] + c_x[i] * d_x;
   const float psi_z_value = b_z[k] * psi_z[linear] + c_z[k] * d_z;
   psi_x[linear] = psi_x_value;
@@ -700,8 +706,8 @@ __global__ void update_electric_ez_cpml_kernel(
     const float* __restrict__ inv_kappa_y,
     const float* __restrict__ b_y,
     const float* __restrict__ c_y,
-    float inv_dx,
-    float inv_dy,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
     int x_low_mode,
     int x_high_mode,
     int y_low_mode,
@@ -748,8 +754,8 @@ __global__ void update_electric_ez_cpml_interior_kernel(
     const float* __restrict__ inv_kappa_y,
     const float* __restrict__ b_y,
     const float* __restrict__ c_y,
-    float inv_dx,
-    float inv_dy,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
     float* __restrict__ psi_x,
     float* __restrict__ psi_y,
     float* __restrict__ ez) {
@@ -764,8 +770,8 @@ __global__ void update_electric_ez_cpml_interior_kernel(
   const long long hy_previous = offset3d(i - 1, j, k, ny, nz);
   const long long hx_current = offset3d(i, j, k, ny - 1, nz);
   const long long hx_previous = offset3d(i, j - 1, k, ny - 1, nz);
-  const float d_x = (hy[hy_current] - hy[hy_previous]) * inv_dx;
-  const float d_y = (hx[hx_current] - hx[hx_previous]) * inv_dy;
+  const float d_x = (hy[hy_current] - hy[hy_previous]) * inv_dx[i];
+  const float d_y = (hx[hx_current] - hx[hx_previous]) * inv_dy[j];
   const float psi_x_value = b_x[i] * psi_x[linear] + c_x[i] * d_x;
   const float psi_y_value = b_y[j] * psi_y[linear] + c_y[j] * d_y;
   psi_x[linear] = psi_x_value;
@@ -817,8 +823,8 @@ __global__ void update_electric_ex_cpml_compressed_kernel(
     const float* __restrict__ inv_kappa_z,
     const float* __restrict__ b_z,
     const float* __restrict__ c_z,
-    float inv_dy,
-    float inv_dz,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
     int y_low_mode,
     int y_high_mode,
     int z_low_mode,
@@ -877,8 +883,8 @@ __global__ void update_electric_ey_cpml_compressed_kernel(
     const float* __restrict__ inv_kappa_z,
     const float* __restrict__ b_z,
     const float* __restrict__ c_z,
-    float inv_dx,
-    float inv_dz,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dz,
     int x_low_mode,
     int x_high_mode,
     int z_low_mode,
@@ -937,8 +943,8 @@ __global__ void update_electric_ez_cpml_compressed_kernel(
     const float* __restrict__ inv_kappa_y,
     const float* __restrict__ b_y,
     const float* __restrict__ c_y,
-    float inv_dx,
-    float inv_dy,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
     int x_low_mode,
     int x_high_mode,
     int y_low_mode,
@@ -1053,6 +1059,15 @@ void check_vector_input(const at::Tensor& tensor, int64_t length, const char* na
   check_contiguous_tensor(tensor, name);
   TORCH_CHECK(tensor.dim() == 1, name, " must be rank 1");
   TORCH_CHECK(tensor.size(0) == length, name, " length must match CPML field axis");
+}
+
+void check_spacing_vector(
+    const at::Tensor& field,
+    const at::Tensor& inv_delta,
+    int64_t axis,
+    const char* name) {
+  check_vector_input(inv_delta, field.size(axis), name);
+  check_same_cuda_device(field, inv_delta, name);
 }
 
 void check_electric_cpml_inputs(
@@ -1174,8 +1189,8 @@ __global__ void update_electric_ex_bloch_y_standard_z_kernel(
     const float* __restrict__ curl_coeff,
     float phase_cos_y,
     float phase_sin_y,
-    float inv_dy,
-    float inv_dz,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
     int z_low_mode,
     int z_high_mode,
     float* __restrict__ ex_real,
@@ -1208,8 +1223,8 @@ __global__ void update_electric_ey_bloch_x_standard_z_kernel(
     const float* __restrict__ curl_coeff,
     float phase_cos_x,
     float phase_sin_x,
-    float inv_dx,
-    float inv_dz,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dz,
     int z_low_mode,
     int z_high_mode,
     float* __restrict__ ey_real,
@@ -1244,7 +1259,7 @@ __global__ void apply_electric_ex_cpml_z_correction_kernel(
     const float* __restrict__ inv_kappa_z,
     const float* __restrict__ b_z,
     const float* __restrict__ c_z,
-    float inv_dz,
+    const float* __restrict__ inv_dz,
     int offset_i,
     int offset_j,
     int offset_k,
@@ -1273,7 +1288,7 @@ __global__ void apply_electric_ex_cpml_z_correction_kernel(
   const long long region_lin = offset3d(x, y, lz, sy, sz);
   const long long hy_cur = offset3d(gx, gy, gz, hy_ny, hy_nz);
   const long long hy_prev = offset3d(gx, gy, gz - 1, hy_ny, hy_nz);
-  const float derivative = (hy[hy_cur] - hy[hy_prev]) * inv_dz;
+  const float derivative = (hy[hy_cur] - hy[hy_prev]) * inv_dz[gz];
   const float psi_new = b_z[gz] * psi_z[region_lin] + c_z[gz] * derivative;
   psi_z[region_lin] = psi_new;
   const float correction = derivative * (inv_kappa_z[gz] - 1.0f) + psi_new;
@@ -1291,7 +1306,7 @@ __global__ void apply_electric_ey_cpml_z_correction_kernel(
     const float* __restrict__ inv_kappa_z,
     const float* __restrict__ b_z,
     const float* __restrict__ c_z,
-    float inv_dz,
+    const float* __restrict__ inv_dz,
     int offset_i,
     int offset_j,
     int offset_k,
@@ -1320,7 +1335,7 @@ __global__ void apply_electric_ey_cpml_z_correction_kernel(
   const long long region_lin = offset3d(x, y, lz, sy, sz);
   const long long hx_cur = offset3d(gx, gy, gz, hx_ny, hx_nz);
   const long long hx_prev = offset3d(gx, gy, gz - 1, hx_ny, hx_nz);
-  const float derivative = (hx[hx_cur] - hx[hx_prev]) * inv_dz;
+  const float derivative = (hx[hx_cur] - hx[hx_prev]) * inv_dz[gz];
   const float psi_new = b_z[gz] * psi_z[region_lin] + c_z[gz] * derivative;
   psi_z[region_lin] = psi_new;
   const float correction = derivative * (inv_kappa_z[gz] - 1.0f) + psi_new;
@@ -1335,8 +1350,8 @@ void update_electric_ex_standard_cuda(
     const at::Tensor& hz,
     const at::Tensor& decay,
     const at::Tensor& curl,
-    double inv_dy,
-    double inv_dz,
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz,
     int64_t y_low_mode,
     int64_t y_high_mode,
     int64_t z_low_mode,
@@ -1344,6 +1359,8 @@ void update_electric_ex_standard_cuda(
   check_electric_inputs(ex, hy, hz, decay, curl, "ex");
   check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
   check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
+  check_spacing_vector(ex, inv_dy, 1, "inv_dy");
+  check_spacing_vector(ex, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(ex.device());
   const auto sizes = ex.sizes();
   const dim3 block = field_block3d();
@@ -1357,8 +1374,8 @@ void update_electric_ex_standard_cuda(
           hz.data_ptr<float>(),
           decay.data_ptr<float>(),
           curl.data_ptr<float>(),
-          static_cast<float>(inv_dy),
-          static_cast<float>(inv_dz),
+          inv_dy.data_ptr<float>(),
+          inv_dz.data_ptr<float>(),
           ex.data_ptr<float>());
     }
   } else {
@@ -1370,8 +1387,8 @@ void update_electric_ex_standard_cuda(
         hz.data_ptr<float>(),
         decay.data_ptr<float>(),
         curl.data_ptr<float>(),
-        static_cast<float>(inv_dy),
-        static_cast<float>(inv_dz),
+        inv_dy.data_ptr<float>(),
+        inv_dz.data_ptr<float>(),
         static_cast<int>(y_low_mode),
         static_cast<int>(y_high_mode),
         static_cast<int>(z_low_mode),
@@ -1387,8 +1404,8 @@ void update_electric_ey_standard_cuda(
     const at::Tensor& hz,
     const at::Tensor& decay,
     const at::Tensor& curl,
-    double inv_dx,
-    double inv_dz,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t z_low_mode,
@@ -1396,6 +1413,8 @@ void update_electric_ey_standard_cuda(
   check_electric_inputs(ey, hx, hz, decay, curl, "ey");
   check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
   check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
+  check_spacing_vector(ey, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ey, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(ey.device());
   const auto sizes = ey.sizes();
   const dim3 block = field_block3d();
@@ -1409,8 +1428,8 @@ void update_electric_ey_standard_cuda(
           hz.data_ptr<float>(),
           decay.data_ptr<float>(),
           curl.data_ptr<float>(),
-          static_cast<float>(inv_dx),
-          static_cast<float>(inv_dz),
+          inv_dx.data_ptr<float>(),
+          inv_dz.data_ptr<float>(),
           ey.data_ptr<float>());
     }
   } else {
@@ -1422,8 +1441,8 @@ void update_electric_ey_standard_cuda(
         hz.data_ptr<float>(),
         decay.data_ptr<float>(),
         curl.data_ptr<float>(),
-        static_cast<float>(inv_dx),
-        static_cast<float>(inv_dz),
+        inv_dx.data_ptr<float>(),
+        inv_dz.data_ptr<float>(),
         static_cast<int>(x_low_mode),
         static_cast<int>(x_high_mode),
         static_cast<int>(z_low_mode),
@@ -1439,8 +1458,8 @@ void update_electric_ez_standard_cuda(
     const at::Tensor& hy,
     const at::Tensor& decay,
     const at::Tensor& curl,
-    double inv_dx,
-    double inv_dy,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t y_low_mode,
@@ -1448,6 +1467,8 @@ void update_electric_ez_standard_cuda(
   check_electric_inputs(ez, hx, hy, decay, curl, "ez");
   check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
   check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
+  check_spacing_vector(ez, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ez, inv_dy, 1, "inv_dy");
   c10::cuda::CUDAGuard guard(ez.device());
   const auto sizes = ez.sizes();
   const dim3 block = field_block3d();
@@ -1461,8 +1482,8 @@ void update_electric_ez_standard_cuda(
           hy.data_ptr<float>(),
           decay.data_ptr<float>(),
           curl.data_ptr<float>(),
-          static_cast<float>(inv_dx),
-          static_cast<float>(inv_dy),
+          inv_dx.data_ptr<float>(),
+          inv_dy.data_ptr<float>(),
           ez.data_ptr<float>());
     }
   } else {
@@ -1474,8 +1495,8 @@ void update_electric_ez_standard_cuda(
         hy.data_ptr<float>(),
         decay.data_ptr<float>(),
         curl.data_ptr<float>(),
-        static_cast<float>(inv_dx),
-        static_cast<float>(inv_dy),
+        inv_dx.data_ptr<float>(),
+        inv_dy.data_ptr<float>(),
         static_cast<int>(x_low_mode),
         static_cast<int>(x_high_mode),
         static_cast<int>(y_low_mode),
@@ -1498,13 +1519,15 @@ void update_electric_ex_bloch_cuda(
     double phase_sin_y,
     double phase_cos_z,
     double phase_sin_z,
-    double inv_dy,
-    double inv_dz) {
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz) {
   check_electric_bloch_inputs(ex_real, ex_imag, hy_real, hy_imag, hz_real, hz_imag, decay, curl, "ex_real");
   check_rank3_shape(hy_real, "hy_real", ex_real.size(0), ex_real.size(1), ex_real.size(2) - 1);
   check_rank3_shape(hy_imag, "hy_imag", ex_real.size(0), ex_real.size(1), ex_real.size(2) - 1);
   check_rank3_shape(hz_real, "hz_real", ex_real.size(0), ex_real.size(1) - 1, ex_real.size(2));
   check_rank3_shape(hz_imag, "hz_imag", ex_real.size(0), ex_real.size(1) - 1, ex_real.size(2));
+  check_spacing_vector(ex_real, inv_dy, 1, "inv_dy");
+  check_spacing_vector(ex_real, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(ex_real.device());
   const auto sizes = ex_real.sizes();
   const dim3 block = field_block3d();
@@ -1522,8 +1545,8 @@ void update_electric_ex_bloch_cuda(
       static_cast<float>(phase_sin_y),
       static_cast<float>(phase_cos_z),
       static_cast<float>(phase_sin_z),
-      static_cast<float>(inv_dy),
-      static_cast<float>(inv_dz),
+      inv_dy.data_ptr<float>(),
+      inv_dz.data_ptr<float>(),
       ex_real.data_ptr<float>(),
       ex_imag.data_ptr<float>());
   WITWIN_CUDA_CHECK();
@@ -1542,13 +1565,15 @@ void update_electric_ey_bloch_cuda(
     double phase_sin_x,
     double phase_cos_z,
     double phase_sin_z,
-    double inv_dx,
-    double inv_dz) {
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz) {
   check_electric_bloch_inputs(ey_real, ey_imag, hx_real, hx_imag, hz_real, hz_imag, decay, curl, "ey_real");
   check_rank3_shape(hx_real, "hx_real", ey_real.size(0), ey_real.size(1), ey_real.size(2) - 1);
   check_rank3_shape(hx_imag, "hx_imag", ey_real.size(0), ey_real.size(1), ey_real.size(2) - 1);
   check_rank3_shape(hz_real, "hz_real", ey_real.size(0) - 1, ey_real.size(1), ey_real.size(2));
   check_rank3_shape(hz_imag, "hz_imag", ey_real.size(0) - 1, ey_real.size(1), ey_real.size(2));
+  check_spacing_vector(ey_real, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ey_real, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(ey_real.device());
   const auto sizes = ey_real.sizes();
   const dim3 block = field_block3d();
@@ -1566,8 +1591,8 @@ void update_electric_ey_bloch_cuda(
       static_cast<float>(phase_sin_x),
       static_cast<float>(phase_cos_z),
       static_cast<float>(phase_sin_z),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dz),
+      inv_dx.data_ptr<float>(),
+      inv_dz.data_ptr<float>(),
       ey_real.data_ptr<float>(),
       ey_imag.data_ptr<float>());
   WITWIN_CUDA_CHECK();
@@ -1586,13 +1611,15 @@ void update_electric_ez_bloch_cuda(
     double phase_sin_x,
     double phase_cos_y,
     double phase_sin_y,
-    double inv_dx,
-    double inv_dy) {
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy) {
   check_electric_bloch_inputs(ez_real, ez_imag, hx_real, hx_imag, hy_real, hy_imag, decay, curl, "ez_real");
   check_rank3_shape(hx_real, "hx_real", ez_real.size(0), ez_real.size(1) - 1, ez_real.size(2));
   check_rank3_shape(hx_imag, "hx_imag", ez_real.size(0), ez_real.size(1) - 1, ez_real.size(2));
   check_rank3_shape(hy_real, "hy_real", ez_real.size(0) - 1, ez_real.size(1), ez_real.size(2));
   check_rank3_shape(hy_imag, "hy_imag", ez_real.size(0) - 1, ez_real.size(1), ez_real.size(2));
+  check_spacing_vector(ez_real, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ez_real, inv_dy, 1, "inv_dy");
   c10::cuda::CUDAGuard guard(ez_real.device());
   const auto sizes = ez_real.sizes();
   const dim3 block = field_block3d();
@@ -1610,8 +1637,8 @@ void update_electric_ez_bloch_cuda(
       static_cast<float>(phase_sin_x),
       static_cast<float>(phase_cos_y),
       static_cast<float>(phase_sin_y),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dy),
+      inv_dx.data_ptr<float>(),
+      inv_dy.data_ptr<float>(),
       ez_real.data_ptr<float>(),
       ez_imag.data_ptr<float>());
   WITWIN_CUDA_CHECK();
@@ -1631,8 +1658,8 @@ void update_electric_ex_cpml_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dy,
-    double inv_dz,
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz,
     int64_t y_low_mode,
     int64_t y_high_mode,
     int64_t z_low_mode,
@@ -1641,6 +1668,8 @@ void update_electric_ex_cpml_cuda(
       ex, hy, hz, decay, curl, psi_y, psi_z, inv_kappa_y, b_y, c_y, inv_kappa_z, b_z, c_z, 1, 2, "ex");
   check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
   check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
+  check_spacing_vector(ex, inv_dy, 1, "inv_dy");
+  check_spacing_vector(ex, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(ex.device());
   const auto sizes = ex.sizes();
   const dim3 block = field_block3d();
@@ -1660,8 +1689,8 @@ void update_electric_ex_cpml_cuda(
           inv_kappa_z.data_ptr<float>(),
           b_z.data_ptr<float>(),
           c_z.data_ptr<float>(),
-          static_cast<float>(inv_dy),
-          static_cast<float>(inv_dz),
+          inv_dy.data_ptr<float>(),
+          inv_dz.data_ptr<float>(),
           psi_y.data_ptr<float>(),
           psi_z.data_ptr<float>(),
           ex.data_ptr<float>());
@@ -1681,8 +1710,8 @@ void update_electric_ex_cpml_cuda(
         inv_kappa_z.data_ptr<float>(),
         b_z.data_ptr<float>(),
         c_z.data_ptr<float>(),
-        static_cast<float>(inv_dy),
-        static_cast<float>(inv_dz),
+        inv_dy.data_ptr<float>(),
+        inv_dz.data_ptr<float>(),
         static_cast<int>(y_low_mode),
         static_cast<int>(y_high_mode),
         static_cast<int>(z_low_mode),
@@ -1708,8 +1737,8 @@ void update_electric_ey_cpml_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dx,
-    double inv_dz,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t z_low_mode,
@@ -1718,6 +1747,8 @@ void update_electric_ey_cpml_cuda(
       ey, hx, hz, decay, curl, psi_x, psi_z, inv_kappa_x, b_x, c_x, inv_kappa_z, b_z, c_z, 0, 2, "ey");
   check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
   check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
+  check_spacing_vector(ey, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ey, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(ey.device());
   const auto sizes = ey.sizes();
   const dim3 block = field_block3d();
@@ -1737,8 +1768,8 @@ void update_electric_ey_cpml_cuda(
           inv_kappa_z.data_ptr<float>(),
           b_z.data_ptr<float>(),
           c_z.data_ptr<float>(),
-          static_cast<float>(inv_dx),
-          static_cast<float>(inv_dz),
+          inv_dx.data_ptr<float>(),
+          inv_dz.data_ptr<float>(),
           psi_x.data_ptr<float>(),
           psi_z.data_ptr<float>(),
           ey.data_ptr<float>());
@@ -1758,8 +1789,8 @@ void update_electric_ey_cpml_cuda(
         inv_kappa_z.data_ptr<float>(),
         b_z.data_ptr<float>(),
         c_z.data_ptr<float>(),
-        static_cast<float>(inv_dx),
-        static_cast<float>(inv_dz),
+        inv_dx.data_ptr<float>(),
+        inv_dz.data_ptr<float>(),
         static_cast<int>(x_low_mode),
         static_cast<int>(x_high_mode),
         static_cast<int>(z_low_mode),
@@ -1785,8 +1816,8 @@ void update_electric_ez_cpml_cuda(
     const at::Tensor& inv_kappa_y,
     const at::Tensor& b_y,
     const at::Tensor& c_y,
-    double inv_dx,
-    double inv_dy,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t y_low_mode,
@@ -1795,6 +1826,8 @@ void update_electric_ez_cpml_cuda(
       ez, hx, hy, decay, curl, psi_x, psi_y, inv_kappa_x, b_x, c_x, inv_kappa_y, b_y, c_y, 0, 1, "ez");
   check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
   check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
+  check_spacing_vector(ez, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ez, inv_dy, 1, "inv_dy");
   c10::cuda::CUDAGuard guard(ez.device());
   const auto sizes = ez.sizes();
   const dim3 block = field_block3d();
@@ -1814,8 +1847,8 @@ void update_electric_ez_cpml_cuda(
           inv_kappa_y.data_ptr<float>(),
           b_y.data_ptr<float>(),
           c_y.data_ptr<float>(),
-          static_cast<float>(inv_dx),
-          static_cast<float>(inv_dy),
+          inv_dx.data_ptr<float>(),
+          inv_dy.data_ptr<float>(),
           psi_x.data_ptr<float>(),
           psi_y.data_ptr<float>(),
           ez.data_ptr<float>());
@@ -1835,8 +1868,8 @@ void update_electric_ez_cpml_cuda(
         inv_kappa_y.data_ptr<float>(),
         b_y.data_ptr<float>(),
         c_y.data_ptr<float>(),
-        static_cast<float>(inv_dx),
-        static_cast<float>(inv_dy),
+        inv_dx.data_ptr<float>(),
+        inv_dy.data_ptr<float>(),
         static_cast<int>(x_low_mode),
         static_cast<int>(x_high_mode),
         static_cast<int>(y_low_mode),
@@ -1862,8 +1895,8 @@ void update_electric_ex_cpml_compressed_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dy,
-    double inv_dz,
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz,
     int64_t y_low_mode,
     int64_t y_high_mode,
     int64_t z_low_mode,
@@ -1881,6 +1914,8 @@ void update_electric_ex_cpml_compressed_cuda(
       1, 2, y_low_length, y_high_length, z_low_length, z_high_length, "ex");
   check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
   check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
+  check_spacing_vector(ex, inv_dy, 1, "inv_dy");
+  check_spacing_vector(ex, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(ex.device());
   const auto sizes = ex.sizes();
   const dim3 block = field_block3d();
@@ -1901,8 +1936,8 @@ void update_electric_ex_cpml_compressed_cuda(
         inv_kappa_z.data_ptr<float>(),
         b_z.data_ptr<float>(),
         c_z.data_ptr<float>(),
-        static_cast<float>(inv_dy),
-        static_cast<float>(inv_dz),
+        inv_dy.data_ptr<float>(),
+        inv_dz.data_ptr<float>(),
         static_cast<int>(y_low_mode),
         static_cast<int>(y_high_mode),
         static_cast<int>(z_low_mode),
@@ -1934,8 +1969,8 @@ void update_electric_ey_cpml_compressed_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dx,
-    double inv_dz,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t z_low_mode,
@@ -1953,6 +1988,8 @@ void update_electric_ey_cpml_compressed_cuda(
       0, 2, x_low_length, x_high_length, z_low_length, z_high_length, "ey");
   check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
   check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
+  check_spacing_vector(ey, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ey, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(ey.device());
   const auto sizes = ey.sizes();
   const dim3 block = field_block3d();
@@ -1973,8 +2010,8 @@ void update_electric_ey_cpml_compressed_cuda(
         inv_kappa_z.data_ptr<float>(),
         b_z.data_ptr<float>(),
         c_z.data_ptr<float>(),
-        static_cast<float>(inv_dx),
-        static_cast<float>(inv_dz),
+        inv_dx.data_ptr<float>(),
+        inv_dz.data_ptr<float>(),
         static_cast<int>(x_low_mode),
         static_cast<int>(x_high_mode),
         static_cast<int>(z_low_mode),
@@ -2006,8 +2043,8 @@ void update_electric_ez_cpml_compressed_cuda(
     const at::Tensor& inv_kappa_y,
     const at::Tensor& b_y,
     const at::Tensor& c_y,
-    double inv_dx,
-    double inv_dy,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dy,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t y_low_mode,
@@ -2025,6 +2062,8 @@ void update_electric_ez_cpml_compressed_cuda(
       0, 1, x_low_length, x_high_length, y_low_length, y_high_length, "ez");
   check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
   check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
+  check_spacing_vector(ez, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ez, inv_dy, 1, "inv_dy");
   c10::cuda::CUDAGuard guard(ez.device());
   const auto sizes = ez.sizes();
   const dim3 block = field_block3d();
@@ -2045,8 +2084,8 @@ void update_electric_ez_cpml_compressed_cuda(
         inv_kappa_y.data_ptr<float>(),
         b_y.data_ptr<float>(),
         c_y.data_ptr<float>(),
-        static_cast<float>(inv_dx),
-        static_cast<float>(inv_dy),
+        inv_dx.data_ptr<float>(),
+        inv_dy.data_ptr<float>(),
         static_cast<int>(x_low_mode),
         static_cast<int>(x_high_mode),
         static_cast<int>(y_low_mode),
@@ -2075,10 +2114,12 @@ void update_electric_ex_bloch_y_standard_z_cuda(
     const at::Tensor& curl,
     double phase_cos_y,
     double phase_sin_y,
-    double inv_dy,
-    double inv_dz,
+    const at::Tensor& inv_dy,
+    const at::Tensor& inv_dz,
     int64_t z_low_mode,
     int64_t z_high_mode) {
+  check_spacing_vector(ex_real, inv_dy, 1, "inv_dy");
+  check_spacing_vector(ex_real, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(ex_real.device());
   const auto sizes = ex_real.sizes();
   const dim3 block = field_block3d();
@@ -2094,8 +2135,8 @@ void update_electric_ex_bloch_y_standard_z_cuda(
       curl.data_ptr<float>(),
       static_cast<float>(phase_cos_y),
       static_cast<float>(phase_sin_y),
-      static_cast<float>(inv_dy),
-      static_cast<float>(inv_dz),
+      inv_dy.data_ptr<float>(),
+      inv_dz.data_ptr<float>(),
       static_cast<int>(z_low_mode),
       static_cast<int>(z_high_mode),
       ex_real.data_ptr<float>(),
@@ -2114,10 +2155,12 @@ void update_electric_ey_bloch_x_standard_z_cuda(
     const at::Tensor& curl,
     double phase_cos_x,
     double phase_sin_x,
-    double inv_dx,
-    double inv_dz,
+    const at::Tensor& inv_dx,
+    const at::Tensor& inv_dz,
     int64_t z_low_mode,
     int64_t z_high_mode) {
+  check_spacing_vector(ey_real, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ey_real, inv_dz, 2, "inv_dz");
   c10::cuda::CUDAGuard guard(ey_real.device());
   const auto sizes = ey_real.sizes();
   const dim3 block = field_block3d();
@@ -2133,8 +2176,8 @@ void update_electric_ey_bloch_x_standard_z_cuda(
       curl.data_ptr<float>(),
       static_cast<float>(phase_cos_x),
       static_cast<float>(phase_sin_x),
-      static_cast<float>(inv_dx),
-      static_cast<float>(inv_dz),
+      inv_dx.data_ptr<float>(),
+      inv_dz.data_ptr<float>(),
       static_cast<int>(z_low_mode),
       static_cast<int>(z_high_mode),
       ey_real.data_ptr<float>(),
@@ -2150,7 +2193,7 @@ void apply_electric_ex_cpml_z_correction_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dz,
+    const at::Tensor& inv_dz,
     int64_t offset_i,
     int64_t offset_j,
     int64_t offset_k,
@@ -2169,6 +2212,8 @@ void apply_electric_ex_cpml_z_correction_cuda(
   if (local_z_stop <= local_z_start) {
     return;
   }
+  check_vector_input(inv_dz, full_size_z, "inv_dz");
+  check_same_cuda_device(ex, inv_dz, "inv_dz");
   c10::cuda::CUDAGuard guard(ex.device());
   const dim3 block = field_block3d();
   apply_electric_ex_cpml_z_correction_kernel<<<field_grid3d(sx, sy, sz, block), block, 0, current_cuda_stream()>>>(
@@ -2182,7 +2227,7 @@ void apply_electric_ex_cpml_z_correction_cuda(
       inv_kappa_z.data_ptr<float>(),
       b_z.data_ptr<float>(),
       c_z.data_ptr<float>(),
-      static_cast<float>(inv_dz),
+      inv_dz.data_ptr<float>(),
       static_cast<int>(offset_i),
       static_cast<int>(offset_j),
       static_cast<int>(offset_k),
@@ -2204,7 +2249,7 @@ void apply_electric_ey_cpml_z_correction_cuda(
     const at::Tensor& inv_kappa_z,
     const at::Tensor& b_z,
     const at::Tensor& c_z,
-    double inv_dz,
+    const at::Tensor& inv_dz,
     int64_t offset_i,
     int64_t offset_j,
     int64_t offset_k,
@@ -2223,6 +2268,8 @@ void apply_electric_ey_cpml_z_correction_cuda(
   if (local_z_stop <= local_z_start) {
     return;
   }
+  check_vector_input(inv_dz, full_size_z, "inv_dz");
+  check_same_cuda_device(ey, inv_dz, "inv_dz");
   c10::cuda::CUDAGuard guard(ey.device());
   const dim3 block = field_block3d();
   apply_electric_ey_cpml_z_correction_kernel<<<field_grid3d(sx, sy, sz, block), block, 0, current_cuda_stream()>>>(
@@ -2236,7 +2283,7 @@ void apply_electric_ey_cpml_z_correction_cuda(
       inv_kappa_z.data_ptr<float>(),
       b_z.data_ptr<float>(),
       c_z.data_ptr<float>(),
-      static_cast<float>(inv_dz),
+      inv_dz.data_ptr<float>(),
       static_cast<int>(offset_i),
       static_cast<int>(offset_j),
       static_cast<int>(offset_k),

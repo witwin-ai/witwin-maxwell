@@ -147,18 +147,18 @@ def get_native_fdtd_module() -> NativeFDTDModule:
 
 
 def _magnetic_hx_standard(*, Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz):
-    _require_cuda_tensors(Hx, Ey, Ez, HxDecay, HxCurl)
-    get_compiled_extension().update_magnetic_hx_standard(Hx, Ey, Ez, HxDecay, HxCurl, float(invDy), float(invDz))
+    _require_cuda_tensors(Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz)
+    get_compiled_extension().update_magnetic_hx_standard(Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz)
 
 
 def _magnetic_hy_standard(*, Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz):
-    _require_cuda_tensors(Hy, Ex, Ez, HyDecay, HyCurl)
-    get_compiled_extension().update_magnetic_hy_standard(Hy, Ex, Ez, HyDecay, HyCurl, float(invDx), float(invDz))
+    _require_cuda_tensors(Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz)
+    get_compiled_extension().update_magnetic_hy_standard(Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz)
 
 
 def _magnetic_hz_standard(*, Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy):
-    _require_cuda_tensors(Hz, Ex, Ey, HzDecay, HzCurl)
-    get_compiled_extension().update_magnetic_hz_standard(Hz, Ex, Ey, HzDecay, HzCurl, float(invDx), float(invDy))
+    _require_cuda_tensors(Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy)
+    get_compiled_extension().update_magnetic_hz_standard(Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy)
 
 
 def _magnetic_hx_cpml(
@@ -193,6 +193,8 @@ def _magnetic_hx_cpml(
         InvKappaHxZ,
         ByHxZ,
         CyHxZ,
+        invDy,
+        invDz,
     )
     get_compiled_extension().update_magnetic_hx_cpml(
                 Hx,
@@ -208,8 +210,8 @@ def _magnetic_hx_cpml(
                 InvKappaHxZ,
                 ByHxZ,
                 CyHxZ,
-                float(invDy),
-                float(invDz),
+                invDy,
+                invDz,
             )
 
 
@@ -245,6 +247,8 @@ def _magnetic_hy_cpml(
         InvKappaHyZ,
         ByHyZ,
         CyHyZ,
+        invDx,
+        invDz,
     )
     get_compiled_extension().update_magnetic_hy_cpml(
                 Hy,
@@ -260,8 +264,8 @@ def _magnetic_hy_cpml(
                 InvKappaHyZ,
                 ByHyZ,
                 CyHyZ,
-                float(invDx),
-                float(invDz),
+                invDx,
+                invDz,
             )
 
 
@@ -297,6 +301,8 @@ def _magnetic_hz_cpml(
         InvKappaHzY,
         ByHzY,
         CyHzY,
+        invDx,
+        invDy,
     )
     get_compiled_extension().update_magnetic_hz_cpml(
                 Hz,
@@ -312,8 +318,8 @@ def _magnetic_hz_cpml(
                 InvKappaHzY,
                 ByHzY,
                 CyHzY,
-                float(invDx),
-                float(invDy),
+                invDx,
+                invDy,
             )
 
 
@@ -341,7 +347,7 @@ def _magnetic_hx_cpml_compressed(
     psiHxZHighStart,
     psiHxZHighLength,
 ):
-    _require_cuda_tensors(Hx, Ey, Ez, PsiHxY, PsiHxZ)
+    _require_cuda_tensors(Hx, Ey, Ez, PsiHxY, PsiHxZ, invDy, invDz)
     get_compiled_extension().update_magnetic_hx_cpml_compressed(
                 Hx,
                 Ey,
@@ -356,8 +362,8 @@ def _magnetic_hx_cpml_compressed(
                 InvKappaHxZ,
                 ByHxZ,
                 CyHxZ,
-                float(invDy),
-                float(invDz),
+                invDy,
+                invDz,
                 int(psiHxYLowLength),
                 int(psiHxYHighStart),
                 int(psiHxYHighLength),
@@ -393,7 +399,7 @@ def _magnetic_hy_cpml_compressed(
     psiHyZHighStart,
     psiHyZHighLength,
 ):
-    _require_cuda_tensors(Hy, Ex, Ez, PsiHyX, PsiHyZ)
+    _require_cuda_tensors(Hy, Ex, Ez, PsiHyX, PsiHyZ, invDx, invDz)
     get_compiled_extension().update_magnetic_hy_cpml_compressed(
                 Hy,
                 Ex,
@@ -408,8 +414,8 @@ def _magnetic_hy_cpml_compressed(
                 InvKappaHyZ,
                 ByHyZ,
                 CyHyZ,
-                float(invDx),
-                float(invDz),
+                invDx,
+                invDz,
                 int(psiHyXLowLength),
                 int(psiHyXHighStart),
                 int(psiHyXHighLength),
@@ -445,7 +451,7 @@ def _magnetic_hz_cpml_compressed(
     psiHzYHighStart,
     psiHzYHighLength,
 ):
-    _require_cuda_tensors(Hz, Ex, Ey, PsiHzX, PsiHzY)
+    _require_cuda_tensors(Hz, Ex, Ey, PsiHzX, PsiHzY, invDx, invDy)
     get_compiled_extension().update_magnetic_hz_cpml_compressed(
                 Hz,
                 Ex,
@@ -460,8 +466,8 @@ def _magnetic_hz_cpml_compressed(
                 InvKappaHzY,
                 ByHzY,
                 CyHzY,
-                float(invDx),
-                float(invDy),
+                invDx,
+                invDy,
                 int(psiHzXLowLength),
                 int(psiHzXHighStart),
                 int(psiHzXHighLength),
@@ -487,15 +493,15 @@ def _electric_ex_standard(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    _require_cuda_tensors(Ex, Hy, Hz, ExDecay, ExCurl)
+    _require_cuda_tensors(Ex, Hy, Hz, ExDecay, ExCurl, invDy, invDz)
     get_compiled_extension().update_electric_ex_standard(
                 Ex,
                 Hy,
                 Hz,
                 ExDecay,
                 ExCurl,
-                float(invDy),
-                float(invDz),
+                invDy,
+                invDz,
                 int(yLowBoundaryMode),
                 int(yHighBoundaryMode),
                 int(zLowBoundaryMode),
@@ -517,15 +523,15 @@ def _electric_ey_standard(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    _require_cuda_tensors(Ey, Hx, Hz, EyDecay, EyCurl)
+    _require_cuda_tensors(Ey, Hx, Hz, EyDecay, EyCurl, invDx, invDz)
     get_compiled_extension().update_electric_ey_standard(
                 Ey,
                 Hx,
                 Hz,
                 EyDecay,
                 EyCurl,
-                float(invDx),
-                float(invDz),
+                invDx,
+                invDz,
                 int(xLowBoundaryMode),
                 int(xHighBoundaryMode),
                 int(zLowBoundaryMode),
@@ -547,15 +553,15 @@ def _electric_ez_standard(
     yLowBoundaryMode,
     yHighBoundaryMode,
 ):
-    _require_cuda_tensors(Ez, Hx, Hy, EzDecay, EzCurl)
+    _require_cuda_tensors(Ez, Hx, Hy, EzDecay, EzCurl, invDx, invDy)
     get_compiled_extension().update_electric_ez_standard(
                 Ez,
                 Hx,
                 Hy,
                 EzDecay,
                 EzCurl,
-                float(invDx),
-                float(invDy),
+                invDx,
+                invDy,
                 int(xLowBoundaryMode),
                 int(xHighBoundaryMode),
                 int(yLowBoundaryMode),
@@ -599,6 +605,8 @@ def _electric_ex_cpml(
         InvKappaExZ,
         BExZ,
         CExZ,
+        invDy,
+        invDz,
     )
     get_compiled_extension().update_electric_ex_cpml(
                 Ex,
@@ -614,8 +622,8 @@ def _electric_ex_cpml(
                 InvKappaExZ,
                 BExZ,
                 CExZ,
-                float(invDy),
-                float(invDz),
+                invDy,
+                invDz,
                 int(yLowBoundaryMode),
                 int(yHighBoundaryMode),
                 int(zLowBoundaryMode),
@@ -659,6 +667,8 @@ def _electric_ey_cpml(
         InvKappaEyZ,
         BEyZ,
         CEyZ,
+        invDx,
+        invDz,
     )
     get_compiled_extension().update_electric_ey_cpml(
                 Ey,
@@ -674,8 +684,8 @@ def _electric_ey_cpml(
                 InvKappaEyZ,
                 BEyZ,
                 CEyZ,
-                float(invDx),
-                float(invDz),
+                invDx,
+                invDz,
                 int(xLowBoundaryMode),
                 int(xHighBoundaryMode),
                 int(zLowBoundaryMode),
@@ -719,6 +729,8 @@ def _electric_ez_cpml(
         InvKappaEzY,
         BEzY,
         CEzY,
+        invDx,
+        invDy,
     )
     get_compiled_extension().update_electric_ez_cpml(
                 Ez,
@@ -734,8 +746,8 @@ def _electric_ez_cpml(
                 InvKappaEzY,
                 BEzY,
                 CEzY,
-                float(invDx),
-                float(invDy),
+                invDx,
+                invDy,
                 int(xLowBoundaryMode),
                 int(xHighBoundaryMode),
                 int(yLowBoundaryMode),
@@ -761,9 +773,9 @@ def _apply_electric_ex_cpml_z_correction(
     fullSizeY,
     fullSizeZ,
 ):
-    _require_cuda_tensors(Ex, Hy, ExCurl, PsiExZ, InvKappaExZ, BExZ, CExZ)
+    _require_cuda_tensors(Ex, Hy, ExCurl, PsiExZ, InvKappaExZ, BExZ, CExZ, invDz)
     get_compiled_extension().apply_electric_ex_cpml_z_correction(
-                Ex, Hy, ExCurl, PsiExZ, InvKappaExZ, BExZ, CExZ, float(invDz),
+                Ex, Hy, ExCurl, PsiExZ, InvKappaExZ, BExZ, CExZ, invDz,
                 int(offsetI), int(offsetJ), int(offsetK),
                 int(yLowBoundaryMode), int(yHighBoundaryMode),
                 int(fullSizeY), int(fullSizeZ),
@@ -788,9 +800,9 @@ def _apply_electric_ey_cpml_z_correction(
     fullSizeX,
     fullSizeZ,
 ):
-    _require_cuda_tensors(Ey, Hx, EyCurl, PsiEyZ, InvKappaEyZ, BEyZ, CEyZ)
+    _require_cuda_tensors(Ey, Hx, EyCurl, PsiEyZ, InvKappaEyZ, BEyZ, CEyZ, invDz)
     get_compiled_extension().apply_electric_ey_cpml_z_correction(
-                Ey, Hx, EyCurl, PsiEyZ, InvKappaEyZ, BEyZ, CEyZ, float(invDz),
+                Ey, Hx, EyCurl, PsiEyZ, InvKappaEyZ, BEyZ, CEyZ, invDz,
                 int(offsetI), int(offsetJ), int(offsetK),
                 int(xLowBoundaryMode), int(xHighBoundaryMode),
                 int(fullSizeX), int(fullSizeZ),
@@ -839,8 +851,8 @@ def _electric_ex_cpml_compressed(
                 InvKappaExZ,
                 BExZ,
                 CExZ,
-                float(invDy),
-                float(invDz),
+                invDy,
+                invDz,
                 int(yLowBoundaryMode),
                 int(yHighBoundaryMode),
                 int(zLowBoundaryMode),
@@ -898,8 +910,8 @@ def _electric_ey_cpml_compressed(
                 InvKappaEyZ,
                 BEyZ,
                 CEyZ,
-                float(invDx),
-                float(invDz),
+                invDx,
+                invDz,
                 int(xLowBoundaryMode),
                 int(xHighBoundaryMode),
                 int(zLowBoundaryMode),
@@ -957,8 +969,8 @@ def _electric_ez_cpml_compressed(
                 InvKappaEzY,
                 BEzY,
                 CEzY,
-                float(invDx),
-                float(invDy),
+                invDx,
+                invDy,
                 int(xLowBoundaryMode),
                 int(xHighBoundaryMode),
                 int(yLowBoundaryMode),
@@ -1004,8 +1016,8 @@ def _electric_ex_bloch(
                 float(phaseSinY),
                 float(phaseCosZ),
                 float(phaseSinZ),
-                float(invDy),
-                float(invDz),
+                invDy,
+                invDz,
             )
 
 
@@ -1039,8 +1051,8 @@ def _electric_ey_bloch(
                 float(phaseSinX),
                 float(phaseCosZ),
                 float(phaseSinZ),
-                float(invDx),
-                float(invDz),
+                invDx,
+                invDz,
             )
 
 
@@ -1063,7 +1075,7 @@ def _electric_ex_bloch_y_standard_z(
 ):
     get_compiled_extension().update_electric_ex_bloch_y_standard_z(
                 ExReal, ExImag, HyReal, HyImag, HzReal, HzImag, ExDecay, ExCurl,
-                float(phaseCosY), float(phaseSinY), float(invDy), float(invDz),
+                float(phaseCosY), float(phaseSinY), invDy, invDz,
                 int(zLowBoundaryMode), int(zHighBoundaryMode),
             )
 
@@ -1087,7 +1099,7 @@ def _electric_ey_bloch_x_standard_z(
 ):
     get_compiled_extension().update_electric_ey_bloch_x_standard_z(
                 EyReal, EyImag, HxReal, HxImag, HzReal, HzImag, EyDecay, EyCurl,
-                float(phaseCosX), float(phaseSinX), float(invDx), float(invDz),
+                float(phaseCosX), float(phaseSinX), invDx, invDz,
                 int(zLowBoundaryMode), int(zHighBoundaryMode),
             )
 
@@ -1122,8 +1134,8 @@ def _electric_ez_bloch(
                 float(phaseSinX),
                 float(phaseCosY),
                 float(phaseSinY),
-                float(invDx),
-                float(invDy),
+                invDx,
+                invDy,
             )
 
 
@@ -1683,19 +1695,19 @@ def _update_kerr_ez(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, EzDecay, Ker
 
 def _reverse_electric_hx_standard(*, AdjHxMid, AdjHxPost, AdjEyPost, AdjEzPost, EyCurl, EzCurl, invDy, invDz):
     get_compiled_extension().reverse_electric_adjoint_to_hx_standard(
-                AdjHxMid, AdjHxPost, AdjEyPost, AdjEzPost, EyCurl, EzCurl, float(invDy), float(invDz)
+                AdjHxMid, AdjHxPost, AdjEyPost, AdjEzPost, EyCurl, EzCurl, invDy, invDz
             )
 
 
 def _reverse_electric_hy_standard(*, AdjHyMid, AdjHyPost, AdjExPost, AdjEzPost, ExCurl, EzCurl, invDx, invDz):
     get_compiled_extension().reverse_electric_adjoint_to_hy_standard(
-                AdjHyMid, AdjHyPost, AdjExPost, AdjEzPost, ExCurl, EzCurl, float(invDx), float(invDz)
+                AdjHyMid, AdjHyPost, AdjExPost, AdjEzPost, ExCurl, EzCurl, invDx, invDz
             )
 
 
 def _reverse_electric_hz_standard(*, AdjHzMid, AdjHzPost, AdjExPost, AdjEyPost, ExCurl, EyCurl, invDx, invDy):
     get_compiled_extension().reverse_electric_adjoint_to_hz_standard(
-                AdjHzMid, AdjHzPost, AdjExPost, AdjEyPost, ExCurl, EyCurl, float(invDx), float(invDy)
+                AdjHzMid, AdjHzPost, AdjExPost, AdjEyPost, ExCurl, EyCurl, invDx, invDy
             )
 
 
@@ -1722,7 +1734,7 @@ def _reverse_electric_hx_bloch(
                 AdjHxMidReal, AdjHxMidImag, AdjHxPostReal, AdjHxPostImag,
                 AdjEyPostReal, AdjEyPostImag, AdjEzPostReal, AdjEzPostImag,
                 EyCurl, EzCurl, float(phaseCosY), float(phaseSinY), float(phaseCosZ), float(phaseSinZ),
-                float(invDy), float(invDz),
+                invDy, invDz,
             )
 
 
@@ -1749,7 +1761,7 @@ def _reverse_electric_hy_bloch(
                 AdjHyMidReal, AdjHyMidImag, AdjHyPostReal, AdjHyPostImag,
                 AdjExPostReal, AdjExPostImag, AdjEzPostReal, AdjEzPostImag,
                 ExCurl, EzCurl, float(phaseCosX), float(phaseSinX), float(phaseCosZ), float(phaseSinZ),
-                float(invDx), float(invDz),
+                invDx, invDz,
             )
 
 
@@ -1776,7 +1788,7 @@ def _reverse_electric_hz_bloch(
                 AdjHzMidReal, AdjHzMidImag, AdjHzPostReal, AdjHzPostImag,
                 AdjExPostReal, AdjExPostImag, AdjEyPostReal, AdjEyPostImag,
                 ExCurl, EyCurl, float(phaseCosX), float(phaseSinX), float(phaseCosY), float(phaseSinY),
-                float(invDx), float(invDy),
+                invDx, invDy,
             )
 
 
@@ -1794,8 +1806,10 @@ def _reverse_magnetic_ex_standard(
     HzMid,
     HyCurl,
     HzCurl,
-    invDy,
-    invDz,
+    invDyE,
+    invDzE,
+    invDyH,
+    invDzH,
     yLowBoundaryMode,
     yHighBoundaryMode,
     zLowBoundaryMode,
@@ -1814,8 +1828,10 @@ def _reverse_magnetic_ex_standard(
                 HzMid,
                 HyCurl,
                 HzCurl,
-                float(invDy),
-                float(invDz),
+                invDyE,
+                invDzE,
+                invDyH,
+                invDzH,
                 int(yLowBoundaryMode),
                 int(yHighBoundaryMode),
                 int(zLowBoundaryMode),
@@ -1837,8 +1853,10 @@ def _reverse_magnetic_ey_standard(
     HzMid,
     HxCurl,
     HzCurl,
-    invDx,
-    invDz,
+    invDxE,
+    invDzE,
+    invDxH,
+    invDzH,
     xLowBoundaryMode,
     xHighBoundaryMode,
     zLowBoundaryMode,
@@ -1857,8 +1875,10 @@ def _reverse_magnetic_ey_standard(
                 HzMid,
                 HxCurl,
                 HzCurl,
-                float(invDx),
-                float(invDz),
+                invDxE,
+                invDzE,
+                invDxH,
+                invDzH,
                 int(xLowBoundaryMode),
                 int(xHighBoundaryMode),
                 int(zLowBoundaryMode),
@@ -1880,8 +1900,10 @@ def _reverse_magnetic_ez_standard(
     HyMid,
     HxCurl,
     HyCurl,
-    invDx,
-    invDy,
+    invDxE,
+    invDyE,
+    invDxH,
+    invDyH,
     xLowBoundaryMode,
     xHighBoundaryMode,
     yLowBoundaryMode,
@@ -1900,8 +1922,10 @@ def _reverse_magnetic_ez_standard(
                 HyMid,
                 HxCurl,
                 HyCurl,
-                float(invDx),
-                float(invDy),
+                invDxE,
+                invDyE,
+                invDxH,
+                invDyH,
                 int(xLowBoundaryMode),
                 int(xHighBoundaryMode),
                 int(yLowBoundaryMode),
@@ -1933,15 +1957,17 @@ def _reverse_magnetic_ex_bloch(
     phaseSinY,
     phaseCosZ,
     phaseSinZ,
-    invDy,
-    invDz,
+    invDyE,
+    invDzE,
+    invDyH,
+    invDzH,
 ):
     get_compiled_extension().reverse_magnetic_adjoint_to_ex_bloch(
                 AdjExPrevReal, AdjExPrevImag, GradEpsEx, AdjExPostReal, AdjExPostImag,
                 AdjHyMidReal, AdjHyMidImag, AdjHzMidReal, AdjHzMidImag,
                 ExDecay, ExCurl, EpsEx, HyMidReal, HyMidImag, HzMidReal, HzMidImag,
                 HyCurl, HzCurl, float(phaseCosY), float(phaseSinY), float(phaseCosZ), float(phaseSinZ),
-                float(invDy), float(invDz),
+                invDyE, invDzE, invDyH, invDzH,
             )
 
 
@@ -1969,15 +1995,17 @@ def _reverse_magnetic_ey_bloch(
     phaseSinX,
     phaseCosZ,
     phaseSinZ,
-    invDx,
-    invDz,
+    invDxE,
+    invDzE,
+    invDxH,
+    invDzH,
 ):
     get_compiled_extension().reverse_magnetic_adjoint_to_ey_bloch(
                 AdjEyPrevReal, AdjEyPrevImag, GradEpsEy, AdjEyPostReal, AdjEyPostImag,
                 AdjHxMidReal, AdjHxMidImag, AdjHzMidReal, AdjHzMidImag,
                 EyDecay, EyCurl, EpsEy, HxMidReal, HxMidImag, HzMidReal, HzMidImag,
                 HxCurl, HzCurl, float(phaseCosX), float(phaseSinX), float(phaseCosZ), float(phaseSinZ),
-                float(invDx), float(invDz),
+                invDxE, invDzE, invDxH, invDzH,
             )
 
 
@@ -2005,15 +2033,17 @@ def _reverse_magnetic_ez_bloch(
     phaseSinX,
     phaseCosY,
     phaseSinY,
-    invDx,
-    invDy,
+    invDxE,
+    invDyE,
+    invDxH,
+    invDyH,
 ):
     get_compiled_extension().reverse_magnetic_adjoint_to_ez_bloch(
                 AdjEzPrevReal, AdjEzPrevImag, GradEpsEz, AdjEzPostReal, AdjEzPostImag,
                 AdjHxMidReal, AdjHxMidImag, AdjHyMidReal, AdjHyMidImag,
                 EzDecay, EzCurl, EpsEz, HxMidReal, HxMidImag, HyMidReal, HyMidImag,
                 HxCurl, HyCurl, float(phaseCosX), float(phaseSinX), float(phaseCosY), float(phaseSinY),
-                float(invDx), float(invDy),
+                invDxE, invDyE, invDxH, invDyH,
             )
 
 
@@ -2023,7 +2053,7 @@ def _accumulate_diff_adjoint(field_grad, diff_grad, axis, inv_delta, *, forward)
                 if forward
                 else get_compiled_extension().accumulate_backward_diff_adjoint
             )
-    method(field_grad, diff_grad, int(axis), float(inv_delta))
+    method(field_grad, diff_grad, int(axis), inv_delta)
 
 
 def _accumulate_forward_diff_x(*, FieldGrad, DiffGrad, invDx):
@@ -2085,7 +2115,7 @@ def _reverse_electric_cpml_ex(
                 AdjExPrev, GradEpsEx, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
                 AdjExPost, AdjPsiPosPost, AdjPsiNegPost, ExDecay, ExCurl, EpsEx,
                 PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
-                HyMid, HzMid, float(invDy), float(invDz), int(yLowBoundaryMode), int(yHighBoundaryMode), int(zLowBoundaryMode), int(zHighBoundaryMode),
+                HyMid, HzMid, invDy, invDz, int(yLowBoundaryMode), int(yHighBoundaryMode), int(zLowBoundaryMode), int(zHighBoundaryMode),
             )
 
 
@@ -2124,7 +2154,7 @@ def _reverse_electric_cpml_ey(
                 AdjEyPrev, GradEpsEy, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
                 AdjEyPost, AdjPsiPosPost, AdjPsiNegPost, EyDecay, EyCurl, EpsEy,
                 PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
-                HxMid, HzMid, float(invDx), float(invDz), int(xLowBoundaryMode), int(xHighBoundaryMode), int(zLowBoundaryMode), int(zHighBoundaryMode),
+                HxMid, HzMid, invDx, invDz, int(xLowBoundaryMode), int(xHighBoundaryMode), int(zLowBoundaryMode), int(zHighBoundaryMode),
             )
 
 
@@ -2163,7 +2193,7 @@ def _reverse_electric_cpml_ez(
                 AdjEzPrev, GradEpsEz, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
                 AdjEzPost, AdjPsiPosPost, AdjPsiNegPost, EzDecay, EzCurl, EpsEz,
                 PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
-                HxMid, HyMid, float(invDx), float(invDy), int(xLowBoundaryMode), int(xHighBoundaryMode), int(yLowBoundaryMode), int(yHighBoundaryMode),
+                HxMid, HyMid, invDx, invDy, int(xLowBoundaryMode), int(xHighBoundaryMode), int(yLowBoundaryMode), int(yHighBoundaryMode),
             )
 
 

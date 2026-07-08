@@ -105,7 +105,10 @@ class _MultiVoxelScene(mw.SceneModule):
         scene.add_material_region(
             mw.MaterialRegion(
                 name="design",
-                geometry=mw.Box(position=(0.0, 0.0, 0.12), size=(0.24, 0.24, 0.24)),
+                # Box faces are offset half a cell from the grid nodes so the
+                # voxel window is off the node-aligned knife edge and matches
+                # the placement this test was calibrated against.
+                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
                 density=density,
                 eps_bounds=(1.0, 6.0),
                 mu_bounds=(1.0, 1.0),

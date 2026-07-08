@@ -61,8 +61,8 @@ def _component_volume(result, component: str):
     field = _to_numpy(result.tensor(component))
     if component == "Ex":
         x = np.linspace(
-            solver.scene.domain_range[0] + 0.5 * solver.dx,
-            solver.scene.domain_range[1] - 0.5 * solver.dx,
+            solver.scene.domain_range[0] + 0.5 * solver.scene.dx,
+            solver.scene.domain_range[1] - 0.5 * solver.scene.dx,
             field.shape[0],
         )
         y = np.linspace(solver.scene.domain_range[2], solver.scene.domain_range[3], field.shape[1])
@@ -71,8 +71,8 @@ def _component_volume(result, component: str):
     if component == "Ey":
         x = np.linspace(solver.scene.domain_range[0], solver.scene.domain_range[1], field.shape[0])
         y = np.linspace(
-            solver.scene.domain_range[2] + 0.5 * solver.dy,
-            solver.scene.domain_range[3] - 0.5 * solver.dy,
+            solver.scene.domain_range[2] + 0.5 * solver.scene.dy,
+            solver.scene.domain_range[3] - 0.5 * solver.scene.dy,
             field.shape[1],
         )
         z = np.linspace(solver.scene.domain_range[4], solver.scene.domain_range[5], field.shape[2])
@@ -80,8 +80,8 @@ def _component_volume(result, component: str):
     x = np.linspace(solver.scene.domain_range[0], solver.scene.domain_range[1], field.shape[0])
     y = np.linspace(solver.scene.domain_range[2], solver.scene.domain_range[3], field.shape[1])
     z = np.linspace(
-        solver.scene.domain_range[4] + 0.5 * solver.dz,
-        solver.scene.domain_range[5] - 0.5 * solver.dz,
+        solver.scene.domain_range[4] + 0.5 * solver.scene.dz,
+        solver.scene.domain_range[5] - 0.5 * solver.scene.dz,
         field.shape[2],
     )
     return field, x, y, z
@@ -585,9 +585,9 @@ def _tfsf_null_summary():
         y,
         z,
         _TFSF_BOUNDS,
-        dx=result.solver.dx,
-        dy=result.solver.dy,
-        dz=result.solver.dz,
+        dx=result.solver.scene.dx,
+        dy=result.solver.scene.dy,
+        dz=result.solver.scene.dz,
     )
     mid = ez.shape[2] // 2
     plot_path = _save_plane_magnitude_plot(
@@ -630,9 +630,9 @@ def _tfsf_oblique_summary():
             y_coords,
             z_coords,
             _TFSF_BOUNDS,
-            dx=result.solver.dx,
-            dy=result.solver.dy,
-            dz=result.solver.dz,
+            dx=result.solver.scene.dx,
+            dy=result.solver.scene.dy,
+            dz=result.solver.scene.dz,
         )
         component_ratios[component] = float(leakage_ratio)
         component_inside_max[component] = float(inside_max)
@@ -689,9 +689,9 @@ def _tfsf_scatter_summary():
         y,
         z,
         _TFSF_BOUNDS,
-        dx=result.solver.dx,
-        dy=result.solver.dy,
-        dz=result.solver.dz,
+        dx=result.solver.scene.dx,
+        dy=result.solver.scene.dy,
+        dz=result.solver.scene.dz,
     )
     null_summary = _tfsf_null_summary()
     difference = np.abs(ez - null_summary["ez"])
