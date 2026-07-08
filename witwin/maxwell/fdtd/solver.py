@@ -443,6 +443,8 @@ class FDTD:
         dft_window: str = "hanning",
         full_field_dft: bool = True,
         normalize_source: bool = False,
+        shutoff: float = 0.0,
+        shutoff_check_interval: int = 100,
     ):
         return solve_impl(
             self,
@@ -452,6 +454,8 @@ class FDTD:
             dft_window=dft_window,
             full_field_dft=full_field_dft,
             normalize_source=normalize_source,
+            shutoff=shutoff,
+            shutoff_check_interval=shutoff_check_interval,
         )
 
     def _interpolate_yee_to_center(self, freq_solution):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 
+import numpy as np
 import torch
 from tqdm import tqdm
 
@@ -824,6 +825,88 @@ def init_field(solver):
     initialize_source_terms(solver)
 
 
+def _compute_shutoff_min_step(solver, shutoff_check_interval: int) -> int:
+    import math
+
+    source_time = getattr(solver, "_source_time", None)
+    settling_time = 0.0
+    if source_time is not None:
+        if isinstance(source_time, dict):
+            settling_time = float(source_time.get("settling_time", 0.0))
+        else:
+            settling_time = float(getattr(source_time, "settling_time", 0.0))
+    settling_step = int(math.ceil(settling_time / solver.dt)) if settling_time > 0.0 else 0
+
+    dft_start_step = getattr(solver, "dft_start_step", None)
+
+    observer_entries = getattr(solver, "_observer_spectral_entries", None)
+    observer_start = 0
+    if observer_entries:
+        observer_start = min(int(entry["start_step"]) for entry in observer_entries)
+
+    floor = max(settling_step, dft_start_step or 0, observer_start or 0)
+    return floor + 2 * shutoff_check_interval
+
+
+def _electric_field_energy(solver) -> float:
+    energy = (
+        (solver.eps_Ex * solver.Ex * solver.Ex).sum()
+        + (solver.eps_Ey * solver.Ey * solver.Ey).sum()
+        + (solver.eps_Ez * solver.Ez * solver.Ez).sum()
+    )
+    if has_complex_fields(solver):
+        energy = (
+            energy
+            + (solver.eps_Ex * solver.Ex_imag * solver.Ex_imag).sum()
+            + (solver.eps_Ey * solver.Ey_imag * solver.Ey_imag).sum()
+            + (solver.eps_Ez * solver.Ez_imag * solver.Ez_imag).sum()
+        )
+    return float(energy.item())
+
+
+def _planned_window_normalization(window_type: str, start_step: int, end_step: int) -> float:
+    # Sum the spectral window weights over the full planned [start_step, end_step)
+    # range, matching compute_window_weight / accumulate_dft exactly for a full run.
+    total = int(end_step) - int(start_step)
+    if total <= 0:
+        return 0.0
+    if window_type == "none":
+        return float(total)
+    positions = np.arange(total, dtype=np.float64) / total
+    if window_type == "hanning":
+        weights = 0.5 * (1.0 - np.cos(2.0 * np.pi * positions))
+        return float(weights.sum())
+    if window_type == "ramp":
+        ramp_fraction = 0.1
+        weights = np.ones_like(positions)
+        ramp_mask = positions < ramp_fraction
+        weights[ramp_mask] = 0.5 * (1.0 - np.cos(np.pi * positions[ramp_mask] / ramp_fraction))
+        return float(weights.sum())
+    return float(total)
+
+
+def _complete_spectral_normalization(solver, time_steps: int) -> None:
+    # After an early auto-shutoff the omitted tail steps carry negligible field, so
+    # the running-DFT / observer numerators are already complete. Restore each
+    # spectral normalizer to its planned full-window value so the
+    # 2 / window_normalization scale is not inflated by the shortened run.
+    if getattr(solver, "dft_enabled", False) and getattr(solver, "_dft_entries", None):
+        for index in range(len(solver._dft_entries)):
+            start_step = int(solver._dft_start_steps[index])
+            end_step = int(solver._dft_end_steps[index])
+            if end_step < 0:
+                end_step = int(time_steps)
+            solver._dft_window_normalization_values[index] = _planned_window_normalization(
+                solver.dft_window_type, start_step, end_step
+            )
+    if getattr(solver, "observers_enabled", False):
+        for entry in solver._observer_spectral_entries:
+            end_step = entry["end_step"] if entry["end_step"] is not None else int(time_steps)
+            entry["window_normalization"] = _planned_window_normalization(
+                solver.observer_window_type, int(entry["start_step"]), int(end_step)
+            )
+
+
 def solve(
     solver,
     time_steps: int,
@@ -832,6 +915,8 @@ def solve(
     dft_window: str = "hanning",
     full_field_dft: bool = True,
     normalize_source: bool = False,
+    shutoff: float = 0.0,
+    shutoff_check_interval: int = 100,
 ):
     if solver.verbose:
         print(f"Starting 3D FDTD simulation (Yee grid), grid size: {solver.Nx}x{solver.Ny}x{solver.Nz}")
@@ -854,6 +939,11 @@ def solve(
     observer_frequency = dft_frequency if dft_frequency is not None else solver.source_frequency
     if solver.observers:
         solver._prepare_observers(observer_frequency, dft_window, time_steps)
+
+    solver._shutoff_triggered = False
+    solver._shutoff_step = None
+    solver._shutoff_peak = 0.0
+    shutoff_min_step = _compute_shutoff_min_step(solver, shutoff_check_interval)
 
     iterator = range(time_steps)
     pbar = None
@@ -914,6 +1004,18 @@ def solve(
         solver.accumulate_dft(n)
         solver.accumulate_observers(n)
 
+        if shutoff > 0 and (n + 1) % shutoff_check_interval == 0:
+            e_energy = _electric_field_energy(solver)
+            solver._shutoff_peak = max(solver._shutoff_peak, e_energy)
+            if (
+                solver._shutoff_peak > 0.0
+                and n >= shutoff_min_step
+                and e_energy < shutoff * solver._shutoff_peak
+            ):
+                solver._shutoff_triggered = True
+                solver._shutoff_step = n
+                break
+
         if pbar is not None:
             should_update_progress = ((n + 1) % solver.progress_update_interval == 0 or n == time_steps - 1)
             if should_update_progress and solver.dft_enabled and solver.dft_start_step is not None:
@@ -927,6 +1029,8 @@ def solve(
 
     solver._synchronize_device()
     solver.last_solve_elapsed_s = time.perf_counter() - solve_start
+    if solver._shutoff_triggered:
+        _complete_spectral_normalization(solver, time_steps)
     if solver.dft_enabled:
         solver._sync_dft_legacy_state()
     if solver.observers_enabled:

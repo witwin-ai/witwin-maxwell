@@ -186,6 +186,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Instantaneous isotropic electric Kerr nonlinearity with GPU-resident dynamic update coefficients
 - Automatic run length estimation with `TimeConfig.auto(...)`
 - Explicit run-step control with `TimeConfig(time_steps=...)`
+- Opt-in auto-shutoff early termination stops the forward loop once relative electric-field energy decays below `Simulation.fdtd(..., shutoff=..., shutoff_check_interval=100)` (default `shutoff=0.0` disables it), with a settling/DFT/observer-aware floor so continuously driven CW and spectral runs are never truncated, plus a planned-window normalization restore so an early-stopped run's DFT/monitor spectra match the full-length run; `Result.stats()` reports `shutoff`, `shutoff_triggered`, `shutoff_step`, and `steps_run`
 - Automatic `dt` tightening for broadband source-time objects such as `GaussianPulse` and `RickerWavelet`, and for electric or magnetic dispersive material poles such as `Drude`, `Debye`, and `Lorentz` media
 - CPML absorber configuration through `BoundarySpec.pml(...)` plus typed `Simulation.fdtd(...)` config (`absorber=...`, `cpml_config=...`)
 - CPML auxiliary `psi` storage auto-selects between a dense fast path and slab-allocated low-memory storage, with `cpml_config={"memory_mode": "auto"|"dense"|"slab"}` and optional `dense_memory_limit_mib` tuning

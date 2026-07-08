@@ -363,7 +363,7 @@ def test_simulation_fdtd_wraps_solver(monkeypatch):
         def init_field(self):
             self.init_called = True
 
-        def solve(self, time_steps, dft_frequency, enable_plot, dft_window, full_field_dft, normalize_source=False):
+        def solve(self, time_steps, dft_frequency, enable_plot, dft_window, full_field_dft, normalize_source=False, shutoff=0.0, shutoff_check_interval=100):
             self.ex = torch.ones((3, 4, 4), dtype=torch.complex64)
             self.ey = torch.ones((4, 3, 4), dtype=torch.complex64) * 2.0
             self.ez = torch.ones((4, 4, 3), dtype=torch.complex64) * 3.0
@@ -434,7 +434,7 @@ def test_simulation_fdtd_multi_frequency_wraps_solver(monkeypatch):
         def init_field(self):
             pass
 
-        def solve(self, time_steps, dft_frequency, enable_plot, dft_window, full_field_dft, normalize_source=False):
+        def solve(self, time_steps, dft_frequency, enable_plot, dft_window, full_field_dft, normalize_source=False, shutoff=0.0, shutoff_check_interval=100):
             self.ex = torch.stack(
                 (
                     torch.ones((3, 4, 4), dtype=torch.complex64),

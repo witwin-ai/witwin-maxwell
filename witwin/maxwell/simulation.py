@@ -141,6 +141,8 @@ class FDTDConfig:
     absorber: AbsorberKind = AbsorberKind.CPML
     cpml_config: dict[str, Any] = field(default_factory=dict)
     adjoint_checkpoint_stride: int | None = None
+    shutoff: float = 0.0  # relative E-energy threshold for auto-shutoff; 0 disables (opt-in)
+    shutoff_check_interval: int = 100
 
     def __post_init__(self):
         if not isinstance(self.run_time, TimeConfig):
@@ -151,6 +153,12 @@ class FDTDConfig:
         self.full_field_dft = bool(self.full_field_dft)
         self.absorber = _normalize_absorber_kind(self.absorber)
         self.cpml_config = dict(self.cpml_config or {})
+        self.shutoff = float(self.shutoff)
+        if self.shutoff < 0:
+            raise ValueError("shutoff must be >= 0.")
+        self.shutoff_check_interval = int(self.shutoff_check_interval)
+        if self.shutoff_check_interval <= 0:
+            raise ValueError("shutoff_check_interval must be > 0.")
         if self.adjoint_checkpoint_stride is not None:
             self.adjoint_checkpoint_stride = int(self.adjoint_checkpoint_stride)
             if self.adjoint_checkpoint_stride <= 0:
@@ -296,6 +304,8 @@ class Simulation:
         cpml_config: dict[str, Any] | None = None,
         enable_plot: bool = False,
         full_field_dft: bool = False,
+        shutoff: float = 0.0,
+        shutoff_check_interval: int = 100,
     ) -> "Simulation":
         return cls(
             scene=scene,
@@ -308,6 +318,8 @@ class Simulation:
                 cpml_config={} if cpml_config is None else cpml_config,
                 enable_plot=enable_plot,
                 full_field_dft=full_field_dft,
+                shutoff=shutoff,
+                shutoff_check_interval=shutoff_check_interval,
             ),
         )
 
@@ -480,6 +492,8 @@ class Simulation:
             dft_window=dft_cfg.window,
             full_field_dft=use_full_field_dft,
             normalize_source=dft_cfg.normalize_source,
+            shutoff=self.config.shutoff,
+            shutoff_check_interval=self.config.shutoff_check_interval,
         )
         return raw_output, time_steps, use_full_field_dft, dft_cfg
 
@@ -547,8 +561,15 @@ class Simulation:
     ) -> dict[str, Any]:
         elapsed_s = getattr(solver, "last_solve_elapsed_s", None)
         dft_sample_counts = tuple(getattr(solver, "dft_sample_counts", (getattr(solver, "dft_sample_count", 0),)))
+        shutoff_triggered = bool(getattr(solver, "_shutoff_triggered", False))
+        shutoff_step = getattr(solver, "_shutoff_step", None)
         return {
             "time_steps": time_steps,
+            "shutoff": self.config.shutoff,
+            "shutoff_check_interval": self.config.shutoff_check_interval,
+            "shutoff_triggered": shutoff_triggered,
+            "shutoff_step": shutoff_step,
+            "steps_run": (shutoff_step + 1) if shutoff_triggered else time_steps,
             "dt": solver.dt,
             "boundary": getattr(solver, "boundary_kind", self.scene.boundary.kind),
             "absorber": getattr(solver, "active_absorber_type", self.config.absorber),
