@@ -16,6 +16,9 @@ BOUNDARY_KIND_TO_CODE = {
     "bloch": BOUNDARY_BLOCH,
     "pec": BOUNDARY_PEC,
     "pmc": BOUNDARY_PMC,
+    # Mur ABC is applied in PyTorch after the E-update; the update kernel treats
+    # these faces as inert so no dedicated CUDA boundary code is required.
+    "mur": BOUNDARY_NONE,
 }
 
 

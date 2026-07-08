@@ -14,6 +14,21 @@ DEFAULT_CPML_CONFIG = {
     "dense_memory_limit_mib": 64.0,
 }
 
+# StablePML overrides: a higher grading order and a larger complex-frequency
+# shift (alpha_max) trade a little absorption for markedly improved late-time
+# stability, which suppresses the low-frequency growth that stresses a plain CPML.
+STABLE_PML_CONFIG_OVERRIDES = {
+    "grading_order": 5.0,
+    "kappa_max": 5.0,
+    "alpha_max": 0.24,
+    "reflection": 1e-9,
+}
+
+# Adiabatic absorber grading: gentle cubic conductivity ramp, no kappa/alpha
+# stretching and no auxiliary psi memory.
+ABSORBER_GRADING_ORDER = 3.0
+ABSORBER_REFLECTION = 1e-6
+
 _AUTO_CPML_DENSE_FREE_FRACTION = 0.125
 
 _CPML_VECTOR_ATTRS = (
@@ -430,6 +445,14 @@ def initialize_cpml_state(solver):
     _allocate_cpml_memory_variables(solver)
 
 
+def initialize_stable_pml_state(solver):
+    # StablePML reuses the full CPML machinery with a stability-oriented profile.
+    config = dict(solver.cpml_config)
+    config.update(STABLE_PML_CONFIG_OVERRIDES)
+    solver.cpml_config = config
+    initialize_cpml_state(solver)
+
+
 def initialize_neutral_boundary_state(solver):
     _clear_auxiliary_state(solver)
 
@@ -443,6 +466,43 @@ def initialize_simple_pml_state(solver):
     for i in range(thickness):
         x = (thickness - i) / thickness
         sigma = sigma_max * x**4
+        if _axis_face_uses_pml(solver, "x", low=True):
+            solver.sigma_x[i, :, :] = sigma
+        if _axis_face_uses_pml(solver, "x", low=False):
+            solver.sigma_x[-(i + 1), :, :] = sigma
+        if _axis_face_uses_pml(solver, "y", low=True):
+            solver.sigma_y[:, i, :] = sigma
+        if _axis_face_uses_pml(solver, "y", low=False):
+            solver.sigma_y[:, -(i + 1), :] = sigma
+        if _axis_face_uses_pml(solver, "z", low=True):
+            solver.sigma_z[:, :, i] = sigma
+        if _axis_face_uses_pml(solver, "z", low=False):
+            solver.sigma_z[:, :, -(i + 1)] = sigma
+
+
+def initialize_absorber_state(solver):
+    # Adiabatic graded-conductivity absorber. Shares the semi-implicit sigma
+    # branch used by the simple PML but with a gentler cubic ramp and a
+    # reflection-calibrated peak conductivity, and no kappa/alpha stretching or
+    # auxiliary psi memory.
+    _clear_auxiliary_state(solver)
+
+    thickness = solver.scene.pml_thickness
+    _allocate_sigma_tensors(solver)
+    eta0 = math.sqrt(solver.mu0 / solver.eps0)
+    grading_order = ABSORBER_GRADING_ORDER
+    min_delta = min(solver.dx, solver.dy, solver.dz)
+    # Physical peak conductivity (S/m) calibrated to the target round-trip
+    # reflection, then converted to the 1/s scale that the semi-implicit sigma
+    # update expects (the stored sigma multiplies dt directly, i.e. sigma/eps0).
+    sigma_phys_max = -(grading_order + 1.0) * math.log(ABSORBER_REFLECTION) / (
+        2.0 * eta0 * thickness * min_delta
+    )
+    sigma_max = sigma_phys_max / solver.eps0
+    sigma_max *= _legacy_strength_scale(solver.scene.pml_strength)
+    for i in range(thickness):
+        x = (thickness - i) / thickness
+        sigma = sigma_max * x**grading_order
         if _axis_face_uses_pml(solver, "x", low=True):
             solver.sigma_x[i, :, :] = sigma
         if _axis_face_uses_pml(solver, "x", low=False):

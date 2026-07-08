@@ -535,7 +535,7 @@ def _electric_update_coefficients(solver, eps, sigma_e, pml_decay):
 
 
 def build_update_coefficients(solver):
-    if solver.active_absorber_type != "pml":
+    if solver.active_absorber_type not in ("pml", "absorber"):
         solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, solver.eps_Ex, solver.sigma_e_Ex, None)
         solver.cey_decay, solver.cey_curl = _electric_update_coefficients(solver, solver.eps_Ey, solver.sigma_e_Ey, None)
         solver.cez_decay, solver.cez_curl = _electric_update_coefficients(solver, solver.eps_Ez, solver.sigma_e_Ez, None)

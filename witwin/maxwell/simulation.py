@@ -35,6 +35,8 @@ class SpectralWindowKind(str, Enum):
 class AbsorberKind(str, Enum):
     CPML = "cpml"
     PML = "pml"
+    ABSORBER = "absorber"
+    STABLE_PML = "stablepml"
 
     def __str__(self) -> str:
         return self.value

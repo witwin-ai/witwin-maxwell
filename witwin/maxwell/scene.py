@@ -17,7 +17,7 @@ from .compiler.materials import (
 )
 
 
-BoundaryKind: TypeAlias = Literal["none", "pml", "periodic", "bloch", "pec", "pmc"]
+BoundaryKind: TypeAlias = Literal["none", "pml", "periodic", "bloch", "pec", "pmc", "mur"]
 BoundaryAxisOverride: TypeAlias = BoundaryKind | tuple[BoundaryKind, BoundaryKind]
 BlochWavevector: TypeAlias = tuple[float, float, float] | Literal["auto"]
 
@@ -25,7 +25,7 @@ _ResolvedBoundaryKind: TypeAlias = BoundaryKind | Literal["mixed"]
 _BOUNDARY_AXES = ("x", "y", "z")
 _BOUNDARY_AXIS_TO_INDEX = {axis: index for index, axis in enumerate(_BOUNDARY_AXES)}
 _BOUNDARY_SIDE_TO_INDEX = {"low": 0, "high": 1}
-_VALID_BOUNDARY_KINDS = {"none", "pml", "periodic", "bloch", "pec", "pmc"}
+_VALID_BOUNDARY_KINDS = {"none", "pml", "periodic", "bloch", "pec", "pmc", "mur"}
 _PAIR_ONLY_BOUNDARY_KINDS = {"periodic", "bloch"}
 
 
@@ -35,7 +35,7 @@ def _normalize_boundary_kind(value, *, allow_mixed: bool = False) -> str:
         return kind
     if kind not in _VALID_BOUNDARY_KINDS:
         raise ValueError(
-            "Boundary kind must be one of 'none', 'pml', 'periodic', 'bloch', 'pec', or 'pmc'."
+            "Boundary kind must be one of 'none', 'pml', 'periodic', 'bloch', 'pec', 'pmc', or 'mur'."
         )
     return kind
 
@@ -276,6 +276,10 @@ class BoundarySpec:
     @classmethod
     def pmc(cls) -> "BoundarySpec":
         return cls(kind="pmc")
+
+    @classmethod
+    def mur(cls) -> "BoundarySpec":
+        return cls(kind="mur")
 
     @classmethod
     def faces(
