@@ -36,6 +36,19 @@ def _structure_material(structure):
     return getattr(structure, "material", None)
 
 
+def _structure_is_pec(structure) -> bool:
+    material = _structure_material(structure)
+    return material is not None and bool(getattr(material, "is_pec", False))
+
+
+def _nonpec_structures(scene):
+    return [structure for structure in _sorted_structures(scene) if not _structure_is_pec(structure)]
+
+
+def _pec_structures(scene):
+    return [structure for structure in _sorted_structures(scene) if _structure_is_pec(structure)]
+
+
 def _scene_has_anisotropic_material(scene) -> bool:
     for structure in _sorted_structures(scene):
         material = _structure_material(structure)
@@ -186,6 +199,70 @@ def _blend_material(tensor, occupancy, *, value):
     return (1.0 - occupancy) * tensor + occupancy * value_tensor
 
 
+_NORMAL_EPS = 1e-24
+_HARMONIC_EPS = 1e-12
+
+
+def _interface_normals(scene, geometry, coords=None):
+    """Unit outward interface normals per node from the signed-distance field.
+
+    The normal is the gradient of the per-structure signed-distance field on the
+    node grid, evaluated with true (possibly graded) spacings via central finite
+    differences. SDFs are eikonal so ``|grad| ~ 1`` on the interface band; deep
+    interior / medial-axis nodes have ``|grad| ~ 0`` and yield ``n ~ 0`` after the
+    floored normalization, which is harmless because the polarized correction there
+    is weighted by the vanishing ``(eps_arith - eps_harm)`` term. Differentiable in
+    geometry parameters through ``signed_distance``.
+    """
+    xx, yy, zz = (scene.X, scene.Y, scene.Z) if coords is None else coords
+    sdf = geometry.signed_distance(xx, yy, zz)
+    x = xx[:, 0, 0]
+    y = yy[0, :, 0]
+    z = zz[0, 0, :]
+    grads = []
+    for dim, coord in enumerate((x, y, z)):
+        if sdf.shape[dim] < 2:
+            grads.append(torch.zeros_like(sdf))
+        else:
+            grads.append(torch.gradient(sdf, spacing=(coord,), dim=dim)[0])
+    gx, gy, gz = grads
+    # Floor is applied inside the sqrt (squared scale ``_NORMAL_EPS``) so the
+    # sqrt's own backward stays finite at degenerate nodes where the summed
+    # squared gradient is exactly zero (medial-axis / symmetric-center nodes).
+    # A floor added after the sqrt would leave d(sqrt)/d(.) = inf there, and the
+    # vanishing upstream gradient would evaluate 0*inf = NaN, poisoning the whole
+    # geometry-gradient tensor through the sum reduction.
+    mag = torch.sqrt(gx * gx + gy * gy + gz * gz + _NORMAL_EPS)
+    inv = 1.0 / mag
+    return {"x": gx * inv, "y": gy * inv, "z": gz * inv}
+
+
+def _blend_material_polarized(tensor, occupancy, normal_axis, *, value):
+    """Normal-projection (Kottke) per-axis blend of a background field with ``value``.
+
+    ``tensor`` is the running per-axis accumulated background permittivity/permeability,
+    ``occupancy`` this structure's soft fill, and ``normal_axis`` the interface-normal
+    component for this axis. The harmonic (series) mean is weighted by ``n_a^2`` along
+    the interface normal and the arithmetic (parallel) mean by ``1 - n_a^2`` tangentially.
+    Reduces exactly to the arithmetic blend when ``n_a = 0``.
+    """
+    value_tensor = _scalar_tensor(value, device=tensor.device, dtype=tensor.dtype)
+    arithmetic = (1.0 - occupancy) * tensor + occupancy * value_tensor
+    harmonic = 1.0 / (
+        (1.0 - occupancy) / (tensor + _HARMONIC_EPS)
+        + occupancy / (value_tensor + _HARMONIC_EPS)
+    )
+    weight = normal_axis * normal_axis
+    return (1.0 - weight) * arithmetic + weight * harmonic
+
+
+def _resolve_subpixel(subpixel):
+    """Return ``(samples, averaging, pec)`` from a SubpixelSpec or the None default."""
+    if subpixel is None:
+        return (1, 1, 1), "arithmetic", "staircase"
+    return tuple(int(v) for v in subpixel.samples), subpixel.averaging, subpixel.pec
+
+
 def _iter_weight_entries(model):
     yield from model["debye_poles"]
     yield from model["drude_poles"]
@@ -229,9 +306,18 @@ def _geometry_beta(scene) -> float:
     return 0.05 * min(scene.grid.min_spacing)
 
 
-def _geometry_occupancy(scene, geometry, coords=None):
+def _pec_geometry_beta(scene) -> float:
+    # Cell-scale smoothing (wider than the near-sharp dielectric beta) so per-edge PEC
+    # fill fractions vary across a full cell. This is what gives conformal PEC genuine
+    # sub-cell wall placement; the sharp dielectric beta would make every edge fill
+    # collapse to 0/1 and leave conformal indistinguishable from staircase.
+    return 0.5 * min(scene.grid.min_spacing)
+
+
+def _geometry_occupancy(scene, geometry, coords=None, beta=None):
     xx, yy, zz = (scene.X, scene.Y, scene.Z) if coords is None else coords
-    return geometry.to_mask(xx, yy, zz, offset=0.0, beta=_geometry_beta(scene))
+    resolved_beta = _geometry_beta(scene) if beta is None else beta
+    return geometry.to_mask(xx, yy, zz, offset=0.0, beta=resolved_beta)
 
 
 def _build_dispersive_layout(scene):
@@ -244,7 +330,7 @@ def _build_dispersive_layout(scene):
         "mu_lorentz_poles": [],
         "structure_slots": [],
     }
-    for structure in _sorted_structures(scene):
+    for structure in _nonpec_structures(scene):
         material, _, _, _, _ = _static_structure_material(structure)
         slots = {
             "debye": [],
@@ -285,21 +371,29 @@ def _apply_structure_material(
     coords=None,
     eps_background=1.0,
     mu_background=1.0,
+    averaging="arithmetic",
 ):
     _, eps_components, mu_components, sigma_components, kerr_chi3 = _static_structure_material(structure)
     occupancy = _geometry_occupancy(scene, structure.geometry, coords=coords)
+    normals = _interface_normals(scene, structure.geometry, coords=coords) if averaging == "polarized" else None
 
     for axis in _AXES:
-        model["eps_components"][axis] = _blend_material(
-            model["eps_components"][axis],
-            occupancy,
-            value=eps_components[axis] * float(eps_background),
-        )
-        model["mu_components"][axis] = _blend_material(
-            model["mu_components"][axis],
-            occupancy,
-            value=mu_components[axis] * float(mu_background),
-        )
+        eps_value = eps_components[axis] * float(eps_background)
+        mu_value = mu_components[axis] * float(mu_background)
+        if normals is None:
+            model["eps_components"][axis] = _blend_material(
+                model["eps_components"][axis], occupancy, value=eps_value
+            )
+            model["mu_components"][axis] = _blend_material(
+                model["mu_components"][axis], occupancy, value=mu_value
+            )
+        else:
+            model["eps_components"][axis] = _blend_material_polarized(
+                model["eps_components"][axis], occupancy, normals[axis], value=eps_value
+            )
+            model["mu_components"][axis] = _blend_material_polarized(
+                model["mu_components"][axis], occupancy, normals[axis], value=mu_value
+            )
         model["sigma_e_components"][axis] = _blend_material(
             model["sigma_e_components"][axis],
             occupancy,
@@ -318,11 +412,12 @@ def _compile_material_sample(
     eps_background,
     mu_background,
     sample_offset=(0.0, 0.0, 0.0),
+    averaging="arithmetic",
 ):
     model = _new_material_model(scene, layout, eps_fill=eps_background, mu_fill=mu_background)
     coords = _coordinate_grids(scene, sample_offset)
 
-    for structure, structure_slots in zip(_sorted_structures(scene), layout["structure_slots"]):
+    for structure, structure_slots in zip(_nonpec_structures(scene), layout["structure_slots"]):
         model = _apply_structure_material(
             scene,
             model,
@@ -331,6 +426,7 @@ def _compile_material_sample(
             coords=coords,
             eps_background=eps_background,
             mu_background=mu_background,
+            averaging=averaging,
         )
     return model
 
@@ -474,14 +570,31 @@ def _apply_material_regions(scene, model):
     return _refresh_model_summary_aliases(model)
 
 
+def _pec_occupancy(scene, coords=None):
+    """Union (max) of soft SDF occupancies of all PEC-material structures on the node grid.
+
+    Returns ``None`` when the scene has no PEC structure so non-PEC scenes stay
+    byte-identical. Differentiable in PEC geometry through ``_geometry_occupancy``.
+    """
+    structures = _pec_structures(scene)
+    if not structures:
+        return None
+    beta = _pec_geometry_beta(scene)
+    occupancy = None
+    for structure in structures:
+        sample = _geometry_occupancy(scene, structure.geometry, coords=coords, beta=beta)
+        occupancy = sample if occupancy is None else torch.maximum(occupancy, sample)
+    return occupancy
+
+
 def compile_material_model(
     scene,
     eps_background=1.0,
     mu_background=1.0,
-    subpixel_samples=(1, 1, 1),
+    subpixel=None,
 ):
     _validate_scene_material_combinations(scene)
-    samples = tuple(int(v) for v in subpixel_samples)
+    samples, averaging, pec_mode = _resolve_subpixel(subpixel)
     layout = _build_dispersive_layout(scene)
     if samples == (1, 1, 1):
         model = _compile_material_sample(
@@ -489,8 +602,12 @@ def compile_material_model(
             layout,
             eps_background=eps_background,
             mu_background=mu_background,
+            averaging=averaging,
         )
-        return _apply_material_regions(scene, model)
+        model = _apply_material_regions(scene, model)
+        model["pec_occupancy"] = _pec_occupancy(scene)
+        model["pec_mode"] = pec_mode
+        return model
 
     accum = _new_material_model(scene, layout, eps_fill=0.0, mu_fill=0.0)
     sample_offsets = _sample_offsets(scene, samples)
@@ -501,6 +618,7 @@ def compile_material_model(
             eps_background=eps_background,
             mu_background=mu_background,
             sample_offset=sample_offset,
+            averaging=averaging,
         )
         for axis in _AXES:
             accum["eps_components"][axis] += sample["eps_components"][axis]
@@ -538,7 +656,10 @@ def compile_material_model(
         entry["weight"] *= scale
     for entry in accum["mu_lorentz_poles"]:
         entry["weight"] *= scale
-    return _apply_material_regions(scene, _refresh_model_summary_aliases(accum))
+    model = _apply_material_regions(scene, _refresh_model_summary_aliases(accum))
+    model["pec_occupancy"] = _pec_occupancy(scene)
+    model["pec_mode"] = pec_mode
+    return model
 
 
 def _evaluate_electric_components(model, frequency: float | None):
@@ -627,14 +748,14 @@ def compile_material_tensors(
     scene,
     eps_background=1.0,
     mu_background=1.0,
-    subpixel_samples=(1, 1, 1),
+    subpixel=None,
     frequency: float | None = None,
 ):
     model = compile_material_model(
         scene,
         eps_background=eps_background,
         mu_background=mu_background,
-        subpixel_samples=subpixel_samples,
+        subpixel=subpixel,
     )
     eps_components, mu_components = evaluate_material_components(model, frequency)
     return _component_average(eps_components), _component_average(mu_components)

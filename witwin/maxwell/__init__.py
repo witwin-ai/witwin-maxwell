@@ -28,6 +28,7 @@ from .scene import (
     MeshOverrideStructure,
     Scene,
     SceneModule,
+    SubpixelSpec,
 )
 from .sources import (
     AstigmaticGaussianBeam,
@@ -120,6 +121,7 @@ __all__ = [
     "SpectralWindowKind",
     "Sphere",
     "Structure",
+    "SubpixelSpec",
     "Tensor3x3",
     "TimeConfig",
     "TFSF",

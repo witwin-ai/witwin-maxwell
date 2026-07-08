@@ -40,7 +40,9 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - `Scene.clone(...)` for scene-preserving validation, benchmarking, and device-transfer workflows
 - `Scene(...)` defaults to `device="cuda"` and requires an explicit `device="cpu"` override for scene-only CPU workflows
 - Optional domain symmetry on `Scene(symmetry=(..., ..., ...))` with per-axis `None` / `"PEC"` / `"PMC"` on either domain face, via bare mode strings (low face by default) or explicit `(mode, face)` pairs such as `("PEC", "high")`, folding the domain about any axis at either face with matching result-side expansion
-- Optional subpixel material averaging via `Scene(subpixel_samples=...)`, accepting only `int` or `(sx, sy, sz)`
+- Optional subpixel material averaging via `Scene(subpixel_samples=...)`, accepting `int`, `(sx, sy, sz)`, or a `SubpixelSpec(samples=..., averaging=..., pec=...)` policy object; the bare `int` / tuple form keeps the legacy arithmetic / staircase behavior bitwise unchanged
+- `SubpixelSpec(averaging="polarized")` enables Kottke normal-projection subpixel averaging (harmonic permittivity/permeability along the SDF interface normal, arithmetic tangentially) for `eps` and `mu` components, flowing through both FDFD and FDTD from the shared material compiler
+- `SubpixelSpec(pec="conformal")` enables stable partial-fill conformal PEC edge treatment for in-domain `Material.pec()` structures in FDTD
 - Solver-side compiled scene inspection via `Simulation.prepare()`, where `prepared.solver.scene` materializes Yee-grid dimensions, lazy meshgrid allocation, material compilation, and orthogonal material cross sections without storing that state on the public `Scene`
 
 ## Geometry
@@ -80,6 +82,8 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - Differentiable SDF occupancy for `PolySlab` and `ComplexPolySlab`, with gradients through polygon vertices, axis bounds, and sidewall angle
 - Differentiable mesh occupancy compilation through shared mesh signed-distance evaluation, including Slang-accelerated CUDA forward/backward distance-sign queries for watertight solid fill, geometry-state-aware static mesh SDF caching, cached BVH acceleration for larger static CUDA meshes, and shared surface-band modes
 - Supersampled voxel averaging for smoother material interfaces on partial cells
+- Polarized (Kottke normal-projection) subpixel averaging for `eps` and `mu`, using SDF-gradient interface normals estimated by central finite differences on the node grid (differentiable in geometry parameters), reducing normal-field error at high-contrast interfaces
+- In-domain perfect-electric-conductor material via `Material.pec(name=None)` / `Material.is_pec`, compiled to a differentiable union PEC occupancy grid and enforced in FDTD through per-edge open-fraction coefficient scaling (`staircase` hard edge or `conformal` stable partial fill)
 
 ## Sources
 
@@ -325,9 +329,10 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Nonuniform (`GridSpec.custom`) grids are FDTD-only in v1: FDFD and Tidy3D export both raise `NotImplementedError` for custom grids; `GridSpec.auto` resolves to a nonuniform grid at prepare time and inherits the same restrictions (FDFD unsupported, TFSF/mode-plane locally-uniform rules apply)
 - On nonuniform grids, TFSF-kind injections (`PlaneWave` TFSF box, grating TFSF slab) require locally uniform spacing along all three axes over the injection region expanded by one cell, and `ModeSource` / `ModeMonitor` / `ModePort` require locally uniform transverse spacing across the mode plane; both are validated with explicit errors. Soft (non-TFSF) surface sources and `PointDipole` are fully generalized, but the soft `PlaneWave` numerical-dispersion phase correction uses the per-axis minimum spacing (exact on uniform grids, an approximation on graded ones)
 - Subpixel material averaging (`Scene(subpixel_samples=...)` with more than one sample) is not yet generalized to nonuniform grids and fails through the scalar `Scene.dx` accessor
-- Current subpixel material smoothing uses scalar arithmetic averaging on the scene grid
-- Yee-edge tangential versus normal permittivity averaging is not yet implemented
-- High-contrast interfaces can therefore show larger normal-field error than a true edge-aware subpixel scheme
+- Polarized subpixel averaging is applied to `eps` and `mu` only; `sigma_e`, Kerr `chi3`, and dispersive-pole weights stay arithmetic (the normal-projection rule is not well defined for conductivity/nonlinearity, and only the static base permittivity/permeability becomes normal-aware for dispersive media)
+- The polarized rule is baked at grid nodes and both runtimes keep their existing arithmetic node-to-Yee-edge averaging, so a residual O(dx) half-cell smoothing of the normal-aware correction remains versus evaluating the rule exactly at each Yee-edge location; this residual is far below the arithmetic/staircase error it replaces
+- Conformal PEC (`SubpixelSpec(pec="conformal")`) is FDTD-only: FDFD raises `NotImplementedError` for in-domain PEC materials, and the FDTD scheme is the stable partial-fill (edge-fraction E-suppression) variant of the Dey-Mittra family; classical area-scaled Dey-Mittra (H-side `1/A_open` with an area floor), contour-path H-loop averaging, and surface-impedance boundaries remain future work
+- Subpixel averaging normals and PEC fill fractions reuse per-structure signed-distance fields, so accuracy is bounded by SDF quality for primitives with kinked distance fields (faces/edges/corners)
 - Maxwell supports axis-aligned diagonal anisotropy through `DiagonalTensor3`, but `Material.orientation` and full `Tensor3x3` rotation / off-diagonal tensors remain unsupported
 - Kerr media cannot be combined with dispersive or anisotropic materials in the same scene in v1
 - Experimental `DiffractionMonitor` is v1-limited: it assumes the monitor plane spans one full transverse unit cell (periods taken from the transverse domain lengths), targets FDTD `CW` grating scenes with transverse Bloch/periodic boundaries, and reports per-order power as a share of the transmitted plane flux. Absolute per-order diffraction efficiency normalized against a separately measured incident power is not asserted, because the FDTD spectral-monitor CW normalization is steady-state/ratio-based rather than an absolute cross-run power balance

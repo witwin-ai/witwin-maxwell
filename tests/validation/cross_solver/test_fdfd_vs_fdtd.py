@@ -97,9 +97,9 @@ def save_field_comparison(fdfd_fields, fdtd_fields, name, scene, show=False):
     fdfd_norm = fdfd_E / (fdfd_max + 1e-30)
     fdtd_norm = fdtd_E / (fdtd_max + 1e-30)
 
-    x0, x1 = scene.domain_range[0], scene.domain_range[1]
-    y0, y1 = scene.domain_range[2], scene.domain_range[3]
-    z0, z1 = scene.domain_range[4], scene.domain_range[5]
+    x0, x1 = scene.domain.domain_range[0], scene.domain.domain_range[1]
+    y0, y1 = scene.domain.domain_range[2], scene.domain.domain_range[3]
+    z0, z1 = scene.domain.domain_range[4], scene.domain.domain_range[5]
     Nx, Ny, Nz = fdfd_E.shape
     mid = [Nx // 2, Ny // 2, Nz // 2]
 
@@ -192,7 +192,8 @@ def save_field_comparison(fdfd_fields, fdtd_fields, name, scene, show=False):
 
 def make_scene_pair(domain_half, resolution, pml_thickness, pml_strength,
                     source_pos, source_width, source_amp, source_pol,
-                    geometry_fn=None, device='cuda', source_frequency=1e9):
+                    geometry_fn=None, device='cuda', source_frequency=1e9,
+                    subpixel_samples=1):
     """Build matched FDFD / FDTD scenes with identical grid and geometry."""
     def _build(add_source_fn):
         scene = mw.Scene(
@@ -205,6 +206,7 @@ def make_scene_pair(domain_half, resolution, pml_thickness, pml_strength,
             ),
             grid=mw.GridSpec.uniform(resolution),
             boundary=mw.BoundarySpec.pml(num_layers=pml_thickness, strength=pml_strength),
+            subpixel_samples=subpixel_samples,
             device=device,
         )
         if geometry_fn is not None:
@@ -381,6 +383,49 @@ class TestFDFDvsFDTD:
         results = compare_fields(fdfd_fields, fdtd_fields, scene_fdfd,
                                  name="cube", label="cube ")
         self._assert_match(results, "cube ")
+
+    # ------------------------------------------------------------------
+    # Case 3: point source + dielectric cube with polarized subpixel
+    # ------------------------------------------------------------------
+    def test_polarized_dielectric_consistency(self):
+        """FDFD and FDTD stay consistent under polarized (Kottke) subpixel averaging.
+
+        Both solvers consume the same node-based normal-aware material components
+        (compiler emits them once; each solver re-averages node -> Yee edge with its
+        own arithmetic stencil), so enabling ``averaging="polarized"`` must keep the
+        two runtimes cross-consistent. This locks the FDFD-for-free path (design 6).
+        """
+        freq = 1e9
+
+        def add_cube(scene):
+            scene.add_structure(
+                mw.Structure(
+                    name="cube",
+                    geometry=mw.Box(position=(0, 0.3, 0), size=(0.3, 0.3, 0.3)),
+                    material=mw.Material(eps_r=4.0),
+                )
+            )
+
+        scene_fdfd, scene_fdtd = make_scene_pair(
+            domain_half=0.64, resolution=0.04,
+            pml_thickness=8, pml_strength=1e6,
+            source_pos=[0, 0, 0], source_width=0.05,
+            source_amp=100.0, source_pol=[0, 0, 1],
+            geometry_fn=add_cube,
+            source_frequency=freq,
+            subpixel_samples=mw.SubpixelSpec(averaging="polarized"),
+        )
+        # Both scenes must actually carry the polarized policy.
+        assert scene_fdfd.subpixel.averaging == "polarized"
+        assert scene_fdtd.subpixel.averaging == "polarized"
+
+        fdfd_fields, _ = run_fdfd(scene_fdfd, freq)
+        fdtd_fields, _ = run_fdtd(scene_fdtd, freq)
+        assert fdfd_fields is not None, "FDFD returned None"
+        assert fdtd_fields is not None, "FDTD returned None"
+        results = compare_fields(fdfd_fields, fdtd_fields, scene_fdfd,
+                                 name="cube_polarized", label="cube_polarized ")
+        self._assert_match(results, "cube_polarized ")
 
 
 # ---------------------------------------------------------------------------

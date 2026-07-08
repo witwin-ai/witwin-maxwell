@@ -632,6 +632,45 @@ def _normalize_subpixel_samples(value) -> tuple[int, int, int]:
     return normalized
 
 
+_SUBPIXEL_AVERAGING = {"arithmetic", "polarized"}
+_SUBPIXEL_PEC = {"staircase", "conformal"}
+
+
+@dataclass(frozen=True)
+class SubpixelSpec:
+    """Subpixel material-averaging policy.
+
+    ``averaging`` selects the per-Yee-component permittivity/permeability blend:
+    ``"arithmetic"`` (scalar volume-fraction mixing, the default) or ``"polarized"``
+    (Kottke normal-projection mixing that uses the harmonic mean along the interface
+    normal and the arithmetic mean tangentially). ``pec`` selects how PEC-material
+    edges are handled by FDTD: ``"staircase"`` (hard edge) or ``"conformal"``
+    (fractional partial-fill edge suppression). The defaults reproduce the legacy
+    arithmetic / staircase behaviour bitwise.
+    """
+
+    samples: tuple[int, int, int] = (1, 1, 1)
+    averaging: str = "arithmetic"
+    pec: str = "staircase"
+
+    def __post_init__(self):
+        object.__setattr__(self, "samples", _normalize_subpixel_samples(self.samples))
+        averaging = str(self.averaging).lower()
+        if averaging not in _SUBPIXEL_AVERAGING:
+            raise ValueError("SubpixelSpec.averaging must be 'arithmetic' or 'polarized'.")
+        pec = str(self.pec).lower()
+        if pec not in _SUBPIXEL_PEC:
+            raise ValueError("SubpixelSpec.pec must be 'staircase' or 'conformal'.")
+        object.__setattr__(self, "averaging", averaging)
+        object.__setattr__(self, "pec", pec)
+
+
+def _coerce_subpixel(value) -> SubpixelSpec:
+    if isinstance(value, SubpixelSpec):
+        return value
+    return SubpixelSpec(samples=_normalize_subpixel_samples(value))
+
+
 def _normalize_symmetry_entry(axis_value) -> tuple[str, str] | None:
     """Normalize a single axis symmetry declaration to ``(mode, face)`` or ``None``.
 
@@ -746,11 +785,15 @@ class Scene(SceneBase):
         self.domain = domain
         self.grid = grid
         self.boundary = boundary
-        self.subpixel_samples = _normalize_subpixel_samples(subpixel_samples)
+        self.subpixel = _coerce_subpixel(subpixel_samples)
         self.symmetry = _normalize_symmetry(symmetry)
         self.material_regions = list(material_regions or [])
         self.ports = list(ports or [])
         self.lazy_meshgrid = bool(lazy_meshgrid)
+
+    @property
+    def subpixel_samples(self) -> tuple[int, int, int]:
+        return self.subpixel.samples
 
     def _scalar_grid_step(self, value: float | None) -> float:
         if self.grid.is_custom or self.grid.is_auto:
@@ -869,7 +912,7 @@ class Scene(SceneBase):
             "device": self.device,
             "verbose": self.verbose,
             "lazy_meshgrid": self.lazy_meshgrid,
-            "subpixel_samples": self.subpixel_samples,
+            "subpixel_samples": self.subpixel,
             "symmetry": self.symmetry,
         }
         params.update(overrides)
@@ -973,7 +1016,7 @@ class PreparedScene(Scene):
             device=scene.device,
             verbose=scene.verbose,
             lazy_meshgrid=resolved_lazy_meshgrid,
-            subpixel_samples=scene.subpixel_samples,
+            subpixel_samples=scene.subpixel,
             symmetry=scene.symmetry,
         )
         self._public_scene = scene
@@ -1093,18 +1136,18 @@ class PreparedScene(Scene):
         return self
 
     def compile_materials(self, subpixel_samples=_USE_SCENE_SUBPIXEL_SAMPLES):
-        resolved_subpixel = (
-            self.subpixel_samples
+        spec = (
+            self.subpixel
             if subpixel_samples is _USE_SCENE_SUBPIXEL_SAMPLES
-            else _normalize_subpixel_samples(subpixel_samples)
+            else _coerce_subpixel(subpixel_samples)
         )
-        key = resolved_subpixel
+        key = spec
         if self._has_dynamic_materials() or self._has_trainable_geometry():
             model = compile_material_model(
                 self,
                 eps_background=1.0,
                 mu_background=1.0,
-                subpixel_samples=resolved_subpixel,
+                subpixel=spec,
             )
             self.release_meshgrid()
             return model
@@ -1115,7 +1158,7 @@ class PreparedScene(Scene):
                 self,
                 eps_background=1.0,
                 mu_background=1.0,
-                subpixel_samples=resolved_subpixel,
+                subpixel=spec,
             )
             self._material_model_cache[key] = cached
             self.release_meshgrid()

@@ -124,6 +124,35 @@ def test_soft_occupancy_returns_fractional_interface_fill_without_subpixel_sampl
     assert abs(interface_value - 3.0) < 0.35
 
 
+def test_soft_occupancy_polarized_normal_component_uses_harmonic_mean():
+    # Domain [0,1]^3, grid 0.25 -> nodes at 0, 0.25, 0.5, 0.75, 1.0. The slab low face
+    # lands on the interior node x=0.25 with a neighbouring interior node at x=0.5, so
+    # the node-based finite-difference normal at x=0.25 resolves along x.
+    domain = mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)))
+    grid = mw.GridSpec.uniform(0.25)
+
+    scene = mw.Scene(
+        domain=domain,
+        grid=grid,
+        device="cpu",
+        subpixel_samples=mw.SubpixelSpec(averaging="polarized"),
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="slab",
+            geometry=mw.Box(position=(0.625, 0.5, 0.5), size=(0.75, 1.0, 1.0)),
+            material=mw.Material(eps_r=5.0),
+        )
+    )
+
+    eps, _ = _prepared_scene(scene).compile_material_components()
+    node = (1, 1, 1)
+    harmonic = 1.0 / (0.5 / 1.0 + 0.5 / 5.0)
+    assert abs(eps["x"][node].item() - harmonic) < 1e-2
+    assert abs(eps["y"][node].item() - 3.0) < 1e-2
+    assert abs(eps["z"][node].item() - 3.0) < 1e-2
+
+
 def test_scene_frequency_specific_material_tensors_match_dispersive_medium_response():
     scene = _build_scene()
     material = mw.Material(

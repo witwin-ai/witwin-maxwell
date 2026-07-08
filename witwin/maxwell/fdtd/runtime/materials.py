@@ -534,6 +534,48 @@ def _electric_update_coefficients(solver, eps, sigma_e, pml_decay):
     return decay.contiguous(), curl.contiguous()
 
 
+def _pec_edge_open_fractions(solver):
+    """Per-E-edge open fractions ``1 - fill`` from the PEC occupancy, or ``None``.
+
+    The PEC fill on each E edge is the two-endpoint node->edge average of the PEC
+    occupancy (same stencil as eps, keeping it consistent and differentiable). In
+    ``staircase`` mode the fill is hard-thresholded at 0.5; in ``conformal`` mode the
+    fractional fill is kept so the effective PEC wall sits at the sub-cell crossing.
+    """
+    model = getattr(solver, "_compiled_material_model", None)
+    pec_occupancy = None if model is None else model.get("pec_occupancy")
+    if pec_occupancy is None:
+        return None
+    mode = model.get("pec_mode", "staircase")
+    open_fractions = {}
+    for component_name in ("Ex", "Ey", "Ez"):
+        fill = average_node_to_component(solver, pec_occupancy, component_name)
+        if mode == "staircase":
+            fill = (fill >= 0.5).to(fill.dtype)
+        open_fractions[component_name] = 1.0 - fill
+    return open_fractions
+
+
+def _apply_pec_edge_suppression(solver):
+    """Fold the PEC open fraction into the electric decay/curl coefficients.
+
+    Scaling both ``decay`` and ``curl`` by ``open = 1 - fill`` turns the update into
+    ``E_new = open * (decay*E_old + curl*(curlH - J))``, so a fully covered edge
+    (``fill = 1``) keeps tangential E exactly zero while a fractional edge acts as a
+    soft short with sub-cell wall placement. Never amplifies (``open <= 1``), so the
+    scheme is unconditionally stable and needs no area floor.
+    """
+    open_fractions = _pec_edge_open_fractions(solver)
+    if open_fractions is None:
+        return
+    solver.cex_decay = (solver.cex_decay * open_fractions["Ex"]).contiguous()
+    solver.cex_curl = (solver.cex_curl * open_fractions["Ex"]).contiguous()
+    solver.cey_decay = (solver.cey_decay * open_fractions["Ey"]).contiguous()
+    solver.cey_curl = (solver.cey_curl * open_fractions["Ey"]).contiguous()
+    solver.cez_decay = (solver.cez_decay * open_fractions["Ez"]).contiguous()
+    solver.cez_curl = (solver.cez_curl * open_fractions["Ez"]).contiguous()
+
+
 def build_update_coefficients(solver):
     if solver.active_absorber_type not in ("pml", "absorber"):
         solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, solver.eps_Ex, solver.sigma_e_Ex, None)
@@ -545,6 +587,7 @@ def build_update_coefficients(solver):
         solver.chy_curl = (solver.dt / solver.mu_Hy).contiguous()
         solver.chz_decay = torch.ones_like(solver.mu_Hz).contiguous()
         solver.chz_curl = (solver.dt / solver.mu_Hz).contiguous()
+        _apply_pec_edge_suppression(solver)
         return
 
     ex_sigma_y = 0.5 * (solver.sigma_y[:-1, :, :] + solver.sigma_y[1:, :, :])
@@ -609,6 +652,8 @@ def build_update_coefficients(solver):
     hz_decay = 1.0 / (1.0 + solver.dt * (hz_sigma_x + hz_sigma_y))
     solver.chz_decay = hz_decay.contiguous()
     solver.chz_curl = ((solver.dt / solver.mu_Hz) * hz_decay).contiguous()
+
+    _apply_pec_edge_suppression(solver)
 
 
 def update_kerr_electric_curls(solver):

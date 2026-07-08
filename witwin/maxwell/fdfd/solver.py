@@ -277,6 +277,12 @@ class FDFD:
     def _ensure_material_components(self):
         if self.material_eps_components is not None:
             return
+        for structure in self.scene.structures:
+            material = getattr(structure, "material", None)
+            if material is not None and bool(getattr(material, "is_pec", False)):
+                raise NotImplementedError(
+                    "FDFD does not support in-domain PEC materials yet; use FDTD for PEC-material scenes."
+                )
         self.material_eps_components, self.material_mu_components = self.scene.compile_material_components(
             frequency=self.frequency
         )

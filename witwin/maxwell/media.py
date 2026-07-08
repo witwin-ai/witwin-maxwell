@@ -176,6 +176,7 @@ class Material(CoreMaterial):
     sigma_e_tensor: DiagonalTensor3 | Tensor3x3 | None
     orientation: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] | None
     kerr_chi3: float | None
+    pec: bool
 
     def __init__(
         self,
@@ -195,8 +196,10 @@ class Material(CoreMaterial):
         sigma_e_tensor: DiagonalTensor3 | Tensor3x3 | None = None,
         orientation=None,
         kerr_chi3: float | None = None,
+        pec: bool = False,
     ):
         super().__init__(eps_r=eps_r, mu_r=mu_r, sigma_e=sigma_e, name=name)
+        object.__setattr__(self, "pec", bool(pec))
         object.__setattr__(self, "debye_poles", _normalize_poles(debye_poles, DebyePole, name="debye_poles"))
         object.__setattr__(self, "drude_poles", _normalize_poles(drude_poles, DrudePole, name="drude_poles"))
         object.__setattr__(self, "lorentz_poles", _normalize_poles(lorentz_poles, LorentzPole, name="lorentz_poles"))
@@ -230,6 +233,20 @@ class Material(CoreMaterial):
         if self.is_nonlinear and self.is_anisotropic:
             raise NotImplementedError("Kerr media cannot be combined with anisotropic tensors in v1.")
 
+        if self.pec:
+            if (
+                self.is_dispersive
+                or self.is_anisotropic
+                or self.is_nonlinear
+                or float(self.eps_r) != 1.0
+                or float(self.mu_r) != 1.0
+                or float(self.sigma_e) != 0.0
+            ):
+                raise ValueError(
+                    "A PEC Material must not carry dispersion, anisotropy, Kerr, or non-default "
+                    "eps/mu/sigma; its permittivity is not a finite number."
+                )
+
     @property
     def is_dispersive(self) -> bool:
         return bool(
@@ -256,6 +273,15 @@ class Material(CoreMaterial):
     @property
     def is_nonlinear(self) -> bool:
         return self.kerr_chi3 is not None and float(self.kerr_chi3) != 0.0
+
+    @property
+    def is_pec(self) -> bool:
+        return self.pec
+
+    @classmethod
+    def pec(cls, name: str | None = None) -> "Material":
+        """Construct a perfect-electric-conductor marker material."""
+        return cls(pec=True, name=name)
 
     def capabilities(self) -> MaterialCapabilities:
         base = super().capabilities()
