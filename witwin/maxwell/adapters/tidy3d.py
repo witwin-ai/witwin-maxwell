@@ -537,10 +537,10 @@ def _convert_boundary(boundary, td):
 
 def _convert_grid(grid, td, s):
     """Convert maxwell GridSpec to Tidy3D GridSpec (dl x *s*)."""
-    if grid.is_custom:
+    if grid.is_custom or grid.is_auto:
         raise NotImplementedError(
-            "Tidy3D export does not support nonuniform (GridSpec.custom) grids; "
-            "use a uniform GridSpec."
+            "Tidy3D export does not support nonuniform (GridSpec.custom / "
+            "GridSpec.auto) grids; use a uniform GridSpec."
         )
     if grid.dx == grid.dy == grid.dz:
         return td.GridSpec.uniform(dl=grid.dx * s)

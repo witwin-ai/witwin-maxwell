@@ -367,7 +367,7 @@ class Simulation:
         prepared_scene = prepare_scene(self.scene)
         if prepared_scene.grid.is_custom:
             raise NotImplementedError(
-                "FDFD does not support nonuniform (GridSpec.custom) grids yet; "
+                "FDFD does not support nonuniform (GridSpec.custom / GridSpec.auto) grids yet; "
                 "use Simulation.fdtd(...) or a uniform GridSpec."
             )
         _require_cuda_scene(prepared_scene, method="fdfd")

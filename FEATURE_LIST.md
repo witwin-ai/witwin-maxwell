@@ -23,8 +23,11 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - `GridSpec.uniform(...)` for isotropic grids
 - `GridSpec.anisotropic(...)` for per-axis constant `dx`, `dy`, `dz`
 - `GridSpec.custom(x_coords, y_coords, z_coords)` for nonuniform (graded) Yee grids from explicit node coordinates: any 1D float array-likes (list / NumPy / torch), validated per axis (strictly increasing, finite, at least two nodes) and stored as read-only float64 masters; a uniform axis is expressed by uniformly spaced coords, and the `Domain` bounds must equal the coordinate extents
-- `GridSpec.is_custom`, `GridSpec.min_spacing`, and `GridSpec.axis_coords(...)` for nonuniform-grid introspection
-- `GridSpec.spacing` returns `(dx, dy, dz)` for uniform specs, with `GridSpec.is_uniform` for uniform-grid checks; both raise on `GridSpec.custom`, as do the scalar `Scene.dx/dy/dz` / `Scene.grid_spacing` properties (use `scene.x/y/z`, the half-grid coordinates, or `grid.min_spacing` instead)
+- `GridSpec.auto(min_steps_per_wavelength=..., wavelength=None, max_ratio=..., override_structures=..., layer_refinement=...)` for adaptive (AutoGrid) meshing: at prepare time every structure and `MaterialRegion` AABB face snaps to a cell boundary, each face-bounded interval is stepped at `wavelength / (n_max * min_steps_per_wavelength)` using the maximum overlapping refractive index at the meshing wavelength (material regions contribute `sqrt(max(eps_bounds) * max(mu_bounds))`), intervals are filled with uniform or geometrically graded cells with a global adjacent-cell ratio bound of `max_ratio`, and the result materializes through the same nonuniform-grid path as `GridSpec.custom` (single downstream representation); the meshing wavelength defaults to the highest source frequency in the scene, or an explicit `wavelength=`
+- `MeshOverrideStructure(geometry, dl)` mesh overrides for `GridSpec.auto`: a scalar or per-axis `(dx, dy, dz)` maximum step enforced inside the geometry's axis-aligned bounding box
+- `LayerRefinementSpec(min_cells=..., axes=None)` for `GridSpec.auto`: any structure-bounded interval thinner than `min_cells` local target steps receives at least `min_cells` cells along the covered axes
+- `GridSpec.is_custom`, `GridSpec.is_auto`, `GridSpec.min_spacing`, and `GridSpec.axis_coords(...)` for nonuniform-grid introspection
+- `GridSpec.spacing` returns `(dx, dy, dz)` for uniform specs, with `GridSpec.is_uniform` for uniform-grid checks; both raise on `GridSpec.custom` and `GridSpec.auto`, as do the scalar `Scene.dx/dy/dz` / `Scene.grid_spacing` properties (use `scene.x/y/z`, the half-grid coordinates, or `grid.min_spacing` instead)
 - `BoundarySpec.none()`, `BoundarySpec.pml(...)`, `BoundarySpec.periodic()`, `BoundarySpec.bloch(...)`, `BoundarySpec.pec()`, and `BoundarySpec.pmc()`
 - Per-face boundary configuration through `BoundarySpec.faces(...)` and direct `BoundarySpec(kind=..., x=..., x_low=..., ...)` overrides, including global defaults plus per-axis or per-face specialization
 - `BoundarySpec.bloch_wavevector="auto"` marker for solver-resolved Bloch phase workflows during FDTD preparation
@@ -319,7 +322,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 
 ## Known Limitations
 
-- Nonuniform (`GridSpec.custom`) grids are FDTD-only in v1: FDFD and Tidy3D export both raise `NotImplementedError` for custom grids
+- Nonuniform (`GridSpec.custom`) grids are FDTD-only in v1: FDFD and Tidy3D export both raise `NotImplementedError` for custom grids; `GridSpec.auto` resolves to a nonuniform grid at prepare time and inherits the same restrictions (FDFD unsupported, TFSF/mode-plane locally-uniform rules apply)
 - On nonuniform grids, TFSF-kind injections (`PlaneWave` TFSF box, grating TFSF slab) require locally uniform spacing along all three axes over the injection region expanded by one cell, and `ModeSource` / `ModeMonitor` / `ModePort` require locally uniform transverse spacing across the mode plane; both are validated with explicit errors. Soft (non-TFSF) surface sources and `PointDipole` are fully generalized, but the soft `PlaneWave` numerical-dispersion phase correction uses the per-axis minimum spacing (exact on uniform grids, an approximation on graded ones)
 - Subpixel material averaging (`Scene(subpixel_samples=...)` with more than one sample) is not yet generalized to nonuniform grids and fails through the scalar `Scene.dx` accessor
 - Current subpixel material smoothing uses scalar arithmetic averaging on the scene grid

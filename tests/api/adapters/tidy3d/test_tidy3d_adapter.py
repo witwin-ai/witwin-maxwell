@@ -164,6 +164,13 @@ class TestGridConversion:
         with pytest.raises(NotImplementedError, match="Tidy3D export does not support nonuniform"):
             _convert_grid(grid, td, 1.0)
 
+    def test_auto_rejected(self, inject_mock_tidy3d):
+        from witwin.maxwell.adapters.tidy3d import _convert_grid
+        td = inject_mock_tidy3d
+        grid = mw.GridSpec.auto(wavelength=0.3)
+        with pytest.raises(NotImplementedError, match="GridSpec.auto"):
+            _convert_grid(grid, td, 1.0)
+
 
 class TestBoundaryConversion:
     def test_pml(self, inject_mock_tidy3d):

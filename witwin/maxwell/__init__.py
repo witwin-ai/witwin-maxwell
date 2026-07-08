@@ -18,7 +18,17 @@ from .monitors import (
 from .ports import ModePort
 from . import postprocess
 from .result import Result
-from .scene import BoundaryKind, BoundarySpec, Domain, GridSpec, MaterialRegion, Scene, SceneModule
+from .scene import (
+    BoundaryKind,
+    BoundarySpec,
+    Domain,
+    GridSpec,
+    LayerRefinementSpec,
+    MaterialRegion,
+    MeshOverrideStructure,
+    Scene,
+    SceneModule,
+)
 from .sources import (
     AstigmaticGaussianBeam,
     CurrentDataset,
@@ -81,11 +91,13 @@ __all__ = [
     "GMRES",
     "GridSpec",
     "HollowBox",
+    "LayerRefinementSpec",
     "LorentzPole",
     "Material",
     "MaterialRegion",
     "MediumMonitor",
     "Mesh",
+    "MeshOverrideStructure",
     "ModeMonitor",
     "ModePort",
     "ModeSource",

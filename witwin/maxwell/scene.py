@@ -106,6 +106,53 @@ class Domain:
         )
 
 
+@dataclass(frozen=True)
+class MeshOverrideStructure:
+    """Maximum mesh step enforced inside a geometry's axis-aligned bounding box."""
+
+    geometry: Any
+    dl: tuple[float, float, float]
+
+    def __init__(self, geometry, dl):
+        if geometry is None:
+            raise ValueError("MeshOverrideStructure requires geometry=.")
+        if isinstance(dl, (int, float)):
+            values = (float(dl),) * 3
+        else:
+            values = tuple(float(value) for value in dl)
+            if len(values) != 3:
+                raise ValueError("MeshOverrideStructure dl must be a scalar or (dx, dy, dz).")
+        if any(value <= 0.0 for value in values):
+            raise ValueError("MeshOverrideStructure dl values must be > 0.")
+        object.__setattr__(self, "geometry", geometry)
+        object.__setattr__(self, "dl", values)
+
+
+@dataclass(frozen=True)
+class LayerRefinementSpec:
+    """Minimum cell count across thin structure-bounded intervals.
+
+    ``axes=None`` covers all axes; otherwise only the listed axes are refined.
+    """
+
+    min_cells: int = 2
+    axes: tuple[str, ...] | None = None
+
+    def __post_init__(self):
+        min_cells = int(self.min_cells)
+        if min_cells < 1:
+            raise ValueError("LayerRefinementSpec.min_cells must be >= 1.")
+        object.__setattr__(self, "min_cells", min_cells)
+        if self.axes is not None:
+            axes = tuple(str(axis).lower() for axis in self.axes)
+            if any(axis not in _BOUNDARY_AXIS_TO_INDEX for axis in axes):
+                raise ValueError("LayerRefinementSpec.axes entries must be 'x', 'y', or 'z'.")
+            object.__setattr__(self, "axes", axes)
+
+    def covers(self, axis: str) -> bool:
+        return self.axes is None or str(axis).lower() in self.axes
+
+
 def _validate_custom_axis_coords(values, axis: str) -> np.ndarray:
     if isinstance(values, torch.Tensor):
         values = values.detach().cpu().numpy()
@@ -130,6 +177,11 @@ class GridSpec:
     x_coords: np.ndarray | None = None
     y_coords: np.ndarray | None = None
     z_coords: np.ndarray | None = None
+    min_steps_per_wavelength: float | None = None
+    wavelength: float | None = None
+    max_ratio: float | None = None
+    override_structures: tuple[MeshOverrideStructure, ...] = ()
+    layer_refinement: LayerRefinementSpec | None = None
 
     @classmethod
     def uniform(cls, dl: float) -> "GridSpec":
@@ -151,24 +203,76 @@ class GridSpec:
             z_coords=_validate_custom_axis_coords(z_coords, "z"),
         )
 
+    @classmethod
+    def auto(
+        cls,
+        min_steps_per_wavelength: float = 10,
+        wavelength: float | None = None,
+        max_ratio: float = 1.4,
+        override_structures=(),
+        layer_refinement: LayerRefinementSpec | None = None,
+    ) -> "GridSpec":
+        steps = float(min_steps_per_wavelength)
+        if steps <= 0.0:
+            raise ValueError("GridSpec.auto min_steps_per_wavelength must be > 0.")
+        if wavelength is not None:
+            wavelength = float(wavelength)
+            if wavelength <= 0.0:
+                raise ValueError("GridSpec.auto wavelength must be > 0 when provided.")
+        ratio = float(max_ratio)
+        if ratio <= 1.0:
+            raise ValueError("GridSpec.auto max_ratio must be > 1.")
+        overrides = tuple(override_structures)
+        for override in overrides:
+            if not isinstance(override, MeshOverrideStructure):
+                raise TypeError(
+                    "GridSpec.auto override_structures must contain MeshOverrideStructure entries."
+                )
+        if layer_refinement is not None and not isinstance(layer_refinement, LayerRefinementSpec):
+            raise TypeError("GridSpec.auto layer_refinement must be a LayerRefinementSpec.")
+        return cls(
+            None,
+            None,
+            None,
+            min_steps_per_wavelength=steps,
+            wavelength=wavelength,
+            max_ratio=ratio,
+            override_structures=overrides,
+            layer_refinement=layer_refinement,
+        )
+
     @property
     def is_custom(self) -> bool:
         return self.x_coords is not None or self.y_coords is not None or self.z_coords is not None
 
     @property
-    def spacing(self) -> tuple[float, float, float]:
+    def is_auto(self) -> bool:
+        return self.min_steps_per_wavelength is not None
+
+    def _require_scalar_spacing(self):
         if self.is_custom:
             raise ValueError("GridSpec.custom has no scalar spacing; use axis_coords()/min_spacing.")
+        if self.is_auto:
+            raise ValueError(
+                "GridSpec.auto has no scalar spacing; it resolves to node coordinates at prepare time."
+            )
+
+    @property
+    def spacing(self) -> tuple[float, float, float]:
+        self._require_scalar_spacing()
         return (self.dx, self.dy, self.dz)
 
     @property
     def is_uniform(self) -> bool:
-        if self.is_custom:
-            raise ValueError("GridSpec.custom has no scalar spacing; use axis_coords()/min_spacing.")
+        self._require_scalar_spacing()
         return bool(np.isclose(self.dx, self.dy) and np.isclose(self.dy, self.dz))
 
     @property
     def min_spacing(self) -> tuple[float, float, float]:
+        if self.is_auto:
+            raise ValueError(
+                "GridSpec.auto has no spacing before prepare; it resolves to node coordinates at prepare time."
+            )
         if self.is_custom:
             return (
                 float(np.diff(self.x_coords).min()),
@@ -649,7 +753,7 @@ class Scene(SceneBase):
         self.lazy_meshgrid = bool(lazy_meshgrid)
 
     def _scalar_grid_step(self, value: float | None) -> float:
-        if self.grid.is_custom:
+        if self.grid.is_custom or self.grid.is_auto:
             raise ValueError(
                 "scalar spacing undefined on a nonuniform grid; use scene.x/y/z, x_half, or grid.min_spacing."
             )
@@ -874,6 +978,11 @@ class PreparedScene(Scene):
         )
         self._public_scene = scene
         self.domain_range = _domain_range_from_bounds(self.domain.bounds)
+
+        if self.grid.is_auto:
+            from .fdtd.meshing import resolve_auto_grid
+
+            self.grid = GridSpec.custom(*resolve_auto_grid(self))
 
         x_start, x_end, y_start, y_end, z_start, z_end = self.domain_range
         self.x_nodes64, self.dx_primal64, self.x_half64, self.dx_dual64 = _build_axis_grid64(
