@@ -30,11 +30,23 @@ def _runtime():
     return _adjoint
 
 
+def _material_has_conductivity(material) -> bool:
+    sigma_e = getattr(material, "sigma_e", 0.0)
+    if sigma_e is not None and float(sigma_e) != 0.0:
+        return True
+    sigma_e_tensor = getattr(material, "sigma_e_tensor", None)
+    if sigma_e_tensor is not None:
+        return any(float(component) != 0.0 for component in sigma_e_tensor.as_tuple())
+    return False
+
+
 def _unsupported_adjoint_medium(scene):
     for structure in getattr(scene, "structures", ()):
         material = getattr(structure, "material", None)
         if material is None:
             continue
+        if _material_has_conductivity(material):
+            return "FDTD adjoint does not support static conductive (sigma_e) media yet."
         if getattr(material, "is_anisotropic", False):
             return "FDTD adjoint does not support anisotropic media yet."
         if getattr(material, "is_magnetic_dispersive", False):

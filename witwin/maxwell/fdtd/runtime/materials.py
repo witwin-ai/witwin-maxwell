@@ -16,11 +16,6 @@ def _any_component_nonzero(components: dict[str, torch.Tensor]) -> bool:
 
 def build_materials(solver, scene):
     material_model = scene.compile_materials()
-    if _any_component_nonzero(material_model["sigma_e_components"]):
-        raise NotImplementedError(
-            "FDTD does not yet support static conductive sigma_e materials. "
-            "Use FDFD for frequency-domain conductivity or Maxwell dispersive pole models for time-domain media."
-        )
     if scene.boundary.uses_kind("bloch") and torch.any(material_model["kerr_chi3"] != 0):
         raise NotImplementedError("FDTD Kerr media are not implemented for Bloch / complex-field runs.")
 
@@ -44,6 +39,11 @@ def build_materials(solver, scene):
     solver.eps_Ex = average_node_to_component(solver, eps_x_node, "Ex")
     solver.eps_Ey = average_node_to_component(solver, eps_y_node, "Ey")
     solver.eps_Ez = average_node_to_component(solver, eps_z_node, "Ez")
+    sigma_e_components = material_model["sigma_e_components"]
+    solver.sigma_e_Ex = average_node_to_component(solver, sigma_e_components["x"], "Ex")
+    solver.sigma_e_Ey = average_node_to_component(solver, sigma_e_components["y"], "Ey")
+    solver.sigma_e_Ez = average_node_to_component(solver, sigma_e_components["z"], "Ez")
+    solver.conductive_enabled = bool(_any_component_nonzero(sigma_e_components))
     solver.mu_Hx = average_node_to_magnetic_component(solver, mu_x_node, "Hx")
     solver.mu_Hy = average_node_to_magnetic_component(solver, mu_y_node, "Hy")
     solver.mu_Hz = average_node_to_magnetic_component(solver, mu_z_node, "Hz")
@@ -508,14 +508,37 @@ def apply_magnetic_dispersive_corrections(solver):
         apply_magnetic_component_dispersive_currents(solver, "Hz", solver.Hz_imag, imag=True)
 
 
+def _electric_update_coefficients(solver, eps, sigma_e, pml_decay):
+    """Compose the semi-implicit lossy-dielectric decay/curl factors for one E component.
+
+    ``eps`` is the absolute permittivity (eps_r * eps0) and ``sigma_e`` the static
+    electric conductivity averaged onto the same Yee component. When conductivity is
+    inactive the material factors reduce to (decay=1, curl=dt/eps), so non-conductive
+    scenes keep the exact existing coefficients. ``pml_decay`` folds the CPML decay in
+    multiplicatively when present.
+    """
+    if solver.conductive_enabled:
+        half = 0.5 * sigma_e * solver.dt / eps
+        denom = 1.0 + half
+        material_decay = (1.0 - half) / denom
+        curl = (solver.dt / eps) / denom
+    else:
+        material_decay = None
+        curl = solver.dt / eps
+
+    if pml_decay is None:
+        decay = material_decay if material_decay is not None else torch.ones_like(eps)
+    else:
+        decay = pml_decay if material_decay is None else material_decay * pml_decay
+        curl = curl * pml_decay
+    return decay.contiguous(), curl.contiguous()
+
+
 def build_update_coefficients(solver):
     if solver.active_absorber_type != "pml":
-        solver.cex_decay = torch.ones_like(solver.eps_Ex).contiguous()
-        solver.cex_curl = (solver.dt / solver.eps_Ex).contiguous()
-        solver.cey_decay = torch.ones_like(solver.eps_Ey).contiguous()
-        solver.cey_curl = (solver.dt / solver.eps_Ey).contiguous()
-        solver.cez_decay = torch.ones_like(solver.eps_Ez).contiguous()
-        solver.cez_curl = (solver.dt / solver.eps_Ez).contiguous()
+        solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, solver.eps_Ex, solver.sigma_e_Ex, None)
+        solver.cey_decay, solver.cey_curl = _electric_update_coefficients(solver, solver.eps_Ey, solver.sigma_e_Ey, None)
+        solver.cez_decay, solver.cez_curl = _electric_update_coefficients(solver, solver.eps_Ez, solver.sigma_e_Ez, None)
         solver.chx_decay = torch.ones_like(solver.mu_Hx).contiguous()
         solver.chx_curl = (solver.dt / solver.mu_Hx).contiguous()
         solver.chy_decay = torch.ones_like(solver.mu_Hy).contiguous()
@@ -527,20 +550,17 @@ def build_update_coefficients(solver):
     ex_sigma_y = 0.5 * (solver.sigma_y[:-1, :, :] + solver.sigma_y[1:, :, :])
     ex_sigma_z = 0.5 * (solver.sigma_z[:-1, :, :] + solver.sigma_z[1:, :, :])
     ex_decay = 1.0 / (1.0 + solver.dt * (ex_sigma_y + ex_sigma_z))
-    solver.cex_decay = ex_decay.contiguous()
-    solver.cex_curl = ((solver.dt / solver.eps_Ex) * ex_decay).contiguous()
+    solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, solver.eps_Ex, solver.sigma_e_Ex, ex_decay)
 
     ey_sigma_x = 0.5 * (solver.sigma_x[:, :-1, :] + solver.sigma_x[:, 1:, :])
     ey_sigma_z = 0.5 * (solver.sigma_z[:, :-1, :] + solver.sigma_z[:, 1:, :])
     ey_decay = 1.0 / (1.0 + solver.dt * (ey_sigma_x + ey_sigma_z))
-    solver.cey_decay = ey_decay.contiguous()
-    solver.cey_curl = ((solver.dt / solver.eps_Ey) * ey_decay).contiguous()
+    solver.cey_decay, solver.cey_curl = _electric_update_coefficients(solver, solver.eps_Ey, solver.sigma_e_Ey, ey_decay)
 
     ez_sigma_x = 0.5 * (solver.sigma_x[:, :, :-1] + solver.sigma_x[:, :, 1:])
     ez_sigma_y = 0.5 * (solver.sigma_y[:, :, :-1] + solver.sigma_y[:, :, 1:])
     ez_decay = 1.0 / (1.0 + solver.dt * (ez_sigma_x + ez_sigma_y))
-    solver.cez_decay = ez_decay.contiguous()
-    solver.cez_curl = ((solver.dt / solver.eps_Ez) * ez_decay).contiguous()
+    solver.cez_decay, solver.cez_curl = _electric_update_coefficients(solver, solver.eps_Ez, solver.sigma_e_Ez, ez_decay)
 
     hx_sigma_y = 0.25 * (
         solver.sigma_y[:, :-1, :-1]

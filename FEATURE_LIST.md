@@ -184,6 +184,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Single- or multi-frequency DFT extraction through `frequency=` or `frequencies=[...]`
 - Source temporal frequency (`source_time.frequency`) remains distinct from simulation / monitor extraction frequencies; Maxwell does not infer extraction frequencies implicitly
 - ADE-based electric and magnetic dispersive-material updates for Debye, Drude, and Lorentz media
+- Static isotropic or diagonal electric conductivity (`sigma_e`) in the time-domain update, folded into the per-component lossy-dielectric `Ca`/`Cb` coefficients via the standard semi-implicit trapezoidal scheme so simple lossy dielectrics no longer require a fitted Drude pole
 - Axis-aligned diagonal anisotropy support for electric and magnetic material tensors on the Yee grid
 - Instantaneous isotropic electric Kerr nonlinearity with GPU-resident dynamic update coefficients
 - Automatic run length estimation with `TimeConfig.auto(...)`
@@ -300,7 +301,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Maxwell supports axis-aligned diagonal anisotropy through `DiagonalTensor3`, but `Material.orientation` and full `Tensor3x3` rotation / off-diagonal tensors remain unsupported
 - Kerr media cannot be combined with dispersive or anisotropic materials in the same scene in v1
 - FDFD supports electric anisotropy only; static magnetic media and magnetic dispersion still fail explicitly
-- FDTD rejects static conductive `sigma_e` materials explicitly; use FDFD for frequency-domain conductivity or Maxwell dispersive poles for time-domain media
+- FDTD supports static electric conductivity (`sigma_e`) in the forward update but still lacks static magnetic conductivity (`sigma_m`), and the FDTD adjoint bridge rejects `sigma_e` media because the reverse-time kernels do not model the conduction-loss decay
 - Mixed Bloch boundary configurations outside the supported x/y Bloch + z PML grating FDTD path still fail explicitly
 - TFSF slab runtime support is currently limited to CW `PlaneWave` grating slabs with `axis="z"`; non-Bloch slabs, non-`PlaneWave` slab sources, and broadband automatic fixed-angle Bloch workflows fail explicitly because automatic Bloch phase is single-frequency metadata
 - Automatic Bloch wavevectors are solver-preparation metadata and are rejected by unresolved Tidy3D export
