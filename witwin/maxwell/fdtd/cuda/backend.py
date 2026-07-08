@@ -34,7 +34,10 @@ def get_compiled_extension(*, verbose: bool = False) -> Any:
 
 
 def _use_compiled_field_kernels() -> bool:
-    return os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION") == "1"
+    # Compiled CUDA field kernels are the default runtime path. Set
+    # WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION=0 to fall back to the Torch
+    # reference implementations (used by the CUDA parity tests).
+    return os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1") != "0"
 
 
 _UNIFORM_SCALAR_CACHE: dict[int, tuple[Any, int, int, float | None]] = {}
@@ -1255,6 +1258,14 @@ def _apply_electric_ex_cpml_z_correction(
     fullSizeZ,
 ):
     _require_cuda_tensors(Ex, Hy, ExCurl, PsiExZ, InvKappaExZ, BExZ, CExZ)
+    if _use_compiled_field_kernels():
+        get_compiled_extension().apply_electric_ex_cpml_z_correction(
+            Ex, Hy, ExCurl, PsiExZ, InvKappaExZ, BExZ, CExZ, float(invDz),
+            int(offsetI), int(offsetJ), int(offsetK),
+            int(yLowBoundaryMode), int(yHighBoundaryMode),
+            int(fullSizeY), int(fullSizeZ),
+        )
+        return
     offset_i = int(offsetI)
     offset_j = int(offsetJ)
     offset_k = int(offsetK)
@@ -1312,6 +1323,14 @@ def _apply_electric_ey_cpml_z_correction(
     fullSizeZ,
 ):
     _require_cuda_tensors(Ey, Hx, EyCurl, PsiEyZ, InvKappaEyZ, BEyZ, CEyZ)
+    if _use_compiled_field_kernels():
+        get_compiled_extension().apply_electric_ey_cpml_z_correction(
+            Ey, Hx, EyCurl, PsiEyZ, InvKappaEyZ, BEyZ, CEyZ, float(invDz),
+            int(offsetI), int(offsetJ), int(offsetK),
+            int(xLowBoundaryMode), int(xHighBoundaryMode),
+            int(fullSizeX), int(fullSizeZ),
+        )
+        return
     offset_i = int(offsetI)
     offset_j = int(offsetJ)
     offset_k = int(offsetK)
@@ -1765,6 +1784,13 @@ def _electric_ex_bloch_y_standard_z(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
+    if _use_compiled_field_kernels():
+        get_compiled_extension().update_electric_ex_bloch_y_standard_z(
+            ExReal, ExImag, HyReal, HyImag, HzReal, HzImag, ExDecay, ExCurl,
+            float(phaseCosY), float(phaseSinY), float(invDy), float(invDz),
+            int(zLowBoundaryMode), int(zHighBoundaryMode),
+        )
+        return
     d_y_r, d_y_i = _bloch_backward_diff(HzReal, HzImag, tuple(ExReal.shape), 1, phaseCosY, phaseSinY, invDy)
     d_z_r = _backward_diff(HyReal, tuple(ExReal.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     d_z_i = _backward_diff(HyImag, tuple(ExImag.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
@@ -1789,6 +1815,13 @@ def _electric_ey_bloch_x_standard_z(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
+    if _use_compiled_field_kernels():
+        get_compiled_extension().update_electric_ey_bloch_x_standard_z(
+            EyReal, EyImag, HxReal, HxImag, HzReal, HzImag, EyDecay, EyCurl,
+            float(phaseCosX), float(phaseSinX), float(invDx), float(invDz),
+            int(zLowBoundaryMode), int(zHighBoundaryMode),
+        )
+        return
     d_z_r = _backward_diff(HxReal, tuple(EyReal.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     d_z_i = _backward_diff(HxImag, tuple(EyImag.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     d_x_r, d_x_i = _bloch_backward_diff(HzReal, HzImag, tuple(EyReal.shape), 0, phaseCosX, phaseSinX, invDx)

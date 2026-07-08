@@ -1016,6 +1016,68 @@ void project_bloch_boundary_cuda(
     int64_t axis,
     double phase_cos,
     double phase_sin);
+void update_electric_ex_bloch_y_standard_z_cuda(
+    at::Tensor ex_real,
+    at::Tensor ex_imag,
+    const at::Tensor& hy_real,
+    const at::Tensor& hy_imag,
+    const at::Tensor& hz_real,
+    const at::Tensor& hz_imag,
+    const at::Tensor& decay,
+    const at::Tensor& curl,
+    double phase_cos_y,
+    double phase_sin_y,
+    double inv_dy,
+    double inv_dz,
+    int64_t z_low_mode,
+    int64_t z_high_mode);
+void update_electric_ey_bloch_x_standard_z_cuda(
+    at::Tensor ey_real,
+    at::Tensor ey_imag,
+    const at::Tensor& hx_real,
+    const at::Tensor& hx_imag,
+    const at::Tensor& hz_real,
+    const at::Tensor& hz_imag,
+    const at::Tensor& decay,
+    const at::Tensor& curl,
+    double phase_cos_x,
+    double phase_sin_x,
+    double inv_dx,
+    double inv_dz,
+    int64_t z_low_mode,
+    int64_t z_high_mode);
+void apply_electric_ex_cpml_z_correction_cuda(
+    at::Tensor ex,
+    const at::Tensor& hy,
+    const at::Tensor& curl,
+    at::Tensor psi_z,
+    const at::Tensor& inv_kappa_z,
+    const at::Tensor& b_z,
+    const at::Tensor& c_z,
+    double inv_dz,
+    int64_t offset_i,
+    int64_t offset_j,
+    int64_t offset_k,
+    int64_t y_low_mode,
+    int64_t y_high_mode,
+    int64_t full_size_y,
+    int64_t full_size_z);
+void apply_electric_ey_cpml_z_correction_cuda(
+    at::Tensor ey,
+    const at::Tensor& hx,
+    const at::Tensor& curl,
+    at::Tensor psi_z,
+    const at::Tensor& inv_kappa_z,
+    const at::Tensor& b_z,
+    const at::Tensor& c_z,
+    double inv_dz,
+    int64_t offset_i,
+    int64_t offset_j,
+    int64_t offset_k,
+    int64_t x_low_mode,
+    int64_t x_high_mode,
+    int64_t full_size_x,
+    int64_t full_size_z);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("is_available", &is_available, "Return whether CUDA is available to PyTorch.");
@@ -1042,6 +1104,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("update_electric_ex_cpml_compressed", &update_electric_ex_cpml_compressed_cuda, "Update compressed CPML Ex field.");
   m.def("update_electric_ey_cpml_compressed", &update_electric_ey_cpml_compressed_cuda, "Update compressed CPML Ey field.");
   m.def("update_electric_ez_cpml_compressed", &update_electric_ez_cpml_compressed_cuda, "Update compressed CPML Ez field.");
+  m.def("update_electric_ex_bloch_y_standard_z", &update_electric_ex_bloch_y_standard_z_cuda, "Update mixed Bloch-y/standard-z Ex field.");
+  m.def("update_electric_ey_bloch_x_standard_z", &update_electric_ey_bloch_x_standard_z_cuda, "Update mixed Bloch-x/standard-z Ey field.");
+  m.def("apply_electric_ex_cpml_z_correction", &apply_electric_ex_cpml_z_correction_cuda, "Apply CPML z correction to Ex over a region.");
+  m.def("apply_electric_ey_cpml_z_correction", &apply_electric_ey_cpml_z_correction_cuda, "Apply CPML z correction to Ey over a region.");
   m.def("accumulate_dft_batched", &accumulate_dft_batched_cuda, "Accumulate batched Yee-grid DFT fields.");
   m.def("accumulate_point_observers", &accumulate_point_observers_cuda, "Accumulate point observer samples.");
   m.def("accumulate_plane_observer", &accumulate_plane_observer_cuda, "Accumulate plane observer samples.");
