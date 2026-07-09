@@ -101,6 +101,17 @@ jobs:
         with:
           python-version: ${{ matrix.python_version }}
 
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "Disk before cleanup:"; df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell /usr/share/swift || true
+          sudo docker image prune --all --force || true
+          echo "Disk after cleanup:"; df -h /
+
       - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.29
         with:
