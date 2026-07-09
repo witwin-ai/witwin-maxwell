@@ -248,12 +248,18 @@ jobs:
       url: https://pypi.org/project/witwin-maxwell/
 
     steps:
-      - name: Download distribution artifacts
+      - name: Download wheel artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: "*"
+          pattern: wheel-*
           path: dist
           merge-multiple: true
+
+      - name: Download source distribution artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
 
       - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
