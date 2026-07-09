@@ -167,6 +167,23 @@ jobs:
         run: |
           python -m build --wheel "$PACKAGE_DIR"
 
+      - name: Normalize Linux wheel platform tag
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          PACKAGE_DIR: ${{ needs.validate_release.outputs.package_dir }}
+        run: |
+          # PyPI rejects the raw linux_x86_64 tag; the extension is built on the
+          # ubuntu-22.04 runner (glibc 2.35), so retag to the matching manylinux
+          # tag. torch/CUDA runtime libraries are runtime dependencies and stay
+          # unbundled, so no auditwheel repair is required.
+          shopt -s nullglob
+          for whl in "$PACKAGE_DIR"/dist/*-linux_x86_64.whl; do
+            echo "Retagging $whl"
+            python -m wheel tags --platform-tag manylinux_2_35_x86_64 --remove "$whl"
+          done
+          ls -l "$PACKAGE_DIR"/dist
+
       - name: Smoke install prebuilt wheel
         shell: bash
         env:
@@ -265,3 +282,4 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          skip-existing: true
