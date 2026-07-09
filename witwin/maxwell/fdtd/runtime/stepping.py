@@ -1024,6 +1024,56 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     return lambda time_value: replay()
 
 
+def _post_source_block(solver):
+    """The time-independent tail after source injection: dispersive corrections,
+    PEC clamp, Mur ABC, and the GPU-driven running-DFT accumulation. Captured as
+    a second graph so its kernel launches collapse to one replay; only valid when
+    the DFT is GPU-driven (``build_dft_step_tables`` succeeded)."""
+    solver._apply_dispersive_corrections()
+    if not solver.tfsf_enabled:
+        enforce_pec_boundaries(solver)
+    apply_mur_boundaries(solver)
+    solver.accumulate_dft_gpu()
+
+
+def _make_tail_runner(solver, use_gpu_dft: bool):
+    """Capture the post-source tail (PEC + Mur + GPU-DFT) into a graph. Returns a
+    replay callable, or ``None`` to keep the inline tail. Snapshots the state the
+    tail mutates (fields, the device step counter, the DFT accumulators) around
+    capture so warmup/capture on the zero field do not perturb the run."""
+    if not (use_gpu_dft and getattr(solver, "_cuda_graph_active", False)):
+        return None
+    from ..cuda.runtime.graph import CudaGraphRunner
+
+    state = {}
+    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
+        tensor = getattr(solver, name, None)
+        if isinstance(tensor, torch.Tensor):
+            state[("field", name)] = tensor
+    if isinstance(getattr(solver, "_dft_step", None), torch.Tensor):
+        state[("step",)] = solver._dft_step
+    for comp, buffers in getattr(solver, "_dft_batched_fields", {}).items():
+        for key in ("real", "imag"):
+            tensor = buffers.get(key)
+            if isinstance(tensor, torch.Tensor):
+                state[("dft", comp, key)] = tensor
+    saved = {k: v.clone() for k, v in state.items()}
+
+    def _restore():
+        for k, v in saved.items():
+            state[k].copy_(v)
+
+    try:
+        replay = CudaGraphRunner(enabled=True, warmup_steps=3).capture(
+            lambda: _post_source_block(solver)
+        )
+    except Exception:
+        _restore()
+        return None
+    _restore()
+    return replay
+
+
 def solve(
     solver,
     time_steps: int,
@@ -1067,6 +1117,15 @@ def solve(
 
     run_field_update = _make_field_update_runner(solver, use_cuda_graph)
 
+    # When the field-update graph is active, drive the running DFT from a
+    # precomputed GPU weight table indexed by a device step counter, dropping the
+    # per-step host arithmetic and host->device transfer of the DFT weights.
+    use_gpu_dft = False
+    if getattr(solver, "_cuda_graph_active", False) and getattr(solver, "dft_enabled", False):
+        use_gpu_dft = solver.build_dft_step_tables(time_steps)
+    run_tail = _make_tail_runner(solver, use_gpu_dft)
+    solver._tail_graph_active = run_tail is not None
+
     iterator = range(time_steps)
     pbar = None
     if solver.verbose:
@@ -1090,11 +1149,17 @@ def solve(
 
         if solver._source_terms:
             solver.add_source(time_value=time_value)
-        solver._apply_dispersive_corrections()
-        if not solver.tfsf_enabled:
-            enforce_pec_boundaries(solver)
-        apply_mur_boundaries(solver)
-        solver.accumulate_dft(n)
+        if run_tail is not None:
+            run_tail()
+        else:
+            solver._apply_dispersive_corrections()
+            if not solver.tfsf_enabled:
+                enforce_pec_boundaries(solver)
+            apply_mur_boundaries(solver)
+            if use_gpu_dft:
+                solver.accumulate_dft_gpu()
+            else:
+                solver.accumulate_dft(n)
         solver.accumulate_observers(n)
         solver.accumulate_time_observers(n)
 

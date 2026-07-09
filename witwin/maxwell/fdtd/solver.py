@@ -34,6 +34,8 @@ from .postprocess import (
 from .runtime import (
     initialization as runtime_initialization,
     accumulate_dft as accumulate_dft_impl,
+    accumulate_dft_gpu as accumulate_dft_gpu_impl,
+    build_dft_step_tables as build_dft_step_tables_impl,
     advance_magnetic_component_dispersive_state as advance_magnetic_component_dispersive_state_impl,
     advance_magnetic_dispersive_state as advance_magnetic_dispersive_state_impl,
     advance_component_dispersive_state as advance_component_dispersive_state_impl,
@@ -195,6 +197,12 @@ class FDTD:
 
     def accumulate_dft(self, n, phase_cos=None, phase_sin=None):
         accumulate_dft_impl(self, n, phase_cos=phase_cos, phase_sin=phase_sin)
+
+    def build_dft_step_tables(self, time_steps):
+        return build_dft_step_tables_impl(self, time_steps)
+
+    def accumulate_dft_gpu(self):
+        accumulate_dft_gpu_impl(self)
 
     def clear_observers(self):
         clear_observers_impl(self)

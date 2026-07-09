@@ -589,6 +589,7 @@ class Simulation:
             "steps_run": (shutoff_step + 1) if shutoff_triggered else time_steps,
             "dt": solver.dt,
             "cuda_graph_active": bool(getattr(solver, "_cuda_graph_active", False)),
+            "tail_graph_active": bool(getattr(solver, "_tail_graph_active", False)),
             "boundary": getattr(solver, "boundary_kind", self.scene.boundary.kind),
             "absorber": getattr(solver, "active_absorber_type", self.config.absorber),
             "cpml_memory_mode": getattr(solver, "_cpml_memory_mode", None),

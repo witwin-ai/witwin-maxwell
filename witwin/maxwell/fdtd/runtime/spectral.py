@@ -467,3 +467,122 @@ def accumulate_dft(solver, n, phase_cos=None, phase_sin=None):
     solver._dft_phase_cos = next_cos.astype(np.float32, copy=False)
     solver._dft_phase_sin = next_sin.astype(np.float32, copy=False)
     sync_dft_primary_runtime_state(solver)
+
+
+def _dft_window_weight(n, window_type, active, start, end):
+    """The per-step spectral window weight vector, matching accumulate_dft."""
+    if window_type == "none":
+        return active.astype(np.float32)
+    total = end - start
+    valid = active & (total > 0)
+    pos = np.zeros_like(start, dtype=np.float32)
+    pos[valid] = (n - start[valid]) / total[valid]
+    if window_type == "hanning":
+        weight = np.zeros_like(start, dtype=np.float32)
+        weight[active & (end < 0)] = 1.0
+        weight[valid] = 0.5 * (1.0 - np.cos(2 * np.pi * pos[valid]))
+        return weight
+    if window_type == "ramp":
+        weight = active.astype(np.float32)
+        ramp_fraction = 0.1
+        ramp_mask = valid & (pos < ramp_fraction)
+        weight[ramp_mask] = 0.5 * (1.0 - np.cos(np.pi * pos[ramp_mask] / ramp_fraction))
+        return weight
+    return active.astype(np.float32)
+
+
+def build_dft_step_tables(solver, time_steps):
+    """Precompute the full per-step running-DFT weight table on the GPU.
+
+    Each row ``table[n]`` is the ``window_weight(n) * phase(n)`` vector that
+    accumulate_dft computes at step ``n``; it is built with the identical float32
+    phase recurrence and window, so a GPU-driven accumulation that gathers rows
+    by a device step counter is bit-identical to the per-step host path -- but
+    with no per-step host arithmetic or host->device transfer (which makes the
+    DFT accumulation capturable and cheaper). Also fixes the final window
+    normalization / sample count / source-DFT to their full-run sums (the values
+    the host path would reach, and what an early shutoff restores anyway).
+
+    Returns False (caller keeps the host path) for the complex-field DFT, which
+    is out of the Option-A/Stage-1 graph scope.
+    """
+    if not solver.dft_enabled or not solver._dft_entries or has_complex_fields(solver):
+        return False
+    frequency_count = len(solver._dft_entries)
+    steps = int(time_steps)
+    weighted_cos = np.zeros((steps, frequency_count), dtype=np.float32)
+    weighted_sin = np.zeros((steps, frequency_count), dtype=np.float32)
+    window_norm = np.zeros(frequency_count, dtype=np.float32)
+    sample_count = np.zeros(frequency_count, dtype=np.int64)
+    src_real = np.zeros(frequency_count, dtype=np.float64)
+    src_imag = np.zeros(frequency_count, dtype=np.float64)
+    normalize = bool(getattr(solver, "_normalize_source", False)) and solver._source_time is not None
+
+    phase_cos = np.ones(frequency_count, dtype=np.float32)
+    phase_sin = np.zeros(frequency_count, dtype=np.float32)
+    step_cos = solver._dft_phase_step_cos_values
+    step_sin = solver._dft_phase_step_sin_values
+    start = solver._dft_start_steps
+    end = solver._dft_end_steps
+    window_type = solver.dft_window_type
+    for n in range(steps):
+        active = (n >= start) & ((end < 0) | (n < end))
+        weight = _dft_window_weight(n, window_type, active, start, end)
+        wc = weight * phase_cos
+        ws = weight * phase_sin
+        weighted_cos[n] = wc
+        weighted_sin[n] = ws
+        window_norm += weight
+        sample_count += active.astype(np.int64)
+        if normalize:
+            signal = float(evaluate_source_time(solver._source_time, n * solver.dt))
+            src_real += signal * wc
+            src_imag += signal * ws
+        next_cos = phase_cos * step_cos - phase_sin * step_sin
+        next_sin = phase_sin * step_cos + phase_cos * step_sin
+        phase_cos = next_cos.astype(np.float32, copy=False)
+        phase_sin = next_sin.astype(np.float32, copy=False)
+
+    solver._dft_weighted_cos_table = torch.as_tensor(weighted_cos, device=solver.device)
+    solver._dft_weighted_sin_table = torch.as_tensor(weighted_sin, device=solver.device)
+    solver._dft_weighted_cos = torch.zeros(frequency_count, device=solver.device, dtype=torch.float32)
+    solver._dft_weighted_sin = torch.zeros(frequency_count, device=solver.device, dtype=torch.float32)
+    solver._dft_step = torch.zeros(1, device=solver.device, dtype=torch.int64)
+    solver._dft_window_normalization_values = window_norm
+    solver._dft_sample_count_values = sample_count
+    if normalize:
+        solver._dft_source_dft_real_values = src_real
+        solver._dft_source_dft_imag_values = src_imag
+    sync_dft_primary_runtime_state(solver)
+    return True
+
+
+def accumulate_dft_gpu(solver):
+    """GPU-driven running-DFT accumulation: gather the current step's weight row
+    from the precomputed table by the device step counter and accumulate. No host
+    arithmetic, no host->device transfer, and capturable into a CUDA graph."""
+    if not solver.dft_enabled or not solver._dft_entries:
+        return
+    solver._dft_weighted_cos.copy_(
+        solver._dft_weighted_cos_table.index_select(0, solver._dft_step).squeeze(0)
+    )
+    solver._dft_weighted_sin.copy_(
+        solver._dft_weighted_sin_table.index_select(0, solver._dft_step).squeeze(0)
+    )
+    solver.fdtd_module.accumulateRunningDftYee3DBatched(
+        Ex=solver.Ex,
+        Ey=solver.Ey,
+        Ez=solver.Ez,
+        ExRealAccum=solver._dft_batched_fields["Ex"]["real"],
+        ExImagAccum=solver._dft_batched_fields["Ex"]["imag"],
+        EyRealAccum=solver._dft_batched_fields["Ey"]["real"],
+        EyImagAccum=solver._dft_batched_fields["Ey"]["imag"],
+        EzRealAccum=solver._dft_batched_fields["Ez"]["real"],
+        EzImagAccum=solver._dft_batched_fields["Ez"]["imag"],
+        weightedCos=solver._dft_weighted_cos,
+        weightedSin=solver._dft_weighted_sin,
+    ).launchRaw(
+        blockSize=solver.kernel_block_size,
+        gridSize=solver._spectral_launch_shapes["electric_dft"],
+    )
+    solver._dft_step.add_(1)

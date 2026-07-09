@@ -51,9 +51,36 @@ def test_cuda_graph_matches_non_graph_bitexact():
     got, got_stats = _run(_dielectric_dipole_scene(), cuda_graph=True)
     assert ref_stats["cuda_graph_active"] is False
     assert got_stats["cuda_graph_active"] is True  # standard real-field path -> captured
-    # Graph replay reproduces the captured kernel sequence exactly.
+    assert got_stats["tail_graph_active"] is True  # GPU-driven DFT + tail captured too
+    # Graph replay (field update + GPU-driven running DFT) reproduces the host
+    # path exactly.
     for component, field in ref.items():
         assert np.array_equal(field, got[component]), component
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
+def test_cuda_graph_multifreq_dft_bitexact():
+    freqs = (1.6e9, 2.0e9, 2.4e9)
+
+    def run(cuda_graph):
+        result = mw.Simulation.fdtd(
+            _dielectric_dipole_scene(),
+            frequencies=freqs,
+            full_field_dft=True,
+            run_time=mw.TimeConfig(time_steps=300),
+            cuda_graph=cuda_graph,
+        ).run()
+        return {
+            f: {a: np.asarray(getattr(result.at(frequency=f).E, a).detach().cpu()) for a in ("x", "y", "z")}
+            for f in freqs
+        }, result.stats()
+
+    ref, _ = run(False)
+    got, got_stats = run(True)
+    assert got_stats["tail_graph_active"] is True
+    for f in freqs:
+        for a in ("x", "y", "z"):
+            assert np.array_equal(ref[f][a], got[f][a]), (f, a)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")

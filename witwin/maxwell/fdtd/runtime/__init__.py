@@ -21,7 +21,9 @@ from .materials import (
 from .module_cache import get_fdtd_module, require_cuda_scene
 from .spectral import (
     accumulate_dft,
+    accumulate_dft_gpu,
     advance_phase,
+    build_dft_step_tables,
     compute_spectral_start_step,
     compute_window_weight,
     enable_dft,
@@ -62,6 +64,8 @@ from .stepping import (
 
 __all__ = [
     "accumulate_dft",
+    "accumulate_dft_gpu",
+    "build_dft_step_tables",
     "advance_magnetic_component_dispersive_state",
     "advance_magnetic_dispersive_state",
     "advance_component_dispersive_state",
