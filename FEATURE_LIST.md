@@ -215,7 +215,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - CPML absorber configuration through `BoundarySpec.pml(...)` plus typed `Simulation.fdtd(...)` config (`absorber=...`, `cpml_config=...`)
 - CPML auxiliary `psi` storage auto-selects between a dense fast path and slab-allocated low-memory storage, with `cpml_config={"memory_mode": "auto"|"dense"|"slab"}` and optional `dense_memory_limit_mib` tuning
 - Additional PML-face absorber variants selectable through `Simulation.fdtd(..., absorber=...)`: `"absorber"` (adiabatic graded-conductivity layer with no auxiliary `psi` memory) and `"stablepml"` (a CPML profile tuned for late-time stability with a higher grading order and larger complex-frequency shift), alongside the existing `"cpml"` and `"pml"` options
-- First-order Mur absorbing boundary as a per-face `BoundarySpec.mur()` kind, applied in PyTorch on the CUDA field tensors after the electric update with no new CUDA kernel
+- First-order Mur absorbing boundary as a per-face `BoundarySpec.mur()` kind, applied by a native CUDA kernel after the electric update that updates persistent per-face boundary buffers in place (no per-step host arithmetic or allocation, so it is captured into the tail CUDA graph)
 - Non-absorbing FDTD boundary conditions: periodic, Bloch phase-shifted periodic, PEC, and PMC
 - Per-face FDTD boundary selection across `pml`, `periodic`, `pec`, `pmc`, and `none`, including mixed-axis combinations such as periodic-in-`y` plus PML-in-`x/z`
 - Mixed x/y Bloch + z PML FDTD forward stepping for grating-oriented CW `PlaneWave` TFSF slabs, including explicit Bloch wavevectors and solver-resolved automatic Bloch phase from the incident CW plane wave

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import torch
+
 from .common import BOUNDARY_KIND_TO_CODE, BOUNDARY_PEC, initialize_complex_fields
 from .bloch import resolve_bloch_phase_factors, resolve_bloch_wavevector
 from .cpml import (
@@ -177,23 +179,31 @@ def initialize_mur_state(solver):
 
     scene = solver.scene
     axis_primal = {"x": scene.dx_primal64, "y": scene.dy_primal64, "z": scene.dz_primal64}
+    speed_dt = solver.c * solver.dt
     for axis, side in solver.mur_faces:
-        # Mur advection uses the local boundary-cell spacing of each face.
+        # Mur advection uses the local boundary-cell spacing of each face. The
+        # coefficient depends only on c, dt, and that spacing, so it is constant
+        # across time steps and precomputed once here.
         primal = axis_primal[axis]
         delta = float(primal[0] if side == "low" else primal[-1])
-        boundary_index = 0 if side == "low" else -1
-        adjacent_index = 1 if side == "low" else -2
+        coef = (speed_dt - delta) / (speed_dt + delta)
         for field_name, field_axis in _MUR_FACE_COMPONENTS[axis]:
             field = getattr(solver, field_name)
+            size = int(field.shape[field_axis])
+            boundary_index = 0 if side == "low" else size - 1
+            adjacent_index = 1 if side == "low" else size - 2
+            # Persistent boundary / first-interior plane buffers, updated in place
+            # by the Mur kernel each step (no per-step allocation). They start at
+            # zero, matching the initial field state.
+            plane_shape = tuple(field.shape[:field_axis] + field.shape[field_axis + 1:])
             solver._mur_state.append(
                 {
                     "field": field_name,
                     "axis": int(field_axis),
-                    "boundary_index": boundary_index,
-                    "adjacent_index": adjacent_index,
-                    "delta": delta,
-                    # Previous-step boundary and first-interior slices (start at zero).
-                    "prev_boundary": field.select(field_axis, boundary_index).clone(),
-                    "prev_adjacent": field.select(field_axis, adjacent_index).clone(),
+                    "boundary_index": int(boundary_index),
+                    "adjacent_index": int(adjacent_index),
+                    "coef": float(coef),
+                    "prev_boundary": torch.zeros(plane_shape, device=solver.device, dtype=field.dtype),
+                    "prev_adjacent": torch.zeros(plane_shape, device=solver.device, dtype=field.dtype),
                 }
             )

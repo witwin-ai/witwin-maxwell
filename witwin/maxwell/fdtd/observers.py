@@ -30,6 +30,14 @@ _PLANE_ALIGNMENT_RULES = {
     },
 }
 
+# Tangential (Ea, Eb, Ha, Hb) ordering for the plane-normal Poynting component
+# (E x H)_n = Ea*Hb - Eb*Ha, used by the native flux-time reduction kernel.
+_FLUX_KERNEL_COMPONENTS = {
+    "x": ("Ey", "Ez", "Hy", "Hz"),
+    "y": ("Ez", "Ex", "Hz", "Hx"),
+    "z": ("Ex", "Ey", "Hx", "Hy"),
+}
+
 
 def _field_name(component):
     return normalize_component(component).capitalize()
@@ -882,6 +890,29 @@ def prepare_time_observers(solver, time_steps):
                 for component in record["fields"]
             }
             record["buffer"] = torch.zeros((num_samples,), device=solver.device, dtype=torch.float32)
+            # Precompute the constant trapezoidal area weights on the aligned
+            # plane grid plus the kernel's field mapping / sign, so the per-step
+            # flux is a single native reduction with no host-side work. The plane
+            # coordinates depend only on the grid, not on the evolving fields.
+            axis_name = normalize_axis(record["axis"])
+            rules = _PLANE_ALIGNMENT_RULES[axis_name]
+            coord_names = _plane_coord_names(axis_name)
+            coord_payloads = {
+                component: {"coords": meta["plane_coords"]}
+                for component, meta in record["flux_components"].items()
+            }
+            coord_a = _resolve_coord_source(coord_payloads, *rules["coord_sources"][coord_names[0]])
+            coord_b = _resolve_coord_source(coord_payloads, *rules["coord_sources"][coord_names[1]])
+            weights = (
+                _trapz_weights_1d(np.asarray(coord_a, dtype=float))[:, None]
+                * _trapz_weights_1d(np.asarray(coord_b, dtype=float))[None, :]
+            )
+            record["flux_weights"] = torch.as_tensor(
+                weights, device=solver.device, dtype=torch.float32
+            ).contiguous()
+            record["flux_kernel_components"] = _FLUX_KERNEL_COMPONENTS[axis_name]
+            # scale = 2.0 (undo the 0.5 time-average) * 0.5 (Poynting) * direction.
+            record["flux_scale"] = 1.0 if record["normal_direction"] == "+" else -1.0
 
     solver.time_observers_enabled = any(records)
 
@@ -918,21 +949,21 @@ def accumulate_time_observers(solver, n):
             field = getattr(solver, meta["field_name"])
             plane = field[meta["field_slice"]].squeeze(meta["axis_code"])
             component_payloads[component] = {"data": plane, "coords": meta["plane_coords"]}
-        aligned = _align_plane_monitor_payload(axis, component_payloads)
-        coord_names = _plane_coord_names(axis)
-        flux_input = {
-            "axis": axis,
-            coord_names[0]: aligned[coord_names[0]],
-            coord_names[1]: aligned[coord_names[1]],
-            "normal_direction": record["normal_direction"],
-            "frequency": 0.0,
-        }
-        for component_name, value in aligned["fields"].items():
-            flux_input[component_name] = value
-        # _compute_plane_flux applies the 0.5 * Re(E x conj(H)) time-average
-        # convention; for real instantaneous fields the physical Poynting flux is
-        # E x H, so multiply by 2 to remove that 0.5 factor.
-        record["buffer"][k] = 2.0 * _compute_plane_flux(flux_input)
+        # Yee-average the tangential slices onto the common plane grid, then
+        # reduce the instantaneous Poynting flux in a single native kernel that
+        # writes the scalar straight into this step's buffer slot.
+        aligned = _align_plane_monitor_payload(axis, component_payloads)["fields"]
+        ea_name, eb_name, ha_name, hb_name = record["flux_kernel_components"]
+        solver.fdtd_module.planeFluxReduce(
+            ea=aligned[ea_name].contiguous(),
+            eb=aligned[eb_name].contiguous(),
+            ha=aligned[ha_name].contiguous(),
+            hb=aligned[hb_name].contiguous(),
+            weights=record["flux_weights"],
+            out=record["buffer"],
+            outIndex=k,
+            scale=record["flux_scale"],
+        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=None)
 
 
 def get_time_observer_results(solver):

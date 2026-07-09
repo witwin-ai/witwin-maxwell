@@ -1607,6 +1607,20 @@ def _accumulate_plane_observer(*, field, planeRealAccum, planeImagAccum, axisCod
             )
 
 
+def _plane_flux_reduce(*, ea, eb, ha, hb, weights, out, outIndex, scale):
+    _require_cuda_tensors(ea, eb, ha, hb, weights, out)
+    get_compiled_extension().plane_flux_reduce(
+        ea,
+        eb,
+        ha,
+        hb,
+        weights,
+        out,
+        int(outIndex),
+        float(scale),
+    )
+
+
 def _update_debye_current(*, ElectricField, Polarization, PolarizationCurrent, DebyeDrive, decay, dt):
     get_compiled_extension().update_debye_current(
                 ElectricField,
@@ -2384,6 +2398,19 @@ def _clamp_pec_boundary(*, field, axisA, axisB):
     get_compiled_extension().clamp_pec_boundary(field, int(axisA), int(axisB))
 
 
+def _mur_abc_face(*, field, axis, boundaryIndex, adjacentIndex, coef, prevBoundary, prevAdjacent):
+    _require_cuda_tensors(field, prevBoundary, prevAdjacent)
+    get_compiled_extension().mur_abc_face(
+        field,
+        int(axis),
+        int(boundaryIndex),
+        int(adjacentIndex),
+        float(coef),
+        prevBoundary,
+        prevAdjacent,
+    )
+
+
 def _project_periodic_boundary(*, field, axis):
     get_compiled_extension().project_periodic_boundary(field, int(axis))
 
@@ -2442,6 +2469,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "accumulateRunningDftYee3DBatched": _accumulate_dft_batched,
     "accumulatePointObservers3D": _accumulate_point_observers,
     "accumulatePlaneObserver3D": _accumulate_plane_observer,
+    "planeFluxReduce": _plane_flux_reduce,
     "updateDebyeCurrent3D": _update_debye_current,
     "updateDrudeCurrent3D": _update_drude_current,
     "updateLorentzCurrent3D": _update_lorentz_current,
@@ -2486,6 +2514,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "reverseTfsfAuxiliaryMagnetic1D": _reverse_tfsf_auxiliary_magnetic,
     "clampFieldFace3D": _clamp_field_face,
     "clampPecBoundary3D": _clamp_pec_boundary,
+    "applyMurBoundary3D": _mur_abc_face,
     "projectPeriodicBoundary3D": _project_periodic_boundary,
     "projectBlochBoundary3D": _project_bloch_boundary,
 }

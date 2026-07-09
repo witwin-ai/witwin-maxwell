@@ -80,6 +80,42 @@ __global__ void accumulate_plane_observer_kernel(
   imag_accum[linear] += value * weighted_sin;
 }
 
+// Single-block reduction of the instantaneous Poynting flux through a plane:
+//   flux = scale * sum_pq (Ea*Hb - Eb*Ha) * weight
+// The four tangential field planes are already Yee-averaged onto the common
+// (P, Q) grid and share `weights`'s layout; the scalar result is written
+// straight into out[out_index] (a preallocated time-series slot), so a sampled
+// step needs no temporaries and no host round-trip. block_size must be a power
+// of two for the tree reduction.
+__global__ void plane_flux_reduce_kernel(
+    int64_t plane_size,
+    float scale,
+    const float* __restrict__ ea,
+    const float* __restrict__ eb,
+    const float* __restrict__ ha,
+    const float* __restrict__ hb,
+    const float* __restrict__ weights,
+    float* __restrict__ out,
+    int64_t out_index) {
+  extern __shared__ float sdata[];
+  const unsigned int tid = threadIdx.x;
+  float local = 0.0f;
+  for (int64_t idx = tid; idx < plane_size; idx += blockDim.x) {
+    local += (ea[idx] * hb[idx] - eb[idx] * ha[idx]) * weights[idx];
+  }
+  sdata[tid] = local;
+  __syncthreads();
+  for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      sdata[tid] += sdata[tid + stride];
+    }
+    __syncthreads();
+  }
+  if (tid == 0) {
+    out[out_index] = scale * sdata[0];
+  }
+}
+
 }  // namespace
 
 namespace {
@@ -262,5 +298,53 @@ void accumulate_plane_observer_cuda(
         nx, ny, nz, field.data_ptr<float>(), plane, cos_weight, sin_weight,
         real_accum.data_ptr<float>(), imag_accum.data_ptr<float>());
   }
+  WITWIN_CUDA_CHECK();
+}
+
+void plane_flux_reduce_cuda(
+    const at::Tensor& ea,
+    const at::Tensor& eb,
+    const at::Tensor& ha,
+    const at::Tensor& hb,
+    const at::Tensor& weights,
+    at::Tensor out,
+    int64_t out_index,
+    double scale) {
+  check_float32_tensor(ea, "ea");
+  check_float32_tensor(eb, "eb");
+  check_float32_tensor(ha, "ha");
+  check_float32_tensor(hb, "hb");
+  check_float32_tensor(weights, "weights");
+  check_float32_tensor(out, "out");
+  check_contiguous_tensor(ea, "ea");
+  check_contiguous_tensor(eb, "eb");
+  check_contiguous_tensor(ha, "ha");
+  check_contiguous_tensor(hb, "hb");
+  check_contiguous_tensor(weights, "weights");
+  check_contiguous_tensor(out, "out");
+  const int64_t plane_size = weights.numel();
+  TORCH_CHECK(ea.numel() == plane_size, "ea size must match weights");
+  TORCH_CHECK(eb.numel() == plane_size, "eb size must match weights");
+  TORCH_CHECK(ha.numel() == plane_size, "ha size must match weights");
+  TORCH_CHECK(hb.numel() == plane_size, "hb size must match weights");
+  TORCH_CHECK(out.dim() == 1, "out must be rank 1");
+  TORCH_CHECK(out_index >= 0 && out_index < out.numel(), "out_index is out of range");
+  check_same_cuda_device(ea, eb, "eb");
+  check_same_cuda_device(ea, ha, "ha");
+  check_same_cuda_device(ea, hb, "hb");
+  check_same_cuda_device(ea, weights, "weights");
+  check_same_cuda_device(ea, out, "out");
+  c10::cuda::CUDAGuard guard(ea.device());
+  const int block_size = 256;
+  plane_flux_reduce_kernel<<<1, block_size, block_size * sizeof(float), current_cuda_stream()>>>(
+      plane_size,
+      static_cast<float>(scale),
+      ea.data_ptr<float>(),
+      eb.data_ptr<float>(),
+      ha.data_ptr<float>(),
+      hb.data_ptr<float>(),
+      weights.data_ptr<float>(),
+      out.data_ptr<float>(),
+      out_index);
   WITWIN_CUDA_CHECK();
 }

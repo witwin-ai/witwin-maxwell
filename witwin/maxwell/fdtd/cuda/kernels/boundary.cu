@@ -188,6 +188,61 @@ void launch_clamp_pec_boundary(
       field);
 }
 
+__device__ __forceinline__ long long mur_plane_offset(
+    int axis,
+    int normal_index,
+    int64_t plane_linear,
+    int ny,
+    int nz) {
+  // Row-major 3D offset of plane element `plane_linear` at the given normal
+  // index. The plane spans the two axes other than `axis`, iterated in
+  // ascending-axis order, matching a `field.select(axis, normal_index)` view.
+  if (axis == 0) {
+    const unsigned int j = static_cast<unsigned int>(plane_linear / nz);
+    const unsigned int k = static_cast<unsigned int>(plane_linear - static_cast<int64_t>(j) * nz);
+    return offset3d(static_cast<unsigned int>(normal_index), j, k, ny, nz);
+  }
+  if (axis == 1) {
+    const unsigned int i = static_cast<unsigned int>(plane_linear / nz);
+    const unsigned int k = static_cast<unsigned int>(plane_linear - static_cast<int64_t>(i) * nz);
+    return offset3d(i, static_cast<unsigned int>(normal_index), k, ny, nz);
+  }
+  const unsigned int i = static_cast<unsigned int>(plane_linear / ny);
+  const unsigned int j = static_cast<unsigned int>(plane_linear - static_cast<int64_t>(i) * ny);
+  return offset3d(i, j, static_cast<unsigned int>(normal_index), ny, nz);
+}
+
+// First-order Mur absorbing boundary on one outer face of a single E component.
+// Persistent `prev_boundary` / `prev_adjacent` plane buffers carry the previous
+// step's boundary and first-interior slices; the kernel reads the current
+// adjacent slice, writes the extrapolated boundary slice, and updates both
+// buffers in place. No allocation and fixed pointers, so it is safe to capture
+// into a CUDA graph and replay.
+__global__ void mur_abc_face_kernel(
+    int64_t plane_size,
+    int axis,
+    int ny,
+    int nz,
+    int boundary_index,
+    int adjacent_index,
+    float coef,
+    float* __restrict__ field,
+    float* __restrict__ prev_boundary,
+    float* __restrict__ prev_adjacent) {
+  const int64_t t = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (t >= plane_size) {
+    return;
+  }
+  const float na = field[mur_plane_offset(axis, adjacent_index, t, ny, nz)];
+  const float pb = prev_boundary[t];
+  const float pa = prev_adjacent[t];
+  // E_boundary(n+1) = E_adjacent(n) + coef * (E_adjacent(n+1) - E_boundary(n)).
+  const float nb = pa + coef * (na - pb);
+  field[mur_plane_offset(axis, boundary_index, t, ny, nz)] = nb;
+  prev_boundary[t] = nb;
+  prev_adjacent[t] = na;
+}
+
 }  // namespace
 
 void clamp_field_face_cuda(at::Tensor field, int64_t axis, int64_t side) {
@@ -257,5 +312,43 @@ void clamp_pec_boundary_cuda(at::Tensor field, int64_t axis_a, int64_t axis_b) {
   } else {
     launch_for_axis_b(std::integral_constant<int, 2>{});
   }
+  WITWIN_CUDA_CHECK();
+}
+
+void mur_abc_face_cuda(
+    at::Tensor field,
+    int64_t axis,
+    int64_t boundary_index,
+    int64_t adjacent_index,
+    double coef,
+    at::Tensor prev_boundary,
+    at::Tensor prev_adjacent) {
+  check_field3d(field, "field");
+  check_float32_tensor(prev_boundary, "prev_boundary");
+  check_contiguous_tensor(prev_boundary, "prev_boundary");
+  check_float32_tensor(prev_adjacent, "prev_adjacent");
+  check_contiguous_tensor(prev_adjacent, "prev_adjacent");
+  TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
+  const c10::cuda::CUDAGuard device_guard(field.device());
+  const int ny = static_cast<int>(field.size(1));
+  const int nz = static_cast<int>(field.size(2));
+  const int64_t plane_size = prev_boundary.numel();
+  TORCH_CHECK(
+      prev_adjacent.numel() == plane_size,
+      "prev_adjacent and prev_boundary must have the same number of elements");
+  if (plane_size == 0) {
+    return;
+  }
+  mur_abc_face_kernel<<<linear_grid(plane_size), 256, 0, current_cuda_stream()>>>(
+      plane_size,
+      static_cast<int>(axis),
+      ny,
+      nz,
+      static_cast<int>(boundary_index),
+      static_cast<int>(adjacent_index),
+      static_cast<float>(coef),
+      field.data_ptr<float>(),
+      prev_boundary.data_ptr<float>(),
+      prev_adjacent.data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }

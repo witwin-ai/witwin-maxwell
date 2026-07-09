@@ -808,25 +808,26 @@ def clamp_pec_boundaries(solver):
 
 
 def apply_mur_boundaries(solver):
-    # First-order Mur absorbing boundary applied in PyTorch on the CUDA E-field
-    # tensors after the interior E-update. For an outer face:
+    # First-order Mur absorbing boundary on the CUDA E-field tensors after the
+    # interior E-update. For an outer face:
     #   E_boundary(n+1) = E_adjacent(n) + coef * (E_adjacent(n+1) - E_boundary(n))
-    # with coef = (c*dt - d) / (c*dt + d) and d the normal cell size.
+    # with coef = (c*dt - d) / (c*dt + d) and d the normal cell size. Each face is
+    # a single native-CUDA kernel launch that updates its persistent boundary /
+    # first-interior plane buffers in place, so it stays capturable into the tail
+    # CUDA graph and carries no per-step host arithmetic or allocation.
     if not getattr(solver, "has_mur_faces", False):
         return
 
-    speed_dt = solver.c * solver.dt
     for entry in solver._mur_state:
-        delta = entry["delta"]
-        coef = (speed_dt - delta) / (speed_dt + delta)
-        field = getattr(solver, entry["field"])
-        axis = entry["axis"]
-        new_adjacent = field.select(axis, entry["adjacent_index"])
-        new_boundary = entry["prev_adjacent"] + coef * (new_adjacent - entry["prev_boundary"])
-        field.select(axis, entry["boundary_index"]).copy_(new_boundary)
-        # Persist this step's boundary/adjacent slices for the next update.
-        entry["prev_boundary"] = new_boundary
-        entry["prev_adjacent"] = new_adjacent.clone()
+        solver.fdtd_module.applyMurBoundary3D(
+            field=getattr(solver, entry["field"]),
+            axis=entry["axis"],
+            boundaryIndex=entry["boundary_index"],
+            adjacentIndex=entry["adjacent_index"],
+            coef=entry["coef"],
+            prevBoundary=entry["prev_boundary"],
+            prevAdjacent=entry["prev_adjacent"],
+        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=None)
 
 
 def init_field(solver):

@@ -407,6 +407,15 @@ void accumulate_plane_observer_cuda(
     int64_t plane_index,
     double weighted_cos,
     double weighted_sin);
+void plane_flux_reduce_cuda(
+    const at::Tensor& ea,
+    const at::Tensor& eb,
+    const at::Tensor& ha,
+    const at::Tensor& hb,
+    const at::Tensor& weights,
+    at::Tensor out,
+    int64_t out_index,
+    double scale);
 void update_debye_current_cuda(
     const at::Tensor& electric,
     at::Tensor polarization,
@@ -1021,6 +1030,14 @@ void reverse_tfsf_auxiliary_magnetic_cuda(
     const at::Tensor& magnetic_curl);
 void clamp_field_face_cuda(at::Tensor field, int64_t axis, int64_t side);
 void clamp_pec_boundary_cuda(at::Tensor field, int64_t axis_a, int64_t axis_b);
+void mur_abc_face_cuda(
+    at::Tensor field,
+    int64_t axis,
+    int64_t boundary_index,
+    int64_t adjacent_index,
+    double coef,
+    at::Tensor prev_boundary,
+    at::Tensor prev_adjacent);
 void project_periodic_boundary_cuda(at::Tensor field, int64_t axis);
 void project_bloch_boundary_cuda(
     at::Tensor field_real,
@@ -1123,6 +1140,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("accumulate_dft_batched", &accumulate_dft_batched_cuda, "Accumulate batched Yee-grid DFT fields.");
   m.def("accumulate_point_observers", &accumulate_point_observers_cuda, "Accumulate point observer samples.");
   m.def("accumulate_plane_observer", &accumulate_plane_observer_cuda, "Accumulate plane observer samples.");
+  m.def("plane_flux_reduce", &plane_flux_reduce_cuda, "Reduce instantaneous Poynting flux through a plane.");
   m.def("update_debye_current", &update_debye_current_cuda, "Update Debye polarization state.");
   m.def("update_drude_current", &update_drude_current_cuda, "Update Drude current state.");
   m.def("update_lorentz_current", &update_lorentz_current_cuda, "Update Lorentz polarization state.");
@@ -1211,6 +1229,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("reverse_tfsf_auxiliary_magnetic", &reverse_tfsf_auxiliary_magnetic_cuda, "Reverse TFSF auxiliary magnetic update.");
   m.def("clamp_field_face", &clamp_field_face_cuda, "Clamp one boundary face.");
   m.def("clamp_pec_boundary", &clamp_pec_boundary_cuda, "Clamp PEC boundary faces.");
+  m.def("mur_abc_face", &mur_abc_face_cuda, "Apply a first-order Mur ABC to one boundary face.");
   m.def("project_periodic_boundary", &project_periodic_boundary_cuda, "Project periodic boundary faces.");
   m.def("project_bloch_boundary", &project_bloch_boundary_cuda, "Project Bloch boundary faces.");
 }
