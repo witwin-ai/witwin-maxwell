@@ -67,7 +67,7 @@ def test_fdtd_smoke_scene_simulation_result(monkeypatch):
         def init_field(self):
             self.initialized = True
 
-        def solve(self, time_steps, dft_frequency, enable_plot, dft_window, full_field_dft, normalize_source=False, shutoff=0.0, shutoff_check_interval=100):
+        def solve(self, time_steps, dft_frequency, enable_plot, dft_window, full_field_dft, normalize_source=False, shutoff=0.0, shutoff_check_interval=100, use_cuda_graph=False):
             self.ex = torch.ones((3, 4, 4), dtype=torch.complex64)
             self.ey = torch.ones((4, 3, 4), dtype=torch.complex64) * 2.0
             self.ez = torch.ones((4, 4, 3), dtype=torch.complex64) * 3.0

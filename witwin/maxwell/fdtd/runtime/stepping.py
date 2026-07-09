@@ -929,6 +929,101 @@ def _complete_spectral_normalization(solver, time_steps: int) -> None:
             )
 
 
+def _field_update_block(solver, time_value):
+    """One step of the time-marching field-update core: the magnetic and electric
+    Yee updates plus their in-place dispersive/Kerr/CPML/Bloch state advances.
+
+    This is exactly the contiguous, time-marching part of the step that carries no
+    per-step host input when TFSF and magnetic sources are absent, so it can be
+    captured once into a CUDA graph and replayed (the additive/surface source and
+    the running DFT stay outside the graph). Kept as a single function so the
+    normal and graph-captured paths execute an identical kernel sequence.
+    """
+    solver._advance_magnetic_dispersive_state()
+    update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
+    if has_complex_fields(solver):
+        update_magnetic_fields(
+            solver,
+            solver.Hx_imag,
+            solver.Hy_imag,
+            solver.Hz_imag,
+            solver.Ex_imag,
+            solver.Ey_imag,
+            solver.Ez_imag,
+            imag=True,
+        )
+    if solver.tfsf_enabled:
+        apply_tfsf_h_correction(solver, time_value)
+        advance_tfsf_auxiliary_magnetic(solver)
+    if solver._magnetic_source_terms:
+        inject_magnetic_surface_source_terms(solver, time_value=time_value)
+    solver._apply_magnetic_dispersive_corrections()
+
+    if has_complex_fields(solver):
+        solver._advance_dispersive_state()
+        if solver.uses_cpml:
+            update_electric_fields_bloch_cpml(solver)
+        else:
+            update_electric_fields_bloch(solver)
+    else:
+        solver._advance_dispersive_state()
+        if solver.kerr_enabled:
+            solver._update_kerr_electric_curls()
+        update_electric_fields(solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
+
+
+def _make_field_update_runner(solver, use_cuda_graph: bool):
+    """Return ``run(time_value)`` for the field-update block, capturing it into a
+    CUDA graph when requested and safe. Falls back to the direct call for TFSF /
+    magnetic-source scenes (whose block carries per-step host input) or if capture
+    is unavailable. Capture happens on the zero initial field, a fixed point of
+    the source-free block, so it does not perturb the physical run.
+    """
+    solver._cuda_graph_active = False
+    normal = lambda time_value: _field_update_block(solver, time_value)
+    # v1 scope: the standard real-field path (optionally conductive). TFSF and
+    # magnetic sources put per-step host input inside the block; complex/Kerr/
+    # dispersive paths carry extra evolving state left to a later iteration.
+    graphable = (
+        use_cuda_graph
+        and torch.cuda.is_available()
+        and not solver.tfsf_enabled
+        and not solver._magnetic_source_terms
+        and not has_complex_fields(solver)
+        and not getattr(solver, "kerr_enabled", False)
+        and not getattr(solver, "dispersive_enabled", False)
+    )
+    if not graphable:
+        return normal
+    from ..cuda.runtime.graph import CudaGraphRunner
+
+    # Snapshot the state this block mutates (fields + CPML psi) so warmup/capture
+    # do not perturb the physical run, then restore before stepping begins.
+    state = {
+        k: v
+        for k, v in vars(solver).items()
+        if isinstance(v, torch.Tensor)
+        and (k in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz") or k.startswith("psi"))
+    }
+    saved = {k: v.clone() for k, v in state.items()}
+
+    def _restore():
+        for k, v in saved.items():
+            state[k].copy_(v)
+
+    try:
+        runner = CudaGraphRunner(enabled=True, warmup_steps=3)
+        replay = runner.capture(lambda: _field_update_block(solver, 0.0))
+    except Exception:
+        # Any capture failure (e.g. a non-capturable kernel) degrades to the
+        # normal path rather than breaking the solve.
+        _restore()
+        return normal
+    _restore()
+    solver._cuda_graph_active = True
+    return lambda time_value: replay()
+
+
 def solve(
     solver,
     time_steps: int,
@@ -939,6 +1034,7 @@ def solve(
     normalize_source: bool = False,
     shutoff: float = 0.0,
     shutoff_check_interval: int = 100,
+    use_cuda_graph: bool = False,
 ):
     if solver.verbose:
         print(f"Starting 3D FDTD simulation (Yee grid), grid size: {solver.Nx}x{solver.Ny}x{solver.Nz}")
@@ -969,6 +1065,8 @@ def solve(
     solver._shutoff_peak = 0.0
     shutoff_min_step = _compute_shutoff_min_step(solver, shutoff_check_interval)
 
+    run_field_update = _make_field_update_runner(solver, use_cuda_graph)
+
     iterator = range(time_steps)
     pbar = None
     if solver.verbose:
@@ -982,37 +1080,7 @@ def solve(
 
     for n in iterator:
         time_value = n * solver.dt
-        solver._advance_magnetic_dispersive_state()
-        update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
-        if has_complex_fields(solver):
-            update_magnetic_fields(
-                solver,
-                solver.Hx_imag,
-                solver.Hy_imag,
-                solver.Hz_imag,
-                solver.Ex_imag,
-                solver.Ey_imag,
-                solver.Ez_imag,
-                imag=True,
-            )
-        if solver.tfsf_enabled:
-            apply_tfsf_h_correction(solver, time_value)
-            advance_tfsf_auxiliary_magnetic(solver)
-        if solver._magnetic_source_terms:
-            inject_magnetic_surface_source_terms(solver, time_value=time_value)
-        solver._apply_magnetic_dispersive_corrections()
-
-        if has_complex_fields(solver):
-            solver._advance_dispersive_state()
-            if solver.uses_cpml:
-                update_electric_fields_bloch_cpml(solver)
-            else:
-                update_electric_fields_bloch(solver)
-        else:
-            solver._advance_dispersive_state()
-            if solver.kerr_enabled:
-                solver._update_kerr_electric_curls()
-            update_electric_fields(solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
+        run_field_update(time_value)
 
         if solver.tfsf_enabled:
             apply_tfsf_e_correction(solver, time_value)

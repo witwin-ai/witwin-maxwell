@@ -146,6 +146,7 @@ class FDTDConfig:
     adjoint_checkpoint_stride: int | None = None
     shutoff: float = 0.0  # relative E-energy threshold for auto-shutoff; 0 disables (opt-in)
     shutoff_check_interval: int = 100
+    cuda_graph: bool = False  # capture the field-update core into a CUDA graph (opt-in)
 
     def __post_init__(self):
         if not isinstance(self.run_time, TimeConfig):
@@ -162,6 +163,7 @@ class FDTDConfig:
         self.shutoff_check_interval = int(self.shutoff_check_interval)
         if self.shutoff_check_interval <= 0:
             raise ValueError("shutoff_check_interval must be > 0.")
+        self.cuda_graph = bool(self.cuda_graph)
         if self.adjoint_checkpoint_stride is not None:
             self.adjoint_checkpoint_stride = int(self.adjoint_checkpoint_stride)
             if self.adjoint_checkpoint_stride <= 0:
@@ -309,6 +311,7 @@ class Simulation:
         full_field_dft: bool = False,
         shutoff: float = 0.0,
         shutoff_check_interval: int = 100,
+        cuda_graph: bool = False,
     ) -> "Simulation":
         return cls(
             scene=scene,
@@ -323,6 +326,7 @@ class Simulation:
                 full_field_dft=full_field_dft,
                 shutoff=shutoff,
                 shutoff_check_interval=shutoff_check_interval,
+                cuda_graph=cuda_graph,
             ),
         )
 
@@ -506,6 +510,7 @@ class Simulation:
             normalize_source=dft_cfg.normalize_source,
             shutoff=self.config.shutoff,
             shutoff_check_interval=self.config.shutoff_check_interval,
+            use_cuda_graph=self.config.cuda_graph,
         )
         return raw_output, time_steps, use_full_field_dft, dft_cfg
 
@@ -583,6 +588,7 @@ class Simulation:
             "shutoff_step": shutoff_step,
             "steps_run": (shutoff_step + 1) if shutoff_triggered else time_steps,
             "dt": solver.dt,
+            "cuda_graph_active": bool(getattr(solver, "_cuda_graph_active", False)),
             "boundary": getattr(solver, "boundary_kind", self.scene.boundary.kind),
             "absorber": getattr(solver, "active_absorber_type", self.config.absorber),
             "cpml_memory_mode": getattr(solver, "_cpml_memory_mode", None),
