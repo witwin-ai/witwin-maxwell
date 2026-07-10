@@ -200,8 +200,8 @@ class _ConductiveDesignScene(mw.SceneModule):
         return scene
 
 
-def test_fdtd_adjoint_rejects_conductive_media():
-    """The trainable FDTD path must reject sigma_e media with a sigma_e message."""
+def test_fdtd_adjoint_accepts_conductive_media():
+    """The trainable FDTD path differentiates designs alongside sigma_e media (P5.1)."""
     model = _ConductiveDesignScene(init=0.0).cuda()
     simulation = mw.Simulation.fdtd(
         model,
@@ -210,5 +210,11 @@ def test_fdtd_adjoint_rejects_conductive_media():
         spectral_sampler=mw.SpectralSampler(window="none"),
         full_field_dft=False,
     )
-    with pytest.raises(NotImplementedError, match="sigma_e"):
-        simulation.run()
+    result = simulation.run()
+    data = result.monitor("probe")["data"]
+    loss = (data * data.conj()).real if data.is_complex() else data * data
+    loss.backward()
+    grad = model.logits.grad
+    assert grad is not None
+    assert torch.isfinite(grad).all()
+    assert torch.any(grad != 0)

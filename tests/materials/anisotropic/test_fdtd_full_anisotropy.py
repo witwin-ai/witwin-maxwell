@@ -113,13 +113,13 @@ def test_fdfd_rejects_full_anisotropy():
         _validate_supported_fdfd_materials(scene)
 
 
-def test_adjoint_bridge_rejects_full_anisotropy():
+def test_adjoint_bridge_accepts_full_anisotropy():
+    """Full off-diagonal epsilon tensors are adjoint-supported since P5.1."""
     from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
 
     material = mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0))
     scene = _build_cpu_scene(material)
-    message = _unsupported_adjoint_medium(scene)
-    assert message is not None and "anisotropic" in message
+    assert _unsupported_adjoint_medium(scene) is None
 
 
 # ---------------------------------------------------------------------------
