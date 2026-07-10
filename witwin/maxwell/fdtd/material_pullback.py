@@ -149,6 +149,37 @@ def _pullback_region_density(scene, region, *, layout: _RegionLayout, grad_eps_p
     return grad_density.to(device=region.density.device, dtype=region.density.dtype)
 
 
+def component_node_gradients_from_yee_permittivity(
+    scene,
+    *,
+    grad_eps_ex: torch.Tensor,
+    grad_eps_ey: torch.Tensor,
+    grad_eps_ez: torch.Tensor,
+    eps0: float,
+) -> dict[str, torch.Tensor]:
+    """Per-axis node gradients transposing the node->Yee-edge permittivity build.
+
+    The forward path builds ``eps_E<axis> = 0.5 * (node_a + node_b) * eps0`` from
+    the *per-axis* relative-permittivity node component, so each Yee-edge gradient
+    scatters half onto its two endpoint nodes of that same axis component. Keeping
+    the three axes separate is what makes diagonal-anisotropic media differentiable;
+    for isotropic media summing the three components reproduces the scalar pullback
+    exactly.
+    """
+    shape = (scene.Nx, scene.Ny, scene.Nz)
+    grad_x = torch.zeros(shape, device=scene.device, dtype=grad_eps_ex.dtype)
+    grad_y = torch.zeros(shape, device=scene.device, dtype=grad_eps_ey.dtype)
+    grad_z = torch.zeros(shape, device=scene.device, dtype=grad_eps_ez.dtype)
+    grad_x[:-1, :, :] += 0.5 * grad_eps_ex
+    grad_x[1:, :, :] += 0.5 * grad_eps_ex
+    grad_y[:, :-1, :] += 0.5 * grad_eps_ey
+    grad_y[:, 1:, :] += 0.5 * grad_eps_ey
+    grad_z[:, :, :-1] += 0.5 * grad_eps_ez
+    grad_z[:, :, 1:] += 0.5 * grad_eps_ez
+    scale = float(eps0)
+    return {"x": grad_x * scale, "y": grad_y * scale, "z": grad_z * scale}
+
+
 def node_gradient_from_yee_permittivity(
     scene,
     *,
@@ -157,18 +188,14 @@ def node_gradient_from_yee_permittivity(
     grad_eps_ez: torch.Tensor,
     eps0: float,
 ) -> torch.Tensor:
-    grad_eps_node = torch.zeros(
-        (scene.Nx, scene.Ny, scene.Nz),
-        device=scene.device,
-        dtype=grad_eps_ex.dtype,
+    component_gradients = component_node_gradients_from_yee_permittivity(
+        scene,
+        grad_eps_ex=grad_eps_ex,
+        grad_eps_ey=grad_eps_ey,
+        grad_eps_ez=grad_eps_ez,
+        eps0=eps0,
     )
-    grad_eps_node[:-1, :, :] += 0.5 * grad_eps_ex
-    grad_eps_node[1:, :, :] += 0.5 * grad_eps_ex
-    grad_eps_node[:, :-1, :] += 0.5 * grad_eps_ey
-    grad_eps_node[:, 1:, :] += 0.5 * grad_eps_ey
-    grad_eps_node[:, :, :-1] += 0.5 * grad_eps_ez
-    grad_eps_node[:, :, 1:] += 0.5 * grad_eps_ez
-    return grad_eps_node * float(eps0)
+    return component_gradients["x"] + component_gradients["y"] + component_gradients["z"]
 
 
 def pullback_density_gradients(
@@ -249,20 +276,36 @@ def pullback_material_input_gradients(
         return ()
     prepared_scene = prepare_scene(scene)
 
-    grad_eps_r = node_gradient_from_yee_permittivity(
+    component_gradients = component_node_gradients_from_yee_permittivity(
         prepared_scene,
         grad_eps_ex=grad_eps_ex,
         grad_eps_ey=grad_eps_ey,
         grad_eps_ez=grad_eps_ez,
         eps0=eps0,
     )
-    eps_r, _mu_r = prepared_scene.compile_material_tensors()
-    gradients = torch.autograd.grad(
-        eps_r,
-        inputs,
-        grad_outputs=grad_eps_r.to(device=eps_r.device, dtype=eps_r.dtype),
-        allow_unused=True,
-        retain_graph=False,
+    # Back-propagate through the per-axis relative-permittivity node components
+    # rather than their scalar average so diagonal-anisotropic sensitivities are
+    # attributed to the correct axis. For isotropic media this is exactly the
+    # previous scalar-eps pullback.
+    eps_components, _mu_components = prepared_scene.compile_material_components()
+    outputs = []
+    grad_outputs = []
+    for axis in ("x", "y", "z"):
+        component = eps_components[axis]
+        if not component.requires_grad:
+            continue
+        outputs.append(component)
+        grad_outputs.append(component_gradients[axis].to(device=component.device, dtype=component.dtype))
+    gradients = (
+        torch.autograd.grad(
+            outputs,
+            inputs,
+            grad_outputs=grad_outputs,
+            allow_unused=True,
+            retain_graph=False,
+        )
+        if outputs
+        else (None,) * len(inputs)
     )
     prepared_scene.release_meshgrid()
     return tuple(

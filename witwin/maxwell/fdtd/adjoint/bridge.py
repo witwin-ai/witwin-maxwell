@@ -8,6 +8,7 @@ from ...adjoint_inputs import (
     material_dependent_inputs as _material_dependent_inputs,
     scene_trainable_material_tensors as _scene_trainable_material_tensors,
 )
+from ...media import Tensor3x3
 from ...result import Result
 from ..boundary import BOUNDARY_BLOCH, BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_PML, has_complex_fields
 from .profiler import _BackwardProfiler, _clone_backward_profile, _empty_backward_profile
@@ -50,7 +51,15 @@ def _unsupported_adjoint_medium(scene):
         if _material_has_conductivity(material):
             return "FDTD adjoint does not support static conductive (sigma_e) media yet."
         if getattr(material, "is_anisotropic", False):
-            return "FDTD adjoint does not support anisotropic media yet."
+            # Diagonal epsilon anisotropy maps onto the per-axis eps_Ex/Ey/Ez
+            # coefficient layout the reverse step and material pullback already
+            # use, so it is fully differentiable. Full 3x3 permittivity uses the
+            # component-coupled forward kernel that the reverse step does not
+            # model, and mu tensors have no gradient channel; both stay guarded.
+            if isinstance(getattr(material, "epsilon_tensor", None), Tensor3x3):
+                return "FDTD adjoint does not support full (off-diagonal) anisotropic media yet."
+            if getattr(material, "mu_tensor", None) is not None:
+                return "FDTD adjoint does not support anisotropic magnetic (mu_tensor) media yet."
         if getattr(material, "is_magnetic_dispersive", False):
             return "FDTD adjoint does not support magnetic dispersive media yet."
         if getattr(material, "is_nonlinear", False):

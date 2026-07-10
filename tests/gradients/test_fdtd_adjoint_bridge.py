@@ -29,8 +29,15 @@ def _build_simulation(model, *, time_steps=24):
     ("material", "message"),
     [
         (
-            mw.Material(eps_r=1.0, epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
-            "anisotropic media",
+            mw.Material(
+                eps_r=1.0,
+                epsilon_tensor=mw.Tensor3x3(((2.5, 0.3, 0.0), (0.3, 2.5, 0.0), (0.0, 0.0, 2.5))),
+            ),
+            "full \\(off-diagonal\\) anisotropic media",
+        ),
+        (
+            mw.Material(mu_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
+            "anisotropic magnetic \\(mu_tensor\\) media",
         ),
         (
             mw.Material(mu_lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=1.0e9, gamma=1.0e8),)),
@@ -62,6 +69,24 @@ def test_fdtd_gradient_bridge_rejects_unsupported_medium_capabilities(material, 
     bridge = object.__new__(_FDTDGradientBridge)
     with pytest.raises(NotImplementedError, match=message):
         bridge._validate_supported_configuration(SimpleNamespace(scene=scene))
+
+
+def test_fdtd_gradient_bridge_accepts_diagonal_anisotropic_epsilon():
+    from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+            material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
+        )
+    )
+
+    assert _unsupported_adjoint_medium(scene) is None
 
 
 def _fake_checkpoint_solver():
