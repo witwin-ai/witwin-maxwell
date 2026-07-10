@@ -672,6 +672,15 @@ void apply_polarization_current_cuda(
     const torch::stable::Tensor& current,
     const torch::stable::Tensor& inv_permittivity,
     double dt);
+void apply_polarization_current_modulated_cuda(
+    torch::stable::Tensor electric,
+    const torch::stable::Tensor& current,
+    const torch::stable::Tensor& inv_permittivity,
+    const torch::stable::Tensor& mod_cos,
+    const torch::stable::Tensor& mod_sin,
+    double cos_next,
+    double sin_next,
+    double dt);
 void update_kerr_ex_curl_cuda(
     torch::stable::Tensor dynamic_curl,
     const torch::stable::Tensor& ex,
@@ -1577,6 +1586,7 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("update_drude_current(Tensor electric, Tensor(a!) current, Tensor drive, float decay) -> ()");
   m.def("update_lorentz_current(Tensor electric, Tensor(a!) polarization, Tensor(b!) current, Tensor drive, float decay, float restoring, float dt) -> ()");
   m.def("apply_polarization_current(Tensor(a!) electric, Tensor current, Tensor inv_permittivity, float dt) -> ()");
+  m.def("apply_polarization_current_modulated(Tensor(a!) electric, Tensor current, Tensor inv_permittivity, Tensor mod_cos, Tensor mod_sin, float cos_next, float sin_next, float dt) -> ()");
   m.def("update_kerr_ex_curl(Tensor(a!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor ex_decay, Tensor chi3, float dt, float eps0) -> ()");
   m.def("update_kerr_ey_curl(Tensor(a!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor ey_decay, Tensor chi3, float dt, float eps0) -> ()");
   m.def("update_kerr_ez_curl(Tensor(a!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor ez_decay, Tensor chi3, float dt, float eps0) -> ()");
@@ -1683,6 +1693,7 @@ STABLE_TORCH_LIBRARY_IMPL(witwin_maxwell_fdtd_cuda, CUDA, m) {
   m.impl("update_drude_current", TORCH_BOX(&update_drude_current_cuda));
   m.impl("update_lorentz_current", TORCH_BOX(&update_lorentz_current_cuda));
   m.impl("apply_polarization_current", TORCH_BOX(&apply_polarization_current_cuda));
+  m.impl("apply_polarization_current_modulated", TORCH_BOX(&apply_polarization_current_modulated_cuda));
   m.impl("update_kerr_ex_curl", TORCH_BOX(&update_kerr_ex_curl_cuda));
   m.impl("update_kerr_ey_curl", TORCH_BOX(&update_kerr_ey_curl_cuda));
   m.impl("update_kerr_ez_curl", TORCH_BOX(&update_kerr_ez_curl_cuda));

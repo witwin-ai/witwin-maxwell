@@ -2280,6 +2280,21 @@ def _apply_polarization_current(*, ElectricField, PolarizationCurrent, InvPermit
             )
 
 
+def _apply_polarization_current_modulated(
+    *, ElectricField, PolarizationCurrent, InvPermittivity, ModCos, ModSin, cosNext, sinNext, dt
+):
+    get_compiled_extension().apply_polarization_current_modulated(
+                ElectricField,
+                PolarizationCurrent,
+                InvPermittivity,
+                ModCos,
+                ModSin,
+                float(cosNext),
+                float(sinNext),
+                float(dt),
+            )
+
+
 def _update_kerr_ex(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, ExDecay, KerrChi3, dt, eps0):
     _invalidate_uniform_scalar(DynamicCurl)
     get_compiled_extension().update_kerr_ex_curl(
@@ -3240,6 +3255,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "updateDrudeCurrent3D": _update_drude_current,
     "updateLorentzCurrent3D": _update_lorentz_current,
     "applyPolarizationCurrent3D": _apply_polarization_current,
+    "applyPolarizationCurrentModulated3D": _apply_polarization_current_modulated,
     "updateKerrElectricFieldExCurl3D": _update_kerr_ex,
     "updateKerrElectricFieldEyCurl3D": _update_kerr_ey,
     "updateKerrElectricFieldEzCurl3D": _update_kerr_ez,

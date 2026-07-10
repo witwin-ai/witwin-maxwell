@@ -82,6 +82,33 @@ __global__ void apply_polarization_kernel(
   electric[index] -= dt * current[index] * inv_permittivity[index];
 }
 
+// Space-time modulated variant of the ADE polarization-current subtraction.
+// The modulated E update divides the curl(H) term by the instantaneous
+// modulation factor m_next(x) = 1 + mod_cos*cos(W t_next) - mod_sin*sin(W t_next);
+// for the conservative eps_inf(x,t) = eps_inf(x) * m(x,t) update the dispersive
+// polarization current must be divided by the SAME eps_inf * m_next, so the
+// resonant response and the modulated background stay mutually consistent inside
+// a cell that is both modulated and dispersive. Where the modulation depth is
+// zero (m_next = 1) this reduces bit-exactly to apply_polarization_kernel.
+__global__ void apply_polarization_modulated_kernel(
+    int64_t total,
+    const float* __restrict__ current,
+    const float* __restrict__ inv_permittivity,
+    const float* __restrict__ mod_cos,
+    const float* __restrict__ mod_sin,
+    float cos_next,
+    float sin_next,
+    float dt,
+    float* __restrict__ electric) {
+  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) {
+    return;
+  }
+  const float m_next =
+      fmaxf(1.0f + mod_cos[index] * cos_next - mod_sin[index] * sin_next, 1.0e-6f);
+  electric[index] -= dt * current[index] * inv_permittivity[index] / m_next;
+}
+
 __device__ __forceinline__ int clamp_index(int index, int size) {
   if (index <= 0) {
     return 0;
@@ -648,6 +675,35 @@ void apply_polarization_current_cuda(
       electric.numel(),
       current.mutable_data_ptr<float>(),
       inv_permittivity.mutable_data_ptr<float>(),
+      static_cast<float>(dt),
+      electric.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void apply_polarization_current_modulated_cuda(
+    torch::stable::Tensor electric,
+    const torch::stable::Tensor& current,
+    const torch::stable::Tensor& inv_permittivity,
+    const torch::stable::Tensor& mod_cos,
+    const torch::stable::Tensor& mod_sin,
+    double cos_next,
+    double sin_next,
+    double dt) {
+  check_float32_tensor(electric, "electric");
+  check_contiguous_tensor(electric, "electric");
+  check_matching_field(electric, current, "current");
+  check_matching_field(electric, inv_permittivity, "inv_permittivity");
+  check_matching_field(electric, mod_cos, "mod_cos");
+  check_matching_field(electric, mod_sin, "mod_sin");
+  torch::stable::accelerator::DeviceGuard guard(electric.get_device_index());
+  apply_polarization_modulated_kernel<<<linear_grid(electric.numel()), 256, 0, current_cuda_stream()>>>(
+      electric.numel(),
+      current.mutable_data_ptr<float>(),
+      inv_permittivity.mutable_data_ptr<float>(),
+      mod_cos.mutable_data_ptr<float>(),
+      mod_sin.mutable_data_ptr<float>(),
+      static_cast<float>(cos_next),
+      static_cast<float>(sin_next),
       static_cast<float>(dt),
       electric.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();

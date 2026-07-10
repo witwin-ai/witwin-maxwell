@@ -73,19 +73,23 @@ def build_materials(solver, scene):
     # through the same per-edge inverse permittivity tensor as curl(H) (see
     # _apply_aniso_dispersive_corrections); magnetic dispersion is an independent
     # H-side channel and does not touch the electric tensor.
-    if solver.modulation_enabled:
-        if solver.nonlinear_enabled:
-            raise NotImplementedError(
-                "FDTD time-modulated media cannot be combined with nonlinear media in the same Scene yet."
-            )
-        if solver.full_aniso_enabled:
-            raise NotImplementedError(
-                "FDTD time-modulated media cannot be combined with full (off-diagonal) anisotropic media in the same Scene yet."
-            )
-        if solver.dispersive_enabled:
-            raise NotImplementedError(
-                "FDTD time-modulated media cannot be combined with dispersive materials in the same Scene yet."
-            )
+    # Space-time modulation now composes with electric/magnetic dispersion and with
+    # the instantaneous nonlinear channels: the modulation scales the eps_inf
+    # background (the modulated E-update coefficients) while the ADE polarization
+    # current and the field-dependent nonlinear coefficients are folded through the
+    # same per-step 1/m_next factor, so a modulated dispersive/nonlinear cell stays
+    # mutually consistent (electro-optic-modulator physics). The full off-diagonal
+    # anisotropic tensor is the one edge left out: modulating the crystal-frame
+    # tensor would require a per-step re-inversion of the coupled 3x3 permittivity,
+    # which the current diagonalized effective-eps + additive off-diagonal split
+    # cannot express.
+    if solver.modulation_enabled and solver.full_aniso_enabled:
+        raise NotImplementedError(
+            "FDTD time-modulated media cannot be combined with full (off-diagonal) anisotropic "
+            "media: modulating the crystal-frame permittivity tensor needs a per-step re-inversion "
+            "of the coupled 3x3 tensor, which the diagonalized effective-permittivity update path "
+            "does not provide. Use a diagonal (axis-aligned) tensor or drop the modulation."
+        )
 
 
 def build_nonlinear_channels(solver, material_model):
@@ -694,6 +698,13 @@ def _dispersive_current_coefficient(solver, component_name, component_templates)
     return component_templates["inv_eps"], solver.dt
 
 
+_MODULATION_QUADRATURE_FIELDS = {
+    "Ex": ("mod_cos_Ex", "mod_sin_Ex"),
+    "Ey": ("mod_cos_Ey", "mod_sin_Ey"),
+    "Ez": ("mod_cos_Ez", "mod_sin_Ez"),
+}
+
+
 def apply_component_dispersive_currents(solver, component_name, field, *, imag=False):
     if not solver.electric_dispersive_enabled:
         return
@@ -704,32 +715,41 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
     launch_shape = solver._field_launch_shapes[component_name]
     inv_eps, apply_dt = _dispersive_current_coefficient(solver, component_name, component_templates)
 
-    for entry in component_templates["debye"]:
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.applyPolarizationCurrent3D(
-            ElectricField=field,
-            PolarizationCurrent=current,
-            InvPermittivity=inv_eps,
-            dt=apply_dt,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+    # When the electric dispersion co-exists with a space-time modulation, the ADE
+    # polarization current is divided by the same instantaneous eps_inf * m_next as
+    # the modulated curl(H) term (see apply_polarization_modulated_kernel); in a
+    # purely dispersive cell (m_next == 1) this reduces to the plain subtraction.
+    modulated = bool(getattr(solver, "modulation_enabled", False)) and not imag
+    if modulated:
+        cos_name, sin_name = _MODULATION_QUADRATURE_FIELDS[component_name]
+        mod_cos = getattr(solver, cos_name)
+        mod_sin = getattr(solver, sin_name)
+        cos_next = float(getattr(solver, "_modulation_next_cos", 1.0))
+        sin_next = float(getattr(solver, "_modulation_next_sin", 0.0))
 
-    for entry in component_templates["drude"]:
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.applyPolarizationCurrent3D(
-            ElectricField=field,
-            PolarizationCurrent=current,
-            InvPermittivity=inv_eps,
-            dt=apply_dt,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+    def _subtract(current):
+        if modulated:
+            solver.fdtd_module.applyPolarizationCurrentModulated3D(
+                ElectricField=field,
+                PolarizationCurrent=current,
+                InvPermittivity=inv_eps,
+                ModCos=mod_cos,
+                ModSin=mod_sin,
+                cosNext=cos_next,
+                sinNext=sin_next,
+                dt=apply_dt,
+            ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+        else:
+            solver.fdtd_module.applyPolarizationCurrent3D(
+                ElectricField=field,
+                PolarizationCurrent=current,
+                InvPermittivity=inv_eps,
+                dt=apply_dt,
+            ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
 
-    for entry in component_templates["lorentz"]:
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.applyPolarizationCurrent3D(
-            ElectricField=field,
-            PolarizationCurrent=current,
-            InvPermittivity=inv_eps,
-            dt=apply_dt,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+    for model_name in ("debye", "drude", "lorentz"):
+        for entry in component_templates[model_name]:
+            _subtract(entry["current_imag"] if imag else entry["current"])
 
 
 def _aniso_periodic_flags(solver):

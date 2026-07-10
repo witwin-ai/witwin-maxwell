@@ -529,12 +529,17 @@ def _modulation_phase_factors(solver, time_value):
 
 def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, time_value):
     cos_prev, sin_prev, cos_next, sin_next = _modulation_phase_factors(solver, time_value)
+    # Composing modulation with an instantaneous nonlinearity: the modulation
+    # scales the same field-dependent decay/curl coefficients the nonlinear kernel
+    # rewrote this step (static tensors when no nonlinearity is present).
+    ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
+    ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
     solver.fdtd_module.updateElectricFieldExModulated3D(
         Ex=ex,
         Hy=hy,
         Hz=hz,
-        ExDecay=solver.cex_decay,
-        ExCurl=solver.cex_curl,
+        ExDecay=ex_decay,
+        ExCurl=ex_curl,
         ModCos=solver.mod_cos_Ex,
         ModSin=solver.mod_sin_Ex,
         cosPrev=cos_prev,
@@ -552,8 +557,8 @@ def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, ti
         Ey=ey,
         Hx=hx,
         Hz=hz,
-        EyDecay=solver.cey_decay,
-        EyCurl=solver.cey_curl,
+        EyDecay=ey_decay,
+        EyCurl=ey_curl,
         ModCos=solver.mod_cos_Ey,
         ModSin=solver.mod_sin_Ey,
         cosPrev=cos_prev,
@@ -571,8 +576,8 @@ def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, ti
         Ez=ez,
         Hx=hx,
         Hy=hy,
-        EzDecay=solver.cez_decay,
-        EzCurl=solver.cez_curl,
+        EzDecay=ez_decay,
+        EzCurl=ez_curl,
         ModCos=solver.mod_cos_Ez,
         ModSin=solver.mod_sin_Ez,
         cosPrev=cos_prev,
@@ -597,12 +602,14 @@ def update_electric_fields_modulated_cpml(solver, ex, ey, ez, hx, hy, hz, time_v
 
 def update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, time_value):
     cos_prev, sin_prev, cos_next, sin_next = _modulation_phase_factors(solver, time_value)
+    ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
+    ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
     solver.fdtd_module.updateElectricFieldExCpmlModulated3D(
         Ex=ex,
         Hy=hy,
         Hz=hz,
-        ExDecay=solver.cex_decay,
-        ExCurl=solver.cex_curl,
+        ExDecay=ex_decay,
+        ExCurl=ex_curl,
         ModCos=solver.mod_cos_Ex,
         ModSin=solver.mod_sin_Ex,
         cosPrev=cos_prev,
@@ -628,8 +635,8 @@ def update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, 
         Ey=ey,
         Hx=hx,
         Hz=hz,
-        EyDecay=solver.cey_decay,
-        EyCurl=solver.cey_curl,
+        EyDecay=ey_decay,
+        EyCurl=ey_curl,
         ModCos=solver.mod_cos_Ey,
         ModSin=solver.mod_sin_Ey,
         cosPrev=cos_prev,
@@ -655,8 +662,8 @@ def update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, 
         Ez=ez,
         Hx=hx,
         Hy=hy,
-        EzDecay=solver.cez_decay,
-        EzCurl=solver.cez_curl,
+        EzDecay=ez_decay,
+        EzCurl=ez_curl,
         ModCos=solver.mod_cos_Ez,
         ModSin=solver.mod_sin_Ez,
         cosPrev=cos_prev,
@@ -691,12 +698,14 @@ def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy,
     psi_ez_x_low, psi_ez_x_high_start, psi_ez_x_high = cpml_layout_params(solver, "psi_ez_x")
     psi_ez_y_low, psi_ez_y_high_start, psi_ez_y_high = cpml_layout_params(solver, "psi_ez_y")
     cos_prev, sin_prev, cos_next, sin_next = _modulation_phase_factors(solver, time_value)
+    ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
+    ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
     solver.fdtd_module.updateElectricFieldExCpmlModulatedCompressed3D(
         Ex=ex,
         Hy=hy,
         Hz=hz,
-        ExDecay=solver.cex_decay,
-        ExCurl=solver.cex_curl,
+        ExDecay=ex_decay,
+        ExCurl=ex_curl,
         ModCos=solver.mod_cos_Ex,
         ModSin=solver.mod_sin_Ex,
         cosPrev=cos_prev,
@@ -728,8 +737,8 @@ def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy,
         Ey=ey,
         Hx=hx,
         Hz=hz,
-        EyDecay=solver.cey_decay,
-        EyCurl=solver.cey_curl,
+        EyDecay=ey_decay,
+        EyCurl=ey_curl,
         ModCos=solver.mod_cos_Ey,
         ModSin=solver.mod_sin_Ey,
         cosPrev=cos_prev,
@@ -761,8 +770,8 @@ def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy,
         Ez=ez,
         Hx=hx,
         Hy=hy,
-        EzDecay=solver.cez_decay,
-        EzCurl=solver.cez_curl,
+        EzDecay=ez_decay,
+        EzCurl=ez_curl,
         ModCos=solver.mod_cos_Ez,
         ModSin=solver.mod_sin_Ez,
         cosPrev=cos_prev,
@@ -798,6 +807,12 @@ def update_electric_fields(solver, ex, ey, ez, hx, hy, hz, *, time_value=None):
             raise RuntimeError(
                 "The time-modulated electric update requires the current step time_value."
             )
+        # Record the new-time modulation phase so a co-located dispersive medium's
+        # ADE polarization-current subtraction (applied later in the step) divides
+        # by the SAME eps_inf * m_next that the modulated curl(H) term used.
+        _, _, cos_next, sin_next = _modulation_phase_factors(solver, time_value)
+        solver._modulation_next_cos = cos_next
+        solver._modulation_next_sin = sin_next
         if solver.uses_cpml:
             update_electric_fields_modulated_cpml(solver, ex, ey, ez, hx, hy, hz, time_value)
         else:

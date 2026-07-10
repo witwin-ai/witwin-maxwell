@@ -601,14 +601,25 @@ class Material(CoreMaterial):
             raise NotImplementedError("A nonlinear Material cannot carry anisotropic tensors in v1.")
 
         if self.modulation is not None:
-            if self.is_dispersive:
-                raise NotImplementedError("A time-modulated Material cannot carry dispersive poles in v1.")
+            # A time-modulated Material may now carry dispersive poles (electric or
+            # magnetic) and the instantaneous nonlinear channels (Kerr / chi2 / TPA):
+            # the modulation scales the eps_inf background while the ADE polarization
+            # current and the field-dependent coefficients are folded through the same
+            # per-step modulation factor (electro-optic-modulator physics). Two edges
+            # remain physically out of reach for the single instantaneous-tensor path:
             if self.is_anisotropic:
-                raise NotImplementedError("A time-modulated Material cannot carry anisotropic tensors in v1.")
-            if self.is_nonlinear:
-                raise NotImplementedError("A time-modulated Material cannot carry nonlinear channels in v1.")
+                raise NotImplementedError(
+                    "A time-modulated Material cannot carry anisotropic tensors: modulating the "
+                    "crystal-frame permittivity tensor needs a per-step re-inversion of the coupled "
+                    "3x3 tensor, which the diagonalized effective-permittivity update does not provide."
+                )
             if float(self.sigma_e) != 0.0:
-                raise NotImplementedError("A time-modulated Material cannot carry electric conductivity in v1.")
+                raise NotImplementedError(
+                    "A time-modulated Material cannot carry static electric conductivity: the "
+                    "semi-implicit loss fold 0.5*sigma*dt/eps must see the modulated eps_inf*m(t), "
+                    "which the static decay coefficient does not track. Model loss with a Drude/Debye "
+                    "pole (dispersive path) instead."
+                )
 
         if self.pec:
             if (

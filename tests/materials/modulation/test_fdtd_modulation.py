@@ -61,21 +61,26 @@ def test_material_modulation_combination_guards():
 
     with pytest.raises(TypeError):
         mw.Material(eps_r=4.0, modulation="not-a-spec")
-    with pytest.raises(NotImplementedError):
-        mw.Material(
-            eps_r=4.0,
-            modulation=modulation,
-            debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-10),),
-        )
-    with pytest.raises(NotImplementedError):
+    # Modulation now composes with dispersion (electro-optic modulator in a dispersive
+    # crystal) and with the instantaneous nonlinear channels; see
+    # tests/materials/combinations/test_modulated_dispersive_nonlinear.py.
+    dispersive = mw.Material(
+        eps_r=4.0,
+        modulation=modulation,
+        debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-10),),
+    )
+    assert dispersive.is_modulated and dispersive.is_electric_dispersive
+    nonlinear = mw.Material(eps_r=4.0, modulation=modulation, kerr_chi3=1.0e-10)
+    assert nonlinear.is_modulated and nonlinear.is_nonlinear
+    # Anisotropic tensor and static conductivity remain physically out of reach for the
+    # scalar-modulated isotropic eps_inf update.
+    with pytest.raises(NotImplementedError, match="anisotropic"):
         mw.Material(
             eps_r=4.0,
             modulation=modulation,
             epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0),
         )
-    with pytest.raises(NotImplementedError):
-        mw.Material(eps_r=4.0, modulation=modulation, kerr_chi3=1.0e-10)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError, match="conductivity"):
         mw.Material(eps_r=4.0, modulation=modulation, sigma_e=1.0)
     with pytest.raises(ValueError):
         mw.Material(pec=True, modulation=modulation)
@@ -340,7 +345,11 @@ def test_fdtd_modulation_rejects_bloch_runs():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_fdtd_modulation_rejects_mixing_with_dispersive_scene():
+def test_fdtd_modulation_composes_with_dispersive_scene():
+    # A modulated slab now shares a Scene with a (disjoint) dispersive material: both
+    # feature flags stay enabled and the runtime no longer rejects the combination.
+    # The full electro-optic-modulator physics lives in
+    # tests/materials/combinations/test_modulated_dispersive_nonlinear.py.
     modulation = mw.ModulationSpec(frequency=2.5e8, amplitude=0.25)
     scene = _build_modulated_slab_scene(carrier_frequency=1.0e9, modulation=modulation)
     scene.add_structure(
@@ -349,10 +358,11 @@ def test_fdtd_modulation_rejects_mixing_with_dispersive_scene():
             material=mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=2.0e-10),
         )
     )
-    with pytest.raises(NotImplementedError, match="dispersive"):
-        mw.Simulation.fdtd(
-            scene,
-            frequencies=[1.0e9],
-            run_time=mw.TimeConfig(time_steps=8),
-            full_field_dft=False,
-        ).prepare()
+    solver = mw.Simulation.fdtd(
+        scene,
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig(time_steps=8),
+        full_field_dft=False,
+    ).prepare().solver
+    assert solver.modulation_enabled
+    assert solver.electric_dispersive_enabled
