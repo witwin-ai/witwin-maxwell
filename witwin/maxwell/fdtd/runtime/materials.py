@@ -623,6 +623,31 @@ def advance_magnetic_dispersive_state(solver):
         advance_magnetic_component_dispersive_state(solver, "Hz", solver.Hz_imag, imag=True)
 
 
+def _dispersive_current_coefficient(solver, component_name, component_templates):
+    """The ``(coefficient, dt)`` pair for the subtraction ``E -= dt * J_p * coefficient``.
+
+    In the linear path the polarization current is divided by the static
+    permittivity (``coefficient = 1/eps_lin``, ``dt = solver.dt``). When an
+    instantaneous nonlinearity is active the same Yee edge's displacement-current
+    term in the E update is scaled by the field-dependent ``c*_curl_dynamic``
+    coefficient (``external * (dt / eps_eff) / (1 + half)``); reusing that
+    coefficient here (with ``dt = 1``) subtracts the ADE current against the SAME
+    effective permittivity the ``curl(H)`` term saw this step, so the
+    instantaneous-nonlinear index shift and the dispersive response stay mutually
+    consistent (dividing the ADE current by ``eps_lin`` instead would detune the
+    dispersion by the nonlinear index shift). In a purely dispersive cell the
+    dynamic curl reduces to ``dt / eps_lin``, so the linear path is unchanged.
+    """
+    if getattr(solver, "nonlinear_enabled", False):
+        dynamic_curl = {
+            "Ex": solver.cex_curl_dynamic,
+            "Ey": solver.cey_curl_dynamic,
+            "Ez": solver.cez_curl_dynamic,
+        }[component_name]
+        return dynamic_curl, 1.0
+    return component_templates["inv_eps"], solver.dt
+
+
 def apply_component_dispersive_currents(solver, component_name, field, *, imag=False):
     if not solver.electric_dispersive_enabled:
         return
@@ -631,7 +656,7 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
     if not component_templates:
         return
     launch_shape = solver._field_launch_shapes[component_name]
-    inv_eps = component_templates["inv_eps"]
+    inv_eps, apply_dt = _dispersive_current_coefficient(solver, component_name, component_templates)
 
     for entry in component_templates["debye"]:
         current = entry["current_imag"] if imag else entry["current"]
@@ -639,7 +664,7 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
             ElectricField=field,
             PolarizationCurrent=current,
             InvPermittivity=inv_eps,
-            dt=solver.dt,
+            dt=apply_dt,
         ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
 
     for entry in component_templates["drude"]:
@@ -648,7 +673,7 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
             ElectricField=field,
             PolarizationCurrent=current,
             InvPermittivity=inv_eps,
-            dt=solver.dt,
+            dt=apply_dt,
         ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
 
     for entry in component_templates["lorentz"]:
@@ -657,7 +682,7 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
             ElectricField=field,
             PolarizationCurrent=current,
             InvPermittivity=inv_eps,
-            dt=solver.dt,
+            dt=apply_dt,
         ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
 
 

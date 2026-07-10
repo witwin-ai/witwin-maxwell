@@ -91,13 +91,17 @@ def test_material_composes_two_photon_absorption():
     assert explicit.tpa_sigma_scale == pytest.approx(expected_explicit, rel=1.0e-9)
 
 
-def test_nonlinear_material_rejects_dispersion_and_anisotropy_in_same_material():
-    with pytest.raises(NotImplementedError, match="nonlinear Material"):
-        mw.Material(
-            eps_r=2.25,
-            nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-6),
-            debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-9),),
-        )
+def test_nonlinear_material_composes_dispersion_but_rejects_anisotropy_in_same_material():
+    # Same-material nonlinearity + electric dispersion is now supported (chi2 SHG
+    # needs the dispersion to set the phase-matching between w and 2w).
+    dispersive_nonlinear = mw.Material(
+        eps_r=2.25,
+        nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-6),
+        debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-9),),
+    )
+    assert dispersive_nonlinear.is_nonlinear
+    assert dispersive_nonlinear.is_electric_dispersive
+    # A nonlinear anisotropic tensor still needs a coupled tensor update.
     with pytest.raises(NotImplementedError, match="nonlinear Material"):
         mw.Material(
             eps_r=2.25,

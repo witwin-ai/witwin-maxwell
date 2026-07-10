@@ -514,14 +514,6 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
         (
             lambda: mw.Material(
                 eps_r=2.0,
-                debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-9),),
-                kerr_chi3=1.0e-10,
-            ),
-            "nonlinear Material cannot carry dispersive poles",
-        ),
-        (
-            lambda: mw.Material(
-                eps_r=2.0,
                 epsilon_tensor=mw.DiagonalTensor3(2.0, 2.5, 3.0),
                 kerr_chi3=1.0e-10,
             ),
@@ -532,6 +524,30 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
 def test_medium_rejects_unsupported_tensor_and_nonlinear_combinations(factory, message):
     with pytest.raises(NotImplementedError, match=message):
         factory()
+
+
+def test_nonlinear_material_composes_with_electric_dispersion():
+    """chi2/chi3 nonlinearity and electric poles now coexist in one Material.
+
+    Second-harmonic phase matching needs the same material to carry both the
+    instantaneous nonlinearity and the dispersion that sets ``n(w)`` vs
+    ``n(2w)``; the construction guard that previously forbade this is lifted.
+    """
+    material = mw.Material(
+        eps_r=2.0,
+        debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-9),),
+        kerr_chi3=1.0e-10,
+    )
+    assert material.is_nonlinear
+    assert material.is_electric_dispersive
+
+    chi2_material = mw.Material(
+        eps_r=2.25,
+        lorentz_poles=(mw.LorentzPole(delta_eps=1.5, resonance_frequency=1.2e9, gamma=1.0e7),),
+        nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-6),
+    )
+    assert chi2_material.is_nonlinear
+    assert chi2_material.is_electric_dispersive
 
 
 def test_diagonal_anisotropic_electric_dispersion_composes_per_axis():

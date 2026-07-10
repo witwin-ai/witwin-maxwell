@@ -93,6 +93,21 @@ def _unsupported_adjoint_medium(scene):
                 "(chi3/chi2/TPA) media in the same material; the nonlinear dynamic-curl replay "
                 "does not carry the static semi-implicit conduction-loss coefficient."
             )
+        if getattr(material, "is_nonlinear", False) and getattr(material, "is_electric_dispersive", False):
+            # The forward run subtracts the ADE polarization current against the
+            # field-dependent effective permittivity that the instantaneous
+            # nonlinearity produces (the dynamic curl coefficient), while the
+            # reverse replay divides that current by the static linear
+            # permittivity; the two disagree by the nonlinear index shift, so the
+            # gradient through a same-material chi2/chi3 + dispersive medium would
+            # not match its forward. Keep the forward composition (SHG phase
+            # matching) usable while its adjoint pullback is unresolved.
+            return (
+                "FDTD adjoint does not support instantaneous nonlinear (chi2/chi3/TPA) media "
+                "combined with electric dispersion in the same material; the reverse ADE "
+                "current is divided by the static permittivity, not the field-dependent "
+                "effective permittivity the forward nonlinear update uses."
+            )
         if getattr(material, "is_anisotropic", False):
             # Diagonal epsilon anisotropy maps onto the per-axis eps_Ex/Ey/Ez
             # coefficient layout, and full 3x3 epsilon is now differentiable too:

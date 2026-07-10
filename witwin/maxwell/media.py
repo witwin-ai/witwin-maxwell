@@ -595,8 +595,6 @@ class Material(CoreMaterial):
                 "DiagonalTensor3 permittivity for anisotropic dispersion, or keep the Tensor3x3 "
                 "permittivity non-dispersive."
             )
-        if self.is_nonlinear and self.is_dispersive:
-            raise NotImplementedError("A nonlinear Material cannot carry dispersive poles in v1.")
         if self.is_nonlinear and self.is_anisotropic:
             raise NotImplementedError("A nonlinear Material cannot carry anisotropic tensors in v1.")
 
