@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 import os
@@ -27,6 +27,7 @@ from ..checkpoint import (
     clone_checkpoint_tensors,
     dispersive_state_name,
     iter_dispersive_state_specs,
+    iter_magnetic_dispersive_state_specs,
     validate_checkpoint_state,
 )
 from ..excitation.injection import initialize_source_terms
@@ -1334,9 +1335,9 @@ def _update_lorentz_state(field, polarization, current, *, drive, decay, restori
     return next_polarization, next_current
 
 
-def _advance_dispersive_state(solver, state):
+def _advance_ade_state(solver, state, specs):
     updated = {}
-    for component_name, model_name, index, _tensor_names, entry in iter_dispersive_state_specs(solver) or ():
+    for component_name, model_name, index, _tensor_names, entry in specs or ():
         field = state[component_name]
         if model_name == "debye":
             polarization_name = dispersive_state_name(component_name, model_name, index, "polarization")
@@ -1374,6 +1375,42 @@ def _advance_dispersive_state(solver, state):
         )
         updated[polarization_name] = polarization
         updated[current_name] = current
+    return updated
+
+
+def _advance_dispersive_state(solver, state):
+    return _advance_ade_state(solver, state, iter_dispersive_state_specs(solver))
+
+
+def _advance_magnetic_dispersive_state(solver, state):
+    return _advance_ade_state(solver, state, iter_magnetic_dispersive_state_specs(solver))
+
+
+def _magnetic_inverse_permeabilities(solver):
+    templates = getattr(solver, "_magnetic_dispersive_templates", {}) or {}
+    return {
+        component_name: templates[component_name]["inv_mu"]
+        for component_name in ("Hx", "Hy", "Hz")
+        if component_name in templates
+    }
+
+
+def _apply_magnetic_dispersive_corrections(solver, magnetic_fields, magnetic_dispersive_state):
+    """H -= dt * J_m / mu with the same edge-averaged inv_mu the runtime kernels use.
+
+    mu carries no gradient channel (it is a constant coefficient tensor in the
+    adjoint), matching the forward `applyPolarizationCurrent3D` launches exactly.
+    """
+    if not getattr(solver, "magnetic_dispersive_enabled", False):
+        return magnetic_fields
+
+    inv_mu = _magnetic_inverse_permeabilities(solver)
+    updated = dict(magnetic_fields)
+    for component_name, model_name, index, _tensor_names, _entry in iter_magnetic_dispersive_state_specs(solver) or ():
+        current_name = dispersive_state_name(component_name, model_name, index, "current")
+        updated[component_name] = updated[component_name] - float(solver.dt) * magnetic_dispersive_state[
+            current_name
+        ] * inv_mu[component_name]
     return updated
 
 
@@ -1441,27 +1478,26 @@ def _reverse_dispersive_corrections(
     return electric_source_adjoint, dispersive_output_adjoint, grad_eps_by_field, source_adjoint_state
 
 
-def _reverse_dispersive_state_python_reference(solver, forward_state, dispersive_output_adjoint):
-    electric_prev_adjoint = {
-        "Ex": torch.zeros_like(forward_state["Ex"]),
-        "Ey": torch.zeros_like(forward_state["Ey"]),
-        "Ez": torch.zeros_like(forward_state["Ez"]),
+def _reverse_ade_state_python_reference(solver, forward_state, output_adjoint, *, specs, component_names, state_names):
+    field_prev_adjoint = {
+        name: torch.zeros_like(forward_state[name])
+        for name in component_names
     }
     pre_step_dispersive_adjoint = {
         name: torch.zeros_like(forward_state[name])
-        for name in checkpoint_schema(solver).dispersive_state_names
+        for name in state_names
     }
     dt = float(solver.dt)
 
-    for component_name, model_name, index, _tensor_names, entry in iter_dispersive_state_specs(solver) or ():
+    for component_name, model_name, index, _tensor_names, entry in specs or ():
         drive = entry["drive"]
         if model_name == "debye":
             polarization_name = dispersive_state_name(component_name, model_name, index, "polarization")
             current_name = dispersive_state_name(component_name, model_name, index, "current")
-            adj_polarization_post = dispersive_output_adjoint[polarization_name]
-            adj_current_post = dispersive_output_adjoint[current_name]
+            adj_polarization_post = output_adjoint[polarization_name]
+            adj_current_post = output_adjoint[current_name]
             adj_polarization_internal = adj_polarization_post + adj_current_post / dt
-            electric_prev_adjoint[component_name] = electric_prev_adjoint[component_name] + drive * adj_polarization_internal
+            field_prev_adjoint[component_name] = field_prev_adjoint[component_name] + drive * adj_polarization_internal
             pre_step_dispersive_adjoint[polarization_name] = (
                 pre_step_dispersive_adjoint[polarization_name]
                 + float(entry["decay"]) * adj_polarization_internal
@@ -1471,8 +1507,8 @@ def _reverse_dispersive_state_python_reference(solver, forward_state, dispersive
 
         if model_name == "drude":
             current_name = dispersive_state_name(component_name, model_name, index, "current")
-            adj_current_post = dispersive_output_adjoint[current_name]
-            electric_prev_adjoint[component_name] = electric_prev_adjoint[component_name] + drive * adj_current_post
+            adj_current_post = output_adjoint[current_name]
+            field_prev_adjoint[component_name] = field_prev_adjoint[component_name] + drive * adj_current_post
             pre_step_dispersive_adjoint[current_name] = (
                 pre_step_dispersive_adjoint[current_name] + float(entry["decay"]) * adj_current_post
             )
@@ -1480,10 +1516,10 @@ def _reverse_dispersive_state_python_reference(solver, forward_state, dispersive
 
         polarization_name = dispersive_state_name(component_name, model_name, index, "polarization")
         current_name = dispersive_state_name(component_name, model_name, index, "current")
-        adj_polarization_post = dispersive_output_adjoint[polarization_name]
-        adj_current_post = dispersive_output_adjoint[current_name]
+        adj_polarization_post = output_adjoint[polarization_name]
+        adj_current_post = output_adjoint[current_name]
         adj_current_internal = adj_current_post + dt * adj_polarization_post
-        electric_prev_adjoint[component_name] = electric_prev_adjoint[component_name] + drive * adj_current_internal
+        field_prev_adjoint[component_name] = field_prev_adjoint[component_name] + drive * adj_current_internal
         pre_step_dispersive_adjoint[polarization_name] = (
             pre_step_dispersive_adjoint[polarization_name]
             + adj_polarization_post
@@ -1493,7 +1529,50 @@ def _reverse_dispersive_state_python_reference(solver, forward_state, dispersive
             pre_step_dispersive_adjoint[current_name] + float(entry["decay"]) * adj_current_internal
         )
 
-    return electric_prev_adjoint, pre_step_dispersive_adjoint
+    return field_prev_adjoint, pre_step_dispersive_adjoint
+
+
+def _reverse_dispersive_state_python_reference(solver, forward_state, dispersive_output_adjoint):
+    return _reverse_ade_state_python_reference(
+        solver,
+        forward_state,
+        dispersive_output_adjoint,
+        specs=iter_dispersive_state_specs(solver),
+        component_names=("Ex", "Ey", "Ez"),
+        state_names=checkpoint_schema(solver).dispersive_state_names,
+    )
+
+
+def _reverse_magnetic_dispersive_state_python_reference(solver, forward_state, magnetic_output_adjoint):
+    return _reverse_ade_state_python_reference(
+        solver,
+        forward_state,
+        magnetic_output_adjoint,
+        specs=iter_magnetic_dispersive_state_specs(solver),
+        component_names=("Hx", "Hy", "Hz"),
+        state_names=checkpoint_schema(solver).magnetic_dispersive_state_names,
+    )
+
+
+def _reverse_magnetic_dispersive_corrections(solver, adjoint_state, magnetic_field_adjoint):
+    """VJP of ``H -= dt * J_m * inv_mu`` given the adjoint of the corrected H.
+
+    ``inv_mu`` is a constant coefficient tensor (there is no magnetic material
+    gradient channel), so the correction only seeds the post-step magnetic
+    dispersive-state adjoint; the field adjoint itself passes through unchanged.
+    """
+    output_adjoint = {
+        name: adjoint_state[name].detach().clone()
+        for name in checkpoint_schema(solver).magnetic_dispersive_state_names
+    }
+    inv_mu = _magnetic_inverse_permeabilities(solver)
+    dt = float(solver.dt)
+    for component_name, model_name, index, _tensor_names, _entry in iter_magnetic_dispersive_state_specs(solver) or ():
+        current_name = dispersive_state_name(component_name, model_name, index, "current")
+        output_adjoint[current_name] = (
+            output_adjoint[current_name] - dt * magnetic_field_adjoint[component_name] * inv_mu[component_name]
+        )
+    return output_adjoint
 
 
 def _broadcast_vector(vector: torch.Tensor, axis: int) -> torch.Tensor:
@@ -1979,6 +2058,84 @@ def _update_mixed_bloch_cpml_electric_fields(solver, state, magnetic_fields, *, 
     return electric_fields, electric_cpml_state
 
 
+def _forward_magnetic_fields(solver, state, *, time_value, resolved_source_terms):
+    """Recompute the post-source real magnetic fields of one forward step.
+
+    Mirrors the magnetic half of ``_step_state`` for real fields (standard or
+    CPML, selected by the solver's psi/coefficient attributes) and applies the
+    resolved magnetic source terms. Used by the reverse steps, which need the
+    same mid-step H the electric update consumed.
+    """
+    uses_cpml = getattr(solver, "uses_cpml", False)
+
+    d_ez_dy = _forward_diff(state["Ez"], axis=1, inv_delta=solver.inv_dy_h)
+    d_ey_dz = _forward_diff(state["Ey"], axis=2, inv_delta=solver.inv_dz_h)
+    hx, _, _ = _update_magnetic_component(
+        state["Hx"],
+        d_pos=d_ez_dy,
+        d_neg=d_ey_dz,
+        decay=solver.chx_decay,
+        curl=solver.chx_curl,
+        psi_pos=state.get("psi_hx_y") if uses_cpml else None,
+        psi_neg=state.get("psi_hx_z") if uses_cpml else None,
+        b_pos=getattr(solver, "cpml_b_h_y", None),
+        c_pos=getattr(solver, "cpml_c_h_y", None),
+        inv_kappa_pos=getattr(solver, "cpml_inv_kappa_h_y", None),
+        b_neg=getattr(solver, "cpml_b_h_z", None),
+        c_neg=getattr(solver, "cpml_c_h_z", None),
+        inv_kappa_neg=getattr(solver, "cpml_inv_kappa_h_z", None),
+        axis_pos=1,
+        axis_neg=2,
+    )
+
+    d_ex_dz = _forward_diff(state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
+    d_ez_dx = _forward_diff(state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
+    hy, _, _ = _update_magnetic_component(
+        state["Hy"],
+        d_pos=d_ex_dz,
+        d_neg=d_ez_dx,
+        decay=solver.chy_decay,
+        curl=solver.chy_curl,
+        psi_pos=state.get("psi_hy_z") if uses_cpml else None,
+        psi_neg=state.get("psi_hy_x") if uses_cpml else None,
+        b_pos=getattr(solver, "cpml_b_h_z", None),
+        c_pos=getattr(solver, "cpml_c_h_z", None),
+        inv_kappa_pos=getattr(solver, "cpml_inv_kappa_h_z", None),
+        b_neg=getattr(solver, "cpml_b_h_x", None),
+        c_neg=getattr(solver, "cpml_c_h_x", None),
+        inv_kappa_neg=getattr(solver, "cpml_inv_kappa_h_x", None),
+        axis_pos=2,
+        axis_neg=0,
+    )
+
+    d_ey_dx = _forward_diff(state["Ey"], axis=0, inv_delta=solver.inv_dx_h)
+    d_ex_dy = _forward_diff(state["Ex"], axis=1, inv_delta=solver.inv_dy_h)
+    hz, _, _ = _update_magnetic_component(
+        state["Hz"],
+        d_pos=d_ey_dx,
+        d_neg=d_ex_dy,
+        decay=solver.chz_decay,
+        curl=solver.chz_curl,
+        psi_pos=state.get("psi_hz_x") if uses_cpml else None,
+        psi_neg=state.get("psi_hz_y") if uses_cpml else None,
+        b_pos=getattr(solver, "cpml_b_h_x", None),
+        c_pos=getattr(solver, "cpml_c_h_x", None),
+        inv_kappa_pos=getattr(solver, "cpml_inv_kappa_h_x", None),
+        b_neg=getattr(solver, "cpml_b_h_y", None),
+        c_neg=getattr(solver, "cpml_c_h_y", None),
+        inv_kappa_neg=getattr(solver, "cpml_inv_kappa_h_y", None),
+        axis_pos=0,
+        axis_neg=1,
+    )
+
+    return _apply_resolved_magnetic_source_terms(
+        {"Hx": hx, "Hy": hy, "Hz": hz},
+        solver=solver,
+        time_value=time_value,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+
 def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
     source_terms, electric_source_terms, magnetic_source_terms = _resolved_source_term_lists(
         solver,
@@ -2141,6 +2298,20 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             omega=solver.source_omega,
             time_value=time_value,
             solver=None,
+        )
+    # Magnetic ADE state advances from the pre-step H; its correction lands on
+    # the post-source H (before the electric update consumes it), matching the
+    # forward per-step kernel order.
+    magnetic_dispersive_state = _advance_magnetic_dispersive_state(solver, state)
+    if magnetic_dispersive_state:
+        if complex_fields:
+            raise NotImplementedError(
+                "FDTD adjoint replay does not support magnetic dispersive media with complex fields."
+            )
+        magnetic_fields = _apply_magnetic_dispersive_corrections(
+            solver,
+            magnetic_fields,
+            magnetic_dispersive_state,
         )
     dispersive_state = _advance_dispersive_state(solver, state)
 
@@ -2414,6 +2585,7 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
         next_state["tfsf_aux_electric"] = auxiliary_state["electric"]
         next_state["tfsf_aux_magnetic"] = auxiliary_state["magnetic"]
     next_state.update(dispersive_state)
+    next_state.update(magnetic_dispersive_state)
     return next_state
 
 

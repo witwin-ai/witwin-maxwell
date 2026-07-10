@@ -40,10 +40,6 @@ def _build_simulation(model, *, time_steps=24):
             "anisotropic magnetic \\(mu_tensor\\) media",
         ),
         (
-            mw.Material(mu_lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=1.0e9, gamma=1.0e8),)),
-            "magnetic dispersive media",
-        ),
-        (
             mw.Material(eps_r=2.0, kerr_chi3=1.0e-10),
             "Kerr nonlinear media",
         ),
@@ -87,6 +83,51 @@ def test_fdtd_gradient_bridge_accepts_diagonal_anisotropic_epsilon():
     )
 
     assert _unsupported_adjoint_medium(scene) is None
+
+
+def _magnetic_dispersive_material():
+    return mw.Material(
+        mu_lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=1.0e9, gamma=1.0e8),)
+    )
+
+
+def test_fdtd_gradient_bridge_accepts_static_magnetic_dispersive_media():
+    from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+            material=_magnetic_dispersive_material(),
+        )
+    )
+
+    assert _unsupported_adjoint_medium(scene) is None
+
+
+def test_fdtd_gradient_bridge_rejects_trainable_geometry_on_magnetic_dispersive_media():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            geometry=mw.Box(
+                position=(0.0, 0.0, 0.0),
+                size=torch.tensor([0.5, 0.5, 0.5], requires_grad=True),
+            ),
+            material=_magnetic_dispersive_material(),
+        )
+    )
+
+    bridge = object.__new__(_FDTDGradientBridge)
+    with pytest.raises(NotImplementedError, match="trainable geometry on magnetic dispersive"):
+        bridge._validate_supported_configuration(SimpleNamespace(scene=scene))
 
 
 def _fake_checkpoint_solver():
@@ -360,6 +401,92 @@ def _fake_dispersive_cpml_reverse_solver():
             ],
         },
     }
+    return SimpleNamespace(**values)
+
+
+def _magnetic_dispersive_standard_reverse_state_shapes():
+    shapes = dict(_cpml_reverse_state_shapes())
+    base = {
+        name: shapes[name]
+        for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+    }
+    base[dispersive_state_name("Hx", "debye", 0, "polarization")] = shapes["Hx"]
+    base[dispersive_state_name("Hx", "debye", 0, "current")] = shapes["Hx"]
+    base[dispersive_state_name("Hy", "drude", 0, "current")] = shapes["Hy"]
+    base[dispersive_state_name("Hz", "lorentz", 0, "polarization")] = shapes["Hz"]
+    base[dispersive_state_name("Hz", "lorentz", 0, "current")] = shapes["Hz"]
+    return base
+
+
+def _magnetic_dispersive_templates(hx_shape, hy_shape, hz_shape):
+    return {
+        "Hx": {
+            "inv_mu": torch.full(hx_shape, 1.0 / 1.8, dtype=torch.float32),
+            "debye": [
+                {
+                    "decay": 0.81,
+                    "drive": torch.full(hx_shape, 0.017, dtype=torch.float32),
+                }
+            ],
+            "drude": [],
+            "lorentz": [],
+        },
+        "Hy": {
+            "inv_mu": torch.full(hy_shape, 1.0 / 2.1, dtype=torch.float32),
+            "debye": [],
+            "drude": [
+                {
+                    "decay": 0.77,
+                    "drive": torch.full(hy_shape, 0.02, dtype=torch.float32),
+                }
+            ],
+            "lorentz": [],
+        },
+        "Hz": {
+            "inv_mu": torch.full(hz_shape, 1.0 / 1.4, dtype=torch.float32),
+            "debye": [],
+            "drude": [],
+            "lorentz": [
+                {
+                    "decay": 0.9,
+                    "restoring": 0.12,
+                    "drive": torch.full(hz_shape, 0.023, dtype=torch.float32),
+                }
+            ],
+        },
+    }
+
+
+def _fake_magnetic_dispersive_standard_reverse_solver():
+    base = _fake_standard_reverse_solver()
+    values = dict(vars(base))
+    values["dispersive_enabled"] = True
+    values["magnetic_dispersive_enabled"] = True
+    values["dt"] = 0.05
+    values["_dispersive_templates"] = {}
+    values["_magnetic_dispersive_templates"] = _magnetic_dispersive_templates(
+        base.chx_decay.shape, base.chy_decay.shape, base.chz_decay.shape
+    )
+    return SimpleNamespace(**values)
+
+
+def _magnetic_dispersive_cpml_reverse_state_shapes():
+    shapes = dict(_dispersive_cpml_reverse_state_shapes())
+    shapes[dispersive_state_name("Hx", "debye", 0, "polarization")] = shapes["Hx"]
+    shapes[dispersive_state_name("Hx", "debye", 0, "current")] = shapes["Hx"]
+    shapes[dispersive_state_name("Hy", "drude", 0, "current")] = shapes["Hy"]
+    shapes[dispersive_state_name("Hz", "lorentz", 0, "polarization")] = shapes["Hz"]
+    shapes[dispersive_state_name("Hz", "lorentz", 0, "current")] = shapes["Hz"]
+    return shapes
+
+
+def _fake_magnetic_dispersive_cpml_reverse_solver():
+    base = _fake_dispersive_cpml_reverse_solver()
+    values = dict(vars(base))
+    values["magnetic_dispersive_enabled"] = True
+    values["_magnetic_dispersive_templates"] = _magnetic_dispersive_templates(
+        base.chx_decay.shape, base.chy_decay.shape, base.chz_decay.shape
+    )
     return SimpleNamespace(**values)
 
 
@@ -1035,6 +1162,69 @@ def test_reverse_step_dispersive_python_reference_matches_torch_vjp_with_source_
     assert reference.backend == "python_reference_dispersive_cpml"
     for name in forward_state:
         assert torch.allclose(reference.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
+    assert torch.allclose(reference.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
+    assert torch.allclose(reference.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
+    assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("solver_factory", "shapes_factory", "expected_backend"),
+    [
+        (
+            _fake_magnetic_dispersive_standard_reverse_solver,
+            _magnetic_dispersive_standard_reverse_state_shapes,
+            "python_reference_dispersive_standard",
+        ),
+        (
+            _fake_magnetic_dispersive_cpml_reverse_solver,
+            _magnetic_dispersive_cpml_reverse_state_shapes,
+            "python_reference_dispersive_cpml",
+        ),
+    ],
+)
+def test_reverse_step_magnetic_dispersive_python_reference_matches_torch_vjp(
+    solver_factory, shapes_factory, expected_backend
+):
+    torch.manual_seed(47)
+    solver = solver_factory()
+    state_shapes = shapes_factory()
+    schema_names = checkpoint_schema(solver).state_names
+    assert tuple(state_shapes.keys()) == schema_names
+    forward_state = {
+        name: torch.randn(state_shapes[name], dtype=torch.float32)
+        for name in schema_names
+    }
+    adjoint_state = {
+        name: torch.randn_like(tensor)
+        for name, tensor in forward_state.items()
+    }
+    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
+    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
+    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
+
+    reference = adjoint_baselines.reverse_step_dispersive_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.0,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    expected = adjoint_baselines.reverse_step_torch_vjp(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.0,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+
+    assert reference.backend == expected_backend
+    assert expected.backend == "torch_vjp"
+    for name in forward_state:
+        assert torch.allclose(reference.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6), name
     assert torch.allclose(reference.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
     assert torch.allclose(reference.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
     assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)

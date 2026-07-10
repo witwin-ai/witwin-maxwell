@@ -51,6 +51,18 @@ def iter_dispersive_state_specs(solver):
                 yield component_name, model_name, index, tensor_names, entry
 
 
+def iter_magnetic_dispersive_state_specs(solver):
+    if not getattr(solver, "magnetic_dispersive_enabled", False):
+        return
+    templates = getattr(solver, "_magnetic_dispersive_templates", {})
+    for component_name in ("Hx", "Hy", "Hz"):
+        component_templates = templates.get(component_name, {})
+        for model_name in ("debye", "drude", "lorentz"):
+            tensor_names = _DISPERSIVE_STATE_TENSORS[model_name]
+            for index, entry in enumerate(component_templates.get(model_name, ())):
+                yield component_name, model_name, index, tensor_names, entry
+
+
 @dataclass(frozen=True)
 class FDTDCheckpointSchema:
     version: int
@@ -59,6 +71,7 @@ class FDTDCheckpointSchema:
     cpml_state_names: tuple[str, ...]
     tfsf_auxiliary_state_names: tuple[str, ...]
     dispersive_state_names: tuple[str, ...]
+    magnetic_dispersive_state_names: tuple[str, ...] = ()
 
     @property
     def state_names(self) -> tuple[str, ...]:
@@ -68,6 +81,7 @@ class FDTDCheckpointSchema:
             + self.cpml_state_names
             + self.tfsf_auxiliary_state_names
             + self.dispersive_state_names
+            + self.magnetic_dispersive_state_names
         )
 
 
@@ -90,6 +104,13 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         for tensor_name in tensor_names:
             dispersive_state_names.append(dispersive_state_name(component_name, model_name, index, tensor_name))
 
+    magnetic_dispersive_state_names = []
+    for component_name, model_name, index, tensor_names, _entry in iter_magnetic_dispersive_state_specs(solver) or ():
+        for tensor_name in tensor_names:
+            magnetic_dispersive_state_names.append(
+                dispersive_state_name(component_name, model_name, index, tensor_name)
+            )
+
     return FDTDCheckpointSchema(
         version=_CHECKPOINT_SCHEMA_VERSION,
         field_names=_FIELD_STATE_NAMES,
@@ -97,6 +118,7 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         cpml_state_names=tuple(cpml_state_names),
         tfsf_auxiliary_state_names=tuple(tfsf_auxiliary_state_names),
         dispersive_state_names=tuple(dispersive_state_names),
+        magnetic_dispersive_state_names=tuple(magnetic_dispersive_state_names),
     )
 
 
@@ -158,6 +180,11 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
             tensors["tfsf_aux_electric"] = auxiliary_grid.electric.detach().clone()
             tensors["tfsf_aux_magnetic"] = auxiliary_grid.magnetic.detach().clone()
     for component_name, model_name, index, tensor_names, entry in iter_dispersive_state_specs(solver) or ():
+        for tensor_name in tensor_names:
+            tensors[dispersive_state_name(component_name, model_name, index, tensor_name)] = (
+                entry[tensor_name].detach().clone()
+            )
+    for component_name, model_name, index, tensor_names, entry in iter_magnetic_dispersive_state_specs(solver) or ():
         for tensor_name in tensor_names:
             tensors[dispersive_state_name(component_name, model_name, index, tensor_name)] = (
                 entry[tensor_name].detach().clone()

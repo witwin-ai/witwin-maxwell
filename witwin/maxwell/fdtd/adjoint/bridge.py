@@ -41,6 +41,16 @@ def _material_has_conductivity(material) -> bool:
     return False
 
 
+def _structure_has_trainable_geometry(structure) -> bool:
+    geometry = getattr(structure, "geometry", None)
+    if geometry is None:
+        return False
+    return any(
+        isinstance(value, torch.Tensor) and value.requires_grad
+        for value in vars(geometry).values()
+    )
+
+
 def _unsupported_adjoint_medium(scene):
     for structure in getattr(scene, "structures", ()):
         material = getattr(structure, "material", None)
@@ -60,8 +70,15 @@ def _unsupported_adjoint_medium(scene):
                 return "FDTD adjoint does not support full (off-diagonal) anisotropic media yet."
             if getattr(material, "mu_tensor", None) is not None:
                 return "FDTD adjoint does not support anisotropic magnetic (mu_tensor) media yet."
-        if getattr(material, "is_magnetic_dispersive", False):
-            return "FDTD adjoint does not support magnetic dispersive media yet."
+        if getattr(material, "is_magnetic_dispersive", False) and _structure_has_trainable_geometry(structure):
+            # The reverse step models static magnetic ADE poles, but there is no
+            # mu-side material gradient channel, so a trainable geometry on a
+            # magnetic-dispersive structure would silently drop the pole-weight
+            # sensitivity.
+            return (
+                "FDTD adjoint does not support trainable geometry on magnetic dispersive "
+                "structures (no mu gradient channel) yet."
+            )
         if getattr(material, "is_nonlinear", False):
             return "FDTD adjoint does not support Kerr nonlinear media yet."
         if getattr(material, "is_modulated", False):
@@ -167,6 +184,7 @@ class _FDTDGradientBridge:
                 checkpoints.append(capture_checkpoint_state(solver, step=step_index))
 
             time_value = step_index * solver.dt
+            solver._advance_magnetic_dispersive_state()
             solver._update_magnetic_fields(solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
             if has_complex_fields(solver):
                 solver._update_magnetic_fields(
@@ -184,6 +202,7 @@ class _FDTDGradientBridge:
                 from ..excitation import inject_magnetic_surface_source_terms
 
                 inject_magnetic_surface_source_terms(solver, time_value=time_value)
+            solver._apply_magnetic_dispersive_corrections()
 
             solver._advance_dispersive_state()
             if has_complex_fields(solver):

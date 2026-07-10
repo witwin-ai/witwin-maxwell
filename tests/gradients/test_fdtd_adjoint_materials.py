@@ -226,6 +226,82 @@ def test_scene_with_diagonal_anisotropic_medium_gradient_matches_fd():
     )
 
 
+# ---------------------------------------------------------------------------
+# Magnetic dispersive media
+# ---------------------------------------------------------------------------
+
+
+class _MagneticDispersiveDensityScene(mw.SceneModule):
+    """Trainable design density next to a static mu-Lorentz slab.
+
+    Exercises the magnetic ADE mirror of the dispersive reverse backend: the
+    per-step H corrections and the magnetic pole state must be reversed for
+    the design-density eps gradients to be correct.
+    """
+
+    def __init__(self, init=0.0):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((2, 2, 2), float(init), device="cuda"))
+
+    def to_scene(self):
+        density = torch.sigmoid(self.logits)
+        scene = mw.Scene(
+            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+            grid=mw.GridSpec.uniform(0.12),
+            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+            device="cuda",
+        )
+        scene.add_structure(
+            mw.Structure(
+                name="mu_lorentz_slab",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+                material=mw.Material(
+                    mu_lorentz_poles=(
+                        mw.LorentzPole(delta_eps=1.0, resonance_frequency=1.5e9, gamma=3.0e8),
+                    ),
+                ),
+            )
+        )
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+        scene.add_source(
+            mw.PointDipole(
+                position=(0.0, 0.0, -0.18),
+                polarization="Ez",
+                width=0.04,
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+            )
+        )
+        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+        return scene
+
+
+@_CUDA
+def test_scene_with_magnetic_dispersive_medium_gradient_matches_fd():
+    """Per-element FD validation of design gradients in a scene containing a
+    static magnetic-dispersive (mu-Lorentz) slab (previously rejected)."""
+    model = _MagneticDispersiveDensityScene(init=0.0).cuda()
+
+    def loss_fn():
+        result = _build_sim(model, time_steps=200).run()
+        return _abs2(result.monitor("probe")["data"])
+
+    backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn)
+
+    assert (fd_grad != 0).any(), "FD gradient is identically zero; test setup is broken."
+    scale = torch.abs(fd_grad).max().item()
+    assert torch.allclose(backward_grad, fd_grad, rtol=3e-2, atol=scale * 5e-3), (
+        f"backward={backward_grad.flatten().tolist()}, fd={fd_grad.flatten().tolist()}"
+    )
+
+
 @_CUDA
 def test_anisotropic_geometry_gradient_is_axis_distinct():
     """Trainable geometry of a diagonal-anisotropic box must receive non-zero,

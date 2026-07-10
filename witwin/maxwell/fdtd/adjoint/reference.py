@@ -11,10 +11,13 @@ from .core import (
     _accumulate_bloch_backward_diff_adjoint,
     _accumulate_forward_diff_adjoint,
     _advance_dispersive_state,
+    _advance_magnetic_dispersive_state,
+    _apply_magnetic_dispersive_corrections,
     _apply_resolved_magnetic_source_terms,
     _backward_diff,
     _bloch_backward_diff,
     _forward_diff,
+    _forward_magnetic_fields,
     _reverse_dispersive_corrections,
     _reverse_dispersive_state_python_reference,
     _reverse_electric_component_bloch,
@@ -22,6 +25,8 @@ from .core import (
     _reverse_electric_component_standard,
     _reverse_magnetic_component_cpml,
     _reverse_magnetic_component_standard,
+    _reverse_magnetic_dispersive_corrections,
+    _reverse_magnetic_dispersive_state_python_reference,
     _reverse_tfsf_auxiliary_state_python_reference,
     _tfsf_magnetic_source_terms,
     _update_magnetic_component,
@@ -48,50 +53,15 @@ def reverse_step_standard_python_reference(
     eps_ey,
     eps_ez,
     resolved_source_terms=None,
+    magnetic_fields=None,
 ):
-    d_ez_dy = _forward_diff(forward_state["Ez"], axis=1, inv_delta=solver.inv_dy_h)
-    d_ey_dz = _forward_diff(forward_state["Ey"], axis=2, inv_delta=solver.inv_dz_h)
-    hx, _, _ = _update_magnetic_component(
-        forward_state["Hx"],
-        d_pos=d_ez_dy,
-        d_neg=d_ey_dz,
-        decay=solver.chx_decay,
-        curl=solver.chx_curl,
-        axis_pos=1,
-        axis_neg=2,
-    )
-
-    d_ex_dz = _forward_diff(forward_state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
-    d_ez_dx = _forward_diff(forward_state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
-    hy, _, _ = _update_magnetic_component(
-        forward_state["Hy"],
-        d_pos=d_ex_dz,
-        d_neg=d_ez_dx,
-        decay=solver.chy_decay,
-        curl=solver.chy_curl,
-        axis_pos=2,
-        axis_neg=0,
-    )
-
-    d_ey_dx = _forward_diff(forward_state["Ey"], axis=0, inv_delta=solver.inv_dx_h)
-    d_ex_dy = _forward_diff(forward_state["Ex"], axis=1, inv_delta=solver.inv_dy_h)
-    hz, _, _ = _update_magnetic_component(
-        forward_state["Hz"],
-        d_pos=d_ey_dx,
-        d_neg=d_ex_dy,
-        decay=solver.chz_decay,
-        curl=solver.chz_curl,
-        axis_pos=0,
-        axis_neg=1,
-    )
-
-    magnetic_fields = {"Hx": hx, "Hy": hy, "Hz": hz}
-    magnetic_fields = _apply_resolved_magnetic_source_terms(
-        magnetic_fields,
-        solver=solver,
-        time_value=time_value,
-        resolved_source_terms=resolved_source_terms,
-    )
+    if magnetic_fields is None:
+        magnetic_fields = _forward_magnetic_fields(
+            solver,
+            forward_state,
+            time_value=time_value,
+            resolved_source_terms=resolved_source_terms,
+        )
     grad_eps_ex = torch.zeros_like(eps_ex)
     grad_eps_ey = torch.zeros_like(eps_ey)
     grad_eps_ez = torch.zeros_like(eps_ez)
@@ -531,6 +501,22 @@ def reverse_step_dispersive_python_reference(
     adjusted_adjoint_state = dict(adjoint_state)
     adjusted_adjoint_state.update(electric_source_adjoint)
 
+    # Magnetic ADE mirror: the corrected mid-step H is what the electric update
+    # consumed, so recompute it once here and hand it to the base reverse.
+    magnetic_dispersive_state = _advance_magnetic_dispersive_state(solver, forward_state)
+    magnetic_fields = None
+    if magnetic_dispersive_state:
+        magnetic_fields = _apply_magnetic_dispersive_corrections(
+            solver,
+            _forward_magnetic_fields(
+                solver,
+                forward_state,
+                time_value=time_value,
+                resolved_source_terms=resolved_source_terms,
+            ),
+            magnetic_dispersive_state,
+        )
+
     if solver.uses_cpml:
         base_result = reverse_step_cpml_python_reference(
             solver,
@@ -541,6 +527,7 @@ def reverse_step_dispersive_python_reference(
             eps_ey=eps_ey,
             eps_ez=eps_ez,
             resolved_source_terms=resolved_source_terms,
+            magnetic_fields=magnetic_fields,
         )
         backend = "python_reference_dispersive_cpml"
     else:
@@ -553,6 +540,7 @@ def reverse_step_dispersive_python_reference(
             eps_ey=eps_ey,
             eps_ez=eps_ez,
             resolved_source_terms=resolved_source_terms,
+            magnetic_fields=magnetic_fields,
         )
         backend = "python_reference_dispersive_standard"
 
@@ -569,6 +557,26 @@ def reverse_step_dispersive_python_reference(
         pre_step_adjoint[component_name] = pre_step_adjoint[component_name] + grad
     for name, grad in pre_step_dispersive_adjoint.items():
         pre_step_adjoint[name] = pre_step_adjoint[name] + grad
+
+    if magnetic_dispersive_state:
+        # The base reverse's magnetic_output_adjoint is the adjoint of the
+        # corrected H (direct post-step seed + electric-update contribution);
+        # the correction VJP seeds the post-step magnetic dispersive currents
+        # and the state reversal propagates them to the pre-step H and state.
+        magnetic_output_adjoint = _reverse_magnetic_dispersive_corrections(
+            solver,
+            adjoint_state,
+            base_result.magnetic_output_adjoint,
+        )
+        magnetic_prev_adjoint, pre_step_magnetic_adjoint = _reverse_magnetic_dispersive_state_python_reference(
+            solver,
+            forward_state,
+            magnetic_output_adjoint,
+        )
+        for component_name, grad in magnetic_prev_adjoint.items():
+            pre_step_adjoint[component_name] = pre_step_adjoint[component_name] + grad
+        for name, grad in pre_step_magnetic_adjoint.items():
+            pre_step_adjoint[name] = pre_step_adjoint[name] + grad
 
     return _ReverseStepResult(
         pre_step_adjoint={name: tensor.detach() for name, tensor in pre_step_adjoint.items()},
@@ -590,74 +598,15 @@ def reverse_step_cpml_python_reference(
     eps_ey,
     eps_ez,
     resolved_source_terms=None,
+    magnetic_fields=None,
 ):
-    d_ez_dy = _forward_diff(forward_state["Ez"], axis=1, inv_delta=solver.inv_dy_h)
-    d_ey_dz = _forward_diff(forward_state["Ey"], axis=2, inv_delta=solver.inv_dz_h)
-    hx, _, _ = _update_magnetic_component(
-        forward_state["Hx"],
-        d_pos=d_ez_dy,
-        d_neg=d_ey_dz,
-        decay=solver.chx_decay,
-        curl=solver.chx_curl,
-        psi_pos=forward_state["psi_hx_y"],
-        psi_neg=forward_state["psi_hx_z"],
-        b_pos=solver.cpml_b_h_y,
-        c_pos=solver.cpml_c_h_y,
-        inv_kappa_pos=solver.cpml_inv_kappa_h_y,
-        b_neg=solver.cpml_b_h_z,
-        c_neg=solver.cpml_c_h_z,
-        inv_kappa_neg=solver.cpml_inv_kappa_h_z,
-        axis_pos=1,
-        axis_neg=2,
-    )
-
-    d_ex_dz = _forward_diff(forward_state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
-    d_ez_dx = _forward_diff(forward_state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
-    hy, _, _ = _update_magnetic_component(
-        forward_state["Hy"],
-        d_pos=d_ex_dz,
-        d_neg=d_ez_dx,
-        decay=solver.chy_decay,
-        curl=solver.chy_curl,
-        psi_pos=forward_state["psi_hy_z"],
-        psi_neg=forward_state["psi_hy_x"],
-        b_pos=solver.cpml_b_h_z,
-        c_pos=solver.cpml_c_h_z,
-        inv_kappa_pos=solver.cpml_inv_kappa_h_z,
-        b_neg=solver.cpml_b_h_x,
-        c_neg=solver.cpml_c_h_x,
-        inv_kappa_neg=solver.cpml_inv_kappa_h_x,
-        axis_pos=2,
-        axis_neg=0,
-    )
-
-    d_ey_dx = _forward_diff(forward_state["Ey"], axis=0, inv_delta=solver.inv_dx_h)
-    d_ex_dy = _forward_diff(forward_state["Ex"], axis=1, inv_delta=solver.inv_dy_h)
-    hz, _, _ = _update_magnetic_component(
-        forward_state["Hz"],
-        d_pos=d_ey_dx,
-        d_neg=d_ex_dy,
-        decay=solver.chz_decay,
-        curl=solver.chz_curl,
-        psi_pos=forward_state["psi_hz_x"],
-        psi_neg=forward_state["psi_hz_y"],
-        b_pos=solver.cpml_b_h_x,
-        c_pos=solver.cpml_c_h_x,
-        inv_kappa_pos=solver.cpml_inv_kappa_h_x,
-        b_neg=solver.cpml_b_h_y,
-        c_neg=solver.cpml_c_h_y,
-        inv_kappa_neg=solver.cpml_inv_kappa_h_y,
-        axis_pos=0,
-        axis_neg=1,
-    )
-
-    magnetic_fields = {"Hx": hx, "Hy": hy, "Hz": hz}
-    magnetic_fields = _apply_resolved_magnetic_source_terms(
-        magnetic_fields,
-        solver=solver,
-        time_value=time_value,
-        resolved_source_terms=resolved_source_terms,
-    )
+    if magnetic_fields is None:
+        magnetic_fields = _forward_magnetic_fields(
+            solver,
+            forward_state,
+            time_value=time_value,
+            resolved_source_terms=resolved_source_terms,
+        )
     grad_eps_ex = torch.zeros_like(eps_ex)
     grad_eps_ey = torch.zeros_like(eps_ey)
     grad_eps_ez = torch.zeros_like(eps_ez)
