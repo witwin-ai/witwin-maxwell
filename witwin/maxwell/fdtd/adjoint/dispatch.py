@@ -70,6 +70,8 @@ def _supports_tfsf(runtime, solver, forward_state, resolved_source_terms) -> boo
         return False
     if getattr(solver, "conductive_enabled", False):
         return False
+    if getattr(solver, "full_aniso_enabled", False):
+        return False
     if not getattr(solver, "tfsf_enabled", False):
         return False
     if has_complex_fields(solver):
@@ -107,6 +109,8 @@ def _supports_grating_tfsf(runtime, solver, forward_state, resolved_source_terms
     if getattr(solver, "nonlinear_enabled", False):
         return False
     if getattr(solver, "conductive_enabled", False):
+        return False
+    if getattr(solver, "full_aniso_enabled", False):
         return False
     if not getattr(solver, "tfsf_enabled", False):
         return False
@@ -150,6 +154,8 @@ def _supports_standard(runtime, solver, forward_state, resolved_source_terms) ->
         return False
     if getattr(solver, "conductive_enabled", False):
         return False
+    if getattr(solver, "full_aniso_enabled", False):
+        return False
     if tuple(forward_state.keys()) != ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         return False
     if getattr(solver, "uses_cpml", False):
@@ -182,6 +188,8 @@ def _supports_cpml(runtime, solver, forward_state, resolved_source_terms) -> boo
         return False
     if getattr(solver, "conductive_enabled", False):
         return False
+    if getattr(solver, "full_aniso_enabled", False):
+        return False
     if not getattr(solver, "uses_cpml", False):
         return False
     if not _matches_checkpoint_layout(solver, forward_state):
@@ -202,6 +210,8 @@ def _supports_dispersive(runtime, solver, forward_state, resolved_source_terms) 
         return False
     if getattr(solver, "conductive_enabled", False):
         return False
+    if getattr(solver, "full_aniso_enabled", False):
+        return False
     if not getattr(solver, "dispersive_enabled", False):
         return False
     if has_complex_fields(solver):
@@ -219,6 +229,8 @@ def _supports_bloch(runtime, solver, forward_state, resolved_source_terms) -> bo
     if getattr(solver, "nonlinear_enabled", False):
         return False
     if getattr(solver, "conductive_enabled", False):
+        return False
+    if getattr(solver, "full_aniso_enabled", False):
         return False
     if getattr(solver, "uses_cpml", False):
         return False

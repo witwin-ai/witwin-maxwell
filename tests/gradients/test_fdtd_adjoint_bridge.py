@@ -29,13 +29,6 @@ def _build_simulation(model, *, time_steps=24):
     ("material", "message"),
     [
         (
-            mw.Material(
-                eps_r=1.0,
-                epsilon_tensor=mw.Tensor3x3(((2.5, 0.3, 0.0), (0.3, 2.5, 0.0), (0.0, 0.0, 2.5))),
-            ),
-            "full \\(off-diagonal\\) anisotropic media",
-        ),
-        (
             mw.Material(mu_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
             "anisotropic magnetic \\(mu_tensor\\) media",
         ),
@@ -60,6 +53,57 @@ def test_fdtd_gradient_bridge_rejects_unsupported_medium_capabilities(material, 
 
     bridge = object.__new__(_FDTDGradientBridge)
     with pytest.raises(NotImplementedError, match=message):
+        bridge._validate_supported_configuration(SimpleNamespace(scene=scene))
+
+
+def test_fdtd_gradient_bridge_accepts_full_anisotropic_epsilon():
+    """Full (off-diagonal) Tensor3x3 epsilon is now differentiable: the reverse
+    step replicates the off-diagonal coupling and routes to the torch-VJP
+    backend, so a static full-anisotropic structure is accepted."""
+    from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+            material=mw.Material(
+                eps_r=1.0,
+                epsilon_tensor=mw.Tensor3x3(((2.5, 0.3, 0.0), (0.3, 2.5, 0.0), (0.0, 0.0, 2.5))),
+            ),
+        )
+    )
+
+    assert _unsupported_adjoint_medium(scene) is None
+
+
+def test_fdtd_gradient_bridge_rejects_trainable_geometry_on_full_anisotropic_media():
+    """A trainable geometry on a full-anisotropic structure is guarded: the
+    off-diagonal coupling coefficients carry no material gradient channel, so the
+    geometry sensitivity would be silently dropped."""
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            geometry=mw.Box(
+                position=(0.0, 0.0, 0.0),
+                size=torch.tensor([0.5, 0.5, 0.5], requires_grad=True),
+            ),
+            material=mw.Material(
+                eps_r=1.0,
+                epsilon_tensor=mw.Tensor3x3(((2.5, 0.3, 0.0), (0.3, 2.5, 0.0), (0.0, 0.0, 2.5))),
+            ),
+        )
+    )
+
+    bridge = object.__new__(_FDTDGradientBridge)
+    with pytest.raises(NotImplementedError, match="trainable geometry on full \\(off-diagonal\\) anisotropic"):
         bridge._validate_supported_configuration(SimpleNamespace(scene=scene))
 
 

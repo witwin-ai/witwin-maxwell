@@ -2319,6 +2319,74 @@ def _forward_magnetic_fields(solver, state, *, time_value, resolved_source_terms
     )
 
 
+def _sum_adjacent(field: torch.Tensor, axis: int) -> torch.Tensor:
+    """Sum of each adjacent pair along ``axis`` (length shrinks by one)."""
+    lo = [slice(None)] * field.ndim
+    hi = [slice(None)] * field.ndim
+    lo[axis] = slice(0, -1)
+    hi[axis] = slice(1, None)
+    return field[tuple(lo)] + field[tuple(hi)]
+
+
+def _spread_to_nodes(edge: torch.Tensor, axis: int) -> torch.Tensor:
+    """Transpose of two-point averaging along ``axis`` (length grows by one).
+
+    Scatters each edge value onto its two bounding node positions with zero-fill
+    at the ends, matching the four-neighbor collocation the full-anisotropy
+    kernel performs when it maps an off-axis curl(H) sample onto the target edge
+    (out-of-range neighbours contribute zero while the fixed 1/4 weight stays).
+    """
+    zero_shape = [1 if i == axis else size for i, size in enumerate(edge.shape)]
+    zero = edge.new_zeros(zero_shape)
+    below = torch.cat((edge, zero), dim=axis)
+    above = torch.cat((zero, edge), dim=axis)
+    return below + above
+
+
+def _collocate_curl(curl: torch.Tensor, *, edge_axis: int, curl_axis: int) -> torch.Tensor:
+    """Neighbor-average an off-axis curl(H) component onto a target E edge.
+
+    ``edge_axis`` is the Yee-edge axis of the *target* E component (summed over
+    the two straddling cells) and ``curl_axis`` is the edge axis of the source
+    curl component (spread onto the target's two bounding nodes).
+    """
+    return _spread_to_nodes(_sum_adjacent(curl, edge_axis), curl_axis)
+
+
+def _full_aniso_electric_correction(solver, magnetic_fields):
+    """Off-diagonal (full-tensor) anisotropic coupling added to the E update.
+
+    Differentiable Torch replica of ``apply_full_aniso_corrections`` (the native
+    ``updateElectricFieldE{x,y,z}FullAniso3D`` kernels): each off-axis curl(H)
+    component is four-neighbor-averaged onto the target Yee edge and scaled by
+    the off-diagonal inverse-permittivity coefficient. It consumes the same
+    post-source magnetic fields the diagonal update used, so the adjoint VJP
+    flows the cotangent through the coupling into the H (and thence E) fields.
+    """
+    hx = magnetic_fields["Hx"]
+    hy = magnetic_fields["Hy"]
+    hz = magnetic_fields["Hz"]
+    # curl(H) on the native Yee E edges, identical backward differences to the
+    # diagonal update (curl_x -> Ex edge, curl_y -> Ey edge, curl_z -> Ez edge).
+    curl_x = _backward_diff(hz, axis=1, inv_delta=solver.inv_dy_e) - _backward_diff(hy, axis=2, inv_delta=solver.inv_dz_e)
+    curl_y = _backward_diff(hx, axis=2, inv_delta=solver.inv_dz_e) - _backward_diff(hz, axis=0, inv_delta=solver.inv_dx_e)
+    curl_z = _backward_diff(hy, axis=0, inv_delta=solver.inv_dx_e) - _backward_diff(hx, axis=1, inv_delta=solver.inv_dy_e)
+
+    ex = 0.25 * (
+        solver.cex_aniso_y * _collocate_curl(curl_y, edge_axis=0, curl_axis=1)
+        + solver.cex_aniso_z * _collocate_curl(curl_z, edge_axis=0, curl_axis=2)
+    )
+    ey = 0.25 * (
+        solver.cey_aniso_x * _collocate_curl(curl_x, edge_axis=1, curl_axis=0)
+        + solver.cey_aniso_z * _collocate_curl(curl_z, edge_axis=1, curl_axis=2)
+    )
+    ez = 0.25 * (
+        solver.cez_aniso_x * _collocate_curl(curl_x, edge_axis=2, curl_axis=0)
+        + solver.cez_aniso_y * _collocate_curl(curl_y, edge_axis=2, curl_axis=1)
+    )
+    return {"Ex": ex, "Ey": ey, "Ez": ez}
+
+
 def _step_state(
     solver,
     state,
@@ -2744,6 +2812,15 @@ def _step_state(
             c_neg=getattr(solver, "cpml_c_e_y", None),
             inv_kappa_neg=getattr(solver, "cpml_inv_kappa_e_y", None),
         )
+        if getattr(solver, "full_aniso_enabled", False):
+            # Full (off-diagonal) anisotropy couples each E component to the two
+            # off-axis curl(H) components; the diagonal entry is already carried
+            # by the base curl above, so add the neighbor-averaged off-diagonal
+            # correction here to match the forward per-step kernel order.
+            aniso_correction = _full_aniso_electric_correction(solver, magnetic_fields)
+            ex = ex + aniso_correction["Ex"]
+            ey = ey + aniso_correction["Ey"]
+            ez = ez + aniso_correction["Ez"]
         electric_fields = {"Ex": ex, "Ey": ey, "Ez": ez}
 
     if getattr(solver, "tfsf_enabled", False):

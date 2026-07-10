@@ -1089,3 +1089,229 @@ def test_chi2_reverse_routes_through_torch_vjp():
         resolved_source_terms=None,
     )
     assert backend is _ReverseBackend.TORCH_VJP, backend
+
+
+# ---------------------------------------------------------------------------
+# Full (off-diagonal) anisotropic epsilon (Tensor3x3) media
+#
+# Full anisotropy uses a component-coupled forward update: the base curl carries
+# the diagonal inverse-permittivity entry, and a separate kernel adds the
+# off-diagonal coupling E_i += dt/eps0 * inv_ij * <curlH_j>. The adjoint replay
+# must replicate that off-diagonal correction differentiably so the reverse
+# propagates cotangents through the coupling; the scene routes to the torch-VJP
+# reverse because the analytic backends model the diagonal curl only.
+# ---------------------------------------------------------------------------
+
+# Symmetric positive-definite tensor with a strong xz/yz coupling so an
+# Ez-driven, Ez-probed scene is genuinely reshaped by the off-diagonal terms.
+_FULL_ANISO_OFFDIAG = 1.2
+
+
+def _full_aniso_tensor(offdiag):
+    return mw.Tensor3x3(
+        (
+            (4.0, 0.0, offdiag),
+            (0.0, 4.0, offdiag),
+            (offdiag, offdiag, 5.0),
+        )
+    )
+
+
+def _full_aniso_scene(offdiag=_FULL_ANISO_OFFDIAG, *, density=None):
+    """Static full-anisotropic slab between the source and an isotropic design.
+
+    The trainable design permittivity sits behind the tensor slab, so its
+    gradient depends on the field transmitted through (and the adjoint field
+    reflected back across) the off-diagonal coupling.
+    """
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+        device="cuda",
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="full_aniso_slab",
+            # Kept clear of the 2-layer PML: the off-diagonal correction is only
+            # exact outside the absorber, so the slab (and its soft-SDF tail) must
+            # not touch it.
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.36, 0.36, 0.12)),
+            material=mw.Material(epsilon_tensor=_full_aniso_tensor(offdiag)),
+        )
+    )
+    if density is not None:
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+    scene.add_source(
+        mw.PointDipole(
+            position=(0.0, 0.0, -0.18),
+            polarization="Ez",
+            width=0.04,
+            source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+        )
+    )
+    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+    return scene
+
+
+class _FullAnisoDensityScene(mw.SceneModule):
+    """Trainable design density behind a static full-anisotropic (Tensor3x3) slab."""
+
+    def __init__(self, init=0.0, offdiag=_FULL_ANISO_OFFDIAG):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((2, 2, 2), float(init), device="cuda"))
+        self._offdiag = offdiag
+
+    def to_scene(self):
+        return _full_aniso_scene(self._offdiag, density=torch.sigmoid(self.logits))
+
+
+@_CUDA
+def test_full_aniso_electric_correction_replica_matches_cuda_kernel():
+    """The differentiable off-diagonal correction used by the adjoint replay must
+    match the native updateElectricFieldE{x,y,z}FullAniso3D kernels.
+
+    This is the forward-consistency guard the collocation transpose needs: a
+    diagonal-dominant tensor would hide a mis-collocated off-axis curl, so the
+    scene uses strong xz/yz coupling and random magnetic fields."""
+    from witwin.maxwell.fdtd.adjoint.core import _full_aniso_electric_correction
+    from witwin.maxwell.fdtd.runtime.stepping import apply_full_aniso_corrections
+
+    torch.manual_seed(17)
+    prepared = mw.Simulation.fdtd(
+        _full_aniso_scene(),
+        frequencies=[1e9],
+        run_time=mw.TimeConfig(time_steps=8),
+    ).prepare()
+    solver = prepared.solver
+    assert solver.full_aniso_enabled
+
+    hx = torch.randn_like(solver.Hx)
+    hy = torch.randn_like(solver.Hy)
+    hz = torch.randn_like(solver.Hz)
+
+    # Native kernel path: zero E, inject the random H, apply the correction in place.
+    solver.Ex.zero_()
+    solver.Ey.zero_()
+    solver.Ez.zero_()
+    solver.Hx.copy_(hx)
+    solver.Hy.copy_(hy)
+    solver.Hz.copy_(hz)
+    apply_full_aniso_corrections(solver)
+    kernels = {"Ex": solver.Ex.clone(), "Ey": solver.Ey.clone(), "Ez": solver.Ez.clone()}
+
+    replica = _full_aniso_electric_correction(
+        solver, {"Hx": hx, "Hy": hy, "Hz": hz}
+    )
+
+    # The correction must be genuinely active (the off-diagonal coupling is not a
+    # no-op), otherwise a broken replica of zeros would pass trivially.
+    assert kernels["Ez"].abs().max().item() > 0.0
+    for name, kernel in kernels.items():
+        scale = max(kernel.abs().max().item(), 1.0)
+        # Tight bit-for-bit agreement (well under 1e-3): this is the exact
+        # correctness check for the new off-diagonal reverse physics, and the
+        # strong xz/yz coupling means a mis-collocated off-axis curl cannot hide.
+        assert torch.allclose(replica[name], kernel, rtol=1e-5, atol=1e-6 * scale), name
+
+
+@_CUDA
+def test_full_aniso_reverse_routes_through_torch_vjp():
+    """A full-anisotropic scene must fall to the torch-VJP reverse backend: the
+    analytic standard/CPML backends model only the diagonal curl and would drop
+    the off-diagonal coupling."""
+    from witwin.maxwell.fdtd.adjoint.dispatch import _select_reverse_backend, _ReverseBackend
+
+    prepared = mw.Simulation.fdtd(
+        _full_aniso_scene(),
+        frequencies=[1e9],
+        run_time=mw.TimeConfig(time_steps=8),
+    ).prepare()
+    solver = prepared.solver
+    assert solver.full_aniso_enabled
+    forward_state = {name: getattr(solver, name) for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
+    backend = _select_reverse_backend(
+        solver,
+        forward_state,
+        eps_ex=solver.eps_Ex,
+        eps_ey=solver.eps_Ey,
+        eps_ez=solver.eps_Ez,
+        resolved_source_terms=None,
+    )
+    assert backend is _ReverseBackend.TORCH_VJP, backend
+
+
+@_CUDA
+def test_full_aniso_bridge_forward_matches_reference_physics():
+    """The adjoint-bridge forward must apply the off-diagonal coupling exactly
+    like the plain forward, otherwise the checkpointed trajectory (and the design
+    gradient built from it) would optimize the wrong physics."""
+    density = torch.sigmoid(torch.zeros((2, 2, 2), device="cuda"))
+    reference = _abs2(
+        mw.Simulation.fdtd(
+            _full_aniso_scene(density=density),
+            frequencies=[1e9],
+            run_time=mw.TimeConfig(time_steps=200),
+            spectral_sampler=mw.SpectralSampler(window="none"),
+            full_field_dft=False,
+        )
+        .run()
+        .monitor("probe")["data"]
+    ).item()
+
+    model = _FullAnisoDensityScene(init=0.0)
+    bridge = _abs2(_build_sim(model, time_steps=200).run().monitor("probe")["data"]).item()
+
+    assert abs(bridge - reference) <= 1e-5 * abs(reference), (
+        f"bridge forward diverges from reference physics: bridge={bridge:.6e}, reference={reference:.6e}"
+    )
+
+
+@_CUDA
+def test_scene_with_full_aniso_medium_gradient_matches_fd():
+    """End-to-end FD validation of design gradients behind a static
+    full-anisotropic (off-diagonal Tensor3x3) slab (previously rejected by the
+    bridge).
+
+    Tolerance matches the landed diagonal-anisotropic adjoint test
+    (``allclose(rtol=3e-2)``): anisotropic FDTD scenes carry a precision floor on
+    end-to-end FD-gradient agreement. Here the whole electric step is replayed on
+    the torch-VJP reverse, and its per-step reparametrized Jacobian differs from
+    the native kernels at float level; that mismatch compounds through the reverse
+    rollout of the high-index tensor cavity to ~0.5% for strong coupling. The
+    exact correctness of the new off-diagonal physics is pinned separately by the
+    ``..._correction_replica_matches_cuda_kernel`` forward-consistency test at
+    rtol 1e-5."""
+    model = _FullAnisoDensityScene(init=0.0)
+
+    def loss_fn():
+        result = _build_sim(model, time_steps=200).run()
+        return _abs2(result.monitor("probe")["data"])
+
+    # The off-diagonal coupling must actually reshape the solution, otherwise
+    # this would only re-validate the diagonal-anisotropic path.
+    diagonal_only = _abs2(
+        _build_sim(_FullAnisoDensityScene(init=0.0, offdiag=0.0), time_steps=200)
+        .run()
+        .monitor("probe")["data"]
+    ).item()
+    coupled = loss_fn().item()
+    assert abs(coupled - diagonal_only) > 1e-2 * abs(diagonal_only), (
+        f"off-diagonal coupling inactive: diagonal={diagonal_only:.6e}, coupled={coupled:.6e}"
+    )
+
+    backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn)
+
+    assert (fd_grad != 0).any(), "FD gradient is identically zero; test setup is broken."
+    scale = torch.abs(fd_grad).max().item()
+    assert torch.allclose(backward_grad, fd_grad, rtol=3e-2, atol=scale * 5e-3), (
+        f"backward={backward_grad.flatten().tolist()}, fd={fd_grad.flatten().tolist()}"
+    )

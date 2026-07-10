@@ -18,7 +18,7 @@ from ..excitation import (
     apply_tfsf_e_correction,
     apply_tfsf_h_correction,
 )
-from ..runtime.stepping import update_electric_fields_bloch_cpml
+from ..runtime.stepping import apply_full_aniso_corrections, update_electric_fields_bloch_cpml
 from .seeds import _build_output_seeds, _schedule_to_tensor_pack, _apply_seed_runtime
 from ..checkpoint import capture_checkpoint_state
 from ..material_pullback import pullback_material_input_gradients
@@ -95,14 +95,24 @@ def _unsupported_adjoint_medium(scene):
             )
         if getattr(material, "is_anisotropic", False):
             # Diagonal epsilon anisotropy maps onto the per-axis eps_Ex/Ey/Ez
-            # coefficient layout the reverse step and material pullback already
-            # use, so it is fully differentiable. Full 3x3 permittivity uses the
-            # component-coupled forward kernel that the reverse step does not
-            # model, and mu tensors have no gradient channel; both stay guarded.
-            if isinstance(getattr(material, "epsilon_tensor", None), Tensor3x3):
-                return "FDTD adjoint does not support full (off-diagonal) anisotropic media yet."
+            # coefficient layout, and full 3x3 epsilon is now differentiable too:
+            # the reverse step replicates the off-diagonal curl(H) coupling and
+            # routes to the torch-VJP backend, so a design differentiated through
+            # a full-anisotropic scene gets correct gradients. A magnetic tensor
+            # still has no reverse gradient channel, and a trainable geometry on
+            # a full-anisotropic structure would drop the off-diagonal coefficient
+            # sensitivity, so both stay guarded with a physical reason.
             if getattr(material, "mu_tensor", None) is not None:
-                return "FDTD adjoint does not support anisotropic magnetic (mu_tensor) media yet."
+                return (
+                    "FDTD adjoint does not support anisotropic magnetic (mu_tensor) media: "
+                    "the magnetic reverse update carries no tensor gradient channel."
+                )
+            if isinstance(getattr(material, "epsilon_tensor", None), Tensor3x3) and _structure_has_trainable_geometry(structure):
+                return (
+                    "FDTD adjoint does not support trainable geometry on full (off-diagonal) "
+                    "anisotropic structures: the off-diagonal coupling coefficients carry no "
+                    "material gradient channel, so the geometry sensitivity would be dropped."
+                )
         if getattr(material, "is_magnetic_dispersive", False) and _structure_has_trainable_geometry(structure):
             # The reverse step models static magnetic ADE poles, but there is no
             # mu-side material gradient channel, so a trainable geometry on a
@@ -255,6 +265,8 @@ class _FDTDGradientBridge:
                 if getattr(solver, "nonlinear_enabled", False):
                     solver._update_nonlinear_electric_coefficients()
                 solver._update_electric_fields(solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
+                if getattr(solver, "full_aniso_enabled", False):
+                    apply_full_aniso_corrections(solver)
 
             if getattr(solver, "tfsf_enabled", False):
                 apply_tfsf_e_correction(solver, time_value)
