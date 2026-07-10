@@ -387,12 +387,35 @@ def _geometry_beta(scene) -> float:
     return 0.05 * min(scene.grid.min_spacing)
 
 
-def _pec_geometry_beta(scene) -> float:
-    # Cell-scale smoothing (wider than the near-sharp dielectric beta) so per-edge PEC
-    # fill fractions vary across a full cell. This is what gives conformal PEC genuine
-    # sub-cell wall placement; the sharp dielectric beta would make every edge fill
-    # collapse to 0/1 and leave conformal indistinguishable from staircase.
-    return 0.5 * min(scene.grid.min_spacing)
+def _pec_geometry_beta(scene) -> float | torch.Tensor:
+    """Cell-scale PEC smoothing width, scalar on uniform grids, per node on graded ones.
+
+    The width is half a cell so per-edge PEC fill fractions vary smoothly across a
+    full cell (the sharp dielectric beta would collapse every edge fill to 0/1 and
+    leave conformal indistinguishable from staircase). On a grid with a defined
+    scalar spacing this stays the global ``0.5*min(min_spacing)`` and is returned as
+    a Python float so PEC occupancy is byte-identical to the pre-graded path.
+
+    On a nonuniform grid (``GridSpec.custom`` or a resolved ``GridSpec.auto``) the
+    single global minimum is wrong: a fine feature anywhere shrinks it, so a PEC
+    wall sitting in a locally coarse region gets a beta far narrower than its own
+    cell and the conformal fill degrades to staircase there. The width is instead a
+    per-node field, half the local Yee dual-cell width, taken as the min over axes
+    so it never smears PEC beyond the finest local cell. It reduces bit-exactly to
+    ``0.5*spacing`` on a uniformly spaced custom axis (every dual width equals the
+    spacing). The min-over-axes is an isotropic cell scale; on a strongly
+    anisotropic node it follows the finest axis, which is the conservative choice
+    (no PEC leakage) but under-resolves a wall whose normal lies along a coarser
+    axis at that node.
+    """
+    grid = scene.grid
+    if not (grid.is_custom or grid.is_auto):
+        return 0.5 * min(scene.grid.min_spacing)
+    dx = torch.as_tensor(scene.dx_dual64, device=scene.device, dtype=torch.float32)
+    dy = torch.as_tensor(scene.dy_dual64, device=scene.device, dtype=torch.float32)
+    dz = torch.as_tensor(scene.dz_dual64, device=scene.device, dtype=torch.float32)
+    cell = torch.minimum(torch.minimum(dx[:, None, None], dy[None, :, None]), dz[None, None, :])
+    return 0.5 * cell
 
 
 def _geometry_occupancy(scene, geometry, coords=None, beta=None):
