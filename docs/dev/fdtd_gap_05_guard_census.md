@@ -58,7 +58,7 @@ guards regardless of wording.
 | P5.0 baseline (this commit) | 87 | measured |
 | after P5.1 (adjoint) | **85 (measured)** | multi-source + `normalize_source` single-source raises deleted (bridge+core 13 → 11). Most P5.1 capability (σ_e, χ²/TPA, full-aniso ε, Bloch+dispersive, custom/uniform sources) was lifted by narrowing the message-branch conditions inside the single `_unsupported_adjoint_medium` raise and generalizing `_validate_supported_configuration`, so the AST raise-count dropped only 87 → 85 even though the differentiable forward surface grew substantially. The projected `≤ 76` assumed guard *deletion*; the realized route was branch-condition lifting. |
 | after P5.2 (combinations) | **74 (measured)** | Projected `≤ 62`; realized `74`. As with P5.1, most P5.2 edges (nonlinear+dispersive, aniso+dispersive, aniso+σ_e, aniso+PML-overlap under CPML, modulated+dispersive/nonlinear, multi-frequency modulation, modulated-slab-CPML) were enabled by *narrowing branch conditions and composing coefficient paths*, not by deleting `raise` statements, so the AST count fell only 85 → 74. `runtime/materials.py` went 10 → 6 (not ≤ 3): the 6 that remain guard genuinely-unsupported combinations — nonlinear / full-aniso / modulated media under complex Bloch fields (need complex-field kernels), modulated + full-aniso (per-step 3×3 re-inversion), full-aniso + nonlinear cross-material defense, and full-aniso overlapping a split-field (non-CPML) PML. `media.py` retains 3 material-combination construction guards (nonlinear+aniso, modulated+aniso, modulated+σ_e) plus the dispersive-full-tensor and PerturbationMedium-full-tensor frequency-evaluation deferrals; all are physics-worded. Every remaining `media.py` / `runtime/materials.py` combination guard was reworded off "not implemented yet" / "in v1" in this phase. |
-| after P5.3 (grid) | ≤ 58 | subpixel/autogrid coherence |
+| after P5.3 (grid) | **74 (measured)** | Projected `≤ 58`; realized `74` (unchanged). As in P5.1/P5.2, P5.3 lifted the grid × feature coherence cases by generalizing *ValueError-gated / approximation* paths, not by deleting `NotImplementedError` raises, so the AST capability count did not move. Subpixel averaging and conformal PEC now scale their per-sub-sample offsets by the local Yee dual-cell width instead of the scalar `Scene.dx` (that `Scene.dx` nonuniform guard is a `ValueError`, never counted); the TFSF / mode-plane "locally uniform" hard rejects became bounded region-uniform `ValueError` contracts; and the soft-`PlaneWave` numerical-dispersion correction switched from global-minimum to launch-local spacing. None of these are `NotImplementedError` guards. The grid-related `NotImplementedError` raises that remain are out of P5.3 scope: `tidy3d.py` / `simulation.py` nonuniform-grid rejects belong to P5.6 (cross-solver parity) and the TFSF-slab `axis='z'` / slab-runtime rejects to P5.4/P5.5. Acceptance proof: `tests/validation/physics/test_autogrid_subpixel_thesis.py` shows `GridSpec.auto` + `SubpixelSpec(samples=(2,2,2), averaging="polarized")` reaches lower field error at fewer cells than uniform + subpixel on a high-contrast (`eps_r=12`) sphere. |
 | after P5.4 (Bloch broadband) | ≤ 50 | temporal/stepping/tfsf Bloch guards |
 | after P5.5 (stubs) | ≤ 45 | SIBC/graphene/sigma_m/TFSF-slab |
 | after P5.6 (parity) | ≤ 33 | tidy3d 13 → ≤ 4 capability; fdfd static parity |
@@ -99,3 +99,17 @@ P5.2 deltas from the baseline: `media.py` 14 → 8, `runtime/materials.py` 10 �
 `compiler/materials.py` 7 → 6, `tidy3d.py` 13 → 13 (untouched; P5.6),
 `adjoint/*` 13 → 12. The material combination matrix that documents the true
 post-P5.2 composability is `tests/materials/combinations/test_combination_matrix.py`.
+
+## Per-cluster capability-guard counts (after P5.3 — measured, total 74)
+
+Unchanged from the P5.2 block above (every file keeps the same count): P5.3 removed
+no `NotImplementedError` raise, so the distribution is identical. The relevant P5.3
+files carry only `ValueError`/approximation paths, not capability guards:
+`compiler/materials.py` (subpixel + conformal PEC per-node offsets), `scene.py`
+(the `Scene.dx` scalar-spacing `ValueError`, a contract not a capability guard),
+`fdtd/excitation/tfsf_common.py` and `modes.py` (region-uniform bounds), and
+`fdtd/excitation/spatial.py` / `injection.py` (launch-local soft-`PlaneWave` spacing).
+The three `fdtd/excitation/tfsf_state.py` capability guards and the two
+`temporal.py` Bloch guards are P5.4/P5.5 items, not grid coherence. The acceptance
+proof that `GridSpec.auto` + subpixel now compose to lower field error at fewer
+cells is `tests/validation/physics/test_autogrid_subpixel_thesis.py`.

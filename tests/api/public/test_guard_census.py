@@ -17,6 +17,11 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 
 # Lowered by each P5 phase in the commit that removes guards. Never raised
 # without a corresponding update to docs/dev/fdtd_gap_05_guard_census.md.
+# P5.3 re-measured this at 74 (unchanged): the grid x feature coherence work
+# lifted its cases by generalizing ValueError-gated / approximation paths
+# (per-node subpixel + conformal-PEC offsets, region-uniform TFSF/mode bounds,
+# launch-local soft-PlaneWave spacing), none of which are NotImplementedError
+# raises, so the AST capability count did not move -- as in P5.1 and P5.2.
 CAPABILITY_GUARD_BUDGET = 74
 
 # (posix path relative to the repo root, distinctive message substring).
