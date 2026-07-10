@@ -50,37 +50,12 @@ def _pec_structures(scene):
     return [structure for structure in _sorted_structures(scene) if _structure_is_pec(structure)]
 
 
-def _scene_has_anisotropic_material(scene) -> bool:
-    for structure in _sorted_structures(scene):
-        material = _structure_material(structure)
-        if material is not None and bool(getattr(material, "is_anisotropic", False)):
-            return True
-    return False
-
-
 def _scene_has_dispersive_material(scene) -> bool:
     for structure in _sorted_structures(scene):
         material = _structure_material(structure)
         if material is not None and bool(getattr(material, "is_dispersive", False)):
             return True
     return False
-
-
-def _scene_has_kerr_material(scene) -> bool:
-    for structure in _sorted_structures(scene):
-        material = _structure_material(structure)
-        if material is not None and bool(getattr(material, "is_nonlinear", False)):
-            return True
-    return False
-
-
-def _validate_scene_material_combinations(scene):
-    if not _scene_has_kerr_material(scene):
-        return
-    if _scene_has_dispersive_material(scene):
-        raise NotImplementedError("Kerr media cannot be combined with dispersive materials elsewhere in the same Scene in v1.")
-    if _scene_has_anisotropic_material(scene):
-        raise NotImplementedError("Kerr media cannot be combined with anisotropic materials elsewhere in the same Scene in v1.")
 
 
 def _component_average(components: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -126,6 +101,22 @@ def _eps_values_from_sample(value):
     return _component_values_from_sample(value, name="eps_r"), {pair: 0.0 for pair in _OFFDIAG_AXES}
 
 
+def _structure_nonlinearity(material):
+    """Scalar nonlinear channel values of a structure material.
+
+    ``kerr_chi3`` is the instantaneous third-order (Kerr) susceptibility and
+    ``chi2`` the second-order susceptibility; both rasterize into per-node
+    fields that blend with structure occupancy exactly like the static eps.
+    """
+    chi3 = getattr(material, "nonlinear_chi3", None)
+    if chi3 is None:
+        chi3 = getattr(material, "kerr_chi3", 0.0) or 0.0
+    return {
+        "kerr_chi3": float(chi3),
+        "chi2": float(getattr(material, "nonlinear_chi2", 0.0)),
+    }
+
+
 def _static_structure_material(structure):
     material = structure.material
     sample = material.evaluate_static()
@@ -143,7 +134,7 @@ def _static_structure_material(structure):
         eps_offdiag,
         mu_components,
         sigma_components,
-        float(getattr(material, "kerr_chi3", 0.0) or 0.0),
+        _structure_nonlinearity(material),
     )
 
 
@@ -159,6 +150,7 @@ def _new_material_model(scene, layout, *, eps_fill, mu_fill):
         "mu_components": _new_component_field(shape, fill_value=mu_fill, device=device),
         "sigma_e_components": _new_component_field(shape, fill_value=0.0, device=device),
         "kerr_chi3": torch.zeros(shape, device=device, dtype=torch.float32),
+        "chi2": torch.zeros(shape, device=device, dtype=torch.float32),
     }
     for key in (
         "debye_poles",
@@ -204,6 +196,11 @@ def _material_model_has_conductivity(model) -> bool:
 
 def _material_model_has_kerr(model) -> bool:
     return bool(torch.any(model["kerr_chi3"] != 0).item())
+
+
+def material_model_has_nonlinearity(model) -> bool:
+    """Whether the compiled model carries any instantaneous nonlinear channel."""
+    return _material_model_has_kerr(model) or bool(torch.any(model["chi2"] != 0).item())
 
 
 def material_model_has_full_anisotropy(model) -> bool:
@@ -404,7 +401,7 @@ def _apply_structure_material(
     mu_background=1.0,
     averaging="arithmetic",
 ):
-    material, eps_components, eps_offdiag, mu_components, sigma_components, kerr_chi3 = _static_structure_material(structure)
+    material, eps_components, eps_offdiag, mu_components, sigma_components, nonlinearity = _static_structure_material(structure)
     has_offdiag = any(value != 0.0 for value in eps_offdiag.values())
     if has_offdiag and averaging == "polarized":
         raise NotImplementedError(
@@ -445,7 +442,8 @@ def _apply_structure_material(
             occupancy,
             value=eps_offdiag[pair] * float(eps_background),
         )
-    model["kerr_chi3"] = _blend_material(model["kerr_chi3"], occupancy, value=kerr_chi3)
+    model["kerr_chi3"] = _blend_material(model["kerr_chi3"], occupancy, value=nonlinearity["kerr_chi3"])
+    model["chi2"] = _blend_material(model["chi2"], occupancy, value=nonlinearity["chi2"])
     if isinstance(material, PerturbationMedium):
         delta = _box_parameter_field(
             scene,
@@ -703,7 +701,6 @@ def compile_material_model(
     mu_background=1.0,
     subpixel=None,
 ):
-    _validate_scene_material_combinations(scene)
     samples, averaging, pec_mode = _resolve_subpixel(subpixel)
     layout = _build_dispersive_layout(scene)
     if samples == (1, 1, 1):
@@ -737,6 +734,7 @@ def compile_material_model(
         for pair in _OFFDIAG_AXES:
             accum["eps_offdiag_components"][pair] += sample["eps_offdiag_components"][pair]
         accum["kerr_chi3"] += sample["kerr_chi3"]
+        accum["chi2"] += sample["chi2"]
         for slot_index, entry in enumerate(sample["debye_poles"]):
             accum["debye_poles"][slot_index]["weight"] += entry["weight"]
         for slot_index, entry in enumerate(sample["drude_poles"]):
@@ -758,6 +756,7 @@ def compile_material_model(
     for pair in _OFFDIAG_AXES:
         accum["eps_offdiag_components"][pair] *= scale
     accum["kerr_chi3"] *= scale
+    accum["chi2"] *= scale
     for entry in accum["debye_poles"]:
         entry["weight"] *= scale
     for entry in accum["drude_poles"]:

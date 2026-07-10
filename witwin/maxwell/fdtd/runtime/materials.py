@@ -7,6 +7,7 @@ from ...compiler.materials import (
     evaluate_material_permeability,
     evaluate_material_permittivity,
     material_model_has_full_anisotropy,
+    material_model_has_nonlinearity,
 )
 from ..boundary import has_complex_fields
 
@@ -17,8 +18,8 @@ def _any_component_nonzero(components: dict[str, torch.Tensor]) -> bool:
 
 def build_materials(solver, scene):
     material_model = scene.compile_materials()
-    if scene.boundary.uses_kind("bloch") and torch.any(material_model["kerr_chi3"] != 0):
-        raise NotImplementedError("FDTD Kerr media are not implemented for Bloch / complex-field runs.")
+    if scene.boundary.uses_kind("bloch") and material_model_has_nonlinearity(material_model):
+        raise NotImplementedError("FDTD nonlinear media are not implemented for Bloch / complex-field runs.")
     if scene.boundary.uses_kind("bloch") and material_model_has_full_anisotropy(material_model):
         raise NotImplementedError(
             "FDTD full (off-diagonal) anisotropic media are not implemented for Bloch / complex-field runs."
@@ -53,9 +54,35 @@ def build_materials(solver, scene):
     solver.mu_Hy = average_node_to_magnetic_component(solver, mu_y_node, "Hy")
     solver.mu_Hz = average_node_to_magnetic_component(solver, mu_z_node, "Hz")
 
+    build_nonlinear_channels(solver, material_model)
+
+    build_full_anisotropy(solver, material_model)
+
+    build_dispersive_templates(solver, material_model)
+    build_magnetic_dispersive_templates(solver, material_model)
+    solver.dispersive_enabled = solver.electric_dispersive_enabled or solver.magnetic_dispersive_enabled
+    if solver.full_aniso_enabled and solver.dispersive_enabled:
+        raise NotImplementedError(
+            "FDTD full (off-diagonal) anisotropic media cannot be combined with dispersive materials in the same Scene yet."
+        )
+
+
+def build_nonlinear_channels(solver, material_model):
+    """Set the nonlinear feature flags and edge-averaged nonlinear channel fields.
+
+    ``kerr_enabled`` marks the instantaneous chi3 (Kerr) channel and keeps the
+    existing dynamic-curl fast path when it is the only nonlinearity.
+    ``nonlinear_general_enabled`` switches to the general nonlinear coefficient
+    kernel, which additionally handles the chi2 channel and a field-dependent
+    conductivity and therefore rewrites both the decay and curl coefficients
+    every step.
+    """
     solver.kerr_enabled = bool(torch.any(material_model["kerr_chi3"] != 0).item())
+    solver.chi2_enabled = bool(torch.any(material_model["chi2"] != 0).item())
+    solver.nonlinear_enabled = solver.kerr_enabled or solver.chi2_enabled
+    solver.nonlinear_general_enabled = solver.chi2_enabled
     solver.kerr_chi3 = material_model["kerr_chi3"]
-    if solver.kerr_enabled:
+    if solver.nonlinear_enabled:
         solver.kerr_chi3_Ex = average_node_to_component(solver, solver.kerr_chi3, "Ex")
         solver.kerr_chi3_Ey = average_node_to_component(solver, solver.kerr_chi3, "Ey")
         solver.kerr_chi3_Ez = average_node_to_component(solver, solver.kerr_chi3, "Ez")
@@ -69,16 +96,36 @@ def build_materials(solver, scene):
         solver.cex_curl_dynamic = None
         solver.cey_curl_dynamic = None
         solver.cez_curl_dynamic = None
-
-    build_full_anisotropy(solver, material_model)
-
-    build_dispersive_templates(solver, material_model)
-    build_magnetic_dispersive_templates(solver, material_model)
-    solver.dispersive_enabled = solver.electric_dispersive_enabled or solver.magnetic_dispersive_enabled
-    if solver.full_aniso_enabled and solver.dispersive_enabled:
-        raise NotImplementedError(
-            "FDTD full (off-diagonal) anisotropic media cannot be combined with dispersive materials in the same Scene yet."
-        )
+    if solver.nonlinear_general_enabled:
+        chi2 = material_model["chi2"]
+        solver.nonlinear_chi2_Ex = average_node_to_component(solver, chi2, "Ex")
+        solver.nonlinear_chi2_Ey = average_node_to_component(solver, chi2, "Ey")
+        solver.nonlinear_chi2_Ez = average_node_to_component(solver, chi2, "Ez")
+        # Field-dependent conductivity channel of the general nonlinear kernel
+        # (sigma_NL = tpa_sigma * |E|^2); zero until a TwoPhotonAbsorption
+        # descriptor populates the compiled model.
+        tpa_sigma = material_model.get("tpa_sigma")
+        if tpa_sigma is None:
+            solver.tpa_sigma_Ex = torch.zeros_like(solver.eps_Ex)
+            solver.tpa_sigma_Ey = torch.zeros_like(solver.eps_Ey)
+            solver.tpa_sigma_Ez = torch.zeros_like(solver.eps_Ez)
+        else:
+            solver.tpa_sigma_Ex = average_node_to_component(solver, tpa_sigma, "Ex")
+            solver.tpa_sigma_Ey = average_node_to_component(solver, tpa_sigma, "Ey")
+            solver.tpa_sigma_Ez = average_node_to_component(solver, tpa_sigma, "Ez")
+        solver.cex_decay_dynamic = torch.empty_like(solver.eps_Ex)
+        solver.cey_decay_dynamic = torch.empty_like(solver.eps_Ey)
+        solver.cez_decay_dynamic = torch.empty_like(solver.eps_Ez)
+    else:
+        solver.nonlinear_chi2_Ex = None
+        solver.nonlinear_chi2_Ey = None
+        solver.nonlinear_chi2_Ez = None
+        solver.tpa_sigma_Ex = None
+        solver.tpa_sigma_Ey = None
+        solver.tpa_sigma_Ez = None
+        solver.cex_decay_dynamic = None
+        solver.cey_decay_dynamic = None
+        solver.cez_decay_dynamic = None
 
 
 _ANISO_ROW_PAIRS = {
@@ -136,9 +183,9 @@ def build_full_anisotropy(solver, material_model):
         raise NotImplementedError(
             "FDTD full (off-diagonal) anisotropic media cannot be combined with electric conductivity yet."
         )
-    if solver.kerr_enabled:
+    if solver.nonlinear_enabled:
         raise NotImplementedError(
-            "FDTD full (off-diagonal) anisotropic media cannot be combined with Kerr media."
+            "FDTD full (off-diagonal) anisotropic media cannot be combined with nonlinear media."
         )
 
     eps_components = material_model["eps_components"]
@@ -682,6 +729,12 @@ def _apply_pec_edge_suppression(solver):
     solver.cey_curl = (solver.cey_curl * open_fractions["Ey"]).contiguous()
     solver.cez_decay = (solver.cez_decay * open_fractions["Ez"]).contiguous()
     solver.cez_curl = (solver.cez_curl * open_fractions["Ez"]).contiguous()
+    if getattr(solver, "cex_decay_external", None) is not None:
+        # The general nonlinear kernel recomposes decay/curl from this external
+        # factor each step, so the PEC open fraction must fold into it too.
+        solver.cex_decay_external = (solver.cex_decay_external * open_fractions["Ex"]).contiguous()
+        solver.cey_decay_external = (solver.cey_decay_external * open_fractions["Ey"]).contiguous()
+        solver.cez_decay_external = (solver.cez_decay_external * open_fractions["Ez"]).contiguous()
     if getattr(solver, "full_aniso_enabled", False):
         # The off-diagonal coupling terms are additive corrections to the same
         # E edges, so PEC-covered edges must suppress them identically.
@@ -691,6 +744,32 @@ def _apply_pec_edge_suppression(solver):
         solver.cey_aniso_z = (solver.cey_aniso_z * open_fractions["Ey"]).contiguous()
         solver.cez_aniso_x = (solver.cez_aniso_x * open_fractions["Ez"]).contiguous()
         solver.cez_aniso_y = (solver.cez_aniso_y * open_fractions["Ez"]).contiguous()
+
+
+def _store_nonlinear_external_decay(solver, ex_decay, ey_decay, ez_decay):
+    """Keep the material-independent (PML) decay factors for the nonlinear kernel.
+
+    The general nonlinear coefficient kernel recomposes the semi-implicit lossy
+    decay/curl factors from the linear permittivity, the static conductivity, and
+    the field-dependent nonlinear terms every step, so it needs the external
+    (PML split-field) decay separately from the static material decay that
+    ``_electric_update_coefficients`` folds into ``c*_decay``. The PEC open
+    fractions are folded in afterwards by ``_apply_pec_edge_suppression``.
+    """
+    if not getattr(solver, "nonlinear_general_enabled", False):
+        solver.cex_decay_external = None
+        solver.cey_decay_external = None
+        solver.cez_decay_external = None
+        return
+    solver.cex_decay_external = (
+        torch.ones_like(solver.eps_Ex) if ex_decay is None else ex_decay.clone()
+    ).contiguous()
+    solver.cey_decay_external = (
+        torch.ones_like(solver.eps_Ey) if ey_decay is None else ey_decay.clone()
+    ).contiguous()
+    solver.cez_decay_external = (
+        torch.ones_like(solver.eps_Ez) if ez_decay is None else ez_decay.clone()
+    ).contiguous()
 
 
 def _electric_epsilon_tensors(solver):
@@ -803,6 +882,7 @@ def build_update_coefficients(solver):
         solver.chy_curl = (solver.dt / solver.mu_Hy).contiguous()
         solver.chz_decay = torch.ones_like(solver.mu_Hz).contiguous()
         solver.chz_curl = (solver.dt / solver.mu_Hz).contiguous()
+        _store_nonlinear_external_decay(solver, None, None, None)
         _build_full_aniso_curl_coefficients(solver)
         _apply_pec_edge_suppression(solver)
         return
@@ -870,8 +950,78 @@ def build_update_coefficients(solver):
     solver.chz_decay = hz_decay.contiguous()
     solver.chz_curl = ((solver.dt / solver.mu_Hz) * hz_decay).contiguous()
 
+    _store_nonlinear_external_decay(solver, ex_decay, ey_decay, ez_decay)
     _build_full_aniso_curl_coefficients(solver)
     _apply_pec_edge_suppression(solver)
+
+
+def update_nonlinear_electric_coefficients(solver):
+    """Recompute the field-dependent electric update coefficients for this step.
+
+    Pure-chi3 (Kerr) scenes keep the existing curl-only kernel; scenes with a
+    chi2 channel or field-dependent conductivity use the general nonlinear
+    kernel that rewrites both the decay and curl coefficients.
+    """
+    if not getattr(solver, "nonlinear_enabled", False):
+        return
+    if getattr(solver, "nonlinear_general_enabled", False):
+        update_general_nonlinear_coefficients(solver)
+        return
+    update_kerr_electric_curls(solver)
+
+
+def update_general_nonlinear_coefficients(solver):
+    for component_name, decay_dynamic, curl_dynamic, eps, external, sigma_static, chi2, chi3, tpa in (
+        (
+            "Ex",
+            solver.cex_decay_dynamic,
+            solver.cex_curl_dynamic,
+            solver.eps_Ex,
+            solver.cex_decay_external,
+            solver.sigma_e_Ex,
+            solver.nonlinear_chi2_Ex,
+            solver.kerr_chi3_Ex,
+            solver.tpa_sigma_Ex,
+        ),
+        (
+            "Ey",
+            solver.cey_decay_dynamic,
+            solver.cey_curl_dynamic,
+            solver.eps_Ey,
+            solver.cey_decay_external,
+            solver.sigma_e_Ey,
+            solver.nonlinear_chi2_Ey,
+            solver.kerr_chi3_Ey,
+            solver.tpa_sigma_Ey,
+        ),
+        (
+            "Ez",
+            solver.cez_decay_dynamic,
+            solver.cez_curl_dynamic,
+            solver.eps_Ez,
+            solver.cez_decay_external,
+            solver.sigma_e_Ez,
+            solver.nonlinear_chi2_Ez,
+            solver.kerr_chi3_Ez,
+            solver.tpa_sigma_Ez,
+        ),
+    ):
+        solver.fdtd_module.updateNonlinearElectricCoefficients3D(
+            DynamicDecay=decay_dynamic,
+            DynamicCurl=curl_dynamic,
+            Ex=solver.Ex,
+            Ey=solver.Ey,
+            Ez=solver.Ez,
+            LinearPermittivity=eps,
+            ExternalDecay=external,
+            SigmaStatic=sigma_static,
+            Chi2=chi2,
+            Chi3=chi3,
+            TpaSigma=tpa,
+            component=component_name,
+            dt=solver.dt,
+            eps0=solver.eps0,
+        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes[component_name])
 
 
 def update_kerr_electric_curls(solver):

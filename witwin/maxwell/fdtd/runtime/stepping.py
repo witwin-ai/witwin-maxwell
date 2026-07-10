@@ -286,18 +286,28 @@ def update_magnetic_fields(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
 
 
 def _electric_curl_tensors(solver):
-    if getattr(solver, "kerr_enabled", False):
+    if getattr(solver, "nonlinear_enabled", False):
         return solver.cex_curl_dynamic, solver.cey_curl_dynamic, solver.cez_curl_dynamic
     return solver.cex_curl, solver.cey_curl, solver.cez_curl
 
 
+def _electric_decay_tensors(solver):
+    # The general nonlinear kernel (chi2 / field-dependent conductivity)
+    # rewrites the decay coefficients per step; pure-chi3 Kerr keeps the
+    # static decay tensors.
+    if getattr(solver, "nonlinear_general_enabled", False):
+        return solver.cex_decay_dynamic, solver.cey_decay_dynamic, solver.cez_decay_dynamic
+    return solver.cex_decay, solver.cey_decay, solver.cez_decay
+
+
 def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
     ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
+    ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
     solver.fdtd_module.updateElectricFieldExCpml3D(
         Ex=ex,
         Hy=hy,
         Hz=hz,
-        ExDecay=solver.cex_decay,
+        ExDecay=ex_decay,
         ExCurl=ex_curl,
         PsiExY=solver.psi_ex_y,
         PsiExZ=solver.psi_ex_z,
@@ -318,7 +328,7 @@ def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
         Ey=ey,
         Hx=hx,
         Hz=hz,
-        EyDecay=solver.cey_decay,
+        EyDecay=ey_decay,
         EyCurl=ey_curl,
         PsiEyX=solver.psi_ey_x,
         PsiEyZ=solver.psi_ey_z,
@@ -339,7 +349,7 @@ def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
         Ez=ez,
         Hx=hx,
         Hy=hy,
-        EzDecay=solver.cez_decay,
+        EzDecay=ez_decay,
         EzCurl=ez_curl,
         PsiEzX=solver.psi_ez_x,
         PsiEzY=solver.psi_ez_y,
@@ -366,12 +376,13 @@ def update_electric_fields_cpml_compressed(solver, ex, ey, ez, hx, hy, hz):
     psi_ez_x_low, psi_ez_x_high_start, psi_ez_x_high = cpml_layout_params(solver, "psi_ez_x")
     psi_ez_y_low, psi_ez_y_high_start, psi_ez_y_high = cpml_layout_params(solver, "psi_ez_y")
     ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
+    ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
 
     solver.fdtd_module.updateElectricFieldExCpmlCompressed3D(
         Ex=ex,
         Hy=hy,
         Hz=hz,
-        ExDecay=solver.cex_decay,
+        ExDecay=ex_decay,
         ExCurl=ex_curl,
         PsiExY=solver.psi_ex_y,
         PsiExZ=solver.psi_ex_z,
@@ -398,7 +409,7 @@ def update_electric_fields_cpml_compressed(solver, ex, ey, ez, hx, hy, hz):
         Ey=ey,
         Hx=hx,
         Hz=hz,
-        EyDecay=solver.cey_decay,
+        EyDecay=ey_decay,
         EyCurl=ey_curl,
         PsiEyX=solver.psi_ey_x,
         PsiEyZ=solver.psi_ey_z,
@@ -425,7 +436,7 @@ def update_electric_fields_cpml_compressed(solver, ex, ey, ez, hx, hy, hz):
         Ez=ez,
         Hx=hx,
         Hy=hy,
-        EzDecay=solver.cez_decay,
+        EzDecay=ez_decay,
         EzCurl=ez_curl,
         PsiEzX=solver.psi_ez_x,
         PsiEzY=solver.psi_ez_y,
@@ -459,11 +470,12 @@ def update_electric_fields_cpml(solver, ex, ey, ez, hx, hy, hz):
 
 def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
     ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
+    ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
     solver.fdtd_module.updateElectricFieldExStandard3D(
         Ex=ex,
         Hy=hy,
         Hz=hz,
-        ExDecay=solver.cex_decay,
+        ExDecay=ex_decay,
         ExCurl=ex_curl,
         invDy=solver.inv_dy_e,
         invDz=solver.inv_dz_e,
@@ -476,7 +488,7 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
         Ey=ey,
         Hx=hx,
         Hz=hz,
-        EyDecay=solver.cey_decay,
+        EyDecay=ey_decay,
         EyCurl=ey_curl,
         invDx=solver.inv_dx_e,
         invDz=solver.inv_dz_e,
@@ -489,7 +501,7 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
         Ez=ez,
         Hx=hx,
         Hy=hy,
-        EzDecay=solver.cez_decay,
+        EzDecay=ez_decay,
         EzCurl=ez_curl,
         invDx=solver.inv_dx_e,
         invDy=solver.inv_dy_e,
@@ -570,8 +582,8 @@ def apply_full_aniso_corrections(solver):
 
 
 def update_electric_fields_bloch(solver):
-    if getattr(solver, "kerr_enabled", False):
-        raise NotImplementedError("FDTD Kerr media are not implemented for Bloch / complex-field runs.")
+    if getattr(solver, "nonlinear_enabled", False):
+        raise NotImplementedError("FDTD nonlinear media are not implemented for Bloch / complex-field runs.")
     solver.fdtd_module.updateElectricFieldExBloch3D(
         ExReal=solver.Ex,
         ExImag=solver.Ex_imag,
@@ -623,8 +635,8 @@ def update_electric_fields_bloch(solver):
 
 
 def update_electric_fields_bloch_xy_standard_z(solver):
-    if getattr(solver, "kerr_enabled", False):
-        raise NotImplementedError("FDTD Kerr media are not implemented for Bloch / complex-field runs.")
+    if getattr(solver, "nonlinear_enabled", False):
+        raise NotImplementedError("FDTD nonlinear media are not implemented for Bloch / complex-field runs.")
     solver.fdtd_module.updateElectricFieldExBlochYStandardZ3D(
         ExReal=solver.Ex,
         ExImag=solver.Ex_imag,
@@ -1037,8 +1049,8 @@ def _field_update_block(solver, time_value):
             update_electric_fields_bloch(solver)
     else:
         solver._advance_dispersive_state()
-        if solver.kerr_enabled:
-            solver._update_kerr_electric_curls()
+        if solver.nonlinear_enabled:
+            solver._update_nonlinear_electric_coefficients()
         update_electric_fields(solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
         if getattr(solver, "full_aniso_enabled", False):
             apply_full_aniso_corrections(solver)
@@ -1065,7 +1077,7 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         and not solver.tfsf_enabled
         and not solver._magnetic_source_terms
         and not has_complex_fields(solver)
-        and not getattr(solver, "kerr_enabled", False)
+        and not getattr(solver, "nonlinear_enabled", False)
         and not getattr(solver, "dispersive_enabled", False)
     )
     if not graphable:

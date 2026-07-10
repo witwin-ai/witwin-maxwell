@@ -80,6 +80,7 @@ from .runtime import (
     sync_observer_primary_state as sync_observer_primary_state_impl,
     synchronize_device as synchronize_device_impl,
     update_kerr_electric_curls as update_kerr_electric_curls_impl,
+    update_nonlinear_electric_coefficients as update_nonlinear_electric_coefficients_impl,
     update_electric_fields as update_electric_fields_impl,
     update_electric_fields_bloch as update_electric_fields_bloch_impl,
     update_electric_fields_cpml as update_electric_fields_cpml_impl,
@@ -304,6 +305,9 @@ class FDTD:
 
     def _update_kerr_electric_curls(self):
         update_kerr_electric_curls_impl(self)
+
+    def _update_nonlinear_electric_coefficients(self):
+        update_nonlinear_electric_coefficients_impl(self)
 
     def _get_material_permittivity(self):
         return get_material_permittivity_impl(self)

@@ -523,7 +523,7 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
                 debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-9),),
                 kerr_chi3=1.0e-10,
             ),
-            "Kerr media cannot be combined with dispersive poles",
+            "nonlinear Material cannot carry dispersive poles",
         ),
         (
             lambda: mw.Material(
@@ -531,7 +531,7 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
                 epsilon_tensor=mw.DiagonalTensor3(2.0, 2.5, 3.0),
                 kerr_chi3=1.0e-10,
             ),
-            "Kerr media cannot be combined with anisotropic tensors",
+            "nonlinear Material cannot carry anisotropic tensors",
         ),
     ],
 )
@@ -540,37 +540,31 @@ def test_medium_rejects_unsupported_tensor_and_nonlinear_combinations(factory, m
         factory()
 
 
-def test_scene_rejects_kerr_combined_with_other_dispersive_or_anisotropic_materials():
-    dispersive_scene = _build_scene()
-    dispersive_scene.add_structure(
+def test_scene_allows_kerr_combined_with_other_dispersive_or_anisotropic_materials():
+    scene = _build_scene()
+    scene.add_structure(
         mw.Structure(
             name="kerr_box",
             geometry=mw.Box(position=(-0.2, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
             material=mw.Material(eps_r=2.0, kerr_chi3=1.0e-10),
         )
     )
-    with pytest.raises(NotImplementedError, match="same Scene"):
-        dispersive_scene.add_structure(
-            mw.Structure(
-                name="debye_box",
-                geometry=mw.Box(position=(0.2, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
-                material=mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=1.0e-9),
-            )
+    scene.add_structure(
+        mw.Structure(
+            name="debye_box",
+            geometry=mw.Box(position=(0.2, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
+            material=mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=1.0e-9),
         )
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="aniso_box",
+            geometry=mw.Box(position=(0.2, 0.0, 0.25), size=(0.3, 0.3, 0.1)),
+            material=mw.Material(eps_r=2.0, epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
+        )
+    )
 
-    anisotropic_scene = _build_scene()
-    anisotropic_scene.add_structure(
-        mw.Structure(
-            name="kerr_box",
-            geometry=mw.Box(position=(-0.2, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
-            material=mw.Material(eps_r=2.0, kerr_chi3=1.0e-10),
-        )
-    )
-    with pytest.raises(NotImplementedError, match="same Scene"):
-        anisotropic_scene.add_structure(
-            mw.Structure(
-                name="aniso_box",
-                geometry=mw.Box(position=(0.2, 0.0, 0.0), size=(0.3, 0.3, 0.3)),
-                material=mw.Material(eps_r=2.0, epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
-            )
-        )
+    model = _prepared_scene(scene).compile_materials()
+
+    assert bool(torch.any(model["kerr_chi3"] != 0))
+    assert model["debye_poles"] and bool(torch.any(model["debye_poles"][0]["weight"] != 0))

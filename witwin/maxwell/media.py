@@ -340,6 +340,27 @@ class CustomLorentzPole(CustomPole):
 
 
 @dataclass(frozen=True)
+class NonlinearSusceptibility:
+    """Instantaneous nonlinear susceptibility descriptor.
+
+    ``chi2`` [m/V] adds the second-order polarization ``P_i = eps0 * chi2 * E_i^2``
+    per field component (diagonal scalar model), which drives second-harmonic
+    generation and optical rectification. Composes with a ``Material`` through the
+    ``nonlinearity=`` argument.
+    """
+
+    chi2: float = 0.0
+
+    def __post_init__(self):
+        object.__setattr__(self, "chi2", _coerce_real_scalar(self.chi2, name="chi2"))
+        if float(self.chi2) == 0.0:
+            raise ValueError("NonlinearSusceptibility requires a nonzero chi2.")
+
+
+_NONLINEAR_SPEC_TYPES = (NonlinearSusceptibility,)
+
+
+@dataclass(frozen=True)
 class DiagonalTensor3:
     xx: float
     yy: float
@@ -375,6 +396,7 @@ class Material(CoreMaterial):
     sigma_e_tensor: DiagonalTensor3 | Tensor3x3 | None
     orientation: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] | None
     kerr_chi3: float | None
+    nonlinearity: tuple
     pec: bool
 
     def __init__(
@@ -395,6 +417,7 @@ class Material(CoreMaterial):
         sigma_e_tensor: DiagonalTensor3 | Tensor3x3 | None = None,
         orientation=None,
         kerr_chi3: float | None = None,
+        nonlinearity=None,
         pec: bool = False,
     ):
         super().__init__(eps_r=eps_r, mu_r=mu_r, sigma_e=sigma_e, name=name)
@@ -410,6 +433,7 @@ class Material(CoreMaterial):
         object.__setattr__(self, "sigma_e_tensor", sigma_e_tensor)
         object.__setattr__(self, "orientation", None if orientation is None else _normalize_tensor_rows(orientation, name="orientation"))
         object.__setattr__(self, "kerr_chi3", None if kerr_chi3 is None else _coerce_real_scalar(kerr_chi3, name="kerr_chi3"))
+        object.__setattr__(self, "nonlinearity", _normalize_poles(nonlinearity, _NONLINEAR_SPEC_TYPES, name="nonlinearity"))
 
         if self.orientation is not None:
             raise NotImplementedError("Material.orientation is not supported yet; use axis-aligned DiagonalTensor3 media only.")
@@ -433,9 +457,9 @@ class Material(CoreMaterial):
         if self.is_magnetic_dispersive and self.mu_tensor is not None:
             raise NotImplementedError("Magnetic dispersion with mu_tensor is not supported yet.")
         if self.is_nonlinear and self.is_dispersive:
-            raise NotImplementedError("Kerr media cannot be combined with dispersive poles in v1.")
+            raise NotImplementedError("A nonlinear Material cannot carry dispersive poles in v1.")
         if self.is_nonlinear and self.is_anisotropic:
-            raise NotImplementedError("Kerr media cannot be combined with anisotropic tensors in v1.")
+            raise NotImplementedError("A nonlinear Material cannot carry anisotropic tensors in v1.")
 
         if self.pec:
             if (
@@ -498,8 +522,20 @@ class Material(CoreMaterial):
         return isinstance(self.epsilon_tensor, Tensor3x3)
 
     @property
+    def nonlinear_chi2(self) -> float:
+        """Total instantaneous second-order susceptibility [m/V]."""
+        return float(
+            sum(spec.chi2 for spec in self.nonlinearity if isinstance(spec, NonlinearSusceptibility))
+        )
+
+    @property
+    def nonlinear_chi3(self) -> float:
+        """Total instantaneous third-order (Kerr) susceptibility [m^2/V^2]."""
+        return float(self.kerr_chi3 or 0.0)
+
+    @property
     def is_nonlinear(self) -> bool:
-        return self.kerr_chi3 is not None and float(self.kerr_chi3) != 0.0
+        return self.nonlinear_chi2 != 0.0 or self.nonlinear_chi3 != 0.0
 
     @property
     def is_pec(self) -> bool:
@@ -761,6 +797,7 @@ class PerturbationMedium(Material):
             mu_tensor=getattr(base, "mu_tensor", None),
             sigma_e_tensor=getattr(base, "sigma_e_tensor", None),
             kerr_chi3=getattr(base, "kerr_chi3", None),
+            nonlinearity=getattr(base, "nonlinearity", ()),
         )
         object.__setattr__(self, "perturbation", perturbation)
         object.__setattr__(self, "eps_sensitivity", sensitivity)

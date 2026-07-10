@@ -9,6 +9,7 @@ from .media import (
     DrudePole,
     LorentzPole,
     Material,
+    NonlinearSusceptibility,
     PerturbationMedium,
     Tensor3x3,
 )
@@ -116,6 +117,7 @@ __all__ = [
     "ModeMonitor",
     "ModePort",
     "ModeSource",
+    "NonlinearSusceptibility",
     "PermittivityMonitor",
     "PerturbationMedium",
     "PlaneMonitor",

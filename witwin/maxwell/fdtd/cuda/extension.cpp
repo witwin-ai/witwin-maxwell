@@ -474,6 +474,21 @@ void update_kerr_ez_curl_cuda(
     const torch::stable::Tensor& chi3,
     double dt,
     double eps0);
+void update_nonlinear_coefficients_cuda(
+    torch::stable::Tensor dynamic_decay,
+    torch::stable::Tensor dynamic_curl,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    const torch::stable::Tensor& linear_permittivity,
+    const torch::stable::Tensor& external_decay,
+    const torch::stable::Tensor& sigma_static,
+    const torch::stable::Tensor& chi2,
+    const torch::stable::Tensor& chi3,
+    const torch::stable::Tensor& tpa_sigma,
+    int64_t component,
+    double dt,
+    double eps0);
 void update_electric_ex_full_aniso_cuda(
     torch::stable::Tensor ex,
     const torch::stable::Tensor& hx,
@@ -1226,6 +1241,7 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("update_kerr_ex_curl(Tensor(a!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor ex_decay, Tensor chi3, float dt, float eps0) -> ()");
   m.def("update_kerr_ey_curl(Tensor(a!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor ey_decay, Tensor chi3, float dt, float eps0) -> ()");
   m.def("update_kerr_ez_curl(Tensor(a!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor ez_decay, Tensor chi3, float dt, float eps0) -> ()");
+  m.def("update_nonlinear_coefficients(Tensor(a!) dynamic_decay, Tensor(b!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor external_decay, Tensor sigma_static, Tensor chi2, Tensor chi3, Tensor tpa_sigma, int component, float dt, float eps0) -> ()");
   m.def("update_electric_ex_full_aniso(Tensor(a!) ex, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_y, Tensor coeff_z, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, int periodic_x, int periodic_y, int periodic_z) -> ()");
   m.def("update_electric_ey_full_aniso(Tensor(a!) ey, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_x, Tensor coeff_z, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, int periodic_x, int periodic_y, int periodic_z) -> ()");
   m.def("update_electric_ez_full_aniso(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_x, Tensor coeff_y, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, int periodic_x, int periodic_y, int periodic_z) -> ()");
@@ -1316,6 +1332,7 @@ STABLE_TORCH_LIBRARY_IMPL(witwin_maxwell_fdtd_cuda, CUDA, m) {
   m.impl("update_kerr_ex_curl", TORCH_BOX(&update_kerr_ex_curl_cuda));
   m.impl("update_kerr_ey_curl", TORCH_BOX(&update_kerr_ey_curl_cuda));
   m.impl("update_kerr_ez_curl", TORCH_BOX(&update_kerr_ez_curl_cuda));
+  m.impl("update_nonlinear_coefficients", TORCH_BOX(&update_nonlinear_coefficients_cuda));
   m.impl("update_electric_ex_full_aniso", TORCH_BOX(&update_electric_ex_full_aniso_cuda));
   m.impl("update_electric_ey_full_aniso", TORCH_BOX(&update_electric_ey_full_aniso_cuda));
   m.impl("update_electric_ez_full_aniso", TORCH_BOX(&update_electric_ez_full_aniso_cuda));

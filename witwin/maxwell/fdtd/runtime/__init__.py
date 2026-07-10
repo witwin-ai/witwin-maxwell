@@ -17,6 +17,7 @@ from .materials import (
     initialize_dispersive_state,
     initialize_magnetic_dispersive_state,
     update_kerr_electric_curls,
+    update_nonlinear_electric_coefficients,
 )
 from .module_cache import get_fdtd_module, require_cuda_scene
 from .spectral import (
@@ -109,6 +110,7 @@ __all__ = [
     "sync_observer_primary_state",
     "synchronize_device",
     "update_kerr_electric_curls",
+    "update_nonlinear_electric_coefficients",
     "update_electric_fields",
     "update_electric_fields_bloch",
     "update_electric_fields_cpml",

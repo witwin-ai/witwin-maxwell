@@ -1707,6 +1707,46 @@ def _update_kerr_ez(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, EzDecay, Ker
             )
 
 
+_NONLINEAR_COMPONENT_CODES = {"Ex": 0, "Ey": 1, "Ez": 2}
+
+
+def _update_nonlinear_coefficients(
+    *,
+    DynamicDecay,
+    DynamicCurl,
+    Ex,
+    Ey,
+    Ez,
+    LinearPermittivity,
+    ExternalDecay,
+    SigmaStatic,
+    Chi2,
+    Chi3,
+    TpaSigma,
+    component,
+    dt,
+    eps0,
+):
+    _invalidate_uniform_scalar(DynamicDecay)
+    _invalidate_uniform_scalar(DynamicCurl)
+    get_compiled_extension().update_nonlinear_coefficients(
+                DynamicDecay,
+                DynamicCurl,
+                Ex,
+                Ey,
+                Ez,
+                LinearPermittivity,
+                ExternalDecay,
+                SigmaStatic,
+                Chi2,
+                Chi3,
+                TpaSigma,
+                _NONLINEAR_COMPONENT_CODES[component],
+                float(dt),
+                float(eps0),
+            )
+
+
 def _electric_ex_full_aniso(*, Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz, periodicX, periodicY, periodicZ):
     _require_cuda_tensors(Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz)
     get_compiled_extension().update_electric_ex_full_aniso(
@@ -2501,6 +2541,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "updateKerrElectricFieldExCurl3D": _update_kerr_ex,
     "updateKerrElectricFieldEyCurl3D": _update_kerr_ey,
     "updateKerrElectricFieldEzCurl3D": _update_kerr_ez,
+    "updateNonlinearElectricCoefficients3D": _update_nonlinear_coefficients,
     "updateElectricFieldExFullAniso3D": _electric_ex_full_aniso,
     "updateElectricFieldEyFullAniso3D": _electric_ey_full_aniso,
     "updateElectricFieldEzFullAniso3D": _electric_ez_full_aniso,

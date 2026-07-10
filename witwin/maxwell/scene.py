@@ -10,7 +10,6 @@ import torch
 from witwin.core import Structure
 from .ports import ModePort
 from .compiler.materials import (
-    _validate_scene_material_combinations,
     compile_material_model,
     evaluate_material_components,
     evaluate_material_permeability,
@@ -881,7 +880,6 @@ class Scene:
         if not isinstance(structure, Structure):
             raise TypeError("Maxwell Scene structures must be witwin.core.Structure instances.")
         self.structures.append(structure)
-        _validate_scene_material_combinations(self)
         return self
 
     def add_source(self, source):
@@ -1135,7 +1133,6 @@ class PreparedScene(Scene):
 
     def add_structure(self, structure: Structure):
         super().add_structure(structure)
-        _validate_scene_material_combinations(self)
         self._invalidate_material_cache()
         return self
 

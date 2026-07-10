@@ -124,11 +124,16 @@ __device__ __forceinline__ float sample_clamped(
       static_cast<unsigned int>(size_z))];
 }
 
+// Collocate the three E components onto the Yee edge of `Component`
+// (0 = Ex, 1 = Ey, 2 = Ez). The two off-axis components are 4-point averaged
+// from the surrounding edges (clamped at domain faces); the own component is
+// read directly at `linear`.
 template <int Component>
-__global__ void update_kerr_curl_kernel(
-    int dynamic_x,
-    int dynamic_y,
-    int dynamic_z,
+__device__ __forceinline__ void collocate_electric_components(
+    int i,
+    int j,
+    int k,
+    long long linear,
     int ex_x,
     int ex_y,
     int ex_z,
@@ -141,28 +146,9 @@ __global__ void update_kerr_curl_kernel(
     const float* __restrict__ ex,
     const float* __restrict__ ey,
     const float* __restrict__ ez,
-    const float* __restrict__ linear_permittivity,
-    const float* __restrict__ decay,
-    const float* __restrict__ chi3,
-    float dt,
-    float eps0,
-    float* __restrict__ dynamic_curl) {
-  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i_u >= static_cast<unsigned int>(dynamic_x)
-      || j_u >= static_cast<unsigned int>(dynamic_y)
-      || k_u >= static_cast<unsigned int>(dynamic_z)) {
-    return;
-  }
-  const long long linear = offset3d(i_u, j_u, k_u, dynamic_y, dynamic_z);
-  const int i = static_cast<int>(i_u);
-  const int j = static_cast<int>(j_u);
-  const int k = static_cast<int>(k_u);
-
-  float ex_value;
-  float ey_value;
-  float ez_value;
+    float& ex_value,
+    float& ey_value,
+    float& ez_value) {
   if constexpr (Component == 0) {
     ex_value = ex[linear];
     const bool ey_interior = i + 1 < ey_x && j > 0 && j < ey_y && k < ey_z;
@@ -242,6 +228,54 @@ __global__ void update_kerr_curl_kernel(
               sample_clamped(ey, i, j, k + 1, ey_x, ey_y, ey_z));
     ez_value = ez[linear];
   }
+}
+
+template <int Component>
+__global__ void update_kerr_curl_kernel(
+    int dynamic_x,
+    int dynamic_y,
+    int dynamic_z,
+    int ex_x,
+    int ex_y,
+    int ex_z,
+    int ey_x,
+    int ey_y,
+    int ey_z,
+    int ez_x,
+    int ez_y,
+    int ez_z,
+    const float* __restrict__ ex,
+    const float* __restrict__ ey,
+    const float* __restrict__ ez,
+    const float* __restrict__ linear_permittivity,
+    const float* __restrict__ decay,
+    const float* __restrict__ chi3,
+    float dt,
+    float eps0,
+    float* __restrict__ dynamic_curl) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i_u >= static_cast<unsigned int>(dynamic_x)
+      || j_u >= static_cast<unsigned int>(dynamic_y)
+      || k_u >= static_cast<unsigned int>(dynamic_z)) {
+    return;
+  }
+  const long long linear = offset3d(i_u, j_u, k_u, dynamic_y, dynamic_z);
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
+
+  float ex_value;
+  float ey_value;
+  float ez_value;
+  collocate_electric_components<Component>(
+      i, j, k, linear,
+      ex_x, ex_y, ex_z,
+      ey_x, ey_y, ey_z,
+      ez_x, ez_y, ez_z,
+      ex, ey, ez,
+      ex_value, ey_value, ez_value);
 
   float effective =
       linear_permittivity[linear] +
@@ -251,6 +285,95 @@ __global__ void update_kerr_curl_kernel(
     effective = floor;
   }
   dynamic_curl[linear] = (dt / effective) * decay[linear];
+}
+
+// General instantaneous-nonlinearity coefficient kernel. Recomposes the
+// semi-implicit lossy decay/curl pair every step from
+//   eps_eff  = eps_lin + eps0 * (chi2 * E_own + chi3 * |E|^2)
+//   sigma    = sigma_static + tpa_sigma * |E|^2
+//   half     = 0.5 * sigma * dt / eps_eff
+//   decay    = external * (1 - half) / (1 + half)
+//   curl     = external * (dt / eps_eff) / (1 + half)
+// where `external` carries the PML split-field decay and the PEC open
+// fraction. With all nonlinear channels zero this reproduces the static
+// coefficients of `_electric_update_coefficients` exactly.
+template <int Component>
+__global__ void update_nonlinear_coefficients_kernel(
+    int dynamic_x,
+    int dynamic_y,
+    int dynamic_z,
+    int ex_x,
+    int ex_y,
+    int ex_z,
+    int ey_x,
+    int ey_y,
+    int ey_z,
+    int ez_x,
+    int ez_y,
+    int ez_z,
+    const float* __restrict__ ex,
+    const float* __restrict__ ey,
+    const float* __restrict__ ez,
+    const float* __restrict__ linear_permittivity,
+    const float* __restrict__ external_decay,
+    const float* __restrict__ sigma_static,
+    const float* __restrict__ chi2,
+    const float* __restrict__ chi3,
+    const float* __restrict__ tpa_sigma,
+    float dt,
+    float eps0,
+    float* __restrict__ dynamic_decay,
+    float* __restrict__ dynamic_curl) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i_u >= static_cast<unsigned int>(dynamic_x)
+      || j_u >= static_cast<unsigned int>(dynamic_y)
+      || k_u >= static_cast<unsigned int>(dynamic_z)) {
+    return;
+  }
+  const long long linear = offset3d(i_u, j_u, k_u, dynamic_y, dynamic_z);
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
+
+  float ex_value;
+  float ey_value;
+  float ez_value;
+  collocate_electric_components<Component>(
+      i, j, k, linear,
+      ex_x, ex_y, ex_z,
+      ey_x, ey_y, ey_z,
+      ez_x, ez_y, ez_z,
+      ex, ey, ez,
+      ex_value, ey_value, ez_value);
+
+  const float field_sq = ex_value * ex_value + ey_value * ey_value + ez_value * ez_value;
+  float own_value;
+  if constexpr (Component == 0) {
+    own_value = ex_value;
+  } else if constexpr (Component == 1) {
+    own_value = ey_value;
+  } else {
+    own_value = ez_value;
+  }
+
+  float effective =
+      linear_permittivity[linear] +
+      eps0 * (chi2[linear] * own_value + chi3[linear] * field_sq);
+  const float floor = 1.0e-12f * eps0;
+  if (effective < floor) {
+    effective = floor;
+  }
+  float sigma = sigma_static[linear] + tpa_sigma[linear] * field_sq;
+  if (sigma < 0.0f) {
+    sigma = 0.0f;
+  }
+  const float half = 0.5f * sigma * dt / effective;
+  const float inv_denom = 1.0f / (1.0f + half);
+  const float external = external_decay[linear];
+  dynamic_decay[linear] = external * (1.0f - half) * inv_denom;
+  dynamic_curl[linear] = external * (dt / effective) * inv_denom;
 }
 
 template <int Component>
@@ -338,6 +461,104 @@ void launch_kerr_curl(
     launch_kerr_curl_kernel<1>(dynamic_curl, ex, ey, ez, linear_permittivity, decay, chi3, dt, eps0);
   } else {
     launch_kerr_curl_kernel<2>(dynamic_curl, ex, ey, ez, linear_permittivity, decay, chi3, dt, eps0);
+  }
+  WITWIN_CUDA_CHECK();
+}
+
+template <int Component>
+void launch_nonlinear_coefficients_kernel(
+    torch::stable::Tensor dynamic_decay,
+    torch::stable::Tensor dynamic_curl,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    const torch::stable::Tensor& linear_permittivity,
+    const torch::stable::Tensor& external_decay,
+    const torch::stable::Tensor& sigma_static,
+    const torch::stable::Tensor& chi2,
+    const torch::stable::Tensor& chi3,
+    const torch::stable::Tensor& tpa_sigma,
+    double dt,
+    double eps0) {
+  const dim3 block = field_block3d();
+  update_nonlinear_coefficients_kernel<Component><<<field_grid3d(dynamic_curl.size(0), dynamic_curl.size(1), dynamic_curl.size(2), block), block, 0, current_cuda_stream()>>>(
+      dynamic_curl.size(0),
+      dynamic_curl.size(1),
+      dynamic_curl.size(2),
+      ex.size(0),
+      ex.size(1),
+      ex.size(2),
+      ey.size(0),
+      ey.size(1),
+      ey.size(2),
+      ez.size(0),
+      ez.size(1),
+      ez.size(2),
+      ex.mutable_data_ptr<float>(),
+      ey.mutable_data_ptr<float>(),
+      ez.mutable_data_ptr<float>(),
+      linear_permittivity.mutable_data_ptr<float>(),
+      external_decay.mutable_data_ptr<float>(),
+      sigma_static.mutable_data_ptr<float>(),
+      chi2.mutable_data_ptr<float>(),
+      chi3.mutable_data_ptr<float>(),
+      tpa_sigma.mutable_data_ptr<float>(),
+      static_cast<float>(dt),
+      static_cast<float>(eps0),
+      dynamic_decay.mutable_data_ptr<float>(),
+      dynamic_curl.mutable_data_ptr<float>());
+}
+
+void launch_nonlinear_coefficients(
+    int component,
+    torch::stable::Tensor dynamic_decay,
+    torch::stable::Tensor dynamic_curl,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    const torch::stable::Tensor& linear_permittivity,
+    const torch::stable::Tensor& external_decay,
+    const torch::stable::Tensor& sigma_static,
+    const torch::stable::Tensor& chi2,
+    const torch::stable::Tensor& chi3,
+    const torch::stable::Tensor& tpa_sigma,
+    double dt,
+    double eps0) {
+  check_field3d(dynamic_curl, "dynamic_curl");
+  check_field3d(ex, "ex");
+  check_field3d(ey, "ey");
+  check_field3d(ez, "ez");
+  check_same_cuda_device(dynamic_curl, ex, "ex");
+  check_same_cuda_device(dynamic_curl, ey, "ey");
+  check_same_cuda_device(dynamic_curl, ez, "ez");
+  check_matching_field(dynamic_curl, dynamic_decay, "dynamic_decay");
+  check_matching_field(dynamic_curl, linear_permittivity, "linear_permittivity");
+  check_matching_field(dynamic_curl, external_decay, "external_decay");
+  check_matching_field(dynamic_curl, sigma_static, "sigma_static");
+  check_matching_field(dynamic_curl, chi2, "chi2");
+  check_matching_field(dynamic_curl, chi3, "chi3");
+  check_matching_field(dynamic_curl, tpa_sigma, "tpa_sigma");
+  STD_TORCH_CHECK(component >= 0 && component < 3, "component must be in [0, 3)");
+  if (component == 0) {
+    STD_TORCH_CHECK(ex.sizes().equals(dynamic_curl.sizes()), "ex must match dynamic_curl shape");
+  } else if (component == 1) {
+    STD_TORCH_CHECK(ey.sizes().equals(dynamic_curl.sizes()), "ey must match dynamic_curl shape");
+  } else {
+    STD_TORCH_CHECK(ez.sizes().equals(dynamic_curl.sizes()), "ez must match dynamic_curl shape");
+  }
+  torch::stable::accelerator::DeviceGuard guard(dynamic_curl.get_device_index());
+  if (component == 0) {
+    launch_nonlinear_coefficients_kernel<0>(
+        dynamic_decay, dynamic_curl, ex, ey, ez, linear_permittivity, external_decay,
+        sigma_static, chi2, chi3, tpa_sigma, dt, eps0);
+  } else if (component == 1) {
+    launch_nonlinear_coefficients_kernel<1>(
+        dynamic_decay, dynamic_curl, ex, ey, ez, linear_permittivity, external_decay,
+        sigma_static, chi2, chi3, tpa_sigma, dt, eps0);
+  } else {
+    launch_nonlinear_coefficients_kernel<2>(
+        dynamic_decay, dynamic_curl, ex, ey, ez, linear_permittivity, external_decay,
+        sigma_static, chi2, chi3, tpa_sigma, dt, eps0);
   }
   WITWIN_CUDA_CHECK();
 }
@@ -469,4 +690,24 @@ void update_kerr_ez_curl_cuda(
     double dt,
     double eps0) {
   launch_kerr_curl(2, dynamic_curl, ex, ey, ez, linear_permittivity, ez_decay, chi3, dt, eps0);
+}
+
+void update_nonlinear_coefficients_cuda(
+    torch::stable::Tensor dynamic_decay,
+    torch::stable::Tensor dynamic_curl,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    const torch::stable::Tensor& linear_permittivity,
+    const torch::stable::Tensor& external_decay,
+    const torch::stable::Tensor& sigma_static,
+    const torch::stable::Tensor& chi2,
+    const torch::stable::Tensor& chi3,
+    const torch::stable::Tensor& tpa_sigma,
+    int64_t component,
+    double dt,
+    double eps0) {
+  launch_nonlinear_coefficients(
+      static_cast<int>(component), dynamic_decay, dynamic_curl, ex, ey, ez,
+      linear_permittivity, external_decay, sigma_static, chi2, chi3, tpa_sigma, dt, eps0);
 }
