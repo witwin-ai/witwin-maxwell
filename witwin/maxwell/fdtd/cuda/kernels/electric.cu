@@ -1308,6 +1308,206 @@ __global__ void update_electric_ez_cpml_compressed_kernel(
   ez[linear] = ez[linear] * decay_factor + curl_factor * curl;
 }
 
+// Compressed-(slab-)CPML variants of the modulated electric update. The compact
+// psi bookkeeping is identical to the plain compressed CPML kernels; the
+// modulation factor is applied to the decay/curl pair exactly as in the dense
+// modulated CPML kernels. The modulated path always carries per-cell decay/curl
+// coefficients, so these kernels do not take the uniform-scalar fast path.
+__global__ void update_electric_ex_cpml_modulated_compressed_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ hy,
+    const float* __restrict__ hz,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    const float* __restrict__ mod_cos,
+    const float* __restrict__ mod_sin,
+    float cos_prev,
+    float sin_prev,
+    float cos_next,
+    float sin_next,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ b_y,
+    const float* __restrict__ c_y,
+    const float* __restrict__ inv_kappa_z,
+    const float* __restrict__ b_z,
+    const float* __restrict__ c_z,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
+    int y_low_mode,
+    int y_high_mode,
+    int z_low_mode,
+    int z_high_mode,
+    int y_low_length,
+    int y_high_start,
+    int y_high_length,
+    int z_low_length,
+    int z_high_start,
+    int z_high_length,
+    float* __restrict__ psi_y,
+    float* __restrict__ psi_z,
+    float* __restrict__ ex) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  if (boundary_pec(j, ny, y_low_mode, y_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
+    ex[linear] = 0.0f;
+    return;
+  }
+  const bool active = !(boundary_inactive(j, ny, y_low_mode, y_high_mode) ||
+                        boundary_inactive(k, nz, z_low_mode, z_high_mode));
+  if (!active) {
+    return;
+  }
+  const float d_y = backward_diff_axis1(hz, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
+  const float d_z = backward_diff_axis2(hy, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
+  const float psi_y_value = update_compact_electric_psi<1>(
+      psi_y, b_y, c_y, i, j, k, ny, nz, j, y_low_length, y_high_start, y_high_length, d_y);
+  const float psi_z_value = update_compact_electric_psi<2>(
+      psi_z, b_z, c_z, i, j, k, ny, nz, k, z_low_length, z_high_start, z_high_length, d_z);
+  const float curl = d_y * inv_kappa_y[j] + psi_y_value - d_z * inv_kappa_z[k] - psi_z_value;
+  const float mc = mod_cos[linear];
+  const float ms = mod_sin[linear];
+  const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
+  const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
+  ex[linear] = ex[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
+}
+
+__global__ void update_electric_ey_cpml_modulated_compressed_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ hx,
+    const float* __restrict__ hz,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    const float* __restrict__ mod_cos,
+    const float* __restrict__ mod_sin,
+    float cos_prev,
+    float sin_prev,
+    float cos_next,
+    float sin_next,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ b_x,
+    const float* __restrict__ c_x,
+    const float* __restrict__ inv_kappa_z,
+    const float* __restrict__ b_z,
+    const float* __restrict__ c_z,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dz,
+    int x_low_mode,
+    int x_high_mode,
+    int z_low_mode,
+    int z_high_mode,
+    int x_low_length,
+    int x_high_start,
+    int x_high_length,
+    int z_low_length,
+    int z_high_start,
+    int z_high_length,
+    float* __restrict__ psi_x,
+    float* __restrict__ psi_z,
+    float* __restrict__ ey) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
+    ey[linear] = 0.0f;
+    return;
+  }
+  const bool active = !(boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
+                        boundary_inactive(k, nz, z_low_mode, z_high_mode));
+  if (!active) {
+    return;
+  }
+  const float d_z = backward_diff_axis2(hx, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
+  const float d_x = backward_diff_axis0(hz, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
+  const float psi_x_value = update_compact_electric_psi<0>(
+      psi_x, b_x, c_x, i, j, k, ny, nz, i, x_low_length, x_high_start, x_high_length, d_x);
+  const float psi_z_value = update_compact_electric_psi<2>(
+      psi_z, b_z, c_z, i, j, k, ny, nz, k, z_low_length, z_high_start, z_high_length, d_z);
+  const float curl = d_z * inv_kappa_z[k] + psi_z_value - d_x * inv_kappa_x[i] - psi_x_value;
+  const float mc = mod_cos[linear];
+  const float ms = mod_sin[linear];
+  const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
+  const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
+  ey[linear] = ey[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
+}
+
+__global__ void update_electric_ez_cpml_modulated_compressed_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ hx,
+    const float* __restrict__ hy,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    const float* __restrict__ mod_cos,
+    const float* __restrict__ mod_sin,
+    float cos_prev,
+    float sin_prev,
+    float cos_next,
+    float sin_next,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ b_x,
+    const float* __restrict__ c_x,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ b_y,
+    const float* __restrict__ c_y,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
+    int x_low_mode,
+    int x_high_mode,
+    int y_low_mode,
+    int y_high_mode,
+    int x_low_length,
+    int x_high_start,
+    int x_high_length,
+    int y_low_length,
+    int y_high_start,
+    int y_high_length,
+    float* __restrict__ psi_x,
+    float* __restrict__ psi_y,
+    float* __restrict__ ez) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(j, ny, y_low_mode, y_high_mode)) {
+    ez[linear] = 0.0f;
+    return;
+  }
+  const bool active = !(boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
+                        boundary_inactive(j, ny, y_low_mode, y_high_mode));
+  if (!active) {
+    return;
+  }
+  const float d_x = backward_diff_axis0(hy, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
+  const float d_y = backward_diff_axis1(hx, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
+  const float psi_x_value = update_compact_electric_psi<0>(
+      psi_x, b_x, c_x, i, j, k, ny, nz, i, x_low_length, x_high_start, x_high_length, d_x);
+  const float psi_y_value = update_compact_electric_psi<1>(
+      psi_y, b_y, c_y, i, j, k, ny, nz, j, y_low_length, y_high_start, y_high_length, d_y);
+  const float curl = d_x * inv_kappa_x[i] + psi_x_value - d_y * inv_kappa_y[j] - psi_y_value;
+  const float mc = mod_cos[linear];
+  const float ms = mod_sin[linear];
+  const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
+  const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
+  ez[linear] = ez[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
+}
+
 void check_electric_inputs(
     const torch::stable::Tensor& field,
     const torch::stable::Tensor& first,
@@ -2436,6 +2636,249 @@ void update_electric_ez_cpml_compressed_cuda(
         psi_y.mutable_data_ptr<float>(),
         ez.mutable_data_ptr<float>());
   });
+  WITWIN_CUDA_CHECK();
+}
+
+void update_electric_ex_cpml_modulated_compressed_cuda(
+    torch::stable::Tensor ex,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& mod_cos,
+    const torch::stable::Tensor& mod_sin,
+    double cos_prev,
+    double sin_prev,
+    double cos_next,
+    double sin_next,
+    torch::stable::Tensor psi_y,
+    torch::stable::Tensor psi_z,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_kappa_z,
+    const torch::stable::Tensor& b_z,
+    const torch::stable::Tensor& c_z,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    int64_t y_low_mode,
+    int64_t y_high_mode,
+    int64_t z_low_mode,
+    int64_t z_high_mode,
+    int64_t y_low_length,
+    int64_t y_high_start,
+    int64_t y_high_length,
+    int64_t z_low_length,
+    int64_t z_high_start,
+    int64_t z_high_length) {
+  check_electric_cpml_compressed_inputs(
+      ex, hy, hz, decay, curl, psi_y, psi_z, inv_kappa_y, b_y, c_y, inv_kappa_z, b_z, c_z,
+      1, 2, y_low_length, y_high_length, z_low_length, z_high_length, "ex");
+  check_modulation_fields(ex, mod_cos, mod_sin);
+  check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
+  check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
+  check_spacing_vector(ex, inv_dy, 1, "inv_dy");
+  check_spacing_vector(ex, inv_dz, 2, "inv_dz");
+  torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
+  const auto sizes = ex.sizes();
+  const dim3 block = field_block3d();
+  update_electric_ex_cpml_modulated_compressed_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sizes[0]),
+      static_cast<unsigned int>(sizes[1]),
+      static_cast<unsigned int>(sizes[2]),
+      hy.mutable_data_ptr<float>(),
+      hz.mutable_data_ptr<float>(),
+      decay.mutable_data_ptr<float>(),
+      curl.mutable_data_ptr<float>(),
+      mod_cos.mutable_data_ptr<float>(),
+      mod_sin.mutable_data_ptr<float>(),
+      static_cast<float>(cos_prev),
+      static_cast<float>(sin_prev),
+      static_cast<float>(cos_next),
+      static_cast<float>(sin_next),
+      inv_kappa_y.mutable_data_ptr<float>(),
+      b_y.mutable_data_ptr<float>(),
+      c_y.mutable_data_ptr<float>(),
+      inv_kappa_z.mutable_data_ptr<float>(),
+      b_z.mutable_data_ptr<float>(),
+      c_z.mutable_data_ptr<float>(),
+      inv_dy.mutable_data_ptr<float>(),
+      inv_dz.mutable_data_ptr<float>(),
+      static_cast<int>(y_low_mode),
+      static_cast<int>(y_high_mode),
+      static_cast<int>(z_low_mode),
+      static_cast<int>(z_high_mode),
+      static_cast<int>(y_low_length),
+      static_cast<int>(y_high_start),
+      static_cast<int>(y_high_length),
+      static_cast<int>(z_low_length),
+      static_cast<int>(z_high_start),
+      static_cast<int>(z_high_length),
+      psi_y.mutable_data_ptr<float>(),
+      psi_z.mutable_data_ptr<float>(),
+      ex.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void update_electric_ey_cpml_modulated_compressed_cuda(
+    torch::stable::Tensor ey,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& mod_cos,
+    const torch::stable::Tensor& mod_sin,
+    double cos_prev,
+    double sin_prev,
+    double cos_next,
+    double sin_next,
+    torch::stable::Tensor psi_x,
+    torch::stable::Tensor psi_z,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_kappa_z,
+    const torch::stable::Tensor& b_z,
+    const torch::stable::Tensor& c_z,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dz,
+    int64_t x_low_mode,
+    int64_t x_high_mode,
+    int64_t z_low_mode,
+    int64_t z_high_mode,
+    int64_t x_low_length,
+    int64_t x_high_start,
+    int64_t x_high_length,
+    int64_t z_low_length,
+    int64_t z_high_start,
+    int64_t z_high_length) {
+  check_electric_cpml_compressed_inputs(
+      ey, hx, hz, decay, curl, psi_x, psi_z, inv_kappa_x, b_x, c_x, inv_kappa_z, b_z, c_z,
+      0, 2, x_low_length, x_high_length, z_low_length, z_high_length, "ey");
+  check_modulation_fields(ey, mod_cos, mod_sin);
+  check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
+  check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
+  check_spacing_vector(ey, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ey, inv_dz, 2, "inv_dz");
+  torch::stable::accelerator::DeviceGuard guard(ey.get_device_index());
+  const auto sizes = ey.sizes();
+  const dim3 block = field_block3d();
+  update_electric_ey_cpml_modulated_compressed_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sizes[0]),
+      static_cast<unsigned int>(sizes[1]),
+      static_cast<unsigned int>(sizes[2]),
+      hx.mutable_data_ptr<float>(),
+      hz.mutable_data_ptr<float>(),
+      decay.mutable_data_ptr<float>(),
+      curl.mutable_data_ptr<float>(),
+      mod_cos.mutable_data_ptr<float>(),
+      mod_sin.mutable_data_ptr<float>(),
+      static_cast<float>(cos_prev),
+      static_cast<float>(sin_prev),
+      static_cast<float>(cos_next),
+      static_cast<float>(sin_next),
+      inv_kappa_x.mutable_data_ptr<float>(),
+      b_x.mutable_data_ptr<float>(),
+      c_x.mutable_data_ptr<float>(),
+      inv_kappa_z.mutable_data_ptr<float>(),
+      b_z.mutable_data_ptr<float>(),
+      c_z.mutable_data_ptr<float>(),
+      inv_dx.mutable_data_ptr<float>(),
+      inv_dz.mutable_data_ptr<float>(),
+      static_cast<int>(x_low_mode),
+      static_cast<int>(x_high_mode),
+      static_cast<int>(z_low_mode),
+      static_cast<int>(z_high_mode),
+      static_cast<int>(x_low_length),
+      static_cast<int>(x_high_start),
+      static_cast<int>(x_high_length),
+      static_cast<int>(z_low_length),
+      static_cast<int>(z_high_start),
+      static_cast<int>(z_high_length),
+      psi_x.mutable_data_ptr<float>(),
+      psi_z.mutable_data_ptr<float>(),
+      ey.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void update_electric_ez_cpml_modulated_compressed_cuda(
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& mod_cos,
+    const torch::stable::Tensor& mod_sin,
+    double cos_prev,
+    double sin_prev,
+    double cos_next,
+    double sin_next,
+    torch::stable::Tensor psi_x,
+    torch::stable::Tensor psi_y,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    int64_t x_low_mode,
+    int64_t x_high_mode,
+    int64_t y_low_mode,
+    int64_t y_high_mode,
+    int64_t x_low_length,
+    int64_t x_high_start,
+    int64_t x_high_length,
+    int64_t y_low_length,
+    int64_t y_high_start,
+    int64_t y_high_length) {
+  check_electric_cpml_compressed_inputs(
+      ez, hx, hy, decay, curl, psi_x, psi_y, inv_kappa_x, b_x, c_x, inv_kappa_y, b_y, c_y,
+      0, 1, x_low_length, x_high_length, y_low_length, y_high_length, "ez");
+  check_modulation_fields(ez, mod_cos, mod_sin);
+  check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
+  check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
+  check_spacing_vector(ez, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ez, inv_dy, 1, "inv_dy");
+  torch::stable::accelerator::DeviceGuard guard(ez.get_device_index());
+  const auto sizes = ez.sizes();
+  const dim3 block = field_block3d();
+  update_electric_ez_cpml_modulated_compressed_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sizes[0]),
+      static_cast<unsigned int>(sizes[1]),
+      static_cast<unsigned int>(sizes[2]),
+      hx.mutable_data_ptr<float>(),
+      hy.mutable_data_ptr<float>(),
+      decay.mutable_data_ptr<float>(),
+      curl.mutable_data_ptr<float>(),
+      mod_cos.mutable_data_ptr<float>(),
+      mod_sin.mutable_data_ptr<float>(),
+      static_cast<float>(cos_prev),
+      static_cast<float>(sin_prev),
+      static_cast<float>(cos_next),
+      static_cast<float>(sin_next),
+      inv_kappa_x.mutable_data_ptr<float>(),
+      b_x.mutable_data_ptr<float>(),
+      c_x.mutable_data_ptr<float>(),
+      inv_kappa_y.mutable_data_ptr<float>(),
+      b_y.mutable_data_ptr<float>(),
+      c_y.mutable_data_ptr<float>(),
+      inv_dx.mutable_data_ptr<float>(),
+      inv_dy.mutable_data_ptr<float>(),
+      static_cast<int>(x_low_mode),
+      static_cast<int>(x_high_mode),
+      static_cast<int>(y_low_mode),
+      static_cast<int>(y_high_mode),
+      static_cast<int>(x_low_length),
+      static_cast<int>(x_high_start),
+      static_cast<int>(x_high_length),
+      static_cast<int>(y_low_length),
+      static_cast<int>(y_high_start),
+      static_cast<int>(y_high_length),
+      psi_x.mutable_data_ptr<float>(),
+      psi_y.mutable_data_ptr<float>(),
+      ez.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 

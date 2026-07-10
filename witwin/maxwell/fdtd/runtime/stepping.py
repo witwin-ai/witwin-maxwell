@@ -589,11 +589,13 @@ def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, ti
 
 
 def update_electric_fields_modulated_cpml(solver, ex, ey, ez, hx, hy, hz, time_value):
-    if solver._cpml_memory_mode != "dense":
-        raise RuntimeError(
-            "FDTD time-modulated media require the dense CPML memory mode; "
-            "the boundary initialization should have forced it."
-        )
+    if solver._cpml_memory_mode == "dense":
+        update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, time_value)
+        return
+    update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy, hz, time_value)
+
+
+def update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, time_value):
     cos_prev, sin_prev, cos_next, sin_next = _modulation_phase_factors(solver, time_value)
     solver.fdtd_module.updateElectricFieldExCpmlModulated3D(
         Ex=ex,
@@ -675,6 +677,118 @@ def update_electric_fields_modulated_cpml(solver, ex, ey, ez, hx, hy, hz, time_v
         xHighBoundaryMode=solver.boundary_x_high_code,
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+
+
+def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy, hz, time_value):
+    # Compressed (slab) psi layout: thread the per-side narrow()/offset bookkeeping
+    # (cpml_layout_params) through the modulated kernels, exactly as the plain
+    # compressed CPML update does, with the modulation phase factors applied on top.
+    psi_ex_y_low, psi_ex_y_high_start, psi_ex_y_high = cpml_layout_params(solver, "psi_ex_y")
+    psi_ex_z_low, psi_ex_z_high_start, psi_ex_z_high = cpml_layout_params(solver, "psi_ex_z")
+    psi_ey_x_low, psi_ey_x_high_start, psi_ey_x_high = cpml_layout_params(solver, "psi_ey_x")
+    psi_ey_z_low, psi_ey_z_high_start, psi_ey_z_high = cpml_layout_params(solver, "psi_ey_z")
+    psi_ez_x_low, psi_ez_x_high_start, psi_ez_x_high = cpml_layout_params(solver, "psi_ez_x")
+    psi_ez_y_low, psi_ez_y_high_start, psi_ez_y_high = cpml_layout_params(solver, "psi_ez_y")
+    cos_prev, sin_prev, cos_next, sin_next = _modulation_phase_factors(solver, time_value)
+    solver.fdtd_module.updateElectricFieldExCpmlModulatedCompressed3D(
+        Ex=ex,
+        Hy=hy,
+        Hz=hz,
+        ExDecay=solver.cex_decay,
+        ExCurl=solver.cex_curl,
+        ModCos=solver.mod_cos_Ex,
+        ModSin=solver.mod_sin_Ex,
+        cosPrev=cos_prev,
+        sinPrev=sin_prev,
+        cosNext=cos_next,
+        sinNext=sin_next,
+        PsiExY=solver.psi_ex_y,
+        PsiExZ=solver.psi_ex_z,
+        InvKappaExY=solver.cpml_inv_kappa_e_y,
+        BExY=solver.cpml_b_e_y,
+        CExY=solver.cpml_c_e_y,
+        InvKappaExZ=solver.cpml_inv_kappa_e_z,
+        BExZ=solver.cpml_b_e_z,
+        CExZ=solver.cpml_c_e_z,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
+        yLowBoundaryMode=solver.boundary_y_low_code,
+        yHighBoundaryMode=solver.boundary_y_high_code,
+        zLowBoundaryMode=solver.boundary_z_low_code,
+        zHighBoundaryMode=solver.boundary_z_high_code,
+        psiExYLowLength=psi_ex_y_low,
+        psiExYHighStart=psi_ex_y_high_start,
+        psiExYHighLength=psi_ex_y_high,
+        psiExZLowLength=psi_ex_z_low,
+        psiExZHighStart=psi_ex_z_high_start,
+        psiExZHighLength=psi_ex_z_high,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    solver.fdtd_module.updateElectricFieldEyCpmlModulatedCompressed3D(
+        Ey=ey,
+        Hx=hx,
+        Hz=hz,
+        EyDecay=solver.cey_decay,
+        EyCurl=solver.cey_curl,
+        ModCos=solver.mod_cos_Ey,
+        ModSin=solver.mod_sin_Ey,
+        cosPrev=cos_prev,
+        sinPrev=sin_prev,
+        cosNext=cos_next,
+        sinNext=sin_next,
+        PsiEyX=solver.psi_ey_x,
+        PsiEyZ=solver.psi_ey_z,
+        InvKappaEyX=solver.cpml_inv_kappa_e_x,
+        BEyX=solver.cpml_b_e_x,
+        CEyX=solver.cpml_c_e_x,
+        InvKappaEyZ=solver.cpml_inv_kappa_e_z,
+        BEyZ=solver.cpml_b_e_z,
+        CEyZ=solver.cpml_c_e_z,
+        invDx=solver.inv_dx_e,
+        invDz=solver.inv_dz_e,
+        xLowBoundaryMode=solver.boundary_x_low_code,
+        xHighBoundaryMode=solver.boundary_x_high_code,
+        zLowBoundaryMode=solver.boundary_z_low_code,
+        zHighBoundaryMode=solver.boundary_z_high_code,
+        psiEyXLowLength=psi_ey_x_low,
+        psiEyXHighStart=psi_ey_x_high_start,
+        psiEyXHighLength=psi_ey_x_high,
+        psiEyZLowLength=psi_ey_z_low,
+        psiEyZHighStart=psi_ey_z_high_start,
+        psiEyZHighLength=psi_ey_z_high,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    solver.fdtd_module.updateElectricFieldEzCpmlModulatedCompressed3D(
+        Ez=ez,
+        Hx=hx,
+        Hy=hy,
+        EzDecay=solver.cez_decay,
+        EzCurl=solver.cez_curl,
+        ModCos=solver.mod_cos_Ez,
+        ModSin=solver.mod_sin_Ez,
+        cosPrev=cos_prev,
+        sinPrev=sin_prev,
+        cosNext=cos_next,
+        sinNext=sin_next,
+        PsiEzX=solver.psi_ez_x,
+        PsiEzY=solver.psi_ez_y,
+        InvKappaEzX=solver.cpml_inv_kappa_e_x,
+        BEzX=solver.cpml_b_e_x,
+        CEzX=solver.cpml_c_e_x,
+        InvKappaEzY=solver.cpml_inv_kappa_e_y,
+        BEzY=solver.cpml_b_e_y,
+        CEzY=solver.cpml_c_e_y,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
+        xLowBoundaryMode=solver.boundary_x_low_code,
+        xHighBoundaryMode=solver.boundary_x_high_code,
+        yLowBoundaryMode=solver.boundary_y_low_code,
+        yHighBoundaryMode=solver.boundary_y_high_code,
+        psiEzXLowLength=psi_ez_x_low,
+        psiEzXHighStart=psi_ez_x_high_start,
+        psiEzXHighLength=psi_ez_x_high,
+        psiEzYLowLength=psi_ez_y_low,
+        psiEzYHighStart=psi_ez_y_high_start,
+        psiEzYHighLength=psi_ez_y_high,
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
 
 

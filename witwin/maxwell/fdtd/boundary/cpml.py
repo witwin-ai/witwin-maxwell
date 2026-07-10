@@ -303,15 +303,6 @@ def _allocate_cpml_memory_variables(solver):
     dense_bytes *= memory_multiplier
     slab_bytes *= memory_multiplier
     memory_mode = _resolve_cpml_memory_mode(solver, dense_bytes)
-    if getattr(solver, "modulation_enabled", False) and memory_mode == "slab":
-        # The modulated E-update kernels exist for the standard and dense CPML
-        # layouts only; the compressed (slab) psi layout has no modulated variant.
-        if solver._cpml_memory_mode_requested == "slab":
-            raise NotImplementedError(
-                "FDTD time-modulated media are not implemented for the compressed (slab) CPML "
-                "memory mode; use cpml_config={'memory_mode': 'dense'}."
-            )
-        memory_mode = "dense"
 
     solver._cpml_memory_layouts = {}
     solver._cpml_memory_mode = memory_mode

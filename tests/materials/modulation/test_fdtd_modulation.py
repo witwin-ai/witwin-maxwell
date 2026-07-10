@@ -201,7 +201,10 @@ def test_fdtd_modulated_scene_prepare_enables_modulation_runtime():
     assert solver.modulation_angular_frequency == pytest.approx(2.0 * np.pi * 2.5e8)
     assert solver.mod_cos_Ez.shape == solver.eps_Ez.shape
     assert solver.mod_sin_Ez.shape == solver.eps_Ez.shape
-    # The compressed (slab) CPML psi layout has no modulated kernel variant.
+    # Modulation no longer forces the dense CPML layout: both dense and compressed
+    # (slab) psi layouts now have modulated kernel variants. For this small scene
+    # the dense psi footprint is far below the auto memory limit, so "auto" still
+    # selects dense here (see test_fdtd_modulated_slab_cpml.py for the slab path).
     assert solver._cpml_memory_mode == "dense"
 
 

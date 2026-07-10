@@ -324,6 +324,102 @@ void update_electric_ez_cpml_modulated_cuda(
     int64_t x_high_mode,
     int64_t y_low_mode,
     int64_t y_high_mode);
+void update_electric_ex_cpml_modulated_compressed_cuda(
+    torch::stable::Tensor ex,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& mod_cos,
+    const torch::stable::Tensor& mod_sin,
+    double cos_prev,
+    double sin_prev,
+    double cos_next,
+    double sin_next,
+    torch::stable::Tensor psi_y,
+    torch::stable::Tensor psi_z,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_kappa_z,
+    const torch::stable::Tensor& b_z,
+    const torch::stable::Tensor& c_z,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    int64_t y_low_mode,
+    int64_t y_high_mode,
+    int64_t z_low_mode,
+    int64_t z_high_mode,
+    int64_t y_low_length,
+    int64_t y_high_start,
+    int64_t y_high_length,
+    int64_t z_low_length,
+    int64_t z_high_start,
+    int64_t z_high_length);
+void update_electric_ey_cpml_modulated_compressed_cuda(
+    torch::stable::Tensor ey,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& mod_cos,
+    const torch::stable::Tensor& mod_sin,
+    double cos_prev,
+    double sin_prev,
+    double cos_next,
+    double sin_next,
+    torch::stable::Tensor psi_x,
+    torch::stable::Tensor psi_z,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_kappa_z,
+    const torch::stable::Tensor& b_z,
+    const torch::stable::Tensor& c_z,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dz,
+    int64_t x_low_mode,
+    int64_t x_high_mode,
+    int64_t z_low_mode,
+    int64_t z_high_mode,
+    int64_t x_low_length,
+    int64_t x_high_start,
+    int64_t x_high_length,
+    int64_t z_low_length,
+    int64_t z_high_start,
+    int64_t z_high_length);
+void update_electric_ez_cpml_modulated_compressed_cuda(
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& mod_cos,
+    const torch::stable::Tensor& mod_sin,
+    double cos_prev,
+    double sin_prev,
+    double cos_next,
+    double sin_next,
+    torch::stable::Tensor psi_x,
+    torch::stable::Tensor psi_y,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    int64_t x_low_mode,
+    int64_t x_high_mode,
+    int64_t y_low_mode,
+    int64_t y_high_mode,
+    int64_t x_low_length,
+    int64_t x_high_start,
+    int64_t x_high_length,
+    int64_t y_low_length,
+    int64_t y_high_start,
+    int64_t y_high_length);
 void update_electric_ex_bloch_cuda(
     torch::stable::Tensor ex_real,
     torch::stable::Tensor ex_imag,
@@ -1470,6 +1566,9 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("update_electric_ex_cpml_compressed(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode, int y_low_length, int y_high_start, int y_high_length, int z_low_length, int z_high_start, int z_high_length, float? uniform_decay, float? uniform_curl) -> ()");
   m.def("update_electric_ey_cpml_compressed(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode, int x_low_length, int x_high_start, int x_high_length, int z_low_length, int z_high_start, int z_high_length, float? uniform_decay, float? uniform_curl) -> ()");
   m.def("update_electric_ez_cpml_compressed(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode, int x_low_length, int x_high_start, int x_high_length, int y_low_length, int y_high_start, int y_high_length, float? uniform_decay, float? uniform_curl) -> ()");
+  m.def("update_electric_ex_cpml_modulated_compressed(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, float cos_prev, float sin_prev, float cos_next, float sin_next, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode, int y_low_length, int y_high_start, int y_high_length, int z_low_length, int z_high_start, int z_high_length) -> ()");
+  m.def("update_electric_ey_cpml_modulated_compressed(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, float cos_prev, float sin_prev, float cos_next, float sin_next, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode, int x_low_length, int x_high_start, int x_high_length, int z_low_length, int z_high_start, int z_high_length) -> ()");
+  m.def("update_electric_ez_cpml_modulated_compressed(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, float cos_prev, float sin_prev, float cos_next, float sin_next, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode, int x_low_length, int x_high_start, int x_high_length, int y_low_length, int y_high_start, int y_high_length) -> ()");
   m.def("accumulate_dft_batched(Tensor ex, Tensor ey, Tensor ez, Tensor(a!) ex_real, Tensor(b!) ex_imag, Tensor(c!) ey_real, Tensor(d!) ey_imag, Tensor(e!) ez_real, Tensor(f!) ez_imag, Tensor weighted_cos, Tensor weighted_sin) -> ()");
   m.def("accumulate_point_observers(Tensor field, Tensor point_i, Tensor point_j, Tensor point_k, Tensor(a!) real_accum, Tensor(b!) imag_accum, float weighted_cos, float weighted_sin) -> ()");
   m.def("accumulate_plane_observer(Tensor field, Tensor(a!) real_accum, Tensor(b!) imag_accum, int axis, int plane_index, float weighted_cos, float weighted_sin) -> ()");
@@ -1573,6 +1672,9 @@ STABLE_TORCH_LIBRARY_IMPL(witwin_maxwell_fdtd_cuda, CUDA, m) {
   m.impl("update_electric_ex_cpml_compressed", TORCH_BOX(&update_electric_ex_cpml_compressed_cuda));
   m.impl("update_electric_ey_cpml_compressed", TORCH_BOX(&update_electric_ey_cpml_compressed_cuda));
   m.impl("update_electric_ez_cpml_compressed", TORCH_BOX(&update_electric_ez_cpml_compressed_cuda));
+  m.impl("update_electric_ex_cpml_modulated_compressed", TORCH_BOX(&update_electric_ex_cpml_modulated_compressed_cuda));
+  m.impl("update_electric_ey_cpml_modulated_compressed", TORCH_BOX(&update_electric_ey_cpml_modulated_compressed_cuda));
+  m.impl("update_electric_ez_cpml_modulated_compressed", TORCH_BOX(&update_electric_ez_cpml_modulated_compressed_cuda));
   m.impl("accumulate_dft_batched", TORCH_BOX(&accumulate_dft_batched_cuda));
   m.impl("accumulate_point_observers", TORCH_BOX(&accumulate_point_observers_cuda));
   m.impl("accumulate_plane_observer", TORCH_BOX(&accumulate_plane_observer_cuda));
