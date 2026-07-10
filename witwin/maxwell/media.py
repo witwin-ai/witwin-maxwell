@@ -1021,11 +1021,31 @@ class Medium2D(Material):
         """
         return ()
 
+    def sheet_lorentz_terms(self) -> tuple[tuple[float, float, float], ...]:
+        """Resonant surface-conductivity terms ``(strength, omega_0, gamma)``.
+
+        Each term contributes
+        ``-i*omega * strength * omega_0^2 / (omega_0^2 - omega^2 - i*gamma*omega)``
+        [S] to the sheet conductivity (``strength`` in S*s, ``omega_0`` and
+        ``gamma`` in rad/s), i.e. the sheet lowering of one volumetric Lorentz
+        pole. A Drude term (``sheet_pole_terms``) can only reproduce an inductive
+        surface reactance (``Im(sigma) > 0``); a resonant absorption edge whose
+        below-edge reactance is capacitive (``Im(sigma) < 0``), such as the
+        graphene interband transition, needs a Lorentz term. The static base
+        class carries none.
+        """
+        return ()
+
     def sheet_conductivity(self, angular_frequency: float) -> complex:
         """Complex sheet conductivity ``sigma_s(omega)`` [S] (e^{-i*omega*t} convention)."""
+        omega = float(angular_frequency)
         sigma = complex(self.sigma_s)
         for weight, rate in self.sheet_pole_terms():
-            sigma += weight / complex(rate, -float(angular_frequency))
+            sigma += weight / complex(rate, -omega)
+        for strength, omega_0, gamma in self.sheet_lorentz_terms():
+            sigma += -1j * omega * strength * omega_0 * omega_0 / (
+                omega_0 * omega_0 - omega * omega - 1j * gamma * omega
+            )
         return sigma
 
     def sheet_conductivity_at_freq(self, frequency: float) -> complex:
@@ -1036,9 +1056,166 @@ _ELEMENTARY_CHARGE = 1.602176634e-19  # [C]
 _REDUCED_PLANCK = 1.054571817e-34  # [J*s]
 _BOLTZMANN = 1.380649e-23  # [J/K]
 
+_GRAPHENE_INTERBAND_POLES = 4
+
+
+def _kubo_interband_sigma(angular_frequency: float, mu_c_ev: float, tau: float, temperature: float) -> complex:
+    """Analytic Kubo interband sheet conductivity ``sigma_inter(omega)`` [S].
+
+    T > 0 principal-value form in the e^{-i*omega*t} convention:
+
+    ``sigma_inter = i*e^2*Omega/(pi*hbar^2) * INT_0^inf [f(-xi) - f(xi)]
+                    / (Omega^2 - (2*xi/hbar)^2) dxi``
+
+    where ``Omega = omega + i/tau`` is the collision-broadened complex
+    frequency and ``f(xi) = 1/(exp((xi - mu_c)/(kB*T)) + 1)`` is the Fermi-Dirac
+    occupation. The finite scattering rate ``1/tau`` moves the integrand pole
+    off the real ``xi`` axis, so the "principal value" is a convergent integral.
+
+    The integrand has a sharp resonant peak of width ``hbar/(2*tau)`` at
+    ``xi = hbar*omega/2`` and a Fermi step of width ``kB*T`` at ``xi = mu_c``,
+    and its ``1/xi^2`` tail decays too slowly to truncate. It is therefore split
+    at ``xi = split`` (chosen above both features, where ``f(-xi) - f(xi) = 1``
+    to machine precision): the near part is integrated adaptively with the peak
+    and step passed as subdivision hints, and the far part is added in closed
+    form, ``INT_split^inf dxi / (Omega^2 - 4*xi^2/hbar^2) = (hbar/(4*Omega)) *
+    ln((2*split - hbar*Omega)/(2*split + hbar*Omega))``. This converges to the
+    exact T = 0 log form as ``T -> 0``.
+    """
+    from scipy.integrate import quad
+
+    mu = mu_c_ev * _ELEMENTARY_CHARGE
+    thermal_energy = _BOLTZMANN * temperature
+    omega_complex = angular_frequency + 1j / tau
+    prefactor = 1j * _ELEMENTARY_CHARGE * _ELEMENTARY_CHARGE * omega_complex / (
+        np.pi * _REDUCED_PLANCK * _REDUCED_PLANCK
+    )
+
+    def fermi(energy: float) -> float:
+        return 1.0 / (np.exp(np.clip((energy - mu) / thermal_energy, -500.0, 500.0)) + 1.0)
+
+    def integrand(energy: float) -> complex:
+        numerator = fermi(-energy) - fermi(energy)
+        denom = omega_complex * omega_complex - 4.0 * (energy / _REDUCED_PLANCK) ** 2
+        return numerator / denom
+
+    split = mu + 40.0 * thermal_energy + 6.0 * _REDUCED_PLANCK * abs(angular_frequency)
+    peak = _REDUCED_PLANCK * angular_frequency / 2.0
+    peak_width = _REDUCED_PLANCK / (2.0 * tau)
+    hints = (peak - 2.0 * peak_width, peak, peak + 2.0 * peak_width,
+             mu - 4.0 * thermal_energy, mu, mu + 4.0 * thermal_energy)
+    points = sorted(p for p in hints if 0.0 < p < split) or None
+    real_part, _ = quad(lambda e: integrand(e).real, 0.0, split, limit=2000, points=points)
+    imag_part, _ = quad(lambda e: integrand(e).imag, 0.0, split, limit=2000, points=points)
+    tail = (_REDUCED_PLANCK / (4.0 * omega_complex)) * np.log(
+        (2.0 * split - _REDUCED_PLANCK * omega_complex) / (2.0 * split + _REDUCED_PLANCK * omega_complex)
+    )
+    return prefactor * (real_part + 1j * imag_part + tail)
+
+
+def _fit_graphene_interband_lorentz(
+    mu_c_ev: float, tau: float, temperature: float, intraband_weight: float
+) -> tuple[tuple[float, float, float], ...]:
+    """Fit the Kubo interband sheet conductivity with Lorentz sheet terms.
+
+    Returns ``(strength, omega_0, gamma)`` terms (see ``sheet_lorentz_terms``)
+    that reproduce the interband conductivity below the band edge
+    ``hbar*omega = 2*|mu_c|``. Below the edge the interband response is a
+    capacitive reactance (``Im(sigma) < 0``) that a Drude pole cannot represent,
+    but a Lorentz oscillator seated near the edge can. Strengths are constrained
+    non-negative so every term lowers to a passive (``delta_eps >= 0``) pole and
+    the time-domain ADE stays stable.
+
+    The fit is a deterministic non-negative least-squares seed on a fixed
+    ``(omega_0, gamma)`` grid, refined by a bounded Levenberg-Marquardt step,
+    weighted by ``1/|sigma_total|`` so the relative error of the *total*
+    (intraband + interband) conductivity is minimized across the band.
+    """
+    from scipy.optimize import least_squares, nnls
+
+    omega_gap = 2.0 * mu_c_ev * _ELEMENTARY_CHARGE / _REDUCED_PLANCK
+    n_samples = 140
+    omega = np.linspace(0.02 * omega_gap, 0.99 * omega_gap, n_samples)
+    intra = intraband_weight / (1.0 / tau - 1j * omega)
+    inter = np.array([_kubo_interband_sigma(w, mu_c_ev, tau, temperature) for w in omega])
+    total = intra + inter
+    fit_weight = 1.0 / np.maximum(np.abs(total), 0.1 * np.abs(total).max())
+
+    def basis(w, omega_0, gamma):
+        return -1j * w * omega_0 * omega_0 / (omega_0 * omega_0 - w * w - 1j * gamma * w)
+
+    omega_0_grid = np.linspace(0.5, 2.0, 25) * omega_gap
+    gamma_grid = np.array([0.05, 0.1, 0.2, 0.35, 0.6, 1.0]) * omega_gap
+    candidates = [(o, g) for o in omega_0_grid for g in gamma_grid]
+    design = np.zeros((2 * n_samples, len(candidates)))
+    scales = np.zeros(len(candidates))
+    for k, (o, g) in enumerate(candidates):
+        column = basis(omega, o, g) * fit_weight
+        stacked = np.concatenate([column.real, column.imag])
+        scales[k] = np.linalg.norm(stacked)
+        design[:, k] = stacked / scales[k]
+    target = np.concatenate([inter.real * fit_weight, inter.imag * fit_weight])
+    seed_solution, _ = nnls(design, target, maxiter=20000)
+    seed_strengths = seed_solution / scales
+    seeds = sorted(
+        (
+            (seed_strengths[k], candidates[k][0], candidates[k][1])
+            for k in range(len(candidates))
+            if seed_strengths[k] > 0.0
+        ),
+        key=lambda term: -term[0],
+    )[:_GRAPHENE_INTERBAND_POLES]
+    while len(seeds) < _GRAPHENE_INTERBAND_POLES:
+        seeds.append((1e-24, 1.3 * omega_gap, 0.3 * omega_gap))
+
+    initial, lower, upper = [], [], []
+    for strength, omega_0, gamma in seeds:
+        initial += [np.log10(max(strength, 1e-30)), omega_0 / omega_gap, np.log10(max(gamma / omega_gap, 0.03))]
+        lower += [-33.0, 0.3, -1.6]
+        upper += [-13.0, 2.5, 0.6]
+
+    def residual(params):
+        model = np.zeros(n_samples, dtype=complex)
+        for k in range(_GRAPHENE_INTERBAND_POLES):
+            model += 10 ** params[3 * k] * basis(
+                omega, params[3 * k + 1] * omega_gap, 10 ** params[3 * k + 2] * omega_gap
+            )
+        residual_complex = (model - inter) * fit_weight
+        return np.concatenate([residual_complex.real, residual_complex.imag])
+
+    solution = least_squares(
+        residual,
+        np.array(initial),
+        bounds=(np.array(lower), np.array(upper)),
+        method="trf",
+        max_nfev=8000,
+        xtol=1e-14,
+        ftol=1e-14,
+        gtol=1e-14,
+    )
+    terms = tuple(
+        (
+            float(10 ** solution.x[3 * k]),
+            float(solution.x[3 * k + 1] * omega_gap),
+            float(10 ** solution.x[3 * k + 2] * omega_gap),
+        )
+        for k in range(_GRAPHENE_INTERBAND_POLES)
+    )
+
+    fitted = intra + sum(strength * basis(omega, omega_0, gamma) for strength, omega_0, gamma in terms)
+    l2_error = float(np.linalg.norm(fitted - total) / np.linalg.norm(total))
+    if l2_error > 0.03:
+        raise ValueError(
+            f"Graphene interband Lorentz fit reached only {l2_error * 100:.1f}% band error "
+            f"(> 3%) for chemical_potential={mu_c_ev} eV, scattering_time={tau} s, "
+            f"temperature={temperature} K; this operating point lies outside the validated "
+            f"interband range (the fit assumes a well-defined edge with |mu_c| >~ kB*T)."
+        )
+    return terms
+
 
 class Graphene(Medium2D):
-    """Graphene sheet with the Kubo intraband surface conductivity.
+    """Graphene sheet with the Kubo surface conductivity.
 
     The intraband (Drude-like) term of the Kubo conductivity is
 
@@ -1059,11 +1236,16 @@ class Graphene(Medium2D):
     ``eps0*omega_p^2 = A/dcell``, so the existing native Drude current kernels
     advance the sheet current with no new per-step work beyond one pole.
 
-    The interband term of the Kubo conductivity is not implemented; it does
-    not lower onto the real-coefficient pole machinery without a Pade/pole fit
-    and ``include_interband=True`` raises ``NotImplementedError`` explicitly.
-    Around and below the THz range the intraband term dominates for typical
-    ``|mu_c| >> hbar*omega`` operating points.
+    With ``include_interband=True`` the interband term of the Kubo conductivity
+    (the T > 0 principal-value form, ``_kubo_interband_sigma``) is added as a
+    small set of Lorentz sheet terms fitted at construction. The interband
+    transition is a reactive absorption edge at ``hbar*omega = 2*|mu_c|`` whose
+    below-edge conductivity is capacitive (``Im(sigma) < 0``); this does not
+    lower onto a Drude pole (always inductive) but does lower onto Lorentz
+    poles, which the existing native Lorentz current kernels advance. The fitted
+    conductivity matches the analytic Kubo model to within a few percent across
+    the optical band up to the edge. The intraband-only model (the default)
+    stays a single Drude pole and dominates for ``|mu_c| >> hbar*omega``.
     """
 
     def __init__(
@@ -1075,11 +1257,6 @@ class Graphene(Medium2D):
         include_interband: bool = False,
         name: str | None = None,
     ):
-        if include_interband:
-            raise NotImplementedError(
-                "Graphene interband conductivity is not implemented yet; only the Kubo "
-                "intraband (Drude-like) term is supported."
-            )
         super().__init__(sigma_s=0.0, name=name)
         object.__setattr__(
             self,
@@ -1090,6 +1267,16 @@ class Graphene(Medium2D):
             self, "scattering_time", _coerce_positive(scattering_time, name="scattering_time")
         )
         object.__setattr__(self, "temperature", _coerce_positive(temperature, name="temperature"))
+        object.__setattr__(self, "include_interband", bool(include_interband))
+        interband_terms: tuple[tuple[float, float, float], ...] = ()
+        if include_interband:
+            interband_terms = _fit_graphene_interband_lorentz(
+                float(self.chemical_potential),
+                float(self.scattering_time),
+                float(self.temperature),
+                self.intraband_drude_weight,
+            )
+        object.__setattr__(self, "_interband_lorentz_terms", interband_terms)
 
     @property
     def intraband_drude_weight(self) -> float:
@@ -1110,11 +1297,22 @@ class Graphene(Medium2D):
 
     @property
     def characteristic_frequency(self) -> float:
-        """Material rate [Hz] folded into the FDTD auto-dt bound."""
-        return self.scattering_rate / (2.0 * np.pi)
+        """Material rate [Hz] folded into the FDTD auto-dt bound.
+
+        The intraband relaxation rate and, when interband is enabled, the
+        highest interband Lorentz resonance and linewidth all set the fastest
+        material timescale the time step must resolve.
+        """
+        characteristic = self.scattering_rate / (2.0 * np.pi)
+        for _strength, omega_0, gamma in self._interband_lorentz_terms:
+            characteristic = max(characteristic, omega_0 / (2.0 * np.pi), gamma / (2.0 * np.pi))
+        return characteristic
 
     def sheet_pole_terms(self) -> tuple[tuple[float, float], ...]:
         return ((self.intraband_drude_weight, self.scattering_rate),)
+
+    def sheet_lorentz_terms(self) -> tuple[tuple[float, float, float], ...]:
+        return self._interband_lorentz_terms
 
 
 _VACUUM_PERMEABILITY = 4.0e-7 * np.pi  # [H/m]

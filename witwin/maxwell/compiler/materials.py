@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from witwin.core import Box
 from witwin.core.material import VACUUM_PERMITTIVITY
 
-from ..media import CustomPole, DiagonalTensor3, DrudePole, ModulationSpec, PerturbationMedium, Tensor3x3
+from ..media import CustomPole, DiagonalTensor3, DrudePole, LorentzPole, ModulationSpec, PerturbationMedium, Tensor3x3
 
 _AXES = ("x", "y", "z")
 _OFFDIAG_AXES = ("xy", "xz", "yz")
@@ -944,10 +944,13 @@ def _apply_sheet_structures(scene, model):
     untouched). Dispersive surface-conductivity terms ``(weight, rate)`` from
     ``Medium2D.sheet_pole_terms()`` (``sigma_s(omega) = weight/(rate - i*omega)``)
     lower to equivalent volumetric Drude poles with
-    ``eps0 * omega_p^2 = weight / dual_spacing`` and ``gamma = rate``, restricted
-    to the tangential axes through the pole entry's ``"axes"`` key. Sheet
-    contributions are additive with bulk conductivity and with other sheets,
-    matching the physical superposition of surface currents.
+    ``eps0 * omega_p^2 = weight / dual_spacing`` and ``gamma = rate``, and
+    resonant terms from ``Medium2D.sheet_lorentz_terms()`` (e.g. the graphene
+    interband edge) lower to volumetric Lorentz poles with
+    ``delta_eps = strength / (eps0 * dual_spacing)``; both are restricted to the
+    tangential axes through the pole entry's ``"axes"`` key. Sheet contributions
+    are additive with bulk conductivity and with other sheets, matching the
+    physical superposition of surface currents.
     """
     sheets = _sheet_structures(scene)
     if not sheets:
@@ -978,6 +981,29 @@ def _apply_sheet_structures(scene, model):
             )
             weight_field[node_slices] = 1.0
             model["drude_poles"].append(
+                {
+                    "pole": pole,
+                    "weight": weight_field,
+                    "amplitude": None,
+                    "axes": tangential_axes,
+                }
+            )
+        for strength, omega_0, gamma in getattr(material, "sheet_lorentz_terms", lambda: ())():
+            # Sheet Lorentz term sigma_s = -i*omega*strength*omega_0^2/(...) lowers
+            # to a volumetric Lorentz pole distributed over the dual-cell width:
+            # sigma_s = -i*omega*eps0*dcell*delta_eps*omega_0^2/(...), so
+            # delta_eps = strength / (eps0 * dcell).
+            delta_eps = float(strength) / (dual_spacing * VACUUM_PERMITTIVITY)
+            pole = LorentzPole(
+                delta_eps=delta_eps,
+                resonance_frequency=float(omega_0) / (2.0 * np.pi),
+                gamma=float(gamma) / (2.0 * np.pi),
+            )
+            weight_field = torch.zeros(
+                (scene.Nx, scene.Ny, scene.Nz), device=scene.device, dtype=torch.float32
+            )
+            weight_field[node_slices] = 1.0
+            model["lorentz_poles"].append(
                 {
                     "pole": pole,
                     "weight": weight_field,
