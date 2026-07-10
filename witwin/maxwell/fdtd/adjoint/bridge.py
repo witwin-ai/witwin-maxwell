@@ -83,8 +83,16 @@ def _unsupported_adjoint_medium(scene):
             continue
         if getattr(material, "is_medium2d", False):
             return "FDTD adjoint does not support 2D sheet (Medium2D) media yet."
-        if _material_has_conductivity(material):
-            return "FDTD adjoint does not support static conductive (sigma_e) media yet."
+        if _material_has_conductivity(material) and getattr(material, "is_nonlinear", False):
+            # Static conduction (sigma_e) is differentiable on its own through the
+            # semi-implicit lossy-coefficient replay, but the instantaneous
+            # nonlinear dynamic-curl kernel folds the loss into a field-dependent
+            # coefficient the linear conduction replica does not reproduce.
+            return (
+                "FDTD adjoint does not support electric conductivity combined with nonlinear "
+                "(chi3/chi2/TPA) media in the same material; the nonlinear dynamic-curl replay "
+                "does not carry the static semi-implicit conduction-loss coefficient."
+            )
         if getattr(material, "is_anisotropic", False):
             # Diagonal epsilon anisotropy maps onto the per-axis eps_Ex/Ey/Ez
             # coefficient layout the reverse step and material pullback already
@@ -173,6 +181,12 @@ class _FDTDGradientBridge:
                 raise NotImplementedError("FDTD adjoint requires complex field state for Bloch faces.")
             if getattr(solver, "dispersive_enabled", False):
                 raise NotImplementedError("FDTD adjoint does not support Bloch boundaries with dispersive media.")
+            if getattr(solver, "conductive_enabled", False):
+                raise NotImplementedError(
+                    "FDTD adjoint does not support electric conductivity on Bloch boundaries; the "
+                    "complex-field reverse replay applies the semi-implicit conduction-loss "
+                    "coefficient on the real electric update only."
+                )
         elif any(code not in {BOUNDARY_NONE, BOUNDARY_PML, BOUNDARY_PEC} for code in face_codes):
             raise NotImplementedError("FDTD adjoint currently supports none, pml, pec, and Bloch faces only.")
         compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())

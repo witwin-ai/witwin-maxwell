@@ -68,6 +68,8 @@ def _supports_explicit_source_step(runtime, solver, resolved_source_terms) -> bo
 def _supports_tfsf(runtime, solver, forward_state, resolved_source_terms) -> bool:
     if getattr(solver, "nonlinear_enabled", False):
         return False
+    if getattr(solver, "conductive_enabled", False):
+        return False
     if not getattr(solver, "tfsf_enabled", False):
         return False
     if has_complex_fields(solver):
@@ -103,6 +105,8 @@ def _supports_tfsf(runtime, solver, forward_state, resolved_source_terms) -> boo
 
 def _supports_grating_tfsf(runtime, solver, forward_state, resolved_source_terms) -> bool:
     if getattr(solver, "nonlinear_enabled", False):
+        return False
+    if getattr(solver, "conductive_enabled", False):
         return False
     if not getattr(solver, "tfsf_enabled", False):
         return False
@@ -144,6 +148,8 @@ def _supports_grating_tfsf(runtime, solver, forward_state, resolved_source_terms
 def _supports_standard(runtime, solver, forward_state, resolved_source_terms) -> bool:
     if getattr(solver, "nonlinear_enabled", False):
         return False
+    if getattr(solver, "conductive_enabled", False):
+        return False
     if tuple(forward_state.keys()) != ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         return False
     if getattr(solver, "uses_cpml", False):
@@ -174,6 +180,8 @@ def _with_profile_sections(profiler, fn):
 def _supports_cpml(runtime, solver, forward_state, resolved_source_terms) -> bool:
     if getattr(solver, "nonlinear_enabled", False):
         return False
+    if getattr(solver, "conductive_enabled", False):
+        return False
     if not getattr(solver, "uses_cpml", False):
         return False
     if not _matches_checkpoint_layout(solver, forward_state):
@@ -192,6 +200,8 @@ def _supports_cpml(runtime, solver, forward_state, resolved_source_terms) -> boo
 def _supports_dispersive(runtime, solver, forward_state, resolved_source_terms) -> bool:
     if getattr(solver, "nonlinear_enabled", False):
         return False
+    if getattr(solver, "conductive_enabled", False):
+        return False
     if not getattr(solver, "dispersive_enabled", False):
         return False
     if has_complex_fields(solver):
@@ -207,6 +217,8 @@ def _supports_dispersive(runtime, solver, forward_state, resolved_source_terms) 
 
 def _supports_bloch(runtime, solver, forward_state, resolved_source_terms) -> bool:
     if getattr(solver, "nonlinear_enabled", False):
+        return False
+    if getattr(solver, "conductive_enabled", False):
         return False
     if getattr(solver, "uses_cpml", False):
         return False

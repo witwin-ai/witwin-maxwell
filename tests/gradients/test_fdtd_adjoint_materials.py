@@ -303,6 +303,140 @@ def test_scene_with_magnetic_dispersive_medium_gradient_matches_fd():
 
 
 # ---------------------------------------------------------------------------
+# Static electric conductivity (sigma_e) media
+# ---------------------------------------------------------------------------
+
+_SIGMA_E = 0.1
+
+
+def _conductive_scene(sigma_e, *, density=None):
+    """Design region embedded in a static conductive slab.
+
+    The lossy slab spans (and slightly overhangs) the design region so every
+    trainable design edge carries a non-zero sigma_e. The design density then
+    drives the permittivity of conductive cells, whose semi-implicit lossy
+    decay/curl coefficients depend on eps -- the dependence the linear-dielectric
+    reverse rule drops.
+    """
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+        device="cuda",
+    )
+    if sigma_e != 0.0:
+        scene.add_structure(
+            mw.Structure(
+                name="lossy_slab",
+                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.30, 0.30, 0.30)),
+                material=mw.Material(eps_r=1.0, sigma_e=sigma_e),
+            )
+        )
+    if density is not None:
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+    scene.add_source(
+        mw.PointDipole(
+            position=(0.0, 0.0, -0.18),
+            polarization="Ez",
+            width=0.04,
+            source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+        )
+    )
+    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+    return scene
+
+
+class _ConductiveDensityScene(mw.SceneModule):
+    """Trainable design density inside a static conductive (sigma_e) slab.
+
+    The reverse step must differentiate the semi-implicit conduction-loss
+    decay/curl coefficients through eps for the design gradients to be correct.
+    """
+
+    def __init__(self, init=0.0, sigma_e=_SIGMA_E):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((2, 2, 2), float(init), device="cuda"))
+        self._sigma = sigma_e
+
+    def to_scene(self):
+        return _conductive_scene(self._sigma, density=torch.sigmoid(self.logits))
+
+
+@_CUDA
+def test_scene_with_conductive_medium_gradient_matches_fd():
+    """Per-element FD validation of design gradients in a scene whose trainable
+    cells carry static electric conductivity (previously rejected by the bridge)."""
+    model = _ConductiveDensityScene(init=0.0)
+
+    def loss_fn():
+        result = _build_sim(model, time_steps=200).run()
+        return _abs2(result.monitor("probe")["data"])
+
+    # The conduction loss must actually shape the solution, otherwise this would
+    # only re-validate the lossless path (which the linear reverse handles). A
+    # realistic sigma_e damps the probe field several-fold.
+    lossless = _abs2(
+        _build_sim(_ConductiveDensityScene(init=0.0, sigma_e=0.0), time_steps=200)
+        .run()
+        .monitor("probe")["data"]
+    ).item()
+    conductive = loss_fn().item()
+    assert conductive < 0.6 * lossless, (
+        f"Conduction term inactive: lossless={lossless:.6e}, conductive={conductive:.6e}"
+    )
+
+    backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn)
+
+    assert (fd_grad != 0).any(), "FD gradient is identically zero; test setup is broken."
+    # Acceptance bar: dominant-element relative error below 1e-3.
+    dominant = int(torch.abs(fd_grad).flatten().argmax().item())
+    dom_rel = (
+        abs(backward_grad.flatten()[dominant].item() - fd_grad.flatten()[dominant].item())
+        / abs(fd_grad.flatten()[dominant].item())
+    )
+    assert dom_rel < 1e-3, f"dominant-element rel err {dom_rel:.3e} exceeds 1e-3."
+
+    scale = torch.abs(fd_grad).max().item()
+    assert torch.allclose(backward_grad, fd_grad, rtol=3e-2, atol=scale * 5e-3), (
+        f"backward={backward_grad.flatten().tolist()}, fd={fd_grad.flatten().tolist()}"
+    )
+
+
+@_CUDA
+def test_conductive_reverse_routes_through_torch_vjp():
+    """A conductive scene must fall to the torch-VJP reverse backend: the analytic
+    standard/CPML backends model an eps-independent decay and would drop the
+    conduction-loss eps sensitivity."""
+    from witwin.maxwell.fdtd.adjoint.dispatch import _select_reverse_backend, _ReverseBackend
+
+    prepared = mw.Simulation.fdtd(
+        _conductive_scene(_SIGMA_E),
+        frequencies=[1e9],
+        run_time=mw.TimeConfig(time_steps=8),
+    ).prepare()
+    solver = prepared.solver
+    assert solver.conductive_enabled
+    forward_state = {name: getattr(solver, name) for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
+    backend = _select_reverse_backend(
+        solver,
+        forward_state,
+        eps_ex=solver.eps_Ex,
+        eps_ey=solver.eps_Ey,
+        eps_ez=solver.eps_Ez,
+        resolved_source_terms=None,
+    )
+    assert backend is _ReverseBackend.TORCH_VJP, backend
+
+
+# ---------------------------------------------------------------------------
 # Kerr (instantaneous chi3) media
 # ---------------------------------------------------------------------------
 

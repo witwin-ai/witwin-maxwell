@@ -2151,6 +2151,37 @@ def _kerr_dynamic_electric_curls(solver, state, *, eps_ex, eps_ey, eps_ez, chi3_
     return curls
 
 
+def _conductive_electric_coefficients(solver, *, eps_ex, eps_ey, eps_ez):
+    """Differentiable replica of the semi-implicit lossy ``_electric_update_coefficients``.
+
+    The forward bakes ``decay = (1 - h)/(1 + h)`` and ``curl = (dt/eps)/(1 + h)``
+    (with ``h = 0.5*sigma_e*dt/eps``, times an eps-independent PML/PEC factor)
+    into ``c*_decay`` / ``c*_curl``. Both carry an ``eps`` dependence that the
+    linear-dielectric reverse rule drops, so recompute them from the
+    differentiable ``eps`` leaves and the frozen per-edge conductivity. The
+    eps-independent factor (PML split-field decay and any PEC open fraction) is
+    recovered from the frozen forward curl so those scalings are preserved
+    exactly. Returns per-component ``(decay, curl)`` where ``curl`` is the full
+    curl coefficient (fed with ``eps = 1`` in the update, mirroring the Kerr
+    dynamic-curl path)."""
+    dt = float(solver.dt)
+    coeffs = {}
+    for name, eps, eps_fwd, sigma, curl_fwd in (
+        ("Ex", eps_ex, solver.eps_Ex, solver.sigma_e_Ex, solver.cex_curl),
+        ("Ey", eps_ey, solver.eps_Ey, solver.sigma_e_Ey, solver.cey_curl),
+        ("Ez", eps_ez, solver.eps_Ez, solver.sigma_e_Ez, solver.cez_curl),
+    ):
+        half_fwd = 0.5 * sigma * dt / eps_fwd
+        # curl_fwd = (dt / eps_fwd) / (1 + half_fwd) * factor  ->  solve for factor.
+        factor = curl_fwd * eps_fwd * (1.0 + half_fwd) / dt
+        half = 0.5 * sigma * dt / eps
+        denom = 1.0 + half
+        decay = ((1.0 - half) / denom) * factor
+        curl = (dt / eps / denom) * factor
+        coeffs[name] = (decay, curl)
+    return coeffs
+
+
 def _forward_magnetic_fields(solver, state, *, time_value, resolved_source_terms):
     """Recompute the post-source real magnetic fields of one forward step.
 
@@ -2518,15 +2549,35 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez, chi3_ex=No
                 chi3_ey=chi3_ey if chi3_ey is not None else solver.kerr_chi3_Ey,
                 chi3_ez=chi3_ez if chi3_ez is not None else solver.kerr_chi3_Ez,
             )
+        conductive_coeffs = None
+        if kerr_curls is None and getattr(solver, "conductive_enabled", False):
+            # Static conduction makes both decay and curl eps-dependent through
+            # the semi-implicit denominator; recompute them differentiably so the
+            # VJP carries that dependence (the linear rule drops it).
+            conductive_coeffs = _conductive_electric_coefficients(
+                solver, eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez
+            )
+        if kerr_curls is not None:
+            ex_decay_c, ex_curl_c, ex_eps_c = solver.cex_decay, kerr_curls["Ex"], 1.0
+            ey_decay_c, ey_curl_c, ey_eps_c = solver.cey_decay, kerr_curls["Ey"], 1.0
+            ez_decay_c, ez_curl_c, ez_eps_c = solver.cez_decay, kerr_curls["Ez"], 1.0
+        elif conductive_coeffs is not None:
+            ex_decay_c, ex_curl_c, ex_eps_c = conductive_coeffs["Ex"][0], conductive_coeffs["Ex"][1], 1.0
+            ey_decay_c, ey_curl_c, ey_eps_c = conductive_coeffs["Ey"][0], conductive_coeffs["Ey"][1], 1.0
+            ez_decay_c, ez_curl_c, ez_eps_c = conductive_coeffs["Ez"][0], conductive_coeffs["Ez"][1], 1.0
+        else:
+            ex_decay_c, ex_curl_c, ex_eps_c = solver.cex_decay, solver.cex_curl * solver.eps_Ex, eps_ex
+            ey_decay_c, ey_curl_c, ey_eps_c = solver.cey_decay, solver.cey_curl * solver.eps_Ey, eps_ey
+            ez_decay_c, ez_curl_c, ez_eps_c = solver.cez_decay, solver.cez_curl * solver.eps_Ez, eps_ez
         d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy_e)
         d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz_e)
         ex, psi_ex_y, psi_ex_z = _update_electric_component(
             state["Ex"],
             d_pos=d_hz_dy,
             d_neg=d_hy_dz,
-            decay=solver.cex_decay,
-            curl_prefactor=solver.cex_curl * solver.eps_Ex if kerr_curls is None else kerr_curls["Ex"],
-            eps=eps_ex if kerr_curls is None else 1.0,
+            decay=ex_decay_c,
+            curl_prefactor=ex_curl_c,
+            eps=ex_eps_c,
             low_mode_pos=solver.boundary_y_low_code,
             high_mode_pos=solver.boundary_y_high_code,
             low_mode_neg=solver.boundary_z_low_code,
@@ -2549,9 +2600,9 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez, chi3_ex=No
             state["Ey"],
             d_pos=d_hx_dz,
             d_neg=d_hz_dx,
-            decay=solver.cey_decay,
-            curl_prefactor=solver.cey_curl * solver.eps_Ey if kerr_curls is None else kerr_curls["Ey"],
-            eps=eps_ey if kerr_curls is None else 1.0,
+            decay=ey_decay_c,
+            curl_prefactor=ey_curl_c,
+            eps=ey_eps_c,
             low_mode_pos=solver.boundary_z_low_code,
             high_mode_pos=solver.boundary_z_high_code,
             low_mode_neg=solver.boundary_x_low_code,
@@ -2574,9 +2625,9 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez, chi3_ex=No
             state["Ez"],
             d_pos=d_hy_dx,
             d_neg=d_hx_dy,
-            decay=solver.cez_decay,
-            curl_prefactor=solver.cez_curl * solver.eps_Ez if kerr_curls is None else kerr_curls["Ez"],
-            eps=eps_ez if kerr_curls is None else 1.0,
+            decay=ez_decay_c,
+            curl_prefactor=ez_curl_c,
+            eps=ez_eps_c,
             low_mode_pos=solver.boundary_x_low_code,
             high_mode_pos=solver.boundary_x_high_code,
             low_mode_neg=solver.boundary_y_low_code,
