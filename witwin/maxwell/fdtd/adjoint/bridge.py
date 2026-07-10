@@ -198,20 +198,11 @@ class _FDTDGradientBridge:
                 )
         elif any(code not in {BOUNDARY_NONE, BOUNDARY_PML, BOUNDARY_PEC} for code in face_codes):
             raise NotImplementedError("FDTD adjoint currently supports none, pml, pec, and Bloch faces only.")
-        compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())
-        supported_source_kinds = {
-            "point_dipole",
-            "plane_wave",
-            "gaussian_beam",
-            "astigmatic_gaussian_beam",
-            "mode_source",
-        }
-        for source in compiled_sources:
-            if source.get("kind") not in supported_source_kinds:
-                raise NotImplementedError(
-                    "FDTD adjoint currently supports PointDipole, PlaneWave, GaussianBeam, "
-                    "AstigmaticGaussianBeam, and ModeSource source pullback only."
-                )
+        # Every compiled source kind (point/plane/beam/mode plus the uniform and
+        # custom current / field sources) injects an additive current whose patch
+        # divides by eps at the injection cell, so the explicit reverse's analytic
+        # 1/eps source pullback (or the torch-VJP fallback) differentiates the
+        # design through it; there is no source-kind that has to be rejected here.
 
     def _run_forward_with_checkpoints(self, solver, *, time_steps, dft_frequency, dft_window, full_field_dft, normalize_source):
         runtime = _runtime()
