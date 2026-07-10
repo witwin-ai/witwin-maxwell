@@ -7,6 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import torch
 from torch.utils.cpp_extension import load
 
 
@@ -107,6 +108,7 @@ def _load_vcvars64_environment() -> bool:
 def _ensure_windows_build_tools_on_path() -> None:
     if os.name != "nt":
         return
+    os.environ.setdefault("VSLANG", "1033")
     if shutil.which("cl") is None:
         _load_vcvars64_environment()
     if shutil.which("cl") is None:
@@ -174,6 +176,26 @@ def extension_sources() -> list[Path]:
     ]
 
 
+def _cuda_gencode_flags() -> list[str]:
+    """Translate the release architecture list directly into nvcc flags."""
+    value = os.environ.get("WITWIN_CUDA_GENCODE_ARCHES")
+    if not value:
+        return []
+    flags: list[str] = []
+    for entry in value.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        include_ptx = entry.endswith("+PTX")
+        number = entry.removesuffix("+PTX").replace(".", "")
+        if not number.isdigit():
+            raise ValueError(f"Invalid CUDA architecture {entry!r} in WITWIN_CUDA_GENCODE_ARCHES.")
+        flags.append(f"-gencode=arch=compute_{number},code=sm_{number}")
+        if include_ptx:
+            flags.append(f"-gencode=arch=compute_{number},code=compute_{number}")
+    return flags
+
+
 def _conda_torch_ldflags() -> list[str]:
     # Conda-distributed torch keeps c10.lib/torch_cuda.lib in <env>\Library\lib
     # instead of site-packages\torch\lib, which cpp_extension does not search.
@@ -185,15 +207,28 @@ def _conda_torch_ldflags() -> list[str]:
     return []
 
 
-def _load_extension_file(module_path: Path):
-    import importlib.util
+class _StableOpsModule:
+    """Attribute-compatible view of the dispatcher operators."""
 
-    spec = importlib.util.spec_from_file_location("witwin_maxwell_fdtd_cuda", module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Unable to create import spec for {module_path}.")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    def __init__(self, library_path: Path) -> None:
+        self.__file__ = str(library_path)
+
+    def is_available(self) -> bool:
+        return bool(torch.cuda.is_available())
+
+    def debug_linear_indices(self, shape):
+        size_x, size_y, size_z = (int(value) for value in shape)
+        return torch.ops.witwin_maxwell_fdtd_cuda.debug_linear_indices(size_x, size_y, size_z)
+
+    def __getattr__(self, name: str):
+        return getattr(torch.ops.witwin_maxwell_fdtd_cuda, name)
+
+
+def _load_extension_file(library_path: Path) -> _StableOpsModule:
+    torch.ops.load_library(str(library_path))
+    if not hasattr(torch.ops.witwin_maxwell_fdtd_cuda, "update_magnetic_hx_standard"):
+        raise ImportError(f"{library_path} does not register the Stable ABI Maxwell operators.")
+    return _StableOpsModule(library_path)
 
 
 def _load_packaged_prebuilt_extension():
@@ -219,10 +254,13 @@ def _load_prebuilt_extension(build_directory: Path):
 
 def build_extension(*, verbose: bool = False):
     root = source_root()
-    default_build_directory = Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda"
+    default_build_directory = Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda" / "stable_abi_v1"
     build_directory = Path(os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR", default_build_directory))
     if os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_SKIP_PREBUILT") != "1":
-        module = _load_packaged_prebuilt_extension()
+        try:
+            module = _load_packaged_prebuilt_extension()
+        except Exception:  # noqa: BLE001 - stale/ABI-mismatched prebuilt, rebuild instead
+            module = None
         if module is not None:
             return module
     if os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_PREBUILT") == "1":
@@ -230,13 +268,24 @@ def build_extension(*, verbose: bool = False):
     _ensure_windows_build_tools_on_path()
     _ensure_cuda_home_from_nvcc()
     build_directory.mkdir(parents=True, exist_ok=True)
-    return load(
+    library_path = load(
         name="witwin_maxwell_fdtd_cuda",
         sources=[str(path) for path in extension_sources()],
         build_directory=str(build_directory),
         extra_include_paths=[str(root), str(root / "kernels")],
-        extra_cflags=["/O2"] if os.name == "nt" else ["-O3"],
-        extra_cuda_cflags=["-O3"],
+        extra_cflags=(
+            ["/O2", "/DTORCH_TARGET_VERSION=0x020a000000000000"]
+            if os.name == "nt"
+            else ["-O3", "-DTORCH_TARGET_VERSION=0x020a000000000000"]
+        ),
+        extra_cuda_cflags=[
+            "-O3",
+            "-DTORCH_TARGET_VERSION=0x020a000000000000",
+            "-DUSE_CUDA",
+            *_cuda_gencode_flags(),
+        ],
         extra_ldflags=_conda_torch_ldflags(),
+        is_python_module=False,
         verbose=verbose,
     )
+    return _StableOpsModule(Path(library_path))

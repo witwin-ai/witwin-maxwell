@@ -1,7 +1,7 @@
-#include <ATen/ATen.h>
-#include <c10/cuda/CUDAGuard.h>
-
+#include <tuple>
 #include <vector>
+
+#include <torch/csrc/stable/ops.h>
 
 #include "../launch.h"
 #include "../tensors.h"
@@ -40,24 +40,35 @@ void synchronize_noop_cuda() {
   WITWIN_CUDA_CHECK();
 }
 
-std::vector<at::Tensor> debug_linear_indices_cuda(std::vector<int64_t> shape) {
-  TORCH_CHECK(shape.size() == 3, "shape must contain exactly three dimensions");
-  TORCH_CHECK(shape[0] > 0 && shape[1] > 0 && shape[2] > 0, "shape dimensions must be positive");
+std::tuple<
+    torch::stable::Tensor,
+    torch::stable::Tensor,
+    torch::stable::Tensor,
+    torch::stable::Tensor>
+debug_linear_indices_cuda(int64_t size_x, int64_t size_y, int64_t size_z) {
+  STD_TORCH_CHECK(size_x > 0 && size_y > 0 && size_z > 0, "shape dimensions must be positive");
+  const std::vector<int64_t> shape{size_x, size_y, size_z};
   const int64_t total = shape[0] * shape[1] * shape[2];
-  auto options = at::TensorOptions().device(at::kCUDA).dtype(at::kLong);
-  auto linear = at::empty(shape, options);
-  auto i_index = at::empty(shape, options);
-  auto j_index = at::empty(shape, options);
-  auto k_index = at::empty(shape, options);
-  c10::cuda::CUDAGuard guard(linear.device());
+  const torch::stable::Device device(
+      torch::headeronly::DeviceType::CUDA,
+      torch::stable::accelerator::getCurrentDeviceIndex());
+  auto linear = torch::stable::empty(
+      shape, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  auto i_index = torch::stable::empty(
+      shape, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  auto j_index = torch::stable::empty(
+      shape, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  auto k_index = torch::stable::empty(
+      shape, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  torch::stable::accelerator::DeviceGuard guard(linear.get_device_index());
   debug_linear_indices_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
       total,
       shape[1],
       shape[2],
-      linear.data_ptr<int64_t>(),
-      i_index.data_ptr<int64_t>(),
-      j_index.data_ptr<int64_t>(),
-      k_index.data_ptr<int64_t>());
+      linear.mutable_data_ptr<int64_t>(),
+      i_index.mutable_data_ptr<int64_t>(),
+      j_index.mutable_data_ptr<int64_t>(),
+      k_index.mutable_data_ptr<int64_t>());
   WITWIN_CUDA_CHECK();
-  return {linear, i_index, j_index, k_index};
+  return std::make_tuple(linear, i_index, j_index, k_index);
 }

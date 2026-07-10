@@ -1,16 +1,13 @@
-#include <ATen/ATen.h>
-#include <c10/cuda/CUDAGuard.h>
-
 #include "../launch.h"
 #include "../tensors.h"
 #include "common.cuh"
 
 namespace {
 
-void check_field3d(const at::Tensor& field, const char* name) {
+void check_field3d(const torch::stable::Tensor& field, const char* name) {
   check_float32_tensor(field, name);
   check_contiguous_tensor(field, name);
-  TORCH_CHECK(field.dim() == 3, name, " must be a contiguous 3D float32 CUDA tensor");
+  STD_TORCH_CHECK(field.dim() == 3, name, " must be a contiguous 3D float32 CUDA tensor");
 }
 
 template <int Axis>
@@ -150,35 +147,35 @@ void launch_bloch_projection(
 
 }  // namespace
 
-void project_periodic_boundary_cuda(at::Tensor field, int64_t axis) {
+void project_periodic_boundary_cuda(torch::stable::Tensor field, int64_t axis) {
   check_field3d(field, "field");
-  TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
-  const c10::cuda::CUDAGuard device_guard(field.device());
+  STD_TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
+  const torch::stable::accelerator::DeviceGuard device_guard(field.get_device_index());
   const int nx = static_cast<int>(field.size(0));
   const int ny = static_cast<int>(field.size(1));
   const int nz = static_cast<int>(field.size(2));
   if (axis == 0) {
-    launch_periodic_projection<0>(nx, ny, nz, field.data_ptr<float>());
+    launch_periodic_projection<0>(nx, ny, nz, field.mutable_data_ptr<float>());
   } else if (axis == 1) {
-    launch_periodic_projection<1>(nx, ny, nz, field.data_ptr<float>());
+    launch_periodic_projection<1>(nx, ny, nz, field.mutable_data_ptr<float>());
   } else {
-    launch_periodic_projection<2>(nx, ny, nz, field.data_ptr<float>());
+    launch_periodic_projection<2>(nx, ny, nz, field.mutable_data_ptr<float>());
   }
   WITWIN_CUDA_CHECK();
 }
 
 void project_bloch_boundary_cuda(
-    at::Tensor field_real,
-    at::Tensor field_imag,
+    torch::stable::Tensor field_real,
+    torch::stable::Tensor field_imag,
     int64_t axis,
     double phase_cos,
     double phase_sin) {
   check_field3d(field_real, "field_real");
   check_field3d(field_imag, "field_imag");
   check_same_cuda_device(field_real, field_imag, "field_imag");
-  TORCH_CHECK(field_real.sizes() == field_imag.sizes(), "field_imag must match field_real shape");
-  TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
-  const c10::cuda::CUDAGuard device_guard(field_real.device());
+  STD_TORCH_CHECK(field_real.sizes().equals(field_imag.sizes()), "field_imag must match field_real shape");
+  STD_TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
+  const torch::stable::accelerator::DeviceGuard device_guard(field_real.get_device_index());
   const int nx = static_cast<int>(field_real.size(0));
   const int ny = static_cast<int>(field_real.size(1));
   const int nz = static_cast<int>(field_real.size(2));
@@ -188,26 +185,26 @@ void project_bloch_boundary_cuda(
   if (axis == 0) {
     if (real_phase) {
       launch_bloch_projection<0, true>(
-          nx, ny, nz, phase_cos_f, phase_sin_f, field_real.data_ptr<float>(), field_imag.data_ptr<float>());
+          nx, ny, nz, phase_cos_f, phase_sin_f, field_real.mutable_data_ptr<float>(), field_imag.mutable_data_ptr<float>());
     } else {
       launch_bloch_projection<0, false>(
-          nx, ny, nz, phase_cos_f, phase_sin_f, field_real.data_ptr<float>(), field_imag.data_ptr<float>());
+          nx, ny, nz, phase_cos_f, phase_sin_f, field_real.mutable_data_ptr<float>(), field_imag.mutable_data_ptr<float>());
     }
   } else if (axis == 1) {
     if (real_phase) {
       launch_bloch_projection<1, true>(
-          nx, ny, nz, phase_cos_f, phase_sin_f, field_real.data_ptr<float>(), field_imag.data_ptr<float>());
+          nx, ny, nz, phase_cos_f, phase_sin_f, field_real.mutable_data_ptr<float>(), field_imag.mutable_data_ptr<float>());
     } else {
       launch_bloch_projection<1, false>(
-          nx, ny, nz, phase_cos_f, phase_sin_f, field_real.data_ptr<float>(), field_imag.data_ptr<float>());
+          nx, ny, nz, phase_cos_f, phase_sin_f, field_real.mutable_data_ptr<float>(), field_imag.mutable_data_ptr<float>());
     }
   } else {
     if (real_phase) {
       launch_bloch_projection<2, true>(
-          nx, ny, nz, phase_cos_f, phase_sin_f, field_real.data_ptr<float>(), field_imag.data_ptr<float>());
+          nx, ny, nz, phase_cos_f, phase_sin_f, field_real.mutable_data_ptr<float>(), field_imag.mutable_data_ptr<float>());
     } else {
       launch_bloch_projection<2, false>(
-          nx, ny, nz, phase_cos_f, phase_sin_f, field_real.data_ptr<float>(), field_imag.data_ptr<float>());
+          nx, ny, nz, phase_cos_f, phase_sin_f, field_real.mutable_data_ptr<float>(), field_imag.mutable_data_ptr<float>());
     }
   }
   WITWIN_CUDA_CHECK();

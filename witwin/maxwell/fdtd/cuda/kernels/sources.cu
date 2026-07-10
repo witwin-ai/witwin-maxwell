@@ -1,6 +1,3 @@
-#include <ATen/ATen.h>
-#include <c10/cuda/CUDAGuard.h>
-
 #include <cmath>
 #include <type_traits>
 
@@ -841,54 +838,54 @@ __global__ void update_auxiliary_electric_kernel(
   }
 }
 
-Shape3D shape3d(const at::Tensor& tensor) {
-  TORCH_CHECK(tensor.dim() == 3, "tensor must be 3D");
+Shape3D shape3d(const torch::stable::Tensor& tensor) {
+  STD_TORCH_CHECK(tensor.dim() == 3, "tensor must be 3D");
   return {static_cast<int>(tensor.size(0)), static_cast<int>(tensor.size(1)), static_cast<int>(tensor.size(2))};
 }
 
-void check_float_3d(const at::Tensor& tensor, const char* name) {
+void check_float_3d(const torch::stable::Tensor& tensor, const char* name) {
   check_float32_tensor(tensor, name);
   check_contiguous_tensor(tensor, name);
-  TORCH_CHECK(tensor.dim() == 3, name, " must be 3D");
+  STD_TORCH_CHECK(tensor.dim() == 3, name, " must be 3D");
 }
 
-void check_float_1d(const at::Tensor& tensor, const char* name) {
+void check_float_1d(const torch::stable::Tensor& tensor, const char* name) {
   check_float32_tensor(tensor, name);
   check_contiguous_tensor(tensor, name);
-  TORCH_CHECK(tensor.dim() == 1, name, " must be 1D");
+  STD_TORCH_CHECK(tensor.dim() == 1, name, " must be 1D");
 }
 
-void check_int32_tensor(const at::Tensor& tensor, const char* name) {
+void check_int32_tensor(const torch::stable::Tensor& tensor, const char* name) {
   check_cuda_tensor(tensor, name);
   check_contiguous_tensor(tensor, name);
-  TORCH_CHECK(tensor.scalar_type() == at::kInt, name, " must be int32");
+  STD_TORCH_CHECK(tensor.scalar_type() == torch::headeronly::ScalarType::Int, name, " must be int32");
 }
 
-void check_int32_or_int64_tensor(const at::Tensor& tensor, const char* name) {
+void check_int32_or_int64_tensor(const torch::stable::Tensor& tensor, const char* name) {
   check_cuda_tensor(tensor, name);
   check_contiguous_tensor(tensor, name);
-  TORCH_CHECK(
-      tensor.scalar_type() == at::kInt || tensor.scalar_type() == at::kLong,
+  STD_TORCH_CHECK(
+      tensor.scalar_type() == torch::headeronly::ScalarType::Int || tensor.scalar_type() == torch::headeronly::ScalarType::Long,
       name,
       " must be int32 or int64");
 }
 
-void check_int64_tensor(const at::Tensor& tensor, const char* name) {
+void check_int64_tensor(const torch::stable::Tensor& tensor, const char* name) {
   check_cuda_tensor(tensor, name);
   check_contiguous_tensor(tensor, name);
-  TORCH_CHECK(tensor.scalar_type() == at::kLong, name, " must be int64");
+  STD_TORCH_CHECK(tensor.scalar_type() == torch::headeronly::ScalarType::Long, name, " must be int64");
 }
 
-void check_same_shape(const at::Tensor& reference, const at::Tensor& tensor, const char* name) {
+void check_same_shape(const torch::stable::Tensor& reference, const torch::stable::Tensor& tensor, const char* name) {
   check_same_cuda_device(reference, tensor, name);
-  TORCH_CHECK(tensor.sizes() == reference.sizes(), name, " must match reference shape");
+  STD_TORCH_CHECK(tensor.sizes().equals(reference.sizes()), name, " must match reference shape");
 }
 
 }  // namespace
 
 void add_source_patch_cuda(
-    at::Tensor field,
-    const at::Tensor& patch,
+    torch::stable::Tensor field,
+    const torch::stable::Tensor& patch,
     int64_t offset_i,
     int64_t offset_j,
     int64_t offset_k,
@@ -896,7 +893,7 @@ void add_source_patch_cuda(
   check_float_3d(field, "field");
   check_float_3d(patch, "patch");
   check_same_cuda_device(field, patch, "patch");
-  c10::cuda::CUDAGuard guard(field.device());
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
   const Shape3D field_shape = shape3d(field);
   const Shape3D patch_shape = shape3d(patch);
   const dim3 block = patch_block3d();
@@ -909,8 +906,8 @@ void add_source_patch_cuda(
         static_cast<int>(offset_j),
         static_cast<int>(offset_k),
         static_cast<float>(signal),
-        field.data_ptr<float>(),
-        patch.data_ptr<float>());
+        field.mutable_data_ptr<float>(),
+        patch.mutable_data_ptr<float>());
   };
   if (patch_contained(field_shape, patch_shape, offset_i, offset_j, offset_k)) {
     launch(std::false_type{});
@@ -921,9 +918,9 @@ void add_source_patch_cuda(
 }
 
 void add_cw_phased_source_patch_cuda(
-    at::Tensor field,
-    const at::Tensor& patch_cos,
-    const at::Tensor& patch_sin,
+    torch::stable::Tensor field,
+    const torch::stable::Tensor& patch_cos,
+    const torch::stable::Tensor& patch_sin,
     int64_t offset_i,
     int64_t offset_j,
     int64_t offset_k,
@@ -934,7 +931,7 @@ void add_cw_phased_source_patch_cuda(
   check_float_3d(patch_sin, "patch_sin");
   check_same_cuda_device(field, patch_cos, "patch_cos");
   check_same_shape(patch_cos, patch_sin, "patch_sin");
-  c10::cuda::CUDAGuard guard(field.device());
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
   const Shape3D field_shape = shape3d(field);
   const Shape3D patch_shape = shape3d(patch_cos);
   const dim3 block = patch_block3d();
@@ -948,9 +945,9 @@ void add_cw_phased_source_patch_cuda(
         static_cast<int>(offset_k),
         static_cast<float>(signal_cos),
         static_cast<float>(signal_sin),
-        field.data_ptr<float>(),
-        patch_cos.data_ptr<float>(),
-        patch_sin.data_ptr<float>());
+        field.mutable_data_ptr<float>(),
+        patch_cos.mutable_data_ptr<float>(),
+        patch_sin.mutable_data_ptr<float>());
   };
   if (patch_contained(field_shape, patch_shape, offset_i, offset_j, offset_k)) {
     launch(std::false_type{});
@@ -961,10 +958,10 @@ void add_cw_phased_source_patch_cuda(
 }
 
 void add_time_shifted_source_patch_cuda(
-    at::Tensor field,
-    const at::Tensor& patch,
-    const at::Tensor& delay_patch,
-    const at::Tensor& activation_delay_patch,
+    torch::stable::Tensor field,
+    const torch::stable::Tensor& patch,
+    const torch::stable::Tensor& delay_patch,
+    const torch::stable::Tensor& activation_delay_patch,
     int64_t offset_i,
     int64_t offset_j,
     int64_t offset_k,
@@ -983,7 +980,7 @@ void add_time_shifted_source_patch_cuda(
   check_same_cuda_device(field, patch, "patch");
   check_same_shape(patch, delay_patch, "delay_patch");
   check_same_shape(patch, activation_delay_patch, "activation_delay_patch");
-  c10::cuda::CUDAGuard guard(field.device());
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
   constexpr float two_pi = 6.283185307179586f;
   constexpr float pi = 3.141592653589793f;
   const float frequency_f = static_cast<float>(frequency);
@@ -1010,10 +1007,10 @@ void add_time_shifted_source_patch_cuda(
         static_cast<float>(phase),
         static_cast<float>(delay),
         static_cast<int>(causal_gate),
-        field.data_ptr<float>(),
-        patch.data_ptr<float>(),
-        delay_patch.data_ptr<float>(),
-        activation_delay_patch.data_ptr<float>());
+        field.mutable_data_ptr<float>(),
+        patch.mutable_data_ptr<float>(),
+        delay_patch.mutable_data_ptr<float>(),
+        activation_delay_patch.mutable_data_ptr<float>());
   };
   if (time_kind == 0) {
     if (contained) {
@@ -1038,8 +1035,8 @@ void add_time_shifted_source_patch_cuda(
 }
 
 void add_source_patch_periodic_cuda(
-    at::Tensor field,
-    const at::Tensor& patch,
+    torch::stable::Tensor field,
+    const torch::stable::Tensor& patch,
     int64_t offset_i,
     int64_t offset_j,
     int64_t offset_k,
@@ -1051,10 +1048,10 @@ void add_source_patch_periodic_cuda(
   check_float_3d(field, "field");
   check_float_3d(patch, "patch");
   check_same_cuda_device(field, patch, "patch");
-  TORCH_CHECK(axis_a >= 0 && axis_a < 3, "axis_a must be in [0, 3)");
-  TORCH_CHECK(axis_b >= 0 && axis_b < 3, "axis_b must be in [0, 3)");
-  TORCH_CHECK(axis_a != axis_b, "axis_a and axis_b must be distinct");
-  c10::cuda::CUDAGuard guard(field.device());
+  STD_TORCH_CHECK(axis_a >= 0 && axis_a < 3, "axis_a must be in [0, 3)");
+  STD_TORCH_CHECK(axis_b >= 0 && axis_b < 3, "axis_b must be in [0, 3)");
+  STD_TORCH_CHECK(axis_a != axis_b, "axis_a and axis_b must be distinct");
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
   const auto launch = [&](auto axis_a_tag, auto axis_b_tag) {
     constexpr int axis_a_value = decltype(axis_a_tag)::value;
     constexpr int axis_b_value = decltype(axis_b_tag)::value;
@@ -1067,8 +1064,8 @@ void add_source_patch_periodic_cuda(
         static_cast<float>(signal),
         static_cast<int>(wrap_a),
         static_cast<int>(wrap_b),
-        field.data_ptr<float>(),
-        patch.data_ptr<float>());
+        field.mutable_data_ptr<float>(),
+        patch.mutable_data_ptr<float>());
   };
   if (axis_a == 0 && axis_b == 1) {
     launch(std::integral_constant<int, 0>{}, std::integral_constant<int, 1>{});
@@ -1087,13 +1084,13 @@ void add_source_patch_periodic_cuda(
 }
 
 void add_source_patch_bloch_cuda(
-    at::Tensor ex_real,
-    at::Tensor ex_imag,
-    at::Tensor ey_real,
-    at::Tensor ey_imag,
-    at::Tensor ez_real,
-    at::Tensor ez_imag,
-    const at::Tensor& patch,
+    torch::stable::Tensor ex_real,
+    torch::stable::Tensor ex_imag,
+    torch::stable::Tensor ey_real,
+    torch::stable::Tensor ey_imag,
+    torch::stable::Tensor ez_real,
+    torch::stable::Tensor ez_imag,
+    const torch::stable::Tensor& patch,
     int64_t offset_i,
     int64_t offset_j,
     int64_t offset_k,
@@ -1122,8 +1119,8 @@ void add_source_patch_bloch_cuda(
   check_same_shape(ex_real, ex_imag, "ex_imag");
   check_same_shape(ey_real, ey_imag, "ey_imag");
   check_same_shape(ez_real, ez_imag, "ez_imag");
-  TORCH_CHECK(axis_code >= 0 && axis_code < 3, "axis_code must be in [0, 3)");
-  c10::cuda::CUDAGuard guard(ex_real.device());
+  STD_TORCH_CHECK(axis_code >= 0 && axis_code < 3, "axis_code must be in [0, 3)");
+  torch::stable::accelerator::DeviceGuard guard(ex_real.get_device_index());
   if (axis_code == 0) {
     launch_bloch_source_patch<1, 2>(
         shape3d(ex_real),
@@ -1139,9 +1136,9 @@ void add_source_patch_bloch_cuda(
         static_cast<float>(phase_sin_b),
         static_cast<int>(wrap_axis_a),
         static_cast<int>(wrap_axis_b),
-        ex_real.data_ptr<float>(),
-        ex_imag.data_ptr<float>(),
-        patch.data_ptr<float>());
+        ex_real.mutable_data_ptr<float>(),
+        ex_imag.mutable_data_ptr<float>(),
+        patch.mutable_data_ptr<float>());
   } else if (axis_code == 1) {
     launch_bloch_source_patch<0, 2>(
         shape3d(ey_real),
@@ -1157,9 +1154,9 @@ void add_source_patch_bloch_cuda(
         static_cast<float>(phase_sin_b),
         static_cast<int>(wrap_axis_a),
         static_cast<int>(wrap_axis_b),
-        ey_real.data_ptr<float>(),
-        ey_imag.data_ptr<float>(),
-        patch.data_ptr<float>());
+        ey_real.mutable_data_ptr<float>(),
+        ey_imag.mutable_data_ptr<float>(),
+        patch.mutable_data_ptr<float>());
   } else {
     launch_bloch_source_patch<0, 1>(
         shape3d(ez_real),
@@ -1175,17 +1172,17 @@ void add_source_patch_bloch_cuda(
         static_cast<float>(phase_sin_b),
         static_cast<int>(wrap_axis_a),
         static_cast<int>(wrap_axis_b),
-        ez_real.data_ptr<float>(),
-        ez_imag.data_ptr<float>(),
-        patch.data_ptr<float>());
+        ez_real.mutable_data_ptr<float>(),
+        ez_imag.mutable_data_ptr<float>(),
+        patch.mutable_data_ptr<float>());
   }
   WITWIN_CUDA_CHECK();
 }
 
 void add_scaled_slice_source_patch_cuda(
-    at::Tensor field,
-    const at::Tensor& patch,
-    const at::Tensor& incident,
+    torch::stable::Tensor field,
+    const torch::stable::Tensor& patch,
+    const torch::stable::Tensor& incident,
     int64_t sample_index,
     int64_t offset_i,
     int64_t offset_j,
@@ -1196,8 +1193,8 @@ void add_scaled_slice_source_patch_cuda(
   check_float_1d(incident, "incident");
   check_same_cuda_device(field, patch, "patch");
   check_same_cuda_device(field, incident, "incident");
-  TORCH_CHECK(sample_index >= 0 && sample_index < incident.numel(), "sample_index is out of range");
-  c10::cuda::CUDAGuard guard(field.device());
+  STD_TORCH_CHECK(sample_index >= 0 && sample_index < incident.numel(), "sample_index is out of range");
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
   const Shape3D patch_shape = shape3d(patch);
   const dim3 block = patch_block3d();
   add_scaled_slice_source_patch_kernel<<<patch_grid3d(patch_shape, block), block, 0, current_cuda_stream()>>>(
@@ -1208,17 +1205,17 @@ void add_scaled_slice_source_patch_cuda(
       static_cast<int>(offset_j),
       static_cast<int>(offset_k),
       static_cast<float>(scale),
-      field.data_ptr<float>(),
-      patch.data_ptr<float>(),
-      incident.data_ptr<float>());
+      field.mutable_data_ptr<float>(),
+      patch.mutable_data_ptr<float>(),
+      incident.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void add_scaled_line_source_patch_cuda(
-    at::Tensor field,
-    const at::Tensor& patch,
-    const at::Tensor& incident,
-    const at::Tensor& sample_indices,
+    torch::stable::Tensor field,
+    const torch::stable::Tensor& patch,
+    const torch::stable::Tensor& incident,
+    const torch::stable::Tensor& sample_indices,
     int64_t sample_axis,
     int64_t offset_i,
     int64_t offset_j,
@@ -1231,9 +1228,9 @@ void add_scaled_line_source_patch_cuda(
   check_same_cuda_device(field, patch, "patch");
   check_same_cuda_device(field, incident, "incident");
   check_same_cuda_device(field, sample_indices, "sample_indices");
-  TORCH_CHECK(sample_axis >= 0 && sample_axis < 3, "sample_axis must be in [0, 3)");
-  TORCH_CHECK(sample_indices.numel() == patch.size(sample_axis), "sample_indices length must match selected patch axis");
-  c10::cuda::CUDAGuard guard(field.device());
+  STD_TORCH_CHECK(sample_axis >= 0 && sample_axis < 3, "sample_axis must be in [0, 3)");
+  STD_TORCH_CHECK(sample_indices.numel() == patch.size(sample_axis), "sample_indices length must match selected patch axis");
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
   if (sample_axis == 0) {
     launch_scaled_line_source_patch<0>(
         shape3d(field),
@@ -1242,10 +1239,10 @@ void add_scaled_line_source_patch_cuda(
         static_cast<int>(offset_j),
         static_cast<int>(offset_k),
         static_cast<float>(scale),
-        field.data_ptr<float>(),
-        patch.data_ptr<float>(),
-        incident.data_ptr<float>(),
-        sample_indices.data_ptr<int>());
+        field.mutable_data_ptr<float>(),
+        patch.mutable_data_ptr<float>(),
+        incident.mutable_data_ptr<float>(),
+        sample_indices.mutable_data_ptr<int>());
   } else if (sample_axis == 1) {
     launch_scaled_line_source_patch<1>(
         shape3d(field),
@@ -1254,10 +1251,10 @@ void add_scaled_line_source_patch_cuda(
         static_cast<int>(offset_j),
         static_cast<int>(offset_k),
         static_cast<float>(scale),
-        field.data_ptr<float>(),
-        patch.data_ptr<float>(),
-        incident.data_ptr<float>(),
-        sample_indices.data_ptr<int>());
+        field.mutable_data_ptr<float>(),
+        patch.mutable_data_ptr<float>(),
+        incident.mutable_data_ptr<float>(),
+        sample_indices.mutable_data_ptr<int>());
   } else {
     launch_scaled_line_source_patch<2>(
         shape3d(field),
@@ -1266,19 +1263,19 @@ void add_scaled_line_source_patch_cuda(
         static_cast<int>(offset_j),
         static_cast<int>(offset_k),
         static_cast<float>(scale),
-        field.data_ptr<float>(),
-        patch.data_ptr<float>(),
-        incident.data_ptr<float>(),
-        sample_indices.data_ptr<int>());
+        field.mutable_data_ptr<float>(),
+        patch.mutable_data_ptr<float>(),
+        incident.mutable_data_ptr<float>(),
+        sample_indices.mutable_data_ptr<int>());
   }
   WITWIN_CUDA_CHECK();
 }
 
 void add_interpolated_source_patch_cuda(
-    at::Tensor field,
-    const at::Tensor& patch,
-    const at::Tensor& incident,
-    const at::Tensor& sample_positions,
+    torch::stable::Tensor field,
+    const torch::stable::Tensor& patch,
+    const torch::stable::Tensor& incident,
+    const torch::stable::Tensor& sample_positions,
     double origin,
     double ds,
     int64_t offset_i,
@@ -1292,7 +1289,7 @@ void add_interpolated_source_patch_cuda(
   check_same_cuda_device(field, patch, "patch");
   check_same_cuda_device(field, incident, "incident");
   check_same_shape(patch, sample_positions, "sample_positions");
-  c10::cuda::CUDAGuard guard(field.device());
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
   const float inv_ds = ds > 0.0 ? static_cast<float>(1.0 / ds) : 0.0f;
   const Shape3D patch_shape = shape3d(patch);
   const dim3 block = patch_block3d();
@@ -1306,22 +1303,22 @@ void add_interpolated_source_patch_cuda(
       static_cast<int>(offset_j),
       static_cast<int>(offset_k),
       static_cast<float>(scale),
-      field.data_ptr<float>(),
-      patch.data_ptr<float>(),
-      incident.data_ptr<float>(),
-      sample_positions.data_ptr<float>());
+      field.mutable_data_ptr<float>(),
+      patch.mutable_data_ptr<float>(),
+      incident.mutable_data_ptr<float>(),
+      sample_positions.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void add_batched_reference_source_patches_cuda(
-    at::Tensor field_x,
-    at::Tensor field_y,
-    at::Tensor field_z,
-    const at::Tensor& coeff_data,
-    const at::Tensor& incident,
-    const at::Tensor& field_codes_per_coeff,
-    const at::Tensor& field_offsets,
-    const at::Tensor& sample_indices_per_coeff) {
+    torch::stable::Tensor field_x,
+    torch::stable::Tensor field_y,
+    torch::stable::Tensor field_z,
+    const torch::stable::Tensor& coeff_data,
+    const torch::stable::Tensor& incident,
+    const torch::stable::Tensor& field_codes_per_coeff,
+    const torch::stable::Tensor& field_offsets,
+    const torch::stable::Tensor& sample_indices_per_coeff) {
   check_float_3d(field_x, "field_x");
   check_float_3d(field_y, "field_y");
   check_float_3d(field_z, "field_z");
@@ -1337,45 +1334,45 @@ void add_batched_reference_source_patches_cuda(
   check_same_cuda_device(field_x, field_codes_per_coeff, "field_codes_per_coeff");
   check_same_cuda_device(field_x, field_offsets, "field_offsets");
   check_same_cuda_device(field_x, sample_indices_per_coeff, "sample_indices_per_coeff");
-  TORCH_CHECK(field_codes_per_coeff.numel() == coeff_data.numel(), "field_codes_per_coeff length must match coeff_data");
-  TORCH_CHECK(field_offsets.numel() == coeff_data.numel(), "field_offsets length must match coeff_data");
-  TORCH_CHECK(sample_indices_per_coeff.numel() == coeff_data.numel(), "sample_indices_per_coeff length must match coeff_data");
-  c10::cuda::CUDAGuard guard(field_x.device());
-  if (field_offsets.scalar_type() == at::kInt) {
+  STD_TORCH_CHECK(field_codes_per_coeff.numel() == coeff_data.numel(), "field_codes_per_coeff length must match coeff_data");
+  STD_TORCH_CHECK(field_offsets.numel() == coeff_data.numel(), "field_offsets length must match coeff_data");
+  STD_TORCH_CHECK(sample_indices_per_coeff.numel() == coeff_data.numel(), "sample_indices_per_coeff length must match coeff_data");
+  torch::stable::accelerator::DeviceGuard guard(field_x.get_device_index());
+  if (field_offsets.scalar_type() == torch::headeronly::ScalarType::Int) {
     add_batched_reference_source_patches_warp_kernel<<<linear_grid(coeff_data.numel()), 256, 0, current_cuda_stream()>>>(
         coeff_data.numel(),
-        field_x.data_ptr<float>(),
-        field_y.data_ptr<float>(),
-        field_z.data_ptr<float>(),
-        coeff_data.data_ptr<float>(),
-        incident.data_ptr<float>(),
-        field_codes_per_coeff.data_ptr<int>(),
-        field_offsets.data_ptr<int>(),
-        sample_indices_per_coeff.data_ptr<int>());
+        field_x.mutable_data_ptr<float>(),
+        field_y.mutable_data_ptr<float>(),
+        field_z.mutable_data_ptr<float>(),
+        coeff_data.mutable_data_ptr<float>(),
+        incident.mutable_data_ptr<float>(),
+        field_codes_per_coeff.mutable_data_ptr<int>(),
+        field_offsets.mutable_data_ptr<int>(),
+        sample_indices_per_coeff.mutable_data_ptr<int>());
   } else {
     add_batched_reference_source_patches_kernel<int64_t><<<linear_grid(coeff_data.numel()), 256, 0, current_cuda_stream()>>>(
         coeff_data.numel(),
-        field_x.data_ptr<float>(),
-        field_y.data_ptr<float>(),
-        field_z.data_ptr<float>(),
-        coeff_data.data_ptr<float>(),
-        incident.data_ptr<float>(),
-        field_codes_per_coeff.data_ptr<int>(),
-        field_offsets.data_ptr<int64_t>(),
-        sample_indices_per_coeff.data_ptr<int>());
+        field_x.mutable_data_ptr<float>(),
+        field_y.mutable_data_ptr<float>(),
+        field_z.mutable_data_ptr<float>(),
+        coeff_data.mutable_data_ptr<float>(),
+        incident.mutable_data_ptr<float>(),
+        field_codes_per_coeff.mutable_data_ptr<int>(),
+        field_offsets.mutable_data_ptr<int64_t>(),
+        sample_indices_per_coeff.mutable_data_ptr<int>());
   }
   WITWIN_CUDA_CHECK();
 }
 
 void add_batched_interpolated_source_patches_cuda(
-    at::Tensor field_x,
-    at::Tensor field_y,
-    at::Tensor field_z,
-    const at::Tensor& coeff_data,
-    const at::Tensor& incident,
-    const at::Tensor& sample_positions,
-    const at::Tensor& field_codes_per_coeff,
-    const at::Tensor& field_offsets,
+    torch::stable::Tensor field_x,
+    torch::stable::Tensor field_y,
+    torch::stable::Tensor field_z,
+    const torch::stable::Tensor& coeff_data,
+    const torch::stable::Tensor& incident,
+    const torch::stable::Tensor& sample_positions,
+    const torch::stable::Tensor& field_codes_per_coeff,
+    const torch::stable::Tensor& field_offsets,
     double origin,
     double ds) {
   check_float_3d(field_x, "field_x");
@@ -1393,48 +1390,48 @@ void add_batched_interpolated_source_patches_cuda(
   check_same_cuda_device(field_x, sample_positions, "sample_positions");
   check_same_cuda_device(field_x, field_codes_per_coeff, "field_codes_per_coeff");
   check_same_cuda_device(field_x, field_offsets, "field_offsets");
-  TORCH_CHECK(sample_positions.numel() == coeff_data.numel(), "sample_positions length must match coeff_data");
-  TORCH_CHECK(field_codes_per_coeff.numel() == coeff_data.numel(), "field_codes_per_coeff length must match coeff_data");
-  TORCH_CHECK(field_offsets.numel() == coeff_data.numel(), "field_offsets length must match coeff_data");
-  c10::cuda::CUDAGuard guard(field_x.device());
+  STD_TORCH_CHECK(sample_positions.numel() == coeff_data.numel(), "sample_positions length must match coeff_data");
+  STD_TORCH_CHECK(field_codes_per_coeff.numel() == coeff_data.numel(), "field_codes_per_coeff length must match coeff_data");
+  STD_TORCH_CHECK(field_offsets.numel() == coeff_data.numel(), "field_offsets length must match coeff_data");
+  torch::stable::accelerator::DeviceGuard guard(field_x.get_device_index());
   const float inv_ds = ds > 0.0 ? static_cast<float>(1.0 / ds) : 0.0f;
-  if (field_offsets.scalar_type() == at::kInt) {
+  if (field_offsets.scalar_type() == torch::headeronly::ScalarType::Int) {
     add_batched_interpolated_source_patches_warp_kernel<<<linear_grid(coeff_data.numel()), 256, 0, current_cuda_stream()>>>(
         coeff_data.numel(),
         static_cast<int>(incident.numel()),
         static_cast<float>(origin),
         inv_ds,
-        field_x.data_ptr<float>(),
-        field_y.data_ptr<float>(),
-        field_z.data_ptr<float>(),
-        coeff_data.data_ptr<float>(),
-        incident.data_ptr<float>(),
-        sample_positions.data_ptr<float>(),
-        field_codes_per_coeff.data_ptr<int>(),
-        field_offsets.data_ptr<int>());
+        field_x.mutable_data_ptr<float>(),
+        field_y.mutable_data_ptr<float>(),
+        field_z.mutable_data_ptr<float>(),
+        coeff_data.mutable_data_ptr<float>(),
+        incident.mutable_data_ptr<float>(),
+        sample_positions.mutable_data_ptr<float>(),
+        field_codes_per_coeff.mutable_data_ptr<int>(),
+        field_offsets.mutable_data_ptr<int>());
   } else {
     add_batched_interpolated_source_patches_kernel<int64_t><<<linear_grid(coeff_data.numel()), 256, 0, current_cuda_stream()>>>(
         coeff_data.numel(),
         static_cast<int>(incident.numel()),
         static_cast<float>(origin),
         inv_ds,
-        field_x.data_ptr<float>(),
-        field_y.data_ptr<float>(),
-        field_z.data_ptr<float>(),
-        coeff_data.data_ptr<float>(),
-        incident.data_ptr<float>(),
-        sample_positions.data_ptr<float>(),
-        field_codes_per_coeff.data_ptr<int>(),
-        field_offsets.data_ptr<int64_t>());
+        field_x.mutable_data_ptr<float>(),
+        field_y.mutable_data_ptr<float>(),
+        field_z.mutable_data_ptr<float>(),
+        coeff_data.mutable_data_ptr<float>(),
+        incident.mutable_data_ptr<float>(),
+        sample_positions.mutable_data_ptr<float>(),
+        field_codes_per_coeff.mutable_data_ptr<int>(),
+        field_offsets.mutable_data_ptr<int64_t>());
   }
   WITWIN_CUDA_CHECK();
 }
 
 void update_auxiliary_magnetic_cuda(
-    at::Tensor magnetic,
-    const at::Tensor& electric,
-    const at::Tensor& decay,
-    const at::Tensor& curl) {
+    torch::stable::Tensor magnetic,
+    const torch::stable::Tensor& electric,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl) {
   check_float_1d(magnetic, "magnetic");
   check_float_1d(electric, "electric");
   check_float_1d(decay, "decay");
@@ -1442,24 +1439,24 @@ void update_auxiliary_magnetic_cuda(
   check_same_cuda_device(magnetic, electric, "electric");
   check_same_cuda_device(magnetic, decay, "decay");
   check_same_cuda_device(magnetic, curl, "curl");
-  TORCH_CHECK(decay.numel() == magnetic.numel(), "decay must match magnetic length");
-  TORCH_CHECK(curl.numel() == magnetic.numel(), "curl must match magnetic length");
-  TORCH_CHECK(electric.numel() == magnetic.numel() + 1, "electric length must be magnetic length + 1");
-  c10::cuda::CUDAGuard guard(magnetic.device());
+  STD_TORCH_CHECK(decay.numel() == magnetic.numel(), "decay must match magnetic length");
+  STD_TORCH_CHECK(curl.numel() == magnetic.numel(), "curl must match magnetic length");
+  STD_TORCH_CHECK(electric.numel() == magnetic.numel() + 1, "electric length must be magnetic length + 1");
+  torch::stable::accelerator::DeviceGuard guard(magnetic.get_device_index());
   update_auxiliary_magnetic_kernel<<<linear_grid(magnetic.numel()), 256, 0, current_cuda_stream()>>>(
       magnetic.numel(),
-      magnetic.data_ptr<float>(),
-      electric.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>());
+      magnetic.mutable_data_ptr<float>(),
+      electric.mutable_data_ptr<float>(),
+      decay.mutable_data_ptr<float>(),
+      curl.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void update_auxiliary_electric_cuda(
-    at::Tensor electric,
-    const at::Tensor& magnetic,
-    const at::Tensor& decay,
-    const at::Tensor& curl,
+    torch::stable::Tensor electric,
+    const torch::stable::Tensor& magnetic,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
     int64_t source_index,
     double source_value) {
   check_float_1d(electric, "electric");
@@ -1469,17 +1466,17 @@ void update_auxiliary_electric_cuda(
   check_same_cuda_device(electric, magnetic, "magnetic");
   check_same_cuda_device(electric, decay, "decay");
   check_same_cuda_device(electric, curl, "curl");
-  TORCH_CHECK(decay.numel() == electric.numel(), "decay must match electric length");
-  TORCH_CHECK(curl.numel() == electric.numel(), "curl must match electric length");
-  TORCH_CHECK(magnetic.numel() + 1 == electric.numel(), "magnetic length must be electric length - 1");
-  c10::cuda::CUDAGuard guard(electric.device());
+  STD_TORCH_CHECK(decay.numel() == electric.numel(), "decay must match electric length");
+  STD_TORCH_CHECK(curl.numel() == electric.numel(), "curl must match electric length");
+  STD_TORCH_CHECK(magnetic.numel() + 1 == electric.numel(), "magnetic length must be electric length - 1");
+  torch::stable::accelerator::DeviceGuard guard(electric.get_device_index());
   update_auxiliary_electric_kernel<<<linear_grid(electric.numel()), 256, 0, current_cuda_stream()>>>(
       electric.numel(),
       static_cast<int>(source_index),
       static_cast<float>(source_value),
-      electric.data_ptr<float>(),
-      magnetic.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      curl.data_ptr<float>());
+      electric.mutable_data_ptr<float>(),
+      magnetic.mutable_data_ptr<float>(),
+      decay.mutable_data_ptr<float>(),
+      curl.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }

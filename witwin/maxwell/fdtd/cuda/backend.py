@@ -81,7 +81,8 @@ def debug_linear_indices(
     if device.type != "cuda":
         raise ValueError("debug_linear_indices requires a CUDA device.")
     if use_extension:
-        return get_compiled_extension().debug_linear_indices([int(value) for value in shape])
+        with torch.cuda.device(device):
+            return get_compiled_extension().debug_linear_indices([int(value) for value in shape])
     total = int(shape[0]) * int(shape[1]) * int(shape[2])
     linear = torch.arange(total, device=device, dtype=torch.int64).reshape(shape)
     i_index = linear // (int(shape[1]) * int(shape[2]))
@@ -1411,7 +1412,6 @@ def _legacy_batched_flat_metadata(
     for term_index in range(term_count):
         start = int(term_starts_cpu[term_index].item())
         end = int(term_starts_cpu[term_index + 1].item()) if term_index + 1 < term_count else coeff_count
-        sx = int(term_shapes_cpu[term_index, 0].item())
         sy = int(term_shapes_cpu[term_index, 1].item())
         sz = int(term_shapes_cpu[term_index, 2].item())
         count = end - start

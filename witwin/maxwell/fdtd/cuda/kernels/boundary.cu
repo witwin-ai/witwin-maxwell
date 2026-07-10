@@ -1,6 +1,3 @@
-#include <ATen/ATen.h>
-#include <c10/cuda/CUDAGuard.h>
-
 #include "../launch.h"
 #include "../tensors.h"
 #include "common.cuh"
@@ -9,10 +6,10 @@
 
 namespace {
 
-void check_field3d(const at::Tensor& field, const char* name) {
+void check_field3d(const torch::stable::Tensor& field, const char* name) {
   check_float32_tensor(field, name);
   check_contiguous_tensor(field, name);
-  TORCH_CHECK(field.dim() == 3, name, " must be a contiguous 3D float32 CUDA tensor");
+  STD_TORCH_CHECK(field.dim() == 3, name, " must be a contiguous 3D float32 CUDA tensor");
 }
 
 int64_t face_area(int64_t axis, int64_t nx, int64_t ny, int64_t nz) {
@@ -245,11 +242,11 @@ __global__ void mur_abc_face_kernel(
 
 }  // namespace
 
-void clamp_field_face_cuda(at::Tensor field, int64_t axis, int64_t side) {
+void clamp_field_face_cuda(torch::stable::Tensor field, int64_t axis, int64_t side) {
   check_field3d(field, "field");
-  TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
-  TORCH_CHECK(side == 0 || side == 1, "side must be 0 (low) or 1 (high)");
-  const c10::cuda::CUDAGuard device_guard(field.device());
+  STD_TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
+  STD_TORCH_CHECK(side == 0 || side == 1, "side must be 0 (low) or 1 (high)");
+  const torch::stable::accelerator::DeviceGuard device_guard(field.get_device_index());
   const int nx = static_cast<int>(field.size(0));
   const int ny = static_cast<int>(field.size(1));
   const int nz = static_cast<int>(field.size(2));
@@ -258,31 +255,31 @@ void clamp_field_face_cuda(at::Tensor field, int64_t axis, int64_t side) {
   }
   if (axis == 0) {
     if (side == 0) {
-      launch_clamp_field_face<0, 0>(nx, ny, nz, field.data_ptr<float>());
+      launch_clamp_field_face<0, 0>(nx, ny, nz, field.mutable_data_ptr<float>());
     } else {
-      launch_clamp_field_face<0, 1>(nx, ny, nz, field.data_ptr<float>());
+      launch_clamp_field_face<0, 1>(nx, ny, nz, field.mutable_data_ptr<float>());
     }
   } else if (axis == 1) {
     if (side == 0) {
-      launch_clamp_field_face<1, 0>(nx, ny, nz, field.data_ptr<float>());
+      launch_clamp_field_face<1, 0>(nx, ny, nz, field.mutable_data_ptr<float>());
     } else {
-      launch_clamp_field_face<1, 1>(nx, ny, nz, field.data_ptr<float>());
+      launch_clamp_field_face<1, 1>(nx, ny, nz, field.mutable_data_ptr<float>());
     }
   } else {
     if (side == 0) {
-      launch_clamp_field_face<2, 0>(nx, ny, nz, field.data_ptr<float>());
+      launch_clamp_field_face<2, 0>(nx, ny, nz, field.mutable_data_ptr<float>());
     } else {
-      launch_clamp_field_face<2, 1>(nx, ny, nz, field.data_ptr<float>());
+      launch_clamp_field_face<2, 1>(nx, ny, nz, field.mutable_data_ptr<float>());
     }
   }
   WITWIN_CUDA_CHECK();
 }
 
-void clamp_pec_boundary_cuda(at::Tensor field, int64_t axis_a, int64_t axis_b) {
+void clamp_pec_boundary_cuda(torch::stable::Tensor field, int64_t axis_a, int64_t axis_b) {
   check_field3d(field, "field");
-  TORCH_CHECK(axis_a >= 0 && axis_a < 3, "axis_a must be in [0, 3)");
-  TORCH_CHECK(axis_b >= 0 && axis_b < 3, "axis_b must be in [0, 3)");
-  const c10::cuda::CUDAGuard device_guard(field.device());
+  STD_TORCH_CHECK(axis_a >= 0 && axis_a < 3, "axis_a must be in [0, 3)");
+  STD_TORCH_CHECK(axis_b >= 0 && axis_b < 3, "axis_b must be in [0, 3)");
+  const torch::stable::accelerator::DeviceGuard device_guard(field.get_device_index());
   const int64_t nx = field.size(0);
   const int64_t ny = field.size(1);
   const int64_t nz = field.size(2);
@@ -296,13 +293,13 @@ void clamp_pec_boundary_cuda(at::Tensor field, int64_t axis_a, int64_t axis_b) {
     constexpr int axis_a_value = decltype(axis_a_tag)::value;
     if (axis_b == 0) {
       launch_clamp_pec_boundary<axis_a_value, 0>(
-          total, static_cast<int>(nx), static_cast<int>(ny), static_cast<int>(nz), face_area_a, face_area_b, field.data_ptr<float>());
+          total, static_cast<int>(nx), static_cast<int>(ny), static_cast<int>(nz), face_area_a, face_area_b, field.mutable_data_ptr<float>());
     } else if (axis_b == 1) {
       launch_clamp_pec_boundary<axis_a_value, 1>(
-          total, static_cast<int>(nx), static_cast<int>(ny), static_cast<int>(nz), face_area_a, face_area_b, field.data_ptr<float>());
+          total, static_cast<int>(nx), static_cast<int>(ny), static_cast<int>(nz), face_area_a, face_area_b, field.mutable_data_ptr<float>());
     } else {
       launch_clamp_pec_boundary<axis_a_value, 2>(
-          total, static_cast<int>(nx), static_cast<int>(ny), static_cast<int>(nz), face_area_a, face_area_b, field.data_ptr<float>());
+          total, static_cast<int>(nx), static_cast<int>(ny), static_cast<int>(nz), face_area_a, face_area_b, field.mutable_data_ptr<float>());
     }
   };
   if (axis_a == 0) {
@@ -316,24 +313,24 @@ void clamp_pec_boundary_cuda(at::Tensor field, int64_t axis_a, int64_t axis_b) {
 }
 
 void mur_abc_face_cuda(
-    at::Tensor field,
+    torch::stable::Tensor field,
     int64_t axis,
     int64_t boundary_index,
     int64_t adjacent_index,
     double coef,
-    at::Tensor prev_boundary,
-    at::Tensor prev_adjacent) {
+    torch::stable::Tensor prev_boundary,
+    torch::stable::Tensor prev_adjacent) {
   check_field3d(field, "field");
   check_float32_tensor(prev_boundary, "prev_boundary");
   check_contiguous_tensor(prev_boundary, "prev_boundary");
   check_float32_tensor(prev_adjacent, "prev_adjacent");
   check_contiguous_tensor(prev_adjacent, "prev_adjacent");
-  TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
-  const c10::cuda::CUDAGuard device_guard(field.device());
+  STD_TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
+  const torch::stable::accelerator::DeviceGuard device_guard(field.get_device_index());
   const int ny = static_cast<int>(field.size(1));
   const int nz = static_cast<int>(field.size(2));
   const int64_t plane_size = prev_boundary.numel();
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       prev_adjacent.numel() == plane_size,
       "prev_adjacent and prev_boundary must have the same number of elements");
   if (plane_size == 0) {
@@ -347,8 +344,8 @@ void mur_abc_face_cuda(
       static_cast<int>(boundary_index),
       static_cast<int>(adjacent_index),
       static_cast<float>(coef),
-      field.data_ptr<float>(),
-      prev_boundary.data_ptr<float>(),
-      prev_adjacent.data_ptr<float>());
+      field.mutable_data_ptr<float>(),
+      prev_boundary.mutable_data_ptr<float>(),
+      prev_adjacent.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }

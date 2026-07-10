@@ -1,6 +1,3 @@
-#include <ATen/ATen.h>
-#include <c10/cuda/CUDAGuard.h>
-
 #include "../launch.h"
 #include "../tensors.h"
 #include "common.cuh"
@@ -258,13 +255,13 @@ __global__ void update_kerr_curl_kernel(
 
 template <int Component>
 void launch_kerr_curl_kernel(
-    at::Tensor dynamic_curl,
-    const at::Tensor& ex,
-    const at::Tensor& ey,
-    const at::Tensor& ez,
-    const at::Tensor& linear_permittivity,
-    const at::Tensor& decay,
-    const at::Tensor& chi3,
+    torch::stable::Tensor dynamic_curl,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    const torch::stable::Tensor& linear_permittivity,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& chi3,
     double dt,
     double eps0) {
   const dim3 block = field_block3d();
@@ -281,39 +278,39 @@ void launch_kerr_curl_kernel(
       ez.size(0),
       ez.size(1),
       ez.size(2),
-      ex.data_ptr<float>(),
-      ey.data_ptr<float>(),
-      ez.data_ptr<float>(),
-      linear_permittivity.data_ptr<float>(),
-      decay.data_ptr<float>(),
-      chi3.data_ptr<float>(),
+      ex.mutable_data_ptr<float>(),
+      ey.mutable_data_ptr<float>(),
+      ez.mutable_data_ptr<float>(),
+      linear_permittivity.mutable_data_ptr<float>(),
+      decay.mutable_data_ptr<float>(),
+      chi3.mutable_data_ptr<float>(),
       static_cast<float>(dt),
       static_cast<float>(eps0),
-      dynamic_curl.data_ptr<float>());
+      dynamic_curl.mutable_data_ptr<float>());
 }
 
-void check_matching_field(const at::Tensor& reference, const at::Tensor& value, const char* name) {
+void check_matching_field(const torch::stable::Tensor& reference, const torch::stable::Tensor& value, const char* name) {
   check_float32_tensor(value, name);
   check_contiguous_tensor(value, name);
   check_same_cuda_device(reference, value, name);
-  TORCH_CHECK(value.sizes() == reference.sizes(), name, " must match field shape");
+  STD_TORCH_CHECK(value.sizes().equals(reference.sizes()), name, " must match field shape");
 }
 
-void check_field3d(const at::Tensor& value, const char* name) {
+void check_field3d(const torch::stable::Tensor& value, const char* name) {
   check_float32_tensor(value, name);
   check_contiguous_tensor(value, name);
-  TORCH_CHECK(value.dim() == 3, name, " must be a 3D tensor");
+  STD_TORCH_CHECK(value.dim() == 3, name, " must be a 3D tensor");
 }
 
 void launch_kerr_curl(
     int component,
-    at::Tensor dynamic_curl,
-    const at::Tensor& ex,
-    const at::Tensor& ey,
-    const at::Tensor& ez,
-    const at::Tensor& linear_permittivity,
-    const at::Tensor& decay,
-    const at::Tensor& chi3,
+    torch::stable::Tensor dynamic_curl,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    const torch::stable::Tensor& linear_permittivity,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& chi3,
     double dt,
     double eps0) {
   check_field3d(dynamic_curl, "dynamic_curl");
@@ -326,15 +323,15 @@ void launch_kerr_curl(
   check_matching_field(dynamic_curl, linear_permittivity, "linear_permittivity");
   check_matching_field(dynamic_curl, decay, "decay");
   check_matching_field(dynamic_curl, chi3, "chi3");
-  TORCH_CHECK(component >= 0 && component < 3, "component must be in [0, 3)");
+  STD_TORCH_CHECK(component >= 0 && component < 3, "component must be in [0, 3)");
   if (component == 0) {
-    TORCH_CHECK(ex.sizes() == dynamic_curl.sizes(), "ex must match dynamic_curl shape");
+    STD_TORCH_CHECK(ex.sizes().equals(dynamic_curl.sizes()), "ex must match dynamic_curl shape");
   } else if (component == 1) {
-    TORCH_CHECK(ey.sizes() == dynamic_curl.sizes(), "ey must match dynamic_curl shape");
+    STD_TORCH_CHECK(ey.sizes().equals(dynamic_curl.sizes()), "ey must match dynamic_curl shape");
   } else {
-    TORCH_CHECK(ez.sizes() == dynamic_curl.sizes(), "ez must match dynamic_curl shape");
+    STD_TORCH_CHECK(ez.sizes().equals(dynamic_curl.sizes()), "ez must match dynamic_curl shape");
   }
-  c10::cuda::CUDAGuard guard(dynamic_curl.device());
+  torch::stable::accelerator::DeviceGuard guard(dynamic_curl.get_device_index());
   if (component == 0) {
     launch_kerr_curl_kernel<0>(dynamic_curl, ex, ey, ez, linear_permittivity, decay, chi3, dt, eps0);
   } else if (component == 1) {
@@ -348,10 +345,10 @@ void launch_kerr_curl(
 }  // namespace
 
 void update_debye_current_cuda(
-    const at::Tensor& electric,
-    at::Tensor polarization,
-    at::Tensor current,
-    const at::Tensor& drive,
+    const torch::stable::Tensor& electric,
+    torch::stable::Tensor polarization,
+    torch::stable::Tensor current,
+    const torch::stable::Tensor& drive,
     double decay,
     double dt) {
   check_float32_tensor(electric, "electric");
@@ -359,42 +356,42 @@ void update_debye_current_cuda(
   check_matching_field(electric, polarization, "polarization");
   check_matching_field(electric, current, "current");
   check_matching_field(electric, drive, "drive");
-  c10::cuda::CUDAGuard guard(electric.device());
+  torch::stable::accelerator::DeviceGuard guard(electric.get_device_index());
   update_debye_kernel<<<linear_grid(electric.numel()), 256, 0, current_cuda_stream()>>>(
       electric.numel(),
-      electric.data_ptr<float>(),
-      drive.data_ptr<float>(),
+      electric.mutable_data_ptr<float>(),
+      drive.mutable_data_ptr<float>(),
       static_cast<float>(decay),
       static_cast<float>(1.0 / dt),
-      polarization.data_ptr<float>(),
-      current.data_ptr<float>());
+      polarization.mutable_data_ptr<float>(),
+      current.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void update_drude_current_cuda(
-    const at::Tensor& electric,
-    at::Tensor current,
-    const at::Tensor& drive,
+    const torch::stable::Tensor& electric,
+    torch::stable::Tensor current,
+    const torch::stable::Tensor& drive,
     double decay) {
   check_float32_tensor(electric, "electric");
   check_contiguous_tensor(electric, "electric");
   check_matching_field(electric, current, "current");
   check_matching_field(electric, drive, "drive");
-  c10::cuda::CUDAGuard guard(electric.device());
+  torch::stable::accelerator::DeviceGuard guard(electric.get_device_index());
   update_drude_kernel<<<linear_grid(electric.numel()), 256, 0, current_cuda_stream()>>>(
       electric.numel(),
-      electric.data_ptr<float>(),
-      drive.data_ptr<float>(),
+      electric.mutable_data_ptr<float>(),
+      drive.mutable_data_ptr<float>(),
       static_cast<float>(decay),
-      current.data_ptr<float>());
+      current.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void update_lorentz_current_cuda(
-    const at::Tensor& electric,
-    at::Tensor polarization,
-    at::Tensor current,
-    const at::Tensor& drive,
+    const torch::stable::Tensor& electric,
+    torch::stable::Tensor polarization,
+    torch::stable::Tensor current,
+    const torch::stable::Tensor& drive,
     double decay,
     double restoring,
     double dt) {
@@ -403,72 +400,72 @@ void update_lorentz_current_cuda(
   check_matching_field(electric, polarization, "polarization");
   check_matching_field(electric, current, "current");
   check_matching_field(electric, drive, "drive");
-  c10::cuda::CUDAGuard guard(electric.device());
+  torch::stable::accelerator::DeviceGuard guard(electric.get_device_index());
   update_lorentz_kernel<<<linear_grid(electric.numel()), 256, 0, current_cuda_stream()>>>(
       electric.numel(),
-      electric.data_ptr<float>(),
-      drive.data_ptr<float>(),
+      electric.mutable_data_ptr<float>(),
+      drive.mutable_data_ptr<float>(),
       static_cast<float>(decay),
       static_cast<float>(restoring),
       static_cast<float>(dt),
-      polarization.data_ptr<float>(),
-      current.data_ptr<float>());
+      polarization.mutable_data_ptr<float>(),
+      current.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void apply_polarization_current_cuda(
-    at::Tensor electric,
-    const at::Tensor& current,
-    const at::Tensor& inv_permittivity,
+    torch::stable::Tensor electric,
+    const torch::stable::Tensor& current,
+    const torch::stable::Tensor& inv_permittivity,
     double dt) {
   check_float32_tensor(electric, "electric");
   check_contiguous_tensor(electric, "electric");
   check_matching_field(electric, current, "current");
   check_matching_field(electric, inv_permittivity, "inv_permittivity");
-  c10::cuda::CUDAGuard guard(electric.device());
+  torch::stable::accelerator::DeviceGuard guard(electric.get_device_index());
   apply_polarization_kernel<<<linear_grid(electric.numel()), 256, 0, current_cuda_stream()>>>(
       electric.numel(),
-      current.data_ptr<float>(),
-      inv_permittivity.data_ptr<float>(),
+      current.mutable_data_ptr<float>(),
+      inv_permittivity.mutable_data_ptr<float>(),
       static_cast<float>(dt),
-      electric.data_ptr<float>());
+      electric.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void update_kerr_ex_curl_cuda(
-    at::Tensor dynamic_curl,
-    const at::Tensor& ex,
-    const at::Tensor& ey,
-    const at::Tensor& ez,
-    const at::Tensor& linear_permittivity,
-    const at::Tensor& ex_decay,
-    const at::Tensor& chi3,
+    torch::stable::Tensor dynamic_curl,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    const torch::stable::Tensor& linear_permittivity,
+    const torch::stable::Tensor& ex_decay,
+    const torch::stable::Tensor& chi3,
     double dt,
     double eps0) {
   launch_kerr_curl(0, dynamic_curl, ex, ey, ez, linear_permittivity, ex_decay, chi3, dt, eps0);
 }
 
 void update_kerr_ey_curl_cuda(
-    at::Tensor dynamic_curl,
-    const at::Tensor& ex,
-    const at::Tensor& ey,
-    const at::Tensor& ez,
-    const at::Tensor& linear_permittivity,
-    const at::Tensor& ey_decay,
-    const at::Tensor& chi3,
+    torch::stable::Tensor dynamic_curl,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    const torch::stable::Tensor& linear_permittivity,
+    const torch::stable::Tensor& ey_decay,
+    const torch::stable::Tensor& chi3,
     double dt,
     double eps0) {
   launch_kerr_curl(1, dynamic_curl, ex, ey, ez, linear_permittivity, ey_decay, chi3, dt, eps0);
 }
 
 void update_kerr_ez_curl_cuda(
-    at::Tensor dynamic_curl,
-    const at::Tensor& ex,
-    const at::Tensor& ey,
-    const at::Tensor& ez,
-    const at::Tensor& linear_permittivity,
-    const at::Tensor& ez_decay,
-    const at::Tensor& chi3,
+    torch::stable::Tensor dynamic_curl,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    const torch::stable::Tensor& linear_permittivity,
+    const torch::stable::Tensor& ez_decay,
+    const torch::stable::Tensor& chi3,
     double dt,
     double eps0) {
   launch_kerr_curl(2, dynamic_curl, ex, ey, ez, linear_permittivity, ez_decay, chi3, dt, eps0);

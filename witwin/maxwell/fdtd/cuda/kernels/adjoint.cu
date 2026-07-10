@@ -1,6 +1,3 @@
-#include <ATen/ATen.h>
-#include <c10/cuda/CUDAGuard.h>
-
 #include <limits>
 #include <type_traits>
 
@@ -21,45 +18,45 @@ dim3 field_grid3d(int64_t nx, int64_t ny, int64_t nz, dim3 block) {
       static_cast<unsigned int>((nx + block.z - 1) / block.z));
 }
 
-void check_field(const at::Tensor& tensor, const char* name) {
+void check_field(const torch::stable::Tensor& tensor, const char* name) {
   check_float32_tensor(tensor, name);
   check_contiguous_tensor(tensor, name);
-  TORCH_CHECK(tensor.dim() == 3, name, " must be a contiguous 3D float32 CUDA tensor");
+  STD_TORCH_CHECK(tensor.dim() == 3, name, " must be a contiguous 3D float32 CUDA tensor");
 }
 
-void check_matching_field(const at::Tensor& reference, const at::Tensor& tensor, const char* name) {
+void check_matching_field(const torch::stable::Tensor& reference, const torch::stable::Tensor& tensor, const char* name) {
   check_field(tensor, name);
   check_same_cuda_device(reference, tensor, name);
-  TORCH_CHECK(tensor.sizes() == reference.sizes(), name, " must match reference shape");
+  STD_TORCH_CHECK(tensor.sizes().equals(reference.sizes()), name, " must match reference shape");
 }
 
-void check_vector(const at::Tensor& tensor, const char* name) {
+void check_vector(const torch::stable::Tensor& tensor, const char* name) {
   check_float32_tensor(tensor, name);
   check_contiguous_tensor(tensor, name);
-  TORCH_CHECK(tensor.dim() == 1, name, " must be a contiguous 1D float32 CUDA tensor");
+  STD_TORCH_CHECK(tensor.dim() == 1, name, " must be a contiguous 1D float32 CUDA tensor");
 }
 
-void check_matching_vector(const at::Tensor& reference, const at::Tensor& tensor, const char* name) {
+void check_matching_vector(const torch::stable::Tensor& reference, const torch::stable::Tensor& tensor, const char* name) {
   check_vector(tensor, name);
   check_same_cuda_device(reference, tensor, name);
-  TORCH_CHECK(tensor.sizes() == reference.sizes(), name, " must match reference shape");
+  STD_TORCH_CHECK(tensor.sizes().equals(reference.sizes()), name, " must match reference shape");
 }
 
 void check_spacing_vector(
-    const at::Tensor& field,
-    const at::Tensor& inv_delta,
+    const torch::stable::Tensor& field,
+    const torch::stable::Tensor& inv_delta,
     int64_t axis,
     const char* name) {
   check_vector(inv_delta, name);
   check_same_cuda_device(field, inv_delta, name);
-  TORCH_CHECK(inv_delta.size(0) == field.size(axis), name, " length must match the field axis");
+  STD_TORCH_CHECK(inv_delta.size(0) == field.size(axis), name, " length must match the field axis");
 }
 
-void check_int32_vector(const at::Tensor& tensor, const char* name) {
+void check_int32_vector(const torch::stable::Tensor& tensor, const char* name) {
   check_cuda_tensor(tensor, name);
   check_contiguous_tensor(tensor, name);
-  TORCH_CHECK(tensor.scalar_type() == at::kInt, name, " must be a contiguous int32 CUDA tensor");
-  TORCH_CHECK(tensor.dim() == 1, name, " must be a contiguous 1D int32 CUDA tensor");
+  STD_TORCH_CHECK(tensor.scalar_type() == torch::headeronly::ScalarType::Int, name, " must be a contiguous int32 CUDA tensor");
+  STD_TORCH_CHECK(tensor.dim() == 1, name, " must be a contiguous 1D int32 CUDA tensor");
 }
 
 __device__ __forceinline__ bool is_valid_index_3d(int i, int j, int k, int nx, int ny, int nz) {
@@ -1196,9 +1193,9 @@ __global__ void accumulate_diff_adjoint_kernel(
 
 template <int Axis, bool Forward>
 void launch_accumulate_diff_adjoint(
-    const at::Tensor& field_grad,
-    const at::Tensor& diff_grad,
-    const at::Tensor& inv_delta) {
+    const torch::stable::Tensor& field_grad,
+    const torch::stable::Tensor& diff_grad,
+    const torch::stable::Tensor& inv_delta) {
   const dim3 block = field_block3d();
   accumulate_diff_adjoint_kernel<Axis, Forward><<<field_grid3d(field_grad.size(0), field_grad.size(1), field_grad.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(field_grad.size(0)),
@@ -1207,9 +1204,9 @@ void launch_accumulate_diff_adjoint(
       static_cast<int>(diff_grad.size(0)),
       static_cast<int>(diff_grad.size(1)),
       static_cast<int>(diff_grad.size(2)),
-      inv_delta.data_ptr<float>(),
-      field_grad.data_ptr<float>(),
-      diff_grad.data_ptr<float>());
+      inv_delta.mutable_data_ptr<float>(),
+      field_grad.mutable_data_ptr<float>(),
+      diff_grad.mutable_data_ptr<float>());
 }
 
 __global__ void reverse_debye_current_kernel(
@@ -1771,31 +1768,31 @@ __global__ void reverse_tfsf_auxiliary_magnetic_kernel(
 }  // namespace
 
 void reverse_magnetic_adjoint_decay_cuda(
-    at::Tensor adj_prev,
-    const at::Tensor& adj_mid,
-    const at::Tensor& decay) {
+    torch::stable::Tensor adj_prev,
+    const torch::stable::Tensor& adj_mid,
+    const torch::stable::Tensor& decay) {
   check_field(adj_prev, "adj_prev");
   check_matching_field(adj_prev, adj_mid, "adj_mid");
   check_matching_field(adj_prev, decay, "decay");
-  const c10::cuda::CUDAGuard device_guard(adj_prev.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_prev.get_device_index());
   const int64_t total = adj_prev.numel();
   reverse_magnetic_decay_kernel<<<linear_grid(total, 512), 512, 0, current_cuda_stream()>>>(
       total,
-      adj_prev.data_ptr<float>(),
-      adj_mid.data_ptr<float>(),
-      decay.data_ptr<float>());
+      adj_prev.mutable_data_ptr<float>(),
+      adj_mid.mutable_data_ptr<float>(),
+      decay.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_electric_adjoint_to_hx_standard_cuda(
-    at::Tensor adj_hx_mid,
-    const at::Tensor& adj_hx_post,
-    const at::Tensor& adj_ey_post,
-    const at::Tensor& adj_ez_post,
-    const at::Tensor& ey_curl,
-    const at::Tensor& ez_curl,
-    const at::Tensor& inv_dy,
-    const at::Tensor& inv_dz) {
+    torch::stable::Tensor adj_hx_mid,
+    const torch::stable::Tensor& adj_hx_post,
+    const torch::stable::Tensor& adj_ey_post,
+    const torch::stable::Tensor& adj_ez_post,
+    const torch::stable::Tensor& ey_curl,
+    const torch::stable::Tensor& ez_curl,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz) {
   check_field(adj_hx_mid, "adj_hx_mid");
   check_matching_field(adj_hx_mid, adj_hx_post, "adj_hx_post");
   check_field(adj_ey_post, "adj_ey_post");
@@ -1804,7 +1801,7 @@ void reverse_electric_adjoint_to_hx_standard_cuda(
   check_matching_field(adj_ez_post, ez_curl, "ez_curl");
   check_spacing_vector(adj_ez_post, inv_dy, 1, "inv_dy");
   check_spacing_vector(adj_ey_post, inv_dz, 2, "inv_dz");
-  const c10::cuda::CUDAGuard device_guard(adj_hx_mid.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_hx_mid.get_device_index());
   const dim3 block = field_block3d();
   reverse_electric_to_hx_standard_kernel<<<field_grid3d(adj_hx_mid.size(0), adj_hx_mid.size(1), adj_hx_mid.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(adj_hx_mid.size(0)),
@@ -1816,26 +1813,26 @@ void reverse_electric_adjoint_to_hx_standard_cuda(
       static_cast<int>(adj_ez_post.size(0)),
       static_cast<int>(adj_ez_post.size(1)),
       static_cast<int>(adj_ez_post.size(2)),
-      adj_hx_mid.data_ptr<float>(),
-      adj_hx_post.data_ptr<float>(),
-      adj_ey_post.data_ptr<float>(),
-      adj_ez_post.data_ptr<float>(),
-      ey_curl.data_ptr<float>(),
-      ez_curl.data_ptr<float>(),
-      inv_dy.data_ptr<float>(),
-      inv_dz.data_ptr<float>());
+      adj_hx_mid.mutable_data_ptr<float>(),
+      adj_hx_post.mutable_data_ptr<float>(),
+      adj_ey_post.mutable_data_ptr<float>(),
+      adj_ez_post.mutable_data_ptr<float>(),
+      ey_curl.mutable_data_ptr<float>(),
+      ez_curl.mutable_data_ptr<float>(),
+      inv_dy.mutable_data_ptr<float>(),
+      inv_dz.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_electric_adjoint_to_hy_standard_cuda(
-    at::Tensor adj_hy_mid,
-    const at::Tensor& adj_hy_post,
-    const at::Tensor& adj_ex_post,
-    const at::Tensor& adj_ez_post,
-    const at::Tensor& ex_curl,
-    const at::Tensor& ez_curl,
-    const at::Tensor& inv_dx,
-    const at::Tensor& inv_dz) {
+    torch::stable::Tensor adj_hy_mid,
+    const torch::stable::Tensor& adj_hy_post,
+    const torch::stable::Tensor& adj_ex_post,
+    const torch::stable::Tensor& adj_ez_post,
+    const torch::stable::Tensor& ex_curl,
+    const torch::stable::Tensor& ez_curl,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dz) {
   check_field(adj_hy_mid, "adj_hy_mid");
   check_matching_field(adj_hy_mid, adj_hy_post, "adj_hy_post");
   check_field(adj_ex_post, "adj_ex_post");
@@ -1844,7 +1841,7 @@ void reverse_electric_adjoint_to_hy_standard_cuda(
   check_matching_field(adj_ez_post, ez_curl, "ez_curl");
   check_spacing_vector(adj_ez_post, inv_dx, 0, "inv_dx");
   check_spacing_vector(adj_ex_post, inv_dz, 2, "inv_dz");
-  const c10::cuda::CUDAGuard device_guard(adj_hy_mid.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_hy_mid.get_device_index());
   const dim3 block = field_block3d();
   reverse_electric_to_hy_standard_kernel<<<field_grid3d(adj_hy_mid.size(0), adj_hy_mid.size(1), adj_hy_mid.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(adj_hy_mid.size(0)),
@@ -1856,26 +1853,26 @@ void reverse_electric_adjoint_to_hy_standard_cuda(
       static_cast<int>(adj_ez_post.size(0)),
       static_cast<int>(adj_ez_post.size(1)),
       static_cast<int>(adj_ez_post.size(2)),
-      adj_hy_mid.data_ptr<float>(),
-      adj_hy_post.data_ptr<float>(),
-      adj_ex_post.data_ptr<float>(),
-      adj_ez_post.data_ptr<float>(),
-      ex_curl.data_ptr<float>(),
-      ez_curl.data_ptr<float>(),
-      inv_dx.data_ptr<float>(),
-      inv_dz.data_ptr<float>());
+      adj_hy_mid.mutable_data_ptr<float>(),
+      adj_hy_post.mutable_data_ptr<float>(),
+      adj_ex_post.mutable_data_ptr<float>(),
+      adj_ez_post.mutable_data_ptr<float>(),
+      ex_curl.mutable_data_ptr<float>(),
+      ez_curl.mutable_data_ptr<float>(),
+      inv_dx.mutable_data_ptr<float>(),
+      inv_dz.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_electric_adjoint_to_hz_standard_cuda(
-    at::Tensor adj_hz_mid,
-    const at::Tensor& adj_hz_post,
-    const at::Tensor& adj_ex_post,
-    const at::Tensor& adj_ey_post,
-    const at::Tensor& ex_curl,
-    const at::Tensor& ey_curl,
-    const at::Tensor& inv_dx,
-    const at::Tensor& inv_dy) {
+    torch::stable::Tensor adj_hz_mid,
+    const torch::stable::Tensor& adj_hz_post,
+    const torch::stable::Tensor& adj_ex_post,
+    const torch::stable::Tensor& adj_ey_post,
+    const torch::stable::Tensor& ex_curl,
+    const torch::stable::Tensor& ey_curl,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy) {
   check_field(adj_hz_mid, "adj_hz_mid");
   check_matching_field(adj_hz_mid, adj_hz_post, "adj_hz_post");
   check_field(adj_ex_post, "adj_ex_post");
@@ -1884,7 +1881,7 @@ void reverse_electric_adjoint_to_hz_standard_cuda(
   check_matching_field(adj_ey_post, ey_curl, "ey_curl");
   check_spacing_vector(adj_ey_post, inv_dx, 0, "inv_dx");
   check_spacing_vector(adj_ex_post, inv_dy, 1, "inv_dy");
-  const c10::cuda::CUDAGuard device_guard(adj_hz_mid.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_hz_mid.get_device_index());
   const dim3 block = field_block3d();
   reverse_electric_to_hz_standard_kernel<<<field_grid3d(adj_hz_mid.size(0), adj_hz_mid.size(1), adj_hz_mid.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(adj_hz_mid.size(0)),
@@ -1896,34 +1893,34 @@ void reverse_electric_adjoint_to_hz_standard_cuda(
       static_cast<int>(adj_ey_post.size(0)),
       static_cast<int>(adj_ey_post.size(1)),
       static_cast<int>(adj_ey_post.size(2)),
-      adj_hz_mid.data_ptr<float>(),
-      adj_hz_post.data_ptr<float>(),
-      adj_ex_post.data_ptr<float>(),
-      adj_ey_post.data_ptr<float>(),
-      ex_curl.data_ptr<float>(),
-      ey_curl.data_ptr<float>(),
-      inv_dx.data_ptr<float>(),
-      inv_dy.data_ptr<float>());
+      adj_hz_mid.mutable_data_ptr<float>(),
+      adj_hz_post.mutable_data_ptr<float>(),
+      adj_ex_post.mutable_data_ptr<float>(),
+      adj_ey_post.mutable_data_ptr<float>(),
+      ex_curl.mutable_data_ptr<float>(),
+      ey_curl.mutable_data_ptr<float>(),
+      inv_dx.mutable_data_ptr<float>(),
+      inv_dy.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_magnetic_adjoint_to_ex_standard_cuda(
-    at::Tensor adj_ex_prev,
-    at::Tensor grad_eps_ex,
-    const at::Tensor& adj_ex_post,
-    const at::Tensor& adj_hy_mid,
-    const at::Tensor& adj_hz_mid,
-    const at::Tensor& ex_decay,
-    const at::Tensor& ex_curl,
-    const at::Tensor& eps_ex,
-    const at::Tensor& hy_mid,
-    const at::Tensor& hz_mid,
-    const at::Tensor& hy_curl,
-    const at::Tensor& hz_curl,
-    const at::Tensor& inv_dy_e,
-    const at::Tensor& inv_dz_e,
-    const at::Tensor& inv_dy_h,
-    const at::Tensor& inv_dz_h,
+    torch::stable::Tensor adj_ex_prev,
+    torch::stable::Tensor grad_eps_ex,
+    const torch::stable::Tensor& adj_ex_post,
+    const torch::stable::Tensor& adj_hy_mid,
+    const torch::stable::Tensor& adj_hz_mid,
+    const torch::stable::Tensor& ex_decay,
+    const torch::stable::Tensor& ex_curl,
+    const torch::stable::Tensor& eps_ex,
+    const torch::stable::Tensor& hy_mid,
+    const torch::stable::Tensor& hz_mid,
+    const torch::stable::Tensor& hy_curl,
+    const torch::stable::Tensor& hz_curl,
+    const torch::stable::Tensor& inv_dy_e,
+    const torch::stable::Tensor& inv_dz_e,
+    const torch::stable::Tensor& inv_dy_h,
+    const torch::stable::Tensor& inv_dz_h,
     int64_t y_low_mode,
     int64_t y_high_mode,
     int64_t z_low_mode,
@@ -1944,7 +1941,7 @@ void reverse_magnetic_adjoint_to_ex_standard_cuda(
   check_spacing_vector(adj_ex_prev, inv_dz_e, 2, "inv_dz_e");
   check_spacing_vector(adj_hz_mid, inv_dy_h, 1, "inv_dy_h");
   check_spacing_vector(adj_hy_mid, inv_dz_h, 2, "inv_dz_h");
-  const c10::cuda::CUDAGuard device_guard(adj_ex_prev.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_ex_prev.get_device_index());
   const dim3 block = field_block3d();
   reverse_magnetic_to_ex_standard_kernel<<<field_grid3d(adj_ex_prev.size(0), adj_ex_prev.size(1), adj_ex_prev.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(adj_ex_prev.size(0)),
@@ -1954,22 +1951,22 @@ void reverse_magnetic_adjoint_to_ex_standard_cuda(
       static_cast<int>(adj_hy_mid.size(2)),
       static_cast<int>(adj_hz_mid.size(1)),
       static_cast<int>(adj_hz_mid.size(2)),
-      adj_ex_prev.data_ptr<float>(),
-      grad_eps_ex.data_ptr<float>(),
-      adj_ex_post.data_ptr<float>(),
-      adj_hy_mid.data_ptr<float>(),
-      adj_hz_mid.data_ptr<float>(),
-      ex_decay.data_ptr<float>(),
-      ex_curl.data_ptr<float>(),
-      eps_ex.data_ptr<float>(),
-      hy_mid.data_ptr<float>(),
-      hz_mid.data_ptr<float>(),
-      hy_curl.data_ptr<float>(),
-      hz_curl.data_ptr<float>(),
-      inv_dy_e.data_ptr<float>(),
-      inv_dz_e.data_ptr<float>(),
-      inv_dy_h.data_ptr<float>(),
-      inv_dz_h.data_ptr<float>(),
+      adj_ex_prev.mutable_data_ptr<float>(),
+      grad_eps_ex.mutable_data_ptr<float>(),
+      adj_ex_post.mutable_data_ptr<float>(),
+      adj_hy_mid.mutable_data_ptr<float>(),
+      adj_hz_mid.mutable_data_ptr<float>(),
+      ex_decay.mutable_data_ptr<float>(),
+      ex_curl.mutable_data_ptr<float>(),
+      eps_ex.mutable_data_ptr<float>(),
+      hy_mid.mutable_data_ptr<float>(),
+      hz_mid.mutable_data_ptr<float>(),
+      hy_curl.mutable_data_ptr<float>(),
+      hz_curl.mutable_data_ptr<float>(),
+      inv_dy_e.mutable_data_ptr<float>(),
+      inv_dz_e.mutable_data_ptr<float>(),
+      inv_dy_h.mutable_data_ptr<float>(),
+      inv_dz_h.mutable_data_ptr<float>(),
       static_cast<int>(y_low_mode),
       static_cast<int>(y_high_mode),
       static_cast<int>(z_low_mode),
@@ -1978,22 +1975,22 @@ void reverse_magnetic_adjoint_to_ex_standard_cuda(
 }
 
 void reverse_magnetic_adjoint_to_ey_standard_cuda(
-    at::Tensor adj_ey_prev,
-    at::Tensor grad_eps_ey,
-    const at::Tensor& adj_ey_post,
-    const at::Tensor& adj_hx_mid,
-    const at::Tensor& adj_hz_mid,
-    const at::Tensor& ey_decay,
-    const at::Tensor& ey_curl,
-    const at::Tensor& eps_ey,
-    const at::Tensor& hx_mid,
-    const at::Tensor& hz_mid,
-    const at::Tensor& hx_curl,
-    const at::Tensor& hz_curl,
-    const at::Tensor& inv_dx_e,
-    const at::Tensor& inv_dz_e,
-    const at::Tensor& inv_dx_h,
-    const at::Tensor& inv_dz_h,
+    torch::stable::Tensor adj_ey_prev,
+    torch::stable::Tensor grad_eps_ey,
+    const torch::stable::Tensor& adj_ey_post,
+    const torch::stable::Tensor& adj_hx_mid,
+    const torch::stable::Tensor& adj_hz_mid,
+    const torch::stable::Tensor& ey_decay,
+    const torch::stable::Tensor& ey_curl,
+    const torch::stable::Tensor& eps_ey,
+    const torch::stable::Tensor& hx_mid,
+    const torch::stable::Tensor& hz_mid,
+    const torch::stable::Tensor& hx_curl,
+    const torch::stable::Tensor& hz_curl,
+    const torch::stable::Tensor& inv_dx_e,
+    const torch::stable::Tensor& inv_dz_e,
+    const torch::stable::Tensor& inv_dx_h,
+    const torch::stable::Tensor& inv_dz_h,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t z_low_mode,
@@ -2014,7 +2011,7 @@ void reverse_magnetic_adjoint_to_ey_standard_cuda(
   check_spacing_vector(adj_ey_prev, inv_dz_e, 2, "inv_dz_e");
   check_spacing_vector(adj_hz_mid, inv_dx_h, 0, "inv_dx_h");
   check_spacing_vector(adj_hx_mid, inv_dz_h, 2, "inv_dz_h");
-  const c10::cuda::CUDAGuard device_guard(adj_ey_prev.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_ey_prev.get_device_index());
   const dim3 block = field_block3d();
   reverse_magnetic_to_ey_standard_kernel<<<field_grid3d(adj_ey_prev.size(0), adj_ey_prev.size(1), adj_ey_prev.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(adj_ey_prev.size(0)),
@@ -2025,22 +2022,22 @@ void reverse_magnetic_adjoint_to_ey_standard_cuda(
       static_cast<int>(adj_hz_mid.size(0)),
       static_cast<int>(adj_hz_mid.size(1)),
       static_cast<int>(adj_hz_mid.size(2)),
-      adj_ey_prev.data_ptr<float>(),
-      grad_eps_ey.data_ptr<float>(),
-      adj_ey_post.data_ptr<float>(),
-      adj_hx_mid.data_ptr<float>(),
-      adj_hz_mid.data_ptr<float>(),
-      ey_decay.data_ptr<float>(),
-      ey_curl.data_ptr<float>(),
-      eps_ey.data_ptr<float>(),
-      hx_mid.data_ptr<float>(),
-      hz_mid.data_ptr<float>(),
-      hx_curl.data_ptr<float>(),
-      hz_curl.data_ptr<float>(),
-      inv_dx_e.data_ptr<float>(),
-      inv_dz_e.data_ptr<float>(),
-      inv_dx_h.data_ptr<float>(),
-      inv_dz_h.data_ptr<float>(),
+      adj_ey_prev.mutable_data_ptr<float>(),
+      grad_eps_ey.mutable_data_ptr<float>(),
+      adj_ey_post.mutable_data_ptr<float>(),
+      adj_hx_mid.mutable_data_ptr<float>(),
+      adj_hz_mid.mutable_data_ptr<float>(),
+      ey_decay.mutable_data_ptr<float>(),
+      ey_curl.mutable_data_ptr<float>(),
+      eps_ey.mutable_data_ptr<float>(),
+      hx_mid.mutable_data_ptr<float>(),
+      hz_mid.mutable_data_ptr<float>(),
+      hx_curl.mutable_data_ptr<float>(),
+      hz_curl.mutable_data_ptr<float>(),
+      inv_dx_e.mutable_data_ptr<float>(),
+      inv_dz_e.mutable_data_ptr<float>(),
+      inv_dx_h.mutable_data_ptr<float>(),
+      inv_dz_h.mutable_data_ptr<float>(),
       static_cast<int>(x_low_mode),
       static_cast<int>(x_high_mode),
       static_cast<int>(z_low_mode),
@@ -2049,22 +2046,22 @@ void reverse_magnetic_adjoint_to_ey_standard_cuda(
 }
 
 void reverse_magnetic_adjoint_to_ez_standard_cuda(
-    at::Tensor adj_ez_prev,
-    at::Tensor grad_eps_ez,
-    const at::Tensor& adj_ez_post,
-    const at::Tensor& adj_hx_mid,
-    const at::Tensor& adj_hy_mid,
-    const at::Tensor& ez_decay,
-    const at::Tensor& ez_curl,
-    const at::Tensor& eps_ez,
-    const at::Tensor& hx_mid,
-    const at::Tensor& hy_mid,
-    const at::Tensor& hx_curl,
-    const at::Tensor& hy_curl,
-    const at::Tensor& inv_dx_e,
-    const at::Tensor& inv_dy_e,
-    const at::Tensor& inv_dx_h,
-    const at::Tensor& inv_dy_h,
+    torch::stable::Tensor adj_ez_prev,
+    torch::stable::Tensor grad_eps_ez,
+    const torch::stable::Tensor& adj_ez_post,
+    const torch::stable::Tensor& adj_hx_mid,
+    const torch::stable::Tensor& adj_hy_mid,
+    const torch::stable::Tensor& ez_decay,
+    const torch::stable::Tensor& ez_curl,
+    const torch::stable::Tensor& eps_ez,
+    const torch::stable::Tensor& hx_mid,
+    const torch::stable::Tensor& hy_mid,
+    const torch::stable::Tensor& hx_curl,
+    const torch::stable::Tensor& hy_curl,
+    const torch::stable::Tensor& inv_dx_e,
+    const torch::stable::Tensor& inv_dy_e,
+    const torch::stable::Tensor& inv_dx_h,
+    const torch::stable::Tensor& inv_dy_h,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t y_low_mode,
@@ -2085,7 +2082,7 @@ void reverse_magnetic_adjoint_to_ez_standard_cuda(
   check_spacing_vector(adj_ez_prev, inv_dy_e, 1, "inv_dy_e");
   check_spacing_vector(adj_hy_mid, inv_dx_h, 0, "inv_dx_h");
   check_spacing_vector(adj_hx_mid, inv_dy_h, 1, "inv_dy_h");
-  const c10::cuda::CUDAGuard device_guard(adj_ez_prev.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_ez_prev.get_device_index());
   const dim3 block = field_block3d();
   reverse_magnetic_to_ez_standard_kernel<<<field_grid3d(adj_ez_prev.size(0), adj_ez_prev.size(1), adj_ez_prev.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(adj_ez_prev.size(0)),
@@ -2096,22 +2093,22 @@ void reverse_magnetic_adjoint_to_ez_standard_cuda(
       static_cast<int>(adj_hy_mid.size(0)),
       static_cast<int>(adj_hy_mid.size(1)),
       static_cast<int>(adj_hy_mid.size(2)),
-      adj_ez_prev.data_ptr<float>(),
-      grad_eps_ez.data_ptr<float>(),
-      adj_ez_post.data_ptr<float>(),
-      adj_hx_mid.data_ptr<float>(),
-      adj_hy_mid.data_ptr<float>(),
-      ez_decay.data_ptr<float>(),
-      ez_curl.data_ptr<float>(),
-      eps_ez.data_ptr<float>(),
-      hx_mid.data_ptr<float>(),
-      hy_mid.data_ptr<float>(),
-      hx_curl.data_ptr<float>(),
-      hy_curl.data_ptr<float>(),
-      inv_dx_e.data_ptr<float>(),
-      inv_dy_e.data_ptr<float>(),
-      inv_dx_h.data_ptr<float>(),
-      inv_dy_h.data_ptr<float>(),
+      adj_ez_prev.mutable_data_ptr<float>(),
+      grad_eps_ez.mutable_data_ptr<float>(),
+      adj_ez_post.mutable_data_ptr<float>(),
+      adj_hx_mid.mutable_data_ptr<float>(),
+      adj_hy_mid.mutable_data_ptr<float>(),
+      ez_decay.mutable_data_ptr<float>(),
+      ez_curl.mutable_data_ptr<float>(),
+      eps_ez.mutable_data_ptr<float>(),
+      hx_mid.mutable_data_ptr<float>(),
+      hy_mid.mutable_data_ptr<float>(),
+      hx_curl.mutable_data_ptr<float>(),
+      hy_curl.mutable_data_ptr<float>(),
+      inv_dx_e.mutable_data_ptr<float>(),
+      inv_dy_e.mutable_data_ptr<float>(),
+      inv_dx_h.mutable_data_ptr<float>(),
+      inv_dy_h.mutable_data_ptr<float>(),
       static_cast<int>(x_low_mode),
       static_cast<int>(x_high_mode),
       static_cast<int>(y_low_mode),
@@ -2120,22 +2117,22 @@ void reverse_magnetic_adjoint_to_ez_standard_cuda(
 }
 
 void reverse_electric_adjoint_to_hx_bloch_cuda(
-    at::Tensor adj_hx_mid_real,
-    at::Tensor adj_hx_mid_imag,
-    const at::Tensor& adj_hx_post_real,
-    const at::Tensor& adj_hx_post_imag,
-    const at::Tensor& adj_ey_post_real,
-    const at::Tensor& adj_ey_post_imag,
-    const at::Tensor& adj_ez_post_real,
-    const at::Tensor& adj_ez_post_imag,
-    const at::Tensor& ey_curl,
-    const at::Tensor& ez_curl,
+    torch::stable::Tensor adj_hx_mid_real,
+    torch::stable::Tensor adj_hx_mid_imag,
+    const torch::stable::Tensor& adj_hx_post_real,
+    const torch::stable::Tensor& adj_hx_post_imag,
+    const torch::stable::Tensor& adj_ey_post_real,
+    const torch::stable::Tensor& adj_ey_post_imag,
+    const torch::stable::Tensor& adj_ez_post_real,
+    const torch::stable::Tensor& adj_ez_post_imag,
+    const torch::stable::Tensor& ey_curl,
+    const torch::stable::Tensor& ez_curl,
     double phase_cos_y,
     double phase_sin_y,
     double phase_cos_z,
     double phase_sin_z,
-    const at::Tensor& inv_dy,
-    const at::Tensor& inv_dz) {
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz) {
   check_field(adj_hx_mid_real, "adj_hx_mid_real");
   check_matching_field(adj_hx_mid_real, adj_hx_mid_imag, "adj_hx_mid_imag");
   check_matching_field(adj_hx_mid_real, adj_hx_post_real, "adj_hx_post_real");
@@ -2146,17 +2143,17 @@ void reverse_electric_adjoint_to_hx_bloch_cuda(
   check_field(adj_ez_post_real, "adj_ez_post_real");
   check_matching_field(adj_ez_post_real, adj_ez_post_imag, "adj_ez_post_imag");
   check_matching_field(adj_ez_post_real, ez_curl, "ez_curl");
-  TORCH_CHECK(adj_ey_post_real.size(0) == adj_hx_mid_real.size(0)
+  STD_TORCH_CHECK(adj_ey_post_real.size(0) == adj_hx_mid_real.size(0)
       && adj_ey_post_real.size(1) == adj_hx_mid_real.size(1)
       && adj_ey_post_real.size(2) == adj_hx_mid_real.size(2) + 1,
       "Ey adjoint shape must match Hx Bloch stencil");
-  TORCH_CHECK(adj_ez_post_real.size(0) == adj_hx_mid_real.size(0)
+  STD_TORCH_CHECK(adj_ez_post_real.size(0) == adj_hx_mid_real.size(0)
       && adj_ez_post_real.size(1) == adj_hx_mid_real.size(1) + 1
       && adj_ez_post_real.size(2) == adj_hx_mid_real.size(2),
       "Ez adjoint shape must match Hx Bloch stencil");
   check_spacing_vector(adj_ez_post_real, inv_dy, 1, "inv_dy");
   check_spacing_vector(adj_ey_post_real, inv_dz, 2, "inv_dz");
-  const c10::cuda::CUDAGuard device_guard(adj_hx_mid_real.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_hx_mid_real.get_device_index());
   const dim3 block = field_block3d();
   reverse_electric_to_hx_bloch_kernel<<<field_grid3d(adj_hx_mid_real.size(0), adj_hx_mid_real.size(1), adj_hx_mid_real.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(adj_hx_mid_real.size(0)),
@@ -2168,42 +2165,42 @@ void reverse_electric_adjoint_to_hx_bloch_cuda(
       static_cast<int>(adj_ez_post_real.size(0)),
       static_cast<int>(adj_ez_post_real.size(1)),
       static_cast<int>(adj_ez_post_real.size(2)),
-      adj_hx_mid_real.data_ptr<float>(),
-      adj_hx_mid_imag.data_ptr<float>(),
-      adj_hx_post_real.data_ptr<float>(),
-      adj_hx_post_imag.data_ptr<float>(),
-      adj_ey_post_real.data_ptr<float>(),
-      adj_ey_post_imag.data_ptr<float>(),
-      adj_ez_post_real.data_ptr<float>(),
-      adj_ez_post_imag.data_ptr<float>(),
-      ey_curl.data_ptr<float>(),
-      ez_curl.data_ptr<float>(),
+      adj_hx_mid_real.mutable_data_ptr<float>(),
+      adj_hx_mid_imag.mutable_data_ptr<float>(),
+      adj_hx_post_real.mutable_data_ptr<float>(),
+      adj_hx_post_imag.mutable_data_ptr<float>(),
+      adj_ey_post_real.mutable_data_ptr<float>(),
+      adj_ey_post_imag.mutable_data_ptr<float>(),
+      adj_ez_post_real.mutable_data_ptr<float>(),
+      adj_ez_post_imag.mutable_data_ptr<float>(),
+      ey_curl.mutable_data_ptr<float>(),
+      ez_curl.mutable_data_ptr<float>(),
       static_cast<float>(phase_cos_y),
       static_cast<float>(phase_sin_y),
       static_cast<float>(phase_cos_z),
       static_cast<float>(phase_sin_z),
-      inv_dy.data_ptr<float>(),
-      inv_dz.data_ptr<float>());
+      inv_dy.mutable_data_ptr<float>(),
+      inv_dz.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_electric_adjoint_to_hy_bloch_cuda(
-    at::Tensor adj_hy_mid_real,
-    at::Tensor adj_hy_mid_imag,
-    const at::Tensor& adj_hy_post_real,
-    const at::Tensor& adj_hy_post_imag,
-    const at::Tensor& adj_ex_post_real,
-    const at::Tensor& adj_ex_post_imag,
-    const at::Tensor& adj_ez_post_real,
-    const at::Tensor& adj_ez_post_imag,
-    const at::Tensor& ex_curl,
-    const at::Tensor& ez_curl,
+    torch::stable::Tensor adj_hy_mid_real,
+    torch::stable::Tensor adj_hy_mid_imag,
+    const torch::stable::Tensor& adj_hy_post_real,
+    const torch::stable::Tensor& adj_hy_post_imag,
+    const torch::stable::Tensor& adj_ex_post_real,
+    const torch::stable::Tensor& adj_ex_post_imag,
+    const torch::stable::Tensor& adj_ez_post_real,
+    const torch::stable::Tensor& adj_ez_post_imag,
+    const torch::stable::Tensor& ex_curl,
+    const torch::stable::Tensor& ez_curl,
     double phase_cos_x,
     double phase_sin_x,
     double phase_cos_z,
     double phase_sin_z,
-    const at::Tensor& inv_dx,
-    const at::Tensor& inv_dz) {
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dz) {
   check_field(adj_hy_mid_real, "adj_hy_mid_real");
   check_matching_field(adj_hy_mid_real, adj_hy_mid_imag, "adj_hy_mid_imag");
   check_matching_field(adj_hy_mid_real, adj_hy_post_real, "adj_hy_post_real");
@@ -2214,17 +2211,17 @@ void reverse_electric_adjoint_to_hy_bloch_cuda(
   check_field(adj_ez_post_real, "adj_ez_post_real");
   check_matching_field(adj_ez_post_real, adj_ez_post_imag, "adj_ez_post_imag");
   check_matching_field(adj_ez_post_real, ez_curl, "ez_curl");
-  TORCH_CHECK(adj_ex_post_real.size(0) == adj_hy_mid_real.size(0)
+  STD_TORCH_CHECK(adj_ex_post_real.size(0) == adj_hy_mid_real.size(0)
       && adj_ex_post_real.size(1) == adj_hy_mid_real.size(1)
       && adj_ex_post_real.size(2) == adj_hy_mid_real.size(2) + 1,
       "Ex adjoint shape must match Hy Bloch stencil");
-  TORCH_CHECK(adj_ez_post_real.size(0) == adj_hy_mid_real.size(0) + 1
+  STD_TORCH_CHECK(adj_ez_post_real.size(0) == adj_hy_mid_real.size(0) + 1
       && adj_ez_post_real.size(1) == adj_hy_mid_real.size(1)
       && adj_ez_post_real.size(2) == adj_hy_mid_real.size(2),
       "Ez adjoint shape must match Hy Bloch stencil");
   check_spacing_vector(adj_ez_post_real, inv_dx, 0, "inv_dx");
   check_spacing_vector(adj_ex_post_real, inv_dz, 2, "inv_dz");
-  const c10::cuda::CUDAGuard device_guard(adj_hy_mid_real.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_hy_mid_real.get_device_index());
   const dim3 block = field_block3d();
   reverse_electric_to_hy_bloch_kernel<<<field_grid3d(adj_hy_mid_real.size(0), adj_hy_mid_real.size(1), adj_hy_mid_real.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(adj_hy_mid_real.size(0)),
@@ -2236,42 +2233,42 @@ void reverse_electric_adjoint_to_hy_bloch_cuda(
       static_cast<int>(adj_ez_post_real.size(0)),
       static_cast<int>(adj_ez_post_real.size(1)),
       static_cast<int>(adj_ez_post_real.size(2)),
-      adj_hy_mid_real.data_ptr<float>(),
-      adj_hy_mid_imag.data_ptr<float>(),
-      adj_hy_post_real.data_ptr<float>(),
-      adj_hy_post_imag.data_ptr<float>(),
-      adj_ex_post_real.data_ptr<float>(),
-      adj_ex_post_imag.data_ptr<float>(),
-      adj_ez_post_real.data_ptr<float>(),
-      adj_ez_post_imag.data_ptr<float>(),
-      ex_curl.data_ptr<float>(),
-      ez_curl.data_ptr<float>(),
+      adj_hy_mid_real.mutable_data_ptr<float>(),
+      adj_hy_mid_imag.mutable_data_ptr<float>(),
+      adj_hy_post_real.mutable_data_ptr<float>(),
+      adj_hy_post_imag.mutable_data_ptr<float>(),
+      adj_ex_post_real.mutable_data_ptr<float>(),
+      adj_ex_post_imag.mutable_data_ptr<float>(),
+      adj_ez_post_real.mutable_data_ptr<float>(),
+      adj_ez_post_imag.mutable_data_ptr<float>(),
+      ex_curl.mutable_data_ptr<float>(),
+      ez_curl.mutable_data_ptr<float>(),
       static_cast<float>(phase_cos_x),
       static_cast<float>(phase_sin_x),
       static_cast<float>(phase_cos_z),
       static_cast<float>(phase_sin_z),
-      inv_dx.data_ptr<float>(),
-      inv_dz.data_ptr<float>());
+      inv_dx.mutable_data_ptr<float>(),
+      inv_dz.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_electric_adjoint_to_hz_bloch_cuda(
-    at::Tensor adj_hz_mid_real,
-    at::Tensor adj_hz_mid_imag,
-    const at::Tensor& adj_hz_post_real,
-    const at::Tensor& adj_hz_post_imag,
-    const at::Tensor& adj_ex_post_real,
-    const at::Tensor& adj_ex_post_imag,
-    const at::Tensor& adj_ey_post_real,
-    const at::Tensor& adj_ey_post_imag,
-    const at::Tensor& ex_curl,
-    const at::Tensor& ey_curl,
+    torch::stable::Tensor adj_hz_mid_real,
+    torch::stable::Tensor adj_hz_mid_imag,
+    const torch::stable::Tensor& adj_hz_post_real,
+    const torch::stable::Tensor& adj_hz_post_imag,
+    const torch::stable::Tensor& adj_ex_post_real,
+    const torch::stable::Tensor& adj_ex_post_imag,
+    const torch::stable::Tensor& adj_ey_post_real,
+    const torch::stable::Tensor& adj_ey_post_imag,
+    const torch::stable::Tensor& ex_curl,
+    const torch::stable::Tensor& ey_curl,
     double phase_cos_x,
     double phase_sin_x,
     double phase_cos_y,
     double phase_sin_y,
-    const at::Tensor& inv_dx,
-    const at::Tensor& inv_dy) {
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy) {
   check_field(adj_hz_mid_real, "adj_hz_mid_real");
   check_matching_field(adj_hz_mid_real, adj_hz_mid_imag, "adj_hz_mid_imag");
   check_matching_field(adj_hz_mid_real, adj_hz_post_real, "adj_hz_post_real");
@@ -2282,17 +2279,17 @@ void reverse_electric_adjoint_to_hz_bloch_cuda(
   check_field(adj_ey_post_real, "adj_ey_post_real");
   check_matching_field(adj_ey_post_real, adj_ey_post_imag, "adj_ey_post_imag");
   check_matching_field(adj_ey_post_real, ey_curl, "ey_curl");
-  TORCH_CHECK(adj_ex_post_real.size(0) == adj_hz_mid_real.size(0)
+  STD_TORCH_CHECK(adj_ex_post_real.size(0) == adj_hz_mid_real.size(0)
       && adj_ex_post_real.size(1) == adj_hz_mid_real.size(1) + 1
       && adj_ex_post_real.size(2) == adj_hz_mid_real.size(2),
       "Ex adjoint shape must match Hz Bloch stencil");
-  TORCH_CHECK(adj_ey_post_real.size(0) == adj_hz_mid_real.size(0) + 1
+  STD_TORCH_CHECK(adj_ey_post_real.size(0) == adj_hz_mid_real.size(0) + 1
       && adj_ey_post_real.size(1) == adj_hz_mid_real.size(1)
       && adj_ey_post_real.size(2) == adj_hz_mid_real.size(2),
       "Ey adjoint shape must match Hz Bloch stencil");
   check_spacing_vector(adj_ey_post_real, inv_dx, 0, "inv_dx");
   check_spacing_vector(adj_ex_post_real, inv_dy, 1, "inv_dy");
-  const c10::cuda::CUDAGuard device_guard(adj_hz_mid_real.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_hz_mid_real.get_device_index());
   const dim3 block = field_block3d();
   reverse_electric_to_hz_bloch_kernel<<<field_grid3d(adj_hz_mid_real.size(0), adj_hz_mid_real.size(1), adj_hz_mid_real.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(adj_hz_mid_real.size(0)),
@@ -2304,52 +2301,52 @@ void reverse_electric_adjoint_to_hz_bloch_cuda(
       static_cast<int>(adj_ey_post_real.size(0)),
       static_cast<int>(adj_ey_post_real.size(1)),
       static_cast<int>(adj_ey_post_real.size(2)),
-      adj_hz_mid_real.data_ptr<float>(),
-      adj_hz_mid_imag.data_ptr<float>(),
-      adj_hz_post_real.data_ptr<float>(),
-      adj_hz_post_imag.data_ptr<float>(),
-      adj_ex_post_real.data_ptr<float>(),
-      adj_ex_post_imag.data_ptr<float>(),
-      adj_ey_post_real.data_ptr<float>(),
-      adj_ey_post_imag.data_ptr<float>(),
-      ex_curl.data_ptr<float>(),
-      ey_curl.data_ptr<float>(),
+      adj_hz_mid_real.mutable_data_ptr<float>(),
+      adj_hz_mid_imag.mutable_data_ptr<float>(),
+      adj_hz_post_real.mutable_data_ptr<float>(),
+      adj_hz_post_imag.mutable_data_ptr<float>(),
+      adj_ex_post_real.mutable_data_ptr<float>(),
+      adj_ex_post_imag.mutable_data_ptr<float>(),
+      adj_ey_post_real.mutable_data_ptr<float>(),
+      adj_ey_post_imag.mutable_data_ptr<float>(),
+      ex_curl.mutable_data_ptr<float>(),
+      ey_curl.mutable_data_ptr<float>(),
       static_cast<float>(phase_cos_x),
       static_cast<float>(phase_sin_x),
       static_cast<float>(phase_cos_y),
       static_cast<float>(phase_sin_y),
-      inv_dx.data_ptr<float>(),
-      inv_dy.data_ptr<float>());
+      inv_dx.mutable_data_ptr<float>(),
+      inv_dy.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_magnetic_adjoint_to_ex_bloch_cuda(
-    at::Tensor adj_ex_prev_real,
-    at::Tensor adj_ex_prev_imag,
-    at::Tensor grad_eps_ex,
-    const at::Tensor& adj_ex_post_real,
-    const at::Tensor& adj_ex_post_imag,
-    const at::Tensor& adj_hy_mid_real,
-    const at::Tensor& adj_hy_mid_imag,
-    const at::Tensor& adj_hz_mid_real,
-    const at::Tensor& adj_hz_mid_imag,
-    const at::Tensor& ex_decay,
-    const at::Tensor& ex_curl,
-    const at::Tensor& eps_ex,
-    const at::Tensor& hy_mid_real,
-    const at::Tensor& hy_mid_imag,
-    const at::Tensor& hz_mid_real,
-    const at::Tensor& hz_mid_imag,
-    const at::Tensor& hy_curl,
-    const at::Tensor& hz_curl,
+    torch::stable::Tensor adj_ex_prev_real,
+    torch::stable::Tensor adj_ex_prev_imag,
+    torch::stable::Tensor grad_eps_ex,
+    const torch::stable::Tensor& adj_ex_post_real,
+    const torch::stable::Tensor& adj_ex_post_imag,
+    const torch::stable::Tensor& adj_hy_mid_real,
+    const torch::stable::Tensor& adj_hy_mid_imag,
+    const torch::stable::Tensor& adj_hz_mid_real,
+    const torch::stable::Tensor& adj_hz_mid_imag,
+    const torch::stable::Tensor& ex_decay,
+    const torch::stable::Tensor& ex_curl,
+    const torch::stable::Tensor& eps_ex,
+    const torch::stable::Tensor& hy_mid_real,
+    const torch::stable::Tensor& hy_mid_imag,
+    const torch::stable::Tensor& hz_mid_real,
+    const torch::stable::Tensor& hz_mid_imag,
+    const torch::stable::Tensor& hy_curl,
+    const torch::stable::Tensor& hz_curl,
     double phase_cos_y,
     double phase_sin_y,
     double phase_cos_z,
     double phase_sin_z,
-    const at::Tensor& inv_dy_e,
-    const at::Tensor& inv_dz_e,
-    const at::Tensor& inv_dy_h,
-    const at::Tensor& inv_dz_h) {
+    const torch::stable::Tensor& inv_dy_e,
+    const torch::stable::Tensor& inv_dz_e,
+    const torch::stable::Tensor& inv_dy_h,
+    const torch::stable::Tensor& inv_dz_h) {
   check_field(adj_ex_prev_real, "adj_ex_prev_real");
   check_matching_field(adj_ex_prev_real, adj_ex_prev_imag, "adj_ex_prev_imag");
   check_matching_field(adj_ex_prev_real, grad_eps_ex, "grad_eps_ex");
@@ -2372,7 +2369,7 @@ void reverse_magnetic_adjoint_to_ex_bloch_cuda(
   check_spacing_vector(adj_ex_prev_real, inv_dz_e, 2, "inv_dz_e");
   check_spacing_vector(hz_mid_real, inv_dy_h, 1, "inv_dy_h");
   check_spacing_vector(hy_mid_real, inv_dz_h, 2, "inv_dz_h");
-  const c10::cuda::CUDAGuard device_guard(adj_ex_prev_real.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_ex_prev_real.get_device_index());
   const dim3 block = field_block3d();
   reverse_magnetic_to_ex_bloch_kernel<<<field_grid3d(adj_ex_prev_real.size(0), adj_ex_prev_real.size(1), adj_ex_prev_real.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(adj_ex_prev_real.size(0)),
@@ -2384,62 +2381,62 @@ void reverse_magnetic_adjoint_to_ex_bloch_cuda(
       static_cast<int>(hz_mid_real.size(0)),
       static_cast<int>(hz_mid_real.size(1)),
       static_cast<int>(hz_mid_real.size(2)),
-      adj_ex_prev_real.data_ptr<float>(),
-      adj_ex_prev_imag.data_ptr<float>(),
-      grad_eps_ex.data_ptr<float>(),
-      adj_ex_post_real.data_ptr<float>(),
-      adj_ex_post_imag.data_ptr<float>(),
-      adj_hy_mid_real.data_ptr<float>(),
-      adj_hy_mid_imag.data_ptr<float>(),
-      adj_hz_mid_real.data_ptr<float>(),
-      adj_hz_mid_imag.data_ptr<float>(),
-      ex_decay.data_ptr<float>(),
-      ex_curl.data_ptr<float>(),
-      eps_ex.data_ptr<float>(),
-      hy_mid_real.data_ptr<float>(),
-      hy_mid_imag.data_ptr<float>(),
-      hz_mid_real.data_ptr<float>(),
-      hz_mid_imag.data_ptr<float>(),
-      hy_curl.data_ptr<float>(),
-      hz_curl.data_ptr<float>(),
+      adj_ex_prev_real.mutable_data_ptr<float>(),
+      adj_ex_prev_imag.mutable_data_ptr<float>(),
+      grad_eps_ex.mutable_data_ptr<float>(),
+      adj_ex_post_real.mutable_data_ptr<float>(),
+      adj_ex_post_imag.mutable_data_ptr<float>(),
+      adj_hy_mid_real.mutable_data_ptr<float>(),
+      adj_hy_mid_imag.mutable_data_ptr<float>(),
+      adj_hz_mid_real.mutable_data_ptr<float>(),
+      adj_hz_mid_imag.mutable_data_ptr<float>(),
+      ex_decay.mutable_data_ptr<float>(),
+      ex_curl.mutable_data_ptr<float>(),
+      eps_ex.mutable_data_ptr<float>(),
+      hy_mid_real.mutable_data_ptr<float>(),
+      hy_mid_imag.mutable_data_ptr<float>(),
+      hz_mid_real.mutable_data_ptr<float>(),
+      hz_mid_imag.mutable_data_ptr<float>(),
+      hy_curl.mutable_data_ptr<float>(),
+      hz_curl.mutable_data_ptr<float>(),
       static_cast<float>(phase_cos_y),
       static_cast<float>(phase_sin_y),
       static_cast<float>(phase_cos_z),
       static_cast<float>(phase_sin_z),
-      inv_dy_e.data_ptr<float>(),
-      inv_dz_e.data_ptr<float>(),
-      inv_dy_h.data_ptr<float>(),
-      inv_dz_h.data_ptr<float>());
+      inv_dy_e.mutable_data_ptr<float>(),
+      inv_dz_e.mutable_data_ptr<float>(),
+      inv_dy_h.mutable_data_ptr<float>(),
+      inv_dz_h.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_magnetic_adjoint_to_ey_bloch_cuda(
-    at::Tensor adj_ey_prev_real,
-    at::Tensor adj_ey_prev_imag,
-    at::Tensor grad_eps_ey,
-    const at::Tensor& adj_ey_post_real,
-    const at::Tensor& adj_ey_post_imag,
-    const at::Tensor& adj_hx_mid_real,
-    const at::Tensor& adj_hx_mid_imag,
-    const at::Tensor& adj_hz_mid_real,
-    const at::Tensor& adj_hz_mid_imag,
-    const at::Tensor& ey_decay,
-    const at::Tensor& ey_curl,
-    const at::Tensor& eps_ey,
-    const at::Tensor& hx_mid_real,
-    const at::Tensor& hx_mid_imag,
-    const at::Tensor& hz_mid_real,
-    const at::Tensor& hz_mid_imag,
-    const at::Tensor& hx_curl,
-    const at::Tensor& hz_curl,
+    torch::stable::Tensor adj_ey_prev_real,
+    torch::stable::Tensor adj_ey_prev_imag,
+    torch::stable::Tensor grad_eps_ey,
+    const torch::stable::Tensor& adj_ey_post_real,
+    const torch::stable::Tensor& adj_ey_post_imag,
+    const torch::stable::Tensor& adj_hx_mid_real,
+    const torch::stable::Tensor& adj_hx_mid_imag,
+    const torch::stable::Tensor& adj_hz_mid_real,
+    const torch::stable::Tensor& adj_hz_mid_imag,
+    const torch::stable::Tensor& ey_decay,
+    const torch::stable::Tensor& ey_curl,
+    const torch::stable::Tensor& eps_ey,
+    const torch::stable::Tensor& hx_mid_real,
+    const torch::stable::Tensor& hx_mid_imag,
+    const torch::stable::Tensor& hz_mid_real,
+    const torch::stable::Tensor& hz_mid_imag,
+    const torch::stable::Tensor& hx_curl,
+    const torch::stable::Tensor& hz_curl,
     double phase_cos_x,
     double phase_sin_x,
     double phase_cos_z,
     double phase_sin_z,
-    const at::Tensor& inv_dx_e,
-    const at::Tensor& inv_dz_e,
-    const at::Tensor& inv_dx_h,
-    const at::Tensor& inv_dz_h) {
+    const torch::stable::Tensor& inv_dx_e,
+    const torch::stable::Tensor& inv_dz_e,
+    const torch::stable::Tensor& inv_dx_h,
+    const torch::stable::Tensor& inv_dz_h) {
   check_field(adj_ey_prev_real, "adj_ey_prev_real");
   check_matching_field(adj_ey_prev_real, adj_ey_prev_imag, "adj_ey_prev_imag");
   check_matching_field(adj_ey_prev_real, grad_eps_ey, "grad_eps_ey");
@@ -2462,7 +2459,7 @@ void reverse_magnetic_adjoint_to_ey_bloch_cuda(
   check_spacing_vector(adj_ey_prev_real, inv_dz_e, 2, "inv_dz_e");
   check_spacing_vector(hz_mid_real, inv_dx_h, 0, "inv_dx_h");
   check_spacing_vector(hx_mid_real, inv_dz_h, 2, "inv_dz_h");
-  const c10::cuda::CUDAGuard device_guard(adj_ey_prev_real.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_ey_prev_real.get_device_index());
   const dim3 block = field_block3d();
   reverse_magnetic_to_ey_bloch_kernel<<<field_grid3d(adj_ey_prev_real.size(0), adj_ey_prev_real.size(1), adj_ey_prev_real.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(adj_ey_prev_real.size(0)),
@@ -2474,62 +2471,62 @@ void reverse_magnetic_adjoint_to_ey_bloch_cuda(
       static_cast<int>(hz_mid_real.size(0)),
       static_cast<int>(hz_mid_real.size(1)),
       static_cast<int>(hz_mid_real.size(2)),
-      adj_ey_prev_real.data_ptr<float>(),
-      adj_ey_prev_imag.data_ptr<float>(),
-      grad_eps_ey.data_ptr<float>(),
-      adj_ey_post_real.data_ptr<float>(),
-      adj_ey_post_imag.data_ptr<float>(),
-      adj_hx_mid_real.data_ptr<float>(),
-      adj_hx_mid_imag.data_ptr<float>(),
-      adj_hz_mid_real.data_ptr<float>(),
-      adj_hz_mid_imag.data_ptr<float>(),
-      ey_decay.data_ptr<float>(),
-      ey_curl.data_ptr<float>(),
-      eps_ey.data_ptr<float>(),
-      hx_mid_real.data_ptr<float>(),
-      hx_mid_imag.data_ptr<float>(),
-      hz_mid_real.data_ptr<float>(),
-      hz_mid_imag.data_ptr<float>(),
-      hx_curl.data_ptr<float>(),
-      hz_curl.data_ptr<float>(),
+      adj_ey_prev_real.mutable_data_ptr<float>(),
+      adj_ey_prev_imag.mutable_data_ptr<float>(),
+      grad_eps_ey.mutable_data_ptr<float>(),
+      adj_ey_post_real.mutable_data_ptr<float>(),
+      adj_ey_post_imag.mutable_data_ptr<float>(),
+      adj_hx_mid_real.mutable_data_ptr<float>(),
+      adj_hx_mid_imag.mutable_data_ptr<float>(),
+      adj_hz_mid_real.mutable_data_ptr<float>(),
+      adj_hz_mid_imag.mutable_data_ptr<float>(),
+      ey_decay.mutable_data_ptr<float>(),
+      ey_curl.mutable_data_ptr<float>(),
+      eps_ey.mutable_data_ptr<float>(),
+      hx_mid_real.mutable_data_ptr<float>(),
+      hx_mid_imag.mutable_data_ptr<float>(),
+      hz_mid_real.mutable_data_ptr<float>(),
+      hz_mid_imag.mutable_data_ptr<float>(),
+      hx_curl.mutable_data_ptr<float>(),
+      hz_curl.mutable_data_ptr<float>(),
       static_cast<float>(phase_cos_x),
       static_cast<float>(phase_sin_x),
       static_cast<float>(phase_cos_z),
       static_cast<float>(phase_sin_z),
-      inv_dx_e.data_ptr<float>(),
-      inv_dz_e.data_ptr<float>(),
-      inv_dx_h.data_ptr<float>(),
-      inv_dz_h.data_ptr<float>());
+      inv_dx_e.mutable_data_ptr<float>(),
+      inv_dz_e.mutable_data_ptr<float>(),
+      inv_dx_h.mutable_data_ptr<float>(),
+      inv_dz_h.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_magnetic_adjoint_to_ez_bloch_cuda(
-    at::Tensor adj_ez_prev_real,
-    at::Tensor adj_ez_prev_imag,
-    at::Tensor grad_eps_ez,
-    const at::Tensor& adj_ez_post_real,
-    const at::Tensor& adj_ez_post_imag,
-    const at::Tensor& adj_hx_mid_real,
-    const at::Tensor& adj_hx_mid_imag,
-    const at::Tensor& adj_hy_mid_real,
-    const at::Tensor& adj_hy_mid_imag,
-    const at::Tensor& ez_decay,
-    const at::Tensor& ez_curl,
-    const at::Tensor& eps_ez,
-    const at::Tensor& hx_mid_real,
-    const at::Tensor& hx_mid_imag,
-    const at::Tensor& hy_mid_real,
-    const at::Tensor& hy_mid_imag,
-    const at::Tensor& hx_curl,
-    const at::Tensor& hy_curl,
+    torch::stable::Tensor adj_ez_prev_real,
+    torch::stable::Tensor adj_ez_prev_imag,
+    torch::stable::Tensor grad_eps_ez,
+    const torch::stable::Tensor& adj_ez_post_real,
+    const torch::stable::Tensor& adj_ez_post_imag,
+    const torch::stable::Tensor& adj_hx_mid_real,
+    const torch::stable::Tensor& adj_hx_mid_imag,
+    const torch::stable::Tensor& adj_hy_mid_real,
+    const torch::stable::Tensor& adj_hy_mid_imag,
+    const torch::stable::Tensor& ez_decay,
+    const torch::stable::Tensor& ez_curl,
+    const torch::stable::Tensor& eps_ez,
+    const torch::stable::Tensor& hx_mid_real,
+    const torch::stable::Tensor& hx_mid_imag,
+    const torch::stable::Tensor& hy_mid_real,
+    const torch::stable::Tensor& hy_mid_imag,
+    const torch::stable::Tensor& hx_curl,
+    const torch::stable::Tensor& hy_curl,
     double phase_cos_x,
     double phase_sin_x,
     double phase_cos_y,
     double phase_sin_y,
-    const at::Tensor& inv_dx_e,
-    const at::Tensor& inv_dy_e,
-    const at::Tensor& inv_dx_h,
-    const at::Tensor& inv_dy_h) {
+    const torch::stable::Tensor& inv_dx_e,
+    const torch::stable::Tensor& inv_dy_e,
+    const torch::stable::Tensor& inv_dx_h,
+    const torch::stable::Tensor& inv_dy_h) {
   check_field(adj_ez_prev_real, "adj_ez_prev_real");
   check_matching_field(adj_ez_prev_real, adj_ez_prev_imag, "adj_ez_prev_imag");
   check_matching_field(adj_ez_prev_real, grad_eps_ez, "grad_eps_ez");
@@ -2552,7 +2549,7 @@ void reverse_magnetic_adjoint_to_ez_bloch_cuda(
   check_spacing_vector(adj_ez_prev_real, inv_dy_e, 1, "inv_dy_e");
   check_spacing_vector(hy_mid_real, inv_dx_h, 0, "inv_dx_h");
   check_spacing_vector(hx_mid_real, inv_dy_h, 1, "inv_dy_h");
-  const c10::cuda::CUDAGuard device_guard(adj_ez_prev_real.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_ez_prev_real.get_device_index());
   const dim3 block = field_block3d();
   reverse_magnetic_to_ez_bloch_kernel<<<field_grid3d(adj_ez_prev_real.size(0), adj_ez_prev_real.size(1), adj_ez_prev_real.size(2), block), block, 0, current_cuda_stream()>>>(
       static_cast<int>(adj_ez_prev_real.size(0)),
@@ -2564,45 +2561,45 @@ void reverse_magnetic_adjoint_to_ez_bloch_cuda(
       static_cast<int>(hy_mid_real.size(0)),
       static_cast<int>(hy_mid_real.size(1)),
       static_cast<int>(hy_mid_real.size(2)),
-      adj_ez_prev_real.data_ptr<float>(),
-      adj_ez_prev_imag.data_ptr<float>(),
-      grad_eps_ez.data_ptr<float>(),
-      adj_ez_post_real.data_ptr<float>(),
-      adj_ez_post_imag.data_ptr<float>(),
-      adj_hx_mid_real.data_ptr<float>(),
-      adj_hx_mid_imag.data_ptr<float>(),
-      adj_hy_mid_real.data_ptr<float>(),
-      adj_hy_mid_imag.data_ptr<float>(),
-      ez_decay.data_ptr<float>(),
-      ez_curl.data_ptr<float>(),
-      eps_ez.data_ptr<float>(),
-      hx_mid_real.data_ptr<float>(),
-      hx_mid_imag.data_ptr<float>(),
-      hy_mid_real.data_ptr<float>(),
-      hy_mid_imag.data_ptr<float>(),
-      hx_curl.data_ptr<float>(),
-      hy_curl.data_ptr<float>(),
+      adj_ez_prev_real.mutable_data_ptr<float>(),
+      adj_ez_prev_imag.mutable_data_ptr<float>(),
+      grad_eps_ez.mutable_data_ptr<float>(),
+      adj_ez_post_real.mutable_data_ptr<float>(),
+      adj_ez_post_imag.mutable_data_ptr<float>(),
+      adj_hx_mid_real.mutable_data_ptr<float>(),
+      adj_hx_mid_imag.mutable_data_ptr<float>(),
+      adj_hy_mid_real.mutable_data_ptr<float>(),
+      adj_hy_mid_imag.mutable_data_ptr<float>(),
+      ez_decay.mutable_data_ptr<float>(),
+      ez_curl.mutable_data_ptr<float>(),
+      eps_ez.mutable_data_ptr<float>(),
+      hx_mid_real.mutable_data_ptr<float>(),
+      hx_mid_imag.mutable_data_ptr<float>(),
+      hy_mid_real.mutable_data_ptr<float>(),
+      hy_mid_imag.mutable_data_ptr<float>(),
+      hx_curl.mutable_data_ptr<float>(),
+      hy_curl.mutable_data_ptr<float>(),
       static_cast<float>(phase_cos_x),
       static_cast<float>(phase_sin_x),
       static_cast<float>(phase_cos_y),
       static_cast<float>(phase_sin_y),
-      inv_dx_e.data_ptr<float>(),
-      inv_dy_e.data_ptr<float>(),
-      inv_dx_h.data_ptr<float>(),
-      inv_dy_h.data_ptr<float>());
+      inv_dx_e.mutable_data_ptr<float>(),
+      inv_dy_e.mutable_data_ptr<float>(),
+      inv_dx_h.mutable_data_ptr<float>(),
+      inv_dy_h.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void accumulate_forward_diff_adjoint_cuda(
-    at::Tensor field_grad,
-    const at::Tensor& diff_grad,
+    torch::stable::Tensor field_grad,
+    const torch::stable::Tensor& diff_grad,
     int64_t axis,
-    const at::Tensor& inv_delta) {
+    const torch::stable::Tensor& inv_delta) {
   check_field(field_grad, "field_grad");
   check_field(diff_grad, "diff_grad");
-  TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
+  STD_TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
   check_spacing_vector(diff_grad, inv_delta, axis, "inv_delta");
-  const c10::cuda::CUDAGuard device_guard(field_grad.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(field_grad.get_device_index());
   if (axis == 0) {
     launch_accumulate_diff_adjoint<0, true>(field_grad, diff_grad, inv_delta);
   } else if (axis == 1) {
@@ -2614,15 +2611,15 @@ void accumulate_forward_diff_adjoint_cuda(
 }
 
 void accumulate_backward_diff_adjoint_cuda(
-    at::Tensor field_grad,
-    const at::Tensor& diff_grad,
+    torch::stable::Tensor field_grad,
+    const torch::stable::Tensor& diff_grad,
     int64_t axis,
-    const at::Tensor& inv_delta) {
+    const torch::stable::Tensor& inv_delta) {
   check_field(field_grad, "field_grad");
   check_field(diff_grad, "diff_grad");
-  TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
+  STD_TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
   check_spacing_vector(diff_grad, inv_delta, axis, "inv_delta");
-  const c10::cuda::CUDAGuard device_guard(field_grad.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(field_grad.get_device_index());
   if (axis == 0) {
     launch_accumulate_diff_adjoint<0, false>(field_grad, diff_grad, inv_delta);
   } else if (axis == 1) {
@@ -2635,30 +2632,30 @@ void accumulate_backward_diff_adjoint_cuda(
 
 void launch_reverse_electric_component_cpml(
     int component,
-    at::Tensor adj_prev,
-    at::Tensor grad_eps,
-    at::Tensor adj_psi_pos_prev,
-    at::Tensor adj_psi_neg_prev,
-    at::Tensor adj_d_pos,
-    at::Tensor adj_d_neg,
-    const at::Tensor& adj_post,
-    const at::Tensor& adj_psi_pos_post,
-    const at::Tensor& adj_psi_neg_post,
-    const at::Tensor& decay,
-    const at::Tensor& curl,
-    const at::Tensor& eps,
-    const at::Tensor& psi_pos,
-    const at::Tensor& psi_neg,
-    const at::Tensor& b_pos,
-    const at::Tensor& c_pos,
-    const at::Tensor& inv_kappa_pos,
-    const at::Tensor& b_neg,
-    const at::Tensor& c_neg,
-    const at::Tensor& inv_kappa_neg,
-    const at::Tensor& h_pos_mid,
-    const at::Tensor& h_neg_mid,
-    const at::Tensor& inv_pos,
-    const at::Tensor& inv_neg,
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor grad_eps,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& eps,
+    const torch::stable::Tensor& psi_pos,
+    const torch::stable::Tensor& psi_neg,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg,
+    const torch::stable::Tensor& h_pos_mid,
+    const torch::stable::Tensor& h_neg_mid,
+    const torch::stable::Tensor& inv_pos,
+    const torch::stable::Tensor& inv_neg,
     int64_t low_mode_a,
     int64_t high_mode_a,
     int64_t low_mode_b,
@@ -2687,7 +2684,7 @@ void launch_reverse_electric_component_cpml(
   check_matching_vector(b_neg, inv_neg, "inv_neg");
   check_field(h_pos_mid, "h_pos_mid");
   check_field(h_neg_mid, "h_neg_mid");
-  const c10::cuda::CUDAGuard device_guard(adj_prev.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_prev.get_device_index());
   const dim3 block = field_block3d();
   const auto launch = [&](auto component_tag) {
     constexpr int component_value = decltype(component_tag)::value;
@@ -2699,30 +2696,30 @@ void launch_reverse_electric_component_cpml(
         static_cast<int>(h_pos_mid.size(2)),
         static_cast<int>(h_neg_mid.size(1)),
         static_cast<int>(h_neg_mid.size(2)),
-        adj_prev.data_ptr<float>(),
-        grad_eps.data_ptr<float>(),
-        adj_psi_pos_prev.data_ptr<float>(),
-        adj_psi_neg_prev.data_ptr<float>(),
-        adj_d_pos.data_ptr<float>(),
-        adj_d_neg.data_ptr<float>(),
-        adj_post.data_ptr<float>(),
-        adj_psi_pos_post.data_ptr<float>(),
-        adj_psi_neg_post.data_ptr<float>(),
-        decay.data_ptr<float>(),
-        curl.data_ptr<float>(),
-        eps.data_ptr<float>(),
-        psi_pos.data_ptr<float>(),
-        psi_neg.data_ptr<float>(),
-        b_pos.data_ptr<float>(),
-        c_pos.data_ptr<float>(),
-        inv_kappa_pos.data_ptr<float>(),
-        b_neg.data_ptr<float>(),
-        c_neg.data_ptr<float>(),
-        inv_kappa_neg.data_ptr<float>(),
-        h_pos_mid.data_ptr<float>(),
-        h_neg_mid.data_ptr<float>(),
-        inv_pos.data_ptr<float>(),
-        inv_neg.data_ptr<float>(),
+        adj_prev.mutable_data_ptr<float>(),
+        grad_eps.mutable_data_ptr<float>(),
+        adj_psi_pos_prev.mutable_data_ptr<float>(),
+        adj_psi_neg_prev.mutable_data_ptr<float>(),
+        adj_d_pos.mutable_data_ptr<float>(),
+        adj_d_neg.mutable_data_ptr<float>(),
+        adj_post.mutable_data_ptr<float>(),
+        adj_psi_pos_post.mutable_data_ptr<float>(),
+        adj_psi_neg_post.mutable_data_ptr<float>(),
+        decay.mutable_data_ptr<float>(),
+        curl.mutable_data_ptr<float>(),
+        eps.mutable_data_ptr<float>(),
+        psi_pos.mutable_data_ptr<float>(),
+        psi_neg.mutable_data_ptr<float>(),
+        b_pos.mutable_data_ptr<float>(),
+        c_pos.mutable_data_ptr<float>(),
+        inv_kappa_pos.mutable_data_ptr<float>(),
+        b_neg.mutable_data_ptr<float>(),
+        c_neg.mutable_data_ptr<float>(),
+        inv_kappa_neg.mutable_data_ptr<float>(),
+        h_pos_mid.mutable_data_ptr<float>(),
+        h_neg_mid.mutable_data_ptr<float>(),
+        inv_pos.mutable_data_ptr<float>(),
+        inv_neg.mutable_data_ptr<float>(),
         static_cast<int>(low_mode_a),
         static_cast<int>(high_mode_a),
         static_cast<int>(low_mode_b),
@@ -2739,30 +2736,30 @@ void launch_reverse_electric_component_cpml(
 }
 
 void reverse_electric_component_ex_cpml_cuda(
-    at::Tensor adj_prev,
-    at::Tensor grad_eps,
-    at::Tensor adj_psi_pos_prev,
-    at::Tensor adj_psi_neg_prev,
-    at::Tensor adj_d_pos,
-    at::Tensor adj_d_neg,
-    const at::Tensor& adj_post,
-    const at::Tensor& adj_psi_pos_post,
-    const at::Tensor& adj_psi_neg_post,
-    const at::Tensor& decay,
-    const at::Tensor& curl,
-    const at::Tensor& eps,
-    const at::Tensor& psi_pos,
-    const at::Tensor& psi_neg,
-    const at::Tensor& b_pos,
-    const at::Tensor& c_pos,
-    const at::Tensor& inv_kappa_pos,
-    const at::Tensor& b_neg,
-    const at::Tensor& c_neg,
-    const at::Tensor& inv_kappa_neg,
-    const at::Tensor& hy_mid,
-    const at::Tensor& hz_mid,
-    const at::Tensor& inv_dy,
-    const at::Tensor& inv_dz,
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor grad_eps,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& eps,
+    const torch::stable::Tensor& psi_pos,
+    const torch::stable::Tensor& psi_neg,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg,
+    const torch::stable::Tensor& hy_mid,
+    const torch::stable::Tensor& hz_mid,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
     int64_t y_low_mode,
     int64_t y_high_mode,
     int64_t z_low_mode,
@@ -2775,30 +2772,30 @@ void reverse_electric_component_ex_cpml_cuda(
 }
 
 void reverse_electric_component_ey_cpml_cuda(
-    at::Tensor adj_prev,
-    at::Tensor grad_eps,
-    at::Tensor adj_psi_pos_prev,
-    at::Tensor adj_psi_neg_prev,
-    at::Tensor adj_d_pos,
-    at::Tensor adj_d_neg,
-    const at::Tensor& adj_post,
-    const at::Tensor& adj_psi_pos_post,
-    const at::Tensor& adj_psi_neg_post,
-    const at::Tensor& decay,
-    const at::Tensor& curl,
-    const at::Tensor& eps,
-    const at::Tensor& psi_pos,
-    const at::Tensor& psi_neg,
-    const at::Tensor& b_pos,
-    const at::Tensor& c_pos,
-    const at::Tensor& inv_kappa_pos,
-    const at::Tensor& b_neg,
-    const at::Tensor& c_neg,
-    const at::Tensor& inv_kappa_neg,
-    const at::Tensor& hx_mid,
-    const at::Tensor& hz_mid,
-    const at::Tensor& inv_dx,
-    const at::Tensor& inv_dz,
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor grad_eps,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& eps,
+    const torch::stable::Tensor& psi_pos,
+    const torch::stable::Tensor& psi_neg,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg,
+    const torch::stable::Tensor& hx_mid,
+    const torch::stable::Tensor& hz_mid,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dz,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t z_low_mode,
@@ -2811,30 +2808,30 @@ void reverse_electric_component_ey_cpml_cuda(
 }
 
 void reverse_electric_component_ez_cpml_cuda(
-    at::Tensor adj_prev,
-    at::Tensor grad_eps,
-    at::Tensor adj_psi_pos_prev,
-    at::Tensor adj_psi_neg_prev,
-    at::Tensor adj_d_pos,
-    at::Tensor adj_d_neg,
-    const at::Tensor& adj_post,
-    const at::Tensor& adj_psi_pos_post,
-    const at::Tensor& adj_psi_neg_post,
-    const at::Tensor& decay,
-    const at::Tensor& curl,
-    const at::Tensor& eps,
-    const at::Tensor& psi_pos,
-    const at::Tensor& psi_neg,
-    const at::Tensor& b_pos,
-    const at::Tensor& c_pos,
-    const at::Tensor& inv_kappa_pos,
-    const at::Tensor& b_neg,
-    const at::Tensor& c_neg,
-    const at::Tensor& inv_kappa_neg,
-    const at::Tensor& hx_mid,
-    const at::Tensor& hy_mid,
-    const at::Tensor& inv_dx,
-    const at::Tensor& inv_dy,
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor grad_eps,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& eps,
+    const torch::stable::Tensor& psi_pos,
+    const torch::stable::Tensor& psi_neg,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg,
+    const torch::stable::Tensor& hx_mid,
+    const torch::stable::Tensor& hy_mid,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t y_low_mode,
@@ -2848,22 +2845,22 @@ void reverse_electric_component_ez_cpml_cuda(
 
 void launch_reverse_magnetic_component_cpml(
     int component,
-    at::Tensor adj_prev,
-    at::Tensor adj_psi_pos_prev,
-    at::Tensor adj_psi_neg_prev,
-    at::Tensor adj_d_pos,
-    at::Tensor adj_d_neg,
-    const at::Tensor& adj_post,
-    const at::Tensor& adj_psi_pos_post,
-    const at::Tensor& adj_psi_neg_post,
-    const at::Tensor& decay,
-    const at::Tensor& curl,
-    const at::Tensor& b_pos,
-    const at::Tensor& c_pos,
-    const at::Tensor& inv_kappa_pos,
-    const at::Tensor& b_neg,
-    const at::Tensor& c_neg,
-    const at::Tensor& inv_kappa_neg) {
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg) {
   check_field(adj_prev, "adj_prev");
   check_matching_field(adj_prev, adj_psi_pos_prev, "adj_psi_pos_prev");
   check_matching_field(adj_prev, adj_psi_neg_prev, "adj_psi_neg_prev");
@@ -2880,7 +2877,7 @@ void launch_reverse_magnetic_component_cpml(
   check_vector(b_neg, "b_neg");
   check_matching_vector(b_neg, c_neg, "c_neg");
   check_matching_vector(b_neg, inv_kappa_neg, "inv_kappa_neg");
-  const c10::cuda::CUDAGuard device_guard(adj_prev.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_prev.get_device_index());
   const dim3 block = field_block3d();
   const auto launch = [&](auto component_tag) {
     constexpr int component_value = decltype(component_tag)::value;
@@ -2888,22 +2885,22 @@ void launch_reverse_magnetic_component_cpml(
         static_cast<int>(adj_prev.size(0)),
         static_cast<int>(adj_prev.size(1)),
         static_cast<int>(adj_prev.size(2)),
-        adj_prev.data_ptr<float>(),
-        adj_psi_pos_prev.data_ptr<float>(),
-        adj_psi_neg_prev.data_ptr<float>(),
-        adj_d_pos.data_ptr<float>(),
-        adj_d_neg.data_ptr<float>(),
-        adj_post.data_ptr<float>(),
-        adj_psi_pos_post.data_ptr<float>(),
-        adj_psi_neg_post.data_ptr<float>(),
-        decay.data_ptr<float>(),
-        curl.data_ptr<float>(),
-        b_pos.data_ptr<float>(),
-        c_pos.data_ptr<float>(),
-        inv_kappa_pos.data_ptr<float>(),
-        b_neg.data_ptr<float>(),
-        c_neg.data_ptr<float>(),
-        inv_kappa_neg.data_ptr<float>());
+        adj_prev.mutable_data_ptr<float>(),
+        adj_psi_pos_prev.mutable_data_ptr<float>(),
+        adj_psi_neg_prev.mutable_data_ptr<float>(),
+        adj_d_pos.mutable_data_ptr<float>(),
+        adj_d_neg.mutable_data_ptr<float>(),
+        adj_post.mutable_data_ptr<float>(),
+        adj_psi_pos_post.mutable_data_ptr<float>(),
+        adj_psi_neg_post.mutable_data_ptr<float>(),
+        decay.mutable_data_ptr<float>(),
+        curl.mutable_data_ptr<float>(),
+        b_pos.mutable_data_ptr<float>(),
+        c_pos.mutable_data_ptr<float>(),
+        inv_kappa_pos.mutable_data_ptr<float>(),
+        b_neg.mutable_data_ptr<float>(),
+        c_neg.mutable_data_ptr<float>(),
+        inv_kappa_neg.mutable_data_ptr<float>());
   };
   if (component == 0) {
     launch(std::integral_constant<int, 0>{});
@@ -2916,22 +2913,22 @@ void launch_reverse_magnetic_component_cpml(
 }
 
 void reverse_magnetic_component_hx_cpml_cuda(
-    at::Tensor adj_prev,
-    at::Tensor adj_psi_pos_prev,
-    at::Tensor adj_psi_neg_prev,
-    at::Tensor adj_d_pos,
-    at::Tensor adj_d_neg,
-    const at::Tensor& adj_post,
-    const at::Tensor& adj_psi_pos_post,
-    const at::Tensor& adj_psi_neg_post,
-    const at::Tensor& decay,
-    const at::Tensor& curl,
-    const at::Tensor& b_pos,
-    const at::Tensor& c_pos,
-    const at::Tensor& inv_kappa_pos,
-    const at::Tensor& b_neg,
-    const at::Tensor& c_neg,
-    const at::Tensor& inv_kappa_neg) {
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg) {
   launch_reverse_magnetic_component_cpml(
       0, adj_prev, adj_psi_pos_prev, adj_psi_neg_prev, adj_d_pos, adj_d_neg,
       adj_post, adj_psi_pos_post, adj_psi_neg_post, decay, curl,
@@ -2939,22 +2936,22 @@ void reverse_magnetic_component_hx_cpml_cuda(
 }
 
 void reverse_magnetic_component_hy_cpml_cuda(
-    at::Tensor adj_prev,
-    at::Tensor adj_psi_pos_prev,
-    at::Tensor adj_psi_neg_prev,
-    at::Tensor adj_d_pos,
-    at::Tensor adj_d_neg,
-    const at::Tensor& adj_post,
-    const at::Tensor& adj_psi_pos_post,
-    const at::Tensor& adj_psi_neg_post,
-    const at::Tensor& decay,
-    const at::Tensor& curl,
-    const at::Tensor& b_pos,
-    const at::Tensor& c_pos,
-    const at::Tensor& inv_kappa_pos,
-    const at::Tensor& b_neg,
-    const at::Tensor& c_neg,
-    const at::Tensor& inv_kappa_neg) {
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg) {
   launch_reverse_magnetic_component_cpml(
       1, adj_prev, adj_psi_pos_prev, adj_psi_neg_prev, adj_d_pos, adj_d_neg,
       adj_post, adj_psi_pos_post, adj_psi_neg_post, decay, curl,
@@ -2962,22 +2959,22 @@ void reverse_magnetic_component_hy_cpml_cuda(
 }
 
 void reverse_magnetic_component_hz_cpml_cuda(
-    at::Tensor adj_prev,
-    at::Tensor adj_psi_pos_prev,
-    at::Tensor adj_psi_neg_prev,
-    at::Tensor adj_d_pos,
-    at::Tensor adj_d_neg,
-    const at::Tensor& adj_post,
-    const at::Tensor& adj_psi_pos_post,
-    const at::Tensor& adj_psi_neg_post,
-    const at::Tensor& decay,
-    const at::Tensor& curl,
-    const at::Tensor& b_pos,
-    const at::Tensor& c_pos,
-    const at::Tensor& inv_kappa_pos,
-    const at::Tensor& b_neg,
-    const at::Tensor& c_neg,
-    const at::Tensor& inv_kappa_neg) {
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg) {
   launch_reverse_magnetic_component_cpml(
       2, adj_prev, adj_psi_pos_prev, adj_psi_neg_prev, adj_d_pos, adj_d_neg,
       adj_post, adj_psi_pos_post, adj_psi_neg_post, decay, curl,
@@ -2985,11 +2982,11 @@ void reverse_magnetic_component_hz_cpml_cuda(
 }
 
 void reverse_debye_current_cuda(
-    at::Tensor adj_electric_prev,
-    at::Tensor adj_polarization_prev,
-    const at::Tensor& adj_polarization_post,
-    const at::Tensor& adj_current_post,
-    const at::Tensor& drive,
+    torch::stable::Tensor adj_electric_prev,
+    torch::stable::Tensor adj_polarization_prev,
+    const torch::stable::Tensor& adj_polarization_post,
+    const torch::stable::Tensor& adj_current_post,
+    const torch::stable::Tensor& drive,
     double decay,
     double dt) {
   check_field(adj_electric_prev, "adj_electric_prev");
@@ -2997,49 +2994,49 @@ void reverse_debye_current_cuda(
   check_matching_field(adj_electric_prev, adj_polarization_post, "adj_polarization_post");
   check_matching_field(adj_electric_prev, adj_current_post, "adj_current_post");
   check_matching_field(adj_electric_prev, drive, "drive");
-  const c10::cuda::CUDAGuard device_guard(adj_electric_prev.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_electric_prev.get_device_index());
   const int64_t total = adj_electric_prev.numel();
   reverse_debye_current_kernel<<<linear_grid(total, 256), 256, 0, current_cuda_stream()>>>(
       total,
-      adj_electric_prev.data_ptr<float>(),
-      adj_polarization_prev.data_ptr<float>(),
-      adj_polarization_post.data_ptr<float>(),
-      adj_current_post.data_ptr<float>(),
-      drive.data_ptr<float>(),
+      adj_electric_prev.mutable_data_ptr<float>(),
+      adj_polarization_prev.mutable_data_ptr<float>(),
+      adj_polarization_post.mutable_data_ptr<float>(),
+      adj_current_post.mutable_data_ptr<float>(),
+      drive.mutable_data_ptr<float>(),
       static_cast<float>(decay),
       static_cast<float>(1.0 / dt));
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_drude_current_cuda(
-    at::Tensor adj_electric_prev,
-    at::Tensor adj_current_prev,
-    const at::Tensor& adj_current_post,
-    const at::Tensor& drive,
+    torch::stable::Tensor adj_electric_prev,
+    torch::stable::Tensor adj_current_prev,
+    const torch::stable::Tensor& adj_current_post,
+    const torch::stable::Tensor& drive,
     double decay) {
   check_field(adj_electric_prev, "adj_electric_prev");
   check_matching_field(adj_electric_prev, adj_current_prev, "adj_current_prev");
   check_matching_field(adj_electric_prev, adj_current_post, "adj_current_post");
   check_matching_field(adj_electric_prev, drive, "drive");
-  const c10::cuda::CUDAGuard device_guard(adj_electric_prev.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_electric_prev.get_device_index());
   const int64_t total = adj_electric_prev.numel();
   reverse_drude_current_kernel<<<linear_grid(total, 256), 256, 0, current_cuda_stream()>>>(
       total,
-      adj_electric_prev.data_ptr<float>(),
-      adj_current_prev.data_ptr<float>(),
-      adj_current_post.data_ptr<float>(),
-      drive.data_ptr<float>(),
+      adj_electric_prev.mutable_data_ptr<float>(),
+      adj_current_prev.mutable_data_ptr<float>(),
+      adj_current_post.mutable_data_ptr<float>(),
+      drive.mutable_data_ptr<float>(),
       static_cast<float>(decay));
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_lorentz_current_cuda(
-    at::Tensor adj_electric_prev,
-    at::Tensor adj_polarization_prev,
-    at::Tensor adj_current_prev,
-    const at::Tensor& adj_polarization_post,
-    const at::Tensor& adj_current_post,
-    const at::Tensor& drive,
+    torch::stable::Tensor adj_electric_prev,
+    torch::stable::Tensor adj_polarization_prev,
+    torch::stable::Tensor adj_current_prev,
+    const torch::stable::Tensor& adj_polarization_post,
+    const torch::stable::Tensor& adj_current_post,
+    const torch::stable::Tensor& drive,
     double decay,
     double restoring,
     double dt) {
@@ -3049,16 +3046,16 @@ void reverse_lorentz_current_cuda(
   check_matching_field(adj_electric_prev, adj_polarization_post, "adj_polarization_post");
   check_matching_field(adj_electric_prev, adj_current_post, "adj_current_post");
   check_matching_field(adj_electric_prev, drive, "drive");
-  const c10::cuda::CUDAGuard device_guard(adj_electric_prev.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_electric_prev.get_device_index());
   const int64_t total = adj_electric_prev.numel();
   reverse_lorentz_current_kernel<<<linear_grid(total, 256), 256, 0, current_cuda_stream()>>>(
       total,
-      adj_electric_prev.data_ptr<float>(),
-      adj_polarization_prev.data_ptr<float>(),
-      adj_current_prev.data_ptr<float>(),
-      adj_polarization_post.data_ptr<float>(),
-      adj_current_post.data_ptr<float>(),
-      drive.data_ptr<float>(),
+      adj_electric_prev.mutable_data_ptr<float>(),
+      adj_polarization_prev.mutable_data_ptr<float>(),
+      adj_current_prev.mutable_data_ptr<float>(),
+      adj_polarization_post.mutable_data_ptr<float>(),
+      adj_current_post.mutable_data_ptr<float>(),
+      drive.mutable_data_ptr<float>(),
       static_cast<float>(decay),
       static_cast<float>(restoring),
       static_cast<float>(dt));
@@ -3066,17 +3063,17 @@ void reverse_lorentz_current_cuda(
 }
 
 void accumulate_tfsf_scalar_sample_adjoint_cuda(
-    at::Tensor adj_aux_field,
-    const at::Tensor& adj_field_patch,
-    const at::Tensor& coeff_patch,
+    torch::stable::Tensor adj_aux_field,
+    const torch::stable::Tensor& adj_field_patch,
+    const torch::stable::Tensor& coeff_patch,
     int64_t sample_index,
     double component_scale) {
   check_vector(adj_aux_field, "adj_aux_field");
   check_field(adj_field_patch, "adj_field_patch");
   check_same_cuda_device(adj_aux_field, adj_field_patch, "adj_field_patch");
   check_matching_field(adj_field_patch, coeff_patch, "coeff_patch");
-  TORCH_CHECK(sample_index >= 0 && sample_index < adj_aux_field.numel(), "sample_index is out of range");
-  const c10::cuda::CUDAGuard device_guard(adj_aux_field.device());
+  STD_TORCH_CHECK(sample_index >= 0 && sample_index < adj_aux_field.numel(), "sample_index is out of range");
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_aux_field.get_device_index());
   const int64_t total = adj_field_patch.numel();
   constexpr int block_size = 512;
   accumulate_tfsf_scalar_sample_adjoint_kernel<<<
@@ -3089,17 +3086,17 @@ void accumulate_tfsf_scalar_sample_adjoint_cuda(
       static_cast<int>(adj_field_patch.size(2)),
       sample_index,
       static_cast<float>(component_scale),
-      adj_aux_field.data_ptr<float>(),
-      adj_field_patch.data_ptr<float>(),
-      coeff_patch.data_ptr<float>());
+      adj_aux_field.mutable_data_ptr<float>(),
+      adj_field_patch.mutable_data_ptr<float>(),
+      coeff_patch.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void accumulate_tfsf_line_sample_adjoint_cuda(
-    at::Tensor adj_aux_field,
-    const at::Tensor& adj_field_patch,
-    const at::Tensor& coeff_patch,
-    const at::Tensor& sample_indices,
+    torch::stable::Tensor adj_aux_field,
+    const torch::stable::Tensor& adj_field_patch,
+    const torch::stable::Tensor& coeff_patch,
+    const torch::stable::Tensor& sample_indices,
     int64_t sample_axis_code,
     double component_scale) {
   check_vector(adj_aux_field, "adj_aux_field");
@@ -3108,48 +3105,48 @@ void accumulate_tfsf_line_sample_adjoint_cuda(
   check_matching_field(adj_field_patch, coeff_patch, "coeff_patch");
   check_int32_vector(sample_indices, "sample_indices");
   check_same_cuda_device(adj_aux_field, sample_indices, "sample_indices");
-  TORCH_CHECK(sample_axis_code >= 0 && sample_axis_code < 3, "sample_axis_code must be in [0, 3)");
-  TORCH_CHECK(sample_indices.numel() == adj_field_patch.size(sample_axis_code), "sample_indices length must match the selected patch axis");
-  const c10::cuda::CUDAGuard device_guard(adj_aux_field.device());
+  STD_TORCH_CHECK(sample_axis_code >= 0 && sample_axis_code < 3, "sample_axis_code must be in [0, 3)");
+  STD_TORCH_CHECK(sample_indices.numel() == adj_field_patch.size(sample_axis_code), "sample_indices length must match the selected patch axis");
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_aux_field.get_device_index());
   if (sample_axis_code == 0) {
     launch_tfsf_line_sample_adjoint<0>(
         static_cast<int>(adj_field_patch.size(0)),
         static_cast<int>(adj_field_patch.size(1)),
         static_cast<int>(adj_field_patch.size(2)),
         static_cast<float>(component_scale),
-        adj_aux_field.data_ptr<float>(),
-        adj_field_patch.data_ptr<float>(),
-        coeff_patch.data_ptr<float>(),
-        sample_indices.data_ptr<int>());
+        adj_aux_field.mutable_data_ptr<float>(),
+        adj_field_patch.mutable_data_ptr<float>(),
+        coeff_patch.mutable_data_ptr<float>(),
+        sample_indices.mutable_data_ptr<int>());
   } else if (sample_axis_code == 1) {
     launch_tfsf_line_sample_adjoint<1>(
         static_cast<int>(adj_field_patch.size(0)),
         static_cast<int>(adj_field_patch.size(1)),
         static_cast<int>(adj_field_patch.size(2)),
         static_cast<float>(component_scale),
-        adj_aux_field.data_ptr<float>(),
-        adj_field_patch.data_ptr<float>(),
-        coeff_patch.data_ptr<float>(),
-        sample_indices.data_ptr<int>());
+        adj_aux_field.mutable_data_ptr<float>(),
+        adj_field_patch.mutable_data_ptr<float>(),
+        coeff_patch.mutable_data_ptr<float>(),
+        sample_indices.mutable_data_ptr<int>());
   } else {
     launch_tfsf_line_sample_adjoint<2>(
         static_cast<int>(adj_field_patch.size(0)),
         static_cast<int>(adj_field_patch.size(1)),
         static_cast<int>(adj_field_patch.size(2)),
         static_cast<float>(component_scale),
-        adj_aux_field.data_ptr<float>(),
-        adj_field_patch.data_ptr<float>(),
-        coeff_patch.data_ptr<float>(),
-        sample_indices.data_ptr<int>());
+        adj_aux_field.mutable_data_ptr<float>(),
+        adj_field_patch.mutable_data_ptr<float>(),
+        coeff_patch.mutable_data_ptr<float>(),
+        sample_indices.mutable_data_ptr<int>());
   }
   WITWIN_CUDA_CHECK();
 }
 
 void accumulate_tfsf_interpolated_sample_adjoint_cuda(
-    at::Tensor adj_aux_field,
-    const at::Tensor& adj_field_patch,
-    const at::Tensor& coeff_patch,
-    const at::Tensor& sample_positions,
+    torch::stable::Tensor adj_aux_field,
+    const torch::stable::Tensor& adj_field_patch,
+    const torch::stable::Tensor& coeff_patch,
+    const torch::stable::Tensor& sample_positions,
     double origin,
     double ds,
     double component_scale) {
@@ -3158,7 +3155,7 @@ void accumulate_tfsf_interpolated_sample_adjoint_cuda(
   check_same_cuda_device(adj_aux_field, adj_field_patch, "adj_field_patch");
   check_matching_field(adj_field_patch, coeff_patch, "coeff_patch");
   check_matching_field(adj_field_patch, sample_positions, "sample_positions");
-  const c10::cuda::CUDAGuard device_guard(adj_aux_field.device());
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_aux_field.get_device_index());
   const int64_t total = adj_field_patch.numel();
   const int64_t adj_aux_count = adj_aux_field.numel();
   const float inv_ds = ds > 0.0 ? static_cast<float>(1.0 / ds) : 0.0f;
@@ -3169,10 +3166,10 @@ void accumulate_tfsf_interpolated_sample_adjoint_cuda(
         static_cast<float>(origin),
         inv_ds,
         static_cast<float>(component_scale),
-        adj_aux_field.data_ptr<float>(),
-        adj_field_patch.data_ptr<float>(),
-        coeff_patch.data_ptr<float>(),
-        sample_positions.data_ptr<float>());
+        adj_aux_field.mutable_data_ptr<float>(),
+        adj_field_patch.mutable_data_ptr<float>(),
+        coeff_patch.mutable_data_ptr<float>(),
+        sample_positions.mutable_data_ptr<float>());
     WITWIN_CUDA_CHECK();
     return;
   }
@@ -3182,19 +3179,19 @@ void accumulate_tfsf_interpolated_sample_adjoint_cuda(
       static_cast<float>(origin),
       inv_ds,
       static_cast<float>(component_scale),
-      adj_aux_field.data_ptr<float>(),
-      adj_field_patch.data_ptr<float>(),
-      coeff_patch.data_ptr<float>(),
-      sample_positions.data_ptr<float>());
+      adj_aux_field.mutable_data_ptr<float>(),
+      adj_field_patch.mutable_data_ptr<float>(),
+      coeff_patch.mutable_data_ptr<float>(),
+      sample_positions.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_tfsf_auxiliary_electric_cuda(
-    at::Tensor adj_electric_prev,
-    at::Tensor adj_magnetic_after,
-    const at::Tensor& adj_electric_post,
-    const at::Tensor& electric_decay,
-    const at::Tensor& electric_curl,
+    torch::stable::Tensor adj_electric_prev,
+    torch::stable::Tensor adj_magnetic_after,
+    const torch::stable::Tensor& adj_electric_post,
+    const torch::stable::Tensor& electric_decay,
+    const torch::stable::Tensor& electric_curl,
     int64_t source_index) {
   check_vector(adj_electric_prev, "adj_electric_prev");
   check_matching_vector(adj_electric_prev, adj_electric_post, "adj_electric_post");
@@ -3202,43 +3199,43 @@ void reverse_tfsf_auxiliary_electric_cuda(
   check_matching_vector(adj_electric_prev, electric_curl, "electric_curl");
   check_vector(adj_magnetic_after, "adj_magnetic_after");
   check_same_cuda_device(adj_electric_prev, adj_magnetic_after, "adj_magnetic_after");
-  TORCH_CHECK(adj_magnetic_after.numel() + 1 == adj_electric_prev.numel(), "adj_magnetic_after length must be electric length - 1");
-  const c10::cuda::CUDAGuard device_guard(adj_electric_prev.device());
+  STD_TORCH_CHECK(adj_magnetic_after.numel() + 1 == adj_electric_prev.numel(), "adj_magnetic_after length must be electric length - 1");
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_electric_prev.get_device_index());
   const int64_t total = adj_electric_prev.numel();
   reverse_tfsf_auxiliary_electric_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
       total,
       adj_magnetic_after.numel(),
       source_index,
-      adj_electric_prev.data_ptr<float>(),
-      adj_magnetic_after.data_ptr<float>(),
-      adj_electric_post.data_ptr<float>(),
-      electric_decay.data_ptr<float>(),
-      electric_curl.data_ptr<float>());
+      adj_electric_prev.mutable_data_ptr<float>(),
+      adj_magnetic_after.mutable_data_ptr<float>(),
+      adj_electric_post.mutable_data_ptr<float>(),
+      electric_decay.mutable_data_ptr<float>(),
+      electric_curl.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
 void reverse_tfsf_auxiliary_magnetic_cuda(
-    at::Tensor adj_electric_prev,
-    at::Tensor adj_magnetic_prev,
-    const at::Tensor& adj_magnetic_after,
-    const at::Tensor& magnetic_decay,
-    const at::Tensor& magnetic_curl) {
+    torch::stable::Tensor adj_electric_prev,
+    torch::stable::Tensor adj_magnetic_prev,
+    const torch::stable::Tensor& adj_magnetic_after,
+    const torch::stable::Tensor& magnetic_decay,
+    const torch::stable::Tensor& magnetic_curl) {
   check_vector(adj_electric_prev, "adj_electric_prev");
   check_vector(adj_magnetic_prev, "adj_magnetic_prev");
   check_same_cuda_device(adj_electric_prev, adj_magnetic_prev, "adj_magnetic_prev");
   check_matching_vector(adj_magnetic_prev, adj_magnetic_after, "adj_magnetic_after");
   check_matching_vector(adj_magnetic_prev, magnetic_decay, "magnetic_decay");
   check_matching_vector(adj_magnetic_prev, magnetic_curl, "magnetic_curl");
-  TORCH_CHECK(adj_magnetic_prev.numel() + 1 == adj_electric_prev.numel(), "adj_electric_prev length must be magnetic length + 1");
-  const c10::cuda::CUDAGuard device_guard(adj_electric_prev.device());
+  STD_TORCH_CHECK(adj_magnetic_prev.numel() + 1 == adj_electric_prev.numel(), "adj_electric_prev length must be magnetic length + 1");
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_electric_prev.get_device_index());
   const int64_t total = adj_electric_prev.numel();
   reverse_tfsf_auxiliary_magnetic_kernel<<<linear_grid(total, 512), 512, 0, current_cuda_stream()>>>(
       total,
       adj_magnetic_prev.numel(),
-      adj_electric_prev.data_ptr<float>(),
-      adj_magnetic_prev.data_ptr<float>(),
-      adj_magnetic_after.data_ptr<float>(),
-      magnetic_decay.data_ptr<float>(),
-      magnetic_curl.data_ptr<float>());
+      adj_electric_prev.mutable_data_ptr<float>(),
+      adj_magnetic_prev.mutable_data_ptr<float>(),
+      adj_magnetic_after.mutable_data_ptr<float>(),
+      magnetic_decay.mutable_data_ptr<float>(),
+      magnetic_curl.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }

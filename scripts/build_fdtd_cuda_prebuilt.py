@@ -39,17 +39,17 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
+    cuda_build = _load_cuda_build_module()
     build_dir = Path(
         os.environ.get(
             "WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR",
-            Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda_wheel",
+            Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda_wheel" / "stable_abi_v1",
         )
     )
     os.environ["WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR"] = str(build_dir)
     os.environ["WITWIN_MAXWELL_FDTD_CUDA_SKIP_PREBUILT"] = "1"
     _ensure_current_device_arch()
 
-    cuda_build = _load_cuda_build_module()
     module = cuda_build.build_extension(verbose=args.verbose)
     module_file = Path(module.__file__).resolve()
 

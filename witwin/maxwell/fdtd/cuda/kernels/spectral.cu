@@ -1,6 +1,3 @@
-#include <ATen/ATen.h>
-#include <c10/cuda/CUDAGuard.h>
-
 #include <algorithm>
 
 #include "../launch.h"
@@ -149,9 +146,9 @@ __global__ void accumulate_dft_component_kernel(
 }
 
 void check_dft_component(
-    const at::Tensor& field,
-    const at::Tensor& real_accum,
-    const at::Tensor& imag_accum,
+    const torch::stable::Tensor& field,
+    const torch::stable::Tensor& real_accum,
+    const torch::stable::Tensor& imag_accum,
     int64_t frequency_count,
     const char* name) {
   check_float32_tensor(field, name);
@@ -162,34 +159,34 @@ void check_dft_component(
   check_contiguous_tensor(imag_accum, "imag_accum");
   check_same_cuda_device(field, real_accum, "real_accum");
   check_same_cuda_device(field, imag_accum, "imag_accum");
-  TORCH_CHECK(real_accum.dim() == field.dim() + 1, "real_accum rank must be field rank + 1");
-  TORCH_CHECK(imag_accum.sizes() == real_accum.sizes(), "imag_accum must match real_accum shape");
-  TORCH_CHECK(real_accum.size(0) == frequency_count, "accum frequency dimension mismatch");
+  STD_TORCH_CHECK(real_accum.dim() == field.dim() + 1, "real_accum rank must be field rank + 1");
+  STD_TORCH_CHECK(imag_accum.sizes().equals(real_accum.sizes()), "imag_accum must match real_accum shape");
+  STD_TORCH_CHECK(real_accum.size(0) == frequency_count, "accum frequency dimension mismatch");
   for (int64_t dim = 0; dim < field.dim(); ++dim) {
-    TORCH_CHECK(real_accum.size(dim + 1) == field.size(dim), "accum spatial shape must match field");
+    STD_TORCH_CHECK(real_accum.size(dim + 1) == field.size(dim), "accum spatial shape must match field");
   }
 }
 
 }  // namespace
 
 void accumulate_dft_batched_cuda(
-    const at::Tensor& ex,
-    const at::Tensor& ey,
-    const at::Tensor& ez,
-    at::Tensor ex_real,
-    at::Tensor ex_imag,
-    at::Tensor ey_real,
-    at::Tensor ey_imag,
-    at::Tensor ez_real,
-    at::Tensor ez_imag,
-    const at::Tensor& weighted_cos,
-    const at::Tensor& weighted_sin) {
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    torch::stable::Tensor ex_real,
+    torch::stable::Tensor ex_imag,
+    torch::stable::Tensor ey_real,
+    torch::stable::Tensor ey_imag,
+    torch::stable::Tensor ez_real,
+    torch::stable::Tensor ez_imag,
+    const torch::stable::Tensor& weighted_cos,
+    const torch::stable::Tensor& weighted_sin) {
   check_float32_tensor(weighted_cos, "weighted_cos");
   check_float32_tensor(weighted_sin, "weighted_sin");
   check_contiguous_tensor(weighted_cos, "weighted_cos");
   check_contiguous_tensor(weighted_sin, "weighted_sin");
-  TORCH_CHECK(weighted_cos.dim() == 1, "weighted_cos must be rank 1");
-  TORCH_CHECK(weighted_sin.sizes() == weighted_cos.sizes(), "weighted_sin must match weighted_cos");
+  STD_TORCH_CHECK(weighted_cos.dim() == 1, "weighted_cos must be rank 1");
+  STD_TORCH_CHECK(weighted_sin.sizes().equals(weighted_cos.sizes()), "weighted_sin must match weighted_cos");
   const int64_t frequency_count = weighted_cos.size(0);
   check_dft_component(ex, ex_real, ex_imag, frequency_count, "ex");
   check_dft_component(ey, ey_real, ey_imag, frequency_count, "ey");
@@ -202,7 +199,7 @@ void accumulate_dft_batched_cuda(
   check_same_cuda_device(ex, ey_imag, "ey_imag");
   check_same_cuda_device(ex, ez_real, "ez_real");
   check_same_cuda_device(ex, ez_imag, "ez_imag");
-  c10::cuda::CUDAGuard guard(ex.device());
+  torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
   const int64_t max_field_numel = std::max(ex.numel(), std::max(ey.numel(), ez.numel()));
   constexpr int block_size = 256;
   if (frequency_count == 1) {
@@ -210,17 +207,17 @@ void accumulate_dft_batched_cuda(
         ex.numel(),
         ey.numel(),
         ez.numel(),
-        ex.data_ptr<float>(),
-        ey.data_ptr<float>(),
-        ez.data_ptr<float>(),
-        weighted_cos.data_ptr<float>(),
-        weighted_sin.data_ptr<float>(),
-        ex_real.data_ptr<float>(),
-        ex_imag.data_ptr<float>(),
-        ey_real.data_ptr<float>(),
-        ey_imag.data_ptr<float>(),
-        ez_real.data_ptr<float>(),
-        ez_imag.data_ptr<float>());
+        ex.mutable_data_ptr<float>(),
+        ey.mutable_data_ptr<float>(),
+        ez.mutable_data_ptr<float>(),
+        weighted_cos.mutable_data_ptr<float>(),
+        weighted_sin.mutable_data_ptr<float>(),
+        ex_real.mutable_data_ptr<float>(),
+        ex_imag.mutable_data_ptr<float>(),
+        ey_real.mutable_data_ptr<float>(),
+        ey_imag.mutable_data_ptr<float>(),
+        ez_real.mutable_data_ptr<float>(),
+        ez_imag.mutable_data_ptr<float>());
   } else if (
       (frequency_count == 4 && max_field_numel < 1000000) ||
       (frequency_count == 3 && max_field_numel >= 400000 && max_field_numel < 1000000)) {
@@ -230,17 +227,17 @@ void accumulate_dft_batched_cuda(
         ex.numel(),
         ey.numel(),
         ez.numel(),
-        ex.data_ptr<float>(),
-        ey.data_ptr<float>(),
-        ez.data_ptr<float>(),
-        weighted_cos.data_ptr<float>(),
-        weighted_sin.data_ptr<float>(),
-        ex_real.data_ptr<float>(),
-        ex_imag.data_ptr<float>(),
-        ey_real.data_ptr<float>(),
-        ey_imag.data_ptr<float>(),
-        ez_real.data_ptr<float>(),
-        ez_imag.data_ptr<float>());
+        ex.mutable_data_ptr<float>(),
+        ey.mutable_data_ptr<float>(),
+        ez.mutable_data_ptr<float>(),
+        weighted_cos.mutable_data_ptr<float>(),
+        weighted_sin.mutable_data_ptr<float>(),
+        ex_real.mutable_data_ptr<float>(),
+        ex_imag.mutable_data_ptr<float>(),
+        ey_real.mutable_data_ptr<float>(),
+        ey_imag.mutable_data_ptr<float>(),
+        ez_real.mutable_data_ptr<float>(),
+        ez_imag.mutable_data_ptr<float>());
   } else if (frequency_count >= 4 && max_field_numel >= 1000000) {
     const dim3 ex_grid(
         static_cast<unsigned int>((ex.numel() + block_size - 1) / block_size),
@@ -256,25 +253,25 @@ void accumulate_dft_batched_cuda(
         1);
     accumulate_dft_component_kernel<<<ex_grid, block_size, 0, current_cuda_stream()>>>(
         ex.numel(),
-        ex.data_ptr<float>(),
-        weighted_cos.data_ptr<float>(),
-        weighted_sin.data_ptr<float>(),
-        ex_real.data_ptr<float>(),
-        ex_imag.data_ptr<float>());
+        ex.mutable_data_ptr<float>(),
+        weighted_cos.mutable_data_ptr<float>(),
+        weighted_sin.mutable_data_ptr<float>(),
+        ex_real.mutable_data_ptr<float>(),
+        ex_imag.mutable_data_ptr<float>());
     accumulate_dft_component_kernel<<<ey_grid, block_size, 0, current_cuda_stream()>>>(
         ey.numel(),
-        ey.data_ptr<float>(),
-        weighted_cos.data_ptr<float>(),
-        weighted_sin.data_ptr<float>(),
-        ey_real.data_ptr<float>(),
-        ey_imag.data_ptr<float>());
+        ey.mutable_data_ptr<float>(),
+        weighted_cos.mutable_data_ptr<float>(),
+        weighted_sin.mutable_data_ptr<float>(),
+        ey_real.mutable_data_ptr<float>(),
+        ey_imag.mutable_data_ptr<float>());
     accumulate_dft_component_kernel<<<ez_grid, block_size, 0, current_cuda_stream()>>>(
         ez.numel(),
-        ez.data_ptr<float>(),
-        weighted_cos.data_ptr<float>(),
-        weighted_sin.data_ptr<float>(),
-        ez_real.data_ptr<float>(),
-        ez_imag.data_ptr<float>());
+        ez.mutable_data_ptr<float>(),
+        weighted_cos.mutable_data_ptr<float>(),
+        weighted_sin.mutable_data_ptr<float>(),
+        ez_real.mutable_data_ptr<float>(),
+        ez_imag.mutable_data_ptr<float>());
   } else {
     const dim3 grid(
         static_cast<unsigned int>((max_field_numel + block_size - 1) / block_size),
@@ -284,17 +281,17 @@ void accumulate_dft_batched_cuda(
         ex.numel(),
         ey.numel(),
         ez.numel(),
-        ex.data_ptr<float>(),
-        ey.data_ptr<float>(),
-        ez.data_ptr<float>(),
-        weighted_cos.data_ptr<float>(),
-        weighted_sin.data_ptr<float>(),
-        ex_real.data_ptr<float>(),
-        ex_imag.data_ptr<float>(),
-        ey_real.data_ptr<float>(),
-        ey_imag.data_ptr<float>(),
-        ez_real.data_ptr<float>(),
-        ez_imag.data_ptr<float>());
+        ex.mutable_data_ptr<float>(),
+        ey.mutable_data_ptr<float>(),
+        ez.mutable_data_ptr<float>(),
+        weighted_cos.mutable_data_ptr<float>(),
+        weighted_sin.mutable_data_ptr<float>(),
+        ex_real.mutable_data_ptr<float>(),
+        ex_imag.mutable_data_ptr<float>(),
+        ey_real.mutable_data_ptr<float>(),
+        ey_imag.mutable_data_ptr<float>(),
+        ez_real.mutable_data_ptr<float>(),
+        ez_imag.mutable_data_ptr<float>());
   }
   WITWIN_CUDA_CHECK();
 }

@@ -83,14 +83,13 @@ jobs:
           PY
 
   build_cuda_wheels:
-    name: Build CUDA wheel / ${{ matrix.os }} / py${{ matrix.python_version }}
+    name: Build stable CUDA wheel / ${{ matrix.os }}
     needs: validate_release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, windows-2022]
-        python_version: ["3.10", "3.11", "3.12"]
 
     steps:
       - name: Check out repository
@@ -99,7 +98,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python_version }}
+          python-version: "3.10"
 
       - name: Free disk space (Linux)
         if: runner.os == 'Linux'
@@ -113,11 +112,11 @@ jobs:
           echo "Disk after cleanup:"; df -h /
 
       - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.29
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
-          cuda: "12.5.0"
+          cuda: "12.8.1"
           method: local
-          log-file-suffix: "${{ runner.os }}-py${{ matrix.python_version }}"
+          log-file-suffix: "${{ runner.os }}-stable-abi"
 
       - name: Set up MSVC
         if: runner.os == 'Windows'
@@ -149,16 +148,27 @@ jobs:
       - name: Install CUDA extension build dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel ninja numpy
-          python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+          python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
           python -m pip install build
 
-      - name: Build packaged FDTD CUDA extension
+      - name: Build packaged stable FDTD CUDA extension
+        shell: bash
         env:
           MAX_JOBS: "2"
-          TORCH_CUDA_ARCH_LIST: "7.0;8.0;8.6;8.9;9.0+PTX"
-          WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR: ${{ runner.temp }}/witwin_maxwell_fdtd_cuda
+          WITWIN_CUDA_GENCODE_ARCHES: "7.0;7.5;8.0;8.6;8.9;9.0;10.0;10.1;12.0+PTX"
+          PACKAGE_DIR: ${{ needs.validate_release.outputs.package_dir }}
+          WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR: ${{ runner.temp }}/witwin_maxwell_fdtd_cuda/stable_abi_v1
         run: |
-          python scripts/build_fdtd_cuda_prebuilt.py --verbose
+          python "$PACKAGE_DIR"/scripts/build_fdtd_cuda_prebuilt.py --verbose
+
+      - name: Verify compiled CUDA architectures
+        shell: bash
+        env:
+          PACKAGE_DIR: ${{ needs.validate_release.outputs.package_dir }}
+        run: |
+          python "$PACKAGE_DIR"/scripts/verify_cuda_binary_arches.py \
+            --stem witwin_maxwell_fdtd_cuda \
+            "$PACKAGE_DIR"/witwin/maxwell/fdtd/cuda/prebuilt
 
       - name: Build platform wheel
         shell: bash
@@ -167,21 +177,25 @@ jobs:
         run: |
           python -m build --wheel "$PACKAGE_DIR"
 
-      - name: Normalize Linux wheel platform tag
+      - name: Repair Linux wheel platform tag
         if: runner.os == 'Linux'
         shell: bash
         env:
           PACKAGE_DIR: ${{ needs.validate_release.outputs.package_dir }}
         run: |
-          # PyPI rejects the raw linux_x86_64 tag; the extension is built on the
-          # ubuntu-22.04 runner (glibc 2.35), so retag to the matching manylinux
-          # tag. torch/CUDA runtime libraries are runtime dependencies and stay
-          # unbundled, so no auditwheel repair is required.
-          shopt -s nullglob
+          python -m pip install auditwheel patchelf
+          mkdir -p "$PACKAGE_DIR"/wheelhouse
           for whl in "$PACKAGE_DIR"/dist/*-linux_x86_64.whl; do
-            echo "Retagging $whl"
-            python -m wheel tags --platform-tag manylinux_2_35_x86_64 --remove "$whl"
+            python -m auditwheel repair "$whl" \
+              --plat manylinux_2_35_x86_64 \
+              --wheel-dir "$PACKAGE_DIR"/wheelhouse \
+              --exclude libc10.so --exclude libc10_cuda.so \
+              --exclude libtorch.so --exclude libtorch_cpu.so \
+              --exclude libtorch_cuda.so --exclude libtorch_python.so \
+              --exclude libcudart.so.12 --exclude libcuda.so.1
           done
+          rm -f "$PACKAGE_DIR"/dist/*-linux_x86_64.whl
+          mv "$PACKAGE_DIR"/wheelhouse/*.whl "$PACKAGE_DIR"/dist/
           ls -l "$PACKAGE_DIR"/dist
 
       - name: Smoke install prebuilt wheel
@@ -195,8 +209,17 @@ jobs:
           python -m pip install --no-deps "$PACKAGE_DIR"/dist/*.whl
           python - <<'PY'
           import importlib.util
+          import os
           import site
+          import zipfile
           from pathlib import Path
+
+          wheel = next((Path(os.environ["PACKAGE_DIR"]) / "dist").glob("*.whl"))
+          names = zipfile.ZipFile(wheel).namelist()
+          native = [name for name in names if "witwin_maxwell_fdtd_cuda" in name and name.endswith((".so", ".pyd"))]
+          assert len(native) == 1, native
+          assert "/prebuilt/" in f"/{native[0]}"
+          assert "torch_" not in native[0]
 
           candidates = []
           for root in site.getsitepackages() + [site.getusersitepackages()]:
@@ -210,6 +233,7 @@ jobs:
 
           path = module.prebuilt_extension_path()
           assert path.exists(), f"missing packaged prebuilt extension: {path}"
+          assert path.parent.name == "prebuilt"
           extension = module.build_extension()
           print(f"Loaded packaged FDTD CUDA extension from {extension.__file__}")
           PY
@@ -217,9 +241,82 @@ jobs:
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.os }}-py${{ matrix.python_version }}
+          name: wheel-${{ matrix.os }}
           path: ${{ needs.validate_release.outputs.package_dir }}/dist/*.whl
           if-no-files-found: error
+
+  test_torch_compatibility:
+    name: Stable ABI / ${{ matrix.os }} / py${{ matrix.compatibility.python_version }} / torch${{ matrix.compatibility.torch_version }}
+    needs:
+      - validate_release
+      - build_cuda_wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+        compatibility:
+          - {python_version: "3.10", torch_version: "2.10.0", cuda_index: "cu128"}
+          - {python_version: "3.11", torch_version: "2.10.0", cuda_index: "cu128"}
+          - {python_version: "3.12", torch_version: "2.10.0", cuda_index: "cu128"}
+          - {python_version: "3.13", torch_version: "2.10.0", cuda_index: "cu128"}
+          - {python_version: "3.14", torch_version: "2.10.0", cuda_index: "cu128"}
+          - {python_version: "3.14", torch_version: "2.11.0", cuda_index: "cu128"}
+          - {python_version: "3.14", torch_version: "2.12.0", cuda_index: "cu126"}
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.compatibility.python_version }}
+
+      - name: Download stable wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}
+          path: dist
+
+      - name: Install compatibility environment
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir "torch==${{ matrix.compatibility.torch_version }}" \
+            --index-url "https://download.pytorch.org/whl/${{ matrix.compatibility.cuda_index }}"
+          python -m pip install --no-deps dist/*.whl
+
+      - name: Load the same stable binary
+        shell: bash
+        env:
+          EXPECTED_TORCH: ${{ matrix.compatibility.torch_version }}
+          WITWIN_MAXWELL_FDTD_CUDA_PREBUILT: "1"
+          WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR: ${{ runner.temp }}/must-not-jit-build
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import os
+          import site
+          from pathlib import Path
+
+          import torch
+
+          assert torch.__version__.split("+", 1)[0] == os.environ["EXPECTED_TORCH"]
+          candidates = [
+              Path(root) / "witwin" / "maxwell" / "fdtd" / "cuda" / "build.py"
+              for root in site.getsitepackages() + [site.getusersitepackages()]
+          ]
+          build_path = next((path for path in candidates if path.exists()), None)
+          assert build_path is not None, candidates
+          spec = importlib.util.spec_from_file_location("witwin_maxwell_fdtd_cuda_build", build_path)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+
+          native_path = module.prebuilt_extension_path()
+          assert native_path.exists(), native_path
+          extension = module.build_extension()
+          assert Path(extension.__file__).resolve() == native_path.resolve()
+          assert extension.update_magnetic_hx_standard is not None
+          print(f"Loaded {native_path.name} with torch {torch.__version__} on Python {os.sys.version.split()[0]}")
+          PY
 
   build_sdist:
     name: Build source distribution
@@ -255,6 +352,7 @@ jobs:
     if: github.event_name == 'release'
     needs:
       - build_cuda_wheels
+      - test_torch_compatibility
       - build_sdist
     runs-on: ubuntu-latest
     permissions:
