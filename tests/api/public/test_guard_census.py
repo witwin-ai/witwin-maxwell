@@ -17,7 +17,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 
 # Lowered by each P5 phase in the commit that removes guards. Never raised
 # without a corresponding update to docs/dev/fdtd_gap_05_guard_census.md.
-CAPABILITY_GUARD_BUDGET = 87
+CAPABILITY_GUARD_BUDGET = 85
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with the table in docs/dev/fdtd_gap_05_guard_census.md.

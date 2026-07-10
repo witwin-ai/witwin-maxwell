@@ -56,7 +56,7 @@ guards regardless of wording.
 | Milestone | Budget | Notes |
 |---|---|---|
 | P5.0 baseline (this commit) | 87 | measured |
-| after P5.1 (adjoint) | ≤ 76 | adjoint bridge+core guards 13 → ≤ 5, minus lifted media checks |
+| after P5.1 (adjoint) | **85 (measured)** | multi-source + `normalize_source` single-source raises deleted (bridge+core 13 → 11). Most P5.1 capability (σ_e, χ²/TPA, full-aniso ε, Bloch+dispersive, custom/uniform sources) was lifted by narrowing the message-branch conditions inside the single `_unsupported_adjoint_medium` raise and generalizing `_validate_supported_configuration`, so the AST raise-count dropped only 87 → 85 even though the differentiable forward surface grew substantially. The projected `≤ 76` assumed guard *deletion*; the realized route was branch-condition lifting. |
 | after P5.2 (combinations) | ≤ 62 | runtime/materials 10 → ≤ 3, media combination guards lifted |
 | after P5.3 (grid) | ≤ 58 | subpixel/autogrid coherence |
 | after P5.4 (Bloch broadband) | ≤ 50 | temporal/stepping/tfsf Bloch guards |
