@@ -226,6 +226,16 @@ def _scene_trainable_geometry_parameters(scene: Scene) -> tuple[torch.Tensor, ..
     return tuple(trainable)
 
 
+def _scene_trainable_material_parameters(scene: Scene) -> tuple[torch.Tensor, ...]:
+    trainable = []
+    for structure in scene.structures:
+        material = getattr(structure, "material", None)
+        perturbation = getattr(material, "perturbation", None)
+        if isinstance(perturbation, torch.Tensor) and perturbation.requires_grad:
+            trainable.append(perturbation)
+    return tuple(trainable)
+
+
 def _require_cuda_scene(scene: Scene, *, method: str) -> None:
     device = torch.device(scene.device)
     if device.type != "cuda":
@@ -258,6 +268,7 @@ class Simulation:
             any(parameter.requires_grad for parameter in (scene_module.parameters() if scene_module is not None else ()))
             or _scene_trainable_density_parameters(resolved_scene)
             or _scene_trainable_geometry_parameters(resolved_scene)
+            or _scene_trainable_material_parameters(resolved_scene)
         )
         self.method = SimulationMethod(method)
         self.frequencies = tuple(float(freq) for freq in frequencies)

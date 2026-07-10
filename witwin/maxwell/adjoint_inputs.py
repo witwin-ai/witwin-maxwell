@@ -34,6 +34,10 @@ def scene_trainable_material_tensors(scene) -> tuple[torch.Tensor, ...]:
             candidates.extend(
                 value for value in vars(geometry).values() if isinstance(value, torch.Tensor) and value.requires_grad
             )
+        material = getattr(structure, "material", None)
+        perturbation = getattr(material, "perturbation", None)
+        if isinstance(perturbation, torch.Tensor) and perturbation.requires_grad:
+            candidates.append(perturbation)
     for region in getattr(scene, "material_regions", ()):
         density = getattr(region, "density", None)
         if isinstance(density, torch.Tensor) and density.requires_grad:

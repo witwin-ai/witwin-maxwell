@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from witwin.core import Box
 from witwin.core.material import VACUUM_PERMITTIVITY
 
-from ..media import CustomPole, DiagonalTensor3, Tensor3x3
+from ..media import CustomPole, DiagonalTensor3, PerturbationMedium, Tensor3x3
 
 _AXES = ("x", "y", "z")
 
@@ -376,7 +376,7 @@ def _apply_structure_material(
     mu_background=1.0,
     averaging="arithmetic",
 ):
-    _, eps_components, mu_components, sigma_components, kerr_chi3 = _static_structure_material(structure)
+    material, eps_components, mu_components, sigma_components, kerr_chi3 = _static_structure_material(structure)
     occupancy = _geometry_occupancy(scene, structure.geometry, coords=coords)
     normals = _interface_normals(scene, structure.geometry, coords=coords) if averaging == "polarized" else None
 
@@ -403,6 +403,22 @@ def _apply_structure_material(
             value=sigma_components[axis],
         )
     model["kerr_chi3"] = _blend_material(model["kerr_chi3"], occupancy, value=kerr_chi3)
+    if isinstance(material, PerturbationMedium):
+        delta = _box_parameter_field(
+            scene,
+            structure.geometry,
+            material.perturbation,
+            name="PerturbationMedium.perturbation",
+        )
+        # eps(x) = eps_base + eps_sensitivity * perturbation(x), applied inside
+        # the structure occupancy so it blends and overlaps like the base eps
+        # itself. eps_background scales the delta exactly as it scales the
+        # base eps value in _blend_material above.
+        contribution = occupancy * (
+            (float(material.eps_sensitivity) * float(eps_background)) * delta
+        )
+        for axis in _AXES:
+            model["eps_components"][axis] = model["eps_components"][axis] + contribution
     _clear_dispersive_region(model, occupancy)
     _assign_structure_weights(model, structure_slots, occupancy)
     return _refresh_model_summary_aliases(model)

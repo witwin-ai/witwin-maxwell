@@ -1082,7 +1082,14 @@ class PreparedScene(Scene):
         self._permeability = None
 
     def _has_dynamic_materials(self) -> bool:
-        return bool(self.material_regions)
+        if self.material_regions:
+            return True
+        for structure in self.structures:
+            material = getattr(structure, "material", None)
+            perturbation = getattr(material, "perturbation", None)
+            if isinstance(perturbation, torch.Tensor) and perturbation.requires_grad:
+                return True
+        return False
 
     def _has_trainable_geometry(self) -> bool:
         for structure in self.structures:

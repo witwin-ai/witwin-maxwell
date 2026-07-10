@@ -671,3 +671,87 @@ class Material(CoreMaterial):
             name=name,
             lorentz_poles=tuple(poles),
         )
+
+
+class PerturbationMedium(Material):
+    """A base material whose permittivity is shifted by an external perturbation field.
+
+    ``eps(x) = eps_base + eps_sensitivity * perturbation(x)`` where
+    ``perturbation`` is a 3D torch tensor (for example a temperature or
+    carrier-density change from an external multiphysics solve). The
+    perturbation grid maps onto the ``Box`` extent of the structure the
+    material is attached to with the same lower-inclusive / upper-exclusive
+    node coverage and trilinear resampling as ``MaterialRegion.density``, is
+    composed multiplicatively with the structure's soft geometry occupancy,
+    and is applied at compile time before ADE templating, so dispersive base
+    materials see the shifted ``eps_inf``.
+
+    The map is PyTorch-native and differentiable: a ``perturbation`` tensor
+    with ``requires_grad=True`` is discovered as a trainable material input by
+    the gradient bridges, so simulation outputs can be differentiated with
+    respect to the perturbation field.
+    """
+
+    def __init__(
+        self,
+        base: Material,
+        *,
+        perturbation: torch.Tensor,
+        eps_sensitivity: float = 1.0,
+        name: str | None = None,
+    ):
+        if not isinstance(base, CoreMaterial):
+            raise TypeError("PerturbationMedium base must be a Material.")
+        if bool(getattr(base, "is_pec", False)):
+            raise ValueError("PerturbationMedium cannot wrap a PEC base material.")
+        if not torch.is_tensor(perturbation):
+            raise TypeError("PerturbationMedium perturbation must be a torch.Tensor.")
+        if perturbation.ndim != 3:
+            raise ValueError(
+                f"PerturbationMedium perturbation must be a 3D tensor, got ndim={perturbation.ndim}."
+            )
+        with torch.no_grad():
+            if not torch.isfinite(perturbation).all():
+                raise ValueError("PerturbationMedium perturbation must be finite everywhere.")
+        sensitivity = _coerce_real_scalar(eps_sensitivity, name="eps_sensitivity")
+
+        super().__init__(
+            eps_r=base.eps_r,
+            mu_r=base.mu_r,
+            sigma_e=base.sigma_e,
+            name=name if name is not None else base.name,
+            debye_poles=getattr(base, "debye_poles", ()),
+            drude_poles=getattr(base, "drude_poles", ()),
+            lorentz_poles=getattr(base, "lorentz_poles", ()),
+            mu_debye_poles=getattr(base, "mu_debye_poles", ()),
+            mu_drude_poles=getattr(base, "mu_drude_poles", ()),
+            mu_lorentz_poles=getattr(base, "mu_lorentz_poles", ()),
+            epsilon_tensor=getattr(base, "epsilon_tensor", None),
+            mu_tensor=getattr(base, "mu_tensor", None),
+            sigma_e_tensor=getattr(base, "sigma_e_tensor", None),
+            kerr_chi3=getattr(base, "kerr_chi3", None),
+        )
+        object.__setattr__(self, "perturbation", perturbation)
+        object.__setattr__(self, "eps_sensitivity", sensitivity)
+
+        base_eps = self.epsilon_tensor if self.epsilon_tensor is not None else self.eps_r
+        eps_floor = min(base_eps.as_tuple()) if isinstance(base_eps, DiagonalTensor3) else float(base_eps)
+        with torch.no_grad():
+            delta_floor = float((sensitivity * perturbation).min())
+        if eps_floor + delta_floor <= 0.0:
+            raise ValueError(
+                "PerturbationMedium would produce a non-positive permittivity: base eps "
+                f"{eps_floor} + minimum perturbation contribution {delta_floor} <= 0."
+            )
+
+    def evaluate_at_frequency(self, frequency: float) -> FrequencyMaterialSample:
+        raise NotImplementedError(
+            "PerturbationMedium frequency evaluation is spatially varying; evaluate the "
+            "compiled scene material model (Scene.compile_relative_materials) instead."
+        )
+
+    def relative_permittivity(self, frequency: float) -> complex:
+        raise NotImplementedError(
+            "relative_permittivity() is not defined for PerturbationMedium; evaluate the "
+            "compiled scene material model (Scene.compile_relative_materials) instead."
+        )
