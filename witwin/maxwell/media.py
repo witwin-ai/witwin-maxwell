@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -116,11 +117,30 @@ class LorentzPole:
     delta_eps: float
     resonance_frequency: float
     gamma: float
+    allow_gain: bool = False
 
     def __post_init__(self):
-        object.__setattr__(self, "delta_eps", _coerce_nonnegative(self.delta_eps, name="delta_eps"))
+        object.__setattr__(self, "allow_gain", bool(self.allow_gain))
+        # A negative oscillator strength (delta_eps < 0) inverts the resonance and
+        # models linear gain instead of absorption. This is only permitted behind an
+        # explicit opt-in so an accidental sign flip still fails validation loudly.
+        delta_eps = _coerce_real_scalar(self.delta_eps, name="delta_eps")
+        if delta_eps < 0.0 and not self.allow_gain:
+            raise ValueError(
+                "LorentzPole delta_eps < 0 encodes a linear-gain (negative oscillator "
+                "strength) resonance; pass allow_gain=True to opt in explicitly."
+            )
+        object.__setattr__(self, "delta_eps", delta_eps)
         object.__setattr__(self, "resonance_frequency", _coerce_frequency(self.resonance_frequency, name="resonance_frequency"))
         object.__setattr__(self, "gamma", _coerce_nonnegative(self.gamma, name="gamma"))
+        if delta_eps < 0.0:
+            warnings.warn(
+                "LorentzPole with negative delta_eps models linear gain; gain media can "
+                "violate the usual FDTD Courant/stability margins and may cause the "
+                "time-domain solution to diverge. Verify run stability and keep the "
+                "single-pass gain small.",
+                stacklevel=2,
+            )
 
     @property
     def resonance_angular_frequency(self) -> float:
@@ -399,6 +419,7 @@ class Material(CoreMaterial):
         mu_r: float = 1.0,
         sigma_e: float = 0.0,
         name: str | None = None,
+        allow_gain: bool = False,
     ) -> "Material":
         return cls(
             eps_r=eps_inf,
@@ -410,6 +431,7 @@ class Material(CoreMaterial):
                     delta_eps=delta_eps,
                     resonance_frequency=resonance_frequency,
                     gamma=gamma,
+                    allow_gain=allow_gain,
                 ),
             ),
         )
