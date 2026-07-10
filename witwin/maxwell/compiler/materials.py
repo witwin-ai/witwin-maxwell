@@ -360,12 +360,26 @@ def _assign_structure_weights(model, structure_slots, region):
             entry["weight"] = entry["weight"] + contribution
 
 
+def _offset_is_zero(offset) -> bool:
+    """Whether a per-axis sub-sample offset displaces the node grid at all.
+
+    A uniform axis passes a Python-float offset; the shared ``(0, 0, 0)`` sample
+    (the node itself, e.g. an odd sub-sample count's centre) is then the exact
+    fast path. Per-node tensor offsets never take the fast path -- adding an
+    all-zero tensor is still numerically exact, so correctness is unaffected.
+    """
+    return not torch.is_tensor(offset) and offset == 0.0
+
+
 def _coordinate_grids(scene, sample_offset):
-    if sample_offset == (0.0, 0.0, 0.0):
+    offset_x, offset_y, offset_z = sample_offset
+    if _offset_is_zero(offset_x) and _offset_is_zero(offset_y) and _offset_is_zero(offset_z):
         return scene.X, scene.Y, scene.Z
-    x = scene.x + float(sample_offset[0])
-    y = scene.y + float(sample_offset[1])
-    z = scene.z + float(sample_offset[2])
+    # Each axis offset is either a scalar (uniform axis) or a 1D per-node field
+    # (nonuniform axis); both broadcast against the 1D node coordinate.
+    x = scene.x + offset_x
+    y = scene.y + offset_y
+    z = scene.z + offset_z
     return torch.meshgrid(x, y, z, indexing="ij")
 
 
@@ -595,15 +609,44 @@ def _compile_material_sample(
     return model
 
 
-def _sample_offsets(scene, subpixel_samples):
-    def axis_offsets(step, count):
-        if count == 1:
-            return [0.0]
-        return [((index + 0.5) / count - 0.5) * step for index in range(count)]
+def _axis_averaging_width(scene, axis):
+    """Per-node subpixel averaging-window width along ``axis``.
 
-    x_offsets = axis_offsets(scene.dx, int(subpixel_samples[0]))
-    y_offsets = axis_offsets(scene.dy, int(subpixel_samples[1]))
-    z_offsets = axis_offsets(scene.dz, int(subpixel_samples[2]))
+    On a grid with a defined scalar spacing (``GridSpec.uniform`` or explicit
+    per-axis steps) the window is that constant spacing, returned as a Python
+    float so the sub-sample offsets stay bit-identical to the scalar-spacing
+    path. On a nonuniform grid (``GridSpec.custom`` or a resolved
+    ``GridSpec.auto``) the window is the per-node Yee dual-cell width
+    ``d{axis}_dual64`` -- the extent each node's material sample represents,
+    ``0.5*(primal_left + primal_right)`` on interior nodes -- returned as a 1D
+    float32 tensor so the offsets scale with the local cell size. It reduces to
+    the constant spacing on a uniformly spaced custom axis.
+    """
+    grid = scene.grid
+    if not (grid.is_custom or grid.is_auto):
+        return float(getattr(grid, f"d{axis}"))
+    dual = getattr(scene, f"d{axis}_dual64")
+    return torch.as_tensor(dual, device=scene.device, dtype=torch.float32)
+
+
+def _axis_sample_offsets(scene, axis, count):
+    """Mean-zero sub-sample displacements of the node sample point along ``axis``.
+
+    Returns ``count`` offsets spanning the node's averaging window. On a uniform
+    axis each offset is a Python float ``((i+0.5)/count - 0.5) * spacing``; on a
+    nonuniform axis each is a 1D per-node tensor scaling that same fraction by
+    the local dual-cell width. ``count == 1`` samples the node itself.
+    """
+    if count == 1:
+        return [0.0]
+    width = _axis_averaging_width(scene, axis)
+    return [((index + 0.5) / count - 0.5) * width for index in range(count)]
+
+
+def _sample_offsets(scene, subpixel_samples):
+    x_offsets = _axis_sample_offsets(scene, "x", int(subpixel_samples[0]))
+    y_offsets = _axis_sample_offsets(scene, "y", int(subpixel_samples[1]))
+    z_offsets = _axis_sample_offsets(scene, "z", int(subpixel_samples[2]))
     return list(product(x_offsets, y_offsets, z_offsets))
 
 
