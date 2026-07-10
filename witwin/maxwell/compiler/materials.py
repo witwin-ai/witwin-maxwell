@@ -12,6 +12,7 @@ from witwin.core.material import VACUUM_PERMITTIVITY
 from ..media import CustomPole, DiagonalTensor3, PerturbationMedium, Tensor3x3
 
 _AXES = ("x", "y", "z")
+_OFFDIAG_AXES = ("xy", "xz", "yz")
 
 
 def _scalar_tensor(value, *, device, dtype=torch.float32):
@@ -111,11 +112,25 @@ def _component_values_from_sample(value, *, name: str):
     return {axis: scalar for axis in _AXES}
 
 
+def _eps_values_from_sample(value):
+    """Split a static permittivity sample into diagonal and off-diagonal parts.
+
+    Full ``Tensor3x3`` permittivity is validated symmetric positive-definite at
+    ``Material`` construction, so only the upper triangle is stored here.
+    """
+    if isinstance(value, Tensor3x3):
+        rows = value.rows
+        diagonal = {"x": float(rows[0][0]), "y": float(rows[1][1]), "z": float(rows[2][2])}
+        offdiag = {"xy": float(rows[0][1]), "xz": float(rows[0][2]), "yz": float(rows[1][2])}
+        return diagonal, offdiag
+    return _component_values_from_sample(value, name="eps_r"), {pair: 0.0 for pair in _OFFDIAG_AXES}
+
+
 def _static_structure_material(structure):
     material = structure.material
     sample = material.evaluate_static()
     try:
-        eps_components = _component_values_from_sample(sample.eps_r, name="eps_r")
+        eps_components, eps_offdiag = _eps_values_from_sample(sample.eps_r)
         mu_components = _component_values_from_sample(sample.mu_r, name="mu_r")
         sigma_components = _component_values_from_sample(getattr(sample, "sigma_e", 0.0), name="sigma_e")
     except (TypeError, ValueError) as exc:
@@ -125,6 +140,7 @@ def _static_structure_material(structure):
     return (
         material,
         eps_components,
+        eps_offdiag,
         mu_components,
         sigma_components,
         float(getattr(material, "kerr_chi3", 0.0) or 0.0),
@@ -136,6 +152,10 @@ def _new_material_model(scene, layout, *, eps_fill, mu_fill):
     device = scene.device
     model = {
         "eps_components": _new_component_field(shape, fill_value=eps_fill, device=device),
+        "eps_offdiag_components": {
+            pair: torch.zeros(shape, device=device, dtype=torch.float32)
+            for pair in _OFFDIAG_AXES
+        },
         "mu_components": _new_component_field(shape, fill_value=mu_fill, device=device),
         "sigma_e_components": _new_component_field(shape, fill_value=0.0, device=device),
         "kerr_chi3": torch.zeros(shape, device=device, dtype=torch.float32),
@@ -184,6 +204,14 @@ def _material_model_has_conductivity(model) -> bool:
 
 def _material_model_has_kerr(model) -> bool:
     return bool(torch.any(model["kerr_chi3"] != 0).item())
+
+
+def material_model_has_full_anisotropy(model) -> bool:
+    """Whether the compiled model carries any off-diagonal permittivity."""
+    offdiag = model.get("eps_offdiag_components")
+    if not offdiag:
+        return False
+    return any(torch.any(offdiag[pair] != 0).item() for pair in _OFFDIAG_AXES)
 
 
 def _blend_material(tensor, occupancy, *, value):
@@ -355,7 +383,7 @@ def _build_dispersive_layout(scene):
         ("mu_lorentz", "mu_lorentz_poles"),
     )
     for structure in _nonpec_structures(scene):
-        material, _, _, _, _ = _static_structure_material(structure)
+        material, _, _, _, _, _ = _static_structure_material(structure)
         slots = {slot_key: [] for slot_key, _ in slot_pairs}
         for slot_key, layout_key in slot_pairs:
             for pole in getattr(material, layout_key, ()):
@@ -376,7 +404,13 @@ def _apply_structure_material(
     mu_background=1.0,
     averaging="arithmetic",
 ):
-    material, eps_components, mu_components, sigma_components, kerr_chi3 = _static_structure_material(structure)
+    material, eps_components, eps_offdiag, mu_components, sigma_components, kerr_chi3 = _static_structure_material(structure)
+    has_offdiag = any(value != 0.0 for value in eps_offdiag.values())
+    if has_offdiag and averaging == "polarized":
+        raise NotImplementedError(
+            "Polarized (Kottke) subpixel averaging is not implemented for full (off-diagonal) "
+            "anisotropic permittivity; use arithmetic subpixel averaging."
+        )
     occupancy = _geometry_occupancy(scene, structure.geometry, coords=coords)
     normals = _interface_normals(scene, structure.geometry, coords=coords) if averaging == "polarized" else None
 
@@ -401,6 +435,15 @@ def _apply_structure_material(
             model["sigma_e_components"][axis],
             occupancy,
             value=sigma_components[axis],
+        )
+    # Off-diagonal permittivity blends arithmetically for every structure so a
+    # later overlapping structure (value 0 when isotropic/diagonal) displaces the
+    # off-diagonal contribution of earlier ones, exactly like the diagonal blend.
+    for pair in _OFFDIAG_AXES:
+        model["eps_offdiag_components"][pair] = _blend_material(
+            model["eps_offdiag_components"][pair],
+            occupancy,
+            value=eps_offdiag[pair] * float(eps_background),
         )
     model["kerr_chi3"] = _blend_material(model["kerr_chi3"], occupancy, value=kerr_chi3)
     if isinstance(material, PerturbationMedium):
@@ -691,6 +734,8 @@ def compile_material_model(
             accum["eps_components"][axis] += sample["eps_components"][axis]
             accum["mu_components"][axis] += sample["mu_components"][axis]
             accum["sigma_e_components"][axis] += sample["sigma_e_components"][axis]
+        for pair in _OFFDIAG_AXES:
+            accum["eps_offdiag_components"][pair] += sample["eps_offdiag_components"][pair]
         accum["kerr_chi3"] += sample["kerr_chi3"]
         for slot_index, entry in enumerate(sample["debye_poles"]):
             accum["debye_poles"][slot_index]["weight"] += entry["weight"]
@@ -710,6 +755,8 @@ def compile_material_model(
         accum["eps_components"][axis] *= scale
         accum["mu_components"][axis] *= scale
         accum["sigma_e_components"][axis] *= scale
+    for pair in _OFFDIAG_AXES:
+        accum["eps_offdiag_components"][pair] *= scale
     accum["kerr_chi3"] *= scale
     for entry in accum["debye_poles"]:
         entry["weight"] *= scale

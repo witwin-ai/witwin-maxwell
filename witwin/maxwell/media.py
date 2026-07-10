@@ -69,6 +69,27 @@ def _coerce_real_scalar(value, *, name: str) -> float:
     return number
 
 
+_TENSOR_SYMMETRY_RTOL = 1.0e-6
+
+
+def _validate_symmetric_positive_definite(tensor: "Tensor3x3", *, name: str) -> None:
+    """Reject full 3x3 tensors that are not symmetric positive-definite.
+
+    A lossless anisotropic permittivity must be an SPD tensor; asymmetric or
+    indefinite tensors would make the FDTD update unconditionally unstable, so
+    they fail loudly at construction time.
+    """
+    matrix = np.asarray(tensor.rows, dtype=np.float64)
+    scale = max(float(np.abs(matrix).max()), 1.0)
+    if not np.allclose(matrix, matrix.T, rtol=0.0, atol=_TENSOR_SYMMETRY_RTOL * scale):
+        raise ValueError(f"{name} must be a symmetric 3x3 tensor.")
+    eigenvalues = np.linalg.eigvalsh(0.5 * (matrix + matrix.T))
+    if float(eigenvalues.min()) <= 0.0:
+        raise ValueError(
+            f"{name} must be positive-definite; got eigenvalues {tuple(float(v) for v in eigenvalues)}."
+        )
+
+
 @dataclass(frozen=True)
 class DebyePole:
     delta_eps: float
@@ -393,13 +414,18 @@ class Material(CoreMaterial):
         if self.orientation is not None:
             raise NotImplementedError("Material.orientation is not supported yet; use axis-aligned DiagonalTensor3 media only.")
         for tensor_name, tensor_value in (
-            ("epsilon_tensor", self.epsilon_tensor),
             ("mu_tensor", self.mu_tensor),
             ("sigma_e_tensor", self.sigma_e_tensor),
         ):
             if isinstance(tensor_value, Tensor3x3):
                 raise NotImplementedError(
                     f"Material.{tensor_name} currently supports DiagonalTensor3 only; Tensor3x3 is not implemented yet."
+                )
+        if isinstance(self.epsilon_tensor, Tensor3x3):
+            _validate_symmetric_positive_definite(self.epsilon_tensor, name="epsilon_tensor")
+            if float(self.sigma_e) != 0.0 or self.sigma_e_tensor is not None:
+                raise NotImplementedError(
+                    "Fully anisotropic (Tensor3x3) permittivity cannot be combined with electric conductivity yet."
                 )
 
         if self.is_electric_dispersive and self.epsilon_tensor is not None:
@@ -465,6 +491,11 @@ class Material(CoreMaterial):
     @property
     def is_anisotropic(self) -> bool:
         return any(value is not None for value in (self.epsilon_tensor, self.mu_tensor, self.sigma_e_tensor))
+
+    @property
+    def has_full_epsilon_tensor(self) -> bool:
+        """Whether the permittivity is a full (potentially off-diagonal) 3x3 tensor."""
+        return isinstance(self.epsilon_tensor, Tensor3x3)
 
     @property
     def is_nonlinear(self) -> bool:
@@ -734,6 +765,10 @@ class PerturbationMedium(Material):
         object.__setattr__(self, "perturbation", perturbation)
         object.__setattr__(self, "eps_sensitivity", sensitivity)
 
+        if isinstance(self.epsilon_tensor, Tensor3x3):
+            raise NotImplementedError(
+                "PerturbationMedium does not support a fully anisotropic (Tensor3x3) base material yet."
+            )
         base_eps = self.epsilon_tensor if self.epsilon_tensor is not None else self.eps_r
         eps_floor = min(base_eps.as_tuple()) if isinstance(base_eps, DiagonalTensor3) else float(base_eps)
         with torch.no_grad():

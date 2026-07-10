@@ -144,6 +144,10 @@ def _validate_supported_fdfd_materials(scene):
             continue
         if bool(getattr(material, "is_nonlinear", False)):
             raise NotImplementedError("FDFD does not support Kerr nonlinear media in v1.")
+        if bool(getattr(material, "has_full_epsilon_tensor", False)):
+            raise NotImplementedError(
+                "FDFD does not support full (off-diagonal Tensor3x3) anisotropic permittivity; use FDTD."
+            )
         if _is_nonvacuum_magnetic_material(material):
             raise NotImplementedError(
                 "FDFD currently supports electric anisotropy only; magnetic media and magnetic dispersion are not implemented yet."
@@ -487,11 +491,10 @@ class FDFD:
         ds = float(self.scene.dx)
         k0 = self.k0
 
-        Nx, Ny, Nz = self.scene.Nx, self.scene.Ny, self.scene.Nz
         Nx_ex, Ny_ex, Nz_ex = self.scene.Nx_ex, self.scene.Ny_ex, self.scene.Nz_ex
         Nx_ey, Ny_ey, Nz_ey = self.scene.Nx_ey, self.scene.Ny_ey, self.scene.Nz_ey
         Nx_ez, Ny_ez, Nz_ez = self.scene.Nx_ez, self.scene.Ny_ez, self.scene.Nz_ez
-        N_ex, N_ey, N_ez = self.scene.N_ex, self.scene.N_ey, self.scene.N_ez
+        N_ex, N_ey = self.scene.N_ex, self.scene.N_ey
         N_vec = self.scene.N_vector_total
 
         if self.verbose:

@@ -1707,6 +1707,30 @@ def _update_kerr_ez(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, EzDecay, Ker
             )
 
 
+def _electric_ex_full_aniso(*, Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz, periodicX, periodicY, periodicZ):
+    _require_cuda_tensors(Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz)
+    get_compiled_extension().update_electric_ex_full_aniso(
+                Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz,
+                int(periodicX), int(periodicY), int(periodicZ),
+            )
+
+
+def _electric_ey_full_aniso(*, Ey, Hx, Hy, Hz, CoeffX, CoeffZ, invDx, invDy, invDz, periodicX, periodicY, periodicZ):
+    _require_cuda_tensors(Ey, Hx, Hy, Hz, CoeffX, CoeffZ, invDx, invDy, invDz)
+    get_compiled_extension().update_electric_ey_full_aniso(
+                Ey, Hx, Hy, Hz, CoeffX, CoeffZ, invDx, invDy, invDz,
+                int(periodicX), int(periodicY), int(periodicZ),
+            )
+
+
+def _electric_ez_full_aniso(*, Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, invDz, periodicX, periodicY, periodicZ):
+    _require_cuda_tensors(Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, invDz)
+    get_compiled_extension().update_electric_ez_full_aniso(
+                Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, invDz,
+                int(periodicX), int(periodicY), int(periodicZ),
+            )
+
+
 def _reverse_electric_hx_standard(*, AdjHxMid, AdjHxPost, AdjEyPost, AdjEzPost, EyCurl, EzCurl, invDy, invDz):
     get_compiled_extension().reverse_electric_adjoint_to_hx_standard(
                 AdjHxMid, AdjHxPost, AdjEyPost, AdjEzPost, EyCurl, EzCurl, invDy, invDz
@@ -2477,6 +2501,9 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "updateKerrElectricFieldExCurl3D": _update_kerr_ex,
     "updateKerrElectricFieldEyCurl3D": _update_kerr_ey,
     "updateKerrElectricFieldEzCurl3D": _update_kerr_ez,
+    "updateElectricFieldExFullAniso3D": _electric_ex_full_aniso,
+    "updateElectricFieldEyFullAniso3D": _electric_ey_full_aniso,
+    "updateElectricFieldEzFullAniso3D": _electric_ez_full_aniso,
     "reverseElectricAdjointToHxStandard3D": _reverse_electric_hx_standard,
     "reverseElectricAdjointToHyStandard3D": _reverse_electric_hy_standard,
     "reverseElectricAdjointToHzStandard3D": _reverse_electric_hz_standard,

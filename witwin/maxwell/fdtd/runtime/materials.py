@@ -6,6 +6,7 @@ import torch
 from ...compiler.materials import (
     evaluate_material_permeability,
     evaluate_material_permittivity,
+    material_model_has_full_anisotropy,
 )
 from ..boundary import has_complex_fields
 
@@ -18,6 +19,10 @@ def build_materials(solver, scene):
     material_model = scene.compile_materials()
     if scene.boundary.uses_kind("bloch") and torch.any(material_model["kerr_chi3"] != 0):
         raise NotImplementedError("FDTD Kerr media are not implemented for Bloch / complex-field runs.")
+    if scene.boundary.uses_kind("bloch") and material_model_has_full_anisotropy(material_model):
+        raise NotImplementedError(
+            "FDTD full (off-diagonal) anisotropic media are not implemented for Bloch / complex-field runs."
+        )
 
     solver._compiled_material_model = material_model
     eps_components = material_model["eps_components"]
@@ -65,9 +70,112 @@ def build_materials(solver, scene):
         solver.cey_curl_dynamic = None
         solver.cez_curl_dynamic = None
 
+    build_full_anisotropy(solver, material_model)
+
     build_dispersive_templates(solver, material_model)
     build_magnetic_dispersive_templates(solver, material_model)
     solver.dispersive_enabled = solver.electric_dispersive_enabled or solver.magnetic_dispersive_enabled
+    if solver.full_aniso_enabled and solver.dispersive_enabled:
+        raise NotImplementedError(
+            "FDTD full (off-diagonal) anisotropic media cannot be combined with dispersive materials in the same Scene yet."
+        )
+
+
+_ANISO_ROW_PAIRS = {
+    # Inverse-tensor row entries coupling each E component to the two off-axis
+    # curl(H) components, in (first, second) order matching the update
+    # E_i += dt/eps0 * (inv_ij * <curlH_j> + inv_ik * <curlH_k>).
+    "Ex": ("xy", "xz"),
+    "Ey": ("xy", "yz"),
+    "Ez": ("xz", "yz"),
+}
+
+
+def _symmetric3_inverse(a, b, c, d, e, f):
+    """Closed-form inverse of the symmetric 3x3 tensor [[a,d,e],[d,b,f],[e,f,c]].
+
+    Returns the six independent entries of the (symmetric) inverse as a dict
+    keyed by ``xx, yy, zz, xy, xz, yz`` plus the determinant for validation.
+    """
+    det = a * (b * c - f * f) - d * (d * c - f * e) + e * (d * f - b * e)
+    inv_det = 1.0 / det
+    return {
+        "xx": (b * c - f * f) * inv_det,
+        "yy": (a * c - e * e) * inv_det,
+        "zz": (a * b - d * d) * inv_det,
+        "xy": (e * f - d * c) * inv_det,
+        "xz": (d * f - b * e) * inv_det,
+        "yz": (d * e - a * f) * inv_det,
+    }, det
+
+
+def build_full_anisotropy(solver, material_model):
+    """Precompute per-edge inverse-permittivity tensor rows for full anisotropy.
+
+    For each E component the six relative-permittivity node grids (diagonal +
+    off-diagonal) are averaged onto that component's Yee edges, the symmetric
+    3x3 tensor is inverted per edge in closed form, and the row belonging to the
+    component is stored: the diagonal entry as an effective scalar permittivity
+    (consumed by ``build_update_coefficients`` for the base curl coefficient)
+    and the two off-diagonal entries as coupling coefficients for the
+    neighbor-averaged off-axis curl(H) correction kernel.
+    """
+    solver.full_aniso_enabled = bool(material_model_has_full_anisotropy(material_model))
+    solver._aniso_eps_eff = None
+    solver._aniso_inverse_rows = None
+    solver.cex_aniso_y = None
+    solver.cex_aniso_z = None
+    solver.cey_aniso_x = None
+    solver.cey_aniso_z = None
+    solver.cez_aniso_x = None
+    solver.cez_aniso_y = None
+    if not solver.full_aniso_enabled:
+        return
+
+    if solver.conductive_enabled:
+        raise NotImplementedError(
+            "FDTD full (off-diagonal) anisotropic media cannot be combined with electric conductivity yet."
+        )
+    if solver.kerr_enabled:
+        raise NotImplementedError(
+            "FDTD full (off-diagonal) anisotropic media cannot be combined with Kerr media."
+        )
+
+    eps_components = material_model["eps_components"]
+    offdiag = material_model["eps_offdiag_components"]
+    node = {
+        "xx": eps_components["x"],
+        "yy": eps_components["y"],
+        "zz": eps_components["z"],
+        "xy": offdiag["xy"],
+        "xz": offdiag["xz"],
+        "yz": offdiag["yz"],
+    }
+    diagonal_key = {"Ex": "xx", "Ey": "yy", "Ez": "zz"}
+    solver._aniso_eps_eff = {}
+    solver._aniso_inverse_rows = {}
+    for component_name in ("Ex", "Ey", "Ez"):
+        edge = {
+            key: average_node_to_component(solver, tensor, component_name)
+            for key, tensor in node.items()
+        }
+        inverse, det = _symmetric3_inverse(
+            edge["xx"], edge["yy"], edge["zz"], edge["xy"], edge["xz"], edge["yz"]
+        )
+        diagonal_inverse = inverse[diagonal_key[component_name]]
+        if bool(torch.any(det <= 0).item()) or bool(torch.any(diagonal_inverse <= 0).item()):
+            raise ValueError(
+                "The blended anisotropic permittivity tensor is not positive-definite on the "
+                f"{component_name} Yee edges; check overlapping structures and material regions."
+            )
+        # Effective scalar permittivity reproducing the diagonal inverse entry:
+        # curl coefficient dt/eps_eff == dt * inv_diag / eps0.
+        solver._aniso_eps_eff[component_name] = (solver.eps0 / diagonal_inverse).contiguous()
+        first_pair, second_pair = _ANISO_ROW_PAIRS[component_name]
+        solver._aniso_inverse_rows[component_name] = (
+            inverse[first_pair].contiguous(),
+            inverse[second_pair].contiguous(),
+        )
 
 
 def average_node_to_component(solver, node_tensor, component_name):
@@ -574,36 +682,145 @@ def _apply_pec_edge_suppression(solver):
     solver.cey_curl = (solver.cey_curl * open_fractions["Ey"]).contiguous()
     solver.cez_decay = (solver.cez_decay * open_fractions["Ez"]).contiguous()
     solver.cez_curl = (solver.cez_curl * open_fractions["Ez"]).contiguous()
+    if getattr(solver, "full_aniso_enabled", False):
+        # The off-diagonal coupling terms are additive corrections to the same
+        # E edges, so PEC-covered edges must suppress them identically.
+        solver.cex_aniso_y = (solver.cex_aniso_y * open_fractions["Ex"]).contiguous()
+        solver.cex_aniso_z = (solver.cex_aniso_z * open_fractions["Ex"]).contiguous()
+        solver.cey_aniso_x = (solver.cey_aniso_x * open_fractions["Ey"]).contiguous()
+        solver.cey_aniso_z = (solver.cey_aniso_z * open_fractions["Ey"]).contiguous()
+        solver.cez_aniso_x = (solver.cez_aniso_x * open_fractions["Ez"]).contiguous()
+        solver.cez_aniso_y = (solver.cez_aniso_y * open_fractions["Ez"]).contiguous()
+
+
+def _electric_epsilon_tensors(solver):
+    """The absolute permittivity tensors feeding the electric curl coefficients.
+
+    Full anisotropy swaps in the effective scalar permittivity that reproduces
+    the diagonal entry of the per-edge inverse tensor; the plain per-axis
+    average is kept otherwise (byte-identical to the base path).
+    """
+    if getattr(solver, "full_aniso_enabled", False):
+        eps_eff = solver._aniso_eps_eff
+        return eps_eff["Ex"], eps_eff["Ey"], eps_eff["Ez"]
+    return solver.eps_Ex, solver.eps_Ey, solver.eps_Ez
+
+
+def _build_full_aniso_curl_coefficients(solver):
+    """Materialize the off-diagonal coupling coefficient tensors.
+
+    ``coeff = dt * inv_ij / eps0`` multiplies the neighbor-averaged off-axis
+    curl(H) component in the correction kernel. The coefficients are zero
+    outside the anisotropic structures, so the correction is a no-op there.
+    """
+    if not getattr(solver, "full_aniso_enabled", False):
+        return
+    scale = solver.dt / solver.eps0
+    rows = solver._aniso_inverse_rows
+    solver.cex_aniso_y = (scale * rows["Ex"][0]).contiguous()
+    solver.cex_aniso_z = (scale * rows["Ex"][1]).contiguous()
+    solver.cey_aniso_x = (scale * rows["Ey"][0]).contiguous()
+    solver.cey_aniso_z = (scale * rows["Ey"][1]).contiguous()
+    solver.cez_aniso_x = (scale * rows["Ez"][0]).contiguous()
+    solver.cez_aniso_y = (scale * rows["Ez"][1]).contiguous()
+    _validate_full_aniso_absorber_overlap(solver)
+
+
+def _absorbing_region_node_mask(solver):
+    """Boolean node mask of the absorbing-boundary region, or ``None``.
+
+    Covers both the graded-sigma split-field absorbers (3D ``sigma_*`` node
+    profiles) and CPML/stable-PML (1D stretching profiles per axis).
+    """
+    if solver.active_absorber_type in ("pml", "absorber"):
+        return (solver.sigma_x != 0) | (solver.sigma_y != 0) | (solver.sigma_z != 0)
+    if getattr(solver, "uses_cpml", False):
+        masks = []
+        for axis_name, view in (("x", (-1, 1, 1)), ("y", (1, -1, 1)), ("z", (1, 1, -1))):
+            c_e = getattr(solver, f"cpml_c_e_{axis_name}", None)
+            inv_kappa = getattr(solver, f"cpml_inv_kappa_e_{axis_name}", None)
+            axis_mask = None
+            if c_e is not None:
+                axis_mask = c_e != 0
+            if inv_kappa is not None:
+                kappa_mask = inv_kappa != 1
+                axis_mask = kappa_mask if axis_mask is None else (axis_mask | kappa_mask)
+            if axis_mask is not None:
+                masks.append(axis_mask.reshape(view))
+        if not masks:
+            return None
+        mask = masks[0]
+        for axis_mask in masks[1:]:
+            mask = mask | axis_mask
+        return mask.expand(solver.Nx, solver.Ny, solver.Nz)
+    return None
+
+
+def _validate_full_aniso_absorber_overlap(solver):
+    """Fail loudly if off-diagonal permittivity extends into an absorbing layer.
+
+    The off-diagonal correction kernel does not carry CPML psi accumulators or
+    split-field stretching, so it is only exact where the absorber profiles are
+    inactive. Off-diagonal coefficients are zero outside the anisotropic
+    structures, so interior structures pass this check untouched.
+    """
+    mask = _absorbing_region_node_mask(solver)
+    if mask is None:
+        return
+    mask = mask.to(dtype=torch.float32)
+    component_coefficients = (
+        ("Ex", (solver.cex_aniso_y, solver.cex_aniso_z)),
+        ("Ey", (solver.cey_aniso_x, solver.cey_aniso_z)),
+        ("Ez", (solver.cez_aniso_x, solver.cez_aniso_y)),
+    )
+    # The soft SDF occupancy leaves a vanishing (denormal-scale) tail far outside
+    # the structure, so compare against a relative threshold instead of != 0.
+    peak = max(
+        float(coefficient.abs().max())
+        for _, coefficients in component_coefficients
+        for coefficient in coefficients
+    )
+    threshold = 1.0e-6 * peak
+    for component_name, coefficients in component_coefficients:
+        edge_mask = average_node_to_component(solver, mask, component_name) > 0
+        for coefficient in coefficients:
+            if bool(torch.any(edge_mask & (coefficient.abs() > threshold)).item()):
+                raise NotImplementedError(
+                    "FDTD full (off-diagonal) anisotropic media inside PML/absorber layers are "
+                    "not implemented; keep anisotropic structures out of the absorbing boundary region."
+                )
 
 
 def build_update_coefficients(solver):
+    eps_ex, eps_ey, eps_ez = _electric_epsilon_tensors(solver)
     if solver.active_absorber_type not in ("pml", "absorber"):
-        solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, solver.eps_Ex, solver.sigma_e_Ex, None)
-        solver.cey_decay, solver.cey_curl = _electric_update_coefficients(solver, solver.eps_Ey, solver.sigma_e_Ey, None)
-        solver.cez_decay, solver.cez_curl = _electric_update_coefficients(solver, solver.eps_Ez, solver.sigma_e_Ez, None)
+        solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, eps_ex, solver.sigma_e_Ex, None)
+        solver.cey_decay, solver.cey_curl = _electric_update_coefficients(solver, eps_ey, solver.sigma_e_Ey, None)
+        solver.cez_decay, solver.cez_curl = _electric_update_coefficients(solver, eps_ez, solver.sigma_e_Ez, None)
         solver.chx_decay = torch.ones_like(solver.mu_Hx).contiguous()
         solver.chx_curl = (solver.dt / solver.mu_Hx).contiguous()
         solver.chy_decay = torch.ones_like(solver.mu_Hy).contiguous()
         solver.chy_curl = (solver.dt / solver.mu_Hy).contiguous()
         solver.chz_decay = torch.ones_like(solver.mu_Hz).contiguous()
         solver.chz_curl = (solver.dt / solver.mu_Hz).contiguous()
+        _build_full_aniso_curl_coefficients(solver)
         _apply_pec_edge_suppression(solver)
         return
 
     ex_sigma_y = 0.5 * (solver.sigma_y[:-1, :, :] + solver.sigma_y[1:, :, :])
     ex_sigma_z = 0.5 * (solver.sigma_z[:-1, :, :] + solver.sigma_z[1:, :, :])
     ex_decay = 1.0 / (1.0 + solver.dt * (ex_sigma_y + ex_sigma_z))
-    solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, solver.eps_Ex, solver.sigma_e_Ex, ex_decay)
+    solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, eps_ex, solver.sigma_e_Ex, ex_decay)
 
     ey_sigma_x = 0.5 * (solver.sigma_x[:, :-1, :] + solver.sigma_x[:, 1:, :])
     ey_sigma_z = 0.5 * (solver.sigma_z[:, :-1, :] + solver.sigma_z[:, 1:, :])
     ey_decay = 1.0 / (1.0 + solver.dt * (ey_sigma_x + ey_sigma_z))
-    solver.cey_decay, solver.cey_curl = _electric_update_coefficients(solver, solver.eps_Ey, solver.sigma_e_Ey, ey_decay)
+    solver.cey_decay, solver.cey_curl = _electric_update_coefficients(solver, eps_ey, solver.sigma_e_Ey, ey_decay)
 
     ez_sigma_x = 0.5 * (solver.sigma_x[:, :, :-1] + solver.sigma_x[:, :, 1:])
     ez_sigma_y = 0.5 * (solver.sigma_y[:, :, :-1] + solver.sigma_y[:, :, 1:])
     ez_decay = 1.0 / (1.0 + solver.dt * (ez_sigma_x + ez_sigma_y))
-    solver.cez_decay, solver.cez_curl = _electric_update_coefficients(solver, solver.eps_Ez, solver.sigma_e_Ez, ez_decay)
+    solver.cez_decay, solver.cez_curl = _electric_update_coefficients(solver, eps_ez, solver.sigma_e_Ez, ez_decay)
 
     hx_sigma_y = 0.25 * (
         solver.sigma_y[:, :-1, :-1]
@@ -653,6 +870,7 @@ def build_update_coefficients(solver):
     solver.chz_decay = hz_decay.contiguous()
     solver.chz_curl = ((solver.dt / solver.mu_Hz) * hz_decay).contiguous()
 
+    _build_full_aniso_curl_coefficients(solver)
     _apply_pec_edge_suppression(solver)
 
 

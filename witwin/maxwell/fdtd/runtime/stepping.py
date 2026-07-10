@@ -7,7 +7,14 @@ import torch
 from tqdm import tqdm
 
 from ...visualization import visualize_slice
-from ..boundary import BOUNDARY_BLOCH, BOUNDARY_PEC, BOUNDARY_PML, has_complex_fields, initialize_boundary_state
+from ..boundary import (
+    BOUNDARY_BLOCH,
+    BOUNDARY_PEC,
+    BOUNDARY_PERIODIC,
+    BOUNDARY_PML,
+    has_complex_fields,
+    initialize_boundary_state,
+)
 from ..excitation import (
     advance_tfsf_auxiliary_electric,
     advance_tfsf_auxiliary_magnetic,
@@ -500,6 +507,68 @@ def update_electric_fields(solver, ex, ey, ez, hx, hy, hz):
         update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz)
 
 
+def _full_aniso_periodic_flags(solver):
+    return (
+        int(solver.boundary_x_low_code == BOUNDARY_PERIODIC and solver.boundary_x_high_code == BOUNDARY_PERIODIC),
+        int(solver.boundary_y_low_code == BOUNDARY_PERIODIC and solver.boundary_y_high_code == BOUNDARY_PERIODIC),
+        int(solver.boundary_z_low_code == BOUNDARY_PERIODIC and solver.boundary_z_high_code == BOUNDARY_PERIODIC),
+    )
+
+
+def apply_full_aniso_corrections(solver):
+    """Add the off-diagonal anisotropic coupling terms to the E update.
+
+    Each kernel neighbor-averages the two off-axis curl(H) components onto the
+    target Yee edge and accumulates ``coeff * <curlH>``; the coefficients are the
+    off-diagonal entries of the per-edge inverse permittivity tensor scaled by
+    ``dt/eps0`` and vanish outside the anisotropic structures. Periodic axes
+    wrap the collocation stencil; other boundaries skip out-of-range samples.
+    """
+    periodic_x, periodic_y, periodic_z = _full_aniso_periodic_flags(solver)
+    solver.fdtd_module.updateElectricFieldExFullAniso3D(
+        Ex=solver.Ex,
+        Hx=solver.Hx,
+        Hy=solver.Hy,
+        Hz=solver.Hz,
+        CoeffY=solver.cex_aniso_y,
+        CoeffZ=solver.cex_aniso_z,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
+        periodicX=periodic_x,
+        periodicY=periodic_y,
+        periodicZ=periodic_z,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    solver.fdtd_module.updateElectricFieldEyFullAniso3D(
+        Ey=solver.Ey,
+        Hx=solver.Hx,
+        Hy=solver.Hy,
+        Hz=solver.Hz,
+        CoeffX=solver.cey_aniso_x,
+        CoeffZ=solver.cey_aniso_z,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
+        periodicX=periodic_x,
+        periodicY=periodic_y,
+        periodicZ=periodic_z,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    solver.fdtd_module.updateElectricFieldEzFullAniso3D(
+        Ez=solver.Ez,
+        Hx=solver.Hx,
+        Hy=solver.Hy,
+        Hz=solver.Hz,
+        CoeffX=solver.cez_aniso_x,
+        CoeffY=solver.cez_aniso_y,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
+        periodicX=periodic_x,
+        periodicY=periodic_y,
+        periodicZ=periodic_z,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+
+
 def update_electric_fields_bloch(solver):
     if getattr(solver, "kerr_enabled", False):
         raise NotImplementedError("FDTD Kerr media are not implemented for Bloch / complex-field runs.")
@@ -971,6 +1040,8 @@ def _field_update_block(solver, time_value):
         if solver.kerr_enabled:
             solver._update_kerr_electric_curls()
         update_electric_fields(solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
+        if getattr(solver, "full_aniso_enabled", False):
+            apply_full_aniso_corrections(solver)
 
 
 def _make_field_update_runner(solver, use_cuda_graph: bool):
@@ -981,7 +1052,10 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     the source-free block, so it does not perturb the physical run.
     """
     solver._cuda_graph_active = False
-    normal = lambda time_value: _field_update_block(solver, time_value)
+
+    def normal(time_value):
+        _field_update_block(solver, time_value)
+
     # v1 scope: the standard real-field path (optionally conductive). TFSF and
     # magnetic sources put per-step host input inside the block; complex/Kerr/
     # dispersive paths carry extra evolving state left to a later iteration.

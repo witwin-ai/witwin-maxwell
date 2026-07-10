@@ -474,6 +474,45 @@ void update_kerr_ez_curl_cuda(
     const torch::stable::Tensor& chi3,
     double dt,
     double eps0);
+void update_electric_ex_full_aniso_cuda(
+    torch::stable::Tensor ex,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& coeff_y,
+    const torch::stable::Tensor& coeff_z,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z);
+void update_electric_ey_full_aniso_cuda(
+    torch::stable::Tensor ey,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& coeff_x,
+    const torch::stable::Tensor& coeff_z,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z);
+void update_electric_ez_full_aniso_cuda(
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& coeff_x,
+    const torch::stable::Tensor& coeff_y,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z);
 void add_source_patch_cuda(
     torch::stable::Tensor field,
     const torch::stable::Tensor& patch,
@@ -1187,6 +1226,9 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("update_kerr_ex_curl(Tensor(a!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor ex_decay, Tensor chi3, float dt, float eps0) -> ()");
   m.def("update_kerr_ey_curl(Tensor(a!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor ey_decay, Tensor chi3, float dt, float eps0) -> ()");
   m.def("update_kerr_ez_curl(Tensor(a!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor ez_decay, Tensor chi3, float dt, float eps0) -> ()");
+  m.def("update_electric_ex_full_aniso(Tensor(a!) ex, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_y, Tensor coeff_z, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, int periodic_x, int periodic_y, int periodic_z) -> ()");
+  m.def("update_electric_ey_full_aniso(Tensor(a!) ey, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_x, Tensor coeff_z, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, int periodic_x, int periodic_y, int periodic_z) -> ()");
+  m.def("update_electric_ez_full_aniso(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_x, Tensor coeff_y, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, int periodic_x, int periodic_y, int periodic_z) -> ()");
   m.def("add_source_patch(Tensor(a!) field, Tensor patch, int offset_i, int offset_j, int offset_k, float signal) -> ()");
   m.def("add_cw_phased_source_patch(Tensor(a!) field, Tensor patch_cos, Tensor patch_sin, int offset_i, int offset_j, int offset_k, float signal_cos, float signal_sin) -> ()");
   m.def("add_time_shifted_source_patch(Tensor(a!) field, Tensor patch, Tensor delay_patch, Tensor activation_delay_patch, int offset_i, int offset_j, int offset_k, int time_kind, float time, float frequency, float fwidth, float amplitude, float phase, float delay, int causal_gate) -> ()");
@@ -1274,6 +1316,9 @@ STABLE_TORCH_LIBRARY_IMPL(witwin_maxwell_fdtd_cuda, CUDA, m) {
   m.impl("update_kerr_ex_curl", TORCH_BOX(&update_kerr_ex_curl_cuda));
   m.impl("update_kerr_ey_curl", TORCH_BOX(&update_kerr_ey_curl_cuda));
   m.impl("update_kerr_ez_curl", TORCH_BOX(&update_kerr_ez_curl_cuda));
+  m.impl("update_electric_ex_full_aniso", TORCH_BOX(&update_electric_ex_full_aniso_cuda));
+  m.impl("update_electric_ey_full_aniso", TORCH_BOX(&update_electric_ey_full_aniso_cuda));
+  m.impl("update_electric_ez_full_aniso", TORCH_BOX(&update_electric_ez_full_aniso_cuda));
   m.impl("add_source_patch", TORCH_BOX(&add_source_patch_cuda));
   m.impl("add_cw_phased_source_patch", TORCH_BOX(&add_cw_phased_source_patch_cuda));
   m.impl("add_time_shifted_source_patch", TORCH_BOX(&add_time_shifted_source_patch_cuda));

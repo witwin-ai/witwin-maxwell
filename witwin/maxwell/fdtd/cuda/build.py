@@ -168,6 +168,7 @@ def extension_sources() -> list[Path]:
         root / "kernels" / "electric.cu",
         root / "kernels" / "boundary.cu",
         root / "kernels" / "projection.cu",
+        root / "kernels" / "aniso.cu",
         root / "kernels" / "dispersive.cu",
         root / "kernels" / "sources.cu",
         root / "kernels" / "spectral.cu",

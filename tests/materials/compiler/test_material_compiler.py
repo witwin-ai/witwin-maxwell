@@ -434,6 +434,32 @@ def test_anisotropic_medium_compiles_component_fields_and_scalar_summary():
     assert prepared_scene.permeability[center_index].item() == pytest.approx((1.5 + 2.5 + 3.5) / 3.0)
 
 
+def test_full_anisotropic_medium_compiles_off_diagonal_permittivity_fields():
+    scene = _build_scene()
+    scene.add_structure(
+        mw.Structure(
+            name="full_aniso_box",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+            material=mw.Material(
+                epsilon_tensor=mw.Tensor3x3(
+                    ((2.0, 0.2, 0.1), (0.2, 3.0, 0.3), (0.1, 0.3, 4.0))
+                )
+            ),
+        )
+    )
+
+    prepared_scene = _prepared_scene(scene)
+    model = prepared_scene.compile_materials()
+    center_index = (prepared_scene.Nx // 2, prepared_scene.Ny // 2, prepared_scene.Nz // 2)
+
+    assert model["eps_components"]["x"][center_index].item() == pytest.approx(2.0)
+    assert model["eps_components"]["y"][center_index].item() == pytest.approx(3.0)
+    assert model["eps_components"]["z"][center_index].item() == pytest.approx(4.0)
+    assert model["eps_offdiag_components"]["xy"][center_index].item() == pytest.approx(0.2)
+    assert model["eps_offdiag_components"]["xz"][center_index].item() == pytest.approx(0.1)
+    assert model["eps_offdiag_components"]["yz"][center_index].item() == pytest.approx(0.3)
+
+
 def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivity():
     scene = _build_scene()
     scene.add_structure(
@@ -474,13 +500,6 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
                 orientation=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
             ),
             "orientation",
-        ),
-        (
-            lambda: mw.Material(
-                eps_r=2.0,
-                epsilon_tensor=mw.Tensor3x3(((2.0, 0.1, 0.0), (0.1, 2.5, 0.0), (0.0, 0.0, 3.0))),
-            ),
-            "Tensor3x3",
         ),
         (
             lambda: mw.Material(
