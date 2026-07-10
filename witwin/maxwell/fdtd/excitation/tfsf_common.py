@@ -23,13 +23,33 @@ def resolve_bounds_indices(scene, bounds):
     return tuple(lower), tuple(upper)
 
 
-def require_locally_uniform_axis(solver, axis, start, stop, *, context):
-    """Validate that the primal spacings over cells [start, stop) are uniform
-    (within 1e-6 relative) and return the local spacing.
+# Relative spacing spread at or below which the injection region is treated as
+# exactly uniform: the legacy scalar spacing is returned bit-for-bit and no new
+# numerics run, so uniform grids stay unchanged.
+_UNIFORM_SPACING_RTOL = 1e-6
+# Maximum tolerated numerical phase-velocity spread across a TFSF injection
+# region before the single auxiliary-grid spacing can no longer match the graded
+# main grid. The leading FDTD dispersion relation gives a relative
+# numerical-wavenumber excess of (k0*d)^2/24 for a vacuum wave of wavenumber
+# k0 = omega/c (the TFSF background is enforced to be vacuum); the spread of that
+# excess between the finest and coarsest cell in the region is the residual the
+# total/scattered-field faces cannot cancel and thus leaks into the scattered
+# region. 1e-3 keeps that residual at or below the uniform-grid leakage floor the
+# axis-aligned null tests already assert.
+_TFSF_DISPERSION_SPREAD_BOUND = 1e-3
 
-    The auxiliary-grid TFSF machinery and its dispersion matching assume a
-    constant main-grid spacing over the injection region; nonuniform grids are
-    supported only when the region (expanded by one cell) is locally uniform.
+
+def require_locally_uniform_axis(solver, axis, start, stop, *, context):
+    """Return the effective primal spacing over cells [start, stop) for the
+    auxiliary-grid dispersion match, accepting a bounded amount of grading.
+
+    A perfectly uniform region (spread <= ``_UNIFORM_SPACING_RTOL`` relative)
+    returns its exact cell spacing, bit-for-bit as before. A mildly graded region
+    is accepted when the numerical phase-velocity spread it induces across the
+    region stays below ``_TFSF_DISPERSION_SPREAD_BOUND``, in which case the
+    region-mean spacing is used as the single effective delta. A region too
+    graded for that bound raises with the predicted error, because a single
+    auxiliary spacing would inject a spurious incident field on the TFSF faces.
     """
     primal = {
         "x": solver.scene.dx_primal64,
@@ -39,13 +59,26 @@ def require_locally_uniform_axis(solver, axis, start, stop, *, context):
     window = primal[max(int(start), 0) : min(int(stop), len(primal))]
     d_min = float(window.min())
     d_max = float(window.max())
-    if (d_max - d_min) > 1e-6 * d_max:
+    if (d_max - d_min) <= _UNIFORM_SPACING_RTOL * d_max:
+        return d_min
+
+    # Region-mean effective spacing minimizes the mean phase mismatch; the
+    # residual is the numerical-dispersion wavenumber spread it leaves across the
+    # region, evaluated at the source (center) frequency.
+    d_eff = float(window.mean())
+    k0 = abs(float(solver.source_omega)) / float(solver.c)
+    dispersion_spread = (k0 * k0) * (d_max * d_max - d_min * d_min) / 24.0
+    if dispersion_spread > _TFSF_DISPERSION_SPREAD_BOUND:
         raise ValueError(
-            f"{context} requires locally uniform grid spacing along axis '{axis}' over the "
-            f"injection region (+1 cell); found min={d_min:g}, max={d_max:g}. Refine "
-            "GridSpec.custom so the region is uniform, or move the region."
+            f"{context} along axis '{axis}' is too graded for the auxiliary-grid "
+            "dispersion match: the numerical phase-velocity spread across the "
+            f"injection region (+1 cell) is {dispersion_spread:.3e} "
+            f"(min={d_min:g}, max={d_max:g}, k0={k0:g}), above the bound "
+            f"{_TFSF_DISPERSION_SPREAD_BOUND:.0e}. Refine GridSpec.custom for "
+            f"locally uniform grid spacing along axis '{axis}' over the injection "
+            "region, or move the region."
         )
-    return d_min
+    return d_eff
 
 
 def validate_bounds(solver, lower, upper):

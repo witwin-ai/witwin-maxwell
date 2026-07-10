@@ -96,24 +96,48 @@ def _resolve_tangential_bounds(scene, source, axis_coords_by_axis=None) -> tuple
     return (bounds[0], bounds[1]), tangential_axes
 
 
-def _local_uniform_plane_spacing(scene, axis: str, lower_index: int, upper_index: int) -> float:
-    """Local transverse spacing across a mode-plane aperture window.
+# Relative transverse-spacing spread at or below which the mode plane is treated
+# as exactly uniform and the legacy scalar spacing is returned bit-for-bit.
+_UNIFORM_SPACING_RTOL = 1e-6
+# Maximum fractional transverse-spacing variation tolerated across a mode-plane
+# aperture. The 2D finite-difference mode operator is assembled from a single
+# du/dv; on a graded transverse grid a centered stencil evaluated with the mean
+# spacing loses one order of accuracy and its leading relative error scales with
+# the fractional spacing spread (d_max - d_min)/d_mean. 1e-2 keeps the induced
+# effective-index / operator error at roughly the one-percent level.
+_MODE_PLANE_SPACING_SPREAD_BOUND = 1e-2
 
-    The 2D mode solver assumes uniform transverse spacing, so the primal
-    spacings over the aperture node window (expanded by one cell) must be
-    locally uniform within 1e-6 relative; returns the local spacing.
+
+def _local_uniform_plane_spacing(scene, axis: str, lower_index: int, upper_index: int) -> float:
+    """Effective transverse spacing across a mode-plane aperture window.
+
+    The 2D mode solver assembles its first/second-difference operators from a
+    single transverse spacing. A perfectly uniform window (spread <=
+    ``_UNIFORM_SPACING_RTOL`` relative) returns its exact spacing, bit-for-bit as
+    before. A mildly graded window is accepted when its fractional spacing
+    variation stays below ``_MODE_PLANE_SPACING_SPREAD_BOUND`` and the region-mean
+    spacing is used; beyond that the finite-difference operator error is no longer
+    controlled and the window is rejected with the predicted variation.
     """
     primal = {"x": scene.dx_primal64, "y": scene.dy_primal64, "z": scene.dz_primal64}[axis]
     window = primal[max(int(lower_index) - 1, 0) : min(int(upper_index) + 1, len(primal))]
     d_min = float(window.min())
     d_max = float(window.max())
-    if (d_max - d_min) > 1e-6 * d_max:
+    if (d_max - d_min) <= _UNIFORM_SPACING_RTOL * d_max:
+        return d_min
+
+    d_eff = float(window.mean())
+    fractional_spread = (d_max - d_min) / d_eff
+    if fractional_spread > _MODE_PLANE_SPACING_SPREAD_BOUND:
         raise ValueError(
-            "ModeSource/ModeMonitor mode solving requires locally uniform grid spacing along "
-            f"axis '{axis}' across the mode plane; found min={d_min:g}, max={d_max:g}. "
-            "Refine GridSpec.custom so the mode plane is uniform, or move the plane."
+            "ModeSource/ModeMonitor mode solving is too graded across the mode "
+            f"plane along axis '{axis}': the fractional transverse-spacing "
+            f"variation is {fractional_spread:.3e} (min={d_min:g}, max={d_max:g}), "
+            f"above the bound {_MODE_PLANE_SPACING_SPREAD_BOUND:.0e}. Refine "
+            f"GridSpec.custom for locally uniform grid spacing along axis '{axis}' "
+            "across the mode plane, or move the plane."
         )
-    return d_min
+    return d_eff
 
 
 def _field_component_axis_coords(scene, field_name: str, axis: str) -> torch.Tensor:
