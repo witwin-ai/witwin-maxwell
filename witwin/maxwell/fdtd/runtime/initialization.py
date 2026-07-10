@@ -11,6 +11,13 @@ from ..boundary import DEFAULT_CPML_CONFIG
 from .module_cache import get_fdtd_module, require_cuda_scene
 
 
+def _pole_parameter_bound(value) -> float:
+    """Scalar upper bound of a pole parameter (per-cell custom poles carry tensors)."""
+    if torch.is_tensor(value):
+        return float(value.detach().max())
+    return float(value)
+
+
 def _material_characteristic_frequency(material) -> float:
     if material is None:
         return 0.0
@@ -21,7 +28,7 @@ def _material_characteristic_frequency(material) -> float:
     for pole in getattr(material, "drude_poles", ()):
         characteristic = max(
             characteristic,
-            float(pole.plasma_frequency),
+            _pole_parameter_bound(pole.plasma_frequency),
             float(pole.gamma),
         )
     for pole in getattr(material, "lorentz_poles", ()):
@@ -35,7 +42,7 @@ def _material_characteristic_frequency(material) -> float:
     for pole in getattr(material, "mu_drude_poles", ()):
         characteristic = max(
             characteristic,
-            float(pole.plasma_frequency),
+            _pole_parameter_bound(pole.plasma_frequency),
             float(pole.gamma),
         )
     for pole in getattr(material, "mu_lorentz_poles", ()):

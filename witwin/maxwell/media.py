@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
+import torch
 
 from witwin.core import (
     FrequencyMaterialSample,
@@ -38,17 +39,20 @@ def _coerce_positive(value: float, *, name: str) -> float:
     return number
 
 
-def _normalize_poles(value, pole_type, *, name: str):
+def _normalize_poles(value, pole_types, *, name: str):
+    if not isinstance(pole_types, tuple):
+        pole_types = (pole_types,)
+    label = " or ".join(pole_type.__name__ for pole_type in pole_types)
     if value is None:
         return ()
-    if isinstance(value, pole_type):
+    if isinstance(value, pole_types):
         return (value,)
     if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
         normalized = tuple(value)
-        if any(not isinstance(item, pole_type) for item in normalized):
-            raise TypeError(f"{name} entries must be {pole_type.__name__} instances.")
+        if any(not isinstance(item, pole_types) for item in normalized):
+            raise TypeError(f"{name} entries must be {label} instances.")
         return normalized
-    raise TypeError(f"{name} must be a {pole_type.__name__} or an iterable of them.")
+    raise TypeError(f"{name} must be a {label} or an iterable of them.")
 
 
 def _normalize_tensor_rows(value, *, name: str):
@@ -162,6 +166,158 @@ class LorentzPole:
         return self.susceptibility(2.0 * np.pi * _coerce_frequency(frequency, name="frequency"))
 
 
+def _coerce_parameter_grid(value, *, name: str) -> torch.Tensor:
+    if not torch.is_tensor(value):
+        raise TypeError(f"{name} must be a torch.Tensor.")
+    if value.ndim != 3:
+        raise ValueError(f"{name} must be a 3D tensor, got ndim={value.ndim}.")
+    with torch.no_grad():
+        if not torch.isfinite(value).all():
+            raise ValueError(f"{name} must be finite everywhere.")
+        if torch.any(value < 0):
+            raise ValueError(f"{name} must be >= 0 everywhere.")
+        if float(value.max()) <= 0.0:
+            raise ValueError(f"{name} must contain at least one positive value.")
+    return value
+
+
+class CustomPole:
+    """Marker base for spatially-varying (per-cell) dispersive pole descriptors.
+
+    A custom pole carries a 3D parameter grid instead of a scalar oscillator
+    strength. The grid spans the axis-aligned extent of the ``Box`` geometry of
+    the ``Structure`` the material is attached to, using the same node-coverage
+    convention as ``MaterialRegion.density``: box faces select grid nodes
+    lower-inclusive / upper-exclusive, and the grid is trilinearly resampled
+    when its shape differs from the covered node count. The rasterized grid is
+    composed multiplicatively with the structure's soft geometry occupancy, so
+    it blends and overlaps with other structures exactly like a scalar pole.
+
+    Only the oscillator-strength parameter may vary per cell (``delta_eps`` for
+    Debye/Lorentz, ``plasma_frequency`` for Drude); the rate parameters
+    (``tau``, ``gamma``, ``resonance_frequency``) stay spatially uniform so the
+    ADE recursion constants remain scalar and the existing native CUDA
+    dispersive kernels are reused unchanged.
+    """
+
+
+@dataclass(frozen=True, eq=False)
+class CustomDebyePole(CustomPole):
+    """Debye pole with per-cell oscillator strength ``delta_eps(x) >= 0``."""
+
+    delta_eps: torch.Tensor
+    tau: float
+
+    def __post_init__(self):
+        object.__setattr__(self, "delta_eps", _coerce_parameter_grid(self.delta_eps, name="delta_eps"))
+        object.__setattr__(self, "tau", _coerce_positive(self.tau, name="tau"))
+
+    @property
+    def peak_delta_eps(self) -> float:
+        return float(self.delta_eps.detach().max())
+
+    def reference_pole(self) -> DebyePole:
+        """Scalar Debye pole at the peak oscillator strength."""
+        return DebyePole(delta_eps=self.peak_delta_eps, tau=self.tau)
+
+    def amplitude(self) -> torch.Tensor:
+        """Per-cell strength normalized by the peak, in [0, 1]."""
+        return self.delta_eps / self.peak_delta_eps
+
+    def susceptibility(self, angular_frequency: float) -> torch.Tensor:
+        return self.delta_eps / (1.0 - 1j * float(angular_frequency) * self.tau)
+
+    def susceptibility_at_freq(self, frequency: float) -> torch.Tensor:
+        return self.susceptibility(2.0 * np.pi * _coerce_frequency(frequency, name="frequency"))
+
+
+@dataclass(frozen=True, eq=False)
+class CustomDrudePole(CustomPole):
+    """Drude pole with per-cell plasma frequency ``plasma_frequency(x) >= 0`` [Hz]."""
+
+    plasma_frequency: torch.Tensor
+    gamma: float
+
+    def __post_init__(self):
+        object.__setattr__(
+            self,
+            "plasma_frequency",
+            _coerce_parameter_grid(self.plasma_frequency, name="plasma_frequency"),
+        )
+        object.__setattr__(self, "gamma", _coerce_nonnegative(self.gamma, name="gamma"))
+
+    @property
+    def peak_plasma_frequency(self) -> float:
+        return float(self.plasma_frequency.detach().max())
+
+    def reference_pole(self) -> DrudePole:
+        """Scalar Drude pole at the peak plasma frequency."""
+        return DrudePole(plasma_frequency=self.peak_plasma_frequency, gamma=self.gamma)
+
+    def amplitude(self) -> torch.Tensor:
+        """Per-cell ``(f_p / f_p_peak)^2`` weight in [0, 1] (chi scales with f_p^2)."""
+        normalized = self.plasma_frequency / self.peak_plasma_frequency
+        return normalized * normalized
+
+    def susceptibility(self, angular_frequency: float) -> torch.Tensor:
+        angular_frequency = float(angular_frequency)
+        if angular_frequency <= 0.0:
+            raise ValueError("Drude susceptibility is undefined at zero frequency.")
+        omega_p = 2.0 * np.pi * self.plasma_frequency
+        gamma = 2.0 * np.pi * self.gamma
+        return -(omega_p * omega_p) / (
+            angular_frequency * angular_frequency + 1j * gamma * angular_frequency
+        )
+
+    def susceptibility_at_freq(self, frequency: float) -> torch.Tensor:
+        return self.susceptibility(2.0 * np.pi * _coerce_frequency(frequency, name="frequency"))
+
+
+@dataclass(frozen=True, eq=False)
+class CustomLorentzPole(CustomPole):
+    """Lorentz pole with per-cell oscillator strength ``delta_eps(x) >= 0``."""
+
+    delta_eps: torch.Tensor
+    resonance_frequency: float
+    gamma: float
+
+    def __post_init__(self):
+        object.__setattr__(self, "delta_eps", _coerce_parameter_grid(self.delta_eps, name="delta_eps"))
+        object.__setattr__(
+            self,
+            "resonance_frequency",
+            _coerce_frequency(self.resonance_frequency, name="resonance_frequency"),
+        )
+        object.__setattr__(self, "gamma", _coerce_nonnegative(self.gamma, name="gamma"))
+
+    @property
+    def peak_delta_eps(self) -> float:
+        return float(self.delta_eps.detach().max())
+
+    def reference_pole(self) -> LorentzPole:
+        """Scalar Lorentz pole at the peak oscillator strength."""
+        return LorentzPole(
+            delta_eps=self.peak_delta_eps,
+            resonance_frequency=self.resonance_frequency,
+            gamma=self.gamma,
+        )
+
+    def amplitude(self) -> torch.Tensor:
+        """Per-cell strength normalized by the peak, in [0, 1]."""
+        return self.delta_eps / self.peak_delta_eps
+
+    def susceptibility(self, angular_frequency: float) -> torch.Tensor:
+        angular_frequency = float(angular_frequency)
+        omega_0 = 2.0 * np.pi * self.resonance_frequency
+        gamma = 2.0 * np.pi * self.gamma
+        return self.delta_eps * omega_0 * omega_0 / (
+            omega_0 * omega_0 - angular_frequency * angular_frequency - 1j * gamma * angular_frequency
+        )
+
+    def susceptibility_at_freq(self, frequency: float) -> torch.Tensor:
+        return self.susceptibility(2.0 * np.pi * _coerce_frequency(frequency, name="frequency"))
+
+
 @dataclass(frozen=True)
 class DiagonalTensor3:
     xx: float
@@ -222,12 +378,12 @@ class Material(CoreMaterial):
     ):
         super().__init__(eps_r=eps_r, mu_r=mu_r, sigma_e=sigma_e, name=name)
         object.__setattr__(self, "pec", bool(pec))
-        object.__setattr__(self, "debye_poles", _normalize_poles(debye_poles, DebyePole, name="debye_poles"))
-        object.__setattr__(self, "drude_poles", _normalize_poles(drude_poles, DrudePole, name="drude_poles"))
-        object.__setattr__(self, "lorentz_poles", _normalize_poles(lorentz_poles, LorentzPole, name="lorentz_poles"))
-        object.__setattr__(self, "mu_debye_poles", _normalize_poles(mu_debye_poles, DebyePole, name="mu_debye_poles"))
-        object.__setattr__(self, "mu_drude_poles", _normalize_poles(mu_drude_poles, DrudePole, name="mu_drude_poles"))
-        object.__setattr__(self, "mu_lorentz_poles", _normalize_poles(mu_lorentz_poles, LorentzPole, name="mu_lorentz_poles"))
+        object.__setattr__(self, "debye_poles", _normalize_poles(debye_poles, (DebyePole, CustomDebyePole), name="debye_poles"))
+        object.__setattr__(self, "drude_poles", _normalize_poles(drude_poles, (DrudePole, CustomDrudePole), name="drude_poles"))
+        object.__setattr__(self, "lorentz_poles", _normalize_poles(lorentz_poles, (LorentzPole, CustomLorentzPole), name="lorentz_poles"))
+        object.__setattr__(self, "mu_debye_poles", _normalize_poles(mu_debye_poles, (DebyePole, CustomDebyePole), name="mu_debye_poles"))
+        object.__setattr__(self, "mu_drude_poles", _normalize_poles(mu_drude_poles, (DrudePole, CustomDrudePole), name="mu_drude_poles"))
+        object.__setattr__(self, "mu_lorentz_poles", _normalize_poles(mu_lorentz_poles, (LorentzPole, CustomLorentzPole), name="mu_lorentz_poles"))
         object.__setattr__(self, "epsilon_tensor", epsilon_tensor)
         object.__setattr__(self, "mu_tensor", mu_tensor)
         object.__setattr__(self, "sigma_e_tensor", sigma_e_tensor)
@@ -289,6 +445,24 @@ class Material(CoreMaterial):
         return bool(self.mu_debye_poles or self.mu_drude_poles or self.mu_lorentz_poles)
 
     @property
+    def has_custom_electric_poles(self) -> bool:
+        return any(
+            isinstance(pole, CustomPole)
+            for pole in (*self.debye_poles, *self.drude_poles, *self.lorentz_poles)
+        )
+
+    @property
+    def has_custom_magnetic_poles(self) -> bool:
+        return any(
+            isinstance(pole, CustomPole)
+            for pole in (*self.mu_debye_poles, *self.mu_drude_poles, *self.mu_lorentz_poles)
+        )
+
+    @property
+    def has_custom_poles(self) -> bool:
+        return self.has_custom_electric_poles or self.has_custom_magnetic_poles
+
+    @property
     def is_anisotropic(self) -> bool:
         return any(value is not None for value in (self.epsilon_tensor, self.mu_tensor, self.sigma_e_tensor))
 
@@ -344,6 +518,11 @@ class Material(CoreMaterial):
             raise NotImplementedError("relative_permittivity() currently supports isotropic Material only.")
         if self.is_nonlinear:
             raise NotImplementedError("relative_permittivity() is not defined for nonlinear Material without a field amplitude.")
+        if self.has_custom_electric_poles:
+            raise NotImplementedError(
+                "relative_permittivity() is not defined for spatially-varying custom dispersive poles; "
+                "evaluate the compiled scene material model (Scene.compile_relative_materials) instead."
+            )
         frequency = _coerce_frequency(frequency, name="frequency")
         angular_frequency = 2.0 * np.pi * frequency
         epsilon = complex(self.eps_r, -self.sigma_e / (angular_frequency * VACUUM_PERMITTIVITY))
@@ -360,6 +539,11 @@ class Material(CoreMaterial):
             raise NotImplementedError("relative_permeability() currently supports isotropic Material only.")
         if self.is_nonlinear:
             raise NotImplementedError("relative_permeability() is not defined for nonlinear Material without a field amplitude.")
+        if self.has_custom_magnetic_poles:
+            raise NotImplementedError(
+                "relative_permeability() is not defined for spatially-varying custom dispersive poles; "
+                "evaluate the compiled scene material model (Scene.compile_relative_materials) instead."
+            )
         frequency = _coerce_frequency(frequency, name="frequency")
         permeability = complex(self.mu_r, 0.0)
         for pole in self.mu_debye_poles:

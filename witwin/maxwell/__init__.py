@@ -1,6 +1,16 @@
 from witwin.core import Box, Cone, Cylinder, Ellipsoid, HollowBox, Mesh, Prism, Pyramid, Sphere, Structure, Torus
 from .geometry import ComplexPolySlab, PolySlab
-from .media import DebyePole, DiagonalTensor3, DrudePole, LorentzPole, Material, Tensor3x3
+from .media import (
+    CustomDebyePole,
+    CustomDrudePole,
+    CustomLorentzPole,
+    DebyePole,
+    DiagonalTensor3,
+    DrudePole,
+    LorentzPole,
+    Material,
+    Tensor3x3,
+)
 from .monitors import (
     ClosedSurfaceMonitor,
     DiffractionMonitor,
@@ -73,6 +83,9 @@ __all__ = [
     "CustomCurrentSource",
     "CustomFieldSource",
     "CW",
+    "CustomDebyePole",
+    "CustomDrudePole",
+    "CustomLorentzPole",
     "CustomSourceTime",
     "Cylinder",
     "DebyePole",

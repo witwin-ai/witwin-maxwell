@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from witwin.core import Box
 from witwin.core.material import VACUUM_PERMITTIVITY
 
-from ..media import DiagonalTensor3, Tensor3x3
+from ..media import CustomPole, DiagonalTensor3, Tensor3x3
 
 _AXES = ("x", "y", "z")
 
@@ -138,32 +138,24 @@ def _new_material_model(scene, layout, *, eps_fill, mu_fill):
         "eps_components": _new_component_field(shape, fill_value=eps_fill, device=device),
         "mu_components": _new_component_field(shape, fill_value=mu_fill, device=device),
         "sigma_e_components": _new_component_field(shape, fill_value=0.0, device=device),
-        "debye_poles": [
-            {"pole": entry["pole"], "weight": torch.zeros(shape, device=device, dtype=torch.float32)}
-            for entry in layout["debye_poles"]
-        ],
-        "drude_poles": [
-            {"pole": entry["pole"], "weight": torch.zeros(shape, device=device, dtype=torch.float32)}
-            for entry in layout["drude_poles"]
-        ],
-        "lorentz_poles": [
-            {"pole": entry["pole"], "weight": torch.zeros(shape, device=device, dtype=torch.float32)}
-            for entry in layout["lorentz_poles"]
-        ],
-        "mu_debye_poles": [
-            {"pole": entry["pole"], "weight": torch.zeros(shape, device=device, dtype=torch.float32)}
-            for entry in layout["mu_debye_poles"]
-        ],
-        "mu_drude_poles": [
-            {"pole": entry["pole"], "weight": torch.zeros(shape, device=device, dtype=torch.float32)}
-            for entry in layout["mu_drude_poles"]
-        ],
-        "mu_lorentz_poles": [
-            {"pole": entry["pole"], "weight": torch.zeros(shape, device=device, dtype=torch.float32)}
-            for entry in layout["mu_lorentz_poles"]
-        ],
         "kerr_chi3": torch.zeros(shape, device=device, dtype=torch.float32),
     }
+    for key in (
+        "debye_poles",
+        "drude_poles",
+        "lorentz_poles",
+        "mu_debye_poles",
+        "mu_drude_poles",
+        "mu_lorentz_poles",
+    ):
+        model[key] = [
+            {
+                "pole": entry["pole"],
+                "weight": torch.zeros(shape, device=device, dtype=torch.float32),
+                "amplitude": entry.get("amplitude"),
+            }
+            for entry in layout[key]
+        ]
     return _refresh_model_summary_aliases(model)
 
 
@@ -279,18 +271,19 @@ def _clear_dispersive_region(model, region):
 
 
 def _assign_structure_weights(model, structure_slots, region):
-    for slot_index in structure_slots["debye"]:
-        model["debye_poles"][slot_index]["weight"] = model["debye_poles"][slot_index]["weight"] + region
-    for slot_index in structure_slots["drude"]:
-        model["drude_poles"][slot_index]["weight"] = model["drude_poles"][slot_index]["weight"] + region
-    for slot_index in structure_slots["lorentz"]:
-        model["lorentz_poles"][slot_index]["weight"] = model["lorentz_poles"][slot_index]["weight"] + region
-    for slot_index in structure_slots["mu_debye"]:
-        model["mu_debye_poles"][slot_index]["weight"] = model["mu_debye_poles"][slot_index]["weight"] + region
-    for slot_index in structure_slots["mu_drude"]:
-        model["mu_drude_poles"][slot_index]["weight"] = model["mu_drude_poles"][slot_index]["weight"] + region
-    for slot_index in structure_slots["mu_lorentz"]:
-        model["mu_lorentz_poles"][slot_index]["weight"] = model["mu_lorentz_poles"][slot_index]["weight"] + region
+    for slot_key, model_key in (
+        ("debye", "debye_poles"),
+        ("drude", "drude_poles"),
+        ("lorentz", "lorentz_poles"),
+        ("mu_debye", "mu_debye_poles"),
+        ("mu_drude", "mu_drude_poles"),
+        ("mu_lorentz", "mu_lorentz_poles"),
+    ):
+        for slot_index in structure_slots[slot_key]:
+            entry = model[model_key][slot_index]
+            amplitude = entry.get("amplitude")
+            contribution = region if amplitude is None else region * amplitude
+            entry["weight"] = entry["weight"] + contribution
 
 
 def _coordinate_grids(scene, sample_offset):
@@ -320,6 +313,29 @@ def _geometry_occupancy(scene, geometry, coords=None, beta=None):
     return geometry.to_mask(xx, yy, zz, offset=0.0, beta=resolved_beta)
 
 
+def _layout_pole_entry(scene, structure, pole):
+    """Lower a pole descriptor to a scalar reference pole plus an optional amplitude grid.
+
+    Scalar poles pass through with ``amplitude=None``. Custom (spatially-varying)
+    poles are lowered to their peak-strength scalar ``reference_pole()`` and a
+    per-node amplitude field in ``[0, 1]`` rasterized from the structure's Box
+    extent; the amplitude multiplies the structure occupancy when the pole
+    weight grid is assembled, so ``weight * chi_ref(omega)`` reproduces the
+    spatially-varying susceptibility exactly.
+    """
+    if isinstance(pole, CustomPole):
+        return {
+            "pole": pole.reference_pole(),
+            "amplitude": _box_parameter_field(
+                scene,
+                structure.geometry,
+                pole.amplitude(),
+                name=f"{type(pole).__name__} parameter grid",
+            ),
+        }
+    return {"pole": pole, "amplitude": None}
+
+
 def _build_dispersive_layout(scene):
     layout = {
         "debye_poles": [],
@@ -330,34 +346,21 @@ def _build_dispersive_layout(scene):
         "mu_lorentz_poles": [],
         "structure_slots": [],
     }
+    slot_pairs = (
+        ("debye", "debye_poles"),
+        ("drude", "drude_poles"),
+        ("lorentz", "lorentz_poles"),
+        ("mu_debye", "mu_debye_poles"),
+        ("mu_drude", "mu_drude_poles"),
+        ("mu_lorentz", "mu_lorentz_poles"),
+    )
     for structure in _nonpec_structures(scene):
         material, _, _, _, _ = _static_structure_material(structure)
-        slots = {
-            "debye": [],
-            "drude": [],
-            "lorentz": [],
-            "mu_debye": [],
-            "mu_drude": [],
-            "mu_lorentz": [],
-        }
-        for pole in getattr(material, "debye_poles", ()):
-            slots["debye"].append(len(layout["debye_poles"]))
-            layout["debye_poles"].append({"pole": pole})
-        for pole in getattr(material, "drude_poles", ()):
-            slots["drude"].append(len(layout["drude_poles"]))
-            layout["drude_poles"].append({"pole": pole})
-        for pole in getattr(material, "lorentz_poles", ()):
-            slots["lorentz"].append(len(layout["lorentz_poles"]))
-            layout["lorentz_poles"].append({"pole": pole})
-        for pole in getattr(material, "mu_debye_poles", ()):
-            slots["mu_debye"].append(len(layout["mu_debye_poles"]))
-            layout["mu_debye_poles"].append({"pole": pole})
-        for pole in getattr(material, "mu_drude_poles", ()):
-            slots["mu_drude"].append(len(layout["mu_drude_poles"]))
-            layout["mu_drude_poles"].append({"pole": pole})
-        for pole in getattr(material, "mu_lorentz_poles", ()):
-            slots["mu_lorentz"].append(len(layout["mu_lorentz_poles"]))
-            layout["mu_lorentz_poles"].append({"pole": pole})
+        slots = {slot_key: [] for slot_key, _ in slot_pairs}
+        for slot_key, layout_key in slot_pairs:
+            for pole in getattr(material, layout_key, ()):
+                slots[slot_key].append(len(layout[layout_key]))
+                layout[layout_key].append(_layout_pole_entry(scene, structure, pole))
         layout["structure_slots"].append(slots)
     return layout
 
@@ -457,6 +460,59 @@ def _region_axis_slice(nodes64: np.ndarray, lower: float, upper: float) -> slice
     return slice(start, stop)
 
 
+def _box_axis_slices(scene, geometry):
+    """Node-grid slices covered by a Box geometry, or ``None`` when empty.
+
+    Uses the same lower-inclusive / upper-exclusive node-coverage convention as
+    ``MaterialRegion`` (see ``_region_axis_slice``).
+    """
+    pos = geometry.position
+    size = geometry.size
+    cx, cy, cz = float(pos[0]), float(pos[1]), float(pos[2])
+    sx, sy, sz = float(size[0]), float(size[1]), float(size[2])
+    x_slice = _region_axis_slice(scene.x_nodes64, cx - sx / 2.0, cx + sx / 2.0)
+    y_slice = _region_axis_slice(scene.y_nodes64, cy - sy / 2.0, cy + sy / 2.0)
+    z_slice = _region_axis_slice(scene.z_nodes64, cz - sz / 2.0, cz + sz / 2.0)
+    if x_slice is None or y_slice is None or z_slice is None:
+        return None
+    return x_slice, y_slice, z_slice
+
+
+def _box_parameter_field(scene, geometry, values, *, name: str):
+    """Rasterize a user 3D parameter grid onto the scene node grid.
+
+    The grid spans the Box extent of ``geometry`` with the same node-coverage
+    convention as ``MaterialRegion.density``; it is trilinearly resampled when
+    its shape differs from the covered node count and is zero outside the box.
+    Differentiable in ``values``.
+    """
+    if not isinstance(geometry, Box):
+        raise ValueError(
+            f"{name} currently supports Box structure geometry only, got {type(geometry).__name__}."
+        )
+    shape = (scene.Nx, scene.Ny, scene.Nz)
+    field = torch.zeros(shape, device=scene.device, dtype=torch.float32)
+    slices = _box_axis_slices(scene, geometry)
+    if slices is None:
+        return field
+    x_slice, y_slice, z_slice = slices
+    values = values.to(device=scene.device, dtype=torch.float32)
+    target_shape = (
+        x_slice.stop - x_slice.start,
+        y_slice.stop - y_slice.start,
+        z_slice.stop - z_slice.start,
+    )
+    if values.shape != target_shape:
+        values = F.interpolate(
+            values[None, None, ...],
+            size=target_shape,
+            mode="trilinear",
+            align_corners=False,
+        )[0, 0]
+    field[x_slice, y_slice, z_slice] = values
+    return field
+
+
 def _density_kernel_size(scene, filter_radius: float) -> tuple[int, int, int]:
     kernel = []
     for spacing in scene.grid.min_spacing:
@@ -501,16 +557,11 @@ def _region_density_field(scene, region, reference: torch.Tensor):
             f"MaterialRegion currently supports Box geometry only, got {type(geometry).__name__}."
         )
 
-    pos = geometry.position
-    sz_vec = geometry.size
-    cx, cy, cz = float(pos[0]), float(pos[1]), float(pos[2])
-    sx, sy, sz = float(sz_vec[0]), float(sz_vec[1]), float(sz_vec[2])
-    x_slice = _region_axis_slice(scene.x_nodes64, cx - sx / 2.0, cx + sx / 2.0)
-    y_slice = _region_axis_slice(scene.y_nodes64, cy - sy / 2.0, cy + sy / 2.0)
-    z_slice = _region_axis_slice(scene.z_nodes64, cz - sz / 2.0, cz + sz / 2.0)
-    if x_slice is None or y_slice is None or z_slice is None:
+    slices = _box_axis_slices(scene, geometry)
+    if slices is None:
         empty = torch.zeros_like(reference)
         return empty, empty.to(dtype=torch.bool)
+    x_slice, y_slice, z_slice = slices
 
     density = region.density.to(device=scene.device, dtype=reference.real.dtype)
     lower, upper = region.bounds

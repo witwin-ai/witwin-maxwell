@@ -130,6 +130,10 @@ def _convert_material(material, td):
         raise NotImplementedError("Tidy3D export for anisotropic Material is not implemented yet.")
     if material.is_nonlinear:
         raise NotImplementedError("Tidy3D export for Kerr nonlinear Material is not implemented yet.")
+    if getattr(material, "has_custom_poles", False):
+        raise NotImplementedError(
+            "Tidy3D export for spatially-varying custom dispersive poles is not implemented yet."
+        )
     if material.is_magnetic_dispersive:
         raise NotImplementedError("Tidy3D export for magnetic dispersive Material is not implemented yet.")
     if not math.isclose(float(material.mu_r), 1.0, rel_tol=0.0, abs_tol=1.0e-12):
