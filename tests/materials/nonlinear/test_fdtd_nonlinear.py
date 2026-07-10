@@ -49,6 +49,21 @@ def test_material_composes_chi2_nonlinearity():
         mw.Material(eps_r=2.25, nonlinearity=object())
 
 
+def test_nonlinear_susceptibility_chi3_folds_into_kerr_channel():
+    chi3_only = mw.Material(eps_r=2.25, nonlinearity=mw.NonlinearSusceptibility(chi3=2.0e-10))
+    assert chi3_only.is_nonlinear
+    assert chi3_only.nonlinear_chi2 == 0.0
+    assert chi3_only.nonlinear_chi3 == pytest.approx(2.0e-10)
+
+    combined = mw.Material(
+        eps_r=2.25,
+        kerr_chi3=1.0e-10,
+        nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-6, chi3=2.0e-10),
+    )
+    assert combined.nonlinear_chi3 == pytest.approx(3.0e-10)
+    assert combined.nonlinear_chi2 == pytest.approx(1.0e-6)
+
+
 def test_nonlinear_material_rejects_dispersion_and_anisotropy_in_same_material():
     with pytest.raises(NotImplementedError, match="nonlinear Material"):
         mw.Material(
@@ -279,6 +294,107 @@ def test_nonlinear_coefficient_kernel_matches_torch_reference():
         expected_decay, expected_curl = _reference_nonlinear_coefficients(solver, component)
         assert torch.allclose(decay_dynamic, expected_decay, rtol=1.0e-5, atol=1.0e-6)
         assert torch.allclose(curl_dynamic, expected_curl, rtol=1.0e-5, atol=1.0e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_chi3_descriptor_matches_kerr_material_run():
+    """NonlinearSusceptibility(chi3=...) is the same runtime channel as kerr_chi3."""
+    frequency = 1.0e9
+    chi3 = 1.0e-10
+
+    def _run(material):
+        scene = _build_plane_wave_scene(
+            frequency,
+            amplitude=120.0,
+            domain=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4)),
+            spacing=0.04,
+        )
+        scene.add_structure(
+            mw.Structure(
+                geometry=Box(position=(0.0, 0.0, 0.0), size=(0.8, 0.8, 0.8)),
+                material=material,
+            )
+        )
+        scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.34, fields=("Ez",)))
+        result = mw.Simulation.fdtd(
+            scene,
+            frequencies=[frequency],
+            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+            spectral_sampler=mw.SpectralSampler(window="hanning"),
+            full_field_dft=False,
+        ).run()
+        payload = result.monitor("post")["components"]["Ez"]
+        data = payload["data"] if isinstance(payload, dict) else payload
+        return data.detach().clone()
+
+    kerr_data = _run(mw.Material(eps_r=2.25, kerr_chi3=chi3))
+    descriptor_data = _run(
+        mw.Material(eps_r=2.25, nonlinearity=mw.NonlinearSusceptibility(chi3=chi3))
+    )
+
+    assert torch.allclose(kerr_data, descriptor_data, rtol=1.0e-6, atol=1.0e-8)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_general_kernel_chi3_only_matches_kerr_fast_path():
+    """The general coefficient kernel reduces exactly to the Kerr curl update."""
+    frequency = 1.0e9
+    scene = _build_plane_wave_scene(
+        frequency,
+        amplitude=50.0,
+        domain=((-1.0, 1.0), (-0.4, 0.4), (-0.4, 0.4)),
+        spacing=0.04,
+    )
+    scene.add_structure(
+        mw.Structure(
+            geometry=Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.4, 0.4)),
+            material=mw.Material(eps_r=2.25, nonlinearity=mw.NonlinearSusceptibility(chi3=1.0e-8)),
+        )
+    )
+    solver = mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare().solver
+
+    # chi3-only stays on the Kerr fast path.
+    assert solver.kerr_enabled and not solver.nonlinear_general_enabled
+
+    generator = torch.Generator(device="cuda").manual_seed(11)
+    for field in (solver.Ex, solver.Ey, solver.Ez):
+        field.copy_(torch.randn(field.shape, generator=generator, device=field.device) * 40.0)
+
+    solver._update_nonlinear_electric_coefficients()
+    kerr_curls = {
+        "Ex": solver.cex_curl_dynamic.clone(),
+        "Ey": solver.cey_curl_dynamic.clone(),
+        "Ez": solver.cez_curl_dynamic.clone(),
+    }
+
+    for component, eps, decay, sigma, chi3, curl_reference in (
+        ("Ex", solver.eps_Ex, solver.cex_decay, solver.sigma_e_Ex, solver.kerr_chi3_Ex, kerr_curls["Ex"]),
+        ("Ey", solver.eps_Ey, solver.cey_decay, solver.sigma_e_Ey, solver.kerr_chi3_Ey, kerr_curls["Ey"]),
+        ("Ez", solver.eps_Ez, solver.cez_decay, solver.sigma_e_Ez, solver.kerr_chi3_Ez, kerr_curls["Ez"]),
+    ):
+        dynamic_decay = torch.empty_like(eps)
+        dynamic_curl = torch.empty_like(eps)
+        solver.fdtd_module.updateNonlinearElectricCoefficients3D(
+            DynamicDecay=dynamic_decay,
+            DynamicCurl=dynamic_curl,
+            Ex=solver.Ex,
+            Ey=solver.Ey,
+            Ez=solver.Ez,
+            LinearPermittivity=eps,
+            # Non-conductive scene: the static decay is exactly the external
+            # (PML x PEC) factor the general kernel expects.
+            ExternalDecay=decay,
+            SigmaStatic=sigma,
+            Chi2=torch.zeros_like(eps),
+            Chi3=chi3,
+            TpaSigma=torch.zeros_like(eps),
+            component=component,
+            dt=solver.dt,
+            eps0=solver.eps0,
+        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes[component])
+
+        assert torch.equal(dynamic_curl, curl_reference)
+        assert torch.equal(dynamic_decay, decay)
 
 
 def _second_harmonic_amplitude(*, chi2, amplitude, thickness):

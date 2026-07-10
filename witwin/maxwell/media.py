@@ -345,16 +345,22 @@ class NonlinearSusceptibility:
 
     ``chi2`` [m/V] adds the second-order polarization ``P_i = eps0 * chi2 * E_i^2``
     per field component (diagonal scalar model), which drives second-harmonic
-    generation and optical rectification. Composes with a ``Material`` through the
-    ``nonlinearity=`` argument.
+    generation and optical rectification. ``chi3`` [m^2/V^2] adds the isotropic
+    third-order polarization ``P_i = eps0 * chi3 * |E|^2 * E_i`` and lowers to the
+    same runtime channel as ``Material(kerr_chi3=...)`` (the two are strictly
+    equivalent and additive). Both are scalars; tensorial susceptibilities are
+    not supported. Composes with a ``Material`` through the ``nonlinearity=``
+    argument.
     """
 
     chi2: float = 0.0
+    chi3: float = 0.0
 
     def __post_init__(self):
         object.__setattr__(self, "chi2", _coerce_real_scalar(self.chi2, name="chi2"))
-        if float(self.chi2) == 0.0:
-            raise ValueError("NonlinearSusceptibility requires a nonzero chi2.")
+        object.__setattr__(self, "chi3", _coerce_real_scalar(self.chi3, name="chi3"))
+        if float(self.chi2) == 0.0 and float(self.chi3) == 0.0:
+            raise ValueError("NonlinearSusceptibility requires a nonzero chi2 or chi3.")
 
 
 _NONLINEAR_SPEC_TYPES = (NonlinearSusceptibility,)
@@ -531,7 +537,9 @@ class Material(CoreMaterial):
     @property
     def nonlinear_chi3(self) -> float:
         """Total instantaneous third-order (Kerr) susceptibility [m^2/V^2]."""
-        return float(self.kerr_chi3 or 0.0)
+        return float(self.kerr_chi3 or 0.0) + float(
+            sum(spec.chi3 for spec in self.nonlinearity if isinstance(spec, NonlinearSusceptibility))
+        )
 
     @property
     def is_nonlinear(self) -> bool:
