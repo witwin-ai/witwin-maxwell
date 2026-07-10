@@ -363,7 +363,36 @@ class NonlinearSusceptibility:
             raise ValueError("NonlinearSusceptibility requires a nonzero chi2 or chi3.")
 
 
-_NONLINEAR_SPEC_TYPES = (NonlinearSusceptibility,)
+@dataclass(frozen=True)
+class TwoPhotonAbsorption:
+    """Two-photon absorption (TPA): intensity-dependent nonlinear loss.
+
+    ``beta`` [m/W] is the TPA coefficient of ``dI/dz = -beta * I^2``. At runtime
+    the loss enters the update as a field-dependent conductivity
+    ``sigma_NL(x, t) = sigma_scale * |E(x, t)|^2`` folded into the semi-implicit
+    lossy decay term, with ``sigma_scale = (4/3) * beta * (n0 * eps0 * c0)^2``.
+    The 4/3 factor makes the cycle-averaged dissipation of a CW field
+    (``<E^4> = 3/8 |E0|^4``) reproduce ``alpha = beta * I`` with
+    ``I = 0.5 * n0 * eps0 * c0 * |E0|^2``. ``n0`` is the linear refractive index
+    used in the intensity conversion and defaults to ``sqrt(eps_r)`` of the host
+    material. Composes with a ``Material`` through the ``nonlinearity=`` argument.
+    """
+
+    beta: float
+    n0: float | None = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "beta", _coerce_positive(self.beta, name="beta"))
+        if self.n0 is not None:
+            object.__setattr__(self, "n0", _coerce_positive(self.n0, name="n0"))
+
+    def sigma_scale(self, base_index: float) -> float:
+        """The ``sigma_NL / |E|^2`` coefficient [S*m/V^2] for a host index."""
+        index = float(base_index) if self.n0 is None else float(self.n0)
+        return (4.0 / 3.0) * self.beta * (index * VACUUM_PERMITTIVITY * _SPEED_OF_LIGHT) ** 2
+
+
+_NONLINEAR_SPEC_TYPES = (NonlinearSusceptibility, TwoPhotonAbsorption)
 
 
 @dataclass(frozen=True)
@@ -542,8 +571,20 @@ class Material(CoreMaterial):
         )
 
     @property
+    def tpa_sigma_scale(self) -> float:
+        """Total two-photon-absorption ``sigma_NL / |E|^2`` coefficient [S*m/V^2]."""
+        base_index = float(np.sqrt(float(self.eps_r)))
+        return float(
+            sum(
+                spec.sigma_scale(base_index)
+                for spec in self.nonlinearity
+                if isinstance(spec, TwoPhotonAbsorption)
+            )
+        )
+
+    @property
     def is_nonlinear(self) -> bool:
-        return self.nonlinear_chi2 != 0.0 or self.nonlinear_chi3 != 0.0
+        return self.nonlinear_chi2 != 0.0 or self.nonlinear_chi3 != 0.0 or self.tpa_sigma_scale != 0.0
 
     @property
     def is_pec(self) -> bool:

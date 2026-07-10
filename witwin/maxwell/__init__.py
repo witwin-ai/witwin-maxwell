@@ -12,6 +12,7 @@ from .media import (
     NonlinearSusceptibility,
     PerturbationMedium,
     Tensor3x3,
+    TwoPhotonAbsorption,
 )
 from .monitors import (
     ClosedSurfaceMonitor,
@@ -143,6 +144,7 @@ __all__ = [
     "TimeConfig",
     "TFSF",
     "Torus",
+    "TwoPhotonAbsorption",
     "UniformCurrentSource",
     "DiagonalTensor3",
     "AbsorberKind",

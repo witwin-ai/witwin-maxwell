@@ -79,8 +79,9 @@ def build_nonlinear_channels(solver, material_model):
     """
     solver.kerr_enabled = bool(torch.any(material_model["kerr_chi3"] != 0).item())
     solver.chi2_enabled = bool(torch.any(material_model["chi2"] != 0).item())
-    solver.nonlinear_enabled = solver.kerr_enabled or solver.chi2_enabled
-    solver.nonlinear_general_enabled = solver.chi2_enabled
+    solver.tpa_enabled = bool(torch.any(material_model["tpa_sigma"] != 0).item())
+    solver.nonlinear_enabled = solver.kerr_enabled or solver.chi2_enabled or solver.tpa_enabled
+    solver.nonlinear_general_enabled = solver.chi2_enabled or solver.tpa_enabled
     solver.kerr_chi3 = material_model["kerr_chi3"]
     if solver.nonlinear_enabled:
         solver.kerr_chi3_Ex = average_node_to_component(solver, solver.kerr_chi3, "Ex")
@@ -101,18 +102,12 @@ def build_nonlinear_channels(solver, material_model):
         solver.nonlinear_chi2_Ex = average_node_to_component(solver, chi2, "Ex")
         solver.nonlinear_chi2_Ey = average_node_to_component(solver, chi2, "Ey")
         solver.nonlinear_chi2_Ez = average_node_to_component(solver, chi2, "Ez")
-        # Field-dependent conductivity channel of the general nonlinear kernel
-        # (sigma_NL = tpa_sigma * |E|^2); zero until a TwoPhotonAbsorption
-        # descriptor populates the compiled model.
-        tpa_sigma = material_model.get("tpa_sigma")
-        if tpa_sigma is None:
-            solver.tpa_sigma_Ex = torch.zeros_like(solver.eps_Ex)
-            solver.tpa_sigma_Ey = torch.zeros_like(solver.eps_Ey)
-            solver.tpa_sigma_Ez = torch.zeros_like(solver.eps_Ez)
-        else:
-            solver.tpa_sigma_Ex = average_node_to_component(solver, tpa_sigma, "Ex")
-            solver.tpa_sigma_Ey = average_node_to_component(solver, tpa_sigma, "Ey")
-            solver.tpa_sigma_Ez = average_node_to_component(solver, tpa_sigma, "Ez")
+        # Field-dependent conductivity channel of the general nonlinear kernel:
+        # sigma_NL = tpa_sigma * |E|^2, from TwoPhotonAbsorption descriptors.
+        tpa_sigma = material_model["tpa_sigma"]
+        solver.tpa_sigma_Ex = average_node_to_component(solver, tpa_sigma, "Ex")
+        solver.tpa_sigma_Ey = average_node_to_component(solver, tpa_sigma, "Ey")
+        solver.tpa_sigma_Ez = average_node_to_component(solver, tpa_sigma, "Ez")
         solver.cex_decay_dynamic = torch.empty_like(solver.eps_Ex)
         solver.cey_decay_dynamic = torch.empty_like(solver.eps_Ey)
         solver.cez_decay_dynamic = torch.empty_like(solver.eps_Ez)

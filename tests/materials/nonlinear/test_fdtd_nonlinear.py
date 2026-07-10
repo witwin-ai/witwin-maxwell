@@ -64,6 +64,33 @@ def test_nonlinear_susceptibility_chi3_folds_into_kerr_channel():
     assert combined.nonlinear_chi2 == pytest.approx(1.0e-6)
 
 
+def test_two_photon_absorption_descriptor_validation():
+    with pytest.raises(ValueError, match="beta"):
+        mw.TwoPhotonAbsorption(beta=0.0)
+    with pytest.raises(ValueError, match="beta"):
+        mw.TwoPhotonAbsorption(beta=-1.0e-4)
+    with pytest.raises(ValueError, match="n0"):
+        mw.TwoPhotonAbsorption(beta=1.0e-4, n0=0.0)
+
+
+def test_material_composes_two_photon_absorption():
+    eps0 = 8.8541878128e-12
+    c0 = 299_792_458.0
+    beta = 1.0e-4
+
+    material = mw.Material(eps_r=2.25, nonlinearity=mw.TwoPhotonAbsorption(beta=beta))
+    assert material.is_nonlinear
+    assert material.nonlinear_chi2 == 0.0
+    assert material.nonlinear_chi3 == 0.0
+    # Default n0 = sqrt(eps_r).
+    expected = (4.0 / 3.0) * beta * (1.5 * eps0 * c0) ** 2
+    assert material.tpa_sigma_scale == pytest.approx(expected, rel=1.0e-9)
+
+    explicit = mw.Material(eps_r=2.25, nonlinearity=mw.TwoPhotonAbsorption(beta=beta, n0=2.0))
+    expected_explicit = (4.0 / 3.0) * beta * (2.0 * eps0 * c0) ** 2
+    assert explicit.tpa_sigma_scale == pytest.approx(expected_explicit, rel=1.0e-9)
+
+
 def test_nonlinear_material_rejects_dispersion_and_anisotropy_in_same_material():
     with pytest.raises(NotImplementedError, match="nonlinear Material"):
         mw.Material(
@@ -264,7 +291,10 @@ def test_nonlinear_coefficient_kernel_matches_torch_reference():
             material=mw.Material(
                 eps_r=2.25,
                 sigma_e=0.02,
-                nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-4),
+                nonlinearity=(
+                    mw.NonlinearSusceptibility(chi2=1.0e-4),
+                    mw.TwoPhotonAbsorption(beta=1.0e-4),
+                ),
             ),
         )
     )
@@ -279,6 +309,7 @@ def test_nonlinear_coefficient_kernel_matches_torch_reference():
 
     assert solver.nonlinear_enabled
     assert solver.nonlinear_general_enabled
+    assert solver.tpa_enabled
 
     generator = torch.Generator(device="cuda").manual_seed(7)
     for field in (solver.Ex, solver.Ey, solver.Ez):
@@ -441,6 +472,73 @@ def _second_harmonic_amplitude(*, chi2, amplitude, thickness):
     ).run()
     payload = result.monitor("post", freq_index=1)
     return abs(_plane_complex_mean(payload["components"]["Ez"]))
+
+
+def _tpa_normalized_transmission(*, beta, amplitude):
+    frequency = 5.0e8
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-1.0, 1.0), (-0.3, 0.3), (-0.3, 0.3))),
+        grid=mw.GridSpec.uniform(0.02),
+        boundary=mw.BoundarySpec.pml(num_layers=8, strength=1.0),
+        device="cuda",
+        sources=[
+            mw.PlaneWave(
+                direction=(1.0, 0.0, 0.0),
+                polarization=(0.0, 0.0, 1.0),
+                source_time=mw.GaussianPulse(frequency=frequency, fwidth=1.0e8, amplitude=amplitude),
+                name="pw",
+            )
+        ],
+    )
+    material_kwargs = {}
+    if beta != 0.0:
+        material_kwargs["nonlinearity"] = mw.TwoPhotonAbsorption(beta=beta)
+    scene.add_structure(
+        mw.Structure(
+            geometry=Box(position=(-0.2, 0.0, 0.0), size=(0.3, 0.8, 0.8)),
+            material=mw.Material(eps_r=2.25, **material_kwargs),
+        )
+    )
+    scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.55, fields=("Ez",)))
+    result = mw.Simulation.fdtd(
+        scene,
+        frequencies=[frequency],
+        run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+        spectral_sampler=mw.SpectralSampler(window="hanning", normalize_source=False),
+        full_field_dft=False,
+    ).run()
+    payload = result.monitor("post")["components"]["Ez"]
+    return abs(_plane_complex_mean(payload)) / amplitude
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_fdtd_two_photon_absorption_transmission_decreases_with_intensity():
+    """TPA transmission follows the saturable 1/(1 + beta*I*L_eff) trend.
+
+    The DFT amplitude is normalized by the incident amplitude, so a linear
+    medium gives an intensity-independent normalized transmission while a TPA
+    medium absorbs progressively more at higher intensity.
+    """
+    beta = 4.0e-5
+    amplitudes = (25.0, 100.0, 400.0)
+
+    linear_low = _tpa_normalized_transmission(beta=0.0, amplitude=amplitudes[0])
+    linear_high = _tpa_normalized_transmission(beta=0.0, amplitude=amplitudes[-1])
+    # Linearity check of the normalization itself.
+    assert linear_high == pytest.approx(linear_low, rel=1.0e-3)
+
+    transmissions = [
+        _tpa_normalized_transmission(beta=beta, amplitude=amplitude) for amplitude in amplitudes
+    ]
+
+    # Nonlinear loss must be monotonic in intensity and significant at the top.
+    assert transmissions[0] < linear_low
+    assert transmissions[1] < 0.9 * transmissions[0]
+    assert transmissions[2] < 0.7 * transmissions[1]
+    # Saturable-absorber shape: the fractional loss grows slower than the
+    # intensity itself (1/(1+x) rather than exponential in x): a 16x intensity
+    # increase must not suppress transmission by more than 16x.
+    assert transmissions[2] > transmissions[0] / 16.0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")

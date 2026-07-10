@@ -114,6 +114,7 @@ def _structure_nonlinearity(material):
     return {
         "kerr_chi3": float(chi3),
         "chi2": float(getattr(material, "nonlinear_chi2", 0.0)),
+        "tpa_sigma": float(getattr(material, "tpa_sigma_scale", 0.0)),
     }
 
 
@@ -151,6 +152,7 @@ def _new_material_model(scene, layout, *, eps_fill, mu_fill):
         "sigma_e_components": _new_component_field(shape, fill_value=0.0, device=device),
         "kerr_chi3": torch.zeros(shape, device=device, dtype=torch.float32),
         "chi2": torch.zeros(shape, device=device, dtype=torch.float32),
+        "tpa_sigma": torch.zeros(shape, device=device, dtype=torch.float32),
     }
     for key in (
         "debye_poles",
@@ -200,7 +202,11 @@ def _material_model_has_kerr(model) -> bool:
 
 def material_model_has_nonlinearity(model) -> bool:
     """Whether the compiled model carries any instantaneous nonlinear channel."""
-    return _material_model_has_kerr(model) or bool(torch.any(model["chi2"] != 0).item())
+    return (
+        _material_model_has_kerr(model)
+        or bool(torch.any(model["chi2"] != 0).item())
+        or bool(torch.any(model["tpa_sigma"] != 0).item())
+    )
 
 
 def material_model_has_full_anisotropy(model) -> bool:
@@ -444,6 +450,7 @@ def _apply_structure_material(
         )
     model["kerr_chi3"] = _blend_material(model["kerr_chi3"], occupancy, value=nonlinearity["kerr_chi3"])
     model["chi2"] = _blend_material(model["chi2"], occupancy, value=nonlinearity["chi2"])
+    model["tpa_sigma"] = _blend_material(model["tpa_sigma"], occupancy, value=nonlinearity["tpa_sigma"])
     if isinstance(material, PerturbationMedium):
         delta = _box_parameter_field(
             scene,
@@ -735,6 +742,7 @@ def compile_material_model(
             accum["eps_offdiag_components"][pair] += sample["eps_offdiag_components"][pair]
         accum["kerr_chi3"] += sample["kerr_chi3"]
         accum["chi2"] += sample["chi2"]
+        accum["tpa_sigma"] += sample["tpa_sigma"]
         for slot_index, entry in enumerate(sample["debye_poles"]):
             accum["debye_poles"][slot_index]["weight"] += entry["weight"]
         for slot_index, entry in enumerate(sample["drude_poles"]):
@@ -757,6 +765,7 @@ def compile_material_model(
         accum["eps_offdiag_components"][pair] *= scale
     accum["kerr_chi3"] *= scale
     accum["chi2"] *= scale
+    accum["tpa_sigma"] *= scale
     for entry in accum["debye_poles"]:
         entry["weight"] *= scale
     for entry in accum["drude_poles"]:

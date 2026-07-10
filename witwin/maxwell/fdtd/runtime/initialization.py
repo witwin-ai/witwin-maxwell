@@ -183,6 +183,7 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver._magnetic_dispersive_templates = {}
     solver.kerr_enabled = False
     solver.chi2_enabled = False
+    solver.tpa_enabled = False
     solver.nonlinear_enabled = False
     solver.nonlinear_general_enabled = False
     solver.kerr_chi3 = None
