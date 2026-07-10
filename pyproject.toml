@@ -8,8 +8,8 @@ version = "0.2.0"
 description = "Witwin Maxwell - Electromagnetic simulation (FDTD/FDFD)"
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
-license = "GPL-3.0-or-later"
-license-files = ["COPYING"]
+license = "LicenseRef-Witwin-Research OR LicenseRef-Witwin-Commercial"
+license-files = ["LICENSE"]
 
 dependencies = [
     "witwin>=0.1,<0.2",
@@ -17,6 +17,9 @@ dependencies = [
     "torch>=2.10",
     "scipy>=1.10",
 ]
+
+[project.urls]
+License = "https://witwin.ai/license"
 
 [project.optional-dependencies]
 direct = ["nvmath-python[cu12]", "nvidia-cudss-cu12"]
