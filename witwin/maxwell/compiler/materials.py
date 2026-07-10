@@ -150,6 +150,12 @@ def _static_structure_material(structure):
         eps_components, eps_offdiag = _eps_values_from_sample(sample.eps_r)
         mu_components = _component_values_from_sample(sample.mu_r, name="mu_r")
         sigma_components = _component_values_from_sample(getattr(sample, "sigma_e", 0.0), name="sigma_e")
+        # Static magnetic conductivity is a scalar Material attribute (the magnetic
+        # dual of sigma_e); it is read directly from the material rather than the
+        # static sample, which carries no magnetic-conductivity channel.
+        sigma_m_components = _component_values_from_sample(
+            getattr(material, "sigma_m", 0.0), name="sigma_m"
+        )
     except (TypeError, ValueError) as exc:
         raise NotImplementedError(
             "The Maxwell material compiler currently supports scalar isotropic or axis-aligned DiagonalTensor3 material samples only."
@@ -160,6 +166,7 @@ def _static_structure_material(structure):
         eps_offdiag,
         mu_components,
         sigma_components,
+        sigma_m_components,
         _structure_nonlinearity(material),
     )
 
@@ -175,6 +182,7 @@ def _new_material_model(scene, layout, *, eps_fill, mu_fill):
         },
         "mu_components": _new_component_field(shape, fill_value=mu_fill, device=device),
         "sigma_e_components": _new_component_field(shape, fill_value=0.0, device=device),
+        "sigma_m_components": _new_component_field(shape, fill_value=0.0, device=device),
         "kerr_chi3": torch.zeros(shape, device=device, dtype=torch.float32),
         "chi2": torch.zeros(shape, device=device, dtype=torch.float32),
         "tpa_sigma": torch.zeros(shape, device=device, dtype=torch.float32),
@@ -229,6 +237,10 @@ def _material_model_has_magnetic_dispersion(model) -> bool:
 
 def _material_model_has_conductivity(model) -> bool:
     return any(torch.any(model["sigma_e_components"][axis] != 0).item() for axis in _AXES)
+
+
+def _material_model_has_magnetic_conductivity(model) -> bool:
+    return any(torch.any(model["sigma_m_components"][axis] != 0).item() for axis in _AXES)
 
 
 def _material_model_has_kerr(model) -> bool:
@@ -466,7 +478,7 @@ def _build_dispersive_layout(scene):
         ("mu_lorentz", "mu_lorentz_poles"),
     )
     for structure in _bulk_structures(scene):
-        material, _, _, _, _, _ = _static_structure_material(structure)
+        material = _static_structure_material(structure)[0]
         slots = {slot_key: [] for slot_key, _ in slot_pairs}
         for slot_key, layout_key in slot_pairs:
             for pole in getattr(material, layout_key, ()):
@@ -533,7 +545,7 @@ def _apply_structure_material(
     mu_background=1.0,
     averaging="arithmetic",
 ):
-    material, eps_components, eps_offdiag, mu_components, sigma_components, nonlinearity = _static_structure_material(structure)
+    material, eps_components, eps_offdiag, mu_components, sigma_components, sigma_m_components, nonlinearity = _static_structure_material(structure)
     has_offdiag = any(value != 0.0 for value in eps_offdiag.values())
     if has_offdiag and averaging == "polarized":
         raise NotImplementedError(
@@ -564,6 +576,11 @@ def _apply_structure_material(
             model["sigma_e_components"][axis],
             occupancy,
             value=sigma_components[axis],
+        )
+        model["sigma_m_components"][axis] = _blend_material(
+            model["sigma_m_components"][axis],
+            occupancy,
+            value=sigma_m_components[axis],
         )
     # Off-diagonal permittivity blends arithmetically for every structure so a
     # later overlapping structure (value 0 when isotropic/diagonal) displaces the
@@ -1027,6 +1044,7 @@ def compile_material_model(
             accum["eps_components"][axis] += sample["eps_components"][axis]
             accum["mu_components"][axis] += sample["mu_components"][axis]
             accum["sigma_e_components"][axis] += sample["sigma_e_components"][axis]
+            accum["sigma_m_components"][axis] += sample["sigma_m_components"][axis]
         for pair in _OFFDIAG_AXES:
             accum["eps_offdiag_components"][pair] += sample["eps_offdiag_components"][pair]
         accum["kerr_chi3"] += sample["kerr_chi3"]
@@ -1058,6 +1076,7 @@ def compile_material_model(
         accum["eps_components"][axis] *= scale
         accum["mu_components"][axis] *= scale
         accum["sigma_e_components"][axis] *= scale
+        accum["sigma_m_components"][axis] *= scale
     for pair in _OFFDIAG_AXES:
         accum["eps_offdiag_components"][pair] *= scale
     accum["kerr_chi3"] *= scale

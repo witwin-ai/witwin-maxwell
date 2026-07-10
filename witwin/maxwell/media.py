@@ -525,6 +525,7 @@ class Material(CoreMaterial):
     epsilon_tensor: DiagonalTensor3 | Tensor3x3 | None
     mu_tensor: DiagonalTensor3 | Tensor3x3 | None
     sigma_e_tensor: DiagonalTensor3 | Tensor3x3 | None
+    sigma_m: float
     orientation: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] | None
     kerr_chi3: float | None
     nonlinearity: tuple
@@ -538,6 +539,7 @@ class Material(CoreMaterial):
         sigma_e: float = 0.0,
         name: str | None = None,
         *,
+        sigma_m: float = 0.0,
         debye_poles=(),
         drude_poles=(),
         lorentz_poles=(),
@@ -564,6 +566,11 @@ class Material(CoreMaterial):
         object.__setattr__(self, "epsilon_tensor", epsilon_tensor)
         object.__setattr__(self, "mu_tensor", mu_tensor)
         object.__setattr__(self, "sigma_e_tensor", sigma_e_tensor)
+        # Static magnetic conductivity [Ohm/m]: the magnetic dual of sigma_e. It
+        # adds a magnetic conduction current sigma_m * H to Faraday's law, folded
+        # semi-implicitly into the H-update Da/Db coefficients exactly as sigma_e
+        # folds into the E-update Ca/Cb coefficients.
+        object.__setattr__(self, "sigma_m", _coerce_nonnegative(sigma_m, name="sigma_m"))
         object.__setattr__(self, "orientation", None if orientation is None else _normalize_tensor_rows(orientation, name="orientation"))
         object.__setattr__(self, "kerr_chi3", None if kerr_chi3 is None else _coerce_real_scalar(kerr_chi3, name="kerr_chi3"))
         object.__setattr__(self, "nonlinearity", _normalize_poles(nonlinearity, _NONLINEAR_SPEC_TYPES, name="nonlinearity"))
@@ -647,6 +654,7 @@ class Material(CoreMaterial):
                 or float(self.eps_r) != 1.0
                 or float(self.mu_r) != 1.0
                 or float(self.sigma_e) != 0.0
+                or float(self.sigma_m) != 0.0
             ):
                 raise ValueError(
                     "A PEC Material must not carry dispersion, anisotropy, Kerr, modulation, or "
@@ -746,7 +754,12 @@ class Material(CoreMaterial):
         base = super().capabilities()
         return MaterialCapabilities(
             conductive=base.conductive or self.sigma_e_tensor is not None,
-            magnetic=base.magnetic or self.mu_tensor is not None or self.is_magnetic_dispersive,
+            magnetic=(
+                base.magnetic
+                or self.mu_tensor is not None
+                or self.is_magnetic_dispersive
+                or float(self.sigma_m) != 0.0
+            ),
             anisotropic=self.is_anisotropic,
             dispersive=self.is_dispersive,
         )

@@ -144,9 +144,12 @@ def _convert_material(material, td):
         raise NotImplementedError("Tidy3D export for time-modulated Material is not implemented yet.")
     if material.is_magnetic_dispersive:
         raise NotImplementedError("Tidy3D export for magnetic dispersive Material is not implemented yet.")
-    if not math.isclose(float(material.mu_r), 1.0, rel_tol=0.0, abs_tol=1.0e-12):
+    if not math.isclose(float(material.mu_r), 1.0, rel_tol=0.0, abs_tol=1.0e-12) or float(
+        getattr(material, "sigma_m", 0.0)
+    ) != 0.0:
         raise NotImplementedError(
-            "Tidy3D export currently assumes mu_r = 1. Static magnetic materials are not implemented yet."
+            "Tidy3D export currently assumes mu_r = 1 and no static magnetic conductivity "
+            "(sigma_m = 0); magnetically-lossy media have no Tidy3D equivalent and are not implemented yet."
         )
 
     if not material.is_dispersive:

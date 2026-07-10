@@ -75,6 +75,14 @@ def build_materials(solver, scene):
     solver.mu_Hx = average_node_to_magnetic_component(solver, mu_x_node, "Hx")
     solver.mu_Hy = average_node_to_magnetic_component(solver, mu_y_node, "Hy")
     solver.mu_Hz = average_node_to_magnetic_component(solver, mu_z_node, "Hz")
+    # Static magnetic conductivity averaged onto the H components (same node->face
+    # stencil as mu): folds semi-implicitly into the H-update decay/curl exactly as
+    # sigma_e folds into the E-update, giving a magnetic conduction loss on Faraday's law.
+    sigma_m_components = material_model["sigma_m_components"]
+    solver.sigma_m_Hx = average_node_to_magnetic_component(solver, sigma_m_components["x"], "Hx")
+    solver.sigma_m_Hy = average_node_to_magnetic_component(solver, sigma_m_components["y"], "Hy")
+    solver.sigma_m_Hz = average_node_to_magnetic_component(solver, sigma_m_components["z"], "Hz")
+    solver.magnetically_conductive_enabled = bool(_any_component_nonzero(sigma_m_components))
 
     build_nonlinear_channels(solver, material_model)
 
@@ -972,6 +980,37 @@ def _electric_update_coefficients(solver, eps, sigma_e, pml_decay, *, aniso_shif
     return decay.contiguous(), curl.contiguous()
 
 
+def _magnetic_update_coefficients(solver, mu, sigma_m, pml_decay):
+    """Compose the semi-implicit magnetically-lossy decay/curl factors for one H component.
+
+    This is the exact magnetic dual of ``_electric_update_coefficients``: ``mu`` is
+    the absolute permeability (mu_r * mu0) and ``sigma_m`` the static magnetic
+    conductivity averaged onto the same Yee H component. A magnetic conduction
+    current ``sigma_m * H`` on Faraday's law, discretized semi-implicitly with H
+    averaged over the two half steps, gives the fold ``decay = (1 - h)/(1 + h)`` and
+    ``curl = (dt/mu)/(1 + h)`` with ``h = 0.5 * sigma_m * dt / mu``. When magnetic
+    conductivity is inactive the factors reduce to ``(decay=1, curl=dt/mu)``, so a
+    non-magnetically-conductive scene keeps the exact existing coefficients.
+    ``pml_decay`` folds the split-field CPML decay in multiplicatively when present,
+    matching the electric path (the per-cell decay tensor the H kernels already read).
+    """
+    if solver.magnetically_conductive_enabled:
+        half = 0.5 * sigma_m * solver.dt / mu
+        denom = 1.0 + half
+        material_decay = (1.0 - half) / denom
+        curl = (solver.dt / mu) / denom
+    else:
+        material_decay = None
+        curl = solver.dt / mu
+
+    if pml_decay is None:
+        decay = material_decay if material_decay is not None else torch.ones_like(mu)
+    else:
+        decay = pml_decay if material_decay is None else material_decay * pml_decay
+        curl = curl * pml_decay
+    return decay.contiguous(), curl.contiguous()
+
+
 def _pec_edge_open_fractions(solver):
     """Per-E-edge open fractions ``1 - fill`` from the PEC occupancy, or ``None``.
 
@@ -1207,12 +1246,9 @@ def build_update_coefficients(solver):
         solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, eps_ex, solver.sigma_e_Ex, None, aniso_shifted=aniso_shifted)
         solver.cey_decay, solver.cey_curl = _electric_update_coefficients(solver, eps_ey, solver.sigma_e_Ey, None, aniso_shifted=aniso_shifted)
         solver.cez_decay, solver.cez_curl = _electric_update_coefficients(solver, eps_ez, solver.sigma_e_Ez, None, aniso_shifted=aniso_shifted)
-        solver.chx_decay = torch.ones_like(solver.mu_Hx).contiguous()
-        solver.chx_curl = (solver.dt / solver.mu_Hx).contiguous()
-        solver.chy_decay = torch.ones_like(solver.mu_Hy).contiguous()
-        solver.chy_curl = (solver.dt / solver.mu_Hy).contiguous()
-        solver.chz_decay = torch.ones_like(solver.mu_Hz).contiguous()
-        solver.chz_curl = (solver.dt / solver.mu_Hz).contiguous()
+        solver.chx_decay, solver.chx_curl = _magnetic_update_coefficients(solver, solver.mu_Hx, solver.sigma_m_Hx, None)
+        solver.chy_decay, solver.chy_curl = _magnetic_update_coefficients(solver, solver.mu_Hy, solver.sigma_m_Hy, None)
+        solver.chz_decay, solver.chz_curl = _magnetic_update_coefficients(solver, solver.mu_Hz, solver.sigma_m_Hz, None)
         _store_nonlinear_external_decay(solver, None, None, None)
         _build_full_aniso_curl_coefficients(solver)
         _apply_pec_edge_suppression(solver)
@@ -1246,8 +1282,7 @@ def build_update_coefficients(solver):
         + solver.sigma_z[:, 1:, 1:]
     )
     hx_decay = 1.0 / (1.0 + solver.dt * (hx_sigma_y + hx_sigma_z))
-    solver.chx_decay = hx_decay.contiguous()
-    solver.chx_curl = ((solver.dt / solver.mu_Hx) * hx_decay).contiguous()
+    solver.chx_decay, solver.chx_curl = _magnetic_update_coefficients(solver, solver.mu_Hx, solver.sigma_m_Hx, hx_decay)
 
     hy_sigma_x = 0.25 * (
         solver.sigma_x[:-1, :, :-1]
@@ -1262,8 +1297,7 @@ def build_update_coefficients(solver):
         + solver.sigma_z[1:, :, 1:]
     )
     hy_decay = 1.0 / (1.0 + solver.dt * (hy_sigma_x + hy_sigma_z))
-    solver.chy_decay = hy_decay.contiguous()
-    solver.chy_curl = ((solver.dt / solver.mu_Hy) * hy_decay).contiguous()
+    solver.chy_decay, solver.chy_curl = _magnetic_update_coefficients(solver, solver.mu_Hy, solver.sigma_m_Hy, hy_decay)
 
     hz_sigma_x = 0.25 * (
         solver.sigma_x[:-1, :-1, :]
@@ -1278,8 +1312,7 @@ def build_update_coefficients(solver):
         + solver.sigma_y[1:, 1:, :]
     )
     hz_decay = 1.0 / (1.0 + solver.dt * (hz_sigma_x + hz_sigma_y))
-    solver.chz_decay = hz_decay.contiguous()
-    solver.chz_curl = ((solver.dt / solver.mu_Hz) * hz_decay).contiguous()
+    solver.chz_decay, solver.chz_curl = _magnetic_update_coefficients(solver, solver.mu_Hz, solver.sigma_m_Hz, hz_decay)
 
     _store_nonlinear_external_decay(solver, ex_decay, ey_decay, ez_decay)
     _build_full_aniso_curl_coefficients(solver)

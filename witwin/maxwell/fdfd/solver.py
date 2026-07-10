@@ -134,6 +134,11 @@ def _is_nonvacuum_magnetic_material(material) -> bool:
         return True
     if getattr(material, "mu_tensor", None) is not None:
         return True
+    # Static magnetic conductivity makes the permeability complex (mu_c = mu0 -
+    # i sigma_m/omega); it is a magnetically-lossy medium the FDFD system does not
+    # model, so it must be rejected rather than silently dropped.
+    if float(getattr(material, "sigma_m", 0.0)) != 0.0:
+        return True
     return not np.isclose(float(getattr(material, "mu_r", 1.0)), 1.0)
 
 
