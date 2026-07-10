@@ -513,14 +513,6 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
         ),
         (
             lambda: mw.Material(
-                mu_r=1.0,
-                mu_tensor=mw.DiagonalTensor3(1.2, 1.3, 1.4),
-                mu_lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=1.0e9, gamma=1.0e8),),
-            ),
-            "Magnetic dispersion with mu_tensor",
-        ),
-        (
-            lambda: mw.Material(
                 eps_r=2.0,
                 debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-9),),
                 kerr_chi3=1.0e-10,
@@ -601,6 +593,69 @@ def test_diagonal_anisotropic_dispersive_material_evaluate_at_frequency():
     shift = float(pole.susceptibility_at_freq(frequency).real)
     assert sample.eps_r.as_tuple() == pytest.approx(
         tuple(background + shift for background in eps_inf), rel=1.0e-6
+    )
+
+
+def test_diagonal_anisotropic_magnetic_dispersion_composes_per_axis():
+    """A DiagonalTensor3 background permeability combined with a homogeneous
+    (isotropic) magnetic pole must compile to a per-axis frequency permeability
+    ``mu_i(f) = mu_inf_i + chi_pole(f)``: the anisotropy lives in the background,
+    the dispersion is shared across axes. This is the magnetic-side mirror of the
+    diagonal-anisotropic electric-dispersion combination.
+    """
+    mu_inf = (2.0, 3.0, 5.0)
+    pole = mw.LorentzPole(delta_eps=2.0, resonance_frequency=2.0e9, gamma=1.0e8)
+    material = mw.Material(
+        mu_tensor=mw.DiagonalTensor3(*mu_inf),
+        mu_lorentz_poles=(pole,),
+    )
+    assert material.is_anisotropic
+    assert material.is_magnetic_dispersive
+
+    scene = _build_scene()
+    scene.add_structure(
+        mw.Structure(
+            name="mu_aniso_dispersive_box",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+            material=material,
+        )
+    )
+
+    frequency = 1.0e9
+    prepared_scene = _prepared_scene(scene)
+    _, mu_components = prepared_scene.compile_material_components(frequency=frequency)
+    center_index = (prepared_scene.Nx // 2, prepared_scene.Ny // 2, prepared_scene.Nz // 2)
+
+    chi = pole.susceptibility_at_freq(frequency)
+    for axis, background in zip("xyz", mu_inf):
+        measured = complex(mu_components[axis][center_index].item())
+        expected = background + chi
+        assert measured == pytest.approx(expected, rel=1.0e-5), (axis, measured, expected)
+
+    # The dispersive (frequency-dependent) part is identical across axes, so the
+    # per-axis differences equal the background (mu_inf) anisotropy exactly.
+    mxx = complex(mu_components["x"][center_index].item())
+    myy = complex(mu_components["y"][center_index].item())
+    mzz = complex(mu_components["z"][center_index].item())
+    assert (myy - mxx) == pytest.approx(mu_inf[1] - mu_inf[0], rel=1.0e-5)
+    assert (mzz - mxx) == pytest.approx(mu_inf[2] - mu_inf[0], rel=1.0e-5)
+
+
+def test_diagonal_anisotropic_magnetic_dispersive_material_evaluate_at_frequency():
+    """The homogeneous frequency sample of a diagonal-mu dispersive Material shifts
+    each axis by the real magnetic pole susceptibility (used by AutoGrid).
+    """
+    mu_inf = (2.0, 3.0, 5.0)
+    pole = mw.LorentzPole(delta_eps=2.0, resonance_frequency=2.0e9, gamma=1.0e8)
+    material = mw.Material(
+        mu_tensor=mw.DiagonalTensor3(*mu_inf),
+        mu_lorentz_poles=(pole,),
+    )
+    frequency = 1.0e9
+    sample = material.evaluate_at_frequency(frequency)
+    shift = float(pole.susceptibility_at_freq(frequency).real)
+    assert sample.mu_r.as_tuple() == pytest.approx(
+        tuple(background + shift for background in mu_inf), rel=1.0e-6
     )
 
 
