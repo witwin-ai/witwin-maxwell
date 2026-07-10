@@ -1576,3 +1576,104 @@ def test_bloch_magnetic_dispersive_adjoint_is_rejected_with_physical_reason():
     model = _BlochMagneticDispersiveDensityScene(init=0.0).cuda()
     with pytest.raises(NotImplementedError, match="magnetic-dispersive"):
         _build_sim(model, time_steps=8).run()
+
+
+# ---------------------------------------------------------------------------
+# Diagonal-anisotropic + electric-dispersive media (P5.2 combination)
+#
+# A DiagonalTensor3 background permittivity combined with a homogeneous electric
+# pole exercises both the per-axis eps_Ex/Ey/Ez coefficient layout AND the ADE
+# dispersive reverse in the same slab. The design density sits behind the slab, so
+# its gradient depends on the field transmitted through (forward) and the adjoint
+# field replayed back across (reverse) the anisotropic-dispersive medium. The
+# diagonal anisotropy carries no off-diagonal coupling, so the electric ADE reverse
+# already handles the combination through the per-axis eps fields.
+# ---------------------------------------------------------------------------
+
+
+class _AnisoDispersiveDensityScene(mw.SceneModule):
+    """Trainable design density behind a static diagonal-anisotropic Lorentz slab."""
+
+    def __init__(self, init=0.0, delta_eps=1.0):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((2, 2, 2), float(init), device="cuda"))
+        self._delta_eps = delta_eps
+
+    def to_scene(self):
+        density = torch.sigmoid(self.logits)
+        scene = mw.Scene(
+            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+            grid=mw.GridSpec.uniform(0.12),
+            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+            device="cuda",
+        )
+        poles = (
+            ()
+            if self._delta_eps == 0.0
+            else (mw.LorentzPole(delta_eps=self._delta_eps, resonance_frequency=1.5e9, gamma=3.0e8),)
+        )
+        scene.add_structure(
+            mw.Structure(
+                name="aniso_lorentz_slab",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+                material=mw.Material(
+                    epsilon_tensor=mw.DiagonalTensor3(2.0, 3.5, 5.0),
+                    lorentz_poles=poles,
+                ),
+            )
+        )
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+        scene.add_source(
+            mw.PointDipole(
+                position=(0.0, 0.0, -0.18),
+                polarization="Ez",
+                width=0.04,
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+            )
+        )
+        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+        return scene
+
+
+@_CUDA
+def test_scene_with_diagonal_aniso_dispersive_medium_gradient_matches_fd():
+    """Per-element FD validation of design gradients behind a static
+    diagonal-anisotropic Lorentz slab (the P5.2 diagonal-aniso-dispersion edge).
+
+    The reverse replay must propagate the adjoint field back through both the
+    per-axis anisotropic permittivity and the electric ADE pole state; a bug in
+    either would corrupt the design-density gradient."""
+    model = _AnisoDispersiveDensityScene(init=0.0).cuda()
+
+    def loss_fn():
+        result = _build_sim(model, time_steps=200).run()
+        return _abs2(result.monitor("probe")["data"])
+
+    # Dispersion must actually reshape the solution versus a nondispersive slab of
+    # the same anisotropic eps_inf, otherwise this would only re-validate the
+    # already-covered diagonal-anisotropic path.
+    nondispersive = _abs2(
+        _build_sim(_AnisoDispersiveDensityScene(init=0.0, delta_eps=0.0).cuda(), time_steps=200)
+        .run()
+        .monitor("probe")["data"]
+    ).item()
+    dispersive = loss_fn().item()
+    assert abs(dispersive - nondispersive) > 1e-2 * abs(nondispersive), (
+        f"dispersion inactive: nondispersive={nondispersive:.6e}, dispersive={dispersive:.6e}"
+    )
+
+    backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn)
+
+    assert (fd_grad != 0).any(), "FD gradient is identically zero; test setup is broken."
+    scale = torch.abs(fd_grad).max().item()
+    assert torch.allclose(backward_grad, fd_grad, rtol=3e-2, atol=scale * 5e-3), (
+        f"backward={backward_grad.flatten().tolist()}, fd={fd_grad.flatten().tolist()}"
+    )

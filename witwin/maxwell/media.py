@@ -497,6 +497,23 @@ class Tensor3x3:
         object.__setattr__(self, "rows", _normalize_tensor_rows(rows, name="rows"))
 
 
+def _shift_permittivity_real(value, susceptibility: complex):
+    """Add the real part of a homogeneous susceptibility to a permittivity sample.
+
+    A ``DiagonalTensor3`` stays a real diagonal tensor with each axis shifted by
+    ``Re(chi)``; a scalar background shifts to ``eps_inf + Re(chi)``. The
+    frequency-domain anisotropic permittivity sample is real because
+    ``DiagonalTensor3`` carries no imaginary channel, and the only consumer of the
+    sample (AutoGrid meshing) needs the real refractive index; the dispersive loss
+    is recovered from the compiled scene material model when the imaginary part is
+    required.
+    """
+    shift = float(susceptibility.real)
+    if isinstance(value, DiagonalTensor3):
+        return DiagonalTensor3(value.xx + shift, value.yy + shift, value.zz + shift)
+    return float(value) + shift
+
+
 @dataclass(frozen=True, init=False)
 class Material(CoreMaterial):
     debye_poles: tuple[DebyePole, ...]
@@ -571,8 +588,13 @@ class Material(CoreMaterial):
                     "Fully anisotropic (Tensor3x3) permittivity cannot be combined with electric conductivity yet."
                 )
 
-        if self.is_electric_dispersive and self.epsilon_tensor is not None:
-            raise NotImplementedError("Anisotropic electric dispersion is not supported yet.")
+        if self.is_electric_dispersive and self.has_full_epsilon_tensor:
+            raise NotImplementedError(
+                "Electric dispersion combined with a fully anisotropic (off-diagonal Tensor3x3) "
+                "permittivity requires a coupled tensor ADE update; use an axis-aligned "
+                "DiagonalTensor3 permittivity for anisotropic dispersion, or keep the Tensor3x3 "
+                "permittivity non-dispersive."
+            )
         if self.is_magnetic_dispersive and self.mu_tensor is not None:
             raise NotImplementedError("Magnetic dispersion with mu_tensor is not supported yet.")
         if self.is_nonlinear and self.is_dispersive:
@@ -710,16 +732,49 @@ class Material(CoreMaterial):
             sigma_e=self.sigma_e_tensor if self.sigma_e_tensor is not None else self.sigma_e,
         )
 
+    def _electric_pole_susceptibility(self, frequency: float) -> complex:
+        """Summed homogeneous electric-pole susceptibility ``chi_e(f)``.
+
+        Defined only for scalar (non-custom) poles; spatially-varying custom poles
+        are rejected before this is reached.
+        """
+        total = 0.0 + 0.0j
+        for pole in (*self.debye_poles, *self.drude_poles, *self.lorentz_poles):
+            total += pole.susceptibility_at_freq(frequency)
+        return complex(total)
+
+    def _magnetic_pole_susceptibility(self, frequency: float) -> complex:
+        """Summed homogeneous magnetic-pole susceptibility ``chi_m(f)``."""
+        total = 0.0 + 0.0j
+        for pole in (*self.mu_debye_poles, *self.mu_drude_poles, *self.mu_lorentz_poles):
+            total += pole.susceptibility_at_freq(frequency)
+        return complex(total)
+
     def evaluate_at_frequency(self, frequency: float) -> FrequencyMaterialSample:
         if self.is_nonlinear:
             raise NotImplementedError("Nonlinear Material frequency evaluation is not defined without a field amplitude.")
-        if self.is_anisotropic and self.is_dispersive:
-            raise NotImplementedError("Anisotropic dispersive Material frequency evaluation is not implemented yet.")
+        if self.is_dispersive and (self.has_full_epsilon_tensor or self.has_custom_poles):
+            raise NotImplementedError(
+                "Frequency evaluation of a dispersive Material is only defined for an axis-aligned "
+                "DiagonalTensor3 permittivity with homogeneous poles: a fully anisotropic Tensor3x3 "
+                "permittivity needs a coupled tensor ADE, and spatially-varying custom poles have no "
+                "homogeneous sample. Evaluate the compiled scene material model "
+                "(Scene.compile_relative_materials) instead."
+            )
         if self.is_anisotropic:
+            # Diagonal (axis-aligned) anisotropy composes with homogeneous
+            # dispersion by shifting each per-axis background permittivity by the
+            # isotropic pole susceptibility; the sample stays a real DiagonalTensor3.
             static = self.evaluate_static()
+            eps_r = static.eps_r
+            mu_r = static.mu_r
+            if self.is_electric_dispersive:
+                eps_r = _shift_permittivity_real(eps_r, self._electric_pole_susceptibility(frequency))
+            if self.is_magnetic_dispersive:
+                mu_r = _shift_permittivity_real(mu_r, self._magnetic_pole_susceptibility(frequency))
             return FrequencyMaterialSample(
-                eps_r=static.eps_r,
-                mu_r=static.mu_r,
+                eps_r=eps_r,
+                mu_r=mu_r,
                 sigma_e=static.sigma_e,
             )
         return FrequencyMaterialSample(

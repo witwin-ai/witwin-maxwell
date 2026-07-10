@@ -502,12 +502,14 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
             "orientation",
         ),
         (
+            # Diagonal anisotropy composes with electric dispersion, but a full
+            # (off-diagonal Tensor3x3) permittivity plus poles still needs a
+            # coupled tensor ADE and is rejected.
             lambda: mw.Material(
-                eps_r=2.0,
-                epsilon_tensor=mw.DiagonalTensor3(2.0, 2.5, 3.0),
+                epsilon_tensor=mw.Tensor3x3(((2.0, 0.1, 0.0), (0.1, 2.5, 0.0), (0.0, 0.0, 3.0))),
                 debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-9),),
             ),
-            "Anisotropic electric dispersion",
+            "coupled tensor ADE",
         ),
         (
             lambda: mw.Material(
@@ -538,6 +540,68 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
 def test_medium_rejects_unsupported_tensor_and_nonlinear_combinations(factory, message):
     with pytest.raises(NotImplementedError, match=message):
         factory()
+
+
+def test_diagonal_anisotropic_electric_dispersion_composes_per_axis():
+    """A DiagonalTensor3 background permittivity combined with a homogeneous
+    (isotropic) electric pole must compile to a per-axis frequency permittivity
+    ``eps_i(f) = eps_inf_i + chi_pole(f)``: the anisotropy lives in the background,
+    the dispersion is shared across axes.
+    """
+    eps_inf = (2.0, 3.0, 5.0)
+    pole = mw.LorentzPole(delta_eps=2.0, resonance_frequency=2.0e9, gamma=1.0e8)
+    material = mw.Material(
+        epsilon_tensor=mw.DiagonalTensor3(*eps_inf),
+        lorentz_poles=(pole,),
+    )
+    assert material.is_anisotropic
+    assert material.is_electric_dispersive
+
+    scene = _build_scene()
+    scene.add_structure(
+        mw.Structure(
+            name="aniso_dispersive_box",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+            material=material,
+        )
+    )
+
+    frequency = 1.0e9
+    prepared_scene = _prepared_scene(scene)
+    eps_components, _ = prepared_scene.compile_material_components(frequency=frequency)
+    center_index = (prepared_scene.Nx // 2, prepared_scene.Ny // 2, prepared_scene.Nz // 2)
+
+    chi = pole.susceptibility_at_freq(frequency)
+    for axis, background in zip("xyz", eps_inf):
+        measured = complex(eps_components[axis][center_index].item())
+        expected = background + chi
+        assert measured == pytest.approx(expected, rel=1.0e-5), (axis, measured, expected)
+
+    # The dispersive (frequency-dependent) part is identical across axes, so the
+    # per-axis differences equal the background (eps_inf) anisotropy exactly.
+    exx = complex(eps_components["x"][center_index].item())
+    eyy = complex(eps_components["y"][center_index].item())
+    ezz = complex(eps_components["z"][center_index].item())
+    assert (eyy - exx) == pytest.approx(eps_inf[1] - eps_inf[0], rel=1.0e-5)
+    assert (ezz - exx) == pytest.approx(eps_inf[2] - eps_inf[0], rel=1.0e-5)
+
+
+def test_diagonal_anisotropic_dispersive_material_evaluate_at_frequency():
+    """The homogeneous frequency sample of a diagonal-anisotropic dispersive
+    Material shifts each axis by the real pole susceptibility (used by AutoGrid).
+    """
+    eps_inf = (2.0, 3.0, 5.0)
+    pole = mw.LorentzPole(delta_eps=2.0, resonance_frequency=2.0e9, gamma=1.0e8)
+    material = mw.Material(
+        epsilon_tensor=mw.DiagonalTensor3(*eps_inf),
+        lorentz_poles=(pole,),
+    )
+    frequency = 1.0e9
+    sample = material.evaluate_at_frequency(frequency)
+    shift = float(pole.susceptibility_at_freq(frequency).real)
+    assert sample.eps_r.as_tuple() == pytest.approx(
+        tuple(background + shift for background in eps_inf), rel=1.0e-6
+    )
 
 
 def test_scene_allows_kerr_combined_with_other_dispersive_or_anisotropic_materials():
