@@ -34,10 +34,21 @@ def test_tensor3x3_epsilon_requires_positive_definite():
         mw.Material(epsilon_tensor=mw.Tensor3x3(((1.0, 2.0, 0.0), (2.0, 1.0, 0.0), (0.0, 0.0, 1.0))))
 
 
-def test_tensor3x3_epsilon_rejects_conductivity():
+def test_tensor3x3_epsilon_with_conductivity_constructs():
+    """Full anisotropy now composes with electric conductivity (lossy crystal).
+
+    The FDTD update folds the loss through the exact semi-implicit tensor inverse
+    ``B = dt (eps_inf + dt/2 diag(sigma))^-1``, so the construction that previously
+    raised must now succeed for both a scalar and a diagonal per-axis conductivity.
+    """
     tensor = _rotated_uniaxial_tensor(2.0, 2.0, 3.0)
-    with pytest.raises(NotImplementedError, match="conductivity"):
-        mw.Material(epsilon_tensor=tensor, sigma_e=0.5)
+    scalar = mw.Material(epsilon_tensor=tensor, sigma_e=0.5)
+    assert scalar.is_anisotropic
+    assert float(scalar.sigma_e) == 0.5
+    diagonal = mw.Material(
+        epsilon_tensor=tensor, sigma_e_tensor=mw.DiagonalTensor3(0.3, 0.4, 0.5)
+    )
+    assert diagonal.is_anisotropic
 
 
 def test_tensor3x3_mu_and_sigma_tensors_stay_rejected():

@@ -583,10 +583,12 @@ class Material(CoreMaterial):
                 )
         if isinstance(self.epsilon_tensor, Tensor3x3):
             _validate_symmetric_positive_definite(self.epsilon_tensor, name="epsilon_tensor")
-            if float(self.sigma_e) != 0.0 or self.sigma_e_tensor is not None:
-                raise NotImplementedError(
-                    "Fully anisotropic (Tensor3x3) permittivity cannot be combined with electric conductivity yet."
-                )
+        # A full (off-diagonal) Tensor3x3 permittivity combined with (diagonal)
+        # electric conductivity is supported: the FDTD update folds the loss through
+        # the exact semi-implicit tensor inverse B = dt * (eps_inf + dt/2 * diag(sigma))^-1
+        # applied to both curl(H) and the conduction current sigma . E, which
+        # diagonalizes in the crystal principal frame and reproduces the per-axis
+        # complex index of a lossy anisotropic crystal (see build_full_anisotropy).
 
         # A full (off-diagonal) Tensor3x3 permittivity combined with electric poles is
         # supported: the poles enter isotropically (chi(omega) * I), so the frequency

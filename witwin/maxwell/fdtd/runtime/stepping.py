@@ -853,6 +853,73 @@ def apply_full_aniso_corrections_cpml(solver):
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
 
 
+def _full_aniso_conductive(solver) -> bool:
+    return getattr(solver, "full_aniso_enabled", False) and getattr(solver, "_aniso_cond_current", None) is not None
+
+
+def capture_aniso_conduction_currents(solver):
+    """Snapshot the conduction current sigma . E^n before the electric update.
+
+    For a full (off-diagonal) anisotropic conductive medium the exact semi-implicit
+    update is ``E^{n+1} = E^n + B . (curl H - sigma . E^n)`` with
+    ``B = dt (eps_inf + dt/2 diag(sigma))^-1``. The diagonal ``-B_ii sigma_i E_i^n``
+    term is folded into the decay coefficient, but the off-diagonal
+    ``-B_ij sigma_j E_j^n`` (i != j) terms need the pre-update field, which the base
+    update overwrites, so they are captured here into ``_aniso_cond_current``.
+    """
+    if not _full_aniso_conductive(solver):
+        return
+    currents = solver._aniso_cond_current
+    torch.mul(solver.sigma_e_Ex, solver.Ex, out=currents["Ex"])
+    torch.mul(solver.sigma_e_Ey, solver.Ey, out=currents["Ey"])
+    torch.mul(solver.sigma_e_Ez, solver.Ez, out=currents["Ez"])
+
+
+def apply_full_aniso_conduction(solver):
+    """Subtract the off-diagonal conduction current through the inverse tensor.
+
+    Applies ``E_i -= 0.25 * (B_ij <sigma_j E_j^n> + B_ik <sigma_k E_k^n>)`` with the
+    same off-diagonal coefficients (``c*_aniso_*`` == ``B_ij``) and four-neighbor
+    collocation used for the curl(H) coupling. The conduction current is pointwise
+    (no spatial derivative), so it needs no CPML coordinate stretch and reuses the
+    plain off-diagonal current kernels for every boundary configuration.
+    """
+    if not _full_aniso_conductive(solver):
+        return
+    currents = solver._aniso_cond_current
+    periodic_x, periodic_y, periodic_z = _full_aniso_periodic_flags(solver)
+    solver.fdtd_module.applyAnisoOffdiagCurrentEx3D(
+        Ex=solver.Ex,
+        Jy=currents["Ey"],
+        Jz=currents["Ez"],
+        CoeffY=solver.cex_aniso_y,
+        CoeffZ=solver.cex_aniso_z,
+        periodicX=periodic_x,
+        periodicY=periodic_y,
+        periodicZ=periodic_z,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    solver.fdtd_module.applyAnisoOffdiagCurrentEy3D(
+        Ey=solver.Ey,
+        Jx=currents["Ex"],
+        Jz=currents["Ez"],
+        CoeffX=solver.cey_aniso_x,
+        CoeffZ=solver.cey_aniso_z,
+        periodicX=periodic_x,
+        periodicY=periodic_y,
+        periodicZ=periodic_z,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    solver.fdtd_module.applyAnisoOffdiagCurrentEz3D(
+        Ez=solver.Ez,
+        Jx=currents["Ex"],
+        Jy=currents["Ey"],
+        CoeffX=solver.cez_aniso_x,
+        CoeffY=solver.cez_aniso_y,
+        periodicX=periodic_x,
+        periodicY=periodic_y,
+        periodicZ=periodic_z,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+
+
 def update_electric_fields_bloch(solver):
     if getattr(solver, "nonlinear_enabled", False):
         raise NotImplementedError("FDTD nonlinear media are not implemented for Bloch / complex-field runs.")
@@ -1323,6 +1390,9 @@ def _field_update_block(solver, time_value):
         solver._advance_dispersive_state()
         if solver.nonlinear_enabled:
             solver._update_nonlinear_electric_coefficients()
+        # Snapshot sigma . E^n before the base update overwrites E (no-op unless the
+        # medium is both full-anisotropic and conductive).
+        capture_aniso_conduction_currents(solver)
         update_electric_fields(
             solver,
             solver.Ex,
@@ -1335,6 +1405,7 @@ def _field_update_block(solver, time_value):
         )
         if getattr(solver, "full_aniso_enabled", False):
             apply_full_aniso_corrections(solver)
+            apply_full_aniso_conduction(solver)
 
 
 def _make_field_update_runner(solver, use_cuda_graph: bool):

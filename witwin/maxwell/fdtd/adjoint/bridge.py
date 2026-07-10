@@ -122,6 +122,22 @@ def _unsupported_adjoint_medium(scene):
                     "FDTD adjoint does not support anisotropic magnetic (mu_tensor) media: "
                     "the magnetic reverse update carries no tensor gradient channel."
                 )
+            if isinstance(getattr(material, "epsilon_tensor", None), Tensor3x3) and _material_has_conductivity(material):
+                # The forward coupled-tensor conduction folds the loss through the
+                # off-diagonal inverse of (eps_inf + dt/2 diag(sigma)) applied to both
+                # curl(H) and the conduction current sigma . E, but the reverse
+                # conduction replica recomputes the semi-implicit decay/curl from the
+                # per-axis effective permittivity and carries no off-diagonal (coupled
+                # tensor) conduction channel, so the gradient through a full-anisotropic
+                # lossy medium would not match its forward. Keep the forward composition
+                # (lossy anisotropic crystal) usable while its adjoint pullback is
+                # unresolved.
+                return (
+                    "FDTD adjoint does not support full (off-diagonal) anisotropic permittivity "
+                    "combined with electric conductivity in the same material; the reverse conduction "
+                    "replica folds the loss through the per-axis effective permittivity and lacks the "
+                    "off-diagonal coupled-tensor conduction channel the forward semi-implicit update applies."
+                )
             if isinstance(getattr(material, "epsilon_tensor", None), Tensor3x3) and getattr(
                 material, "is_electric_dispersive", False
             ):

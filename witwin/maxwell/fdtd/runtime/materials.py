@@ -223,6 +223,10 @@ def build_full_anisotropy(solver, material_model):
     # polarization current buffers used by the off-diagonal tensor subtraction.
     solver._aniso_disp_inv_eps = None
     solver._aniso_disp_current = None
+    # Per-component conduction-current buffers (sigma . E at the pre-update field),
+    # subtracted through the off-diagonal inverse tensor when the anisotropic
+    # medium is also conductive; None otherwise.
+    solver._aniso_cond_current = None
     solver.cex_aniso_y = None
     solver.cex_aniso_z = None
     solver.cey_aniso_x = None
@@ -239,10 +243,6 @@ def build_full_anisotropy(solver, material_model):
     if not solver.full_aniso_enabled:
         return
 
-    if solver.conductive_enabled:
-        raise NotImplementedError(
-            "FDTD full (off-diagonal) anisotropic media cannot be combined with electric conductivity yet."
-        )
     if solver.nonlinear_enabled:
         raise NotImplementedError(
             "FDTD full (off-diagonal) anisotropic media cannot be combined with nonlinear media."
@@ -250,6 +250,7 @@ def build_full_anisotropy(solver, material_model):
 
     eps_components = material_model["eps_components"]
     offdiag = material_model["eps_offdiag_components"]
+    sigma_components = material_model["sigma_e_components"]
     node = {
         "xx": eps_components["x"],
         "yy": eps_components["y"],
@@ -259,6 +260,13 @@ def build_full_anisotropy(solver, material_model):
         "yz": offdiag["yz"],
     }
     diagonal_key = {"Ex": "xx", "Ey": "yy", "Ez": "zz"}
+    # Semi-implicit conductive fold: invert (eps_inf + dt/2 * diag(sigma)) instead of
+    # eps_inf so the same per-edge inverse tensor B = dt * (...)^-1 that couples
+    # curl(H) also carries the exact tensor conduction damping. In relative units
+    # the diagonal shift is (dt / (2 eps0)) * sigma_abs; adding a nonnegative
+    # diagonal to an SPD tensor keeps it SPD, so the inverse stays well defined.
+    conductive = solver.conductive_enabled
+    conductive_shift = solver.dt / (2.0 * solver.eps0)
     solver._aniso_eps_eff = {}
     solver._aniso_inverse_rows = {}
     for component_name in ("Ex", "Ey", "Ez"):
@@ -266,6 +274,10 @@ def build_full_anisotropy(solver, material_model):
             key: average_node_to_component(solver, tensor, component_name)
             for key, tensor in node.items()
         }
+        if conductive:
+            for diag_key, axis in (("xx", "x"), ("yy", "y"), ("zz", "z")):
+                sigma_edge = average_node_to_component(solver, sigma_components[axis], component_name)
+                edge[diag_key] = edge[diag_key] + conductive_shift * sigma_edge
         inverse, det = _symmetric3_inverse(
             edge["xx"], edge["yy"], edge["zz"], edge["xy"], edge["xz"], edge["yz"]
         )
@@ -276,13 +288,25 @@ def build_full_anisotropy(solver, material_model):
                 f"{component_name} Yee edges; check overlapping structures and material regions."
             )
         # Effective scalar permittivity reproducing the diagonal inverse entry:
-        # curl coefficient dt/eps_eff == dt * inv_diag / eps0.
+        # the base curl coefficient dt/eps_eff == dt * inv_diag / eps0 == B_ii, and
+        # (when conductive) the diagonal decay 1 - sigma * B_ii is folded in by
+        # _electric_update_coefficients through the aniso_shifted branch.
         solver._aniso_eps_eff[component_name] = (solver.eps0 / diagonal_inverse).contiguous()
         first_pair, second_pair = _ANISO_ROW_PAIRS[component_name]
         solver._aniso_inverse_rows[component_name] = (
             inverse[first_pair].contiguous(),
             inverse[second_pair].contiguous(),
         )
+
+    if conductive:
+        # Buffers for the pre-update conduction current sigma . E^n, subtracted
+        # through the off-diagonal inverse tensor each step (the diagonal part is
+        # already folded into the decay coefficient).
+        solver._aniso_cond_current = {
+            "Ex": torch.zeros_like(solver.Ex),
+            "Ey": torch.zeros_like(solver.Ey),
+            "Ez": torch.zeros_like(solver.Ez),
+        }
 
 
 def average_node_to_component(solver, node_tensor, component_name):
@@ -849,7 +873,7 @@ def apply_magnetic_dispersive_corrections(solver):
         apply_magnetic_component_dispersive_currents(solver, "Hz", solver.Hz_imag, imag=True)
 
 
-def _electric_update_coefficients(solver, eps, sigma_e, pml_decay):
+def _electric_update_coefficients(solver, eps, sigma_e, pml_decay, *, aniso_shifted=False):
     """Compose the semi-implicit lossy-dielectric decay/curl factors for one E component.
 
     ``eps`` is the absolute permittivity (eps_r * eps0) and ``sigma_e`` the static
@@ -857,12 +881,24 @@ def _electric_update_coefficients(solver, eps, sigma_e, pml_decay):
     inactive the material factors reduce to (decay=1, curl=dt/eps), so non-conductive
     scenes keep the exact existing coefficients. ``pml_decay`` folds the CPML decay in
     multiplicatively when present.
+
+    ``aniso_shifted`` selects the full-tensor conductive path: ``eps`` is then the
+    effective permittivity ``eps0 / [(eps_inf + dt/2 diag(sigma))^-1]_ii`` whose
+    reciprocal is the diagonal of the conductively-shifted inverse tensor, so the
+    diagonal curl is already the semi-implicit ``B_ii = dt/eps`` and the decay is
+    ``1 - sigma * B_ii`` (the same ``decay = 1 - sigma * curl`` identity the scalar
+    lossy fold satisfies). The off-diagonal conduction coupling is applied separately
+    through ``B_ij`` by the conduction-current subtraction.
     """
     if solver.conductive_enabled:
-        half = 0.5 * sigma_e * solver.dt / eps
-        denom = 1.0 + half
-        material_decay = (1.0 - half) / denom
-        curl = (solver.dt / eps) / denom
+        if aniso_shifted:
+            curl = solver.dt / eps
+            material_decay = 1.0 - sigma_e * curl
+        else:
+            half = 0.5 * sigma_e * solver.dt / eps
+            denom = 1.0 + half
+            material_decay = (1.0 - half) / denom
+            curl = (solver.dt / eps) / denom
     else:
         material_decay = None
         curl = solver.dt / eps
@@ -1102,10 +1138,14 @@ def _handle_full_aniso_absorber_overlap(solver):
 
 def build_update_coefficients(solver):
     eps_ex, eps_ey, eps_ez = _electric_epsilon_tensors(solver)
+    # Under full anisotropy eps_e* is the conductively-shifted effective permittivity,
+    # so the diagonal decay/curl must use the aniso_shifted semi-implicit identity
+    # rather than re-applying the scalar (1 + half) denominator.
+    aniso_shifted = getattr(solver, "full_aniso_enabled", False)
     if solver.active_absorber_type not in ("pml", "absorber"):
-        solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, eps_ex, solver.sigma_e_Ex, None)
-        solver.cey_decay, solver.cey_curl = _electric_update_coefficients(solver, eps_ey, solver.sigma_e_Ey, None)
-        solver.cez_decay, solver.cez_curl = _electric_update_coefficients(solver, eps_ez, solver.sigma_e_Ez, None)
+        solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, eps_ex, solver.sigma_e_Ex, None, aniso_shifted=aniso_shifted)
+        solver.cey_decay, solver.cey_curl = _electric_update_coefficients(solver, eps_ey, solver.sigma_e_Ey, None, aniso_shifted=aniso_shifted)
+        solver.cez_decay, solver.cez_curl = _electric_update_coefficients(solver, eps_ez, solver.sigma_e_Ez, None, aniso_shifted=aniso_shifted)
         solver.chx_decay = torch.ones_like(solver.mu_Hx).contiguous()
         solver.chx_curl = (solver.dt / solver.mu_Hx).contiguous()
         solver.chy_decay = torch.ones_like(solver.mu_Hy).contiguous()
@@ -1120,17 +1160,17 @@ def build_update_coefficients(solver):
     ex_sigma_y = 0.5 * (solver.sigma_y[:-1, :, :] + solver.sigma_y[1:, :, :])
     ex_sigma_z = 0.5 * (solver.sigma_z[:-1, :, :] + solver.sigma_z[1:, :, :])
     ex_decay = 1.0 / (1.0 + solver.dt * (ex_sigma_y + ex_sigma_z))
-    solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, eps_ex, solver.sigma_e_Ex, ex_decay)
+    solver.cex_decay, solver.cex_curl = _electric_update_coefficients(solver, eps_ex, solver.sigma_e_Ex, ex_decay, aniso_shifted=aniso_shifted)
 
     ey_sigma_x = 0.5 * (solver.sigma_x[:, :-1, :] + solver.sigma_x[:, 1:, :])
     ey_sigma_z = 0.5 * (solver.sigma_z[:, :-1, :] + solver.sigma_z[:, 1:, :])
     ey_decay = 1.0 / (1.0 + solver.dt * (ey_sigma_x + ey_sigma_z))
-    solver.cey_decay, solver.cey_curl = _electric_update_coefficients(solver, eps_ey, solver.sigma_e_Ey, ey_decay)
+    solver.cey_decay, solver.cey_curl = _electric_update_coefficients(solver, eps_ey, solver.sigma_e_Ey, ey_decay, aniso_shifted=aniso_shifted)
 
     ez_sigma_x = 0.5 * (solver.sigma_x[:, :, :-1] + solver.sigma_x[:, :, 1:])
     ez_sigma_y = 0.5 * (solver.sigma_y[:, :, :-1] + solver.sigma_y[:, :, 1:])
     ez_decay = 1.0 / (1.0 + solver.dt * (ez_sigma_x + ez_sigma_y))
-    solver.cez_decay, solver.cez_curl = _electric_update_coefficients(solver, eps_ez, solver.sigma_e_Ez, ez_decay)
+    solver.cez_decay, solver.cez_curl = _electric_update_coefficients(solver, eps_ez, solver.sigma_e_Ez, ez_decay, aniso_shifted=aniso_shifted)
 
     hx_sigma_y = 0.25 * (
         solver.sigma_y[:, :-1, :-1]
