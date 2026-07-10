@@ -711,7 +711,12 @@ def apply_full_aniso_corrections(solver):
     off-diagonal entries of the per-edge inverse permittivity tensor scaled by
     ``dt/eps0`` and vanish outside the anisotropic structures. Periodic axes
     wrap the collocation stencil; other boundaries skip out-of-range samples.
+    Under CPML the coordinate-stretched variant is used so the coupling is
+    absorbed consistently where an anisotropic structure reaches the boundary.
     """
+    if getattr(solver, "uses_cpml", False):
+        apply_full_aniso_corrections_cpml(solver)
+        return
     periodic_x, periodic_y, periodic_z = _full_aniso_periodic_flags(solver)
     solver.fdtd_module.updateElectricFieldExFullAniso3D(
         Ex=solver.Ex,
@@ -754,6 +759,97 @@ def apply_full_aniso_corrections(solver):
         periodicX=periodic_x,
         periodicY=periodic_y,
         periodicZ=periodic_z,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+
+
+def apply_full_aniso_corrections_cpml(solver):
+    """CPML-consistent off-diagonal anisotropic coupling for absorber overlap.
+
+    Each spatial derivative that enters the collocated off-axis curl(H) is
+    coordinate-stretched with its own recursive-convolution memory owned by the
+    target E edge. The two transverse directions use the E-field (node) CPML
+    profiles at the edge index; the edge's own direction sits on a half point and
+    uses the H-field (half) profile. Outside the absorber the profiles are neutral
+    and the psi buffers stay zero, so the correction matches the raw update.
+    """
+    periodic_x, periodic_y, periodic_z = _full_aniso_periodic_flags(solver)
+    solver.fdtd_module.updateElectricFieldExFullAnisoCpml3D(
+        Ex=solver.Ex,
+        Hx=solver.Hx,
+        Hy=solver.Hy,
+        Hz=solver.Hz,
+        CoeffY=solver.cex_aniso_y,
+        CoeffZ=solver.cex_aniso_z,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
+        InvKappaX=solver.cpml_inv_kappa_h_x,
+        BX=solver.cpml_b_h_x,
+        CX=solver.cpml_c_h_x,
+        InvKappaY=solver.cpml_inv_kappa_e_y,
+        BY=solver.cpml_b_e_y,
+        CY=solver.cpml_c_e_y,
+        InvKappaZ=solver.cpml_inv_kappa_e_z,
+        BZ=solver.cpml_b_e_z,
+        CZ=solver.cpml_c_e_z,
+        periodicX=periodic_x,
+        periodicY=periodic_y,
+        periodicZ=periodic_z,
+        PsiX=solver.psi_ex_aniso_x,
+        PsiY=solver.psi_ex_aniso_y,
+        PsiZ=solver.psi_ex_aniso_z,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    solver.fdtd_module.updateElectricFieldEyFullAnisoCpml3D(
+        Ey=solver.Ey,
+        Hx=solver.Hx,
+        Hy=solver.Hy,
+        Hz=solver.Hz,
+        CoeffX=solver.cey_aniso_x,
+        CoeffZ=solver.cey_aniso_z,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
+        InvKappaX=solver.cpml_inv_kappa_e_x,
+        BX=solver.cpml_b_e_x,
+        CX=solver.cpml_c_e_x,
+        InvKappaY=solver.cpml_inv_kappa_h_y,
+        BY=solver.cpml_b_h_y,
+        CY=solver.cpml_c_h_y,
+        InvKappaZ=solver.cpml_inv_kappa_e_z,
+        BZ=solver.cpml_b_e_z,
+        CZ=solver.cpml_c_e_z,
+        periodicX=periodic_x,
+        periodicY=periodic_y,
+        periodicZ=periodic_z,
+        PsiX=solver.psi_ey_aniso_x,
+        PsiY=solver.psi_ey_aniso_y,
+        PsiZ=solver.psi_ey_aniso_z,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    solver.fdtd_module.updateElectricFieldEzFullAnisoCpml3D(
+        Ez=solver.Ez,
+        Hx=solver.Hx,
+        Hy=solver.Hy,
+        Hz=solver.Hz,
+        CoeffX=solver.cez_aniso_x,
+        CoeffY=solver.cez_aniso_y,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
+        InvKappaX=solver.cpml_inv_kappa_e_x,
+        BX=solver.cpml_b_e_x,
+        CX=solver.cpml_c_e_x,
+        InvKappaY=solver.cpml_inv_kappa_e_y,
+        BY=solver.cpml_b_e_y,
+        CY=solver.cpml_c_e_y,
+        InvKappaZ=solver.cpml_inv_kappa_h_z,
+        BZ=solver.cpml_b_h_z,
+        CZ=solver.cpml_c_h_z,
+        periodicX=periodic_x,
+        periodicY=periodic_y,
+        periodicZ=periodic_z,
+        PsiX=solver.psi_ez_aniso_x,
+        PsiY=solver.psi_ez_aniso_y,
+        PsiZ=solver.psi_ez_aniso_z,
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
 
 

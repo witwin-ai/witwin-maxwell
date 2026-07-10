@@ -660,6 +660,81 @@ void update_electric_ez_full_aniso_cuda(
     int64_t periodic_x,
     int64_t periodic_y,
     int64_t periodic_z);
+void update_electric_ex_full_aniso_cpml_cuda(
+    torch::stable::Tensor ex,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& coeff_y,
+    const torch::stable::Tensor& coeff_z,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_kappa_z,
+    const torch::stable::Tensor& b_z,
+    const torch::stable::Tensor& c_z,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z,
+    torch::stable::Tensor psi_x,
+    torch::stable::Tensor psi_y,
+    torch::stable::Tensor psi_z);
+void update_electric_ey_full_aniso_cpml_cuda(
+    torch::stable::Tensor ey,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& coeff_x,
+    const torch::stable::Tensor& coeff_z,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_kappa_z,
+    const torch::stable::Tensor& b_z,
+    const torch::stable::Tensor& c_z,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z,
+    torch::stable::Tensor psi_x,
+    torch::stable::Tensor psi_y,
+    torch::stable::Tensor psi_z);
+void update_electric_ez_full_aniso_cpml_cuda(
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& coeff_x,
+    const torch::stable::Tensor& coeff_y,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_kappa_z,
+    const torch::stable::Tensor& b_z,
+    const torch::stable::Tensor& c_z,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z,
+    torch::stable::Tensor psi_x,
+    torch::stable::Tensor psi_y,
+    torch::stable::Tensor psi_z);
 void apply_aniso_offdiag_current_ex_cuda(
     torch::stable::Tensor ex,
     const torch::stable::Tensor& jy,
@@ -1410,6 +1485,9 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("update_electric_ex_full_aniso(Tensor(a!) ex, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_y, Tensor coeff_z, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, int periodic_x, int periodic_y, int periodic_z) -> ()");
   m.def("update_electric_ey_full_aniso(Tensor(a!) ey, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_x, Tensor coeff_z, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, int periodic_x, int periodic_y, int periodic_z) -> ()");
   m.def("update_electric_ez_full_aniso(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_x, Tensor coeff_y, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, int periodic_x, int periodic_y, int periodic_z) -> ()");
+  m.def("update_electric_ex_full_aniso_cpml(Tensor(a!) ex, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_y, Tensor coeff_z, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, int periodic_x, int periodic_y, int periodic_z, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor(d!) psi_z) -> ()");
+  m.def("update_electric_ey_full_aniso_cpml(Tensor(a!) ey, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_x, Tensor coeff_z, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, int periodic_x, int periodic_y, int periodic_z, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor(d!) psi_z) -> ()");
+  m.def("update_electric_ez_full_aniso_cpml(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_x, Tensor coeff_y, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, int periodic_x, int periodic_y, int periodic_z, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor(d!) psi_z) -> ()");
   m.def("apply_aniso_offdiag_current_ex(Tensor(a!) ex, Tensor jy, Tensor jz, Tensor coeff_y, Tensor coeff_z, int periodic_x, int periodic_y, int periodic_z) -> ()");
   m.def("apply_aniso_offdiag_current_ey(Tensor(a!) ey, Tensor jx, Tensor jz, Tensor coeff_x, Tensor coeff_z, int periodic_x, int periodic_y, int periodic_z) -> ()");
   m.def("apply_aniso_offdiag_current_ez(Tensor(a!) ez, Tensor jx, Tensor jy, Tensor coeff_x, Tensor coeff_y, int periodic_x, int periodic_y, int periodic_z) -> ()");
@@ -1510,6 +1588,9 @@ STABLE_TORCH_LIBRARY_IMPL(witwin_maxwell_fdtd_cuda, CUDA, m) {
   m.impl("update_electric_ex_full_aniso", TORCH_BOX(&update_electric_ex_full_aniso_cuda));
   m.impl("update_electric_ey_full_aniso", TORCH_BOX(&update_electric_ey_full_aniso_cuda));
   m.impl("update_electric_ez_full_aniso", TORCH_BOX(&update_electric_ez_full_aniso_cuda));
+  m.impl("update_electric_ex_full_aniso_cpml", TORCH_BOX(&update_electric_ex_full_aniso_cpml_cuda));
+  m.impl("update_electric_ey_full_aniso_cpml", TORCH_BOX(&update_electric_ey_full_aniso_cpml_cuda));
+  m.impl("update_electric_ez_full_aniso_cpml", TORCH_BOX(&update_electric_ez_full_aniso_cpml_cuda));
   m.impl("apply_aniso_offdiag_current_ex", TORCH_BOX(&apply_aniso_offdiag_current_ex_cuda));
   m.impl("apply_aniso_offdiag_current_ey", TORCH_BOX(&apply_aniso_offdiag_current_ey_cuda));
   m.impl("apply_aniso_offdiag_current_ez", TORCH_BOX(&apply_aniso_offdiag_current_ez_cuda));

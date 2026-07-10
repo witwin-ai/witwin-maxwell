@@ -367,7 +367,13 @@ def test_rotated_uniaxial_update_matches_principal_axis_superposition():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_full_aniso_structure_inside_pml_is_rejected():
+def test_full_aniso_structure_inside_cpml_is_supported():
+    """A full-anisotropic structure may now overlap the default CPML absorber.
+
+    The off-diagonal coupling is coordinate-stretched by the dedicated CPML aniso
+    kernel with its own per-direction psi memory, so the overlap is recorded and
+    the scene prepares instead of raising.
+    """
     frequency = 1.0e9
     material = mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0))
     scene = _build_plane_wave_scene(frequency, spacing=0.04)
@@ -375,8 +381,29 @@ def test_full_aniso_structure_inside_pml_is_rejected():
     scene.add_structure(
         mw.Structure(geometry=Box(position=(0.1, 0.0, 0.0), size=(0.2, 0.8, 0.8)), material=material)
     )
-    with pytest.raises(NotImplementedError, match="PML"):
-        mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare()
+    solver = mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare().solver
+    assert solver.full_aniso_enabled
+    assert solver.uses_cpml
+    assert solver._full_aniso_cpml_overlap
+    for component in ("ex", "ey", "ez"):
+        for axis in ("x", "y", "z"):
+            psi = getattr(solver, f"psi_{component}_aniso_{axis}")
+            assert psi is not None
+            assert bool(torch.all(psi == 0.0))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_full_aniso_structure_inside_split_field_absorber_is_rejected():
+    """The split-field graded-sigma absorbers have no per-direction psi memory to
+    coordinate-stretch the off-diagonal coupling, so an overlap stays rejected."""
+    frequency = 1.0e9
+    material = mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0))
+    scene = _build_plane_wave_scene(frequency, spacing=0.04)
+    scene.add_structure(
+        mw.Structure(geometry=Box(position=(0.1, 0.0, 0.0), size=(0.2, 0.8, 0.8)), material=material)
+    )
+    with pytest.raises(NotImplementedError, match="split-field"):
+        mw.Simulation.fdtd(scene, frequencies=[frequency], absorber="pml").prepare()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
@@ -420,9 +447,10 @@ def test_full_aniso_composes_with_dispersive_structures():
             material=mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=1.0e-10),
         )
     )
-    # The anisotropic structure stays clear of the transverse PML (full
-    # off-diagonal media may not overlap the absorber); the isotropic dispersive
-    # slab above may touch it.
+    # The anisotropic structure stays clear of the transverse PML here so the
+    # off-diagonal current correction is a no-op; the isotropic dispersive slab
+    # above may touch it. (Anisotropic overlap of the CPML absorber is covered
+    # separately by the reflection test.)
     scene.add_structure(
         mw.Structure(
             geometry=Box(position=(0.3, 0.0, 0.0), size=(0.2, 0.16, 0.16)),

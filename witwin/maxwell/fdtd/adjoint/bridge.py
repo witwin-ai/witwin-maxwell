@@ -200,6 +200,19 @@ class _FDTDGradientBridge:
         unsupported_medium_message = _unsupported_adjoint_medium(solver.scene)
         if unsupported_medium_message is not None:
             raise NotImplementedError(unsupported_medium_message)
+        if getattr(solver, "_full_aniso_cpml_overlap", False):
+            # The forward off-diagonal correction coordinate-stretches the tensor
+            # coupling inside the CPML with per-direction psi memory, but the
+            # reverse replay reconstructs the off-diagonal coupling from the raw
+            # (un-stretched) collocated curl, so a design differentiated through an
+            # anisotropic structure overlapping the absorber would receive a
+            # gradient inconsistent with its forward. Keep the anisotropic
+            # structure clear of the absorber for adjoint runs.
+            raise NotImplementedError(
+                "FDTD adjoint does not support full (off-diagonal) anisotropic media overlapping "
+                "the CPML absorber: the reverse off-diagonal correction uses the un-stretched "
+                "collocated curl and does not replay the CPML coordinate stretch the forward applies."
+            )
         face_codes = (
             int(solver.boundary_x_low_code),
             int(solver.boundary_x_high_code),

@@ -229,6 +229,13 @@ def build_full_anisotropy(solver, material_model):
     solver.cey_aniso_z = None
     solver.cez_aniso_x = None
     solver.cez_aniso_y = None
+    # Per-direction CPML psi accumulators for the off-diagonal coupling, allocated
+    # only when the anisotropic structure runs under a CPML absorber; kept as
+    # attributes so a graph capture snapshots them like the base CPML psi.
+    for component in ("ex", "ey", "ez"):
+        for axis in ("x", "y", "z"):
+            setattr(solver, f"psi_{component}_aniso_{axis}", None)
+    solver._full_aniso_cpml_overlap = False
     if not solver.full_aniso_enabled:
         return
 
@@ -991,7 +998,7 @@ def _build_full_aniso_curl_coefficients(solver):
             component_name: (1.0 / eps_eff[component_name]).contiguous()
             for component_name in ("Ex", "Ey", "Ez")
         }
-    _validate_full_aniso_absorber_overlap(solver)
+    _handle_full_aniso_absorber_overlap(solver)
 
 
 def _absorbing_region_node_mask(solver):
@@ -1024,17 +1031,11 @@ def _absorbing_region_node_mask(solver):
     return None
 
 
-def _validate_full_aniso_absorber_overlap(solver):
-    """Fail loudly if off-diagonal permittivity extends into an absorbing layer.
-
-    The off-diagonal correction kernel does not carry CPML psi accumulators or
-    split-field stretching, so it is only exact where the absorber profiles are
-    inactive. Off-diagonal coefficients are zero outside the anisotropic
-    structures, so interior structures pass this check untouched.
-    """
+def _full_aniso_offdiag_overlaps_absorber(solver):
+    """Whether any off-diagonal coupling coefficient reaches into the absorber."""
     mask = _absorbing_region_node_mask(solver)
     if mask is None:
-        return
+        return False
     mask = mask.to(dtype=torch.float32)
     component_coefficients = (
         ("Ex", (solver.cex_aniso_y, solver.cex_aniso_z)),
@@ -1048,15 +1049,55 @@ def _validate_full_aniso_absorber_overlap(solver):
         for _, coefficients in component_coefficients
         for coefficient in coefficients
     )
+    if peak == 0.0:
+        return False
     threshold = 1.0e-6 * peak
     for component_name, coefficients in component_coefficients:
         edge_mask = average_node_to_component(solver, mask, component_name) > 0
         for coefficient in coefficients:
             if bool(torch.any(edge_mask & (coefficient.abs() > threshold)).item()):
-                raise NotImplementedError(
-                    "FDTD full (off-diagonal) anisotropic media inside PML/absorber layers are "
-                    "not implemented; keep anisotropic structures out of the absorbing boundary region."
-                )
+                return True
+    return False
+
+
+def _initialize_full_aniso_cpml_psi(solver):
+    """Allocate the per-direction off-diagonal CPML psi accumulators.
+
+    The CPML off-diagonal correction kernel coordinate-stretches each of the
+    three spatial derivative directions with an independent recursive-convolution
+    memory owned by the target E edge. The buffers share the E-field shapes and
+    start at zero, so a structure that never reaches the absorber leaves them at
+    zero and the correction is byte-consistent with the raw (no-stretch) update.
+    """
+    for field_name, component in (("Ex", "ex"), ("Ey", "ey"), ("Ez", "ez")):
+        field = getattr(solver, field_name)
+        for axis in ("x", "y", "z"):
+            setattr(solver, f"psi_{component}_aniso_{axis}", torch.zeros_like(field))
+
+
+def _handle_full_aniso_absorber_overlap(solver):
+    """Route an anisotropic structure that overlaps the absorbing boundary.
+
+    Under CPML the dedicated off-diagonal kernel coordinate-stretches the tensor
+    coupling with its own psi memory (allocated here), so the overlap is
+    supported; the overlap is recorded because the reverse adjoint replay does
+    not yet stretch the off-diagonal, and the split-field graded-sigma absorbers
+    ('pml'/'absorber') carry no per-direction auxiliary memory to stretch the
+    coupling, so an overlap there is rejected with a physical reason.
+    """
+    solver._full_aniso_cpml_overlap = False
+    if getattr(solver, "uses_cpml", False):
+        _initialize_full_aniso_cpml_psi(solver)
+        solver._full_aniso_cpml_overlap = _full_aniso_offdiag_overlaps_absorber(solver)
+        return
+    if _full_aniso_offdiag_overlaps_absorber(solver):
+        raise NotImplementedError(
+            "FDTD full (off-diagonal) anisotropic media overlapping a split-field "
+            "PML/absorber layer are not supported: the graded-sigma absorber carries no "
+            "per-direction auxiliary memory to coordinate-stretch the off-diagonal tensor "
+            "coupling. Use the default CPML absorber for anisotropic structures that reach "
+            "the boundary region."
+        )
 
 
 def build_update_coefficients(solver):

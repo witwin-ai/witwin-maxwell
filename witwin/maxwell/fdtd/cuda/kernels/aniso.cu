@@ -192,6 +192,146 @@ __device__ __forceinline__ bool curl_h_z_at(
   return true;
 }
 
+// --- Split (per-direction) curl(H) parts for the CPML off-diagonal update ---
+//
+// The CPML off-diagonal correction coordinate-stretches each spatial derivative
+// separately, so it needs the two directional derivatives that make up an
+// off-axis curl(H) component instead of their difference. These helpers mirror
+// the curl_h_*_at stencils above exactly but return each part; when the stencil
+// leaves a non-periodic axis they return false so the neighbor is skipped
+// identically to the raw path (its contribution to both parts is zero).
+
+// curl(H)_x = dHz/dy - dHy/dz at the Ex edge: outputs d_dy = dHz/dy, d_dz = dHy/dz.
+__device__ __forceinline__ bool curl_h_x_parts(
+    const float* __restrict__ hy,
+    const float* __restrict__ hz,
+    int sx,
+    int sy,
+    int sz,
+    int nx_nodes,
+    int ny_nodes,
+    int nz_nodes,
+    bool periodic_x,
+    bool periodic_y,
+    bool periodic_z,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
+    float& d_dy,
+    float& d_dz) {
+  sx = wrap_edge_coord(sx, nx_nodes, periodic_x);
+  if (sx < 0) {
+    return false;
+  }
+  sy = map_node_coord(sy, ny_nodes, periodic_y);
+  sz = map_node_coord(sz, nz_nodes, periodic_z);
+  int y_low;
+  int y_high;
+  int z_low;
+  int z_high;
+  if (!backward_edge_pair(sy, ny_nodes, periodic_y, y_low, y_high) ||
+      !backward_edge_pair(sz, nz_nodes, periodic_z, z_low, z_high)) {
+    return false;
+  }
+  d_dy = (hz[offset3d(sx, y_high, sz, ny_nodes - 1, nz_nodes)] -
+          hz[offset3d(sx, y_low, sz, ny_nodes - 1, nz_nodes)]) * inv_dy[sy];
+  d_dz = (hy[offset3d(sx, sy, z_high, ny_nodes, nz_nodes - 1)] -
+          hy[offset3d(sx, sy, z_low, ny_nodes, nz_nodes - 1)]) * inv_dz[sz];
+  return true;
+}
+
+// curl(H)_y = dHx/dz - dHz/dx at the Ey edge: outputs d_dz = dHx/dz, d_dx = dHz/dx.
+__device__ __forceinline__ bool curl_h_y_parts(
+    const float* __restrict__ hx,
+    const float* __restrict__ hz,
+    int sx,
+    int sy,
+    int sz,
+    int nx_nodes,
+    int ny_nodes,
+    int nz_nodes,
+    bool periodic_x,
+    bool periodic_y,
+    bool periodic_z,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dz,
+    float& d_dz,
+    float& d_dx) {
+  sy = wrap_edge_coord(sy, ny_nodes, periodic_y);
+  if (sy < 0) {
+    return false;
+  }
+  sx = map_node_coord(sx, nx_nodes, periodic_x);
+  sz = map_node_coord(sz, nz_nodes, periodic_z);
+  int x_low;
+  int x_high;
+  int z_low;
+  int z_high;
+  if (!backward_edge_pair(sx, nx_nodes, periodic_x, x_low, x_high) ||
+      !backward_edge_pair(sz, nz_nodes, periodic_z, z_low, z_high)) {
+    return false;
+  }
+  d_dz = (hx[offset3d(sx, sy, z_high, ny_nodes - 1, nz_nodes - 1)] -
+          hx[offset3d(sx, sy, z_low, ny_nodes - 1, nz_nodes - 1)]) * inv_dz[sz];
+  d_dx = (hz[offset3d(x_high, sy, sz, ny_nodes - 1, nz_nodes)] -
+          hz[offset3d(x_low, sy, sz, ny_nodes - 1, nz_nodes)]) * inv_dx[sx];
+  return true;
+}
+
+// curl(H)_z = dHy/dx - dHx/dy at the Ez edge: outputs d_dx = dHy/dx, d_dy = dHx/dy.
+__device__ __forceinline__ bool curl_h_z_parts(
+    const float* __restrict__ hx,
+    const float* __restrict__ hy,
+    int sx,
+    int sy,
+    int sz,
+    int nx_nodes,
+    int ny_nodes,
+    int nz_nodes,
+    bool periodic_x,
+    bool periodic_y,
+    bool periodic_z,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
+    float& d_dx,
+    float& d_dy) {
+  sz = wrap_edge_coord(sz, nz_nodes, periodic_z);
+  if (sz < 0) {
+    return false;
+  }
+  sx = map_node_coord(sx, nx_nodes, periodic_x);
+  sy = map_node_coord(sy, ny_nodes, periodic_y);
+  int x_low;
+  int x_high;
+  int y_low;
+  int y_high;
+  if (!backward_edge_pair(sx, nx_nodes, periodic_x, x_low, x_high) ||
+      !backward_edge_pair(sy, ny_nodes, periodic_y, y_low, y_high)) {
+    return false;
+  }
+  d_dx = (hy[offset3d(x_high, sy, sz, ny_nodes, nz_nodes - 1)] -
+          hy[offset3d(x_low, sy, sz, ny_nodes, nz_nodes - 1)]) * inv_dx[sx];
+  d_dy = (hx[offset3d(sx, y_high, sz, ny_nodes - 1, nz_nodes - 1)] -
+          hx[offset3d(sx, y_low, sz, ny_nodes - 1, nz_nodes - 1)]) * inv_dy[sy];
+  return true;
+}
+
+// One CPML coordinate-stretch of a collocated off-diagonal driver term. The
+// psi accumulator lives at the target E edge (single update per step, no race);
+// b/c/inv_kappa are the axis profiles sampled at that edge's index for the axis.
+// Outside the absorber (c == 0, b == 1, inv_kappa == 1) this returns the driver
+// unchanged and psi stays zero, so the correction reduces to the raw update.
+__device__ __forceinline__ float aniso_cpml_stretch(
+    float driver,
+    float* __restrict__ psi,
+    long long linear,
+    float b,
+    float c,
+    float inv_kappa) {
+  const float psi_new = b * psi[linear] + c * driver;
+  psi[linear] = psi_new;
+  return driver * inv_kappa + psi_new;
+}
+
 // Ex(i, j, k) lives at ((i+1/2), j, k) on an (nx_nodes, ny_nodes, nz_nodes)
 // node grid; field shape is (nx_nodes-1, ny_nodes, nz_nodes).
 __global__ void update_electric_ex_full_aniso_kernel(
@@ -401,6 +541,302 @@ __global__ void update_electric_ez_full_aniso_kernel(
   }
 
   ez[linear] += 0.25f * (c_x * acc_x + c_y * acc_y);
+}
+
+// --- CPML-consistent off-diagonal correction (structure overlapping the PML) -
+//
+// The raw kernels above add the collocated off-axis curl(H) with plain finite
+// differences, which is only exact where the CPML coordinate stretch is
+// inactive. When an anisotropic structure reaches into the absorber the
+// off-diagonal coupling must be stretched exactly like the diagonal curl. These
+// kernels split each off-axis curl(H) into its two directional derivatives,
+// collocate each onto the target E edge, and apply the CPML stretch per
+// direction with a psi accumulator owned by that edge. The transverse
+// directions use the E-field (node) profiles at the edge's node index; the
+// edge's own direction sits on a half point, so it uses the H-field (half)
+// profile at the edge index. The three per-direction psi buffers are zero
+// outside the absorber, so this reduces exactly to the raw correction there.
+
+__global__ void update_electric_ex_full_aniso_cpml_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ hx,
+    const float* __restrict__ hy,
+    const float* __restrict__ hz,
+    const float* __restrict__ coeff_y,
+    const float* __restrict__ coeff_z,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ cpml_b_x,
+    const float* __restrict__ cpml_c_x,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ cpml_b_y,
+    const float* __restrict__ cpml_c_y,
+    const float* __restrict__ inv_kappa_z,
+    const float* __restrict__ cpml_b_z,
+    const float* __restrict__ cpml_c_z,
+    int periodic_x,
+    int periodic_y,
+    int periodic_z,
+    float* __restrict__ psi_x,
+    float* __restrict__ psi_y,
+    float* __restrict__ psi_z,
+    float* __restrict__ ex) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const float c_y = coeff_y[linear];
+  const float c_z = coeff_z[linear];
+  if (c_y == 0.0f && c_z == 0.0f) {
+    return;
+  }
+  const int nx_nodes = static_cast<int>(nx) + 1;  // ex shape (Nx-1, Ny, Nz)
+  const int ny_nodes = static_cast<int>(ny);
+  const int nz_nodes = static_cast<int>(nz);
+  const bool per_x = periodic_x != 0;
+  const bool per_y = periodic_y != 0;
+  const bool per_z = periodic_z != 0;
+  const int ii = static_cast<int>(i);
+  const int jj = static_cast<int>(j);
+  const int kk = static_cast<int>(k);
+
+  // curl(H)_y over the four surrounding Ey edges: split into dHx/dz and dHz/dx.
+  float acc_yz = 0.0f;  // dHx/dz
+  float acc_yx = 0.0f;  // dHz/dx
+  if (c_y != 0.0f) {
+    for (int sx = ii; sx <= ii + 1; ++sx) {
+      for (int sy = jj - 1; sy <= jj; ++sy) {
+        float d_dz;
+        float d_dx;
+        if (curl_h_y_parts(hx, hz, sx, sy, kk, nx_nodes, ny_nodes, nz_nodes,
+                           per_x, per_y, per_z, inv_dx, inv_dz, d_dz, d_dx)) {
+          acc_yz += d_dz;
+          acc_yx += d_dx;
+        }
+      }
+    }
+  }
+
+  // curl(H)_z over the four surrounding Ez edges: split into dHy/dx and dHx/dy.
+  float acc_zx = 0.0f;  // dHy/dx
+  float acc_zy = 0.0f;  // dHx/dy
+  if (c_z != 0.0f) {
+    for (int sx = ii; sx <= ii + 1; ++sx) {
+      for (int sz = kk - 1; sz <= kk; ++sz) {
+        float d_dx;
+        float d_dy;
+        if (curl_h_z_parts(hx, hy, sx, jj, sz, nx_nodes, ny_nodes, nz_nodes,
+                           per_x, per_y, per_z, inv_dx, inv_dy, d_dx, d_dy)) {
+          acc_zx += d_dx;
+          acc_zy += d_dy;
+        }
+      }
+    }
+  }
+
+  const float driver_x = 0.25f * (-c_y * acc_yx + c_z * acc_zx);
+  const float driver_y = 0.25f * (-c_z * acc_zy);
+  const float driver_z = 0.25f * (c_y * acc_yz);
+
+  const float out_x = aniso_cpml_stretch(driver_x, psi_x, linear, cpml_b_x[i], cpml_c_x[i], inv_kappa_x[i]);
+  const float out_y = aniso_cpml_stretch(driver_y, psi_y, linear, cpml_b_y[j], cpml_c_y[j], inv_kappa_y[j]);
+  const float out_z = aniso_cpml_stretch(driver_z, psi_z, linear, cpml_b_z[k], cpml_c_z[k], inv_kappa_z[k]);
+  ex[linear] += out_x + out_y + out_z;
+}
+
+__global__ void update_electric_ey_full_aniso_cpml_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ hx,
+    const float* __restrict__ hy,
+    const float* __restrict__ hz,
+    const float* __restrict__ coeff_x,
+    const float* __restrict__ coeff_z,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ cpml_b_x,
+    const float* __restrict__ cpml_c_x,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ cpml_b_y,
+    const float* __restrict__ cpml_c_y,
+    const float* __restrict__ inv_kappa_z,
+    const float* __restrict__ cpml_b_z,
+    const float* __restrict__ cpml_c_z,
+    int periodic_x,
+    int periodic_y,
+    int periodic_z,
+    float* __restrict__ psi_x,
+    float* __restrict__ psi_y,
+    float* __restrict__ psi_z,
+    float* __restrict__ ey) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const float c_x = coeff_x[linear];
+  const float c_z = coeff_z[linear];
+  if (c_x == 0.0f && c_z == 0.0f) {
+    return;
+  }
+  const int nx_nodes = static_cast<int>(nx);  // ey shape (Nx, Ny-1, Nz)
+  const int ny_nodes = static_cast<int>(ny) + 1;
+  const int nz_nodes = static_cast<int>(nz);
+  const bool per_x = periodic_x != 0;
+  const bool per_y = periodic_y != 0;
+  const bool per_z = periodic_z != 0;
+  const int ii = static_cast<int>(i);
+  const int jj = static_cast<int>(j);
+  const int kk = static_cast<int>(k);
+
+  // curl(H)_x over the four surrounding Ex edges: split into dHz/dy and dHy/dz.
+  float acc_xy = 0.0f;  // dHz/dy
+  float acc_xz = 0.0f;  // dHy/dz
+  if (c_x != 0.0f) {
+    for (int sx = ii - 1; sx <= ii; ++sx) {
+      for (int sy = jj; sy <= jj + 1; ++sy) {
+        float d_dy;
+        float d_dz;
+        if (curl_h_x_parts(hy, hz, sx, sy, kk, nx_nodes, ny_nodes, nz_nodes,
+                           per_x, per_y, per_z, inv_dy, inv_dz, d_dy, d_dz)) {
+          acc_xy += d_dy;
+          acc_xz += d_dz;
+        }
+      }
+    }
+  }
+
+  // curl(H)_z over the four surrounding Ez edges: split into dHy/dx and dHx/dy.
+  float acc_zx = 0.0f;  // dHy/dx
+  float acc_zy = 0.0f;  // dHx/dy
+  if (c_z != 0.0f) {
+    for (int sy = jj; sy <= jj + 1; ++sy) {
+      for (int sz = kk - 1; sz <= kk; ++sz) {
+        float d_dx;
+        float d_dy;
+        if (curl_h_z_parts(hx, hy, ii, sy, sz, nx_nodes, ny_nodes, nz_nodes,
+                           per_x, per_y, per_z, inv_dx, inv_dy, d_dx, d_dy)) {
+          acc_zx += d_dx;
+          acc_zy += d_dy;
+        }
+      }
+    }
+  }
+
+  const float driver_x = 0.25f * (c_z * acc_zx);
+  const float driver_y = 0.25f * (c_x * acc_xy - c_z * acc_zy);
+  const float driver_z = 0.25f * (-c_x * acc_xz);
+
+  const float out_x = aniso_cpml_stretch(driver_x, psi_x, linear, cpml_b_x[i], cpml_c_x[i], inv_kappa_x[i]);
+  const float out_y = aniso_cpml_stretch(driver_y, psi_y, linear, cpml_b_y[j], cpml_c_y[j], inv_kappa_y[j]);
+  const float out_z = aniso_cpml_stretch(driver_z, psi_z, linear, cpml_b_z[k], cpml_c_z[k], inv_kappa_z[k]);
+  ey[linear] += out_x + out_y + out_z;
+}
+
+__global__ void update_electric_ez_full_aniso_cpml_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ hx,
+    const float* __restrict__ hy,
+    const float* __restrict__ hz,
+    const float* __restrict__ coeff_x,
+    const float* __restrict__ coeff_y,
+    const float* __restrict__ inv_dx,
+    const float* __restrict__ inv_dy,
+    const float* __restrict__ inv_dz,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ cpml_b_x,
+    const float* __restrict__ cpml_c_x,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ cpml_b_y,
+    const float* __restrict__ cpml_c_y,
+    const float* __restrict__ inv_kappa_z,
+    const float* __restrict__ cpml_b_z,
+    const float* __restrict__ cpml_c_z,
+    int periodic_x,
+    int periodic_y,
+    int periodic_z,
+    float* __restrict__ psi_x,
+    float* __restrict__ psi_y,
+    float* __restrict__ psi_z,
+    float* __restrict__ ez) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const float c_x = coeff_x[linear];
+  const float c_y = coeff_y[linear];
+  if (c_x == 0.0f && c_y == 0.0f) {
+    return;
+  }
+  const int nx_nodes = static_cast<int>(nx);  // ez shape (Nx, Ny, Nz-1)
+  const int ny_nodes = static_cast<int>(ny);
+  const int nz_nodes = static_cast<int>(nz) + 1;
+  const bool per_x = periodic_x != 0;
+  const bool per_y = periodic_y != 0;
+  const bool per_z = periodic_z != 0;
+  const int ii = static_cast<int>(i);
+  const int jj = static_cast<int>(j);
+  const int kk = static_cast<int>(k);
+
+  // curl(H)_x over the four surrounding Ex edges: split into dHz/dy and dHy/dz.
+  float acc_xy = 0.0f;  // dHz/dy
+  float acc_xz = 0.0f;  // dHy/dz
+  if (c_x != 0.0f) {
+    for (int sx = ii - 1; sx <= ii; ++sx) {
+      for (int sz = kk; sz <= kk + 1; ++sz) {
+        float d_dy;
+        float d_dz;
+        if (curl_h_x_parts(hy, hz, sx, jj, sz, nx_nodes, ny_nodes, nz_nodes,
+                           per_x, per_y, per_z, inv_dy, inv_dz, d_dy, d_dz)) {
+          acc_xy += d_dy;
+          acc_xz += d_dz;
+        }
+      }
+    }
+  }
+
+  // curl(H)_y over the four surrounding Ey edges: split into dHx/dz and dHz/dx.
+  float acc_yz = 0.0f;  // dHx/dz
+  float acc_yx = 0.0f;  // dHz/dx
+  if (c_y != 0.0f) {
+    for (int sy = jj - 1; sy <= jj; ++sy) {
+      for (int sz = kk; sz <= kk + 1; ++sz) {
+        float d_dz;
+        float d_dx;
+        if (curl_h_y_parts(hx, hz, ii, sy, sz, nx_nodes, ny_nodes, nz_nodes,
+                           per_x, per_y, per_z, inv_dx, inv_dz, d_dz, d_dx)) {
+          acc_yz += d_dz;
+          acc_yx += d_dx;
+        }
+      }
+    }
+  }
+
+  const float driver_x = 0.25f * (-c_y * acc_yx);
+  const float driver_y = 0.25f * (c_x * acc_xy);
+  const float driver_z = 0.25f * (-c_x * acc_xz + c_y * acc_yz);
+
+  const float out_x = aniso_cpml_stretch(driver_x, psi_x, linear, cpml_b_x[i], cpml_c_x[i], inv_kappa_x[i]);
+  const float out_y = aniso_cpml_stretch(driver_y, psi_y, linear, cpml_b_y[j], cpml_c_y[j], inv_kappa_y[j]);
+  const float out_z = aniso_cpml_stretch(driver_z, psi_z, linear, cpml_b_z[k], cpml_c_z[k], inv_kappa_z[k]);
+  ez[linear] += out_x + out_y + out_z;
 }
 
 // --- Off-diagonal ADE polarization-current subtraction ---------------------
@@ -711,6 +1147,37 @@ void check_full_aniso_inputs(
   STD_TORCH_CHECK(inv_dz.dim() == 1 && inv_dz.size(0) == nz_nodes, name, " inv_dz length must be the node count");
 }
 
+void check_aniso_cpml_axis(
+    const torch::stable::Tensor& field,
+    const torch::stable::Tensor& inv_kappa,
+    const torch::stable::Tensor& cpml_b,
+    const torch::stable::Tensor& cpml_c,
+    int axis,
+    const char* name) {
+  for (const torch::stable::Tensor* tensor : {&inv_kappa, &cpml_b, &cpml_c}) {
+    check_float32_tensor(*tensor, name);
+    check_contiguous_tensor(*tensor, name);
+    check_same_cuda_device(field, *tensor, name);
+    STD_TORCH_CHECK(
+        tensor->dim() == 1 && tensor->size(0) == field.size(axis),
+        name, " CPML profile length must match the field extent along its axis");
+  }
+}
+
+void check_aniso_cpml_psi(
+    const torch::stable::Tensor& field,
+    const torch::stable::Tensor& psi_x,
+    const torch::stable::Tensor& psi_y,
+    const torch::stable::Tensor& psi_z,
+    const char* name) {
+  for (const torch::stable::Tensor* tensor : {&psi_x, &psi_y, &psi_z}) {
+    check_float32_tensor(*tensor, name);
+    check_contiguous_tensor(*tensor, name);
+    check_same_cuda_device(field, *tensor, name);
+    STD_TORCH_CHECK(tensor->sizes().equals(field.sizes()), name, " psi buffer must match field shape");
+  }
+}
+
 void check_current_field(
     const torch::stable::Tensor& field,
     const torch::stable::Tensor& reference,
@@ -859,6 +1326,210 @@ void update_electric_ez_full_aniso_cuda(
       static_cast<int>(periodic_x),
       static_cast<int>(periodic_y),
       static_cast<int>(periodic_z),
+      ez.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void update_electric_ex_full_aniso_cpml_cuda(
+    torch::stable::Tensor ex,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& coeff_y,
+    const torch::stable::Tensor& coeff_z,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_kappa_z,
+    const torch::stable::Tensor& b_z,
+    const torch::stable::Tensor& c_z,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z,
+    torch::stable::Tensor psi_x,
+    torch::stable::Tensor psi_y,
+    torch::stable::Tensor psi_z) {
+  const int64_t nx_nodes = ex.size(0) + 1;
+  const int64_t ny_nodes = ex.size(1);
+  const int64_t nz_nodes = ex.size(2);
+  check_full_aniso_inputs(ex, hx, hy, hz, coeff_y, coeff_z, inv_dx, inv_dy, inv_dz,
+                          nx_nodes, ny_nodes, nz_nodes, "ex_cpml");
+  check_aniso_cpml_axis(ex, inv_kappa_x, b_x, c_x, 0, "ex_cpml x");
+  check_aniso_cpml_axis(ex, inv_kappa_y, b_y, c_y, 1, "ex_cpml y");
+  check_aniso_cpml_axis(ex, inv_kappa_z, b_z, c_z, 2, "ex_cpml z");
+  check_aniso_cpml_psi(ex, psi_x, psi_y, psi_z, "ex_cpml psi");
+  torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
+  const dim3 block = aniso_block3d();
+  update_electric_ex_full_aniso_cpml_kernel<<<
+      aniso_grid3d(ex.size(0), ex.size(1), ex.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(ex.size(0)),
+      static_cast<unsigned int>(ex.size(1)),
+      static_cast<unsigned int>(ex.size(2)),
+      hx.mutable_data_ptr<float>(),
+      hy.mutable_data_ptr<float>(),
+      hz.mutable_data_ptr<float>(),
+      coeff_y.mutable_data_ptr<float>(),
+      coeff_z.mutable_data_ptr<float>(),
+      inv_dx.mutable_data_ptr<float>(),
+      inv_dy.mutable_data_ptr<float>(),
+      inv_dz.mutable_data_ptr<float>(),
+      inv_kappa_x.mutable_data_ptr<float>(),
+      b_x.mutable_data_ptr<float>(),
+      c_x.mutable_data_ptr<float>(),
+      inv_kappa_y.mutable_data_ptr<float>(),
+      b_y.mutable_data_ptr<float>(),
+      c_y.mutable_data_ptr<float>(),
+      inv_kappa_z.mutable_data_ptr<float>(),
+      b_z.mutable_data_ptr<float>(),
+      c_z.mutable_data_ptr<float>(),
+      static_cast<int>(periodic_x),
+      static_cast<int>(periodic_y),
+      static_cast<int>(periodic_z),
+      psi_x.mutable_data_ptr<float>(),
+      psi_y.mutable_data_ptr<float>(),
+      psi_z.mutable_data_ptr<float>(),
+      ex.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void update_electric_ey_full_aniso_cpml_cuda(
+    torch::stable::Tensor ey,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& coeff_x,
+    const torch::stable::Tensor& coeff_z,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_kappa_z,
+    const torch::stable::Tensor& b_z,
+    const torch::stable::Tensor& c_z,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z,
+    torch::stable::Tensor psi_x,
+    torch::stable::Tensor psi_y,
+    torch::stable::Tensor psi_z) {
+  const int64_t nx_nodes = ey.size(0);
+  const int64_t ny_nodes = ey.size(1) + 1;
+  const int64_t nz_nodes = ey.size(2);
+  check_full_aniso_inputs(ey, hx, hy, hz, coeff_x, coeff_z, inv_dx, inv_dy, inv_dz,
+                          nx_nodes, ny_nodes, nz_nodes, "ey_cpml");
+  check_aniso_cpml_axis(ey, inv_kappa_x, b_x, c_x, 0, "ey_cpml x");
+  check_aniso_cpml_axis(ey, inv_kappa_y, b_y, c_y, 1, "ey_cpml y");
+  check_aniso_cpml_axis(ey, inv_kappa_z, b_z, c_z, 2, "ey_cpml z");
+  check_aniso_cpml_psi(ey, psi_x, psi_y, psi_z, "ey_cpml psi");
+  torch::stable::accelerator::DeviceGuard guard(ey.get_device_index());
+  const dim3 block = aniso_block3d();
+  update_electric_ey_full_aniso_cpml_kernel<<<
+      aniso_grid3d(ey.size(0), ey.size(1), ey.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(ey.size(0)),
+      static_cast<unsigned int>(ey.size(1)),
+      static_cast<unsigned int>(ey.size(2)),
+      hx.mutable_data_ptr<float>(),
+      hy.mutable_data_ptr<float>(),
+      hz.mutable_data_ptr<float>(),
+      coeff_x.mutable_data_ptr<float>(),
+      coeff_z.mutable_data_ptr<float>(),
+      inv_dx.mutable_data_ptr<float>(),
+      inv_dy.mutable_data_ptr<float>(),
+      inv_dz.mutable_data_ptr<float>(),
+      inv_kappa_x.mutable_data_ptr<float>(),
+      b_x.mutable_data_ptr<float>(),
+      c_x.mutable_data_ptr<float>(),
+      inv_kappa_y.mutable_data_ptr<float>(),
+      b_y.mutable_data_ptr<float>(),
+      c_y.mutable_data_ptr<float>(),
+      inv_kappa_z.mutable_data_ptr<float>(),
+      b_z.mutable_data_ptr<float>(),
+      c_z.mutable_data_ptr<float>(),
+      static_cast<int>(periodic_x),
+      static_cast<int>(periodic_y),
+      static_cast<int>(periodic_z),
+      psi_x.mutable_data_ptr<float>(),
+      psi_y.mutable_data_ptr<float>(),
+      psi_z.mutable_data_ptr<float>(),
+      ey.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void update_electric_ez_full_aniso_cpml_cuda(
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& coeff_x,
+    const torch::stable::Tensor& coeff_y,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_kappa_z,
+    const torch::stable::Tensor& b_z,
+    const torch::stable::Tensor& c_z,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z,
+    torch::stable::Tensor psi_x,
+    torch::stable::Tensor psi_y,
+    torch::stable::Tensor psi_z) {
+  const int64_t nx_nodes = ez.size(0);
+  const int64_t ny_nodes = ez.size(1);
+  const int64_t nz_nodes = ez.size(2) + 1;
+  check_full_aniso_inputs(ez, hx, hy, hz, coeff_x, coeff_y, inv_dx, inv_dy, inv_dz,
+                          nx_nodes, ny_nodes, nz_nodes, "ez_cpml");
+  check_aniso_cpml_axis(ez, inv_kappa_x, b_x, c_x, 0, "ez_cpml x");
+  check_aniso_cpml_axis(ez, inv_kappa_y, b_y, c_y, 1, "ez_cpml y");
+  check_aniso_cpml_axis(ez, inv_kappa_z, b_z, c_z, 2, "ez_cpml z");
+  check_aniso_cpml_psi(ez, psi_x, psi_y, psi_z, "ez_cpml psi");
+  torch::stable::accelerator::DeviceGuard guard(ez.get_device_index());
+  const dim3 block = aniso_block3d();
+  update_electric_ez_full_aniso_cpml_kernel<<<
+      aniso_grid3d(ez.size(0), ez.size(1), ez.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(ez.size(0)),
+      static_cast<unsigned int>(ez.size(1)),
+      static_cast<unsigned int>(ez.size(2)),
+      hx.mutable_data_ptr<float>(),
+      hy.mutable_data_ptr<float>(),
+      hz.mutable_data_ptr<float>(),
+      coeff_x.mutable_data_ptr<float>(),
+      coeff_y.mutable_data_ptr<float>(),
+      inv_dx.mutable_data_ptr<float>(),
+      inv_dy.mutable_data_ptr<float>(),
+      inv_dz.mutable_data_ptr<float>(),
+      inv_kappa_x.mutable_data_ptr<float>(),
+      b_x.mutable_data_ptr<float>(),
+      c_x.mutable_data_ptr<float>(),
+      inv_kappa_y.mutable_data_ptr<float>(),
+      b_y.mutable_data_ptr<float>(),
+      c_y.mutable_data_ptr<float>(),
+      inv_kappa_z.mutable_data_ptr<float>(),
+      b_z.mutable_data_ptr<float>(),
+      c_z.mutable_data_ptr<float>(),
+      static_cast<int>(periodic_x),
+      static_cast<int>(periodic_y),
+      static_cast<int>(periodic_z),
+      psi_x.mutable_data_ptr<float>(),
+      psi_y.mutable_data_ptr<float>(),
+      psi_z.mutable_data_ptr<float>(),
       ez.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }

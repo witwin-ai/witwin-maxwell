@@ -2125,6 +2125,57 @@ def _electric_ez_full_aniso(*, Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, inv
             )
 
 
+def _electric_ex_full_aniso_cpml(
+    *,
+    Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz,
+    InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ,
+    periodicX, periodicY, periodicZ, PsiX, PsiY, PsiZ,
+):
+    _require_cuda_tensors(
+        Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz,
+        InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ, PsiX, PsiY, PsiZ,
+    )
+    get_compiled_extension().update_electric_ex_full_aniso_cpml(
+                Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz,
+                InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ,
+                int(periodicX), int(periodicY), int(periodicZ), PsiX, PsiY, PsiZ,
+            )
+
+
+def _electric_ey_full_aniso_cpml(
+    *,
+    Ey, Hx, Hy, Hz, CoeffX, CoeffZ, invDx, invDy, invDz,
+    InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ,
+    periodicX, periodicY, periodicZ, PsiX, PsiY, PsiZ,
+):
+    _require_cuda_tensors(
+        Ey, Hx, Hy, Hz, CoeffX, CoeffZ, invDx, invDy, invDz,
+        InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ, PsiX, PsiY, PsiZ,
+    )
+    get_compiled_extension().update_electric_ey_full_aniso_cpml(
+                Ey, Hx, Hy, Hz, CoeffX, CoeffZ, invDx, invDy, invDz,
+                InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ,
+                int(periodicX), int(periodicY), int(periodicZ), PsiX, PsiY, PsiZ,
+            )
+
+
+def _electric_ez_full_aniso_cpml(
+    *,
+    Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, invDz,
+    InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ,
+    periodicX, periodicY, periodicZ, PsiX, PsiY, PsiZ,
+):
+    _require_cuda_tensors(
+        Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, invDz,
+        InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ, PsiX, PsiY, PsiZ,
+    )
+    get_compiled_extension().update_electric_ez_full_aniso_cpml(
+                Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, invDz,
+                InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ,
+                int(periodicX), int(periodicY), int(periodicZ), PsiX, PsiY, PsiZ,
+            )
+
+
 def _aniso_offdiag_current_ex(*, Ex, Jy, Jz, CoeffY, CoeffZ, periodicX, periodicY, periodicZ):
     _require_cuda_tensors(Ex, Jy, Jz, CoeffY, CoeffZ)
     get_compiled_extension().apply_aniso_offdiag_current_ex(
@@ -2929,6 +2980,9 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "updateElectricFieldExFullAniso3D": _electric_ex_full_aniso,
     "updateElectricFieldEyFullAniso3D": _electric_ey_full_aniso,
     "updateElectricFieldEzFullAniso3D": _electric_ez_full_aniso,
+    "updateElectricFieldExFullAnisoCpml3D": _electric_ex_full_aniso_cpml,
+    "updateElectricFieldEyFullAnisoCpml3D": _electric_ey_full_aniso_cpml,
+    "updateElectricFieldEzFullAnisoCpml3D": _electric_ez_full_aniso_cpml,
     "applyAnisoOffdiagCurrentEx3D": _aniso_offdiag_current_ex,
     "applyAnisoOffdiagCurrentEy3D": _aniso_offdiag_current_ey,
     "applyAnisoOffdiagCurrentEz3D": _aniso_offdiag_current_ez,
