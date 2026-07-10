@@ -125,6 +125,8 @@ def _convert_material(material, td):
     """Convert a Maxwell Material to a Tidy3D medium."""
     if getattr(material, "is_medium2d", False):
         raise NotImplementedError("Tidy3D export for 2D sheet (Medium2D) materials is not implemented yet.")
+    if getattr(material, "is_lossy_metal", False):
+        raise NotImplementedError("Tidy3D export for LossyMetalMedium is not implemented yet.")
     has_debye = bool(material.debye_poles)
     has_drude = bool(material.drude_poles)
     has_lorentz = bool(material.lorentz_poles)

@@ -1023,6 +1023,61 @@ class Graphene(Medium2D):
         return ((self.intraband_drude_weight, self.scattering_rate),)
 
 
+_VACUUM_PERMEABILITY = 4.0e-7 * np.pi  # [H/m]
+
+
+class LossyMetalMedium(Material):
+    """Good-conductor metal intended for a surface-impedance boundary condition (SIBC).
+
+    ``conductivity`` [S/m] is the bulk metal conductivity. The intended runtime
+    treatment replaces the resolved metal interior with the first-order Leontovich
+    boundary condition ``E_t = Z_s(omega) * (n x H)`` on the metal surface, where
+    (with the ``e^{-i*omega*t}`` convention)
+
+    ``Z_s(omega) = (1 - i) / (conductivity * skin_depth(omega))
+                 = (1 - i) * sqrt(omega * mu0 / (2 * conductivity))``
+
+    so the skin-depth interior never needs to be meshed.
+
+    The SIBC runtime is **not implemented yet**: ``Z_s ~ sqrt(-i*omega)`` is not
+    rational in ``omega``, so a time-domain implementation needs a vector-fitted
+    pole expansion of ``Z_s`` with per-face recursive-convolution state and a
+    dedicated boundary-side update kernel on the tangential E faces adjacent to
+    the metal surface. Compiling a Scene that contains a ``LossyMetalMedium``
+    structure raises ``NotImplementedError``; resolve the metal volumetrically
+    with ``Material(sigma_e=...)`` (or use ``Material.pec()`` for a lossless
+    shortcut) in the meantime. The analytic helpers ``surface_impedance`` /
+    ``surface_impedance_at_freq`` / ``skin_depth`` are exposed for validation
+    and design work.
+    """
+
+    def __init__(self, *, conductivity: float, name: str | None = None):
+        super().__init__(eps_r=1.0, mu_r=1.0, sigma_e=0.0, name=name)
+        object.__setattr__(
+            self, "conductivity", _coerce_positive(conductivity, name="conductivity")
+        )
+
+    @property
+    def is_lossy_metal(self) -> bool:
+        return True
+
+    def skin_depth(self, frequency: float) -> float:
+        """Skin depth ``sqrt(2 / (omega * mu0 * sigma))`` [m] at ``frequency`` [Hz]."""
+        omega = 2.0 * np.pi * _coerce_frequency(frequency, name="frequency")
+        return float(np.sqrt(2.0 / (omega * _VACUUM_PERMEABILITY * self.conductivity)))
+
+    def surface_impedance(self, angular_frequency: float) -> complex:
+        """Leontovich surface impedance ``Z_s(omega)`` [ohm] (e^{-i*omega*t} convention)."""
+        omega = float(angular_frequency)
+        if omega <= 0.0:
+            raise ValueError("surface_impedance requires angular_frequency > 0.")
+        magnitude = np.sqrt(omega * _VACUUM_PERMEABILITY / (2.0 * self.conductivity))
+        return complex(magnitude, -magnitude)
+
+    def surface_impedance_at_freq(self, frequency: float) -> complex:
+        return self.surface_impedance(2.0 * np.pi * _coerce_frequency(frequency, name="frequency"))
+
+
 class PerturbationMedium(Material):
     """A base material whose permittivity is shifted by an external perturbation field.
 

@@ -901,12 +901,31 @@ def _apply_sheet_structures(scene, model):
     return _refresh_model_summary_aliases(model)
 
 
+def _reject_unsupported_sibc_materials(scene):
+    """Fail loudly for `LossyMetalMedium` structures.
+
+    The surface-impedance boundary condition ``E_t = Z_s(omega) * (n x H)`` is
+    not implemented: ``Z_s ~ sqrt(-i*omega)`` needs a vector-fitted pole
+    expansion with per-face recursive-convolution state and a dedicated
+    boundary-side kernel. Raising here keeps the descriptor from silently
+    compiling to vacuum.
+    """
+    for structure in _sorted_structures(scene):
+        material = _structure_material(structure)
+        if material is not None and bool(getattr(material, "is_lossy_metal", False)):
+            raise NotImplementedError(
+                "LossyMetalMedium (surface-impedance boundary condition) is not implemented yet; "
+                "resolve the metal volumetrically with Material(sigma_e=...) or use Material.pec()."
+            )
+
+
 def compile_material_model(
     scene,
     eps_background=1.0,
     mu_background=1.0,
     subpixel=None,
 ):
+    _reject_unsupported_sibc_materials(scene)
     samples, averaging, pec_mode = _resolve_subpixel(subpixel)
     layout = _build_dispersive_layout(scene)
     modulation_frequency = _scene_modulation_frequency(scene)
