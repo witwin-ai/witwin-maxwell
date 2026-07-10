@@ -304,6 +304,12 @@ def reverse_step(
     chi3_ex=None,
     chi3_ey=None,
     chi3_ez=None,
+    chi2_ex=None,
+    chi2_ey=None,
+    chi2_ez=None,
+    tpa_ex=None,
+    tpa_ey=None,
+    tpa_ez=None,
     profiler=None,
 ):
     runtime = _runtime()
@@ -440,6 +446,12 @@ def reverse_step(
             chi3_ex=chi3_ex,
             chi3_ey=chi3_ey,
             chi3_ez=chi3_ez,
+            chi2_ex=chi2_ex,
+            chi2_ey=chi2_ey,
+            chi2_ez=chi2_ez,
+            tpa_ex=tpa_ex,
+            tpa_ey=tpa_ey,
+            tpa_ez=tpa_ez,
             profiler=profiler,
         )
     raise RuntimeError(f"Unsupported reverse backend selection: {backend!r}")

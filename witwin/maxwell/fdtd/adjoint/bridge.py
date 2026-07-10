@@ -112,16 +112,6 @@ def _unsupported_adjoint_medium(scene):
                 "FDTD adjoint does not support trainable geometry on magnetic dispersive "
                 "structures (no mu gradient channel) yet."
             )
-        if getattr(material, "is_nonlinear", False):
-            # Pure instantaneous chi3 (Kerr) is differentiable through the
-            # torch-VJP reverse of the dynamic-curl recompute plus a dedicated
-            # chi3 gradient channel. chi2 and two-photon absorption rewrite the
-            # decay coefficient through the general nonlinear kernel, which the
-            # adjoint replay does not model yet.
-            if float(getattr(material, "nonlinear_chi2", 0.0)) != 0.0:
-                return "FDTD adjoint does not support chi2 nonlinear media yet."
-            if float(getattr(material, "tpa_sigma_scale", 0.0)) != 0.0:
-                return "FDTD adjoint does not support two-photon-absorption media yet."
         if getattr(material, "is_modulated", False):
             return "FDTD adjoint does not support time-modulated media yet."
     return None
@@ -441,16 +431,40 @@ class _FDTDGradientBridge:
         grad_eps_ex = torch.zeros_like(solver.eps_Ex)
         grad_eps_ey = torch.zeros_like(solver.eps_Ey)
         grad_eps_ez = torch.zeros_like(solver.eps_Ez)
-        kerr_enabled = bool(getattr(solver, "kerr_enabled", False))
+        nonlinear_enabled = bool(getattr(solver, "nonlinear_enabled", False))
+        general_enabled = bool(getattr(solver, "nonlinear_general_enabled", False))
         chi3_ex = chi3_ey = chi3_ez = None
         grad_chi3_ex = grad_chi3_ey = grad_chi3_ez = None
-        if kerr_enabled:
+        chi2_ex = chi2_ey = chi2_ez = None
+        grad_chi2_ex = grad_chi2_ey = grad_chi2_ez = None
+        tpa_ex = tpa_ey = tpa_ez = None
+        grad_tpa_ex = grad_tpa_ey = grad_tpa_ez = None
+        if nonlinear_enabled:
+            # chi3 leaves feed both the curl-only Kerr kernel and the general
+            # nonlinear kernel (which also reads chi3), so allocate them whenever
+            # any instantaneous nonlinear channel is active.
             chi3_ex = solver.kerr_chi3_Ex.detach().clone().requires_grad_(True)
             chi3_ey = solver.kerr_chi3_Ey.detach().clone().requires_grad_(True)
             chi3_ez = solver.kerr_chi3_Ez.detach().clone().requires_grad_(True)
             grad_chi3_ex = torch.zeros_like(solver.kerr_chi3_Ex)
             grad_chi3_ey = torch.zeros_like(solver.kerr_chi3_Ey)
             grad_chi3_ez = torch.zeros_like(solver.kerr_chi3_Ez)
+        if general_enabled:
+            # chi2 second-order susceptibility and the TPA conductivity scale
+            # drive the general nonlinear coefficient kernel; carry their own
+            # gradient channels so a trainable chi2 / TPA design is differentiable.
+            chi2_ex = solver.nonlinear_chi2_Ex.detach().clone().requires_grad_(True)
+            chi2_ey = solver.nonlinear_chi2_Ey.detach().clone().requires_grad_(True)
+            chi2_ez = solver.nonlinear_chi2_Ez.detach().clone().requires_grad_(True)
+            tpa_ex = solver.tpa_sigma_Ex.detach().clone().requires_grad_(True)
+            tpa_ey = solver.tpa_sigma_Ey.detach().clone().requires_grad_(True)
+            tpa_ez = solver.tpa_sigma_Ez.detach().clone().requires_grad_(True)
+            grad_chi2_ex = torch.zeros_like(solver.nonlinear_chi2_Ex)
+            grad_chi2_ey = torch.zeros_like(solver.nonlinear_chi2_Ey)
+            grad_chi2_ez = torch.zeros_like(solver.nonlinear_chi2_Ez)
+            grad_tpa_ex = torch.zeros_like(solver.tpa_sigma_Ex)
+            grad_tpa_ey = torch.zeros_like(solver.tpa_sigma_Ey)
+            grad_tpa_ez = torch.zeros_like(solver.tpa_sigma_Ez)
         compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())
         cache_mode_source_terms = any(source.get("kind") == "mode_source" for source in compiled_sources)
         if cache_mode_source_terms:
@@ -486,21 +500,39 @@ class _FDTDGradientBridge:
                         chi3_ex=chi3_ex,
                         chi3_ey=chi3_ey,
                         chi3_ez=chi3_ez,
+                        chi2_ex=chi2_ex,
+                        chi2_ey=chi2_ey,
+                        chi2_ez=chi2_ez,
+                        tpa_ex=tpa_ex,
+                        tpa_ey=tpa_ey,
+                        tpa_ez=tpa_ez,
                         profiler=profiler,
                     )
                     profiler.record_reverse_backend(step_result.backend)
                     grad_eps_ex = grad_eps_ex + step_result.grad_eps_ex
                     grad_eps_ey = grad_eps_ey + step_result.grad_eps_ey
                     grad_eps_ez = grad_eps_ez + step_result.grad_eps_ez
-                    if kerr_enabled:
+                    if nonlinear_enabled:
                         if step_result.grad_chi3_ex is None:
                             raise RuntimeError(
-                                "Kerr-enabled reverse step did not produce chi3 gradients; "
+                                "Nonlinear reverse step did not produce chi3 gradients; "
                                 f"backend {step_result.backend!r} lacks the chi3 channel."
                             )
                         grad_chi3_ex = grad_chi3_ex + step_result.grad_chi3_ex
                         grad_chi3_ey = grad_chi3_ey + step_result.grad_chi3_ey
                         grad_chi3_ez = grad_chi3_ez + step_result.grad_chi3_ez
+                    if general_enabled:
+                        if step_result.grad_chi2_ex is None:
+                            raise RuntimeError(
+                                "General-nonlinear reverse step did not produce chi2 / TPA "
+                                f"gradients; backend {step_result.backend!r} lacks the channels."
+                            )
+                        grad_chi2_ex = grad_chi2_ex + step_result.grad_chi2_ex
+                        grad_chi2_ey = grad_chi2_ey + step_result.grad_chi2_ey
+                        grad_chi2_ez = grad_chi2_ez + step_result.grad_chi2_ez
+                        grad_tpa_ex = grad_tpa_ex + step_result.grad_tpa_ex
+                        grad_tpa_ey = grad_tpa_ey + step_result.grad_tpa_ey
+                        grad_tpa_ez = grad_tpa_ez + step_result.grad_tpa_ez
                     adjoint_state = step_result.pre_step_adjoint
 
             with profiler.section("material_pullback"):
@@ -516,6 +548,12 @@ class _FDTDGradientBridge:
                         grad_chi3_ex=grad_chi3_ex,
                         grad_chi3_ey=grad_chi3_ey,
                         grad_chi3_ez=grad_chi3_ez,
+                        grad_chi2_ex=grad_chi2_ex,
+                        grad_chi2_ey=grad_chi2_ey,
+                        grad_chi2_ez=grad_chi2_ez,
+                        grad_tpa_ex=grad_tpa_ex,
+                        grad_tpa_ey=grad_tpa_ey,
+                        grad_tpa_ez=grad_tpa_ez,
                     )
         finally:
             if hasattr(solver, "_mode_source_explicit_vjp_remaining"):

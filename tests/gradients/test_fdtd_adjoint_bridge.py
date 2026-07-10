@@ -40,14 +40,6 @@ def _build_simulation(model, *, time_steps=24):
             "anisotropic magnetic \\(mu_tensor\\) media",
         ),
         (
-            mw.Material(eps_r=2.0, nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-12)),
-            "chi2 nonlinear media",
-        ),
-        (
-            mw.Material(eps_r=2.0, nonlinearity=mw.TwoPhotonAbsorption(beta=1.0e-12)),
-            "two-photon-absorption media",
-        ),
-        (
             mw.Material(eps_r=2.0, modulation=mw.ModulationSpec(frequency=1.0e8, amplitude=0.1)),
             "time-modulated media",
         ),
@@ -125,6 +117,40 @@ def test_fdtd_gradient_bridge_accepts_pure_kerr_media():
         mw.Structure(
             geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
             material=mw.Material(eps_r=2.0, kerr_chi3=1.0e-10),
+        )
+    )
+
+    assert _unsupported_adjoint_medium(scene) is None
+
+
+@pytest.mark.parametrize(
+    "material",
+    [
+        mw.Material(eps_r=2.0, nonlinearity=mw.NonlinearSusceptibility(chi2=1.0e-12)),
+        mw.Material(eps_r=2.0, nonlinearity=mw.TwoPhotonAbsorption(beta=1.0e-12)),
+        mw.Material(
+            eps_r=2.0,
+            nonlinearity=(
+                mw.NonlinearSusceptibility(chi2=1.0e-12, chi3=1.0e-10),
+                mw.TwoPhotonAbsorption(beta=1.0e-12),
+            ),
+        ),
+    ],
+)
+def test_fdtd_gradient_bridge_accepts_general_nonlinear_media(material):
+    """chi2 and two-photon absorption drive the general nonlinear coefficient
+    kernel, which the adjoint replay now replicates differentiably."""
+    from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.5, 0.5, 0.5)),
+            material=material,
         )
     )
 

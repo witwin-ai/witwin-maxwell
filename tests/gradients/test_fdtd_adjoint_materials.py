@@ -663,3 +663,429 @@ def test_anisotropic_geometry_gradient_is_axis_distinct():
     assert grad is not None
     assert (grad != 0).all()
     assert torch.unique(grad).numel() > 1
+
+
+# ---------------------------------------------------------------------------
+# chi2 (second-order susceptibility) and two-photon-absorption (TPA) media
+#
+# chi2 and TPA drive the general nonlinear coefficient kernel, which rewrites
+# BOTH the semi-implicit decay and curl every step from the pre-update fields
+# (eps_eff = eps + eps0*(chi2*E_own + chi3*|E|^2); sigma = sigma_static +
+# tpa*|E|^2). The adjoint replay must replicate that kernel differentiably.
+# ---------------------------------------------------------------------------
+
+_CHI2 = 8.0e-3
+_TPA_BETA = 40.0
+
+
+def _chi2_scene(chi2, *, density=None):
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+        device="cuda",
+    )
+    if chi2 != 0.0:
+        scene.add_structure(
+            mw.Structure(
+                name="chi2_slab",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+                material=mw.Material(
+                    eps_r=2.0, nonlinearity=[mw.NonlinearSusceptibility(chi2=chi2)]
+                ),
+            )
+        )
+    if density is not None:
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+    scene.add_source(
+        mw.PointDipole(
+            position=(0.0, 0.0, -0.18),
+            polarization="Ez",
+            width=0.04,
+            source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+        )
+    )
+    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+    return scene
+
+
+def _tpa_scene(beta, *, density=None):
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+        device="cuda",
+    )
+    if beta != 0.0:
+        scene.add_structure(
+            mw.Structure(
+                name="tpa_slab",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+                material=mw.Material(
+                    eps_r=2.0, nonlinearity=[mw.TwoPhotonAbsorption(beta=beta)]
+                ),
+            )
+        )
+    if density is not None:
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+    scene.add_source(
+        mw.PointDipole(
+            position=(0.0, 0.0, -0.18),
+            polarization="Ez",
+            width=0.04,
+            source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=80.0),
+        )
+    )
+    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+    return scene
+
+
+def _general_nonlinear_scene():
+    """A slab carrying chi2, chi3, and TPA together so the coefficient replica
+    exercises every term of the general nonlinear kernel."""
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+        device="cuda",
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="general_slab",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+            material=mw.Material(
+                eps_r=2.0,
+                nonlinearity=[
+                    mw.NonlinearSusceptibility(chi2=_CHI2, chi3=_KERR_CHI3),
+                    mw.TwoPhotonAbsorption(beta=_TPA_BETA),
+                ],
+            ),
+        )
+    )
+    scene.add_source(
+        mw.PointDipole(
+            position=(0.0, 0.0, -0.18),
+            polarization="Ez",
+            width=0.04,
+            source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+        )
+    )
+    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+    return scene
+
+
+@_CUDA
+def test_general_nonlinear_coefficient_replica_matches_cuda_kernel():
+    """The differentiable general nonlinear coefficient replica used by the
+    adjoint replay must match the native updateNonlinearElectricCoefficients3D
+    kernel (both the dynamic decay and dynamic curl outputs)."""
+    from witwin.maxwell.fdtd.adjoint.core import _general_nonlinear_electric_coefficients
+
+    torch.manual_seed(13)
+    prepared = mw.Simulation.fdtd(
+        _general_nonlinear_scene(),
+        frequencies=[1e9],
+        run_time=mw.TimeConfig(time_steps=8),
+    ).prepare()
+    solver = prepared.solver
+    assert solver.nonlinear_general_enabled
+    assert solver.chi2_enabled and solver.tpa_enabled and solver.kerr_enabled
+
+    solver.Ex.copy_(3.0 * torch.randn_like(solver.Ex))
+    solver.Ey.copy_(3.0 * torch.randn_like(solver.Ey))
+    solver.Ez.copy_(3.0 * torch.randn_like(solver.Ez))
+    solver._update_nonlinear_electric_coefficients()
+
+    state = {"Ex": solver.Ex, "Ey": solver.Ey, "Ez": solver.Ez}
+    replica = _general_nonlinear_electric_coefficients(
+        solver,
+        state,
+        eps_ex=solver.eps_Ex,
+        eps_ey=solver.eps_Ey,
+        eps_ez=solver.eps_Ez,
+        chi2_ex=solver.nonlinear_chi2_Ex,
+        chi2_ey=solver.nonlinear_chi2_Ey,
+        chi2_ez=solver.nonlinear_chi2_Ez,
+        chi3_ex=solver.kerr_chi3_Ex,
+        chi3_ey=solver.kerr_chi3_Ey,
+        chi3_ez=solver.kerr_chi3_Ez,
+        tpa_ex=solver.tpa_sigma_Ex,
+        tpa_ey=solver.tpa_sigma_Ey,
+        tpa_ez=solver.tpa_sigma_Ez,
+    )
+
+    for component, decay_dynamic, curl_dynamic in (
+        ("Ex", solver.cex_decay_dynamic, solver.cex_curl_dynamic),
+        ("Ey", solver.cey_decay_dynamic, solver.cey_curl_dynamic),
+        ("Ez", solver.cez_decay_dynamic, solver.cez_curl_dynamic),
+    ):
+        replica_decay, replica_curl = replica[component]
+        assert torch.allclose(replica_decay, decay_dynamic, rtol=1e-5, atol=1e-12), component
+        assert torch.allclose(replica_curl, curl_dynamic, rtol=1e-5, atol=1e-20), component
+
+
+class _Chi2DensityScene(mw.SceneModule):
+    """Trainable design density next to a static chi2 slab.
+
+    The reverse step must differentiate the general nonlinear decay/curl
+    coefficients through the forward E fields for the design gradients to be
+    correct (chi2 folds the signed own-component field into eps_eff)."""
+
+    def __init__(self, init=0.0, chi2=_CHI2):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((2, 2, 2), float(init), device="cuda"))
+        self._chi2 = chi2
+
+    def to_scene(self):
+        return _chi2_scene(self._chi2, density=torch.sigmoid(self.logits))
+
+
+@_CUDA
+def test_scene_with_chi2_medium_gradient_matches_fd():
+    """Per-element FD validation of design gradients in a scene containing a
+    static chi2 slab (previously rejected by the bridge)."""
+    model = _Chi2DensityScene(init=0.0)
+
+    def loss_fn():
+        result = _build_sim(model, time_steps=200).run()
+        return _abs2(result.monitor("probe")["data"])
+
+    # The chi2 nonlinearity must actually shape the solution, otherwise this
+    # would only re-validate the linear path.
+    linear_loss = _abs2(
+        _build_sim(_Chi2DensityScene(init=0.0, chi2=0.0), time_steps=200)
+        .run()
+        .monitor("probe")["data"]
+    ).item()
+    chi2_loss = loss_fn().item()
+    assert abs(chi2_loss - linear_loss) > 1e-3 * abs(linear_loss), (
+        f"chi2 term inactive: linear={linear_loss:.6e}, chi2={chi2_loss:.6e}"
+    )
+
+    backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn)
+
+    assert (fd_grad != 0).any(), "FD gradient is identically zero; test setup is broken."
+    # Acceptance bar: dominant-element relative error below 1e-3.
+    dominant = int(torch.abs(fd_grad).flatten().argmax().item())
+    dom_rel = (
+        abs(backward_grad.flatten()[dominant].item() - fd_grad.flatten()[dominant].item())
+        / abs(fd_grad.flatten()[dominant].item())
+    )
+    assert dom_rel < 1e-3, f"dominant-element rel err {dom_rel:.3e} exceeds 1e-3."
+
+    scale = torch.abs(fd_grad).max().item()
+    assert torch.allclose(backward_grad, fd_grad, rtol=3e-2, atol=scale * 5e-3), (
+        f"backward={backward_grad.flatten().tolist()}, fd={fd_grad.flatten().tolist()}"
+    )
+
+
+class _TpaDensityScene(mw.SceneModule):
+    """Trainable design density next to a static two-photon-absorption slab.
+
+    TPA folds a field-dependent conductivity sigma = tpa_sigma*|E|^2 into the
+    semi-implicit loss term; the reverse step must differentiate that decay/curl
+    pair through the forward fields."""
+
+    def __init__(self, init=0.0, beta=_TPA_BETA):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((2, 2, 2), float(init), device="cuda"))
+        self._beta = beta
+
+    def to_scene(self):
+        return _tpa_scene(self._beta, density=torch.sigmoid(self.logits))
+
+
+@_CUDA
+def test_scene_with_tpa_medium_gradient_matches_fd():
+    """Per-element FD validation of design gradients in a scene whose static slab
+    carries two-photon absorption (previously rejected by the bridge)."""
+    model = _TpaDensityScene(init=0.0)
+
+    def loss_fn():
+        result = _build_sim(model, time_steps=200).run()
+        return _abs2(result.monitor("probe")["data"])
+
+    # The intensity-dependent loss must actually damp the solution.
+    lossless = _abs2(
+        _build_sim(_TpaDensityScene(init=0.0, beta=0.0), time_steps=200)
+        .run()
+        .monitor("probe")["data"]
+    ).item()
+    absorbed = loss_fn().item()
+    assert absorbed < 0.999 * lossless, (
+        f"TPA term inactive: lossless={lossless:.6e}, absorbed={absorbed:.6e}"
+    )
+
+    backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn)
+
+    assert (fd_grad != 0).any(), "FD gradient is identically zero; test setup is broken."
+    # Acceptance bar: dominant-element relative error below 1e-3.
+    dominant = int(torch.abs(fd_grad).flatten().argmax().item())
+    dom_rel = (
+        abs(backward_grad.flatten()[dominant].item() - fd_grad.flatten()[dominant].item())
+        / abs(fd_grad.flatten()[dominant].item())
+    )
+    assert dom_rel < 1e-3, f"dominant-element rel err {dom_rel:.3e} exceeds 1e-3."
+
+    scale = torch.abs(fd_grad).max().item()
+    assert torch.allclose(backward_grad, fd_grad, rtol=3e-2, atol=scale * 5e-3), (
+        f"backward={backward_grad.flatten().tolist()}, fd={fd_grad.flatten().tolist()}"
+    )
+
+
+class _Chi2GeometryScene(mw.SceneModule):
+    """Trainable-size chi2 box: the logits move the chi2 (and eps) blend."""
+
+    def __init__(self, init=0.0):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((3,), float(init), device="cuda"))
+
+    def to_scene(self):
+        size = 0.30 + 0.12 * torch.sigmoid(self.logits)
+        scene = mw.Scene(
+            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+            grid=mw.GridSpec.uniform(0.12),
+            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+            device="cuda",
+            subpixel_samples=5,
+        )
+        scene.add_structure(
+            mw.Structure(
+                name="chi2_box",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=size),
+                material=mw.Material(
+                    eps_r=2.0,
+                    nonlinearity=[
+                        mw.NonlinearSusceptibility(chi2=_CHI2),
+                        mw.TwoPhotonAbsorption(beta=_TPA_BETA),
+                    ],
+                ),
+            )
+        )
+        scene.add_source(
+            mw.PointDipole(
+                position=(0.0, 0.0, -0.18),
+                polarization="Ez",
+                width=0.04,
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+            )
+        )
+        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+        return scene
+
+
+def _pullback_transpose_reference(model, *, field_key, grad_ex_kwarg, grad_ey_kwarg, grad_ez_kwarg):
+    """Shared body for the chi2 / TPA pullback exact-transpose unit tests.
+
+    Feeds random per-edge cotangents through the material pullback and checks the
+    returned design gradient equals the autograd transpose of the node->Yee-edge
+    averaging of the corresponding compiled node channel."""
+    inputs = tuple(parameter for parameter in model.parameters() if parameter.requires_grad)
+    scene = model.to_scene()
+    prepared = prepare_scene(scene)
+    zero_eps_ex = torch.zeros((prepared.Nx - 1, prepared.Ny, prepared.Nz), device="cuda")
+    zero_eps_ey = torch.zeros((prepared.Nx, prepared.Ny - 1, prepared.Nz), device="cuda")
+    zero_eps_ez = torch.zeros((prepared.Nx, prepared.Ny, prepared.Nz - 1), device="cuda")
+    grad_ex = torch.randn_like(zero_eps_ex)
+    grad_ey = torch.randn_like(zero_eps_ey)
+    grad_ez = torch.randn_like(zero_eps_ez)
+
+    with torch.enable_grad():
+        outputs = pullback_material_input_gradients(
+            scene,
+            inputs=inputs,
+            grad_eps_ex=zero_eps_ex,
+            grad_eps_ey=zero_eps_ey,
+            grad_eps_ez=zero_eps_ez,
+            eps0=_EPS0,
+            **{grad_ex_kwarg: grad_ex, grad_ey_kwarg: grad_ey, grad_ez_kwarg: grad_ez},
+        )
+
+        reference_prepared = prepare_scene(model.to_scene())
+        node_field = reference_prepared.compile_materials()[field_key]
+        objective = (
+            (grad_ex * average_node_to_component(None, node_field, "Ex")).sum()
+            + (grad_ey * average_node_to_component(None, node_field, "Ey")).sum()
+            + (grad_ez * average_node_to_component(None, node_field, "Ez")).sum()
+        )
+        expected = torch.autograd.grad(objective, inputs, allow_unused=True)
+
+    for output, reference in zip(outputs, expected):
+        reference = torch.zeros_like(output) if reference is None else reference
+        assert (reference != 0).any()
+        assert torch.allclose(output, reference, rtol=1e-4, atol=1e-10), (
+            output.tolist(),
+            reference.tolist(),
+        )
+
+
+@_CUDA
+def test_general_nonlinear_pullback_chi2_channel_is_exact_transpose():
+    """The chi2 gradient channel of the material pullback must be the exact
+    transpose of the node->Yee-edge chi2 averaging."""
+    torch.manual_seed(7)
+    model = _Chi2GeometryScene(init=0.0).cuda()
+    _pullback_transpose_reference(
+        model,
+        field_key="chi2",
+        grad_ex_kwarg="grad_chi2_ex",
+        grad_ey_kwarg="grad_chi2_ey",
+        grad_ez_kwarg="grad_chi2_ez",
+    )
+
+
+@_CUDA
+def test_general_nonlinear_pullback_tpa_channel_is_exact_transpose():
+    """The TPA-conductivity gradient channel of the material pullback must be the
+    exact transpose of the node->Yee-edge tpa_sigma averaging."""
+    torch.manual_seed(8)
+    model = _Chi2GeometryScene(init=0.0).cuda()
+    _pullback_transpose_reference(
+        model,
+        field_key="tpa_sigma",
+        grad_ex_kwarg="grad_tpa_ex",
+        grad_ey_kwarg="grad_tpa_ey",
+        grad_ez_kwarg="grad_tpa_ez",
+    )
+
+
+@_CUDA
+def test_chi2_reverse_routes_through_torch_vjp():
+    """A chi2 / TPA scene must fall to the torch-VJP reverse backend: the analytic
+    standard/CPML backends model a field-independent decay and cannot reproduce
+    the general nonlinear coefficient recompute."""
+    from witwin.maxwell.fdtd.adjoint.dispatch import _select_reverse_backend, _ReverseBackend
+
+    prepared = mw.Simulation.fdtd(
+        _general_nonlinear_scene(),
+        frequencies=[1e9],
+        run_time=mw.TimeConfig(time_steps=8),
+    ).prepare()
+    solver = prepared.solver
+    assert solver.nonlinear_general_enabled
+    forward_state = {name: getattr(solver, name) for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
+    backend = _select_reverse_backend(
+        solver,
+        forward_state,
+        eps_ex=solver.eps_Ex,
+        eps_ey=solver.eps_Ey,
+        eps_ez=solver.eps_Ez,
+        resolved_source_terms=None,
+    )
+    assert backend is _ReverseBackend.TORCH_VJP, backend

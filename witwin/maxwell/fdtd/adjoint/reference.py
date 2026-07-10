@@ -886,6 +886,12 @@ def reverse_step_torch_vjp(
     chi3_ex=None,
     chi3_ey=None,
     chi3_ez=None,
+    chi2_ex=None,
+    chi2_ey=None,
+    chi2_ez=None,
+    tpa_ex=None,
+    tpa_ey=None,
+    tpa_ez=None,
     profiler: _BackwardProfiler | None = None,
     backend: str = "torch_vjp",
 ):
@@ -893,6 +899,8 @@ def reverse_step_torch_vjp(
 
     chi3_leaves = (chi3_ex, chi3_ey, chi3_ez)
     has_chi3_leaves = all(leaf is not None for leaf in chi3_leaves)
+    general_leaves = (chi2_ex, chi2_ey, chi2_ez, tpa_ex, tpa_ey, tpa_ez)
+    has_general_leaves = all(leaf is not None for leaf in general_leaves)
     active_profiler = profiler if profiler is not None else _adjoint._BackwardProfiler(enabled=False, device=None)
     with torch.enable_grad():
         with active_profiler.section("state_clone"):
@@ -906,6 +914,18 @@ def reverse_step_torch_vjp(
                 if has_chi3_leaves
                 else {}
             )
+            general_kwargs = (
+                {
+                    "chi2_ex": chi2_ex,
+                    "chi2_ey": chi2_ey,
+                    "chi2_ez": chi2_ez,
+                    "tpa_ex": tpa_ex,
+                    "tpa_ey": tpa_ey,
+                    "tpa_ez": tpa_ez,
+                }
+                if has_general_leaves
+                else {}
+            )
             next_state = _adjoint._step_state(
                 solver,
                 state_inputs,
@@ -914,6 +934,7 @@ def reverse_step_torch_vjp(
                 eps_ey=eps_ey,
                 eps_ez=eps_ez,
                 **chi3_kwargs,
+                **general_kwargs,
             )
             objective = next_state["Ex"].new_zeros(())
             for name in forward_state:
@@ -922,6 +943,8 @@ def reverse_step_torch_vjp(
             leaves = tuple(state_inputs.values()) + (eps_ex, eps_ey, eps_ez)
             if has_chi3_leaves:
                 leaves = leaves + chi3_leaves
+            if has_general_leaves:
+                leaves = leaves + general_leaves
             gradients = torch.autograd.grad(
                 objective,
                 leaves,
@@ -934,13 +957,26 @@ def reverse_step_torch_vjp(
         for (name, _), grad in zip(state_inputs.items(), state_grads)
     }
     eps_offset = len(state_inputs)
+    cursor = eps_offset + 3
     grad_chi3 = {}
     if has_chi3_leaves:
         grad_chi3 = {
-            "grad_chi3_ex": _adjoint._safe_grad(gradients[eps_offset + 3], chi3_ex).detach(),
-            "grad_chi3_ey": _adjoint._safe_grad(gradients[eps_offset + 4], chi3_ey).detach(),
-            "grad_chi3_ez": _adjoint._safe_grad(gradients[eps_offset + 5], chi3_ez).detach(),
+            "grad_chi3_ex": _adjoint._safe_grad(gradients[cursor], chi3_ex).detach(),
+            "grad_chi3_ey": _adjoint._safe_grad(gradients[cursor + 1], chi3_ey).detach(),
+            "grad_chi3_ez": _adjoint._safe_grad(gradients[cursor + 2], chi3_ez).detach(),
         }
+        cursor += 3
+    grad_general = {}
+    if has_general_leaves:
+        grad_general = {
+            "grad_chi2_ex": _adjoint._safe_grad(gradients[cursor], chi2_ex).detach(),
+            "grad_chi2_ey": _adjoint._safe_grad(gradients[cursor + 1], chi2_ey).detach(),
+            "grad_chi2_ez": _adjoint._safe_grad(gradients[cursor + 2], chi2_ez).detach(),
+            "grad_tpa_ex": _adjoint._safe_grad(gradients[cursor + 3], tpa_ex).detach(),
+            "grad_tpa_ey": _adjoint._safe_grad(gradients[cursor + 4], tpa_ey).detach(),
+            "grad_tpa_ez": _adjoint._safe_grad(gradients[cursor + 5], tpa_ez).detach(),
+        }
+        cursor += 6
     return _adjoint._ReverseStepResult(
         pre_step_adjoint=pre_step_adjoint,
         grad_eps_ex=_adjoint._safe_grad(gradients[eps_offset], eps_ex).detach(),
@@ -948,6 +984,7 @@ def reverse_step_torch_vjp(
         grad_eps_ez=_adjoint._safe_grad(gradients[eps_offset + 2], eps_ez).detach(),
         backend=backend,
         **grad_chi3,
+        **grad_general,
     )
 
 

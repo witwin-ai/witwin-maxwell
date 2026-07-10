@@ -2182,6 +2182,65 @@ def _conductive_electric_coefficients(solver, *, eps_ex, eps_ey, eps_ez):
     return coeffs
 
 
+def _general_nonlinear_electric_coefficients(
+    solver,
+    state,
+    *,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    chi2_ex,
+    chi2_ey,
+    chi2_ez,
+    chi3_ex,
+    chi3_ey,
+    chi3_ez,
+    tpa_ex,
+    tpa_ey,
+    tpa_ez,
+):
+    """Differentiable replica of ``updateNonlinearElectricCoefficients3D``.
+
+    The general nonlinear kernel rewrites both the decay and the curl coefficient
+    every step from the pre-update fields, exactly as in the CUDA source::
+
+        eps_eff = max(eps_lin + eps0 * (chi2 * E_own + chi3 * |E|^2), floor)
+        sigma   = max(sigma_static + tpa_sigma * |E|^2, 0)
+        half    = 0.5 * sigma * dt / eps_eff
+        decay   = external * (1 - half) / (1 + half)
+        curl    = external * (dt / eps_eff) / (1 + half)
+
+    ``external`` (``c*_decay_external``) carries the PML split-field decay and the
+    PEC open fraction. ``E_own`` is the component's own edge field (the CUDA
+    collocation returns the direct value for the own axis), while ``|E|^2`` is the
+    4-point off-axis collocation shared with the Kerr replica. Flowing the VJP
+    through the ``eps`` / ``chi2`` / ``chi3`` / ``tpa`` leaves and the pre-step
+    ``state`` fields is what makes chi2 and two-photon absorption differentiable.
+    Returns per-component ``(decay, curl)`` with ``dt / eps_eff`` already folded
+    into ``curl`` (fed with ``eps = 1`` in the update, like the Kerr path).
+    """
+    field_square = _collocated_field_square(state["Ex"], state["Ey"], state["Ez"])
+    eps0 = float(solver.eps0)
+    floor = 1.0e-12 * eps0
+    dt = float(solver.dt)
+    coeffs = {}
+    for name, own_field, eps, chi2, chi3, tpa, sigma_static, external in (
+        ("Ex", state["Ex"], eps_ex, chi2_ex, chi3_ex, tpa_ex, solver.sigma_e_Ex, solver.cex_decay_external),
+        ("Ey", state["Ey"], eps_ey, chi2_ey, chi3_ey, tpa_ey, solver.sigma_e_Ey, solver.cey_decay_external),
+        ("Ez", state["Ez"], eps_ez, chi2_ez, chi3_ez, tpa_ez, solver.sigma_e_Ez, solver.cez_decay_external),
+    ):
+        effective = torch.clamp_min(
+            eps + eps0 * (chi2 * own_field + chi3 * field_square[name]), floor
+        )
+        sigma = torch.clamp_min(sigma_static + tpa * field_square[name], 0.0)
+        half = 0.5 * sigma * dt / effective
+        inv_denom = 1.0 / (1.0 + half)
+        decay = external * (1.0 - half) * inv_denom
+        curl = external * (dt / effective) * inv_denom
+        coeffs[name] = (decay, curl)
+    return coeffs
+
+
 def _forward_magnetic_fields(solver, state, *, time_value, resolved_source_terms):
     """Recompute the post-source real magnetic fields of one forward step.
 
@@ -2260,11 +2319,24 @@ def _forward_magnetic_fields(solver, state, *, time_value, resolved_source_terms
     )
 
 
-def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez, chi3_ex=None, chi3_ey=None, chi3_ez=None):
-    if getattr(solver, "nonlinear_general_enabled", False):
-        raise NotImplementedError(
-            "FDTD adjoint replay supports the pure-chi3 Kerr nonlinearity only (no chi2 / TPA channels)."
-        )
+def _step_state(
+    solver,
+    state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    chi3_ex=None,
+    chi3_ey=None,
+    chi3_ez=None,
+    chi2_ex=None,
+    chi2_ey=None,
+    chi2_ez=None,
+    tpa_ex=None,
+    tpa_ey=None,
+    tpa_ez=None,
+):
     if getattr(solver, "modulation_enabled", False):
         raise NotImplementedError("FDTD adjoint replay does not support time-modulated media.")
     source_terms, electric_source_terms, magnetic_source_terms = _resolved_source_term_lists(
@@ -2534,8 +2606,34 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez, chi3_ex=No
             }
             psi_ex_y = psi_ex_z = psi_ey_x = psi_ey_z = psi_ez_x = psi_ez_y = None
     else:
+        general_coeffs = None
         kerr_curls = None
-        if getattr(solver, "kerr_enabled", False):
+        conductive_coeffs = None
+        if getattr(solver, "nonlinear_general_enabled", False):
+            # chi2 / two-photon absorption (and any static conduction) rewrite
+            # BOTH the decay and curl coefficients from the pre-update E fields
+            # each step; replicate the general coefficient kernel differentiably
+            # so the VJP flows into the fields, eps, chi2, chi3, and the TPA
+            # conductivity. This branch matches the forward dispatch order, which
+            # prefers the general kernel over the curl-only Kerr kernel when a
+            # chi2 or TPA channel is present.
+            general_coeffs = _general_nonlinear_electric_coefficients(
+                solver,
+                state,
+                eps_ex=eps_ex,
+                eps_ey=eps_ey,
+                eps_ez=eps_ez,
+                chi2_ex=chi2_ex if chi2_ex is not None else solver.nonlinear_chi2_Ex,
+                chi2_ey=chi2_ey if chi2_ey is not None else solver.nonlinear_chi2_Ey,
+                chi2_ez=chi2_ez if chi2_ez is not None else solver.nonlinear_chi2_Ez,
+                chi3_ex=chi3_ex if chi3_ex is not None else solver.kerr_chi3_Ex,
+                chi3_ey=chi3_ey if chi3_ey is not None else solver.kerr_chi3_Ey,
+                chi3_ez=chi3_ez if chi3_ez is not None else solver.kerr_chi3_Ez,
+                tpa_ex=tpa_ex if tpa_ex is not None else solver.tpa_sigma_Ex,
+                tpa_ey=tpa_ey if tpa_ey is not None else solver.tpa_sigma_Ey,
+                tpa_ez=tpa_ez if tpa_ez is not None else solver.tpa_sigma_Ez,
+            )
+        elif getattr(solver, "kerr_enabled", False):
             # The Kerr coefficient kernel recomputes the curl factor from the
             # pre-update E fields each step; replicate it differentiably so the
             # VJP flows into the fields, eps, and chi3.
@@ -2549,15 +2647,18 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez, chi3_ex=No
                 chi3_ey=chi3_ey if chi3_ey is not None else solver.kerr_chi3_Ey,
                 chi3_ez=chi3_ez if chi3_ez is not None else solver.kerr_chi3_Ez,
             )
-        conductive_coeffs = None
-        if kerr_curls is None and getattr(solver, "conductive_enabled", False):
+        elif getattr(solver, "conductive_enabled", False):
             # Static conduction makes both decay and curl eps-dependent through
             # the semi-implicit denominator; recompute them differentiably so the
             # VJP carries that dependence (the linear rule drops it).
             conductive_coeffs = _conductive_electric_coefficients(
                 solver, eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez
             )
-        if kerr_curls is not None:
+        if general_coeffs is not None:
+            ex_decay_c, ex_curl_c, ex_eps_c = general_coeffs["Ex"][0], general_coeffs["Ex"][1], 1.0
+            ey_decay_c, ey_curl_c, ey_eps_c = general_coeffs["Ey"][0], general_coeffs["Ey"][1], 1.0
+            ez_decay_c, ez_curl_c, ez_eps_c = general_coeffs["Ez"][0], general_coeffs["Ez"][1], 1.0
+        elif kerr_curls is not None:
             ex_decay_c, ex_curl_c, ex_eps_c = solver.cex_decay, kerr_curls["Ex"], 1.0
             ey_decay_c, ey_curl_c, ey_eps_c = solver.cey_decay, kerr_curls["Ey"], 1.0
             ez_decay_c, ez_curl_c, ez_eps_c = solver.cez_decay, kerr_curls["Ez"], 1.0

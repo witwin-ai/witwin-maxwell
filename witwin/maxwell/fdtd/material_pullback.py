@@ -274,6 +274,12 @@ def pullback_material_input_gradients(
     grad_chi3_ex: torch.Tensor | None = None,
     grad_chi3_ey: torch.Tensor | None = None,
     grad_chi3_ez: torch.Tensor | None = None,
+    grad_chi2_ex: torch.Tensor | None = None,
+    grad_chi2_ey: torch.Tensor | None = None,
+    grad_chi2_ez: torch.Tensor | None = None,
+    grad_tpa_ex: torch.Tensor | None = None,
+    grad_tpa_ey: torch.Tensor | None = None,
+    grad_tpa_ez: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
     if not inputs:
         return ()
@@ -319,6 +325,31 @@ def pullback_material_input_gradients(
             )
             outputs.append(kerr_field)
             grad_outputs.append(chi3_node_gradient.to(device=kerr_field.device, dtype=kerr_field.dtype))
+
+    for grad_channel, field_key in (
+        ((grad_chi2_ex, grad_chi2_ey, grad_chi2_ez), "chi2"),
+        ((grad_tpa_ex, grad_tpa_ey, grad_tpa_ez), "tpa_sigma"),
+    ):
+        # General-nonlinear channels: the compiled chi2 / TPA-conductivity node
+        # fields feed the three Yee-edge tensors through the same two-point
+        # averaging as chi3 (no eps0 scale), so each node gradient is the sum of
+        # the three per-axis edge scatters.
+        grad_ex, grad_ey, grad_ez = grad_channel
+        if grad_ex is None:
+            continue
+        channel_field = model[field_key]
+        if not channel_field.requires_grad:
+            continue
+        node_gradients = component_node_gradients_from_yee_permittivity(
+            prepared_scene,
+            grad_eps_ex=grad_ex,
+            grad_eps_ey=grad_ey,
+            grad_eps_ez=grad_ez,
+            eps0=1.0,
+        )
+        node_gradient = node_gradients["x"] + node_gradients["y"] + node_gradients["z"]
+        outputs.append(channel_field)
+        grad_outputs.append(node_gradient.to(device=channel_field.device, dtype=channel_field.dtype))
 
     gradients = (
         torch.autograd.grad(

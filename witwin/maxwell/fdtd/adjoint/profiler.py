@@ -28,10 +28,19 @@ class _ReverseStepResult:
     source_adjoint_state: dict[str, torch.Tensor] | None = None
     magnetic_output_adjoint: dict[str, torch.Tensor] | None = None
     # Kerr chi3 gradient channel; populated only when the reverse step ran with
-    # chi3 leaves (Kerr-enabled solvers on the torch-VJP backend).
+    # chi3 leaves (any nonlinear solver on the torch-VJP backend).
     grad_chi3_ex: torch.Tensor | None = None
     grad_chi3_ey: torch.Tensor | None = None
     grad_chi3_ez: torch.Tensor | None = None
+    # General-nonlinear gradient channels (chi2 second-order susceptibility and
+    # the two-photon-absorption conductivity scale); populated only when the
+    # reverse step ran with the general-nonlinear leaves.
+    grad_chi2_ex: torch.Tensor | None = None
+    grad_chi2_ey: torch.Tensor | None = None
+    grad_chi2_ez: torch.Tensor | None = None
+    grad_tpa_ex: torch.Tensor | None = None
+    grad_tpa_ey: torch.Tensor | None = None
+    grad_tpa_ez: torch.Tensor | None = None
 
 
 @dataclass
