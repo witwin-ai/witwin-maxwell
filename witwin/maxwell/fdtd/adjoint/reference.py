@@ -883,11 +883,16 @@ def reverse_step_torch_vjp(
     eps_ex,
     eps_ey,
     eps_ez,
+    chi3_ex=None,
+    chi3_ey=None,
+    chi3_ez=None,
     profiler: _BackwardProfiler | None = None,
     backend: str = "torch_vjp",
 ):
     _adjoint = importlib.import_module(__package__)
 
+    chi3_leaves = (chi3_ex, chi3_ey, chi3_ez)
+    has_chi3_leaves = all(leaf is not None for leaf in chi3_leaves)
     active_profiler = profiler if profiler is not None else _adjoint._BackwardProfiler(enabled=False, device=None)
     with torch.enable_grad():
         with active_profiler.section("state_clone"):
@@ -896,6 +901,11 @@ def reverse_step_torch_vjp(
                 for name, tensor in forward_state.items()
             }
         with active_profiler.section("step_forward"):
+            chi3_kwargs = (
+                {"chi3_ex": chi3_ex, "chi3_ey": chi3_ey, "chi3_ez": chi3_ez}
+                if has_chi3_leaves
+                else {}
+            )
             next_state = _adjoint._step_state(
                 solver,
                 state_inputs,
@@ -903,14 +913,18 @@ def reverse_step_torch_vjp(
                 eps_ex=eps_ex,
                 eps_ey=eps_ey,
                 eps_ez=eps_ez,
+                **chi3_kwargs,
             )
             objective = next_state["Ex"].new_zeros(())
             for name in forward_state:
                 objective = objective + torch.sum(next_state[name] * adjoint_state[name])
         with active_profiler.section("step_vjp"):
+            leaves = tuple(state_inputs.values()) + (eps_ex, eps_ey, eps_ez)
+            if has_chi3_leaves:
+                leaves = leaves + chi3_leaves
             gradients = torch.autograd.grad(
                 objective,
-                tuple(state_inputs.values()) + (eps_ex, eps_ey, eps_ez),
+                leaves,
                 allow_unused=True,
             )
 
@@ -919,12 +933,21 @@ def reverse_step_torch_vjp(
         name: _adjoint._safe_grad(grad, forward_state[name]).detach()
         for (name, _), grad in zip(state_inputs.items(), state_grads)
     }
+    eps_offset = len(state_inputs)
+    grad_chi3 = {}
+    if has_chi3_leaves:
+        grad_chi3 = {
+            "grad_chi3_ex": _adjoint._safe_grad(gradients[eps_offset + 3], chi3_ex).detach(),
+            "grad_chi3_ey": _adjoint._safe_grad(gradients[eps_offset + 4], chi3_ey).detach(),
+            "grad_chi3_ez": _adjoint._safe_grad(gradients[eps_offset + 5], chi3_ez).detach(),
+        }
     return _adjoint._ReverseStepResult(
         pre_step_adjoint=pre_step_adjoint,
-        grad_eps_ex=_adjoint._safe_grad(gradients[-3], eps_ex).detach(),
-        grad_eps_ey=_adjoint._safe_grad(gradients[-2], eps_ey).detach(),
-        grad_eps_ez=_adjoint._safe_grad(gradients[-1], eps_ez).detach(),
+        grad_eps_ex=_adjoint._safe_grad(gradients[eps_offset], eps_ex).detach(),
+        grad_eps_ey=_adjoint._safe_grad(gradients[eps_offset + 1], eps_ey).detach(),
+        grad_eps_ez=_adjoint._safe_grad(gradients[eps_offset + 2], eps_ez).detach(),
         backend=backend,
+        **grad_chi3,
     )
 
 

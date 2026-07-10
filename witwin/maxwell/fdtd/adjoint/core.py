@@ -2058,6 +2058,60 @@ def _update_mixed_bloch_cpml_electric_fields(solver, state, magnetic_fields, *, 
     return electric_fields, electric_cpml_state
 
 
+def _clamped_center_pair_sum(field: torch.Tensor, axis: int) -> torch.Tensor:
+    """Sum of ``field[clamp(i-1)] + field[clamp(i)]`` for ``i in 0..size`` along ``axis``.
+
+    Replicates the index-clamped two-point gather of the CUDA collocation helper:
+    the output is one element longer than the input along ``axis``.
+    """
+    first = field.narrow(axis, 0, 1)
+    last = field.narrow(axis, field.shape[axis] - 1, 1)
+    padded = torch.cat([first, field, last], dim=axis)
+    length = field.shape[axis] + 1
+    return padded.narrow(axis, 0, length) + padded.narrow(axis, 1, length)
+
+
+def _forward_pair_sum(field: torch.Tensor, axis: int) -> torch.Tensor:
+    """Sum of ``field[i] + field[i+1]`` for ``i in 0..size-2`` along ``axis``."""
+    length = field.shape[axis] - 1
+    return field.narrow(axis, 0, length) + field.narrow(axis, 1, length)
+
+
+def _collocated_field_square(ex, ey, ez):
+    """|E|^2 collocated onto each electric Yee edge, matching the CUDA
+    ``collocate_electric_components`` stencil (4-point off-axis average with
+    index clamping at the domain faces)."""
+    ey_on_ex = 0.25 * _forward_pair_sum(_clamped_center_pair_sum(ey, axis=1), axis=0)
+    ez_on_ex = 0.25 * _forward_pair_sum(_clamped_center_pair_sum(ez, axis=2), axis=0)
+    ex_on_ey = 0.25 * _forward_pair_sum(_clamped_center_pair_sum(ex, axis=0), axis=1)
+    ez_on_ey = 0.25 * _forward_pair_sum(_clamped_center_pair_sum(ez, axis=2), axis=1)
+    ex_on_ez = 0.25 * _forward_pair_sum(_clamped_center_pair_sum(ex, axis=0), axis=2)
+    ey_on_ez = 0.25 * _forward_pair_sum(_clamped_center_pair_sum(ey, axis=1), axis=2)
+    return {
+        "Ex": ex * ex + ey_on_ex * ey_on_ex + ez_on_ex * ez_on_ex,
+        "Ey": ex_on_ey * ex_on_ey + ey * ey + ez_on_ey * ez_on_ey,
+        "Ez": ex_on_ez * ex_on_ez + ey_on_ez * ey_on_ez + ez * ez,
+    }
+
+
+def _kerr_dynamic_electric_curls(solver, state, *, eps_ex, eps_ey, eps_ez, chi3_ex, chi3_ey, chi3_ez):
+    """Differentiable replica of ``updateKerrElectricField*Curl3D``:
+    ``curl = dt / max(eps + eps0 * chi3 * |E|^2, floor) * decay``."""
+    field_square = _collocated_field_square(state["Ex"], state["Ey"], state["Ez"])
+    eps0 = float(solver.eps0)
+    floor = 1.0e-12 * eps0
+    dt = float(solver.dt)
+    curls = {}
+    for component_name, eps, chi3, decay in (
+        ("Ex", eps_ex, chi3_ex, solver.cex_decay),
+        ("Ey", eps_ey, chi3_ey, solver.cey_decay),
+        ("Ez", eps_ez, chi3_ez, solver.cez_decay),
+    ):
+        effective = torch.clamp_min(eps + eps0 * chi3 * field_square[component_name], floor)
+        curls[component_name] = (dt / effective) * decay
+    return curls
+
+
 def _forward_magnetic_fields(solver, state, *, time_value, resolved_source_terms):
     """Recompute the post-source real magnetic fields of one forward step.
 
@@ -2136,7 +2190,13 @@ def _forward_magnetic_fields(solver, state, *, time_value, resolved_source_terms
     )
 
 
-def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
+def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez, chi3_ex=None, chi3_ey=None, chi3_ez=None):
+    if getattr(solver, "nonlinear_general_enabled", False):
+        raise NotImplementedError(
+            "FDTD adjoint replay supports the pure-chi3 Kerr nonlinearity only (no chi2 / TPA channels)."
+        )
+    if getattr(solver, "modulation_enabled", False):
+        raise NotImplementedError("FDTD adjoint replay does not support time-modulated media.")
     source_terms, electric_source_terms, magnetic_source_terms = _resolved_source_term_lists(
         solver,
         eps_ex,
@@ -2404,6 +2464,21 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             }
             psi_ex_y = psi_ex_z = psi_ey_x = psi_ey_z = psi_ez_x = psi_ez_y = None
     else:
+        kerr_curls = None
+        if getattr(solver, "kerr_enabled", False):
+            # The Kerr coefficient kernel recomputes the curl factor from the
+            # pre-update E fields each step; replicate it differentiably so the
+            # VJP flows into the fields, eps, and chi3.
+            kerr_curls = _kerr_dynamic_electric_curls(
+                solver,
+                state,
+                eps_ex=eps_ex,
+                eps_ey=eps_ey,
+                eps_ez=eps_ez,
+                chi3_ex=chi3_ex if chi3_ex is not None else solver.kerr_chi3_Ex,
+                chi3_ey=chi3_ey if chi3_ey is not None else solver.kerr_chi3_Ey,
+                chi3_ez=chi3_ez if chi3_ez is not None else solver.kerr_chi3_Ez,
+            )
         d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy_e)
         d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz_e)
         ex, psi_ex_y, psi_ex_z = _update_electric_component(
@@ -2411,8 +2486,8 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             d_pos=d_hz_dy,
             d_neg=d_hy_dz,
             decay=solver.cex_decay,
-            curl_prefactor=solver.cex_curl * solver.eps_Ex,
-            eps=eps_ex,
+            curl_prefactor=solver.cex_curl * solver.eps_Ex if kerr_curls is None else kerr_curls["Ex"],
+            eps=eps_ex if kerr_curls is None else 1.0,
             low_mode_pos=solver.boundary_y_low_code,
             high_mode_pos=solver.boundary_y_high_code,
             low_mode_neg=solver.boundary_z_low_code,
@@ -2436,8 +2511,8 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             d_pos=d_hx_dz,
             d_neg=d_hz_dx,
             decay=solver.cey_decay,
-            curl_prefactor=solver.cey_curl * solver.eps_Ey,
-            eps=eps_ey,
+            curl_prefactor=solver.cey_curl * solver.eps_Ey if kerr_curls is None else kerr_curls["Ey"],
+            eps=eps_ey if kerr_curls is None else 1.0,
             low_mode_pos=solver.boundary_z_low_code,
             high_mode_pos=solver.boundary_z_high_code,
             low_mode_neg=solver.boundary_x_low_code,
@@ -2461,8 +2536,8 @@ def _step_state(solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
             d_pos=d_hy_dx,
             d_neg=d_hx_dy,
             decay=solver.cez_decay,
-            curl_prefactor=solver.cez_curl * solver.eps_Ez,
-            eps=eps_ez,
+            curl_prefactor=solver.cez_curl * solver.eps_Ez if kerr_curls is None else kerr_curls["Ez"],
+            eps=eps_ez if kerr_curls is None else 1.0,
             low_mode_pos=solver.boundary_x_low_code,
             high_mode_pos=solver.boundary_x_high_code,
             low_mode_neg=solver.boundary_y_low_code,

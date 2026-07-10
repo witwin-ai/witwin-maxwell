@@ -302,6 +302,216 @@ def test_scene_with_magnetic_dispersive_medium_gradient_matches_fd():
     )
 
 
+# ---------------------------------------------------------------------------
+# Kerr (instantaneous chi3) media
+# ---------------------------------------------------------------------------
+
+_KERR_CHI3 = 5.0e-3
+
+
+def _kerr_scene(chi3, *, density=None):
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+        device="cuda",
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="kerr_slab",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+            material=mw.Material(eps_r=2.0, kerr_chi3=chi3),
+        )
+    )
+    if density is not None:
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+    scene.add_source(
+        mw.PointDipole(
+            position=(0.0, 0.0, -0.18),
+            polarization="Ez",
+            width=0.04,
+            source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+        )
+    )
+    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+    return scene
+
+
+class _KerrDensityScene(mw.SceneModule):
+    """Trainable design density next to a static Kerr (chi3) slab.
+
+    The reverse step must differentiate the per-step dynamic curl recompute
+    through the forward E fields for the design gradients to be correct.
+    """
+
+    def __init__(self, init=0.0, chi3=_KERR_CHI3):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((2, 2, 2), float(init), device="cuda"))
+        self._chi3 = chi3
+
+    def to_scene(self):
+        return _kerr_scene(self._chi3, density=torch.sigmoid(self.logits))
+
+
+@_CUDA
+def test_kerr_dynamic_curl_replica_matches_cuda_kernel():
+    """The differentiable Kerr dynamic-curl replica used by the adjoint replay
+    must match the native updateKerrElectricField*Curl3D kernels."""
+    from witwin.maxwell.fdtd.adjoint.core import _kerr_dynamic_electric_curls
+
+    torch.manual_seed(11)
+    prepared = mw.Simulation.fdtd(
+        _kerr_scene(_KERR_CHI3),
+        frequencies=[1e9],
+        run_time=mw.TimeConfig(time_steps=8),
+    ).prepare()
+    solver = prepared.solver
+    assert solver.kerr_enabled
+
+    solver.Ex.copy_(2.0 * torch.randn_like(solver.Ex))
+    solver.Ey.copy_(2.0 * torch.randn_like(solver.Ey))
+    solver.Ez.copy_(2.0 * torch.randn_like(solver.Ez))
+    solver._update_nonlinear_electric_coefficients()
+
+    state = {"Ex": solver.Ex, "Ey": solver.Ey, "Ez": solver.Ez}
+    replica = _kerr_dynamic_electric_curls(
+        solver,
+        state,
+        eps_ex=solver.eps_Ex,
+        eps_ey=solver.eps_Ey,
+        eps_ez=solver.eps_Ez,
+        chi3_ex=solver.kerr_chi3_Ex,
+        chi3_ey=solver.kerr_chi3_Ey,
+        chi3_ez=solver.kerr_chi3_Ez,
+    )
+
+    assert torch.allclose(replica["Ex"], solver.cex_curl_dynamic, rtol=1e-5, atol=0.0)
+    assert torch.allclose(replica["Ey"], solver.cey_curl_dynamic, rtol=1e-5, atol=0.0)
+    assert torch.allclose(replica["Ez"], solver.cez_curl_dynamic, rtol=1e-5, atol=0.0)
+
+
+@_CUDA
+def test_scene_with_kerr_medium_gradient_matches_fd():
+    """Per-element FD validation of design gradients in a scene containing a
+    static Kerr slab (previously rejected by the bridge)."""
+    model = _KerrDensityScene(init=0.0)
+
+    def loss_fn():
+        result = _build_sim(model, time_steps=200).run()
+        return _abs2(result.monitor("probe")["data"])
+
+    # The nonlinearity must actually shape the solution, otherwise this would
+    # only re-validate the linear path.
+    linear_loss = _abs2(
+        _build_sim(_KerrDensityScene(init=0.0, chi3=0.0), time_steps=200)
+        .run()
+        .monitor("probe")["data"]
+    ).item()
+    kerr_loss = loss_fn().item()
+    assert abs(kerr_loss - linear_loss) > 1e-3 * abs(linear_loss), (
+        f"Kerr term inactive: linear={linear_loss:.6e}, kerr={kerr_loss:.6e}"
+    )
+
+    backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn)
+
+    assert (fd_grad != 0).any(), "FD gradient is identically zero; test setup is broken."
+    scale = torch.abs(fd_grad).max().item()
+    assert torch.allclose(backward_grad, fd_grad, rtol=3e-2, atol=scale * 5e-3), (
+        f"backward={backward_grad.flatten().tolist()}, fd={fd_grad.flatten().tolist()}"
+    )
+
+
+class _KerrGeometryScene(mw.SceneModule):
+    """Trainable-size Kerr box: the logits move the chi3 (and eps) blend."""
+
+    def __init__(self, init=0.0):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((3,), float(init), device="cuda"))
+
+    def to_scene(self):
+        size = 0.30 + 0.12 * torch.sigmoid(self.logits)
+        scene = mw.Scene(
+            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+            grid=mw.GridSpec.uniform(0.12),
+            boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+            device="cuda",
+            subpixel_samples=5,
+        )
+        scene.add_structure(
+            mw.Structure(
+                name="kerr_box",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=size),
+                material=mw.Material(eps_r=2.0, kerr_chi3=_KERR_CHI3),
+            )
+        )
+        scene.add_source(
+            mw.PointDipole(
+                position=(0.0, 0.0, -0.18),
+                polarization="Ez",
+                width=0.04,
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+            )
+        )
+        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+        return scene
+
+
+@_CUDA
+def test_kerr_pullback_chi3_channel_is_exact_transpose():
+    """The chi3 gradient channel of the material pullback must be the exact
+    transpose of the node->Yee-edge chi3 averaging."""
+    torch.manual_seed(5)
+    model = _KerrGeometryScene(init=0.0).cuda()
+    inputs = tuple(parameter for parameter in model.parameters() if parameter.requires_grad)
+
+    scene = model.to_scene()
+    prepared = prepare_scene(scene)
+    zero_eps_ex = torch.zeros((prepared.Nx - 1, prepared.Ny, prepared.Nz), device="cuda")
+    zero_eps_ey = torch.zeros((prepared.Nx, prepared.Ny - 1, prepared.Nz), device="cuda")
+    zero_eps_ez = torch.zeros((prepared.Nx, prepared.Ny, prepared.Nz - 1), device="cuda")
+    grad_chi3_ex = torch.randn_like(zero_eps_ex)
+    grad_chi3_ey = torch.randn_like(zero_eps_ey)
+    grad_chi3_ez = torch.randn_like(zero_eps_ez)
+
+    with torch.enable_grad():
+        outputs = pullback_material_input_gradients(
+            scene,
+            inputs=inputs,
+            grad_eps_ex=zero_eps_ex,
+            grad_eps_ey=zero_eps_ey,
+            grad_eps_ez=zero_eps_ez,
+            eps0=_EPS0,
+            grad_chi3_ex=grad_chi3_ex,
+            grad_chi3_ey=grad_chi3_ey,
+            grad_chi3_ez=grad_chi3_ez,
+        )
+
+        reference_prepared = prepare_scene(model.to_scene())
+        kerr_field = reference_prepared.compile_materials()["kerr_chi3"]
+        objective = (
+            (grad_chi3_ex * average_node_to_component(None, kerr_field, "Ex")).sum()
+            + (grad_chi3_ey * average_node_to_component(None, kerr_field, "Ey")).sum()
+            + (grad_chi3_ez * average_node_to_component(None, kerr_field, "Ez")).sum()
+        )
+        expected = torch.autograd.grad(objective, inputs, allow_unused=True)
+
+    for output, reference in zip(outputs, expected):
+        reference = torch.zeros_like(output) if reference is None else reference
+        assert (reference != 0).any()
+        assert torch.allclose(output, reference, rtol=1e-4, atol=1e-10), (
+            output.tolist(),
+            reference.tolist(),
+        )
+
+
 @_CUDA
 def test_anisotropic_geometry_gradient_is_axis_distinct():
     """Trainable geometry of a diagonal-anisotropic box must receive non-zero,

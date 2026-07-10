@@ -271,6 +271,9 @@ def pullback_material_input_gradients(
     grad_eps_ey: torch.Tensor,
     grad_eps_ez: torch.Tensor,
     eps0: float,
+    grad_chi3_ex: torch.Tensor | None = None,
+    grad_chi3_ey: torch.Tensor | None = None,
+    grad_chi3_ez: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
     if not inputs:
         return ()
@@ -287,7 +290,8 @@ def pullback_material_input_gradients(
     # rather than their scalar average so diagonal-anisotropic sensitivities are
     # attributed to the correct axis. For isotropic media this is exactly the
     # previous scalar-eps pullback.
-    eps_components, _mu_components = prepared_scene.compile_material_components()
+    model = prepared_scene.compile_materials()
+    eps_components = model["eps_components"]
     outputs = []
     grad_outputs = []
     for axis in ("x", "y", "z"):
@@ -296,6 +300,26 @@ def pullback_material_input_gradients(
             continue
         outputs.append(component)
         grad_outputs.append(component_gradients[axis].to(device=component.device, dtype=component.dtype))
+
+    if grad_chi3_ex is not None:
+        # Kerr channel: the compiled chi3 node field feeds all three Yee-edge
+        # chi3 tensors through the same two-point averaging (no eps0 scale), so
+        # its node gradient is the sum of the three per-axis edge scatters.
+        kerr_field = model["kerr_chi3"]
+        if kerr_field.requires_grad:
+            chi3_node_gradients = component_node_gradients_from_yee_permittivity(
+                prepared_scene,
+                grad_eps_ex=grad_chi3_ex,
+                grad_eps_ey=grad_chi3_ey,
+                grad_eps_ez=grad_chi3_ez,
+                eps0=1.0,
+            )
+            chi3_node_gradient = (
+                chi3_node_gradients["x"] + chi3_node_gradients["y"] + chi3_node_gradients["z"]
+            )
+            outputs.append(kerr_field)
+            grad_outputs.append(chi3_node_gradient.to(device=kerr_field.device, dtype=kerr_field.dtype))
+
     gradients = (
         torch.autograd.grad(
             outputs,

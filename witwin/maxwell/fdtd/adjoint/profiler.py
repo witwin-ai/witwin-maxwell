@@ -27,6 +27,11 @@ class _ReverseStepResult:
     backend: str
     source_adjoint_state: dict[str, torch.Tensor] | None = None
     magnetic_output_adjoint: dict[str, torch.Tensor] | None = None
+    # Kerr chi3 gradient channel; populated only when the reverse step ran with
+    # chi3 leaves (Kerr-enabled solvers on the torch-VJP backend).
+    grad_chi3_ex: torch.Tensor | None = None
+    grad_chi3_ey: torch.Tensor | None = None
+    grad_chi3_ez: torch.Tensor | None = None
 
 
 @dataclass

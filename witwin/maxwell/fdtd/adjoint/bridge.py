@@ -80,7 +80,15 @@ def _unsupported_adjoint_medium(scene):
                 "structures (no mu gradient channel) yet."
             )
         if getattr(material, "is_nonlinear", False):
-            return "FDTD adjoint does not support Kerr nonlinear media yet."
+            # Pure instantaneous chi3 (Kerr) is differentiable through the
+            # torch-VJP reverse of the dynamic-curl recompute plus a dedicated
+            # chi3 gradient channel. chi2 and two-photon absorption rewrite the
+            # decay coefficient through the general nonlinear kernel, which the
+            # adjoint replay does not model yet.
+            if float(getattr(material, "nonlinear_chi2", 0.0)) != 0.0:
+                return "FDTD adjoint does not support chi2 nonlinear media yet."
+            if float(getattr(material, "tpa_sigma_scale", 0.0)) != 0.0:
+                return "FDTD adjoint does not support two-photon-absorption media yet."
         if getattr(material, "is_modulated", False):
             return "FDTD adjoint does not support time-modulated media yet."
     return None
@@ -211,6 +219,8 @@ class _FDTDGradientBridge:
                 else:
                     solver._update_electric_fields_bloch()
             else:
+                if getattr(solver, "nonlinear_enabled", False):
+                    solver._update_nonlinear_electric_coefficients()
                 solver._update_electric_fields(solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
 
             if getattr(solver, "tfsf_enabled", False):
@@ -388,6 +398,16 @@ class _FDTDGradientBridge:
         grad_eps_ex = torch.zeros_like(solver.eps_Ex)
         grad_eps_ey = torch.zeros_like(solver.eps_Ey)
         grad_eps_ez = torch.zeros_like(solver.eps_Ez)
+        kerr_enabled = bool(getattr(solver, "kerr_enabled", False))
+        chi3_ex = chi3_ey = chi3_ez = None
+        grad_chi3_ex = grad_chi3_ey = grad_chi3_ez = None
+        if kerr_enabled:
+            chi3_ex = solver.kerr_chi3_Ex.detach().clone().requires_grad_(True)
+            chi3_ey = solver.kerr_chi3_Ey.detach().clone().requires_grad_(True)
+            chi3_ez = solver.kerr_chi3_Ez.detach().clone().requires_grad_(True)
+            grad_chi3_ex = torch.zeros_like(solver.kerr_chi3_Ex)
+            grad_chi3_ey = torch.zeros_like(solver.kerr_chi3_Ey)
+            grad_chi3_ez = torch.zeros_like(solver.kerr_chi3_Ez)
         compiled_source = getattr(solver, "_compiled_source", None)
         cache_mode_source_terms = compiled_source is not None and compiled_source.get("kind") == "mode_source"
         if cache_mode_source_terms:
@@ -420,12 +440,24 @@ class _FDTDGradientBridge:
                         eps_ex=eps_ex,
                         eps_ey=eps_ey,
                         eps_ez=eps_ez,
+                        chi3_ex=chi3_ex,
+                        chi3_ey=chi3_ey,
+                        chi3_ez=chi3_ez,
                         profiler=profiler,
                     )
                     profiler.record_reverse_backend(step_result.backend)
                     grad_eps_ex = grad_eps_ex + step_result.grad_eps_ex
                     grad_eps_ey = grad_eps_ey + step_result.grad_eps_ey
                     grad_eps_ez = grad_eps_ez + step_result.grad_eps_ez
+                    if kerr_enabled:
+                        if step_result.grad_chi3_ex is None:
+                            raise RuntimeError(
+                                "Kerr-enabled reverse step did not produce chi3 gradients; "
+                                f"backend {step_result.backend!r} lacks the chi3 channel."
+                            )
+                        grad_chi3_ex = grad_chi3_ex + step_result.grad_chi3_ex
+                        grad_chi3_ey = grad_chi3_ey + step_result.grad_chi3_ey
+                        grad_chi3_ez = grad_chi3_ez + step_result.grad_chi3_ez
                     adjoint_state = step_result.pre_step_adjoint
 
             with profiler.section("material_pullback"):
@@ -438,6 +470,9 @@ class _FDTDGradientBridge:
                         grad_eps_ey=grad_eps_ey,
                         grad_eps_ez=grad_eps_ez,
                         eps0=solver.eps0,
+                        grad_chi3_ex=grad_chi3_ex,
+                        grad_chi3_ey=grad_chi3_ey,
+                        grad_chi3_ez=grad_chi3_ez,
                     )
         finally:
             if hasattr(solver, "_mode_source_explicit_vjp_remaining"):
