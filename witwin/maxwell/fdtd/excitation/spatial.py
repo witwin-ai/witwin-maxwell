@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 
+import numpy as np
 import torch
 
 from ...scene import prepare_scene
@@ -10,6 +11,12 @@ from ...sources import evaluate_source_time
 
 
 _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
+
+# Relative spacing spread at or below which a tangential aperture window is
+# treated as exactly uniform: the exact minimum cell spacing is returned
+# bit-for-bit (equal to the global minimum used before), so uniform grids keep
+# their numerical-dispersion phase correction unchanged.
+_SOFT_PLANE_UNIFORM_RTOL = 1e-6
 
 
 def _pml_margin(scene, axis: str, side: str, *, extra: int = 0) -> int:
@@ -74,6 +81,54 @@ def soft_plane_wave_coordinate(scene, axis: str, direction_component: float, *, 
     index = soft_plane_wave_index(scene, axis, direction_component, fraction=fraction)
     axis_coords = {"x": scene.x, "y": scene.y, "z": scene.z}[axis]
     return float(axis_coords[index].item())
+
+
+def _window_is_uniform(cells: np.ndarray) -> bool:
+    cells = np.asarray(cells, dtype=np.float64)
+    d_min = float(cells.min())
+    d_max = float(cells.max())
+    return (d_max - d_min) <= _SOFT_PLANE_UNIFORM_RTOL * max(d_max, 1e-300)
+
+
+def soft_plane_wave_region_spacing(scene, *, injection_axis: str, plane_index: int, direction_sign: int) -> dict:
+    """Per-axis primal spacing local to the soft plane-wave launch footprint.
+
+    The soft plane-wave numerical-dispersion phase correction solves the discrete
+    dispersion relation with one effective spacing per axis. On a grid whose
+    interior is uniform along an axis (to ``_SOFT_PLANE_UNIFORM_RTOL``) that axis
+    returns its exact minimum cell spacing, bit-for-bit the global-minimum value
+    the correction used before, so uniform grids are unchanged.
+
+    On a graded axis the global minimum spacing can belong to a cell far from the
+    source, which mis-tunes the injected wavefront's phase velocity. Instead, the
+    injection axis returns the spacing of the cell the wavefront is launched into
+    (the Yee E/H half-cell offset that governs the one-way phase match lives
+    there), and each tangential axis returns the mean spacing over the physical
+    aperture (the best single scalar for the oblique-incidence phase across the
+    plane).
+    """
+    scene = prepare_scene(scene)
+    primal = {
+        "x": np.asarray(scene.dx_primal64, dtype=np.float64),
+        "y": np.asarray(scene.dy_primal64, dtype=np.float64),
+        "z": np.asarray(scene.dz_primal64, dtype=np.float64),
+    }
+    deltas = {}
+    for axis in "xyz":
+        cells = primal[axis]
+        lo, hi = physical_interior_indices(scene, axis)
+        interior = cells[lo:hi] if hi > lo else cells
+        if _window_is_uniform(interior):
+            # Uniform interior: exact spacing, bit-for-bit the previous value.
+            deltas[axis] = float(interior.min())
+        elif axis == injection_axis:
+            # Cell straddled by the launch plane on the propagation side.
+            cell_index = plane_index if direction_sign > 0 else plane_index - 1
+            cell_index = min(max(int(cell_index), 0), len(cells) - 1)
+            deltas[axis] = float(cells[cell_index])
+        else:
+            deltas[axis] = float(interior.mean())
+    return deltas
 
 
 def plane_center(scene, axis: str, plane_coordinate: float, *, device, dtype):

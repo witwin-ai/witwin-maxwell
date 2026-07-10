@@ -11,6 +11,7 @@ from .spatial import (
     plane_wave_profile,
     resolve_injection_axis,
     soft_plane_wave_index,
+    soft_plane_wave_region_spacing,
     source_plane_index,
 )
 from .modes import sample_mode_source_component, sample_mode_source_profile, solve_mode_source_profile
@@ -685,13 +686,19 @@ def _prepare_plane_wave_surface_source(solver, source, *, source_index):
     magnetic_specs = magnetic_specs[_FACE_SPEC_RANGES[(injection_axis, face_side)]]
 
     phase_speed = solver.c
-    # Numerical-dispersion phase correction with the per-axis minimum spacing
-    # (exact on uniform grids, a conservative estimate on nonuniform ones).
-    k_numeric = solve_numerical_wavenumber(
-        solver,
-        direction,
-        {"x": solver.min_dx, "y": solver.min_dy, "z": solver.min_dz},
+    # Numerical-dispersion phase correction with the grid spacing local to the
+    # launch plane and aperture. On a uniform grid this is exactly the per-axis
+    # spacing (bit-for-bit the previous global-minimum value); on a graded grid it
+    # tracks the launch-region cells the wavefront actually crosses instead of the
+    # global-minimum spacing, whose finest cell can lie far from the source and
+    # mis-tune the injected phase velocity.
+    deltas = soft_plane_wave_region_spacing(
+        solver.scene,
+        injection_axis=injection_axis,
+        plane_index=plane_index,
+        direction_sign=direction_sign,
     )
+    k_numeric = solve_numerical_wavenumber(solver, direction, deltas)
     if k_numeric > 1e-12:
         phase_speed = source_omega / k_numeric
 
