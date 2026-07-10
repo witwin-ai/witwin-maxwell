@@ -660,6 +660,33 @@ void update_electric_ez_full_aniso_cuda(
     int64_t periodic_x,
     int64_t periodic_y,
     int64_t periodic_z);
+void apply_aniso_offdiag_current_ex_cuda(
+    torch::stable::Tensor ex,
+    const torch::stable::Tensor& jy,
+    const torch::stable::Tensor& jz,
+    const torch::stable::Tensor& coeff_y,
+    const torch::stable::Tensor& coeff_z,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z);
+void apply_aniso_offdiag_current_ey_cuda(
+    torch::stable::Tensor ey,
+    const torch::stable::Tensor& jx,
+    const torch::stable::Tensor& jz,
+    const torch::stable::Tensor& coeff_x,
+    const torch::stable::Tensor& coeff_z,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z);
+void apply_aniso_offdiag_current_ez_cuda(
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& jx,
+    const torch::stable::Tensor& jy,
+    const torch::stable::Tensor& coeff_x,
+    const torch::stable::Tensor& coeff_y,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z);
 void add_source_patch_cuda(
     torch::stable::Tensor field,
     const torch::stable::Tensor& patch,
@@ -1383,6 +1410,9 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("update_electric_ex_full_aniso(Tensor(a!) ex, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_y, Tensor coeff_z, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, int periodic_x, int periodic_y, int periodic_z) -> ()");
   m.def("update_electric_ey_full_aniso(Tensor(a!) ey, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_x, Tensor coeff_z, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, int periodic_x, int periodic_y, int periodic_z) -> ()");
   m.def("update_electric_ez_full_aniso(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor hz, Tensor coeff_x, Tensor coeff_y, Tensor inv_dx, Tensor inv_dy, Tensor inv_dz, int periodic_x, int periodic_y, int periodic_z) -> ()");
+  m.def("apply_aniso_offdiag_current_ex(Tensor(a!) ex, Tensor jy, Tensor jz, Tensor coeff_y, Tensor coeff_z, int periodic_x, int periodic_y, int periodic_z) -> ()");
+  m.def("apply_aniso_offdiag_current_ey(Tensor(a!) ey, Tensor jx, Tensor jz, Tensor coeff_x, Tensor coeff_z, int periodic_x, int periodic_y, int periodic_z) -> ()");
+  m.def("apply_aniso_offdiag_current_ez(Tensor(a!) ez, Tensor jx, Tensor jy, Tensor coeff_x, Tensor coeff_y, int periodic_x, int periodic_y, int periodic_z) -> ()");
   m.def("add_source_patch(Tensor(a!) field, Tensor patch, int offset_i, int offset_j, int offset_k, float signal) -> ()");
   m.def("add_cw_phased_source_patch(Tensor(a!) field, Tensor patch_cos, Tensor patch_sin, int offset_i, int offset_j, int offset_k, float signal_cos, float signal_sin) -> ()");
   m.def("add_time_shifted_source_patch(Tensor(a!) field, Tensor patch, Tensor delay_patch, Tensor activation_delay_patch, int offset_i, int offset_j, int offset_k, int time_kind, float time, float frequency, float fwidth, float amplitude, float phase, float delay, int causal_gate) -> ()");
@@ -1480,6 +1510,9 @@ STABLE_TORCH_LIBRARY_IMPL(witwin_maxwell_fdtd_cuda, CUDA, m) {
   m.impl("update_electric_ex_full_aniso", TORCH_BOX(&update_electric_ex_full_aniso_cuda));
   m.impl("update_electric_ey_full_aniso", TORCH_BOX(&update_electric_ey_full_aniso_cuda));
   m.impl("update_electric_ez_full_aniso", TORCH_BOX(&update_electric_ez_full_aniso_cuda));
+  m.impl("apply_aniso_offdiag_current_ex", TORCH_BOX(&apply_aniso_offdiag_current_ex_cuda));
+  m.impl("apply_aniso_offdiag_current_ey", TORCH_BOX(&apply_aniso_offdiag_current_ey_cuda));
+  m.impl("apply_aniso_offdiag_current_ez", TORCH_BOX(&apply_aniso_offdiag_current_ez_cuda));
   m.impl("add_source_patch", TORCH_BOX(&add_source_patch_cuda));
   m.impl("add_cw_phased_source_patch", TORCH_BOX(&add_cw_phased_source_patch_cuda));
   m.impl("add_time_shifted_source_patch", TORCH_BOX(&add_time_shifted_source_patch_cuda));

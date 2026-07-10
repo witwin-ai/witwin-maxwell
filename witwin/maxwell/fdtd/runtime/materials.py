@@ -10,7 +10,7 @@ from ...compiler.materials import (
     material_model_has_modulation,
     material_model_has_nonlinearity,
 )
-from ..boundary import has_complex_fields
+from ..boundary import BOUNDARY_PERIODIC, has_complex_fields
 
 
 def _any_component_nonzero(components: dict[str, torch.Tensor]) -> bool:
@@ -68,10 +68,11 @@ def build_materials(solver, scene):
     build_dispersive_templates(solver, material_model)
     build_magnetic_dispersive_templates(solver, material_model)
     solver.dispersive_enabled = solver.electric_dispersive_enabled or solver.magnetic_dispersive_enabled
-    if solver.full_aniso_enabled and solver.dispersive_enabled:
-        raise NotImplementedError(
-            "FDTD full (off-diagonal) anisotropic media cannot be combined with dispersive materials in the same Scene yet."
-        )
+    # Full (off-diagonal) anisotropic permittivity now composes with dispersion:
+    # electric poles enter isotropically and the ADE polarization current is folded
+    # through the same per-edge inverse permittivity tensor as curl(H) (see
+    # _apply_aniso_dispersive_corrections); magnetic dispersion is an independent
+    # H-side channel and does not touch the electric tensor.
     if solver.modulation_enabled:
         if solver.nonlinear_enabled:
             raise NotImplementedError(
@@ -217,6 +218,11 @@ def build_full_anisotropy(solver, material_model):
     solver.full_aniso_enabled = bool(material_model_has_full_anisotropy(material_model))
     solver._aniso_eps_eff = None
     solver._aniso_inverse_rows = None
+    # Effective inverse permittivity (1/eps_eff) reused for the diagonal ADE
+    # polarization-current subtraction, and the accumulated per-component
+    # polarization current buffers used by the off-diagonal tensor subtraction.
+    solver._aniso_disp_inv_eps = None
+    solver._aniso_disp_current = None
     solver.cex_aniso_y = None
     solver.cex_aniso_z = None
     solver.cey_aniso_x = None
@@ -462,6 +468,15 @@ def initialize_dispersive_state(solver):
         solver.electric_dispersive_enabled = False
         return
 
+    if getattr(solver, "full_aniso_enabled", False) and solver.electric_dispersive_enabled:
+        # Accumulator for the total per-component polarization current, summed over
+        # all electric poles, consumed by the coupled tensor ADE subtraction.
+        solver._aniso_disp_current = {
+            "Ex": torch.zeros_like(solver.Ex),
+            "Ey": torch.zeros_like(solver.Ey),
+            "Ez": torch.zeros_like(solver.Ez),
+        }
+
     for component_name, field in (("Ex", solver.Ex), ("Ey", solver.Ey), ("Ez", solver.Ez)):
         component_templates = solver._dispersive_templates[component_name]
         for entry in component_templates["debye"]:
@@ -686,8 +701,85 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
         ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
 
 
+def _aniso_periodic_flags(solver):
+    return (
+        int(solver.boundary_x_low_code == BOUNDARY_PERIODIC and solver.boundary_x_high_code == BOUNDARY_PERIODIC),
+        int(solver.boundary_y_low_code == BOUNDARY_PERIODIC and solver.boundary_y_high_code == BOUNDARY_PERIODIC),
+        int(solver.boundary_z_low_code == BOUNDARY_PERIODIC and solver.boundary_z_high_code == BOUNDARY_PERIODIC),
+    )
+
+
+def _apply_aniso_dispersive_corrections(solver):
+    """Subtract the ADE polarization current through the full inverse permittivity tensor.
+
+    For a full (off-diagonal) anisotropic permittivity the instantaneous
+    constitutive relation is ``D = eps_inf . E + P``, so the Ampere update is
+    ``E += dt * eps_inf^-1 . (curl H - J_p)``. The base and off-diagonal curl
+    kernels already apply ``eps_inf^-1`` (diagonal via ``dt/eps_eff`` and
+    off-diagonal via ``c*_aniso_*``) to ``curl H``; this applies the same operator
+    to the accumulated polarization current ``J_p``. Electric poles enter
+    isotropically (``P_i`` is driven by ``E_i``), so the per-component ADE state
+    advance is unchanged and only the subtraction becomes a tensor contraction.
+    Full anisotropy runs on real fields only (Bloch/complex is rejected upstream).
+    """
+    templates = solver._dispersive_templates
+    totals = solver._aniso_disp_current
+    for component_name in ("Ex", "Ey", "Ez"):
+        buffer = totals[component_name]
+        buffer.zero_()
+        component_templates = templates[component_name]
+        for model_name in ("debye", "drude", "lorentz"):
+            for entry in component_templates[model_name]:
+                buffer.add_(entry["current"])
+
+    inv_eps = solver._aniso_disp_inv_eps
+    for component_name, field in (("Ex", solver.Ex), ("Ey", solver.Ey), ("Ez", solver.Ez)):
+        solver.fdtd_module.applyPolarizationCurrent3D(
+            ElectricField=field,
+            PolarizationCurrent=totals[component_name],
+            InvPermittivity=inv_eps[component_name],
+            dt=solver.dt,
+        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes[component_name])
+
+    periodic_x, periodic_y, periodic_z = _aniso_periodic_flags(solver)
+    solver.fdtd_module.applyAnisoOffdiagCurrentEx3D(
+        Ex=solver.Ex,
+        Jy=totals["Ey"],
+        Jz=totals["Ez"],
+        CoeffY=solver.cex_aniso_y,
+        CoeffZ=solver.cex_aniso_z,
+        periodicX=periodic_x,
+        periodicY=periodic_y,
+        periodicZ=periodic_z,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    solver.fdtd_module.applyAnisoOffdiagCurrentEy3D(
+        Ey=solver.Ey,
+        Jx=totals["Ex"],
+        Jz=totals["Ez"],
+        CoeffX=solver.cey_aniso_x,
+        CoeffZ=solver.cey_aniso_z,
+        periodicX=periodic_x,
+        periodicY=periodic_y,
+        periodicZ=periodic_z,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    solver.fdtd_module.applyAnisoOffdiagCurrentEz3D(
+        Ez=solver.Ez,
+        Jx=totals["Ex"],
+        Jy=totals["Ey"],
+        CoeffX=solver.cez_aniso_x,
+        CoeffY=solver.cez_aniso_y,
+        periodicX=periodic_x,
+        periodicY=periodic_y,
+        periodicZ=periodic_z,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+
+
 def apply_dispersive_corrections(solver):
     if not solver.electric_dispersive_enabled:
+        return
+
+    if getattr(solver, "full_aniso_enabled", False):
+        _apply_aniso_dispersive_corrections(solver)
         return
 
     apply_component_dispersive_currents(solver, "Ex", solver.Ex, imag=False)
@@ -889,6 +981,16 @@ def _build_full_aniso_curl_coefficients(solver):
     solver.cey_aniso_z = (scale * rows["Ey"][1]).contiguous()
     solver.cez_aniso_x = (scale * rows["Ez"][0]).contiguous()
     solver.cez_aniso_y = (scale * rows["Ez"][1]).contiguous()
+    # The diagonal ADE polarization-current subtraction must divide by the same
+    # effective permittivity the base curl coefficient uses (dt/eps_eff), not the
+    # plain per-axis average, so the dispersive response and the tensor curl stay
+    # consistent on off-diagonal edges (they coincide for a diagonal tensor).
+    if getattr(solver, "electric_dispersive_enabled", False):
+        eps_eff = solver._aniso_eps_eff
+        solver._aniso_disp_inv_eps = {
+            component_name: (1.0 / eps_eff[component_name]).contiguous()
+            for component_name in ("Ex", "Ey", "Ez")
+        }
     _validate_full_aniso_absorber_overlap(solver)
 
 

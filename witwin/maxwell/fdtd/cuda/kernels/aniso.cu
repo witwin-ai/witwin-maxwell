@@ -403,6 +403,277 @@ __global__ void update_electric_ez_full_aniso_kernel(
   ez[linear] += 0.25f * (c_x * acc_x + c_y * acc_y);
 }
 
+// --- Off-diagonal ADE polarization-current subtraction ---------------------
+//
+// For a full (off-diagonal) anisotropic permittivity the Ampere update is
+//     E += dt * eps_inf^-1 . (curl H - J_p),
+// so the same per-edge inverse permittivity tensor that couples curl(H) also
+// couples the polarization current J_p across components. These kernels apply
+// the off-diagonal part of that tensor to the accumulated per-component
+// polarization current, mirroring the curl(H) collocation stencil above but
+// reading the stored current field directly and subtracting:
+//     E_i -= 0.25 * (coeff_ij * <J_j>_i + coeff_ik * <J_k>_i).
+// The coefficients coeff_ij == dt * inv_ij / eps0 are exactly the ones used for
+// the curl(H) off-diagonal correction, so magnitude and sign stay consistent.
+
+// Read an Ex-edge field value at (sx edge-x, sy node-y, sz node-z).
+__device__ __forceinline__ bool read_ex_edge_value(
+    const float* __restrict__ field,
+    int sx,
+    int sy,
+    int sz,
+    int nx_nodes,
+    int ny_nodes,
+    int nz_nodes,
+    bool periodic_x,
+    bool periodic_y,
+    bool periodic_z,
+    float& value) {
+  sx = wrap_edge_coord(sx, nx_nodes, periodic_x);
+  if (sx < 0) {
+    return false;
+  }
+  sy = map_node_coord(sy, ny_nodes, periodic_y);
+  sz = map_node_coord(sz, nz_nodes, periodic_z);
+  value = field[offset3d(sx, sy, sz, ny_nodes, nz_nodes)];
+  return true;
+}
+
+// Read an Ey-edge field value at (sx node-x, sy edge-y, sz node-z).
+__device__ __forceinline__ bool read_ey_edge_value(
+    const float* __restrict__ field,
+    int sx,
+    int sy,
+    int sz,
+    int nx_nodes,
+    int ny_nodes,
+    int nz_nodes,
+    bool periodic_x,
+    bool periodic_y,
+    bool periodic_z,
+    float& value) {
+  sy = wrap_edge_coord(sy, ny_nodes, periodic_y);
+  if (sy < 0) {
+    return false;
+  }
+  sx = map_node_coord(sx, nx_nodes, periodic_x);
+  sz = map_node_coord(sz, nz_nodes, periodic_z);
+  value = field[offset3d(sx, sy, sz, ny_nodes - 1, nz_nodes)];
+  return true;
+}
+
+// Read an Ez-edge field value at (sx node-x, sy node-y, sz edge-z).
+__device__ __forceinline__ bool read_ez_edge_value(
+    const float* __restrict__ field,
+    int sx,
+    int sy,
+    int sz,
+    int nx_nodes,
+    int ny_nodes,
+    int nz_nodes,
+    bool periodic_x,
+    bool periodic_y,
+    bool periodic_z,
+    float& value) {
+  sz = wrap_edge_coord(sz, nz_nodes, periodic_z);
+  if (sz < 0) {
+    return false;
+  }
+  sx = map_node_coord(sx, nx_nodes, periodic_x);
+  sy = map_node_coord(sy, ny_nodes, periodic_y);
+  value = field[offset3d(sx, sy, sz, ny_nodes, nz_nodes - 1)];
+  return true;
+}
+
+__global__ void apply_aniso_offdiag_current_ex_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ jy,
+    const float* __restrict__ jz,
+    const float* __restrict__ coeff_y,
+    const float* __restrict__ coeff_z,
+    int periodic_x,
+    int periodic_y,
+    int periodic_z,
+    float* __restrict__ ex) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const float c_y = coeff_y[linear];
+  const float c_z = coeff_z[linear];
+  if (c_y == 0.0f && c_z == 0.0f) {
+    return;
+  }
+  const int nx_nodes = static_cast<int>(nx) + 1;  // ex shape (Nx-1, Ny, Nz)
+  const int ny_nodes = static_cast<int>(ny);
+  const int nz_nodes = static_cast<int>(nz);
+  const bool per_x = periodic_x != 0;
+  const bool per_y = periodic_y != 0;
+  const bool per_z = periodic_z != 0;
+  const int ii = static_cast<int>(i);
+  const int jj = static_cast<int>(j);
+  const int kk = static_cast<int>(k);
+
+  float acc_y = 0.0f;
+  if (c_y != 0.0f) {
+    for (int sx = ii; sx <= ii + 1; ++sx) {
+      for (int sy = jj - 1; sy <= jj; ++sy) {
+        float sample;
+        if (read_ey_edge_value(jy, sx, sy, kk, nx_nodes, ny_nodes, nz_nodes,
+                               per_x, per_y, per_z, sample)) {
+          acc_y += sample;
+        }
+      }
+    }
+  }
+
+  float acc_z = 0.0f;
+  if (c_z != 0.0f) {
+    for (int sx = ii; sx <= ii + 1; ++sx) {
+      for (int sz = kk - 1; sz <= kk; ++sz) {
+        float sample;
+        if (read_ez_edge_value(jz, sx, jj, sz, nx_nodes, ny_nodes, nz_nodes,
+                               per_x, per_y, per_z, sample)) {
+          acc_z += sample;
+        }
+      }
+    }
+  }
+
+  ex[linear] -= 0.25f * (c_y * acc_y + c_z * acc_z);
+}
+
+__global__ void apply_aniso_offdiag_current_ey_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ jx,
+    const float* __restrict__ jz,
+    const float* __restrict__ coeff_x,
+    const float* __restrict__ coeff_z,
+    int periodic_x,
+    int periodic_y,
+    int periodic_z,
+    float* __restrict__ ey) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const float c_x = coeff_x[linear];
+  const float c_z = coeff_z[linear];
+  if (c_x == 0.0f && c_z == 0.0f) {
+    return;
+  }
+  const int nx_nodes = static_cast<int>(nx);  // ey shape (Nx, Ny-1, Nz)
+  const int ny_nodes = static_cast<int>(ny) + 1;
+  const int nz_nodes = static_cast<int>(nz);
+  const bool per_x = periodic_x != 0;
+  const bool per_y = periodic_y != 0;
+  const bool per_z = periodic_z != 0;
+  const int ii = static_cast<int>(i);
+  const int jj = static_cast<int>(j);
+  const int kk = static_cast<int>(k);
+
+  float acc_x = 0.0f;
+  if (c_x != 0.0f) {
+    for (int sx = ii - 1; sx <= ii; ++sx) {
+      for (int sy = jj; sy <= jj + 1; ++sy) {
+        float sample;
+        if (read_ex_edge_value(jx, sx, sy, kk, nx_nodes, ny_nodes, nz_nodes,
+                               per_x, per_y, per_z, sample)) {
+          acc_x += sample;
+        }
+      }
+    }
+  }
+
+  float acc_z = 0.0f;
+  if (c_z != 0.0f) {
+    for (int sy = jj; sy <= jj + 1; ++sy) {
+      for (int sz = kk - 1; sz <= kk; ++sz) {
+        float sample;
+        if (read_ez_edge_value(jz, ii, sy, sz, nx_nodes, ny_nodes, nz_nodes,
+                               per_x, per_y, per_z, sample)) {
+          acc_z += sample;
+        }
+      }
+    }
+  }
+
+  ey[linear] -= 0.25f * (c_x * acc_x + c_z * acc_z);
+}
+
+__global__ void apply_aniso_offdiag_current_ez_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ jx,
+    const float* __restrict__ jy,
+    const float* __restrict__ coeff_x,
+    const float* __restrict__ coeff_y,
+    int periodic_x,
+    int periodic_y,
+    int periodic_z,
+    float* __restrict__ ez) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= nx || j >= ny || k >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const float c_x = coeff_x[linear];
+  const float c_y = coeff_y[linear];
+  if (c_x == 0.0f && c_y == 0.0f) {
+    return;
+  }
+  const int nx_nodes = static_cast<int>(nx);  // ez shape (Nx, Ny, Nz-1)
+  const int ny_nodes = static_cast<int>(ny);
+  const int nz_nodes = static_cast<int>(nz) + 1;
+  const bool per_x = periodic_x != 0;
+  const bool per_y = periodic_y != 0;
+  const bool per_z = periodic_z != 0;
+  const int ii = static_cast<int>(i);
+  const int jj = static_cast<int>(j);
+  const int kk = static_cast<int>(k);
+
+  float acc_x = 0.0f;
+  if (c_x != 0.0f) {
+    for (int sx = ii - 1; sx <= ii; ++sx) {
+      for (int sz = kk; sz <= kk + 1; ++sz) {
+        float sample;
+        if (read_ex_edge_value(jx, sx, jj, sz, nx_nodes, ny_nodes, nz_nodes,
+                               per_x, per_y, per_z, sample)) {
+          acc_x += sample;
+        }
+      }
+    }
+  }
+
+  float acc_y = 0.0f;
+  if (c_y != 0.0f) {
+    for (int sy = jj - 1; sy <= jj; ++sy) {
+      for (int sz = kk; sz <= kk + 1; ++sz) {
+        float sample;
+        if (read_ey_edge_value(jy, ii, sy, sz, nx_nodes, ny_nodes, nz_nodes,
+                               per_x, per_y, per_z, sample)) {
+          acc_y += sample;
+        }
+      }
+    }
+  }
+
+  ez[linear] -= 0.25f * (c_x * acc_x + c_y * acc_y);
+}
+
 void check_full_aniso_inputs(
     const torch::stable::Tensor& field,
     const torch::stable::Tensor& hx,
@@ -438,6 +709,36 @@ void check_full_aniso_inputs(
   STD_TORCH_CHECK(inv_dx.dim() == 1 && inv_dx.size(0) == nx_nodes, name, " inv_dx length must be the node count");
   STD_TORCH_CHECK(inv_dy.dim() == 1 && inv_dy.size(0) == ny_nodes, name, " inv_dy length must be the node count");
   STD_TORCH_CHECK(inv_dz.dim() == 1 && inv_dz.size(0) == nz_nodes, name, " inv_dz length must be the node count");
+}
+
+void check_current_field(
+    const torch::stable::Tensor& field,
+    const torch::stable::Tensor& reference,
+    int64_t s0,
+    int64_t s1,
+    int64_t s2,
+    const char* name) {
+  check_float32_tensor(field, name);
+  check_contiguous_tensor(field, name);
+  check_same_cuda_device(reference, field, name);
+  STD_TORCH_CHECK(
+      field.dim() == 3 && field.size(0) == s0 && field.size(1) == s1 && field.size(2) == s2,
+      name, " has an incompatible Yee-grid shape");
+}
+
+void check_aniso_offdiag_current_inputs(
+    const torch::stable::Tensor& field,
+    const torch::stable::Tensor& coeff_a,
+    const torch::stable::Tensor& coeff_b,
+    const char* name) {
+  for (const torch::stable::Tensor* tensor : {&field, &coeff_a, &coeff_b}) {
+    check_float32_tensor(*tensor, name);
+    check_contiguous_tensor(*tensor, name);
+    check_same_cuda_device(field, *tensor, name);
+  }
+  STD_TORCH_CHECK(field.dim() == 3, name, " must be rank 3");
+  STD_TORCH_CHECK(coeff_a.sizes().equals(field.sizes()), name, " coeff must match field shape");
+  STD_TORCH_CHECK(coeff_b.sizes().equals(field.sizes()), name, " coeff must match field shape");
 }
 
 }  // namespace
@@ -555,6 +856,105 @@ void update_electric_ez_full_aniso_cuda(
       inv_dx.mutable_data_ptr<float>(),
       inv_dy.mutable_data_ptr<float>(),
       inv_dz.mutable_data_ptr<float>(),
+      static_cast<int>(periodic_x),
+      static_cast<int>(periodic_y),
+      static_cast<int>(periodic_z),
+      ez.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void apply_aniso_offdiag_current_ex_cuda(
+    torch::stable::Tensor ex,
+    const torch::stable::Tensor& jy,
+    const torch::stable::Tensor& jz,
+    const torch::stable::Tensor& coeff_y,
+    const torch::stable::Tensor& coeff_z,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z) {
+  const int64_t nx_nodes = ex.size(0) + 1;
+  const int64_t ny_nodes = ex.size(1);
+  const int64_t nz_nodes = ex.size(2);
+  check_aniso_offdiag_current_inputs(ex, coeff_y, coeff_z, "ex_offdiag_current");
+  check_current_field(jy, ex, nx_nodes, ny_nodes - 1, nz_nodes, "ex_offdiag_current jy");
+  check_current_field(jz, ex, nx_nodes, ny_nodes, nz_nodes - 1, "ex_offdiag_current jz");
+  torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
+  const dim3 block = aniso_block3d();
+  apply_aniso_offdiag_current_ex_kernel<<<
+      aniso_grid3d(ex.size(0), ex.size(1), ex.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(ex.size(0)),
+      static_cast<unsigned int>(ex.size(1)),
+      static_cast<unsigned int>(ex.size(2)),
+      jy.mutable_data_ptr<float>(),
+      jz.mutable_data_ptr<float>(),
+      coeff_y.mutable_data_ptr<float>(),
+      coeff_z.mutable_data_ptr<float>(),
+      static_cast<int>(periodic_x),
+      static_cast<int>(periodic_y),
+      static_cast<int>(periodic_z),
+      ex.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void apply_aniso_offdiag_current_ey_cuda(
+    torch::stable::Tensor ey,
+    const torch::stable::Tensor& jx,
+    const torch::stable::Tensor& jz,
+    const torch::stable::Tensor& coeff_x,
+    const torch::stable::Tensor& coeff_z,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z) {
+  const int64_t nx_nodes = ey.size(0);
+  const int64_t ny_nodes = ey.size(1) + 1;
+  const int64_t nz_nodes = ey.size(2);
+  check_aniso_offdiag_current_inputs(ey, coeff_x, coeff_z, "ey_offdiag_current");
+  check_current_field(jx, ey, nx_nodes - 1, ny_nodes, nz_nodes, "ey_offdiag_current jx");
+  check_current_field(jz, ey, nx_nodes, ny_nodes, nz_nodes - 1, "ey_offdiag_current jz");
+  torch::stable::accelerator::DeviceGuard guard(ey.get_device_index());
+  const dim3 block = aniso_block3d();
+  apply_aniso_offdiag_current_ey_kernel<<<
+      aniso_grid3d(ey.size(0), ey.size(1), ey.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(ey.size(0)),
+      static_cast<unsigned int>(ey.size(1)),
+      static_cast<unsigned int>(ey.size(2)),
+      jx.mutable_data_ptr<float>(),
+      jz.mutable_data_ptr<float>(),
+      coeff_x.mutable_data_ptr<float>(),
+      coeff_z.mutable_data_ptr<float>(),
+      static_cast<int>(periodic_x),
+      static_cast<int>(periodic_y),
+      static_cast<int>(periodic_z),
+      ey.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void apply_aniso_offdiag_current_ez_cuda(
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& jx,
+    const torch::stable::Tensor& jy,
+    const torch::stable::Tensor& coeff_x,
+    const torch::stable::Tensor& coeff_y,
+    int64_t periodic_x,
+    int64_t periodic_y,
+    int64_t periodic_z) {
+  const int64_t nx_nodes = ez.size(0);
+  const int64_t ny_nodes = ez.size(1);
+  const int64_t nz_nodes = ez.size(2) + 1;
+  check_aniso_offdiag_current_inputs(ez, coeff_x, coeff_y, "ez_offdiag_current");
+  check_current_field(jx, ez, nx_nodes - 1, ny_nodes, nz_nodes, "ez_offdiag_current jx");
+  check_current_field(jy, ez, nx_nodes, ny_nodes - 1, nz_nodes, "ez_offdiag_current jy");
+  torch::stable::accelerator::DeviceGuard guard(ez.get_device_index());
+  const dim3 block = aniso_block3d();
+  apply_aniso_offdiag_current_ez_kernel<<<
+      aniso_grid3d(ez.size(0), ez.size(1), ez.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(ez.size(0)),
+      static_cast<unsigned int>(ez.size(1)),
+      static_cast<unsigned int>(ez.size(2)),
+      jx.mutable_data_ptr<float>(),
+      jy.mutable_data_ptr<float>(),
+      coeff_x.mutable_data_ptr<float>(),
+      coeff_y.mutable_data_ptr<float>(),
       static_cast<int>(periodic_x),
       static_cast<int>(periodic_y),
       static_cast<int>(periodic_z),

@@ -122,6 +122,23 @@ def _unsupported_adjoint_medium(scene):
                     "FDTD adjoint does not support anisotropic magnetic (mu_tensor) media: "
                     "the magnetic reverse update carries no tensor gradient channel."
                 )
+            if isinstance(getattr(material, "epsilon_tensor", None), Tensor3x3) and getattr(
+                material, "is_electric_dispersive", False
+            ):
+                # The forward coupled-tensor ADE folds the polarization current
+                # through the full off-diagonal inverse permittivity tensor, but the
+                # reverse dispersive correction only divides the current by the
+                # per-axis effective permittivity and carries no off-diagonal
+                # coupling, so the gradient through a full-anisotropic dispersive
+                # medium would not match its forward. Keep the forward composition
+                # (rotated birefringent dispersive crystal) usable while its adjoint
+                # pullback is unresolved.
+                return (
+                    "FDTD adjoint does not support full (off-diagonal) anisotropic permittivity "
+                    "combined with electric dispersion in the same material; the reverse ADE "
+                    "correction lacks the off-diagonal inverse-permittivity coupling the forward "
+                    "coupled-tensor update applies."
+                )
             if isinstance(getattr(material, "epsilon_tensor", None), Tensor3x3) and _structure_has_trainable_geometry(structure):
                 return (
                     "FDTD adjoint does not support trainable geometry on full (off-diagonal) "

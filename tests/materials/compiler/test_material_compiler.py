@@ -502,16 +502,6 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
             "orientation",
         ),
         (
-            # Diagonal anisotropy composes with electric dispersion, but a full
-            # (off-diagonal Tensor3x3) permittivity plus poles still needs a
-            # coupled tensor ADE and is rejected.
-            lambda: mw.Material(
-                epsilon_tensor=mw.Tensor3x3(((2.0, 0.1, 0.0), (0.1, 2.5, 0.0), (0.0, 0.0, 3.0))),
-                debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-9),),
-            ),
-            "coupled tensor ADE",
-        ),
-        (
             lambda: mw.Material(
                 eps_r=2.0,
                 epsilon_tensor=mw.DiagonalTensor3(2.0, 2.5, 3.0),
@@ -524,6 +514,24 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
 def test_medium_rejects_unsupported_tensor_and_nonlinear_combinations(factory, message):
     with pytest.raises(NotImplementedError, match=message):
         factory()
+
+
+def test_full_tensor_composes_with_electric_dispersion():
+    """A full (off-diagonal) Tensor3x3 permittivity now carries electric poles.
+
+    The poles enter isotropically, so the frequency response is
+    ``eps_inf_tensor + chi(omega) * I``; the FDTD forward applies the single
+    instantaneous inverse permittivity tensor to both curl(H) and the ADE
+    polarization current, so the construction guard that previously required a
+    coupled tensor ADE is lifted.
+    """
+    material = mw.Material(
+        epsilon_tensor=mw.Tensor3x3(((2.0, 0.1, 0.0), (0.1, 2.5, 0.0), (0.0, 0.0, 3.0))),
+        debye_poles=(mw.DebyePole(delta_eps=1.0, tau=1.0e-9),),
+    )
+    assert material.is_anisotropic
+    assert material.has_full_epsilon_tensor
+    assert material.is_electric_dispersive
 
 
 def test_nonlinear_material_composes_with_electric_dispersion():

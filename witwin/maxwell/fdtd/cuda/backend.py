@@ -2125,6 +2125,30 @@ def _electric_ez_full_aniso(*, Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, inv
             )
 
 
+def _aniso_offdiag_current_ex(*, Ex, Jy, Jz, CoeffY, CoeffZ, periodicX, periodicY, periodicZ):
+    _require_cuda_tensors(Ex, Jy, Jz, CoeffY, CoeffZ)
+    get_compiled_extension().apply_aniso_offdiag_current_ex(
+                Ex, Jy, Jz, CoeffY, CoeffZ,
+                int(periodicX), int(periodicY), int(periodicZ),
+            )
+
+
+def _aniso_offdiag_current_ey(*, Ey, Jx, Jz, CoeffX, CoeffZ, periodicX, periodicY, periodicZ):
+    _require_cuda_tensors(Ey, Jx, Jz, CoeffX, CoeffZ)
+    get_compiled_extension().apply_aniso_offdiag_current_ey(
+                Ey, Jx, Jz, CoeffX, CoeffZ,
+                int(periodicX), int(periodicY), int(periodicZ),
+            )
+
+
+def _aniso_offdiag_current_ez(*, Ez, Jx, Jy, CoeffX, CoeffY, periodicX, periodicY, periodicZ):
+    _require_cuda_tensors(Ez, Jx, Jy, CoeffX, CoeffY)
+    get_compiled_extension().apply_aniso_offdiag_current_ez(
+                Ez, Jx, Jy, CoeffX, CoeffY,
+                int(periodicX), int(periodicY), int(periodicZ),
+            )
+
+
 def _reverse_electric_hx_standard(*, AdjHxMid, AdjHxPost, AdjEyPost, AdjEzPost, EyCurl, EzCurl, invDy, invDz):
     get_compiled_extension().reverse_electric_adjoint_to_hx_standard(
                 AdjHxMid, AdjHxPost, AdjEyPost, AdjEzPost, EyCurl, EzCurl, invDy, invDz
@@ -2905,6 +2929,9 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "updateElectricFieldExFullAniso3D": _electric_ex_full_aniso,
     "updateElectricFieldEyFullAniso3D": _electric_ey_full_aniso,
     "updateElectricFieldEzFullAniso3D": _electric_ez_full_aniso,
+    "applyAnisoOffdiagCurrentEx3D": _aniso_offdiag_current_ex,
+    "applyAnisoOffdiagCurrentEy3D": _aniso_offdiag_current_ey,
+    "applyAnisoOffdiagCurrentEz3D": _aniso_offdiag_current_ez,
     "reverseElectricAdjointToHxStandard3D": _reverse_electric_hx_standard,
     "reverseElectricAdjointToHyStandard3D": _reverse_electric_hy_standard,
     "reverseElectricAdjointToHzStandard3D": _reverse_electric_hz_standard,

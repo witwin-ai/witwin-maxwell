@@ -588,13 +588,13 @@ class Material(CoreMaterial):
                     "Fully anisotropic (Tensor3x3) permittivity cannot be combined with electric conductivity yet."
                 )
 
-        if self.is_electric_dispersive and self.has_full_epsilon_tensor:
-            raise NotImplementedError(
-                "Electric dispersion combined with a fully anisotropic (off-diagonal Tensor3x3) "
-                "permittivity requires a coupled tensor ADE update; use an axis-aligned "
-                "DiagonalTensor3 permittivity for anisotropic dispersion, or keep the Tensor3x3 "
-                "permittivity non-dispersive."
-            )
+        # A full (off-diagonal) Tensor3x3 permittivity combined with electric poles is
+        # supported: the poles enter isotropically (chi(omega) * I), so the frequency
+        # response is eps_inf_tensor + chi(omega) * I and the FDTD update applies the
+        # single instantaneous tensor inverse eps_inf^-1 to both curl(H) and the ADE
+        # polarization current. This diagonalizes exactly in the crystal principal
+        # frame, reproducing n_o(omega) and n_e(omega) for a rotated birefringent
+        # dispersive crystal.
         if self.is_nonlinear and self.is_anisotropic:
             raise NotImplementedError("A nonlinear Material cannot carry anisotropic tensors in v1.")
 

@@ -404,7 +404,14 @@ def test_full_aniso_rejects_bloch_boundaries():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_full_aniso_rejects_dispersive_combination():
+def test_full_aniso_composes_with_dispersive_structures():
+    """Full anisotropy now coexists with dispersion in the same Scene.
+
+    A separate isotropic dispersive structure and a full-anisotropic structure
+    compile and prepare together: the dispersive region gets the diagonal ADE
+    subtraction and the anisotropic region gets the coupled tensor inverse, and
+    they do not overlap here so the off-diagonal current correction is a no-op.
+    """
     frequency = 1.0e9
     scene = _build_plane_wave_scene(frequency, spacing=0.04)
     scene.add_structure(
@@ -413,11 +420,19 @@ def test_full_aniso_rejects_dispersive_combination():
             material=mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=1.0e-10),
         )
     )
+    # The anisotropic structure stays clear of the transverse PML (full
+    # off-diagonal media may not overlap the absorber); the isotropic dispersive
+    # slab above may touch it.
     scene.add_structure(
         mw.Structure(
-            geometry=Box(position=(0.3, 0.0, 0.0), size=(0.2, 0.4, 0.4)),
+            geometry=Box(position=(0.3, 0.0, 0.0), size=(0.2, 0.16, 0.16)),
             material=mw.Material(epsilon_tensor=_rotated_uniaxial_tensor(2.0, 2.0, 3.0)),
         )
     )
-    with pytest.raises(NotImplementedError, match="dispersive"):
-        mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare()
+    solver = mw.Simulation.fdtd(scene, frequencies=[frequency]).prepare().solver
+    assert solver.full_aniso_enabled
+    assert solver.electric_dispersive_enabled
+    # The diagonal ADE subtraction divides by the effective permittivity that the
+    # tensor curl coefficient uses, so it is precomputed for the full-aniso path.
+    assert solver._aniso_disp_inv_eps is not None
+    assert solver._aniso_disp_current is not None
