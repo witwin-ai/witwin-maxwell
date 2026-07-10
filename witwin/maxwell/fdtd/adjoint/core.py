@@ -1374,13 +1374,17 @@ def _update_lorentz_state(field, polarization, current, *, drive, decay, restori
     return next_polarization, next_current
 
 
-def _advance_ade_state(solver, state, specs):
+def _advance_ade_state(solver, state, specs, *, imag=False):
+    # ``imag`` advances the imaginary-field ADE replica the forward solver keeps
+    # for Bloch (complex-field) runs: same real pole coefficients, but driven by
+    # the imaginary field component and stored under ``*_imag`` state names.
+    suffix = "_imag" if imag else ""
     updated = {}
     for component_name, model_name, index, _tensor_names, entry in specs or ():
-        field = state[component_name]
+        field = state[component_name + suffix]
         if model_name == "debye":
-            polarization_name = dispersive_state_name(component_name, model_name, index, "polarization")
-            current_name = dispersive_state_name(component_name, model_name, index, "current")
+            polarization_name = dispersive_state_name(component_name, model_name, index, "polarization") + suffix
+            current_name = dispersive_state_name(component_name, model_name, index, "current") + suffix
             polarization, current = _update_debye_state(
                 field,
                 state[polarization_name],
@@ -1392,7 +1396,7 @@ def _advance_ade_state(solver, state, specs):
             updated[current_name] = current
             continue
         if model_name == "drude":
-            current_name = dispersive_state_name(component_name, model_name, index, "current")
+            current_name = dispersive_state_name(component_name, model_name, index, "current") + suffix
             updated[current_name] = _update_drude_state(
                 field,
                 state[current_name],
@@ -1401,8 +1405,8 @@ def _advance_ade_state(solver, state, specs):
             )
             continue
 
-        polarization_name = dispersive_state_name(component_name, model_name, index, "polarization")
-        current_name = dispersive_state_name(component_name, model_name, index, "current")
+        polarization_name = dispersive_state_name(component_name, model_name, index, "polarization") + suffix
+        current_name = dispersive_state_name(component_name, model_name, index, "current") + suffix
         polarization, current = _update_lorentz_state(
             field,
             state[polarization_name],
@@ -1418,7 +1422,16 @@ def _advance_ade_state(solver, state, specs):
 
 
 def _advance_dispersive_state(solver, state):
-    return _advance_ade_state(solver, state, iter_dispersive_state_specs(solver))
+    updated = _advance_ade_state(solver, state, iter_dispersive_state_specs(solver))
+    if has_complex_fields(solver):
+        # Bloch runs propagate a second real FDTD copy (the imaginary field);
+        # the electric ADE poles advance on it identically, so mirror the real
+        # pass with the imaginary drive to keep the replay bit-consistent with
+        # the forward kernels.
+        updated.update(
+            _advance_ade_state(solver, state, iter_dispersive_state_specs(solver), imag=True)
+        )
+    return updated
 
 
 def _advance_magnetic_dispersive_state(solver, state):
@@ -1463,11 +1476,23 @@ def _apply_dispersive_corrections(solver, electric_fields, dispersive_state, *, 
         "Ez": 1.0 / eps_ez,
     }
     updated = dict(electric_fields)
+    dt = float(solver.dt)
+    # On Bloch runs the imaginary field carries its own polarization current, so
+    # subtract dt * J_imag / eps from the imaginary component too (matching the
+    # forward apply_component_dispersive_currents(imag=True) launches).
+    complex_fields = has_complex_fields(solver) and all(
+        f"{component_name}_imag" in electric_fields for component_name in ("Ex", "Ey", "Ez")
+    )
     for component_name, model_name, index, _tensor_names, _entry in iter_dispersive_state_specs(solver) or ():
         current_name = dispersive_state_name(component_name, model_name, index, "current")
-        updated[component_name] = updated[component_name] - float(solver.dt) * dispersive_state[current_name] * inv_eps[
+        updated[component_name] = updated[component_name] - dt * dispersive_state[current_name] * inv_eps[
             component_name
         ]
+        if complex_fields:
+            imag_field = f"{component_name}_imag"
+            updated[imag_field] = updated[imag_field] - dt * dispersive_state[current_name + "_imag"] * inv_eps[
+                component_name
+            ]
     return updated
 
 
@@ -2855,15 +2880,22 @@ def _step_state(
             solver=solver if complex_fields else None,
         )
 
-    real_electric_fields = _apply_dispersive_corrections(
+    dispersive_input_fields = {name: electric_fields[name] for name in ("Ex", "Ey", "Ez")}
+    if complex_fields:
+        # Bloch dispersive replay corrects the imaginary field with its own
+        # polarization current; hand both halves to the shared correction.
+        dispersive_input_fields.update(
+            {name: electric_fields[name] for name in ("Ex_imag", "Ey_imag", "Ez_imag")}
+        )
+    corrected_electric_fields = _apply_dispersive_corrections(
         solver,
-        {name: electric_fields[name] for name in ("Ex", "Ey", "Ez")},
+        dispersive_input_fields,
         dispersive_state,
         eps_ex=eps_ex,
         eps_ey=eps_ey,
         eps_ez=eps_ez,
     )
-    electric_fields.update(real_electric_fields)
+    electric_fields.update(corrected_electric_fields)
     if not getattr(solver, "tfsf_enabled", False) and getattr(solver, "has_pec_faces", False):
         real_electric_fields = _enforce_pec_boundaries(
             solver,

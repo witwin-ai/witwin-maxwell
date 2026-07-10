@@ -6,6 +6,8 @@ transpose unit test of the per-axis material pullback plus end-to-end
 finite-difference validation of scenes containing anisotropic media.
 """
 
+import math
+
 import pytest
 import torch
 
@@ -1315,3 +1317,262 @@ def test_scene_with_full_aniso_medium_gradient_matches_fd():
     assert torch.allclose(backward_grad, fd_grad, rtol=3e-2, atol=scale * 5e-3), (
         f"backward={backward_grad.flatten().tolist()}, fd={fd_grad.flatten().tolist()}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Bloch (periodic) + electric-dispersive media
+#
+# Under Bloch boundaries the solver propagates complex fields: a second real
+# FDTD copy carrying the imaginary (quadrature) component that the phased
+# boundary wrap couples in. The electric ADE poles advance on BOTH halves -- the
+# forward keeps a real and an imaginary polarization current per pole and applies
+# each to its own field. The adjoint checkpoint replay must reproduce that
+# imaginary ADE replica; otherwise the checkpointed trajectory (and every
+# gradient built from it) drifts on the imaginary field. The scene routes to the
+# torch-VJP reverse because the analytic Bloch backend rejects dispersion and the
+# analytic dispersive backend rejects complex fields.
+#
+# The Bloch phase angle is k * L; a multiple of pi has sin = 0 and never excites
+# the imaginary field, which would make the imaginary dispersion a silent no-op.
+# k = pi/1.8 with L = 1.2 gives angle 2*pi/3 (sin ~ 0.87), keeping the imaginary
+# field comparable to the real field so the new physics is genuinely exercised.
+# ---------------------------------------------------------------------------
+
+_BLOCH_DISP_K = math.pi / 1.8
+
+
+def _bloch_dispersive_scene(delta_eps, *, density=None):
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.bloch((_BLOCH_DISP_K, 0.0, 0.0)),
+        device="cuda",
+    )
+    # Lorentz slab perpendicular to the Bloch (x) propagation axis: the phased
+    # wrap-around excites a strong imaginary field inside the dispersive region,
+    # so its imaginary polarization current genuinely shapes the design gradient.
+    scene.add_structure(
+        mw.Structure(
+            name="lorentz_slab",
+            geometry=mw.Box(position=(-0.06, 0.0, 0.0), size=(0.60, 1.2, 1.2)),
+            material=mw.Material.lorentz(
+                eps_inf=2.0,
+                delta_eps=delta_eps,
+                resonance_frequency=1.1e9,
+                gamma=0.2e9,
+            ),
+        )
+    )
+    if density is not None:
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.30, 0.06, 0.06), size=(0.24, 0.24, 0.24)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+    scene.add_source(
+        mw.PointDipole(
+            position=(-0.54, 0.06, 0.06),
+            polarization="Ez",
+            width=0.12,
+            source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.3e9, amplitude=25.0),
+        )
+    )
+    scene.add_monitor(mw.PointMonitor("probe", (0.30, 0.06, 0.06), fields=("Ez",)))
+    return scene
+
+
+class _BlochDispersiveDensityScene(mw.SceneModule):
+    """Trainable design density behind a static Lorentz slab under Bloch boundaries."""
+
+    def __init__(self, init=0.0, delta_eps=3.5):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((2, 2, 2), float(init), device="cuda"))
+        self._delta_eps = delta_eps
+
+    def to_scene(self):
+        return _bloch_dispersive_scene(self._delta_eps, density=torch.sigmoid(self.logits))
+
+
+@_CUDA
+def test_bloch_dispersive_reverse_routes_through_torch_vjp():
+    """A Bloch + electric-dispersive scene must fall to the torch-VJP reverse: the
+    analytic Bloch backend rejects dispersion and the analytic dispersive backend
+    rejects complex fields, so neither carries the imaginary ADE replica."""
+    from witwin.maxwell.fdtd.adjoint.dispatch import _select_reverse_backend, _ReverseBackend
+    from witwin.maxwell.fdtd.checkpoint import capture_checkpoint_state
+
+    density = torch.sigmoid(torch.zeros((2, 2, 2), device="cuda"))
+    prepared = mw.Simulation.fdtd(
+        _bloch_dispersive_scene(3.5, density=density),
+        frequencies=[1e9],
+        run_time=mw.TimeConfig(time_steps=8),
+    ).prepare()
+    solver = prepared.solver
+    assert solver.electric_dispersive_enabled and solver.complex_fields_enabled
+    forward_state = capture_checkpoint_state(solver, step=0).tensors
+    backend = _select_reverse_backend(
+        solver,
+        forward_state,
+        eps_ex=solver.eps_Ex,
+        eps_ey=solver.eps_Ey,
+        eps_ez=solver.eps_Ez,
+        resolved_source_terms=None,
+    )
+    assert backend is _ReverseBackend.TORCH_VJP, backend
+
+
+@_CUDA
+def test_bloch_dispersive_bridge_replay_matches_forward_state():
+    """Forward-consistency guard for the imaginary ADE replica.
+
+    The checkpoint replay must reproduce the native Bloch + dispersive forward
+    exactly, including the imaginary polarization current the complex-field solver
+    keeps per electric pole. This is the risk the reconnaissance flagged: dropping
+    that imaginary current corrupts the checkpointed trajectory the reverse rolls
+    back through. Measured empirically, omitting it drifts the replayed imaginary
+    field by ~46% of its magnitude, whereas carrying it matches to ~1e-13."""
+    from witwin.maxwell.fdtd.adjoint.bridge import _FDTDGradientBridge
+    from witwin.maxwell.fdtd.adjoint.core import _replay_segment_states
+    from witwin.maxwell.fdtd.checkpoint import dispersive_state_name
+
+    model = _BlochDispersiveDensityScene(init=0.0).cuda()
+    bridge = _FDTDGradientBridge(_build_sim(model, time_steps=56))
+    bridge.forward(tuple(bridge.material_inputs))
+    solver = bridge._last_solver
+
+    # The nondegenerate Bloch phase must genuinely excite the imaginary field,
+    # otherwise the imaginary dispersion is a silent no-op and this proves nothing.
+    real_scale = solver.Ez.abs().max().item()
+    imag_scale = solver.Ez_imag.abs().max().item()
+    assert imag_scale > 0.1 * real_scale, (imag_scale, real_scale)
+
+    full_states = _replay_segment_states(solver, bridge._last_checkpoints[0], 0, bridge._time_steps)
+    terminal = full_states[-1]
+
+    field_scale = max(
+        getattr(solver, name).abs().max().item()
+        for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz",
+                     "Ex_imag", "Ey_imag", "Ez_imag", "Hx_imag", "Hy_imag", "Hz_imag")
+    )
+    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz",
+                 "Ex_imag", "Ey_imag", "Ez_imag", "Hx_imag", "Hy_imag", "Hz_imag"):
+        err = (terminal[name] - getattr(solver, name)).abs().max().item()
+        assert err < 1e-5 * field_scale, (name, err, field_scale)
+
+    # The imaginary ADE replica must be genuinely driven and exactly replayed.
+    imag_state_seen = False
+    for component_name in ("Ex", "Ey", "Ez"):
+        component_templates = solver._dispersive_templates.get(component_name, {})
+        for model_name in ("debye", "drude", "lorentz"):
+            for index, entry in enumerate(component_templates.get(model_name, ())):
+                tensor_names = ("current",) if model_name == "drude" else ("polarization", "current")
+                for tensor_name in tensor_names:
+                    key = dispersive_state_name(component_name, model_name, index, tensor_name) + "_imag"
+                    reference = entry[f"{tensor_name}_imag"]
+                    state_scale = reference.abs().max().item()
+                    imag_state_seen = imag_state_seen or state_scale > 0.0
+                    err = (terminal[key] - reference).abs().max().item()
+                    assert err < 1e-5 * max(state_scale, 1e-30), (key, err, state_scale)
+    assert imag_state_seen, "imaginary dispersive ADE never activated; Bloch phase is degenerate."
+
+
+@_CUDA
+def test_scene_with_bloch_dispersive_medium_gradient_matches_fd():
+    """Per-element FD validation of design gradients behind a static Lorentz slab
+    under Bloch boundaries (previously rejected by the bridge)."""
+    model = _BlochDispersiveDensityScene(init=0.0).cuda()
+
+    def loss_fn():
+        result = _build_sim(model, time_steps=56).run()
+        return _abs2(result.monitor("probe")["data"])
+
+    # Dispersion must actually reshape the solution versus a nondispersive slab of
+    # the same eps_inf, otherwise this would only re-validate the nondispersive
+    # Bloch path (which the earlier Bloch adjoint already covers).
+    nondispersive = _abs2(
+        _build_sim(_BlochDispersiveDensityScene(init=0.0, delta_eps=0.0), time_steps=56)
+        .run()
+        .monitor("probe")["data"]
+    ).item()
+    dispersive = loss_fn().item()
+    assert abs(dispersive - nondispersive) > 1e-2 * abs(nondispersive), (
+        f"dispersion inactive: nondispersive={nondispersive:.6e}, dispersive={dispersive:.6e}"
+    )
+
+    backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn)
+
+    assert (fd_grad != 0).any(), "FD gradient is identically zero; test setup is broken."
+    # Acceptance bar: dominant-element relative error below 1e-3.
+    dominant = int(torch.abs(fd_grad).flatten().argmax().item())
+    dom_rel = (
+        abs(backward_grad.flatten()[dominant].item() - fd_grad.flatten()[dominant].item())
+        / abs(fd_grad.flatten()[dominant].item())
+    )
+    assert dom_rel < 1e-3, f"dominant-element rel err {dom_rel:.3e} exceeds 1e-3."
+
+    scale = torch.abs(fd_grad).max().item()
+    assert torch.allclose(backward_grad, fd_grad, rtol=3e-2, atol=scale * 5e-3), (
+        f"backward={backward_grad.flatten().tolist()}, fd={fd_grad.flatten().tolist()}"
+    )
+
+
+class _BlochMagneticDispersiveDensityScene(mw.SceneModule):
+    """Bloch scene with a static magnetic-dispersive (mu-Lorentz) slab."""
+
+    def __init__(self, init=0.0):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((2, 2, 2), float(init), device="cuda"))
+
+    def to_scene(self):
+        density = torch.sigmoid(self.logits)
+        scene = mw.Scene(
+            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+            grid=mw.GridSpec.uniform(0.15),
+            boundary=mw.BoundarySpec.bloch((_BLOCH_DISP_K, 0.0, 0.0)),
+            device="cuda",
+        )
+        scene.add_structure(
+            mw.Structure(
+                name="mu_lorentz_slab",
+                geometry=mw.Box(position=(-0.15, 0.0, 0.0), size=(0.30, 1.2, 1.2)),
+                material=mw.Material(
+                    mu_lorentz_poles=(
+                        mw.LorentzPole(delta_eps=1.0, resonance_frequency=1.2e9, gamma=2.0e8),
+                    ),
+                ),
+            )
+        )
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.15, 0.0, 0.0), size=(0.24, 0.24, 0.24)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+        scene.add_source(
+            mw.PointDipole(
+                position=(-0.54, 0.06, 0.06),
+                polarization="Ez",
+                width=0.12,
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.3e9, amplitude=25.0),
+            )
+        )
+        scene.add_monitor(mw.PointMonitor("probe", (0.15, 0.0, 0.0), fields=("Ez",)))
+        return scene
+
+
+@_CUDA
+def test_bloch_magnetic_dispersive_adjoint_is_rejected_with_physical_reason():
+    """Electric dispersion under Bloch is now differentiable, but magnetic (mu-pole)
+    dispersion is not: the magnetic ADE reverse channel is real-valued only, so the
+    imaginary Bloch component of the magnetic pole current carries no gradient. The
+    guard must fire with that physical reason rather than "not implemented yet"."""
+    model = _BlochMagneticDispersiveDensityScene(init=0.0).cuda()
+    with pytest.raises(NotImplementedError, match="magnetic-dispersive"):
+        _build_sim(model, time_steps=8).run()

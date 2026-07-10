@@ -179,8 +179,17 @@ class _FDTDGradientBridge:
         if any(code == BOUNDARY_BLOCH for code in face_codes):
             if not has_complex_fields(solver):
                 raise NotImplementedError("FDTD adjoint requires complex field state for Bloch faces.")
-            if getattr(solver, "dispersive_enabled", False):
-                raise NotImplementedError("FDTD adjoint does not support Bloch boundaries with dispersive media.")
+            if getattr(solver, "magnetic_dispersive_enabled", False):
+                # Electric (eps-pole) dispersion under Bloch is differentiable:
+                # the complex-field replay advances an imaginary ADE replica per
+                # pole and the torch-VJP reverse propagates through it. The
+                # magnetic (mu-pole) ADE mirror, by contrast, has no complex-field
+                # reverse channel, so the imaginary Bloch component of the
+                # magnetic pole current would carry no gradient.
+                raise NotImplementedError(
+                    "FDTD adjoint does not support Bloch boundaries with magnetic-dispersive "
+                    "(mu-pole) media; the magnetic ADE reverse channel is real-valued only."
+                )
             if getattr(solver, "conductive_enabled", False):
                 raise NotImplementedError(
                     "FDTD adjoint does not support electric conductivity on Bloch boundaries; the "

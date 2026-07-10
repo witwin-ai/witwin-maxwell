@@ -236,19 +236,33 @@ def _fake_checkpoint_solver():
         dispersive_enabled=True,
         _dispersive_templates={
             "Ex": {
-                "debye": [{"polarization": torch.full((1,), 1.0), "current": torch.full((1,), 2.0)}],
+                "debye": [
+                    {
+                        "polarization": torch.full((1,), 1.0),
+                        "current": torch.full((1,), 2.0),
+                        "polarization_imag": torch.full((1,), 101.0),
+                        "current_imag": torch.full((1,), 102.0),
+                    }
+                ],
                 "drude": [],
                 "lorentz": [],
             },
             "Ey": {
                 "debye": [],
-                "drude": [{"current": torch.full((1,), 3.0)}],
+                "drude": [{"current": torch.full((1,), 3.0), "current_imag": torch.full((1,), 103.0)}],
                 "lorentz": [],
             },
             "Ez": {
                 "debye": [],
                 "drude": [],
-                "lorentz": [{"polarization": torch.full((1,), 4.0), "current": torch.full((1,), 5.0)}],
+                "lorentz": [
+                    {
+                        "polarization": torch.full((1,), 4.0),
+                        "current": torch.full((1,), 5.0),
+                        "polarization_imag": torch.full((1,), 104.0),
+                        "current_imag": torch.full((1,), 105.0),
+                    }
+                ],
             },
         },
     )
@@ -857,12 +871,23 @@ def test_capture_checkpoint_state_freezes_schema_layout():
         "tfsf_aux_electric",
         "tfsf_aux_magnetic",
     )
+    # Complex-field (Bloch) solvers carry an imaginary ADE replica per electric
+    # pole; it follows all real pole names in the frozen dispersive layout.
     assert state.schema.dispersive_state_names == (
         dispersive_state_name("Ex", "debye", 0, "polarization"),
         dispersive_state_name("Ex", "debye", 0, "current"),
         dispersive_state_name("Ey", "drude", 0, "current"),
         dispersive_state_name("Ez", "lorentz", 0, "polarization"),
         dispersive_state_name("Ez", "lorentz", 0, "current"),
+        dispersive_state_name("Ex", "debye", 0, "polarization") + "_imag",
+        dispersive_state_name("Ex", "debye", 0, "current") + "_imag",
+        dispersive_state_name("Ey", "drude", 0, "current") + "_imag",
+        dispersive_state_name("Ez", "lorentz", 0, "polarization") + "_imag",
+        dispersive_state_name("Ez", "lorentz", 0, "current") + "_imag",
+    )
+    assert torch.equal(
+        state.tensors[dispersive_state_name("Ez", "lorentz", 0, "current") + "_imag"],
+        torch.full((1,), 105.0),
     )
 
 
