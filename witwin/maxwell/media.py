@@ -13,6 +13,8 @@ from witwin.core import (
 )
 from witwin.core.material import VACUUM_PERMITTIVITY
 
+_SPEED_OF_LIGHT = 299_792_458.0
+
 
 def _coerce_frequency(value: float, *, name: str) -> float:
     frequency = float(value)
@@ -410,4 +412,56 @@ class Material(CoreMaterial):
                     gamma=gamma,
                 ),
             ),
+        )
+
+    @classmethod
+    def sellmeier(
+        cls,
+        *,
+        b_coefficients,
+        c_coefficients,
+        eps_inf: float = 1.0,
+        mu_r: float = 1.0,
+        sigma_e: float = 0.0,
+        name: str | None = None,
+    ) -> "Material":
+        """Construct a lossless Sellmeier dielectric.
+
+        The Sellmeier dispersion ``n(lambda)^2 = eps_inf + sum_i B_i * lambda^2 /
+        (lambda^2 - C_i)`` is a sum of lossless Lorentz oscillators. Each ``(B_i, C_i)``
+        term maps exactly to a zero-damping ``LorentzPole`` with ``delta_eps = B_i`` and
+        resonance ``omega0_i = 2*pi*c / sqrt(C_i)`` (i.e. ``resonance_frequency =
+        c / sqrt(C_i)``), because ``omega0_i^2 / (omega0_i^2 - omega^2) =
+        lambda^2 / (lambda^2 - C_i)``.
+
+        ``c_coefficients`` carry units of length squared and MUST be expressed in SI
+        ``meters^2``, consistent with the rest of the simulation. Coefficient tables
+        quoted in ``micron^2`` (for example the BK7 Schott coefficients) must be scaled
+        by ``1e-12`` before being passed in. Each ``B_i`` must be non-negative and each
+        ``C_i`` strictly positive.
+        """
+        b_values = tuple(float(b) for b in b_coefficients)
+        c_values = tuple(float(c) for c in c_coefficients)
+        if len(b_values) != len(c_values):
+            raise ValueError("Sellmeier b_coefficients and c_coefficients must have equal length.")
+        if not b_values:
+            raise ValueError("Sellmeier material requires at least one (B, C) coefficient pair.")
+        poles = []
+        for b_value, c_value in zip(b_values, c_values):
+            if c_value <= 0.0:
+                raise ValueError("Sellmeier c_coefficients must be > 0 (squared resonance wavelength in meters^2).")
+            resonance_frequency = _SPEED_OF_LIGHT / np.sqrt(c_value)
+            poles.append(
+                LorentzPole(
+                    delta_eps=b_value,
+                    resonance_frequency=resonance_frequency,
+                    gamma=0.0,
+                )
+            )
+        return cls(
+            eps_r=eps_inf,
+            mu_r=mu_r,
+            sigma_e=sigma_e,
+            name=name,
+            lorentz_poles=tuple(poles),
         )

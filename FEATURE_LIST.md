@@ -71,6 +71,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 - Instantaneous isotropic Kerr nonlinearity on `Material(kerr_chi3=...)`
 - Optional anisotropic Maxwell material descriptors: `DiagonalTensor3` and `Tensor3x3`
 - Convenience constructors `Material.debye(...)`, `Material.drude(...)`, and `Material.lorentz(...)`
+- `Material.sellmeier(b_coefficients, c_coefficients, eps_inf=1.0, ...)` for lossless Sellmeier dielectrics (for example Schott BK7 glass), which lowers each `B_i * lambda^2 / (lambda^2 - C_i)` term to a zero-damping `LorentzPole` with `delta_eps = B_i` and `resonance_frequency = c / sqrt(C_i)`; `c_coefficients` are the squared resonance wavelengths in SI `meters^2`
 - Frequency-dependent material evaluation through the shared material compiler for single-frequency workflows, including isotropic `sigma_e`
 - Component-aware material compilation keeps scalar summary tensors for visualization / compatibility while exposing explicit per-axis material grids for solver backends and `Result.material(...)`
 - Density-based `MaterialRegion` compilation using native PyTorch tensor interpolation, optional box filtering, and optional projection
