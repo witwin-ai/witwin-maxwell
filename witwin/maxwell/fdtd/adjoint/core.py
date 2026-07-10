@@ -31,6 +31,7 @@ from ..checkpoint import (
     validate_checkpoint_state,
 )
 from ..excitation.injection import initialize_source_terms
+from ..excitation.temporal import _resolve_term_source
 from ..observers import (
     _align_plane_monitor_payload,
     _compute_plane_flux,
@@ -363,7 +364,9 @@ def _dynamic_electric_curl(base_curl: torch.Tensor, base_eps: torch.Tensor, eps:
     return ((base_curl * base_eps) / eps).contiguous()
 
 
-def _build_source_replay_solver(solver, compiled_source, eps_ex, eps_ey, eps_ez):
+def _build_source_replay_solver(solver, compiled_sources, eps_ex, eps_ey, eps_ez):
+    compiled_sources = tuple(compiled_sources)
+    primary = compiled_sources[0]
     return SimpleNamespace(
         scene=solver.scene,
         min_dx=solver.min_dx,
@@ -395,10 +398,11 @@ def _build_source_replay_solver(solver, compiled_source, eps_ex, eps_ey, eps_ez)
         chz_curl=solver.chz_curl,
         boundary_kind=solver.boundary_kind,
         tfsf_enabled=bool(getattr(solver, "tfsf_enabled", False)),
-        _compiled_source=compiled_source,
+        _compiled_sources=compiled_sources,
+        _compiled_source=primary,
         _compiled_material_model=getattr(solver, "_compiled_material_model", None),
         _mode_source_rebuild_from_fields=True,
-        _source_time=compiled_source["source_time"],
+        _source_time=primary["source_time"],
         _compute_linear_launch_shape=solver._compute_linear_launch_shape,
         _iter_source_images=solver._iter_source_images,
         _component_plane_spec=solver._component_plane_spec,
@@ -407,31 +411,59 @@ def _build_source_replay_solver(solver, compiled_source, eps_ex, eps_ey, eps_ez)
     )
 
 
-def _resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez):
+# Source kinds whose eps-leaf-dependent patches are re-derived on the replay
+# solver so the mode-source objective and the torch-VJP reverse can flow
+# gradients into eps. Other kinds keep their forward-built terms.
+_SOURCE_REPLAY_REBUILD_KINDS = frozenset(
+    {"point_dipole", "plane_wave", "gaussian_beam", "mode_source"}
+)
+
+
+def _compiled_sources_for_replay(solver):
+    compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())
+    if compiled_sources:
+        return compiled_sources
     compiled_source = getattr(solver, "_compiled_source", None)
+    return (compiled_source,) if compiled_source is not None else ()
+
+
+def _scene_has_mode_source(solver) -> bool:
+    return any(
+        source.get("kind") == "mode_source"
+        for source in _compiled_sources_for_replay(solver)
+    )
+
+
+def _resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez):
     default_source_terms = getattr(solver, "_source_terms", ())
     default_electric_source_terms = getattr(solver, "_electric_source_terms", ())
     default_magnetic_source_terms = getattr(solver, "_magnetic_source_terms", ())
-    if compiled_source is None:
+    compiled_sources = _compiled_sources_for_replay(solver)
+    if not compiled_sources:
         return default_source_terms, default_electric_source_terms, default_magnetic_source_terms
-    if compiled_source["kind"] not in {"point_dipole", "plane_wave", "gaussian_beam", "mode_source"}:
+    # A kind outside the rebuild set (e.g. astigmatic beams) keeps the exact
+    # forward-built terms, which already reproduce the injection for the explicit
+    # reverse path; if any source in the scene is such a kind, fall back to the
+    # forward terms for the whole scene so the per-source term indexing stays
+    # consistent with the forward solve.
+    if not all(source.get("kind") in _SOURCE_REPLAY_REBUILD_KINDS for source in compiled_sources):
         return default_source_terms, default_electric_source_terms, default_magnetic_source_terms
 
-    if compiled_source["kind"] == "mode_source":
+    has_mode_source = any(source.get("kind") == "mode_source" for source in compiled_sources)
+    cache_key = (
+        int(eps_ex.data_ptr()),
+        int(eps_ey.data_ptr()),
+        int(eps_ez.data_ptr()),
+    )
+    if has_mode_source:
         cache = getattr(solver, "_source_replay_term_cache", None)
-        cache_key = (
-            id(compiled_source),
-            int(eps_ex.data_ptr()),
-            int(eps_ey.data_ptr()),
-            int(eps_ez.data_ptr()),
-        )
         if isinstance(cache, dict):
             cached = cache.get(cache_key)
             if cached is not None:
                 return cached
 
-    temp_solver = _build_source_replay_solver(solver, compiled_source, eps_ex, eps_ey, eps_ez)
-    if compiled_source["kind"] == "mode_source":
+    temp_solver = _build_source_replay_solver(solver, compiled_sources, eps_ex, eps_ey, eps_ez)
+    if has_mode_source:
         with torch.enable_grad():
             initialize_source_terms(temp_solver)
     else:
@@ -441,7 +473,7 @@ def _resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez):
         tuple(temp_solver._electric_source_terms),
         tuple(temp_solver._magnetic_source_terms),
     )
-    if compiled_source["kind"] == "mode_source" and isinstance(getattr(solver, "_source_replay_term_cache", None), dict):
+    if has_mode_source and isinstance(getattr(solver, "_source_replay_term_cache", None), dict):
         solver._source_replay_term_cache.clear()
         solver._source_replay_term_cache[cache_key] = resolved
     return resolved
@@ -499,6 +531,10 @@ def _apply_resolved_magnetic_source_terms(
 
 
 def _source_term_signal_patch(term, *, source_time, omega, time_value):
+    # Each compiled source carries its own source-time waveform / CW frequency;
+    # resolve per-term so a second source at a different frequency is not driven
+    # by the primary source's spectrum.
+    source_time, omega = _resolve_term_source(term, source_time, omega)
     literal_patch = term.get("literal_patch")
     if literal_patch is not None:
         return literal_patch
@@ -521,6 +557,7 @@ def _source_term_signal_patch(term, *, source_time, omega, time_value):
 
 
 def _bloch_source_term_signal_patch(term, *, source_time, omega, time_value) -> torch.Tensor:
+    source_time, omega = _resolve_term_source(term, source_time, omega)
     if term["cw_cos_patch"] is not None or term["delay_patch"] is not None:
         raise NotImplementedError("Bloch source-term reverse currently supports uniform point-source patches only.")
     scalar_signal = float(evaluate_source_time(source_time, float(time_value)))
@@ -597,8 +634,10 @@ def _accumulate_source_term_gradients(
         "Ey": eps_ey,
         "Ez": eps_ez,
     }
-    compiled_source = getattr(solver, "_compiled_source", None)
-    if compiled_source is not None and compiled_source.get("kind") == "mode_source":
+    if _scene_has_mode_source(solver):
+        # Mode-source patches (and any other rebuilt patches sharing the scene)
+        # carry an eps-leaf graph, so the whole term set flows through one
+        # autograd objective rather than the per-cell analytic 1/eps rule.
         magnetic_output_adjoint = step_result.magnetic_output_adjoint or {}
         with torch.enable_grad():
             objective = _mode_source_term_objective(

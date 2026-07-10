@@ -51,6 +51,31 @@ def _structure_has_trainable_geometry(structure) -> bool:
     )
 
 
+def _source_spectrum_key(source_time):
+    if source_time is None:
+        return None
+    if source_time.get("times") is not None:
+        # Sampled custom waveforms are only spectrum-equivalent when they share
+        # the same table object; identity keeps the comparison conservative.
+        return ("custom", id(source_time))
+    fields = ("kind_code", "frequency", "amplitude", "phase", "delay", "fwidth")
+    return tuple(
+        None if source_time.get(field) is None else float(source_time.get(field))
+        for field in fields
+    )
+
+
+def _sources_share_spectrum(compiled_sources) -> bool:
+    """Whether every compiled source carries the same source-time spectrum.
+
+    Source normalization divides monitor spectra by one incident spectrum, which
+    is only well-defined when all sources share it (a single source, or several
+    driven by an identical waveform).
+    """
+    keys = {_source_spectrum_key(source.get("source_time")) for source in (compiled_sources or ())}
+    return len(keys) <= 1
+
+
 def _unsupported_adjoint_medium(scene):
     for structure in getattr(scene, "structures", ()):
         material = getattr(structure, "material", None)
@@ -151,25 +176,29 @@ class _FDTDGradientBridge:
         elif any(code not in {BOUNDARY_NONE, BOUNDARY_PML, BOUNDARY_PEC} for code in face_codes):
             raise NotImplementedError("FDTD adjoint currently supports none, pml, pec, and Bloch faces only.")
         compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())
-        if len(compiled_sources) > 1:
-            raise NotImplementedError("FDTD adjoint currently supports at most one source per scene.")
-        compiled_source = getattr(solver, "_compiled_source", None)
-        if compiled_source is not None and compiled_source["kind"] not in {
+        supported_source_kinds = {
             "point_dipole",
             "plane_wave",
             "gaussian_beam",
             "astigmatic_gaussian_beam",
             "mode_source",
-        }:
-            raise NotImplementedError(
-                "FDTD adjoint currently supports PointDipole, PlaneWave, GaussianBeam, "
-                "AstigmaticGaussianBeam, and ModeSource source pullback only."
-            )
+        }
+        for source in compiled_sources:
+            if source.get("kind") not in supported_source_kinds:
+                raise NotImplementedError(
+                    "FDTD adjoint currently supports PointDipole, PlaneWave, GaussianBeam, "
+                    "AstigmaticGaussianBeam, and ModeSource source pullback only."
+                )
 
     def _run_forward_with_checkpoints(self, solver, *, time_steps, dft_frequency, dft_window, full_field_dft, normalize_source):
         runtime = _runtime()
-        if normalize_source and len(getattr(solver, "_compiled_sources", ())) != 1:
-            raise NotImplementedError("normalize_source currently requires exactly one compiled source.")
+        if normalize_source and not _sources_share_spectrum(getattr(solver, "_compiled_sources", ())):
+            raise NotImplementedError(
+                "normalize_source divides monitor spectra by a single incident source "
+                "spectrum, which is ill-defined when the scene drives sources with "
+                "different source-time spectra; give the sources a common source_time "
+                "or disable normalize_source."
+            )
         solver._normalize_source = normalize_source
         solver._synchronize_device()
         solve_start = time.perf_counter()
@@ -408,8 +437,8 @@ class _FDTDGradientBridge:
             grad_chi3_ex = torch.zeros_like(solver.kerr_chi3_Ex)
             grad_chi3_ey = torch.zeros_like(solver.kerr_chi3_Ey)
             grad_chi3_ez = torch.zeros_like(solver.kerr_chi3_Ez)
-        compiled_source = getattr(solver, "_compiled_source", None)
-        cache_mode_source_terms = compiled_source is not None and compiled_source.get("kind") == "mode_source"
+        compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())
+        cache_mode_source_terms = any(source.get("kind") == "mode_source" for source in compiled_sources)
         if cache_mode_source_terms:
             solver._source_replay_term_cache = {}
             solver._mode_source_explicit_vjp_remaining = self._time_steps
