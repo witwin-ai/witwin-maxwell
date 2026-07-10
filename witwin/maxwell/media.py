@@ -888,6 +888,56 @@ class Material(CoreMaterial):
         )
 
 
+class Medium2D(Material):
+    """Zero-thickness conductive sheet (2D material).
+
+    ``Medium2D`` models an infinitesimally thin conductive layer through its
+    sheet conductivity ``sigma_s`` [S] (siemens; a surface quantity, not the
+    volumetric S/m). The sheet carries the surface current
+    ``J_s = sigma_s * E_t`` in the two tangential field components and leaves
+    the normal component untouched.
+
+    A ``Medium2D`` must be attached to a ``Structure`` whose geometry is an
+    axis-aligned ``Box`` with exactly one zero-size axis (the sheet normal).
+    The compiler snaps the sheet to the nearest node plane along the normal
+    axis and lowers ``sigma_s`` to the effective volumetric conductivity
+    ``sigma_s / dcell`` on that single Yee layer, where ``dcell`` is the local
+    dual-cell width at the plane: integrating the discrete Ampere law across
+    one dual cell shows a sheet current distributed over that cell is exactly
+    equivalent to this volumetric conductivity. Sheet contributions are
+    additive with bulk conductivity and with other overlapping sheets.
+    """
+
+    def __init__(self, *, sigma_s: float = 0.0, name: str | None = None):
+        super().__init__(eps_r=1.0, mu_r=1.0, sigma_e=0.0, name=name)
+        object.__setattr__(self, "sigma_s", _coerce_nonnegative(sigma_s, name="sigma_s"))
+
+    @property
+    def is_medium2d(self) -> bool:
+        return True
+
+    def sheet_pole_terms(self) -> tuple[tuple[float, float], ...]:
+        """Dispersive surface-conductivity terms ``(weight, rate)``.
+
+        Each term contributes ``weight / (rate - i*omega)`` [S] to the sheet
+        conductivity (``weight`` in S/s, ``rate`` in 1/s), i.e. a Drude-like
+        relaxation of the surface current ``dJ_s/dt + rate * J_s = weight * E_t``.
+        The static base class carries none; frequency-dependent sheets such as
+        ``Graphene`` override this.
+        """
+        return ()
+
+    def sheet_conductivity(self, angular_frequency: float) -> complex:
+        """Complex sheet conductivity ``sigma_s(omega)`` [S] (e^{-i*omega*t} convention)."""
+        sigma = complex(self.sigma_s)
+        for weight, rate in self.sheet_pole_terms():
+            sigma += weight / complex(rate, -float(angular_frequency))
+        return sigma
+
+    def sheet_conductivity_at_freq(self, frequency: float) -> complex:
+        return self.sheet_conductivity(2.0 * np.pi * _coerce_frequency(frequency, name="frequency"))
+
+
 class PerturbationMedium(Material):
     """A base material whose permittivity is shifted by an external perturbation field.
 

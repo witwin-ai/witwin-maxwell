@@ -45,6 +45,8 @@ def _unsupported_adjoint_medium(scene):
         material = getattr(structure, "material", None)
         if material is None:
             continue
+        if getattr(material, "is_medium2d", False):
+            return "FDTD adjoint does not support 2D sheet (Medium2D) media yet."
         if _material_has_conductivity(material):
             return "FDTD adjoint does not support static conductive (sigma_e) media yet."
         if getattr(material, "is_anisotropic", False):

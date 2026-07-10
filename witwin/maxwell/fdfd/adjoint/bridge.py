@@ -30,6 +30,8 @@ def _unsupported_fdfd_adjoint_medium(scene):
         material = getattr(structure, "material", None)
         if material is None:
             continue
+        if getattr(material, "is_medium2d", False):
+            return "FDFD adjoint does not support 2D sheet (Medium2D) media yet."
         if getattr(material, "is_anisotropic", False):
             return "FDFD adjoint does not support anisotropic media yet."
         if getattr(material, "is_dispersive", False):

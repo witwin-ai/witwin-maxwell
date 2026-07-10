@@ -42,18 +42,43 @@ def _structure_is_pec(structure) -> bool:
     return material is not None and bool(getattr(material, "is_pec", False))
 
 
-def _nonpec_structures(scene):
-    return [structure for structure in _sorted_structures(scene) if not _structure_is_pec(structure)]
+def _structure_is_sheet(structure) -> bool:
+    material = _structure_material(structure)
+    return material is not None and bool(getattr(material, "is_medium2d", False))
+
+
+def _bulk_structures(scene):
+    """Enabled volumetric structures: everything except PEC markers and 2D sheets."""
+    return [
+        structure
+        for structure in _sorted_structures(scene)
+        if not _structure_is_pec(structure) and not _structure_is_sheet(structure)
+    ]
 
 
 def _pec_structures(scene):
     return [structure for structure in _sorted_structures(scene) if _structure_is_pec(structure)]
 
 
+def _sheet_structures(scene):
+    return [structure for structure in _sorted_structures(scene) if _structure_is_sheet(structure)]
+
+
 def _scene_has_dispersive_material(scene) -> bool:
+    """Whether any compiled material component depends on frequency.
+
+    2D sheets count as dispersive here: their conductivity enters the compiled
+    complex permittivity through the frequency-dependent ``sigma/(omega*eps0)``
+    term (and ``Graphene`` adds a genuinely dispersive sheet conductivity), so
+    frequency-cached component consumers must recompile on frequency changes.
+    """
     for structure in _sorted_structures(scene):
         material = _structure_material(structure)
-        if material is not None and bool(getattr(material, "is_dispersive", False)):
+        if material is None:
+            continue
+        if bool(getattr(material, "is_dispersive", False)):
+            return True
+        if bool(getattr(material, "is_medium2d", False)):
             return True
     return False
 
@@ -401,7 +426,7 @@ def _build_dispersive_layout(scene):
         ("mu_drude", "mu_drude_poles"),
         ("mu_lorentz", "mu_lorentz_poles"),
     )
-    for structure in _nonpec_structures(scene):
+    for structure in _bulk_structures(scene):
         material, _, _, _, _, _ = _static_structure_material(structure)
         slots = {slot_key: [] for slot_key, _ in slot_pairs}
         for slot_key, layout_key in slot_pairs:
@@ -415,7 +440,7 @@ def _build_dispersive_layout(scene):
 def _scene_modulation_frequency(scene):
     """The single scene-wide modulation frequency, or ``None`` when unmodulated."""
     frequencies = set()
-    for structure in _nonpec_structures(scene):
+    for structure in _bulk_structures(scene):
         material = _structure_material(structure)
         spec = None if material is None else getattr(material, "modulation", None)
         if isinstance(spec, ModulationSpec):
@@ -552,7 +577,7 @@ def _compile_material_sample(
     model = _new_material_model(scene, layout, eps_fill=eps_background, mu_fill=mu_background)
     coords = _coordinate_grids(scene, sample_offset)
 
-    for structure, structure_slots in zip(_nonpec_structures(scene), layout["structure_slots"]):
+    for structure, structure_slots in zip(_bulk_structures(scene), layout["structure_slots"]):
         model = _apply_structure_material(
             scene,
             model,
@@ -770,6 +795,88 @@ def _pec_occupancy(scene, coords=None):
     return occupancy
 
 
+def _sheet_plane_layout(scene, structure):
+    """Resolve the Yee-plane placement of a 2D-sheet structure.
+
+    Returns ``(normal_axis_index, node_index, dual_spacing, node_slices)`` or
+    ``None`` when the sheet lies outside the grid. The sheet geometry must be
+    an axis-aligned ``Box`` with exactly one zero-size axis (the sheet
+    normal); the sheet is snapped to the nearest node plane along the normal
+    and covers lateral nodes with the same lower-inclusive / upper-exclusive
+    convention as ``MaterialRegion``.
+    """
+    geometry = structure.geometry
+    material = _structure_material(structure)
+    label = type(material).__name__
+    if not isinstance(geometry, Box):
+        raise NotImplementedError(
+            f"{label} sheets currently support Box structure geometry only, got {type(geometry).__name__}."
+        )
+    rotation = getattr(geometry, "rotation", None)
+    if rotation is not None:
+        # Geometry stores rotations as [w, x, y, z] quaternions; only identity is allowed.
+        quaternion = np.asarray(rotation.detach().cpu(), dtype=np.float64)
+        if not np.allclose(np.abs(quaternion), (1.0, 0.0, 0.0, 0.0), atol=1.0e-6):
+            raise NotImplementedError(f"{label} sheets require an axis-aligned (unrotated) Box geometry.")
+    sizes = tuple(float(value) for value in geometry.size)
+    zero_axes = [index for index, value in enumerate(sizes) if value == 0.0]
+    if len(zero_axes) != 1:
+        raise ValueError(
+            f"{label} sheet geometry must be a Box with exactly one zero-size axis (the sheet normal); "
+            f"got size {sizes}."
+        )
+    normal_index = zero_axes[0]
+    position = tuple(float(value) for value in geometry.position)
+
+    node_slices = []
+    node_index = 0
+    dual_spacing = 0.0
+    for axis_index, axis in enumerate(_AXES):
+        nodes64 = getattr(scene, f"{axis}_nodes64")
+        if axis_index == normal_index:
+            node_index = int(np.argmin(np.abs(nodes64 - position[axis_index])))
+            dual_spacing = float(getattr(scene, f"d{axis}_dual64")[node_index])
+            node_slices.append(slice(node_index, node_index + 1))
+            continue
+        half_size = 0.5 * sizes[axis_index]
+        axis_slice = _region_axis_slice(
+            nodes64, position[axis_index] - half_size, position[axis_index] + half_size
+        )
+        if axis_slice is None:
+            return None
+        node_slices.append(axis_slice)
+    return normal_index, node_index, dual_spacing, tuple(node_slices)
+
+
+def _apply_sheet_structures(scene, model):
+    """Rasterize 2D-sheet (``Medium2D``) structures onto single Yee node planes.
+
+    The static sheet conductivity ``sigma_s`` [S] lowers to the effective
+    volumetric conductivity ``sigma_s / dual_spacing`` on the two tangential
+    ``sigma_e_components`` of the snapped node plane (the normal component is
+    untouched). Sheet contributions are additive with bulk conductivity and
+    with other sheets, matching the physical superposition of surface
+    currents.
+    """
+    sheets = _sheet_structures(scene)
+    if not sheets:
+        return model
+    for structure in sheets:
+        material = _structure_material(structure)
+        layout = _sheet_plane_layout(scene, structure)
+        if layout is None:
+            continue
+        normal_index, _, dual_spacing, node_slices = layout
+        tangential_axes = tuple(axis for index, axis in enumerate(_AXES) if index != normal_index)
+        sigma_s = float(getattr(material, "sigma_s", 0.0))
+        if sigma_s != 0.0:
+            for axis in tangential_axes:
+                contribution = torch.zeros_like(model["sigma_e_components"][axis])
+                contribution[node_slices] = sigma_s / dual_spacing
+                model["sigma_e_components"][axis] = model["sigma_e_components"][axis] + contribution
+    return _refresh_model_summary_aliases(model)
+
+
 def compile_material_model(
     scene,
     eps_background=1.0,
@@ -788,6 +895,7 @@ def compile_material_model(
             averaging=averaging,
         )
         model = _apply_material_regions(scene, model)
+        model = _apply_sheet_structures(scene, model)
         model["pec_occupancy"] = _pec_occupancy(scene)
         model["pec_mode"] = pec_mode
         model["modulation_frequency"] = modulation_frequency
@@ -853,6 +961,7 @@ def compile_material_model(
     for entry in accum["mu_lorentz_poles"]:
         entry["weight"] *= scale
     model = _apply_material_regions(scene, _refresh_model_summary_aliases(accum))
+    model = _apply_sheet_structures(scene, model)
     model["pec_occupancy"] = _pec_occupancy(scene)
     model["pec_mode"] = pec_mode
     model["modulation_frequency"] = modulation_frequency
