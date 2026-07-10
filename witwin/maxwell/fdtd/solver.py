@@ -436,8 +436,8 @@ class FDTD:
     def _update_electric_fields_standard(self, ex, ey, ez, hx, hy, hz):
         update_electric_fields_standard_impl(self, ex, ey, ez, hx, hy, hz)
 
-    def _update_electric_fields(self, ex, ey, ez, hx, hy, hz):
-        update_electric_fields_impl(self, ex, ey, ez, hx, hy, hz)
+    def _update_electric_fields(self, ex, ey, ez, hx, hy, hz, *, time_value=None):
+        update_electric_fields_impl(self, ex, ey, ez, hx, hy, hz, time_value=time_value)
 
     def _update_electric_fields_bloch(self):
         update_electric_fields_bloch_impl(self)

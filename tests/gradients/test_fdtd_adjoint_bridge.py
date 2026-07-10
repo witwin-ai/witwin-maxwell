@@ -40,6 +40,10 @@ def _build_simulation(model, *, time_steps=24):
             mw.Material(eps_r=2.0, kerr_chi3=1.0e-10),
             "Kerr nonlinear media",
         ),
+        (
+            mw.Material(eps_r=2.0, modulation=mw.ModulationSpec(frequency=1.0e8, amplitude=0.1)),
+            "time-modulated media",
+        ),
     ],
 )
 def test_fdtd_gradient_bridge_rejects_unsupported_medium_capabilities(material, message):

@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from witwin.core import Box
 from witwin.core.material import VACUUM_PERMITTIVITY
 
-from ..media import CustomPole, DiagonalTensor3, PerturbationMedium, Tensor3x3
+from ..media import CustomPole, DiagonalTensor3, ModulationSpec, PerturbationMedium, Tensor3x3
 
 _AXES = ("x", "y", "z")
 _OFFDIAG_AXES = ("xy", "xz", "yz")
@@ -153,6 +153,12 @@ def _new_material_model(scene, layout, *, eps_fill, mu_fill):
         "kerr_chi3": torch.zeros(shape, device=device, dtype=torch.float32),
         "chi2": torch.zeros(shape, device=device, dtype=torch.float32),
         "tpa_sigma": torch.zeros(shape, device=device, dtype=torch.float32),
+        # Space-time modulation quadrature fields: amplitude * cos(phase) and
+        # amplitude * sin(phase). This basis blends linearly across overlapping
+        # structures, unlike the raw phase itself.
+        "modulation_cos": torch.zeros(shape, device=device, dtype=torch.float32),
+        "modulation_sin": torch.zeros(shape, device=device, dtype=torch.float32),
+        "modulation_frequency": None,
     }
     for key in (
         "debye_poles",
@@ -206,6 +212,16 @@ def material_model_has_nonlinearity(model) -> bool:
         _material_model_has_kerr(model)
         or bool(torch.any(model["chi2"] != 0).item())
         or bool(torch.any(model["tpa_sigma"] != 0).item())
+    )
+
+
+def material_model_has_modulation(model) -> bool:
+    """Whether the compiled model carries a space-time permittivity modulation."""
+    if model.get("modulation_frequency") is None:
+        return False
+    return bool(
+        torch.any(model["modulation_cos"] != 0).item()
+        or torch.any(model["modulation_sin"] != 0).item()
     )
 
 
@@ -396,6 +412,55 @@ def _build_dispersive_layout(scene):
     return layout
 
 
+def _scene_modulation_frequency(scene):
+    """The single scene-wide modulation frequency, or ``None`` when unmodulated."""
+    frequencies = set()
+    for structure in _nonpec_structures(scene):
+        material = _structure_material(structure)
+        spec = None if material is None else getattr(material, "modulation", None)
+        if isinstance(spec, ModulationSpec):
+            frequencies.add(float(spec.frequency))
+    if not frequencies:
+        return None
+    if len(frequencies) > 1:
+        raise NotImplementedError(
+            "The Maxwell material compiler currently supports a single modulation frequency per "
+            f"Scene; got {sorted(frequencies)}."
+        )
+    return frequencies.pop()
+
+
+def _structure_modulation_values(scene, structure):
+    """The ``amplitude*cos(phase)`` / ``amplitude*sin(phase)`` blend values of a structure.
+
+    Returns scalars for scalar specs and node-grid tensors when the amplitude or
+    phase is a spatial grid (rasterized over the structure Box extent). Unmodulated
+    structures contribute ``(0, 0)`` so they displace earlier modulation on overlap,
+    exactly like the static blends.
+    """
+    spec = getattr(structure.material, "modulation", None)
+    if spec is None:
+        return 0.0, 0.0
+    amplitude = spec.amplitude
+    phase = spec.phase
+    if not torch.is_tensor(amplitude) and not torch.is_tensor(phase):
+        amplitude = float(amplitude)
+        phase = float(phase)
+        return amplitude * float(np.cos(phase)), amplitude * float(np.sin(phase))
+    if torch.is_tensor(amplitude):
+        amplitude = _box_parameter_field(
+            scene, structure.geometry, amplitude, name="ModulationSpec.amplitude"
+        )
+    if torch.is_tensor(phase):
+        phase = _box_parameter_field(scene, structure.geometry, phase, name="ModulationSpec.phase")
+        cos_phase = torch.cos(phase)
+        sin_phase = torch.sin(phase)
+    else:
+        cos_phase = float(np.cos(float(phase)))
+        sin_phase = float(np.sin(float(phase)))
+    return amplitude * cos_phase, amplitude * sin_phase
+
+
 def _apply_structure_material(
     scene,
     model,
@@ -451,6 +516,9 @@ def _apply_structure_material(
     model["kerr_chi3"] = _blend_material(model["kerr_chi3"], occupancy, value=nonlinearity["kerr_chi3"])
     model["chi2"] = _blend_material(model["chi2"], occupancy, value=nonlinearity["chi2"])
     model["tpa_sigma"] = _blend_material(model["tpa_sigma"], occupancy, value=nonlinearity["tpa_sigma"])
+    modulation_cos, modulation_sin = _structure_modulation_values(scene, structure)
+    model["modulation_cos"] = _blend_material(model["modulation_cos"], occupancy, value=modulation_cos)
+    model["modulation_sin"] = _blend_material(model["modulation_sin"], occupancy, value=modulation_sin)
     if isinstance(material, PerturbationMedium):
         delta = _box_parameter_field(
             scene,
@@ -710,6 +778,7 @@ def compile_material_model(
 ):
     samples, averaging, pec_mode = _resolve_subpixel(subpixel)
     layout = _build_dispersive_layout(scene)
+    modulation_frequency = _scene_modulation_frequency(scene)
     if samples == (1, 1, 1):
         model = _compile_material_sample(
             scene,
@@ -721,6 +790,7 @@ def compile_material_model(
         model = _apply_material_regions(scene, model)
         model["pec_occupancy"] = _pec_occupancy(scene)
         model["pec_mode"] = pec_mode
+        model["modulation_frequency"] = modulation_frequency
         return model
 
     accum = _new_material_model(scene, layout, eps_fill=0.0, mu_fill=0.0)
@@ -743,6 +813,8 @@ def compile_material_model(
         accum["kerr_chi3"] += sample["kerr_chi3"]
         accum["chi2"] += sample["chi2"]
         accum["tpa_sigma"] += sample["tpa_sigma"]
+        accum["modulation_cos"] += sample["modulation_cos"]
+        accum["modulation_sin"] += sample["modulation_sin"]
         for slot_index, entry in enumerate(sample["debye_poles"]):
             accum["debye_poles"][slot_index]["weight"] += entry["weight"]
         for slot_index, entry in enumerate(sample["drude_poles"]):
@@ -766,6 +838,8 @@ def compile_material_model(
     accum["kerr_chi3"] *= scale
     accum["chi2"] *= scale
     accum["tpa_sigma"] *= scale
+    accum["modulation_cos"] *= scale
+    accum["modulation_sin"] *= scale
     for entry in accum["debye_poles"]:
         entry["weight"] *= scale
     for entry in accum["drude_poles"]:
@@ -781,6 +855,7 @@ def compile_material_model(
     model = _apply_material_regions(scene, _refresh_model_summary_aliases(accum))
     model["pec_occupancy"] = _pec_occupancy(scene)
     model["pec_mode"] = pec_mode
+    model["modulation_frequency"] = modulation_frequency
     return model
 
 

@@ -394,6 +394,85 @@ class TwoPhotonAbsorption:
 
 _NONLINEAR_SPEC_TYPES = (NonlinearSusceptibility, TwoPhotonAbsorption)
 
+# Harmonic modulation depth cap. The FDTD time step is sized against the static
+# permittivity, and a modulated cell momentarily speeds the wave up by
+# 1/sqrt(1 - amplitude); capping the amplitude at 0.5 keeps that inflation below
+# sqrt(2), well inside the 2x headroom of the default Courant factor.
+_MODULATION_AMPLITUDE_LIMIT = 0.5
+
+
+def _coerce_modulation_amplitude(value):
+    if torch.is_tensor(value):
+        if value.ndim != 3:
+            raise ValueError(f"ModulationSpec amplitude must be a 3D tensor, got ndim={value.ndim}.")
+        with torch.no_grad():
+            if not torch.isfinite(value).all():
+                raise ValueError("ModulationSpec amplitude must be finite everywhere.")
+            if torch.any(value < 0):
+                raise ValueError("ModulationSpec amplitude must be >= 0 everywhere.")
+            if float(value.max()) <= 0.0:
+                raise ValueError("ModulationSpec amplitude must contain at least one positive value.")
+            if float(value.max()) >= _MODULATION_AMPLITUDE_LIMIT:
+                raise ValueError(
+                    f"ModulationSpec amplitude must be < {_MODULATION_AMPLITUDE_LIMIT} everywhere to keep "
+                    "the time-varying permittivity positive and Courant-stable."
+                )
+        return value
+    amplitude = float(value)
+    if not np.isfinite(amplitude) or amplitude <= 0.0:
+        raise ValueError("ModulationSpec amplitude must be > 0.")
+    if amplitude >= _MODULATION_AMPLITUDE_LIMIT:
+        raise ValueError(
+            f"ModulationSpec amplitude must be < {_MODULATION_AMPLITUDE_LIMIT} to keep the "
+            "time-varying permittivity positive and Courant-stable."
+        )
+    return amplitude
+
+
+def _coerce_modulation_phase(value):
+    if torch.is_tensor(value):
+        if value.ndim != 3:
+            raise ValueError(f"ModulationSpec phase must be a 3D tensor, got ndim={value.ndim}.")
+        with torch.no_grad():
+            if not torch.isfinite(value).all():
+                raise ValueError("ModulationSpec phase must be finite everywhere.")
+        return value
+    return _coerce_real_scalar(value, name="phase")
+
+
+@dataclass(frozen=True, eq=False)
+class ModulationSpec:
+    """Harmonic space-time permittivity modulation.
+
+    Attached to a ``Material`` through ``Material(modulation=...)`` it makes the
+    static permittivity time-varying:
+
+    ``eps(x, t) = eps_static(x) * (1 + amplitude(x) * cos(2*pi*frequency*t + phase(x)))``
+
+    ``frequency`` [Hz] is the modulation frequency (a single frequency per
+    scene). ``amplitude`` is the dimensionless modulation depth, a scalar or a
+    3D grid in ``[0, 0.5)`` spanning the Box extent of the structure the
+    material is attached to (same node-coverage and trilinear-resampling
+    convention as ``MaterialRegion.density``). ``phase`` [rad] is a scalar or a
+    3D grid with the same spatial convention, enabling traveling-wave
+    modulation profiles. The runtime applies the modulation inside a dedicated
+    E-update kernel from precompiled per-cell quadrature fields, so no
+    coefficient tensors are rebuilt per step.
+    """
+
+    frequency: float
+    amplitude: float | torch.Tensor
+    phase: float | torch.Tensor = 0.0
+
+    def __post_init__(self):
+        object.__setattr__(self, "frequency", _coerce_frequency(self.frequency, name="frequency"))
+        object.__setattr__(self, "amplitude", _coerce_modulation_amplitude(self.amplitude))
+        object.__setattr__(self, "phase", _coerce_modulation_phase(self.phase))
+
+    @property
+    def angular_frequency(self) -> float:
+        return 2.0 * np.pi * self.frequency
+
 
 @dataclass(frozen=True)
 class DiagonalTensor3:
@@ -432,6 +511,7 @@ class Material(CoreMaterial):
     orientation: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] | None
     kerr_chi3: float | None
     nonlinearity: tuple
+    modulation: ModulationSpec | None
     pec: bool
 
     def __init__(
@@ -453,6 +533,7 @@ class Material(CoreMaterial):
         orientation=None,
         kerr_chi3: float | None = None,
         nonlinearity=None,
+        modulation: ModulationSpec | None = None,
         pec: bool = False,
     ):
         super().__init__(eps_r=eps_r, mu_r=mu_r, sigma_e=sigma_e, name=name)
@@ -469,6 +550,9 @@ class Material(CoreMaterial):
         object.__setattr__(self, "orientation", None if orientation is None else _normalize_tensor_rows(orientation, name="orientation"))
         object.__setattr__(self, "kerr_chi3", None if kerr_chi3 is None else _coerce_real_scalar(kerr_chi3, name="kerr_chi3"))
         object.__setattr__(self, "nonlinearity", _normalize_poles(nonlinearity, _NONLINEAR_SPEC_TYPES, name="nonlinearity"))
+        if modulation is not None and not isinstance(modulation, ModulationSpec):
+            raise TypeError("Material.modulation must be a ModulationSpec instance.")
+        object.__setattr__(self, "modulation", modulation)
 
         if self.orientation is not None:
             raise NotImplementedError("Material.orientation is not supported yet; use axis-aligned DiagonalTensor3 media only.")
@@ -496,18 +580,29 @@ class Material(CoreMaterial):
         if self.is_nonlinear and self.is_anisotropic:
             raise NotImplementedError("A nonlinear Material cannot carry anisotropic tensors in v1.")
 
+        if self.modulation is not None:
+            if self.is_dispersive:
+                raise NotImplementedError("A time-modulated Material cannot carry dispersive poles in v1.")
+            if self.is_anisotropic:
+                raise NotImplementedError("A time-modulated Material cannot carry anisotropic tensors in v1.")
+            if self.is_nonlinear:
+                raise NotImplementedError("A time-modulated Material cannot carry nonlinear channels in v1.")
+            if float(self.sigma_e) != 0.0:
+                raise NotImplementedError("A time-modulated Material cannot carry electric conductivity in v1.")
+
         if self.pec:
             if (
                 self.is_dispersive
                 or self.is_anisotropic
                 or self.is_nonlinear
+                or self.modulation is not None
                 or float(self.eps_r) != 1.0
                 or float(self.mu_r) != 1.0
                 or float(self.sigma_e) != 0.0
             ):
                 raise ValueError(
-                    "A PEC Material must not carry dispersion, anisotropy, Kerr, or non-default "
-                    "eps/mu/sigma; its permittivity is not a finite number."
+                    "A PEC Material must not carry dispersion, anisotropy, Kerr, modulation, or "
+                    "non-default eps/mu/sigma; its permittivity is not a finite number."
                 )
 
     @property
@@ -585,6 +680,10 @@ class Material(CoreMaterial):
     @property
     def is_nonlinear(self) -> bool:
         return self.nonlinear_chi2 != 0.0 or self.nonlinear_chi3 != 0.0 or self.tpa_sigma_scale != 0.0
+
+    @property
+    def is_modulated(self) -> bool:
+        return self.modulation is not None
 
     @property
     def is_pec(self) -> bool:
@@ -847,6 +946,7 @@ class PerturbationMedium(Material):
             sigma_e_tensor=getattr(base, "sigma_e_tensor", None),
             kerr_chi3=getattr(base, "kerr_chi3", None),
             nonlinearity=getattr(base, "nonlinearity", ()),
+            modulation=getattr(base, "modulation", None),
         )
         object.__setattr__(self, "perturbation", perturbation)
         object.__setattr__(self, "eps_sensitivity", sensitivity)

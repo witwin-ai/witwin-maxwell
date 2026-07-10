@@ -512,7 +512,183 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
 
 
-def update_electric_fields(solver, ex, ey, ez, hx, hy, hz):
+def _modulation_phase_factors(solver, time_value):
+    """Host-side ``(cos, sin)`` pairs of the modulation phase at the previous and
+    new E-field time instants. The E update advances E from ``time_value - dt`` to
+    ``time_value`` (source injection at ``time_value`` follows the update)."""
+    omega = float(solver.modulation_angular_frequency)
+    t_next = float(time_value)
+    t_prev = t_next - float(solver.dt)
+    return (
+        float(np.cos(omega * t_prev)),
+        float(np.sin(omega * t_prev)),
+        float(np.cos(omega * t_next)),
+        float(np.sin(omega * t_next)),
+    )
+
+
+def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, time_value):
+    cos_prev, sin_prev, cos_next, sin_next = _modulation_phase_factors(solver, time_value)
+    solver.fdtd_module.updateElectricFieldExModulated3D(
+        Ex=ex,
+        Hy=hy,
+        Hz=hz,
+        ExDecay=solver.cex_decay,
+        ExCurl=solver.cex_curl,
+        ModCos=solver.mod_cos_Ex,
+        ModSin=solver.mod_sin_Ex,
+        cosPrev=cos_prev,
+        sinPrev=sin_prev,
+        cosNext=cos_next,
+        sinNext=sin_next,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
+        yLowBoundaryMode=solver.boundary_y_low_code,
+        yHighBoundaryMode=solver.boundary_y_high_code,
+        zLowBoundaryMode=solver.boundary_z_low_code,
+        zHighBoundaryMode=solver.boundary_z_high_code,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    solver.fdtd_module.updateElectricFieldEyModulated3D(
+        Ey=ey,
+        Hx=hx,
+        Hz=hz,
+        EyDecay=solver.cey_decay,
+        EyCurl=solver.cey_curl,
+        ModCos=solver.mod_cos_Ey,
+        ModSin=solver.mod_sin_Ey,
+        cosPrev=cos_prev,
+        sinPrev=sin_prev,
+        cosNext=cos_next,
+        sinNext=sin_next,
+        invDx=solver.inv_dx_e,
+        invDz=solver.inv_dz_e,
+        xLowBoundaryMode=solver.boundary_x_low_code,
+        xHighBoundaryMode=solver.boundary_x_high_code,
+        zLowBoundaryMode=solver.boundary_z_low_code,
+        zHighBoundaryMode=solver.boundary_z_high_code,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    solver.fdtd_module.updateElectricFieldEzModulated3D(
+        Ez=ez,
+        Hx=hx,
+        Hy=hy,
+        EzDecay=solver.cez_decay,
+        EzCurl=solver.cez_curl,
+        ModCos=solver.mod_cos_Ez,
+        ModSin=solver.mod_sin_Ez,
+        cosPrev=cos_prev,
+        sinPrev=sin_prev,
+        cosNext=cos_next,
+        sinNext=sin_next,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
+        xLowBoundaryMode=solver.boundary_x_low_code,
+        xHighBoundaryMode=solver.boundary_x_high_code,
+        yLowBoundaryMode=solver.boundary_y_low_code,
+        yHighBoundaryMode=solver.boundary_y_high_code,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+
+
+def update_electric_fields_modulated_cpml(solver, ex, ey, ez, hx, hy, hz, time_value):
+    if solver._cpml_memory_mode != "dense":
+        raise RuntimeError(
+            "FDTD time-modulated media require the dense CPML memory mode; "
+            "the boundary initialization should have forced it."
+        )
+    cos_prev, sin_prev, cos_next, sin_next = _modulation_phase_factors(solver, time_value)
+    solver.fdtd_module.updateElectricFieldExCpmlModulated3D(
+        Ex=ex,
+        Hy=hy,
+        Hz=hz,
+        ExDecay=solver.cex_decay,
+        ExCurl=solver.cex_curl,
+        ModCos=solver.mod_cos_Ex,
+        ModSin=solver.mod_sin_Ex,
+        cosPrev=cos_prev,
+        sinPrev=sin_prev,
+        cosNext=cos_next,
+        sinNext=sin_next,
+        PsiExY=solver.psi_ex_y,
+        PsiExZ=solver.psi_ex_z,
+        InvKappaExY=solver.cpml_inv_kappa_e_y,
+        BExY=solver.cpml_b_e_y,
+        CExY=solver.cpml_c_e_y,
+        InvKappaExZ=solver.cpml_inv_kappa_e_z,
+        BExZ=solver.cpml_b_e_z,
+        CExZ=solver.cpml_c_e_z,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
+        yLowBoundaryMode=solver.boundary_y_low_code,
+        yHighBoundaryMode=solver.boundary_y_high_code,
+        zLowBoundaryMode=solver.boundary_z_low_code,
+        zHighBoundaryMode=solver.boundary_z_high_code,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    solver.fdtd_module.updateElectricFieldEyCpmlModulated3D(
+        Ey=ey,
+        Hx=hx,
+        Hz=hz,
+        EyDecay=solver.cey_decay,
+        EyCurl=solver.cey_curl,
+        ModCos=solver.mod_cos_Ey,
+        ModSin=solver.mod_sin_Ey,
+        cosPrev=cos_prev,
+        sinPrev=sin_prev,
+        cosNext=cos_next,
+        sinNext=sin_next,
+        PsiEyX=solver.psi_ey_x,
+        PsiEyZ=solver.psi_ey_z,
+        InvKappaEyX=solver.cpml_inv_kappa_e_x,
+        BEyX=solver.cpml_b_e_x,
+        CEyX=solver.cpml_c_e_x,
+        InvKappaEyZ=solver.cpml_inv_kappa_e_z,
+        BEyZ=solver.cpml_b_e_z,
+        CEyZ=solver.cpml_c_e_z,
+        invDx=solver.inv_dx_e,
+        invDz=solver.inv_dz_e,
+        xLowBoundaryMode=solver.boundary_x_low_code,
+        xHighBoundaryMode=solver.boundary_x_high_code,
+        zLowBoundaryMode=solver.boundary_z_low_code,
+        zHighBoundaryMode=solver.boundary_z_high_code,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    solver.fdtd_module.updateElectricFieldEzCpmlModulated3D(
+        Ez=ez,
+        Hx=hx,
+        Hy=hy,
+        EzDecay=solver.cez_decay,
+        EzCurl=solver.cez_curl,
+        ModCos=solver.mod_cos_Ez,
+        ModSin=solver.mod_sin_Ez,
+        cosPrev=cos_prev,
+        sinPrev=sin_prev,
+        cosNext=cos_next,
+        sinNext=sin_next,
+        PsiEzX=solver.psi_ez_x,
+        PsiEzY=solver.psi_ez_y,
+        InvKappaEzX=solver.cpml_inv_kappa_e_x,
+        BEzX=solver.cpml_b_e_x,
+        CEzX=solver.cpml_c_e_x,
+        InvKappaEzY=solver.cpml_inv_kappa_e_y,
+        BEzY=solver.cpml_b_e_y,
+        CEzY=solver.cpml_c_e_y,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
+        xLowBoundaryMode=solver.boundary_x_low_code,
+        xHighBoundaryMode=solver.boundary_x_high_code,
+        yLowBoundaryMode=solver.boundary_y_low_code,
+        yHighBoundaryMode=solver.boundary_y_high_code,
+    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+
+
+def update_electric_fields(solver, ex, ey, ez, hx, hy, hz, *, time_value=None):
+    if getattr(solver, "modulation_enabled", False):
+        if time_value is None:
+            raise RuntimeError(
+                "The time-modulated electric update requires the current step time_value."
+            )
+        if solver.uses_cpml:
+            update_electric_fields_modulated_cpml(solver, ex, ey, ez, hx, hy, hz, time_value)
+        else:
+            update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, time_value)
+        return
     if solver.uses_cpml:
         update_electric_fields_cpml(solver, ex, ey, ez, hx, hy, hz)
     else:
@@ -1051,7 +1227,16 @@ def _field_update_block(solver, time_value):
         solver._advance_dispersive_state()
         if solver.nonlinear_enabled:
             solver._update_nonlinear_electric_coefficients()
-        update_electric_fields(solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
+        update_electric_fields(
+            solver,
+            solver.Ex,
+            solver.Ey,
+            solver.Ez,
+            solver.Hx,
+            solver.Hy,
+            solver.Hz,
+            time_value=time_value,
+        )
         if getattr(solver, "full_aniso_enabled", False):
             apply_full_aniso_corrections(solver)
 
@@ -1079,6 +1264,9 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         and not has_complex_fields(solver)
         and not getattr(solver, "nonlinear_enabled", False)
         and not getattr(solver, "dispersive_enabled", False)
+        # The modulated E update consumes per-step host phase scalars, which a
+        # captured CUDA graph would freeze at their capture-time values.
+        and not getattr(solver, "modulation_enabled", False)
     )
     if not graphable:
         return normal

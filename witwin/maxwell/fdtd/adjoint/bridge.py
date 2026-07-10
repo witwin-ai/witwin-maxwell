@@ -53,6 +53,8 @@ def _unsupported_adjoint_medium(scene):
             return "FDTD adjoint does not support magnetic dispersive media yet."
         if getattr(material, "is_nonlinear", False):
             return "FDTD adjoint does not support Kerr nonlinear media yet."
+        if getattr(material, "is_modulated", False):
+            return "FDTD adjoint does not support time-modulated media yet."
     return None
 
 

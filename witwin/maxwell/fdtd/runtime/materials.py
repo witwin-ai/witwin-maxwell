@@ -7,6 +7,7 @@ from ...compiler.materials import (
     evaluate_material_permeability,
     evaluate_material_permittivity,
     material_model_has_full_anisotropy,
+    material_model_has_modulation,
     material_model_has_nonlinearity,
 )
 from ..boundary import has_complex_fields
@@ -23,6 +24,10 @@ def build_materials(solver, scene):
     if scene.boundary.uses_kind("bloch") and material_model_has_full_anisotropy(material_model):
         raise NotImplementedError(
             "FDTD full (off-diagonal) anisotropic media are not implemented for Bloch / complex-field runs."
+        )
+    if scene.boundary.uses_kind("bloch") and material_model_has_modulation(material_model):
+        raise NotImplementedError(
+            "FDTD time-modulated media are not implemented for Bloch / complex-field runs."
         )
 
     solver._compiled_material_model = material_model
@@ -58,6 +63,8 @@ def build_materials(solver, scene):
 
     build_full_anisotropy(solver, material_model)
 
+    build_modulation(solver, material_model)
+
     build_dispersive_templates(solver, material_model)
     build_magnetic_dispersive_templates(solver, material_model)
     solver.dispersive_enabled = solver.electric_dispersive_enabled or solver.magnetic_dispersive_enabled
@@ -65,6 +72,19 @@ def build_materials(solver, scene):
         raise NotImplementedError(
             "FDTD full (off-diagonal) anisotropic media cannot be combined with dispersive materials in the same Scene yet."
         )
+    if solver.modulation_enabled:
+        if solver.nonlinear_enabled:
+            raise NotImplementedError(
+                "FDTD time-modulated media cannot be combined with nonlinear media in the same Scene yet."
+            )
+        if solver.full_aniso_enabled:
+            raise NotImplementedError(
+                "FDTD time-modulated media cannot be combined with full (off-diagonal) anisotropic media in the same Scene yet."
+            )
+        if solver.dispersive_enabled:
+            raise NotImplementedError(
+                "FDTD time-modulated media cannot be combined with dispersive materials in the same Scene yet."
+            )
 
 
 def build_nonlinear_channels(solver, material_model):
@@ -121,6 +141,38 @@ def build_nonlinear_channels(solver, material_model):
         solver.cex_decay_dynamic = None
         solver.cey_decay_dynamic = None
         solver.cez_decay_dynamic = None
+
+
+def build_modulation(solver, material_model):
+    """Set the space-time modulation flag and its per-edge quadrature fields.
+
+    The compiled ``modulation_cos`` / ``modulation_sin`` node fields
+    (``amplitude*cos(phase)`` and ``amplitude*sin(phase)``) are averaged onto the
+    Yee E edges once here; the per-step modulation factor
+    ``m(t) = 1 + cos_field*cos(Omega*t) - sin_field*sin(Omega*t)`` is evaluated
+    inside the modulated E-update kernels from these static fields plus two
+    host-side ``(cos, sin)`` scalar pairs, so no coefficient tensor is rebuilt
+    per step.
+    """
+    solver.modulation_enabled = bool(material_model_has_modulation(material_model))
+    if not solver.modulation_enabled:
+        solver.modulation_angular_frequency = None
+        solver.mod_cos_Ex = None
+        solver.mod_cos_Ey = None
+        solver.mod_cos_Ez = None
+        solver.mod_sin_Ex = None
+        solver.mod_sin_Ey = None
+        solver.mod_sin_Ez = None
+        return
+    solver.modulation_angular_frequency = 2.0 * np.pi * float(material_model["modulation_frequency"])
+    modulation_cos = material_model["modulation_cos"]
+    modulation_sin = material_model["modulation_sin"]
+    solver.mod_cos_Ex = average_node_to_component(solver, modulation_cos, "Ex")
+    solver.mod_cos_Ey = average_node_to_component(solver, modulation_cos, "Ey")
+    solver.mod_cos_Ez = average_node_to_component(solver, modulation_cos, "Ez")
+    solver.mod_sin_Ex = average_node_to_component(solver, modulation_sin, "Ex")
+    solver.mod_sin_Ey = average_node_to_component(solver, modulation_sin, "Ey")
+    solver.mod_sin_Ez = average_node_to_component(solver, modulation_sin, "Ez")
 
 
 _ANISO_ROW_PAIRS = {
