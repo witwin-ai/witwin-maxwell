@@ -67,7 +67,7 @@ def _mode_probe_loss(model):
     return result, data, loss
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_mode_source_backpropagates_to_material_density():
     model = _DensityModeSourceScene(init=0.0).cuda()
 
@@ -85,7 +85,7 @@ def test_fdtd_gradient_bridge_mode_source_backpropagates_to_material_density():
     assert result.monitor("probe")["data"].grad_fn is not None
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_mode_source_matches_central_difference_and_uses_python_reference_cpml():
     model = _DensityModeSourceScene(init=0.0).cuda()
 
@@ -212,7 +212,7 @@ def test_mode_source_reverse_step_matches_python_reference_for_checkpoint_replay
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_mode_source_supports_sparse_implicit_mode_solver(monkeypatch):
     model = _DensityModeSourceScene(init=0.0).cuda()
 

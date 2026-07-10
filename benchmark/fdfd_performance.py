@@ -63,10 +63,15 @@ class PerfCase:
     status: str  # "ok", "oom", or "failed"
 
 
-def build_scene(size: int) -> mw.Scene:
+def build_scene(size: int, source_time=None) -> mw.Scene:
     """Canonical scene: z-polarized point dipole at the origin plus one
     dielectric cube (eps_r=4) offset in +y, sized relative to the PML-free
-    interior so every sweep size keeps the same relative geometry."""
+    interior so every sweep size keeps the same relative geometry.
+
+    ``source_time`` defaults to a CW excitation at ``FREQUENCY`` (for FDFD).
+    Pass a ``GaussianPulse`` to drive the same geometry in the time domain."""
+    if source_time is None:
+        source_time = mw.CW(frequency=FREQUENCY, amplitude=100.0)
     half = size * RESOLUTION / 2.0
     interior_cells = size - 2 * PML_LAYERS
     cube_side = (interior_cells / 3.0) * RESOLUTION
@@ -92,7 +97,7 @@ def build_scene(size: int) -> mw.Scene:
             position=(0.0, 0.0, 0.0),
             polarization=(0.0, 0.0, 1.0),
             width=0.05,
-            source_time=mw.CW(frequency=FREQUENCY, amplitude=100.0),
+            source_time=source_time,
             name="src",
         )
     )

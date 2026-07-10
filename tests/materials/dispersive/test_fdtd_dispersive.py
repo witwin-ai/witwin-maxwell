@@ -59,7 +59,7 @@ def _build_plane_wave_scene(frequency, *, polarization=(0.0, 0.0, 1.0), amplitud
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_dispersive_poles_tighten_auto_dt():
     frequency = 1.0e9
     vacuum_scene = _build_plane_wave_scene(frequency)
@@ -77,7 +77,7 @@ def test_fdtd_dispersive_poles_tighten_auto_dt():
     assert metal_dt < vacuum_dt
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_magnetic_dispersive_poles_tighten_auto_dt():
     frequency = 1.0e9
     vacuum_scene = _build_plane_wave_scene(frequency)
@@ -99,7 +99,7 @@ def test_fdtd_magnetic_dispersive_poles_tighten_auto_dt():
     assert magnetic_dt < vacuum_dt
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_drude_slab_reflects_below_plasma_frequency():
     frequency = 5.0e8
 
@@ -166,7 +166,7 @@ def _normalized_lorentz_transmission(frequency):
     return lorentz_post / max(vacuum_post, 1e-12)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_lorentz_resonance_reduces_transmission():
     detuned_transmission = _normalized_lorentz_transmission(7.0e8)
     resonant_transmission = _normalized_lorentz_transmission(1.0e9)
@@ -189,7 +189,7 @@ def _advance_solver_one_step(solver, *, time_value):
     solver._enforce_pec_boundaries()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_debye_polarization_dft_matches_analytic_permittivity():
     frequency = 1.0e9
     material = mw.Material.debye(eps_inf=2.0, delta_eps=3.0, tau=2.0e-10)
@@ -250,7 +250,7 @@ def test_fdtd_debye_polarization_dft_matches_analytic_permittivity():
     assert relative_error < 0.08
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_anisotropic_slab_is_polarization_selective():
     frequency = 1.0e9
     material = mw.Material(
@@ -278,7 +278,7 @@ def test_fdtd_anisotropic_slab_is_polarization_selective():
     assert ey_transmission > ez_transmission * 10.0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_magnetic_lorentz_slab_reflects_near_resonance():
     frequency = 1.0e9
 
@@ -319,7 +319,7 @@ def _phase_difference(angle_a, angle_b):
     return float(np.angle(np.exp(1j * (angle_a - angle_b))))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_kerr_slab_phase_depends_on_source_amplitude():
     frequency = 1.0e9
 

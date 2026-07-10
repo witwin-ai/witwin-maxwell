@@ -1,5 +1,5 @@
 from witwin.core import Box, Cone, Cylinder, Ellipsoid, HollowBox, Mesh, Prism, Pyramid, Sphere, Structure, Torus
-from witwin.core.geometry import ComplexPolySlab, PolySlab
+from .geometry import ComplexPolySlab, PolySlab
 from .media import DebyePole, DiagonalTensor3, DrudePole, LorentzPole, Material, Tensor3x3
 from .monitors import (
     ClosedSurfaceMonitor,

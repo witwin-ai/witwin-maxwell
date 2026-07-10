@@ -8,7 +8,7 @@ from witwin.maxwell.fdtd.boundary import expand_cpml_memory_tensor
 from witwin.maxwell.fdtd.checkpoint import capture_checkpoint_state
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_cpml_profiles_and_boundary_attenuation():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
@@ -72,7 +72,7 @@ def test_fdtd_cpml_profiles_and_boundary_attenuation():
     assert pml_outer_mag < pml_mid_mag
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_simple_pml_and_cpml_both_run():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
@@ -100,7 +100,7 @@ def test_fdtd_simple_pml_and_cpml_both_run():
     assert pml_solver.sigma_x is not None
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_custom_cpml_config_changes_profile():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
@@ -130,7 +130,7 @@ def test_fdtd_custom_cpml_config_changes_profile():
     assert not torch.allclose(tuned_solver.cpml_b_e_x, default_solver.cpml_b_e_x)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_cpml_psi_is_slab_allocated_but_checkpoints_expand_dense():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
@@ -171,7 +171,7 @@ def test_fdtd_cpml_psi_is_slab_allocated_but_checkpoints_expand_dense():
     assert torch.count_nonzero(checkpoint.tensors["psi_ex_y"]).item() == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
@@ -348,7 +348,7 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         assert torch.allclose(slab_dense, reference, atol=1.0e-2, rtol=1.0e-2)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_cpml_auto_prefers_dense_small_grids_and_dense_mode_is_full_shape():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.48, 0.48), (-0.48, 0.48), (-0.48, 0.48))),

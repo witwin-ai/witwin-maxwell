@@ -239,7 +239,7 @@ def test_compute_s_parameters_rejects_missing_or_mismatched_normalization():
         )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_compute_s_parameters_free_space_multifrequency_fdtd_returns_zero_s11():
     scene = _build_tfsf_multifrequency_scene()
     runtime = _runtime_for_scene(scene, min(_MULTI_FREQUENCIES), steady_cycles=6, transient_cycles=20)
@@ -263,7 +263,7 @@ def test_compute_s_parameters_free_space_multifrequency_fdtd_returns_zero_s11():
     assert s_params["P_transmitted"] is None
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_compute_s_parameters_dielectric_half_space_matches_fresnel_and_energy_balance():
     reference_result, dut_result = _run_half_space_case(material=mw.Material(eps_r=4.0))
 
@@ -280,7 +280,7 @@ def test_compute_s_parameters_dielectric_half_space_matches_fresnel_and_energy_b
     np.testing.assert_allclose(s_params["S11_mag"] ** 2 + s_params["S21_mag"] ** 2, 1.0, atol=8e-2)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_compute_s_parameters_metal_half_space_returns_near_unity_reflection():
     metal = mw.Material.drude(eps_inf=1.0, plasma_frequency=2.0e9, gamma=1.0e8)
     reference_result, dut_result = _run_half_space_case(material=metal)

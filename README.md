@@ -6,7 +6,7 @@ WiTwin Maxwell is a differentiable full-wave electromagnetic solver with a **PyT
 
 The main public solver workflow today is:
 
-- `FDTD`: Slang/CUDA Yee-grid time-domain solver with monitor extraction, multi-frequency DFT sampling, and differentiable adjoint support
+- `FDTD`: native-CUDA Yee-grid time-domain solver with monitor extraction, multi-frequency DFT sampling, and differentiable adjoint support
 
 Frequency-domain `FDFD` support is coming soon.
 

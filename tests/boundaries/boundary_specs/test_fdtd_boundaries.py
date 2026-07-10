@@ -155,7 +155,7 @@ def test_complex_spectral_components_are_combined_correctly():
 @pytest.fixture(scope="module")
 def cuda_fdtd_solver():
     if not torch.cuda.is_available():
-        pytest.skip("needs CUDA for slang FDTD")
+        pytest.skip("needs CUDA for FDTD")
 
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),

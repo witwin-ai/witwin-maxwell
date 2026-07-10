@@ -29,7 +29,7 @@ def _build_mode_source_scene():
     return scene
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_mode_source_initializes_eh_surface_terms_from_guided_profile():
     solver = mw.Simulation.fdtd(_build_mode_source_scene(), frequencies=[1.0e9]).prepare().solver
 

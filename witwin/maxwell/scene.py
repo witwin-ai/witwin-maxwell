@@ -7,7 +7,7 @@ from typing import Any, Literal, TypeAlias
 import numpy as np
 import torch
 
-from witwin.core import SceneBase, Structure
+from witwin.core import Structure
 from .ports import ModePort
 from .compiler.materials import (
     _validate_scene_material_combinations,
@@ -744,7 +744,7 @@ def _domain_range_from_bounds(
     )
 
 
-class Scene(SceneBase):
+class Scene:
     """Declarative 3D scene definition for simulation backends."""
 
     def __init__(
@@ -766,14 +766,14 @@ class Scene(SceneBase):
         symmetry=None,
     ):
         resolved_device = _resolve_scene_device(device)
-        super().__init__(
-            structures=structures,
-            sources=sources,
-            monitors=monitors,
-            metadata=metadata,
-            device=resolved_device,
-            verbose=verbose,
-        )
+        self.structures = list(structures or [])
+        if any(not isinstance(structure, Structure) for structure in self.structures):
+            raise TypeError("Maxwell Scene structures must be witwin.core.Structure instances.")
+        self.sources = list(sources or [])
+        self.monitors = list(monitors or [])
+        self.metadata = dict(metadata or {})
+        self.device = resolved_device
+        self.verbose = bool(verbose)
 
         if domain is None:
             domain = Domain.from_domain_range((-1.0, 1.0, -1.0, 1.0, -1.0, 1.0))
@@ -878,6 +878,8 @@ class Scene(SceneBase):
         return any(mode is not None for mode in self.symmetry)
 
     def add_structure(self, structure: Structure):
+        if not isinstance(structure, Structure):
+            raise TypeError("Maxwell Scene structures must be witwin.core.Structure instances.")
         self.structures.append(structure)
         _validate_scene_material_combinations(self)
         return self

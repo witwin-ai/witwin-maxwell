@@ -1,5 +1,7 @@
 # Native CUDA FDTD Profiling Baseline
 
+> Slang rows are historical pre-removal measurements; only the native-CUDA commands remain runnable.
+
 Baseline established 2026-06-12 on NVIDIA GeForce RTX 5080 (16 GB, driver 596.49),
 torch 2.10.0+cu128, CUDA toolkit 12.9, Windows 11. The "optimized" numbers at the
 bottom reflect the state after the 2026-06-12 optimization pass. All timings use

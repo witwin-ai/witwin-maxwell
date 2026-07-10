@@ -90,7 +90,7 @@ def _build_symmetry_pair(symmetry_mode, *, polarization):
     return half_scene, full_scene
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_periodic_boundary_matches_opposite_faces():
     _, fields = _run_fdtd_boundary_case(mw.BoundarySpec.periodic())
     ez = fields["EZ"]
@@ -98,7 +98,7 @@ def test_fdtd_periodic_boundary_matches_opposite_faces():
     assert rel_err < 1e-6
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_bloch_boundary_matches_expected_phase_shift():
     scene, fields = _run_fdtd_boundary_case(mw.BoundarySpec.bloch((math.pi / 1.2, 0.0, 0.0)))
     ez = fields["EZ"]
@@ -107,7 +107,7 @@ def test_fdtd_bloch_boundary_matches_expected_phase_shift():
     assert rel_err < 1e-6
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_pec_boundary_keeps_tangential_electric_field_zero():
     _, fields = _run_fdtd_boundary_case(mw.BoundarySpec.pec())
     boundary_max = max(
@@ -121,7 +121,7 @@ def test_fdtd_pec_boundary_keeps_tangential_electric_field_zero():
     assert boundary_max < 1e-7
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_periodic_boundary_preserves_opposite_faces_with_edge_source():
     _, fields = _run_fdtd_boundary_case(
         mw.BoundarySpec.periodic(),
@@ -133,7 +133,7 @@ def test_fdtd_periodic_boundary_preserves_opposite_faces_with_edge_source():
     assert rel_err < 1e-6
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_bloch_boundary_preserves_phase_with_edge_source():
     scene, fields = _run_fdtd_boundary_case(
         mw.BoundarySpec.bloch((math.pi / 1.2, 0.0, 0.0)),
@@ -146,7 +146,7 @@ def test_fdtd_bloch_boundary_preserves_phase_with_edge_source():
     assert rel_err < 1e-6
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_mixed_periodic_and_pml_boundary_preserves_periodic_axis():
     _, fields = _run_fdtd_boundary_case(
         mw.BoundarySpec.faces(
@@ -164,7 +164,7 @@ def test_fdtd_mixed_periodic_and_pml_boundary_preserves_periodic_axis():
     assert rel_err < 1e-6
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_mixed_bloch_xy_pml_z_runs_with_complex_fields():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
@@ -298,7 +298,7 @@ def test_fdtd_mixed_bloch_cpml_rejects_non_grating_update_layout():
         ).run()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_pec_boundary_keeps_tangential_electric_field_zero_with_edge_source():
     _, fields = _run_fdtd_boundary_case(
         mw.BoundarySpec.pec(),
@@ -316,7 +316,7 @@ def test_fdtd_pec_boundary_keeps_tangential_electric_field_zero_with_edge_source
     assert boundary_max < 1e-7
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_low_face_symmetry_pec_keeps_tangential_field_zero():
     _, fields = _run_fdtd_boundary_case(
         mw.BoundarySpec.pml(num_layers=4, strength=1.0),
@@ -331,7 +331,7 @@ def test_fdtd_low_face_symmetry_pec_keeps_tangential_field_zero():
     assert boundary_max < 1e-7
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_pmc_symmetry_matches_full_domain_reference():
     half_scene, full_scene = _build_symmetry_pair("PMC", polarization="Ez")
     half_result = _run_fdtd_result(half_scene)
@@ -344,7 +344,7 @@ def test_fdtd_pmc_symmetry_matches_full_domain_reference():
     assert rel_err < 0.06
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_pec_symmetry_matches_full_domain_reference_for_normal_component():
     half_scene, full_scene = _build_symmetry_pair("PEC", polarization="Ex")
     half_result = _run_fdtd_result(half_scene)

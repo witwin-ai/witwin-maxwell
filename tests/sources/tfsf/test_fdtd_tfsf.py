@@ -93,7 +93,7 @@ def _guarded_region_ratio(field, x_coords, y_coords, z_coords, bounds, *, dx, dy
     return outside_max / max(inside_max, 1e-12), inside_max, outside_max
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 @pytest.mark.parametrize(
     ("direction", "polarization", "component"),
     [
@@ -133,7 +133,7 @@ def test_tfsf_axis_aligned_plane_wave_null_leakage_is_small(direction, polarizat
     assert leakage_ratio < 1e-3
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 @pytest.mark.parametrize("dft_frequency", [0.7e9, 1.0e9, 1.3e9])
 @pytest.mark.parametrize(
     ("direction", "polarization", "component"),
@@ -182,7 +182,7 @@ def test_tfsf_axis_aligned_gaussian_pulse_null_leakage_is_small_across_dft_frequ
     assert leakage_ratio < 1e-3
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_tfsf_oblique_plane_wave_keeps_leakage_bounded():
     scene = _build_scene(
         mw.PlaneWave(
@@ -215,7 +215,7 @@ def test_tfsf_oblique_plane_wave_keeps_leakage_bounded():
     assert max(dominant_ratios) < 1.2e-3
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 @pytest.mark.xfail(
     reason="Gaussian-beam TFSF still relies on the analytical patch provider until the discrete face engine is completed.",
     strict=False,
@@ -251,7 +251,7 @@ def test_tfsf_gaussian_beam_null_leakage_is_small():
     assert leakage_ratio < 8e-2
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_tfsf_scatterer_generates_scattered_field_outside_box():
     scatterer = mw.Structure(
         name="sphere",

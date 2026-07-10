@@ -549,7 +549,7 @@ def dipole_nonrect_closed_surface_validation():
     }
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_closed_surface_dipole_near_field_reconstruction_is_physically_consistent(dipole_closed_surface_validation):
     errors = dipole_closed_surface_validation["near_field_errors"]
     assert errors["Ex"] < 0.25
@@ -560,14 +560,14 @@ def test_closed_surface_dipole_near_field_reconstruction_is_physically_consisten
     assert 0.65 < dipole_closed_surface_validation["power_ratio"] < 0.95
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_closed_surface_dipole_directivity_matches_hertzian_reference(dipole_closed_surface_validation):
     assert abs(dipole_closed_surface_validation["D_max"] - 1.5) < 0.08
     assert abs(dipole_closed_surface_validation["D_max_theta_deg"] - 90.0) < 1.0
     assert dipole_closed_surface_validation["line_rel"] < 0.05
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_closed_surface_tfsf_rayleigh_rcs_matches_analytic_bistatic_pattern(tfsf_rayleigh_rcs_validation):
     assert tfsf_rayleigh_rcs_validation["rel_l2"] < 0.1
     assert tfsf_rayleigh_rcs_validation["phi0_rel"] < 0.1
@@ -575,7 +575,7 @@ def test_closed_surface_tfsf_rayleigh_rcs_matches_analytic_bistatic_pattern(tfsf
     assert 0.9 < tfsf_rayleigh_rcs_validation["sigma_max_ratio"] < 1.15
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_nonrect_closed_surface_dipole_directivity_matches_hertzian_reference(
     dipole_nonrect_closed_surface_validation,
 ):

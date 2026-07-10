@@ -10,7 +10,7 @@ Usage (from maxwell/, witwin2 env, with the extension built):
 `save` records forward solve outputs (final fields + DFT monitor data) for
 shortened benchmark scenarios plus adjoint gradients for a differentiable
 scene. `check` re-runs the same workloads and asserts the outputs match the
-stored snapshot within tight float32 tolerances. This is the Slang-independent
+stored snapshot within tight float32 tolerances. This is the backend-independent
 guardrail for every optimization commit.
 """
 from __future__ import annotations
@@ -136,8 +136,7 @@ def collect() -> dict[str, torch.Tensor]:
     for name in ("dipole_vacuum", "planewave_vacuum"):
         for key, value in forward_outputs(name).items():
             out[f"{name}/{key}"] = value
-    for backend_name in ("python", "slang"):
-        out.update(adjoint_outputs(backend_name))
+    out.update(adjoint_outputs("python"))
     return out
 
 

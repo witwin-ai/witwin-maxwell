@@ -65,8 +65,8 @@ def test_auxiliary_grid_pulse_propagates_forward_causally():
     assert max(far_samples[: near_peak_step]) < max(far_samples) * 0.35
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
-def test_auxiliary_grid_cuda_slang_step_matches_cpu_reference():
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_auxiliary_grid_cuda_step_matches_cpu_reference():
     kwargs = dict(
         s_min=0.0,
         s_max=4.0,

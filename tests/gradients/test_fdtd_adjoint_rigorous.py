@@ -24,7 +24,7 @@ import witwin.maxwell as mw
 # ---------------------------------------------------------------------------
 
 _CUDA = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="needs CUDA for slang FDTD"
+    not torch.cuda.is_available(), reason="needs CUDA for FDTD"
 )
 
 _FD_DELTA = 1.0e-2

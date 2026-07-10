@@ -33,10 +33,14 @@ _MAX_AXIS_CELLS = 10_000_000
 def _axis_tolerance(lo: float, hi: float) -> float:
     """Face-snapping tolerance for one axis.
 
-    Scaled by ``max(span, |lo|, |hi|)`` so it stays valid for domains offset far
-    from the origin, where the float32 ULP grows with coordinate magnitude.
+    The relative term covers domains near the origin; the float32-ULP term
+    covers domains offset far from the origin, where the absolute face rounding
+    grows with coordinate magnitude. The ULP term is a few ULP (not scaled by
+    the span/offset ratio) so a large offset never swallows real structure
+    faces inside a much smaller domain span.
     """
-    return _FACE_SNAP_REL * max(hi - lo, abs(lo), abs(hi))
+    ulp = float(np.spacing(np.float32(max(abs(lo), abs(hi)))))
+    return max(_FACE_SNAP_REL * (hi - lo), 4.0 * ulp)
 
 
 def _collect_boundaries(lo: float, hi: float, faces) -> np.ndarray:
@@ -150,12 +154,16 @@ def mesh_axis(
     index_regions=(),
     override_regions=(),
     layer_min_cells=None,
+    pml_cells=(0, 0),
 ) -> np.ndarray:
     """Mesh one axis of the domain ``[lo, hi]`` into float64 node coordinates.
 
     ``index_regions`` are ``(lo, hi, refractive_index)`` structure extents and
     ``override_regions`` are ``(lo, hi, max_dl)`` mesh-override extents; the
-    faces of both snap to cell boundaries.
+    faces of both snap to cell boundaries. ``pml_cells`` gives the CPML
+    thickness in cells at the low / high domain edge; those bands are
+    uniformized piecewise between hard faces (see
+    ``_uniformize_boundary_band``).
     """
     lo, hi = float(lo), float(hi)
     if hi <= lo:
@@ -180,7 +188,8 @@ def mesh_axis(
             f"on one axis (limit {_MAX_AXIS_CELLS:.0e}); check the wavelength, "
             "min_steps_per_wavelength, and override dl units."
         )
-    return _fill_axis(boundaries, targets, float(max_ratio))
+    nodes = _fill_axis(boundaries, targets, float(max_ratio))
+    return _uniformize_boundary_band(nodes, boundaries, *pml_cells)
 
 
 def _geometry_aabb(geometry):
@@ -216,7 +225,13 @@ def _meshing_wavelength(scene) -> float:
         return float(scene.grid.wavelength)
     frequencies = []
     for source in scene.resolved_sources():
-        frequency = getattr(getattr(source, "source_time", None), "frequency", None)
+        source_time = getattr(source, "source_time", None)
+        # Broadband waveforms (GaussianPulse, RickerWavelet) carry significant
+        # spectral content above their center frequency; mesh for the same
+        # characteristic frequency that auto_dt() uses.
+        frequency = getattr(source_time, "characteristic_frequency", None)
+        if frequency is None:
+            frequency = getattr(source_time, "frequency", None)
         if frequency is not None:
             frequencies.append(float(frequency))
     if not frequencies:
@@ -228,29 +243,37 @@ def _meshing_wavelength(scene) -> float:
     return _C0 / max(frequencies)
 
 
-def _uniformize_boundary_band(nodes: np.ndarray, n_low: int, n_high: int) -> np.ndarray:
-    """Force the outermost ``n_low`` / ``n_high`` cells to be uniform.
+def _uniformize_boundary_band(
+    nodes: np.ndarray, boundaries: np.ndarray, n_low: int, n_high: int
+) -> np.ndarray:
+    """Uniformize the outermost ``n_low`` / ``n_high`` cells piecewise.
 
     The CPML absorber occupies the outermost ``pml_thickness`` cells of the
     domain and grades by physical depth, so a uniform absorber band gives the
-    cleanest absorption. This re-spaces only the cells inside each band: the
-    domain edges and the first interior node past each band stay fixed, so the
-    interior mesh (and its target / ratio invariants) is untouched. It is a
-    no-op where the band is already uniform (the common vacuum-edge case) and
-    only reshapes cells when a nearby structure let a graded ramp intrude into
-    the absorber. Bands are skipped (rather than overlapped) on domains too thin
-    to hold both plus an interior cell.
+    cleanest absorption. Each band is re-spaced piecewise: hard interval
+    boundaries (structure / override faces) inside the band stay fixed, and the
+    nodes of each sub-segment between them are spread uniformly. Face snapping
+    is therefore preserved, and so are the per-interval targets: every replaced
+    cell already satisfied its interval target, so the sub-segment mean does
+    too. The domain edges and the first interior node past each band stay
+    fixed, so the interior mesh is untouched. It is a no-op where the band is
+    already uniform (the common vacuum-edge case). Bands are skipped (rather
+    than overlapped) on domains too thin to hold both plus an interior cell.
     """
     cells = nodes.size - 1
     n_low = max(0, int(n_low))
     n_high = max(0, int(n_high))
-    if n_low + n_high >= cells:
+    if n_low + n_high == 0 or n_low + n_high >= cells:
         return nodes
     out = nodes.copy()
-    if n_low > 0:
-        out[: n_low + 1] = np.linspace(out[0], out[n_low], n_low + 1)
-    if n_high > 0:
-        out[-(n_high + 1) :] = np.linspace(out[-(n_high + 1)], out[-1], n_high + 1)
+    # Interval boundaries are exact node values by construction (_fill_axis
+    # appends them verbatim), so exact-match lookup is safe.
+    positions = np.searchsorted(nodes, boundaries)
+    hard = {int(i) for i, b in zip(positions, boundaries) if nodes[i] == b}
+    for start, stop in ((0, n_low), (cells - n_high, cells)):
+        anchors = [start] + sorted(i for i in hard if start < i < stop) + [stop]
+        for a, b in zip(anchors, anchors[1:]):
+            out[a : b + 1] = np.linspace(out[a], out[b], b - a + 1)
     return out
 
 
@@ -259,7 +282,8 @@ def resolve_auto_grid(scene):
 
     Returns float64 ``(x_nodes, y_nodes, z_nodes)`` spanning the scene domain
     exactly, suitable for ``GridSpec.custom``. The outermost cells under each
-    PML face are uniformized so the absorber sees a clean, constant-step band.
+    PML face are uniformized between structure faces so the absorber sees a
+    clean, constant-step band without losing face snapping or refinement.
     """
     grid = scene.grid
     wavelength = _meshing_wavelength(scene)
@@ -303,11 +327,10 @@ def resolve_auto_grid(scene):
                 for lo, hi, dl in override_regions
             ],
             layer_min_cells=layer_min_cells,
-        )
-        axis_nodes = _uniformize_boundary_band(
-            axis_nodes,
-            scene.pml_thickness_for_face(axis, "low"),
-            scene.pml_thickness_for_face(axis, "high"),
+            pml_cells=(
+                scene.pml_thickness_for_face(axis, "low"),
+                scene.pml_thickness_for_face(axis, "high"),
+            ),
         )
         nodes.append(axis_nodes)
     return tuple(nodes)

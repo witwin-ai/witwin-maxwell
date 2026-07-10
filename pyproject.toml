@@ -12,20 +12,18 @@ license = "GPL-3.0-or-later"
 license-files = ["COPYING"]
 
 dependencies = [
-    "witwin>=0.0.1",
+    "witwin>=0.1,<0.2",
     "numpy>=1.24",
     "torch>=2.0",
     "scipy>=1.10",
 ]
 
 [project.optional-dependencies]
-slang = ["slangtorch"]
 direct = ["nvmath-python[cu12]", "nvidia-cudss-cu12"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["witwin"]
 artifacts = [
-    "witwin/maxwell/fdtd/**/*.slang",
     "witwin/maxwell/fdtd/cuda/**/*.cpp",
     "witwin/maxwell/fdtd/cuda/**/*.cu",
     "witwin/maxwell/fdtd/cuda/**/*.cuh",

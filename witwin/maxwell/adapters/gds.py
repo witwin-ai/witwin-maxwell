@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from witwin.core.geometry import PolySlab
+from ..geometry import PolySlab
 
 if TYPE_CHECKING:
     import gdstk

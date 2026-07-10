@@ -22,7 +22,7 @@ def _to_cpu_numpy(value):
     return np.asarray(value)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gaussian_pulse_reduces_time_step():
     scene_cw = _build_scene(
         mw.PointDipole(
@@ -47,7 +47,7 @@ def test_fdtd_gaussian_pulse_reduces_time_step():
     assert pulse_dt < cw_dt
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_multiple_point_sources_initialize_and_inject_independently():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
@@ -85,7 +85,7 @@ def test_fdtd_multiple_point_sources_initialize_and_inject_independently():
     assert torch.count_nonzero(solver.Ez).item() > 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_ideal_point_dipole_collapses_to_single_yee_sample():
     gaussian_scene = _build_scene(
         mw.PointDipole(
@@ -117,7 +117,7 @@ def test_fdtd_ideal_point_dipole_collapses_to_single_yee_sample():
     assert torch.count_nonzero(ideal_patch).item() <= torch.count_nonzero(gaussian_patch).item()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_multi_frequency_dft_accumulates_all_frequencies_in_batched_tensors():
     scene = _build_scene(
         mw.PointDipole(
@@ -146,7 +146,7 @@ def test_fdtd_multi_frequency_dft_accumulates_all_frequencies_in_batched_tensors
         assert measured_imag == pytest.approx(expected_imag, rel=1e-5, abs=1e-5)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_plane_wave_produces_uniform_cross_section():
     scene = _build_scene(
         mw.PlaneWave(
@@ -176,7 +176,7 @@ def test_fdtd_plane_wave_produces_uniform_cross_section():
     assert float(crop.std() / max(crop.mean(), 1e-12)) < 0.2
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_soft_plane_wave_uses_single_plane_eh_surface_injection():
     scene = _build_scene(
         mw.PlaneWave(
@@ -197,7 +197,7 @@ def test_fdtd_soft_plane_wave_uses_single_plane_eh_surface_injection():
     assert {term["field_name"] for term in solver._electric_source_terms} == {"Ez"}
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_soft_plane_wave_flux_scales_with_amplitude_squared():
     def run_flux(amplitude):
         scene = _build_scene(
@@ -228,7 +228,7 @@ def test_fdtd_soft_plane_wave_flux_scales_with_amplitude_squared():
     assert flux_2 / flux_1 == pytest.approx(4.0, rel=0.15)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gaussian_beam_focuses_energy_near_axis():
     scene = _build_scene(
         mw.GaussianBeam(

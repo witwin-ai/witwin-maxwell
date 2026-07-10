@@ -32,7 +32,7 @@ def test_cuda_backend_selects_python_adjoint_reference_by_default(monkeypatch):
     assert resolve_fdtd_adjoint_backend_name() == "python"
 
 
-def test_cuda_standard_reverse_step_matches_python_reference_without_slang(monkeypatch):
+def test_cuda_standard_reverse_step_matches_python_reference(monkeypatch):
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
     torch.manual_seed(101)
     solver = _move_solver_tensors_to_cuda(_fake_standard_reverse_solver())
@@ -76,7 +76,7 @@ def test_cuda_standard_reverse_step_matches_python_reference_without_slang(monke
     torch.testing.assert_close(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1.0e-5, atol=1.0e-6)
 
 
-def test_cuda_cpml_reverse_step_matches_python_reference_without_slang(monkeypatch):
+def test_cuda_cpml_reverse_step_matches_python_reference(monkeypatch):
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
     torch.manual_seed(103)
     solver = _move_solver_tensors_to_cuda(_fake_cpml_reverse_solver())

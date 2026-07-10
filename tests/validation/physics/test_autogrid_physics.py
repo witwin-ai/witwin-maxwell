@@ -119,8 +119,12 @@ def _coefficients(slab, vacuum):
 def _auto_and_uniform_coefficients():
     # AutoGrid slab scene; the vacuum normalization run reuses the resolved
     # nodes through GridSpec.custom so both runs share the exact same mesh.
+    # The wavelength is pinned to the measured 2 GHz so the comparison against
+    # the 2 GHz-sized uniform reference isolates the graded mesh (the pulse's
+    # characteristic frequency of 3.5 GHz would otherwise set a finer target).
     auto_slab_scene = _build_scene(
-        mw.GridSpec.auto(min_steps_per_wavelength=_MSW), with_slab=True
+        mw.GridSpec.auto(min_steps_per_wavelength=_MSW, wavelength=_WAVELENGTH),
+        with_slab=True,
     )
     prepared = prepare_scene(auto_slab_scene)
     same_mesh = mw.GridSpec.custom(

@@ -172,7 +172,7 @@ def _plane_reference(full_result, scene, component, *, axis, position):
     return _interpolate_axis(field, normal_coords, position, axis_index)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_pulsed_sources_start_spectral_accumulation_immediately():
     pulsed_scene = _build_pulse_scene(
         source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=100.0)
@@ -202,7 +202,7 @@ def test_fdtd_pulsed_sources_start_spectral_accumulation_immediately():
     assert cw_solver._resolve_spectral_window_type("hanning") == "hanning"
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_selective_observers_and_precomputed_coefficients():
     scene = _build_scene(
         bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64)),
@@ -254,7 +254,7 @@ def test_fdtd_selective_observers_and_precomputed_coefficients():
     assert torch.max(torch.abs(observers["midplane_ez"]["data"])).item() > 0.0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_observers_match_full_field_dft_slices():
     scene = _build_scene(
         bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64)),
@@ -287,7 +287,7 @@ def test_fdtd_observers_match_full_field_dft_slices():
     np.testing.assert_allclose(_to_cpu_numpy(plane_observer["data"]), plane_reference, rtol=1e-2, atol=1e-3)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_plane_monitor_supports_multi_component_eh_and_postprocess_bridge():
     scene = _build_scene(
         bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64)),
@@ -352,7 +352,7 @@ def test_fdtd_plane_monitor_supports_multi_component_eh_and_postprocess_bridge()
     assert np.max(np.abs(_to_cpu_numpy(far_field["E"]))) > 0.0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_plane_monitor_aligns_normal_electric_component_to_in_plane_centers():
     scene = _build_scene(
         bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64)),
@@ -404,7 +404,7 @@ def test_fdtd_plane_monitor_aligns_normal_electric_component_to_in_plane_centers
     np.testing.assert_allclose(_to_cpu_numpy(monitor["Ez"]), ez_reference, rtol=1e-2, atol=1e-3)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_odd_grid_dimensions_cover_tail_cells():
     scene = _build_scene(
         bounds=((-0.455, 0.455), (-0.385, 0.385), (-0.315, 0.315)),
@@ -429,7 +429,7 @@ def test_fdtd_odd_grid_dimensions_cover_tail_cells():
     assert torch.max(torch.abs(result.tensor("Ez"))).item() > 0.0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_multi_frequency_full_field_matches_single_frequency_runs():
     frequencies = (0.9e9, 1.1e9)
     scene = _build_broadband_scene(
@@ -474,7 +474,7 @@ def test_fdtd_multi_frequency_full_field_matches_single_frequency_runs():
         )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_multi_frequency_flux_monitor_matches_single_frequency_runs():
     frequencies = (0.9e9, 1.1e9)
     position = 0.16

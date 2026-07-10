@@ -181,7 +181,7 @@ def test_result_mode_monitor_returns_modal_payload_and_raw_plane():
     assert raw_monitor["mode_spec"]["mode_index"] == 0
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_compute_mode_overlap_fdtd_monitor_direction_switch_swaps_forward_and_backward_amplitudes():
     result = mw.Simulation.fdtd(
         _fdtd_mode_overlap_scene(),
@@ -206,7 +206,7 @@ def test_compute_mode_overlap_fdtd_monitor_direction_switch_swaps_forward_and_ba
     assert plus_backward == pytest.approx(minus_forward, rel=1e-5, abs=1e-5)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for slang FDTD")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_mode_port_materializes_first_class_source_and_monitor_results():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),

@@ -9,6 +9,7 @@ from witwin.maxwell.result import Result
 
 
 def test_top_level_exports_are_available():
+    assert mw.Scene.__module__ == "witwin.maxwell.scene"
     assert mw.BoundaryKind is not None
     assert mw.ClosedSurfaceMonitor is not None
     assert mw.DebyePole is not None
@@ -48,6 +49,10 @@ def test_top_level_exports_are_available():
     assert not hasattr(mw, "DFT")
     assert not hasattr(mw, "Medium")
     assert not hasattr(mw, "RunTime")
+
+    import witwin.core as wc
+
+    assert not hasattr(wc, "SceneBase")
 
 
 def test_geometry_with_material_builds_core_structure():
@@ -365,7 +370,18 @@ def test_simulation_fdtd_wraps_solver(monkeypatch):
         def init_field(self):
             self.init_called = True
 
-        def solve(self, time_steps, dft_frequency, enable_plot, dft_window, full_field_dft, normalize_source=False, shutoff=0.0, shutoff_check_interval=100):
+        def solve(
+            self,
+            time_steps,
+            dft_frequency,
+            enable_plot,
+            dft_window,
+            full_field_dft,
+            normalize_source=False,
+            shutoff=0.0,
+            shutoff_check_interval=100,
+            use_cuda_graph=False,
+        ):
             self.ex = torch.ones((3, 4, 4), dtype=torch.complex64)
             self.ey = torch.ones((4, 3, 4), dtype=torch.complex64) * 2.0
             self.ez = torch.ones((4, 4, 3), dtype=torch.complex64) * 3.0
@@ -436,7 +452,18 @@ def test_simulation_fdtd_multi_frequency_wraps_solver(monkeypatch):
         def init_field(self):
             pass
 
-        def solve(self, time_steps, dft_frequency, enable_plot, dft_window, full_field_dft, normalize_source=False, shutoff=0.0, shutoff_check_interval=100):
+        def solve(
+            self,
+            time_steps,
+            dft_frequency,
+            enable_plot,
+            dft_window,
+            full_field_dft,
+            normalize_source=False,
+            shutoff=0.0,
+            shutoff_check_interval=100,
+            use_cuda_graph=False,
+        ):
             self.ex = torch.stack(
                 (
                     torch.ones((3, 4, 4), dtype=torch.complex64),
