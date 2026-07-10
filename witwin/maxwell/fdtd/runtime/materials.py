@@ -318,6 +318,21 @@ def average_node_to_magnetic_component(solver, node_tensor, component_name):
     raise ValueError(f"Unsupported magnetic field component {component_name!r}.")
 
 
+_ELECTRIC_COMPONENT_AXIS = {"Ex": "x", "Ey": "y", "Ez": "z"}
+
+
+def _electric_pole_components(entry):
+    """The E components a pole entry drives (sheet poles restrict to tangential axes)."""
+    axes = entry.get("axes")
+    if axes is None:
+        return ("Ex", "Ey", "Ez")
+    return tuple(
+        component_name
+        for component_name, axis in _ELECTRIC_COMPONENT_AXIS.items()
+        if axis in axes
+    )
+
+
 def build_dispersive_templates(solver, material_model):
     templates = {
         "Ex": {"inv_eps": (1.0 / solver.eps_Ex).contiguous(), "debye": [], "drude": [], "lorentz": []},
@@ -329,7 +344,7 @@ def build_dispersive_templates(solver, material_model):
         pole = entry["pole"]
         decay = (2.0 * pole.tau - solver.dt) / (2.0 * pole.tau + solver.dt)
         base_scale = 2.0 * solver.eps0 * pole.delta_eps * solver.dt / (2.0 * pole.tau + solver.dt)
-        for component_name in ("Ex", "Ey", "Ez"):
+        for component_name in _electric_pole_components(entry):
             weight = average_node_to_component(solver, entry["weight"], component_name)
             templates[component_name]["debye"].append(
                 {
@@ -345,7 +360,7 @@ def build_dispersive_templates(solver, material_model):
         denom = 2.0 + gamma * solver.dt
         decay = (2.0 - gamma * solver.dt) / denom
         base_scale = 2.0 * solver.eps0 * omega_p * omega_p * solver.dt / denom
-        for component_name in ("Ex", "Ey", "Ez"):
+        for component_name in _electric_pole_components(entry):
             weight = average_node_to_component(solver, entry["weight"], component_name)
             templates[component_name]["drude"].append(
                 {
@@ -362,7 +377,7 @@ def build_dispersive_templates(solver, material_model):
         decay = (2.0 - gamma * solver.dt) / denom
         restoring = 2.0 * omega_0 * omega_0 * solver.dt / denom
         base_scale = 2.0 * solver.eps0 * pole.delta_eps * omega_0 * omega_0 * solver.dt / denom
-        for component_name in ("Ex", "Ey", "Ez"):
+        for component_name in _electric_pole_components(entry):
             weight = average_node_to_component(solver, entry["weight"], component_name)
             templates[component_name]["lorentz"].append(
                 {

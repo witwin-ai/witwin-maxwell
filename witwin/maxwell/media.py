@@ -938,6 +938,91 @@ class Medium2D(Material):
         return self.sheet_conductivity(2.0 * np.pi * _coerce_frequency(frequency, name="frequency"))
 
 
+_ELEMENTARY_CHARGE = 1.602176634e-19  # [C]
+_REDUCED_PLANCK = 1.054571817e-34  # [J*s]
+_BOLTZMANN = 1.380649e-23  # [J/K]
+
+
+class Graphene(Medium2D):
+    """Graphene sheet with the Kubo intraband surface conductivity.
+
+    The intraband (Drude-like) term of the Kubo conductivity is
+
+    ``sigma_intra(omega) = A / (Gamma - i*omega)``  [S]
+
+    with the Drude weight (e^{-i*omega*t} convention)
+
+    ``A = (e^2 * kB * T / (pi * hbar^2)) * (mu_c/(kB*T) + 2*ln(1 + exp(-mu_c/(kB*T))))``
+
+    and the scattering rate ``Gamma = 1 / scattering_time``. ``chemical_potential``
+    is given in eV, ``temperature`` in K, and ``scattering_time`` (the intraband
+    relaxation time tau) in seconds. The DC sheet conductivity is
+    ``A * scattering_time``.
+
+    At runtime the sheet lowers to a surface-current ADE on the snapped Yee
+    layer: the relaxation ``dJ_s/dt + Gamma*J_s = A*E_t`` distributed over the
+    local dual-cell width ``dcell`` is exactly a Drude pole with
+    ``eps0*omega_p^2 = A/dcell``, so the existing native Drude current kernels
+    advance the sheet current with no new per-step work beyond one pole.
+
+    The interband term of the Kubo conductivity is not implemented; it does
+    not lower onto the real-coefficient pole machinery without a Pade/pole fit
+    and ``include_interband=True`` raises ``NotImplementedError`` explicitly.
+    Around and below the THz range the intraband term dominates for typical
+    ``|mu_c| >> hbar*omega`` operating points.
+    """
+
+    def __init__(
+        self,
+        *,
+        chemical_potential: float,
+        scattering_time: float,
+        temperature: float = 300.0,
+        include_interband: bool = False,
+        name: str | None = None,
+    ):
+        if include_interband:
+            raise NotImplementedError(
+                "Graphene interband conductivity is not implemented yet; only the Kubo "
+                "intraband (Drude-like) term is supported."
+            )
+        super().__init__(sigma_s=0.0, name=name)
+        object.__setattr__(
+            self,
+            "chemical_potential",
+            _coerce_nonnegative(chemical_potential, name="chemical_potential"),
+        )
+        object.__setattr__(
+            self, "scattering_time", _coerce_positive(scattering_time, name="scattering_time")
+        )
+        object.__setattr__(self, "temperature", _coerce_positive(temperature, name="temperature"))
+
+    @property
+    def intraband_drude_weight(self) -> float:
+        """The Kubo intraband Drude weight ``A`` [S/s]."""
+        thermal_energy = _BOLTZMANN * self.temperature
+        mu_over_kt = self.chemical_potential * _ELEMENTARY_CHARGE / thermal_energy
+        bracket = mu_over_kt + 2.0 * float(np.log1p(np.exp(-mu_over_kt)))
+        prefactor = (
+            _ELEMENTARY_CHARGE * _ELEMENTARY_CHARGE * thermal_energy
+            / (np.pi * _REDUCED_PLANCK * _REDUCED_PLANCK)
+        )
+        return float(prefactor * bracket)
+
+    @property
+    def scattering_rate(self) -> float:
+        """Intraband relaxation rate ``Gamma = 1/tau`` [1/s]."""
+        return 1.0 / self.scattering_time
+
+    @property
+    def characteristic_frequency(self) -> float:
+        """Material rate [Hz] folded into the FDTD auto-dt bound."""
+        return self.scattering_rate / (2.0 * np.pi)
+
+    def sheet_pole_terms(self) -> tuple[tuple[float, float], ...]:
+        return ((self.intraband_drude_weight, self.scattering_rate),)
+
+
 class PerturbationMedium(Material):
     """A base material whose permittivity is shifted by an external perturbation field.
 

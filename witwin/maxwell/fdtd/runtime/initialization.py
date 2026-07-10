@@ -51,6 +51,10 @@ def _material_characteristic_frequency(material) -> float:
             float(pole.resonance_frequency),
             float(pole.gamma),
         )
+    # Sheet media (e.g. Graphene) expose their relaxation rate directly.
+    characteristic = max(
+        characteristic, float(getattr(material, "characteristic_frequency", 0.0) or 0.0)
+    )
     return characteristic
 
 

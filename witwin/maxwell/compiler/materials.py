@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from witwin.core import Box
 from witwin.core.material import VACUUM_PERMITTIVITY
 
-from ..media import CustomPole, DiagonalTensor3, ModulationSpec, PerturbationMedium, Tensor3x3
+from ..media import CustomPole, DiagonalTensor3, DrudePole, ModulationSpec, PerturbationMedium, Tensor3x3
 
 _AXES = ("x", "y", "z")
 _OFFDIAG_AXES = ("xy", "xz", "yz")
@@ -854,9 +854,13 @@ def _apply_sheet_structures(scene, model):
     The static sheet conductivity ``sigma_s`` [S] lowers to the effective
     volumetric conductivity ``sigma_s / dual_spacing`` on the two tangential
     ``sigma_e_components`` of the snapped node plane (the normal component is
-    untouched). Sheet contributions are additive with bulk conductivity and
-    with other sheets, matching the physical superposition of surface
-    currents.
+    untouched). Dispersive surface-conductivity terms ``(weight, rate)`` from
+    ``Medium2D.sheet_pole_terms()`` (``sigma_s(omega) = weight/(rate - i*omega)``)
+    lower to equivalent volumetric Drude poles with
+    ``eps0 * omega_p^2 = weight / dual_spacing`` and ``gamma = rate``, restricted
+    to the tangential axes through the pole entry's ``"axes"`` key. Sheet
+    contributions are additive with bulk conductivity and with other sheets,
+    matching the physical superposition of surface currents.
     """
     sheets = _sheet_structures(scene)
     if not sheets:
@@ -874,6 +878,26 @@ def _apply_sheet_structures(scene, model):
                 contribution = torch.zeros_like(model["sigma_e_components"][axis])
                 contribution[node_slices] = sigma_s / dual_spacing
                 model["sigma_e_components"][axis] = model["sigma_e_components"][axis] + contribution
+        for weight, rate in getattr(material, "sheet_pole_terms", lambda: ())():
+            plasma_angular_frequency = float(
+                np.sqrt(float(weight) / (dual_spacing * VACUUM_PERMITTIVITY))
+            )
+            pole = DrudePole(
+                plasma_frequency=plasma_angular_frequency / (2.0 * np.pi),
+                gamma=float(rate) / (2.0 * np.pi),
+            )
+            weight_field = torch.zeros(
+                (scene.Nx, scene.Ny, scene.Nz), device=scene.device, dtype=torch.float32
+            )
+            weight_field[node_slices] = 1.0
+            model["drude_poles"].append(
+                {
+                    "pole": pole,
+                    "weight": weight_field,
+                    "amplitude": None,
+                    "axes": tangential_axes,
+                }
+            )
     return _refresh_model_summary_aliases(model)
 
 
@@ -1001,7 +1025,9 @@ def _evaluate_electric_components(model, frequency: float | None):
                 entry["pole"].susceptibility(angular_frequency),
                 device=entry["weight"].device,
             )
-            for axis in _AXES:
+            # Sheet-lowered poles act on the tangential axes only; volumetric
+            # poles carry no "axes" restriction and apply to all three.
+            for axis in entry.get("axes") or _AXES:
                 epsilon[axis] = epsilon[axis] + entry["weight"].to(dtype=torch.complex64) * susceptibility
 
     return epsilon
