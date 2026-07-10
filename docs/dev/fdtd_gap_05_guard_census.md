@@ -57,7 +57,7 @@ guards regardless of wording.
 |---|---|---|
 | P5.0 baseline (this commit) | 87 | measured |
 | after P5.1 (adjoint) | **85 (measured)** | multi-source + `normalize_source` single-source raises deleted (bridge+core 13 → 11). Most P5.1 capability (σ_e, χ²/TPA, full-aniso ε, Bloch+dispersive, custom/uniform sources) was lifted by narrowing the message-branch conditions inside the single `_unsupported_adjoint_medium` raise and generalizing `_validate_supported_configuration`, so the AST raise-count dropped only 87 → 85 even though the differentiable forward surface grew substantially. The projected `≤ 76` assumed guard *deletion*; the realized route was branch-condition lifting. |
-| after P5.2 (combinations) | ≤ 62 | runtime/materials 10 → ≤ 3, media combination guards lifted |
+| after P5.2 (combinations) | **74 (measured)** | Projected `≤ 62`; realized `74`. As with P5.1, most P5.2 edges (nonlinear+dispersive, aniso+dispersive, aniso+σ_e, aniso+PML-overlap under CPML, modulated+dispersive/nonlinear, multi-frequency modulation, modulated-slab-CPML) were enabled by *narrowing branch conditions and composing coefficient paths*, not by deleting `raise` statements, so the AST count fell only 85 → 74. `runtime/materials.py` went 10 → 6 (not ≤ 3): the 6 that remain guard genuinely-unsupported combinations — nonlinear / full-aniso / modulated media under complex Bloch fields (need complex-field kernels), modulated + full-aniso (per-step 3×3 re-inversion), full-aniso + nonlinear cross-material defense, and full-aniso overlapping a split-field (non-CPML) PML. `media.py` retains 3 material-combination construction guards (nonlinear+aniso, modulated+aniso, modulated+σ_e) plus the dispersive-full-tensor and PerturbationMedium-full-tensor frequency-evaluation deferrals; all are physics-worded. Every remaining `media.py` / `runtime/materials.py` combination guard was reworded off "not implemented yet" / "in v1" in this phase. |
 | after P5.3 (grid) | ≤ 58 | subpixel/autogrid coherence |
 | after P5.4 (Bloch broadband) | ≤ 50 | temporal/stepping/tfsf Bloch guards |
 | after P5.5 (stubs) | ≤ 45 | SIBC/graphene/sigma_m/TFSF-slab |
@@ -80,3 +80,22 @@ once P5.5 lands.
  6  witwin/maxwell/fdtd/adjoint/bridge.py      1  simulation.py / fdfd/adjoint/bridge.py /
                                                   boundary/cpml.py / scattering_parameters.py
 ```
+
+## Per-cluster capability-guard counts (after P5.2 — measured, total 74)
+
+```
+13  witwin/maxwell/adapters/tidy3d.py          6  witwin/maxwell/fdtd/runtime/materials.py
+ 8  witwin/maxwell/media.py                    6  witwin/maxwell/fdtd/runtime/stepping.py
+ 7  witwin/maxwell/fdtd/excitation/modes.py    4  witwin/maxwell/fdfd/solver.py
+ 6  witwin/maxwell/compiler/materials.py       3  witwin/maxwell/fdtd/excitation/tfsf_state.py
+ 6  witwin/maxwell/fdtd/adjoint/bridge.py      2  witwin/maxwell/fdtd/excitation/injection.py
+ 6  witwin/maxwell/fdtd/adjoint/core.py        2  witwin/maxwell/fdtd/excitation/temporal.py
+                                               2  witwin/maxwell/postprocess/stratton_chu.py
+                                               1  simulation.py / fdfd/adjoint/bridge.py /
+                                                  scattering_parameters.py
+```
+
+P5.2 deltas from the baseline: `media.py` 14 → 8, `runtime/materials.py` 10 → 6,
+`compiler/materials.py` 7 → 6, `tidy3d.py` 13 → 13 (untouched; P5.6),
+`adjoint/*` 13 → 12. The material combination matrix that documents the true
+post-P5.2 composability is `tests/materials/combinations/test_combination_matrix.py`.

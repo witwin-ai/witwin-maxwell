@@ -19,15 +19,32 @@ def _any_component_nonzero(components: dict[str, torch.Tensor]) -> bool:
 
 def build_materials(solver, scene):
     material_model = scene.compile_materials()
+    # A Bloch-periodic run carries complex phase-shifted field state. The
+    # instantaneous |E|^2 nonlinearity, the additive off-diagonal anisotropic
+    # curl correction, and the per-step modulation factor are all implemented on
+    # the real-valued Yee update kernels, and their coefficients are undefined on
+    # a complex field (|E|^2 is not analytic, and the real additive/scaling
+    # corrections would break the Bloch phase). Each needs a complex-field kernel
+    # variant before it can compose with Bloch periodicity.
     if scene.boundary.uses_kind("bloch") and material_model_has_nonlinearity(material_model):
-        raise NotImplementedError("FDTD nonlinear media are not implemented for Bloch / complex-field runs.")
+        raise NotImplementedError(
+            "FDTD nonlinear media require the real-valued update kernels: a Bloch-periodic run carries "
+            "complex phase-shifted fields, for which the instantaneous |E|^2 Kerr/chi2/TPA coefficient is "
+            "not defined. Use a real-field boundary (PML/PEC/PMC/periodic) with the nonlinearity."
+        )
     if scene.boundary.uses_kind("bloch") and material_model_has_full_anisotropy(material_model):
         raise NotImplementedError(
-            "FDTD full (off-diagonal) anisotropic media are not implemented for Bloch / complex-field runs."
+            "FDTD full (off-diagonal) anisotropic media use a real additive curl(H) correction: a "
+            "Bloch-periodic run carries complex phase-shifted fields, and applying the real off-diagonal "
+            "correction to a complex field would break the Bloch phase relation. Use a real-field boundary "
+            "(PML/PEC/PMC/periodic) or an axis-aligned DiagonalTensor3."
         )
     if scene.boundary.uses_kind("bloch") and material_model_has_modulation(material_model):
         raise NotImplementedError(
-            "FDTD time-modulated media are not implemented for Bloch / complex-field runs."
+            "FDTD time-modulated media scale the real-valued update coefficients by a per-step modulation "
+            "factor: a Bloch-periodic run carries complex phase-shifted fields, and the real scaling does "
+            "not track the complex Bloch phase. Use a real-field boundary (PML/PEC/PMC/periodic) with the "
+            "modulation."
         )
 
     solver._compiled_material_model = material_model

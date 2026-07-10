@@ -572,14 +572,24 @@ class Material(CoreMaterial):
         object.__setattr__(self, "modulation", modulation)
 
         if self.orientation is not None:
-            raise NotImplementedError("Material.orientation is not supported yet; use axis-aligned DiagonalTensor3 media only.")
+            raise NotImplementedError(
+                "Material.orientation (a separate crystal-frame rotation matrix) is not consumed: the "
+                "tensor material path assembles per-edge Yee coefficients directly from the lab-frame "
+                "permittivity/permeability/conductivity tensor, so a standalone rotation would need the "
+                "tensor rotated into the lab frame before compilation. Pass the already-rotated tensor as "
+                "Tensor3x3 rows (or an axis-aligned DiagonalTensor3) instead of an orientation matrix."
+            )
         for tensor_name, tensor_value in (
             ("mu_tensor", self.mu_tensor),
             ("sigma_e_tensor", self.sigma_e_tensor),
         ):
             if isinstance(tensor_value, Tensor3x3):
+                side = "H-field" if tensor_name == "mu_tensor" else "conduction-current"
                 raise NotImplementedError(
-                    f"Material.{tensor_name} currently supports DiagonalTensor3 only; Tensor3x3 is not implemented yet."
+                    f"Material.{tensor_name} accepts a DiagonalTensor3 (axis-aligned) tensor only. A full "
+                    f"off-diagonal Tensor3x3 would require a coupled per-edge 3x3 inverse on the {side} "
+                    "update, which only the electric permittivity update forms; supply an axis-aligned "
+                    "DiagonalTensor3, or move the off-diagonal coupling to epsilon_tensor."
                 )
         if isinstance(self.epsilon_tensor, Tensor3x3):
             _validate_symmetric_positive_definite(self.epsilon_tensor, name="epsilon_tensor")
@@ -598,7 +608,14 @@ class Material(CoreMaterial):
         # frame, reproducing n_o(omega) and n_e(omega) for a rotated birefringent
         # dispersive crystal.
         if self.is_nonlinear and self.is_anisotropic:
-            raise NotImplementedError("A nonlinear Material cannot carry anisotropic tensors in v1.")
+            raise NotImplementedError(
+                "A nonlinear Material cannot carry an anisotropic permittivity tensor: the instantaneous "
+                "Kerr/chi2/TPA channel updates the permittivity as a per-component field-dependent scalar, "
+                "whereas an anisotropic tensor applies a coupled per-edge tensor inverse. Composing them "
+                "would need a per-step re-inversion of a field-amplitude-dependent 3x3 tensor, which the "
+                "scalar nonlinear coefficient update does not form. Use an isotropic (scalar) permittivity "
+                "with the nonlinearity, or drop the tensor."
+            )
 
         if self.modulation is not None:
             # A time-modulated Material may now carry dispersive poles (electric or
@@ -1207,7 +1224,10 @@ class PerturbationMedium(Material):
 
         if isinstance(self.epsilon_tensor, Tensor3x3):
             raise NotImplementedError(
-                "PerturbationMedium does not support a fully anisotropic (Tensor3x3) base material yet."
+                "PerturbationMedium applies its scalar sensitivity field as an isotropic delta_eps to a "
+                "scalar or axis-aligned (DiagonalTensor3) base permittivity; a full off-diagonal Tensor3x3 "
+                "base has no single principal-axis eps to perturb, so the perturbation direction in the "
+                "coupled tensor is ambiguous. Use a scalar or DiagonalTensor3 base permittivity."
             )
         base_eps = self.epsilon_tensor if self.epsilon_tensor is not None else self.eps_r
         eps_floor = min(base_eps.as_tuple()) if isinstance(base_eps, DiagonalTensor3) else float(base_eps)

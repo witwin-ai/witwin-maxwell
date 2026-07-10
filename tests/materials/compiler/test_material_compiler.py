@@ -507,7 +507,7 @@ def test_anisotropic_sigma_tensor_produces_component_specific_complex_permittivi
                 epsilon_tensor=mw.DiagonalTensor3(2.0, 2.5, 3.0),
                 kerr_chi3=1.0e-10,
             ),
-            "nonlinear Material cannot carry anisotropic tensors",
+            "nonlinear Material cannot carry an anisotropic permittivity tensor",
         ),
     ],
 )
