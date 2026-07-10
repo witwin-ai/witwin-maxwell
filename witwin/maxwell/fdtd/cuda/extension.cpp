@@ -200,10 +200,9 @@ void update_electric_ex_modulated_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     const torch::stable::Tensor& inv_dy,
     const torch::stable::Tensor& inv_dz,
     int64_t y_low_mode,
@@ -218,10 +217,9 @@ void update_electric_ey_modulated_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     const torch::stable::Tensor& inv_dx,
     const torch::stable::Tensor& inv_dz,
     int64_t x_low_mode,
@@ -236,10 +234,9 @@ void update_electric_ez_modulated_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     const torch::stable::Tensor& inv_dx,
     const torch::stable::Tensor& inv_dy,
     int64_t x_low_mode,
@@ -254,10 +251,9 @@ void update_electric_ex_cpml_modulated_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     torch::stable::Tensor psi_y,
     torch::stable::Tensor psi_z,
     const torch::stable::Tensor& inv_kappa_y,
@@ -280,10 +276,9 @@ void update_electric_ey_cpml_modulated_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     torch::stable::Tensor psi_x,
     torch::stable::Tensor psi_z,
     const torch::stable::Tensor& inv_kappa_x,
@@ -306,10 +301,9 @@ void update_electric_ez_cpml_modulated_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     torch::stable::Tensor psi_x,
     torch::stable::Tensor psi_y,
     const torch::stable::Tensor& inv_kappa_x,
@@ -332,10 +326,9 @@ void update_electric_ex_cpml_modulated_compressed_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     torch::stable::Tensor psi_y,
     torch::stable::Tensor psi_z,
     const torch::stable::Tensor& inv_kappa_y,
@@ -364,10 +357,9 @@ void update_electric_ey_cpml_modulated_compressed_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     torch::stable::Tensor psi_x,
     torch::stable::Tensor psi_z,
     const torch::stable::Tensor& inv_kappa_x,
@@ -396,10 +388,9 @@ void update_electric_ez_cpml_modulated_compressed_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     torch::stable::Tensor psi_x,
     torch::stable::Tensor psi_y,
     const torch::stable::Tensor& inv_kappa_x,
@@ -678,8 +669,8 @@ void apply_polarization_current_modulated_cuda(
     const torch::stable::Tensor& inv_permittivity,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_next,
     double dt);
 void update_kerr_ex_curl_cuda(
     torch::stable::Tensor dynamic_curl,
@@ -1560,12 +1551,12 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("update_electric_ex_standard(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode) -> ()");
   m.def("update_electric_ey_standard(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode) -> ()");
   m.def("update_electric_ez_standard(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode) -> ()");
-  m.def("update_electric_ex_modulated(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, float cos_prev, float sin_prev, float cos_next, float sin_next, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode) -> ()");
-  m.def("update_electric_ey_modulated(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, float cos_prev, float sin_prev, float cos_next, float sin_next, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode) -> ()");
-  m.def("update_electric_ez_modulated(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, float cos_prev, float sin_prev, float cos_next, float sin_next, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode) -> ()");
-  m.def("update_electric_ex_cpml_modulated(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, float cos_prev, float sin_prev, float cos_next, float sin_next, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode) -> ()");
-  m.def("update_electric_ey_cpml_modulated(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, float cos_prev, float sin_prev, float cos_next, float sin_next, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode) -> ()");
-  m.def("update_electric_ez_cpml_modulated(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, float cos_prev, float sin_prev, float cos_next, float sin_next, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode) -> ()");
+  m.def("update_electric_ex_modulated(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, float t_prev, float t_next, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode) -> ()");
+  m.def("update_electric_ey_modulated(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, float t_prev, float t_next, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode) -> ()");
+  m.def("update_electric_ez_modulated(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, float t_prev, float t_next, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode) -> ()");
+  m.def("update_electric_ex_cpml_modulated(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, float t_prev, float t_next, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode) -> ()");
+  m.def("update_electric_ey_cpml_modulated(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, float t_prev, float t_next, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode) -> ()");
+  m.def("update_electric_ez_cpml_modulated(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, float t_prev, float t_next, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode) -> ()");
   m.def("update_electric_ex_bloch(Tensor(a!) ex_real, Tensor(b!) ex_imag, Tensor hy_real, Tensor hy_imag, Tensor hz_real, Tensor hz_imag, Tensor decay, Tensor curl, float phase_cos_y, float phase_sin_y, float phase_cos_z, float phase_sin_z, Tensor inv_dy, Tensor inv_dz) -> ()");
   m.def("update_electric_ey_bloch(Tensor(a!) ey_real, Tensor(b!) ey_imag, Tensor hx_real, Tensor hx_imag, Tensor hz_real, Tensor hz_imag, Tensor decay, Tensor curl, float phase_cos_x, float phase_sin_x, float phase_cos_z, float phase_sin_z, Tensor inv_dx, Tensor inv_dz) -> ()");
   m.def("update_electric_ez_bloch(Tensor(a!) ez_real, Tensor(b!) ez_imag, Tensor hx_real, Tensor hx_imag, Tensor hy_real, Tensor hy_imag, Tensor decay, Tensor curl, float phase_cos_x, float phase_sin_x, float phase_cos_y, float phase_sin_y, Tensor inv_dx, Tensor inv_dy) -> ()");
@@ -1575,9 +1566,9 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("update_electric_ex_cpml_compressed(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode, int y_low_length, int y_high_start, int y_high_length, int z_low_length, int z_high_start, int z_high_length, float? uniform_decay, float? uniform_curl) -> ()");
   m.def("update_electric_ey_cpml_compressed(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode, int x_low_length, int x_high_start, int x_high_length, int z_low_length, int z_high_start, int z_high_length, float? uniform_decay, float? uniform_curl) -> ()");
   m.def("update_electric_ez_cpml_compressed(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode, int x_low_length, int x_high_start, int x_high_length, int y_low_length, int y_high_start, int y_high_length, float? uniform_decay, float? uniform_curl) -> ()");
-  m.def("update_electric_ex_cpml_modulated_compressed(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, float cos_prev, float sin_prev, float cos_next, float sin_next, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode, int y_low_length, int y_high_start, int y_high_length, int z_low_length, int z_high_start, int z_high_length) -> ()");
-  m.def("update_electric_ey_cpml_modulated_compressed(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, float cos_prev, float sin_prev, float cos_next, float sin_next, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode, int x_low_length, int x_high_start, int x_high_length, int z_low_length, int z_high_start, int z_high_length) -> ()");
-  m.def("update_electric_ez_cpml_modulated_compressed(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, float cos_prev, float sin_prev, float cos_next, float sin_next, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode, int x_low_length, int x_high_start, int x_high_length, int y_low_length, int y_high_start, int y_high_length) -> ()");
+  m.def("update_electric_ex_cpml_modulated_compressed(Tensor(a!) ex, Tensor hy, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, float t_prev, float t_next, Tensor(b!) psi_y, Tensor(c!) psi_z, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode, int y_low_length, int y_high_start, int y_high_length, int z_low_length, int z_high_start, int z_high_length) -> ()");
+  m.def("update_electric_ey_cpml_modulated_compressed(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, float t_prev, float t_next, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode, int x_low_length, int x_high_start, int x_high_length, int z_low_length, int z_high_start, int z_high_length) -> ()");
+  m.def("update_electric_ez_cpml_modulated_compressed(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, float t_prev, float t_next, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode, int x_low_length, int x_high_start, int x_high_length, int y_low_length, int y_high_start, int y_high_length) -> ()");
   m.def("accumulate_dft_batched(Tensor ex, Tensor ey, Tensor ez, Tensor(a!) ex_real, Tensor(b!) ex_imag, Tensor(c!) ey_real, Tensor(d!) ey_imag, Tensor(e!) ez_real, Tensor(f!) ez_imag, Tensor weighted_cos, Tensor weighted_sin) -> ()");
   m.def("accumulate_point_observers(Tensor field, Tensor point_i, Tensor point_j, Tensor point_k, Tensor(a!) real_accum, Tensor(b!) imag_accum, float weighted_cos, float weighted_sin) -> ()");
   m.def("accumulate_plane_observer(Tensor field, Tensor(a!) real_accum, Tensor(b!) imag_accum, int axis, int plane_index, float weighted_cos, float weighted_sin) -> ()");
@@ -1586,7 +1577,7 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("update_drude_current(Tensor electric, Tensor(a!) current, Tensor drive, float decay) -> ()");
   m.def("update_lorentz_current(Tensor electric, Tensor(a!) polarization, Tensor(b!) current, Tensor drive, float decay, float restoring, float dt) -> ()");
   m.def("apply_polarization_current(Tensor(a!) electric, Tensor current, Tensor inv_permittivity, float dt) -> ()");
-  m.def("apply_polarization_current_modulated(Tensor(a!) electric, Tensor current, Tensor inv_permittivity, Tensor mod_cos, Tensor mod_sin, float cos_next, float sin_next, float dt) -> ()");
+  m.def("apply_polarization_current_modulated(Tensor(a!) electric, Tensor current, Tensor inv_permittivity, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, float t_next, float dt) -> ()");
   m.def("update_kerr_ex_curl(Tensor(a!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor ex_decay, Tensor chi3, float dt, float eps0) -> ()");
   m.def("update_kerr_ey_curl(Tensor(a!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor ey_decay, Tensor chi3, float dt, float eps0) -> ()");
   m.def("update_kerr_ez_curl(Tensor(a!) dynamic_curl, Tensor ex, Tensor ey, Tensor ez, Tensor linear_permittivity, Tensor ez_decay, Tensor chi3, float dt, float eps0) -> ()");

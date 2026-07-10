@@ -427,6 +427,18 @@ __device__ __forceinline__ float modulation_factor(
   return 1.0f + mod_cos * phase_cos - mod_sin * phase_sin;
 }
 
+// Per-cell modulation phase. The scene may hold several distinct modulation
+// frequencies; each Yee edge carries its OWN angular frequency ``omega`` (0 where
+// unmodulated), so the phase cos/sin of the previous and new E time instants are
+// evaluated per cell here rather than passed as scene-wide host scalars. This is
+// what lets disjoint structures modulate at independent frequencies in one run.
+__device__ __forceinline__ void modulation_phase_from_omega(
+    float omega, float t_prev, float t_next,
+    float& cos_prev, float& sin_prev, float& cos_next, float& sin_next) {
+  sincosf(omega * t_prev, &sin_prev, &cos_prev);
+  sincosf(omega * t_next, &sin_next, &cos_next);
+}
+
 __global__ void update_electric_ex_modulated_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -437,10 +449,9 @@ __global__ void update_electric_ex_modulated_kernel(
     const float* __restrict__ curl_coeff,
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
-    float cos_prev,
-    float sin_prev,
-    float cos_next,
-    float sin_next,
+    const float* __restrict__ mod_omega,
+    float t_prev,
+    float t_next,
     const float* __restrict__ inv_dy,
     const float* __restrict__ inv_dz,
     int y_low_mode,
@@ -467,6 +478,8 @@ __global__ void update_electric_ex_modulated_kernel(
   const float d_z = backward_diff_axis2(hy, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
   const float mc = mod_cos[linear];
   const float ms = mod_sin[linear];
+  float cos_prev, sin_prev, cos_next, sin_next;
+  modulation_phase_from_omega(mod_omega[linear], t_prev, t_next, cos_prev, sin_prev, cos_next, sin_next);
   const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
   const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
   ex[linear] = ex[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * (d_y - d_z);
@@ -482,10 +495,9 @@ __global__ void update_electric_ey_modulated_kernel(
     const float* __restrict__ curl_coeff,
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
-    float cos_prev,
-    float sin_prev,
-    float cos_next,
-    float sin_next,
+    const float* __restrict__ mod_omega,
+    float t_prev,
+    float t_next,
     const float* __restrict__ inv_dx,
     const float* __restrict__ inv_dz,
     int x_low_mode,
@@ -512,6 +524,8 @@ __global__ void update_electric_ey_modulated_kernel(
   const float d_x = backward_diff_axis0(hz, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
   const float mc = mod_cos[linear];
   const float ms = mod_sin[linear];
+  float cos_prev, sin_prev, cos_next, sin_next;
+  modulation_phase_from_omega(mod_omega[linear], t_prev, t_next, cos_prev, sin_prev, cos_next, sin_next);
   const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
   const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
   ey[linear] = ey[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * (d_z - d_x);
@@ -527,10 +541,9 @@ __global__ void update_electric_ez_modulated_kernel(
     const float* __restrict__ curl_coeff,
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
-    float cos_prev,
-    float sin_prev,
-    float cos_next,
-    float sin_next,
+    const float* __restrict__ mod_omega,
+    float t_prev,
+    float t_next,
     const float* __restrict__ inv_dx,
     const float* __restrict__ inv_dy,
     int x_low_mode,
@@ -557,6 +570,8 @@ __global__ void update_electric_ez_modulated_kernel(
   const float d_y = backward_diff_axis1(hx, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
   const float mc = mod_cos[linear];
   const float ms = mod_sin[linear];
+  float cos_prev, sin_prev, cos_next, sin_next;
+  modulation_phase_from_omega(mod_omega[linear], t_prev, t_next, cos_prev, sin_prev, cos_next, sin_next);
   const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
   const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
   ez[linear] = ez[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * (d_x - d_y);
@@ -938,10 +953,9 @@ __global__ void update_electric_ex_cpml_modulated_kernel(
     const float* __restrict__ curl_coeff,
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
-    float cos_prev,
-    float sin_prev,
-    float cos_next,
-    float sin_next,
+    const float* __restrict__ mod_omega,
+    float t_prev,
+    float t_next,
     const float* __restrict__ inv_kappa_y,
     const float* __restrict__ b_y,
     const float* __restrict__ c_y,
@@ -981,6 +995,8 @@ __global__ void update_electric_ex_cpml_modulated_kernel(
   const float curl = d_y * inv_kappa_y[j] + psi_y_value - d_z * inv_kappa_z[k] - psi_z_value;
   const float mc = mod_cos[linear];
   const float ms = mod_sin[linear];
+  float cos_prev, sin_prev, cos_next, sin_next;
+  modulation_phase_from_omega(mod_omega[linear], t_prev, t_next, cos_prev, sin_prev, cos_next, sin_next);
   const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
   const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
   ex[linear] = ex[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
@@ -996,10 +1012,9 @@ __global__ void update_electric_ey_cpml_modulated_kernel(
     const float* __restrict__ curl_coeff,
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
-    float cos_prev,
-    float sin_prev,
-    float cos_next,
-    float sin_next,
+    const float* __restrict__ mod_omega,
+    float t_prev,
+    float t_next,
     const float* __restrict__ inv_kappa_x,
     const float* __restrict__ b_x,
     const float* __restrict__ c_x,
@@ -1039,6 +1054,8 @@ __global__ void update_electric_ey_cpml_modulated_kernel(
   const float curl = d_z * inv_kappa_z[k] + psi_z_value - d_x * inv_kappa_x[i] - psi_x_value;
   const float mc = mod_cos[linear];
   const float ms = mod_sin[linear];
+  float cos_prev, sin_prev, cos_next, sin_next;
+  modulation_phase_from_omega(mod_omega[linear], t_prev, t_next, cos_prev, sin_prev, cos_next, sin_next);
   const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
   const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
   ey[linear] = ey[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
@@ -1054,10 +1071,9 @@ __global__ void update_electric_ez_cpml_modulated_kernel(
     const float* __restrict__ curl_coeff,
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
-    float cos_prev,
-    float sin_prev,
-    float cos_next,
-    float sin_next,
+    const float* __restrict__ mod_omega,
+    float t_prev,
+    float t_next,
     const float* __restrict__ inv_kappa_x,
     const float* __restrict__ b_x,
     const float* __restrict__ c_x,
@@ -1097,6 +1113,8 @@ __global__ void update_electric_ez_cpml_modulated_kernel(
   const float curl = d_x * inv_kappa_x[i] + psi_x_value - d_y * inv_kappa_y[j] - psi_y_value;
   const float mc = mod_cos[linear];
   const float ms = mod_sin[linear];
+  float cos_prev, sin_prev, cos_next, sin_next;
+  modulation_phase_from_omega(mod_omega[linear], t_prev, t_next, cos_prev, sin_prev, cos_next, sin_next);
   const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
   const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
   ez[linear] = ez[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
@@ -1323,10 +1341,9 @@ __global__ void update_electric_ex_cpml_modulated_compressed_kernel(
     const float* __restrict__ curl_coeff,
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
-    float cos_prev,
-    float sin_prev,
-    float cos_next,
-    float sin_next,
+    const float* __restrict__ mod_omega,
+    float t_prev,
+    float t_next,
     const float* __restrict__ inv_kappa_y,
     const float* __restrict__ b_y,
     const float* __restrict__ c_y,
@@ -1373,6 +1390,8 @@ __global__ void update_electric_ex_cpml_modulated_compressed_kernel(
   const float curl = d_y * inv_kappa_y[j] + psi_y_value - d_z * inv_kappa_z[k] - psi_z_value;
   const float mc = mod_cos[linear];
   const float ms = mod_sin[linear];
+  float cos_prev, sin_prev, cos_next, sin_next;
+  modulation_phase_from_omega(mod_omega[linear], t_prev, t_next, cos_prev, sin_prev, cos_next, sin_next);
   const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
   const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
   ex[linear] = ex[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
@@ -1388,10 +1407,9 @@ __global__ void update_electric_ey_cpml_modulated_compressed_kernel(
     const float* __restrict__ curl_coeff,
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
-    float cos_prev,
-    float sin_prev,
-    float cos_next,
-    float sin_next,
+    const float* __restrict__ mod_omega,
+    float t_prev,
+    float t_next,
     const float* __restrict__ inv_kappa_x,
     const float* __restrict__ b_x,
     const float* __restrict__ c_x,
@@ -1438,6 +1456,8 @@ __global__ void update_electric_ey_cpml_modulated_compressed_kernel(
   const float curl = d_z * inv_kappa_z[k] + psi_z_value - d_x * inv_kappa_x[i] - psi_x_value;
   const float mc = mod_cos[linear];
   const float ms = mod_sin[linear];
+  float cos_prev, sin_prev, cos_next, sin_next;
+  modulation_phase_from_omega(mod_omega[linear], t_prev, t_next, cos_prev, sin_prev, cos_next, sin_next);
   const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
   const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
   ey[linear] = ey[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
@@ -1453,10 +1473,9 @@ __global__ void update_electric_ez_cpml_modulated_compressed_kernel(
     const float* __restrict__ curl_coeff,
     const float* __restrict__ mod_cos,
     const float* __restrict__ mod_sin,
-    float cos_prev,
-    float sin_prev,
-    float cos_next,
-    float sin_next,
+    const float* __restrict__ mod_omega,
+    float t_prev,
+    float t_next,
     const float* __restrict__ inv_kappa_x,
     const float* __restrict__ b_x,
     const float* __restrict__ c_x,
@@ -1503,6 +1522,8 @@ __global__ void update_electric_ez_cpml_modulated_compressed_kernel(
   const float curl = d_x * inv_kappa_x[i] + psi_x_value - d_y * inv_kappa_y[j] - psi_y_value;
   const float mc = mod_cos[linear];
   const float ms = mod_sin[linear];
+  float cos_prev, sin_prev, cos_next, sin_next;
+  modulation_phase_from_omega(mod_omega[linear], t_prev, t_next, cos_prev, sin_prev, cos_next, sin_next);
   const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
   const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
   ez[linear] = ez[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
@@ -1539,15 +1560,20 @@ void check_electric_inputs(
 void check_modulation_fields(
     const torch::stable::Tensor& field,
     const torch::stable::Tensor& mod_cos,
-    const torch::stable::Tensor& mod_sin) {
+    const torch::stable::Tensor& mod_sin,
+    const torch::stable::Tensor& mod_omega) {
   check_float32_tensor(mod_cos, "mod_cos");
   check_float32_tensor(mod_sin, "mod_sin");
+  check_float32_tensor(mod_omega, "mod_omega");
   check_same_cuda_device(field, mod_cos, "mod_cos");
   check_same_cuda_device(field, mod_sin, "mod_sin");
+  check_same_cuda_device(field, mod_omega, "mod_omega");
   check_contiguous_tensor(mod_cos, "mod_cos");
   check_contiguous_tensor(mod_sin, "mod_sin");
+  check_contiguous_tensor(mod_omega, "mod_omega");
   STD_TORCH_CHECK(mod_cos.sizes().equals(field.sizes()), "mod_cos must match field shape");
   STD_TORCH_CHECK(mod_sin.sizes().equals(field.sizes()), "mod_sin must match field shape");
+  STD_TORCH_CHECK(mod_omega.sizes().equals(field.sizes()), "mod_omega must match field shape");
 }
 
 void check_rank3_shape(
@@ -2647,10 +2673,9 @@ void update_electric_ex_cpml_modulated_compressed_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     torch::stable::Tensor psi_y,
     torch::stable::Tensor psi_z,
     const torch::stable::Tensor& inv_kappa_y,
@@ -2674,7 +2699,7 @@ void update_electric_ex_cpml_modulated_compressed_cuda(
   check_electric_cpml_compressed_inputs(
       ex, hy, hz, decay, curl, psi_y, psi_z, inv_kappa_y, b_y, c_y, inv_kappa_z, b_z, c_z,
       1, 2, y_low_length, y_high_length, z_low_length, z_high_length, "ex");
-  check_modulation_fields(ex, mod_cos, mod_sin);
+  check_modulation_fields(ex, mod_cos, mod_sin, mod_omega);
   check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
   check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
   check_spacing_vector(ex, inv_dy, 1, "inv_dy");
@@ -2692,10 +2717,9 @@ void update_electric_ex_cpml_modulated_compressed_cuda(
       curl.mutable_data_ptr<float>(),
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
-      static_cast<float>(cos_prev),
-      static_cast<float>(sin_prev),
-      static_cast<float>(cos_next),
-      static_cast<float>(sin_next),
+      mod_omega.mutable_data_ptr<float>(),
+      static_cast<float>(t_prev),
+      static_cast<float>(t_next),
       inv_kappa_y.mutable_data_ptr<float>(),
       b_y.mutable_data_ptr<float>(),
       c_y.mutable_data_ptr<float>(),
@@ -2728,10 +2752,9 @@ void update_electric_ey_cpml_modulated_compressed_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     torch::stable::Tensor psi_x,
     torch::stable::Tensor psi_z,
     const torch::stable::Tensor& inv_kappa_x,
@@ -2755,7 +2778,7 @@ void update_electric_ey_cpml_modulated_compressed_cuda(
   check_electric_cpml_compressed_inputs(
       ey, hx, hz, decay, curl, psi_x, psi_z, inv_kappa_x, b_x, c_x, inv_kappa_z, b_z, c_z,
       0, 2, x_low_length, x_high_length, z_low_length, z_high_length, "ey");
-  check_modulation_fields(ey, mod_cos, mod_sin);
+  check_modulation_fields(ey, mod_cos, mod_sin, mod_omega);
   check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
   check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
   check_spacing_vector(ey, inv_dx, 0, "inv_dx");
@@ -2773,10 +2796,9 @@ void update_electric_ey_cpml_modulated_compressed_cuda(
       curl.mutable_data_ptr<float>(),
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
-      static_cast<float>(cos_prev),
-      static_cast<float>(sin_prev),
-      static_cast<float>(cos_next),
-      static_cast<float>(sin_next),
+      mod_omega.mutable_data_ptr<float>(),
+      static_cast<float>(t_prev),
+      static_cast<float>(t_next),
       inv_kappa_x.mutable_data_ptr<float>(),
       b_x.mutable_data_ptr<float>(),
       c_x.mutable_data_ptr<float>(),
@@ -2809,10 +2831,9 @@ void update_electric_ez_cpml_modulated_compressed_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     torch::stable::Tensor psi_x,
     torch::stable::Tensor psi_y,
     const torch::stable::Tensor& inv_kappa_x,
@@ -2836,7 +2857,7 @@ void update_electric_ez_cpml_modulated_compressed_cuda(
   check_electric_cpml_compressed_inputs(
       ez, hx, hy, decay, curl, psi_x, psi_y, inv_kappa_x, b_x, c_x, inv_kappa_y, b_y, c_y,
       0, 1, x_low_length, x_high_length, y_low_length, y_high_length, "ez");
-  check_modulation_fields(ez, mod_cos, mod_sin);
+  check_modulation_fields(ez, mod_cos, mod_sin, mod_omega);
   check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
   check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
   check_spacing_vector(ez, inv_dx, 0, "inv_dx");
@@ -2854,10 +2875,9 @@ void update_electric_ez_cpml_modulated_compressed_cuda(
       curl.mutable_data_ptr<float>(),
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
-      static_cast<float>(cos_prev),
-      static_cast<float>(sin_prev),
-      static_cast<float>(cos_next),
-      static_cast<float>(sin_next),
+      mod_omega.mutable_data_ptr<float>(),
+      static_cast<float>(t_prev),
+      static_cast<float>(t_next),
       inv_kappa_x.mutable_data_ptr<float>(),
       b_x.mutable_data_ptr<float>(),
       c_x.mutable_data_ptr<float>(),
@@ -3084,10 +3104,9 @@ void update_electric_ex_modulated_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     const torch::stable::Tensor& inv_dy,
     const torch::stable::Tensor& inv_dz,
     int64_t y_low_mode,
@@ -3095,7 +3114,7 @@ void update_electric_ex_modulated_cuda(
     int64_t z_low_mode,
     int64_t z_high_mode) {
   check_electric_inputs(ex, hy, hz, decay, curl, "ex");
-  check_modulation_fields(ex, mod_cos, mod_sin);
+  check_modulation_fields(ex, mod_cos, mod_sin, mod_omega);
   check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
   check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
   check_spacing_vector(ex, inv_dy, 1, "inv_dy");
@@ -3113,10 +3132,9 @@ void update_electric_ex_modulated_cuda(
       curl.mutable_data_ptr<float>(),
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
-      static_cast<float>(cos_prev),
-      static_cast<float>(sin_prev),
-      static_cast<float>(cos_next),
-      static_cast<float>(sin_next),
+      mod_omega.mutable_data_ptr<float>(),
+      static_cast<float>(t_prev),
+      static_cast<float>(t_next),
       inv_dy.mutable_data_ptr<float>(),
       inv_dz.mutable_data_ptr<float>(),
       static_cast<int>(y_low_mode),
@@ -3135,10 +3153,9 @@ void update_electric_ey_modulated_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     const torch::stable::Tensor& inv_dx,
     const torch::stable::Tensor& inv_dz,
     int64_t x_low_mode,
@@ -3146,7 +3163,7 @@ void update_electric_ey_modulated_cuda(
     int64_t z_low_mode,
     int64_t z_high_mode) {
   check_electric_inputs(ey, hx, hz, decay, curl, "ey");
-  check_modulation_fields(ey, mod_cos, mod_sin);
+  check_modulation_fields(ey, mod_cos, mod_sin, mod_omega);
   check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
   check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
   check_spacing_vector(ey, inv_dx, 0, "inv_dx");
@@ -3164,10 +3181,9 @@ void update_electric_ey_modulated_cuda(
       curl.mutable_data_ptr<float>(),
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
-      static_cast<float>(cos_prev),
-      static_cast<float>(sin_prev),
-      static_cast<float>(cos_next),
-      static_cast<float>(sin_next),
+      mod_omega.mutable_data_ptr<float>(),
+      static_cast<float>(t_prev),
+      static_cast<float>(t_next),
       inv_dx.mutable_data_ptr<float>(),
       inv_dz.mutable_data_ptr<float>(),
       static_cast<int>(x_low_mode),
@@ -3186,10 +3202,9 @@ void update_electric_ez_modulated_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     const torch::stable::Tensor& inv_dx,
     const torch::stable::Tensor& inv_dy,
     int64_t x_low_mode,
@@ -3197,7 +3212,7 @@ void update_electric_ez_modulated_cuda(
     int64_t y_low_mode,
     int64_t y_high_mode) {
   check_electric_inputs(ez, hx, hy, decay, curl, "ez");
-  check_modulation_fields(ez, mod_cos, mod_sin);
+  check_modulation_fields(ez, mod_cos, mod_sin, mod_omega);
   check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
   check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
   check_spacing_vector(ez, inv_dx, 0, "inv_dx");
@@ -3215,10 +3230,9 @@ void update_electric_ez_modulated_cuda(
       curl.mutable_data_ptr<float>(),
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
-      static_cast<float>(cos_prev),
-      static_cast<float>(sin_prev),
-      static_cast<float>(cos_next),
-      static_cast<float>(sin_next),
+      mod_omega.mutable_data_ptr<float>(),
+      static_cast<float>(t_prev),
+      static_cast<float>(t_next),
       inv_dx.mutable_data_ptr<float>(),
       inv_dy.mutable_data_ptr<float>(),
       static_cast<int>(x_low_mode),
@@ -3237,10 +3251,9 @@ void update_electric_ex_cpml_modulated_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     torch::stable::Tensor psi_y,
     torch::stable::Tensor psi_z,
     const torch::stable::Tensor& inv_kappa_y,
@@ -3257,7 +3270,7 @@ void update_electric_ex_cpml_modulated_cuda(
     int64_t z_high_mode) {
   check_electric_cpml_inputs(
       ex, hy, hz, decay, curl, psi_y, psi_z, inv_kappa_y, b_y, c_y, inv_kappa_z, b_z, c_z, 1, 2, "ex");
-  check_modulation_fields(ex, mod_cos, mod_sin);
+  check_modulation_fields(ex, mod_cos, mod_sin, mod_omega);
   check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
   check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
   check_spacing_vector(ex, inv_dy, 1, "inv_dy");
@@ -3275,10 +3288,9 @@ void update_electric_ex_cpml_modulated_cuda(
       curl.mutable_data_ptr<float>(),
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
-      static_cast<float>(cos_prev),
-      static_cast<float>(sin_prev),
-      static_cast<float>(cos_next),
-      static_cast<float>(sin_next),
+      mod_omega.mutable_data_ptr<float>(),
+      static_cast<float>(t_prev),
+      static_cast<float>(t_next),
       inv_kappa_y.mutable_data_ptr<float>(),
       b_y.mutable_data_ptr<float>(),
       c_y.mutable_data_ptr<float>(),
@@ -3305,10 +3317,9 @@ void update_electric_ey_cpml_modulated_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     torch::stable::Tensor psi_x,
     torch::stable::Tensor psi_z,
     const torch::stable::Tensor& inv_kappa_x,
@@ -3325,7 +3336,7 @@ void update_electric_ey_cpml_modulated_cuda(
     int64_t z_high_mode) {
   check_electric_cpml_inputs(
       ey, hx, hz, decay, curl, psi_x, psi_z, inv_kappa_x, b_x, c_x, inv_kappa_z, b_z, c_z, 0, 2, "ey");
-  check_modulation_fields(ey, mod_cos, mod_sin);
+  check_modulation_fields(ey, mod_cos, mod_sin, mod_omega);
   check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
   check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
   check_spacing_vector(ey, inv_dx, 0, "inv_dx");
@@ -3343,10 +3354,9 @@ void update_electric_ey_cpml_modulated_cuda(
       curl.mutable_data_ptr<float>(),
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
-      static_cast<float>(cos_prev),
-      static_cast<float>(sin_prev),
-      static_cast<float>(cos_next),
-      static_cast<float>(sin_next),
+      mod_omega.mutable_data_ptr<float>(),
+      static_cast<float>(t_prev),
+      static_cast<float>(t_next),
       inv_kappa_x.mutable_data_ptr<float>(),
       b_x.mutable_data_ptr<float>(),
       c_x.mutable_data_ptr<float>(),
@@ -3373,10 +3383,9 @@ void update_electric_ez_cpml_modulated_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& mod_cos,
     const torch::stable::Tensor& mod_sin,
-    double cos_prev,
-    double sin_prev,
-    double cos_next,
-    double sin_next,
+    const torch::stable::Tensor& mod_omega,
+    double t_prev,
+    double t_next,
     torch::stable::Tensor psi_x,
     torch::stable::Tensor psi_y,
     const torch::stable::Tensor& inv_kappa_x,
@@ -3393,7 +3402,7 @@ void update_electric_ez_cpml_modulated_cuda(
     int64_t y_high_mode) {
   check_electric_cpml_inputs(
       ez, hx, hy, decay, curl, psi_x, psi_y, inv_kappa_x, b_x, c_x, inv_kappa_y, b_y, c_y, 0, 1, "ez");
-  check_modulation_fields(ez, mod_cos, mod_sin);
+  check_modulation_fields(ez, mod_cos, mod_sin, mod_omega);
   check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
   check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
   check_spacing_vector(ez, inv_dx, 0, "inv_dx");
@@ -3411,10 +3420,9 @@ void update_electric_ez_cpml_modulated_cuda(
       curl.mutable_data_ptr<float>(),
       mod_cos.mutable_data_ptr<float>(),
       mod_sin.mutable_data_ptr<float>(),
-      static_cast<float>(cos_prev),
-      static_cast<float>(sin_prev),
-      static_cast<float>(cos_next),
-      static_cast<float>(sin_next),
+      mod_omega.mutable_data_ptr<float>(),
+      static_cast<float>(t_prev),
+      static_cast<float>(t_next),
       inv_kappa_x.mutable_data_ptr<float>(),
       b_x.mutable_data_ptr<float>(),
       c_x.mutable_data_ptr<float>(),

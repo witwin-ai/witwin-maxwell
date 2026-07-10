@@ -122,13 +122,18 @@ def test_scene_compile_rasterizes_modulation_quadrature_fields():
         mw.ModulationSpec(frequency=frequency, amplitude=amplitude, phase=phase)
     )
 
-    assert model["modulation_frequency"] == frequency
     center = (scene.Nx // 2, scene.Ny // 2, scene.Nz // 2)
+    # The single scene-wide frequency scalar is gone: each modulated cell now carries
+    # its own angular frequency in the per-node modulation_omega field.
+    assert float(model["modulation_omega"][center]) == pytest.approx(
+        2.0 * np.pi * frequency, rel=1e-5
+    )
     assert float(model["modulation_cos"][center]) == pytest.approx(amplitude * np.cos(phase), rel=1e-5)
     assert float(model["modulation_sin"][center]) == pytest.approx(amplitude * np.sin(phase), rel=1e-5)
-    # Far outside the structure the modulation fields vanish.
+    # Far outside the structure the modulation fields (and the frequency label) vanish.
     assert float(model["modulation_cos"][1, 1, 1]) == pytest.approx(0.0, abs=1e-6)
     assert float(model["modulation_sin"][1, 1, 1]) == pytest.approx(0.0, abs=1e-6)
+    assert float(model["modulation_omega"][1, 1, 1]) == pytest.approx(0.0, abs=1e-6)
 
 
 def test_scene_compile_without_modulation_has_no_frequency():
@@ -144,19 +149,29 @@ def test_scene_compile_without_modulation_has_no_frequency():
         ],
     )
     model = prepare_scene(scene).compile_materials()
-    assert model["modulation_frequency"] is None
     assert not torch.any(model["modulation_cos"] != 0)
     assert not torch.any(model["modulation_sin"] != 0)
+    assert not torch.any(model["modulation_omega"] != 0)
 
 
-def test_scene_compile_rejects_mixed_modulation_frequencies():
-    with pytest.raises(NotImplementedError, match="single modulation frequency"):
-        _compile_scene_with_modulation(
-            mw.ModulationSpec(frequency=2.0e8, amplitude=0.2),
-            second_material=mw.Material(
-                eps_r=2.0, modulation=mw.ModulationSpec(frequency=3.0e8, amplitude=0.2)
-            ),
-        )
+def test_scene_compile_rasterizes_two_modulation_frequencies():
+    # The single-modulation-frequency-per-scene cap is lifted: two disjoint slabs
+    # driven at different frequencies now compile, each stamping its own angular
+    # frequency onto the cells it covers.
+    freq_a = 2.0e8
+    freq_b = 3.0e8
+    _, model = _compile_scene_with_modulation(
+        mw.ModulationSpec(frequency=freq_a, amplitude=0.2),
+        second_material=mw.Material(
+            eps_r=2.0, modulation=mw.ModulationSpec(frequency=freq_b, amplitude=0.2)
+        ),
+    )
+    omega = model["modulation_omega"]
+    present = torch.unique(omega[omega != 0]).detach().cpu().numpy()
+    present = np.sort(present)
+    assert present.size == 2
+    assert present[0] == pytest.approx(2.0 * np.pi * freq_a, rel=1e-5)
+    assert present[1] == pytest.approx(2.0 * np.pi * freq_b, rel=1e-5)
 
 
 # ---------------------------------------------------------------------------
@@ -203,9 +218,13 @@ def test_fdtd_modulated_scene_prepare_enables_modulation_runtime():
     ).prepare().solver
 
     assert solver.modulation_enabled
-    assert solver.modulation_angular_frequency == pytest.approx(2.0 * np.pi * 2.5e8)
+    # Per-cell frequency: the modulated slab's Yee edges carry omega = 2*pi*f_mod,
+    # while the unmodulated background stays at 0.
+    assert float(solver.mod_omega_Ez.max()) == pytest.approx(2.0 * np.pi * 2.5e8)
+    assert float(solver.mod_omega_Ez.min()) == pytest.approx(0.0)
     assert solver.mod_cos_Ez.shape == solver.eps_Ez.shape
     assert solver.mod_sin_Ez.shape == solver.eps_Ez.shape
+    assert solver.mod_omega_Ez.shape == solver.eps_Ez.shape
     # Modulation no longer forces the dense CPML layout: both dense and compressed
     # (slab) psi layouts now have modulated kernel variants. For this small scene
     # the dense psi footprint is far below the auto memory limit, so "auto" still

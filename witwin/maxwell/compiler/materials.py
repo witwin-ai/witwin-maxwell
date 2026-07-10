@@ -183,7 +183,11 @@ def _new_material_model(scene, layout, *, eps_fill, mu_fill):
         # structures, unlike the raw phase itself.
         "modulation_cos": torch.zeros(shape, device=device, dtype=torch.float32),
         "modulation_sin": torch.zeros(shape, device=device, dtype=torch.float32),
-        "modulation_frequency": None,
+        # Per-node modulation angular frequency (0 where unmodulated). A Scene may
+        # hold several distinct modulation frequencies at once; each modulated
+        # structure stamps its own frequency onto the cells it covers, so the
+        # single-frequency-per-scene restriction no longer applies.
+        "modulation_omega": torch.zeros(shape, device=device, dtype=torch.float32),
     }
     for key in (
         "debye_poles",
@@ -242,8 +246,6 @@ def material_model_has_nonlinearity(model) -> bool:
 
 def material_model_has_modulation(model) -> bool:
     """Whether the compiled model carries a space-time permittivity modulation."""
-    if model.get("modulation_frequency") is None:
-        return False
     return bool(
         torch.any(model["modulation_cos"] != 0).item()
         or torch.any(model["modulation_sin"] != 0).item()
@@ -437,22 +439,19 @@ def _build_dispersive_layout(scene):
     return layout
 
 
-def _scene_modulation_frequency(scene):
-    """The single scene-wide modulation frequency, or ``None`` when unmodulated."""
-    frequencies = set()
-    for structure in _bulk_structures(scene):
-        material = _structure_material(structure)
-        spec = None if material is None else getattr(material, "modulation", None)
-        if isinstance(spec, ModulationSpec):
-            frequencies.add(float(spec.frequency))
-    if not frequencies:
-        return None
-    if len(frequencies) > 1:
-        raise NotImplementedError(
-            "The Maxwell material compiler currently supports a single modulation frequency per "
-            f"Scene; got {sorted(frequencies)}."
-        )
-    return frequencies.pop()
+def _assign_modulation_omega(tensor, occupancy, *, value):
+    """Stamp a modulated structure's angular frequency onto the cells it covers.
+
+    Frequency is a per-cell *label*, not an amplitude: wherever a modulated
+    structure has any presence the cell modulates at that structure's angular
+    frequency, and a later modulated structure wins on overlap (mirroring the
+    quadrature ``_blend_material`` displacement). Partial-occupancy boundary cells
+    keep the full material frequency; the modulation *depth* fades separately
+    through the occupancy-weighted quadrature blend. Several distinct frequencies
+    therefore coexist in one Scene without any single-frequency restriction.
+    """
+    value_tensor = _scalar_tensor(value, device=tensor.device, dtype=tensor.dtype)
+    return torch.where(occupancy > 0, value_tensor, tensor)
 
 
 def _structure_modulation_values(scene, structure):
@@ -544,6 +543,11 @@ def _apply_structure_material(
     modulation_cos, modulation_sin = _structure_modulation_values(scene, structure)
     model["modulation_cos"] = _blend_material(model["modulation_cos"], occupancy, value=modulation_cos)
     model["modulation_sin"] = _blend_material(model["modulation_sin"], occupancy, value=modulation_sin)
+    modulation_spec = getattr(structure.material, "modulation", None)
+    if isinstance(modulation_spec, ModulationSpec):
+        model["modulation_omega"] = _assign_modulation_omega(
+            model["modulation_omega"], occupancy, value=modulation_spec.angular_frequency
+        )
     if isinstance(material, PerturbationMedium):
         delta = _box_parameter_field(
             scene,
@@ -928,7 +932,6 @@ def compile_material_model(
     _reject_unsupported_sibc_materials(scene)
     samples, averaging, pec_mode = _resolve_subpixel(subpixel)
     layout = _build_dispersive_layout(scene)
-    modulation_frequency = _scene_modulation_frequency(scene)
     if samples == (1, 1, 1):
         model = _compile_material_sample(
             scene,
@@ -941,7 +944,6 @@ def compile_material_model(
         model = _apply_sheet_structures(scene, model)
         model["pec_occupancy"] = _pec_occupancy(scene)
         model["pec_mode"] = pec_mode
-        model["modulation_frequency"] = modulation_frequency
         return model
 
     accum = _new_material_model(scene, layout, eps_fill=0.0, mu_fill=0.0)
@@ -966,6 +968,12 @@ def compile_material_model(
         accum["tpa_sigma"] += sample["tpa_sigma"]
         accum["modulation_cos"] += sample["modulation_cos"]
         accum["modulation_sin"] += sample["modulation_sin"]
+        # Frequency is a per-cell label, not an amplitude: take the max over
+        # sub-samples so a cell the structure touches in any sub-sample keeps the
+        # structure's angular frequency (arithmetic averaging would dilute it).
+        accum["modulation_omega"] = torch.maximum(
+            accum["modulation_omega"], sample["modulation_omega"]
+        )
         for slot_index, entry in enumerate(sample["debye_poles"]):
             accum["debye_poles"][slot_index]["weight"] += entry["weight"]
         for slot_index, entry in enumerate(sample["drude_poles"]):
@@ -1007,7 +1015,6 @@ def compile_material_model(
     model = _apply_sheet_structures(scene, model)
     model["pec_occupancy"] = _pec_occupancy(scene)
     model["pec_mode"] = pec_mode
-    model["modulation_frequency"] = modulation_frequency
     return model
 
 

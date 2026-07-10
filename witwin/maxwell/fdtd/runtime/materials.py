@@ -161,23 +161,33 @@ def build_modulation(solver, material_model):
     """
     solver.modulation_enabled = bool(material_model_has_modulation(material_model))
     if not solver.modulation_enabled:
-        solver.modulation_angular_frequency = None
         solver.mod_cos_Ex = None
         solver.mod_cos_Ey = None
         solver.mod_cos_Ez = None
         solver.mod_sin_Ex = None
         solver.mod_sin_Ey = None
         solver.mod_sin_Ez = None
+        solver.mod_omega_Ex = None
+        solver.mod_omega_Ey = None
+        solver.mod_omega_Ez = None
         return
-    solver.modulation_angular_frequency = 2.0 * np.pi * float(material_model["modulation_frequency"])
     modulation_cos = material_model["modulation_cos"]
     modulation_sin = material_model["modulation_sin"]
+    modulation_omega = material_model["modulation_omega"]
     solver.mod_cos_Ex = average_node_to_component(solver, modulation_cos, "Ex")
     solver.mod_cos_Ey = average_node_to_component(solver, modulation_cos, "Ey")
     solver.mod_cos_Ez = average_node_to_component(solver, modulation_cos, "Ez")
     solver.mod_sin_Ex = average_node_to_component(solver, modulation_sin, "Ex")
     solver.mod_sin_Ey = average_node_to_component(solver, modulation_sin, "Ey")
     solver.mod_sin_Ez = average_node_to_component(solver, modulation_sin, "Ez")
+    # Frequency is a per-cell label, not an amplitude: reduce it onto each Yee edge
+    # with a MAX over the averaging stencil so a modulated/unmodulated interface
+    # edge keeps the modulated cell's full angular frequency (its quadrature depth
+    # already fades through the arithmetic cos/sin blend), letting disjoint
+    # structures modulate at independent frequencies in one run.
+    solver.mod_omega_Ex = _max_node_to_electric_component(modulation_omega, "Ex")
+    solver.mod_omega_Ey = _max_node_to_electric_component(modulation_omega, "Ey")
+    solver.mod_omega_Ez = _max_node_to_electric_component(modulation_omega, "Ez")
 
 
 _ANISO_ROW_PAIRS = {
@@ -321,6 +331,20 @@ def average_node_to_component(solver, node_tensor, component_name):
         return (0.5 * (node_tensor[:, :-1, :] + node_tensor[:, 1:, :])).contiguous()
     if component_name == "Ez":
         return (0.5 * (node_tensor[:, :, :-1] + node_tensor[:, :, 1:])).contiguous()
+    raise ValueError(f"Unsupported electric field component {component_name!r}.")
+
+
+def _max_node_to_electric_component(node_tensor, component_name):
+    """Reduce a per-node field onto a Yee E edge with a MAX over the two-node
+    stencil that ``average_node_to_component`` averages. Used for the modulation
+    angular-frequency label, where the arithmetic mean would halve the frequency at
+    an interface edge; the max keeps the modulated cell's frequency there."""
+    if component_name == "Ex":
+        return torch.maximum(node_tensor[:-1, :, :], node_tensor[1:, :, :]).contiguous()
+    if component_name == "Ey":
+        return torch.maximum(node_tensor[:, :-1, :], node_tensor[:, 1:, :]).contiguous()
+    if component_name == "Ez":
+        return torch.maximum(node_tensor[:, :, :-1], node_tensor[:, :, 1:]).contiguous()
     raise ValueError(f"Unsupported electric field component {component_name!r}.")
 
 
@@ -699,9 +723,9 @@ def _dispersive_current_coefficient(solver, component_name, component_templates)
 
 
 _MODULATION_QUADRATURE_FIELDS = {
-    "Ex": ("mod_cos_Ex", "mod_sin_Ex"),
-    "Ey": ("mod_cos_Ey", "mod_sin_Ey"),
-    "Ez": ("mod_cos_Ez", "mod_sin_Ez"),
+    "Ex": ("mod_cos_Ex", "mod_sin_Ex", "mod_omega_Ex"),
+    "Ey": ("mod_cos_Ey", "mod_sin_Ey", "mod_omega_Ey"),
+    "Ez": ("mod_cos_Ez", "mod_sin_Ez", "mod_omega_Ez"),
 }
 
 
@@ -721,11 +745,11 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
     # purely dispersive cell (m_next == 1) this reduces to the plain subtraction.
     modulated = bool(getattr(solver, "modulation_enabled", False)) and not imag
     if modulated:
-        cos_name, sin_name = _MODULATION_QUADRATURE_FIELDS[component_name]
+        cos_name, sin_name, omega_name = _MODULATION_QUADRATURE_FIELDS[component_name]
         mod_cos = getattr(solver, cos_name)
         mod_sin = getattr(solver, sin_name)
-        cos_next = float(getattr(solver, "_modulation_next_cos", 1.0))
-        sin_next = float(getattr(solver, "_modulation_next_sin", 0.0))
+        mod_omega = getattr(solver, omega_name)
+        t_next = float(getattr(solver, "_modulation_t_next", 0.0))
 
     def _subtract(current):
         if modulated:
@@ -735,8 +759,8 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
                 InvPermittivity=inv_eps,
                 ModCos=mod_cos,
                 ModSin=mod_sin,
-                cosNext=cos_next,
-                sinNext=sin_next,
+                ModOmega=mod_omega,
+                tNext=t_next,
                 dt=apply_dt,
             ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
         else:
