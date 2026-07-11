@@ -406,11 +406,18 @@ def _execute_reference_backend(
     profiler,
     adjoint_reference,
     finish,
+    forward_magnetic_fields=None,
 ):
     """Run one of the analytic torch reference reverse backends.
 
     This is the exact per-variant dispatch the ``auto`` and ``torch_reference``
     modes share; ``TORCH_VJP`` is handled by the caller and never reaches here.
+
+    ``forward_magnetic_fields`` is the mid-step H the checkpoint replay already
+    reconstructed; when present it is handed to the standard / CPML backends so
+    they skip their own magnetic half-step recompute. The replay only supplies it
+    for the pure real configuration those backends serve (see
+    ``_replay_can_capture_mid_magnetic``), where it matches the recompute exactly.
     """
     if backend is _ReverseBackend.TFSF:
         return _with_profile_sections(
@@ -483,6 +490,7 @@ def _execute_reference_backend(
                     eps_ey=eps_ey,
                     eps_ez=eps_ez,
                     resolved_source_terms=resolved_source_terms,
+                    magnetic_fields=forward_magnetic_fields,
                 ),
             )
         )
@@ -499,6 +507,7 @@ def _execute_reference_backend(
                     eps_ey=eps_ey,
                     eps_ez=eps_ez,
                     resolved_source_terms=resolved_source_terms,
+                    magnetic_fields=forward_magnetic_fields,
                 ),
             )
         )
@@ -523,6 +532,7 @@ def reverse_step(
     tpa_ex=None,
     tpa_ey=None,
     tpa_ez=None,
+    forward_magnetic_fields=None,
     profiler=None,
 ):
     runtime = _runtime()
@@ -572,6 +582,7 @@ def reverse_step(
             profiler=profiler,
             adjoint_reference=_adjoint_reference,
             finish=finish,
+            forward_magnetic_fields=forward_magnetic_fields,
         )
 
     def run_torch_vjp():

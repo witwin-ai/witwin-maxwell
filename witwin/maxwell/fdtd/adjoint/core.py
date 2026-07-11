@@ -1726,7 +1726,20 @@ def _accumulate_bloch_backward_diff_adjoint(
     )
 
 
+# The face codes and grid shape are fixed for the whole reverse pass, so the
+# boolean boundary masks the per-step electric-adjoint update reads (six rebuilds
+# per reverse step) are config-level constants. Memoize them: the returned masks
+# are consumed read-only (|, &, ~, torch.where) at every call site, so a shared
+# cached tensor is safe, and the key (shape/axis/face-codes/device) recurs
+# identically across every step and every optimization iteration on a scene.
+_BOUNDARY_AXIS_MASK_CACHE: dict = {}
+
+
 def _boundary_axis_masks(shape, axis: int, low_mode: int, high_mode: int, device) -> tuple[torch.Tensor, torch.Tensor]:
+    key = (tuple(int(dim) for dim in shape), int(axis), int(low_mode), int(high_mode), str(device))
+    cached = _BOUNDARY_AXIS_MASK_CACHE.get(key)
+    if cached is not None:
+        return cached
     inactive = torch.zeros(shape, device=device, dtype=torch.bool)
     pec = torch.zeros(shape, device=device, dtype=torch.bool)
     low_face = [slice(None)] * len(shape)
@@ -1741,6 +1754,7 @@ def _boundary_axis_masks(shape, axis: int, low_mode: int, high_mode: int, device
         inactive[tuple(high_face)] = True
     elif high_mode == BOUNDARY_PEC:
         pec[tuple(high_face)] = True
+    _BOUNDARY_AXIS_MASK_CACHE[key] = (inactive, pec)
     return inactive, pec
 
 
@@ -2563,6 +2577,7 @@ def _step_state(
     tpa_ex=None,
     tpa_ey=None,
     tpa_ez=None,
+    capture_magnetic=None,
 ):
     if getattr(solver, "modulation_enabled", False):
         raise NotImplementedError("FDTD adjoint replay does not support time-modulated media.")
@@ -2743,6 +2758,21 @@ def _step_state(
             magnetic_dispersive_state,
         )
     dispersive_state = _advance_dispersive_state(solver, state)
+
+    if capture_magnetic is not None:
+        # Post-magnetic, post-source real H that the electric update consumes this
+        # step: the checkpoint replay hands it to the reverse reference backend so
+        # it does not recompute the magnetic half-step (see ``_forward_magnetic_fields``).
+        # The replay only requests capture for the pure real standard/CPML path
+        # (see ``_replay_can_capture_mid_magnetic``), where this equals the reverse
+        # recompute bit-for-bit; the tensors are never mutated after this point.
+        capture_magnetic.append(
+            {
+                "Hx": magnetic_fields["Hx"].detach(),
+                "Hy": magnetic_fields["Hy"].detach(),
+                "Hz": magnetic_fields["Hz"].detach(),
+            }
+        )
 
     if complex_fields:
         ex_curl = _dynamic_electric_curl(solver.cex_curl, solver.eps_Ex, eps_ex)
@@ -3154,8 +3184,48 @@ def _build_spectral_weight_schedule(entries, *, time_steps, window_type):
     return tuple(schedules)
 
 
-def _replay_segment_states(solver, checkpoint, start_step, end_step):
+def _replay_can_capture_mid_magnetic(solver) -> bool:
+    """Whether the replay may hand its mid-step H to the reverse reference backend.
+
+    True only for the pure real standard / CPML configuration whose magnetic
+    half-step is a plain ``_update_magnetic_component`` (no TFSF injection, no
+    magnetic ADE correction, no magnetic surface source, no complex split field,
+    no electric dispersion / nonlinear / conductive / full-anisotropic coupling).
+    In that regime the H captured on the way to the electric update equals the
+    reverse backend's ``_forward_magnetic_fields`` recompute bit-for-bit, and the
+    per-step magnetic update carries no dependence on the (leaf) permittivity, so
+    threading the captured tensor changes nothing numerically while removing one
+    torch magnetic half-step per reverse step.
+    """
+    if has_complex_fields(solver):
+        return False
+    if getattr(solver, "tfsf_enabled", False):
+        return False
+    if getattr(solver, "dispersive_enabled", False):
+        return False
+    if getattr(solver, "magnetic_dispersive_enabled", False):
+        return False
+    if getattr(solver, "nonlinear_enabled", False):
+        return False
+    if getattr(solver, "conductive_enabled", False):
+        return False
+    if getattr(solver, "full_aniso_enabled", False):
+        return False
+    if getattr(solver, "_magnetic_source_terms", ()):
+        return False
+    return True
+
+
+def _replay_segment_states(solver, checkpoint, start_step, end_step, *, mid_magnetic_out=None):
+    """Replay the forward field states of one checkpoint segment.
+
+    ``mid_magnetic_out``, when a list, collects the post-magnetic real H of each
+    replayed step (one entry per step, aligned with ``states[offset]``) so the
+    reverse pass can consume the mid-step H instead of recomputing it. It is only
+    populated for configurations ``_replay_can_capture_mid_magnetic`` accepts.
+    """
     validate_checkpoint_state(checkpoint)
+    capture = mid_magnetic_out is not None and _replay_can_capture_mid_magnetic(solver)
     with torch.no_grad():
         current = clone_checkpoint_tensors(checkpoint)
         states = [current]
@@ -3167,6 +3237,7 @@ def _replay_segment_states(solver, checkpoint, start_step, end_step):
                 eps_ex=solver.eps_Ex,
                 eps_ey=solver.eps_Ey,
                 eps_ez=solver.eps_Ez,
+                capture_magnetic=mid_magnetic_out if capture else None,
             )
             states.append({name: tensor.detach() for name, tensor in current.items()})
     return states

@@ -554,14 +554,22 @@ class _FDTDGradientBridge:
             solver._source_replay_term_cache = {}
             solver._mode_source_explicit_vjp_remaining = self._time_steps
 
+        # The checkpoint replay reconstructs the mid-step (post-magnetic) H on its
+        # way to each step's electric update; for the pure real standard / CPML
+        # path it is bit-identical to the reverse reference backend's own magnetic
+        # half-step recompute, so capture it once and hand it to the reverse step
+        # instead of recomputing it there.
+        capture_mid_magnetic = runtime._replay_can_capture_mid_magnetic(solver)
         try:
             for start_step, end_step in reversed(segment_bounds):
+                mid_magnetic = [] if capture_mid_magnetic else None
                 with profiler.section("segment_replay"):
                     states = runtime._replay_segment_states(
                         solver,
                         checkpoint_lookup[start_step],
                         start_step,
                         end_step,
+                        mid_magnetic_out=mid_magnetic,
                     )
                 for offset in range(end_step - start_step - 1, -1, -1):
                     step_index = start_step + offset
@@ -580,6 +588,7 @@ class _FDTDGradientBridge:
                         eps_ex=eps_ex,
                         eps_ey=eps_ey,
                         eps_ez=eps_ez,
+                        forward_magnetic_fields=(mid_magnetic[offset] if mid_magnetic else None),
                         chi3_ex=chi3_ex,
                         chi3_ey=chi3_ey,
                         chi3_ez=chi3_ez,

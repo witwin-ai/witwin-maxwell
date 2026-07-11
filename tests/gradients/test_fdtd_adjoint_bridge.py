@@ -2622,6 +2622,102 @@ def test_fdtd_gradient_bridge_checkpoint_replay_matches_forward_state():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_fdtd_replay_mid_magnetic_capture_matches_recompute():
+    """The mid-step H the checkpoint replay captures for the reverse reference
+    backend is bit-identical to the backend's own ``_forward_magnetic_fields``
+    recompute, so threading it changes nothing numerically."""
+    from witwin.maxwell.fdtd.adjoint.core import (
+        _forward_magnetic_fields,
+        _replay_can_capture_mid_magnetic,
+        _resolved_source_term_lists,
+    )
+
+    model = _DensityPointScene(init=0.0).cuda()
+    simulation = _build_simulation(model)
+    bridge = _FDTDGradientBridge(simulation)
+    bridge.forward(tuple(bridge.material_inputs))
+    solver = bridge._last_solver
+
+    assert _replay_can_capture_mid_magnetic(solver) is True
+
+    mid_magnetic = []
+    states = _replay_segment_states(
+        solver,
+        bridge._last_checkpoints[0],
+        0,
+        bridge._time_steps,
+        mid_magnetic_out=mid_magnetic,
+    )
+    assert len(mid_magnetic) == bridge._time_steps
+
+    resolved = _resolved_source_term_lists(solver, solver.eps_Ex, solver.eps_Ey, solver.eps_Ez)
+    for step_index in range(bridge._time_steps):
+        recompute = _forward_magnetic_fields(
+            solver,
+            states[step_index],
+            time_value=step_index * solver.dt,
+            resolved_source_terms=resolved,
+        )
+        for name in ("Hx", "Hy", "Hz"):
+            assert torch.equal(mid_magnetic[step_index][name], recompute[name])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+@pytest.mark.parametrize(
+    "model_factory",
+    [
+        lambda: _DensityTFSFScene(source_kind="plane_wave", init=0.0).cuda(),
+        lambda: _DensityBlochScene(init=0.0).cuda(),
+        lambda: _DensityDispersiveScene(medium_kind="debye", init=0.0).cuda(),
+    ],
+    ids=["tfsf", "bloch", "dispersive"],
+)
+def test_fdtd_replay_mid_magnetic_capture_guard_excludes_non_reference_paths(model_factory):
+    """The replay only offers its mid-step H to the pure real standard / CPML
+    reference backends; TFSF, complex Bloch, and dispersive configurations keep
+    the reverse recompute and never populate the capture list."""
+    from witwin.maxwell.fdtd.adjoint.core import _replay_can_capture_mid_magnetic
+
+    model = model_factory()
+    simulation = _build_simulation(model, time_steps=24)
+    bridge = _FDTDGradientBridge(simulation)
+    bridge.forward(tuple(bridge.material_inputs))
+    solver = bridge._last_solver
+
+    assert _replay_can_capture_mid_magnetic(solver) is False
+
+    mid_magnetic = []
+    _replay_segment_states(
+        solver,
+        bridge._last_checkpoints[0],
+        0,
+        bridge._time_steps,
+        mid_magnetic_out=mid_magnetic,
+    )
+    assert mid_magnetic == []
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_fdtd_replay_mid_magnetic_capture_leaves_gradient_bit_identical(monkeypatch):
+    """End-to-end proof that consuming the captured mid-step H produces exactly
+    the same material gradient as recomputing it inside the reverse backend."""
+    import witwin.maxwell.fdtd.adjoint.core as adjoint_core
+
+    model = _DensityPointScene(init=0.0).cuda()
+    _, _, loss = _loss_from_point_probe(model)
+    loss.backward()
+    grad_with_capture = model.logits.grad.detach().clone()
+
+    monkeypatch.setattr(adjoint_core, "_replay_can_capture_mid_magnetic", lambda solver: False)
+    model_recompute = _DensityPointScene(init=0.0).cuda()
+    _, _, loss_recompute = _loss_from_point_probe(model_recompute)
+    loss_recompute.backward()
+    grad_with_recompute = model_recompute.logits.grad.detach().clone()
+
+    assert torch.equal(grad_with_capture, grad_with_recompute)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_checkpoint_replay_matches_tfsf_forward_state():
     model = _DensityTFSFScene(source_kind="plane_wave", init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=48)
