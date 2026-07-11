@@ -906,6 +906,50 @@ def _mode_slice(tensor: torch.Tensor, *, axis: str, plane_index: int, tangential
     return tensor[u_lo : u_hi + 1, v_lo : v_hi + 1, plane_index]
 
 
+def _bend_conformal_factor(source, *, tangential_axes, tangential_bounds, coord_map):
+    """Heiblum-Harris conformal index factor over a bent-port mode plane.
+
+    Returns ``None`` for a straight port. A curved (bent) waveguide keeps its
+    cross-section plane axis-aligned but its guided mode is solved on the
+    equivalent straight guide produced by the conformal map: for a bend of signed
+    radius ``R`` about the cylinder axis ``bend_axis``, the transformed
+    permittivity is ``eps_eq(u, v) = eps(u, v) * (1 + r/R)**2`` where ``r`` is the
+    signed offset of each node from the port centre along the in-plane radial axis
+    (the tangential axis that is not the cylinder axis). ``R > 0`` grades the index
+    up on the ``+r`` side, shifting the mode outward and raising the effective
+    index, exactly as a physical bend does. The returned float64 tensor has shape
+    ``(nu, 1)`` or ``(1, nv)`` so it broadcasts against a mode-plane aperture slice.
+    """
+    bend_radius = source.get("bend_radius")
+    if bend_radius is None:
+        return None
+    bend_axis = str(source["bend_axis"])
+    axis_u, axis_v = tangential_axes
+    radial_is_u = axis_v == bend_axis
+    radial_axis = axis_u if radial_is_u else axis_v
+    (u_lo, u_hi), (v_lo, v_hi) = tangential_bounds
+    lo, hi = (u_lo, u_hi) if radial_is_u else (v_lo, v_hi)
+    coords_radial = coord_map[radial_axis][lo : hi + 1].to(dtype=torch.float64)
+    radial_center = float(source["position"][_AXIS_TO_INDEX[radial_axis]])
+    ratio = 1.0 + (coords_radial - radial_center) / float(bend_radius)
+    if float(torch.min(ratio).item()) <= 0.0:
+        raise ValueError(
+            "Bent mode-plane aperture spans the bend centre of curvature "
+            f"(1 + r/R <= 0 for bend_radius={float(bend_radius):g} about axis {bend_axis!r}); "
+            "the conformal transform is singular there. Increase |bend_radius| or shrink the aperture."
+        )
+    factor_1d = ratio * ratio
+    return factor_1d[:, None] if radial_is_u else factor_1d[None, :]
+
+
+def _apply_bend_factor(tensor: torch.Tensor, factor) -> torch.Tensor:
+    """Multiply a mode-plane eps slice by the conformal bend factor (identity if None)."""
+    if factor is None:
+        return tensor
+    real_dtype = torch.real(tensor).dtype if torch.is_complex(tensor) else tensor.dtype
+    return tensor * factor.to(device=tensor.device, dtype=real_dtype)
+
+
 def _regular_grid_sample(coords: torch.Tensor, values: torch.Tensor):
     if values.numel() < 2:
         raise ValueError("ModeSource profile sampling requires at least two grid points per axis.")
@@ -1050,6 +1094,14 @@ def _assemble_vector_mode_data(
         raise ValueError("ModeSource polarization must be tangential to the source plane.")
 
     (u_lo, u_hi), (v_lo, v_hi) = tangential_bounds
+    bend_factor = _bend_conformal_factor(
+        source,
+        tangential_axes=tangential_axes,
+        tangential_bounds=tangential_bounds,
+        coord_map=tangential_coord_map,
+    )
+    if bend_factor is not None:
+        eps_by_axis = {axis: _apply_bend_factor(component, bend_factor) for axis, component in eps_by_axis.items()}
     du = _local_uniform_plane_spacing(solver.scene, axis_u, u_lo, u_hi)
     dv = _local_uniform_plane_spacing(solver.scene, axis_v, v_lo, v_hi)
     k0 = 2.0 * math.pi * float(frequency) / float(solver.c)
@@ -1144,6 +1196,8 @@ def _assemble_vector_mode_data(
         "plane_index": int(plane_index),
         "box_lower": tuple(int(value) for value in lower),
         "box_upper": tuple(int(value) for value in upper),
+        "bend_radius": source.get("bend_radius"),
+        "bend_axis": source.get("bend_axis"),
     }
 
 
@@ -1235,6 +1289,13 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         plane_index=plane_index,
         tangential_bounds=tangential_bounds,
     )
+    bend_factor = _bend_conformal_factor(
+        source,
+        tangential_axes=tangential_axes,
+        tangential_bounds=tangential_bounds,
+        coord_map=tangential_coord_map,
+    )
+    eps_slice = _apply_bend_factor(eps_slice, bend_factor)
     if (
         getattr(solver, "_compiled_material_model", None) is not None
         and not getattr(solver, "_mode_source_rebuild_from_fields", False)
@@ -1436,6 +1497,8 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         "plane_index": int(plane_index),
         "box_lower": tuple(int(value) for value in lower),
         "box_upper": tuple(int(value) for value in upper),
+        "bend_radius": source.get("bend_radius"),
+        "bend_axis": source.get("bend_axis"),
     }
 
 

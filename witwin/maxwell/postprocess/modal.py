@@ -39,6 +39,8 @@ def _mode_source_from_mode_spec(mode_spec: dict[str, object], *, frequency: floa
         polarization=polarization,
         source_time=CW(frequency=float(frequency), amplitude=1.0),
         name=mode_spec.get("name"),
+        bend_radius=mode_spec.get("bend_radius"),
+        bend_axis=mode_spec.get("bend_axis"),
     )
 
 
