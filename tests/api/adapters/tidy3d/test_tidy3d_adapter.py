@@ -57,6 +57,8 @@ def _make_mock_tidy3d():
 
     class Medium(_Recorder): pass
     class PECMedium(_Recorder): pass
+    class AnisotropicMedium(_Recorder): pass
+    class FullyAnisotropicMedium(_Recorder): pass
     class Drude(_Recorder): pass
     class Lorentz(_Recorder): pass
     class Debye(_Recorder): pass
@@ -96,6 +98,8 @@ def _make_mock_tidy3d():
 
     td.Medium = Medium
     td.PECMedium = PECMedium
+    td.AnisotropicMedium = AnisotropicMedium
+    td.FullyAnisotropicMedium = FullyAnisotropicMedium
     td.Drude = Drude
     td.Lorentz = Lorentz
     td.Debye = Debye
@@ -485,6 +489,112 @@ class TestMediumConversion:
         sim = scene.to_tidy3d(frequencies=1e9)
         assert len(sim.structures) == 1
         assert isinstance(sim.structures[0].medium, td.PECMedium)
+
+    def test_diagonal_anisotropic_epsilon_exports_anisotropic_medium(self, inject_mock_tidy3d):
+        # Axis-aligned DiagonalTensor3 permittivity -> AnisotropicMedium of three
+        # per-axis isotropic Media whose permittivities are the tensor diagonal.
+        td = inject_mock_tidy3d
+        medium = mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0))
+        result = _convert_material(medium, td)
+        assert isinstance(result, td.AnisotropicMedium)
+        assert result.xx.permittivity == pytest.approx(2.0)
+        assert result.yy.permittivity == pytest.approx(3.0)
+        assert result.zz.permittivity == pytest.approx(4.0)
+
+    def test_diagonal_anisotropic_conductivity_is_scaled_per_axis(self, inject_mock_tidy3d):
+        # A DiagonalTensor3 electric conductivity exports as per-axis Medium.conductivity,
+        # each scaled by the metre->um length factor exactly as the isotropic sigma path.
+        td = inject_mock_tidy3d
+        length_scale = 1.0e6
+        medium = mw.Material(
+            epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0),
+            sigma_e_tensor=mw.DiagonalTensor3(0.5, 0.1, 0.0),
+        )
+        result = _convert_material(medium, td, length_scale)
+        assert result.xx.conductivity == pytest.approx(0.5 / length_scale)
+        assert result.yy.conductivity == pytest.approx(0.1 / length_scale)
+        # sigma == 0 axis carries no conductivity kwarg (plain non-lossy Medium).
+        assert not hasattr(result.zz, "conductivity")
+
+    def test_diagonal_anisotropic_dispersion_is_carried_per_axis(self, inject_mock_tidy3d):
+        # Electric dispersion enters each axis isotropically, so every component of a
+        # dispersive diagonal-anisotropic material is the same dispersive Tidy3D medium
+        # with a per-axis eps_inf background.
+        td = inject_mock_tidy3d
+        medium = mw.Material(
+            epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0),
+            lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=3e14, gamma=1e13),),
+        )
+        result = _convert_material(medium, td)
+        assert isinstance(result, td.AnisotropicMedium)
+        assert isinstance(result.xx, td.Lorentz)
+        assert result.xx.eps_inf == pytest.approx(2.0)
+        assert result.zz.eps_inf == pytest.approx(4.0)
+        # Same isotropic pole set on every axis.
+        assert result.xx.coeffs == result.zz.coeffs
+
+    def test_full_offdiagonal_tensor_exports_fully_anisotropic_medium(self, inject_mock_tidy3d):
+        # A full off-diagonal Tensor3x3 permittivity maps row-for-row onto a Tidy3D
+        # FullyAnisotropicMedium; a scalar sigma_e becomes the scaled diagonal
+        # conductivity tensor (sigma*I commutes with the permittivity).
+        td = inject_mock_tidy3d
+        length_scale = 1.0e6
+        rows = ((2.0, 0.3, 0.0), (0.3, 3.0, 0.0), (0.0, 0.0, 4.0))
+        medium = mw.Material(epsilon_tensor=mw.Tensor3x3(rows), sigma_e=0.5)
+        result = _convert_material(medium, td, length_scale)
+        assert isinstance(result, td.FullyAnisotropicMedium)
+        assert result.permittivity == [[2.0, 0.3, 0.0], [0.3, 3.0, 0.0], [0.0, 0.0, 4.0]]
+        assert result.conductivity[0][0] == pytest.approx(0.5 / length_scale)
+        assert result.conductivity[1][1] == pytest.approx(0.5 / length_scale)
+        assert result.conductivity[0][1] == 0.0
+
+    def test_magnetic_anisotropy_is_rejected(self, inject_mock_tidy3d):
+        # Tidy3D anisotropic media are electric-only (mu_r = 1); a mu_tensor has no
+        # counterpart, so it must raise rather than silently drop the magnetic tensor.
+        td = inject_mock_tidy3d
+        medium = mw.Material(mu_tensor=mw.DiagonalTensor3(1.1, 1.2, 1.3))
+        with pytest.raises(NotImplementedError, match="anisotropic magnetic medium"):
+            _convert_material(medium, td)
+
+    def test_dispersive_full_tensor_is_rejected(self, inject_mock_tidy3d):
+        # FullyAnisotropicMedium is strictly non-dispersive: a full off-diagonal tensor
+        # combined with poles has no Tidy3D equivalent and must raise, not drop the poles.
+        td = inject_mock_tidy3d
+        medium = mw.Material(
+            epsilon_tensor=mw.Tensor3x3(((2.0, 0.3, 0.0), (0.3, 3.0, 0.0), (0.0, 0.0, 4.0))),
+            lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=3e14, gamma=1e13),),
+        )
+        with pytest.raises(NotImplementedError, match="non-dispersive"):
+            _convert_material(medium, td)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the eps_diagonal convention check",
+    )
+    def test_diagonal_anisotropic_eps_matches_per_axis_physics_real_tidy3d(self):
+        # Physical-convention check: the exported AnisotropicMedium must reproduce the
+        # per-axis complex permittivity eps_axis + i*sigma_axis/(w*eps0). A wrong axis
+        # mapping or an unscaled conductivity (1e6x too lossy) fails this.
+        from witwin.core.material import VACUUM_PERMITTIVITY
+
+        freq = 2.0e14
+        omega = 2.0 * math.pi * freq
+        eps_diag = (2.0, 3.0, 4.0)
+        sigma_diag = (0.5, 0.1, 0.0)
+        with _real_tidy3d() as real_td:
+            material = mw.Material(
+                epsilon_tensor=mw.DiagonalTensor3(*eps_diag),
+                sigma_e_tensor=mw.DiagonalTensor3(*sigma_diag),
+            )
+            medium = _convert_material(material, real_td)  # default length_scale = 1e6
+            assert isinstance(medium, real_td.AnisotropicMedium)
+            eps_axes = medium.eps_diagonal(freq)
+            for axis in range(3):
+                eps = complex(eps_axes[axis])
+                assert eps.real == pytest.approx(eps_diag[axis])
+                assert eps.imag == pytest.approx(
+                    sigma_diag[axis] / (omega * VACUUM_PERMITTIVITY), rel=1e-6, abs=1e-9
+                )
 
     @pytest.mark.skipif(
         importlib.util.find_spec("tidy3d") is None,

@@ -204,6 +204,101 @@ def _dispersive_medium(material, td, nonlinear_spec=None):
     return td.PoleResidue(eps_inf=material.eps_r, poles=poles, **extra)
 
 
+def _axis_isotropic_material(material, axis_index: int):
+    """Project an axis-aligned anisotropic Material onto one principal axis.
+
+    Diagonal (``DiagonalTensor3``) anisotropy is three independent isotropic media,
+    one per lab-frame axis. Electric dispersion enters each axis isotropically
+    (``chi(omega) * I``), so the per-axis medium keeps the material's homogeneous
+    pole set and only its background permittivity/conductivity change per axis.
+    Returning a fresh isotropic ``Material`` lets ``_convert_material`` reuse the
+    full isotropic pole/conductivity conversion (and its e^{-iwt} sign and
+    length-scale conventions) for each Tidy3D ``AnisotropicMedium`` component.
+    """
+    from ..media import DiagonalTensor3, Material
+
+    eps_tensor = material.epsilon_tensor
+    if isinstance(eps_tensor, DiagonalTensor3):
+        eps_axis = eps_tensor.as_tuple()[axis_index]
+    else:
+        eps_axis = float(material.eps_r)
+
+    sigma_tensor = material.sigma_e_tensor
+    if isinstance(sigma_tensor, DiagonalTensor3):
+        sigma_axis = sigma_tensor.as_tuple()[axis_index]
+    else:
+        sigma_axis = float(material.sigma_e)
+
+    return Material(
+        eps_r=eps_axis,
+        sigma_e=sigma_axis,
+        debye_poles=material.debye_poles,
+        drude_poles=material.drude_poles,
+        lorentz_poles=material.lorentz_poles,
+    )
+
+
+def _fully_anisotropic_medium(material, td, length_scale: float):
+    """Convert a full off-diagonal ``Tensor3x3`` permittivity to a Tidy3D medium.
+
+    Tidy3D's ``FullyAnisotropicMedium`` carries a symmetric-positive-definite 3x3
+    permittivity tensor plus a conductivity tensor that must share its principal
+    axes; the maxwell tensor is validated SPD at construction, so it maps across
+    row-for-row. The conductivity is diagonal in the lab frame (scalar ``sigma_e``
+    or a ``DiagonalTensor3``) and scaled by the metre->Tidy3D length factor exactly
+    as the isotropic path, so ``eps'' = sigma/(w*eps0)`` matches physically. When the
+    diagonal conductivity does not share axes with an off-diagonal permittivity,
+    Tidy3D's own commutation validator rejects the medium.
+    """
+    if material.is_dispersive:
+        raise NotImplementedError(
+            "Tidy3D's FullyAnisotropicMedium is strictly non-dispersive, so a full "
+            "off-diagonal permittivity tensor combined with dispersive poles has no Tidy3D "
+            "equivalent; supply an axis-aligned DiagonalTensor3 (which exports as a per-axis "
+            "dispersive AnisotropicMedium) or drop the dispersion."
+        )
+    from ..media import DiagonalTensor3
+
+    rows = material.epsilon_tensor.rows
+    permittivity = [[float(rows[i][j]) for j in range(3)] for i in range(3)]
+
+    sigma_tensor = material.sigma_e_tensor
+    if isinstance(sigma_tensor, DiagonalTensor3):
+        sigma_diag = sigma_tensor.as_tuple()
+    else:
+        sigma = float(material.sigma_e)
+        sigma_diag = (sigma, sigma, sigma)
+    conductivity = [
+        [sigma_diag[i] / length_scale if i == j else 0.0 for j in range(3)]
+        for i in range(3)
+    ]
+    return td.FullyAnisotropicMedium(permittivity=permittivity, conductivity=conductivity)
+
+
+def _anisotropic_medium(material, td, length_scale: float):
+    """Convert an anisotropic Material to a Tidy3D anisotropic medium.
+
+    Axis-aligned ``DiagonalTensor3`` permittivity/conductivity exports as a
+    ``td.AnisotropicMedium`` of three per-axis isotropic media (dispersion allowed);
+    a full off-diagonal ``Tensor3x3`` exports as a non-dispersive
+    ``td.FullyAnisotropicMedium``. A magnetic ``mu_tensor`` has no Tidy3D counterpart.
+    """
+    if material.mu_tensor is not None:
+        raise NotImplementedError(
+            "Tidy3D has no anisotropic magnetic medium: its AnisotropicMedium and "
+            "FullyAnisotropicMedium describe the electric permittivity/conductivity tensor "
+            "with mu_r = 1, so a mu_tensor (anisotropic permeability) has no Tidy3D equivalent."
+        )
+    if material.has_full_epsilon_tensor:
+        return _fully_anisotropic_medium(material, td, length_scale)
+
+    components = [
+        _convert_material(_axis_isotropic_material(material, axis), td, length_scale)
+        for axis in range(3)
+    ]
+    return td.AnisotropicMedium(xx=components[0], yy=components[1], zz=components[2])
+
+
 def _nonlinear_spec(material, td, length_scale: float):
     """Build a Tidy3D ``NonlinearSpec`` for a Material's nonlinear channels, or None.
 
@@ -277,8 +372,6 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM):
         raise NotImplementedError("Tidy3D export for 2D sheet (Medium2D) materials is not implemented yet.")
     if getattr(material, "is_lossy_metal", False):
         raise NotImplementedError("Tidy3D export for LossyMetalMedium is not implemented yet.")
-    if material.is_anisotropic:
-        raise NotImplementedError("Tidy3D export for anisotropic Material is not implemented yet.")
     if getattr(material, "has_custom_poles", False):
         raise NotImplementedError(
             "Tidy3D export for spatially-varying custom dispersive poles is not implemented yet."
@@ -296,6 +389,9 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM):
             "Tidy3D export currently assumes mu_r = 1 and no static magnetic conductivity "
             "(sigma_m = 0); magnetically-lossy media have no Tidy3D equivalent and are not implemented yet."
         )
+
+    if material.is_anisotropic:
+        return _anisotropic_medium(material, td, length_scale)
 
     nonlinear_spec = _nonlinear_spec(material, td, length_scale)
     sigma_e = float(getattr(material, "sigma_e", 0.0))
