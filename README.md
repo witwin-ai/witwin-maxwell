@@ -1,6 +1,6 @@
 # WiTwin Maxwell — Differentiable Electromagnetic Solver
 
-[![PyPI](https://img.shields.io/pypi/v/witwin-maxwell)](https://pypi.org/project/witwin-maxwell/) [![Downloads](https://img.shields.io/pypi/dm/witwin-maxwell)](https://pypi.org/project/witwin-maxwell/) ![Code Size](https://img.shields.io/github/languages/code-size/Asixa/witwin-platform)[![License](https://img.shields.io/github/license/Asixa/witwin-platform)](COPYING)
+[![PyPI](https://img.shields.io/pypi/v/witwin-maxwell)](https://pypi.org/project/witwin-maxwell/) [![Downloads](https://img.shields.io/pypi/dm/witwin-maxwell)](https://pypi.org/project/witwin-maxwell/) ![Code Size](https://img.shields.io/github/languages/code-size/Asixa/witwin-platform) [![License](https://img.shields.io/badge/license-dual--licensed-blue)](https://witwin.ai/license)
 
 WiTwin Maxwell is a differentiable full-wave electromagnetic solver with a **PyTorch-native interface** and a native CUDA FDTD runtime at its core. The FDTD field-update loops run as hand-written GPU kernels shipped in prebuilt platform wheels, while the entire workflow — scene definition, simulation dispatch, result access, and automatic differentiation — stays inside standard PyTorch through `SceneModule`, `MaterialRegion`, and adjoint backward support.
 
@@ -156,7 +156,9 @@ Benchmark assets live under:
 
 ## License
 
-GPL-3.0-or-later. See `COPYING` for the full license text.
+Witwin Maxwell is available under a dual-license model for academic and
+non-commercial research use or commercial and enterprise use. See the
+[Witwin licensing page](https://witwin.ai/license) for the applicable terms.
 
 ## Developer
 
