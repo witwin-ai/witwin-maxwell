@@ -117,7 +117,7 @@ def test_fdtd_gradient_bridge_mode_source_matches_central_difference_and_uses_py
     bridge.forward(tuple(bridge.material_inputs))
     profile = bridge.backward_profile()
 
-    assert profile["reverse_backend_counts"].get("python_reference_cpml", 0) == bridge._time_steps
+    assert profile["reverse_backend_counts"].get(adjoint_baselines.expected_cpml_reverse_backend(), 0) == bridge._time_steps
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
@@ -179,7 +179,7 @@ def test_mode_source_reverse_step_matches_python_reference_for_checkpoint_replay
         resolved_source_terms=expected_resolved_source_terms,
     )
 
-    assert actual.backend == "python_reference_cpml"
+    assert actual.backend == adjoint_baselines.expected_cpml_reverse_backend()
     assert expected.backend == "python_reference_cpml"
     for name in forward_state:
         assert torch.allclose(

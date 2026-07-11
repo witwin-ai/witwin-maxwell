@@ -15,15 +15,6 @@ def _runtime():
 
 @dataclass
 class _CpmlReverseContext:
-    hx_mid: torch.Tensor
-    hy_mid: torch.Tensor
-    hz_mid: torch.Tensor
-    psi_hx_y_mid: torch.Tensor
-    psi_hx_z_mid: torch.Tensor
-    psi_hy_x_mid: torch.Tensor
-    psi_hy_z_mid: torch.Tensor
-    psi_hz_x_mid: torch.Tensor
-    psi_hz_y_mid: torch.Tensor
     pre_step_adjoint: dict[str, torch.Tensor]
     grad_eps_ex: torch.Tensor
     grad_eps_ey: torch.Tensor
@@ -87,6 +78,16 @@ def allocate_cpml_reverse_context(
     eps_ey,
     eps_ez,
 ) -> _CpmlReverseContext:
+    """Allocate the per-step reverse buffers the native CPML runner writes into.
+
+    The mid-step magnetic field the electric update consumed is reconstructed by
+    the shared Torch replay helper (``_forward_magnetic_fields``) at call sites,
+    matching the analytic Torch reference exactly, so this context only owns the
+    reverse-math outputs: the pre-step adjoint (electric/magnetic + psi), the eps
+    gradient accumulators, the mid-step magnetic-output adjoint the electric
+    reverse folds its curl(H) contribution into, the 12 curl-derivative adjoint
+    scratch buffers, and the eps-cast dynamic electric curls.
+    """
     pre_step_adjoint, grad_eps_ex, grad_eps_ey, grad_eps_ez = allocate_reverse_buffers(
         forward_state,
         eps_ex=eps_ex,
@@ -100,15 +101,6 @@ def allocate_cpml_reverse_context(
         eps_ez=eps_ez,
     )
     return _CpmlReverseContext(
-        hx_mid=forward_state["Hx"].detach().clone(),
-        hy_mid=forward_state["Hy"].detach().clone(),
-        hz_mid=forward_state["Hz"].detach().clone(),
-        psi_hx_y_mid=forward_state["psi_hx_y"].detach().clone(),
-        psi_hx_z_mid=forward_state["psi_hx_z"].detach().clone(),
-        psi_hy_x_mid=forward_state["psi_hy_x"].detach().clone(),
-        psi_hy_z_mid=forward_state["psi_hy_z"].detach().clone(),
-        psi_hz_x_mid=forward_state["psi_hz_x"].detach().clone(),
-        psi_hz_y_mid=forward_state["psi_hz_y"].detach().clone(),
         pre_step_adjoint=pre_step_adjoint,
         grad_eps_ex=grad_eps_ex,
         grad_eps_ey=grad_eps_ey,
@@ -133,85 +125,6 @@ def allocate_cpml_reverse_context(
         ex_curl=ex_curl,
         ey_curl=ey_curl,
         ez_curl=ez_curl,
-    )
-
-
-def replay_cpml_magnetic_step(
-    solver,
-    forward_state,
-    context: _CpmlReverseContext,
-    *,
-    forward_module,
-    block_size,
-    time_value,
-    resolved_source_terms,
-):
-    runtime = _runtime()
-    forward_module.updateMagneticFieldHx3D(
-        Hx=context.hx_mid,
-        Ey=forward_state["Ey"],
-        Ez=forward_state["Ez"],
-        HxDecay=solver.chx_decay,
-        HxCurl=solver.chx_curl,
-        PsiHxY=context.psi_hx_y_mid,
-        PsiHxZ=context.psi_hx_z_mid,
-        InvKappaHxY=solver.cpml_inv_kappa_h_y,
-        ByHxY=solver.cpml_b_h_y,
-        CyHxY=solver.cpml_c_h_y,
-        InvKappaHxZ=solver.cpml_inv_kappa_h_z,
-        ByHxZ=solver.cpml_b_h_z,
-        CyHxZ=solver.cpml_c_h_z,
-        invDy=solver.inv_dy_h,
-        invDz=solver.inv_dz_h,
-    ).launchRaw(
-        blockSize=block_size,
-        gridSize=runtime._adjoint_launch_shape(solver, "Hx", context.hx_mid),
-    )
-    forward_module.updateMagneticFieldHy3D(
-        Hy=context.hy_mid,
-        Ex=forward_state["Ex"],
-        Ez=forward_state["Ez"],
-        HyDecay=solver.chy_decay,
-        HyCurl=solver.chy_curl,
-        PsiHyX=context.psi_hy_x_mid,
-        PsiHyZ=context.psi_hy_z_mid,
-        InvKappaHyX=solver.cpml_inv_kappa_h_x,
-        ByHyX=solver.cpml_b_h_x,
-        CyHyX=solver.cpml_c_h_x,
-        InvKappaHyZ=solver.cpml_inv_kappa_h_z,
-        ByHyZ=solver.cpml_b_h_z,
-        CyHyZ=solver.cpml_c_h_z,
-        invDx=solver.inv_dx_h,
-        invDz=solver.inv_dz_h,
-    ).launchRaw(
-        blockSize=block_size,
-        gridSize=runtime._adjoint_launch_shape(solver, "Hy", context.hy_mid),
-    )
-    forward_module.updateMagneticFieldHz3D(
-        Hz=context.hz_mid,
-        Ex=forward_state["Ex"],
-        Ey=forward_state["Ey"],
-        HzDecay=solver.chz_decay,
-        HzCurl=solver.chz_curl,
-        PsiHzX=context.psi_hz_x_mid,
-        PsiHzY=context.psi_hz_y_mid,
-        InvKappaHzX=solver.cpml_inv_kappa_h_x,
-        ByHzX=solver.cpml_b_h_x,
-        CyHzX=solver.cpml_c_h_x,
-        InvKappaHzY=solver.cpml_inv_kappa_h_y,
-        ByHzY=solver.cpml_b_h_y,
-        CyHzY=solver.cpml_c_h_y,
-        invDx=solver.inv_dx_h,
-        invDy=solver.inv_dy_h,
-    ).launchRaw(
-        blockSize=block_size,
-        gridSize=runtime._adjoint_launch_shape(solver, "Hz", context.hz_mid),
-    )
-    return runtime._apply_resolved_magnetic_source_terms(
-        {"Hx": context.hx_mid, "Hy": context.hy_mid, "Hz": context.hz_mid},
-        solver=solver,
-        time_value=time_value,
-        resolved_source_terms=resolved_source_terms,
     )
 
 

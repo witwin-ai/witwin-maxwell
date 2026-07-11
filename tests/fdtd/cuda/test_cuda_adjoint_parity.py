@@ -161,6 +161,56 @@ def test_cuda_cpml_reverse_step_matches_python_reference(monkeypatch):
     )
     torch.cuda.synchronize()
 
+    # A qualifying CUDA scene resolves ``auto`` to the fused native CPML reverse
+    # step, which must reproduce the analytic Torch reference exactly. The long,
+    # per-component permuted coefficient argument lists (b/c/inv_kappa stretch
+    # vectors and pre-step psi state) make this parity check the transposition
+    # guard for the native runner's wiring.
+    assert actual.backend == "native_cpml"
+    for name in forward_state:
+        torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1.0e-5, atol=1.0e-6)
+
+
+def test_cuda_cpml_reverse_step_torch_reference_override_matches_baseline(monkeypatch):
+    # Forcing the analytic reference on the same CUDA CPML scene must keep
+    # producing the Torch reference backend (and identical gradients), so the
+    # native CPML path is a drop-in replacement rather than the only option.
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "torch_reference")
+    torch.manual_seed(103)
+    solver = _move_solver_tensors_to_cuda(_fake_cpml_reverse_solver())
+    state_shapes = _cpml_reverse_state_shapes()
+    forward_state = {
+        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
+        for name in checkpoint_schema(solver).state_names
+    }
+    adjoint_state = {name: torch.randn_like(tensor) for name, tensor in forward_state.items()}
+    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
+    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
+    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
+
+    actual = reverse_step(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.0,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    expected = adjoint_baselines.reverse_step_cpml_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    torch.cuda.synchronize()
+
     assert actual.backend == "python_reference_cpml"
     for name in forward_state:
         torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)

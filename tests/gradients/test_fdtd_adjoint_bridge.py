@@ -2468,7 +2468,7 @@ def test_fdtd_gradient_bridge_backward_profile_reports_expected_sections():
     assert profile["material_pullback_backend"] == "autograd_material_graph"
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
-    assert profile["reverse_backend_counts"].get("python_reference_cpml", 0) == bridge._time_steps
+    assert profile["reverse_backend_counts"].get(adjoint_baselines.expected_cpml_reverse_backend(), 0) == bridge._time_steps
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
@@ -2484,7 +2484,7 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_cpml_for_so
 
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
-    assert profile["reverse_backend_counts"].get("python_reference_cpml", 0) == bridge._time_steps
+    assert profile["reverse_backend_counts"].get(adjoint_baselines.expected_cpml_reverse_backend(), 0) == bridge._time_steps
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 

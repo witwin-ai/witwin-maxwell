@@ -631,17 +631,23 @@ def reverse_step(
         )
 
     def run_native():
-        return _run_native_reverse_step(
-            analytic_backend,
-            solver,
-            forward_state,
-            adjoint_state,
-            time_value=time_value,
-            eps_ex=eps_ex,
-            eps_ey=eps_ey,
-            eps_ez=eps_ez,
-            resolved_source_terms=resolved_source_terms,
-            profiler=profiler,
+        # Account the native reverse step under the same per-step profiler
+        # sections the analytic reference path records, so the backward profile
+        # stays consistent regardless of which reverse backend auto mode selects.
+        return _with_profile_sections(
+            profiler,
+            lambda: _run_native_reverse_step(
+                analytic_backend,
+                solver,
+                forward_state,
+                adjoint_state,
+                time_value=time_value,
+                eps_ex=eps_ex,
+                eps_ey=eps_ey,
+                eps_ez=eps_ez,
+                resolved_source_terms=resolved_source_terms,
+                profiler=profiler,
+            ),
         )
 
     # The torch-VJP fallback has no native mirror; native applies only to the

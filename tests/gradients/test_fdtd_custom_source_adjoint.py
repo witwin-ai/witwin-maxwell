@@ -39,6 +39,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.fdtd.adjoint import _FDTDGradientBridge
+from tests.gradients import fdtd_adjoint_baselines as adjoint_baselines
 
 _CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 
@@ -194,7 +195,7 @@ def test_uniform_current_source_uses_explicit_cpml_backend():
     profile = bridge.backward_profile()
 
     counts = profile["reverse_backend_counts"]
-    assert counts.get("python_reference_cpml", 0) == bridge._time_steps
+    assert counts.get(adjoint_baselines.expected_cpml_reverse_backend(), 0) == bridge._time_steps
     assert counts.get("torch_vjp", 0) == 0
 
 

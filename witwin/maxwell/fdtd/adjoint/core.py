@@ -39,13 +39,11 @@ from ..observers import (
     _plane_coord_names,
 )
 from .reverse_common import (
-    allocate_cpml_reverse_context,
     allocate_reverse_buffers,
     dynamic_electric_curls,
     finalize_dispersive_reverse_step,
     finalize_reverse_step_result,
     prepare_dispersive_reverse_context,
-    replay_cpml_magnetic_step,
     replay_standard_magnetic_step,
 )
 

@@ -8,6 +8,28 @@ from witwin.maxwell.fdtd.material_pullback import node_gradient_from_yee_permitt
 from witwin.maxwell.scene import MaterialRegion, prepare_scene
 
 
+def expected_cpml_reverse_backend() -> str:
+    """The reverse-backend label ``auto`` mode records per step for a CUDA CPML scene.
+
+    ``auto`` prefers the fused native CUDA CPML reverse step when its runner is
+    registered (P6 native adjoint) and falls back to the analytic Torch reference
+    label otherwise. The FDTD gradient bridges in these tests run on CUDA, where a
+    registered native CPML runner qualifies, so ``native_cpml`` is what the
+    backward profile records; this helper keeps the ``uses the explicit CPML
+    reverse backend, never the torch_vjp fallback`` assertions correct in both
+    configurations.
+    """
+    from witwin.maxwell.fdtd.adjoint.dispatch import (
+        _NATIVE_REVERSE_LABELS,
+        _ReverseBackend,
+        _native_backend_available,
+    )
+
+    if _native_backend_available(_ReverseBackend.PYTHON_CPML):
+        return _NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_CPML]
+    return "python_reference_cpml"
+
+
 def reverse_step_torch_vjp(solver, forward_state, adjoint_state, *, time_value, eps_ex, eps_ey, eps_ez):
     return fdtd_adjoint_reference.reverse_step_torch_vjp(
         solver,
