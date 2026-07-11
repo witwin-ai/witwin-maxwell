@@ -320,6 +320,8 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - `GaussianPulse` export carries Maxwell's carrier delay into the Tidy3D source phase so single-frequency pulse benchmarks compare against the same source spectrum
 - `PlaneWave` export places the source inside the physical interior and uses Tidy3D's infinite-plane aperture convention instead of a finite rectangular source patch
 - Supported mappings: Domain, GridSpec, BoundarySpec (uniform or per-face PML/periodic/PEC/PMC/Bloch export), Structure (Box/Sphere/Cylinder/Cone), Material (simple conductive / Drude / Lorentz / Debye / mixed PoleResidue with `mu_r = 1`, plus `Material.pec()` mapped to Tidy3D's dedicated `PECMedium`), PointDipole, PlaneWave, GaussianBeam, PointMonitor, PlaneMonitor, FinitePlaneMonitor, FluxMonitor, symmetry
+- A dispersive `Material` (Debye / Drude / Lorentz / mixed poles) that also carries a static electric conductivity `sigma_e` exports as a single Tidy3D `PoleResidue`: the dispersion is taken from the equivalent pole-residue of the base dispersive medium and the conductivity is folded in as a zero-frequency pole with residue `sigma_e / (2 * eps0)`, which reproduces the physical loss term `+i * sigma_e / (omega * eps0)` under Tidy3D's `e^{-i*omega*t}` convention (validated against `Material.relative_permittivity` and the analytic conductivity term via `eps_model`)
+- Electric conductivity export uses the correct Tidy3D micrometre units: the SI `sigma_e` [S/m] is divided by the metre-to-Tidy3D length scale so `Medium.conductivity` [S/um] yields the physical `eps'' = sigma_e / (omega * eps0)`
 
 ## GDS Adapter
 

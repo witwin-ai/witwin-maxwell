@@ -358,6 +358,138 @@ class TestMediumConversion:
             assert eps.real < -1.0
             assert not math.isclose(eps.real, 1.0, rel_tol=0.0, abs_tol=1e-6)
 
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the eps_model convention check",
+    )
+    def test_nondispersive_sigma_e_conductivity_units_real_tidy3d(self):
+        # A static electric conductivity must export with the physically correct
+        # imaginary permittivity eps'' = sigma / (w * eps0). Tidy3D is a micrometre
+        # solver whose Medium.conductivity is [S/um], so the SI value [S/m] must be
+        # divided by the metre->um length scale; passing it unscaled (the pre-fix
+        # path) made the exported medium 1e6x too lossy.
+        from witwin.core.material import VACUUM_PERMITTIVITY
+
+        freq = 2.0e14
+        omega = 2.0 * math.pi * freq
+        sigma = 0.5
+        with _real_tidy3d() as real_td:
+            material = mw.Material(eps_r=3.0, sigma_e=sigma)
+            medium = _convert_material(material, real_td)  # default length_scale = 1e6
+            assert isinstance(medium, real_td.Medium)
+            eps = complex(medium.eps_model(freq))
+            assert eps.real == pytest.approx(3.0)
+            # Loss (positive imaginary part under e^{-i w t}) of the physical size.
+            assert eps.imag == pytest.approx(sigma / (omega * VACUUM_PERMITTIVITY), rel=1e-6)
+            # Same magnitude as maxwell's own conductivity contribution (which carries
+            # the opposite sign under its e^{+i w t} diagnostic convention).
+            assert eps.imag == pytest.approx(
+                abs(material.relative_permittivity(freq).imag), rel=1e-6
+            )
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the eps_model convention check",
+    )
+    def test_drude_plus_sigma_e_matches_physical_permittivity_real_tidy3d(self):
+        # A dispersive pole model combined with a static conductivity must export to
+        # a single Tidy3D PoleResidue whose eps_model reproduces the physical
+        # e^{-i w t} permittivity eps_disp(w) + i*sigma/(w*eps0). Drude is the pole
+        # family whose Tidy3D convention coincides with maxwell's, so the full
+        # complex value is asserted against Material.relative_permittivity.
+        from witwin.core.material import VACUUM_PERMITTIVITY
+
+        freq = 2.0e14
+        omega = 2.0 * math.pi * freq
+        sigma = 0.5
+        with _real_tidy3d() as real_td:
+            conductive = mw.Material.drude(
+                eps_inf=1.0, plasma_frequency=2e15, gamma=1e13, sigma_e=sigma
+            )
+            lossless = mw.Material.drude(eps_inf=1.0, plasma_frequency=2e15, gamma=1e13)
+            medium = _convert_material(conductive, real_td)
+            # Specialized Drude/Lorentz/Debye media cannot carry a conductivity, so
+            # the combination must fold into a PoleResidue.
+            assert isinstance(medium, real_td.PoleResidue)
+            eps = complex(medium.eps_model(freq))
+            reference = lossless.relative_permittivity(freq) + 1j * sigma / (
+                omega * VACUUM_PERMITTIVITY
+            )
+            assert eps.real == pytest.approx(reference.real, rel=1e-6)
+            assert eps.imag == pytest.approx(reference.imag, rel=1e-6)
+            # Isolate the conductivity term against the sigma_e = 0 export: the
+            # difference must be exactly +i*sigma/(w*eps0), independent of length
+            # scale, confirming the pole sign (loss) and magnitude (SI units).
+            lossless_eps = complex(_convert_material(lossless, real_td).eps_model(freq))
+            delta = eps - lossless_eps
+            assert delta.real == pytest.approx(0.0, abs=1e-6 * abs(eps.real))
+            assert delta.imag == pytest.approx(sigma / (omega * VACUUM_PERMITTIVITY), rel=1e-6)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the eps_model convention check",
+    )
+    @pytest.mark.parametrize(
+        "make_pair",
+        [
+            pytest.param(
+                lambda s: (
+                    mw.Material.lorentz(
+                        eps_inf=2.0, delta_eps=1.5, resonance_frequency=5e14, gamma=1e13, sigma_e=s
+                    ),
+                    mw.Material.lorentz(
+                        eps_inf=2.0, delta_eps=1.5, resonance_frequency=5e14, gamma=1e13
+                    ),
+                ),
+                id="lorentz",
+            ),
+            pytest.param(
+                lambda s: (
+                    mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=1e-12, sigma_e=s),
+                    mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=1e-12),
+                ),
+                id="debye",
+            ),
+        ],
+    )
+    def test_dispersive_plus_sigma_e_isolates_conductivity_term_real_tidy3d(self, make_pair):
+        # For pole families whose Tidy3D convention differs from maxwell's, the
+        # conductivity contribution can still be validated in isolation: the exported
+        # eps_model with sigma_e minus the export without it must equal exactly the
+        # analytic loss term +i*sigma/(w*eps0), with no change to the real part.
+        from witwin.core.material import VACUUM_PERMITTIVITY
+
+        freq = 2.0e14
+        omega = 2.0 * math.pi * freq
+        sigma = 0.5
+        with _real_tidy3d() as real_td:
+            conductive, lossless = make_pair(sigma)
+            medium = _convert_material(conductive, real_td)
+            assert isinstance(medium, real_td.PoleResidue)
+            eps = complex(medium.eps_model(freq))
+            lossless_eps = complex(_convert_material(lossless, real_td).eps_model(freq))
+            delta = eps - lossless_eps
+            assert delta.real == pytest.approx(0.0, abs=1e-6 * max(abs(eps.real), 1.0))
+            assert delta.imag == pytest.approx(sigma / (omega * VACUUM_PERMITTIVITY), rel=1e-6)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the eps_model convention check",
+    )
+    def test_dispersive_plus_sigma_e_structure_exports_pole_residue_real_tidy3d(self):
+        # End-to-end through _convert_structure: a conductive dispersive structure
+        # exports a single PoleResidue medium carrying both the dispersion and the
+        # conductivity.
+        with _real_tidy3d() as real_td:
+            structure = mw.Structure(
+                mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
+                mw.Material.drude(eps_inf=1.0, plasma_frequency=2e15, gamma=1e13, sigma_e=0.5),
+            )
+            from witwin.maxwell.adapters.tidy3d import _convert_structure
+
+            td_structure = _convert_structure(structure, real_td, 1e6)
+            assert isinstance(td_structure.medium, real_td.PoleResidue)
+
 
 class TestGeometryConversion:
     def test_box(self, inject_mock_tidy3d):

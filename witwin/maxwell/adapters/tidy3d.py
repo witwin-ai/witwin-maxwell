@@ -18,6 +18,7 @@ import math
 from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
+from witwin.core.material import VACUUM_PERMITTIVITY
 from ..fdtd.excitation.spatial import resolve_injection_axis, soft_plane_wave_coordinate
 
 if TYPE_CHECKING:
@@ -121,52 +122,26 @@ def _convert_source_time(source_time, td):
 # Material conversion (no length scaling - dimensionless or frequency-based)
 # ---------------------------------------------------------------------------
 
-def _convert_material(material, td):
-    """Convert a Maxwell Material to a Tidy3D medium."""
-    if getattr(material, "is_pec", False):
-        # A PEC marker has no finite permittivity (eps_r stays at its 1.0
-        # default). Without this early branch it would fall through to the
-        # non-dispersive td.Medium(permittivity=1.0) path and silently export
-        # as vacuum. Tidy3D models a perfect electric conductor with the
-        # dedicated PECMedium (eps_model -> -inf), not a finite dielectric.
-        return td.PECMedium()
-    if getattr(material, "is_medium2d", False):
-        raise NotImplementedError("Tidy3D export for 2D sheet (Medium2D) materials is not implemented yet.")
-    if getattr(material, "is_lossy_metal", False):
-        raise NotImplementedError("Tidy3D export for LossyMetalMedium is not implemented yet.")
+def _conductivity_pole(sigma_e: float):
+    """Zero-frequency PoleResidue pole encoding a static electric conductivity.
+
+    Under the e^{-i*omega*t} convention a passive conductor adds a loss term
+    +i*sigma/(omega*eps0) to the relative permittivity. In Tidy3D's PoleResidue
+    model ``eps(w) = eps_inf - sum_i [ c_i/(iw + a_i) + c_i*/(iw + a_i*) ]`` a real
+    residue ``c`` placed at the pole ``a = 0`` contributes ``+2i*Re(c)/w``, so
+    ``Re(c) = sigma/(2*eps0)`` reproduces the conductivity term exactly. The residue
+    lives in the (dimensionless) permittivity domain with ``w`` in rad/s, so it is
+    independent of the export length scale. ``eps0`` is the SI vacuum permittivity,
+    matching ``Material.relative_permittivity``.
+    """
+    return (complex(0.0, 0.0), complex(float(sigma_e) / (2.0 * VACUUM_PERMITTIVITY), 0.0))
+
+
+def _dispersive_medium(material, td):
+    """Convert a dispersive Maxwell Material (ignoring sigma_e) to a Tidy3D medium."""
     has_debye = bool(material.debye_poles)
     has_drude = bool(material.drude_poles)
     has_lorentz = bool(material.lorentz_poles)
-    if material.is_anisotropic:
-        raise NotImplementedError("Tidy3D export for anisotropic Material is not implemented yet.")
-    if material.is_nonlinear:
-        raise NotImplementedError("Tidy3D export for Kerr nonlinear Material is not implemented yet.")
-    if getattr(material, "has_custom_poles", False):
-        raise NotImplementedError(
-            "Tidy3D export for spatially-varying custom dispersive poles is not implemented yet."
-        )
-    if getattr(material, "perturbation", None) is not None:
-        raise NotImplementedError("Tidy3D export for PerturbationMedium is not implemented yet.")
-    if getattr(material, "modulation", None) is not None:
-        raise NotImplementedError("Tidy3D export for time-modulated Material is not implemented yet.")
-    if material.is_magnetic_dispersive:
-        raise NotImplementedError("Tidy3D export for magnetic dispersive Material is not implemented yet.")
-    if not math.isclose(float(material.mu_r), 1.0, rel_tol=0.0, abs_tol=1.0e-12) or float(
-        getattr(material, "sigma_m", 0.0)
-    ) != 0.0:
-        raise NotImplementedError(
-            "Tidy3D export currently assumes mu_r = 1 and no static magnetic conductivity "
-            "(sigma_m = 0); magnetically-lossy media have no Tidy3D equivalent and are not implemented yet."
-        )
-
-    if not material.is_dispersive:
-        kwargs = {"permittivity": material.eps_r}
-        if getattr(material, "sigma_e", 0.0) != 0.0:
-            kwargs["conductivity"] = material.sigma_e
-        return td.Medium(**kwargs)
-
-    if getattr(material, "sigma_e", 0.0) != 0.0:
-        raise NotImplementedError("Tidy3D export does not yet support combining sigma_e with dispersive pole materials.")
 
     if has_drude and not has_debye and not has_lorentz:
         coeffs = [
@@ -220,6 +195,68 @@ def _convert_material(material, td):
         poles.append((a, c))
 
     return td.PoleResidue(eps_inf=material.eps_r, poles=poles)
+
+
+def _convert_material(material, td, length_scale: float = _M_TO_UM):
+    """Convert a Maxwell Material to a Tidy3D medium."""
+    if getattr(material, "is_pec", False):
+        # A PEC marker has no finite permittivity (eps_r stays at its 1.0
+        # default). Without this early branch it would fall through to the
+        # non-dispersive td.Medium(permittivity=1.0) path and silently export
+        # as vacuum. Tidy3D models a perfect electric conductor with the
+        # dedicated PECMedium (eps_model -> -inf), not a finite dielectric.
+        return td.PECMedium()
+    if getattr(material, "is_medium2d", False):
+        raise NotImplementedError("Tidy3D export for 2D sheet (Medium2D) materials is not implemented yet.")
+    if getattr(material, "is_lossy_metal", False):
+        raise NotImplementedError("Tidy3D export for LossyMetalMedium is not implemented yet.")
+    if material.is_anisotropic:
+        raise NotImplementedError("Tidy3D export for anisotropic Material is not implemented yet.")
+    if material.is_nonlinear:
+        raise NotImplementedError("Tidy3D export for Kerr nonlinear Material is not implemented yet.")
+    if getattr(material, "has_custom_poles", False):
+        raise NotImplementedError(
+            "Tidy3D export for spatially-varying custom dispersive poles is not implemented yet."
+        )
+    if getattr(material, "perturbation", None) is not None:
+        raise NotImplementedError("Tidy3D export for PerturbationMedium is not implemented yet.")
+    if getattr(material, "modulation", None) is not None:
+        raise NotImplementedError("Tidy3D export for time-modulated Material is not implemented yet.")
+    if material.is_magnetic_dispersive:
+        raise NotImplementedError("Tidy3D export for magnetic dispersive Material is not implemented yet.")
+    if not math.isclose(float(material.mu_r), 1.0, rel_tol=0.0, abs_tol=1.0e-12) or float(
+        getattr(material, "sigma_m", 0.0)
+    ) != 0.0:
+        raise NotImplementedError(
+            "Tidy3D export currently assumes mu_r = 1 and no static magnetic conductivity "
+            "(sigma_m = 0); magnetically-lossy media have no Tidy3D equivalent and are not implemented yet."
+        )
+
+    sigma_e = float(getattr(material, "sigma_e", 0.0))
+
+    if not material.is_dispersive:
+        kwargs = {"permittivity": material.eps_r}
+        if sigma_e != 0.0:
+            # Tidy3D works in micrometres, so its Medium.conductivity is [S/um].
+            # Convert the SI conductivity [S/m] by the metre->Tidy3D length scale so
+            # the exported eps'' = sigma/(w*eps0) matches the physical value.
+            kwargs["conductivity"] = sigma_e / length_scale
+        return td.Medium(**kwargs)
+
+    dispersive = _dispersive_medium(material, td)
+    if sigma_e == 0.0:
+        return dispersive
+
+    # Static electric conductivity combined with a dispersive pole model. Tidy3D's
+    # specialized Drude/Lorentz/Debye media cannot carry a conductivity, so fold the
+    # dispersion and the conductivity into a single PoleResidue: convert the
+    # dispersive medium to its equivalent pole-residue form and append the
+    # zero-frequency conductivity pole.
+    base = dispersive.pole_residue
+    return td.PoleResidue(
+        eps_inf=base.eps_inf,
+        poles=tuple(base.poles) + (_conductivity_pole(sigma_e),),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +315,7 @@ def _convert_geometry(geometry, td, s):
 def _convert_structure(structure, td, s):
     """Convert maxwell Structure to a Tidy3D Structure."""
     td_geometry = _convert_geometry(structure.geometry, td, s)
-    td_material = _convert_material(structure.material, td)
+    td_material = _convert_material(structure.material, td, s)
     return td.Structure(geometry=td_geometry, medium=td_material)
 
 
