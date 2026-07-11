@@ -24,6 +24,7 @@ from ..excitation import (
     inject_magnetic_surface_source_terms,
     initialize_source_terms,
     initialize_tfsf_state,
+    tfsf_incident_is_gpu_driven,
 )
 
 
@@ -1707,17 +1708,75 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     def normal(time_value):
         _field_update_block(solver, time_value)
 
-    # v1 scope: the standard real-field path (optionally conductive). TFSF and
-    # magnetic sources put per-step host input inside the block; complex/Kerr/
-    # dispersive paths carry extra evolving state left to a later iteration.
+    # v1 scope: the standard real-field path (optionally conductive), linear
+    # electric/magnetic dispersion, the instantaneous nonlinear family (Kerr chi3,
+    # chi2, and two-photon-absorption loss), the complex split-field Bloch path
+    # (optionally with a single CPML axis), and reference-provider TFSF injection
+    # (axis-aligned / x-Ez plane waves, in both the six-face box and the two-face
+    # non-periodic slab injection mode). Magnetic surface sources put a
+    # host-evaluated signal scalar inside the block, so those scenes stay on the
+    # eager path.
+    #
+    # A reference-provider TFSF scene is safe to capture: its in-block H correction
+    # and auxiliary magnetic advance read the incident field from the
+    # device-resident auxiliary 1D grid (aux.electric / aux.magnetic) at fixed
+    # integer sample indices, so the block carries no per-step host input, and the
+    # reference injection kernel's warp-aggregated writes are collision-free for the
+    # axis-aligned face layout (bit-reproducible run to run). The 1D source waveform
+    # is evaluated on the host only in the E-side auxiliary advance, which runs
+    # eagerly after the block (outside the captured region), and the captured H
+    # correction reads whatever aux.electric holds at replay -- exactly matching the
+    # eager path. The block mutates only aux.magnetic among the auxiliary tensors;
+    # it is snapshotted below alongside aux.electric so warmup/capture on the zero
+    # field leave the incident line untouched for the physical run, and the incident
+    # line is a zero fixed point during capture (aux.electric stays zero until the
+    # eager E-side advance injects the source after capture). The oblique
+    # auxiliary-line provider is excluded (its interpolated injection kernel is not
+    # bit-reproducible under cross-warp atomics), and the oblique-CW / analytic
+    # providers evaluate the waveform on the host each step; all stay eager
+    # (see excitation.tfsf_incident_is_gpu_driven).
+    #
+    # Linear dispersion is safe to capture: the Debye/Drude/Lorentz ADE advance and
+    # the polarization-current subtraction launch persistent per-pole state tensors
+    # (polarization/current, allocated once at init) with fixed dt/decay/restoring
+    # scalars, so they carry no per-step host input. The ADE is linear with zero
+    # forcing at E = H = 0, so with all pole state starting at zero the zero initial
+    # field is still a fixed point of the extended block; warmup/capture leaves the
+    # pole state at zero and does not perturb the physical run.
+    #
+    # Instantaneous nonlinearity is safe to capture too: the Kerr curl-only kernel
+    # and the general chi2/TPA coefficient kernel recompute the dynamic curl/decay
+    # tensors in place from the current field, the persistent chi3/chi2/tpa maps,
+    # and fixed dt/eps0 scalars, with no per-step host input. Unlike dispersion they
+    # carry no accumulated auxiliary state: the dynamic coefficients are a pure
+    # function of the live field, rewritten before they are read every step, so the
+    # fields+psi snapshot already covers everything the block mutates. Every
+    # nonlinear polarization vanishes at E = 0 (P ~ chi2 E^2, chi3 |E|^2 E, and
+    # sigma_NL ~ |E|^2), collapsing the dynamic coefficients to their linear values,
+    # so the zero field remains a fixed point through warmup/capture.
+    #
+    # The complex (split-field Bloch) path is safe to capture too: a Bloch-periodic
+    # scene marches a second real FDTD copy (the imaginary split field) through the
+    # same magnetic/electric curl+decay kernels, coupled only by a fixed per-axis
+    # wrap phase (cos/sin of the Bloch wavevector, constant for the whole run), so
+    # the block carries no per-step host input. The extra state it evolves -- the
+    # imaginary E/H fields and their CPML psi memory -- is snapshotted alongside the
+    # real fields below (the imaginary psi tensors already match the ``psi`` prefix),
+    # and the split update is linear with zero forcing at E = H = 0, so the zero
+    # field (real and imaginary) stays a fixed point through warmup/capture. The
+    # complex running DFT keeps the host tail (build_dft_step_tables declines the GPU
+    # weight table for complex fields), so only the field-update block is captured.
     graphable = (
         use_cuda_graph
         and torch.cuda.is_available()
-        and not solver.tfsf_enabled
+        # TFSF is capturable only for the reference providers, whose in-block
+        # correction reads the device-resident incident line through the
+        # bit-reproducible integer-indexed reference kernel and carries no per-step
+        # host input (see _make_field_update_runner docstring above).
+        and (not solver.tfsf_enabled or tfsf_incident_is_gpu_driven(solver))
+        # A magnetic surface source injects a host-evaluated signal scalar inside
+        # the block, which a captured graph would freeze at its capture-time value.
         and not solver._magnetic_source_terms
-        and not has_complex_fields(solver)
-        and not getattr(solver, "nonlinear_enabled", False)
-        and not getattr(solver, "dispersive_enabled", False)
         # The modulated E update consumes per-step host phase scalars, which a
         # captured CUDA graph would freeze at their capture-time values.
         and not getattr(solver, "modulation_enabled", False)
@@ -1729,14 +1788,30 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         return normal
     from ..cuda.runtime.graph import CudaGraphRunner
 
-    # Snapshot the state this block mutates (fields + CPML psi) so warmup/capture
-    # do not perturb the physical run, then restore before stepping begins.
+    # Snapshot the state this block mutates (real + imaginary fields, CPML psi) so
+    # warmup/capture do not perturb the physical run, then restore before stepping
+    # begins. The imaginary split fields exist only on the complex Bloch path; on
+    # the real path they are absent from ``vars(solver)`` and drop out naturally.
+    snapshot_field_names = (
+        "Ex", "Ey", "Ez", "Hx", "Hy", "Hz",
+        "Ex_imag", "Ey_imag", "Ez_imag", "Hx_imag", "Hy_imag", "Hz_imag",
+    )
     state = {
         k: v
         for k, v in vars(solver).items()
         if isinstance(v, torch.Tensor)
-        and (k in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz") or k.startswith("psi"))
+        and (k in snapshot_field_names or k.startswith("psi"))
     }
+    # The TFSF field-update block advances the auxiliary 1D magnetic grid in place
+    # (and reads the auxiliary electric grid). Snapshot both auxiliary tensors so
+    # warmup/capture on the zero field leave the incident line exactly as the
+    # physical run expects; the "psi" / field filter above does not reach them
+    # because they live on the auxiliary-grid object, not on ``vars(solver)``.
+    if getattr(solver, "tfsf_enabled", False) and getattr(solver, "_tfsf_state", None):
+        aux = solver._tfsf_state.get("auxiliary_grid")
+        if aux is not None:
+            state["_tfsf_aux_electric"] = aux.electric
+            state["_tfsf_aux_magnetic"] = aux.magnetic
     saved = {k: v.clone() for k, v in state.items()}
 
     def _restore():
