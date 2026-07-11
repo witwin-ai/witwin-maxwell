@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from collections.abc import Callable
 from enum import Enum, auto
 
 
@@ -13,7 +14,7 @@ from ..boundary import (
 from ..checkpoint import checkpoint_schema
 
 
-_VALID_ADJOINT_BACKENDS = {"auto", "python"}
+_VALID_ADJOINT_BACKENDS = {"auto", "native", "torch_reference", "torch_vjp"}
 
 class _ReverseBackend(Enum):
     GRATING_TFSF = auto()
@@ -23,6 +24,46 @@ class _ReverseBackend(Enum):
     PYTHON_STANDARD = auto()
     PYTHON_CPML = auto()
     TORCH_VJP = auto()
+
+
+# Native CUDA reverse-execution backends mirror the analytic torch reference
+# variants one-for-one. Each label is the value recorded into
+# ``_BackwardProfiler.reverse_backend_counts`` so a native reverse step stays
+# attributable per configuration (``native_standard`` mirrors
+# ``python_reference_standard`` and so on). The runner registry is populated by
+# later P6 items as the fused CUDA reverse kernels land; until an entry exists
+# ``auto`` mode never selects native and an explicit ``native`` override raises.
+_NATIVE_REVERSE_LABELS: dict[_ReverseBackend, str] = {
+    _ReverseBackend.PYTHON_STANDARD: "native_standard",
+    _ReverseBackend.PYTHON_CPML: "native_cpml",
+    _ReverseBackend.PYTHON_BLOCH: "native_bloch",
+    _ReverseBackend.PYTHON_DISPERSIVE: "native_dispersive",
+    _ReverseBackend.TFSF: "native_tfsf",
+    _ReverseBackend.GRATING_TFSF: "native_grating_tfsf",
+}
+
+# A registered runner takes the same (solver, forward_state, adjoint_state,
+# time_value, eps_*, resolved_source_terms, profiler) contract as the analytic
+# reference backends and returns a fully-formed ``_ReverseStepResult`` whose
+# ``backend`` field is the matching ``_NATIVE_REVERSE_LABELS`` value.
+_NativeReverseRunner = Callable[..., object]
+_NATIVE_REVERSE_RUNNERS: dict[_ReverseBackend, _NativeReverseRunner] = {}
+
+
+def register_native_reverse_backend(backend: _ReverseBackend, runner: _NativeReverseRunner) -> None:
+    """Register a native CUDA reverse-step runner for an analytic backend variant."""
+    if backend not in _NATIVE_REVERSE_LABELS:
+        raise ValueError(f"No native reverse label is defined for backend {backend!r}.")
+    _NATIVE_REVERSE_RUNNERS[backend] = runner
+
+
+def unregister_native_reverse_backend(backend: _ReverseBackend) -> None:
+    """Drop a previously registered native runner (primarily for tests)."""
+    _NATIVE_REVERSE_RUNNERS.pop(backend, None)
+
+
+def _native_backend_available(backend: _ReverseBackend) -> bool:
+    return backend in _NATIVE_REVERSE_RUNNERS
 
 
 def _runtime():
@@ -47,13 +88,28 @@ def _matches_checkpoint_layout(solver, forward_state) -> bool:
 
 
 def resolve_fdtd_adjoint_backend_name(requested: str | None = None) -> str:
+    """Resolve which FDTD adjoint reverse-execution backend :func:`reverse_step` uses.
+
+    The value comes from the explicit ``requested`` argument, otherwise the
+    ``WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND`` environment variable, otherwise
+    ``"auto"``. The returned (lower-cased, stripped) name is one of:
+
+    - ``auto``: prefer the native CUDA reverse backend when one is registered for
+      the resolved per-step configuration, otherwise the analytic torch reference
+      backend, otherwise the torch-autograd VJP fallback.
+    - ``native``: force the native CUDA reverse backend; error when none is
+      registered for the configuration.
+    - ``torch_reference``: force the analytic torch reference backend; error when
+      the configuration only supports the VJP fallback.
+    - ``torch_vjp``: force the torch-autograd VJP fallback.
+    """
     import os
 
     backend = (requested or os.environ.get("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "auto")).strip().lower()
     if backend not in _VALID_ADJOINT_BACKENDS:
         choices = ", ".join(sorted(_VALID_ADJOINT_BACKENDS))
         raise ValueError(f"WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND must be one of: {choices}.")
-    return "python"
+    return backend
 
 
 def _has_open_face_conflicts(face_codes: tuple[int, int, int, int, int, int]) -> bool:
@@ -302,6 +358,153 @@ def _accumulate_source_term_gradients(
     )
 
 
+def _run_native_reverse_step(
+    backend,
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+):
+    """Invoke the registered native CUDA reverse runner for ``backend``.
+
+    The caller guarantees ``backend`` has a registered runner. The runner owns
+    the full reverse-step contract (including any source-term gradient
+    accumulation) and returns a ``_ReverseStepResult`` labelled with the matching
+    ``_NATIVE_REVERSE_LABELS`` value.
+    """
+    runner = _NATIVE_REVERSE_RUNNERS[backend]
+    return runner(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+        profiler=profiler,
+    )
+
+
+def _execute_reference_backend(
+    backend,
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+    adjoint_reference,
+    finish,
+):
+    """Run one of the analytic torch reference reverse backends.
+
+    This is the exact per-variant dispatch the ``auto`` and ``torch_reference``
+    modes share; ``TORCH_VJP`` is handled by the caller and never reaches here.
+    """
+    if backend is _ReverseBackend.TFSF:
+        return _with_profile_sections(
+            profiler,
+            lambda: adjoint_reference.reverse_step_tfsf(
+                solver,
+                forward_state,
+                adjoint_state,
+                time_value=time_value,
+                eps_ex=eps_ex,
+                eps_ey=eps_ey,
+                eps_ez=eps_ez,
+                resolved_source_terms=resolved_source_terms,
+                profiler=None,
+            ),
+        )
+    if backend is _ReverseBackend.GRATING_TFSF:
+        return adjoint_reference.reverse_step_grating_tfsf(
+            solver,
+            forward_state,
+            adjoint_state,
+            time_value=time_value,
+            eps_ex=eps_ex,
+            eps_ey=eps_ey,
+            eps_ez=eps_ez,
+            profiler=profiler,
+        )
+    if backend is _ReverseBackend.PYTHON_BLOCH:
+        return finish(
+            _with_profile_sections(
+                profiler,
+                lambda: adjoint_reference.reverse_step_bloch_python_reference(
+                    solver,
+                    forward_state,
+                    adjoint_state,
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_source_terms,
+                ),
+            )
+        )
+    if backend is _ReverseBackend.PYTHON_DISPERSIVE:
+        return finish(
+            _with_profile_sections(
+                profiler,
+                lambda: adjoint_reference.reverse_step_dispersive_python_reference(
+                    solver,
+                    forward_state,
+                    adjoint_state,
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_source_terms,
+                ),
+            )
+        )
+    if backend is _ReverseBackend.PYTHON_STANDARD:
+        return finish(
+            _with_profile_sections(
+                profiler,
+                lambda: adjoint_reference.reverse_step_standard_python_reference(
+                    solver,
+                    forward_state,
+                    adjoint_state,
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_source_terms,
+                ),
+            )
+        )
+    if backend is _ReverseBackend.PYTHON_CPML:
+        return finish(
+            _with_profile_sections(
+                profiler,
+                lambda: adjoint_reference.reverse_step_cpml_python_reference(
+                    solver,
+                    forward_state,
+                    adjoint_state,
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_source_terms,
+                ),
+            )
+        )
+    raise RuntimeError(f"Unsupported reference reverse backend selection: {backend!r}")
+
+
 def reverse_step(
     solver,
     forward_state,
@@ -332,7 +535,7 @@ def reverse_step(
         )
 
     resolved_source_terms = runtime._resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez)
-    backend = _select_reverse_backend(
+    analytic_backend = _select_reverse_backend(
         solver,
         forward_state,
         eps_ex=eps_ex,
@@ -340,6 +543,7 @@ def reverse_step(
         eps_ez=eps_ez,
         resolved_source_terms=resolved_source_terms,
     )
+    mode = resolve_fdtd_adjoint_backend_name()
 
     def finish(step_result):
         return _accumulate_source_term_gradients(
@@ -354,23 +558,9 @@ def reverse_step(
             resolved_source_terms=resolved_source_terms,
         )
 
-    if backend is _ReverseBackend.TFSF:
-        return _with_profile_sections(
-            profiler,
-            lambda: _adjoint_reference.reverse_step_tfsf(
-                solver,
-                forward_state,
-                adjoint_state,
-                time_value=time_value,
-                eps_ex=eps_ex,
-                eps_ey=eps_ey,
-                eps_ez=eps_ez,
-                resolved_source_terms=resolved_source_terms,
-                profiler=None,
-            ),
-        )
-    if backend is _ReverseBackend.GRATING_TFSF:
-        return _adjoint_reference.reverse_step_grating_tfsf(
+    def run_reference():
+        return _execute_reference_backend(
+            analytic_backend,
             solver,
             forward_state,
             adjoint_state,
@@ -378,73 +568,13 @@ def reverse_step(
             eps_ex=eps_ex,
             eps_ey=eps_ey,
             eps_ez=eps_ez,
+            resolved_source_terms=resolved_source_terms,
             profiler=profiler,
+            adjoint_reference=_adjoint_reference,
+            finish=finish,
         )
-    if backend is _ReverseBackend.PYTHON_BLOCH:
-        return finish(
-            _with_profile_sections(
-                profiler,
-                lambda: _adjoint_reference.reverse_step_bloch_python_reference(
-                    solver,
-                    forward_state,
-                    adjoint_state,
-                    time_value=time_value,
-                    eps_ex=eps_ex,
-                    eps_ey=eps_ey,
-                    eps_ez=eps_ez,
-                    resolved_source_terms=resolved_source_terms,
-                ),
-            )
-        )
-    if backend is _ReverseBackend.PYTHON_DISPERSIVE:
-        return finish(
-            _with_profile_sections(
-                profiler,
-                lambda: _adjoint_reference.reverse_step_dispersive_python_reference(
-                    solver,
-                    forward_state,
-                    adjoint_state,
-                    time_value=time_value,
-                    eps_ex=eps_ex,
-                    eps_ey=eps_ey,
-                    eps_ez=eps_ez,
-                    resolved_source_terms=resolved_source_terms,
-                ),
-            )
-        )
-    if backend is _ReverseBackend.PYTHON_STANDARD:
-        return finish(
-            _with_profile_sections(
-                profiler,
-                lambda: _adjoint_reference.reverse_step_standard_python_reference(
-                    solver,
-                    forward_state,
-                    adjoint_state,
-                    time_value=time_value,
-                    eps_ex=eps_ex,
-                    eps_ey=eps_ey,
-                    eps_ez=eps_ez,
-                    resolved_source_terms=resolved_source_terms,
-                ),
-            )
-        )
-    if backend is _ReverseBackend.PYTHON_CPML:
-        return finish(
-            _with_profile_sections(
-                profiler,
-                lambda: _adjoint_reference.reverse_step_cpml_python_reference(
-                    solver,
-                    forward_state,
-                    adjoint_state,
-                    time_value=time_value,
-                    eps_ex=eps_ex,
-                    eps_ey=eps_ey,
-                    eps_ez=eps_ez,
-                    resolved_source_terms=resolved_source_terms,
-                ),
-            )
-        )
-    if backend is _ReverseBackend.TORCH_VJP:
+
+    def run_torch_vjp():
         return _adjoint_reference.reverse_step_torch_vjp(
             solver,
             forward_state,
@@ -464,4 +594,49 @@ def reverse_step(
             tpa_ez=tpa_ez,
             profiler=profiler,
         )
-    raise RuntimeError(f"Unsupported reverse backend selection: {backend!r}")
+
+    def run_native():
+        return _run_native_reverse_step(
+            analytic_backend,
+            solver,
+            forward_state,
+            adjoint_state,
+            time_value=time_value,
+            eps_ex=eps_ex,
+            eps_ey=eps_ey,
+            eps_ez=eps_ez,
+            resolved_source_terms=resolved_source_terms,
+            profiler=profiler,
+        )
+
+    # The torch-VJP fallback has no native mirror; native applies only to the
+    # analytic reference variants that a fused CUDA reverse kernel can replace.
+    native_available = (
+        analytic_backend is not _ReverseBackend.TORCH_VJP
+        and _native_backend_available(analytic_backend)
+    )
+
+    if mode == "torch_vjp":
+        return run_torch_vjp()
+    if mode == "native":
+        if not native_available:
+            raise ValueError(
+                "WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND='native' was requested but no "
+                "native CUDA reverse backend is registered for this configuration "
+                f"(analytic backend {analytic_backend.name})."
+            )
+        return run_native()
+    if mode == "torch_reference":
+        if analytic_backend is _ReverseBackend.TORCH_VJP:
+            raise ValueError(
+                "WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND='torch_reference' was requested "
+                "but this configuration only supports the torch-autograd VJP fallback."
+            )
+        return run_reference()
+
+    # mode == "auto": prefer native, then the analytic reference, then the VJP fallback.
+    if native_available:
+        return run_native()
+    if analytic_backend is _ReverseBackend.TORCH_VJP:
+        return run_torch_vjp()
+    return run_reference()

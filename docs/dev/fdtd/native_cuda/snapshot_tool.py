@@ -136,7 +136,7 @@ def collect() -> dict[str, torch.Tensor]:
     for name in ("dipole_vacuum", "planewave_vacuum"):
         for key, value in forward_outputs(name).items():
             out[f"{name}/{key}"] = value
-    out.update(adjoint_outputs("python"))
+    out.update(adjoint_outputs("auto"))
     return out
 
 

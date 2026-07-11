@@ -29,7 +29,9 @@ def test_cuda_backend_selects_python_adjoint_reference_by_default(monkeypatch):
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
     monkeypatch.delenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", raising=False)
 
-    assert resolve_fdtd_adjoint_backend_name() == "python"
+    # Default resolves to the auto mode, which prefers the analytic torch
+    # reference backend when no native CUDA reverse backend is registered.
+    assert resolve_fdtd_adjoint_backend_name() == "auto"
 
 
 def test_cuda_standard_reverse_step_matches_python_reference(monkeypatch):
