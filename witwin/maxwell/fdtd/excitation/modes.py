@@ -654,9 +654,12 @@ def _lobpcg_request_count(unknowns: int, *, mode_index: int) -> int:
     max_requested = max(1, (int(unknowns) - 1) // 3)
     requested = min(requested, max_requested)
     if requested <= int(mode_index):
-        raise NotImplementedError(
-            "Sparse ModeSource iterative solve requires unknowns >= 3 * requested_modes. "
-            f"mode_index={mode_index} is too large for an aperture solve with {unknowns} interior unknowns."
+        raise ValueError(
+            "ModeSource mode_index is too large for this aperture's resolution: the sparse "
+            "LOBPCG eigensolver needs at least three interior aperture unknowns per requested "
+            f"mode to span a valid iteration subspace, but mode_index={mode_index} on an "
+            f"aperture with {unknowns} interior unknowns leaves fewer. Refine the aperture grid "
+            "or request a lower mode_index."
         )
     return requested
 
@@ -1212,7 +1215,12 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
             "for arbitrary custom waveforms."
         )
     if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
-        raise NotImplementedError("ModeSource currently supports only none, pml, pec, or pmc boundaries.")
+        raise NotImplementedError(
+            "ModeSource mode solving is undefined under a periodic/Bloch transverse boundary: "
+            "the aperture wraps with the Bloch phase, so the guided profile is an eigenfunction "
+            "of a complex-Hermitian Bloch-phase transverse operator, whereas this solver builds "
+            "the real, zero-boundary transverse operator. Use none/pml/pec/pmc on the mode plane."
+        )
 
     normal_axis, tangential_axes = _mode_source_axes(source)
     normal_axis_index = _AXIS_TO_INDEX[normal_axis]
@@ -1318,7 +1326,12 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
     if torch.min(eps_real).item() <= 0.0 or torch.min(mu_real).item() <= 0.0:
         raise ValueError("ModeSource requires positive epsilon and mu on the source plane.")
     if not torch.allclose(mu_real, torch.ones_like(mu_real), atol=1e-6, rtol=0.0):
-        raise NotImplementedError("ModeSource scalar eigenmode solve currently requires mu_r == 1 on the source plane.")
+        raise NotImplementedError(
+            "ModeSource scalar eigenmode solve is undefined for a magnetic (mu_r != 1) plane: "
+            "the scalar Helmholtz reduction folds mu into a single index and scales the magnetic "
+            "profile by n_eff/eta0, both of which assume a non-magnetic medium. A magnetic plane "
+            "must be solved with the full-vector operator, which carries mu per component."
+        )
     if eps_is_lossy and eps_real.requires_grad:
         raise NotImplementedError(
             "Differentiable ModeSource gradients through a lossy (complex) permittivity require a "
