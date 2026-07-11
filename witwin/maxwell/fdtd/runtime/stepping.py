@@ -1707,9 +1707,18 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     def normal(time_value):
         _field_update_block(solver, time_value)
 
-    # v1 scope: the standard real-field path (optionally conductive). TFSF and
-    # magnetic sources put per-step host input inside the block; complex/Kerr/
-    # dispersive paths carry extra evolving state left to a later iteration.
+    # v1 scope: the standard real-field path (optionally conductive) plus linear
+    # electric/magnetic dispersion. TFSF and magnetic sources put per-step host
+    # input inside the block; complex (Bloch) and instantaneous-nonlinear (Kerr /
+    # chi2) paths carry extra evolving state left to a later iteration.
+    #
+    # Linear dispersion is safe to capture: the Debye/Drude/Lorentz ADE advance and
+    # the polarization-current subtraction launch persistent per-pole state tensors
+    # (polarization/current, allocated once at init) with fixed dt/decay/restoring
+    # scalars, so they carry no per-step host input. The ADE is linear with zero
+    # forcing at E = H = 0, so with all pole state starting at zero the zero initial
+    # field is still a fixed point of the extended block; warmup/capture leaves the
+    # pole state at zero and does not perturb the physical run.
     graphable = (
         use_cuda_graph
         and torch.cuda.is_available()
@@ -1717,7 +1726,6 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         and not solver._magnetic_source_terms
         and not has_complex_fields(solver)
         and not getattr(solver, "nonlinear_enabled", False)
-        and not getattr(solver, "dispersive_enabled", False)
         # The modulated E update consumes per-step host phase scalars, which a
         # captured CUDA graph would freeze at their capture-time values.
         and not getattr(solver, "modulation_enabled", False)
