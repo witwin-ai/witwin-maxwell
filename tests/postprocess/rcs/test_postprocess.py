@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import pytest
 import torch
@@ -5,13 +7,16 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.postprocess import (
     compute_bistatic_rcs,
+    compute_directivity,
     EquivalentCurrentsSurface,
     infer_incident_plane_wave_amplitude,
     NearFieldFarFieldTransformer,
     PlanarEquivalentCurrents,
     StrattonChuPropagator,
+    SurfaceEquivalentCurrents,
     equivalent_surface_currents_from_fields,
     equivalent_surface_currents_from_monitor,
+    equivalent_surface_currents_from_surface_samples,
     transform_to_bistatic_rcs,
 )
 
@@ -19,6 +24,65 @@ from witwin.maxwell.postprocess import (
 _C0 = 299792458.0
 _MU0 = 4.0 * np.pi * 1e-7
 _EPS0 = 1.0 / (_MU0 * _C0**2)
+_ETA0 = math.sqrt(_MU0 / _EPS0)
+
+
+def _trapz_weights(points: torch.Tensor) -> torch.Tensor:
+    weights = torch.empty_like(points)
+    diffs = points[1:] - points[:-1]
+    weights[0] = diffs[0] / 2.0
+    weights[-1] = diffs[-1] / 2.0
+    weights[1:-1] = (diffs[:-1] + diffs[1:]) / 2.0
+    return weights
+
+
+def _hertzian_dipole_sphere_samples(frequency, radius, n_theta, n_phi, moment=1.0):
+    """Exact ``e^{-iωt}`` fields of a z-directed Hertzian dipole sampled on a
+    sphere of the given radius, returned as ``(points, normals, areas, E, H)``
+    torch tensors. The dipole is enclosed by the sphere, so its surface currents
+    reproduce the dipole far field for any radius (surface equivalence). The
+    outward normals are radial, so every quadrature point has a different,
+    non-axis-aligned normal -- a genuinely curved Huygens surface."""
+    omega = 2.0 * math.pi * frequency
+    k = omega / _C0
+    theta = torch.linspace(0.0, math.pi, n_theta, dtype=torch.float64)
+    phi = torch.linspace(0.0, 2.0 * math.pi, n_phi, dtype=torch.float64)
+    weight_theta = _trapz_weights(theta)
+    weight_phi = _trapz_weights(phi)
+    th_grid, phi_grid = torch.meshgrid(theta, phi, indexing="ij")
+    wt_grid, wp_grid = torch.meshgrid(weight_theta, weight_phi, indexing="ij")
+    sin_t, cos_t = torch.sin(th_grid), torch.cos(th_grid)
+    sin_p, cos_p = torch.sin(phi_grid), torch.cos(phi_grid)
+    r_hat = torch.stack([sin_t * cos_p, sin_t * sin_p, cos_t], dim=-1)
+    theta_hat = torch.stack([cos_t * cos_p, cos_t * sin_p, -sin_t], dim=-1)
+    phi_hat = torch.stack([-sin_p, cos_p, torch.zeros_like(phi_grid)], dim=-1)
+
+    kr = k * radius
+    e_ikr = torch.exp(torch.tensor(1j * kr, dtype=torch.complex128))
+    e_r = (_ETA0 * moment * cos_t) / (2.0 * math.pi * radius**2) * (1.0 + 1j / kr) * e_ikr
+    e_t = (_ETA0 * k * moment * sin_t) / (4.0 * math.pi * radius) * (1.0 / kr + 1j * (1.0 / kr**2 - 1.0)) * e_ikr
+    h_p = (k * moment * sin_t) / (4.0 * math.pi * radius) * (1.0 / kr - 1j) * e_ikr
+    e_field = e_r[..., None] * r_hat + e_t[..., None] * theta_hat
+    h_field = h_p[..., None] * phi_hat
+    area = (radius**2) * sin_t * wt_grid * wp_grid
+    return (
+        (radius * r_hat).reshape(-1, 3),
+        r_hat.reshape(-1, 3),
+        area.reshape(-1),
+        e_field.reshape(-1, 3),
+        h_field.reshape(-1, 3),
+    )
+
+
+def _hertzian_far_e_theta(frequency, radius, theta, moment=1.0):
+    """Analytic far-field ``E_theta`` (``e^{-iωt}``) of the same dipole."""
+    k = 2.0 * math.pi * frequency / _C0
+    return (
+        (_ETA0 * k * moment * torch.sin(theta))
+        / (4.0 * math.pi * radius)
+        * (-1j)
+        * torch.exp(torch.tensor(1j * k * radius, dtype=torch.complex128))
+    )
 
 
 def _synthetic_closed_surface_result(*, layered_exterior: bool = False) -> mw.Result:
@@ -510,3 +574,152 @@ def test_bistatic_rcs_keeps_torch_gradients():
     assert isinstance(rcs["rcs"], torch.Tensor)
     assert e_theta.grad is not None
     assert torch.all(torch.isfinite(e_theta.grad))
+
+
+def test_surface_equivalent_currents_from_samples_uses_cross_product_convention():
+    """``J = n x H`` and ``M = -n x E`` at each quadrature point, with the
+    outward normals normalized to unit length and the per-point surface-area
+    weights folded into the currents by ``quadrature()``. This is the curved
+    generalization of the axis-aligned ``n x H`` convention: the two sample
+    points below carry tilted, non-unit normals."""
+    points = torch.tensor([[0.1, 0.0, 0.0], [0.0, 0.2, 0.3]], dtype=torch.float64)
+    normals = torch.tensor([[2.0, 0.0, 0.0], [0.0, 3.0, 4.0]], dtype=torch.float64)
+    areas = torch.tensor([0.5, 0.25], dtype=torch.float64)
+    e_field = torch.tensor(
+        [[1.0 + 1.0j, 2.0 - 1.0j, 0.5j], [0.0, 1.0 + 0.0j, -2.0 + 1.0j]], dtype=torch.complex128
+    )
+    h_field = torch.tensor(
+        [[0.0, -1.0 + 2.0j, 3.0 + 0.0j], [1.0j, 2.0 + 0.0j, -1.0 + 0.0j]], dtype=torch.complex128
+    )
+
+    currents = equivalent_surface_currents_from_surface_samples(
+        frequency=1.0e9,
+        points=points,
+        normals=normals,
+        areas=areas,
+        E=e_field,
+        H=h_field,
+    )
+
+    assert isinstance(currents, SurfaceEquivalentCurrents)
+    unit_normal = (normals / torch.linalg.norm(normals, dim=-1, keepdim=True)).to(torch.complex128)
+    expected_j = torch.cross(unit_normal, h_field, dim=-1)
+    expected_m = -torch.cross(unit_normal, e_field, dim=-1)
+    torch.testing.assert_close(currents.J, expected_j)
+    torch.testing.assert_close(currents.M, expected_m)
+
+    quad_points, quad_j, quad_m = currents.quadrature()
+    torch.testing.assert_close(quad_points, points)
+    torch.testing.assert_close(quad_j, expected_j * areas[:, None].to(torch.complex128))
+    torch.testing.assert_close(quad_m, expected_m * areas[:, None].to(torch.complex128))
+
+
+def test_surface_equivalent_currents_reject_shape_and_normal_errors():
+    good_points = torch.zeros((4, 3), dtype=torch.float64)
+    good_vec = torch.ones((4, 3), dtype=torch.complex128)
+    with pytest.raises(ValueError, match="normals must have shape"):
+        equivalent_surface_currents_from_surface_samples(
+            frequency=1.0e9,
+            points=good_points,
+            normals=torch.ones((3, 3), dtype=torch.float64),
+            areas=torch.ones(4, dtype=torch.float64),
+            E=good_vec,
+            H=good_vec,
+        )
+    with pytest.raises(ValueError, match="non-zero"):
+        equivalent_surface_currents_from_surface_samples(
+            frequency=1.0e9,
+            points=good_points,
+            normals=torch.zeros((4, 3), dtype=torch.float64),
+            areas=torch.ones(4, dtype=torch.float64),
+            E=good_vec,
+            H=good_vec,
+        )
+
+
+def test_stratton_chu_propagator_accepts_general_surface_currents():
+    frequency = 1.0e9
+    points, normals, areas, e_field, h_field = _hertzian_dipole_sphere_samples(frequency, 0.10, 48, 96)
+    currents = equivalent_surface_currents_from_surface_samples(
+        frequency=frequency,
+        points=points,
+        normals=normals,
+        areas=areas,
+        E=e_field,
+        H=h_field,
+    )
+    propagator = StrattonChuPropagator(currents, c=_C0, eps0=_EPS0, mu0=_MU0, device="cpu")
+    out = propagator.propagate_points([[0.0, 0.0, 12.0]], batch_size=4096)
+    assert tuple(out["E"].shape) == (1, 3)
+    assert float(torch.max(torch.abs(out["E"]))) > 0.0
+
+
+def test_curved_sphere_huygens_reproduces_hertzian_dipole_far_field():
+    """A spherical (curved, tilted-normal) Huygens surface enclosing a Hertzian
+    dipole radiates the dipole's exact far field: E_theta matches the analytic
+    dipole to quadrature error, the cross-polar E_phi is machine zero, and the
+    reconstructed directivity is the 1.5 sin^2(theta) Hertzian pattern peaking
+    broadside. This is the surface-equivalence far field on a non-box surface."""
+    frequency = 1.0e9
+    sphere_radius = 0.10
+    obs_radius = 12.0
+    points, normals, areas, e_field, h_field = _hertzian_dipole_sphere_samples(
+        frequency, sphere_radius, 64, 128
+    )
+    currents = equivalent_surface_currents_from_surface_samples(
+        frequency=frequency,
+        points=points,
+        normals=normals,
+        areas=areas,
+        E=e_field,
+        H=h_field,
+    )
+    transformer = NearFieldFarFieldTransformer(currents, c=_C0, eps0=_EPS0, mu0=_MU0, device="cpu")
+
+    theta = torch.linspace(0.0, math.pi, 91, dtype=torch.float64)
+    phi = torch.zeros_like(theta)
+    far = transformer.transform(theta, phi, radius=obs_radius, batch_size=4096)
+    analytic = _hertzian_far_e_theta(frequency, obs_radius, theta)
+    rel = torch.linalg.norm(far["E_theta"] - analytic) / torch.linalg.norm(analytic)
+    assert float(rel) < 1e-3
+    cross_pol = torch.max(torch.abs(far["E_phi"])) / torch.max(torch.abs(far["E_theta"]))
+    assert float(cross_pol) < 1e-6
+
+    theta_grid, phi_grid = torch.broadcast_tensors(
+        torch.linspace(0.0, math.pi, 61, dtype=torch.float64)[:, None],
+        torch.linspace(0.0, 2.0 * math.pi, 121, dtype=torch.float64)[None, :],
+    )
+    far_sphere = transformer.transform(theta_grid, phi_grid, radius=obs_radius, batch_size=8192)
+    directivity = compute_directivity(far_sphere)
+    assert abs(float(directivity["D_max"]) - 1.5) < 0.02
+    assert abs(math.degrees(float(directivity["D_max_theta"])) - 90.0) < 1.0
+
+
+def test_curved_huygens_surface_far_field_is_radius_independent():
+    """Surface equivalence: the far field radiated from the equivalent currents
+    on two different enclosing spheres must agree, because both enclose the same
+    interior source. A convention or weighting bug would break this."""
+    frequency = 1.0e9
+    obs_radius = 12.0
+    theta = torch.linspace(0.0, math.pi, 91, dtype=torch.float64)
+    phi = torch.zeros_like(theta)
+
+    def _far(sphere_radius):
+        points, normals, areas, e_field, h_field = _hertzian_dipole_sphere_samples(
+            frequency, sphere_radius, 64, 128
+        )
+        currents = equivalent_surface_currents_from_surface_samples(
+            frequency=frequency,
+            points=points,
+            normals=normals,
+            areas=areas,
+            E=e_field,
+            H=h_field,
+        )
+        transformer = NearFieldFarFieldTransformer(currents, c=_C0, eps0=_EPS0, mu0=_MU0, device="cpu")
+        return transformer.transform(theta, phi, radius=obs_radius, batch_size=4096)["E_theta"]
+
+    inner = _far(0.10)
+    outer = _far(0.16)
+    rel = torch.linalg.norm(outer - inner) / torch.linalg.norm(inner)
+    assert float(rel) < 1e-3

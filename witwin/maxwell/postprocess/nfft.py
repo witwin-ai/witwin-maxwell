@@ -7,6 +7,7 @@ import torch
 from .stratton_chu import (
     EquivalentCurrentsSurface,
     PlanarEquivalentCurrents,
+    SurfaceEquivalentCurrents,
     _as_1d_coords,
     _background_wavenumber_and_impedance,
     _normalize_currents_collection,
@@ -47,7 +48,7 @@ def _broadcast_radius(radius, shape: tuple[int, ...], *, device: torch.device, d
 class NearFieldFarFieldTransformer:
     def __init__(
         self,
-        currents: PlanarEquivalentCurrents | EquivalentCurrentsSurface,
+        currents: PlanarEquivalentCurrents | EquivalentCurrentsSurface | SurfaceEquivalentCurrents,
         *,
         solver=None,
         c: float | None = None,
@@ -71,7 +72,7 @@ class NearFieldFarFieldTransformer:
             self._surfaces, background_eps_r, background_mu_r
         )
         self.frequency = float(self._surfaces[0].frequency)
-        self.coord_dtype = self._surfaces[0].u.dtype
+        self.coord_dtype = self._surfaces[0].coord_dtype
         self.field_dtype = _resolve_complex_dtype(*(surface.J for surface in self._surfaces), *(surface.M for surface in self._surfaces))
         self.omega = 2.0 * math.pi * self.frequency
         self.eta0 = math.sqrt(self.mu0 / self.eps0)
@@ -90,10 +91,10 @@ class NearFieldFarFieldTransformer:
         weighted_j = []
         weighted_m = []
         for surface in self._surfaces:
-            weights = surface.weights_2d()[..., None].to(dtype=surface.J.real.dtype)
-            source_points.append(surface.plane_points().reshape(-1, 3))
-            weighted_j.append((surface.J * weights.to(dtype=surface.J.dtype)).reshape(-1, 3))
-            weighted_m.append((surface.M * weights.to(dtype=surface.M.dtype)).reshape(-1, 3))
+            points, surface_j, surface_m = surface.quadrature()
+            source_points.append(points.reshape(-1, 3))
+            weighted_j.append(surface_j.reshape(-1, 3))
+            weighted_m.append(surface_m.reshape(-1, 3))
 
         self._src_points = torch.cat(source_points, dim=0).to(device=self.device, dtype=self.coord_dtype)
         self._J_w = torch.cat(weighted_j, dim=0).to(device=self.device, dtype=self.field_dtype)
