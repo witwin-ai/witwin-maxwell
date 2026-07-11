@@ -275,8 +275,8 @@ def test_grating_tfsf_rejects_box_tfsf_with_bloch_boundaries():
         simulation.prepare()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
-def test_tfsf_slab_runtime_reports_unsupported_until_state_exists():
+def _nonperiodic_slab_scene(*, direction=(0.0, 0.0, 1.0), polarization=(1.0, 0.0, 0.0),
+                            source_time=None, injection=None):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
         grid=mw.GridSpec.uniform(0.12),
@@ -285,16 +285,67 @@ def test_tfsf_slab_runtime_reports_unsupported_until_state_exists():
     )
     scene.add_source(
         mw.PlaneWave(
-            direction=(0.0, 0.0, 1.0),
-            polarization=(1.0, 0.0, 0.0),
-            source_time=mw.CW(frequency=1.0e9, amplitude=20.0),
-            injection=mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
+            direction=direction,
+            polarization=polarization,
+            source_time=source_time if source_time is not None else mw.CW(frequency=1.0e9, amplitude=20.0),
+            injection=injection if injection is not None else mw.TFSF.slab(axis="z", bounds=(-0.24, 0.24)),
             name="slab_tfsf",
         )
     )
-    simulation = mw.Simulation.fdtd(scene, frequencies=[1.0e9], run_time=mw.TimeConfig(time_steps=1))
-    with pytest.raises(NotImplementedError, match="TFSF slab"):
-        simulation.prepare()
+    scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")))
+    return scene
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
+def test_nonperiodic_tfsf_slab_initializes_axis_aligned_state():
+    prepared = mw.Simulation.fdtd(
+        _nonperiodic_slab_scene(),
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig(time_steps=1),
+        absorber="cpml",
+    ).prepare()
+    solver = prepared.solver
+    state = solver._tfsf_state
+    assert solver.tfsf_enabled is True
+    assert state["provider"] == "plane_wave_axis_aligned"
+    assert state["mode"] == "slab"
+    assert state["axis"] == "z"
+    assert state["lower"][2] < state["upper"][2]
+    assert len(state["electric_terms"]) > 0
+    assert len(state["magnetic_terms"]) > 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
+def test_nonperiodic_tfsf_slab_rejects_oblique_incidence():
+    scene = _nonperiodic_slab_scene(
+        direction=(0.2, 0.0, 0.9797958971132712),
+        polarization=(0.0, 1.0, 0.0),
+    )
+    with pytest.raises(ValueError, match="normally incident"):
+        mw.Simulation.fdtd(scene, frequencies=[1.0e9], run_time=mw.TimeConfig(time_steps=1)).prepare()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_nonperiodic_tfsf_slab_forward_confines_total_field():
+    bounds = (-0.24, 0.24)
+    result = mw.Simulation.fdtd(
+        _nonperiodic_slab_scene(injection=mw.TFSF.slab(axis="z", bounds=bounds)),
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig(time_steps=96),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+        full_field_dft=True,
+        absorber="cpml",
+    ).run()
+
+    field, z_coords = _component_volume(result, "Ex")
+    assert np.isfinite(np.abs(field)).all()
+    leakage_ratio, inside_max, outside_max = _normal_slab_ratio(
+        field, z_coords, bounds, dz=result.solver.scene.dz
+    )
+    # The plane wave lives in the total-field slab; the scattered region outside the
+    # two z-faces must not carry the incident field for an empty (no-scatterer) run.
+    assert inside_max > 0.0
+    assert leakage_ratio < 0.2
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")

@@ -283,7 +283,7 @@ def _spec_positions(solver, spec):
 
 
 def _initialize_axis_aligned_plane_wave_auxiliary_state(
-    solver, source, lower, upper, axis: str, direction_sign: int, deltas
+    solver, source, lower, upper, axis: str, direction_sign: int, deltas, *, slab_axis=None
 ):
     electric_vector = {
         "Ex": source["polarization"][0],
@@ -293,7 +293,13 @@ def _initialize_axis_aligned_plane_wave_auxiliary_state(
     magnetic_vector = magnetic_unit_vector(source["direction"], source["polarization"])
     aux = _make_directional_auxiliary_grid(solver, source["direction"], float(deltas[axis]))
 
-    electric_specs, magnetic_specs = build_discrete_tfsf_specs(lower, upper)
+    # A slab injection keeps only the two faces normal to the propagation axis; the
+    # total-field region fills the whole transverse span, so no transverse-face
+    # corrections exist (the transverse boundary absorbs/wraps the field directly).
+    if slab_axis is None:
+        electric_specs, magnetic_specs = build_discrete_tfsf_specs(lower, upper)
+    else:
+        electric_specs, magnetic_specs = build_slab_tfsf_specs(lower, upper, axis=slab_axis)
 
     def build_axis_term(spec, coeff_patch, component_scale):
         sample_indices = axis_aligned_sample_indices(
@@ -680,6 +686,41 @@ def _initialize_analytic_tfsf_state(solver, source, lower, upper, deltas):
     )
 
 
+def _initialize_nonperiodic_slab_state(solver, source, lower, upper, deltas):
+    """Slab TFSF with non-periodic (PML/absorbing) transverse boundaries.
+
+    A two-face slab injects a plane wave that fills the whole transverse cross
+    section. With absorbing transverse boundaries this is only well posed for a
+    wave that is uniform across that cross section, i.e. normal incidence along
+    the slab axis; an oblique wave would carry a transverse phase gradient that
+    the omitted transverse faces cannot terminate (that case needs Bloch
+    transverse boundaries and is handled by the grating slab path). The state is
+    built on the same axis-aligned auxiliary-line provider the box TFSF uses, so
+    both CW and pulsed source_times are supported and the forward/adjoint runtime
+    needs no slab-specific branch.
+    """
+    axis = source["injection"]["axis"]
+    if source["kind"] != "plane_wave":
+        raise ValueError("Non-periodic TFSF slab injection requires a PlaneWave source.")
+    axis_direction = axis_aligned_direction(source["direction"])
+    if axis_direction is None or axis_direction[0] != axis:
+        raise ValueError(
+            "A TFSF slab with non-periodic transverse boundaries must be a plane wave "
+            f"normally incident along the slab axis {axis!r}; use Bloch transverse "
+            "boundaries for oblique-incidence (grating) slab injection."
+        )
+    _initialize_axis_aligned_plane_wave_auxiliary_state(
+        solver,
+        source,
+        lower,
+        upper,
+        axis_direction[0],
+        axis_direction[1],
+        deltas,
+        slab_axis=axis,
+    )
+
+
 def initialize_tfsf_state(solver):
     compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())
     if not compiled_sources and getattr(solver, "_compiled_source", None) is not None:
@@ -707,7 +748,13 @@ def initialize_tfsf_state(solver):
             _validate_slab_interfaces_are_vacuum(solver, lower, upper, source["injection"]["axis"])
             _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds, deltas)
             return
-        raise NotImplementedError("TFSF slab runtime support is not implemented yet.")
+        axis = source["injection"]["axis"]
+        lower, upper, _bounds = resolve_tfsf_region_indices(solver, source["injection"])
+        deltas = _validate_locally_uniform_region(solver, lower, upper)
+        _validate_slab_normal_bounds(solver, lower, upper, axis)
+        _validate_slab_interfaces_are_vacuum(solver, lower, upper, axis)
+        _initialize_nonperiodic_slab_state(solver, source, lower, upper, deltas)
+        return
     if solver.scene.boundary.uses_kind("bloch"):
         raise NotImplementedError("TFSF slab mode is required for Bloch-boundary TFSF injection.")
     if solver.scene.boundary.uses_kind("periodic"):

@@ -1647,9 +1647,6 @@ def solve(
 ):
     if solver.verbose:
         print(f"Starting 3D FDTD simulation (Yee grid), grid size: {solver.Nx}x{solver.Ny}x{solver.Nz}")
-    tfsf_state = getattr(solver, "_tfsf_state", None)
-    if isinstance(tfsf_state, dict) and tfsf_state.get("runtime_pending", False):
-        raise NotImplementedError("TFSF slab forward runtime support is not implemented yet.")
     if normalize_source and len(getattr(solver, "_compiled_sources", ())) != 1:
         raise NotImplementedError("normalize_source currently requires exactly one compiled source.")
     solver._normalize_source = normalize_source
