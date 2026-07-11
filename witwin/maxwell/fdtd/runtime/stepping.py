@@ -1708,10 +1708,10 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         _field_update_block(solver, time_value)
 
     # v1 scope: the standard real-field path (optionally conductive), linear
-    # electric/magnetic dispersion, and the instantaneous nonlinear family
-    # (Kerr chi3, chi2, and two-photon-absorption loss). TFSF and magnetic
-    # sources put per-step host input inside the block; the complex (Bloch) path
-    # carries extra evolving state left to a later iteration.
+    # electric/magnetic dispersion, the instantaneous nonlinear family (Kerr chi3,
+    # chi2, and two-photon-absorption loss), and the complex split-field Bloch path
+    # (optionally with a single CPML axis). TFSF and magnetic sources put per-step
+    # host input inside the block, so those scenes stay on the eager path.
     #
     # Linear dispersion is safe to capture: the Debye/Drude/Lorentz ADE advance and
     # the polarization-current subtraction launch persistent per-pole state tensors
@@ -1731,12 +1731,23 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     # nonlinear polarization vanishes at E = 0 (P ~ chi2 E^2, chi3 |E|^2 E, and
     # sigma_NL ~ |E|^2), collapsing the dynamic coefficients to their linear values,
     # so the zero field remains a fixed point through warmup/capture.
+    #
+    # The complex (split-field Bloch) path is safe to capture too: a Bloch-periodic
+    # scene marches a second real FDTD copy (the imaginary split field) through the
+    # same magnetic/electric curl+decay kernels, coupled only by a fixed per-axis
+    # wrap phase (cos/sin of the Bloch wavevector, constant for the whole run), so
+    # the block carries no per-step host input. The extra state it evolves -- the
+    # imaginary E/H fields and their CPML psi memory -- is snapshotted alongside the
+    # real fields below (the imaginary psi tensors already match the ``psi`` prefix),
+    # and the split update is linear with zero forcing at E = H = 0, so the zero
+    # field (real and imaginary) stays a fixed point through warmup/capture. The
+    # complex running DFT keeps the host tail (build_dft_step_tables declines the GPU
+    # weight table for complex fields), so only the field-update block is captured.
     graphable = (
         use_cuda_graph
         and torch.cuda.is_available()
         and not solver.tfsf_enabled
         and not solver._magnetic_source_terms
-        and not has_complex_fields(solver)
         # The modulated E update consumes per-step host phase scalars, which a
         # captured CUDA graph would freeze at their capture-time values.
         and not getattr(solver, "modulation_enabled", False)
@@ -1748,13 +1759,19 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         return normal
     from ..cuda.runtime.graph import CudaGraphRunner
 
-    # Snapshot the state this block mutates (fields + CPML psi) so warmup/capture
-    # do not perturb the physical run, then restore before stepping begins.
+    # Snapshot the state this block mutates (real + imaginary fields, CPML psi) so
+    # warmup/capture do not perturb the physical run, then restore before stepping
+    # begins. The imaginary split fields exist only on the complex Bloch path; on
+    # the real path they are absent from ``vars(solver)`` and drop out naturally.
+    snapshot_field_names = (
+        "Ex", "Ey", "Ez", "Hx", "Hy", "Hz",
+        "Ex_imag", "Ey_imag", "Ez_imag", "Hx_imag", "Hy_imag", "Hz_imag",
+    )
     state = {
         k: v
         for k, v in vars(solver).items()
         if isinstance(v, torch.Tensor)
-        and (k in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz") or k.startswith("psi"))
+        and (k in snapshot_field_names or k.startswith("psi"))
     }
     saved = {k: v.clone() for k, v in state.items()}
 
