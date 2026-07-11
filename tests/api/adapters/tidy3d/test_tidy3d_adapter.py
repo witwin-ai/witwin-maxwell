@@ -75,14 +75,38 @@ def _make_mock_tidy3d():
     class Box(_Recorder): pass
     class Sphere(_Recorder): pass
     class Cylinder(_Recorder): pass
+    class PolySlab(_Recorder): pass
     class Structure(_Recorder): pass
     class PointDipole(_Recorder): pass
     class PlaneWave(_Recorder): pass
     class GaussianBeam(_Recorder): pass
+    class AstigmaticGaussianBeam(_Recorder): pass
+    class ModeSource(_Recorder): pass
+    class ModeSpec(_Recorder): pass
+    class TFSF(_Recorder): pass
+    class UniformCurrentSource(_Recorder): pass
+    class CustomCurrentSource(_Recorder): pass
+    class CustomFieldSource(_Recorder): pass
+    class FieldDataset(_Recorder): pass
     class FieldMonitor(_Recorder): pass
     class FluxMonitor(_Recorder): pass
+    class ModeMonitor(_Recorder): pass
+    class DiffractionMonitor(_Recorder): pass
+    class PermittivityMonitor(_Recorder): pass
+    class FieldTimeMonitor(_Recorder): pass
+    class FluxTimeMonitor(_Recorder): pass
     class ContinuousWave(_Recorder): pass
     class GaussianPulse(_Recorder): pass
+
+    class ScalarFieldDataArray:
+        def __init__(self, data, coords=None):
+            self.data = data
+            self.coords = coords
+
+    class TriangleMesh(_Recorder):
+        @classmethod
+        def from_vertices_faces(cls, vertices, faces):
+            return cls(vertices=vertices, faces=faces)
     class PML(_Recorder): pass
     class Periodic(_Recorder): pass
     class PECBoundary(_Recorder): pass
@@ -122,12 +146,28 @@ def _make_mock_tidy3d():
     td.Box = Box
     td.Sphere = Sphere
     td.Cylinder = Cylinder
+    td.PolySlab = PolySlab
+    td.TriangleMesh = TriangleMesh
     td.Structure = Structure
     td.PointDipole = PointDipole
     td.PlaneWave = PlaneWave
     td.GaussianBeam = GaussianBeam
+    td.AstigmaticGaussianBeam = AstigmaticGaussianBeam
+    td.ModeSource = ModeSource
+    td.ModeSpec = ModeSpec
+    td.TFSF = TFSF
+    td.UniformCurrentSource = UniformCurrentSource
+    td.CustomCurrentSource = CustomCurrentSource
+    td.CustomFieldSource = CustomFieldSource
+    td.FieldDataset = FieldDataset
+    td.ScalarFieldDataArray = ScalarFieldDataArray
     td.FieldMonitor = FieldMonitor
     td.FluxMonitor = FluxMonitor
+    td.ModeMonitor = ModeMonitor
+    td.DiffractionMonitor = DiffractionMonitor
+    td.PermittivityMonitor = PermittivityMonitor
+    td.FieldTimeMonitor = FieldTimeMonitor
+    td.FluxTimeMonitor = FluxTimeMonitor
     td.ContinuousWave = ContinuousWave
     td.GaussianPulse = GaussianPulse
     td.PML = PML
@@ -1316,11 +1356,70 @@ class TestGeometryConversion:
         assert result.axis == 1
         assert result.length == 2.0
 
-    def test_unsupported_geometry(self, inject_mock_tidy3d):
+    def test_torus_exports_as_triangle_mesh(self, inject_mock_tidy3d):
+        # A torus has no analytic Tidy3D primitive, so it tessellates to a TriangleMesh
+        # built from the primitive's own surface mesh (vertices scaled to Tidy3D units).
         td = inject_mock_tidy3d
         geom = mw.Torus(position=(0, 0, 0), major_radius=1.0, minor_radius=0.3)
-        with pytest.raises(NotImplementedError, match="torus"):
-            _convert_geometry(geom, td, 1.0)
+        result = _convert_geometry(geom, td, 2.0)
+        assert isinstance(result, td.TriangleMesh)
+        # Faces are an integer connectivity table (never length-scaled); vertices are
+        # scaled by the metre->Tidy3D length factor.
+        assert result.faces.shape[1] == 3
+        expected_vertices, _ = geom.to_mesh()
+        assert result.vertices.shape == tuple(expected_vertices.shape)
+        assert result.vertices.max() == pytest.approx(float(expected_vertices.max()) * 2.0, rel=1e-5)
+
+    @pytest.mark.parametrize(
+        "geom",
+        [
+            mw.Pyramid(position=(0, 0, 0), base_size=0.6, height=0.5),
+            mw.HollowBox(position=(0, 0, 0), outer_size=(0.6, 0.6, 0.6), inner_size=(0.4, 0.4, 0.4)),
+            mw.Prism(position=(0, 0, 0), radius=0.3, height=0.4, num_sides=6),
+            mw.Ellipsoid(position=(0, 0, 0), radii=(0.3, 0.2, 0.15)),
+        ],
+    )
+    def test_mesh_only_primitives_export_as_triangle_mesh(self, inject_mock_tidy3d, geom):
+        td = inject_mock_tidy3d
+        result = _convert_geometry(geom, td, 1.0)
+        assert isinstance(result, td.TriangleMesh)
+
+    def test_isotropic_ellipsoid_stays_analytic_sphere(self, inject_mock_tidy3d):
+        # Radii equal on all axes: prefer Tidy3D's exact analytic Sphere over a mesh.
+        td = inject_mock_tidy3d
+        geom = mw.Ellipsoid(position=(1, 0, 0), radii=(0.5, 0.5, 0.5))
+        result = _convert_geometry(geom, td, 1.0)
+        assert isinstance(result, td.Sphere)
+        assert result.radius == pytest.approx(0.5)
+
+    def test_simple_poly_slab_exports_as_poly_slab(self, inject_mock_tidy3d):
+        # An un-rotated, origin-centred, vertical PolySlab maps to the faithful Tidy3D
+        # PolySlab primitive: polygon vertices and axial slab_bounds scale by length_scale.
+        td = inject_mock_tidy3d
+        geom = mw.PolySlab(
+            vertices=[(-0.3, -0.3), (0.3, -0.3), (0.3, 0.3), (-0.3, 0.3)],
+            bounds=(-0.1, 0.2),
+            axis="z",
+        )
+        result = _convert_geometry(geom, td, 10.0)
+        assert isinstance(result, td.PolySlab)
+        assert result.axis == 2
+        assert result.slab_bounds == pytest.approx((-1.0, 2.0))
+        assert result.vertices[0] == pytest.approx((-3.0, -3.0))
+        assert result.reference_plane == "middle"
+
+    def test_tapered_poly_slab_falls_back_to_triangle_mesh(self, inject_mock_tidy3d):
+        # A sidewall taper (or rotation/offset) is baked into a TriangleMesh because Tidy3D's
+        # PolySlab primitive only maps exactly for the vertical, untransformed case.
+        td = inject_mock_tidy3d
+        geom = mw.PolySlab(
+            vertices=[(-0.3, -0.3), (0.3, -0.3), (0.3, 0.3)],
+            bounds=(-0.1, 0.1),
+            axis="z",
+            sidewall_angle=0.15,
+        )
+        result = _convert_geometry(geom, td, 1.0)
+        assert isinstance(result, td.TriangleMesh)
 
 
 class TestSourceConversion:
@@ -1350,6 +1449,125 @@ class TestSourceConversion:
         assert result.direction == "+"
         # Source plane should be zero-thickness along z.
         assert result.size[2] == 0.0
+
+    def test_mode_source(self, inject_mock_tidy3d):
+        # A ModeSource exports as a Tidy3D ModeSource carrying a ModeSpec resolving at
+        # least mode_index + 1 modes; the plane is zero-thickness along its normal axis.
+        td = inject_mock_tidy3d
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        src = mw.ModeSource(
+            position=(0, 0, 0.5), size=(1.0, 1.0, 0.0), mode_index=1, direction="-",
+            source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13), name="p0",
+        )
+        result = _convert_source(src, scene, td, 2.0)
+        assert isinstance(result, td.ModeSource)
+        assert result.direction == "-"
+        assert result.mode_index == 1
+        assert isinstance(result.mode_spec, td.ModeSpec)
+        assert result.mode_spec.num_modes == 2
+        assert result.center == pytest.approx((0.0, 0.0, 1.0))
+        assert result.size[2] == 0.0
+
+    def test_astigmatic_gaussian_beam(self, inject_mock_tidy3d):
+        # AstigmaticGaussianBeam maps to Tidy3D's AstigmaticGaussianBeam with per-axis
+        # waist sizes and per-axis waist distances, all length-scaled.
+        td = inject_mock_tidy3d
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        src = mw.AstigmaticGaussianBeam(
+            direction=(0, 0, 1), polarization=(1, 0, 0), beam_waist=(0.5, 0.6),
+            focus=(0, 0, 0.2), focus_u=0.1, focus_v=0.15,
+            source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
+        )
+        result = _convert_source(src, scene, td, 2.0)
+        assert isinstance(result, td.AstigmaticGaussianBeam)
+        assert result.waist_sizes == pytest.approx((1.0, 1.2))
+        assert result.waist_distances == pytest.approx((0.2, 0.3))
+        assert result.center[2] == pytest.approx(0.4)
+        assert result.size[2] == 0.0
+
+    def test_uniform_current_source(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        src = mw.UniformCurrentSource(
+            size=(0.4, 0.4, 0.4), polarization="Ez", center=(0.1, 0.0, 0.0),
+            source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
+        )
+        result = _convert_source(src, scene, td, 2.0)
+        assert isinstance(result, td.UniformCurrentSource)
+        assert result.polarization == "Ez"
+        assert result.center == pytest.approx((0.2, 0.0, 0.0))
+        assert result.size == pytest.approx((0.8, 0.8, 0.8))
+
+    def test_tfsf_box_injection_exports_tfsf(self, inject_mock_tidy3d):
+        # A plane wave injected as a TFSF box exports a Tidy3D TFSF volume source whose box
+        # is the total-field region and whose injection axis is the propagation axis.
+        td = inject_mock_tidy3d
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        src = mw.PlaneWave(
+            direction=(0, 0, 1), polarization=(1, 0, 0),
+            source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
+            injection=mw.TFSF(((-1, 1), (-1, 1), (-0.5, 0.5))),
+        )
+        result = _convert_source(src, scene, td, 2.0)
+        assert isinstance(result, td.TFSF)
+        assert result.injection_axis == 2
+        assert result.direction == "+"
+        assert result.center == pytest.approx((0.0, 0.0, 0.0))
+        assert result.size == pytest.approx((4.0, 4.0, 2.0))
+
+    def test_tfsf_slab_injection_is_infinite_in_transverse(self, inject_mock_tidy3d):
+        # A slab-mode TFSF bounds only the propagation axis; the transverse extent is td.inf.
+        td = inject_mock_tidy3d
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        src = mw.PlaneWave(
+            direction=(0, 0, -1), polarization=(1, 0, 0),
+            source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
+            injection=mw.TFSF.slab(axis="z", bounds=(-1.0, 1.0)),
+        )
+        result = _convert_source(src, scene, td, 1.0)
+        assert isinstance(result, td.TFSF)
+        assert result.injection_axis == 2
+        assert result.direction == "-"
+        assert result.size[0] == td.inf and result.size[1] == td.inf
+        assert result.size[2] == pytest.approx(2.0)
+
+    def test_custom_field_source_dataset_is_relative_to_center(self, inject_mock_tidy3d):
+        # Tidy3D custom-source datasets carry coordinates RELATIVE to the source center,
+        # a single injection frequency, and identity E/H component names.
+        import numpy as _np
+
+        td = inject_mock_tidy3d
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        x = _np.array([-0.5, 0.0, 0.5]); y = _np.array([-0.5, 0.5]); z = _np.array([0.2])
+        ds = mw.FieldDataset((x, y, z), {"Ex": _np.ones((3, 2, 1)), "Hy": _np.full((3, 2, 1), 0.3)})
+        src = mw.CustomFieldSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13))
+        result = _convert_source(src, scene, td, 2.0)
+        assert isinstance(result, td.CustomFieldSource)
+        # Center is the midpoint of each coordinate span, scaled to Tidy3D units.
+        assert result.center == pytest.approx((0.0, 0.0, 0.4))
+        # Spans: x,y are 1.0 wide (x2 = 2.0 um); z is a single sample (zero-thickness plane).
+        assert result.size == pytest.approx((2.0, 2.0, 0.0))
+        field = result.field_dataset
+        assert set(field._kwargs) == {"Ex", "Hy"}
+        # x-coordinates are (coord - center) * length_scale = [-1, 0, 1] um.
+        assert list(field.Ex.coords["x"]) == pytest.approx([-1.0, 0.0, 1.0])
+        assert list(field.Ex.coords["f"]) == pytest.approx([3e14])
+
+    def test_custom_current_source_maps_j_and_m_to_e_and_h(self, inject_mock_tidy3d):
+        # Tidy3D's CustomCurrentSource reuses a FieldDataset whose E/H slots carry the
+        # electric (J) / magnetic (M) currents: Jz -> Ez, Mx -> Hx.
+        import numpy as _np
+
+        td = inject_mock_tidy3d
+        scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+        x = _np.array([-0.5, 0.5]); y = _np.array([-0.5, 0.5]); z = _np.array([-0.1, 0.1])
+        ds = mw.CurrentDataset((x, y, z), {"Jz": _np.ones((2, 2, 2)), "Mx": _np.full((2, 2, 2), 0.3)})
+        src = mw.CustomCurrentSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13))
+        result = _convert_source(src, scene, td, 1.0)
+        assert isinstance(result, td.CustomCurrentSource)
+        assert set(result.current_dataset._kwargs) == {"Ez", "Hx"}
+        assert result.current_dataset.Ez.data.reshape(-1)[0].real == pytest.approx(1.0)
+        assert result.current_dataset.Hx.data.reshape(-1)[0].real == pytest.approx(0.3)
 
 
 class TestSourceTimeConversion:
@@ -1414,20 +1632,77 @@ class TestMonitorConversion:
         assert isinstance(result, td.FluxMonitor)
         assert result.freqs == [1e9, 2e9]
 
-    def test_mode_monitor_exports_as_field_monitor(self, inject_mock_tidy3d):
+    def test_mode_monitor_exports_as_mode_monitor_with_mode_spec(self, inject_mock_tidy3d):
+        # A modal monitor must export as a Tidy3D ModeMonitor carrying a ModeSpec, not a
+        # raw FieldMonitor: the modal decomposition is what distinguishes it, and the mode
+        # solver must resolve at least mode_index + 1 modes.
         td = inject_mock_tidy3d
         mon = mw.ModeMonitor(
             name="port0",
             position=(0.0, 0.0, 0.5),
             size=(1.0, 1.0, 0.0),
+            mode_index=2,
             polarization="Ey",
             frequencies=(1e9,),
         )
         bounds = ((-2, 2), (-2, 2), (-2, 2))
         result = _convert_monitor(mon, bounds, None, td, 1.0)
-        assert isinstance(result, td.FieldMonitor)
+        assert isinstance(result, td.ModeMonitor)
+        assert not isinstance(result, td.FieldMonitor)
         assert result.center[2] == 0.5
         assert result.size[2] == 0.0
+        assert isinstance(result.mode_spec, td.ModeSpec)
+        assert result.mode_spec.num_modes == 3
+        assert result.freqs == [1e9]
+
+    def test_diffraction_monitor_exports_with_infinite_transverse_size(self, inject_mock_tidy3d):
+        # Tidy3D decomposes orders over the whole periodic cell, so the transverse size
+        # must be td.inf; the normal axis stays zero-thickness at the plane position.
+        td = inject_mock_tidy3d
+        mon = mw.DiffractionMonitor(
+            name="orders", position=(0.0, 0.0, 0.5), size=(1.0, 1.0, 0.0), frequencies=(1e9,), normal_direction="+"
+        )
+        bounds = ((-2, 2), (-2, 2), (-2, 2))
+        result = _convert_monitor(mon, bounds, None, td, 1.0)
+        assert isinstance(result, td.DiffractionMonitor)
+        assert result.size == (td.inf, td.inf, 0.0)
+        assert result.center[2] == 0.5
+        assert result.normal_dir == "+"
+
+    def test_permittivity_monitor_exports(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        mon = mw.PermittivityMonitor(name="eps", position=(0.1, 0.2, 0.3), size=(1.0, 2.0, 3.0), frequencies=(1e9,))
+        bounds = ((-2, 2), (-2, 2), (-2, 2))
+        result = _convert_monitor(mon, bounds, None, td, 2.0)
+        assert isinstance(result, td.PermittivityMonitor)
+        assert result.center == pytest.approx((0.2, 0.4, 0.6))
+        assert result.size == pytest.approx((2.0, 4.0, 6.0))
+
+    def test_field_time_monitor_exports_without_frequencies(self, inject_mock_tidy3d):
+        # A time-domain monitor samples the running field, so it must convert even when no
+        # frequencies are supplied (unlike frequency-domain monitors).
+        td = inject_mock_tidy3d
+        mon = mw.FieldTimeMonitor(
+            name="probe_t", components=("Ex", "Hz"), position=(0.0, 0.0, 0.0), size=(0.0, 0.0, 0.0),
+            start=10, stop=100, interval=2,
+        )
+        bounds = ((-2, 2), (-2, 2), (-2, 2))
+        result = _convert_monitor(mon, bounds, None, td, 1.0)
+        assert isinstance(result, td.FieldTimeMonitor)
+        assert result.start == 10
+        assert result.stop == 100
+        assert result.interval == 2
+        assert list(result.fields) == ["Ex", "Hz"]
+
+    def test_flux_time_monitor_exports_as_plane(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        mon = mw.FluxTimeMonitor(name="flux_t", axis="z", position=1.0, start=0, interval=1, normal_direction="-")
+        bounds = ((-2, 2), (-2, 2), (-2, 2))
+        result = _convert_monitor(mon, bounds, None, td, 1.0)
+        assert isinstance(result, td.FluxTimeMonitor)
+        assert result.center[2] == 1.0
+        assert result.size[2] == 0.0
+        assert result.normal_dir == "-"
 
     def test_monitor_without_frequencies_raises(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
@@ -1533,3 +1808,162 @@ class TestFullSceneConversion:
         assert isinstance(sim, td.Simulation)
         assert len(sim.sources) == 0
         assert len(sim.monitors) == 1
+
+
+class TestGeometrySourceMonitorRealTidy3d:
+    """Correctness checks against the genuine tidy3d validators (not the mock).
+
+    These assert the exported objects both satisfy Tidy3D's own field validators AND
+    reproduce the maxwell geometry/placement, so a merely-accepted-but-wrong conversion
+    (wrong axis, unscaled coordinate, absolute-instead-of-relative dataset) is caught.
+    """
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the TriangleMesh geometry check",
+    )
+    def test_torus_triangle_mesh_bounds_match_scaled_extent_real_tidy3d(self):
+        # A torus tessellates to a real TriangleMesh; its axial half-extent equals the
+        # minor radius and its in-plane half-extent the (major + minor) radius, each scaled
+        # to Tidy3D units. A wrong (unscaled) vertex conversion fails by 1e6.
+        from witwin.maxwell.adapters.tidy3d import _convert_geometry
+
+        length_scale = 1.0e6
+        major, minor = 0.5, 0.15
+        with _real_tidy3d() as real_td:
+            geom = mw.Torus(position=(0, 0, 0), major_radius=major, minor_radius=minor, axis="z")
+            mesh = _convert_geometry(geom, real_td, length_scale)
+            assert isinstance(mesh, real_td.TriangleMesh)
+            (xmin, ymin, zmin), (xmax, ymax, zmax) = mesh.bounds
+            assert xmax == pytest.approx((major + minor) * length_scale, rel=1e-4)
+            assert xmin == pytest.approx(-(major + minor) * length_scale, rel=1e-4)
+            assert zmax == pytest.approx(minor * length_scale, rel=1e-4)
+            assert zmin == pytest.approx(-minor * length_scale, rel=1e-4)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the PolySlab geometry check",
+    )
+    def test_simple_poly_slab_inside_matches_real_tidy3d(self):
+        # The exported real PolySlab reproduces the maxwell cross-section: a point inside
+        # the polygon (and slab bounds) is inside, one outside the polygon is outside.
+        import numpy as _np
+
+        from witwin.maxwell.adapters.tidy3d import _convert_geometry
+
+        length_scale = 1.0e6
+        with _real_tidy3d() as real_td:
+            geom = mw.PolySlab(
+                vertices=[(-0.3, -0.3), (0.3, -0.3), (0.3, 0.3), (-0.3, 0.3)],
+                bounds=(-0.1, 0.1),
+                axis="z",
+            )
+            slab = _convert_geometry(geom, real_td, length_scale)
+            assert isinstance(slab, real_td.PolySlab)
+            inside = slab.inside(_np.array([0.0]), _np.array([0.0]), _np.array([0.0]))
+            outside = slab.inside(_np.array([0.4 * length_scale]), _np.array([0.0]), _np.array([0.0]))
+            assert bool(inside[0]) is True
+            assert bool(outside[0]) is False
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the ModeSource/ModeMonitor check",
+    )
+    def test_mode_source_and_monitor_build_in_real_tidy3d(self):
+        # ModeSource/ModeMonitor build under Tidy3D's own validators with a ModeSpec whose
+        # num_modes covers the requested order, and the plane is normal to its zero axis.
+        from witwin.maxwell.adapters.tidy3d import _convert_monitor, _convert_source
+
+        with _real_tidy3d() as real_td:
+            scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+            src = _convert_source(
+                mw.ModeSource(
+                    position=(0, 0, 0.5), size=(1.0, 1.0, 0.0), mode_index=2, direction="+",
+                    source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
+                ),
+                scene, real_td, 1.0e6,
+            )
+            assert isinstance(src, real_td.ModeSource)
+            assert src.mode_spec.num_modes == 3
+            assert src.mode_index == 2
+            mon = _convert_monitor(
+                mw.ModeMonitor(name="mm", position=(0, 0, 0.5), size=(1.0, 1.0, 0.0), mode_index=1, frequencies=(3e14,)),
+                ((-2, 2), (-2, 2), (-2, 2)), None, real_td, 1.0e6,
+            )
+            assert isinstance(mon, real_td.ModeMonitor)
+            assert mon.mode_spec.num_modes == 2
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the DiffractionMonitor validator check",
+    )
+    def test_diffraction_monitor_builds_in_real_tidy3d(self):
+        # Tidy3D's DiffractionMonitor validator REQUIRES td.inf transverse size; the export
+        # building successfully proves the transverse extent was set to inf (a finite size
+        # raises inside tidy3d).
+        from witwin.maxwell.adapters.tidy3d import _convert_monitor
+
+        with _real_tidy3d() as real_td:
+            mon = _convert_monitor(
+                mw.DiffractionMonitor(name="d", position=(0, 0, 0.5), size=(1.0, 1.0, 0.0), frequencies=(3e14,)),
+                ((-2, 2), (-2, 2), (-2, 2)), None, real_td, 1.0e6,
+            )
+            assert isinstance(mon, real_td.DiffractionMonitor)
+            assert mon.size[0] == real_td.inf and mon.size[1] == real_td.inf
+            assert mon.size[2] == 0.0
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the custom-source dataset convention check",
+    )
+    def test_custom_field_source_relative_coordinates_real_tidy3d(self):
+        # Tidy3D custom-source datasets are RELATIVE to the source center. Adding the center
+        # back to the exported relative coordinates must recover the maxwell absolute
+        # coordinates scaled to um, and the tidy3d validators (single freq, interpolatable)
+        # must accept the source.
+        import numpy as _np
+
+        from witwin.maxwell.adapters.tidy3d import _convert_source
+
+        length_scale = 1.0e6
+        with _real_tidy3d() as real_td:
+            scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+            x = _np.array([-0.5, 0.0, 0.5]); y = _np.array([-0.5, 0.5]); z = _np.array([0.2])
+            ds = mw.FieldDataset((x, y, z), {"Ex": _np.ones((3, 2, 1)), "Hy": _np.full((3, 2, 1), 0.3)})
+            src = _convert_source(
+                mw.CustomFieldSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13)),
+                scene, real_td, length_scale,
+            )
+            assert isinstance(src, real_td.CustomFieldSource)
+            ex = src.field_dataset.Ex
+            abs_x = _np.asarray(ex.coords["x"]) + src.center[0]
+            assert list(abs_x) == pytest.approx(list(x * length_scale))
+            assert list(_np.asarray(ex.coords["f"])) == pytest.approx([3e14])
+            # Center is the midpoint of the (single-sample) z span, scaled to um.
+            assert src.center[2] == pytest.approx(0.2 * length_scale)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the current-source J/M convention check",
+    )
+    def test_custom_current_source_j_m_map_to_e_h_real_tidy3d(self):
+        # Tidy3D's CustomCurrentSource injects a FieldDataset whose E/H slots ARE the
+        # electric (J) and magnetic (M) currents. The real source must carry Jz in Ez and
+        # Mx in Hx with the physical amplitudes, and pass Tidy3D's validators.
+        import numpy as _np
+
+        from witwin.maxwell.adapters.tidy3d import _convert_source
+
+        with _real_tidy3d() as real_td:
+            scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
+            x = _np.array([-0.5, 0.5]); y = _np.array([-0.5, 0.5]); z = _np.array([-0.1, 0.1])
+            ds = mw.CurrentDataset((x, y, z), {"Jz": _np.ones((2, 2, 2)), "Mx": _np.full((2, 2, 2), 0.3)})
+            src = _convert_source(
+                mw.CustomCurrentSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13)),
+                scene, real_td, 1.0e6,
+            )
+            assert isinstance(src, real_td.CustomCurrentSource)
+            assert src.current_dataset.Ez is not None
+            assert src.current_dataset.Hx is not None
+            assert complex(src.current_dataset.Ez.values.reshape(-1)[0]).real == pytest.approx(1.0)
+            assert complex(src.current_dataset.Hx.values.reshape(-1)[0]).real == pytest.approx(0.3)

@@ -736,6 +736,65 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
 # Geometry conversion (all lengths scaled)
 # ---------------------------------------------------------------------------
 
+def _triangle_mesh(geometry, td, s):
+    """Tessellate a maxwell SDF primitive into a Tidy3D ``TriangleMesh``.
+
+    Every ``witwin.core`` primitive exposes ``to_mesh() -> (vertices, faces)`` with the
+    structure's position/rotation already baked into the (metre) vertices, so the mesh is
+    in absolute world coordinates. Scaling the vertices by the metre->Tidy3D length factor
+    (leaving the integer face table untouched) gives the exact same watertight surface
+    Tidy3D voxelizes onto its Yee grid, so a primitive that has no analytic Tidy3D
+    counterpart (torus, pyramid, prism, hollow box, general ellipsoid) still round-trips
+    geometrically rather than being rejected.
+    """
+    import torch  # local import, matching the lazy-torch convention in this module
+
+    vertices, faces = geometry.to_mesh()
+    vertices_np = vertices.detach().cpu().to(torch.float64).numpy() * float(s)
+    faces_np = faces.detach().cpu().to(torch.int64).numpy()
+    return td.TriangleMesh.from_vertices_faces(vertices_np, faces_np)
+
+
+def _poly_slab(geometry, td, s):
+    """Convert an untransformed simple ``PolySlab`` to a Tidy3D ``PolySlab``.
+
+    Tidy3D's ``PolySlab`` carries the transverse polygon plus the axial ``slab_bounds`` in
+    absolute simulation coordinates and applies no position/rotation, so the faithful
+    primitive mapping is exact only when the maxwell slab is un-rotated, centred at the
+    origin, and vertical (``sidewall_angle == 0``). The polygon vertices and slab bounds
+    scale by the metre->Tidy3D length factor; ``reference_plane`` carries across verbatim.
+    A tapered, rotated, or offset slab is baked into a ``TriangleMesh`` instead (its
+    ``to_mesh`` already applies the taper and transform), so no geometry is silently lost.
+    """
+    import torch  # local import, matching the lazy-torch convention in this module
+
+    rotation = getattr(geometry, "rotation", None)
+    if rotation is None:
+        is_identity_rotation = True
+    else:
+        # GeometryBase stores rotation as a unit quaternion; the identity is (1, 0, 0, 0).
+        quat = [float(v) for v in rotation.detach().cpu().tolist()]
+        is_identity_rotation = abs(quat[0] - 1.0) < 1e-12 and all(abs(c) < 1e-12 for c in quat[1:])
+    position = [float(v) for v in geometry.position.detach().cpu().tolist()]
+    sidewall = float(geometry.sidewall_angle.detach().cpu().item())
+    is_simple = (
+        is_identity_rotation
+        and all(abs(component) < 1e-12 for component in position)
+        and abs(sidewall) < 1e-12
+    )
+    if not is_simple:
+        return _triangle_mesh(geometry, td, s)
+
+    vertices = geometry.vertices.detach().cpu().to(torch.float64).numpy() * float(s)
+    lo, hi = geometry.bounds.detach().cpu().to(torch.float64).tolist()
+    return td.PolySlab(
+        vertices=[(float(u), float(v)) for u, v in vertices],
+        slab_bounds=(lo * float(s), hi * float(s)),
+        axis=_axis_name_to_index(geometry.axis),
+        reference_plane=geometry.reference_plane,
+    )
+
+
 def _convert_geometry(geometry, td, s):
     """Convert maxwell geometry to a Tidy3D geometry (lengths x *s*)."""
     kind = geometry.kind
@@ -769,15 +828,22 @@ def _convert_geometry(geometry, td, s):
     if kind == "ellipsoid":
         rx, ry, rz = float(geometry.radii[0]), float(geometry.radii[1]), float(geometry.radii[2])
         if abs(rx - ry) < 1e-12 and abs(ry - rz) < 1e-12:
+            # An isotropic ellipsoid is exactly a sphere; use Tidy3D's analytic
+            # Sphere rather than a tessellated approximation.
             return td.Sphere(center=_scale3(geometry.position, s), radius=rx * s)
-        raise NotImplementedError(
-            "Tidy3D has no native Ellipsoid geometry. "
-            "Consider using a Box approximation or a GDS-based PolySlab."
-        )
+        return _triangle_mesh(geometry, td, s)
+
+    if kind == "poly_slab":
+        return _poly_slab(geometry, td, s)
+
+    if hasattr(geometry, "to_mesh"):
+        # Any remaining primitive with no analytic Tidy3D equivalent (torus, pyramid,
+        # prism, hollow box) tessellates to a TriangleMesh from its own surface mesh.
+        return _triangle_mesh(geometry, td, s)
 
     raise NotImplementedError(
-        f"Geometry type '{kind}' has no Tidy3D mapping yet. "
-        f"Supported: box, sphere, cylinder, cone."
+        f"Geometry type '{kind}' exposes no surface mesh, so it has no Tidy3D geometry mapping. "
+        f"Analytic primitives (box, sphere, cylinder, cone) and any mesh-able primitive are supported."
     )
 
 
@@ -796,9 +862,116 @@ def _convert_structure(structure, td, s, frequencies=None):
 # Source conversion
 # ---------------------------------------------------------------------------
 
-def _convert_source(source, scene, td, s):
+def _tfsf_source(source, scene, td, s):
+    """Convert a total-field/scattered-field-injected plane wave to a Tidy3D ``TFSF``.
+
+    Tidy3D models a TFSF injection as a dedicated ``td.TFSF`` volume source whose box is the
+    total-field region, ``injection_axis`` is the propagation axis, and ``direction`` its sign;
+    the incident wave enters the low face of that axis (``+``) or the high face (``-``). maxwell
+    carries the same information on the ``TFSF`` injection object: a ``box`` mode gives the full
+    (x, y, z) total-field bounds, while a ``slab`` mode bounds only the propagation axis and is
+    infinite in the two transverse directions (a 1D total-field layer). The plane-wave angles reuse
+    the same ``_direction_to_angles`` mapping as the soft plane wave, so a TFSF and a soft plane
+    wave of identical direction inject the same incident field.
+    """
+    from ..sources import TFSF
+
+    injection = source.injection
+    td_source_time = _convert_source_time(source.source_time, td)
+    direction = source.direction
+    injection_axis = resolve_injection_axis(direction, source.injection_axis)
+    axis_idx = _axis_name_to_index(injection_axis)
+    inject_dir = "+" if direction[axis_idx] > 0 else "-"
+    pol_angle, angle_theta, angle_phi = _direction_to_angles(direction, axis_idx)
+
+    if injection.mode == "slab":
+        lo, hi = injection.axis_bounds
+        center = list((b_lo + b_hi) / 2.0 * s for b_lo, b_hi in scene.domain.bounds)
+        size = [td.inf, td.inf, td.inf]
+        center[axis_idx] = 0.5 * (lo + hi) * s
+        size[axis_idx] = (hi - lo) * s
+    else:
+        bounds = injection.bounds
+        center = [0.5 * (lo + hi) * s for lo, hi in bounds]
+        size = [(hi - lo) * s for lo, hi in bounds]
+
+    return td.TFSF(
+        center=tuple(center),
+        size=tuple(size),
+        source_time=td_source_time,
+        direction=inject_dir,
+        injection_axis=axis_idx,
+        pol_angle=pol_angle,
+        angle_theta=angle_theta,
+        angle_phi=angle_phi,
+        name=source.name or "tfsf",
+    )
+
+
+def _custom_source_dataset(dataset, td, freq, s, component_map):
+    """Build a Tidy3D field/current dataset from a maxwell rectilinear dataset.
+
+    Tidy3D custom field/current sources carry a ``FieldDataset`` of ``ScalarFieldDataArray``
+    components on coordinates ``(x, y, z, f)`` that are **relative to the source center** and a
+    single frequency in the source band. maxwell stores absolute-metre coordinates and a
+    time-domain spatial profile, so the center is the midpoint of each coordinate span, the
+    exported coordinates are ``(coord - center) * length_scale`` (um, relative), the frequency
+    axis is the single injection frequency, and ``component_map`` renames maxwell components
+    (identity for field sources; ``J -> E`` / ``M -> H`` for current sources, matching Tidy3D's
+    convention that the current dataset reuses ``E``/``H`` slots for ``J``/``M``). Returns the
+    Tidy3D dataset together with the source center and size in Tidy3D units.
+    """
+    import numpy as _np
+
+    coords_m = dataset.coords
+    center_m = tuple(0.5 * (float(axis[0]) + float(axis[-1])) for axis in coords_m)
+    size_um = tuple((float(axis[-1]) - float(axis[0])) * s for axis in coords_m)
+    rel_coords = tuple(
+        _np.asarray([(float(v) - center_m[i]) * s for v in coords_m[i]], dtype=_np.float64)
+        for i in range(3)
+    )
+    freqs = _np.asarray([float(freq)], dtype=_np.float64)
+    td_components = {}
+    for source_name, values in dataset.components.items():
+        td_name = component_map[source_name]
+        data = _np.asarray(values, dtype=_np.complex128)[..., _np.newaxis]
+        td_components[td_name] = td.ScalarFieldDataArray(
+            data, coords=dict(x=rel_coords[0], y=rel_coords[1], z=rel_coords[2], f=freqs)
+        )
+    return td.FieldDataset(**td_components), tuple(c * s for c in center_m), size_um
+
+
+def _custom_source_frequency(source, frequencies):
+    """Single injection frequency for a custom current/field source export.
+
+    Tidy3D requires the custom dataset to carry exactly one frequency inside the source band. It
+    is taken from the attached ``source_time`` (its characteristic frequency), falling back to the
+    first export frequency when the source has no explicit waveform.
+    """
+    source_time = source.source_time
+    if source_time is not None:
+        return float(source_time.frequency)
+    if frequencies:
+        return float(frequencies[0])
+    raise ValueError(
+        f"Custom source '{source.name}' export needs an injection frequency: attach a source_time "
+        "or pass frequencies=... to Scene.to_tidy3d()."
+    )
+
+
+def _convert_source(source, scene, td, s, frequencies=None):
     """Convert a maxwell source to a Tidy3D source (lengths x *s*)."""
-    from ..sources import PointDipole, PlaneWave, GaussianBeam
+    from ..sources import (
+        AstigmaticGaussianBeam,
+        CustomCurrentSource,
+        CustomFieldSource,
+        GaussianBeam,
+        ModeSource,
+        PlaneWave,
+        PointDipole,
+        TFSF,
+        UniformCurrentSource,
+    )
     domain_bounds = scene.domain.bounds
 
     if isinstance(source, PointDipole):
@@ -812,6 +985,8 @@ def _convert_source(source, scene, td, s):
         )
 
     if isinstance(source, PlaneWave):
+        if isinstance(source.injection, TFSF):
+            return _tfsf_source(source, scene, td, s)
         td_source_time = _convert_source_time(source.source_time, td)
         direction = source.direction
 
@@ -837,7 +1012,9 @@ def _convert_source(source, scene, td, s):
             name=source.name or "plane_wave",
         )
 
-    if isinstance(source, GaussianBeam):
+    if isinstance(source, (GaussianBeam, AstigmaticGaussianBeam)):
+        if isinstance(source.injection, TFSF):
+            return _tfsf_source(source, scene, td, s)
         td_source_time = _convert_source_time(source.source_time, td)
         direction = source.direction
 
@@ -852,6 +1029,20 @@ def _convert_source(source, scene, td, s):
 
         pol_angle, angle_theta, angle_phi = _direction_to_angles(direction, dominant_axis)
 
+        if isinstance(source, AstigmaticGaussianBeam):
+            return td.AstigmaticGaussianBeam(
+                center=tuple(center),
+                size=tuple(size),
+                source_time=td_source_time,
+                direction=inject_dir,
+                pol_angle=pol_angle,
+                angle_theta=angle_theta,
+                angle_phi=angle_phi,
+                waist_sizes=(source.beam_waist[0] * s, source.beam_waist[1] * s),
+                waist_distances=(source.focus_u * s, source.focus_v * s),
+                name=source.name or "astigmatic_gaussian_beam",
+            )
+
         return td.GaussianBeam(
             center=tuple(center),
             size=tuple(size),
@@ -864,8 +1055,64 @@ def _convert_source(source, scene, td, s):
             name=source.name or "gaussian_beam",
         )
 
+    if isinstance(source, ModeSource):
+        td_source_time = _convert_source_time(source.source_time, td)
+        axis_idx = _axis_name_to_index(source.normal_axis)
+        center = list(_scale3(source.position, s))
+        size = list(_scale3(source.size, s))
+        size[axis_idx] = 0.0
+        return td.ModeSource(
+            center=tuple(center),
+            size=tuple(size),
+            source_time=td_source_time,
+            direction=source.direction,
+            mode_spec=td.ModeSpec(num_modes=int(source.mode_index) + 1),
+            mode_index=int(source.mode_index),
+            name=source.name or "mode_source",
+        )
+
+    if isinstance(source, UniformCurrentSource):
+        td_source_time = _convert_source_time(source.source_time, td)
+        return td.UniformCurrentSource(
+            center=_scale3(source.center, s),
+            size=_scale3(source.size, s),
+            source_time=td_source_time,
+            polarization=_polarization_to_component(source.polarization),
+            name=source.name or "uniform_current",
+        )
+
+    if isinstance(source, CustomFieldSource):
+        td_source_time = _convert_source_time(source.source_time, td)
+        freq = _custom_source_frequency(source, frequencies)
+        identity = {name: name for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
+        field_dataset, center, size = _custom_source_dataset(
+            source.field_dataset, td, freq, s, identity
+        )
+        return td.CustomFieldSource(
+            center=center,
+            size=size,
+            source_time=td_source_time,
+            field_dataset=field_dataset,
+            name=source.name or "custom_field",
+        )
+
+    if isinstance(source, CustomCurrentSource):
+        td_source_time = _convert_source_time(source.source_time, td)
+        freq = _custom_source_frequency(source, frequencies)
+        current_map = {"Jx": "Ex", "Jy": "Ey", "Jz": "Ez", "Mx": "Hx", "My": "Hy", "Mz": "Hz"}
+        current_dataset, center, size = _custom_source_dataset(
+            source.current_dataset, td, freq, s, current_map
+        )
+        return td.CustomCurrentSource(
+            center=center,
+            size=size,
+            source_time=td_source_time,
+            current_dataset=current_dataset,
+            name=source.name or "custom_current",
+        )
+
     raise NotImplementedError(
-        f"Source type '{type(source).__name__}' has no Tidy3D mapping yet."
+        f"Source type '{type(source).__name__}' has no Tidy3D source mapping."
     )
 
 
@@ -902,9 +1149,53 @@ def _direction_to_angles(direction, dominant_axis):
 # Monitor conversion
 # ---------------------------------------------------------------------------
 
+def _plane_center_size(axis_idx, plane_position, domain_bounds, s):
+    """(center, size) of a full-domain plane at *plane_position* along *axis_idx*."""
+    center = list((lo + hi) / 2.0 * s for lo, hi in domain_bounds)
+    size = [(hi - lo) * s for lo, hi in domain_bounds]
+    center[axis_idx] = float(plane_position) * s
+    size[axis_idx] = 0.0
+    return center, size
+
+
 def _convert_monitor(monitor, domain_bounds, frequencies, td, s):
     """Convert a maxwell monitor to a Tidy3D monitor (lengths x *s*)."""
-    from ..monitors import FinitePlaneMonitor, ModeMonitor, PointMonitor, PlaneMonitor
+    from ..monitors import (
+        DiffractionMonitor,
+        FieldTimeMonitor,
+        FinitePlaneMonitor,
+        FluxTimeMonitor,
+        ModeMonitor,
+        PermittivityMonitor,
+        PlaneMonitor,
+        PointMonitor,
+    )
+
+    # Time-domain monitors sample the running field, not a frequency spectrum, so they
+    # are converted before the frequency requirement below.
+    if isinstance(monitor, FieldTimeMonitor):
+        return td.FieldTimeMonitor(
+            center=_scale3(monitor.position, s),
+            size=_scale3(monitor.size, s),
+            start=monitor.start,
+            stop=monitor.stop,
+            interval=monitor.interval,
+            fields=list(monitor.components),
+            name=monitor.name,
+        )
+
+    if isinstance(monitor, FluxTimeMonitor):
+        axis_idx = _axis_name_to_index(monitor.axis)
+        center, size = _plane_center_size(axis_idx, monitor.position, domain_bounds, s)
+        return td.FluxTimeMonitor(
+            center=tuple(center),
+            size=tuple(size),
+            start=monitor.start,
+            stop=monitor.stop,
+            interval=monitor.interval,
+            normal_dir=monitor.normal_direction,
+            name=monitor.name,
+        )
 
     monitor_frequencies = (
         monitor.frequencies
@@ -924,16 +1215,44 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s):
             name=monitor.name,
         )
 
-    if isinstance(monitor, ModeMonitor):
+    if isinstance(monitor, DiffractionMonitor):
+        # Tidy3D decomposes the plane wave into diffraction orders over the whole periodic
+        # cell, so the transverse extent must be td.inf; the maxwell monitor's finite period
+        # is the Bloch cell carried by the simulation boundaries, not the monitor size.
         axis_idx = _axis_name_to_index(monitor.axis)
         center = list((lo + hi) / 2.0 * s for lo, hi in domain_bounds)
-        size = [(hi - lo) * s for lo, hi in domain_bounds]
-        center[axis_idx] = monitor.plane_position * s
+        size = [td.inf, td.inf, td.inf]
+        center[axis_idx] = float(monitor.plane_position) * s
         size[axis_idx] = 0.0
-        return td.FieldMonitor(
+        return td.DiffractionMonitor(
             center=tuple(center),
             size=tuple(size),
             freqs=list(monitor_frequencies),
+            normal_dir=monitor.normal_direction,
+            name=monitor.name,
+        )
+
+    if isinstance(monitor, PermittivityMonitor):
+        return td.PermittivityMonitor(
+            center=_scale3(monitor.position, s),
+            size=_scale3(monitor.size, s),
+            freqs=list(monitor_frequencies),
+            name=monitor.name,
+        )
+
+    if isinstance(monitor, ModeMonitor):
+        # A modal monitor projects the field onto waveguide eigenmodes, which Tidy3D
+        # models with a dedicated ModeMonitor + ModeSpec, not a raw FieldMonitor. The mode
+        # solver must resolve at least mode_index + 1 modes to expose the requested order.
+        axis_idx = _axis_name_to_index(monitor.normal_axis)
+        center = list(_scale3(monitor.position, s))
+        size = list(_scale3(monitor.size, s))
+        size[axis_idx] = 0.0
+        return td.ModeMonitor(
+            center=tuple(center),
+            size=tuple(size),
+            freqs=list(monitor_frequencies),
+            mode_spec=td.ModeSpec(num_modes=int(monitor.mode_index) + 1),
             name=monitor.name,
         )
 
@@ -981,7 +1300,7 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s):
         )
 
     raise NotImplementedError(
-        f"Monitor type '{type(monitor).__name__}' has no Tidy3D mapping yet."
+        f"Monitor type '{type(monitor).__name__}' has no Tidy3D monitor mapping."
     )
 
 
@@ -1158,7 +1477,7 @@ def scene_to_tidy3d(
     td_sources = []
     sources = scene.resolved_sources() if hasattr(scene, "resolved_sources") else (scene.sources or [])
     for source in sources:
-        td_sources.append(_convert_source(source, scene, td, s))
+        td_sources.append(_convert_source(source, scene, td, s, frequencies=frequencies))
 
     # -- monitors --------------------------------------------------------------
     td_monitors = []
