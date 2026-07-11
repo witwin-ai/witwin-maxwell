@@ -57,6 +57,8 @@ def _make_mock_tidy3d():
 
     class Medium(_Recorder): pass
     class PECMedium(_Recorder): pass
+    class Medium2D(_Recorder): pass
+    class LossyMetalMedium(_Recorder): pass
     class AnisotropicMedium(_Recorder): pass
     class FullyAnisotropicMedium(_Recorder): pass
     class Drude(_Recorder): pass
@@ -98,6 +100,8 @@ def _make_mock_tidy3d():
 
     td.Medium = Medium
     td.PECMedium = PECMedium
+    td.Medium2D = Medium2D
+    td.LossyMetalMedium = LossyMetalMedium
     td.AnisotropicMedium = AnisotropicMedium
     td.FullyAnisotropicMedium = FullyAnisotropicMedium
     td.Drude = Drude
@@ -744,6 +748,200 @@ class TestMediumConversion:
 
             td_structure = _convert_structure(structure, real_td, 1e6)
             assert isinstance(td_structure.medium, real_td.PoleResidue)
+
+
+class TestSheetAndMetalConversion:
+    def test_static_medium2d_exports_medium2d(self, inject_mock_tidy3d):
+        # A static Medium2D sheet exports as a Tidy3D Medium2D whose two tangential
+        # surface media are the same isotropic Medium carrying the sheet conductance.
+        td = inject_mock_tidy3d
+        medium = mw.Medium2D(sigma_s=0.002)
+        result = _convert_material(medium, td)
+        assert isinstance(result, td.Medium2D)
+        assert isinstance(result.ss, td.Medium)
+        assert isinstance(result.tt, td.Medium)
+        assert result.ss.conductivity == pytest.approx(0.002)
+        assert result.tt.conductivity == pytest.approx(0.002)
+
+    def test_static_medium2d_conductance_is_not_length_scaled(self, inject_mock_tidy3d):
+        # Sheet conductivity is a surface conductance [S] (unit-system independent),
+        # so unlike the volumetric sigma_e path it must NOT be divided by length_scale.
+        td = inject_mock_tidy3d
+        medium = mw.Medium2D(sigma_s=0.002)
+        result = _convert_material(medium, td, 1.0e6)
+        assert result.ss.conductivity == pytest.approx(0.002)
+
+    def test_zero_conductivity_medium2d_carries_no_conductivity_kwarg(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        medium = mw.Medium2D(sigma_s=0.0)
+        result = _convert_material(medium, td)
+        assert isinstance(result, td.Medium2D)
+        assert not hasattr(result.ss, "conductivity")
+
+    def test_graphene_intraband_exports_medium2d_with_drude_sheet(self, inject_mock_tidy3d):
+        # Graphene's intraband Kubo channel is a single Drude sheet term, so the
+        # tangential surface medium is a Tidy3D Drude with one pole.
+        td = inject_mock_tidy3d
+        medium = mw.Graphene(chemical_potential=0.4, scattering_time=1.0e-13, include_interband=False)
+        result = _convert_material(medium, td)
+        assert isinstance(result, td.Medium2D)
+        assert isinstance(result.ss, td.Drude)
+        assert len(result.ss.coeffs) == 1
+        # tangential-isotropic: both faces share the same surface medium.
+        assert result.tt is result.ss
+
+    def test_lossy_metal_exports_lossy_metal_medium(self, inject_mock_tidy3d):
+        # LossyMetalMedium exports as a Tidy3D LossyMetalMedium; the SI bulk
+        # conductivity [S/m] becomes [S/um] via the length scale, exactly like the
+        # volumetric sigma_e path.
+        td = inject_mock_tidy3d
+        length_scale = 1.0e6
+        medium = mw.LossyMetalMedium(conductivity=1.0e7)
+        result = _convert_material(medium, td, length_scale, frequencies=(1.0e10,))
+        assert isinstance(result, td.LossyMetalMedium)
+        assert result.conductivity == pytest.approx(1.0e7 / length_scale)
+        # A single operating frequency is widened into a non-degenerate fit band
+        # that still contains it.
+        lo, hi = result.frequency_range
+        assert lo < 1.0e10 < hi
+
+    def test_lossy_metal_frequency_range_spans_export_frequencies(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        medium = mw.LossyMetalMedium(conductivity=1.0e7)
+        result = _convert_material(medium, td, 1.0e6, frequencies=(8.0e9, 1.2e10))
+        assert result.frequency_range == pytest.approx((8.0e9, 1.2e10))
+
+    def test_lossy_metal_without_frequencies_raises(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        medium = mw.LossyMetalMedium(conductivity=1.0e7)
+        with pytest.raises(ValueError, match="frequenc"):
+            _convert_material(medium, td)
+
+    def test_medium2d_structure_scene_exports_medium2d(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        scene = (
+            mw.Scene(
+                domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.pml(num_layers=10),
+                device="cpu",
+            )
+            .add_structure(
+                mw.Structure(mw.Box(position=(0, 0, 0), size=(1.0, 1.0, 0.0)), mw.Medium2D(sigma_s=0.002))
+            )
+            .add_source(mw.PointDipole(position=(0, 0, 0.3), polarization="Ex", source_time=mw.CW(frequency=1e13)))
+        )
+        sim = scene.to_tidy3d(frequencies=1e13)
+        assert len(sim.structures) == 1
+        assert isinstance(sim.structures[0].medium, td.Medium2D)
+
+    def test_lossy_metal_structure_scene_exports_lossy_metal(self, inject_mock_tidy3d):
+        # The scene-level export threads the frequencies to the LossyMetal surface-
+        # impedance fit; without them the metal export would raise.
+        td = inject_mock_tidy3d
+        scene = (
+            mw.Scene(
+                domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.pml(num_layers=10),
+                device="cpu",
+            )
+            .add_structure(
+                mw.Structure(mw.Box(position=(0, 0, -0.9), size=(2.0, 2.0, 0.2)), mw.LossyMetalMedium(conductivity=1.0e7))
+            )
+            .add_source(mw.PointDipole(position=(0, 0, 0.3), polarization="Ex", source_time=mw.CW(frequency=1e10)))
+        )
+        sim = scene.to_tidy3d(frequencies=1e10)
+        assert len(sim.structures) == 1
+        assert isinstance(sim.structures[0].medium, td.LossyMetalMedium)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the sheet-conductivity convention check",
+    )
+    def test_static_medium2d_sheet_conductivity_matches_real_tidy3d(self):
+        # Physical-convention check: the exported Medium2D's complex surface
+        # conductivity sigma_model(omega) must equal maxwell's own sheet_conductivity
+        # at every frequency (a surface conductance in siemens, no length scaling).
+        with _real_tidy3d() as real_td:
+            medium = mw.Medium2D(sigma_s=0.002)
+            result = _convert_material(medium, real_td)
+            assert isinstance(result, real_td.Medium2D)
+            for freq in (1.0e12, 5.0e12):
+                got = complex(result.sigma_model(freq))
+                ref = complex(medium.sheet_conductivity_at_freq(freq))
+                assert got.real == pytest.approx(ref.real, rel=1e-6, abs=1e-12)
+                assert got.imag == pytest.approx(ref.imag, rel=1e-6, abs=1e-12)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the graphene intraband convention check",
+    )
+    def test_graphene_intraband_sheet_conductivity_matches_real_tidy3d(self):
+        # The intraband Drude sheet term must reproduce maxwell's frequency-dependent
+        # sheet conductivity (magnitude AND the inductive Im(sigma) > 0 reactance).
+        with _real_tidy3d() as real_td:
+            medium = mw.Graphene(chemical_potential=0.4, scattering_time=1.0e-13, include_interband=False)
+            result = _convert_material(medium, real_td)
+            for freq in (1.0e12, 5.0e12, 2.0e13):
+                got = complex(result.sigma_model(freq))
+                ref = complex(medium.sheet_conductivity_at_freq(freq))
+                assert got.real == pytest.approx(ref.real, rel=1e-6)
+                assert got.imag == pytest.approx(ref.imag, rel=1e-6)
+            # graphene intraband is inductive: positive imaginary conductivity.
+            assert complex(result.sigma_model(5.0e12)).imag > 0.0
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the graphene interband convention check",
+    )
+    def test_graphene_interband_sheet_conductivity_matches_real_tidy3d(self):
+        # The fitted interband Lorentz sheet terms fold into a single PoleResidue whose
+        # sigma_model reproduces maxwell's total (intraband + interband) sheet
+        # conductivity across the optical band, including the below-edge capacitive
+        # (Im(sigma) < 0) reactance a Drude term cannot represent.
+        import math as _math
+
+        with _real_tidy3d() as real_td:
+            medium = mw.Graphene(
+                chemical_potential=0.4,
+                scattering_time=1.0e-13,
+                temperature=300.0,
+                include_interband=True,
+            )
+            result = _convert_material(medium, real_td)
+            assert isinstance(result, real_td.Medium2D)
+            edge = 2.0 * 0.4 * 1.602176634e-19 / 1.054571817e-34 / (2.0 * _math.pi)
+            for freq in (0.2 * edge, 0.5 * edge, 0.9 * edge):
+                got = complex(result.sigma_model(freq))
+                ref = complex(medium.sheet_conductivity_at_freq(freq))
+                assert got.real == pytest.approx(ref.real, rel=1e-6)
+                assert got.imag == pytest.approx(ref.imag, rel=1e-6)
+            # Below the edge the interband channel makes the reactance capacitive.
+            assert complex(result.sigma_model(0.9 * edge)).imag < 0.0
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the surface-impedance convention check",
+    )
+    def test_lossy_metal_surface_impedance_matches_real_tidy3d(self):
+        # Physical-convention check: the exported LossyMetalMedium must reproduce
+        # maxwell's Leontovich surface impedance Z_s = (1 - i)*sqrt(w*mu0/(2*sigma))
+        # [ohm] (ohms are unit-system independent). The imaginary part must be
+        # negative (inductive loss under e^{-i w t}), not positive (which would be
+        # gain), confirming the conductivity is not misscaled into a different regime.
+        import numpy as _np
+
+        freq = 1.0e10
+        with _real_tidy3d() as real_td:
+            medium = mw.LossyMetalMedium(conductivity=1.0e7)
+            result = _convert_material(medium, real_td, frequencies=(freq,))
+            assert isinstance(result, real_td.LossyMetalMedium)
+            z_td = complex(result.surface_impedance(_np.array([freq]))[0])
+            z_mx = complex(medium.surface_impedance_at_freq(freq))
+            assert z_td.real == pytest.approx(z_mx.real, rel=1e-3)
+            assert z_td.imag == pytest.approx(z_mx.imag, rel=1e-3)
+            assert z_td.real > 0.0 and z_td.imag < 0.0
 
 
 class TestGeometryConversion:

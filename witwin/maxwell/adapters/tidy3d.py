@@ -359,7 +359,117 @@ def _nonlinear_spec(material, td, length_scale: float):
     return td.NonlinearSpec(models=models)
 
 
-def _convert_material(material, td, length_scale: float = _M_TO_UM):
+def _sheet_surface_medium(medium, td, length_scale: float):
+    """Build the Tidy3D surface-conductivity medium reproducing a ``Medium2D`` sheet.
+
+    A maxwell ``Medium2D`` carries the complex sheet conductivity ``sigma_s(omega)``
+    [S] (siemens; a *surface* conductance ``J_s = sigma_s * E_t``, so it is
+    unit-system independent and is NOT length-scaled). Tidy3D models a 2D sheet as
+    ``td.Medium2D(ss, tt)`` whose per-tangential media report the sheet conductivity
+    through ``sigma_model(omega) = (eps_inf - eps(omega)) * i * omega * eps0``. This
+    returns the isotropic ``ss == tt`` medium whose ``sigma_model`` equals
+    ``medium.sheet_conductivity`` at every frequency:
+
+    * a purely static sheet (only ``sigma_s``) is ``td.Medium(conductivity=sigma_s)``
+      because ``Medium.sigma_model`` returns the conductivity verbatim (``eps0``
+      cancels), so the sheet conductance is passed through unscaled;
+    * a single Drude sheet term ``weight/(rate - i*omega)`` (the graphene intraband
+      Kubo channel) is a ``td.Drude`` with ``plasma_frequency = sqrt(weight/eps0)``
+      and ``gamma = rate``, since ``td``'s Drude conductivity evaluates to
+      ``eps0*omega_p^2/(gamma_ang - i*omega)``;
+    * any richer combination (static + Drude + Lorentz, e.g. graphene with the fitted
+      interband Lorentz sheet terms) folds into a single ``td.PoleResidue`` by summing
+      each channel's pole-residue contribution (the static conductance maps to the
+      ``a = 0`` pole ``c = sigma_s/(2*eps0)``, and the Drude/Lorentz sheet terms reuse
+      Tidy3D's own ``Drude``/``Lorentz`` -> ``pole_residue`` conversion).
+
+    ``eps0`` is Tidy3D's micrometre-unit vacuum permittivity ``eps0_SI / length_scale``.
+    It cancels in ``sigma_model`` for the static channel and sets the Drude/Lorentz
+    residue magnitudes for the dispersive ones, so the reported sheet conductance stays
+    in physical siemens.
+    """
+    eps0 = VACUUM_PERMITTIVITY / length_scale
+    sigma_s = float(medium.sigma_s)
+    drude_terms = tuple(medium.sheet_pole_terms())
+    lorentz_terms = tuple(medium.sheet_lorentz_terms())
+
+    if not drude_terms and not lorentz_terms:
+        kwargs = {"permittivity": 1.0}
+        if sigma_s != 0.0:
+            kwargs["conductivity"] = sigma_s
+        return td.Medium(**kwargs)
+
+    if sigma_s == 0.0 and len(drude_terms) == 1 and not lorentz_terms:
+        weight, rate = drude_terms[0]
+        plasma_frequency = math.sqrt(weight / eps0) / (2.0 * math.pi)
+        gamma = rate / (2.0 * math.pi)
+        return td.Drude(eps_inf=1.0, coeffs=((plasma_frequency, gamma),))
+
+    poles: list = []
+    if sigma_s != 0.0:
+        poles.append((complex(0.0, 0.0), complex(sigma_s / (2.0 * eps0), 0.0)))
+    for weight, rate in drude_terms:
+        plasma_frequency = math.sqrt(weight / eps0) / (2.0 * math.pi)
+        gamma = rate / (2.0 * math.pi)
+        poles.extend(
+            td.Drude(eps_inf=1.0, coeffs=((plasma_frequency, gamma),)).pole_residue.poles
+        )
+    for strength, omega_0, gamma in lorentz_terms:
+        # td.Lorentz eps uses eps_inf + de*f0^2/(f0^2 - 2i*f*delta - f^2), so its
+        # angular damping is 2*(2*pi*delta); matching the sheet term's angular gamma
+        # gives delta = gamma / (4*pi), and eps0*de = strength gives de = strength/eps0.
+        delta_eps = strength / eps0
+        resonance = omega_0 / (2.0 * math.pi)
+        damping = gamma / (4.0 * math.pi)
+        poles.extend(
+            td.Lorentz(eps_inf=1.0, coeffs=((delta_eps, resonance, damping),)).pole_residue.poles
+        )
+    return td.PoleResidue(eps_inf=1.0, poles=tuple(poles))
+
+
+def _medium2d(material, td, length_scale: float):
+    """Convert a maxwell ``Medium2D`` (including ``Graphene``) to a Tidy3D ``Medium2D``.
+
+    The sheet is isotropic in its tangential plane, so both Tidy3D tangential surface
+    media ``ss`` and ``tt`` are the same surface-conductivity medium reproducing
+    ``material.sheet_conductivity(omega)``. ``Graphene`` exports through the same path:
+    its intraband Drude sheet term and any fitted interband Lorentz sheet terms are
+    carried by ``_sheet_surface_medium``.
+    """
+    surface = _sheet_surface_medium(material, td, length_scale)
+    return td.Medium2D(ss=surface, tt=surface)
+
+
+def _lossy_metal_medium(material, td, length_scale: float, frequencies):
+    """Convert a maxwell ``LossyMetalMedium`` to a Tidy3D ``LossyMetalMedium``.
+
+    Both model a good conductor through a surface-impedance (Leontovich) boundary
+    condition. The maxwell bulk ``conductivity`` [S/m] maps to Tidy3D's ``conductivity``
+    [S/um] by the metre->Tidy3D length scale, exactly as the volumetric ``sigma_e``
+    path, so the exported Leontovich surface impedance
+    ``Z_s(omega) = (1 - i) * sqrt(omega*mu0/(2*sigma))`` [ohm] matches maxwell's
+    ``surface_impedance`` (ohms are unit-system independent). Tidy3D vector-fits
+    ``Z_s(omega)`` over a required ``frequency_range``, so the export frequencies must be
+    supplied; a single operating frequency (the narrowband SIBC case) is widened into a
+    non-degenerate fit band around it.
+    """
+    if not frequencies:
+        raise ValueError(
+            "LossyMetalMedium export needs the operating frequencies: Tidy3D fits the "
+            "surface impedance Z_s(omega) over a frequency_range, so pass frequencies=... "
+            "to Scene.to_tidy3d()."
+        )
+    freqs = tuple(float(frequency) for frequency in frequencies)
+    f_min, f_max = min(freqs), max(freqs)
+    if f_min == f_max:
+        f_min, f_max = 0.5 * f_min, 2.0 * f_max
+    return td.LossyMetalMedium(
+        conductivity=float(material.conductivity) / length_scale,
+        frequency_range=(f_min, f_max),
+    )
+
+
+def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=None):
     """Convert a Maxwell Material to a Tidy3D medium."""
     if getattr(material, "is_pec", False):
         # A PEC marker has no finite permittivity (eps_r stays at its 1.0
@@ -369,9 +479,9 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM):
         # dedicated PECMedium (eps_model -> -inf), not a finite dielectric.
         return td.PECMedium()
     if getattr(material, "is_medium2d", False):
-        raise NotImplementedError("Tidy3D export for 2D sheet (Medium2D) materials is not implemented yet.")
+        return _medium2d(material, td, length_scale)
     if getattr(material, "is_lossy_metal", False):
-        raise NotImplementedError("Tidy3D export for LossyMetalMedium is not implemented yet.")
+        return _lossy_metal_medium(material, td, length_scale, frequencies)
     if getattr(material, "has_custom_poles", False):
         raise NotImplementedError(
             "Tidy3D export for spatially-varying custom dispersive poles is not implemented yet."
@@ -479,10 +589,10 @@ def _convert_geometry(geometry, td, s):
 # Structure conversion
 # ---------------------------------------------------------------------------
 
-def _convert_structure(structure, td, s):
+def _convert_structure(structure, td, s, frequencies=None):
     """Convert maxwell Structure to a Tidy3D Structure."""
     td_geometry = _convert_geometry(structure.geometry, td, s)
-    td_material = _convert_material(structure.material, td, s)
+    td_material = _convert_material(structure.material, td, s, frequencies=frequencies)
     return td.Structure(geometry=td_geometry, medium=td_material)
 
 
@@ -845,7 +955,7 @@ def scene_to_tidy3d(
     # -- structures ------------------------------------------------------------
     td_structures = []
     for structure in (scene.structures or []):
-        td_structures.append(_convert_structure(structure, td, s))
+        td_structures.append(_convert_structure(structure, td, s, frequencies=frequencies))
 
     # -- sources ---------------------------------------------------------------
     domain_bounds = scene.domain.bounds
