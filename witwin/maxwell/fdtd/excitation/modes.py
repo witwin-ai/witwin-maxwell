@@ -214,16 +214,6 @@ def _build_first_difference_sparse(count: int, spacing: float):
     return sparse.diags((-off, off), offsets=(-1, 1), shape=(count, count), format="csr")
 
 
-def _build_first_difference_torch_dense(count: int, spacing: float, *, device, dtype):
-    if count <= 0:
-        raise ValueError("count must be > 0 for first-difference assembly.")
-    operator = torch.zeros((count, count), device=device, dtype=dtype)
-    if count > 1:
-        off = torch.full((count - 1,), 0.5 / float(spacing), device=device, dtype=dtype)
-        operator = operator + torch.diag(off, diagonal=1) - torch.diag(off, diagonal=-1)
-    return operator
-
-
 def _build_vector_operator_sparse(eps_r: np.ndarray, mu_r: np.ndarray, *, k0: float, du: float, dv: float):
     nu = int(eps_r.shape[0])
     nv = int(eps_r.shape[1])
@@ -270,64 +260,6 @@ def _build_vector_operator_sparse(eps_r: np.ndarray, mu_r: np.ndarray, *, k0: fl
             [-a_hu_hu / electric_scale, -a_hu_hv / electric_scale, None, None],
         ],
         format="csr",
-    )
-    return operator, interior_u, interior_v
-
-
-def _build_vector_operator_torch_dense(eps_r: torch.Tensor, mu_r: torch.Tensor, *, k0: float, du: float, dv: float):
-    nu = int(eps_r.shape[0])
-    nv = int(eps_r.shape[1])
-    interior_u = nu - 2
-    interior_v = nv - 2
-    unknowns = interior_u * interior_v
-    if unknowns <= 0:
-        raise ValueError(
-            "ModeSource aperture must contain at least one interior node after applying zero boundary conditions."
-        )
-    if unknowns > _FULL_VECTOR_DENSE_LIMIT:
-        raise NotImplementedError(
-            "Full-vector differentiable ModeSource currently supports at most "
-            f"{_FULL_VECTOR_DENSE_LIMIT} interior nodes per source-plane solve."
-        )
-
-    device = eps_r.device
-    dtype = eps_r.dtype
-    d1_u = _build_first_difference_torch_dense(interior_u, du, device=device, dtype=dtype)
-    d1_v = _build_first_difference_torch_dense(interior_v, dv, device=device, dtype=dtype)
-    identity_u = torch.eye(interior_u, device=device, dtype=dtype)
-    identity_v = torch.eye(interior_v, device=device, dtype=dtype)
-    derivative_u = torch.kron(d1_u, identity_v)
-    derivative_v = torch.kron(identity_u, d1_v)
-
-    eps_flat = eps_r[1:-1, 1:-1].reshape(-1)
-    mu_flat = mu_r[1:-1, 1:-1].reshape(-1)
-    eps_inv = torch.diag(torch.reciprocal(eps_flat))
-    mu_inv = torch.diag(torch.reciprocal(mu_flat))
-    eps_diag = torch.diag(eps_flat)
-    mu_diag = torch.diag(mu_flat)
-    k0_sq = float(k0) * float(k0)
-
-    a_hu_hu = derivative_v @ eps_inv @ derivative_v + k0_sq * mu_diag
-    a_hu_hv = -(derivative_v @ eps_inv @ derivative_u)
-    a_hv_hu = -(derivative_u @ eps_inv @ derivative_v)
-    a_hv_hv = derivative_u @ eps_inv @ derivative_u + k0_sq * mu_diag
-
-    a_eu_eu = -(derivative_v @ mu_inv @ derivative_v) - k0_sq * eps_diag
-    a_eu_ev = derivative_v @ mu_inv @ derivative_u
-    a_ev_eu = derivative_u @ mu_inv @ derivative_v
-    a_ev_ev = -(derivative_u @ mu_inv @ derivative_u) - k0_sq * eps_diag
-
-    electric_scale = float(k0) / _ETA0
-    magnetic_scale = float(k0) * _ETA0
-    zero = torch.zeros_like(a_hu_hu)
-    operator = torch.cat(
-        (
-            torch.cat((zero, zero, a_ev_eu / magnetic_scale, a_ev_ev / magnetic_scale), dim=1),
-            torch.cat((zero, zero, -a_eu_eu / magnetic_scale, -a_eu_ev / magnetic_scale), dim=1),
-            torch.cat((a_hv_hu / electric_scale, a_hv_hv / electric_scale, zero, zero), dim=1),
-            torch.cat((-a_hu_hu / electric_scale, -a_hu_hv / electric_scale, zero, zero), dim=1),
-        ),
-        dim=0,
     )
     return operator, interior_u, interior_v
 
@@ -516,11 +448,6 @@ def _build_scalar_operator_torch_dense(index_sq: torch.Tensor, du: float, dv: fl
     if unknowns <= 0:
         raise ValueError(
             "ModeSource aperture must contain at least one interior node after applying zero boundary conditions."
-        )
-    if unknowns > _DENSE_EIGEN_LIMIT:
-        raise NotImplementedError(
-            "Differentiable ModeSource currently supports at most "
-            f"{_DENSE_EIGEN_LIMIT} interior unknowns per source-plane solve."
         )
 
     dtype = index_sq.dtype

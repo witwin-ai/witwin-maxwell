@@ -231,6 +231,35 @@ def test_differentiable_sparse_mode_solver_supports_higher_order_modes(monkeypat
     assert torch.allclose(sparse_context.eps_Ez.grad, dense_grad, rtol=1e-2, atol=1e-4)
 
 
+def test_dense_scalar_mode_operator_has_no_differentiable_node_cap(monkeypatch):
+    # Regression lock for the removed differentiable node caps (g-diff-node-caps).
+    # The dense scalar mode operator was previously guarded to reject apertures
+    # with more than _DENSE_EIGEN_LIMIT interior unknowns, yet the differentiable
+    # dispatch already routes oversized planes to the sparse implicit solve, so
+    # that dense-builder cap was unreachable and its message ("supports at most N
+    # nodes") was false. With the cap removed the dense builder must still
+    # assemble the exact same operator (identical spectrum to the sparse builder)
+    # for an aperture larger than the limit, and the dead differentiable
+    # full-vector torch scaffolding must stay removed.
+    monkeypatch.setattr(mode_solver, "_DENSE_EIGEN_LIMIT", 4)
+    n = 6
+    du = dv = 0.05
+    torch.manual_seed(0)
+    index_sq = (torch.rand((n, n), dtype=torch.float64) * 8.0).contiguous()
+    unknowns = (n - 2) * (n - 2)
+    assert unknowns > mode_solver._DENSE_EIGEN_LIMIT
+
+    dense_operator, iu, iv = mode_solver._build_scalar_operator_torch_dense(index_sq, du, dv)
+    sparse_operator, _, _ = mode_solver._build_scalar_operator_torch_sparse(index_sq, du, dv)
+    assert iu * iv == unknowns
+    dense_spectrum = torch.linalg.eigvalsh(dense_operator)
+    sparse_spectrum = torch.linalg.eigvalsh(sparse_operator.to_dense())
+    assert torch.allclose(dense_spectrum, sparse_spectrum, rtol=1e-8, atol=1e-8)
+
+    assert not hasattr(mode_solver, "_build_vector_operator_torch_dense")
+    assert not hasattr(mode_solver, "_build_first_difference_torch_dense")
+
+
 def test_full_vector_mode_solver_matches_scalar_beta_on_rectangular_waveguide():
     scene = _mode_scene()
     compiled_source = _compile_mode_source(scene.sources[0], default_frequency=1.0e9)
