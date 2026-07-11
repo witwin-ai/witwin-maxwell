@@ -1087,8 +1087,12 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
     if source.get("injection", {}).get("kind") != "soft":
         raise ValueError("ModeSource currently supports soft injection only.")
     source_time = source["source_time"]
-    if source_time["kind"] != "cw":
-        raise ValueError("ModeSource currently supports CW source_time only.")
+    if source_time["kind"] == "custom":
+        raise ValueError(
+            "ModeSource does not support CustomSourceTime; the native time-shifted surface "
+            "kernel evaluates only the analytic CW/Gaussian/Ricker forms. Use PointDipole "
+            "for arbitrary custom waveforms."
+        )
     if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
         raise NotImplementedError("ModeSource currently supports only none, pml, pec, or pmc boundaries.")
 

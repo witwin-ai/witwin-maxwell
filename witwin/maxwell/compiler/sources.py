@@ -162,9 +162,15 @@ def _compile_custom_field_source(source: CustomFieldSource, *, default_frequency
 
 
 def _compile_mode_source(source: ModeSource, *, default_frequency: float) -> dict:
-    source_time = compile_source_time(source.source_time, default_frequency=default_frequency)
-    if source_time["kind"] != "cw":
-        raise ValueError("ModeSource currently supports CW source_time only.")
+    # Broadband injection: the guided profile and effective index are solved once
+    # at the waveform's center frequency and driven by the temporal envelope, so a
+    # GaussianPulse/Ricker mode source excites the whole band from one run. Only
+    # CustomSourceTime is rejected because the native time-shifted surface kernel
+    # evaluates the analytic CW/Gaussian/Ricker forms on-device and has no table path.
+    source_time = _reject_custom_source_time(
+        compile_source_time(source.source_time, default_frequency=default_frequency),
+        source_kind="ModeSource",
+    )
 
     direction_sign = 1 if source.direction == "+" else -1
     direction_vector = {
