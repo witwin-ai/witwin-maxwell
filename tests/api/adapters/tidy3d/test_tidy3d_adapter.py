@@ -61,6 +61,9 @@ def _make_mock_tidy3d():
     class Lorentz(_Recorder): pass
     class Debye(_Recorder): pass
     class PoleResidue(_Recorder): pass
+    class NonlinearSpec(_Recorder): pass
+    class NonlinearSusceptibility(_Recorder): pass
+    class TwoPhotonAbsorption(_Recorder): pass
     class Box(_Recorder): pass
     class Sphere(_Recorder): pass
     class Cylinder(_Recorder): pass
@@ -97,6 +100,9 @@ def _make_mock_tidy3d():
     td.Lorentz = Lorentz
     td.Debye = Debye
     td.PoleResidue = PoleResidue
+    td.NonlinearSpec = NonlinearSpec
+    td.NonlinearSusceptibility = NonlinearSusceptibility
+    td.TwoPhotonAbsorption = TwoPhotonAbsorption
     td.Box = Box
     td.Sphere = Sphere
     td.Cylinder = Cylinder
@@ -303,11 +309,150 @@ class TestMediumConversion:
         with pytest.raises(NotImplementedError, match="magnetic dispersive"):
             _convert_material(medium, td)
 
-    def test_kerr_medium_is_rejected(self, inject_mock_tidy3d):
+    def test_kerr_chi3_exports_nonlinear_susceptibility(self, inject_mock_tidy3d):
+        # A Kerr (chi3) Material exports a non-dispersive Medium carrying a
+        # NonlinearSpec whose single NonlinearSusceptibility uses the length-scaled
+        # chi3 (maxwell [m^2/V^2] -> Tidy3D [um^2/V^2] = x length_scale^2).
         td = inject_mock_tidy3d
-        medium = mw.Material(eps_r=2.0, kerr_chi3=1.0e-10)
-        with pytest.raises(NotImplementedError, match="Kerr nonlinear"):
+        chi3_si = 2.0e-20
+        length_scale = 1.0e6
+        medium = mw.Material(eps_r=4.0, kerr_chi3=chi3_si)
+        result = _convert_material(medium, td, length_scale)
+        assert isinstance(result, td.Medium)
+        assert result.permittivity == 4.0
+        spec = result.nonlinear_spec
+        assert isinstance(spec, td.NonlinearSpec)
+        assert len(spec.models) == 1
+        model = spec.models[0]
+        assert isinstance(model, td.NonlinearSusceptibility)
+        assert model.chi3 == pytest.approx(chi3_si * length_scale ** 2)
+
+    def test_two_photon_absorption_exports_with_scaled_beta_and_explicit_n0(self, inject_mock_tidy3d):
+        # TPA exports a TwoPhotonAbsorption model: beta [m/W] -> [um/W] scales by
+        # length_scale, and n0 defaults to sqrt(eps_r) and must be forwarded so
+        # Tidy3D does not silently infer it from the source frequencies.
+        td = inject_mock_tidy3d
+        beta_si = 1.0e-11
+        length_scale = 1.0e6
+        medium = mw.Material(eps_r=9.0, nonlinearity=(mw.TwoPhotonAbsorption(beta=beta_si),))
+        result = _convert_material(medium, td, length_scale)
+        spec = result.nonlinear_spec
+        assert len(spec.models) == 1
+        tpa = spec.models[0]
+        assert isinstance(tpa, td.TwoPhotonAbsorption)
+        assert tpa.beta == pytest.approx(beta_si * length_scale)
+        assert tpa.n0 == pytest.approx(math.sqrt(9.0))
+
+    def test_tpa_explicit_n0_is_forwarded(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        medium = mw.Material(eps_r=9.0, nonlinearity=(mw.TwoPhotonAbsorption(beta=1.0e-11, n0=3.4),))
+        result = _convert_material(medium, td, 1.0e6)
+        assert result.nonlinear_spec.models[0].n0 == pytest.approx(3.4)
+
+    def test_chi3_and_tpa_export_as_two_additive_models(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        medium = mw.Material(
+            eps_r=4.0,
+            nonlinearity=(
+                mw.NonlinearSusceptibility(chi3=1.0e-20),
+                mw.TwoPhotonAbsorption(beta=2.0e-11, n0=2.0),
+            ),
+        )
+        result = _convert_material(medium, td, 1.0e6)
+        kinds = {type(m).__name__ for m in result.nonlinear_spec.models}
+        assert kinds == {"NonlinearSusceptibility", "TwoPhotonAbsorption"}
+
+    def test_chi2_medium_is_rejected_as_no_tidy3d_equivalent(self, inject_mock_tidy3d):
+        # Tidy3D's public nonlinear API is the chi3/Kerr/TPA family only; a
+        # second-order (chi2 / SHG) susceptibility has no equivalent and must be
+        # rejected with a physics-worded message (not a Kerr blanket rejection).
+        td = inject_mock_tidy3d
+        medium = mw.Material(eps_r=4.0, nonlinearity=(mw.NonlinearSusceptibility(chi2=5.0e-12),))
+        with pytest.raises(NotImplementedError, match="second-order"):
             _convert_material(medium, td)
+
+    def test_kerr_plus_dispersion_exports_dispersive_medium_with_nonlinear_spec(self, inject_mock_tidy3d):
+        # nonlinear + dispersive (same material) rides the Kerr NonlinearSpec on the
+        # dispersive Tidy3D medium rather than being rejected.
+        td = inject_mock_tidy3d
+        medium = mw.Material(
+            eps_r=1.0,
+            lorentz_poles=(mw.LorentzPole(delta_eps=2.0, resonance_frequency=5e14, gamma=1e13),),
+            kerr_chi3=1.0e-20,
+        )
+        result = _convert_material(medium, td, 1.0e6)
+        assert isinstance(result, td.Lorentz)
+        assert isinstance(result.nonlinear_spec, td.NonlinearSpec)
+        assert isinstance(result.nonlinear_spec.models[0], td.NonlinearSusceptibility)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the chi3 unit-convention check",
+    )
+    def test_kerr_chi3_reproduces_physical_n2_real_tidy3d(self):
+        # Physical-convention check: the exported chi3 must reproduce the same
+        # nonlinear refractive index n2 the maxwell material encodes. Tidy3D's own
+        # relation n2 = 3/(4 n0^2 eps0 c0) chi3 (in its um unit system) applied to
+        # the exported chi3 must equal the SI n2 = 3 chi3_SI/(4 n0^2 eps0 c0)
+        # expressed in Tidy3D units [um^2/W] (i.e. x length_scale^2). A wrong scale
+        # (e.g. exporting chi3_SI unscaled) fails this by 1e12.
+        import scipy.constants as sc
+
+        chi3_si = 3.0e-20
+        n0 = 2.0
+        length_scale = 1.0e6
+        with _real_tidy3d() as real_td:
+            from tidy3d.constants import EPSILON_0 as TD_EPS0, C_0 as TD_C0
+
+            medium = mw.Material(eps_r=n0 ** 2, kerr_chi3=chi3_si)
+            exported = _convert_material(medium, real_td, length_scale)
+            chi3_td = exported.nonlinear_spec.models[0].chi3
+            n2_td = 3.0 / (4.0 * n0 ** 2 * TD_EPS0 * TD_C0) * chi3_td
+            n2_si = 3.0 * chi3_si / (4.0 * n0 ** 2 * sc.epsilon_0 * sc.c)
+            assert n2_td == pytest.approx(n2_si * length_scale ** 2, rel=1e-6)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the TPA construction/convention check",
+    )
+    def test_two_photon_absorption_builds_in_real_tidy3d(self):
+        # The exported TPA model must satisfy Tidy3D's own validators (real beta,
+        # real positive n0) and carry the physical beta [um/W] and the forwarded
+        # linear index n0 = sqrt(eps_r).
+        beta_si = 1.0e-11
+        length_scale = 1.0e6
+        with _real_tidy3d() as real_td:
+            medium = mw.Material(eps_r=9.0, nonlinearity=(mw.TwoPhotonAbsorption(beta=beta_si),))
+            exported = _convert_material(medium, real_td, length_scale)
+            assert isinstance(exported, real_td.Medium)
+            (tpa,) = exported.nonlinear_spec.models
+            assert isinstance(tpa, real_td.TwoPhotonAbsorption)
+            assert tpa.beta == pytest.approx(beta_si * length_scale)
+            assert tpa.n0 == pytest.approx(3.0)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the nonlinear-spec construction check",
+    )
+    def test_kerr_plus_sigma_e_dispersive_structure_real_tidy3d(self):
+        # End-to-end: a Kerr + dispersive + conductive material exports a single
+        # PoleResidue that carries both the folded conductivity pole and the Kerr
+        # NonlinearSpec, and the real tidy3d Simulation validators accept it.
+        from witwin.maxwell.adapters.tidy3d import _convert_structure
+
+        with _real_tidy3d() as real_td:
+            structure = mw.Structure(
+                mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
+                mw.Material(
+                    eps_r=1.0,
+                    drude_poles=(mw.DrudePole(plasma_frequency=2e15, gamma=1e13),),
+                    sigma_e=0.5,
+                    kerr_chi3=1.0e-20,
+                ),
+            )
+            td_structure = _convert_structure(structure, real_td, 1e6)
+            assert isinstance(td_structure.medium, real_td.PoleResidue)
+            assert td_structure.medium.nonlinear_spec is not None
 
     def test_pec_medium_exports_as_pec_not_vacuum(self, inject_mock_tidy3d):
         # Regression: Material.pec() carries eps_r == 1.0 by construction, so

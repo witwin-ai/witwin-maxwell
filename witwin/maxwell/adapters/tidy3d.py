@@ -137,32 +137,38 @@ def _conductivity_pole(sigma_e: float):
     return (complex(0.0, 0.0), complex(float(sigma_e) / (2.0 * VACUUM_PERMITTIVITY), 0.0))
 
 
-def _dispersive_medium(material, td):
-    """Convert a dispersive Maxwell Material (ignoring sigma_e) to a Tidy3D medium."""
+def _dispersive_medium(material, td, nonlinear_spec=None):
+    """Convert a dispersive Maxwell Material (ignoring sigma_e) to a Tidy3D medium.
+
+    An optional ``nonlinear_spec`` is forwarded to the constructed medium so a
+    material that is both dispersive and Kerr/TPA nonlinear exports as a single
+    dispersive+nonlinear Tidy3D medium.
+    """
     has_debye = bool(material.debye_poles)
     has_drude = bool(material.drude_poles)
     has_lorentz = bool(material.lorentz_poles)
+    extra = {} if nonlinear_spec is None else {"nonlinear_spec": nonlinear_spec}
 
     if has_drude and not has_debye and not has_lorentz:
         coeffs = [
             (pole.plasma_frequency, pole.gamma)
             for pole in material.drude_poles
         ]
-        return td.Drude(eps_inf=material.eps_r, coeffs=coeffs)
+        return td.Drude(eps_inf=material.eps_r, coeffs=coeffs, **extra)
 
     if has_lorentz and not has_debye and not has_drude:
         coeffs = [
             (pole.delta_eps, pole.resonance_frequency, pole.gamma)
             for pole in material.lorentz_poles
         ]
-        return td.Lorentz(eps_inf=material.eps_r, coeffs=coeffs)
+        return td.Lorentz(eps_inf=material.eps_r, coeffs=coeffs, **extra)
 
     if has_debye and not has_drude and not has_lorentz:
         coeffs = [
             (pole.delta_eps, pole.tau)
             for pole in material.debye_poles
         ]
-        return td.Debye(eps_inf=material.eps_r, coeffs=coeffs)
+        return td.Debye(eps_inf=material.eps_r, coeffs=coeffs, **extra)
 
     # Mixed pole types to PoleResidue
     poles = []
@@ -194,7 +200,68 @@ def _dispersive_medium(material, td):
         c = complex(0, p.delta_eps / tau)
         poles.append((a, c))
 
-    return td.PoleResidue(eps_inf=material.eps_r, poles=poles)
+    extra = {} if nonlinear_spec is None else {"nonlinear_spec": nonlinear_spec}
+    return td.PoleResidue(eps_inf=material.eps_r, poles=poles, **extra)
+
+
+def _nonlinear_spec(material, td, length_scale: float):
+    """Build a Tidy3D ``NonlinearSpec`` for a Material's nonlinear channels, or None.
+
+    maxwell and Tidy3D share the instantaneous Kerr form ``P_NL = eps0*chi3*|E|^2*E``
+    and the two-photon-absorption model, so the chi3 (Kerr) and TPA channels map
+    directly onto ``td.NonlinearSusceptibility`` and ``td.TwoPhotonAbsorption``.
+
+    Unit conventions (Tidy3D is a micrometre solver with ``E`` in [V/um]):
+
+    * ``chi3`` is [m^2/V^2] in maxwell and [um^2/V^2] in Tidy3D. The dimensionless
+      fractional-permittivity correction ``chi3*|E|^2`` must be preserved, and a
+      physical field of ``E`` [V/m] equals ``E/length_scale`` [V/um], so
+      ``chi3_um = chi3_SI * length_scale**2``. (Cross-checked via Tidy3D's own
+      ``n2 = 3/(4 n0^2 eps0 c0) chi3`` relation, which then yields the same physical
+      ``n2`` scaled to [um^2/W].)
+    * TPA ``beta`` is [m/W] in maxwell and [um/W] in Tidy3D, so
+      ``beta_um = beta_SI * length_scale``. ``n0`` (the linear index used in the
+      intensity conversion) defaults to ``sqrt(eps_r)`` in maxwell and is forwarded
+      explicitly; otherwise Tidy3D would infer it from the source frequencies.
+
+    Second-order (chi2) susceptibility has no public Tidy3D equivalent (Tidy3D's
+    public nonlinear API is the chi3/Kerr/TPA family only) and is rejected.
+    """
+    from ..media import TwoPhotonAbsorption
+
+    if not material.is_nonlinear:
+        return None
+
+    if material.nonlinear_chi2 != 0.0:
+        raise NotImplementedError(
+            "Tidy3D has no second-order (chi2 / second-harmonic-generation) nonlinear "
+            "medium; its public nonlinear API is the chi3 / Kerr / two-photon-absorption "
+            "family only. Validate chi2 against an FDTD analytic reference instead."
+        )
+
+    models = []
+
+    chi3 = material.nonlinear_chi3
+    if chi3 != 0.0:
+        models.append(td.NonlinearSusceptibility(chi3=chi3 * length_scale ** 2))
+
+    tpa_specs = [s for s in material.nonlinearity if isinstance(s, TwoPhotonAbsorption)]
+    if tpa_specs:
+        base_index = float(math.sqrt(float(material.eps_r)))
+        n0_values = {
+            float(spec.n0) if spec.n0 is not None else base_index for spec in tpa_specs
+        }
+        if len(n0_values) != 1:
+            raise ValueError(
+                "Tidy3D represents two-photon absorption with a single model carrying one "
+                f"linear index n0, but the material combines TPA terms with differing n0 "
+                f"({sorted(n0_values)}); merge them or give them a common n0."
+            )
+        n0 = n0_values.pop()
+        beta = sum(float(spec.beta) for spec in tpa_specs)
+        models.append(td.TwoPhotonAbsorption(beta=beta * length_scale, n0=n0))
+
+    return td.NonlinearSpec(models=models)
 
 
 def _convert_material(material, td, length_scale: float = _M_TO_UM):
@@ -212,8 +279,6 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM):
         raise NotImplementedError("Tidy3D export for LossyMetalMedium is not implemented yet.")
     if material.is_anisotropic:
         raise NotImplementedError("Tidy3D export for anisotropic Material is not implemented yet.")
-    if material.is_nonlinear:
-        raise NotImplementedError("Tidy3D export for Kerr nonlinear Material is not implemented yet.")
     if getattr(material, "has_custom_poles", False):
         raise NotImplementedError(
             "Tidy3D export for spatially-varying custom dispersive poles is not implemented yet."
@@ -232,6 +297,7 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM):
             "(sigma_m = 0); magnetically-lossy media have no Tidy3D equivalent and are not implemented yet."
         )
 
+    nonlinear_spec = _nonlinear_spec(material, td, length_scale)
     sigma_e = float(getattr(material, "sigma_e", 0.0))
 
     if not material.is_dispersive:
@@ -241,22 +307,27 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM):
             # Convert the SI conductivity [S/m] by the metre->Tidy3D length scale so
             # the exported eps'' = sigma/(w*eps0) matches the physical value.
             kwargs["conductivity"] = sigma_e / length_scale
+        if nonlinear_spec is not None:
+            kwargs["nonlinear_spec"] = nonlinear_spec
         return td.Medium(**kwargs)
 
-    dispersive = _dispersive_medium(material, td)
     if sigma_e == 0.0:
-        return dispersive
+        return _dispersive_medium(material, td, nonlinear_spec)
 
     # Static electric conductivity combined with a dispersive pole model. Tidy3D's
     # specialized Drude/Lorentz/Debye media cannot carry a conductivity, so fold the
     # dispersion and the conductivity into a single PoleResidue: convert the
     # dispersive medium to its equivalent pole-residue form and append the
-    # zero-frequency conductivity pole.
-    base = dispersive.pole_residue
-    return td.PoleResidue(
+    # zero-frequency conductivity pole. Any Kerr/TPA nonlinearity rides along on the
+    # same PoleResidue.
+    base = _dispersive_medium(material, td).pole_residue
+    poleres_kwargs = dict(
         eps_inf=base.eps_inf,
         poles=tuple(base.poles) + (_conductivity_pole(sigma_e),),
     )
+    if nonlinear_spec is not None:
+        poleres_kwargs["nonlinear_spec"] = nonlinear_spec
+    return td.PoleResidue(**poleres_kwargs)
 
 
 # ---------------------------------------------------------------------------
