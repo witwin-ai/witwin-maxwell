@@ -1712,7 +1712,8 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     # electric/magnetic dispersion, the instantaneous nonlinear family (Kerr chi3,
     # chi2, and two-photon-absorption loss), the complex split-field Bloch path
     # (optionally with a single CPML axis), and reference-provider TFSF injection
-    # (axis-aligned / x-Ez plane waves). Magnetic surface sources put a
+    # (axis-aligned / x-Ez plane waves, in both the six-face box and the two-face
+    # non-periodic slab injection mode). Magnetic surface sources put a
     # host-evaluated signal scalar inside the block, so those scenes stay on the
     # eager path.
     #
