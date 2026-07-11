@@ -207,8 +207,12 @@ def _initialize_grating_slab_cw_state(solver, source, lower, upper, bounds, delt
     if axis != "z":
         raise NotImplementedError("Grating TFSF slab support currently requires axis='z'.")
     source_time = source["source_time"]
-    if source_time["kind"] != "cw":
-        raise ValueError("Grating TFSF slab injection with Bloch boundaries requires CW source_time.")
+    # Both CW and pulsed (broadband) source times are supported: the fixed Bloch
+    # transverse phase is imposed by the boundary, while ``build_term_from_profile``
+    # emits CW-phased patches for a CW source_time and delayed-pulse patches
+    # otherwise. Automatic Bloch-wavevector resolution still requires CW (it maps
+    # a single frequency to a wavevector); that constraint is enforced upstream in
+    # ``resolve_bloch_wavevector`` before this state is built.
 
     eta0 = (solver.mu0 / solver.eps0) ** 0.5
     source_frequency = float(source_time["frequency"])

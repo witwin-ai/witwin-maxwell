@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import numpy as np
+import torch
 
-from ...sources import evaluate_source_time
+from ...sources import (
+    SOURCE_TIME_KIND_CW,
+    SOURCE_TIME_KIND_GAUSSIAN_PULSE,
+    evaluate_source_time,
+)
 
 
 def build_source_term(
@@ -240,6 +245,64 @@ def _launch_time_shifted_patch(solver, *, field_name, term, source_time, time_va
     )
 
 
+def _evaluate_time_shifted_signal_tensor(source_time, sample_time):
+    # Per-cell source-time waveform for a time-shifted patch, matching the
+    # ``evaluate_source_time`` device kernel branch-for-branch (kind 0 = CW,
+    # kind 1 = Gaussian pulse, anything else = Ricker) so a Bloch pulse injected
+    # through this Torch path is numerically identical to the non-Bloch kernel.
+    kind_code = int(source_time["kind_code"])
+    amplitude = float(source_time["amplitude"])
+    frequency = float(source_time["frequency"])
+    phase = float(source_time.get("phase", 0.0))
+    delay = float(source_time.get("delay", 0.0))
+    two_pi = 2.0 * np.pi
+    if kind_code == SOURCE_TIME_KIND_CW:
+        return amplitude * torch.cos(two_pi * frequency * sample_time + phase)
+    if kind_code == SOURCE_TIME_KIND_GAUSSIAN_PULSE:
+        inv_sigma = max(two_pi * float(source_time["fwidth"]), 1.0e-30)
+        tau = sample_time - delay
+        envelope = torch.exp(-0.5 * (tau * inv_sigma) ** 2)
+        return amplitude * envelope * torch.cos(two_pi * frequency * tau + phase)
+    tau = sample_time - delay
+    alpha = np.pi * frequency * tau
+    alpha_sq = alpha * alpha
+    return amplitude * (1.0 - 2.0 * alpha_sq) * torch.exp(-alpha_sq)
+
+
+def _time_shifted_signal_patch(term, source_time, time_value):
+    # Collapse the delayed pulse to a real per-cell amplitude patch on-device.
+    # The scatter into the split real/imag Bloch field (interior injection plus
+    # the phase-rotated wrap copies) is still the native ``addSourcePatchBloch3D``
+    # kernel; only the envelope evaluation is Torch, exactly as the CW-phased
+    # Bloch path already precomputes its cos/sin combination before scattering.
+    sample_time = float(time_value) - term["delay_patch"]
+    signal_patch = _evaluate_time_shifted_signal_tensor(source_time, sample_time) * term["patch"]
+    activation_delay_patch = term.get("activation_delay_patch")
+    if activation_delay_patch is not None:
+        signal_patch = torch.where(
+            activation_delay_patch > float(time_value),
+            torch.zeros_like(signal_patch),
+            signal_patch,
+        )
+    return signal_patch.contiguous()
+
+
+def _launch_bloch_time_shifted_patch(solver, *, field_name, term, source_time, time_value):
+    signal_patch = _time_shifted_signal_patch(term, source_time, time_value)
+    kernel_kwargs = _bloch_patch_common_kwargs(solver, field_name, term)
+    kernel_kwargs.update(
+        {
+            "sourcePatch": signal_patch,
+            "signalReal": 1.0,
+            "signalImag": 0.0,
+        }
+    )
+    solver.fdtd_module.addSourcePatchBloch3D(**kernel_kwargs).launchRaw(
+        blockSize=solver.kernel_block_size,
+        gridSize=term["grid"],
+    )
+
+
 def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value, clamp_pec=True):
     if not terms:
         return
@@ -273,7 +336,14 @@ def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value,
             continue
         if term["delay_patch"] is not None:
             if solver.scene.boundary.uses_kind("bloch"):
-                raise NotImplementedError("Bloch-boundary source patches require CW phased source terms.")
+                _launch_bloch_time_shifted_patch(
+                    solver,
+                    field_name=field_name,
+                    term=term,
+                    source_time=term_source_time,
+                    time_value=time_value,
+                )
+                continue
             _launch_time_shifted_patch(
                 solver,
                 field_name=field_name,
@@ -416,7 +486,14 @@ def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value
             continue
         if term["delay_patch"] is not None:
             if solver.scene.boundary.uses_kind("bloch"):
-                raise NotImplementedError("Bloch-boundary source patches require CW phased source terms.")
+                _launch_bloch_time_shifted_patch(
+                    solver,
+                    field_name=field_name,
+                    term=term,
+                    source_time=term_source_time,
+                    time_value=time_value,
+                )
+                continue
             _launch_time_shifted_patch(
                 solver,
                 field_name=field_name,

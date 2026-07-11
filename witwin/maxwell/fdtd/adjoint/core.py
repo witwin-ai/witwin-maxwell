@@ -1324,8 +1324,6 @@ def _apply_source_term_list(field_mapping, *, terms, source_time, omega, time_va
                 continue
             patch = float(signal_cos) * term["cw_cos_patch"] + float(signal_sin) * term["cw_sin_patch"]
         elif term["delay_patch"] is not None:
-            if solver is not None and has_complex_fields(solver):
-                raise NotImplementedError("Bloch-boundary source replay requires CW phased source terms.")
             sample_time = time_value - term["delay_patch"]
             patch = _evaluate_source_time_tensor(term_source_time, sample_time) * term["patch"]
             activation_delay_patch = term.get("activation_delay_patch")
@@ -1335,6 +1333,24 @@ def _apply_source_term_list(field_mapping, *, terms, source_time, omega, time_va
                     torch.zeros_like(patch),
                     patch,
                 )
+            if solver is not None and has_complex_fields(solver):
+                # The delayed pulse is a real current; scatter it into the split
+                # real/imag Bloch field with the same wrap-phase rule the forward
+                # ``addSourcePatchBloch3D`` kernel uses, so the reverse-replay
+                # reconstruction (and the eps VJP flowing through it) matches the
+                # forward injection exactly.
+                real_patch = patch.to(
+                    device=updated[term["field_name"]].device,
+                    dtype=updated[term["field_name"]].dtype,
+                )
+                updated = _add_complex_bloch_source_patch(
+                    updated,
+                    solver=solver,
+                    field_name=term["field_name"],
+                    offsets=term["offsets"],
+                    delta=torch.complex(real_patch, torch.zeros_like(real_patch)),
+                )
+                continue
         else:
             if cache_key not in signal_cache:
                 signal_cache[cache_key] = evaluate_source_time(term_source_time, float(time_value))
