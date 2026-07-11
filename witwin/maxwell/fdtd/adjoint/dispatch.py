@@ -49,11 +49,26 @@ _NATIVE_REVERSE_LABELS: dict[_ReverseBackend, str] = {
 _NativeReverseRunner = Callable[..., object]
 _NATIVE_REVERSE_RUNNERS: dict[_ReverseBackend, _NativeReverseRunner] = {}
 
+# A runner may carry a ``(solver, forward_state) -> bool`` qualifier stashed on
+# the callable itself (``_native_reverse_qualifier``). The real native runners
+# require a CUDA scene with the compiled extension present, so on CPU or a
+# missing-extension host ``auto`` mode falls back to the analytic reference and a
+# forced ``native`` override raises. The qualifier travels with the runner so a
+# test that swaps in its own runner (no qualifier attribute) qualifies anywhere.
+_NATIVE_QUALIFIER_ATTR = "_native_reverse_qualifier"
 
-def register_native_reverse_backend(backend: _ReverseBackend, runner: _NativeReverseRunner) -> None:
+
+def register_native_reverse_backend(
+    backend: _ReverseBackend,
+    runner: _NativeReverseRunner,
+    *,
+    qualifier: Callable[..., bool] | None = None,
+) -> None:
     """Register a native CUDA reverse-step runner for an analytic backend variant."""
     if backend not in _NATIVE_REVERSE_LABELS:
         raise ValueError(f"No native reverse label is defined for backend {backend!r}.")
+    if qualifier is not None:
+        setattr(runner, _NATIVE_QUALIFIER_ATTR, qualifier)
     _NATIVE_REVERSE_RUNNERS[backend] = runner
 
 
@@ -62,8 +77,17 @@ def unregister_native_reverse_backend(backend: _ReverseBackend) -> None:
     _NATIVE_REVERSE_RUNNERS.pop(backend, None)
 
 
-def _native_backend_available(backend: _ReverseBackend) -> bool:
-    return backend in _NATIVE_REVERSE_RUNNERS
+def _native_backend_available(backend: _ReverseBackend, solver=None, forward_state=None) -> bool:
+    runner = _NATIVE_REVERSE_RUNNERS.get(backend)
+    if runner is None:
+        return False
+    qualifier = getattr(runner, _NATIVE_QUALIFIER_ATTR, None)
+    if qualifier is None:
+        return True
+    if solver is None:
+        # No scene context to evaluate against: report registry membership only.
+        return True
+    return bool(qualifier(solver, forward_state))
 
 
 def _runtime():
@@ -621,10 +645,11 @@ def reverse_step(
         )
 
     # The torch-VJP fallback has no native mirror; native applies only to the
-    # analytic reference variants that a fused CUDA reverse kernel can replace.
+    # analytic reference variants that a fused CUDA reverse kernel can replace,
+    # and only when the runner's qualifier accepts this scene (CUDA + extension).
     native_available = (
         analytic_backend is not _ReverseBackend.TORCH_VJP
-        and _native_backend_available(analytic_backend)
+        and _native_backend_available(analytic_backend, solver, forward_state)
     )
 
     if mode == "torch_vjp":

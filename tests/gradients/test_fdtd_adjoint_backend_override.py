@@ -8,9 +8,10 @@ These tests exercise the P6 foundation plumbing:
 - the native reverse-execution harness (runner registry), and
 - the ``native_*`` profiler labels wired into ``reverse_backend_counts``.
 
-Everything here runs on CPU: no native CUDA reverse backend is registered on
-master yet, so ``auto`` mode must reproduce the analytic torch reference
-behaviour exactly, and an explicit ``native`` override must raise.
+Everything here runs on CPU. The native standard runner is registered, but its
+qualifier only accepts a CUDA scene with the compiled extension, so on CPU
+``auto`` mode must still reproduce the analytic torch reference behaviour exactly
+and an explicit ``native`` override must still raise.
 """
 
 from __future__ import annotations
@@ -164,11 +165,17 @@ def test_native_labels_cover_every_analytic_reference_variant():
     assert all(label.startswith("native_") for label in labels)
 
 
-def test_force_native_raises_when_no_runner_registered(monkeypatch):
+def test_force_native_raises_when_runner_does_not_qualify(monkeypatch):
+    # The standard native runner is registered, but its qualifier only accepts a
+    # CUDA scene with the compiled extension. On this CPU standard case the
+    # runner does not qualify, so an explicit ``native`` override must still raise.
     monkeypatch.setenv(_ENV, "native")
-    assert not dispatch._native_backend_available(_ReverseBackend.PYTHON_STANDARD)
+    solver, forward_state, adjoint_state, eps_ex, eps_ey, eps_ez = _standard_case()
+    assert not dispatch._native_backend_available(
+        _ReverseBackend.PYTHON_STANDARD, solver, forward_state
+    )
     with pytest.raises(ValueError, match="no .*native CUDA reverse backend is registered"):
-        _run(*_standard_case())
+        _run(solver, forward_state, adjoint_state, eps_ex, eps_ey, eps_ez)
 
 
 def _fake_native_runner(recorder, label):
