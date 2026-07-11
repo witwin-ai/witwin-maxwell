@@ -16,8 +16,8 @@ from .core import (
     _apply_resolved_magnetic_source_terms,
     _backward_diff,
     _bloch_backward_diff,
-    _forward_diff,
     _forward_magnetic_fields,
+    _forward_magnetic_fields_complex,
     _reverse_dispersive_corrections,
     _reverse_dispersive_state_python_reference,
     _reverse_electric_component_bloch,
@@ -29,7 +29,6 @@ from .core import (
     _reverse_magnetic_dispersive_state_python_reference,
     _reverse_tfsf_auxiliary_state_python_reference,
     _tfsf_magnetic_source_terms,
-    _update_magnetic_component,
 )
 
 __all__ = [
@@ -190,86 +189,9 @@ def reverse_step_bloch_python_reference(
     eps_ez,
     resolved_source_terms=None,
 ):
-    d_ez_dy = _forward_diff(forward_state["Ez"], axis=1, inv_delta=solver.inv_dy_h)
-    d_ey_dz = _forward_diff(forward_state["Ey"], axis=2, inv_delta=solver.inv_dz_h)
-    hx, _, _ = _update_magnetic_component(
-        forward_state["Hx"],
-        d_pos=d_ez_dy,
-        d_neg=d_ey_dz,
-        decay=solver.chx_decay,
-        curl=solver.chx_curl,
-        axis_pos=1,
-        axis_neg=2,
-    )
-    d_ez_imag_dy = _forward_diff(forward_state["Ez_imag"], axis=1, inv_delta=solver.inv_dy_h)
-    d_ey_imag_dz = _forward_diff(forward_state["Ey_imag"], axis=2, inv_delta=solver.inv_dz_h)
-    hx_imag, _, _ = _update_magnetic_component(
-        forward_state["Hx_imag"],
-        d_pos=d_ez_imag_dy,
-        d_neg=d_ey_imag_dz,
-        decay=solver.chx_decay,
-        curl=solver.chx_curl,
-        axis_pos=1,
-        axis_neg=2,
-    )
-
-    d_ex_dz = _forward_diff(forward_state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
-    d_ez_dx = _forward_diff(forward_state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
-    hy, _, _ = _update_magnetic_component(
-        forward_state["Hy"],
-        d_pos=d_ex_dz,
-        d_neg=d_ez_dx,
-        decay=solver.chy_decay,
-        curl=solver.chy_curl,
-        axis_pos=2,
-        axis_neg=0,
-    )
-    d_ex_imag_dz = _forward_diff(forward_state["Ex_imag"], axis=2, inv_delta=solver.inv_dz_h)
-    d_ez_imag_dx = _forward_diff(forward_state["Ez_imag"], axis=0, inv_delta=solver.inv_dx_h)
-    hy_imag, _, _ = _update_magnetic_component(
-        forward_state["Hy_imag"],
-        d_pos=d_ex_imag_dz,
-        d_neg=d_ez_imag_dx,
-        decay=solver.chy_decay,
-        curl=solver.chy_curl,
-        axis_pos=2,
-        axis_neg=0,
-    )
-
-    d_ey_dx = _forward_diff(forward_state["Ey"], axis=0, inv_delta=solver.inv_dx_h)
-    d_ex_dy = _forward_diff(forward_state["Ex"], axis=1, inv_delta=solver.inv_dy_h)
-    hz, _, _ = _update_magnetic_component(
-        forward_state["Hz"],
-        d_pos=d_ey_dx,
-        d_neg=d_ex_dy,
-        decay=solver.chz_decay,
-        curl=solver.chz_curl,
-        axis_pos=0,
-        axis_neg=1,
-    )
-    d_ey_imag_dx = _forward_diff(forward_state["Ey_imag"], axis=0, inv_delta=solver.inv_dx_h)
-    d_ex_imag_dy = _forward_diff(forward_state["Ex_imag"], axis=1, inv_delta=solver.inv_dy_h)
-    hz_imag, _, _ = _update_magnetic_component(
-        forward_state["Hz_imag"],
-        d_pos=d_ey_imag_dx,
-        d_neg=d_ex_imag_dy,
-        decay=solver.chz_decay,
-        curl=solver.chz_curl,
-        axis_pos=0,
-        axis_neg=1,
-    )
-
-    magnetic_fields = {
-        "Hx": hx,
-        "Hy": hy,
-        "Hz": hz,
-        "Hx_imag": hx_imag,
-        "Hy_imag": hy_imag,
-        "Hz_imag": hz_imag,
-    }
-    magnetic_fields = _apply_resolved_magnetic_source_terms(
-        magnetic_fields,
-        solver=solver,
+    magnetic_fields = _forward_magnetic_fields_complex(
+        solver,
+        forward_state,
         time_value=time_value,
         resolved_source_terms=resolved_source_terms,
     )

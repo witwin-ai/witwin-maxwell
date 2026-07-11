@@ -30,6 +30,28 @@ def expected_cpml_reverse_backend() -> str:
     return "python_reference_cpml"
 
 
+def expected_bloch_reverse_backend() -> str:
+    """The reverse-backend label ``auto`` mode records per step for a CUDA Bloch scene.
+
+    ``auto`` prefers the fused native CUDA complex Bloch reverse step when its
+    runner is registered (P6 native adjoint) and falls back to the analytic Torch
+    reference label otherwise. The FDTD gradient bridges in these tests run on CUDA,
+    where a registered native Bloch runner qualifies, so ``native_bloch`` is what
+    the backward profile records; this helper keeps the ``uses the explicit Bloch
+    reverse backend, never the torch_vjp fallback`` assertion correct in both
+    configurations.
+    """
+    from witwin.maxwell.fdtd.adjoint.dispatch import (
+        _NATIVE_REVERSE_LABELS,
+        _ReverseBackend,
+        _native_backend_available,
+    )
+
+    if _native_backend_available(_ReverseBackend.PYTHON_BLOCH):
+        return _NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_BLOCH]
+    return "python_reference_bloch"
+
+
 def reverse_step_torch_vjp(solver, forward_state, adjoint_state, *, time_value, eps_ex, eps_ey, eps_ez):
     return fdtd_adjoint_reference.reverse_step_torch_vjp(
         solver,

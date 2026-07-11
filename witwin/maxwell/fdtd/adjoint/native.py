@@ -9,9 +9,9 @@ per-cell reverse computation (electric-adjoint -> mid-H adjoint, magnetic-adjoin
 inside the compiled kernels.
 
 The mid-step magnetic field is still reconstructed with the shared Torch replay
-helper (``_forward_magnetic_fields``); nativizing that replay is tracked
-separately under the native-replay work. The reverse *math* itself is fully
-native here.
+helper (``_forward_magnetic_fields`` / ``_forward_magnetic_fields_complex`` for the
+complex split-field Bloch runner); nativizing that replay is tracked separately
+under the native-replay work. The reverse *math* itself is fully native here.
 """
 
 from __future__ import annotations
@@ -477,6 +477,268 @@ def _reverse_step_cpml_native(
     )
 
 
+def _reverse_step_bloch_native(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+):
+    """Fully native reverse step for the complex split-field Bloch configuration.
+
+    Mirrors ``reverse_step_bloch_python_reference`` exactly, launching the fused
+    complex Bloch reverse kernels in a fixed order. Every per-cell reverse
+    computation (electric-adjoint -> mid-H adjoint with the boundary wrap phase,
+    magnetic-adjoint -> pre-step E adjoint + eps gradient, and the real/imag
+    magnetic decay pullback) runs inside the compiled kernels; Python only
+    sequences the launches and carries the three per-axis Bloch phase pairs.
+
+    The fused kernels *assign* (not accumulate) into their outputs, so the launch
+    order is load-bearing: the electric->H kernels must fully populate both real
+    and imag mid-H adjoints before the magnetic->E kernels (which read them for the
+    forward-diff fold) and before the decay pullback (which reads them for the
+    pre-step H adjoint).
+    """
+    import torch
+
+    from . import core as _adjoint
+    from .reverse_common import dynamic_electric_curls
+
+    # Mid-step complex H the forward electric update consumed (shared Torch replay).
+    magnetic_fields = _adjoint._forward_magnetic_fields_complex(
+        solver,
+        forward_state,
+        time_value=time_value,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+    # Dynamic electric curl coefficients (cast base curl by the eps leaf).
+    ex_curl, ey_curl, ez_curl = dynamic_electric_curls(
+        solver, eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez
+    )
+
+    cos = solver.boundary_phase_cos
+    sin = solver.boundary_phase_sin
+    phase_cos_x, phase_sin_x = float(cos[0]), float(sin[0])
+    phase_cos_y, phase_sin_y = float(cos[1]), float(sin[1])
+    phase_cos_z, phase_sin_z = float(cos[2]), float(sin[2])
+
+    # Phase 1: electric adjoint -> mid-H adjoint (complex), with the boundary wrap
+    # phase on the transposed backward differences.
+    adj_hx_mid_r = torch.empty_like(forward_state["Hx"])
+    adj_hx_mid_i = torch.empty_like(forward_state["Hx"])
+    adj_hy_mid_r = torch.empty_like(forward_state["Hy"])
+    adj_hy_mid_i = torch.empty_like(forward_state["Hy"])
+    adj_hz_mid_r = torch.empty_like(forward_state["Hz"])
+    adj_hz_mid_i = torch.empty_like(forward_state["Hz"])
+    _cuda_backend._reverse_electric_hx_bloch(
+        AdjHxMidReal=adj_hx_mid_r,
+        AdjHxMidImag=adj_hx_mid_i,
+        AdjHxPostReal=adjoint_state["Hx"],
+        AdjHxPostImag=adjoint_state["Hx_imag"],
+        AdjEyPostReal=adjoint_state["Ey"],
+        AdjEyPostImag=adjoint_state["Ey_imag"],
+        AdjEzPostReal=adjoint_state["Ez"],
+        AdjEzPostImag=adjoint_state["Ez_imag"],
+        EyCurl=ey_curl,
+        EzCurl=ez_curl,
+        phaseCosY=phase_cos_y,
+        phaseSinY=phase_sin_y,
+        phaseCosZ=phase_cos_z,
+        phaseSinZ=phase_sin_z,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
+    )
+    _cuda_backend._reverse_electric_hy_bloch(
+        AdjHyMidReal=adj_hy_mid_r,
+        AdjHyMidImag=adj_hy_mid_i,
+        AdjHyPostReal=adjoint_state["Hy"],
+        AdjHyPostImag=adjoint_state["Hy_imag"],
+        AdjExPostReal=adjoint_state["Ex"],
+        AdjExPostImag=adjoint_state["Ex_imag"],
+        AdjEzPostReal=adjoint_state["Ez"],
+        AdjEzPostImag=adjoint_state["Ez_imag"],
+        ExCurl=ex_curl,
+        EzCurl=ez_curl,
+        phaseCosX=phase_cos_x,
+        phaseSinX=phase_sin_x,
+        phaseCosZ=phase_cos_z,
+        phaseSinZ=phase_sin_z,
+        invDx=solver.inv_dx_e,
+        invDz=solver.inv_dz_e,
+    )
+    _cuda_backend._reverse_electric_hz_bloch(
+        AdjHzMidReal=adj_hz_mid_r,
+        AdjHzMidImag=adj_hz_mid_i,
+        AdjHzPostReal=adjoint_state["Hz"],
+        AdjHzPostImag=adjoint_state["Hz_imag"],
+        AdjExPostReal=adjoint_state["Ex"],
+        AdjExPostImag=adjoint_state["Ex_imag"],
+        AdjEyPostReal=adjoint_state["Ey"],
+        AdjEyPostImag=adjoint_state["Ey_imag"],
+        ExCurl=ex_curl,
+        EyCurl=ey_curl,
+        phaseCosX=phase_cos_x,
+        phaseSinX=phase_sin_x,
+        phaseCosY=phase_cos_y,
+        phaseSinY=phase_sin_y,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
+    )
+
+    # Phase 2: magnetic adjoint -> pre-step E adjoint (complex) + eps gradient. Each
+    # kernel reconstructs its own curl(H) from the mid-H fields (for the eps
+    # gradient) and assigns the complete pre-step E adjoint (electric decay pullback
+    # + magnetic forward-diff fold of the mid-H adjoints).
+    adj_ex_prev_r = torch.empty_like(forward_state["Ex"])
+    adj_ex_prev_i = torch.empty_like(forward_state["Ex"])
+    adj_ey_prev_r = torch.empty_like(forward_state["Ey"])
+    adj_ey_prev_i = torch.empty_like(forward_state["Ey"])
+    adj_ez_prev_r = torch.empty_like(forward_state["Ez"])
+    adj_ez_prev_i = torch.empty_like(forward_state["Ez"])
+    grad_eps_ex = torch.empty_like(eps_ex)
+    grad_eps_ey = torch.empty_like(eps_ey)
+    grad_eps_ez = torch.empty_like(eps_ez)
+    _cuda_backend._reverse_magnetic_ex_bloch(
+        AdjExPrevReal=adj_ex_prev_r,
+        AdjExPrevImag=adj_ex_prev_i,
+        GradEpsEx=grad_eps_ex,
+        AdjExPostReal=adjoint_state["Ex"],
+        AdjExPostImag=adjoint_state["Ex_imag"],
+        AdjHyMidReal=adj_hy_mid_r,
+        AdjHyMidImag=adj_hy_mid_i,
+        AdjHzMidReal=adj_hz_mid_r,
+        AdjHzMidImag=adj_hz_mid_i,
+        ExDecay=solver.cex_decay,
+        ExCurl=ex_curl,
+        EpsEx=eps_ex,
+        HyMidReal=magnetic_fields["Hy"],
+        HyMidImag=magnetic_fields["Hy_imag"],
+        HzMidReal=magnetic_fields["Hz"],
+        HzMidImag=magnetic_fields["Hz_imag"],
+        HyCurl=solver.chy_curl,
+        HzCurl=solver.chz_curl,
+        phaseCosY=phase_cos_y,
+        phaseSinY=phase_sin_y,
+        phaseCosZ=phase_cos_z,
+        phaseSinZ=phase_sin_z,
+        invDyE=solver.inv_dy_e,
+        invDzE=solver.inv_dz_e,
+        invDyH=solver.inv_dy_h,
+        invDzH=solver.inv_dz_h,
+    )
+    _cuda_backend._reverse_magnetic_ey_bloch(
+        AdjEyPrevReal=adj_ey_prev_r,
+        AdjEyPrevImag=adj_ey_prev_i,
+        GradEpsEy=grad_eps_ey,
+        AdjEyPostReal=adjoint_state["Ey"],
+        AdjEyPostImag=adjoint_state["Ey_imag"],
+        AdjHxMidReal=adj_hx_mid_r,
+        AdjHxMidImag=adj_hx_mid_i,
+        AdjHzMidReal=adj_hz_mid_r,
+        AdjHzMidImag=adj_hz_mid_i,
+        EyDecay=solver.cey_decay,
+        EyCurl=ey_curl,
+        EpsEy=eps_ey,
+        HxMidReal=magnetic_fields["Hx"],
+        HxMidImag=magnetic_fields["Hx_imag"],
+        HzMidReal=magnetic_fields["Hz"],
+        HzMidImag=magnetic_fields["Hz_imag"],
+        HxCurl=solver.chx_curl,
+        HzCurl=solver.chz_curl,
+        phaseCosX=phase_cos_x,
+        phaseSinX=phase_sin_x,
+        phaseCosZ=phase_cos_z,
+        phaseSinZ=phase_sin_z,
+        invDxE=solver.inv_dx_e,
+        invDzE=solver.inv_dz_e,
+        invDxH=solver.inv_dx_h,
+        invDzH=solver.inv_dz_h,
+    )
+    _cuda_backend._reverse_magnetic_ez_bloch(
+        AdjEzPrevReal=adj_ez_prev_r,
+        AdjEzPrevImag=adj_ez_prev_i,
+        GradEpsEz=grad_eps_ez,
+        AdjEzPostReal=adjoint_state["Ez"],
+        AdjEzPostImag=adjoint_state["Ez_imag"],
+        AdjHxMidReal=adj_hx_mid_r,
+        AdjHxMidImag=adj_hx_mid_i,
+        AdjHyMidReal=adj_hy_mid_r,
+        AdjHyMidImag=adj_hy_mid_i,
+        EzDecay=solver.cez_decay,
+        EzCurl=ez_curl,
+        EpsEz=eps_ez,
+        HxMidReal=magnetic_fields["Hx"],
+        HxMidImag=magnetic_fields["Hx_imag"],
+        HyMidReal=magnetic_fields["Hy"],
+        HyMidImag=magnetic_fields["Hy_imag"],
+        HxCurl=solver.chx_curl,
+        HyCurl=solver.chy_curl,
+        phaseCosX=phase_cos_x,
+        phaseSinX=phase_sin_x,
+        phaseCosY=phase_cos_y,
+        phaseSinY=phase_sin_y,
+        invDxE=solver.inv_dx_e,
+        invDyE=solver.inv_dy_e,
+        invDxH=solver.inv_dx_h,
+        invDyH=solver.inv_dy_h,
+    )
+
+    # Phase 3: magnetic decay pullback -> pre-step H adjoint (complex). The decay is
+    # real, so the standard real decay kernel runs once per split-field half.
+    adj_hx_prev_r = torch.empty_like(forward_state["Hx"])
+    adj_hx_prev_i = torch.empty_like(forward_state["Hx"])
+    adj_hy_prev_r = torch.empty_like(forward_state["Hy"])
+    adj_hy_prev_i = torch.empty_like(forward_state["Hy"])
+    adj_hz_prev_r = torch.empty_like(forward_state["Hz"])
+    adj_hz_prev_i = torch.empty_like(forward_state["Hz"])
+    _cuda_backend._reverse_magnetic_hx_decay(AdjHxPrev=adj_hx_prev_r, AdjHxMid=adj_hx_mid_r, HxDecay=solver.chx_decay)
+    _cuda_backend._reverse_magnetic_hx_decay(AdjHxPrev=adj_hx_prev_i, AdjHxMid=adj_hx_mid_i, HxDecay=solver.chx_decay)
+    _cuda_backend._reverse_magnetic_hy_decay(AdjHyPrev=adj_hy_prev_r, AdjHyMid=adj_hy_mid_r, HyDecay=solver.chy_decay)
+    _cuda_backend._reverse_magnetic_hy_decay(AdjHyPrev=adj_hy_prev_i, AdjHyMid=adj_hy_mid_i, HyDecay=solver.chy_decay)
+    _cuda_backend._reverse_magnetic_hz_decay(AdjHzPrev=adj_hz_prev_r, AdjHzMid=adj_hz_mid_r, HzDecay=solver.chz_decay)
+    _cuda_backend._reverse_magnetic_hz_decay(AdjHzPrev=adj_hz_prev_i, AdjHzMid=adj_hz_mid_i, HzDecay=solver.chz_decay)
+
+    pre_by_name = {
+        "Ex": adj_ex_prev_r,
+        "Ey": adj_ey_prev_r,
+        "Ez": adj_ez_prev_r,
+        "Hx": adj_hx_prev_r,
+        "Hy": adj_hy_prev_r,
+        "Hz": adj_hz_prev_r,
+        "Ex_imag": adj_ex_prev_i,
+        "Ey_imag": adj_ey_prev_i,
+        "Ez_imag": adj_ez_prev_i,
+        "Hx_imag": adj_hx_prev_i,
+        "Hy_imag": adj_hy_prev_i,
+        "Hz_imag": adj_hz_prev_i,
+    }
+    step_result = _adjoint._ReverseStepResult(
+        pre_step_adjoint={name: pre_by_name[name] for name in forward_state},
+        grad_eps_ex=grad_eps_ex,
+        grad_eps_ey=grad_eps_ey,
+        grad_eps_ez=grad_eps_ez,
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_BLOCH],
+    )
+    # The native runner owns the full reverse-step contract, including the analytic
+    # source-term eps-gradient accumulation the reference path applies via ``finish``.
+    return _adjoint._accumulate_source_term_gradients(
+        step_result,
+        solver=solver,
+        adjoint_state=adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+
 def register_native_reverse_backends() -> None:
     """Register every available native CUDA reverse-step runner."""
     register_native_reverse_backend(
@@ -487,5 +749,10 @@ def register_native_reverse_backends() -> None:
     register_native_reverse_backend(
         _ReverseBackend.PYTHON_CPML,
         _reverse_step_cpml_native,
+        qualifier=_cuda_scene_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.PYTHON_BLOCH,
+        _reverse_step_bloch_native,
         qualifier=_cuda_scene_native_qualifies,
     )

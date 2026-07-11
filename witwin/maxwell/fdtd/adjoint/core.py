@@ -2490,6 +2490,75 @@ def _forward_magnetic_fields(solver, state, *, time_value, resolved_source_terms
     )
 
 
+def _forward_magnetic_fields_complex(solver, state, *, time_value, resolved_source_terms):
+    """Recompute the post-source complex (split-field) magnetic fields of one Bloch step.
+
+    Mirrors the magnetic half of the split-field Bloch ``_step_state``: the real and
+    imaginary field halves each run the plain (non-CPML) magnetic update with the
+    shared decay/curl coefficients, and the resolved magnetic source terms apply once
+    to the combined six-key dict. Both the analytic Bloch reference and the native
+    Bloch reverse runner consume this to recover the mid-step H the electric update
+    read (the reverse *math* is native; this replay stays Torch, same bar as the
+    standard/CPML runners).
+    """
+
+    def _magnetic_half(suffix):
+        ex = state["Ex" + suffix]
+        ey = state["Ey" + suffix]
+        ez = state["Ez" + suffix]
+        d_ez_dy = _forward_diff(ez, axis=1, inv_delta=solver.inv_dy_h)
+        d_ey_dz = _forward_diff(ey, axis=2, inv_delta=solver.inv_dz_h)
+        hx, _, _ = _update_magnetic_component(
+            state["Hx" + suffix],
+            d_pos=d_ez_dy,
+            d_neg=d_ey_dz,
+            decay=solver.chx_decay,
+            curl=solver.chx_curl,
+            axis_pos=1,
+            axis_neg=2,
+        )
+        d_ex_dz = _forward_diff(ex, axis=2, inv_delta=solver.inv_dz_h)
+        d_ez_dx = _forward_diff(ez, axis=0, inv_delta=solver.inv_dx_h)
+        hy, _, _ = _update_magnetic_component(
+            state["Hy" + suffix],
+            d_pos=d_ex_dz,
+            d_neg=d_ez_dx,
+            decay=solver.chy_decay,
+            curl=solver.chy_curl,
+            axis_pos=2,
+            axis_neg=0,
+        )
+        d_ey_dx = _forward_diff(ey, axis=0, inv_delta=solver.inv_dx_h)
+        d_ex_dy = _forward_diff(ex, axis=1, inv_delta=solver.inv_dy_h)
+        hz, _, _ = _update_magnetic_component(
+            state["Hz" + suffix],
+            d_pos=d_ey_dx,
+            d_neg=d_ex_dy,
+            decay=solver.chz_decay,
+            curl=solver.chz_curl,
+            axis_pos=0,
+            axis_neg=1,
+        )
+        return hx, hy, hz
+
+    hx, hy, hz = _magnetic_half("")
+    hx_imag, hy_imag, hz_imag = _magnetic_half("_imag")
+    magnetic_fields = {
+        "Hx": hx,
+        "Hy": hy,
+        "Hz": hz,
+        "Hx_imag": hx_imag,
+        "Hy_imag": hy_imag,
+        "Hz_imag": hz_imag,
+    }
+    return _apply_resolved_magnetic_source_terms(
+        magnetic_fields,
+        solver=solver,
+        time_value=time_value,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+
 def _sum_adjacent(field: torch.Tensor, axis: int) -> torch.Tensor:
     """Sum of each adjacent pair along ``axis`` (length shrinks by one)."""
     lo = [slice(None)] * field.ndim
