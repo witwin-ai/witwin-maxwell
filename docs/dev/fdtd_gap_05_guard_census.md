@@ -60,7 +60,7 @@ guards regardless of wording.
 | after P5.2 (combinations) | **74 (measured)** | Projected `≤ 62`; realized `74`. As with P5.1, most P5.2 edges (nonlinear+dispersive, aniso+dispersive, aniso+σ_e, aniso+PML-overlap under CPML, modulated+dispersive/nonlinear, multi-frequency modulation, modulated-slab-CPML) were enabled by *narrowing branch conditions and composing coefficient paths*, not by deleting `raise` statements, so the AST count fell only 85 → 74. `runtime/materials.py` went 10 → 6 (not ≤ 3): the 6 that remain guard genuinely-unsupported combinations — nonlinear / full-aniso / modulated media under complex Bloch fields (need complex-field kernels), modulated + full-aniso (per-step 3×3 re-inversion), full-aniso + nonlinear cross-material defense, and full-aniso overlapping a split-field (non-CPML) PML. `media.py` retains 3 material-combination construction guards (nonlinear+aniso, modulated+aniso, modulated+σ_e) plus the dispersive-full-tensor and PerturbationMedium-full-tensor frequency-evaluation deferrals; all are physics-worded. Every remaining `media.py` / `runtime/materials.py` combination guard was reworded off "not implemented yet" / "in v1" in this phase. |
 | after P5.3 (grid) | **74 (measured)** | Projected `≤ 58`; realized `74` (unchanged). As in P5.1/P5.2, P5.3 lifted the grid × feature coherence cases by generalizing *ValueError-gated / approximation* paths, not by deleting `NotImplementedError` raises, so the AST capability count did not move. Subpixel averaging and conformal PEC now scale their per-sub-sample offsets by the local Yee dual-cell width instead of the scalar `Scene.dx` (that `Scene.dx` nonuniform guard is a `ValueError`, never counted); the TFSF / mode-plane "locally uniform" hard rejects became bounded region-uniform `ValueError` contracts; and the soft-`PlaneWave` numerical-dispersion correction switched from global-minimum to launch-local spacing. None of these are `NotImplementedError` guards. The grid-related `NotImplementedError` raises that remain are out of P5.3 scope: `tidy3d.py` / `simulation.py` nonuniform-grid rejects belong to P5.6 (cross-solver parity) and the TFSF-slab `axis='z'` / slab-runtime rejects to P5.4/P5.5. Acceptance proof: `tests/validation/physics/test_autogrid_subpixel_thesis.py` shows `GridSpec.auto` + `SubpixelSpec(samples=(2,2,2), averaging="polarized")` reaches lower field error at fewer cells than uniform + subpixel on a high-contrast (`eps_r=12`) sphere. |
 | after P5.5 (stubs) | **71 (measured)** | Projected `≤ 45`; realized `71` (74 → 71). The four P5.5 stubs each landed a runtime path rather than a large guard sweep: `sigma_m` folded into the H update with no pre-existing raise to delete; the `Graphene` interband Lorentz sheet-pole fit deleted the `media.py` interband raise (media 8 → 7); the non-periodic TFSF slab forward runtime deleted one `stepping.py` raise (6 → 5) and one `tfsf_state.py` raise (3 → 2); and the `LossyMetalMedium` SIBC runtime replaced its descriptor-only raise with a single physics-worded SIBC-configuration guard (compiler unchanged at 6). Net −3. Every remaining forward-path guard message now states a physical or mathematical reason: the compiler Tensor3x3-`mu_r`/`sigma_e`/`sigma_m` guard and the SIBC guard were reworded off "not implemented yet" / "v1" in this phase, and the phrase gate (below) is now live. |
-| after P5.4 (Bloch broadband) | ≤ 50 | temporal/stepping/tfsf Bloch guards |
+| after P5.4 (Bloch broadband) | **66 (measured)** | Projected `≤ 50`; realized `66` (71 → 66). Pulsed (broadband) Bloch source injection deleted both `excitation/temporal.py` CW-only guards (2 → 0); the general grating TFSF slab runtime deleted one `stepping.py` raise (5 → 4) and one `tfsf_state.py` raise (2 → 1); the mixed Bloch/CPML single-PML-axis generalization deleted one `adjoint/core.py` raise (6 → 5). Net −5. The `excitation/` phrase-gate allowlist entry was removed: every remaining `excitation/` guard already states a physical reason (`currently supports only none, pml, pec, or pmc boundaries`, real-valued-eps mode caps, the Bloch 6-face split ill-posedness), none uses a deferral phrase. |
 | after P5.6 (parity) | ≤ 33 | tidy3d 13 → ≤ 4 capability; fdfd static parity |
 | after P5.7–P5.9 | ≤ 25 | plan §5 global target |
 
@@ -71,8 +71,9 @@ never "not implemented yet" / "not supported yet" / "in v1". As of P5.5 this is
 phrases in a public forward-path module (`media.py`, `compiler/`,
 `fdtd/runtime/`, `fdtd/boundary/`, `scene.py`, `simulation.py`). Modules whose
 wording a later phase owns carry an explicit allowlist entry naming that phase
-(`adapters/tidy3d.py` → P5.6, `fdfd/` → P5.6, `fdtd/excitation/` → P5.4,
-`postprocess/` → P5.9, `fdtd/adjoint/` → P5.7+).
+(`adapters/tidy3d.py` → P5.6, `fdfd/` → P5.6, `postprocess/` → P5.9,
+`fdtd/adjoint/` → P5.7+). The `fdtd/excitation/` allowlist entry was retired in
+P5.4: every excitation guard now states a physical reason directly.
 
 ## Per-cluster capability-guard counts (baseline)
 
@@ -146,3 +147,37 @@ at 6. Acceptance proofs: `tests/materials/conductive/test_fdtd_magnetic_conducti
 `tests/sources/tfsf/test_fdtd_grating_tfsf.py` (non-periodic slab forward confines the
 total field). The phrase gate `test_no_deferral_phrase_in_public_forward_path` is now
 live in the same census test file.
+
+## Per-cluster capability-guard counts (after P5.4 — measured, total 66)
+
+```
+13  witwin/maxwell/adapters/tidy3d.py          4  witwin/maxwell/fdfd/solver.py
+ 7  witwin/maxwell/fdtd/excitation/modes.py    4  witwin/maxwell/fdtd/runtime/stepping.py
+ 7  witwin/maxwell/media.py                    2  witwin/maxwell/fdtd/excitation/injection.py
+ 6  witwin/maxwell/compiler/materials.py       2  witwin/maxwell/postprocess/stratton_chu.py
+ 6  witwin/maxwell/fdtd/adjoint/bridge.py      1  witwin/maxwell/fdtd/excitation/tfsf_state.py
+ 6  witwin/maxwell/fdtd/runtime/materials.py   1  simulation.py / fdfd/adjoint/bridge.py /
+ 5  witwin/maxwell/fdtd/adjoint/core.py           scattering_parameters.py
+```
+
+P5.4 deltas from the after-P5.5 block: `fdtd/excitation/temporal.py` 2 → 0 (both
+CW-only Bloch-source guards deleted by the pulsed/broadband Bloch injection),
+`fdtd/runtime/stepping.py` 5 → 4 and `fdtd/excitation/tfsf_state.py` 2 → 1 (the
+grating TFSF slab runtime generalized to any normal axis), and
+`fdtd/adjoint/core.py` 6 → 5 (the mixed Bloch/CPML single-PML-axis generalization
+lifted the x/y-Bloch+z-PML-only adjoint guard). The two `tfsf_state.py` Bloch
+contract guards became one; the surviving `TFSF slab mode is required for
+Bloch-boundary TFSF injection` guard stays a contract (a 6-face total/scattered
+split is ill-posed under transverse periodicity). Acceptance proofs:
+`tests/validation/physics/test_bloch_broadband_vs_cw.py` (a single broadband
+GaussianPulse run reproduces the per-frequency CW transmission of a normal-incidence
+periodic metasurface within 2%, plus oblique complex-field Bloch injection confines
+the total field per frequency), `tests/validation/physics/test_dispersive_metasurface_bloch.py`
+(a patterned Lorentz metasurface runs forward under oblique Bloch and matches its
+periodic-equivalent unit-phase reference to float32 round-off; FDFD is unavailable
+as a cross-check because it rejects periodic/Bloch faces), and the existing
+`tests/sources/tfsf/test_fdtd_grating_pulsed_bloch.py` and
+`tests/monitors/diffraction/test_diffraction_monitor.py` (order decomposition
+conserves plane flux within 5% and agrees with the independent Yee flux integrator
+within 8%; absolute per-order `T + R = 1` is a documented normalization limit, kept
+as a strict-`False` xfail tripwire).

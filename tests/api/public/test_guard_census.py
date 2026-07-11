@@ -17,12 +17,13 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 
 # Lowered by each P5 phase in the commit that removes guards. Never raised
 # without a corresponding update to docs/dev/fdtd_gap_05_guard_census.md.
-# P5.5 (stub completion) re-measured this at 71: sigma_m folded into the H
-# update, Graphene interband via a Lorentz sheet-pole fit, the non-periodic
-# TFSF slab forward runtime, and the LossyMetalMedium normal-incidence SIBC
-# runtime each deleted a NotImplementedError raise (stepping/runtime/compiler),
-# taking the AST capability count 74 -> 71.
-CAPABILITY_GUARD_BUDGET = 71
+# P5.4 (Bloch broadband) re-measured this at 66: the pulsed (broadband) Bloch
+# source injection deleted both excitation/temporal.py CW-only guards (2 -> 0),
+# the general grating TFSF slab runtime deleted one stepping.py raise (5 -> 4)
+# and one tfsf_state.py raise (2 -> 1), and the mixed Bloch/CPML axis
+# generalization deleted one adjoint/core.py raise (6 -> 5), taking the AST
+# capability count 71 -> 66.
+CAPABILITY_GUARD_BUDGET = 66
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with the table in docs/dev/fdtd_gap_05_guard_census.md.
@@ -134,7 +135,6 @@ BANNED_DEFERRAL_PHRASES = ("not implemented yet", "not supported yet", "in v1")
 PHRASE_GATE_ALLOWLIST = (
     ("witwin/maxwell/adapters/tidy3d.py", "P5.6 cross-solver parity export reword"),
     ("witwin/maxwell/fdfd/", "P5.6 FDFD static-parity reword (Kerr/Tensor3x3/magnetic)"),
-    ("witwin/maxwell/fdtd/excitation/", "P5.4 Bloch broadband source/TFSF reword"),
     ("witwin/maxwell/postprocess/", "P5.9 postprocess generality reword"),
     ("witwin/maxwell/fdtd/adjoint/", "adjoint deferred-branch reword (P5.7+)"),
 )
