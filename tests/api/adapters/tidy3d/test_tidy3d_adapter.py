@@ -1116,6 +1116,182 @@ class TestSheetAndMetalConversion:
             assert z_td.real > 0.0 and z_td.imag < 0.0
 
 
+class TestCustomPoleAndPerturbationConversion:
+    def test_uniform_custom_lorentz_pole_exports_as_scalar_lorentz(self, inject_mock_tidy3d):
+        # A spatially-uniform CustomLorentzPole lowers to its scalar reference pole
+        # (peak == the uniform value), so the export is the ordinary td.Lorentz.
+        import torch
+
+        td = inject_mock_tidy3d
+        delta = torch.full((3, 3, 3), 2.0)
+        medium = mw.Material(
+            eps_r=1.5,
+            lorentz_poles=(mw.CustomLorentzPole(delta_eps=delta, resonance_frequency=5e14, gamma=1e13),),
+        )
+        result = _convert_material(medium, td)
+        assert isinstance(result, td.Lorentz)
+        assert result.eps_inf == pytest.approx(1.5)
+        assert result.coeffs[0] == pytest.approx((2.0, 5e14, 1e13))
+
+    def test_uniform_custom_drude_pole_exports_as_scalar_drude(self, inject_mock_tidy3d):
+        import torch
+
+        td = inject_mock_tidy3d
+        plasma = torch.full((4, 4, 4), 2e15)
+        medium = mw.Material(drude_poles=(mw.CustomDrudePole(plasma_frequency=plasma, gamma=1e13),))
+        result = _convert_material(medium, td)
+        assert isinstance(result, td.Drude)
+        assert result.coeffs[0] == pytest.approx((2e15, 1e13))
+
+    def test_uniform_custom_debye_pole_exports_as_scalar_debye(self, inject_mock_tidy3d):
+        import torch
+
+        td = inject_mock_tidy3d
+        delta = torch.full((2, 2, 2), 1.0)
+        medium = mw.Material(eps_r=2.0, debye_poles=(mw.CustomDebyePole(delta_eps=delta, tau=1e-12),))
+        result = _convert_material(medium, td)
+        assert isinstance(result, td.Debye)
+        assert result.coeffs[0] == pytest.approx((1.0, 1e-12))
+
+    def test_spatially_varying_custom_pole_is_rejected(self, inject_mock_tidy3d):
+        # A per-cell strength profile is defined relative to the owning structure's
+        # Box, which the material-level export cannot resolve into Tidy3D absolute
+        # coordinates, so it must raise rather than silently collapse to the peak.
+        import torch
+
+        td = inject_mock_tidy3d
+        delta = torch.linspace(1.0, 2.0, 8).reshape(2, 2, 2)
+        medium = mw.Material(
+            lorentz_poles=(mw.CustomLorentzPole(delta_eps=delta, resonance_frequency=5e14, gamma=1e13),),
+        )
+        with pytest.raises(NotImplementedError, match="spatially-varying custom dispersive pole"):
+            _convert_material(medium, td)
+
+    def test_uniform_perturbation_exports_shifted_medium(self, inject_mock_tidy3d):
+        # A spatially-uniform perturbation is a constant background shift
+        # eps_base + eps_sensitivity * value = 2.0 + 2.0 * 0.5 = 3.0.
+        import torch
+
+        td = inject_mock_tidy3d
+        pert = torch.full((3, 3, 3), 0.5)
+        medium = mw.PerturbationMedium(mw.Material(eps_r=2.0), perturbation=pert, eps_sensitivity=2.0)
+        result = _convert_material(medium, td)
+        assert isinstance(result, td.Medium)
+        assert result.permittivity == pytest.approx(3.0)
+
+    def test_uniform_perturbation_on_diagonal_base_shifts_each_axis(self, inject_mock_tidy3d):
+        # The isotropic shift adds to every principal axis of a DiagonalTensor3 base.
+        import torch
+
+        td = inject_mock_tidy3d
+        pert = torch.full((3, 3, 3), 1.0)
+        base = mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0))
+        medium = mw.PerturbationMedium(base, perturbation=pert, eps_sensitivity=0.5)
+        result = _convert_material(medium, td)
+        assert isinstance(result, td.AnisotropicMedium)
+        assert result.xx.permittivity == pytest.approx(2.5)
+        assert result.yy.permittivity == pytest.approx(3.5)
+        assert result.zz.permittivity == pytest.approx(4.5)
+
+    def test_uniform_perturbation_preserves_base_dispersion(self, inject_mock_tidy3d):
+        # The perturbation shifts only eps_inf; the base poles ride through unchanged.
+        import torch
+
+        td = inject_mock_tidy3d
+        pert = torch.full((2, 2, 2), 1.0)
+        base = mw.Material.lorentz(eps_inf=2.0, delta_eps=1.5, resonance_frequency=5e14, gamma=1e13)
+        medium = mw.PerturbationMedium(base, perturbation=pert, eps_sensitivity=0.5)
+        result = _convert_material(medium, td)
+        assert isinstance(result, td.Lorentz)
+        assert result.eps_inf == pytest.approx(2.5)
+        assert result.coeffs[0] == pytest.approx((1.5, 5e14, 1e13))
+
+    def test_spatially_varying_perturbation_is_rejected(self, inject_mock_tidy3d):
+        import torch
+
+        td = inject_mock_tidy3d
+        pert = torch.linspace(0.1, 1.0, 8).reshape(2, 2, 2)
+        medium = mw.PerturbationMedium(mw.Material(eps_r=2.0), perturbation=pert)
+        with pytest.raises(NotImplementedError, match="spatially-varying PerturbationMedium"):
+            _convert_material(medium, td)
+
+    def test_perturbation_structure_scene_exports_shifted_medium(self, inject_mock_tidy3d):
+        import torch
+
+        td = inject_mock_tidy3d
+        pert = torch.full((3, 3, 3), 0.5)
+        scene = (
+            mw.Scene(
+                domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.pml(num_layers=10),
+                device="cpu",
+            )
+            .add_structure(
+                mw.Structure(
+                    mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
+                    mw.PerturbationMedium(mw.Material(eps_r=2.0), perturbation=pert, eps_sensitivity=2.0),
+                )
+            )
+            .add_source(mw.PointDipole(position=(0, 0, 0.4), polarization="Ex", source_time=mw.CW(frequency=1e13)))
+        )
+        sim = scene.to_tidy3d(frequencies=1e13)
+        assert len(sim.structures) == 1
+        medium = sim.structures[0].medium
+        assert isinstance(medium, td.Medium)
+        assert medium.permittivity == pytest.approx(3.0)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the custom-pole convention check",
+    )
+    def test_uniform_custom_drude_pole_matches_scalar_permittivity_real_tidy3d(self):
+        # Physical-convention check: the uniform custom pole exports to the same
+        # td.Drude as the equivalent scalar pole, so its eps_model reproduces the
+        # scalar Material.relative_permittivity (Drude's Tidy3D convention coincides
+        # with maxwell's, so the full complex value is asserted). The custom material's
+        # own relative_permittivity is undefined, so the scalar twin is the reference.
+        import torch
+
+        freq = 2.0e14
+        with _real_tidy3d() as real_td:
+            plasma = torch.full((3, 3, 3), 2e15)
+            custom = mw.Material(eps_r=1.0, drude_poles=(mw.CustomDrudePole(plasma_frequency=plasma, gamma=1e13),))
+            scalar = mw.Material.drude(eps_inf=1.0, plasma_frequency=2e15, gamma=1e13)
+            medium = _convert_material(custom, real_td)
+            assert isinstance(medium, real_td.Drude)
+            eps = complex(medium.eps_model(freq))
+            ref = scalar.relative_permittivity(freq)
+            assert eps.real == pytest.approx(ref.real, rel=1e-6)
+            assert eps.imag == pytest.approx(ref.imag, rel=1e-6)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the perturbation-shift convention check",
+    )
+    def test_uniform_perturbation_reproduces_shifted_permittivity_real_tidy3d(self):
+        # Physical-convention check: the exported permittivity is exactly
+        # eps_base + eps_sensitivity * value, matching Material(eps_r=shifted). The
+        # difference from the unperturbed base is exactly eps_sensitivity * value, so
+        # the perturbation is provably not dropped.
+        import torch
+
+        freq = 2.0e14
+        base_eps, sensitivity, value = 2.0, 2.0, 0.5
+        shifted = base_eps + sensitivity * value
+        with _real_tidy3d() as real_td:
+            pert = torch.full((3, 3, 3), value)
+            medium = mw.PerturbationMedium(mw.Material(eps_r=base_eps), perturbation=pert, eps_sensitivity=sensitivity)
+            exported = _convert_material(medium, real_td)
+            assert isinstance(exported, real_td.Medium)
+            eps = complex(exported.eps_model(freq))
+            ref = mw.Material(eps_r=shifted).relative_permittivity(freq)
+            assert eps.real == pytest.approx(shifted)
+            assert eps.real == pytest.approx(ref.real, rel=1e-6)
+            base_eps_model = complex(_convert_material(mw.Material(eps_r=base_eps), real_td).eps_model(freq))
+            assert eps.real - base_eps_model.real == pytest.approx(sensitivity * value)
+
+
 class TestGeometryConversion:
     def test_box(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d

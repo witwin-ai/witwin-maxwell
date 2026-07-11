@@ -545,6 +545,124 @@ def _lossy_metal_medium(material, td, length_scale: float, frequencies):
     )
 
 
+def _uniform_grid_value(grid) -> float | None:
+    """Single value of a per-cell parameter grid if spatially uniform, else None.
+
+    Custom dispersive poles and ``PerturbationMedium`` carry a 3D torch tensor of
+    per-cell oscillator strength / perturbation amplitude defined relative to the
+    owning structure's ``Box``. A spatially-uniform grid lowers to a homogeneous
+    Tidy3D medium; a varying grid would need a ``CustomMedium`` / ``CustomPoleResidue``
+    on a ``SpatialDataArray`` in absolute simulation coordinates, which the box-relative
+    grid cannot supply at material-conversion time.
+    """
+    import torch
+
+    with torch.no_grad():
+        lo = float(grid.min())
+        hi = float(grid.max())
+    return lo if hi == lo else None
+
+
+def _homogenize_custom_poles(material):
+    """Lower a Material whose dispersive poles are per-cell custom poles to scalar poles.
+
+    Each ``CustomPole`` whose strength grid is spatially uniform maps to its scalar
+    ``reference_pole()`` (the peak equals the uniform value, so the lowering is exact);
+    a spatially-varying custom pole has no homogeneous Tidy3D equivalent and raises. The
+    reconstructed Material keeps every other channel (background permittivity/permeability,
+    conductivity, tensors, nonlinearity, modulation) so it re-enters ``_convert_material``
+    through the ordinary pole path.
+    """
+    from ..media import CustomDrudePole, CustomPole, Material
+
+    def resolve(pole):
+        if not isinstance(pole, CustomPole):
+            return pole
+        grid = pole.plasma_frequency if isinstance(pole, CustomDrudePole) else pole.delta_eps
+        if _uniform_grid_value(grid) is None:
+            raise NotImplementedError(
+                "Tidy3D export of a spatially-varying custom dispersive pole would need a "
+                "CustomPoleResidue on a SpatialDataArray in absolute simulation coordinates, but "
+                "maxwell's per-cell pole-strength grid is defined relative to the owning structure's "
+                "Box and cannot be resolved into Tidy3D coordinates at material-conversion time. "
+                "Export a spatially-uniform custom pole (it lowers to the equivalent homogeneous "
+                "pole) or validate the per-cell profile against an FDTD/analytic reference."
+            )
+        return pole.reference_pole()
+
+    return Material(
+        eps_r=material.eps_r,
+        mu_r=material.mu_r,
+        sigma_e=material.sigma_e,
+        sigma_m=material.sigma_m,
+        debye_poles=tuple(resolve(p) for p in material.debye_poles),
+        drude_poles=tuple(resolve(p) for p in material.drude_poles),
+        lorentz_poles=tuple(resolve(p) for p in material.lorentz_poles),
+        mu_debye_poles=tuple(resolve(p) for p in material.mu_debye_poles),
+        mu_drude_poles=tuple(resolve(p) for p in material.mu_drude_poles),
+        mu_lorentz_poles=tuple(resolve(p) for p in material.mu_lorentz_poles),
+        epsilon_tensor=material.epsilon_tensor,
+        mu_tensor=material.mu_tensor,
+        sigma_e_tensor=material.sigma_e_tensor,
+        kerr_chi3=material.kerr_chi3,
+        nonlinearity=material.nonlinearity,
+        modulation=material.modulation,
+    )
+
+
+def _homogenize_perturbation(material):
+    """Lower a ``PerturbationMedium`` with a spatially-uniform perturbation to a plain Material.
+
+    ``eps(x) = eps_base + eps_sensitivity * perturbation(x)`` shifts the background
+    permittivity (``eps_inf``) only. A spatially-uniform perturbation is a constant shift
+    ``eps_sensitivity * value``, applied to the scalar ``eps_r`` or, for a diagonal
+    ``DiagonalTensor3`` base, to each principal axis; the base's poles / conductivity /
+    nonlinearity / modulation ride through unchanged so the reconstructed Material exports
+    exactly like its dispersive/anisotropic base at the shifted background. A spatially-
+    varying perturbation has no homogeneous Tidy3D equivalent and raises.
+    """
+    from ..media import DiagonalTensor3, Material
+
+    value = _uniform_grid_value(material.perturbation)
+    if value is None:
+        raise NotImplementedError(
+            "Tidy3D export of a spatially-varying PerturbationMedium would need a CustomMedium on a "
+            "SpatialDataArray in absolute simulation coordinates, but its perturbation field is "
+            "defined relative to the owning structure's Box and cannot be resolved into Tidy3D "
+            "coordinates at material-conversion time. Export a spatially-uniform perturbation (it "
+            "lowers to a homogeneous permittivity shift eps_base + eps_sensitivity*value) or validate "
+            "the perturbed profile against an FDTD/analytic reference."
+        )
+
+    shift = float(material.eps_sensitivity) * value
+    base_tensor = material.epsilon_tensor
+    if isinstance(base_tensor, DiagonalTensor3):
+        eps_tensor = DiagonalTensor3(base_tensor.xx + shift, base_tensor.yy + shift, base_tensor.zz + shift)
+        eps_r = material.eps_r
+    else:
+        eps_tensor = None
+        eps_r = float(material.eps_r) + shift
+
+    return Material(
+        eps_r=eps_r,
+        mu_r=material.mu_r,
+        sigma_e=material.sigma_e,
+        sigma_m=material.sigma_m,
+        debye_poles=material.debye_poles,
+        drude_poles=material.drude_poles,
+        lorentz_poles=material.lorentz_poles,
+        mu_debye_poles=material.mu_debye_poles,
+        mu_drude_poles=material.mu_drude_poles,
+        mu_lorentz_poles=material.mu_lorentz_poles,
+        epsilon_tensor=eps_tensor,
+        mu_tensor=material.mu_tensor,
+        sigma_e_tensor=material.sigma_e_tensor,
+        kerr_chi3=material.kerr_chi3,
+        nonlinearity=material.nonlinearity,
+        modulation=material.modulation,
+    )
+
+
 def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=None):
     """Convert a Maxwell Material to a Tidy3D medium."""
     if getattr(material, "is_pec", False):
@@ -558,12 +676,12 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
         return _medium2d(material, td, length_scale)
     if getattr(material, "is_lossy_metal", False):
         return _lossy_metal_medium(material, td, length_scale, frequencies)
-    if getattr(material, "has_custom_poles", False):
-        raise NotImplementedError(
-            "Tidy3D export for spatially-varying custom dispersive poles is not implemented yet."
-        )
     if getattr(material, "perturbation", None) is not None:
-        raise NotImplementedError("Tidy3D export for PerturbationMedium is not implemented yet.")
+        # Resolve the background shift first: the lowered Material may still carry
+        # (custom) poles, which the recursion then handles through the pole path.
+        return _convert_material(_homogenize_perturbation(material), td, length_scale, frequencies=frequencies)
+    if getattr(material, "has_custom_poles", False):
+        return _convert_material(_homogenize_custom_poles(material), td, length_scale, frequencies=frequencies)
     if material.is_magnetic_dispersive:
         raise NotImplementedError("Tidy3D export for magnetic dispersive Material is not implemented yet.")
     if not math.isclose(float(material.mu_r), 1.0, rel_tol=0.0, abs_tol=1.0e-12) or float(
