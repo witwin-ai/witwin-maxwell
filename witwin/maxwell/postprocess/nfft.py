@@ -8,8 +8,10 @@ from .stratton_chu import (
     EquivalentCurrentsSurface,
     PlanarEquivalentCurrents,
     _as_1d_coords,
+    _background_wavenumber_and_impedance,
     _normalize_currents_collection,
     _resolve_complex_dtype,
+    _resolve_currents_background,
     _resolve_device,
     _resolve_physical_constants,
     _resolve_real_dtype,
@@ -51,6 +53,8 @@ class NearFieldFarFieldTransformer:
         c: float | None = None,
         eps0: float | None = None,
         mu0: float | None = None,
+        background_eps_r: complex | float | None = None,
+        background_mu_r: complex | float | None = None,
         device: str | torch.device | None = None,
     ):
         self.currents = currents
@@ -63,12 +67,24 @@ class NearFieldFarFieldTransformer:
             eps0=eps0,
             mu0=mu0,
         )
+        self.background_eps_r, self.background_mu_r = _resolve_currents_background(
+            self._surfaces, background_eps_r, background_mu_r
+        )
         self.frequency = float(self._surfaces[0].frequency)
         self.coord_dtype = self._surfaces[0].u.dtype
         self.field_dtype = _resolve_complex_dtype(*(surface.J for surface in self._surfaces), *(surface.M for surface in self._surfaces))
         self.omega = 2.0 * math.pi * self.frequency
-        self.k = self.omega / self.c
         self.eta0 = math.sqrt(self.mu0 / self.eps0)
+        # Near-to-far-field radiation uses the homogeneous exterior background's
+        # wavenumber and intrinsic impedance (vacuum when the box sits in free
+        # space, the sampled dielectric otherwise).
+        self.k, self.eta = _background_wavenumber_and_impedance(
+            self.background_eps_r,
+            self.background_mu_r,
+            omega=self.omega,
+            c=self.c,
+            eta_vacuum=self.eta0,
+        )
 
         source_points = []
         weighted_j = []
@@ -108,11 +124,11 @@ class NearFieldFarFieldTransformer:
         )[:, None]
 
         e_field = prefactor * (
-            self.eta0 * torch.cross(direction_complex, cross_s_n, dim=-1)
+            self.eta * torch.cross(direction_complex, cross_s_n, dim=-1)
             + cross_s_l
         )
         h_field = prefactor * (
-            (1.0 / self.eta0) * torch.cross(direction_complex, cross_s_l, dim=-1)
+            (1.0 / self.eta) * torch.cross(direction_complex, cross_s_l, dim=-1)
             - cross_s_n
         )
         return e_field, h_field

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cmath
 import math
 from dataclasses import dataclass
 from typing import Mapping
@@ -10,6 +11,62 @@ WINDOW_FACTOR = 15.0
 
 _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
 _INDEX_TO_AXIS = ("x", "y", "z")
+
+
+def _as_real_if_lossless(value: complex | float | int) -> complex | float:
+    """Collapse a (near-)real scalar to ``float`` so the vacuum/lossless path
+    keeps its original real dtype and only genuinely lossy backgrounds carry an
+    imaginary part into the propagator kernels."""
+    number = complex(value)
+    if abs(number.imag) <= 1e-12 * (abs(number.real) + 1.0):
+        return number.real
+    return number
+
+
+def _normalize_background(
+    background_eps_r: complex | float | int,
+    background_mu_r: complex | float | int,
+) -> tuple[complex | float, complex | float]:
+    eps_r = _as_real_if_lossless(background_eps_r)
+    mu_r = _as_real_if_lossless(background_mu_r)
+    if isinstance(eps_r, float) and eps_r <= 0.0:
+        raise ValueError("background_eps_r must be positive for a lossless exterior.")
+    if isinstance(mu_r, float) and mu_r <= 0.0:
+        raise ValueError("background_mu_r must be positive for a lossless exterior.")
+    return eps_r, mu_r
+
+
+def _background_wavenumber_and_impedance(
+    background_eps_r: complex | float,
+    background_mu_r: complex | float,
+    *,
+    omega: float,
+    c: float,
+    eta_vacuum: float,
+) -> tuple[complex | float, complex | float]:
+    """Return ``(k, eta)`` of the homogeneous exterior background relative to the
+    vacuum wavenumber ``omega/c`` and vacuum impedance ``eta_vacuum``."""
+    index = _as_real_if_lossless(cmath.sqrt(complex(background_eps_r) * complex(background_mu_r)))
+    impedance_ratio = _as_real_if_lossless(
+        cmath.sqrt(complex(background_mu_r) / complex(background_eps_r))
+    )
+    k = _as_real_if_lossless((omega / c) * complex(index))
+    eta = _as_real_if_lossless(eta_vacuum * complex(impedance_ratio))
+    return k, eta
+
+
+def _resolve_currents_background(
+    surfaces,
+    background_eps_r: complex | float | None,
+    background_mu_r: complex | float | None,
+) -> tuple[complex | float, complex | float]:
+    """Resolve the exterior background for a propagator: an explicit override wins,
+    otherwise fall back to the medium carried by the equivalent currents."""
+    if background_eps_r is None:
+        background_eps_r = surfaces[0].background_eps_r
+    if background_mu_r is None:
+        background_mu_r = surfaces[0].background_mu_r
+    return _normalize_background(background_eps_r, background_mu_r)
 
 
 def _complex_dtype_for(dtype: torch.dtype) -> torch.dtype:
@@ -287,6 +344,8 @@ class PlanarEquivalentCurrents:
     v: torch.Tensor
     J: torch.Tensor
     M: torch.Tensor
+    background_eps_r: complex | float = 1.0
+    background_mu_r: complex | float = 1.0
 
     def __post_init__(self):
         axis_name = _normalize_axis(self.axis)
@@ -300,6 +359,9 @@ class PlanarEquivalentCurrents:
         shape = (u_coords.numel(), v_coords.numel())
         j_field = _as_vector_field(self.J, "J", shape, device=device, dtype=complex_dtype)
         m_field = _as_vector_field(self.M, "M", shape, device=device, dtype=complex_dtype)
+        background_eps_r, background_mu_r = _normalize_background(
+            self.background_eps_r, self.background_mu_r
+        )
 
         object.__setattr__(self, "axis", axis_name)
         object.__setattr__(self, "position", float(self.position))
@@ -308,6 +370,8 @@ class PlanarEquivalentCurrents:
         object.__setattr__(self, "v", v_coords)
         object.__setattr__(self, "J", j_field)
         object.__setattr__(self, "M", m_field)
+        object.__setattr__(self, "background_eps_r", background_eps_r)
+        object.__setattr__(self, "background_mu_r", background_mu_r)
 
     @property
     def device(self) -> torch.device:
@@ -361,6 +425,8 @@ class PlanarEquivalentCurrents:
             v=v_coords,
             J=j_field,
             M=m_field,
+            background_eps_r=self.background_eps_r,
+            background_mu_r=self.background_mu_r,
         )
 
     def windowed(self, window_size: tuple[float, float] | None) -> "PlanarEquivalentCurrents":
@@ -378,6 +444,8 @@ class PlanarEquivalentCurrents:
             v=self.v,
             J=self.J * window_2d.to(dtype=self.J.dtype),
             M=self.M * window_2d.to(dtype=self.M.dtype),
+            background_eps_r=self.background_eps_r,
+            background_mu_r=self.background_mu_r,
         )
 
 
@@ -396,14 +464,32 @@ class EquivalentCurrentsSurface:
                     f"got {type(surface).__name__}."
                 )
         reference_frequency = float(resolved_surfaces[0].frequency)
+        reference_eps = complex(resolved_surfaces[0].background_eps_r)
+        reference_mu = complex(resolved_surfaces[0].background_mu_r)
         for surface in resolved_surfaces[1:]:
             if not math.isclose(float(surface.frequency), reference_frequency, rel_tol=1e-9, abs_tol=1e-12):
                 raise ValueError("All equivalent-current surfaces must share the same frequency.")
+            if not cmath.isclose(
+                complex(surface.background_eps_r), reference_eps, rel_tol=1e-6, abs_tol=1e-9
+            ) or not cmath.isclose(
+                complex(surface.background_mu_r), reference_mu, rel_tol=1e-6, abs_tol=1e-9
+            ):
+                raise ValueError(
+                    "All equivalent-current surfaces must share the same exterior background medium."
+                )
         object.__setattr__(self, "surfaces", resolved_surfaces)
 
     @property
     def frequency(self) -> float:
         return float(self.surfaces[0].frequency)
+
+    @property
+    def background_eps_r(self) -> complex | float:
+        return self.surfaces[0].background_eps_r
+
+    @property
+    def background_mu_r(self) -> complex | float:
+        return self.surfaces[0].background_mu_r
 
     @property
     def device(self) -> torch.device:
@@ -494,9 +580,16 @@ def _sample_exterior_patch(
     return permuted[outside_index].index_select(0, indices_a).index_select(1, indices_b)
 
 
-def _validate_homogeneous_exterior(result, monitor: Mapping[str, object], frequency: float) -> None:
+def _validate_homogeneous_exterior(
+    result, monitor: Mapping[str, object], frequency: float
+) -> tuple[complex | float, complex | float] | None:
+    """Validate that the medium immediately outside a closed Huygens surface is a
+    single homogeneous background and return that background as relative
+    ``(eps_r, mu_r)`` so the exterior wavenumber/impedance can drive the
+    near-to-far-field transform. Returns ``None`` for non-closed-surface
+    monitors (their background defaults to vacuum)."""
     if monitor.get("kind") != "closed_surface":
-        return
+        return None
 
     prepared_scene = result.prepared_scene
     eps_r, mu_r = prepared_scene.compile_relative_materials(frequency=frequency)
@@ -539,6 +632,10 @@ def _validate_homogeneous_exterior(result, monitor: Mapping[str, object], freque
                 "layered or piecewise exteriors are not supported."
             )
 
+    if reference_eps is None:
+        return None
+    return complex(reference_eps.item()), complex(reference_mu.item())
+
 
 def _equivalent_surface_currents_from_payload(
     monitor: Mapping[str, object],
@@ -546,6 +643,7 @@ def _equivalent_surface_currents_from_payload(
     tangential_bounds: Mapping[str, tuple[float, float]] | None = None,
     normal_direction: str | int | float | None = None,
     window_size: tuple[float, float] | None = None,
+    background: tuple[complex | float, complex | float] = (1.0, 1.0),
 ) -> PlanarEquivalentCurrents | EquivalentCurrentsSurface:
     if monitor.get("kind") == "closed_surface":
         surfaces = []
@@ -556,6 +654,7 @@ def _equivalent_surface_currents_from_payload(
                     tangential_bounds=tangential_bounds,
                     normal_direction=normal_direction,
                     window_size=window_size,
+                    background=background,
                 )
             )
         return EquivalentCurrentsSurface(tuple(surfaces))
@@ -583,6 +682,8 @@ def _equivalent_surface_currents_from_payload(
         fields=monitor,
         normal_direction=resolved_normal_direction,
         window_size=None,
+        background_eps_r=background[0],
+        background_mu_r=background[1],
     ).cropped(tangential_bounds).windowed(window_size)
 
 
@@ -596,6 +697,8 @@ def equivalent_surface_currents_from_fields(
     fields: Mapping[str, torch.Tensor],
     normal_direction: str | int | float = "+",
     window_size: tuple[float, float] | None = None,
+    background_eps_r: complex | float = 1.0,
+    background_mu_r: complex | float = 1.0,
 ) -> PlanarEquivalentCurrents:
     axis_name = _normalize_axis(axis)
     normalized_fields = {str(name).upper(): values for name, values in fields.items()}
@@ -657,6 +760,8 @@ def equivalent_surface_currents_from_fields(
         v=v_coords,
         J=j_field,
         M=m_field,
+        background_eps_r=background_eps_r,
+        background_mu_r=background_mu_r,
     )
     return currents.windowed(window_size)
 
@@ -676,12 +781,15 @@ def equivalent_surface_currents_from_monitor(
     if len(monitor_frequencies) > 1:
         monitor = result.monitor(monitor_name, freq_index=0)
     resolved_frequency = float(monitor.get("frequency", getattr(result, "frequency", None)))
-    _validate_homogeneous_exterior(result, monitor, resolved_frequency)
+    background = _validate_homogeneous_exterior(result, monitor, resolved_frequency)
+    if background is None:
+        background = (1.0, 1.0)
     return _equivalent_surface_currents_from_payload(
         monitor,
         tangential_bounds=tangential_bounds,
         normal_direction=normal_direction,
         window_size=window_size,
+        background=background,
     )
 
 
@@ -732,6 +840,8 @@ class StrattonChuPropagator:
         c: float | None = None,
         eps0: float | None = None,
         mu0: float | None = None,
+        background_eps_r: complex | float | None = None,
+        background_mu_r: complex | float | None = None,
         device: str | torch.device | None = None,
     ):
         self.currents = currents
@@ -743,15 +853,26 @@ class StrattonChuPropagator:
             eps0=eps0,
             mu0=mu0,
         )
+        self.background_eps_r, self.background_mu_r = _resolve_currents_background(
+            self._surfaces, background_eps_r, background_mu_r
+        )
         self.frequency = float(self._surfaces[0].frequency)
         self.coord_dtype = self._surfaces[0].u.dtype
         self.field_dtype = _resolve_complex_dtype(*(surface.J for surface in self._surfaces), *(surface.M for surface in self._surfaces))
         self.omega = 2.0 * math.pi * self.frequency
-        self.k = self.omega / self.c
-        self.k_sq = self.k**2
         self.eta0 = math.sqrt(self.mu0 / self.eps0)
-        self.i_omega_mu = complex(0.0, self.omega * self.mu0)
-        self.i_omega_eps = complex(0.0, self.omega * self.eps0)
+        self.k, self.eta = _background_wavenumber_and_impedance(
+            self.background_eps_r,
+            self.background_mu_r,
+            omega=self.omega,
+            c=self.c,
+            eta_vacuum=self.eta0,
+        )
+        self.k_sq = self.k**2
+        # Radiation into the homogeneous exterior scales i*omega with the
+        # background permeability/permittivity: mu -> mu0*mu_r, eps -> eps0*eps_r.
+        self.i_omega_mu = 1j * self.omega * self.mu0 * self.background_mu_r
+        self.i_omega_eps = 1j * self.omega * self.eps0 * self.background_eps_r
 
         src_points = []
         j_weighted = []
