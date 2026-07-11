@@ -1331,16 +1331,20 @@ class LossyMetalMedium(Material):
 
     so the skin-depth interior never needs to be meshed.
 
-    The SIBC runtime is **not implemented yet**: ``Z_s ~ sqrt(-i*omega)`` is not
-    rational in ``omega``, so a time-domain implementation needs a vector-fitted
-    pole expansion of ``Z_s`` with per-face recursive-convolution state and a
-    dedicated boundary-side update kernel on the tangential E faces adjacent to
-    the metal surface. Compiling a Scene that contains a ``LossyMetalMedium``
-    structure raises ``NotImplementedError``; resolve the metal volumetrically
-    with ``Material(sigma_e=...)`` (or use ``Material.pec()`` for a lossless
-    shortcut) in the meantime. The analytic helpers ``surface_impedance`` /
-    ``surface_impedance_at_freq`` / ``skin_depth`` are exposed for validation
-    and design work.
+    The v1 runtime is scoped to normal incidence on a single axis-aligned planar
+    face: the metal must be a ``Box`` slab that spans the full transverse
+    cross-section and sits flush against one domain boundary. The surface
+    impedance is realized as a narrowband series R-L evaluated at the operating
+    frequency (``Z_s(omega0) = R + i*omega0*L_s`` with ``L_s = R/omega0``), so it
+    reproduces the exact Leontovich value at the source frequency; the metal
+    interior is masked and the two tangential E faces are updated each step from
+    the vacuum-side tangential H (see ``compiler/materials.py`` and
+    ``fdtd/runtime/materials.py``). Laterally finite blocks, oblique/curved
+    surfaces, mid-domain slabs, and Bloch runs raise ``NotImplementedError`` with
+    a physical reason; resolve those metals volumetrically with
+    ``Material(sigma_e=...)`` (or ``Material.pec()`` for a lossless shortcut). The
+    analytic helpers ``surface_impedance`` / ``surface_impedance_at_freq`` /
+    ``skin_depth`` are exposed for validation and design work.
     """
 
     def __init__(self, *, conductivity: float, name: str | None = None):

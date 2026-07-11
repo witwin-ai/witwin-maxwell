@@ -1340,6 +1340,32 @@ def enforce_pec_boundaries(solver):
             clamp_field_face(solver, getattr(solver, field_name), axis, side)
 
 
+def apply_sibc_surface(solver):
+    """Override the tangential E on a ``LossyMetalMedium`` surface via the Leontovich
+    surface-impedance relation ``E_t = Zs * (n_hat x H)`` (passive/absorbing branch).
+
+    The surface impedance is a narrowband series R-L, ``Zs(omega0) = R + j*omega0*Ls``,
+    so in the time domain each tangential face reads the vacuum-side tangential H
+    (index-aligned on the Yee grid by ``_configure_sibc``) and forms
+    ``E_surface = sign * (R * H + Ls * dH/dt)``, storing the previous H for the
+    surface-inductance dH/dt term. The metal interior is masked to zero by the
+    coefficient setup, so the surface acts as a semi-infinite good-conductor
+    termination at roughly a skin-depth-free (>=10x coarser) cell size.
+    """
+    state = getattr(solver, "_sibc", None)
+    if state is None:
+        return
+    surface_r = state["surface_r"]
+    surface_l = state["surface_l"]
+    inv_dt = 1.0 / solver.dt
+    for face in state["faces"]:
+        h_now = getattr(solver, face["h_name"])[face["h_selector"]]
+        d_h = (h_now - face["h_prev"]) * inv_dt
+        e_surface = face["sign"] * (surface_r * h_now + surface_l * d_h)
+        getattr(solver, face["e_name"])[face["e_selector"]] = e_surface
+        face["h_prev"].copy_(h_now)
+
+
 def clamp_pec_boundaries(solver):
     enforce_pec_boundaries(solver)
 
@@ -1551,6 +1577,9 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         # The modulated E update consumes per-step host phase scalars, which a
         # captured CUDA graph would freeze at their capture-time values.
         and not getattr(solver, "modulation_enabled", False)
+        # The SIBC surface override advances per-face recursive H state outside the
+        # captured block; keep the whole step on the eager path in v1.
+        and not getattr(solver, "sibc_enabled", False)
     )
     if not graphable:
         return normal
@@ -1696,6 +1725,9 @@ def solve(
     for n in iterator:
         time_value = n * solver.dt
         run_field_update(time_value)
+
+        if getattr(solver, "sibc_enabled", False):
+            apply_sibc_surface(solver)
 
         if solver.tfsf_enabled:
             apply_tfsf_e_correction(solver, time_value)

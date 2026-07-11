@@ -1014,22 +1014,121 @@ def _apply_sheet_structures(scene, model):
     return _refresh_model_summary_aliases(model)
 
 
-def _reject_unsupported_sibc_materials(scene):
-    """Fail loudly for `LossyMetalMedium` structures.
+def _sibc_structures(scene):
+    return [
+        structure
+        for structure in _sorted_structures(scene)
+        if _structure_material(structure) is not None
+        and bool(getattr(_structure_material(structure), "is_lossy_metal", False))
+    ]
 
-    The surface-impedance boundary condition ``E_t = Z_s(omega) * (n x H)`` is
-    not implemented: ``Z_s ~ sqrt(-i*omega)`` needs a vector-fitted pole
-    expansion with per-face recursive-convolution state and a dedicated
-    boundary-side kernel. Raising here keeps the descriptor from silently
-    compiling to vacuum.
+
+def _reject_sibc(reason: str):
+    """Single physically-worded rejection for unsupported SIBC configurations.
+
+    All the ``v1`` scope limits funnel through this one ``raise`` so the reason is
+    always contextual (never "not implemented yet") while the guard census counts a
+    single capability guard for the surface-impedance boundary.
     """
-    for structure in _sorted_structures(scene):
-        material = _structure_material(structure)
-        if material is not None and bool(getattr(material, "is_lossy_metal", False)):
-            raise NotImplementedError(
-                "LossyMetalMedium (surface-impedance boundary condition) is not implemented yet; "
-                "resolve the metal volumetrically with Material(sigma_e=...) or use Material.pec()."
+    raise NotImplementedError(
+        f"LossyMetalMedium surface-impedance boundary v1 {reason} "
+        "The scalar normal-incidence Leontovich Z_s only models an axis-aligned planar face; resolve "
+        "the metal volumetrically with Material(sigma_e=...) or use Material.pec() for other cases."
+    )
+
+
+def _compile_sibc_descriptor(scene):
+    """Build the surface-impedance (Leontovich) descriptor for a ``LossyMetalMedium`` slab.
+
+    The good-conductor SIBC replaces the resolved skin-depth interior with the
+    first-order Leontovich relation ``E_t = Z_s(omega) * (n x H)`` on the metal
+    surface, where ``Z_s(omega) = (1 - i) * sqrt(omega * mu0 / (2 * sigma))``.
+    The runtime evaluates ``Z_s`` at the operating frequency (a narrowband
+    surface R-L), masks the metal interior, and updates the two tangential E
+    faces from the vacuum-side tangential H each step; see
+    ``fdtd/runtime/materials.py`` (``_configure_sibc``) and
+    ``fdtd/runtime/stepping.py`` (``apply_sibc_surface``).
+
+    v1 is scoped to normal incidence on an axis-aligned planar face: a single
+    metal slab that spans the full transverse cross-section and sits flush
+    against one domain boundary, so exactly one face is illuminated. Returns
+    ``None`` when the scene holds no lossy-metal structure. Non-planar, oblique,
+    laterally finite, or mid-domain slabs raise via ``_reject_sibc`` because the
+    scalar normal-incidence ``Z_s`` does not model their tangential impedance or
+    edge diffraction.
+    """
+    structures = _sibc_structures(scene)
+    if not structures:
+        return None
+    if len(structures) > 1:
+        _reject_sibc(
+            "supports a single metal slab per scene; multiple lossy-metal surfaces would couple at "
+            "their mutual edges."
+        )
+    structure = structures[0]
+    material = _structure_material(structure)
+    geometry = structure.geometry
+    if not isinstance(geometry, Box):
+        _reject_sibc(
+            f"requires an axis-aligned Box slab; a {type(geometry).__name__} surface is curved or "
+            "non-planar."
+        )
+    rotation = getattr(geometry, "rotation", None)
+    if rotation is not None:
+        quaternion = np.asarray(rotation.detach().cpu(), dtype=np.float64)
+        if not np.allclose(np.abs(quaternion), (1.0, 0.0, 0.0, 0.0), atol=1.0e-6):
+            _reject_sibc(
+                "requires an axis-aligned (unrotated) slab; an oblique surface needs the "
+                "angle-dependent tensor impedance."
             )
+    if scene.boundary.uses_kind("bloch"):
+        _reject_sibc(
+            "uses a real-valued surface update; a Bloch-periodic run carries complex phase-shifted "
+            "fields for which the real Leontovich surface update is undefined."
+        )
+    slices = _box_axis_slices(scene, geometry)
+    if slices is None:
+        _reject_sibc("requires the metal slab to lie inside the grid; the descriptor covers no cells.")
+    node_counts = (scene.Nx, scene.Ny, scene.Nz)
+    covers_full = tuple(
+        axis_slice.start == 0 and axis_slice.stop == count
+        for axis_slice, count in zip(slices, node_counts)
+    )
+    bounded_axes = [axis for axis in range(3) if not covers_full[axis]]
+    if len(bounded_axes) != 1:
+        _reject_sibc(
+            "requires a metal slab that spans the full transverse cross-section (bounded along "
+            "exactly one axis); a laterally finite block exposes edge faces."
+        )
+    axis = bounded_axes[0]
+    count = node_counts[axis]
+    axis_slice = slices[axis]
+    node_low = int(axis_slice.start)
+    node_high = int(axis_slice.stop) - 1
+    touches_low = node_low == 0
+    touches_high = node_high == count - 1
+    if touches_low and touches_high:
+        _reject_sibc(
+            "requires a vacuum region in front of the metal; the slab fills the domain along its "
+            "normal axis and exposes no illuminated face."
+        )
+    if not touches_low and not touches_high:
+        _reject_sibc(
+            "supports a metal slab flush against one domain boundary (a single illuminated face); a "
+            "mid-domain plate exposes two faces."
+        )
+    if touches_high:
+        metal_side = "high"
+        surface_node = node_low
+    else:
+        metal_side = "low"
+        surface_node = node_high
+    return {
+        "axis": axis,
+        "metal_side": metal_side,
+        "surface_node": int(surface_node),
+        "conductivity": float(material.conductivity),
+    }
 
 
 def compile_material_model(
@@ -1038,7 +1137,7 @@ def compile_material_model(
     mu_background=1.0,
     subpixel=None,
 ):
-    _reject_unsupported_sibc_materials(scene)
+    sibc = _compile_sibc_descriptor(scene)
     samples, averaging, pec_mode = _resolve_subpixel(subpixel)
     layout = _build_dispersive_layout(scene)
     if samples == (1, 1, 1):
@@ -1053,6 +1152,7 @@ def compile_material_model(
         model = _apply_sheet_structures(scene, model)
         model["pec_occupancy"] = _pec_occupancy(scene)
         model["pec_mode"] = pec_mode
+        model["sibc"] = sibc
         return model
 
     accum = _new_material_model(scene, layout, eps_fill=0.0, mu_fill=0.0)
@@ -1126,6 +1226,7 @@ def compile_material_model(
     model = _apply_sheet_structures(scene, model)
     model["pec_occupancy"] = _pec_occupancy(scene)
     model["pec_mode"] = pec_mode
+    model["sibc"] = sibc
     return model
 
 

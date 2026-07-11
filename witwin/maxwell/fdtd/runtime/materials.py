@@ -1068,6 +1068,109 @@ def _apply_pec_edge_suppression(solver):
         solver.cez_aniso_y = (solver.cez_aniso_y * open_fractions["Ez"]).contiguous()
 
 
+_E_COMPONENTS = ("Ex", "Ey", "Ez")
+_H_COMPONENTS = ("Hx", "Hy", "Hz")
+
+
+def _axis_index_tuple(ndim, axis, index_or_slice):
+    selector = [slice(None)] * ndim
+    selector[axis] = index_or_slice
+    return tuple(selector)
+
+
+def _configure_sibc(solver):
+    """Set up the surface-impedance (Leontovich) boundary from the compiled descriptor.
+
+    The good-conductor SIBC is realized by (a) masking the metal interior so its
+    tangential E edges stay zero (a zero open-fraction folded into the update
+    coefficients, exactly as PEC does) and (b) overriding the two tangential E
+    faces on the surface node plane each step from the vacuum-side tangential H,
+    which ``apply_sibc_surface`` in ``stepping.py`` performs. The surface
+    impedance is evaluated at the operating frequency as a narrowband series R-L,
+    ``Zs(omega0) = R + j*omega0*Ls`` with ``R = sqrt(omega0*mu0/(2*sigma))`` and
+    ``Ls = R/omega0``, so ``Zs(omega0)`` reproduces the exact Leontovich value at
+    the source frequency.
+    """
+    solver.sibc_enabled = False
+    solver._sibc = None
+    model = getattr(solver, "_compiled_material_model", None)
+    descriptor = None if model is None else model.get("sibc")
+    if descriptor is None:
+        return
+    axis = int(descriptor["axis"])
+    metal_side = descriptor["metal_side"]
+    surface_node = int(descriptor["surface_node"])
+    sigma = float(descriptor["conductivity"])
+    omega0 = 2.0 * np.pi * float(solver.source_frequency)
+    if omega0 <= 0.0:
+        raise ValueError("LossyMetalMedium SIBC requires a positive operating frequency.")
+    surface_r = float(np.sqrt(omega0 * solver.mu0 / (2.0 * sigma)))
+    surface_l = surface_r / omega0
+
+    # Mask the metal interior: zero the update coefficients of the tangential
+    # E edges strictly inside the metal (node index on the metal side of the
+    # surface) and the normal E edges from the surface inward, so those edges
+    # stay at their zero initial value and the surface behaves as a termination.
+    if metal_side == "high":
+        tangential_interior = slice(surface_node + 1, None)
+        normal_interior = slice(surface_node, None)
+        vacuum_h_index = surface_node - 1
+    else:
+        tangential_interior = slice(None, surface_node)
+        normal_interior = slice(None, surface_node)
+        vacuum_h_index = surface_node
+    for component in _E_COMPONENTS:
+        component_axis = _E_COMPONENTS.index(component)
+        interior = normal_interior if component_axis == axis else tangential_interior
+        decay = getattr(solver, f"c{component.lower()}_decay", None)
+        if decay is None:
+            continue
+        # Open-fraction mask (1 outside the metal, 0 inside), multiplied into the
+        # decay and curl coefficients out-of-place, mirroring the PEC suppression so
+        # a covered edge keeps E exactly zero without perturbing autograd.
+        mask = torch.ones_like(decay)
+        mask[_axis_index_tuple(mask.dim(), axis, interior)] = 0.0
+        for suffix in ("decay", "curl"):
+            name = f"c{component.lower()}_{suffix}"
+            setattr(solver, name, (getattr(solver, name) * mask).contiguous())
+
+    # Tangential components (b, c) in cyclic order after the normal axis, each
+    # paired with the transverse H one cell out on the vacuum side. The Leontovich
+    # relation E_t = Zs * (n_hat x H) with the metal outward normal n_hat gives
+    # E_b = +sn*(R*H_c + Ls*dH_c/dt), E_c = -sn*(R*H_b + Ls*dH_b/dt); sn = +1 when
+    # the metal fills the high side of the surface (n_hat = -axis) and -1 for the
+    # low side. This is the passive (energy-absorbing) branch: the opposite sign is
+    # a negative surface resistance and grows without bound.
+    b = (axis + 1) % 3
+    c = (axis + 2) % 3
+    sn = 1.0 if metal_side == "high" else -1.0
+    faces = (
+        (_E_COMPONENTS[b], _H_COMPONENTS[c], +sn),
+        (_E_COMPONENTS[c], _H_COMPONENTS[b], -sn),
+    )
+    face_state = []
+    for e_name, h_name, sign in faces:
+        h_tensor = getattr(solver, h_name)
+        h_selector = _axis_index_tuple(h_tensor.dim(), axis, vacuum_h_index)
+        e_selector = _axis_index_tuple(getattr(solver, e_name).dim(), axis, surface_node)
+        face_state.append(
+            {
+                "e_name": e_name,
+                "h_name": h_name,
+                "sign": float(sign),
+                "e_selector": e_selector,
+                "h_selector": h_selector,
+                "h_prev": torch.zeros_like(h_tensor[h_selector]),
+            }
+        )
+    solver._sibc = {
+        "surface_r": surface_r,
+        "surface_l": surface_l,
+        "faces": tuple(face_state),
+    }
+    solver.sibc_enabled = True
+
+
 def _store_nonlinear_external_decay(solver, ex_decay, ey_decay, ez_decay):
     """Keep the material-independent (PML) decay factors for the nonlinear kernel.
 
@@ -1252,6 +1355,7 @@ def build_update_coefficients(solver):
         _store_nonlinear_external_decay(solver, None, None, None)
         _build_full_aniso_curl_coefficients(solver)
         _apply_pec_edge_suppression(solver)
+        _configure_sibc(solver)
         return
 
     ex_sigma_y = 0.5 * (solver.sigma_y[:-1, :, :] + solver.sigma_y[1:, :, :])
@@ -1317,6 +1421,7 @@ def build_update_coefficients(solver):
     _store_nonlinear_external_decay(solver, ex_decay, ey_decay, ez_decay)
     _build_full_aniso_curl_coefficients(solver)
     _apply_pec_edge_suppression(solver)
+    _configure_sibc(solver)
 
 
 def update_nonlinear_electric_coefficients(solver):

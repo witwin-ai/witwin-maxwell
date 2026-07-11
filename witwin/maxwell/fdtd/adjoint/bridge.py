@@ -83,6 +83,16 @@ def _unsupported_adjoint_medium(scene):
             continue
         if getattr(material, "is_medium2d", False):
             return "FDTD adjoint does not support 2D sheet (Medium2D) media yet."
+        if getattr(material, "is_lossy_metal", False):
+            # The surface-impedance (Leontovich) boundary evolves per-face recursive
+            # H state and overrides the tangential surface E outside the differentiable
+            # material-tensor replay, so it carries no reverse gradient channel; a design
+            # differentiated through a lossy-metal SIBC surface would drop its sensitivity.
+            return (
+                "FDTD adjoint does not support LossyMetalMedium (surface-impedance boundary) media: "
+                "the Leontovich surface update runs outside the differentiable material replay and "
+                "carries no reverse gradient channel."
+            )
         if _material_has_conductivity(material) and getattr(material, "is_nonlinear", False):
             # Static conduction (sigma_e) is differentiable on its own through the
             # semi-implicit lossy-coefficient replay, but the instantaneous
