@@ -7,7 +7,6 @@ from ..boundary import (
     BOUNDARY_BLOCH,
     BOUNDARY_NONE,
     BOUNDARY_PERIODIC,
-    BOUNDARY_PML,
     BOUNDARY_PMC,
     has_complex_fields,
 )
@@ -124,17 +123,16 @@ def _supports_grating_tfsf(runtime, solver, forward_state, resolved_source_terms
         return False
     if not _matches_checkpoint_layout(solver, forward_state):
         return False
-    if tuple(getattr(solver, "has_bloch_axes", ())) != ("x", "y"):
-        return False
-    face_codes = _face_codes(solver)
-    if face_codes != (
-        BOUNDARY_BLOCH,
-        BOUNDARY_BLOCH,
-        BOUNDARY_BLOCH,
-        BOUNDARY_BLOCH,
-        BOUNDARY_PML,
-        BOUNDARY_PML,
-    ):
+
+    # A grating slab is a single absorbing (PML) normal axis with the two
+    # transverse axes periodic (Bloch), for any choice of normal axis. The reverse
+    # split-field replay carries the wrap phase on the two Bloch axes and the
+    # recursive-convolution stretch on the single PML axis; ``_bloch_cpml_pml_axis``
+    # recognizes exactly that layout and returns the absorbing axis.
+    from ..runtime.stepping import _bloch_cpml_pml_axis
+
+    pml_axis = _bloch_cpml_pml_axis(solver)
+    if pml_axis is None:
         return False
 
     tfsf_state = getattr(solver, "_tfsf_state", None)
@@ -143,7 +141,7 @@ def _supports_grating_tfsf(runtime, solver, forward_state, resolved_source_terms
     return (
         tfsf_state.get("provider") == "plane_wave_grating_slab_cw"
         and tfsf_state.get("mode") == "slab"
-        and tfsf_state.get("axis") == "z"
+        and tfsf_state.get("axis") == pml_axis
         and "tfsf_aux_electric" not in forward_state
         and "tfsf_aux_magnetic" not in forward_state
     )

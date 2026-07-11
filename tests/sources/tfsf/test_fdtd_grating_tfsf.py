@@ -596,6 +596,149 @@ def test_grating_tfsf_auto_bloch_phase_runs_forward():
     assert torch.isfinite(torch.as_tensor(center["Ez"]).abs()).all()
 
 
+_GRATING_BASE_DIRECTION = (0.2, 0.1, 0.9746794344808963)
+_GRATING_BASE_POLARIZATION = (1.0, 0.0, -0.20519567041703082)
+_GRATING_BASE_WAVEVECTOR = (math.pi, 0.5 * math.pi, 0.0)
+_GRATING_BASE_DOMAIN = ((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))
+
+
+def _roll_normal_from_z(triple, axis):
+    """Cyclically rotate an (x, y, z)-ordered triple so the z entry (the base
+    grating normal) lands on ``axis``. The permutation is a proper rotation, so a
+    perpendicular (direction, polarization) pair stays perpendicular and the
+    domain's deep dimension follows the normal axis."""
+    x, y, z = triple
+    return {"z": (x, y, z), "x": (z, x, y), "y": (y, z, x)}[axis]
+
+
+def _general_axis_grating_scene(axis, *, source_time=None, bounds=(-0.24, 0.24)):
+    direction = _roll_normal_from_z(_GRATING_BASE_DIRECTION, axis)
+    polarization = _roll_normal_from_z(_GRATING_BASE_POLARIZATION, axis)
+    wavevector = _roll_normal_from_z(_GRATING_BASE_WAVEVECTOR, axis)
+    domain_bounds = _roll_normal_from_z(_GRATING_BASE_DOMAIN, axis)
+    boundary_kinds = {other: "bloch" for other in "xyz"}
+    boundary_kinds[axis] = "pml"
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=domain_bounds),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.faces(
+            default="pml",
+            num_layers=4,
+            strength=1.0,
+            bloch_wavevector=wavevector,
+            **boundary_kinds,
+        ),
+        device="cuda",
+    )
+    scene.add_source(
+        mw.PlaneWave(
+            direction=direction,
+            polarization=polarization,
+            source_time=source_time if source_time is not None else mw.CW(frequency=1.0e9, amplitude=20.0),
+            injection=mw.TFSF.slab(axis=axis, bounds=bounds),
+            name="grating_tfsf",
+        )
+    )
+    scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ex", "Ez")))
+    return scene
+
+
+def _normal_axis_leakage(field, coords, bounds, axis_index, *, dcell):
+    magnitude = np.abs(np.asarray(field))
+    inside = (coords >= bounds[0]) & (coords <= bounds[1])
+    outside = (coords < bounds[0] - dcell) | (coords > bounds[1] + dcell)
+    inside_slice = [slice(None), slice(None), slice(None)]
+    outside_slice = [slice(None), slice(None), slice(None)]
+    inside_slice[axis_index] = inside
+    outside_slice[axis_index] = outside
+    inside_max = float(np.max(magnitude[tuple(inside_slice)]))
+    outside_max = float(np.max(magnitude[tuple(outside_slice)]))
+    return outside_max / max(inside_max, 1e-12), inside_max, outside_max
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD prepare")
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_grating_tfsf_slab_initializes_state_for_general_normal_axis(axis):
+    prepared = mw.Simulation.fdtd(
+        _general_axis_grating_scene(axis),
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig(time_steps=1),
+        absorber="cpml",
+    ).prepare()
+    state = prepared.solver._tfsf_state
+    axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+    assert prepared.solver.tfsf_enabled is True
+    assert state["provider"] == "plane_wave_grating_slab_cw"
+    assert state["mode"] == "slab"
+    assert state["axis"] == axis
+    assert state["lower"][axis_index] < state["upper"][axis_index]
+    assert len(state["electric_terms"]) > 0
+    assert len(state["magnetic_terms"]) > 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_grating_tfsf_general_axis_forward_confines_total_field(axis):
+    # The oblique grating plane wave lives in the total-field slab spanning the two
+    # faces normal to ``axis``; the scattered region beyond those faces must not
+    # carry the incident field for an empty (no-scatterer) run, on any normal axis.
+    bounds = (-0.24, 0.24)
+    result = mw.Simulation.fdtd(
+        _general_axis_grating_scene(axis, bounds=bounds),
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig(time_steps=64),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+        full_field_dft=True,
+        absorber="cpml",
+    ).run()
+
+    axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+    dcell = (result.solver.scene.dx, result.solver.scene.dy, result.solver.scene.dz)[axis_index]
+    lo = result.solver.scene.domain_range[2 * axis_index]
+    hi = result.solver.scene.domain_range[2 * axis_index + 1]
+
+    ratios = []
+    for component in ("Ex", "Ez"):
+        field = _to_numpy(result.tensor(component))
+        assert np.isfinite(np.abs(field)).all()
+        coords = np.linspace(lo, hi, field.shape[axis_index])
+        leakage_ratio, inside_max, outside_max = _normal_axis_leakage(
+            field, coords, bounds, axis_index, dcell=dcell
+        )
+        assert inside_max > 0.0
+        assert outside_max < inside_max * 4.0
+        ratios.append(leakage_ratio)
+    assert max(ratios) < 4.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_grating_tfsf_general_axis_broadband_runs_finite(axis):
+    # Broadband (GaussianPulse) grating injection on a non-z normal axis: the
+    # delayed surface-current patches scatter into the split real/imag Bloch field
+    # with the boundary wrap phase, and the pulse is not silently downgraded to CW.
+    frequencies = (0.85e9, 1.0e9, 1.15e9)
+    result = mw.Simulation.fdtd(
+        _general_axis_grating_scene(
+            axis,
+            source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.3e9, amplitude=20.0),
+            bounds=(-0.24, 0.24),
+        ),
+        frequencies=list(frequencies),
+        run_time=mw.TimeConfig(time_steps=192),
+        absorber="cpml",
+    ).run()
+
+    assert result.solver.tfsf_enabled is True
+    assert result.solver.complex_fields_enabled is True
+    assert result.solver._tfsf_state["provider"] == "plane_wave_grating_slab_cw"
+    assert result.solver._tfsf_state["axis"] == axis
+    for frequency in frequencies:
+        payload = result.monitor("center", frequency=frequency)
+        assert torch.isfinite(torch.as_tensor(payload["Ex"]).abs()).all()
+        assert torch.isfinite(torch.as_tensor(payload["Ez"]).abs()).all()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_grating_tfsf_dielectric_slab_reflection_transmission_sanity():
     empty = _grating_flux_metrics(False)

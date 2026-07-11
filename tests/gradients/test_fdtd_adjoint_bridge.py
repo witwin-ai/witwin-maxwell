@@ -1863,24 +1863,42 @@ class _DensityBlochYPmlScene(mw.SceneModule):
         return scene
 
 
+def _roll_normal_from_z(triple, axis):
+    """Cyclically rotate an (x, y, z)-ordered triple so the z entry (the base
+    grating normal) lands on ``axis``. The permutation is a proper rotation."""
+    x, y, z = triple
+    return {"z": (x, y, z), "x": (z, x, y), "y": (y, z, x)}[axis]
+
+
+# Under the same z->axis rotation, the base "Ex" probe component maps to the new
+# component occupying the old x slot.
+_GRATING_PROBE_COMPONENT = {"z": "Ex", "x": "Ey", "y": "Ez"}
+
+
 class _DensityGratingTFSFScene(mw.SceneModule):
-    def __init__(self, init=0.0):
+    def __init__(self, init=0.0, axis="z"):
         super().__init__()
+        self.axis = axis
         self.logits = torch.nn.Parameter(torch.full((1, 1, 1), float(init), device="cuda"))
 
     def to_scene(self):
+        axis = self.axis
         density = torch.sigmoid(self.logits)
+        direction = _roll_normal_from_z((0.2, 0.1, 0.9746794344808963), axis)
+        polarization = _roll_normal_from_z((1.0, 0.0, -0.20519567041703082), axis)
+        domain_bounds = _roll_normal_from_z(((-0.45, 0.45), (-0.45, 0.45), (-0.75, 0.75)), axis)
+        probe_position = _roll_normal_from_z((0.15, 0.0, 0.0), axis)
+        boundary_kinds = {other: "bloch" for other in "xyz"}
+        boundary_kinds[axis] = "pml"
         scene = mw.Scene(
-            domain=mw.Domain(bounds=((-0.45, 0.45), (-0.45, 0.45), (-0.75, 0.75))),
+            domain=mw.Domain(bounds=domain_bounds),
             grid=mw.GridSpec.uniform(0.15),
             boundary=mw.BoundarySpec.faces(
                 default="pml",
                 num_layers=2,
                 strength=1.0,
-                x="bloch",
-                y="bloch",
-                z="pml",
                 bloch_wavevector="auto",
+                **boundary_kinds,
             ),
             device="cuda",
         )
@@ -1896,13 +1914,15 @@ class _DensityGratingTFSFScene(mw.SceneModule):
         scene.add_source(
             mw.PlaneWave(
                 name="grating_tfsf",
-                direction=(0.2, 0.1, 0.9746794344808963),
-                polarization=(1.0, 0.0, -0.20519567041703082),
+                direction=direction,
+                polarization=polarization,
                 source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
-                injection=mw.TFSF.slab(axis="z", bounds=(-0.30, 0.30)),
+                injection=mw.TFSF.slab(axis=axis, bounds=(-0.30, 0.30)),
             )
         )
-        scene.add_monitor(mw.PointMonitor("probe", (0.15, 0.0, 0.0), fields=("Ex",)))
+        scene.add_monitor(
+            mw.PointMonitor("probe", probe_position, fields=(_GRATING_PROBE_COMPONENT[axis],))
+        )
         return scene
 
 
@@ -2363,6 +2383,40 @@ def test_fdtd_gradient_bridge_matches_central_difference_for_grating_tfsf():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_fdtd_gradient_bridge_matches_central_difference_for_grating_tfsf_x_axis():
+    # The grating slab normal axis is generalized beyond z: the adjoint replays the
+    # single-PML-axis (here x) mixed Bloch/CPML update and the grating surface
+    # currents, and the density gradient must still match a central difference.
+    model = _DensityGratingTFSFScene(init=0.0, axis="x").cuda()
+
+    _, data, loss = _loss_from_grating_tfsf_probe(model)
+    assert torch.is_complex(data)
+
+    loss.backward()
+    backward_grad = model.logits.grad.detach().clone()
+    assert torch.isfinite(backward_grad).all()
+
+    delta = 1.0e-2
+    with torch.no_grad():
+        base = model.logits.detach().clone()
+        model.logits.copy_(base + delta)
+    _, _, loss_plus = _loss_from_grating_tfsf_probe(model)
+    with torch.no_grad():
+        model.logits.copy_(base - delta)
+    _, _, loss_minus = _loss_from_grating_tfsf_probe(model)
+    with torch.no_grad():
+        model.logits.copy_(base)
+
+    finite_difference = (loss_plus - loss_minus) / (2.0 * delta)
+    assert torch.allclose(
+        backward_grad,
+        torch.full_like(backward_grad, finite_difference.item()),
+        rtol=1.5e-1,
+        atol=1e-15,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_optimizer_step_reduces_loss():
     model = _DensityPointScene(init=0.0).cuda()
     optimizer = torch.optim.SGD(model.parameters(), lr=1.0e13)
@@ -2476,6 +2530,21 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_grating_tfs
 
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
+    assert profile["reverse_backend_counts"].get("python_reference_grating_tfsf", 0) == bridge._time_steps
+    assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_fdtd_gradient_bridge_backward_profile_uses_grating_tfsf_for_general_axis(axis):
+    # The grating-slab reverse backend is selected for any single-PML-axis grating
+    # layout, not only z, so a non-z normal axis must not fall back to torch_vjp.
+    model = _DensityGratingTFSFScene(init=0.0, axis=axis).cuda()
+    simulation = _build_simulation(model, time_steps=32)
+    bridge = _FDTDGradientBridge(simulation)
+    bridge.forward(tuple(bridge.material_inputs))
+
+    profile = bridge.backward_profile()
     assert profile["reverse_backend_counts"].get("python_reference_grating_tfsf", 0) == bridge._time_steps
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
