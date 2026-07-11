@@ -608,6 +608,65 @@ def _solve_mode_eigenpair(operator, *, mode_index: int):
     return float(eigenvalues[mode_slot]), eigenvectors[:, mode_slot]
 
 
+def _solve_mode_eigenpair_complex(operator, *, mode_index: int):
+    """Fundamental-first eigenpair of the complex (lossy) scalar mode operator.
+
+    When the plane permittivity carries loss, ``d2 + k0**2 eps`` is complex
+    symmetric rather than Hermitian, so the guided spectrum ``beta**2`` is
+    complex. Guided modes have the largest real part of ``beta**2`` (the
+    fundamental has the largest of all), so the modes are ranked by descending
+    ``Re(beta**2)`` and the ``mode_index``-th positive-real-part eigenvalue is
+    returned. A dense general eigensolve is used up to ``_DENSE_EIGEN_LIMIT``
+    unknowns and a largest-real-part Arnoldi solve above it.
+    """
+    size = int(operator.shape[0])
+    if size <= _DENSE_EIGEN_LIMIT:
+        eigenvalues, eigenvectors = scipy_linalg.eig(operator.toarray())
+    else:
+        requested = min(max(int(mode_index) + _VECTOR_EIGEN_REQUEST_PADDING, 4), max(1, size - 2))
+        eigenvalues, eigenvectors = scipy_sparse_linalg.eigs(
+            operator,
+            k=requested,
+            which="LR",
+            tol=_VECTOR_EIGS_TOL,
+            maxiter=_VECTOR_EIGS_MAX_ITER,
+        )
+    order = np.argsort(np.real(eigenvalues))[::-1]
+    positive = [int(index) for index in order if np.isfinite(eigenvalues[index]) and np.real(eigenvalues[index]) > 0.0]
+    if len(positive) <= int(mode_index):
+        raise ValueError(
+            f"ModeSource requested mode_index={mode_index}, but only {len(positive)} positive-beta modes were found."
+        )
+    mode_slot = positive[int(mode_index)]
+    return complex(eigenvalues[mode_slot]), np.asarray(eigenvectors[:, mode_slot])
+
+
+def _real_profile_from_complex_eigenvector(eigenvector, *, interior_u: int, interior_v: int, shape):
+    """Real transverse amplitude of a complex eigenmode, phase-aligned at its peak.
+
+    A complex eigenvector carries an arbitrary global phase; removing the phase at
+    the amplitude peak yields the real standing transverse shape used for soft
+    injection (the complex propagation constant, not the transverse phase, carries
+    the loss). Returns a peak-normalized, sign-oriented float64 numpy array on the
+    full aperture grid with zeroed Dirichlet borders.
+    """
+    peak = int(np.argmax(np.abs(eigenvector)))
+    peak_value = eigenvector[peak]
+    if abs(peak_value) <= 0.0:
+        raise RuntimeError("ModeSource complex eigenmode solve returned a zero profile.")
+    aligned = eigenvector * (np.conjugate(peak_value) / abs(peak_value))
+    profile = np.zeros(tuple(int(dim) for dim in shape), dtype=np.float64)
+    profile[1:-1, 1:-1] = np.real(aligned).reshape((int(interior_u), int(interior_v)))
+    scale = float(np.max(np.abs(profile)))
+    if scale <= 0.0:
+        raise RuntimeError("ModeSource complex eigenmode solve returned a zero profile.")
+    profile /= scale
+    peak_index = np.unravel_index(np.argmax(np.abs(profile)), profile.shape)
+    if profile[peak_index] < 0.0:
+        profile *= -1.0
+    return profile
+
+
 def _solve_mode_eigenpair_torch(operator: torch.Tensor, *, mode_index: int):
     eigenvalues, eigenvectors = torch.linalg.eigh(operator)
     order = torch.argsort(eigenvalues, descending=True)
@@ -1140,34 +1199,34 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         mu_node_imag = (
             float(torch.max(torch.abs(torch.imag(mu_node_slice))).item()) if torch.is_complex(mu_node_slice) else 0.0
         )
-        if eps_node_imag > 1e-7 or mu_node_imag > 1e-7:
-            raise NotImplementedError(
-                "ModeSource full-vector eigenmode solve currently requires real-valued epsilon and mu."
-            )
-
-        eps_node_real = torch.real(eps_node_slice) if torch.is_complex(eps_node_slice) else eps_node_slice
-        mu_node_real = torch.real(mu_node_slice) if torch.is_complex(mu_node_slice) else mu_node_slice
-        if torch.min(eps_node_real).item() <= 0.0 or torch.min(mu_node_real).item() <= 0.0:
-            raise ValueError("ModeSource requires positive epsilon and mu on the source plane.")
-        node_unknowns = max((int(eps_node_real.shape[0]) - 2) * (int(eps_node_real.shape[1]) - 2), 0)
-        if _vector_mode_supported(
-            solver,
-            eps_slice=eps_node_real,
-            mu_slice=mu_node_real,
-            unknowns=node_unknowns,
-        ):
-            return _assemble_vector_mode_data(
+        # A lossy (complex) permittivity makes the full-vector operator non-Hermitian and
+        # its forward path solves only the real part, which would silently drop the loss.
+        # Route those planes to the scalar complex-mode solve below, which resolves the
+        # complex propagation constant directly.
+        if eps_node_imag <= 1e-7 and mu_node_imag <= 1e-7:
+            eps_node_real = torch.real(eps_node_slice) if torch.is_complex(eps_node_slice) else eps_node_slice
+            mu_node_real = torch.real(mu_node_slice) if torch.is_complex(mu_node_slice) else mu_node_slice
+            if torch.min(eps_node_real).item() <= 0.0 or torch.min(mu_node_real).item() <= 0.0:
+                raise ValueError("ModeSource requires positive epsilon and mu on the source plane.")
+            node_unknowns = max((int(eps_node_real.shape[0]) - 2) * (int(eps_node_real.shape[1]) - 2), 0)
+            if _vector_mode_supported(
                 solver,
-                source,
-                normal_axis=normal_axis,
-                tangential_axes=tangential_axes,
-                tangential_bounds=node_tangential_bounds,
-                tangential_coord_map=node_coord_map,
-                plane_index=plane_index,
                 eps_slice=eps_node_real,
                 mu_slice=mu_node_real,
-                frequency=frequency,
-            )
+                unknowns=node_unknowns,
+            ):
+                return _assemble_vector_mode_data(
+                    solver,
+                    source,
+                    normal_axis=normal_axis,
+                    tangential_axes=tangential_axes,
+                    tangential_bounds=node_tangential_bounds,
+                    tangential_coord_map=node_coord_map,
+                    plane_index=plane_index,
+                    eps_slice=eps_node_real,
+                    mu_slice=mu_node_real,
+                    frequency=frequency,
+                )
 
     tangential_coord_map = {
         axis: _field_component_axis_coords(solver.scene, field_name, axis)
@@ -1201,8 +1260,7 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
 
     eps_max_imag = float(torch.max(torch.abs(torch.imag(eps_slice))).item()) if torch.is_complex(eps_slice) else 0.0
     mu_max_imag = float(torch.max(torch.abs(torch.imag(mu_slice))).item()) if torch.is_complex(mu_slice) else 0.0
-    if eps_max_imag > 1e-7 or mu_max_imag > 1e-7:
-        raise NotImplementedError("ModeSource scalar eigenmode solve currently requires real-valued epsilon and mu.")
+    eps_is_lossy = eps_max_imag > 1e-7 or mu_max_imag > 1e-7
 
     eps_real = torch.real(eps_slice) if torch.is_complex(eps_slice) else eps_slice
     mu_real = torch.real(mu_slice) if torch.is_complex(mu_slice) else mu_slice
@@ -1210,6 +1268,12 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         raise ValueError("ModeSource requires positive epsilon and mu on the source plane.")
     if not torch.allclose(mu_real, torch.ones_like(mu_real), atol=1e-6, rtol=0.0):
         raise NotImplementedError("ModeSource scalar eigenmode solve currently requires mu_r == 1 on the source plane.")
+    if eps_is_lossy and eps_real.requires_grad:
+        raise NotImplementedError(
+            "Differentiable ModeSource gradients through a lossy (complex) permittivity require a "
+            "non-Hermitian eigen-adjoint; the differentiable path solves the Hermitian "
+            "real-permittivity problem."
+        )
 
     axis_u, axis_v = tangential_axes
     (u_lo, u_hi), (v_lo, v_hi) = tangential_bounds
@@ -1220,7 +1284,35 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
     k0 = 2.0 * math.pi * frequency / float(solver.c)
     unknowns = max((int(eps_real.shape[0]) - 2) * (int(eps_real.shape[1]) - 2), 0)
 
-    if eps_real.requires_grad:
+    effective_index_complex = None
+    beta_complex = None
+    if eps_is_lossy:
+        eps_complex_np = eps_slice.detach().cpu().numpy().astype(np.complex128, copy=False)
+        mu_complex_np = (
+            mu_slice.detach().cpu().numpy().astype(np.complex128, copy=False)
+            if torch.is_complex(mu_slice)
+            else mu_real.detach().cpu().numpy().astype(np.complex128, copy=False)
+        )
+        index_sq_complex = (k0 * k0) * (eps_complex_np * mu_complex_np)
+        operator, interior_u, interior_v = _build_scalar_operator(index_sq_complex, du, dv)
+        beta_sq_complex, eigenvector = _solve_mode_eigenpair_complex(operator, mode_index=int(source["mode_index"]))
+        profile_np = _real_profile_from_complex_eigenvector(
+            eigenvector,
+            interior_u=interior_u,
+            interior_v=interior_v,
+            shape=tuple(int(dim) for dim in eps_real.shape),
+        )
+        profile = torch.as_tensor(profile_np, device=eps_real.device, dtype=torch.float64)
+        beta_complex = complex(np.sqrt(beta_sq_complex))
+        if beta_complex.real < 0.0:
+            beta_complex = -beta_complex
+        effective_index_complex = beta_complex / max(k0, 1e-30)
+        beta_value = float(beta_complex.real)
+        effective_index_value = float(effective_index_complex.real)
+        beta_tensor = None
+        effective_index_tensor = None
+        scalar_solver_kind = "scalar_complex_dense" if unknowns <= _DENSE_EIGEN_LIMIT else "scalar_complex_sparse"
+    elif eps_real.requires_grad:
         index_sq = ((k0 * k0) * (eps_real * mu_real)).to(dtype=torch.float64)
         if unknowns > _DENSE_EIGEN_LIMIT:
             beta_sq, eigenvector = _solve_mode_eigenpair_torch_sparse_implicit(
@@ -1275,7 +1367,7 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         effective_index_value = beta_value / max(k0, 1e-30)
         beta_tensor = None
         effective_index_tensor = None
-    if eps_real.requires_grad:
+    if not eps_is_lossy and eps_real.requires_grad:
         scalar_solver_kind = "scalar_sparse_implicit" if unknowns > _DENSE_EIGEN_LIMIT else "scalar_dense_torch"
 
     direction_vector = tuple(float(component) for component in source["direction_vector"])
@@ -1339,6 +1431,8 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         "mode_solver_kind": scalar_solver_kind,
         "effective_index": float(effective_index_value),
         "beta": float(beta_value),
+        "effective_index_complex": None if effective_index_complex is None else complex(effective_index_complex),
+        "beta_complex": None if beta_complex is None else complex(beta_complex),
         "effective_index_tensor": (
             None
             if effective_index_tensor is None
