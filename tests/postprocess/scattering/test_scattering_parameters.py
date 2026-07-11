@@ -64,6 +64,40 @@ def _synthetic_flux_result(*, frequencies, incident_flux, transmitted_flux=None)
     )
 
 
+def _synthetic_flux_result_with_source(*, frequencies, incident_flux, source, transmitted_flux=None):
+    frequencies = tuple(float(freq) for freq in frequencies)
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+        sources=[source],
+    )
+    samples = np.full((len(frequencies),), 8, dtype=int)
+    monitors = {
+        "port1": {
+            "kind": "plane",
+            "fields": ("Ey", "Ez", "Hy", "Hz"),
+            "samples": samples.copy(),
+            "frequency": frequencies[0],
+            "frequencies": frequencies,
+            "axis": "x",
+            "position": -0.1,
+            "compute_flux": True,
+            "normal_direction": "+",
+            "flux": _as_monitor_array(incident_flux),
+            "power": _as_monitor_array(incident_flux),
+        }
+    }
+    if transmitted_flux is not None:
+        monitors["port2"] = dict(monitors["port1"])
+        monitors["port2"].update(
+            position=0.1,
+            flux=_as_monitor_array(transmitted_flux),
+            power=_as_monitor_array(transmitted_flux),
+        )
+    return Result(method="fdtd", scene=scene, frequencies=frequencies, monitors=monitors)
+
+
 def _stack_flux_results(results):
     frequencies = tuple(float(result.frequency) for result in results)
     monitors = {}
@@ -218,6 +252,45 @@ def test_compute_s_parameters_supports_explicit_incident_power_arrays():
     np.testing.assert_allclose(s_params["S11_db"], 20.0 * np.log10(np.sqrt([0.2, 0.4])))
 
 
+def test_compute_s_parameters_cw_auto_matches_analytic_power():
+    amplitude = 3.0
+    source = mw.PlaneWave(
+        direction=(1.0, 0.0, 0.0),
+        polarization=(0.0, 0.0, 1.0),
+        source_time=mw.CW(frequency=1.0e9, amplitude=amplitude),
+        name="pw",
+    )
+    result = _synthetic_flux_result_with_source(
+        frequencies=(1.0e9, 2.0e9),
+        incident_flux=(5.0, 5.0),
+        source=source,
+    )
+
+    s_params = compute_s_parameters(result, incident_monitor="port1", incident_power="auto")
+
+    eta0 = 4.0 * np.pi * 1e-7 * 299792458.0
+    area = 1.0  # domain y-extent x z-extent, 1.0 x 1.0
+    expected = (amplitude ** 2) / (2.0 * eta0) * area
+    np.testing.assert_allclose(s_params["P_incident"], [expected, expected], rtol=1e-9)
+
+
+def test_compute_s_parameters_broadband_auto_without_solver_is_rejected():
+    source = mw.PlaneWave(
+        direction=(1.0, 0.0, 0.0),
+        polarization=(0.0, 0.0, 1.0),
+        source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.3e9, amplitude=1.0),
+        name="pw",
+    )
+    result = _synthetic_flux_result_with_source(
+        frequencies=(1.0e9, 2.0e9),
+        incident_flux=(5.0, 5.0),
+        source=source,
+    )
+
+    with pytest.raises(ValueError, match="running-DFT schedule"):
+        compute_s_parameters(result, incident_monitor="port1", incident_power="auto")
+
+
 def test_compute_s_parameters_rejects_missing_or_mismatched_normalization():
     result = _synthetic_flux_result(
         frequencies=(1.0, 2.0),
@@ -261,6 +334,67 @@ def test_compute_s_parameters_free_space_multifrequency_fdtd_returns_zero_s11():
     np.testing.assert_allclose(s_params["S11_mag"], 0.0, atol=1e-15)
     assert s_params["S21"] is None
     assert s_params["P_transmitted"] is None
+
+
+_BROADBAND_FREQUENCIES = (0.9e9, 1.0e9, 1.1e9)
+
+
+def _build_broadband_tfsf_fine_scene():
+    # Well-resolved (~15 cells/wavelength) empty TFSF box so the injected pulse
+    # fills a clean aperture inside the total-field region and the analytic
+    # aperture-area normalization is not swamped by numerical dispersion.
+    aperture = ((-0.15, 0.15), (-0.15, 0.15), (-0.15, 0.15))
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.45, 0.45), (-0.45, 0.45), (-0.45, 0.45))),
+        grid=mw.GridSpec.uniform(0.02),
+        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+        device="cuda",
+        sources=[
+            mw.PlaneWave(
+                direction=(1.0, 0.0, 0.0),
+                polarization=(0.0, 0.0, 1.0),
+                source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.3e9, amplitude=1.0),
+                injection=mw.TFSF(bounds=aperture),
+                name="pw",
+            )
+        ],
+    )
+    scene.add_monitor(mw.FluxMonitor("port1", axis="x", position=-0.075, frequencies=_BROADBAND_FREQUENCIES, normal_direction="+"))
+    return scene
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_compute_s_parameters_broadband_auto_matches_measured_incident_flux():
+    # An empty broadband (GaussianPulse) TFSF run: port1 measures the pure
+    # incident spectral flux. incident_power="auto" must reconstruct that same
+    # flux analytically from the source waveform and the solver DFT schedule,
+    # without a second reference run.
+    scene = _build_broadband_tfsf_fine_scene()
+    runtime = _runtime_for_scene(scene, min(_BROADBAND_FREQUENCIES), steady_cycles=10, transient_cycles=25)
+    result = mw.Simulation.fdtd(
+        scene,
+        frequencies=_BROADBAND_FREQUENCIES,
+        run_time=runtime,
+        spectral_sampler=mw.SpectralSampler(window="hanning"),
+        full_field_dft=False,
+    ).run()
+
+    def _to_numpy(value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().to(dtype=torch.float64).numpy().reshape(-1)
+        return np.asarray(value, dtype=float).reshape(-1)
+
+    measured_incident = _to_numpy(result.monitor("port1")["flux"])
+    s_params = compute_s_parameters(result, incident_monitor="port1", incident_power="auto")
+    auto_incident = _to_numpy(s_params["P_incident"])
+
+    assert auto_incident.shape == measured_incident.shape
+    assert np.all(auto_incident > 0.0)
+    # The co-located aperture-area reconstruction matches the reference monitor
+    # flux to the residual Yee-stagger / numerical-dispersion level at this
+    # resolution (measured deviation ~5-7% across the band); the margin below
+    # guards that while still catching a wrong area or normalization constant.
+    np.testing.assert_allclose(auto_incident, measured_incident, rtol=0.12)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
