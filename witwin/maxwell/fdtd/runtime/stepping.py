@@ -24,6 +24,7 @@ from ..excitation import (
     inject_magnetic_surface_source_terms,
     initialize_source_terms,
     initialize_tfsf_state,
+    tfsf_incident_is_gpu_driven,
 )
 
 
@@ -1709,9 +1710,30 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
 
     # v1 scope: the standard real-field path (optionally conductive), linear
     # electric/magnetic dispersion, the instantaneous nonlinear family (Kerr chi3,
-    # chi2, and two-photon-absorption loss), and the complex split-field Bloch path
-    # (optionally with a single CPML axis). TFSF and magnetic sources put per-step
-    # host input inside the block, so those scenes stay on the eager path.
+    # chi2, and two-photon-absorption loss), the complex split-field Bloch path
+    # (optionally with a single CPML axis), and reference-provider TFSF injection
+    # (axis-aligned / x-Ez plane waves). Magnetic surface sources put a
+    # host-evaluated signal scalar inside the block, so those scenes stay on the
+    # eager path.
+    #
+    # A reference-provider TFSF scene is safe to capture: its in-block H correction
+    # and auxiliary magnetic advance read the incident field from the
+    # device-resident auxiliary 1D grid (aux.electric / aux.magnetic) at fixed
+    # integer sample indices, so the block carries no per-step host input, and the
+    # reference injection kernel's warp-aggregated writes are collision-free for the
+    # axis-aligned face layout (bit-reproducible run to run). The 1D source waveform
+    # is evaluated on the host only in the E-side auxiliary advance, which runs
+    # eagerly after the block (outside the captured region), and the captured H
+    # correction reads whatever aux.electric holds at replay -- exactly matching the
+    # eager path. The block mutates only aux.magnetic among the auxiliary tensors;
+    # it is snapshotted below alongside aux.electric so warmup/capture on the zero
+    # field leave the incident line untouched for the physical run, and the incident
+    # line is a zero fixed point during capture (aux.electric stays zero until the
+    # eager E-side advance injects the source after capture). The oblique
+    # auxiliary-line provider is excluded (its interpolated injection kernel is not
+    # bit-reproducible under cross-warp atomics), and the oblique-CW / analytic
+    # providers evaluate the waveform on the host each step; all stay eager
+    # (see excitation.tfsf_incident_is_gpu_driven).
     #
     # Linear dispersion is safe to capture: the Debye/Drude/Lorentz ADE advance and
     # the polarization-current subtraction launch persistent per-pole state tensors
@@ -1746,7 +1768,13 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     graphable = (
         use_cuda_graph
         and torch.cuda.is_available()
-        and not solver.tfsf_enabled
+        # TFSF is capturable only for the reference providers, whose in-block
+        # correction reads the device-resident incident line through the
+        # bit-reproducible integer-indexed reference kernel and carries no per-step
+        # host input (see _make_field_update_runner docstring above).
+        and (not solver.tfsf_enabled or tfsf_incident_is_gpu_driven(solver))
+        # A magnetic surface source injects a host-evaluated signal scalar inside
+        # the block, which a captured graph would freeze at its capture-time value.
         and not solver._magnetic_source_terms
         # The modulated E update consumes per-step host phase scalars, which a
         # captured CUDA graph would freeze at their capture-time values.
@@ -1773,6 +1801,16 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         if isinstance(v, torch.Tensor)
         and (k in snapshot_field_names or k.startswith("psi"))
     }
+    # The TFSF field-update block advances the auxiliary 1D magnetic grid in place
+    # (and reads the auxiliary electric grid). Snapshot both auxiliary tensors so
+    # warmup/capture on the zero field leave the incident line exactly as the
+    # physical run expects; the "psi" / field filter above does not reach them
+    # because they live on the auxiliary-grid object, not on ``vars(solver)``.
+    if getattr(solver, "tfsf_enabled", False) and getattr(solver, "_tfsf_state", None):
+        aux = solver._tfsf_state.get("auxiliary_grid")
+        if aux is not None:
+            state["_tfsf_aux_electric"] = aux.electric
+            state["_tfsf_aux_magnetic"] = aux.magnetic
     saved = {k: v.clone() for k, v in state.items()}
 
     def _restore():

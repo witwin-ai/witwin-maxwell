@@ -188,6 +188,45 @@ def _apply_tfsf_terms(solver, *, term_key, sample_kind, time_value):
     )
 
 
+# TFSF providers whose in-block correction both (1) reads the incident field from
+# the device-resident auxiliary 1D grid -- carrying no per-step host input -- and
+# (2) accumulates through the integer-indexed *reference* injection kernel, whose
+# warp-aggregated writes are collision-free for the axis-aligned face layout and
+# therefore bit-reproducible. The oblique auxiliary-line provider
+# (``plane_wave_aux``) is deliberately excluded: it accumulates through the batched
+# *interpolated* kernel, whose cross-warp atomic adds at the overlapping oblique
+# faces are not bit-reproducible run to run, so a captured graph could not be
+# proven bit-identical to the eager path.
+_CAPTURABLE_TFSF_PROVIDERS = frozenset(_REFERENCE_PROVIDERS)
+
+
+def tfsf_incident_is_gpu_driven(solver) -> bool:
+    """True when an active TFSF source couples into the 3D field-update block only
+    by *reading* the device-resident auxiliary 1D incident grid through the
+    bit-reproducible reference injection kernel, so the block can be captured into a
+    CUDA graph and replayed bit-for-bit.
+
+    The reference providers apply their in-block H correction with the batched /
+    per-term reference kernels, which read ``aux.electric`` / ``aux.magnetic``
+    (persistent device tensors) at fixed integer sample indices and carry no
+    per-step host input. The 1D source waveform is evaluated on the host only in
+    ``advance_tfsf_auxiliary_electric`` (the E-side auxiliary advance), which runs
+    eagerly *after* the field-update block, outside the captured region. So for
+    these providers the block is a fixed, deterministic kernel sequence.
+
+    The oblique auxiliary-line provider (``plane_wave_aux``) is excluded because its
+    batched interpolated injection kernel accumulates through non-deterministic
+    cross-warp atomic adds (bit-identical capture parity is impossible), and every
+    remaining provider evaluates the waveform on the host each step via
+    ``apply_generic_source_terms`` and injects it as a kernel launch scalar that a
+    captured graph would freeze. All of these stay on the eager path.
+    """
+    state = getattr(solver, "_tfsf_state", None)
+    if not state:
+        return False
+    return state.get("provider") in _CAPTURABLE_TFSF_PROVIDERS
+
+
 def apply_tfsf_h_correction(solver, time_value):
     _apply_tfsf_terms(
         solver,
