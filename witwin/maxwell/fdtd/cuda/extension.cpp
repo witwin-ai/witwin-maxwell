@@ -1494,6 +1494,70 @@ void apply_electric_ey_cpml_z_correction_cuda(
     int64_t x_high_mode,
     int64_t full_size_x,
     int64_t full_size_z);
+void apply_electric_ex_cpml_y_correction_cuda(
+    torch::stable::Tensor ex,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& curl,
+    torch::stable::Tensor psi_y,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_dy,
+    int64_t offset_i,
+    int64_t offset_j,
+    int64_t offset_k,
+    int64_t z_low_mode,
+    int64_t z_high_mode,
+    int64_t full_size_z,
+    int64_t full_size_y);
+void apply_electric_ez_cpml_y_correction_cuda(
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& curl,
+    torch::stable::Tensor psi_y,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_dy,
+    int64_t offset_i,
+    int64_t offset_j,
+    int64_t offset_k,
+    int64_t x_low_mode,
+    int64_t x_high_mode,
+    int64_t full_size_x,
+    int64_t full_size_y);
+void apply_electric_ey_cpml_x_correction_cuda(
+    torch::stable::Tensor ey,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& curl,
+    torch::stable::Tensor psi_x,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_dx,
+    int64_t offset_i,
+    int64_t offset_j,
+    int64_t offset_k,
+    int64_t z_low_mode,
+    int64_t z_high_mode,
+    int64_t full_size_z,
+    int64_t full_size_x);
+void apply_electric_ez_cpml_x_correction_cuda(
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& curl,
+    torch::stable::Tensor psi_x,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_dx,
+    int64_t offset_i,
+    int64_t offset_j,
+    int64_t offset_k,
+    int64_t y_low_mode,
+    int64_t y_high_mode,
+    int64_t full_size_y,
+    int64_t full_size_x);
 
 void add_source_patch_ex_periodic_cuda(
     torch::stable::Tensor field,
@@ -1640,6 +1704,10 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("update_electric_ey_bloch_x_standard_z(Tensor(a!) ey_real, Tensor(b!) ey_imag, Tensor hx_real, Tensor hx_imag, Tensor hz_real, Tensor hz_imag, Tensor decay, Tensor curl, float phase_cos_x, float phase_sin_x, Tensor inv_dx, Tensor inv_dz, int z_low_mode, int z_high_mode) -> ()");
   m.def("apply_electric_ex_cpml_z_correction(Tensor(a!) ex, Tensor hy, Tensor curl, Tensor(b!) psi_z, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dz, int offset_i, int offset_j, int offset_k, int y_low_mode, int y_high_mode, int full_size_y, int full_size_z) -> ()");
   m.def("apply_electric_ey_cpml_z_correction(Tensor(a!) ey, Tensor hx, Tensor curl, Tensor(b!) psi_z, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dz, int offset_i, int offset_j, int offset_k, int x_low_mode, int x_high_mode, int full_size_x, int full_size_z) -> ()");
+  m.def("apply_electric_ex_cpml_y_correction(Tensor(a!) ex, Tensor hz, Tensor curl, Tensor(b!) psi_y, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dy, int offset_i, int offset_j, int offset_k, int z_low_mode, int z_high_mode, int full_size_z, int full_size_y) -> ()");
+  m.def("apply_electric_ez_cpml_y_correction(Tensor(a!) ez, Tensor hx, Tensor curl, Tensor(b!) psi_y, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dy, int offset_i, int offset_j, int offset_k, int x_low_mode, int x_high_mode, int full_size_x, int full_size_y) -> ()");
+  m.def("apply_electric_ey_cpml_x_correction(Tensor(a!) ey, Tensor hz, Tensor curl, Tensor(b!) psi_x, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_dx, int offset_i, int offset_j, int offset_k, int z_low_mode, int z_high_mode, int full_size_z, int full_size_x) -> ()");
+  m.def("apply_electric_ez_cpml_x_correction(Tensor(a!) ez, Tensor hy, Tensor curl, Tensor(b!) psi_x, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_dx, int offset_i, int offset_j, int offset_k, int y_low_mode, int y_high_mode, int full_size_y, int full_size_x) -> ()");
   m.def("add_source_patch_ex_periodic(Tensor(a!) field, Tensor patch, int offset_i, int offset_j, int offset_k, float signal, int wrap_a, int wrap_b) -> ()");
   m.def("add_source_patch_ey_periodic(Tensor(a!) field, Tensor patch, int offset_i, int offset_j, int offset_k, float signal, int wrap_a, int wrap_b) -> ()");
   m.def("add_source_patch_ez_periodic(Tensor(a!) field, Tensor patch, int offset_i, int offset_j, int offset_k, float signal, int wrap_a, int wrap_b) -> ()");
@@ -1747,6 +1815,10 @@ STABLE_TORCH_LIBRARY_IMPL(witwin_maxwell_fdtd_cuda, CUDA, m) {
   m.impl("update_electric_ey_bloch_x_standard_z", TORCH_BOX(&update_electric_ey_bloch_x_standard_z_cuda));
   m.impl("apply_electric_ex_cpml_z_correction", TORCH_BOX(&apply_electric_ex_cpml_z_correction_cuda));
   m.impl("apply_electric_ey_cpml_z_correction", TORCH_BOX(&apply_electric_ey_cpml_z_correction_cuda));
+  m.impl("apply_electric_ex_cpml_y_correction", TORCH_BOX(&apply_electric_ex_cpml_y_correction_cuda));
+  m.impl("apply_electric_ez_cpml_y_correction", TORCH_BOX(&apply_electric_ez_cpml_y_correction_cuda));
+  m.impl("apply_electric_ey_cpml_x_correction", TORCH_BOX(&apply_electric_ey_cpml_x_correction_cuda));
+  m.impl("apply_electric_ez_cpml_x_correction", TORCH_BOX(&apply_electric_ez_cpml_x_correction_cuda));
   m.impl("add_source_patch_ex_periodic", TORCH_BOX(&add_source_patch_ex_periodic_cuda));
   m.impl("add_source_patch_ey_periodic", TORCH_BOX(&add_source_patch_ey_periodic_cuda));
   m.impl("add_source_patch_ez_periodic", TORCH_BOX(&add_source_patch_ez_periodic_cuda));

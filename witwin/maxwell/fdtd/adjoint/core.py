@@ -1996,7 +1996,7 @@ def _cpml_correction_mask(shape, *, normal_axis: int, tangent_axis: int, tangent
     return mask & (~inactive_tangent) & (~pec_tangent)
 
 
-def _apply_complex_z_cpml_correction(
+def _apply_complex_cpml_correction(
     field: torch.Tensor,
     psi: torch.Tensor,
     derivative: torch.Tensor,
@@ -2005,20 +2005,21 @@ def _apply_complex_z_cpml_correction(
     inv_kappa: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
+    normal_axis: int,
     tangent_axis: int,
     tangent_low_mode: int,
     tangent_high_mode: int,
     sign: float,
 ):
-    b_term = _broadcast_vector(b, 2)
-    c_term = _broadcast_vector(c, 2)
-    inv_kappa_term = _broadcast_vector(inv_kappa, 2)
+    b_term = _broadcast_vector(b, normal_axis)
+    c_term = _broadcast_vector(c, normal_axis)
+    inv_kappa_term = _broadcast_vector(inv_kappa, normal_axis)
     psi_candidate = b_term * psi + c_term * derivative
     correction = curl * (derivative * (inv_kappa_term - 1.0) + psi_candidate)
     candidate = field + float(sign) * correction
     mask = _cpml_correction_mask(
         field.shape,
-        normal_axis=2,
+        normal_axis=normal_axis,
         tangent_axis=tangent_axis,
         tangent_low_mode=tangent_low_mode,
         tangent_high_mode=tangent_high_mode,
@@ -2050,7 +2051,7 @@ def _update_mixed_bloch_cpml_electric_fields(solver, state, magnetic_fields, *, 
         high_mode=solver.boundary_z_high_code,
     )
     psi_ex_z = torch.complex(state["psi_ex_z"], state["psi_ex_z_imag"])
-    ex_complex, psi_ex_z = _apply_complex_z_cpml_correction(
+    ex_complex, psi_ex_z = _apply_complex_cpml_correction(
         ex_complex,
         psi_ex_z,
         d_hy_dz,
@@ -2058,6 +2059,7 @@ def _update_mixed_bloch_cpml_electric_fields(solver, state, magnetic_fields, *, 
         inv_kappa=solver.cpml_inv_kappa_e_z,
         b=solver.cpml_b_e_z,
         c=solver.cpml_c_e_z,
+        normal_axis=2,
         tangent_axis=1,
         tangent_low_mode=solver.boundary_y_low_code,
         tangent_high_mode=solver.boundary_y_high_code,
@@ -2082,7 +2084,7 @@ def _update_mixed_bloch_cpml_electric_fields(solver, state, magnetic_fields, *, 
         high_mode=solver.boundary_z_high_code,
     )
     psi_ey_z = torch.complex(state["psi_ey_z"], state["psi_ey_z_imag"])
-    ey_complex, psi_ey_z = _apply_complex_z_cpml_correction(
+    ey_complex, psi_ey_z = _apply_complex_cpml_correction(
         ey_complex,
         psi_ey_z,
         d_hx_dz,
@@ -2090,6 +2092,7 @@ def _update_mixed_bloch_cpml_electric_fields(solver, state, magnetic_fields, *, 
         inv_kappa=solver.cpml_inv_kappa_e_z,
         b=solver.cpml_b_e_z,
         c=solver.cpml_c_e_z,
+        normal_axis=2,
         tangent_axis=0,
         tangent_low_mode=solver.boundary_x_low_code,
         tangent_high_mode=solver.boundary_x_high_code,
@@ -2135,6 +2138,121 @@ def _update_mixed_bloch_cpml_electric_fields(solver, state, magnetic_fields, *, 
         "psi_ez_x_imag": state["psi_ez_x_imag"],
         "psi_ez_y_imag": state["psi_ez_y_imag"],
     }
+    return electric_fields, electric_cpml_state
+
+
+def _update_general_bloch_cpml_electric_fields(
+    solver, state, magnetic_fields, *, pml_axis, ex_curl, ey_curl, ez_curl
+):
+    """Reverse replay of the general single-PML-axis (x or y) Bloch+CPML electric
+    update. The forward runs the full-Bloch base (``update_electric_fields_bloch``)
+    with the true wrap phase on the two periodic axes and the natural unit phase on
+    the absorbing axis, then folds the recursive-convolution stretch into the two
+    components with an absorbing-axis derivative. This mirrors that step exactly so
+    the field, eps, and source VJPs stay consistent with the forward kernels."""
+    hx = _complex_state_field(magnetic_fields, "Hx")
+    hy = _complex_state_field(magnetic_fields, "Hy")
+    hz = _complex_state_field(magnetic_fields, "Hz")
+    phase_cos = solver.boundary_phase_cos
+    phase_sin = solver.boundary_phase_sin
+
+    def _bdiff(field, axis, inv_delta):
+        return _bloch_backward_diff(
+            field,
+            axis=axis,
+            inv_delta=inv_delta,
+            phase_cos=float(phase_cos[axis]),
+            phase_sin=float(phase_sin[axis]),
+        )
+
+    d_hz_dy = _bdiff(hz, 1, solver.inv_dy_e)
+    d_hy_dz = _bdiff(hy, 2, solver.inv_dz_e)
+    ex = _complex_state_field(state, "Ex") * solver.cex_decay + ex_curl * (d_hz_dy - d_hy_dz)
+
+    d_hx_dz = _bdiff(hx, 2, solver.inv_dz_e)
+    d_hz_dx = _bdiff(hz, 0, solver.inv_dx_e)
+    ey = _complex_state_field(state, "Ey") * solver.cey_decay + ey_curl * (d_hx_dz - d_hz_dx)
+
+    d_hy_dx = _bdiff(hy, 0, solver.inv_dx_e)
+    d_hx_dy = _bdiff(hx, 1, solver.inv_dy_e)
+    ez = _complex_state_field(state, "Ez") * solver.cez_decay + ez_curl * (d_hy_dx - d_hx_dy)
+
+    psi = {
+        name: torch.complex(state[name], state[f"{name}_imag"])
+        for name in ("psi_ex_y", "psi_ex_z", "psi_ey_x", "psi_ey_z", "psi_ez_x", "psi_ez_y")
+    }
+
+    if pml_axis == "y":
+        ex, psi["psi_ex_y"] = _apply_complex_cpml_correction(
+            ex,
+            psi["psi_ex_y"],
+            d_hz_dy,
+            curl=ex_curl,
+            inv_kappa=solver.cpml_inv_kappa_e_y,
+            b=solver.cpml_b_e_y,
+            c=solver.cpml_c_e_y,
+            normal_axis=1,
+            tangent_axis=2,
+            tangent_low_mode=solver.boundary_z_low_code,
+            tangent_high_mode=solver.boundary_z_high_code,
+            sign=1.0,
+        )
+        ez, psi["psi_ez_y"] = _apply_complex_cpml_correction(
+            ez,
+            psi["psi_ez_y"],
+            d_hx_dy,
+            curl=ez_curl,
+            inv_kappa=solver.cpml_inv_kappa_e_y,
+            b=solver.cpml_b_e_y,
+            c=solver.cpml_c_e_y,
+            normal_axis=1,
+            tangent_axis=0,
+            tangent_low_mode=solver.boundary_x_low_code,
+            tangent_high_mode=solver.boundary_x_high_code,
+            sign=-1.0,
+        )
+    else:  # pml_axis == "x"
+        ey, psi["psi_ey_x"] = _apply_complex_cpml_correction(
+            ey,
+            psi["psi_ey_x"],
+            d_hz_dx,
+            curl=ey_curl,
+            inv_kappa=solver.cpml_inv_kappa_e_x,
+            b=solver.cpml_b_e_x,
+            c=solver.cpml_c_e_x,
+            normal_axis=0,
+            tangent_axis=2,
+            tangent_low_mode=solver.boundary_z_low_code,
+            tangent_high_mode=solver.boundary_z_high_code,
+            sign=-1.0,
+        )
+        ez, psi["psi_ez_x"] = _apply_complex_cpml_correction(
+            ez,
+            psi["psi_ez_x"],
+            d_hy_dx,
+            curl=ez_curl,
+            inv_kappa=solver.cpml_inv_kappa_e_x,
+            b=solver.cpml_b_e_x,
+            c=solver.cpml_c_e_x,
+            normal_axis=0,
+            tangent_axis=1,
+            tangent_low_mode=solver.boundary_y_low_code,
+            tangent_high_mode=solver.boundary_y_high_code,
+            sign=1.0,
+        )
+
+    electric_fields = {
+        "Ex": ex.real,
+        "Ey": ey.real,
+        "Ez": ez.real,
+        "Ex_imag": ex.imag,
+        "Ey_imag": ey.imag,
+        "Ez_imag": ez.imag,
+    }
+    electric_cpml_state = {}
+    for name, value in psi.items():
+        electric_cpml_state[name] = value.real
+        electric_cpml_state[f"{name}_imag"] = value.imag
     return electric_fields, electric_cpml_state
 
 
@@ -2631,16 +2749,36 @@ def _step_state(
         ey_curl = _dynamic_electric_curl(solver.cey_curl, solver.eps_Ey, eps_ey)
         ez_curl = _dynamic_electric_curl(solver.cez_curl, solver.eps_Ez, eps_ez)
         if getattr(solver, "uses_cpml", False):
-            if tuple(getattr(solver, "has_bloch_axes", ())) != ("x", "y"):
-                raise NotImplementedError("Complex-field CPML adjoint replay currently supports x/y Bloch with z PML only.")
-            electric_fields, electric_cpml_state = _update_mixed_bloch_cpml_electric_fields(
-                solver,
-                state,
-                magnetic_fields,
-                ex_curl=ex_curl,
-                ey_curl=ey_curl,
-                ez_curl=ez_curl,
-            )
+            from ..runtime.stepping import _bloch_cpml_pml_axis
+
+            pml_axis = _bloch_cpml_pml_axis(solver)
+            if pml_axis is None:
+                raise NotImplementedError(
+                    "Complex-field CPML adjoint replay requires exactly one PML axis and two Bloch axes: "
+                    "the reverse split-field update carries the transverse wrap phase on the two periodic "
+                    "axes and the recursive-convolution stretch on the single absorbing axis, so a face "
+                    "layout mixing Bloch and PML on one axis or leaving more than one absorbing axis is "
+                    "not expressible on that split."
+                )
+            if pml_axis == "z":
+                electric_fields, electric_cpml_state = _update_mixed_bloch_cpml_electric_fields(
+                    solver,
+                    state,
+                    magnetic_fields,
+                    ex_curl=ex_curl,
+                    ey_curl=ey_curl,
+                    ez_curl=ez_curl,
+                )
+            else:
+                electric_fields, electric_cpml_state = _update_general_bloch_cpml_electric_fields(
+                    solver,
+                    state,
+                    magnetic_fields,
+                    pml_axis=pml_axis,
+                    ex_curl=ex_curl,
+                    ey_curl=ey_curl,
+                    ez_curl=ez_curl,
+                )
             psi_ex_y = electric_cpml_state["psi_ex_y"]
             psi_ex_z = electric_cpml_state["psi_ex_z"]
             psi_ey_x = electric_cpml_state["psi_ey_x"]

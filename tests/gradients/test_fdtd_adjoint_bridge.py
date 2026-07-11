@@ -1818,6 +1818,51 @@ class _DensityBlochScene(mw.SceneModule):
         return scene
 
 
+class _DensityBlochYPmlScene(mw.SceneModule):
+    """x/z Bloch + y PML: the generalized single-PML-axis mixed Bloch+CPML update
+    (absorbing axis != z) exercising the general reverse replay."""
+
+    def __init__(self, init=0.0):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full((1, 1, 1), float(init), device="cuda"))
+
+    def to_scene(self):
+        density = torch.sigmoid(self.logits)
+        scene = mw.Scene(
+            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.75, 0.75), (-0.6, 0.6))),
+            grid=mw.GridSpec.uniform(0.15),
+            boundary=mw.BoundarySpec.faces(
+                default="pml",
+                num_layers=2,
+                strength=1.0,
+                x="bloch",
+                y="pml",
+                z="bloch",
+                bloch_wavevector=(math.pi / 1.2, 0.0, math.pi / 2.4),
+            ),
+            device="cuda",
+        )
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.15, 0.15, 0.15)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+        scene.add_source(
+            mw.PointDipole(
+                position=(0.0, -0.55, 0.0),
+                polarization="Ez",
+                width=0.12,
+                source_time=mw.GaussianPulse(frequency=1.0e9, fwidth=0.25e9, amplitude=25.0),
+            )
+        )
+        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ez",)))
+        return scene
+
+
 class _DensityGratingTFSFScene(mw.SceneModule):
     def __init__(self, init=0.0):
         super().__init__()
@@ -1961,6 +2006,13 @@ def _loss_from_bloch_probe(model):
 
 def _loss_from_grating_tfsf_probe(model):
     result = _build_simulation(model, time_steps=48).run()
+    data = result.monitor("probe")["data"]
+    loss = torch.abs(data) ** 2
+    return result, data, loss
+
+
+def _loss_from_bloch_y_pml_probe(model):
+    result = _build_simulation(model, time_steps=40).run()
     data = result.monitor("probe")["data"]
     loss = torch.abs(data) ** 2
     return result, data, loss
@@ -2236,6 +2288,42 @@ def test_fdtd_gradient_bridge_matches_central_difference_for_bloch_boundaries():
         backward_grad,
         torch.full_like(backward_grad, finite_difference.item()),
         rtol=6e-2,
+        atol=1e-15,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_fdtd_gradient_bridge_matches_central_difference_for_bloch_y_pml_boundaries():
+    # Adjoint of the generalized single-PML-axis (y) mixed Bloch+CPML update: the
+    # reverse replay runs _update_general_bloch_cpml_electric_fields.
+    model = _DensityBlochYPmlScene(init=0.0).cuda()
+
+    _, data, loss = _loss_from_bloch_y_pml_probe(model)
+    assert torch.is_tensor(data)
+    assert data.is_cuda
+    assert data.requires_grad
+    assert torch.is_complex(data)
+
+    loss.backward()
+    backward_grad = model.logits.grad.detach().clone()
+    assert torch.isfinite(backward_grad).all()
+
+    delta = 1.0e-2
+    with torch.no_grad():
+        base = model.logits.detach().clone()
+        model.logits.copy_(base + delta)
+    _, _, loss_plus = _loss_from_bloch_y_pml_probe(model)
+    with torch.no_grad():
+        model.logits.copy_(base - delta)
+    _, _, loss_minus = _loss_from_bloch_y_pml_probe(model)
+    with torch.no_grad():
+        model.logits.copy_(base)
+
+    finite_difference = (loss_plus - loss_minus) / (2.0 * delta)
+    assert torch.allclose(
+        backward_grad,
+        torch.full_like(backward_grad, finite_difference.item()),
+        rtol=8e-2,
         atol=1e-15,
     )
 

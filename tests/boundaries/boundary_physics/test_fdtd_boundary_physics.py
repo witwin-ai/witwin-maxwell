@@ -266,7 +266,9 @@ def test_fdtd_mixed_bloch_pml_preserves_xy_phase_relationship():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_fdtd_mixed_bloch_cpml_rejects_non_grating_update_layout():
+def test_fdtd_mixed_bloch_cpml_rejects_two_pml_axes():
+    # One Bloch axis + two PML axes is outside the single-PML-axis / two-Bloch-axes
+    # contract: the split-field Bloch update carries one absorbing axis only.
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.8, 0.8))),
         grid=mw.GridSpec.uniform(0.2),
@@ -289,13 +291,113 @@ def test_fdtd_mixed_bloch_cpml_rejects_non_grating_update_layout():
             source_time=mw.CW(frequency=1.0e9, amplitude=10.0),
         )
     )
-    with pytest.raises(NotImplementedError, match="x/y Bloch with z PML"):
+    with pytest.raises(NotImplementedError, match="exactly one PML axis"):
         mw.Simulation.fdtd(
             scene,
             frequencies=[1.0e9],
             run_time=mw.TimeConfig(time_steps=2),
             absorber="cpml",
         ).run()
+
+
+def _mixed_bloch_pml_scene(*, pml_axis, bloch_wavevector, source_polarization="Ez"):
+    long_axis = {"x": 0, "y": 1, "z": 2}[pml_axis]
+    bounds = [(-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6)]
+    bounds[long_axis] = (-0.8, 0.8)
+    faces = {axis: "bloch" for axis in ("x", "y", "z")}
+    faces[pml_axis] = "pml"
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=tuple(bounds)),
+        grid=mw.GridSpec.uniform(0.12),
+        boundary=mw.BoundarySpec.faces(
+            default="pml",
+            num_layers=4,
+            strength=1.0,
+            bloch_wavevector=bloch_wavevector,
+            **faces,
+        ),
+        device="cuda",
+    )
+    scene.add_source(
+        mw.PointDipole(
+            position=(0.0, 0.0, 0.0),
+            polarization=source_polarization,
+            width=0.08,
+            source_time=mw.CW(frequency=1.0e9, amplitude=40.0),
+        )
+    )
+    return scene
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+@pytest.mark.parametrize(
+    ("pml_axis", "bloch_axes", "wavevector"),
+    [
+        ("y", ("x", "z"), (math.pi / 1.2, 0.0, math.pi / 2.4)),
+        ("x", ("y", "z"), (0.0, math.pi / 1.2, math.pi / 2.4)),
+    ],
+)
+def test_fdtd_mixed_bloch_cpml_single_pml_axis_runs(pml_axis, bloch_axes, wavevector):
+    # Generalized single-PML-axis / two-Bloch-axes mixed update (beyond the
+    # historical x/y-Bloch + z-PML grating layout).
+    scene = _mixed_bloch_pml_scene(pml_axis=pml_axis, bloch_wavevector=wavevector)
+    result = mw.Simulation.fdtd(
+        scene,
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=8),
+        absorber="cpml",
+        # Force the compressed slab psi layout so the region-narrowed correction
+        # kernels are exercised along the non-default absorbing axis.
+        cpml_config={"memory_mode": "slab"},
+        full_field_dft=True,
+    ).run()
+    assert result.solver._cpml_memory_mode == "slab"
+
+    solver = result.solver
+    assert solver.complex_fields_enabled is True
+    assert solver.uses_cpml is True
+    assert solver.has_bloch_axes == bloch_axes
+
+    ez = result.tensor("Ez")
+    assert bool(torch.isfinite(ez).all().item())
+
+    # The absorbing axis owns the two electric and two magnetic split-field CPML
+    # memory banks; they must fill (non-zero) and stay finite on both field halves.
+    e_comp = {"x": ("ey", "ez"), "y": ("ex", "ez"), "z": ("ex", "ey")}[pml_axis]
+    h_comp = {"x": ("hy", "hz"), "y": ("hx", "hz"), "z": ("hx", "hy")}[pml_axis]
+    memory = []
+    for comp in (*e_comp, *h_comp):
+        for suffix in ("", "_imag"):
+            memory.append(getattr(solver, f"psi_{comp}_{pml_axis}{suffix}"))
+    assert all(bool(torch.isfinite(tensor).all().item()) for tensor in memory)
+    assert any(torch.max(torch.abs(tensor)).item() > 0.0 for tensor in memory)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_fdtd_mixed_bloch_cpml_axis_permutation_parity():
+    # A y-PML scene (x/z Bloch) and an x-PML scene (y/z Bloch) related by the x<->y
+    # axis swap are reflections of the same physics, so |Ez| must agree after the
+    # transpose. Both run the general full-Bloch base + single-axis CPML stretch, so
+    # this pins the new y- and x-PML correction kernels against each other exactly.
+    wavevector = (math.pi / 1.5, 0.0, math.pi / 3.0)
+    scene_y = _mixed_bloch_pml_scene(pml_axis="y", bloch_wavevector=wavevector)
+    scene_x = _mixed_bloch_pml_scene(
+        pml_axis="x", bloch_wavevector=(0.0, math.pi / 1.5, math.pi / 3.0)
+    )
+    run = dict(
+        frequencies=[1.0e9],
+        run_time=mw.TimeConfig.auto(steady_cycles=4, transient_cycles=10),
+        absorber="cpml",
+        full_field_dft=True,
+    )
+    ez_y = mw.Simulation.fdtd(scene_y, **run).run().tensor("Ez")
+    ez_x = mw.Simulation.fdtd(scene_x, **run).run().tensor("Ez")
+
+    swapped = ez_y.transpose(0, 1)
+    scale = torch.max(swapped.abs())
+    assert float(scale) > 0.0
+    rel = torch.max((ez_x.abs() - swapped.abs()).abs()) / scale
+    assert float(rel) < 2e-2
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")

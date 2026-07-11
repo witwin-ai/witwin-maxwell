@@ -1152,6 +1152,114 @@ def _apply_electric_ey_cpml_z_correction(
             )
 
 
+def _apply_electric_ex_cpml_y_correction(
+    *,
+    Ex,
+    Hz,
+    ExCurl,
+    PsiExY,
+    InvKappaExY,
+    BExY,
+    CExY,
+    invDy,
+    offsetI,
+    offsetJ,
+    offsetK,
+    zLowBoundaryMode,
+    zHighBoundaryMode,
+    fullSizeZ,
+    fullSizeY,
+):
+    _require_cuda_tensors(Ex, Hz, ExCurl, PsiExY, InvKappaExY, BExY, CExY, invDy)
+    get_compiled_extension().apply_electric_ex_cpml_y_correction(
+                Ex, Hz, ExCurl, PsiExY, InvKappaExY, BExY, CExY, invDy,
+                int(offsetI), int(offsetJ), int(offsetK),
+                int(zLowBoundaryMode), int(zHighBoundaryMode),
+                int(fullSizeZ), int(fullSizeY),
+            )
+
+
+def _apply_electric_ez_cpml_y_correction(
+    *,
+    Ez,
+    Hx,
+    EzCurl,
+    PsiEzY,
+    InvKappaEzY,
+    BEzY,
+    CEzY,
+    invDy,
+    offsetI,
+    offsetJ,
+    offsetK,
+    xLowBoundaryMode,
+    xHighBoundaryMode,
+    fullSizeX,
+    fullSizeY,
+):
+    _require_cuda_tensors(Ez, Hx, EzCurl, PsiEzY, InvKappaEzY, BEzY, CEzY, invDy)
+    get_compiled_extension().apply_electric_ez_cpml_y_correction(
+                Ez, Hx, EzCurl, PsiEzY, InvKappaEzY, BEzY, CEzY, invDy,
+                int(offsetI), int(offsetJ), int(offsetK),
+                int(xLowBoundaryMode), int(xHighBoundaryMode),
+                int(fullSizeX), int(fullSizeY),
+            )
+
+
+def _apply_electric_ey_cpml_x_correction(
+    *,
+    Ey,
+    Hz,
+    EyCurl,
+    PsiEyX,
+    InvKappaEyX,
+    BEyX,
+    CEyX,
+    invDx,
+    offsetI,
+    offsetJ,
+    offsetK,
+    zLowBoundaryMode,
+    zHighBoundaryMode,
+    fullSizeZ,
+    fullSizeX,
+):
+    _require_cuda_tensors(Ey, Hz, EyCurl, PsiEyX, InvKappaEyX, BEyX, CEyX, invDx)
+    get_compiled_extension().apply_electric_ey_cpml_x_correction(
+                Ey, Hz, EyCurl, PsiEyX, InvKappaEyX, BEyX, CEyX, invDx,
+                int(offsetI), int(offsetJ), int(offsetK),
+                int(zLowBoundaryMode), int(zHighBoundaryMode),
+                int(fullSizeZ), int(fullSizeX),
+            )
+
+
+def _apply_electric_ez_cpml_x_correction(
+    *,
+    Ez,
+    Hy,
+    EzCurl,
+    PsiEzX,
+    InvKappaEzX,
+    BEzX,
+    CEzX,
+    invDx,
+    offsetI,
+    offsetJ,
+    offsetK,
+    yLowBoundaryMode,
+    yHighBoundaryMode,
+    fullSizeY,
+    fullSizeX,
+):
+    _require_cuda_tensors(Ez, Hy, EzCurl, PsiEzX, InvKappaEzX, BEzX, CEzX, invDx)
+    get_compiled_extension().apply_electric_ez_cpml_x_correction(
+                Ez, Hy, EzCurl, PsiEzX, InvKappaEzX, BEzX, CEzX, invDx,
+                int(offsetI), int(offsetJ), int(offsetK),
+                int(yLowBoundaryMode), int(yHighBoundaryMode),
+                int(fullSizeY), int(fullSizeX),
+            )
+
+
 def _electric_ex_cpml_compressed(
     *,
     Ex,
@@ -3209,6 +3317,10 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "updateElectricFieldEzCpmlModulatedCompressed3D": _electric_ez_cpml_modulated_compressed,
     "applyElectricFieldExCpmlZCorrection3D": _apply_electric_ex_cpml_z_correction,
     "applyElectricFieldEyCpmlZCorrection3D": _apply_electric_ey_cpml_z_correction,
+    "applyElectricFieldExCpmlYCorrection3D": _apply_electric_ex_cpml_y_correction,
+    "applyElectricFieldEzCpmlYCorrection3D": _apply_electric_ez_cpml_y_correction,
+    "applyElectricFieldEyCpmlXCorrection3D": _apply_electric_ey_cpml_x_correction,
+    "applyElectricFieldEzCpmlXCorrection3D": _apply_electric_ez_cpml_x_correction,
     "updateElectricFieldExBloch3D": _electric_ex_bloch,
     "updateElectricFieldEyBloch3D": _electric_ey_bloch,
     "updateElectricFieldExBlochYStandardZ3D": _electric_ex_bloch_y_standard_z,

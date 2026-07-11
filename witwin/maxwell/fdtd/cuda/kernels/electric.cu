@@ -1904,6 +1904,205 @@ __global__ void apply_electric_ey_cpml_z_correction_kernel(
   ey[region_lin] = ey[region_lin] + curl[region_lin] * correction;
 }
 
+// CPML psi + kappa correction along y (the PML axis) for the general
+// single-PML-axis Bloch+CPML electric update, where the two Bloch axes carry
+// the transverse phase in the base full-Bloch kernel. Ex: derivative of Hz
+// along y; tangent (skip) check is on the x/z Bloch axis that also touches Ex.
+// The region is narrowed along y (the psi memory axis); region-local
+// (x, ly, k) map to global (offset_i + x, offset_j + ly, offset_k + k).
+__global__ void apply_electric_ex_cpml_y_correction_kernel(
+    unsigned int sx,
+    unsigned int sy,
+    unsigned int sz,
+    unsigned int hz_ny,
+    unsigned int hz_nz,
+    const float* __restrict__ hz,
+    const float* __restrict__ curl,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ b_y,
+    const float* __restrict__ c_y,
+    const float* __restrict__ inv_dy,
+    int offset_i,
+    int offset_j,
+    int offset_k,
+    int z_low_mode,
+    int z_high_mode,
+    unsigned int full_size_z,
+    int local_y_start,
+    int local_y_stop,
+    float* __restrict__ psi_y,
+    float* __restrict__ ex) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int ly = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int x = blockIdx.z * blockDim.z + threadIdx.z;
+  if (x >= sx || ly >= sy || k >= sz) {
+    return;
+  }
+  if (static_cast<int>(ly) < local_y_start || static_cast<int>(ly) >= local_y_stop) {
+    return;
+  }
+  const unsigned int gz = static_cast<unsigned int>(offset_k) + k;
+  if (!cpml_correction_active(gz, full_size_z, z_low_mode, z_high_mode)) {
+    return;
+  }
+  const unsigned int gx = static_cast<unsigned int>(offset_i) + x;
+  const unsigned int gy = static_cast<unsigned int>(offset_j) + ly;
+  const long long region_lin = offset3d(x, ly, k, sy, sz);
+  const long long hz_cur = offset3d(gx, gy, gz, hz_ny, hz_nz);
+  const long long hz_prev = offset3d(gx, gy - 1, gz, hz_ny, hz_nz);
+  const float derivative = (hz[hz_cur] - hz[hz_prev]) * inv_dy[gy];
+  const float psi_new = b_y[gy] * psi_y[region_lin] + c_y[gy] * derivative;
+  psi_y[region_lin] = psi_new;
+  const float correction = derivative * (inv_kappa_y[gy] - 1.0f) + psi_new;
+  ex[region_lin] = ex[region_lin] + curl[region_lin] * correction;
+}
+
+// Ez: derivative of Hx along y (the PML axis); tangent check on x.
+__global__ void apply_electric_ez_cpml_y_correction_kernel(
+    unsigned int sx,
+    unsigned int sy,
+    unsigned int sz,
+    unsigned int hx_ny,
+    unsigned int hx_nz,
+    const float* __restrict__ hx,
+    const float* __restrict__ curl,
+    const float* __restrict__ inv_kappa_y,
+    const float* __restrict__ b_y,
+    const float* __restrict__ c_y,
+    const float* __restrict__ inv_dy,
+    int offset_i,
+    int offset_j,
+    int offset_k,
+    int x_low_mode,
+    int x_high_mode,
+    unsigned int full_size_x,
+    int local_y_start,
+    int local_y_stop,
+    float* __restrict__ psi_y,
+    float* __restrict__ ez) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int ly = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int x = blockIdx.z * blockDim.z + threadIdx.z;
+  if (x >= sx || ly >= sy || k >= sz) {
+    return;
+  }
+  if (static_cast<int>(ly) < local_y_start || static_cast<int>(ly) >= local_y_stop) {
+    return;
+  }
+  const unsigned int gx = static_cast<unsigned int>(offset_i) + x;
+  if (!cpml_correction_active(gx, full_size_x, x_low_mode, x_high_mode)) {
+    return;
+  }
+  const unsigned int gy = static_cast<unsigned int>(offset_j) + ly;
+  const unsigned int gz = static_cast<unsigned int>(offset_k) + k;
+  const long long region_lin = offset3d(x, ly, k, sy, sz);
+  const long long hx_cur = offset3d(gx, gy, gz, hx_ny, hx_nz);
+  const long long hx_prev = offset3d(gx, gy - 1, gz, hx_ny, hx_nz);
+  const float derivative = (hx[hx_cur] - hx[hx_prev]) * inv_dy[gy];
+  const float psi_new = b_y[gy] * psi_y[region_lin] + c_y[gy] * derivative;
+  psi_y[region_lin] = psi_new;
+  const float correction = derivative * (inv_kappa_y[gy] - 1.0f) + psi_new;
+  ez[region_lin] = ez[region_lin] - curl[region_lin] * correction;
+}
+
+// CPML correction along x (the PML axis). Region narrowed along x; region-local
+// (lx, y, k) map to global (offset_i + lx, offset_j + y, offset_k + k).
+// Ey: derivative of Hz along x; tangent check on z.
+__global__ void apply_electric_ey_cpml_x_correction_kernel(
+    unsigned int sx,
+    unsigned int sy,
+    unsigned int sz,
+    unsigned int hz_ny,
+    unsigned int hz_nz,
+    const float* __restrict__ hz,
+    const float* __restrict__ curl,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ b_x,
+    const float* __restrict__ c_x,
+    const float* __restrict__ inv_dx,
+    int offset_i,
+    int offset_j,
+    int offset_k,
+    int z_low_mode,
+    int z_high_mode,
+    unsigned int full_size_z,
+    int local_x_start,
+    int local_x_stop,
+    float* __restrict__ psi_x,
+    float* __restrict__ ey) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int lx = blockIdx.z * blockDim.z + threadIdx.z;
+  if (lx >= sx || y >= sy || k >= sz) {
+    return;
+  }
+  if (static_cast<int>(lx) < local_x_start || static_cast<int>(lx) >= local_x_stop) {
+    return;
+  }
+  const unsigned int gz = static_cast<unsigned int>(offset_k) + k;
+  if (!cpml_correction_active(gz, full_size_z, z_low_mode, z_high_mode)) {
+    return;
+  }
+  const unsigned int gx = static_cast<unsigned int>(offset_i) + lx;
+  const unsigned int gy = static_cast<unsigned int>(offset_j) + y;
+  const long long region_lin = offset3d(lx, y, k, sy, sz);
+  const long long hz_cur = offset3d(gx, gy, gz, hz_ny, hz_nz);
+  const long long hz_prev = offset3d(gx - 1, gy, gz, hz_ny, hz_nz);
+  const float derivative = (hz[hz_cur] - hz[hz_prev]) * inv_dx[gx];
+  const float psi_new = b_x[gx] * psi_x[region_lin] + c_x[gx] * derivative;
+  psi_x[region_lin] = psi_new;
+  const float correction = derivative * (inv_kappa_x[gx] - 1.0f) + psi_new;
+  ey[region_lin] = ey[region_lin] - curl[region_lin] * correction;
+}
+
+// Ez: derivative of Hy along x (the PML axis); tangent check on y.
+__global__ void apply_electric_ez_cpml_x_correction_kernel(
+    unsigned int sx,
+    unsigned int sy,
+    unsigned int sz,
+    unsigned int hy_ny,
+    unsigned int hy_nz,
+    const float* __restrict__ hy,
+    const float* __restrict__ curl,
+    const float* __restrict__ inv_kappa_x,
+    const float* __restrict__ b_x,
+    const float* __restrict__ c_x,
+    const float* __restrict__ inv_dx,
+    int offset_i,
+    int offset_j,
+    int offset_k,
+    int y_low_mode,
+    int y_high_mode,
+    unsigned int full_size_y,
+    int local_x_start,
+    int local_x_stop,
+    float* __restrict__ psi_x,
+    float* __restrict__ ez) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int lx = blockIdx.z * blockDim.z + threadIdx.z;
+  if (lx >= sx || y >= sy || k >= sz) {
+    return;
+  }
+  if (static_cast<int>(lx) < local_x_start || static_cast<int>(lx) >= local_x_stop) {
+    return;
+  }
+  const unsigned int gy = static_cast<unsigned int>(offset_j) + y;
+  if (!cpml_correction_active(gy, full_size_y, y_low_mode, y_high_mode)) {
+    return;
+  }
+  const unsigned int gx = static_cast<unsigned int>(offset_i) + lx;
+  const unsigned int gz = static_cast<unsigned int>(offset_k) + k;
+  const long long region_lin = offset3d(lx, y, k, sy, sz);
+  const long long hy_cur = offset3d(gx, gy, gz, hy_ny, hy_nz);
+  const long long hy_prev = offset3d(gx - 1, gy, gz, hy_ny, hy_nz);
+  const float derivative = (hy[hy_cur] - hy[hy_prev]) * inv_dx[gx];
+  const float psi_new = b_x[gx] * psi_x[region_lin] + c_x[gx] * derivative;
+  psi_x[region_lin] = psi_new;
+  const float correction = derivative * (inv_kappa_x[gx] - 1.0f) + psi_new;
+  ez[region_lin] = ez[region_lin] + curl[region_lin] * correction;
+}
+
 }  // namespace
 
 void update_electric_ex_standard_cuda(
@@ -3093,6 +3292,230 @@ void apply_electric_ey_cpml_z_correction_cuda(
       local_z_stop,
       psi_z.mutable_data_ptr<float>(),
       ey.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void apply_electric_ex_cpml_y_correction_cuda(
+    torch::stable::Tensor ex,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& curl,
+    torch::stable::Tensor psi_y,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_dy,
+    int64_t offset_i,
+    int64_t offset_j,
+    int64_t offset_k,
+    int64_t z_low_mode,
+    int64_t z_high_mode,
+    int64_t full_size_z,
+    int64_t full_size_y) {
+  const auto sizes = ex.sizes();
+  const int sx = static_cast<int>(sizes[0]);
+  const int sy = static_cast<int>(sizes[1]);
+  const int sz = static_cast<int>(sizes[2]);
+  const int start_candidate = 1 - static_cast<int>(offset_j);
+  const int local_y_start = start_candidate > 0 ? start_candidate : 0;
+  const int stop_candidate = static_cast<int>(full_size_y) - 1 - static_cast<int>(offset_j);
+  const int local_y_stop = sy < stop_candidate ? sy : stop_candidate;
+  if (local_y_stop <= local_y_start) {
+    return;
+  }
+  check_vector_input(inv_dy, full_size_y, "inv_dy");
+  check_same_cuda_device(ex, inv_dy, "inv_dy");
+  torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
+  const dim3 block = field_block3d();
+  apply_electric_ex_cpml_y_correction_kernel<<<field_grid3d(sx, sy, sz, block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sx),
+      static_cast<unsigned int>(sy),
+      static_cast<unsigned int>(sz),
+      static_cast<unsigned int>(hz.size(1)),
+      static_cast<unsigned int>(hz.size(2)),
+      hz.mutable_data_ptr<float>(),
+      curl.mutable_data_ptr<float>(),
+      inv_kappa_y.mutable_data_ptr<float>(),
+      b_y.mutable_data_ptr<float>(),
+      c_y.mutable_data_ptr<float>(),
+      inv_dy.mutable_data_ptr<float>(),
+      static_cast<int>(offset_i),
+      static_cast<int>(offset_j),
+      static_cast<int>(offset_k),
+      static_cast<int>(z_low_mode),
+      static_cast<int>(z_high_mode),
+      static_cast<unsigned int>(full_size_z),
+      local_y_start,
+      local_y_stop,
+      psi_y.mutable_data_ptr<float>(),
+      ex.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void apply_electric_ez_cpml_y_correction_cuda(
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& curl,
+    torch::stable::Tensor psi_y,
+    const torch::stable::Tensor& inv_kappa_y,
+    const torch::stable::Tensor& b_y,
+    const torch::stable::Tensor& c_y,
+    const torch::stable::Tensor& inv_dy,
+    int64_t offset_i,
+    int64_t offset_j,
+    int64_t offset_k,
+    int64_t x_low_mode,
+    int64_t x_high_mode,
+    int64_t full_size_x,
+    int64_t full_size_y) {
+  const auto sizes = ez.sizes();
+  const int sx = static_cast<int>(sizes[0]);
+  const int sy = static_cast<int>(sizes[1]);
+  const int sz = static_cast<int>(sizes[2]);
+  const int start_candidate = 1 - static_cast<int>(offset_j);
+  const int local_y_start = start_candidate > 0 ? start_candidate : 0;
+  const int stop_candidate = static_cast<int>(full_size_y) - 1 - static_cast<int>(offset_j);
+  const int local_y_stop = sy < stop_candidate ? sy : stop_candidate;
+  if (local_y_stop <= local_y_start) {
+    return;
+  }
+  check_vector_input(inv_dy, full_size_y, "inv_dy");
+  check_same_cuda_device(ez, inv_dy, "inv_dy");
+  torch::stable::accelerator::DeviceGuard guard(ez.get_device_index());
+  const dim3 block = field_block3d();
+  apply_electric_ez_cpml_y_correction_kernel<<<field_grid3d(sx, sy, sz, block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sx),
+      static_cast<unsigned int>(sy),
+      static_cast<unsigned int>(sz),
+      static_cast<unsigned int>(hx.size(1)),
+      static_cast<unsigned int>(hx.size(2)),
+      hx.mutable_data_ptr<float>(),
+      curl.mutable_data_ptr<float>(),
+      inv_kappa_y.mutable_data_ptr<float>(),
+      b_y.mutable_data_ptr<float>(),
+      c_y.mutable_data_ptr<float>(),
+      inv_dy.mutable_data_ptr<float>(),
+      static_cast<int>(offset_i),
+      static_cast<int>(offset_j),
+      static_cast<int>(offset_k),
+      static_cast<int>(x_low_mode),
+      static_cast<int>(x_high_mode),
+      static_cast<unsigned int>(full_size_x),
+      local_y_start,
+      local_y_stop,
+      psi_y.mutable_data_ptr<float>(),
+      ez.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void apply_electric_ey_cpml_x_correction_cuda(
+    torch::stable::Tensor ey,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& curl,
+    torch::stable::Tensor psi_x,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_dx,
+    int64_t offset_i,
+    int64_t offset_j,
+    int64_t offset_k,
+    int64_t z_low_mode,
+    int64_t z_high_mode,
+    int64_t full_size_z,
+    int64_t full_size_x) {
+  const auto sizes = ey.sizes();
+  const int sx = static_cast<int>(sizes[0]);
+  const int sy = static_cast<int>(sizes[1]);
+  const int sz = static_cast<int>(sizes[2]);
+  const int start_candidate = 1 - static_cast<int>(offset_i);
+  const int local_x_start = start_candidate > 0 ? start_candidate : 0;
+  const int stop_candidate = static_cast<int>(full_size_x) - 1 - static_cast<int>(offset_i);
+  const int local_x_stop = sx < stop_candidate ? sx : stop_candidate;
+  if (local_x_stop <= local_x_start) {
+    return;
+  }
+  check_vector_input(inv_dx, full_size_x, "inv_dx");
+  check_same_cuda_device(ey, inv_dx, "inv_dx");
+  torch::stable::accelerator::DeviceGuard guard(ey.get_device_index());
+  const dim3 block = field_block3d();
+  apply_electric_ey_cpml_x_correction_kernel<<<field_grid3d(sx, sy, sz, block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sx),
+      static_cast<unsigned int>(sy),
+      static_cast<unsigned int>(sz),
+      static_cast<unsigned int>(hz.size(1)),
+      static_cast<unsigned int>(hz.size(2)),
+      hz.mutable_data_ptr<float>(),
+      curl.mutable_data_ptr<float>(),
+      inv_kappa_x.mutable_data_ptr<float>(),
+      b_x.mutable_data_ptr<float>(),
+      c_x.mutable_data_ptr<float>(),
+      inv_dx.mutable_data_ptr<float>(),
+      static_cast<int>(offset_i),
+      static_cast<int>(offset_j),
+      static_cast<int>(offset_k),
+      static_cast<int>(z_low_mode),
+      static_cast<int>(z_high_mode),
+      static_cast<unsigned int>(full_size_z),
+      local_x_start,
+      local_x_stop,
+      psi_x.mutable_data_ptr<float>(),
+      ey.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void apply_electric_ez_cpml_x_correction_cuda(
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& curl,
+    torch::stable::Tensor psi_x,
+    const torch::stable::Tensor& inv_kappa_x,
+    const torch::stable::Tensor& b_x,
+    const torch::stable::Tensor& c_x,
+    const torch::stable::Tensor& inv_dx,
+    int64_t offset_i,
+    int64_t offset_j,
+    int64_t offset_k,
+    int64_t y_low_mode,
+    int64_t y_high_mode,
+    int64_t full_size_y,
+    int64_t full_size_x) {
+  const auto sizes = ez.sizes();
+  const int sx = static_cast<int>(sizes[0]);
+  const int sy = static_cast<int>(sizes[1]);
+  const int sz = static_cast<int>(sizes[2]);
+  const int start_candidate = 1 - static_cast<int>(offset_i);
+  const int local_x_start = start_candidate > 0 ? start_candidate : 0;
+  const int stop_candidate = static_cast<int>(full_size_x) - 1 - static_cast<int>(offset_i);
+  const int local_x_stop = sx < stop_candidate ? sx : stop_candidate;
+  if (local_x_stop <= local_x_start) {
+    return;
+  }
+  check_vector_input(inv_dx, full_size_x, "inv_dx");
+  check_same_cuda_device(ez, inv_dx, "inv_dx");
+  torch::stable::accelerator::DeviceGuard guard(ez.get_device_index());
+  const dim3 block = field_block3d();
+  apply_electric_ez_cpml_x_correction_kernel<<<field_grid3d(sx, sy, sz, block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sx),
+      static_cast<unsigned int>(sy),
+      static_cast<unsigned int>(sz),
+      static_cast<unsigned int>(hy.size(1)),
+      static_cast<unsigned int>(hy.size(2)),
+      hy.mutable_data_ptr<float>(),
+      curl.mutable_data_ptr<float>(),
+      inv_kappa_x.mutable_data_ptr<float>(),
+      b_x.mutable_data_ptr<float>(),
+      c_x.mutable_data_ptr<float>(),
+      inv_dx.mutable_data_ptr<float>(),
+      static_cast<int>(offset_i),
+      static_cast<int>(offset_j),
+      static_cast<int>(offset_k),
+      static_cast<int>(y_low_mode),
+      static_cast<int>(y_high_mode),
+      static_cast<unsigned int>(full_size_y),
+      local_x_start,
+      local_x_stop,
+      psi_x.mutable_data_ptr<float>(),
+      ez.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 

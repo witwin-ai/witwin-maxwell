@@ -1153,24 +1153,46 @@ def update_electric_fields_bloch_xy_standard_z(solver):
     ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
 
 
+def _bloch_cpml_pml_axis(solver):
+    """Return the single PML axis (``"x"``/``"y"``/``"z"``) of a mixed Bloch+CPML
+    update whose faces are exactly one axis of paired PML and two axes of paired
+    Bloch, or ``None`` for any other face configuration.
+
+    The complex split-field Bloch update carries the transverse wrap phase on the
+    two periodic axes and runs the recursive-convolution CPML stretch on the one
+    absorbing axis; that decomposition exists only for the three single-PML-axis
+    permutations."""
+    axes = ("x", "y", "z")
+    codes = {
+        axis: (
+            int(getattr(solver, f"boundary_{axis}_low_code")),
+            int(getattr(solver, f"boundary_{axis}_high_code")),
+        )
+        for axis in axes
+    }
+    pml_axes = [axis for axis in axes if codes[axis] == (BOUNDARY_PML, BOUNDARY_PML)]
+    bloch_axes = [axis for axis in axes if codes[axis] == (BOUNDARY_BLOCH, BOUNDARY_BLOCH)]
+    if len(pml_axes) == 1 and len(bloch_axes) == 2:
+        return pml_axes[0]
+    return None
+
+
 def _validate_bloch_cpml_update_layout(solver):
-    if tuple(getattr(solver, "has_bloch_axes", ())) != ("x", "y"):
-        raise NotImplementedError("Mixed Bloch/CPML FDTD updates currently support x/y Bloch with z PML only.")
-    if (
-        solver.boundary_x_low_code != BOUNDARY_BLOCH
-        or solver.boundary_x_high_code != BOUNDARY_BLOCH
-        or solver.boundary_y_low_code != BOUNDARY_BLOCH
-        or solver.boundary_y_high_code != BOUNDARY_BLOCH
-        or solver.boundary_z_low_code != BOUNDARY_PML
-        or solver.boundary_z_high_code != BOUNDARY_PML
-    ):
-        raise NotImplementedError("Mixed Bloch/CPML FDTD updates currently support paired x/y Bloch faces and z PML faces only.")
+    pml_axis = _bloch_cpml_pml_axis(solver)
+    if pml_axis is None:
+        raise NotImplementedError(
+            "Mixed Bloch/CPML FDTD updates require exactly one PML axis (both faces PML) and two "
+            "Bloch axes (both faces Bloch). The complex split-field Bloch update carries the "
+            "transverse wrap phase on the two periodic axes while the single absorbing axis runs the "
+            "recursive-convolution CPML stretch, so a face layout that mixes Bloch and PML on one axis "
+            "or leaves more than one absorbing axis is not expressible on that split."
+        )
+    return pml_axis
 
 
-def _iter_cpml_field_regions(solver, field, curl, attr_name):
+def _iter_cpml_field_regions(solver, field, curl, attr_name, field_key):
     layout = getattr(solver, "_cpml_memory_layouts", {}).get(attr_name)
     if layout is None:
-        field_key = "Ex" if attr_name.startswith("psi_ex_z") else "Ey"
         yield {
             "field": field,
             "curl": curl,
@@ -1196,7 +1218,7 @@ def _iter_cpml_field_regions(solver, field, curl, attr_name):
 def _apply_electric_z_cpml_corrections(solver, ex, ey, hx, hy, *, imag=False):
     psi_ex_z_attr = _cpml_memory_attr("psi_ex_z", imag=imag)
     psi_ey_z_attr = _cpml_memory_attr("psi_ey_z", imag=imag)
-    for region in _iter_cpml_field_regions(solver, ex, solver.cex_curl, psi_ex_z_attr):
+    for region in _iter_cpml_field_regions(solver, ex, solver.cex_curl, psi_ex_z_attr, "Ex"):
         offset_i, offset_j, offset_k = region["offsets"]
         solver.fdtd_module.applyElectricFieldExCpmlZCorrection3D(
             Ex=region["field"],
@@ -1216,7 +1238,7 @@ def _apply_electric_z_cpml_corrections(solver, ex, ey, hx, hy, *, imag=False):
             fullSizeZ=solver.Ex.shape[2],
         ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
 
-    for region in _iter_cpml_field_regions(solver, ey, solver.cey_curl, psi_ey_z_attr):
+    for region in _iter_cpml_field_regions(solver, ey, solver.cey_curl, psi_ey_z_attr, "Ey"):
         offset_i, offset_j, offset_k = region["offsets"]
         solver.fdtd_module.applyElectricFieldEyCpmlZCorrection3D(
             Ey=region["field"],
@@ -1237,18 +1259,130 @@ def _apply_electric_z_cpml_corrections(solver, ex, ey, hx, hy, *, imag=False):
         ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
 
 
+def _apply_electric_y_cpml_corrections(solver, ex, ez, hx, hz, *, imag=False):
+    # PML axis y: Ex takes the recursive-convolution stretch on its d(Hz)/dy term
+    # (tangent Bloch axis z), Ez on its d(Hx)/dy term (tangent Bloch axis x). The
+    # base full-Bloch update already applied the un-stretched derivatives.
+    psi_ex_y_attr = _cpml_memory_attr("psi_ex_y", imag=imag)
+    psi_ez_y_attr = _cpml_memory_attr("psi_ez_y", imag=imag)
+    for region in _iter_cpml_field_regions(solver, ex, solver.cex_curl, psi_ex_y_attr, "Ex"):
+        offset_i, offset_j, offset_k = region["offsets"]
+        solver.fdtd_module.applyElectricFieldExCpmlYCorrection3D(
+            Ex=region["field"],
+            Hz=hz,
+            ExCurl=region["curl"],
+            PsiExY=region["psi"],
+            InvKappaExY=solver.cpml_inv_kappa_e_y,
+            BExY=solver.cpml_b_e_y,
+            CExY=solver.cpml_c_e_y,
+            invDy=solver.inv_dy_e,
+            offsetI=offset_i,
+            offsetJ=offset_j,
+            offsetK=offset_k,
+            zLowBoundaryMode=solver.boundary_z_low_code,
+            zHighBoundaryMode=solver.boundary_z_high_code,
+            fullSizeZ=solver.Ex.shape[2],
+            fullSizeY=solver.Ex.shape[1],
+        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
+
+    for region in _iter_cpml_field_regions(solver, ez, solver.cez_curl, psi_ez_y_attr, "Ez"):
+        offset_i, offset_j, offset_k = region["offsets"]
+        solver.fdtd_module.applyElectricFieldEzCpmlYCorrection3D(
+            Ez=region["field"],
+            Hx=hx,
+            EzCurl=region["curl"],
+            PsiEzY=region["psi"],
+            InvKappaEzY=solver.cpml_inv_kappa_e_y,
+            BEzY=solver.cpml_b_e_y,
+            CEzY=solver.cpml_c_e_y,
+            invDy=solver.inv_dy_e,
+            offsetI=offset_i,
+            offsetJ=offset_j,
+            offsetK=offset_k,
+            xLowBoundaryMode=solver.boundary_x_low_code,
+            xHighBoundaryMode=solver.boundary_x_high_code,
+            fullSizeX=solver.Ez.shape[0],
+            fullSizeY=solver.Ez.shape[1],
+        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
+
+
+def _apply_electric_x_cpml_corrections(solver, ey, ez, hy, hz, *, imag=False):
+    # PML axis x: Ey takes the stretch on its d(Hz)/dx term (tangent Bloch axis z),
+    # Ez on its d(Hy)/dx term (tangent Bloch axis y).
+    psi_ey_x_attr = _cpml_memory_attr("psi_ey_x", imag=imag)
+    psi_ez_x_attr = _cpml_memory_attr("psi_ez_x", imag=imag)
+    for region in _iter_cpml_field_regions(solver, ey, solver.cey_curl, psi_ey_x_attr, "Ey"):
+        offset_i, offset_j, offset_k = region["offsets"]
+        solver.fdtd_module.applyElectricFieldEyCpmlXCorrection3D(
+            Ey=region["field"],
+            Hz=hz,
+            EyCurl=region["curl"],
+            PsiEyX=region["psi"],
+            InvKappaEyX=solver.cpml_inv_kappa_e_x,
+            BEyX=solver.cpml_b_e_x,
+            CEyX=solver.cpml_c_e_x,
+            invDx=solver.inv_dx_e,
+            offsetI=offset_i,
+            offsetJ=offset_j,
+            offsetK=offset_k,
+            zLowBoundaryMode=solver.boundary_z_low_code,
+            zHighBoundaryMode=solver.boundary_z_high_code,
+            fullSizeZ=solver.Ey.shape[2],
+            fullSizeX=solver.Ey.shape[0],
+        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
+
+    for region in _iter_cpml_field_regions(solver, ez, solver.cez_curl, psi_ez_x_attr, "Ez"):
+        offset_i, offset_j, offset_k = region["offsets"]
+        solver.fdtd_module.applyElectricFieldEzCpmlXCorrection3D(
+            Ez=region["field"],
+            Hy=hy,
+            EzCurl=region["curl"],
+            PsiEzX=region["psi"],
+            InvKappaEzX=solver.cpml_inv_kappa_e_x,
+            BEzX=solver.cpml_b_e_x,
+            CEzX=solver.cpml_c_e_x,
+            invDx=solver.inv_dx_e,
+            offsetI=offset_i,
+            offsetJ=offset_j,
+            offsetK=offset_k,
+            yLowBoundaryMode=solver.boundary_y_low_code,
+            yHighBoundaryMode=solver.boundary_y_high_code,
+            fullSizeY=solver.Ez.shape[1],
+            fullSizeX=solver.Ez.shape[0],
+        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
+
+
 def update_electric_fields_bloch_cpml(solver):
-    _validate_bloch_cpml_update_layout(solver)
-    update_electric_fields_bloch_xy_standard_z(solver)
-    _apply_electric_z_cpml_corrections(solver, solver.Ex, solver.Ey, solver.Hx, solver.Hy, imag=False)
-    _apply_electric_z_cpml_corrections(
-        solver,
-        solver.Ex_imag,
-        solver.Ey_imag,
-        solver.Hx_imag,
-        solver.Hy_imag,
-        imag=True,
-    )
+    pml_axis = _validate_bloch_cpml_update_layout(solver)
+    if pml_axis == "z":
+        # Grating-style x/y Bloch + z PML: standard boundary treatment on z keeps
+        # the outer plane exactly zero (mirrored by the adjoint replay).
+        update_electric_fields_bloch_xy_standard_z(solver)
+        _apply_electric_z_cpml_corrections(solver, solver.Ex, solver.Ey, solver.Hx, solver.Hy, imag=False)
+        _apply_electric_z_cpml_corrections(
+            solver,
+            solver.Ex_imag,
+            solver.Ey_imag,
+            solver.Hx_imag,
+            solver.Hy_imag,
+            imag=True,
+        )
+        return
+    # General single-PML-axis permutation (x or y): the base full-Bloch update
+    # carries the true wrap phase on both periodic axes and the natural unit phase
+    # on the absorbing axis, then the recursive-convolution stretch is folded in
+    # along that axis for the two components with an absorbing-axis derivative.
+    update_electric_fields_bloch(solver)
+    if pml_axis == "y":
+        _apply_electric_y_cpml_corrections(solver, solver.Ex, solver.Ez, solver.Hx, solver.Hz, imag=False)
+        _apply_electric_y_cpml_corrections(
+            solver, solver.Ex_imag, solver.Ez_imag, solver.Hx_imag, solver.Hz_imag, imag=True
+        )
+    else:
+        _apply_electric_x_cpml_corrections(solver, solver.Ey, solver.Ez, solver.Hy, solver.Hz, imag=False)
+        _apply_electric_x_cpml_corrections(
+            solver, solver.Ey_imag, solver.Ez_imag, solver.Hy_imag, solver.Hz_imag, imag=True
+        )
 
 
 def clamp_field_face(solver, field, axis, side):
