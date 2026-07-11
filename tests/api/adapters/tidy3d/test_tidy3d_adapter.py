@@ -68,6 +68,10 @@ def _make_mock_tidy3d():
     class NonlinearSpec(_Recorder): pass
     class NonlinearSusceptibility(_Recorder): pass
     class TwoPhotonAbsorption(_Recorder): pass
+    class ModulationSpec(_Recorder): pass
+    class SpaceTimeModulation(_Recorder): pass
+    class SpaceModulation(_Recorder): pass
+    class ContinuousWaveTimeModulation(_Recorder): pass
     class Box(_Recorder): pass
     class Sphere(_Recorder): pass
     class Cylinder(_Recorder): pass
@@ -111,6 +115,10 @@ def _make_mock_tidy3d():
     td.NonlinearSpec = NonlinearSpec
     td.NonlinearSusceptibility = NonlinearSusceptibility
     td.TwoPhotonAbsorption = TwoPhotonAbsorption
+    td.ModulationSpec = ModulationSpec
+    td.SpaceTimeModulation = SpaceTimeModulation
+    td.SpaceModulation = SpaceModulation
+    td.ContinuousWaveTimeModulation = ContinuousWaveTimeModulation
     td.Box = Box
     td.Sphere = Sphere
     td.Cylinder = Cylinder
@@ -748,6 +756,170 @@ class TestMediumConversion:
 
             td_structure = _convert_structure(structure, real_td, 1e6)
             assert isinstance(td_structure.medium, real_td.PoleResidue)
+
+
+class TestModulationConversion:
+    def test_scalar_modulation_exports_medium_with_modulation_spec(self, inject_mock_tidy3d):
+        # A time-modulated non-dispersive Material exports as a Medium carrying a
+        # ModulationSpec on its permittivity (eps_inf); the base permittivity stays eps_r.
+        td = inject_mock_tidy3d
+        medium = mw.Material(eps_r=4.0, modulation=mw.ModulationSpec(frequency=2e13, amplitude=0.3, phase=0.7))
+        result = _convert_material(medium, td)
+        assert isinstance(result, td.Medium)
+        assert result.permittivity == pytest.approx(4.0)
+        spec = result.modulation_spec
+        assert isinstance(spec, td.ModulationSpec)
+        stm = spec.permittivity
+        assert isinstance(stm, td.SpaceTimeModulation)
+        # Time part carries the modulation frequency; magnitude/phase live in space.
+        assert stm.time_modulation.freq0 == pytest.approx(2e13)
+        assert stm.time_modulation.amplitude == pytest.approx(1.0)
+        assert stm.time_modulation.phase == pytest.approx(0.0)
+
+    def test_modulation_amplitude_is_absolute_permittivity_deviation(self, inject_mock_tidy3d):
+        # Tidy3D's SpaceModulation amplitude is an ABSOLUTE eps deviation, so the
+        # dimensionless maxwell depth must be multiplied by eps_static (= eps_r here):
+        # depth 0.2 on eps_r 9 -> absolute amplitude 1.8.
+        td = inject_mock_tidy3d
+        medium = mw.Material(eps_r=9.0, modulation=mw.ModulationSpec(frequency=1e13, amplitude=0.2, phase=0.0))
+        space = _convert_material(medium, td).modulation_spec.permittivity.space_modulation
+        assert isinstance(space, td.SpaceModulation)
+        assert space.amplitude == pytest.approx(9.0 * 0.2)
+
+    def test_modulation_phase_sign_is_flipped(self, inject_mock_tidy3d):
+        # Tidy3D's e^{-i w t} time factor is the conjugate of maxwell's +phase
+        # convention, so the exported space phase must be -phase to reproduce
+        # cos(2*pi*f*t + phase).
+        td = inject_mock_tidy3d
+        medium = mw.Material(eps_r=2.0, modulation=mw.ModulationSpec(frequency=1e13, amplitude=0.3, phase=0.9))
+        space = _convert_material(medium, td).modulation_spec.permittivity.space_modulation
+        assert space.phase == pytest.approx(-0.9)
+
+    def test_modulated_dispersive_is_rejected_as_no_equivalent(self, inject_mock_tidy3d):
+        # Tidy3D modulates only the non-dispersive eps_inf; maxwell folds the same
+        # per-step factor through the ADE polarization current, so a modulated +
+        # dispersive material has no equivalent and must raise (not silently drop the
+        # pole modulation).
+        td = inject_mock_tidy3d
+        medium = mw.Material(
+            eps_r=2.0,
+            lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=5e14, gamma=1e13),),
+            modulation=mw.ModulationSpec(frequency=1e13, amplitude=0.2),
+        )
+        with pytest.raises(NotImplementedError, match="ModulationSpec modulates only"):
+            _convert_material(medium, td)
+
+    def test_modulated_nonlinear_is_rejected_as_no_equivalent(self, inject_mock_tidy3d):
+        # Tidy3D's nonlinear polarization is unmodulated, whereas maxwell folds the
+        # modulation factor through the instantaneous Kerr coefficient, so the two
+        # models disagree and a modulated + Kerr material must raise.
+        td = inject_mock_tidy3d
+        medium = mw.Material(eps_r=4.0, kerr_chi3=1.0e-20, modulation=mw.ModulationSpec(frequency=1e13, amplitude=0.2))
+        with pytest.raises(NotImplementedError, match="ModulationSpec modulates only"):
+            _convert_material(medium, td)
+
+    def test_spatially_varying_modulation_is_rejected(self, inject_mock_tidy3d):
+        # A 3D-tensor (spatially varying) amplitude/phase profile is defined relative
+        # to the owning structure's Box, which the material-level export cannot resolve
+        # into Tidy3D absolute coordinates, so it must raise.
+        import torch
+
+        td = inject_mock_tidy3d
+        amp = torch.full((4, 4, 4), 0.3)
+        medium = mw.Material(eps_r=3.0, modulation=mw.ModulationSpec(frequency=1e13, amplitude=amp))
+        with pytest.raises(NotImplementedError, match="spatially-varying modulation"):
+            _convert_material(medium, td)
+
+    def test_modulated_structure_scene_exports_medium(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        scene = (
+            mw.Scene(
+                domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.pml(num_layers=10),
+                device="cpu",
+            )
+            .add_structure(
+                mw.Structure(
+                    mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
+                    mw.Material(eps_r=4.0, modulation=mw.ModulationSpec(frequency=2e13, amplitude=0.3)),
+                )
+            )
+            .add_source(mw.PointDipole(position=(0, 0, 0.4), polarization="Ex", source_time=mw.CW(frequency=1e13)))
+        )
+        sim = scene.to_tidy3d(frequencies=1e13)
+        assert len(sim.structures) == 1
+        medium = sim.structures[0].medium
+        assert isinstance(medium, td.Medium)
+        assert medium.modulation_spec is not None
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the modulation-convention check",
+    )
+    def test_modulation_reproduces_maxwell_delta_eps_real_tidy3d(self):
+        # Physical-convention check: the exported ModulationSpec must reproduce
+        # maxwell's absolute permittivity deviation
+        # delta_eps(t) = eps_static * depth * cos(2*pi*f*t + phase) at every time,
+        # including the phase sign flip. The exported medium must also satisfy Tidy3D's
+        # own non-negative-permittivity modulation validator (it builds without error).
+        import cmath
+
+        eps_static, depth, phase, freq = 4.0, 0.3, 0.7, 2.0e13
+        omega = 2.0 * math.pi * freq
+        with _real_tidy3d() as real_td:
+            material = mw.Material(
+                eps_r=eps_static,
+                modulation=mw.ModulationSpec(frequency=freq, amplitude=depth, phase=phase),
+            )
+            exported = _convert_material(material, real_td)
+            assert isinstance(exported, real_td.Medium)
+            assert exported.permittivity == pytest.approx(eps_static)
+            stm = exported.modulation_spec.permittivity
+            assert stm.time_modulation.freq0 == pytest.approx(freq)
+            amp_space = complex(stm.space_modulation.amplitude) * cmath.exp(
+                1j * float(stm.space_modulation.phase)
+            )
+            for t in (0.0, 1.0e-15, 7.3e-15, 2.1e-14):
+                delta_td = (complex(stm.time_modulation.amp_time(t)) * amp_space).real
+                delta_mx = eps_static * depth * math.cos(omega * t + phase)
+                assert delta_td == pytest.approx(delta_mx, rel=1e-6, abs=1e-9)
+            # The minimum modulated permittivity stays strictly positive (depth < 0.5),
+            # which is exactly what let the real Medium validator accept the export.
+            assert eps_static - eps_static * depth > 0.0
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the modulation-sign control check",
+    )
+    def test_modulation_phase_sign_flip_is_load_bearing_real_tidy3d(self):
+        # Control: dropping the phase sign flip (exporting +phase instead of -phase)
+        # would reproduce cos(2*pi*f*t - phase), which differs from maxwell's
+        # cos(2*pi*f*t + phase) at t=0 for a nonzero phase. Confirm the exported value
+        # matches the correct convention and NOT the wrong-sign one.
+        import cmath
+
+        eps_static, depth, phase, freq = 3.0, 0.25, 1.1, 1.0e13
+        with _real_tidy3d() as real_td:
+            material = mw.Material(
+                eps_r=eps_static,
+                modulation=mw.ModulationSpec(frequency=freq, amplitude=depth, phase=phase),
+            )
+            stm = _convert_material(material, real_td).modulation_spec.permittivity
+            amp_space = complex(stm.space_modulation.amplitude) * cmath.exp(
+                1j * float(stm.space_modulation.phase)
+            )
+            delta_t0 = (complex(stm.time_modulation.amp_time(0.0)) * amp_space).real
+            correct = eps_static * depth * math.cos(phase)
+            wrong_sign = eps_static * depth * math.cos(-phase)  # identical at t=0 (cos even)
+            # At t=0 both signs coincide; use a quarter modulation period to separate them.
+            quarter = 0.25 / freq
+            delta_q = (complex(stm.time_modulation.amp_time(quarter)) * amp_space).real
+            correct_q = eps_static * depth * math.cos(2.0 * math.pi * freq * quarter + phase)
+            wrong_q = eps_static * depth * math.cos(2.0 * math.pi * freq * quarter - phase)
+            assert delta_t0 == pytest.approx(correct)
+            assert delta_q == pytest.approx(correct_q)
+            assert abs(delta_q - wrong_q) > 1e-3  # the wrong sign is genuinely different here
 
 
 class TestSheetAndMetalConversion:

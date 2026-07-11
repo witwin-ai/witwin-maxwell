@@ -359,6 +359,82 @@ def _nonlinear_spec(material, td, length_scale: float):
     return td.NonlinearSpec(models=models)
 
 
+def _modulated_medium(material, modulation, td, length_scale: float):
+    """Convert a time-modulated Material to a Tidy3D ``Medium`` with a ``ModulationSpec``.
+
+    maxwell's modulation makes the static permittivity harmonic,
+
+    ``eps(x, t) = eps_static(x) * (1 + amplitude(x) * cos(2*pi*f*t + phase(x)))``,
+
+    so the *absolute* permittivity deviation is
+    ``delta_eps(x, t) = eps_static * amplitude * cos(2*pi*f*t + phase)``.
+
+    Tidy3D adds a separable space-time modulation to the non-dispersive part
+    (eps_inf / conductivity) of a medium,
+
+    ``delta_eps(r, t) = Re[amp_time(t) * amp_space(r)]``, with
+    ``amp_time(t) = A_t * e^{i*phi_t - 2*pi*i*f*t}`` and
+    ``amp_space(r) = A_s(r) * e^{i*phi_s(r)}``.
+
+    Putting all magnitude/phase in the space part (``A_t = 1``, ``phi_t = 0``) gives
+    ``delta_eps = A_s * cos(2*pi*f*t - phi_s)``. Matching maxwell term-for-term:
+
+    * ``A_s = eps_static * amplitude`` (Tidy3D's amplitude is an *absolute* permittivity
+      deviation, not the dimensionless depth), and
+    * ``phi_s = -phase`` (the sign flips because Tidy3D's e^{-i*omega*t} time factor is
+      the conjugate of maxwell's ``+phase`` convention; cosine parity turns
+      ``cos(2*pi*f*t + phi_s)`` back into ``cos(2*pi*f*t + phase)``).
+
+    maxwell caps the modulation depth at ``< 0.5``, so ``A_s < 0.5*eps_static`` and the
+    modulated permittivity stays strictly positive, satisfying Tidy3D's own
+    non-negative-permittivity modulation validator.
+    """
+    # maxwell forbids a modulated Material from carrying anisotropy or a static
+    # electric conductivity at construction, so a modulated export is always an
+    # isotropic Medium whose only modulated quantity is eps_inf. Dispersion and the
+    # instantaneous nonlinear channels, however, are folded through the SAME per-step
+    # modulation factor as the eps_inf background in maxwell's runtime, whereas Tidy3D's
+    # ModulationSpec modulates ONLY the non-dispersive part and leaves the pole /
+    # nonlinear polarization currents unmodulated. The two models therefore disagree,
+    # so a modulated + dispersive / + nonlinear material has no equivalent Tidy3D medium.
+    if material.is_dispersive or material.is_nonlinear:
+        raise NotImplementedError(
+            "Tidy3D's ModulationSpec modulates only the non-dispersive permittivity "
+            "(eps_inf) and conductivity, but maxwell folds the same per-step modulation "
+            "factor through the dispersive polarization current and the instantaneous "
+            "Kerr/chi2/TPA coefficient, so a time-modulated Material that also carries "
+            "dispersion or a nonlinearity has no equivalent Tidy3D construct. Validate the "
+            "modulated dispersive/nonlinear cell against an FDTD analytic reference instead."
+        )
+
+    if not isinstance(modulation.amplitude, float) or not isinstance(modulation.phase, float):
+        raise NotImplementedError(
+            "Tidy3D represents a spatially-varying modulation profile as a SpaceModulation "
+            "carrying a SpatialDataArray on absolute simulation coordinates, but maxwell's "
+            "per-cell modulation amplitude/phase tensors are defined relative to the owning "
+            "structure's Box and are not available at material-conversion time. Export a "
+            "scalar-amplitude, scalar-phase ModulationSpec instead."
+        )
+
+    eps_static = float(material.eps_r)
+    space_modulation = td.SpaceModulation(
+        amplitude=eps_static * modulation.amplitude,
+        phase=-modulation.phase,
+    )
+    time_modulation = td.ContinuousWaveTimeModulation(
+        freq0=modulation.frequency,
+        amplitude=1.0,
+        phase=0.0,
+    )
+    modulation_spec = td.ModulationSpec(
+        permittivity=td.SpaceTimeModulation(
+            space_modulation=space_modulation,
+            time_modulation=time_modulation,
+        )
+    )
+    return td.Medium(permittivity=eps_static, modulation_spec=modulation_spec)
+
+
 def _sheet_surface_medium(medium, td, length_scale: float):
     """Build the Tidy3D surface-conductivity medium reproducing a ``Medium2D`` sheet.
 
@@ -488,8 +564,6 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
         )
     if getattr(material, "perturbation", None) is not None:
         raise NotImplementedError("Tidy3D export for PerturbationMedium is not implemented yet.")
-    if getattr(material, "modulation", None) is not None:
-        raise NotImplementedError("Tidy3D export for time-modulated Material is not implemented yet.")
     if material.is_magnetic_dispersive:
         raise NotImplementedError("Tidy3D export for magnetic dispersive Material is not implemented yet.")
     if not math.isclose(float(material.mu_r), 1.0, rel_tol=0.0, abs_tol=1.0e-12) or float(
@@ -499,6 +573,10 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
             "Tidy3D export currently assumes mu_r = 1 and no static magnetic conductivity "
             "(sigma_m = 0); magnetically-lossy media have no Tidy3D equivalent and are not implemented yet."
         )
+
+    modulation = getattr(material, "modulation", None)
+    if modulation is not None:
+        return _modulated_medium(material, modulation, td, length_scale)
 
     if material.is_anisotropic:
         return _anisotropic_medium(material, td, length_scale)
