@@ -64,7 +64,12 @@ still keyed by the substrings `Tidy3D export for magnetic dispersive Material` a
 | after P5.5 (stubs) | **71 (measured)** | Projected `≤ 45`; realized `71` (74 → 71). The four P5.5 stubs each landed a runtime path rather than a large guard sweep: `sigma_m` folded into the H update with no pre-existing raise to delete; the `Graphene` interband Lorentz sheet-pole fit deleted the `media.py` interband raise (media 8 → 7); the non-periodic TFSF slab forward runtime deleted one `stepping.py` raise (6 → 5) and one `tfsf_state.py` raise (3 → 2); and the `LossyMetalMedium` SIBC runtime replaced its descriptor-only raise with a single physics-worded SIBC-configuration guard (compiler unchanged at 6). Net −3. Every remaining forward-path guard message now states a physical or mathematical reason: the compiler Tensor3x3-`mu_r`/`sigma_e`/`sigma_m` guard and the SIBC guard were reworded off "not implemented yet" / "v1" in this phase, and the phrase gate (below) is now live. |
 | after P5.4 (Bloch broadband) | **66 (measured)** | Projected `≤ 50`; realized `66` (71 → 66). Pulsed (broadband) Bloch source injection deleted both `excitation/temporal.py` CW-only guards (2 → 0); the general grating TFSF slab runtime deleted one `stepping.py` raise (5 → 4) and one `tfsf_state.py` raise (2 → 1); the mixed Bloch/CPML single-PML-axis generalization deleted one `adjoint/core.py` raise (6 → 5). Net −5. The `excitation/` phrase-gate allowlist entry was removed: every remaining `excitation/` guard already states a physical reason (`currently supports only none, pml, pec, or pmc boundaries`, real-valued-eps mode caps, the Bloch 6-face split ill-posedness), none uses a deferral phrase. |
 | after P5.6 (parity) | **63 (measured)** | Projected `≤ 33`; realized `63` (66 → 63). The Tidy3D export commits (PEC→PECMedium, `sigma_e`+dispersive→PoleResidue, Kerr/TPA→NonlinearSpec, diagonal/full anisotropy, `Medium2D`/`Graphene`/`LossyMetalMedium`, modulation, uniform custom poles + `PerturbationMedium`, `Ellipsoid`/`PolySlab` geometry + source/monitor kinds, nonuniform grids) lifted `adapters/tidy3d.py` capability guards from 13 → 10. The plan's `tidy3d 13 → ≤ 4` (≤ 6 in the plan body) target was **not** reached: the 10 that remain are the 3 unknown-kind geometry/source/monitor fallbacks (`851`/`1121`/`1309`), 4 genuine "Tidy3D has no such construct" guards (full-tensor+dispersive, anisotropic-magnetic, `chi2`/SHG, modulated+dispersive/nonlinear), and 3 spatially-varying architectural limits (per-cell modulation / custom pole / `PerturbationMedium` grids are defined relative to the owning `Structure` `Box` and are not resolvable into Tidy3D absolute coordinates at material-conversion time). Every one states a physical/architectural reason and none uses a deferral phrase, so `adapters/tidy3d.py` was **retired from the phrase-gate allowlist** this phase. **FDFD static parity (Kerr / `Tensor3x3` / magnetic / in-domain PEC) and FDFD nonuniform grids are deferred by user decision (2026-07-11)**: no `fdfd/` guard was removed; the four `fdfd/solver.py` guards were reworded to honest user-deferral statements ("… is deferred (user decision 2026-07-11): … Use FDTD, which …") off the former "in v1" / "not implemented yet" wording, and `fdfd/` **stays** in the phrase-gate allowlist with a comment recording the deferral. Coverage instead of static parity: every public medium capability now has a verified validation path enforced by `tests/validation/benchmark/test_media_validation_coverage.py` and recorded in `benchmark/RESULTS.md` (§ Validation coverage). |
-| after P5.7–P5.9 | ≤ 25 | plan §5 global target |
+| after P5.9 (postprocess), merged first `da668a1` | **62 (measured)** | `postprocess/scattering_parameters.py` 1 → 0: broadband `incident_power="auto"` replaced its last (CW-only) `NotImplementedError` with actionable `ValueError`s (no running-DFT schedule on the Result / no matching solver DFT entry / zero weighted samples). Background-aware (homogeneous non-vacuum exterior) and curved (arbitrary-normal) closed-surface Huygens NF2FF added only `ValueError` input contracts, so `postprocess/stratton_chu.py` stays at 2 capability guards (the two surviving genuinely require a layered/heterogeneous-exterior Green's function). Net −1. |
+| after P5.8 (performance path), merged second `bc0c29b` | **62 (measured, no change)** | CUDA-graph capture was extended to dispersive (electric + magnetic ADE), Kerr/`chi2`/TPA, complex split-field Bloch (incl. mixed Bloch+CPML), and reference-provider TFSF plane-wave scenes purely by narrowing boolean/predicate declines (`dispersive_enabled`, `nonlinear_enabled`, `has_complex_fields`, `not tfsf_enabled`) inside `fdtd/runtime/stepping._make_field_update_runner` — none of which is a `NotImplementedError` raise — so the AST capability census does not move. The P5.8 deliverable is a **capture-coverage matrix** (`tests/fdtd/test_cuda_graph_capture_coverage.py`): it asserts `Result.stats()["cuda_graph_active"]` per scene class with every decline reason (interpolated-aux cross-warp atomics / host-waveform launch scalar / per-step host phase) checked live in the predicate source via `inspect.getsource`, plus per-class bit-exact parity tests and the perf harness `scripts/perf_cuda_graph_dispersive.py`. Net 0. |
+| after P5.7 (modal/port), merged last `c8867be` | **58 (measured)** | `fdtd/excitation/modes.py` 7 → 3 lands the entire P5.7 capability delta. Two dead differentiable-ModeSource node caps were deleted (the dense-scalar and full-vector torch node-cap guards, both proven unreachable), the full-vector complex-epsilon guard was deleted (a lossy plane now falls through to the scalar complex-symmetric solve exposing `effective_index_complex` / `beta_complex`), and the sparse LOBPCG request-count guard was reclassified `NotImplementedError` → `ValueError` (requesting a mode block larger than the aperture can resolve is an invalid request, not an unimplemented capability). The three surviving guards were reworded, not removed — periodic/Bloch transverse boundary, magnetic (`mu_r != 1`) scalar plane, and differentiable non-Hermitian lossy eigen-adjoint each now state a physical/mathematical reason. Diagonal-anisotropic apertures, bent ports (Heiblum-Harris conformal map via `bend_radius`/`bend_axis`), broadband `GaussianPulse`/`Ricker` injection, and the ring-resonator S21 acceptance all landed as `ValueError` input contracts or tests, so they add no capability guard. Net −4. |
+| after P5.7–P5.9 | ≤ 25 | plan §5 global target (not reached; gap explained in the "P5 final state" note below) |
+
+The three branches were developed in parallel from the P5.6 base (`944835f`, capability 63) and merged into master in the order P5.9 → P5.8 → P5.7, taking the on-master capability count **63 → 62 → 62 → 58** (the sequential values in the three rows above, each re-measured on master at the merge commit). Their *branch-isolated* tips measured 63 (p59), 64 (p58), and 60 (p57) instead, because each branch forked before the P5.6 `tidy3d` magnetic-guard reword and therefore carries `adapters/tidy3d.py` = 11 rather than the master value 10; the portable, authoritative quantities are the per-phase on-master deltas above (−1, 0, −4), which compose exactly to 63 → 58.
 
 Every remaining guard's message must state a physical or mathematical reason,
 never "not implemented yet" / "not supported yet" / "in v1". As of P5.5 this is
@@ -223,3 +228,59 @@ the per-medium path table recorded in `benchmark/RESULTS.md` (§ Validation
 coverage). New P3-media Tidy3D benchmark scenarios registered in `SCENARIOS`:
 `debye_slab`, `sigma_e_drude_slab`, `anisotropic_slab`, `kerr_slab`,
 `modulated_slab`, `graphene_sheet` (under `benchmark/scenes/media/`).
+
+## Per-cluster capability-guard counts (after P5.7–P5.9 — final, merged master `c8867be`, total 58)
+
+```
+10  witwin/maxwell/adapters/tidy3d.py          4  witwin/maxwell/fdfd/solver.py
+ 7  witwin/maxwell/media.py                    4  witwin/maxwell/fdtd/runtime/stepping.py
+ 6  witwin/maxwell/compiler/materials.py       3  witwin/maxwell/fdtd/excitation/modes.py
+ 6  witwin/maxwell/fdtd/adjoint/bridge.py      2  witwin/maxwell/fdtd/excitation/injection.py
+ 6  witwin/maxwell/fdtd/runtime/materials.py   2  witwin/maxwell/postprocess/stratton_chu.py
+ 5  witwin/maxwell/fdtd/adjoint/core.py        1  simulation.py / fdfd/adjoint/bridge.py /
+                                                  fdtd/excitation/tfsf_state.py
+```
+
+Deltas from the after-P5.6 block: `fdtd/excitation/modes.py` 7 → 3 (P5.7) and
+`postprocess/scattering_parameters.py` 1 → 0 (P5.9, now absent from the list).
+Every other cluster is unchanged from P5.6; in particular `adapters/tidy3d.py`
+stays 10 (the P5.6 magnetic-guard reword is preserved through all three merges)
+and the FDFD-deferred clusters are untouched.
+
+## P5 final state
+
+Capability guards: **87 (P5.0 baseline) → 58 (measured on merged master
+`c8867be`)**, against the plan §5 global target of ≤ 25. The gap is honest — it is
+accounting, deliberate deferral, and genuine no-equivalents, not hidden or
+mis-labelled capability:
+
+- **Branch-condition lifting keeps one raise serving many narrowed branches.**
+  From P5.1 onward most capability was unlocked by narrowing the branch conditions
+  guarding a single `raise` and composing coefficient paths, rather than deleting
+  `raise` statements. One `NotImplementedError` in `fdtd/adjoint/*`,
+  `fdtd/runtime/materials.py`, `fdtd/runtime/stepping.py`, or `media.py` now covers
+  several narrowed sub-cases at once, so the AST raise-count (what this census
+  measures) lags the true differentiable/forward surface. That surface is measured
+  directly instead by `tests/materials/combinations/test_combination_matrix.py`,
+  `tests/gradients/`, and `tests/validation/benchmark/test_media_validation_coverage.py`.
+- **FDFD static parity, deferred by user decision (2026-07-11), accounts for 6:**
+  `fdfd/solver.py` = 4 (Kerr, full `Tensor3x3` ε, magnetic media/dispersion,
+  in-domain PEC), `fdfd/adjoint/bridge.py` = 1 (the FDFD-adjoint unsupported-medium
+  reject), and `simulation.py` = 1 (FDFD nonuniform grids). These were reworded to
+  explicit "deferred (user decision 2026-07-11) … use FDTD" statements and kept;
+  FDTD covers every one of these media, so coverage — not FDFD static parity — was
+  the closing criterion (`benchmark/RESULTS.md` § Validation coverage).
+- **`adapters/tidy3d.py` = 10 are genuine no-equivalents plus honest narrows:**
+  3 unknown-kind geometry/source/monitor fallbacks, 4 "Tidy3D has no such
+  construct" guards (full-tensor+dispersive, anisotropic-magnetic, `chi2`/SHG,
+  modulated+dispersive/nonlinear), and 3 spatially-varying architectural limits
+  (per-cell modulation / custom pole / `PerturbationMedium` box-relative grids not
+  resolvable into Tidy3D absolute coordinates at conversion time).
+- **Every remaining guard message states a physical/mathematical reason or an
+  honest deferral**, and this is enforced, not just conventional: the forward-path
+  phrase gate `test_no_deferral_phrase_in_public_forward_path` fails on any
+  "not implemented yet" / "not supported yet" / "in v1" wording outside the
+  narrowly allowlisted, phase-owned modules (`fdfd/` user-deferred, `postprocess/`,
+  `fdtd/adjoint/`). The `fdtd/excitation/` and `adapters/tidy3d.py` allowlist
+  entries were both retired in earlier phases, so those guards now state their
+  reason directly.

@@ -25,7 +25,19 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # and FDFD nonuniform grids are deferred by user decision (2026-07-11), so no
 # fdfd/ guard was removed; the fdfd/solver.py messages were reworded to honest
 # user-deferral statements instead.
-CAPABILITY_GUARD_BUDGET = 63
+# P5.7-P5.9 (final reconciliation, measured on merged master) re-measured this at
+# 58. P5.7 (modal/port maturity) took fdtd/excitation/modes.py 7 -> 3: two dead
+# differentiable node caps deleted, the full-vector complex-epsilon guard deleted
+# (complex planes fall through to the scalar complex solve), and the sparse
+# request-count guard reclassified NotImplementedError -> ValueError; the surviving
+# three (Bloch transverse boundary, magnetic mu_r scalar plane, differentiable
+# non-Hermitian lossy adjoint) are physics-worded. P5.9 (postprocess generality)
+# took postprocess/scattering_parameters.py 1 -> 0 (broadband incident_power="auto"
+# replaced its last NotImplementedError with actionable ValueErrors). P5.8
+# (CUDA-graph coverage) added and removed no NotImplementedError: its capture
+# coverage was lifted by narrowing boolean/predicate declines in
+# fdtd/runtime/stepping.py, not by deleting raise statements. Net 63 -> 58.
+CAPABILITY_GUARD_BUDGET = 58
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with the table in docs/dev/fdtd_gap_05_guard_census.md.
