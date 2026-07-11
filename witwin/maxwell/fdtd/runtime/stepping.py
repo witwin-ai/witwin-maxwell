@@ -1707,10 +1707,11 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     def normal(time_value):
         _field_update_block(solver, time_value)
 
-    # v1 scope: the standard real-field path (optionally conductive) plus linear
-    # electric/magnetic dispersion. TFSF and magnetic sources put per-step host
-    # input inside the block; complex (Bloch) and instantaneous-nonlinear (Kerr /
-    # chi2) paths carry extra evolving state left to a later iteration.
+    # v1 scope: the standard real-field path (optionally conductive), linear
+    # electric/magnetic dispersion, and the instantaneous nonlinear family
+    # (Kerr chi3, chi2, and two-photon-absorption loss). TFSF and magnetic
+    # sources put per-step host input inside the block; the complex (Bloch) path
+    # carries extra evolving state left to a later iteration.
     #
     # Linear dispersion is safe to capture: the Debye/Drude/Lorentz ADE advance and
     # the polarization-current subtraction launch persistent per-pole state tensors
@@ -1719,13 +1720,23 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     # forcing at E = H = 0, so with all pole state starting at zero the zero initial
     # field is still a fixed point of the extended block; warmup/capture leaves the
     # pole state at zero and does not perturb the physical run.
+    #
+    # Instantaneous nonlinearity is safe to capture too: the Kerr curl-only kernel
+    # and the general chi2/TPA coefficient kernel recompute the dynamic curl/decay
+    # tensors in place from the current field, the persistent chi3/chi2/tpa maps,
+    # and fixed dt/eps0 scalars, with no per-step host input. Unlike dispersion they
+    # carry no accumulated auxiliary state: the dynamic coefficients are a pure
+    # function of the live field, rewritten before they are read every step, so the
+    # fields+psi snapshot already covers everything the block mutates. Every
+    # nonlinear polarization vanishes at E = 0 (P ~ chi2 E^2, chi3 |E|^2 E, and
+    # sigma_NL ~ |E|^2), collapsing the dynamic coefficients to their linear values,
+    # so the zero field remains a fixed point through warmup/capture.
     graphable = (
         use_cuda_graph
         and torch.cuda.is_available()
         and not solver.tfsf_enabled
         and not solver._magnetic_source_terms
         and not has_complex_fields(solver)
-        and not getattr(solver, "nonlinear_enabled", False)
         # The modulated E update consumes per-step host phase scalars, which a
         # captured CUDA graph would freeze at their capture-time values.
         and not getattr(solver, "modulation_enabled", False)
