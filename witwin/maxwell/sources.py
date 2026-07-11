@@ -100,6 +100,37 @@ def _resolve_mode_source_polarization_axis(normal_axis: str, size, value) -> str
     return axis
 
 
+def _normalize_bend(bend_radius, bend_axis, normal_axis: str) -> tuple[float | None, str | None]:
+    """Validate the cylindrical-bend parameters of a mode plane.
+
+    A bent (curved-waveguide) port keeps its cross-section plane axis-aligned but
+    solves the guided mode with the Heiblum-Harris conformal transform, which maps
+    a bend of signed radius ``bend_radius`` into an equivalent straight guide whose
+    index is graded along the in-plane radial direction. ``bend_axis`` is the
+    cylinder (rotation) axis: it must be one of the two axes tangential to the mode
+    plane, and the remaining tangential axis becomes the radial direction. Returns
+    ``(None, None)`` for a straight port and ``(radius, axis)`` for a bent one.
+    """
+    if bend_radius is None:
+        if bend_axis is not None:
+            raise ValueError("bend_axis requires bend_radius to be set.")
+        return None, None
+    radius = float(bend_radius)
+    if radius == 0.0 or not math.isfinite(radius):
+        raise ValueError("bend_radius must be a finite non-zero length (a straight port omits it).")
+    if bend_axis is None:
+        raise ValueError("bend_radius requires bend_axis, the cylinder (rotation) axis of the bend.")
+    axis = str(bend_axis).lower()
+    if axis not in {"x", "y", "z"}:
+        raise ValueError("bend_axis must be 'x', 'y', or 'z'.")
+    if axis == normal_axis:
+        raise ValueError(
+            "bend_axis must be tangential to the mode plane (perpendicular to the propagation axis), "
+            f"but it equals the propagation axis {normal_axis!r}."
+        )
+    return radius, axis
+
+
 def polarization_vector(value) -> tuple[float, float, float]:
     if isinstance(value, str):
         token = value.lower()
@@ -821,6 +852,8 @@ class ModeSource:
     name: str | None = None
     normal_axis: str = "z"
     polarization_axis: str = "x"
+    bend_radius: float | None = None
+    bend_axis: str | None = None
     kind: str = "mode_source"
 
     def __init__(
@@ -833,11 +866,14 @@ class ModeSource:
         source_time=None,
         injection="soft",
         name=None,
+        bend_radius=None,
+        bend_axis=None,
     ):
         resolved_position = _require_length3("position", position)
         resolved_size = _require_mode_source_size(size)
         normal_axis = _resolve_mode_source_normal_axis(resolved_size)
         polarization_axis = _resolve_mode_source_polarization_axis(normal_axis, resolved_size, polarization)
+        resolved_bend_radius, resolved_bend_axis = _normalize_bend(bend_radius, bend_axis, normal_axis)
         object.__setattr__(self, "position", resolved_position)
         object.__setattr__(self, "size", resolved_size)
         object.__setattr__(self, "mode_index", int(mode_index))
@@ -848,6 +884,8 @@ class ModeSource:
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "normal_axis", normal_axis)
         object.__setattr__(self, "polarization_axis", polarization_axis)
+        object.__setattr__(self, "bend_radius", resolved_bend_radius)
+        object.__setattr__(self, "bend_axis", resolved_bend_axis)
         object.__setattr__(self, "kind", "mode_source")
         if self.mode_index < 0:
             raise ValueError("mode_index must be >= 0.")

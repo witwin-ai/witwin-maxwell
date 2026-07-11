@@ -9,7 +9,7 @@ from scipy import sparse
 from scipy.sparse import linalg as scipy_sparse_linalg
 from witwin.core.material import VACUUM_PERMITTIVITY
 
-from ...compiler.materials import evaluate_material_permittivity
+from ...compiler.materials import evaluate_material_components
 from .spatial import physical_interior_indices
 from .tfsf_common import nearest_index
 
@@ -186,25 +186,45 @@ def _mode_source_relative_material_slices(
     plane_index: int,
     tangential_bounds,
 ):
+    """Per-axis diagonal eps/mu aperture slices for the full-vector mode solve.
+
+    Returns ``(eps_by_axis, mu_by_axis)`` where each maps ``"x"/"y"/"z"`` to the
+    diagonal permittivity/permeability component sliced on the source plane. The
+    full-vector operator consumes the three components separately so a
+    diagonal-anisotropic aperture is resolved with its true per-axis tensor
+    instead of an isotropic average.
+    """
     compiled_material_model = getattr(solver, "_compiled_material_model", None)
     if compiled_material_model is None:
         raise RuntimeError("Full-vector ModeSource currently requires solver._compiled_material_model.")
 
-    eps_r = evaluate_material_permittivity(compiled_material_model, float(frequency))
-    mu_r = compiled_material_model["mu_r"]
-    eps_slice = _mode_slice(
-        eps_r,
-        axis=normal_axis,
-        plane_index=plane_index,
-        tangential_bounds=tangential_bounds,
+    eps_components, mu_components = evaluate_material_components(compiled_material_model, float(frequency))
+    eps_by_axis = {
+        axis: _mode_slice(eps_components[axis], axis=normal_axis, plane_index=plane_index, tangential_bounds=tangential_bounds)
+        for axis in ("x", "y", "z")
+    }
+    mu_by_axis = {
+        axis: _mode_slice(mu_components[axis], axis=normal_axis, plane_index=plane_index, tangential_bounds=tangential_bounds)
+        for axis in ("x", "y", "z")
+    }
+    return eps_by_axis, mu_by_axis
+
+
+def _max_component_imag(components: dict) -> float:
+    """Largest imaginary magnitude across the per-axis diagonal aperture slices."""
+    worst = 0.0
+    for component in components.values():
+        if torch.is_complex(component):
+            worst = max(worst, float(torch.max(torch.abs(torch.imag(component))).item()))
+    return worst
+
+
+def _min_component_real(components: dict) -> float:
+    """Smallest real part across the per-axis diagonal aperture slices."""
+    return min(
+        float(torch.min(torch.real(component) if torch.is_complex(component) else component).item())
+        for component in components.values()
     )
-    mu_slice = _mode_slice(
-        mu_r,
-        axis=normal_axis,
-        plane_index=plane_index,
-        tangential_bounds=tangential_bounds,
-    )
-    return eps_slice, mu_slice
 
 
 def _build_first_difference_sparse(count: int, spacing: float):
@@ -214,19 +234,25 @@ def _build_first_difference_sparse(count: int, spacing: float):
     return sparse.diags((-off, off), offsets=(-1, 1), shape=(count, count), format="csr")
 
 
-def _build_first_difference_torch_dense(count: int, spacing: float, *, device, dtype):
-    if count <= 0:
-        raise ValueError("count must be > 0 for first-difference assembly.")
-    operator = torch.zeros((count, count), device=device, dtype=dtype)
-    if count > 1:
-        off = torch.full((count - 1,), 0.5 / float(spacing), device=device, dtype=dtype)
-        operator = operator + torch.diag(off, diagonal=1) - torch.diag(off, diagonal=-1)
-    return operator
+def _build_vector_operator_sparse(eps_planes, mu_planes, *, k0: float, du: float, dv: float):
+    """Full-vector transverse mode operator for a diagonal-anisotropic plane.
 
-
-def _build_vector_operator_sparse(eps_r: np.ndarray, mu_r: np.ndarray, *, k0: float, du: float, dv: float):
-    nu = int(eps_r.shape[0])
-    nv = int(eps_r.shape[1])
+    ``eps_planes`` / ``mu_planes`` are ``(uu, vv, ww)`` triples of 2D aperture
+    slices, with ``uu``/``vv`` the in-plane (tangential) diagonal components and
+    ``ww`` the plane-normal (propagation-axis) component. The placement follows
+    the first-order transverse Maxwell system eliminated for the longitudinal
+    fields: the normal permittivity ``eps_ww`` enters every H-block coupling
+    through the eliminated ``E_w = (i / (omega eps0 eps_ww)) (d_u H_v - d_v H_u)``,
+    the normal permeability ``mu_ww`` enters every E-block coupling through the
+    eliminated ``H_w``, and each transverse self-term carries the matching in-plane
+    component (``E_u`` sees ``eps_uu``, ``E_v`` sees ``eps_vv``, ``H_u`` sees
+    ``mu_uu``, ``H_v`` sees ``mu_vv``). For an isotropic plane the three components
+    coincide and this reduces to the scalar-``eps`` form bit-for-bit.
+    """
+    eps_uu, eps_vv, eps_ww = eps_planes
+    mu_uu, mu_vv, mu_ww = mu_planes
+    nu = int(eps_uu.shape[0])
+    nv = int(eps_uu.shape[1])
     interior_u = nu - 2
     interior_v = nv - 2
     unknowns = interior_u * interior_v
@@ -242,23 +268,28 @@ def _build_vector_operator_sparse(eps_r: np.ndarray, mu_r: np.ndarray, *, k0: fl
     derivative_u = sparse.kron(d1_u, identity_v, format="csr")
     derivative_v = sparse.kron(identity_u, d1_v, format="csr")
 
-    eps_flat = np.asarray(eps_r[1:-1, 1:-1], dtype=np.float64).reshape(-1)
-    mu_flat = np.asarray(mu_r[1:-1, 1:-1], dtype=np.float64).reshape(-1)
-    eps_inv = sparse.diags(1.0 / eps_flat, offsets=0, format="csr")
-    mu_inv = sparse.diags(1.0 / mu_flat, offsets=0, format="csr")
-    eps_diag = sparse.diags(eps_flat, offsets=0, format="csr")
-    mu_diag = sparse.diags(mu_flat, offsets=0, format="csr")
+    def _interior_diag(values: np.ndarray):
+        return sparse.diags(
+            np.asarray(values, dtype=np.float64)[1:-1, 1:-1].reshape(-1), offsets=0, format="csr"
+        )
+
+    eps_w_inv = _interior_diag(1.0 / np.asarray(eps_ww, dtype=np.float64))
+    mu_w_inv = _interior_diag(1.0 / np.asarray(mu_ww, dtype=np.float64))
+    eps_u_diag = _interior_diag(eps_uu)
+    eps_v_diag = _interior_diag(eps_vv)
+    mu_u_diag = _interior_diag(mu_uu)
+    mu_v_diag = _interior_diag(mu_vv)
     k0_sq = float(k0) * float(k0)
 
-    a_hu_hu = derivative_v @ eps_inv @ derivative_v + k0_sq * mu_diag
-    a_hu_hv = -derivative_v @ eps_inv @ derivative_u
-    a_hv_hu = -derivative_u @ eps_inv @ derivative_v
-    a_hv_hv = derivative_u @ eps_inv @ derivative_u + k0_sq * mu_diag
+    a_hu_hu = derivative_v @ eps_w_inv @ derivative_v + k0_sq * mu_u_diag
+    a_hu_hv = -derivative_v @ eps_w_inv @ derivative_u
+    a_hv_hu = -derivative_u @ eps_w_inv @ derivative_v
+    a_hv_hv = derivative_u @ eps_w_inv @ derivative_u + k0_sq * mu_v_diag
 
-    a_eu_eu = -derivative_v @ mu_inv @ derivative_v - k0_sq * eps_diag
-    a_eu_ev = derivative_v @ mu_inv @ derivative_u
-    a_ev_eu = derivative_u @ mu_inv @ derivative_v
-    a_ev_ev = -derivative_u @ mu_inv @ derivative_u - k0_sq * eps_diag
+    a_eu_eu = -derivative_v @ mu_w_inv @ derivative_v - k0_sq * eps_u_diag
+    a_eu_ev = derivative_v @ mu_w_inv @ derivative_u
+    a_ev_eu = derivative_u @ mu_w_inv @ derivative_v
+    a_ev_ev = -derivative_u @ mu_w_inv @ derivative_u - k0_sq * eps_v_diag
 
     electric_scale = float(k0) / _ETA0
     magnetic_scale = float(k0) * _ETA0
@@ -270,64 +301,6 @@ def _build_vector_operator_sparse(eps_r: np.ndarray, mu_r: np.ndarray, *, k0: fl
             [-a_hu_hu / electric_scale, -a_hu_hv / electric_scale, None, None],
         ],
         format="csr",
-    )
-    return operator, interior_u, interior_v
-
-
-def _build_vector_operator_torch_dense(eps_r: torch.Tensor, mu_r: torch.Tensor, *, k0: float, du: float, dv: float):
-    nu = int(eps_r.shape[0])
-    nv = int(eps_r.shape[1])
-    interior_u = nu - 2
-    interior_v = nv - 2
-    unknowns = interior_u * interior_v
-    if unknowns <= 0:
-        raise ValueError(
-            "ModeSource aperture must contain at least one interior node after applying zero boundary conditions."
-        )
-    if unknowns > _FULL_VECTOR_DENSE_LIMIT:
-        raise NotImplementedError(
-            "Full-vector differentiable ModeSource currently supports at most "
-            f"{_FULL_VECTOR_DENSE_LIMIT} interior nodes per source-plane solve."
-        )
-
-    device = eps_r.device
-    dtype = eps_r.dtype
-    d1_u = _build_first_difference_torch_dense(interior_u, du, device=device, dtype=dtype)
-    d1_v = _build_first_difference_torch_dense(interior_v, dv, device=device, dtype=dtype)
-    identity_u = torch.eye(interior_u, device=device, dtype=dtype)
-    identity_v = torch.eye(interior_v, device=device, dtype=dtype)
-    derivative_u = torch.kron(d1_u, identity_v)
-    derivative_v = torch.kron(identity_u, d1_v)
-
-    eps_flat = eps_r[1:-1, 1:-1].reshape(-1)
-    mu_flat = mu_r[1:-1, 1:-1].reshape(-1)
-    eps_inv = torch.diag(torch.reciprocal(eps_flat))
-    mu_inv = torch.diag(torch.reciprocal(mu_flat))
-    eps_diag = torch.diag(eps_flat)
-    mu_diag = torch.diag(mu_flat)
-    k0_sq = float(k0) * float(k0)
-
-    a_hu_hu = derivative_v @ eps_inv @ derivative_v + k0_sq * mu_diag
-    a_hu_hv = -(derivative_v @ eps_inv @ derivative_u)
-    a_hv_hu = -(derivative_u @ eps_inv @ derivative_v)
-    a_hv_hv = derivative_u @ eps_inv @ derivative_u + k0_sq * mu_diag
-
-    a_eu_eu = -(derivative_v @ mu_inv @ derivative_v) - k0_sq * eps_diag
-    a_eu_ev = derivative_v @ mu_inv @ derivative_u
-    a_ev_eu = derivative_u @ mu_inv @ derivative_v
-    a_ev_ev = -(derivative_u @ mu_inv @ derivative_u) - k0_sq * eps_diag
-
-    electric_scale = float(k0) / _ETA0
-    magnetic_scale = float(k0) * _ETA0
-    zero = torch.zeros_like(a_hu_hu)
-    operator = torch.cat(
-        (
-            torch.cat((zero, zero, a_ev_eu / magnetic_scale, a_ev_ev / magnetic_scale), dim=1),
-            torch.cat((zero, zero, -a_eu_eu / magnetic_scale, -a_eu_ev / magnetic_scale), dim=1),
-            torch.cat((a_hv_hu / electric_scale, a_hv_hv / electric_scale, zero, zero), dim=1),
-            torch.cat((-a_hu_hu / electric_scale, -a_hu_hv / electric_scale, zero, zero), dim=1),
-        ),
-        dim=0,
     )
     return operator, interior_u, interior_v
 
@@ -517,11 +490,6 @@ def _build_scalar_operator_torch_dense(index_sq: torch.Tensor, du: float, dv: fl
         raise ValueError(
             "ModeSource aperture must contain at least one interior node after applying zero boundary conditions."
         )
-    if unknowns > _DENSE_EIGEN_LIMIT:
-        raise NotImplementedError(
-            "Differentiable ModeSource currently supports at most "
-            f"{_DENSE_EIGEN_LIMIT} interior unknowns per source-plane solve."
-        )
 
     dtype = index_sq.dtype
     device = index_sq.device
@@ -608,6 +576,65 @@ def _solve_mode_eigenpair(operator, *, mode_index: int):
     return float(eigenvalues[mode_slot]), eigenvectors[:, mode_slot]
 
 
+def _solve_mode_eigenpair_complex(operator, *, mode_index: int):
+    """Fundamental-first eigenpair of the complex (lossy) scalar mode operator.
+
+    When the plane permittivity carries loss, ``d2 + k0**2 eps`` is complex
+    symmetric rather than Hermitian, so the guided spectrum ``beta**2`` is
+    complex. Guided modes have the largest real part of ``beta**2`` (the
+    fundamental has the largest of all), so the modes are ranked by descending
+    ``Re(beta**2)`` and the ``mode_index``-th positive-real-part eigenvalue is
+    returned. A dense general eigensolve is used up to ``_DENSE_EIGEN_LIMIT``
+    unknowns and a largest-real-part Arnoldi solve above it.
+    """
+    size = int(operator.shape[0])
+    if size <= _DENSE_EIGEN_LIMIT:
+        eigenvalues, eigenvectors = scipy_linalg.eig(operator.toarray())
+    else:
+        requested = min(max(int(mode_index) + _VECTOR_EIGEN_REQUEST_PADDING, 4), max(1, size - 2))
+        eigenvalues, eigenvectors = scipy_sparse_linalg.eigs(
+            operator,
+            k=requested,
+            which="LR",
+            tol=_VECTOR_EIGS_TOL,
+            maxiter=_VECTOR_EIGS_MAX_ITER,
+        )
+    order = np.argsort(np.real(eigenvalues))[::-1]
+    positive = [int(index) for index in order if np.isfinite(eigenvalues[index]) and np.real(eigenvalues[index]) > 0.0]
+    if len(positive) <= int(mode_index):
+        raise ValueError(
+            f"ModeSource requested mode_index={mode_index}, but only {len(positive)} positive-beta modes were found."
+        )
+    mode_slot = positive[int(mode_index)]
+    return complex(eigenvalues[mode_slot]), np.asarray(eigenvectors[:, mode_slot])
+
+
+def _real_profile_from_complex_eigenvector(eigenvector, *, interior_u: int, interior_v: int, shape):
+    """Real transverse amplitude of a complex eigenmode, phase-aligned at its peak.
+
+    A complex eigenvector carries an arbitrary global phase; removing the phase at
+    the amplitude peak yields the real standing transverse shape used for soft
+    injection (the complex propagation constant, not the transverse phase, carries
+    the loss). Returns a peak-normalized, sign-oriented float64 numpy array on the
+    full aperture grid with zeroed Dirichlet borders.
+    """
+    peak = int(np.argmax(np.abs(eigenvector)))
+    peak_value = eigenvector[peak]
+    if abs(peak_value) <= 0.0:
+        raise RuntimeError("ModeSource complex eigenmode solve returned a zero profile.")
+    aligned = eigenvector * (np.conjugate(peak_value) / abs(peak_value))
+    profile = np.zeros(tuple(int(dim) for dim in shape), dtype=np.float64)
+    profile[1:-1, 1:-1] = np.real(aligned).reshape((int(interior_u), int(interior_v)))
+    scale = float(np.max(np.abs(profile)))
+    if scale <= 0.0:
+        raise RuntimeError("ModeSource complex eigenmode solve returned a zero profile.")
+    profile /= scale
+    peak_index = np.unravel_index(np.argmax(np.abs(profile)), profile.shape)
+    if profile[peak_index] < 0.0:
+        profile *= -1.0
+    return profile
+
+
 def _solve_mode_eigenpair_torch(operator: torch.Tensor, *, mode_index: int):
     eigenvalues, eigenvectors = torch.linalg.eigh(operator)
     order = torch.argsort(eigenvalues, descending=True)
@@ -627,9 +654,12 @@ def _lobpcg_request_count(unknowns: int, *, mode_index: int) -> int:
     max_requested = max(1, (int(unknowns) - 1) // 3)
     requested = min(requested, max_requested)
     if requested <= int(mode_index):
-        raise NotImplementedError(
-            "Sparse ModeSource iterative solve requires unknowns >= 3 * requested_modes. "
-            f"mode_index={mode_index} is too large for an aperture solve with {unknowns} interior unknowns."
+        raise ValueError(
+            "ModeSource mode_index is too large for this aperture's resolution: the sparse "
+            "LOBPCG eigensolver needs at least three interior aperture unknowns per requested "
+            f"mode to span a valid iteration subspace, but mode_index={mode_index} on an "
+            f"aperture with {unknowns} interior unknowns leaves fewer. Refine the aperture grid "
+            "or request a lower mode_index."
         )
     return requested
 
@@ -814,8 +844,8 @@ def _solve_mode_eigenpair_torch_sparse_implicit(index_sq: torch.Tensor, *, du: f
 
 
 def _solve_vector_mode_eigenpair_sparse(
-    eps_r: np.ndarray,
-    mu_r: np.ndarray,
+    eps_planes,
+    mu_planes,
     *,
     k0: float,
     du: float,
@@ -824,7 +854,7 @@ def _solve_vector_mode_eigenpair_sparse(
     field_names,
     preferred_field_name: str,
 ):
-    operator, interior_u, interior_v = _build_vector_operator_sparse(eps_r, mu_r, k0=k0, du=du, dv=dv)
+    operator, interior_u, interior_v = _build_vector_operator_sparse(eps_planes, mu_planes, k0=k0, du=du, dv=dv)
     matrix_size = int(operator.shape[0])
     requested = _vector_mode_request_count(matrix_size, mode_index=int(mode_index))
     eigenvalues, eigenvectors = scipy_sparse_linalg.eigs(
@@ -846,8 +876,8 @@ def _solve_vector_mode_eigenpair_sparse(
 
 
 def _solve_vector_mode_eigenpair_dense(
-    eps_r: np.ndarray,
-    mu_r: np.ndarray,
+    eps_planes,
+    mu_planes,
     *,
     k0: float,
     du: float,
@@ -856,7 +886,7 @@ def _solve_vector_mode_eigenpair_dense(
     field_names,
     preferred_field_name: str,
 ):
-    operator, interior_u, interior_v = _build_vector_operator_sparse(eps_r, mu_r, k0=k0, du=du, dv=dv)
+    operator, interior_u, interior_v = _build_vector_operator_sparse(eps_planes, mu_planes, k0=k0, du=du, dv=dv)
     dense = operator.toarray()
     eigenvalues, eigenvectors = scipy_linalg.eig(dense)
     return _select_and_normalize_vector_mode_numpy(
@@ -877,6 +907,50 @@ def _mode_slice(tensor: torch.Tensor, *, axis: str, plane_index: int, tangential
     if axis == "y":
         return tensor[u_lo : u_hi + 1, plane_index, v_lo : v_hi + 1]
     return tensor[u_lo : u_hi + 1, v_lo : v_hi + 1, plane_index]
+
+
+def _bend_conformal_factor(source, *, tangential_axes, tangential_bounds, coord_map):
+    """Heiblum-Harris conformal index factor over a bent-port mode plane.
+
+    Returns ``None`` for a straight port. A curved (bent) waveguide keeps its
+    cross-section plane axis-aligned but its guided mode is solved on the
+    equivalent straight guide produced by the conformal map: for a bend of signed
+    radius ``R`` about the cylinder axis ``bend_axis``, the transformed
+    permittivity is ``eps_eq(u, v) = eps(u, v) * (1 + r/R)**2`` where ``r`` is the
+    signed offset of each node from the port centre along the in-plane radial axis
+    (the tangential axis that is not the cylinder axis). ``R > 0`` grades the index
+    up on the ``+r`` side, shifting the mode outward and raising the effective
+    index, exactly as a physical bend does. The returned float64 tensor has shape
+    ``(nu, 1)`` or ``(1, nv)`` so it broadcasts against a mode-plane aperture slice.
+    """
+    bend_radius = source.get("bend_radius")
+    if bend_radius is None:
+        return None
+    bend_axis = str(source["bend_axis"])
+    axis_u, axis_v = tangential_axes
+    radial_is_u = axis_v == bend_axis
+    radial_axis = axis_u if radial_is_u else axis_v
+    (u_lo, u_hi), (v_lo, v_hi) = tangential_bounds
+    lo, hi = (u_lo, u_hi) if radial_is_u else (v_lo, v_hi)
+    coords_radial = coord_map[radial_axis][lo : hi + 1].to(dtype=torch.float64)
+    radial_center = float(source["position"][_AXIS_TO_INDEX[radial_axis]])
+    ratio = 1.0 + (coords_radial - radial_center) / float(bend_radius)
+    if float(torch.min(ratio).item()) <= 0.0:
+        raise ValueError(
+            "Bent mode-plane aperture spans the bend centre of curvature "
+            f"(1 + r/R <= 0 for bend_radius={float(bend_radius):g} about axis {bend_axis!r}); "
+            "the conformal transform is singular there. Increase |bend_radius| or shrink the aperture."
+        )
+    factor_1d = ratio * ratio
+    return factor_1d[:, None] if radial_is_u else factor_1d[None, :]
+
+
+def _apply_bend_factor(tensor: torch.Tensor, factor) -> torch.Tensor:
+    """Multiply a mode-plane eps slice by the conformal bend factor (identity if None)."""
+    if factor is None:
+        return tensor
+    real_dtype = torch.real(tensor).dtype if torch.is_complex(tensor) else tensor.dtype
+    return tensor * factor.to(device=tensor.device, dtype=real_dtype)
 
 
 def _regular_grid_sample(coords: torch.Tensor, values: torch.Tensor):
@@ -944,8 +1018,15 @@ def _mode_source_component_permittivity(solver, source, *, frequency: float) -> 
 
     compiled_material_model = getattr(solver, "_compiled_material_model", None)
     if compiled_material_model is not None:
-        eps_r = evaluate_material_permittivity(compiled_material_model, float(frequency))
-        return _average_node_tensor_to_component(eps_r, field_name)
+        # A diagonal-anisotropic aperture must be solved with the permittivity
+        # component that matches the injected polarization (E_p sees eps_pp), the
+        # same per-axis component the forward Yee update uses for that field
+        # (solver.eps_E{p}). Averaging the three diagonal components would inject a
+        # mode computed for an isotropic medium the forward solve never sees. For an
+        # isotropic plane the three components coincide and this is unchanged.
+        polarization_axis = field_name[1].lower()
+        eps_components, _ = evaluate_material_components(compiled_material_model, float(frequency))
+        return _average_node_tensor_to_component(eps_components[polarization_axis], field_name)
 
     if field_tensor is None:
         raise RuntimeError(
@@ -969,19 +1050,26 @@ def _normalize_profile_torch(profile: torch.Tensor) -> torch.Tensor:
 def _vector_mode_supported(
     solver,
     *,
-    eps_slice: torch.Tensor,
-    mu_slice: torch.Tensor,
+    eps_by_axis: dict,
+    mu_by_axis: dict,
     unknowns: int,
 ) -> bool:
     if getattr(solver, "_mode_source_rebuild_from_fields", False):
         return False
     if getattr(solver, "_compiled_material_model", None) is None:
         return False
-    if eps_slice.requires_grad or mu_slice.requires_grad:
+    if any(component.requires_grad for component in eps_by_axis.values()):
+        return False
+    if any(component.requires_grad for component in mu_by_axis.values()):
         return False
     if unknowns <= 0:
         return False
     return True
+
+
+def _real_plane_numpy(component: torch.Tensor) -> np.ndarray:
+    real = torch.real(component) if torch.is_complex(component) else component
+    return real.detach().cpu().numpy().astype(np.float64, copy=False)
 
 
 def _assemble_vector_mode_data(
@@ -993,8 +1081,8 @@ def _assemble_vector_mode_data(
     tangential_bounds,
     tangential_coord_map,
     plane_index: int,
-    eps_slice: torch.Tensor,
-    mu_slice: torch.Tensor,
+    eps_by_axis: dict,
+    mu_by_axis: dict,
     frequency: float,
 ):
     axis_u, axis_v = tangential_axes
@@ -1009,19 +1097,36 @@ def _assemble_vector_mode_data(
         raise ValueError("ModeSource polarization must be tangential to the source plane.")
 
     (u_lo, u_hi), (v_lo, v_hi) = tangential_bounds
+    bend_factor = _bend_conformal_factor(
+        source,
+        tangential_axes=tangential_axes,
+        tangential_bounds=tangential_bounds,
+        coord_map=tangential_coord_map,
+    )
+    if bend_factor is not None:
+        eps_by_axis = {axis: _apply_bend_factor(component, bend_factor) for axis, component in eps_by_axis.items()}
     du = _local_uniform_plane_spacing(solver.scene, axis_u, u_lo, u_hi)
     dv = _local_uniform_plane_spacing(solver.scene, axis_v, v_lo, v_hi)
     k0 = 2.0 * math.pi * float(frequency) / float(solver.c)
-    eps_real = torch.real(eps_slice) if torch.is_complex(eps_slice) else eps_slice
-    mu_real = torch.real(mu_slice) if torch.is_complex(mu_slice) else mu_slice
-    eps_np = eps_real.detach().cpu().numpy().astype(np.float64, copy=False)
-    mu_np = mu_real.detach().cpu().numpy().astype(np.float64, copy=False)
+    # Order the diagonal components as (in-plane u, in-plane v, plane-normal w) so
+    # the vector operator threads eps_ww/mu_ww through the eliminated longitudinal
+    # fields and eps_uu/eps_vv (mu_uu/mu_vv) through the transverse self-terms.
+    eps_planes = (
+        _real_plane_numpy(eps_by_axis[axis_u]),
+        _real_plane_numpy(eps_by_axis[axis_v]),
+        _real_plane_numpy(eps_by_axis[normal_axis]),
+    )
+    mu_planes = (
+        _real_plane_numpy(mu_by_axis[axis_u]),
+        _real_plane_numpy(mu_by_axis[axis_v]),
+        _real_plane_numpy(mu_by_axis[normal_axis]),
+    )
 
-    unknowns = max((int(eps_np.shape[0]) - 2) * (int(eps_np.shape[1]) - 2), 0)
+    unknowns = max((int(eps_planes[0].shape[0]) - 2) * (int(eps_planes[0].shape[1]) - 2), 0)
     if unknowns <= _FULL_VECTOR_DENSE_LIMIT:
         beta_value, _eigenvector, component_arrays = _solve_vector_mode_eigenpair_dense(
-            eps_np,
-            mu_np,
+            eps_planes,
+            mu_planes,
             k0=k0,
             du=du,
             dv=dv,
@@ -1032,8 +1137,8 @@ def _assemble_vector_mode_data(
         solver_kind = "vector_dense"
     else:
         beta_value, _eigenvector, component_arrays = _solve_vector_mode_eigenpair_sparse(
-            eps_np,
-            mu_np,
+            eps_planes,
+            mu_planes,
             k0=k0,
             du=du,
             dv=dv,
@@ -1094,6 +1199,8 @@ def _assemble_vector_mode_data(
         "plane_index": int(plane_index),
         "box_lower": tuple(int(value) for value in lower),
         "box_upper": tuple(int(value) for value in upper),
+        "bend_radius": source.get("bend_radius"),
+        "bend_axis": source.get("bend_axis"),
     }
 
 
@@ -1101,10 +1208,19 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
     if source.get("injection", {}).get("kind") != "soft":
         raise ValueError("ModeSource currently supports soft injection only.")
     source_time = source["source_time"]
-    if source_time["kind"] != "cw":
-        raise ValueError("ModeSource currently supports CW source_time only.")
+    if source_time["kind"] == "custom":
+        raise ValueError(
+            "ModeSource does not support CustomSourceTime; the native time-shifted surface "
+            "kernel evaluates only the analytic CW/Gaussian/Ricker forms. Use PointDipole "
+            "for arbitrary custom waveforms."
+        )
     if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
-        raise NotImplementedError("ModeSource currently supports only none, pml, pec, or pmc boundaries.")
+        raise NotImplementedError(
+            "ModeSource mode solving is undefined under a periodic/Bloch transverse boundary: "
+            "the aperture wraps with the Bloch phase, so the guided profile is an eigenfunction "
+            "of a complex-Hermitian Bloch-phase transverse operator, whereas this solver builds "
+            "the real, zero-boundary transverse operator. Use none/pml/pec/pmc on the mode plane."
+        )
 
     normal_axis, tangential_axes = _mode_source_axes(source)
     normal_axis_index = _AXIS_TO_INDEX[normal_axis]
@@ -1127,47 +1243,42 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
             source,
             axis_coords_by_axis=node_coord_map,
         )
-        eps_node_slice, mu_node_slice = _mode_source_relative_material_slices(
+        eps_node_by_axis, mu_node_by_axis = _mode_source_relative_material_slices(
             solver,
             frequency=frequency,
             normal_axis=normal_axis,
             plane_index=plane_index,
             tangential_bounds=node_tangential_bounds,
         )
-        eps_node_imag = (
-            float(torch.max(torch.abs(torch.imag(eps_node_slice))).item()) if torch.is_complex(eps_node_slice) else 0.0
-        )
-        mu_node_imag = (
-            float(torch.max(torch.abs(torch.imag(mu_node_slice))).item()) if torch.is_complex(mu_node_slice) else 0.0
-        )
-        if eps_node_imag > 1e-7 or mu_node_imag > 1e-7:
-            raise NotImplementedError(
-                "ModeSource full-vector eigenmode solve currently requires real-valued epsilon and mu."
-            )
-
-        eps_node_real = torch.real(eps_node_slice) if torch.is_complex(eps_node_slice) else eps_node_slice
-        mu_node_real = torch.real(mu_node_slice) if torch.is_complex(mu_node_slice) else mu_node_slice
-        if torch.min(eps_node_real).item() <= 0.0 or torch.min(mu_node_real).item() <= 0.0:
-            raise ValueError("ModeSource requires positive epsilon and mu on the source plane.")
-        node_unknowns = max((int(eps_node_real.shape[0]) - 2) * (int(eps_node_real.shape[1]) - 2), 0)
-        if _vector_mode_supported(
-            solver,
-            eps_slice=eps_node_real,
-            mu_slice=mu_node_real,
-            unknowns=node_unknowns,
-        ):
-            return _assemble_vector_mode_data(
+        eps_node_imag = _max_component_imag(eps_node_by_axis)
+        mu_node_imag = _max_component_imag(mu_node_by_axis)
+        # A lossy (complex) permittivity makes the full-vector operator non-Hermitian and
+        # its forward path solves only the real part, which would silently drop the loss.
+        # Route those planes to the scalar complex-mode solve below, which resolves the
+        # complex propagation constant directly.
+        if eps_node_imag <= 1e-7 and mu_node_imag <= 1e-7:
+            if _min_component_real(eps_node_by_axis) <= 0.0 or _min_component_real(mu_node_by_axis) <= 0.0:
+                raise ValueError("ModeSource requires positive epsilon and mu on the source plane.")
+            reference_slice = eps_node_by_axis[normal_axis]
+            node_unknowns = max((int(reference_slice.shape[0]) - 2) * (int(reference_slice.shape[1]) - 2), 0)
+            if _vector_mode_supported(
                 solver,
-                source,
-                normal_axis=normal_axis,
-                tangential_axes=tangential_axes,
-                tangential_bounds=node_tangential_bounds,
-                tangential_coord_map=node_coord_map,
-                plane_index=plane_index,
-                eps_slice=eps_node_real,
-                mu_slice=mu_node_real,
-                frequency=frequency,
-            )
+                eps_by_axis=eps_node_by_axis,
+                mu_by_axis=mu_node_by_axis,
+                unknowns=node_unknowns,
+            ):
+                return _assemble_vector_mode_data(
+                    solver,
+                    source,
+                    normal_axis=normal_axis,
+                    tangential_axes=tangential_axes,
+                    tangential_bounds=node_tangential_bounds,
+                    tangential_coord_map=node_coord_map,
+                    plane_index=plane_index,
+                    eps_by_axis=eps_node_by_axis,
+                    mu_by_axis=mu_node_by_axis,
+                    frequency=frequency,
+                )
 
     tangential_coord_map = {
         axis: _field_component_axis_coords(solver.scene, field_name, axis)
@@ -1186,6 +1297,13 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         plane_index=plane_index,
         tangential_bounds=tangential_bounds,
     )
+    bend_factor = _bend_conformal_factor(
+        source,
+        tangential_axes=tangential_axes,
+        tangential_bounds=tangential_bounds,
+        coord_map=tangential_coord_map,
+    )
+    eps_slice = _apply_bend_factor(eps_slice, bend_factor)
     if (
         getattr(solver, "_compiled_material_model", None) is not None
         and not getattr(solver, "_mode_source_rebuild_from_fields", False)
@@ -1201,15 +1319,25 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
 
     eps_max_imag = float(torch.max(torch.abs(torch.imag(eps_slice))).item()) if torch.is_complex(eps_slice) else 0.0
     mu_max_imag = float(torch.max(torch.abs(torch.imag(mu_slice))).item()) if torch.is_complex(mu_slice) else 0.0
-    if eps_max_imag > 1e-7 or mu_max_imag > 1e-7:
-        raise NotImplementedError("ModeSource scalar eigenmode solve currently requires real-valued epsilon and mu.")
+    eps_is_lossy = eps_max_imag > 1e-7 or mu_max_imag > 1e-7
 
     eps_real = torch.real(eps_slice) if torch.is_complex(eps_slice) else eps_slice
     mu_real = torch.real(mu_slice) if torch.is_complex(mu_slice) else mu_slice
     if torch.min(eps_real).item() <= 0.0 or torch.min(mu_real).item() <= 0.0:
         raise ValueError("ModeSource requires positive epsilon and mu on the source plane.")
     if not torch.allclose(mu_real, torch.ones_like(mu_real), atol=1e-6, rtol=0.0):
-        raise NotImplementedError("ModeSource scalar eigenmode solve currently requires mu_r == 1 on the source plane.")
+        raise NotImplementedError(
+            "ModeSource scalar eigenmode solve is undefined for a magnetic (mu_r != 1) plane: "
+            "the scalar Helmholtz reduction folds mu into a single index and scales the magnetic "
+            "profile by n_eff/eta0, both of which assume a non-magnetic medium. A magnetic plane "
+            "must be solved with the full-vector operator, which carries mu per component."
+        )
+    if eps_is_lossy and eps_real.requires_grad:
+        raise NotImplementedError(
+            "Differentiable ModeSource gradients through a lossy (complex) permittivity require a "
+            "non-Hermitian eigen-adjoint; the differentiable path solves the Hermitian "
+            "real-permittivity problem."
+        )
 
     axis_u, axis_v = tangential_axes
     (u_lo, u_hi), (v_lo, v_hi) = tangential_bounds
@@ -1220,7 +1348,35 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
     k0 = 2.0 * math.pi * frequency / float(solver.c)
     unknowns = max((int(eps_real.shape[0]) - 2) * (int(eps_real.shape[1]) - 2), 0)
 
-    if eps_real.requires_grad:
+    effective_index_complex = None
+    beta_complex = None
+    if eps_is_lossy:
+        eps_complex_np = eps_slice.detach().cpu().numpy().astype(np.complex128, copy=False)
+        mu_complex_np = (
+            mu_slice.detach().cpu().numpy().astype(np.complex128, copy=False)
+            if torch.is_complex(mu_slice)
+            else mu_real.detach().cpu().numpy().astype(np.complex128, copy=False)
+        )
+        index_sq_complex = (k0 * k0) * (eps_complex_np * mu_complex_np)
+        operator, interior_u, interior_v = _build_scalar_operator(index_sq_complex, du, dv)
+        beta_sq_complex, eigenvector = _solve_mode_eigenpair_complex(operator, mode_index=int(source["mode_index"]))
+        profile_np = _real_profile_from_complex_eigenvector(
+            eigenvector,
+            interior_u=interior_u,
+            interior_v=interior_v,
+            shape=tuple(int(dim) for dim in eps_real.shape),
+        )
+        profile = torch.as_tensor(profile_np, device=eps_real.device, dtype=torch.float64)
+        beta_complex = complex(np.sqrt(beta_sq_complex))
+        if beta_complex.real < 0.0:
+            beta_complex = -beta_complex
+        effective_index_complex = beta_complex / max(k0, 1e-30)
+        beta_value = float(beta_complex.real)
+        effective_index_value = float(effective_index_complex.real)
+        beta_tensor = None
+        effective_index_tensor = None
+        scalar_solver_kind = "scalar_complex_dense" if unknowns <= _DENSE_EIGEN_LIMIT else "scalar_complex_sparse"
+    elif eps_real.requires_grad:
         index_sq = ((k0 * k0) * (eps_real * mu_real)).to(dtype=torch.float64)
         if unknowns > _DENSE_EIGEN_LIMIT:
             beta_sq, eigenvector = _solve_mode_eigenpair_torch_sparse_implicit(
@@ -1275,7 +1431,7 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         effective_index_value = beta_value / max(k0, 1e-30)
         beta_tensor = None
         effective_index_tensor = None
-    if eps_real.requires_grad:
+    if not eps_is_lossy and eps_real.requires_grad:
         scalar_solver_kind = "scalar_sparse_implicit" if unknowns > _DENSE_EIGEN_LIMIT else "scalar_dense_torch"
 
     direction_vector = tuple(float(component) for component in source["direction_vector"])
@@ -1339,6 +1495,8 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         "mode_solver_kind": scalar_solver_kind,
         "effective_index": float(effective_index_value),
         "beta": float(beta_value),
+        "effective_index_complex": None if effective_index_complex is None else complex(effective_index_complex),
+        "beta_complex": None if beta_complex is None else complex(beta_complex),
         "effective_index_tensor": (
             None
             if effective_index_tensor is None
@@ -1352,6 +1510,8 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         "plane_index": int(plane_index),
         "box_lower": tuple(int(value) for value in lower),
         "box_upper": tuple(int(value) for value in upper),
+        "bend_radius": source.get("bend_radius"),
+        "bend_axis": source.get("bend_axis"),
     }
 
 

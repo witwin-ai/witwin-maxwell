@@ -6,6 +6,7 @@ from .monitors import ModeMonitor, _normalize_frequencies, _normalize_normal_dir
 from .sources import (
     ModeSource,
     SourceTime,
+    _normalize_bend,
     _normalize_mode_direction,
     _require_length3,
     _require_mode_source_size,
@@ -29,6 +30,8 @@ class ModePort:
     normal_direction: str = "+"
     normal_axis: str = "z"
     polarization_axis: str = "x"
+    bend_radius: float | None = None
+    bend_axis: str | None = None
     kind: str = "mode_port"
 
     def __init__(
@@ -43,11 +46,14 @@ class ModePort:
         source_time=None,
         monitor_offset=0.0,
         normal_direction=None,
+        bend_radius=None,
+        bend_axis=None,
     ):
         resolved_position = _require_length3("position", position)
         resolved_size = _require_mode_source_size(size)
         normal_axis = _resolve_mode_source_normal_axis(resolved_size)
         polarization_axis = _resolve_mode_source_polarization_axis(normal_axis, resolved_size, polarization)
+        resolved_bend_radius, resolved_bend_axis = _normalize_bend(bend_radius, bend_axis, normal_axis)
         resolved_direction = _normalize_mode_direction(direction)
         resolved_normal_direction = (
             resolved_direction if normal_direction is None else _normalize_normal_direction(normal_direction)
@@ -64,6 +70,8 @@ class ModePort:
         object.__setattr__(self, "normal_direction", resolved_normal_direction)
         object.__setattr__(self, "normal_axis", normal_axis)
         object.__setattr__(self, "polarization_axis", polarization_axis)
+        object.__setattr__(self, "bend_radius", resolved_bend_radius)
+        object.__setattr__(self, "bend_axis", resolved_bend_axis)
         object.__setattr__(self, "kind", "mode_port")
         if self.mode_index < 0:
             raise ValueError("mode_index must be >= 0.")
@@ -83,6 +91,8 @@ class ModePort:
             polarization=f"E{self.polarization_axis}",
             source_time=self.source_time,
             name=self.source_name,
+            bend_radius=self.bend_radius,
+            bend_axis=self.bend_axis,
         )
 
     def to_mode_monitor(self) -> ModeMonitor:
@@ -98,4 +108,6 @@ class ModePort:
             polarization=f"E{self.polarization_axis}",
             frequencies=self.frequencies,
             normal_direction=self.normal_direction,
+            bend_radius=self.bend_radius,
+            bend_axis=self.bend_axis,
         )

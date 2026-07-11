@@ -788,6 +788,8 @@ def _prepare_mode_surface_source(solver, source, *, source_index):
     mode_data = solve_mode_source_profile(solver, source)
     source["effective_index"] = mode_data["effective_index"]
     source["beta"] = mode_data["beta"]
+    source["effective_index_complex"] = mode_data.get("effective_index_complex")
+    source["beta_complex"] = mode_data.get("beta_complex")
     source["mode_solver_kind"] = mode_data.get("mode_solver_kind")
 
     face_side = "low" if int(source["direction_sign"]) > 0 else "high"

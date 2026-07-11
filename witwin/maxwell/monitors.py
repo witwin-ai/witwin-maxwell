@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .sources import (
+    _normalize_bend,
     _normalize_mode_direction,
     _require_length3,
     _require_mode_source_size,
@@ -612,6 +613,8 @@ class ModeMonitor:
     compute_flux: bool = True
     normal_axis: str = "z"
     polarization_axis: str = "x"
+    bend_radius: float | None = None
+    bend_axis: str | None = None
     kind: str = "mode"
 
     def __init__(
@@ -624,11 +627,14 @@ class ModeMonitor:
         polarization="auto",
         frequencies=None,
         normal_direction=None,
+        bend_radius=None,
+        bend_axis=None,
     ):
         resolved_position = _require_length3("position", position)
         resolved_size = _require_mode_source_size(size)
         normal_axis = _resolve_mode_source_normal_axis(resolved_size)
         polarization_axis = _resolve_mode_source_polarization_axis(normal_axis, resolved_size, polarization)
+        resolved_bend_radius, resolved_bend_axis = _normalize_bend(bend_radius, bend_axis, normal_axis)
         axis_index = "xyz".index(normal_axis)
         resolved_direction = _normalize_mode_direction(direction)
         resolved_normal_direction = (
@@ -650,6 +656,8 @@ class ModeMonitor:
         object.__setattr__(self, "compute_flux", True)
         object.__setattr__(self, "normal_axis", normal_axis)
         object.__setattr__(self, "polarization_axis", polarization_axis)
+        object.__setattr__(self, "bend_radius", resolved_bend_radius)
+        object.__setattr__(self, "bend_axis", resolved_bend_axis)
         object.__setattr__(self, "kind", "mode")
         if self.mode_index < 0:
             raise ValueError("mode_index must be >= 0.")
@@ -664,6 +672,8 @@ class ModeMonitor:
             "polarization": self.polarization,
             "polarization_axis": self.polarization_axis,
             "normal_axis": self.normal_axis,
+            "bend_radius": self.bend_radius,
+            "bend_axis": self.bend_axis,
         }
 
 
