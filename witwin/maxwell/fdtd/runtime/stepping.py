@@ -1039,7 +1039,12 @@ def apply_full_aniso_conduction(solver):
 
 def update_electric_fields_bloch(solver):
     if getattr(solver, "nonlinear_enabled", False):
-        raise NotImplementedError("FDTD nonlinear media are not implemented for Bloch / complex-field runs.")
+        raise NotImplementedError(
+            "FDTD instantaneous nonlinear media cannot evolve on the complex Bloch fields: the "
+            "|E|^2 Kerr/chi2/TPA polarization couples the single-wavevector Bloch field to the 2k/3k "
+            "harmonic sectors a complex-Bloch run does not carry, so the nonlinear response is not "
+            "closed on the real update kernels. Use a real-field boundary (PML/PEC/PMC/periodic)."
+        )
     solver.fdtd_module.updateElectricFieldExBloch3D(
         ExReal=solver.Ex,
         ExImag=solver.Ex_imag,
@@ -1092,7 +1097,12 @@ def update_electric_fields_bloch(solver):
 
 def update_electric_fields_bloch_xy_standard_z(solver):
     if getattr(solver, "nonlinear_enabled", False):
-        raise NotImplementedError("FDTD nonlinear media are not implemented for Bloch / complex-field runs.")
+        raise NotImplementedError(
+            "FDTD instantaneous nonlinear media cannot evolve on the complex Bloch fields: the "
+            "|E|^2 Kerr/chi2/TPA polarization couples the single-wavevector Bloch field to the 2k/3k "
+            "harmonic sectors a complex-Bloch run does not carry, so the nonlinear response is not "
+            "closed on the real update kernels. Use a real-field boundary (PML/PEC/PMC/periodic)."
+        )
     solver.fdtd_module.updateElectricFieldExBlochYStandardZ3D(
         ExReal=solver.Ex,
         ExImag=solver.Ex_imag,
