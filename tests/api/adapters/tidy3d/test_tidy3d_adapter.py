@@ -114,6 +114,7 @@ def _make_mock_tidy3d():
     class BlochBoundary(_Recorder): pass
     class Boundary(_Recorder): pass
     class UniformGrid(_Recorder): pass
+    class CustomGridBoundaries(_Recorder): pass
     class Simulation(_Recorder): pass
 
     class BoundarySpec(_Recorder):
@@ -179,6 +180,7 @@ def _make_mock_tidy3d():
     td.BoundarySpec = BoundarySpec
     td.GridSpec = GridSpec
     td.UniformGrid = UniformGrid
+    td.CustomGridBoundaries = CustomGridBoundaries
     td.Simulation = Simulation
     td.inf = float("inf")
     return td
@@ -232,31 +234,135 @@ class TestGridConversion:
     def test_uniform(self, inject_mock_tidy3d):
         from witwin.maxwell.adapters.tidy3d import _convert_grid
         td = inject_mock_tidy3d
-        grid = mw.GridSpec.uniform(0.05)
-        result = _convert_grid(grid, td, 1.0)
+        scene = types.SimpleNamespace(grid=mw.GridSpec.uniform(0.05))
+        result = _convert_grid(scene, td, 1.0)
         assert result.dl == 0.05
 
     def test_anisotropic(self, inject_mock_tidy3d):
         from witwin.maxwell.adapters.tidy3d import _convert_grid
         td = inject_mock_tidy3d
-        grid = mw.GridSpec.anisotropic(0.01, 0.02, 0.03)
-        result = _convert_grid(grid, td, 1.0)
-        assert hasattr(result, "grid_x")
+        scene = types.SimpleNamespace(grid=mw.GridSpec.anisotropic(0.01, 0.02, 0.03))
+        result = _convert_grid(scene, td, 2.0)
+        assert isinstance(result.grid_x, td.UniformGrid)
+        assert (result.grid_x.dl, result.grid_y.dl, result.grid_z.dl) == (0.02, 0.04, 0.06)
 
-    def test_custom_rejected(self, inject_mock_tidy3d):
+    def test_custom_exports_boundary_coords(self, inject_mock_tidy3d):
+        # A nonuniform (GridSpec.custom) grid exports as per-axis CustomGridBoundaries
+        # carrying the node coordinates scaled by the metre->Tidy3D length factor.
+        import numpy as np
+
         from witwin.maxwell.adapters.tidy3d import _convert_grid
         td = inject_mock_tidy3d
-        nodes = [0.0, 0.1, 0.25, 0.45]
-        grid = mw.GridSpec.custom(nodes, nodes, nodes)
-        with pytest.raises(NotImplementedError, match="Tidy3D export does not support nonuniform"):
-            _convert_grid(grid, td, 1.0)
+        xn = [0.0, 0.1, 0.25, 0.45]
+        yn = [0.0, 0.2, 0.5]
+        zn = [0.0, 0.3, 0.55, 0.7, 1.0]
+        scene = types.SimpleNamespace(grid=mw.GridSpec.custom(xn, yn, zn))
+        result = _convert_grid(scene, td, 2.0)
+        assert isinstance(result.grid_x, td.CustomGridBoundaries)
+        assert np.allclose(result.grid_x.coords, np.asarray(xn) * 2.0)
+        assert np.allclose(result.grid_y.coords, np.asarray(yn) * 2.0)
+        assert np.allclose(result.grid_z.coords, np.asarray(zn) * 2.0)
 
-    def test_auto_rejected(self, inject_mock_tidy3d):
+    def test_auto_exports_maxwell_resolved_boundary_coords(self, inject_mock_tidy3d):
+        # A GridSpec.auto grid is resolved through maxwell's own mesher and exported as
+        # the exact resolved node coordinates, so Tidy3D reuses maxwell's mesh rather
+        # than running its own AutoGrid.
+        import numpy as np
+
         from witwin.maxwell.adapters.tidy3d import _convert_grid
+        from witwin.maxwell.fdtd.meshing import resolve_auto_grid
         td = inject_mock_tidy3d
-        grid = mw.GridSpec.auto(wavelength=0.3)
-        with pytest.raises(NotImplementedError, match="GridSpec.auto"):
-            _convert_grid(grid, td, 1.0)
+        scene = (
+            mw.Scene(
+                domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
+                grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.5),
+                device="cpu",
+            )
+            .add_structure(
+                mw.Structure(mw.Box(position=(0, 0, 0), size=(0.4, 0.4, 0.4)), mw.Material(eps_r=12.0))
+            )
+        )
+        expected = resolve_auto_grid(scene)
+        result = _convert_grid(scene, td, 3.0)
+        for axis, nodes in zip(("grid_x", "grid_y", "grid_z"), expected):
+            component = getattr(result, axis)
+            assert isinstance(component, td.CustomGridBoundaries)
+            assert np.allclose(component.coords, np.asarray(nodes) * 3.0)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package to build the discretized Yee grid",
+    )
+    def test_custom_grid_builds_identical_yee_boundaries_in_real_tidy3d(self):
+        # "Correct, not merely accepted": the exported CustomGridBoundaries must make the
+        # real Tidy3D Simulation discretize on the SAME in-domain Yee boundaries maxwell
+        # uses. Tidy3D adds PML cells outside the domain, so compare only the interior.
+        import numpy as np
+
+        graded = np.array([0.0, 0.12, 0.28, 0.5, 0.68, 0.82, 1.0], dtype=np.float64)
+        with _real_tidy3d():
+            scene = (
+                mw.Scene(
+                    domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
+                    grid=mw.GridSpec.custom(graded, graded, graded),
+                    boundary=mw.BoundarySpec.pml(num_layers=6),
+                    device="cpu",
+                )
+                .add_source(
+                    mw.PointDipole(
+                        position=(0.5, 0.5, 0.5),
+                        polarization="Ez",
+                        source_time=mw.GaussianPulse(frequency=1e14, fwidth=1e13),
+                    )
+                )
+            )
+            sim = scene.to_tidy3d()
+            s = 1.0e6
+            for axis in ("x", "y", "z"):
+                boundaries = np.asarray(getattr(sim.grid.boundaries, axis))
+                lo, hi = graded[0] * s, graded[-1] * s
+                interior = boundaries[(boundaries >= lo - 1e-3) & (boundaries <= hi + 1e-3)]
+                assert np.allclose(interior, graded * s)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package to build the discretized Yee grid",
+    )
+    def test_auto_grid_builds_maxwell_resolved_mesh_in_real_tidy3d(self):
+        # The resolved auto mesh must survive round-trip into a real Tidy3D Simulation:
+        # the in-domain Yee boundaries equal maxwell's own resolve_auto_grid nodes.
+        import numpy as np
+
+        from witwin.maxwell.fdtd.meshing import resolve_auto_grid
+        with _real_tidy3d():
+            scene = (
+                mw.Scene(
+                    domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
+                    grid=mw.GridSpec.auto(min_steps_per_wavelength=10, wavelength=0.5),
+                    boundary=mw.BoundarySpec.pml(num_layers=6),
+                    device="cpu",
+                )
+                .add_structure(
+                    mw.Structure(mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)), mw.Material(eps_r=9.0))
+                )
+                .add_source(
+                    mw.PointDipole(
+                        position=(0, 0, 0),
+                        polarization="Ez",
+                        source_time=mw.GaussianPulse(frequency=6e14, fwidth=6e13),
+                    )
+                )
+            )
+            expected = resolve_auto_grid(scene)
+            sim = scene.to_tidy3d()
+            s = 1.0e6
+            for axis, nodes in zip(("x", "y", "z"), expected):
+                nodes = np.asarray(nodes)
+                boundaries = np.asarray(getattr(sim.grid.boundaries, axis))
+                lo, hi = nodes[0] * s, nodes[-1] * s
+                interior = boundaries[(boundaries >= lo - 1e-3) & (boundaries <= hi + 1e-3)]
+                assert interior.size == nodes.size
+                assert np.allclose(interior, nodes * s)
 
 
 class TestBoundaryConversion:

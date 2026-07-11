@@ -1386,13 +1386,56 @@ def _convert_boundary(boundary, td):
 # Grid conversion
 # ---------------------------------------------------------------------------
 
-def _convert_grid(grid, td, s):
-    """Convert maxwell GridSpec to Tidy3D GridSpec (dl x *s*)."""
-    if grid.is_custom or grid.is_auto:
-        raise NotImplementedError(
-            "Tidy3D export does not support nonuniform (GridSpec.custom / "
-            "GridSpec.auto) grids; use a uniform GridSpec."
+def _axis_grid_1d(coords, spacing, td, s):
+    """One Tidy3D 1D grid for a single axis (lengths x *s*).
+
+    A nonuniform axis carries explicit node coordinates and maps to
+    ``td.CustomGridBoundaries`` (grid *boundary* coordinates in Tidy3D units); a
+    uniform axis maps to ``td.UniformGrid`` at the scaled step. maxwell's custom
+    node arrays already span the domain exactly (validated at prepare time), so the
+    scaled coordinates coincide with the exported simulation bounds and Tidy3D
+    discretizes the interior on the identical Yee boundaries.
+    """
+    if coords is not None:
+        return td.CustomGridBoundaries(coords=np.asarray(coords, dtype=np.float64) * s)
+    return td.UniformGrid(dl=float(spacing) * s)
+
+
+def _convert_grid(scene, td, s):
+    """Convert a maxwell ``GridSpec`` to a Tidy3D ``GridSpec`` (lengths x *s*).
+
+    Uniform and per-axis-anisotropic grids export as ``td.UniformGrid`` steps. A
+    nonuniform grid exports as per-axis ``td.CustomGridBoundaries`` carrying the exact
+    Yee node coordinates, so the Tidy3D simulation discretizes on the *same* grid
+    maxwell uses and the two solvers compare cell-for-cell instead of across two
+    independent meshers:
+
+    * ``GridSpec.custom`` forwards its node arrays directly.
+    * ``GridSpec.auto`` is first resolved through maxwell's own mesher
+      (``resolve_auto_grid``), which honours the index-aware step targets,
+      ``override_structures`` and ``layer_refinement`` that a lossy parameter map to
+      Tidy3D's ``AutoGrid`` would drop. Exporting the resolved nodes reproduces the
+      maxwell mesh exactly rather than letting Tidy3D's AutoGrid pick a different one.
+    """
+    grid = scene.grid
+
+    if grid.is_auto:
+        from ..fdtd.meshing import resolve_auto_grid
+
+        x_nodes, y_nodes, z_nodes = resolve_auto_grid(scene)
+        return td.GridSpec(
+            grid_x=_axis_grid_1d(x_nodes, None, td, s),
+            grid_y=_axis_grid_1d(y_nodes, None, td, s),
+            grid_z=_axis_grid_1d(z_nodes, None, td, s),
         )
+
+    if grid.is_custom:
+        return td.GridSpec(
+            grid_x=_axis_grid_1d(grid.x_coords, grid.dx, td, s),
+            grid_y=_axis_grid_1d(grid.y_coords, grid.dy, td, s),
+            grid_z=_axis_grid_1d(grid.z_coords, grid.dz, td, s),
+        )
+
     if grid.dx == grid.dy == grid.dz:
         return td.GridSpec.uniform(dl=grid.dx * s)
     return td.GridSpec(
@@ -1460,7 +1503,7 @@ def scene_to_tidy3d(
     # -- grid ------------------------------------------------------------------
     td_grid = None
     if scene.grid is not None:
-        td_grid = _convert_grid(scene.grid, td, s)
+        td_grid = _convert_grid(scene, td, s)
 
     # -- boundary --------------------------------------------------------------
     td_boundary = td.BoundarySpec.all_sides(boundary=td.PML())
