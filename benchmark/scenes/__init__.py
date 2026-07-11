@@ -11,6 +11,7 @@ from benchmark.scenes.dipole import (
     LORENTZ_RESONATOR,
     MULTI_DIELECTRIC,
 )
+from benchmark.scenes.media import MEDIA_EXPORT_SCENARIOS
 from benchmark.scenes.planewave import (
     DIELECTRIC_SLAB,
     DIELECTRIC_SPHERE,
@@ -37,6 +38,7 @@ SCENARIOS = {
         DIELECTRIC_SPHERE,
         DIPOLE_DIELECTRIC_SPHERE,
         DIPOLE_TWO_FREQ,
+        *MEDIA_EXPORT_SCENARIOS,
     )
 }
 

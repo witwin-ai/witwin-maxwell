@@ -17,13 +17,15 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 
 # Lowered by each P5 phase in the commit that removes guards. Never raised
 # without a corresponding update to docs/dev/fdtd_gap_05_guard_census.md.
-# P5.4 (Bloch broadband) re-measured this at 66: the pulsed (broadband) Bloch
-# source injection deleted both excitation/temporal.py CW-only guards (2 -> 0),
-# the general grating TFSF slab runtime deleted one stepping.py raise (5 -> 4)
-# and one tfsf_state.py raise (2 -> 1), and the mixed Bloch/CPML axis
-# generalization deleted one adjoint/core.py raise (6 -> 5), taking the AST
-# capability count 71 -> 66.
-CAPABILITY_GUARD_BUDGET = 66
+# P5.6 (cross-solver parity) re-measured this at 63: the Tidy3D export commits
+# (PEC/PECMedium, sigma_e+dispersive, Kerr/TPA, anisotropy, Medium2D/Graphene/
+# LossyMetal, modulation, custom poles/PerturbationMedium, geometry/source/
+# monitor kinds, nonuniform grids) lifted adapters/tidy3d.py capability guards
+# from 13 -> 10, taking the AST capability count 66 -> 63. FDFD static parity
+# and FDFD nonuniform grids are deferred by user decision (2026-07-11), so no
+# fdfd/ guard was removed; the fdfd/solver.py messages were reworded to honest
+# user-deferral statements instead.
+CAPABILITY_GUARD_BUDGET = 63
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with the table in docs/dev/fdtd_gap_05_guard_census.md.
@@ -133,8 +135,15 @@ BANNED_DEFERRAL_PHRASES = ("not implemented yet", "not supported yet", "in v1")
 # entry names the owning phase and is matched as a path prefix. These are the
 # ONLY files allowed to keep a deferral phrase after P5.5.
 PHRASE_GATE_ALLOWLIST = (
-    ("witwin/maxwell/adapters/tidy3d.py", "P5.6 cross-solver parity export reword"),
-    ("witwin/maxwell/fdfd/", "P5.6 FDFD static-parity reword (Kerr/Tensor3x3/magnetic)"),
+    # adapters/tidy3d.py was retired from the allowlist in P5.6: every remaining
+    # export guard states a physical or architectural reason (Tidy3D has no such
+    # construct, or the per-cell profile is not resolvable at material-conversion
+    # time) and none uses a deferral phrase.
+    # fdfd/ stays allowlisted: FDFD static parity (Kerr / Tensor3x3 / magnetic /
+    # in-domain PEC) and FDFD nonuniform grids are deferred by user decision
+    # (2026-07-11), so these guards remain as honest user-deferral statements
+    # rather than being closed.
+    ("witwin/maxwell/fdfd/", "P5.6 FDFD static parity deferred by user decision (2026-07-11)"),
     ("witwin/maxwell/postprocess/", "P5.9 postprocess generality reword"),
     ("witwin/maxwell/fdtd/adjoint/", "adjoint deferred-branch reword (P5.7+)"),
 )

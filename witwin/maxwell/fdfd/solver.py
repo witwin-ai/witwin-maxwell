@@ -148,14 +148,22 @@ def _validate_supported_fdfd_materials(scene):
         if material is None:
             continue
         if bool(getattr(material, "is_nonlinear", False)):
-            raise NotImplementedError("FDFD does not support Kerr nonlinear media in v1.")
+            raise NotImplementedError(
+                "FDFD static parity for Kerr nonlinear media is deferred (user decision 2026-07-11): a "
+                "frequency-domain solve has no single linear operator for a field-amplitude-dependent "
+                "permittivity. Use FDTD, which models the nonlinearity directly."
+            )
         if bool(getattr(material, "has_full_epsilon_tensor", False)):
             raise NotImplementedError(
-                "FDFD does not support full (off-diagonal Tensor3x3) anisotropic permittivity; use FDTD."
+                "FDFD static parity for full (off-diagonal Tensor3x3) anisotropic permittivity is deferred "
+                "(user decision 2026-07-11): the curl-curl operator assembly here forms only per-axis "
+                "diagonal material components. Use FDTD, which models the coupled tensor."
             )
         if _is_nonvacuum_magnetic_material(material):
             raise NotImplementedError(
-                "FDFD currently supports electric anisotropy only; magnetic media and magnetic dispersion are not implemented yet."
+                "FDFD static parity for magnetic media and magnetic dispersion is deferred (user decision "
+                "2026-07-11): this solver assembles an electric-only operator with mu_r = 1. Use FDTD, "
+                "which models magnetic response."
             )
 
 
@@ -290,7 +298,9 @@ class FDFD:
             material = getattr(structure, "material", None)
             if material is not None and bool(getattr(material, "is_pec", False)):
                 raise NotImplementedError(
-                    "FDFD does not support in-domain PEC materials yet; use FDTD for PEC-material scenes."
+                    "FDFD static parity for in-domain PEC materials is deferred (user decision 2026-07-11): "
+                    "the in-domain Dirichlet/mask handling for a perfect conductor is unimplemented here. Use "
+                    "FDTD for PEC-material scenes."
                 )
         self.material_eps_components, self.material_mu_components = self.scene.compile_material_components(
             frequency=self.frequency

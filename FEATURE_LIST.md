@@ -209,7 +209,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Isotropic conductive-material support via `sigma_e` folded into effective complex `epsilon_r(omega)`
 - Axis-aligned diagonal electric anisotropy and diagonal `sigma_e_tensor` support in the Yee-grid operator
 - Per-face `none` / `pml` boundary selection, including one-sided and mixed-axis PML layouts
-- Explicit fast-fail validation for unsupported magnetic response and Kerr media
+- Explicit fast-fail validation for magnetic response, Kerr/nonlinear media, full off-diagonal `Tensor3x3` permittivity, and in-domain PEC: FDFD static parity for these (and FDFD nonuniform grids) is deferred by user decision (2026-07-11), so the guards state an honest deferral and route to FDTD, which models them
 - Configurable GMRES settings via `GMRES(max_iter, tol, restart, solver_type, preconditioner)`
 - GPU-native preconditioners for the iterative solvers: `none`, `jacobi` (default), `ssor` (relaxation via `GMRES(ssor_omega=...)`, default 0.8), `ilu` (ILU(0); unstable on the indefinite curl-curl operator — see `benchmark/FDFD_PERFORMANCE.md`), and `ams` (experimental in-repo Hiptmair–Xu auxiliary-space preconditioner with geometric multigrid; measured non-contractive on the indefinite time-harmonic operator — see the module docstring for its scope)
 - Double-precision iterative solves via `GMRES(precision="double")`: the Krylov recurrences and preconditioner run in complex128 while assembly and returned fields stay complex64; removes the float32 round-off stagnation (measured: `sqmr`+`ssor` converges to 1e-7 at 48³ where single precision stalls at ~2e-2)
@@ -343,8 +343,10 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 ## Tidy3D Benchmarking
 
 - `benchmark/` package as the unified Maxwell-vs-Tidy3D benchmarking entrypoint
-- One-file-per-scenario definitions organized under `benchmark/scenes/dipole/` and `benchmark/scenes/planewave/`
+- One-file-per-scenario definitions organized under `benchmark/scenes/dipole/`, `benchmark/scenes/planewave/`, and `benchmark/scenes/media/`
 - Predefined ~128^3-grid benchmark scenarios covering vacuum dipoles, plane-wave slab/sphere scattering, dispersive resonators, multi-dielectric scenes, and `dipole_dielectric_sphere`
+- P3-media Tidy3D cross-validation scenarios under `benchmark/scenes/media/` exercising the phase-3 material physics that has a Tidy3D export equivalent: `debye_slab` (Debye dispersion → `td.Debye`), `sigma_e_drude_slab` (Drude + static conductivity → one `td.PoleResidue`), `anisotropic_slab` (diagonal anisotropy → `AnisotropicMedium`), `kerr_slab` (Kerr χ³ → `NonlinearSpec`), `modulated_slab` (time modulation → `Medium` + `ModulationSpec`), and `graphene_sheet` (Graphene/`Medium2D` sheet → `td.Medium2D`)
+- Per-medium validation-coverage gate `tests/validation/benchmark/test_media_validation_coverage.py` backed by the `benchmark/media_coverage.py` registry: it discovers every public `is_*`/`has_*` capability flag on `media.py` (introspection, not a hardcoded class list) and fails if any capability lacks a declared validation path — a Tidy3D benchmark scenario, an FDFD cross-check, or a documented analytic-reference test — then verifies each claim (Tidy3D-path media must export through the adapter and reproduce `Material.relative_permittivity` for the clean-identity cases; non-equivalent fallback media must genuinely raise on export, proving the analytic fallback is justified). The per-capability path table is recorded in `benchmark/RESULTS.md` under `## Validation coverage`
 - HDF5-based Tidy3D reference caching under `benchmark/cache/`
 - Benchmark cache validation keyed to the exported Tidy3D scene configuration so stale reference data is regenerated automatically
 - Benchmark-side Tidy3D exports preserve the full simulation domain and crop field/flux comparisons back to Maxwell's physical interior during analysis

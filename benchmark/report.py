@@ -132,6 +132,12 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
         for _, plot_line in group_plots:
             lines.append(plot_line)
         lines.append("")
+
+    # The per-medium validation-coverage table is regenerated from the coverage
+    # registry so it stays in sync with media.py even across benchmark reruns.
+    from benchmark.media_coverage import validation_coverage_markdown_lines
+
+    lines.extend(validation_coverage_markdown_lines())
     lines.extend(
         [
             f"_Last regenerated: {datetime.now().astimezone().isoformat(timespec='seconds')}_",
