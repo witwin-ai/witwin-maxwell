@@ -123,6 +123,13 @@ def _convert_source_time(source_time, td):
 
 def _convert_material(material, td):
     """Convert a Maxwell Material to a Tidy3D medium."""
+    if getattr(material, "is_pec", False):
+        # A PEC marker has no finite permittivity (eps_r stays at its 1.0
+        # default). Without this early branch it would fall through to the
+        # non-dispersive td.Medium(permittivity=1.0) path and silently export
+        # as vacuum. Tidy3D models a perfect electric conductor with the
+        # dedicated PECMedium (eps_model -> -inf), not a finite dielectric.
+        return td.PECMedium()
     if getattr(material, "is_medium2d", False):
         raise NotImplementedError("Tidy3D export for 2D sheet (Medium2D) materials is not implemented yet.")
     if getattr(material, "is_lossy_metal", False):

@@ -319,7 +319,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Adapter module at `maxwell/adapters/tidy3d.py` with optional `tidy3d` import
 - `GaussianPulse` export carries Maxwell's carrier delay into the Tidy3D source phase so single-frequency pulse benchmarks compare against the same source spectrum
 - `PlaneWave` export places the source inside the physical interior and uses Tidy3D's infinite-plane aperture convention instead of a finite rectangular source patch
-- Supported mappings: Domain, GridSpec, BoundarySpec (uniform or per-face PML/periodic/PEC/PMC/Bloch export), Structure (Box/Sphere/Cylinder/Cone), Material (simple conductive / Drude / Lorentz / Debye / mixed PoleResidue with `mu_r = 1`), PointDipole, PlaneWave, GaussianBeam, PointMonitor, PlaneMonitor, FinitePlaneMonitor, FluxMonitor, symmetry
+- Supported mappings: Domain, GridSpec, BoundarySpec (uniform or per-face PML/periodic/PEC/PMC/Bloch export), Structure (Box/Sphere/Cylinder/Cone), Material (simple conductive / Drude / Lorentz / Debye / mixed PoleResidue with `mu_r = 1`, plus `Material.pec()` mapped to Tidy3D's dedicated `PECMedium`), PointDipole, PlaneWave, GaussianBeam, PointMonitor, PlaneMonitor, FinitePlaneMonitor, FluxMonitor, symmetry
 
 ## GDS Adapter
 

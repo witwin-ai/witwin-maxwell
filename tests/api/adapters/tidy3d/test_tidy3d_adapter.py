@@ -7,12 +7,35 @@ called with the right arguments.
 
 from __future__ import annotations
 
+import contextlib
+import importlib
+import importlib.util
 import math
 import sys
 import types
 from unittest.mock import MagicMock
 
 import pytest
+
+
+@contextlib.contextmanager
+def _real_tidy3d():
+    """Yield the genuine tidy3d module, bypassing the mock in sys.modules.
+
+    The autouse ``inject_mock_tidy3d`` fixture replaces ``sys.modules['tidy3d']``
+    for every test in this module. A handful of physical-convention checks need
+    the real package, so temporarily drop the mock, import the real module, and
+    restore the mock afterwards.
+    """
+    saved = sys.modules.pop("tidy3d", None)
+    try:
+        real_td = importlib.import_module("tidy3d")
+        yield real_td
+    finally:
+        if saved is not None:
+            sys.modules["tidy3d"] = saved
+        else:
+            sys.modules.pop("tidy3d", None)
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +56,7 @@ def _make_mock_tidy3d():
             return f"{type(self).__name__}({self._kwargs})"
 
     class Medium(_Recorder): pass
+    class PECMedium(_Recorder): pass
     class Drude(_Recorder): pass
     class Lorentz(_Recorder): pass
     class Debye(_Recorder): pass
@@ -68,6 +92,7 @@ def _make_mock_tidy3d():
             return cls(dl=dl)
 
     td.Medium = Medium
+    td.PECMedium = PECMedium
     td.Drude = Drude
     td.Lorentz = Lorentz
     td.Debye = Debye
@@ -283,6 +308,55 @@ class TestMediumConversion:
         medium = mw.Material(eps_r=2.0, kerr_chi3=1.0e-10)
         with pytest.raises(NotImplementedError, match="Kerr nonlinear"):
             _convert_material(medium, td)
+
+    def test_pec_medium_exports_as_pec_not_vacuum(self, inject_mock_tidy3d):
+        # Regression: Material.pec() carries eps_r == 1.0 by construction, so
+        # without a dedicated PEC branch it fell through to the non-dispersive
+        # td.Medium(permittivity=1.0) path and silently exported as vacuum.
+        td = inject_mock_tidy3d
+        medium = mw.Material.pec()
+        assert medium.is_pec
+        result = _convert_material(medium, td)
+        # Must use Tidy3D's dedicated perfect-conductor construct, never the
+        # finite-dielectric Medium (which for eps_r=1.0 would be vacuum).
+        assert isinstance(result, td.PECMedium)
+        assert not isinstance(result, td.Medium)
+        assert not hasattr(result, "permittivity")
+
+    def test_pec_structure_scene_exports_pec_medium(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        scene = (
+            mw.Scene(
+                domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.pml(num_layers=10),
+                device="cpu",
+            )
+            .add_structure(
+                mw.Structure(mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)), mw.Material.pec())
+            )
+            .add_source(mw.PointDipole(position=(0.4, 0, 0), polarization="Ez", source_time=mw.CW(frequency=1e9)))
+        )
+        sim = scene.to_tidy3d(frequencies=1e9)
+        assert len(sim.structures) == 1
+        assert isinstance(sim.structures[0].medium, td.PECMedium)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the eps_model convention check",
+    )
+    def test_pec_export_is_conductor_not_vacuum_real_tidy3d(self):
+        # Physical-convention check against the real tidy3d: the exported PEC
+        # medium must model a perfect conductor (eps_model -> large negative),
+        # emphatically NOT the vacuum value of 1.0 the buggy path produced.
+        with _real_tidy3d() as real_td:
+            medium = mw.Material.pec()
+            result = _convert_material(medium, real_td)
+            assert isinstance(result, real_td.PECMedium)
+            freq = 3e14
+            eps = complex(result.eps_model(freq))
+            assert eps.real < -1.0
+            assert not math.isclose(eps.real, 1.0, rel_tol=0.0, abs_tol=1e-6)
 
 
 class TestGeometryConversion:
