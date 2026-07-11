@@ -30,8 +30,6 @@ _FACE_SPEC_RANGES = {
 }
 _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
 _ETA0 = 376.730313668
-_PLANE_WAVE_POWER_CALIBRATION = 0.958
-_PLANE_WAVE_DELAY_CALIBRATION_S = 1.65e-10
 
 
 def _normalized_point_dipole_profile(dist_sq: torch.Tensor, width: float) -> torch.Tensor:
@@ -621,6 +619,27 @@ def _surface_plane_spec_positions(solver, spec):
 
 
 def _plane_wave_power_scale(source, aperture_bounds, injection_axis: str) -> float:
+    """Absolute surface-current scale for unit time-averaged incident power.
+
+    The soft ``PlaneWave`` face injects the surface-equivalent currents of the
+    target incident wave (``J_s = n x H_inc`` on the electric face, ``M_s =
+    -n x E_inc`` on the magnetic face). By the surface-equivalence principle
+    these radiate the incident field forward with unit gain, so the injected
+    incident amplitude equals the specified ``E`` amplitude scaled here. On the
+    Yee grid the numerical wave impedance of a plane wave that satisfies the
+    discrete dispersion relation is exactly ``eta0`` -- the leapfrog identity
+    ``sin(omega*dt/2)/(c*dt) = sin(k~*d/2)/d`` makes ``H0/E0 = 1/eta0`` -- so the
+    physical-impedance magnetic current the injector uses (``magnetic_physical_
+    vector(..., eta0)``) is the correct numerical amplitude and the forward
+    radiation gain is unity. No empirical calibration is therefore required.
+
+    Normalizing to unit incident power over the illuminated aperture, the
+    time-averaged forward power ``0.5*|E0|^2*A*cos(theta)/eta0`` equals one when
+    ``|E0| = 1/sqrt(unit_power)`` with ``unit_power = A*cos(theta)/(2*eta0)``.
+    The residual discrete-injection error is below the 2% absolute-power
+    acceptance across frequencies and spacings (see
+    ``tests/sources/incident/test_soft_planewave_absolute_power.py``).
+    """
     axis_index = _AXIS_TO_INDEX[injection_axis]
     tangential_extents = [
         float(axis_bounds[1] - axis_bounds[0])
@@ -632,7 +651,7 @@ def _plane_wave_power_scale(source, aperture_bounds, injection_axis: str) -> flo
     unit_power = aperture_area * incidence_cosine / (2.0 * _ETA0)
     if unit_power <= 0.0:
         raise ValueError("PlaneWave source requires a positive aperture power for normalization.")
-    return _PLANE_WAVE_POWER_CALIBRATION / np.sqrt(unit_power)
+    return 1.0 / np.sqrt(unit_power)
 
 
 def _prepare_plane_wave_surface_source(solver, source, *, source_index):
@@ -730,7 +749,12 @@ def _prepare_plane_wave_surface_source(solver, source, *, source_index):
             reference_point=reference_point,
             propagation_speed=phase_speed,
         )
-        delay_patch = delay_patch + _PLANE_WAVE_DELAY_CALIBRATION_S
+        # The electric- and magnetic-face terms share one spatially uniform
+        # launch-time origin, so the incident phase is set entirely by the
+        # per-cell propagation delay above. A constant time offset added
+        # identically to both faces only rotates the global launch phase and
+        # leaves every phasor magnitude -- hence the radiated power and the E/H
+        # amplitude ratio -- invariant, so no empirical delay term is applied.
         scale = spec["sign"] * component_scale * spatial_amplitude * coeff_patch
         return build_term_from_profile(
             solver,
