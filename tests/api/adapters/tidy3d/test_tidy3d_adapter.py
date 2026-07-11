@@ -457,19 +457,37 @@ class TestMediumConversion:
         assert result.coeffs[0] == (1.0, 1e-12)
 
     def test_static_magnetic_medium_is_rejected(self, inject_mock_tidy3d):
+        # Tidy3D's FDTD solver fixes mu_r = 1: a genuinely magnetic medium
+        # (mu_r != 1) has no equivalent construct, so the guard must reject it
+        # while stating that physical reason -- not a deferral phrase.
         td = inject_mock_tidy3d
         medium = mw.Material(eps_r=2.0, mu_r=1.2)
-        with pytest.raises(NotImplementedError, match="mu_r = 1"):
+        # The material really is magnetic at the export frequency (mu != mu0),
+        # which is exactly why Tidy3D cannot represent it.
+        assert medium.relative_permeability(5e14) == pytest.approx(1.2)
+        with pytest.raises(NotImplementedError, match="mu_r = 1") as info:
             _convert_material(medium, td)
+        message = str(info.value)
+        assert "no magnetic-material model" in message
+        assert "not implemented yet" not in message
 
     def test_magnetic_dispersive_medium_is_rejected(self, inject_mock_tidy3d):
+        # A mu-pole (dispersive permeability) medium has no Tidy3D permeability
+        # pole construct; the guard rejects it with the physical reason.
         td = inject_mock_tidy3d
         medium = mw.Material(
             eps_r=2.0,
             mu_lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=5e14, gamma=1e13),),
         )
-        with pytest.raises(NotImplementedError, match="magnetic dispersive"):
+        assert medium.is_magnetic_dispersive
+        # The permeability is genuinely frequency-dispersive (mu(omega) != 1 off
+        # resonance), so no static Tidy3D medium can carry it.
+        assert medium.relative_permeability(1e14) != pytest.approx(1.0)
+        with pytest.raises(NotImplementedError, match="magnetic dispersive") as info:
             _convert_material(medium, td)
+        message = str(info.value)
+        assert "no magnetic-material model" in message
+        assert "not implemented yet" not in message
 
     def test_kerr_chi3_exports_nonlinear_susceptibility(self, inject_mock_tidy3d):
         # A Kerr (chi3) Material exports a non-dispersive Medium carrying a

@@ -683,13 +683,20 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
     if getattr(material, "has_custom_poles", False):
         return _convert_material(_homogenize_custom_poles(material), td, length_scale, frequencies=frequencies)
     if material.is_magnetic_dispersive:
-        raise NotImplementedError("Tidy3D export for magnetic dispersive Material is not implemented yet.")
+        raise NotImplementedError(
+            "Tidy3D export for magnetic dispersive Material has no equivalent: Tidy3D has no "
+            "magnetic-material model. Its FDTD solver fixes the relative permeability at mu_r = 1 "
+            "and exposes no permeability pole (Debye/Drude/Lorentz) construct, so a frequency-"
+            "dispersive mu(omega) cannot be represented."
+        )
     if not math.isclose(float(material.mu_r), 1.0, rel_tol=0.0, abs_tol=1.0e-12) or float(
         getattr(material, "sigma_m", 0.0)
     ) != 0.0:
         raise NotImplementedError(
             "Tidy3D export currently assumes mu_r = 1 and no static magnetic conductivity "
-            "(sigma_m = 0); magnetically-lossy media have no Tidy3D equivalent and are not implemented yet."
+            "(sigma_m = 0): Tidy3D has no magnetic-material model. Its FDTD solver fixes the "
+            "relative permeability at 1 and models no magnetic loss, so a magnetic (mu_r != 1) "
+            "or magnetically-lossy (sigma_m != 0) medium has no Tidy3D equivalent."
         )
 
     modulation = getattr(material, "modulation", None)

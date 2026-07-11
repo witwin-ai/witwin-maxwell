@@ -46,10 +46,12 @@ input validation, or a case that is physically/mathematically undefined. Keyed b
 | `witwin/maxwell/postprocess/stratton_chu.py` | `must have at least one material cell outside the surface` | Input validation (plan §2.1). |
 | `witwin/maxwell/postprocess/stratton_chu.py` | `must expose tangential_bounds metadata` | Input validation of required face metadata (plan §2.1). |
 
-Two contract guards currently say "not implemented yet" in their message
-(`tidy3d.py` magnetic pair); their wording must change to state the physical reason
-("Tidy3D has no magnetic-material model") as part of P5.6, but they are contract
-guards regardless of wording.
+The `tidy3d.py` magnetic pair was reworded in P5.6 to state the physical reason
+directly ("Tidy3D has no magnetic-material model": the Tidy3D FDTD solver fixes
+mu_r = 1 and exposes no permeability-pole construct), replacing the former
+"not implemented yet" wording. They remain contract guards regardless of wording,
+still keyed by the substrings `Tidy3D export for magnetic dispersive Material` and
+`Tidy3D export currently assumes mu_r = 1`, so `CONTRACT_GUARDS` is unchanged.
 
 ## Capability-guard budget schedule
 
