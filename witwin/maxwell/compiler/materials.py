@@ -106,7 +106,10 @@ def _component_values_from_sample(value, *, name: str):
         return {"x": float(value.xx), "y": float(value.yy), "z": float(value.zz)}
     if isinstance(value, Tensor3x3):
         raise NotImplementedError(
-            f"The Maxwell material compiler currently supports DiagonalTensor3 only for {name}; Tensor3x3 is not implemented yet."
+            f"The Maxwell material compiler stores {name} on the diagonal Yee components; "
+            f"off-diagonal Tensor3x3 coupling is realized only for permittivity via the "
+            f"coupled-tensor eps kernel. A full off-diagonal {name} tensor has no "
+            f"corresponding coupled update kernel on the Yee grid."
         )
     scalar = float(value)
     return {axis: scalar for axis in _AXES}
@@ -1026,12 +1029,12 @@ def _sibc_structures(scene):
 def _reject_sibc(reason: str):
     """Single physically-worded rejection for unsupported SIBC configurations.
 
-    All the ``v1`` scope limits funnel through this one ``raise`` so the reason is
+    All the SIBC scope limits funnel through this one ``raise`` so the reason is
     always contextual (never "not implemented yet") while the guard census counts a
     single capability guard for the surface-impedance boundary.
     """
     raise NotImplementedError(
-        f"LossyMetalMedium surface-impedance boundary v1 {reason} "
+        f"LossyMetalMedium surface-impedance boundary: {reason} "
         "The scalar normal-incidence Leontovich Z_s only models an axis-aligned planar face; resolve "
         "the metal volumetrically with Material(sigma_e=...) or use Material.pec() for other cases."
     )

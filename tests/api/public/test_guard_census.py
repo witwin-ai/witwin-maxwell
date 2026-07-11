@@ -17,12 +17,12 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 
 # Lowered by each P5 phase in the commit that removes guards. Never raised
 # without a corresponding update to docs/dev/fdtd_gap_05_guard_census.md.
-# P5.3 re-measured this at 74 (unchanged): the grid x feature coherence work
-# lifted its cases by generalizing ValueError-gated / approximation paths
-# (per-node subpixel + conformal-PEC offsets, region-uniform TFSF/mode bounds,
-# launch-local soft-PlaneWave spacing), none of which are NotImplementedError
-# raises, so the AST capability count did not move -- as in P5.1 and P5.2.
-CAPABILITY_GUARD_BUDGET = 74
+# P5.5 (stub completion) re-measured this at 71: sigma_m folded into the H
+# update, Graphene interband via a Lorentz sheet-pole fit, the non-periodic
+# TFSF slab forward runtime, and the LossyMetalMedium normal-incidence SIBC
+# runtime each deleted a NotImplementedError raise (stepping/runtime/compiler),
+# taking the AST capability count 74 -> 71.
+CAPABILITY_GUARD_BUDGET = 71
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with the table in docs/dev/fdtd_gap_05_guard_census.md.
@@ -116,3 +116,48 @@ def test_contract_guard_list_is_accurate():
             f"Stale contract-guard entry: {file!r} has no NotImplementedError containing {key!r}. "
             "Update CONTRACT_GUARDS and docs/dev/fdtd_gap_05_guard_census.md."
         )
+
+
+# --- P5.5 phrase gate --------------------------------------------------------
+# Plan P5.5 criterion: no public *forward-path* NotImplementedError may say a
+# guard is merely deferred ("not implemented yet" / "not supported yet" / "in
+# v1"); every such message must state the physical or mathematical reason the
+# case is unsupported. The gated forward path is media.py, compiler/,
+# fdtd/runtime/, fdtd/boundary/, scene.py, and simulation.py -- i.e. everything
+# except the modules a LATER phase owns for rewording, enumerated below.
+
+BANNED_DEFERRAL_PHRASES = ("not implemented yet", "not supported yet", "in v1")
+
+# Modules whose NotImplementedError wording is owned by a later phase; each
+# entry names the owning phase and is matched as a path prefix. These are the
+# ONLY files allowed to keep a deferral phrase after P5.5.
+PHRASE_GATE_ALLOWLIST = (
+    ("witwin/maxwell/adapters/tidy3d.py", "P5.6 cross-solver parity export reword"),
+    ("witwin/maxwell/fdfd/", "P5.6 FDFD static-parity reword (Kerr/Tensor3x3/magnetic)"),
+    ("witwin/maxwell/fdtd/excitation/", "P5.4 Bloch broadband source/TFSF reword"),
+    ("witwin/maxwell/postprocess/", "P5.9 postprocess generality reword"),
+    ("witwin/maxwell/fdtd/adjoint/", "adjoint deferred-branch reword (P5.7+)"),
+)
+
+
+def _phrase_gate_allowlisted(rel: str) -> bool:
+    return any(rel.startswith(prefix) for prefix, _ in PHRASE_GATE_ALLOWLIST)
+
+
+def test_no_deferral_phrase_in_public_forward_path():
+    guards = collect_guards()
+    violations = []
+    for rel, lineno, msg in guards:
+        low = msg.lower()
+        if not any(phrase in low for phrase in BANNED_DEFERRAL_PHRASES):
+            continue
+        if _phrase_gate_allowlisted(rel):
+            continue
+        violations.append((rel, lineno, msg))
+    assert not violations, (
+        "Public forward-path NotImplementedError messages must state a physical or "
+        "mathematical reason, never a deferral phrase "
+        f"{BANNED_DEFERRAL_PHRASES}. Reword these or, if a later phase owns the module, "
+        "add it to PHRASE_GATE_ALLOWLIST with the owning phase:\n"
+        + "\n".join(f"  {rel}:{lineno}  {msg[:90]}" for rel, lineno, msg in violations)
+    )

@@ -59,14 +59,20 @@ guards regardless of wording.
 | after P5.1 (adjoint) | **85 (measured)** | multi-source + `normalize_source` single-source raises deleted (bridge+core 13 → 11). Most P5.1 capability (σ_e, χ²/TPA, full-aniso ε, Bloch+dispersive, custom/uniform sources) was lifted by narrowing the message-branch conditions inside the single `_unsupported_adjoint_medium` raise and generalizing `_validate_supported_configuration`, so the AST raise-count dropped only 87 → 85 even though the differentiable forward surface grew substantially. The projected `≤ 76` assumed guard *deletion*; the realized route was branch-condition lifting. |
 | after P5.2 (combinations) | **74 (measured)** | Projected `≤ 62`; realized `74`. As with P5.1, most P5.2 edges (nonlinear+dispersive, aniso+dispersive, aniso+σ_e, aniso+PML-overlap under CPML, modulated+dispersive/nonlinear, multi-frequency modulation, modulated-slab-CPML) were enabled by *narrowing branch conditions and composing coefficient paths*, not by deleting `raise` statements, so the AST count fell only 85 → 74. `runtime/materials.py` went 10 → 6 (not ≤ 3): the 6 that remain guard genuinely-unsupported combinations — nonlinear / full-aniso / modulated media under complex Bloch fields (need complex-field kernels), modulated + full-aniso (per-step 3×3 re-inversion), full-aniso + nonlinear cross-material defense, and full-aniso overlapping a split-field (non-CPML) PML. `media.py` retains 3 material-combination construction guards (nonlinear+aniso, modulated+aniso, modulated+σ_e) plus the dispersive-full-tensor and PerturbationMedium-full-tensor frequency-evaluation deferrals; all are physics-worded. Every remaining `media.py` / `runtime/materials.py` combination guard was reworded off "not implemented yet" / "in v1" in this phase. |
 | after P5.3 (grid) | **74 (measured)** | Projected `≤ 58`; realized `74` (unchanged). As in P5.1/P5.2, P5.3 lifted the grid × feature coherence cases by generalizing *ValueError-gated / approximation* paths, not by deleting `NotImplementedError` raises, so the AST capability count did not move. Subpixel averaging and conformal PEC now scale their per-sub-sample offsets by the local Yee dual-cell width instead of the scalar `Scene.dx` (that `Scene.dx` nonuniform guard is a `ValueError`, never counted); the TFSF / mode-plane "locally uniform" hard rejects became bounded region-uniform `ValueError` contracts; and the soft-`PlaneWave` numerical-dispersion correction switched from global-minimum to launch-local spacing. None of these are `NotImplementedError` guards. The grid-related `NotImplementedError` raises that remain are out of P5.3 scope: `tidy3d.py` / `simulation.py` nonuniform-grid rejects belong to P5.6 (cross-solver parity) and the TFSF-slab `axis='z'` / slab-runtime rejects to P5.4/P5.5. Acceptance proof: `tests/validation/physics/test_autogrid_subpixel_thesis.py` shows `GridSpec.auto` + `SubpixelSpec(samples=(2,2,2), averaging="polarized")` reaches lower field error at fewer cells than uniform + subpixel on a high-contrast (`eps_r=12`) sphere. |
+| after P5.5 (stubs) | **71 (measured)** | Projected `≤ 45`; realized `71` (74 → 71). The four P5.5 stubs each landed a runtime path rather than a large guard sweep: `sigma_m` folded into the H update with no pre-existing raise to delete; the `Graphene` interband Lorentz sheet-pole fit deleted the `media.py` interband raise (media 8 → 7); the non-periodic TFSF slab forward runtime deleted one `stepping.py` raise (6 → 5) and one `tfsf_state.py` raise (3 → 2); and the `LossyMetalMedium` SIBC runtime replaced its descriptor-only raise with a single physics-worded SIBC-configuration guard (compiler unchanged at 6). Net −3. Every remaining forward-path guard message now states a physical or mathematical reason: the compiler Tensor3x3-`mu_r`/`sigma_e`/`sigma_m` guard and the SIBC guard were reworded off "not implemented yet" / "v1" in this phase, and the phrase gate (below) is now live. |
 | after P5.4 (Bloch broadband) | ≤ 50 | temporal/stepping/tfsf Bloch guards |
-| after P5.5 (stubs) | ≤ 45 | SIBC/graphene/sigma_m/TFSF-slab |
 | after P5.6 (parity) | ≤ 33 | tidy3d 13 → ≤ 4 capability; fdfd static parity |
 | after P5.7–P5.9 | ≤ 25 | plan §5 global target |
 
 Every remaining guard's message must state a physical or mathematical reason,
-never "not implemented yet" — enforced by the phrase gate in the same test file
-once P5.5 lands.
+never "not implemented yet" / "not supported yet" / "in v1". As of P5.5 this is
+**enforced** by `test_no_deferral_phrase_in_public_forward_path` in
+`tests/api/public/test_guard_census.py`, which fails on any of those deferral
+phrases in a public forward-path module (`media.py`, `compiler/`,
+`fdtd/runtime/`, `fdtd/boundary/`, `scene.py`, `simulation.py`). Modules whose
+wording a later phase owns carry an explicit allowlist entry naming that phase
+(`adapters/tidy3d.py` → P5.6, `fdfd/` → P5.6, `fdtd/excitation/` → P5.4,
+`postprocess/` → P5.9, `fdtd/adjoint/` → P5.7+).
 
 ## Per-cluster capability-guard counts (baseline)
 
@@ -113,3 +119,30 @@ The three `fdtd/excitation/tfsf_state.py` capability guards and the two
 `temporal.py` Bloch guards are P5.4/P5.5 items, not grid coherence. The acceptance
 proof that `GridSpec.auto` + subpixel now compose to lower field error at fewer
 cells is `tests/validation/physics/test_autogrid_subpixel_thesis.py`.
+
+## Per-cluster capability-guard counts (after P5.5 — measured, total 71)
+
+```
+13  witwin/maxwell/adapters/tidy3d.py          5  witwin/maxwell/fdtd/runtime/stepping.py
+ 7  witwin/maxwell/fdtd/excitation/modes.py    4  witwin/maxwell/fdfd/solver.py
+ 7  witwin/maxwell/media.py                    2  witwin/maxwell/fdtd/excitation/injection.py
+ 6  witwin/maxwell/compiler/materials.py       2  witwin/maxwell/fdtd/excitation/temporal.py
+ 6  witwin/maxwell/fdtd/adjoint/bridge.py      2  witwin/maxwell/fdtd/excitation/tfsf_state.py
+ 6  witwin/maxwell/fdtd/adjoint/core.py        2  witwin/maxwell/postprocess/stratton_chu.py
+ 6  witwin/maxwell/fdtd/runtime/materials.py   1  simulation.py / fdfd/adjoint/bridge.py /
+                                                  scattering_parameters.py
+```
+
+P5.5 deltas from the after-P5.2/P5.3 block: `media.py` 8 → 7 (Graphene interband
+raise deleted by the Lorentz sheet-pole fit), `fdtd/runtime/stepping.py` 6 → 5 and
+`fdtd/excitation/tfsf_state.py` 3 → 2 (both from the non-periodic TFSF slab forward
+runtime). `sigma_m` added no guard (it mirrors the P1 `sigma_e` Ca/Cb fold, which
+never had a raise). The `LossyMetalMedium` SIBC runtime replaced its descriptor-only
+raise with one contextual SIBC-configuration guard, so `compiler/materials.py` stays
+at 6. Acceptance proofs: `tests/materials/conductive/test_fdtd_magnetic_conductive.py`
+(sigma_m slab absorption `rel_err < 0.02`), `tests/materials/sheet/test_fdtd_graphene.py`
+(interband Kubo fit `< 0.03`), `tests/validation/physics/test_lossy_metal_sibc.py`
+(SIBC reflection `rel_err < 0.05` at `>= 10x` fewer cells), and
+`tests/sources/tfsf/test_fdtd_grating_tfsf.py` (non-periodic slab forward confines the
+total field). The phrase gate `test_no_deferral_phrase_in_public_forward_path` is now
+live in the same census test file.

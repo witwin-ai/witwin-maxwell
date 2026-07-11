@@ -357,6 +357,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Direct physics validation suites under `tests/validation/physics/` for vacuum plane-wave and dipole correctness, dielectric slab energy balance, boundary-condition validation (`periodic`, `Bloch`, `PEC`, `PMC`, mixed `periodic + PML`, `CPML`), and TFSF leakage/scatter validation for both axis-aligned and oblique CW plane waves
 - Validation workflows emit representative electric-field and centerline plots under `tests/test_output/validation/` in addition to pass/fail assertions
 - Test coverage for public API, scene construction, mesh geometry, material compilation, CPML, observer extraction, and FDFD/FDTD consistency
+- Guard-convergence gates in `tests/api/public/test_guard_census.py`: an AST census caps the number of `NotImplementedError` capability guards in `witwin/` against a committed budget (contract guards excluded via a documented list), and a phrase gate fails if any `NotImplementedError` in the public forward path (`media.py`, `compiler/`, `fdtd/runtime/`, `fdtd/boundary/`, `scene.py`, `simulation.py`) carries a bare deferral phrase (`not implemented yet` / `not supported yet` / `in v1`) instead of a physical or mathematical reason; modules reworded by a later phase are allowlisted with the owning phase named
 
 ## Known Limitations
 
