@@ -9,10 +9,12 @@ from .stratton_chu import (
     EquivalentCurrentsSurface,
     PlanarEquivalentCurrents,
     StrattonChuPropagator,
+    SurfaceEquivalentCurrents,
     build_plane_points,
     equivalent_surface_currents_from_monitor,
     equivalent_surface_currents_from_monitors,
     equivalent_surface_currents_from_fields,
+    equivalent_surface_currents_from_surface_samples,
     gaussian_window_1d,
 )
 
@@ -29,10 +31,12 @@ __all__ = [
     "EquivalentCurrentsSurface",
     "PlanarEquivalentCurrents",
     "StrattonChuPropagator",
+    "SurfaceEquivalentCurrents",
     "build_plane_points",
     "equivalent_surface_currents_from_monitor",
     "equivalent_surface_currents_from_monitors",
     "equivalent_surface_currents_from_fields",
+    "equivalent_surface_currents_from_surface_samples",
     "gaussian_window_1d",
     "transform_to_bistatic_rcs",
 ]

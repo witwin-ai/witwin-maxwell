@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cmath
 import math
 from dataclasses import dataclass
 from typing import Mapping
@@ -10,6 +11,62 @@ WINDOW_FACTOR = 15.0
 
 _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
 _INDEX_TO_AXIS = ("x", "y", "z")
+
+
+def _as_real_if_lossless(value: complex | float | int) -> complex | float:
+    """Collapse a (near-)real scalar to ``float`` so the vacuum/lossless path
+    keeps its original real dtype and only genuinely lossy backgrounds carry an
+    imaginary part into the propagator kernels."""
+    number = complex(value)
+    if abs(number.imag) <= 1e-12 * (abs(number.real) + 1.0):
+        return number.real
+    return number
+
+
+def _normalize_background(
+    background_eps_r: complex | float | int,
+    background_mu_r: complex | float | int,
+) -> tuple[complex | float, complex | float]:
+    eps_r = _as_real_if_lossless(background_eps_r)
+    mu_r = _as_real_if_lossless(background_mu_r)
+    if isinstance(eps_r, float) and eps_r <= 0.0:
+        raise ValueError("background_eps_r must be positive for a lossless exterior.")
+    if isinstance(mu_r, float) and mu_r <= 0.0:
+        raise ValueError("background_mu_r must be positive for a lossless exterior.")
+    return eps_r, mu_r
+
+
+def _background_wavenumber_and_impedance(
+    background_eps_r: complex | float,
+    background_mu_r: complex | float,
+    *,
+    omega: float,
+    c: float,
+    eta_vacuum: float,
+) -> tuple[complex | float, complex | float]:
+    """Return ``(k, eta)`` of the homogeneous exterior background relative to the
+    vacuum wavenumber ``omega/c`` and vacuum impedance ``eta_vacuum``."""
+    index = _as_real_if_lossless(cmath.sqrt(complex(background_eps_r) * complex(background_mu_r)))
+    impedance_ratio = _as_real_if_lossless(
+        cmath.sqrt(complex(background_mu_r) / complex(background_eps_r))
+    )
+    k = _as_real_if_lossless((omega / c) * complex(index))
+    eta = _as_real_if_lossless(eta_vacuum * complex(impedance_ratio))
+    return k, eta
+
+
+def _resolve_currents_background(
+    surfaces,
+    background_eps_r: complex | float | None,
+    background_mu_r: complex | float | None,
+) -> tuple[complex | float, complex | float]:
+    """Resolve the exterior background for a propagator: an explicit override wins,
+    otherwise fall back to the medium carried by the equivalent currents."""
+    if background_eps_r is None:
+        background_eps_r = surfaces[0].background_eps_r
+    if background_mu_r is None:
+        background_mu_r = surfaces[0].background_mu_r
+    return _normalize_background(background_eps_r, background_mu_r)
 
 
 def _complex_dtype_for(dtype: torch.dtype) -> torch.dtype:
@@ -287,6 +344,8 @@ class PlanarEquivalentCurrents:
     v: torch.Tensor
     J: torch.Tensor
     M: torch.Tensor
+    background_eps_r: complex | float = 1.0
+    background_mu_r: complex | float = 1.0
 
     def __post_init__(self):
         axis_name = _normalize_axis(self.axis)
@@ -300,6 +359,9 @@ class PlanarEquivalentCurrents:
         shape = (u_coords.numel(), v_coords.numel())
         j_field = _as_vector_field(self.J, "J", shape, device=device, dtype=complex_dtype)
         m_field = _as_vector_field(self.M, "M", shape, device=device, dtype=complex_dtype)
+        background_eps_r, background_mu_r = _normalize_background(
+            self.background_eps_r, self.background_mu_r
+        )
 
         object.__setattr__(self, "axis", axis_name)
         object.__setattr__(self, "position", float(self.position))
@@ -308,10 +370,16 @@ class PlanarEquivalentCurrents:
         object.__setattr__(self, "v", v_coords)
         object.__setattr__(self, "J", j_field)
         object.__setattr__(self, "M", m_field)
+        object.__setattr__(self, "background_eps_r", background_eps_r)
+        object.__setattr__(self, "background_mu_r", background_mu_r)
 
     @property
     def device(self) -> torch.device:
         return self.u.device
+
+    @property
+    def coord_dtype(self) -> torch.dtype:
+        return self.u.dtype
 
     @property
     def tangential_axes(self) -> tuple[str, str]:
@@ -327,6 +395,17 @@ class PlanarEquivalentCurrents:
 
     def plane_points(self) -> torch.Tensor:
         return build_plane_points(self.axis, self.position, self.u, self.v)
+
+    def quadrature(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Flattened ``(points, J_weighted, M_weighted)`` for the radiation
+        integral: the plane's Yee-consistent trapezoid area weights are folded
+        into the electric/magnetic surface currents so every source-surface type
+        (planar patch or general curved surface) exposes the same interface."""
+        weights = self.weights_2d()[..., None].to(dtype=self.J.real.dtype)
+        points = self.plane_points().reshape(-1, 3)
+        j_weighted = (self.J * weights.to(dtype=self.J.dtype)).reshape(-1, 3)
+        m_weighted = (self.M * weights.to(dtype=self.M.dtype)).reshape(-1, 3)
+        return points, j_weighted, m_weighted
 
     def cropped(
         self,
@@ -361,6 +440,8 @@ class PlanarEquivalentCurrents:
             v=v_coords,
             J=j_field,
             M=m_field,
+            background_eps_r=self.background_eps_r,
+            background_mu_r=self.background_mu_r,
         )
 
     def windowed(self, window_size: tuple[float, float] | None) -> "PlanarEquivalentCurrents":
@@ -378,6 +459,8 @@ class PlanarEquivalentCurrents:
             v=self.v,
             J=self.J * window_2d.to(dtype=self.J.dtype),
             M=self.M * window_2d.to(dtype=self.M.dtype),
+            background_eps_r=self.background_eps_r,
+            background_mu_r=self.background_mu_r,
         )
 
 
@@ -396,14 +479,32 @@ class EquivalentCurrentsSurface:
                     f"got {type(surface).__name__}."
                 )
         reference_frequency = float(resolved_surfaces[0].frequency)
+        reference_eps = complex(resolved_surfaces[0].background_eps_r)
+        reference_mu = complex(resolved_surfaces[0].background_mu_r)
         for surface in resolved_surfaces[1:]:
             if not math.isclose(float(surface.frequency), reference_frequency, rel_tol=1e-9, abs_tol=1e-12):
                 raise ValueError("All equivalent-current surfaces must share the same frequency.")
+            if not cmath.isclose(
+                complex(surface.background_eps_r), reference_eps, rel_tol=1e-6, abs_tol=1e-9
+            ) or not cmath.isclose(
+                complex(surface.background_mu_r), reference_mu, rel_tol=1e-6, abs_tol=1e-9
+            ):
+                raise ValueError(
+                    "All equivalent-current surfaces must share the same exterior background medium."
+                )
         object.__setattr__(self, "surfaces", resolved_surfaces)
 
     @property
     def frequency(self) -> float:
         return float(self.surfaces[0].frequency)
+
+    @property
+    def background_eps_r(self) -> complex | float:
+        return self.surfaces[0].background_eps_r
+
+    @property
+    def background_mu_r(self) -> complex | float:
+        return self.surfaces[0].background_mu_r
 
     @property
     def device(self) -> torch.device:
@@ -419,16 +520,154 @@ class EquivalentCurrentsSurface:
         return EquivalentCurrentsSurface(surface.windowed(window_size) for surface in self.surfaces)
 
 
+@dataclass(frozen=True)
+class SurfaceEquivalentCurrents:
+    """Equivalent electric/magnetic surface currents on an arbitrary closed
+    surface, sampled at explicit quadrature points with per-point area weights.
+
+    Unlike :class:`PlanarEquivalentCurrents`, the geometry is not restricted to
+    an axis-aligned plane: each quadrature point carries its own position and
+    the currents may point in any direction, so a genuinely curved Huygens
+    surface (a sphere, an ellipsoid, or a staircased/voxelized closed surface)
+    can be radiated by the same Stratton-Chu integral as a box. The surface
+    equivalence far field is independent of the enclosing surface's shape, so
+    the propagator kernels consume this the same way they consume planar faces.
+    """
+
+    frequency: float
+    points: torch.Tensor
+    weights: torch.Tensor
+    J: torch.Tensor
+    M: torch.Tensor
+    background_eps_r: complex | float = 1.0
+    background_mu_r: complex | float = 1.0
+
+    def __post_init__(self):
+        device = _resolve_tensor_device(self.points, self.weights, self.J, self.M)
+        real_dtype = _resolve_real_dtype(self.points, self.weights, self.J, self.M)
+        complex_dtype = _resolve_complex_dtype(self.J, self.M)
+        points = _to_real_tensor(self.points, device=device, dtype=real_dtype)
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError(f"points must have shape (N, 3), got {tuple(points.shape)}.")
+        count = int(points.shape[0])
+        if count < 1:
+            raise ValueError("SurfaceEquivalentCurrents requires at least one quadrature point.")
+        weights = _to_real_tensor(self.weights, device=device, dtype=real_dtype).reshape(-1)
+        if weights.numel() != count:
+            raise ValueError(f"weights must have shape ({count},), got {tuple(weights.shape)}.")
+        if float(self.frequency) <= 0.0:
+            raise ValueError("frequency must be positive.")
+        j_field = _to_complex_tensor(self.J, device=device, dtype=complex_dtype)
+        m_field = _to_complex_tensor(self.M, device=device, dtype=complex_dtype)
+        for name, field in (("J", j_field), ("M", m_field)):
+            if tuple(field.shape) != (count, 3):
+                raise ValueError(f"{name} must have shape ({count}, 3), got {tuple(field.shape)}.")
+        background_eps_r, background_mu_r = _normalize_background(
+            self.background_eps_r, self.background_mu_r
+        )
+
+        object.__setattr__(self, "frequency", float(self.frequency))
+        object.__setattr__(self, "points", points)
+        object.__setattr__(self, "weights", weights)
+        object.__setattr__(self, "J", j_field)
+        object.__setattr__(self, "M", m_field)
+        object.__setattr__(self, "background_eps_r", background_eps_r)
+        object.__setattr__(self, "background_mu_r", background_mu_r)
+
+    @property
+    def device(self) -> torch.device:
+        return self.points.device
+
+    @property
+    def coord_dtype(self) -> torch.dtype:
+        return self.points.dtype
+
+    @property
+    def shape(self) -> tuple[int]:
+        return (int(self.points.shape[0]),)
+
+    def quadrature(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Flattened ``(points, J_weighted, M_weighted)`` with the per-point
+        surface-area weights folded into the currents, matching the interface of
+        :meth:`PlanarEquivalentCurrents.quadrature`."""
+        weights = self.weights[:, None]
+        j_weighted = self.J * weights.to(dtype=self.J.dtype)
+        m_weighted = self.M * weights.to(dtype=self.M.dtype)
+        return self.points, j_weighted, m_weighted
+
+
+def equivalent_surface_currents_from_surface_samples(
+    *,
+    frequency: float,
+    points,
+    normals,
+    areas,
+    E,
+    H,
+    background_eps_r: complex | float = 1.0,
+    background_mu_r: complex | float = 1.0,
+) -> SurfaceEquivalentCurrents:
+    """Build equivalent surface currents on an arbitrary closed surface from
+    fields sampled at quadrature points.
+
+    The surface equivalence principle replaces the interior sources by
+    ``J = n x H`` and ``M = -n x E`` on any closed surface enclosing them, where
+    ``n`` is the outward unit normal. This constructor accepts a general point
+    cloud (``points``), the outward normals (``normals``, normalized here), the
+    per-point differential surface areas (``areas``), and the tangential-plus
+    fields (``E``, ``H``), so a curved Huygens surface can drive the same
+    Stratton-Chu / near-to-far-field transform as an axis-aligned box.
+    """
+    device = _resolve_tensor_device(points, normals, areas, E, H)
+    real_dtype = _resolve_real_dtype(points, normals, areas)
+    complex_dtype = _resolve_complex_dtype(E, H)
+
+    point_tensor = _to_real_tensor(points, device=device, dtype=real_dtype)
+    if point_tensor.ndim != 2 or point_tensor.shape[1] != 3:
+        raise ValueError(f"points must have shape (N, 3), got {tuple(point_tensor.shape)}.")
+    count = int(point_tensor.shape[0])
+
+    normal_tensor = _to_real_tensor(normals, device=device, dtype=real_dtype)
+    if tuple(normal_tensor.shape) != (count, 3):
+        raise ValueError(f"normals must have shape ({count}, 3), got {tuple(normal_tensor.shape)}.")
+    norm = torch.linalg.norm(normal_tensor, dim=-1, keepdim=True)
+    if torch.any(norm <= 0.0):
+        raise ValueError("normals must be non-zero vectors.")
+    unit_normal = (normal_tensor / norm).to(dtype=complex_dtype)
+
+    area_tensor = _to_real_tensor(areas, device=device, dtype=real_dtype).reshape(-1)
+    if area_tensor.numel() != count:
+        raise ValueError(f"areas must have shape ({count},), got {tuple(area_tensor.shape)}.")
+
+    e_field = _to_complex_tensor(E, device=device, dtype=complex_dtype)
+    h_field = _to_complex_tensor(H, device=device, dtype=complex_dtype)
+    for name, field in (("E", e_field), ("H", h_field)):
+        if tuple(field.shape) != (count, 3):
+            raise ValueError(f"{name} must have shape ({count}, 3), got {tuple(field.shape)}.")
+
+    j_field = torch.cross(unit_normal, h_field, dim=-1)
+    m_field = -torch.cross(unit_normal, e_field, dim=-1)
+    return SurfaceEquivalentCurrents(
+        frequency=frequency,
+        points=point_tensor,
+        weights=area_tensor,
+        J=j_field,
+        M=m_field,
+        background_eps_r=background_eps_r,
+        background_mu_r=background_mu_r,
+    )
+
+
 def _normalize_currents_collection(
-    currents: PlanarEquivalentCurrents | EquivalentCurrentsSurface,
-) -> tuple[PlanarEquivalentCurrents, ...]:
+    currents: PlanarEquivalentCurrents | EquivalentCurrentsSurface | SurfaceEquivalentCurrents,
+) -> tuple[PlanarEquivalentCurrents | SurfaceEquivalentCurrents, ...]:
     if isinstance(currents, EquivalentCurrentsSurface):
         return currents.surfaces
-    if isinstance(currents, PlanarEquivalentCurrents):
+    if isinstance(currents, (PlanarEquivalentCurrents, SurfaceEquivalentCurrents)):
         return (currents,)
     raise TypeError(
-        "currents must be PlanarEquivalentCurrents or EquivalentCurrentsSurface, "
-        f"got {type(currents).__name__}."
+        "currents must be PlanarEquivalentCurrents, EquivalentCurrentsSurface, or "
+        f"SurfaceEquivalentCurrents, got {type(currents).__name__}."
     )
 
 
@@ -494,9 +733,16 @@ def _sample_exterior_patch(
     return permuted[outside_index].index_select(0, indices_a).index_select(1, indices_b)
 
 
-def _validate_homogeneous_exterior(result, monitor: Mapping[str, object], frequency: float) -> None:
+def _validate_homogeneous_exterior(
+    result, monitor: Mapping[str, object], frequency: float
+) -> tuple[complex | float, complex | float] | None:
+    """Validate that the medium immediately outside a closed Huygens surface is a
+    single homogeneous background and return that background as relative
+    ``(eps_r, mu_r)`` so the exterior wavenumber/impedance can drive the
+    near-to-far-field transform. Returns ``None`` for non-closed-surface
+    monitors (their background defaults to vacuum)."""
     if monitor.get("kind") != "closed_surface":
-        return
+        return None
 
     prepared_scene = result.prepared_scene
     eps_r, mu_r = prepared_scene.compile_relative_materials(frequency=frequency)
@@ -539,6 +785,10 @@ def _validate_homogeneous_exterior(result, monitor: Mapping[str, object], freque
                 "layered or piecewise exteriors are not supported."
             )
 
+    if reference_eps is None:
+        return None
+    return complex(reference_eps.item()), complex(reference_mu.item())
+
 
 def _equivalent_surface_currents_from_payload(
     monitor: Mapping[str, object],
@@ -546,6 +796,7 @@ def _equivalent_surface_currents_from_payload(
     tangential_bounds: Mapping[str, tuple[float, float]] | None = None,
     normal_direction: str | int | float | None = None,
     window_size: tuple[float, float] | None = None,
+    background: tuple[complex | float, complex | float] = (1.0, 1.0),
 ) -> PlanarEquivalentCurrents | EquivalentCurrentsSurface:
     if monitor.get("kind") == "closed_surface":
         surfaces = []
@@ -556,6 +807,7 @@ def _equivalent_surface_currents_from_payload(
                     tangential_bounds=tangential_bounds,
                     normal_direction=normal_direction,
                     window_size=window_size,
+                    background=background,
                 )
             )
         return EquivalentCurrentsSurface(tuple(surfaces))
@@ -583,6 +835,8 @@ def _equivalent_surface_currents_from_payload(
         fields=monitor,
         normal_direction=resolved_normal_direction,
         window_size=None,
+        background_eps_r=background[0],
+        background_mu_r=background[1],
     ).cropped(tangential_bounds).windowed(window_size)
 
 
@@ -596,6 +850,8 @@ def equivalent_surface_currents_from_fields(
     fields: Mapping[str, torch.Tensor],
     normal_direction: str | int | float = "+",
     window_size: tuple[float, float] | None = None,
+    background_eps_r: complex | float = 1.0,
+    background_mu_r: complex | float = 1.0,
 ) -> PlanarEquivalentCurrents:
     axis_name = _normalize_axis(axis)
     normalized_fields = {str(name).upper(): values for name, values in fields.items()}
@@ -657,6 +913,8 @@ def equivalent_surface_currents_from_fields(
         v=v_coords,
         J=j_field,
         M=m_field,
+        background_eps_r=background_eps_r,
+        background_mu_r=background_mu_r,
     )
     return currents.windowed(window_size)
 
@@ -676,12 +934,15 @@ def equivalent_surface_currents_from_monitor(
     if len(monitor_frequencies) > 1:
         monitor = result.monitor(monitor_name, freq_index=0)
     resolved_frequency = float(monitor.get("frequency", getattr(result, "frequency", None)))
-    _validate_homogeneous_exterior(result, monitor, resolved_frequency)
+    background = _validate_homogeneous_exterior(result, monitor, resolved_frequency)
+    if background is None:
+        background = (1.0, 1.0)
     return _equivalent_surface_currents_from_payload(
         monitor,
         tangential_bounds=tangential_bounds,
         normal_direction=normal_direction,
         window_size=window_size,
+        background=background,
     )
 
 
@@ -726,12 +987,14 @@ def equivalent_surface_currents_from_monitors(
 class StrattonChuPropagator:
     def __init__(
         self,
-        currents: PlanarEquivalentCurrents | EquivalentCurrentsSurface,
+        currents: PlanarEquivalentCurrents | EquivalentCurrentsSurface | SurfaceEquivalentCurrents,
         *,
         solver=None,
         c: float | None = None,
         eps0: float | None = None,
         mu0: float | None = None,
+        background_eps_r: complex | float | None = None,
+        background_mu_r: complex | float | None = None,
         device: str | torch.device | None = None,
     ):
         self.currents = currents
@@ -743,24 +1006,35 @@ class StrattonChuPropagator:
             eps0=eps0,
             mu0=mu0,
         )
+        self.background_eps_r, self.background_mu_r = _resolve_currents_background(
+            self._surfaces, background_eps_r, background_mu_r
+        )
         self.frequency = float(self._surfaces[0].frequency)
-        self.coord_dtype = self._surfaces[0].u.dtype
+        self.coord_dtype = self._surfaces[0].coord_dtype
         self.field_dtype = _resolve_complex_dtype(*(surface.J for surface in self._surfaces), *(surface.M for surface in self._surfaces))
         self.omega = 2.0 * math.pi * self.frequency
-        self.k = self.omega / self.c
-        self.k_sq = self.k**2
         self.eta0 = math.sqrt(self.mu0 / self.eps0)
-        self.i_omega_mu = complex(0.0, self.omega * self.mu0)
-        self.i_omega_eps = complex(0.0, self.omega * self.eps0)
+        self.k, self.eta = _background_wavenumber_and_impedance(
+            self.background_eps_r,
+            self.background_mu_r,
+            omega=self.omega,
+            c=self.c,
+            eta_vacuum=self.eta0,
+        )
+        self.k_sq = self.k**2
+        # Radiation into the homogeneous exterior scales i*omega with the
+        # background permeability/permittivity: mu -> mu0*mu_r, eps -> eps0*eps_r.
+        self.i_omega_mu = 1j * self.omega * self.mu0 * self.background_mu_r
+        self.i_omega_eps = 1j * self.omega * self.eps0 * self.background_eps_r
 
         src_points = []
         j_weighted = []
         m_weighted = []
         for surface in self._surfaces:
-            weights = surface.weights_2d()[..., None].to(dtype=surface.J.real.dtype)
-            src_points.append(surface.plane_points().reshape(-1, 3))
-            j_weighted.append((surface.J * weights.to(dtype=surface.J.dtype)).reshape(-1, 3))
-            m_weighted.append((surface.M * weights.to(dtype=surface.M.dtype)).reshape(-1, 3))
+            points, surface_j, surface_m = surface.quadrature()
+            src_points.append(points.reshape(-1, 3))
+            j_weighted.append(surface_j.reshape(-1, 3))
+            m_weighted.append(surface_m.reshape(-1, 3))
         self._src_points = torch.cat(src_points, dim=0).to(device=self.device, dtype=self.coord_dtype)
         self._J_w = torch.cat(j_weighted, dim=0).to(device=self.device, dtype=self.field_dtype)
         self._M_w = torch.cat(m_weighted, dim=0).to(device=self.device, dtype=self.field_dtype)
@@ -769,17 +1043,17 @@ class StrattonChuPropagator:
         if axis is not None:
             axis_name = _normalize_axis(axis)
             for surface in self._surfaces:
-                if surface.axis == axis_name:
+                if getattr(surface, "axis", None) == axis_name:
                     return axis_name, surface
             raise ValueError(f"No source surface is aligned with axis {axis_name!r}. Pass explicit u/v coordinates.")
 
-        first_axis = self._surfaces[0].axis
-        if any(surface.axis != first_axis for surface in self._surfaces[1:]):
+        axes = [getattr(surface, "axis", None) for surface in self._surfaces]
+        if axes[0] is None or any(surface_axis != axes[0] for surface_axis in axes[1:]):
             raise ValueError(
-                "axis must be provided when propagating a multi-plane surface to a plane. "
-                "The current surface contains multiple source-plane orientations."
+                "axis must be provided when propagating a multi-plane or general surface to a plane. "
+                "The current surface has no single source-plane orientation; pass explicit axis, u, and v."
             )
-        return first_axis, self._surfaces[0]
+        return axes[0], self._surfaces[0]
 
     def _compute_batch(self, observation_points: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         observation = observation_points.to(device=self.device, dtype=self.coord_dtype)
@@ -864,9 +1138,14 @@ class StrattonChuPropagator:
         v=None,
         batch_size: int = 256,
     ) -> dict[str, torch.Tensor | float]:
-        plane_axis, reference_surface = self._plane_reference_surface(axis)
-        u_coords = reference_surface.u if u is None else _as_1d_coords(u, "u", device=self.device, dtype=self.coord_dtype)
-        v_coords = reference_surface.v if v is None else _as_1d_coords(v, "v", device=self.device, dtype=self.coord_dtype)
+        if u is not None and v is not None:
+            plane_axis = _normalize_axis(axis) if axis is not None else self._plane_reference_surface(None)[0]
+            u_coords = _as_1d_coords(u, "u", device=self.device, dtype=self.coord_dtype)
+            v_coords = _as_1d_coords(v, "v", device=self.device, dtype=self.coord_dtype)
+        else:
+            plane_axis, reference_surface = self._plane_reference_surface(axis)
+            u_coords = reference_surface.u if u is None else _as_1d_coords(u, "u", device=self.device, dtype=self.coord_dtype)
+            v_coords = reference_surface.v if v is None else _as_1d_coords(v, "v", device=self.device, dtype=self.coord_dtype)
         grid_points = build_plane_points(plane_axis, position, u_coords, v_coords).to(device=self.device, dtype=self.coord_dtype)
         propagated = self.propagate_points(grid_points.reshape(-1, 3), batch_size=batch_size)
         shape = (int(u_coords.numel()), int(v_coords.numel()))

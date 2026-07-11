@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+import numpy as np
 import torch
 
-from ..sources import CW, PlaneWave
+from ..sources import CW, PlaneWave, TFSF, evaluate_source_time
 from .stratton_chu import _trapz_weights_1d
 
 _MU0 = 4.0 * torch.pi * 1e-7
@@ -94,6 +95,139 @@ def _monitor_area(result, monitor_name: str) -> float:
     return float(torch.sum(weights).item())
 
 
+def _incident_beam_area(source, result, incident_monitor: str) -> float:
+    """Cross-sectional area the incident PlaneWave illuminates at the monitor.
+
+    A TFSF box injects the incident field only inside its aperture, so the flux a
+    plane monitor spanning the whole cross-section reports comes from that
+    aperture alone; the relevant area is the aperture face transverse to the
+    propagation axis, not the full monitor plane. A soft source (or a full-width
+    TFSF slab) fills the whole cross-section, so the monitor area is used.
+    """
+
+    injection = getattr(source, "injection", "soft")
+    if isinstance(injection, TFSF) and getattr(injection, "mode", "box") == "box" and injection.bounds is not None:
+        direction = tuple(float(component) for component in getattr(source, "direction", (0.0, 0.0, 1.0)))
+        axis_index = max(range(3), key=lambda index: abs(direction[index]))
+        transverse = [index for index in range(3) if index != axis_index]
+        bounds = injection.bounds
+        return float(bounds[transverse[0]][1] - bounds[transverse[0]][0]) * float(
+            bounds[transverse[1]][1] - bounds[transverse[1]][0]
+        )
+    return _monitor_area(result, incident_monitor)
+
+
+def _plane_wave_cw_amplitude(source_time) -> float | None:
+    """Peak amplitude of a steady-state CW PlaneWave, or ``None`` if broadband.
+
+    A missing ``source_time`` defaults to a unit-amplitude CW carrier at the
+    monitor frequency, matching the injector's default excitation.
+    """
+
+    if source_time is None:
+        return 1.0
+    if isinstance(source_time, CW):
+        return float(source_time.amplitude)
+    if isinstance(source_time, Mapping) and str(source_time.get("kind", "")).lower() == "cw":
+        return float(source_time["amplitude"])
+    return None
+
+
+def _broadband_plane_wave_incident_power(
+    result,
+    source_time,
+    frequencies: torch.Tensor,
+    *,
+    eta0: float,
+    area: float,
+) -> torch.Tensor:
+    """Analytic incident power spectrum of a broadband PlaneWave.
+
+    A soft PlaneWave face radiates the incident field forward with unit gain, so
+    the incident field at the monitor is the source waveform itself,
+    ``E_inc(t) = A * s(t)``, and an empty reference monitor reports the forward
+    flux ``|E_inc(f)|^2 / (2*eta0) * area`` per frequency, where ``area`` is the
+    illuminated cross-section (the TFSF aperture, or the full monitor plane for a
+    soft source). This reduces to ``A^2 / (2*eta0) * area`` at the CW carrier,
+    matching the closed-form CW branch.
+
+    The monitor forms ``E_inc(f)`` with a windowed running DFT: for a non-CW
+    waveform the solver forces ``window="none"`` and ``start_step=0`` (see
+    ``fdtd/runtime/spectral.py``), and the reported phasor is
+    ``(2/sum_w) * sum_n w(n) * field(n) * exp(i*w*n*dt)``. Reproducing that exact
+    discrete transform of the *known* injected waveform yields the reference
+    incident power without a second simulation: the injection-to-monitor
+    propagation delay only rotates a global phase, which the ``|.|^2`` magnitude
+    discards. The reconstruction is co-located (the leading Yee E/H stagger
+    factor ``cos(k~*d/2)`` the monitor applies is dropped), so the absolute power
+    matches the reference monitor to the grid-dispersion level of that stagger,
+    which vanishes as the grid is refined -- the same regime the soft-PlaneWave
+    absolute-power calibration is pinned at.
+    """
+
+    solver = getattr(result, "solver", None)
+    entries = list(getattr(solver, "_observer_spectral_entries", ()) or ())
+    dt = getattr(solver, "dt", None)
+    if solver is None or not entries or dt is None:
+        raise ValueError(
+            "incident_power='auto' for a broadband (non-CW) PlaneWave needs the FDTD "
+            "solver's running-DFT schedule (dt and per-frequency spectral entries), which "
+            "is only present on a freshly run FDTD Result. Pass reference_result (an empty "
+            "run) or an explicit incident_power array instead."
+        )
+
+    dt = float(dt)
+    window_type = str(getattr(solver, "observer_window_type", "none"))
+    entry_frequencies = np.array([float(entry["frequency"]) for entry in entries], dtype=np.float64)
+
+    # Evaluate the injected waveform once over the widest accumulated step range.
+    max_count = max(int(entry["sample_count"]) for entry in entries)
+    min_start = min(int(entry["start_step"]) for entry in entries)
+    if max_count <= 0:
+        raise ValueError(
+            "incident_power='auto' requires a completed FDTD run: the monitor DFT "
+            "accumulated zero samples."
+        )
+    steps = np.arange(min_start, min_start + max_count, dtype=np.float64)
+    waveform = np.array([evaluate_source_time(source_time, float(step) * dt) for step in steps], dtype=np.float64)
+
+    powers = []
+    for frequency in frequencies.tolist():
+        match_index = int(np.argmin(np.abs(entry_frequencies - float(frequency))))
+        if abs(entry_frequencies[match_index] - float(frequency)) > 1e-6 * max(abs(float(frequency)), 1.0):
+            raise ValueError(
+                f"No solver DFT entry matches monitor frequency {float(frequency)!r}; "
+                "the incident-power normalization cannot be reconstructed."
+            )
+        entry = entries[match_index]
+        start = int(entry["start_step"])
+        count = int(entry["sample_count"])
+        norm = float(entry["window_normalization"])
+        if count <= 0 or norm <= _POWER_EPS:
+            raise ValueError(
+                f"Monitor DFT for frequency {float(frequency)!r} accumulated no weighted "
+                "samples; incident-power normalization is undefined."
+            )
+        local = slice(start - min_start, start - min_start + count)
+        step_slice = steps[local]
+        signal = waveform[local]
+        if window_type == "none":
+            weights = np.ones(count, dtype=np.float64)
+        else:
+            weights = np.array(
+                [
+                    float(solver._compute_window_weight(int(step), start_step=start, end_step=entry["end_step"], window_type=window_type))
+                    for step in step_slice
+                ],
+                dtype=np.float64,
+            )
+        phase = np.exp(1j * (2.0 * np.pi * float(frequency)) * step_slice * dt)
+        spectral_amplitude = (2.0 / norm) * np.sum(weights * signal * phase)
+        powers.append(float(abs(spectral_amplitude) ** 2) / (2.0 * eta0) * area)
+
+    return torch.as_tensor(powers, device=frequencies.device, dtype=frequencies.dtype)
+
+
 def _plane_wave_incident_power(result, incident_monitor: str, frequencies: torch.Tensor) -> torch.Tensor:
     plane_wave_sources = [source for source in getattr(result.scene, "sources", ()) if isinstance(source, PlaneWave)]
     if len(plane_wave_sources) != 1:
@@ -101,24 +235,23 @@ def _plane_wave_incident_power(result, incident_monitor: str, frequencies: torch
 
     source = plane_wave_sources[0]
     source_time = source.source_time
-    if source_time is None:
-        amplitude = 1.0
-    elif isinstance(source_time, CW):
-        amplitude = float(source_time.amplitude)
-    elif isinstance(source_time, Mapping) and str(source_time.get("kind", "")).lower() == "cw":
-        amplitude = float(source_time["amplitude"])
-    else:
-        raise NotImplementedError(
-            "incident_power='auto' currently supports CW PlaneWave sources only. "
-            "For broadband normalization, pass reference_result or an explicit incident_power array."
-        )
 
     solver = getattr(result, "solver", None)
     c_value = float(getattr(solver, "c", getattr(solver, "c0", 299792458.0)))
-    eta0 = float(_MU0.item()) * c_value
-    area = _monitor_area(result, incident_monitor)
-    power_density = (abs(amplitude) ** 2) / (2.0 * eta0)
-    return torch.full((frequencies.numel(),), power_density * area, device=frequencies.device, dtype=frequencies.dtype)
+    eta0 = float(_MU0) * c_value
+    area = _incident_beam_area(source, result, incident_monitor)
+
+    cw_amplitude = _plane_wave_cw_amplitude(source_time)
+    if cw_amplitude is not None:
+        power_density = (abs(cw_amplitude) ** 2) / (2.0 * eta0)
+        return torch.full(
+            (frequencies.numel(),),
+            power_density * area,
+            device=frequencies.device,
+            dtype=frequencies.dtype,
+        )
+
+    return _broadband_plane_wave_incident_power(result, source_time, frequencies, eta0=eta0, area=area)
 
 
 def _resolve_incident_power(
