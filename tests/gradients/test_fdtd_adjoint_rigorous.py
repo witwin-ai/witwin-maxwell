@@ -1065,3 +1065,67 @@ def test_fd_convergence_order_confirms_adjoint_accuracy():
         f"err(1e-1)={err_coarse:.4e}, err(1e-2)={err_fine:.4e}. "
         "This suggests the adjoint gradient is NOT converging to the true derivative."
     )
+
+
+# ---------------------------------------------------------------------------
+# PEC-boundary design gradient (native adjoint has no torch-VJP fallback, so a
+# PEC-face scene with a source must be served by the explicit native source
+# reverse; the source-term eps-gradient masks the terminal PEC clamp).
+# ---------------------------------------------------------------------------
+
+class _PecDesignScene(mw.SceneModule):
+    """Design region behind a source under a PEC-boundary domain."""
+
+    def __init__(self, shape=(2, 2, 2), init=0.0):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.full(shape, float(init), device="cuda"))
+
+    def to_scene(self):
+        density = torch.sigmoid(self.logits)
+        scene = mw.Scene(
+            domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
+            grid=mw.GridSpec.uniform(0.12),
+            boundary=mw.BoundarySpec(kind="pec"),
+            device="cuda",
+        )
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.24, 0.24, 0.24)),
+                density=density,
+                eps_bounds=(1.0, 6.0),
+                mu_bounds=(1.0, 1.0),
+            )
+        )
+        scene.add_source(
+            mw.PointDipole(
+                position=(0.0, 0.0, -0.18),
+                polarization="Ez",
+                width=0.04,
+                source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+            )
+        )
+        scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+        return scene
+
+
+@_CUDA
+def test_pec_boundary_design_gradient_matches_fd():
+    """A PEC-boundary design scene with a source is differentiable (no torch-VJP
+    fallback exists) and its gradient matches central differences."""
+    model = _PecDesignScene(shape=(2, 2, 2), init=0.0).cuda()
+
+    def loss_fn():
+        data = _build_sim(model, time_steps=120).run().monitor("probe")["data"]
+        return _abs2(data)
+
+    backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn, delta=1.0e-2)
+
+    assert torch.isfinite(backward_grad).all()
+    assert backward_grad.abs().max() > 0.0
+    # Dominant-element agreement; sub-dominant elements sit near the float32 FD
+    # noise floor, so compare the largest-magnitude voxel.
+    idx = int(fd_grad.abs().flatten().argmax())
+    a = backward_grad.flatten()[idx].item()
+    f = fd_grad.flatten()[idx].item()
+    assert a == pytest.approx(f, rel=5.0e-3), f"adjoint {a:.4e} vs FD {f:.4e}"

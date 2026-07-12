@@ -447,9 +447,11 @@ def _can_use_explicit_source_term_reverse_step(solver, resolved_source_terms) ->
         return True
     if getattr(solver, "tfsf_enabled", False):
         return False
-    if bool(getattr(solver, "has_pec_faces", False)):
-        return False
     if has_complex_fields(solver):
+        # The complex (Bloch) source replay does not carry the terminal PEC-face
+        # clamp on the source patch, so keep PEC + complex on the reject path.
+        if bool(getattr(solver, "has_pec_faces", False)):
+            return False
         source_terms, electric_source_terms, magnetic_source_terms = resolved_source_terms
         codes = {
             axis: (
@@ -472,6 +474,9 @@ def _can_use_explicit_source_term_reverse_step(solver, resolved_source_terms) ->
             and term.get("activation_delay_patch") is None
             for term in source_terms
         )
+    # Real fields: PEC domain faces are supported. The source-term eps-gradient
+    # in _accumulate_source_term_gradients applies the electric PEC mask so a
+    # source coinciding with a clamped face contributes zero.
     return True
 
 
@@ -734,7 +739,18 @@ def _accumulate_source_term_gradients(
         )
         offsets = term["offsets"]
         region = _slice_from_offsets_shape(offsets, payload.shape)
-        adjoint_patch = source_adjoint_state[field_name][region]
+        adjoint_field = source_adjoint_state[field_name]
+        adjoint_patch = adjoint_field[region]
+        # A source cell on a PEC domain face is erased by the terminal forward
+        # PEC clamp, so its eps-gradient must be zero; mask the incoming adjoint
+        # exactly as the forward clamp zeroes the injected field (no-op interior).
+        pec_mask = _electric_component_pec_mask(
+            solver, field_name, adjoint_field.shape, adjoint_field.device
+        )
+        if pec_mask is not None:
+            adjoint_patch = torch.where(
+                pec_mask[region], torch.zeros_like(adjoint_patch), adjoint_patch
+            )
         eps_patch = eps_by_field[field_name][region]
         grad_eps_by_field[field_name][region] = (
             grad_eps_by_field[field_name][region] - (adjoint_patch * payload) / eps_patch
@@ -1814,6 +1830,41 @@ def _boundary_axis_masks(shape, axis: int, low_mode: int, high_mode: int, device
         pec[tuple(high_face)] = True
     _BOUNDARY_AXIS_MASK_CACHE[key] = (inactive, pec)
     return inactive, pec
+
+
+# Per-electric-component tangential axes and their domain-face boundary codes,
+# matching the Yee electric update (_update_electric_component) and the terminal
+# _enforce_pec_boundaries clamp.
+_ELECTRIC_COMPONENT_PEC_AXES = {
+    "Ex": ((1, "boundary_y_low_code", "boundary_y_high_code"), (2, "boundary_z_low_code", "boundary_z_high_code")),
+    "Ey": ((2, "boundary_z_low_code", "boundary_z_high_code"), (0, "boundary_x_low_code", "boundary_x_high_code")),
+    "Ez": ((0, "boundary_x_low_code", "boundary_x_high_code"), (1, "boundary_y_low_code", "boundary_y_high_code")),
+}
+
+
+def _electric_component_pec_mask(solver, field_name, shape, device):
+    """Mask of PEC-clamped cells for an electric component, or ``None`` when the
+    scene has no PEC faces.
+
+    A soft source injected onto a PEC domain face is erased by the terminal
+    ``_enforce_pec_boundaries`` clamp in the forward step, so its eps-gradient
+    must be zero there. The mask is the union of the two tangential domain faces'
+    PEC cells, exactly the cells the forward clamp zeroes; on an interior region
+    it is all-``False`` so masking is a no-op.
+    """
+    if not bool(getattr(solver, "has_pec_faces", False)):
+        return None
+    spec = _ELECTRIC_COMPONENT_PEC_AXES.get(field_name)
+    if spec is None:
+        return None
+    (axis_pos, low_pos, high_pos), (axis_neg, low_neg, high_neg) = spec
+    _inactive_pos, pec_pos = _boundary_axis_masks(
+        shape, axis_pos, int(getattr(solver, low_pos)), int(getattr(solver, high_pos)), device
+    )
+    _inactive_neg, pec_neg = _boundary_axis_masks(
+        shape, axis_neg, int(getattr(solver, low_neg)), int(getattr(solver, high_neg)), device
+    )
+    return pec_pos | pec_neg
 
 
 def _update_magnetic_component(field, *, d_pos, d_neg, decay, curl, psi_pos=None, psi_neg=None, b_pos=None, c_pos=None, inv_kappa_pos=None, b_neg=None, c_neg=None, inv_kappa_neg=None, axis_pos=None, axis_neg=None):
