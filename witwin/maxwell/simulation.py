@@ -347,6 +347,10 @@ class Simulation:
             solver = self._build_fdfd_solver()
         elif self.method == SimulationMethod.FDTD:
             solver = self._build_fdtd_solver(initialize=True)
+            if self.has_trainable_parameters:
+                from .fdtd.adjoint.dispatch import validate_native_adjoint_preparation
+
+                validate_native_adjoint_preparation(solver)
         else:
             raise ValueError(f"Unsupported simulation method {self.method!r}.")
         return PreparedSimulation(self, solver)

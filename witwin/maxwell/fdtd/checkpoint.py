@@ -119,6 +119,10 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
             magnetic_dispersive_state_names.append(
                 dispersive_state_name(component_name, model_name, index, tensor_name)
             )
+    if bool(getattr(solver, "complex_fields_enabled", False)):
+        magnetic_dispersive_state_names.extend(
+            name + "_imag" for name in tuple(magnetic_dispersive_state_names)
+        )
 
     return FDTDCheckpointSchema(
         version=_CHECKPOINT_SCHEMA_VERSION,
@@ -204,6 +208,12 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
             tensors[dispersive_state_name(component_name, model_name, index, tensor_name)] = (
                 entry[tensor_name].detach().clone()
             )
+    if bool(getattr(solver, "complex_fields_enabled", False)):
+        for component_name, model_name, index, tensor_names, entry in iter_magnetic_dispersive_state_specs(solver) or ():
+            for tensor_name in tensor_names:
+                tensors[dispersive_state_name(component_name, model_name, index, tensor_name) + "_imag"] = (
+                    entry[f"{tensor_name}_imag"].detach().clone()
+                )
     state = FDTDCheckpointState(step=int(step), schema=schema, tensors=tensors)
     validate_checkpoint_state(state)
     return state

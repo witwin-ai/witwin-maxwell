@@ -1,9 +1,8 @@
 """Native CUDA reverse-step runners for the FDTD adjoint.
 
-These runners orchestrate the fused reverse-math CUDA kernels (registered in
-``cuda/backend.py`` and parity-tested against the frozen Torch reference) into a
-full per-step reverse pass that is bit-for-bit equivalent to the analytic Torch
-reference backend it mirrors. Python only sequences the kernel launches; every
+These runners orchestrate the fused reverse-math CUDA kernels registered in
+``cuda/backend.py`` into a full per-step reverse pass. Python only sequences the
+kernel launches; every
 per-cell reverse computation (electric-adjoint -> mid-H adjoint, magnetic-adjoint
 -> pre-step E adjoint + eps gradient, and the magnetic decay pullback) runs
 inside the compiled kernels.
@@ -31,20 +30,18 @@ def _scene_is_cuda(forward_state) -> bool:
 
 def _cuda_scene_native_qualifies(solver, forward_state) -> bool:
     """Native reverse runners only run on a CUDA scene with the compiled extension."""
-    return bool(_scene_is_cuda(forward_state) and _cuda_backend.is_available())
+    if not _scene_is_cuda(forward_state) or not _cuda_backend.is_available():
+        return False
+    try:
+        extension = _cuda_backend.get_compiled_extension()
+    except (ImportError, OSError, RuntimeError):
+        return False
+    solver._fdtd_cuda_extension = extension
+    return True
 
 
 def _dispersive_native_qualifies(solver, forward_state) -> bool:
-    """Gate the native dispersive runner to the electric-only ADE configuration.
-
-    The dispersive runner nativizes the electric Debye/Drude/Lorentz current VJP
-    and the 1/eps correction VJP on top of the native standard/CPML base reverse.
-    The magnetic ADE (mu-pole) correction/state VJP is not nativized here, so a
-    scene that also enables magnetic dispersion falls back to the analytic Torch
-    reference in auto mode (and a forced ``native`` override raises).
-    """
-    if getattr(solver, "magnetic_dispersive_enabled", False):
-        return False
+    """Gate the native ADE runner to CUDA scenes with the compiled extension."""
     return _cuda_scene_native_qualifies(solver, forward_state)
 
 
@@ -58,6 +55,7 @@ def _reverse_step_standard_native_core(
     eps_ey,
     eps_ez,
     resolved_source_terms,
+    magnetic_fields=None,
 ):
     """Fused native standard reverse math, without the source-term eps gradient.
 
@@ -72,12 +70,13 @@ def _reverse_step_standard_native_core(
     from .reverse_common import dynamic_electric_curls
 
     # Mid-step H the forward electric update consumed (shared Torch replay).
-    magnetic_fields = _adjoint._forward_magnetic_fields(
-        solver,
-        forward_state,
-        time_value=time_value,
-        resolved_source_terms=resolved_source_terms,
-    )
+    if magnetic_fields is None:
+        magnetic_fields = _adjoint._forward_magnetic_fields(
+            solver,
+            forward_state,
+            time_value=time_value,
+            resolved_source_terms=resolved_source_terms,
+        )
     hx_mid = magnetic_fields["Hx"]
     hy_mid = magnetic_fields["Hy"]
     hz_mid = magnetic_fields["Hz"]
@@ -224,7 +223,7 @@ def _reverse_step_standard_native_core(
         grad_eps_ex=grad_eps_ex,
         grad_eps_ey=grad_eps_ey,
         grad_eps_ez=grad_eps_ez,
-        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_STANDARD],
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.STANDARD],
         magnetic_output_adjoint={"Hx": adj_hx_mid, "Hy": adj_hy_mid, "Hz": adj_hz_mid},
     )
     return step_result
@@ -244,7 +243,7 @@ def _reverse_step_standard_native(
 ):
     """Fully native reverse step for the standard (open-boundary) configuration.
 
-    Mirrors ``reverse_step_standard_python_reference`` exactly, launching the
+    Mirrors ``reverse_step_standard_native`` exactly, launching the
     fused reverse kernels in a fixed order. The fused kernels *assign* (not
     accumulate) into their outputs, so the launch order is load-bearing: the
     electric->H kernels must fully populate the mid-H adjoints before the
@@ -286,6 +285,7 @@ def _reverse_step_cpml_native_core(
     eps_ey,
     eps_ez,
     resolved_source_terms,
+    magnetic_fields=None,
 ):
     """Fused native CPML reverse math, without the source-term eps gradient.
 
@@ -294,7 +294,7 @@ def _reverse_step_cpml_native_core(
     that accumulation; the dispersive runner reuses this core as its CPML base
     reverse and defers the single source-term accumulation to the end of the step.
 
-    Mirrors ``reverse_step_cpml_python_reference`` exactly, launching the fused
+    Mirrors ``reverse_step_cpml_native`` exactly, launching the fused
     CPML reverse kernels in a fixed order. Every per-cell reverse computation
     (electric-adjoint -> pre-step E/psi_e adjoint + eps gradient + curl(H)
     derivative adjoint, and magnetic-decay/psi_h pullback -> pre-step H/psi_h
@@ -319,12 +319,13 @@ def _reverse_step_cpml_native_core(
     from .reverse_common import allocate_cpml_reverse_context
 
     # Mid-step H the forward electric update consumed (shared Torch replay).
-    magnetic_fields = _adjoint._forward_magnetic_fields(
-        solver,
-        forward_state,
-        time_value=time_value,
-        resolved_source_terms=resolved_source_terms,
-    )
+    if magnetic_fields is None:
+        magnetic_fields = _adjoint._forward_magnetic_fields(
+            solver,
+            forward_state,
+            time_value=time_value,
+            resolved_source_terms=resolved_source_terms,
+        )
     hx_mid = magnetic_fields["Hx"]
     hy_mid = magnetic_fields["Hy"]
     hz_mid = magnetic_fields["Hz"]
@@ -511,7 +512,7 @@ def _reverse_step_cpml_native_core(
         grad_eps_ex=ctx.grad_eps_ex,
         grad_eps_ey=ctx.grad_eps_ey,
         grad_eps_ez=ctx.grad_eps_ez,
-        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_CPML],
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.CPML],
         magnetic_output_adjoint=adj_h_mid,
     )
     return step_result
@@ -570,7 +571,7 @@ def _reverse_step_conductive_native(
 ):
     """Fully native reverse step for a static-conductive (sigma_e) CPML medium.
 
-    Mirrors :func:`reverse_step_conductive_cpml_python_reference`. The magnetic
+    Mirrors :func:`reverse_step_conductive_cpml_native`. The magnetic
     reverse, the curl(H)/curl(E) difference folds, and the pre-step field/psi
     accumulation are the linear CPML machinery unchanged; the only conduction
     specialization is the electric reverse kernel, which recomputes the eps
@@ -794,7 +795,7 @@ def _reverse_step_conductive_native(
         grad_eps_ex=ctx.grad_eps_ex,
         grad_eps_ey=ctx.grad_eps_ey,
         grad_eps_ez=ctx.grad_eps_ez,
-        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_CONDUCTIVE],
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.CONDUCTIVE],
         magnetic_output_adjoint=adj_h_mid,
     )
     return _adjoint._accumulate_source_term_gradients(
@@ -807,6 +808,42 @@ def _reverse_step_conductive_native(
         eps_ez=eps_ez,
         resolved_source_terms=resolved_source_terms,
     )
+
+
+def _reverse_cpml_magnetic_phase_native(solver, ctx, adjoint_state, *, suffix=""):
+    """Run the shared linear magnetic CPML pullback after an electric variant."""
+    pre = ctx.pre_step_adjoint
+    adj_h_mid = ctx.magnetic_output_adjoint
+    for component, pos_name, neg_name, d_pos, d_neg, curl, b_pos, c_pos, k_pos, b_neg, c_neg, k_neg in (
+        ("Hx", "psi_hx_y", "psi_hx_z", ctx.adj_d_ez_dy, ctx.adj_d_ey_dz, solver.chx_curl,
+         solver.cpml_b_h_y, solver.cpml_c_h_y, solver.cpml_inv_kappa_h_y,
+         solver.cpml_b_h_z, solver.cpml_c_h_z, solver.cpml_inv_kappa_h_z),
+        ("Hy", "psi_hy_z", "psi_hy_x", ctx.adj_d_ex_dz, ctx.adj_d_ez_dx, solver.chy_curl,
+         solver.cpml_b_h_z, solver.cpml_c_h_z, solver.cpml_inv_kappa_h_z,
+         solver.cpml_b_h_x, solver.cpml_c_h_x, solver.cpml_inv_kappa_h_x),
+        ("Hz", "psi_hz_x", "psi_hz_y", ctx.adj_d_ey_dx, ctx.adj_d_ex_dy, solver.chz_curl,
+         solver.cpml_b_h_x, solver.cpml_c_h_x, solver.cpml_inv_kappa_h_x,
+         solver.cpml_b_h_y, solver.cpml_c_h_y, solver.cpml_inv_kappa_h_y),
+    ):
+        field_key = component + suffix
+        pos_key, neg_key = pos_name + suffix, neg_name + suffix
+        getattr(_cuda_backend, f"_reverse_magnetic_cpml_{component.lower()}")(
+            **{f"Adj{component}Prev": pre[field_key]},
+            AdjPsiPosPrev=pre[pos_key], AdjPsiNegPrev=pre[neg_key],
+            AdjDPos=d_pos, AdjDNeg=d_neg,
+            **{f"Adj{component}Post": adj_h_mid[field_key]},
+            AdjPsiPosPost=adjoint_state[pos_key], AdjPsiNegPost=adjoint_state[neg_key],
+            **{f"{component}Decay": getattr(solver, f"c{component.lower()}_decay")},
+            **{f"{component}Curl": curl},
+            BPos=b_pos, CPos=c_pos, InvKappaPos=k_pos,
+            BNeg=b_neg, CNeg=c_neg, InvKappaNeg=k_neg,
+        )
+    _cuda_backend._accumulate_forward_diff_y(FieldGrad=pre["Ez" + suffix], DiffGrad=ctx.adj_d_ez_dy, invDy=solver.inv_dy_h)
+    _cuda_backend._accumulate_forward_diff_z(FieldGrad=pre["Ey" + suffix], DiffGrad=ctx.adj_d_ey_dz, invDz=solver.inv_dz_h)
+    _cuda_backend._accumulate_forward_diff_z(FieldGrad=pre["Ex" + suffix], DiffGrad=ctx.adj_d_ex_dz, invDz=solver.inv_dz_h)
+    _cuda_backend._accumulate_forward_diff_x(FieldGrad=pre["Ez" + suffix], DiffGrad=ctx.adj_d_ez_dx, invDx=solver.inv_dx_h)
+    _cuda_backend._accumulate_forward_diff_x(FieldGrad=pre["Ey" + suffix], DiffGrad=ctx.adj_d_ey_dx, invDx=solver.inv_dx_h)
+    _cuda_backend._accumulate_forward_diff_y(FieldGrad=pre["Ex" + suffix], DiffGrad=ctx.adj_d_ex_dy, invDy=solver.inv_dy_h)
 
 
 def _reverse_step_kerr_native(
@@ -823,7 +860,7 @@ def _reverse_step_kerr_native(
 ):
     """Fully native reverse step for an instantaneous Kerr (chi3) CPML medium.
 
-    Mirrors :func:`reverse_step_kerr_cpml_python_reference`. The Kerr forward
+    Mirrors :func:`reverse_step_kerr_cpml_native`. The Kerr forward
     rewrites only the electric ``curl`` coefficient each step from the pre-update
     fields (``curl = (dt / eff) * decay`` with ``eff = eps + eps0 * chi3 * |E|^2``),
     so the reverse math splits into: (1) a native forward collocation of the frozen
@@ -1003,70 +1040,8 @@ def _reverse_step_kerr_native(
     _cuda_backend._accumulate_backward_diff_x(FieldGrad=adj_h_mid["Hy"], DiffGrad=ctx.adj_d_hy_dx, invDx=solver.inv_dx_e)
     _cuda_backend._accumulate_backward_diff_y(FieldGrad=adj_h_mid["Hx"], DiffGrad=ctx.adj_d_hx_dy, invDy=solver.inv_dy_e)
 
-    # Phase 2: linear CPML magnetic reverse (the Kerr term is electric-only),
-    # folding each curl(E) derivative into the pre-step E adjoint.
-    _cuda_backend._reverse_magnetic_cpml_hx(
-        AdjHxPrev=pre["Hx"],
-        AdjPsiPosPrev=pre["psi_hx_y"],
-        AdjPsiNegPrev=pre["psi_hx_z"],
-        AdjDPos=ctx.adj_d_ez_dy,
-        AdjDNeg=ctx.adj_d_ey_dz,
-        AdjHxPost=adj_h_mid["Hx"],
-        AdjPsiPosPost=adjoint_state["psi_hx_y"],
-        AdjPsiNegPost=adjoint_state["psi_hx_z"],
-        HxDecay=solver.chx_decay,
-        HxCurl=solver.chx_curl,
-        BPos=solver.cpml_b_h_y,
-        CPos=solver.cpml_c_h_y,
-        InvKappaPos=solver.cpml_inv_kappa_h_y,
-        BNeg=solver.cpml_b_h_z,
-        CNeg=solver.cpml_c_h_z,
-        InvKappaNeg=solver.cpml_inv_kappa_h_z,
-    )
-    _cuda_backend._accumulate_forward_diff_y(FieldGrad=pre["Ez"], DiffGrad=ctx.adj_d_ez_dy, invDy=solver.inv_dy_h)
-    _cuda_backend._accumulate_forward_diff_z(FieldGrad=pre["Ey"], DiffGrad=ctx.adj_d_ey_dz, invDz=solver.inv_dz_h)
-
-    _cuda_backend._reverse_magnetic_cpml_hy(
-        AdjHyPrev=pre["Hy"],
-        AdjPsiPosPrev=pre["psi_hy_z"],
-        AdjPsiNegPrev=pre["psi_hy_x"],
-        AdjDPos=ctx.adj_d_ex_dz,
-        AdjDNeg=ctx.adj_d_ez_dx,
-        AdjHyPost=adj_h_mid["Hy"],
-        AdjPsiPosPost=adjoint_state["psi_hy_x"],
-        AdjPsiNegPost=adjoint_state["psi_hy_z"],
-        HyDecay=solver.chy_decay,
-        HyCurl=solver.chy_curl,
-        BPos=solver.cpml_b_h_z,
-        CPos=solver.cpml_c_h_z,
-        InvKappaPos=solver.cpml_inv_kappa_h_z,
-        BNeg=solver.cpml_b_h_x,
-        CNeg=solver.cpml_c_h_x,
-        InvKappaNeg=solver.cpml_inv_kappa_h_x,
-    )
-    _cuda_backend._accumulate_forward_diff_z(FieldGrad=pre["Ex"], DiffGrad=ctx.adj_d_ex_dz, invDz=solver.inv_dz_h)
-    _cuda_backend._accumulate_forward_diff_x(FieldGrad=pre["Ez"], DiffGrad=ctx.adj_d_ez_dx, invDx=solver.inv_dx_h)
-
-    _cuda_backend._reverse_magnetic_cpml_hz(
-        AdjHzPrev=pre["Hz"],
-        AdjPsiPosPrev=pre["psi_hz_x"],
-        AdjPsiNegPrev=pre["psi_hz_y"],
-        AdjDPos=ctx.adj_d_ey_dx,
-        AdjDNeg=ctx.adj_d_ex_dy,
-        AdjHzPost=adj_h_mid["Hz"],
-        AdjPsiPosPost=adjoint_state["psi_hz_x"],
-        AdjPsiNegPost=adjoint_state["psi_hz_y"],
-        HzDecay=solver.chz_decay,
-        HzCurl=solver.chz_curl,
-        BPos=solver.cpml_b_h_x,
-        CPos=solver.cpml_c_h_x,
-        InvKappaPos=solver.cpml_inv_kappa_h_x,
-        BNeg=solver.cpml_b_h_y,
-        CNeg=solver.cpml_c_h_y,
-        InvKappaNeg=solver.cpml_inv_kappa_h_y,
-    )
-    _cuda_backend._accumulate_forward_diff_x(FieldGrad=pre["Ey"], DiffGrad=ctx.adj_d_ey_dx, invDx=solver.inv_dx_h)
-    _cuda_backend._accumulate_forward_diff_y(FieldGrad=pre["Ex"], DiffGrad=ctx.adj_d_ex_dy, invDy=solver.inv_dy_h)
+    # Phase 2: linear CPML magnetic reverse (the Kerr term is electric-only).
+    _reverse_cpml_magnetic_phase_native(solver, ctx, adjoint_state)
 
     # Phase 3: scatter the |E|^2 cotangent back onto the pre-step fields (the exact
     # transpose of the collocation, own-axis 2*E plus the 4-point off-axis average).
@@ -1089,7 +1064,7 @@ def _reverse_step_kerr_native(
         grad_eps_ex=ctx.grad_eps_ex,
         grad_eps_ey=ctx.grad_eps_ey,
         grad_eps_ez=ctx.grad_eps_ez,
-        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_KERR],
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.KERR],
         magnetic_output_adjoint=adj_h_mid,
         grad_chi3_ex=grad_chi3_ex,
         grad_chi3_ey=grad_chi3_ey,
@@ -1107,6 +1082,166 @@ def _reverse_step_kerr_native(
     )
 
 
+def _reverse_step_nonlinear_native(
+    solver, forward_state, adjoint_state, *, time_value, eps_ex, eps_ey, eps_ez,
+    resolved_source_terms, profiler,
+):
+    """Native reverse for chi2/chi3/two-photon absorption on standard or CPML grids."""
+    import torch
+
+    from . import core as _adjoint
+    from .reverse_common import allocate_cpml_reverse_context
+
+    magnetic_fields = _adjoint._forward_magnetic_fields(
+        solver, forward_state, time_value=time_value,
+        resolved_source_terms=resolved_source_terms,
+    )
+    original_state_names = tuple(forward_state)
+    if not getattr(solver, "uses_cpml", False):
+        psi_components = {
+            "psi_ex_y": "Ex", "psi_ex_z": "Ex",
+            "psi_ey_x": "Ey", "psi_ey_z": "Ey",
+            "psi_ez_x": "Ez", "psi_ez_y": "Ez",
+            "psi_hx_y": "Hx", "psi_hx_z": "Hx",
+            "psi_hy_x": "Hy", "psi_hy_z": "Hy",
+            "psi_hz_x": "Hz", "psi_hz_y": "Hz",
+        }
+        forward_state = dict(forward_state)
+        adjoint_state = dict(adjoint_state)
+        for psi_name, component_name in psi_components.items():
+            forward_state[psi_name] = torch.zeros_like(forward_state[component_name])
+            adjoint_state[psi_name] = torch.zeros_like(adjoint_state[component_name])
+        for stagger in ("e", "h"):
+            for axis in ("x", "y", "z"):
+                vector = getattr(solver, f"inv_d{axis}_{stagger}")
+                setattr(solver, f"cpml_b_{stagger}_{axis}", torch.ones_like(vector))
+                setattr(solver, f"cpml_c_{stagger}_{axis}", torch.zeros_like(vector))
+                setattr(solver, f"cpml_inv_kappa_{stagger}_{axis}", torch.ones_like(vector))
+    dispersive_state = _adjoint._advance_dispersive_state(solver, forward_state)
+    fsq = {name: torch.empty_like(eps) for name, eps in (
+        ("Ex", eps_ex), ("Ey", eps_ey), ("Ez", eps_ez)
+    )}
+    _cuda_backend._collocate_field_square(
+        FsqEx=fsq["Ex"], FsqEy=fsq["Ey"], FsqEz=fsq["Ez"],
+        Ex=forward_state["Ex"], Ey=forward_state["Ey"], Ez=forward_state["Ez"],
+    )
+    ctx = allocate_cpml_reverse_context(
+        solver, forward_state, adjoint_state,
+        eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez,
+    )
+    pre, adj_h = ctx.pre_step_adjoint, ctx.magnetic_output_adjoint
+    grad_chi2 = {name: torch.empty_like(value) for name, value in fsq.items()}
+    grad_chi3 = {name: torch.empty_like(value) for name, value in fsq.items()}
+    grad_tpa = {name: torch.empty_like(value) for name, value in fsq.items()}
+    g_fsq = {name: torch.empty_like(value) for name, value in fsq.items()}
+    configs = (
+        (0, "Ex", eps_ex, "psi_ex_y", "psi_ex_z", ctx.adj_d_hz_dy, ctx.adj_d_hy_dz,
+         magnetic_fields["Hz"], magnetic_fields["Hy"], solver.inv_dy_e, solver.inv_dz_e,
+         solver.cpml_b_e_y, solver.cpml_c_e_y, solver.cpml_inv_kappa_e_y,
+         solver.cpml_b_e_z, solver.cpml_c_e_z, solver.cpml_inv_kappa_e_z,
+         solver.boundary_y_low_code, solver.boundary_y_high_code,
+         solver.boundary_z_low_code, solver.boundary_z_high_code),
+        (1, "Ey", eps_ey, "psi_ey_z", "psi_ey_x", ctx.adj_d_hx_dz, ctx.adj_d_hz_dx,
+         magnetic_fields["Hx"], magnetic_fields["Hz"], solver.inv_dz_e, solver.inv_dx_e,
+         solver.cpml_b_e_z, solver.cpml_c_e_z, solver.cpml_inv_kappa_e_z,
+         solver.cpml_b_e_x, solver.cpml_c_e_x, solver.cpml_inv_kappa_e_x,
+         solver.boundary_x_low_code, solver.boundary_x_high_code,
+         solver.boundary_z_low_code, solver.boundary_z_high_code),
+        (2, "Ez", eps_ez, "psi_ez_x", "psi_ez_y", ctx.adj_d_hy_dx, ctx.adj_d_hx_dy,
+         magnetic_fields["Hy"], magnetic_fields["Hx"], solver.inv_dx_e, solver.inv_dy_e,
+         solver.cpml_b_e_x, solver.cpml_c_e_x, solver.cpml_inv_kappa_e_x,
+         solver.cpml_b_e_y, solver.cpml_c_e_y, solver.cpml_inv_kappa_e_y,
+         solver.boundary_x_low_code, solver.boundary_x_high_code,
+         solver.boundary_y_low_code, solver.boundary_y_high_code),
+    )
+    grad_eps = {"Ex": ctx.grad_eps_ex, "Ey": ctx.grad_eps_ey, "Ez": ctx.grad_eps_ez}
+    for (component, name, eps, psi_pos, psi_neg, adj_d_pos, adj_d_neg,
+         h_pos, h_neg, inv_pos, inv_neg, b_pos, c_pos, k_pos, b_neg, c_neg, k_neg,
+         low_a, high_a, low_b, high_b) in configs:
+        # Ey's reference wiring stores the two post-psi cotangents in the
+        # historical x/z order; retain it for exact forward/checkpoint parity.
+        post_pos, post_neg = (psi_neg, psi_pos) if name == "Ey" else (psi_pos, psi_neg)
+        suffix = name[-1]
+        _cuda_backend._reverse_electric_cpml_nonlinear(
+            component=component, AdjPrev=pre[name], GradEps=grad_eps[name],
+            GradChi2=grad_chi2[name], GradChi3=grad_chi3[name], GradTpa=grad_tpa[name],
+            GFsq=g_fsq[name], AdjPsiPosPrev=pre[psi_pos], AdjPsiNegPrev=pre[psi_neg],
+            AdjDPos=adj_d_pos, AdjDNeg=adj_d_neg, AdjPost=adjoint_state[name],
+            AdjPsiPosPost=adjoint_state[post_pos], AdjPsiNegPost=adjoint_state[post_neg],
+            EPrev=forward_state[name], ExternalDecay=getattr(solver, f"ce{suffix.lower()}_decay_external"),
+            Eps=eps, Chi2=getattr(solver, f"nonlinear_chi2_{name}"),
+            Chi3=getattr(solver, f"kerr_chi3_{name}"), Tpa=getattr(solver, f"tpa_sigma_{name}"),
+            SigmaStatic=getattr(solver, f"sigma_e_{name}"), Fsq=fsq[name],
+            Dt=float(solver.dt), Eps0=float(solver.eps0),
+            PsiPos=forward_state[psi_pos], PsiNeg=forward_state[psi_neg],
+            BPos=b_pos, CPos=c_pos, InvKappaPos=k_pos,
+            BNeg=b_neg, CNeg=c_neg, InvKappaNeg=k_neg,
+            HPosMid=h_pos, HNegMid=h_neg, InvPos=inv_pos, InvNeg=inv_neg,
+            LowModeA=low_a, HighModeA=high_a, LowModeB=low_b, HighModeB=high_b,
+        )
+    _cuda_backend._accumulate_backward_diff_y(FieldGrad=adj_h["Hz"], DiffGrad=ctx.adj_d_hz_dy, invDy=solver.inv_dy_e)
+    _cuda_backend._accumulate_backward_diff_z(FieldGrad=adj_h["Hy"], DiffGrad=ctx.adj_d_hy_dz, invDz=solver.inv_dz_e)
+    _cuda_backend._accumulate_backward_diff_z(FieldGrad=adj_h["Hx"], DiffGrad=ctx.adj_d_hx_dz, invDz=solver.inv_dz_e)
+    _cuda_backend._accumulate_backward_diff_x(FieldGrad=adj_h["Hz"], DiffGrad=ctx.adj_d_hz_dx, invDx=solver.inv_dx_e)
+    _cuda_backend._accumulate_backward_diff_x(FieldGrad=adj_h["Hy"], DiffGrad=ctx.adj_d_hy_dx, invDx=solver.inv_dx_e)
+    _cuda_backend._accumulate_backward_diff_y(FieldGrad=adj_h["Hx"], DiffGrad=ctx.adj_d_hx_dy, invDy=solver.inv_dy_e)
+    _reverse_cpml_magnetic_phase_native(solver, ctx, adjoint_state)
+    _cuda_backend._collocation_transpose(
+        AdjEx=pre["Ex"], AdjEy=pre["Ey"], AdjEz=pre["Ez"],
+        GEx=g_fsq["Ex"], GEy=g_fsq["Ey"], GEz=g_fsq["Ez"],
+        Ex=forward_state["Ex"], Ey=forward_state["Ey"], Ez=forward_state["Ez"],
+    )
+    if dispersive_state:
+        eps_by_field = {"Ex": eps_ex, "Ey": eps_ey, "Ez": eps_ez}
+        grad_eps = {"Ex": ctx.grad_eps_ex, "Ey": ctx.grad_eps_ey, "Ez": ctx.grad_eps_ez}
+        dt = float(solver.dt)
+        for component, model, index, _tensor_names, entry in (
+            _adjoint.iter_dispersive_state_specs(solver) or ()
+        ):
+            current = _adjoint.dispersive_state_name(component, model, index, "current")
+            adj_current = torch.empty_like(forward_state[current])
+            _cuda_backend._reverse_dispersive_correction(
+                AdjCurrentCorrected=adj_current, GradEps=grad_eps[component],
+                AdjCurrentPost=adjoint_state[current], AdjElectricPost=adjoint_state[component],
+                Current=dispersive_state[current], Eps=eps_by_field[component], dt=dt,
+            )
+            if model == "debye":
+                polarization = _adjoint.dispersive_state_name(component, model, index, "polarization")
+                _cuda_backend._reverse_debye_current(
+                    AdjElectricPrev=pre[component], AdjPolarizationPrev=pre[polarization],
+                    AdjPolarizationPost=adjoint_state[polarization], AdjCurrentPost=adj_current,
+                    DebyeDrive=entry["drive"], decay=float(entry["decay"]), dt=dt,
+                )
+            elif model == "drude":
+                _cuda_backend._reverse_drude_current(
+                    AdjElectricPrev=pre[component], AdjCurrentPrev=pre[current],
+                    AdjCurrentPost=adj_current, DrudeDrive=entry["drive"],
+                    decay=float(entry["decay"]),
+                )
+            else:
+                polarization = _adjoint.dispersive_state_name(component, model, index, "polarization")
+                _cuda_backend._reverse_lorentz_current(
+                    AdjElectricPrev=pre[component], AdjPolarizationPrev=pre[polarization],
+                    AdjCurrentPrev=pre[current], AdjPolarizationPost=adjoint_state[polarization],
+                    AdjCurrentPost=adj_current, LorentzDrive=entry["drive"],
+                    decay=float(entry["decay"]), restoring=float(entry["restoring"]), dt=dt,
+                )
+    result = _adjoint._ReverseStepResult(
+        pre_step_adjoint={name: pre[name] for name in original_state_names}, grad_eps_ex=ctx.grad_eps_ex,
+        grad_eps_ey=ctx.grad_eps_ey, grad_eps_ez=ctx.grad_eps_ez,
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.GENERAL_NONLINEAR],
+        magnetic_output_adjoint=adj_h,
+        grad_chi2_ex=grad_chi2["Ex"], grad_chi2_ey=grad_chi2["Ey"], grad_chi2_ez=grad_chi2["Ez"],
+        grad_chi3_ex=grad_chi3["Ex"], grad_chi3_ey=grad_chi3["Ey"], grad_chi3_ez=grad_chi3["Ez"],
+        grad_tpa_ex=grad_tpa["Ex"], grad_tpa_ey=grad_tpa["Ey"], grad_tpa_ez=grad_tpa["Ez"],
+    )
+    return _adjoint._accumulate_source_term_gradients(
+        result, solver=solver, adjoint_state=adjoint_state, time_value=time_value,
+        eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+
 def _reverse_step_bloch_native_core(
     solver,
     forward_state,
@@ -1117,6 +1252,9 @@ def _reverse_step_bloch_native_core(
     eps_ey,
     eps_ez,
     resolved_source_terms,
+    magnetic_fields=None,
+    magnetic_cpml=False,
+    magnetic_adjoint_additions=None,
 ):
     """Fused native complex-Bloch reverse math, without the source-term eps gradient.
 
@@ -1126,7 +1264,7 @@ def _reverse_step_bloch_native_core(
     accumulation; the Bloch+dispersive runner reuses this core as its complex base
     reverse and folds the electric ADE VJP on top before the single accumulation.
 
-    Mirrors ``reverse_step_bloch_python_reference`` exactly, launching the fused
+    Mirrors ``reverse_step_bloch_native`` exactly, launching the fused
     complex Bloch reverse kernels in a fixed order. Every per-cell reverse
     computation (electric-adjoint -> mid-H adjoint with the boundary wrap phase,
     magnetic-adjoint -> pre-step E adjoint + eps gradient, and the real/imag
@@ -1145,12 +1283,13 @@ def _reverse_step_bloch_native_core(
     from .reverse_common import dynamic_electric_curls
 
     # Mid-step complex H the forward electric update consumed (shared Torch replay).
-    magnetic_fields = _adjoint._forward_magnetic_fields_complex(
-        solver,
-        forward_state,
-        time_value=time_value,
-        resolved_source_terms=resolved_source_terms,
-    )
+    if magnetic_fields is None:
+        magnetic_fields = _adjoint._forward_magnetic_fields_complex(
+            solver,
+            forward_state,
+            time_value=time_value,
+            resolved_source_terms=resolved_source_terms,
+        )
 
     # Dynamic electric curl coefficients (cast base curl by the eps leaf).
     ex_curl, ey_curl, ez_curl = dynamic_electric_curls(
@@ -1225,6 +1364,22 @@ def _reverse_step_bloch_native_core(
         invDx=solver.inv_dx_e,
         invDy=solver.inv_dy_e,
     )
+    if magnetic_adjoint_additions:
+        for name, target in (
+            ("Hx", adj_hx_mid_r), ("Hy", adj_hy_mid_r), ("Hz", adj_hz_mid_r),
+            ("Hx_imag", adj_hx_mid_i), ("Hy_imag", adj_hy_mid_i), ("Hz_imag", adj_hz_mid_i),
+        ):
+            addition = magnetic_adjoint_additions.get(name)
+            if addition is not None:
+                _cuda_backend._accumulate_in_place(dst=target, src=addition)
+    if magnetic_cpml:
+        zero_hx_r, zero_hx_i = torch.zeros_like(adj_hx_mid_r), torch.zeros_like(adj_hx_mid_i)
+        zero_hy_r, zero_hy_i = torch.zeros_like(adj_hy_mid_r), torch.zeros_like(adj_hy_mid_i)
+        zero_hz_r, zero_hz_i = torch.zeros_like(adj_hz_mid_r), torch.zeros_like(adj_hz_mid_i)
+    else:
+        zero_hx_r, zero_hx_i = adj_hx_mid_r, adj_hx_mid_i
+        zero_hy_r, zero_hy_i = adj_hy_mid_r, adj_hy_mid_i
+        zero_hz_r, zero_hz_i = adj_hz_mid_r, adj_hz_mid_i
 
     # Phase 2: magnetic adjoint -> pre-step E adjoint (complex) + eps gradient. Each
     # kernel reconstructs its own curl(H) from the mid-H fields (for the eps
@@ -1245,10 +1400,10 @@ def _reverse_step_bloch_native_core(
         GradEpsEx=grad_eps_ex,
         AdjExPostReal=adjoint_state["Ex"],
         AdjExPostImag=adjoint_state["Ex_imag"],
-        AdjHyMidReal=adj_hy_mid_r,
-        AdjHyMidImag=adj_hy_mid_i,
-        AdjHzMidReal=adj_hz_mid_r,
-        AdjHzMidImag=adj_hz_mid_i,
+        AdjHyMidReal=zero_hy_r,
+        AdjHyMidImag=zero_hy_i,
+        AdjHzMidReal=zero_hz_r,
+        AdjHzMidImag=zero_hz_i,
         ExDecay=solver.cex_decay,
         ExCurl=ex_curl,
         EpsEx=eps_ex,
@@ -1273,10 +1428,10 @@ def _reverse_step_bloch_native_core(
         GradEpsEy=grad_eps_ey,
         AdjEyPostReal=adjoint_state["Ey"],
         AdjEyPostImag=adjoint_state["Ey_imag"],
-        AdjHxMidReal=adj_hx_mid_r,
-        AdjHxMidImag=adj_hx_mid_i,
-        AdjHzMidReal=adj_hz_mid_r,
-        AdjHzMidImag=adj_hz_mid_i,
+        AdjHxMidReal=zero_hx_r,
+        AdjHxMidImag=zero_hx_i,
+        AdjHzMidReal=zero_hz_r,
+        AdjHzMidImag=zero_hz_i,
         EyDecay=solver.cey_decay,
         EyCurl=ey_curl,
         EpsEy=eps_ey,
@@ -1301,10 +1456,10 @@ def _reverse_step_bloch_native_core(
         GradEpsEz=grad_eps_ez,
         AdjEzPostReal=adjoint_state["Ez"],
         AdjEzPostImag=adjoint_state["Ez_imag"],
-        AdjHxMidReal=adj_hx_mid_r,
-        AdjHxMidImag=adj_hx_mid_i,
-        AdjHyMidReal=adj_hy_mid_r,
-        AdjHyMidImag=adj_hy_mid_i,
+        AdjHxMidReal=zero_hx_r,
+        AdjHxMidImag=zero_hx_i,
+        AdjHyMidReal=zero_hy_r,
+        AdjHyMidImag=zero_hy_i,
         EzDecay=solver.cez_decay,
         EzCurl=ez_curl,
         EpsEz=eps_ez,
@@ -1324,41 +1479,216 @@ def _reverse_step_bloch_native_core(
         invDyH=solver.inv_dy_h,
     )
 
-    # Phase 3: magnetic decay pullback -> pre-step H adjoint (complex). The decay is
-    # real, so the standard real decay kernel runs once per split-field half.
-    adj_hx_prev_r = torch.empty_like(forward_state["Hx"])
-    adj_hx_prev_i = torch.empty_like(forward_state["Hx"])
-    adj_hy_prev_r = torch.empty_like(forward_state["Hy"])
-    adj_hy_prev_i = torch.empty_like(forward_state["Hy"])
-    adj_hz_prev_r = torch.empty_like(forward_state["Hz"])
-    adj_hz_prev_i = torch.empty_like(forward_state["Hz"])
-    _cuda_backend._reverse_magnetic_hx_decay(AdjHxPrev=adj_hx_prev_r, AdjHxMid=adj_hx_mid_r, HxDecay=solver.chx_decay)
-    _cuda_backend._reverse_magnetic_hx_decay(AdjHxPrev=adj_hx_prev_i, AdjHxMid=adj_hx_mid_i, HxDecay=solver.chx_decay)
-    _cuda_backend._reverse_magnetic_hy_decay(AdjHyPrev=adj_hy_prev_r, AdjHyMid=adj_hy_mid_r, HyDecay=solver.chy_decay)
-    _cuda_backend._reverse_magnetic_hy_decay(AdjHyPrev=adj_hy_prev_i, AdjHyMid=adj_hy_mid_i, HyDecay=solver.chy_decay)
-    _cuda_backend._reverse_magnetic_hz_decay(AdjHzPrev=adj_hz_prev_r, AdjHzMid=adj_hz_mid_r, HzDecay=solver.chz_decay)
-    _cuda_backend._reverse_magnetic_hz_decay(AdjHzPrev=adj_hz_prev_i, AdjHzMid=adj_hz_mid_i, HzDecay=solver.chz_decay)
-
     pre_by_name = {
         "Ex": adj_ex_prev_r,
         "Ey": adj_ey_prev_r,
         "Ez": adj_ez_prev_r,
-        "Hx": adj_hx_prev_r,
-        "Hy": adj_hy_prev_r,
-        "Hz": adj_hz_prev_r,
         "Ex_imag": adj_ex_prev_i,
         "Ey_imag": adj_ey_prev_i,
         "Ez_imag": adj_ez_prev_i,
-        "Hx_imag": adj_hx_prev_i,
-        "Hy_imag": adj_hy_prev_i,
-        "Hz_imag": adj_hz_prev_i,
     }
+    if magnetic_cpml:
+        from types import SimpleNamespace
+        for name in ("Hx", "Hy", "Hz", "Hx_imag", "Hy_imag", "Hz_imag"):
+            pre_by_name[name] = torch.empty_like(forward_state[name])
+        for name in _adjoint.checkpoint_schema(solver).cpml_state_names:
+            pre_by_name[name] = torch.zeros_like(forward_state[name])
+        def make_ctx(suffix, adj_h_values):
+            return SimpleNamespace(
+                pre_step_adjoint=pre_by_name,
+                magnetic_output_adjoint=adj_h_values,
+                adj_d_ez_dy=torch.empty_like(forward_state["Hx"]),
+                adj_d_ey_dz=torch.empty_like(forward_state["Hx"]),
+                adj_d_ex_dz=torch.empty_like(forward_state["Hy"]),
+                adj_d_ez_dx=torch.empty_like(forward_state["Hy"]),
+                adj_d_ey_dx=torch.empty_like(forward_state["Hz"]),
+                adj_d_ex_dy=torch.empty_like(forward_state["Hz"]),
+            )
+        real_ctx = make_ctx("", {"Hx": adj_hx_mid_r, "Hy": adj_hy_mid_r, "Hz": adj_hz_mid_r})
+        imag_ctx = make_ctx("_imag", {
+            "Hx_imag": adj_hx_mid_i, "Hy_imag": adj_hy_mid_i, "Hz_imag": adj_hz_mid_i
+        })
+        _reverse_cpml_magnetic_phase_native(solver, real_ctx, adjoint_state)
+        _reverse_cpml_magnetic_phase_native(solver, imag_ctx, adjoint_state, suffix="_imag")
+    else:
+        for component, adj_r, adj_i in (
+            ("Hx", adj_hx_mid_r, adj_hx_mid_i),
+            ("Hy", adj_hy_mid_r, adj_hy_mid_i),
+            ("Hz", adj_hz_mid_r, adj_hz_mid_i),
+        ):
+            prev_r, prev_i = torch.empty_like(adj_r), torch.empty_like(adj_i)
+            getattr(_cuda_backend, f"_reverse_magnetic_{component.lower()}_decay")(
+                **{f"Adj{component}Prev": prev_r, f"Adj{component}Mid": adj_r,
+                   f"{component}Decay": getattr(solver, f"c{component.lower()}_decay")}
+            )
+            getattr(_cuda_backend, f"_reverse_magnetic_{component.lower()}_decay")(
+                **{f"Adj{component}Prev": prev_i, f"Adj{component}Mid": adj_i,
+                   f"{component}Decay": getattr(solver, f"c{component.lower()}_decay")}
+            )
+            pre_by_name[component] = prev_r
+            pre_by_name[component + "_imag"] = prev_i
+    pre_by_name = {name: pre_by_name[name] for name in forward_state if name in pre_by_name}
     return _adjoint._ReverseStepResult(
         pre_step_adjoint=pre_by_name,
         grad_eps_ex=grad_eps_ex,
         grad_eps_ey=grad_eps_ey,
         grad_eps_ez=grad_eps_ez,
-        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_BLOCH],
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.BLOCH],
+        magnetic_output_adjoint={
+            "Hx": adj_hx_mid_r, "Hy": adj_hy_mid_r, "Hz": adj_hz_mid_r,
+            "Hx_imag": adj_hx_mid_i, "Hy_imag": adj_hy_mid_i, "Hz_imag": adj_hz_mid_i,
+        },
+    )
+
+
+def _reverse_step_mixed_bloch_cpml_native(
+    solver, forward_state, adjoint_state, *, time_value, eps_ex, eps_ey, eps_ez,
+    resolved_source_terms, profiler,
+):
+    """Native reverse of one-PML-axis/two-Bloch-axis complex CPML."""
+    import dataclasses
+    import torch
+
+    from . import core as _adjoint
+    from .reverse_common import dynamic_electric_curls
+    from ..runtime.stepping import _bloch_cpml_pml_axis
+
+    pml_axis_name = _bloch_cpml_pml_axis(solver)
+    if pml_axis_name is None:
+        raise RuntimeError("Native mixed Bloch/CPML reverse requires one PML axis and two Bloch axes.")
+    captured = []
+    _adjoint._step_state(
+        solver, forward_state, time_value=time_value,
+        eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez,
+        capture_magnetic=captured,
+    )
+    magnetic_fields = {name: tensor.contiguous() for name, tensor in captured[0].items()}
+    dispersive_state = _adjoint._advance_dispersive_state(solver, forward_state)
+    magnetic_dispersive_state = _adjoint._advance_magnetic_dispersive_state(
+        solver, forward_state
+    )
+    curls = dict(zip(("Ex", "Ey", "Ez"), dynamic_electric_curls(
+        solver, eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez
+    )))
+    additions = {
+        name: torch.zeros_like(forward_state[name])
+        for name in ("Hx", "Hy", "Hz", "Hx_imag", "Hy_imag", "Hz_imag")
+    }
+    electric_psi_names = (
+        "psi_ex_y", "psi_ex_z", "psi_ey_x", "psi_ey_z", "psi_ez_x", "psi_ez_y"
+    )
+    psi_pre = {
+        name + suffix: adjoint_state[name + suffix].detach().clone()
+        for suffix in ("", "_imag") for name in electric_psi_names
+    }
+    axis = {"x": 0, "y": 1, "z": 2}[pml_axis_name]
+    # component, psi, derivative target H, sign, tangent axis
+    correction_specs = {
+        "z": (("Ex", "psi_ex_z", "Hy", -1.0, 1), ("Ey", "psi_ey_z", "Hx", 1.0, 0)),
+        "y": (("Ex", "psi_ex_y", "Hz", 1.0, 2), ("Ez", "psi_ez_y", "Hx", -1.0, 0)),
+        "x": (("Ey", "psi_ey_x", "Hz", -1.0, 2), ("Ez", "psi_ez_x", "Hy", 1.0, 1)),
+    }[pml_axis_name]
+    inv_delta = (solver.inv_dx_e, solver.inv_dy_e, solver.inv_dz_e)[axis]
+    b = (solver.cpml_b_e_x, solver.cpml_b_e_y, solver.cpml_b_e_z)[axis]
+    c = (solver.cpml_c_e_x, solver.cpml_c_e_y, solver.cpml_c_e_z)[axis]
+    inv_kappa = (
+        solver.cpml_inv_kappa_e_x, solver.cpml_inv_kappa_e_y, solver.cpml_inv_kappa_e_z
+    )[axis]
+    for suffix in ("", "_imag"):
+        for component, psi_name, h_name, sign, tangent_axis in correction_specs:
+            field_key, psi_key, h_key = component + suffix, psi_name + suffix, h_name + suffix
+            adj_derivative = torch.empty_like(forward_state[field_key])
+            _cuda_backend._reverse_cpml_correction(
+                AdjPsiPrev=psi_pre[psi_key], AdjDerivative=adj_derivative,
+                AdjField=adjoint_state[field_key], AdjPsiPost=adjoint_state[psi_key],
+                Curl=curls[component], B=b, C=c, InvKappa=inv_kappa,
+                NormalAxis=axis, TangentAxis=tangent_axis,
+                TangentLowMode=getattr(solver, f"boundary_{'xyz'[tangent_axis]}_low_code"),
+                TangentHighMode=getattr(solver, f"boundary_{'xyz'[tangent_axis]}_high_code"),
+                Sign=sign,
+            )
+            accumulate = (
+                _cuda_backend._accumulate_backward_diff_x,
+                _cuda_backend._accumulate_backward_diff_y,
+                _cuda_backend._accumulate_backward_diff_z,
+            )[axis]
+            accumulate(**{
+                "FieldGrad": additions[h_key], "DiffGrad": adj_derivative,
+                ("invDx", "invDy", "invDz")[axis]: inv_delta,
+            })
+    result = _reverse_step_bloch_native_core(
+        solver, forward_state, adjoint_state, time_value=time_value,
+        eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+        magnetic_fields=magnetic_fields, magnetic_cpml=True,
+        magnetic_adjoint_additions=additions,
+    )
+    pre = dict(result.pre_step_adjoint)
+    pre.update(psi_pre)
+    for name in _adjoint.checkpoint_schema(solver).dispersive_state_names:
+        pre[name] = torch.zeros_like(forward_state[name])
+    for name in _adjoint.checkpoint_schema(solver).magnetic_dispersive_state_names:
+        pre[name] = torch.zeros_like(forward_state[name])
+    if dispersive_state:
+        grad_eps = {"Ex": result.grad_eps_ex, "Ey": result.grad_eps_ey, "Ez": result.grad_eps_ez}
+        eps_by_field = {"Ex": eps_ex, "Ey": eps_ey, "Ez": eps_ez}
+        dt = float(solver.dt)
+        for suffix in ("", "_imag"):
+            for component, model, index, _tensor_names, entry in (
+                _adjoint.iter_dispersive_state_specs(solver) or ()
+            ):
+                current = _adjoint.dispersive_state_name(component, model, index, "current") + suffix
+                adj_current = torch.empty_like(forward_state[current])
+                _cuda_backend._reverse_dispersive_correction(
+                    AdjCurrentCorrected=adj_current, GradEps=grad_eps[component],
+                    AdjCurrentPost=adjoint_state[current],
+                    AdjElectricPost=adjoint_state[component + suffix],
+                    Current=dispersive_state[current], Eps=eps_by_field[component], dt=dt,
+                )
+                if model == "debye":
+                    polarization = _adjoint.dispersive_state_name(
+                        component, model, index, "polarization"
+                    ) + suffix
+                    _cuda_backend._reverse_debye_current(
+                        AdjElectricPrev=pre[component + suffix],
+                        AdjPolarizationPrev=pre[polarization],
+                        AdjPolarizationPost=adjoint_state[polarization],
+                        AdjCurrentPost=adj_current, DebyeDrive=entry["drive"],
+                        decay=float(entry["decay"]), dt=dt,
+                    )
+                elif model == "drude":
+                    _cuda_backend._reverse_drude_current(
+                        AdjElectricPrev=pre[component + suffix], AdjCurrentPrev=pre[current],
+                        AdjCurrentPost=adj_current, DrudeDrive=entry["drive"],
+                        decay=float(entry["decay"]),
+                    )
+                else:
+                    polarization = _adjoint.dispersive_state_name(
+                        component, model, index, "polarization"
+                    ) + suffix
+                    _cuda_backend._reverse_lorentz_current(
+                        AdjElectricPrev=pre[component + suffix],
+                        AdjPolarizationPrev=pre[polarization], AdjCurrentPrev=pre[current],
+                        AdjPolarizationPost=adjoint_state[polarization], AdjCurrentPost=adj_current,
+                        LorentzDrive=entry["drive"], decay=float(entry["decay"]),
+                        restoring=float(entry["restoring"]), dt=dt,
+                    )
+    _apply_magnetic_ade_reverse_native(
+        solver, forward_state, adjoint_state, magnetic_dispersive_state,
+        result.magnetic_output_adjoint, pre,
+    )
+    pre = {name: pre[name] for name in forward_state}
+    backend = (
+        _ReverseBackend.GRATING_TFSF if getattr(solver, "tfsf_enabled", False)
+        else _ReverseBackend.MIXED_BLOCH_CPML
+    )
+    result = dataclasses.replace(
+        result, pre_step_adjoint=pre, backend=_NATIVE_REVERSE_LABELS[backend]
+    )
+    return _adjoint._accumulate_source_term_gradients(
+        result, solver=solver, adjoint_state=adjoint_state, time_value=time_value,
+        eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
     )
 
 
@@ -1401,6 +1731,62 @@ def _reverse_step_bloch_native(
     )
 
 
+def _apply_magnetic_ade_reverse_native(
+    solver, forward_state, adjoint_state, magnetic_state, magnetic_output_adjoint,
+    pre_step_adjoint,
+):
+    """Apply native magnetic-current correction and ADE-state pullbacks."""
+    import torch
+
+    from . import core as _adjoint
+
+    if not magnetic_state:
+        return
+    mu = {"Hx": solver.mu_Hx, "Hy": solver.mu_Hy, "Hz": solver.mu_Hz}
+    suffixes = ("", "_imag") if getattr(solver, "complex_fields_enabled", False) else ("",)
+    for suffix in suffixes:
+        for component, model, index, _tensor_names, entry in (
+            _adjoint.iter_magnetic_dispersive_state_specs(solver) or ()
+        ):
+            current = _adjoint.dispersive_state_name(component, model, index, "current") + suffix
+            adj_current = torch.empty_like(forward_state[current])
+            discarded_grad_mu = torch.zeros_like(mu[component])
+            _cuda_backend._reverse_dispersive_correction(
+                AdjCurrentCorrected=adj_current, GradEps=discarded_grad_mu,
+                AdjCurrentPost=adjoint_state[current],
+                AdjElectricPost=magnetic_output_adjoint[component + suffix],
+                Current=magnetic_state[current], Eps=mu[component], dt=float(solver.dt),
+            )
+            if model == "debye":
+                polarization = _adjoint.dispersive_state_name(
+                    component, model, index, "polarization"
+                ) + suffix
+                _cuda_backend._reverse_debye_current(
+                    AdjElectricPrev=pre_step_adjoint[component + suffix],
+                    AdjPolarizationPrev=pre_step_adjoint[polarization],
+                    AdjPolarizationPost=adjoint_state[polarization], AdjCurrentPost=adj_current,
+                    DebyeDrive=entry["drive"], decay=float(entry["decay"]), dt=float(solver.dt),
+                )
+            elif model == "drude":
+                _cuda_backend._reverse_drude_current(
+                    AdjElectricPrev=pre_step_adjoint[component + suffix],
+                    AdjCurrentPrev=pre_step_adjoint[current], AdjCurrentPost=adj_current,
+                    DrudeDrive=entry["drive"], decay=float(entry["decay"]),
+                )
+            else:
+                polarization = _adjoint.dispersive_state_name(
+                    component, model, index, "polarization"
+                ) + suffix
+                _cuda_backend._reverse_lorentz_current(
+                    AdjElectricPrev=pre_step_adjoint[component + suffix],
+                    AdjPolarizationPrev=pre_step_adjoint[polarization],
+                    AdjCurrentPrev=pre_step_adjoint[current],
+                    AdjPolarizationPost=adjoint_state[polarization], AdjCurrentPost=adj_current,
+                    LorentzDrive=entry["drive"], decay=float(entry["decay"]),
+                    restoring=float(entry["restoring"]), dt=float(solver.dt),
+                )
+
+
 def _reverse_step_bloch_dispersive_native(
     solver,
     forward_state,
@@ -1415,7 +1801,7 @@ def _reverse_step_bloch_dispersive_native(
 ):
     """Fully native reverse step for a Bloch (complex-field) + electric-dispersive medium.
 
-    Mirrors :func:`reverse_step_bloch_dispersive_python_reference`. The complex
+    Mirrors :func:`reverse_step_bloch_dispersive_native`. The complex
     Bloch base reverse produces the twelve real/imag field adjoints and the base
     eps gradient; on top of it the electric ADE VJP runs on the real and imaginary
     halves independently, reusing the same fused dispersive-correction and
@@ -1434,6 +1820,19 @@ def _reverse_step_bloch_dispersive_native(
 
     # Replay the post-update electric dispersive currents (Torch), real + imag.
     dispersive_state = _adjoint._advance_dispersive_state(solver, forward_state)
+    magnetic_dispersive_state = _adjoint._advance_magnetic_dispersive_state(
+        solver, forward_state
+    )
+    magnetic_fields = None
+    if magnetic_dispersive_state:
+        magnetic_fields = _adjoint._apply_magnetic_dispersive_corrections(
+            solver,
+            _adjoint._forward_magnetic_fields_complex(
+                solver, forward_state, time_value=time_value,
+                resolved_source_terms=resolved_source_terms,
+            ),
+            magnetic_dispersive_state,
+        )
 
     # Native complex Bloch base reverse (no source-term grads yet).
     base_result = _reverse_step_bloch_native_core(
@@ -1445,12 +1844,15 @@ def _reverse_step_bloch_dispersive_native(
         eps_ey=eps_ey,
         eps_ez=eps_ez,
         resolved_source_terms=resolved_source_terms,
+        magnetic_fields=magnetic_fields,
     )
 
     pre_step_adjoint = dict(base_result.pre_step_adjoint)
     for name in _adjoint.checkpoint_schema(solver).dispersive_state_names:
         if name not in pre_step_adjoint:
             pre_step_adjoint[name] = torch.zeros_like(forward_state[name])
+    for name in _adjoint.checkpoint_schema(solver).magnetic_dispersive_state_names:
+        pre_step_adjoint[name] = torch.zeros_like(forward_state[name])
 
     grad_eps_by_field = {
         "Ex": base_result.grad_eps_ex,
@@ -1508,12 +1910,16 @@ def _reverse_step_bloch_dispersive_native(
                     dt=dt,
                 )
 
+    _apply_magnetic_ade_reverse_native(
+        solver, forward_state, adjoint_state, magnetic_dispersive_state,
+        base_result.magnetic_output_adjoint, pre_step_adjoint,
+    )
     step_result = _adjoint._ReverseStepResult(
         pre_step_adjoint=pre_step_adjoint,
         grad_eps_ex=grad_eps_by_field["Ex"],
         grad_eps_ey=grad_eps_by_field["Ey"],
         grad_eps_ez=grad_eps_by_field["Ez"],
-        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_BLOCH_DISPERSIVE],
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.BLOCH_DISPERSIVE],
         source_adjoint_state=dict(adjoint_state),
     )
     return _adjoint._accumulate_source_term_gradients(
@@ -1542,7 +1948,7 @@ def _reverse_step_dispersive_native(
 ):
     """Fully native reverse step for the electric-dispersive (ADE) configuration.
 
-    Mirrors ``reverse_step_dispersive_python_reference`` for the electric-only
+    Mirrors ``reverse_step_dispersive_native`` for the electric-only
     dispersive case. The reverse *math* runs entirely in native kernels:
 
     1. The mid-step post-update dispersive currents are reconstructed with the
@@ -1573,8 +1979,24 @@ def _reverse_step_dispersive_native(
 
     from . import core as _adjoint
 
-    # Step 1: replay the post-update electric dispersive currents (Torch).
+    # Step 1: replay the post-update electric and magnetic ADE currents.  Replay
+    # is orchestration; all pullbacks below are compiled CUDA kernels.
     dispersive_state = _adjoint._advance_dispersive_state(solver, forward_state)
+    magnetic_dispersive_state = _adjoint._advance_magnetic_dispersive_state(
+        solver, forward_state
+    )
+    magnetic_fields = None
+    if magnetic_dispersive_state:
+        magnetic_fields = _adjoint._apply_magnetic_dispersive_corrections(
+            solver,
+            _adjoint._forward_magnetic_fields(
+                solver,
+                forward_state,
+                time_value=time_value,
+                resolved_source_terms=resolved_source_terms,
+            ),
+            magnetic_dispersive_state,
+        )
 
     # Step 2: native base reverse (standard or CPML core), no source-term grads.
     if getattr(solver, "uses_cpml", False):
@@ -1587,6 +2009,7 @@ def _reverse_step_dispersive_native(
             eps_ey=eps_ey,
             eps_ez=eps_ez,
             resolved_source_terms=resolved_source_terms,
+            magnetic_fields=magnetic_fields,
         )
     else:
         base_result = _reverse_step_standard_native_core(
@@ -1598,12 +2021,15 @@ def _reverse_step_dispersive_native(
             eps_ey=eps_ey,
             eps_ez=eps_ez,
             resolved_source_terms=resolved_source_terms,
+            magnetic_fields=magnetic_fields,
         )
 
     pre_step_adjoint = dict(base_result.pre_step_adjoint)
     for name in _adjoint.checkpoint_schema(solver).dispersive_state_names:
         if name not in pre_step_adjoint:
             pre_step_adjoint[name] = torch.zeros_like(forward_state[name])
+    for name in _adjoint.checkpoint_schema(solver).magnetic_dispersive_state_names:
+        pre_step_adjoint[name] = torch.zeros_like(forward_state[name])
 
     grad_eps_by_field = {
         "Ex": base_result.grad_eps_ex,
@@ -1646,7 +2072,9 @@ def _reverse_step_dispersive_native(
                 decay=float(entry["decay"]),
             )
         else:
-            polarization_name = _adjoint.dispersive_state_name(component_name, model_name, index, "polarization")
+            polarization_name = _adjoint.dispersive_state_name(
+                component_name, model_name, index, "polarization"
+            )
             _cuda_backend._reverse_lorentz_current(
                 AdjElectricPrev=pre_step_adjoint[component_name],
                 AdjPolarizationPrev=pre_step_adjoint[polarization_name],
@@ -1659,12 +2087,76 @@ def _reverse_step_dispersive_native(
                 dt=dt,
             )
 
+    # Magnetic ADE is the same local state recurrence on H.  The correction
+    # kernel is reused with mu as its denominator; its accumulated mu gradient is
+    # intentionally not exposed by the current public material compiler, matching
+    # the existing static-mu adjoint contract.
+    if magnetic_dispersive_state:
+        mu_by_field = {
+            "Hx": solver.mu_Hx,
+            "Hy": solver.mu_Hy,
+            "Hz": solver.mu_Hz,
+        }
+        magnetic_output_adjoint = base_result.magnetic_output_adjoint
+        for component_name, model_name, index, _tensor_names, entry in (
+            _adjoint.iter_magnetic_dispersive_state_specs(solver) or ()
+        ):
+            current_name = _adjoint.dispersive_state_name(
+                component_name, model_name, index, "current"
+            )
+            adj_current_corrected = torch.empty_like(forward_state[current_name])
+            discarded_grad_mu = torch.zeros_like(mu_by_field[component_name])
+            _cuda_backend._reverse_dispersive_correction(
+                AdjCurrentCorrected=adj_current_corrected,
+                GradEps=discarded_grad_mu,
+                AdjCurrentPost=adjoint_state[current_name],
+                AdjElectricPost=magnetic_output_adjoint[component_name],
+                Current=magnetic_dispersive_state[current_name],
+                Eps=mu_by_field[component_name],
+                dt=dt,
+            )
+            if model_name == "debye":
+                polarization_name = _adjoint.dispersive_state_name(
+                    component_name, model_name, index, "polarization"
+                )
+                _cuda_backend._reverse_debye_current(
+                    AdjElectricPrev=pre_step_adjoint[component_name],
+                    AdjPolarizationPrev=pre_step_adjoint[polarization_name],
+                    AdjPolarizationPost=adjoint_state[polarization_name],
+                    AdjCurrentPost=adj_current_corrected,
+                    DebyeDrive=entry["drive"],
+                    decay=float(entry["decay"]),
+                    dt=dt,
+                )
+            elif model_name == "drude":
+                _cuda_backend._reverse_drude_current(
+                    AdjElectricPrev=pre_step_adjoint[component_name],
+                    AdjCurrentPrev=pre_step_adjoint[current_name],
+                    AdjCurrentPost=adj_current_corrected,
+                    DrudeDrive=entry["drive"],
+                    decay=float(entry["decay"]),
+                )
+            else:
+                polarization_name = _adjoint.dispersive_state_name(
+                    component_name, model_name, index, "polarization"
+                )
+                _cuda_backend._reverse_lorentz_current(
+                    AdjElectricPrev=pre_step_adjoint[component_name],
+                    AdjPolarizationPrev=pre_step_adjoint[polarization_name],
+                    AdjCurrentPrev=pre_step_adjoint[current_name],
+                    AdjPolarizationPost=adjoint_state[polarization_name],
+                    AdjCurrentPost=adj_current_corrected,
+                    LorentzDrive=entry["drive"],
+                    decay=float(entry["decay"]),
+                    restoring=float(entry["restoring"]),
+                    dt=dt,
+                )
     step_result = _adjoint._ReverseStepResult(
         pre_step_adjoint=pre_step_adjoint,
         grad_eps_ex=grad_eps_by_field["Ex"],
         grad_eps_ey=grad_eps_by_field["Ey"],
         grad_eps_ez=grad_eps_by_field["Ez"],
-        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_DISPERSIVE],
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.DISPERSIVE],
         source_adjoint_state=dict(adjoint_state),
     )
     # The reference dispersive path discards the base magnetic mid-step adjoint
@@ -1736,7 +2228,7 @@ def _accumulate_tfsf_sample_adjoint_native(adj_aux, terms, adjoint_fields, *, or
 def _reverse_tfsf_auxiliary_state_native(solver, forward_state, adjoint_state, *, magnetic_output_adjoint):
     """Native CUDA transpose of the per-step TFSF auxiliary update.
 
-    Mirrors ``_reverse_tfsf_auxiliary_state_python_reference`` one-for-one, driving
+    Mirrors ``_reverse_tfsf_auxiliary_state_native`` one-for-one, driving
     the fused 1D auxiliary reverse kernels and the sample-adjoint kernels in the
     load-bearing order: the electric-side incident injection and the electric
     auxiliary advance both accumulate into the advanced-magnetic adjoint before the
@@ -1820,13 +2312,13 @@ def _reverse_step_tfsf_native(
 ):
     """Fully native reverse step for the TFSF (total-field/scattered-field) case.
 
-    Mirrors ``reference.reverse_step_tfsf``: the native standard or CPML *core*
-    reverse produces the pre-step field/psi adjoint (its mid-step H replay consumes
+    The native standard or CPML core reverse produces the pre-step field/psi
+    adjoint (its mid-step H replay consumes
     the materialized magnetic incident source terms, so the injected incident field
     is folded into the mid-H exactly as the forward step did), then the native TFSF
     auxiliary reverse kernels add the 1D auxiliary electric/magnetic pre-step
-    adjoints. The TFSF incident terms are literal patches, so the reference path
-    runs no source-term eps-gradient accumulation and neither does this runner.
+    adjoints. TFSF incident terms are literal patches, so this runner needs no
+    source-term permittivity-gradient accumulation.
     """
     from . import core as _adjoint
 
@@ -1924,7 +2416,7 @@ def _reverse_step_full_aniso_native(
     backward-difference transpose, and (3) delegates to the linear CPML native core
     on that augmented adjoint state. Every per-cell reverse computation runs inside
     the compiled kernels; Python only sequences the launches (matching
-    ``reverse_step_full_aniso_cpml_python_reference`` exactly).
+    ``reverse_step_full_aniso_cpml_native`` exactly).
     """
     import dataclasses
 
@@ -1989,7 +2481,7 @@ def _reverse_step_full_aniso_native(
         resolved_source_terms=resolved_source_terms,
     )
     step_result = dataclasses.replace(
-        step_result, backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_FULL_ANISO]
+        step_result, backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.FULL_ANISO]
     )
     # Source-term eps-gradient accumulation reads the electric adjoint only, so it
     # runs on the original (unaugmented) adjoint state.
@@ -2008,42 +2500,57 @@ def _reverse_step_full_aniso_native(
 def register_native_reverse_backends() -> None:
     """Register every available native CUDA reverse-step runner."""
     register_native_reverse_backend(
-        _ReverseBackend.PYTHON_STANDARD,
+        _ReverseBackend.GENERAL_NONLINEAR,
+        _reverse_step_nonlinear_native,
+        qualifier=_cuda_scene_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.MIXED_BLOCH_CPML,
+        _reverse_step_mixed_bloch_cpml_native,
+        qualifier=_cuda_scene_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.GRATING_TFSF,
+        _reverse_step_mixed_bloch_cpml_native,
+        qualifier=_cuda_scene_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.STANDARD,
         _reverse_step_standard_native,
         qualifier=_cuda_scene_native_qualifies,
     )
     register_native_reverse_backend(
-        _ReverseBackend.PYTHON_CPML,
+        _ReverseBackend.CPML,
         _reverse_step_cpml_native,
         qualifier=_cuda_scene_native_qualifies,
     )
     register_native_reverse_backend(
-        _ReverseBackend.PYTHON_CONDUCTIVE,
+        _ReverseBackend.CONDUCTIVE,
         _reverse_step_conductive_native,
         qualifier=_cuda_scene_native_qualifies,
     )
     register_native_reverse_backend(
-        _ReverseBackend.PYTHON_KERR,
+        _ReverseBackend.KERR,
         _reverse_step_kerr_native,
         qualifier=_cuda_scene_native_qualifies,
     )
     register_native_reverse_backend(
-        _ReverseBackend.PYTHON_FULL_ANISO,
+        _ReverseBackend.FULL_ANISO,
         _reverse_step_full_aniso_native,
         qualifier=_cuda_scene_native_qualifies,
     )
     register_native_reverse_backend(
-        _ReverseBackend.PYTHON_BLOCH,
+        _ReverseBackend.BLOCH,
         _reverse_step_bloch_native,
         qualifier=_cuda_scene_native_qualifies,
     )
     register_native_reverse_backend(
-        _ReverseBackend.PYTHON_BLOCH_DISPERSIVE,
+        _ReverseBackend.BLOCH_DISPERSIVE,
         _reverse_step_bloch_dispersive_native,
         qualifier=_cuda_scene_native_qualifies,
     )
     register_native_reverse_backend(
-        _ReverseBackend.PYTHON_DISPERSIVE,
+        _ReverseBackend.DISPERSIVE,
         _reverse_step_dispersive_native,
         qualifier=_dispersive_native_qualifies,
     )

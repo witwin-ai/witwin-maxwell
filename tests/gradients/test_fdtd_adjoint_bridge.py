@@ -5,11 +5,10 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
-import witwin.maxwell.fdtd.adjoint as fdtd_adjoint
 from witwin.maxwell.fdtd.checkpoint import dispersive_state_name
-from witwin.maxwell.fdtd.adjoint import _FDTDGradientBridge, _replay_segment_states, reverse_step
+from witwin.maxwell.fdtd.adjoint import _FDTDGradientBridge, _replay_segment_states
 from witwin.maxwell.fdtd.boundary import BOUNDARY_BLOCH, BOUNDARY_NONE, BOUNDARY_PML
-from witwin.maxwell.fdtd.checkpoint import capture_checkpoint_state, checkpoint_schema
+from witwin.maxwell.fdtd.checkpoint import capture_checkpoint_state
 from witwin.maxwell.fdtd.material_pullback import pullback_density_gradients
 from witwin.maxwell.scene import prepare_scene
 from tests.gradients import fdtd_adjoint_baselines as adjoint_baselines
@@ -1018,547 +1017,6 @@ def test_capture_checkpoint_state_freezes_schema_layout():
         torch.full((1,), 105.0),
     )
 
-
-def test_reverse_step_shell_matches_inline_torch_vjp(monkeypatch):
-    def fake_step_state(_solver, state, *, time_value, eps_ex, eps_ey, eps_ez):
-        del _solver
-        return {
-            "Ex": 2.0 * state["Ex"] - state["Ey"] + (1.0 + time_value) * eps_ex,
-            "Ey": 0.5 * state["Ex"] + 3.0 * state["Ey"] + eps_ey,
-            "Hz": state["Hz"] - 1.5 * state["Ex"] + 0.25 * eps_ez,
-        }
-
-    monkeypatch.setattr(fdtd_adjoint, "_step_state", fake_step_state)
-
-    solver = SimpleNamespace()
-    forward_state = {
-        "Ex": torch.tensor([1.0, -2.0], dtype=torch.float32),
-        "Ey": torch.tensor([0.5, 3.0], dtype=torch.float32),
-        "Hz": torch.tensor([-1.0, 2.5], dtype=torch.float32),
-    }
-    adjoint_state = {
-        "Ex": torch.tensor([0.25, -0.5], dtype=torch.float32),
-        "Ey": torch.tensor([1.5, 0.75], dtype=torch.float32),
-        "Hz": torch.tensor([-0.2, 0.4], dtype=torch.float32),
-    }
-    eps_ex = torch.tensor([0.1, -0.3], dtype=torch.float32, requires_grad=True)
-    eps_ey = torch.tensor([0.6, 0.2], dtype=torch.float32, requires_grad=True)
-    eps_ez = torch.tensor([-0.4, 0.8], dtype=torch.float32, requires_grad=True)
-
-    result = reverse_step(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.25,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    with torch.enable_grad():
-        state_inputs = {
-            name: tensor.detach().clone().requires_grad_(True)
-            for name, tensor in forward_state.items()
-        }
-        next_state = fake_step_state(
-            solver,
-            state_inputs,
-            time_value=0.25,
-            eps_ex=eps_ex,
-            eps_ey=eps_ey,
-            eps_ez=eps_ez,
-        )
-        objective = torch.zeros((), dtype=torch.float32)
-        for name in forward_state:
-            objective = objective + torch.sum(next_state[name] * adjoint_state[name])
-        gradients = torch.autograd.grad(
-            objective,
-            tuple(state_inputs.values()) + (eps_ex, eps_ey, eps_ez),
-            allow_unused=True,
-        )
-
-    expected_pre_step = {
-        name: gradient.detach()
-        for (name, _), gradient in zip(state_inputs.items(), gradients[: len(state_inputs)])
-    }
-    assert torch.allclose(result.pre_step_adjoint["Ex"], expected_pre_step["Ex"])
-    assert torch.allclose(result.pre_step_adjoint["Ey"], expected_pre_step["Ey"])
-    assert torch.allclose(result.pre_step_adjoint["Hz"], expected_pre_step["Hz"])
-    assert torch.allclose(result.grad_eps_ex, gradients[-3].detach())
-    assert torch.allclose(result.grad_eps_ey, gradients[-2].detach())
-    assert torch.allclose(result.grad_eps_ez, gradients[-1].detach())
-    assert result.backend == "torch_vjp"
-
-
-def _apply_nonuniform_spacing(solver, *, bloch=False):
-    # Replace the uniform per-axis spacing tensors with a graded-mesh set that
-    # is self-consistent (dual = midpoint distances of the primal cells) so the
-    # hand-written reverse steps are checked as the exact transpose of the
-    # nonuniform forward step.
-    def axis_arrays(node_count, base):
-        primal = base * (1.0 + 0.25 * torch.sin(torch.arange(node_count - 1, dtype=torch.float64) + 0.7))
-        dual = torch.empty(node_count, dtype=torch.float64)
-        dual[1:-1] = 0.5 * (primal[:-1] + primal[1:])
-        if bloch:
-            dual[0] = dual[-1] = 0.5 * (primal[0] + primal[-1])
-        else:
-            dual[0] = primal[0]
-            dual[-1] = primal[-1]
-        return (1.0 / dual).to(torch.float32), (1.0 / primal).to(torch.float32)
-
-    solver.inv_dx_e, solver.inv_dx_h = axis_arrays(3, 0.8)
-    solver.inv_dy_e, solver.inv_dy_h = axis_arrays(4, 1.3)
-    solver.inv_dz_e, solver.inv_dz_h = axis_arrays(5, 0.65)
-    return solver
-
-
-@pytest.mark.parametrize("nonuniform", [False, True])
-def test_reverse_step_standard_python_reference_matches_torch_vjp(nonuniform):
-    torch.manual_seed(7)
-    solver = _fake_standard_reverse_solver()
-    if nonuniform:
-        solver = _apply_nonuniform_spacing(solver)
-    forward_state = {
-        "Ex": torch.randn(2, 4, 5, dtype=torch.float32),
-        "Ey": torch.randn(3, 3, 5, dtype=torch.float32),
-        "Ez": torch.randn(3, 4, 4, dtype=torch.float32),
-        "Hx": torch.randn(3, 3, 4, dtype=torch.float32),
-        "Hy": torch.randn(2, 4, 4, dtype=torch.float32),
-        "Hz": torch.randn(2, 3, 5, dtype=torch.float32),
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    reference = adjoint_baselines.reverse_step_standard_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_torch_vjp(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    assert reference.backend == "python_reference_standard"
-    assert expected.backend == "torch_vjp"
-    for name in forward_state:
-        assert torch.allclose(reference.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-@pytest.mark.parametrize("nonuniform", [False, True])
-def test_reverse_step_cpml_python_reference_matches_torch_vjp(nonuniform):
-    torch.manual_seed(13)
-    solver = _fake_cpml_reverse_solver()
-    if nonuniform:
-        solver = _apply_nonuniform_spacing(solver)
-    state_shapes = _cpml_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    reference = adjoint_baselines.reverse_step_cpml_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_torch_vjp(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    assert reference.backend == "python_reference_cpml"
-    assert expected.backend == "torch_vjp"
-    for name in forward_state:
-        assert torch.allclose(reference.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-@pytest.mark.parametrize("nonuniform", [False, True])
-def test_reverse_step_bloch_python_reference_matches_torch_vjp(nonuniform):
-    torch.manual_seed(23)
-    solver = _fake_bloch_reverse_solver()
-    if nonuniform:
-        solver = _apply_nonuniform_spacing(solver, bloch=True)
-    state_shapes = _bloch_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    reference = adjoint_baselines.reverse_step_bloch_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_torch_vjp(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    assert reference.backend == "python_reference_bloch"
-    assert expected.backend == "torch_vjp"
-    for name in forward_state:
-        assert torch.allclose(reference.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-def test_reverse_step_bloch_python_reference_matches_torch_vjp_with_source_terms():
-    torch.manual_seed(29)
-    solver = _fake_bloch_reverse_solver()
-    solver._source_terms = [
-        {
-            "field_name": "Ez",
-            "offsets": (0, 0, 1),
-            "patch": torch.tensor([[[0.25, -0.4]]], dtype=torch.float32),
-            "phase_real": 0.6,
-            "phase_imag": -0.35,
-            "cw_cos_patch": None,
-            "cw_sin_patch": None,
-            "delay_patch": None,
-            "activation_delay_patch": None,
-        }
-    ]
-    state_shapes = _bloch_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    reference = adjoint_baselines.reverse_step_bloch_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.125,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_torch_vjp(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.125,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    assert reference.backend == "python_reference_bloch"
-    for name in forward_state:
-        assert torch.allclose(reference.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-def test_reverse_step_dispersive_python_reference_matches_torch_vjp():
-    torch.manual_seed(41)
-    solver = _fake_dispersive_cpml_reverse_solver()
-    state_shapes = _dispersive_cpml_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    reference = adjoint_baselines.reverse_step_dispersive_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_torch_vjp(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    assert reference.backend == "python_reference_dispersive_cpml"
-    assert expected.backend == "torch_vjp"
-    for name in forward_state:
-        assert torch.allclose(reference.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-def test_reverse_step_dispersive_python_reference_matches_torch_vjp_with_source_terms():
-    torch.manual_seed(43)
-    solver = _fake_dispersive_cpml_reverse_solver()
-    solver._source_terms = [
-        {
-            "field_name": "Ez",
-            "offsets": (0, 0, 1),
-            "patch": torch.tensor([[[0.2, -0.15]]], dtype=torch.float32),
-            "phase_real": 0.55,
-            "phase_imag": 0.0,
-            "cw_cos_patch": None,
-            "cw_sin_patch": None,
-            "delay_patch": None,
-            "activation_delay_patch": None,
-        }
-    ]
-    state_shapes = _dispersive_cpml_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    reference = adjoint_baselines.reverse_step_dispersive_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.125,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_torch_vjp(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.125,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    assert reference.backend == "python_reference_dispersive_cpml"
-    for name in forward_state:
-        assert torch.allclose(reference.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-@pytest.mark.parametrize(
-    ("solver_factory", "shapes_factory", "expected_backend"),
-    [
-        (
-            _fake_magnetic_dispersive_standard_reverse_solver,
-            _magnetic_dispersive_standard_reverse_state_shapes,
-            "python_reference_dispersive_standard",
-        ),
-        (
-            _fake_magnetic_dispersive_cpml_reverse_solver,
-            _magnetic_dispersive_cpml_reverse_state_shapes,
-            "python_reference_dispersive_cpml",
-        ),
-    ],
-)
-def test_reverse_step_magnetic_dispersive_python_reference_matches_torch_vjp(
-    solver_factory, shapes_factory, expected_backend
-):
-    torch.manual_seed(47)
-    solver = solver_factory()
-    state_shapes = shapes_factory()
-    schema_names = checkpoint_schema(solver).state_names
-    assert tuple(state_shapes.keys()) == schema_names
-    forward_state = {
-        name: torch.randn(state_shapes[name], dtype=torch.float32)
-        for name in schema_names
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    reference = adjoint_baselines.reverse_step_dispersive_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_torch_vjp(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.0,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    assert reference.backend == expected_backend
-    assert expected.backend == "torch_vjp"
-    for name in forward_state:
-        assert torch.allclose(reference.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6), name
-    assert torch.allclose(reference.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-def test_reverse_step_tfsf_python_reference_matches_torch_vjp():
-    torch.manual_seed(59)
-    solver = _fake_tfsf_cpml_reverse_solver()
-    state_shapes = _tfsf_cpml_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    reference = adjoint_baselines.reverse_step_tfsf_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.075,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_torch_vjp(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.075,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    assert reference.backend == "python_reference_tfsf_cpml"
-    for name in forward_state:
-        assert torch.allclose(reference.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
-
-
-def test_reverse_step_tfsf_python_reference_matches_torch_vjp_without_auxiliary_grid():
-    torch.manual_seed(61)
-    solver = _fake_tfsf_cpml_reverse_solver(provider="analytic_profile")
-    state_shapes = _cpml_reverse_state_shapes()
-    forward_state = {
-        name: torch.randn(state_shapes[name], dtype=torch.float32)
-        for name in checkpoint_schema(solver).state_names
-    }
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
-    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
-    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
-
-    reference = adjoint_baselines.reverse_step_tfsf_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.05,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_torch_vjp(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=0.05,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    assert reference.backend == "python_reference_tfsf_cpml"
-    for name in forward_state:
-        assert torch.allclose(reference.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ex, expected.grad_eps_ex, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ey, expected.grad_eps_ey, rtol=1e-5, atol=1e-6)
-    assert torch.allclose(reference.grad_eps_ez, expected.grad_eps_ez, rtol=1e-5, atol=1e-6)
 
 
 def _build_material_pullback_scene(device: str):
@@ -2597,12 +2055,11 @@ def test_fdtd_gradient_bridge_backward_profile_reports_expected_sections():
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
     assert profile["reverse_backend_counts"].get(adjoint_baselines.expected_cpml_reverse_backend(), 0) == bridge._time_steps
-    assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 @pytest.mark.parametrize("source_kind", ["plane_wave", "gaussian_beam"])
-def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_cpml_for_soft_surface_sources(source_kind):
+def test_fdtd_gradient_bridge_backward_profile_uses_native_cpml_for_soft_surface_sources(source_kind):
     model = _DensitySurfaceSourceScene(source_kind=source_kind, init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=24)
     bridge = _FDTDGradientBridge(simulation)
@@ -2613,12 +2070,11 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_cpml_for_so
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
     assert profile["reverse_backend_counts"].get(adjoint_baselines.expected_cpml_reverse_backend(), 0) == bridge._time_steps
-    assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 @pytest.mark.parametrize("source_kind", ["plane_wave", "gaussian_beam"])
-def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_tfsf_for_tfsf_sources(source_kind):
+def test_fdtd_gradient_bridge_backward_profile_uses_native_tfsf_for_tfsf_sources(source_kind):
     model = _DensityTFSFScene(source_kind=source_kind, init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=24)
     bridge = _FDTDGradientBridge(simulation)
@@ -2632,11 +2088,10 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_tfsf_for_tf
         profile["reverse_backend_counts"].get(adjoint_baselines.expected_tfsf_reverse_backend(), 0)
         == bridge._time_steps
     )
-    assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_bloch_for_bloch_boundaries():
+def test_fdtd_gradient_bridge_backward_profile_uses_native_bloch_for_bloch_boundaries():
     model = _DensityBlochScene(init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=40)
     bridge = _FDTDGradientBridge(simulation)
@@ -2647,11 +2102,10 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_bloch_for_b
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
     assert profile["reverse_backend_counts"].get(adjoint_baselines.expected_bloch_reverse_backend(), 0) == bridge._time_steps
-    assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_grating_tfsf():
+def test_fdtd_gradient_bridge_backward_profile_uses_native_grating_tfsf():
     model = _DensityGratingTFSFScene(init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=32)
     bridge = _FDTDGradientBridge(simulation)
@@ -2661,27 +2115,25 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_grating_tfs
 
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
-    assert profile["reverse_backend_counts"].get("python_reference_grating_tfsf", 0) == bridge._time_steps
-    assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
+    assert profile["reverse_backend_counts"].get("native_grating_tfsf", 0) == bridge._time_steps
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 @pytest.mark.parametrize("axis", ["x", "y"])
 def test_fdtd_gradient_bridge_backward_profile_uses_grating_tfsf_for_general_axis(axis):
     # The grating-slab reverse backend is selected for any single-PML-axis grating
-    # layout, not only z, so a non-z normal axis must not fall back to torch_vjp.
+    # layout, not only z, so a non-z normal axis must select its native runner.
     model = _DensityGratingTFSFScene(init=0.0, axis=axis).cuda()
     simulation = _build_simulation(model, time_steps=32)
     bridge = _FDTDGradientBridge(simulation)
     bridge.forward(tuple(bridge.material_inputs))
 
     profile = bridge.backward_profile()
-    assert profile["reverse_backend_counts"].get("python_reference_grating_tfsf", 0) == bridge._time_steps
-    assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
+    assert profile["reverse_backend_counts"].get("native_grating_tfsf", 0) == bridge._time_steps
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_dispersive_cpml_for_dispersive_materials():
+def test_fdtd_gradient_bridge_backward_profile_uses_native_dispersive_cpml_for_dispersive_materials():
     model = _DensityDispersiveScene(medium_kind="debye", init=0.0).cuda()
     simulation = _build_simulation(model, time_steps=36)
     bridge = _FDTDGradientBridge(simulation)
@@ -2692,7 +2144,6 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_dispersive_
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
     assert profile["reverse_backend_counts"].get(adjoint_baselines.expected_dispersive_reverse_backend(), 0) == bridge._time_steps
-    assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")

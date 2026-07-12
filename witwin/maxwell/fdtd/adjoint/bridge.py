@@ -32,34 +32,22 @@ def _runtime():
 
 
 def _resolve_grad_accumulator_backend(device):
-    """Return the CUDA backend for native in-place gradient accumulation.
-
-    Mirrors the reverse-step native gate: on a CUDA scene with the compiled
-    extension loaded, each step's material-gradient contribution is folded into
-    the running accumulator by a fused CUDA element-wise accumulate, so the
-    per-step full-grid ``aten::add`` never enters the hot path. Returns ``None``
-    (Torch ``a + b`` fallback) off CUDA or without the extension.
-    """
+    """Require native in-place gradient accumulation for CUDA-only adjoints."""
     if torch.device(device).type != "cuda":
-        return None
+        raise RuntimeError("Differentiable FDTD requires CUDA gradient tensors.")
     from ..cuda import backend as _cuda_backend
 
     if not _cuda_backend.is_available():
-        return None
+        raise RuntimeError("Differentiable FDTD requires the native CUDA extension.")
     return _cuda_backend
 
 
 def _accumulate_grad(cuda_backend, accumulator, increment):
-    """Fold ``increment`` into ``accumulator`` in place (native) or via Torch add.
-
-    The native path mutates ``accumulator`` in place and returns the same tensor;
-    the Torch fallback returns a fresh sum. Both preserve the caller's rebinding
-    pattern (``acc = _accumulate_grad(...)``).
-    """
-    if cuda_backend is not None and accumulator.is_contiguous() and increment.is_contiguous():
-        cuda_backend._accumulate_in_place(dst=accumulator, src=increment)
-        return accumulator
-    return accumulator + increment
+    """Fold one gradient contribution into its native CUDA accumulator."""
+    if not accumulator.is_contiguous() or not increment.is_contiguous():
+        raise RuntimeError("Native FDTD gradient accumulation requires contiguous tensors.")
+    cuda_backend._accumulate_in_place(dst=accumulator, src=increment)
+    return accumulator
 
 
 def _material_has_conductivity(material) -> bool:
@@ -281,17 +269,6 @@ class _FDTDGradientBridge:
         if any(code == BOUNDARY_BLOCH for code in face_codes):
             if not has_complex_fields(solver):
                 raise NotImplementedError("FDTD adjoint requires complex field state for Bloch faces.")
-            if getattr(solver, "magnetic_dispersive_enabled", False):
-                # Electric (eps-pole) dispersion under Bloch is differentiable:
-                # the complex-field replay advances an imaginary ADE replica per
-                # pole and the torch-VJP reverse propagates through it. The
-                # magnetic (mu-pole) ADE mirror, by contrast, has no complex-field
-                # reverse channel, so the imaginary Bloch component of the
-                # magnetic pole current would carry no gradient.
-                raise NotImplementedError(
-                    "FDTD adjoint does not support Bloch boundaries with magnetic-dispersive "
-                    "(mu-pole) media; the magnetic ADE reverse channel is real-valued only."
-                )
             if getattr(solver, "conductive_enabled", False):
                 raise NotImplementedError(
                     "FDTD adjoint does not support electric conductivity on Bloch boundaries; the "
@@ -409,6 +386,9 @@ class _FDTDGradientBridge:
             scene = self.simulation.scene
             solver = self.simulation._build_fdtd_solver_for_scene(scene, initialize=True)
             self._validate_supported_configuration(solver)
+            from .dispatch import validate_native_adjoint_preparation
+
+            validate_native_adjoint_preparation(solver)
 
             time_steps = self.simulation._resolve_fdtd_time_steps(solver, scene)
             dft_cfg = self.simulation.config.spectral_sampler

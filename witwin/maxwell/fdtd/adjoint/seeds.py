@@ -457,67 +457,6 @@ def _schedule_pack_for(
     return cos, sin
 
 
-def _gather_step_weights(schedule: _ScheduleTensorPack, entry_indices: torch.Tensor, step_index: int):
-    if entry_indices.numel() == 0 or schedule.cos.numel() == 0:
-        empty = torch.zeros((0,), device=entry_indices.device, dtype=schedule.cos.dtype)
-        return empty, empty
-    weight_cos = schedule.cos.index_select(0, entry_indices)[:, int(step_index)]
-    weight_sin = schedule.sin.index_select(0, entry_indices)[:, int(step_index)]
-    return weight_cos, weight_sin
-
-
-def _apply_dense_seeds(adj_state, seed_runtime: _SeedRuntime, step_index):
-    for batch in seed_runtime.dense_batches:
-        weight_cos, weight_sin = _gather_step_weights(
-            seed_runtime.dft_schedule,
-            batch.entry_indices,
-            step_index,
-        )
-        contribution = _seed_batch_contribution(batch.grad_real, batch.grad_imag, weight_cos, weight_sin)
-        adj_state[batch.state_field_name] = adj_state[batch.state_field_name] + contribution.to(
-            device=adj_state[batch.state_field_name].device,
-            dtype=adj_state[batch.state_field_name].dtype,
-        )
-
-
-def _apply_point_seeds(adj_state, seed_runtime: _SeedRuntime, step_index):
-    for batch in seed_runtime.point_batches:
-        weight_cos, weight_sin = _gather_step_weights(
-            seed_runtime.observer_schedule,
-            batch.entry_indices,
-            step_index,
-        )
-        contribution = _seed_batch_contribution(batch.grad_real, batch.grad_imag, weight_cos, weight_sin)
-        adj_state[batch.state_field_name].index_put_(
-            (batch.point_i, batch.point_j, batch.point_k),
-            contribution.to(
-                device=adj_state[batch.state_field_name].device,
-                dtype=adj_state[batch.state_field_name].dtype,
-            ),
-            accumulate=True,
-        )
-
-
-def _apply_plane_seeds(adj_state, seed_runtime: _SeedRuntime, step_index):
-    for batch in seed_runtime.plane_batches:
-        weight_cos, weight_sin = _gather_step_weights(
-            seed_runtime.observer_schedule,
-            batch.entry_indices,
-            step_index,
-        )
-        contribution = _seed_batch_contribution(batch.grad_real, batch.grad_imag, weight_cos, weight_sin).to(
-            device=adj_state[batch.state_field_name].device,
-            dtype=adj_state[batch.state_field_name].dtype,
-        )
-        field = adj_state[batch.state_field_name]
-        if batch.axis_code == 0:
-            field[batch.plane_index, :, :].add_(contribution)
-        elif batch.axis_code == 1:
-            field[:, batch.plane_index, :].add_(contribution)
-        else:
-            field[:, :, batch.plane_index].add_(contribution)
-
-
 def _apply_dense_seeds_native(_cuda_backend, adj_state, seed_runtime: _SeedRuntime, step_index):
     for batch in seed_runtime.dense_batches:
         if batch.cos_pack.shape[1] == 0:
@@ -566,30 +505,19 @@ def _apply_plane_seeds_native(_cuda_backend, adj_state, seed_runtime: _SeedRunti
 
 
 def _seed_runtime_native_backend(adj_state):
-    """Return the CUDA backend module when native seed injection can run.
-
-    Native seed injection mirrors the reverse-step native gate: it applies only
-    when the adjoint state lives on CUDA and the compiled extension is loaded.
-    Otherwise the Torch reference seed math runs (the same math the parity tests
-    pin the native kernels against).
-    """
+    """Require the CUDA module used by adjoint seed-injection kernels."""
     reference = next(iter(adj_state.values()), None)
     if reference is None or not reference.is_cuda:
-        return None
+        raise RuntimeError("FDTD adjoint seed injection requires CUDA tensors.")
     from ..cuda import backend as _cuda_backend
 
     if not _cuda_backend.is_available():
-        return None
+        raise RuntimeError("FDTD adjoint seed injection requires the native CUDA extension.")
     return _cuda_backend
 
 
 def _apply_seed_runtime(adj_state, seed_runtime: _SeedRuntime, step_index):
     cuda_backend = _seed_runtime_native_backend(adj_state)
-    if cuda_backend is not None:
-        _apply_dense_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
-        _apply_point_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
-        _apply_plane_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
-        return
-    _apply_dense_seeds(adj_state, seed_runtime, step_index)
-    _apply_point_seeds(adj_state, seed_runtime, step_index)
-    _apply_plane_seeds(adj_state, seed_runtime, step_index)
+    _apply_dense_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
+    _apply_point_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
+    _apply_plane_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)

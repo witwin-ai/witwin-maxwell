@@ -1,117 +1,87 @@
-# FDTD Adjoint — Native Reverse Gradient Capability Matrix
+# FDTD Native CUDA Gradient Capability Matrix
 
-This is the acceptance map for the P6 effort that moved the FDTD adjoint per-step
-reverse **math** off Torch and onto fused native CUDA kernels. Python still
-orchestrates the backward sweep (segment replay, kernel launches, gradient
-accumulation) and a small, calibrated set of once-per-step Torch helpers stays
-Torch (the "residual" column). Everything in the per-cell reverse recurrence —
-electric→mid-H adjoint, mid-H→pre-step-E adjoint plus the eps/chi3 gradient, the
-CPML psi pullback, the ADE-current VJP, the collocation transpose, and the TFSF
-auxiliary reverse — runs inside the compiled kernels.
+The compiled CUDA reverse operators are the only production FDTD adjoint
+implementation. Python owns checkpointing, replay, launch orchestration, and
+PyTorch autograd integration; it does not provide an alternative reverse
+numerical implementation.
 
-The backend is selected per step by `WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND`
-(`auto` / `native` / `torch_reference` / `torch_vjp`). In `auto` mode a qualifying
-CUDA scene prefers the native runner; otherwise it falls to the analytic Torch
-reference, otherwise the torch-autograd VJP.
+Differentiable FDTD requires a CUDA scene and the packaged native extension.
+Preparation fails before forward stepping if the device, extension, or scene
+capability is unsupported. There is no backend setting and no automatic
+fallback.
 
-## Native reverse classes
+## Native variants
 
-Each of these differentiable scene classes has a fused native CUDA reverse runner
-(`witwin/maxwell/fdtd/adjoint/native.py`) whose per-cell math is bit-for-bit
-equivalent to the analytic Torch reference it mirrors.
-
-| Scene class | `auto` backend label | Reverse-math kernels (native) |
+| Differentiable scene class | Native label | Principal reverse kernels |
 | --- | --- | --- |
-| Standard (open / PEC, non-CPML) | `native_standard` | `reverseElectricAdjointToH*Standard3D`, `reverseMagneticAdjointToE*Standard3D`, `reverseMagneticAdjointDecay` |
-| CPML (absorbing) | `native_cpml` | `reverseElectricComponent*Cpml3D`, `reverseMagneticComponent*Cpml3D`, `accumulate{Backward,Forward}DiffAdjoint` |
-| Static conductive (`sigma_e`) + CPML | `native_conductive` | `reverseElectricComponent*CpmlConductive3D` + linear CPML magnetic reverse |
-| Instantaneous Kerr (`chi3`) + CPML | `native_kerr` | `reverseElectricComponent*CpmlKerr3D`, `collocateFieldSquare`, `collocationTranspose` |
-| Full (off-diagonal) anisotropic + CPML | `native_full_aniso` | `fullAnisoCurlAdjoint` + backward-diff fold + linear CPML core |
-| Bloch (complex split-field) | `native_bloch` | `reverseElectricAdjointToH*Bloch3D`, `reverseMagneticAdjointToE*Bloch3D` |
-| Bloch + electric-dispersive | `native_bloch_dispersive` | complex Bloch core + `reverse{Debye,Drude,Lorentz}Current`, `reverseDispersiveCorrection` (real+imag) |
-| Electric-dispersive (ADE, standard or CPML base) | `native_dispersive` | standard/CPML core + `reverse{Debye,Drude,Lorentz}Current`, `reverseDispersiveCorrection` |
-| TFSF (total-field/scattered-field) | `native_tfsf` | standard/CPML core + `reverseTfsfAuxiliary*1D`, `accumulateTfsf*SampleAdjoint3D` |
+| Standard real fields | `native_standard` | standard Yee electric/magnetic transpose kernels |
+| Real CPML | `native_cpml` | CPML electric/magnetic and derivative-fold kernels |
+| Electric conductivity + CPML | `native_conductive` | semi-implicit conductive coefficient pullback + CPML |
+| General instantaneous nonlinearity (standard or CPML) | `native_general_nonlinear` | dynamic decay/curl pullback for `chi2`, `chi3`, and TPA + collocation transpose |
+| Full electric anisotropy + CPML | `native_full_aniso` | off-diagonal curl pullback + CPML core |
+| Bloch complex fields | `native_bloch` | split real/imag Bloch phase transpose kernels |
+| Electric ADE dispersion | `native_dispersive` | Debye/Drude/Lorentz recurrence and dispersive correction kernels |
+| Bloch + ADE dispersion | `native_bloch_dispersive` | complex Bloch core + real/imag electric and magnetic ADE pullbacks |
+| One PML axis + two Bloch axes | `native_mixed_bloch_cpml` | complex Bloch phase transpose + native CPML correction pullback |
+| TFSF | `native_tfsf` | native base reverse + auxiliary-line and sample-gather pullbacks |
+| Grating-slab TFSF | `native_grating_tfsf` | mixed Bloch/CPML reverse + any-axis grating TFSF auxiliary pullback |
 
-Additive **magnetic conductivity** (`sigma_m`) carries no separate ADE state — it
-folds into the semi-implicit magnetic decay/curl coefficient — so a `sigma_m`
-medium routes through `native_standard` / `native_cpml` unchanged and is covered
-under the standard/CPML rows.
+Electric and magnetic Debye, Drude, and Lorentz poles may be composed where the
+forward solver supports them. Magnetic ADE includes real and imaginary state for
+Bloch scenes. The mixed complex-CPML specialization supports each permutation of
+one paired-PML axis and two paired-Bloch axes. Additive magnetic conductivity is
+part of the standard/CPML magnetic coefficient policy and needs no separate
+stateful variant.
 
-### Residual Torch on the native hot path (the calibrated whitelist)
+The machine-readable inventory is
+`witwin/maxwell/fdtd/adjoint/capabilities.py::NATIVE_ADJOINT_CAPABILITIES`.
 
-The per-step reverse region legitimately dispatches a small set of Torch `aten.*`
-ops for orchestration and replay; the reverse **math** is never one of them. These
-are the "same bar" remainders every landed P6 item reports:
+## Correctness and acceptance
 
-- **mid-H magnetic replay** (`_forward_magnetic_fields` /
-  `_forward_magnetic_fields_complex`) — reconstructs the post-magnetic H the
-  forward electric update consumed.
-- **electric-dispersive ADE replay** (`_advance_dispersive_state`) — reconstructs
-  the post-update polarization currents (`exp`/`pow`/`clamp`/`sum` on the ADE
-  coefficients).
-- **`dynamic_electric_curls`** — casts the base curl coefficient by the eps leaf.
-- **reverse-context allocation** (`allocate_cpml_reverse_context`) and the
-  **source-term VJP** (`_accumulate_source_term_gradients`, per-step
-  source-region scatter/`1/eps`).
+The production tree contains no analytic Torch reverse or autograd-VJP fallback.
+Correctness is checked independently through:
 
-The exact whitelist (overload-packet names) is pinned in
-`tests/gradients/test_fdtd_adjoint_p6_acceptance.py::_REVERSE_REGION_ATEN_WHITELIST`.
-It deliberately excludes the allocation/masking ops (`aten.zeros`,
-`aten.new_zeros`, `aten.bitwise_*`, `aten.where`, `aten.slice_backward`, ...) that
-only the Torch analytic reverse math emits, so a native runner silently regressing
-to Torch trips the `__torch_dispatch__` gate.
+- end-to-end central finite differences in `tests/gradients` for material,
+  geometry, boundary, dispersive, nonlinear, and source gradients;
+- local discrete transpose tests for the six mixed CPML axis/tangent
+  permutations;
+- central-difference checks of the native `chi2`, `chi3`, and TPA coefficient
+  pullbacks;
+- existing Yee, CPML, ADE, Bloch, source, checkpoint-replay, dtype, device, and
+  contiguity tests;
+- preparation-time failure tests when a native runner is unavailable.
 
-## Honestly-reported remainder (not native)
+## Profiling record (2026-07-12)
 
-These differentiable classes have **no** fused native reverse runner yet; the
-backend column is the truthful `auto` selection.
+Validation host: NVIDIA GeForce RTX 5080 (16 GiB, compute capability 12.0),
+driver 596.49, PyTorch 2.10.0 with CUDA 12.8, and NVCC 12.9.41. Fields and
+reverse state used FP32. Timings synchronize immediately before and after the
+complete checkpointed backward. Each representative scene used 24 time steps;
+peak allocation was reset after forward preparation.
 
-| Scene class | `auto` backend | Why it is not native |
-| --- | --- | --- |
-| General nonlinear (`chi2` / two-photon absorption) | `torch_vjp` | the general nonlinear forward rewrites both the electric decay **and** curl from the pre-update fields; that fused dynamic-coefficient VJP is not a native kernel. |
-| Magnetic-dispersive (`mu`-pole ADE) | `python_reference_*` (analytic) / `torch_vjp` under Bloch | the magnetic ADE correction/state VJP is not nativized; the electric-dispersive runner qualifier rejects `magnetic_dispersive_enabled`. |
-| Grating-slab TFSF (Bloch + CPML complex) | `python_reference_grating_tfsf` | analytic Torch reference only; no native grating-TFSF reverse kernel yet. |
-| Mixed Bloch + CPML (complex, general) | `torch_vjp` | no fused analytic complex-CPML reverse. |
+| Scene | Native runner | Backward ms | ms/step | Peak backward MiB |
+| --- | --- | ---: | ---: | ---: |
+| CPML | `native_cpml` | 580.262 | 24.178 | 0.254 |
+| Bloch | `native_bloch` | 188.197 | 7.842 | 0.699 |
+| Electric ADE | `native_dispersive` | 155.089 | 6.462 | 0.310 |
+| General nonlinear | `native_general_nonlinear` | 525.064 | 21.878 | 17.664 |
+| Mixed Bloch + CPML | `native_mixed_bloch_cpml` | 286.098 | 11.921 | 1.802 |
+| Grating TFSF | `native_grating_tfsf` | 301.663 | 12.569 | 1.069 |
 
-These are pinned so the native/remainder boundary stays explicit:
-`test_general_nonlinear_reverse_remains_torch_vjp` (this module),
-`test_chi2_reverse_routes_through_torch_vjp` and
-`test_scene_with_magnetic_dispersive_medium_gradient_matches_fd`
-(`test_fdtd_adjoint_materials.py`), and
-`test_general_mixed_bloch_cpml_remains_torch_vjp_remainder`
-(`test_fdtd_adjoint_b_complex_classes.py`).
+These are full-backward results rather than isolated-kernel timings. Every run
+recorded exactly 24 invocations of the named native runner. PyTorch profiler
+inspection of an isolated mixed reverse step found no CUDA memcpy event; the new
+per-cell reverse operators accept device tensors and launch compiled kernels
+without a host round trip.
 
-## Acceptance coverage
+Nsight Compute 2025.2 connected to the focused nonlinear reverse workload, but
+the driver denied hardware counters with `ERR_NVGPUCTRPERM`; occupancy,
+registers/thread, spills, cache, throughput, and branch-efficiency counters need
+administrator-enabled counter access. Nsight Systems is not installed on this
+host (`nsys` is absent). These environment limits are recorded explicitly rather
+than treating an unavailable profiler as a successful measurement.
 
-| Guarantee | Test |
-| --- | --- |
-| Hot-path gate: native backend + `witwin_maxwell_fdtd_cuda.*` reverse kernels present + only whitelisted `aten.*` ops in the reverse region, per class | `test_fdtd_adjoint_p6_acceptance.py::test_hotpath_reverse_region_is_native` |
-| Whitelist is tight (Torch reference trips it) | `...::test_torch_reference_reverse_region_leaves_the_whitelist` |
-| Step-level native == analytic reference parity matrix | `...::test_native_reverse_matches_reference` |
-| Additive `sigma_m` design gradient == finite difference | `...::test_additive_sigma_m_gradient_matches_fd` |
-| Multi-frequency + dispersive design gradient == finite difference | `...::test_multi_frequency_dispersive_gradient_matches_fd` |
-| Per-kernel native == Torch-reference parity | `tests/fdtd/cuda/test_cuda_adjoint_parity.py` |
-| End-to-end design-gradient == FD per class | `tests/gradients/test_fdtd_adjoint_rigorous.py`, `test_fdtd_adjoint_materials.py` |
-
-## Performance
-
-`scripts/perf_native_adjoint_reverse.py` times one reverse step under the native
-vs Torch-reference backend per class (CUDA events, quiet GPU, RTX 5080, 300 iters):
-
-| class | native ms/step | torch ms/step | speedup |
-| --- | ---: | ---: | ---: |
-| standard | 2.07 | 11.78 | 5.7x |
-| cpml | 6.10 | 21.98 | 3.6x |
-| conductive | 7.96 | 20.36 | 2.6x |
-| kerr | 4.96 | 23.84 | 4.8x |
-| full_aniso | 3.82 | 21.84 | 5.7x |
-| bloch | 3.87 | 30.00 | 7.8x |
-| dispersive_standard | 2.39 | 10.07 | 4.2x |
-| dispersive_cpml | 3.18 | 16.30 | 5.1x |
-| tfsf | 4.19 | 13.53 | 3.2x |
-| bloch_dispersive | 7.93 | 34.48 | 4.4x |
-
-The native reverse math replaces the dominant Torch reverse cost with fused
-kernels; the residual Torch replay/orchestration is shared by both backends, so
-the ratio isolates the reverse-math speedup (2.6x–7.8x here). Absolute numbers are
-GPU- and contention-dependent; run the harness on a quiet GPU to reproduce.
+Acceptance results on this GPU: 9 native local tests, 30 material/capability
+tests, 54 bridge tests, and 19 rigorous-gradient tests passed. The combined
+`tests/fdtd tests/gradients` run completed with 170 passed and 44 optional forward
+tests skipped; the CUDA adjoint acceptance cases executed.

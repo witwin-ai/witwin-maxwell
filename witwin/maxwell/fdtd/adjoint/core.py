@@ -1,9 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 
 import torch
 
@@ -12,15 +12,10 @@ from ..boundary import (
     BOUNDARY_BLOCH,
     BOUNDARY_NONE,
     BOUNDARY_PEC,
-    BOUNDARY_PERIODIC,
-    BOUNDARY_PMC,
     BOUNDARY_PML,
     has_complex_fields,
 )
-from .profiler import (
-    _BackwardProfiler,
-    _ReverseStepResult,
-)
+from .profiler import _ReverseStepResult
 from ..checkpoint import (
     FDTDCheckpointSchema,
     checkpoint_schema,
@@ -255,6 +250,7 @@ def _slice_from_offsets_shape(offsets, shape):
 
 
 def _safe_grad(grad, reference):
+    """Normalize optional autograd output while constructing monitor seeds."""
     if grad is None:
         return torch.zeros_like(reference)
     return grad.to(device=reference.device, dtype=reference.dtype)
@@ -455,7 +451,18 @@ def _can_use_explicit_source_term_reverse_step(solver, resolved_source_terms) ->
         return False
     if has_complex_fields(solver):
         source_terms, electric_source_terms, magnetic_source_terms = resolved_source_terms
-        if getattr(solver, "boundary_kind", None) != "bloch":
+        codes = {
+            axis: (
+                int(getattr(solver, f"boundary_{axis}_low_code")),
+                int(getattr(solver, f"boundary_{axis}_high_code")),
+            )
+            for axis in ("x", "y", "z")
+        }
+        mixed_bloch_cpml = (
+            sum(pair == (BOUNDARY_PML, BOUNDARY_PML) for pair in codes.values()) == 1
+            and sum(pair == (BOUNDARY_BLOCH, BOUNDARY_BLOCH) for pair in codes.values()) == 2
+        )
+        if getattr(solver, "boundary_kind", None) != "bloch" and not mixed_bloch_cpml:
             return False
         if electric_source_terms or magnetic_source_terms:
             return False
@@ -1352,87 +1359,6 @@ def _reverse_tfsf_auxiliary_magnetic_state_adjoint(
     adj_electric_prev[1:].add_(-curl_flux)
 
 
-def _reverse_tfsf_auxiliary_state_python_reference(
-    solver,
-    forward_state,
-    adjoint_state,
-    *,
-    magnetic_output_adjoint,
-):
-    """Analytic (autograd-free) transpose of the per-step TFSF auxiliary update.
-
-    Replays the reverse of the one-dimensional auxiliary electric/magnetic advance
-    and the incident sample-and-inject in the exact order the forward step runs
-    them, so no ``torch.autograd`` graph is built on the reverse hot path. Mirrors
-    the native TFSF reverse kernels bit-for-bit (parity-tested), and stays equal to
-    the full ``torch_vjp`` auxiliary gradient (``test_reverse_step_tfsf_python_
-    reference_matches_torch_vjp``).
-
-    The magnetic incident correction is injected into the mid-step H that both the
-    post-step H seed and the electric update consume, so its sample-adjoint reads
-    the base reverse's ``magnetic_output_adjoint`` (the full mid-H adjoint), not the
-    raw post-step H seed.
-    """
-    auxiliary_state = _extract_tfsf_auxiliary_state(forward_state)
-    if auxiliary_state is None:
-        return {}
-    tfsf_state = getattr(solver, "_tfsf_state", None)
-    if tfsf_state is None:
-        return {}
-    auxiliary_grid = tfsf_state.get("auxiliary_grid")
-    if auxiliary_grid is None:
-        return {}
-
-    adj_electric_prev = torch.zeros_like(auxiliary_state["electric"])
-    adj_magnetic_prev = torch.zeros_like(auxiliary_state["magnetic"])
-    adj_magnetic_after = adjoint_state["tfsf_aux_magnetic"].detach().clone()
-    adj_electric_post = adjoint_state["tfsf_aux_electric"]
-
-    ds = float(auxiliary_grid.ds)
-    origin_electric = float(auxiliary_grid.s_min)
-    origin_magnetic = float(auxiliary_grid.s_min + 0.5 * ds)
-
-    # (1) Electric incident injection samples the advanced magnetic grid.
-    _accumulate_tfsf_sample_adjoint_torch(
-        adj_magnetic_after,
-        tfsf_state.get("electric_terms", ()),
-        adjoint_state,
-        origin=origin_magnetic,
-        ds=ds,
-    )
-    # (2) Electric auxiliary advance reverse (reads adj E1, writes adj E0 / adj H1).
-    _reverse_tfsf_auxiliary_electric_state_adjoint(
-        adj_electric_prev,
-        adj_magnetic_after,
-        adj_electric_post,
-        auxiliary_grid.electric_decay,
-        auxiliary_grid.electric_curl,
-        int(auxiliary_grid.source_index),
-    )
-    # (3) Magnetic auxiliary advance reverse (reads adj H1, writes adj H0 / adj E0).
-    _reverse_tfsf_auxiliary_magnetic_state_adjoint(
-        adj_electric_prev,
-        adj_magnetic_prev,
-        adj_magnetic_after,
-        auxiliary_grid.magnetic_decay,
-        auxiliary_grid.magnetic_curl,
-    )
-    # (4) Magnetic incident injection samples the pre-step electric grid; it lands
-    # on the mid-step H, so read the full mid-H adjoint from the base reverse.
-    _accumulate_tfsf_sample_adjoint_torch(
-        adj_electric_prev,
-        tfsf_state.get("magnetic_terms", ()),
-        magnetic_output_adjoint,
-        origin=origin_electric,
-        ds=ds,
-    )
-
-    return {
-        "tfsf_aux_electric": adj_electric_prev,
-        "tfsf_aux_magnetic": adj_magnetic_prev,
-    }
-
-
 def _bloch_backward_diff(field: torch.Tensor, *, axis: int, inv_delta: torch.Tensor, phase_cos: float, phase_sin: float):
     # inv_delta: 1D dual spacing reciprocals, length == field size + 1 along
     # axis; wrap entries live at [0] and [-1] (equal on a Bloch axis).
@@ -1630,7 +1556,14 @@ def _advance_dispersive_state(solver, state):
 
 
 def _advance_magnetic_dispersive_state(solver, state):
-    return _advance_ade_state(solver, state, iter_magnetic_dispersive_state_specs(solver))
+    updated = _advance_ade_state(solver, state, iter_magnetic_dispersive_state_specs(solver))
+    if has_complex_fields(solver):
+        updated.update(
+            _advance_ade_state(
+                solver, state, iter_magnetic_dispersive_state_specs(solver), imag=True
+            )
+        )
+    return updated
 
 
 def _magnetic_inverse_permeabilities(solver):
@@ -1653,11 +1586,14 @@ def _apply_magnetic_dispersive_corrections(solver, magnetic_fields, magnetic_dis
 
     inv_mu = _magnetic_inverse_permeabilities(solver)
     updated = dict(magnetic_fields)
-    for component_name, model_name, index, _tensor_names, _entry in iter_magnetic_dispersive_state_specs(solver) or ():
-        current_name = dispersive_state_name(component_name, model_name, index, "current")
-        updated[component_name] = updated[component_name] - float(solver.dt) * magnetic_dispersive_state[
-            current_name
-        ] * inv_mu[component_name]
+    suffixes = ("", "_imag") if has_complex_fields(solver) else ("",)
+    for suffix in suffixes:
+        for component_name, model_name, index, _tensor_names, _entry in iter_magnetic_dispersive_state_specs(solver) or ():
+            current_name = dispersive_state_name(component_name, model_name, index, "current") + suffix
+            field_name = component_name + suffix
+            updated[field_name] = updated[field_name] - float(solver.dt) * magnetic_dispersive_state[
+                current_name
+            ] * inv_mu[component_name]
     return updated
 
 
@@ -1742,66 +1678,6 @@ def _reverse_dispersive_corrections(
     return electric_source_adjoint, dispersive_output_adjoint, grad_eps_by_field, source_adjoint_state
 
 
-def _reverse_ade_state_python_reference(solver, forward_state, output_adjoint, *, specs, component_names, state_names, suffix=""):
-    # ``suffix`` selects the field/state half the ADE-state VJP runs on. For the
-    # pure-real path it is "" (unchanged). Bloch (complex-field) runs also carry an
-    # imaginary FDTD copy whose electric ADE poles advance identically under
-    # ``*_imag`` state names, so the Bloch+dispersive reverse calls this with
-    # ``suffix="_imag"`` to reverse that replica onto the imaginary field.
-    field_prev_adjoint = {
-        name + suffix: torch.zeros_like(forward_state[name + suffix])
-        for name in component_names
-    }
-    pre_step_dispersive_adjoint = {
-        name + suffix: torch.zeros_like(forward_state[name + suffix])
-        for name in state_names
-    }
-    dt = float(solver.dt)
-
-    for component_name, model_name, index, _tensor_names, entry in specs or ():
-        field_key = component_name + suffix
-        drive = entry["drive"]
-        if model_name == "debye":
-            polarization_name = dispersive_state_name(component_name, model_name, index, "polarization") + suffix
-            current_name = dispersive_state_name(component_name, model_name, index, "current") + suffix
-            adj_polarization_post = output_adjoint[polarization_name]
-            adj_current_post = output_adjoint[current_name]
-            adj_polarization_internal = adj_polarization_post + adj_current_post / dt
-            field_prev_adjoint[field_key] = field_prev_adjoint[field_key] + drive * adj_polarization_internal
-            pre_step_dispersive_adjoint[polarization_name] = (
-                pre_step_dispersive_adjoint[polarization_name]
-                + float(entry["decay"]) * adj_polarization_internal
-                - adj_current_post / dt
-            )
-            continue
-
-        if model_name == "drude":
-            current_name = dispersive_state_name(component_name, model_name, index, "current") + suffix
-            adj_current_post = output_adjoint[current_name]
-            field_prev_adjoint[field_key] = field_prev_adjoint[field_key] + drive * adj_current_post
-            pre_step_dispersive_adjoint[current_name] = (
-                pre_step_dispersive_adjoint[current_name] + float(entry["decay"]) * adj_current_post
-            )
-            continue
-
-        polarization_name = dispersive_state_name(component_name, model_name, index, "polarization") + suffix
-        current_name = dispersive_state_name(component_name, model_name, index, "current") + suffix
-        adj_polarization_post = output_adjoint[polarization_name]
-        adj_current_post = output_adjoint[current_name]
-        adj_current_internal = adj_current_post + dt * adj_polarization_post
-        field_prev_adjoint[field_key] = field_prev_adjoint[field_key] + drive * adj_current_internal
-        pre_step_dispersive_adjoint[polarization_name] = (
-            pre_step_dispersive_adjoint[polarization_name]
-            + adj_polarization_post
-            - float(entry["restoring"]) * adj_current_internal
-        )
-        pre_step_dispersive_adjoint[current_name] = (
-            pre_step_dispersive_adjoint[current_name] + float(entry["decay"]) * adj_current_internal
-        )
-
-    return field_prev_adjoint, pre_step_dispersive_adjoint
-
-
 def _electric_dispersive_real_state_names(solver):
     """Canonical (unsuffixed) electric-dispersive state names, in spec order.
 
@@ -1814,29 +1690,6 @@ def _electric_dispersive_real_state_names(solver):
         for tensor_name in tensor_names:
             names.append(dispersive_state_name(component_name, model_name, index, tensor_name))
     return tuple(names)
-
-
-def _reverse_dispersive_state_python_reference(solver, forward_state, dispersive_output_adjoint, *, suffix=""):
-    return _reverse_ade_state_python_reference(
-        solver,
-        forward_state,
-        dispersive_output_adjoint,
-        specs=iter_dispersive_state_specs(solver),
-        component_names=("Ex", "Ey", "Ez"),
-        state_names=_electric_dispersive_real_state_names(solver),
-        suffix=suffix,
-    )
-
-
-def _reverse_magnetic_dispersive_state_python_reference(solver, forward_state, magnetic_output_adjoint):
-    return _reverse_ade_state_python_reference(
-        solver,
-        forward_state,
-        magnetic_output_adjoint,
-        specs=iter_magnetic_dispersive_state_specs(solver),
-        component_names=("Hx", "Hy", "Hz"),
-        state_names=checkpoint_schema(solver).magnetic_dispersive_state_names,
-    )
 
 
 def _reverse_magnetic_dispersive_corrections(solver, adjoint_state, magnetic_field_adjoint):
@@ -3225,10 +3078,6 @@ def _step_state(
     # forward per-step kernel order.
     magnetic_dispersive_state = _advance_magnetic_dispersive_state(solver, state)
     if magnetic_dispersive_state:
-        if complex_fields:
-            raise NotImplementedError(
-                "FDTD adjoint replay does not support magnetic dispersive media with complex fields."
-            )
         magnetic_fields = _apply_magnetic_dispersive_corrections(
             solver,
             magnetic_fields,
@@ -3243,13 +3092,7 @@ def _step_state(
         # The replay only requests capture for the pure real standard/CPML path
         # (see ``_replay_can_capture_mid_magnetic``), where this equals the reverse
         # recompute bit-for-bit; the tensors are never mutated after this point.
-        capture_magnetic.append(
-            {
-                "Hx": magnetic_fields["Hx"].detach(),
-                "Hy": magnetic_fields["Hy"].detach(),
-                "Hz": magnetic_fields["Hz"].detach(),
-            }
-        )
+        capture_magnetic.append({name: tensor.detach() for name, tensor in magnetic_fields.items()})
 
     if complex_fields:
         ex_curl = _dynamic_electric_curl(solver.cex_curl, solver.eps_Ex, eps_ex)
@@ -3718,9 +3561,3 @@ def _replay_segment_states(solver, checkpoint, start_step, end_step, *, mid_magn
             )
             states.append({name: tensor.detach() for name, tensor in current.items()})
     return states
-
-
-from .dispatch import reverse_step
-
-
-from .bridge import _FDTDGradientBridge, run_fdtd_with_gradient_bridge

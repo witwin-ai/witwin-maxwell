@@ -1563,6 +1563,37 @@ void reverse_electric_component_ez_cpml_kerr_cuda(
     int64_t x_high_mode,
     int64_t y_low_mode,
     int64_t y_high_mode);
+void reverse_cpml_correction_cuda(
+    torch::stable::Tensor adj_psi_prev, torch::stable::Tensor adj_derivative,
+    const torch::stable::Tensor& adj_field, const torch::stable::Tensor& adj_psi_post,
+    const torch::stable::Tensor& curl, const torch::stable::Tensor& b,
+    const torch::stable::Tensor& c, const torch::stable::Tensor& inv_kappa,
+    int64_t normal_axis, int64_t tangent_axis,
+    int64_t tangent_low_mode, int64_t tangent_high_mode, double sign);
+void reverse_electric_component_cpml_nonlinear_cuda(
+    int64_t component,
+    torch::stable::Tensor adj_prev, torch::stable::Tensor grad_eps,
+    torch::stable::Tensor grad_chi2, torch::stable::Tensor grad_chi3,
+    torch::stable::Tensor grad_tpa, torch::stable::Tensor g_fsq,
+    torch::stable::Tensor adj_psi_pos_prev, torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos, torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& e_prev,
+    const torch::stable::Tensor& external_decay,
+    const torch::stable::Tensor& eps, const torch::stable::Tensor& chi2,
+    const torch::stable::Tensor& chi3, const torch::stable::Tensor& tpa,
+    const torch::stable::Tensor& sigma_static, const torch::stable::Tensor& fsq,
+    double dt, double eps0,
+    const torch::stable::Tensor& psi_pos, const torch::stable::Tensor& psi_neg,
+    const torch::stable::Tensor& b_pos, const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg, const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg,
+    const torch::stable::Tensor& h_pos_mid, const torch::stable::Tensor& h_neg_mid,
+    const torch::stable::Tensor& inv_pos, const torch::stable::Tensor& inv_neg,
+    int64_t low_mode_a, int64_t high_mode_a, int64_t low_mode_b, int64_t high_mode_b);
 void reverse_magnetic_component_hx_cpml_cuda(
     torch::stable::Tensor adj_prev,
     torch::stable::Tensor adj_psi_pos_prev,
@@ -1958,6 +1989,8 @@ void add_source_patch_ez_periodic_cuda(
   _(reverse_electric_component_ex_cpml_kerr, "reverse_electric_component_ex_cpml_kerr(Tensor(a!) adj_prev, Tensor(b!) grad_eps, Tensor(c!) grad_chi3, Tensor(d!) g_fsq, Tensor(e!) adj_psi_pos_prev, Tensor(f!) adj_psi_neg_prev, Tensor(g!) adj_d_pos, Tensor(h!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor eps, Tensor chi3, Tensor fsq, float dt, float eps0, Tensor psi_pos, Tensor psi_neg, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg, Tensor hy_mid, Tensor hz_mid, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode) -> ()", reverse_electric_component_ex_cpml_kerr_cuda) \
   _(reverse_electric_component_ey_cpml_kerr, "reverse_electric_component_ey_cpml_kerr(Tensor(a!) adj_prev, Tensor(b!) grad_eps, Tensor(c!) grad_chi3, Tensor(d!) g_fsq, Tensor(e!) adj_psi_pos_prev, Tensor(f!) adj_psi_neg_prev, Tensor(g!) adj_d_pos, Tensor(h!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor eps, Tensor chi3, Tensor fsq, float dt, float eps0, Tensor psi_pos, Tensor psi_neg, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg, Tensor hx_mid, Tensor hz_mid, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode) -> ()", reverse_electric_component_ey_cpml_kerr_cuda) \
   _(reverse_electric_component_ez_cpml_kerr, "reverse_electric_component_ez_cpml_kerr(Tensor(a!) adj_prev, Tensor(b!) grad_eps, Tensor(c!) grad_chi3, Tensor(d!) g_fsq, Tensor(e!) adj_psi_pos_prev, Tensor(f!) adj_psi_neg_prev, Tensor(g!) adj_d_pos, Tensor(h!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor eps, Tensor chi3, Tensor fsq, float dt, float eps0, Tensor psi_pos, Tensor psi_neg, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg, Tensor hx_mid, Tensor hy_mid, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode) -> ()", reverse_electric_component_ez_cpml_kerr_cuda) \
+  _(reverse_electric_component_cpml_nonlinear, "reverse_electric_component_cpml_nonlinear(int component, Tensor(a!) adj_prev, Tensor(b!) grad_eps, Tensor(c!) grad_chi2, Tensor(d!) grad_chi3, Tensor(e!) grad_tpa, Tensor(f!) g_fsq, Tensor(g!) adj_psi_pos_prev, Tensor(h!) adj_psi_neg_prev, Tensor(i!) adj_d_pos, Tensor(j!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor e_prev, Tensor external_decay, Tensor eps, Tensor chi2, Tensor chi3, Tensor tpa, Tensor sigma_static, Tensor fsq, float dt, float eps0, Tensor psi_pos, Tensor psi_neg, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg, Tensor h_pos_mid, Tensor h_neg_mid, Tensor inv_pos, Tensor inv_neg, int low_mode_a, int high_mode_a, int low_mode_b, int high_mode_b) -> ()", reverse_electric_component_cpml_nonlinear_cuda) \
+  _(reverse_cpml_correction, "reverse_cpml_correction(Tensor(a!) adj_psi_prev, Tensor(b!) adj_derivative, Tensor adj_field, Tensor adj_psi_post, Tensor curl, Tensor b, Tensor c, Tensor inv_kappa, int normal_axis, int tangent_axis, int tangent_low_mode, int tangent_high_mode, float sign) -> ()", reverse_cpml_correction_cuda) \
   _(reverse_magnetic_component_hx_cpml, "reverse_magnetic_component_hx_cpml(Tensor(a!) adj_prev, Tensor(b!) adj_psi_pos_prev, Tensor(c!) adj_psi_neg_prev, Tensor(d!) adj_d_pos, Tensor(e!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor curl, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg) -> ()", reverse_magnetic_component_hx_cpml_cuda) \
   _(reverse_magnetic_component_hy_cpml, "reverse_magnetic_component_hy_cpml(Tensor(a!) adj_prev, Tensor(b!) adj_psi_pos_prev, Tensor(c!) adj_psi_neg_prev, Tensor(d!) adj_d_pos, Tensor(e!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor curl, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg) -> ()", reverse_magnetic_component_hy_cpml_cuda) \
   _(reverse_magnetic_component_hz_cpml, "reverse_magnetic_component_hz_cpml(Tensor(a!) adj_prev, Tensor(b!) adj_psi_pos_prev, Tensor(c!) adj_psi_neg_prev, Tensor(d!) adj_d_pos, Tensor(e!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor curl, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg) -> ()", reverse_magnetic_component_hz_cpml_cuda) \

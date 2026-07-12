@@ -196,7 +196,7 @@ def test_uniform_current_source_uses_explicit_cpml_backend():
 
     counts = profile["reverse_backend_counts"]
     assert counts.get(adjoint_baselines.expected_cpml_reverse_backend(), 0) == bridge._time_steps
-    assert counts.get("torch_vjp", 0) == 0
+    assert all(name.startswith("native_") for name in counts)
 
 
 # ---------------------------------------------------------------------------

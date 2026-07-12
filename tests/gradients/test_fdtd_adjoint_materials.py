@@ -439,7 +439,7 @@ def test_conductive_reverse_routes_through_native_conductive():
         eps_ez=solver.eps_Ez,
         resolved_source_terms=None,
     )
-    assert backend is _ReverseBackend.PYTHON_CONDUCTIVE, backend
+    assert backend is _ReverseBackend.CONDUCTIVE, backend
 
 
 # ---------------------------------------------------------------------------
@@ -594,72 +594,8 @@ def test_kerr_reverse_routes_through_native_kerr():
         eps_ez=solver.eps_Ez,
         resolved_source_terms=None,
     )
-    assert backend is _ReverseBackend.PYTHON_KERR, backend
+    assert backend is _ReverseBackend.KERR, backend
 
-
-@_CUDA
-def test_kerr_reverse_step_reference_matches_torch_vjp():
-    """The analytic Kerr CPML reverse must reproduce the torch-autograd VJP of the
-    Kerr forward step (fields, psi, grad_eps, and the chi3 channel) on a real Kerr
-    solver. This is the oracle behind the fused native Kerr reverse: the native
-    kernels are validated against this reference, which is validated here against
-    autograd, so a native/reference agreement is a genuine end-to-end check."""
-    from witwin.maxwell.fdtd.adjoint import reference as fdtd_adjoint_reference
-    from witwin.maxwell.fdtd.adjoint import core as adjoint_core
-    from witwin.maxwell.fdtd.checkpoint import checkpoint_schema
-
-    torch.manual_seed(3)
-    prepared = mw.Simulation.fdtd(
-        _kerr_scene(_KERR_CHI3),
-        frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=8),
-    ).prepare()
-    solver = prepared.solver
-    names = checkpoint_schema(solver).state_names
-    forward_state = {
-        n: 0.3 * torch.randn(getattr(solver, n).shape, device="cuda", dtype=torch.float32)
-        for n in names
-    }
-    adjoint_state = {n: torch.randn_like(t) for n, t in forward_state.items()}
-    eps_ex = solver.eps_Ex.detach().clone().requires_grad_(True)
-    eps_ey = solver.eps_Ey.detach().clone().requires_grad_(True)
-    eps_ez = solver.eps_Ez.detach().clone().requires_grad_(True)
-    chi3_ex = solver.kerr_chi3_Ex.detach().clone().requires_grad_(True)
-    chi3_ey = solver.kerr_chi3_Ey.detach().clone().requires_grad_(True)
-    chi3_ez = solver.kerr_chi3_Ez.detach().clone().requires_grad_(True)
-    rst = adjoint_core._resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez)
-    time_value = 3 * solver.dt
-
-    with torch.no_grad():
-        expected = fdtd_adjoint_reference.reverse_step_torch_vjp(
-            solver, forward_state, adjoint_state, time_value=time_value,
-            eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez,
-            chi3_ex=chi3_ex, chi3_ey=chi3_ey, chi3_ez=chi3_ez,
-        )
-        base = fdtd_adjoint_reference.reverse_step_kerr_cpml_python_reference(
-            solver, forward_state, adjoint_state, time_value=time_value,
-            eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez, resolved_source_terms=rst,
-        )
-        actual = adjoint_core._accumulate_source_term_gradients(
-            base, solver=solver, adjoint_state=adjoint_state, time_value=time_value,
-            eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez, resolved_source_terms=rst,
-        )
-
-    assert actual.backend == "python_reference_kerr_cpml"
-    assert expected.backend == "torch_vjp"
-
-    def _match(a, e):
-        scale = e.abs().max().item() + 1e-30
-        assert torch.allclose(a, e, rtol=1e-4, atol=scale * 1e-4), (a - e).abs().max().item() / scale
-
-    for name in names:
-        _match(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name])
-    _match(actual.grad_eps_ex, expected.grad_eps_ex)
-    _match(actual.grad_eps_ey, expected.grad_eps_ey)
-    _match(actual.grad_eps_ez, expected.grad_eps_ez)
-    _match(actual.grad_chi3_ex, expected.grad_chi3_ex)
-    _match(actual.grad_chi3_ey, expected.grad_chi3_ey)
-    _match(actual.grad_chi3_ez, expected.grad_chi3_ez)
 
 
 class _KerrGeometryScene(mw.SceneModule):
@@ -777,11 +713,15 @@ _CHI2 = 8.0e-3
 _TPA_BETA = 40.0
 
 
-def _chi2_scene(chi2, *, density=None):
+def _chi2_scene(chi2, *, density=None, boundary="pml"):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.12),
-        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+        boundary=(
+            mw.BoundarySpec.pml(num_layers=2, strength=1.0)
+            if boundary == "pml"
+            else mw.BoundarySpec.none()
+        ),
         device="cuda",
     )
     if chi2 != 0.0:
@@ -790,7 +730,8 @@ def _chi2_scene(chi2, *, density=None):
                 name="chi2_slab",
                 geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
                 material=mw.Material(
-                    eps_r=2.0, nonlinearity=[mw.NonlinearSusceptibility(chi2=chi2)]
+                    eps_r=2.0,
+                    nonlinearity=[mw.NonlinearSusceptibility(chi2=chi2)],
                 ),
             )
         )
@@ -946,20 +887,26 @@ class _Chi2DensityScene(mw.SceneModule):
     coefficients through the forward E fields for the design gradients to be
     correct (chi2 folds the signed own-component field into eps_eff)."""
 
-    def __init__(self, init=0.0, chi2=_CHI2):
+    def __init__(self, init=0.0, chi2=_CHI2, boundary="pml"):
         super().__init__()
         self.logits = torch.nn.Parameter(torch.full((2, 2, 2), float(init), device="cuda"))
         self._chi2 = chi2
+        self._boundary = boundary
 
     def to_scene(self):
-        return _chi2_scene(self._chi2, density=torch.sigmoid(self.logits))
+        return _chi2_scene(
+            self._chi2,
+            density=torch.sigmoid(self.logits),
+            boundary=self._boundary,
+        )
 
 
 @_CUDA
-def test_scene_with_chi2_medium_gradient_matches_fd():
+@pytest.mark.parametrize("boundary", ["pml", "none"])
+def test_scene_with_chi2_medium_gradient_matches_fd(boundary):
     """Per-element FD validation of design gradients in a scene containing a
     static chi2 slab (previously rejected by the bridge)."""
-    model = _Chi2DensityScene(init=0.0)
+    model = _Chi2DensityScene(init=0.0, boundary=boundary)
 
     def loss_fn():
         result = _build_sim(model, time_steps=200).run()
@@ -968,7 +915,7 @@ def test_scene_with_chi2_medium_gradient_matches_fd():
     # The chi2 nonlinearity must actually shape the solution, otherwise this
     # would only re-validate the linear path.
     linear_loss = _abs2(
-        _build_sim(_Chi2DensityScene(init=0.0, chi2=0.0), time_steps=200)
+        _build_sim(_Chi2DensityScene(init=0.0, chi2=0.0, boundary=boundary), time_steps=200)
         .run()
         .monitor("probe")["data"]
     ).item()
@@ -1165,11 +1112,13 @@ def test_general_nonlinear_pullback_tpa_channel_is_exact_transpose():
 
 
 @_CUDA
-def test_chi2_reverse_routes_through_torch_vjp():
-    """A chi2 / TPA scene must fall to the torch-VJP reverse backend: the analytic
-    standard/CPML backends model a field-independent decay and cannot reproduce
-    the general nonlinear coefficient recompute."""
-    from witwin.maxwell.fdtd.adjoint.dispatch import _select_reverse_backend, _ReverseBackend
+def test_chi2_reverse_routes_through_native_general_nonlinear():
+    from witwin.maxwell.fdtd.adjoint.dispatch import (
+        _native_backend_available,
+        _select_reverse_backend,
+        _ReverseBackend,
+    )
+    from witwin.maxwell.fdtd.checkpoint import capture_checkpoint_state
 
     prepared = mw.Simulation.fdtd(
         _general_nonlinear_scene(),
@@ -1178,7 +1127,7 @@ def test_chi2_reverse_routes_through_torch_vjp():
     ).prepare()
     solver = prepared.solver
     assert solver.nonlinear_general_enabled
-    forward_state = {name: getattr(solver, name) for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
+    forward_state = capture_checkpoint_state(solver, step=0).tensors
     backend = _select_reverse_backend(
         solver,
         forward_state,
@@ -1187,7 +1136,8 @@ def test_chi2_reverse_routes_through_torch_vjp():
         eps_ez=solver.eps_Ez,
         resolved_source_terms=None,
     )
-    assert backend is _ReverseBackend.TORCH_VJP, backend
+    assert backend is _ReverseBackend.GENERAL_NONLINEAR, backend
+    assert _native_backend_available(backend, solver, forward_state)
 
 
 # ---------------------------------------------------------------------------
@@ -1349,7 +1299,7 @@ def test_full_aniso_reverse_routes_through_native_full_aniso():
         eps_ez=solver.eps_Ez,
         resolved_source_terms=None,
     )
-    assert backend is _ReverseBackend.PYTHON_FULL_ANISO, backend
+    assert backend is _ReverseBackend.FULL_ANISO, backend
 
 
 @_CUDA
@@ -1501,7 +1451,7 @@ class _BlochDispersiveDensityScene(mw.SceneModule):
 @_CUDA
 def test_bloch_dispersive_reverse_selects_native_bloch_dispersive_backend():
     """A Bloch + electric-dispersive scene resolves to the dedicated analytic
-    ``PYTHON_BLOCH_DISPERSIVE`` backend, which carries the imaginary-ADE replica the
+    ``BLOCH_DISPERSIVE`` backend, which carries the imaginary-ADE replica the
     plain Bloch and plain dispersive backends each drop, and (on a qualifying CUDA
     scene) auto mode prefers its fused native reverse runner over the torch-VJP
     fallback."""
@@ -1529,7 +1479,7 @@ def test_bloch_dispersive_reverse_selects_native_bloch_dispersive_backend():
         eps_ez=solver.eps_Ez,
         resolved_source_terms=None,
     )
-    assert backend is _ReverseBackend.PYTHON_BLOCH_DISPERSIVE, backend
+    assert backend is _ReverseBackend.BLOCH_DISPERSIVE, backend
     assert _native_backend_available(backend, solver, forward_state)
 
 
@@ -1676,14 +1626,12 @@ class _BlochMagneticDispersiveDensityScene(mw.SceneModule):
 
 
 @_CUDA
-def test_bloch_magnetic_dispersive_adjoint_is_rejected_with_physical_reason():
-    """Electric dispersion under Bloch is now differentiable, but magnetic (mu-pole)
-    dispersion is not: the magnetic ADE reverse channel is real-valued only, so the
-    imaginary Bloch component of the magnetic pole current carries no gradient. The
-    guard must fire with that physical reason rather than "not implemented yet"."""
+def test_bloch_magnetic_dispersive_adjoint_runs_native():
     model = _BlochMagneticDispersiveDensityScene(init=0.0).cuda()
-    with pytest.raises(NotImplementedError, match="magnetic-dispersive"):
-        _build_sim(model, time_steps=8).run()
+    loss = _abs2(_build_sim(model, time_steps=16).run().monitor("probe")["data"])
+    loss.backward()
+    assert model.logits.grad is not None
+    assert torch.isfinite(model.logits.grad).all()
 
 
 # ---------------------------------------------------------------------------

@@ -3124,6 +3124,34 @@ def _reverse_electric_cpml_kerr_ez(
             )
 
 
+def _reverse_electric_cpml_nonlinear(**kwargs):
+    _COMPILED_EXTENSION.reverse_electric_component_cpml_nonlinear(
+        int(kwargs["component"]),
+        kwargs["AdjPrev"], kwargs["GradEps"], kwargs["GradChi2"],
+        kwargs["GradChi3"], kwargs["GradTpa"], kwargs["GFsq"],
+        kwargs["AdjPsiPosPrev"], kwargs["AdjPsiNegPrev"],
+        kwargs["AdjDPos"], kwargs["AdjDNeg"], kwargs["AdjPost"],
+        kwargs["AdjPsiPosPost"], kwargs["AdjPsiNegPost"], kwargs["EPrev"],
+        kwargs["ExternalDecay"], kwargs["Eps"], kwargs["Chi2"],
+        kwargs["Chi3"], kwargs["Tpa"], kwargs["SigmaStatic"], kwargs["Fsq"],
+        float(kwargs["Dt"]), float(kwargs["Eps0"]), kwargs["PsiPos"],
+        kwargs["PsiNeg"], kwargs["BPos"], kwargs["CPos"],
+        kwargs["InvKappaPos"], kwargs["BNeg"], kwargs["CNeg"],
+        kwargs["InvKappaNeg"], kwargs["HPosMid"], kwargs["HNegMid"],
+        kwargs["InvPos"], kwargs["InvNeg"], int(kwargs["LowModeA"]),
+        int(kwargs["HighModeA"]), int(kwargs["LowModeB"]), int(kwargs["HighModeB"]),
+    )
+
+
+def _reverse_cpml_correction(**kwargs):
+    _COMPILED_EXTENSION.reverse_cpml_correction(
+        kwargs["AdjPsiPrev"], kwargs["AdjDerivative"], kwargs["AdjField"],
+        kwargs["AdjPsiPost"], kwargs["Curl"], kwargs["B"], kwargs["C"],
+        kwargs["InvKappa"], int(kwargs["NormalAxis"]), int(kwargs["TangentAxis"]),
+        int(kwargs["TangentLowMode"]), int(kwargs["TangentHighMode"]), float(kwargs["Sign"]),
+    )
+
+
 def _reverse_magnetic_cpml_hx(**kwargs):
     _COMPILED_EXTENSION.reverse_magnetic_component_hx_cpml(
                 kwargs["AdjHxPrev"], kwargs["AdjPsiPosPrev"], kwargs["AdjPsiNegPrev"], kwargs["AdjDPos"], kwargs["AdjDNeg"],
@@ -3471,6 +3499,8 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "reverseElectricComponentExCpmlKerr3D": _reverse_electric_cpml_kerr_ex,
     "reverseElectricComponentEyCpmlKerr3D": _reverse_electric_cpml_kerr_ey,
     "reverseElectricComponentEzCpmlKerr3D": _reverse_electric_cpml_kerr_ez,
+    "reverseElectricComponentCpmlNonlinear3D": _reverse_electric_cpml_nonlinear,
+    "reverseCpmlCorrection3D": _reverse_cpml_correction,
     "reverseMagneticComponentHxCpml3D": _reverse_magnetic_cpml_hx,
     "reverseMagneticComponentHyCpml3D": _reverse_magnetic_cpml_hy,
     "reverseMagneticComponentHzCpml3D": _reverse_magnetic_cpml_hz,

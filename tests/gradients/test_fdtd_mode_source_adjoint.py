@@ -4,7 +4,6 @@ import torch
 import witwin.maxwell as mw
 import witwin.maxwell.fdtd.excitation.modes as mode_solver
 from witwin.maxwell.fdtd.adjoint import _FDTDGradientBridge
-from witwin.maxwell.fdtd.adjoint.dispatch import reverse_step
 from tests.gradients import fdtd_adjoint_baselines as adjoint_baselines
 
 
@@ -86,7 +85,7 @@ def test_fdtd_gradient_bridge_mode_source_backpropagates_to_material_density():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_fdtd_gradient_bridge_mode_source_matches_central_difference_and_uses_python_reference_cpml():
+def test_fdtd_gradient_bridge_mode_source_matches_central_difference_and_uses_native_cpml():
     model = _DensityModeSourceScene(init=0.0).cuda()
 
     _result, _data, loss = _mode_probe_loss(model)
@@ -118,100 +117,9 @@ def test_fdtd_gradient_bridge_mode_source_matches_central_difference_and_uses_py
     profile = bridge.backward_profile()
 
     assert profile["reverse_backend_counts"].get(adjoint_baselines.expected_cpml_reverse_backend(), 0) == bridge._time_steps
-    assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for CUDA FDTD")
-def test_mode_source_reverse_step_matches_python_reference_for_checkpoint_replay():
-    model = _DensityModeSourceScene(init=0.0).cuda()
-    bridge = _FDTDGradientBridge(_build_mode_simulation(model, time_steps=10))
-    bridge.forward(tuple(bridge.material_inputs))
-
-    solver = bridge._last_solver
-    assert solver is not None
-    checkpoint = bridge._last_checkpoints[0]
-    states = mw.fdtd.adjoint._replay_segment_states(solver, checkpoint, 0, 2)
-    forward_state = states[1]
-    time_value = solver.dt
-    adjoint_state = {
-        name: torch.randn_like(tensor)
-        for name, tensor in forward_state.items()
-    }
-
-    eps_ex = solver.eps_Ex.detach().clone().requires_grad_(True)
-    eps_ey = solver.eps_Ey.detach().clone().requires_grad_(True)
-    eps_ez = solver.eps_Ez.detach().clone().requires_grad_(True)
-    solver._mode_source_explicit_vjp_remaining = 2
-    actual = reverse_step(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=time_value,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
-
-    expected_resolved_source_terms = adjoint_baselines.resolved_source_term_lists(
-        solver,
-        eps_ex,
-        eps_ey,
-        eps_ez,
-    )
-    expected = adjoint_baselines.reverse_step_cpml_python_reference(
-        solver,
-        forward_state,
-        adjoint_state,
-        time_value=time_value,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-        resolved_source_terms=expected_resolved_source_terms,
-    )
-    expected = adjoint_baselines.accumulate_source_term_gradients(
-        expected,
-        solver=solver,
-        adjoint_state=adjoint_state,
-        time_value=time_value,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-        resolved_source_terms=expected_resolved_source_terms,
-    )
-
-    assert actual.backend == adjoint_baselines.expected_cpml_reverse_backend()
-    assert expected.backend == "python_reference_cpml"
-    for name in forward_state:
-        assert torch.allclose(
-            actual.pre_step_adjoint[name],
-            expected.pre_step_adjoint[name],
-            rtol=2.0e-4,
-            atol=2.0e-5,
-            equal_nan=True,
-        )
-    assert torch.allclose(
-        actual.grad_eps_ex,
-        expected.grad_eps_ex,
-        rtol=2.0e-4,
-        atol=2.0e-5,
-        equal_nan=True,
-    )
-    assert torch.allclose(
-        actual.grad_eps_ey,
-        expected.grad_eps_ey,
-        rtol=2.0e-4,
-        atol=2.0e-5,
-        equal_nan=True,
-    )
-    assert torch.allclose(
-        actual.grad_eps_ez,
-        expected.grad_eps_ez,
-        rtol=2.0e-4,
-        atol=2.0e-5,
-        equal_nan=True,
-    )
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_gradient_bridge_mode_source_supports_sparse_implicit_mode_solver(monkeypatch):
     model = _DensityModeSourceScene(init=0.0).cuda()

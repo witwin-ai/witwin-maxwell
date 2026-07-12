@@ -1788,6 +1788,185 @@ __global__ void reverse_electric_component_cpml_kerr_kernel(
   adj_d_neg[linear] = out_adj_d_neg;
 }
 
+// General instantaneous nonlinear pullback.  Unlike the Kerr specialization,
+// chi2/TPA make both electric decay and curl depend on the pre-update field.
+template <int Component>
+__global__ void reverse_electric_component_cpml_nonlinear_kernel(
+    int prev_nx, int prev_ny, int prev_nz,
+    int h_pos_ny, int h_pos_nz, int h_neg_ny, int h_neg_nz,
+    float* __restrict__ adj_prev,
+    float* __restrict__ grad_eps,
+    float* __restrict__ grad_chi2,
+    float* __restrict__ grad_chi3,
+    float* __restrict__ grad_tpa,
+    float* __restrict__ g_fsq,
+    float* __restrict__ adj_psi_pos_prev,
+    float* __restrict__ adj_psi_neg_prev,
+    float* __restrict__ adj_d_pos,
+    float* __restrict__ adj_d_neg,
+    const float* __restrict__ adj_post,
+    const float* __restrict__ adj_psi_pos_post,
+    const float* __restrict__ adj_psi_neg_post,
+    const float* __restrict__ e_prev,
+    const float* __restrict__ external_decay,
+    const float* __restrict__ eps,
+    const float* __restrict__ chi2,
+    const float* __restrict__ chi3,
+    const float* __restrict__ tpa,
+    const float* __restrict__ sigma_static,
+    const float* __restrict__ fsq,
+    float dt, float eps0,
+    const float* __restrict__ psi_pos,
+    const float* __restrict__ psi_neg,
+    const float* __restrict__ b_pos,
+    const float* __restrict__ c_pos,
+    const float* __restrict__ inv_kappa_pos,
+    const float* __restrict__ b_neg,
+    const float* __restrict__ c_neg,
+    const float* __restrict__ inv_kappa_neg,
+    const float* __restrict__ h_pos_mid,
+    const float* __restrict__ h_neg_mid,
+    const float* __restrict__ inv_pos,
+    const float* __restrict__ inv_neg,
+    int low_mode_a, int high_mode_a, int low_mode_b, int high_mode_b) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i_u >= static_cast<unsigned int>(prev_nx)
+      || j_u >= static_cast<unsigned int>(prev_ny)
+      || k_u >= static_cast<unsigned int>(prev_nz)) return;
+  const long long linear = offset3d(i_u, j_u, k_u, prev_ny, prev_nz);
+  const int i = static_cast<int>(i_u), j = static_cast<int>(j_u), k = static_cast<int>(k_u);
+  int coord_a = j, size_a = prev_ny, coord_b = k, size_b = prev_nz;
+  int pos_coeff_index = j, neg_coeff_index = k;
+  if constexpr (Component == 1) {
+    coord_a = i; size_a = prev_nx; coord_b = k; size_b = prev_nz;
+    pos_coeff_index = k; neg_coeff_index = i;
+  } else if constexpr (Component == 2) {
+    coord_a = i; size_a = prev_nx; coord_b = j; size_b = prev_ny;
+    pos_coeff_index = i; neg_coeff_index = j;
+  }
+  const ElectricCellStatus status = resolve_electric_cell_status(
+      coord_a, size_a, low_mode_a, high_mode_a,
+      coord_b, size_b, low_mode_b, high_mode_b);
+  const float adj_post_value = adj_post[linear];
+  float adjoint = 0.0f, grad_e = 0.0f, grad_c2 = 0.0f;
+  float grad_c3 = 0.0f, grad_absorption = 0.0f, g_fsq_out = 0.0f;
+  const float adj_psi_pos_post_value = adj_psi_pos_post[linear];
+  const float adj_psi_neg_post_value = adj_psi_neg_post[linear];
+  float adj_psi_pos = adj_psi_pos_post_value;
+  float adj_psi_neg = adj_psi_neg_post_value;
+  float out_adj_d_pos = 0.0f, out_adj_d_neg = 0.0f;
+  if (status.inactive) {
+    adjoint = adj_post_value;
+  } else if (status.active) {
+    float d_pos = 0.0f, d_neg = 0.0f;
+    if constexpr (Component == 0) {
+      d_pos = (h_pos_mid[offset3d(i_u,j_u,k_u,h_pos_ny,h_pos_nz)]
+             - h_pos_mid[offset3d(i_u,j_u-1,k_u,h_pos_ny,h_pos_nz)]) * inv_pos[pos_coeff_index];
+      d_neg = (h_neg_mid[offset3d(i_u,j_u,k_u,h_neg_ny,h_neg_nz)]
+             - h_neg_mid[offset3d(i_u,j_u,k_u-1,h_neg_ny,h_neg_nz)]) * inv_neg[neg_coeff_index];
+    } else if constexpr (Component == 1) {
+      d_pos = (h_pos_mid[offset3d(i_u,j_u,k_u,h_pos_ny,h_pos_nz)]
+             - h_pos_mid[offset3d(i_u,j_u,k_u-1,h_pos_ny,h_pos_nz)]) * inv_pos[pos_coeff_index];
+      d_neg = (h_neg_mid[offset3d(i_u,j_u,k_u,h_neg_ny,h_neg_nz)]
+             - h_neg_mid[offset3d(i_u-1,j_u,k_u,h_neg_ny,h_neg_nz)]) * inv_neg[neg_coeff_index];
+    } else {
+      d_pos = (h_pos_mid[offset3d(i_u,j_u,k_u,h_pos_ny,h_pos_nz)]
+             - h_pos_mid[offset3d(i_u-1,j_u,k_u,h_pos_ny,h_pos_nz)]) * inv_pos[pos_coeff_index];
+      d_neg = (h_neg_mid[offset3d(i_u,j_u,k_u,h_neg_ny,h_neg_nz)]
+             - h_neg_mid[offset3d(i_u,j_u-1,k_u,h_neg_ny,h_neg_nz)]) * inv_neg[neg_coeff_index];
+    }
+    const float bp=b_pos[pos_coeff_index], cp=c_pos[pos_coeff_index], kp=inv_kappa_pos[pos_coeff_index];
+    const float bn=b_neg[neg_coeff_index], cn=c_neg[neg_coeff_index], kn=inv_kappa_neg[neg_coeff_index];
+    const float psi_p = bp * psi_pos[linear] + cp * d_pos;
+    const float psi_n = bn * psi_neg[linear] + cn * d_neg;
+    const float curl_term = (d_pos * kp + psi_p) - (d_neg * kn + psi_n);
+    const float own = e_prev[linear], fsq_value = fsq[linear];
+    const float raw_eff = eps[linear] + eps0 * (chi2[linear] * own + chi3[linear] * fsq_value);
+    const float floor = 1.0e-12f * eps0;
+    const bool eff_clamped = raw_eff < floor;
+    const float eff = eff_clamped ? floor : raw_eff;
+    const float raw_sigma = sigma_static[linear] + tpa[linear] * fsq_value;
+    const bool sigma_clamped = raw_sigma < 0.0f;
+    const float sigma = sigma_clamped ? 0.0f : raw_sigma;
+    const float q = 0.5f * sigma * dt;
+    const float denom = eff + q;
+    const float external = external_decay[linear];
+    const float decay_value = external * (eff - q) / denom;
+    const float curl_value = external * dt / denom;
+    const float adj_decay_coeff = adj_post_value * own;
+    const float adj_curl_coeff = adj_post_value * curl_term;
+    const float inv_denom2 = 1.0f / (denom * denom);
+    float adj_eff = adj_decay_coeff * (external * 2.0f * q * inv_denom2)
+                  - adj_curl_coeff * (external * dt * inv_denom2);
+    float adj_sigma = -adj_decay_coeff * (external * dt * eff * inv_denom2)
+                    - adj_curl_coeff * (0.5f * external * dt * dt * inv_denom2);
+    if (eff_clamped) adj_eff = 0.0f;
+    if (sigma_clamped) adj_sigma = 0.0f;
+    grad_e = adj_eff;
+    grad_c2 = adj_eff * eps0 * own;
+    grad_c3 = adj_eff * eps0 * fsq_value;
+    grad_absorption = adj_sigma * fsq_value;
+    g_fsq_out = adj_eff * eps0 * chi3[linear] + adj_sigma * tpa[linear];
+    adjoint = adj_post_value * decay_value + adj_eff * eps0 * chi2[linear];
+    const float adj_curl_term = adj_post_value * curl_value;
+    const float adj_psi_p_total = adj_psi_pos_post_value + adj_curl_term;
+    const float adj_psi_n_total = adj_psi_neg_post_value - adj_curl_term;
+    adj_psi_pos = bp * adj_psi_p_total;
+    adj_psi_neg = bn * adj_psi_n_total;
+    out_adj_d_pos = kp * adj_curl_term + cp * adj_psi_p_total;
+    out_adj_d_neg = -kn * adj_curl_term + cn * adj_psi_n_total;
+  }
+  adj_prev[linear]=adjoint; grad_eps[linear]=grad_e; grad_chi2[linear]=grad_c2;
+  grad_chi3[linear]=grad_c3; grad_tpa[linear]=grad_absorption; g_fsq[linear]=g_fsq_out;
+  adj_psi_pos_prev[linear]=adj_psi_pos; adj_psi_neg_prev[linear]=adj_psi_neg;
+  adj_d_pos[linear]=out_adj_d_pos; adj_d_neg[linear]=out_adj_d_neg;
+}
+
+__device__ __forceinline__ bool cpml_correction_cell_active(
+    int index, int size, int low_mode, int high_mode) {
+  const bool low_inactive = index == 0 &&
+      (low_mode == BOUNDARY_NONE || low_mode == BOUNDARY_PEC || low_mode == BOUNDARY_PML);
+  const bool high_inactive = index + 1 == size &&
+      (high_mode == BOUNDARY_NONE || high_mode == BOUNDARY_PEC || high_mode == BOUNDARY_PML);
+  return !(low_inactive || high_inactive);
+}
+
+__global__ void reverse_cpml_correction_kernel(
+    int nx, int ny, int nz,
+    float* __restrict__ adj_psi_prev,
+    float* __restrict__ adj_derivative,
+    const float* __restrict__ adj_field,
+    const float* __restrict__ adj_psi_post,
+    const float* __restrict__ curl,
+    const float* __restrict__ b,
+    const float* __restrict__ c,
+    const float* __restrict__ inv_kappa,
+    int normal_axis, int tangent_axis,
+    int tangent_low_mode, int tangent_high_mode,
+    float sign) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= static_cast<unsigned int>(nx) || j >= static_cast<unsigned int>(ny)
+      || k >= static_cast<unsigned int>(nz)) return;
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const int coord[3] = {static_cast<int>(i), static_cast<int>(j), static_cast<int>(k)};
+  const int size[3] = {nx, ny, nz};
+  const int normal = coord[normal_axis];
+  const int tangent = coord[tangent_axis];
+  adj_psi_prev[linear] = adj_psi_post[linear];
+  adj_derivative[linear] = 0.0f;
+  if (normal <= 0 || normal + 1 >= size[normal_axis]
+      || !cpml_correction_cell_active(tangent, size[tangent_axis],
+                                      tangent_low_mode, tangent_high_mode)) return;
+  const float adj_psi_total = adj_psi_post[linear] + sign * curl[linear] * adj_field[linear];
+  adj_psi_prev[linear] = b[normal] * adj_psi_total;
+  adj_derivative[linear] = c[normal] * adj_psi_total
+      + sign * curl[linear] * (inv_kappa[normal] - 1.0f) * adj_field[linear];
+}
+
 template <int Component>
 __global__ void reverse_magnetic_component_cpml_kernel(
     int prev_nx,
@@ -4434,6 +4613,132 @@ void launch_reverse_magnetic_component_cpml(
   } else {
     launch(std::integral_constant<int, 2>{});
   }
+  WITWIN_CUDA_CHECK();
+}
+
+void reverse_cpml_correction_cuda(
+    torch::stable::Tensor adj_psi_prev,
+    torch::stable::Tensor adj_derivative,
+    const torch::stable::Tensor& adj_field,
+    const torch::stable::Tensor& adj_psi_post,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& b,
+    const torch::stable::Tensor& c,
+    const torch::stable::Tensor& inv_kappa,
+    int64_t normal_axis, int64_t tangent_axis,
+    int64_t tangent_low_mode, int64_t tangent_high_mode, double sign) {
+  check_field(adj_psi_prev, "adj_psi_prev");
+  check_matching_field(adj_psi_prev, adj_derivative, "adj_derivative");
+  check_matching_field(adj_psi_prev, adj_field, "adj_field");
+  check_matching_field(adj_psi_prev, adj_psi_post, "adj_psi_post");
+  check_matching_field(adj_psi_prev, curl, "curl");
+  check_vector(b, "b"); check_matching_vector(b, c, "c");
+  check_matching_vector(b, inv_kappa, "inv_kappa");
+  STD_TORCH_CHECK(normal_axis >= 0 && normal_axis < 3, "normal_axis must be 0, 1, or 2");
+  STD_TORCH_CHECK(tangent_axis >= 0 && tangent_axis < 3, "tangent_axis must be 0, 1, or 2");
+  check_spacing_vector(adj_psi_prev, b, static_cast<int>(normal_axis), "b");
+  const torch::stable::accelerator::DeviceGuard guard(adj_psi_prev.get_device_index());
+  const dim3 block = field_block3d();
+  reverse_cpml_correction_kernel<<<field_grid3d(adj_psi_prev.size(0), adj_psi_prev.size(1),
+      adj_psi_prev.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_psi_prev.size(0)), static_cast<int>(adj_psi_prev.size(1)),
+      static_cast<int>(adj_psi_prev.size(2)), adj_psi_prev.mutable_data_ptr<float>(),
+      adj_derivative.mutable_data_ptr<float>(), adj_field.mutable_data_ptr<float>(),
+      adj_psi_post.mutable_data_ptr<float>(), curl.mutable_data_ptr<float>(),
+      b.mutable_data_ptr<float>(), c.mutable_data_ptr<float>(), inv_kappa.mutable_data_ptr<float>(),
+      static_cast<int>(normal_axis), static_cast<int>(tangent_axis),
+      static_cast<int>(tangent_low_mode), static_cast<int>(tangent_high_mode), static_cast<float>(sign));
+  WITWIN_CUDA_CHECK();
+}
+
+void reverse_electric_component_cpml_nonlinear_cuda(
+    int64_t component,
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor grad_eps,
+    torch::stable::Tensor grad_chi2,
+    torch::stable::Tensor grad_chi3,
+    torch::stable::Tensor grad_tpa,
+    torch::stable::Tensor g_fsq,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& e_prev,
+    const torch::stable::Tensor& external_decay,
+    const torch::stable::Tensor& eps,
+    const torch::stable::Tensor& chi2,
+    const torch::stable::Tensor& chi3,
+    const torch::stable::Tensor& tpa,
+    const torch::stable::Tensor& sigma_static,
+    const torch::stable::Tensor& fsq,
+    double dt, double eps0,
+    const torch::stable::Tensor& psi_pos,
+    const torch::stable::Tensor& psi_neg,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg,
+    const torch::stable::Tensor& h_pos_mid,
+    const torch::stable::Tensor& h_neg_mid,
+    const torch::stable::Tensor& inv_pos,
+    const torch::stable::Tensor& inv_neg,
+    int64_t low_mode_a, int64_t high_mode_a, int64_t low_mode_b, int64_t high_mode_b) {
+  check_field(adj_prev, "adj_prev");
+  const auto check_nonlinear_tensor = [&](const torch::stable::Tensor& tensor) {
+    check_matching_field(adj_prev, tensor, "nonlinear tensor");
+  };
+  check_nonlinear_tensor(grad_eps); check_nonlinear_tensor(grad_chi2);
+  check_nonlinear_tensor(grad_chi3); check_nonlinear_tensor(grad_tpa);
+  check_nonlinear_tensor(g_fsq); check_nonlinear_tensor(adj_psi_pos_prev);
+  check_nonlinear_tensor(adj_psi_neg_prev); check_nonlinear_tensor(adj_d_pos);
+  check_nonlinear_tensor(adj_d_neg); check_nonlinear_tensor(adj_post);
+  check_nonlinear_tensor(adj_psi_pos_post); check_nonlinear_tensor(adj_psi_neg_post);
+  check_nonlinear_tensor(e_prev); check_nonlinear_tensor(external_decay);
+  check_nonlinear_tensor(eps); check_nonlinear_tensor(chi2); check_nonlinear_tensor(chi3);
+  check_nonlinear_tensor(tpa); check_nonlinear_tensor(sigma_static);
+  check_nonlinear_tensor(fsq); check_nonlinear_tensor(psi_pos); check_nonlinear_tensor(psi_neg);
+  check_vector(b_pos, "b_pos"); check_matching_vector(b_pos, c_pos, "c_pos");
+  check_matching_vector(b_pos, inv_kappa_pos, "inv_kappa_pos");
+  check_matching_vector(b_pos, inv_pos, "inv_pos");
+  check_vector(b_neg, "b_neg"); check_matching_vector(b_neg, c_neg, "c_neg");
+  check_matching_vector(b_neg, inv_kappa_neg, "inv_kappa_neg");
+  check_matching_vector(b_neg, inv_neg, "inv_neg");
+  check_field(h_pos_mid, "h_pos_mid"); check_field(h_neg_mid, "h_neg_mid");
+  const torch::stable::accelerator::DeviceGuard guard(adj_prev.get_device_index());
+  const dim3 block = field_block3d();
+  const auto launch = [&](auto tag) {
+    constexpr int C = decltype(tag)::value;
+    reverse_electric_component_cpml_nonlinear_kernel<C><<<field_grid3d(
+        adj_prev.size(0), adj_prev.size(1), adj_prev.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_prev.size(0)), static_cast<int>(adj_prev.size(1)), static_cast<int>(adj_prev.size(2)),
+      static_cast<int>(h_pos_mid.size(1)), static_cast<int>(h_pos_mid.size(2)),
+      static_cast<int>(h_neg_mid.size(1)), static_cast<int>(h_neg_mid.size(2)),
+      adj_prev.mutable_data_ptr<float>(), grad_eps.mutable_data_ptr<float>(),
+      grad_chi2.mutable_data_ptr<float>(), grad_chi3.mutable_data_ptr<float>(),
+      grad_tpa.mutable_data_ptr<float>(), g_fsq.mutable_data_ptr<float>(),
+      adj_psi_pos_prev.mutable_data_ptr<float>(), adj_psi_neg_prev.mutable_data_ptr<float>(),
+      adj_d_pos.mutable_data_ptr<float>(), adj_d_neg.mutable_data_ptr<float>(),
+      adj_post.mutable_data_ptr<float>(), adj_psi_pos_post.mutable_data_ptr<float>(),
+      adj_psi_neg_post.mutable_data_ptr<float>(), e_prev.mutable_data_ptr<float>(),
+      external_decay.mutable_data_ptr<float>(), eps.mutable_data_ptr<float>(),
+      chi2.mutable_data_ptr<float>(), chi3.mutable_data_ptr<float>(), tpa.mutable_data_ptr<float>(),
+      sigma_static.mutable_data_ptr<float>(), fsq.mutable_data_ptr<float>(),
+      static_cast<float>(dt), static_cast<float>(eps0), psi_pos.mutable_data_ptr<float>(),
+      psi_neg.mutable_data_ptr<float>(), b_pos.mutable_data_ptr<float>(), c_pos.mutable_data_ptr<float>(),
+      inv_kappa_pos.mutable_data_ptr<float>(), b_neg.mutable_data_ptr<float>(), c_neg.mutable_data_ptr<float>(),
+      inv_kappa_neg.mutable_data_ptr<float>(), h_pos_mid.mutable_data_ptr<float>(),
+      h_neg_mid.mutable_data_ptr<float>(), inv_pos.mutable_data_ptr<float>(), inv_neg.mutable_data_ptr<float>(),
+      static_cast<int>(low_mode_a), static_cast<int>(high_mode_a),
+      static_cast<int>(low_mode_b), static_cast<int>(high_mode_b));
+  };
+  if (component == 0) launch(std::integral_constant<int,0>{});
+  else if (component == 1) launch(std::integral_constant<int,1>{});
+  else launch(std::integral_constant<int,2>{});
   WITWIN_CUDA_CHECK();
 }
 
