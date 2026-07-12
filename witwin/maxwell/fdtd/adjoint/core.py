@@ -32,6 +32,7 @@ from ..checkpoint import (
 )
 from ..excitation.injection import initialize_source_terms
 from ..excitation.temporal import _resolve_term_source
+from ..excitation.tfsf_specs import reference_sample_axis_code
 from ..observers import (
     _align_plane_monitor_payload,
     _compute_plane_flux,
@@ -1197,50 +1198,198 @@ def _tfsf_magnetic_source_terms(solver, forward_state, *, time_value, resolved_s
     )
 
 
+def _accumulate_tfsf_sample_adjoint_torch(adj_aux, terms, adjoint_fields, *, origin, ds):
+    """Transpose of the per-step TFSF incident injection into ``adj_aux``.
+
+    For every injection term this reads the adjoint of the field the forward step
+    wrote the incident patch into (``adjoint_fields[field_name]`` at the term
+    offsets), contracts it with the term coefficient patch and component scale,
+    and scatters the result back onto the sampled 1D auxiliary grid. This mirrors
+    the native ``accumulateTfsf*SampleAdjoint3D`` kernels: scalar terms fold onto a
+    single index, line terms reduce the two non-sample axes onto their index line,
+    and interpolated terms distribute linearly onto the two straddling indices.
+    """
+    for term in terms:
+        field = adjoint_fields[term["field_name"]]
+        offset_i, offset_j, offset_k = (int(offset) for offset in term["offsets"])
+        coeff_patch = term["coeff_patch"]
+        shape_i, shape_j, shape_k = (int(length) for length in coeff_patch.shape)
+        adj_field_patch = field[
+            offset_i : offset_i + shape_i,
+            offset_j : offset_j + shape_j,
+            offset_k : offset_k + shape_k,
+        ]
+        component_scale = float(term["component_scale"])
+        weighted = component_scale * adj_field_patch * coeff_patch
+        if "sample_positions" in term:
+            last_index = max(adj_aux.numel() - 1, 0)
+            inv_ds = 1.0 / ds if ds > 0.0 else 0.0
+            coord = torch.clamp(
+                (term["sample_positions"] - origin) * inv_ds, min=0.0, max=float(last_index)
+            )
+            lower = torch.floor(coord).to(torch.int64)
+            upper = torch.clamp(lower + 1, max=last_index)
+            frac = coord - lower.to(coord.dtype)
+            value = weighted.reshape(-1)
+            lower_flat = lower.reshape(-1)
+            upper_flat = upper.reshape(-1)
+            frac_flat = frac.reshape(-1)
+            adj_aux.index_add_(0, lower_flat, value * (1.0 - frac_flat))
+            distinct = upper_flat != lower_flat
+            if bool(distinct.any()):
+                adj_aux.index_add_(0, upper_flat[distinct], (value * frac_flat)[distinct])
+            continue
+        if term["scalar_sample_index"] is not None:
+            adj_aux[int(term["scalar_sample_index"])] += torch.sum(weighted)
+            continue
+        axis = int(reference_sample_axis_code(term))
+        reduce_axes = tuple(other for other in (0, 1, 2) if other != axis)
+        per_index = weighted.sum(dim=reduce_axes)
+        sample_indices = term["sample_indices"].to(device=adj_aux.device, dtype=torch.int64).reshape(-1)
+        adj_aux.index_add_(0, sample_indices, per_index)
+
+
+def _reverse_tfsf_auxiliary_electric_state_adjoint(
+    adj_electric_prev,
+    adj_magnetic_after,
+    adj_electric_post,
+    electric_decay,
+    electric_curl,
+    source_index,
+):
+    """Analytic transpose of ``_advance_tfsf_auxiliary_electric_state``.
+
+    Accumulates the pre-step electric adjoint (decay pullback on the interior, an
+    identity passthrough at index 0) and the advanced-magnetic adjoint (the curl-H
+    difference) exactly as ``reverse_tfsf_auxiliary_electric_kernel`` does; the
+    source-driven and clamped-tail entries carry no state dependence.
+    """
+    electric_total = adj_electric_prev.numel()
+    magnetic_total = adj_magnetic_after.numel()
+    index = torch.arange(electric_total, device=adj_electric_prev.device)
+    overwritten = (index == int(source_index)) | (index == electric_total - 1)
+    interior = (index >= 1) & (index + 1 < electric_total) & (~overwritten)
+    passthrough = (index == 0) & (~overwritten)
+    electric_coeff = torch.where(interior, electric_decay, torch.zeros_like(electric_decay))
+    electric_coeff = torch.where(passthrough, torch.ones_like(electric_decay), electric_coeff)
+    adj_electric_prev.add_(electric_coeff * adj_electric_post)
+
+    if magnetic_total == 0:
+        return
+    lower = torch.arange(magnetic_total, device=adj_electric_prev.device)
+    upper = lower + 1
+    lower_valid = (lower > 0) & (lower + 1 < electric_total) & (lower != int(source_index))
+    upper_valid = (upper > 0) & (upper + 1 < electric_total) & (upper != int(source_index))
+    zeros = torch.zeros(magnetic_total, device=adj_electric_prev.device, dtype=adj_electric_prev.dtype)
+    lower_term = torch.where(
+        lower_valid, electric_curl[:magnetic_total] * adj_electric_post[:magnetic_total], zeros
+    )
+    upper_term = torch.where(
+        upper_valid, electric_curl[1 : magnetic_total + 1] * adj_electric_post[1 : magnetic_total + 1], zeros
+    )
+    adj_magnetic_after.add_(upper_term - lower_term)
+
+
+def _reverse_tfsf_auxiliary_magnetic_state_adjoint(
+    adj_electric_prev,
+    adj_magnetic_prev,
+    adj_magnetic_after,
+    magnetic_decay,
+    magnetic_curl,
+):
+    """Analytic transpose of ``_advance_tfsf_auxiliary_magnetic_state``.
+
+    Assigns the pre-step magnetic adjoint (decay pullback) and folds the curl-E
+    difference into the pre-step electric adjoint, matching
+    ``reverse_tfsf_auxiliary_magnetic_kernel``.
+    """
+    magnetic_total = adj_magnetic_after.numel()
+    adj_magnetic_prev.copy_(magnetic_decay * adj_magnetic_after)
+    if magnetic_total == 0:
+        return
+    curl_flux = magnetic_curl * adj_magnetic_after
+    adj_electric_prev[:magnetic_total].add_(curl_flux)
+    adj_electric_prev[1:].add_(-curl_flux)
+
+
 def _reverse_tfsf_auxiliary_state_python_reference(
     solver,
     forward_state,
     adjoint_state,
     *,
-    time_value,
-    eps_ex,
-    eps_ey,
-    eps_ez,
+    magnetic_output_adjoint,
 ):
+    """Analytic (autograd-free) transpose of the per-step TFSF auxiliary update.
+
+    Replays the reverse of the one-dimensional auxiliary electric/magnetic advance
+    and the incident sample-and-inject in the exact order the forward step runs
+    them, so no ``torch.autograd`` graph is built on the reverse hot path. Mirrors
+    the native TFSF reverse kernels bit-for-bit (parity-tested), and stays equal to
+    the full ``torch_vjp`` auxiliary gradient (``test_reverse_step_tfsf_python_
+    reference_matches_torch_vjp``).
+
+    The magnetic incident correction is injected into the mid-step H that both the
+    post-step H seed and the electric update consume, so its sample-adjoint reads
+    the base reverse's ``magnetic_output_adjoint`` (the full mid-H adjoint), not the
+    raw post-step H seed.
+    """
     auxiliary_state = _extract_tfsf_auxiliary_state(forward_state)
     if auxiliary_state is None:
         return {}
+    tfsf_state = getattr(solver, "_tfsf_state", None)
+    if tfsf_state is None:
+        return {}
+    auxiliary_grid = tfsf_state.get("auxiliary_grid")
+    if auxiliary_grid is None:
+        return {}
 
-    aux_electric = auxiliary_state["electric"].detach().clone().requires_grad_(True)
-    aux_magnetic = auxiliary_state["magnetic"].detach().clone().requires_grad_(True)
-    state_inputs = {name: tensor.detach() for name, tensor in forward_state.items()}
-    state_inputs["tfsf_aux_electric"] = aux_electric
-    state_inputs["tfsf_aux_magnetic"] = aux_magnetic
+    adj_electric_prev = torch.zeros_like(auxiliary_state["electric"])
+    adj_magnetic_prev = torch.zeros_like(auxiliary_state["magnetic"])
+    adj_magnetic_after = adjoint_state["tfsf_aux_magnetic"].detach().clone()
+    adj_electric_post = adjoint_state["tfsf_aux_electric"]
 
-    with torch.enable_grad():
-        next_state = _step_state(
-            solver,
-            state_inputs,
-            time_value=time_value,
-            eps_ex=eps_ex.detach(),
-            eps_ey=eps_ey.detach(),
-            eps_ez=eps_ez.detach(),
-        )
-        objective = aux_electric.new_zeros(())
-        for name, tensor in next_state.items():
-            adjoint_tensor = adjoint_state.get(name)
-            if adjoint_tensor is None:
-                continue
-            objective = objective + torch.sum(tensor * adjoint_tensor.detach())
-        aux_grads = torch.autograd.grad(
-            objective,
-            (aux_electric, aux_magnetic),
-            allow_unused=True,
-        )
+    ds = float(auxiliary_grid.ds)
+    origin_electric = float(auxiliary_grid.s_min)
+    origin_magnetic = float(auxiliary_grid.s_min + 0.5 * ds)
+
+    # (1) Electric incident injection samples the advanced magnetic grid.
+    _accumulate_tfsf_sample_adjoint_torch(
+        adj_magnetic_after,
+        tfsf_state.get("electric_terms", ()),
+        adjoint_state,
+        origin=origin_magnetic,
+        ds=ds,
+    )
+    # (2) Electric auxiliary advance reverse (reads adj E1, writes adj E0 / adj H1).
+    _reverse_tfsf_auxiliary_electric_state_adjoint(
+        adj_electric_prev,
+        adj_magnetic_after,
+        adj_electric_post,
+        auxiliary_grid.electric_decay,
+        auxiliary_grid.electric_curl,
+        int(auxiliary_grid.source_index),
+    )
+    # (3) Magnetic auxiliary advance reverse (reads adj H1, writes adj H0 / adj E0).
+    _reverse_tfsf_auxiliary_magnetic_state_adjoint(
+        adj_electric_prev,
+        adj_magnetic_prev,
+        adj_magnetic_after,
+        auxiliary_grid.magnetic_decay,
+        auxiliary_grid.magnetic_curl,
+    )
+    # (4) Magnetic incident injection samples the pre-step electric grid; it lands
+    # on the mid-step H, so read the full mid-H adjoint from the base reverse.
+    _accumulate_tfsf_sample_adjoint_torch(
+        adj_electric_prev,
+        tfsf_state.get("magnetic_terms", ()),
+        magnetic_output_adjoint,
+        origin=origin_electric,
+        ds=ds,
+    )
 
     return {
-        "tfsf_aux_electric": _safe_grad(aux_grads[0], aux_electric).detach(),
-        "tfsf_aux_magnetic": _safe_grad(aux_grads[1], aux_magnetic).detach(),
+        "tfsf_aux_electric": adj_electric_prev,
+        "tfsf_aux_magnetic": adj_magnetic_prev,
     }
 
 

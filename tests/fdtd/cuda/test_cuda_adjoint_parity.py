@@ -14,7 +14,9 @@ from tests.gradients.test_fdtd_adjoint_bridge import (
     _fake_dispersive_cpml_reverse_solver,
     _fake_dispersive_standard_reverse_solver,
     _fake_standard_reverse_solver,
+    _fake_tfsf_cpml_reverse_solver,
     _move_solver_tensors_to_cuda,
+    _tfsf_cpml_reverse_state_shapes,
 )
 from witwin.maxwell.fdtd.adjoint import core as adjoint_core
 from witwin.maxwell.fdtd.adjoint.dispatch import reverse_step, resolve_fdtd_adjoint_backend_name
@@ -1563,6 +1565,102 @@ def test_native_adjoint_tfsf_auxiliary_reverse_kernels_match_reference():
     torch.cuda.synchronize()
     torch.testing.assert_close(actual_adj_magnetic_prev, expected_adj_magnetic_prev, rtol=2.0e-6, atol=2.0e-7)
     torch.testing.assert_close(actual_adj_electric_prev, expected_adj_electric_prev, rtol=2.0e-6, atol=2.0e-7)
+
+
+def _build_cuda_tfsf_reverse_case(provider, seed):
+    torch.manual_seed(seed)
+    solver = _move_solver_tensors_to_cuda(_fake_tfsf_cpml_reverse_solver(provider=provider))
+    state_shapes = _tfsf_cpml_reverse_state_shapes()
+    forward_state = {
+        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
+        for name in checkpoint_schema(solver).state_names
+    }
+    adjoint_state = {name: torch.randn_like(tensor) for name, tensor in forward_state.items()}
+    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
+    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
+    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
+    return solver, forward_state, adjoint_state, eps_ex, eps_ey, eps_ez
+
+
+@pytest.mark.parametrize(
+    "provider",
+    ["plane_wave_ref_x_ez", "plane_wave_axis_aligned", "plane_wave_aux"],
+)
+def test_cuda_tfsf_reverse_step_matches_python_reference(monkeypatch, provider):
+    # A qualifying CUDA TFSF scene resolves ``auto`` to the fused native TFSF
+    # reverse step (native standard/CPML base reverse plus the native 1D auxiliary
+    # reverse and scalar / line / interpolated sample-adjoint kernels). It must
+    # reproduce the analytic Torch reference exactly, including the auxiliary
+    # electric/magnetic pre-step adjoints.
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    solver, forward_state, adjoint_state, eps_ex, eps_ey, eps_ez = _build_cuda_tfsf_reverse_case(provider, 103)
+
+    actual = reverse_step(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.075,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    expected = adjoint_baselines.reverse_step_tfsf_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.075,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    torch.cuda.synchronize()
+
+    assert actual.backend == "native_tfsf"
+    for name in forward_state:
+        torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1.0e-5, atol=1.0e-6)
+
+
+@pytest.mark.parametrize(
+    "provider",
+    ["plane_wave_ref_x_ez", "plane_wave_aux"],
+)
+def test_cuda_tfsf_reverse_step_torch_reference_override_matches_baseline(monkeypatch, provider):
+    # Forcing the analytic reference on the same CUDA TFSF scene keeps the Torch
+    # reference backend and identical gradients, so the native TFSF runner is a
+    # drop-in replacement.
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "torch_reference")
+    solver, forward_state, adjoint_state, eps_ex, eps_ey, eps_ez = _build_cuda_tfsf_reverse_case(provider, 104)
+
+    actual = reverse_step(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.075,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    expected = adjoint_baselines.reverse_step_tfsf_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.075,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    torch.cuda.synchronize()
+
+    assert actual.backend == "python_reference_tfsf_cpml"
+    for name in forward_state:
+        torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1.0e-5, atol=1.0e-6)
 
 
 @requires_extension_build

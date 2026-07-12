@@ -972,6 +972,203 @@ def _reverse_step_dispersive_native(
     )
 
 
+def _accumulate_tfsf_sample_adjoint_native(adj_aux, terms, adjoint_fields, *, origin, ds):
+    """Transpose the per-step TFSF incident injection into ``adj_aux`` via kernels.
+
+    Iterates the injection terms exactly like the forward per-term apply, slicing
+    the adjoint of the field the incident patch was written into and launching the
+    matching native sample-adjoint kernel (scalar / line / interpolated). The
+    ``adj_field_patch`` is materialized contiguous so the kernels can index it
+    linearly against the term coefficient patch.
+    """
+    for term in terms:
+        offset_i, offset_j, offset_k = (int(offset) for offset in term["offsets"])
+        coeff_patch = term["coeff_patch"]
+        shape_i, shape_j, shape_k = (int(length) for length in coeff_patch.shape)
+        adj_field_patch = adjoint_fields[term["field_name"]][
+            offset_i : offset_i + shape_i,
+            offset_j : offset_j + shape_j,
+            offset_k : offset_k + shape_k,
+        ].contiguous()
+        component_scale = float(term["component_scale"])
+        if "sample_positions" in term:
+            _cuda_backend._accumulate_tfsf_interpolated_sample_adjoint(
+                AdjAuxField=adj_aux,
+                AdjFieldPatch=adj_field_patch,
+                CoeffPatch=coeff_patch,
+                SamplePositions=term["sample_positions"],
+                origin=origin,
+                ds=ds,
+                componentScale=component_scale,
+            )
+            continue
+        if term["scalar_sample_index"] is not None:
+            _cuda_backend._accumulate_tfsf_scalar_sample_adjoint(
+                AdjAuxField=adj_aux,
+                AdjFieldPatch=adj_field_patch,
+                CoeffPatch=coeff_patch,
+                sampleIndex=int(term["scalar_sample_index"]),
+                componentScale=component_scale,
+            )
+            continue
+        from ..excitation.tfsf_specs import reference_sample_axis_code
+
+        _cuda_backend._accumulate_tfsf_line_sample_adjoint(
+            AdjAuxField=adj_aux,
+            AdjFieldPatch=adj_field_patch,
+            CoeffPatch=coeff_patch,
+            SampleIndices=term["sample_indices"],
+            sampleAxisCode=int(reference_sample_axis_code(term)),
+            componentScale=component_scale,
+        )
+
+
+def _reverse_tfsf_auxiliary_state_native(solver, forward_state, adjoint_state, *, magnetic_output_adjoint):
+    """Native CUDA transpose of the per-step TFSF auxiliary update.
+
+    Mirrors ``_reverse_tfsf_auxiliary_state_python_reference`` one-for-one, driving
+    the fused 1D auxiliary reverse kernels and the sample-adjoint kernels in the
+    load-bearing order: the electric-side incident injection and the electric
+    auxiliary advance both accumulate into the advanced-magnetic adjoint before the
+    magnetic auxiliary advance reads it; the magnetic incident injection reads the
+    base reverse's full mid-step H adjoint. Returns the aux pre-step adjoints, or an
+    empty dict when the active provider carries no 1D auxiliary state.
+    """
+    from . import core as _adjoint
+
+    auxiliary_state = _adjoint._extract_tfsf_auxiliary_state(forward_state)
+    if auxiliary_state is None:
+        return {}
+    tfsf_state = getattr(solver, "_tfsf_state", None)
+    if tfsf_state is None:
+        return {}
+    auxiliary_grid = tfsf_state.get("auxiliary_grid")
+    if auxiliary_grid is None:
+        return {}
+
+    import torch
+
+    adj_electric_prev = torch.zeros_like(auxiliary_state["electric"])
+    adj_magnetic_prev = torch.empty_like(auxiliary_state["magnetic"])
+    adj_magnetic_after = adjoint_state["tfsf_aux_magnetic"].detach().clone()
+
+    ds = float(auxiliary_grid.ds)
+    origin_electric = float(auxiliary_grid.s_min)
+    origin_magnetic = float(auxiliary_grid.s_min + 0.5 * ds)
+
+    # (1) Electric incident injection samples the advanced magnetic grid.
+    _accumulate_tfsf_sample_adjoint_native(
+        adj_magnetic_after,
+        tfsf_state.get("electric_terms", ()),
+        adjoint_state,
+        origin=origin_magnetic,
+        ds=ds,
+    )
+    # (2) Electric auxiliary advance reverse.
+    _cuda_backend._reverse_tfsf_auxiliary_electric(
+        AdjElectricPrev=adj_electric_prev,
+        AdjMagneticAfter=adj_magnetic_after,
+        AdjElectricPost=adjoint_state["tfsf_aux_electric"],
+        ElectricDecay=auxiliary_grid.electric_decay,
+        ElectricCurl=auxiliary_grid.electric_curl,
+        sourceIndex=int(auxiliary_grid.source_index),
+    )
+    # (3) Magnetic auxiliary advance reverse.
+    _cuda_backend._reverse_tfsf_auxiliary_magnetic(
+        AdjElectricPrev=adj_electric_prev,
+        AdjMagneticPrev=adj_magnetic_prev,
+        AdjMagneticAfter=adj_magnetic_after,
+        MagneticDecay=auxiliary_grid.magnetic_decay,
+        MagneticCurl=auxiliary_grid.magnetic_curl,
+    )
+    # (4) Magnetic incident injection samples the pre-step electric grid; it lands
+    # on the mid-step H, so read the full mid-H adjoint from the base reverse.
+    _accumulate_tfsf_sample_adjoint_native(
+        adj_electric_prev,
+        tfsf_state.get("magnetic_terms", ()),
+        magnetic_output_adjoint,
+        origin=origin_electric,
+        ds=ds,
+    )
+    return {
+        "tfsf_aux_electric": adj_electric_prev,
+        "tfsf_aux_magnetic": adj_magnetic_prev,
+    }
+
+
+def _reverse_step_tfsf_native(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+):
+    """Fully native reverse step for the TFSF (total-field/scattered-field) case.
+
+    Mirrors ``reference.reverse_step_tfsf``: the native standard or CPML *core*
+    reverse produces the pre-step field/psi adjoint (its mid-step H replay consumes
+    the materialized magnetic incident source terms, so the injected incident field
+    is folded into the mid-H exactly as the forward step did), then the native TFSF
+    auxiliary reverse kernels add the 1D auxiliary electric/magnetic pre-step
+    adjoints. The TFSF incident terms are literal patches, so the reference path
+    runs no source-term eps-gradient accumulation and neither does this runner.
+    """
+    from . import core as _adjoint
+
+    tfsf_source_terms = _adjoint._tfsf_magnetic_source_terms(
+        solver,
+        forward_state,
+        time_value=time_value,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+    if getattr(solver, "uses_cpml", False):
+        base_result = _reverse_step_cpml_native_core(
+            solver,
+            forward_state,
+            adjoint_state,
+            time_value=time_value,
+            eps_ex=eps_ex,
+            eps_ey=eps_ey,
+            eps_ez=eps_ez,
+            resolved_source_terms=tfsf_source_terms,
+        )
+    else:
+        base_result = _reverse_step_standard_native_core(
+            solver,
+            forward_state,
+            adjoint_state,
+            time_value=time_value,
+            eps_ex=eps_ex,
+            eps_ey=eps_ey,
+            eps_ez=eps_ez,
+            resolved_source_terms=tfsf_source_terms,
+        )
+
+    pre_step_adjoint = dict(base_result.pre_step_adjoint)
+    auxiliary_grads = _reverse_tfsf_auxiliary_state_native(
+        solver,
+        forward_state,
+        adjoint_state,
+        magnetic_output_adjoint=base_result.magnetic_output_adjoint,
+    )
+    pre_step_adjoint.update(auxiliary_grads)
+
+    return _adjoint._ReverseStepResult(
+        pre_step_adjoint=pre_step_adjoint,
+        grad_eps_ex=base_result.grad_eps_ex,
+        grad_eps_ey=base_result.grad_eps_ey,
+        grad_eps_ez=base_result.grad_eps_ez,
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.TFSF],
+        magnetic_output_adjoint=base_result.magnetic_output_adjoint,
+    )
+
+
 def register_native_reverse_backends() -> None:
     """Register every available native CUDA reverse-step runner."""
     register_native_reverse_backend(
@@ -993,4 +1190,9 @@ def register_native_reverse_backends() -> None:
         _ReverseBackend.PYTHON_DISPERSIVE,
         _reverse_step_dispersive_native,
         qualifier=_dispersive_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.TFSF,
+        _reverse_step_tfsf_native,
+        qualifier=_cuda_scene_native_qualifies,
     )

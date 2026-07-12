@@ -74,6 +74,30 @@ def expected_dispersive_reverse_backend() -> str:
     return "python_reference_dispersive_cpml"
 
 
+def expected_tfsf_reverse_backend() -> str:
+    """The reverse-backend label ``auto`` mode records per step for a CUDA TFSF scene.
+
+    ``auto`` prefers the fused native CUDA TFSF reverse step (the native standard /
+    CPML base reverse plus the native 1D auxiliary reverse and sample-adjoint
+    kernels) when its runner is registered (P6 native adjoint) and falls back to the
+    analytic Torch reference label otherwise. The FDTD gradient bridges in these
+    tests run on CUDA where the native TFSF runner qualifies, so ``native_tfsf`` is
+    what the backward profile records; this helper keeps the ``uses the explicit
+    TFSF reverse backend, never the torch_vjp fallback`` assertion correct in both
+    configurations. The reference fallback label matches the absorbing-boundary
+    (CPML) TFSF box the profile scenes use.
+    """
+    from witwin.maxwell.fdtd.adjoint.dispatch import (
+        _NATIVE_REVERSE_LABELS,
+        _ReverseBackend,
+        _native_backend_available,
+    )
+
+    if _native_backend_available(_ReverseBackend.TFSF):
+        return _NATIVE_REVERSE_LABELS[_ReverseBackend.TFSF]
+    return "python_reference_tfsf_cpml"
+
+
 def reverse_step_torch_vjp(solver, forward_state, adjoint_state, *, time_value, eps_ex, eps_ey, eps_ez):
     return fdtd_adjoint_reference.reverse_step_torch_vjp(
         solver,

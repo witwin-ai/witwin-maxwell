@@ -764,10 +764,7 @@ def reverse_step_tfsf(
         solver,
         forward_state,
         adjoint_state,
-        time_value=time_value,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
+        magnetic_output_adjoint=base_result.magnetic_output_adjoint,
     )
     if not auxiliary_grads:
         return _ReverseStepResult(
