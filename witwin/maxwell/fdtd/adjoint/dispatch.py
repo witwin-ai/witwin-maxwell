@@ -25,6 +25,7 @@ class _ReverseBackend(Enum):
     PYTHON_CPML = auto()
     PYTHON_CONDUCTIVE = auto()
     PYTHON_KERR = auto()
+    PYTHON_FULL_ANISO = auto()
     TORCH_VJP = auto()
 
 
@@ -40,6 +41,7 @@ _NATIVE_REVERSE_LABELS: dict[_ReverseBackend, str] = {
     _ReverseBackend.PYTHON_CPML: "native_cpml",
     _ReverseBackend.PYTHON_CONDUCTIVE: "native_conductive",
     _ReverseBackend.PYTHON_KERR: "native_kerr",
+    _ReverseBackend.PYTHON_FULL_ANISO: "native_full_aniso",
     _ReverseBackend.PYTHON_BLOCH: "native_bloch",
     _ReverseBackend.PYTHON_DISPERSIVE: "native_dispersive",
     _ReverseBackend.TFSF: "native_tfsf",
@@ -397,6 +399,43 @@ def _supports_kerr(runtime, solver, forward_state, resolved_source_terms) -> boo
     return _supports_explicit_source_step(runtime, solver, resolved_source_terms)
 
 
+def _supports_full_aniso(runtime, solver, forward_state, resolved_source_terms) -> bool:
+    """Analytic native reverse for a full (off-diagonal) anisotropic CPML medium.
+
+    Full anisotropy adds the off-diagonal coupling ``E_i += coeff_ij * <curlH_j>``
+    on top of the diagonal CPML electric update. The reverse reuses the linear CPML
+    reverse for the diagonal step and folds the transpose of the off-diagonal
+    collocated curl(H) into the mid-step H adjoint, so the extra coupling flows the
+    cotangent through the field (H) path; the off-diagonal coefficients themselves
+    carry no material gradient channel (trainable geometry on a full-anisotropic
+    structure is guarded). Gated to the pure real, CPML class with the anisotropic
+    structure clear of the absorber (enforced by the bridge ``_full_aniso_cpml_overlap``
+    guard, so the un-stretched collocation matches the forward). Full anisotropy on
+    an open boundary, or combined with conduction/dispersion/nonlinearity/complex
+    fields/TFSF, still routes to the torch-VJP fallback."""
+    if not getattr(solver, "full_aniso_enabled", False):
+        return False
+    if getattr(solver, "nonlinear_enabled", False):
+        return False
+    if getattr(solver, "conductive_enabled", False):
+        return False
+    if not getattr(solver, "uses_cpml", False):
+        return False
+    if getattr(solver, "dispersive_enabled", False):
+        return False
+    if getattr(solver, "magnetic_dispersive_enabled", False):
+        return False
+    if has_complex_fields(solver):
+        return False
+    if getattr(solver, "tfsf_enabled", False):
+        return False
+    if not _matches_checkpoint_layout(solver, forward_state):
+        return False
+    if _has_open_face_conflicts(_face_codes(solver)):
+        return False
+    return _supports_explicit_source_step(runtime, solver, resolved_source_terms)
+
+
 def _select_reverse_backend(
     solver,
     forward_state,
@@ -416,6 +455,7 @@ def _select_reverse_backend(
     supports_bloch = _supports_bloch(runtime, solver, forward_state, resolved_source_terms)
     supports_conductive = _supports_conductive(runtime, solver, forward_state, resolved_source_terms)
     supports_kerr = _supports_kerr(runtime, solver, forward_state, resolved_source_terms)
+    supports_full_aniso = _supports_full_aniso(runtime, solver, forward_state, resolved_source_terms)
 
     decision_table = (
         (_ReverseBackend.GRATING_TFSF, supports_grating_tfsf),
@@ -426,6 +466,7 @@ def _select_reverse_backend(
         (_ReverseBackend.PYTHON_CPML, supports_cpml),
         (_ReverseBackend.PYTHON_CONDUCTIVE, supports_conductive),
         (_ReverseBackend.PYTHON_KERR, supports_kerr),
+        (_ReverseBackend.PYTHON_FULL_ANISO, supports_full_aniso),
         (_ReverseBackend.TORCH_VJP, True),
     )
     for backend, enabled in decision_table:
@@ -633,6 +674,23 @@ def _execute_reference_backend(
             _with_profile_sections(
                 profiler,
                 lambda: adjoint_reference.reverse_step_kerr_cpml_python_reference(
+                    solver,
+                    forward_state,
+                    adjoint_state,
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_source_terms,
+                    magnetic_fields=forward_magnetic_fields,
+                ),
+            )
+        )
+    if backend is _ReverseBackend.PYTHON_FULL_ANISO:
+        return finish(
+            _with_profile_sections(
+                profiler,
+                lambda: adjoint_reference.reverse_step_full_aniso_cpml_python_reference(
                     solver,
                     forward_state,
                     adjoint_state,

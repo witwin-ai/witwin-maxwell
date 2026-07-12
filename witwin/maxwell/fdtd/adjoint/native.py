@@ -1720,6 +1720,132 @@ def _reverse_step_tfsf_native(
     )
 
 
+def _full_aniso_neg_inv_deltas(solver):
+    """Cache the negated electric inverse spacings the off-diagonal fold needs.
+
+    The off-diagonal reverse folds each ``adj_curl`` into two mid-step H adjoints
+    with opposite signs (``curl = D_a - D_b``). The shared backward-difference
+    transpose only accumulates ``+D^T``, so the subtractive fold passes a negated
+    inverse-spacing vector (the transpose is linear in it). These 1D vectors are
+    static for the whole reverse pass, so they are negated once and cached on the
+    solver rather than per step, keeping the per-cell reverse math fully native.
+    """
+    cached = getattr(solver, "_full_aniso_neg_inv_deltas", None)
+    if cached is None:
+        cached = {
+            "x": -solver.inv_dx_e,
+            "y": -solver.inv_dy_e,
+            "z": -solver.inv_dz_e,
+        }
+        try:
+            solver._full_aniso_neg_inv_deltas = cached
+        except (AttributeError, TypeError):
+            pass
+    return cached
+
+
+def _reverse_step_full_aniso_native(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+):
+    """Fully native reverse step for a full (off-diagonal) anisotropic CPML medium.
+
+    The off-diagonal coupling only feeds the mid-step magnetic adjoint the diagonal
+    CPML reverse already consumes, so this runner (1) forms the off-diagonal
+    curl(H) cotangents with the native ``full_aniso_curl_adjoint`` op, (2) folds
+    them into a clone of the post-step H adjoint with the shared native
+    backward-difference transpose, and (3) delegates to the linear CPML native core
+    on that augmented adjoint state. Every per-cell reverse computation runs inside
+    the compiled kernels; Python only sequences the launches (matching
+    ``reverse_step_full_aniso_cpml_python_reference`` exactly).
+    """
+    import dataclasses
+
+    import torch
+
+    from . import core as _adjoint
+
+    adj_ex = adjoint_state["Ex"]
+    adj_ey = adjoint_state["Ey"]
+    adj_ez = adjoint_state["Ez"]
+
+    # (1) Off-diagonal curl(H) cotangents on their own electric-edge grids (assign).
+    adj_curl_x = torch.empty_like(adj_ex)
+    adj_curl_y = torch.empty_like(adj_ey)
+    adj_curl_z = torch.empty_like(adj_ez)
+    _cuda_backend._full_aniso_curl_adjoint(
+        AdjCurlX=adj_curl_x,
+        AdjCurlY=adj_curl_y,
+        AdjCurlZ=adj_curl_z,
+        AdjEx=adj_ex,
+        AdjEy=adj_ey,
+        AdjEz=adj_ez,
+        CoeffExY=solver.cex_aniso_y,
+        CoeffExZ=solver.cex_aniso_z,
+        CoeffEyX=solver.cey_aniso_x,
+        CoeffEyZ=solver.cey_aniso_z,
+        CoeffEzX=solver.cez_aniso_x,
+        CoeffEzY=solver.cez_aniso_y,
+    )
+
+    # (2) Fold into a clone of the post-step H adjoint (native accumulate). The
+    # +/- sign of each curl derivative matches the diagonal curl fold; the minus
+    # folds pass a negated inverse spacing (the transpose is linear in it).
+    neg = _full_aniso_neg_inv_deltas(solver)
+    aug_hx = adjoint_state["Hx"].detach().clone()
+    aug_hy = adjoint_state["Hy"].detach().clone()
+    aug_hz = adjoint_state["Hz"].detach().clone()
+    # curl_x = dHz/dy - dHy/dz  ->  Hz += Dy^T(curl_x); Hy -= Dz^T(curl_x)
+    _cuda_backend._accumulate_backward_diff_y(FieldGrad=aug_hz, DiffGrad=adj_curl_x, invDy=solver.inv_dy_e)
+    _cuda_backend._accumulate_backward_diff_z(FieldGrad=aug_hy, DiffGrad=adj_curl_x, invDz=neg["z"])
+    # curl_y = dHx/dz - dHz/dx  ->  Hx += Dz^T(curl_y); Hz -= Dx^T(curl_y)
+    _cuda_backend._accumulate_backward_diff_z(FieldGrad=aug_hx, DiffGrad=adj_curl_y, invDz=solver.inv_dz_e)
+    _cuda_backend._accumulate_backward_diff_x(FieldGrad=aug_hz, DiffGrad=adj_curl_y, invDx=neg["x"])
+    # curl_z = dHy/dx - dHx/dy  ->  Hy += Dx^T(curl_z); Hx -= Dy^T(curl_z)
+    _cuda_backend._accumulate_backward_diff_x(FieldGrad=aug_hy, DiffGrad=adj_curl_z, invDx=solver.inv_dx_e)
+    _cuda_backend._accumulate_backward_diff_y(FieldGrad=aug_hx, DiffGrad=adj_curl_z, invDy=neg["y"])
+
+    adjoint_state_aug = dict(adjoint_state)
+    adjoint_state_aug["Hx"] = aug_hx
+    adjoint_state_aug["Hy"] = aug_hy
+    adjoint_state_aug["Hz"] = aug_hz
+
+    # (3) Diagonal CPML reverse on the augmented adjoint state.
+    step_result = _reverse_step_cpml_native_core(
+        solver,
+        forward_state,
+        adjoint_state_aug,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+    step_result = dataclasses.replace(
+        step_result, backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_FULL_ANISO]
+    )
+    # Source-term eps-gradient accumulation reads the electric adjoint only, so it
+    # runs on the original (unaugmented) adjoint state.
+    return _adjoint._accumulate_source_term_gradients(
+        step_result,
+        solver=solver,
+        adjoint_state=adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+
 def register_native_reverse_backends() -> None:
     """Register every available native CUDA reverse-step runner."""
     register_native_reverse_backend(
@@ -1740,6 +1866,11 @@ def register_native_reverse_backends() -> None:
     register_native_reverse_backend(
         _ReverseBackend.PYTHON_KERR,
         _reverse_step_kerr_native,
+        qualifier=_cuda_scene_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.PYTHON_FULL_ANISO,
+        _reverse_step_full_aniso_native,
         qualifier=_cuda_scene_native_qualifies,
     )
     register_native_reverse_backend(

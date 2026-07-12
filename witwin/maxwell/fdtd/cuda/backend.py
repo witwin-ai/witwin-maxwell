@@ -3240,6 +3240,37 @@ def _collocate_field_square(*, FsqEx, FsqEy, FsqEz, Ex, Ey, Ez):
     get_compiled_extension().collocate_field_square(FsqEx, FsqEy, FsqEz, Ex, Ey, Ez)
 
 
+def _full_aniso_curl_adjoint(
+    *,
+    AdjCurlX,
+    AdjCurlY,
+    AdjCurlZ,
+    AdjEx,
+    AdjEy,
+    AdjEz,
+    CoeffExY,
+    CoeffExZ,
+    CoeffEyX,
+    CoeffEyZ,
+    CoeffEzX,
+    CoeffEzY,
+):
+    get_compiled_extension().full_aniso_curl_adjoint(
+                AdjCurlX,
+                AdjCurlY,
+                AdjCurlZ,
+                AdjEx,
+                AdjEy,
+                AdjEz,
+                CoeffExY,
+                CoeffExZ,
+                CoeffEyX,
+                CoeffEyZ,
+                CoeffEzX,
+                CoeffEzY,
+            )
+
+
 def _reverse_electric_cpml_kerr_ex(
     *,
     AdjExPrev,
@@ -3716,6 +3747,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "reverseElectricComponentEzCpmlConductive3D": _reverse_electric_cpml_conductive_ez,
     "collocationTranspose3D": _collocation_transpose,
     "collocateFieldSquare3D": _collocate_field_square,
+    "fullAnisoCurlAdjoint3D": _full_aniso_curl_adjoint,
     "reverseElectricComponentExCpmlKerr3D": _reverse_electric_cpml_kerr_ex,
     "reverseElectricComponentEyCpmlKerr3D": _reverse_electric_cpml_kerr_ey,
     "reverseElectricComponentEzCpmlKerr3D": _reverse_electric_cpml_kerr_ez,

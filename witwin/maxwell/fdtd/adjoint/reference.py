@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib
 
 import torch
@@ -8,6 +9,7 @@ from .core import (
     _BackwardProfiler,
     _ReverseStepResult,
     _accumulate_backward_diff_adjoint,
+    _full_aniso_electric_correction,
     _accumulate_bloch_backward_diff_adjoint,
     _accumulate_forward_diff_adjoint,
     _advance_dispersive_state,
@@ -41,6 +43,7 @@ __all__ = [
     "reverse_step_conductive_cpml_python_reference",
     "reverse_step_cpml_python_reference",
     "reverse_step_dispersive_python_reference",
+    "reverse_step_full_aniso_cpml_python_reference",
     "reverse_step_grating_tfsf",
     "reverse_step_kerr_cpml_python_reference",
     "reverse_step_standard_python_reference",
@@ -1219,6 +1222,90 @@ def reverse_step_kerr_cpml_python_reference(
         grad_chi3_ey=grad_chi3_ey.detach(),
         grad_chi3_ez=grad_chi3_ez.detach(),
     )
+
+
+def _full_aniso_correction_grad_h_reference(solver, magnetic_fields, adjoint_state):
+    """Torch-reference VJP of the off-diagonal anisotropic correction onto H.
+
+    Differentiates the off-diagonal correction replica
+    ``_full_aniso_electric_correction`` (which the forward FullAniso3D kernels
+    match outside the absorber) with respect to the mid-step magnetic fields,
+    seeded by the post-correction electric adjoint. This is the exact cotangent
+    the native ``full_aniso_curl_adjoint`` op + backward-diff fold reproduce; it is
+    kept alive as the parity/``torch_reference``-override ground truth. The
+    off-diagonal coefficients carry no material-gradient channel here (trainable
+    geometry on a full-anisotropic structure is guarded), so the correction only
+    flows the cotangent through the field (H) path.
+    """
+    hx = magnetic_fields["Hx"].detach().requires_grad_(True)
+    hy = magnetic_fields["Hy"].detach().requires_grad_(True)
+    hz = magnetic_fields["Hz"].detach().requires_grad_(True)
+    correction = _full_aniso_electric_correction(solver, {"Hx": hx, "Hy": hy, "Hz": hz})
+    grad_hx, grad_hy, grad_hz = torch.autograd.grad(
+        outputs=[correction["Ex"], correction["Ey"], correction["Ez"]],
+        inputs=[hx, hy, hz],
+        grad_outputs=[
+            adjoint_state["Ex"],
+            adjoint_state["Ey"],
+            adjoint_state["Ez"],
+        ],
+        allow_unused=True,
+    )
+    return {
+        "Hx": grad_hx if grad_hx is not None else torch.zeros_like(hx),
+        "Hy": grad_hy if grad_hy is not None else torch.zeros_like(hy),
+        "Hz": grad_hz if grad_hz is not None else torch.zeros_like(hz),
+    }
+
+
+def reverse_step_full_aniso_cpml_python_reference(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value=0.0,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms=None,
+    magnetic_fields=None,
+):
+    """Analytic reverse step for a full (off-diagonal) anisotropic CPML medium.
+
+    The forward electric update is the diagonal CPML step plus the off-diagonal
+    coupling correction ``E_i += coeff_ij * <curlH_j>``. Because the correction
+    depends only on the mid-step magnetic field (not the pre-step electric field or
+    the diagonal permittivity), its reverse only adds a contribution to the
+    mid-step H adjoint the diagonal magnetic reverse consumes. So the whole step is
+    the linear CPML reverse run on an adjoint state whose H entries are
+    pre-incremented by the off-diagonal correction's cotangent -- no duplication of
+    the CPML reverse machinery, and the anisotropic structure is kept clear of the
+    absorber (bridge guard) so the un-stretched collocation matches the forward.
+    """
+    if magnetic_fields is None:
+        magnetic_fields = _forward_magnetic_fields(
+            solver,
+            forward_state,
+            time_value=time_value,
+            resolved_source_terms=resolved_source_terms,
+        )
+    aniso_grad_h = _full_aniso_correction_grad_h_reference(solver, magnetic_fields, adjoint_state)
+    adjoint_state_aug = dict(adjoint_state)
+    adjoint_state_aug["Hx"] = adjoint_state["Hx"] + aniso_grad_h["Hx"]
+    adjoint_state_aug["Hy"] = adjoint_state["Hy"] + aniso_grad_h["Hy"]
+    adjoint_state_aug["Hz"] = adjoint_state["Hz"] + aniso_grad_h["Hz"]
+    result = reverse_step_cpml_python_reference(
+        solver,
+        forward_state,
+        adjoint_state_aug,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+        magnetic_fields=magnetic_fields,
+    )
+    return dataclasses.replace(result, backend="python_reference_full_aniso")
 
 
 def reverse_step_tfsf(

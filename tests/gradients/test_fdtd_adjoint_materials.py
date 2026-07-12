@@ -1323,11 +1323,13 @@ def test_full_aniso_electric_correction_replica_matches_cuda_kernel():
 
 
 @_CUDA
-def test_full_aniso_reverse_routes_through_torch_vjp():
-    """A full-anisotropic scene must fall to the torch-VJP reverse backend: the
-    analytic standard/CPML backends model only the diagonal curl and would drop
-    the off-diagonal coupling."""
+def test_full_aniso_reverse_routes_through_native_full_aniso():
+    """A full-anisotropic CPML scene must route to the analytic native full-aniso
+    reverse backend: it carries the off-diagonal coupling the linear standard/CPML
+    reverse drops (folded into the mid-step H adjoint), so it no longer falls back
+    to the torch-VJP autograd path."""
     from witwin.maxwell.fdtd.adjoint.dispatch import _select_reverse_backend, _ReverseBackend
+    from witwin.maxwell.fdtd.checkpoint import checkpoint_schema
 
     prepared = mw.Simulation.fdtd(
         _full_aniso_scene(),
@@ -1336,7 +1338,9 @@ def test_full_aniso_reverse_routes_through_torch_vjp():
     ).prepare()
     solver = prepared.solver
     assert solver.full_aniso_enabled
-    forward_state = {name: getattr(solver, name) for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
+    # The off-diagonal reverse composes with the CPML checkpoint layout, so the
+    # backend must be selected against the full frozen state (fields + psi).
+    forward_state = {name: getattr(solver, name) for name in checkpoint_schema(solver).state_names}
     backend = _select_reverse_backend(
         solver,
         forward_state,
@@ -1345,7 +1349,7 @@ def test_full_aniso_reverse_routes_through_torch_vjp():
         eps_ez=solver.eps_Ez,
         resolved_source_terms=None,
     )
-    assert backend is _ReverseBackend.TORCH_VJP, backend
+    assert backend is _ReverseBackend.PYTHON_FULL_ANISO, backend
 
 
 @_CUDA

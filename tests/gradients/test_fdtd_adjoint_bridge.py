@@ -503,6 +503,33 @@ def _fake_kerr_cpml_reverse_solver(chi3=0.5, dt=0.05, eps0=1.0):
     return SimpleNamespace(**values)
 
 
+def _fake_full_aniso_cpml_reverse_solver():
+    """CPML reverse solver carrying a full (off-diagonal) anisotropic epsilon.
+
+    Full anisotropy keeps the linear CPML diagonal update and adds the off-diagonal
+    coupling ``E_i += coeff_ij * <curlH_j>`` through six per-edge coefficient
+    tensors (``c{ex,ey,ez}_aniso_{...}``). This fake adds those coefficients on top
+    of the linear CPML fake with distinct nonzero values, so the off-diagonal
+    reverse (its transpose folded into the mid-step H adjoint) is genuinely
+    exercised rather than degenerate. The coefficients are static (no material
+    gradient channel), so no extra checkpoint state is introduced."""
+    base = _fake_cpml_reverse_solver()
+    values = dict(vars(base))
+    values["full_aniso_enabled"] = True
+    values["conductive_enabled"] = False
+    values["nonlinear_enabled"] = False
+    values["kerr_enabled"] = False
+    values["dispersive_enabled"] = False
+    values["magnetic_dispersive_enabled"] = False
+    values["cex_aniso_y"] = torch.full_like(values["eps_Ex"], 0.031)
+    values["cex_aniso_z"] = torch.full_like(values["eps_Ex"], -0.024)
+    values["cey_aniso_x"] = torch.full_like(values["eps_Ey"], 0.027)
+    values["cey_aniso_z"] = torch.full_like(values["eps_Ey"], 0.019)
+    values["cez_aniso_x"] = torch.full_like(values["eps_Ez"], -0.022)
+    values["cez_aniso_y"] = torch.full_like(values["eps_Ez"], 0.035)
+    return SimpleNamespace(**values)
+
+
 def _dispersive_cpml_reverse_state_shapes():
     shapes = dict(_cpml_reverse_state_shapes())
     shapes[dispersive_state_name("Ex", "debye", 0, "polarization")] = shapes["Ex"]

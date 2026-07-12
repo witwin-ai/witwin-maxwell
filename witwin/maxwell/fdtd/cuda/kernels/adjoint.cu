@@ -2519,6 +2519,165 @@ __global__ void collocate_field_square_kernel(
   }
 }
 
+// --- Off-diagonal (full-tensor) anisotropic correction reverse -------------
+//
+// Transpose (VJP) of the off-diagonal coupling the adjoint replay adds to the
+// electric update (the Torch replica ``_full_aniso_electric_correction``, which
+// mirrors the forward ``updateElectricFieldE{x,y,z}FullAniso3D`` kernels outside
+// the absorber). The forward correction collocates each off-axis curl(H) onto
+// the target E edge and scales it by the off-diagonal inverse-permittivity
+// coefficient:
+//     E_i += 0.25 * coeff_ij * spread_c( sum_e( curlH_j ) )
+// where ``sum_e`` sums the two straddling cells along the target edge axis and
+// ``spread_c`` scatters onto the two bounding nodes along the source curl axis
+// (zero fill at the domain faces, matching the replica's ``_sum_adjacent`` /
+// ``_spread_to_nodes``). These gather kernels form the cotangent on each curl(H)
+// component ``adj_curl_j`` on its own E edge grid, given the post-correction E
+// adjoint. The caller then folds ``adj_curl_j`` into the mid-step H adjoint with
+// the shared backward-difference transpose (the same op the diagonal curl uses),
+// so the full off-diagonal reverse stays fused-native with no autograd VJP.
+//
+// Each output cell is written exactly once (assign), so no atomics are needed.
+// ``coeff`` vanishes outside the anisotropic structure, so the fixed 1/4 weight
+// stays exact where it matters (the structure is kept clear of the CPML absorber
+// by the bridge guard, so the un-stretched collocation matches the forward).
+__device__ __forceinline__ float aniso_scaled(
+    const float* __restrict__ adj,
+    const float* __restrict__ coeff,
+    int i,
+    int j,
+    int k,
+    int ny,
+    int nz) {
+  const long long o = offset3d(
+      static_cast<unsigned int>(i), static_cast<unsigned int>(j), static_cast<unsigned int>(k),
+      static_cast<unsigned int>(ny), static_cast<unsigned int>(nz));
+  return 0.25f * coeff[o] * adj[o];
+}
+
+// adj_curl_x on the Ex edge grid = C^T(t_ey_x; e=1,c=0) + C^T(t_ez_x; e=2,c=0).
+__global__ void full_aniso_curl_x_adjoint_kernel(
+    int exx, int exy, int exz,
+    int eyx, int eyy, int eyz,
+    int ezx, int ezy, int ezz,
+    const float* __restrict__ adj_ey,
+    const float* __restrict__ coeff_ey_x,
+    const float* __restrict__ adj_ez,
+    const float* __restrict__ coeff_ez_x,
+    float* __restrict__ adj_curl_x) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (static_cast<int>(i) >= exx || static_cast<int>(j) >= exy || static_cast<int>(k) >= exz) {
+    return;
+  }
+  const int ii = static_cast<int>(i);
+  const int jj = static_cast<int>(j);
+  const int kk = static_cast<int>(k);
+  float value = 0.0f;
+  // From Ey: sum over the target edge axis (x), spread over the source curl axis (y).
+  if (jj <= exy - 2) {
+    value += aniso_scaled(adj_ey, coeff_ey_x, ii, jj, kk, eyy, eyz)
+           + aniso_scaled(adj_ey, coeff_ey_x, ii + 1, jj, kk, eyy, eyz);
+  }
+  if (jj >= 1) {
+    value += aniso_scaled(adj_ey, coeff_ey_x, ii, jj - 1, kk, eyy, eyz)
+           + aniso_scaled(adj_ey, coeff_ey_x, ii + 1, jj - 1, kk, eyy, eyz);
+  }
+  // From Ez: sum over the target edge axis (x), spread over the source curl axis (z).
+  if (kk <= exz - 2) {
+    value += aniso_scaled(adj_ez, coeff_ez_x, ii, jj, kk, ezy, ezz)
+           + aniso_scaled(adj_ez, coeff_ez_x, ii + 1, jj, kk, ezy, ezz);
+  }
+  if (kk >= 1) {
+    value += aniso_scaled(adj_ez, coeff_ez_x, ii, jj, kk - 1, ezy, ezz)
+           + aniso_scaled(adj_ez, coeff_ez_x, ii + 1, jj, kk - 1, ezy, ezz);
+  }
+  adj_curl_x[offset3d(i, j, k, static_cast<unsigned int>(exy), static_cast<unsigned int>(exz))] = value;
+}
+
+// adj_curl_y on the Ey edge grid = C^T(t_ex_y; e=0,c=1) + C^T(t_ez_y; e=2,c=1).
+__global__ void full_aniso_curl_y_adjoint_kernel(
+    int exx, int exy, int exz,
+    int eyx, int eyy, int eyz,
+    int ezx, int ezy, int ezz,
+    const float* __restrict__ adj_ex,
+    const float* __restrict__ coeff_ex_y,
+    const float* __restrict__ adj_ez,
+    const float* __restrict__ coeff_ez_y,
+    float* __restrict__ adj_curl_y) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (static_cast<int>(i) >= eyx || static_cast<int>(j) >= eyy || static_cast<int>(k) >= eyz) {
+    return;
+  }
+  const int ii = static_cast<int>(i);
+  const int jj = static_cast<int>(j);
+  const int kk = static_cast<int>(k);
+  float value = 0.0f;
+  // From Ex: sum over the target edge axis (y), spread over the source curl axis (x).
+  if (ii <= eyx - 2) {
+    value += aniso_scaled(adj_ex, coeff_ex_y, ii, jj, kk, exy, exz)
+           + aniso_scaled(adj_ex, coeff_ex_y, ii, jj + 1, kk, exy, exz);
+  }
+  if (ii >= 1) {
+    value += aniso_scaled(adj_ex, coeff_ex_y, ii - 1, jj, kk, exy, exz)
+           + aniso_scaled(adj_ex, coeff_ex_y, ii - 1, jj + 1, kk, exy, exz);
+  }
+  // From Ez: sum over the target edge axis (y), spread over the source curl axis (z).
+  if (kk <= eyz - 2) {
+    value += aniso_scaled(adj_ez, coeff_ez_y, ii, jj, kk, ezy, ezz)
+           + aniso_scaled(adj_ez, coeff_ez_y, ii, jj + 1, kk, ezy, ezz);
+  }
+  if (kk >= 1) {
+    value += aniso_scaled(adj_ez, coeff_ez_y, ii, jj, kk - 1, ezy, ezz)
+           + aniso_scaled(adj_ez, coeff_ez_y, ii, jj + 1, kk - 1, ezy, ezz);
+  }
+  adj_curl_y[offset3d(i, j, k, static_cast<unsigned int>(eyy), static_cast<unsigned int>(eyz))] = value;
+}
+
+// adj_curl_z on the Ez edge grid = C^T(t_ex_z; e=0,c=2) + C^T(t_ey_z; e=1,c=2).
+__global__ void full_aniso_curl_z_adjoint_kernel(
+    int exx, int exy, int exz,
+    int eyx, int eyy, int eyz,
+    int ezx, int ezy, int ezz,
+    const float* __restrict__ adj_ex,
+    const float* __restrict__ coeff_ex_z,
+    const float* __restrict__ adj_ey,
+    const float* __restrict__ coeff_ey_z,
+    float* __restrict__ adj_curl_z) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+  if (static_cast<int>(i) >= ezx || static_cast<int>(j) >= ezy || static_cast<int>(k) >= ezz) {
+    return;
+  }
+  const int ii = static_cast<int>(i);
+  const int jj = static_cast<int>(j);
+  const int kk = static_cast<int>(k);
+  float value = 0.0f;
+  // From Ex: sum over the target edge axis (z), spread over the source curl axis (x).
+  if (ii <= ezx - 2) {
+    value += aniso_scaled(adj_ex, coeff_ex_z, ii, jj, kk, exy, exz)
+           + aniso_scaled(adj_ex, coeff_ex_z, ii, jj, kk + 1, exy, exz);
+  }
+  if (ii >= 1) {
+    value += aniso_scaled(adj_ex, coeff_ex_z, ii - 1, jj, kk, exy, exz)
+           + aniso_scaled(adj_ex, coeff_ex_z, ii - 1, jj, kk + 1, exy, exz);
+  }
+  // From Ey: sum over the target edge axis (z), spread over the source curl axis (y).
+  if (jj <= ezy - 2) {
+    value += aniso_scaled(adj_ey, coeff_ey_z, ii, jj, kk, eyy, eyz)
+           + aniso_scaled(adj_ey, coeff_ey_z, ii, jj, kk + 1, eyy, eyz);
+  }
+  if (jj >= 1) {
+    value += aniso_scaled(adj_ey, coeff_ey_z, ii, jj - 1, kk, eyy, eyz)
+           + aniso_scaled(adj_ey, coeff_ey_z, ii, jj - 1, kk + 1, eyy, eyz);
+  }
+  adj_curl_z[offset3d(i, j, k, static_cast<unsigned int>(ezy), static_cast<unsigned int>(ezz))] = value;
+}
+
 }  // namespace
 
 void collocation_transpose_cuda(
@@ -2605,6 +2764,60 @@ void collocate_field_square_cuda(
   launch(std::integral_constant<int, 0>{}, fsq_ex, ex_x, ex_y, ex_z);
   launch(std::integral_constant<int, 1>{}, fsq_ey, ey_x, ey_y, ey_z);
   launch(std::integral_constant<int, 2>{}, fsq_ez, ez_x, ez_y, ez_z);
+  WITWIN_CUDA_CHECK();
+}
+
+void full_aniso_curl_adjoint_cuda(
+    torch::stable::Tensor adj_curl_x,
+    torch::stable::Tensor adj_curl_y,
+    torch::stable::Tensor adj_curl_z,
+    const torch::stable::Tensor& adj_ex,
+    const torch::stable::Tensor& adj_ey,
+    const torch::stable::Tensor& adj_ez,
+    const torch::stable::Tensor& coeff_ex_y,
+    const torch::stable::Tensor& coeff_ex_z,
+    const torch::stable::Tensor& coeff_ey_x,
+    const torch::stable::Tensor& coeff_ey_z,
+    const torch::stable::Tensor& coeff_ez_x,
+    const torch::stable::Tensor& coeff_ez_y) {
+  check_field(adj_curl_x, "adj_curl_x");
+  check_matching_field(adj_curl_x, adj_ex, "adj_ex");
+  check_matching_field(adj_curl_x, coeff_ex_y, "coeff_ex_y");
+  check_matching_field(adj_curl_x, coeff_ex_z, "coeff_ex_z");
+  check_field(adj_curl_y, "adj_curl_y");
+  check_matching_field(adj_curl_y, adj_ey, "adj_ey");
+  check_matching_field(adj_curl_y, coeff_ey_x, "coeff_ey_x");
+  check_matching_field(adj_curl_y, coeff_ey_z, "coeff_ey_z");
+  check_field(adj_curl_z, "adj_curl_z");
+  check_matching_field(adj_curl_z, adj_ez, "adj_ez");
+  check_matching_field(adj_curl_z, coeff_ez_x, "coeff_ez_x");
+  check_matching_field(adj_curl_z, coeff_ez_y, "coeff_ez_y");
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_curl_x.get_device_index());
+  const int ex_x = static_cast<int>(adj_ex.size(0));
+  const int ex_y = static_cast<int>(adj_ex.size(1));
+  const int ex_z = static_cast<int>(adj_ex.size(2));
+  const int ey_x = static_cast<int>(adj_ey.size(0));
+  const int ey_y = static_cast<int>(adj_ey.size(1));
+  const int ey_z = static_cast<int>(adj_ey.size(2));
+  const int ez_x = static_cast<int>(adj_ez.size(0));
+  const int ez_y = static_cast<int>(adj_ez.size(1));
+  const int ez_z = static_cast<int>(adj_ez.size(2));
+  const dim3 block = field_block3d();
+  full_aniso_curl_x_adjoint_kernel<<<field_grid3d(ex_x, ex_y, ex_z, block), block, 0, current_cuda_stream()>>>(
+      ex_x, ex_y, ex_z, ey_x, ey_y, ey_z, ez_x, ez_y, ez_z,
+      adj_ey.mutable_data_ptr<float>(), coeff_ey_x.mutable_data_ptr<float>(),
+      adj_ez.mutable_data_ptr<float>(), coeff_ez_x.mutable_data_ptr<float>(),
+      adj_curl_x.mutable_data_ptr<float>());
+  full_aniso_curl_y_adjoint_kernel<<<field_grid3d(ey_x, ey_y, ey_z, block), block, 0, current_cuda_stream()>>>(
+      ex_x, ex_y, ex_z, ey_x, ey_y, ey_z, ez_x, ez_y, ez_z,
+      adj_ex.mutable_data_ptr<float>(), coeff_ex_y.mutable_data_ptr<float>(),
+      adj_ez.mutable_data_ptr<float>(), coeff_ez_y.mutable_data_ptr<float>(),
+      adj_curl_y.mutable_data_ptr<float>());
+  full_aniso_curl_z_adjoint_kernel<<<field_grid3d(ez_x, ez_y, ez_z, block), block, 0, current_cuda_stream()>>>(
+      ex_x, ex_y, ex_z, ey_x, ey_y, ey_z, ez_x, ez_y, ez_z,
+      adj_ex.mutable_data_ptr<float>(), coeff_ex_z.mutable_data_ptr<float>(),
+      adj_ey.mutable_data_ptr<float>(), coeff_ey_z.mutable_data_ptr<float>(),
+      adj_curl_z.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 

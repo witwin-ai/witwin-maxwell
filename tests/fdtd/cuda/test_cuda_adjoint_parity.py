@@ -12,6 +12,7 @@ from tests.gradients.test_fdtd_adjoint_bridge import (
     _fake_bloch_reverse_solver,
     _fake_conductive_cpml_reverse_solver,
     _fake_cpml_reverse_solver,
+    _fake_full_aniso_cpml_reverse_solver,
     _fake_kerr_cpml_reverse_solver,
     _fake_dispersive_cpml_reverse_solver,
     _fake_dispersive_standard_reverse_solver,
@@ -484,6 +485,174 @@ def test_cuda_collocation_transpose_matches_autograd(monkeypatch):
     torch.testing.assert_close(adj_ex, expected_ex, rtol=1.0e-5, atol=1.0e-5)
     torch.testing.assert_close(adj_ey, expected_ey, rtol=1.0e-5, atol=1.0e-5)
     torch.testing.assert_close(adj_ez, expected_ez, rtol=1.0e-5, atol=1.0e-5)
+
+
+def test_cuda_full_aniso_curl_adjoint_matches_autograd(monkeypatch):
+    # The native off-diagonal correction reverse forms the curl(H) cotangent with
+    # ``full_aniso_curl_adjoint`` and folds it into the mid-step H adjoint with the
+    # shared backward-difference transpose (the same op the diagonal curl uses).
+    # Validate the whole composition in isolation against the exact transpose
+    # ``torch.autograd.grad`` performs over the Torch replica
+    # ``_full_aniso_electric_correction`` (which the forward FullAniso3D kernels
+    # match outside the absorber), including the +/- curl-derivative signs.
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    from witwin.maxwell.fdtd.cuda import backend as cuda_backend
+
+    torch.manual_seed(19)
+    solver = _move_solver_tensors_to_cuda(_fake_full_aniso_cpml_reverse_solver())
+    shapes = _cpml_reverse_state_shapes()
+    hx = torch.randn(shapes["Hx"], device="cuda", dtype=torch.float32)
+    hy = torch.randn(shapes["Hy"], device="cuda", dtype=torch.float32)
+    hz = torch.randn(shapes["Hz"], device="cuda", dtype=torch.float32)
+    adj_ex = torch.randn(shapes["Ex"], device="cuda", dtype=torch.float32)
+    adj_ey = torch.randn(shapes["Ey"], device="cuda", dtype=torch.float32)
+    adj_ez = torch.randn(shapes["Ez"], device="cuda", dtype=torch.float32)
+
+    hx_leaf = hx.clone().requires_grad_(True)
+    hy_leaf = hy.clone().requires_grad_(True)
+    hz_leaf = hz.clone().requires_grad_(True)
+    correction = adjoint_core._full_aniso_electric_correction(
+        solver, {"Hx": hx_leaf, "Hy": hy_leaf, "Hz": hz_leaf}
+    )
+    # The coupling must be genuinely active so a broken transpose cannot pass on
+    # near-zero cotangents.
+    assert correction["Ez"].abs().max().item() > 0.0
+    objective = (
+        (correction["Ex"] * adj_ex).sum()
+        + (correction["Ey"] * adj_ey).sum()
+        + (correction["Ez"] * adj_ez).sum()
+    )
+    expected_hx, expected_hy, expected_hz = torch.autograd.grad(
+        objective, [hx_leaf, hy_leaf, hz_leaf]
+    )
+
+    adj_curl_x = torch.empty_like(adj_ex)
+    adj_curl_y = torch.empty_like(adj_ey)
+    adj_curl_z = torch.empty_like(adj_ez)
+    cuda_backend._full_aniso_curl_adjoint(
+        AdjCurlX=adj_curl_x,
+        AdjCurlY=adj_curl_y,
+        AdjCurlZ=adj_curl_z,
+        AdjEx=adj_ex,
+        AdjEy=adj_ey,
+        AdjEz=adj_ez,
+        CoeffExY=solver.cex_aniso_y,
+        CoeffExZ=solver.cex_aniso_z,
+        CoeffEyX=solver.cey_aniso_x,
+        CoeffEyZ=solver.cey_aniso_z,
+        CoeffEzX=solver.cez_aniso_x,
+        CoeffEzY=solver.cez_aniso_y,
+    )
+    grad_hx = torch.zeros_like(hx)
+    grad_hy = torch.zeros_like(hy)
+    grad_hz = torch.zeros_like(hz)
+    neg_inv_dx_e = -solver.inv_dx_e
+    neg_inv_dy_e = -solver.inv_dy_e
+    neg_inv_dz_e = -solver.inv_dz_e
+    # curl_x = dHz/dy - dHy/dz
+    cuda_backend._accumulate_backward_diff_y(FieldGrad=grad_hz, DiffGrad=adj_curl_x, invDy=solver.inv_dy_e)
+    cuda_backend._accumulate_backward_diff_z(FieldGrad=grad_hy, DiffGrad=adj_curl_x, invDz=neg_inv_dz_e)
+    # curl_y = dHx/dz - dHz/dx
+    cuda_backend._accumulate_backward_diff_z(FieldGrad=grad_hx, DiffGrad=adj_curl_y, invDz=solver.inv_dz_e)
+    cuda_backend._accumulate_backward_diff_x(FieldGrad=grad_hz, DiffGrad=adj_curl_y, invDx=neg_inv_dx_e)
+    # curl_z = dHy/dx - dHx/dy
+    cuda_backend._accumulate_backward_diff_x(FieldGrad=grad_hy, DiffGrad=adj_curl_z, invDx=solver.inv_dx_e)
+    cuda_backend._accumulate_backward_diff_y(FieldGrad=grad_hx, DiffGrad=adj_curl_z, invDy=neg_inv_dy_e)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(grad_hx, expected_hx, rtol=1.0e-5, atol=1.0e-5)
+    torch.testing.assert_close(grad_hy, expected_hy, rtol=1.0e-5, atol=1.0e-5)
+    torch.testing.assert_close(grad_hz, expected_hz, rtol=1.0e-5, atol=1.0e-5)
+
+
+def test_cuda_full_aniso_reverse_step_matches_python_reference(monkeypatch):
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    torch.manual_seed(151)
+    solver = _move_solver_tensors_to_cuda(_fake_full_aniso_cpml_reverse_solver())
+    state_shapes = _cpml_reverse_state_shapes()
+    forward_state = {
+        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
+        for name in checkpoint_schema(solver).state_names
+    }
+    adjoint_state = {name: torch.randn_like(tensor) for name, tensor in forward_state.items()}
+    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
+    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
+    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
+
+    actual = reverse_step(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.0,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    expected = adjoint_baselines.reverse_step_full_aniso_cpml_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    torch.cuda.synchronize()
+
+    # A qualifying full-anisotropic CUDA scene resolves ``auto`` to the fused native
+    # full-aniso reverse step (linear CPML diagonal reverse plus the native
+    # off-diagonal curl(H) cotangent folded into the mid-step H adjoint). It must
+    # reproduce the analytic Torch reference exactly.
+    assert actual.backend == "native_full_aniso"
+    for name in forward_state:
+        torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1.0e-5, atol=1.0e-6)
+
+
+def test_cuda_full_aniso_reverse_step_torch_reference_override_matches_baseline(monkeypatch):
+    # Forcing the analytic reference on the same full-anisotropic CUDA scene must
+    # keep producing the Torch reference backend (and identical gradients), so the
+    # native full-aniso path is a drop-in replacement rather than the only option.
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "torch_reference")
+    torch.manual_seed(151)
+    solver = _move_solver_tensors_to_cuda(_fake_full_aniso_cpml_reverse_solver())
+    state_shapes = _cpml_reverse_state_shapes()
+    forward_state = {
+        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
+        for name in checkpoint_schema(solver).state_names
+    }
+    adjoint_state = {name: torch.randn_like(tensor) for name, tensor in forward_state.items()}
+    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
+    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
+    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
+
+    actual = reverse_step(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.0,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    expected = adjoint_baselines.reverse_step_full_aniso_cpml_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    torch.cuda.synchronize()
+
+    assert actual.backend == "python_reference_full_aniso"
+    for name in forward_state:
+        torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1.0e-5, atol=1.0e-6)
 
 
 def test_cuda_bloch_reverse_step_matches_python_reference(monkeypatch):

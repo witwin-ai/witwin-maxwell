@@ -1448,6 +1448,19 @@ void collocate_field_square_cuda(
     const torch::stable::Tensor& ex,
     const torch::stable::Tensor& ey,
     const torch::stable::Tensor& ez);
+void full_aniso_curl_adjoint_cuda(
+    torch::stable::Tensor adj_curl_x,
+    torch::stable::Tensor adj_curl_y,
+    torch::stable::Tensor adj_curl_z,
+    const torch::stable::Tensor& adj_ex,
+    const torch::stable::Tensor& adj_ey,
+    const torch::stable::Tensor& adj_ez,
+    const torch::stable::Tensor& coeff_ex_y,
+    const torch::stable::Tensor& coeff_ex_z,
+    const torch::stable::Tensor& coeff_ey_x,
+    const torch::stable::Tensor& coeff_ey_z,
+    const torch::stable::Tensor& coeff_ez_x,
+    const torch::stable::Tensor& coeff_ez_y);
 void reverse_electric_component_ex_cpml_kerr_cuda(
     torch::stable::Tensor adj_prev,
     torch::stable::Tensor grad_eps,
@@ -1945,6 +1958,7 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("reverse_electric_component_ez_cpml_conductive(Tensor(a!) adj_prev, Tensor(b!) grad_eps, Tensor(c!) adj_psi_pos_prev, Tensor(d!) adj_psi_neg_prev, Tensor(e!) adj_d_pos, Tensor(f!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor curl, Tensor half, Tensor e_prev, Tensor eps, float dt, Tensor psi_pos, Tensor psi_neg, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg, Tensor hx_mid, Tensor hy_mid, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode) -> ()");
   m.def("collocation_transpose(Tensor(a!) adj_ex, Tensor(b!) adj_ey, Tensor(c!) adj_ez, Tensor g_ex, Tensor g_ey, Tensor g_ez, Tensor ex, Tensor ey, Tensor ez) -> ()");
   m.def("collocate_field_square(Tensor(a!) fsq_ex, Tensor(b!) fsq_ey, Tensor(c!) fsq_ez, Tensor ex, Tensor ey, Tensor ez) -> ()");
+  m.def("full_aniso_curl_adjoint(Tensor(a!) adj_curl_x, Tensor(b!) adj_curl_y, Tensor(c!) adj_curl_z, Tensor adj_ex, Tensor adj_ey, Tensor adj_ez, Tensor coeff_ex_y, Tensor coeff_ex_z, Tensor coeff_ey_x, Tensor coeff_ey_z, Tensor coeff_ez_x, Tensor coeff_ez_y) -> ()");
   m.def("reverse_electric_component_ex_cpml_kerr(Tensor(a!) adj_prev, Tensor(b!) grad_eps, Tensor(c!) grad_chi3, Tensor(d!) g_fsq, Tensor(e!) adj_psi_pos_prev, Tensor(f!) adj_psi_neg_prev, Tensor(g!) adj_d_pos, Tensor(h!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor eps, Tensor chi3, Tensor fsq, float dt, float eps0, Tensor psi_pos, Tensor psi_neg, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg, Tensor hy_mid, Tensor hz_mid, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode) -> ()");
   m.def("reverse_electric_component_ey_cpml_kerr(Tensor(a!) adj_prev, Tensor(b!) grad_eps, Tensor(c!) grad_chi3, Tensor(d!) g_fsq, Tensor(e!) adj_psi_pos_prev, Tensor(f!) adj_psi_neg_prev, Tensor(g!) adj_d_pos, Tensor(h!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor eps, Tensor chi3, Tensor fsq, float dt, float eps0, Tensor psi_pos, Tensor psi_neg, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg, Tensor hx_mid, Tensor hz_mid, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode) -> ()");
   m.def("reverse_electric_component_ez_cpml_kerr(Tensor(a!) adj_prev, Tensor(b!) grad_eps, Tensor(c!) grad_chi3, Tensor(d!) g_fsq, Tensor(e!) adj_psi_pos_prev, Tensor(f!) adj_psi_neg_prev, Tensor(g!) adj_d_pos, Tensor(h!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor eps, Tensor chi3, Tensor fsq, float dt, float eps0, Tensor psi_pos, Tensor psi_neg, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg, Tensor hx_mid, Tensor hy_mid, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode) -> ()");
@@ -2069,6 +2083,7 @@ STABLE_TORCH_LIBRARY_IMPL(witwin_maxwell_fdtd_cuda, CUDA, m) {
   m.impl("reverse_electric_component_ez_cpml_conductive", TORCH_BOX(&reverse_electric_component_ez_cpml_conductive_cuda));
   m.impl("collocation_transpose", TORCH_BOX(&collocation_transpose_cuda));
   m.impl("collocate_field_square", TORCH_BOX(&collocate_field_square_cuda));
+  m.impl("full_aniso_curl_adjoint", TORCH_BOX(&full_aniso_curl_adjoint_cuda));
   m.impl("reverse_electric_component_ex_cpml_kerr", TORCH_BOX(&reverse_electric_component_ex_cpml_kerr_cuda));
   m.impl("reverse_electric_component_ey_cpml_kerr", TORCH_BOX(&reverse_electric_component_ey_cpml_kerr_cuda));
   m.impl("reverse_electric_component_ez_cpml_kerr", TORCH_BOX(&reverse_electric_component_ez_cpml_kerr_cuda));
