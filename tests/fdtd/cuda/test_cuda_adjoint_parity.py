@@ -7,8 +7,12 @@ from tests.gradients import fdtd_adjoint_baselines as adjoint_baselines
 from tests.gradients.test_fdtd_adjoint_bridge import (
     _bloch_reverse_state_shapes,
     _cpml_reverse_state_shapes,
+    _dispersive_cpml_reverse_state_shapes,
+    _dispersive_standard_reverse_state_shapes,
     _fake_bloch_reverse_solver,
     _fake_cpml_reverse_solver,
+    _fake_dispersive_cpml_reverse_solver,
+    _fake_dispersive_standard_reverse_solver,
     _fake_standard_reverse_solver,
     _move_solver_tensors_to_cuda,
 )
@@ -302,6 +306,109 @@ def test_cuda_bloch_reverse_step_torch_reference_override_matches_baseline(monke
     torch.cuda.synchronize()
 
     assert actual.backend == "python_reference_bloch"
+    for name in forward_state:
+        torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1.0e-5, atol=1.0e-6)
+
+
+_DISPERSIVE_REVERSE_FIXTURES = {
+    "standard": (_fake_dispersive_standard_reverse_solver, _dispersive_standard_reverse_state_shapes),
+    "cpml": (_fake_dispersive_cpml_reverse_solver, _dispersive_cpml_reverse_state_shapes),
+}
+
+
+@pytest.mark.parametrize("base_config", ["standard", "cpml"])
+def test_cuda_dispersive_reverse_step_matches_python_reference(monkeypatch, base_config):
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    torch.manual_seed(211 if base_config == "standard" else 213)
+    make_solver, make_shapes = _DISPERSIVE_REVERSE_FIXTURES[base_config]
+    solver = _move_solver_tensors_to_cuda(make_solver())
+    state_shapes = make_shapes()
+    forward_state = {
+        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
+        for name in checkpoint_schema(solver).state_names
+    }
+    adjoint_state = {name: torch.randn_like(tensor) for name, tensor in forward_state.items()}
+    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
+    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
+    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
+
+    actual = reverse_step(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.0,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    expected = adjoint_baselines.reverse_step_dispersive_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    torch.cuda.synchronize()
+
+    # A qualifying CUDA electric-dispersive scene resolves ``auto`` to the fused
+    # native dispersive reverse step. It composes the native standard/CPML base
+    # reverse with the fused 1/eps correction VJP kernel and the Debye/Drude/
+    # Lorentz current VJP kernels, and must reproduce the analytic Torch reference
+    # exactly (including the per-pole eps-gradient correction and the ADE-state
+    # adjoints).
+    assert actual.backend == "native_dispersive"
+    for name in forward_state:
+        torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1.0e-5, atol=1.0e-6)
+
+
+@pytest.mark.parametrize("base_config", ["standard", "cpml"])
+def test_cuda_dispersive_reverse_step_torch_reference_override_matches_baseline(monkeypatch, base_config):
+    # Forcing the analytic reference on the same CUDA dispersive scene must keep
+    # producing the Torch reference backend (and identical gradients), so the
+    # native dispersive path is a drop-in replacement rather than the only option.
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "torch_reference")
+    torch.manual_seed(211 if base_config == "standard" else 213)
+    make_solver, make_shapes = _DISPERSIVE_REVERSE_FIXTURES[base_config]
+    solver = _move_solver_tensors_to_cuda(make_solver())
+    state_shapes = make_shapes()
+    forward_state = {
+        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
+        for name in checkpoint_schema(solver).state_names
+    }
+    adjoint_state = {name: torch.randn_like(tensor) for name, tensor in forward_state.items()}
+    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
+    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
+    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
+
+    actual = reverse_step(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.0,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    expected = adjoint_baselines.reverse_step_dispersive_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    torch.cuda.synchronize()
+
+    assert actual.backend == expected.backend
+    assert actual.backend.startswith("python_reference_dispersive_")
     for name in forward_state:
         torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
     torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
@@ -1296,6 +1403,42 @@ def test_native_adjoint_dispersive_current_reverse_kernels_match_reference(model
         atol=2.0e-7,
     )
     torch.testing.assert_close(adj_current_prev, decay * adj_internal, rtol=2.0e-6, atol=2.0e-7)
+
+
+def test_native_adjoint_dispersive_correction_reverse_kernel_matches_reference():
+    ext = get_compiled_extension()
+    torch.manual_seed(151)
+    shape = (3, 4, 2)
+    dt = 0.05
+    adj_current_post = torch.randn(shape, device="cuda", dtype=torch.float32)
+    adj_electric_post = torch.randn(shape, device="cuda", dtype=torch.float32)
+    current = torch.randn(shape, device="cuda", dtype=torch.float32)
+    eps = torch.rand(shape, device="cuda", dtype=torch.float32) * 2.0 + 1.5
+
+    adj_current_corrected = torch.empty(shape, device="cuda", dtype=torch.float32)
+    grad_eps = torch.full(shape, 0.37, device="cuda", dtype=torch.float32)
+    grad_eps_base = grad_eps.clone()
+    ext.reverse_dispersive_correction(
+        adj_current_corrected,
+        grad_eps,
+        adj_current_post,
+        adj_electric_post,
+        current,
+        eps,
+        dt,
+    )
+    torch.cuda.synchronize()
+
+    # ASSIGN into the corrected current adjoint, ACCUMULATE onto the base eps
+    # gradient (the base reverse step assigned it first, and other poles fold in).
+    dt_adj_over_eps = dt * adj_electric_post / eps
+    torch.testing.assert_close(adj_current_corrected, adj_current_post - dt_adj_over_eps, rtol=2.0e-6, atol=2.0e-7)
+    torch.testing.assert_close(
+        grad_eps,
+        grad_eps_base + current * dt_adj_over_eps / eps,
+        rtol=2.0e-6,
+        atol=2.0e-7,
+    )
 
 
 @requires_extension_build

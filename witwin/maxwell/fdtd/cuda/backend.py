@@ -3165,6 +3165,27 @@ def _reverse_lorentz_current(
             )
 
 
+def _reverse_dispersive_correction(
+    *,
+    AdjCurrentCorrected,
+    GradEps,
+    AdjCurrentPost,
+    AdjElectricPost,
+    Current,
+    Eps,
+    dt,
+):
+    get_compiled_extension().reverse_dispersive_correction(
+                AdjCurrentCorrected,
+                GradEps,
+                AdjCurrentPost,
+                AdjElectricPost,
+                Current,
+                Eps,
+                float(dt),
+            )
+
+
 def _accumulate_tfsf_scalar_sample_adjoint(*, AdjAuxField, AdjFieldPatch, CoeffPatch, sampleIndex, componentScale):
     get_compiled_extension().accumulate_tfsf_scalar_sample_adjoint(
                 AdjAuxField,
@@ -3393,6 +3414,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "reverseDebyeCurrent3D": _reverse_debye_current,
     "reverseDrudeCurrent3D": _reverse_drude_current,
     "reverseLorentzCurrent3D": _reverse_lorentz_current,
+    "reverseDispersiveCorrection3D": _reverse_dispersive_correction,
     "accumulateTfsfScalarSampleAdjoint3D": _accumulate_tfsf_scalar_sample_adjoint,
     "accumulateTfsfLineSampleAdjoint3D": _accumulate_tfsf_line_sample_adjoint,
     "accumulateTfsfInterpolatedSampleAdjoint3D": _accumulate_tfsf_interpolated_sample_adjoint,

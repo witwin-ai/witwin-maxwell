@@ -52,6 +52,28 @@ def expected_bloch_reverse_backend() -> str:
     return "python_reference_bloch"
 
 
+def expected_dispersive_reverse_backend() -> str:
+    """The reverse-backend label ``auto`` mode records per step for a CUDA electric-dispersive scene.
+
+    ``auto`` prefers the fused native CUDA dispersive reverse step when its runner
+    is registered (P6 native adjoint) and falls back to the analytic Torch
+    reference label otherwise. The FDTD gradient bridges in these tests run on CUDA
+    with electric-only dispersion, where the native dispersive runner qualifies, so
+    ``native_dispersive`` is what the backward profile records; this helper keeps
+    the ``uses the explicit dispersive reverse backend, never the torch_vjp
+    fallback`` assertion correct in both configurations.
+    """
+    from witwin.maxwell.fdtd.adjoint.dispatch import (
+        _NATIVE_REVERSE_LABELS,
+        _ReverseBackend,
+        _native_backend_available,
+    )
+
+    if _native_backend_available(_ReverseBackend.PYTHON_DISPERSIVE):
+        return _NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_DISPERSIVE]
+    return "python_reference_dispersive_cpml"
+
+
 def reverse_step_torch_vjp(solver, forward_state, adjoint_state, *, time_value, eps_ex, eps_ey, eps_ez):
     return fdtd_adjoint_reference.reverse_step_torch_vjp(
         solver,

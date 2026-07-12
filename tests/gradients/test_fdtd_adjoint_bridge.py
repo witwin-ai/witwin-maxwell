@@ -510,6 +510,61 @@ def _fake_dispersive_cpml_reverse_solver():
     return SimpleNamespace(**values)
 
 
+def _dispersive_standard_reverse_state_shapes():
+    shapes = _cpml_reverse_state_shapes()
+    base = {name: shapes[name] for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
+    base[dispersive_state_name("Ex", "debye", 0, "polarization")] = shapes["Ex"]
+    base[dispersive_state_name("Ex", "debye", 0, "current")] = shapes["Ex"]
+    base[dispersive_state_name("Ey", "drude", 0, "current")] = shapes["Ey"]
+    base[dispersive_state_name("Ez", "lorentz", 0, "polarization")] = shapes["Ez"]
+    base[dispersive_state_name("Ez", "lorentz", 0, "current")] = shapes["Ez"]
+    return base
+
+
+def _fake_dispersive_standard_reverse_solver():
+    base = _fake_standard_reverse_solver()
+    values = dict(vars(base))
+    values["dispersive_enabled"] = True
+    values["dt"] = 0.05
+    values["_dispersive_templates"] = {
+        "Ex": {
+            "inv_eps": (1.0 / base.eps_Ex).contiguous(),
+            "debye": [
+                {
+                    "decay": 0.83,
+                    "drive": torch.full(base.eps_Ex.shape, 0.021, dtype=torch.float32),
+                }
+            ],
+            "drude": [],
+            "lorentz": [],
+        },
+        "Ey": {
+            "inv_eps": (1.0 / base.eps_Ey).contiguous(),
+            "debye": [],
+            "drude": [
+                {
+                    "decay": 0.79,
+                    "drive": torch.full(base.eps_Ey.shape, 0.018, dtype=torch.float32),
+                }
+            ],
+            "lorentz": [],
+        },
+        "Ez": {
+            "inv_eps": (1.0 / base.eps_Ez).contiguous(),
+            "debye": [],
+            "drude": [],
+            "lorentz": [
+                {
+                    "decay": 0.88,
+                    "restoring": 0.14,
+                    "drive": torch.full(base.eps_Ez.shape, 0.024, dtype=torch.float32),
+                }
+            ],
+        },
+    }
+    return SimpleNamespace(**values)
+
+
 def _magnetic_dispersive_standard_reverse_state_shapes():
     shapes = dict(_cpml_reverse_state_shapes())
     base = {
@@ -2560,7 +2615,7 @@ def test_fdtd_gradient_bridge_backward_profile_uses_python_reference_dispersive_
 
     assert profile["seed_injection_backend"] == "device_batched"
     assert profile["seed_batch_counts"]["point"] > 0
-    assert profile["reverse_backend_counts"].get("python_reference_dispersive_cpml", 0) == bridge._time_steps
+    assert profile["reverse_backend_counts"].get(adjoint_baselines.expected_dispersive_reverse_backend(), 0) == bridge._time_steps
     assert profile["reverse_backend_counts"].get("torch_vjp", 0) == 0
 
 

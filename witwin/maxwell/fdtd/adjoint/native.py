@@ -34,7 +34,21 @@ def _cuda_scene_native_qualifies(solver, forward_state) -> bool:
     return bool(_scene_is_cuda(forward_state) and _cuda_backend.is_available())
 
 
-def _reverse_step_standard_native(
+def _dispersive_native_qualifies(solver, forward_state) -> bool:
+    """Gate the native dispersive runner to the electric-only ADE configuration.
+
+    The dispersive runner nativizes the electric Debye/Drude/Lorentz current VJP
+    and the 1/eps correction VJP on top of the native standard/CPML base reverse.
+    The magnetic ADE (mu-pole) correction/state VJP is not nativized here, so a
+    scene that also enables magnetic dispersion falls back to the analytic Torch
+    reference in auto mode (and a forced ``native`` override raises).
+    """
+    if getattr(solver, "magnetic_dispersive_enabled", False):
+        return False
+    return _cuda_scene_native_qualifies(solver, forward_state)
+
+
+def _reverse_step_standard_native_core(
     solver,
     forward_state,
     adjoint_state,
@@ -44,15 +58,13 @@ def _reverse_step_standard_native(
     eps_ey,
     eps_ez,
     resolved_source_terms,
-    profiler,
 ):
-    """Fully native reverse step for the standard (open-boundary) configuration.
+    """Fused native standard reverse math, without the source-term eps gradient.
 
-    Mirrors ``reverse_step_standard_python_reference`` exactly, launching the
-    fused reverse kernels in a fixed order. The fused kernels *assign* (not
-    accumulate) into their outputs, so the launch order is load-bearing: the
-    electric->H kernels must fully populate the mid-H adjoints before the
-    magnetic->E kernels (which read them) and before the decay pullback.
+    Returns the ``_ReverseStepResult`` the analytic standard reference produces
+    *before* ``_accumulate_source_term_gradients`` runs. The public runner adds
+    that accumulation; the dispersive runner reuses this core as its base reverse
+    and defers the single source-term accumulation to the end of the full step.
     """
     import torch
 
@@ -215,6 +227,41 @@ def _reverse_step_standard_native(
         backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_STANDARD],
         magnetic_output_adjoint={"Hx": adj_hx_mid, "Hy": adj_hy_mid, "Hz": adj_hz_mid},
     )
+    return step_result
+
+
+def _reverse_step_standard_native(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+):
+    """Fully native reverse step for the standard (open-boundary) configuration.
+
+    Mirrors ``reverse_step_standard_python_reference`` exactly, launching the
+    fused reverse kernels in a fixed order. The fused kernels *assign* (not
+    accumulate) into their outputs, so the launch order is load-bearing: the
+    electric->H kernels must fully populate the mid-H adjoints before the
+    magnetic->E kernels (which read them) and before the decay pullback.
+    """
+    from . import core as _adjoint
+
+    step_result = _reverse_step_standard_native_core(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
     # The native runner owns the full reverse-step contract, including the
     # analytic source-term eps-gradient accumulation the reference path applies.
     return _adjoint._accumulate_source_term_gradients(
@@ -229,7 +276,7 @@ def _reverse_step_standard_native(
     )
 
 
-def _reverse_step_cpml_native(
+def _reverse_step_cpml_native_core(
     solver,
     forward_state,
     adjoint_state,
@@ -239,9 +286,13 @@ def _reverse_step_cpml_native(
     eps_ey,
     eps_ez,
     resolved_source_terms,
-    profiler,
 ):
-    """Fully native reverse step for the CPML (absorbing-boundary) configuration.
+    """Fused native CPML reverse math, without the source-term eps gradient.
+
+    Returns the ``_ReverseStepResult`` the analytic CPML reference produces
+    *before* ``_accumulate_source_term_gradients`` runs. The public runner adds
+    that accumulation; the dispersive runner reuses this core as its CPML base
+    reverse and defers the single source-term accumulation to the end of the step.
 
     Mirrors ``reverse_step_cpml_python_reference`` exactly, launching the fused
     CPML reverse kernels in a fixed order. Every per-cell reverse computation
@@ -462,6 +513,34 @@ def _reverse_step_cpml_native(
         grad_eps_ez=ctx.grad_eps_ez,
         backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_CPML],
         magnetic_output_adjoint=adj_h_mid,
+    )
+    return step_result
+
+
+def _reverse_step_cpml_native(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+):
+    """Fully native reverse step for the CPML (absorbing-boundary) configuration."""
+    from . import core as _adjoint
+
+    step_result = _reverse_step_cpml_native_core(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
     )
     # The native runner owns the full reverse-step contract, including the
     # analytic source-term eps-gradient accumulation the reference path applies.
@@ -739,6 +818,160 @@ def _reverse_step_bloch_native(
     )
 
 
+def _reverse_step_dispersive_native(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+):
+    """Fully native reverse step for the electric-dispersive (ADE) configuration.
+
+    Mirrors ``reverse_step_dispersive_python_reference`` for the electric-only
+    dispersive case. The reverse *math* runs entirely in native kernels:
+
+    1. The mid-step post-update dispersive currents are reconstructed with the
+       shared Torch ADE replay (``_advance_dispersive_state``); this is the
+       once-per-step replay tracked under the native-replay work, same bar as the
+       standard/CPML runners' mid-H replay.
+    2. The native standard or CPML *core* reverse produces the pre-step E/H (and
+       psi) adjoint plus the base eps gradient, consuming the post-step field
+       adjoints directly (the reference's ``electric_source_adjoint`` is an
+       identity clone of those, so no separate copy is needed).
+    3. Per electric pole the fused ``reverseDispersiveCorrection3D`` kernel folds
+       the 1/eps coupling: it assigns the corrected post-step current adjoint and
+       accumulates the ``dt * J * adj_E / eps^2`` eps gradient onto the base eps
+       gradient in place.
+    4. The fused ``reverseDebye/Drude/LorentzCurrent3D`` kernels pull the corrected
+       current (and raw polarization) adjoint back through the ADE update, adding
+       the field-drive term into the pre-step E adjoint and assigning the pre-step
+       polarization/current adjoints.
+
+    Launch order is load-bearing: the base reverse assigns the pre-step E adjoint
+    and base eps gradient first; the correction kernel then accumulates the eps
+    gradient and produces the corrected current adjoint the ADE-state kernels read;
+    the ADE-state kernels accumulate the field-drive term on top of the base
+    pre-step E adjoint. The single source-term eps-gradient accumulation runs once
+    at the end, matching the reference ``finish`` step.
+    """
+    import torch
+
+    from . import core as _adjoint
+
+    # Step 1: replay the post-update electric dispersive currents (Torch).
+    dispersive_state = _adjoint._advance_dispersive_state(solver, forward_state)
+
+    # Step 2: native base reverse (standard or CPML core), no source-term grads.
+    if getattr(solver, "uses_cpml", False):
+        base_result = _reverse_step_cpml_native_core(
+            solver,
+            forward_state,
+            adjoint_state,
+            time_value=time_value,
+            eps_ex=eps_ex,
+            eps_ey=eps_ey,
+            eps_ez=eps_ez,
+            resolved_source_terms=resolved_source_terms,
+        )
+    else:
+        base_result = _reverse_step_standard_native_core(
+            solver,
+            forward_state,
+            adjoint_state,
+            time_value=time_value,
+            eps_ex=eps_ex,
+            eps_ey=eps_ey,
+            eps_ez=eps_ez,
+            resolved_source_terms=resolved_source_terms,
+        )
+
+    pre_step_adjoint = dict(base_result.pre_step_adjoint)
+    for name in _adjoint.checkpoint_schema(solver).dispersive_state_names:
+        if name not in pre_step_adjoint:
+            pre_step_adjoint[name] = torch.zeros_like(forward_state[name])
+
+    grad_eps_by_field = {
+        "Ex": base_result.grad_eps_ex,
+        "Ey": base_result.grad_eps_ey,
+        "Ez": base_result.grad_eps_ez,
+    }
+    eps_by_field = {"Ex": eps_ex, "Ey": eps_ey, "Ez": eps_ez}
+    dt = float(solver.dt)
+
+    # Steps 3 + 4: per pole, correction VJP then ADE-state VJP.
+    for component_name, model_name, index, _tensor_names, entry in _adjoint.iter_dispersive_state_specs(solver) or ():
+        current_name = _adjoint.dispersive_state_name(component_name, model_name, index, "current")
+        adj_current_corrected = torch.empty_like(forward_state[current_name])
+        _cuda_backend._reverse_dispersive_correction(
+            AdjCurrentCorrected=adj_current_corrected,
+            GradEps=grad_eps_by_field[component_name],
+            AdjCurrentPost=adjoint_state[current_name],
+            AdjElectricPost=adjoint_state[component_name],
+            Current=dispersive_state[current_name],
+            Eps=eps_by_field[component_name],
+            dt=dt,
+        )
+        if model_name == "debye":
+            polarization_name = _adjoint.dispersive_state_name(component_name, model_name, index, "polarization")
+            _cuda_backend._reverse_debye_current(
+                AdjElectricPrev=pre_step_adjoint[component_name],
+                AdjPolarizationPrev=pre_step_adjoint[polarization_name],
+                AdjPolarizationPost=adjoint_state[polarization_name],
+                AdjCurrentPost=adj_current_corrected,
+                DebyeDrive=entry["drive"],
+                decay=float(entry["decay"]),
+                dt=dt,
+            )
+        elif model_name == "drude":
+            _cuda_backend._reverse_drude_current(
+                AdjElectricPrev=pre_step_adjoint[component_name],
+                AdjCurrentPrev=pre_step_adjoint[current_name],
+                AdjCurrentPost=adj_current_corrected,
+                DrudeDrive=entry["drive"],
+                decay=float(entry["decay"]),
+            )
+        else:
+            polarization_name = _adjoint.dispersive_state_name(component_name, model_name, index, "polarization")
+            _cuda_backend._reverse_lorentz_current(
+                AdjElectricPrev=pre_step_adjoint[component_name],
+                AdjPolarizationPrev=pre_step_adjoint[polarization_name],
+                AdjCurrentPrev=pre_step_adjoint[current_name],
+                AdjPolarizationPost=adjoint_state[polarization_name],
+                AdjCurrentPost=adj_current_corrected,
+                LorentzDrive=entry["drive"],
+                decay=float(entry["decay"]),
+                restoring=float(entry["restoring"]),
+                dt=dt,
+            )
+
+    step_result = _adjoint._ReverseStepResult(
+        pre_step_adjoint=pre_step_adjoint,
+        grad_eps_ex=grad_eps_by_field["Ex"],
+        grad_eps_ey=grad_eps_by_field["Ey"],
+        grad_eps_ez=grad_eps_by_field["Ez"],
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_DISPERSIVE],
+        source_adjoint_state=dict(adjoint_state),
+    )
+    # The reference dispersive path discards the base magnetic mid-step adjoint
+    # (it returns no ``magnetic_output_adjoint``), so the single source-term
+    # accumulation sees the same empty magnetic seed here.
+    return _adjoint._accumulate_source_term_gradients(
+        step_result,
+        solver=solver,
+        adjoint_state=adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+
 def register_native_reverse_backends() -> None:
     """Register every available native CUDA reverse-step runner."""
     register_native_reverse_backend(
@@ -755,4 +988,9 @@ def register_native_reverse_backends() -> None:
         _ReverseBackend.PYTHON_BLOCH,
         _reverse_step_bloch_native,
         qualifier=_cuda_scene_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.PYTHON_DISPERSIVE,
+        _reverse_step_dispersive_native,
+        qualifier=_dispersive_native_qualifies,
     )

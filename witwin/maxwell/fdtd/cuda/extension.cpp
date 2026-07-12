@@ -1381,6 +1381,14 @@ void reverse_lorentz_current_cuda(
     double decay,
     double restoring,
     double dt);
+void reverse_dispersive_correction_cuda(
+    torch::stable::Tensor adj_current_corrected,
+    torch::stable::Tensor grad_eps,
+    const torch::stable::Tensor& adj_current_post,
+    const torch::stable::Tensor& adj_electric_post,
+    const torch::stable::Tensor& current,
+    const torch::stable::Tensor& eps,
+    double dt);
 void accumulate_tfsf_scalar_sample_adjoint_cuda(
     torch::stable::Tensor adj_aux_field,
     const torch::stable::Tensor& adj_field_patch,
@@ -1690,6 +1698,7 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("reverse_debye_current(Tensor(a!) adj_electric_prev, Tensor(b!) adj_polarization_prev, Tensor adj_polarization_post, Tensor adj_current_post, Tensor drive, float decay, float dt) -> ()");
   m.def("reverse_drude_current(Tensor(a!) adj_electric_prev, Tensor(b!) adj_current_prev, Tensor adj_current_post, Tensor drive, float decay) -> ()");
   m.def("reverse_lorentz_current(Tensor(a!) adj_electric_prev, Tensor(b!) adj_polarization_prev, Tensor(c!) adj_current_prev, Tensor adj_polarization_post, Tensor adj_current_post, Tensor drive, float decay, float restoring, float dt) -> ()");
+  m.def("reverse_dispersive_correction(Tensor(a!) adj_current_corrected, Tensor(b!) grad_eps, Tensor adj_current_post, Tensor adj_electric_post, Tensor current, Tensor eps, float dt) -> ()");
   m.def("accumulate_tfsf_scalar_sample_adjoint(Tensor(a!) adj_aux_field, Tensor adj_field_patch, Tensor coeff_patch, int sample_index, float component_scale) -> ()");
   m.def("accumulate_tfsf_line_sample_adjoint(Tensor(a!) adj_aux_field, Tensor adj_field_patch, Tensor coeff_patch, Tensor sample_indices, int sample_axis_code, float component_scale) -> ()");
   m.def("accumulate_tfsf_interpolated_sample_adjoint(Tensor(a!) adj_aux_field, Tensor adj_field_patch, Tensor coeff_patch, Tensor sample_positions, float origin, float ds, float component_scale) -> ()");
@@ -1801,6 +1810,7 @@ STABLE_TORCH_LIBRARY_IMPL(witwin_maxwell_fdtd_cuda, CUDA, m) {
   m.impl("reverse_debye_current", TORCH_BOX(&reverse_debye_current_cuda));
   m.impl("reverse_drude_current", TORCH_BOX(&reverse_drude_current_cuda));
   m.impl("reverse_lorentz_current", TORCH_BOX(&reverse_lorentz_current_cuda));
+  m.impl("reverse_dispersive_correction", TORCH_BOX(&reverse_dispersive_correction_cuda));
   m.impl("accumulate_tfsf_scalar_sample_adjoint", TORCH_BOX(&accumulate_tfsf_scalar_sample_adjoint_cuda));
   m.impl("accumulate_tfsf_line_sample_adjoint", TORCH_BOX(&accumulate_tfsf_line_sample_adjoint_cuda));
   m.impl("accumulate_tfsf_interpolated_sample_adjoint", TORCH_BOX(&accumulate_tfsf_interpolated_sample_adjoint_cuda));

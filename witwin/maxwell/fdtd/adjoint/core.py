@@ -38,14 +38,6 @@ from ..observers import (
     _monitor_payload_is_point,
     _plane_coord_names,
 )
-from .reverse_common import (
-    allocate_reverse_buffers,
-    dynamic_electric_curls,
-    finalize_dispersive_reverse_step,
-    finalize_reverse_step_result,
-    prepare_dispersive_reverse_context,
-    replay_standard_magnetic_step,
-)
 
 _TFSF_REFERENCE_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned"}
 _TFSF_AUXILIARY_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned", "plane_wave_aux"}

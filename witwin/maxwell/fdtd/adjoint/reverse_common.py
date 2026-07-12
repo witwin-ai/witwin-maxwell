@@ -4,8 +4,6 @@ from dataclasses import dataclass
 
 import torch
 
-from .profiler import _BackwardProfiler, _ReverseStepResult
-
 
 def _runtime():
     from . import core as _adjoint
@@ -35,18 +33,6 @@ class _CpmlReverseContext:
     ex_curl: torch.Tensor
     ey_curl: torch.Tensor
     ez_curl: torch.Tensor
-
-
-@dataclass
-class _DispersiveReverseContext:
-    runtime: object
-    active_profiler: _BackwardProfiler
-    adjoint_module: object
-    block_size: tuple[int, int, int]
-    dispersive_output_adjoint: dict[str, torch.Tensor]
-    correction_grad_eps: dict[str, torch.Tensor]
-    source_adjoint_state: dict[str, torch.Tensor]
-    adjusted_adjoint_state: dict[str, torch.Tensor]
 
 
 def allocate_reverse_buffers(forward_state, *, eps_ex, eps_ey, eps_ez):
@@ -125,120 +111,6 @@ def allocate_cpml_reverse_context(
         ex_curl=ex_curl,
         ey_curl=ey_curl,
         ez_curl=ez_curl,
-    )
-
-
-def prepare_dispersive_reverse_context(
-    solver,
-    forward_state,
-    adjoint_state,
-    *,
-    eps_ex,
-    eps_ey,
-    eps_ez,
-    profiler: _BackwardProfiler | None,
-) -> _DispersiveReverseContext:
-    runtime = _runtime()
-    active_profiler = profiler if profiler is not None else _BackwardProfiler(enabled=False, device=None)
-    dispersive_state = runtime._advance_dispersive_state(solver, forward_state)
-    electric_source_adjoint, dispersive_output_adjoint, correction_grad_eps, source_adjoint_state = (
-        runtime._reverse_dispersive_corrections(
-            solver,
-            adjoint_state,
-            dispersive_state,
-            eps_ex=eps_ex,
-            eps_ey=eps_ey,
-            eps_ez=eps_ez,
-        )
-    )
-    adjusted_adjoint_state = dict(adjoint_state)
-    adjusted_adjoint_state.update(electric_source_adjoint)
-    return _DispersiveReverseContext(
-        runtime=runtime,
-        active_profiler=active_profiler,
-        adjoint_module=solver.fdtd_module,
-        block_size=runtime._adjoint_kernel_block_size(solver),
-        dispersive_output_adjoint=dispersive_output_adjoint,
-        correction_grad_eps=correction_grad_eps,
-        source_adjoint_state=source_adjoint_state,
-        adjusted_adjoint_state=adjusted_adjoint_state,
-    )
-
-
-def finalize_dispersive_reverse_step(
-    solver,
-    forward_state,
-    *,
-    base_result: _ReverseStepResult,
-    context: _DispersiveReverseContext,
-    backend: str,
-) -> _ReverseStepResult:
-    runtime = context.runtime
-    pre_step_adjoint = {
-        name: tensor.detach().clone()
-        for name, tensor in base_result.pre_step_adjoint.items()
-    }
-    for name in runtime.checkpoint_schema(solver).dispersive_state_names:
-        if name not in pre_step_adjoint:
-            pre_step_adjoint[name] = torch.zeros_like(forward_state[name])
-
-    for component_name, model_name, index, _tensor_names, entry in runtime.iter_dispersive_state_specs(solver) or ():
-        launch_shape = runtime._adjoint_launch_shape(solver, component_name, forward_state[component_name])
-        if model_name == "debye":
-            polarization_name = runtime.dispersive_state_name(component_name, model_name, index, "polarization")
-            current_name = runtime.dispersive_state_name(component_name, model_name, index, "current")
-            context.adjoint_module.reverseDebyeCurrent3D(
-                AdjElectricPrev=pre_step_adjoint[component_name],
-                AdjPolarizationPrev=pre_step_adjoint[polarization_name],
-                AdjPolarizationPost=context.dispersive_output_adjoint[polarization_name],
-                AdjCurrentPost=context.dispersive_output_adjoint[current_name],
-                DebyeDrive=entry["drive"],
-                decay=float(entry["decay"]),
-                dt=float(solver.dt),
-            ).launchRaw(
-                blockSize=context.block_size,
-                gridSize=launch_shape,
-            )
-            continue
-
-        if model_name == "drude":
-            current_name = runtime.dispersive_state_name(component_name, model_name, index, "current")
-            context.adjoint_module.reverseDrudeCurrent3D(
-                AdjElectricPrev=pre_step_adjoint[component_name],
-                AdjCurrentPrev=pre_step_adjoint[current_name],
-                AdjCurrentPost=context.dispersive_output_adjoint[current_name],
-                DrudeDrive=entry["drive"],
-                decay=float(entry["decay"]),
-            ).launchRaw(
-                blockSize=context.block_size,
-                gridSize=launch_shape,
-            )
-            continue
-
-        polarization_name = runtime.dispersive_state_name(component_name, model_name, index, "polarization")
-        current_name = runtime.dispersive_state_name(component_name, model_name, index, "current")
-        context.adjoint_module.reverseLorentzCurrent3D(
-            AdjElectricPrev=pre_step_adjoint[component_name],
-            AdjPolarizationPrev=pre_step_adjoint[polarization_name],
-            AdjCurrentPrev=pre_step_adjoint[current_name],
-            AdjPolarizationPost=context.dispersive_output_adjoint[polarization_name],
-            AdjCurrentPost=context.dispersive_output_adjoint[current_name],
-            LorentzDrive=entry["drive"],
-            decay=float(entry["decay"]),
-            restoring=float(entry["restoring"]),
-            dt=float(solver.dt),
-        ).launchRaw(
-            blockSize=context.block_size,
-            gridSize=launch_shape,
-        )
-
-    return finalize_reverse_step_result(
-        pre_step_adjoint=pre_step_adjoint,
-        grad_eps_ex=base_result.grad_eps_ex + context.correction_grad_eps["Ex"],
-        grad_eps_ey=base_result.grad_eps_ey + context.correction_grad_eps["Ey"],
-        grad_eps_ez=base_result.grad_eps_ez + context.correction_grad_eps["Ez"],
-        backend=backend,
-        source_adjoint_state=context.source_adjoint_state,
     )
 
 
@@ -350,31 +222,4 @@ def replay_standard_magnetic_step(
         solver=solver,
         time_value=time_value,
         resolved_source_terms=resolved_source_terms,
-    )
-
-
-def finalize_reverse_step_result(
-    *,
-    pre_step_adjoint,
-    grad_eps_ex,
-    grad_eps_ey,
-    grad_eps_ez,
-    backend,
-    magnetic_output_adjoint=None,
-    source_adjoint_state=None,
-):
-    magnetic_output = None
-    if magnetic_output_adjoint is not None:
-        magnetic_output = {
-            name: tensor.detach()
-            for name, tensor in magnetic_output_adjoint.items()
-        }
-    return _ReverseStepResult(
-        pre_step_adjoint={name: tensor.detach() for name, tensor in pre_step_adjoint.items()},
-        grad_eps_ex=grad_eps_ex.detach(),
-        grad_eps_ey=grad_eps_ey.detach(),
-        grad_eps_ez=grad_eps_ez.detach(),
-        backend=backend,
-        magnetic_output_adjoint=magnetic_output,
-        source_adjoint_state=source_adjoint_state,
     )

@@ -1267,6 +1267,31 @@ __global__ void reverse_lorentz_current_kernel(
   adj_current_prev[index] += decay * adj_internal;
 }
 
+__global__ void reverse_dispersive_correction_kernel(
+    int64_t total,
+    float* __restrict__ adj_current_corrected,
+    float* __restrict__ grad_eps,
+    const float* __restrict__ adj_current_post,
+    const float* __restrict__ adj_electric_post,
+    const float* __restrict__ current,
+    const float* __restrict__ eps,
+    float dt) {
+  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) {
+    return;
+  }
+  const float adj_electric_value = adj_electric_post[index];
+  const float inv_eps = 1.0f / eps[index];
+  const float dt_adj_over_eps = dt * adj_electric_value * inv_eps;
+  // Post-step dispersive-current adjoint carries the -dt/eps correction the
+  // electric update applied when it subtracted dt * J / eps from the field.
+  adj_current_corrected[index] = adj_current_post[index] - dt_adj_over_eps;
+  // The 1/eps coupling contributes an eps gradient dt * J * adj_E / eps^2; it
+  // accumulates on top of the base reverse step's eps gradient (multiple poles
+  // on the same component add here in turn).
+  grad_eps[index] += current[index] * dt_adj_over_eps * inv_eps;
+}
+
 __global__ void reverse_tfsf_auxiliary_electric_kernel(
     int64_t total,
     int64_t magnetic_total,
@@ -3058,6 +3083,34 @@ void reverse_lorentz_current_cuda(
       drive.mutable_data_ptr<float>(),
       static_cast<float>(decay),
       static_cast<float>(restoring),
+      static_cast<float>(dt));
+  WITWIN_CUDA_CHECK();
+}
+
+void reverse_dispersive_correction_cuda(
+    torch::stable::Tensor adj_current_corrected,
+    torch::stable::Tensor grad_eps,
+    const torch::stable::Tensor& adj_current_post,
+    const torch::stable::Tensor& adj_electric_post,
+    const torch::stable::Tensor& current,
+    const torch::stable::Tensor& eps,
+    double dt) {
+  check_field(adj_current_corrected, "adj_current_corrected");
+  check_matching_field(adj_current_corrected, grad_eps, "grad_eps");
+  check_matching_field(adj_current_corrected, adj_current_post, "adj_current_post");
+  check_matching_field(adj_current_corrected, adj_electric_post, "adj_electric_post");
+  check_matching_field(adj_current_corrected, current, "current");
+  check_matching_field(adj_current_corrected, eps, "eps");
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_current_corrected.get_device_index());
+  const int64_t total = adj_current_corrected.numel();
+  reverse_dispersive_correction_kernel<<<linear_grid(total, 256), 256, 0, current_cuda_stream()>>>(
+      total,
+      adj_current_corrected.mutable_data_ptr<float>(),
+      grad_eps.mutable_data_ptr<float>(),
+      adj_current_post.mutable_data_ptr<float>(),
+      adj_electric_post.mutable_data_ptr<float>(),
+      current.mutable_data_ptr<float>(),
+      eps.mutable_data_ptr<float>(),
       static_cast<float>(dt));
   WITWIN_CUDA_CHECK();
 }
