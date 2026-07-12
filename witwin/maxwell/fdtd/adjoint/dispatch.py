@@ -19,6 +19,7 @@ _VALID_ADJOINT_BACKENDS = {"auto", "native", "torch_reference", "torch_vjp"}
 class _ReverseBackend(Enum):
     GRATING_TFSF = auto()
     TFSF = auto()
+    PYTHON_BLOCH_DISPERSIVE = auto()
     PYTHON_BLOCH = auto()
     PYTHON_DISPERSIVE = auto()
     PYTHON_STANDARD = auto()
@@ -43,6 +44,7 @@ _NATIVE_REVERSE_LABELS: dict[_ReverseBackend, str] = {
     _ReverseBackend.PYTHON_KERR: "native_kerr",
     _ReverseBackend.PYTHON_FULL_ANISO: "native_full_aniso",
     _ReverseBackend.PYTHON_BLOCH: "native_bloch",
+    _ReverseBackend.PYTHON_BLOCH_DISPERSIVE: "native_bloch_dispersive",
     _ReverseBackend.PYTHON_DISPERSIVE: "native_dispersive",
     _ReverseBackend.TFSF: "native_tfsf",
     _ReverseBackend.GRATING_TFSF: "native_grating_tfsf",
@@ -331,6 +333,41 @@ def _supports_bloch(runtime, solver, forward_state, resolved_source_terms) -> bo
     return _supports_explicit_source_step(runtime, solver, resolved_source_terms)
 
 
+def _supports_bloch_dispersive(runtime, solver, forward_state, resolved_source_terms) -> bool:
+    """Analytic native reverse for a Bloch (complex-field) + electric-dispersive medium.
+
+    The complex-field solver advances a real and an imaginary FDTD copy that couple
+    only through the Bloch boundary wrap, and the electric ADE poles advance on each
+    copy with the same real coefficients. The reverse is the complex Bloch base
+    reverse plus the electric-dispersive correction / ADE-state VJP applied to both
+    halves, so this variant carries the imaginary-ADE replica the plain Bloch and
+    plain dispersive backends each drop. Gated to the pure Bloch (all-faces-Bloch,
+    non-CPML) electric-dispersive class; combined with an absorbing (CPML) axis,
+    magnetic dispersion, conduction, nonlinearity, full anisotropy, or TFSF it still
+    routes to the torch-VJP fallback."""
+    if not has_complex_fields(solver):
+        return False
+    if not getattr(solver, "electric_dispersive_enabled", False):
+        return False
+    if getattr(solver, "magnetic_dispersive_enabled", False):
+        return False
+    if getattr(solver, "nonlinear_enabled", False):
+        return False
+    if getattr(solver, "conductive_enabled", False):
+        return False
+    if getattr(solver, "full_aniso_enabled", False):
+        return False
+    if getattr(solver, "uses_cpml", False):
+        return False
+    if getattr(solver, "tfsf_enabled", False):
+        return False
+    if not _matches_checkpoint_layout(solver, forward_state):
+        return False
+    if not all(code == BOUNDARY_BLOCH for code in _face_codes(solver)):
+        return False
+    return _supports_explicit_source_step(runtime, solver, resolved_source_terms)
+
+
 def _supports_conductive(runtime, solver, forward_state, resolved_source_terms) -> bool:
     """Analytic native reverse for a static-conductive (sigma_e) CPML medium.
 
@@ -453,6 +490,7 @@ def _select_reverse_backend(
     supports_standard = _supports_standard(runtime, solver, forward_state, resolved_source_terms)
     supports_dispersive = _supports_dispersive(runtime, solver, forward_state, resolved_source_terms)
     supports_bloch = _supports_bloch(runtime, solver, forward_state, resolved_source_terms)
+    supports_bloch_dispersive = _supports_bloch_dispersive(runtime, solver, forward_state, resolved_source_terms)
     supports_conductive = _supports_conductive(runtime, solver, forward_state, resolved_source_terms)
     supports_kerr = _supports_kerr(runtime, solver, forward_state, resolved_source_terms)
     supports_full_aniso = _supports_full_aniso(runtime, solver, forward_state, resolved_source_terms)
@@ -460,6 +498,7 @@ def _select_reverse_backend(
     decision_table = (
         (_ReverseBackend.GRATING_TFSF, supports_grating_tfsf),
         (_ReverseBackend.TFSF, supports_tfsf),
+        (_ReverseBackend.PYTHON_BLOCH_DISPERSIVE, supports_bloch_dispersive),
         (_ReverseBackend.PYTHON_BLOCH, supports_bloch),
         (_ReverseBackend.PYTHON_DISPERSIVE, supports_dispersive),
         (_ReverseBackend.PYTHON_STANDARD, supports_standard),
@@ -591,6 +630,22 @@ def _execute_reference_backend(
             _with_profile_sections(
                 profiler,
                 lambda: adjoint_reference.reverse_step_bloch_python_reference(
+                    solver,
+                    forward_state,
+                    adjoint_state,
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_source_terms,
+                ),
+            )
+        )
+    if backend is _ReverseBackend.PYTHON_BLOCH_DISPERSIVE:
+        return finish(
+            _with_profile_sections(
+                profiler,
+                lambda: adjoint_reference.reverse_step_bloch_dispersive_python_reference(
                     solver,
                     forward_state,
                     adjoint_state,

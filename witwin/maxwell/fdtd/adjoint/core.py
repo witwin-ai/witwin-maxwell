@@ -1717,15 +1717,20 @@ def _reverse_dispersive_corrections(
     eps_ex,
     eps_ey,
     eps_ez,
+    suffix="",
 ):
+    # ``suffix`` selects the field/current half the ``E -= dt * J / eps``
+    # correction VJP runs on. "" is the real field (unchanged); Bloch runs also
+    # correct the imaginary field with ``suffix="_imag"``. Both halves share the
+    # (real) eps, so both accumulate into the same eps gradient at the call site.
     electric_source_adjoint = {
-        "Ex": adjoint_state["Ex"].detach().clone(),
-        "Ey": adjoint_state["Ey"].detach().clone(),
-        "Ez": adjoint_state["Ez"].detach().clone(),
+        "Ex": adjoint_state["Ex" + suffix].detach().clone(),
+        "Ey": adjoint_state["Ey" + suffix].detach().clone(),
+        "Ez": adjoint_state["Ez" + suffix].detach().clone(),
     }
     dispersive_output_adjoint = {
-        name: adjoint_state[name].detach().clone()
-        for name in checkpoint_schema(solver).dispersive_state_names
+        name + suffix: adjoint_state[name + suffix].detach().clone()
+        for name in _electric_dispersive_real_state_names(solver)
     }
     grad_eps_by_field = {
         "Ex": torch.zeros_like(eps_ex),
@@ -1740,7 +1745,7 @@ def _reverse_dispersive_corrections(
     dt = float(solver.dt)
 
     for component_name, model_name, index, _tensor_names, _entry in iter_dispersive_state_specs(solver) or ():
-        current_name = dispersive_state_name(component_name, model_name, index, "current")
+        current_name = dispersive_state_name(component_name, model_name, index, "current") + suffix
         electric_adjoint = electric_source_adjoint[component_name]
         eps_field = eps_by_field[component_name]
         dispersive_output_adjoint[current_name] = (
@@ -1751,30 +1756,36 @@ def _reverse_dispersive_corrections(
         )
 
     source_adjoint_state = dict(adjoint_state)
-    source_adjoint_state.update(electric_source_adjoint)
+    source_adjoint_state.update({name + suffix: value for name, value in electric_source_adjoint.items()})
     return electric_source_adjoint, dispersive_output_adjoint, grad_eps_by_field, source_adjoint_state
 
 
-def _reverse_ade_state_python_reference(solver, forward_state, output_adjoint, *, specs, component_names, state_names):
+def _reverse_ade_state_python_reference(solver, forward_state, output_adjoint, *, specs, component_names, state_names, suffix=""):
+    # ``suffix`` selects the field/state half the ADE-state VJP runs on. For the
+    # pure-real path it is "" (unchanged). Bloch (complex-field) runs also carry an
+    # imaginary FDTD copy whose electric ADE poles advance identically under
+    # ``*_imag`` state names, so the Bloch+dispersive reverse calls this with
+    # ``suffix="_imag"`` to reverse that replica onto the imaginary field.
     field_prev_adjoint = {
-        name: torch.zeros_like(forward_state[name])
+        name + suffix: torch.zeros_like(forward_state[name + suffix])
         for name in component_names
     }
     pre_step_dispersive_adjoint = {
-        name: torch.zeros_like(forward_state[name])
+        name + suffix: torch.zeros_like(forward_state[name + suffix])
         for name in state_names
     }
     dt = float(solver.dt)
 
     for component_name, model_name, index, _tensor_names, entry in specs or ():
+        field_key = component_name + suffix
         drive = entry["drive"]
         if model_name == "debye":
-            polarization_name = dispersive_state_name(component_name, model_name, index, "polarization")
-            current_name = dispersive_state_name(component_name, model_name, index, "current")
+            polarization_name = dispersive_state_name(component_name, model_name, index, "polarization") + suffix
+            current_name = dispersive_state_name(component_name, model_name, index, "current") + suffix
             adj_polarization_post = output_adjoint[polarization_name]
             adj_current_post = output_adjoint[current_name]
             adj_polarization_internal = adj_polarization_post + adj_current_post / dt
-            field_prev_adjoint[component_name] = field_prev_adjoint[component_name] + drive * adj_polarization_internal
+            field_prev_adjoint[field_key] = field_prev_adjoint[field_key] + drive * adj_polarization_internal
             pre_step_dispersive_adjoint[polarization_name] = (
                 pre_step_dispersive_adjoint[polarization_name]
                 + float(entry["decay"]) * adj_polarization_internal
@@ -1783,20 +1794,20 @@ def _reverse_ade_state_python_reference(solver, forward_state, output_adjoint, *
             continue
 
         if model_name == "drude":
-            current_name = dispersive_state_name(component_name, model_name, index, "current")
+            current_name = dispersive_state_name(component_name, model_name, index, "current") + suffix
             adj_current_post = output_adjoint[current_name]
-            field_prev_adjoint[component_name] = field_prev_adjoint[component_name] + drive * adj_current_post
+            field_prev_adjoint[field_key] = field_prev_adjoint[field_key] + drive * adj_current_post
             pre_step_dispersive_adjoint[current_name] = (
                 pre_step_dispersive_adjoint[current_name] + float(entry["decay"]) * adj_current_post
             )
             continue
 
-        polarization_name = dispersive_state_name(component_name, model_name, index, "polarization")
-        current_name = dispersive_state_name(component_name, model_name, index, "current")
+        polarization_name = dispersive_state_name(component_name, model_name, index, "polarization") + suffix
+        current_name = dispersive_state_name(component_name, model_name, index, "current") + suffix
         adj_polarization_post = output_adjoint[polarization_name]
         adj_current_post = output_adjoint[current_name]
         adj_current_internal = adj_current_post + dt * adj_polarization_post
-        field_prev_adjoint[component_name] = field_prev_adjoint[component_name] + drive * adj_current_internal
+        field_prev_adjoint[field_key] = field_prev_adjoint[field_key] + drive * adj_current_internal
         pre_step_dispersive_adjoint[polarization_name] = (
             pre_step_dispersive_adjoint[polarization_name]
             + adj_polarization_post
@@ -1809,14 +1820,29 @@ def _reverse_ade_state_python_reference(solver, forward_state, output_adjoint, *
     return field_prev_adjoint, pre_step_dispersive_adjoint
 
 
-def _reverse_dispersive_state_python_reference(solver, forward_state, dispersive_output_adjoint):
+def _electric_dispersive_real_state_names(solver):
+    """Canonical (unsuffixed) electric-dispersive state names, in spec order.
+
+    Bloch runs append ``_imag`` replicas to ``dispersive_state_names``; the
+    suffix-parameterized ADE-state VJP needs the real names alone so it can apply
+    the requested half's suffix without double-suffixing the ``_imag`` copies.
+    """
+    names = []
+    for component_name, model_name, index, tensor_names, _entry in iter_dispersive_state_specs(solver) or ():
+        for tensor_name in tensor_names:
+            names.append(dispersive_state_name(component_name, model_name, index, tensor_name))
+    return tuple(names)
+
+
+def _reverse_dispersive_state_python_reference(solver, forward_state, dispersive_output_adjoint, *, suffix=""):
     return _reverse_ade_state_python_reference(
         solver,
         forward_state,
         dispersive_output_adjoint,
         specs=iter_dispersive_state_specs(solver),
         component_names=("Ex", "Ey", "Ez"),
-        state_names=checkpoint_schema(solver).dispersive_state_names,
+        state_names=_electric_dispersive_real_state_names(solver),
+        suffix=suffix,
     )
 
 

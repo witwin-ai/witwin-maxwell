@@ -39,6 +39,7 @@ from .core import (
 )
 
 __all__ = [
+    "reverse_step_bloch_dispersive_python_reference",
     "reverse_step_bloch_python_reference",
     "reverse_step_conductive_cpml_python_reference",
     "reverse_step_cpml_python_reference",
@@ -405,6 +406,96 @@ def reverse_step_bloch_python_reference(
         grad_eps_ey=grad_eps_ey.detach(),
         grad_eps_ez=grad_eps_ez.detach(),
         backend="python_reference_bloch",
+    )
+
+
+def reverse_step_bloch_dispersive_python_reference(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value=0.0,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms=None,
+):
+    """Analytic reverse for Bloch (complex-field) + electric-dispersive (ADE) media.
+
+    The complex-field solver keeps a real and an imaginary FDTD copy that couple
+    only through the Bloch boundary wrap (carried in the curl), while the electric
+    ADE poles advance on each copy independently with the same real coefficients.
+    The reverse therefore factors into the complex Bloch base reverse plus the
+    electric-dispersive correction/state VJP applied to the real and imaginary
+    halves independently. The ``E -= dt * J / eps`` correction shares the (real)
+    eps across both halves, so both accumulate into the single eps gradient; the
+    E-field cotangent passes through the correction unchanged, so the Bloch base
+    reverse consumes the post-step field adjoints directly.
+    """
+    dispersive_state = _advance_dispersive_state(solver, forward_state)
+
+    # Per-half correction VJP: assemble the corrected post-step current adjoints
+    # (real + imaginary) and sum the eps sensitivity across both halves.
+    dispersive_output_adjoint = {}
+    correction_grad_eps = {
+        "Ex": torch.zeros_like(eps_ex),
+        "Ey": torch.zeros_like(eps_ey),
+        "Ez": torch.zeros_like(eps_ez),
+    }
+    for suffix in ("", "_imag"):
+        _electric_source_adjoint, half_output_adjoint, half_grad_eps, _source_adjoint_state = (
+            _reverse_dispersive_corrections(
+                solver,
+                adjoint_state,
+                dispersive_state,
+                eps_ex=eps_ex,
+                eps_ey=eps_ey,
+                eps_ez=eps_ez,
+                suffix=suffix,
+            )
+        )
+        dispersive_output_adjoint.update(half_output_adjoint)
+        for component_name in correction_grad_eps:
+            correction_grad_eps[component_name] = correction_grad_eps[component_name] + half_grad_eps[component_name]
+
+    # Complex Bloch base reverse (the correction's field VJP is the identity, so it
+    # sees the post-step field adjoints unchanged).
+    base_result = reverse_step_bloch_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+    pre_step_adjoint = {
+        name: tensor.detach().clone()
+        for name, tensor in base_result.pre_step_adjoint.items()
+    }
+
+    # Per-half ADE-state VJP: propagate the corrected current adjoint back to the
+    # pre-step field and dispersive-state adjoints of that half.
+    for suffix in ("", "_imag"):
+        electric_prev_adjoint, pre_step_dispersive_adjoint = _reverse_dispersive_state_python_reference(
+            solver,
+            forward_state,
+            dispersive_output_adjoint,
+            suffix=suffix,
+        )
+        for component_name, grad in electric_prev_adjoint.items():
+            pre_step_adjoint[component_name] = pre_step_adjoint[component_name] + grad
+        for name, grad in pre_step_dispersive_adjoint.items():
+            pre_step_adjoint[name] = pre_step_adjoint[name] + grad
+
+    return _ReverseStepResult(
+        pre_step_adjoint={name: tensor.detach() for name, tensor in pre_step_adjoint.items()},
+        grad_eps_ex=(base_result.grad_eps_ex + correction_grad_eps["Ex"]).detach(),
+        grad_eps_ey=(base_result.grad_eps_ey + correction_grad_eps["Ey"]).detach(),
+        grad_eps_ez=(base_result.grad_eps_ez + correction_grad_eps["Ez"]).detach(),
+        backend="python_reference_bloch_dispersive",
+        source_adjoint_state=dict(adjoint_state),
     )
 
 

@@ -1499,11 +1499,17 @@ class _BlochDispersiveDensityScene(mw.SceneModule):
 
 
 @_CUDA
-def test_bloch_dispersive_reverse_routes_through_torch_vjp():
-    """A Bloch + electric-dispersive scene must fall to the torch-VJP reverse: the
-    analytic Bloch backend rejects dispersion and the analytic dispersive backend
-    rejects complex fields, so neither carries the imaginary ADE replica."""
-    from witwin.maxwell.fdtd.adjoint.dispatch import _select_reverse_backend, _ReverseBackend
+def test_bloch_dispersive_reverse_selects_native_bloch_dispersive_backend():
+    """A Bloch + electric-dispersive scene resolves to the dedicated analytic
+    ``PYTHON_BLOCH_DISPERSIVE`` backend, which carries the imaginary-ADE replica the
+    plain Bloch and plain dispersive backends each drop, and (on a qualifying CUDA
+    scene) auto mode prefers its fused native reverse runner over the torch-VJP
+    fallback."""
+    from witwin.maxwell.fdtd.adjoint.dispatch import (
+        _native_backend_available,
+        _select_reverse_backend,
+        _ReverseBackend,
+    )
     from witwin.maxwell.fdtd.checkpoint import capture_checkpoint_state
 
     density = torch.sigmoid(torch.zeros((2, 2, 2), device="cuda"))
@@ -1523,7 +1529,8 @@ def test_bloch_dispersive_reverse_routes_through_torch_vjp():
         eps_ez=solver.eps_Ez,
         resolved_source_terms=None,
     )
-    assert backend is _ReverseBackend.TORCH_VJP, backend
+    assert backend is _ReverseBackend.PYTHON_BLOCH_DISPERSIVE, backend
+    assert _native_backend_available(backend, solver, forward_state)
 
 
 @_CUDA

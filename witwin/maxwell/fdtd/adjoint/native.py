@@ -1107,7 +1107,7 @@ def _reverse_step_kerr_native(
     )
 
 
-def _reverse_step_bloch_native(
+def _reverse_step_bloch_native_core(
     solver,
     forward_state,
     adjoint_state,
@@ -1117,9 +1117,14 @@ def _reverse_step_bloch_native(
     eps_ey,
     eps_ez,
     resolved_source_terms,
-    profiler,
 ):
-    """Fully native reverse step for the complex split-field Bloch configuration.
+    """Fused native complex-Bloch reverse math, without the source-term eps gradient.
+
+    Returns the ``_ReverseStepResult`` the analytic Bloch reference produces
+    *before* ``_accumulate_source_term_gradients`` runs, with ``pre_step_adjoint``
+    holding the twelve real/imag field adjoints. The public runner adds that
+    accumulation; the Bloch+dispersive runner reuses this core as its complex base
+    reverse and folds the electric ADE VJP on top before the single accumulation.
 
     Mirrors ``reverse_step_bloch_python_reference`` exactly, launching the fused
     complex Bloch reverse kernels in a fixed order. Every per-cell reverse
@@ -1348,15 +1353,169 @@ def _reverse_step_bloch_native(
         "Hy_imag": adj_hy_prev_i,
         "Hz_imag": adj_hz_prev_i,
     }
-    step_result = _adjoint._ReverseStepResult(
-        pre_step_adjoint={name: pre_by_name[name] for name in forward_state},
+    return _adjoint._ReverseStepResult(
+        pre_step_adjoint=pre_by_name,
         grad_eps_ex=grad_eps_ex,
         grad_eps_ey=grad_eps_ey,
         grad_eps_ez=grad_eps_ez,
         backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_BLOCH],
     )
+
+
+def _reverse_step_bloch_native(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+):
+    """Fully native reverse step for the complex split-field Bloch configuration."""
+    from . import core as _adjoint
+
+    step_result = _reverse_step_bloch_native_core(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
     # The native runner owns the full reverse-step contract, including the analytic
     # source-term eps-gradient accumulation the reference path applies via ``finish``.
+    return _adjoint._accumulate_source_term_gradients(
+        step_result,
+        solver=solver,
+        adjoint_state=adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+
+def _reverse_step_bloch_dispersive_native(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+):
+    """Fully native reverse step for a Bloch (complex-field) + electric-dispersive medium.
+
+    Mirrors :func:`reverse_step_bloch_dispersive_python_reference`. The complex
+    Bloch base reverse produces the twelve real/imag field adjoints and the base
+    eps gradient; on top of it the electric ADE VJP runs on the real and imaginary
+    halves independently, reusing the same fused dispersive-correction and
+    ADE-current kernels the pure-real dispersive runner uses. Both halves share the
+    real eps, so both correction launches *accumulate* into the same eps gradient;
+    both ADE-current launches *accumulate* the field-drive term onto their half's
+    pre-step E adjoint and *assign* their half's pre-step polarization/current
+    adjoint. Launch order is load-bearing: the Bloch base assigns the pre-step E
+    adjoint first, then per half the correction produces the corrected current
+    adjoint the ADE-current kernels read, and those accumulate onto the base E
+    adjoint. The single source-term accumulation runs once at the end.
+    """
+    import torch
+
+    from . import core as _adjoint
+
+    # Replay the post-update electric dispersive currents (Torch), real + imag.
+    dispersive_state = _adjoint._advance_dispersive_state(solver, forward_state)
+
+    # Native complex Bloch base reverse (no source-term grads yet).
+    base_result = _reverse_step_bloch_native_core(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+    pre_step_adjoint = dict(base_result.pre_step_adjoint)
+    for name in _adjoint.checkpoint_schema(solver).dispersive_state_names:
+        if name not in pre_step_adjoint:
+            pre_step_adjoint[name] = torch.zeros_like(forward_state[name])
+
+    grad_eps_by_field = {
+        "Ex": base_result.grad_eps_ex,
+        "Ey": base_result.grad_eps_ey,
+        "Ez": base_result.grad_eps_ez,
+    }
+    eps_by_field = {"Ex": eps_ex, "Ey": eps_ey, "Ez": eps_ez}
+    dt = float(solver.dt)
+
+    # Per half (real, imaginary), per pole: correction VJP then ADE-state VJP. The
+    # coefficients are identical across halves; only the field/state suffix differs.
+    for suffix in ("", "_imag"):
+        for component_name, model_name, index, _tensor_names, entry in _adjoint.iter_dispersive_state_specs(solver) or ():
+            current_name = _adjoint.dispersive_state_name(component_name, model_name, index, "current") + suffix
+            adj_current_corrected = torch.empty_like(forward_state[current_name])
+            _cuda_backend._reverse_dispersive_correction(
+                AdjCurrentCorrected=adj_current_corrected,
+                GradEps=grad_eps_by_field[component_name],
+                AdjCurrentPost=adjoint_state[current_name],
+                AdjElectricPost=adjoint_state[component_name + suffix],
+                Current=dispersive_state[current_name],
+                Eps=eps_by_field[component_name],
+                dt=dt,
+            )
+            if model_name == "debye":
+                polarization_name = _adjoint.dispersive_state_name(component_name, model_name, index, "polarization") + suffix
+                _cuda_backend._reverse_debye_current(
+                    AdjElectricPrev=pre_step_adjoint[component_name + suffix],
+                    AdjPolarizationPrev=pre_step_adjoint[polarization_name],
+                    AdjPolarizationPost=adjoint_state[polarization_name],
+                    AdjCurrentPost=adj_current_corrected,
+                    DebyeDrive=entry["drive"],
+                    decay=float(entry["decay"]),
+                    dt=dt,
+                )
+            elif model_name == "drude":
+                _cuda_backend._reverse_drude_current(
+                    AdjElectricPrev=pre_step_adjoint[component_name + suffix],
+                    AdjCurrentPrev=pre_step_adjoint[current_name],
+                    AdjCurrentPost=adj_current_corrected,
+                    DrudeDrive=entry["drive"],
+                    decay=float(entry["decay"]),
+                )
+            else:
+                polarization_name = _adjoint.dispersive_state_name(component_name, model_name, index, "polarization") + suffix
+                _cuda_backend._reverse_lorentz_current(
+                    AdjElectricPrev=pre_step_adjoint[component_name + suffix],
+                    AdjPolarizationPrev=pre_step_adjoint[polarization_name],
+                    AdjCurrentPrev=pre_step_adjoint[current_name],
+                    AdjPolarizationPost=adjoint_state[polarization_name],
+                    AdjCurrentPost=adj_current_corrected,
+                    LorentzDrive=entry["drive"],
+                    decay=float(entry["decay"]),
+                    restoring=float(entry["restoring"]),
+                    dt=dt,
+                )
+
+    step_result = _adjoint._ReverseStepResult(
+        pre_step_adjoint=pre_step_adjoint,
+        grad_eps_ex=grad_eps_by_field["Ex"],
+        grad_eps_ey=grad_eps_by_field["Ey"],
+        grad_eps_ez=grad_eps_by_field["Ez"],
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_BLOCH_DISPERSIVE],
+        source_adjoint_state=dict(adjoint_state),
+    )
     return _adjoint._accumulate_source_term_gradients(
         step_result,
         solver=solver,
@@ -1876,6 +2035,11 @@ def register_native_reverse_backends() -> None:
     register_native_reverse_backend(
         _ReverseBackend.PYTHON_BLOCH,
         _reverse_step_bloch_native,
+        qualifier=_cuda_scene_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.PYTHON_BLOCH_DISPERSIVE,
+        _reverse_step_bloch_dispersive_native,
         qualifier=_cuda_scene_native_qualifies,
     )
     register_native_reverse_backend(
