@@ -413,11 +413,13 @@ def test_scene_with_conductive_medium_gradient_matches_fd():
 
 
 @_CUDA
-def test_conductive_reverse_routes_through_torch_vjp():
-    """A conductive scene must fall to the torch-VJP reverse backend: the analytic
-    standard/CPML backends model an eps-independent decay and would drop the
-    conduction-loss eps sensitivity."""
+def test_conductive_reverse_routes_through_native_conductive():
+    """A conductive CPML scene must route to the analytic native conductive
+    reverse backend: it carries the eps sensitivity of the semi-implicit
+    conduction-loss decay/curl pair that the linear standard/CPML reverse drops,
+    so it no longer falls back to the torch-VJP autograd path."""
     from witwin.maxwell.fdtd.adjoint.dispatch import _select_reverse_backend, _ReverseBackend
+    from witwin.maxwell.fdtd.checkpoint import checkpoint_schema
 
     prepared = mw.Simulation.fdtd(
         _conductive_scene(_SIGMA_E),
@@ -426,7 +428,9 @@ def test_conductive_reverse_routes_through_torch_vjp():
     ).prepare()
     solver = prepared.solver
     assert solver.conductive_enabled
-    forward_state = {name: getattr(solver, name) for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
+    # The conductive reverse composes with the CPML checkpoint layout, so the
+    # backend must be selected against the full frozen state (fields + psi).
+    forward_state = {name: getattr(solver, name) for name in checkpoint_schema(solver).state_names}
     backend = _select_reverse_backend(
         solver,
         forward_state,
@@ -435,7 +439,7 @@ def test_conductive_reverse_routes_through_torch_vjp():
         eps_ez=solver.eps_Ez,
         resolved_source_terms=None,
     )
-    assert backend is _ReverseBackend.TORCH_VJP, backend
+    assert backend is _ReverseBackend.PYTHON_CONDUCTIVE, backend
 
 
 # ---------------------------------------------------------------------------

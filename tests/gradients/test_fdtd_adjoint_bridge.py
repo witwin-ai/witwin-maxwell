@@ -456,6 +456,28 @@ def _fake_cpml_reverse_solver():
     )
 
 
+def _fake_conductive_cpml_reverse_solver(sigma_e=0.35, dt=0.05):
+    """CPML reverse solver carrying a static electric conductivity (sigma_e).
+
+    The conductive reverse recomputes the semi-implicit lossy decay/curl pair and
+    their eps sensitivities from the frozen ``cex_curl``/``eps_Ex``/``sigma_e_Ex``
+    leaves, so this solver adds the conduction attributes on top of the linear
+    CPML fake and rebakes ``c*_decay``/``c*_curl`` to be consistent with a nonzero
+    ``sigma_e`` (the reverse recovers the eps-independent PML factor from
+    ``cex_curl`` regardless, but keeping them consistent keeps the forward replica
+    physical)."""
+    base = _fake_cpml_reverse_solver()
+    values = dict(vars(base))
+    values["conductive_enabled"] = True
+    values["nonlinear_enabled"] = False
+    values["full_aniso_enabled"] = False
+    values["magnetic_dispersive_enabled"] = False
+    values["dt"] = dt
+    for comp in ("Ex", "Ey", "Ez"):
+        values[f"sigma_e_{comp}"] = torch.full_like(values[f"eps_{comp}"], float(sigma_e))
+    return SimpleNamespace(**values)
+
+
 def _dispersive_cpml_reverse_state_shapes():
     shapes = dict(_cpml_reverse_state_shapes())
     shapes[dispersive_state_name("Ex", "debye", 0, "polarization")] = shapes["Ex"]

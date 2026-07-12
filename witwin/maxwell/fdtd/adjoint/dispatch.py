@@ -23,6 +23,7 @@ class _ReverseBackend(Enum):
     PYTHON_DISPERSIVE = auto()
     PYTHON_STANDARD = auto()
     PYTHON_CPML = auto()
+    PYTHON_CONDUCTIVE = auto()
     TORCH_VJP = auto()
 
 
@@ -36,6 +37,7 @@ class _ReverseBackend(Enum):
 _NATIVE_REVERSE_LABELS: dict[_ReverseBackend, str] = {
     _ReverseBackend.PYTHON_STANDARD: "native_standard",
     _ReverseBackend.PYTHON_CPML: "native_cpml",
+    _ReverseBackend.PYTHON_CONDUCTIVE: "native_conductive",
     _ReverseBackend.PYTHON_BLOCH: "native_bloch",
     _ReverseBackend.PYTHON_DISPERSIVE: "native_dispersive",
     _ReverseBackend.TFSF: "native_tfsf",
@@ -325,6 +327,38 @@ def _supports_bloch(runtime, solver, forward_state, resolved_source_terms) -> bo
     return _supports_explicit_source_step(runtime, solver, resolved_source_terms)
 
 
+def _supports_conductive(runtime, solver, forward_state, resolved_source_terms) -> bool:
+    """Analytic native reverse for a static-conductive (sigma_e) CPML medium.
+
+    The semi-implicit conduction loss makes the electric ``decay`` and ``curl``
+    coefficients eps-dependent, so this variant carries the extra eps sensitivity
+    the linear CPML reverse drops. Gated to the pure real, single-material
+    conductive class on an absorbing (CPML) grid; conduction combined with an
+    open boundary, ADE dispersion, nonlinearity, full anisotropy, complex fields,
+    or TFSF still falls to the torch-VJP fallback."""
+    if not getattr(solver, "conductive_enabled", False):
+        return False
+    if getattr(solver, "nonlinear_enabled", False):
+        return False
+    if getattr(solver, "full_aniso_enabled", False):
+        return False
+    if not getattr(solver, "uses_cpml", False):
+        return False
+    if getattr(solver, "dispersive_enabled", False):
+        return False
+    if getattr(solver, "magnetic_dispersive_enabled", False):
+        return False
+    if has_complex_fields(solver):
+        return False
+    if getattr(solver, "tfsf_enabled", False):
+        return False
+    if not _matches_checkpoint_layout(solver, forward_state):
+        return False
+    if _has_open_face_conflicts(_face_codes(solver)):
+        return False
+    return _supports_explicit_source_step(runtime, solver, resolved_source_terms)
+
+
 def _select_reverse_backend(
     solver,
     forward_state,
@@ -342,6 +376,7 @@ def _select_reverse_backend(
     supports_standard = _supports_standard(runtime, solver, forward_state, resolved_source_terms)
     supports_dispersive = _supports_dispersive(runtime, solver, forward_state, resolved_source_terms)
     supports_bloch = _supports_bloch(runtime, solver, forward_state, resolved_source_terms)
+    supports_conductive = _supports_conductive(runtime, solver, forward_state, resolved_source_terms)
 
     decision_table = (
         (_ReverseBackend.GRATING_TFSF, supports_grating_tfsf),
@@ -350,6 +385,7 @@ def _select_reverse_backend(
         (_ReverseBackend.PYTHON_DISPERSIVE, supports_dispersive),
         (_ReverseBackend.PYTHON_STANDARD, supports_standard),
         (_ReverseBackend.PYTHON_CPML, supports_cpml),
+        (_ReverseBackend.PYTHON_CONDUCTIVE, supports_conductive),
         (_ReverseBackend.TORCH_VJP, True),
     )
     for backend, enabled in decision_table:
@@ -523,6 +559,23 @@ def _execute_reference_backend(
             _with_profile_sections(
                 profiler,
                 lambda: adjoint_reference.reverse_step_cpml_python_reference(
+                    solver,
+                    forward_state,
+                    adjoint_state,
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_source_terms,
+                    magnetic_fields=forward_magnetic_fields,
+                ),
+            )
+        )
+    if backend is _ReverseBackend.PYTHON_CONDUCTIVE:
+        return finish(
+            _with_profile_sections(
+                profiler,
+                lambda: adjoint_reference.reverse_step_conductive_cpml_python_reference(
                     solver,
                     forward_state,
                     adjoint_state,

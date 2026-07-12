@@ -10,6 +10,7 @@ from tests.gradients.test_fdtd_adjoint_bridge import (
     _dispersive_cpml_reverse_state_shapes,
     _dispersive_standard_reverse_state_shapes,
     _fake_bloch_reverse_solver,
+    _fake_conductive_cpml_reverse_solver,
     _fake_cpml_reverse_solver,
     _fake_dispersive_cpml_reverse_solver,
     _fake_dispersive_standard_reverse_solver,
@@ -223,6 +224,147 @@ def test_cuda_cpml_reverse_step_torch_reference_override_matches_baseline(monkey
     torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
     torch.testing.assert_close(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1.0e-5, atol=1.0e-6)
     torch.testing.assert_close(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1.0e-5, atol=1.0e-6)
+
+
+def test_cuda_conductive_reverse_step_matches_python_reference(monkeypatch):
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    torch.manual_seed(107)
+    solver = _move_solver_tensors_to_cuda(_fake_conductive_cpml_reverse_solver())
+    state_shapes = _cpml_reverse_state_shapes()
+    forward_state = {
+        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
+        for name in checkpoint_schema(solver).state_names
+    }
+    adjoint_state = {name: torch.randn_like(tensor) for name, tensor in forward_state.items()}
+    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
+    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
+    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
+
+    actual = reverse_step(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.0,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    expected = adjoint_baselines.reverse_step_conductive_cpml_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    torch.cuda.synchronize()
+
+    # A qualifying conductive CUDA scene resolves ``auto`` to the fused native
+    # conductive reverse step. It must reproduce the analytic Torch reference
+    # exactly, including the extra eps sensitivity of the semi-implicit
+    # conduction-loss decay/curl pair that the linear CPML reverse drops.
+    assert actual.backend == "native_conductive"
+    for name in forward_state:
+        torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1.0e-5, atol=1.0e-6)
+
+
+def test_cuda_conductive_reverse_step_torch_reference_override_matches_baseline(monkeypatch):
+    # Forcing the analytic reference on the same conductive CUDA scene must keep
+    # producing the Torch reference backend (and identical gradients), so the
+    # native conductive path is a drop-in replacement rather than the only option.
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_ADJOINT_BACKEND", "torch_reference")
+    torch.manual_seed(107)
+    solver = _move_solver_tensors_to_cuda(_fake_conductive_cpml_reverse_solver())
+    state_shapes = _cpml_reverse_state_shapes()
+    forward_state = {
+        name: torch.randn(state_shapes[name], device="cuda", dtype=torch.float32)
+        for name in checkpoint_schema(solver).state_names
+    }
+    adjoint_state = {name: torch.randn_like(tensor) for name, tensor in forward_state.items()}
+    eps_ex = torch.full_like(forward_state["Ex"], 2.3, requires_grad=True)
+    eps_ey = torch.full_like(forward_state["Ey"], 2.7, requires_grad=True)
+    eps_ez = torch.full_like(forward_state["Ez"], 3.1, requires_grad=True)
+
+    actual = reverse_step(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=0.0,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    expected = adjoint_baselines.reverse_step_conductive_cpml_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    torch.cuda.synchronize()
+
+    assert actual.backend == "python_reference_conductive_cpml"
+    for name in forward_state:
+        torch.testing.assert_close(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name], rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ex, expected.grad_eps_ex, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ey, expected.grad_eps_ey, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual.grad_eps_ez, expected.grad_eps_ez, rtol=1.0e-5, atol=1.0e-6)
+
+
+def test_cuda_collocation_transpose_matches_autograd(monkeypatch):
+    # The native collocation-transpose scatters the |E|^2 cotangent back onto the
+    # three E-edge tensors. It is the shared building block the Kerr and general
+    # nonlinear reverses reuse, so validate it in isolation against the exact
+    # transpose ``torch.autograd.grad`` performs over the Torch collocation replica
+    # ``_collocated_field_square``, including the face-clamped weight folding.
+    monkeypatch.setenv("WITWIN_MAXWELL_FDTD_BACKEND", "cuda")
+    from witwin.maxwell.fdtd.cuda import backend as cuda_backend
+
+    torch.manual_seed(7)
+    ex = torch.randn(2, 4, 5, device="cuda", dtype=torch.float32)
+    ey = torch.randn(3, 3, 5, device="cuda", dtype=torch.float32)
+    ez = torch.randn(3, 4, 4, device="cuda", dtype=torch.float32)
+    g_ex = torch.randn_like(ex)
+    g_ey = torch.randn_like(ey)
+    g_ez = torch.randn_like(ez)
+
+    ex_leaf = ex.clone().requires_grad_(True)
+    ey_leaf = ey.clone().requires_grad_(True)
+    ez_leaf = ez.clone().requires_grad_(True)
+    field_sq = adjoint_core._collocated_field_square(ex_leaf, ey_leaf, ez_leaf)
+    objective = (
+        (field_sq["Ex"] * g_ex).sum()
+        + (field_sq["Ey"] * g_ey).sum()
+        + (field_sq["Ez"] * g_ez).sum()
+    )
+    expected_ex, expected_ey, expected_ez = torch.autograd.grad(
+        objective, [ex_leaf, ey_leaf, ez_leaf]
+    )
+
+    adj_ex = torch.zeros_like(ex)
+    adj_ey = torch.zeros_like(ey)
+    adj_ez = torch.zeros_like(ez)
+    cuda_backend._collocation_transpose(
+        AdjEx=adj_ex,
+        AdjEy=adj_ey,
+        AdjEz=adj_ez,
+        GEx=g_ex,
+        GEy=g_ey,
+        GEz=g_ez,
+        Ex=ex,
+        Ey=ey,
+        Ez=ez,
+    )
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(adj_ex, expected_ex, rtol=1.0e-5, atol=1.0e-5)
+    torch.testing.assert_close(adj_ey, expected_ey, rtol=1.0e-5, atol=1.0e-5)
+    torch.testing.assert_close(adj_ez, expected_ez, rtol=1.0e-5, atol=1.0e-5)
 
 
 def test_cuda_bloch_reverse_step_matches_python_reference(monkeypatch):

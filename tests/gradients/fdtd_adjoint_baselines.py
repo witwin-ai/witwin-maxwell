@@ -156,6 +156,29 @@ def reverse_step_cpml_python_reference(
     )
 
 
+def reverse_step_conductive_cpml_python_reference(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value=0.0,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms=None,
+):
+    return fdtd_adjoint_reference.reverse_step_conductive_cpml_python_reference(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+
 def reverse_step_bloch_python_reference(
     solver,
     forward_state,

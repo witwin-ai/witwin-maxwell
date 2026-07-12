@@ -2539,6 +2539,110 @@ def _conductive_electric_coefficients(solver, *, eps_ex, eps_ey, eps_ez):
     return coeffs
 
 
+def _conductive_reverse_coefficients(solver, *, eps_ex, eps_ey, eps_ez):
+    """Per-component ``(decay, curl, half)`` for the static-conductive reverse.
+
+    Identical bake to :func:`_conductive_electric_coefficients` but also returns
+    the semi-implicit ``half = 0.5*sigma_e*dt/eps`` (recomputed from the
+    differentiable ``eps`` leaf) so the reverse can form the analytic
+    ``d(decay)/d(eps)`` and ``d(curl)/d(eps)`` sensitivities without an autograd
+    VJP: ``d(decay)/d(eps) = 2*half*curl/(dt*(1+half))`` and
+    ``d(curl)/d(eps) = -curl/(eps*(1+half))``. The eps-independent PML/PEC
+    ``factor`` is recovered from the frozen forward curl so those scalings are
+    preserved exactly."""
+    dt = float(solver.dt)
+    coeffs = {}
+    for name, eps, eps_fwd, sigma, curl_fwd in (
+        ("Ex", eps_ex, solver.eps_Ex, solver.sigma_e_Ex, solver.cex_curl),
+        ("Ey", eps_ey, solver.eps_Ey, solver.sigma_e_Ey, solver.cey_curl),
+        ("Ez", eps_ez, solver.eps_Ez, solver.sigma_e_Ez, solver.cez_curl),
+    ):
+        half_fwd = 0.5 * sigma * dt / eps_fwd
+        factor = curl_fwd * eps_fwd * (1.0 + half_fwd) / dt
+        half = 0.5 * sigma * dt / eps
+        denom = 1.0 + half
+        decay = ((1.0 - half) / denom) * factor
+        curl = (dt / eps / denom) * factor
+        coeffs[name] = (decay, curl, half)
+    return coeffs
+
+
+def _reverse_electric_component_cpml_conductive(
+    adj_updated,
+    adj_psi_pos_post,
+    adj_psi_neg_post,
+    field,
+    *,
+    d_pos,
+    d_neg,
+    decay,
+    curl,
+    half,
+    eps,
+    dt,
+    low_mode_pos,
+    high_mode_pos,
+    low_mode_neg,
+    high_mode_neg,
+    axis_pos,
+    axis_neg,
+    psi_pos,
+    psi_neg,
+    b_pos,
+    c_pos,
+    inv_kappa_pos,
+    b_neg,
+    c_neg,
+    inv_kappa_neg,
+):
+    """Static-conductive analytic reverse of the semi-implicit CPML electric update.
+
+    Structurally identical to :func:`_reverse_electric_component_cpml` (the psi
+    recursion, ``adj_d_pos``/``adj_d_neg`` folds, and pre-step field pullback all
+    reuse the CPML stretch unchanged, because the conductive update only rescales
+    the ``decay``/``curl`` coefficient pair). The one difference is the eps
+    gradient: the semi-implicit ``decay`` and ``curl`` both depend on ``eps``
+    through the loss denominator, so the linear rule ``-curl*curl_term/eps^2`` is
+    replaced by the exact
+    ``adj_updated*(E_prev*d(decay)/d(eps) + curl_term*d(curl)/d(eps))``."""
+    inactive_pos, pec_pos = _boundary_axis_masks(field.shape, axis_pos, low_mode_pos, high_mode_pos, field.device)
+    inactive_neg, pec_neg = _boundary_axis_masks(field.shape, axis_neg, low_mode_neg, high_mode_neg, field.device)
+    pec_mask = pec_pos | pec_neg
+    inactive_mask = (~pec_mask) & (inactive_pos | inactive_neg)
+    active_mask = (~pec_mask) & (~inactive_mask)
+    keep_mask = inactive_mask | pec_mask
+
+    active = active_mask.to(device=field.device, dtype=field.dtype)
+    inactive = inactive_mask.to(device=field.device, dtype=field.dtype)
+    keep = keep_mask.to(device=field.device, dtype=field.dtype)
+
+    b_pos_term = _broadcast_vector(b_pos, axis_pos)
+    c_pos_term = _broadcast_vector(c_pos, axis_pos)
+    inv_kappa_pos_term = _broadcast_vector(inv_kappa_pos, axis_pos)
+    b_neg_term = _broadcast_vector(b_neg, axis_neg)
+    c_neg_term = _broadcast_vector(c_neg, axis_neg)
+    inv_kappa_neg_term = _broadcast_vector(inv_kappa_neg, axis_neg)
+
+    psi_pos_candidate = b_pos_term * psi_pos + c_pos_term * d_pos
+    psi_neg_candidate = b_neg_term * psi_neg + c_neg_term * d_neg
+    curl_term = (d_pos * inv_kappa_pos_term + psi_pos_candidate) - (d_neg * inv_kappa_neg_term + psi_neg_candidate)
+
+    denom = 1.0 + half
+    d_decay_d_eps = 2.0 * half * curl / (float(dt) * denom)
+    d_curl_d_eps = -curl / (eps * denom)
+
+    adj_field = inactive * adj_updated + active * (adj_updated * decay)
+    adj_curl_term = active * adj_updated * curl
+    grad_eps = active * adj_updated * (field * d_decay_d_eps + curl_term * d_curl_d_eps)
+    adj_psi_pos_candidate = active * adj_psi_pos_post + adj_curl_term
+    adj_psi_neg_candidate = active * adj_psi_neg_post - adj_curl_term
+    adj_psi_pos = keep * adj_psi_pos_post + active * (b_pos_term * adj_psi_pos_candidate)
+    adj_psi_neg = keep * adj_psi_neg_post + active * (b_neg_term * adj_psi_neg_candidate)
+    adj_d_pos = inv_kappa_pos_term * adj_curl_term + c_pos_term * adj_psi_pos_candidate
+    adj_d_neg = -inv_kappa_neg_term * adj_curl_term + c_neg_term * adj_psi_neg_candidate
+    return adj_field, adj_d_pos, adj_d_neg, grad_eps, adj_psi_pos, adj_psi_neg
+
+
 def _general_nonlinear_electric_coefficients(
     solver,
     state,
