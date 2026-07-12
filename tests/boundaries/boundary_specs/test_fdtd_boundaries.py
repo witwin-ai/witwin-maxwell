@@ -227,10 +227,7 @@ def test_generic_periodic_projection_kernel_matches_expected_faces(cuda_fdtd_sol
     cuda_fdtd_solver.fdtd_module.projectPeriodicBoundary3D(
         field=field,
         axis=axis,
-    ).launchRaw(
-        blockSize=cuda_fdtd_solver.kernel_block_size,
-        gridSize=cuda_fdtd_solver._compute_face_launch_shape(field, axis),
-    )
+    ).launchRaw()
     torch.cuda.synchronize()
 
     assert np.allclose(field.detach().cpu().numpy(), expected)
@@ -251,10 +248,7 @@ def test_generic_bloch_projection_kernel_matches_expected_phase(cuda_fdtd_solver
         axis=axis,
         phaseCos=float(phase.real),
         phaseSin=float(phase.imag),
-    ).launchRaw(
-        blockSize=cuda_fdtd_solver.kernel_block_size,
-        gridSize=cuda_fdtd_solver._compute_face_launch_shape(real_field, axis),
-    )
+    ).launchRaw()
     torch.cuda.synchronize()
 
     assert np.allclose(real_field.detach().cpu().numpy(), expected_real)
@@ -274,10 +268,7 @@ def test_generic_pec_clamp_kernel_zeroes_selected_boundary_axes(cuda_fdtd_solver
         field=field,
         axisA=axis_a,
         axisB=axis_b,
-    ).launchRaw(
-        blockSize=cuda_fdtd_solver.kernel_block_size,
-        gridSize=cuda_fdtd_solver._compute_linear_launch_shape(field.numel()),
-    )
+    ).launchRaw()
     torch.cuda.synchronize()
 
     assert np.allclose(field.detach().cpu().numpy(), expected)

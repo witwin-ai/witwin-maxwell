@@ -121,7 +121,6 @@ def _bloch_capture_solver():
     return SimpleNamespace(
         scene=SimpleNamespace(boundary=boundary),
         fdtd_module=fdtd_module,
-        kernel_block_size=(1, 1, 1),
         Ex=object(),
         Ex_imag=object(),
         Ey=object(),

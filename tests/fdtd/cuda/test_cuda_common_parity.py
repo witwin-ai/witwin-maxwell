@@ -90,7 +90,7 @@ def test_runtime_clamp_field_face_uses_native_module(monkeypatch):
 
     monkeypatch.setattr(backend, "_COMPILED_EXTENSION", CountingExtension())
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
-    solver = SimpleNamespace(fdtd_module=backend.get_native_fdtd_module(), kernel_block_size=(32, 8, 1))
+    solver = SimpleNamespace(fdtd_module=backend.get_native_fdtd_module())
 
     clamp_field_face(solver, field, 2, "high")
     torch.cuda.synchronize()
@@ -135,7 +135,6 @@ def test_runtime_pec_enforcement_merges_native_full_faces(monkeypatch):
     monkeypatch.setenv("WITWIN_MAXWELL_FDTD_CUDA_USE_EXTENSION", "1")
     solver = SimpleNamespace(
         fdtd_module=backend.get_native_fdtd_module(),
-        kernel_block_size=(32, 8, 1),
         has_pec_faces=True,
         boundary_x_low_code=BOUNDARY_PEC,
         boundary_x_high_code=BOUNDARY_PEC,
@@ -197,7 +196,6 @@ def test_runtime_native_pec_enforcement_handles_partial_faces(monkeypatch):
 
     solver = SimpleNamespace(
         fdtd_module=backend.get_native_fdtd_module(),
-        kernel_block_size=(32, 8, 1),
         has_pec_faces=True,
         boundary_x_low_code=BOUNDARY_PEC,
         boundary_x_high_code=BOUNDARY_NONE,

@@ -137,10 +137,7 @@ def replay_standard_magnetic_step(
         HxCurl=solver.chx_curl,
         invDy=solver.inv_dy_h,
         invDz=solver.inv_dz_h,
-    ).launchRaw(
-        blockSize=block_size,
-        gridSize=runtime._adjoint_launch_shape(solver, "Hx", hx_mid),
-    )
+    ).launchRaw()
     forward_module.updateMagneticFieldHyStandard3D(
         Hy=hy_mid,
         Ex=forward_state["Ex"],
@@ -149,10 +146,7 @@ def replay_standard_magnetic_step(
         HyCurl=solver.chy_curl,
         invDx=solver.inv_dx_h,
         invDz=solver.inv_dz_h,
-    ).launchRaw(
-        blockSize=block_size,
-        gridSize=runtime._adjoint_launch_shape(solver, "Hy", hy_mid),
-    )
+    ).launchRaw()
     forward_module.updateMagneticFieldHzStandard3D(
         Hz=hz_mid,
         Ex=forward_state["Ex"],
@@ -161,10 +155,7 @@ def replay_standard_magnetic_step(
         HzCurl=solver.chz_curl,
         invDx=solver.inv_dx_h,
         invDy=solver.inv_dy_h,
-    ).launchRaw(
-        blockSize=block_size,
-        gridSize=runtime._adjoint_launch_shape(solver, "Hz", hz_mid),
-    )
+    ).launchRaw()
 
     magnetic_fields = {
         "Hx": hx_mid,
@@ -183,10 +174,7 @@ def replay_standard_magnetic_step(
             HxCurl=solver.chx_curl,
             invDy=solver.inv_dy_h,
             invDz=solver.inv_dz_h,
-        ).launchRaw(
-            blockSize=block_size,
-            gridSize=runtime._adjoint_launch_shape(solver, "Hx", hx_mid_imag),
-        )
+        ).launchRaw()
         forward_module.updateMagneticFieldHyStandard3D(
             Hy=hy_mid_imag,
             Ex=forward_state["Ex_imag"],
@@ -195,10 +183,7 @@ def replay_standard_magnetic_step(
             HyCurl=solver.chy_curl,
             invDx=solver.inv_dx_h,
             invDz=solver.inv_dz_h,
-        ).launchRaw(
-            blockSize=block_size,
-            gridSize=runtime._adjoint_launch_shape(solver, "Hy", hy_mid_imag),
-        )
+        ).launchRaw()
         forward_module.updateMagneticFieldHzStandard3D(
             Hz=hz_mid_imag,
             Ex=forward_state["Ex_imag"],
@@ -207,10 +192,7 @@ def replay_standard_magnetic_step(
             HzCurl=solver.chz_curl,
             invDx=solver.inv_dx_h,
             invDy=solver.inv_dy_h,
-        ).launchRaw(
-            blockSize=block_size,
-            gridSize=runtime._adjoint_launch_shape(solver, "Hz", hz_mid_imag),
-        )
+        ).launchRaw()
         magnetic_fields.update(
             Hx_imag=hx_mid_imag,
             Hy_imag=hy_mid_imag,

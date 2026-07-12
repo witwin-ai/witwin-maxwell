@@ -235,7 +235,7 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         CyHxZ=solver.cpml_c_h_z,
         invDy=solver.inv_dy_h,
         invDz=solver.inv_dz_h,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hx"])
+    ).launchRaw()
     module.updateMagneticFieldHy3D(
         Hy=ref_hy,
         Ex=ref_ex,
@@ -252,7 +252,7 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         CyHyZ=solver.cpml_c_h_z,
         invDx=solver.inv_dx_h,
         invDz=solver.inv_dz_h,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hy"])
+    ).launchRaw()
     module.updateMagneticFieldHz3D(
         Hz=ref_hz,
         Ex=ref_ex,
@@ -269,7 +269,7 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         CyHzY=solver.cpml_c_h_y,
         invDx=solver.inv_dx_h,
         invDy=solver.inv_dy_h,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hz"])
+    ).launchRaw()
 
     module.updateElectricFieldExCpml3D(
         Ex=ref_ex,
@@ -291,7 +291,7 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         yHighBoundaryMode=solver.boundary_y_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     module.updateElectricFieldEyCpml3D(
         Ey=ref_ey,
         Hx=ref_hx,
@@ -312,7 +312,7 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         xHighBoundaryMode=solver.boundary_x_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     module.updateElectricFieldEzCpml3D(
         Ez=ref_ez,
         Hx=ref_hx,
@@ -333,7 +333,7 @@ def test_fdtd_cpml_slab_updates_match_dense_kernels_for_one_step():
         xHighBoundaryMode=solver.boundary_x_high_code,
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
 
     for name, value in initial_state.items():
         getattr(solver, name).copy_(value)

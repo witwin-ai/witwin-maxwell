@@ -28,37 +28,6 @@ from ..excitation import (
 )
 
 
-def compute_linear_launch_shape(solver, length):
-    threads_per_block = (
-        solver.kernel_block_size[0] * solver.kernel_block_size[1] * solver.kernel_block_size[2]
-    )
-    grid_x = max(1, (int(length) + threads_per_block - 1) // threads_per_block)
-    return (grid_x, 1, 1)
-
-
-def compute_face_launch_shape(solver, field, axis):
-    sizes = tuple(int(dim) for dim in field.shape)
-    face_sizes = (
-        sizes[1] * sizes[2],
-        sizes[0] * sizes[2],
-        sizes[0] * sizes[1],
-    )
-    return compute_linear_launch_shape(solver, face_sizes[int(axis)])
-
-
-def refresh_launch_shapes(solver):
-    solver._field_launch_shapes = {
-        "Ex": compute_linear_launch_shape(solver, int(solver.Ex.numel())),
-        "Ey": compute_linear_launch_shape(solver, int(solver.Ey.numel())),
-        "Ez": compute_linear_launch_shape(solver, int(solver.Ez.numel())),
-        "Hx": compute_linear_launch_shape(solver, int(solver.Hx.numel())),
-        "Hy": compute_linear_launch_shape(solver, int(solver.Hy.numel())),
-        "Hz": compute_linear_launch_shape(solver, int(solver.Hz.numel())),
-    }
-    electric_numel = max(int(solver.Ex.numel()), int(solver.Ey.numel()), int(solver.Ez.numel()))
-    solver._spectral_launch_shapes = {"electric": compute_linear_launch_shape(solver, electric_numel)}
-
-
 def iter_cpml_memory_regions(solver, attr_name):
     layout = getattr(solver, "_cpml_memory_layouts", {}).get(attr_name)
     if layout is None:
@@ -79,14 +48,15 @@ def iter_cpml_memory_regions(solver, attr_name):
             "length": length,
             "offsets": tuple(offsets),
             "psi": psi_region,
-            "grid": compute_linear_launch_shape(solver, int(psi_region.numel())),
         }
 
 
 def cpml_layout_params(solver, attr_name):
     layout = getattr(solver, "_cpml_memory_layouts", {}).get(attr_name)
     if layout is None:
-        return 0, 0, 0
+        result = (0, 0, 0)
+        solver._cpml_layout_cache[attr_name] = result
+        return result
     low = next((region for region in layout["regions"] if region["side"] == "low"), None)
     high = next((region for region in layout["regions"] if region["side"] == "high"), None)
     low_length = 0 if low is None else int(low["length"])
@@ -120,7 +90,7 @@ def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, *, imag=Fa
         CyHxZ=solver.cpml_c_h_z,
         invDy=solver.inv_dy_h,
         invDz=solver.inv_dz_h,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hx"])
+    ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHy3D(
         Hy=hy,
         Ex=ex,
@@ -137,7 +107,7 @@ def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, *, imag=Fa
         CyHyZ=solver.cpml_c_h_z,
         invDx=solver.inv_dx_h,
         invDz=solver.inv_dz_h,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hy"])
+    ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHz3D(
         Hz=hz,
         Ex=ex,
@@ -154,7 +124,7 @@ def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, *, imag=Fa
         CyHzY=solver.cpml_c_h_y,
         invDx=solver.inv_dx_h,
         invDy=solver.inv_dy_h,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hz"])
+    ).launchRaw()
 
 
 def update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
@@ -193,7 +163,9 @@ def update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez, *, im
         psiHxZLowLength=psi_hx_z_low,
         psiHxZHighStart=psi_hx_z_high_start,
         psiHxZHighLength=psi_hx_z_high,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hx"])
+        uniformDecay=solver._coefficient_uniformity["chx_decay"],
+        uniformCurl=solver._coefficient_uniformity["chx_curl"],
+    ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHyCpmlCompressed3D(
         Hy=hy,
         Ex=ex,
@@ -216,7 +188,9 @@ def update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez, *, im
         psiHyZLowLength=psi_hy_z_low,
         psiHyZHighStart=psi_hy_z_high_start,
         psiHyZHighLength=psi_hy_z_high,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hy"])
+        uniformDecay=solver._coefficient_uniformity["chy_decay"],
+        uniformCurl=solver._coefficient_uniformity["chy_curl"],
+    ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHzCpmlCompressed3D(
         Hz=hz,
         Ex=ex,
@@ -239,7 +213,9 @@ def update_magnetic_fields_cpml_compressed(solver, hx, hy, hz, ex, ey, ez, *, im
         psiHzYLowLength=psi_hz_y_low,
         psiHzYHighStart=psi_hz_y_high_start,
         psiHzYHighLength=psi_hz_y_high,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hz"])
+        uniformDecay=solver._coefficient_uniformity["chz_decay"],
+        uniformCurl=solver._coefficient_uniformity["chz_curl"],
+    ).launchRaw()
 
 
 def update_magnetic_fields_cpml(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
@@ -258,7 +234,7 @@ def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
         HxCurl=solver.chx_curl,
         invDy=solver.inv_dy_h,
         invDz=solver.inv_dz_h,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hx"])
+    ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHyStandard3D(
         Hy=hy,
         Ex=ex,
@@ -267,7 +243,7 @@ def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
         HyCurl=solver.chy_curl,
         invDx=solver.inv_dx_h,
         invDz=solver.inv_dz_h,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hy"])
+    ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHzStandard3D(
         Hz=hz,
         Ex=ex,
@@ -276,7 +252,7 @@ def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
         HzCurl=solver.chz_curl,
         invDx=solver.inv_dx_h,
         invDy=solver.inv_dy_h,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Hz"])
+    ).launchRaw()
 
 
 def update_magnetic_fields(solver, hx, hy, hz, ex, ey, ez, *, imag=False):
@@ -324,7 +300,7 @@ def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
         yHighBoundaryMode=solver.boundary_y_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyCpml3D(
         Ey=ey,
         Hx=hx,
@@ -345,7 +321,7 @@ def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
         xHighBoundaryMode=solver.boundary_x_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzCpml3D(
         Ez=ez,
         Hx=hx,
@@ -366,7 +342,7 @@ def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
         xHighBoundaryMode=solver.boundary_x_high_code,
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
 
 
 def update_electric_fields_cpml_compressed(solver, ex, ey, ez, hx, hy, hz):
@@ -405,7 +381,9 @@ def update_electric_fields_cpml_compressed(solver, ex, ey, ez, hx, hy, hz):
         psiExZLowLength=psi_ex_z_low,
         psiExZHighStart=psi_ex_z_high_start,
         psiExZHighLength=psi_ex_z_high,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+        uniformDecay=None if ex_decay is not solver.cex_decay else solver._coefficient_uniformity["cex_decay"],
+        uniformCurl=None if ex_curl is not solver.cex_curl else solver._coefficient_uniformity["cex_curl"],
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyCpmlCompressed3D(
         Ey=ey,
         Hx=hx,
@@ -432,7 +410,9 @@ def update_electric_fields_cpml_compressed(solver, ex, ey, ez, hx, hy, hz):
         psiEyZLowLength=psi_ey_z_low,
         psiEyZHighStart=psi_ey_z_high_start,
         psiEyZHighLength=psi_ey_z_high,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+        uniformDecay=None if ey_decay is not solver.cey_decay else solver._coefficient_uniformity["cey_decay"],
+        uniformCurl=None if ey_curl is not solver.cey_curl else solver._coefficient_uniformity["cey_curl"],
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzCpmlCompressed3D(
         Ez=ez,
         Hx=hx,
@@ -459,7 +439,9 @@ def update_electric_fields_cpml_compressed(solver, ex, ey, ez, hx, hy, hz):
         psiEzYLowLength=psi_ez_y_low,
         psiEzYHighStart=psi_ez_y_high_start,
         psiEzYHighLength=psi_ez_y_high,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+        uniformDecay=None if ez_decay is not solver.cez_decay else solver._coefficient_uniformity["cez_decay"],
+        uniformCurl=None if ez_curl is not solver.cez_curl else solver._coefficient_uniformity["cez_curl"],
+    ).launchRaw()
 
 
 def update_electric_fields_cpml(solver, ex, ey, ez, hx, hy, hz):
@@ -484,7 +466,7 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
         yHighBoundaryMode=solver.boundary_y_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyStandard3D(
         Ey=ey,
         Hx=hx,
@@ -497,7 +479,7 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
         xHighBoundaryMode=solver.boundary_x_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzStandard3D(
         Ez=ez,
         Hx=hx,
@@ -510,7 +492,7 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
         xHighBoundaryMode=solver.boundary_x_high_code,
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
 
 
 def _modulation_time_instants(solver, time_value):
@@ -549,7 +531,7 @@ def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, ti
         yHighBoundaryMode=solver.boundary_y_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyModulated3D(
         Ey=ey,
         Hx=hx,
@@ -567,7 +549,7 @@ def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, ti
         xHighBoundaryMode=solver.boundary_x_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzModulated3D(
         Ez=ez,
         Hx=hx,
@@ -585,7 +567,7 @@ def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, ti
         xHighBoundaryMode=solver.boundary_x_high_code,
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
 
 
 def update_electric_fields_modulated_cpml(solver, ex, ey, ez, hx, hy, hz, time_value):
@@ -624,7 +606,7 @@ def update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, 
         yHighBoundaryMode=solver.boundary_y_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyCpmlModulated3D(
         Ey=ey,
         Hx=hx,
@@ -650,7 +632,7 @@ def update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, 
         xHighBoundaryMode=solver.boundary_x_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzCpmlModulated3D(
         Ez=ez,
         Hx=hx,
@@ -676,7 +658,7 @@ def update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, 
         xHighBoundaryMode=solver.boundary_x_high_code,
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
 
 
 def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy, hz, time_value):
@@ -723,7 +705,7 @@ def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy,
         psiExZLowLength=psi_ex_z_low,
         psiExZHighStart=psi_ex_z_high_start,
         psiExZHighLength=psi_ex_z_high,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyCpmlModulatedCompressed3D(
         Ey=ey,
         Hx=hx,
@@ -755,7 +737,7 @@ def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy,
         psiEyZLowLength=psi_ey_z_low,
         psiEyZHighStart=psi_ey_z_high_start,
         psiEyZHighLength=psi_ey_z_high,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzCpmlModulatedCompressed3D(
         Ez=ez,
         Hx=hx,
@@ -787,7 +769,7 @@ def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy,
         psiEzYLowLength=psi_ez_y_low,
         psiEzYHighStart=psi_ez_y_high_start,
         psiEzYHighLength=psi_ez_y_high,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
 
 
 def update_electric_fields(solver, ex, ey, ez, hx, hy, hz, *, time_value=None):
@@ -849,7 +831,7 @@ def apply_full_aniso_corrections(solver):
         periodicX=periodic_x,
         periodicY=periodic_y,
         periodicZ=periodic_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyFullAniso3D(
         Ey=solver.Ey,
         Hx=solver.Hx,
@@ -863,7 +845,7 @@ def apply_full_aniso_corrections(solver):
         periodicX=periodic_x,
         periodicY=periodic_y,
         periodicZ=periodic_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzFullAniso3D(
         Ez=solver.Ez,
         Hx=solver.Hx,
@@ -877,7 +859,7 @@ def apply_full_aniso_corrections(solver):
         periodicX=periodic_x,
         periodicY=periodic_y,
         periodicZ=periodic_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
 
 
 def apply_full_aniso_corrections_cpml(solver):
@@ -916,7 +898,7 @@ def apply_full_aniso_corrections_cpml(solver):
         PsiX=solver.psi_ex_aniso_x,
         PsiY=solver.psi_ex_aniso_y,
         PsiZ=solver.psi_ex_aniso_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyFullAnisoCpml3D(
         Ey=solver.Ey,
         Hx=solver.Hx,
@@ -942,7 +924,7 @@ def apply_full_aniso_corrections_cpml(solver):
         PsiX=solver.psi_ey_aniso_x,
         PsiY=solver.psi_ey_aniso_y,
         PsiZ=solver.psi_ey_aniso_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzFullAnisoCpml3D(
         Ez=solver.Ez,
         Hx=solver.Hx,
@@ -968,7 +950,7 @@ def apply_full_aniso_corrections_cpml(solver):
         PsiX=solver.psi_ez_aniso_x,
         PsiY=solver.psi_ez_aniso_y,
         PsiZ=solver.psi_ez_aniso_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
 
 
 def _full_aniso_conductive(solver) -> bool:
@@ -1015,7 +997,7 @@ def apply_full_aniso_conduction(solver):
         periodicX=periodic_x,
         periodicY=periodic_y,
         periodicZ=periodic_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.applyAnisoOffdiagCurrentEy3D(
         Ey=solver.Ey,
         Jx=currents["Ex"],
@@ -1025,7 +1007,7 @@ def apply_full_aniso_conduction(solver):
         periodicX=periodic_x,
         periodicY=periodic_y,
         periodicZ=periodic_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.applyAnisoOffdiagCurrentEz3D(
         Ez=solver.Ez,
         Jx=currents["Ex"],
@@ -1035,7 +1017,7 @@ def apply_full_aniso_conduction(solver):
         periodicX=periodic_x,
         periodicY=periodic_y,
         periodicZ=periodic_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
 
 
 def update_electric_fields_bloch(solver):
@@ -1061,7 +1043,7 @@ def update_electric_fields_bloch(solver):
         phaseSinZ=solver.boundary_phase_sin[2],
         invDy=solver.inv_dy_e,
         invDz=solver.inv_dz_e,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyBloch3D(
         EyReal=solver.Ey,
         EyImag=solver.Ey_imag,
@@ -1077,7 +1059,7 @@ def update_electric_fields_bloch(solver):
         phaseSinZ=solver.boundary_phase_sin[2],
         invDx=solver.inv_dx_e,
         invDz=solver.inv_dz_e,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzBloch3D(
         EzReal=solver.Ez,
         EzImag=solver.Ez_imag,
@@ -1093,7 +1075,7 @@ def update_electric_fields_bloch(solver):
         phaseSinY=solver.boundary_phase_sin[1],
         invDx=solver.inv_dx_e,
         invDy=solver.inv_dy_e,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
 
 
 def update_electric_fields_bloch_xy_standard_z(solver):
@@ -1119,7 +1101,7 @@ def update_electric_fields_bloch_xy_standard_z(solver):
         invDz=solver.inv_dz_e,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyBlochXStandardZ3D(
         EyReal=solver.Ey,
         EyImag=solver.Ey_imag,
@@ -1135,7 +1117,7 @@ def update_electric_fields_bloch_xy_standard_z(solver):
         invDz=solver.inv_dz_e,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzBloch3D(
         EzReal=solver.Ez,
         EzImag=solver.Ez_imag,
@@ -1151,7 +1133,7 @@ def update_electric_fields_bloch_xy_standard_z(solver):
         phaseSinY=solver.boundary_phase_sin[1],
         invDx=solver.inv_dx_e,
         invDy=solver.inv_dy_e,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
 
 
 def _bloch_cpml_pml_axis(solver):
@@ -1191,7 +1173,7 @@ def _validate_bloch_cpml_update_layout(solver):
     return pml_axis
 
 
-def _iter_cpml_field_regions(solver, field, curl, attr_name, field_key):
+def _iter_cpml_field_regions(solver, field, curl, attr_name):
     layout = getattr(solver, "_cpml_memory_layouts", {}).get(attr_name)
     if layout is None:
         yield {
@@ -1199,7 +1181,6 @@ def _iter_cpml_field_regions(solver, field, curl, attr_name, field_key):
             "curl": curl,
             "psi": getattr(solver, attr_name),
             "offsets": (0, 0, 0),
-            "grid": solver._field_launch_shapes[field_key],
         }
         return
 
@@ -1212,14 +1193,13 @@ def _iter_cpml_field_regions(solver, field, curl, attr_name, field_key):
             "curl": curl.narrow(axis, start, length),
             "psi": region["psi"],
             "offsets": region["offsets"],
-            "grid": region["grid"],
         }
 
 
 def _apply_electric_z_cpml_corrections(solver, ex, ey, hx, hy, *, imag=False):
     psi_ex_z_attr = _cpml_memory_attr("psi_ex_z", imag=imag)
     psi_ey_z_attr = _cpml_memory_attr("psi_ey_z", imag=imag)
-    for region in _iter_cpml_field_regions(solver, ex, solver.cex_curl, psi_ex_z_attr, "Ex"):
+    for region in _iter_cpml_field_regions(solver, ex, solver.cex_curl, psi_ex_z_attr):
         offset_i, offset_j, offset_k = region["offsets"]
         solver.fdtd_module.applyElectricFieldExCpmlZCorrection3D(
             Ex=region["field"],
@@ -1237,9 +1217,9 @@ def _apply_electric_z_cpml_corrections(solver, ex, ey, hx, hy, *, imag=False):
             yHighBoundaryMode=solver.boundary_y_high_code,
             fullSizeY=solver.Ex.shape[1],
             fullSizeZ=solver.Ex.shape[2],
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
+        ).launchRaw()
 
-    for region in _iter_cpml_field_regions(solver, ey, solver.cey_curl, psi_ey_z_attr, "Ey"):
+    for region in _iter_cpml_field_regions(solver, ey, solver.cey_curl, psi_ey_z_attr):
         offset_i, offset_j, offset_k = region["offsets"]
         solver.fdtd_module.applyElectricFieldEyCpmlZCorrection3D(
             Ey=region["field"],
@@ -1257,7 +1237,7 @@ def _apply_electric_z_cpml_corrections(solver, ex, ey, hx, hy, *, imag=False):
             xHighBoundaryMode=solver.boundary_x_high_code,
             fullSizeX=solver.Ey.shape[0],
             fullSizeZ=solver.Ey.shape[2],
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
+        ).launchRaw()
 
 
 def _apply_electric_y_cpml_corrections(solver, ex, ez, hx, hz, *, imag=False):
@@ -1266,7 +1246,7 @@ def _apply_electric_y_cpml_corrections(solver, ex, ez, hx, hz, *, imag=False):
     # base full-Bloch update already applied the un-stretched derivatives.
     psi_ex_y_attr = _cpml_memory_attr("psi_ex_y", imag=imag)
     psi_ez_y_attr = _cpml_memory_attr("psi_ez_y", imag=imag)
-    for region in _iter_cpml_field_regions(solver, ex, solver.cex_curl, psi_ex_y_attr, "Ex"):
+    for region in _iter_cpml_field_regions(solver, ex, solver.cex_curl, psi_ex_y_attr):
         offset_i, offset_j, offset_k = region["offsets"]
         solver.fdtd_module.applyElectricFieldExCpmlYCorrection3D(
             Ex=region["field"],
@@ -1284,9 +1264,9 @@ def _apply_electric_y_cpml_corrections(solver, ex, ez, hx, hz, *, imag=False):
             zHighBoundaryMode=solver.boundary_z_high_code,
             fullSizeZ=solver.Ex.shape[2],
             fullSizeY=solver.Ex.shape[1],
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
+        ).launchRaw()
 
-    for region in _iter_cpml_field_regions(solver, ez, solver.cez_curl, psi_ez_y_attr, "Ez"):
+    for region in _iter_cpml_field_regions(solver, ez, solver.cez_curl, psi_ez_y_attr):
         offset_i, offset_j, offset_k = region["offsets"]
         solver.fdtd_module.applyElectricFieldEzCpmlYCorrection3D(
             Ez=region["field"],
@@ -1304,7 +1284,7 @@ def _apply_electric_y_cpml_corrections(solver, ex, ez, hx, hz, *, imag=False):
             xHighBoundaryMode=solver.boundary_x_high_code,
             fullSizeX=solver.Ez.shape[0],
             fullSizeY=solver.Ez.shape[1],
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
+        ).launchRaw()
 
 
 def _apply_electric_x_cpml_corrections(solver, ey, ez, hy, hz, *, imag=False):
@@ -1312,7 +1292,7 @@ def _apply_electric_x_cpml_corrections(solver, ey, ez, hy, hz, *, imag=False):
     # Ez on its d(Hy)/dx term (tangent Bloch axis y).
     psi_ey_x_attr = _cpml_memory_attr("psi_ey_x", imag=imag)
     psi_ez_x_attr = _cpml_memory_attr("psi_ez_x", imag=imag)
-    for region in _iter_cpml_field_regions(solver, ey, solver.cey_curl, psi_ey_x_attr, "Ey"):
+    for region in _iter_cpml_field_regions(solver, ey, solver.cey_curl, psi_ey_x_attr):
         offset_i, offset_j, offset_k = region["offsets"]
         solver.fdtd_module.applyElectricFieldEyCpmlXCorrection3D(
             Ey=region["field"],
@@ -1330,9 +1310,9 @@ def _apply_electric_x_cpml_corrections(solver, ey, ez, hy, hz, *, imag=False):
             zHighBoundaryMode=solver.boundary_z_high_code,
             fullSizeZ=solver.Ey.shape[2],
             fullSizeX=solver.Ey.shape[0],
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
+        ).launchRaw()
 
-    for region in _iter_cpml_field_regions(solver, ez, solver.cez_curl, psi_ez_x_attr, "Ez"):
+    for region in _iter_cpml_field_regions(solver, ez, solver.cez_curl, psi_ez_x_attr):
         offset_i, offset_j, offset_k = region["offsets"]
         solver.fdtd_module.applyElectricFieldEzCpmlXCorrection3D(
             Ez=region["field"],
@@ -1350,7 +1330,7 @@ def _apply_electric_x_cpml_corrections(solver, ey, ez, hy, hz, *, imag=False):
             yHighBoundaryMode=solver.boundary_y_high_code,
             fullSizeY=solver.Ez.shape[1],
             fullSizeX=solver.Ez.shape[0],
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=region["grid"])
+        ).launchRaw()
 
 
 def update_electric_fields_bloch_cpml(solver):
@@ -1390,10 +1370,7 @@ def clamp_field_face(solver, field, axis, side):
     side_code = 0 if side == "low" else 1
     module = getattr(solver, "fdtd_module", None)
     if module is not None and module.__class__.__name__ == "NativeFDTDModule":
-        module.clampFieldFace3D(field=field, axis=int(axis), side=side_code).launchRaw(
-            blockSize=getattr(solver, "kernel_block_size", None),
-            gridSize=None,
-        )
+        module.clampFieldFace3D(field=field, axis=int(axis), side=side_code).launchRaw()
         return
     index = 0 if side_code == 0 else field.shape[axis] - 1
     field.select(axis, index).zero_()
@@ -1403,10 +1380,7 @@ def _launch_native_clamp(solver, kernel_name, **kwargs):
     module = getattr(solver, "fdtd_module", None)
     if module is None or module.__class__.__name__ != "NativeFDTDModule":
         return False
-    getattr(module, kernel_name)(**kwargs).launchRaw(
-        blockSize=getattr(solver, "kernel_block_size", None),
-        gridSize=None,
-    )
+    getattr(module, kernel_name)(**kwargs).launchRaw()
     return True
 
 
@@ -1535,7 +1509,7 @@ def apply_mur_boundaries(solver):
             coef=entry["coef"],
             prevBoundary=entry["prev_boundary"],
             prevAdjacent=entry["prev_adjacent"],
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=None)
+        ).launchRaw()
 
 
 def init_field(solver):
@@ -1545,7 +1519,6 @@ def init_field(solver):
     solver.Hx = torch.zeros((solver.Nx, solver.Ny - 1, solver.Nz - 1), device=solver.device, dtype=torch.float32)
     solver.Hy = torch.zeros((solver.Nx - 1, solver.Ny, solver.Nz - 1), device=solver.device, dtype=torch.float32)
     solver.Hz = torch.zeros((solver.Nx - 1, solver.Ny - 1, solver.Nz), device=solver.device, dtype=torch.float32)
-    refresh_launch_shapes(solver)
 
     solver.build_materials(solver.scene)
     initialize_boundary_state(solver)
@@ -1579,7 +1552,7 @@ def _compute_shutoff_min_step(solver, shutoff_check_interval: int) -> int:
     return floor + 2 * shutoff_check_interval
 
 
-def _electric_field_energy(solver) -> float:
+def _electric_field_energy(solver) -> torch.Tensor:
     energy = (
         (solver.eps_Ex * solver.Ex * solver.Ex).sum()
         + (solver.eps_Ey * solver.Ey * solver.Ey).sum()
@@ -1592,7 +1565,7 @@ def _electric_field_energy(solver) -> float:
             + (solver.eps_Ey * solver.Ey_imag * solver.Ey_imag).sum()
             + (solver.eps_Ez * solver.Ez_imag * solver.Ez_imag).sum()
         )
-    return float(energy.item())
+    return energy
 
 
 def _planned_window_normalization(window_type: str, start_step: int, end_step: int) -> float:
@@ -1916,7 +1889,7 @@ def solve(
 
     solver._shutoff_triggered = False
     solver._shutoff_step = None
-    solver._shutoff_peak = 0.0
+    solver._shutoff_peak = torch.zeros((), device=solver.device, dtype=solver.Ex.dtype)
     shutoff_min_step = _compute_shutoff_min_step(solver, shutoff_check_interval)
 
     run_field_update = _make_field_update_runner(solver, use_cuda_graph)
@@ -1972,12 +1945,12 @@ def solve(
 
         if shutoff > 0 and (n + 1) % shutoff_check_interval == 0:
             e_energy = _electric_field_energy(solver)
-            solver._shutoff_peak = max(solver._shutoff_peak, e_energy)
-            if (
-                solver._shutoff_peak > 0.0
-                and n >= shutoff_min_step
-                and e_energy < shutoff * solver._shutoff_peak
-            ):
+            solver._shutoff_peak = torch.maximum(solver._shutoff_peak, e_energy)
+            should_stop = (
+                n >= shutoff_min_step
+                and bool(((solver._shutoff_peak > 0.0) & (e_energy < shutoff * solver._shutoff_peak)).item())
+            )
+            if should_stop:
                 solver._shutoff_triggered = True
                 solver._shutoff_step = n
                 break

@@ -173,19 +173,19 @@ def test_aniso_cpml_kernel_reduces_to_raw_correction_outside_absorber():
         CoeffY=solver.cex_aniso_y, CoeffZ=solver.cex_aniso_z,
         invDx=solver.inv_dx_e, invDy=solver.inv_dy_e, invDz=solver.inv_dz_e,
         periodicX=periodic_x, periodicY=periodic_y, periodicZ=periodic_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyFullAniso3D(
         Ey=solver.Ey, Hx=solver.Hx, Hy=solver.Hy, Hz=solver.Hz,
         CoeffX=solver.cey_aniso_x, CoeffZ=solver.cey_aniso_z,
         invDx=solver.inv_dx_e, invDy=solver.inv_dy_e, invDz=solver.inv_dz_e,
         periodicX=periodic_x, periodicY=periodic_y, periodicZ=periodic_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzFullAniso3D(
         Ez=solver.Ez, Hx=solver.Hx, Hy=solver.Hy, Hz=solver.Hz,
         CoeffX=solver.cez_aniso_x, CoeffY=solver.cez_aniso_y,
         invDx=solver.inv_dx_e, invDy=solver.inv_dy_e, invDz=solver.inv_dz_e,
         periodicX=periodic_x, periodicY=periodic_y, periodicZ=periodic_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
     raw_delta = (solver.Ex - before[0], solver.Ey - before[1], solver.Ez - before[2])
 
     # Reset and run the coordinate-stretched CPML kernel from the same state.

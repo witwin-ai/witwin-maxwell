@@ -369,8 +369,6 @@ def enable_dft(solver, frequencies, window_type="hanning", end_step=None):
                 "source_dft_imag": 0.0,
             }
         )
-    electric_numel = max(int(solver.Ex.numel()), int(solver.Ey.numel()), int(solver.Ez.numel()))
-    solver._spectral_launch_shapes["electric_dft"] = solver._compute_linear_launch_shape(electric_numel * frequency_count)
     sync_dft_legacy_state(solver)
     if solver.verbose:
         freq_text = ", ".join(f"{frequency / 1e9:.3f} GHz" for frequency in frequency_values)
@@ -430,10 +428,7 @@ def accumulate_dft(solver, n, phase_cos=None, phase_sin=None):
         EzImagAccum=solver._dft_batched_fields["Ez"]["imag"],
         weightedCos=weighted_cos_tensor,
         weightedSin=weighted_sin_tensor,
-    ).launchRaw(
-        blockSize=solver.kernel_block_size,
-        gridSize=solver._spectral_launch_shapes["electric_dft"],
-    )
+    ).launchRaw()
 
     if has_complex_fields(solver):
         solver.fdtd_module.accumulateRunningDftYee3DBatched(
@@ -448,10 +443,7 @@ def accumulate_dft(solver, n, phase_cos=None, phase_sin=None):
             EzImagAccum=solver._dft_batched_fields["Ez"]["aux_imag"],
             weightedCos=weighted_cos_tensor,
             weightedSin=weighted_sin_tensor,
-        ).launchRaw(
-            blockSize=solver.kernel_block_size,
-            gridSize=solver._spectral_launch_shapes["electric_dft"],
-        )
+        ).launchRaw()
 
     solver._dft_window_normalization_values += window_weight
     solver._dft_sample_count_values += active.astype(np.int64)
@@ -581,8 +573,5 @@ def accumulate_dft_gpu(solver):
         EzImagAccum=solver._dft_batched_fields["Ez"]["imag"],
         weightedCos=solver._dft_weighted_cos,
         weightedSin=solver._dft_weighted_sin,
-    ).launchRaw(
-        blockSize=solver.kernel_block_size,
-        gridSize=solver._spectral_launch_shapes["electric_dft"],
-    )
+    ).launchRaw()
     solver._dft_step.add_(1)

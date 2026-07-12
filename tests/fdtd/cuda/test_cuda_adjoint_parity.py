@@ -2231,7 +2231,7 @@ def test_native_module_handles_non_contiguous_views(monkeypatch):
         HxCurl=curl,
         invDy=inv_dy,
         invDz=inv_dz,
-    ).launchRaw(blockSize=(256, 1, 1), gridSize=(1, 1, 1))
+    ).launchRaw()
     torch.cuda.synchronize()
 
     torch.testing.assert_close(hx, expected, rtol=2.0e-6, atol=2.0e-7)

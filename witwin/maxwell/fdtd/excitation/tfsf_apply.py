@@ -39,10 +39,7 @@ def _apply_batched_aux_terms(solver, batch, *, sample_kind, field_names):
         fieldOffsets=batch["field_offsets"],
         origin=sample_origin,
         ds=float(aux.ds),
-    ).launchRaw(
-        blockSize=solver.kernel_block_size,
-        gridSize=batch["grid"],
-    )
+    ).launchRaw()
 
 
 def _apply_batched_reference_terms(solver, batch, *, sample_kind, field_names):
@@ -67,10 +64,7 @@ def _apply_batched_reference_terms(solver, batch, *, sample_kind, field_names):
         fieldCodesPerCoeff=batch["field_codes_per_coeff"],
         fieldOffsets=batch["field_offsets"],
         sampleIndicesPerCoeff=batch["sample_indices_per_coeff"],
-    ).launchRaw(
-        blockSize=solver.kernel_block_size,
-        gridSize=batch["grid"],
-    )
+    ).launchRaw()
 
 
 def _apply_aux_terms(solver, terms, *, sample_kind):
@@ -92,10 +86,7 @@ def _apply_aux_terms(solver, terms, *, sample_kind):
             offsetJ=int(offset_j),
             offsetK=int(offset_k),
             scale=float(term["component_scale"]),
-        ).launchRaw(
-            blockSize=solver.kernel_block_size,
-            gridSize=term["grid"],
-        )
+        ).launchRaw()
 
 
 def _apply_reference_terms(solver, terms):
@@ -116,10 +107,7 @@ def _apply_reference_terms(solver, terms):
                 offsetJ=int(offset_j),
                 offsetK=int(offset_k),
                 scale=float(term["component_scale"]),
-            ).launchRaw(
-                blockSize=solver.kernel_block_size,
-                gridSize=term["grid"],
-            )
+            ).launchRaw()
             continue
         sample_indices_i32 = term.get("_sample_indices_i32")
         if (
@@ -142,10 +130,7 @@ def _apply_reference_terms(solver, terms):
             offsetJ=int(offset_j),
             offsetK=int(offset_k),
             scale=float(term["component_scale"]),
-        ).launchRaw(
-            blockSize=solver.kernel_block_size,
-            gridSize=term["grid"],
-        )
+        ).launchRaw()
 
 
 def _apply_tfsf_terms(solver, *, term_key, sample_kind, time_value):

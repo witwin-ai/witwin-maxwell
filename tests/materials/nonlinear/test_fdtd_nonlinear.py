@@ -426,7 +426,7 @@ def test_general_kernel_chi3_only_matches_kerr_fast_path():
             component=component,
             dt=solver.dt,
             eps0=solver.eps0,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes[component])
+        ).launchRaw()
 
         assert torch.equal(dynamic_curl, curl_reference)
         assert torch.equal(dynamic_decay, decay)

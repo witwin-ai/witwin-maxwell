@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import weakref
 from collections.abc import Callable
 from typing import Any
 
@@ -23,39 +22,6 @@ def get_compiled_extension(*, verbose: bool = False) -> Any:
     return _COMPILED_EXTENSION
 
 
-_UNIFORM_SCALAR_CACHE: dict[int, tuple[Any, int, int, float | None]] = {}
-
-
-def _uniform_scalar(tensor: torch.Tensor) -> float | None:
-    """Return the scalar value of a spatially uniform coefficient tensor.
-
-    Update coefficients (decay/curl) are static for the duration of a solve,
-    so the min==max reduction and its device synchronization run once per
-    tensor and the result is cached. Cache entries are validated against the
-    tensor identity (weakref), storage pointer, and autograd version counter;
-    kernels that mutate a coefficient tensor in place without bumping the
-    version counter (the Kerr dynamic-curl update) must call
-    _invalidate_uniform_scalar explicitly.
-    """
-    key = id(tensor)
-    entry = _UNIFORM_SCALAR_CACHE.get(key)
-    if entry is not None and entry[0]() is tensor:
-        if entry[1] is None:  # pinned non-uniform (mutated in place by kernels)
-            return None
-        if entry[1] == tensor.data_ptr() and entry[2] == tensor._version:
-            return entry[3]
-    minimum, maximum = torch.aminmax(tensor)
-    value = minimum.item() if bool((minimum == maximum).item()) else None
-    _UNIFORM_SCALAR_CACHE[key] = (weakref.ref(tensor), tensor.data_ptr(), tensor._version, value)
-    return value
-
-
-def _invalidate_uniform_scalar(tensor: torch.Tensor) -> None:
-    # Pin as non-uniform: the tensor is rewritten in place by a kernel every
-    # step, so re-deriving a scalar (with its device sync) would be wasted.
-    _UNIFORM_SCALAR_CACHE[id(tensor)] = (weakref.ref(tensor), None, None, None)
-
-
 def build_info() -> dict[str, Any]:
     return {
         "backend": "torch-cuda",
@@ -63,12 +29,6 @@ def build_info() -> dict[str, Any]:
         "cuda_available": is_available(),
         "torch_version": torch.__version__,
     }
-
-
-def _require_cuda_tensors(*values: Any) -> None:
-    for value in values:
-        if torch.is_tensor(value) and value.device.type != "cuda":
-            raise ValueError("Native CUDA FDTD backend requires CUDA tensors.")
 
 
 def debug_linear_indices(
@@ -111,15 +71,18 @@ def _call_with_contiguous(kernel: Callable[..., None], kwargs: dict) -> None:
 
 
 class _Launch:
-    __slots__ = ("kernel", "kwargs")
+    __slots__ = ("kernel", "kwargs", "may_receive_strided")
 
-    def __init__(self, kernel: Callable[..., None], kwargs: dict):
+    def __init__(self, kernel: Callable[..., None], kwargs: dict, *, may_receive_strided: bool):
         self.kernel = kernel
         self.kwargs = kwargs
+        self.may_receive_strided = may_receive_strided
 
-    def launchRaw(self, *, blockSize=None, gridSize=None):  # noqa: N802 - kernel launch entry point
-        del blockSize, gridSize
-        _call_with_contiguous(self.kernel, self.kwargs)
+    def launchRaw(self):  # noqa: N802 - kernel launch entry point
+        if self.may_receive_strided:
+            _call_with_contiguous(self.kernel, self.kwargs)
+        else:
+            self.kernel(**self.kwargs)
         return None
 
 
@@ -129,8 +92,12 @@ class NativeFDTDModule:
         if kernel is None:
             raise AttributeError(f"Native CUDA FDTD backend does not implement kernel {name!r}.")
 
+        may_receive_strided = name.startswith(
+            ("reverse", "seedInject", "accumulate", "applyElectricField")
+        )
+
         def bind(**kwargs):
-            return _Launch(kernel, kwargs)
+            return _Launch(kernel, kwargs, may_receive_strided=may_receive_strided)
 
         bind.__name__ = name
         # Cache on the instance so later lookups bypass __getattr__ entirely.
@@ -144,22 +111,20 @@ _NATIVE_MODULE = NativeFDTDModule()
 def get_native_fdtd_module() -> NativeFDTDModule:
     if not is_available():
         raise RuntimeError("Native CUDA FDTD backend requires torch.cuda.is_available() to be True.")
+    get_compiled_extension()
     return _NATIVE_MODULE
 
 
 def _magnetic_hx_standard(*, Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz):
-    _require_cuda_tensors(Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz)
-    get_compiled_extension().update_magnetic_hx_standard(Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz)
+    _COMPILED_EXTENSION.update_magnetic_hx_standard(Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz)
 
 
 def _magnetic_hy_standard(*, Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz):
-    _require_cuda_tensors(Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz)
-    get_compiled_extension().update_magnetic_hy_standard(Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz)
+    _COMPILED_EXTENSION.update_magnetic_hy_standard(Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz)
 
 
 def _magnetic_hz_standard(*, Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy):
-    _require_cuda_tensors(Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy)
-    get_compiled_extension().update_magnetic_hz_standard(Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy)
+    _COMPILED_EXTENSION.update_magnetic_hz_standard(Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy)
 
 
 def _magnetic_hx_cpml(
@@ -180,24 +145,7 @@ def _magnetic_hx_cpml(
     invDy,
     invDz,
 ):
-    _require_cuda_tensors(
-        Hx,
-        Ey,
-        Ez,
-        HxDecay,
-        HxCurl,
-        PsiHxY,
-        PsiHxZ,
-        InvKappaHxY,
-        ByHxY,
-        CyHxY,
-        InvKappaHxZ,
-        ByHxZ,
-        CyHxZ,
-        invDy,
-        invDz,
-    )
-    get_compiled_extension().update_magnetic_hx_cpml(
+    _COMPILED_EXTENSION.update_magnetic_hx_cpml(
                 Hx,
                 Ey,
                 Ez,
@@ -234,24 +182,7 @@ def _magnetic_hy_cpml(
     invDx,
     invDz,
 ):
-    _require_cuda_tensors(
-        Hy,
-        Ex,
-        Ez,
-        HyDecay,
-        HyCurl,
-        PsiHyX,
-        PsiHyZ,
-        InvKappaHyX,
-        ByHyX,
-        CyHyX,
-        InvKappaHyZ,
-        ByHyZ,
-        CyHyZ,
-        invDx,
-        invDz,
-    )
-    get_compiled_extension().update_magnetic_hy_cpml(
+    _COMPILED_EXTENSION.update_magnetic_hy_cpml(
                 Hy,
                 Ex,
                 Ez,
@@ -288,24 +219,7 @@ def _magnetic_hz_cpml(
     invDx,
     invDy,
 ):
-    _require_cuda_tensors(
-        Hz,
-        Ex,
-        Ey,
-        HzDecay,
-        HzCurl,
-        PsiHzX,
-        PsiHzY,
-        InvKappaHzX,
-        ByHzX,
-        CyHzX,
-        InvKappaHzY,
-        ByHzY,
-        CyHzY,
-        invDx,
-        invDy,
-    )
-    get_compiled_extension().update_magnetic_hz_cpml(
+    _COMPILED_EXTENSION.update_magnetic_hz_cpml(
                 Hz,
                 Ex,
                 Ey,
@@ -347,9 +261,10 @@ def _magnetic_hx_cpml_compressed(
     psiHxZLowLength,
     psiHxZHighStart,
     psiHxZHighLength,
+    uniformDecay,
+    uniformCurl,
 ):
-    _require_cuda_tensors(Hx, Ey, Ez, PsiHxY, PsiHxZ, invDy, invDz)
-    get_compiled_extension().update_magnetic_hx_cpml_compressed(
+    _COMPILED_EXTENSION.update_magnetic_hx_cpml_compressed(
                 Hx,
                 Ey,
                 Ez,
@@ -371,8 +286,8 @@ def _magnetic_hx_cpml_compressed(
                 int(psiHxZLowLength),
                 int(psiHxZHighStart),
                 int(psiHxZHighLength),
-                _uniform_scalar(HxDecay),
-                _uniform_scalar(HxCurl),
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -399,9 +314,10 @@ def _magnetic_hy_cpml_compressed(
     psiHyZLowLength,
     psiHyZHighStart,
     psiHyZHighLength,
+    uniformDecay,
+    uniformCurl,
 ):
-    _require_cuda_tensors(Hy, Ex, Ez, PsiHyX, PsiHyZ, invDx, invDz)
-    get_compiled_extension().update_magnetic_hy_cpml_compressed(
+    _COMPILED_EXTENSION.update_magnetic_hy_cpml_compressed(
                 Hy,
                 Ex,
                 Ez,
@@ -423,8 +339,8 @@ def _magnetic_hy_cpml_compressed(
                 int(psiHyZLowLength),
                 int(psiHyZHighStart),
                 int(psiHyZHighLength),
-                _uniform_scalar(HyDecay),
-                _uniform_scalar(HyCurl),
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -451,9 +367,10 @@ def _magnetic_hz_cpml_compressed(
     psiHzYLowLength,
     psiHzYHighStart,
     psiHzYHighLength,
+    uniformDecay,
+    uniformCurl,
 ):
-    _require_cuda_tensors(Hz, Ex, Ey, PsiHzX, PsiHzY, invDx, invDy)
-    get_compiled_extension().update_magnetic_hz_cpml_compressed(
+    _COMPILED_EXTENSION.update_magnetic_hz_cpml_compressed(
                 Hz,
                 Ex,
                 Ey,
@@ -475,8 +392,8 @@ def _magnetic_hz_cpml_compressed(
                 int(psiHzYLowLength),
                 int(psiHzYHighStart),
                 int(psiHzYHighLength),
-                _uniform_scalar(HzDecay),
-                _uniform_scalar(HzCurl),
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -494,8 +411,7 @@ def _electric_ex_standard(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    _require_cuda_tensors(Ex, Hy, Hz, ExDecay, ExCurl, invDy, invDz)
-    get_compiled_extension().update_electric_ex_standard(
+    _COMPILED_EXTENSION.update_electric_ex_standard(
                 Ex,
                 Hy,
                 Hz,
@@ -524,8 +440,7 @@ def _electric_ey_standard(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    _require_cuda_tensors(Ey, Hx, Hz, EyDecay, EyCurl, invDx, invDz)
-    get_compiled_extension().update_electric_ey_standard(
+    _COMPILED_EXTENSION.update_electric_ey_standard(
                 Ey,
                 Hx,
                 Hz,
@@ -554,8 +469,7 @@ def _electric_ez_standard(
     yLowBoundaryMode,
     yHighBoundaryMode,
 ):
-    _require_cuda_tensors(Ez, Hx, Hy, EzDecay, EzCurl, invDx, invDy)
-    get_compiled_extension().update_electric_ez_standard(
+    _COMPILED_EXTENSION.update_electric_ez_standard(
                 Ez,
                 Hx,
                 Hy,
@@ -589,8 +503,7 @@ def _electric_ex_modulated(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    _require_cuda_tensors(Ex, Hy, Hz, ExDecay, ExCurl, ModCos, ModSin, invDy, invDz)
-    get_compiled_extension().update_electric_ex_modulated(
+    _COMPILED_EXTENSION.update_electric_ex_modulated(
                 Ex,
                 Hy,
                 Hz,
@@ -629,8 +542,7 @@ def _electric_ey_modulated(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    _require_cuda_tensors(Ey, Hx, Hz, EyDecay, EyCurl, ModCos, ModSin, invDx, invDz)
-    get_compiled_extension().update_electric_ey_modulated(
+    _COMPILED_EXTENSION.update_electric_ey_modulated(
                 Ey,
                 Hx,
                 Hz,
@@ -669,8 +581,7 @@ def _electric_ez_modulated(
     yLowBoundaryMode,
     yHighBoundaryMode,
 ):
-    _require_cuda_tensors(Ez, Hx, Hy, EzDecay, EzCurl, ModCos, ModSin, invDx, invDy)
-    get_compiled_extension().update_electric_ez_modulated(
+    _COMPILED_EXTENSION.update_electric_ez_modulated(
                 Ez,
                 Hx,
                 Hy,
@@ -717,26 +628,7 @@ def _electric_ex_cpml_modulated(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    _require_cuda_tensors(
-        Ex,
-        Hy,
-        Hz,
-        ExDecay,
-        ExCurl,
-        ModCos,
-        ModSin,
-        PsiExY,
-        PsiExZ,
-        InvKappaExY,
-        BExY,
-        CExY,
-        InvKappaExZ,
-        BExZ,
-        CExZ,
-        invDy,
-        invDz,
-    )
-    get_compiled_extension().update_electric_ex_cpml_modulated(
+    _COMPILED_EXTENSION.update_electric_ex_cpml_modulated(
                 Ex,
                 Hy,
                 Hz,
@@ -791,26 +683,7 @@ def _electric_ey_cpml_modulated(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    _require_cuda_tensors(
-        Ey,
-        Hx,
-        Hz,
-        EyDecay,
-        EyCurl,
-        ModCos,
-        ModSin,
-        PsiEyX,
-        PsiEyZ,
-        InvKappaEyX,
-        BEyX,
-        CEyX,
-        InvKappaEyZ,
-        BEyZ,
-        CEyZ,
-        invDx,
-        invDz,
-    )
-    get_compiled_extension().update_electric_ey_cpml_modulated(
+    _COMPILED_EXTENSION.update_electric_ey_cpml_modulated(
                 Ey,
                 Hx,
                 Hz,
@@ -865,26 +738,7 @@ def _electric_ez_cpml_modulated(
     yLowBoundaryMode,
     yHighBoundaryMode,
 ):
-    _require_cuda_tensors(
-        Ez,
-        Hx,
-        Hy,
-        EzDecay,
-        EzCurl,
-        ModCos,
-        ModSin,
-        PsiEzX,
-        PsiEzY,
-        InvKappaEzX,
-        BEzX,
-        CEzX,
-        InvKappaEzY,
-        BEzY,
-        CEzY,
-        invDx,
-        invDy,
-    )
-    get_compiled_extension().update_electric_ez_cpml_modulated(
+    _COMPILED_EXTENSION.update_electric_ez_cpml_modulated(
                 Ez,
                 Hx,
                 Hy,
@@ -934,24 +788,7 @@ def _electric_ex_cpml(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    _require_cuda_tensors(
-        Ex,
-        Hy,
-        Hz,
-        ExDecay,
-        ExCurl,
-        PsiExY,
-        PsiExZ,
-        InvKappaExY,
-        BExY,
-        CExY,
-        InvKappaExZ,
-        BExZ,
-        CExZ,
-        invDy,
-        invDz,
-    )
-    get_compiled_extension().update_electric_ex_cpml(
+    _COMPILED_EXTENSION.update_electric_ex_cpml(
                 Ex,
                 Hy,
                 Hz,
@@ -996,24 +833,7 @@ def _electric_ey_cpml(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    _require_cuda_tensors(
-        Ey,
-        Hx,
-        Hz,
-        EyDecay,
-        EyCurl,
-        PsiEyX,
-        PsiEyZ,
-        InvKappaEyX,
-        BEyX,
-        CEyX,
-        InvKappaEyZ,
-        BEyZ,
-        CEyZ,
-        invDx,
-        invDz,
-    )
-    get_compiled_extension().update_electric_ey_cpml(
+    _COMPILED_EXTENSION.update_electric_ey_cpml(
                 Ey,
                 Hx,
                 Hz,
@@ -1058,24 +878,7 @@ def _electric_ez_cpml(
     yLowBoundaryMode,
     yHighBoundaryMode,
 ):
-    _require_cuda_tensors(
-        Ez,
-        Hx,
-        Hy,
-        EzDecay,
-        EzCurl,
-        PsiEzX,
-        PsiEzY,
-        InvKappaEzX,
-        BEzX,
-        CEzX,
-        InvKappaEzY,
-        BEzY,
-        CEzY,
-        invDx,
-        invDy,
-    )
-    get_compiled_extension().update_electric_ez_cpml(
+    _COMPILED_EXTENSION.update_electric_ez_cpml(
                 Ez,
                 Hx,
                 Hy,
@@ -1116,8 +919,7 @@ def _apply_electric_ex_cpml_z_correction(
     fullSizeY,
     fullSizeZ,
 ):
-    _require_cuda_tensors(Ex, Hy, ExCurl, PsiExZ, InvKappaExZ, BExZ, CExZ, invDz)
-    get_compiled_extension().apply_electric_ex_cpml_z_correction(
+    _COMPILED_EXTENSION.apply_electric_ex_cpml_z_correction(
                 Ex, Hy, ExCurl, PsiExZ, InvKappaExZ, BExZ, CExZ, invDz,
                 int(offsetI), int(offsetJ), int(offsetK),
                 int(yLowBoundaryMode), int(yHighBoundaryMode),
@@ -1143,8 +945,7 @@ def _apply_electric_ey_cpml_z_correction(
     fullSizeX,
     fullSizeZ,
 ):
-    _require_cuda_tensors(Ey, Hx, EyCurl, PsiEyZ, InvKappaEyZ, BEyZ, CEyZ, invDz)
-    get_compiled_extension().apply_electric_ey_cpml_z_correction(
+    _COMPILED_EXTENSION.apply_electric_ey_cpml_z_correction(
                 Ey, Hx, EyCurl, PsiEyZ, InvKappaEyZ, BEyZ, CEyZ, invDz,
                 int(offsetI), int(offsetJ), int(offsetK),
                 int(xLowBoundaryMode), int(xHighBoundaryMode),
@@ -1170,8 +971,7 @@ def _apply_electric_ex_cpml_y_correction(
     fullSizeZ,
     fullSizeY,
 ):
-    _require_cuda_tensors(Ex, Hz, ExCurl, PsiExY, InvKappaExY, BExY, CExY, invDy)
-    get_compiled_extension().apply_electric_ex_cpml_y_correction(
+    _COMPILED_EXTENSION.apply_electric_ex_cpml_y_correction(
                 Ex, Hz, ExCurl, PsiExY, InvKappaExY, BExY, CExY, invDy,
                 int(offsetI), int(offsetJ), int(offsetK),
                 int(zLowBoundaryMode), int(zHighBoundaryMode),
@@ -1197,8 +997,7 @@ def _apply_electric_ez_cpml_y_correction(
     fullSizeX,
     fullSizeY,
 ):
-    _require_cuda_tensors(Ez, Hx, EzCurl, PsiEzY, InvKappaEzY, BEzY, CEzY, invDy)
-    get_compiled_extension().apply_electric_ez_cpml_y_correction(
+    _COMPILED_EXTENSION.apply_electric_ez_cpml_y_correction(
                 Ez, Hx, EzCurl, PsiEzY, InvKappaEzY, BEzY, CEzY, invDy,
                 int(offsetI), int(offsetJ), int(offsetK),
                 int(xLowBoundaryMode), int(xHighBoundaryMode),
@@ -1224,8 +1023,7 @@ def _apply_electric_ey_cpml_x_correction(
     fullSizeZ,
     fullSizeX,
 ):
-    _require_cuda_tensors(Ey, Hz, EyCurl, PsiEyX, InvKappaEyX, BEyX, CEyX, invDx)
-    get_compiled_extension().apply_electric_ey_cpml_x_correction(
+    _COMPILED_EXTENSION.apply_electric_ey_cpml_x_correction(
                 Ey, Hz, EyCurl, PsiEyX, InvKappaEyX, BEyX, CEyX, invDx,
                 int(offsetI), int(offsetJ), int(offsetK),
                 int(zLowBoundaryMode), int(zHighBoundaryMode),
@@ -1251,8 +1049,7 @@ def _apply_electric_ez_cpml_x_correction(
     fullSizeY,
     fullSizeX,
 ):
-    _require_cuda_tensors(Ez, Hy, EzCurl, PsiEzX, InvKappaEzX, BEzX, CEzX, invDx)
-    get_compiled_extension().apply_electric_ez_cpml_x_correction(
+    _COMPILED_EXTENSION.apply_electric_ez_cpml_x_correction(
                 Ez, Hy, EzCurl, PsiEzX, InvKappaEzX, BEzX, CEzX, invDx,
                 int(offsetI), int(offsetJ), int(offsetK),
                 int(yLowBoundaryMode), int(yHighBoundaryMode),
@@ -1287,8 +1084,10 @@ def _electric_ex_cpml_compressed(
     psiExZLowLength,
     psiExZHighStart,
     psiExZHighLength,
+    uniformDecay,
+    uniformCurl,
 ):
-    get_compiled_extension().update_electric_ex_cpml_compressed(
+    _COMPILED_EXTENSION.update_electric_ex_cpml_compressed(
                 Ex,
                 Hy,
                 Hz,
@@ -1314,8 +1113,8 @@ def _electric_ex_cpml_compressed(
                 int(psiExZLowLength),
                 int(psiExZHighStart),
                 int(psiExZHighLength),
-                _uniform_scalar(ExDecay),
-                _uniform_scalar(ExCurl),
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -1346,8 +1145,10 @@ def _electric_ey_cpml_compressed(
     psiEyZLowLength,
     psiEyZHighStart,
     psiEyZHighLength,
+    uniformDecay,
+    uniformCurl,
 ):
-    get_compiled_extension().update_electric_ey_cpml_compressed(
+    _COMPILED_EXTENSION.update_electric_ey_cpml_compressed(
                 Ey,
                 Hx,
                 Hz,
@@ -1373,8 +1174,8 @@ def _electric_ey_cpml_compressed(
                 int(psiEyZLowLength),
                 int(psiEyZHighStart),
                 int(psiEyZHighLength),
-                _uniform_scalar(EyDecay),
-                _uniform_scalar(EyCurl),
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -1405,8 +1206,10 @@ def _electric_ez_cpml_compressed(
     psiEzYLowLength,
     psiEzYHighStart,
     psiEzYHighLength,
+    uniformDecay,
+    uniformCurl,
 ):
-    get_compiled_extension().update_electric_ez_cpml_compressed(
+    _COMPILED_EXTENSION.update_electric_ez_cpml_compressed(
                 Ez,
                 Hx,
                 Hy,
@@ -1432,8 +1235,8 @@ def _electric_ez_cpml_compressed(
                 int(psiEzYLowLength),
                 int(psiEzYHighStart),
                 int(psiEzYHighLength),
-                _uniform_scalar(EzDecay),
-                _uniform_scalar(EzCurl),
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -1470,26 +1273,7 @@ def _electric_ex_cpml_modulated_compressed(
     psiExZHighStart,
     psiExZHighLength,
 ):
-    _require_cuda_tensors(
-        Ex,
-        Hy,
-        Hz,
-        ExDecay,
-        ExCurl,
-        ModCos,
-        ModSin,
-        PsiExY,
-        PsiExZ,
-        InvKappaExY,
-        BExY,
-        CExY,
-        InvKappaExZ,
-        BExZ,
-        CExZ,
-        invDy,
-        invDz,
-    )
-    get_compiled_extension().update_electric_ex_cpml_modulated_compressed(
+    _COMPILED_EXTENSION.update_electric_ex_cpml_modulated_compressed(
                 Ex,
                 Hy,
                 Hz,
@@ -1556,26 +1340,7 @@ def _electric_ey_cpml_modulated_compressed(
     psiEyZHighStart,
     psiEyZHighLength,
 ):
-    _require_cuda_tensors(
-        Ey,
-        Hx,
-        Hz,
-        EyDecay,
-        EyCurl,
-        ModCos,
-        ModSin,
-        PsiEyX,
-        PsiEyZ,
-        InvKappaEyX,
-        BEyX,
-        CEyX,
-        InvKappaEyZ,
-        BEyZ,
-        CEyZ,
-        invDx,
-        invDz,
-    )
-    get_compiled_extension().update_electric_ey_cpml_modulated_compressed(
+    _COMPILED_EXTENSION.update_electric_ey_cpml_modulated_compressed(
                 Ey,
                 Hx,
                 Hz,
@@ -1642,26 +1407,7 @@ def _electric_ez_cpml_modulated_compressed(
     psiEzYHighStart,
     psiEzYHighLength,
 ):
-    _require_cuda_tensors(
-        Ez,
-        Hx,
-        Hy,
-        EzDecay,
-        EzCurl,
-        ModCos,
-        ModSin,
-        PsiEzX,
-        PsiEzY,
-        InvKappaEzX,
-        BEzX,
-        CEzX,
-        InvKappaEzY,
-        BEzY,
-        CEzY,
-        invDx,
-        invDy,
-    )
-    get_compiled_extension().update_electric_ez_cpml_modulated_compressed(
+    _COMPILED_EXTENSION.update_electric_ez_cpml_modulated_compressed(
                 Ez,
                 Hx,
                 Hy,
@@ -1712,7 +1458,7 @@ def _electric_ex_bloch(
     invDy,
     invDz,
 ):
-    get_compiled_extension().update_electric_ex_bloch(
+    _COMPILED_EXTENSION.update_electric_ex_bloch(
                 ExReal,
                 ExImag,
                 HyReal,
@@ -1747,7 +1493,7 @@ def _electric_ey_bloch(
     invDx,
     invDz,
 ):
-    get_compiled_extension().update_electric_ey_bloch(
+    _COMPILED_EXTENSION.update_electric_ey_bloch(
                 EyReal,
                 EyImag,
                 HxReal,
@@ -1782,7 +1528,7 @@ def _electric_ex_bloch_y_standard_z(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    get_compiled_extension().update_electric_ex_bloch_y_standard_z(
+    _COMPILED_EXTENSION.update_electric_ex_bloch_y_standard_z(
                 ExReal, ExImag, HyReal, HyImag, HzReal, HzImag, ExDecay, ExCurl,
                 float(phaseCosY), float(phaseSinY), invDy, invDz,
                 int(zLowBoundaryMode), int(zHighBoundaryMode),
@@ -1806,7 +1552,7 @@ def _electric_ey_bloch_x_standard_z(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    get_compiled_extension().update_electric_ey_bloch_x_standard_z(
+    _COMPILED_EXTENSION.update_electric_ey_bloch_x_standard_z(
                 EyReal, EyImag, HxReal, HxImag, HzReal, HzImag, EyDecay, EyCurl,
                 float(phaseCosX), float(phaseSinX), invDx, invDz,
                 int(zLowBoundaryMode), int(zHighBoundaryMode),
@@ -1830,7 +1576,7 @@ def _electric_ez_bloch(
     invDx,
     invDy,
 ):
-    get_compiled_extension().update_electric_ez_bloch(
+    _COMPILED_EXTENSION.update_electric_ez_bloch(
                 EzReal,
                 EzImag,
                 HxReal,
@@ -1849,7 +1595,7 @@ def _electric_ez_bloch(
 
 
 def _add_source_patch(*, field, sourcePatch, offsetI, offsetJ, offsetK, signal):
-    get_compiled_extension().add_source_patch(
+    _COMPILED_EXTENSION.add_source_patch(
                 field,
                 sourcePatch,
                 int(offsetI),
@@ -1870,7 +1616,7 @@ def _add_cw_phased_source_patch(
     signalCos,
     signalSin,
 ):
-    get_compiled_extension().add_cw_phased_source_patch(
+    _COMPILED_EXTENSION.add_cw_phased_source_patch(
                 field,
                 sourcePatchCos,
                 sourcePatchSin,
@@ -1900,7 +1646,7 @@ def _add_time_shifted_source_patch(
     delay,
     causalGate,
 ):
-    get_compiled_extension().add_time_shifted_source_patch(
+    _COMPILED_EXTENSION.add_time_shifted_source_patch(
                 field,
                 sourcePatch,
                 delayPatch,
@@ -1929,7 +1675,7 @@ def _add_source_patch_periodic(*, signal, sourcePatch, offsetI, offsetJ, offsetK
     else:
         field = kwargs["Ez"]
         extension_method = "add_source_patch_ez_periodic"
-    getattr(get_compiled_extension(), extension_method)(
+    getattr(_COMPILED_EXTENSION, extension_method)(
                 field,
                 sourcePatch,
                 int(offsetI),
@@ -1963,7 +1709,7 @@ def _add_source_patch_bloch(
     wrapAxisA=1,
     wrapAxisB=1,
 ):
-    get_compiled_extension().add_source_patch_bloch(
+    _COMPILED_EXTENSION.add_source_patch_bloch(
         ExReal, ExImag, EyReal, EyImag, EzReal, EzImag, sourcePatch,
         int(offsetI), int(offsetJ), int(offsetK),
         float(signalReal), float(signalImag), int(axisCode),
@@ -1997,7 +1743,7 @@ def _add_cw_phased_source_patch_bloch(
 ):
     real_values = sourcePatchCos * float(signalCos) + sourcePatchSin * float(signalSin)
     imag_values = sourcePatchCos * float(signalSin) - sourcePatchSin * float(signalCos)
-    extension = get_compiled_extension()
+    extension = _COMPILED_EXTENSION
     extension.add_source_patch_bloch(
         ExReal, ExImag, EyReal, EyImag, EzReal, EzImag, real_values,
         int(offsetI), int(offsetJ), int(offsetK), 1.0, 0.0, int(axisCode),
@@ -2013,7 +1759,7 @@ def _add_cw_phased_source_patch_bloch(
 
 
 def _add_scaled_slice_source_patch(*, field, sourcePatch, incidentField, sampleIndex, offsetI, offsetJ, offsetK, scale):
-    get_compiled_extension().add_scaled_slice_source_patch(
+    _COMPILED_EXTENSION.add_scaled_slice_source_patch(
                 field,
                 sourcePatch,
                 incidentField,
@@ -2037,7 +1783,7 @@ def _add_scaled_line_source_patch(
     offsetK,
     scale,
 ):
-    get_compiled_extension().add_scaled_line_source_patch(
+    _COMPILED_EXTENSION.add_scaled_line_source_patch(
                 field,
                 coeffPatch,
                 incidentField,
@@ -2063,7 +1809,7 @@ def _add_interpolated_source_patch(
     offsetK,
     scale,
 ):
-    get_compiled_extension().add_interpolated_source_patch(
+    _COMPILED_EXTENSION.add_interpolated_source_patch(
                 field,
                 coeffPatch,
                 incidentField,
@@ -2178,7 +1924,7 @@ def _add_batched_reference_source_patches(
             sampleIndexStarts=sampleIndexStarts,
             sampleIndices=sampleIndices,
         )
-    get_compiled_extension().add_batched_reference_source_patches(
+    _COMPILED_EXTENSION.add_batched_reference_source_patches(
                 fieldX,
                 fieldY,
                 fieldZ,
@@ -2216,7 +1962,7 @@ def _add_batched_interpolated_source_patches(
             fieldCodes=fieldCodes,
             fieldShapes=(fieldX.shape, fieldY.shape, fieldZ.shape),
         )
-    get_compiled_extension().add_batched_interpolated_source_patches(
+    _COMPILED_EXTENSION.add_batched_interpolated_source_patches(
                 fieldX,
                 fieldY,
                 fieldZ,
@@ -2231,7 +1977,7 @@ def _add_batched_interpolated_source_patches(
 
 
 def _update_auxiliary_magnetic(*, Magnetic, Electric, MagneticDecay, MagneticCurl):
-    get_compiled_extension().update_auxiliary_magnetic(
+    _COMPILED_EXTENSION.update_auxiliary_magnetic(
                 Magnetic,
                 Electric,
                 MagneticDecay,
@@ -2240,7 +1986,7 @@ def _update_auxiliary_magnetic(*, Magnetic, Electric, MagneticDecay, MagneticCur
 
 
 def _update_auxiliary_electric(*, Electric, Magnetic, ElectricDecay, ElectricCurl, sourceIndex, sourceValue):
-    get_compiled_extension().update_auxiliary_electric(
+    _COMPILED_EXTENSION.update_auxiliary_electric(
                 Electric,
                 Magnetic,
                 ElectricDecay,
@@ -2264,8 +2010,7 @@ def _accumulate_dft_batched(
     weightedCos,
     weightedSin,
 ):
-    _require_cuda_tensors(Ex, Ey, Ez, weightedCos, weightedSin)
-    get_compiled_extension().accumulate_dft_batched(
+    _COMPILED_EXTENSION.accumulate_dft_batched(
                 Ex,
                 Ey,
                 Ez,
@@ -2291,7 +2036,7 @@ def _accumulate_point_observers(
     weightedCos,
     weightedSin,
 ):
-    get_compiled_extension().accumulate_point_observers(
+    _COMPILED_EXTENSION.accumulate_point_observers(
                 field,
                 pointI.contiguous(),
                 pointJ.contiguous(),
@@ -2304,7 +2049,7 @@ def _accumulate_point_observers(
 
 
 def _accumulate_plane_observer(*, field, planeRealAccum, planeImagAccum, axisCode, planeIndex, weightedCos, weightedSin):
-    get_compiled_extension().accumulate_plane_observer(
+    _COMPILED_EXTENSION.accumulate_plane_observer(
                 field,
                 planeRealAccum,
                 planeImagAccum,
@@ -2316,8 +2061,7 @@ def _accumulate_plane_observer(*, field, planeRealAccum, planeImagAccum, axisCod
 
 
 def _plane_flux_reduce(*, ea, eb, ha, hb, weights, out, outIndex, scale):
-    _require_cuda_tensors(ea, eb, ha, hb, weights, out)
-    get_compiled_extension().plane_flux_reduce(
+    _COMPILED_EXTENSION.plane_flux_reduce(
         ea,
         eb,
         ha,
@@ -2330,7 +2074,7 @@ def _plane_flux_reduce(*, ea, eb, ha, hb, weights, out, outIndex, scale):
 
 
 def _update_debye_current(*, ElectricField, Polarization, PolarizationCurrent, DebyeDrive, decay, dt):
-    get_compiled_extension().update_debye_current(
+    _COMPILED_EXTENSION.update_debye_current(
                 ElectricField,
                 Polarization,
                 PolarizationCurrent,
@@ -2341,7 +2085,7 @@ def _update_debye_current(*, ElectricField, Polarization, PolarizationCurrent, D
 
 
 def _update_drude_current(*, ElectricField, PolarizationCurrent, DrudeDrive, decay):
-    get_compiled_extension().update_drude_current(
+    _COMPILED_EXTENSION.update_drude_current(
                 ElectricField,
                 PolarizationCurrent,
                 DrudeDrive,
@@ -2350,7 +2094,7 @@ def _update_drude_current(*, ElectricField, PolarizationCurrent, DrudeDrive, dec
 
 
 def _update_lorentz_current(*, ElectricField, Polarization, PolarizationCurrent, LorentzDrive, decay, restoring, dt):
-    get_compiled_extension().update_lorentz_current(
+    _COMPILED_EXTENSION.update_lorentz_current(
                 ElectricField,
                 Polarization,
                 PolarizationCurrent,
@@ -2362,7 +2106,7 @@ def _update_lorentz_current(*, ElectricField, Polarization, PolarizationCurrent,
 
 
 def _apply_polarization_current(*, ElectricField, PolarizationCurrent, InvPermittivity, dt):
-    get_compiled_extension().apply_polarization_current(
+    _COMPILED_EXTENSION.apply_polarization_current(
                 ElectricField,
                 PolarizationCurrent,
                 InvPermittivity,
@@ -2373,7 +2117,7 @@ def _apply_polarization_current(*, ElectricField, PolarizationCurrent, InvPermit
 def _apply_polarization_current_modulated(
     *, ElectricField, PolarizationCurrent, InvPermittivity, ModCos, ModSin, ModOmega, tNext, dt
 ):
-    get_compiled_extension().apply_polarization_current_modulated(
+    _COMPILED_EXTENSION.apply_polarization_current_modulated(
                 ElectricField,
                 PolarizationCurrent,
                 InvPermittivity,
@@ -2386,8 +2130,7 @@ def _apply_polarization_current_modulated(
 
 
 def _update_kerr_ex(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, ExDecay, KerrChi3, dt, eps0):
-    _invalidate_uniform_scalar(DynamicCurl)
-    get_compiled_extension().update_kerr_ex_curl(
+    _COMPILED_EXTENSION.update_kerr_ex_curl(
                 DynamicCurl,
                 Ex,
                 Ey,
@@ -2401,8 +2144,7 @@ def _update_kerr_ex(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, ExDecay, Ker
 
 
 def _update_kerr_ey(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, EyDecay, KerrChi3, dt, eps0):
-    _invalidate_uniform_scalar(DynamicCurl)
-    get_compiled_extension().update_kerr_ey_curl(
+    _COMPILED_EXTENSION.update_kerr_ey_curl(
                 DynamicCurl,
                 Ex,
                 Ey,
@@ -2416,8 +2158,7 @@ def _update_kerr_ey(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, EyDecay, Ker
 
 
 def _update_kerr_ez(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, EzDecay, KerrChi3, dt, eps0):
-    _invalidate_uniform_scalar(DynamicCurl)
-    get_compiled_extension().update_kerr_ez_curl(
+    _COMPILED_EXTENSION.update_kerr_ez_curl(
                 DynamicCurl,
                 Ex,
                 Ey,
@@ -2450,9 +2191,7 @@ def _update_nonlinear_coefficients(
     dt,
     eps0,
 ):
-    _invalidate_uniform_scalar(DynamicDecay)
-    _invalidate_uniform_scalar(DynamicCurl)
-    get_compiled_extension().update_nonlinear_coefficients(
+    _COMPILED_EXTENSION.update_nonlinear_coefficients(
                 DynamicDecay,
                 DynamicCurl,
                 Ex,
@@ -2471,24 +2210,21 @@ def _update_nonlinear_coefficients(
 
 
 def _electric_ex_full_aniso(*, Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz, periodicX, periodicY, periodicZ):
-    _require_cuda_tensors(Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz)
-    get_compiled_extension().update_electric_ex_full_aniso(
+    _COMPILED_EXTENSION.update_electric_ex_full_aniso(
                 Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz,
                 int(periodicX), int(periodicY), int(periodicZ),
             )
 
 
 def _electric_ey_full_aniso(*, Ey, Hx, Hy, Hz, CoeffX, CoeffZ, invDx, invDy, invDz, periodicX, periodicY, periodicZ):
-    _require_cuda_tensors(Ey, Hx, Hy, Hz, CoeffX, CoeffZ, invDx, invDy, invDz)
-    get_compiled_extension().update_electric_ey_full_aniso(
+    _COMPILED_EXTENSION.update_electric_ey_full_aniso(
                 Ey, Hx, Hy, Hz, CoeffX, CoeffZ, invDx, invDy, invDz,
                 int(periodicX), int(periodicY), int(periodicZ),
             )
 
 
 def _electric_ez_full_aniso(*, Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, invDz, periodicX, periodicY, periodicZ):
-    _require_cuda_tensors(Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, invDz)
-    get_compiled_extension().update_electric_ez_full_aniso(
+    _COMPILED_EXTENSION.update_electric_ez_full_aniso(
                 Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, invDz,
                 int(periodicX), int(periodicY), int(periodicZ),
             )
@@ -2500,11 +2236,7 @@ def _electric_ex_full_aniso_cpml(
     InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ,
     periodicX, periodicY, periodicZ, PsiX, PsiY, PsiZ,
 ):
-    _require_cuda_tensors(
-        Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz,
-        InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ, PsiX, PsiY, PsiZ,
-    )
-    get_compiled_extension().update_electric_ex_full_aniso_cpml(
+    _COMPILED_EXTENSION.update_electric_ex_full_aniso_cpml(
                 Ex, Hx, Hy, Hz, CoeffY, CoeffZ, invDx, invDy, invDz,
                 InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ,
                 int(periodicX), int(periodicY), int(periodicZ), PsiX, PsiY, PsiZ,
@@ -2517,11 +2249,7 @@ def _electric_ey_full_aniso_cpml(
     InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ,
     periodicX, periodicY, periodicZ, PsiX, PsiY, PsiZ,
 ):
-    _require_cuda_tensors(
-        Ey, Hx, Hy, Hz, CoeffX, CoeffZ, invDx, invDy, invDz,
-        InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ, PsiX, PsiY, PsiZ,
-    )
-    get_compiled_extension().update_electric_ey_full_aniso_cpml(
+    _COMPILED_EXTENSION.update_electric_ey_full_aniso_cpml(
                 Ey, Hx, Hy, Hz, CoeffX, CoeffZ, invDx, invDy, invDz,
                 InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ,
                 int(periodicX), int(periodicY), int(periodicZ), PsiX, PsiY, PsiZ,
@@ -2534,11 +2262,7 @@ def _electric_ez_full_aniso_cpml(
     InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ,
     periodicX, periodicY, periodicZ, PsiX, PsiY, PsiZ,
 ):
-    _require_cuda_tensors(
-        Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, invDz,
-        InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ, PsiX, PsiY, PsiZ,
-    )
-    get_compiled_extension().update_electric_ez_full_aniso_cpml(
+    _COMPILED_EXTENSION.update_electric_ez_full_aniso_cpml(
                 Ez, Hx, Hy, Hz, CoeffX, CoeffY, invDx, invDy, invDz,
                 InvKappaX, BX, CX, InvKappaY, BY, CY, InvKappaZ, BZ, CZ,
                 int(periodicX), int(periodicY), int(periodicZ), PsiX, PsiY, PsiZ,
@@ -2546,43 +2270,40 @@ def _electric_ez_full_aniso_cpml(
 
 
 def _aniso_offdiag_current_ex(*, Ex, Jy, Jz, CoeffY, CoeffZ, periodicX, periodicY, periodicZ):
-    _require_cuda_tensors(Ex, Jy, Jz, CoeffY, CoeffZ)
-    get_compiled_extension().apply_aniso_offdiag_current_ex(
+    _COMPILED_EXTENSION.apply_aniso_offdiag_current_ex(
                 Ex, Jy, Jz, CoeffY, CoeffZ,
                 int(periodicX), int(periodicY), int(periodicZ),
             )
 
 
 def _aniso_offdiag_current_ey(*, Ey, Jx, Jz, CoeffX, CoeffZ, periodicX, periodicY, periodicZ):
-    _require_cuda_tensors(Ey, Jx, Jz, CoeffX, CoeffZ)
-    get_compiled_extension().apply_aniso_offdiag_current_ey(
+    _COMPILED_EXTENSION.apply_aniso_offdiag_current_ey(
                 Ey, Jx, Jz, CoeffX, CoeffZ,
                 int(periodicX), int(periodicY), int(periodicZ),
             )
 
 
 def _aniso_offdiag_current_ez(*, Ez, Jx, Jy, CoeffX, CoeffY, periodicX, periodicY, periodicZ):
-    _require_cuda_tensors(Ez, Jx, Jy, CoeffX, CoeffY)
-    get_compiled_extension().apply_aniso_offdiag_current_ez(
+    _COMPILED_EXTENSION.apply_aniso_offdiag_current_ez(
                 Ez, Jx, Jy, CoeffX, CoeffY,
                 int(periodicX), int(periodicY), int(periodicZ),
             )
 
 
 def _reverse_electric_hx_standard(*, AdjHxMid, AdjHxPost, AdjEyPost, AdjEzPost, EyCurl, EzCurl, invDy, invDz):
-    get_compiled_extension().reverse_electric_adjoint_to_hx_standard(
+    _COMPILED_EXTENSION.reverse_electric_adjoint_to_hx_standard(
                 AdjHxMid, AdjHxPost, AdjEyPost, AdjEzPost, EyCurl, EzCurl, invDy, invDz
             )
 
 
 def _reverse_electric_hy_standard(*, AdjHyMid, AdjHyPost, AdjExPost, AdjEzPost, ExCurl, EzCurl, invDx, invDz):
-    get_compiled_extension().reverse_electric_adjoint_to_hy_standard(
+    _COMPILED_EXTENSION.reverse_electric_adjoint_to_hy_standard(
                 AdjHyMid, AdjHyPost, AdjExPost, AdjEzPost, ExCurl, EzCurl, invDx, invDz
             )
 
 
 def _reverse_electric_hz_standard(*, AdjHzMid, AdjHzPost, AdjExPost, AdjEyPost, ExCurl, EyCurl, invDx, invDy):
-    get_compiled_extension().reverse_electric_adjoint_to_hz_standard(
+    _COMPILED_EXTENSION.reverse_electric_adjoint_to_hz_standard(
                 AdjHzMid, AdjHzPost, AdjExPost, AdjEyPost, ExCurl, EyCurl, invDx, invDy
             )
 
@@ -2606,7 +2327,7 @@ def _reverse_electric_hx_bloch(
     invDy,
     invDz,
 ):
-    get_compiled_extension().reverse_electric_adjoint_to_hx_bloch(
+    _COMPILED_EXTENSION.reverse_electric_adjoint_to_hx_bloch(
                 AdjHxMidReal, AdjHxMidImag, AdjHxPostReal, AdjHxPostImag,
                 AdjEyPostReal, AdjEyPostImag, AdjEzPostReal, AdjEzPostImag,
                 EyCurl, EzCurl, float(phaseCosY), float(phaseSinY), float(phaseCosZ), float(phaseSinZ),
@@ -2633,7 +2354,7 @@ def _reverse_electric_hy_bloch(
     invDx,
     invDz,
 ):
-    get_compiled_extension().reverse_electric_adjoint_to_hy_bloch(
+    _COMPILED_EXTENSION.reverse_electric_adjoint_to_hy_bloch(
                 AdjHyMidReal, AdjHyMidImag, AdjHyPostReal, AdjHyPostImag,
                 AdjExPostReal, AdjExPostImag, AdjEzPostReal, AdjEzPostImag,
                 ExCurl, EzCurl, float(phaseCosX), float(phaseSinX), float(phaseCosZ), float(phaseSinZ),
@@ -2660,7 +2381,7 @@ def _reverse_electric_hz_bloch(
     invDx,
     invDy,
 ):
-    get_compiled_extension().reverse_electric_adjoint_to_hz_bloch(
+    _COMPILED_EXTENSION.reverse_electric_adjoint_to_hz_bloch(
                 AdjHzMidReal, AdjHzMidImag, AdjHzPostReal, AdjHzPostImag,
                 AdjExPostReal, AdjExPostImag, AdjEyPostReal, AdjEyPostImag,
                 ExCurl, EyCurl, float(phaseCosX), float(phaseSinX), float(phaseCosY), float(phaseSinY),
@@ -2691,7 +2412,7 @@ def _reverse_magnetic_ex_standard(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    get_compiled_extension().reverse_magnetic_adjoint_to_ex_standard(
+    _COMPILED_EXTENSION.reverse_magnetic_adjoint_to_ex_standard(
                 AdjExPrev,
                 GradEpsEx,
                 AdjExPost,
@@ -2738,7 +2459,7 @@ def _reverse_magnetic_ey_standard(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    get_compiled_extension().reverse_magnetic_adjoint_to_ey_standard(
+    _COMPILED_EXTENSION.reverse_magnetic_adjoint_to_ey_standard(
                 AdjEyPrev,
                 GradEpsEy,
                 AdjEyPost,
@@ -2785,7 +2506,7 @@ def _reverse_magnetic_ez_standard(
     yLowBoundaryMode,
     yHighBoundaryMode,
 ):
-    get_compiled_extension().reverse_magnetic_adjoint_to_ez_standard(
+    _COMPILED_EXTENSION.reverse_magnetic_adjoint_to_ez_standard(
                 AdjEzPrev,
                 GradEpsEz,
                 AdjEzPost,
@@ -2838,7 +2559,7 @@ def _reverse_magnetic_ex_bloch(
     invDyH,
     invDzH,
 ):
-    get_compiled_extension().reverse_magnetic_adjoint_to_ex_bloch(
+    _COMPILED_EXTENSION.reverse_magnetic_adjoint_to_ex_bloch(
                 AdjExPrevReal, AdjExPrevImag, GradEpsEx, AdjExPostReal, AdjExPostImag,
                 AdjHyMidReal, AdjHyMidImag, AdjHzMidReal, AdjHzMidImag,
                 ExDecay, ExCurl, EpsEx, HyMidReal, HyMidImag, HzMidReal, HzMidImag,
@@ -2876,7 +2597,7 @@ def _reverse_magnetic_ey_bloch(
     invDxH,
     invDzH,
 ):
-    get_compiled_extension().reverse_magnetic_adjoint_to_ey_bloch(
+    _COMPILED_EXTENSION.reverse_magnetic_adjoint_to_ey_bloch(
                 AdjEyPrevReal, AdjEyPrevImag, GradEpsEy, AdjEyPostReal, AdjEyPostImag,
                 AdjHxMidReal, AdjHxMidImag, AdjHzMidReal, AdjHzMidImag,
                 EyDecay, EyCurl, EpsEy, HxMidReal, HxMidImag, HzMidReal, HzMidImag,
@@ -2914,7 +2635,7 @@ def _reverse_magnetic_ez_bloch(
     invDxH,
     invDyH,
 ):
-    get_compiled_extension().reverse_magnetic_adjoint_to_ez_bloch(
+    _COMPILED_EXTENSION.reverse_magnetic_adjoint_to_ez_bloch(
                 AdjEzPrevReal, AdjEzPrevImag, GradEpsEz, AdjEzPostReal, AdjEzPostImag,
                 AdjHxMidReal, AdjHxMidImag, AdjHyMidReal, AdjHyMidImag,
                 EzDecay, EzCurl, EpsEz, HxMidReal, HxMidImag, HyMidReal, HyMidImag,
@@ -2925,9 +2646,9 @@ def _reverse_magnetic_ez_bloch(
 
 def _accumulate_diff_adjoint(field_grad, diff_grad, axis, inv_delta, *, forward):
     method = (
-                get_compiled_extension().accumulate_forward_diff_adjoint
+                _COMPILED_EXTENSION.accumulate_forward_diff_adjoint
                 if forward
-                else get_compiled_extension().accumulate_backward_diff_adjoint
+                else _COMPILED_EXTENSION.accumulate_backward_diff_adjoint
             )
     method(field_grad, diff_grad, int(axis), inv_delta)
 
@@ -2957,23 +2678,23 @@ def _accumulate_backward_diff_z(*, FieldGrad, DiffGrad, invDz):
 
 
 def _seed_inject_dense(*, AdjField, GradReal, GradImag, CosPack, SinPack, step):
-    get_compiled_extension().seed_inject_dense(AdjField, GradReal, GradImag, CosPack, SinPack, int(step))
+    _COMPILED_EXTENSION.seed_inject_dense(AdjField, GradReal, GradImag, CosPack, SinPack, int(step))
 
 
 def _seed_inject_point(*, AdjField, GradReal, GradImag, PointI, PointJ, PointK, CosPack, SinPack, step):
-    get_compiled_extension().seed_inject_point(
+    _COMPILED_EXTENSION.seed_inject_point(
         AdjField, GradReal, GradImag, PointI, PointJ, PointK, CosPack, SinPack, int(step)
     )
 
 
 def _seed_inject_plane(*, AdjField, GradReal, GradImag, CosPack, SinPack, axis, planeIndex, step):
-    get_compiled_extension().seed_inject_plane(
+    _COMPILED_EXTENSION.seed_inject_plane(
         AdjField, GradReal, GradImag, CosPack, SinPack, int(axis), int(planeIndex), int(step)
     )
 
 
 def _accumulate_in_place(*, dst, src):
-    get_compiled_extension().accumulate_in_place(dst, src)
+    _COMPILED_EXTENSION.accumulate_in_place(dst, src)
 
 
 def _reverse_electric_cpml_ex(
@@ -3007,7 +2728,7 @@ def _reverse_electric_cpml_ex(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    get_compiled_extension().reverse_electric_component_ex_cpml(
+    _COMPILED_EXTENSION.reverse_electric_component_ex_cpml(
                 AdjExPrev, GradEpsEx, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
                 AdjExPost, AdjPsiPosPost, AdjPsiNegPost, ExDecay, ExCurl, EpsEx,
                 PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
@@ -3046,7 +2767,7 @@ def _reverse_electric_cpml_ey(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    get_compiled_extension().reverse_electric_component_ey_cpml(
+    _COMPILED_EXTENSION.reverse_electric_component_ey_cpml(
                 AdjEyPrev, GradEpsEy, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
                 AdjEyPost, AdjPsiPosPost, AdjPsiNegPost, EyDecay, EyCurl, EpsEy,
                 PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
@@ -3085,7 +2806,7 @@ def _reverse_electric_cpml_ez(
     yLowBoundaryMode,
     yHighBoundaryMode,
 ):
-    get_compiled_extension().reverse_electric_component_ez_cpml(
+    _COMPILED_EXTENSION.reverse_electric_component_ez_cpml(
                 AdjEzPrev, GradEpsEz, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
                 AdjEzPost, AdjPsiPosPost, AdjPsiNegPost, EzDecay, EzCurl, EpsEz,
                 PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
@@ -3127,7 +2848,7 @@ def _reverse_electric_cpml_conductive_ex(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    get_compiled_extension().reverse_electric_component_ex_cpml_conductive(
+    _COMPILED_EXTENSION.reverse_electric_component_ex_cpml_conductive(
                 AdjExPrev, GradEpsEx, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
                 AdjExPost, AdjPsiPosPost, AdjPsiNegPost, ExDecay, ExCurl, ExHalf, ExPrev, EpsEx, float(Dt),
                 PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
@@ -3169,7 +2890,7 @@ def _reverse_electric_cpml_conductive_ey(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    get_compiled_extension().reverse_electric_component_ey_cpml_conductive(
+    _COMPILED_EXTENSION.reverse_electric_component_ey_cpml_conductive(
                 AdjEyPrev, GradEpsEy, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
                 AdjEyPost, AdjPsiPosPost, AdjPsiNegPost, EyDecay, EyCurl, EyHalf, EyPrev, EpsEy, float(Dt),
                 PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
@@ -3211,7 +2932,7 @@ def _reverse_electric_cpml_conductive_ez(
     yLowBoundaryMode,
     yHighBoundaryMode,
 ):
-    get_compiled_extension().reverse_electric_component_ez_cpml_conductive(
+    _COMPILED_EXTENSION.reverse_electric_component_ez_cpml_conductive(
                 AdjEzPrev, GradEpsEz, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
                 AdjEzPost, AdjPsiPosPost, AdjPsiNegPost, EzDecay, EzCurl, EzHalf, EzPrev, EpsEz, float(Dt),
                 PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
@@ -3231,13 +2952,13 @@ def _collocation_transpose(
     Ey,
     Ez,
 ):
-    get_compiled_extension().collocation_transpose(
+    _COMPILED_EXTENSION.collocation_transpose(
                 AdjEx, AdjEy, AdjEz, GEx, GEy, GEz, Ex, Ey, Ez,
             )
 
 
 def _collocate_field_square(*, FsqEx, FsqEy, FsqEz, Ex, Ey, Ez):
-    get_compiled_extension().collocate_field_square(FsqEx, FsqEy, FsqEz, Ex, Ey, Ez)
+    _COMPILED_EXTENSION.collocate_field_square(FsqEx, FsqEy, FsqEz, Ex, Ey, Ez)
 
 
 def _full_aniso_curl_adjoint(
@@ -3255,7 +2976,7 @@ def _full_aniso_curl_adjoint(
     CoeffEzX,
     CoeffEzY,
 ):
-    get_compiled_extension().full_aniso_curl_adjoint(
+    _COMPILED_EXTENSION.full_aniso_curl_adjoint(
                 AdjCurlX,
                 AdjCurlY,
                 AdjCurlZ,
@@ -3307,7 +3028,7 @@ def _reverse_electric_cpml_kerr_ex(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    get_compiled_extension().reverse_electric_component_ex_cpml_kerr(
+    _COMPILED_EXTENSION.reverse_electric_component_ex_cpml_kerr(
                 AdjExPrev, GradEpsEx, GradChi3Ex, GFsqEx, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
                 AdjExPost, AdjPsiPosPost, AdjPsiNegPost, ExDecay, EpsEx, Chi3Ex, FsqEx, float(Dt), float(Eps0),
                 PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
@@ -3351,7 +3072,7 @@ def _reverse_electric_cpml_kerr_ey(
     zLowBoundaryMode,
     zHighBoundaryMode,
 ):
-    get_compiled_extension().reverse_electric_component_ey_cpml_kerr(
+    _COMPILED_EXTENSION.reverse_electric_component_ey_cpml_kerr(
                 AdjEyPrev, GradEpsEy, GradChi3Ey, GFsqEy, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
                 AdjEyPost, AdjPsiPosPost, AdjPsiNegPost, EyDecay, EpsEy, Chi3Ey, FsqEy, float(Dt), float(Eps0),
                 PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
@@ -3395,7 +3116,7 @@ def _reverse_electric_cpml_kerr_ez(
     yLowBoundaryMode,
     yHighBoundaryMode,
 ):
-    get_compiled_extension().reverse_electric_component_ez_cpml_kerr(
+    _COMPILED_EXTENSION.reverse_electric_component_ez_cpml_kerr(
                 AdjEzPrev, GradEpsEz, GradChi3Ez, GFsqEz, AdjPsiPosPrev, AdjPsiNegPrev, AdjDPos, AdjDNeg,
                 AdjEzPost, AdjPsiPosPost, AdjPsiNegPost, EzDecay, EpsEz, Chi3Ez, FsqEz, float(Dt), float(Eps0),
                 PsiPos, PsiNeg, BPos, CPos, InvKappaPos, BNeg, CNeg, InvKappaNeg,
@@ -3404,7 +3125,7 @@ def _reverse_electric_cpml_kerr_ez(
 
 
 def _reverse_magnetic_cpml_hx(**kwargs):
-    get_compiled_extension().reverse_magnetic_component_hx_cpml(
+    _COMPILED_EXTENSION.reverse_magnetic_component_hx_cpml(
                 kwargs["AdjHxPrev"], kwargs["AdjPsiPosPrev"], kwargs["AdjPsiNegPrev"], kwargs["AdjDPos"], kwargs["AdjDNeg"],
                 kwargs["AdjHxPost"], kwargs["AdjPsiPosPost"], kwargs["AdjPsiNegPost"], kwargs["HxDecay"], kwargs["HxCurl"],
                 kwargs["BPos"], kwargs["CPos"], kwargs["InvKappaPos"], kwargs["BNeg"], kwargs["CNeg"], kwargs["InvKappaNeg"],
@@ -3412,7 +3133,7 @@ def _reverse_magnetic_cpml_hx(**kwargs):
 
 
 def _reverse_magnetic_cpml_hy(**kwargs):
-    get_compiled_extension().reverse_magnetic_component_hy_cpml(
+    _COMPILED_EXTENSION.reverse_magnetic_component_hy_cpml(
                 kwargs["AdjHyPrev"], kwargs["AdjPsiPosPrev"], kwargs["AdjPsiNegPrev"], kwargs["AdjDPos"], kwargs["AdjDNeg"],
                 kwargs["AdjHyPost"], kwargs["AdjPsiPosPost"], kwargs["AdjPsiNegPost"], kwargs["HyDecay"], kwargs["HyCurl"],
                 kwargs["BPos"], kwargs["CPos"], kwargs["InvKappaPos"], kwargs["BNeg"], kwargs["CNeg"], kwargs["InvKappaNeg"],
@@ -3420,7 +3141,7 @@ def _reverse_magnetic_cpml_hy(**kwargs):
 
 
 def _reverse_magnetic_cpml_hz(**kwargs):
-    get_compiled_extension().reverse_magnetic_component_hz_cpml(
+    _COMPILED_EXTENSION.reverse_magnetic_component_hz_cpml(
                 kwargs["AdjHzPrev"], kwargs["AdjPsiPosPrev"], kwargs["AdjPsiNegPrev"], kwargs["AdjDPos"], kwargs["AdjDNeg"],
                 kwargs["AdjHzPost"], kwargs["AdjPsiPosPost"], kwargs["AdjPsiNegPost"], kwargs["HzDecay"], kwargs["HzCurl"],
                 kwargs["BPos"], kwargs["CPos"], kwargs["InvKappaPos"], kwargs["BNeg"], kwargs["CNeg"], kwargs["InvKappaNeg"],
@@ -3428,15 +3149,15 @@ def _reverse_magnetic_cpml_hz(**kwargs):
 
 
 def _reverse_magnetic_hx_decay(*, AdjHxPrev, AdjHxMid, HxDecay):
-    get_compiled_extension().reverse_magnetic_adjoint_decay(AdjHxPrev, AdjHxMid, HxDecay)
+    _COMPILED_EXTENSION.reverse_magnetic_adjoint_decay(AdjHxPrev, AdjHxMid, HxDecay)
 
 
 def _reverse_magnetic_hy_decay(*, AdjHyPrev, AdjHyMid, HyDecay):
-    get_compiled_extension().reverse_magnetic_adjoint_decay(AdjHyPrev, AdjHyMid, HyDecay)
+    _COMPILED_EXTENSION.reverse_magnetic_adjoint_decay(AdjHyPrev, AdjHyMid, HyDecay)
 
 
 def _reverse_magnetic_hz_decay(*, AdjHzPrev, AdjHzMid, HzDecay):
-    get_compiled_extension().reverse_magnetic_adjoint_decay(AdjHzPrev, AdjHzMid, HzDecay)
+    _COMPILED_EXTENSION.reverse_magnetic_adjoint_decay(AdjHzPrev, AdjHzMid, HzDecay)
 
 
 def _reverse_debye_current(
@@ -3449,7 +3170,7 @@ def _reverse_debye_current(
     decay,
     dt,
 ):
-    get_compiled_extension().reverse_debye_current(
+    _COMPILED_EXTENSION.reverse_debye_current(
                 AdjElectricPrev,
                 AdjPolarizationPrev,
                 AdjPolarizationPost,
@@ -3461,7 +3182,7 @@ def _reverse_debye_current(
 
 
 def _reverse_drude_current(*, AdjElectricPrev, AdjCurrentPrev, AdjCurrentPost, DrudeDrive, decay):
-    get_compiled_extension().reverse_drude_current(
+    _COMPILED_EXTENSION.reverse_drude_current(
                 AdjElectricPrev,
                 AdjCurrentPrev,
                 AdjCurrentPost,
@@ -3482,7 +3203,7 @@ def _reverse_lorentz_current(
     restoring,
     dt,
 ):
-    get_compiled_extension().reverse_lorentz_current(
+    _COMPILED_EXTENSION.reverse_lorentz_current(
                 AdjElectricPrev,
                 AdjPolarizationPrev,
                 AdjCurrentPrev,
@@ -3505,7 +3226,7 @@ def _reverse_dispersive_correction(
     Eps,
     dt,
 ):
-    get_compiled_extension().reverse_dispersive_correction(
+    _COMPILED_EXTENSION.reverse_dispersive_correction(
                 AdjCurrentCorrected,
                 GradEps,
                 AdjCurrentPost,
@@ -3517,7 +3238,7 @@ def _reverse_dispersive_correction(
 
 
 def _accumulate_tfsf_scalar_sample_adjoint(*, AdjAuxField, AdjFieldPatch, CoeffPatch, sampleIndex, componentScale):
-    get_compiled_extension().accumulate_tfsf_scalar_sample_adjoint(
+    _COMPILED_EXTENSION.accumulate_tfsf_scalar_sample_adjoint(
                 AdjAuxField,
                 AdjFieldPatch,
                 CoeffPatch,
@@ -3536,7 +3257,7 @@ def _accumulate_tfsf_line_sample_adjoint(
     componentScale,
 ):
     sample_indices = SampleIndices.to(device=AdjAuxField.device, dtype=torch.int32).contiguous()
-    get_compiled_extension().accumulate_tfsf_line_sample_adjoint(
+    _COMPILED_EXTENSION.accumulate_tfsf_line_sample_adjoint(
                 AdjAuxField,
                 AdjFieldPatch,
                 CoeffPatch,
@@ -3556,7 +3277,7 @@ def _accumulate_tfsf_interpolated_sample_adjoint(
     ds,
     componentScale,
 ):
-    get_compiled_extension().accumulate_tfsf_interpolated_sample_adjoint(
+    _COMPILED_EXTENSION.accumulate_tfsf_interpolated_sample_adjoint(
                 AdjAuxField,
                 AdjFieldPatch,
                 CoeffPatch,
@@ -3576,7 +3297,7 @@ def _reverse_tfsf_auxiliary_electric(
     ElectricCurl,
     sourceIndex,
 ):
-    get_compiled_extension().reverse_tfsf_auxiliary_electric(
+    _COMPILED_EXTENSION.reverse_tfsf_auxiliary_electric(
                 AdjElectricPrev,
                 AdjMagneticAfter,
                 AdjElectricPost,
@@ -3594,7 +3315,7 @@ def _reverse_tfsf_auxiliary_magnetic(
     MagneticDecay,
     MagneticCurl,
 ):
-    get_compiled_extension().reverse_tfsf_auxiliary_magnetic(
+    _COMPILED_EXTENSION.reverse_tfsf_auxiliary_magnetic(
                 AdjElectricPrev,
                 AdjMagneticPrev,
                 AdjMagneticAfter,
@@ -3604,16 +3325,15 @@ def _reverse_tfsf_auxiliary_magnetic(
 
 
 def _clamp_field_face(*, field, axis, side):
-    get_compiled_extension().clamp_field_face(field, int(axis), int(side))
+    _COMPILED_EXTENSION.clamp_field_face(field, int(axis), int(side))
 
 
 def _clamp_pec_boundary(*, field, axisA, axisB):
-    get_compiled_extension().clamp_pec_boundary(field, int(axisA), int(axisB))
+    _COMPILED_EXTENSION.clamp_pec_boundary(field, int(axisA), int(axisB))
 
 
 def _mur_abc_face(*, field, axis, boundaryIndex, adjacentIndex, coef, prevBoundary, prevAdjacent):
-    _require_cuda_tensors(field, prevBoundary, prevAdjacent)
-    get_compiled_extension().mur_abc_face(
+    _COMPILED_EXTENSION.mur_abc_face(
         field,
         int(axis),
         int(boundaryIndex),
@@ -3625,11 +3345,11 @@ def _mur_abc_face(*, field, axis, boundaryIndex, adjacentIndex, coef, prevBounda
 
 
 def _project_periodic_boundary(*, field, axis):
-    get_compiled_extension().project_periodic_boundary(field, int(axis))
+    _COMPILED_EXTENSION.project_periodic_boundary(field, int(axis))
 
 
 def _project_bloch_boundary(*, fieldReal, fieldImag, axis, phaseCos, phaseSin):
-    get_compiled_extension().project_bloch_boundary(
+    _COMPILED_EXTENSION.project_bloch_boundary(
                 fieldReal,
                 fieldImag,
                 int(axis),

@@ -950,7 +950,6 @@ def _move_solver_tensors_to_cuda(solver):
     for name, value in vars(solver).items():
         values[name] = _move(value)
     values["device"] = "cuda"
-    values["kernel_block_size"] = (256, 1, 1)
     return SimpleNamespace(**values)
 
 

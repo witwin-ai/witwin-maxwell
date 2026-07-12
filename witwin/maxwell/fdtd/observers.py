@@ -619,7 +619,6 @@ def prepare_observers(solver, frequencies, window_type, time_steps):
         if has_complex_fields(solver):
             group["aux_real"] = torch.zeros((len(group["global_freq_indices"]), point_count), device=solver.device, dtype=field.dtype)
             group["aux_imag"] = torch.zeros((len(group["global_freq_indices"]), point_count), device=solver.device, dtype=field.dtype)
-        group["grid"] = solver._compute_linear_launch_shape(point_count)
         for global_index, local_index in group["freq_local_lookup"].items():
             solver._observer_point_groups_by_frequency[global_index].append((group, local_index))
 
@@ -640,7 +639,6 @@ def prepare_observers(solver, frequencies, window_type, time_steps):
         if has_complex_fields(solver):
             group["aux_real"] = torch.zeros((len(group["global_freq_indices"]),) + group["plane_shape"], device=solver.device, dtype=field.dtype)
             group["aux_imag"] = torch.zeros((len(group["global_freq_indices"]),) + group["plane_shape"], device=solver.device, dtype=field.dtype)
-        group["grid"] = solver._compute_linear_launch_shape(int(np.prod(group["plane_shape"])))
         for global_index, local_index in group["freq_local_lookup"].items():
             solver._observer_plane_groups_by_frequency[global_index].append((group, local_index))
 
@@ -686,10 +684,7 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                 imagAccum=group["imag"][local_index],
                 weightedCos=weighted_cos,
                 weightedSin=weighted_sin,
-            ).launchRaw(
-                blockSize=solver.kernel_block_size,
-                gridSize=group["grid"],
-            )
+            ).launchRaw()
             if has_complex_fields(solver):
                 solver.fdtd_module.accumulatePointObservers3D(
                     field=getattr(solver, f"{group['field_name']}_imag"),
@@ -700,10 +695,7 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     imagAccum=group["aux_imag"][local_index],
                     weightedCos=weighted_cos,
                     weightedSin=weighted_sin,
-                ).launchRaw(
-                    blockSize=solver.kernel_block_size,
-                    gridSize=group["grid"],
-                )
+                ).launchRaw()
 
         for group, local_index in solver._observer_plane_groups_by_frequency[global_index]:
             solver.fdtd_module.accumulatePlaneObserver3D(
@@ -714,10 +706,7 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                 planeIndex=group["plane_index"],
                 weightedCos=weighted_cos,
                 weightedSin=weighted_sin,
-            ).launchRaw(
-                blockSize=solver.kernel_block_size,
-                gridSize=group["grid"],
-            )
+            ).launchRaw()
             if has_complex_fields(solver):
                 solver.fdtd_module.accumulatePlaneObserver3D(
                     field=getattr(solver, f"{group['field_name']}_imag"),
@@ -727,10 +716,7 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     planeIndex=group["plane_index"],
                     weightedCos=weighted_cos,
                     weightedSin=weighted_sin,
-                ).launchRaw(
-                    blockSize=solver.kernel_block_size,
-                    gridSize=group["grid"],
-                )
+                ).launchRaw()
 
         entry["window_normalization"] += window_weight
         entry["sample_count"] += 1
@@ -963,7 +949,7 @@ def accumulate_time_observers(solver, n):
             out=record["buffer"],
             outIndex=k,
             scale=record["flux_scale"],
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=None)
+        ).launchRaw()
 
 
 def get_time_observer_results(solver):

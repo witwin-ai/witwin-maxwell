@@ -147,15 +147,15 @@ def test_offdiag_current_kernels_match_torch_reference():
     solver.fdtd_module.applyAnisoOffdiagCurrentEx3D(
         Ex=solver.Ex, Jy=jy, Jz=jz, CoeffY=solver.cex_aniso_y, CoeffZ=solver.cex_aniso_z,
         periodicX=periodic[0], periodicY=periodic[1], periodicZ=periodic[2],
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.applyAnisoOffdiagCurrentEy3D(
         Ey=solver.Ey, Jx=jx, Jz=jz, CoeffX=solver.cey_aniso_x, CoeffZ=solver.cey_aniso_z,
         periodicX=periodic[0], periodicY=periodic[1], periodicZ=periodic[2],
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.applyAnisoOffdiagCurrentEz3D(
         Ez=solver.Ez, Jx=jx, Jy=jy, CoeffX=solver.cez_aniso_x, CoeffY=solver.cez_aniso_y,
         periodicX=periodic[0], periodicY=periodic[1], periodicZ=periodic[2],
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
     torch.cuda.synchronize()
 
     # The kernel subtracts the collocated off-diagonal current.

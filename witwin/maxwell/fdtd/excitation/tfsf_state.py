@@ -68,7 +68,6 @@ def _make_auxiliary_grid(solver, *, s_min, s_max, ds):
         dtype=solver.Ex.dtype,
         absorber_cells=ABSORBER_CELLS,
         fdtd_module=solver.fdtd_module,
-        kernel_block_size=solver.kernel_block_size,
     )
 
 

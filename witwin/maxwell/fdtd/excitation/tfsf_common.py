@@ -185,7 +185,6 @@ def make_aux_term(solver, *, field_name, offsets, coeff_patch, sample_positions,
     return {
         "field_name": field_name,
         "offsets": offsets,
-        "grid": solver._compute_linear_launch_shape(int(coeff_patch.numel())),
         "coeff_patch": coeff_patch.contiguous(),
         "sample_positions": sample_positions.contiguous(),
         "component_scale": float(component_scale),
@@ -266,7 +265,6 @@ def _pack_batched_term_metadata(solver, terms):
         "field_codes": torch.tensor(field_codes, device=solver.device, dtype=torch.int32),
         "field_codes_per_coeff": torch.cat(field_code_chunks).contiguous(),
         "field_offsets": torch.cat(field_offset_chunks).contiguous(),
-        "grid": solver._compute_linear_launch_shape(int(coeff_data.numel())),
     }
 
 

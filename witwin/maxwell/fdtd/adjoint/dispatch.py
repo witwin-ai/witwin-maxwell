@@ -558,6 +558,10 @@ def _run_native_reverse_step(
     accumulation) and returns a ``_ReverseStepResult`` labelled with the matching
     ``_NATIVE_REVERSE_LABELS`` value.
     """
+    if getattr(solver, "_fdtd_cuda_extension", None) is None:
+        from ..cuda.backend import get_compiled_extension
+
+        solver._fdtd_cuda_extension = get_compiled_extension()
     runner = _NATIVE_REVERSE_RUNNERS[backend]
     return runner(
         solver,

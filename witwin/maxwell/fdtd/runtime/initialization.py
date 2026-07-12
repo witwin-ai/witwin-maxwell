@@ -117,12 +117,12 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver._cpml_memory_mode_requested = str(solver.cpml_config.get("memory_mode", "auto")).strip().lower()
     solver._cpml_memory_mode = "none"
     solver._cpml_memory_layouts = {}
+    solver._cpml_layout_cache = {}
     solver._cpml_dense_memory_bytes = 0
     solver._cpml_slab_memory_bytes = 0
     solver._cpml_allocated_memory_bytes = 0
     solver._cpml_dense_memory_limit_bytes = None
     solver._cpml_auto_free_bytes = None
-    solver.kernel_block_size = (256, 1, 1)
 
     solver.dt = solver.auto_dt(solver.min_dx, solver.min_dy, solver.min_dz, time_step_frequency)
     # Per-axis spacing arrays: `_e` scales backward diffs in E updates (dual
@@ -209,8 +209,6 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver.cex_decay_external = None
     solver.cey_decay_external = None
     solver.cez_decay_external = None
-    solver._field_launch_shapes = {}
-    solver._spectral_launch_shapes = {}
     solver._point_observer_groups = {}
     solver._plane_observer_groups = {}
     solver.last_solve_elapsed_s = None

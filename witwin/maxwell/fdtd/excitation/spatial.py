@@ -324,7 +324,6 @@ class AuxiliaryGrid1D:
         absorber_cells=20,
         source_buffer_cells=6,
         fdtd_module=None,
-        kernel_block_size=(256, 1, 1),
     ):
         self.s_min = float(s_min)
         self.s_max = float(s_max)
@@ -338,7 +337,6 @@ class AuxiliaryGrid1D:
         self.absorber_cells = max(int(absorber_cells), 0)
         self.source_buffer_cells = max(int(source_buffer_cells), 0)
         self.fdtd_module = fdtd_module
-        self.kernel_block_size = tuple(kernel_block_size)
 
         if self.ds <= 0.0:
             raise ValueError("AuxiliaryGrid1D ds must be > 0.")
@@ -353,8 +351,6 @@ class AuxiliaryGrid1D:
         self.electric = torch.zeros(electric_cells, device=self.device, dtype=dtype)
         self.magnetic = torch.zeros(electric_cells - 1, device=self.device, dtype=dtype)
         self.source_index = 0
-        self._electric_launch_shape = self._compute_linear_launch_shape(int(self.electric.numel()))
-        self._magnetic_launch_shape = self._compute_linear_launch_shape(int(self.magnetic.numel()))
 
         self.eps = 1.0 / (self.impedance * self.wave_speed)
         self.mu = self.impedance / self.wave_speed
@@ -368,13 +364,6 @@ class AuxiliaryGrid1D:
     @property
     def magnetic_time(self):
         return (self.time_step - 0.5) * self.dt
-
-    def _compute_linear_launch_shape(self, size: int) -> tuple[int, int, int]:
-        threads_per_block = int(self.kernel_block_size[0]) * int(self.kernel_block_size[1]) * int(self.kernel_block_size[2])
-        if threads_per_block <= 0:
-            raise ValueError("kernel_block_size must describe at least one thread.")
-        grid_x = max(1, (int(size) + threads_per_block - 1) // threads_per_block)
-        return (grid_x, 1, 1)
 
     def _can_use_compiled_auxiliary(self) -> bool:
         return self.device.type == "cuda" and self.dtype == torch.float32
@@ -438,10 +427,7 @@ class AuxiliaryGrid1D:
             Electric=self.electric,
             MagneticDecay=self.magnetic_decay,
             MagneticCurl=self.magnetic_curl,
-        ).launchRaw(
-            blockSize=self.kernel_block_size,
-            gridSize=self._magnetic_launch_shape,
-        )
+        ).launchRaw()
 
     def _advance_electric_compiled(self):
         source_value = float(evaluate_source_time(self.source_time, self.electric_time))
@@ -452,10 +438,7 @@ class AuxiliaryGrid1D:
             ElectricCurl=self.electric_curl,
             sourceIndex=int(self.source_index),
             sourceValue=source_value,
-        ).launchRaw(
-            blockSize=self.kernel_block_size,
-            gridSize=self._electric_launch_shape,
-        )
+        ).launchRaw()
 
     def advance_magnetic(self):
         if self._can_use_compiled_auxiliary():

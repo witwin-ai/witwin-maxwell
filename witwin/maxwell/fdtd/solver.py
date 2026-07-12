@@ -53,8 +53,6 @@ from .runtime import (
     build_update_coefficients as build_update_coefficients_impl,
     clamp_field_face as clamp_field_face_impl,
     clamp_pec_boundaries as clamp_pec_boundaries_impl,
-    compute_face_launch_shape as compute_face_launch_shape_impl,
-    compute_linear_launch_shape as compute_linear_launch_shape_impl,
     compute_spectral_start_step as compute_spectral_start_step_impl,
     compute_window_weight as compute_window_weight_impl,
     cpml_layout_params as cpml_layout_params_impl,
@@ -67,7 +65,6 @@ from .runtime import (
     initialize_solver,
     iter_cpml_memory_regions as iter_cpml_memory_regions_impl,
     normalize_target_frequencies as normalize_target_frequencies_impl,
-    refresh_launch_shapes as refresh_launch_shapes_impl,
     reset_dft_runtime_state as reset_dft_runtime_state_impl,
     require_cuda_scene,
     resolve_spectral_window_type as resolve_spectral_window_type_impl,
@@ -312,12 +309,6 @@ class FDTD:
     def _get_material_permittivity(self):
         return get_material_permittivity_impl(self)
 
-    def _compute_linear_launch_shape(self, length):
-        return compute_linear_launch_shape_impl(self, length)
-
-    def _compute_face_launch_shape(self, field, axis):
-        return compute_face_launch_shape_impl(self, field, axis)
-
     def _iter_source_images(self, source_position, cutoff):
         src_x, src_y, src_z = source_position
         boundary = self.scene.boundary
@@ -399,9 +390,6 @@ class FDTD:
         axis_values = {"x": self.scene.x, "y": self.scene.y, "z": self.scene.z}[axis]
         plane_index = min(max(int(plane_index), 0), len(axis_values) - 1)
         return float(axis_values[plane_index].item())
-
-    def _refresh_launch_shapes(self):
-        refresh_launch_shapes_impl(self)
 
     def _iter_cpml_memory_regions(self, attr_name):
         yield from iter_cpml_memory_regions_impl(self, attr_name)

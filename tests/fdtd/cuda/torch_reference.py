@@ -10,7 +10,6 @@ not import it; use ``witwin.maxwell.fdtd.cuda.backend`` instead.
 
 import math
 import os
-import weakref
 from collections.abc import Callable
 from typing import Any
 
@@ -39,39 +38,6 @@ def get_compiled_extension(*, verbose: bool = False) -> Any:
 
         _COMPILED_EXTENSION = build_extension(verbose=verbose)
     return _COMPILED_EXTENSION
-
-
-_UNIFORM_SCALAR_CACHE: dict[int, tuple[Any, int, int, float | None]] = {}
-
-
-def _uniform_scalar(tensor: torch.Tensor) -> float | None:
-    """Return the scalar value of a spatially uniform coefficient tensor.
-
-    Update coefficients (decay/curl) are static for the duration of a solve,
-    so the min==max reduction and its device synchronization run once per
-    tensor and the result is cached. Cache entries are validated against the
-    tensor identity (weakref), storage pointer, and autograd version counter;
-    kernels that mutate a coefficient tensor in place without bumping the
-    version counter (the Kerr dynamic-curl update) must call
-    _invalidate_uniform_scalar explicitly.
-    """
-    key = id(tensor)
-    entry = _UNIFORM_SCALAR_CACHE.get(key)
-    if entry is not None and entry[0]() is tensor:
-        if entry[1] is None:  # pinned non-uniform (mutated in place by kernels)
-            return None
-        if entry[1] == tensor.data_ptr() and entry[2] == tensor._version:
-            return entry[3]
-    minimum, maximum = torch.aminmax(tensor)
-    value = minimum.item() if bool((minimum == maximum).item()) else None
-    _UNIFORM_SCALAR_CACHE[key] = (weakref.ref(tensor), tensor.data_ptr(), tensor._version, value)
-    return value
-
-
-def _invalidate_uniform_scalar(tensor: torch.Tensor) -> None:
-    # Pin as non-uniform: the tensor is rewritten in place by a kernel every
-    # step, so re-deriving a scalar (with its device sync) would be wasted.
-    _UNIFORM_SCALAR_CACHE[id(tensor)] = (weakref.ref(tensor), None, None, None)
 
 
 def build_info() -> dict[str, Any]:
@@ -154,8 +120,7 @@ class _Launch:
         self.kernel = kernel
         self.kwargs = kwargs
 
-    def launchRaw(self, *, blockSize=None, gridSize=None):  # noqa: N802 - mirrors the kernel module API
-        del blockSize, gridSize
+    def launchRaw(self):  # noqa: N802 - mirrors the kernel module API
         _call_with_contiguous(self.kernel, self.kwargs)
         return None
 
@@ -471,6 +436,8 @@ def _magnetic_hx_cpml_compressed(
     psiHxZLowLength,
     psiHxZHighStart,
     psiHxZHighLength,
+    uniformDecay,
+    uniformCurl,
 ):
     _require_cuda_tensors(Hx, Ey, Ez, PsiHxY, PsiHxZ)
     d_y = (Ez[:, 1:, :] - Ez[:, :-1, :]) * _spacing_factor(invDy, 1)
@@ -522,6 +489,8 @@ def _magnetic_hy_cpml_compressed(
     psiHyZLowLength,
     psiHyZHighStart,
     psiHyZHighLength,
+    uniformDecay,
+    uniformCurl,
 ):
     _require_cuda_tensors(Hy, Ex, Ez, PsiHyX, PsiHyZ)
     d_z = (Ex[:, :, 1:] - Ex[:, :, :-1]) * _spacing_factor(invDz, 2)
@@ -573,6 +542,8 @@ def _magnetic_hz_cpml_compressed(
     psiHzYLowLength,
     psiHzYHighStart,
     psiHzYHighLength,
+    uniformDecay,
+    uniformCurl,
 ):
     _require_cuda_tensors(Hz, Ex, Ey, PsiHzX, PsiHzY)
     d_x = (Ey[1:, :, :] - Ey[:-1, :, :]) * _spacing_factor(invDx, 0)
@@ -1137,6 +1108,8 @@ def _electric_ex_cpml_compressed(
     psiExZLowLength,
     psiExZHighStart,
     psiExZHighLength,
+    uniformDecay,
+    uniformCurl,
 ):
     d_y = _backward_diff(Hz, tuple(Ex.shape), 1, yLowBoundaryMode, yHighBoundaryMode, invDy)
     d_z = _backward_diff(Hy, tuple(Ex.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
@@ -1193,6 +1166,8 @@ def _electric_ey_cpml_compressed(
     psiEyZLowLength,
     psiEyZHighStart,
     psiEyZHighLength,
+    uniformDecay,
+    uniformCurl,
 ):
     d_z = _backward_diff(Hx, tuple(Ey.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
     d_x = _backward_diff(Hz, tuple(Ey.shape), 0, xLowBoundaryMode, xHighBoundaryMode, invDx)
@@ -1249,6 +1224,8 @@ def _electric_ez_cpml_compressed(
     psiEzYLowLength,
     psiEzYHighStart,
     psiEzYHighLength,
+    uniformDecay,
+    uniformCurl,
 ):
     d_x = _backward_diff(Hy, tuple(Ez.shape), 0, xLowBoundaryMode, xHighBoundaryMode, invDx)
     d_y = _backward_diff(Hx, tuple(Ez.shape), 1, yLowBoundaryMode, yHighBoundaryMode, invDy)

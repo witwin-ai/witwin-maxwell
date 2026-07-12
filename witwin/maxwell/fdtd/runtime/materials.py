@@ -615,7 +615,6 @@ def advance_component_dispersive_state(solver, component_name, field, *, imag=Fa
     component_templates = solver._dispersive_templates.get(component_name)
     if not component_templates:
         return
-    launch_shape = solver._field_launch_shapes[component_name]
 
     for entry in component_templates["debye"]:
         polarization = entry["polarization_imag"] if imag else entry["polarization"]
@@ -627,7 +626,7 @@ def advance_component_dispersive_state(solver, component_name, field, *, imag=Fa
             DebyeDrive=entry["drive"],
             decay=entry["decay"],
             dt=solver.dt,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+        ).launchRaw()
 
     for entry in component_templates["drude"]:
         current = entry["current_imag"] if imag else entry["current"]
@@ -636,7 +635,7 @@ def advance_component_dispersive_state(solver, component_name, field, *, imag=Fa
             PolarizationCurrent=current,
             DrudeDrive=entry["drive"],
             decay=entry["decay"],
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+        ).launchRaw()
 
     for entry in component_templates["lorentz"]:
         polarization = entry["polarization_imag"] if imag else entry["polarization"]
@@ -649,7 +648,7 @@ def advance_component_dispersive_state(solver, component_name, field, *, imag=Fa
             decay=entry["decay"],
             restoring=entry["restoring"],
             dt=solver.dt,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+        ).launchRaw()
 
 
 def advance_dispersive_state(solver):
@@ -672,7 +671,6 @@ def advance_magnetic_component_dispersive_state(solver, component_name, field, *
     component_templates = solver._magnetic_dispersive_templates.get(component_name)
     if not component_templates:
         return
-    launch_shape = solver._field_launch_shapes[component_name]
 
     for entry in component_templates["debye"]:
         polarization = entry["polarization_imag"] if imag else entry["polarization"]
@@ -684,7 +682,7 @@ def advance_magnetic_component_dispersive_state(solver, component_name, field, *
             DebyeDrive=entry["drive"],
             decay=entry["decay"],
             dt=solver.dt,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+        ).launchRaw()
 
     for entry in component_templates["drude"]:
         current = entry["current_imag"] if imag else entry["current"]
@@ -693,7 +691,7 @@ def advance_magnetic_component_dispersive_state(solver, component_name, field, *
             PolarizationCurrent=current,
             DrudeDrive=entry["drive"],
             decay=entry["decay"],
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+        ).launchRaw()
 
     for entry in component_templates["lorentz"]:
         polarization = entry["polarization_imag"] if imag else entry["polarization"]
@@ -706,7 +704,7 @@ def advance_magnetic_component_dispersive_state(solver, component_name, field, *
             decay=entry["decay"],
             restoring=entry["restoring"],
             dt=solver.dt,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+        ).launchRaw()
 
 
 def advance_magnetic_dispersive_state(solver):
@@ -761,7 +759,6 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
     component_templates = solver._dispersive_templates.get(component_name)
     if not component_templates:
         return
-    launch_shape = solver._field_launch_shapes[component_name]
     inv_eps, apply_dt = _dispersive_current_coefficient(solver, component_name, component_templates)
 
     # When the electric dispersion co-exists with a space-time modulation, the ADE
@@ -787,14 +784,14 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
                 ModOmega=mod_omega,
                 tNext=t_next,
                 dt=apply_dt,
-            ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+            ).launchRaw()
         else:
             solver.fdtd_module.applyPolarizationCurrent3D(
                 ElectricField=field,
                 PolarizationCurrent=current,
                 InvPermittivity=inv_eps,
                 dt=apply_dt,
-            ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+            ).launchRaw()
 
     for model_name in ("debye", "drude", "lorentz"):
         for entry in component_templates[model_name]:
@@ -839,7 +836,7 @@ def _apply_aniso_dispersive_corrections(solver):
             PolarizationCurrent=totals[component_name],
             InvPermittivity=inv_eps[component_name],
             dt=solver.dt,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes[component_name])
+        ).launchRaw()
 
     periodic_x, periodic_y, periodic_z = _aniso_periodic_flags(solver)
     solver.fdtd_module.applyAnisoOffdiagCurrentEx3D(
@@ -851,7 +848,7 @@ def _apply_aniso_dispersive_corrections(solver):
         periodicX=periodic_x,
         periodicY=periodic_y,
         periodicZ=periodic_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.applyAnisoOffdiagCurrentEy3D(
         Ey=solver.Ey,
         Jx=totals["Ex"],
@@ -861,7 +858,7 @@ def _apply_aniso_dispersive_corrections(solver):
         periodicX=periodic_x,
         periodicY=periodic_y,
         periodicZ=periodic_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.applyAnisoOffdiagCurrentEz3D(
         Ez=solver.Ez,
         Jx=totals["Ex"],
@@ -871,7 +868,7 @@ def _apply_aniso_dispersive_corrections(solver):
         periodicX=periodic_x,
         periodicY=periodic_y,
         periodicZ=periodic_z,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()
 
 
 def apply_dispersive_corrections(solver):
@@ -898,7 +895,6 @@ def apply_magnetic_component_dispersive_currents(solver, component_name, field, 
     component_templates = solver._magnetic_dispersive_templates.get(component_name)
     if not component_templates:
         return
-    launch_shape = solver._field_launch_shapes[component_name]
     inv_mu = component_templates["inv_mu"]
 
     for entry in component_templates["debye"]:
@@ -908,7 +904,7 @@ def apply_magnetic_component_dispersive_currents(solver, component_name, field, 
             PolarizationCurrent=current,
             InvPermittivity=inv_mu,
             dt=solver.dt,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+        ).launchRaw()
 
     for entry in component_templates["drude"]:
         current = entry["current_imag"] if imag else entry["current"]
@@ -917,7 +913,7 @@ def apply_magnetic_component_dispersive_currents(solver, component_name, field, 
             PolarizationCurrent=current,
             InvPermittivity=inv_mu,
             dt=solver.dt,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+        ).launchRaw()
 
     for entry in component_templates["lorentz"]:
         current = entry["current_imag"] if imag else entry["current"]
@@ -926,7 +922,7 @@ def apply_magnetic_component_dispersive_currents(solver, component_name, field, 
             PolarizationCurrent=current,
             InvPermittivity=inv_mu,
             dt=solver.dt,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=launch_shape)
+        ).launchRaw()
 
 
 def apply_magnetic_dispersive_corrections(solver):
@@ -1339,6 +1335,33 @@ def _handle_full_aniso_absorber_overlap(solver):
         )
 
 
+def _uniform_coefficient_value(tensor: torch.Tensor) -> float | None:
+    minimum, maximum = torch.aminmax(tensor)
+    if not bool(torch.eq(minimum, maximum).item()):
+        return None
+    return float(minimum.item())
+
+
+def _store_coefficient_uniformity(solver) -> None:
+    solver._coefficient_uniformity = {
+        name: _uniform_coefficient_value(getattr(solver, name))
+        for name in (
+            "cex_decay",
+            "cex_curl",
+            "cey_decay",
+            "cey_curl",
+            "cez_decay",
+            "cez_curl",
+            "chx_decay",
+            "chx_curl",
+            "chy_decay",
+            "chy_curl",
+            "chz_decay",
+            "chz_curl",
+        )
+    }
+
+
 def build_update_coefficients(solver):
     eps_ex, eps_ey, eps_ez = _electric_epsilon_tensors(solver)
     # Under full anisotropy eps_e* is the conductively-shifted effective permittivity,
@@ -1356,6 +1379,7 @@ def build_update_coefficients(solver):
         _build_full_aniso_curl_coefficients(solver)
         _apply_pec_edge_suppression(solver)
         _configure_sibc(solver)
+        _store_coefficient_uniformity(solver)
         return
 
     ex_sigma_y = 0.5 * (solver.sigma_y[:-1, :, :] + solver.sigma_y[1:, :, :])
@@ -1422,6 +1446,7 @@ def build_update_coefficients(solver):
     _build_full_aniso_curl_coefficients(solver)
     _apply_pec_edge_suppression(solver)
     _configure_sibc(solver)
+    _store_coefficient_uniformity(solver)
 
 
 def update_nonlinear_electric_coefficients(solver):
@@ -1490,7 +1515,7 @@ def update_general_nonlinear_coefficients(solver):
             component=component_name,
             dt=solver.dt,
             eps0=solver.eps0,
-        ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes[component_name])
+        ).launchRaw()
 
 
 def update_kerr_electric_curls(solver):
@@ -1507,7 +1532,7 @@ def update_kerr_electric_curls(solver):
         KerrChi3=solver.kerr_chi3_Ex,
         dt=solver.dt,
         eps0=solver.eps0,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ex"])
+    ).launchRaw()
     solver.fdtd_module.updateKerrElectricFieldEyCurl3D(
         DynamicCurl=solver.cey_curl_dynamic,
         Ex=solver.Ex,
@@ -1518,7 +1543,7 @@ def update_kerr_electric_curls(solver):
         KerrChi3=solver.kerr_chi3_Ey,
         dt=solver.dt,
         eps0=solver.eps0,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ey"])
+    ).launchRaw()
     solver.fdtd_module.updateKerrElectricFieldEzCurl3D(
         DynamicCurl=solver.cez_curl_dynamic,
         Ex=solver.Ex,
@@ -1529,4 +1554,4 @@ def update_kerr_electric_curls(solver):
         KerrChi3=solver.kerr_chi3_Ez,
         dt=solver.dt,
         eps0=solver.eps0,
-    ).launchRaw(blockSize=solver.kernel_block_size, gridSize=solver._field_launch_shapes["Ez"])
+    ).launchRaw()

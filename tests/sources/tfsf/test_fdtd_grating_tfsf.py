@@ -50,7 +50,6 @@ def _mixed_periodic_bloch_source_solver():
     solver = SimpleNamespace(
         scene=SimpleNamespace(boundary=boundary),
         fdtd_module=fdtd_module,
-        kernel_block_size=(1, 1, 1),
         Ex=object(),
         Ex_imag=object(),
         Ey=object(),

@@ -269,23 +269,6 @@ def _validate_checkpoint_sequence(checkpoints) -> FDTDCheckpointSchema:
     return schema
 
 
-def _adjoint_kernel_block_size(solver) -> tuple[int, int, int]:
-    return tuple(getattr(solver, "kernel_block_size", (256, 1, 1)))
-
-
-def _adjoint_launch_shape(solver, field_name: str, tensor: torch.Tensor) -> tuple[int, int, int]:
-    launch_shapes = getattr(solver, "_field_launch_shapes", {})
-    if field_name in launch_shapes:
-        return tuple(launch_shapes[field_name])
-    compute_shape = getattr(solver, "_compute_linear_launch_shape", None)
-    if compute_shape is not None:
-        return tuple(compute_shape(int(tensor.numel())))
-    block_size = _adjoint_kernel_block_size(solver)
-    threads_per_block = int(block_size[0]) * int(block_size[1]) * int(block_size[2])
-    grid_x = max(1, (int(tensor.numel()) + threads_per_block - 1) // threads_per_block)
-    return (grid_x, 1, 1)
-
-
 def _checkpoint_stride(simulation, time_steps: int) -> int:
     configured = getattr(simulation.config, "adjoint_checkpoint_stride", None)
     if configured is not None:
@@ -394,7 +377,6 @@ def _build_source_replay_solver(solver, compiled_sources, eps_ex, eps_ey, eps_ez
         _compiled_material_model=getattr(solver, "_compiled_material_model", None),
         _mode_source_rebuild_from_fields=True,
         _source_time=primary["source_time"],
-        _compute_linear_launch_shape=solver._compute_linear_launch_shape,
         _iter_source_images=solver._iter_source_images,
         _component_plane_spec=solver._component_plane_spec,
         _component_positions=solver._component_positions,

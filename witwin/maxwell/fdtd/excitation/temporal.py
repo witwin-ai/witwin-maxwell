@@ -40,7 +40,6 @@ def build_source_term(
         "field_name": field_name,
         "offsets": offsets,
         "patch": None if patch is None else patch.contiguous(),
-        "grid": solver._compute_linear_launch_shape(int(grid_tensor.numel())),
         "phase_real": float(phase_real),
         "phase_imag": float(phase_imag),
         "delay_patch": None if delay_patch is None else delay_patch.contiguous(),
@@ -83,7 +82,7 @@ def _resolve_term_cache_key(term, term_source_time, term_omega):
     return (id(term_source_time), float(term_omega))
 
 
-def _launch_uniform_patch(solver, *, field_name, source_patch, offsets, signal, grid):
+def _launch_uniform_patch(solver, *, field_name, source_patch, offsets, signal):
     offset_i, offset_j, offset_k = offsets
     solver.fdtd_module.addSourcePatch3D(
         field=getattr(solver, field_name),
@@ -92,10 +91,7 @@ def _launch_uniform_patch(solver, *, field_name, source_patch, offsets, signal, 
         offsetJ=int(offset_j),
         offsetK=int(offset_k),
         signal=float(signal),
-    ).launchRaw(
-        blockSize=solver.kernel_block_size,
-        gridSize=grid,
-    )
+    ).launchRaw()
 
 
 _COMPONENT_TANGENTIAL_AXES = {
@@ -141,10 +137,7 @@ def _launch_cw_patch(solver, *, field_name, term, signal_cos, signal_sin):
         offsetK=int(offset_k),
         signalCos=float(signal_cos),
         signalSin=float(signal_sin),
-    ).launchRaw(
-        blockSize=solver.kernel_block_size,
-        gridSize=term["grid"],
-    )
+    ).launchRaw()
 
 
 def _field_triplet_kwargs(solver, field_name):
@@ -239,10 +232,7 @@ def _launch_time_shifted_patch(solver, *, field_name, term, source_time, time_va
         phase=float(source_time["phase"]),
         delay=float(source_time["delay"]),
         causalGate=1 if term.get("activation_delay_patch") is not None else 0,
-    ).launchRaw(
-        blockSize=solver.kernel_block_size,
-        gridSize=term["grid"],
-    )
+    ).launchRaw()
 
 
 def _evaluate_time_shifted_signal_tensor(source_time, sample_time):
@@ -297,10 +287,7 @@ def _launch_bloch_time_shifted_patch(solver, *, field_name, term, source_time, t
             "signalImag": 0.0,
         }
     )
-    solver.fdtd_module.addSourcePatchBloch3D(**kernel_kwargs).launchRaw(
-        blockSize=solver.kernel_block_size,
-        gridSize=term["grid"],
-    )
+    solver.fdtd_module.addSourcePatchBloch3D(**kernel_kwargs).launchRaw()
 
 
 def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value, clamp_pec=True):
@@ -376,7 +363,6 @@ def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value,
             source_patch=term["patch"],
             offsets=term["offsets"],
             signal=signal_cache[cache_key],
-            grid=term["grid"],
         )
 
     if clamp_pec:
@@ -393,7 +379,6 @@ def _launch_periodic_patch(solver, *, field_name, term, signal):
             source_patch=term["patch"],
             offsets=term["offsets"],
             signal=scaled_signal,
-            grid=term["grid"],
         )
         return
     offset_i, offset_j, offset_k = term["offsets"]
@@ -411,10 +396,7 @@ def _launch_periodic_patch(solver, *, field_name, term, signal):
             "wrapAxisA": int(wrap_axis_a),
             "wrapAxisB": int(wrap_axis_b),
         }
-    ).launchRaw(
-        blockSize=solver.kernel_block_size,
-        gridSize=term["grid"],
-    )
+    ).launchRaw()
 
 
 def _launch_bloch_patch(solver, *, field_name, term, signal):
@@ -426,10 +408,7 @@ def _launch_bloch_patch(solver, *, field_name, term, signal):
             "signalImag": float(signal) * float(term["phase_imag"]),
         }
     )
-    solver.fdtd_module.addSourcePatchBloch3D(**kernel_kwargs).launchRaw(
-        blockSize=solver.kernel_block_size,
-        gridSize=term["grid"],
-    )
+    solver.fdtd_module.addSourcePatchBloch3D(**kernel_kwargs).launchRaw()
 
 
 def _launch_bloch_cw_patch(solver, *, field_name, term, signal_cos, signal_sin):
@@ -442,10 +421,7 @@ def _launch_bloch_cw_patch(solver, *, field_name, term, signal_cos, signal_sin):
             "signalSin": float(signal_sin),
         }
     )
-    solver.fdtd_module.addCwPhasedSourcePatchBloch3D(**kernel_kwargs).launchRaw(
-        blockSize=solver.kernel_block_size,
-        gridSize=term["grid"],
-    )
+    solver.fdtd_module.addCwPhasedSourcePatchBloch3D(**kernel_kwargs).launchRaw()
 
 
 def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value, signal=None):
@@ -529,7 +505,6 @@ def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value
             source_patch=term["patch"],
             offsets=term["offsets"],
             signal=float(signal_cache[cache_key]) * float(term["phase_real"]),
-            grid=term["grid"],
         )
 
     solver._clamp_pec_boundaries()

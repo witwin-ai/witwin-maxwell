@@ -17,17 +17,18 @@ dim3 field_grid3d(int64_t nx, int64_t ny, int64_t nz, dim3 block) {
       static_cast<unsigned int>((nx + block.z - 1) / block.z));
 }
 
-__global__ void update_magnetic_hx_standard_kernel(
+template <int Component>
+__global__ void update_magnetic_standard_kernel(
     unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* __restrict__ ey,
-    const float* __restrict__ ez,
+    const float* __restrict__ first,
+    const float* __restrict__ second,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
-    const float* __restrict__ inv_dy,
-    const float* __restrict__ inv_dz,
-    float* __restrict__ hx) {
+    const float* __restrict__ inv_a,
+    const float* __restrict__ inv_b,
+    float* __restrict__ field) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
   const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
   const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
@@ -35,25 +36,41 @@ __global__ void update_magnetic_hx_standard_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  const long long ez_hi = offset3d(i, j + 1, k, ny + 1, nz);
-  const long long ez_lo = offset3d(i, j, k, ny + 1, nz);
-  const long long ey_hi = offset3d(i, j, k + 1, ny, nz + 1);
-  const long long ey_lo = offset3d(i, j, k, ny, nz + 1);
-  const float curl = (ez[ez_hi] - ez[ez_lo]) * inv_dy[j] - (ey[ey_hi] - ey[ey_lo]) * inv_dz[k];
-  hx[linear] = hx[linear] * decay[linear] - curl_coeff[linear] * curl;
+  float positive;
+  float negative;
+  if constexpr (Component == 0) {
+    positive = (second[offset3d(i, j + 1, k, ny + 1, nz)] - second[offset3d(i, j, k, ny + 1, nz)]) * inv_a[j];
+    negative = (first[offset3d(i, j, k + 1, ny, nz + 1)] - first[offset3d(i, j, k, ny, nz + 1)]) * inv_b[k];
+  } else if constexpr (Component == 1) {
+    positive = (first[offset3d(i, j, k + 1, ny, nz + 1)] - first[offset3d(i, j, k, ny, nz + 1)]) * inv_b[k];
+    negative = (second[offset3d(i + 1, j, k, ny, nz)] - second[offset3d(i, j, k, ny, nz)]) * inv_a[i];
+  } else {
+    positive = (second[offset3d(i + 1, j, k, ny, nz)] - second[offset3d(i, j, k, ny, nz)]) * inv_a[i];
+    negative = (first[offset3d(i, j + 1, k, ny + 1, nz)] - first[offset3d(i, j, k, ny + 1, nz)]) * inv_b[j];
+  }
+  field[linear] = field[linear] * decay[linear] - curl_coeff[linear] * (positive - negative);
 }
 
-__global__ void update_magnetic_hy_standard_kernel(
+template <int Component>
+__global__ void update_magnetic_cpml_kernel(
     unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* __restrict__ ex,
-    const float* __restrict__ ez,
+    const float* __restrict__ first,
+    const float* __restrict__ second,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
-    const float* __restrict__ inv_dx,
-    const float* __restrict__ inv_dz,
-    float* __restrict__ hy) {
+    const float* __restrict__ inv_kappa_a,
+    const float* __restrict__ b_a,
+    const float* __restrict__ c_a,
+    const float* __restrict__ inv_kappa_b,
+    const float* __restrict__ b_b,
+    const float* __restrict__ c_b,
+    const float* __restrict__ inv_a,
+    const float* __restrict__ inv_b,
+    float* __restrict__ psi_a,
+    float* __restrict__ psi_b,
+    float* __restrict__ field) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
   const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
   const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
@@ -61,158 +78,28 @@ __global__ void update_magnetic_hy_standard_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  const long long ex_hi = offset3d(i, j, k + 1, ny, nz + 1);
-  const long long ex_lo = offset3d(i, j, k, ny, nz + 1);
-  const long long ez_hi = offset3d(i + 1, j, k, ny, nz);
-  const long long ez_lo = offset3d(i, j, k, ny, nz);
-  const float curl = (ex[ex_hi] - ex[ex_lo]) * inv_dz[k] - (ez[ez_hi] - ez[ez_lo]) * inv_dx[i];
-  hy[linear] = hy[linear] * decay[linear] - curl_coeff[linear] * curl;
-}
-
-__global__ void update_magnetic_hz_standard_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ ex,
-    const float* __restrict__ ey,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ inv_dx,
-    const float* __restrict__ inv_dy,
-    float* __restrict__ hz) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
+  float d_a;
+  float d_b;
+  if constexpr (Component == 0) {
+    d_a = (second[offset3d(i, j + 1, k, ny + 1, nz)] - second[offset3d(i, j, k, ny + 1, nz)]) * inv_a[j];
+    d_b = (first[offset3d(i, j, k + 1, ny, nz + 1)] - first[offset3d(i, j, k, ny, nz + 1)]) * inv_b[k];
+  } else if constexpr (Component == 1) {
+    d_a = (second[offset3d(i + 1, j, k, ny, nz)] - second[offset3d(i, j, k, ny, nz)]) * inv_a[i];
+    d_b = (first[offset3d(i, j, k + 1, ny, nz + 1)] - first[offset3d(i, j, k, ny, nz + 1)]) * inv_b[k];
+  } else {
+    d_a = (second[offset3d(i + 1, j, k, ny, nz)] - second[offset3d(i, j, k, ny, nz)]) * inv_a[i];
+    d_b = (first[offset3d(i, j + 1, k, ny + 1, nz)] - first[offset3d(i, j, k, ny + 1, nz)]) * inv_b[j];
   }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  const long long ey_hi = offset3d(i + 1, j, k, ny, nz);
-  const long long ey_lo = offset3d(i, j, k, ny, nz);
-  const long long ex_hi = offset3d(i, j + 1, k, ny + 1, nz);
-  const long long ex_lo = offset3d(i, j, k, ny + 1, nz);
-  const float curl = (ey[ey_hi] - ey[ey_lo]) * inv_dx[i] - (ex[ex_hi] - ex[ex_lo]) * inv_dy[j];
-  hz[linear] = hz[linear] * decay[linear] - curl_coeff[linear] * curl;
-}
-
-__global__ void update_magnetic_hx_cpml_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ ey,
-    const float* __restrict__ ez,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ inv_kappa_y,
-    const float* __restrict__ b_y,
-    const float* __restrict__ c_y,
-    const float* __restrict__ inv_kappa_z,
-    const float* __restrict__ b_z,
-    const float* __restrict__ c_z,
-    const float* __restrict__ inv_dy,
-    const float* __restrict__ inv_dz,
-    float* __restrict__ psi_y,
-    float* __restrict__ psi_z,
-    float* __restrict__ hx) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
-  }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  const long long ez_lo = (static_cast<long long>(i) * (ny + 1u) + j) * nz + k;
-  const long long ez_hi = ez_lo + nz;
-  const long long ey_lo = (static_cast<long long>(i) * ny + j) * (nz + 1u) + k;
-  const long long ey_hi = ey_lo + 1;
-  const float d_y = (ez[ez_hi] - ez[ez_lo]) * inv_dy[j];
-  const float d_z = (ey[ey_hi] - ey[ey_lo]) * inv_dz[k];
-  const float psi_y_value = b_y[j] * psi_y[linear] + c_y[j] * d_y;
-  const float psi_z_value = b_z[k] * psi_z[linear] + c_z[k] * d_z;
-  psi_y[linear] = psi_y_value;
-  psi_z[linear] = psi_z_value;
-  const float curl = d_y * inv_kappa_y[j] + psi_y_value - d_z * inv_kappa_z[k] - psi_z_value;
-  hx[linear] = hx[linear] * decay[linear] - curl_coeff[linear] * curl;
-}
-
-__global__ void update_magnetic_hy_cpml_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ ex,
-    const float* __restrict__ ez,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ inv_kappa_x,
-    const float* __restrict__ b_x,
-    const float* __restrict__ c_x,
-    const float* __restrict__ inv_kappa_z,
-    const float* __restrict__ b_z,
-    const float* __restrict__ c_z,
-    const float* __restrict__ inv_dx,
-    const float* __restrict__ inv_dz,
-    float* __restrict__ psi_x,
-    float* __restrict__ psi_z,
-    float* __restrict__ hy) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
-  }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  const long long ex_lo = (static_cast<long long>(i) * ny + j) * (nz + 1u) + k;
-  const long long ex_hi = ex_lo + 1;
-  const long long ez_lo = linear;
-  const long long ez_hi = ez_lo + static_cast<long long>(ny) * nz;
-  const float d_z = (ex[ex_hi] - ex[ex_lo]) * inv_dz[k];
-  const float d_x = (ez[ez_hi] - ez[ez_lo]) * inv_dx[i];
-  const float psi_x_value = b_x[i] * psi_x[linear] + c_x[i] * d_x;
-  const float psi_z_value = b_z[k] * psi_z[linear] + c_z[k] * d_z;
-  psi_x[linear] = psi_x_value;
-  psi_z[linear] = psi_z_value;
-  const float curl = d_z * inv_kappa_z[k] + psi_z_value - d_x * inv_kappa_x[i] - psi_x_value;
-  hy[linear] = hy[linear] * decay[linear] - curl_coeff[linear] * curl;
-}
-
-__global__ void update_magnetic_hz_cpml_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ ex,
-    const float* __restrict__ ey,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ inv_kappa_x,
-    const float* __restrict__ b_x,
-    const float* __restrict__ c_x,
-    const float* __restrict__ inv_kappa_y,
-    const float* __restrict__ b_y,
-    const float* __restrict__ c_y,
-    const float* __restrict__ inv_dx,
-    const float* __restrict__ inv_dy,
-    float* __restrict__ psi_x,
-    float* __restrict__ psi_y,
-    float* __restrict__ hz) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
-  }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  const long long ey_lo = linear;
-  const long long ey_hi = ey_lo + static_cast<long long>(ny) * nz;
-  const long long ex_lo = (static_cast<long long>(i) * (ny + 1u) + j) * nz + k;
-  const long long ex_hi = ex_lo + nz;
-  const float d_x = (ey[ey_hi] - ey[ey_lo]) * inv_dx[i];
-  const float d_y = (ex[ex_hi] - ex[ex_lo]) * inv_dy[j];
-  const float psi_x_value = b_x[i] * psi_x[linear] + c_x[i] * d_x;
-  const float psi_y_value = b_y[j] * psi_y[linear] + c_y[j] * d_y;
-  psi_x[linear] = psi_x_value;
-  psi_y[linear] = psi_y_value;
-  const float curl = d_x * inv_kappa_x[i] + psi_x_value - d_y * inv_kappa_y[j] - psi_y_value;
-  hz[linear] = hz[linear] * decay[linear] - curl_coeff[linear] * curl;
+  const unsigned int coord_a = Component == 0 ? j : i;
+  const unsigned int coord_b = Component == 2 ? j : k;
+  const float psi_a_value = b_a[coord_a] * psi_a[linear] + c_a[coord_a] * d_a;
+  const float psi_b_value = b_b[coord_b] * psi_b[linear] + c_b[coord_b] * d_b;
+  psi_a[linear] = psi_a_value;
+  psi_b[linear] = psi_b_value;
+  const float corrected_a = d_a * inv_kappa_a[coord_a] + psi_a_value;
+  const float corrected_b = d_b * inv_kappa_b[coord_b] + psi_b_value;
+  const float curl = Component == 1 ? corrected_b - corrected_a : corrected_a - corrected_b;
+  field[linear] = field[linear] * decay[linear] - curl_coeff[linear] * curl;
 }
 
 template <int Axis>
@@ -241,34 +128,34 @@ __device__ __forceinline__ float update_compact_magnetic_psi(
   return value;
 }
 
-template <bool UniformDecay, bool UniformCurl>
-__global__ void update_magnetic_hx_cpml_compressed_kernel(
+template <int Component, bool UniformDecay, bool UniformCurl>
+__global__ void update_magnetic_cpml_compressed_kernel(
     unsigned int nx,
     unsigned int ny,
     unsigned int nz,
-    const float* __restrict__ ey,
-    const float* __restrict__ ez,
+    const float* __restrict__ first,
+    const float* __restrict__ second,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
     float decay_value,
     float curl_value,
-    const float* __restrict__ inv_kappa_y,
-    const float* __restrict__ b_y,
-    const float* __restrict__ c_y,
-    const float* __restrict__ inv_kappa_z,
-    const float* __restrict__ b_z,
-    const float* __restrict__ c_z,
-    const float* __restrict__ inv_dy,
-    const float* __restrict__ inv_dz,
-    int y_low_length,
-    int y_high_start,
-    int y_high_length,
-    int z_low_length,
-    int z_high_start,
-    int z_high_length,
-    float* __restrict__ psi_y,
-    float* __restrict__ psi_z,
-    float* __restrict__ hx) {
+    const float* __restrict__ inv_kappa_a,
+    const float* __restrict__ b_a,
+    const float* __restrict__ c_a,
+    const float* __restrict__ inv_kappa_b,
+    const float* __restrict__ b_b,
+    const float* __restrict__ c_b,
+    const float* __restrict__ inv_a,
+    const float* __restrict__ inv_b,
+    int a_low_length,
+    int a_high_start,
+    int a_high_length,
+    int b_low_length,
+    int b_high_start,
+    int b_high_length,
+    float* __restrict__ psi_a,
+    float* __restrict__ psi_b,
+    float* __restrict__ field) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
   const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
   const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
@@ -276,122 +163,38 @@ __global__ void update_magnetic_hx_cpml_compressed_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  const long long ez_hi = offset3d(i, j + 1, k, ny + 1, nz);
-  const long long ez_lo = offset3d(i, j, k, ny + 1, nz);
-  const long long ey_hi = offset3d(i, j, k + 1, ny, nz + 1);
-  const long long ey_lo = offset3d(i, j, k, ny, nz + 1);
-  const float d_y = (ez[ez_hi] - ez[ez_lo]) * inv_dy[j];
-  const float d_z = (ey[ey_hi] - ey[ey_lo]) * inv_dz[k];
-  const float psi_y_value = update_compact_magnetic_psi<1>(
-      psi_y, b_y, c_y, i, j, k, ny, nz, j, y_low_length, y_high_start, y_high_length, d_y);
-  const float psi_z_value = update_compact_magnetic_psi<2>(
-      psi_z, b_z, c_z, i, j, k, ny, nz, k, z_low_length, z_high_start, z_high_length, d_z);
-  const float curl = d_y * inv_kappa_y[j] + psi_y_value - d_z * inv_kappa_z[k] - psi_z_value;
-  const float decay_factor = UniformDecay ? decay_value : decay[linear];
-  const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
-  hx[linear] = hx[linear] * decay_factor - curl_factor * curl;
-}
-
-template <bool UniformDecay, bool UniformCurl>
-__global__ void update_magnetic_hy_cpml_compressed_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ ex,
-    const float* __restrict__ ez,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    float decay_value,
-    float curl_value,
-    const float* __restrict__ inv_kappa_x,
-    const float* __restrict__ b_x,
-    const float* __restrict__ c_x,
-    const float* __restrict__ inv_kappa_z,
-    const float* __restrict__ b_z,
-    const float* __restrict__ c_z,
-    const float* __restrict__ inv_dx,
-    const float* __restrict__ inv_dz,
-    int x_low_length,
-    int x_high_start,
-    int x_high_length,
-    int z_low_length,
-    int z_high_start,
-    int z_high_length,
-    float* __restrict__ psi_x,
-    float* __restrict__ psi_z,
-    float* __restrict__ hy) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
+  float d_a;
+  float d_b;
+  if constexpr (Component == 0) {
+    d_a = (second[offset3d(i, j + 1, k, ny + 1, nz)] - second[offset3d(i, j, k, ny + 1, nz)]) * inv_a[j];
+    d_b = (first[offset3d(i, j, k + 1, ny, nz + 1)] - first[offset3d(i, j, k, ny, nz + 1)]) * inv_b[k];
+  } else if constexpr (Component == 1) {
+    d_a = (second[offset3d(i + 1, j, k, ny, nz)] - second[offset3d(i, j, k, ny, nz)]) * inv_a[i];
+    d_b = (first[offset3d(i, j, k + 1, ny, nz + 1)] - first[offset3d(i, j, k, ny, nz + 1)]) * inv_b[k];
+  } else {
+    d_a = (second[offset3d(i + 1, j, k, ny, nz)] - second[offset3d(i, j, k, ny, nz)]) * inv_a[i];
+    d_b = (first[offset3d(i, j + 1, k, ny + 1, nz)] - first[offset3d(i, j, k, ny + 1, nz)]) * inv_b[j];
   }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  const long long ex_hi = offset3d(i, j, k + 1, ny, nz + 1);
-  const long long ex_lo = offset3d(i, j, k, ny, nz + 1);
-  const long long ez_hi = offset3d(i + 1, j, k, ny, nz);
-  const long long ez_lo = offset3d(i, j, k, ny, nz);
-  const float d_z = (ex[ex_hi] - ex[ex_lo]) * inv_dz[k];
-  const float d_x = (ez[ez_hi] - ez[ez_lo]) * inv_dx[i];
-  const float psi_x_value = update_compact_magnetic_psi<0>(
-      psi_x, b_x, c_x, i, j, k, ny, nz, i, x_low_length, x_high_start, x_high_length, d_x);
-  const float psi_z_value = update_compact_magnetic_psi<2>(
-      psi_z, b_z, c_z, i, j, k, ny, nz, k, z_low_length, z_high_start, z_high_length, d_z);
-  const float curl = d_z * inv_kappa_z[k] + psi_z_value - d_x * inv_kappa_x[i] - psi_x_value;
-  const float decay_factor = UniformDecay ? decay_value : decay[linear];
-  const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
-  hy[linear] = hy[linear] * decay_factor - curl_factor * curl;
-}
-
-template <bool UniformDecay, bool UniformCurl>
-__global__ void update_magnetic_hz_cpml_compressed_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ ex,
-    const float* __restrict__ ey,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    float decay_value,
-    float curl_value,
-    const float* __restrict__ inv_kappa_x,
-    const float* __restrict__ b_x,
-    const float* __restrict__ c_x,
-    const float* __restrict__ inv_kappa_y,
-    const float* __restrict__ b_y,
-    const float* __restrict__ c_y,
-    const float* __restrict__ inv_dx,
-    const float* __restrict__ inv_dy,
-    int x_low_length,
-    int x_high_start,
-    int x_high_length,
-    int y_low_length,
-    int y_high_start,
-    int y_high_length,
-    float* __restrict__ psi_x,
-    float* __restrict__ psi_y,
-    float* __restrict__ hz) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
+  const unsigned int coord_a = Component == 0 ? j : i;
+  const unsigned int coord_b = Component == 2 ? j : k;
+  float psi_a_value;
+  float psi_b_value;
+  if constexpr (Component == 0) {
+    psi_a_value = update_compact_magnetic_psi<1>(psi_a, b_a, c_a, i, j, k, ny, nz, coord_a, a_low_length, a_high_start, a_high_length, d_a);
+    psi_b_value = update_compact_magnetic_psi<2>(psi_b, b_b, c_b, i, j, k, ny, nz, coord_b, b_low_length, b_high_start, b_high_length, d_b);
+  } else if constexpr (Component == 1) {
+    psi_a_value = update_compact_magnetic_psi<0>(psi_a, b_a, c_a, i, j, k, ny, nz, coord_a, a_low_length, a_high_start, a_high_length, d_a);
+    psi_b_value = update_compact_magnetic_psi<2>(psi_b, b_b, c_b, i, j, k, ny, nz, coord_b, b_low_length, b_high_start, b_high_length, d_b);
+  } else {
+    psi_a_value = update_compact_magnetic_psi<0>(psi_a, b_a, c_a, i, j, k, ny, nz, coord_a, a_low_length, a_high_start, a_high_length, d_a);
+    psi_b_value = update_compact_magnetic_psi<1>(psi_b, b_b, c_b, i, j, k, ny, nz, coord_b, b_low_length, b_high_start, b_high_length, d_b);
   }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  const long long ey_hi = offset3d(i + 1, j, k, ny, nz);
-  const long long ey_lo = offset3d(i, j, k, ny, nz);
-  const long long ex_hi = offset3d(i, j + 1, k, ny + 1, nz);
-  const long long ex_lo = offset3d(i, j, k, ny + 1, nz);
-  const float d_x = (ey[ey_hi] - ey[ey_lo]) * inv_dx[i];
-  const float d_y = (ex[ex_hi] - ex[ex_lo]) * inv_dy[j];
-  const float psi_x_value = update_compact_magnetic_psi<0>(
-      psi_x, b_x, c_x, i, j, k, ny, nz, i, x_low_length, x_high_start, x_high_length, d_x);
-  const float psi_y_value = update_compact_magnetic_psi<1>(
-      psi_y, b_y, c_y, i, j, k, ny, nz, j, y_low_length, y_high_start, y_high_length, d_y);
-  const float curl = d_x * inv_kappa_x[i] + psi_x_value - d_y * inv_kappa_y[j] - psi_y_value;
+  const float corrected_a = d_a * inv_kappa_a[coord_a] + psi_a_value;
+  const float corrected_b = d_b * inv_kappa_b[coord_b] + psi_b_value;
+  const float curl = Component == 1 ? corrected_b - corrected_a : corrected_a - corrected_b;
   const float decay_factor = UniformDecay ? decay_value : decay[linear];
   const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
-  hz[linear] = hz[linear] * decay_factor - curl_factor * curl;
+  field[linear] = field[linear] * decay_factor - curl_factor * curl;
 }
 
 void check_magnetic_inputs(
@@ -564,7 +367,7 @@ void update_magnetic_hx_standard_cuda(
   torch::stable::accelerator::DeviceGuard guard(hx.get_device_index());
   const auto sizes = hx.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_hx_standard_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_magnetic_standard_kernel<0><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
@@ -594,7 +397,7 @@ void update_magnetic_hy_standard_cuda(
   torch::stable::accelerator::DeviceGuard guard(hy.get_device_index());
   const auto sizes = hy.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_hy_standard_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_magnetic_standard_kernel<1><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
@@ -624,7 +427,7 @@ void update_magnetic_hz_standard_cuda(
   torch::stable::accelerator::DeviceGuard guard(hz.get_device_index());
   const auto sizes = hz.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_hz_standard_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_magnetic_standard_kernel<2><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
@@ -663,7 +466,7 @@ void update_magnetic_hx_cpml_cuda(
   torch::stable::accelerator::DeviceGuard guard(hx.get_device_index());
   const auto sizes = hx.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_hx_cpml_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_magnetic_cpml_kernel<0><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
@@ -710,7 +513,7 @@ void update_magnetic_hy_cpml_cuda(
   torch::stable::accelerator::DeviceGuard guard(hy.get_device_index());
   const auto sizes = hy.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_hy_cpml_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_magnetic_cpml_kernel<1><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
@@ -757,7 +560,7 @@ void update_magnetic_hz_cpml_cuda(
   torch::stable::accelerator::DeviceGuard guard(hz.get_device_index());
   const auto sizes = hz.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_hz_cpml_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_magnetic_cpml_kernel<2><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
@@ -814,7 +617,7 @@ void update_magnetic_hx_cpml_compressed_cuda(
   const auto sizes = hx.sizes();
   const dim3 block = field_block3d();
   dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
-    update_magnetic_hx_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+    update_magnetic_cpml_compressed_kernel<0, decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
         static_cast<unsigned int>(sizes[0]),
         static_cast<unsigned int>(sizes[1]),
         static_cast<unsigned int>(sizes[2]),
@@ -880,7 +683,7 @@ void update_magnetic_hy_cpml_compressed_cuda(
   const auto sizes = hy.sizes();
   const dim3 block = field_block3d();
   dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
-    update_magnetic_hy_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+    update_magnetic_cpml_compressed_kernel<1, decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
         static_cast<unsigned int>(sizes[0]),
         static_cast<unsigned int>(sizes[1]),
         static_cast<unsigned int>(sizes[2]),
@@ -946,7 +749,7 @@ void update_magnetic_hz_cpml_compressed_cuda(
   const auto sizes = hz.sizes();
   const dim3 block = field_block3d();
   dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
-    update_magnetic_hz_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+    update_magnetic_cpml_compressed_kernel<2, decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
         static_cast<unsigned int>(sizes[0]),
         static_cast<unsigned int>(sizes[1]),
         static_cast<unsigned int>(sizes[2]),

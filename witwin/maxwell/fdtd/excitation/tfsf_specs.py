@@ -438,7 +438,6 @@ def make_reference_term(
     return {
         "field_name": field_name,
         "offsets": offsets,
-        "grid": solver._compute_linear_launch_shape(int(coeff_patch.numel())),
         "coeff_patch": coeff_patch.contiguous(),
         "sample_kind": sample_kind,
         "sample_indices": sample_indices.contiguous(),
