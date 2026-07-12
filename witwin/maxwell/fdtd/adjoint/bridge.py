@@ -580,11 +580,14 @@ class _FDTDGradientBridge:
             grad_tpa_ex = torch.zeros_like(solver.tpa_sigma_Ex)
             grad_tpa_ey = torch.zeros_like(solver.tpa_sigma_Ey)
             grad_tpa_ez = torch.zeros_like(solver.tpa_sigma_Ez)
-        compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())
-        cache_mode_source_terms = any(source.get("kind") == "mode_source" for source in compiled_sources)
-        if cache_mode_source_terms:
-            solver._source_replay_term_cache = {}
-            solver._mode_source_explicit_vjp_remaining = self._time_steps
+        # The compiled source-term set (curl-coefficient patches and, for mode
+        # sources, the eigensolve profile) depends only on the solver and the frozen
+        # eps leaves, both constant across the backward sweep, so resolve it once and
+        # hand the same lists to every reverse step instead of rebuilding the replay
+        # solver (and re-running the mode eigensolve) per step.
+        resolved_source_terms = runtime._resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez)
+        if hasattr(solver, "_mode_source_cotangent_accum"):
+            delattr(solver, "_mode_source_cotangent_accum")
 
         # The checkpoint replay reconstructs the mid-step (post-magnetic) H on its
         # way to each step's electric update; for the pure real standard / CPML
@@ -620,6 +623,7 @@ class _FDTDGradientBridge:
                         eps_ex=eps_ex,
                         eps_ey=eps_ey,
                         eps_ez=eps_ez,
+                        resolved_source_terms=resolved_source_terms,
                         forward_magnetic_fields=(mid_magnetic[offset] if mid_magnetic else None),
                         chi3_ex=chi3_ex,
                         chi3_ey=chi3_ey,
@@ -660,6 +664,21 @@ class _FDTDGradientBridge:
                     adjoint_state = step_result.pre_step_adjoint
 
             with profiler.section("material_pullback"):
+                # Mode-source profile terms deferred their eigensolve VJP to keep
+                # torch.autograd.grad off the per-step hot path; apply the single
+                # accumulated pullback here (over the retained source-term graph)
+                # before the material pullback consumes grad_eps.
+                profile_grads = runtime._mode_source_profile_pullback(
+                    solver, resolved_source_terms, eps_ex, eps_ey, eps_ez
+                )
+                if profile_grads is not None:
+                    grad_profile_ex, grad_profile_ey, grad_profile_ez = profile_grads
+                    if grad_profile_ex is not None:
+                        grad_eps_ex = _accumulate_grad(grad_accumulator_backend, grad_eps_ex, grad_profile_ex.detach())
+                    if grad_profile_ey is not None:
+                        grad_eps_ey = _accumulate_grad(grad_accumulator_backend, grad_eps_ey, grad_profile_ey.detach())
+                    if grad_profile_ez is not None:
+                        grad_eps_ez = _accumulate_grad(grad_accumulator_backend, grad_eps_ez, grad_profile_ez.detach())
                 with torch.enable_grad():
                     scene = self._material_graph_scene()
                     outputs = pullback_material_input_gradients(
@@ -680,13 +699,8 @@ class _FDTDGradientBridge:
                         grad_tpa_ez=grad_tpa_ez,
                     )
         finally:
-            if hasattr(solver, "_mode_source_explicit_vjp_remaining"):
-                delattr(solver, "_mode_source_explicit_vjp_remaining")
-            if hasattr(solver, "_source_replay_term_cache"):
-                cache = getattr(solver, "_source_replay_term_cache")
-                if isinstance(cache, dict):
-                    cache.clear()
-                delattr(solver, "_source_replay_term_cache")
+            if hasattr(solver, "_mode_source_cotangent_accum"):
+                delattr(solver, "_mode_source_cotangent_accum")
         profiler.record_material_pullback_backend("autograd_material_graph" if base_inputs else "none")
 
         profiler.stop_total()

@@ -441,33 +441,20 @@ def _resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez):
         return default_source_terms, default_electric_source_terms, default_magnetic_source_terms
 
     has_mode_source = any(source.get("kind") == "mode_source" for source in compiled_sources)
-    cache_key = (
-        int(eps_ex.data_ptr()),
-        int(eps_ey.data_ptr()),
-        int(eps_ez.data_ptr()),
-    )
-    if has_mode_source:
-        cache = getattr(solver, "_source_replay_term_cache", None)
-        if isinstance(cache, dict):
-            cached = cache.get(cache_key)
-            if cached is not None:
-                return cached
-
     temp_solver = _build_source_replay_solver(solver, compiled_sources, eps_ex, eps_ey, eps_ez)
     if has_mode_source:
+        # Build the mode-source patches under grad tracking so the eigensolve
+        # profile keeps its eps-graph; the FDTD backward runs under no_grad, and
+        # _mode_source_profile_pullback needs that graph for its once-per-pass VJP.
         with torch.enable_grad():
             initialize_source_terms(temp_solver)
     else:
         initialize_source_terms(temp_solver)
-    resolved = (
+    return (
         tuple(temp_solver._source_terms),
         tuple(temp_solver._electric_source_terms),
         tuple(temp_solver._magnetic_source_terms),
     )
-    if has_mode_source and isinstance(getattr(solver, "_source_replay_term_cache", None), dict):
-        solver._source_replay_term_cache.clear()
-        solver._source_replay_term_cache[cache_key] = resolved
-    return resolved
 
 
 def _has_resolved_source_terms(resolved_source_terms) -> bool:
@@ -521,30 +508,60 @@ def _apply_resolved_magnetic_source_terms(
     )
 
 
-def _source_term_signal_patch(term, *, source_time, omega, time_value):
+def _source_term_component_patches(term):
+    """Ordered eps-dependent patches whose signal-weighted sum is the injected payload.
+
+    Each patch carries the term's permittivity dependence (the ``1/eps`` injection
+    coefficient and, for mode sources, the eigensolve profile). The time-signal
+    weights come from :func:`_source_term_signal_factors` in the same order.
+    """
+    literal_patch = term.get("literal_patch")
+    if literal_patch is not None:
+        return (literal_patch,)
+    if term["cw_cos_patch"] is not None:
+        return (term["cw_cos_patch"], term["cw_sin_patch"])
+    return (term["patch"],)
+
+
+def _source_term_signal_factors(term, *, source_time, omega, time_value):
+    """Time-signal weights (scalar or per-cell tensor) for the term's patches.
+
+    The weights are permittivity-independent, so the injected payload is
+    ``sum_k patch_k * factor_k`` and its eps-derivative is carried entirely by the
+    patches. Order matches :func:`_source_term_component_patches`.
+    """
     # Each compiled source carries its own source-time waveform / CW frequency;
     # resolve per-term so a second source at a different frequency is not driven
     # by the primary source's spectrum.
     source_time, omega = _resolve_term_source(term, source_time, omega)
-    literal_patch = term.get("literal_patch")
-    if literal_patch is not None:
-        return literal_patch
+    if term.get("literal_patch") is not None:
+        return (1.0,)
     if term["cw_cos_patch"] is not None:
         signal_cos, signal_sin = _resolve_cw_signal(source_time, omega, time_value)
-        return float(signal_cos) * term["cw_cos_patch"] + float(signal_sin) * term["cw_sin_patch"]
+        return (float(signal_cos), float(signal_sin))
     if term["delay_patch"] is not None:
         sample_time = float(time_value) - term["delay_patch"]
-        patch = _evaluate_source_time_tensor(source_time, sample_time) * term["patch"]
+        factor = _evaluate_source_time_tensor(source_time, sample_time)
         activation_delay_patch = term.get("activation_delay_patch")
         if activation_delay_patch is not None:
-            patch = torch.where(
+            factor = torch.where(
                 activation_delay_patch > float(time_value),
-                torch.zeros_like(patch),
-                patch,
+                torch.zeros_like(factor),
+                factor,
             )
-        return patch
+        return (factor,)
     scalar_signal = evaluate_source_time(source_time, float(time_value))
-    return (float(scalar_signal) * float(term["phase_real"])) * term["patch"]
+    return (float(scalar_signal) * float(term["phase_real"]),)
+
+
+def _source_term_signal_patch(term, *, source_time, omega, time_value):
+    patches = _source_term_component_patches(term)
+    factors = _source_term_signal_factors(term, source_time=source_time, omega=omega, time_value=time_value)
+    payload = None
+    for patch, factor in zip(patches, factors):
+        contribution = patch * factor
+        payload = contribution if payload is None else payload + contribution
+    return payload
 
 
 def _bloch_source_term_signal_patch(term, *, source_time, omega, time_value) -> torch.Tensor:
@@ -560,41 +577,91 @@ def _bloch_source_term_signal_patch(term, *, source_time, omega, time_value) -> 
     )
 
 
-def _mode_source_retain_graph(solver) -> bool:
-    remaining = getattr(solver, "_mode_source_explicit_vjp_remaining", None)
-    if remaining is None:
-        return False
-    remaining = max(int(remaining), 0)
-    retain_graph = remaining > 1
-    solver._mode_source_explicit_vjp_remaining = max(remaining - 1, 0)
-    return retain_graph
-
-
-def _mode_source_term_objective(
-    terms,
+def _accumulate_mode_source_cotangents(
+    solver,
     *,
-    adjoint_by_field,
+    electric_terms,
+    magnetic_terms,
+    electric_adjoint,
+    magnetic_adjoint,
     source_time,
     omega,
     time_value,
-) -> torch.Tensor | None:
-    objective = None
-    for term in terms:
-        field_name = term["field_name"]
-        if field_name not in adjoint_by_field:
-            continue
-        payload = _source_term_signal_patch(
-            term,
-            source_time=source_time,
-            omega=omega,
-            time_value=time_value,
-        )
-        offsets = term["offsets"]
-        region = _slice_from_offsets_shape(offsets, payload.shape)
-        adjoint_patch = adjoint_by_field[field_name][region].detach().to(device=payload.device, dtype=payload.dtype)
-        contribution = torch.sum(payload * adjoint_patch)
-        objective = contribution if objective is None else objective + contribution
-    return objective
+) -> None:
+    """Accumulate the time-weighted adjoint cotangent for profile source terms.
+
+    Mode-source patches carry an eigensolve eps-graph: the aperture mode profile
+    (and its normalization) depends on the source-plane permittivity. The per-step
+    source objective ``sum_t sum_k <patch_k, signal_k(t) * adjoint(t)>`` is linear
+    in the detached adjoint, and grad_eps is summed over the backward sweep anyway,
+    so accumulate ``sum_t signal_k(t) * adjoint(t)`` per patch here with a native
+    scatter-add and defer the single eigensolve VJP to
+    :func:`_mode_source_profile_pullback`. This keeps ``torch.autograd.grad`` off
+    the per-step hot path while reproducing the exact profile eps-dependence.
+    """
+    accum = getattr(solver, "_mode_source_cotangent_accum", None)
+    if accum is None:
+        accum = {}
+        solver._mode_source_cotangent_accum = accum
+    groups = (
+        ("E", electric_terms, electric_adjoint),
+        ("H", magnetic_terms, magnetic_adjoint),
+    )
+    for group_name, terms, adjoint_by_field in groups:
+        for term_pos, term in enumerate(terms):
+            field_name = term["field_name"]
+            if field_name not in adjoint_by_field:
+                continue
+            offsets = term["offsets"]
+            patches = _source_term_component_patches(term)
+            factors = _source_term_signal_factors(
+                term, source_time=source_time, omega=omega, time_value=time_value
+            )
+            for comp_idx, (patch, factor) in enumerate(zip(patches, factors)):
+                region = _slice_from_offsets_shape(offsets, patch.shape)
+                adjoint_patch = adjoint_by_field[field_name][region].detach().to(
+                    device=patch.device, dtype=patch.dtype
+                )
+                contribution = (adjoint_patch * factor).detach()
+                key = (group_name, term_pos, comp_idx)
+                existing = accum.get(key)
+                if existing is None:
+                    accum[key] = contribution.clone()
+                else:
+                    existing.add_(contribution)
+
+
+def _mode_source_profile_pullback(solver, resolved_source_terms, eps_ex, eps_ey, eps_ez):
+    """Apply the accumulated profile cotangent through the eigensolve eps-graph once.
+
+    Runs a single ``torch.autograd.grad`` over the retained source-term graph at the
+    end of the backward pass (once-per-run material-pullback stage), returning the
+    per-axis eps gradients, or ``None`` when there is nothing to pull back.
+    """
+    accum = getattr(solver, "_mode_source_cotangent_accum", None)
+    if not accum:
+        return None
+    source_terms, electric_source_terms, magnetic_source_terms = resolved_source_terms
+    grouped = (
+        ("E", tuple(electric_source_terms) + tuple(source_terms)),
+        ("H", tuple(magnetic_source_terms)),
+    )
+    with torch.enable_grad():
+        objective = None
+        for group_name, terms in grouped:
+            for term_pos, term in enumerate(terms):
+                patches = _source_term_component_patches(term)
+                for comp_idx, patch in enumerate(patches):
+                    cotangent = accum.get((group_name, term_pos, comp_idx))
+                    if cotangent is None:
+                        continue
+                    contribution = torch.sum(
+                        patch * cotangent.to(device=patch.device, dtype=patch.dtype)
+                    )
+                    objective = contribution if objective is None else objective + contribution
+        if objective is None:
+            return None
+        return torch.autograd.grad(objective, (eps_ex, eps_ey, eps_ez), allow_unused=True)
 
 
 def _accumulate_source_term_gradients(
@@ -615,6 +682,25 @@ def _accumulate_source_term_gradients(
 
     source_terms, electric_source_terms, magnetic_source_terms = resolved_source_terms
     source_adjoint_state = step_result.source_adjoint_state or adjoint_state
+    if _scene_has_mode_source(solver):
+        # Mode-source patches (and any other rebuilt patches sharing the scene)
+        # carry an eigensolve eps-graph. Instead of running torch.autograd.grad on
+        # the per-step hot path, accumulate the time-weighted adjoint cotangent with
+        # a native scatter-add here; the single eigensolve VJP is applied once per
+        # backward pass by _mode_source_profile_pullback (bridge material-pullback
+        # stage). The per-step step_result eps-grad is returned unchanged.
+        _accumulate_mode_source_cotangents(
+            solver,
+            electric_terms=tuple(electric_source_terms) + tuple(source_terms),
+            magnetic_terms=tuple(magnetic_source_terms),
+            electric_adjoint=source_adjoint_state,
+            magnetic_adjoint=step_result.magnetic_output_adjoint or {},
+            source_time=solver._source_time,
+            omega=solver.source_omega,
+            time_value=time_value,
+        )
+        return step_result
+
     grad_eps_by_field = {
         "Ex": step_result.grad_eps_ex.detach().clone(),
         "Ey": step_result.grad_eps_ey.detach().clone(),
@@ -625,47 +711,6 @@ def _accumulate_source_term_gradients(
         "Ey": eps_ey,
         "Ez": eps_ez,
     }
-    if _scene_has_mode_source(solver):
-        # Mode-source patches (and any other rebuilt patches sharing the scene)
-        # carry an eps-leaf graph, so the whole term set flows through one
-        # autograd objective rather than the per-cell analytic 1/eps rule.
-        magnetic_output_adjoint = step_result.magnetic_output_adjoint or {}
-        with torch.enable_grad():
-            objective = _mode_source_term_objective(
-                tuple(electric_source_terms) + tuple(source_terms),
-                adjoint_by_field=source_adjoint_state,
-                source_time=solver._source_time,
-                omega=solver.source_omega,
-                time_value=time_value,
-            )
-            magnetic_objective = _mode_source_term_objective(
-                tuple(magnetic_source_terms),
-                adjoint_by_field=magnetic_output_adjoint,
-                source_time=solver._source_time,
-                omega=solver.source_omega,
-                time_value=time_value,
-            )
-            if magnetic_objective is not None:
-                objective = magnetic_objective if objective is None else objective + magnetic_objective
-            if objective is not None:
-                gradients = torch.autograd.grad(
-                    objective,
-                    (eps_ex, eps_ey, eps_ez),
-                    allow_unused=True,
-                    retain_graph=_mode_source_retain_graph(solver),
-                )
-                for field_name, grad in zip(("Ex", "Ey", "Ez"), gradients):
-                    if grad is not None:
-                        grad_eps_by_field[field_name] = grad_eps_by_field[field_name] + grad.detach()
-        return _ReverseStepResult(
-            pre_step_adjoint=step_result.pre_step_adjoint,
-            grad_eps_ex=grad_eps_by_field["Ex"],
-            grad_eps_ey=grad_eps_by_field["Ey"],
-            grad_eps_ez=grad_eps_by_field["Ez"],
-            backend=step_result.backend,
-            source_adjoint_state=step_result.source_adjoint_state,
-            magnetic_output_adjoint=step_result.magnetic_output_adjoint,
-        )
 
     for term in tuple(electric_source_terms) + tuple(source_terms):
         field_name = term["field_name"]

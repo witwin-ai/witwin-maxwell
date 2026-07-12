@@ -557,6 +557,7 @@ def reverse_step(
     tpa_ey=None,
     tpa_ez=None,
     forward_magnetic_fields=None,
+    resolved_source_terms=None,
     profiler=None,
 ):
     runtime = _runtime()
@@ -568,7 +569,10 @@ def reverse_step(
             "Reverse step expects forward and adjoint states to share the same frozen checkpoint layout."
         )
 
-    resolved_source_terms = runtime._resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez)
+    # The FDTD backward bridge resolves the source-term lists once per pass and
+    # threads them in; direct callers (parity tests) omit them and resolve here.
+    if resolved_source_terms is None:
+        resolved_source_terms = runtime._resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez)
     analytic_backend = _select_reverse_backend(
         solver,
         forward_state,
