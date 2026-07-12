@@ -478,6 +478,31 @@ def _fake_conductive_cpml_reverse_solver(sigma_e=0.35, dt=0.05):
     return SimpleNamespace(**values)
 
 
+def _fake_kerr_cpml_reverse_solver(chi3=0.5, dt=0.05, eps0=1.0):
+    """CPML reverse solver carrying an instantaneous Kerr (chi3) nonlinearity.
+
+    The Kerr reverse recomputes the dynamic curl ``(dt / eff) * decay`` with
+    ``eff = eps + eps0 * chi3 * |E|^2`` from the frozen ``eps``/``chi3`` leaves and
+    the collocated fields, so this solver adds the Kerr attributes on top of the
+    linear CPML fake. ``eps0`` is set to 1.0 (an arbitrary coefficient for the fake)
+    and ``chi3`` large enough that the nonlinear term is a non-negligible fraction
+    of the linear permittivity, so the coefficient reverse (grad_chi3 / the |E|^2
+    cotangent) is exercised rather than degenerate."""
+    base = _fake_cpml_reverse_solver()
+    values = dict(vars(base))
+    values["kerr_enabled"] = True
+    values["nonlinear_enabled"] = True
+    values["nonlinear_general_enabled"] = False
+    values["conductive_enabled"] = False
+    values["full_aniso_enabled"] = False
+    values["magnetic_dispersive_enabled"] = False
+    values["dt"] = dt
+    values["eps0"] = eps0
+    for pos, comp in enumerate(("Ex", "Ey", "Ez")):
+        values[f"kerr_chi3_{comp}"] = torch.full_like(values[f"eps_{comp}"], float(chi3) + 0.05 * pos)
+    return SimpleNamespace(**values)
+
+
 def _dispersive_cpml_reverse_state_shapes():
     shapes = dict(_cpml_reverse_state_shapes())
     shapes[dispersive_state_name("Ex", "debye", 0, "polarization")] = shapes["Ex"]

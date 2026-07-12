@@ -759,6 +759,19 @@ def _accumulate_source_term_gradients(
         backend=step_result.backend,
         source_adjoint_state=step_result.source_adjoint_state,
         magnetic_output_adjoint=step_result.magnetic_output_adjoint,
+        # Preserve the nonlinear gradient channels across the source-term eps
+        # accumulation (the source injection carries no chi2/chi3/tpa dependence,
+        # so these pass through untouched); the analytic Kerr / general-nonlinear
+        # reverses populate them and the bridge requires them per step.
+        grad_chi3_ex=step_result.grad_chi3_ex,
+        grad_chi3_ey=step_result.grad_chi3_ey,
+        grad_chi3_ez=step_result.grad_chi3_ez,
+        grad_chi2_ex=step_result.grad_chi2_ex,
+        grad_chi2_ey=step_result.grad_chi2_ey,
+        grad_chi2_ez=step_result.grad_chi2_ez,
+        grad_tpa_ex=step_result.grad_tpa_ex,
+        grad_tpa_ey=step_result.grad_tpa_ey,
+        grad_tpa_ez=step_result.grad_tpa_ez,
     )
 
 
@@ -2641,6 +2654,105 @@ def _reverse_electric_component_cpml_conductive(
     adj_d_pos = inv_kappa_pos_term * adj_curl_term + c_pos_term * adj_psi_pos_candidate
     adj_d_neg = -inv_kappa_neg_term * adj_curl_term + c_neg_term * adj_psi_neg_candidate
     return adj_field, adj_d_pos, adj_d_neg, grad_eps, adj_psi_pos, adj_psi_neg
+
+
+def _reverse_electric_component_cpml_nonlinear(
+    adj_updated,
+    adj_psi_pos_post,
+    adj_psi_neg_post,
+    field,
+    *,
+    d_pos,
+    d_neg,
+    decay,
+    curl,
+    low_mode_pos,
+    high_mode_pos,
+    low_mode_neg,
+    high_mode_neg,
+    axis_pos,
+    axis_neg,
+    psi_pos,
+    psi_neg,
+    b_pos,
+    c_pos,
+    inv_kappa_pos,
+    b_neg,
+    c_neg,
+    inv_kappa_neg,
+):
+    """Reverse of the CPML electric update with GIVEN per-edge decay/curl pair.
+
+    Unlike :func:`_reverse_electric_component_cpml` (which bakes the linear
+    ``curl_prefactor/eps`` rule and returns ``grad_eps``), this returns the raw
+    cotangents ``adj_decay`` and ``adj_curl`` to the field-dependent coefficient
+    pair so a nonlinear coefficient reverse (Kerr / general) can push them onto the
+    ``eps`` / ``chi2`` / ``chi3`` / ``tpa`` leaves and (via the collocation
+    transpose) the pre-step fields. The psi recursion, the ``adj_d_pos``/
+    ``adj_d_neg`` curl(H) folds, and the pre-step field pullback are the CPML
+    machinery unchanged (a field-dependent coefficient only rescales the update)."""
+    inactive_pos, pec_pos = _boundary_axis_masks(field.shape, axis_pos, low_mode_pos, high_mode_pos, field.device)
+    inactive_neg, pec_neg = _boundary_axis_masks(field.shape, axis_neg, low_mode_neg, high_mode_neg, field.device)
+    pec_mask = pec_pos | pec_neg
+    inactive_mask = (~pec_mask) & (inactive_pos | inactive_neg)
+    active_mask = (~pec_mask) & (~inactive_mask)
+    keep_mask = inactive_mask | pec_mask
+
+    active = active_mask.to(device=field.device, dtype=field.dtype)
+    inactive = inactive_mask.to(device=field.device, dtype=field.dtype)
+    keep = keep_mask.to(device=field.device, dtype=field.dtype)
+
+    b_pos_term = _broadcast_vector(b_pos, axis_pos)
+    c_pos_term = _broadcast_vector(c_pos, axis_pos)
+    inv_kappa_pos_term = _broadcast_vector(inv_kappa_pos, axis_pos)
+    b_neg_term = _broadcast_vector(b_neg, axis_neg)
+    c_neg_term = _broadcast_vector(c_neg, axis_neg)
+    inv_kappa_neg_term = _broadcast_vector(inv_kappa_neg, axis_neg)
+
+    psi_pos_candidate = b_pos_term * psi_pos + c_pos_term * d_pos
+    psi_neg_candidate = b_neg_term * psi_neg + c_neg_term * d_neg
+    curl_term = (d_pos * inv_kappa_pos_term + psi_pos_candidate) - (d_neg * inv_kappa_neg_term + psi_neg_candidate)
+
+    adj_field = inactive * adj_updated + active * (adj_updated * decay)
+    adj_decay = active * (adj_updated * field)
+    adj_curl = active * (adj_updated * curl_term)
+    adj_curl_term = active * (adj_updated * curl)
+    adj_psi_pos_candidate = active * adj_psi_pos_post + adj_curl_term
+    adj_psi_neg_candidate = active * adj_psi_neg_post - adj_curl_term
+    adj_psi_pos = keep * adj_psi_pos_post + active * (b_pos_term * adj_psi_pos_candidate)
+    adj_psi_neg = keep * adj_psi_neg_post + active * (b_neg_term * adj_psi_neg_candidate)
+    adj_d_pos = inv_kappa_pos_term * adj_curl_term + c_pos_term * adj_psi_pos_candidate
+    adj_d_neg = -inv_kappa_neg_term * adj_curl_term + c_neg_term * adj_psi_neg_candidate
+    return adj_field, adj_d_pos, adj_d_neg, adj_decay, adj_curl, adj_psi_pos, adj_psi_neg
+
+
+def _kerr_reverse_coefficients(solver, state, *, eps_ex, eps_ey, eps_ez, chi3_ex, chi3_ey, chi3_ez):
+    """Per-component ``(decay, curl, eff, fsq, clamp_mask)`` for the Kerr reverse.
+
+    Mirrors :func:`_kerr_dynamic_electric_curls` (the differentiable forward
+    replica already parity-tested against ``updateKerrElectricField*Curl3D``) but
+    also returns the effective permittivity ``eff``, the collocated ``|E|^2``, and
+    the ``clamp_min`` gradient mask so the reverse can form the analytic coefficient
+    sensitivities without an autograd VJP. ``decay`` is the frozen linear PML decay
+    (constant in the Kerr update); the eps/chi3/field dependence lives entirely in
+    ``curl = (dt / eff) * decay`` through ``eff = eps + eps0 * chi3 * |E|^2``."""
+    field_square = _collocated_field_square(state["Ex"], state["Ey"], state["Ez"])
+    eps0 = float(solver.eps0)
+    floor = 1.0e-12 * eps0
+    dt = float(solver.dt)
+    coeffs = {}
+    for name, eps, chi3, decay in (
+        ("Ex", eps_ex, chi3_ex, solver.cex_decay),
+        ("Ey", eps_ey, chi3_ey, solver.cey_decay),
+        ("Ez", eps_ez, chi3_ez, solver.cez_decay),
+    ):
+        fsq = field_square[name]
+        raw = eps + eps0 * chi3 * fsq
+        eff = torch.clamp_min(raw, floor)
+        clamp_mask = (raw >= floor).to(dtype=eff.dtype)
+        curl = (dt / eff) * decay
+        coeffs[name] = (decay, curl, eff, fsq, clamp_mask)
+    return coeffs
 
 
 def _general_nonlinear_electric_coefficients(

@@ -20,10 +20,13 @@ from .core import (
     _forward_magnetic_fields_complex,
     _reverse_dispersive_corrections,
     _reverse_dispersive_state_python_reference,
+    _collocated_field_square,
     _conductive_reverse_coefficients,
+    _kerr_reverse_coefficients,
     _reverse_electric_component_bloch,
     _reverse_electric_component_cpml,
     _reverse_electric_component_cpml_conductive,
+    _reverse_electric_component_cpml_nonlinear,
     _reverse_electric_component_standard,
     _reverse_magnetic_component_cpml,
     _reverse_magnetic_component_standard,
@@ -39,6 +42,7 @@ __all__ = [
     "reverse_step_cpml_python_reference",
     "reverse_step_dispersive_python_reference",
     "reverse_step_grating_tfsf",
+    "reverse_step_kerr_cpml_python_reference",
     "reverse_step_standard_python_reference",
     "reverse_step_tfsf",
     "reverse_step_torch_vjp",
@@ -943,6 +947,277 @@ def reverse_step_conductive_cpml_python_reference(
         grad_eps_ez=grad_eps_ez.detach(),
         backend="python_reference_conductive_cpml",
         magnetic_output_adjoint={name: tensor.detach() for name, tensor in magnetic_output_adjoint.items()},
+    )
+
+
+def reverse_step_kerr_cpml_python_reference(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value=0.0,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms=None,
+    magnetic_fields=None,
+):
+    """Analytic reverse for an instantaneous Kerr (chi3) medium on a CPML grid.
+
+    The Kerr forward rewrites only the electric ``curl`` coefficient every step
+    from the pre-update fields, ``curl = (dt / eff) * decay`` with
+    ``eff = eps + eps0 * chi3 * |E|^2`` and the frozen linear PML ``decay`` (see
+    :func:`_kerr_dynamic_electric_curls`). This reverse mirrors
+    :func:`reverse_step_cpml_python_reference` but feeds that dynamic ``curl`` into
+    :func:`_reverse_electric_component_cpml_nonlinear`, which returns the raw
+    ``adj_curl`` cotangent instead of applying the linear eps rule. The coefficient
+    reverse then flows ``adj_curl`` through ``eff`` onto ``eps`` (grad_eps), ``chi3``
+    (grad_chi3), and ``|E|^2`` (a per-edge cotangent scattered back onto the
+    pre-step fields via the collocation transpose, the exact transpose of
+    ``_collocated_field_square``). The magnetic reverse and the curl(H)/curl(E)
+    folds are the linear CPML reference unchanged (the Kerr term is electric-only)."""
+    if magnetic_fields is None:
+        magnetic_fields = _forward_magnetic_fields(
+            solver,
+            forward_state,
+            time_value=time_value,
+            resolved_source_terms=resolved_source_terms,
+        )
+    eps0 = float(solver.eps0)
+    coeffs = _kerr_reverse_coefficients(
+        solver,
+        forward_state,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        chi3_ex=solver.kerr_chi3_Ex,
+        chi3_ey=solver.kerr_chi3_Ey,
+        chi3_ez=solver.kerr_chi3_Ez,
+    )
+    grad_eps_ex = torch.zeros_like(eps_ex)
+    grad_eps_ey = torch.zeros_like(eps_ey)
+    grad_eps_ez = torch.zeros_like(eps_ez)
+    grad_chi3_ex = torch.zeros_like(eps_ex)
+    grad_chi3_ey = torch.zeros_like(eps_ey)
+    grad_chi3_ez = torch.zeros_like(eps_ez)
+    g_fsq = {}
+    pre_step_adjoint = {
+        name: torch.zeros_like(tensor)
+        for name, tensor in forward_state.items()
+    }
+    magnetic_output_adjoint = {
+        "Hx": adjoint_state["Hx"].clone(),
+        "Hy": adjoint_state["Hy"].clone(),
+        "Hz": adjoint_state["Hz"].clone(),
+    }
+
+    def _coefficient_reverse(adj_curl, coeff, chi3):
+        _decay, curl, eff, fsq, clamp_mask = coeff
+        adj_eff = adj_curl * (-(curl / eff)) * clamp_mask
+        return adj_eff, adj_eff * (eps0 * fsq), adj_eff * (eps0 * chi3)
+
+    d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy_e)
+    d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz_e)
+    decay_ex, curl_ex, _eff_ex, _fsq_ex, _mask_ex = coeffs["Ex"]
+    adj_ex, adj_d_hz_dy, adj_d_hy_dz, _adj_decay_ex, adj_curl_ex, adj_psi_ex_y, adj_psi_ex_z = _reverse_electric_component_cpml_nonlinear(
+        adjoint_state["Ex"],
+        adjoint_state["psi_ex_y"],
+        adjoint_state["psi_ex_z"],
+        forward_state["Ex"],
+        d_pos=d_hz_dy,
+        d_neg=d_hy_dz,
+        decay=decay_ex,
+        curl=curl_ex,
+        low_mode_pos=solver.boundary_y_low_code,
+        high_mode_pos=solver.boundary_y_high_code,
+        low_mode_neg=solver.boundary_z_low_code,
+        high_mode_neg=solver.boundary_z_high_code,
+        axis_pos=1,
+        axis_neg=2,
+        psi_pos=forward_state["psi_ex_y"],
+        psi_neg=forward_state["psi_ex_z"],
+        b_pos=solver.cpml_b_e_y,
+        c_pos=solver.cpml_c_e_y,
+        inv_kappa_pos=solver.cpml_inv_kappa_e_y,
+        b_neg=solver.cpml_b_e_z,
+        c_neg=solver.cpml_c_e_z,
+        inv_kappa_neg=solver.cpml_inv_kappa_e_z,
+    )
+    pre_step_adjoint["Ex"] = pre_step_adjoint["Ex"] + adj_ex
+    pre_step_adjoint["psi_ex_y"] = pre_step_adjoint["psi_ex_y"] + adj_psi_ex_y
+    pre_step_adjoint["psi_ex_z"] = pre_step_adjoint["psi_ex_z"] + adj_psi_ex_z
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hz"], adj_d_hz_dy, axis=1, inv_delta=solver.inv_dy_e)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hy"], adj_d_hy_dz, axis=2, inv_delta=solver.inv_dz_e)
+    adj_eff_ex, grad_chi3_ex_inc, g_fsq["Ex"] = _coefficient_reverse(adj_curl_ex, coeffs["Ex"], solver.kerr_chi3_Ex)
+    grad_eps_ex = grad_eps_ex + adj_eff_ex
+    grad_chi3_ex = grad_chi3_ex + grad_chi3_ex_inc
+
+    d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz_e)
+    d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx_e)
+    decay_ey, curl_ey, _eff_ey, _fsq_ey, _mask_ey = coeffs["Ey"]
+    adj_ey, adj_d_hx_dz, adj_d_hz_dx, _adj_decay_ey, adj_curl_ey, adj_psi_ey_z, adj_psi_ey_x = _reverse_electric_component_cpml_nonlinear(
+        adjoint_state["Ey"],
+        adjoint_state["psi_ey_x"],
+        adjoint_state["psi_ey_z"],
+        forward_state["Ey"],
+        d_pos=d_hx_dz,
+        d_neg=d_hz_dx,
+        decay=decay_ey,
+        curl=curl_ey,
+        low_mode_pos=solver.boundary_z_low_code,
+        high_mode_pos=solver.boundary_z_high_code,
+        low_mode_neg=solver.boundary_x_low_code,
+        high_mode_neg=solver.boundary_x_high_code,
+        axis_pos=2,
+        axis_neg=0,
+        psi_pos=forward_state["psi_ey_z"],
+        psi_neg=forward_state["psi_ey_x"],
+        b_pos=solver.cpml_b_e_z,
+        c_pos=solver.cpml_c_e_z,
+        inv_kappa_pos=solver.cpml_inv_kappa_e_z,
+        b_neg=solver.cpml_b_e_x,
+        c_neg=solver.cpml_c_e_x,
+        inv_kappa_neg=solver.cpml_inv_kappa_e_x,
+    )
+    pre_step_adjoint["Ey"] = pre_step_adjoint["Ey"] + adj_ey
+    pre_step_adjoint["psi_ey_z"] = pre_step_adjoint["psi_ey_z"] + adj_psi_ey_z
+    pre_step_adjoint["psi_ey_x"] = pre_step_adjoint["psi_ey_x"] + adj_psi_ey_x
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hx"], adj_d_hx_dz, axis=2, inv_delta=solver.inv_dz_e)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hz"], adj_d_hz_dx, axis=0, inv_delta=solver.inv_dx_e)
+    adj_eff_ey, grad_chi3_ey_inc, g_fsq["Ey"] = _coefficient_reverse(adj_curl_ey, coeffs["Ey"], solver.kerr_chi3_Ey)
+    grad_eps_ey = grad_eps_ey + adj_eff_ey
+    grad_chi3_ey = grad_chi3_ey + grad_chi3_ey_inc
+
+    d_hy_dx = _backward_diff(magnetic_fields["Hy"], axis=0, inv_delta=solver.inv_dx_e)
+    d_hx_dy = _backward_diff(magnetic_fields["Hx"], axis=1, inv_delta=solver.inv_dy_e)
+    decay_ez, curl_ez, _eff_ez, _fsq_ez, _mask_ez = coeffs["Ez"]
+    adj_ez, adj_d_hy_dx, adj_d_hx_dy, _adj_decay_ez, adj_curl_ez, adj_psi_ez_x, adj_psi_ez_y = _reverse_electric_component_cpml_nonlinear(
+        adjoint_state["Ez"],
+        adjoint_state["psi_ez_x"],
+        adjoint_state["psi_ez_y"],
+        forward_state["Ez"],
+        d_pos=d_hy_dx,
+        d_neg=d_hx_dy,
+        decay=decay_ez,
+        curl=curl_ez,
+        low_mode_pos=solver.boundary_x_low_code,
+        high_mode_pos=solver.boundary_x_high_code,
+        low_mode_neg=solver.boundary_y_low_code,
+        high_mode_neg=solver.boundary_y_high_code,
+        axis_pos=0,
+        axis_neg=1,
+        psi_pos=forward_state["psi_ez_x"],
+        psi_neg=forward_state["psi_ez_y"],
+        b_pos=solver.cpml_b_e_x,
+        c_pos=solver.cpml_c_e_x,
+        inv_kappa_pos=solver.cpml_inv_kappa_e_x,
+        b_neg=solver.cpml_b_e_y,
+        c_neg=solver.cpml_c_e_y,
+        inv_kappa_neg=solver.cpml_inv_kappa_e_y,
+    )
+    pre_step_adjoint["Ez"] = pre_step_adjoint["Ez"] + adj_ez
+    pre_step_adjoint["psi_ez_x"] = pre_step_adjoint["psi_ez_x"] + adj_psi_ez_x
+    pre_step_adjoint["psi_ez_y"] = pre_step_adjoint["psi_ez_y"] + adj_psi_ez_y
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hy"], adj_d_hy_dx, axis=0, inv_delta=solver.inv_dx_e)
+    _accumulate_backward_diff_adjoint(magnetic_output_adjoint["Hx"], adj_d_hx_dy, axis=1, inv_delta=solver.inv_dy_e)
+    adj_eff_ez, grad_chi3_ez_inc, g_fsq["Ez"] = _coefficient_reverse(adj_curl_ez, coeffs["Ez"], solver.kerr_chi3_Ez)
+    grad_eps_ez = grad_eps_ez + adj_eff_ez
+    grad_chi3_ez = grad_chi3_ez + grad_chi3_ez_inc
+
+    adj_hx, adj_d_ez_dy, adj_d_ey_dz, adj_psi_hx_y, adj_psi_hx_z = _reverse_magnetic_component_cpml(
+        magnetic_output_adjoint["Hx"],
+        adjoint_state["psi_hx_y"],
+        adjoint_state["psi_hx_z"],
+        decay=solver.chx_decay,
+        curl=solver.chx_curl,
+        b_pos=solver.cpml_b_h_y,
+        c_pos=solver.cpml_c_h_y,
+        inv_kappa_pos=solver.cpml_inv_kappa_h_y,
+        b_neg=solver.cpml_b_h_z,
+        c_neg=solver.cpml_c_h_z,
+        inv_kappa_neg=solver.cpml_inv_kappa_h_z,
+        axis_pos=1,
+        axis_neg=2,
+    )
+    pre_step_adjoint["Hx"] = pre_step_adjoint["Hx"] + adj_hx
+    pre_step_adjoint["psi_hx_y"] = pre_step_adjoint["psi_hx_y"] + adj_psi_hx_y
+    pre_step_adjoint["psi_hx_z"] = pre_step_adjoint["psi_hx_z"] + adj_psi_hx_z
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dy, axis=1, inv_delta=solver.inv_dy_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dz, axis=2, inv_delta=solver.inv_dz_h)
+
+    adj_hy, adj_d_ex_dz, adj_d_ez_dx, adj_psi_hy_z, adj_psi_hy_x = _reverse_magnetic_component_cpml(
+        magnetic_output_adjoint["Hy"],
+        adjoint_state["psi_hy_x"],
+        adjoint_state["psi_hy_z"],
+        decay=solver.chy_decay,
+        curl=solver.chy_curl,
+        b_pos=solver.cpml_b_h_z,
+        c_pos=solver.cpml_c_h_z,
+        inv_kappa_pos=solver.cpml_inv_kappa_h_z,
+        b_neg=solver.cpml_b_h_x,
+        c_neg=solver.cpml_c_h_x,
+        inv_kappa_neg=solver.cpml_inv_kappa_h_x,
+        axis_pos=2,
+        axis_neg=0,
+    )
+    pre_step_adjoint["Hy"] = pre_step_adjoint["Hy"] + adj_hy
+    pre_step_adjoint["psi_hy_z"] = pre_step_adjoint["psi_hy_z"] + adj_psi_hy_z
+    pre_step_adjoint["psi_hy_x"] = pre_step_adjoint["psi_hy_x"] + adj_psi_hy_x
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dz, axis=2, inv_delta=solver.inv_dz_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ez"], adj_d_ez_dx, axis=0, inv_delta=solver.inv_dx_h)
+
+    adj_hz, adj_d_ey_dx, adj_d_ex_dy, adj_psi_hz_x, adj_psi_hz_y = _reverse_magnetic_component_cpml(
+        magnetic_output_adjoint["Hz"],
+        adjoint_state["psi_hz_x"],
+        adjoint_state["psi_hz_y"],
+        decay=solver.chz_decay,
+        curl=solver.chz_curl,
+        b_pos=solver.cpml_b_h_x,
+        c_pos=solver.cpml_c_h_x,
+        inv_kappa_pos=solver.cpml_inv_kappa_h_x,
+        b_neg=solver.cpml_b_h_y,
+        c_neg=solver.cpml_c_h_y,
+        inv_kappa_neg=solver.cpml_inv_kappa_h_y,
+        axis_pos=0,
+        axis_neg=1,
+    )
+    pre_step_adjoint["Hz"] = pre_step_adjoint["Hz"] + adj_hz
+    pre_step_adjoint["psi_hz_x"] = pre_step_adjoint["psi_hz_x"] + adj_psi_hz_x
+    pre_step_adjoint["psi_hz_y"] = pre_step_adjoint["psi_hz_y"] + adj_psi_hz_y
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ey"], adj_d_ey_dx, axis=0, inv_delta=solver.inv_dx_h)
+    _accumulate_forward_diff_adjoint(pre_step_adjoint["Ex"], adj_d_ex_dy, axis=1, inv_delta=solver.inv_dy_h)
+
+    # |E|^2 cotangent -> pre-step fields via the exact transpose of the collocation
+    # (own-axis 2*E plus the 4-point off-axis scatter). The native runner drives the
+    # ``collocation_transpose`` kernel here; the reference recovers the identical map
+    # with a single autograd.grad over the frozen ``_collocated_field_square`` replica.
+    with torch.enable_grad():
+        ex_leaf = forward_state["Ex"].detach().clone().requires_grad_(True)
+        ey_leaf = forward_state["Ey"].detach().clone().requires_grad_(True)
+        ez_leaf = forward_state["Ez"].detach().clone().requires_grad_(True)
+        field_square = _collocated_field_square(ex_leaf, ey_leaf, ez_leaf)
+        collocation_objective = (
+            (field_square["Ex"] * g_fsq["Ex"]).sum()
+            + (field_square["Ey"] * g_fsq["Ey"]).sum()
+            + (field_square["Ez"] * g_fsq["Ez"]).sum()
+        )
+        grad_field_ex, grad_field_ey, grad_field_ez = torch.autograd.grad(
+            collocation_objective, (ex_leaf, ey_leaf, ez_leaf)
+        )
+    pre_step_adjoint["Ex"] = pre_step_adjoint["Ex"] + grad_field_ex
+    pre_step_adjoint["Ey"] = pre_step_adjoint["Ey"] + grad_field_ey
+    pre_step_adjoint["Ez"] = pre_step_adjoint["Ez"] + grad_field_ez
+
+    return _ReverseStepResult(
+        pre_step_adjoint={name: tensor.detach() for name, tensor in pre_step_adjoint.items()},
+        grad_eps_ex=grad_eps_ex.detach(),
+        grad_eps_ey=grad_eps_ey.detach(),
+        grad_eps_ez=grad_eps_ez.detach(),
+        backend="python_reference_kerr_cpml",
+        magnetic_output_adjoint={name: tensor.detach() for name, tensor in magnetic_output_adjoint.items()},
+        grad_chi3_ex=grad_chi3_ex.detach(),
+        grad_chi3_ey=grad_chi3_ey.detach(),
+        grad_chi3_ez=grad_chi3_ez.detach(),
     )
 
 

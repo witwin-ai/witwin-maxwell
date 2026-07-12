@@ -809,6 +809,304 @@ def _reverse_step_conductive_native(
     )
 
 
+def _reverse_step_kerr_native(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+):
+    """Fully native reverse step for an instantaneous Kerr (chi3) CPML medium.
+
+    Mirrors :func:`reverse_step_kerr_cpml_python_reference`. The Kerr forward
+    rewrites only the electric ``curl`` coefficient each step from the pre-update
+    fields (``curl = (dt / eff) * decay`` with ``eff = eps + eps0 * chi3 * |E|^2``),
+    so the reverse math splits into: (1) a native forward collocation of the frozen
+    fields to the per-edge ``|E|^2`` (``fsq``); (2) the fused Kerr electric reverse
+    kernels, which assign the pre-step E/psi adjoint (decay pullback) plus the
+    grad_eps / grad_chi3 coefficient sensitivities and emit the per-edge ``|E|^2``
+    cotangent ``g_fsq``, while folding curl(H) into the mid-step H adjoint; (3) the
+    linear CPML magnetic reverse (the Kerr term is electric-only); and (4) the
+    shared ``collocation_transpose`` scattering ``g_fsq`` back onto the pre-step
+    fields. Launch order is load-bearing: the electric kernels *assign* the pre-step
+    E adjoint before the magnetic forward-diff folds and the collocation transpose
+    *accumulate* onto it, and all three electric kernels (and their curl(H) folds)
+    must complete before any magnetic kernel reads the mid-step H adjoint.
+    """
+    import torch
+
+    from . import core as _adjoint
+    from .reverse_common import allocate_cpml_reverse_context
+
+    magnetic_fields = _adjoint._forward_magnetic_fields(
+        solver,
+        forward_state,
+        time_value=time_value,
+        resolved_source_terms=resolved_source_terms,
+    )
+    hx_mid = magnetic_fields["Hx"]
+    hy_mid = magnetic_fields["Hy"]
+    hz_mid = magnetic_fields["Hz"]
+
+    eps0 = float(solver.eps0)
+    dt = float(solver.dt)
+
+    # Per-edge |E|^2 collocation of the frozen checkpoint fields (native forward).
+    fsq_ex = torch.empty_like(eps_ex)
+    fsq_ey = torch.empty_like(eps_ey)
+    fsq_ez = torch.empty_like(eps_ez)
+    _cuda_backend._collocate_field_square(
+        FsqEx=fsq_ex,
+        FsqEy=fsq_ey,
+        FsqEz=fsq_ez,
+        Ex=forward_state["Ex"],
+        Ey=forward_state["Ey"],
+        Ez=forward_state["Ez"],
+    )
+
+    ctx = allocate_cpml_reverse_context(
+        solver,
+        forward_state,
+        adjoint_state,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    pre = ctx.pre_step_adjoint
+    adj_h_mid = ctx.magnetic_output_adjoint
+
+    grad_chi3_ex = torch.empty_like(eps_ex)
+    grad_chi3_ey = torch.empty_like(eps_ey)
+    grad_chi3_ez = torch.empty_like(eps_ez)
+    g_fsq_ex = torch.empty_like(eps_ex)
+    g_fsq_ey = torch.empty_like(eps_ey)
+    g_fsq_ez = torch.empty_like(eps_ez)
+
+    # Phase 1: Kerr electric adjoint -> pre-step E/psi adjoint + grad_eps/grad_chi3
+    # + |E|^2 cotangent, folding each curl(H) derivative into the mid-step H.
+    _cuda_backend._reverse_electric_cpml_kerr_ex(
+        AdjExPrev=pre["Ex"],
+        GradEpsEx=ctx.grad_eps_ex,
+        GradChi3Ex=grad_chi3_ex,
+        GFsqEx=g_fsq_ex,
+        AdjPsiPosPrev=pre["psi_ex_y"],
+        AdjPsiNegPrev=pre["psi_ex_z"],
+        AdjDPos=ctx.adj_d_hz_dy,
+        AdjDNeg=ctx.adj_d_hy_dz,
+        AdjExPost=adjoint_state["Ex"],
+        AdjPsiPosPost=adjoint_state["psi_ex_y"],
+        AdjPsiNegPost=adjoint_state["psi_ex_z"],
+        ExDecay=solver.cex_decay,
+        EpsEx=eps_ex,
+        Chi3Ex=solver.kerr_chi3_Ex,
+        FsqEx=fsq_ex,
+        Dt=dt,
+        Eps0=eps0,
+        PsiPos=forward_state["psi_ex_y"],
+        PsiNeg=forward_state["psi_ex_z"],
+        BPos=solver.cpml_b_e_y,
+        CPos=solver.cpml_c_e_y,
+        InvKappaPos=solver.cpml_inv_kappa_e_y,
+        BNeg=solver.cpml_b_e_z,
+        CNeg=solver.cpml_c_e_z,
+        InvKappaNeg=solver.cpml_inv_kappa_e_z,
+        HyMid=hy_mid,
+        HzMid=hz_mid,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
+        yLowBoundaryMode=solver.boundary_y_low_code,
+        yHighBoundaryMode=solver.boundary_y_high_code,
+        zLowBoundaryMode=solver.boundary_z_low_code,
+        zHighBoundaryMode=solver.boundary_z_high_code,
+    )
+    _cuda_backend._accumulate_backward_diff_y(FieldGrad=adj_h_mid["Hz"], DiffGrad=ctx.adj_d_hz_dy, invDy=solver.inv_dy_e)
+    _cuda_backend._accumulate_backward_diff_z(FieldGrad=adj_h_mid["Hy"], DiffGrad=ctx.adj_d_hy_dz, invDz=solver.inv_dz_e)
+
+    _cuda_backend._reverse_electric_cpml_kerr_ey(
+        AdjEyPrev=pre["Ey"],
+        GradEpsEy=ctx.grad_eps_ey,
+        GradChi3Ey=grad_chi3_ey,
+        GFsqEy=g_fsq_ey,
+        AdjPsiPosPrev=pre["psi_ey_z"],
+        AdjPsiNegPrev=pre["psi_ey_x"],
+        AdjDPos=ctx.adj_d_hx_dz,
+        AdjDNeg=ctx.adj_d_hz_dx,
+        AdjEyPost=adjoint_state["Ey"],
+        AdjPsiPosPost=adjoint_state["psi_ey_x"],
+        AdjPsiNegPost=adjoint_state["psi_ey_z"],
+        EyDecay=solver.cey_decay,
+        EpsEy=eps_ey,
+        Chi3Ey=solver.kerr_chi3_Ey,
+        FsqEy=fsq_ey,
+        Dt=dt,
+        Eps0=eps0,
+        PsiPos=forward_state["psi_ey_z"],
+        PsiNeg=forward_state["psi_ey_x"],
+        BPos=solver.cpml_b_e_z,
+        CPos=solver.cpml_c_e_z,
+        InvKappaPos=solver.cpml_inv_kappa_e_z,
+        BNeg=solver.cpml_b_e_x,
+        CNeg=solver.cpml_c_e_x,
+        InvKappaNeg=solver.cpml_inv_kappa_e_x,
+        HxMid=hx_mid,
+        HzMid=hz_mid,
+        invDx=solver.inv_dx_e,
+        invDz=solver.inv_dz_e,
+        xLowBoundaryMode=solver.boundary_x_low_code,
+        xHighBoundaryMode=solver.boundary_x_high_code,
+        zLowBoundaryMode=solver.boundary_z_low_code,
+        zHighBoundaryMode=solver.boundary_z_high_code,
+    )
+    _cuda_backend._accumulate_backward_diff_z(FieldGrad=adj_h_mid["Hx"], DiffGrad=ctx.adj_d_hx_dz, invDz=solver.inv_dz_e)
+    _cuda_backend._accumulate_backward_diff_x(FieldGrad=adj_h_mid["Hz"], DiffGrad=ctx.adj_d_hz_dx, invDx=solver.inv_dx_e)
+
+    _cuda_backend._reverse_electric_cpml_kerr_ez(
+        AdjEzPrev=pre["Ez"],
+        GradEpsEz=ctx.grad_eps_ez,
+        GradChi3Ez=grad_chi3_ez,
+        GFsqEz=g_fsq_ez,
+        AdjPsiPosPrev=pre["psi_ez_x"],
+        AdjPsiNegPrev=pre["psi_ez_y"],
+        AdjDPos=ctx.adj_d_hy_dx,
+        AdjDNeg=ctx.adj_d_hx_dy,
+        AdjEzPost=adjoint_state["Ez"],
+        AdjPsiPosPost=adjoint_state["psi_ez_x"],
+        AdjPsiNegPost=adjoint_state["psi_ez_y"],
+        EzDecay=solver.cez_decay,
+        EpsEz=eps_ez,
+        Chi3Ez=solver.kerr_chi3_Ez,
+        FsqEz=fsq_ez,
+        Dt=dt,
+        Eps0=eps0,
+        PsiPos=forward_state["psi_ez_x"],
+        PsiNeg=forward_state["psi_ez_y"],
+        BPos=solver.cpml_b_e_x,
+        CPos=solver.cpml_c_e_x,
+        InvKappaPos=solver.cpml_inv_kappa_e_x,
+        BNeg=solver.cpml_b_e_y,
+        CNeg=solver.cpml_c_e_y,
+        InvKappaNeg=solver.cpml_inv_kappa_e_y,
+        HxMid=hx_mid,
+        HyMid=hy_mid,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
+        xLowBoundaryMode=solver.boundary_x_low_code,
+        xHighBoundaryMode=solver.boundary_x_high_code,
+        yLowBoundaryMode=solver.boundary_y_low_code,
+        yHighBoundaryMode=solver.boundary_y_high_code,
+    )
+    _cuda_backend._accumulate_backward_diff_x(FieldGrad=adj_h_mid["Hy"], DiffGrad=ctx.adj_d_hy_dx, invDx=solver.inv_dx_e)
+    _cuda_backend._accumulate_backward_diff_y(FieldGrad=adj_h_mid["Hx"], DiffGrad=ctx.adj_d_hx_dy, invDy=solver.inv_dy_e)
+
+    # Phase 2: linear CPML magnetic reverse (the Kerr term is electric-only),
+    # folding each curl(E) derivative into the pre-step E adjoint.
+    _cuda_backend._reverse_magnetic_cpml_hx(
+        AdjHxPrev=pre["Hx"],
+        AdjPsiPosPrev=pre["psi_hx_y"],
+        AdjPsiNegPrev=pre["psi_hx_z"],
+        AdjDPos=ctx.adj_d_ez_dy,
+        AdjDNeg=ctx.adj_d_ey_dz,
+        AdjHxPost=adj_h_mid["Hx"],
+        AdjPsiPosPost=adjoint_state["psi_hx_y"],
+        AdjPsiNegPost=adjoint_state["psi_hx_z"],
+        HxDecay=solver.chx_decay,
+        HxCurl=solver.chx_curl,
+        BPos=solver.cpml_b_h_y,
+        CPos=solver.cpml_c_h_y,
+        InvKappaPos=solver.cpml_inv_kappa_h_y,
+        BNeg=solver.cpml_b_h_z,
+        CNeg=solver.cpml_c_h_z,
+        InvKappaNeg=solver.cpml_inv_kappa_h_z,
+    )
+    _cuda_backend._accumulate_forward_diff_y(FieldGrad=pre["Ez"], DiffGrad=ctx.adj_d_ez_dy, invDy=solver.inv_dy_h)
+    _cuda_backend._accumulate_forward_diff_z(FieldGrad=pre["Ey"], DiffGrad=ctx.adj_d_ey_dz, invDz=solver.inv_dz_h)
+
+    _cuda_backend._reverse_magnetic_cpml_hy(
+        AdjHyPrev=pre["Hy"],
+        AdjPsiPosPrev=pre["psi_hy_z"],
+        AdjPsiNegPrev=pre["psi_hy_x"],
+        AdjDPos=ctx.adj_d_ex_dz,
+        AdjDNeg=ctx.adj_d_ez_dx,
+        AdjHyPost=adj_h_mid["Hy"],
+        AdjPsiPosPost=adjoint_state["psi_hy_x"],
+        AdjPsiNegPost=adjoint_state["psi_hy_z"],
+        HyDecay=solver.chy_decay,
+        HyCurl=solver.chy_curl,
+        BPos=solver.cpml_b_h_z,
+        CPos=solver.cpml_c_h_z,
+        InvKappaPos=solver.cpml_inv_kappa_h_z,
+        BNeg=solver.cpml_b_h_x,
+        CNeg=solver.cpml_c_h_x,
+        InvKappaNeg=solver.cpml_inv_kappa_h_x,
+    )
+    _cuda_backend._accumulate_forward_diff_z(FieldGrad=pre["Ex"], DiffGrad=ctx.adj_d_ex_dz, invDz=solver.inv_dz_h)
+    _cuda_backend._accumulate_forward_diff_x(FieldGrad=pre["Ez"], DiffGrad=ctx.adj_d_ez_dx, invDx=solver.inv_dx_h)
+
+    _cuda_backend._reverse_magnetic_cpml_hz(
+        AdjHzPrev=pre["Hz"],
+        AdjPsiPosPrev=pre["psi_hz_x"],
+        AdjPsiNegPrev=pre["psi_hz_y"],
+        AdjDPos=ctx.adj_d_ey_dx,
+        AdjDNeg=ctx.adj_d_ex_dy,
+        AdjHzPost=adj_h_mid["Hz"],
+        AdjPsiPosPost=adjoint_state["psi_hz_x"],
+        AdjPsiNegPost=adjoint_state["psi_hz_y"],
+        HzDecay=solver.chz_decay,
+        HzCurl=solver.chz_curl,
+        BPos=solver.cpml_b_h_x,
+        CPos=solver.cpml_c_h_x,
+        InvKappaPos=solver.cpml_inv_kappa_h_x,
+        BNeg=solver.cpml_b_h_y,
+        CNeg=solver.cpml_c_h_y,
+        InvKappaNeg=solver.cpml_inv_kappa_h_y,
+    )
+    _cuda_backend._accumulate_forward_diff_x(FieldGrad=pre["Ey"], DiffGrad=ctx.adj_d_ey_dx, invDx=solver.inv_dx_h)
+    _cuda_backend._accumulate_forward_diff_y(FieldGrad=pre["Ex"], DiffGrad=ctx.adj_d_ex_dy, invDy=solver.inv_dy_h)
+
+    # Phase 3: scatter the |E|^2 cotangent back onto the pre-step fields (the exact
+    # transpose of the collocation, own-axis 2*E plus the 4-point off-axis average).
+    # It accumulates onto the pre-step E adjoint the electric kernels already
+    # assigned and the magnetic folds added, so it runs last.
+    _cuda_backend._collocation_transpose(
+        AdjEx=pre["Ex"],
+        AdjEy=pre["Ey"],
+        AdjEz=pre["Ez"],
+        GEx=g_fsq_ex,
+        GEy=g_fsq_ey,
+        GEz=g_fsq_ez,
+        Ex=forward_state["Ex"],
+        Ey=forward_state["Ey"],
+        Ez=forward_state["Ez"],
+    )
+
+    step_result = _adjoint._ReverseStepResult(
+        pre_step_adjoint=pre,
+        grad_eps_ex=ctx.grad_eps_ex,
+        grad_eps_ey=ctx.grad_eps_ey,
+        grad_eps_ez=ctx.grad_eps_ez,
+        backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.PYTHON_KERR],
+        magnetic_output_adjoint=adj_h_mid,
+        grad_chi3_ex=grad_chi3_ex,
+        grad_chi3_ey=grad_chi3_ey,
+        grad_chi3_ez=grad_chi3_ez,
+    )
+    return _adjoint._accumulate_source_term_gradients(
+        step_result,
+        solver=solver,
+        adjoint_state=adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+
 def _reverse_step_bloch_native(
     solver,
     forward_state,
@@ -1437,6 +1735,11 @@ def register_native_reverse_backends() -> None:
     register_native_reverse_backend(
         _ReverseBackend.PYTHON_CONDUCTIVE,
         _reverse_step_conductive_native,
+        qualifier=_cuda_scene_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.PYTHON_KERR,
+        _reverse_step_kerr_native,
         qualifier=_cuda_scene_native_qualifies,
     )
     register_native_reverse_backend(

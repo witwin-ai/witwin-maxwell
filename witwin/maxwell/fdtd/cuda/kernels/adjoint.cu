@@ -1618,6 +1618,176 @@ __global__ void reverse_electric_component_cpml_conductive_kernel(
   adj_d_neg[linear] = out_adj_d_neg;
 }
 
+// Instantaneous Kerr (chi3) analytic reverse of the CPML electric update. The psi
+// recursion, adj_d_pos/adj_d_neg folds, and pre-step field pullback are the linear
+// reverse_electric_component_cpml machinery (the Kerr term only rescales the
+// per-edge curl coefficient). The Kerr forward recomputes the dynamic curl every
+// step from the pre-update fields,
+//   eff  = max(eps + eps0 * chi3 * |E|^2, floor)     (|E|^2 = fsq, precomputed)
+//   curl = (dt / eff) * decay
+// (decay is the frozen linear PML decay), so this kernel folds the coefficient
+// reverse in: the cotangent adj_curl = adj_post * curl_term feeds eff through
+// d(curl)/d(eff) = -curl/eff, and eff pushes onto eps (grad_eps), chi3 (grad_chi3)
+// and |E|^2 (g_fsq, the per-edge cotangent the collocation transpose scatters back
+// onto the fields). clamp_min zeros the sensitivities on any clamped cell.
+template <int Component>
+__global__ void reverse_electric_component_cpml_kerr_kernel(
+    int prev_nx,
+    int prev_ny,
+    int prev_nz,
+    int h_pos_ny,
+    int h_pos_nz,
+    int h_neg_ny,
+    int h_neg_nz,
+    float* __restrict__ adj_prev,
+    float* __restrict__ grad_eps,
+    float* __restrict__ grad_chi3,
+    float* __restrict__ g_fsq,
+    float* __restrict__ adj_psi_pos_prev,
+    float* __restrict__ adj_psi_neg_prev,
+    float* __restrict__ adj_d_pos,
+    float* __restrict__ adj_d_neg,
+    const float* __restrict__ adj_post,
+    const float* __restrict__ adj_psi_pos_post,
+    const float* __restrict__ adj_psi_neg_post,
+    const float* __restrict__ decay,
+    const float* __restrict__ eps,
+    const float* __restrict__ chi3,
+    const float* __restrict__ fsq,
+    float dt,
+    float eps0,
+    const float* __restrict__ psi_pos,
+    const float* __restrict__ psi_neg,
+    const float* __restrict__ b_pos,
+    const float* __restrict__ c_pos,
+    const float* __restrict__ inv_kappa_pos,
+    const float* __restrict__ b_neg,
+    const float* __restrict__ c_neg,
+    const float* __restrict__ inv_kappa_neg,
+    const float* __restrict__ h_pos_mid,
+    const float* __restrict__ h_neg_mid,
+    const float* __restrict__ inv_pos,
+    const float* __restrict__ inv_neg,
+    int low_mode_a,
+    int high_mode_a,
+    int low_mode_b,
+    int high_mode_b) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (i_u >= static_cast<unsigned int>(prev_nx)
+      || j_u >= static_cast<unsigned int>(prev_ny)
+      || k_u >= static_cast<unsigned int>(prev_nz)) {
+    return;
+  }
+  const long long linear = offset3d(i_u, j_u, k_u, prev_ny, prev_nz);
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
+
+  int coord_a = j;
+  int size_a = prev_ny;
+  int coord_b = k;
+  int size_b = prev_nz;
+  int pos_coeff_index = j;
+  int neg_coeff_index = k;
+
+  if constexpr (Component == 1) {
+    coord_a = i;
+    size_a = prev_nx;
+    coord_b = k;
+    size_b = prev_nz;
+    pos_coeff_index = k;
+    neg_coeff_index = i;
+  } else if constexpr (Component == 2) {
+    coord_a = i;
+    size_a = prev_nx;
+    coord_b = j;
+    size_b = prev_ny;
+    pos_coeff_index = i;
+    neg_coeff_index = j;
+  }
+
+  const ElectricCellStatus status = resolve_electric_cell_status(
+      coord_a, size_a, low_mode_a, high_mode_a,
+      coord_b, size_b, low_mode_b, high_mode_b);
+  const float adj_post_value = adj_post[linear];
+  float adjoint = 0.0f;
+  float grad_e = 0.0f;
+  float grad_c3 = 0.0f;
+  float g_fsq_out = 0.0f;
+  const float adj_psi_pos_post_value = adj_psi_pos_post[linear];
+  const float adj_psi_neg_post_value = adj_psi_neg_post[linear];
+  float adj_psi_pos = adj_psi_pos_post_value;
+  float adj_psi_neg = adj_psi_neg_post_value;
+  float out_adj_d_pos = 0.0f;
+  float out_adj_d_neg = 0.0f;
+
+  if (status.inactive) {
+    adjoint = adj_post_value;
+  } else if (status.active) {
+    float d_pos = 0.0f;
+    float d_neg = 0.0f;
+    if constexpr (Component == 0) {
+      d_pos = (h_pos_mid[offset3d(i_u, j_u, k_u, h_pos_ny, h_pos_nz)]
+               - h_pos_mid[offset3d(i_u, j_u - 1, k_u, h_pos_ny, h_pos_nz)]) * inv_pos[pos_coeff_index];
+      d_neg = (h_neg_mid[offset3d(i_u, j_u, k_u, h_neg_ny, h_neg_nz)]
+               - h_neg_mid[offset3d(i_u, j_u, k_u - 1, h_neg_ny, h_neg_nz)]) * inv_neg[neg_coeff_index];
+    } else if constexpr (Component == 1) {
+      d_pos = (h_pos_mid[offset3d(i_u, j_u, k_u, h_pos_ny, h_pos_nz)]
+               - h_pos_mid[offset3d(i_u, j_u, k_u - 1, h_pos_ny, h_pos_nz)]) * inv_pos[pos_coeff_index];
+      d_neg = (h_neg_mid[offset3d(i_u, j_u, k_u, h_neg_ny, h_neg_nz)]
+               - h_neg_mid[offset3d(i_u - 1, j_u, k_u, h_neg_ny, h_neg_nz)]) * inv_neg[neg_coeff_index];
+    } else {
+      d_pos = (h_pos_mid[offset3d(i_u, j_u, k_u, h_pos_ny, h_pos_nz)]
+               - h_pos_mid[offset3d(i_u - 1, j_u, k_u, h_pos_ny, h_pos_nz)]) * inv_pos[pos_coeff_index];
+      d_neg = (h_neg_mid[offset3d(i_u, j_u, k_u, h_neg_ny, h_neg_nz)]
+               - h_neg_mid[offset3d(i_u, j_u - 1, k_u, h_neg_ny, h_neg_nz)]) * inv_neg[neg_coeff_index];
+    }
+    const float b_pos_value = b_pos[pos_coeff_index];
+    const float c_pos_value = c_pos[pos_coeff_index];
+    const float inv_kappa_pos_value = inv_kappa_pos[pos_coeff_index];
+    const float b_neg_value = b_neg[neg_coeff_index];
+    const float c_neg_value = c_neg[neg_coeff_index];
+    const float inv_kappa_neg_value = inv_kappa_neg[neg_coeff_index];
+    const float psi_pos_candidate = b_pos_value * psi_pos[linear] + c_pos_value * d_pos;
+    const float psi_neg_candidate = b_neg_value * psi_neg[linear] + c_neg_value * d_neg;
+    const float curl_term = (d_pos * inv_kappa_pos_value + psi_pos_candidate)
+        - (d_neg * inv_kappa_neg_value + psi_neg_candidate);
+
+    const float floor = 1.0e-12f * eps0;
+    const float fsq_value = fsq[linear];
+    const float chi3_value = chi3[linear];
+    const float raw = eps[linear] + eps0 * chi3_value * fsq_value;
+    const bool clamped = raw < floor;
+    const float eff = clamped ? floor : raw;
+    const float curl_value = (dt / eff) * decay[linear];
+    const float adj_curl_term = adj_post_value * curl_value;
+    const float adj_curl_coeff = adj_post_value * curl_term;
+    const float adj_eff = clamped ? 0.0f : (adj_curl_coeff * (-(curl_value / eff)));
+    grad_e = adj_eff;
+    grad_c3 = adj_eff * eps0 * fsq_value;
+    g_fsq_out = adj_eff * eps0 * chi3_value;
+
+    adjoint = adj_post_value * decay[linear];
+    const float adj_psi_pos_total = adj_psi_pos_post_value + adj_curl_term;
+    const float adj_psi_neg_total = adj_psi_neg_post_value - adj_curl_term;
+    adj_psi_pos = b_pos_value * adj_psi_pos_total;
+    adj_psi_neg = b_neg_value * adj_psi_neg_total;
+    out_adj_d_pos = inv_kappa_pos_value * adj_curl_term + c_pos_value * adj_psi_pos_total;
+    out_adj_d_neg = -inv_kappa_neg_value * adj_curl_term + c_neg_value * adj_psi_neg_total;
+  }
+
+  adj_prev[linear] = adjoint;
+  grad_eps[linear] = grad_e;
+  grad_chi3[linear] = grad_c3;
+  g_fsq[linear] = g_fsq_out;
+  adj_psi_pos_prev[linear] = adj_psi_pos;
+  adj_psi_neg_prev[linear] = adj_psi_neg;
+  adj_d_pos[linear] = out_adj_d_pos;
+  adj_d_neg[linear] = out_adj_d_neg;
+}
+
 template <int Component>
 __global__ void reverse_magnetic_component_cpml_kernel(
     int prev_nx,
@@ -2257,6 +2427,98 @@ __global__ void collocation_transpose_kernel(
   }
 }
 
+// Forward |E|^2 collocated onto each electric Yee edge, the exact value the Kerr
+// and general-nonlinear coefficient kernels consume (own axis direct, each off
+// axis a 4-point face-clamped average). This is the primal of
+// ``collocation_transpose_kernel`` and mirrors the Torch replica
+// ``_collocated_field_square`` / the forward device stencil
+// ``collocate_electric_components``. The reverse runners drive it once per step to
+// materialize the ``fsq`` input the Kerr coefficient reverse reads.
+template <int Component>
+__global__ void collocate_field_square_kernel(
+    int ex_x, int ex_y, int ex_z,
+    int ey_x, int ey_y, int ey_z,
+    int ez_x, int ez_y, int ez_z,
+    const float* __restrict__ ex,
+    const float* __restrict__ ey,
+    const float* __restrict__ ez,
+    float* __restrict__ fsq) {
+  int own_x = ex_x;
+  int own_y = ex_y;
+  int own_z = ex_z;
+  if constexpr (Component == 1) {
+    own_x = ey_x;
+    own_y = ey_y;
+    own_z = ey_z;
+  } else if constexpr (Component == 2) {
+    own_x = ez_x;
+    own_y = ez_y;
+    own_z = ez_z;
+  }
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  const int i = static_cast<int>(i_u);
+  const int j = static_cast<int>(j_u);
+  const int k = static_cast<int>(k_u);
+  if (i >= own_x || j >= own_y || k >= own_z) {
+    return;
+  }
+
+  if constexpr (Component == 0) {
+    const float own = ex[offset3d(i_u, j_u, k_u, ex_y, ex_z)];
+    const int jm = clamp_axis_index(j - 1, ey_y);
+    const int jc = clamp_axis_index(j, ey_y);
+    const float ey_col = 0.25f * (
+        ey[offset3d(i_u, static_cast<unsigned int>(jm), k_u, ey_y, ey_z)]
+        + ey[offset3d(i_u, static_cast<unsigned int>(jc), k_u, ey_y, ey_z)]
+        + ey[offset3d(static_cast<unsigned int>(i + 1), static_cast<unsigned int>(jm), k_u, ey_y, ey_z)]
+        + ey[offset3d(static_cast<unsigned int>(i + 1), static_cast<unsigned int>(jc), k_u, ey_y, ey_z)]);
+    const int km = clamp_axis_index(k - 1, ez_z);
+    const int kc = clamp_axis_index(k, ez_z);
+    const float ez_col = 0.25f * (
+        ez[offset3d(i_u, j_u, static_cast<unsigned int>(km), ez_y, ez_z)]
+        + ez[offset3d(i_u, j_u, static_cast<unsigned int>(kc), ez_y, ez_z)]
+        + ez[offset3d(static_cast<unsigned int>(i + 1), j_u, static_cast<unsigned int>(km), ez_y, ez_z)]
+        + ez[offset3d(static_cast<unsigned int>(i + 1), j_u, static_cast<unsigned int>(kc), ez_y, ez_z)]);
+    fsq[offset3d(i_u, j_u, k_u, ex_y, ex_z)] = own * own + ey_col * ey_col + ez_col * ez_col;
+  } else if constexpr (Component == 1) {
+    const float own = ey[offset3d(i_u, j_u, k_u, ey_y, ey_z)];
+    const int im = clamp_axis_index(i - 1, ex_x);
+    const int ic = clamp_axis_index(i, ex_x);
+    const float ex_col = 0.25f * (
+        ex[offset3d(static_cast<unsigned int>(im), j_u, k_u, ex_y, ex_z)]
+        + ex[offset3d(static_cast<unsigned int>(ic), j_u, k_u, ex_y, ex_z)]
+        + ex[offset3d(static_cast<unsigned int>(im), static_cast<unsigned int>(j + 1), k_u, ex_y, ex_z)]
+        + ex[offset3d(static_cast<unsigned int>(ic), static_cast<unsigned int>(j + 1), k_u, ex_y, ex_z)]);
+    const int km = clamp_axis_index(k - 1, ez_z);
+    const int kc = clamp_axis_index(k, ez_z);
+    const float ez_col = 0.25f * (
+        ez[offset3d(i_u, j_u, static_cast<unsigned int>(km), ez_y, ez_z)]
+        + ez[offset3d(i_u, j_u, static_cast<unsigned int>(kc), ez_y, ez_z)]
+        + ez[offset3d(i_u, static_cast<unsigned int>(j + 1), static_cast<unsigned int>(km), ez_y, ez_z)]
+        + ez[offset3d(i_u, static_cast<unsigned int>(j + 1), static_cast<unsigned int>(kc), ez_y, ez_z)]);
+    fsq[offset3d(i_u, j_u, k_u, ey_y, ey_z)] = ex_col * ex_col + own * own + ez_col * ez_col;
+  } else {
+    const float own = ez[offset3d(i_u, j_u, k_u, ez_y, ez_z)];
+    const int im = clamp_axis_index(i - 1, ex_x);
+    const int ic = clamp_axis_index(i, ex_x);
+    const float ex_col = 0.25f * (
+        ex[offset3d(static_cast<unsigned int>(im), j_u, k_u, ex_y, ex_z)]
+        + ex[offset3d(static_cast<unsigned int>(ic), j_u, k_u, ex_y, ex_z)]
+        + ex[offset3d(static_cast<unsigned int>(im), j_u, static_cast<unsigned int>(k + 1), ex_y, ex_z)]
+        + ex[offset3d(static_cast<unsigned int>(ic), j_u, static_cast<unsigned int>(k + 1), ex_y, ex_z)]);
+    const int jm = clamp_axis_index(j - 1, ey_y);
+    const int jc = clamp_axis_index(j, ey_y);
+    const float ey_col = 0.25f * (
+        ey[offset3d(i_u, static_cast<unsigned int>(jm), k_u, ey_y, ey_z)]
+        + ey[offset3d(i_u, static_cast<unsigned int>(jc), k_u, ey_y, ey_z)]
+        + ey[offset3d(i_u, static_cast<unsigned int>(jm), static_cast<unsigned int>(k + 1), ey_y, ey_z)]
+        + ey[offset3d(i_u, static_cast<unsigned int>(jc), static_cast<unsigned int>(k + 1), ey_y, ey_z)]);
+    fsq[offset3d(i_u, j_u, k_u, ez_y, ez_z)] = ex_col * ex_col + ey_col * ey_col + own * own;
+  }
+}
+
 }  // namespace
 
 void collocation_transpose_cuda(
@@ -2304,6 +2566,45 @@ void collocation_transpose_cuda(
   launch(std::integral_constant<int, 0>{}, g_ex, ex_x, ex_y, ex_z);
   launch(std::integral_constant<int, 1>{}, g_ey, ey_x, ey_y, ey_z);
   launch(std::integral_constant<int, 2>{}, g_ez, ez_x, ez_y, ez_z);
+  WITWIN_CUDA_CHECK();
+}
+
+void collocate_field_square_cuda(
+    torch::stable::Tensor fsq_ex,
+    torch::stable::Tensor fsq_ey,
+    torch::stable::Tensor fsq_ez,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez) {
+  check_field(fsq_ex, "fsq_ex");
+  check_matching_field(fsq_ex, ex, "ex");
+  check_field(fsq_ey, "fsq_ey");
+  check_matching_field(fsq_ey, ey, "ey");
+  check_field(fsq_ez, "fsq_ez");
+  check_matching_field(fsq_ez, ez, "ez");
+  const torch::stable::accelerator::DeviceGuard device_guard(fsq_ex.get_device_index());
+  const int ex_x = static_cast<int>(ex.size(0));
+  const int ex_y = static_cast<int>(ex.size(1));
+  const int ex_z = static_cast<int>(ex.size(2));
+  const int ey_x = static_cast<int>(ey.size(0));
+  const int ey_y = static_cast<int>(ey.size(1));
+  const int ey_z = static_cast<int>(ey.size(2));
+  const int ez_x = static_cast<int>(ez.size(0));
+  const int ez_y = static_cast<int>(ez.size(1));
+  const int ez_z = static_cast<int>(ez.size(2));
+  const dim3 block = field_block3d();
+  auto launch = [&](auto component_tag, torch::stable::Tensor& fsq, int nx, int ny, int nz) {
+    constexpr int component_value = decltype(component_tag)::value;
+    collocate_field_square_kernel<component_value><<<field_grid3d(nx, ny, nz, block), block, 0, current_cuda_stream()>>>(
+        ex_x, ex_y, ex_z, ey_x, ey_y, ey_z, ez_x, ez_y, ez_z,
+        ex.mutable_data_ptr<float>(),
+        ey.mutable_data_ptr<float>(),
+        ez.mutable_data_ptr<float>(),
+        fsq.mutable_data_ptr<float>());
+  };
+  launch(std::integral_constant<int, 0>{}, fsq_ex, ex_x, ex_y, ex_z);
+  launch(std::integral_constant<int, 1>{}, fsq_ey, ey_x, ey_y, ey_z);
+  launch(std::integral_constant<int, 2>{}, fsq_ez, ez_x, ez_y, ez_z);
   WITWIN_CUDA_CHECK();
 }
 
@@ -3609,6 +3910,247 @@ void reverse_electric_component_ez_cpml_conductive_cuda(
   launch_reverse_electric_component_cpml_conductive(
       2, adj_prev, grad_eps, adj_psi_pos_prev, adj_psi_neg_prev, adj_d_pos, adj_d_neg,
       adj_post, adj_psi_pos_post, adj_psi_neg_post, decay, curl, half, e_prev, eps, dt,
+      psi_pos, psi_neg, b_pos, c_pos, inv_kappa_pos, b_neg, c_neg, inv_kappa_neg,
+      hy_mid, hx_mid, inv_dx, inv_dy, x_low_mode, x_high_mode, y_low_mode, y_high_mode);
+}
+
+void launch_reverse_electric_component_cpml_kerr(
+    int component,
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor grad_eps,
+    torch::stable::Tensor grad_chi3,
+    torch::stable::Tensor g_fsq,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& eps,
+    const torch::stable::Tensor& chi3,
+    const torch::stable::Tensor& fsq,
+    double dt,
+    double eps0,
+    const torch::stable::Tensor& psi_pos,
+    const torch::stable::Tensor& psi_neg,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg,
+    const torch::stable::Tensor& h_pos_mid,
+    const torch::stable::Tensor& h_neg_mid,
+    const torch::stable::Tensor& inv_pos,
+    const torch::stable::Tensor& inv_neg,
+    int64_t low_mode_a,
+    int64_t high_mode_a,
+    int64_t low_mode_b,
+    int64_t high_mode_b) {
+  check_field(adj_prev, "adj_prev");
+  check_matching_field(adj_prev, grad_eps, "grad_eps");
+  check_matching_field(adj_prev, grad_chi3, "grad_chi3");
+  check_matching_field(adj_prev, g_fsq, "g_fsq");
+  check_matching_field(adj_prev, adj_psi_pos_prev, "adj_psi_pos_prev");
+  check_matching_field(adj_prev, adj_psi_neg_prev, "adj_psi_neg_prev");
+  check_matching_field(adj_prev, adj_d_pos, "adj_d_pos");
+  check_matching_field(adj_prev, adj_d_neg, "adj_d_neg");
+  check_matching_field(adj_prev, adj_post, "adj_post");
+  check_matching_field(adj_prev, adj_psi_pos_post, "adj_psi_pos_post");
+  check_matching_field(adj_prev, adj_psi_neg_post, "adj_psi_neg_post");
+  check_matching_field(adj_prev, decay, "decay");
+  check_matching_field(adj_prev, eps, "eps");
+  check_matching_field(adj_prev, chi3, "chi3");
+  check_matching_field(adj_prev, fsq, "fsq");
+  check_matching_field(adj_prev, psi_pos, "psi_pos");
+  check_matching_field(adj_prev, psi_neg, "psi_neg");
+  check_vector(b_pos, "b_pos");
+  check_matching_vector(b_pos, c_pos, "c_pos");
+  check_matching_vector(b_pos, inv_kappa_pos, "inv_kappa_pos");
+  check_vector(b_neg, "b_neg");
+  check_matching_vector(b_neg, c_neg, "c_neg");
+  check_matching_vector(b_neg, inv_kappa_neg, "inv_kappa_neg");
+  check_matching_vector(b_pos, inv_pos, "inv_pos");
+  check_matching_vector(b_neg, inv_neg, "inv_neg");
+  check_field(h_pos_mid, "h_pos_mid");
+  check_field(h_neg_mid, "h_neg_mid");
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_prev.get_device_index());
+  const dim3 block = field_block3d();
+  const auto launch = [&](auto component_tag) {
+    constexpr int component_value = decltype(component_tag)::value;
+    reverse_electric_component_cpml_kerr_kernel<component_value><<<field_grid3d(adj_prev.size(0), adj_prev.size(1), adj_prev.size(2), block), block, 0, current_cuda_stream()>>>(
+        static_cast<int>(adj_prev.size(0)),
+        static_cast<int>(adj_prev.size(1)),
+        static_cast<int>(adj_prev.size(2)),
+        static_cast<int>(h_pos_mid.size(1)),
+        static_cast<int>(h_pos_mid.size(2)),
+        static_cast<int>(h_neg_mid.size(1)),
+        static_cast<int>(h_neg_mid.size(2)),
+        adj_prev.mutable_data_ptr<float>(),
+        grad_eps.mutable_data_ptr<float>(),
+        grad_chi3.mutable_data_ptr<float>(),
+        g_fsq.mutable_data_ptr<float>(),
+        adj_psi_pos_prev.mutable_data_ptr<float>(),
+        adj_psi_neg_prev.mutable_data_ptr<float>(),
+        adj_d_pos.mutable_data_ptr<float>(),
+        adj_d_neg.mutable_data_ptr<float>(),
+        adj_post.mutable_data_ptr<float>(),
+        adj_psi_pos_post.mutable_data_ptr<float>(),
+        adj_psi_neg_post.mutable_data_ptr<float>(),
+        decay.mutable_data_ptr<float>(),
+        eps.mutable_data_ptr<float>(),
+        chi3.mutable_data_ptr<float>(),
+        fsq.mutable_data_ptr<float>(),
+        static_cast<float>(dt),
+        static_cast<float>(eps0),
+        psi_pos.mutable_data_ptr<float>(),
+        psi_neg.mutable_data_ptr<float>(),
+        b_pos.mutable_data_ptr<float>(),
+        c_pos.mutable_data_ptr<float>(),
+        inv_kappa_pos.mutable_data_ptr<float>(),
+        b_neg.mutable_data_ptr<float>(),
+        c_neg.mutable_data_ptr<float>(),
+        inv_kappa_neg.mutable_data_ptr<float>(),
+        h_pos_mid.mutable_data_ptr<float>(),
+        h_neg_mid.mutable_data_ptr<float>(),
+        inv_pos.mutable_data_ptr<float>(),
+        inv_neg.mutable_data_ptr<float>(),
+        static_cast<int>(low_mode_a),
+        static_cast<int>(high_mode_a),
+        static_cast<int>(low_mode_b),
+        static_cast<int>(high_mode_b));
+  };
+  if (component == 0) {
+    launch(std::integral_constant<int, 0>{});
+  } else if (component == 1) {
+    launch(std::integral_constant<int, 1>{});
+  } else {
+    launch(std::integral_constant<int, 2>{});
+  }
+  WITWIN_CUDA_CHECK();
+}
+
+void reverse_electric_component_ex_cpml_kerr_cuda(
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor grad_eps,
+    torch::stable::Tensor grad_chi3,
+    torch::stable::Tensor g_fsq,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& eps,
+    const torch::stable::Tensor& chi3,
+    const torch::stable::Tensor& fsq,
+    double dt,
+    double eps0,
+    const torch::stable::Tensor& psi_pos,
+    const torch::stable::Tensor& psi_neg,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg,
+    const torch::stable::Tensor& hy_mid,
+    const torch::stable::Tensor& hz_mid,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    int64_t y_low_mode,
+    int64_t y_high_mode,
+    int64_t z_low_mode,
+    int64_t z_high_mode) {
+  launch_reverse_electric_component_cpml_kerr(
+      0, adj_prev, grad_eps, grad_chi3, g_fsq, adj_psi_pos_prev, adj_psi_neg_prev, adj_d_pos, adj_d_neg,
+      adj_post, adj_psi_pos_post, adj_psi_neg_post, decay, eps, chi3, fsq, dt, eps0,
+      psi_pos, psi_neg, b_pos, c_pos, inv_kappa_pos, b_neg, c_neg, inv_kappa_neg,
+      hz_mid, hy_mid, inv_dy, inv_dz, y_low_mode, y_high_mode, z_low_mode, z_high_mode);
+}
+
+void reverse_electric_component_ey_cpml_kerr_cuda(
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor grad_eps,
+    torch::stable::Tensor grad_chi3,
+    torch::stable::Tensor g_fsq,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& eps,
+    const torch::stable::Tensor& chi3,
+    const torch::stable::Tensor& fsq,
+    double dt,
+    double eps0,
+    const torch::stable::Tensor& psi_pos,
+    const torch::stable::Tensor& psi_neg,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg,
+    const torch::stable::Tensor& hx_mid,
+    const torch::stable::Tensor& hz_mid,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dz,
+    int64_t x_low_mode,
+    int64_t x_high_mode,
+    int64_t z_low_mode,
+    int64_t z_high_mode) {
+  launch_reverse_electric_component_cpml_kerr(
+      1, adj_prev, grad_eps, grad_chi3, g_fsq, adj_psi_pos_prev, adj_psi_neg_prev, adj_d_pos, adj_d_neg,
+      adj_post, adj_psi_pos_post, adj_psi_neg_post, decay, eps, chi3, fsq, dt, eps0,
+      psi_pos, psi_neg, b_pos, c_pos, inv_kappa_pos, b_neg, c_neg, inv_kappa_neg,
+      hx_mid, hz_mid, inv_dz, inv_dx, x_low_mode, x_high_mode, z_low_mode, z_high_mode);
+}
+
+void reverse_electric_component_ez_cpml_kerr_cuda(
+    torch::stable::Tensor adj_prev,
+    torch::stable::Tensor grad_eps,
+    torch::stable::Tensor grad_chi3,
+    torch::stable::Tensor g_fsq,
+    torch::stable::Tensor adj_psi_pos_prev,
+    torch::stable::Tensor adj_psi_neg_prev,
+    torch::stable::Tensor adj_d_pos,
+    torch::stable::Tensor adj_d_neg,
+    const torch::stable::Tensor& adj_post,
+    const torch::stable::Tensor& adj_psi_pos_post,
+    const torch::stable::Tensor& adj_psi_neg_post,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& eps,
+    const torch::stable::Tensor& chi3,
+    const torch::stable::Tensor& fsq,
+    double dt,
+    double eps0,
+    const torch::stable::Tensor& psi_pos,
+    const torch::stable::Tensor& psi_neg,
+    const torch::stable::Tensor& b_pos,
+    const torch::stable::Tensor& c_pos,
+    const torch::stable::Tensor& inv_kappa_pos,
+    const torch::stable::Tensor& b_neg,
+    const torch::stable::Tensor& c_neg,
+    const torch::stable::Tensor& inv_kappa_neg,
+    const torch::stable::Tensor& hx_mid,
+    const torch::stable::Tensor& hy_mid,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    int64_t x_low_mode,
+    int64_t x_high_mode,
+    int64_t y_low_mode,
+    int64_t y_high_mode) {
+  launch_reverse_electric_component_cpml_kerr(
+      2, adj_prev, grad_eps, grad_chi3, g_fsq, adj_psi_pos_prev, adj_psi_neg_prev, adj_d_pos, adj_d_neg,
+      adj_post, adj_psi_pos_post, adj_psi_neg_post, decay, eps, chi3, fsq, dt, eps0,
       psi_pos, psi_neg, b_pos, c_pos, inv_kappa_pos, b_neg, c_neg, inv_kappa_neg,
       hy_mid, hx_mid, inv_dx, inv_dy, x_low_mode, x_high_mode, y_low_mode, y_high_mode);
 }

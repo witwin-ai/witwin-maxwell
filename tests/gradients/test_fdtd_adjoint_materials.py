@@ -569,6 +569,99 @@ def test_scene_with_kerr_medium_gradient_matches_fd():
     )
 
 
+@_CUDA
+def test_kerr_reverse_routes_through_native_kerr():
+    """An instantaneous Kerr (chi3) CPML scene must route to the analytic native
+    Kerr reverse backend: it carries the field / chi3 sensitivity of the per-step
+    dynamic curl recompute that the linear CPML reverse drops, so it no longer
+    falls back to the torch-VJP autograd path."""
+    from witwin.maxwell.fdtd.adjoint.dispatch import _select_reverse_backend, _ReverseBackend
+    from witwin.maxwell.fdtd.checkpoint import checkpoint_schema
+
+    prepared = mw.Simulation.fdtd(
+        _kerr_scene(_KERR_CHI3),
+        frequencies=[1e9],
+        run_time=mw.TimeConfig(time_steps=8),
+    ).prepare()
+    solver = prepared.solver
+    assert solver.kerr_enabled and not getattr(solver, "nonlinear_general_enabled", False)
+    forward_state = {name: getattr(solver, name) for name in checkpoint_schema(solver).state_names}
+    backend = _select_reverse_backend(
+        solver,
+        forward_state,
+        eps_ex=solver.eps_Ex,
+        eps_ey=solver.eps_Ey,
+        eps_ez=solver.eps_Ez,
+        resolved_source_terms=None,
+    )
+    assert backend is _ReverseBackend.PYTHON_KERR, backend
+
+
+@_CUDA
+def test_kerr_reverse_step_reference_matches_torch_vjp():
+    """The analytic Kerr CPML reverse must reproduce the torch-autograd VJP of the
+    Kerr forward step (fields, psi, grad_eps, and the chi3 channel) on a real Kerr
+    solver. This is the oracle behind the fused native Kerr reverse: the native
+    kernels are validated against this reference, which is validated here against
+    autograd, so a native/reference agreement is a genuine end-to-end check."""
+    from witwin.maxwell.fdtd.adjoint import reference as fdtd_adjoint_reference
+    from witwin.maxwell.fdtd.adjoint import core as adjoint_core
+    from witwin.maxwell.fdtd.checkpoint import checkpoint_schema
+
+    torch.manual_seed(3)
+    prepared = mw.Simulation.fdtd(
+        _kerr_scene(_KERR_CHI3),
+        frequencies=[1e9],
+        run_time=mw.TimeConfig(time_steps=8),
+    ).prepare()
+    solver = prepared.solver
+    names = checkpoint_schema(solver).state_names
+    forward_state = {
+        n: 0.3 * torch.randn(getattr(solver, n).shape, device="cuda", dtype=torch.float32)
+        for n in names
+    }
+    adjoint_state = {n: torch.randn_like(t) for n, t in forward_state.items()}
+    eps_ex = solver.eps_Ex.detach().clone().requires_grad_(True)
+    eps_ey = solver.eps_Ey.detach().clone().requires_grad_(True)
+    eps_ez = solver.eps_Ez.detach().clone().requires_grad_(True)
+    chi3_ex = solver.kerr_chi3_Ex.detach().clone().requires_grad_(True)
+    chi3_ey = solver.kerr_chi3_Ey.detach().clone().requires_grad_(True)
+    chi3_ez = solver.kerr_chi3_Ez.detach().clone().requires_grad_(True)
+    rst = adjoint_core._resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez)
+    time_value = 3 * solver.dt
+
+    with torch.no_grad():
+        expected = fdtd_adjoint_reference.reverse_step_torch_vjp(
+            solver, forward_state, adjoint_state, time_value=time_value,
+            eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez,
+            chi3_ex=chi3_ex, chi3_ey=chi3_ey, chi3_ez=chi3_ez,
+        )
+        base = fdtd_adjoint_reference.reverse_step_kerr_cpml_python_reference(
+            solver, forward_state, adjoint_state, time_value=time_value,
+            eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez, resolved_source_terms=rst,
+        )
+        actual = adjoint_core._accumulate_source_term_gradients(
+            base, solver=solver, adjoint_state=adjoint_state, time_value=time_value,
+            eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez, resolved_source_terms=rst,
+        )
+
+    assert actual.backend == "python_reference_kerr_cpml"
+    assert expected.backend == "torch_vjp"
+
+    def _match(a, e):
+        scale = e.abs().max().item() + 1e-30
+        assert torch.allclose(a, e, rtol=1e-4, atol=scale * 1e-4), (a - e).abs().max().item() / scale
+
+    for name in names:
+        _match(actual.pre_step_adjoint[name], expected.pre_step_adjoint[name])
+    _match(actual.grad_eps_ex, expected.grad_eps_ex)
+    _match(actual.grad_eps_ey, expected.grad_eps_ey)
+    _match(actual.grad_eps_ez, expected.grad_eps_ez)
+    _match(actual.grad_chi3_ex, expected.grad_chi3_ex)
+    _match(actual.grad_chi3_ey, expected.grad_chi3_ey)
+    _match(actual.grad_chi3_ez, expected.grad_chi3_ez)
+
+
 class _KerrGeometryScene(mw.SceneModule):
     """Trainable-size Kerr box: the logits move the chi3 (and eps) blend."""
 
