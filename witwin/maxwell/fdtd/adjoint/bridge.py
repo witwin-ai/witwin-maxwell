@@ -31,6 +31,37 @@ def _runtime():
     return _adjoint
 
 
+def _resolve_grad_accumulator_backend(device):
+    """Return the CUDA backend for native in-place gradient accumulation.
+
+    Mirrors the reverse-step native gate: on a CUDA scene with the compiled
+    extension loaded, each step's material-gradient contribution is folded into
+    the running accumulator by a fused CUDA element-wise accumulate, so the
+    per-step full-grid ``aten::add`` never enters the hot path. Returns ``None``
+    (Torch ``a + b`` fallback) off CUDA or without the extension.
+    """
+    if torch.device(device).type != "cuda":
+        return None
+    from ..cuda import backend as _cuda_backend
+
+    if not _cuda_backend.is_available():
+        return None
+    return _cuda_backend
+
+
+def _accumulate_grad(cuda_backend, accumulator, increment):
+    """Fold ``increment`` into ``accumulator`` in place (native) or via Torch add.
+
+    The native path mutates ``accumulator`` in place and returns the same tensor;
+    the Torch fallback returns a fresh sum. Both preserve the caller's rebinding
+    pattern (``acc = _accumulate_grad(...)``).
+    """
+    if cuda_backend is not None and accumulator.is_contiguous() and increment.is_contiguous():
+        cuda_backend._accumulate_in_place(dst=accumulator, src=increment)
+        return accumulator
+    return accumulator + increment
+
+
 def _material_has_conductivity(material) -> bool:
     sigma_e = getattr(material, "sigma_e", 0.0)
     if sigma_e is not None and float(sigma_e) != 0.0:
@@ -508,6 +539,7 @@ class _FDTDGradientBridge:
             for name in state_names
         }
 
+        grad_accumulator_backend = _resolve_grad_accumulator_backend(solver.device)
         eps_ex = solver.eps_Ex.detach().clone().requires_grad_(True)
         eps_ey = solver.eps_Ey.detach().clone().requires_grad_(True)
         eps_ez = solver.eps_Ez.detach().clone().requires_grad_(True)
@@ -601,30 +633,30 @@ class _FDTDGradientBridge:
                         profiler=profiler,
                     )
                     profiler.record_reverse_backend(step_result.backend)
-                    grad_eps_ex = grad_eps_ex + step_result.grad_eps_ex
-                    grad_eps_ey = grad_eps_ey + step_result.grad_eps_ey
-                    grad_eps_ez = grad_eps_ez + step_result.grad_eps_ez
+                    grad_eps_ex = _accumulate_grad(grad_accumulator_backend, grad_eps_ex, step_result.grad_eps_ex)
+                    grad_eps_ey = _accumulate_grad(grad_accumulator_backend, grad_eps_ey, step_result.grad_eps_ey)
+                    grad_eps_ez = _accumulate_grad(grad_accumulator_backend, grad_eps_ez, step_result.grad_eps_ez)
                     if nonlinear_enabled:
                         if step_result.grad_chi3_ex is None:
                             raise RuntimeError(
                                 "Nonlinear reverse step did not produce chi3 gradients; "
                                 f"backend {step_result.backend!r} lacks the chi3 channel."
                             )
-                        grad_chi3_ex = grad_chi3_ex + step_result.grad_chi3_ex
-                        grad_chi3_ey = grad_chi3_ey + step_result.grad_chi3_ey
-                        grad_chi3_ez = grad_chi3_ez + step_result.grad_chi3_ez
+                        grad_chi3_ex = _accumulate_grad(grad_accumulator_backend, grad_chi3_ex, step_result.grad_chi3_ex)
+                        grad_chi3_ey = _accumulate_grad(grad_accumulator_backend, grad_chi3_ey, step_result.grad_chi3_ey)
+                        grad_chi3_ez = _accumulate_grad(grad_accumulator_backend, grad_chi3_ez, step_result.grad_chi3_ez)
                     if general_enabled:
                         if step_result.grad_chi2_ex is None:
                             raise RuntimeError(
                                 "General-nonlinear reverse step did not produce chi2 / TPA "
                                 f"gradients; backend {step_result.backend!r} lacks the channels."
                             )
-                        grad_chi2_ex = grad_chi2_ex + step_result.grad_chi2_ex
-                        grad_chi2_ey = grad_chi2_ey + step_result.grad_chi2_ey
-                        grad_chi2_ez = grad_chi2_ez + step_result.grad_chi2_ez
-                        grad_tpa_ex = grad_tpa_ex + step_result.grad_tpa_ex
-                        grad_tpa_ey = grad_tpa_ey + step_result.grad_tpa_ey
-                        grad_tpa_ez = grad_tpa_ez + step_result.grad_tpa_ez
+                        grad_chi2_ex = _accumulate_grad(grad_accumulator_backend, grad_chi2_ex, step_result.grad_chi2_ex)
+                        grad_chi2_ey = _accumulate_grad(grad_accumulator_backend, grad_chi2_ey, step_result.grad_chi2_ey)
+                        grad_chi2_ez = _accumulate_grad(grad_accumulator_backend, grad_chi2_ez, step_result.grad_chi2_ez)
+                        grad_tpa_ex = _accumulate_grad(grad_accumulator_backend, grad_tpa_ex, step_result.grad_tpa_ex)
+                        grad_tpa_ey = _accumulate_grad(grad_accumulator_backend, grad_tpa_ey, step_result.grad_tpa_ey)
+                        grad_tpa_ez = _accumulate_grad(grad_accumulator_backend, grad_tpa_ez, step_result.grad_tpa_ez)
                     adjoint_state = step_result.pre_step_adjoint
 
             with profiler.section("material_pullback"):

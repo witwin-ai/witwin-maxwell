@@ -1019,6 +1019,107 @@ def test_native_adjoint_diff_accumulators_match_torch_dispatcher(monkeypatch, ax
     torch.testing.assert_close(actual_backward, expected_backward, rtol=2.0e-6, atol=2.0e-7)
 
 
+@requires_extension_build
+def test_native_seed_inject_dense_matches_reference():
+    # The dense seed kernel is the transpose of the batched DFT accumulation:
+    # it *accumulates* the weighted frequency reduction into the post-step
+    # adjoint field, so the reference expectation adds onto a nonzero base.
+    ext = get_compiled_extension()
+    torch.manual_seed(211)
+    entries, nx, ny, nz, steps, step = 3, 4, 3, 5, 6, 2
+    grad_real = torch.randn((entries, nx, ny, nz), device="cuda", dtype=torch.float32)
+    grad_imag = torch.randn((entries, nx, ny, nz), device="cuda", dtype=torch.float32)
+    cos_pack = torch.randn((entries, steps), device="cuda", dtype=torch.float32)
+    sin_pack = torch.randn((entries, steps), device="cuda", dtype=torch.float32)
+    base = torch.randn((nx, ny, nz), device="cuda", dtype=torch.float32)
+    cos = cos_pack[:, step].view(entries, 1, 1, 1)
+    sin = sin_pack[:, step].view(entries, 1, 1, 1)
+    expected = base + (grad_real * cos + grad_imag * sin).sum(dim=0)
+    actual = base.clone()
+    ext.seed_inject_dense(actual, grad_real, grad_imag, cos_pack, sin_pack, step)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(actual, expected, rtol=2.0e-6, atol=2.0e-7)
+
+
+@requires_extension_build
+def test_native_seed_inject_point_matches_reference():
+    ext = get_compiled_extension()
+    torch.manual_seed(212)
+    entries, nx, ny, nz, steps, step = 2, 5, 4, 6, 4, 1
+    point_count = 7
+    grad_real = torch.randn((entries, point_count), device="cuda", dtype=torch.float32)
+    grad_imag = torch.randn((entries, point_count), device="cuda", dtype=torch.float32)
+    cos_pack = torch.randn((entries, steps), device="cuda", dtype=torch.float32)
+    sin_pack = torch.randn((entries, steps), device="cuda", dtype=torch.float32)
+    pi = torch.randint(0, nx, (point_count,), device="cuda", dtype=torch.int32)
+    pj = torch.randint(0, ny, (point_count,), device="cuda", dtype=torch.int32)
+    pk = torch.randint(0, nz, (point_count,), device="cuda", dtype=torch.int32)
+    base = torch.randn((nx, ny, nz), device="cuda", dtype=torch.float32)
+    cos = cos_pack[:, step].view(entries, 1)
+    sin = sin_pack[:, step].view(entries, 1)
+    contribution = (grad_real * cos + grad_imag * sin).sum(dim=0)
+    expected = base.clone()
+    expected.index_put_((pi.long(), pj.long(), pk.long()), contribution, accumulate=True)
+    actual = base.clone()
+    ext.seed_inject_point(actual, grad_real, grad_imag, pi, pj, pk, cos_pack, sin_pack, step)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(actual, expected, rtol=2.0e-6, atol=2.0e-7)
+
+
+@requires_extension_build
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_native_seed_inject_plane_matches_reference(axis):
+    ext = get_compiled_extension()
+    torch.manual_seed(213 + axis)
+    entries, nx, ny, nz, steps, step = 3, 4, 5, 6, 4, 2
+    plane_index = 1
+    if axis == 0:
+        h, w = ny, nz
+    elif axis == 1:
+        h, w = nx, nz
+    else:
+        h, w = nx, ny
+    grad_real = torch.randn((entries, h, w), device="cuda", dtype=torch.float32)
+    grad_imag = torch.randn((entries, h, w), device="cuda", dtype=torch.float32)
+    cos_pack = torch.randn((entries, steps), device="cuda", dtype=torch.float32)
+    sin_pack = torch.randn((entries, steps), device="cuda", dtype=torch.float32)
+    base = torch.randn((nx, ny, nz), device="cuda", dtype=torch.float32)
+    cos = cos_pack[:, step].view(entries, 1, 1)
+    sin = sin_pack[:, step].view(entries, 1, 1)
+    contribution = (grad_real * cos + grad_imag * sin).sum(dim=0)
+    expected = base.clone()
+    if axis == 0:
+        expected[plane_index, :, :].add_(contribution)
+    elif axis == 1:
+        expected[:, plane_index, :].add_(contribution)
+    else:
+        expected[:, :, plane_index].add_(contribution)
+    actual = base.clone()
+    ext.seed_inject_plane(actual, grad_real, grad_imag, cos_pack, sin_pack, axis, plane_index, step)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(actual, expected, rtol=2.0e-6, atol=2.0e-7)
+
+
+@requires_extension_build
+def test_native_accumulate_in_place_matches_reference():
+    # The bridge folds each step's material gradient into the running
+    # accumulator with this fused element-wise add, so it must be a bit-exact
+    # ``dst += src`` (no reduction, no reordering).
+    ext = get_compiled_extension()
+    torch.manual_seed(214)
+    dst = torch.randn((4, 3, 5), device="cuda", dtype=torch.float32)
+    src = torch.randn_like(dst)
+    expected = dst + src
+    actual = dst.clone()
+    ext.accumulate_in_place(actual, src)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
 def _cpml_coeffs(length):
     return (
         torch.rand(length, device="cuda", dtype=torch.float32) * 0.2 + 0.7,

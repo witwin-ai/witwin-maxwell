@@ -2956,6 +2956,26 @@ def _accumulate_backward_diff_z(*, FieldGrad, DiffGrad, invDz):
     _accumulate_diff_adjoint(FieldGrad, DiffGrad, 2, invDz, forward=False)
 
 
+def _seed_inject_dense(*, AdjField, GradReal, GradImag, CosPack, SinPack, step):
+    get_compiled_extension().seed_inject_dense(AdjField, GradReal, GradImag, CosPack, SinPack, int(step))
+
+
+def _seed_inject_point(*, AdjField, GradReal, GradImag, PointI, PointJ, PointK, CosPack, SinPack, step):
+    get_compiled_extension().seed_inject_point(
+        AdjField, GradReal, GradImag, PointI, PointJ, PointK, CosPack, SinPack, int(step)
+    )
+
+
+def _seed_inject_plane(*, AdjField, GradReal, GradImag, CosPack, SinPack, axis, planeIndex, step):
+    get_compiled_extension().seed_inject_plane(
+        AdjField, GradReal, GradImag, CosPack, SinPack, int(axis), int(planeIndex), int(step)
+    )
+
+
+def _accumulate_in_place(*, dst, src):
+    get_compiled_extension().accumulate_in_place(dst, src)
+
+
 def _reverse_electric_cpml_ex(
     *,
     AdjExPrev,
@@ -3405,6 +3425,10 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "accumulateBackwardDiffAdjointX3D": _accumulate_backward_diff_x,
     "accumulateBackwardDiffAdjointY3D": _accumulate_backward_diff_y,
     "accumulateBackwardDiffAdjointZ3D": _accumulate_backward_diff_z,
+    "seedInjectDense3D": _seed_inject_dense,
+    "seedInjectPoint3D": _seed_inject_point,
+    "seedInjectPlane3D": _seed_inject_plane,
+    "accumulateInPlace3D": _accumulate_in_place,
     "reverseElectricComponentExCpml3D": _reverse_electric_cpml_ex,
     "reverseElectricComponentEyCpml3D": _reverse_electric_cpml_ey,
     "reverseElectricComponentEzCpml3D": _reverse_electric_cpml_ez,

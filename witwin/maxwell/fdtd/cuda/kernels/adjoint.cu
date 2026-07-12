@@ -1790,6 +1790,159 @@ __global__ void reverse_tfsf_auxiliary_magnetic_kernel(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Seed injection (transpose of the forward DFT / observer accumulation).
+//
+// The forward accumulation at step ``t`` writes
+//   real_accum[e, cell] += field[cell] * cos_pack[e, t]
+//   imag_accum[e, cell] += field[cell] * sin_pack[e, t]
+// so its vector-Jacobian product back onto the field is the weighted frequency
+// reduction
+//   adj_field[cell] += sum_e grad_real[e, cell] * cos_pack[e, t]
+//                          + grad_imag[e, cell] * sin_pack[e, t].
+// ``cos_pack`` / ``sin_pack`` are the per-entry schedule rows (shape ``(E, T)``)
+// already gathered once at seed-build time, so the kernel only reads column
+// ``step`` for the active reverse step. The seed contribution *accumulates* into
+// the (already cloned) post-step adjoint field, matching the Torch reference.
+// ---------------------------------------------------------------------------
+
+__global__ void seed_inject_dense_kernel(
+    int nx,
+    int ny,
+    int nz,
+    int entries,
+    int steps,
+    int step,
+    float* __restrict__ adj_field,
+    const float* __restrict__ grad_real,
+    const float* __restrict__ grad_imag,
+    const float* __restrict__ cos_pack,
+    const float* __restrict__ sin_pack) {
+  const unsigned int k_u = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned int j_u = blockIdx.y * blockDim.y + threadIdx.y;
+  const unsigned int i_u = blockIdx.z * blockDim.z + threadIdx.z;
+  if (static_cast<int>(i_u) >= nx || static_cast<int>(j_u) >= ny || static_cast<int>(k_u) >= nz) {
+    return;
+  }
+  const long long cell = offset3d(i_u, j_u, k_u, static_cast<unsigned int>(ny), static_cast<unsigned int>(nz));
+  const long long plane = static_cast<long long>(nx) * ny * nz;
+  float value = 0.0f;
+  for (int e = 0; e < entries; ++e) {
+    const float weight_cos = cos_pack[e * steps + step];
+    const float weight_sin = sin_pack[e * steps + step];
+    const long long field_index = static_cast<long long>(e) * plane + cell;
+    value += grad_real[field_index] * weight_cos + grad_imag[field_index] * weight_sin;
+  }
+  adj_field[cell] += value;
+}
+
+template <typename IndexT>
+__global__ void seed_inject_point_kernel(
+    int point_count,
+    int entries,
+    int steps,
+    int step,
+    unsigned int ny,
+    unsigned int nz,
+    float* __restrict__ adj_field,
+    const float* __restrict__ grad_real,
+    const float* __restrict__ grad_imag,
+    const IndexT* __restrict__ point_i,
+    const IndexT* __restrict__ point_j,
+    const IndexT* __restrict__ point_k,
+    const float* __restrict__ cos_pack,
+    const float* __restrict__ sin_pack) {
+  const int p = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (p >= point_count) {
+    return;
+  }
+  float value = 0.0f;
+  for (int e = 0; e < entries; ++e) {
+    const float weight_cos = cos_pack[e * steps + step];
+    const float weight_sin = sin_pack[e * steps + step];
+    const long long grad_index = static_cast<long long>(e) * point_count + p;
+    value += grad_real[grad_index] * weight_cos + grad_imag[grad_index] * weight_sin;
+  }
+  const long long cell = offset3d(
+      static_cast<unsigned int>(point_i[p]),
+      static_cast<unsigned int>(point_j[p]),
+      static_cast<unsigned int>(point_k[p]),
+      ny,
+      nz);
+  atomicAdd(&adj_field[cell], value);
+}
+
+template <int Axis>
+__global__ void seed_inject_plane_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    int entries,
+    int steps,
+    int step,
+    int plane_index,
+    float* __restrict__ adj_field,
+    const float* __restrict__ grad_real,
+    const float* __restrict__ grad_imag,
+    const float* __restrict__ cos_pack,
+    const float* __restrict__ sin_pack) {
+  unsigned int i = 0;
+  unsigned int j = 0;
+  unsigned int k = 0;
+  long long plane_linear = 0;
+  long long plane_size = 0;
+  if constexpr (Axis == 0) {
+    k = blockIdx.x * blockDim.x + threadIdx.x;
+    j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (j >= ny || k >= nz) {
+      return;
+    }
+    i = static_cast<unsigned int>(plane_index);
+    plane_linear = static_cast<long long>(j) * nz + k;
+    plane_size = static_cast<long long>(ny) * nz;
+  } else if constexpr (Axis == 1) {
+    k = blockIdx.x * blockDim.x + threadIdx.x;
+    i = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= nx || k >= nz) {
+      return;
+    }
+    j = static_cast<unsigned int>(plane_index);
+    plane_linear = static_cast<long long>(i) * nz + k;
+    plane_size = static_cast<long long>(nx) * nz;
+  } else {
+    j = blockIdx.x * blockDim.x + threadIdx.x;
+    i = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= nx || j >= ny) {
+      return;
+    }
+    k = static_cast<unsigned int>(plane_index);
+    plane_linear = static_cast<long long>(i) * ny + j;
+    plane_size = static_cast<long long>(nx) * ny;
+  }
+  float value = 0.0f;
+  for (int e = 0; e < entries; ++e) {
+    const float weight_cos = cos_pack[e * steps + step];
+    const float weight_sin = sin_pack[e * steps + step];
+    const long long grad_index = static_cast<long long>(e) * plane_size + plane_linear;
+    value += grad_real[grad_index] * weight_cos + grad_imag[grad_index] * weight_sin;
+  }
+  adj_field[offset3d(i, j, k, ny, nz)] += value;
+}
+
+// Fused element-wise accumulate: ``dst[i] += src[i]``. Replaces the per-step
+// full-grid ``aten::add`` the adjoint bridge used to fold each step's material
+// gradient into the running accumulator.
+__global__ void accumulate_in_place_kernel(
+    int64_t total,
+    float* __restrict__ dst,
+    const float* __restrict__ src) {
+  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) {
+    return;
+  }
+  dst[index] += src[index];
+}
+
 }  // namespace
 
 void reverse_magnetic_adjoint_decay_cuda(
@@ -3290,5 +3443,196 @@ void reverse_tfsf_auxiliary_magnetic_cuda(
       adj_magnetic_after.mutable_data_ptr<float>(),
       magnetic_decay.mutable_data_ptr<float>(),
       magnetic_curl.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+namespace {
+
+void check_seed_schedule_pack(
+    const torch::stable::Tensor& pack,
+    int64_t entries,
+    int64_t step,
+    const char* name) {
+  check_float32_tensor(pack, name);
+  check_contiguous_tensor(pack, name);
+  STD_TORCH_CHECK(pack.dim() == 2, name, " must be a contiguous 2D (entry, step) float32 CUDA tensor");
+  STD_TORCH_CHECK(pack.size(0) == entries, name, " entry dimension must match the seed gradient batch");
+  STD_TORCH_CHECK(step >= 0 && step < pack.size(1), name, " step index is out of range");
+}
+
+}  // namespace
+
+void seed_inject_dense_cuda(
+    torch::stable::Tensor adj_field,
+    const torch::stable::Tensor& grad_real,
+    const torch::stable::Tensor& grad_imag,
+    const torch::stable::Tensor& cos_pack,
+    const torch::stable::Tensor& sin_pack,
+    int64_t step) {
+  check_field(adj_field, "adj_field");
+  check_float32_tensor(grad_real, "grad_real");
+  check_contiguous_tensor(grad_real, "grad_real");
+  check_float32_tensor(grad_imag, "grad_imag");
+  check_contiguous_tensor(grad_imag, "grad_imag");
+  STD_TORCH_CHECK(grad_real.dim() == 4, "grad_real must be a contiguous 4D (entry, nx, ny, nz) tensor");
+  STD_TORCH_CHECK(grad_real.sizes().equals(grad_imag.sizes()), "grad_imag must match grad_real shape");
+  STD_TORCH_CHECK(
+      grad_real.size(1) == adj_field.size(0) && grad_real.size(2) == adj_field.size(1) &&
+          grad_real.size(3) == adj_field.size(2),
+      "grad_real spatial dims must match adj_field");
+  check_same_cuda_device(adj_field, grad_real, "grad_real");
+  check_same_cuda_device(adj_field, grad_imag, "grad_imag");
+  const int64_t entries = grad_real.size(0);
+  check_seed_schedule_pack(cos_pack, entries, step, "cos_pack");
+  check_seed_schedule_pack(sin_pack, entries, step, "sin_pack");
+  check_same_cuda_device(adj_field, cos_pack, "cos_pack");
+  check_same_cuda_device(adj_field, sin_pack, "sin_pack");
+  if (entries == 0) {
+    return;
+  }
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_field.get_device_index());
+  const dim3 block = field_block3d();
+  seed_inject_dense_kernel<<<field_grid3d(adj_field.size(0), adj_field.size(1), adj_field.size(2), block), block, 0, current_cuda_stream()>>>(
+      static_cast<int>(adj_field.size(0)),
+      static_cast<int>(adj_field.size(1)),
+      static_cast<int>(adj_field.size(2)),
+      static_cast<int>(entries),
+      static_cast<int>(cos_pack.size(1)),
+      static_cast<int>(step),
+      adj_field.mutable_data_ptr<float>(),
+      grad_real.mutable_data_ptr<float>(),
+      grad_imag.mutable_data_ptr<float>(),
+      cos_pack.mutable_data_ptr<float>(),
+      sin_pack.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void seed_inject_point_cuda(
+    torch::stable::Tensor adj_field,
+    const torch::stable::Tensor& grad_real,
+    const torch::stable::Tensor& grad_imag,
+    const torch::stable::Tensor& point_i,
+    const torch::stable::Tensor& point_j,
+    const torch::stable::Tensor& point_k,
+    const torch::stable::Tensor& cos_pack,
+    const torch::stable::Tensor& sin_pack,
+    int64_t step) {
+  check_field(adj_field, "adj_field");
+  check_float32_tensor(grad_real, "grad_real");
+  check_contiguous_tensor(grad_real, "grad_real");
+  check_float32_tensor(grad_imag, "grad_imag");
+  check_contiguous_tensor(grad_imag, "grad_imag");
+  STD_TORCH_CHECK(grad_real.dim() == 2, "grad_real must be a contiguous 2D (entry, point) tensor");
+  STD_TORCH_CHECK(grad_real.sizes().equals(grad_imag.sizes()), "grad_imag must match grad_real shape");
+  const int64_t entries = grad_real.size(0);
+  const int64_t point_count = grad_real.size(1);
+  check_int32_vector(point_i, "point_i");
+  check_int32_vector(point_j, "point_j");
+  check_int32_vector(point_k, "point_k");
+  STD_TORCH_CHECK(point_i.size(0) == point_count, "point_i length must match the point gradient batch");
+  STD_TORCH_CHECK(point_j.size(0) == point_count, "point_j length must match the point gradient batch");
+  STD_TORCH_CHECK(point_k.size(0) == point_count, "point_k length must match the point gradient batch");
+  check_same_cuda_device(adj_field, grad_real, "grad_real");
+  check_same_cuda_device(adj_field, point_i, "point_i");
+  check_seed_schedule_pack(cos_pack, entries, step, "cos_pack");
+  check_seed_schedule_pack(sin_pack, entries, step, "sin_pack");
+  check_same_cuda_device(adj_field, cos_pack, "cos_pack");
+  if (entries == 0 || point_count == 0) {
+    return;
+  }
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_field.get_device_index());
+  const int block_size = 256;
+  seed_inject_point_kernel<int><<<linear_grid(point_count, block_size), block_size, 0, current_cuda_stream()>>>(
+      static_cast<int>(point_count),
+      static_cast<int>(entries),
+      static_cast<int>(cos_pack.size(1)),
+      static_cast<int>(step),
+      static_cast<unsigned int>(adj_field.size(1)),
+      static_cast<unsigned int>(adj_field.size(2)),
+      adj_field.mutable_data_ptr<float>(),
+      grad_real.mutable_data_ptr<float>(),
+      grad_imag.mutable_data_ptr<float>(),
+      point_i.mutable_data_ptr<int>(),
+      point_j.mutable_data_ptr<int>(),
+      point_k.mutable_data_ptr<int>(),
+      cos_pack.mutable_data_ptr<float>(),
+      sin_pack.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void seed_inject_plane_cuda(
+    torch::stable::Tensor adj_field,
+    const torch::stable::Tensor& grad_real,
+    const torch::stable::Tensor& grad_imag,
+    const torch::stable::Tensor& cos_pack,
+    const torch::stable::Tensor& sin_pack,
+    int64_t axis,
+    int64_t plane_index,
+    int64_t step) {
+  check_field(adj_field, "adj_field");
+  check_float32_tensor(grad_real, "grad_real");
+  check_contiguous_tensor(grad_real, "grad_real");
+  check_float32_tensor(grad_imag, "grad_imag");
+  check_contiguous_tensor(grad_imag, "grad_imag");
+  STD_TORCH_CHECK(grad_real.dim() == 3, "grad_real must be a contiguous 3D (entry, plane_h, plane_w) tensor");
+  STD_TORCH_CHECK(grad_real.sizes().equals(grad_imag.sizes()), "grad_imag must match grad_real shape");
+  STD_TORCH_CHECK(axis >= 0 && axis <= 2, "axis must be 0, 1, or 2");
+  STD_TORCH_CHECK(plane_index >= 0 && plane_index < adj_field.size(axis), "plane_index is out of range");
+  const int64_t entries = grad_real.size(0);
+  const int64_t plane_h = axis == 0 ? adj_field.size(1) : adj_field.size(0);
+  const int64_t plane_w = axis == 2 ? adj_field.size(1) : adj_field.size(2);
+  STD_TORCH_CHECK(grad_real.size(1) == plane_h && grad_real.size(2) == plane_w, "grad_real plane dims must match the selected plane");
+  check_same_cuda_device(adj_field, grad_real, "grad_real");
+  check_seed_schedule_pack(cos_pack, entries, step, "cos_pack");
+  check_seed_schedule_pack(sin_pack, entries, step, "sin_pack");
+  check_same_cuda_device(adj_field, cos_pack, "cos_pack");
+  if (entries == 0) {
+    return;
+  }
+  const torch::stable::accelerator::DeviceGuard device_guard(adj_field.get_device_index());
+  const auto nx = static_cast<unsigned int>(adj_field.size(0));
+  const auto ny = static_cast<unsigned int>(adj_field.size(1));
+  const auto nz = static_cast<unsigned int>(adj_field.size(2));
+  const dim3 block(64, 4, 1);
+  const unsigned int dim_x = axis == 2 ? ny : nz;
+  const unsigned int dim_y = axis == 0 ? ny : nx;
+  const dim3 grid((dim_x + block.x - 1) / block.x, (dim_y + block.y - 1) / block.y, 1);
+  const int steps = static_cast<int>(cos_pack.size(1));
+  const int e = static_cast<int>(entries);
+  const int plane = static_cast<int>(plane_index);
+  const int st = static_cast<int>(step);
+  float* adj_ptr = adj_field.mutable_data_ptr<float>();
+  const float* gr = grad_real.mutable_data_ptr<float>();
+  const float* gi = grad_imag.mutable_data_ptr<float>();
+  const float* cp = cos_pack.mutable_data_ptr<float>();
+  const float* sp = sin_pack.mutable_data_ptr<float>();
+  if (axis == 0) {
+    seed_inject_plane_kernel<0><<<grid, block, 0, current_cuda_stream()>>>(nx, ny, nz, e, steps, st, plane, adj_ptr, gr, gi, cp, sp);
+  } else if (axis == 1) {
+    seed_inject_plane_kernel<1><<<grid, block, 0, current_cuda_stream()>>>(nx, ny, nz, e, steps, st, plane, adj_ptr, gr, gi, cp, sp);
+  } else {
+    seed_inject_plane_kernel<2><<<grid, block, 0, current_cuda_stream()>>>(nx, ny, nz, e, steps, st, plane, adj_ptr, gr, gi, cp, sp);
+  }
+  WITWIN_CUDA_CHECK();
+}
+
+void accumulate_in_place_cuda(
+    torch::stable::Tensor dst,
+    const torch::stable::Tensor& src) {
+  check_float32_tensor(dst, "dst");
+  check_contiguous_tensor(dst, "dst");
+  check_float32_tensor(src, "src");
+  check_contiguous_tensor(src, "src");
+  check_same_cuda_device(dst, src, "src");
+  STD_TORCH_CHECK(dst.numel() == src.numel(), "src must match dst element count");
+  const torch::stable::accelerator::DeviceGuard device_guard(dst.get_device_index());
+  const int64_t total = dst.numel();
+  if (total == 0) {
+    return;
+  }
+  accumulate_in_place_kernel<<<linear_grid(total, 512), 512, 0, current_cuda_stream()>>>(
+      total,
+      dst.mutable_data_ptr<float>(),
+      src.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }

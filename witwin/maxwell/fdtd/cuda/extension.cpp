@@ -1219,6 +1219,35 @@ void accumulate_backward_diff_adjoint_cuda(
     const torch::stable::Tensor& diff_grad,
     int64_t axis,
     const torch::stable::Tensor& inv_delta);
+void seed_inject_dense_cuda(
+    torch::stable::Tensor adj_field,
+    const torch::stable::Tensor& grad_real,
+    const torch::stable::Tensor& grad_imag,
+    const torch::stable::Tensor& cos_pack,
+    const torch::stable::Tensor& sin_pack,
+    int64_t step);
+void seed_inject_point_cuda(
+    torch::stable::Tensor adj_field,
+    const torch::stable::Tensor& grad_real,
+    const torch::stable::Tensor& grad_imag,
+    const torch::stable::Tensor& point_i,
+    const torch::stable::Tensor& point_j,
+    const torch::stable::Tensor& point_k,
+    const torch::stable::Tensor& cos_pack,
+    const torch::stable::Tensor& sin_pack,
+    int64_t step);
+void seed_inject_plane_cuda(
+    torch::stable::Tensor adj_field,
+    const torch::stable::Tensor& grad_real,
+    const torch::stable::Tensor& grad_imag,
+    const torch::stable::Tensor& cos_pack,
+    const torch::stable::Tensor& sin_pack,
+    int64_t axis,
+    int64_t plane_index,
+    int64_t step);
+void accumulate_in_place_cuda(
+    torch::stable::Tensor dst,
+    const torch::stable::Tensor& src);
 void reverse_electric_component_ex_cpml_cuda(
     torch::stable::Tensor adj_prev,
     torch::stable::Tensor grad_eps,
@@ -1689,6 +1718,10 @@ STABLE_TORCH_LIBRARY(witwin_maxwell_fdtd_cuda, m) {
   m.def("reverse_magnetic_adjoint_to_ez_bloch(Tensor(a!) adj_ez_prev_real, Tensor(b!) adj_ez_prev_imag, Tensor(c!) grad_eps_ez, Tensor adj_ez_post_real, Tensor adj_ez_post_imag, Tensor adj_hx_mid_real, Tensor adj_hx_mid_imag, Tensor adj_hy_mid_real, Tensor adj_hy_mid_imag, Tensor ez_decay, Tensor ez_curl, Tensor eps_ez, Tensor hx_mid_real, Tensor hx_mid_imag, Tensor hy_mid_real, Tensor hy_mid_imag, Tensor hx_curl, Tensor hy_curl, float phase_cos_x, float phase_sin_x, float phase_cos_y, float phase_sin_y, Tensor inv_dx_e, Tensor inv_dy_e, Tensor inv_dx_h, Tensor inv_dy_h) -> ()");
   m.def("accumulate_forward_diff_adjoint(Tensor(a!) field_grad, Tensor diff_grad, int axis, Tensor inv_delta) -> ()");
   m.def("accumulate_backward_diff_adjoint(Tensor(a!) field_grad, Tensor diff_grad, int axis, Tensor inv_delta) -> ()");
+  m.def("seed_inject_dense(Tensor(a!) adj_field, Tensor grad_real, Tensor grad_imag, Tensor cos_pack, Tensor sin_pack, int step) -> ()");
+  m.def("seed_inject_point(Tensor(a!) adj_field, Tensor grad_real, Tensor grad_imag, Tensor point_i, Tensor point_j, Tensor point_k, Tensor cos_pack, Tensor sin_pack, int step) -> ()");
+  m.def("seed_inject_plane(Tensor(a!) adj_field, Tensor grad_real, Tensor grad_imag, Tensor cos_pack, Tensor sin_pack, int axis, int plane_index, int step) -> ()");
+  m.def("accumulate_in_place(Tensor(a!) dst, Tensor src) -> ()");
   m.def("reverse_electric_component_ex_cpml(Tensor(a!) adj_prev, Tensor(b!) grad_eps, Tensor(c!) adj_psi_pos_prev, Tensor(d!) adj_psi_neg_prev, Tensor(e!) adj_d_pos, Tensor(f!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor curl, Tensor eps, Tensor psi_pos, Tensor psi_neg, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg, Tensor hy_mid, Tensor hz_mid, Tensor inv_dy, Tensor inv_dz, int y_low_mode, int y_high_mode, int z_low_mode, int z_high_mode) -> ()");
   m.def("reverse_electric_component_ey_cpml(Tensor(a!) adj_prev, Tensor(b!) grad_eps, Tensor(c!) adj_psi_pos_prev, Tensor(d!) adj_psi_neg_prev, Tensor(e!) adj_d_pos, Tensor(f!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor curl, Tensor eps, Tensor psi_pos, Tensor psi_neg, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg, Tensor hx_mid, Tensor hz_mid, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode) -> ()");
   m.def("reverse_electric_component_ez_cpml(Tensor(a!) adj_prev, Tensor(b!) grad_eps, Tensor(c!) adj_psi_pos_prev, Tensor(d!) adj_psi_neg_prev, Tensor(e!) adj_d_pos, Tensor(f!) adj_d_neg, Tensor adj_post, Tensor adj_psi_pos_post, Tensor adj_psi_neg_post, Tensor decay, Tensor curl, Tensor eps, Tensor psi_pos, Tensor psi_neg, Tensor b_pos, Tensor c_pos, Tensor inv_kappa_pos, Tensor b_neg, Tensor c_neg, Tensor inv_kappa_neg, Tensor hx_mid, Tensor hy_mid, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode) -> ()");
@@ -1801,6 +1834,10 @@ STABLE_TORCH_LIBRARY_IMPL(witwin_maxwell_fdtd_cuda, CUDA, m) {
   m.impl("reverse_magnetic_adjoint_to_ez_bloch", TORCH_BOX(&reverse_magnetic_adjoint_to_ez_bloch_cuda));
   m.impl("accumulate_forward_diff_adjoint", TORCH_BOX(&accumulate_forward_diff_adjoint_cuda));
   m.impl("accumulate_backward_diff_adjoint", TORCH_BOX(&accumulate_backward_diff_adjoint_cuda));
+  m.impl("seed_inject_dense", TORCH_BOX(&seed_inject_dense_cuda));
+  m.impl("seed_inject_point", TORCH_BOX(&seed_inject_point_cuda));
+  m.impl("seed_inject_plane", TORCH_BOX(&seed_inject_plane_cuda));
+  m.impl("accumulate_in_place", TORCH_BOX(&accumulate_in_place_cuda));
   m.impl("reverse_electric_component_ex_cpml", TORCH_BOX(&reverse_electric_component_ex_cpml_cuda));
   m.impl("reverse_electric_component_ey_cpml", TORCH_BOX(&reverse_electric_component_ey_cpml_cuda));
   m.impl("reverse_electric_component_ez_cpml", TORCH_BOX(&reverse_electric_component_ez_cpml_cuda));

@@ -2713,6 +2713,48 @@ def _accumulate_backward_diff_z(*, FieldGrad, DiffGrad, invDz):
     _accumulate_diff_adjoint(FieldGrad, DiffGrad, 2, invDz, forward=False)
 
 
+def _seed_batch_contribution(grad_real, grad_imag, cos_pack, sin_pack, step):
+    entries = grad_real.shape[0]
+    view = (entries,) + (1,) * (grad_real.dim() - 1)
+    cos = cos_pack[:, int(step)].reshape(view)
+    sin = sin_pack[:, int(step)].reshape(view)
+    return (grad_real * cos + grad_imag * sin).sum(dim=0)
+
+
+def _seed_inject_dense(*, AdjField, GradReal, GradImag, CosPack, SinPack, step):
+    if GradReal.shape[0] == 0:
+        return
+    AdjField.add_(_seed_batch_contribution(GradReal, GradImag, CosPack, SinPack, step))
+
+
+def _seed_inject_point(*, AdjField, GradReal, GradImag, PointI, PointJ, PointK, CosPack, SinPack, step):
+    if GradReal.shape[0] == 0 or GradReal.shape[1] == 0:
+        return
+    contribution = _seed_batch_contribution(GradReal, GradImag, CosPack, SinPack, step)
+    AdjField.index_put_(
+        (PointI.to(torch.long), PointJ.to(torch.long), PointK.to(torch.long)),
+        contribution,
+        accumulate=True,
+    )
+
+
+def _seed_inject_plane(*, AdjField, GradReal, GradImag, CosPack, SinPack, axis, planeIndex, step):
+    if GradReal.shape[0] == 0:
+        return
+    contribution = _seed_batch_contribution(GradReal, GradImag, CosPack, SinPack, step)
+    plane = int(planeIndex)
+    if int(axis) == 0:
+        AdjField[plane, :, :].add_(contribution)
+    elif int(axis) == 1:
+        AdjField[:, plane, :].add_(contribution)
+    else:
+        AdjField[:, :, plane].add_(contribution)
+
+
+def _accumulate_in_place(*, dst, src):
+    dst.view(-1).add_(src.reshape(-1))
+
+
 def _reverse_electric_cpml_torch(
     component,
     adj_prev,
@@ -3243,6 +3285,10 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "accumulateBackwardDiffAdjointX3D": _accumulate_backward_diff_x,
     "accumulateBackwardDiffAdjointY3D": _accumulate_backward_diff_y,
     "accumulateBackwardDiffAdjointZ3D": _accumulate_backward_diff_z,
+    "seedInjectDense3D": _seed_inject_dense,
+    "seedInjectPoint3D": _seed_inject_point,
+    "seedInjectPlane3D": _seed_inject_plane,
+    "accumulateInPlace3D": _accumulate_in_place,
     "reverseElectricComponentExCpml3D": _reverse_electric_cpml_ex,
     "reverseElectricComponentEyCpml3D": _reverse_electric_cpml_ey,
     "reverseElectricComponentEzCpml3D": _reverse_electric_cpml_ez,

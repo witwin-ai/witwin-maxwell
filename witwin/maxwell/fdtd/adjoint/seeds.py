@@ -57,6 +57,8 @@ class _DenseSeedBatch:
     entry_indices: torch.Tensor
     grad_real: torch.Tensor
     grad_imag: torch.Tensor
+    cos_pack: torch.Tensor
+    sin_pack: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,11 @@ class _PointSeedBatch:
     point_k: torch.Tensor
     grad_real: torch.Tensor
     grad_imag: torch.Tensor
+    cos_pack: torch.Tensor
+    sin_pack: torch.Tensor
+    point_i32: torch.Tensor
+    point_j32: torch.Tensor
+    point_k32: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -78,6 +85,8 @@ class _PlaneSeedBatch:
     entry_indices: torch.Tensor
     grad_real: torch.Tensor
     grad_imag: torch.Tensor
+    cos_pack: torch.Tensor
+    sin_pack: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -349,12 +358,15 @@ def _build_output_seeds(
     dense_batches = []
     for state_field_name, records in dense_seed_records.items():
         entry_indices, grad_real, grad_imag = _stack_dense_seed_records(records)
+        cos_pack, sin_pack = _schedule_pack_for(dft_schedule, entry_indices)
         dense_batches.append(
             _DenseSeedBatch(
                 state_field_name=state_field_name,
                 entry_indices=entry_indices,
                 grad_real=grad_real,
                 grad_imag=grad_imag,
+                cos_pack=cos_pack,
+                sin_pack=sin_pack,
             )
         )
 
@@ -369,15 +381,25 @@ def _build_output_seeds(
             runtime._safe_grad(leaf_grads[pair.imag_index], leaves[pair.imag_index]),
             entry_count,
         )
+        entry_indices = torch.tensor(pair.global_indices, device=real_grad.device, dtype=torch.long)
+        cos_pack, sin_pack = _schedule_pack_for(observer_schedule, entry_indices)
+        point_i = pair.point_i.to(device=real_grad.device, dtype=torch.long)
+        point_j = pair.point_j.to(device=real_grad.device, dtype=torch.long)
+        point_k = pair.point_k.to(device=real_grad.device, dtype=torch.long)
         point_batches.append(
             _PointSeedBatch(
                 state_field_name=pair.state_field_name,
-                entry_indices=torch.tensor(pair.global_indices, device=real_grad.device, dtype=torch.long),
-                point_i=pair.point_i.to(device=real_grad.device, dtype=torch.long),
-                point_j=pair.point_j.to(device=real_grad.device, dtype=torch.long),
-                point_k=pair.point_k.to(device=real_grad.device, dtype=torch.long),
+                entry_indices=entry_indices,
+                point_i=point_i,
+                point_j=point_j,
+                point_k=point_k,
                 grad_real=real_grad,
                 grad_imag=imag_grad,
+                cos_pack=cos_pack,
+                sin_pack=sin_pack,
+                point_i32=point_i.to(dtype=torch.int32),
+                point_j32=point_j.to(dtype=torch.int32),
+                point_k32=point_k.to(dtype=torch.int32),
             )
         )
 
@@ -392,14 +414,18 @@ def _build_output_seeds(
             runtime._safe_grad(leaf_grads[pair.imag_index], leaves[pair.imag_index]),
             entry_count,
         )
+        entry_indices = torch.tensor(pair.global_indices, device=real_grad.device, dtype=torch.long)
+        cos_pack, sin_pack = _schedule_pack_for(observer_schedule, entry_indices)
         plane_batches.append(
             _PlaneSeedBatch(
                 state_field_name=pair.state_field_name,
                 axis_code=pair.axis_code,
                 plane_index=pair.plane_index,
-                entry_indices=torch.tensor(pair.global_indices, device=real_grad.device, dtype=torch.long),
+                entry_indices=entry_indices,
                 grad_real=real_grad,
                 grad_imag=imag_grad,
+                cos_pack=cos_pack,
+                sin_pack=sin_pack,
             )
         )
 
@@ -410,6 +436,25 @@ def _build_output_seeds(
         point_batches=tuple(point_batches),
         plane_batches=tuple(plane_batches),
     )
+
+
+def _schedule_pack_for(
+    schedule: _ScheduleTensorPack, entry_indices: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather the per-entry schedule rows ``(E, T)`` for a seed batch once.
+
+    The native seed-injection kernels read column ``step`` of these packs per
+    reverse step, so the (small) per-entry ``index_select`` runs once at seed
+    build instead of every step. Degenerate empty schedules collapse to an
+    ``(E, 0)`` pack so the native apply skips the batch (zero contribution),
+    matching the Torch reference's empty-weight guard.
+    """
+    if entry_indices.numel() == 0 or schedule.cos.numel() == 0:
+        empty = torch.zeros((int(entry_indices.numel()), 0), device=entry_indices.device, dtype=schedule.cos.dtype)
+        return empty, empty
+    cos = schedule.cos.index_select(0, entry_indices).contiguous()
+    sin = schedule.sin.index_select(0, entry_indices).contiguous()
+    return cos, sin
 
 
 def _gather_step_weights(schedule: _ScheduleTensorPack, entry_indices: torch.Tensor, step_index: int):
@@ -473,7 +518,78 @@ def _apply_plane_seeds(adj_state, seed_runtime: _SeedRuntime, step_index):
             field[:, :, batch.plane_index].add_(contribution)
 
 
+def _apply_dense_seeds_native(_cuda_backend, adj_state, seed_runtime: _SeedRuntime, step_index):
+    for batch in seed_runtime.dense_batches:
+        if batch.cos_pack.shape[1] == 0:
+            continue
+        _cuda_backend._seed_inject_dense(
+            AdjField=adj_state[batch.state_field_name],
+            GradReal=batch.grad_real,
+            GradImag=batch.grad_imag,
+            CosPack=batch.cos_pack,
+            SinPack=batch.sin_pack,
+            step=step_index,
+        )
+
+
+def _apply_point_seeds_native(_cuda_backend, adj_state, seed_runtime: _SeedRuntime, step_index):
+    for batch in seed_runtime.point_batches:
+        if batch.cos_pack.shape[1] == 0:
+            continue
+        _cuda_backend._seed_inject_point(
+            AdjField=adj_state[batch.state_field_name],
+            GradReal=batch.grad_real,
+            GradImag=batch.grad_imag,
+            PointI=batch.point_i32,
+            PointJ=batch.point_j32,
+            PointK=batch.point_k32,
+            CosPack=batch.cos_pack,
+            SinPack=batch.sin_pack,
+            step=step_index,
+        )
+
+
+def _apply_plane_seeds_native(_cuda_backend, adj_state, seed_runtime: _SeedRuntime, step_index):
+    for batch in seed_runtime.plane_batches:
+        if batch.cos_pack.shape[1] == 0:
+            continue
+        _cuda_backend._seed_inject_plane(
+            AdjField=adj_state[batch.state_field_name],
+            GradReal=batch.grad_real,
+            GradImag=batch.grad_imag,
+            CosPack=batch.cos_pack,
+            SinPack=batch.sin_pack,
+            axis=batch.axis_code,
+            planeIndex=batch.plane_index,
+            step=step_index,
+        )
+
+
+def _seed_runtime_native_backend(adj_state):
+    """Return the CUDA backend module when native seed injection can run.
+
+    Native seed injection mirrors the reverse-step native gate: it applies only
+    when the adjoint state lives on CUDA and the compiled extension is loaded.
+    Otherwise the Torch reference seed math runs (the same math the parity tests
+    pin the native kernels against).
+    """
+    reference = next(iter(adj_state.values()), None)
+    if reference is None or not reference.is_cuda:
+        return None
+    from ..cuda import backend as _cuda_backend
+
+    if not _cuda_backend.is_available():
+        return None
+    return _cuda_backend
+
+
 def _apply_seed_runtime(adj_state, seed_runtime: _SeedRuntime, step_index):
+    cuda_backend = _seed_runtime_native_backend(adj_state)
+    if cuda_backend is not None:
+        _apply_dense_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
+        _apply_point_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
+        _apply_plane_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
+        return
     _apply_dense_seeds(adj_state, seed_runtime, step_index)
     _apply_point_seeds(adj_state, seed_runtime, step_index)
     _apply_plane_seeds(adj_state, seed_runtime, step_index)
