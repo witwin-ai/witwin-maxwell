@@ -52,17 +52,21 @@ def iter_cpml_memory_regions(solver, attr_name):
 
 
 def cpml_layout_params(solver, attr_name):
+    cached = solver._cpml_layout_cache.get(attr_name)
+    if cached is not None:
+        return cached
     layout = getattr(solver, "_cpml_memory_layouts", {}).get(attr_name)
     if layout is None:
         result = (0, 0, 0)
-        solver._cpml_layout_cache[attr_name] = result
-        return result
-    low = next((region for region in layout["regions"] if region["side"] == "low"), None)
-    high = next((region for region in layout["regions"] if region["side"] == "high"), None)
-    low_length = 0 if low is None else int(low["length"])
-    high_start = 0 if high is None else int(high["global_start"])
-    high_length = 0 if high is None else int(high["length"])
-    return low_length, high_start, high_length
+    else:
+        low = next((region for region in layout["regions"] if region["side"] == "low"), None)
+        high = next((region for region in layout["regions"] if region["side"] == "high"), None)
+        low_length = 0 if low is None else int(low["length"])
+        high_start = 0 if high is None else int(high["global_start"])
+        high_length = 0 if high is None else int(high["length"])
+        result = (low_length, high_start, high_length)
+    solver._cpml_layout_cache[attr_name] = result
+    return result
 
 
 def _cpml_memory_attr(attr_name, *, imag=False):
