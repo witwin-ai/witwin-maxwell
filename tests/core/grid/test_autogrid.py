@@ -464,46 +464,39 @@ def test_uniformize_boundary_band_preserves_hard_faces():
 
 
 def test_autogrid_uniform_cells_under_pml_faces():
-    """The absorber sees a constant-step band: the outermost ``num_layers`` cells
-    under every PML face are uniform between hard faces, even when a nearby
-    structure would let a graded ramp intrude into the absorber. Uniformization
-    must not undo face snapping or the high-index target inside the band."""
+    """External PML copies the physical auto-grid edge step on every face."""
     NL = 8
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
         grid=mw.GridSpec.auto(min_steps_per_wavelength=_MSW, wavelength=_WAVELENGTH),
         boundary=mw.BoundarySpec.pml(num_layers=NL), device="cpu",
     )
-    # High-index block hugging the high-z edge; its high-z face (0.45) lands
-    # inside the absorber band, its x/y faces are interior.
+    # High-index block hugging the physical high-z edge; its face remains part of
+    # the physical auto mesh while PML is appended beyond z=0.5.
     scene.add_structure(mw.Structure(
         geometry=mw.Box(position=(0.0, 0.0, 0.32), size=(0.2, 0.2, 0.26)),
         material=mw.Material(eps_r=12.0),
     ))
     prepared = prepare_scene(scene)
-    # No face inside the x/y bands -> fully uniform absorber bands.
+    # Every external absorber band is uniform at the adjacent physical edge step.
     for nodes in (prepared.x_nodes64, prepared.y_nodes64):
         dl = np.diff(nodes)
         assert np.allclose(dl[:NL], dl[0])      # low absorber band uniform
         assert np.allclose(dl[-NL:], dl[-1])    # high absorber band uniform
-    # The z face at 0.45 stays snapped and splits the high band in two
-    # uniform segments; the high-index cells keep honoring their target.
+    # The z face at 0.45 stays snapped in the physical mesh and the high-index
+    # cells keep honoring their target independently of the external PML.
     z = prepared.z_nodes64
     dz = np.diff(z)
     assert np.allclose(dz[:NL], dz[0])
     face = int(np.argmin(np.abs(z - 0.45)))
     assert abs(z[face] - 0.45) <= 1e-7          # float32 AABB rounding only
-    assert z.size - 1 - NL < face < z.size - 1  # face is inside the band
-    assert np.allclose(dz[-NL:face], dz[-NL])   # uniform below the face
-    assert np.allclose(dz[face:], dz[-1])       # uniform above the face
+    assert NL < face < z.size - 1 - NL
+    assert np.allclose(dz[-NL:], dz[-1])
     fine_dl = _WAVELENGTH / (np.sqrt(12.0) * _MSW)
     inside = (z[:-1] >= 0.19 - 1e-7) & (z[1:] <= 0.45 + 1e-7)
     assert dz[inside].max() <= fine_dl * _TOL
-    # The band is genuinely reshaped: without uniformization the mesh is not
-    # uniform in the high-z absorber, so the assertions above exercise the fix.
-    raw = mesh_axis(-0.5, 0.5, wavelength=_WAVELENGTH, min_steps_per_wavelength=_MSW,
-                    max_ratio=_RATIO, index_regions=[(0.19, 0.45, 12.0 ** 0.5)])
-    assert not np.allclose(np.diff(raw)[-NL:], np.diff(raw)[-1])
+    physical_high_step = dz[-NL - 1]
+    np.testing.assert_allclose(dz[-NL:], physical_high_step)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")

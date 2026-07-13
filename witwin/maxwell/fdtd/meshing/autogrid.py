@@ -327,10 +327,9 @@ def resolve_auto_grid(scene):
                 for lo, hi, dl in override_regions
             ],
             layer_min_cells=layer_min_cells,
-            pml_cells=(
-                scene.pml_thickness_for_face(axis, "low"),
-                scene.pml_thickness_for_face(axis, "high"),
-            ),
+            # Domain is physical. PreparedScene appends the PML cells outside
+            # these nodes, so the physical auto mesh has no internal PML band.
+            pml_cells=(0, 0),
         )
         nodes.append(axis_nodes)
     return tuple(nodes)

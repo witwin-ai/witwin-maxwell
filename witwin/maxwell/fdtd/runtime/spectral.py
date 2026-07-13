@@ -187,10 +187,11 @@ def compute_spectral_start_step(solver, frequency, *, window_type=None):
         return 0
 
     period = 1.0 / frequency
+    domain_range = getattr(solver.scene, "physical_domain_range", solver.scene.domain_range)
     domain_size = max(
-        solver.scene.domain_range[1] - solver.scene.domain_range[0],
-        solver.scene.domain_range[3] - solver.scene.domain_range[2],
-        solver.scene.domain_range[5] - solver.scene.domain_range[4],
+        domain_range[1] - domain_range[0],
+        domain_range[3] - domain_range[2],
+        domain_range[5] - domain_range[4],
     )
     propagation_time = 2 * domain_size / solver.c
     transient_time = max(15 * period, propagation_time * 5)

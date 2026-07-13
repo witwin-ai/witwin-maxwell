@@ -131,6 +131,6 @@ def test_validation_coverage_markdown_lists_every_capability():
     assert "## Validation coverage" in lines
     for key in MEDIA_VALIDATION:
         assert f"`{key}`" in lines
-    # The plane-wave normalization staleness must be recorded, not fabricated.
+    # Group 1 is current, while the untouched downstream groups remain stale.
     assert "STALE" in lines
-    assert "02e25d3" in lines
+    assert "Group 1" in lines

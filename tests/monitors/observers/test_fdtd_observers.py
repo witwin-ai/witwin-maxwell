@@ -121,10 +121,10 @@ def _manual_flux(monitor):
     wy = np.empty_like(y)
     dx = np.diff(x)
     dy = np.diff(y)
-    wx[0] = dx[0] / 2.0
-    wx[-1] = dx[-1] / 2.0
-    wy[0] = dy[0] / 2.0
-    wy[-1] = dy[-1] / 2.0
+    wx[0] = dx[0]
+    wx[-1] = dx[-1]
+    wy[0] = dy[0]
+    wy[-1] = dy[-1]
     if x.size > 2:
         wx[1:-1] = (dx[:-1] + dx[1:]) / 2.0
     if y.size > 2:
@@ -420,9 +420,11 @@ def test_fdtd_odd_grid_dimensions_cover_tail_cells():
     ).run()
     prepared_scene = result.prepared_scene
 
-    assert prepared_scene.Nx == 13
-    assert prepared_scene.Ny == 11
-    assert prepared_scene.Nz == 9
+    # The odd physical counts (13, 11, 9) remain intact and four PML cells are
+    # appended outside each face.
+    assert prepared_scene.Nx == 21
+    assert prepared_scene.Ny == 19
+    assert prepared_scene.Nz == 17
     assert result.tensor("Ex").shape == (prepared_scene.Nx - 1, prepared_scene.Ny, prepared_scene.Nz)
     assert result.tensor("Ey").shape == (prepared_scene.Nx, prepared_scene.Ny - 1, prepared_scene.Nz)
     assert result.tensor("Ez").shape == (prepared_scene.Nx, prepared_scene.Ny, prepared_scene.Nz - 1)

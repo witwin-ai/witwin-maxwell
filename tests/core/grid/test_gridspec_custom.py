@@ -95,7 +95,7 @@ def test_domain_extent_mismatch_raises():
         prepare_scene(scene)
 
 
-def test_prepared_scene_uniform_masters_match_old_arange_behavior():
+def test_prepared_scene_uniform_masters_fill_domain_with_tidy3d_spacing_semantics():
     dl = 0.01
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.64, 0.64), (-0.64, 0.64), (-0.64, 0.64))),
@@ -108,10 +108,11 @@ def test_prepared_scene_uniform_masters_match_old_arange_behavior():
     assert prepared.Nx == old_count
     assert len(prepared.x_nodes64) == old_count
 
-    expected_nodes = -0.64 + np.arange(old_count, dtype=np.float64) * dl
+    expected_nodes = np.linspace(-0.64, 0.64, old_count, endpoint=False, dtype=np.float64)
+    effective_dl = 1.28 / old_count
     np.testing.assert_array_equal(prepared.x_nodes64, expected_nodes)
-    np.testing.assert_allclose(prepared.dx_primal64, dl, rtol=1e-12)
-    np.testing.assert_allclose(prepared.dx_dual64, dl, rtol=1e-12)
+    np.testing.assert_allclose(prepared.dx_primal64, effective_dl, rtol=1e-12)
+    np.testing.assert_allclose(prepared.dx_dual64, effective_dl, rtol=1e-12)
     np.testing.assert_array_equal(
         prepared.x_half64, prepared.x_nodes64[:-1] + 0.5 * prepared.dx_primal64
     )
@@ -119,6 +120,49 @@ def test_prepared_scene_uniform_masters_match_old_arange_behavior():
     assert prepared.x.dtype == torch.float32
     np.testing.assert_allclose(prepared.x.cpu().numpy(), expected_nodes, atol=1e-7)
     np.testing.assert_allclose(prepared.x_half.cpu().numpy(), prepared.x_half64, atol=1e-7)
+
+
+def test_uniform_grid_treats_requested_dl_as_maximum_step():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((0.0, 1.0),) * 3),
+        grid=mw.GridSpec.uniform(0.3),
+        device="cpu",
+    )
+
+    prepared = prepare_scene(scene)
+
+    assert prepared.Nx == 4
+    np.testing.assert_allclose(prepared.x_nodes64, (0.0, 0.25, 0.5, 0.75))
+    np.testing.assert_allclose(prepared.dx_primal64, 0.25)
+
+
+def test_prepared_scene_appends_uniform_pml_outside_domain():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
+        grid=mw.GridSpec.uniform(0.1),
+        boundary=mw.BoundarySpec.pml(num_layers=2),
+        device="cpu",
+    )
+
+    prepared = prepare_scene(scene)
+
+    assert prepared.Nx == 14
+    np.testing.assert_allclose(prepared.x_nodes64[:3], (-0.7, -0.6, -0.5))
+    np.testing.assert_allclose(prepared.x_nodes64[-3:], (0.4, 0.5, 0.6))
+    assert prepared.physical_domain_range == pytest.approx((-0.5, 0.5) * 3)
+    assert prepared.domain_range == pytest.approx((-0.7, 0.7) * 3)
+
+
+def test_prepared_scene_appends_custom_pml_with_edge_steps():
+    scene = _custom_scene(boundary=mw.BoundarySpec.pml(num_layers=1))
+
+    prepared = prepare_scene(scene)
+
+    np.testing.assert_allclose(
+        prepared.x_nodes64,
+        np.concatenate(([-0.1], GRADED_NODES, [1.3])),
+    )
+    assert prepared.domain.bounds[0] == (0.0, 1.0)
 
 
 def test_prepared_scene_custom_masters_on_graded_axis():
@@ -190,12 +234,16 @@ def test_fdtd_custom_grid_with_pml_runs_with_physical_depth_profiles():
 
     assert solver.cpml_kappa_e_x.shape == (solver.Nx,)
     assert solver.cpml_kappa_h_x.shape == (solver.Nx - 1,)
-    # Boundary nodes sit at full physical layer depth on both (unequal) sides.
-    assert float(solver.cpml_kappa_e_x[0]) > 1.0
-    assert float(solver.cpml_kappa_e_x[-1]) > 1.0
-    # Nodes at or inside the layer interfaces carry no stretching.
+    # The default propagating-wave profile is impedance matched (kappa=1) and
+    # absorbs through its non-zero convolutional conductivity coefficients.
+    assert torch.all(solver.cpml_kappa_e_x == 1.0)
+    assert float(solver.cpml_c_e_x[0]) < 0.0
+    assert float(solver.cpml_c_e_x[-1]) < 0.0
+    # Nodes at or inside the layer interfaces carry no conductivity grading.
     assert float(solver.cpml_kappa_e_x[2]) == 1.0
     assert float(solver.cpml_kappa_e_x[3]) == 1.0
+    assert float(solver.cpml_c_e_x[2]) == 0.0
+    assert float(solver.cpml_c_e_x[3]) == 0.0
 
     solver.solve(time_steps=20, dft_frequency=None, dft_window="none", full_field_dft=False)
     for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):

@@ -88,18 +88,19 @@ def test_custom_constant_grid_matches_uniform_bitwise(boundary_kind):
     uniform_scene = _dipole_scene(bounds, mw.GridSpec.uniform(dl), boundary_kind)
     prepared_uniform = prepare_scene(uniform_scene)
 
-    custom_grid = mw.GridSpec.custom(
-        prepared_uniform.x_nodes64,
-        prepared_uniform.y_nodes64,
-        prepared_uniform.z_nodes64,
-    )
+    physical_nodes = []
+    for axis, nodes in zip(
+        "xyz",
+        (prepared_uniform.x_nodes64, prepared_uniform.y_nodes64, prepared_uniform.z_nodes64),
+    ):
+        low = prepared_uniform.pml_thickness_for_face(axis, "low")
+        high = prepared_uniform.pml_thickness_for_face(axis, "high")
+        stop = len(nodes) - high if high else len(nodes)
+        physical_nodes.append(nodes[low:stop])
+    custom_grid = mw.GridSpec.custom(*physical_nodes)
     custom_bounds = tuple(
         (float(nodes[0]), float(nodes[-1]))
-        for nodes in (
-            prepared_uniform.x_nodes64,
-            prepared_uniform.y_nodes64,
-            prepared_uniform.z_nodes64,
-        )
+        for nodes in physical_nodes
     )
     custom_scene = _dipole_scene(custom_bounds, custom_grid, boundary_kind)
 

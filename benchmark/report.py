@@ -95,7 +95,11 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
         ]
         material_rel = _display_path(result.material_source_plot)
         field_rel = _display_path(result.field_plot)
-        merged_plots[result.name] = f"- `{result.name}`: [material+source]({material_rel}), [field]({field_rel})"
+        plot_links = f"[material+source]({material_rel}), [field]({field_rel})"
+        if result.diagnostic_plot is not None:
+            diagnostic_rel = _display_path(result.diagnostic_plot)
+            plot_links += f", [complex diagnostic]({diagnostic_rel})"
+        merged_plots[result.name] = f"- `{result.name}`: {plot_links}"
 
     lines = [
         "# Benchmark Results",

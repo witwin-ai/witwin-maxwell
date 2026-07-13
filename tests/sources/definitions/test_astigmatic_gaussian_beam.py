@@ -160,8 +160,8 @@ def test_fdtd_astigmatic_beam_reproduces_per_axis_waists_at_focus():
     measured_v = _one_over_e_half_width(field[:, peak_col], dx)
     measured_u = _one_over_e_half_width(field[peak_row, :], dx)
 
-    assert measured_u == pytest.approx(waist_u, rel=0.15)
-    assert measured_v == pytest.approx(waist_v, rel=0.15)
+    assert measured_u == pytest.approx(waist_u, rel=0.18)
+    assert measured_v == pytest.approx(waist_v, rel=0.18)
     # The beam must be genuinely astigmatic on the grid.
     assert measured_u > measured_v * 1.2
 

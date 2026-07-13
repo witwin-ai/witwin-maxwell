@@ -10,7 +10,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import witwin.maxwell as mw
-from benchmark.metrics import align_arrays, align_plane_fields, plane_coord_keys
+from benchmark.metrics import (
+    align_arrays,
+    align_plane_fields,
+    phase_align_field,
+    plane_coord_keys,
+    significant_field_mask,
+)
 from benchmark.paths import ensure_directories, scenario_plot_dir
 from benchmark.tidy3d_scene import benchmark_physical_bounds
 from witwin.maxwell.fdtd.excitation.spatial import resolve_injection_axis, soft_plane_wave_index
@@ -286,8 +292,10 @@ def _crop_monitor_field_to_physical_bounds(
     tangential_bounds = tuple(physical_bounds["xyz".index(coord_name)] for coord_name in coord_names)
     coords_a = np.asarray(coords[0], dtype=np.float64)
     coords_b = np.asarray(coords[1], dtype=np.float64)
-    mask_a = (coords_a >= tangential_bounds[0][0] - 1e-12) & (coords_a <= tangential_bounds[0][1] + 1e-12)
-    mask_b = (coords_b >= tangential_bounds[1][0] - 1e-12) & (coords_b <= tangential_bounds[1][1] + 1e-12)
+    tolerance_a = 1e-7 * max(1.0, float(np.max(np.abs(coords_a))), *map(abs, tangential_bounds[0]))
+    tolerance_b = 1e-7 * max(1.0, float(np.max(np.abs(coords_b))), *map(abs, tangential_bounds[1]))
+    mask_a = (coords_a >= tangential_bounds[0][0] - tolerance_a) & (coords_a <= tangential_bounds[0][1] + tolerance_a)
+    mask_b = (coords_b >= tangential_bounds[1][0] - tolerance_b) & (coords_b <= tangential_bounds[1][1] + tolerance_b)
     if not np.any(mask_a) or not np.any(mask_b):
         return np.asarray(values), (coords_a, coords_b)
 
@@ -442,6 +450,133 @@ def save_field_comparison_plot(
             for idx in range(3):
                 axes[row, col + idx].set_xlabel(axis_a)
                 axes[row, col + idx].set_ylabel(axis_b)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(output_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def save_complex_field_diagnostic_plot(
+    *,
+    scenario_name: str,
+    monitor_name: str,
+    component: str,
+    maxwell_monitor: dict,
+    tidy3d_monitor: dict,
+    scene: mw.Scene,
+    freq_index: int = 0,
+) -> Path:
+    """Plot complex-field slices and center lines on one shared coordinate grid."""
+    ensure_directories()
+    scenario_dir = scenario_plot_dir(scenario_name)
+    scenario_dir.mkdir(parents=True, exist_ok=True)
+    output_path = scenario_dir / "complex_field_diagnostic.png"
+
+    axis = maxwell_monitor.get("axis") or tidy3d_monitor.get("axis")
+    if axis not in PLANE_COORD_NAMES:
+        raise ValueError(f"Monitor {monitor_name!r} does not define a plane axis.")
+
+    maxwell_field = _select_plot_field(
+        maxwell_monitor,
+        component,
+        maxwell_monitor["fields"][component],
+        freq_index=freq_index,
+    )
+    tidy3d_field = _select_plot_field(
+        tidy3d_monitor,
+        component,
+        tidy3d_monitor["fields"][component],
+        freq_index=freq_index,
+    )
+    maxwell_coords = _component_plane_coords(maxwell_monitor, component)
+    tidy3d_coords = _component_plane_coords(tidy3d_monitor, component)
+    maxwell_field, maxwell_coords = _crop_monitor_field_to_physical_bounds(
+        scene, axis=axis, values=maxwell_field, coords=maxwell_coords
+    )
+    tidy3d_field, tidy3d_coords = _crop_monitor_field_to_physical_bounds(
+        scene, axis=axis, values=tidy3d_field, coords=tidy3d_coords
+    )
+    if maxwell_coords is None or tidy3d_coords is None:
+        raise ValueError(f"Monitor {monitor_name!r} is missing component coordinates.")
+    maxwell_field, tidy3d_field, coords = align_plane_fields(
+        maxwell_field,
+        tidy3d_field,
+        source_coords=maxwell_coords,
+        reference_coords=tidy3d_coords,
+    )
+    support = significant_field_mask(tidy3d_field)
+    phase_aligned_maxwell, phase_factor = phase_align_field(
+        maxwell_field,
+        tidy3d_field,
+        mask=support,
+    )
+
+    coord_a, coord_b = coords
+    extent = (float(coord_a[0]), float(coord_a[-1]), float(coord_b[0]), float(coord_b[-1]))
+    difference = phase_aligned_maxwell - tidy3d_field
+    magnitude_max = max(float(np.max(np.abs(maxwell_field))), float(np.max(np.abs(tidy3d_field))), 1e-12)
+    real_max = max(float(np.max(np.abs(maxwell_field.real))), float(np.max(np.abs(tidy3d_field.real))), 1e-12)
+    diff_max = max(float(np.max(np.abs(difference))), 1e-12)
+
+    fig, axes = plt.subplots(3, 4, figsize=(18, 12))
+    fig.suptitle(f"{scenario_name}: {monitor_name}/{component} complex-field diagnostic", fontsize=15)
+
+    maps = (
+        (np.abs(maxwell_field), "Maxwell |E|", "viridis", 0.0, magnitude_max),
+        (np.abs(tidy3d_field), "Tidy3D |E|", "viridis", 0.0, magnitude_max),
+        (np.abs(difference), "|phase-aligned Maxwell - Tidy3D|", "magma", 0.0, diff_max),
+        (phase_aligned_maxwell.real, "Phase-aligned Maxwell Re(E)", "RdBu_r", -real_max, real_max),
+        (tidy3d_field.real, "Tidy3D Re(E)", "RdBu_r", -real_max, real_max),
+        (difference.real, "Aligned real-field difference", "RdBu_r", -diff_max, diff_max),
+        (np.angle(maxwell_field), "Maxwell phase (raw)", "twilight", -np.pi, np.pi),
+        (np.angle(tidy3d_field), "Tidy3D phase", "twilight", -np.pi, np.pi),
+        (np.angle(phase_aligned_maxwell * np.conj(tidy3d_field)), "Aligned phase difference", "twilight", -np.pi, np.pi),
+    )
+    for plot_axis, (values, title, cmap, vmin, vmax) in zip(axes[:, :3].flat, maps):
+        image = plot_axis.imshow(
+            np.asarray(values).T,
+            origin="lower",
+            extent=extent,
+            aspect="auto",
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        plot_axis.set_title(title)
+        plot_axis.set_xlabel(PLANE_COORD_NAMES[axis][0])
+        plot_axis.set_ylabel(PLANE_COORD_NAMES[axis][1])
+        fig.colorbar(image, ax=plot_axis, shrink=0.78)
+
+    center_index = maxwell_field.shape[0] // 2
+    line_coord = coord_b
+    maxwell_line = phase_aligned_maxwell[center_index, :]
+    tidy3d_line = tidy3d_field[center_index, :]
+    axes[0, 3].plot(line_coord, np.abs(maxwell_line), label="Maxwell")
+    axes[0, 3].plot(line_coord, np.abs(tidy3d_line), label="Tidy3D")
+    axes[0, 3].set_title("Center-line magnitude")
+    axes[0, 3].set_ylabel(f"|{component}|")
+    axes[0, 3].legend()
+
+    axes[1, 3].plot(line_coord, maxwell_line.real, label="Maxwell")
+    axes[1, 3].plot(line_coord, tidy3d_line.real, label="Tidy3D")
+    axes[1, 3].set_title("Center-line real field")
+    axes[1, 3].set_ylabel(f"Re({component})")
+
+    axes[2, 3].plot(line_coord, np.unwrap(np.angle(maxwell_line)), label="Maxwell (aligned)")
+    axes[2, 3].plot(line_coord, np.unwrap(np.angle(tidy3d_line)), label="Tidy3D")
+    axes[2, 3].set_title("Center-line unwrapped phase")
+    axes[2, 3].set_ylabel("phase (rad)")
+    for plot_axis in axes[:, 3]:
+        plot_axis.set_xlabel(PLANE_COORD_NAMES[axis][1])
+        plot_axis.grid(alpha=0.25)
+    axes[2, 3].legend()
+    fig.text(
+        0.5,
+        0.01,
+        f"Global phase factor applied to Maxwell: {np.angle(phase_factor):+.4f} rad",
+        ha="center",
+    )
 
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(output_path, dpi=160, bbox_inches="tight")

@@ -151,6 +151,53 @@ def _align_plane_monitor_payload(axis, component_payloads):
     }
 
 
+def _physical_plane_masks(solver, axis, coord_a, coord_b):
+    coord_names = _plane_coord_names(axis)
+    domain_range = getattr(solver.scene, "physical_domain_range", solver.scene.domain_range)
+    bounds = {
+        "x": (domain_range[0], domain_range[1]),
+        "y": (domain_range[2], domain_range[3]),
+        "z": (domain_range[4], domain_range[5]),
+    }
+    arrays = (np.asarray(coord_a, dtype=np.float64), np.asarray(coord_b, dtype=np.float64))
+    masks = []
+    for name, values in zip(coord_names, arrays):
+        lo, hi = bounds[name]
+        tolerance = 1e-7 * max(1.0, float(np.max(np.abs(values))), abs(lo), abs(hi))
+        masks.append((values >= lo - tolerance) & (values <= hi + tolerance))
+    return tuple(masks)
+
+
+def _crop_aligned_plane_to_physical_bounds(solver, axis, aligned):
+    coord_names = _plane_coord_names(axis)
+    mask_a, mask_b = _physical_plane_masks(
+        solver,
+        axis,
+        aligned[coord_names[0]],
+        aligned[coord_names[1]],
+    )
+    indices_a = np.flatnonzero(mask_a)
+    indices_b = np.flatnonzero(mask_b)
+    if indices_a.size == 0 or indices_b.size == 0:
+        raise ValueError("FluxMonitor plane has no samples inside the physical domain.")
+
+    cropped_fields = {}
+    for component_name, values in aligned["fields"].items():
+        if isinstance(values, torch.Tensor):
+            index_a = torch.as_tensor(indices_a, device=values.device, dtype=torch.long)
+            index_b = torch.as_tensor(indices_b, device=values.device, dtype=torch.long)
+            cropped = torch.index_select(values, values.ndim - 2, index_a)
+            cropped = torch.index_select(cropped, cropped.ndim - 1, index_b)
+        else:
+            cropped = np.take(np.take(values, indices_a, axis=-2), indices_b, axis=-1)
+        cropped_fields[component_name] = cropped
+    return {
+        coord_names[0]: np.asarray(aligned[coord_names[0]])[indices_a],
+        coord_names[1]: np.asarray(aligned[coord_names[1]])[indices_b],
+        "fields": cropped_fields,
+    }
+
+
 def _plane_shape(field, axis):
     if axis == "x":
         return (field.shape[1], field.shape[2])
@@ -214,7 +261,8 @@ def _to_torch_scalar_or_tensor(value, *, device, dtype):
     return torch.as_tensor(value, device=device, dtype=dtype)
 
 
-def _trapz_weights_1d(points):
+def _cell_center_weights_1d(points):
+    """Control-volume widths for samples located at Yee cell centers."""
     if isinstance(points, torch.Tensor):
         coords = points.to(dtype=points.real.dtype)
         count = int(coords.numel())
@@ -222,8 +270,8 @@ def _trapz_weights_1d(points):
             return torch.ones((count,), device=coords.device, dtype=coords.dtype)
         diffs = coords[1:] - coords[:-1]
         weights = torch.empty((count,), device=coords.device, dtype=coords.dtype)
-        weights[0] = diffs[0] / 2.0
-        weights[-1] = diffs[-1] / 2.0
+        weights[0] = diffs[0]
+        weights[-1] = diffs[-1]
         if count > 2:
             weights[1:-1] = (diffs[:-1] + diffs[1:]) / 2.0
         return weights
@@ -234,8 +282,8 @@ def _trapz_weights_1d(points):
         return np.ones((count,), dtype=float)
     diffs = np.diff(coords)
     weights = np.empty((count,), dtype=float)
-    weights[0] = diffs[0] / 2.0
-    weights[-1] = diffs[-1] / 2.0
+    weights[0] = diffs[0]
+    weights[-1] = diffs[-1]
     if count > 2:
         weights[1:-1] = (diffs[:-1] + diffs[1:]) / 2.0
     return weights
@@ -261,7 +309,7 @@ def _compute_plane_flux(result):
         )
         coord_a = _to_torch_scalar_or_tensor(result[coord_names[0]], device=device, dtype=coord_dtype)
         coord_b = _to_torch_scalar_or_tensor(result[coord_names[1]], device=device, dtype=coord_dtype)
-        weights = _trapz_weights_1d(coord_a)[:, None] * _trapz_weights_1d(coord_b)[None, :]
+        weights = _cell_center_weights_1d(coord_a)[:, None] * _cell_center_weights_1d(coord_b)[None, :]
         field_shape = ((len(frequencies),) if has_multi_frequency else ()) + (coord_a.numel(), coord_b.numel())
         complex_dtype = None
         for component_name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
@@ -301,7 +349,7 @@ def _compute_plane_flux(result):
 
     coord_a = np.asarray(result[coord_names[0]], dtype=float)
     coord_b = np.asarray(result[coord_names[1]], dtype=float)
-    weights = _trapz_weights_1d(coord_a)[:, None] * _trapz_weights_1d(coord_b)[None, :]
+    weights = _cell_center_weights_1d(coord_a)[:, None] * _cell_center_weights_1d(coord_b)[None, :]
     leading_shape = (len(frequencies),) if has_multi_frequency else ()
     field_shape = leading_shape + (coord_a.size, coord_b.size)
 
@@ -474,6 +522,25 @@ def resolve_plane_observer(solver, observer):
     return plane_samples, (x_coords, y_coords)
 
 
+def _flux_yee_plane_position(solver, axis, requested_position):
+    """Snap a flux plane to the nearest tangential-E Yee plane.
+
+    Tangential electric components live on primal nodes along the plane normal;
+    magnetic components then straddle that node symmetrically and are averaged by
+    the ordinary plane sampler.  Sampling both families independently at an
+    arbitrary coordinate would attenuate each complex phasor by a position-
+    dependent interpolation factor.
+    """
+    axis_name = normalize_axis(axis)
+    nodes = {
+        "x": solver.scene.x_nodes64,
+        "y": solver.scene.y_nodes64,
+        "z": solver.scene.z_nodes64,
+    }[axis_name]
+    index = int(np.argmin(np.abs(np.asarray(nodes, dtype=np.float64) - float(requested_position))))
+    return float(nodes[index])
+
+
 def prepare_observers(solver, frequencies, window_type, time_steps):
     default_frequencies = _normalize_frequency_list(frequencies)
     if not solver.observers:
@@ -556,7 +623,16 @@ def prepare_observers(solver, frequencies, window_type, time_steps):
             group["point_k"].append(field_index[2])
             group["requested_global_freq_indices"].extend(observer["global_freq_indices"])
         else:
-            plane_samples, plane_coords = resolve_plane_observer(solver, observer)
+            sampling_observer = observer
+            if observer.get("compute_flux", False):
+                sampling_observer = dict(observer)
+                sampling_observer["position"] = _flux_yee_plane_position(
+                    solver,
+                    observer["axis"],
+                    observer["position"],
+                )
+                observer["yee_plane_position"] = sampling_observer["position"]
+            plane_samples, plane_coords = resolve_plane_observer(solver, sampling_observer)
             axis = normalize_axis(observer["axis"])
             observer["plane_samples"] = []
             for sample in plane_samples:
@@ -890,9 +966,16 @@ def prepare_time_observers(solver, time_steps):
             coord_a = _resolve_coord_source(coord_payloads, *rules["coord_sources"][coord_names[0]])
             coord_b = _resolve_coord_source(coord_payloads, *rules["coord_sources"][coord_names[1]])
             weights = (
-                _trapz_weights_1d(np.asarray(coord_a, dtype=float))[:, None]
-                * _trapz_weights_1d(np.asarray(coord_b, dtype=float))[None, :]
+                _cell_center_weights_1d(np.asarray(coord_a, dtype=float))[:, None]
+                * _cell_center_weights_1d(np.asarray(coord_b, dtype=float))[None, :]
             )
+            physical_a, physical_b = _physical_plane_masks(
+                solver,
+                axis_name,
+                coord_a,
+                coord_b,
+            )
+            weights *= physical_a[:, None] * physical_b[None, :]
             record["flux_weights"] = torch.as_tensor(
                 weights, device=solver.device, dtype=torch.float32
             ).contiguous()
@@ -1298,6 +1381,8 @@ def get_observer_results(solver):
                     f"Monitor {result!r} is missing aligned tangential fields required for flux integration."
                 )
             continue
+        if result.get("compute_flux"):
+            aligned = _crop_aligned_plane_to_physical_bounds(solver, axis, aligned)
         result[coord_names[0]] = aligned[coord_names[0]]
         result[coord_names[1]] = aligned[coord_names[1]]
         result["coords"] = (aligned[coord_names[0]], aligned[coord_names[1]])

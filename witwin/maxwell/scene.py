@@ -962,7 +962,7 @@ def _axis_nodes64(grid: GridSpec, axis: str, axis_lo: float, axis_hi: float) -> 
     if coords is None:
         step = float(getattr(grid, f"d{axis}"))
         count = max(0, int(math.ceil((float(axis_hi) - float(axis_lo)) / step)))
-        return float(axis_lo) + np.arange(count, dtype=np.float64) * step
+        return np.linspace(float(axis_lo), float(axis_hi), count, endpoint=False, dtype=np.float64)
     span = float(axis_hi) - float(axis_lo)
     tolerance = 1e-9 * span
     if abs(float(coords[0]) - float(axis_lo)) > tolerance or abs(float(coords[-1]) - float(axis_hi)) > tolerance:
@@ -989,9 +989,23 @@ def _axis_dual_spacing64(primal: np.ndarray, boundary_kind: str) -> np.ndarray:
 
 
 def _build_axis_grid64(
-    grid: GridSpec, axis: str, axis_lo: float, axis_hi: float, boundary_kind: str
+    grid: GridSpec,
+    axis: str,
+    axis_lo: float,
+    axis_hi: float,
+    boundary_kind: str,
+    pml_layers: tuple[int, int] = (0, 0),
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     nodes = _axis_nodes64(grid, axis, axis_lo, axis_hi)
+    low_layers, high_layers = (int(value) for value in pml_layers)
+    if low_layers or high_layers:
+        if nodes.size < 2:
+            raise ValueError(f"Cannot extend the {axis}-axis PML from fewer than two physical nodes.")
+        low_step = float(nodes[1] - nodes[0])
+        high_step = float(nodes[-1] - nodes[-2])
+        low_nodes = nodes[0] - low_step * np.arange(low_layers, 0, -1, dtype=np.float64)
+        high_nodes = nodes[-1] + high_step * np.arange(1, high_layers + 1, dtype=np.float64)
+        nodes = np.concatenate((low_nodes, nodes, high_nodes))
     primal = np.diff(nodes)
     half = nodes[:-1] + 0.5 * primal
     dual = _axis_dual_spacing64(primal, boundary_kind)
@@ -1020,23 +1034,59 @@ class PreparedScene(Scene):
             symmetry=scene.symmetry,
         )
         self._public_scene = scene
-        self.domain_range = _domain_range_from_bounds(self.domain.bounds)
+        self.physical_domain_range = _domain_range_from_bounds(self.domain.bounds)
 
         if self.grid.is_auto:
             from .fdtd.meshing import resolve_auto_grid
 
             self.grid = GridSpec.custom(*resolve_auto_grid(self))
 
-        x_start, x_end, y_start, y_end, z_start, z_end = self.domain_range
+        x_start, x_end, y_start, y_end, z_start, z_end = self.physical_domain_range
         self.x_nodes64, self.dx_primal64, self.x_half64, self.dx_dual64 = _build_axis_grid64(
-            self.grid, "x", x_start, x_end, self.boundary.axis_kind("x")
+            self.grid,
+            "x",
+            x_start,
+            x_end,
+            self.boundary.axis_kind("x"),
+            (self.pml_thickness_for_face("x", "low"), self.pml_thickness_for_face("x", "high")),
         )
         self.y_nodes64, self.dy_primal64, self.y_half64, self.dy_dual64 = _build_axis_grid64(
-            self.grid, "y", y_start, y_end, self.boundary.axis_kind("y")
+            self.grid,
+            "y",
+            y_start,
+            y_end,
+            self.boundary.axis_kind("y"),
+            (self.pml_thickness_for_face("y", "low"), self.pml_thickness_for_face("y", "high")),
         )
         self.z_nodes64, self.dz_primal64, self.z_half64, self.dz_dual64 = _build_axis_grid64(
-            self.grid, "z", z_start, z_end, self.boundary.axis_kind("z")
+            self.grid,
+            "z",
+            z_start,
+            z_end,
+            self.boundary.axis_kind("z"),
+            (self.pml_thickness_for_face("z", "low"), self.pml_thickness_for_face("z", "high")),
         )
+        computational_bounds = []
+        for axis_index, (axis, nodes, primal) in enumerate(
+            (
+                ("x", self.x_nodes64, self.dx_primal64),
+                ("y", self.y_nodes64, self.dy_primal64),
+                ("z", self.z_nodes64, self.dz_primal64),
+            )
+        ):
+            low_layers = self.pml_thickness_for_face(axis, "low")
+            high_layers = self.pml_thickness_for_face(axis, "high")
+            physical_lo, physical_hi = self.domain.bounds[axis_index]
+            low_step = float(primal[low_layers]) if low_layers < primal.size else float(primal[0])
+            high_index = primal.size - high_layers - 1
+            high_step = float(primal[max(high_index, 0)])
+            computational_bounds.append(
+                (
+                    float(physical_lo) - low_layers * low_step,
+                    float(physical_hi) + high_layers * high_step,
+                )
+            )
+        self.domain_range = _domain_range_from_bounds(computational_bounds)
         self.x = torch.tensor(self.x_nodes64, dtype=torch.float32, device=self.device)
         self.y = torch.tensor(self.y_nodes64, dtype=torch.float32, device=self.device)
         self.z = torch.tensor(self.z_nodes64, dtype=torch.float32, device=self.device)

@@ -36,5 +36,6 @@ class ScenarioMetrics:
     material_source_plot: Path
     field_plot: Path
     updated_at: str
+    diagnostic_plot: Path | None = None
     notes: list[str] = field(default_factory=list)
     per_frequency: list[dict[str, float]] = field(default_factory=list)

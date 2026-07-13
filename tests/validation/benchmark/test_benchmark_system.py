@@ -11,7 +11,7 @@ from benchmark import plotting as benchmark_plotting
 from benchmark import report as benchmark_report
 from benchmark import runner as benchmark_runner
 from benchmark import paths as benchmark_paths
-from benchmark.metrics import align_arrays, align_plane_fields
+from benchmark.metrics import align_arrays, align_plane_fields, phase_align_field, significant_field_mask
 from benchmark.models import ScenarioMetrics
 from benchmark.scenes import SCENARIOS, build_scene
 from benchmark.tidy3d_scene import benchmark_physical_bounds, prepare_tidy3d_benchmark_scene
@@ -78,6 +78,18 @@ def test_align_plane_fields_uses_physical_coordinates():
     np.testing.assert_allclose(target_x, reference_x)
     np.testing.assert_allclose(target_y, reference_y)
     np.testing.assert_allclose(aligned_source, aligned_reference)
+
+
+def test_phase_alignment_removes_only_global_phasor_on_significant_support():
+    reference = np.array((0.0j, 1.0 + 2.0j, -0.5 + 0.25j))
+    actual = 1.2 * reference * np.exp(-0.7j)
+    support = significant_field_mask(reference)
+
+    aligned, factor = phase_align_field(actual, reference, mask=support)
+
+    np.testing.assert_allclose(aligned[support], 1.2 * reference[support])
+    assert abs(factor) == pytest.approx(1.0)
+    assert abs(aligned[1]) == pytest.approx(abs(actual[1]))
 
 
 def test_select_monitor_plane_field_accepts_trailing_frequency_axis():
@@ -233,7 +245,7 @@ def test_extract_maxwell_monitors_converts_cuda_tensor_payloads_to_numpy():
 
 def test_extract_maxwell_monitors_trims_flux_to_physical_interior():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.2),
         boundary=mw.BoundarySpec.pml(num_layers=1),
         device="cpu",
@@ -276,14 +288,14 @@ def test_extract_maxwell_monitors_trims_flux_to_physical_interior():
 
     extracted = benchmark_runner._extract_maxwell_monitors(DummyResult(), scene)
     assert extracted["flux_z"]["raw_flux"] == pytest.approx(0.32)
-    assert extracted["flux_z"]["flux"] == pytest.approx(0.08)
-    assert extracted["flux_z"]["power"] == pytest.approx(0.08)
+    assert extracted["flux_z"]["flux"] == pytest.approx(0.18)
+    assert extracted["flux_z"]["power"] == pytest.approx(0.18)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA tensor payloads")
 def test_extract_maxwell_flux_monitors_accepts_cuda_tensor_payloads():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.2),
         boundary=mw.BoundarySpec.pml(num_layers=1),
         device="cpu",
@@ -328,7 +340,7 @@ def test_extract_maxwell_flux_monitors_accepts_cuda_tensor_payloads():
     assert isinstance(extracted["flux_z"]["raw_flux"], np.ndarray)
     assert isinstance(extracted["flux_z"]["flux"], np.ndarray)
     assert extracted["flux_z"]["raw_flux"] == pytest.approx(0.32)
-    assert extracted["flux_z"]["flux"] == pytest.approx(0.08)
+    assert extracted["flux_z"]["flux"] == pytest.approx(0.18)
 
 
 def test_report_writer_updates_markdown(tmp_path, monkeypatch):
@@ -474,7 +486,7 @@ def test_benchmark_scene_material_slices_match_exactly(geometry, label):
 
 def test_align_plane_monitor_fields_crops_to_physical_interior():
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        domain=mw.Domain(bounds=((-0.2, 0.2), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.2),
         boundary=mw.BoundarySpec.pml(num_layers=1),
         device="cpu",
@@ -530,6 +542,36 @@ def test_field_comparison_plot_smoke(tmp_path, monkeypatch):
     )
     assert output_path.exists()
     assert output_path == tmp_path / "dipole" / "dipole_vacuum" / "field_comparison.png"
+
+
+def test_complex_field_diagnostic_plot_smoke(tmp_path, monkeypatch):
+    monkeypatch.setattr(benchmark_paths, "PLOTS_DIR", tmp_path)
+
+    coords = np.linspace(-0.4, 0.4, 8)
+    phase = np.exp(1j * np.linspace(0.0, np.pi, 8))[None, :]
+    field = np.broadcast_to(phase, (8, 8))
+    monitor = {
+        "axis": "y",
+        "frequencies": (2.0e9,),
+        "x": coords,
+        "z": coords,
+        "fields": {"Ex": field},
+    }
+    scene = build_scene("planewave_vacuum")
+
+    output_path = benchmark_plotting.save_complex_field_diagnostic_plot(
+        scenario_name="planewave_vacuum",
+        monitor_name="field_xz",
+        component="Ex",
+        maxwell_monitor=monitor,
+        tidy3d_monitor=monitor,
+        scene=scene,
+    )
+
+    assert output_path.exists()
+    assert output_path == (
+        tmp_path / "planewave" / "planewave_vacuum" / "complex_field_diagnostic.png"
+    )
 
 
 def test_field_comparison_plot_smoke_with_multi_frequency_fields(tmp_path, monkeypatch):

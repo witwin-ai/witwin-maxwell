@@ -22,13 +22,11 @@ checks that the absolute time-averaged incident power matches the analytic unit
 power within 2% across three frequencies and two spacings (the P5.9 acceptance).
 
 The measured observable is the forward Poynting flux integrated over the central
-half of the physical aperture -- the flux is immune to the residual PML-reflection
-standing wave (a pure position shift), and the central window avoids the aperture
-edge cells that abut the transverse PML. The E/H Yee half-cell stagger reduces the
-discrete flux operator by ``cos(k~*dz/2)``; that factor is divided out using the
-same numerical wavenumber (``solve_numerical_wavenumber``) and launch-local
-spacing (``soft_plane_wave_region_spacing``) that P5.3 added and that the injector
-itself uses, so the comparison is against the true co-located forward power.
+half of the physical aperture. Infinite plane sources are normalized over the full
+computational aperture, including external PML, and the derived source scale
+includes the Yee ``cos(k~*dz/2)`` power factor. The central window avoids cells
+that abut the transverse PML while checking the native FluxMonitor convention
+directly, without a post-hoc numerical correction.
 """
 
 from __future__ import annotations
@@ -41,11 +39,9 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.fdtd.excitation import injection as _injection
-from witwin.maxwell.fdtd.dispersion import solve_numerical_wavenumber
 from witwin.maxwell.fdtd.excitation.spatial import (
     physical_interior_indices,
     soft_plane_wave_index,
-    soft_plane_wave_region_spacing,
 )
 
 
@@ -105,8 +101,8 @@ def _measure_incident_power_ratio(
     """Return measured / analytic time-averaged incident power for a soft +z wave.
 
     The scene is normalized to unit incident power (unit source amplitude), so the
-    analytic power crossing the full physical aperture is 1.0 and the analytic
-    power through the central window is its area fraction of the aperture.
+    analytic power crossing the full computational aperture is 1.0 and the
+    analytic power through the central window is its area fraction.
     """
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-half_span, half_span),) * 3),
@@ -141,17 +137,14 @@ def _measure_incident_power_ratio(
     y_nodes = grid.y.detach().cpu().numpy()
     x_lo, x_hi = float(x_nodes[lo_x]), float(x_nodes[hi_x])
     y_lo, y_hi = float(y_nodes[lo_y]), float(y_nodes[hi_y])
-    aperture_area = (x_hi - x_lo) * (y_hi - y_lo)
+    computational_range = grid.domain_range
+    aperture_area = (
+        (computational_range[1] - computational_range[0])
+        * (computational_range[3] - computational_range[2])
+    )
     x_mid, y_mid = 0.5 * (x_lo + x_hi), 0.5 * (y_lo + y_hi)
     half_wx = 0.5 * aperture_fraction * (x_hi - x_lo)
     half_wy = 0.5 * aperture_fraction * (y_hi - y_lo)
-
-    deltas = soft_plane_wave_region_spacing(
-        grid, injection_axis="z", plane_index=src_index, direction_sign=1
-    )
-    k_numeric = solve_numerical_wavenumber(solver, (0.0, 0.0, 1.0), deltas)
-    stagger = math.cos(0.5 * k_numeric * dx)
-    assert stagger > 0.0
 
     scene.add_monitor(
         mw.PlaneMonitor(
@@ -182,7 +175,7 @@ def _measure_incident_power_ratio(
     mask_x = np.abs(x_coords - x_mid) <= half_wx
     mask_y = np.abs(y_coords - y_mid) <= half_wy
     window = np.ix_(mask_x, mask_y)
-    poynting_z = 0.5 * np.real(ex[window] * np.conj(hy[window])) / stagger
+    poynting_z = 0.5 * np.real(ex[window] * np.conj(hy[window]))
     measured_power = float(poynting_z.sum()) * (dx * dx)
     window_area = float(mask_x.sum() * mask_y.sum()) * (dx * dx)
     analytic_power = window_area / aperture_area  # unit power density over aperture

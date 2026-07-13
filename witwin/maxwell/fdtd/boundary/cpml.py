@@ -7,10 +7,15 @@ from .common import BOUNDARY_PML
 
 
 DEFAULT_CPML_CONFIG = {
-    "grading_order": 4.0,
-    "kappa_max": 7.0,
-    "alpha_max": 0.1,
-    "reflection": 1e-8,
+    # A cubic, impedance-matched conductivity ramp is the robust default for
+    # the relatively thin (8-12 cell) layers used by Scene boundaries.  Large
+    # kappa stretching at this thickness creates a resolvable entrance mismatch
+    # for propagating waves; complex-frequency shifting remains available through
+    # cpml_config and StablePML for low-frequency/late-time workloads.
+    "grading_order": 3.0,
+    "kappa_max": 1.0,
+    "alpha_max": 0.0,
+    "reflection": 1e-6,
     "memory_mode": "auto",
     "dense_memory_limit_mib": 64.0,
 }

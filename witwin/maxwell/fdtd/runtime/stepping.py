@@ -1929,7 +1929,13 @@ def solve(
             apply_tfsf_e_correction(solver, time_value)
             advance_tfsf_auxiliary_electric(solver)
         if solver._electric_source_terms:
-            inject_electric_surface_source_terms(solver, time_value=time_value)
+            # The electric equivalent current enters the E update through the
+            # incident H field, which lives at the Yee half step.  Sample it at
+            # the same n + 1/2 instant as the TFSF electric correction.
+            inject_electric_surface_source_terms(
+                solver,
+                time_value=time_value + 0.5 * float(solver.dt),
+            )
 
         if solver._source_terms:
             solver.add_source(time_value=time_value)

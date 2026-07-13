@@ -9,17 +9,56 @@ This report is the low-cost numerical baseline for the campaign in
 
 - 48 FDTD cases were prepared; all 48 Tidy3D references were generated and cache-key verified. This includes
   34 S1-S5 campaign cases and 14 historical dipole/plane-wave cases.
-- The common cloud grid uses `dx=0.025 m`, approximately 52 cells per axis, 8 PML cells, and a normal
-  run-time factor of 8. This is a bug-location grid, not a convergence-study grid.
+- The common cloud grid requests `dl=0.025 m`; both solvers use 52 uniformly redistributed physical cells
+  (`1.28 / 52 = 0.02461538... m`) and append PML outside the physical `Domain.bounds` (68 total grid samples
+  for the usual 8-layer case). The normal run-time factor is 8. This is a bug-location grid, not a
+  convergence-study grid.
 - Each Tidy3D task was estimated before submission and guarded by a 2 FlexCredit per-case ceiling.
-- Fields are cropped to the non-PML interior, interpolated to common plane coordinates, and compared with
-  relative L2, relative Linf, and complex correlation.
+- Fields are cropped to the common physical domain, interpolated to common plane coordinates, and compared
+  with relative L2, relative Linf, and complex correlation. Soft-plane-wave comparisons remove one
+  unit-modulus global source-reference phase and use source geometry/direction to exclude only the discrete
+  source sheet and upstream half-space; amplitude is not fitted and downstream nulls remain in the metric.
 - Flux error is the maximum absolute monitor mismatch divided by one shared incident-power scale. It does not
   divide each monitor by its own near-zero reference.
 - Multi-frequency fields are compared one frequency plane at a time; the scenario headline reports worst L2,
   worst Linf, and minimum correlation.
 
 Detailed numerical rows and plots are in `benchmark/RESULTS.md` and `benchmark/plots/`.
+
+## Group 1 alignment update
+
+Group 1 is numerically aligned after the common grid/source/PML/monitor repairs below. All three rows meet the
+acceptance target (correlation >= 0.995, field L2 <= 0.10, flux error <= 0.05):
+
+| Case | Field L2 | Field Linf | Correlation | Flux error |
+| --- | ---: | ---: | ---: | ---: |
+| `planewave_vacuum` | 1.4908e-02 | 1.7343e-02 | 0.9999 | 1.0515e-02 |
+| `pml_only` | 2.2492e-03 | 4.0896e-03 | 1.0000 | 1.7607e-03 |
+| `symmetry_center` | 1.4908e-02 | 1.7343e-02 | 0.9999 | 1.0515e-02 |
+
+The fixes are general rather than case-fitted:
+
+- `Domain.bounds` is physical; Maxwell now appends PML outside it, matching Tidy3D.
+- Uniform `GridSpec` treats `dl` as a maximum and redistributes `ceil(span / dl)` cells uniformly.
+- Tidy3D receives Maxwell's actual Courant step, and Maxwell run length is computed from its prepared `dt`.
+- The default thin-layer CPML uses an impedance-matched cubic conductivity ramp. Forward/backward-wave fits
+  reduced the Maxwell reflected amplitude from 8.15% to 0.30% (Tidy3D: 1.51%).
+- Infinite soft plane waves normalize over the full computational aperture and include the derived Yee
+  half-cell Poynting factor; no empirical amplitude multiplier or delay was introduced.
+- Spectral flux planes use a shared Yee plane and cell-centred control-volume integration instead of
+  independently interpolating E/H phasors and dropping half-width endpoint cells.
+- Complex diagnostic plots show raw source-reference phase and phase-aligned field/center-line differences.
+
+`symmetry_center` currently builds the same unfurled vacuum scene as `planewave_vacuum`; its numerical row is
+therefore a duplicate baseline and does **not** validate symmetry folding. A genuine half-domain symmetry
+scenario remains a scenario-definition task and should not be counted as symmetry-feature coverage.
+
+Broader regression runs also exposed that the old AutoGrid/nonuniform slab tests manually embedded PML cells
+inside `GridSpec.custom` and reused prepared grids without removing PML. Those fixtures now pass only physical
+nodes and let `PreparedScene` append PML once. Their two-plane reflected-power estimator has a 5-16% residual
+after flux planes snap to physical Yee nodes; the independent graded-slab Fresnel checks remain within their
+existing 8% tier. A denser forward/backward modal estimator and convergence sweep belong to the later grid group,
+not to this uniform-vacuum Group 1 acceptance.
 
 ## Campaign outcome
 
@@ -28,12 +67,14 @@ Detailed numerical rows and plots are in `benchmark/RESULTS.md` and `benchmark/p
 | Prepared FDTD cases | 48 |
 | Valid Tidy3D caches | 48 |
 | Completed Maxwell/Tidy3D field comparisons | 41 |
-| Passed the plan tolerance | 0 |
+| Passed the plan tolerance in the original full-campaign baseline | 0 |
+| Group 1 cases passing after repair | 3 |
 | Framework or scene failures | 7 |
 | FDFD cases run | 0 |
 
-No completed case meets the plan's joint field/scalar acceptance criteria. Every completed case has field
-L2 near or above 1, flux error above 0.05, or both.
+The table above describes the original full-campaign baseline. Group 1 has since been repaired and passes as
+shown in the update section; the remaining groups have not been regenerated and should still be treated as
+the original diagnostic baseline.
 
 ## Numerical difference summary
 
@@ -41,15 +82,14 @@ L2 near or above 1, flux error above 0.05, or both.
 | --- | ---: | --- | --- |
 | Campaign sources | 5 | L2 1.000-1.002; corr 0.639-0.976; flux err about 1 | Maxwell amplitude/power is nearly absent relative to Tidy3D in four cases; uniform-current/custom-field retain shape but not scale. |
 | Materials | 13 | L2 1.114-2.192; corr 0.137-0.921; flux err 0.101-2.901 | Both normalization and physics/phase differences. `sigma_e_slab` has the best scalar error (0.101), still outside tolerance. |
-| Boundaries | 2 | L2 2.054-2.742; corr 0.971-0.977; flux err 0.376-0.866 | Strong shape agreement with large global amplitude/phase mismatch; investigate plane-wave spectral normalization first. |
+| Boundaries | 2 | Original: L2 2.054-2.742; repaired Group 1: L2 0.002-0.015, corr 0.9999-1.0000, flux err 0.002-0.011 | External PML geometry, thin-layer CPML entrance mismatch, source power, and Yee flux integration were repaired. |
 | Grid/geometry | 4 | L2 1.647-2.112; corr 0.441-0.904; flux err 0.126-0.728 | Geometry cases show real shape differences in addition to amplitude mismatch. Torus mesh export warnings make those rows lower-confidence. |
 | Postprocess | 3 | L2 1.000-1.679; corr 0.241-0.701; flux err 0.348-1.000 | Field-level baselines only. Dedicated S21/RCS scalar cross-validation is not yet wired into the cache/report schema. |
 | Historical dipole/plane-wave | 14 | L2 0.899-8.376; corr 0.310-0.998; flux err 0.300-1.185e5 | No historical case passes. Dipole power scaling and broadband normalization are the dominant failures. |
 
-The highest-confidence normalization signal is `pml_only`: corr=0.9765 while L2=2.7415. `symmetry_center`
-shows the same pattern (corr=0.9713, L2=2.0544). These should be repaired before interpreting material or
-geometry amplitudes. Source cases with L2 and flux error almost exactly 1 need a direct source-spectrum and
-monitor-power audit.
+The highest-confidence normalization signal was `pml_only`: corr=0.9765 while L2=2.7415. It now reaches
+corr=1.0000 and L2=0.00225. Source cases outside Group 1 with L2 and flux error almost exactly 1 still need a
+direct source-spectrum and monitor-power audit.
 
 The historical cases reinforce this diagnosis. `dipole_offcenter` retains corr=0.9983 but has L2=3.2644 and
 flux error=14.655. The two broadband dipole cases are much worse: `multi_dielectric` has L2=8.0864 and
@@ -82,8 +122,8 @@ dipole-driven resonator and needs a source-power reference observable.
 
 ## Recommended repair order
 
-1. Fix the homogeneous plane-wave/source-spectrum amplitude convention using `pml_only` and
-   `symmetry_center`; require corr to remain high while L2 and flux converge.
+1. **Completed:** fix the homogeneous plane-wave/source-spectrum amplitude convention using
+   `planewave_vacuum`, `pml_only`, and the duplicate `symmetry_center` baseline.
 2. Audit UniformCurrent/CustomField/CustomCurrent/ModeSource normalization because their errors cluster at 1.
 3. Re-run simple linear materials (`sigma_e_slab`, anisotropic slab) before nonlinear/modulated/Graphene cases.
 4. Repair the seven invalid scenario definitions above, then add named scalar cache fields for S-parameters,
@@ -102,10 +142,9 @@ The 48 FDTD scenarios are partitioned below without overlap. Process the groups 
 - `pml_only`
 - `symmetry_center`
 
-This is the highest-priority group because PlaneWave normalization affects most slab, scattering, material,
-and boundary scenarios. The current high-correlation/high-L2 pattern points to a global complex-amplitude,
-phase, or source-spectrum convention mismatch. Acceptance: correlation >= 0.995, field L2 <= 0.10, and flux
-error <= 0.05.
+This group now passes. PlaneWave normalization affects most slab, scattering, material, and boundary
+scenarios, so downstream groups should be regenerated from this repaired baseline. Acceptance: correlation
+>= 0.995, field L2 <= 0.10, and flux error <= 0.05. The `symmetry_center` caveat above remains.
 
 ### Group 2: Dipole, custom, beam, and modal source normalization
 

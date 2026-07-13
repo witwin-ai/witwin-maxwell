@@ -4,6 +4,7 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.compiler.sources import compile_fdtd_sources
+from witwin.maxwell.fdtd.coords import component_coords
 
 
 def _make_scene(*, device="cpu"):
@@ -232,7 +233,10 @@ def test_custom_field_source_reproduces_plane_wave():
     assert forward > 1.8 * backward
 
     # Transverse uniformity of a downstream plane (plane-wave signature).
-    plane = ex[6:-6, 6:-6, kz + 4]
+    x, y, _ = component_coords(prepared.solver.scene, "Ex")
+    central_x = np.flatnonzero(np.abs(x) <= 0.30)
+    central_y = np.flatnonzero(np.abs(y) <= 0.30)
+    plane = ex[np.ix_(central_x, central_y, np.array([kz + 4]))].squeeze(-1)
     assert plane.mean() > 0.2
     assert plane.std() / plane.mean() < 0.15
 

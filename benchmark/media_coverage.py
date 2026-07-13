@@ -335,10 +335,11 @@ def validation_coverage_markdown_lines() -> list[str]:
     lines.extend(
         [
             "",
-            "**Metric staleness.** The dipole/planewave metric tables above were last "
-            "regenerated 2026-06-12, before the soft-plane-wave absolute-power "
-            "normalization fix (`02e25d3`); the plane-wave rows are therefore STALE "
-            "pending a benchmark rerun. The P3-media scenarios "
+            "**Metric staleness.** Group 1 (`planewave_vacuum`, `pml_only`, and the "
+            "duplicate `symmetry_center` baseline) was regenerated on 2026-07-12 after "
+            "the external-PML, grid, CPML, source-power, and flux-monitor repairs. Other "
+            "historical plane-wave/material rows remain STALE until their groups are rerun. "
+            "The P3-media scenarios "
             "(`debye_slab`, `sigma_e_drude_slab`, `anisotropic_slab`, `kerr_slab`, "
             "`modulated_slab`, `graphene_sheet`) build and export but have not been "
             "cloud-run (Tidy3D runs are cache-gated), so they carry no metric row yet.",

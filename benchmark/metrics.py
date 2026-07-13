@@ -3,6 +3,32 @@ from __future__ import annotations
 import numpy as np
 
 
+def significant_field_mask(reference: np.ndarray, *, relative_floor: float = 0.1) -> np.ndarray:
+    """Select the physically excited support of a reference complex field."""
+    values = np.abs(np.asarray(reference, dtype=np.complex128))
+    peak = float(np.max(values)) if values.size else 0.0
+    if peak == 0.0:
+        return np.ones(values.shape, dtype=bool)
+    return values >= float(relative_floor) * peak
+
+
+def phase_align_field(
+    actual: np.ndarray,
+    reference: np.ndarray,
+    *,
+    mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, complex]:
+    """Remove one global phasor-reference offset without changing amplitude."""
+    actual_array = np.asarray(actual, dtype=np.complex128)
+    reference_array = np.asarray(reference, dtype=np.complex128)
+    if actual_array.shape != reference_array.shape:
+        raise ValueError("Global phase alignment requires equal field shapes.")
+    selected = np.ones(actual_array.shape, dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+    overlap = np.vdot(actual_array[selected], reference_array[selected])
+    phase = 1.0 + 0.0j if abs(overlap) == 0.0 else overlap / abs(overlap)
+    return actual_array * phase, complex(phase)
+
+
 def field_l2_error(a: np.ndarray, b: np.ndarray) -> float:
     a = np.asarray(a, dtype=np.complex128)
     b = np.asarray(b, dtype=np.complex128)
@@ -171,5 +197,7 @@ __all__ = [
     "field_max_error",
     "flux_incident_normalized_error",
     "flux_relative_error",
+    "phase_align_field",
     "plane_coord_keys",
+    "significant_field_mask",
 ]

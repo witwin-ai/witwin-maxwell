@@ -27,8 +27,8 @@ def test_fdtd_cpml_profiles_and_boundary_attenuation():
     )
     scene.add_monitor(mw.PointMonitor("center", (0.0, 0.0, 0.0), fields=("Ez",)))
     scene.add_monitor(mw.PointMonitor("inner_x", (0.24, 0.0, 0.0), fields=("Ez",)))
-    scene.add_monitor(mw.PointMonitor("pml_mid_x", (0.40, 0.0, 0.0), fields=("Ez",)))
-    scene.add_monitor(mw.PointMonitor("pml_outer_x", (0.56, 0.0, 0.0), fields=("Ez",)))
+    scene.add_monitor(mw.PointMonitor("pml_mid_x", (0.72, 0.0, 0.0), fields=("Ez",)))
+    scene.add_monitor(mw.PointMonitor("pml_outer_x", (0.88, 0.0, 0.0), fields=("Ez",)))
 
     sim = mw.Simulation.fdtd(
         scene,
@@ -47,8 +47,10 @@ def test_fdtd_cpml_profiles_and_boundary_attenuation():
     assert fdtd.cpml_kappa_h_x.shape == (compiled_scene.Nx - 1,)
     assert fdtd.cpml_kappa_h_y.shape == (compiled_scene.Ny - 1,)
     assert fdtd.cpml_kappa_h_z.shape == (compiled_scene.Nz - 1,)
-    assert float(fdtd.cpml_kappa_e_x.max()) > 1.0
-    assert float(fdtd.cpml_kappa_h_x.max()) > 1.0
+    assert torch.all(fdtd.cpml_kappa_e_x == 1.0)
+    assert torch.all(fdtd.cpml_kappa_h_x == 1.0)
+    assert torch.any(fdtd.cpml_c_e_x != 0.0)
+    assert torch.any(fdtd.cpml_c_h_x != 0.0)
 
     steps = calculate_required_steps(
         frequency=1e9,

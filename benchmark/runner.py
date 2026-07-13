@@ -21,15 +21,22 @@ from benchmark.metrics import (
     field_l2_error,
     field_max_error,
     flux_incident_normalized_error,
+    phase_align_field,
     plane_coord_keys,
+    significant_field_mask,
 )
 from benchmark.models import ScenarioMetrics
 from benchmark.paths import ensure_directories
-from benchmark.plotting import save_field_comparison_plot, save_material_source_plot
+from benchmark.plotting import (
+    save_complex_field_diagnostic_plot,
+    save_field_comparison_plot,
+    save_material_source_plot,
+)
 from benchmark.report import write_results_markdown
 from benchmark.scenes import SCENARIOS, build_scene
 from benchmark.tidy3d_scene import benchmark_physical_bounds, prepare_tidy3d_benchmark_scene
 from witwin.maxwell.adapters.tidy3d import _M_TO_UM
+from witwin.maxwell.fdtd.excitation.spatial import resolve_injection_axis, soft_plane_wave_coordinate
 from witwin.maxwell.fdtd.observers import _compute_plane_flux
 from witwin.maxwell.monitors import required_flux_fields
 from witwin.maxwell.simulation import TimeConfig, Simulation
@@ -102,7 +109,8 @@ def _stable_serialize(value):
 def _benchmark_cache_key(scene: mw.Scene, frequencies: tuple[float, ...], run_time_factor: float) -> str:
     tidy_scene = prepare_tidy3d_benchmark_scene(scene)
     payload = {
-        "version": 4,
+        "version": 5,
+        "courant": _maxwell_courant(scene, frequencies),
         "frequencies": [float(frequency) for frequency in frequencies],
         "run_time_factor": float(run_time_factor),
         "domain": _stable_serialize(tidy_scene.domain),
@@ -193,6 +201,7 @@ def _align_plane_monitor_fields(
     component: str,
     maxwell_field,
     tidy3d_field,
+    return_coords: bool = False,
 ):
     maxwell_coords = _component_plane_coords(maxwell_monitor, component)
     tidy3d_coords = _component_plane_coords(tidy3d_monitor, component)
@@ -214,16 +223,49 @@ def _align_plane_monitor_fields(
             )
     if maxwell_coords is not None and tidy3d_coords is not None:
         try:
-            aligned_maxwell, aligned_tidy3d, _ = align_plane_fields(
+            aligned_maxwell, aligned_tidy3d, aligned_coords = align_plane_fields(
                 maxwell_field,
                 tidy3d_field,
                 source_coords=maxwell_coords,
                 reference_coords=tidy3d_coords,
             )
+            if return_coords:
+                return aligned_maxwell, aligned_tidy3d, aligned_coords
             return aligned_maxwell, aligned_tidy3d
         except ValueError:
             pass
-    return align_arrays(maxwell_field, tidy3d_field)
+    aligned_maxwell, aligned_tidy3d = align_arrays(maxwell_field, tidy3d_field)
+    if return_coords:
+        return aligned_maxwell, aligned_tidy3d, None
+    return aligned_maxwell, aligned_tidy3d
+
+
+def _comparison_fields(scene: mw.Scene, monitor_axis: str, coords, maxwell_field, tidy3d_field):
+    """Apply convention-invariant alignment needed for soft-plane-wave metrics."""
+    plane_waves = [source for source in scene.sources if isinstance(source, mw.PlaneWave)]
+    if len(plane_waves) != 1 or getattr(plane_waves[0], "injection", "soft") != "soft":
+        return maxwell_field, tidy3d_field
+
+    source = plane_waves[0]
+    injection_axis = resolve_injection_axis(source.direction, source.injection_axis)
+    support = np.ones(np.asarray(tidy3d_field).shape, dtype=bool)
+    coord_names = _PLANE_COORD_NAMES.get(monitor_axis, ())
+    if coords is not None and injection_axis in coord_names:
+        direction_component = float(source.direction["xyz".index(injection_axis)])
+        source_position = soft_plane_wave_coordinate(scene, injection_axis, direction_component)
+        propagation_coords = np.asarray(coords[coord_names.index(injection_axis)], dtype=np.float64)
+        downstream = (
+            propagation_coords > source_position
+            if direction_component >= 0.0
+            else propagation_coords < source_position
+        )
+        shape = [1, 1]
+        shape[coord_names.index(injection_axis)] = propagation_coords.size
+        support &= downstream.reshape(shape)
+    if not np.any(support):
+        support = significant_field_mask(tidy3d_field)
+    phase_aligned, _ = phase_align_field(maxwell_field, tidy3d_field, mask=support)
+    return phase_aligned[support], np.asarray(tidy3d_field)[support]
 
 
 def _take_plane_window(values, indices_a: np.ndarray, indices_b: np.ndarray) -> np.ndarray:
@@ -231,6 +273,10 @@ def _take_plane_window(values, indices_a: np.ndarray, indices_b: np.ndarray) -> 
     windowed = np.take(array, indices_a, axis=-2)
     windowed = np.take(windowed, indices_b, axis=-1)
     return windowed
+
+
+def _coordinate_tolerance(coords: np.ndarray, bounds: tuple[float, float]) -> float:
+    return 1e-7 * max(1.0, float(np.max(np.abs(coords))), abs(bounds[0]), abs(bounds[1]))
 
 
 def _crop_plane_field_to_physical_bounds(
@@ -245,8 +291,10 @@ def _crop_plane_field_to_physical_bounds(
     tangential_bounds = tuple(physical_bounds["xyz".index(coord_name)] for coord_name in coord_names)
     coords_a = _to_numpy(coords[0], dtype=np.float64)
     coords_b = _to_numpy(coords[1], dtype=np.float64)
-    mask_a = (coords_a >= tangential_bounds[0][0] - 1e-12) & (coords_a <= tangential_bounds[0][1] + 1e-12)
-    mask_b = (coords_b >= tangential_bounds[1][0] - 1e-12) & (coords_b <= tangential_bounds[1][1] + 1e-12)
+    tolerance_a = _coordinate_tolerance(coords_a, tangential_bounds[0])
+    tolerance_b = _coordinate_tolerance(coords_b, tangential_bounds[1])
+    mask_a = (coords_a >= tangential_bounds[0][0] - tolerance_a) & (coords_a <= tangential_bounds[0][1] + tolerance_a)
+    mask_b = (coords_b >= tangential_bounds[1][0] - tolerance_b) & (coords_b <= tangential_bounds[1][1] + tolerance_b)
     if not np.any(mask_a) or not np.any(mask_b):
         return _to_numpy(values), (coords_a, coords_b)
 
@@ -268,8 +316,10 @@ def _benchmark_flux_from_payload(payload: dict[str, Any], scene: mw.Scene):
     tangential_bounds = tuple(physical_bounds["xyz".index(coord_name)] for coord_name in coord_names)
     coords_a = _to_numpy(payload[coord_names[0]], dtype=np.float64)
     coords_b = _to_numpy(payload[coord_names[1]], dtype=np.float64)
-    mask_a = (coords_a >= tangential_bounds[0][0] - 1e-12) & (coords_a <= tangential_bounds[0][1] + 1e-12)
-    mask_b = (coords_b >= tangential_bounds[1][0] - 1e-12) & (coords_b <= tangential_bounds[1][1] + 1e-12)
+    tolerance_a = _coordinate_tolerance(coords_a, tangential_bounds[0])
+    tolerance_b = _coordinate_tolerance(coords_b, tangential_bounds[1])
+    mask_a = (coords_a >= tangential_bounds[0][0] - tolerance_a) & (coords_a <= tangential_bounds[0][1] + tolerance_a)
+    mask_b = (coords_b >= tangential_bounds[1][0] - tolerance_b) & (coords_b <= tangential_bounds[1][1] + tolerance_b)
     if not np.any(mask_a) or not np.any(mask_b):
         return payload.get("flux")
 
@@ -417,13 +467,39 @@ def _extract_maxwell_monitors(result, scene) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _compute_num_steps(scene: mw.Scene, run_time_factor: float) -> int:
+def _maxwell_courant(scene: mw.Scene, frequencies: tuple[float, ...]) -> float:
+    c0 = 299_792_458.0
+    from witwin.maxwell.scene import prepare_scene
+
+    prepared_scene = prepare_scene(scene.clone(device="cpu"))
+    min_dx = float(prepared_scene.dx_primal64.min())
+    min_dy = float(prepared_scene.dy_primal64.min())
+    min_dz = float(prepared_scene.dz_primal64.min())
+    dt_cfl = 1.0 / (c0 * np.sqrt(1.0 / min_dx**2 + 1.0 / min_dy**2 + 1.0 / min_dz**2))
+    characteristic_frequency = max((float(value) for value in frequencies), default=0.0)
+    for source in scene.resolved_sources():
+        source_time = getattr(source, "source_time", None)
+        if source_time is not None:
+            characteristic_frequency = max(
+                characteristic_frequency,
+                float(source_time.characteristic_frequency),
+            )
+    from witwin.maxwell.fdtd.runtime.initialization import _scene_material_characteristic_frequency
+
+    characteristic_frequency = max(
+        characteristic_frequency,
+        _scene_material_characteristic_frequency(scene),
+    )
+    if characteristic_frequency <= 0.0:
+        return 0.99
+    return min(0.99, (1.0 / (30.0 * characteristic_frequency)) / dt_cfl)
+
+
+def _compute_num_steps(scene: mw.Scene, run_time_factor: float, *, dt: float) -> int:
     c0 = 299_792_458.0
     domain_size = max(bounds[1] - bounds[0] for bounds in scene.domain.bounds)
     run_time_s = run_time_factor * domain_size / c0
-    min_spacing = min(float(value) for value in scene.grid.min_spacing) if scene.grid.is_custom else min(scene.dx, scene.dy, scene.dz)
-    dt_estimate = 0.5 * min_spacing / (c0 * np.sqrt(3.0))
-    return int(np.ceil(run_time_s / dt_estimate))
+    return int(np.ceil(run_time_s / float(dt)))
 
 
 def _clone_scene(scene: mw.Scene, *, device: str) -> mw.Scene:
@@ -432,7 +508,6 @@ def _clone_scene(scene: mw.Scene, *, device: str) -> mw.Scene:
 
 def _run_maxwell(scene: mw.Scene, *, frequencies: tuple[float, ...], run_time_factor: float, solver: str = "fdtd"):
     scene = _clone_scene(scene, device="cuda")
-    n_steps = _compute_num_steps(scene, run_time_factor)
     source = scene.sources[0] if scene.sources else None
     normalize_source = isinstance(source, mw.PlaneWave) and getattr(source, "injection", "soft") == "soft"
     start = time.perf_counter()
@@ -444,10 +519,15 @@ def _run_maxwell(scene: mw.Scene, *, frequencies: tuple[float, ...], run_time_fa
             solver=mw.GMRES(solver_type="sqmr", preconditioner="ssor", precision="double"),
         ).run()
     elif solver == "fdtd":
-        result = Simulation.fdtd(
-            scene, frequencies=frequencies, run_time=TimeConfig(time_steps=n_steps),
+        simulation = Simulation.fdtd(
+            scene, frequencies=frequencies, run_time=TimeConfig(time_steps=1),
             spectral_sampler=mw.SpectralSampler(normalize_source=normalize_source),
-        ).run()
+        )
+        prepared = simulation.prepare()
+        simulation.config.run_time = TimeConfig(
+            time_steps=_compute_num_steps(scene, run_time_factor, dt=prepared.solver.dt)
+        )
+        result = prepared.run()
     else:
         raise ValueError(f"Unknown benchmark solver {solver!r}.")
     elapsed = time.perf_counter() - start
@@ -490,7 +570,11 @@ def _load_or_run_tidy3d(name: str, scene: mw.Scene, frequencies: tuple[float, ..
     domain_size = max(bounds[1] - bounds[0] for bounds in scene.domain.bounds)
     run_time = run_time_factor * domain_size / c0
     td_scene = prepare_tidy3d_benchmark_scene(scene)
-    td_sim = td_scene.to_tidy3d(frequencies=frequencies, run_time=run_time)
+    td_sim = td_scene.to_tidy3d(
+        frequencies=frequencies,
+        run_time=run_time,
+        courant=_maxwell_courant(scene, frequencies),
+    )
     print(f"  Tidy3D: estimating reference cost for {name}")
     job = web.Job(simulation=td_sim, task_name=f"maxwell_benchmark_{name}", verbose=False)
     estimated_cost = float(job.estimate_cost(verbose=False))
@@ -563,9 +647,17 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             tidy3d_field = _select_monitor_plane_field(
                 tidy3d_monitors[monitor_name], component,
                 tidy3d_monitors[monitor_name]["fields"][component], freq_index=freq_index)
-            maxwell_field, tidy3d_field = _align_plane_monitor_fields(
+            maxwell_field, tidy3d_field, comparison_coords = _align_plane_monitor_fields(
                 scene, maxwell_monitors[monitor_name], tidy3d_monitors[monitor_name],
-                component=component, maxwell_field=maxwell_field, tidy3d_field=tidy3d_field)
+                component=component, maxwell_field=maxwell_field, tidy3d_field=tidy3d_field,
+                return_coords=True)
+            maxwell_field, tidy3d_field = _comparison_fields(
+                scene,
+                maxwell_monitors[monitor_name].get("axis") or tidy3d_monitors[monitor_name].get("axis"),
+                comparison_coords,
+                maxwell_field,
+                tidy3d_field,
+            )
             per_frequency.append({
                 "frequency": float(frequency),
                 "field_l2": field_l2_error(maxwell_field, tidy3d_field),
@@ -588,6 +680,14 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             maxwell_monitors=maxwell_monitors,
             tidy3d_monitors=tidy3d_monitors,
         )
+        diagnostic_plot = save_complex_field_diagnostic_plot(
+            scene=scene,
+            scenario_name=name,
+            monitor_name=monitor_name,
+            component=component,
+            maxwell_monitor=maxwell_monitors[monitor_name],
+            tidy3d_monitor=tidy3d_monitors[monitor_name],
+        )
 
         result = ScenarioMetrics(
             name=name,
@@ -603,6 +703,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             compared_component=component,
             material_source_plot=material_source_plot,
             field_plot=field_plot,
+            diagnostic_plot=diagnostic_plot,
             updated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
             per_frequency=per_frequency,
         )

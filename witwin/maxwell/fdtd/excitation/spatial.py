@@ -133,7 +133,7 @@ def soft_plane_wave_region_spacing(scene, *, injection_axis: str, plane_index: i
 
 def plane_center(scene, axis: str, plane_coordinate: float, *, device, dtype):
     scene = prepare_scene(scene)
-    bounds = scene.domain_range
+    bounds = scene.domain.domain_range
     center = torch.tensor(
         [
             0.5 * (bounds[0] + bounds[1]),

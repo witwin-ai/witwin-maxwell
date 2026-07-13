@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import torch
 
 from ...sources import POINT_DIPOLE_IDEAL_PROFILE_SCALE, POINT_DIPOLE_REFERENCE_WIDTH
 from .spatial import (
-    physical_interior_indices,
     beam_profile_from_source,
     plane_center,
     plane_wave_profile,
@@ -672,8 +673,8 @@ def _prepare_plane_wave_surface_source(solver, source, *, source_index):
     lower = []
     upper = []
     aperture_bounds = []
+    computational_range = solver.scene.domain_range
     for axis in "xyz":
-        physical_lo, physical_hi = physical_interior_indices(solver.scene, axis)
         if axis == injection_axis:
             if direction_sign > 0:
                 lo = plane_index
@@ -685,13 +686,13 @@ def _prepare_plane_wave_surface_source(solver, source, *, source_index):
             plane_coord = float(axis_coords[plane_index].item())
             aperture_bounds.append((plane_coord, plane_coord))
         else:
-            axis_coords = {"x": solver.scene.x, "y": solver.scene.y, "z": solver.scene.z}[axis]
             lo = 0
             hi = {"x": solver.Nx, "y": solver.Ny, "z": solver.Nz}[axis] - 1
+            range_offset = 2 * _AXIS_TO_INDEX[axis]
             aperture_bounds.append(
                 (
-                    float(axis_coords[physical_lo].item()),
-                    float(axis_coords[physical_hi].item()),
+                    float(computational_range[range_offset]),
+                    float(computational_range[range_offset + 1]),
                 )
             )
         lower.append(int(lo))
@@ -722,6 +723,20 @@ def _prepare_plane_wave_surface_source(solver, source, *, source_index):
         phase_speed = source_omega / k_numeric
 
     power_scale = _plane_wave_power_scale(source, tuple(aperture_bounds), injection_axis)
+    # A native Yee-plane Poynting monitor co-locates the tangential E/H pair by
+    # interpolating across their half-cell separation along the injection axis.
+    # For the injected discrete plane wave this reduces the measured normal power
+    # by cos(k_axis * delta_axis / 2).  Normalize by that derived factor so a unit
+    # PlaneWave carries one watt through the full computational aperture, matching
+    # Tidy3D's infinite-plane source convention without an empirical multiplier.
+    k_axis = k_numeric * float(direction[axis_index])
+    discrete_power_factor = math.cos(0.5 * k_axis * float(deltas[injection_axis]))
+    if discrete_power_factor <= 0.0:
+        raise ValueError(
+            "PlaneWave grid is too coarse for positive discrete normal power; "
+            "refine the injection-axis spacing."
+        )
+    power_scale /= math.sqrt(discrete_power_factor)
     electric_vector = {
         "Ex": power_scale * float(source["polarization"][0]),
         "Ey": power_scale * float(source["polarization"][1]),
