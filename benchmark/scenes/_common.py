@@ -22,6 +22,7 @@ def base_scene() -> mw.Scene:
         ),
         grid=mw.GridSpec.uniform(DX),
         boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
+        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
         device="cpu",
     )
 

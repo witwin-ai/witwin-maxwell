@@ -35,7 +35,7 @@ from benchmark.plotting import (
 from benchmark.report import write_results_markdown
 from benchmark.scenes import SCENARIOS, build_scene
 from benchmark.tidy3d_scene import benchmark_physical_bounds, prepare_tidy3d_benchmark_scene
-from witwin.maxwell.adapters.tidy3d import _M_TO_UM
+from witwin.maxwell.adapters.tidy3d import _M_TO_UM, _direction_to_angles
 from witwin.maxwell.fdtd.excitation.spatial import resolve_injection_axis, soft_plane_wave_coordinate
 from witwin.maxwell.fdtd.observers import _compute_plane_flux
 from witwin.maxwell.monitors import required_flux_fields
@@ -49,6 +49,10 @@ _PLANE_COORD_NAMES = {
 }
 MAX_TIDY3D_COST_PER_SCENARIO = 2.0
 _MODE_EXPORT_CONTRACT_VERSION = 1
+_MESH_EXPORT_CONTRACT_VERSION = 1
+_MATERIAL_EXPORT_CONTRACT_VERSION = 1
+_DIRECTIONAL_SOURCE_EXPORT_CONTRACT_VERSION = 1
+_MESH_EXPORT_KINDS = {"torus", "pyramid", "prism", "hollow_box", "mesh", "poly_slab"}
 
 
 def _to_numpy(value, *, dtype=None) -> np.ndarray:
@@ -107,6 +111,76 @@ def _stable_serialize(value):
     return value
 
 
+def _strip_display_names(value):
+    """Drop declarative names that do not change source physics."""
+    if isinstance(value, dict):
+        return {
+            key: _strip_display_names(item)
+            for key, item in value.items()
+            if key != "name"
+        }
+    if isinstance(value, list):
+        return [_strip_display_names(item) for item in value]
+    return value
+
+
+def _incident_source_payload(source):
+    """Serialize source physics that determines vacuum incident power."""
+    payload = _strip_display_names(_stable_serialize(source))
+    if isinstance(source, mw.PlaneWave):
+        # PlaneWave validates a unit transverse polarization, and both solvers
+        # normalize the complete vector to one incident-power convention. The
+        # vacuum reference power is therefore independent of its transverse
+        # orientation, although the scattered field is not.
+        payload["polarization"] = "unit_transverse"
+    return payload
+
+
+def _directional_source_uses_export_contract(source) -> bool:
+    """Whether a source depends on the explicit direction/polarization mapping."""
+    if not isinstance(source, (mw.PlaneWave, mw.GaussianBeam, mw.AstigmaticGaussianBeam)):
+        return False
+    injection_axis = resolve_injection_axis(source.direction, source.injection_axis)
+    axis_idx = "xyz".index(injection_axis)
+    pol_angle, angle_theta, _ = _direction_to_angles(
+        source.direction, axis_idx, source.polarization
+    )
+    return abs(pol_angle) > 1e-12 or abs(angle_theta) > 1e-12
+
+
+def _material_uses_export_contract(material) -> bool:
+    """Whether a material depends on revised dispersion parameter lowering."""
+    debye_poles = tuple(getattr(material, "debye_poles", ()))
+    drude_poles = tuple(getattr(material, "drude_poles", ()))
+    lorentz_poles = tuple(getattr(material, "lorentz_poles", ()))
+    pole_family_count = sum(
+        bool(poles) for poles in (debye_poles, drude_poles, lorentz_poles)
+    )
+    return (
+        bool(debye_poles)
+        or pole_family_count > 1
+        or any(float(getattr(pole, "gamma", 0.0)) != 0.0 for pole in lorentz_poles)
+    )
+
+
+def _incident_scene_signature(scene: mw.Scene, frequencies: tuple[float, ...]) -> str:
+    """Hash the geometry-independent physics that fixes plane-wave incident power."""
+    tidy_scene = prepare_tidy3d_benchmark_scene(scene)
+    payload = {
+        "version": 1,
+        "courant": _maxwell_courant(scene, frequencies),
+        "frequencies": [float(frequency) for frequency in frequencies],
+        "domain": _stable_serialize(tidy_scene.domain),
+        "grid": _stable_serialize(tidy_scene.grid),
+        "boundary": _stable_serialize(tidy_scene.boundary),
+        "symmetry": _stable_serialize(tidy_scene.symmetry),
+        "source_types": [type(source).__qualname__ for source in tidy_scene.sources],
+        "sources": [_incident_source_payload(source) for source in tidy_scene.sources],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _benchmark_cache_key(scene: mw.Scene, frequencies: tuple[float, ...], run_time_factor: float) -> str:
     tidy_scene = prepare_tidy3d_benchmark_scene(scene)
     payload = {
@@ -128,6 +202,23 @@ def _benchmark_cache_key(scene: mw.Scene, frequencies: tuple[float, ...], run_ti
         # Mode candidate-count and polarization-ordering changes alter the SaaS result
         # without changing the declarative Scene, so track that export contract explicitly.
         payload["mode_export_contract_version"] = _MODE_EXPORT_CONTRACT_VERSION
+    if any(
+        getattr(structure.geometry, "kind", None) in _MESH_EXPORT_KINDS
+        for structure in tidy_scene.structures
+    ):
+        # Primitive tessellation changes alter Tidy3D voxelization without changing
+        # the declarative geometry parameters serialized above.
+        payload["mesh_export_contract_version"] = _MESH_EXPORT_CONTRACT_VERSION
+    if any(_material_uses_export_contract(structure.material) for structure in tidy_scene.structures):
+        # Debye time constants and Lorentz damping use different parameter
+        # conventions in Tidy3D, so conversion changes must invalidate SaaS data.
+        payload["material_export_contract_version"] = _MATERIAL_EXPORT_CONTRACT_VERSION
+    if any(_directional_source_uses_export_contract(source) for source in tidy_scene.sources):
+        # Direction/polarization conversion changes alter the SaaS launch field
+        # without changing the declarative source vectors serialized above.
+        payload["directional_source_export_contract_version"] = (
+            _DIRECTIONAL_SOURCE_EXPORT_CONTRACT_VERSION
+        )
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -280,10 +371,16 @@ def _comparison_fields(scene: mw.Scene, monitor_axis: str, coords, maxwell_field
     coord_names = _PLANE_COORD_NAMES.get(monitor_axis, ())
     if coords is not None and injection_axis in coord_names:
         propagation_coords = np.asarray(coords[coord_names.index(injection_axis)], dtype=np.float64)
+        deltas = np.diff(propagation_coords)
+        positive_deltas = deltas[deltas > 0.0]
+        # The two solvers implement a soft surface source on different Yee
+        # stencils. Exclude the first downstream cell where the impressed source
+        # itself, rather than propagated field, dominates the difference slice.
+        source_guard = float(np.median(positive_deltas)) if positive_deltas.size else 0.0
         downstream = (
-            propagation_coords > source_position
+            propagation_coords > source_position + source_guard
             if direction_component >= 0.0
-            else propagation_coords < source_position
+            else propagation_coords < source_position - source_guard
         )
         shape = [1, 1]
         shape[coord_names.index(injection_axis)] = propagation_coords.size
@@ -624,7 +721,40 @@ def _load_or_run_tidy3d(name: str, scene: mw.Scene, frequencies: tuple[float, ..
     return _rescale_tidy3d_fields(monitors), False
 
 
-def _pick_flux_error(maxwell_monitors: dict[str, dict], tidy3d_monitors: dict[str, dict]) -> float | None:
+def _cached_plane_wave_incident_power(scene: mw.Scene, frequencies: tuple[float, ...]) -> float | None:
+    """Load incident power from the canonical empty scene when its launch physics matches."""
+    reference_name = "planewave_vacuum"
+    reference_scenario = SCENARIOS.get(reference_name)
+    if reference_scenario is None or tuple(reference_scenario.frequencies) != tuple(frequencies):
+        return None
+    reference_scene = build_scene(reference_name)
+    if _incident_scene_signature(scene, frequencies) != _incident_scene_signature(reference_scene, frequencies):
+        return None
+    try:
+        reference_monitors = load_tidy3d_result(
+            reference_name,
+            expected_cache_key=_benchmark_cache_key(
+                reference_scene,
+                reference_scenario.frequencies,
+                reference_scenario.run_time_factor,
+            ),
+        )
+    except (FileNotFoundError, ValueError):
+        return None
+    powers = [
+        float(np.max(np.abs(np.asarray(monitor["flux"]).ravel())))
+        for monitor in reference_monitors.values()
+        if "flux" in monitor and np.asarray(monitor["flux"]).size
+    ]
+    return max(powers) if powers else None
+
+
+def _pick_flux_error(
+    maxwell_monitors: dict[str, dict],
+    tidy3d_monitors: dict[str, dict],
+    *,
+    incident_power: float | None = None,
+) -> float | None:
     pairs = []
     for name, monitor in maxwell_monitors.items():
         if "flux" not in monitor or name not in tidy3d_monitors or "flux" not in tidy3d_monitors[name]:
@@ -637,7 +767,8 @@ def _pick_flux_error(maxwell_monitors: dict[str, dict], tidy3d_monitors: dict[st
         pairs.append((maxwell_flux[:common], tidy3d_flux[:common]))
     if not pairs:
         return None
-    incident_power = max(float(np.max(np.abs(reference))) for _, reference in pairs)
+    if incident_power is None:
+        incident_power = max(float(np.max(np.abs(reference))) for _, reference in pairs)
     return max(
         flux_incident_normalized_error(actual, reference, incident_power=incident_power)
         for actual, reference in pairs
@@ -699,7 +830,11 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
         l2_error = max(item["field_l2"] for item in per_frequency)
         linf_error = max(item["field_linf"] for item in per_frequency)
         corr = min(item["field_corr"] for item in per_frequency)
-        flux_error = _pick_flux_error(maxwell_monitors, tidy3d_monitors)
+        flux_error = _pick_flux_error(
+            maxwell_monitors,
+            tidy3d_monitors,
+            incident_power=_cached_plane_wave_incident_power(scene, scenario.frequencies),
+        )
 
         material_source_plot = save_material_source_plot(
             scene=scene,

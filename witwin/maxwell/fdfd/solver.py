@@ -12,7 +12,7 @@ from tqdm import tqdm
 from ..compiler.materials import _scene_has_dispersive_material
 from ..compiler.sources import compile_fdfd_sources
 from ..scene import prepare_scene
-from ..sources import CW, POINT_DIPOLE_IDEAL_PROFILE_SCALE, POINT_DIPOLE_REFERENCE_WIDTH, PointDipole
+from ..sources import CW, POINT_DIPOLE_REFERENCE_WIDTH, PointDipole
 from .plotting import (
     plot_cross_section as plot_cross_section_impl,
     plot_isotropic_3views as plot_isotropic_3views_impl,
@@ -21,6 +21,11 @@ from .postprocess import (
     get_field_raw as get_field_raw_impl,
     interpolate_yee_to_center as interpolate_yee_to_center_impl,
 )
+
+
+# The FDFD ideal-delta path is calibrated against its Gaussian reference
+# profile independently of the FDTD source-injection normalization.
+_FDFD_IDEAL_POINT_DIPOLE_PROFILE_SCALE = 0.75
 
 # Iterative-refinement steps for the cuDSS direct solver. The complex64 LU of
 # the strongly PML-graded operator loses several digits; refinement recovers
@@ -111,7 +116,7 @@ def _ideal_point_dipole_mass_gpu(x_coords, y_coords, z_coords, position):
         + (local_z[None, None, :] - position[2]) ** 2
     )
     reference_width_sq = 2.0 * POINT_DIPOLE_REFERENCE_WIDTH ** 2
-    return POINT_DIPOLE_IDEAL_PROFILE_SCALE * cp.exp(-dist_sq / reference_width_sq).sum()
+    return _FDFD_IDEAL_POINT_DIPOLE_PROFILE_SCALE * cp.exp(-dist_sq / reference_width_sq).sum()
 
 
 def _require_cuda_scene(scene):

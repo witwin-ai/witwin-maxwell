@@ -177,50 +177,49 @@ def _dispersive_medium(material, td, nonlinear_spec=None):
 
     if has_lorentz and not has_debye and not has_drude:
         coeffs = [
-            (pole.delta_eps, pole.resonance_frequency, pole.gamma)
+            # Tidy3D writes the Lorentz denominator as
+            # f0^2 - f^2 - 2j*f*delta, while Maxwell stores gamma in
+            # f0^2 - f^2 - j*f*gamma after converting angular frequency to Hz.
+            (pole.delta_eps, pole.resonance_frequency, 0.5 * pole.gamma)
             for pole in material.lorentz_poles
         ]
         return td.Lorentz(eps_inf=material.eps_r, coeffs=coeffs, **extra)
 
     if has_debye and not has_drude and not has_lorentz:
         coeffs = [
-            (pole.delta_eps, pole.tau)
+            # Tidy3D uses 1 - j*f*tau, whereas Maxwell's DebyePole uses
+            # 1 - j*omega*tau. Scale tau so both describe the same response.
+            (pole.delta_eps, 2.0 * math.pi * pole.tau)
             for pole in material.debye_poles
         ]
         return td.Debye(eps_inf=material.eps_r, coeffs=coeffs, **extra)
 
-    # Mixed pole types to PoleResidue
+    # Mixed pole types to PoleResidue. Let Tidy3D lower each specialized
+    # medium into its own PoleResidue representation so its sign and damping
+    # conventions remain exactly consistent with eps_model().
     poles = []
-    omega_factor = 2.0 * math.pi
     for p in material.drude_poles:
-        wp = p.plasma_frequency * omega_factor
-        g = p.gamma * omega_factor
-        a = complex(0, -g / 2)
-        c = complex(0, -wp * wp / (2.0 * g)) if g > 0 else complex(-wp * wp / 2, 0)
-        poles.append((a, c))
+        medium = td.Drude(
+            eps_inf=1.0,
+            coeffs=((p.plasma_frequency, p.gamma),),
+        )
+        poles.extend(medium.pole_residue.poles)
     for p in material.lorentz_poles:
-        w0 = p.resonance_frequency * omega_factor
-        g = p.gamma * omega_factor
-        disc = g * g / 4.0 - w0 * w0
-        if disc >= 0:
-            sq = math.sqrt(disc)
-            a1 = complex(0, -g / 2 + sq)
-            a2 = complex(0, -g / 2 - sq)
-        else:
-            sq = math.sqrt(-disc)
-            a1 = complex(sq, -g / 2)
-            a2 = complex(-sq, -g / 2)
-        c_val = p.delta_eps * w0 * w0 / (2.0 * (a1 - a2)) if abs(a1 - a2) > 0 else 0
-        poles.append((a1, complex(c_val)))
-        poles.append((a2, complex(-c_val)))
+        medium = td.Lorentz(
+            eps_inf=1.0,
+            coeffs=((p.delta_eps, p.resonance_frequency, 0.5 * p.gamma),),
+            allow_gain=bool(p.allow_gain),
+        )
+        poles.extend(medium.pole_residue.poles)
     for p in material.debye_poles:
-        tau = p.tau
-        a = complex(0, -1.0 / tau)
-        c = complex(0, p.delta_eps / tau)
-        poles.append((a, c))
+        medium = td.Debye(
+            eps_inf=1.0,
+            coeffs=((p.delta_eps, 2.0 * math.pi * p.tau),),
+        )
+        poles.extend(medium.pole_residue.poles)
 
     extra = {} if nonlinear_spec is None else {"nonlinear_spec": nonlinear_spec}
-    return td.PoleResidue(eps_inf=material.eps_r, poles=poles, **extra)
+    return td.PoleResidue(eps_inf=material.eps_r, poles=tuple(poles), **extra)
 
 
 def _axis_isotropic_material(material, axis_index: int):
@@ -908,7 +907,9 @@ def _tfsf_source(source, scene, td, s):
     injection_axis = resolve_injection_axis(direction, source.injection_axis)
     axis_idx = _axis_name_to_index(injection_axis)
     inject_dir = "+" if direction[axis_idx] > 0 else "-"
-    pol_angle, angle_theta, angle_phi = _direction_to_angles(direction, axis_idx)
+    pol_angle, angle_theta, angle_phi = _direction_to_angles(
+        direction, axis_idx, source.polarization
+    )
 
     if injection.mode == "slab":
         lo, hi = injection.axis_bounds
@@ -1027,7 +1028,9 @@ def _convert_source(source, scene, td, s, frequencies=None):
         center[axis_idx] = soft_plane_wave_coordinate(scene, injection_axis, float(direction[axis_idx])) * s
         size[axis_idx] = 0.0
 
-        pol_angle, angle_theta, angle_phi = _direction_to_angles(direction, axis_idx)
+        pol_angle, angle_theta, angle_phi = _direction_to_angles(
+            direction, axis_idx, source.polarization
+        )
 
         return td.PlaneWave(
             center=tuple(center),
@@ -1064,7 +1067,9 @@ def _convert_source(source, scene, td, s, frequencies=None):
         size = [(hi - lo) * s for lo, hi in domain_bounds]
         size[dominant_axis] = 0.0
 
-        pol_angle, angle_theta, angle_phi = _direction_to_angles(direction, dominant_axis)
+        pol_angle, angle_theta, angle_phi = _direction_to_angles(
+            direction, dominant_axis, source.polarization
+        )
 
         if isinstance(source, AstigmaticGaussianBeam):
             return td.AstigmaticGaussianBeam(
@@ -1163,33 +1168,69 @@ def _convert_source(source, scene, td, s, frequencies=None):
     )
 
 
-def _direction_to_angles(direction, dominant_axis):
-    """Compute Tidy3D (pol_angle, angle_theta, angle_phi) from direction vector."""
-    dx, dy, dz = direction
-    norm = math.sqrt(dx * dx + dy * dy + dz * dz)
+def _direction_to_angles(direction, dominant_axis, polarization=None):
+    """Compute Tidy3D source angles from a propagation and polarization vector.
+
+    Tidy3D defines its angles in a local frame whose normal is the injection
+    axis. Its ``direction='-'`` option reverses the complete propagation vector,
+    while ``pol_angle`` rotates the electric field from the local P basis toward
+    the S basis. Expressing both Maxwell vectors in that frame preserves
+    arbitrary transverse polarization for every injection axis and sign.
+    """
+    direction_vector = np.asarray(direction, dtype=np.float64)
+    norm = float(np.linalg.norm(direction_vector))
     if norm < 1e-15:
         return 0.0, 0.0, 0.0
-    dx, dy, dz = dx / norm, dy / norm, dz / norm
+    direction_vector /= norm
 
-    tol = 1e-6
-    if dominant_axis == 0 and abs(dy) < tol and abs(dz) < tol:
-        return 0.0, 0.0, 0.0
-    if dominant_axis == 1 and abs(dx) < tol and abs(dz) < tol:
-        return 0.0, 0.0, 0.0
-    if dominant_axis == 2 and abs(dx) < tol and abs(dy) < tol:
-        return 0.0, 0.0, 0.0
-
-    if dominant_axis == 2:
-        angle_theta = math.acos(abs(dz))
-        angle_phi = math.atan2(dy, dx)
-    elif dominant_axis == 0:
-        angle_theta = math.acos(abs(dx))
-        angle_phi = math.atan2(dz, dy)
+    tangential_axes = [axis for axis in range(3) if axis != dominant_axis]
+    direction_sign = 1.0 if direction_vector[dominant_axis] >= 0.0 else -1.0
+    local_direction = np.array(
+        (
+            direction_vector[tangential_axes[0]] / direction_sign,
+            direction_vector[tangential_axes[1]] / direction_sign,
+            direction_vector[dominant_axis] / direction_sign,
+        ),
+        dtype=np.float64,
+    )
+    angle_theta = math.acos(float(np.clip(local_direction[2], -1.0, 1.0)))
+    if math.sin(angle_theta) < 1e-12:
+        angle_phi = 0.0
     else:
-        angle_theta = math.acos(abs(dy))
-        angle_phi = math.atan2(dx, dz)
+        angle_phi = math.atan2(float(local_direction[1]), float(local_direction[0]))
 
-    return 0.0, angle_theta, angle_phi
+    if polarization is None:
+        return 0.0, angle_theta, angle_phi
+
+    cos_theta = math.cos(angle_theta)
+    sin_theta = math.sin(angle_theta)
+    cos_phi = math.cos(angle_phi)
+    sin_phi = math.sin(angle_phi)
+    p_basis_local = np.array(
+        (cos_theta * cos_phi, cos_theta * sin_phi, -sin_theta),
+        dtype=np.float64,
+    )
+    s_basis_local = np.array((-sin_phi, cos_phi, 0.0), dtype=np.float64)
+
+    def _to_global(local_vector):
+        global_vector = np.empty(3, dtype=np.float64)
+        global_vector[dominant_axis] = local_vector[2]
+        global_vector[tangential_axes[0]] = local_vector[0]
+        global_vector[tangential_axes[1]] = local_vector[1]
+        return global_vector
+
+    polarization_vector = np.asarray(polarization, dtype=np.float64)
+    polarization_norm = float(np.linalg.norm(polarization_vector))
+    if polarization_norm < 1e-15:
+        return 0.0, angle_theta, angle_phi
+    polarization_vector /= polarization_norm
+    p_basis = _to_global(p_basis_local)
+    s_basis = _to_global(s_basis_local)
+    pol_angle = math.atan2(
+        float(np.dot(polarization_vector, s_basis)),
+        float(np.dot(polarization_vector, p_basis)),
+    )
+    return pol_angle, angle_theta, angle_phi
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import sys
 import types
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 
@@ -449,14 +450,39 @@ class TestMediumConversion:
         )
         result = _convert_material(medium, td)
         assert isinstance(result, td.Lorentz)
-        assert result.coeffs[0] == (2.0, 5e14, 1e13)
+        assert result.coeffs[0] == (2.0, 5e14, 0.5e13)
 
     def test_debye_medium(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
         medium = mw.Material.debye(eps_inf=2.0, delta_eps=1.0, tau=1e-12)
         result = _convert_material(medium, td)
         assert isinstance(result, td.Debye)
-        assert result.coeffs[0] == (1.0, 1e-12)
+        assert result.coeffs[0] == pytest.approx((1.0, 2.0 * math.pi * 1e-12))
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the dispersive convention check",
+    )
+    @pytest.mark.parametrize(
+        "material",
+        [
+            mw.Material.debye(eps_inf=2.0, delta_eps=1.5, tau=1e-10),
+            mw.Material.lorentz(
+                eps_inf=2.0,
+                delta_eps=1.5,
+                resonance_frequency=3e9,
+                gamma=0.2e9,
+            ),
+        ],
+        ids=("debye", "lorentz"),
+    )
+    def test_dispersive_medium_matches_maxwell_permittivity_real_tidy3d(self, material):
+        with _real_tidy3d() as real_td:
+            exported = _convert_material(material, real_td)
+            for frequency in (1.0e9, 2.0e9, 4.0e9):
+                assert complex(exported.eps_model(frequency)) == pytest.approx(
+                    material.relative_permittivity(frequency), rel=1e-12
+                )
 
     def test_static_magnetic_medium_is_rejected(self, inject_mock_tidy3d):
         # Tidy3D's FDTD solver fixes mu_r = 1: a genuinely magnetic medium
@@ -814,11 +840,7 @@ class TestMediumConversion:
             assert eps.real == pytest.approx(3.0)
             # Loss (positive imaginary part under e^{-i w t}) of the physical size.
             assert eps.imag == pytest.approx(sigma / (omega * VACUUM_PERMITTIVITY), rel=1e-6)
-            # Same magnitude as maxwell's own conductivity contribution (which carries
-            # the opposite sign under its e^{+i w t} diagnostic convention).
-            assert eps.imag == pytest.approx(
-                abs(material.relative_permittivity(freq).imag), rel=1e-6
-            )
+            assert eps == pytest.approx(material.relative_permittivity(freq), rel=1e-6)
 
     @pytest.mark.skipif(
         importlib.util.find_spec("tidy3d") is None,
@@ -845,9 +867,7 @@ class TestMediumConversion:
             # the combination must fold into a PoleResidue.
             assert isinstance(medium, real_td.PoleResidue)
             eps = complex(medium.eps_model(freq))
-            reference = lossless.relative_permittivity(freq) + 1j * sigma / (
-                omega * VACUUM_PERMITTIVITY
-            )
+            reference = conductive.relative_permittivity(freq)
             assert eps.real == pytest.approx(reference.real, rel=1e-6)
             assert eps.imag == pytest.approx(reference.imag, rel=1e-6)
             # Isolate the conductivity term against the sigma_e = 0 export: the
@@ -886,10 +906,8 @@ class TestMediumConversion:
         ],
     )
     def test_dispersive_plus_sigma_e_isolates_conductivity_term_real_tidy3d(self, make_pair):
-        # For pole families whose Tidy3D convention differs from maxwell's, the
-        # conductivity contribution can still be validated in isolation: the exported
-        # eps_model with sigma_e minus the export without it must equal exactly the
-        # analytic loss term +i*sigma/(w*eps0), with no change to the real part.
+        # The exported mixed PoleResidue must preserve both the Maxwell dispersive
+        # response and the analytic +i*sigma/(w*eps0) conductivity contribution.
         from witwin.core.material import VACUUM_PERMITTIVITY
 
         freq = 2.0e14
@@ -900,6 +918,7 @@ class TestMediumConversion:
             medium = _convert_material(conductive, real_td)
             assert isinstance(medium, real_td.PoleResidue)
             eps = complex(medium.eps_model(freq))
+            assert eps == pytest.approx(conductive.relative_permittivity(freq), rel=1e-6)
             lossless_eps = complex(_convert_material(lossless, real_td).eps_model(freq))
             delta = eps - lossless_eps
             assert delta.real == pytest.approx(0.0, abs=1e-6 * max(abs(eps.real), 1.0))
@@ -1297,7 +1316,7 @@ class TestCustomPoleAndPerturbationConversion:
         result = _convert_material(medium, td)
         assert isinstance(result, td.Lorentz)
         assert result.eps_inf == pytest.approx(1.5)
-        assert result.coeffs[0] == pytest.approx((2.0, 5e14, 1e13))
+        assert result.coeffs[0] == pytest.approx((2.0, 5e14, 0.5e13))
 
     def test_uniform_custom_drude_pole_exports_as_scalar_drude(self, inject_mock_tidy3d):
         import torch
@@ -1317,7 +1336,7 @@ class TestCustomPoleAndPerturbationConversion:
         medium = mw.Material(eps_r=2.0, debye_poles=(mw.CustomDebyePole(delta_eps=delta, tau=1e-12),))
         result = _convert_material(medium, td)
         assert isinstance(result, td.Debye)
-        assert result.coeffs[0] == pytest.approx((1.0, 1e-12))
+        assert result.coeffs[0] == pytest.approx((1.0, 2.0 * math.pi * 1e-12))
 
     def test_spatially_varying_custom_pole_is_rejected(self, inject_mock_tidy3d):
         # A per-cell strength profile is defined relative to the owning structure's
@@ -1370,7 +1389,7 @@ class TestCustomPoleAndPerturbationConversion:
         result = _convert_material(medium, td)
         assert isinstance(result, td.Lorentz)
         assert result.eps_inf == pytest.approx(2.5)
-        assert result.coeffs[0] == pytest.approx((1.5, 5e14, 1e13))
+        assert result.coeffs[0] == pytest.approx((1.5, 5e14, 0.5e13))
 
     def test_spatially_varying_perturbation_is_rejected(self, inject_mock_tidy3d):
         import torch
@@ -1576,6 +1595,53 @@ class TestSourceConversion:
         assert result.direction == "+"
         # Source plane should be zero-thickness along z.
         assert result.size[2] == 0.0
+
+    def test_plane_wave_exports_requested_polarization_angle(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        scene = mw.Scene(domain=mw.Domain(bounds=((-5, 5), (-5, 5), (-5, 5))), device="cpu")
+        polarization = (0.9436283192, 0.3310069414, 0.0)
+        src = mw.PlaneWave(
+            direction=(0, 0, 1),
+            polarization=polarization,
+            source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
+        )
+
+        result = _convert_source(src, scene, td, 1.0)
+
+        assert result.pol_angle == pytest.approx(math.atan2(polarization[1], polarization[0]))
+        assert result.angle_theta == pytest.approx(0.0)
+        assert result.angle_phi == pytest.approx(0.0)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for source-vector convention checks",
+    )
+    @pytest.mark.parametrize(
+        ("direction", "polarization"),
+        (
+            ((0.0, 0.0, 1.0), (0.9436283192, 0.3310069414, 0.0)),
+            ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
+            ((0.3, -0.9, 0.3), (2.0**-0.5, 0.0, -(2.0**-0.5))),
+        ),
+    )
+    def test_plane_wave_vectors_match_real_tidy3d(self, direction, polarization):
+        with _real_tidy3d() as real_td:
+            scene = mw.Scene(
+                domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))),
+                device="cpu",
+            )
+            source = mw.PlaneWave(
+                direction=direction,
+                polarization=polarization,
+                source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
+            )
+
+            result = _convert_source(source, scene, real_td, 1.0)
+
+            np.testing.assert_allclose(result._dir_vector, source.direction, rtol=1e-12, atol=1e-12)
+            np.testing.assert_allclose(
+                result._pol_vector, source.polarization, rtol=1e-12, atol=1e-12
+            )
 
     def test_mode_source(self, inject_mock_tidy3d):
         # A ModeSource exports as a Tidy3D ModeSource carrying both polarization

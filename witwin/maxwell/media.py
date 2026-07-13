@@ -834,7 +834,7 @@ class Material(CoreMaterial):
             )
         frequency = _coerce_frequency(frequency, name="frequency")
         angular_frequency = 2.0 * np.pi * frequency
-        epsilon = complex(self.eps_r, -self.sigma_e / (angular_frequency * VACUUM_PERMITTIVITY))
+        epsilon = complex(self.eps_r, self.sigma_e / (angular_frequency * VACUUM_PERMITTIVITY))
         for pole in self.debye_poles:
             epsilon += pole.susceptibility_at_freq(frequency)
         for pole in self.drude_poles:

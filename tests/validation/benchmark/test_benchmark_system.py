@@ -65,6 +65,157 @@ def test_mode_benchmark_cache_key_tracks_export_contract(monkeypatch):
     assert changed != original
 
 
+def test_mesh_benchmark_cache_key_tracks_export_contract(monkeypatch):
+    scene = build_scene("autogrid_ring")
+    original = benchmark_runner._benchmark_cache_key(
+        scene, frequencies=(2.0e9,), run_time_factor=8.0
+    )
+    monkeypatch.setattr(
+        benchmark_runner,
+        "_MESH_EXPORT_CONTRACT_VERSION",
+        benchmark_runner._MESH_EXPORT_CONTRACT_VERSION + 1,
+    )
+    changed = benchmark_runner._benchmark_cache_key(
+        scene, frequencies=(2.0e9,), run_time_factor=8.0
+    )
+    assert changed != original
+
+
+def test_material_benchmark_cache_key_tracks_export_contract(monkeypatch):
+    scenario = SCENARIOS["debye_slab"]
+    scene = build_scene("debye_slab")
+    original = benchmark_runner._benchmark_cache_key(
+        scene, scenario.frequencies, scenario.run_time_factor
+    )
+    monkeypatch.setattr(
+        benchmark_runner,
+        "_MATERIAL_EXPORT_CONTRACT_VERSION",
+        benchmark_runner._MATERIAL_EXPORT_CONTRACT_VERSION + 1,
+    )
+    changed = benchmark_runner._benchmark_cache_key(
+        scene, scenario.frequencies, scenario.run_time_factor
+    )
+    assert changed != original
+
+
+def test_mixed_undamped_pole_families_use_material_export_contract():
+    material = mw.Material(
+        drude_poles=(mw.DrudePole(plasma_frequency=3.0e9, gamma=0.2e9),),
+        lorentz_poles=(
+            mw.LorentzPole(
+                delta_eps=0.4,
+                resonance_frequency=2.0e9,
+                gamma=0.0,
+            ),
+        ),
+    )
+    assert benchmark_runner._material_uses_export_contract(material)
+
+
+def test_directional_source_benchmark_cache_key_tracks_export_contract(monkeypatch):
+    scenario = SCENARIOS["full_tensor_slab"]
+    scene = build_scene("full_tensor_slab")
+    original = benchmark_runner._benchmark_cache_key(
+        scene, scenario.frequencies, scenario.run_time_factor
+    )
+    monkeypatch.setattr(
+        benchmark_runner,
+        "_DIRECTIONAL_SOURCE_EXPORT_CONTRACT_VERSION",
+        benchmark_runner._DIRECTIONAL_SOURCE_EXPORT_CONTRACT_VERSION + 1,
+    )
+    changed = benchmark_runner._benchmark_cache_key(
+        scene, scenario.frequencies, scenario.run_time_factor
+    )
+    assert changed != original
+
+
+def test_default_normal_plane_wave_does_not_use_directional_source_contract():
+    scene = build_scene("planewave_vacuum")
+    assert not benchmark_runner._directional_source_uses_export_contract(scene.sources[0])
+
+
+def test_incident_scene_signature_ignores_names_but_tracks_launch_physics():
+    vacuum = build_scene("planewave_vacuum")
+    slab = build_scene("dielectric_slab")
+    assert benchmark_runner._incident_scene_signature(vacuum, (2.0e9,)) == (
+        benchmark_runner._incident_scene_signature(slab, (2.0e9,))
+    )
+
+    changed_source = slab.sources[0]
+    slab.sources[0] = mw.PlaneWave(
+        direction=changed_source.direction,
+        polarization=changed_source.polarization,
+        source_time=mw.GaussianPulse(frequency=2.0e9, fwidth=0.4e9),
+    )
+    assert benchmark_runner._incident_scene_signature(vacuum, (2.0e9,)) != (
+        benchmark_runner._incident_scene_signature(slab, (2.0e9,))
+    )
+
+
+def test_incident_scene_signature_ignores_unit_transverse_plane_wave_orientation():
+    vacuum = build_scene("planewave_vacuum")
+    rotated = build_scene("planewave_vacuum")
+    source = rotated.sources[0]
+    rotated.sources[0] = mw.PlaneWave(
+        direction=source.direction,
+        polarization=(0.8, 0.6, 0.0),
+        source_time=source.source_time,
+        injection=source.injection,
+        injection_axis=source.injection_axis,
+    )
+    assert benchmark_runner._incident_scene_signature(vacuum, (2.0e9,)) == (
+        benchmark_runner._incident_scene_signature(rotated, (2.0e9,))
+    )
+
+
+def test_flux_error_uses_empty_scene_incident_power_for_reflective_cases():
+    maxwell = {
+        "reflected": {"flux": np.array([-0.016])},
+        "transmitted": {"flux": np.array([0.029])},
+    }
+    tidy3d = {
+        "reflected": {"flux": np.array([-0.043])},
+        "transmitted": {"flux": np.array([0.030])},
+    }
+
+    error = benchmark_runner._pick_flux_error(maxwell, tidy3d, incident_power=0.585)
+
+    assert error == pytest.approx(0.027 / 0.585)
+
+
+def test_full_tensor_benchmark_launches_a_transverse_eigenpolarization():
+    scene = build_scene("full_tensor_slab")
+    tensor = np.asarray(scene.structures[0].material.epsilon_tensor.rows)
+    polarization = np.asarray(scene.sources[0].polarization)
+    transverse = polarization[:2]
+    response = tensor[:2, :2] @ transverse
+
+    np.testing.assert_allclose(response, (response @ transverse) * transverse, rtol=1e-9, atol=1e-9)
+    assert abs(polarization[1]) > 0.3
+
+
+def test_directional_field_comparison_excludes_the_soft_source_stencil():
+    scene = build_scene("planewave_vacuum")
+    source_position = benchmark_runner.soft_plane_wave_coordinate(scene, "z", 1.0)
+    spacing = 0.025
+    x = np.array((-0.1, 0.1))
+    z = source_position + spacing * np.array((-1.5, -0.5, 0.5, 1.5, 2.5))
+    reference = np.ones((x.size, z.size), dtype=np.complex128)
+    actual = reference * np.exp(0.4j)
+    actual[:, 2] = 100.0  # first downstream cell contains the source stencil
+
+    compared_actual, compared_reference = benchmark_runner._comparison_fields(
+        scene,
+        "y",
+        (x, z),
+        actual,
+        reference,
+    )
+
+    assert compared_actual.size == 2 * 2
+    np.testing.assert_allclose(compared_actual, compared_reference)
+
+
 def test_align_arrays_center_crops():
     a = np.ones((10, 12))
     b = np.ones((8, 10))

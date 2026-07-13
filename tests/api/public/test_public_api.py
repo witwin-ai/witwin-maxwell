@@ -73,7 +73,7 @@ def test_conductive_material_relative_permittivity_uses_sigma_e():
     epsilon_r = material.relative_permittivity(1.0e9)
 
     assert np.isclose(epsilon_r.real, 4.0)
-    assert epsilon_r.imag < 0.0
+    assert epsilon_r.imag > 0.0
 
 
 def test_dispersive_poles_expose_frequency_helper():

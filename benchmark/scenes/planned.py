@@ -28,11 +28,15 @@ def _observed(
     return with_plot_monitors(scene, frequencies=FREQUENCIES)
 
 
-def _plane_scene(*, material=None, boundary=None, grid=None, source=None) -> mw.Scene:
+def _plane_scene(*, material=None, boundary=None, grid=None, source=None, subpixel=None) -> mw.Scene:
     scene = base_scene()
-    if boundary is not None or grid is not None:
+    if boundary is not None or grid is not None or subpixel is not None:
         scene = mw.Scene(
-            domain=scene.domain, grid=grid or scene.grid, boundary=boundary or scene.boundary, device="cpu"
+            domain=scene.domain,
+            grid=grid or scene.grid,
+            boundary=boundary or scene.boundary,
+            subpixel_samples=subpixel or scene.subpixel,
+            device="cpu",
         )
     if material is not None:
         scene.add_structure(mw.Structure(
@@ -95,6 +99,24 @@ def _scatter_scene(geometry=None) -> mw.Scene:
     return _observed(scene)
 
 
+def _full_tensor_scene() -> mw.Scene:
+    tensor = mw.Tensor3x3(((3.0, 0.2, 0.0), (0.2, 2.5, 0.0), (0.0, 0.0, 2.0)))
+    # Launch one transverse tensor eigenmode. This still exercises the coupled
+    # Ex/Ey update while avoiding a grid-dispersion-sensitive beat between two
+    # eigenmodes that obscures the constitutive validation.
+    polarization = (0.9436283192, 0.3310069414, 0.0)
+    source = mw.PlaneWave(
+        direction=(0.0, 0.0, 1.0),
+        polarization=polarization,
+        source_time=PULSE,
+    )
+    return _plane_scene(
+        material=mw.Material(epsilon_tensor=tensor),
+        source=source,
+        subpixel=mw.SubpixelSpec(samples=3, averaging="arithmetic"),
+    )
+
+
 def _cavity(boundary) -> mw.Scene:
     scene = mw.Scene(domain=mw.Domain(bounds=((-0.5, 0.5),) * 3), grid=mw.GridSpec.uniform(0.04), boundary=boundary, device="cpu")
     scene.add_source(mw.PointDipole(position=(0.07, 0, 0), polarization="Ez", source_time=PULSE))
@@ -114,7 +136,7 @@ PLANNED_SCENARIOS = (
     _make("custom_current_source", "sources", "custom current radiation", lambda: _source_scene(_custom_current_source(), monitor_position=0.2)),
     _make("mode_source_wg", "sources", "transmitted mode power", _waveguide_scene, component="Ez"),
     _make("pec_box", "media", "PEC reflection", lambda: _plane_scene(material=mw.Material.pec())),
-    _make("full_tensor_slab", "media", "full-tensor polarization", lambda: _plane_scene(material=mw.Material(epsilon_tensor=mw.Tensor3x3(((3.0,0.2,0),(0.2,2.5,0),(0,0,2.0)))))),
+    _make("full_tensor_slab", "media", "full-tensor eigenpolarization", _full_tensor_scene),
     _make("sigma_e_slab", "media", "conductive absorption", lambda: _plane_scene(material=mw.Material(eps_r=3.0, sigma_e=0.05))),
     _make("tpa_slab", "media", "two-photon absorption", lambda: _plane_scene(material=mw.Material(eps_r=3.0, nonlinearity=mw.TwoPhotonAbsorption(beta=1e-10)))),
     _make("custom_pole_uniform_slab", "media", "uniform custom pole", lambda: _plane_scene(material=mw.Material(eps_r=2.0, lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=3e9, gamma=0.2e9),)))),
