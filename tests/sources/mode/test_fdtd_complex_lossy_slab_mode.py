@@ -69,12 +69,14 @@ def test_fdtd_lossy_slab_complex_effective_index_matches_transcendental_solver()
 
     n_core = 1.5
     eps_clad = 1.0
-    # Loss: sigma_e chosen so Im(eps_core) = -0.1 at f, in the same eps = eps' -
+    # Loss: sigma_e chosen so Im(eps_core) = +0.1 at f, in the same eps = eps' +
     # i sigma/(omega eps0) convention the compiled material model uses.
     im_eps = 0.1
     sigma_e = im_eps * (2.0 * np.pi * f) * VACUUM_PERMITTIVITY
     core = mw.Material(eps_r=n_core * n_core, sigma_e=sigma_e, name="core")
-    eps_core = core.relative_permittivity(f)
+    # The time-domain mode compiler uses the exp(+i*omega*t) field convention,
+    # for which a passive conductivity contributes negative imaginary epsilon.
+    eps_core = complex(n_core * n_core, -im_eps)
 
     # Confinement grid (y): fine, symmetric about the y = 0 node.
     dy = lam / 80.0

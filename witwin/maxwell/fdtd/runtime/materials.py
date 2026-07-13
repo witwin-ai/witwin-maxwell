@@ -180,12 +180,13 @@ def build_modulation(solver, material_model):
     (``amplitude*cos(phase)`` and ``amplitude*sin(phase)``) are averaged onto the
     Yee E edges once here; the per-step modulation factor
     ``m(t) = 1 + cos_field*cos(Omega*t) - sin_field*sin(Omega*t)`` is evaluated
-    inside the modulated E-update kernels from these static fields plus two
-    host-side ``(cos, sin)`` scalar pairs, so no coefficient tensor is rebuilt
-    per step.
+    inside the modulated E-update kernels from these static fields and a persistent
+    two-element device clock, so no coefficient tensor or host phase is rebuilt per
+    step.
     """
     solver.modulation_enabled = bool(material_model_has_modulation(material_model))
     if not solver.modulation_enabled:
+        solver._modulation_time = None
         solver.mod_cos_Ex = None
         solver.mod_cos_Ey = None
         solver.mod_cos_Ez = None
@@ -196,6 +197,9 @@ def build_modulation(solver, material_model):
         solver.mod_omega_Ey = None
         solver.mod_omega_Ez = None
         return
+    solver._modulation_time = torch.full(
+        (2,), -float(solver.dt), device=solver.device, dtype=solver.Ex.dtype
+    )
     modulation_cos = material_model["modulation_cos"]
     modulation_sin = material_model["modulation_sin"]
     modulation_omega = material_model["modulation_omega"]
@@ -771,7 +775,6 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
         mod_cos = getattr(solver, cos_name)
         mod_sin = getattr(solver, sin_name)
         mod_omega = getattr(solver, omega_name)
-        t_next = float(getattr(solver, "_modulation_t_next", 0.0))
 
     def _subtract(current):
         if modulated:
@@ -782,7 +785,7 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
                 ModCos=mod_cos,
                 ModSin=mod_sin,
                 ModOmega=mod_omega,
-                tNext=t_next,
+                ModulationTime=solver._modulation_time,
                 dt=apply_dt,
             ).launchRaw()
         else:
@@ -1154,6 +1157,9 @@ def _configure_sibc(solver):
                 "e_name": e_name,
                 "h_name": h_name,
                 "sign": float(sign),
+                "axis": axis,
+                "electric_index": surface_node,
+                "magnetic_index": vacuum_h_index,
                 "e_selector": e_selector,
                 "h_selector": h_selector,
                 "h_prev": torch.zeros_like(h_tensor[h_selector]),

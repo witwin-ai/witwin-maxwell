@@ -18,7 +18,39 @@
 #include "../tensors.h"
 #include "common.cuh"
 
+#include <algorithm>
+#include <utility>
+
 namespace {
+
+__global__ void capture_aniso_conduction_current_kernel(
+    int64_t total,
+    int64_t nx,
+    int64_t ny,
+    int64_t nz,
+    const float* __restrict__ sigma_x,
+    const float* __restrict__ sigma_y,
+    const float* __restrict__ sigma_z,
+    const float* __restrict__ ex,
+    const float* __restrict__ ey,
+    const float* __restrict__ ez,
+    float* __restrict__ jx,
+    float* __restrict__ jy,
+    float* __restrict__ jz) {
+  const int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (linear >= total) {
+    return;
+  }
+  if (linear < nx) {
+    jx[linear] = sigma_x[linear] * ex[linear];
+  }
+  if (linear < ny) {
+    jy[linear] = sigma_y[linear] * ey[linear];
+  }
+  if (linear < nz) {
+    jz[linear] = sigma_z[linear] * ez[linear];
+  }
+}
 
 dim3 aniso_block3d() {
   return dim3(128, 2, 1);
@@ -1209,6 +1241,44 @@ void check_aniso_offdiag_current_inputs(
 }
 
 }  // namespace
+
+void capture_aniso_conduction_current_cuda(
+    const torch::stable::Tensor& sigma_x,
+    const torch::stable::Tensor& sigma_y,
+    const torch::stable::Tensor& sigma_z,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    torch::stable::Tensor jx,
+    torch::stable::Tensor jy,
+    torch::stable::Tensor jz) {
+  for (const auto& entry : {
+           std::pair<const torch::stable::Tensor*, const char*>{&sigma_x, "sigma_x"},
+           {&sigma_y, "sigma_y"}, {&sigma_z, "sigma_z"},
+           {&ex, "ex"}, {&ey, "ey"}, {&ez, "ez"},
+           {&jx, "jx"}, {&jy, "jy"}, {&jz, "jz"}}) {
+    check_float32_tensor(*entry.first, entry.second);
+    check_contiguous_tensor(*entry.first, entry.second);
+    check_same_cuda_device(ex, *entry.first, entry.second);
+  }
+  STD_TORCH_CHECK(sigma_x.sizes().equals(ex.sizes()) && jx.sizes().equals(ex.sizes()),
+                  "sigma_x and jx must match ex");
+  STD_TORCH_CHECK(sigma_y.sizes().equals(ey.sizes()) && jy.sizes().equals(ey.sizes()),
+                  "sigma_y and jy must match ey");
+  STD_TORCH_CHECK(sigma_z.sizes().equals(ez.sizes()) && jz.sizes().equals(ez.sizes()),
+                  "sigma_z and jz must match ez");
+  const int64_t total = std::max(ex.numel(), std::max(ey.numel(), ez.numel()));
+  if (total == 0) {
+    return;
+  }
+  const torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
+  capture_aniso_conduction_current_kernel<<<linear_grid(total), 256, 0, current_cuda_stream()>>>(
+      total, ex.numel(), ey.numel(), ez.numel(),
+      sigma_x.mutable_data_ptr<float>(), sigma_y.mutable_data_ptr<float>(), sigma_z.mutable_data_ptr<float>(),
+      ex.mutable_data_ptr<float>(), ey.mutable_data_ptr<float>(), ez.mutable_data_ptr<float>(),
+      jx.mutable_data_ptr<float>(), jy.mutable_data_ptr<float>(), jz.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
 
 void update_electric_ex_full_aniso_cuda(
     torch::stable::Tensor ex,

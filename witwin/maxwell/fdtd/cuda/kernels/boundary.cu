@@ -240,6 +240,31 @@ __global__ void mur_abc_face_kernel(
   prev_adjacent[t] = na;
 }
 
+__global__ void sibc_surface_kernel(
+    int64_t plane_size,
+    int axis,
+    int e_ny,
+    int e_nz,
+    int h_ny,
+    int h_nz,
+    int e_index,
+    int h_index,
+    float sign,
+    float surface_r,
+    float surface_l_over_dt,
+    float* __restrict__ electric,
+    const float* __restrict__ magnetic,
+    float* __restrict__ h_prev) {
+  const int64_t t = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (t >= plane_size) {
+    return;
+  }
+  const float h_now = magnetic[mur_plane_offset(axis, h_index, t, h_ny, h_nz)];
+  electric[mur_plane_offset(axis, e_index, t, e_ny, e_nz)] =
+      sign * (surface_r * h_now + surface_l_over_dt * (h_now - h_prev[t]));
+  h_prev[t] = h_now;
+}
+
 }  // namespace
 
 void clamp_field_face_cuda(torch::stable::Tensor field, int64_t axis, int64_t side) {
@@ -347,5 +372,53 @@ void mur_abc_face_cuda(
       field.mutable_data_ptr<float>(),
       prev_boundary.mutable_data_ptr<float>(),
       prev_adjacent.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void apply_sibc_surface_cuda(
+    torch::stable::Tensor electric,
+    const torch::stable::Tensor& magnetic,
+    int64_t axis,
+    int64_t electric_index,
+    int64_t magnetic_index,
+    double sign,
+    double surface_r,
+    double surface_l_over_dt,
+    torch::stable::Tensor h_prev) {
+  check_field3d(electric, "electric");
+  check_field3d(magnetic, "magnetic");
+  check_float32_tensor(h_prev, "h_prev");
+  check_contiguous_tensor(h_prev, "h_prev");
+  check_same_cuda_device(electric, magnetic, "magnetic");
+  check_same_cuda_device(electric, h_prev, "h_prev");
+  STD_TORCH_CHECK(axis >= 0 && axis < 3, "axis must be in [0, 3)");
+  const int64_t e_axis_size = electric.size(axis);
+  const int64_t h_axis_size = magnetic.size(axis);
+  STD_TORCH_CHECK(electric_index >= 0 && electric_index < e_axis_size, "electric_index is out of bounds");
+  STD_TORCH_CHECK(magnetic_index >= 0 && magnetic_index < h_axis_size, "magnetic_index is out of bounds");
+  const int64_t plane_size = face_area(axis, magnetic.size(0), magnetic.size(1), magnetic.size(2));
+  STD_TORCH_CHECK(h_prev.numel() == plane_size, "h_prev must match the magnetic face area");
+  STD_TORCH_CHECK(
+      face_area(axis, electric.size(0), electric.size(1), electric.size(2)) == plane_size,
+      "electric and magnetic face shapes must match");
+  if (plane_size == 0) {
+    return;
+  }
+  const torch::stable::accelerator::DeviceGuard device_guard(electric.get_device_index());
+  sibc_surface_kernel<<<linear_grid(plane_size), 256, 0, current_cuda_stream()>>>(
+      plane_size,
+      static_cast<int>(axis),
+      static_cast<int>(electric.size(1)),
+      static_cast<int>(electric.size(2)),
+      static_cast<int>(magnetic.size(1)),
+      static_cast<int>(magnetic.size(2)),
+      static_cast<int>(electric_index),
+      static_cast<int>(magnetic_index),
+      static_cast<float>(sign),
+      static_cast<float>(surface_r),
+      static_cast<float>(surface_l_over_dt),
+      electric.mutable_data_ptr<float>(),
+      magnetic.mutable_data_ptr<float>(),
+      h_prev.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }

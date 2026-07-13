@@ -15,7 +15,7 @@ from .spatial import (
     soft_plane_wave_region_spacing,
     source_plane_index,
 )
-from .modes import sample_mode_source_component, sample_mode_source_profile, solve_mode_source_profile
+from .modes import sample_mode_source_component, solve_mode_source_profile
 from .temporal import append_source_term, apply_compiled_source_terms, apply_generic_source_terms
 from .tfsf_common import build_term_from_profile, build_terms_from_specs, slice_coeff_patch, solve_numerical_wavenumber
 from .tfsf_specs import E_CURL_ATTR, H_CURL_ATTR, build_discrete_tfsf_specs, magnetic_physical_vector
@@ -69,6 +69,26 @@ def _yee_component_coords(solver, field_name: str) -> tuple[torch.Tensor, ...]:
         "Ez": (scene.x, scene.y, scene.z_half),
     }[field_name]
     return tuple(axis.to(device=solver.device, dtype=solver.Ex.dtype) for axis in coords)
+
+
+def _symmetry_plane_source_scale(scene, field_name: str, position) -> float:
+    """Scale a source that lies exactly on an image plane to its full-grid weight."""
+    field_axis = {"Ex": 0, "Ey": 1, "Ez": 2}[field_name]
+    scale = 1.0
+    for axis, symmetry in enumerate(scene.symmetry):
+        if symmetry is None:
+            continue
+        _mode, face = symmetry
+        plane = float(scene.domain.bounds[axis][0 if face == "low" else 1])
+        span = float(scene.domain.bounds[axis][1] - scene.domain.bounds[axis][0])
+        if abs(float(position[axis]) - plane) > 1e-9 * max(span, 1.0):
+            continue
+        # A tangential E component is sampled on the image plane: the half-cell
+        # control volume is half of its full-grid counterpart. A normal component
+        # is staggered off the plane as well, so the full-grid source interpolation
+        # also splits equally between the two mirrored edges.
+        scale *= 0.25 if field_axis == axis else 0.5
+    return scale
 
 
 def _axis_control_overlap(coords: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
@@ -251,6 +271,7 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                         * profile
                     )
                     patch_offsets = (ix_start, iy_start, iz_start)
+                source_patch *= _symmetry_plane_source_scale(scene, "Ez", image_position)
                 append_source_term(
                     solver._source_terms,
                     solver,
@@ -297,6 +318,7 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                         * profile
                     )
                     patch_offsets = (ix_start, iy_start, iz_start)
+                source_patch *= _symmetry_plane_source_scale(scene, "Ex", image_position)
                 append_source_term(
                     solver._source_terms,
                     solver,
@@ -343,6 +365,7 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                         * profile
                     )
                     patch_offsets = (ix_start, iy_start, iz_start)
+                source_patch *= _symmetry_plane_source_scale(scene, "Ey", image_position)
                 append_source_term(
                     solver._source_terms,
                     solver,
@@ -365,11 +388,19 @@ _CURRENT_MAGNETIC_MAP = {"Mx": "Hx", "My": "Hy", "Mz": "Hz"}
 def _region_index_range(solver, field_name, lo, hi):
     scene = solver.scene
     axis_nodes = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)
+    axis_half = (scene.x_half64, scene.y_half64, scene.z_half64)
     sizes = tuple(int(dim) for dim in getattr(solver, field_name).shape)
     half_axes = solver._COMPONENT_HALF_OFFSET_AXES[field_name]
     start = []
     stop = []
     for axis in range(3):
+        if float(lo[axis]) == float(hi[axis]):
+            component_coords = axis_half[axis] if half_axes[axis] else axis_nodes[axis]
+            component_coords = component_coords[: sizes[axis]]
+            nearest = int(np.argmin(np.abs(component_coords - float(lo[axis]))))
+            start.append(nearest)
+            stop.append(nearest + 1)
+            continue
         lo_index, hi_index = _axis_index_window(axis_nodes[axis], lo[axis], hi[axis], sizes[axis])
         if half_axes[axis]:
             # ``_axis_index_window`` returns the bounding-node window. A Yee

@@ -37,14 +37,20 @@ def decompose_two_waves(x, profile, lo, hi, k):
     return (g11 * r0 - g01 * r1) / det, (g00 * r1 - g10 * r0) / det
 
 
-def sheet_scattering_coefficients(profile, *, dl, dt, frequency, x_origin, fit_gap, fit_extent):
+def sheet_scattering_coefficients(profile, *, x, dt, frequency, fit_gap, fit_extent):
     """Extract the sheet (t, r) from a DFT Ez line profile through a sheet at x = 0.
 
     Solves ``fwd_r = t*fwd_l + r*bwd_r`` and ``bwd_l = t*bwd_r + r*fwd_l`` from
     the two-wave decompositions of the windows ``(-fit_extent, -fit_gap)`` and
     ``(fit_gap, fit_extent)``.
     """
-    x = np.arange(profile.size) * dl + x_origin
+    x = np.asarray(x, dtype=np.float64)
+    if x.shape != profile.shape:
+        raise ValueError("The field profile and x-coordinate array must have identical shapes.")
+    spacing = np.diff(x)
+    dl = float(np.mean(spacing))
+    if not np.allclose(spacing, dl, rtol=1e-10, atol=1e-15):
+        raise ValueError("Sheet scattering extraction requires a uniform x grid.")
     omega = 2.0 * np.pi * frequency
     k_num = 2.0 / dl * np.arcsin(np.sin(omega * dt / 2.0) * dl / (C0 * dt))
     fwd_l, bwd_l = decompose_two_waves(x, profile, -fit_extent, -fit_gap, k_num)
@@ -113,14 +119,14 @@ def measure_sheet_scattering(
         ez = ez[0]
     profile = ez[:, ez.shape[1] // 2, ez.shape[2] // 2].detach().cpu().numpy()
     dt = result.solver.dt
+    x = result.solver.scene.x_nodes64.copy()
     del result
     torch.cuda.empty_cache()
     return sheet_scattering_coefficients(
         profile,
-        dl=dl,
+        x=x,
         dt=dt,
         frequency=frequency,
-        x_origin=-half_length,
         fit_gap=fit_gap,
         fit_extent=fit_extent,
     )

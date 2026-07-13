@@ -86,7 +86,9 @@ def _run(frequency, *, kind, dx, x_lo=-0.5, x_hi=0.5, surface=0.1, source_x=-0.3
     ez = (ez["data"] if isinstance(ez, dict) else ez).detach().cpu().numpy()
     assert np.isfinite(ez).all(), "SIBC field diverged (non-finite)"
     line = np.abs(ez).reshape(ez.shape[0], -1).mean(axis=1)
-    xs = np.linspace(x_lo, x_hi, line.shape[0])
+    xs = result.solver.scene.x_nodes64
+    if xs.shape != line.shape:
+        raise ValueError("SIBC field line does not match the solver x grid.")
     mask = (xs >= window[0]) & (xs <= window[1])
     v = line[mask]
     gamma = float((v.max() - v.min()) / (v.max() + v.min()))

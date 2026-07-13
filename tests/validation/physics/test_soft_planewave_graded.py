@@ -18,9 +18,9 @@ used before, so uniform grids are unchanged.
 The unit tests below quantify the improvement without CUDA: on a 2.6x-graded
 propagation axis with the source in the coarse region (~6 cells/wavelength there),
 the discrete-dispersion phase-velocity error of the injected wavefront drops from
-~4% (global-minimum spacing) to exactly 0 (local spacing, which matches the launch
+~5.3% (global-minimum spacing) to exactly 0 (local spacing, which matches the launch
 cell's own numerical wavenumber bit-for-bit). The E/H half-cell timing phase error
-drops from ~2e-2 rad to 0.
+drops from ~2.9e-2 rad to 0.
 """
 
 from __future__ import annotations
@@ -80,8 +80,6 @@ class _FakeSolver:
 
 
 def _cpu_scene(x_nodes, y_nodes, z_nodes, *, num_layers=6):
-    lo = float(min(x_nodes[0], y_nodes[0], z_nodes[0]))
-    hi = float(max(x_nodes[-1], y_nodes[-1], z_nodes[-1]))
     scene = mw.Scene(
         domain=mw.Domain(bounds=((float(x_nodes[0]), float(x_nodes[-1])),
                                  (float(y_nodes[0]), float(y_nodes[-1])),
@@ -215,8 +213,8 @@ def test_soft_plane_graded_reduces_injected_phase_velocity_error():
     assert abs(eh_phase_err_old) > 1e-2
 
     # Guard the reported magnitudes so the numbers in the change stay honest.
-    assert vp_err_old == pytest.approx(3.95e-2, rel=0.1)
-    assert abs(eh_phase_err_old) == pytest.approx(1.97e-2, rel=0.1)
+    assert vp_err_old == pytest.approx(5.30e-2, rel=0.1)
+    assert abs(eh_phase_err_old) == pytest.approx(2.95e-2, rel=0.1)
 
 
 # --------------------------------------------------------------------------- #

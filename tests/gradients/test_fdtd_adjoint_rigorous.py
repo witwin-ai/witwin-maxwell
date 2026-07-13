@@ -848,7 +848,10 @@ def test_real_part_loss_gradient_matches_fd():
 
     fd_grad = _central_difference_per_element(model, loss_fn, delta=_FD_DELTA)
 
-    assert torch.allclose(backward_grad, fd_grad, rtol=1e-2, atol=1e-15), (
+    scale = torch.abs(fd_grad).max().item()
+    # The last voxels are below the central-difference precision floor; scale
+    # the absolute tolerance from the dominant, accurately resolved gradient.
+    assert torch.allclose(backward_grad, fd_grad, rtol=1e-2, atol=scale * 5e-5), (
         f"max relative error: "
         f"{(torch.abs(backward_grad - fd_grad) / (torch.abs(fd_grad) + 1e-30)).max().item():.4e}"
     )
@@ -948,7 +951,7 @@ def test_optimizer_converges_over_multiple_steps():
     decreases = sum(1 for i in range(1, len(losses)) if losses[i] < losses[i - 1])
     assert decreases >= 2, (
         f"Expected at least 2 decreasing steps out of 3, got {decreases}. "
-        f"Losses: {[f'{l:.6e}' for l in losses]}"
+        f"Losses: {[f'{loss_value:.6e}' for loss_value in losses]}"
     )
 
 

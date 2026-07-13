@@ -208,7 +208,7 @@ def test_high_face_x_symmetry_expands_to_full_domain():
     # PEC on the x-high face; folded half nodes end at the plane x=0. Ex is
     # normal to the x-plane so it is even under PEC.
     half = mw.Scene(
-        domain=mw.Domain(bounds=((-0.45, 0.05), (-0.6, 0.6), (-0.6, 0.6))),
+        domain=mw.Domain(bounds=((-0.6, 0.0), (-0.6, 0.6), (-0.6, 0.6))),
         grid=mw.GridSpec.uniform(0.15),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
         symmetry=(("PEC", "high"), None, None),

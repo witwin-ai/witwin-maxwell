@@ -131,8 +131,12 @@ def test_lossy_anisotropic_uniform_conduction_decay_matches_analytic():
         update_electric_fields,
     )
 
-    solver.Hx.zero_(); solver.Hy.zero_(); solver.Hz.zero_()
-    solver.Ex.zero_(); solver.Ey.zero_(); solver.Ez.fill_(1.0)
+    solver.Hx.zero_()
+    solver.Hy.zero_()
+    solver.Hz.zero_()
+    solver.Ex.zero_()
+    solver.Ey.zero_()
+    solver.Ez.fill_(1.0)
     for _ in range(steps):
         capture_aniso_conduction_currents(solver)
         update_electric_fields(solver, solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
@@ -220,7 +224,9 @@ def _projected_line(result):
         return crop.reshape(crop.shape[0], -1).mean(axis=1)
 
     line = _EXTRAORDINARY_POL[1] * _line(ey) + _EXTRAORDINARY_POL[2] * _line(ez)
-    xs = np.linspace(-0.75, 0.75, line.shape[0])
+    xs = result.solver.scene.x_nodes64
+    if xs.shape != line.shape:
+        raise ValueError("Projected field line does not match the solver x grid.")
     return xs, line
 
 

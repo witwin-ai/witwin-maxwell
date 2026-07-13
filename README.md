@@ -4,11 +4,10 @@
 
 WiTwin Maxwell is a differentiable full-wave electromagnetic solver with a **PyTorch-native interface** and a native CUDA FDTD runtime at its core. The FDTD field-update loops run as hand-written GPU kernels shipped in prebuilt platform wheels, while the entire workflow — scene definition, simulation dispatch, result access, and automatic differentiation — stays inside standard PyTorch through `SceneModule`, `MaterialRegion`, and adjoint backward support.
 
-The main public solver workflow today is:
+The public solver workflow is `Scene -> Simulation -> Result` for both runtimes:
 
-- `FDTD`: native-CUDA Yee-grid time-domain solver with monitor extraction, multi-frequency DFT sampling, and differentiable adjoint support
-
-Frequency-domain `FDFD` support is coming soon.
+- `FDTD`: native-CUDA Yee-grid time-domain solver with CPML, multi-frequency DFT sampling, material dispersion and nonlinearity, and differentiable adjoint support
+- `FDFD` (limited/experimental): CUDA-only sparse single-frequency solver for linear isotropic or diagonal-electric media with `none`/PML boundaries. It does not yet match FDTD's material, boundary, nonuniform-grid, source, monitor, or adjoint coverage.
 
 ## Get Started
 
@@ -43,19 +42,20 @@ For module-style inverse-design workflows, define a `SceneModule`, implement `to
 
 | Area | Currently supported | Notes |
 | --- | --- | --- |
-| Solvers | `Simulation.fdtd(...)` | FDTD supports time stepping and single- or multi-frequency DFT extraction. `Simulation.fdfd(...)` is coming soon. |
-| Sources | `PointDipole`, `PlaneWave`, `GaussianBeam`, `ModeSource`, `TFSF` | `PlaneWave` / `GaussianBeam` support soft injection and `TFSF(...)`; CW `PlaneWave` supports `TFSF.slab(axis="z", ...)` for grating illumination. `ModeSource` is still experimental. |
-| Source time | `CW`, `GaussianPulse`, `RickerWavelet` | Shared waveform vocabulary across public source APIs. |
+| Solvers | `Simulation.fdtd(...)`; limited `Simulation.fdfd(...)` | FDTD is the primary, full-featured runtime. FDFD is a CUDA-only sparse single-frequency path with isotropic/diagonal-electric, dispersive/conductive, `none`/PML, iterative/direct-solver, and basic adjoint support; nonuniform grids, magnetic/nonlinear/full-tensor media, in-domain PEC, symmetry, and broader FDTD parity are not implemented. Both return `Result`. |
+| Sources | `PointDipole`, `PlaneWave`, `GaussianBeam`, `AstigmaticGaussianBeam`, `ModeSource`, `TFSF`, uniform/custom current and custom field sources | Soft and TFSF launch paths are available. `TFSF.slab(...)` supports any normal axis, CW or broadband waveforms, and periodic/Bloch grating layouts. `ModeSource` remains experimental. |
+| Source time | `CW`, `GaussianPulse`, `RickerWavelet`, `CustomSourceTime` | Shared waveform vocabulary across public source APIs, including sampled or callable custom temporal signals. |
 | Boundaries | `none`, `pml`, `periodic`, `bloch`, `pec`, `pmc` | Per-axis and per-face mixed layouts are available through `BoundarySpec.faces(...)`, including x/y Bloch plus z PML for grating FDTD workflows. |
-| Materials | Isotropic `eps_r`, `mu_r`, `sigma_e`; `Debye`, `Drude`, `Lorentz`; `DiagonalTensor3`; `MaterialRegion` | `sigma_e` is the public frequency-domain conductivity path. `MaterialRegion` is the most direct differentiable design primitive. |
-| Geometry | `Box`, `Sphere`, `Cylinder`, `Ellipsoid`, `Cone`, `Pyramid`, `Prism`, `Torus`, `HollowBox`, `Mesh` | Geometry and `Structure` primitives are re-exported through `witwin.maxwell`. |
-| Monitors | `PointMonitor`, `PlaneMonitor`, `FluxMonitor`, `ModeMonitor` | Frequency selection is available through `Result.at(...)`. |
-| Ports | `ModePort` | First-class modal port object; still experimental. |
+| Materials | Isotropic and tensor electric/magnetic media; conductive, Debye, Drude, Lorentz, Sellmeier, gain, nonlinear, modulated, perturbation, custom dispersive, `Medium2D`, `Graphene`, and `LossyMetalMedium` | Compatible material effects compose in the same compiled Yee model. `MaterialRegion` is the primary differentiable design primitive; specialized combinations and adjoint limits are listed in `FEATURE_LIST.md`. |
+| Geometry and grids | `Box`, `Sphere`, `Cylinder`, `Ellipsoid`, `Cone`, `Pyramid`, `Prism`, `Torus`, `HollowBox`, `Mesh`, `PolySlab`, custom/automatic/nonuniform grids, mesh overrides, and subpixel averaging | Shared geometry and `Structure` primitives are re-exported through `witwin.maxwell`; `Scene` owns device placement and compilation. |
+| Monitors | Point, plane, finite-plane, flux, time-domain, material/permittivity, mode, diffraction, dipole-emission, and closed-surface monitors | Frequency selection is available through `Result.at(...)`; closed surfaces feed equivalent-current and near-to-far postprocessing. |
+| Ports | `ModePort` | First-class modal port with S-parameter/modal-overlap workflows, including broadband, lossy, anisotropic, and bent-waveguide forward modes; still experimental. |
 | Results | `result.E`, `result.H`, `result.materials`, `Result.monitor(...)`, `Result.save(...)` | Structured field and material access stay torch-native. |
-| Postprocess | Equivalent currents, Stratton-Chu propagation, near-to-far transform, directivity, bistatic RCS, S-parameters, modal overlap | Use `witwin.maxwell.postprocess`. |
-| Differentiable workflows | `SceneModule`, `MaterialRegion`, supported trainable geometry parameters, FDTD adjoint backward | Public backward support currently targets trainable inputs that flow into the prepared-scene material tensors compiled from `Scene`. |
+| Postprocess | Equivalent currents, background-aware/curved-surface Stratton-Chu propagation, near-to-far transform, directivity, bistatic RCS, S-parameters, and modal overlap | Use `witwin.maxwell.postprocess`. |
+| Differentiable workflows | `SceneModule`, `MaterialRegion`, trainable material/geometry/source inputs, native-CUDA FDTD adjoint backward | Native reverse kernels cover standard/CPML/Bloch fields and supported conductive, dispersive, anisotropic, nonlinear, TFSF, and multi-source compositions. Explicit capability guards reject unsupported gradients. |
+| Interoperability | Tidy3D scene export and GDS geometry import | Tidy3D export covers grids, boundaries, common geometry, broad material/source/monitor families, and validated SI/unit-convention conversions. |
 
-For the exhaustive user-visible capability inventory, see [`FEATURE_LIST.md`](FEATURE_LIST.md).
+For the exhaustive user-visible capability inventory, see [`FEATURE_LIST.md`](FEATURE_LIST.md). The numerical conventions and lessons from the Maxwell-vs-Tidy3D validation campaign are recorded in [`docs/validation/tidy3d-numerical-alignment-0.3.0.md`](docs/validation/tidy3d-numerical-alignment-0.3.0.md).
 
 ## Minimal Differentiable Example
 
@@ -138,20 +138,18 @@ python -m benchmark dipole_vacuum
 python -m benchmark planewave_vacuum
 ```
 
-Benchmark assets live under:
+Benchmark assets live under `benchmark/scenes/`, `benchmark/cache/`, `benchmark/plots/`, and `benchmark/RESULTS.md`.
 
-- `benchmark/scenes/`
-- `benchmark/cache/`
-- `benchmark/plots/`
-- `benchmark/RESULTS.md`
+The release validation suite combines unit/API tests, native CUDA parity and adjoint tests, and Maxwell-vs-Tidy3D numerical comparisons. Cross-solver comparisons use common physical-domain coordinates, external PML on both sides, coordinate-aligned complex field slices, and solver-independent scalar observables. See the [0.3.0 numerical-alignment notes](docs/validation/tidy3d-numerical-alignment-0.3.0.md) for the conventions, visual diagnosis workflow, and known residuals.
 
 ## Current Notes
 
 - Core Maxwell workflows are GPU/CUDA-first.
-- `Simulation.fdfd(...)` is coming soon.
+- FDFD is available but remains limited/experimental. It is suitable for supported linear single-frequency scenes; use FDTD for nonuniform grids, magnetic or nonlinear media, full off-diagonal anisotropy, in-domain PEC, symmetry, and the broader source/monitor/adjoint feature set.
 - `bloch_wavevector="auto"` is supported for fixed-angle CW TFSF grating slabs; broadband automatic Bloch phase requests are rejected.
-- Prefer `DiagonalTensor3` for anisotropic materials. Full rotated/off-diagonal `Tensor3x3` support is not implemented yet.
-- The public differentiable path currently focuses on trainable inputs that affect compiled material tensors.
+- Full off-diagonal `Tensor3x3` electric anisotropy is supported by FDTD, including supported CPML, dispersion, conduction, and adjoint compositions; use `DiagonalTensor3` when the material is naturally diagonal because it is cheaper.
+- `LossyMetalMedium` is a narrowband, normal-incidence planar SIBC model. Curved, oblique, laterally finite, and adjoint SIBC workflows require a volumetric material model or a future generalized surface operator.
+- The public differentiable path covers supported trainable material, geometry, and source inputs. Runtime capability checks reject combinations without a physically implemented reverse channel.
 - `ModeSource`, `ModeMonitor`, and `ModePort` are available, but they are still marked experimental.
 
 ## License

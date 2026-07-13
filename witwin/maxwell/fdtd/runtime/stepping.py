@@ -499,20 +499,7 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
     ).launchRaw()
 
 
-def _modulation_time_instants(solver, time_value):
-    """Host-side ``(t_prev, t_next)`` E-field time instants of the modulated update.
-    The E update advances E from ``time_value - dt`` to ``time_value`` (source
-    injection at ``time_value`` follows the update). Each Yee edge carries its own
-    modulation angular frequency (a scene may mix several), so the per-cell phase
-    ``cos/sin(omega(x) * t)`` is evaluated inside the CUDA kernels from these two
-    scalars plus the ``mod_omega`` field rather than as scene-wide phase scalars."""
-    t_next = float(time_value)
-    t_prev = t_next - float(solver.dt)
-    return t_prev, t_next
-
-
 def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, time_value):
-    t_prev, t_next = _modulation_time_instants(solver, time_value)
     # Composing modulation with an instantaneous nonlinearity: the modulation
     # scales the same field-dependent decay/curl coefficients the nonlinear kernel
     # rewrote this step (static tensors when no nonlinearity is present).
@@ -527,8 +514,7 @@ def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, ti
         ModCos=solver.mod_cos_Ex,
         ModSin=solver.mod_sin_Ex,
         ModOmega=solver.mod_omega_Ex,
-        tPrev=t_prev,
-        tNext=t_next,
+        ModulationTime=solver._modulation_time,
         invDy=solver.inv_dy_e,
         invDz=solver.inv_dz_e,
         yLowBoundaryMode=solver.boundary_y_low_code,
@@ -545,8 +531,7 @@ def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, ti
         ModCos=solver.mod_cos_Ey,
         ModSin=solver.mod_sin_Ey,
         ModOmega=solver.mod_omega_Ey,
-        tPrev=t_prev,
-        tNext=t_next,
+        ModulationTime=solver._modulation_time,
         invDx=solver.inv_dx_e,
         invDz=solver.inv_dz_e,
         xLowBoundaryMode=solver.boundary_x_low_code,
@@ -563,8 +548,7 @@ def update_electric_fields_modulated_standard(solver, ex, ey, ez, hx, hy, hz, ti
         ModCos=solver.mod_cos_Ez,
         ModSin=solver.mod_sin_Ez,
         ModOmega=solver.mod_omega_Ez,
-        tPrev=t_prev,
-        tNext=t_next,
+        ModulationTime=solver._modulation_time,
         invDx=solver.inv_dx_e,
         invDy=solver.inv_dy_e,
         xLowBoundaryMode=solver.boundary_x_low_code,
@@ -582,7 +566,6 @@ def update_electric_fields_modulated_cpml(solver, ex, ey, ez, hx, hy, hz, time_v
 
 
 def update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, time_value):
-    t_prev, t_next = _modulation_time_instants(solver, time_value)
     ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
     ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
     solver.fdtd_module.updateElectricFieldExCpmlModulated3D(
@@ -594,8 +577,7 @@ def update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, 
         ModCos=solver.mod_cos_Ex,
         ModSin=solver.mod_sin_Ex,
         ModOmega=solver.mod_omega_Ex,
-        tPrev=t_prev,
-        tNext=t_next,
+        ModulationTime=solver._modulation_time,
         PsiExY=solver.psi_ex_y,
         PsiExZ=solver.psi_ex_z,
         InvKappaExY=solver.cpml_inv_kappa_e_y,
@@ -620,8 +602,7 @@ def update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, 
         ModCos=solver.mod_cos_Ey,
         ModSin=solver.mod_sin_Ey,
         ModOmega=solver.mod_omega_Ey,
-        tPrev=t_prev,
-        tNext=t_next,
+        ModulationTime=solver._modulation_time,
         PsiEyX=solver.psi_ey_x,
         PsiEyZ=solver.psi_ey_z,
         InvKappaEyX=solver.cpml_inv_kappa_e_x,
@@ -646,8 +627,7 @@ def update_electric_fields_modulated_cpml_dense(solver, ex, ey, ez, hx, hy, hz, 
         ModCos=solver.mod_cos_Ez,
         ModSin=solver.mod_sin_Ez,
         ModOmega=solver.mod_omega_Ez,
-        tPrev=t_prev,
-        tNext=t_next,
+        ModulationTime=solver._modulation_time,
         PsiEzX=solver.psi_ez_x,
         PsiEzY=solver.psi_ez_y,
         InvKappaEzX=solver.cpml_inv_kappa_e_x,
@@ -675,7 +655,6 @@ def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy,
     psi_ey_z_low, psi_ey_z_high_start, psi_ey_z_high = cpml_layout_params(solver, "psi_ey_z")
     psi_ez_x_low, psi_ez_x_high_start, psi_ez_x_high = cpml_layout_params(solver, "psi_ez_x")
     psi_ez_y_low, psi_ez_y_high_start, psi_ez_y_high = cpml_layout_params(solver, "psi_ez_y")
-    t_prev, t_next = _modulation_time_instants(solver, time_value)
     ex_curl, ey_curl, ez_curl = _electric_curl_tensors(solver)
     ex_decay, ey_decay, ez_decay = _electric_decay_tensors(solver)
     solver.fdtd_module.updateElectricFieldExCpmlModulatedCompressed3D(
@@ -687,8 +666,7 @@ def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy,
         ModCos=solver.mod_cos_Ex,
         ModSin=solver.mod_sin_Ex,
         ModOmega=solver.mod_omega_Ex,
-        tPrev=t_prev,
-        tNext=t_next,
+        ModulationTime=solver._modulation_time,
         PsiExY=solver.psi_ex_y,
         PsiExZ=solver.psi_ex_z,
         InvKappaExY=solver.cpml_inv_kappa_e_y,
@@ -719,8 +697,7 @@ def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy,
         ModCos=solver.mod_cos_Ey,
         ModSin=solver.mod_sin_Ey,
         ModOmega=solver.mod_omega_Ey,
-        tPrev=t_prev,
-        tNext=t_next,
+        ModulationTime=solver._modulation_time,
         PsiEyX=solver.psi_ey_x,
         PsiEyZ=solver.psi_ey_z,
         InvKappaEyX=solver.cpml_inv_kappa_e_x,
@@ -751,8 +728,7 @@ def update_electric_fields_modulated_cpml_compressed(solver, ex, ey, ez, hx, hy,
         ModCos=solver.mod_cos_Ez,
         ModSin=solver.mod_sin_Ez,
         ModOmega=solver.mod_omega_Ez,
-        tPrev=t_prev,
-        tNext=t_next,
+        ModulationTime=solver._modulation_time,
         PsiEzX=solver.psi_ez_x,
         PsiEzY=solver.psi_ez_y,
         InvKappaEzX=solver.cpml_inv_kappa_e_x,
@@ -782,12 +758,6 @@ def update_electric_fields(solver, ex, ey, ez, hx, hy, hz, *, time_value=None):
             raise RuntimeError(
                 "The time-modulated electric update requires the current step time_value."
             )
-        # Record the new-time instant so a co-located dispersive medium's ADE
-        # polarization-current subtraction (applied later in the step) divides by the
-        # SAME eps_inf * m_next(x) that the modulated curl(H) term used. The per-cell
-        # frequency lives in the mod_omega field; only the scalar time is shared.
-        _, t_next = _modulation_time_instants(solver, time_value)
-        solver._modulation_t_next = t_next
         if solver.uses_cpml:
             update_electric_fields_modulated_cpml(solver, ex, ey, ez, hx, hy, hz, time_value)
         else:
@@ -974,9 +944,17 @@ def capture_aniso_conduction_currents(solver):
     if not _full_aniso_conductive(solver):
         return
     currents = solver._aniso_cond_current
-    torch.mul(solver.sigma_e_Ex, solver.Ex, out=currents["Ex"])
-    torch.mul(solver.sigma_e_Ey, solver.Ey, out=currents["Ey"])
-    torch.mul(solver.sigma_e_Ez, solver.Ez, out=currents["Ez"])
+    solver.fdtd_module.captureAnisoConductionCurrent3D(
+        SigmaX=solver.sigma_e_Ex,
+        SigmaY=solver.sigma_e_Ey,
+        SigmaZ=solver.sigma_e_Ez,
+        Ex=solver.Ex,
+        Ey=solver.Ey,
+        Ez=solver.Ez,
+        Jx=currents["Ex"],
+        Jy=currents["Ey"],
+        Jz=currents["Ez"],
+    ).launchRaw()
 
 
 def apply_full_aniso_conduction(solver):
@@ -1479,14 +1457,19 @@ def apply_sibc_surface(solver):
     if state is None:
         return
     surface_r = state["surface_r"]
-    surface_l = state["surface_l"]
-    inv_dt = 1.0 / solver.dt
+    surface_l_over_dt = state["surface_l"] / solver.dt
     for face in state["faces"]:
-        h_now = getattr(solver, face["h_name"])[face["h_selector"]]
-        d_h = (h_now - face["h_prev"]) * inv_dt
-        e_surface = face["sign"] * (surface_r * h_now + surface_l * d_h)
-        getattr(solver, face["e_name"])[face["e_selector"]] = e_surface
-        face["h_prev"].copy_(h_now)
+        solver.fdtd_module.applySibcSurface3D(
+            electric=getattr(solver, face["e_name"]),
+            magnetic=getattr(solver, face["h_name"]),
+            axis=face["axis"],
+            electricIndex=face["electric_index"],
+            magneticIndex=face["magnetic_index"],
+            sign=face["sign"],
+            surfaceR=surface_r,
+            surfaceLOverDt=surface_l_over_dt,
+            hPrev=face["h_prev"],
+        ).launchRaw()
 
 
 def clamp_pec_boundaries(solver):
@@ -1621,10 +1604,16 @@ def _field_update_block(solver, time_value):
 
     This is exactly the contiguous, time-marching part of the step that carries no
     per-step host input when TFSF and magnetic sources are absent, so it can be
-    captured once into a CUDA graph and replayed (the additive/surface source and
-    the running DFT stay outside the graph). Kept as a single function so the
-    normal and graph-captured paths execute an identical kernel sequence.
+    captured once into a CUDA graph and replayed (additive electric sources and
+    the running DFT stay outside the graph; native SIBC remains inside). Kept as
+    a single function so the normal and graph-captured paths execute an identical
+    kernel sequence.
     """
+    if getattr(solver, "modulation_enabled", False):
+        solver.fdtd_module.advanceModulationTime3D(
+            ModulationTime=solver._modulation_time,
+            dt=solver.dt,
+        ).launchRaw()
     solver._advance_magnetic_dispersive_state()
     update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
     if has_complex_fields(solver):
@@ -1671,6 +1660,7 @@ def _field_update_block(solver, time_value):
         if getattr(solver, "full_aniso_enabled", False):
             apply_full_aniso_corrections(solver)
             apply_full_aniso_conduction(solver)
+    apply_sibc_surface(solver)
 
 
 def _make_field_update_runner(solver, use_cuda_graph: bool):
@@ -1754,12 +1744,6 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         # A magnetic surface source injects a host-evaluated signal scalar inside
         # the block, which a captured graph would freeze at its capture-time value.
         and not solver._magnetic_source_terms
-        # The modulated E update consumes per-step host phase scalars, which a
-        # captured CUDA graph would freeze at their capture-time values.
-        and not getattr(solver, "modulation_enabled", False)
-        # The SIBC surface override advances per-face recursive H state outside the
-        # captured block; keep the whole step on the eager path in v1.
-        and not getattr(solver, "sibc_enabled", False)
     )
     if not graphable:
         return normal
@@ -1777,7 +1761,7 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         k: v
         for k, v in vars(solver).items()
         if isinstance(v, torch.Tensor)
-        and (k in snapshot_field_names or k.startswith("psi"))
+        and (k in snapshot_field_names or k.startswith("psi") or k == "_modulation_time")
     }
     # The TFSF field-update block advances the auxiliary 1D magnetic grid in place
     # (and reads the auxiliary electric grid). Snapshot both auxiliary tensors so
@@ -1789,6 +1773,10 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         if aux is not None:
             state["_tfsf_aux_electric"] = aux.electric
             state["_tfsf_aux_magnetic"] = aux.magnetic
+    sibc_state = getattr(solver, "_sibc", None)
+    if sibc_state is not None:
+        for index, face in enumerate(sibc_state["faces"]):
+            state[f"_sibc_h_prev_{index}"] = face["h_prev"]
     saved = {k: v.clone() for k, v in state.items()}
 
     def _restore():
@@ -1921,9 +1909,6 @@ def solve(
     for n in iterator:
         time_value = n * solver.dt
         run_field_update(time_value)
-
-        if getattr(solver, "sibc_enabled", False):
-            apply_sibc_surface(solver)
 
         if solver.tfsf_enabled:
             apply_tfsf_e_correction(solver, time_value)

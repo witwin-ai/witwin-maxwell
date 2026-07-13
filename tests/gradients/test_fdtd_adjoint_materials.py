@@ -887,7 +887,7 @@ class _Chi2DensityScene(mw.SceneModule):
     coefficients through the forward E fields for the design gradients to be
     correct (chi2 folds the signed own-component field into eps_eff)."""
 
-    def __init__(self, init=0.0, chi2=_CHI2, boundary="pml"):
+    def __init__(self, init=0.0, chi2=1.0e-4, boundary="pml"):
         super().__init__()
         self.logits = torch.nn.Parameter(torch.full((2, 2, 2), float(init), device="cuda"))
         self._chi2 = chi2

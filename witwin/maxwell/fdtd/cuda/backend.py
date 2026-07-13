@@ -494,8 +494,7 @@ def _electric_ex_modulated(
     ModCos,
     ModSin,
     ModOmega,
-    tPrev,
-    tNext,
+    ModulationTime,
     invDy,
     invDz,
     yLowBoundaryMode,
@@ -512,8 +511,7 @@ def _electric_ex_modulated(
                 ModCos,
                 ModSin,
                 ModOmega,
-                float(tPrev),
-                float(tNext),
+                ModulationTime,
                 invDy,
                 invDz,
                 int(yLowBoundaryMode),
@@ -533,8 +531,7 @@ def _electric_ey_modulated(
     ModCos,
     ModSin,
     ModOmega,
-    tPrev,
-    tNext,
+    ModulationTime,
     invDx,
     invDz,
     xLowBoundaryMode,
@@ -551,8 +548,7 @@ def _electric_ey_modulated(
                 ModCos,
                 ModSin,
                 ModOmega,
-                float(tPrev),
-                float(tNext),
+                ModulationTime,
                 invDx,
                 invDz,
                 int(xLowBoundaryMode),
@@ -572,8 +568,7 @@ def _electric_ez_modulated(
     ModCos,
     ModSin,
     ModOmega,
-    tPrev,
-    tNext,
+    ModulationTime,
     invDx,
     invDy,
     xLowBoundaryMode,
@@ -590,8 +585,7 @@ def _electric_ez_modulated(
                 ModCos,
                 ModSin,
                 ModOmega,
-                float(tPrev),
-                float(tNext),
+                ModulationTime,
                 invDx,
                 invDy,
                 int(xLowBoundaryMode),
@@ -611,8 +605,7 @@ def _electric_ex_cpml_modulated(
     ModCos,
     ModSin,
     ModOmega,
-    tPrev,
-    tNext,
+    ModulationTime,
     PsiExY,
     PsiExZ,
     InvKappaExY,
@@ -637,8 +630,7 @@ def _electric_ex_cpml_modulated(
                 ModCos,
                 ModSin,
                 ModOmega,
-                float(tPrev),
-                float(tNext),
+                ModulationTime,
                 PsiExY,
                 PsiExZ,
                 InvKappaExY,
@@ -666,8 +658,7 @@ def _electric_ey_cpml_modulated(
     ModCos,
     ModSin,
     ModOmega,
-    tPrev,
-    tNext,
+    ModulationTime,
     PsiEyX,
     PsiEyZ,
     InvKappaEyX,
@@ -692,8 +683,7 @@ def _electric_ey_cpml_modulated(
                 ModCos,
                 ModSin,
                 ModOmega,
-                float(tPrev),
-                float(tNext),
+                ModulationTime,
                 PsiEyX,
                 PsiEyZ,
                 InvKappaEyX,
@@ -721,8 +711,7 @@ def _electric_ez_cpml_modulated(
     ModCos,
     ModSin,
     ModOmega,
-    tPrev,
-    tNext,
+    ModulationTime,
     PsiEzX,
     PsiEzY,
     InvKappaEzX,
@@ -747,8 +736,7 @@ def _electric_ez_cpml_modulated(
                 ModCos,
                 ModSin,
                 ModOmega,
-                float(tPrev),
-                float(tNext),
+                ModulationTime,
                 PsiEzX,
                 PsiEzY,
                 InvKappaEzX,
@@ -1250,8 +1238,7 @@ def _electric_ex_cpml_modulated_compressed(
     ModCos,
     ModSin,
     ModOmega,
-    tPrev,
-    tNext,
+    ModulationTime,
     PsiExY,
     PsiExZ,
     InvKappaExY,
@@ -1282,8 +1269,7 @@ def _electric_ex_cpml_modulated_compressed(
                 ModCos,
                 ModSin,
                 ModOmega,
-                float(tPrev),
-                float(tNext),
+                ModulationTime,
                 PsiExY,
                 PsiExZ,
                 InvKappaExY,
@@ -1317,8 +1303,7 @@ def _electric_ey_cpml_modulated_compressed(
     ModCos,
     ModSin,
     ModOmega,
-    tPrev,
-    tNext,
+    ModulationTime,
     PsiEyX,
     PsiEyZ,
     InvKappaEyX,
@@ -1349,8 +1334,7 @@ def _electric_ey_cpml_modulated_compressed(
                 ModCos,
                 ModSin,
                 ModOmega,
-                float(tPrev),
-                float(tNext),
+                ModulationTime,
                 PsiEyX,
                 PsiEyZ,
                 InvKappaEyX,
@@ -1384,8 +1368,7 @@ def _electric_ez_cpml_modulated_compressed(
     ModCos,
     ModSin,
     ModOmega,
-    tPrev,
-    tNext,
+    ModulationTime,
     PsiEzX,
     PsiEzY,
     InvKappaEzX,
@@ -1416,8 +1399,7 @@ def _electric_ez_cpml_modulated_compressed(
                 ModCos,
                 ModSin,
                 ModOmega,
-                float(tPrev),
-                float(tNext),
+                ModulationTime,
                 PsiEzX,
                 PsiEzY,
                 InvKappaEzX,
@@ -2115,7 +2097,7 @@ def _apply_polarization_current(*, ElectricField, PolarizationCurrent, InvPermit
 
 
 def _apply_polarization_current_modulated(
-    *, ElectricField, PolarizationCurrent, InvPermittivity, ModCos, ModSin, ModOmega, tNext, dt
+    *, ElectricField, PolarizationCurrent, InvPermittivity, ModCos, ModSin, ModOmega, ModulationTime, dt
 ):
     _COMPILED_EXTENSION.apply_polarization_current_modulated(
                 ElectricField,
@@ -2124,9 +2106,13 @@ def _apply_polarization_current_modulated(
                 ModCos,
                 ModSin,
                 ModOmega,
-                float(tNext),
+                ModulationTime,
                 float(dt),
             )
+
+
+def _advance_modulation_time(*, ModulationTime, dt):
+    _COMPILED_EXTENSION.advance_modulation_time(ModulationTime, float(dt))
 
 
 def _update_kerr_ex(*, DynamicCurl, Ex, Ey, Ez, LinearPermittivity, ExDecay, KerrChi3, dt, eps0):
@@ -2274,6 +2260,12 @@ def _aniso_offdiag_current_ex(*, Ex, Jy, Jz, CoeffY, CoeffZ, periodicX, periodic
                 Ex, Jy, Jz, CoeffY, CoeffZ,
                 int(periodicX), int(periodicY), int(periodicZ),
             )
+
+
+def _capture_aniso_conduction_current(*, SigmaX, SigmaY, SigmaZ, Ex, Ey, Ez, Jx, Jy, Jz):
+    _COMPILED_EXTENSION.capture_aniso_conduction_current(
+        SigmaX, SigmaY, SigmaZ, Ex, Ey, Ez, Jx, Jy, Jz
+    )
 
 
 def _aniso_offdiag_current_ey(*, Ey, Jx, Jz, CoeffX, CoeffZ, periodicX, periodicY, periodicZ):
@@ -3372,6 +3364,22 @@ def _mur_abc_face(*, field, axis, boundaryIndex, adjacentIndex, coef, prevBounda
     )
 
 
+def _apply_sibc_surface(
+    *, electric, magnetic, axis, electricIndex, magneticIndex, sign, surfaceR, surfaceLOverDt, hPrev
+):
+    _COMPILED_EXTENSION.apply_sibc_surface(
+        electric,
+        magnetic,
+        int(axis),
+        int(electricIndex),
+        int(magneticIndex),
+        float(sign),
+        float(surfaceR),
+        float(surfaceLOverDt),
+        hPrev,
+    )
+
+
 def _project_periodic_boundary(*, field, axis):
     _COMPILED_EXTENSION.project_periodic_boundary(field, int(axis))
 
@@ -3397,6 +3405,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "updateMagneticFieldHyCpmlCompressed3D": _magnetic_hy_cpml_compressed,
     "updateMagneticFieldHzCpmlCompressed3D": _magnetic_hz_cpml_compressed,
     "updateElectricFieldExStandard3D": _electric_ex_standard,
+    "advanceModulationTime3D": _advance_modulation_time,
     "updateElectricFieldExModulated3D": _electric_ex_modulated,
     "updateElectricFieldEyModulated3D": _electric_ey_modulated,
     "updateElectricFieldEzModulated3D": _electric_ez_modulated,
@@ -3459,6 +3468,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "updateElectricFieldExFullAnisoCpml3D": _electric_ex_full_aniso_cpml,
     "updateElectricFieldEyFullAnisoCpml3D": _electric_ey_full_aniso_cpml,
     "updateElectricFieldEzFullAnisoCpml3D": _electric_ez_full_aniso_cpml,
+    "captureAnisoConductionCurrent3D": _capture_aniso_conduction_current,
     "applyAnisoOffdiagCurrentEx3D": _aniso_offdiag_current_ex,
     "applyAnisoOffdiagCurrentEy3D": _aniso_offdiag_current_ey,
     "applyAnisoOffdiagCurrentEz3D": _aniso_offdiag_current_ez,
@@ -3516,6 +3526,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "clampFieldFace3D": _clamp_field_face,
     "clampPecBoundary3D": _clamp_pec_boundary,
     "applyMurBoundary3D": _mur_abc_face,
+    "applySibcSurface3D": _apply_sibc_surface,
     "projectPeriodicBoundary3D": _project_periodic_boundary,
     "projectBlochBoundary3D": _project_bloch_boundary,
 }

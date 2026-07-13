@@ -157,6 +157,7 @@ def _seed_batch_contribution(
 
 def _clone_seed_solver(solver):
     seed_solver = SimpleNamespace()
+    seed_solver.scene = solver.scene
     seed_solver.verbose = False
     seed_solver.complex_fields_enabled = has_complex_fields(solver)
     seed_solver._normalize_source = getattr(solver, "_normalize_source", False)

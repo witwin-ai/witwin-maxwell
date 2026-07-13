@@ -138,9 +138,8 @@ def _magnetic_source_scene():
 
 
 def _modulated_scene():
-    # A modulated dielectric with a point-dipole (electric) source: the only guard
-    # that can decline capture here is modulation_enabled, so the class isolates the
-    # per-step host phase-scalar decline (no magnetic surface source is present).
+    # The persistent modulation clock is advanced on-device, so this isolates the
+    # graph-capturable time-modulated electric update.
     scene = _pml_box_domain()
     scene.add_structure(
         mw.Structure(
@@ -149,6 +148,25 @@ def _modulated_scene():
                 eps_r=4.0,
                 modulation=mw.ModulationSpec(frequency=5.0e8, amplitude=0.2),
             ),
+        )
+    )
+    scene.add_source(_dipole())
+    return scene
+
+
+def _sibc_scene():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.1, 0.1), (-0.1, 0.1), (-0.1, 0.1))),
+        grid=mw.GridSpec.uniform(0.008),
+        boundary=mw.BoundarySpec.faces(
+            default="periodic", num_layers=8, x=("pml", "pml")
+        ),
+        device="cuda",
+    )
+    scene.add_structure(
+        mw.Structure(
+            geometry=mw.Box(position=(0.06, 0.0, 0.0), size=(0.08, 0.2, 0.2)),
+            material=mw.LossyMetalMedium(conductivity=5.8e7),
         )
     )
     scene.add_source(_dipole())
@@ -165,7 +183,8 @@ _COVERAGE = [
     ("bloch_complex", _bloch_scene, _FREQ, True, None),
     ("tfsf_reference", _tfsf_scene, _TFSF_FREQ, True, None),
     ("magnetic_source", _magnetic_source_scene, _FREQ, False, "host-evaluated signal scalar"),
-    ("modulated", _modulated_scene, _FREQ, False, "per-step host phase scalars"),
+    ("modulated", _modulated_scene, _FREQ, True, None),
+    ("sibc", _sibc_scene, _FREQ, True, None),
 ]
 
 
