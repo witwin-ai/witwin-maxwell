@@ -87,10 +87,10 @@ def test_astigmatic_gaussian_beam_compiles_per_axis_fields():
 # ---------------------------------------------------------------------------
 
 
-def _build_scene(source):
+def _build_scene(source, *, grid_step=0.08):
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.8, 0.8), (-0.8, 0.8), (-0.8, 0.8))),
-        grid=mw.GridSpec.uniform(0.08),
+        grid=mw.GridSpec.uniform(grid_step),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
         device="cuda",
     )
@@ -128,7 +128,7 @@ def _one_over_e_half_width(profile, spacing):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_astigmatic_beam_reproduces_per_axis_waists_at_focus():
-    dx = 0.08
+    dx = 0.04
     waist_u = 0.36  # along polarization (z axis on an x-plane monitor)
     waist_v = 0.24  # along binormal (y axis on an x-plane monitor)
     scene = _build_scene(
@@ -139,7 +139,8 @@ def test_fdtd_astigmatic_beam_reproduces_per_axis_waists_at_focus():
             focus=(0.0, 0.0, 0.0),
             source_time=mw.CW(frequency=1.0e9, amplitude=120.0),
             name="beam",
-        )
+        ),
+        grid_step=dx,
     )
     scene.add_monitor(mw.PlaneMonitor("focus_ez", axis="x", position=0.0, fields=("Ez",)))
 

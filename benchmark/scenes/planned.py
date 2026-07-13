@@ -13,11 +13,18 @@ FREQUENCIES = (2.0e9,)
 PULSE = mw.GaussianPulse(frequency=FREQUENCIES[0], fwidth=0.5e9)
 
 
-def _observed(scene: mw.Scene, *, axis: str = "y", component: str = "Ex") -> mw.Scene:
-    position = 0.0
+def _observed(
+    scene: mw.Scene,
+    *,
+    axis: str = "y",
+    position: float = 0.0,
+    component: str = "Ex",
+    flux_axis: str = "z",
+    flux_positions: tuple[float, float] = (-0.3, 0.3),
+) -> mw.Scene:
     scene.add_monitor(mw.PlaneMonitor("field", axis=axis, position=position, fields=(component,), frequencies=FREQUENCIES))
-    scene.add_monitor(mw.FluxMonitor("reflected", axis="z", position=-0.3, frequencies=FREQUENCIES, normal_direction="-"))
-    scene.add_monitor(mw.FluxMonitor("transmitted", axis="z", position=0.3, frequencies=FREQUENCIES))
+    scene.add_monitor(mw.FluxMonitor("reflected", axis=flux_axis, position=flux_positions[0], frequencies=FREQUENCIES, normal_direction="-"))
+    scene.add_monitor(mw.FluxMonitor("transmitted", axis=flux_axis, position=flux_positions[1], frequencies=FREQUENCIES))
     return with_plot_monitors(scene, frequencies=FREQUENCIES)
 
 
@@ -43,14 +50,22 @@ def _waveguide_scene(*, diffraction=False) -> mw.Scene:
             x_low="periodic", x_high="periodic", y_low="periodic", y_high="periodic")
         scene = mw.Scene(domain=scene.domain, grid=scene.grid, boundary=boundary, device="cpu")
     scene.add_structure(mw.Structure(
-        geometry=mw.Box(position=(0, 0, 0), size=(1.1, 0.22, 0.22)),
+        # Extend the guide through the full physical domain so this validates
+        # modal launch/propagation rather than solver-dependent facet scattering.
+        geometry=mw.Box(position=(0, 0, 0), size=(2 * HALF_SPAN, 0.22, 0.22)),
         material=mw.Material(eps_r=4.0), name="waveguide",
     ))
     scene.add_source(mw.ModeSource(position=(-0.35, 0, 0), size=(0, 0.5, 0.5), polarization="Ez", source_time=PULSE, name="mode"))
     scene.add_monitor(mw.ModeMonitor("mode_out", position=(0.35, 0, 0), size=(0, 0.5, 0.5), polarization="Ez", frequencies=FREQUENCIES))
     if diffraction:
         scene.add_monitor(mw.DiffractionMonitor("orders", position=(0, 0, 0.3), size=(1.0, 1.0, 0), frequencies=FREQUENCIES, orders=1))
-    return _observed(scene, axis="y", component="Ez")
+    return _observed(
+        scene,
+        axis="y",
+        component="Ez",
+        flux_axis="x",
+        flux_positions=(-0.5, 0.5),
+    )
 
 
 def _custom_field_source():
@@ -67,10 +82,10 @@ def _custom_current_source():
     return mw.CustomCurrentSource(mw.CurrentDataset((coords, coords, coords - 0.25), {"Jx": values}), source_time=PULSE, name="custom_current")
 
 
-def _source_scene(source) -> mw.Scene:
+def _source_scene(source, *, monitor_position: float = 0.0) -> mw.Scene:
     scene = base_scene().add_source(source)
     scene.add_monitor(mw.FluxMonitor("radiated", axis="z", position=0.3, frequencies=FREQUENCIES))
-    return _observed(scene)
+    return _observed(scene, position=monitor_position)
 
 
 def _scatter_scene(geometry=None) -> mw.Scene:
@@ -94,9 +109,9 @@ def _make(name, family, observable, builder, *, component="Ex", solver="fdtd", r
 
 PLANNED_SCENARIOS = (
     _make("astigmatic_beam", "sources", "astigmatic waist profile", lambda: _source_scene(mw.AstigmaticGaussianBeam(direction=(0,0,1), polarization="Ex", beam_waist=(0.22,0.35), focus=(0,0,0), focus_u=0.05, focus_v=-0.04, source_time=PULSE))),
-    _make("uniform_current", "sources", "radiated power", lambda: _source_scene(mw.UniformCurrentSource(size=(0.12,0.12,0.12), polarization="Ex", center=(0,0,-0.2), source_time=PULSE))),
-    _make("custom_field_source", "sources", "plane replay", lambda: _source_scene(_custom_field_source())),
-    _make("custom_current_source", "sources", "custom current radiation", lambda: _source_scene(_custom_current_source())),
+    _make("uniform_current", "sources", "radiated power", lambda: _source_scene(mw.UniformCurrentSource(size=(0.12,0.12,0.12), polarization="Ex", center=(0,0,-0.2), source_time=PULSE), monitor_position=0.2)),
+    _make("custom_field_source", "sources", "plane replay", lambda: _source_scene(_custom_field_source(), monitor_position=0.5)),
+    _make("custom_current_source", "sources", "custom current radiation", lambda: _source_scene(_custom_current_source(), monitor_position=0.2)),
     _make("mode_source_wg", "sources", "transmitted mode power", _waveguide_scene, component="Ez"),
     _make("pec_box", "media", "PEC reflection", lambda: _plane_scene(material=mw.Material.pec())),
     _make("full_tensor_slab", "media", "full-tensor polarization", lambda: _plane_scene(material=mw.Material(epsilon_tensor=mw.Tensor3x3(((3.0,0.2,0),(0.2,2.5,0),(0,0,2.0)))))),

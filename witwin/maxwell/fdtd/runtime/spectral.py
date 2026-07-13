@@ -5,7 +5,6 @@ from collections.abc import Iterable
 import numpy as np
 import torch
 
-from ...sources import evaluate_source_time
 from ..boundary import has_complex_fields
 
 
@@ -383,7 +382,9 @@ def accumulate_dft(solver, n, phase_cos=None, phase_sin=None):
 
     source_signal = None
     if getattr(solver, "_normalize_source", False) and solver._source_time is not None:
-        source_signal = evaluate_source_time(solver._source_time, n * solver.dt)
+        from ...sources import evaluate_source_time_normalization
+
+        source_signal = evaluate_source_time_normalization(solver._source_time, n * solver.dt)
     active = n >= solver._dft_start_steps
     active &= (solver._dft_end_steps < 0) | (n < solver._dft_end_steps)
     if solver.dft_window_type == "none":
@@ -528,7 +529,9 @@ def build_dft_step_tables(solver, time_steps):
         window_norm += weight
         sample_count += active.astype(np.int64)
         if normalize:
-            signal = float(evaluate_source_time(solver._source_time, n * solver.dt))
+            from ...sources import evaluate_source_time_normalization
+
+            signal = float(evaluate_source_time_normalization(solver._source_time, n * solver.dt))
             src_real += signal * wc
             src_imag += signal * ws
         next_cos = phase_cos * step_cos - phase_sin * step_sin

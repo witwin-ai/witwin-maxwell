@@ -728,8 +728,9 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
     source_signal = None
     accumulate_source = getattr(solver, '_normalize_source', False) or getattr(solver, '_accumulate_source_spectrum', False)
     if accumulate_source and getattr(solver, '_source_time', None) is not None:
-        from ..sources import evaluate_source_time
-        source_signal = evaluate_source_time(solver._source_time, n * solver.dt)
+        from ..sources import evaluate_source_time_normalization
+
+        source_signal = evaluate_source_time_normalization(solver._source_time, n * solver.dt)
 
     for global_index, entry in enumerate(solver._observer_spectral_entries):
         if n < entry["start_step"]:

@@ -49,6 +49,22 @@ def test_benchmark_cache_key_supports_geometry_and_source_objects():
     assert len(cache_key) == 64
 
 
+def test_mode_benchmark_cache_key_tracks_export_contract(monkeypatch):
+    scene = build_scene("mode_source_wg")
+    original = benchmark_runner._benchmark_cache_key(
+        scene, frequencies=(2.0e9,), run_time_factor=15.0
+    )
+    monkeypatch.setattr(
+        benchmark_runner,
+        "_MODE_EXPORT_CONTRACT_VERSION",
+        benchmark_runner._MODE_EXPORT_CONTRACT_VERSION + 1,
+    )
+    changed = benchmark_runner._benchmark_cache_key(
+        scene, frequencies=(2.0e9,), run_time_factor=15.0
+    )
+    assert changed != original
+
+
 def test_align_arrays_center_crops():
     a = np.ones((10, 12))
     b = np.ones((8, 10))

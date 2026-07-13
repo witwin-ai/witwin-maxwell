@@ -48,6 +48,7 @@ _PLANE_COORD_NAMES = {
     "z": ("x", "y"),
 }
 MAX_TIDY3D_COST_PER_SCENARIO = 2.0
+_MODE_EXPORT_CONTRACT_VERSION = 1
 
 
 def _to_numpy(value, *, dtype=None) -> np.ndarray:
@@ -121,6 +122,12 @@ def _benchmark_cache_key(scene: mw.Scene, frequencies: tuple[float, ...], run_ti
         "sources": _stable_serialize(tuple(tidy_scene.sources)),
         "monitors": _stable_serialize(tuple(tidy_scene.monitors)),
     }
+    if any(isinstance(source, mw.ModeSource) for source in tidy_scene.sources) or any(
+        isinstance(monitor, mw.ModeMonitor) for monitor in tidy_scene.monitors
+    ):
+        # Mode candidate-count and polarization-ordering changes alter the SaaS result
+        # without changing the declarative Scene, so track that export contract explicitly.
+        payload["mode_export_contract_version"] = _MODE_EXPORT_CONTRACT_VERSION
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -241,18 +248,37 @@ def _align_plane_monitor_fields(
 
 
 def _comparison_fields(scene: mw.Scene, monitor_axis: str, coords, maxwell_field, tidy3d_field):
-    """Apply convention-invariant alignment needed for soft-plane-wave metrics."""
-    plane_waves = [source for source in scene.sources if isinstance(source, mw.PlaneWave)]
-    if len(plane_waves) != 1 or getattr(plane_waves[0], "injection", "soft") != "soft":
+    """Compare the downstream field of one directional soft surface source."""
+    directional_types = (
+        mw.PlaneWave,
+        mw.GaussianBeam,
+        mw.AstigmaticGaussianBeam,
+        mw.ModeSource,
+        mw.CustomFieldSource,
+    )
+    directional_sources = [source for source in scene.sources if isinstance(source, directional_types)]
+    if len(directional_sources) != 1:
         return maxwell_field, tidy3d_field
 
-    source = plane_waves[0]
-    injection_axis = resolve_injection_axis(source.direction, source.injection_axis)
+    source = directional_sources[0]
+    if isinstance(source, (mw.PlaneWave, mw.GaussianBeam, mw.AstigmaticGaussianBeam)):
+        if getattr(source, "injection", "soft") != "soft":
+            return maxwell_field, tidy3d_field
+        injection_axis = resolve_injection_axis(source.direction, source.injection_axis)
+        direction_component = float(source.direction["xyz".index(injection_axis)])
+        source_position = soft_plane_wave_coordinate(scene, injection_axis, direction_component)
+    elif isinstance(source, mw.ModeSource):
+        injection_axis = source.normal_axis
+        direction_component = 1.0 if source.direction == "+" else -1.0
+        source_position = float(source.position["xyz".index(injection_axis)])
+    else:
+        injection_axis = source.normal_axis
+        direction_component = 1.0
+        source_position = float(source.field_dataset.coords["xyz".index(injection_axis)][0])
+
     support = np.ones(np.asarray(tidy3d_field).shape, dtype=bool)
     coord_names = _PLANE_COORD_NAMES.get(monitor_axis, ())
     if coords is not None and injection_axis in coord_names:
-        direction_component = float(source.direction["xyz".index(injection_axis)])
-        source_position = soft_plane_wave_coordinate(scene, injection_axis, direction_component)
         propagation_coords = np.asarray(coords[coord_names.index(injection_axis)], dtype=np.float64)
         downstream = (
             propagation_coords > source_position
@@ -508,8 +534,14 @@ def _clone_scene(scene: mw.Scene, *, device: str) -> mw.Scene:
 
 def _run_maxwell(scene: mw.Scene, *, frequencies: tuple[float, ...], run_time_factor: float, solver: str = "fdtd"):
     scene = _clone_scene(scene, device="cuda")
-    source = scene.sources[0] if scene.sources else None
-    normalize_source = isinstance(source, mw.PlaneWave) and getattr(source, "injection", "soft") == "soft"
+    sources = tuple(scene.resolved_sources())
+    source_spectra = [
+        _stable_serialize(getattr(source, "source_time", None))
+        for source in sources
+    ]
+    normalize_source = bool(source_spectra) and all(
+        spectrum == source_spectra[0] for spectrum in source_spectra[1:]
+    )
     start = time.perf_counter()
     if solver == "fdfd":
         if len(frequencies) != 1:

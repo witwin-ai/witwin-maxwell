@@ -5,7 +5,7 @@ import math
 import numpy as np
 import torch
 
-from ...sources import POINT_DIPOLE_IDEAL_PROFILE_SCALE, POINT_DIPOLE_REFERENCE_WIDTH
+from ...sources import POINT_DIPOLE_REFERENCE_WIDTH
 from .spatial import (
     beam_profile_from_source,
     plane_center,
@@ -33,21 +33,74 @@ _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
 _ETA0 = 376.730313668
 
 
-def _normalized_point_dipole_profile(dist_sq: torch.Tensor, width: float) -> torch.Tensor:
+def _normalized_point_dipole_profile(
+    dist_sq: torch.Tensor, width: float, control_volumes: torch.Tensor
+) -> torch.Tensor:
     width_sq = 2.0 * float(width) ** 2
     profile = torch.exp(-dist_sq / width_sq)
-    if np.isclose(width, POINT_DIPOLE_REFERENCE_WIDTH):
-        return profile
-
-    reference_width_sq = 2.0 * POINT_DIPOLE_REFERENCE_WIDTH ** 2
-    reference_profile = torch.exp(-dist_sq / reference_width_sq)
-    current_sum = torch.clamp(profile.sum(), min=torch.finfo(profile.dtype).eps)
-    return profile * (reference_profile.sum() / current_sum)
+    integrated_mass = torch.sum(profile * control_volumes)
+    return profile / torch.clamp(integrated_mass, min=torch.finfo(profile.dtype).eps)
 
 
-def _reference_point_dipole_mass(dist_sq: torch.Tensor) -> torch.Tensor:
-    reference_width_sq = 2.0 * POINT_DIPOLE_REFERENCE_WIDTH ** 2
-    return POINT_DIPOLE_IDEAL_PROFILE_SCALE * torch.exp(-dist_sq / reference_width_sq).sum()
+def _sample_control_widths(coords: torch.Tensor) -> torch.Tensor:
+    count = int(coords.numel())
+    if count <= 1:
+        return torch.ones_like(coords)
+    diffs = coords[1:] - coords[:-1]
+    widths = torch.empty_like(coords)
+    widths[0] = 0.5 * diffs[0]
+    widths[-1] = 0.5 * diffs[-1]
+    if count > 2:
+        widths[1:-1] = 0.5 * (diffs[:-1] + diffs[1:])
+    return widths
+
+
+def _yee_component_control_volumes(solver, field_name: str) -> torch.Tensor:
+    coords = _yee_component_coords(solver, field_name)
+    widths = tuple(_sample_control_widths(axis) for axis in coords)
+    return widths[0][:, None, None] * widths[1][None, :, None] * widths[2][None, None, :]
+
+
+def _yee_component_coords(solver, field_name: str) -> tuple[torch.Tensor, ...]:
+    scene = solver.scene
+    coords = {
+        "Ex": (scene.x_half, scene.y, scene.z),
+        "Ey": (scene.x, scene.y_half, scene.z),
+        "Ez": (scene.x, scene.y, scene.z_half),
+    }[field_name]
+    return tuple(axis.to(device=solver.device, dtype=solver.Ex.dtype) for axis in coords)
+
+
+def _axis_control_overlap(coords: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+    """Fraction of every sample's dual control interval covered by ``[lo, hi]``."""
+    count = int(coords.numel())
+    if count <= 1:
+        return torch.ones_like(coords) if lo <= float(coords[0]) <= hi else torch.zeros_like(coords)
+    midpoints = 0.5 * (coords[:-1] + coords[1:])
+    left = torch.cat((coords[:1] - 0.5 * (coords[1:2] - coords[:1]), midpoints))
+    right = torch.cat((midpoints, coords[-1:] + 0.5 * (coords[-1:] - coords[-2:-1])))
+    overlap = torch.clamp(
+        torch.minimum(right, torch.as_tensor(hi, device=coords.device, dtype=coords.dtype))
+        - torch.maximum(left, torch.as_tensor(lo, device=coords.device, dtype=coords.dtype)),
+        min=0.0,
+    )
+    return overlap / (right - left)
+
+
+def _yee_box_overlap(solver, field_name: str, lo, hi):
+    """Return a compact Yee patch containing volume-averaged box indicator weights."""
+    axis_weights = tuple(
+        _axis_control_overlap(coords, float(lo[axis]), float(hi[axis]))
+        for axis, coords in enumerate(_yee_component_coords(solver, field_name))
+    )
+    nonzero = tuple(torch.nonzero(weights > 0.0, as_tuple=False).flatten() for weights in axis_weights)
+    if any(int(indices.numel()) == 0 for indices in nonzero):
+        return None
+    start = tuple(int(indices[0].item()) for indices in nonzero)
+    stop = tuple(int(indices[-1].item()) + 1 for indices in nonzero)
+    slices = tuple(axis_weights[axis][start[axis] : stop[axis]] for axis in range(3))
+    weights = slices[0][:, None, None] * slices[1][None, :, None] * slices[2][None, None, :]
+    return start, stop, weights
 
 
 def _ideal_axis_weights(coords: torch.Tensor, position: float) -> tuple[list[int], list[float]]:
@@ -82,13 +135,13 @@ def _ideal_point_dipole_term(
     px: torch.Tensor,
     py: torch.Tensor,
     pz: torch.Tensor,
-    dist_sq: torch.Tensor,
     source_position,
     *,
     eps_tensor: torch.Tensor,
     offsets,
     dt: float,
     polarization_component: float,
+    control_volumes: torch.Tensor,
 ):
     x_indices, x_weights = _ideal_axis_weights(px, source_position[0])
     y_indices, y_weights = _ideal_axis_weights(py, source_position[1])
@@ -106,15 +159,24 @@ def _ideal_point_dipole_term(
         global_offsets[1] : offsets[1] + local_stop[1],
         global_offsets[2] : offsets[2] + local_stop[2],
     ]
+    volume_slice = control_volumes[
+        global_offsets[0] : offsets[0] + local_stop[0],
+        global_offsets[1] : offsets[1] + local_stop[1],
+        global_offsets[2] : offsets[2] + local_stop[2],
+    ]
     source_patch = torch.zeros_like(eps_slice)
-    source_scale = -float(dt) * float(polarization_component) * _reference_point_dipole_mass(dist_sq)
+    source_scale = -float(dt) * float(polarization_component)
 
     for ix, wx in zip(x_indices, x_weights):
         for iy, wy in zip(y_indices, y_weights):
             for iz, wz in zip(z_indices, z_weights):
                 local_index = (ix - local_start[0], iy - local_start[1], iz - local_start[2])
                 source_patch[local_index] += (
-                    source_scale * float(wx) * float(wy) * float(wz) / eps_slice[local_index]
+                    source_scale
+                    * float(wx)
+                    * float(wy)
+                    * float(wz)
+                    / (eps_slice[local_index] * volume_slice[local_index])
                 )
 
     return global_offsets, source_patch
@@ -141,6 +203,11 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
     else:
         cutoff = 3.0 * max(width, 0.5 * POINT_DIPOLE_REFERENCE_WIDTH)
     coord_dtype = solver.Ex.dtype
+    control_volumes = {
+        field_name: _yee_component_control_volumes(solver, field_name)
+        for field_name, component in zip(("Ex", "Ey", "Ez"), polarization)
+        if not np.isclose(component, 0.0)
+    }
 
     for image_position, phase_real, phase_imag in solver._iter_source_images(source["position"], cutoff):
         src_x, src_y, src_z = image_position
@@ -167,15 +234,18 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                         px,
                         py,
                         pz,
-                        dist_sq,
                         image_position,
                         eps_tensor=solver.eps_Ez,
                         offsets=(ix_start, iy_start, iz_start),
                         dt=solver.dt,
                         polarization_component=polarization[2],
+                        control_volumes=control_volumes["Ez"],
                     )
                 else:
-                    profile = _normalized_point_dipole_profile(dist_sq, width)
+                    volume_slice = control_volumes["Ez"][
+                        ix_start:ix_end, iy_start:iy_end, iz_start:iz_end_ez
+                    ]
+                    profile = _normalized_point_dipole_profile(dist_sq, width, volume_slice)
                     source_patch = (
                         (-solver.dt * polarization[2] / solver.eps_Ez[ix_start:ix_end, iy_start:iy_end, iz_start:iz_end_ez])
                         * profile
@@ -210,15 +280,18 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                         px,
                         py,
                         pz,
-                        dist_sq,
                         image_position,
                         eps_tensor=solver.eps_Ex,
                         offsets=(ix_start, iy_start, iz_start),
                         dt=solver.dt,
                         polarization_component=polarization[0],
+                        control_volumes=control_volumes["Ex"],
                     )
                 else:
-                    profile = _normalized_point_dipole_profile(dist_sq, width)
+                    volume_slice = control_volumes["Ex"][
+                        ix_start:ix_end_ex, iy_start:iy_end, iz_start:iz_end
+                    ]
+                    profile = _normalized_point_dipole_profile(dist_sq, width, volume_slice)
                     source_patch = (
                         (-solver.dt * polarization[0] / solver.eps_Ex[ix_start:ix_end_ex, iy_start:iy_end, iz_start:iz_end])
                         * profile
@@ -253,15 +326,18 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                         px,
                         py,
                         pz,
-                        dist_sq,
                         image_position,
                         eps_tensor=solver.eps_Ey,
                         offsets=(ix_start, iy_start, iz_start),
                         dt=solver.dt,
                         polarization_component=polarization[1],
+                        control_volumes=control_volumes["Ey"],
                     )
                 else:
-                    profile = _normalized_point_dipole_profile(dist_sq, width)
+                    volume_slice = control_volumes["Ey"][
+                        ix_start:ix_end, iy_start:iy_end_ey, iz_start:iz_end
+                    ]
+                    profile = _normalized_point_dipole_profile(dist_sq, width, volume_slice)
                     source_patch = (
                         (-solver.dt * polarization[1] / solver.eps_Ey[ix_start:ix_end, iy_start:iy_end_ey, iz_start:iz_end])
                         * profile
@@ -284,34 +360,22 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
 _UNIFORM_CURRENT_COMPONENTS = (("Ex", 0), ("Ey", 1), ("Ez", 2))
 _CURRENT_ELECTRIC_MAP = {"Jx": "Ex", "Jy": "Ey", "Jz": "Ez"}
 _CURRENT_MAGNETIC_MAP = {"Mx": "Hx", "My": "Hy", "Mz": "Hz"}
-# Equivalent surface currents for a plane with outward normal +axis:
-# electric current J = n x H feeds the tangential E components; magnetic
-# current M = -n x E feeds the tangential H components. Each entry is
-# (target_field, source_component, sign).
-_CUSTOM_FIELD_CURRENT_MAP = {
-    "x": {
-        "electric": (("Ey", "Hz", -1.0), ("Ez", "Hy", 1.0)),
-        "magnetic": (("Hy", "Ez", 1.0), ("Hz", "Ey", -1.0)),
-    },
-    "y": {
-        "electric": (("Ex", "Hz", 1.0), ("Ez", "Hx", -1.0)),
-        "magnetic": (("Hx", "Ez", -1.0), ("Hz", "Ex", 1.0)),
-    },
-    "z": {
-        "electric": (("Ex", "Hy", -1.0), ("Ey", "Hx", 1.0)),
-        "magnetic": (("Hx", "Ey", 1.0), ("Hy", "Ex", -1.0)),
-    },
-}
 
 
 def _region_index_range(solver, field_name, lo, hi):
     scene = solver.scene
     axis_nodes = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)
     sizes = tuple(int(dim) for dim in getattr(solver, field_name).shape)
+    half_axes = solver._COMPONENT_HALF_OFFSET_AXES[field_name]
     start = []
     stop = []
     for axis in range(3):
         lo_index, hi_index = _axis_index_window(axis_nodes[axis], lo[axis], hi[axis], sizes[axis])
+        if half_axes[axis]:
+            # ``_axis_index_window`` returns the bounding-node window. A Yee
+            # component centered between nodes has one fewer sample inside the
+            # same discretized box along that axis.
+            hi_index = max(lo_index, hi_index - 1)
         start.append(lo_index)
         stop.append(hi_index)
     return tuple(start), tuple(stop)
@@ -330,12 +394,13 @@ def _prepare_uniform_current_source(solver, source, *, source_index):
         pol_component = float(polarization[axis])
         if np.isclose(pol_component, 0.0):
             continue
-        start, stop = _region_index_range(solver, field_name, lo, hi)
-        if any(stop[a] <= start[a] for a in range(3)):
+        overlap = _yee_box_overlap(solver, field_name, lo, hi)
+        if overlap is None:
             continue
+        start, stop, weights = overlap
         field_eps = getattr(solver, f"eps_{field_name}")
         eps_slice = field_eps[start[0]:stop[0], start[1]:stop[1], start[2]:stop[2]]
-        source_patch = (-solver.dt * pol_component / eps_slice)
+        source_patch = (-solver.dt * pol_component / eps_slice) * weights
         append_source_term(
             solver._source_terms,
             solver,
@@ -381,15 +446,6 @@ def _trilinear_sample(values, axes, positions):
     return c0 * (1.0 - wx) + c1 * wx
 
 
-def _dataset_inside_mask(axes, positions):
-    mask = torch.ones(positions.shape[:-1], dtype=torch.bool, device=positions.device)
-    for index, coords in enumerate(axes):
-        if int(coords.numel()) > 1:
-            query = positions[..., index]
-            mask = mask & (query >= coords[0]) & (query <= coords[-1])
-    return mask
-
-
 def _dataset_axes_tensors(solver, dataset):
     return tuple(
         torch.tensor(axis, device=solver.device, dtype=solver.Ex.dtype)
@@ -423,7 +479,6 @@ def _append_interpolated_current(
     shape = tuple(stop[a] - start[a] for a in range(3))
     positions = solver._component_positions(field_name, start, shape, dtype=solver.Ex.dtype)
     sampled = _trilinear_sample(values, axes, positions)
-    sampled = sampled * _dataset_inside_mask(axes, positions).to(sampled.dtype)
     if torch.max(torch.abs(sampled)).item() <= 1e-30:
         return
     denom_slice = denom_tensor[start[0]:stop[0], start[1]:stop[1], start[2]:stop[2]]
@@ -479,59 +534,74 @@ def _prepare_custom_field_source(solver, source, *, source_index):
     source_omega = 2.0 * np.pi * float(source_time["frequency"])
     axes = _dataset_axes_tensors(solver, dataset)
     region_lo, region_hi = _dataset_region_bounds(dataset)
-
-    # The equivalent surface currents are smeared over the E dual cell at the
-    # injection plane, so the normal step is the local dual spacing there.
-    scene = solver.scene
     axis_index = _AXIS_TO_INDEX[normal_axis]
-    nodes64 = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)[axis_index]
-    dual64 = (scene.dx_dual64, scene.dy_dual64, scene.dz_dual64)[axis_index]
     plane_coord = 0.5 * (float(region_lo[axis_index]) + float(region_hi[axis_index]))
-    plane_index = int(np.argmin(np.abs(nodes64 - plane_coord)))
-    normal_step = float(dual64[plane_index])
-    mapping = _CUSTOM_FIELD_CURRENT_MAP[normal_axis]
+    plane_coords = getattr(solver.scene, normal_axis)
+    plane_index = int(torch.argmin(torch.abs(plane_coords - plane_coord)).item())
 
-    for target_field, source_component, sign in mapping["electric"]:
-        if source_component not in dataset.components:
+    lower = [0, 0, 0]
+    upper = [0, 0, 0]
+    for index, axis in enumerate("xyz"):
+        if axis == normal_axis:
+            lower[index] = plane_index
+            upper[index] = plane_index + 1
             continue
-        # J_s = n x H, converted to a one-cell-thick volume current (divide by dn).
-        values = (float(sign) / normal_step) * torch.tensor(
-            dataset.components[source_component], device=solver.device, dtype=solver.Ex.dtype
+        nodes64 = (solver.scene.x_nodes64, solver.scene.y_nodes64, solver.scene.z_nodes64)[index]
+        size_cap = (solver.Nx, solver.Ny, solver.Nz)[index]
+        start, stop = _axis_index_window(
+            nodes64,
+            region_lo[index],
+            region_hi[index],
+            size_cap,
         )
-        _append_interpolated_current(
+        lower[index] = start
+        upper[index] = stop - 1
+
+    electric_specs, magnetic_specs = build_discrete_tfsf_specs(tuple(lower), tuple(upper))
+    face_side = "low"
+    electric_specs = electric_specs[_FACE_SPEC_RANGES[(normal_axis, face_side)]]
+    magnetic_specs = magnetic_specs[_FACE_SPEC_RANGES[(normal_axis, face_side)]]
+    component_values = {
+        name: torch.tensor(values, device=solver.device, dtype=solver.Ex.dtype)
+        for name, values in dataset.components.items()
+    }
+
+    def build_profile_term(spec, coeff_patch, _component_scale):
+        values = component_values[spec["incident_name"]]
+        positions = _surface_plane_spec_positions(solver, spec)
+        sampled = _trilinear_sample(values, axes, positions)
+        if spec["incident_name"].startswith("H"):
+            # The discrete face specification stores incident magnetic fields
+            # with the update-equation sign (``-k x E``), while FieldDataset
+            # exposes the physical ``H = k x E / eta`` convention.
+            sampled = -sampled
+        scale = spec["sign"] * sampled * coeff_patch
+        return build_term_from_profile(
             solver,
-            field_name=target_field,
-            values=values,
-            axes=axes,
-            denom_tensor=getattr(solver, f"eps_{target_field}"),
-            region_lo=region_lo,
-            region_hi=region_hi,
+            field_name=spec["field_name"],
+            offsets=spec["offsets"],
+            scale=scale,
+            delay_patch=torch.zeros_like(scale),
+            activation_delay_patch=None,
             source_time=source_time,
-            source_omega=source_omega,
+            omega=source_omega,
             source_index=source_index,
-            term_list=solver._source_terms,
         )
 
-    for target_field, source_component, sign in mapping["magnetic"]:
-        if source_component not in dataset.components:
-            continue
-        # M_s = -n x E, converted to a one-cell-thick volume current (divide by dn).
-        values = (float(sign) / normal_step) * torch.tensor(
-            dataset.components[source_component], device=solver.device, dtype=solver.Ex.dtype
-        )
-        _append_interpolated_current(
-            solver,
-            field_name=target_field,
-            values=values,
-            axes=axes,
-            denom_tensor=getattr(solver, f"mu_{target_field}"),
-            region_lo=region_lo,
-            region_hi=region_hi,
-            source_time=source_time,
-            source_omega=source_omega,
-            source_index=source_index,
-            term_list=solver._magnetic_source_terms,
-        )
+    solver._electric_source_terms.extend(build_terms_from_specs(
+        solver,
+        electric_specs,
+        {name: (1.0 if name in component_values else 0.0) for name in ("Hx", "Hy", "Hz")},
+        E_CURL_ATTR,
+        build_profile_term,
+    ))
+    solver._magnetic_source_terms.extend(build_terms_from_specs(
+        solver,
+        magnetic_specs,
+        {name: (1.0 if name in component_values else 0.0) for name in ("Ex", "Ey", "Ez")},
+        H_CURL_ATTR,
+        build_profile_term,
+    ))
 
 
 def _prepare_surface_source(solver, source, *, source_index):
@@ -655,7 +725,27 @@ def _plane_wave_power_scale(source, aperture_bounds, injection_axis: str) -> flo
     return 1.0 / np.sqrt(unit_power)
 
 
-def _prepare_plane_wave_surface_source(solver, source, *, source_index):
+def _beam_power_scale(source, injection_axis: str) -> float:
+    """Peak electric-field scale for a unit-power Gaussian beam.
+
+    The astigmatic profile uses ``exp(-u^2 / wu^2 - v^2 / wv^2)`` with the
+    longitudinal prefactor that preserves its transverse L2 mass.  Therefore
+    ``integral |E/E0|^2 dA = pi*wu*wv/2`` at every propagation plane.
+    """
+    if source["kind"] == "astigmatic_gaussian_beam":
+        waist_u = float(source["beam_waist_u"])
+        waist_v = float(source["beam_waist_v"])
+    else:
+        waist_u = waist_v = float(source["beam_waist"])
+    axis_index = _AXIS_TO_INDEX[injection_axis]
+    incidence_cosine = abs(float(source["direction"][axis_index]))
+    unit_power = math.pi * waist_u * waist_v * incidence_cosine / (4.0 * _ETA0)
+    if unit_power <= 0.0:
+        raise ValueError("Gaussian beam requires a positive transverse power integral.")
+    return 1.0 / math.sqrt(unit_power)
+
+
+def _prepare_power_normalized_surface_source(solver, source, *, source_index):
     if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
         raise NotImplementedError(
             "PlaneWave soft injection currently supports only none, pml, pec, or pmc boundaries."
@@ -722,7 +812,10 @@ def _prepare_plane_wave_surface_source(solver, source, *, source_index):
     if k_numeric > 1e-12:
         phase_speed = source_omega / k_numeric
 
-    power_scale = _plane_wave_power_scale(source, tuple(aperture_bounds), injection_axis)
+    if source["kind"] == "plane_wave":
+        power_scale = _plane_wave_power_scale(source, tuple(aperture_bounds), injection_axis)
+    else:
+        power_scale = _beam_power_scale(source, injection_axis)
     # A native Yee-plane Poynting monitor co-locates the tangential E/H pair by
     # interpolating across their half-cell separation along the injection axis.
     # For the injected discrete plane wave this reduces the measured normal power
@@ -755,21 +848,38 @@ def _prepare_plane_wave_surface_source(solver, source, *, source_index):
         device=solver.device,
         dtype=solver.Ex.dtype,
     )
+    beam_reference_delay = None
+    if source["kind"] != "plane_wave":
+        _, beam_reference_delay = beam_profile_from_source(
+            reference_point.reshape(1, 1, 1, 3),
+            source,
+            frequency=source_frequency,
+            propagation_speed=phase_speed,
+        )
+        beam_reference_delay = beam_reference_delay.reshape(())
 
     def build_profile_term(spec, coeff_patch, component_scale):
         positions = _surface_plane_spec_positions(solver, spec)
-        spatial_amplitude, delay_patch = plane_wave_profile(
-            positions,
-            direction=direction,
-            reference_point=reference_point,
-            propagation_speed=phase_speed,
-        )
-        # The electric- and magnetic-face terms share one spatially uniform
-        # launch-time origin, so the incident phase is set entirely by the
-        # per-cell propagation delay above. A constant time offset added
-        # identically to both faces only rotates the global launch phase and
-        # leaves every phasor magnitude -- hence the radiated power and the E/H
-        # amplitude ratio -- invariant, so no empirical delay term is applied.
+        if source["kind"] == "plane_wave":
+            spatial_amplitude, delay_patch = plane_wave_profile(
+                positions,
+                direction=direction,
+                reference_point=reference_point,
+                propagation_speed=phase_speed,
+            )
+        else:
+            spatial_amplitude, delay_patch = beam_profile_from_source(
+                positions,
+                source,
+                frequency=source_frequency,
+                propagation_speed=phase_speed,
+            )
+            # The analytic beam phase is expressed relative to its waist.  A
+            # soft source, however, starts on this launch plane: retaining the
+            # large negative waist-to-plane delay would place most of a pulsed
+            # waveform before t=0.  Remove only the common launch-plane delay;
+            # transverse curvature and Gouy phase differences remain intact.
+            delay_patch = delay_patch - beam_reference_delay
         scale = spec["sign"] * component_scale * spatial_amplitude * coeff_patch
         return build_term_from_profile(
             solver,
@@ -816,20 +926,33 @@ def _prepare_mode_surface_source(solver, source, *, source_index):
     magnetic_specs = magnetic_specs[_FACE_SPEC_RANGES[(source["normal_axis"], face_side)]]
     source_time = source["source_time"]
     source_omega = 2.0 * np.pi * float(source_time["frequency"])
+    normal_axis_index = _AXIS_TO_INDEX[source["normal_axis"]]
+    plane_coordinate = solver._plane_coordinate(source["normal_axis"], mode_data["plane_index"])
+    direction_sign = int(source["direction_sign"])
+    phase_speed = source_omega / max(abs(float(mode_data["beta"])), 1.0e-30)
 
     def build_profile_term(spec, coeff_patch):
         positions = _surface_plane_spec_positions(solver, spec)
         component_profile = sample_mode_source_component(mode_data, positions, spec["incident_name"])
+        if spec["incident_name"].startswith("H"):
+            # TFSF face specifications store the magnetic incident component
+            # with the update-equation ``-k x E`` sign. Mode profiles expose
+            # the physical ``H = k x E / eta`` field, so convert conventions.
+            component_profile = -component_profile
         if torch.max(torch.abs(component_profile)).item() <= 1e-12:
             return None
-        zero_delay = torch.zeros_like(component_profile)
+        delay_patch = (
+            float(direction_sign)
+            * (positions[..., normal_axis_index] - float(plane_coordinate))
+            / float(phase_speed)
+        )
         scale = spec["sign"] * component_profile * coeff_patch
         return build_term_from_profile(
             solver,
             field_name=spec["field_name"],
             offsets=spec["offsets"],
             scale=scale,
-            delay_patch=zero_delay,
+            delay_patch=delay_patch,
             activation_delay_patch=None,
             source_time=source_time,
             omega=source_omega,
@@ -893,8 +1016,8 @@ def initialize_source_terms(solver):
         if source["kind"] == "mode_source":
             _prepare_mode_surface_source(solver, source, source_index=source_index)
             continue
-        if source["kind"] == "plane_wave":
-            _prepare_plane_wave_surface_source(solver, source, source_index=source_index)
+        if source["kind"] in {"plane_wave", "gaussian_beam", "astigmatic_gaussian_beam"}:
+            _prepare_power_normalized_surface_source(solver, source, source_index=source_index)
             continue
         if source["kind"] == "uniform_current":
             _prepare_uniform_current_source(solver, source, source_index=source_index)

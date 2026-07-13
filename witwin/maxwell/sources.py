@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 import numpy as np
@@ -11,7 +11,6 @@ SOURCE_TIME_KIND_GAUSSIAN_PULSE = 1
 SOURCE_TIME_KIND_RICKER_WAVELET = 2
 SOURCE_TIME_KIND_CUSTOM = 3
 POINT_DIPOLE_REFERENCE_WIDTH = 0.02
-POINT_DIPOLE_IDEAL_PROFILE_SCALE = 0.75
 
 
 def _require_length3(name, value) -> tuple[float, float, float]:
@@ -526,6 +525,31 @@ def evaluate_source_time(source_time: SourceTime | dict[str, float | int | str],
         alpha_sq = alpha * alpha
         return amplitude * (1.0 - 2.0 * alpha_sq) * math.exp(-alpha_sq)
     return float(source_time.evaluate(float(t)))
+
+
+def evaluate_source_time_normalization(
+    source_time: SourceTime | dict[str, float | int | str], t: float
+) -> float:
+    """Evaluate only the arbitrary waveform envelope used for spectral normalization.
+
+    User amplitude and phase are physical source controls and must remain in frequency-domain
+    results.  This matches Tidy3D's normalization contract while still removing pulse width,
+    delay, and other waveform-shape factors.
+    """
+    if isinstance(source_time, dict):
+        normalized = dict(source_time)
+        normalized["amplitude"] = 1.0
+        normalized["phase"] = 0.0
+        return evaluate_source_time(normalized, t)
+    if isinstance(source_time, CustomSourceTime):
+        if source_time.fn is not None:
+            return float(source_time.fn(float(t)))
+        return float(np.interp(float(t), source_time.times, source_time.amplitudes, left=0.0, right=0.0))
+    updates = {"amplitude": 1.0}
+    if hasattr(source_time, "phase"):
+        updates["phase"] = 0.0
+    normalized = replace(source_time, **updates)
+    return float(normalized.evaluate(float(t)))
 
 
 @dataclass(frozen=True)

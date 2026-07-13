@@ -15,9 +15,9 @@ This report is the low-cost numerical baseline for the campaign in
   convergence-study grid.
 - Each Tidy3D task was estimated before submission and guarded by a 2 FlexCredit per-case ceiling.
 - Fields are cropped to the common physical domain, interpolated to common plane coordinates, and compared
-  with relative L2, relative Linf, and complex correlation. Soft-plane-wave comparisons remove one
-  unit-modulus global source-reference phase and use source geometry/direction to exclude only the discrete
-  source sheet and upstream half-space; amplitude is not fitted and downstream nulls remain in the metric.
+  with relative L2, relative Linf, and complex correlation. Comparisons for one directional soft-surface
+  source remove one unit-modulus global source-reference phase and use source geometry/direction to exclude
+  only the discrete source sheet and upstream half-space; amplitude is never fitted.
 - Flux error is the maximum absolute monitor mismatch divided by one shared incident-power scale. It does not
   divide each monitor by its own near-zero reference.
 - Multi-frequency fields are compared one frequency plane at a time; the scenario headline reports worst L2,
@@ -60,6 +60,60 @@ after flux planes snap to physical Yee nodes; the independent graded-slab Fresne
 existing 8% tier. A denser forward/backward modal estimator and convergence sweep belong to the later grid group,
 not to this uniform-vacuum Group 1 acceptance.
 
+## Group 2 alignment update
+
+Group 2 has been fully rerun with refreshed Tidy3D references and inspected through complex-field slice plots.
+Two of eight cases meet every campaign target; the three vacuum dipoles and custom field replay are close in field
+shape or power, while the two volume-current cases retain material amplitude differences. The mode case now uses a
+two-candidate polarization-filtered Tidy3D reference, but exact square-guide degeneracy and the finite-run propagation
+envelope remain visibly different. This is a completed diagnostic/fix pass, not a claim that all eight rows align.
+
+| Case | Field L2 | Field Linf | Correlation | Flux error | Status |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `dipole_vacuum` | 5.4550e-02 | 8.0581e-02 | 0.9999 | 6.8288e-02 | Field pass; flux marginal |
+| `dipole_ey` | 5.8028e-02 | 6.5710e-02 | 0.9999 | 1.4369e-02 | Pass |
+| `dipole_offcenter` | 5.3690e-02 | 6.4194e-02 | 1.0000 | 7.4575e-02 | Field pass; flux marginal |
+| `astigmatic_beam` | 1.5049e-02 | 1.9512e-02 | 0.9999 | 1.2199e-03 | Pass |
+| `uniform_current` | 7.7862e-01 | 1.0054e+00 | 0.9092 | 6.6514e-01 | Residual volume-current amplitude |
+| `custom_field_source` | 1.9275e-01 | 2.2148e-01 | 0.9896 | 3.2920e-02 | Power pass; field near target |
+| `custom_current_source` | 8.0058e-01 | 8.2125e-01 | 0.9594 | 7.6660e-01 | Residual reverse-interpolation amplitude |
+| `mode_source_wg` | 7.7478e-01 | 5.0843e-01 | 0.6367 | 1.4171e-01 | Degenerate-basis and propagation-envelope residual |
+
+The retained repairs are general and contain no per-scenario fitted amplitude:
+
+- FDTD point-dipole profiles now preserve one SI current moment under Yee control-volume integration; the
+  Tidy3D adapter converts A m to A um. The three vacuum field slices then agree at L2 0.054-0.058 and
+  correlation 0.9999-1.0000. The remaining 6.8-7.5% flux offsets for two dipoles are consistent with comparing
+  Maxwell's finite Gaussian regularization against Tidy3D's ideal point source on this coarse grid.
+- Source-spectrum normalization removes only the arbitrary waveform envelope and preserves user amplitude and
+  phase. Tidy3D Gaussian-pulse export keeps physical phase separate from envelope offset.
+- Gaussian/astigmatic beams are normalized by their analytic transverse power. Their pulsed time origin is the
+  launch plane rather than a remote waist; this removed the pre-`t=0` pulse truncation. The downstream beam
+  magnitude, real part, and unwrapped phase now overlap visually, with differences confined to the source sheet.
+- Uniform current is deposited by source-box/Yee-control-volume overlap, exactly preserving physical current
+  volume. This changes the slice correlation from 0.2887 to 0.9092, but exposes a common unresolved amplitude
+  difference instead of hiding it behind an over-wide `7 x 7 x 7` source patch.
+- Custom current uses component-aware staggered windows and Tidy3D-compatible endpoint extension. The wavefront
+  correlation improves from 0.7831 to 0.9594; the remaining approximately uniform amplitude/power factor requires
+  a faithful implementation of Tidy3D's private reverse-interpolation weights, so no empirical 0.76 multiplier was
+  introduced.
+- Custom field replay now uses one discrete TFSF face and converts physical H to the update-equation sign. Its
+  forward power agrees within 3.3%; the residual field error is concentrated near the launch sheet.
+- Full-vector modes are rotated deterministically inside exactly degenerate eigenspaces toward the requested
+  polarization, normalized by integrated Poynting power, and time-aligned across staggered E/H launch faces.
+  Tidy3D `ModeSource` and `ModeMonitor` now request both polarization candidates and receive the corresponding
+  `ModeSortSpec` polarization-fraction filter, and the mode-export contract invalidates stale one-candidate caches.
+  The refreshed transverse slice still has Tidy3D `||Ey|| / ||Ez|| = 0.956`, versus Maxwell's deterministic
+  requested-`Ez` basis at 0.217. Tidy3D's filter orders the exact square-guide degenerate eigenvectors but does not
+  rotate their eigenspace, so component-wise `Ez` remains basis-dependent. The complex longitudinal slice also shows
+  a smooth Tidy3D packet envelope versus Maxwell's oscillatory finite-run envelope. Flux error is reduced from 5.51
+  to 0.142, but no fitted polarization rotation or amplitude factor is introduced to hide these two residuals.
+
+The diagnostic plots used for these conclusions are the per-case
+`benchmark/plots/<case>/complex_field_diagnostic.png` files. They include raw/phase-aligned complex slices and
+center-line magnitude, real-field, and unwrapped-phase traces; the source-boundary and propagation conclusions above
+come from those plots, not from scalar metrics alone.
+
 ## Campaign outcome
 
 | Outcome | Count |
@@ -69,12 +123,12 @@ not to this uniform-vacuum Group 1 acceptance.
 | Completed Maxwell/Tidy3D field comparisons | 41 |
 | Passed the plan tolerance in the original full-campaign baseline | 0 |
 | Group 1 cases passing after repair | 3 |
+| Group 2 cases passing every target after repair | 2 of 8 |
 | Framework or scene failures | 7 |
 | FDFD cases run | 0 |
 
-The table above describes the original full-campaign baseline. Group 1 has since been repaired and passes as
-shown in the update section; the remaining groups have not been regenerated and should still be treated as
-the original diagnostic baseline.
+The table above describes the original full-campaign baseline. Groups 1 and 2 have since been regenerated as shown
+in their update sections; Groups 3-7 still represent the original diagnostic baseline.
 
 ## Numerical difference summary
 
@@ -124,7 +178,8 @@ dipole-driven resonator and needs a source-power reference observable.
 
 1. **Completed:** fix the homogeneous plane-wave/source-spectrum amplitude convention using
    `planewave_vacuum`, `pml_only`, and the duplicate `symmetry_center` baseline.
-2. Audit UniformCurrent/CustomField/CustomCurrent/ModeSource normalization because their errors cluster at 1.
+2. **Completed diagnostic pass:** source normalization was repaired where a public physical mapping was available;
+   retain the documented volume-current reverse-interpolation and modal-envelope residuals without fitted scales.
 3. Re-run simple linear materials (`sigma_e_slab`, anisotropic slab) before nonlinear/modulated/Graphene cases.
 4. Repair the seven invalid scenario definitions above, then add named scalar cache fields for S-parameters,
    diffraction efficiency, RCS, and directivity.
@@ -161,6 +216,10 @@ Recommended internal order: the three dipole cases, `uniform_current`, the two c
 mode source. Audit source spectra, discrete-source mass, absolute current/field amplitudes, and monitor power
 normalization. `dipole_offcenter` is the cleanest amplitude diagnostic because its correlation is 0.9983 while
 L2 is 3.2644.
+
+This group has now been rerun; use the Group 2 alignment update above rather than the original baseline values in
+this worklist. Two cases pass every target, the three dipole fields pass with two marginal flux rows, custom-field
+power passes, and the volume-current plus modal-degenerate-basis/envelope residuals remain explicitly open.
 
 ### Group 3: Linear, conductive, anisotropic, and dispersive materials
 

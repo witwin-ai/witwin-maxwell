@@ -74,11 +74,34 @@ def _axis_name_to_index(axis: str) -> int:
     return {"x": 0, "y": 1, "z": 2}[axis]
 
 
+def _mode_polarization_fraction(normal_axis: str, polarization) -> str:
+    """Map a requested tangential field axis to Tidy3D's modal polarization fraction."""
+    tangential_axes = tuple(axis for axis in "xyz" if axis != normal_axis)
+    polarization_axis = "xyz"[int(np.argmax(np.abs(polarization)))]
+    if polarization_axis not in tangential_axes:
+        raise ValueError("Mode polarization must be tangential to the source or monitor plane.")
+    return "TE_fraction" if polarization_axis == tangential_axes[0] else "TM_fraction"
+
+
+def _mode_sort_spec(td, normal_axis: str, polarization):
+    """Prefer the requested field axis using Tidy3D's current mode-sorting API."""
+    return td.ModeSortSpec(
+        filter_key=_mode_polarization_fraction(normal_axis, polarization),
+        filter_reference=0.5,
+        filter_order="over",
+    )
+
+
+def _mode_candidate_count(mode_index: int) -> int:
+    """Request both polarization families through the selected modal order."""
+    return 2 * (int(mode_index) + 1)
+
+
 # ---------------------------------------------------------------------------
 # Source-time conversion (no length scaling - purely temporal / frequency)
 # ---------------------------------------------------------------------------
 
-def _convert_source_time(source_time, td):
+def _convert_source_time(source_time, td, *, amplitude_scale: float = 1.0):
     """Convert maxwell source_time to a Tidy3D SourceTime."""
     from ..sources import CW, GaussianPulse, RickerWavelet
 
@@ -88,23 +111,19 @@ def _convert_source_time(source_time, td):
     if isinstance(source_time, CW):
         return td.ContinuousWave(
             freq0=source_time.frequency,
-            amplitude=source_time.amplitude,
+            amplitude=source_time.amplitude * amplitude_scale,
             phase=source_time.phase,
         )
 
     if isinstance(source_time, GaussianPulse):
-        # Maxwell's pulsed source keeps the carrier delay inside the sampled
-        # waveform, while Tidy3D's GaussianPulse encodes the carrier spectrum
-        # phase separately from the envelope offset. Fold the carrier delay
-        # into the exported phase so single-frequency benchmark fields compare
-        # against the same source spectrum at the target frequency.
         offset = source_time.delay / source_time.sigma_t
-        phase = source_time.phase + 2.0 * math.pi * source_time.frequency * source_time.delay
         return td.GaussianPulse(
             freq0=source_time.frequency,
             fwidth=source_time.fwidth,
-            amplitude=source_time.amplitude,
-            phase=phase,
+            amplitude=source_time.amplitude * amplitude_scale,
+            # Tidy3D removes the arbitrary waveform delay during source-spectrum
+            # normalization while preserving this user-controlled phase.
+            phase=source_time.phase,
             offset=offset,
         )
 
@@ -112,7 +131,7 @@ def _convert_source_time(source_time, td):
         return td.GaussianPulse(
             freq0=source_time.frequency,
             fwidth=source_time.frequency,
-            amplitude=source_time.amplitude,
+            amplitude=source_time.amplitude * amplitude_scale,
         )
 
     raise TypeError(f"Unsupported source_time type: {type(source_time).__name__}")
@@ -983,7 +1002,9 @@ def _convert_source(source, scene, td, s, frequencies=None):
 
     if isinstance(source, PointDipole):
         component = _polarization_to_component(source.polarization)
-        td_source_time = _convert_source_time(source.source_time, td)
+        # Maxwell's SI point-source amplitude is an electric current moment in A*m;
+        # Tidy3D's micrometre coordinate system uses A*um.
+        td_source_time = _convert_source_time(source.source_time, td, amplitude_scale=s)
         return td.PointDipole(
             center=_scale3(source.position, s),
             source_time=td_source_time,
@@ -1029,9 +1050,18 @@ def _convert_source(source, scene, td, s, frequencies=None):
         dominant_axis = int(np.argmax(abs_dir))
         inject_dir = "+" if direction[dominant_axis] > 0 else "-"
 
-        center = list((lo + hi) / 2.0 * s for lo, hi in domain_bounds)
+        source_plane = soft_plane_wave_coordinate(
+            scene, "xyz"[dominant_axis], float(direction[dominant_axis])
+        )
+        source_axis_parameter = (
+            source_plane - float(source.focus[dominant_axis])
+        ) / float(direction[dominant_axis])
+        center_m = [
+            float(source.focus[index]) + source_axis_parameter * float(direction[index])
+            for index in range(3)
+        ]
+        center = [value * s for value in center_m]
         size = [(hi - lo) * s for lo, hi in domain_bounds]
-        center[dominant_axis] = source.focus[dominant_axis] * s
         size[dominant_axis] = 0.0
 
         pol_angle, angle_theta, angle_phi = _direction_to_angles(direction, dominant_axis)
@@ -1046,7 +1076,10 @@ def _convert_source(source, scene, td, s, frequencies=None):
                 angle_theta=angle_theta,
                 angle_phi=angle_phi,
                 waist_sizes=(source.beam_waist[0] * s, source.beam_waist[1] * s),
-                waist_distances=(source.focus_u * s, source.focus_v * s),
+                waist_distances=(
+                    (source_axis_parameter - source.focus_u) * s,
+                    (source_axis_parameter - source.focus_v) * s,
+                ),
                 name=source.name or "astigmatic_gaussian_beam",
             )
 
@@ -1059,6 +1092,7 @@ def _convert_source(source, scene, td, s, frequencies=None):
             angle_theta=angle_theta,
             angle_phi=angle_phi,
             waist_radius=source.beam_waist * s,
+            waist_distance=source_axis_parameter * s,
             name=source.name or "gaussian_beam",
         )
 
@@ -1073,13 +1107,17 @@ def _convert_source(source, scene, td, s, frequencies=None):
             size=tuple(size),
             source_time=td_source_time,
             direction=source.direction,
-            mode_spec=td.ModeSpec(num_modes=int(source.mode_index) + 1),
+            mode_spec=td.ModeSpec(
+                num_modes=_mode_candidate_count(source.mode_index),
+                sort_spec=_mode_sort_spec(td, source.normal_axis, source.polarization),
+            ),
             mode_index=int(source.mode_index),
             name=source.name or "mode_source",
         )
 
     if isinstance(source, UniformCurrentSource):
-        td_source_time = _convert_source_time(source.source_time, td)
+        # Current density is A/m^2 in Maxwell and A/um^2 in Tidy3D.
+        td_source_time = _convert_source_time(source.source_time, td, amplitude_scale=1.0 / s**2)
         return td.UniformCurrentSource(
             center=_scale3(source.center, s),
             size=_scale3(source.size, s),
@@ -1089,7 +1127,8 @@ def _convert_source(source, scene, td, s, frequencies=None):
         )
 
     if isinstance(source, CustomFieldSource):
-        td_source_time = _convert_source_time(source.source_time, td)
+        # Dataset E/H fields are SI V/m and A/m; Tidy3D stores them per micrometre.
+        td_source_time = _convert_source_time(source.source_time, td, amplitude_scale=1.0 / s)
         freq = _custom_source_frequency(source, frequencies)
         identity = {name: name for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
         field_dataset, center, size = _custom_source_dataset(
@@ -1104,7 +1143,8 @@ def _convert_source(source, scene, td, s, frequencies=None):
         )
 
     if isinstance(source, CustomCurrentSource):
-        td_source_time = _convert_source_time(source.source_time, td)
+        # Electric and magnetic volume-current densities both acquire two inverse-length factors.
+        td_source_time = _convert_source_time(source.source_time, td, amplitude_scale=1.0 / s**2)
         freq = _custom_source_frequency(source, frequencies)
         current_map = {"Jx": "Ex", "Jy": "Ey", "Jz": "Ez", "Mx": "Hx", "My": "Hy", "Mz": "Hz"}
         current_dataset, center, size = _custom_source_dataset(
@@ -1259,7 +1299,10 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s):
             center=tuple(center),
             size=tuple(size),
             freqs=list(monitor_frequencies),
-            mode_spec=td.ModeSpec(num_modes=int(monitor.mode_index) + 1),
+            mode_spec=td.ModeSpec(
+                num_modes=_mode_candidate_count(monitor.mode_index),
+                sort_spec=_mode_sort_spec(td, monitor.normal_axis, monitor.polarization),
+            ),
             name=monitor.name,
         )
 

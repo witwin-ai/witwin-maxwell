@@ -404,6 +404,37 @@ def _vector_mode_power_sign_numpy(component_profiles: dict[str, np.ndarray]) -> 
     return float(np.sum(np.real(eu * np.conj(hv) - ev * np.conj(hu))))
 
 
+def _normalize_mode_profiles_to_unit_power(
+    component_profiles: dict[str, torch.Tensor],
+    *,
+    coords_u: torch.Tensor,
+    coords_v: torch.Tensor,
+    normal_axis: str,
+) -> dict[str, torch.Tensor]:
+    """Scale a common-grid modal E/H profile to one watt of forward power."""
+    ex, ey, ez = (component_profiles[name] for name in ("Ex", "Ey", "Ez"))
+    hx, hy, hz = (component_profiles[name] for name in ("Hx", "Hy", "Hz"))
+    normal_poynting = {
+        "x": ey * torch.conj(hz) - ez * torch.conj(hy),
+        "y": ez * torch.conj(hx) - ex * torch.conj(hz),
+        "z": ex * torch.conj(hy) - ey * torch.conj(hx),
+    }[normal_axis]
+    power_density = 0.5 * torch.real(normal_poynting)
+    if int(coords_u.numel()) != int(power_density.shape[0]):
+        offset = max((int(coords_u.numel()) - int(power_density.shape[0])) // 2, 0)
+        coords_u = coords_u[offset : offset + int(power_density.shape[0])]
+    if int(coords_v.numel()) != int(power_density.shape[1]):
+        offset = max((int(coords_v.numel()) - int(power_density.shape[1])) // 2, 0)
+        coords_v = coords_v[offset : offset + int(power_density.shape[1])]
+    power_v = torch.trapezoid(power_density, x=coords_v, dim=1)
+    power = torch.trapezoid(power_v, x=coords_u, dim=0)
+    abs_power = torch.abs(power)
+    if float(abs_power.detach().item()) <= torch.finfo(abs_power.dtype).eps:
+        raise RuntimeError("ModeSource eigenmode profile has zero integrated Poynting power.")
+    scale = torch.rsqrt(abs_power)
+    return {name: profile * scale for name, profile in component_profiles.items()}
+
+
 def _select_and_normalize_vector_mode_numpy(
     eigenvalues: np.ndarray,
     eigenvectors: np.ndarray,
@@ -415,7 +446,7 @@ def _select_and_normalize_vector_mode_numpy(
     preferred_field_name: str,
 ):
     order = np.lexsort((np.abs(np.imag(eigenvalues)), -np.real(eigenvalues)))
-    positive_candidates = []
+    raw_candidates = []
     for index in order:
         value = eigenvalues[index]
         if not np.isfinite(value) or np.real(value) <= 0.0:
@@ -432,21 +463,80 @@ def _select_and_normalize_vector_mode_numpy(
             field_names[2]: hu,
             field_names[3]: hv,
         }
-        component_profiles = _normalize_vector_mode_profiles_numpy(
-            component_profiles,
-            preferred_field_name=preferred_field_name,
-        )
-        power_sign = _vector_mode_power_sign_numpy(component_profiles)
-        positive_candidates.append((index, value, component_profiles, power_sign))
+        raw_candidates.append((index, value, component_profiles))
 
-    preferred_candidates = [entry for entry in positive_candidates if entry[3] > 0.0]
+    # A symmetric cross-section can produce an exactly degenerate polarization
+    # pair.  Eigensolvers may return an arbitrary rotation of that subspace, so
+    # selecting one raw vector makes the launched polarization jump with tiny
+    # frequency or grid changes.  Diagonalize the requested-polarization energy
+    # inside each degenerate subspace to obtain a deterministic polarized basis.
+    positive_candidates = []
+    cursor = 0
+    while cursor < len(raw_candidates):
+        group_stop = cursor + 1
+        reference_value = raw_candidates[cursor][1]
+        tolerance = 1.0e-9 * max(abs(reference_value), 1.0)
+        while (
+            group_stop < len(raw_candidates)
+            and abs(raw_candidates[group_stop][1] - reference_value) <= tolerance
+        ):
+            group_stop += 1
+        group = raw_candidates[cursor:group_stop]
+
+        if len(group) == 1:
+            rotated = [(group[0][0], group[0][1], eigenvectors[:, group[0][0]], group[0][2])]
+        else:
+            count = len(group)
+            preferred_gram = np.empty((count, count), dtype=np.complex128)
+            electric_gram = np.empty((count, count), dtype=np.complex128)
+            for row, (_, _, row_profiles) in enumerate(group):
+                for col, (_, _, col_profiles) in enumerate(group):
+                    preferred_gram[row, col] = np.vdot(
+                        row_profiles[preferred_field_name], col_profiles[preferred_field_name]
+                    )
+                    electric_gram[row, col] = sum(
+                        np.vdot(row_profiles[name], col_profiles[name])
+                        for name in row_profiles
+                        if name.startswith("E")
+                    )
+            electric_scale = max(float(np.max(np.abs(np.diag(electric_gram)))), 1.0)
+            electric_gram += np.eye(count) * (np.finfo(np.float64).eps * electric_scale)
+            fractions, rotations = scipy_linalg.eigh(preferred_gram, electric_gram)
+            rotated = []
+            for rotation_index in np.argsort(fractions)[::-1]:
+                coefficients = rotations[:, rotation_index]
+                combined_vector = sum(
+                    coefficient * eigenvectors[:, index]
+                    for coefficient, (index, _, _) in zip(coefficients, group)
+                )
+                combined_profiles = {
+                    name: sum(
+                        coefficient * profiles[name]
+                        for coefficient, (_, _, profiles) in zip(coefficients, group)
+                    )
+                    for name in group[0][2]
+                }
+                rotated.append((group[0][0], reference_value, combined_vector, combined_profiles))
+
+        for selected_index, value, selected_vector, component_profiles in rotated:
+            component_profiles = _normalize_vector_mode_profiles_numpy(
+                component_profiles,
+                preferred_field_name=preferred_field_name,
+            )
+            power_sign = _vector_mode_power_sign_numpy(component_profiles)
+            positive_candidates.append(
+                (selected_index, value, selected_vector, component_profiles, power_sign)
+            )
+        cursor = group_stop
+
+    preferred_candidates = [entry for entry in positive_candidates if entry[4] > 0.0]
     selected_candidates = preferred_candidates if len(preferred_candidates) > int(mode_index) else positive_candidates
     if len(selected_candidates) <= int(mode_index):
         raise ValueError(
             f"ModeSource requested mode_index={mode_index}, but only {len(selected_candidates)} forward modes were found."
         )
-    selected_index, selected_beta, selected_profiles, _ = selected_candidates[int(mode_index)]
-    return selected_beta, eigenvectors[:, selected_index], selected_profiles
+    _, selected_beta, selected_vector, selected_profiles, _ = selected_candidates[int(mode_index)]
+    return selected_beta, selected_vector, selected_profiles
 
 
 def _full_field_component_profiles(component_profiles, shape, *, tangential_field_names):
@@ -1165,9 +1255,22 @@ def _assemble_vector_mode_data(
             device=target_device,
             dtype=target_dtype,
         ).contiguous()
+    reference_profile = next(iter(component_profiles.values()))
+    for field_name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
+        component_profiles.setdefault(field_name, torch.zeros_like(reference_profile))
     if int(source["direction_sign"]) < 0:
         for field_name in field_names[2:]:
             component_profiles[field_name] = -component_profiles[field_name]
+    component_profiles = _normalize_mode_profiles_to_unit_power(
+        component_profiles,
+        coords_u=tangential_coord_map[axis_u][u_lo : u_hi + 1].to(
+            device=target_device, dtype=target_dtype
+        ),
+        coords_v=tangential_coord_map[axis_v][v_lo : v_hi + 1].to(
+            device=target_device, dtype=target_dtype
+        ),
+        normal_axis=normal_axis,
+    )
 
     lower = [0, 0, 0]
     upper = [0, 0, 0]
@@ -1481,6 +1584,14 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
             component_profiles[name] = component * scalar_profile
         elif abs(float(component)) > 1e-12:
             component_profiles[name] = float(component) * scalar_profile
+
+    component_profiles = _normalize_mode_profiles_to_unit_power(
+        component_profiles,
+        coords_u=coords_u.to(device=target_device, dtype=target_dtype),
+        coords_v=coords_v.to(device=target_device, dtype=target_dtype),
+        normal_axis=normal_axis,
+    )
+    scalar_profile = component_profiles[field_name]
 
     return {
         "normal_axis": normal_axis,

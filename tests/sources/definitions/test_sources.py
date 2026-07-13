@@ -7,10 +7,10 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.compiler.sources import compile_fdtd_sources
 from witwin.maxwell.fdtd.excitation.injection import (
+    _ideal_axis_weights,
     _normalized_point_dipole_profile,
-    _reference_point_dipole_mass,
 )
-from witwin.maxwell.sources import POINT_DIPOLE_IDEAL_PROFILE_SCALE, POINT_DIPOLE_REFERENCE_WIDTH
+from witwin.maxwell.sources import POINT_DIPOLE_REFERENCE_WIDTH
 
 
 def _make_scene():
@@ -201,27 +201,22 @@ def test_mode_source_rejects_non_tangential_polarization():
         )
 
 
-def test_point_dipole_narrow_width_keeps_reference_discrete_source_mass():
+def test_point_dipole_gaussian_profile_integrates_to_unit_current_moment():
     width = 0.005
     support = 3.0 * max(width, 0.5 * POINT_DIPOLE_REFERENCE_WIDTH)
     coords = np.arange(-support, support + 1e-12, 0.01)
     xx, yy, zz = np.meshgrid(coords, coords, coords, indexing="ij")
     dist_sq = torch.tensor(xx**2 + yy**2 + zz**2, dtype=torch.float32)
 
-    normalized = _normalized_point_dipole_profile(dist_sq, width)
-    reference = torch.exp(-dist_sq / (2.0 * POINT_DIPOLE_REFERENCE_WIDTH ** 2))
+    control_volumes = torch.full_like(dist_sq, 0.01**3)
+    normalized = _normalized_point_dipole_profile(dist_sq, width, control_volumes)
 
-    assert float(normalized.sum().item()) == pytest.approx(float(reference.sum().item()), rel=1e-6)
+    assert float(torch.sum(normalized * control_volumes).item()) == pytest.approx(1.0, rel=1e-6)
 
 
-def test_ideal_point_dipole_uses_scaled_reference_discrete_mass():
-    coords = np.arange(-0.06, 0.06 + 1e-12, 0.01)
-    xx, yy, zz = np.meshgrid(coords, coords, coords, indexing="ij")
-    dist_sq = torch.tensor(xx**2 + yy**2 + zz**2, dtype=torch.float32)
+def test_ideal_point_dipole_linear_weights_preserve_position_and_mass():
+    coords = torch.tensor((-0.02, 0.0, 0.03), dtype=torch.float64)
+    indices, weights = _ideal_axis_weights(coords, 0.01)
 
-    reference = torch.exp(-dist_sq / (2.0 * POINT_DIPOLE_REFERENCE_WIDTH ** 2))
-
-    assert float(_reference_point_dipole_mass(dist_sq).item()) == pytest.approx(
-        float((POINT_DIPOLE_IDEAL_PROFILE_SCALE * reference.sum()).item()),
-        rel=1e-6,
-    )
+    assert sum(weights) == pytest.approx(1.0)
+    assert sum(float(coords[index]) * weight for index, weight in zip(indices, weights)) == pytest.approx(0.01)

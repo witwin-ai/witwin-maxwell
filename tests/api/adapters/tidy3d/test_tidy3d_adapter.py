@@ -83,6 +83,7 @@ def _make_mock_tidy3d():
     class AstigmaticGaussianBeam(_Recorder): pass
     class ModeSource(_Recorder): pass
     class ModeSpec(_Recorder): pass
+    class ModeSortSpec(_Recorder): pass
     class TFSF(_Recorder): pass
     class UniformCurrentSource(_Recorder): pass
     class CustomCurrentSource(_Recorder): pass
@@ -156,6 +157,7 @@ def _make_mock_tidy3d():
     td.AstigmaticGaussianBeam = AstigmaticGaussianBeam
     td.ModeSource = ModeSource
     td.ModeSpec = ModeSpec
+    td.ModeSortSpec = ModeSortSpec
     td.TFSF = TFSF
     td.UniformCurrentSource = UniformCurrentSource
     td.CustomCurrentSource = CustomCurrentSource
@@ -1555,10 +1557,11 @@ class TestSourceConversion:
             polarization="Ez",
             source_time=mw.CW(frequency=1e9),
         )
-        result = _convert_source(src, scene, td, 1.0)
+        result = _convert_source(src, scene, td, 2.0)
         assert isinstance(result, td.PointDipole)
         assert result.center == (0, 0, 0)
         assert result.polarization == "Ez"
+        assert result.source_time.amplitude == pytest.approx(2.0)
 
     def test_plane_wave(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
@@ -1575,8 +1578,8 @@ class TestSourceConversion:
         assert result.size[2] == 0.0
 
     def test_mode_source(self, inject_mock_tidy3d):
-        # A ModeSource exports as a Tidy3D ModeSource carrying a ModeSpec resolving at
-        # least mode_index + 1 modes; the plane is zero-thickness along its normal axis.
+        # A ModeSource exports as a Tidy3D ModeSource carrying both polarization
+        # candidates through the requested order; the plane is zero-thickness normally.
         td = inject_mock_tidy3d
         scene = mw.Scene(domain=mw.Domain(bounds=((-2, 2), (-2, 2), (-2, 2))), device="cpu")
         src = mw.ModeSource(
@@ -1588,9 +1591,25 @@ class TestSourceConversion:
         assert result.direction == "-"
         assert result.mode_index == 1
         assert isinstance(result.mode_spec, td.ModeSpec)
-        assert result.mode_spec.num_modes == 2
+        assert result.mode_spec.num_modes == 4
+        assert result.mode_spec.sort_spec.filter_key == "TM_fraction"
+        assert result.mode_spec.sort_spec.filter_reference == pytest.approx(0.5)
+        assert result.mode_spec.sort_spec.filter_order == "over"
         assert result.center == pytest.approx((0.0, 0.0, 1.0))
         assert result.size[2] == 0.0
+
+        te_result = _convert_source(
+            mw.ModeSource(
+                position=(0, 0, 0.5),
+                size=(1.0, 1.0, 0.0),
+                polarization="Ex",
+                source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
+            ),
+            scene,
+            td,
+            2.0,
+        )
+        assert te_result.mode_spec.sort_spec.filter_key == "TE_fraction"
 
     def test_astigmatic_gaussian_beam(self, inject_mock_tidy3d):
         # AstigmaticGaussianBeam maps to Tidy3D's AstigmaticGaussianBeam with per-axis
@@ -1605,8 +1624,11 @@ class TestSourceConversion:
         result = _convert_source(src, scene, td, 2.0)
         assert isinstance(result, td.AstigmaticGaussianBeam)
         assert result.waist_sizes == pytest.approx((1.0, 1.2))
-        assert result.waist_distances == pytest.approx((0.2, 0.3))
-        assert result.center[2] == pytest.approx(0.4)
+        source_axis_parameter = result.center[2] / 2.0 - src.focus[2]
+        assert result.waist_distances == pytest.approx(
+            ((source_axis_parameter - src.focus_u) * 2.0, (source_axis_parameter - src.focus_v) * 2.0)
+        )
+        assert result.center[2] < 0.0
         assert result.size[2] == 0.0
 
     def test_uniform_current_source(self, inject_mock_tidy3d):
@@ -1621,6 +1643,7 @@ class TestSourceConversion:
         assert result.polarization == "Ez"
         assert result.center == pytest.approx((0.2, 0.0, 0.0))
         assert result.size == pytest.approx((0.8, 0.8, 0.8))
+        assert result.source_time.amplitude == pytest.approx(0.25)
 
     def test_tfsf_box_injection_exports_tfsf(self, inject_mock_tidy3d):
         # A plane wave injected as a TFSF box exports a Tidy3D TFSF volume source whose box
@@ -1676,6 +1699,7 @@ class TestSourceConversion:
         # x-coordinates are (coord - center) * length_scale = [-1, 0, 1] um.
         assert list(field.Ex.coords["x"]) == pytest.approx([-1.0, 0.0, 1.0])
         assert list(field.Ex.coords["f"]) == pytest.approx([3e14])
+        assert result.source_time.amplitude == pytest.approx(0.5)
 
     def test_custom_current_source_maps_j_and_m_to_e_and_h(self, inject_mock_tidy3d):
         # Tidy3D's CustomCurrentSource reuses a FieldDataset whose E/H slots carry the
@@ -1687,11 +1711,12 @@ class TestSourceConversion:
         x = _np.array([-0.5, 0.5]); y = _np.array([-0.5, 0.5]); z = _np.array([-0.1, 0.1])
         ds = mw.CurrentDataset((x, y, z), {"Jz": _np.ones((2, 2, 2)), "Mx": _np.full((2, 2, 2), 0.3)})
         src = mw.CustomCurrentSource(ds, source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13))
-        result = _convert_source(src, scene, td, 1.0)
+        result = _convert_source(src, scene, td, 2.0)
         assert isinstance(result, td.CustomCurrentSource)
         assert set(result.current_dataset._kwargs) == {"Ez", "Hx"}
         assert result.current_dataset.Ez.data.reshape(-1)[0].real == pytest.approx(1.0)
         assert result.current_dataset.Hx.data.reshape(-1)[0].real == pytest.approx(0.3)
+        assert result.source_time.amplitude == pytest.approx(0.25)
 
 
 class TestSourceTimeConversion:
@@ -1712,7 +1737,7 @@ class TestSourceTimeConversion:
         assert result.freq0 == 3e14
         assert result.fwidth == 1e13
         assert result.offset == pytest.approx(st.delay / st.sigma_t)
-        assert result.phase == pytest.approx(st.phase + 2.0 * math.pi * st.frequency * st.delay)
+        assert result.phase == pytest.approx(st.phase)
 
 
 class TestMonitorConversion:
@@ -1759,7 +1784,7 @@ class TestMonitorConversion:
     def test_mode_monitor_exports_as_mode_monitor_with_mode_spec(self, inject_mock_tidy3d):
         # A modal monitor must export as a Tidy3D ModeMonitor carrying a ModeSpec, not a
         # raw FieldMonitor: the modal decomposition is what distinguishes it, and the mode
-        # solver must resolve at least mode_index + 1 modes.
+        # solver must resolve both polarization candidates through mode_index.
         td = inject_mock_tidy3d
         mon = mw.ModeMonitor(
             name="port0",
@@ -1776,7 +1801,8 @@ class TestMonitorConversion:
         assert result.center[2] == 0.5
         assert result.size[2] == 0.0
         assert isinstance(result.mode_spec, td.ModeSpec)
-        assert result.mode_spec.num_modes == 3
+        assert result.mode_spec.num_modes == 6
+        assert result.mode_spec.sort_spec.filter_key == "TM_fraction"
         assert result.freqs == [1e9]
 
     def test_diffraction_monitor_exports_with_infinite_transverse_size(self, inject_mock_tidy3d):
@@ -2008,14 +2034,16 @@ class TestGeometrySourceMonitorRealTidy3d:
                 scene, real_td, 1.0e6,
             )
             assert isinstance(src, real_td.ModeSource)
-            assert src.mode_spec.num_modes == 3
+            assert src.mode_spec.num_modes == 6
+            assert src.mode_spec.sort_spec.filter_key == "TM_fraction"
             assert src.mode_index == 2
             mon = _convert_monitor(
                 mw.ModeMonitor(name="mm", position=(0, 0, 0.5), size=(1.0, 1.0, 0.0), mode_index=1, frequencies=(3e14,)),
                 ((-2, 2), (-2, 2), (-2, 2)), None, real_td, 1.0e6,
             )
             assert isinstance(mon, real_td.ModeMonitor)
-            assert mon.mode_spec.num_modes == 2
+            assert mon.mode_spec.num_modes == 4
+            assert mon.mode_spec.sort_spec.filter_key == "TM_fraction"
 
     @pytest.mark.skipif(
         importlib.util.find_spec("tidy3d") is None,
@@ -2073,7 +2101,8 @@ class TestGeometrySourceMonitorRealTidy3d:
     def test_custom_current_source_j_m_map_to_e_h_real_tidy3d(self):
         # Tidy3D's CustomCurrentSource injects a FieldDataset whose E/H slots ARE the
         # electric (J) and magnetic (M) currents. The real source must carry Jz in Ez and
-        # Mx in Hx with the physical amplitudes, and pass Tidy3D's validators.
+        # Mx in Hx with the physical dataset amplitudes, while source_time carries the
+        # SI current-density conversion, and pass Tidy3D's validators.
         import numpy as _np
 
         from witwin.maxwell.adapters.tidy3d import _convert_source
@@ -2091,3 +2120,4 @@ class TestGeometrySourceMonitorRealTidy3d:
             assert src.current_dataset.Hx is not None
             assert complex(src.current_dataset.Ez.values.reshape(-1)[0]).real == pytest.approx(1.0)
             assert complex(src.current_dataset.Hx.values.reshape(-1)[0]).real == pytest.approx(0.3)
+            assert src.source_time.amplitude == pytest.approx(1.0e-12)
