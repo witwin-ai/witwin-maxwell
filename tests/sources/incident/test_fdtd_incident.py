@@ -3,7 +3,29 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
+from witwin.maxwell.fdtd.excitation.injection import _validate_soft_surface_source_boundary
 from witwin.maxwell.fdtd.excitation.spatial import AuxiliaryGrid1D
+
+
+def test_soft_plane_wave_accepts_zero_phase_transverse_periodic_boundaries():
+    boundary = mw.BoundarySpec.pml(num_layers=8).with_faces(
+        x_low="periodic",
+        x_high="periodic",
+        y_low="periodic",
+        y_high="periodic",
+    )
+
+    _validate_soft_surface_source_boundary(boundary, (0.0, 0.0, 1.0), "z")
+
+
+def test_soft_plane_wave_rejects_propagation_along_a_periodic_axis():
+    boundary = mw.BoundarySpec.pml(num_layers=8).with_faces(
+        x_low="periodic",
+        x_high="periodic",
+    )
+
+    with pytest.raises(NotImplementedError, match="zero-phase transverse"):
+        _validate_soft_surface_source_boundary(boundary, (1.0, 0.0, 0.0), "x")
 
 
 def test_auxiliary_grid_interpolates_grid_and_half_grid_samples():

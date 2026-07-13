@@ -745,17 +745,36 @@ def _beam_power_scale(source, injection_axis: str) -> float:
     return 1.0 / math.sqrt(unit_power)
 
 
-def _prepare_power_normalized_surface_source(solver, source, *, source_index):
-    if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
+def _validate_soft_surface_source_boundary(boundary, direction, injection_axis: str) -> None:
+    if boundary.uses_kind("bloch"):
         raise NotImplementedError(
-            "PlaneWave soft injection currently supports only none, pml, pec, or pmc boundaries."
+            "PlaneWave soft injection does not support Bloch boundaries; use a TFSF source."
+        )
+    incompatible_periodic_axes = [
+        axis
+        for index, axis in enumerate("xyz")
+        if boundary.axis_kind(axis) == "periodic"
+        and (axis == injection_axis or abs(float(direction[index])) > 1.0e-12)
+    ]
+    if incompatible_periodic_axes:
+        axes = ", ".join(incompatible_periodic_axes)
+        raise NotImplementedError(
+            "PlaneWave soft injection supports periodic boundaries only on zero-phase "
+            f"transverse axes; incompatible axes: {axes}."
         )
 
+
+def _prepare_power_normalized_surface_source(solver, source, *, source_index):
     source_time = source["source_time"]
     source_frequency = float(source_time["frequency"])
     source_omega = 2.0 * np.pi * source_frequency
     direction = source["direction"]
     injection_axis = resolve_injection_axis(direction, source.get("injection_axis"))
+    _validate_soft_surface_source_boundary(
+        solver.scene.boundary,
+        direction,
+        injection_axis,
+    )
     axis_index = _AXIS_TO_INDEX[injection_axis]
     direction_sign = 1 if float(direction[axis_index]) >= 0.0 else -1
     plane_index = soft_plane_wave_index(solver.scene, injection_axis, float(direction[axis_index]))

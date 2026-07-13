@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
+import sys
 
 import numpy as np
 import pytest
@@ -42,11 +44,168 @@ def test_benchmark_scenes_build():
         assert len(scene.monitors) >= 5
 
 
+def test_group7_scenarios_use_supported_source_boundary_and_monitor_contracts():
+    lossy = build_scene("lossy_metal_slab")
+    metal = lossy.structures[0].geometry
+    metal_lower = metal.position - metal.size / 2
+    metal_upper = metal.position + metal.size / 2
+    assert metal_lower[0] < lossy.domain.bounds[0][0]
+    assert metal_upper[0] > lossy.domain.bounds[0][1]
+    prepared_lossy = prepare_scene(lossy)
+    assert np.min(np.abs(prepared_lossy.z_nodes64 - float(metal_lower[2]))) < 1.0e-7
+
+    periodic = build_scene("periodic_grating")
+    assert periodic.boundary.axis_kind("x") == "periodic"
+    assert periodic.boundary.axis_kind("y") == "periodic"
+    assert periodic.boundary.axis_kind("z") == "pml"
+    assert isinstance(periodic.sources[0].injection, mw.TFSF)
+
+    bloch = build_scene("bloch_oblique")
+    assert bloch.boundary.axis_kind("x") == "bloch"
+    assert bloch.boundary.axis_kind("y") == "bloch"
+    assert bloch.boundary.axis_kind("z") == "pml"
+    assert all(value > 0.0 for value in bloch.boundary.bloch_wavevector[:2])
+
+    for name in ("pec_cavity", "pmc_cavity"):
+        cavity = build_scene(name)
+        assert any(monitor.name == "resonance_probe" for monitor in cavity.monitors)
+        assert SCENARIOS[name].scalar_observable == "cavity_resonance"
+    pmc = build_scene("pmc_cavity")
+    assert isinstance(pmc.sources[0], mw.CustomCurrentSource)
+    assert set(pmc.sources[0].current_dataset.components) == {"Mz"}
+    assert SCENARIOS["pmc_cavity"].display_component == "Hz"
+
+    diffraction = build_scene("grating_diffraction")
+    assert any(isinstance(monitor, mw.DiffractionMonitor) for monitor in diffraction.monitors)
+    for name in ("sphere_rcs", "antenna_directivity"):
+        scene = build_scene(name)
+        assert any(isinstance(monitor, mw.ClosedSurfaceMonitor) for monitor in scene.monitors)
+
+
+def test_source_normalized_tfsf_cache_uses_maxwell_incident_field_units():
+    scene = build_scene("periodic_grating")
+    monitors = {
+        "field": {
+            "kind": "field",
+            "position": 250_000.0,
+            "x": np.array([-640_000.0, 640_000.0]),
+            "fields": {"Ey": np.ones((2, 1), dtype=np.complex64)},
+        },
+        "flux": {"kind": "flux", "flux": np.array([2.0])},
+    }
+
+    scaled = benchmark_runner._rescale_tidy3d_fields(
+        monitors,
+        scene=scene,
+        normalize_source=True,
+    )
+
+    unit_field = math.sqrt(2.0 / (299_792_458.0 * 8.8541878128e-12))
+    np.testing.assert_allclose(scaled["field"]["fields"]["Ey"], 1.0 / unit_field)
+    np.testing.assert_allclose(
+        scaled["flux"]["flux"],
+        2.0 / (unit_field * 1.0e6) ** 2,
+    )
+    assert scaled["field"]["position"] == pytest.approx(0.25)
+    np.testing.assert_allclose(scaled["field"]["x"], (-0.64, 0.64))
+
+
+def test_tidy3d_cache_keeps_only_publicly_requested_monitor_fields():
+    scene = build_scene("pmc_cavity")
+    monitors = {
+        "resonance_probe": {
+            "kind": "field",
+            "fields": {
+                "Ez": np.asarray([9.0, 1.0, 2.0]),
+                "Hz": np.asarray([1.0, 5.0, 2.0]),
+            },
+        }
+    }
+
+    scaled = benchmark_runner._rescale_tidy3d_fields(monitors, scene=scene)
+
+    assert set(scaled["resonance_probe"]["fields"]) == {"Hz"}
+    np.testing.assert_allclose(
+        scaled["resonance_probe"]["fields"]["Hz"],
+        np.asarray([1.0, 5.0, 2.0]) * 1.0e6,
+    )
+
+
+def test_lorentz_resonator_keeps_the_point_source_outside_the_dispersive_body():
+    scene = build_scene("lorentz_resonator")
+    source = scene.sources[0]
+    cylinder = scene.structures[0].geometry
+
+    radial_distance = math.hypot(
+        float(source.position[0] - cylinder.position[0]),
+        float(source.position[1] - cylinder.position[1]),
+    )
+    axial_distance = abs(float(source.position[2] - cylinder.position[2]))
+    assert radial_distance > cylinder.radius or axial_distance > 0.5 * cylinder.height
+
+
+@pytest.mark.parametrize("name", ("ring_resonator_s21", "waveguide_s_matrix"))
+def test_s_parameter_benchmarks_compare_the_output_transverse_mode(name):
+    scene = build_scene(name)
+    field_monitor = next(monitor for monitor in scene.monitors if monitor.name == "field")
+
+    assert isinstance(field_monitor, mw.PlaneMonitor)
+    assert field_monitor.axis == "x"
+    assert field_monitor.position == pytest.approx(0.35)
+    assert not any(isinstance(monitor, mw.FluxMonitor) for monitor in scene.monitors)
+    assert not SCENARIOS[name].compare_flux
+
+
 def test_benchmark_cache_key_supports_geometry_and_source_objects():
     scene = build_scene("dielectric_slab")
     cache_key = benchmark_runner._benchmark_cache_key(scene, frequencies=(2.0e9,), run_time_factor=15.0)
     assert isinstance(cache_key, str)
     assert len(cache_key) == 64
+
+
+def test_reference_refresh_cli_forwards_force_refresh(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        benchmark_runner,
+        "generate_tidy3d_references",
+        lambda names, *, force_refresh=False: captured.update(
+            names=names,
+            force_refresh=force_refresh,
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark",
+            "--references-only",
+            "--refresh-references",
+            "dipole_vacuum",
+        ],
+    )
+
+    benchmark_runner.main()
+
+    assert captured == {"names": ["dipole_vacuum"], "force_refresh": True}
+
+
+def test_reference_refresh_cli_requires_references_only(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["benchmark", "--refresh-references", "dipole_vacuum"],
+    )
+
+    with pytest.raises(SystemExit, match="requires --references-only"):
+        benchmark_runner.main()
+
+
+def test_modulated_benchmark_uses_carrier_referenced_field_spectra():
+    scenario = SCENARIOS["modulated_slab"]
+
+    assert not scenario.normalize_source
+    assert scenario.spectral_reference_index == 1
+    assert not scenario.compare_flux
 
 
 def test_mode_benchmark_cache_key_tracks_export_contract(monkeypatch):
@@ -134,6 +293,29 @@ def test_default_normal_plane_wave_does_not_use_directional_source_contract():
     assert not benchmark_runner._directional_source_uses_export_contract(scene.sources[0])
 
 
+def test_continuous_wave_cache_key_tracks_source_time_export_contract(monkeypatch):
+    scenario = SCENARIOS["modulated_slab"]
+    scene = build_scene("modulated_slab")
+    original = benchmark_runner._benchmark_cache_key(
+        scene,
+        scenario.frequencies,
+        scenario.run_time_factor,
+        normalize_source=False,
+    )
+    monkeypatch.setattr(
+        benchmark_runner,
+        "_SOURCE_TIME_EXPORT_CONTRACT_VERSION",
+        benchmark_runner._SOURCE_TIME_EXPORT_CONTRACT_VERSION + 1,
+    )
+    changed = benchmark_runner._benchmark_cache_key(
+        scene,
+        scenario.frequencies,
+        scenario.run_time_factor,
+        normalize_source=False,
+    )
+    assert changed != original
+
+
 def test_incident_scene_signature_ignores_names_but_tracks_launch_physics():
     vacuum = build_scene("planewave_vacuum")
     slab = build_scene("dielectric_slab")
@@ -216,6 +398,102 @@ def test_directional_field_comparison_excludes_the_soft_source_stencil():
     np.testing.assert_allclose(compared_actual, compared_reference)
 
 
+def test_tfsf_field_comparison_removes_only_the_global_reference_phase():
+    scene = build_scene("periodic_grating")
+    reference = np.array(
+        ((1.0 + 0.5j, -0.5 + 0.25j), (0.2 - 0.1j, 2.0 - 0.5j)),
+        dtype=np.complex128,
+    )
+    actual = reference * np.exp(0.73j)
+
+    compared_actual, compared_reference = benchmark_runner._comparison_fields(
+        scene,
+        "y",
+        (np.array((-0.1, 0.1)), np.array((-0.2, 0.2))),
+        actual,
+        reference,
+    )
+
+    np.testing.assert_allclose(compared_actual, compared_reference)
+    assert compared_actual.size == reference.size
+
+
+def test_point_source_field_comparison_excludes_the_singular_source_disk():
+    scene = mw.Scene(device="cpu").add_source(
+        mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez")
+    )
+    coords = np.linspace(-0.2, 0.2, 9)
+    reference = np.ones((coords.size, coords.size), dtype=np.complex128)
+    actual = reference * np.exp(0.3j)
+    actual[coords.size // 2, coords.size // 2] = 1.0e6
+
+    compared_actual, compared_reference = benchmark_runner._comparison_fields(
+        scene,
+        "z",
+        (coords, coords),
+        actual,
+        reference,
+        monitor_position=0.0,
+    )
+
+    assert compared_actual.size < actual.size
+    np.testing.assert_allclose(compared_actual, compared_reference)
+
+
+def test_point_source_field_comparison_excludes_reference_weak_field_noise():
+    scene = mw.Scene(device="cpu").add_source(
+        mw.PointDipole(position=(0.0, 0.0, 0.0), polarization="Ez")
+    )
+    coords = np.linspace(-0.2, 0.2, 9)
+    reference = np.full((coords.size, coords.size), 1.0e-6, dtype=np.complex128)
+    reference[1:3, 1:3] = 1.0
+    actual = reference * np.exp(0.3j)
+    actual[6:, 6:] = np.exp(2.0j) * 1.0e-6
+
+    compared_actual, compared_reference = benchmark_runner._comparison_fields(
+        scene,
+        "z",
+        (coords, coords),
+        actual,
+        reference,
+        monitor_position=0.0,
+    )
+
+    assert compared_actual.size == 4
+    np.testing.assert_allclose(compared_actual, compared_reference)
+
+
+def test_monitor_fields_can_be_normalized_to_one_spectral_reference():
+    coords = np.linspace(-0.1, 0.1, 3)
+    values = np.stack(
+        (
+            np.full((3, 3), 2.0 + 0.0j),
+            np.full((3, 3), 4.0 + 0.0j),
+        ),
+        axis=-1,
+    )
+    monitors = {
+        "field": {
+            "axis": "z",
+            "x": coords,
+            "y": coords,
+            "frequencies": (1.0, 2.0),
+            "fields": {"Ex": values},
+        }
+    }
+
+    normalized = benchmark_runner._normalize_monitor_fields_to_spectral_reference(
+        monitors,
+        monitor_name="field",
+        component="Ex",
+        reference_index=1,
+    )
+
+    np.testing.assert_allclose(normalized["field"]["fields"]["Ex"][..., 0], 0.5)
+    np.testing.assert_allclose(normalized["field"]["fields"]["Ex"][..., 1], 1.0)
+    np.testing.assert_allclose(monitors["field"]["fields"]["Ex"][..., 1], 4.0)
+
+
 def test_align_arrays_center_crops():
     a = np.ones((10, 12))
     b = np.ones((8, 10))
@@ -296,6 +574,13 @@ def test_benchmark_cache_round_trip(tmp_path, monkeypatch):
                 "y": np.linspace(-1.0, 1.0, 7),
             },
             "flux_pos_z": {"kind": "flux", "flux": np.array([1.2])},
+            "mode_out": {
+                "kind": "mode",
+                "scalars": {
+                    "amplitude_forward": np.array([0.3 + 0.4j]),
+                    "effective_index": np.array([1.8]),
+                },
+            },
         },
         cache_key="demo-cache-key",
     )
@@ -303,6 +588,208 @@ def test_benchmark_cache_round_trip(tmp_path, monkeypatch):
     loaded = benchmark_cache.load_tidy3d_result("dipole_vacuum", expected_cache_key="demo-cache-key")
     np.testing.assert_allclose(loaded["field_xy"]["fields"]["Ez"], field)
     np.testing.assert_allclose(loaded["flux_pos_z"]["flux"], np.array([1.2]))
+    np.testing.assert_allclose(
+        loaded["mode_out"]["scalars"]["amplitude_forward"],
+        np.array([0.3 + 0.4j]),
+    )
+    np.testing.assert_allclose(
+        loaded["mode_out"]["scalars"]["effective_index"],
+        np.array([1.8]),
+    )
+
+
+def test_scalar_observable_comparison_uses_complex_modal_ratios():
+    maxwell = {
+        "mode_in": {
+            "scalars": {
+                "amplitude_forward": np.array([2.0 + 0.0j]),
+                "amplitude_backward": np.array([0.2j]),
+            }
+        },
+        "mode_out": {
+            "scalars": {
+                "amplitude_forward": np.array([1.0 + 1.0j]),
+                "effective_index": np.array([1.75]),
+            }
+        },
+    }
+    tidy3d = {
+        "mode_in": {
+            "scalars": {
+                "amplitude_forward": np.array([4.0 + 0.0j]),
+                "amplitude_backward": np.array([0.4j]),
+            }
+        },
+        "mode_out": {
+            "scalars": {
+                "amplitude_forward": np.array([2.0 + 2.0j]),
+                "effective_index": np.array([1.75]),
+            }
+        },
+    }
+
+    metrics = benchmark_runner._compare_scalar_observables(
+        "waveguide_s_matrix", maxwell, tidy3d, (2.0e9,)
+    )
+
+    assert {item["observable"] for item in metrics} == {"S11", "S12", "S21", "S22", "n_eff"}
+    assert max(float(item["complex_error"]) for item in metrics) == pytest.approx(0.0)
+
+
+def test_ring_scalar_observable_reports_one_resonance_frequency():
+    frequencies = tuple(np.linspace(1.8e9, 2.2e9, 9))
+    monitors = {
+        "mode_out": {
+            "scalars": {
+                "effective_index": np.full(len(frequencies), 1.965),
+            }
+        }
+    }
+
+    metrics = benchmark_runner._compare_scalar_observables(
+        "ring_s21",
+        monitors,
+        monitors,
+        frequencies,
+    )
+
+    resonance_rows = [
+        item for item in metrics if item["observable"] == "resonance_frequency"
+    ]
+    assert len(resonance_rows) == 1
+    assert resonance_rows[0]["maxwell"].real == pytest.approx(2.0e9)
+    assert resonance_rows[0]["phase_error"] is None
+
+
+def test_cavity_scalar_observable_uses_sub_bin_quadratic_peak():
+    frequencies = tuple(np.linspace(100.0, 120.0, 5))
+    expected_peak = 113.0
+    spectrum = np.exp(-((np.asarray(frequencies) - expected_peak) / 7.0) ** 2)
+    monitors = {
+        "resonance_probe": {
+            "fields": {"Ez": spectrum},
+        }
+    }
+
+    observables = benchmark_runner._scalar_observables(
+        "cavity_resonance",
+        monitors,
+        frequencies,
+    )
+
+    assert observables["resonance_frequency"][0] == pytest.approx(expected_peak)
+    assert np.max(observables["normalized_probe_spectrum"]) == pytest.approx(1.0)
+
+
+def test_cavity_scalar_observable_accepts_magnetic_dual_probe():
+    frequencies = (1.0e8, 1.5e8, 2.0e8)
+    monitors = {
+        "resonance_probe": {
+            "fields": {"Hz": np.asarray([1.0, 4.0, 2.0], dtype=np.complex128)}
+        }
+    }
+
+    observables = benchmark_runner._scalar_observables(
+        "cavity_resonance", monitors, frequencies
+    )
+
+    assert observables["normalized_probe_spectrum"] == pytest.approx((0.25, 1.0, 0.5))
+    assert 1.0e8 < observables["resonance_frequency"][0] < 2.0e8
+
+
+def test_real_scalar_comparison_plot_is_generated(tmp_path, monkeypatch):
+    monkeypatch.setattr(benchmark_plotting, "ensure_directories", lambda: None)
+    monkeypatch.setattr(
+        benchmark_plotting,
+        "scenario_plot_dir",
+        lambda _name: tmp_path / "scalar_case",
+    )
+    metrics = [
+        {
+            "frequency": frequency,
+            "observable": "normalized_probe_spectrum",
+            "maxwell": maxwell,
+            "tidy3d": tidy3d,
+        }
+        for frequency, maxwell, tidy3d in (
+            (1.0e8, 0.2, 0.1),
+            (1.5e8, 1.0, 0.9),
+            (2.0e8, 0.3, 0.4),
+        )
+    ]
+    metrics.append(
+        {
+            "frequency": 1.5e8,
+            "observable": "resonance_frequency",
+            "maxwell": 1.52e8,
+            "tidy3d": 1.49e8,
+        }
+    )
+
+    output = benchmark_plotting.save_scalar_comparison_plot(
+        scenario_name="scalar_case", scalar_metrics=metrics
+    )
+
+    assert output == tmp_path / "scalar_case" / "scalar_comparison.png"
+    assert output.is_file()
+
+
+def test_diffraction_scalar_observable_normalizes_common_orders():
+    monitors = {
+        "orders": {
+            "scalars": {
+                "orders_m": np.asarray([-2, -1, 0, 1, 2]),
+                "orders_n": np.zeros(5, dtype=np.int64),
+                "order_power": np.asarray([[1.0], [2.0], [4.0], [2.0], [1.0]]),
+            }
+        }
+    }
+
+    observables = benchmark_runner._scalar_observables(
+        "diffraction_orders",
+        monitors,
+        (1.0e9,),
+    )
+
+    assert observables["eta_+0_0"][0] == pytest.approx(0.4)
+    assert observables["eta_-1_0"][0] == pytest.approx(0.2)
+    assert observables["eta_+3_0"][0] == pytest.approx(0.0)
+
+
+def test_tidy3d_closed_surface_faces_feed_common_far_field_postprocess(monkeypatch):
+    surface = mw.ClosedSurfaceMonitor.box(
+        "huygens",
+        position=(0.0, 0.0, 0.0),
+        size=(0.2, 0.2, 0.2),
+        frequencies=(1.0e9,),
+    )
+    scene = mw.Scene(device="cpu").add_monitor(surface)
+    coords = np.linspace(-0.1, 0.1, 3)
+    monitors = {}
+    for face in surface.faces:
+        coord_names = benchmark_runner._PLANE_COORD_NAMES[face.axis]
+        monitors[face.name] = {
+            "kind": "field",
+            "axis": face.axis,
+            "position": face.plane_position,
+            "frequencies": (1.0e9,),
+            coord_names[0]: coords,
+            coord_names[1]: coords,
+            "fields": {
+                component: np.ones((3, 3), dtype=np.complex128)
+                for component in face.fields
+            },
+        }
+
+    monkeypatch.setattr(
+        benchmark_runner,
+        "_far_field_scalar_summary",
+        lambda currents: {"D_max": np.asarray([1.5])},
+    )
+
+    benchmark_runner._attach_tidy3d_surface_scalars(monitors, scene)
+
+    np.testing.assert_allclose(monitors["huygens"]["scalars"]["D_max"], [1.5])
 
 
 def test_benchmark_cache_rejects_mismatched_cache_key(tmp_path, monkeypatch):
@@ -361,6 +848,66 @@ def test_extract_maxwell_monitors_prefers_native_component_payload():
     np.testing.assert_allclose(
         extracted["field_xy"]["field_coords"]["Ez"]["x"],
         np.linspace(-0.15, 0.15, 4),
+    )
+
+
+def test_extract_maxwell_point_monitor_unwraps_component_data():
+    scene = mw.Scene(device="cpu").add_monitor(
+        mw.PointMonitor("probe", position=(0.0, 0.0, 0.0), fields=("Ez",))
+    )
+    payload = {
+        "frequencies": (1.0, 2.0),
+        "components": {
+            "Ez": {"data": np.asarray([1.0 + 0.0j, 2.0 + 0.0j])},
+        },
+    }
+
+    class DummyResult:
+        def monitor(self, name):
+            assert name == "probe"
+            return payload
+
+    extracted = benchmark_runner._extract_maxwell_monitors(DummyResult(), scene)
+
+    np.testing.assert_allclose(extracted["probe"]["fields"]["Ez"], [1.0, 2.0])
+    assert extracted["probe"]["frequencies"] == (1.0, 2.0)
+
+
+def test_extract_maxwell_mode_monitor_preserves_complex_frequency_series():
+    frequencies = (1.8e9, 2.0e9)
+    scene = mw.Scene(device="cpu").add_monitor(
+        mw.ModeMonitor(
+            "mode_out",
+            position=(0.2, 0.0, 0.0),
+            size=(0.0, 0.4, 0.5),
+            polarization="Ez",
+            frequencies=frequencies,
+        )
+    )
+
+    class DummyResult:
+        def raw_monitor(self, name):
+            assert name == "mode_out"
+            return {"frequencies": frequencies}
+
+        def monitor(self, name, *, freq_index):
+            assert name == "mode_out"
+            return {
+                "amplitude_forward": torch.tensor(1.0 + 0.1j * freq_index),
+                "amplitude_backward": torch.tensor(0.01j * (freq_index + 1)),
+                "effective_index": 1.7 + 0.05 * freq_index,
+            }
+
+    extracted = benchmark_runner._extract_maxwell_monitors(DummyResult(), scene)
+
+    assert extracted["mode_out"]["kind"] == "mode"
+    np.testing.assert_allclose(
+        extracted["mode_out"]["scalars"]["amplitude_forward"],
+        np.array([1.0 + 0.0j, 1.0 + 0.1j]),
+    )
+    np.testing.assert_allclose(
+        extracted["mode_out"]["scalars"]["effective_index"],
+        np.array([1.7, 1.75]),
     )
 
 
@@ -530,6 +1077,18 @@ def test_report_writer_updates_markdown(tmp_path, monkeypatch):
         material_source_plot=Path("plots/dipole/material_source.png"),
         field_plot=Path("plots/dipole/field_comparison.png"),
         updated_at="2026-03-16T12:00:00-07:00",
+        scalar_plot=Path("plots/dipole/scalar_comparison.png"),
+        scalar_metrics=[
+            {
+                "frequency": 1.5e9,
+                "observable": "S21",
+                "maxwell": 0.8 + 0.1j,
+                "tidy3d": 0.79 + 0.11j,
+                "complex_error": 0.02,
+                "magnitude_error": 0.01,
+                "phase_error": 0.015,
+            }
+        ],
     )
     planewave_result = ScenarioMetrics(
         name="planewave_vacuum",
@@ -559,6 +1118,9 @@ def test_report_writer_updates_markdown(tmp_path, monkeypatch):
     assert "### dipole" in content
     assert "### planewave" in content
     assert "[material+source]" in content
+    assert "[scalar comparison]" in content
+    assert "## Scalar observables" in content
+    assert "| dipole_vacuum | 1.50000000e+09 | S21 |" in content
 
 
 def test_material_source_plot_smoke(tmp_path, monkeypatch):

@@ -1092,10 +1092,26 @@ def _compile_sibc_descriptor(scene):
     slices = _box_axis_slices(scene, geometry)
     if slices is None:
         _reject_sibc("requires the metal slab to lie inside the grid; the descriptor covers no cells.")
-    node_counts = (scene.Nx, scene.Ny, scene.Nz)
+    geometry_center = tuple(float(value) for value in geometry.position)
+    geometry_size = tuple(float(value) for value in geometry.size)
+    geometry_lower = tuple(
+        geometry_center[axis] - 0.5 * geometry_size[axis] for axis in range(3)
+    )
+    geometry_upper = tuple(
+        geometry_center[axis] + 0.5 * geometry_size[axis] for axis in range(3)
+    )
+    physical_bounds = scene.domain.bounds
+    tolerances = tuple(
+        1.0e-6 * max(float(upper) - float(lower), 1.0)
+        for lower, upper in physical_bounds
+    )
+    # Domain.bounds stays physical when PreparedScene appends PML nodes. SIBC
+    # coverage is a physical geometry contract, so a slab ending at that
+    # boundary is a half-space even though the external PML grid continues.
     covers_full = tuple(
-        axis_slice.start == 0 and axis_slice.stop == count
-        for axis_slice, count in zip(slices, node_counts)
+        geometry_lower[axis] <= float(physical_bounds[axis][0]) + tolerances[axis]
+        and geometry_upper[axis] >= float(physical_bounds[axis][1]) - tolerances[axis]
+        for axis in range(3)
     )
     bounded_axes = [axis for axis in range(3) if not covers_full[axis]]
     if len(bounded_axes) != 1:
@@ -1104,12 +1120,15 @@ def _compile_sibc_descriptor(scene):
             "exactly one axis); a laterally finite block exposes edge faces."
         )
     axis = bounded_axes[0]
-    count = node_counts[axis]
     axis_slice = slices[axis]
-    node_low = int(axis_slice.start)
-    node_high = int(axis_slice.stop) - 1
-    touches_low = node_low == 0
-    touches_high = node_high == count - 1
+    touches_low = (
+        geometry_lower[axis]
+        <= float(physical_bounds[axis][0]) + tolerances[axis]
+    )
+    touches_high = (
+        geometry_upper[axis]
+        >= float(physical_bounds[axis][1]) - tolerances[axis]
+    )
     if touches_low and touches_high:
         _reject_sibc(
             "requires a vacuum region in front of the metal; the slab fills the domain along its "
@@ -1122,10 +1141,12 @@ def _compile_sibc_descriptor(scene):
         )
     if touches_high:
         metal_side = "high"
-        surface_node = node_low
+        surface_node = int(axis_slice.start)
     else:
         metal_side = "low"
-        surface_node = node_high
+        # The upper geometry face is the first node after the lower-inclusive,
+        # upper-exclusive metal-cell window.
+        surface_node = int(axis_slice.stop)
     return {
         "axis": axis,
         "metal_side": metal_side,

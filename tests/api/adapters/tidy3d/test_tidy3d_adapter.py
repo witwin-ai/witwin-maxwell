@@ -405,6 +405,30 @@ class TestBoundaryConversion:
         assert isinstance(result.z.minus, td.PECBoundary)
         assert isinstance(result.z.plus, td.PMCBoundary)
 
+    def test_bloch_wavevector_is_normalized_by_physical_period(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        boundary = mw.BoundarySpec.faces(
+            default="pml",
+            num_layers=8,
+            x="bloch",
+            bloch_wavevector=(3.0 * np.pi, 0.0, 0.0),
+        )
+
+        result = _convert_boundary(
+            boundary,
+            td,
+            ((-0.25, 0.25), (-1.0, 1.0), (-2.0, 2.0)),
+        )
+
+        assert result.x.minus.bloch_vec == pytest.approx(0.75)
+        assert result.x.plus.bloch_vec == pytest.approx(0.75)
+
+    def test_explicit_bloch_export_requires_domain_bounds(self, inject_mock_tidy3d):
+        boundary = mw.BoundarySpec.bloch((1.0, 0.0, 0.0))
+
+        with pytest.raises(ValueError, match="physical domain bounds"):
+            _convert_boundary(boundary, inject_mock_tidy3d)
+
     def test_auto_bloch_boundary_requires_solver_resolution(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
         boundary = mw.BoundarySpec.bloch("auto")
@@ -1590,9 +1614,10 @@ class TestSourceConversion:
             polarization=(1, 0, 0),
             source_time=mw.GaussianPulse(frequency=3e14, fwidth=1e13),
         )
-        result = _convert_source(src, scene, td, 1.0)
+        result = _convert_source(src, scene, td, 2.0)
         assert isinstance(result, td.PlaneWave)
         assert result.direction == "+"
+        assert result.source_time.amplitude == pytest.approx(1.0)
         # Source plane should be zero-thickness along z.
         assert result.size[2] == 0.0
 
@@ -1689,6 +1714,7 @@ class TestSourceConversion:
         )
         result = _convert_source(src, scene, td, 2.0)
         assert isinstance(result, td.AstigmaticGaussianBeam)
+        assert result.source_time.amplitude == pytest.approx(1.0)
         assert result.waist_sizes == pytest.approx((1.0, 1.2))
         source_axis_parameter = result.center[2] / 2.0 - src.focus[2]
         assert result.waist_distances == pytest.approx(
@@ -1725,6 +1751,10 @@ class TestSourceConversion:
         assert isinstance(result, td.TFSF)
         assert result.injection_axis == 2
         assert result.direction == "+"
+        expected_amplitude = 1.0 / (
+            2.0 * math.sqrt(2.0 / (299_792_458.0 * 8.8541878128e-12))
+        )
+        assert result.source_time.amplitude == pytest.approx(expected_amplitude)
         assert result.center == pytest.approx((0.0, 0.0, 0.0))
         assert result.size == pytest.approx((4.0, 4.0, 2.0))
 
@@ -1741,6 +1771,10 @@ class TestSourceConversion:
         assert isinstance(result, td.TFSF)
         assert result.injection_axis == 2
         assert result.direction == "-"
+        expected_amplitude = 1.0 / (
+            math.sqrt(2.0 / (299_792_458.0 * 8.8541878128e-12))
+        )
+        assert result.source_time.amplitude == pytest.approx(expected_amplitude)
         assert result.size[0] == td.inf and result.size[1] == td.inf
         assert result.size[2] == pytest.approx(2.0)
 
@@ -1792,6 +1826,7 @@ class TestSourceTimeConversion:
         result = _convert_source_time(st, td)
         assert isinstance(result, td.ContinuousWave)
         assert result.freq0 == 1e9
+        assert result.fwidth == pytest.approx(1e8)
         assert result.amplitude == 2.0
         assert result.phase == 0.5
 
@@ -1809,21 +1844,23 @@ class TestSourceTimeConversion:
 class TestMonitorConversion:
     def test_point_monitor(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        mon = mw.PointMonitor(name="probe", position=(0, 0, 0))
+        mon = mw.PointMonitor(name="probe", position=(0, 0, 0), fields=("Hz",))
         bounds = ((-1, 1), (-1, 1), (-1, 1))
         result = _convert_monitor(mon, bounds, (1e9,), td, 1.0)
         assert isinstance(result, td.FieldMonitor)
         assert result.size == (0.0, 0.0, 0.0)
         assert result.name == "probe"
+        assert result.fields == ["Hz"]
 
     def test_plane_monitor(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        mon = mw.PlaneMonitor(name="field_xy", axis="z", position=0.5)
+        mon = mw.PlaneMonitor(name="field_xy", axis="z", position=0.5, fields=("Ey", "Hz"))
         bounds = ((-2, 2), (-2, 2), (-2, 2))
         result = _convert_monitor(mon, bounds, (1e9,), td, 1.0)
         assert isinstance(result, td.FieldMonitor)
         assert result.center[2] == 0.5
         assert result.size[2] == 0.0
+        assert result.fields == ["Ey", "Hz"]
 
     def test_finite_plane_monitor(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
@@ -1831,6 +1868,7 @@ class TestMonitorConversion:
             name="finite_xy",
             position=(0.0, 0.0, 0.5),
             size=(1.2, 1.4, 0.0),
+            fields=("Hx",),
             frequencies=(1e9,),
         )
         bounds = ((-2, 2), (-2, 2), (-2, 2))
@@ -1838,6 +1876,7 @@ class TestMonitorConversion:
         assert isinstance(result, td.FieldMonitor)
         assert result.center == pytest.approx((0.0, 0.0, 0.5))
         assert result.size == pytest.approx((1.2, 1.4, 0.0))
+        assert result.fields == ["Hx"]
 
     def test_flux_monitor(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d

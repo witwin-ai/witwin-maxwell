@@ -26,6 +26,11 @@ if TYPE_CHECKING:
 
 # Default length conversion factor: metres to micrometres.
 _M_TO_UM = 1e6
+_C0 = 299_792_458.0
+# Tidy3D's TFSF source injects 1 W/um^2 by definition, corresponding
+# to this incident electric-field amplitude in V/um. Maxwell's TFSF
+# source amplitude is instead the physical incident E field in V/m.
+_TIDY3D_TFSF_UNIT_FIELD = math.sqrt(2.0 / (_C0 * VACUUM_PERMITTIVITY))
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +116,7 @@ def _convert_source_time(source_time, td, *, amplitude_scale: float = 1.0):
     if isinstance(source_time, CW):
         return td.ContinuousWave(
             freq0=source_time.frequency,
+            fwidth=0.1 * source_time.frequency,
             amplitude=source_time.amplitude * amplitude_scale,
             phase=source_time.phase,
         )
@@ -902,7 +908,13 @@ def _tfsf_source(source, scene, td, s):
     from ..sources import TFSF
 
     injection = source.injection
-    td_source_time = _convert_source_time(source.source_time, td)
+    # Convert Maxwell's physical V/m incident-field amplitude to the
+    # multiplier on Tidy3D's fixed 1 W/um^2 TFSF normalization.
+    td_source_time = _convert_source_time(
+        source.source_time,
+        td,
+        amplitude_scale=1.0 / (s * _TIDY3D_TFSF_UNIT_FIELD),
+    )
     direction = source.direction
     injection_axis = resolve_injection_axis(direction, source.injection_axis)
     axis_idx = _axis_name_to_index(injection_axis)
@@ -1300,6 +1312,7 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s):
             center=_scale3(monitor.position, s),
             size=(0.0, 0.0, 0.0),
             freqs=list(monitor_frequencies),
+            fields=list(monitor.fields),
             name=monitor.name,
         )
 
@@ -1364,6 +1377,7 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s):
             center=center,
             size=size,
             freqs=list(monitor_frequencies),
+            fields=list(monitor.fields),
             name=monitor.name,
         )
 
@@ -1387,6 +1401,7 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s):
             center=tuple(center),
             size=tuple(size),
             freqs=list(monitor_frequencies),
+            fields=list(monitor.fields),
             name=monitor.name,
         )
 
@@ -1399,13 +1414,21 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s):
 # Boundary conversion (no length scaling)
 # ---------------------------------------------------------------------------
 
-def _convert_boundary(boundary, td):
+def _convert_boundary(boundary, td, domain_bounds=None):
     """Convert maxwell BoundarySpec to Tidy3D BoundarySpec."""
     kind = boundary.kind
     if boundary.bloch_wavevector == "auto":
         raise ValueError(
             "Automatic Bloch wavevectors require Simulation.prepare() and cannot be exported to Tidy3D unresolved."
         )
+
+    def normalized_bloch_component(axis: str) -> float:
+        if domain_bounds is None:
+            raise ValueError("Bloch boundary export requires the physical domain bounds.")
+        axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+        lower, upper = domain_bounds[axis_index]
+        period = float(upper) - float(lower)
+        return float(boundary.bloch_wavevector[axis_index]) * period / (2.0 * np.pi)
 
     if kind == "pml":
         pml = td.PML(num_layers=boundary.num_layers)
@@ -1424,9 +1447,9 @@ def _convert_boundary(boundary, td):
         return td.BoundarySpec.all_sides(boundary=pmc)
 
     if kind == "bloch":
-        bloch_x = td.BlochBoundary(bloch_vec=boundary.bloch_wavevector[0])
-        bloch_y = td.BlochBoundary(bloch_vec=boundary.bloch_wavevector[1])
-        bloch_z = td.BlochBoundary(bloch_vec=boundary.bloch_wavevector[2])
+        bloch_x = td.BlochBoundary(bloch_vec=normalized_bloch_component("x"))
+        bloch_y = td.BlochBoundary(bloch_vec=normalized_bloch_component("y"))
+        bloch_z = td.BlochBoundary(bloch_vec=normalized_bloch_component("z"))
         return td.BoundarySpec(
             x=td.Boundary(plus=bloch_x, minus=bloch_x),
             y=td.Boundary(plus=bloch_y, minus=bloch_y),
@@ -1438,8 +1461,6 @@ def _convert_boundary(boundary, td):
         return td.BoundarySpec.all_sides(boundary=pec)
 
     if kind == "mixed":
-        axis_index = {"x": 0, "y": 1, "z": 2}
-
         def convert_face(face_kind, axis):
             if face_kind == "pml":
                 return td.PML(num_layers=boundary.num_layers)
@@ -1450,7 +1471,7 @@ def _convert_boundary(boundary, td):
             if face_kind == "pmc":
                 return td.PMCBoundary()
             if face_kind == "bloch":
-                return td.BlochBoundary(bloch_vec=boundary.bloch_wavevector[axis_index[axis]])
+                return td.BlochBoundary(bloch_vec=normalized_bloch_component(axis))
             if face_kind == "none":
                 return td.PECBoundary()
             raise ValueError(f"Unsupported boundary kind: {face_kind}")
@@ -1599,7 +1620,7 @@ def scene_to_tidy3d(
     # -- boundary --------------------------------------------------------------
     td_boundary = td.BoundarySpec.all_sides(boundary=td.PML())
     if scene.boundary is not None:
-        td_boundary = _convert_boundary(scene.boundary, td)
+        td_boundary = _convert_boundary(scene.boundary, td, scene.domain.bounds)
 
     # -- structures ------------------------------------------------------------
     td_structures = []

@@ -33,7 +33,7 @@ def test_lossy_metal_construction_and_surface_impedance():
         metal.surface_impedance(0.0)
 
 
-def _slab_scene(*, device="cpu", conductivity=5.8e7):
+def _slab_scene(*, device="cpu", conductivity=5.8e7, side="high"):
     # Metal slab flush against the +x domain boundary spanning the full transverse
     # cross-section: a single axis-aligned face at normal incidence.
     return mw.Scene(
@@ -43,7 +43,10 @@ def _slab_scene(*, device="cpu", conductivity=5.8e7):
         device=device,
         structures=[
             mw.Structure(
-                geometry=Box(position=(0.3, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+                geometry=Box(
+                    position=((0.3 if side == "high" else -0.3), 0.0, 0.0),
+                    size=(0.4, 0.4, 0.4),
+                ),
                 material=mw.LossyMetalMedium(conductivity=conductivity),
             )
         ],
@@ -60,6 +63,16 @@ def test_lossy_metal_compiles_to_sibc_descriptor():
     assert descriptor["axis"] == 0
     assert descriptor["metal_side"] == "high"
     assert descriptor["conductivity"] == pytest.approx(5.8e7)
+    assert scene.x_nodes64[descriptor["surface_node"]] == pytest.approx(0.1)
+
+
+def test_lossy_metal_low_side_surface_uses_upper_geometry_face():
+    scene = prepare_scene(_slab_scene(side="low"))
+    descriptor = scene.compile_materials()["sibc"]
+
+    assert descriptor["axis"] == 0
+    assert descriptor["metal_side"] == "low"
+    assert scene.x_nodes64[descriptor["surface_node"]] == pytest.approx(-0.1)
 
 
 def test_lossy_metal_finite_block_raises_physics_guard():
