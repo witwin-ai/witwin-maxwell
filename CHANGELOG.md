@@ -38,6 +38,7 @@ All notable user-visible changes to WiTwin Maxwell are documented here. The proj
 - Added visual slice/phase diagnostics and solver-independent scalar comparisons for resonances, diffraction orders, directivity/beamwidth, RCS, and S-parameters.
 - Corrected symmetry-face PML removal, high-face grid anchoring, and Yee-control-volume point-dipole image scaling.
 - Corrected singleton custom-current datasets on staggered Yee components so magnetic current samples compile to the nearest component location.
+- Kept the stable-ABI CUDA extension source portable across MSVC and Linux NVCC by using explicit typed input tables in native anisotropic-current validation.
 
 Detailed numerical conventions, pitfalls, final comparison values, and intentionally unresolved operator-level residuals are documented in [the 0.3.0 Tidy3D numerical-alignment notes](docs/validation/tidy3d-numerical-alignment-0.3.0.md).
 

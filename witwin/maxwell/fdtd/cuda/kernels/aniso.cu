@@ -1252,11 +1252,11 @@ void capture_aniso_conduction_current_cuda(
     torch::stable::Tensor jx,
     torch::stable::Tensor jy,
     torch::stable::Tensor jz) {
-  for (const auto& entry : {
-           std::pair<const torch::stable::Tensor*, const char*>{&sigma_x, "sigma_x"},
-           {&sigma_y, "sigma_y"}, {&sigma_z, "sigma_z"},
-           {&ex, "ex"}, {&ey, "ey"}, {&ez, "ez"},
-           {&jx, "jx"}, {&jy, "jy"}, {&jz, "jz"}}) {
+  const std::pair<const torch::stable::Tensor*, const char*> inputs[] = {
+      {&sigma_x, "sigma_x"}, {&sigma_y, "sigma_y"}, {&sigma_z, "sigma_z"},
+      {&ex, "ex"}, {&ey, "ey"}, {&ez, "ez"},
+      {&jx, "jx"}, {&jy, "jy"}, {&jz, "jz"}};
+  for (const auto& entry : inputs) {
     check_float32_tensor(*entry.first, entry.second);
     check_contiguous_tensor(*entry.first, entry.second);
     check_same_cuda_device(ex, *entry.first, entry.second);
