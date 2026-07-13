@@ -229,6 +229,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Local benchmark and build artifacts
+# Repository-local development content and build artifacts
 .bench_tmp/
-benchmark/cache/
+docs/dev/
+assets/
+benchmark/
