@@ -20,7 +20,7 @@ from benchmark.metrics import (
     field_correlation,
     field_l2_error,
     field_max_error,
-    flux_relative_error,
+    flux_incident_normalized_error,
     plane_coord_keys,
 )
 from benchmark.models import ScenarioMetrics
@@ -40,6 +40,7 @@ _PLANE_COORD_NAMES = {
     "y": ("x", "z"),
     "z": ("x", "y"),
 }
+MAX_TIDY3D_COST_PER_SCENARIO = 2.0
 
 
 def _to_numpy(value, *, dtype=None) -> np.ndarray:
@@ -335,6 +336,35 @@ def _extract_maxwell_monitors(result, scene) -> dict[str, dict[str, Any]]:
     from witwin.maxwell.monitors import FluxMonitor, PlaneMonitor, PointMonitor
 
     out: dict[str, dict[str, Any]] = {}
+    if getattr(result, "method", None) == "fdfd":
+        component_arrays = {
+            name: _to_numpy(result.tensor(name))
+            for name in ("EX", "EY", "EZ")
+            if name in result.fields
+        }
+        for monitor in scene.monitors:
+            if not isinstance(monitor, PlaneMonitor):
+                continue
+            axis_index = "xyz".index(monitor.axis)
+            first = next(iter(component_arrays.values()))
+            axis_size = first.shape[axis_index]
+            lo, hi = scene.domain.bounds[axis_index]
+            axis_coords = np.linspace(lo, hi, axis_size, endpoint=False) + (hi - lo) / (2 * axis_size)
+            plane_index = int(np.argmin(np.abs(axis_coords - monitor.position)))
+            coord_names = _PLANE_COORD_NAMES[monitor.axis]
+            monitor_data = {
+                "kind": "field", "axis": monitor.axis, "position": float(monitor.position),
+                "frequencies": (float(result.frequency),), "fields": {},
+            }
+            for coord_name, size in zip(coord_names, (first.shape[i] for i in range(3) if i != axis_index)):
+                bound_lo, bound_hi = scene.domain.bounds["xyz".index(coord_name)]
+                monitor_data[coord_name] = np.linspace(bound_lo, bound_hi, size, endpoint=False) + (bound_hi - bound_lo) / (2 * size)
+            for component in monitor.fields:
+                key = component.upper()
+                if key in component_arrays:
+                    monitor_data["fields"][component] = np.take(component_arrays[key], plane_index, axis=axis_index)
+            out[monitor.name] = monitor_data
+        return out
     for monitor in scene.monitors:
         payload = result.monitor(monitor.name)
         monitor_data: dict[str, Any] = {}
@@ -391,7 +421,8 @@ def _compute_num_steps(scene: mw.Scene, run_time_factor: float) -> int:
     c0 = 299_792_458.0
     domain_size = max(bounds[1] - bounds[0] for bounds in scene.domain.bounds)
     run_time_s = run_time_factor * domain_size / c0
-    dt_estimate = 0.5 * min(scene.dx, scene.dy, scene.dz) / (c0 * np.sqrt(3.0))
+    min_spacing = min(float(value) for value in scene.grid.min_spacing) if scene.grid.is_custom else min(scene.dx, scene.dy, scene.dz)
+    dt_estimate = 0.5 * min_spacing / (c0 * np.sqrt(3.0))
     return int(np.ceil(run_time_s / dt_estimate))
 
 
@@ -399,18 +430,26 @@ def _clone_scene(scene: mw.Scene, *, device: str) -> mw.Scene:
     return scene.clone(device=device)
 
 
-def _run_maxwell(scene: mw.Scene, *, frequencies: tuple[float, ...], run_time_factor: float):
+def _run_maxwell(scene: mw.Scene, *, frequencies: tuple[float, ...], run_time_factor: float, solver: str = "fdtd"):
     scene = _clone_scene(scene, device="cuda")
     n_steps = _compute_num_steps(scene, run_time_factor)
     source = scene.sources[0] if scene.sources else None
     normalize_source = isinstance(source, mw.PlaneWave) and getattr(source, "injection", "soft") == "soft"
     start = time.perf_counter()
-    result = Simulation.fdtd(
-        scene,
-        frequencies=frequencies,
-        run_time=TimeConfig(time_steps=n_steps),
-        spectral_sampler=mw.SpectralSampler(normalize_source=normalize_source),
-    ).run()
+    if solver == "fdfd":
+        if len(frequencies) != 1:
+            raise ValueError("FDFD benchmark scenarios require exactly one frequency.")
+        result = Simulation.fdfd(
+            scene, frequency=frequencies[0],
+            solver=mw.GMRES(solver_type="sqmr", preconditioner="ssor", precision="double"),
+        ).run()
+    elif solver == "fdtd":
+        result = Simulation.fdtd(
+            scene, frequencies=frequencies, run_time=TimeConfig(time_steps=n_steps),
+            spectral_sampler=mw.SpectralSampler(normalize_source=normalize_source),
+        ).run()
+    else:
+        raise ValueError(f"Unknown benchmark solver {solver!r}.")
     elapsed = time.perf_counter() - start
     return result, _extract_maxwell_monitors(result, scene), elapsed
 
@@ -452,8 +491,17 @@ def _load_or_run_tidy3d(name: str, scene: mw.Scene, frequencies: tuple[float, ..
     run_time = run_time_factor * domain_size / c0
     td_scene = prepare_tidy3d_benchmark_scene(scene)
     td_sim = td_scene.to_tidy3d(frequencies=frequencies, run_time=run_time)
+    print(f"  Tidy3D: estimating reference cost for {name}")
+    job = web.Job(simulation=td_sim, task_name=f"maxwell_benchmark_{name}", verbose=False)
+    estimated_cost = float(job.estimate_cost(verbose=False))
+    print(f"  Tidy3D: estimated cost {estimated_cost:.4f} FlexCredits")
+    if estimated_cost > MAX_TIDY3D_COST_PER_SCENARIO:
+        raise RuntimeError(
+            f"Tidy3D estimate for {name} is {estimated_cost:.4f} FlexCredits, above the "
+            f"per-scenario budget {MAX_TIDY3D_COST_PER_SCENARIO:.4f}; reference was not run."
+        )
     print(f"  Tidy3D: generating reference for {name} with cloud run")
-    td_data = web.run(td_sim, task_name=f"maxwell_benchmark_{name}", verbose=False)
+    td_data = job.run()
     monitors = _extract_tidy3d_monitors(td_data, td_sim)
     save_tidy3d_result(name, frequencies=frequencies, monitors=monitors, cache_key=cache_key)
     print(f"  Tidy3D: saved cache for {name}")
@@ -461,7 +509,7 @@ def _load_or_run_tidy3d(name: str, scene: mw.Scene, frequencies: tuple[float, ..
 
 
 def _pick_flux_error(maxwell_monitors: dict[str, dict], tidy3d_monitors: dict[str, dict]) -> float | None:
-    errors = []
+    pairs = []
     for name, monitor in maxwell_monitors.items():
         if "flux" not in monitor or name not in tidy3d_monitors or "flux" not in tidy3d_monitors[name]:
             continue
@@ -470,8 +518,14 @@ def _pick_flux_error(maxwell_monitors: dict[str, dict], tidy3d_monitors: dict[st
         common = min(len(maxwell_flux), len(tidy3d_flux))
         if common == 0:
             continue
-        errors.append(flux_relative_error(maxwell_flux[:common], tidy3d_flux[:common]))
-    return max(errors) if errors else None
+        pairs.append((maxwell_flux[:common], tidy3d_flux[:common]))
+    if not pairs:
+        return None
+    incident_power = max(float(np.max(np.abs(reference))) for _, reference in pairs)
+    return max(
+        flux_incident_normalized_error(actual, reference, incident_power=incident_power)
+        for actual, reference in pairs
+    )
 
 
 def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
@@ -490,6 +544,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             scene,
             frequencies=scenario.frequencies,
             run_time_factor=scenario.run_time_factor,
+            solver=scenario.solver,
         )
         tidy3d_monitors, cache_hit = _load_or_run_tidy3d(
             name,
@@ -500,30 +555,26 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
 
         monitor_name = scenario.display_monitor
         component = scenario.display_component
-        maxwell_field = _select_monitor_plane_field(
-            maxwell_monitors[monitor_name],
-            component,
-            maxwell_monitors[monitor_name]["fields"][component],
-            freq_index=0,
-        )
-        tidy3d_field = _select_monitor_plane_field(
-            tidy3d_monitors[monitor_name],
-            component,
-            tidy3d_monitors[monitor_name]["fields"][component],
-            freq_index=0,
-        )
-        maxwell_field, tidy3d_field = _align_plane_monitor_fields(
-            scene,
-            maxwell_monitors[monitor_name],
-            tidy3d_monitors[monitor_name],
-            component=component,
-            maxwell_field=maxwell_field,
-            tidy3d_field=tidy3d_field,
-        )
-
-        l2_error = field_l2_error(maxwell_field, tidy3d_field)
-        linf_error = field_max_error(maxwell_field, tidy3d_field)
-        corr = field_correlation(maxwell_field, tidy3d_field)
+        per_frequency = []
+        for freq_index, frequency in enumerate(scenario.frequencies):
+            maxwell_field = _select_monitor_plane_field(
+                maxwell_monitors[monitor_name], component,
+                maxwell_monitors[monitor_name]["fields"][component], freq_index=freq_index)
+            tidy3d_field = _select_monitor_plane_field(
+                tidy3d_monitors[monitor_name], component,
+                tidy3d_monitors[monitor_name]["fields"][component], freq_index=freq_index)
+            maxwell_field, tidy3d_field = _align_plane_monitor_fields(
+                scene, maxwell_monitors[monitor_name], tidy3d_monitors[monitor_name],
+                component=component, maxwell_field=maxwell_field, tidy3d_field=tidy3d_field)
+            per_frequency.append({
+                "frequency": float(frequency),
+                "field_l2": field_l2_error(maxwell_field, tidy3d_field),
+                "field_linf": field_max_error(maxwell_field, tidy3d_field),
+                "field_corr": field_correlation(maxwell_field, tidy3d_field),
+            })
+        l2_error = max(item["field_l2"] for item in per_frequency)
+        linf_error = max(item["field_linf"] for item in per_frequency)
+        corr = min(item["field_corr"] for item in per_frequency)
         flux_error = _pick_flux_error(maxwell_monitors, tidy3d_monitors)
 
         material_source_plot = save_material_source_plot(
@@ -553,6 +604,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             material_source_plot=material_source_plot,
             field_plot=field_plot,
             updated_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+            per_frequency=per_frequency,
         )
         results.append(result)
         print(
@@ -565,13 +617,61 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
     return results
 
 
+def generate_tidy3d_references(names: list[str] | None = None) -> None:
+    """Populate cache files without running either local Maxwell solver."""
+    ensure_directories()
+    selected_names = names if names else list(SCENARIOS.keys())
+    for name in selected_names:
+        scenario = SCENARIOS[name]
+        scene = build_scene(name)
+        print(f"\n=== reference: {name} ===")
+        _, cache_hit = _load_or_run_tidy3d(
+            name, scene, scenario.frequencies, scenario.run_time_factor
+        )
+        print(f"  reference cache: {'hit' if cache_hit else 'generated'}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run benchmark scenarios against Tidy3D.")
     parser.add_argument("scenarios", nargs="*", help="Scenario names to run. Defaults to all.")
+    parser.add_argument(
+        "--references-only", action="store_true",
+        help="Generate/reuse Tidy3D caches without running Maxwell.",
+    )
+    parser.add_argument(
+        "--campaign-only", action="store_true",
+        help="Select only the S1-S6 cases from the validation campaign.",
+    )
+    parser.add_argument(
+        "--historical-only", action="store_true",
+        help="Select registered scenarios outside the S1-S6 campaign.",
+    )
+    parser.add_argument(
+        "--solver", choices=("fdtd", "fdfd"),
+        help="Restrict selected scenarios to one Maxwell solver.",
+    )
     args = parser.parse_args()
 
-    selected = args.scenarios or list(SCENARIOS.keys())
+    selection_modes = int(bool(args.scenarios)) + int(args.campaign_only) + int(args.historical_only)
+    if selection_modes > 1:
+        raise SystemExit("Use explicit scenarios, --campaign-only, or --historical-only, not more than one.")
+    if args.campaign_only:
+        from benchmark.validation_catalog import VALIDATION_CASES
+
+        selected = [case.name for case in VALIDATION_CASES]
+    elif args.historical_only:
+        from benchmark.validation_catalog import VALIDATION_CASES
+
+        campaign_names = {case.name for case in VALIDATION_CASES}
+        selected = [name for name in SCENARIOS if name not in campaign_names]
+    else:
+        selected = args.scenarios or list(SCENARIOS.keys())
+    if args.solver is not None:
+        selected = [name for name in selected if SCENARIOS[name].solver == args.solver]
     unknown = [name for name in selected if name not in SCENARIOS]
     if unknown:
         raise SystemExit(f"Unknown benchmark scenarios: {unknown}. Available: {list(SCENARIOS)}")
-    run_benchmarks(selected)
+    if args.references_only:
+        generate_tidy3d_references(selected)
+    else:
+        run_benchmarks(selected)

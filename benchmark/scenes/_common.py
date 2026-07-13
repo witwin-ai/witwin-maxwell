@@ -3,9 +3,9 @@ from __future__ import annotations
 import witwin.maxwell as mw
 
 
-DX = 0.01
+DX = 0.025
 HALF_SPAN = 0.64
-PML_LAYERS = 25
+PML_LAYERS = 8
 PHYSICAL_HALF_SPAN = HALF_SPAN - PML_LAYERS * DX
 FLUX_MONITOR_MARGIN = 4 * DX
 SAFE_FLUX_POSITION = max(DX, PHYSICAL_HALF_SPAN - FLUX_MONITOR_MARGIN)

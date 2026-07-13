@@ -364,6 +364,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Auto-generated Maxwell-vs-Tidy3D permittivity/source comparison plots plus `Ex/Ey/Ez` field comparisons on `x/y/z` cut planes under `benchmark/plots/`
 - Auto-updated benchmark summary in `benchmark/RESULTS.md`, grouped by benchmark scene folder with per-metric better-direction and target-range guidance
 - Plane-wave benchmark runs enable source-spectrum normalization on the Maxwell side so pulsed `PlaneWave` scenarios compare against the same frequency-domain reference convention as the Tidy3D export
+- Validation-campaign controls for low-cost reference generation and solver filtering: `python -m benchmark --references-only --campaign-only`, `--historical-only`, `--solver fdtd|fdfd`, cache-key inventory, per-frequency field metrics, incident-power-normalized flux errors, and a per-task Tidy3D cost ceiling
 
 ## Performance Benchmarking
 

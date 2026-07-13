@@ -32,6 +32,25 @@ def flux_relative_error(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.abs(a[mask] - b[mask]) / np.abs(b[mask])))
 
 
+def flux_incident_normalized_error(
+    a: np.ndarray,
+    b: np.ndarray,
+    *,
+    incident_power: float,
+) -> float:
+    """Return the largest absolute flux difference on one incident-power scale."""
+    a = np.asarray(a, dtype=np.float64).ravel()
+    b = np.asarray(b, dtype=np.float64).ravel()
+    common = min(a.size, b.size)
+    if common == 0:
+        raise ValueError("Flux arrays must not be empty.")
+    scale = abs(float(incident_power))
+    if scale == 0.0:
+        difference = float(np.max(np.abs(a[:common] - b[:common])))
+        return 0.0 if difference == 0.0 else float("inf")
+    return float(np.max(np.abs(a[:common] - b[:common])) / scale)
+
+
 def field_correlation(a: np.ndarray, b: np.ndarray) -> float:
     a = np.asarray(a, dtype=np.complex128).ravel()
     b = np.asarray(b, dtype=np.complex128).ravel()
@@ -150,6 +169,7 @@ __all__ = [
     "field_correlation",
     "field_l2_error",
     "field_max_error",
+    "flux_incident_normalized_error",
     "flux_relative_error",
     "plane_coord_keys",
 ]

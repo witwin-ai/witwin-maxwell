@@ -7,11 +7,8 @@ def benchmark_physical_bounds(scene) -> tuple[tuple[float, float], tuple[float, 
     if boundary is None or boundary.kind != "pml" or int(boundary.num_layers) <= 0:
         return bounds
 
-    trims = (
-        float(boundary.num_layers) * float(scene.dx),
-        float(boundary.num_layers) * float(scene.dy),
-        float(boundary.num_layers) * float(scene.dz),
-    )
+    spacings = scene.grid.min_spacing if scene.grid.is_custom else (scene.dx, scene.dy, scene.dz)
+    trims = tuple(float(boundary.num_layers) * float(spacing) for spacing in spacings)
     physical_bounds = []
     for axis_bounds, trim in zip(bounds, trims):
         lo = axis_bounds[0] + trim

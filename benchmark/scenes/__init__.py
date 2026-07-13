@@ -19,6 +19,7 @@ from benchmark.scenes.planewave import (
     PLANEWAVE_DIELECTRIC_SPHERE,
     PLANEWAVE_VACUUM,
 )
+from benchmark.scenes.planned import PLANNED_SCENARIOS
 
 
 SCENARIOS = {
@@ -39,6 +40,7 @@ SCENARIOS = {
         DIPOLE_DIELECTRIC_SPHERE,
         DIPOLE_TWO_FREQ,
         *MEDIA_EXPORT_SCENARIOS,
+        *PLANNED_SCENARIOS,
     )
 }
 

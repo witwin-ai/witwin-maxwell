@@ -133,6 +133,24 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
             lines.append(plot_line)
         lines.append("")
 
+    frequency_rows = [
+        (result.name, item)
+        for result in results
+        for item in result.per_frequency
+    ]
+    if frequency_rows:
+        lines.extend([
+            "## Per-frequency field metrics", "",
+            "| Scenario | Frequency (Hz) | Field L2 | Field Linf | Field Corr |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ])
+        for scenario_name, item in frequency_rows:
+            lines.append(
+                f"| {scenario_name} | {item['frequency']:.8e} | {item['field_l2']:.4e} | "
+                f"{item['field_linf']:.4e} | {item['field_corr']:.4f} |"
+            )
+        lines.append("")
+
     # The per-medium validation-coverage table is regenerated from the coverage
     # registry so it stays in sync with media.py even across benchmark reruns.
     from benchmark.media_coverage import validation_coverage_markdown_lines

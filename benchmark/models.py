@@ -15,8 +15,9 @@ class ScenarioDefinition:
     frequencies: tuple[float, ...]
     display_monitor: str
     display_component: str
-    run_time_factor: float = 15.0
+    run_time_factor: float = 8.0
     maxwell_alignment: dict | None = None
+    solver: str = "fdtd"
 
 
 @dataclass
@@ -36,3 +37,4 @@ class ScenarioMetrics:
     field_plot: Path
     updated_at: str
     notes: list[str] = field(default_factory=list)
+    per_frequency: list[dict[str, float]] = field(default_factory=list)
