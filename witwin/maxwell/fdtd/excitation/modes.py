@@ -388,9 +388,17 @@ def _normalize_vector_mode_profiles_numpy(component_profiles: dict[str, np.ndarr
     else:
         peak_index = np.unravel_index(np.argmax(np.abs(preferred)), preferred.shape)
         preferred_value = preferred[peak_index]
-    sign = 1.0 if float(np.real(preferred_value)) >= 0.0 else -1.0
+    # Eigenvectors of the real mode operator carry an arbitrary global phase when
+    # they come from a complex eigensolver (ARPACK); rotating by the conjugate
+    # phase at the preferred-component peak recovers the real profile. For a real
+    # eigenvector this reduces exactly to the previous +/-1 sign orientation.
+    preferred_magnitude = abs(complex(preferred_value))
+    if preferred_magnitude > 0.0:
+        scale = np.conj(preferred_value) / (preferred_magnitude * peak)
+    else:
+        scale = 1.0 / peak
     for name in tuple(component_profiles):
-        component_profiles[name] = sign * component_profiles[name] / peak
+        component_profiles[name] = scale * component_profiles[name]
     return component_profiles
 
 
@@ -475,7 +483,11 @@ def _select_and_normalize_vector_mode_numpy(
     while cursor < len(raw_candidates):
         group_stop = cursor + 1
         reference_value = raw_candidates[cursor][1]
-        tolerance = 1.0e-9 * max(abs(reference_value), 1.0)
+        # Wide enough to capture ARPACK duplicate/conjugate-pair jitter (~1e-9
+        # relative, observed up to ~2e-9 including the imaginary split), yet
+        # orders of magnitude below distinct-mode spacings (>=1e-4 relative for
+        # the polarization pair of a mildly rectangular guide).
+        tolerance = 1.0e-7 * max(abs(reference_value), 1.0)
         while (
             group_stop < len(raw_candidates)
             and abs(raw_candidates[group_stop][1] - reference_value) <= tolerance
@@ -483,14 +495,52 @@ def _select_and_normalize_vector_mode_numpy(
             group_stop += 1
         group = raw_candidates[cursor:group_stop]
 
+        if len(group) > 1:
+            # Sparse (ARPACK) solves can return duplicated eigenvectors and
+            # complex-conjugate / arbitrarily phase-rotated copies of the same
+            # real mode inside one degenerate group. The vector mode operator is
+            # real here, so the group's invariant subspace has a real basis:
+            # orthonormalize the stacked real and imaginary parts with an SVD
+            # and keep only the numerically independent real directions. This
+            # both removes duplicates and guarantees real rotated profiles.
+            stacked = np.stack([eigenvectors[:, index] for index, _, _ in group], axis=1)
+            stacked = np.concatenate([np.real(stacked), np.imag(stacked)], axis=1)
+            basis, singular_values, _ = np.linalg.svd(stacked, full_matrices=False)
+            rank = int(np.sum(singular_values > 1.0e-6 * singular_values[0]))
+            reference_index = group[0][0]
+            group = []
+            for column in range(rank):
+                vector = basis[:, column] * singular_values[0]
+                hu, hv, eu, ev = _split_vector_mode_components(
+                    vector,
+                    interior_u=interior_u,
+                    interior_v=interior_v,
+                    backend="numpy",
+                )
+                group.append(
+                    (
+                        reference_index,
+                        reference_value,
+                        {
+                            field_names[0]: eu,
+                            field_names[1]: ev,
+                            field_names[2]: hu,
+                            field_names[3]: hv,
+                        },
+                        vector,
+                    )
+                )
+
         if len(group) == 1:
-            rotated = [(group[0][0], group[0][1], eigenvectors[:, group[0][0]], group[0][2])]
+            entry = group[0]
+            vector = entry[3] if len(entry) > 3 else eigenvectors[:, entry[0]]
+            rotated = [(entry[0], entry[1], vector, entry[2])]
         else:
             count = len(group)
             preferred_gram = np.empty((count, count), dtype=np.complex128)
             electric_gram = np.empty((count, count), dtype=np.complex128)
-            for row, (_, _, row_profiles) in enumerate(group):
-                for col, (_, _, col_profiles) in enumerate(group):
+            for row, (_, _, row_profiles, _) in enumerate(group):
+                for col, (_, _, col_profiles, _) in enumerate(group):
                     preferred_gram[row, col] = np.vdot(
                         row_profiles[preferred_field_name], col_profiles[preferred_field_name]
                     )
@@ -506,13 +556,13 @@ def _select_and_normalize_vector_mode_numpy(
             for rotation_index in np.argsort(fractions)[::-1]:
                 coefficients = rotations[:, rotation_index]
                 combined_vector = sum(
-                    coefficient * eigenvectors[:, index]
-                    for coefficient, (index, _, _) in zip(coefficients, group)
+                    coefficient * vector
+                    for coefficient, (_, _, _, vector) in zip(coefficients, group)
                 )
                 combined_profiles = {
                     name: sum(
                         coefficient * profiles[name]
-                        for coefficient, (_, _, profiles) in zip(coefficients, group)
+                        for coefficient, (_, _, profiles, _) in zip(coefficients, group)
                     )
                     for name in group[0][2]
                 }
@@ -1242,12 +1292,21 @@ def _assemble_vector_mode_data(
     effective_index_value = beta_real / max(k0, 1e-30)
     target_device = torch.device(getattr(solver, "device", solver.scene.device))
     target_dtype = solver.Ex.dtype
+    # The profile set is peak-normalized to 1 on the preferred component, so
+    # compare the residual imaginary content against the joint profile scale.
+    # An iterative (ARPACK) eigensolve leaves tolerance-level imaginary noise
+    # (~1e-5 relative); a genuinely complex (lossy) mode has imag of order one.
+    profile_scale = max(
+        (float(np.max(np.abs(np.asarray(array)))) for array in component_arrays.values()),
+        default=0.0,
+    )
+    imag_bound = 1e-3 * max(profile_scale, 1e-30)
     component_profiles = {}
     for name, array in component_arrays.items():
         resolved_array = np.asarray(array)
         if np.iscomplexobj(resolved_array):
             imag_max = float(np.max(np.abs(np.imag(resolved_array))))
-            if imag_max > 1e-6:
+            if imag_max > imag_bound:
                 raise RuntimeError("Full-vector ModeSource forward solve returned a materially complex field profile.")
             resolved_array = np.real(resolved_array)
         component_profiles[name] = torch.as_tensor(
