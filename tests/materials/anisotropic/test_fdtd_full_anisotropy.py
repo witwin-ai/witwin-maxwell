@@ -475,3 +475,91 @@ def test_full_aniso_composes_with_dispersive_structures():
     # tensor curl coefficient uses, so it is precomputed for the full-aniso path.
     assert solver._aniso_disp_inv_eps is not None
     assert solver._aniso_disp_current is not None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
+def test_full_tensor_eigenpolarization_ring_resonance_matches_analytic_eigenvalues():
+    """Uniform full-tensor medium, fully periodic ring along z: the resonance
+    frequencies of each transverse eigenpolarization must sit at the analytic
+    tensor eigenvalue (after the scalar Yee dispersion correction). This
+    validates the off-diagonal curl(H) collocation against pure physics with no
+    external reference: a wrong effective tensor shifts the mode combs.
+    """
+    import numpy as np
+
+    from witwin.maxwell.simulation import FDTDConfig, TimeConfig
+
+    c0 = 299_792_458.0
+    eig_hi = 2.75 + float(np.sqrt(0.0625 + 0.04))
+    eig_lo = 2.75 - float(np.sqrt(0.0625 + 0.04))
+    e_hi = np.array([0.2, eig_hi - 3.0])
+    e_hi /= np.linalg.norm(e_hi)
+    e_lo = np.array([0.2, eig_lo - 3.0])
+    e_lo /= np.linalg.norm(e_lo)
+
+    dx = 0.01
+    half_t = 4 * dx
+    lz = 0.64
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-half_t, half_t), (-half_t, half_t), (-lz / 2, lz / 2))),
+        grid=mw.GridSpec.uniform(dx),
+        boundary=mw.BoundarySpec.periodic(),
+        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="arithmetic"),
+        device="cuda",
+    )
+    tensor = mw.Tensor3x3(((3.0, 0.2, 0.0), (0.2, 2.5, 0.0), (0.0, 0.0, 2.0)))
+    scene.add_structure(
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(10.0, 10.0, 10.0)),
+            material=mw.Material(epsilon_tensor=tensor),
+            name="uniform",
+        )
+    )
+    # Transversely uniform current sheet pumping both eigenmodes at once.
+    scene.add_source(
+        mw.UniformCurrentSource(
+            size=(2 * half_t, 2 * half_t, dx),
+            center=(0.0, 0.0, -0.17),
+            polarization=(1.0, 1.0, 0.0),
+            source_time=mw.GaussianPulse(frequency=1.2e9, fwidth=0.9e9),
+        )
+    )
+    scene.add_monitor(
+        mw.FieldTimeMonitor("probe", components=("Ex", "Ey"), position=(0.0, 0.0, 0.11))
+    )
+
+    steps = 60_000
+    sim = mw.Simulation(
+        scene=scene,
+        method="fdtd",
+        frequencies=(1.2e9,),
+        config=FDTDConfig(run_time=TimeConfig(time_steps=steps)),
+    )
+    result = sim.run()
+    mon = result.monitor("probe")
+    ex = np.asarray(torch.as_tensor(mon["components"]["Ex"]).cpu(), dtype=np.float64).ravel()
+    ey = np.asarray(torch.as_tensor(mon["components"]["Ey"]).cpu(), dtype=np.float64).ravel()
+    t = np.asarray(torch.as_tensor(mon["t"]).cpu(), dtype=np.float64).ravel()
+    dt = float(t[1] - t[0])
+
+    window = np.hanning(ex.size)
+    freqs = np.fft.rfftfreq(ex.size, d=dt)
+    bin_width = freqs[1] - freqs[0]
+    for vec, eig in ((e_hi, eig_hi), (e_lo, eig_lo)):
+        n_eig = float(np.sqrt(eig))
+        spec = np.abs(np.fft.rfft((vec[0] * ex + vec[1] * ey) * window))
+        for mode_index in (5, 6, 7):
+            k = 2.0 * np.pi * mode_index / lz
+            # Yee dispersion along z: sin(w dt/2) = c0 dt / (n dz) * sin(k dz/2)
+            s = c0 * dt / (n_eig * dx) * np.sin(0.5 * k * dx)
+            f_disc = float(np.arcsin(min(s, 1.0)) / (np.pi * dt))
+            band = (freqs > f_disc - 0.1e9) & (freqs < f_disc + 0.1e9)
+            local = spec[band]
+            f_peak = float(freqs[band][int(np.argmax(local))])
+            # The other polarization's combs sit ~200 MHz away; requiring the
+            # peak within 3 bins of the dispersion-corrected analytic frequency
+            # pins the eigenvalue to ~0.3%.
+            assert abs(f_peak - f_disc) <= 3.0 * bin_width, (
+                f"eig={eig}: mode m={mode_index} peaked at {f_peak/1e9:.4f} GHz, "
+                f"expected {f_disc/1e9:.4f} GHz"
+            )

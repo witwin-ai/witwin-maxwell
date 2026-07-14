@@ -433,10 +433,61 @@ def _pec_geometry_beta(scene) -> float | torch.Tensor:
     return 0.5 * cell
 
 
+def _wrap_axis_shifts(scene, occupancy):
+    """Per-axis periodic image shifts required by ``occupancy``.
+
+    On a periodic/Bloch axis the node grid keeps the wrap node explicitly, so a
+    geometry ending exactly at the domain boundary leaves the boundary nodes
+    half-covered even though the wrapped medium is contiguous there. For each
+    such axis whose boundary node planes the geometry touches, this returns the
+    domain-span translation(s) whose image restores the coverage coming from
+    the other side of the wrap. Axes that are not periodic, or that the
+    geometry does not reach, contribute no shifts, keeping the common path
+    byte-identical.
+    """
+    domain_range = getattr(scene, "physical_domain_range", None)
+    if domain_range is None:
+        return None
+    shifts = []
+    has_any = False
+    for axis_index, axis in enumerate(("x", "y", "z")):
+        options = [0.0]
+        if scene.boundary.axis_kind(axis) in ("periodic", "bloch"):
+            span = float(domain_range[2 * axis_index + 1]) - float(domain_range[2 * axis_index])
+            low_plane = occupancy.narrow(axis_index, 0, 1)
+            high_plane = occupancy.narrow(axis_index, occupancy.shape[axis_index] - 1, 1)
+            # Geometry touching the low face wraps onto the high face and
+            # vice versa; a +span image covers the high boundary nodes.
+            if bool((low_plane.max() > 1.0e-3).item()):
+                options.append(span)
+            if bool((high_plane.max() > 1.0e-3).item()):
+                options.append(-span)
+        if len(options) > 1:
+            has_any = True
+        shifts.append(options)
+    if not has_any:
+        return None
+    return shifts
+
+
 def _geometry_occupancy(scene, geometry, coords=None, beta=None):
     xx, yy, zz = (scene.X, scene.Y, scene.Z) if coords is None else coords
     resolved_beta = _geometry_beta(scene) if beta is None else beta
-    return geometry.to_mask(xx, yy, zz, offset=0.0, beta=resolved_beta)
+    occupancy = geometry.to_mask(xx, yy, zz, offset=0.0, beta=resolved_beta)
+    shifts = _wrap_axis_shifts(scene, occupancy)
+    if shifts is None:
+        return occupancy
+    # Periodic images are disjoint translates of the geometry, so their smooth
+    # coverages add; clamp absorbs the sub-cell sigmoid overlap right on a face.
+    for shift_x in shifts[0]:
+        for shift_y in shifts[1]:
+            for shift_z in shifts[2]:
+                if shift_x == 0.0 and shift_y == 0.0 and shift_z == 0.0:
+                    continue
+                occupancy = occupancy + geometry.to_mask(
+                    xx - shift_x, yy - shift_y, zz - shift_z, offset=0.0, beta=resolved_beta
+                )
+    return occupancy.clamp(max=1.0)
 
 
 def _layout_pole_entry(scene, structure, pole):

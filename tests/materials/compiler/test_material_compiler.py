@@ -711,3 +711,72 @@ def test_scene_allows_kerr_combined_with_other_dispersive_or_anisotropic_materia
 
     assert bool(torch.any(model["kerr_chi3"] != 0))
     assert model["debye_poles"] and bool(torch.any(model["debye_poles"][0]["weight"] != 0))
+
+
+def test_full_span_structure_wraps_uniformly_on_periodic_axes():
+    """A box covering the whole period of a periodic axis compiles to a uniform
+    medium: the wrap-boundary nodes must not stay half-covered (the seam that
+    produced a spurious transverse ripple in periodic slab scenes).
+    """
+    span = 1.0
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-span / 2, span / 2), (-span / 2, span / 2), (-span / 2, span / 2))),
+        grid=mw.GridSpec.uniform(0.1),
+        boundary=mw.BoundarySpec.pml(num_layers=4).with_faces(
+            x_low="periodic", x_high="periodic", y_low="periodic", y_high="periodic"
+        ),
+        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="arithmetic"),
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="slab",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(span, span, 0.2)),
+            material=mw.Material(
+                eps_r=4.0,
+                modulation=mw.ModulationSpec(frequency=1.0e8, amplitude=0.1, phase=0.0),
+            ),
+        )
+    )
+    model = _prepared_scene(scene).compile_materials()
+
+    eps_x = model["eps_components"]["x"]
+    mod_cos = model["modulation_cos"]
+    z_mid = eps_x.shape[2] // 2
+    eps_slice = eps_x[:, :, z_mid]
+    mod_slice = mod_cos[:, :, z_mid]
+    # Every transverse node in the slab plane, including the wrap nodes at the
+    # periodic boundaries, carries the full material values.
+    assert torch.allclose(eps_slice, torch.full_like(eps_slice, 4.0), atol=1.0e-4)
+    assert torch.allclose(mod_slice, torch.full_like(mod_slice, 0.1), atol=1.0e-5)
+
+
+def test_structure_short_of_periodic_boundary_keeps_partial_edge_nodes():
+    """Wrapping applies only to geometry that reaches the wrap boundary; a box
+    stopping short keeps its ordinary blended interface nodes byte-identically.
+    """
+    span = 1.0
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-span / 2, span / 2), (-span / 2, span / 2), (-span / 2, span / 2))),
+        grid=mw.GridSpec.uniform(0.1),
+        boundary=mw.BoundarySpec.pml(num_layers=4).with_faces(
+            x_low="periodic", x_high="periodic", y_low="periodic", y_high="periodic"
+        ),
+        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="arithmetic"),
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="pillar",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.35, 0.35, 0.2)),
+            material=mw.Material(eps_r=4.0),
+        )
+    )
+    model = _prepared_scene(scene).compile_materials()
+    eps_x = model["eps_components"]["x"]
+    z_mid = eps_x.shape[2] // 2
+    eps_slice = eps_x[:, :, z_mid]
+    # Boundary nodes stay vacuum, interior of the pillar is full.
+    assert torch.allclose(eps_slice[0, :], torch.ones_like(eps_slice[0, :]))
+    assert torch.allclose(eps_slice[-1, :], torch.ones_like(eps_slice[-1, :]))
+    assert float(eps_slice.max()) == pytest.approx(4.0, rel=1.0e-4)
