@@ -32,7 +32,7 @@ _DISPERSIVE_STATE_TENSORS = {
     "drude": ("current",),
     "lorentz": ("polarization", "current"),
 }
-_CHECKPOINT_SCHEMA_VERSION = 1
+_CHECKPOINT_SCHEMA_VERSION = 2
 
 
 def dispersive_state_name(component_name: str, model_name: str, index: int, tensor_name: str) -> str:
@@ -73,6 +73,7 @@ class FDTDCheckpointSchema:
     dispersive_state_names: tuple[str, ...]
     magnetic_dispersive_state_names: tuple[str, ...] = ()
     lumped_state_names: tuple[str, ...] = ()
+    circuit_state_names: tuple[str, ...] = ()
 
     @property
     def state_names(self) -> tuple[str, ...]:
@@ -84,6 +85,7 @@ class FDTDCheckpointSchema:
             + self.dispersive_state_names
             + self.magnetic_dispersive_state_names
             + self.lumped_state_names
+            + self.circuit_state_names
         )
 
 
@@ -119,6 +121,18 @@ def iter_lumped_state_specs(solver):
                 "element",
                 index,
             )
+
+
+def circuit_state_name(circuit_index: int, tensor_name: str) -> str:
+    return f"circuit_{int(circuit_index)}_{tensor_name}"
+
+
+def iter_circuit_state_specs(solver):
+    """Yield the fixed companion history required by coupled MNA replay/resume."""
+
+    for circuit_index, runtime in enumerate(getattr(solver, "_circuit_runtimes", ())):
+        for tensor_name, tensor in runtime.checkpoint_tensors().items():
+            yield circuit_state_name(circuit_index, tensor_name), tensor
 
 
 def checkpoint_schema(solver) -> FDTDCheckpointSchema:
@@ -162,6 +176,7 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
     lumped_state_names = tuple(
         name for name, _runtime, _tensor_name, _field_name, _kind, _index in iter_lumped_state_specs(solver)
     )
+    circuit_state_names = tuple(name for name, _tensor in iter_circuit_state_specs(solver))
 
     return FDTDCheckpointSchema(
         version=_CHECKPOINT_SCHEMA_VERSION,
@@ -172,6 +187,7 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         dispersive_state_names=tuple(dispersive_state_names),
         magnetic_dispersive_state_names=tuple(magnetic_dispersive_state_names),
         lumped_state_names=lumped_state_names,
+        circuit_state_names=circuit_state_names,
     )
 
 
@@ -256,6 +272,8 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
                 )
     for name, runtime, tensor_name, _field_name, _kind, _index in iter_lumped_state_specs(solver):
         tensors[name] = getattr(runtime, tensor_name).detach().clone()
+    for name, tensor in iter_circuit_state_specs(solver):
+        tensors[name] = tensor.detach().clone()
     state = FDTDCheckpointState(step=int(step), schema=schema, tensors=tensors)
     validate_checkpoint_state(state)
     return state

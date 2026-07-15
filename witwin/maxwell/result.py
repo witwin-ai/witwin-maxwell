@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from .circuits import CircuitData
 from .monitors import (
     ClosedSurfaceMonitor,
     FinitePlaneMonitor,
@@ -56,6 +57,29 @@ def _normalize_port_data_mapping(ports) -> dict[str, PortData]:
                 f"PortData.port_name {data.port_name!r}."
             )
         normalized[port_name] = data
+    return normalized
+
+
+def _normalize_circuit_data_mapping(circuits) -> dict[str, CircuitData]:
+    if circuits is None:
+        return {}
+    if not isinstance(circuits, Mapping):
+        raise TypeError("circuits must be a mapping from circuit names to CircuitData.")
+    normalized = {}
+    for name, data in circuits.items():
+        circuit_name = str(name)
+        if circuit_name in normalized:
+            raise ValueError(f"Duplicate normalized circuit key {circuit_name!r}.")
+        if not isinstance(data, CircuitData):
+            raise TypeError(
+                f"Result circuit {circuit_name!r} must be a CircuitData instance."
+            )
+        if circuit_name != data.circuit_name:
+            raise ValueError(
+                f"Result circuit key {circuit_name!r} does not match "
+                f"CircuitData.circuit_name {data.circuit_name!r}."
+            )
+        normalized[circuit_name] = data
     return normalized
 
 
@@ -850,6 +874,7 @@ class Result:
         fields: dict[str, torch.Tensor] | None = None,
         monitors: dict[str, Any] | None = None,
         ports: Mapping[str, PortData] | None = None,
+        circuits: Mapping[str, CircuitData] | None = None,
         network: NetworkData | None = None,
         metadata: dict[str, Any] | None = None,
         solver_stats: dict[str, Any] | None = None,
@@ -864,6 +889,7 @@ class Result:
         self._fields = _clone_mapping(fields)
         self._monitors = _clone_mapping(monitors)
         self._ports = _normalize_port_data_mapping(ports)
+        self._circuits = _normalize_circuit_data_mapping(circuits)
         if network is not None and not isinstance(network, NetworkData):
             raise TypeError("network must be a NetworkData or None.")
         self._network = network
@@ -909,6 +935,10 @@ class Result:
     @property
     def ports(self) -> dict[str, PortData]:
         return dict(self._ports)
+
+    @property
+    def circuits(self) -> dict[str, CircuitData]:
+        return dict(self._circuits)
 
     @property
     def network(self) -> NetworkData | None:
@@ -1087,6 +1117,16 @@ class Result:
             )
         return self._ports[port_name]
 
+    def circuit(self, name: str) -> CircuitData:
+        circuit_name = str(name)
+        if circuit_name not in self._circuits:
+            choices = tuple(self._circuits)
+            raise KeyError(
+                f"Circuit {circuit_name!r} is not available in this result. "
+                f"Choices: {choices}."
+            )
+        return self._circuits[circuit_name]
+
     def antenna(
         self,
         *,
@@ -1232,8 +1272,16 @@ class Result:
         stats["num_fields"] = len(self._fields)
         stats["num_monitors"] = len(self._monitors)
         stats["num_ports"] = len(self._ports)
+        stats["num_circuits"] = len(self._circuits)
         stats["has_network"] = self._network is not None
         return stats
+
+    def _require_circuit_snapshot_schema(self) -> None:
+        if self._circuits:
+            raise NotImplementedError(
+                "CircuitData persistence requires the versioned circuit snapshot schema; "
+                "this result was not written to avoid silently omitting circuit data."
+            )
 
     def save(self, path: str | Path):
         """Save a detached CPU data snapshot.
@@ -1244,6 +1292,7 @@ class Result:
         the caller to supply the corresponding declarative Scene.
         """
 
+        self._require_circuit_snapshot_schema()
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
@@ -1270,6 +1319,7 @@ class Result:
     def save_sharded(self, directory: str | Path):
         """Persist owned field shards without assembling global field tensors."""
 
+        self._require_circuit_snapshot_schema()
         exporter = getattr(self.solver, "export_field_shards", None)
         if not callable(exporter):
             raise RuntimeError(

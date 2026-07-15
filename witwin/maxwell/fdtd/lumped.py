@@ -54,6 +54,29 @@ class LumpedRuntime:
     last_field_energy_change: torch.Tensor
 
 
+@dataclass
+class FieldPortCoupling:
+    """Geometry-derived field/Norton terms shared by local and graph circuits."""
+
+    port_name: str
+    field_shape: tuple[int, int, int]
+    field_dtype: torch.dtype
+    linear_indices: torch.Tensor
+    voltage_weights: torch.Tensor
+    injection: torch.Tensor
+    dt: torch.Tensor
+    coupling_impedance: torch.Tensor
+    discrete_port_impedance: torch.Tensor
+    edge_buffer: torch.Tensor
+    correction_buffer: torch.Tensor
+    last_voltage_before: torch.Tensor
+    last_voltage: torch.Tensor
+    last_voltage_after: torch.Tensor
+    last_current: torch.Tensor
+    last_port_work: torch.Tensor
+    last_field_energy_change: torch.Tensor
+
+
 @dataclass(frozen=True)
 class LumpedStepTrace:
     """Scalar intermediates required by the exact local circuit pullback."""
@@ -327,6 +350,44 @@ def prepare_lumped_runtime(
         last_stored_energy_change=scalar_zeros[11],
         last_source_work=scalar_zeros[12],
         last_field_energy_change=scalar_zeros[13],
+    )
+
+
+def prepare_field_port_coupling(
+    geometry: Any,
+    *,
+    dt: torch.Tensor | float,
+    eps_edge: torch.Tensor,
+    yee_control_volume: torch.Tensor | float,
+) -> FieldPortCoupling:
+    """Prepare the exact Yee voltage/injection pair without a local termination."""
+
+    open_runtime = prepare_lumped_runtime(
+        geometry,
+        dt=dt,
+        eps_edge=eps_edge,
+        yee_control_volume=yee_control_volume,
+        resistance=torch.inf,
+    )
+    zeros = [torch.zeros((), device=eps_edge.device, dtype=eps_edge.dtype) for _ in range(6)]
+    return FieldPortCoupling(
+        port_name=open_runtime.port_name,
+        field_shape=open_runtime.field_shape,
+        field_dtype=open_runtime.field_dtype,
+        linear_indices=open_runtime.linear_indices,
+        voltage_weights=open_runtime.voltage_weights,
+        injection=open_runtime.injection,
+        dt=open_runtime.dt,
+        coupling_impedance=open_runtime.coupling_impedance,
+        discrete_port_impedance=open_runtime.discrete_port_impedance,
+        edge_buffer=open_runtime.edge_buffer,
+        correction_buffer=open_runtime.correction_buffer,
+        last_voltage_before=zeros[0],
+        last_voltage=zeros[1],
+        last_voltage_after=zeros[2],
+        last_current=zeros[3],
+        last_port_work=zeros[4],
+        last_field_energy_change=zeros[5],
     )
 
 
@@ -709,11 +770,13 @@ def apply_lumped_runtime(
 
 
 __all__ = [
+    "FieldPortCoupling",
     "LumpedRuntime",
     "LumpedStepPullback",
     "LumpedStepTrace",
     "apply_lumped_runtime",
     "prepare_lumped_runtime",
+    "prepare_field_port_coupling",
     "pullback_lumped_runtime",
     "replay_lumped_runtime",
 ]

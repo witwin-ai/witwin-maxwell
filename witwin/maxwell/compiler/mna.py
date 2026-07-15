@@ -187,13 +187,26 @@ class LinearMNASystem:
         self.dt = plan.dt
         self._inductor_index = {name: index for index, name in enumerate(plan.inductor_names)}
         self._parameter_cache: dict[int, torch.Tensor] = {}
+        self._literal_cache: dict[tuple[type, float], torch.Tensor] = {}
         self._refresh_parameter_cache()
 
     @property
     def unknown_count(self) -> int:
         return self.graph.unknown_count
 
-    def _zeros(self):
+    def _zeros(self, out=None):
+        if out is not None:
+            matrix, rhs = out
+            expected_matrix = (self.unknown_count, self.unknown_count)
+            if matrix.shape != expected_matrix or rhs.shape != (self.unknown_count,):
+                raise ValueError("MNA assembly buffers do not match the compiled unknown count.")
+            if matrix.device != self.device or rhs.device != self.device:
+                raise ValueError("MNA assembly buffers must stay on the compiled device.")
+            if matrix.dtype != self.dtype or rhs.dtype != self.dtype:
+                raise ValueError("MNA assembly buffers must use the compiled dtype.")
+            matrix.zero_()
+            rhs.zero_()
+            return matrix, rhs
         return (
             torch.zeros((self.unknown_count, self.unknown_count), device=self.device, dtype=self.dtype),
             torch.zeros((self.unknown_count,), device=self.device, dtype=self.dtype),
@@ -207,7 +220,12 @@ class LinearMNASystem:
             if cached.ndim != 0 or cached.is_complex():
                 raise ValueError(f"Circuit parameter {name!r} must be a real scalar tensor.")
             return cached
-        return _parameter(value, device=self.device, dtype=self.dtype, name=name)
+        key = (type(value), float(value))
+        cached = self._literal_cache.get(key)
+        if cached is None:
+            cached = _parameter(value, device=self.device, dtype=self.dtype, name=name)
+            self._literal_cache[key] = cached
+        return cached
 
     def _refresh_parameter_cache(self) -> None:
         self._parameter_cache = {
@@ -352,31 +370,65 @@ class LinearMNASystem:
         source_values: dict[str, torch.Tensor],
         step_index: int,
         integration: str | None = None,
+        midpoint: bool = False,
+        out=None,
+        stamp_matrix: bool = True,
     ):
-        matrix, rhs = self._zeros()
+        if stamp_matrix:
+            matrix, rhs = self._zeros(out)
+        else:
+            if out is None:
+                matrix = torch.empty(
+                    (self.unknown_count, self.unknown_count),
+                    device=self.device,
+                    dtype=self.dtype,
+                )
+                rhs = torch.zeros((self.unknown_count,), device=self.device, dtype=self.dtype)
+            else:
+                matrix, rhs = out
+                if rhs.shape != (self.unknown_count,):
+                    raise ValueError("MNA RHS buffer does not match the compiled unknown count.")
+                rhs.zero_()
         integration = self.circuit.config.integration if integration is None else integration
         factor = 2.0 if integration == "trapezoidal" else 1.0
         for device in self.circuit.devices:
             if isinstance(device, Capacitor):
                 capacitance = self._value(device.capacitance, device.name)
                 conductance = factor * capacitance / self.dt
-                _stamp_conductance(matrix, self.graph, device.positive, device.negative, conductance)
+                if stamp_matrix:
+                    _stamp_conductance(
+                        matrix,
+                        self.graph,
+                        device.positive,
+                        device.negative,
+                        conductance,
+                    )
                 previous_voltage = state.capacitor_voltage[device.name]
                 previous_current = state.capacitor_current[device.name]
                 history = -conductance * previous_voltage
-                if integration == "trapezoidal":
+                if integration == "trapezoidal" and not midpoint:
                     history = history - previous_current
                 _add_rhs(rhs, _node_unknown(self.graph, device.positive), -history)
                 _add_rhs(rhs, _node_unknown(self.graph, device.negative), history)
                 continue
             if isinstance(device, Inductor):
-                branch = _stamp_branch(matrix, self.graph, device)
+                branch = (
+                    _stamp_branch(matrix, self.graph, device)
+                    if stamp_matrix
+                    else _branch_unknown(self.graph, device.name)
+                )
                 row = self._inductor_index[device.name]
                 alpha_row = factor * self.plan.inductance_matrix[row] / self.dt
-                for column, name in enumerate(self.plan.inductor_names):
-                    _add(matrix, branch, _branch_unknown(self.graph, name), -alpha_row[column])
+                if stamp_matrix:
+                    for column, name in enumerate(self.plan.inductor_names):
+                        _add(
+                            matrix,
+                            branch,
+                            _branch_unknown(self.graph, name),
+                            -alpha_row[column],
+                        )
                 history = -torch.dot(alpha_row, state.inductor_current)
-                if integration == "trapezoidal":
+                if integration == "trapezoidal" and not midpoint:
                     history = history - state.inductor_voltage[row]
                 _add_rhs(rhs, branch, history)
                 continue
@@ -388,7 +440,13 @@ class LinearMNASystem:
                 value = source_values[device.name][step_index]
             else:
                 value = None
-            self._stamp_static_device(matrix, rhs, device, value, dc=False)
+            if stamp_matrix:
+                self._stamp_static_device(matrix, rhs, device, value, dc=False)
+            elif isinstance(device, VoltageSource):
+                _add_rhs(rhs, _branch_unknown(self.graph, device.name), value)
+            elif isinstance(device, CurrentSource):
+                _add_rhs(rhs, _node_unknown(self.graph, device.positive), -value)
+                _add_rhs(rhs, _node_unknown(self.graph, device.negative), value)
         return matrix, rhs
 
     def _solve(self, matrix, rhs):
@@ -561,6 +619,7 @@ class LinearMNASystem:
         solution: torch.Tensor,
         *,
         integration: str | None = None,
+        midpoint: bool = False,
     ):
         integration = self.circuit.config.integration if integration is None else integration
         factor = 2.0 if integration == "trapezoidal" else 1.0
@@ -572,7 +631,10 @@ class LinearMNASystem:
             voltage = _terminal_voltage(solution, self.graph, device.positive, device.negative)
             conductance = factor * self._value(device.capacitance, device.name) / self.dt
             current = conductance * (voltage - state.capacitor_voltage[device.name])
-            if integration == "trapezoidal":
+            if integration == "trapezoidal" and midpoint:
+                voltage = 2.0 * voltage - state.capacitor_voltage[device.name]
+                current = 2.0 * current - state.capacitor_current[device.name]
+            elif integration == "trapezoidal":
                 current = current - state.capacitor_current[device.name]
             capacitor_voltage[device.name] = voltage
             capacitor_current[device.name] = current
@@ -583,6 +645,12 @@ class LinearMNASystem:
         for name in self.plan.inductor_names:
             device = next(device for device in self.circuit.devices if device.name == name)
             voltages.append(_terminal_voltage(solution, self.graph, device.positive, device.negative))
+        if integration == "trapezoidal" and midpoint:
+            currents = 2.0 * currents - state.inductor_current
+            voltages = [
+                2.0 * voltage - state.inductor_voltage[index]
+                for index, voltage in enumerate(voltages)
+            ]
         return CircuitState(
             capacitor_voltage=capacitor_voltage,
             capacitor_current=capacitor_current,
@@ -828,18 +896,17 @@ def _compile_inductance_matrix(circuit, graph, *, device, dtype):
     return names, matrix
 
 
-def compile_mna_system(
+def _compile_mna_system(
     circuit: Circuit,
     *,
     dt,
     device: str | torch.device | None = None,
     dtype: torch.dtype | None = None,
+    allow_bindings: bool,
 ) -> LinearMNASystem:
-    """Compile one linear circuit to the production CUDA dense MNA runtime."""
-
     if not isinstance(circuit, Circuit):
         raise TypeError("compile_mna_system requires a Circuit instance.")
-    if circuit.bindings:
+    if circuit.bindings and not allow_bindings:
         raise ValueError(
             "Standalone MNA cannot solve EM-bound ports without the FDTD Norton companion."
         )
@@ -884,10 +951,49 @@ def compile_mna_system(
     )
 
 
+def compile_mna_system(
+    circuit: Circuit,
+    *,
+    dt,
+    device: str | torch.device | None = None,
+    dtype: torch.dtype | None = None,
+) -> LinearMNASystem:
+    """Compile one standalone linear circuit to the CUDA dense MNA runtime."""
+
+    return _compile_mna_system(
+        circuit,
+        dt=dt,
+        device=device,
+        dtype=dtype,
+        allow_bindings=False,
+    )
+
+
+def compile_coupled_mna_system(
+    circuit: Circuit,
+    *,
+    dt,
+    device: str | torch.device | None = None,
+    dtype: torch.dtype | None = None,
+) -> LinearMNASystem:
+    """Compile an EM-bound circuit for the FDTD Norton companion runtime."""
+
+    if not circuit.bindings:
+        raise ValueError("Coupled MNA compilation requires at least one EM port binding.")
+    return _compile_mna_system(
+        circuit,
+        dt=dt,
+        device=device,
+        dtype=dtype,
+        allow_bindings=True,
+    )
+
+
 __all__ = [
     "CircuitState",
     "CompiledStampPlan",
     "LinearMNASystem",
+    "compile_coupled_mna_system",
     "compile_mna_system",
     "evaluate_waveform",
 ]

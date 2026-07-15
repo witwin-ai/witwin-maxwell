@@ -112,6 +112,7 @@ def test_trainable_parallel_is_rejected_before_solver_allocation(monkeypatch, en
         parallel=_parallel(),
     )
     simulation.has_trainable_parameters = True
+    monkeypatch.setattr(simulation, "_refresh_scene", lambda: None)
 
     def unexpected_allocation(*args, **kwargs):
         raise AssertionError("solver allocation must not be reached")

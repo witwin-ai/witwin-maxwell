@@ -144,9 +144,9 @@ def test_all_public_devices_satisfy_the_circuit_device_protocol():
     assert all(isinstance(device, mw.CircuitDevice) for device in devices)
 
 
-def test_circuit_scene_is_fdtd_only_and_cannot_be_silently_ignored_before_runtime_connection():
+def test_circuit_scene_is_fdtd_only_and_requires_a_bound_port_for_coupling():
     scene = _scene(circuits=(_circuit(),))
     with pytest.raises(ValueError, match=r"Simulation\.fdtd.*only"):
         mw.Simulation.fdfd(scene, frequency=1.0e9).prepare()
-    with pytest.raises(RuntimeError, match="coupled FDTD runtime"):
+    with pytest.raises(NotImplementedError, match="one circuit with one bound port"):
         mw.Simulation.fdtd(scene, frequency=1.0e9).prepare()

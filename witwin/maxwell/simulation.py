@@ -492,7 +492,16 @@ class Simulation:
         raise ValueError(f"Unsupported simulation method {self.method!r}.")
 
     def _validate_port_excitations(self) -> None:
+        bound_port_names = {
+            binding.port_name
+            for circuit in self.scene.circuits
+            for binding in circuit.bindings
+        }
         if self.port_sweep is not None:
+            if bound_port_names:
+                raise NotImplementedError(
+                    "Circuit-bound ports do not support PortSweep execution."
+                )
             if any(isinstance(port, WavePort) for port in self.scene.ports):
                 if self.port_sweep.amplitude.requires_grad:
                     raise NotImplementedError(
@@ -508,6 +517,11 @@ class Simulation:
             return
         ports_by_name = {port.name: port for port in self.scene.ports}
         for excitation in self.excitations:
+            if excitation.port_name in bound_port_names:
+                raise ValueError(
+                    f"Circuit-bound port {excitation.port_name!r} cannot also declare "
+                    "a direct PortExcitation."
+                )
             port = ports_by_name.get(excitation.port_name)
             if port is None:
                 raise ValueError(
@@ -549,6 +563,11 @@ class Simulation:
     def _validate_trainable_rf_support(self) -> None:
         if self.method != SimulationMethod.FDTD or not self.has_trainable_parameters:
             return
+        if self.scene.circuits:
+            raise NotImplementedError(
+                "Differentiable circuit-coupled FDTD requires circuit replay and "
+                "transpose Schur solves; this forward runtime rejects partial gradients."
+            )
         rf_ports = tuple(
             port
             for port in self.scene.ports
@@ -621,10 +640,15 @@ class Simulation:
         self.scene.compile_circuits()
         if self.method != SimulationMethod.FDTD:
             raise ValueError("Circuit-coupled scenes are supported by Simulation.fdtd(...) only.")
-        raise RuntimeError(
-            "Circuit graphs require the coupled FDTD runtime; graph-only preparation "
-            "cannot execute a Simulation."
-        )
+        if self.config.parallel is not None:
+            raise NotImplementedError(
+                "Circuit-coupled distributed FDTD is introduced in the multi-GPU phase."
+            )
+        if len(self.scene.circuits) != 1 or len(self.scene.circuits[0].bindings) != 1:
+            raise NotImplementedError(
+                "This circuit-coupling phase supports one circuit with one bound port; "
+                "multi-port execution is introduced in the following phase."
+            )
 
     def _run_fdfd(self) -> Result:
         if self.has_trainable_parameters:
@@ -1003,6 +1027,7 @@ class Simulation:
 
         monitors = raw_output.get("observers", {}) if isinstance(raw_output, dict) else {}
         ports = raw_output.get("ports", {}) if isinstance(raw_output, dict) else {}
+        circuits = raw_output.get("circuits", {}) if isinstance(raw_output, dict) else {}
         field_payload = {
             key: value
             for key, value in (raw_output.items() if isinstance(raw_output, dict) else [])
@@ -1037,6 +1062,7 @@ class Simulation:
             fields=fields,
             monitors=monitors,
             ports=ports,
+            circuits=circuits,
             metadata=self.metadata,
             solver_stats=solver_stats,
             raw_output=raw_output,

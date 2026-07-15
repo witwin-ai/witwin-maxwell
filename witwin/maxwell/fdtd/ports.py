@@ -9,6 +9,7 @@ from ..lumped import PortExcitation
 from ..network import PortData
 from ..sources import CW, CustomSourceTime, GaussianPulse, RickerWavelet
 from .checkpoint import lumped_state_name
+from .circuits import apply_circuit_runtimes, prepare_circuit_runtimes
 from .lumped import (
     LumpedRuntime,
     apply_lumped_runtime,
@@ -146,6 +147,7 @@ class PreparedPortRuntime:
     geometry: object
     frequencies: torch.Tensor
     field_name: str
+    yee_control_volume: torch.Tensor | None
     lumped: LumpedRuntime | None
     excitation: PortExcitation | None
     source_kind: str | None
@@ -162,6 +164,7 @@ class PreparedPortRuntime:
     accumulator: PortDFTAccumulator | None = None
     drive_accumulator: PortDFTAccumulator | None = None
     sample_index: int = 0
+    circuit_port: object | None = None
 
 
 def _field_map(solver) -> dict[str, torch.Tensor]:
@@ -445,11 +448,16 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
     )
     excitation_by_name = {excitation.port_name: excitation for excitation in excitations}
     ports_by_name = {port.name: port for port in solver.scene.ports}
+    circuit_port_names = {
+        binding.port_name
+        for circuit in getattr(solver.scene, "circuits", ())
+        for binding in circuit.bindings
+    }
     termination_overrides = getattr(solver, "_port_termination_overrides", {})
     has_coupled_objects = bool(excitation_by_name) or any(
         termination_overrides.get(port.name, getattr(port, "termination", None)) is not None
         for port in ports_by_name.values()
-    ) or bool(solver.scene.lumped_elements)
+    ) or bool(solver.scene.lumped_elements) or bool(circuit_port_names)
     if has_coupled_objects:
         _validate_supported_field_coupling(solver)
     runtimes = []
@@ -457,14 +465,23 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
         port = ports_by_name[geometry.port_name]
         excitation = excitation_by_name.get(port.name)
         termination = termination_overrides.get(port.name, port.termination)
+        if port.name in circuit_port_names and excitation is not None:
+            raise ValueError(
+                f"Circuit-bound port {port.name!r} cannot also declare a direct PortExcitation."
+            )
         _require_forward_only_parameters(port, excitation, termination)
         if excitation is not None and termination is not None:
             raise ValueError(
                 f"Active port {port.name!r} cannot also declare a passive termination in the same run."
             )
         field = getattr(solver, geometry.voltage_component)
+        control_volume = None
         lumped = None
-        if excitation is not None:
+        if port.name in circuit_port_names:
+            control_volume = _edge_control_volume(solver, geometry.voltage_component)
+            _open_declared_pec_terminal_edges(solver, geometry, port)
+        elif excitation is not None:
+            control_volume = _edge_control_volume(solver, geometry.voltage_component)
             _open_declared_pec_terminal_edges(solver, geometry, port)
             resistance = _real_source_resistance(
                 port,
@@ -476,17 +493,18 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
                 geometry,
                 dt=solver.dt,
                 eps_edge=getattr(solver, f"eps_{geometry.voltage_component}"),
-                yee_control_volume=_edge_control_volume(solver, geometry.voltage_component),
+                yee_control_volume=control_volume,
                 resistance=resistance,
             )
             _validate_local_update_coefficient(solver, lumped, geometry.voltage_component)
         elif termination is not None:
+            control_volume = _edge_control_volume(solver, geometry.voltage_component)
             _open_declared_pec_terminal_edges(solver, geometry, port)
             lumped = prepare_lumped_runtime(
                 geometry,
                 dt=solver.dt,
                 eps_edge=getattr(solver, f"eps_{geometry.voltage_component}"),
-                yee_control_volume=_edge_control_volume(solver, geometry.voltage_component),
+                yee_control_volume=control_volume,
                 termination=termination,
             )
             _validate_local_update_coefficient(solver, lumped, geometry.voltage_component)
@@ -505,6 +523,9 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
                 geometry=geometry,
                 frequencies=frequency_tensor,
                 field_name=geometry.voltage_component,
+                yee_control_volume=(
+                    control_volume if port.name in circuit_port_names else None
+                ),
                 lumped=lumped,
                 excitation=excitation,
                 source_kind=source_kind,
@@ -535,6 +556,15 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
         _validate_local_update_coefficient(solver, element_runtime, geometry.voltage_component)
         element_runtimes.append((element_runtime, geometry.voltage_component))
     solver._lumped_element_runtimes = tuple(element_runtimes)
+    prepare_circuit_runtimes(solver, solver._port_runtimes)
+    for runtime in solver._port_runtimes:
+        if runtime.circuit_port is not None:
+            _validate_local_update_coefficient(
+                solver,
+                runtime.circuit_port.field,
+                runtime.field_name,
+            )
+        runtime.yee_control_volume = None
     occupied_edges = {}
     coupled = [
         (runtime.port_name, field_name, runtime.linear_indices)
@@ -544,6 +574,15 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
         (runtime.port.name, runtime.field_name, runtime.lumped.linear_indices)
         for runtime in solver._port_runtimes
         if runtime.lumped is not None
+    )
+    coupled.extend(
+        (
+            runtime.port.name,
+            runtime.field_name,
+            runtime.circuit_port.field.linear_indices,
+        )
+        for runtime in solver._port_runtimes
+        if runtime.circuit_port is not None
     )
     for name, field_name, indices in coupled:
         for index in indices.detach().cpu().tolist():
@@ -864,6 +903,8 @@ def apply_port_runtimes(solver) -> None:
         )
     for runtime, field_name in getattr(solver, "_lumped_element_runtimes", ()):
         apply_lumped_runtime(runtime, getattr(solver, field_name))
+    if getattr(solver, "_circuit_runtimes", ()):
+        apply_circuit_runtimes(solver)
 
 
 def accumulate_port_observers(solver) -> None:
@@ -871,7 +912,16 @@ def accumulate_port_observers(solver) -> None:
     for runtime in getattr(solver, "_port_runtimes", ()):
         if runtime.accumulator is None or runtime.window_weights is None:
             raise RuntimeError("Port spectral accumulators were not prepared.")
-        if runtime.lumped is not None:
+        if runtime.circuit_port is not None:
+            voltage = runtime.circuit_port.field.last_voltage
+            voltage_sample_time = (
+                runtime.magnetic_time
+                if runtime.circuit_port.last_integration == "trapezoidal"
+                else runtime.electric_time
+            )
+            current_sample_time = voltage_sample_time
+            current = -runtime.circuit_port.field.last_current
+        elif runtime.lumped is not None:
             # Voltage and current must come from the same implicit coupling
             # state. The corrected Yee field is the post-branch voltage, whereas
             # the constitutive branch current is evaluated at the coupling
@@ -879,6 +929,7 @@ def accumulate_port_observers(solver) -> None:
             # passive port.
             voltage = runtime.lumped.last_voltage_midpoint
             voltage_sample_time = runtime.magnetic_time
+            current_sample_time = runtime.magnetic_time
             # Branch current is positive from the field into the external
             # branch. RF network current has the opposite sign: into the field
             # network from the port reference side.
@@ -886,13 +937,14 @@ def accumulate_port_observers(solver) -> None:
         else:
             voltage = runtime.geometry.integrate_voltage(fields)
             voltage_sample_time = runtime.electric_time
+            current_sample_time = runtime.magnetic_time
             current = runtime.geometry.integrate_current(fields)
         weight = runtime.window_weights[runtime.sample_index]
         runtime.accumulator.accumulate(
             voltage,
             current,
             electric_sample_time=voltage_sample_time,
-            magnetic_sample_time=runtime.magnetic_time,
+            magnetic_sample_time=current_sample_time,
             window_weight=weight,
         )
         if runtime.drive_accumulator is not None:
@@ -904,8 +956,12 @@ def accumulate_port_observers(solver) -> None:
                 window_weight=weight,
             )
         runtime.sample_index += 1
-        runtime.electric_time.add_(runtime.lumped.dt if runtime.lumped is not None else solver.dt)
-        runtime.magnetic_time.add_(runtime.lumped.dt if runtime.lumped is not None else solver.dt)
+        runtime.electric_time.add_(
+            runtime.lumped.dt if runtime.lumped is not None else solver.dt
+        )
+        runtime.magnetic_time.add_(
+            runtime.lumped.dt if runtime.lumped is not None else solver.dt
+        )
 
 
 def finalize_port_data(solver) -> dict[str, PortData]:
@@ -949,7 +1005,7 @@ def finalize_port_data(solver) -> dict[str, PortData]:
                 "orientation": runtime.geometry.direction,
                 "current_convention": (
                     "entering_field_network"
-                    if runtime.lumped is not None
+                    if runtime.lumped is not None or runtime.circuit_port is not None
                     else "positive_axis_h_contour"
                 ),
                 "dft_samples": runtime.sample_index,

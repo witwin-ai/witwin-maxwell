@@ -7,10 +7,16 @@ cannot enter unnoticed.
 
 ## Reconciled baseline
 
-The 2026-07-15 repository state contains 128 guards:
+The Phase 2 circuit-coupling state on 2026-07-15 contains 133 guards:
 
-- 108 capability guards tracked by the non-increasing test budget;
+- 113 capability guards tracked by the test budget;
 - 20 contract guards excluded by exact file and message substring.
+
+The five additions are explicit phase-owned circuit guards: live `CircuitData`
+snapshot persistence and multi-port execution are removed in Phase 3, while
+transpose-solve differentiation and distributed execution are removed in
+Phase 4. They were reviewed as capability guards rather than reclassified as
+permanent contracts; their owning phases must lower this baseline as they land.
 
 The capability baseline is distributed as follows:
 
@@ -23,10 +29,10 @@ The capability baseline is distributed as follows:
 | Time-domain excitation | 12 |
 | Time-domain ports and lumped elements | 12 |
 | Time-domain runtime | 10 |
-| Public simulation, result, and network workflows | 18 |
+| Public simulation, result, and network workflows | 23 |
 | Material models | 7 |
 | Postprocessing | 3 |
-| **Total** | **108** |
+| **Total** | **113** |
 
 ## Contract exclusions
 

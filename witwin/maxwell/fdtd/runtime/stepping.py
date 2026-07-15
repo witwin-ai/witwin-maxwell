@@ -34,6 +34,7 @@ from ..ports import (
     prepare_port_runtimes,
     prepare_port_spectral_accumulators,
 )
+from ..circuits import finalize_circuit_data, prepare_circuit_time_series
 
 
 def iter_cpml_memory_regions(solver, attr_name):
@@ -1893,6 +1894,7 @@ def solve(
     if getattr(solver, "time_observers", None):
         solver._prepare_time_observers(time_steps)
     prepare_port_spectral_accumulators(solver, time_steps, dft_window)
+    prepare_circuit_time_series(solver, time_steps)
 
     solver._shutoff_triggered = False
     solver._shutoff_step = None
@@ -2004,4 +2006,7 @@ def solve(
     ports = finalize_port_data(solver)
     if ports:
         output["ports"] = ports
+    circuits = finalize_circuit_data(solver)
+    if circuits:
+        output["circuits"] = circuits
     return output or None
