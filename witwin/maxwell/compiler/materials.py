@@ -284,6 +284,34 @@ _NORMAL_EPS = 1e-24
 _HARMONIC_EPS = 1e-12
 
 
+def _field_gradients(scene, field, coords=None):
+    xx, yy, zz = (scene.X, scene.Y, scene.Z) if coords is None else coords
+    x = xx[:, 0, 0]
+    y = yy[0, :, 0]
+    z = zz[0, 0, :]
+    grads = []
+    for dim, coord in enumerate((x, y, z)):
+        if field.shape[dim] < 2:
+            grads.append(torch.zeros_like(field))
+        else:
+            grads.append(torch.gradient(field, spacing=(coord,), dim=dim)[0])
+    return dict(zip(_AXES, grads, strict=True))
+
+
+def _normalized_field_gradients(scene, field, coords=None):
+    grads = _field_gradients(scene, field, coords=coords)
+    gx, gy, gz = (grads[axis] for axis in _AXES)
+    # Floor is applied inside the sqrt (squared scale ``_NORMAL_EPS``) so the
+    # sqrt's own backward stays finite at degenerate nodes where the summed
+    # squared gradient is exactly zero (medial-axis / symmetric-center nodes).
+    # A floor added after the sqrt would leave d(sqrt)/d(.) = inf there, and the
+    # vanishing upstream gradient would evaluate 0*inf = NaN, poisoning the whole
+    # geometry-gradient tensor through the sum reduction.
+    mag = torch.sqrt(gx * gx + gy * gy + gz * gz + _NORMAL_EPS)
+    inv = 1.0 / mag
+    return {"x": gx * inv, "y": gy * inv, "z": gz * inv}
+
+
 def _interface_normals(scene, geometry, coords=None):
     """Unit outward interface normals per node from the signed-distance field.
 
@@ -296,26 +324,11 @@ def _interface_normals(scene, geometry, coords=None):
     geometry parameters through ``signed_distance``.
     """
     xx, yy, zz = (scene.X, scene.Y, scene.Z) if coords is None else coords
-    sdf = geometry.signed_distance(xx, yy, zz)
-    x = xx[:, 0, 0]
-    y = yy[0, :, 0]
-    z = zz[0, 0, :]
-    grads = []
-    for dim, coord in enumerate((x, y, z)):
-        if sdf.shape[dim] < 2:
-            grads.append(torch.zeros_like(sdf))
-        else:
-            grads.append(torch.gradient(sdf, spacing=(coord,), dim=dim)[0])
-    gx, gy, gz = grads
-    # Floor is applied inside the sqrt (squared scale ``_NORMAL_EPS``) so the
-    # sqrt's own backward stays finite at degenerate nodes where the summed
-    # squared gradient is exactly zero (medial-axis / symmetric-center nodes).
-    # A floor added after the sqrt would leave d(sqrt)/d(.) = inf there, and the
-    # vanishing upstream gradient would evaluate 0*inf = NaN, poisoning the whole
-    # geometry-gradient tensor through the sum reduction.
-    mag = torch.sqrt(gx * gx + gy * gy + gz * gz + _NORMAL_EPS)
-    inv = 1.0 / mag
-    return {"x": gx * inv, "y": gy * inv, "z": gz * inv}
+    return _normalized_field_gradients(
+        scene,
+        geometry.signed_distance(xx, yy, zz),
+        coords=(xx, yy, zz),
+    )
 
 
 def _blend_material_polarized(tensor, occupancy, normal_axis, *, value):
@@ -337,11 +350,44 @@ def _blend_material_polarized(tensor, occupancy, normal_axis, *, value):
     return (1.0 - weight) * arithmetic + weight * harmonic
 
 
+def _reconstruct_sampled_polarized_components(scene, arithmetic, inverse):
+    """Combine subcell arithmetic and reciprocal means along the material normal.
+
+    Averaging an already blended harmonic value at every subcell sample collapses
+    toward the arithmetic mean when those samples are nearly binary. Integrating
+    the material and its reciprocal separately preserves the finite-volume series
+    mean before the normal projection is applied.
+    """
+    squared_gradients = {
+        axis: torch.zeros_like(arithmetic[axis]) for axis in _AXES
+    }
+    for component in arithmetic.values():
+        for axis, gradient in _field_gradients(scene, component).items():
+            squared_gradients[axis] += gradient * gradient
+    gradient_norm_squared = sum(squared_gradients.values()) + _NORMAL_EPS
+    components = {}
+    for axis in _AXES:
+        weight = squared_gradients[axis] / gradient_norm_squared
+        harmonic = 1.0 / (inverse[axis] + _HARMONIC_EPS)
+        components[axis] = (1.0 - weight) * arithmetic[axis] + weight * harmonic
+    return components
+
+
 def _resolve_subpixel(subpixel):
     """Return ``(samples, averaging, pec)`` from a SubpixelSpec or the None default."""
     if subpixel is None:
         return (1, 1, 1), "arithmetic", "staircase"
     return tuple(int(v) for v in subpixel.samples), subpixel.averaging, subpixel.pec
+
+
+def _validate_polarized_materials(scene):
+    for structure in _bulk_structures(scene):
+        eps_offdiag = _static_structure_material(structure)[2]
+        if any(value != 0.0 for value in eps_offdiag.values()):
+            raise NotImplementedError(
+                "Polarized (Kottke) subpixel averaging is not implemented for full "
+                "(off-diagonal) anisotropic permittivity; use arithmetic subpixel averaging."
+            )
 
 
 def _iter_weight_entries(model):
@@ -711,6 +757,7 @@ def _apply_structure_material(
     averaging="arithmetic",
     half_weight_boundary=False,
     periodic_shift_options=None,
+    inverse_components=None,
 ):
     material, eps_components, eps_offdiag, mu_components, sigma_components, sigma_m_components, nonlinearity = _static_structure_material(structure)
     has_offdiag = any(value != 0.0 for value in eps_offdiag.values())
@@ -727,6 +774,18 @@ def _apply_structure_material(
         periodic_shift_options=periodic_shift_options,
     )
     normals = _interface_normals(scene, structure.geometry, coords=coords) if averaging == "polarized" else None
+    perturbation_delta = None
+    if isinstance(material, PerturbationMedium):
+        perturbation_delta = (
+            float(material.eps_sensitivity)
+            * float(eps_background)
+            * _box_parameter_field(
+                scene,
+                structure.geometry,
+                material.perturbation,
+                name="PerturbationMedium.perturbation",
+            )
+        )
 
     for axis in _AXES:
         eps_value = eps_components[axis] * float(eps_background)
@@ -744,6 +803,18 @@ def _apply_structure_material(
             )
             model["mu_components"][axis] = _blend_material_polarized(
                 model["mu_components"][axis], occupancy, normals[axis], value=mu_value
+            )
+        if inverse_components is not None:
+            effective_eps = eps_value if perturbation_delta is None else eps_value + perturbation_delta
+            inverse_components["eps_components"][axis] = _blend_material(
+                inverse_components["eps_components"][axis],
+                occupancy,
+                value=1.0 / (effective_eps + _HARMONIC_EPS),
+            )
+            inverse_components["mu_components"][axis] = _blend_material(
+                inverse_components["mu_components"][axis],
+                occupancy,
+                value=1.0 / (mu_value + _HARMONIC_EPS),
             )
         model["sigma_e_components"][axis] = _blend_material(
             model["sigma_e_components"][axis],
@@ -776,19 +847,11 @@ def _apply_structure_material(
             model["modulation_omega"], occupancy, value=modulation_spec.angular_frequency
         )
     if isinstance(material, PerturbationMedium):
-        delta = _box_parameter_field(
-            scene,
-            structure.geometry,
-            material.perturbation,
-            name="PerturbationMedium.perturbation",
-        )
         # eps(x) = eps_base + eps_sensitivity * perturbation(x), applied inside
         # the structure occupancy so it blends and overlaps like the base eps
         # itself. eps_background scales the delta exactly as it scales the
         # base eps value in _blend_material above.
-        contribution = occupancy * (
-            (float(material.eps_sensitivity) * float(eps_background)) * delta
-        )
+        contribution = occupancy * perturbation_delta
         for axis in _AXES:
             model["eps_components"][axis] = model["eps_components"][axis] + contribution
     _clear_dispersive_region(model, occupancy)
@@ -807,8 +870,24 @@ def _compile_material_sample(
     averaging="arithmetic",
     half_weight_boundary=False,
     geometry_periodic_shifts=None,
+    collect_inverse=False,
 ):
     model = _new_material_model(scene, layout, eps_fill=eps_background, mu_fill=mu_background)
+    inverse_components = None
+    if collect_inverse:
+        shape = (scene.Nx, scene.Ny, scene.Nz)
+        inverse_components = {
+            "eps_components": _new_component_field(
+                shape,
+                fill_value=1.0 / (float(eps_background) + _HARMONIC_EPS),
+                device=scene.device,
+            ),
+            "mu_components": _new_component_field(
+                shape,
+                fill_value=1.0 / (float(mu_background) + _HARMONIC_EPS),
+                device=scene.device,
+            ),
+        }
     coords = _coordinate_grids(scene, sample_offset)
     geometry_periodic_shifts = geometry_periodic_shifts or {}
 
@@ -824,6 +903,7 @@ def _compile_material_sample(
             averaging=averaging,
             half_weight_boundary=half_weight_boundary,
             periodic_shift_options=geometry_periodic_shifts.get(id(structure.geometry)),
+            inverse_components=inverse_components,
         )
     if region_densities:
         model = _apply_material_regions(
@@ -834,7 +914,10 @@ def _compile_material_sample(
             averaging=averaging,
             half_weight_boundary=half_weight_boundary,
             geometry_periodic_shifts=geometry_periodic_shifts,
+            inverse_components=inverse_components,
         )
+    if collect_inverse:
+        return model, inverse_components
     return model
 
 
@@ -1047,6 +1130,7 @@ def _apply_material_regions(
     averaging="arithmetic",
     half_weight_boundary=False,
     geometry_periodic_shifts=None,
+    inverse_components=None,
 ):
     """Blend design regions through the same occupancy path as ordinary structures."""
     eps_base = {axis: model["eps_components"][axis].clone() for axis in _AXES}
@@ -1095,6 +1179,17 @@ def _apply_material_regions(
                     occupancy,
                     normals[axis],
                     value=mu_region,
+                )
+            if inverse_components is not None:
+                inverse_components["eps_components"][axis] = _blend_material(
+                    inverse_components["eps_components"][axis],
+                    occupancy,
+                    value=1.0 / (eps_region + _HARMONIC_EPS),
+                )
+                inverse_components["mu_components"][axis] = _blend_material(
+                    inverse_components["mu_components"][axis],
+                    occupancy,
+                    value=1.0 / (mu_region + _HARMONIC_EPS),
                 )
             model["sigma_e_components"][axis] = _blend_material(
                 model["sigma_e_components"][axis], occupancy, value=0.0
@@ -1442,7 +1537,17 @@ def compile_material_model(
         model["sibc"] = sibc
         return model
 
+    collect_inverse = averaging == "polarized"
+    if collect_inverse:
+        _validate_polarized_materials(scene)
     accum = _new_material_model(scene, layout, eps_fill=0.0, mu_fill=0.0)
+    inverse_accum = None
+    if collect_inverse:
+        shape = (scene.Nx, scene.Ny, scene.Nz)
+        inverse_accum = {
+            "eps_components": _new_component_field(shape, fill_value=0.0, device=scene.device),
+            "mu_components": _new_component_field(shape, fill_value=0.0, device=scene.device),
+        }
     if region_densities:
         accum["eps_r_base"] = torch.zeros_like(accum["eps_r"])
         accum["mu_r_base"] = torch.zeros_like(accum["mu_r"])
@@ -1450,22 +1555,30 @@ def compile_material_model(
         accum["mu_r_design"] = torch.zeros_like(accum["mu_r"])
     sample_offsets = _sample_offsets(scene, samples)
     for sample_offset in sample_offsets:
-        sample = _compile_material_sample(
+        compiled_sample = _compile_material_sample(
             scene,
             layout,
             eps_background=eps_background,
             mu_background=mu_background,
             region_densities=region_densities,
             sample_offset=sample_offset,
-            averaging=averaging,
+            averaging="arithmetic" if collect_inverse else averaging,
             half_weight_boundary=True,
             geometry_periodic_shifts=geometry_periodic_shifts,
+            collect_inverse=collect_inverse,
         )
+        if collect_inverse:
+            sample, inverse_sample = compiled_sample
+        else:
+            sample = compiled_sample
         for axis in _AXES:
             accum["eps_components"][axis] += sample["eps_components"][axis]
             accum["mu_components"][axis] += sample["mu_components"][axis]
             accum["sigma_e_components"][axis] += sample["sigma_e_components"][axis]
             accum["sigma_m_components"][axis] += sample["sigma_m_components"][axis]
+            if inverse_accum is not None:
+                inverse_accum["eps_components"][axis] += inverse_sample["eps_components"][axis]
+                inverse_accum["mu_components"][axis] += inverse_sample["mu_components"][axis]
         for pair in _OFFDIAG_AXES:
             accum["eps_offdiag_components"][pair] += sample["eps_offdiag_components"][pair]
         accum["kerr_chi3"] += sample["kerr_chi3"]
@@ -1503,6 +1616,20 @@ def compile_material_model(
         accum["mu_components"][axis] *= scale
         accum["sigma_e_components"][axis] *= scale
         accum["sigma_m_components"][axis] *= scale
+        if inverse_accum is not None:
+            inverse_accum["eps_components"][axis] *= scale
+            inverse_accum["mu_components"][axis] *= scale
+    if inverse_accum is not None:
+        accum["eps_components"] = _reconstruct_sampled_polarized_components(
+            scene,
+            accum["eps_components"],
+            inverse_accum["eps_components"],
+        )
+        accum["mu_components"] = _reconstruct_sampled_polarized_components(
+            scene,
+            accum["mu_components"],
+            inverse_accum["mu_components"],
+        )
     for pair in _OFFDIAG_AXES:
         accum["eps_offdiag_components"][pair] *= scale
     accum["kerr_chi3"] *= scale
@@ -1529,6 +1656,9 @@ def compile_material_model(
     for entry in accum["mu_lorentz_poles"]:
         entry["weight"] *= scale
     model = _refresh_model_summary_aliases(accum)
+    if region_densities:
+        model["eps_r_design"] = model["eps_r"] - model["eps_r_base"]
+        model["mu_r_design"] = model["mu_r"] - model["mu_r_base"]
     model = _apply_sheet_structures(scene, model)
     model["pec_occupancy"] = _pec_occupancy(scene)
     model["pec_mode"] = pec_mode
