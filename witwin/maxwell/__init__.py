@@ -32,7 +32,8 @@ from .monitors import (
     PlaneMonitor,
     PointMonitor,
 )
-from .ports import ModePort
+from .network import NetworkData, PortData
+from .ports import AxisPath, LumpedPort, ModePort
 from . import postprocess
 from .result import Result
 from .scene import (
@@ -79,6 +80,7 @@ from .simulation import (
 
 __all__ = [
     "AstigmaticGaussianBeam",
+    "AxisPath",
     "BoundarySpec",
     "BoundaryKind",
     "Box",
@@ -115,6 +117,7 @@ __all__ = [
     "HollowBox",
     "LayerRefinementSpec",
     "LorentzPole",
+    "LumpedPort",
     "LossyMetalMedium",
     "Material",
     "MaterialRegion",
@@ -125,6 +128,7 @@ __all__ = [
     "ModeMonitor",
     "ModePort",
     "ModeSource",
+    "NetworkData",
     "ModulationSpec",
     "NonlinearSusceptibility",
     "PermittivityMonitor",
@@ -133,6 +137,7 @@ __all__ = [
     "PlaneWave",
     "PointDipole",
     "PointMonitor",
+    "PortData",
     "PolySlab",
     "postprocess",
     "Prism",

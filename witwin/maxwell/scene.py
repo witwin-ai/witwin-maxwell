@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from witwin.core import Structure
-from .ports import ModePort
+from .ports import LumpedPort, ModePort
 from .compiler.materials import (
     compile_material_model,
     evaluate_material_components,
@@ -785,7 +785,9 @@ class Scene:
         self.subpixel = _coerce_subpixel(subpixel_samples)
         self.symmetry = _normalize_symmetry(symmetry)
         self.material_regions = list(material_regions or [])
-        self.ports = list(ports or [])
+        self.ports = []
+        for port in ports or ():
+            self.add_port(port)
         self.lazy_meshgrid = bool(lazy_meshgrid)
 
     @property
@@ -892,7 +894,11 @@ class Scene:
         self.monitors.append(monitor)
         return self
 
-    def add_port(self, port: ModePort):
+    def add_port(self, port: ModePort | LumpedPort):
+        if not isinstance(port, (ModePort, LumpedPort)):
+            raise TypeError("Maxwell Scene ports must be ModePort or LumpedPort instances.")
+        if any(existing.name == port.name for existing in self.ports):
+            raise ValueError(f"Port name {port.name!r} is already present in the scene.")
         self.ports.append(port)
         return self
 
@@ -923,9 +929,10 @@ class Scene:
     def resolved_sources(self):
         resolved = list(self.sources)
         for port in self.ports:
-            source = port.to_mode_source()
-            if source is not None:
-                resolved.append(source)
+            if isinstance(port, ModePort):
+                source = port.to_mode_source()
+                if source is not None:
+                    resolved.append(source)
         return resolved
 
     def resolved_monitors(self):
@@ -936,7 +943,8 @@ class Scene:
             else:
                 resolved.append(monitor)
         for port in self.ports:
-            resolved.append(port.to_mode_monitor())
+            if isinstance(port, ModePort):
+                resolved.append(port.to_mode_monitor())
         return resolved
 
     def to_tidy3d(self, *, frequencies=None, run_time=None, **kwargs):
@@ -1234,6 +1242,11 @@ class PreparedScene(Scene):
             self._material_model_cache[key] = cached
             self.release_meshgrid()
         return cached
+
+    def compile_ports(self, *, device=None):
+        from .compiler.ports import compile_ports
+
+        return compile_ports(self, device=self.device if device is None else device)
 
     def compile_relative_materials(
         self,

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+
+import torch
+from witwin.core import Box
 
 from .monitors import ModeMonitor, _normalize_frequencies, _normalize_normal_direction
 from .sources import (
@@ -14,6 +18,131 @@ from .sources import (
     _resolve_mode_source_polarization_axis,
     polarization_vector,
 )
+
+
+@dataclass(frozen=True)
+class AxisPath:
+    """Axis-aligned voltage integration path.
+
+    The path orientation is supplied by the owning port's ``negative`` and
+    ``positive`` terminals; this object only fixes the Cartesian axis.
+    """
+
+    axis: str
+
+    def __init__(self, axis):
+        if not isinstance(axis, str):
+            raise TypeError("AxisPath axis must be one of 'x', 'y', or 'z'.")
+        resolved_axis = axis.strip().lower()
+        if resolved_axis not in {"x", "y", "z"}:
+            raise ValueError("AxisPath axis must be one of 'x', 'y', or 'z'.")
+        object.__setattr__(self, "axis", resolved_axis)
+
+
+@dataclass(frozen=True)
+class LumpedPort:
+    """Declare a two-terminal lumped port with explicit discrete V/I geometry.
+
+    Voltage is the line integral of E from ``negative`` to ``positive``.
+    Current is the right-hand circulation of H around ``current_surface`` with
+    the same orientation. Phasors are peak-valued, so average power is
+    ``0.5 * Re(V * conj(I))``.
+    """
+
+    name: str
+    positive: tuple[float, float, float]
+    negative: tuple[float, float, float]
+    voltage_path: AxisPath
+    current_surface: Box
+    reference_impedance: complex | float | torch.Tensor
+    reference_plane: float | None = None
+    kind: str = "lumped_port"
+    phasor_convention: str = "peak"
+    power_convention: str = "0.5*Re(V*conj(I))"
+
+    def __init__(
+        self,
+        name,
+        *,
+        positive,
+        negative,
+        voltage_path,
+        current_surface,
+        reference_impedance=50.0,
+        reference_plane=None,
+    ):
+        if not isinstance(voltage_path, AxisPath):
+            raise TypeError("voltage_path must be an AxisPath.")
+        if not isinstance(current_surface, Box):
+            raise TypeError("current_surface must be a witwin.core.Box.")
+
+        resolved_positive = _require_length3("positive", positive)
+        resolved_negative = _require_length3("negative", negative)
+        if resolved_positive == resolved_negative:
+            raise ValueError("LumpedPort positive and negative terminals must be distinct.")
+
+        axis_index = "xyz".index(voltage_path.axis)
+        transverse_indices = tuple(index for index in range(3) if index != axis_index)
+        if any(
+            not math.isclose(
+                resolved_positive[index],
+                resolved_negative[index],
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            )
+            for index in transverse_indices
+        ):
+            raise ValueError(
+                "LumpedPort positive and negative terminals must define an axis-aligned voltage path."
+            )
+        if math.isclose(
+            resolved_positive[axis_index],
+            resolved_negative[axis_index],
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        ):
+            raise ValueError("LumpedPort positive and negative terminals must be distinct along voltage_path.axis.")
+
+        if torch.is_tensor(reference_impedance):
+            if reference_impedance.numel() != 1:
+                raise ValueError("reference_impedance tensor must contain one value.")
+            real = torch.real(reference_impedance)
+            imag = torch.imag(reference_impedance) if reference_impedance.is_complex() else torch.zeros_like(real)
+            if not bool(torch.isfinite(real)) or not bool(torch.isfinite(imag)):
+                raise ValueError("reference_impedance must be finite.")
+            if not bool(real > 0.0):
+                raise ValueError("reference_impedance real part must be positive.")
+            stored_impedance = reference_impedance
+        else:
+            resolved_impedance = complex(reference_impedance)
+            if not math.isfinite(resolved_impedance.real) or not math.isfinite(resolved_impedance.imag):
+                raise ValueError("reference_impedance must be finite.")
+            if resolved_impedance.real <= 0.0:
+                raise ValueError("reference_impedance real part must be positive.")
+            stored_impedance = (
+                float(resolved_impedance.real)
+                if resolved_impedance.imag == 0.0
+                else resolved_impedance
+            )
+
+        resolved_name = str(name)
+        if not resolved_name:
+            raise ValueError("LumpedPort name must not be empty.")
+
+        object.__setattr__(self, "name", resolved_name)
+        object.__setattr__(self, "positive", resolved_positive)
+        object.__setattr__(self, "negative", resolved_negative)
+        object.__setattr__(self, "voltage_path", voltage_path)
+        object.__setattr__(self, "current_surface", current_surface)
+        object.__setattr__(self, "reference_impedance", stored_impedance)
+        object.__setattr__(
+            self,
+            "reference_plane",
+            None if reference_plane is None else float(reference_plane),
+        )
+        object.__setattr__(self, "kind", "lumped_port")
+        object.__setattr__(self, "phasor_convention", "peak")
+        object.__setattr__(self, "power_convention", "0.5*Re(V*conj(I))")
 
 
 @dataclass(frozen=True)
