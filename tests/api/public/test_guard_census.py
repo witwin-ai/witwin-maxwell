@@ -1,7 +1,7 @@
 """Guard-convergence gate for the P5 functional-completeness plan.
 
 Walks every ``raise NotImplementedError`` in ``witwin/`` via AST, subtracts the
-committed contract-guard exclusion list (docs/dev/fdtd_gap_05_guard_census.md),
+committed contract-guard exclusion list (docs/reference/fdtd-gap-05-guard-census.md),
 and fails when the remaining *capability* guard count exceeds the committed
 budget. Each P5 phase lowers ``CAPABILITY_GUARD_BUDGET`` in the same commit
 that removes guards, so the metric cannot silently regress or be gamed by
@@ -16,7 +16,7 @@ from pathlib import Path
 PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 
 # Lowered by each P5 phase in the commit that removes guards. Never raised
-# without a corresponding update to docs/dev/fdtd_gap_05_guard_census.md.
+# without a corresponding update to docs/reference/fdtd-gap-05-guard-census.md.
 # P5.6 (cross-solver parity) re-measured this at 63: the Tidy3D export commits
 # (PEC/PECMedium, sigma_e+dispersive, Kerr/TPA, anisotropy, Medium2D/Graphene/
 # LossyMetal, modulation, custom poles/PerturbationMedium, geometry/source/
@@ -40,7 +40,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 CAPABILITY_GUARD_BUDGET = 58
 
 # (posix path relative to the repo root, distinctive message substring).
-# Keep in sync with the table in docs/dev/fdtd_gap_05_guard_census.md.
+# Keep in sync with the table in docs/reference/fdtd-gap-05-guard-census.md.
 CONTRACT_GUARDS = (
     ("witwin/maxwell/media.py", "Nonlinear Material frequency evaluation is not defined without a field amplitude"),
     ("witwin/maxwell/media.py", "relative_permittivity() currently supports isotropic Material only"),
@@ -118,7 +118,7 @@ def test_capability_guard_budget():
     assert len(capability) <= CAPABILITY_GUARD_BUDGET, (
         f"{len(capability)} capability guards exceed the committed budget of "
         f"{CAPABILITY_GUARD_BUDGET}. New NotImplementedError guards need either an "
-        "implementation or a contract-guard entry in docs/dev/fdtd_gap_05_guard_census.md:\n"
+        "implementation or a contract-guard entry in docs/reference/fdtd-gap-05-guard-census.md:\n"
         + "\n".join(f"  {rel}:{lineno}  {msg[:90]}" for rel, lineno, msg in capability)
     )
 
@@ -129,7 +129,7 @@ def test_contract_guard_list_is_accurate():
     for file, key in CONTRACT_GUARDS:
         assert any(rel == file and key in msg for rel, _, msg in guards), (
             f"Stale contract-guard entry: {file!r} has no NotImplementedError containing {key!r}. "
-            "Update CONTRACT_GUARDS and docs/dev/fdtd_gap_05_guard_census.md."
+            "Update CONTRACT_GUARDS and docs/reference/fdtd-gap-05-guard-census.md."
         )
 
 

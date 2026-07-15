@@ -1,4 +1,4 @@
-"""Validation campaign inventory from docs/dev/validation-vs-tidy3d-plan.md."""
+"""Validation campaign inventory from the archived numerical-correctness plan."""
 
 from __future__ import annotations
 

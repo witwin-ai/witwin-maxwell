@@ -231,6 +231,6 @@ __marimo__/
 
 # Repository-local development content and build artifacts
 .bench_tmp/
-docs/dev/
+docs/
 assets/
 benchmark/

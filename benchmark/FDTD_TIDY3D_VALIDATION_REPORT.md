@@ -5,7 +5,7 @@ Date: 2026-07-13
 ## Scope and method
 
 This report is the low-cost numerical baseline for the campaign in
-`docs/dev/validation-vs-tidy3d-plan.md`. FDFD is excluded by user decision.
+`docs/archive/plans/numerical-correctness-validation-plan.md`. FDFD is excluded by user decision.
 
 - 48 FDTD cases were prepared; all 48 Tidy3D references were generated and cache-key verified. This includes
   34 S1-S5 campaign cases and 14 historical dipole/plane-wave cases.
