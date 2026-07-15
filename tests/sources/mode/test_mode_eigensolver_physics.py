@@ -91,8 +91,8 @@ def test_analytic_rectangular_waveguide_neff_and_higher_order_field_shape():
     )
     assert abs(result["effective_index"] - analytic_neff) / analytic_neff < 0.01
 
-    coords_u = result["coords_u"][1:-1].cpu().numpy()
-    coords_v = result["coords_v"][1:-1].cpu().numpy()
+    coords_u = result["coords_u"].cpu().numpy()
+    coords_v = result["coords_v"].cpu().numpy()
     grid_u, grid_v = np.meshgrid(coords_u, coords_v, indexing="ij")
     core = (np.abs(grid_u) <= 0.5 * _CORE_SIZE[0] + 1e-12) & (
         np.abs(grid_v) <= 0.5 * _CORE_SIZE[1] + 1e-12
