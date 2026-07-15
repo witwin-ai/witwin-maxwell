@@ -9,7 +9,7 @@ import torch
 
 from witwin.core import Structure
 from .lumped import Capacitor, Inductor, Resistor
-from .ports import LumpedPort, ModePort, TerminalPort, _resolve_terminal_port
+from .ports import LumpedPort, ModePort, TerminalPort, WavePort, _resolve_terminal_port
 from .compiler.materials import (
     compile_material_model,
     evaluate_material_components,
@@ -899,10 +899,10 @@ class Scene:
         self.monitors.append(monitor)
         return self
 
-    def add_port(self, port: ModePort | LumpedPort | TerminalPort):
-        if not isinstance(port, (ModePort, LumpedPort, TerminalPort)):
+    def add_port(self, port: ModePort | LumpedPort | TerminalPort | WavePort):
+        if not isinstance(port, (ModePort, LumpedPort, TerminalPort, WavePort)):
             raise TypeError(
-                "Maxwell Scene ports must be ModePort, LumpedPort, or TerminalPort instances."
+                "Maxwell Scene ports must be ModePort, LumpedPort, TerminalPort, or WavePort instances."
             )
         if any(existing.name == port.name for existing in self.ports):
             raise ValueError(f"Port name {port.name!r} is already present in the scene.")
@@ -969,6 +969,11 @@ class Scene:
         """Compile declared port geometry through the solver preparation layer."""
 
         return prepare_scene(self).compile_ports(device=device)
+
+    def compile_waveports(self, *, device=None):
+        """Compile RF wave-port cross sections without solving their modes."""
+
+        return prepare_scene(self).compile_waveports(device=device)
 
     def compile_lumped_elements(self, *, device=None):
         """Compile declared R/L/C elements through the preparation layer."""
@@ -1322,6 +1327,14 @@ class PreparedScene(Scene):
         from .compiler.ports import compile_ports
 
         return compile_ports(self, device=self.device if device is None else device)
+
+    def compile_waveports(self, *, device=None):
+        from .compiler.waveports import compile_waveports
+
+        return compile_waveports(
+            self,
+            device=self.device if device is None else device,
+        )
 
     def compile_lumped_elements(self, *, device=None):
         from .compiler.lumped import compile_lumped_elements

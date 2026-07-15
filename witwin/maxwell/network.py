@@ -202,6 +202,10 @@ class PortData:
     direction: str = "+"
     reference_plane: float | None = None
     available_power: torch.Tensor | None = None
+    mode_names: tuple[str, ...] | None = None
+    beta: torch.Tensor | None = None
+    characteristic_impedance: torch.Tensor | None = None
+    tracking_confidence: torch.Tensor | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     phasor_convention: str = PHASOR_CONVENTION
     power_wave_convention: str = POWER_WAVE_CONVENTION
@@ -253,6 +257,66 @@ class PortData:
             except RuntimeError as exc:
                 raise ValueError("available_power must be broadcastable to the signal shape.") from exc
 
+        mode_names = self.mode_names
+        beta = self.beta
+        characteristic_impedance = self.characteristic_impedance
+        tracking_confidence = self.tracking_confidence
+        modal_values = (beta, characteristic_impedance, tracking_confidence)
+        if mode_names is None:
+            if any(value is not None for value in modal_values):
+                raise ValueError(
+                    "mode_names is required when modal beta, impedance, or tracking data is provided."
+                )
+        else:
+            mode_names = tuple(str(mode_name) for mode_name in mode_names)
+            if voltage.ndim < 2:
+                raise ValueError("Modal PortData signals must have a mode axis before frequency.")
+            if len(mode_names) != voltage.shape[-2]:
+                raise ValueError("mode_names must match the signal mode dimension.")
+            if any(not mode_name for mode_name in mode_names):
+                raise ValueError("mode_names must not contain empty names.")
+            if len(set(mode_names)) != len(mode_names):
+                raise ValueError("mode_names must be unique.")
+            modal_shape = (len(mode_names), frequencies.numel())
+
+            def normalize_modal(value, *, field_name: str, real: bool):
+                if value is None:
+                    return None
+                if not isinstance(value, torch.Tensor):
+                    value = torch.as_tensor(value, device=voltage.device)
+                if value.device != voltage.device:
+                    raise ValueError(f"{field_name} and port signals must be on the same device.")
+                if tuple(value.shape) != modal_shape:
+                    raise ValueError(f"{field_name} must have shape [M, F] = {modal_shape}.")
+                if real and value.is_complex():
+                    raise TypeError(f"{field_name} must be real.")
+                if not value.dtype.is_floating_point and not value.is_complex():
+                    raise TypeError(f"{field_name} must be floating point.")
+                if not bool(torch.all(torch.isfinite(value))):
+                    raise ValueError(f"{field_name} must contain only finite values.")
+                return value
+
+            beta = normalize_modal(beta, field_name="beta", real=False)
+            characteristic_impedance = normalize_modal(
+                characteristic_impedance,
+                field_name="characteristic_impedance",
+                real=False,
+            )
+            if characteristic_impedance is not None:
+                characteristic_impedance = _validate_reference_impedance(
+                    characteristic_impedance,
+                    name="characteristic_impedance",
+                )
+            tracking_confidence = normalize_modal(
+                tracking_confidence,
+                field_name="tracking_confidence",
+                real=True,
+            )
+            if tracking_confidence is not None and not bool(
+                torch.all((tracking_confidence >= 0.0) & (tracking_confidence <= 1.0))
+            ):
+                raise ValueError("tracking_confidence must lie in [0, 1].")
+
         object.__setattr__(self, "port_name", name)
         object.__setattr__(self, "frequencies", frequencies)
         object.__setattr__(self, "voltage", voltage)
@@ -265,6 +329,10 @@ class PortData:
             None if self.reference_plane is None else float(self.reference_plane),
         )
         object.__setattr__(self, "available_power", available_power)
+        object.__setattr__(self, "mode_names", mode_names)
+        object.__setattr__(self, "beta", beta)
+        object.__setattr__(self, "characteristic_impedance", characteristic_impedance)
+        object.__setattr__(self, "tracking_confidence", tracking_confidence)
         object.__setattr__(self, "metadata", dict(self.metadata))
 
     @classmethod
@@ -357,6 +425,10 @@ class PortData:
                 "direction": self.direction,
                 "reference_plane": self.reference_plane,
                 "available_power": _detach_to_cpu(self.available_power),
+                "mode_names": self.mode_names,
+                "beta": _detach_to_cpu(self.beta),
+                "characteristic_impedance": _detach_to_cpu(self.characteristic_impedance),
+                "tracking_confidence": _detach_to_cpu(self.tracking_confidence),
                 "metadata": _detach_to_cpu(self.metadata),
                 "phasor_convention": self.phasor_convention,
                 "power_wave_convention": self.power_wave_convention,
@@ -382,6 +454,10 @@ class PortData:
             direction=payload["direction"],
             reference_plane=payload["reference_plane"],
             available_power=payload["available_power"],
+            mode_names=payload.get("mode_names"),
+            beta=payload.get("beta"),
+            characteristic_impedance=payload.get("characteristic_impedance"),
+            tracking_confidence=payload.get("tracking_confidence"),
             metadata=payload["metadata"],
             phasor_convention=payload["phasor_convention"],
             power_wave_convention=payload["power_wave_convention"],
@@ -844,7 +920,7 @@ class NetworkData:
         self,
         distances,
         *,
-        propagation_constants,
+        propagation_constants=None,
     ) -> "NetworkData":
         """Shift port reference planes with explicit complex propagation constants.
 
@@ -861,8 +937,16 @@ class NetworkData:
             device=self.s.device,
             dtype=self.s.real.dtype,
         )
+        resolved_propagation = propagation_constants
+        if resolved_propagation is None:
+            resolved_propagation = self.metadata.get("propagation_constants")
+            if resolved_propagation is None:
+                raise ValueError(
+                    "propagation_constants must be provided when NetworkData metadata "
+                    "does not contain modal propagation constants."
+                )
         propagation = _normalize_propagation_constants(
-            propagation_constants,
+            resolved_propagation,
             frequency_count=self.s.shape[0],
             port_count=self.s.shape[1],
             device=self.s.device,

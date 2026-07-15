@@ -439,6 +439,288 @@ def _resolve_terminal_port(port: TerminalPort, structures, domain_bounds) -> Ter
     )
 
 
+_WAVE_MODE_FAMILIES = {"tem", "te", "tm", "hybrid"}
+_WAVE_IMPEDANCE_FORMULAS = {
+    "voltage_current": "V/I",
+    "te_wave": "omega*mu/beta",
+    "tm_wave": "beta/(omega*epsilon)",
+    "power_voltage": "abs(V)**2/(2*P)",
+    "power_current": "2*P/abs(I)**2",
+}
+
+
+def _normalize_wave_voltage_path(value):
+    if value is None:
+        return None
+    if len(value) != 2:
+        raise ValueError(
+            "WaveModeSpec voltage_path must contain (negative_point, positive_point)."
+        )
+    negative = _require_length3("voltage_path negative point", value[0])
+    positive = _require_length3("voltage_path positive point", value[1])
+    if any(not math.isfinite(component) for point in (negative, positive) for component in point):
+        raise ValueError("WaveModeSpec voltage_path points must be finite.")
+    varying_axes = [
+        axis
+        for axis, (negative_value, positive_value) in enumerate(zip(negative, positive))
+        if not math.isclose(negative_value, positive_value, rel_tol=0.0, abs_tol=1.0e-12)
+    ]
+    if len(varying_axes) != 1:
+        raise ValueError(
+            "WaveModeSpec voltage_path must be a nonzero axis-aligned negative-to-positive path."
+        )
+    return negative, positive
+
+
+def _normalize_wave_polarization(value):
+    if value is None:
+        return "auto"
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token not in {"auto", "ex", "ey", "ez", "x", "y", "z"}:
+            raise ValueError(
+                "WaveModeSpec polarization must be 'auto', Ex/Ey/Ez, x/y/z, "
+                "or an axis-aligned vector."
+            )
+        return token
+    vector = polarization_vector(value)
+    active = [component for component in vector if abs(float(component)) > 1.0e-9]
+    if len(active) != 1:
+        raise ValueError("WaveModeSpec polarization vector must be axis-aligned.")
+    return vector
+
+
+@dataclass(frozen=True)
+class WaveModeSpec:
+    """Select one RF waveguide mode and freeze its impedance definition.
+
+    TEM and hybrid voltage/current definitions use peak phasors. The voltage
+    path is ordered ``(negative_point, positive_point)``. Its current contour
+    is the right-hand circulation around a planar, unrotated ``Box``.
+    """
+
+    family: str
+    mode_index: int
+    name: str
+    impedance_definition: str
+    impedance_formula: str
+    polarization: str | tuple[float, float, float]
+    voltage_path: tuple[
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ] | None = None
+    current_contour: Box | None = None
+
+    def __init__(
+        self,
+        family,
+        mode_index=0,
+        *,
+        name=None,
+        polarization="auto",
+        impedance_definition=None,
+        voltage_path=None,
+        current_contour=None,
+    ):
+        resolved_family = str(family).strip().lower()
+        if resolved_family not in _WAVE_MODE_FAMILIES:
+            raise ValueError("WaveModeSpec family must be 'tem', 'te', 'tm', or 'hybrid'.")
+        resolved_index = int(mode_index)
+        if resolved_index < 0:
+            raise ValueError("WaveModeSpec mode_index must be >= 0.")
+        resolved_name = (
+            f"{resolved_family.upper()}{resolved_index}"
+            if name is None
+            else str(name).strip()
+        )
+        if not resolved_name:
+            raise ValueError("WaveModeSpec name must not be empty.")
+        if "::" in resolved_name:
+            raise ValueError("WaveModeSpec name must not contain the reserved '::' separator.")
+
+        resolved_voltage_path = _normalize_wave_voltage_path(voltage_path)
+        resolved_polarization = _normalize_wave_polarization(polarization)
+        if current_contour is not None and not isinstance(current_contour, Box):
+            raise TypeError("WaveModeSpec current_contour must be a witwin.core.Box or None.")
+
+        default_definition = {
+            "tem": "voltage_current",
+            "te": "te_wave",
+            "tm": "tm_wave",
+        }.get(resolved_family)
+        resolved_definition = (
+            default_definition
+            if impedance_definition is None
+            else str(impedance_definition).strip().lower()
+        )
+        if resolved_family == "tem":
+            if resolved_definition != "voltage_current":
+                raise ValueError(
+                    "WaveModeSpec TEM impedance_definition must be 'voltage_current'."
+                )
+            if resolved_voltage_path is None or current_contour is None:
+                raise ValueError(
+                    "WaveModeSpec TEM requires both voltage_path and current_contour."
+                )
+        elif resolved_family == "te":
+            if resolved_definition != "te_wave":
+                raise ValueError("WaveModeSpec TE impedance_definition must be 'te_wave'.")
+            if resolved_voltage_path is not None or current_contour is not None:
+                raise ValueError("WaveModeSpec TE does not accept TEM V/I geometry.")
+        elif resolved_family == "tm":
+            if resolved_definition != "tm_wave":
+                raise ValueError("WaveModeSpec TM impedance_definition must be 'tm_wave'.")
+            if resolved_voltage_path is not None or current_contour is not None:
+                raise ValueError("WaveModeSpec TM does not accept TEM V/I geometry.")
+        else:
+            supported = {"voltage_current", "power_voltage", "power_current"}
+            if resolved_definition not in supported:
+                raise ValueError(
+                    "WaveModeSpec hybrid impedance_definition must be explicitly set to "
+                    "'voltage_current', 'power_voltage', or 'power_current'."
+                )
+            if resolved_definition in {"voltage_current", "power_voltage"} and resolved_voltage_path is None:
+                raise ValueError(
+                    f"WaveModeSpec hybrid {resolved_definition!r} requires voltage_path."
+                )
+            if resolved_definition in {"voltage_current", "power_current"} and current_contour is None:
+                raise ValueError(
+                    f"WaveModeSpec hybrid {resolved_definition!r} requires current_contour."
+                )
+
+        object.__setattr__(self, "family", resolved_family)
+        object.__setattr__(self, "mode_index", resolved_index)
+        object.__setattr__(self, "name", resolved_name)
+        object.__setattr__(self, "impedance_definition", resolved_definition)
+        object.__setattr__(
+            self,
+            "impedance_formula",
+            _WAVE_IMPEDANCE_FORMULAS[resolved_definition],
+        )
+        object.__setattr__(self, "polarization", resolved_polarization)
+        object.__setattr__(self, "voltage_path", resolved_voltage_path)
+        object.__setattr__(self, "current_contour", current_contour)
+
+
+@dataclass(frozen=True)
+class WavePort:
+    """Declare an axis-aligned RF modal aperture without invoking a solver."""
+
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    direction: str
+    reference_plane: float
+    modes: tuple[WaveModeSpec, ...]
+    normal_axis: str
+    direction_sign: int
+    kind: str = "wave_port"
+    phasor_convention: str = "peak"
+    power_convention: str = "0.5*Re(V*conj(I))"
+
+    def __init__(self, name, position, size, direction, reference_plane, modes):
+        resolved_name = str(name).strip()
+        if not resolved_name:
+            raise ValueError("WavePort name must not be empty.")
+        if "::" in resolved_name:
+            raise ValueError("WavePort name must not contain the reserved '::' separator.")
+        resolved_position = _require_length3("position", position)
+        resolved_size = _require_length3("size", size)
+        if any(not math.isfinite(value) for value in (*resolved_position, *resolved_size)):
+            raise ValueError(f"WavePort {resolved_name!r} position and size must be finite.")
+        if any(value < 0.0 for value in resolved_size):
+            raise ValueError(f"WavePort {resolved_name!r} size components must be >= 0.")
+        zero_indices = [
+            index
+            for index, value in enumerate(resolved_size)
+            if math.isclose(value, 0.0, rel_tol=0.0, abs_tol=1.0e-12)
+        ]
+        if len(zero_indices) != 1:
+            raise ValueError(
+                f"WavePort {resolved_name!r} size must contain exactly one zero component."
+            )
+        normal_index = zero_indices[0]
+        normalized_size = list(resolved_size)
+        normalized_size[normal_index] = 0.0
+        resolved_size = tuple(normalized_size)
+        if any(
+            value <= 0.0
+            for index, value in enumerate(resolved_size)
+            if index != normal_index
+        ):
+            raise ValueError(
+                f"WavePort {resolved_name!r} tangential size components must be positive."
+            )
+        try:
+            resolved_direction = _normalize_mode_direction(direction)
+        except ValueError as error:
+            raise ValueError(f"WavePort {resolved_name!r} direction must be '+' or '-'.") from error
+        try:
+            resolved_reference_plane = float(reference_plane)
+        except (TypeError, ValueError) as error:
+            raise type(error)(
+                f"WavePort {resolved_name!r} reference_plane must be a real scalar."
+            ) from error
+        if not math.isfinite(resolved_reference_plane):
+            raise ValueError(f"WavePort {resolved_name!r} reference_plane must be finite.")
+        normal_position = resolved_position[normal_index]
+        tolerance = 1.0e-12 * max(1.0, abs(normal_position), abs(resolved_reference_plane))
+        if not math.isclose(
+            normal_position,
+            resolved_reference_plane,
+            rel_tol=0.0,
+            abs_tol=tolerance,
+        ):
+            raise ValueError(
+                f"WavePort {resolved_name!r} reference_plane must equal the aperture plane."
+            )
+
+        try:
+            resolved_modes = tuple(modes)
+        except TypeError as error:
+            raise TypeError(
+                f"WavePort {resolved_name!r} modes must be an iterable of WaveModeSpec instances."
+            ) from error
+        if not resolved_modes:
+            raise ValueError(f"WavePort {resolved_name!r} modes must not be empty.")
+        if any(not isinstance(mode, WaveModeSpec) for mode in resolved_modes):
+            raise TypeError(
+                f"WavePort {resolved_name!r} modes must contain only WaveModeSpec instances."
+            )
+        mode_names = tuple(mode.name for mode in resolved_modes)
+        if len(set(mode_names)) != len(mode_names):
+            raise ValueError(f"WavePort {resolved_name!r} mode names must be unique.")
+
+        normal_axis = "xyz"[normal_index]
+        for mode in resolved_modes:
+            try:
+                _resolve_mode_source_polarization_axis(
+                    normal_axis,
+                    resolved_size,
+                    mode.polarization,
+                )
+            except ValueError as error:
+                raise ValueError(
+                    f"WavePort {resolved_name!r} mode {mode.name!r} polarization: {error}"
+                ) from error
+        object.__setattr__(self, "name", resolved_name)
+        object.__setattr__(self, "position", resolved_position)
+        object.__setattr__(self, "size", resolved_size)
+        object.__setattr__(self, "direction", resolved_direction)
+        object.__setattr__(self, "reference_plane", resolved_reference_plane)
+        object.__setattr__(self, "modes", resolved_modes)
+        object.__setattr__(self, "normal_axis", normal_axis)
+        object.__setattr__(self, "direction_sign", 1 if resolved_direction == "+" else -1)
+        object.__setattr__(self, "kind", "wave_port")
+        object.__setattr__(self, "phasor_convention", "peak")
+        object.__setattr__(self, "power_convention", "0.5*Re(V*conj(I))")
+
+    def mode_name(self, mode: WaveModeSpec) -> str:
+        if mode not in self.modes:
+            raise ValueError(f"WaveModeSpec {mode.name!r} is not declared by WavePort {self.name!r}.")
+        return f"{self.name}::{mode.name}"
+
+
 @dataclass(frozen=True)
 class ModePort:
     """Couple a source and monitor using a polarization-family mode index."""

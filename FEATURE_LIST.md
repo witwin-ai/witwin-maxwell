@@ -18,7 +18,7 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 
 - Declarative simulation workflow: `Scene -> Simulation -> Result`
 - PyTorch-native scene-module workflow: `SceneModule -> Simulation -> Result`, with automatic `to_scene()` normalization inside `Simulation`
-- Top-level package exports for Maxwell-specific public objects under `maxwell`, including the full-featured public `Material` and the experimental RF contracts `AxisPath`, `LumpedPort`, `TerminalRef`, `TerminalPort`, `Resistor`, `Capacitor`, `Inductor`, `SeriesRLC`, `ParallelRLC`, `PortExcitation`, `PortData`, and `NetworkData`
+- Top-level package exports for Maxwell-specific public objects under `maxwell`, including the full-featured public `Material` and the experimental RF contracts `AxisPath`, `LumpedPort`, `TerminalRef`, `TerminalPort`, `WaveModeSpec`, `WavePort`, `Resistor`, `Capacitor`, `Inductor`, `SeriesRLC`, `ParallelRLC`, `PortExcitation`, `PortData`, and `NetworkData`
 - Public simulation entrypoints: `Simulation.fdfd(...)`, `Simulation.fdtd(...)`, and `run(...)`
 - Typed simulation configuration records and enums exposed as `FDFDConfig`, `FDTDConfig`, `TimeConfig`, `SpectralSampler`, `SimulationMethod`, `SpectralWindowKind`, and `AbsorberKind`
 - Public frequency vocabulary uses `frequency=` for scalar selection and `frequencies=` for one-or-many target frequencies; `freqs` is not exposed in public Maxwell APIs
@@ -204,6 +204,7 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Experimental `ModePort` scene object that declaratively couples an optional `ModeSource` excitation with a first-class `ModeMonitor`, so modal ports still flow through the same `Scene -> Simulation -> Result` public architecture
 - `ModePort(source_time=...)` materializes a named `ModeSource` plus a named modal monitor; `ModePort(source_time=None)` acts as a monitor-only modal port
 - `ModePort(monitor_offset=...)` can separate the launch plane from the sampled monitor plane along the port normal without introducing a second public solver entrypoint
+- Experimental RF `WavePort` / `WaveModeSpec` declarations freeze an axis-aligned aperture, explicit propagation direction and coincident reference plane, deterministic per-port mode identities, a tangential polarization seed, and peak-phasor impedance definitions. `Scene.compile_waveports()` snaps the aperture and optional TEM/hybrid voltage path and current contour to one Yee grid. `Simulation.fdtd(...)` supports both a named single-mode `PortExcitation(..., mode_name=...)` and independent-column `PortSweep`; the latter returns a complete multimode `NetworkData`, while both return modal `PortData` with explicit `[M, F]` propagation constants, characteristic impedances, and tracking confidence. Cross-frequency assignment combines propagation constants and modal overlap, including degenerate-subspace alignment. Uniform conductor-backed TEM apertures use a device-resident electrostatic mode solve and one-watt power-consistent V/I normalization; TE uses `Z=omega*mu/beta`, TM uses `Z=beta/(omega*epsilon)`, and hybrid modes explicitly select voltage/current or power normalization. WavePort mode solves and FDTD columns execute sequentially on one CUDA device
 
 ## FDFD Solver Workflow
 

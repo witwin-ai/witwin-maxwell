@@ -8,7 +8,7 @@ import torch
 
 from .lumped import PortExcitation, PortSweep
 from .monitors import MediumMonitor, PermittivityMonitor
-from .ports import LumpedPort, TerminalPort
+from .ports import LumpedPort, TerminalPort, WavePort
 from .result import Result
 from .scene import Scene, SceneModule, prepare_scene
 
@@ -378,19 +378,25 @@ class Simulation:
         self._refresh_scene()
         self._validate_trainable_rf_support()
         self._validate_port_excitations()
+        waveport_excitation = self._waveport_excitation()
+        if waveport_excitation is not None:
+            prepared_scene = prepare_scene(self.scene)
+            _require_cuda_scene(prepared_scene, method="fdtd")
+            return PreparedWavePortExcitation(
+                self,
+                prepared_scene,
+                self._resolve_waveport_excitation_manifest(
+                    prepared_scene,
+                    waveport_excitation,
+                ),
+            )
         if self.port_sweep is not None:
-            from .network_sweep import resolve_network_run_manifest
-
             prepared_scene = prepare_scene(self.scene)
             _require_cuda_scene(prepared_scene, method="fdtd")
             return PreparedNetworkSweep(
                 self,
                 prepared_scene,
-                resolve_network_run_manifest(
-                    prepared_scene,
-                    self.port_sweep,
-                    self.frequencies,
-                ),
+                self._resolve_port_sweep_manifest(prepared_scene),
             )
         if self.method == SimulationMethod.FDFD:
             solver = self._build_fdfd_solver()
@@ -416,6 +422,13 @@ class Simulation:
 
     def _validate_port_excitations(self) -> None:
         if self.port_sweep is not None:
+            if any(isinstance(port, WavePort) for port in self.scene.ports):
+                if self.port_sweep.amplitude.requires_grad:
+                    raise NotImplementedError(
+                        "PortSweep amplitude is trainable, but WavePort sweeps do not "
+                        "support RF-parameter gradients."
+                    )
+                return
             from .network_sweep import resolve_network_run_manifest
 
             resolve_network_run_manifest(self.scene, self.port_sweep, self.frequencies)
@@ -429,17 +442,45 @@ class Simulation:
                 raise ValueError(
                     f"PortExcitation references missing port {excitation.port_name!r}."
                 )
-            if not isinstance(port, (LumpedPort, TerminalPort)):
+            if not isinstance(port, (LumpedPort, TerminalPort, WavePort)):
                 raise TypeError(
                     f"PortExcitation {excitation.port_name!r} requires an RF port, "
                     f"got {type(port).__name__}."
                 )
+            if isinstance(port, WavePort):
+                if excitation.source_impedance != "matched":
+                    raise ValueError(
+                        "WavePort PortExcitation requires source_impedance='matched'."
+                    )
+                if excitation.source_time is not None:
+                    raise ValueError(
+                        "WavePort PortExcitation uses calibrated per-frequency CW runs; "
+                        "source_time must be None."
+                    )
+                if excitation.amplitude.requires_grad:
+                    raise NotImplementedError(
+                        "WavePort PortExcitation does not yet support trainable amplitude."
+                    )
+                mode_names = tuple(mode.name for mode in port.modes)
+                qualified_names = tuple(port.mode_name(mode) for mode in port.modes)
+                if (
+                    excitation.mode_name is not None
+                    and excitation.mode_name not in mode_names
+                    and excitation.mode_name not in qualified_names
+                ):
+                    raise ValueError(
+                        f"WavePort {port.name!r} has no mode {excitation.mode_name!r}; "
+                        f"choices are {mode_names}."
+                    )
+            elif excitation.mode_name is not None:
+                raise ValueError("mode_name is supported by WavePort excitations only.")
 
     def _validate_trainable_rf_support(self) -> None:
         if self.method != SimulationMethod.FDTD or not self.has_trainable_parameters:
             return
         has_rf_ports = any(
-            isinstance(port, (LumpedPort, TerminalPort)) for port in self.scene.ports
+            isinstance(port, (LumpedPort, TerminalPort, WavePort))
+            for port in self.scene.ports
         )
         if has_rf_ports or self.scene.lumped_elements or self.excitations or self.port_sweep:
             raise NotImplementedError(
@@ -532,20 +573,61 @@ class Simulation:
             return self._run_fdtd_with_gradient_bridge()
         if self.port_sweep is not None:
             return self._run_fdtd_network_sweep()
+        waveport_excitation = self._waveport_excitation()
+        if waveport_excitation is not None:
+            return self._run_fdtd_waveport_excitation(waveport_excitation)
         solver = self._build_fdtd_solver(initialize=True)
         return self._run_fdtd_from_solver(solver)
+
+    def _waveport_excitation(self):
+        if len(self.excitations) != 1:
+            return None
+        excitation = self.excitations[0]
+        port = next(
+            (port for port in self.scene.ports if port.name == excitation.port_name),
+            None,
+        )
+        return excitation if isinstance(port, WavePort) else None
+
+    def _resolve_waveport_excitation_manifest(self, scene, excitation):
+        from .waveport_sweep import resolve_waveport_run_manifest
+
+        return resolve_waveport_run_manifest(
+            scene,
+            PortSweep(ports=(excitation.port_name,), amplitude=excitation.amplitude),
+            self.frequencies,
+        )
+
+    def _run_fdtd_waveport_excitation(self, excitation, *, scene=None, manifest=None):
+        from .waveport_sweep import run_waveport_excitation
+
+        run_scene = self.scene if scene is None else scene
+        if manifest is None:
+            manifest = self._resolve_waveport_excitation_manifest(
+                run_scene,
+                excitation,
+            )
+        return run_waveport_excitation(
+            self,
+            run_scene,
+            excitation,
+            manifest,
+        )
 
     def _run_fdtd_network_sweep(self, *, scene=None, manifest=None) -> Result:
         from .network_sweep import (
             aggregate_network_columns,
             build_network_column_run,
-            resolve_network_run_manifest,
         )
 
         sweep = self.port_sweep
         run_scene = self.scene if scene is None else scene
         if manifest is None:
-            manifest = resolve_network_run_manifest(run_scene, sweep, self.frequencies)
+            manifest = self._resolve_port_sweep_manifest(run_scene)
+        from .waveport_sweep import WavePortRunManifest, run_waveport_sweep
+
+        if isinstance(manifest, WavePortRunManifest):
+            return run_waveport_sweep(self, run_scene, manifest)
         columns = []
         column_stats = []
         last_solver = None
@@ -587,6 +669,23 @@ class Simulation:
                 "columns": tuple(column_stats),
             },
             raw_output={"network_run_manifest": manifest.metadata()},
+        )
+
+    def _resolve_port_sweep_manifest(self, scene):
+        if any(isinstance(port, WavePort) for port in scene.ports):
+            from .waveport_sweep import resolve_waveport_run_manifest
+
+            return resolve_waveport_run_manifest(
+                scene,
+                self.port_sweep,
+                self.frequencies,
+            )
+        from .network_sweep import resolve_network_run_manifest
+
+        return resolve_network_run_manifest(
+            scene,
+            self.port_sweep,
+            self.frequencies,
         )
 
     def _build_fdtd_solver(self, *, initialize: bool):
@@ -838,6 +937,21 @@ class PreparedNetworkSweep:
 
     def run(self) -> Result:
         return self.simulation._run_fdtd_network_sweep(
+            scene=self.scene,
+            manifest=self.manifest,
+        )
+
+
+class PreparedWavePortExcitation:
+    def __init__(self, simulation: Simulation, scene, manifest):
+        self.simulation = simulation
+        self.scene = scene
+        self.manifest = manifest
+
+    def run(self) -> Result:
+        excitation = self.simulation._waveport_excitation()
+        return self.simulation._run_fdtd_waveport_excitation(
+            excitation,
             scene=self.scene,
             manifest=self.manifest,
         )

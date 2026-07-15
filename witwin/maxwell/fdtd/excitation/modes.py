@@ -27,6 +27,8 @@ _IMPLICIT_EIGEN_CG_TOL = 1.0e-8
 _VECTOR_EIGEN_REQUEST_PADDING = 4
 _VECTOR_EIGS_MAX_ITER = 600
 _VECTOR_EIGS_TOL = 1.0e-8
+_PEC_OCCUPANCY_THRESHOLD = 0.5
+_PEC_VECTOR_MATRIX_LIMIT = 4096
 _RIGHT_HANDED_TANGENTIAL_AXES = {
     "x": ("y", "z"),
     "y": ("z", "x"),
@@ -210,6 +212,27 @@ def _mode_source_relative_material_slices(
     return eps_by_axis, mu_by_axis
 
 
+def _mode_source_pec_slice(
+    solver,
+    *,
+    normal_axis: str,
+    plane_index: int,
+    tangential_bounds,
+) -> torch.Tensor | None:
+    compiled_material_model = getattr(solver, "_compiled_material_model", None)
+    if compiled_material_model is None:
+        return None
+    occupancy = compiled_material_model.get("pec_occupancy")
+    if occupancy is None:
+        return None
+    return _mode_slice(
+        occupancy,
+        axis=normal_axis,
+        plane_index=plane_index,
+        tangential_bounds=tangential_bounds,
+    )
+
+
 def _max_component_imag(components: dict) -> float:
     """Largest imaginary magnitude across the per-axis diagonal aperture slices."""
     worst = 0.0
@@ -303,6 +326,119 @@ def _build_vector_operator_sparse(eps_planes, mu_planes, *, k0: float, du: float
         format="csr",
     )
     return operator, interior_u, interior_v
+
+
+def _pec_first_difference(count: int, spacing: float, *, device: torch.device) -> torch.Tensor:
+    if count <= 0:
+        raise ValueError("count must be > 0 for PEC mode first-difference assembly.")
+    result = torch.zeros((count, count), device=device, dtype=torch.float64)
+    if count > 1:
+        indices = torch.arange(count - 1, device=device)
+        coefficient = 0.5 / float(spacing)
+        result[indices, indices + 1] = coefficient
+        result[indices + 1, indices] = -coefficient
+    return result
+
+
+def _pec_vector_operator_torch(
+    eps_planes: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    mu_planes: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    pec_occupancy: torch.Tensor,
+    *,
+    k0: float,
+    du: float,
+    dv: float,
+) -> tuple[torch.Tensor, torch.Tensor, int, int, int]:
+    """Build a device-resident transverse operator with PEC nodes eliminated."""
+
+    eps_uu, eps_vv, eps_ww = eps_planes
+    mu_uu, mu_vv, mu_ww = mu_planes
+    device = eps_uu.device
+    tensors = (*eps_planes, *mu_planes, pec_occupancy)
+    if any(tensor.device != device for tensor in tensors):
+        raise ValueError("PEC mode material and occupancy tensors must share one device.")
+    if pec_occupancy.requires_grad:
+        raise NotImplementedError(
+            "Differentiable PEC geometry requires a mode-shape eigen-adjoint; "
+            "the PEC-aware forward mode solve uses a hard conductor boundary."
+        )
+
+    nu, nv = (int(value) for value in eps_uu.shape)
+    if any(tuple(tensor.shape) != (nu, nv) for tensor in tensors):
+        raise ValueError("PEC mode material and occupancy slices must have identical shapes.")
+    interior_u = nu - 2
+    interior_v = nv - 2
+    unknowns = interior_u * interior_v
+    if unknowns <= 0:
+        raise ValueError(
+            "ModeSource aperture must contain at least one interior node after applying zero boundary conditions."
+        )
+
+    conductor = pec_occupancy >= _PEC_OCCUPANCY_THRESHOLD
+    conductor_count = int(torch.count_nonzero(conductor[1:-1, 1:-1]).item())
+    if conductor_count == 0:
+        peak = float(torch.max(pec_occupancy).item())
+        raise ValueError(
+            "PEC structure is under-resolved on the mode plane: its maximum node "
+            f"occupancy is {peak:.3f}, below the {_PEC_OCCUPANCY_THRESHOLD:g} boundary threshold."
+        )
+    active = (~conductor[1:-1, 1:-1]).reshape(-1)
+    active_count = int(torch.count_nonzero(active).item())
+    if active_count < 2:
+        raise ValueError("PEC conductors leave fewer than two active mode-plane nodes.")
+
+    d1_u = _pec_first_difference(interior_u, du, device=device)
+    d1_v = _pec_first_difference(interior_v, dv, device=device)
+    identity_u = torch.eye(interior_u, device=device, dtype=torch.float64)
+    identity_v = torch.eye(interior_v, device=device, dtype=torch.float64)
+    derivative_u = torch.kron(d1_u, identity_v)
+    derivative_v = torch.kron(identity_u, d1_v)
+    active_diagonal = torch.diag(active.to(dtype=torch.float64))
+    derivative_u = active_diagonal @ derivative_u @ active_diagonal
+    derivative_v = active_diagonal @ derivative_v @ active_diagonal
+
+    def interior_diag(values: torch.Tensor) -> torch.Tensor:
+        real = torch.real(values) if values.is_complex() else values
+        return torch.diag(real[1:-1, 1:-1].reshape(-1).to(device=device, dtype=torch.float64))
+
+    eps_w_inv = interior_diag(1.0 / eps_ww)
+    mu_w_inv = interior_diag(1.0 / mu_ww)
+    eps_u_diag = interior_diag(eps_uu)
+    eps_v_diag = interior_diag(eps_vv)
+    mu_u_diag = interior_diag(mu_uu)
+    mu_v_diag = interior_diag(mu_vv)
+    k0_sq = float(k0) * float(k0)
+
+    a_hu_hu = derivative_v @ eps_w_inv @ derivative_v + k0_sq * mu_u_diag
+    a_hu_hv = -derivative_v @ eps_w_inv @ derivative_u
+    a_hv_hu = -derivative_u @ eps_w_inv @ derivative_v
+    a_hv_hv = derivative_u @ eps_w_inv @ derivative_u + k0_sq * mu_v_diag
+    a_eu_eu = -derivative_v @ mu_w_inv @ derivative_v - k0_sq * eps_u_diag
+    a_eu_ev = derivative_v @ mu_w_inv @ derivative_u
+    a_ev_eu = derivative_u @ mu_w_inv @ derivative_v
+    a_ev_ev = -derivative_u @ mu_w_inv @ derivative_u - k0_sq * eps_v_diag
+
+    zero = torch.zeros_like(a_hu_hu)
+    electric_scale = float(k0) / _ETA0
+    magnetic_scale = float(k0) * _ETA0
+    operator = torch.cat(
+        (
+            torch.cat((zero, zero, a_ev_eu / magnetic_scale, a_ev_ev / magnetic_scale), dim=1),
+            torch.cat((zero, zero, -a_eu_eu / magnetic_scale, -a_eu_ev / magnetic_scale), dim=1),
+            torch.cat((a_hv_hu / electric_scale, a_hv_hv / electric_scale, zero, zero), dim=1),
+            torch.cat((-a_hu_hu / electric_scale, -a_hu_hv / electric_scale, zero, zero), dim=1),
+        ),
+        dim=0,
+    )
+    component_active = active.repeat(4)
+    reduced = operator[component_active][:, component_active].contiguous()
+    if int(reduced.shape[0]) > _PEC_VECTOR_MATRIX_LIMIT:
+        raise RuntimeError(
+            "PEC-aware mode plane is too large for the device-resident dense eigensolve: "
+            f"matrix size {int(reduced.shape[0])} exceeds {_PEC_VECTOR_MATRIX_LIMIT}. "
+            "Use a coarser locally uniform mode-plane grid."
+        )
+    return reduced, active, interior_u, interior_v, conductor_count
 
 
 def _vector_mode_request_count(matrix_size: int, *, mode_index: int) -> int:
@@ -619,6 +755,83 @@ def _select_and_normalize_vector_mode_numpy(
         )
     _, selected_beta, selected_vector, selected_profiles, _, _ = selected_candidates[int(mode_index)]
     return selected_beta, selected_vector, selected_profiles
+
+
+def _solve_pec_vector_mode_eigenpair_torch(
+    operator: torch.Tensor,
+    active: torch.Tensor,
+    *,
+    interior_u: int,
+    interior_v: int,
+    mode_index: int,
+    field_names,
+    preferred_field_name: str,
+):
+    """Select one forward PEC mode without leaving the material tensor device."""
+
+    eigenvalues, eigenvectors = torch.linalg.eig(operator)
+    order = torch.argsort(torch.real(eigenvalues), descending=True)
+    full_size = 4 * int(active.numel())
+    component_active = active.repeat(4)
+    candidates = []
+    for index_tensor in order:
+        index = int(index_tensor.item())
+        beta = eigenvalues[index]
+        beta_real = float(torch.real(beta).item())
+        beta_imag = float(torch.abs(torch.imag(beta)).item())
+        if beta_real <= 0.0 or beta_imag > 1.0e-7 * max(abs(beta_real), 1.0):
+            continue
+
+        vector = torch.zeros(
+            (full_size,),
+            device=operator.device,
+            dtype=eigenvectors.dtype,
+        )
+        vector[component_active] = eigenvectors[:, index]
+        hu, hv, eu, ev = _split_vector_mode_components(
+            vector,
+            interior_u=interior_u,
+            interior_v=interior_v,
+            backend="torch",
+        )
+        profiles = {
+            field_names[0]: eu,
+            field_names[1]: ev,
+            field_names[2]: hu,
+            field_names[3]: hv,
+        }
+        preferred = profiles[preferred_field_name]
+        peak = torch.max(torch.abs(preferred))
+        if float(peak.item()) <= 0.0:
+            continue
+        peak_index = int(torch.argmax(torch.abs(preferred)).item())
+        peak_value = preferred.reshape(-1)[peak_index]
+        phase = torch.conj(peak_value) / torch.abs(peak_value)
+        profiles = {name: profile * phase / peak for name, profile in profiles.items()}
+
+        power_sign = torch.sum(torch.real(
+            profiles[field_names[0]] * torch.conj(profiles[field_names[3]])
+            - profiles[field_names[1]] * torch.conj(profiles[field_names[2]])
+        ))
+        if float(power_sign.item()) <= 0.0:
+            continue
+        electric_energy = sum(
+            torch.sum(torch.abs(profile).square())
+            for name, profile in profiles.items()
+            if name.startswith("E")
+        )
+        preferred_energy = torch.sum(torch.abs(profiles[preferred_field_name]).square())
+        polarization_fraction = preferred_energy / electric_energy
+        if float(polarization_fraction.item()) < 0.5:
+            continue
+        candidates.append((beta, vector, profiles))
+
+    if len(candidates) <= int(mode_index):
+        raise ValueError(
+            f"ModeSource requested mode_index={mode_index}, but only {len(candidates)} "
+            "forward PEC modes in the requested polarization family were found."
+        )
+    return candidates[int(mode_index)]
 
 
 def _full_field_component_profiles(component_profiles, shape, *, tangential_field_names):
@@ -1244,6 +1457,109 @@ def _real_plane_numpy(component: torch.Tensor) -> np.ndarray:
     return real.detach().cpu().numpy().astype(np.float64, copy=False)
 
 
+def _boundary_connected_conductor(conductor: torch.Tensor) -> torch.Tensor:
+    connected = torch.zeros_like(conductor)
+    connected[0, :] = conductor[0, :]
+    connected[-1, :] = conductor[-1, :]
+    connected[:, 0] |= conductor[:, 0]
+    connected[:, -1] |= conductor[:, -1]
+    for _ in range(int(conductor.shape[0] + conductor.shape[1])):
+        adjacent = torch.zeros_like(conductor)
+        adjacent[1:, :] |= connected[:-1, :]
+        adjacent[:-1, :] |= connected[1:, :]
+        adjacent[:, 1:] |= connected[:, :-1]
+        adjacent[:, :-1] |= connected[:, 1:]
+        connected |= adjacent & conductor
+    return connected
+
+
+def _solve_pec_tem_mode_torch(
+    eps_planes: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    mu_planes: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    pec_occupancy: torch.Tensor,
+    *,
+    k0: float,
+    du: float,
+    dv: float,
+    mode_index: int,
+    field_names,
+):
+    if int(mode_index) != 0:
+        raise ValueError("A TEM WavePort currently supports one common conductor mode.")
+    conductor = pec_occupancy >= _PEC_OCCUPANCY_THRESHOLD
+    grounded = _boundary_connected_conductor(conductor)
+    signal = conductor & ~grounded
+    if not bool(torch.any(signal)):
+        raise ValueError(
+            "A TEM WavePort requires at least one isolated signal conductor and a "
+            "grounded aperture boundary."
+        )
+
+    dielectric = ~conductor
+    eps_u, eps_v, _ = eps_planes
+    mu_u, mu_v, _ = mu_planes
+    eps_relative = 0.5 * (torch.real(eps_u) + torch.real(eps_v))
+    mu_relative = 0.5 * (torch.real(mu_u) + torch.real(mu_v))
+    eps_values = eps_relative[dielectric]
+    mu_values = mu_relative[dielectric]
+    if not torch.allclose(
+        eps_values,
+        eps_values[0].expand_as(eps_values),
+        rtol=1.0e-4,
+        atol=1.0e-6,
+    ) or not torch.allclose(
+        mu_values,
+        mu_values[0].expand_as(mu_values),
+        rtol=1.0e-4,
+        atol=1.0e-6,
+    ):
+        raise NotImplementedError(
+            "TEM WavePort electrostatic normalization requires a uniformly filled "
+            "cross-section; use a hybrid mode for inhomogeneous transmission lines."
+        )
+
+    potential = signal.to(dtype=torch.float64)
+    free = dielectric.clone()
+    free[0, :] = False
+    free[-1, :] = False
+    free[:, 0] = False
+    free[:, -1] = False
+    weight_u = 1.0 / (float(du) * float(du))
+    weight_v = 1.0 / (float(dv) * float(dv))
+    denominator = 2.0 * (weight_u + weight_v)
+    for _ in range(2048):
+        update = potential.clone()
+        update[1:-1, 1:-1] = (
+            weight_u * (potential[2:, 1:-1] + potential[:-2, 1:-1])
+            + weight_v * (potential[1:-1, 2:] + potential[1:-1, :-2])
+        ) / denominator
+        potential = torch.where(free, update, potential)
+
+    electric_u = torch.zeros_like(potential)
+    electric_v = torch.zeros_like(potential)
+    electric_u[1:-1, :] = -(potential[2:, :] - potential[:-2, :]) / (2.0 * float(du))
+    electric_u[0, :] = -(potential[1, :] - potential[0, :]) / float(du)
+    electric_u[-1, :] = -(potential[-1, :] - potential[-2, :]) / float(du)
+    electric_v[:, 1:-1] = -(potential[:, 2:] - potential[:, :-2]) / (2.0 * float(dv))
+    electric_v[:, 0] = -(potential[:, 1] - potential[:, 0]) / float(dv)
+    electric_v[:, -1] = -(potential[:, -1] - potential[:, -2]) / float(dv)
+
+    impedance = _ETA0 * torch.sqrt(mu_relative / eps_relative)
+    magnetic_u = -electric_v / impedance
+    magnetic_v = electric_u / impedance
+    beta = torch.as_tensor(
+        float(k0),
+        device=potential.device,
+        dtype=torch.float64,
+    ) * torch.sqrt(eps_values[0] * mu_values[0])
+    return beta, {
+        field_names[0]: electric_u,
+        field_names[1]: electric_v,
+        field_names[2]: magnetic_u,
+        field_names[3]: magnetic_v,
+    }, int(torch.count_nonzero(conductor).item())
+
+
 def _assemble_vector_mode_data(
     solver,
     source,
@@ -1256,6 +1572,7 @@ def _assemble_vector_mode_data(
     eps_by_axis: dict,
     mu_by_axis: dict,
     frequency: float,
+    pec_occupancy: torch.Tensor | None = None,
 ):
     axis_u, axis_v = tangential_axes
     field_names = (
@@ -1283,44 +1600,88 @@ def _assemble_vector_mode_data(
     # Order the diagonal components as (in-plane u, in-plane v, plane-normal w) so
     # the vector operator threads eps_ww/mu_ww through the eliminated longitudinal
     # fields and eps_uu/eps_vv (mu_uu/mu_vv) through the transverse self-terms.
-    eps_planes = (
-        _real_plane_numpy(eps_by_axis[axis_u]),
-        _real_plane_numpy(eps_by_axis[axis_v]),
-        _real_plane_numpy(eps_by_axis[normal_axis]),
+    tensor_eps_planes = (
+        eps_by_axis[axis_u],
+        eps_by_axis[axis_v],
+        eps_by_axis[normal_axis],
     )
-    mu_planes = (
-        _real_plane_numpy(mu_by_axis[axis_u]),
-        _real_plane_numpy(mu_by_axis[axis_v]),
-        _real_plane_numpy(mu_by_axis[normal_axis]),
+    tensor_mu_planes = (
+        mu_by_axis[axis_u],
+        mu_by_axis[axis_v],
+        mu_by_axis[normal_axis],
     )
-
-    unknowns = max((int(eps_planes[0].shape[0]) - 2) * (int(eps_planes[0].shape[1]) - 2), 0)
-    if unknowns <= _FULL_VECTOR_DENSE_LIMIT:
-        beta_value, _eigenvector, component_arrays = _solve_vector_mode_eigenpair_dense(
-            eps_planes,
-            mu_planes,
+    pec_node_count = 0
+    has_interior_pec = pec_occupancy is not None and bool(
+        torch.any(pec_occupancy[1:-1, 1:-1] >= _PEC_OCCUPANCY_THRESHOLD)
+    )
+    if has_interior_pec and source.get("wave_family") == "tem":
+        beta_value, component_arrays, pec_node_count = _solve_pec_tem_mode_torch(
+            tensor_eps_planes,
+            tensor_mu_planes,
+            pec_occupancy,
             k0=k0,
             du=du,
             dv=dv,
             mode_index=int(source["mode_index"]),
             field_names=field_names,
+        )
+        solver_kind = "tem_electrostatic_torch"
+    elif has_interior_pec:
+        operator, active, interior_u, interior_v, pec_node_count = _pec_vector_operator_torch(
+            tensor_eps_planes,
+            tensor_mu_planes,
+            pec_occupancy,
+            k0=k0,
+            du=du,
+            dv=dv,
+        )
+        beta_value, _eigenvector, component_arrays = _solve_pec_vector_mode_eigenpair_torch(
+            operator,
+            active,
+            interior_u=interior_u,
+            interior_v=interior_v,
+            mode_index=int(source["mode_index"]),
+            field_names=field_names,
             preferred_field_name=preferred_field_name,
         )
-        solver_kind = "vector_dense"
+        solver_kind = "vector_pec_dense_torch"
     else:
-        beta_value, _eigenvector, component_arrays = _solve_vector_mode_eigenpair_sparse(
-            eps_planes,
-            mu_planes,
-            k0=k0,
-            du=du,
-            dv=dv,
-            mode_index=int(source["mode_index"]),
-            field_names=field_names,
-            preferred_field_name=preferred_field_name,
+        eps_planes = tuple(_real_plane_numpy(component) for component in tensor_eps_planes)
+        mu_planes = tuple(_real_plane_numpy(component) for component in tensor_mu_planes)
+        unknowns = max(
+            (int(eps_planes[0].shape[0]) - 2) * (int(eps_planes[0].shape[1]) - 2),
+            0,
         )
-        solver_kind = "vector_sparse"
+        if unknowns <= _FULL_VECTOR_DENSE_LIMIT:
+            beta_value, _eigenvector, component_arrays = _solve_vector_mode_eigenpair_dense(
+                eps_planes,
+                mu_planes,
+                k0=k0,
+                du=du,
+                dv=dv,
+                mode_index=int(source["mode_index"]),
+                field_names=field_names,
+                preferred_field_name=preferred_field_name,
+            )
+            solver_kind = "vector_dense"
+        else:
+            beta_value, _eigenvector, component_arrays = _solve_vector_mode_eigenpair_sparse(
+                eps_planes,
+                mu_planes,
+                k0=k0,
+                du=du,
+                dv=dv,
+                mode_index=int(source["mode_index"]),
+                field_names=field_names,
+                preferred_field_name=preferred_field_name,
+            )
+            solver_kind = "vector_sparse"
 
-    beta_real = float(np.real(beta_value))
+    beta_real = (
+        float(torch.real(beta_value).item())
+        if isinstance(beta_value, torch.Tensor)
+        else float(np.real(beta_value))
+    )
     effective_index_value = beta_real / max(k0, 1e-30)
     target_device = torch.device(getattr(solver, "device", solver.scene.device))
     target_dtype = solver.Ex.dtype
@@ -1329,12 +1690,32 @@ def _assemble_vector_mode_data(
     # An iterative (ARPACK) eigensolve leaves tolerance-level imaginary noise
     # (~1e-5 relative); a genuinely complex (lossy) mode has imag of order one.
     profile_scale = max(
-        (float(np.max(np.abs(np.asarray(array)))) for array in component_arrays.values()),
+        (
+            float(torch.max(torch.abs(array)).item())
+            if isinstance(array, torch.Tensor)
+            else float(np.max(np.abs(np.asarray(array))))
+            for array in component_arrays.values()
+        ),
         default=0.0,
     )
     imag_bound = 1e-3 * max(profile_scale, 1e-30)
     component_profiles = {}
     for name, array in component_arrays.items():
+        if isinstance(array, torch.Tensor):
+            resolved_array = array
+            if resolved_array.is_complex():
+                imag_max = float(torch.max(torch.abs(torch.imag(resolved_array))).item())
+                if imag_max > imag_bound:
+                    raise RuntimeError(
+                        "Full-vector ModeSource forward solve returned a materially complex field profile."
+                    )
+                resolved_array = torch.real(resolved_array)
+            component_profiles[name] = resolved_array.to(
+                device=target_device,
+                dtype=target_dtype,
+            ).contiguous()
+            continue
+
         resolved_array = np.asarray(array)
         if np.iscomplexobj(resolved_array):
             imag_max = float(np.max(np.abs(np.imag(resolved_array))))
@@ -1390,6 +1771,7 @@ def _assemble_vector_mode_data(
         "beta": float(beta_real),
         "effective_index_tensor": None,
         "beta_tensor": None,
+        "pec_node_count": int(pec_node_count),
         "plane_index": int(plane_index),
         "box_lower": tuple(int(value) for value in lower),
         "box_upper": tuple(int(value) for value in upper),
@@ -1424,9 +1806,35 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
     field_name = _mode_source_field_name(source)
     frequency = float(source_time["frequency"])
 
+    compiled_material_model = getattr(solver, "_compiled_material_model", None)
+    rebuild_from_fields = bool(getattr(solver, "_mode_source_rebuild_from_fields", False))
+    if compiled_material_model is not None and rebuild_from_fields:
+        pec_coord_map = {
+            axis: _mode_source_node_axis_coords(solver.scene, axis)
+            for axis in tangential_axes
+        }
+        pec_bounds, _ = _resolve_tangential_bounds(
+            solver.scene,
+            source,
+            axis_coords_by_axis=pec_coord_map,
+        )
+        pec_occupancy = _mode_source_pec_slice(
+            solver,
+            normal_axis=normal_axis,
+            plane_index=plane_index,
+            tangential_bounds=pec_bounds,
+        )
+        if pec_occupancy is not None and bool(
+            torch.any(pec_occupancy[1:-1, 1:-1] >= _PEC_OCCUPANCY_THRESHOLD)
+        ):
+            raise NotImplementedError(
+                "Differentiable ModeSource rebuilding with an internal PEC conductor "
+                "requires a PEC mode-shape eigen-adjoint."
+            )
+
     if (
-        getattr(solver, "_compiled_material_model", None) is not None
-        and not getattr(solver, "_mode_source_rebuild_from_fields", False)
+        compiled_material_model is not None
+        and not rebuild_from_fields
     ):
         node_coord_map = {
             axis: _mode_source_node_axis_coords(solver.scene, axis)
@@ -1446,6 +1854,28 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
         )
         eps_node_imag = _max_component_imag(eps_node_by_axis)
         mu_node_imag = _max_component_imag(mu_node_by_axis)
+        pec_occupancy = _mode_source_pec_slice(
+            solver,
+            normal_axis=normal_axis,
+            plane_index=plane_index,
+            tangential_bounds=node_tangential_bounds,
+        )
+        has_interior_pec = pec_occupancy is not None and bool(
+            torch.any(pec_occupancy[1:-1, 1:-1] >= _PEC_OCCUPANCY_THRESHOLD)
+        )
+        if has_interior_pec and (eps_node_imag > 1.0e-7 or mu_node_imag > 1.0e-7):
+            raise NotImplementedError(
+                "Lossy PEC-aware modes require a device-resident complex vector eigensolve; "
+                "the scalar complex mode path cannot enforce internal conductors."
+            )
+        if has_interior_pec and any(
+            component.requires_grad
+            for component in (*eps_node_by_axis.values(), *mu_node_by_axis.values())
+        ):
+            raise NotImplementedError(
+                "Differentiable material parameters with an internal PEC conductor require "
+                "a PEC mode-shape eigen-adjoint."
+            )
         # A lossy (complex) permittivity makes the full-vector operator non-Hermitian and
         # its forward path solves only the real part, which would silently drop the loss.
         # Route those planes to the scalar complex-mode solve below, which resolves the
@@ -1472,6 +1902,7 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
                     eps_by_axis=eps_node_by_axis,
                     mu_by_axis=mu_node_by_axis,
                     frequency=frequency,
+                    pec_occupancy=pec_occupancy,
                 )
 
     tangential_coord_map = {

@@ -31,7 +31,7 @@ def _mode_source_from_mode_spec(mode_spec: dict[str, object], *, frequency: floa
         polarization = f"E{str(polarization_axis)}"
     else:
         polarization = tuple(float(component) for component in mode_spec["polarization"])
-    return ModeSource(
+    source = ModeSource(
         position=tuple(float(value) for value in mode_spec["position"]),
         size=tuple(float(value) for value in mode_spec["size"]),
         mode_index=int(mode_spec["mode_index"]),
@@ -42,6 +42,10 @@ def _mode_source_from_mode_spec(mode_spec: dict[str, object], *, frequency: floa
         bend_radius=mode_spec.get("bend_radius"),
         bend_axis=mode_spec.get("bend_axis"),
     )
+    wave_family = mode_spec.get("wave_family")
+    if wave_family is not None:
+        object.__setattr__(source, "_wave_family", str(wave_family))
+    return source
 
 
 def _resolve_mode_source(scene, monitor=None, *, mode_source=None, frequency: float) -> ModeSource:

@@ -265,16 +265,33 @@ class PortExcitation:
     amplitude: torch.Tensor
     source_impedance: str | complex | float | torch.Tensor = "matched"
     source_time: SourceTime | None = None
+    mode_name: str | None = None
     kind: str = "port_excitation"
 
-    def __init__(self, port_name, amplitude=1.0, source_impedance="matched", source_time=None):
+    def __init__(
+        self,
+        port_name,
+        amplitude=1.0,
+        source_impedance="matched",
+        source_time=None,
+        mode_name=None,
+    ):
         resolved_name = str(port_name)
         if not resolved_name:
             raise ValueError("port_name must not be empty.")
+        if source_time is not None and not isinstance(source_time, SourceTime):
+            raise TypeError("source_time must be a SourceTime or None.")
+        if mode_name is None:
+            resolved_mode_name = None
+        else:
+            resolved_mode_name = str(mode_name).strip()
+            if not resolved_mode_name:
+                raise ValueError("mode_name must not be empty when provided.")
         object.__setattr__(self, "port_name", resolved_name)
         object.__setattr__(self, "amplitude", _amplitude_tensor(amplitude))
         object.__setattr__(self, "source_impedance", _source_impedance(source_impedance))
         object.__setattr__(self, "source_time", source_time)
+        object.__setattr__(self, "mode_name", resolved_mode_name)
         object.__setattr__(self, "kind", "port_excitation")
 
 

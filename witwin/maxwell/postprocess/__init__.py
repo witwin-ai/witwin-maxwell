@@ -17,6 +17,7 @@ from .stratton_chu import (
     equivalent_surface_currents_from_surface_samples,
     gaussian_window_1d,
 )
+from .waveports import ModeTrackingError, ModeTrackingResult, track_modes
 
 __all__ = [
     "compute_bistatic_rcs",
@@ -39,4 +40,7 @@ __all__ = [
     "equivalent_surface_currents_from_surface_samples",
     "gaussian_window_1d",
     "transform_to_bistatic_rcs",
+    "ModeTrackingError",
+    "ModeTrackingResult",
+    "track_modes",
 ]

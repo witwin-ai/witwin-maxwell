@@ -192,6 +192,7 @@ def _compile_mode_source(source: ModeSource, *, default_frequency: float) -> dic
         "polarization_axis": source.polarization_axis,
         "bend_radius": source.bend_radius,
         "bend_axis": source.bend_axis,
+        "wave_family": getattr(source, "_wave_family", None),
         "injection": {"kind": "soft"},
         "source_time": source_time,
     }

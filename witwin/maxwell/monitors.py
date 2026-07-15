@@ -665,7 +665,7 @@ class ModeMonitor:
             raise ValueError("mode_index must be >= 0.")
 
     def mode_spec(self) -> dict[str, object]:
-        return {
+        spec = {
             "name": self.name,
             "position": self.position,
             "size": self.size,
@@ -677,6 +677,10 @@ class ModeMonitor:
             "bend_radius": self.bend_radius,
             "bend_axis": self.bend_axis,
         }
+        wave_family = getattr(self, "_wave_family", None)
+        if wave_family is not None:
+            spec["wave_family"] = wave_family
+        return spec
 
 
 @dataclass(frozen=True)

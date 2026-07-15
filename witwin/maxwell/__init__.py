@@ -42,7 +42,15 @@ from .lumped import (
     SeriesRLC,
 )
 from .network import NetworkData, PortData
-from .ports import AxisPath, LumpedPort, ModePort, TerminalPort, TerminalRef
+from .ports import (
+    AxisPath,
+    LumpedPort,
+    ModePort,
+    TerminalPort,
+    TerminalRef,
+    WaveModeSpec,
+    WavePort,
+)
 from . import postprocess
 from .result import Result
 from .scene import (
@@ -177,6 +185,8 @@ __all__ = [
     "Torus",
     "TwoPhotonAbsorption",
     "UniformCurrentSource",
+    "WaveModeSpec",
+    "WavePort",
     "DiagonalTensor3",
     "AbsorberKind",
     "run",
