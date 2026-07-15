@@ -129,12 +129,18 @@ def _line_indices(
     return torch.as_tensor(indices, device=device, dtype=torch.int64)
 
 
-def _compile_voltage(port: LumpedPort, scene, *, device: torch.device):
-    axis = port.voltage_path.axis
+def _compile_voltage_path(
+    scene,
+    *,
+    positive,
+    negative,
+    axis: str,
+    device: torch.device,
+):
     axis_index = _AXES.index(axis)
     nodes = _axis_values(scene, axis, half=False)
-    negative_index = _snap_index(nodes, port.negative[axis_index], label=f"{axis} node")
-    positive_index = _snap_index(nodes, port.positive[axis_index], label=f"{axis} node")
+    negative_index = _snap_index(nodes, negative[axis_index], label=f"{axis} node")
+    positive_index = _snap_index(nodes, positive[axis_index], label=f"{axis} node")
     direction = 1 if positive_index > negative_index else -1
     lower_index, upper_index = sorted((negative_index, positive_index))
 
@@ -145,7 +151,7 @@ def _compile_voltage(port: LumpedPort, scene, *, device: torch.device):
         transverse_index = _AXES.index(transverse_axis)
         fixed_indices[transverse_axis] = _snap_index(
             _axis_values(scene, transverse_axis, half=False),
-            port.negative[transverse_index],
+            negative[transverse_index],
             label=f"{transverse_axis} node",
         )
 
@@ -162,6 +168,16 @@ def _compile_voltage(port: LumpedPort, scene, *, device: torch.device):
         f"E{axis}",
         torch.as_tensor(indices, device=device, dtype=torch.int64),
         torch.as_tensor(weights, device=device, dtype=torch.float64),
+    )
+
+
+def _compile_voltage(port: LumpedPort, scene, *, device: torch.device):
+    return _compile_voltage_path(
+        scene,
+        positive=port.positive,
+        negative=port.negative,
+        axis=port.voltage_path.axis,
+        device=device,
     )
 
 

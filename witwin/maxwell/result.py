@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -8,10 +9,12 @@ import numpy as np
 import torch
 
 from .monitors import ClosedSurfaceMonitor, FinitePlaneMonitor, MediumMonitor, PermittivityMonitor
+from .network import PortData
 from .scene import prepare_scene
 from .visualization import extract_orthogonal_slice, plot_slice_image
 
 _UNSET = object()
+RESULT_SNAPSHOT_SCHEMA_VERSION = 1
 
 
 def _clone_mapping(data: dict[str, Any]) -> dict[str, Any]:
@@ -28,6 +31,44 @@ def _cpu_serializable(value: Any):
     if isinstance(value, tuple):
         return tuple(_cpu_serializable(item) for item in value)
     return value
+
+
+def _normalize_port_data_mapping(ports) -> dict[str, PortData]:
+    if ports is None:
+        return {}
+    if not isinstance(ports, Mapping):
+        raise TypeError("ports must be a mapping from port names to PortData.")
+
+    normalized = {}
+    for name, data in ports.items():
+        port_name = str(name)
+        if not isinstance(data, PortData):
+            raise TypeError(f"Result port {port_name!r} must be a PortData instance.")
+        if port_name != data.port_name:
+            raise ValueError(
+                f"Result port key {port_name!r} does not match "
+                f"PortData.port_name {data.port_name!r}."
+            )
+        normalized[port_name] = data
+    return normalized
+
+
+def _port_data_snapshot(data: PortData) -> dict[str, Any]:
+    return {
+        "schema_version": data.schema_version,
+        "data_type": "PortData",
+        "port_name": data.port_name,
+        "frequencies": _cpu_serializable(data.frequencies),
+        "voltage": _cpu_serializable(data.voltage),
+        "current": _cpu_serializable(data.current),
+        "z0": _cpu_serializable(data.z0),
+        "direction": data.direction,
+        "reference_plane": data.reference_plane,
+        "available_power": _cpu_serializable(data.available_power),
+        "metadata": _cpu_serializable(data.metadata),
+        "phasor_convention": data.phasor_convention,
+        "power_wave_convention": data.power_wave_convention,
+    }
 
 
 def _resolve_result_frequencies(*, frequency: float | None, frequencies) -> tuple[float, ...]:
@@ -727,6 +768,7 @@ class Result:
         solver=None,
         fields: dict[str, torch.Tensor] | None = None,
         monitors: dict[str, Any] | None = None,
+        ports: Mapping[str, PortData] | None = None,
         metadata: dict[str, Any] | None = None,
         solver_stats: dict[str, Any] | None = None,
         raw_output: Any = None,
@@ -739,6 +781,7 @@ class Result:
         self.solver = solver
         self._fields = _clone_mapping(fields)
         self._monitors = _clone_mapping(monitors)
+        self._ports = _normalize_port_data_mapping(ports)
         self._metadata = _clone_mapping(metadata)
         self._solver_stats = _clone_mapping(solver_stats)
         self.raw_output = raw_output
@@ -775,6 +818,10 @@ class Result:
     @property
     def monitors(self) -> dict[str, Any]:
         return dict(self._monitors)
+
+    @property
+    def ports(self) -> dict[str, PortData]:
+        return dict(self._ports)
 
     @property
     def E(self) -> ResultFieldAccessor:
@@ -915,6 +962,16 @@ class Result:
         modal["plane"] = payload
         return modal
 
+    def port(self, name: str) -> PortData:
+        port_name = str(name)
+        if port_name not in self._ports:
+            choices = tuple(self._ports)
+            raise KeyError(
+                f"Port {port_name!r} is not available in this result. "
+                f"Choices: {choices}."
+            )
+        return self._ports[port_name]
+
     def material(self, name: str = "eps_r", *, expand_symmetry: bool = False) -> torch.Tensor:
         prepared_scene = self.prepared_scene
         key = name.lower()
@@ -948,20 +1005,36 @@ class Result:
         stats["num_frequencies"] = len(self.frequencies)
         stats["num_fields"] = len(self._fields)
         stats["num_monitors"] = len(self._monitors)
+        stats["num_ports"] = len(self._ports)
         return stats
 
     def save(self, path: str | Path):
+        """Save a detached CPU data snapshot.
+
+        Port payloads use the same versioned schema as ``PortData.save``. The
+        snapshot intentionally omits the declarative Scene, prepared Scene, solver,
+        raw runtime output, and every live autograd graph. It is therefore not a
+        complete ``Result.load`` format; reconstructing a Result requires a future
+        explicit Scene serialization contract.
+        """
+
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
+                "schema_version": RESULT_SNAPSHOT_SCHEMA_VERSION,
+                "data_type": "ResultSnapshot",
                 "method": self.method,
                 "frequency": self.frequency,
                 "frequencies": self.frequencies,
                 "fields": {name: tensor.detach().cpu() for name, tensor in self._fields.items()},
                 "monitors": _cpu_serializable(self._monitors),
-                "metadata": self._metadata,
-                "solver_stats": self._solver_stats,
+                "ports": {
+                    name: _port_data_snapshot(data)
+                    for name, data in self._ports.items()
+                },
+                "metadata": _cpu_serializable(self._metadata),
+                "solver_stats": _cpu_serializable(self._solver_stats),
             },
             output_path,
         )

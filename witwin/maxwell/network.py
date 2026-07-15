@@ -1,13 +1,64 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from pathlib import Path
+from typing import Any, ClassVar, Mapping
 
 import torch
 
 
 PHASOR_CONVENTION = "peak phasor with exp(-i*omega*t) time dependence"
 POWER_WAVE_CONVENTION = "Kurokawa power waves normalized to sqrt(watt)"
+PERSISTENCE_SCHEMA_VERSION = 1
+
+
+def _detach_to_cpu(value: Any):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, Mapping):
+        return {key: _detach_to_cpu(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_detach_to_cpu(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_detach_to_cpu(item) for item in value)
+    return value
+
+
+def _validate_safe_persistence(value: Any, *, path: str = "metadata") -> None:
+    if value is None or isinstance(value, (bool, int, float, complex, str, bytes, torch.Tensor)):
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, (bool, int, float, complex, str, bytes)):
+                raise TypeError(f"{path} contains an unsupported mapping key type {type(key).__name__}.")
+            _validate_safe_persistence(item, path=f"{path}[{key!r}]")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _validate_safe_persistence(item, path=f"{path}[{index}]")
+        return
+    raise TypeError(
+        f"{path} contains unsupported persistence type {type(value).__name__}; "
+        "use primitive values, tensors, mappings, lists, or tuples."
+    )
+
+
+def _load_persisted_payload(path, *, map_location, expected_type: str) -> dict[str, Any]:
+    payload = torch.load(path, map_location=map_location, weights_only=True)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Persisted {expected_type} payload must be a mapping.")
+
+    actual_type = payload.get("data_type")
+    if actual_type != expected_type:
+        raise ValueError(f"Persisted file contains {actual_type}, not {expected_type}.")
+
+    schema_version = payload.get("schema_version")
+    if schema_version != PERSISTENCE_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported {expected_type} schema_version {schema_version!r}; "
+            f"expected {PERSISTENCE_SCHEMA_VERSION}."
+        )
+    return payload
 
 
 def _validate_frequencies(frequencies: torch.Tensor, *, device: torch.device) -> torch.Tensor:
@@ -155,6 +206,8 @@ class PortData:
     phasor_convention: str = PHASOR_CONVENTION
     power_wave_convention: str = POWER_WAVE_CONVENTION
 
+    schema_version: ClassVar[int] = PERSISTENCE_SCHEMA_VERSION
+
     def __post_init__(self):
         voltage, current = _validate_complex_pair(
             self.voltage,
@@ -279,6 +332,61 @@ class PortData:
     def vswr(self) -> torch.Tensor:
         return _vswr(self.reflection_coefficient)
 
+    def save(self, path: str | Path):
+        """Save a detached CPU snapshot.
+
+        File persistence intentionally does not preserve the live autograd graph.
+        Loaded tensors are detached and may be placed with ``load(map_location=...)``.
+        Metadata may contain tensors and primitive dict/list/tuple values accepted
+        by safe ``torch.load(weights_only=True)``; arbitrary Python objects are not
+        part of this persistence contract.
+        """
+
+        _validate_safe_persistence(self.metadata)
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "schema_version": self.schema_version,
+                "data_type": type(self).__name__,
+                "port_name": self.port_name,
+                "frequencies": _detach_to_cpu(self.frequencies),
+                "voltage": _detach_to_cpu(self.voltage),
+                "current": _detach_to_cpu(self.current),
+                "z0": _detach_to_cpu(self.z0),
+                "direction": self.direction,
+                "reference_plane": self.reference_plane,
+                "available_power": _detach_to_cpu(self.available_power),
+                "metadata": _detach_to_cpu(self.metadata),
+                "phasor_convention": self.phasor_convention,
+                "power_wave_convention": self.power_wave_convention,
+            },
+            output_path,
+        )
+
+    @classmethod
+    def load(cls, path: str | Path, map_location=None) -> "PortData":
+        """Load a detached snapshot; no active autograd graph is reconstructed."""
+
+        payload = _load_persisted_payload(
+            Path(path),
+            map_location=map_location,
+            expected_type=cls.__name__,
+        )
+        return cls(
+            port_name=payload["port_name"],
+            frequencies=payload["frequencies"],
+            voltage=payload["voltage"],
+            current=payload["current"],
+            z0=payload["z0"],
+            direction=payload["direction"],
+            reference_plane=payload["reference_plane"],
+            available_power=payload["available_power"],
+            metadata=payload["metadata"],
+            phasor_convention=payload["phasor_convention"],
+            power_wave_convention=payload["power_wave_convention"],
+        )
+
 
 def _validate_network_matrix(
     matrix: torch.Tensor,
@@ -400,6 +508,10 @@ class NetworkData:
     port_names: tuple[str, ...]
     valid_columns: torch.Tensor | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    phasor_convention: str = PHASOR_CONVENTION
+    power_wave_convention: str = POWER_WAVE_CONVENTION
+
+    schema_version: ClassVar[int] = PERSISTENCE_SCHEMA_VERSION
 
     def __post_init__(self):
         s, frequencies, frequency_count, port_count = _validate_network_matrix(
@@ -437,6 +549,8 @@ class NetworkData:
         port_names,
         valid_columns: torch.Tensor | None = None,
         metadata: Mapping[str, Any] | None = None,
+        phasor_convention: str = PHASOR_CONVENTION,
+        power_wave_convention: str = POWER_WAVE_CONVENTION,
     ) -> "NetworkData":
         z, resolved_frequencies, frequency_count, port_count = _validate_network_matrix(
             z,
@@ -465,6 +579,8 @@ class NetworkData:
             port_names=names,
             valid_columns=valid,
             metadata={} if metadata is None else metadata,
+            phasor_convention=phasor_convention,
+            power_wave_convention=power_wave_convention,
         )
 
     @classmethod
@@ -477,6 +593,8 @@ class NetworkData:
         port_names,
         valid_columns: torch.Tensor | None = None,
         metadata: Mapping[str, Any] | None = None,
+        phasor_convention: str = PHASOR_CONVENTION,
+        power_wave_convention: str = POWER_WAVE_CONVENTION,
     ) -> "NetworkData":
         y, resolved_frequencies, _, port_count = _validate_network_matrix(
             y,
@@ -498,6 +616,8 @@ class NetworkData:
             port_names=port_names,
             valid_columns=valid,
             metadata=metadata,
+            phasor_convention=phasor_convention,
+            power_wave_convention=power_wave_convention,
         )
 
     @property
@@ -543,12 +663,64 @@ class NetworkData:
             port_names=self.port_names,
             valid_columns=self.valid_columns,
             metadata=self.metadata,
+            phasor_convention=self.phasor_convention,
+            power_wave_convention=self.power_wave_convention,
+        )
+
+    def save(self, path: str | Path):
+        """Save a detached CPU snapshot.
+
+        File persistence intentionally does not preserve the live autograd graph.
+        Loaded tensors are detached and may be placed with ``load(map_location=...)``.
+        Metadata may contain tensors and primitive dict/list/tuple values accepted
+        by safe ``torch.load(weights_only=True)``; arbitrary Python objects are not
+        part of this persistence contract.
+        """
+
+        _validate_safe_persistence(self.metadata)
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "schema_version": self.schema_version,
+                "data_type": type(self).__name__,
+                "frequencies": _detach_to_cpu(self.frequencies),
+                "s": _detach_to_cpu(self.s),
+                "z0": _detach_to_cpu(self.z0),
+                "port_names": self.port_names,
+                "valid_columns": _detach_to_cpu(self.valid_columns),
+                "metadata": _detach_to_cpu(self.metadata),
+                "phasor_convention": self.phasor_convention,
+                "power_wave_convention": self.power_wave_convention,
+            },
+            output_path,
+        )
+
+    @classmethod
+    def load(cls, path: str | Path, map_location=None) -> "NetworkData":
+        """Load a detached snapshot; no active autograd graph is reconstructed."""
+
+        payload = _load_persisted_payload(
+            Path(path),
+            map_location=map_location,
+            expected_type=cls.__name__,
+        )
+        return cls(
+            frequencies=payload["frequencies"],
+            s=payload["s"],
+            z0=payload["z0"],
+            port_names=tuple(payload["port_names"]),
+            valid_columns=payload["valid_columns"],
+            metadata=payload["metadata"],
+            phasor_convention=payload["phasor_convention"],
+            power_wave_convention=payload["power_wave_convention"],
         )
 
 
 __all__ = [
     "NetworkData",
     "PHASOR_CONVENTION",
+    "PERSISTENCE_SCHEMA_VERSION",
     "POWER_WAVE_CONVENTION",
     "PortData",
     "power_waves_to_voltage_current",

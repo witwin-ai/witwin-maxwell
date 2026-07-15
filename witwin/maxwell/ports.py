@@ -6,6 +6,7 @@ import math
 import torch
 from witwin.core import Box
 
+from .lumped import ParallelRLC, SeriesRLC
 from .monitors import ModeMonitor, _normalize_frequencies, _normalize_normal_direction
 from .sources import (
     ModeSource,
@@ -56,6 +57,7 @@ class LumpedPort:
     current_surface: Box
     reference_impedance: complex | float | torch.Tensor
     reference_plane: float | None = None
+    termination: SeriesRLC | ParallelRLC | None = None
     kind: str = "lumped_port"
     phasor_convention: str = "peak"
     power_convention: str = "0.5*Re(V*conj(I))"
@@ -70,6 +72,7 @@ class LumpedPort:
         current_surface,
         reference_impedance=50.0,
         reference_plane=None,
+        termination=None,
     ):
         if not isinstance(voltage_path, AxisPath):
             raise TypeError("voltage_path must be an AxisPath.")
@@ -128,6 +131,8 @@ class LumpedPort:
         resolved_name = str(name)
         if not resolved_name:
             raise ValueError("LumpedPort name must not be empty.")
+        if termination is not None and not isinstance(termination, (SeriesRLC, ParallelRLC)):
+            raise TypeError("termination must be a SeriesRLC, ParallelRLC, or None.")
 
         object.__setattr__(self, "name", resolved_name)
         object.__setattr__(self, "positive", resolved_positive)
@@ -140,6 +145,7 @@ class LumpedPort:
             "reference_plane",
             None if reference_plane is None else float(reference_plane),
         )
+        object.__setattr__(self, "termination", termination)
         object.__setattr__(self, "kind", "lumped_port")
         object.__setattr__(self, "phasor_convention", "peak")
         object.__setattr__(self, "power_convention", "0.5*Re(V*conj(I))")

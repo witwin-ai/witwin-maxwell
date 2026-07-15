@@ -6,7 +6,9 @@ from typing import Any, Iterable
 
 import torch
 
+from .lumped import PortExcitation
 from .monitors import MediumMonitor, PermittivityMonitor
+from .ports import LumpedPort
 from .result import Result
 from .scene import Scene, SceneModule, prepare_scene
 
@@ -64,6 +66,27 @@ def _normalize_single_frequency(*, frequency=None) -> float:
     if len(values) != 1:
         raise ValueError("This solver path only supports a single frequency.")
     return values[0]
+
+
+def _normalize_port_excitations(excitations) -> tuple[PortExcitation, ...]:
+    if excitations is None:
+        return ()
+    if isinstance(excitations, PortExcitation):
+        resolved = (excitations,)
+    elif isinstance(excitations, Iterable) and not isinstance(excitations, (str, bytes)):
+        resolved = tuple(excitations)
+    else:
+        raise TypeError("excitations must be a PortExcitation or an iterable of PortExcitation entries.")
+    if any(not isinstance(excitation, PortExcitation) for excitation in resolved):
+        raise TypeError("excitations must contain only PortExcitation entries.")
+    names = tuple(excitation.port_name for excitation in resolved)
+    if len(set(names)) != len(names):
+        raise ValueError("Each port may appear in excitations at most once.")
+    if len(resolved) > 1:
+        raise NotImplementedError(
+            "Phase 1 supports one active LumpedPort per FDTD run; use one PortExcitation."
+        )
+    return resolved
 
 
 def _normalize_spectral_window_kind(value) -> SpectralWindowKind:
@@ -256,6 +279,7 @@ class Simulation:
         method: SimulationMethod,
         frequencies: tuple[float, ...],
         config: FDFDConfig | FDTDConfig | None = None,
+        excitations=None,
         metadata: dict[str, Any] | None = None,
     ):
         if not frequencies:
@@ -271,6 +295,10 @@ class Simulation:
             or _scene_trainable_material_parameters(resolved_scene)
         )
         self.method = SimulationMethod(method)
+        self.excitations = _normalize_port_excitations(excitations)
+        if self.method != SimulationMethod.FDTD and self.excitations:
+            raise ValueError("PortExcitation is supported by Simulation.fdtd(...) only.")
+        self._validate_trainable_rf_support()
         self.frequencies = tuple(float(freq) for freq in frequencies)
         self.frequency = self.frequencies[0]
         if self.method == SimulationMethod.FDFD:
@@ -323,6 +351,7 @@ class Simulation:
         shutoff: float = 0.0,
         shutoff_check_interval: int = 100,
         cuda_graph: bool = False,
+        excitations=None,
     ) -> "Simulation":
         return cls(
             scene=scene,
@@ -339,10 +368,13 @@ class Simulation:
                 shutoff_check_interval=shutoff_check_interval,
                 cuda_graph=cuda_graph,
             ),
+            excitations=excitations,
         )
 
     def prepare(self):
         self._refresh_scene()
+        self._validate_trainable_rf_support()
+        self._validate_port_excitations()
         if self.method == SimulationMethod.FDFD:
             solver = self._build_fdfd_solver()
         elif self.method == SimulationMethod.FDTD:
@@ -357,11 +389,40 @@ class Simulation:
 
     def run(self) -> Result:
         self._refresh_scene()
+        self._validate_trainable_rf_support()
+        self._validate_port_excitations()
         if self.method == SimulationMethod.FDFD:
             return self._run_fdfd()
         if self.method == SimulationMethod.FDTD:
             return self._run_fdtd()
         raise ValueError(f"Unsupported simulation method {self.method!r}.")
+
+    def _validate_port_excitations(self) -> None:
+        if not self.excitations:
+            return
+        ports_by_name = {port.name: port for port in self.scene.ports}
+        for excitation in self.excitations:
+            port = ports_by_name.get(excitation.port_name)
+            if port is None:
+                raise ValueError(
+                    f"PortExcitation references missing port {excitation.port_name!r}."
+                )
+            if not isinstance(port, LumpedPort):
+                raise TypeError(
+                    f"PortExcitation {excitation.port_name!r} requires a LumpedPort, "
+                    f"got {type(port).__name__}."
+                )
+
+    def _validate_trainable_rf_support(self) -> None:
+        if self.method != SimulationMethod.FDTD or not self.has_trainable_parameters:
+            return
+        has_lumped_ports = any(isinstance(port, LumpedPort) for port in self.scene.ports)
+        if has_lumped_ports or self.scene.lumped_elements or self.excitations:
+            raise NotImplementedError(
+                "Trainable FDTD scenes cannot yet include LumpedPort, PortExcitation, "
+                "or standalone R/L/C elements because the adjoint does not replay "
+                "their auxiliary state."
+            )
 
     def _refresh_scene(self):
         if self.scene_module is not None:
@@ -455,12 +516,22 @@ class Simulation:
         prepared_scene = prepare_scene(scene)
         _require_cuda_scene(prepared_scene, method="fdtd")
         fdtd_backend, _ = _resolve_fdtd_backend()
+        time_step_frequency = self.frequency
+        for excitation in self.excitations:
+            source_time = excitation.source_time
+            if source_time is not None:
+                time_step_frequency = max(
+                    time_step_frequency,
+                    float(source_time.characteristic_frequency),
+                )
         solver = fdtd_backend(
             prepared_scene,
-            frequency=self.frequency,
+            frequency=time_step_frequency,
             absorber_type=self.config.absorber,
             cpml_config=self.config.cpml_config,
         )
+        solver._requested_port_frequencies = self.frequencies
+        solver._port_excitations = self.excitations
         if initialize:
             solver.init_field()
         return solver
@@ -499,6 +570,22 @@ class Simulation:
             float(resolved_scene.domain.bounds[2][1] - resolved_scene.domain.bounds[2][0]),
         )
         requested_frequencies = self._collect_fdtd_requested_frequencies(resolved_scene)
+        source_time = getattr(solver, "_source_time", None)
+        port_source_times = tuple(
+            excitation.source_time
+            for excitation in self.excitations
+            if excitation.source_time is not None
+        )
+        if port_source_times:
+            candidates = ((source_time,) if source_time is not None else ()) + port_source_times
+            source_time = max(
+                candidates,
+                key=lambda value: float(
+                    value.get("settling_time", 0.0)
+                    if isinstance(value, dict)
+                    else getattr(value, "settling_time", 0.0)
+                ),
+            )
         return steps_helper(
             frequency=min(requested_frequencies),
             dt=solver.dt,
@@ -506,7 +593,7 @@ class Simulation:
             num_cycles=runtime_cfg.steady_cycles,
             transient_cycles=runtime_cfg.transient_cycles,
             domain_size=domain_size,
-            source_time=getattr(solver, "_source_time", None),
+            source_time=source_time,
         )
 
     def _execute_fdtd_solve(self, solver, scene=None):
@@ -514,7 +601,10 @@ class Simulation:
         time_steps = self._resolve_fdtd_time_steps(solver, resolved_scene)
         dft_cfg = self.config.spectral_sampler
         requested_full_field_dft = self.config.full_field_dft
-        use_full_field_dft = requested_full_field_dft or len(self.frequencies) > 1
+        has_lumped_ports = any(isinstance(port, LumpedPort) for port in resolved_scene.ports)
+        use_full_field_dft = requested_full_field_dft or (
+            len(self.frequencies) > 1 and not has_lumped_ports
+        )
         dft_request = self.frequency if len(self.frequencies) == 1 else self.frequencies
         raw_output = solver.solve(
             time_steps=time_steps,
@@ -554,6 +644,7 @@ class Simulation:
             raise RuntimeError("FDTD solve did not return any output.")
 
         monitors = raw_output.get("observers", {}) if isinstance(raw_output, dict) else {}
+        ports = raw_output.get("ports", {}) if isinstance(raw_output, dict) else {}
         field_payload = {
             key: value
             for key, value in (raw_output.items() if isinstance(raw_output, dict) else [])
@@ -578,6 +669,7 @@ class Simulation:
             solver=solver,
             fields=fields,
             monitors=monitors,
+            ports=ports,
             metadata=self.metadata,
             solver_stats=solver_stats,
             raw_output=raw_output,

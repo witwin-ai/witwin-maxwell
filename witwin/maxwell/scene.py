@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from witwin.core import Structure
+from .lumped import Capacitor, Inductor, Resistor
 from .ports import LumpedPort, ModePort
 from .compiler.materials import (
     compile_material_model,
@@ -754,6 +755,7 @@ class Scene:
         sources=None,
         monitors=None,
         ports=None,
+        lumped_elements=(),
         material_regions=None,
         metadata=None,
         device="cuda",
@@ -788,6 +790,9 @@ class Scene:
         self.ports = []
         for port in ports or ():
             self.add_port(port)
+        self.lumped_elements = []
+        for element in lumped_elements:
+            self.add_lumped_element(element)
         self.lazy_meshgrid = bool(lazy_meshgrid)
 
     @property
@@ -899,8 +904,72 @@ class Scene:
             raise TypeError("Maxwell Scene ports must be ModePort or LumpedPort instances.")
         if any(existing.name == port.name for existing in self.ports):
             raise ValueError(f"Port name {port.name!r} is already present in the scene.")
+        if isinstance(port, LumpedPort):
+            for terminal_name, terminal in (
+                ("positive", port.positive),
+                ("negative", port.negative),
+            ):
+                for axis, coordinate, (lower, upper) in zip(
+                    _BOUNDARY_AXES,
+                    terminal,
+                    self.domain.bounds,
+                ):
+                    if not math.isfinite(coordinate) or coordinate < lower or coordinate > upper:
+                        raise ValueError(
+                            f"LumpedPort {port.name!r} {terminal_name} terminal "
+                            f"{axis}={coordinate:g} lies outside the Scene domain "
+                            f"[{lower:g}, {upper:g}]."
+                        )
         self.ports.append(port)
         return self
+
+    def add_lumped_element(self, element: Resistor | Capacitor | Inductor):
+        if not isinstance(element, (Resistor, Capacitor, Inductor)):
+            raise TypeError(
+                "Maxwell Scene lumped elements must be Resistor, Capacitor, or Inductor instances."
+            )
+        if any(existing.name == element.name for existing in self.lumped_elements):
+            raise ValueError(
+                f"Lumped element name {element.name!r} is already present in the scene."
+            )
+
+        for terminal_name, terminal in (
+            ("positive", element.positive),
+            ("negative", element.negative),
+        ):
+            for axis, coordinate, (lower, upper) in zip(
+                _BOUNDARY_AXES,
+                terminal,
+                self.domain.bounds,
+            ):
+                if not math.isfinite(coordinate) or coordinate < lower or coordinate > upper:
+                    raise ValueError(
+                        f"Lumped element {element.name!r} {terminal_name} terminal "
+                        f"{axis}={coordinate:g} lies outside the Scene domain "
+                        f"[{lower:g}, {upper:g}]."
+                    )
+
+        differing_axes = sum(
+            not math.isclose(positive, negative, rel_tol=0.0, abs_tol=1.0e-12)
+            for positive, negative in zip(element.positive, element.negative)
+        )
+        if differing_axes != 1:
+            raise ValueError(
+                f"Lumped element {element.name!r} terminals must define an axis-aligned path."
+            )
+
+        self.lumped_elements.append(element)
+        return self
+
+    def compile_ports(self, *, device=None):
+        """Compile declared port geometry through the solver preparation layer."""
+
+        return prepare_scene(self).compile_ports(device=device)
+
+    def compile_lumped_elements(self, *, device=None):
+        """Compile declared R/L/C elements through the preparation layer."""
+
+        return prepare_scene(self).compile_lumped_elements(device=device)
 
     def add_material_region(self, material_region: MaterialRegion):
         self.material_regions.append(material_region)
@@ -915,6 +984,7 @@ class Scene:
             "sources": list(self.sources),
             "monitors": list(self.monitors),
             "ports": list(self.ports),
+            "lumped_elements": list(self.lumped_elements),
             "material_regions": list(self.material_regions),
             "metadata": dict(self.metadata),
             "device": self.device,
@@ -1048,6 +1118,7 @@ class PreparedScene(Scene):
             sources=list(scene.sources),
             monitors=list(scene.monitors),
             ports=list(scene.ports),
+            lumped_elements=list(scene.lumped_elements),
             material_regions=list(scene.material_regions),
             metadata=dict(scene.metadata),
             device=scene.device,
@@ -1247,6 +1318,14 @@ class PreparedScene(Scene):
         from .compiler.ports import compile_ports
 
         return compile_ports(self, device=self.device if device is None else device)
+
+    def compile_lumped_elements(self, *, device=None):
+        from .compiler.lumped import compile_lumped_elements
+
+        return compile_lumped_elements(
+            self,
+            device=self.device if device is None else device,
+        )
 
     def compile_relative_materials(
         self,

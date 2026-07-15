@@ -32,6 +32,14 @@ from .monitors import (
     PlaneMonitor,
     PointMonitor,
 )
+from .lumped import (
+    Capacitor,
+    Inductor,
+    ParallelRLC,
+    PortExcitation,
+    Resistor,
+    SeriesRLC,
+)
 from .network import NetworkData, PortData
 from .ports import AxisPath, LumpedPort, ModePort
 from . import postprocess
@@ -85,6 +93,7 @@ __all__ = [
     "BoundaryKind",
     "Box",
     "ClosedSurfaceMonitor",
+    "Capacitor",
     "ComplexPolySlab",
     "DiffractionMonitor",
     "Cone",
@@ -116,6 +125,7 @@ __all__ = [
     "GridSpec",
     "HollowBox",
     "LayerRefinementSpec",
+    "Inductor",
     "LorentzPole",
     "LumpedPort",
     "LossyMetalMedium",
@@ -132,18 +142,22 @@ __all__ = [
     "ModulationSpec",
     "NonlinearSusceptibility",
     "PermittivityMonitor",
+    "ParallelRLC",
     "PerturbationMedium",
     "PlaneMonitor",
     "PlaneWave",
     "PointDipole",
     "PointMonitor",
     "PortData",
+    "PortExcitation",
     "PolySlab",
     "postprocess",
     "Prism",
     "Pyramid",
     "Result",
+    "Resistor",
     "RickerWavelet",
+    "SeriesRLC",
     "Scene",
     "SceneModule",
     "Simulation",

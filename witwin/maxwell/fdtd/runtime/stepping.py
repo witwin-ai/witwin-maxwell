@@ -26,6 +26,14 @@ from ..excitation import (
     initialize_tfsf_state,
     tfsf_incident_is_gpu_driven,
 )
+from ..ports import (
+    accumulate_port_observers,
+    apply_port_runtimes,
+    complete_port_spectral_normalization,
+    finalize_port_data,
+    prepare_port_runtimes,
+    prepare_port_spectral_accumulators,
+)
 
 
 def iter_cpml_memory_regions(solver, attr_name):
@@ -1514,6 +1522,11 @@ def init_field(solver):
     solver._initialize_magnetic_dispersive_state()
     initialize_tfsf_state(solver)
     initialize_source_terms(solver)
+    prepare_port_runtimes(
+        solver,
+        getattr(solver, "_requested_port_frequencies", (solver.source_frequency,)),
+        getattr(solver, "_port_excitations", ()),
+    )
 
 
 def _compute_shutoff_min_step(solver, shutoff_check_interval: int) -> int:
@@ -1596,6 +1609,7 @@ def _complete_spectral_normalization(solver, time_steps: int) -> None:
             entry["window_normalization"] = _planned_window_normalization(
                 solver.observer_window_type, int(entry["start_step"]), int(end_step)
             )
+    complete_port_spectral_normalization(solver)
 
 
 def _field_update_block(solver, time_value):
@@ -1878,6 +1892,7 @@ def solve(
         solver._prepare_observers(observer_frequency, dft_window, time_steps)
     if getattr(solver, "time_observers", None):
         solver._prepare_time_observers(time_steps)
+    prepare_port_spectral_accumulators(solver, time_steps, dft_window)
 
     solver._shutoff_triggered = False
     solver._shutoff_step = None
@@ -1924,6 +1939,7 @@ def solve(
 
         if solver._source_terms:
             solver.add_source(time_value=time_value)
+        apply_port_runtimes(solver)
         if run_tail is not None:
             run_tail()
         else:
@@ -1935,6 +1951,7 @@ def solve(
                 solver.accumulate_dft_gpu()
             else:
                 solver.accumulate_dft(n)
+        accumulate_port_observers(solver)
         solver.accumulate_observers(n)
         solver.accumulate_time_observers(n)
 
@@ -1984,4 +2001,7 @@ def solve(
         monitors.update(solver.get_time_observer_results())
     if monitors:
         output["observers"] = monitors
+    ports = finalize_port_data(solver)
+    if ports:
+        output["ports"] = ports
     return output or None
