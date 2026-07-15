@@ -339,7 +339,11 @@ class Simulation:
             raise NotImplementedError(
                 "Trainable RF port, source, and R/L/C parameters require Simulation.fdtd(...)."
             )
-        self._validate_trainable_rf_support()
+        defer_lumped_sweep_validation = self.port_sweep is not None and all(
+            not isinstance(port, WavePort) for port in resolved_scene.ports
+        )
+        if not defer_lumped_sweep_validation:
+            self._validate_trainable_rf_support()
         self.frequencies = tuple(float(freq) for freq in frequencies)
         self.frequency = self.frequencies[0]
         if self.method == SimulationMethod.FDFD:
@@ -414,8 +418,8 @@ class Simulation:
 
     def prepare(self):
         self._refresh_scene()
-        self._validate_trainable_rf_support()
         self._validate_port_excitations()
+        self._validate_trainable_rf_support()
         waveport_excitation = self._waveport_excitation()
         if waveport_excitation is not None:
             prepared_scene = prepare_scene(self.scene)
@@ -450,8 +454,8 @@ class Simulation:
 
     def run(self) -> Result:
         self._refresh_scene()
-        self._validate_trainable_rf_support()
         self._validate_port_excitations()
+        self._validate_trainable_rf_support()
         if self.method == SimulationMethod.FDFD:
             return self._run_fdfd()
         if self.method == SimulationMethod.FDTD:
