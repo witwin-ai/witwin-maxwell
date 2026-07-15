@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 import torch
 
-from ..antenna import AntennaData, Ludwig3
+from ..antenna import AntennaData, Ludwig3, _power_normalized_antenna_metrics
 from ..network import PortData
 
 
@@ -311,14 +311,6 @@ def compute_antenna_data(
             device=device,
             dtype=field_real_dtype,
         )
-        intensity = (
-            radius_tensor.square()
-            * (
-                torch.abs(resolved_e_theta).square()
-                + torch.abs(resolved_e_phi).square()
-            )
-            / (2.0 * impedance_tensor)
-        )
         normalization = (
             "peak phasor; U=r^2*(|E_theta|^2+|E_phi|^2)/(2*eta); "
             "gain referenced to accepted power; realized gain referenced to incident power"
@@ -343,12 +335,6 @@ def compute_antenna_data(
     solid_angle_weights = (
         torch.sin(theta_grid) * theta_weights[:, None] * phi_weights[None, :]
     )
-    p_rad = torch.sum(intensity * solid_angle_weights[None, ...], dim=(-2, -1))
-    if not bool(torch.all(torch.isfinite(p_rad))) or not bool(torch.all(p_rad > 0.0)):
-        raise ValueError(
-            "Integrated radiated power must be finite and strictly positive."
-        )
-
     p_incident = driven_port.incident_power
     p_accepted = driven_port.accepted_power
     if not bool(torch.all(torch.isfinite(p_incident))) or not bool(
@@ -360,14 +346,49 @@ def compute_antenna_data(
     if not bool(torch.all(p_accepted > 0.0)):
         raise ValueError("Driven-port accepted power must be strictly positive.")
 
-    four_pi_intensity = 4.0 * math.pi * intensity
-    directivity = four_pi_intensity / p_rad[:, None, None]
-    gain = four_pi_intensity / p_accepted[:, None, None]
-    realized_gain = four_pi_intensity / p_incident[:, None, None]
-    radiation_efficiency = p_rad / p_accepted
-    mismatch_efficiency = p_accepted / p_incident
-    system_efficiency = p_rad / p_incident
-    eirp = torch.amax(four_pi_intensity, dim=(-2, -1))
+    if resolved_e_theta is not None:
+        metrics = _power_normalized_antenna_metrics(
+            e_theta=resolved_e_theta,
+            e_phi=resolved_e_phi,
+            observation_radius=radius_tensor,
+            wave_impedance=impedance_tensor,
+            solid_angle_weights=solid_angle_weights,
+            incident_power=p_incident,
+            accepted_power=p_accepted,
+        )
+        intensity = metrics["radiation_intensity"]
+    else:
+        p_rad = torch.sum(intensity * solid_angle_weights[None, ...], dim=(-2, -1))
+        radiation_valid = torch.isfinite(p_rad) & (p_rad > 0.0)
+        accepted_valid = torch.isfinite(p_accepted) & (p_accepted > 0.0)
+        incident_valid = torch.isfinite(p_incident) & (p_incident > 0.0)
+        safe_p_rad = torch.where(radiation_valid, p_rad, torch.ones_like(p_rad))
+        safe_accepted = torch.where(accepted_valid, p_accepted, torch.ones_like(p_accepted))
+        safe_incident = torch.where(incident_valid, p_incident, torch.ones_like(p_incident))
+        four_pi_intensity = 4.0 * math.pi * intensity
+        metrics = {
+            "p_rad": p_rad,
+            "directivity": four_pi_intensity / safe_p_rad[:, None, None],
+            "gain": four_pi_intensity / safe_accepted[:, None, None],
+            "realized_gain": four_pi_intensity / safe_incident[:, None, None],
+            "radiation_efficiency": p_rad / safe_accepted,
+            "mismatch_efficiency": p_accepted / safe_incident,
+            "system_efficiency": p_rad / safe_incident,
+            "eirp": torch.amax(four_pi_intensity, dim=(-2, -1)),
+            "radiation_valid": radiation_valid,
+            "accepted_power_valid": accepted_valid,
+            "incident_power_valid": incident_valid,
+        }
+    if not bool(torch.all(metrics["radiation_valid"])):
+        raise ValueError("Integrated radiated power must be finite and strictly positive.")
+    p_rad = metrics["p_rad"]
+    directivity = metrics["directivity"]
+    gain = metrics["gain"]
+    realized_gain = metrics["realized_gain"]
+    radiation_efficiency = metrics["radiation_efficiency"]
+    mismatch_efficiency = metrics["mismatch_efficiency"]
+    system_efficiency = metrics["system_efficiency"]
+    eirp = metrics["eirp"]
 
     basis = Ludwig3() if polarization is None else polarization
     if not isinstance(basis, Ludwig3):

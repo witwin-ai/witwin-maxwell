@@ -1,5 +1,11 @@
 from witwin.core import Box, Cone, Cylinder, Ellipsoid, HollowBox, Mesh, Prism, Pyramid, Sphere, Structure, Torus
 from .antenna import AntennaData, Ludwig3
+from .array import (
+    ArrayBasisData,
+    BeamData,
+    BeamWeights,
+    EmbeddedElementPatternData,
+)
 from .geometry import ComplexPolySlab, PolySlab
 from .media import (
     CustomDebyePole,
@@ -102,9 +108,12 @@ from .fdtd_parallel import FDTDParallelConfig
 __all__ = [
     "AstigmaticGaussianBeam",
     "AntennaData",
+    "ArrayBasisData",
     "AxisPath",
     "BoundarySpec",
     "BoundaryKind",
+    "BeamData",
+    "BeamWeights",
     "Box",
     "ClosedSurfaceMonitor",
     "Capacitor",
@@ -125,6 +134,7 @@ __all__ = [
     "Domain",
     "DrudePole",
     "Ellipsoid",
+    "EmbeddedElementPatternData",
     "FieldDataset",
     "FieldTimeMonitor",
     "FluxMonitor",
