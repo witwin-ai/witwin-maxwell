@@ -76,6 +76,7 @@ from .simulation import (
     TimeConfig,
     run,
 )
+from .fdtd_parallel import FDTDParallelConfig
 
 __all__ = [
     "AstigmaticGaussianBeam",
@@ -106,6 +107,7 @@ __all__ = [
     "FluxTimeMonitor",
     "FDFDConfig",
     "FDTDConfig",
+    "FDTDParallelConfig",
     "FinitePlaneMonitor",
     "GaussianBeam",
     "GaussianPulse",

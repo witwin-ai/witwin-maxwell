@@ -741,6 +741,8 @@ class Result:
         self._monitors = _clone_mapping(monitors)
         self._metadata = _clone_mapping(metadata)
         self._solver_stats = _clone_mapping(solver_stats)
+        self._sharded_manifest = None
+        self._shard_paths: tuple[Path, ...] = ()
         self.raw_output = raw_output
         self.plot = ResultPlotter(self)
 
@@ -775,6 +777,22 @@ class Result:
     @property
     def monitors(self) -> dict[str, Any]:
         return dict(self._monitors)
+
+    @property
+    def solver_stats(self) -> dict[str, Any]:
+        return dict(self._solver_stats)
+
+    @property
+    def is_sharded(self) -> bool:
+        return self._sharded_manifest is not None
+
+    @property
+    def sharded_manifest(self):
+        return self._sharded_manifest
+
+    @property
+    def shard_paths(self) -> tuple[Path, ...]:
+        return self._shard_paths
 
     @property
     def E(self) -> ResultFieldAccessor:
@@ -955,13 +973,132 @@ class Result:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
+                "format_version": 1,
                 "method": self.method,
                 "frequency": self.frequency,
                 "frequencies": self.frequencies,
                 "fields": {name: tensor.detach().cpu() for name, tensor in self._fields.items()},
                 "monitors": _cpu_serializable(self._monitors),
-                "metadata": self._metadata,
-                "solver_stats": self._solver_stats,
+                "metadata": _cpu_serializable(self._metadata),
+                "solver_stats": _cpu_serializable(self._solver_stats),
             },
             output_path,
         )
+
+    def save_sharded(self, directory: str | Path):
+        """Persist owned field shards without assembling global field tensors."""
+
+        exporter = getattr(self.solver, "export_field_shards", None)
+        if not callable(exporter):
+            raise RuntimeError(
+                "Result.save_sharded() requires solver.export_field_shards(); "
+                "this Result has no shard field export provider."
+            )
+        from .fdtd.distributed.persistence import write_sharded_result
+
+        payload = {
+            "format_version": 1,
+            "method": self.method,
+            "frequency": self.frequency,
+            "frequencies": self.frequencies,
+            "fields": {},
+            "monitors": _cpu_serializable(self._monitors),
+            "metadata": _cpu_serializable(self._metadata),
+            "solver_stats": _cpu_serializable(self._solver_stats),
+        }
+        return write_sharded_result(
+            directory,
+            result_payload=payload,
+            shard_artifacts=exporter(),
+            frequencies=self.frequencies,
+        )
+
+    @classmethod
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        scene,
+        prepared_scene=None,
+        map_location: Any = "cpu",
+    ) -> "Result":
+        """Load detached inference data saved by :meth:`save`.
+
+        The declarative scene is supplied by the caller because runtime solvers,
+        prepared scenes, and transport state are intentionally not persisted.
+        Result files use pickle-backed ``torch.save`` and must therefore only be
+        loaded from trusted sources.
+        """
+
+        payload = torch.load(
+            Path(path),
+            map_location=map_location,
+            weights_only=False,
+        )
+        if not isinstance(payload, dict):
+            raise ValueError("Result checkpoint must contain a mapping payload.")
+        version = int(payload.get("format_version", 1))
+        if version != 1:
+            raise ValueError(f"Unsupported Result checkpoint format_version={version}.")
+        missing = {"method", "fields", "monitors"}.difference(payload)
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise ValueError(f"Result checkpoint is missing required keys: {names}.")
+
+        return cls(
+            method=payload["method"],
+            scene=scene,
+            prepared_scene=prepared_scene,
+            frequency=payload.get("frequency"),
+            frequencies=payload.get("frequencies"),
+            fields=payload["fields"],
+            monitors=payload["monitors"],
+            metadata=payload.get("metadata"),
+            solver_stats=payload.get("solver_stats"),
+        )
+
+    @classmethod
+    def load_sharded(
+        cls,
+        directory: str | Path,
+        *,
+        scene,
+        prepared_scene=None,
+        gather_fields: bool = False,
+        map_location: Any = "cpu",
+    ) -> "Result":
+        """Load sharded metadata lazily, gathering owned fields only on request."""
+
+        if not isinstance(gather_fields, bool):
+            raise TypeError("gather_fields must be a bool.")
+        from .fdtd.distributed.persistence import load_sharded_result
+
+        loaded = load_sharded_result(
+            directory,
+            gather_fields=gather_fields,
+            map_location=map_location,
+        )
+        payload = loaded.result_payload
+        version = int(payload.get("format_version", 1))
+        if version != 1:
+            raise ValueError(
+                f"Unsupported sharded Result metadata format_version={version}."
+            )
+        missing = {"method", "monitors"}.difference(payload)
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise ValueError(f"Sharded Result metadata is missing required keys: {names}.")
+        result = cls(
+            method=payload["method"],
+            scene=scene,
+            prepared_scene=prepared_scene,
+            frequency=payload.get("frequency"),
+            frequencies=payload.get("frequencies"),
+            fields=loaded.fields,
+            monitors=payload["monitors"],
+            metadata=payload.get("metadata"),
+            solver_stats=payload.get("solver_stats"),
+        )
+        result._sharded_manifest = loaded.manifest
+        result._shard_paths = loaded.shard_paths
+        return result

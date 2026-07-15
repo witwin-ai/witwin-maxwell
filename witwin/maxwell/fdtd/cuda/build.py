@@ -10,6 +10,17 @@ from pathlib import Path
 import torch
 from torch.utils.cpp_extension import load
 
+STABLE_ABI_VERSION = "stable_abi_v2"
+_REQUIRED_STABLE_OPS = (
+    "update_magnetic_hx_standard_bounded",
+    "update_magnetic_hy_standard_bounded",
+    "update_magnetic_hz_standard_bounded",
+    "update_electric_ex_standard_bounded",
+    "update_electric_ey_standard_bounded",
+    "update_electric_ez_standard_bounded",
+)
+
+
 
 def _candidate_vcvars64_paths() -> list[Path]:
     paths: list[Path] = []
@@ -159,6 +170,11 @@ def prebuilt_extension_path() -> Path:
     return prebuilt_root() / f"witwin_maxwell_fdtd_cuda{extension_suffix()}"
 
 
+def prebuilt_abi_marker_path(library_path: Path | None = None) -> Path:
+    selected = prebuilt_extension_path() if library_path is None else Path(library_path)
+    return selected.with_suffix(f"{selected.suffix}.abi")
+
+
 def extension_sources() -> list[Path]:
     root = source_root()
     return [
@@ -227,7 +243,8 @@ class _StableOpsModule:
 
 def _load_extension_file(library_path: Path) -> _StableOpsModule:
     torch.ops.load_library(str(library_path))
-    if not hasattr(torch.ops.witwin_maxwell_fdtd_cuda, "update_magnetic_hx_standard"):
+    namespace = torch.ops.witwin_maxwell_fdtd_cuda
+    if any(not hasattr(namespace, name) for name in _REQUIRED_STABLE_OPS):
         raise ImportError(f"{library_path} does not register the Stable ABI Maxwell operators.")
     return _StableOpsModule(library_path)
 
@@ -235,6 +252,11 @@ def _load_extension_file(library_path: Path) -> _StableOpsModule:
 def _load_packaged_prebuilt_extension():
     module_path = prebuilt_extension_path()
     if not module_path.exists():
+        return None
+    marker_path = prebuilt_abi_marker_path(module_path)
+    if not marker_path.exists():
+        return None
+    if marker_path.read_text(encoding="utf-8").strip() != STABLE_ABI_VERSION:
         return None
     return _load_extension_file(module_path)
 
@@ -255,13 +277,14 @@ def _load_prebuilt_extension(build_directory: Path):
 
 def build_extension(*, verbose: bool = False):
     root = source_root()
-    default_build_directory = Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda" / "stable_abi_v1"
+    default_build_directory = Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda" / STABLE_ABI_VERSION
     build_directory = Path(os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR", default_build_directory))
     if os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_SKIP_PREBUILT") != "1":
-        try:
-            module = _load_packaged_prebuilt_extension()
-        except Exception:  # noqa: BLE001 - stale/ABI-mismatched prebuilt, rebuild instead
-            module = None
+        # Missing or stale markers are rejected before loading the library so a
+        # JIT rebuild remains safe. A matching marker is an ABI promise: if
+        # loading or probing that binary fails, propagate the error instead of
+        # trying to register the same dispatcher namespace again in-process.
+        module = _load_packaged_prebuilt_extension()
         if module is not None:
             return module
     if os.environ.get("WITWIN_MAXWELL_FDTD_CUDA_PREBUILT") == "1":

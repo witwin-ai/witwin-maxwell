@@ -209,6 +209,8 @@ __global__ void update_electric_standard_kernel(
     unsigned int nx,
     unsigned int ny,
     unsigned int nz,
+    unsigned int local_x_begin,
+    unsigned int local_x_end,
     const float* __restrict__ first,
     const float* __restrict__ second,
     const float* __restrict__ decay,
@@ -222,8 +224,8 @@ __global__ void update_electric_standard_kernel(
     float* __restrict__ field) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
   const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
+  const unsigned int i = local_x_begin + blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= local_x_end || i >= nx || j >= ny || k >= nz) {
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
@@ -260,6 +262,8 @@ __global__ void update_electric_standard_interior_kernel(
     unsigned int nx,
     unsigned int ny,
     unsigned int nz,
+    unsigned int local_x_begin,
+    unsigned int local_x_end,
     const float* __restrict__ first,
     const float* __restrict__ second,
     const float* __restrict__ decay,
@@ -269,8 +273,8 @@ __global__ void update_electric_standard_interior_kernel(
     float* __restrict__ field) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x + (Component == 2 ? 0 : 1);
   const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y + (Component == 1 ? 0 : 1);
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z + (Component == 0 ? 0 : 1);
-  if (i + (Component == 0 ? 0 : 1) >= nx || j + (Component == 1 ? 0 : 1) >= ny ||
+  const unsigned int i = local_x_begin + blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= local_x_end || i >= nx || j + (Component == 1 ? 0 : 1) >= ny ||
       k + (Component == 2 ? 0 : 1) >= nz) {
     return;
   }
@@ -1862,6 +1866,73 @@ void advance_modulation_time_cuda(torch::stable::Tensor modulation_time, double 
   WITWIN_CUDA_CHECK();
 }
 
+void update_electric_ex_standard_bounded_cuda(
+    torch::stable::Tensor ex,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    int64_t y_low_mode,
+    int64_t y_high_mode,
+    int64_t z_low_mode,
+    int64_t z_high_mode,
+    int64_t local_x_begin,
+    int64_t local_x_end,
+    int64_t global_x_offset,
+    int64_t global_x_extent) {
+  check_electric_inputs(ex, hy, hz, decay, curl, "ex");
+  check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
+  check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
+  check_spacing_vector(ex, inv_dy, 1, "inv_dy");
+  check_spacing_vector(ex, inv_dz, 2, "inv_dz");
+  check_bounded_x_launch(
+      ex, local_x_begin, local_x_end, global_x_offset, global_x_extent, "ex");
+  if (local_x_begin == local_x_end) {
+    return;
+  }
+  torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
+  const auto sizes = ex.sizes();
+  const dim3 block = field_block3d();
+  if (inactive_boundary_pair(y_low_mode, y_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
+    if (sizes[1] > 2 && sizes[2] > 2) {
+      update_electric_standard_interior_kernel<0><<<field_grid3d(local_x_end - local_x_begin, sizes[1] - 2, sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+          static_cast<unsigned int>(sizes[0]),
+          static_cast<unsigned int>(sizes[1]),
+          static_cast<unsigned int>(sizes[2]),
+          static_cast<unsigned int>(local_x_begin),
+          static_cast<unsigned int>(local_x_end),
+          hy.mutable_data_ptr<float>(),
+          hz.mutable_data_ptr<float>(),
+          decay.mutable_data_ptr<float>(),
+          curl.mutable_data_ptr<float>(),
+          inv_dy.mutable_data_ptr<float>(),
+          inv_dz.mutable_data_ptr<float>(),
+          ex.mutable_data_ptr<float>());
+    }
+  } else {
+    update_electric_standard_kernel<0><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        static_cast<unsigned int>(local_x_begin),
+        static_cast<unsigned int>(local_x_end),
+        hy.mutable_data_ptr<float>(),
+        hz.mutable_data_ptr<float>(),
+        decay.mutable_data_ptr<float>(),
+        curl.mutable_data_ptr<float>(),
+        inv_dy.mutable_data_ptr<float>(),
+        inv_dz.mutable_data_ptr<float>(),
+        static_cast<int>(y_low_mode),
+        static_cast<int>(y_high_mode),
+        static_cast<int>(z_low_mode),
+        static_cast<int>(z_high_mode),
+        ex.mutable_data_ptr<float>());
+  }
+  WITWIN_CUDA_CHECK();
+}
+
 void update_electric_ex_standard_cuda(
     torch::stable::Tensor ex,
     const torch::stable::Tensor& hy,
@@ -1874,44 +1945,82 @@ void update_electric_ex_standard_cuda(
     int64_t y_high_mode,
     int64_t z_low_mode,
     int64_t z_high_mode) {
-  check_electric_inputs(ex, hy, hz, decay, curl, "ex");
-  check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
-  check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
-  check_spacing_vector(ex, inv_dy, 1, "inv_dy");
-  check_spacing_vector(ex, inv_dz, 2, "inv_dz");
-  torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
-  const auto sizes = ex.sizes();
+  const int64_t x_extent = ex.size(0);
+  update_electric_ex_standard_bounded_cuda(
+      ex, hy, hz, decay, curl, inv_dy, inv_dz,
+      y_low_mode, y_high_mode, z_low_mode, z_high_mode,
+      0, x_extent, 0, x_extent);
+}
+
+void update_electric_ey_standard_bounded_cuda(
+    torch::stable::Tensor ey,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hz,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dz,
+    int64_t x_low_mode,
+    int64_t x_high_mode,
+    int64_t z_low_mode,
+    int64_t z_high_mode,
+    int64_t local_x_begin,
+    int64_t local_x_end,
+    int64_t global_x_offset,
+    int64_t global_x_extent) {
+  check_electric_inputs(ey, hx, hz, decay, curl, "ey");
+  check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
+  check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
+  check_spacing_vector(ey, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ey, inv_dz, 2, "inv_dz");
+  check_bounded_x_launch(
+      ey, local_x_begin, local_x_end, global_x_offset, global_x_extent, "ey");
+  if (local_x_begin == local_x_end) {
+    return;
+  }
+  const int64_t effective_x_low_mode =
+      global_x_offset == 0 ? x_low_mode : BOUNDARY_NONE;
+  const int64_t effective_x_high_mode =
+      global_x_offset + ey.size(0) == global_x_extent ? x_high_mode : BOUNDARY_NONE;
+  torch::stable::accelerator::DeviceGuard guard(ey.get_device_index());
+  const auto sizes = ey.sizes();
   const dim3 block = field_block3d();
-  if (inactive_boundary_pair(y_low_mode, y_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
-    if (sizes[1] > 2 && sizes[2] > 2) {
-      update_electric_standard_interior_kernel<0><<<field_grid3d(sizes[0], sizes[1] - 2, sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+  if (inactive_boundary_pair(effective_x_low_mode, effective_x_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
+    const int64_t interior_x_begin = local_x_begin < 1 ? 1 : local_x_begin;
+    const int64_t interior_x_end = local_x_end > sizes[0] - 1 ? sizes[0] - 1 : local_x_end;
+    if (interior_x_end > interior_x_begin && sizes[2] > 2) {
+      update_electric_standard_interior_kernel<1><<<field_grid3d(interior_x_end - interior_x_begin, sizes[1], sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
-          hy.mutable_data_ptr<float>(),
+          static_cast<unsigned int>(interior_x_begin),
+          static_cast<unsigned int>(interior_x_end),
+          hx.mutable_data_ptr<float>(),
           hz.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
-          inv_dy.mutable_data_ptr<float>(),
+          inv_dx.mutable_data_ptr<float>(),
           inv_dz.mutable_data_ptr<float>(),
-          ex.mutable_data_ptr<float>());
+          ey.mutable_data_ptr<float>());
     }
   } else {
-    update_electric_standard_kernel<0><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+    update_electric_standard_kernel<1><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
         static_cast<unsigned int>(sizes[0]),
         static_cast<unsigned int>(sizes[1]),
         static_cast<unsigned int>(sizes[2]),
-        hy.mutable_data_ptr<float>(),
+        static_cast<unsigned int>(local_x_begin),
+        static_cast<unsigned int>(local_x_end),
+        hx.mutable_data_ptr<float>(),
         hz.mutable_data_ptr<float>(),
         decay.mutable_data_ptr<float>(),
         curl.mutable_data_ptr<float>(),
-        inv_dy.mutable_data_ptr<float>(),
+        inv_dx.mutable_data_ptr<float>(),
         inv_dz.mutable_data_ptr<float>(),
-        static_cast<int>(y_low_mode),
-        static_cast<int>(y_high_mode),
+        static_cast<int>(effective_x_low_mode),
+        static_cast<int>(effective_x_high_mode),
         static_cast<int>(z_low_mode),
         static_cast<int>(z_high_mode),
-        ex.mutable_data_ptr<float>());
+        ey.mutable_data_ptr<float>());
   }
   WITWIN_CUDA_CHECK();
 }
@@ -1928,44 +2037,82 @@ void update_electric_ey_standard_cuda(
     int64_t x_high_mode,
     int64_t z_low_mode,
     int64_t z_high_mode) {
-  check_electric_inputs(ey, hx, hz, decay, curl, "ey");
-  check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
-  check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
-  check_spacing_vector(ey, inv_dx, 0, "inv_dx");
-  check_spacing_vector(ey, inv_dz, 2, "inv_dz");
-  torch::stable::accelerator::DeviceGuard guard(ey.get_device_index());
-  const auto sizes = ey.sizes();
+  const int64_t x_extent = ey.size(0);
+  update_electric_ey_standard_bounded_cuda(
+      ey, hx, hz, decay, curl, inv_dx, inv_dz,
+      x_low_mode, x_high_mode, z_low_mode, z_high_mode,
+      0, x_extent, 0, x_extent);
+}
+
+void update_electric_ez_standard_bounded_cuda(
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& hx,
+    const torch::stable::Tensor& hy,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    int64_t x_low_mode,
+    int64_t x_high_mode,
+    int64_t y_low_mode,
+    int64_t y_high_mode,
+    int64_t local_x_begin,
+    int64_t local_x_end,
+    int64_t global_x_offset,
+    int64_t global_x_extent) {
+  check_electric_inputs(ez, hx, hy, decay, curl, "ez");
+  check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
+  check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
+  check_spacing_vector(ez, inv_dx, 0, "inv_dx");
+  check_spacing_vector(ez, inv_dy, 1, "inv_dy");
+  check_bounded_x_launch(
+      ez, local_x_begin, local_x_end, global_x_offset, global_x_extent, "ez");
+  if (local_x_begin == local_x_end) {
+    return;
+  }
+  const int64_t effective_x_low_mode =
+      global_x_offset == 0 ? x_low_mode : BOUNDARY_NONE;
+  const int64_t effective_x_high_mode =
+      global_x_offset + ez.size(0) == global_x_extent ? x_high_mode : BOUNDARY_NONE;
+  torch::stable::accelerator::DeviceGuard guard(ez.get_device_index());
+  const auto sizes = ez.sizes();
   const dim3 block = field_block3d();
-  if (inactive_boundary_pair(x_low_mode, x_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
-    if (sizes[0] > 2 && sizes[2] > 2) {
-      update_electric_standard_interior_kernel<1><<<field_grid3d(sizes[0] - 2, sizes[1], sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+  if (inactive_boundary_pair(effective_x_low_mode, effective_x_high_mode) && inactive_boundary_pair(y_low_mode, y_high_mode)) {
+    const int64_t interior_x_begin = local_x_begin < 1 ? 1 : local_x_begin;
+    const int64_t interior_x_end = local_x_end > sizes[0] - 1 ? sizes[0] - 1 : local_x_end;
+    if (interior_x_end > interior_x_begin && sizes[1] > 2) {
+      update_electric_standard_interior_kernel<2><<<field_grid3d(interior_x_end - interior_x_begin, sizes[1] - 2, sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
+          static_cast<unsigned int>(interior_x_begin),
+          static_cast<unsigned int>(interior_x_end),
           hx.mutable_data_ptr<float>(),
-          hz.mutable_data_ptr<float>(),
+          hy.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
           inv_dx.mutable_data_ptr<float>(),
-          inv_dz.mutable_data_ptr<float>(),
-          ey.mutable_data_ptr<float>());
+          inv_dy.mutable_data_ptr<float>(),
+          ez.mutable_data_ptr<float>());
     }
   } else {
-    update_electric_standard_kernel<1><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+    update_electric_standard_kernel<2><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
         static_cast<unsigned int>(sizes[0]),
         static_cast<unsigned int>(sizes[1]),
         static_cast<unsigned int>(sizes[2]),
+        static_cast<unsigned int>(local_x_begin),
+        static_cast<unsigned int>(local_x_end),
         hx.mutable_data_ptr<float>(),
-        hz.mutable_data_ptr<float>(),
+        hy.mutable_data_ptr<float>(),
         decay.mutable_data_ptr<float>(),
         curl.mutable_data_ptr<float>(),
         inv_dx.mutable_data_ptr<float>(),
-        inv_dz.mutable_data_ptr<float>(),
-        static_cast<int>(x_low_mode),
-        static_cast<int>(x_high_mode),
-        static_cast<int>(z_low_mode),
-        static_cast<int>(z_high_mode),
-        ey.mutable_data_ptr<float>());
+        inv_dy.mutable_data_ptr<float>(),
+        static_cast<int>(effective_x_low_mode),
+        static_cast<int>(effective_x_high_mode),
+        static_cast<int>(y_low_mode),
+        static_cast<int>(y_high_mode),
+        ez.mutable_data_ptr<float>());
   }
   WITWIN_CUDA_CHECK();
 }
@@ -1982,46 +2129,11 @@ void update_electric_ez_standard_cuda(
     int64_t x_high_mode,
     int64_t y_low_mode,
     int64_t y_high_mode) {
-  check_electric_inputs(ez, hx, hy, decay, curl, "ez");
-  check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
-  check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
-  check_spacing_vector(ez, inv_dx, 0, "inv_dx");
-  check_spacing_vector(ez, inv_dy, 1, "inv_dy");
-  torch::stable::accelerator::DeviceGuard guard(ez.get_device_index());
-  const auto sizes = ez.sizes();
-  const dim3 block = field_block3d();
-  if (inactive_boundary_pair(x_low_mode, x_high_mode) && inactive_boundary_pair(y_low_mode, y_high_mode)) {
-    if (sizes[0] > 2 && sizes[1] > 2) {
-      update_electric_standard_interior_kernel<2><<<field_grid3d(sizes[0] - 2, sizes[1] - 2, sizes[2], block), block, 0, current_cuda_stream()>>>(
-          static_cast<unsigned int>(sizes[0]),
-          static_cast<unsigned int>(sizes[1]),
-          static_cast<unsigned int>(sizes[2]),
-          hx.mutable_data_ptr<float>(),
-          hy.mutable_data_ptr<float>(),
-          decay.mutable_data_ptr<float>(),
-          curl.mutable_data_ptr<float>(),
-          inv_dx.mutable_data_ptr<float>(),
-          inv_dy.mutable_data_ptr<float>(),
-          ez.mutable_data_ptr<float>());
-    }
-  } else {
-    update_electric_standard_kernel<2><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-        static_cast<unsigned int>(sizes[0]),
-        static_cast<unsigned int>(sizes[1]),
-        static_cast<unsigned int>(sizes[2]),
-        hx.mutable_data_ptr<float>(),
-        hy.mutable_data_ptr<float>(),
-        decay.mutable_data_ptr<float>(),
-        curl.mutable_data_ptr<float>(),
-        inv_dx.mutable_data_ptr<float>(),
-        inv_dy.mutable_data_ptr<float>(),
-        static_cast<int>(x_low_mode),
-        static_cast<int>(x_high_mode),
-        static_cast<int>(y_low_mode),
-        static_cast<int>(y_high_mode),
-        ez.mutable_data_ptr<float>());
-  }
-  WITWIN_CUDA_CHECK();
+  const int64_t x_extent = ez.size(0);
+  update_electric_ez_standard_bounded_cuda(
+      ez, hx, hy, decay, curl, inv_dx, inv_dy,
+      x_low_mode, x_high_mode, y_low_mode, y_high_mode,
+      0, x_extent, 0, x_extent);
 }
 
 void update_electric_ex_bloch_cuda(

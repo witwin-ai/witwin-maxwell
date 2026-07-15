@@ -127,6 +127,36 @@ def _magnetic_hz_standard(*, Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy):
     _COMPILED_EXTENSION.update_magnetic_hz_standard(Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy)
 
 
+def _magnetic_hx_standard_bounded(
+    *, Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz,
+    localXBegin, localXEnd, globalXOffset, globalXExtent,
+):
+    _COMPILED_EXTENSION.update_magnetic_hx_standard_bounded(
+        Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz,
+        int(localXBegin), int(localXEnd), int(globalXOffset), int(globalXExtent),
+    )
+
+
+def _magnetic_hy_standard_bounded(
+    *, Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz,
+    localXBegin, localXEnd, globalXOffset, globalXExtent,
+):
+    _COMPILED_EXTENSION.update_magnetic_hy_standard_bounded(
+        Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz,
+        int(localXBegin), int(localXEnd), int(globalXOffset), int(globalXExtent),
+    )
+
+
+def _magnetic_hz_standard_bounded(
+    *, Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy,
+    localXBegin, localXEnd, globalXOffset, globalXExtent,
+):
+    _COMPILED_EXTENSION.update_magnetic_hz_standard_bounded(
+        Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy,
+        int(localXBegin), int(localXEnd), int(globalXOffset), int(globalXExtent),
+    )
+
+
 def _magnetic_hx_cpml(
     *,
     Hx,
@@ -484,6 +514,42 @@ def _electric_ez_standard(
             )
 
 
+
+
+def _electric_ex_standard_bounded(
+    *, Ex, Hy, Hz, ExDecay, ExCurl, invDy, invDz,
+    yLowBoundaryMode, yHighBoundaryMode, zLowBoundaryMode, zHighBoundaryMode,
+    localXBegin, localXEnd, globalXOffset, globalXExtent,
+):
+    _COMPILED_EXTENSION.update_electric_ex_standard_bounded(
+        Ex, Hy, Hz, ExDecay, ExCurl, invDy, invDz,
+        int(yLowBoundaryMode), int(yHighBoundaryMode), int(zLowBoundaryMode), int(zHighBoundaryMode),
+        int(localXBegin), int(localXEnd), int(globalXOffset), int(globalXExtent),
+    )
+
+
+def _electric_ey_standard_bounded(
+    *, Ey, Hx, Hz, EyDecay, EyCurl, invDx, invDz,
+    xLowBoundaryMode, xHighBoundaryMode, zLowBoundaryMode, zHighBoundaryMode,
+    localXBegin, localXEnd, globalXOffset, globalXExtent,
+):
+    _COMPILED_EXTENSION.update_electric_ey_standard_bounded(
+        Ey, Hx, Hz, EyDecay, EyCurl, invDx, invDz,
+        int(xLowBoundaryMode), int(xHighBoundaryMode), int(zLowBoundaryMode), int(zHighBoundaryMode),
+        int(localXBegin), int(localXEnd), int(globalXOffset), int(globalXExtent),
+    )
+
+
+def _electric_ez_standard_bounded(
+    *, Ez, Hx, Hy, EzDecay, EzCurl, invDx, invDy,
+    xLowBoundaryMode, xHighBoundaryMode, yLowBoundaryMode, yHighBoundaryMode,
+    localXBegin, localXEnd, globalXOffset, globalXExtent,
+):
+    _COMPILED_EXTENSION.update_electric_ez_standard_bounded(
+        Ez, Hx, Hy, EzDecay, EzCurl, invDx, invDy,
+        int(xLowBoundaryMode), int(xHighBoundaryMode), int(yLowBoundaryMode), int(yHighBoundaryMode),
+        int(localXBegin), int(localXEnd), int(globalXOffset), int(globalXExtent),
+    )
 def _electric_ex_modulated(
     *,
     Ex,
@@ -3398,6 +3464,9 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "updateMagneticFieldHxStandard3D": _magnetic_hx_standard,
     "updateMagneticFieldHyStandard3D": _magnetic_hy_standard,
     "updateMagneticFieldHzStandard3D": _magnetic_hz_standard,
+    "updateMagneticFieldHxStandardBounded3D": _magnetic_hx_standard_bounded,
+    "updateMagneticFieldHyStandardBounded3D": _magnetic_hy_standard_bounded,
+    "updateMagneticFieldHzStandardBounded3D": _magnetic_hz_standard_bounded,
     "updateMagneticFieldHx3D": _magnetic_hx_cpml,
     "updateMagneticFieldHy3D": _magnetic_hy_cpml,
     "updateMagneticFieldHz3D": _magnetic_hz_cpml,
@@ -3405,6 +3474,7 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "updateMagneticFieldHyCpmlCompressed3D": _magnetic_hy_cpml_compressed,
     "updateMagneticFieldHzCpmlCompressed3D": _magnetic_hz_cpml_compressed,
     "updateElectricFieldExStandard3D": _electric_ex_standard,
+    "updateElectricFieldExStandardBounded3D": _electric_ex_standard_bounded,
     "advanceModulationTime3D": _advance_modulation_time,
     "updateElectricFieldExModulated3D": _electric_ex_modulated,
     "updateElectricFieldEyModulated3D": _electric_ey_modulated,
@@ -3414,6 +3484,8 @@ _KERNELS: dict[str, Callable[..., None]] = {
     "updateElectricFieldEzCpmlModulated3D": _electric_ez_cpml_modulated,
     "updateElectricFieldEyStandard3D": _electric_ey_standard,
     "updateElectricFieldEzStandard3D": _electric_ez_standard,
+    "updateElectricFieldEyStandardBounded3D": _electric_ey_standard_bounded,
+    "updateElectricFieldEzStandardBounded3D": _electric_ez_standard_bounded,
     "updateElectricFieldExCpml3D": _electric_ex_cpml,
     "updateElectricFieldEyCpml3D": _electric_ey_cpml,
     "updateElectricFieldEzCpml3D": _electric_ez_cpml,

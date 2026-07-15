@@ -271,7 +271,8 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                         * profile
                     )
                     patch_offsets = (ix_start, iy_start, iz_start)
-                source_patch *= _symmetry_plane_source_scale(scene, "Ez", image_position)
+                symmetry_scale = _symmetry_plane_source_scale(scene, "Ez", image_position)
+                source_patch *= symmetry_scale
                 append_source_term(
                     solver._source_terms,
                     solver,
@@ -281,6 +282,8 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                     phase_real=phase_real,
                     phase_imag=phase_imag,
                     source_index=source_index,
+                    source_position=image_position,
+                    source_symmetry_scale=symmetry_scale,
                     source_time=source_time,
                     omega=source_omega,
                 )
@@ -318,7 +321,8 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                         * profile
                     )
                     patch_offsets = (ix_start, iy_start, iz_start)
-                source_patch *= _symmetry_plane_source_scale(scene, "Ex", image_position)
+                symmetry_scale = _symmetry_plane_source_scale(scene, "Ex", image_position)
+                source_patch *= symmetry_scale
                 append_source_term(
                     solver._source_terms,
                     solver,
@@ -328,6 +332,8 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                     phase_real=phase_real,
                     phase_imag=phase_imag,
                     source_index=source_index,
+                    source_position=image_position,
+                    source_symmetry_scale=symmetry_scale,
                     source_time=source_time,
                     omega=source_omega,
                 )
@@ -365,7 +371,8 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                         * profile
                     )
                     patch_offsets = (ix_start, iy_start, iz_start)
-                source_patch *= _symmetry_plane_source_scale(scene, "Ey", image_position)
+                symmetry_scale = _symmetry_plane_source_scale(scene, "Ey", image_position)
+                source_patch *= symmetry_scale
                 append_source_term(
                     solver._source_terms,
                     solver,
@@ -375,6 +382,8 @@ def _prepare_point_dipole_source(solver, source, *, source_index):
                     phase_real=phase_real,
                     phase_imag=phase_imag,
                     source_index=source_index,
+                    source_position=image_position,
+                    source_symmetry_scale=symmetry_scale,
                     source_time=source_time,
                     omega=source_omega,
                 )

@@ -24,6 +24,8 @@ def build_source_term(
     cw_sin_patch=None,
     source_index=None,
     source_time=None,
+    source_position=None,
+    source_symmetry_scale=None,
     omega=None,
 ):
     grid_tensor = patch
@@ -49,6 +51,12 @@ def build_source_term(
         "cw_cos_patch": None if cw_cos_patch is None else cw_cos_patch.contiguous(),
         "cw_sin_patch": None if cw_sin_patch is None else cw_sin_patch.contiguous(),
         "source_index": None if source_index is None else int(source_index),
+        "source_position": (
+            None if source_position is None else tuple(float(value) for value in source_position)
+        ),
+        "source_symmetry_scale": (
+            None if source_symmetry_scale is None else float(source_symmetry_scale)
+        ),
         "source_time": source_time,
         "omega": None if omega is None else float(omega),
     }

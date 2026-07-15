@@ -6,6 +6,8 @@ from typing import Any, Iterable
 
 import torch
 
+from .fdtd_parallel import FDTDParallelConfig
+
 from .monitors import MediumMonitor, PermittivityMonitor
 from .result import Result
 from .scene import Scene, SceneModule, prepare_scene
@@ -147,6 +149,7 @@ class FDTDConfig:
     shutoff: float = 0.0  # relative E-energy threshold for auto-shutoff; 0 disables (opt-in)
     shutoff_check_interval: int = 100
     cuda_graph: bool = False  # capture the field-update core into a CUDA graph (opt-in)
+    parallel: FDTDParallelConfig | None = None
 
     def __post_init__(self):
         if not isinstance(self.run_time, TimeConfig):
@@ -163,7 +166,15 @@ class FDTDConfig:
         self.shutoff_check_interval = int(self.shutoff_check_interval)
         if self.shutoff_check_interval <= 0:
             raise ValueError("shutoff_check_interval must be > 0.")
+        if self.parallel is not None and not isinstance(self.parallel, FDTDParallelConfig):
+            raise TypeError("parallel must be an FDTDParallelConfig instance or None.")
         self.cuda_graph = bool(self.cuda_graph)
+        if self.parallel is not None and self.cuda_graph:
+            raise ValueError("Multi-GPU FDTD does not support CUDA Graph capture.")
+        if self.parallel is not None and self.enable_plot:
+            raise ValueError(
+                "Multi-GPU FDTD plotting requires running first and requesting gathered fields."
+            )
         if self.adjoint_checkpoint_stride is not None:
             self.adjoint_checkpoint_stride = int(self.adjoint_checkpoint_stride)
             if self.adjoint_checkpoint_stride <= 0:
@@ -323,6 +334,7 @@ class Simulation:
         shutoff: float = 0.0,
         shutoff_check_interval: int = 100,
         cuda_graph: bool = False,
+        parallel: FDTDParallelConfig | None = None,
     ) -> "Simulation":
         return cls(
             scene=scene,
@@ -338,6 +350,7 @@ class Simulation:
                 shutoff=shutoff,
                 shutoff_check_interval=shutoff_check_interval,
                 cuda_graph=cuda_graph,
+                parallel=parallel,
             ),
         )
 
@@ -346,6 +359,7 @@ class Simulation:
         if self.method == SimulationMethod.FDFD:
             solver = self._build_fdfd_solver()
         elif self.method == SimulationMethod.FDTD:
+            self._reject_trainable_parallel_fdtd()
             solver = self._build_fdtd_solver(initialize=True)
             if self.has_trainable_parameters:
                 from .fdtd.adjoint.dispatch import validate_native_adjoint_preparation
@@ -443,6 +457,7 @@ class Simulation:
         )
 
     def _run_fdtd(self) -> Result:
+        self._reject_trainable_parallel_fdtd()
         if self.has_trainable_parameters:
             return self._run_fdtd_with_gradient_bridge()
         solver = self._build_fdtd_solver(initialize=True)
@@ -451,7 +466,29 @@ class Simulation:
     def _build_fdtd_solver(self, *, initialize: bool):
         return self._build_fdtd_solver_for_scene(self.scene, initialize=initialize)
 
+    def _reject_trainable_parallel_fdtd(self) -> None:
+        if self.config.parallel is not None and self.has_trainable_parameters:
+            raise ValueError(
+                "Multi-GPU FDTD does not support trainable scene parameters; "
+                "use the single-GPU adjoint path by omitting parallel."
+            )
+
     def _build_fdtd_solver_for_scene(self, scene, *, initialize: bool):
+        if self.config.parallel is not None:
+            _require_cuda_scene(scene, method="fdtd")
+            from .fdtd.distributed import DistributedFDTD
+
+            solver = DistributedFDTD(
+                scene,
+                frequency=self.frequency,
+                parallel=self.config.parallel,
+                absorber_type=self.config.absorber,
+                cpml_config=self.config.cpml_config,
+            )
+            if initialize:
+                solver.init_field()
+            return solver
+
         prepared_scene = prepare_scene(scene)
         _require_cuda_scene(prepared_scene, method="fdtd")
         fdtd_backend, _ = _resolve_fdtd_backend()
@@ -551,7 +588,9 @@ class Simulation:
     def _run_fdtd_from_solver(self, solver) -> Result:
         raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(solver, self.scene)
         if raw_output is None:
-            raise RuntimeError("FDTD solve did not return any output.")
+            if self.config.parallel is None or self.config.parallel.gather_fields:
+                raise RuntimeError("FDTD solve did not return any output.")
+            raw_output = {}
 
         monitors = raw_output.get("observers", {}) if isinstance(raw_output, dict) else {}
         field_payload = {
@@ -559,10 +598,19 @@ class Simulation:
             for key, value in (raw_output.items() if isinstance(raw_output, dict) else [])
             if key in {"Ex", "Ey", "Ez"}
         }
-        if not field_payload and len(self.frequencies) == 1:
+        if self.config.parallel is not None and self.config.parallel.gather_fields and not field_payload:
+            raise RuntimeError(
+                "Multi-GPU FDTD was configured with gather_fields=True but returned no fields."
+            )
+        if not field_payload and len(self.frequencies) == 1 and self.config.parallel is None:
             field_payload = self._fdtd_last_step_field_payload(solver)
 
-        fields = _to_tensor_fields(field_payload, self.scene.device)
+        result_device = (
+            self.scene.device
+            if self.config.parallel is None
+            else self.config.parallel.result_device
+        )
+        fields = _to_tensor_fields(field_payload, result_device)
         solver_stats = self._build_fdtd_solver_stats(
             solver,
             time_steps=time_steps,
@@ -602,7 +650,7 @@ class Simulation:
         )
         shutoff_triggered = bool(getattr(solver, "_shutoff_triggered", False))
         shutoff_step = getattr(solver, "_shutoff_step", None)
-        return {
+        stats = {
             "time_steps": time_steps,
             "shutoff": self.config.shutoff,
             "shutoff_check_interval": self.config.shutoff_check_interval,
@@ -640,6 +688,9 @@ class Simulation:
                 else None
             ),
         }
+        if self.config.parallel is not None:
+            stats["parallel_stats"] = dict(getattr(solver, "parallel_stats", {}))
+        return stats
 
     def _run_fdtd_with_gradient_bridge(self) -> Result:
         from .fdtd.adjoint import run_fdtd_with_gradient_bridge
