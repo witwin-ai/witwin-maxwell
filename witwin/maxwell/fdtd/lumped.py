@@ -21,6 +21,8 @@ class LumpedRuntime:
     resistance: torch.Tensor
     inductance: torch.Tensor
     capacitance: torch.Tensor
+    inductance_active: bool
+    capacitance_active: bool
     resistance_is_open: torch.Tensor
     inductance_enabled: torch.Tensor
     capacitance_enabled: torch.Tensor
@@ -50,6 +52,34 @@ class LumpedRuntime:
     last_stored_energy_change: torch.Tensor
     last_source_work: torch.Tensor
     last_field_energy_change: torch.Tensor
+
+
+@dataclass(frozen=True)
+class LumpedStepTrace:
+    """Scalar intermediates required by the exact local circuit pullback."""
+
+    runtime: LumpedRuntime
+    field_name: str
+    kind: str
+    index: int
+    voltage_before: torch.Tensor
+    branch_current: torch.Tensor
+    voltage_midpoint: torch.Tensor
+    drive: torch.Tensor
+    old_inductor_current: torch.Tensor
+    old_capacitor_voltage: torch.Tensor
+
+
+@dataclass(frozen=True)
+class LumpedStepPullback:
+    field_adjoint: torch.Tensor
+    inductor_current_adjoint: torch.Tensor
+    capacitor_voltage_adjoint: torch.Tensor
+    grad_eps: torch.Tensor
+    grad_resistance: torch.Tensor
+    grad_inductance: torch.Tensor
+    grad_capacitance: torch.Tensor
+    grad_drive: torch.Tensor
 
 
 def _prepared_scalar(
@@ -266,6 +296,8 @@ def prepare_lumped_runtime(
         resistance=resistance_tensor,
         inductance=inductance_tensor,
         capacitance=capacitance_tensor,
+        inductance_active=bool(inductance_enabled),
+        capacitance_active=bool(capacitance_enabled),
         resistance_is_open=torch.isinf(resistance_tensor),
         inductance_enabled=inductance_enabled,
         capacitance_enabled=capacitance_enabled,
@@ -295,6 +327,191 @@ def prepare_lumped_runtime(
         last_stored_energy_change=scalar_zeros[11],
         last_source_work=scalar_zeros[12],
         last_field_energy_change=scalar_zeros[13],
+    )
+
+
+def replay_lumped_runtime(
+    runtime: LumpedRuntime,
+    electric_field: torch.Tensor,
+    *,
+    inductor_current: torch.Tensor,
+    capacitor_voltage: torch.Tensor,
+    drive: torch.Tensor,
+    field_name: str,
+    kind: str,
+    index: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, LumpedStepTrace]:
+    """Replay one series implicit branch without mutating prepared runtime state."""
+
+    if runtime.topology != "series":
+        raise NotImplementedError(
+            "Differentiable lumped replay currently supports series R/L/C topology only."
+        )
+    flat = electric_field.reshape(-1)
+    voltage_before = torch.dot(
+        torch.index_select(flat, 0, runtime.linear_indices),
+        runtime.voltage_weights,
+    )
+    numerator = (
+        voltage_before
+        - drive
+        - capacitor_voltage
+        + runtime.series_inductive_impedance * inductor_current
+    )
+    branch_current = numerator * runtime.inverse_denominator
+    corrected = electric_field.clone()
+    corrected.reshape(-1).index_add_(
+        0,
+        runtime.linear_indices,
+        -runtime.injection * branch_current,
+    )
+    voltage_midpoint = (
+        voltage_before - runtime.discrete_port_impedance * branch_current
+    )
+
+    next_inductor_current = 2.0 * branch_current - inductor_current
+    if not runtime.inductance_active:
+        next_inductor_current = torch.zeros_like(next_inductor_current)
+    next_capacitor_voltage = (
+        capacitor_voltage
+        + 2.0 * runtime.series_capacitive_impedance * branch_current
+    )
+    if not runtime.capacitance_active:
+        next_capacitor_voltage = torch.zeros_like(next_capacitor_voltage)
+
+    trace = LumpedStepTrace(
+        runtime=runtime,
+        field_name=field_name,
+        kind=kind,
+        index=int(index),
+        voltage_before=voltage_before,
+        branch_current=branch_current,
+        voltage_midpoint=voltage_midpoint,
+        drive=drive,
+        old_inductor_current=inductor_current,
+        old_capacitor_voltage=capacitor_voltage,
+    )
+    return corrected, next_inductor_current, next_capacitor_voltage, trace
+
+
+def pullback_lumped_runtime(
+    trace: LumpedStepTrace,
+    field_adjoint: torch.Tensor,
+    *,
+    inductor_current_adjoint: torch.Tensor,
+    capacitor_voltage_adjoint: torch.Tensor,
+    voltage_sample_adjoint: torch.Tensor,
+    network_current_sample_adjoint: torch.Tensor,
+    eps_edge: torch.Tensor,
+) -> LumpedStepPullback:
+    """Apply the exact VJP of one implicit series branch on the runtime device."""
+
+    runtime = trace.runtime
+    if runtime.topology != "series":
+        raise NotImplementedError(
+            "Differentiable lumped pullback currently supports series R/L/C topology only."
+        )
+    flat_adjoint = field_adjoint.reshape(-1)
+    local_field_adjoint = torch.index_select(
+        flat_adjoint,
+        0,
+        runtime.linear_indices,
+    )
+    branch_current = trace.branch_current
+    bar_current = -network_current_sample_adjoint
+    bar_injection = -branch_current * local_field_adjoint
+    bar_current = bar_current - torch.dot(runtime.injection, local_field_adjoint)
+
+    bar_voltage = voltage_sample_adjoint
+    bar_discrete_impedance = -branch_current * voltage_sample_adjoint
+    bar_current = (
+        bar_current
+        - runtime.discrete_port_impedance * voltage_sample_adjoint
+    )
+
+    bar_old_inductor = torch.zeros_like(trace.old_inductor_current)
+    bar_old_capacitor = torch.zeros_like(trace.old_capacitor_voltage)
+    bar_inductive_impedance = torch.zeros_like(runtime.series_inductive_impedance)
+    bar_capacitive_impedance = torch.zeros_like(runtime.series_capacitive_impedance)
+    if runtime.inductance_active:
+        bar_current = bar_current + 2.0 * inductor_current_adjoint
+        bar_old_inductor = bar_old_inductor - inductor_current_adjoint
+    if runtime.capacitance_active:
+        bar_old_capacitor = bar_old_capacitor + capacitor_voltage_adjoint
+        bar_capacitive_impedance = (
+            bar_capacitive_impedance
+            + 2.0 * branch_current * capacitor_voltage_adjoint
+        )
+        bar_current = (
+            bar_current
+            + 2.0 * runtime.series_capacitive_impedance
+            * capacitor_voltage_adjoint
+        )
+
+    bar_numerator = bar_current * runtime.inverse_denominator
+    bar_denominator = (
+        -bar_current * branch_current * runtime.inverse_denominator
+    )
+    bar_voltage = bar_voltage + bar_numerator
+    bar_drive = -bar_numerator
+    bar_old_capacitor = bar_old_capacitor - bar_numerator
+    bar_inductive_impedance = (
+        bar_inductive_impedance
+        + trace.old_inductor_current * bar_numerator
+        + bar_denominator
+    )
+    bar_old_inductor = (
+        bar_old_inductor
+        + runtime.series_inductive_impedance * bar_numerator
+    )
+    bar_capacitive_impedance = bar_capacitive_impedance + bar_denominator
+    bar_resistance = bar_denominator
+    bar_discrete_impedance = bar_discrete_impedance + bar_denominator
+
+    bar_injection = (
+        bar_injection
+        + 0.5 * runtime.voltage_weights * bar_discrete_impedance
+    )
+    pre_field_adjoint = field_adjoint.clone()
+    pre_field_adjoint.reshape(-1).index_add_(
+        0,
+        runtime.linear_indices,
+        runtime.voltage_weights * bar_voltage,
+    )
+
+    local_eps = torch.index_select(
+        eps_edge.reshape(-1),
+        0,
+        runtime.linear_indices,
+    )
+    local_grad_eps = -bar_injection * runtime.injection / local_eps
+    grad_eps = torch.zeros_like(eps_edge)
+    grad_eps.reshape(-1).index_add_(
+        0,
+        runtime.linear_indices,
+        local_grad_eps,
+    )
+    grad_inductance = (
+        2.0 * bar_inductive_impedance / runtime.dt
+        if runtime.inductance_active
+        else torch.zeros_like(runtime.inductance)
+    )
+    grad_capacitance = (
+        -bar_capacitive_impedance
+        * runtime.series_capacitive_impedance
+        / runtime.capacitance
+        if runtime.capacitance_active
+        else torch.zeros_like(runtime.capacitance)
+    )
+    return LumpedStepPullback(
+        field_adjoint=pre_field_adjoint,
+        inductor_current_adjoint=bar_old_inductor,
+        capacitor_voltage_adjoint=bar_old_capacitor,
+        grad_eps=grad_eps,
+        grad_resistance=bar_resistance,
+        grad_inductance=grad_inductance,
+        grad_capacitance=grad_capacitance,
+        grad_drive=bar_drive,
     )
 
 
@@ -491,4 +708,12 @@ def apply_lumped_runtime(
     return runtime.last_branch_current
 
 
-__all__ = ["LumpedRuntime", "apply_lumped_runtime", "prepare_lumped_runtime"]
+__all__ = [
+    "LumpedRuntime",
+    "LumpedStepPullback",
+    "LumpedStepTrace",
+    "apply_lumped_runtime",
+    "prepare_lumped_runtime",
+    "pullback_lumped_runtime",
+    "replay_lumped_runtime",
+]

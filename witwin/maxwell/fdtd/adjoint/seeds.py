@@ -90,12 +90,21 @@ class _PlaneSeedBatch:
 
 
 @dataclass(frozen=True)
+class _PortSeedBatch:
+    port_index: int
+    voltage_samples: torch.Tensor
+    current_samples: torch.Tensor
+    drive_samples: torch.Tensor
+
+
+@dataclass(frozen=True)
 class _SeedRuntime:
     dft_schedule: _ScheduleTensorPack
     observer_schedule: _ScheduleTensorPack
     dense_batches: tuple[_DenseSeedBatch, ...]
     point_batches: tuple[_PointSeedBatch, ...]
     plane_batches: tuple[_PlaneSeedBatch, ...]
+    port_batches: tuple[_PortSeedBatch, ...]
     backend: str = "device_batched"
 
 
@@ -331,17 +340,24 @@ def _build_output_seeds(
     with torch.enable_grad():
         seed_solver, leaves, field_pairs, point_pairs, plane_pairs = _clone_seed_solver(solver)
         seed_pack = _dense_seed_output_pairs(seed_solver)
-        if len(seed_pack.output_tensors) != len(pack.output_tensors):
+        if len(seed_pack.output_tensors) != pack.port_offset:
             raise RuntimeError("Adjoint output pack layout changed between forward and backward.")
         output_grads = tuple(
             torch.zeros_like(output) if grad_output is None else grad_output.to(device=output.device, dtype=output.dtype)
-            for output, grad_output in zip(seed_pack.output_tensors, grad_outputs)
+            for output, grad_output in zip(
+                seed_pack.output_tensors,
+                grad_outputs[: pack.port_offset],
+            )
         )
-        leaf_grads = torch.autograd.grad(
-            seed_pack.output_tensors,
-            leaves,
-            grad_outputs=output_grads,
-            allow_unused=True,
+        leaf_grads = (
+            torch.autograd.grad(
+                seed_pack.output_tensors,
+                leaves,
+                grad_outputs=output_grads,
+                allow_unused=True,
+            )
+            if leaves and seed_pack.output_tensors
+            else tuple(None for _leaf in leaves)
         )
 
     dense_seed_records: dict[str, list[tuple[int, torch.Tensor, torch.Tensor]]] = {}
@@ -430,13 +446,126 @@ def _build_output_seeds(
             )
         )
 
+    port_batches = []
+    port_runtime_by_name = {
+        runtime.port.name: (index, runtime)
+        for index, runtime in enumerate(getattr(solver, "_port_runtimes", ()))
+    }
+    cursor = int(pack.port_offset)
+    for port_name in pack.port_templates:
+        port_index, port_runtime = port_runtime_by_name[port_name]
+        voltage_output = pack.output_tensors[cursor]
+        current_output = pack.output_tensors[cursor + 1]
+        voltage_grad = (
+            torch.zeros_like(voltage_output)
+            if grad_outputs[cursor] is None
+            else grad_outputs[cursor].to(
+                device=voltage_output.device,
+                dtype=voltage_output.dtype,
+            )
+        )
+        current_grad = (
+            torch.zeros_like(current_output)
+            if grad_outputs[cursor + 1] is None
+            else grad_outputs[cursor + 1].to(
+                device=current_output.device,
+                dtype=current_output.dtype,
+            )
+        )
+        cursor += 2
+        available_power_grad = None
+        if pack.port_templates[port_name].available_power is not None:
+            available_power_output = pack.output_tensors[cursor]
+            available_power_grad = (
+                torch.zeros_like(available_power_output)
+                if grad_outputs[cursor] is None
+                else grad_outputs[cursor].to(
+                    device=available_power_output.device,
+                    dtype=available_power_output.dtype,
+                )
+            )
+            cursor += 1
+        weights = port_runtime.window_weights
+        if weights is None or port_runtime.accumulator is None:
+            raise RuntimeError("Port DFT seed construction requires a completed forward accumulator.")
+        steps = torch.arange(
+            weights.shape[0],
+            device=weights.device,
+            dtype=weights.dtype,
+        )
+        sample_times = (steps + 0.5) * port_runtime.lumped.dt.to(dtype=weights.dtype)
+        angles = (
+            2.0
+            * torch.pi
+            * sample_times[:, None]
+            * port_runtime.frequencies[None, :]
+        )
+        scale = 2.0 / port_runtime.accumulator._window_weight_sum
+        weighted_scale = weights * scale[None, :]
+        voltage_samples = torch.sum(
+            weighted_scale
+            * (
+                voltage_grad.real[None, :] * torch.cos(angles)
+                + voltage_grad.imag[None, :] * torch.sin(angles)
+            ),
+            dim=1,
+        )
+        current_samples = torch.sum(
+            weighted_scale
+            * (
+                current_grad.real[None, :] * torch.cos(angles)
+                + current_grad.imag[None, :] * torch.sin(angles)
+            ),
+            dim=1,
+        )
+        drive_samples = torch.zeros_like(voltage_samples)
+        if available_power_grad is not None:
+            if port_runtime.drive_accumulator is None:
+                raise RuntimeError("Active-port power seed requires a drive DFT accumulator.")
+            source_voltage, _ = port_runtime.drive_accumulator.phasors(
+                normalization="peak"
+            )
+            source_voltage_grad = (
+                available_power_grad
+                * source_voltage
+                / (4.0 * port_runtime.lumped.resistance)
+            )
+            drive_samples = torch.sum(
+                weighted_scale
+                * (
+                    source_voltage_grad.real[None, :] * torch.cos(angles)
+                    + source_voltage_grad.imag[None, :] * torch.sin(angles)
+                ),
+                dim=1,
+            )
+        port_batches.append(
+            _PortSeedBatch(
+                port_index=port_index,
+                voltage_samples=voltage_samples,
+                current_samples=current_samples,
+                drive_samples=drive_samples,
+            )
+        )
+
     return _SeedRuntime(
         dft_schedule=dft_schedule,
         observer_schedule=observer_schedule,
         dense_batches=tuple(dense_batches),
         point_batches=tuple(point_batches),
         plane_batches=tuple(plane_batches),
+        port_batches=tuple(port_batches),
     )
+
+
+def _port_sample_adjoints(seed_runtime: _SeedRuntime, step_index: int):
+    return {
+        batch.port_index: (
+            batch.voltage_samples[step_index],
+            batch.current_samples[step_index],
+            batch.drive_samples[step_index],
+        )
+        for batch in seed_runtime.port_batches
+    }
 
 
 def _schedule_pack_for(

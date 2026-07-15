@@ -74,7 +74,7 @@ def test_fdfd_rejects_port_excitation():
         )
 
 
-def test_trainable_scene_rejects_lumped_port_until_adjoint_replay_is_supported():
+def test_trainable_scene_accepts_lumped_port_for_adjoint_runtime():
     class TrainablePortScene(mw.SceneModule):
         def __init__(self):
             super().__init__()
@@ -83,9 +83,11 @@ def test_trainable_scene_rejects_lumped_port_until_adjoint_replay_is_supported()
         def to_scene(self):
             return _scene(ports=(_lumped_port(),))
 
-    with pytest.raises(NotImplementedError, match="does not replay"):
-        mw.Simulation.fdtd(
-            TrainablePortScene(),
-            frequency=1.0e9,
-            excitations=mw.PortExcitation("p1"),
-        )
+    simulation = mw.Simulation.fdtd(
+        TrainablePortScene(),
+        frequency=1.0e9,
+        excitations=mw.PortExcitation("p1"),
+    )
+
+    assert simulation.has_trainable_parameters
+    assert simulation.excitations[0].port_name == "p1"

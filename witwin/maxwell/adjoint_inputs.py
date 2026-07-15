@@ -45,6 +45,45 @@ def scene_trainable_material_tensors(scene) -> tuple[torch.Tensor, ...]:
     return unique_trainable_tensors(candidates)
 
 
+def scene_trainable_rf_tensors(scene) -> tuple[torch.Tensor, ...]:
+    candidates = []
+    for port in getattr(scene, "ports", ()):
+        termination = getattr(port, "termination", None)
+        if termination is not None:
+            candidates.extend(
+                getattr(termination, name, None)
+                for name in ("r", "l", "c")
+            )
+        candidates.append(getattr(port, "reference_impedance", None))
+    for element in getattr(scene, "lumped_elements", ()):
+        candidates.append(getattr(element, "value", None))
+    return unique_trainable_tensors(candidates)
+
+
+def rf_dependent_inputs(scene, candidates) -> tuple[torch.Tensor, ...]:
+    inputs = unique_trainable_tensors(candidates)
+    if not inputs:
+        return ()
+    outputs = scene_trainable_rf_tensors(scene)
+    if not outputs:
+        return ()
+    probe = sum(
+        value.real.sum() + (value.imag.sum() if value.is_complex() else 0.0)
+        for value in outputs
+    )
+    dependencies = torch.autograd.grad(
+        probe,
+        inputs,
+        allow_unused=True,
+        retain_graph=False,
+    )
+    return tuple(
+        tensor
+        for tensor, dependency in zip(inputs, dependencies)
+        if dependency is not None
+    )
+
+
 def material_dependent_inputs(scene, candidates) -> tuple[torch.Tensor, ...]:
     inputs = unique_trainable_tensors(candidates)
     if not inputs:

@@ -237,7 +237,7 @@ def _supports_standard(runtime, solver, forward_state, resolved_source_terms) ->
         return False
     if getattr(solver, "full_aniso_enabled", False):
         return False
-    if tuple(forward_state.keys()) != ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
+    if not _matches_checkpoint_layout(solver, forward_state):
         return False
     if getattr(solver, "uses_cpml", False):
         return False

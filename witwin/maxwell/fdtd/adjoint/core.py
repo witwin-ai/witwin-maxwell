@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -34,6 +34,7 @@ from ..observers import (
     _monitor_payload_is_point,
     _plane_coord_names,
 )
+from ..ports import replay_port_runtimes
 
 _TFSF_REFERENCE_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned"}
 _TFSF_AUXILIARY_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned", "plane_wave_aux"}
@@ -125,9 +126,19 @@ def _prepare_forward_pack(raw_output):
             for component_name in template["fields"]:
                 output_tensors.append(payload["components"][component_name]["data"])
 
+    port_offset = len(output_tensors)
+    port_templates = {}
+    for port_name, data in raw_output.get("ports", {}).items():
+        port_templates[port_name] = data
+        output_tensors.extend((data.voltage, data.current))
+        if data.available_power is not None:
+            output_tensors.append(data.available_power)
+
     return _ForwardPack(
         field_names=tuple(field_names),
         monitor_templates=monitor_templates,
+        port_templates=port_templates,
+        port_offset=port_offset,
         output_tensors=tuple(output_tensors),
     )
 
@@ -235,6 +246,22 @@ def _rebuild_monitors(monitor_templates, output_tensors, field_offset):
             cursor += 1
         monitors[monitor_name] = _finalize_plane_monitor_payload(payload)
     return monitors
+
+
+def _rebuild_ports(port_templates, output_tensors, port_offset):
+    ports = {}
+    cursor = int(port_offset)
+    for port_name, template in port_templates.items():
+        updates = {
+            "voltage": output_tensors[cursor],
+            "current": output_tensors[cursor + 1],
+        }
+        cursor += 2
+        if template.available_power is not None:
+            updates["available_power"] = output_tensors[cursor]
+            cursor += 1
+        ports[port_name] = replace(template, **updates)
+    return ports
 
 
 def _term_grid_tensor(term):
@@ -784,6 +811,8 @@ def _accumulate_source_term_gradients(
 class _ForwardPack:
     field_names: tuple[str, ...]
     monitor_templates: dict[str, dict[str, Any]]
+    port_templates: dict[str, Any]
+    port_offset: int
     output_tensors: tuple[torch.Tensor, ...]
 
 
@@ -2959,6 +2988,7 @@ def _step_state(
     tpa_ey=None,
     tpa_ez=None,
     capture_magnetic=None,
+    capture_lumped=None,
 ):
     if getattr(solver, "modulation_enabled", False):
         raise NotImplementedError("FDTD adjoint replay does not support time-modulated media.")
@@ -3435,6 +3465,14 @@ def _step_state(
             solver=solver if complex_fields else None,
         )
 
+    electric_fields, lumped_state = replay_port_runtimes(
+        solver,
+        electric_fields,
+        state,
+        time_value=time_value,
+        capture=capture_lumped,
+    )
+
     dispersive_input_fields = {name: electric_fields[name] for name in ("Ex", "Ey", "Ez")}
     if complex_fields:
         # Bloch dispersive replay corrects the imaginary field with its own
@@ -3516,6 +3554,7 @@ def _step_state(
         next_state["tfsf_aux_magnetic"] = auxiliary_state["magnetic"]
     next_state.update(dispersive_state)
     next_state.update(magnetic_dispersive_state)
+    next_state.update(lumped_state)
     return next_state
 
 
@@ -3587,7 +3626,15 @@ def _replay_can_capture_mid_magnetic(solver) -> bool:
     return True
 
 
-def _replay_segment_states(solver, checkpoint, start_step, end_step, *, mid_magnetic_out=None):
+def _replay_segment_states(
+    solver,
+    checkpoint,
+    start_step,
+    end_step,
+    *,
+    mid_magnetic_out=None,
+    lumped_traces_out=None,
+):
     """Replay the forward field states of one checkpoint segment.
 
     ``mid_magnetic_out``, when a list, collects the post-magnetic real H of each
@@ -3609,6 +3656,7 @@ def _replay_segment_states(solver, checkpoint, start_step, end_step, *, mid_magn
                 eps_ey=solver.eps_Ey,
                 eps_ez=solver.eps_Ez,
                 capture_magnetic=mid_magnetic_out if capture else None,
+                capture_lumped=lumped_traces_out,
             )
             states.append({name: tensor.detach() for name, tensor in current.items()})
     return states

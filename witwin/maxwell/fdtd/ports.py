@@ -8,7 +8,14 @@ import torch
 from ..lumped import PortExcitation
 from ..network import PortData
 from ..sources import CW, CustomSourceTime, GaussianPulse, RickerWavelet
-from .lumped import LumpedRuntime, apply_lumped_runtime, prepare_lumped_runtime
+from .checkpoint import lumped_state_name
+from .lumped import (
+    LumpedRuntime,
+    apply_lumped_runtime,
+    prepare_lumped_runtime,
+    pullback_lumped_runtime,
+    replay_lumped_runtime,
+)
 
 
 PhasorNormalization = Literal["peak", "rms", "none"]
@@ -209,18 +216,30 @@ def _require_forward_only_parameters(
     excitation: PortExcitation | None,
     termination=None,
 ) -> None:
-    values = []
-    if excitation is not None:
-        values.extend((excitation.amplitude, excitation.source_impedance))
-        if excitation.source_impedance == "matched":
-            values.append(port.reference_impedance)
-    termination = getattr(port, "termination", None) if termination is None else termination
-    if termination is not None:
-        values.extend(getattr(termination, name, None) for name in ("r", "l", "c"))
-    if any(isinstance(value, torch.Tensor) and value.requires_grad for value in values):
+    if (
+        isinstance(port.reference_impedance, torch.Tensor)
+        and port.reference_impedance.requires_grad
+    ):
         raise NotImplementedError(
-            f"Port {port.name!r} has trainable RF parameters, but the FDTD adjoint "
-            "does not replay port/RLC auxiliary state."
+            f"Port {port.name!r} trainable reference_impedance is not supported by "
+            "the FDTD lumped adjoint."
+        )
+    if excitation is not None:
+        source_impedance = excitation.source_impedance
+        if isinstance(source_impedance, torch.Tensor) and source_impedance.requires_grad:
+            raise NotImplementedError(
+                f"Port {port.name!r} trainable source_impedance is not supported by "
+                "the FDTD lumped adjoint; train amplitude or series R/L/C values instead."
+            )
+    termination = getattr(port, "termination", None) if termination is None else termination
+    if getattr(termination, "kind", None) == "parallel_rlc" and any(
+        isinstance(getattr(termination, name, None), torch.Tensor)
+        and getattr(termination, name).requires_grad
+        for name in ("r", "l", "c")
+    ):
+        raise NotImplementedError(
+            f"Port {port.name!r} trainable ParallelRLC is not supported by the FDTD "
+            "lumped adjoint; use a SeriesRLC termination."
         )
 
 
@@ -505,11 +524,6 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
     for geometry in solver.scene.compile_lumped_elements(device=solver.device):
         field = getattr(solver, geometry.voltage_component)
         element = element_by_name[geometry.element_name]
-        if isinstance(element.value, torch.Tensor) and element.value.requires_grad:
-            raise NotImplementedError(
-                f"Lumped element {element.name!r} is trainable, but the FDTD adjoint "
-                "does not replay RLC auxiliary state."
-            )
         _open_declared_pec_terminal_edges(solver, geometry, element)
         element_runtime = prepare_lumped_runtime(
             geometry,
@@ -618,11 +632,9 @@ def complete_port_spectral_normalization(solver) -> None:
             runtime.drive_accumulator._window_weight_sum.copy_(planned)
 
 
-def _evaluate_drive(runtime: PreparedPortRuntime) -> torch.Tensor:
+def _drive_value(runtime: PreparedPortRuntime, time: torch.Tensor) -> torch.Tensor:
     if runtime.source_kind is None:
-        runtime.drive_buffer.zero_()
-        return runtime.drive_buffer
-    time = runtime.magnetic_time
+        return torch.zeros_like(runtime.drive_buffer)
     if runtime.source_kind == "cw":
         angle = 2.0 * torch.pi * runtime.source_frequency * time + runtime.source_phase
         value = runtime.source_amplitude.real * torch.cos(angle)
@@ -638,8 +650,204 @@ def _evaluate_drive(runtime: PreparedPortRuntime) -> torch.Tensor:
         tau = time - runtime.source_delay
         alpha_sq = (torch.pi * runtime.source_frequency * tau).square()
         value = runtime.source_amplitude.real * (1.0 - 2.0 * alpha_sq) * torch.exp(-alpha_sq)
+    return value
+
+
+def _evaluate_drive(runtime: PreparedPortRuntime) -> torch.Tensor:
+    value = _drive_value(runtime, runtime.magnetic_time)
     runtime.drive_buffer.copy_(value)
     return runtime.drive_buffer
+
+
+def replay_port_runtimes(
+    solver,
+    electric_fields: dict[str, torch.Tensor],
+    state: dict[str, torch.Tensor],
+    *,
+    time_value,
+    capture=None,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """Replay all series branch corrections and return their next auxiliary state."""
+
+    if not getattr(solver, "_port_runtimes", ()) and not getattr(
+        solver, "_lumped_element_runtimes", ()
+    ):
+        return electric_fields, {}
+    fields = dict(electric_fields)
+    next_auxiliary = {}
+    sample_time = torch.as_tensor(
+        time_value + 0.5 * float(solver.dt),
+        device=solver.device,
+        dtype=solver.Ex.dtype,
+    )
+    traces = []
+    for index, port_runtime in enumerate(getattr(solver, "_port_runtimes", ())):
+        runtime = port_runtime.lumped
+        if runtime is None:
+            continue
+        inductor_name = lumped_state_name("port", index, "inductor_current")
+        capacitor_name = lumped_state_name("port", index, "capacitor_voltage")
+        corrected, next_inductor, next_capacitor, trace = replay_lumped_runtime(
+            runtime,
+            fields[port_runtime.field_name],
+            inductor_current=state[inductor_name],
+            capacitor_voltage=state[capacitor_name],
+            drive=_drive_value(port_runtime, sample_time),
+            field_name=port_runtime.field_name,
+            kind="port",
+            index=index,
+        )
+        fields[port_runtime.field_name] = corrected
+        next_auxiliary[inductor_name] = next_inductor
+        next_auxiliary[capacitor_name] = next_capacitor
+        traces.append(trace)
+    for index, (runtime, field_name) in enumerate(
+        getattr(solver, "_lumped_element_runtimes", ())
+    ):
+        inductor_name = lumped_state_name("element", index, "inductor_current")
+        capacitor_name = lumped_state_name("element", index, "capacitor_voltage")
+        corrected, next_inductor, next_capacitor, trace = replay_lumped_runtime(
+            runtime,
+            fields[field_name],
+            inductor_current=state[inductor_name],
+            capacitor_voltage=state[capacitor_name],
+            drive=torch.zeros_like(runtime.default_thevenin_voltage),
+            field_name=field_name,
+            kind="element",
+            index=index,
+        )
+        fields[field_name] = corrected
+        next_auxiliary[inductor_name] = next_inductor
+        next_auxiliary[capacitor_name] = next_capacitor
+        traces.append(trace)
+    if capture is not None:
+        capture.append(tuple(traces))
+    return fields, next_auxiliary
+
+
+def _source_amplitude_pullback(
+    runtime: PreparedPortRuntime,
+    grad_drive: torch.Tensor,
+    sample_time: torch.Tensor,
+) -> torch.Tensor:
+    excitation = runtime.excitation
+    if excitation is None:
+        return torch.zeros_like(runtime.source_amplitude)
+    scale = float((excitation.source_time or CW(frequency=runtime.source_frequency)).amplitude)
+    if runtime.source_kind == "cw":
+        angle = 2.0 * torch.pi * runtime.source_frequency * sample_time + runtime.source_phase
+        real_basis = scale * torch.cos(angle)
+        imag_basis = scale * torch.sin(angle)
+    elif runtime.source_kind == "gaussian_pulse":
+        tau = sample_time - runtime.source_delay
+        envelope = torch.exp(-0.5 * (2.0 * torch.pi * runtime.source_fwidth * tau).square())
+        angle = 2.0 * torch.pi * runtime.source_frequency * tau + runtime.source_phase
+        real_basis = scale * envelope * torch.cos(angle)
+        imag_basis = scale * envelope * torch.sin(angle)
+    else:
+        tau = sample_time - runtime.source_delay
+        alpha_sq = (torch.pi * runtime.source_frequency * tau).square()
+        real_basis = scale * (1.0 - 2.0 * alpha_sq) * torch.exp(-alpha_sq)
+        imag_basis = torch.zeros_like(real_basis)
+    if excitation.amplitude.is_complex():
+        return torch.complex(grad_drive * real_basis, grad_drive * imag_basis).to(
+            dtype=excitation.amplitude.dtype
+        )
+    return (grad_drive * real_basis).to(dtype=excitation.amplitude.dtype)
+
+
+def pullback_port_runtimes(
+    solver,
+    traces,
+    adjoint_state: dict[str, torch.Tensor],
+    *,
+    port_sample_adjoints: dict[
+        int,
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ],
+    eps_by_field: dict[str, torch.Tensor],
+    time_value,
+):
+    """Reverse all local branch solves before the Maxwell reverse step."""
+
+    updated = dict(adjoint_state)
+    grad_eps = {name: torch.zeros_like(value) for name, value in eps_by_field.items()}
+    semantic_grads = {}
+    sample_time = torch.as_tensor(
+        time_value + 0.5 * float(solver.dt),
+        device=solver.device,
+        dtype=solver.Ex.dtype,
+    )
+    for trace in reversed(tuple(traces)):
+        inductor_name = lumped_state_name(trace.kind, trace.index, "inductor_current")
+        capacitor_name = lumped_state_name(trace.kind, trace.index, "capacitor_voltage")
+        voltage_seed, current_seed, direct_drive_seed = port_sample_adjoints.get(
+            trace.index,
+            (
+                torch.zeros_like(trace.branch_current),
+                torch.zeros_like(trace.branch_current),
+                torch.zeros_like(trace.branch_current),
+            ),
+        ) if trace.kind == "port" else (
+            torch.zeros_like(trace.branch_current),
+            torch.zeros_like(trace.branch_current),
+            torch.zeros_like(trace.branch_current),
+        )
+        voltage_seed = voltage_seed.to(
+            device=trace.branch_current.device,
+            dtype=trace.branch_current.dtype,
+        )
+        current_seed = current_seed.to(
+            device=trace.branch_current.device,
+            dtype=trace.branch_current.dtype,
+        )
+        direct_drive_seed = direct_drive_seed.to(
+            device=trace.branch_current.device,
+            dtype=trace.branch_current.dtype,
+        )
+        result = pullback_lumped_runtime(
+            trace,
+            updated[trace.field_name],
+            inductor_current_adjoint=updated[inductor_name],
+            capacitor_voltage_adjoint=updated[capacitor_name],
+            voltage_sample_adjoint=voltage_seed,
+            network_current_sample_adjoint=current_seed,
+            eps_edge=eps_by_field[trace.field_name],
+        )
+        updated[trace.field_name] = result.field_adjoint
+        updated[inductor_name] = result.inductor_current_adjoint
+        updated[capacitor_name] = result.capacitor_voltage_adjoint
+        grad_eps[trace.field_name] = grad_eps[trace.field_name] + result.grad_eps
+        if trace.kind == "port":
+            port_runtime = solver._port_runtimes[trace.index]
+            termination = getattr(port_runtime.port, "termination", None)
+            if port_runtime.excitation is not None:
+                key = ("excitation", port_runtime.port.name, "amplitude")
+                contribution = _source_amplitude_pullback(
+                    port_runtime,
+                    result.grad_drive + direct_drive_seed,
+                    sample_time,
+                )
+                semantic_grads[key] = semantic_grads.get(key, torch.zeros_like(contribution)) + contribution
+            elif termination is not None:
+                for component, value in (
+                    ("r", result.grad_resistance),
+                    ("l", result.grad_inductance),
+                    ("c", result.grad_capacitance),
+                ):
+                    if getattr(termination, component, None) is not None:
+                        key = ("port", port_runtime.port.name, component)
+                        semantic_grads[key] = semantic_grads.get(key, torch.zeros_like(value)) + value
+        else:
+            element = solver.scene.lumped_elements[trace.index]
+            gradient = {
+                "resistor": result.grad_resistance,
+                "inductor": result.grad_inductance,
+                "capacitor": result.grad_capacitance,
+            }[element.kind]
+            key = ("element", element.name, "value")
+            semantic_grads[key] = semantic_grads.get(key, torch.zeros_like(gradient)) + gradient
+    return updated, grad_eps, semantic_grads
 
 
 def apply_port_runtimes(solver) -> None:
@@ -762,4 +970,6 @@ __all__ = [
     "finalize_port_data",
     "prepare_port_runtimes",
     "prepare_port_spectral_accumulators",
+    "pullback_port_runtimes",
+    "replay_port_runtimes",
 ]

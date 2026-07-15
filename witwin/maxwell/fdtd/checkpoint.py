@@ -72,6 +72,7 @@ class FDTDCheckpointSchema:
     tfsf_auxiliary_state_names: tuple[str, ...]
     dispersive_state_names: tuple[str, ...]
     magnetic_dispersive_state_names: tuple[str, ...] = ()
+    lumped_state_names: tuple[str, ...] = ()
 
     @property
     def state_names(self) -> tuple[str, ...]:
@@ -82,7 +83,42 @@ class FDTDCheckpointSchema:
             + self.tfsf_auxiliary_state_names
             + self.dispersive_state_names
             + self.magnetic_dispersive_state_names
+            + self.lumped_state_names
         )
+
+
+def lumped_state_name(kind: str, index: int, tensor_name: str) -> str:
+    return f"lumped_{kind}_{int(index)}_{tensor_name}"
+
+
+def iter_lumped_state_specs(solver):
+    """Yield the frozen auxiliary state for each coupled single-device branch."""
+
+    for index, port_runtime in enumerate(getattr(solver, "_port_runtimes", ())):
+        runtime = getattr(port_runtime, "lumped", None)
+        if runtime is None:
+            continue
+        for tensor_name in ("inductor_current", "capacitor_voltage"):
+            yield (
+                lumped_state_name("port", index, tensor_name),
+                runtime,
+                tensor_name,
+                port_runtime.field_name,
+                "port",
+                index,
+            )
+    for index, (runtime, field_name) in enumerate(
+        getattr(solver, "_lumped_element_runtimes", ())
+    ):
+        for tensor_name in ("inductor_current", "capacitor_voltage"):
+            yield (
+                lumped_state_name("element", index, tensor_name),
+                runtime,
+                tensor_name,
+                field_name,
+                "element",
+                index,
+            )
 
 
 def checkpoint_schema(solver) -> FDTDCheckpointSchema:
@@ -123,6 +159,9 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         magnetic_dispersive_state_names.extend(
             name + "_imag" for name in tuple(magnetic_dispersive_state_names)
         )
+    lumped_state_names = tuple(
+        name for name, _runtime, _tensor_name, _field_name, _kind, _index in iter_lumped_state_specs(solver)
+    )
 
     return FDTDCheckpointSchema(
         version=_CHECKPOINT_SCHEMA_VERSION,
@@ -132,6 +171,7 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         tfsf_auxiliary_state_names=tuple(tfsf_auxiliary_state_names),
         dispersive_state_names=tuple(dispersive_state_names),
         magnetic_dispersive_state_names=tuple(magnetic_dispersive_state_names),
+        lumped_state_names=lumped_state_names,
     )
 
 
@@ -214,6 +254,8 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
                 tensors[dispersive_state_name(component_name, model_name, index, tensor_name) + "_imag"] = (
                     entry[f"{tensor_name}_imag"].detach().clone()
                 )
+    for name, runtime, tensor_name, _field_name, _kind, _index in iter_lumped_state_specs(solver):
+        tensors[name] = getattr(runtime, tensor_name).detach().clone()
     state = FDTDCheckpointState(step=int(step), schema=schema, tensors=tensors)
     validate_checkpoint_state(state)
     return state

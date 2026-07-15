@@ -259,6 +259,34 @@ def _scene_trainable_material_parameters(scene: Scene) -> tuple[torch.Tensor, ..
     return tuple(trainable)
 
 
+def _trainable_rf_parameters(
+    scene: Scene,
+    *,
+    excitations=(),
+    port_sweep: PortSweep | None = None,
+) -> tuple[torch.Tensor, ...]:
+    candidates = []
+    for port in scene.ports:
+        candidates.append(getattr(port, "reference_impedance", None))
+        termination = getattr(port, "termination", None)
+        if termination is not None:
+            candidates.extend(
+                getattr(termination, name, None)
+                for name in ("r", "l", "c")
+            )
+    for element in scene.lumped_elements:
+        candidates.append(getattr(element, "value", None))
+    for excitation in excitations:
+        candidates.extend((excitation.amplitude, excitation.source_impedance))
+    if port_sweep is not None:
+        candidates.append(port_sweep.amplitude)
+    return tuple(
+        value
+        for value in candidates
+        if isinstance(value, torch.Tensor) and value.requires_grad
+    )
+
+
 def _require_cuda_scene(scene: Scene, *, method: str) -> None:
     device = torch.device(scene.device)
     if device.type != "cuda":
@@ -288,19 +316,29 @@ class Simulation:
         self.scene_input = scene
         self.scene = resolved_scene
         self.scene_module = scene_module
-        self.has_trainable_parameters = bool(
-            any(parameter.requires_grad for parameter in (scene_module.parameters() if scene_module is not None else ()))
-            or _scene_trainable_density_parameters(resolved_scene)
-            or _scene_trainable_geometry_parameters(resolved_scene)
-            or _scene_trainable_material_parameters(resolved_scene)
-        )
         self.method = SimulationMethod(method)
         self.port_sweep = excitations if isinstance(excitations, PortSweep) else None
         self.excitations = (
             () if self.port_sweep is not None else _normalize_port_excitations(excitations)
         )
+        trainable_rf_parameters = _trainable_rf_parameters(
+            resolved_scene,
+            excitations=self.excitations,
+            port_sweep=self.port_sweep,
+        )
+        self.has_trainable_parameters = bool(
+            any(parameter.requires_grad for parameter in (scene_module.parameters() if scene_module is not None else ()))
+            or _scene_trainable_density_parameters(resolved_scene)
+            or _scene_trainable_geometry_parameters(resolved_scene)
+            or _scene_trainable_material_parameters(resolved_scene)
+            or trainable_rf_parameters
+        )
         if self.method != SimulationMethod.FDTD and (self.excitations or self.port_sweep):
             raise ValueError("RF port excitation is supported by Simulation.fdtd(...) only.")
+        if self.method != SimulationMethod.FDTD and trainable_rf_parameters:
+            raise NotImplementedError(
+                "Trainable RF port, source, and R/L/C parameters require Simulation.fdtd(...)."
+            )
         self._validate_trainable_rf_support()
         self.frequencies = tuple(float(freq) for freq in frequencies)
         self.frequency = self.frequencies[0]
@@ -484,6 +522,9 @@ class Simulation:
             if isinstance(port, (LumpedPort, TerminalPort, WavePort))
         )
         wave_ports = tuple(port for port in rf_ports if isinstance(port, WavePort))
+        lumped_ports = tuple(
+            port for port in rf_ports if isinstance(port, (LumpedPort, TerminalPort))
+        )
         uses_waveport_workflow = bool(wave_ports) and bool(
             self.port_sweep is not None or self._waveport_excitation() is not None
         )
@@ -501,12 +542,19 @@ class Simulation:
                     f"per aperture; multimode ports are {multimode}."
                 )
             return
-        if rf_ports or self.scene.lumped_elements or self.excitations or self.port_sweep:
+        if wave_ports:
             raise NotImplementedError(
-                "Trainable FDTD scenes cannot yet include lumped/terminal RF ports, "
-                "standalone R/L/C elements, or passive WavePort declarations because "
-                "the FDTD adjoint does not replay their auxiliary state."
+                "Differentiable WavePort declarations require a fixed single-mode direct "
+                "excitation or WavePort sweep and cannot be mixed into a lumped workflow."
             )
+        if self.port_sweep is not None and lumped_ports:
+            raise NotImplementedError(
+                "Differentiable LumpedPort/TerminalPort PortSweep is not yet supported; "
+                "use direct port excitations."
+            )
+        # Exact circuit topology, field-medium, and RF-parameter guards are applied
+        # after the single-device runtimes are compiled. Supported series lumped
+        # ports and standalone R/C/L elements proceed through the adjoint bridge.
 
     def _refresh_scene(self):
         if self.scene_module is not None:
