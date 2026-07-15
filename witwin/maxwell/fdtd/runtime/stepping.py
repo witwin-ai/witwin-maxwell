@@ -34,6 +34,15 @@ from ..ports import (
     prepare_port_runtimes,
     prepare_port_spectral_accumulators,
 )
+from ..wire import (
+    accumulate_wire_monitors,
+    complete_wire_monitor_normalization,
+    deposit_wire_current,
+    finalize_wire_data,
+    initialize_wire_runtime,
+    prepare_wire_monitors,
+    sample_and_update_wire,
+)
 
 
 def iter_cpml_memory_regions(solver, attr_name):
@@ -1516,6 +1525,10 @@ def init_field(solver):
     solver.Hz = torch.zeros((solver.Nx - 1, solver.Ny - 1, solver.Nz), device=solver.device, dtype=torch.float32)
 
     solver.build_materials(solver.scene)
+    # Wire preparation may conservatively tighten dt using the joint
+    # Maxwell-plus-wire spectral bound. All dt-dependent boundary and field
+    # coefficients must therefore be built after it.
+    initialize_wire_runtime(solver)
     initialize_boundary_state(solver)
     solver._build_update_coefficients()
     solver._initialize_dispersive_state()
@@ -1647,6 +1660,8 @@ def _field_update_block(solver, time_value):
     if solver._magnetic_source_terms:
         inject_magnetic_surface_source_terms(solver, time_value=time_value)
     solver._apply_magnetic_dispersive_corrections()
+    if solver._wire_runtime is not None:
+        sample_and_update_wire(solver)
 
     if has_complex_fields(solver):
         solver._advance_dispersive_state()
@@ -1674,6 +1689,8 @@ def _field_update_block(solver, time_value):
         if getattr(solver, "full_aniso_enabled", False):
             apply_full_aniso_corrections(solver)
             apply_full_aniso_conduction(solver)
+    if solver._wire_runtime is not None:
+        deposit_wire_current(solver)
     apply_sibc_surface(solver)
 
 
@@ -1787,6 +1804,11 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         if aux is not None:
             state["_tfsf_aux_electric"] = aux.electric
             state["_tfsf_aux_magnetic"] = aux.magnetic
+    wire_runtime = getattr(solver, "_wire_runtime", None)
+    if wire_runtime is not None:
+        state["_wire_current"] = wire_runtime.current
+        state["_wire_charge"] = wire_runtime.charge
+        state["_wire_emf"] = wire_runtime.emf
     sibc_state = getattr(solver, "_sibc", None)
     if sibc_state is not None:
         for index, face in enumerate(sibc_state["faces"]):
@@ -1893,6 +1915,7 @@ def solve(
     if getattr(solver, "time_observers", None):
         solver._prepare_time_observers(time_steps)
     prepare_port_spectral_accumulators(solver, time_steps, dft_window)
+    prepare_wire_monitors(solver, time_steps, dft_window)
 
     solver._shutoff_triggered = False
     solver._shutoff_step = None
@@ -1954,6 +1977,7 @@ def solve(
         accumulate_port_observers(solver)
         solver.accumulate_observers(n)
         solver.accumulate_time_observers(n)
+        accumulate_wire_monitors(solver, n)
 
         if shutoff > 0 and (n + 1) % shutoff_check_interval == 0:
             e_energy = _electric_field_energy(solver)
@@ -1982,6 +2006,7 @@ def solve(
     solver.last_solve_elapsed_s = time.perf_counter() - solve_start
     if solver._shutoff_triggered:
         _complete_spectral_normalization(solver, time_steps)
+        complete_wire_monitor_normalization(solver, time_steps)
     if solver.dft_enabled:
         solver._sync_dft_legacy_state()
     if solver.observers_enabled:
@@ -1999,6 +2024,10 @@ def solve(
     if getattr(solver, "time_observers_enabled", False):
         monitors = dict(monitors)
         monitors.update(solver.get_time_observer_results())
+    wire_monitors = finalize_wire_data(solver)
+    if wire_monitors:
+        monitors = dict(monitors)
+        monitors.update(wire_monitors)
     if monitors:
         output["observers"] = monitors
     ports = finalize_port_data(solver)

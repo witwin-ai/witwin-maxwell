@@ -10,6 +10,7 @@ import torch
 from witwin.core import Structure
 from .lumped import Capacitor, Inductor, Resistor
 from .ports import LumpedPort, ModePort, TerminalPort, WavePort, _resolve_terminal_port
+from .thin_wire import ThinWire
 from .compiler.materials import (
     compile_material_model,
     evaluate_material_components,
@@ -752,6 +753,7 @@ class Scene:
         boundary: BoundarySpec | None = None,
         *,
         structures=None,
+        thin_wires=None,
         sources=None,
         monitors=None,
         ports=None,
@@ -768,6 +770,9 @@ class Scene:
         self.structures = list(structures or [])
         if any(not isinstance(structure, Structure) for structure in self.structures):
             raise TypeError("Maxwell Scene structures must be witwin.core.Structure instances.")
+        self._thin_wires = []
+        for wire in thin_wires or ():
+            self.add_thin_wire(wire)
         self.sources = list(sources or [])
         self.monitors = list(monitors or [])
         self.metadata = dict(metadata or {})
@@ -891,6 +896,22 @@ class Scene:
         self.structures.append(structure)
         return self
 
+    @property
+    def thin_wires(self) -> tuple[ThinWire, ...]:
+        """Declared subgrid wires, kept separate from volume structures."""
+
+        return tuple(self._thin_wires)
+
+    def add_thin_wire(self, wire: ThinWire):
+        if not isinstance(wire, ThinWire):
+            raise TypeError("Maxwell Scene thin wires must be ThinWire instances.")
+        if any(existing.name == wire.name for existing in self._thin_wires):
+            raise ValueError(
+                f"Thin-wire name {wire.name!r} is already present in the scene."
+            )
+        self._thin_wires.append(wire)
+        return self
+
     def add_source(self, source):
         self.sources.append(source)
         return self
@@ -970,6 +991,16 @@ class Scene:
 
         return prepare_scene(self).compile_ports(device=device)
 
+    def compile_thin_wires(self, *, device=None):
+        """Compile declared thin wires through the solver preparation layer."""
+
+        return prepare_scene(self).compile_thin_wires(device=device)
+
+    def compile_wire_monitors(self, *, device=None):
+        """Compile declared thin-wire monitor sampling through preparation."""
+
+        return prepare_scene(self).compile_wire_monitors(device=device)
+
     def compile_waveports(self, *, device=None):
         """Compile RF wave-port cross sections without solving their modes."""
 
@@ -990,6 +1021,7 @@ class Scene:
             "grid": self.grid,
             "boundary": self.boundary,
             "structures": list(self.structures),
+            "thin_wires": list(self.thin_wires),
             "sources": list(self.sources),
             "monitors": list(self.monitors),
             "ports": list(self.ports),
@@ -1124,6 +1156,7 @@ class PreparedScene(Scene):
             grid=scene.grid,
             boundary=scene.boundary,
             structures=list(scene.structures),
+            thin_wires=list(scene.thin_wires),
             sources=list(scene.sources),
             monitors=list(scene.monitors),
             ports=list(scene.ports),
@@ -1327,6 +1360,23 @@ class PreparedScene(Scene):
         from .compiler.ports import compile_ports
 
         return compile_ports(self, device=self.device if device is None else device)
+
+    def compile_thin_wires(self, *, device=None):
+        from .compiler.thin_wire import compile_thin_wires
+
+        return compile_thin_wires(
+            self,
+            device=self.device if device is None else device,
+        )
+
+    def compile_wire_monitors(self, *, device=None):
+        from .compiler.thin_wire import compile_wire_monitors
+
+        network = self.compile_thin_wires(device=device)
+        return compile_wire_monitors(
+            self,
+            network,
+        )
 
     def compile_waveports(self, *, device=None):
         from .compiler.waveports import compile_waveports

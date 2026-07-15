@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 from torch.utils.cpp_extension import load
 
-STABLE_ABI_VERSION = "stable_abi_v2"
+STABLE_ABI_VERSION = "stable_abi_v3"
 _REQUIRED_STABLE_OPS = (
     "update_magnetic_hx_standard_bounded",
     "update_magnetic_hy_standard_bounded",
@@ -18,6 +18,9 @@ _REQUIRED_STABLE_OPS = (
     "update_electric_ex_standard_bounded",
     "update_electric_ey_standard_bounded",
     "update_electric_ez_standard_bounded",
+    "sample_wire_emf",
+    "update_wire_state",
+    "deposit_wire_current",
 )
 
 
@@ -189,6 +192,7 @@ def extension_sources() -> list[Path]:
         root / "kernels" / "sources.cu",
         root / "kernels" / "spectral.cu",
         root / "kernels" / "observers.cu",
+        root / "kernels" / "wire.cu",
         root / "kernels" / "adjoint.cu",
     ]
 

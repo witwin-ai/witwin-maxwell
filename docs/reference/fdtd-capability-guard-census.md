@@ -7,9 +7,9 @@ cannot enter unnoticed.
 
 ## Reconciled baseline
 
-The 2026-07-15 repository state contains 128 guards:
+The 2026-07-15 repository state contains 137 guards:
 
-- 108 capability guards tracked by the non-increasing test budget;
+- 117 capability guards tracked by the non-increasing test budget;
 - 20 contract guards excluded by exact file and message substring.
 
 The capability baseline is distributed as follows:
@@ -17,16 +17,28 @@ The capability baseline is distributed as follows:
 | Area | Capability guards |
 | --- | ---: |
 | External interoperability adapter | 18 |
-| Material compilers | 9 |
+| Material compilers | 10 |
 | Frequency-domain runtime | 5 |
 | Time-domain adjoint | 14 |
 | Time-domain excitation | 12 |
 | Time-domain ports and lumped elements | 12 |
-| Time-domain runtime | 10 |
-| Public simulation, result, and network workflows | 18 |
+| Time-domain runtime | 17 |
+| Public simulation, result, and network workflows | 19 |
 | Material models | 7 |
 | Postprocessing | 3 |
-| **Total** | **108** |
+| **Total** | **117** |
+
+Thin-wire Phase 1 added nine reviewed capability guards rather than silently
+running unsupported compositions: one locally anisotropic self-term guard in
+the compiler; five Bloch, off-diagonal, conductive, dispersive, and nonlinear/
+modulated host guards plus one surface-impedance conductor-ownership guard in
+the single-device runtime; one distributed ownership
+guard; and one adjoint checkpoint/reverse guard. They remain capability debt,
+not contract exclusions. Phase 2 owns the adjoint guard, Phase 3 owns the Bloch
+path guard. Phase 4 owns distributed execution and SIBC/finite-loss ownership;
+the other host-composition guards remain tracked capability debt for a later
+compatibility plan rather than expanding the Phase 4 exit gate. Each
+implementation phase must lower this budget as it removes its guards.
 
 ## Contract exclusions
 

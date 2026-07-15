@@ -29,7 +29,7 @@ PyTorch coefficients. Native FDTD stepping is a Phase 1 deliverable.
 | Phase | Scope | Status | Evidence |
 | --- | --- | --- | --- |
 | 0 | Discrete energy derivation, effective radius, torch reference | accepted | `docs/assessments/thin-wire-phase-0-acceptance.md` |
-| 1 | Axis-aligned PEC single-wire GPU forward | pending | - |
+| 1 | Axis-aligned PEC single-wire GPU forward | accepted | `docs/assessments/thin-wire-phase-1-acceptance.md` |
 | 2 | Network topology, checkpoint, and adjoint | pending | - |
 | 3 | Arbitrary direction, nonuniform grid, and port binding | pending | - |
 | 4 | Finite conductivity, broadband loss, and multi-device parity | pending | - |

@@ -5,7 +5,10 @@ import pytest
 from witwin.maxwell.fdtd.cuda import build as cuda_build
 
 
-@pytest.mark.parametrize("marker_contents", [None, "stable_abi_v1\n", "garbage\n"])
+@pytest.mark.parametrize(
+    "marker_contents",
+    [None, "stable_abi_v1\n", "stable_abi_v2\n", "garbage\n"],
+)
 def test_stale_or_missing_packaged_prebuilt_is_rejected_before_loading(
     monkeypatch,
     tmp_path,
@@ -55,3 +58,13 @@ def test_matching_packaged_prebuilt_load_failure_is_fail_fast_without_jit(
         cuda_build.build_extension()
 
     assert jit_calls == []
+
+
+def test_wire_operators_are_part_of_the_stable_v3_contract():
+    assert cuda_build.STABLE_ABI_VERSION == "stable_abi_v3"
+    assert {
+        "sample_wire_emf",
+        "update_wire_state",
+        "deposit_wire_current",
+    }.issubset(cuda_build._REQUIRED_STABLE_OPS)
+    assert cuda_build.source_root() / "kernels" / "wire.cu" in cuda_build.extension_sources()

@@ -13,6 +13,7 @@ from ..monitors import (
     PlaneMonitor,
     PointMonitor,
     PowerLossMonitor,
+    WireMonitor,
     normalize_component,
     normalize_axis,
 )
@@ -66,6 +67,7 @@ def compile_fdtd_observers(scene):
                 PermittivityMonitor,
                 MediumMonitor,
                 PowerLossMonitor,
+                WireMonitor,
             ),
         ):
             # Time-domain monitors are handled by compile_fdtd_time_observers and

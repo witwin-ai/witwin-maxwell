@@ -4,6 +4,12 @@ from .monitors import compile_fdtd_observers, compile_fdtd_time_observers
 from .ports import CompiledPortGeometry, compile_port_geometry, compile_ports
 from .power_loss import CompiledPowerLossMonitor, compile_power_loss_monitor
 from .sources import compile_fdfd_sources, compile_fdtd_sources
+from .thin_wire import (
+    CompiledWireMonitor,
+    CompiledWireNetwork,
+    compile_thin_wires,
+    compile_wire_monitors,
+)
 from .waveports import (
     CompiledWaveModeSpec,
     CompiledWavePortCrossSection,
@@ -21,6 +27,8 @@ __all__ = [
     "CompiledPowerLossMonitor",
     "CompiledWaveModeSpec",
     "CompiledWavePortCrossSection",
+    "CompiledWireMonitor",
+    "CompiledWireNetwork",
     "compile_port_geometry",
     "compile_ports",
     "compile_power_loss_monitor",
@@ -28,4 +36,6 @@ __all__ = [
     "compile_waveports",
     "compile_fdtd_sources",
     "compile_material_tensors",
+    "compile_thin_wires",
+    "compile_wire_monitors",
 ]

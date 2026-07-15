@@ -33,6 +33,7 @@ from .monitors import (
     PlaneMonitor,
     PointMonitor,
     PowerLossMonitor,
+    WireMonitor,
 )
 from .lumped import (
     Capacitor,
@@ -45,6 +46,7 @@ from .lumped import (
 )
 from .network import NetworkData, PortData
 from .power_loss import PowerLossData
+from .thin_wire import ThinWire, WireConductor, WireData, WireEnd
 from .ports import (
     AxisPath,
     LumpedPort,
@@ -166,6 +168,7 @@ __all__ = [
     "PointMonitor",
     "PowerLossData",
     "PowerLossMonitor",
+    "ThinWire",
     "PortData",
     "PortExcitation",
     "PortSweep",
@@ -196,6 +199,10 @@ __all__ = [
     "UniformCurrentSource",
     "WaveModeSpec",
     "WavePort",
+    "WireConductor",
+    "WireData",
+    "WireEnd",
+    "WireMonitor",
     "DiagonalTensor3",
     "AbsorberKind",
     "run",

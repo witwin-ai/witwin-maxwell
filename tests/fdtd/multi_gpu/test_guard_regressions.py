@@ -95,6 +95,25 @@ def test_invalid_dipole_emission_source_is_rejected_before_hardware_prepare():
         )
 
 
+def test_thin_wire_is_explicitly_rejected_before_distributed_hardware_prepare():
+    scene = _scene()
+    scene.add_thin_wire(
+        mw.ThinWire(
+            name="wire",
+            points=((-0.2, 0.0, 0.0), (0.2, 0.0, 0.0)),
+            radius=1.0e-3,
+            conductor=mw.WireConductor.pec(),
+        )
+    )
+
+    with pytest.raises(NotImplementedError, match="fragment/state ownership"):
+        DistributedFDTD(
+            scene,
+            frequency=_FREQUENCY,
+            parallel=_parallel(),
+        )
+
+
 @pytest.mark.parametrize(
     "monitor",
     (
