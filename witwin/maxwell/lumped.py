@@ -5,6 +5,7 @@ import math
 
 import torch
 
+from .circuits import CircuitNode
 from .sources import SourceTime, _require_length3
 
 
@@ -31,8 +32,14 @@ def _terminals(name, positive, negative):
     resolved_name = str(name)
     if not resolved_name:
         raise ValueError("Lumped element name must not be empty.")
-    resolved_positive = _require_length3("positive", positive)
-    resolved_negative = _require_length3("negative", negative)
+    if isinstance(positive, CircuitNode) or isinstance(negative, CircuitNode):
+        if not isinstance(positive, CircuitNode) or not isinstance(negative, CircuitNode):
+            raise TypeError("Lumped element terminals must both be CircuitNode instances or 3D points.")
+        resolved_positive = positive
+        resolved_negative = negative
+    else:
+        resolved_positive = _require_length3("positive", positive)
+        resolved_negative = _require_length3("negative", negative)
     if resolved_positive == resolved_negative:
         raise ValueError("Lumped element positive and negative terminals must be distinct.")
     return resolved_name, resolved_positive, resolved_negative
@@ -54,8 +61,8 @@ def _jw(angular_frequency, reference: torch.Tensor) -> torch.Tensor:
 @dataclass(frozen=True)
 class Resistor:
     name: str
-    positive: tuple[float, float, float]
-    negative: tuple[float, float, float]
+    positive: tuple[float, float, float] | CircuitNode
+    negative: tuple[float, float, float] | CircuitNode
     resistance: torch.Tensor
     kind: str = "resistor"
 
@@ -71,6 +78,18 @@ class Resistor:
     def value(self) -> torch.Tensor:
         return self.resistance
 
+    @property
+    def terminals(self):
+        return (self.positive, self.negative)
+
+    @property
+    def parameters(self):
+        return {"resistance": self.resistance}
+
+    @property
+    def initial_condition(self):
+        return None
+
     def impedance(self, angular_frequency) -> torch.Tensor:
         jw = _jw(angular_frequency, self.resistance)
         return self.resistance.to(dtype=jw.dtype) + torch.zeros_like(jw)
@@ -79,8 +98,8 @@ class Resistor:
 @dataclass(frozen=True)
 class Capacitor:
     name: str
-    positive: tuple[float, float, float]
-    negative: tuple[float, float, float]
+    positive: tuple[float, float, float] | CircuitNode
+    negative: tuple[float, float, float] | CircuitNode
     capacitance: torch.Tensor
     kind: str = "capacitor"
 
@@ -96,6 +115,18 @@ class Capacitor:
     def value(self) -> torch.Tensor:
         return self.capacitance
 
+    @property
+    def terminals(self):
+        return (self.positive, self.negative)
+
+    @property
+    def parameters(self):
+        return {"capacitance": self.capacitance}
+
+    @property
+    def initial_condition(self):
+        return None
+
     def impedance(self, angular_frequency) -> torch.Tensor:
         return 1.0 / (_jw(angular_frequency, self.capacitance) * self.capacitance)
 
@@ -103,8 +134,8 @@ class Capacitor:
 @dataclass(frozen=True)
 class Inductor:
     name: str
-    positive: tuple[float, float, float]
-    negative: tuple[float, float, float]
+    positive: tuple[float, float, float] | CircuitNode
+    negative: tuple[float, float, float] | CircuitNode
     inductance: torch.Tensor
     kind: str = "inductor"
 
@@ -119,6 +150,18 @@ class Inductor:
     @property
     def value(self) -> torch.Tensor:
         return self.inductance
+
+    @property
+    def terminals(self):
+        return (self.positive, self.negative)
+
+    @property
+    def parameters(self):
+        return {"inductance": self.inductance}
+
+    @property
+    def initial_condition(self):
+        return None
 
     def impedance(self, angular_frequency) -> torch.Tensor:
         return _jw(angular_frequency, self.inductance) * self.inductance

@@ -430,6 +430,7 @@ class Simulation:
 
     def prepare(self):
         self._refresh_scene()
+        self._validate_circuit_execution()
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         waveport_excitation = self._waveport_excitation()
@@ -467,6 +468,7 @@ class Simulation:
 
     def run(self) -> Result:
         self._refresh_scene()
+        self._validate_circuit_execution()
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         if self.method == SimulationMethod.FDFD:
@@ -579,6 +581,17 @@ class Simulation:
             return
         if isinstance(self.scene_input, Scene):
             self.scene = self.scene_input
+
+    def _validate_circuit_execution(self) -> None:
+        if not self.scene.circuits:
+            return
+        self.scene.compile_circuits()
+        if self.method != SimulationMethod.FDTD:
+            raise ValueError("Circuit-coupled scenes are supported by Simulation.fdtd(...) only.")
+        raise RuntimeError(
+            "Circuit graphs require the coupled FDTD runtime; graph-only preparation "
+            "cannot execute a Simulation."
+        )
 
     def _run_fdfd(self) -> Result:
         if self.has_trainable_parameters:

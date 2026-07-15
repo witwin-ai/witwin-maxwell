@@ -1,3 +1,4 @@
+from .circuits import CircuitGraph, compile_circuit_graph, compile_circuits
 from .lumped import CompiledLumpedElement, compile_lumped_elements
 from .materials import compile_material_tensors
 from .monitors import compile_fdtd_observers, compile_fdtd_time_observers
@@ -12,6 +13,9 @@ from .waveports import (
 )
 
 __all__ = [
+    "CircuitGraph",
+    "compile_circuit_graph",
+    "compile_circuits",
     "CompiledLumpedElement",
     "compile_lumped_elements",
     "compile_fdfd_sources",
