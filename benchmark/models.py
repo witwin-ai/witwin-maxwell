@@ -24,6 +24,7 @@ class ScenarioDefinition:
     compare_flux: bool = True
     spectral_reference_index: int | None = None
     compare_magnitude: bool = False
+    comparison_components: tuple[str, ...] | None = None
 
 
 @dataclass

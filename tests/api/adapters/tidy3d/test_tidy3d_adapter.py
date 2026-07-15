@@ -1683,7 +1683,7 @@ class TestSourceConversion:
         assert result.direction == "-"
         assert result.mode_index == 1
         assert isinstance(result.mode_spec, td.ModeSpec)
-        assert result.mode_spec.num_modes == 4
+        assert result.mode_spec.num_modes == 10
         assert result.mode_spec.sort_spec.filter_key == "TM_fraction"
         assert result.mode_spec.sort_spec.filter_reference == pytest.approx(0.5)
         assert result.mode_spec.sort_spec.filter_order == "over"
@@ -1897,6 +1897,7 @@ class TestMonitorConversion:
         assert result.center[2] == 0.5
         assert result.size[2] == 0.0
         assert result.fields == ["Ey", "Hz"]
+        assert result.colocate is True
 
     def test_finite_plane_monitor(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
@@ -1913,6 +1914,7 @@ class TestMonitorConversion:
         assert result.center == pytest.approx((0.0, 0.0, 0.5))
         assert result.size == pytest.approx((1.2, 1.4, 0.0))
         assert result.fields == ["Hx"]
+        assert result.colocate is True
 
     def test_flux_monitor(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
@@ -1942,7 +1944,7 @@ class TestMonitorConversion:
         assert result.center[2] == 0.5
         assert result.size[2] == 0.0
         assert isinstance(result.mode_spec, td.ModeSpec)
-        assert result.mode_spec.num_modes == 6
+        assert result.mode_spec.num_modes == 12
         assert result.mode_spec.sort_spec.filter_key == "TM_fraction"
         assert result.freqs == [1e9]
 
@@ -2262,7 +2264,7 @@ class TestGeometrySourceMonitorRealTidy3d:
                 scene, real_td, 1.0e6,
             )
             assert isinstance(src, real_td.ModeSource)
-            assert src.mode_spec.num_modes == 6
+            assert src.mode_spec.num_modes == 12
             assert src.mode_spec.sort_spec.filter_key == "TM_fraction"
             assert src.mode_index == 2
             mon = _convert_monitor(
@@ -2270,7 +2272,7 @@ class TestGeometrySourceMonitorRealTidy3d:
                 ((-2, 2), (-2, 2), (-2, 2)), None, real_td, 1.0e6,
             )
             assert isinstance(mon, real_td.ModeMonitor)
-            assert mon.mode_spec.num_modes == 4
+            assert mon.mode_spec.num_modes == 10
             assert mon.mode_spec.sort_spec.filter_key == "TM_fraction"
 
     @pytest.mark.skipif(

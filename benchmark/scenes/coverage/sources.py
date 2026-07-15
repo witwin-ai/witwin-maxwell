@@ -5,7 +5,6 @@ from __future__ import annotations
 import numpy as np
 
 import witwin.maxwell as mw
-from benchmark.models import ScenarioDefinition
 from benchmark.scenes._common import HALF_SPAN, base_scene, with_plot_monitors
 from benchmark.scenes.planned import FREQUENCIES, PULSE, _make, _observed, _source_scene
 
@@ -37,7 +36,7 @@ def _higher_order_waveguide_scene() -> mw.Scene:
     scene = base_scene()
     scene.add_structure(
         mw.Structure(
-            geometry=mw.Box(position=(0, 0, 0), size=(2 * HALF_SPAN, 0.22, 0.22)),
+            geometry=mw.Box(position=(0, 0, 0), size=(2 * HALF_SPAN, 0.30, 0.15)),
             material=mw.Material(eps_r=4.0),
             name="waveguide",
         )
@@ -45,7 +44,7 @@ def _higher_order_waveguide_scene() -> mw.Scene:
     scene.add_source(
         mw.ModeSource(
             position=(-0.35, 0, 0),
-            size=(0, 0.5, 0.5),
+            size=(0, 0.525, 0.375),
             mode_index=1,
             polarization="Ez",
             source_time=PULSE,
@@ -53,22 +52,33 @@ def _higher_order_waveguide_scene() -> mw.Scene:
         )
     )
     scene.add_monitor(
+        mw.FinitePlaneMonitor(
+            "field",
+            position=(0.20, 0, 0),
+            size=(0, 0.525, 0.375),
+            fields=("Ex", "Ey", "Ez"),
+            frequencies=FREQUENCIES,
+        )
+    )
+    scene.add_monitor(
         mw.ModeMonitor(
             "mode_out",
             position=(0.35, 0, 0),
-            size=(0, 0.5, 0.5),
+            size=(0, 0.525, 0.375),
             mode_index=1,
             polarization="Ez",
             frequencies=FREQUENCIES,
         )
     )
-    return _observed(
-        scene,
-        axis="y",
-        component="Ez",
-        flux_axis="x",
-        flux_positions=(-0.5, 0.5),
+    scene.add_monitor(
+        mw.FluxMonitor(
+            "reflected", axis="x", position=-0.5, frequencies=FREQUENCIES, normal_direction="-"
+        )
     )
+    scene.add_monitor(
+        mw.FluxMonitor("transmitted", axis="x", position=0.5, frequencies=FREQUENCIES)
+    )
+    return with_plot_monitors(scene, frequencies=FREQUENCIES)
 
 
 def _magnetic_current_scene() -> mw.Scene:
@@ -202,6 +212,8 @@ SOURCE_COVERAGE_SCENARIOS = (
         "mode_index=1 launch and modal transmission",
         _higher_order_waveguide_scene,
         component="Ez",
+        scalar_observable="mode_effective_index",
+        comparison_components=("Ex", "Ey", "Ez"),
     ),
     _make(
         "magnetic_current_vacuum",

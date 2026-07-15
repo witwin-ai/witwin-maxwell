@@ -492,13 +492,15 @@ def _make(
     compare_magnitude=False,
     normalize_source=None,
     spectral_reference_index=None,
+    comparison_components=None,
 ):
     return ScenarioDefinition(name=name, description=f"{family}: {observable}", builder=builder,
         frequencies=frequencies, display_monitor="field", display_component=component,
         solver=solver, reference_solver=reference_solver, run_time_factor=run_time_factor,
         scalar_observable=scalar_observable, normalize_source=normalize_source,
         compare_flux=compare_flux, compare_magnitude=compare_magnitude,
-        spectral_reference_index=spectral_reference_index)
+        spectral_reference_index=spectral_reference_index,
+        comparison_components=comparison_components)
 
 
 PLANNED_SCENARIOS = (

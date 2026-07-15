@@ -412,6 +412,23 @@ def _vector_mode_power_sign_numpy(component_profiles: dict[str, np.ndarray]) -> 
     return float(np.sum(np.real(eu * np.conj(hv) - ev * np.conj(hu))))
 
 
+def _vector_mode_polarization_fraction_numpy(
+    component_profiles: dict[str, np.ndarray],
+    *,
+    preferred_field_name: str,
+) -> float:
+    """Return the requested tangential electric-field energy fraction."""
+    electric_energy = sum(
+        float(np.vdot(profile, profile).real)
+        for name, profile in component_profiles.items()
+        if name.startswith("E")
+    )
+    if electric_energy <= 0.0:
+        return 0.0
+    preferred = component_profiles[preferred_field_name]
+    return float(np.vdot(preferred, preferred).real) / electric_energy
+
+
 def _normalize_mode_profiles_to_unit_power(
     component_profiles: dict[str, torch.Tensor],
     *,
@@ -574,18 +591,33 @@ def _select_and_normalize_vector_mode_numpy(
                 preferred_field_name=preferred_field_name,
             )
             power_sign = _vector_mode_power_sign_numpy(component_profiles)
+            polarization_fraction = _vector_mode_polarization_fraction_numpy(
+                component_profiles,
+                preferred_field_name=preferred_field_name,
+            )
             positive_candidates.append(
-                (selected_index, value, selected_vector, component_profiles, power_sign)
+                (
+                    selected_index,
+                    value,
+                    selected_vector,
+                    component_profiles,
+                    power_sign,
+                    polarization_fraction,
+                )
             )
         cursor = group_stop
 
-    preferred_candidates = [entry for entry in positive_candidates if entry[4] > 0.0]
-    selected_candidates = preferred_candidates if len(preferred_candidates) > int(mode_index) else positive_candidates
+    forward_candidates = [entry for entry in positive_candidates if entry[4] > 0.0]
+    # Match ModeSortSpec and the scalar mode path: modes dominated by the
+    # requested tangential E polarization form one indexed family. Selecting
+    # an orthogonal mode as a fallback would silently violate polarization.
+    selected_candidates = [entry for entry in forward_candidates if entry[5] >= 0.5]
     if len(selected_candidates) <= int(mode_index):
         raise ValueError(
-            f"ModeSource requested mode_index={mode_index}, but only {len(selected_candidates)} forward modes were found."
+            f"ModeSource requested mode_index={mode_index}, but only "
+            f"{len(selected_candidates)} forward modes in the requested polarization family were found."
         )
-    _, selected_beta, selected_vector, selected_profiles, _ = selected_candidates[int(mode_index)]
+    _, selected_beta, selected_vector, selected_profiles, _, _ = selected_candidates[int(mode_index)]
     return selected_beta, selected_vector, selected_profiles
 
 

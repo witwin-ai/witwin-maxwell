@@ -507,6 +507,82 @@ def save_field_comparison_plot(
     return output_path
 
 
+def save_vector_field_comparison_plot(
+    *,
+    scenario_name: str,
+    components: tuple[str, ...],
+    maxwell_vector: np.ndarray,
+    reference_vector: np.ndarray,
+    coords: tuple[np.ndarray, np.ndarray],
+    comparison: dict[str, object],
+    reference_label: str = "Tidy3D",
+) -> Path:
+    """Plot one globally aligned electric-vector cross section and its residual."""
+    ensure_directories()
+    scenario_dir = scenario_plot_dir(scenario_name)
+    scenario_dir.mkdir(parents=True, exist_ok=True)
+    output_path = scenario_dir / "vector_field_comparison.png"
+
+    aligned = np.asarray(maxwell_vector) * complex(comparison["shape_scale"])
+    reference = np.asarray(reference_vector)
+    extent = (
+        float(coords[0][0]),
+        float(coords[0][-1]),
+        float(coords[1][0]),
+        float(coords[1][-1]),
+    )
+    row_labels = ("|E|",) + tuple(f"Re({name})" for name in components)
+    left_rows = [np.sqrt(np.sum(np.abs(aligned) ** 2, axis=0))]
+    reference_rows = [np.sqrt(np.sum(np.abs(reference) ** 2, axis=0))]
+    left_rows.extend(np.real(aligned[index]) for index in range(len(components)))
+    reference_rows.extend(np.real(reference[index]) for index in range(len(components)))
+
+    fig, axes = plt.subplots(len(row_labels), 3, figsize=(13.5, 3.5 * len(row_labels)))
+    for row, (label, left, right) in enumerate(zip(row_labels, left_rows, reference_rows)):
+        difference = np.abs(left - right)
+        if row == 0:
+            vmax = max(float(np.max(left)), float(np.max(right)), 1.0e-30)
+            left_limits = {"vmin": 0.0, "vmax": vmax, "cmap": "magma"}
+        else:
+            vmax = max(float(np.max(np.abs(left))), float(np.max(np.abs(right))), 1.0e-30)
+            left_limits = {"vmin": -vmax, "vmax": vmax, "cmap": "RdBu_r"}
+        images = (
+            axes[row, 0].imshow(
+                left.T, origin="lower", extent=extent, aspect="equal", **left_limits
+            ),
+            axes[row, 1].imshow(
+                right.T, origin="lower", extent=extent, aspect="equal", **left_limits
+            ),
+            axes[row, 2].imshow(
+                difference.T,
+                origin="lower",
+                extent=extent,
+                aspect="equal",
+                cmap="viridis",
+                vmin=0.0,
+                vmax=max(float(np.max(difference)), 1.0e-30),
+            ),
+        )
+        axes[row, 0].set_title(f"{label} Maxwell (one vector scale)")
+        axes[row, 1].set_title(f"{label} {reference_label}")
+        axes[row, 2].set_title(f"{label} absolute residual")
+        for axis, image in zip(axes[row], images):
+            axis.set_xlabel("transverse coordinate 1 (m)")
+            axis.set_ylabel("transverse coordinate 2 (m)")
+            plt.colorbar(image, ax=axis, shrink=0.78)
+
+    fig.suptitle(
+        f"{scenario_name}: electric-vector cross section | "
+        f"overlap={float(comparison['overlap']):.4f}, "
+        f"energy ratio={float(comparison['energy_ratio']):.4f}",
+        fontsize=14,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(output_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 def save_complex_field_diagnostic_plot(
     *,
     scenario_name: str,

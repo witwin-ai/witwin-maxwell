@@ -27,6 +27,7 @@ from benchmark.metrics import (
     phase_align_field,
     plane_coord_keys,
     significant_field_mask,
+    vector_field_comparison,
 )
 from benchmark.gpu_memory import GpuMemorySampler, release_gpu_caches
 from benchmark.models import ScenarioMetrics
@@ -37,6 +38,7 @@ from benchmark.plotting import (
     save_material_source_plot,
     save_scalar_comparison_plot,
     save_time_trace_comparison_plot,
+    save_vector_field_comparison_plot,
 )
 from benchmark.report import write_results_markdown
 from benchmark.scenes import SCENARIOS, build_scene
@@ -62,7 +64,7 @@ MAX_TIDY3D_COST_PER_SCENARIO = 2.0
 # instead of a billable Tidy3D cloud submission. Use it whenever the benchmark is driven
 # from an automated loop that is only meant to re-score against existing references.
 NO_CLOUD_ENV_VAR = "WITWIN_BENCHMARK_NO_CLOUD"
-_MODE_EXPORT_CONTRACT_VERSION = 1
+_MODE_EXPORT_CONTRACT_VERSION = 2
 _GRID_EXPORT_CONTRACT_VERSION = 1
 _MESH_EXPORT_CONTRACT_VERSION = 1
 _MATERIAL_EXPORT_CONTRACT_VERSION = 1
@@ -403,6 +405,75 @@ def _align_plane_monitor_fields(
     if return_coords:
         return aligned_maxwell, aligned_tidy3d, None
     return aligned_maxwell, aligned_tidy3d
+
+
+def _collocated_monitor_view(monitor: dict[str, Any]) -> dict[str, Any]:
+    fields = monitor.get("collocated_fields")
+    if fields is None:
+        return monitor
+    view = dict(monitor)
+    view["fields"] = fields
+    view.pop("field_coords", None)
+    view.update(monitor.get("collocated_coords", {}))
+    return view
+
+
+def _aligned_vector_field_comparison(
+    scene: mw.Scene,
+    maxwell_monitor: dict[str, Any],
+    reference_monitor: dict[str, Any],
+    *,
+    components: tuple[str, ...],
+    freq_index: int,
+) -> tuple[dict[str, object], np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray]]:
+    """Align co-located components and compare them with one vector-field phasor."""
+    maxwell_view = _collocated_monitor_view(maxwell_monitor)
+    reference_view = _collocated_monitor_view(reference_monitor)
+    aligned_maxwell = []
+    aligned_reference = []
+    shared_coords = None
+    for component in components:
+        maxwell_field = _select_monitor_plane_field(
+            maxwell_view,
+            component,
+            maxwell_view["fields"][component],
+            freq_index=freq_index,
+        )
+        reference_field = _select_monitor_plane_field(
+            reference_view,
+            component,
+            reference_view["fields"][component],
+            freq_index=freq_index,
+        )
+        maxwell_field, reference_field, component_coords = _align_plane_monitor_fields(
+            scene,
+            maxwell_view,
+            reference_view,
+            component=component,
+            maxwell_field=maxwell_field,
+            tidy3d_field=reference_field,
+            return_coords=True,
+        )
+        if component_coords is None:
+            raise ValueError("Vector-field comparison requires physical plane coordinates.")
+        if shared_coords is None:
+            shared_coords = component_coords
+        elif any(
+            left.shape != right.shape or not np.allclose(left, right, rtol=1.0e-9, atol=1.0e-12)
+            for left, right in zip(shared_coords, component_coords)
+        ):
+            raise ValueError("Co-located vector components did not align to one transverse grid.")
+        aligned_maxwell.append(np.asarray(maxwell_field))
+        aligned_reference.append(np.asarray(reference_field))
+
+    maxwell_vector = np.stack(aligned_maxwell, axis=0)
+    reference_vector = np.stack(aligned_reference, axis=0)
+    comparison = vector_field_comparison(
+        maxwell_vector,
+        reference_vector,
+        coords=shared_coords,
+    )
+    return comparison, maxwell_vector, reference_vector, shared_coords
 
 
 def _comparison_fields(
@@ -917,6 +988,18 @@ def _extract_maxwell_monitors(result, scene) -> dict[str, dict[str, Any]]:
             monitor_data["fields"] = fields
             if field_coords:
                 monitor_data["field_coords"] = field_coords
+            collocated_fields = {
+                component: _to_numpy(payload[component])
+                for component in monitor.fields
+                if component in payload
+            }
+            if len(collocated_fields) > 1:
+                monitor_data["collocated_fields"] = collocated_fields
+                monitor_data["collocated_coords"] = {
+                    coord_key: _to_numpy(payload[coord_key])
+                    for coord_key in coord_names
+                    if coord_key in payload
+                }
             for coord_key in ("x", "y", "z"):
                 if coord_key in payload:
                     monitor_data[coord_key] = _to_numpy(payload[coord_key])
@@ -1516,6 +1599,8 @@ def _scalar_observables(
     monitors: dict[str, dict[str, Any]],
     frequencies: tuple[float, ...],
 ) -> dict[str, np.ndarray]:
+    if observable_kind == "mode_effective_index":
+        return {"n_eff": _mode_scalar(monitors, "mode_out", "effective_index")}
     if observable_kind == "waveguide_s_matrix":
         effective_index = _mode_scalar(monitors, "mode_out", "effective_index")
         frequency_array = np.asarray(frequencies, dtype=np.float64)
@@ -2042,39 +2127,70 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                 reference_index=scenario.spectral_reference_index,
             )
         per_frequency = []
+        vector_plot_payload = None
         for freq_index, frequency in enumerate(scenario.frequencies):
-            maxwell_field = _select_monitor_plane_field(
-                field_maxwell_monitors[monitor_name], component,
-                field_maxwell_monitors[monitor_name]["fields"][component], freq_index=freq_index)
-            tidy3d_field = _select_monitor_plane_field(
-                field_tidy3d_monitors[monitor_name], component,
-                field_tidy3d_monitors[monitor_name]["fields"][component], freq_index=freq_index)
-            maxwell_field, tidy3d_field, comparison_coords = _align_plane_monitor_fields(
-                scene, field_maxwell_monitors[monitor_name], field_tidy3d_monitors[monitor_name],
-                component=component, maxwell_field=maxwell_field, tidy3d_field=tidy3d_field,
-                return_coords=True)
-            maxwell_field, tidy3d_field = _comparison_fields(
-                scene,
-                field_maxwell_monitors[monitor_name].get("axis") or field_tidy3d_monitors[monitor_name].get("axis"),
-                comparison_coords,
-                maxwell_field,
-                tidy3d_field,
-                monitor_position=field_maxwell_monitors[monitor_name].get(
-                    "position",
-                    field_tidy3d_monitors[monitor_name].get("position"),
-                ),
-            )
-            if scenario.compare_magnitude:
-                maxwell_field = np.abs(maxwell_field)
-                tidy3d_field = np.abs(tidy3d_field)
-            shape_aligned, _ = best_fit_field_scale(maxwell_field, tidy3d_field)
-            per_frequency.append({
-                "frequency": float(frequency),
-                "field_l2": field_l2_error(maxwell_field, tidy3d_field),
-                "field_shape_l2": field_l2_error(shape_aligned, tidy3d_field),
-                "field_linf": field_max_error(maxwell_field, tidy3d_field),
-                "field_corr": field_correlation(maxwell_field, tidy3d_field),
-            })
+            if scenario.comparison_components:
+                comparison, maxwell_vector, tidy3d_vector, comparison_coords = (
+                    _aligned_vector_field_comparison(
+                        scene,
+                        field_maxwell_monitors[monitor_name],
+                        field_tidy3d_monitors[monitor_name],
+                        components=scenario.comparison_components,
+                        freq_index=freq_index,
+                    )
+                )
+                if not comparison["valid"]:
+                    raise ValueError(
+                        f"Invalid vector-field comparison for {name}: {comparison['reason']}."
+                    )
+                per_frequency.append({
+                    "frequency": float(frequency),
+                    "field_l2": float(comparison["field_l2"]),
+                    "field_shape_l2": float(comparison["field_shape_l2"]),
+                    "field_linf": float(comparison["field_linf"]),
+                    "field_corr": float(comparison["overlap"]),
+                    "field_energy_ratio": float(comparison["energy_ratio"]),
+                })
+                if freq_index == 0:
+                    vector_plot_payload = (
+                        comparison,
+                        maxwell_vector,
+                        tidy3d_vector,
+                        comparison_coords,
+                    )
+            else:
+                maxwell_field = _select_monitor_plane_field(
+                    field_maxwell_monitors[monitor_name], component,
+                    field_maxwell_monitors[monitor_name]["fields"][component], freq_index=freq_index)
+                tidy3d_field = _select_monitor_plane_field(
+                    field_tidy3d_monitors[monitor_name], component,
+                    field_tidy3d_monitors[monitor_name]["fields"][component], freq_index=freq_index)
+                maxwell_field, tidy3d_field, comparison_coords = _align_plane_monitor_fields(
+                    scene, field_maxwell_monitors[monitor_name], field_tidy3d_monitors[monitor_name],
+                    component=component, maxwell_field=maxwell_field, tidy3d_field=tidy3d_field,
+                    return_coords=True)
+                maxwell_field, tidy3d_field = _comparison_fields(
+                    scene,
+                    field_maxwell_monitors[monitor_name].get("axis") or field_tidy3d_monitors[monitor_name].get("axis"),
+                    comparison_coords,
+                    maxwell_field,
+                    tidy3d_field,
+                    monitor_position=field_maxwell_monitors[monitor_name].get(
+                        "position",
+                        field_tidy3d_monitors[monitor_name].get("position"),
+                    ),
+                )
+                if scenario.compare_magnitude:
+                    maxwell_field = np.abs(maxwell_field)
+                    tidy3d_field = np.abs(tidy3d_field)
+                shape_aligned, _ = best_fit_field_scale(maxwell_field, tidy3d_field)
+                per_frequency.append({
+                    "frequency": float(frequency),
+                    "field_l2": field_l2_error(maxwell_field, tidy3d_field),
+                    "field_shape_l2": field_l2_error(shape_aligned, tidy3d_field),
+                    "field_linf": field_max_error(maxwell_field, tidy3d_field),
+                    "field_corr": field_correlation(maxwell_field, tidy3d_field),
+                })
         l2_error = max(item["field_l2"] for item in per_frequency)
         shape_l2_error = max(item["field_shape_l2"] for item in per_frequency)
         linf_error = max(item["field_linf"] for item in per_frequency)
@@ -2100,7 +2216,10 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             scene=scene,
         )
         reference_label = "FDTD" if scenario.reference_solver == "fdtd" else "Tidy3D"
-        metric_component = f"abs({component})" if scenario.compare_magnitude else component
+        if scenario.comparison_components:
+            metric_component = "E-vector(" + ",".join(scenario.comparison_components) + ")"
+        else:
+            metric_component = f"abs({component})" if scenario.compare_magnitude else component
 
         material_source_plot = save_material_source_plot(
             scene=scene,
@@ -2115,15 +2234,27 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             tidy3d_monitors=field_tidy3d_monitors,
             reference_label=reference_label,
         )
-        diagnostic_plot = save_complex_field_diagnostic_plot(
-            scene=scene,
-            scenario_name=name,
-            monitor_name=monitor_name,
-            component=component,
-            maxwell_monitor=field_maxwell_monitors[monitor_name],
-            tidy3d_monitor=field_tidy3d_monitors[monitor_name],
-            reference_label=reference_label,
-        )
+        if vector_plot_payload is None:
+            diagnostic_plot = save_complex_field_diagnostic_plot(
+                scene=scene,
+                scenario_name=name,
+                monitor_name=monitor_name,
+                component=component,
+                maxwell_monitor=field_maxwell_monitors[monitor_name],
+                tidy3d_monitor=field_tidy3d_monitors[monitor_name],
+                reference_label=reference_label,
+            )
+        else:
+            vector_comparison, maxwell_vector, tidy3d_vector, vector_coords = vector_plot_payload
+            diagnostic_plot = save_vector_field_comparison_plot(
+                scenario_name=name,
+                components=scenario.comparison_components,
+                maxwell_vector=maxwell_vector,
+                reference_vector=tidy3d_vector,
+                coords=vector_coords,
+                comparison=vector_comparison,
+                reference_label=reference_label,
+            )
         if scenario.scalar_observable == "time_monitor_traces":
             scalar_plot = save_time_trace_comparison_plot(
                 scenario_name=name,
@@ -2171,6 +2302,11 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             f"  {monitor_name}/{metric_component}: L2={l2_error:.4e} "
             f"ShapeL2={shape_l2_error:.4e} Linf={linf_error:.4e} Corr={corr:.4f}"
         )
+        if scenario.comparison_components:
+            print(
+                "  Electric-vector energy ratio: "
+                f"{float(per_frequency[0]['field_energy_ratio']):.4f}"
+            )
         if flux_error is not None:
             print(f"  Flux error: {flux_error:.4e}")
         for item in scalar_metrics:

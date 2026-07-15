@@ -18,6 +18,8 @@ from .sources import (
 
 @dataclass(frozen=True)
 class ModePort:
+    """Couple a source and monitor using a polarization-family mode index."""
+
     name: str
     position: tuple[float, float, float]
     size: tuple[float, float, float]

@@ -98,8 +98,8 @@ def _mode_sort_spec(td, normal_axis: str, polarization):
 
 
 def _mode_candidate_count(mode_index: int) -> int:
-    """Request both polarization families through the selected modal order."""
-    return 2 * (int(mode_index) + 1)
+    """Request a padded two-polarization window through the selected order."""
+    return 2 * (int(mode_index) + 4)
 
 
 # ---------------------------------------------------------------------------
@@ -1364,6 +1364,7 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=No
             freqs=list(monitor_frequencies),
             fields=list(monitor.fields),
             name=monitor.name,
+            colocate=True,
         )
 
     if isinstance(monitor, DiffractionMonitor):
@@ -1429,6 +1430,7 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=No
             freqs=list(monitor_frequencies),
             fields=list(monitor.fields),
             name=monitor.name,
+            colocate=True,
         )
 
     if isinstance(monitor, PlaneMonitor):
@@ -1453,6 +1455,7 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=No
             freqs=list(monitor_frequencies),
             fields=list(monitor.fields),
             name=monitor.name,
+            colocate=True,
         )
 
     raise NotImplementedError(

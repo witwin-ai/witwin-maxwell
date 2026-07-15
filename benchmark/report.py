@@ -96,6 +96,8 @@ def _parse_existing_results():
         if in_frequencies and stripped.startswith("|") and not stripped.startswith("| ---"):
             parts = [part.strip() for part in stripped.strip("|").split("|")]
             if len(parts) == 6 and parts[0] != "Scenario":
+                parts.append("-")
+            if len(parts) == 7 and parts[0] != "Scenario":
                 frequency_rows[(parts[0], parts[1])] = parts
     return rows, plots, scalar_rows, frequency_rows
 
@@ -202,6 +204,11 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
                 f"{float(item['field_shape_l2']):.4e}",
                 f"{float(item['field_linf']):.4e}",
                 f"{float(item['field_corr']):.4f}",
+                (
+                    "-"
+                    if "field_energy_ratio" not in item
+                    else f"{float(item['field_energy_ratio']):.4f}"
+                ),
             ]
 
     lines = [
@@ -215,6 +222,7 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
         "- `Shape L2 [smaller]`: relative L2 after removing the best-fit global complex scale; it isolates spatial-shape error from amplitude and phase conventions.",
         "- `Field Linf [smaller, <1e-1]`: smaller is better; below `1e-1` usually means no large local outlier.",
         "- `Field Corr [larger, >0.99]`: larger is better; above `0.99` means field shape is strongly aligned.",
+        "- `Energy ratio`: weighted Maxwell/reference electric-field norm ratio for vector comparisons; unity is ideal.",
         "- `Flux err [smaller, <5e-2]`: smaller is better; below `5e-2` is a strong flux match.",
         "- `Complex err`: symmetric complex relative error; it remains finite for near-zero S-parameters.",
         "- `Phase err`: wrapped phase difference in radians; omitted when either magnitude is numerically zero.",
@@ -258,8 +266,8 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
     if merged_frequency_rows:
         lines.extend([
             "## Per-frequency field metrics", "",
-            "| Scenario | Frequency (Hz) | Field L2 | Shape L2 | Field Linf | Field Corr |",
-            "| --- | ---: | ---: | ---: | ---: | ---: |",
+            "| Scenario | Frequency (Hz) | Field L2 | Shape L2 | Field Linf | Field Corr | Energy ratio |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ])
         for key in sorted(merged_frequency_rows):
             lines.append("| " + " | ".join(merged_frequency_rows[key]) + " |")

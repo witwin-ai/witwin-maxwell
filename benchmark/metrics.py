@@ -108,6 +108,83 @@ def field_correlation(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.abs(np.vdot(a, b)) / (norm_a * norm_b))
 
 
+def _trapezoid_axis_weights(coords: np.ndarray) -> np.ndarray:
+    axis = _normalize_axis_coords(coords)
+    if axis.size == 1:
+        return np.ones((1,), dtype=np.float64)
+    weights = np.empty_like(axis)
+    weights[0] = 0.5 * (axis[1] - axis[0])
+    weights[-1] = 0.5 * (axis[-1] - axis[-2])
+    if axis.size > 2:
+        weights[1:-1] = 0.5 * (axis[2:] - axis[:-2])
+    return weights
+
+
+def vector_field_comparison(
+    actual: np.ndarray,
+    reference: np.ndarray,
+    *,
+    coords: tuple[np.ndarray, np.ndarray],
+) -> dict[str, object]:
+    """Compare co-located complex vector fields with one global phase and scale."""
+    actual_array = np.asarray(actual, dtype=np.complex128)
+    reference_array = np.asarray(reference, dtype=np.complex128)
+    if actual_array.shape != reference_array.shape or actual_array.ndim != 3:
+        raise ValueError("Vector fields must have equal (component, u, v) shapes.")
+    if not np.isfinite(actual_array).all() or not np.isfinite(reference_array).all():
+        return {"valid": False, "reason": "non-finite field values"}
+
+    weights = np.outer(
+        _trapezoid_axis_weights(coords[0]),
+        _trapezoid_axis_weights(coords[1]),
+    )[None, ...]
+    if actual_array.shape[1:] != weights.shape[1:]:
+        raise ValueError("Vector-field coordinates do not match the transverse field shape.")
+
+    actual_peak = float(np.max(np.abs(actual_array)))
+    reference_peak = float(np.max(np.abs(reference_array)))
+    if actual_peak == 0.0 or reference_peak == 0.0:
+        return {"valid": False, "reason": "zero vector field"}
+    actual_scaled = actual_array / actual_peak
+    reference_scaled = reference_array / reference_peak
+    actual_energy = float(np.sum(weights * np.abs(actual_scaled) ** 2))
+    reference_energy = float(np.sum(weights * np.abs(reference_scaled) ** 2))
+    if actual_energy <= 0.0 or reference_energy <= 0.0:
+        return {"valid": False, "reason": "zero weighted vector-field energy"}
+
+    overlap_integral = np.sum(weights * np.conj(actual_scaled) * reference_scaled)
+    overlap_magnitude = abs(complex(overlap_integral))
+    phase = 1.0 + 0.0j if overlap_magnitude == 0.0 else overlap_integral / overlap_magnitude
+    overlap = overlap_magnitude / np.sqrt(actual_energy * reference_energy)
+    amplitude_ratio = actual_peak / reference_peak
+    energy_ratio = amplitude_ratio * np.sqrt(actual_energy / reference_energy)
+
+    phase_aligned = actual_scaled * phase * amplitude_ratio
+    raw_l2 = np.sqrt(
+        float(np.sum(weights * np.abs(phase_aligned - reference_scaled) ** 2))
+        / reference_energy
+    )
+    scale_denominator = np.sum(weights * np.abs(actual_scaled) ** 2)
+    shape_scale_scaled = overlap_integral / scale_denominator
+    shape_aligned = actual_scaled * shape_scale_scaled
+    shape_l2 = np.sqrt(
+        float(np.sum(weights * np.abs(shape_aligned - reference_scaled) ** 2))
+        / reference_energy
+    )
+    linf = float(np.max(np.abs(phase_aligned - reference_scaled)))
+    shape_scale = complex(shape_scale_scaled * reference_peak / actual_peak)
+    return {
+        "valid": True,
+        "overlap": float(np.clip(overlap, 0.0, 1.0)),
+        "energy_ratio": float(energy_ratio),
+        "phase": complex(phase),
+        "shape_scale": shape_scale,
+        "field_l2": float(raw_l2),
+        "field_shape_l2": float(shape_l2),
+        "field_linf": linf,
+    }
+
+
 def align_arrays(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     a = np.squeeze(np.asarray(a))
     b = np.squeeze(np.asarray(b))
@@ -222,4 +299,5 @@ __all__ = [
     "phase_align_field",
     "plane_coord_keys",
     "significant_field_mask",
+    "vector_field_comparison",
 ]

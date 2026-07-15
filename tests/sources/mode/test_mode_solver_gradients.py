@@ -8,7 +8,7 @@ import witwin.maxwell as mw
 import witwin.maxwell.fdtd.excitation.modes as mode_solver
 from witwin.maxwell.compiler.materials import evaluate_material_permittivity
 from witwin.maxwell.compiler.sources import _compile_mode_source
-from witwin.maxwell.fdtd.excitation.modes import sample_mode_source_component, solve_mode_source_profile
+from witwin.maxwell.fdtd.excitation.modes import solve_mode_source_profile
 from witwin.maxwell.scene import prepare_scene
 
 
@@ -99,6 +99,35 @@ def _mode_context(scene, *, rebuild_from_fields: bool, requires_grad: bool, use_
         eps_Ey=eps_ey,
         eps_Ez=eps_ez,
     )
+
+
+def test_full_vector_mode_index_is_ordered_within_requested_polarization_family():
+    # Layout is (Hy, Hz, Ey, Ez) for an x-normal mode plane. The largest-beta
+    # candidate is Ey-dominated; the next two are Ez-dominated. mode_index=1
+    # with polarization=Ez must therefore select the second Ez-family mode.
+    eigenvalues = torch.tensor([5.0, 4.0, 3.0], dtype=torch.float64).numpy()
+    eigenvectors = torch.tensor(
+        [
+            [0.0, -1.0, -2.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 2.0],
+        ],
+        dtype=torch.float64,
+    ).numpy()
+
+    beta, _, profiles = mode_solver._select_and_normalize_vector_mode_numpy(
+        eigenvalues,
+        eigenvectors,
+        interior_u=1,
+        interior_v=1,
+        mode_index=1,
+        field_names=("Ey", "Ez", "Hy", "Hz"),
+        preferred_field_name="Ez",
+    )
+
+    assert beta == pytest.approx(3.0)
+    assert float(abs(profiles["Ez"]).max()) == pytest.approx(1.0)
 
 
 def test_torch_mode_solver_matches_scipy_forward_profile_and_beta():

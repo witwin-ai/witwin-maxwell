@@ -599,6 +599,8 @@ class FluxTimeMonitor:
 
 @dataclass(frozen=True)
 class ModeMonitor:
+    """Decompose a guided mode indexed within the requested polarization family."""
+
     name: str
     position: tuple[float, float, float]
     size: tuple[float, float, float]

@@ -866,6 +866,8 @@ class CustomFieldSource:
 
 @dataclass(frozen=True)
 class ModeSource:
+    """Launch a guided mode indexed within the requested polarization family."""
+
     position: tuple[float, float, float]
     size: tuple[float, float, float]
     mode_index: int

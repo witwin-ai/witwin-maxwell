@@ -387,3 +387,52 @@ RCS 标量不再全部饱和为 error=1：PEC sphere 的 forward/back/E/H broads
 `time_trace_comparison.png` 的视觉检查显示：约 7--11 ns 的主电场脉冲在包络、载波相位和峰值时刻上重合，FluxTimeMonitor 的各功率峰几乎逐点重合；field waveform 的主要剩余误差来自 Maxwell 在约 12--14.5 ns 的低幅尾部振铃，而不是源时间原点或高斯相位错误。真空本地解析传播验证进一步检查了峰值时刻 `source_delay + distance/c`：field 和 flux 峰均落在预期值的 1.5 个 monitor sample step 内。
 
 阶段 A 最终回归包括：Tidy3D adapter / benchmark validation `231 passed`，受影响 runtime 测试 `108 passed, 1 skipped`，以及真实 Tidy3D `GaussianPulse.amp_time` 与 Maxwell `GaussianPulse.evaluate` 的 257 点逐点一致性测试。
+
+## 17. Numerical-consistency repair stage B: modal system
+
+Stage B separates a confirmed public-contract bug from a deeper eigensolver algorithm difference. The contract fix is retained; the algorithm difference is documented rather than hidden by changing the requested mode number.
+
+### 17.1 Confirmed contract and validation fixes
+
+1. `ModeSource`, `ModeMonitor`, and `ModePort` now define `mode_index` within the requested tangential-electric polarization family. Full-vector candidates use `sum(|E_preferred|^2) / sum(|E_tangential|^2) >= 0.5`, remain ordered by descending propagation constant within that family, and fail explicitly when the family does not contain the requested order. They no longer silently fall back to an orthogonal mode.
+2. Tidy3D mode export retains the matching `TE_fraction` / `TM_fraction` sort contract and expands its candidate window from `2 * (mode_index + 1)` to `2 * (mode_index + 4)`. The modal export cache contract was incremented so old cloud references cannot be reused under the new ordering.
+3. Tidy3D field monitors now request `colocate=True` explicitly. Maxwell benchmark extraction retains the raw Yee-component fields for existing scalar diagnostics and additionally exposes the solver's co-located multi-component plane payload.
+4. Modal field comparison now aligns all requested E components to one physical transverse grid and computes a trapezoid-area-weighted complex vector overlap with one global phase. It also reports raw vector L2, best-one-complex-scale shape L2, Linf, and electric-energy ratio. Per-component phase fitting is forbidden because it would conceal polarization and relative-component-phase errors.
+5. `vector_field_comparison.png` plots the full transverse electric magnitude and signed real components for Maxwell, Tidy3D, and the globally aligned residual. The non-degenerate modal coverage scene uses a finite x-normal output plane, so the comparison is a real cross section instead of the previous longitudinal `y=0` slice that coincided with a higher-order-mode node.
+
+Regression coverage includes requested-family ordering, orthogonal-polarization rejection, relative-component-phase sensitivity, zero-field invalidation, co-located payload extraction, physical-coordinate alignment, adapter candidate counts, and explicit Tidy3D colocation. Targeted results before the external rerun: mode solver `10 passed`, Tidy3D adapter `133 passed`, benchmark system `84 passed`; modified-source Ruff checks pass.
+
+### 17.2 Three-grid eigenspectrum evidence
+
+The replacement baseline uses a rectangular `0.30 m x 0.15 m` core, a `0.525 m x 0.375 m` source/monitor aperture, `2 GHz`, `polarization="Ez"`, and public `mode_index=1`. The geometry is exactly representable on all three study grids.
+
+| Grid spacing (m) | Second physical Ez-mode group n_eff | Ez purity range | Gap to nearest different physical group |
+|---:|---:|---:|---:|
+| 0.0375 | 1.912182 | 0.990--1.000 | 0.02121 |
+| 0.0250 | 1.900120 | 0.996--1.000 | 0.03625 |
+| 0.0125 | 1.891643 | 0.997--0.999 | 0.03989 |
+
+The physical group changes by 0.448% from the medium to fine grid and 1.086% from coarse to fine. It is non-degenerate with the neighboring physical mode and has one signed `Ez` node along y and none along z. This establishes a stable target independent of the original square-guide polarization degeneracy.
+
+### 17.3 `DEFERRED(mode-eigensolver-checkerboard-duplicates)`
+
+The current full-vector transverse operator composes centered first derivatives. On the transverse lattice this decouples odd/even sublattices and produces approximately four checkerboard copies of each continuous physical mode. At `dx=0.025 m`, raw Ez-family candidates 0--3 all have zero center-line nodes, while candidates 4--7 all have one y node; the four eigenvalues inside each physical group collapse toward one value as the grid is refined.
+
+Consequently, public `mode_index=1` currently selects another zero-node fundamental copy. The local Stage-B Maxwell run returns `n_eff=1.9408339`, whereas the independently grouped second physical Ez mode is near `1.90012` on the same grid. Changing the public request to `mode_index=4` would only disguise the defect and would ask Tidy3D for a different physical order, so that workaround is explicitly rejected.
+
+This item is sufficiently verified as a fundamental mode-eigensolver discretization difference. It remains deferred for a dedicated operator/de-duplication redesign. The new Tidy3D reference, full-vector overlap, `n_eff`, cross-section plot, and signed propagation slice remain the acceptance baseline for that future repair.
+
+### 17.4 External reference and electric-field visual verdict
+
+The user regenerated the Tidy3D reference under modal export contract version 2. A subsequent `WITWIN_BENCHMARK_NO_CLOUD=1` run hit cache key `ec917b965d219b04a39913bb5071c2f1f77a7d8cf0e12ac9697835031b8db939`, proving that scoring and plotting used the new reference without another cloud submission.
+
+| Quantity | Maxwell | Tidy3D | Comparison |
+|---|---:|---:|---:|
+| `n_eff` | 1.940834 | 1.889471 | relative error 0.026464 |
+| electric-vector energy | - | - | Maxwell/Tidy3D ratio 0.2674 |
+| full-vector field | - | - | raw L2 0.97992; shape L2 0.97812; overlap 0.2081 |
+| transmitted flux | - | - | relative error 0.93845 |
+
+The transverse electric-field image is decisive rather than merely illustrative. Tidy3D launches the requested signed second-order `Ez` mode: two transverse lobes with a sign reversal at the central node. Maxwell launches a single central lobe with no transverse node and visible staggered/checkerboard leakage in the weaker components. On the longitudinal `y=0` slice, Tidy3D is consequently near zero because the plane lies on the physical mode node, while Maxwell retains a strong propagating field. One global complex alignment cannot transform either topology into the other, which is consistent with the low vector overlap and rules out a simple unit, phase, or normalization explanation.
+
+Stage B therefore closes with the public polarization-family contract fixed and regression-tested, while the eigensolver checkerboard duplication remains explicitly deferred. The generated `vector_field_comparison.png` is the authoritative visual baseline for the future operator redesign; the old scalar longitudinal slice is not accepted on its own.

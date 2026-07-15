@@ -20,6 +20,7 @@ from benchmark.metrics import (
     best_fit_field_scale,
     phase_align_field,
     significant_field_mask,
+    vector_field_comparison,
 )
 from benchmark.models import ScenarioMetrics
 from benchmark.scenes import SCENARIOS, build_scene
@@ -115,6 +116,51 @@ def test_source_normalized_tfsf_cache_uses_standard_spatial_unit_conversion():
     np.testing.assert_allclose(scaled["flux"]["flux"], 2.0)
     assert scaled["field"]["position"] == pytest.approx(0.25)
     np.testing.assert_allclose(scaled["field"]["x"], (-0.64, 0.64))
+
+
+def test_vector_field_comparison_uses_one_global_phase_and_area_weights():
+    u = np.array([-0.4, -0.1, 0.2, 0.6])
+    v = np.array([-0.3, 0.0, 0.5])
+    reference = np.zeros((3, u.size, v.size), dtype=np.complex128)
+    reference[0] = 1.0 + u[:, None] + 0.25j * v[None, :]
+    reference[1] = (0.5 - 0.2j) * reference[0]
+    reference[2] = (-0.1 + 0.7j) * reference[0]
+    actual = 2.5 * np.exp(0.4j) * reference
+
+    comparison = vector_field_comparison(actual, reference, coords=(u, v))
+
+    assert comparison["valid"] is True
+    assert comparison["overlap"] == pytest.approx(1.0)
+    assert comparison["energy_ratio"] == pytest.approx(2.5)
+    assert comparison["field_shape_l2"] == pytest.approx(0.0, abs=1.0e-14)
+    assert comparison["phase"] == pytest.approx(np.exp(-0.4j))
+
+
+def test_vector_field_comparison_detects_orthogonal_and_relative_phase_errors():
+    coords = (np.linspace(-1.0, 1.0, 5), np.linspace(-0.5, 0.5, 4))
+    ey = np.zeros((3, 5, 4), dtype=np.complex128)
+    ez = np.zeros_like(ey)
+    ey[1] = 1.0
+    ez[2] = 1.0
+    orthogonal = vector_field_comparison(ey, ez, coords=coords)
+    assert orthogonal["valid"] is True
+    assert orthogonal["overlap"] == pytest.approx(0.0)
+
+    reference = ey + ez
+    wrong_relative_phase = ey + 1j * ez
+    relative_phase = vector_field_comparison(wrong_relative_phase, reference, coords=coords)
+    assert relative_phase["overlap"] == pytest.approx(np.sqrt(0.5))
+    assert relative_phase["field_shape_l2"] > 0.7
+
+
+def test_vector_field_comparison_rejects_zero_fields_without_nan_metrics():
+    zeros = np.zeros((3, 2, 2), dtype=np.complex128)
+    comparison = vector_field_comparison(
+        zeros,
+        zeros,
+        coords=(np.array([0.0, 1.0]), np.array([0.0, 1.0])),
+    )
+    assert comparison == {"valid": False, "reason": "zero vector field"}
 
 
 def test_tidy3d_cache_keeps_only_publicly_requested_monitor_fields():
@@ -1134,6 +1180,82 @@ def test_extract_maxwell_monitors_prefers_native_component_payload():
     )
 
 
+def test_extract_maxwell_monitors_also_preserves_collocated_vector_payload():
+    scene = mw.Scene(device="cpu").add_monitor(
+        mw.FinitePlaneMonitor(
+            name="field",
+            position=(0.0, 0.0, 0.0),
+            size=(0.0, 0.4, 0.4),
+            fields=("Ex", "Ey", "Ez"),
+            frequencies=(1.5e9,),
+        )
+    )
+    coords = np.linspace(-0.2, 0.2, 3)
+    payload = {
+        "y": coords,
+        "z": coords,
+        "Ex": np.ones((3, 3)),
+        "Ey": 2.0 * np.ones((3, 3)),
+        "Ez": 3.0 * np.ones((3, 3)),
+        "components": {
+            name: {
+                "data": (index + 5.0) * np.ones((4, 4)),
+                "coords": (np.linspace(-0.2, 0.2, 4), np.linspace(-0.2, 0.2, 4)),
+            }
+            for index, name in enumerate(("Ex", "Ey", "Ez"))
+        },
+    }
+
+    class DummyResult:
+        def monitor(self, name):
+            assert name == "field"
+            return payload
+
+    extracted = benchmark_runner._extract_maxwell_monitors(DummyResult(), scene)["field"]
+    np.testing.assert_allclose(extracted["fields"]["Ex"], 5.0)
+    np.testing.assert_allclose(extracted["collocated_fields"]["Ex"], 1.0)
+    np.testing.assert_allclose(extracted["collocated_fields"]["Ez"], 3.0)
+    np.testing.assert_allclose(extracted["collocated_coords"]["y"], coords)
+
+
+def test_aligned_vector_field_comparison_uses_collocated_components():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+    )
+    coords = np.linspace(-0.25, 0.25, 3)
+    reference = {
+        name: (index + 1.0) * np.ones((3, 3), dtype=np.complex128)
+        for index, name in enumerate(("Ex", "Ey", "Ez"))
+    }
+    common = {"kind": "field", "axis": "x", "position": 0.0, "y": coords, "z": coords}
+    tidy3d_monitor = {**common, "fields": reference}
+    maxwell_monitor = {
+        **common,
+        "fields": {name: np.zeros((4, 4)) for name in reference},
+        "collocated_fields": {
+            name: 2.0 * np.exp(0.3j) * values for name, values in reference.items()
+        },
+        "collocated_coords": {"y": coords, "z": coords},
+    }
+
+    comparison, maxwell_vector, tidy3d_vector, aligned_coords = (
+        benchmark_runner._aligned_vector_field_comparison(
+            scene,
+            maxwell_monitor,
+            tidy3d_monitor,
+            components=("Ex", "Ey", "Ez"),
+            freq_index=0,
+        )
+    )
+
+    assert comparison["overlap"] == pytest.approx(1.0)
+    assert comparison["energy_ratio"] == pytest.approx(2.0)
+    assert maxwell_vector.shape == tidy3d_vector.shape == (3, 3, 3)
+    np.testing.assert_allclose(aligned_coords[0], coords)
+
+
 def test_extract_fdfd_monitors_preserves_component_yee_coordinates():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
@@ -1670,6 +1792,26 @@ def test_complex_field_diagnostic_plot_smoke(tmp_path, monkeypatch):
     assert output_path == (
         tmp_path / "planewave" / "planewave_vacuum" / "complex_field_diagnostic.png"
     )
+
+
+def test_vector_field_comparison_plot_smoke(tmp_path, monkeypatch):
+    monkeypatch.setattr(benchmark_paths, "PLOTS_DIR", tmp_path)
+    coords = np.linspace(-0.2, 0.2, 5)
+    reference = np.ones((3, 5, 5), dtype=np.complex128)
+    actual = 1.2 * np.exp(0.2j) * reference
+    comparison = vector_field_comparison(actual, reference, coords=(coords, coords))
+
+    output_path = benchmark_plotting.save_vector_field_comparison_plot(
+        scenario_name="mode_source_higher_order",
+        components=("Ex", "Ey", "Ez"),
+        maxwell_vector=actual,
+        reference_vector=reference,
+        coords=(coords, coords),
+        comparison=comparison,
+    )
+
+    assert output_path.exists()
+    assert output_path.name == "vector_field_comparison.png"
 
 
 def test_field_comparison_plot_smoke_with_multi_frequency_fields(tmp_path, monkeypatch):
