@@ -28,9 +28,9 @@ phase records live under `docs/assessments/`.
 | Fixed single-mode WavePort material adjoint | < 2% | < 2% | pass |
 | Half-wave peak-directivity error | 1.33e-11 dB | < 0.25 dB | pass |
 | Antenna accepted-power balance error | < 3% | < 3% | pass |
-| No-RF-feature paired runtime regression | 1.6305% | < 2% | pass |
+| No-RF-feature paired runtime regression | 1.9063% | < 2% | pass |
 
-The performance row compares baseline `88dafa0` with clean candidate `d00830e`
+The performance row compares baseline `88dafa0` with clean candidate `f2ba14b`
 using CUDA Events and symmetric ABBA/BAAB blocks. Its complete sample record is
 `docs/assessments/rf-workflow-phase-5-performance.json`.
 

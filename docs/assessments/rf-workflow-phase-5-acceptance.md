@@ -50,10 +50,10 @@ three-step checkpoint replay is bitwise identical.
 - No-feature fast-path structure check: 1 passed.
 - Ruff and `git diff --check`: passed.
 
-The no-feature performance comparison uses a 24-cubed CPML scene, 2,000 time
-steps, CUDA Events, three warmups and seven timed runs per block, and symmetric
-ABBA/BAAB ordering. Baseline `88dafa0` and clean candidate `d00830e` produced a
-paired-round regression of 1.6305%, satisfying the `< 2%` gate. The complete
+The no-feature performance comparison uses a 24-cubed CPML scene, 6,000 time
+steps, CUDA Events, three warmups and five timed runs per block, and four
+symmetric ABBA/BAAB rounds. Baseline `88dafa0` and clean candidate `f2ba14b`
+produced a paired-round regression of 1.9063%, satisfying the `< 2%` gate. The complete
 machine-readable record is `rf-workflow-phase-5-performance.json`.
 
 ## Explicit unsupported combinations
