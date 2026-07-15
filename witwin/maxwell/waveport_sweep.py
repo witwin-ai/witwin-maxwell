@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import torch
 
+from .adjoint_inputs import scene_trainable_material_tensors
 from .compiler.sources import _compile_mode_source
 from .fdtd.excitation.modes import (
     sample_mode_source_component,
@@ -296,6 +297,103 @@ def _tracking_confidence(tracking: ModeTrackingResult) -> torch.Tensor:
     return torch.cat((first, tracking.confidence), dim=0).transpose(0, 1)
 
 
+def _material_cross_section_probe(model, compiled) -> torch.Tensor | None:
+    aperture_indices = compiled.aperture_indices.reshape(-1, 3)
+    normal_index = "xyz".index(compiled.normal_axis)
+    source_indices = aperture_indices.clone()
+    source_indices[:, normal_index] = (
+        compiled.electric_plane_index - compiled.direction_sign
+    )
+    selectors = tuple(
+        tuple(indices[:, axis] for axis in range(3))
+        for indices in (aperture_indices, source_indices)
+    )
+    tensors = []
+    for key in (
+        "eps_components",
+        "mu_components",
+        "sigma_e_components",
+        "sigma_m_components",
+        "eps_offdiag_components",
+        "mu_offdiag_components",
+    ):
+        values = model.get(key, {})
+        if isinstance(values, dict):
+            tensors.extend(value for value in values.values() if torch.is_tensor(value))
+    for key in ("eps_r", "mu_r", "pec_occupancy"):
+        value = model.get(key)
+        if torch.is_tensor(value):
+            tensors.append(value)
+
+    probe = None
+    for tensor_index, tensor in enumerate(tensors):
+        if not tensor.requires_grad:
+            continue
+        sampled = torch.cat(
+            tuple(tensor[selector].reshape(-1) for selector in selectors)
+        )
+        weights = torch.linspace(
+            1.0 + 0.03125 * tensor_index,
+            2.0 + 0.03125 * tensor_index,
+            sampled.numel(),
+            device=sampled.device,
+            dtype=sampled.real.dtype,
+        )
+        term = torch.sum(sampled.real * weights)
+        if sampled.is_complex():
+            term = term + torch.sum(sampled.imag * torch.flip(weights, dims=(0,)))
+        probe = term if probe is None else probe + term
+    return probe
+
+
+def _validate_fixed_trainable_cross_sections(scene, context, compiled_by_name, selected_names):
+    inputs = scene_trainable_material_tensors(scene)
+    if not inputs:
+        raise NotImplementedError(
+            "Differentiable WavePort runs require trainable inputs that contribute to "
+            "the prepared material tensors."
+        )
+    probes = tuple(
+        probe
+        for name in selected_names
+        if (probe := _material_cross_section_probe(
+            context._compiled_material_model,
+            compiled_by_name[name],
+        ))
+        is not None
+    )
+    if not probes:
+        return
+    dependencies = torch.autograd.grad(
+        sum(probes),
+        inputs,
+        allow_unused=True,
+        retain_graph=True,
+    )
+    if any(
+        dependency is not None and bool(torch.any(dependency.detach() != 0))
+        for dependency in dependencies
+    ):
+        raise NotImplementedError(
+            "Differentiable WavePort runs require fixed port cross-sections and launch "
+            "planes; a trainable material or geometry input affects a selected WavePort "
+            "aperture or its adjacent source plane. Move the design region away from the "
+            "port launch."
+        )
+
+
+def _detach_material_model(value):
+    if torch.is_tensor(value):
+        return value.detach()
+    if isinstance(value, dict):
+        return {key: _detach_material_model(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_detach_material_model(item) for item in value)
+    if isinstance(value, list):
+        return [_detach_material_model(item) for item in value]
+    return value
+
+
 def resolve_waveport_run_manifest(scene, sweep: PortSweep, frequencies) -> WavePortRunManifest:
     if not isinstance(sweep, PortSweep):
         raise TypeError("sweep must be a PortSweep.")
@@ -344,6 +442,19 @@ def resolve_waveport_run_manifest(scene, sweep: PortSweep, frequencies) -> WaveP
 
     context = _mode_context(scene)
     compiled_by_name = {entry.port_name: entry for entry in scene.compile_waveports()}
+    if scene_trainable_material_tensors(scene):
+        _validate_fixed_trainable_cross_sections(
+            scene,
+            context,
+            compiled_by_name,
+            selected_names,
+        )
+        # The selected aperture is proven independent of the design inputs above.
+        # Detaching the mode context keeps the fixed mode solve on its full-vector
+        # forward path instead of requesting an unnecessary mode-shape eigen-adjoint.
+        context._compiled_material_model = _detach_material_model(
+            context._compiled_material_model
+        )
     prepared_ports = []
     channel_names = []
     for port_name in selected_names:
@@ -526,6 +637,11 @@ def _execute_columns(
                 excitations=None,
                 metadata=simulation.metadata,
             )
+            # The outer workflow has already proved that trainable material inputs
+            # do not affect this fixed WavePort aperture. Reuse the initialized
+            # full-vector source patches during the adjoint instead of requesting
+            # an unrelated mode-shape eigen-adjoint from each inner simulation.
+            sub_simulation._fixed_waveport_mode_sources = True
             last_result = sub_simulation.run()
             incident, reflected = _extract_tracked_waves(
                 last_result,

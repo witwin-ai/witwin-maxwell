@@ -478,15 +478,34 @@ class Simulation:
     def _validate_trainable_rf_support(self) -> None:
         if self.method != SimulationMethod.FDTD or not self.has_trainable_parameters:
             return
-        has_rf_ports = any(
-            isinstance(port, (LumpedPort, TerminalPort, WavePort))
+        rf_ports = tuple(
+            port
             for port in self.scene.ports
+            if isinstance(port, (LumpedPort, TerminalPort, WavePort))
         )
-        if has_rf_ports or self.scene.lumped_elements or self.excitations or self.port_sweep:
+        wave_ports = tuple(port for port in rf_ports if isinstance(port, WavePort))
+        uses_waveport_workflow = bool(wave_ports) and bool(
+            self.port_sweep is not None or self._waveport_excitation() is not None
+        )
+        if uses_waveport_workflow:
+            if len(wave_ports) != len(rf_ports) or self.scene.lumped_elements:
+                raise NotImplementedError(
+                    "Differentiable WavePort runs cannot include lumped/terminal ports "
+                    "or standalone R/L/C elements because their auxiliary state is not "
+                    "replayed by the FDTD adjoint."
+                )
+            multimode = tuple(port.name for port in wave_ports if len(port.modes) != 1)
+            if multimode:
+                raise NotImplementedError(
+                    "Differentiable WavePort runs currently require exactly one fixed mode "
+                    f"per aperture; multimode ports are {multimode}."
+                )
+            return
+        if rf_ports or self.scene.lumped_elements or self.excitations or self.port_sweep:
             raise NotImplementedError(
-                "Trainable FDTD scenes cannot yet include RF ports, port excitations, "
-                "or standalone R/L/C elements because the adjoint does not replay "
-                "their auxiliary state."
+                "Trainable FDTD scenes cannot yet include lumped/terminal RF ports, "
+                "standalone R/L/C elements, or passive WavePort declarations because "
+                "the FDTD adjoint does not replay their auxiliary state."
             )
 
     def _refresh_scene(self):
@@ -569,13 +588,13 @@ class Simulation:
         )
 
     def _run_fdtd(self) -> Result:
-        if self.has_trainable_parameters:
-            return self._run_fdtd_with_gradient_bridge()
         if self.port_sweep is not None:
             return self._run_fdtd_network_sweep()
         waveport_excitation = self._waveport_excitation()
         if waveport_excitation is not None:
             return self._run_fdtd_waveport_excitation(waveport_excitation)
+        if self.has_trainable_parameters:
+            return self._run_fdtd_with_gradient_bridge()
         solver = self._build_fdtd_solver(initialize=True)
         return self._run_fdtd_from_solver(solver)
 
@@ -724,6 +743,19 @@ class Simulation:
         solver._port_termination_overrides = dict(termination_overrides or {})
         if initialize:
             solver.init_field()
+        if getattr(self, "_fixed_waveport_mode_sources", False):
+            compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())
+            frozen_sources = []
+            for source in compiled_sources:
+                if source.get("kind") != "mode_source":
+                    frozen_sources.append(source)
+                    continue
+                frozen = dict(source)
+                frozen["kind"] = "fixed_waveport_mode_source"
+                frozen_sources.append(frozen)
+            solver._compiled_sources = tuple(frozen_sources)
+            if frozen_sources:
+                solver._compiled_source = frozen_sources[0]
         return solver
 
     def _collect_fdtd_requested_frequencies(self, scene=None) -> tuple[float, ...]:
