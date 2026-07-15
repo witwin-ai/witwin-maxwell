@@ -118,6 +118,7 @@ from .simulation import (
     run,
 )
 from .fdtd_parallel import FDTDParallelConfig
+from .fdtd.resume import FDTDResumeCheckpoint
 
 __all__ = [
     "AstigmaticGaussianBeam",
@@ -159,6 +160,7 @@ __all__ = [
     "FDFDConfig",
     "FDTDConfig",
     "FDTDParallelConfig",
+    "FDTDResumeCheckpoint",
     "FinitePlaneMonitor",
     "GaussianBeam",
     "GaussianPulse",

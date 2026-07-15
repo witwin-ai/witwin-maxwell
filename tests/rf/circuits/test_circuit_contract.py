@@ -148,5 +148,9 @@ def test_circuit_scene_is_fdtd_only_and_requires_a_bound_port_for_coupling():
     scene = _scene(circuits=(_circuit(),))
     with pytest.raises(ValueError, match=r"Simulation\.fdtd.*only"):
         mw.Simulation.fdfd(scene, frequency=1.0e9).prepare()
-    with pytest.raises(NotImplementedError, match="one circuit with one bound port"):
+    with pytest.raises(NotImplementedError, match="one circuit with at least one bound port"):
         mw.Simulation.fdtd(scene, frequency=1.0e9).prepare()
+
+    multiple = _scene(circuits=(_circuit("first"), _circuit("second")))
+    with pytest.raises(NotImplementedError, match="multi-circuit execution"):
+        mw.Simulation.fdtd(multiple, frequency=1.0e9).prepare()

@@ -644,10 +644,10 @@ class Simulation:
             raise NotImplementedError(
                 "Circuit-coupled distributed FDTD is introduced in the multi-GPU phase."
             )
-        if len(self.scene.circuits) != 1 or len(self.scene.circuits[0].bindings) != 1:
+        if len(self.scene.circuits) != 1 or not self.scene.circuits[0].bindings:
             raise NotImplementedError(
-                "This circuit-coupling phase supports one circuit with one bound port; "
-                "multi-port execution is introduced in the following phase."
+                "Circuit-coupled FDTD requires one circuit with at least one bound port; "
+                "multi-circuit execution is not yet supported."
             )
 
     def _run_fdfd(self) -> Result:
@@ -976,7 +976,14 @@ class Simulation:
             source_time=source_time,
         )
 
-    def _execute_fdtd_solve(self, solver, scene=None):
+    def _execute_fdtd_solve(
+        self,
+        solver,
+        scene=None,
+        *,
+        resume_from=None,
+        stop_step: int | None = None,
+    ):
         resolved_scene = self.scene if scene is None else scene
         time_steps = self._resolve_fdtd_time_steps(solver, resolved_scene)
         dft_cfg = self.config.spectral_sampler
@@ -996,6 +1003,8 @@ class Simulation:
             shutoff=self.config.shutoff,
             shutoff_check_interval=self.config.shutoff_check_interval,
             use_cuda_graph=self.config.cuda_graph,
+            resume_from=resume_from,
+            stop_step=stop_step,
         )
         return raw_output, time_steps, use_full_field_dft, dft_cfg
 
@@ -1018,8 +1027,12 @@ class Simulation:
             "Ez": _field("Ez"),
         }
 
-    def _run_fdtd_from_solver(self, solver) -> Result:
-        raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(solver, self.scene)
+    def _run_fdtd_from_solver(self, solver, *, resume_from=None) -> Result:
+        raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(
+            solver,
+            self.scene,
+            resume_from=resume_from,
+        )
         if raw_output is None:
             if self.config.parallel is None or self.config.parallel.gather_fields:
                 raise RuntimeError("FDTD solve did not return any output.")
@@ -1167,14 +1180,89 @@ class PreparedSimulation:
     def __init__(self, simulation: Simulation, solver):
         self.simulation = simulation
         self.solver = solver
+        self._consumed = False
 
-    def run(self) -> Result:
+    def _claim(self) -> None:
+        if self._consumed:
+            raise RuntimeError(
+                "A PreparedSimulation can execute only once; call Simulation.prepare() "
+                "again for a fresh solver."
+            )
+        self._consumed = True
+
+    def _validate_resume_support(self) -> None:
+        if (
+            self.simulation.config.parallel is not None
+            or self.simulation.has_trainable_parameters
+        ):
+            raise NotImplementedError(
+                "FDTD resume currently requires a single-GPU detached forward run; "
+                "distributed circuit-owner state and adjoint replay are separate contracts."
+            )
+
+    def run(self, *, resume_from=None) -> Result:
         if self.simulation.method == SimulationMethod.FDFD:
+            if resume_from is not None:
+                raise TypeError("resume_from is available only for FDTD simulations.")
+            self._claim()
             solver_cfg = self.simulation.config.solver
             return self.simulation._build_fdfd_result(self.solver, solver_cfg)
+        if resume_from is not None:
+            self._validate_resume_support()
+            total_steps = self.simulation._resolve_fdtd_time_steps(
+                self.solver,
+                self.simulation.scene,
+            )
+            from .fdtd.resume import preflight_resume_checkpoint
+
+            preflight_resume_checkpoint(
+                self.solver,
+                resume_from,
+                total_steps=total_steps,
+            )
+            self._claim()
+            return self.simulation._run_fdtd_from_solver(
+                self.solver,
+                resume_from=resume_from,
+            )
+        self._claim()
         if self.simulation.has_trainable_parameters:
             return self.simulation._run_fdtd()
         return self.simulation._run_fdtd_from_solver(self.solver)
+
+    def run_until(self, step: int):
+        """Advance exactly ``step`` FDTD steps and return a detached resume state."""
+
+        if self.simulation.method != SimulationMethod.FDTD:
+            raise TypeError("run_until() is available only for FDTD simulations.")
+        self._validate_resume_support()
+        total_steps = self.simulation._resolve_fdtd_time_steps(
+            self.solver,
+            self.simulation.scene,
+        )
+        if isinstance(step, bool) or not isinstance(step, int):
+            raise TypeError("step must be an integer.")
+        if not 0 <= step < total_steps:
+            raise ValueError(
+                f"step must satisfy 0 <= step < {total_steps} for this simulation."
+            )
+        self._claim()
+        raw_output, resolved_steps, _use_full_field_dft, _dft_cfg = (
+            self.simulation._execute_fdtd_solve(
+                self.solver,
+                self.simulation.scene,
+                stop_step=step,
+            )
+        )
+        if raw_output is not None or resolved_steps != total_steps:
+            raise RuntimeError("Partial FDTD execution did not stop at its checkpoint boundary.")
+        from .fdtd.resume import capture_resume_checkpoint
+
+        return capture_resume_checkpoint(
+            self.solver,
+            step=step,
+            total_steps=total_steps,
+        )
 
 
 

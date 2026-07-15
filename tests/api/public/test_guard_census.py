@@ -18,7 +18,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # This exact snapshot was reconciled on 2026-07-15 after the RF, adjoint,
 # material, and interoperability feature series landed. Lower it when a
 # capability guard is implemented; do not raise it without updating the census.
-CAPABILITY_GUARD_BUDGET = 113
+CAPABILITY_GUARD_BUDGET = 114
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

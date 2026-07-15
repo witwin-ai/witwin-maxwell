@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 import re
 import shlex
-from typing import Literal, Protocol, runtime_checkable
+from typing import ClassVar, Literal, Protocol, runtime_checkable
 
 import torch
 
@@ -417,6 +417,8 @@ _CIRCUIT_DEVICE_TYPES = (
 class CircuitData:
     """Torch-native sampled voltages, currents, power, and solver diagnostics."""
 
+    schema_version: ClassVar[int] = 1
+
     circuit_name: str
     times: torch.Tensor
     node_names: tuple[str, ...]
@@ -520,6 +522,92 @@ class CircuitData:
             energy_balance=None if self.energy_balance is None else self.energy_balance.to(device=device),
             diagnostics=move(self.diagnostics),
         )
+
+    def _snapshot(self) -> dict[str, object]:
+        from .network import _detach_to_cpu, _validate_safe_persistence
+
+        _validate_safe_persistence(self.diagnostics, path="CircuitData.diagnostics")
+        return {
+            "schema_version": self.schema_version,
+            "data_type": "CircuitData",
+            "circuit_name": self.circuit_name,
+            "times": _detach_to_cpu(self.times),
+            "node_names": self.node_names,
+            "node_voltages": _detach_to_cpu(self.node_voltages),
+            "branch_names": self.branch_names,
+            "branch_currents": _detach_to_cpu(self.branch_currents),
+            "device_powers": _detach_to_cpu(self.device_powers),
+            "energy_balance": _detach_to_cpu(self.energy_balance),
+            "diagnostics": _detach_to_cpu(self.diagnostics),
+        }
+
+    @classmethod
+    def _from_snapshot(cls, payload) -> "CircuitData":
+        from .network import _validate_safe_persistence
+
+        if not isinstance(payload, dict):
+            raise ValueError("CircuitData snapshot must contain a mapping payload.")
+        if payload.get("data_type") != "CircuitData":
+            raise ValueError("CircuitData snapshot has an invalid data_type.")
+        if payload.get("schema_version") != cls.schema_version:
+            raise ValueError(
+                f"Unsupported CircuitData schema_version {payload.get('schema_version')!r}."
+            )
+        required = {
+            "circuit_name",
+            "times",
+            "node_names",
+            "node_voltages",
+            "branch_names",
+            "branch_currents",
+            "device_powers",
+            "energy_balance",
+            "diagnostics",
+        }
+        missing = required.difference(payload)
+        if missing:
+            raise ValueError(
+                "CircuitData snapshot is missing required keys: "
+                + ", ".join(sorted(missing))
+            )
+        if not isinstance(payload["device_powers"], dict):
+            raise ValueError("CircuitData snapshot device_powers must be a mapping.")
+        if not isinstance(payload["diagnostics"], dict):
+            raise ValueError("CircuitData snapshot diagnostics must be a mapping.")
+        _validate_safe_persistence(
+            payload["diagnostics"],
+            path="CircuitData.diagnostics",
+        )
+        return cls(
+            circuit_name=payload["circuit_name"],
+            times=payload["times"],
+            node_names=tuple(payload["node_names"]),
+            node_voltages=payload["node_voltages"],
+            branch_names=tuple(payload["branch_names"]),
+            branch_currents=payload["branch_currents"],
+            device_powers=dict(payload["device_powers"]),
+            energy_balance=payload["energy_balance"],
+            diagnostics=dict(payload["diagnostics"]),
+        )
+
+    def save(self, path: str | Path) -> None:
+        """Save a detached CPU data snapshot without the live autograd graph."""
+
+        output_path = Path(path)
+        payload = self._snapshot()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(payload, output_path)
+
+    @classmethod
+    def load(cls, path: str | Path, map_location=None) -> "CircuitData":
+        """Load a detached versioned snapshot using safe tensor-only unpickling."""
+
+        payload = torch.load(
+            Path(path),
+            map_location=map_location,
+            weights_only=True,
+        )
+        return cls._from_snapshot(payload)
 
 
 class Circuit:

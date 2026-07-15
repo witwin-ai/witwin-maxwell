@@ -1872,11 +1872,28 @@ def solve(
     shutoff: float = 0.0,
     shutoff_check_interval: int = 100,
     use_cuda_graph: bool = False,
+    resume_from=None,
+    stop_step: int | None = None,
 ):
     if solver.verbose:
         print(f"Starting 3D FDTD simulation (Yee grid), grid size: {solver.Nx}x{solver.Ny}x{solver.Nz}")
     if normalize_source and len(getattr(solver, "_compiled_sources", ())) != 1:
         raise NotImplementedError("normalize_source currently requires exactly one compiled source.")
+    checkpoint_execution = resume_from is not None or stop_step is not None
+    if checkpoint_execution and (
+        (dft_frequency is not None and full_field_dft)
+        or bool(getattr(solver, "observers", ()))
+        or bool(getattr(solver, "time_observers", ()))
+    ):
+        raise NotImplementedError(
+            "FDTD resume currently supports circuit/port workflows without full-field "
+            "DFT or field/time observers."
+        )
+    if stop_step is not None:
+        if isinstance(stop_step, bool) or not isinstance(stop_step, int):
+            raise TypeError("stop_step must be an integer when provided.")
+        if not 0 <= stop_step <= time_steps:
+            raise ValueError("stop_step must satisfy 0 <= stop_step <= time_steps.")
     solver._normalize_source = normalize_source
     solver._synchronize_device()
     solve_start = time.perf_counter()
@@ -1912,7 +1929,22 @@ def solve(
     run_tail = _make_tail_runner(solver, use_gpu_dft)
     solver._tail_graph_active = run_tail is not None
 
-    iterator = range(time_steps)
+    start_step = 0
+    if resume_from is not None:
+        from ..resume import restore_resume_checkpoint
+
+        start_step = restore_resume_checkpoint(
+            solver,
+            resume_from,
+            total_steps=time_steps,
+        )
+    end_step = time_steps if stop_step is None else stop_step
+    if end_step < start_step:
+        raise ValueError(
+            f"stop_step={end_step} precedes resume step {start_step}."
+        )
+
+    iterator = range(start_step, end_step)
     pbar = None
     if solver.verbose:
         pbar = tqdm(
@@ -1970,7 +2002,7 @@ def solve(
                 break
 
         if pbar is not None:
-            should_update_progress = ((n + 1) % solver.progress_update_interval == 0 or n == time_steps - 1)
+            should_update_progress = ((n + 1) % solver.progress_update_interval == 0 or n == end_step - 1)
             if should_update_progress and solver.dft_enabled and solver.dft_start_step is not None:
                 if n < solver.dft_start_step:
                     pbar.set_postfix({"status": "transient"})
@@ -1982,6 +2014,8 @@ def solve(
 
     solver._synchronize_device()
     solver.last_solve_elapsed_s = time.perf_counter() - solve_start
+    if end_step < time_steps:
+        return None
     if solver._shutoff_triggered:
         _complete_spectral_normalization(solver, time_steps)
     if solver.dft_enabled:
