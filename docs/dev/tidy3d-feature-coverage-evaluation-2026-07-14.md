@@ -503,3 +503,171 @@ The electric-field images support the same conclusions:
 ### 18.7 Stage-C regression closure
 
 Targeted regression results are: material compiler `32 passed`, Tidy3D adapter `138 passed`, and benchmark validation `92 passed`. Ruff passes on the modified production modules and the new tests (the adapter test retains only its explicitly listed legacy ignores), and `git diff --check` is clean. The external-cache run above is the final numerical and visual acceptance pass for this stage.
+
+## 19. Numerical-consistency repair stage D: boundaries, grids, and spectral diagnostics
+
+Stage D fixes two independently reproduced validation defects and makes the visual
+acceptance criteria frequency-aware. It does not fit solver outputs or weaken field
+metrics. Confirmed constitutive/source algorithm differences remain explicit deferred
+items.
+
+### 19.1 Exact subpixel interfaces and periodic endpoint planes
+
+Multi-sample material compilation previously counted a sample exactly on an analytic
+interface as fully inside. Odd sample counts therefore biased a grid-aligned interface
+toward the structure material. For a vacuum-to-epsilon-3 interface, sample counts
+2/3/4/5 produced tangential epsilon values near
+`2.000/2.333/2.014/2.201` instead of a sample-count-independent value of 2.
+Exact signed-distance boundary samples now receive half occupancy.
+
+The old periodic repair added translated geometry by a domain span. A structure that
+already covered one or more periods consequently double-counted its image throughout
+the volume, while removing images entirely would lose a shorter structure that really
+crosses the seam. The compiler now takes a differentiable maximum union of the base and
+periodic images. It then composes the duplicate endpoint planes, using adjacent interior
+planes (or the cell midpoint for a legal two-node periodic axis) to distinguish a real
+wrap continuation from an orthogonal partial interface. This has no per-sample CUDA
+`.item()` reachability synchronization. Static world-space geometry bounds restrict the
+image set to faces the geometry can actually reach; trainable or unknown-bound geometry
+retains the exhaustive differentiable union. Exact half values use a straight-through
+value correction, so trainable geometry gradients are retained.
+
+Regression coverage uses an over-period slab and checks the center, both periodic
+endpoints, and periodic corners for sample counts 2/3/4/5. Separate tests verify that a
+short box crossing one seam fills the opposite-side interior, a full-period structure
+works on a two-node periodic axis, and the exact-interface half value retains a finite
+nonzero size gradient.
+
+The field and flux results confirm that this is a material-occupancy repair rather than
+a boundary-kernel change:
+
+| Scenario | Old Shape L2 | New Field L2 | New Shape L2 | New Corr | New flux err |
+|---|---:|---:|---:|---:|---:|
+| `periodic_slab` | 0.3095 | 0.0023315 | 0.0023314 | 1.0000 | 0.0059300 |
+| `mixed_faces` | 0.3423 | 0.0084299 | 0.0034108 | 1.0000 | 1.4444 |
+
+All three principal electric-field cuts for `periodic_slab` are visually coincident.
+The `mixed_faces` Maxwell/Tidy3D `Ey` cuts have the same uniform one-dimensional
+topology and their phase-aligned center lines are nearly indistinguishable. A control
+that replaces the y-PEC faces by y-periodic faces gives Shape L2 below `2e-6`, proving
+that the mixed periodic/PEC/PML update kernel is not the source of the remaining flux
+outlier.
+
+### 19.2 Nominal infinite slabs must continue through transverse absorbers
+
+`Domain.bounds` is the physical domain, while PML cells are appended outside it. The
+shared plane-wave benchmark helper previously ended its nominally infinite slab at the
+physical x/y bounds. This created a finite plate edge exactly at the transverse PML
+entrance. On graded grids it generated strong transverse diffraction and checkerboard
+patterns unrelated to the intended one-dimensional grid/material comparison.
+
+The helper now extends a slab through the computational PML only on transverse axes
+that use an external absorber. Periodic and Bloch axes retain exactly one physical
+period. A regression checks both the structure bounds and the compiled material slice
+over the prepared PML domain.
+
+The user force-regenerated all eleven affected Tidy3D references. A subsequent run with
+`WITWIN_BENCHMARK_NO_CLOUD=1` validated every new cache key and used cache hits only:
+
+| Scenario | Field L2 | Shape L2 | Corr | Flux err |
+|---|---:|---:|---:|---:|
+| `pec_box` | 0.025124 | 0.023072 | 0.9997 | 0.033387 |
+| `full_tensor_slab` | 0.63632 | 0.59138 | 0.8064 | 0.62443 |
+| `sigma_e_slab` | 0.058696 | 0.058674 | 0.9983 | 0.047985 |
+| `custom_pole_uniform_slab` | 0.099650 | 0.099544 | 0.9950 | 0.10134 |
+| `perturbation_uniform_slab` | 0.040047 | 0.039989 | 0.9992 | 0.033508 |
+| `sellmeier_slab` | 0.14172 | 0.14065 | 0.9901 | 0.034228 |
+| `custom_grid_slab` | 0.015353 | 0.014813 | 0.9999 | 0.084003 |
+| `autogrid_slab` | 0.035718 | 0.035597 | 0.9994 | 0.016964 |
+| `nonuniform_custom_grid` | 0.069794 | 0.069718 | 0.9976 | 0.012579 |
+| `anisotropic_uniform_grid` | 0.008008 | 0.007654 | 1.0000 | 0.029319 |
+| `autogrid_override_refinement` | 0.045899 | 0.043599 | 0.9990 | 0.008327 |
+
+The five grid-scene electric-field images now show a purely one-dimensional `Ex`
+propagation pattern: x/y-normal cuts vary only with z, z-normal cuts are transversely
+uniform, and `Ey/Ez` remain at numerical zero. The old domain-wide checkerboard and PML
+entrance diffraction are absent. Phase-aligned real fields and unwrapped center-line
+phases overlap closely; residuals are smooth z bands plus the shared source-plane band.
+In particular, `nonuniform_custom_grid` improved from Field/Shape L2
+`0.13829/0.13773` to `0.069794/0.069718`, and its correlation increased from 0.9905 to
+0.9976. `anisotropic_uniform_grid` improved from 0.09555 to 0.00801 Field L2, while
+`autogrid_override_refinement` improved from 0.15905 to 0.04590. There is no remaining
+evidence for a fundamental nonuniform-Yee stencil error in these scenes.
+
+The full-tensor image gives the opposite verdict. Maxwell and Tidy3D retain the same
+eigenpolarization ratio (`Ey/Ex` approximately 0.351/0.350), longitudinal phase trend,
+and one-dimensional propagation topology, but their finite-slab standing-wave amplitude
+and interface impedance differ systematically. Maxwell also produces an unexpected
+`Ez` peak near 0.184 where Tidy3D remains near 0.003. Together with
+the whole-domain tensor control and correct adapter matrix mapping from Stage C, this
+strengthens `DEFERRED(full-tensor-interface-collocation)`: the unresolved work is the
+full-tensor Yee-interface/colocation operator and its adjoint, not scene export.
+
+### 19.3 Frequency-aware electric-field diagnostics
+
+Multi-frequency summaries already selected the worst field metric, but the old main
+image always plotted frequency index zero. Worse, modulation scenes independently fit
+a global phase at every sideband, which erased relative carrier/sideband phase errors.
+The runner now:
+
+1. selects the worst-L2 frequency for the main field image;
+2. uses the nearest extracted resonance for resonance-observable diagnostics;
+3. derives one global phase anchor from the carrier and applies it unchanged to all
+   modulation frequencies; and
+4. writes a three-row spectral diagnostic containing Maxwell/reference magnitude,
+   signed real field, complex residual, and per-frequency metrics.
+
+The shared carrier anchor produces the following authoritative modulation results:
+
+| Scenario / frequency | Field L2 | Shape L2 | Corr |
+|---|---:|---:|---:|
+| `modulated_slab` / 1.8 GHz | 0.30194 | 0.27054 | 0.9627 |
+| `modulated_slab` / 2.0 GHz carrier | 0.18542 | 0.10943 | 0.9940 |
+| `modulated_slab` / 2.2 GHz | 0.45534 | 0.14729 | 0.9891 |
+| `modulated_slab_phase` / 1.65 GHz | 0.18104 | 0.16766 | 0.9858 |
+| `modulated_slab_phase` / 2.0 GHz carrier | 0.19590 | 0.13116 | 0.9914 |
+| `modulated_slab_phase` / 2.35 GHz | 0.38005 | 0.33198 | 0.9433 |
+
+All six electric-field images preserve the same one-dimensional sideband topology, but
+the upper sidebands retain systematic amplitude and relative-phase residuals. This is
+visible directly under one carrier phase anchor and is no longer hidden by independent
+phase fitting. No DFT-window, Hann normalization, adapter phase-sign, or safe local
+runtime defect was found, so `DEFERRED(time-modulation-validation)` remains in force
+for depth, duration, and grid convergence followed by a constitutive-update audit.
+
+`pmc_cavity` is no longer classified from the worst off-resonance noise slice. The
+Maxwell/Tidy3D extracted resonances are 210.9960 and 210.4843 MHz, a relative difference
+of 0.2425%; both are within 0.71% of the analytic 211.9853 MHz `Hz(110)` resonance. The
+new diagnostic selects the 210 MHz sample. Its dominant electric-field lobes and Hz
+mode topology agree visually (Shape L2 0.0656 at that sample), so the old aggregate
+Shape L2 0.7118 over a broad off-resonance sweep is retained as a worst-frequency
+number but is not evidence of a PMC boundary defect.
+
+### 19.4 Explicitly deferred source/monitor semantics
+
+- `DEFERRED(mixed-soft-source-upstream-net-flux)`: the mixed-face field is resolved and
+  the transmitted powers differ by about 0.8%, but the upstream total-field monitor
+  gives opposite signed net values near incident/reflected cancellation. It is not an
+  isolated reflected-power observable. Separating incident and scattered flux, and
+  auditing the soft-source E/H power balance, is required; a sign flip or excluding the
+  monitor from the maximum would only conceal the discrepancy.
+- `DEFERRED(gridded-current-source-discretization)`: the magnetic-current image has the
+  same antisymmetric radiation-ring topology and source center in both solvers, while
+  electric gridded-current controls are also discrepant. Half-cell translation does not
+  resolve it, and strict clipping/control-volume overlap candidates worsen Shape L2
+  from 0.369 to 0.784/0.606. A smooth zero-edge dataset, multi-grid convergence, and an
+  electromagnetic-duality test are needed before changing injection semantics.
+- `DEFERRED(custom-grid-flux-sampling)`: `custom_grid_slab` has excellent field agreement
+  (Shape L2 0.0148, correlation 0.9999) but flux error 0.0840. This is isolated from the
+  repaired transverse field topology and should be checked by moving the flux plane
+  away from a grid transition and comparing the colocation/quadrature aperture.
+
+### 19.5 Stage-D regression closure
+
+Material-compiler plus benchmark-validation coverage passes `134` tests (`37 + 97`).
+The complete boundary suite passes `61` tests, and custom/uniform electric and magnetic
+current source definitions pass `13` tests. Ruff passes on every modified production
+and test module, and `git diff --check` is clean. The refreshed-reference run above is
+the final numerical baseline; the
+orthogonal electric-field slices, complex diagnostics, resonance-selected cavity image,
+and carrier-anchored spectral images are the visual acceptance artifacts for this stage.

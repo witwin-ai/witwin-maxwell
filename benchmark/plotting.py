@@ -484,6 +484,8 @@ def save_field_comparison_plot(
     tidy3d_monitors: dict[str, dict],
     scene: mw.Scene | None = None,
     reference_label: str = "Tidy3D",
+    freq_index: int = 0,
+    frequency: float | None = None,
 ) -> Path:
     ensure_directories()
     scenario_dir = scenario_plot_dir(scenario_name)
@@ -491,7 +493,11 @@ def save_field_comparison_plot(
     output_path = scenario_dir / "field_comparison.png"
 
     fig, axes = plt.subplots(len(PLOT_AXES), len(FIELD_COMPONENTS) * 3, figsize=(30, 12))
-    fig.suptitle(f"{scenario_name}: Ex/Ey/Ez on x/y/z planes", fontsize=16)
+    frequency_text = "" if frequency is None else f" @ {float(frequency):.6e} Hz"
+    fig.suptitle(
+        f"{scenario_name}: Ex/Ey/Ez on x/y/z planes{frequency_text}",
+        fontsize=16,
+    )
 
     for row, axis in enumerate(PLOT_AXES):
         monitor_name = f"plot_field_{axis}"
@@ -504,13 +510,13 @@ def save_field_comparison_plot(
                 maxwell_monitor,
                 component,
                 maxwell_monitor["fields"][component],
-                freq_index=0,
+                freq_index=freq_index,
             )
             tidy3d_field = _select_plot_field(
                 tidy3d_monitor,
                 component,
                 tidy3d_monitor["fields"][component],
-                freq_index=0,
+                freq_index=freq_index,
             )
             maxwell_coords = _component_plane_coords(maxwell_monitor, component)
             tidy3d_coords = _component_plane_coords(tidy3d_monitor, component)
@@ -565,6 +571,7 @@ def save_vector_field_comparison_plot(
     coords: tuple[np.ndarray, np.ndarray],
     comparison: dict[str, object],
     reference_label: str = "Tidy3D",
+    frequency: float | None = None,
 ) -> Path:
     """Plot one globally aligned electric-vector cross section and its residual."""
     ensure_directories()
@@ -620,8 +627,9 @@ def save_vector_field_comparison_plot(
             axis.set_ylabel("transverse coordinate 2 (m)")
             plt.colorbar(image, ax=axis, shrink=0.78)
 
+    frequency_text = "" if frequency is None else f" @ {frequency:.6e} Hz"
     fig.suptitle(
-        f"{scenario_name}: electric-vector cross section | "
+        f"{scenario_name}: electric-vector cross section{frequency_text} | "
         f"overlap={float(comparison['overlap']):.4f}, "
         f"energy ratio={float(comparison['energy_ratio']):.4f}",
         fontsize=14,
@@ -706,11 +714,17 @@ def save_complex_field_diagnostic_plot(
     fig.suptitle(f"{scenario_name}: {monitor_name}/{component} complex-field diagnostic", fontsize=15)
 
     maps = (
-        (np.abs(maxwell_field), "Maxwell |E|", "viridis", 0.0, magnitude_max),
-        (np.abs(tidy3d_field), f"{reference_label} |E|", "viridis", 0.0, magnitude_max),
+        (np.abs(maxwell_field), f"Maxwell |{component}|", "viridis", 0.0, magnitude_max),
+        (np.abs(tidy3d_field), f"{reference_label} |{component}|", "viridis", 0.0, magnitude_max),
         (np.abs(difference), f"|phase-aligned Maxwell - {reference_label}|", "magma", 0.0, diff_max),
-        (phase_aligned_maxwell.real, "Phase-aligned Maxwell Re(E)", "RdBu_r", -real_max, real_max),
-        (tidy3d_field.real, f"{reference_label} Re(E)", "RdBu_r", -real_max, real_max),
+        (
+            phase_aligned_maxwell.real,
+            f"Phase-aligned Maxwell Re({component})",
+            "RdBu_r",
+            -real_max,
+            real_max,
+        ),
+        (tidy3d_field.real, f"{reference_label} Re({component})", "RdBu_r", -real_max, real_max),
         (difference.real, "Aligned real-field difference", "RdBu_r", -diff_max, diff_max),
         (masked_maxwell_phase, "Maxwell phase (excited support)", "twilight", -np.pi, np.pi),
         (masked_tidy3d_phase, f"{reference_label} phase (excited support)", "twilight", -np.pi, np.pi),
@@ -772,6 +786,144 @@ def save_complex_field_diagnostic_plot(
         ha="center",
     )
 
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(output_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def save_spectral_field_diagnostic_plot(
+    *,
+    scenario_name: str,
+    monitor_name: str,
+    component: str,
+    maxwell_monitor: dict,
+    tidy3d_monitor: dict,
+    frequencies: tuple[float, ...],
+    per_frequency: list[dict[str, float]],
+    phase_factor: complex,
+    scene: mw.Scene,
+    reference_label: str = "Tidy3D",
+) -> Path:
+    """Plot every spectral channel with one carrier-derived phase reference."""
+    if len(frequencies) != len(per_frequency) or not frequencies:
+        raise ValueError("Spectral diagnostic frequencies and metrics must be non-empty and aligned.")
+
+    ensure_directories()
+    scenario_dir = scenario_plot_dir(scenario_name)
+    scenario_dir.mkdir(parents=True, exist_ok=True)
+    output_path = scenario_dir / "spectral_field_diagnostic.png"
+    axis = maxwell_monitor.get("axis") or tidy3d_monitor.get("axis")
+    if axis not in PLANE_COORD_NAMES:
+        raise ValueError(f"Monitor {monitor_name!r} does not define a plane axis.")
+
+    fig, axes = plt.subplots(
+        len(frequencies),
+        5,
+        figsize=(22, 4.2 * len(frequencies)),
+        squeeze=False,
+    )
+    for row, (frequency, metrics) in enumerate(zip(frequencies, per_frequency)):
+        maxwell_field = _select_plot_field(
+            maxwell_monitor,
+            component,
+            maxwell_monitor["fields"][component],
+            freq_index=row,
+        )
+        tidy3d_field = _select_plot_field(
+            tidy3d_monitor,
+            component,
+            tidy3d_monitor["fields"][component],
+            freq_index=row,
+        )
+        maxwell_coords = _component_plane_coords(maxwell_monitor, component)
+        tidy3d_coords = _component_plane_coords(tidy3d_monitor, component)
+        maxwell_field, maxwell_coords = _crop_monitor_field_to_physical_bounds(
+            scene, axis=axis, values=maxwell_field, coords=maxwell_coords
+        )
+        tidy3d_field, tidy3d_coords = _crop_monitor_field_to_physical_bounds(
+            scene, axis=axis, values=tidy3d_field, coords=tidy3d_coords
+        )
+        if maxwell_coords is None or tidy3d_coords is None:
+            raise ValueError(f"Monitor {monitor_name!r} is missing component coordinates.")
+        maxwell_field, tidy3d_field, coords = align_plane_fields(
+            maxwell_field,
+            tidy3d_field,
+            source_coords=maxwell_coords,
+            reference_coords=tidy3d_coords,
+        )
+        maxwell_field = np.asarray(maxwell_field) * complex(phase_factor)
+        tidy3d_field = np.asarray(tidy3d_field)
+        residual = maxwell_field - tidy3d_field
+        coord_a, coord_b = coords
+        extent = (
+            float(coord_a[0]),
+            float(coord_a[-1]),
+            float(coord_b[0]),
+            float(coord_b[-1]),
+        )
+        magnitude_max = max(
+            float(np.max(np.abs(maxwell_field))),
+            float(np.max(np.abs(tidy3d_field))),
+            1.0e-30,
+        )
+        real_max = max(
+            float(np.max(np.abs(maxwell_field.real))),
+            float(np.max(np.abs(tidy3d_field.real))),
+            1.0e-30,
+        )
+        residual_max = max(float(np.max(np.abs(residual))), 1.0e-30)
+        maps = (
+            (np.abs(maxwell_field), f"Maxwell |{component}|", "magma", 0.0, magnitude_max),
+            (
+                np.abs(tidy3d_field),
+                f"{reference_label} |{component}|",
+                "magma",
+                0.0,
+                magnitude_max,
+            ),
+            (
+                maxwell_field.real,
+                f"Carrier-anchored Maxwell Re({component})",
+                "RdBu_r",
+                -real_max,
+                real_max,
+            ),
+            (
+                tidy3d_field.real,
+                f"{reference_label} Re({component})",
+                "RdBu_r",
+                -real_max,
+                real_max,
+            ),
+            (np.abs(residual), "|complex residual|", "viridis", 0.0, residual_max),
+        )
+        row_header = (
+            f"{float(frequency):.6e} Hz\n"
+            f"L2={float(metrics['field_l2']):.3f}  "
+            f"Shape={float(metrics['field_shape_l2']):.3f}  "
+            f"Corr={float(metrics['field_corr']):.3f}"
+        )
+        for col, (values, title, cmap, vmin, vmax) in enumerate(maps):
+            image = axes[row, col].imshow(
+                np.asarray(values).T,
+                origin="lower",
+                extent=extent,
+                aspect="auto",
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+            )
+            axes[row, col].set_title(f"{row_header}\n{title}" if col == 0 else title)
+            axes[row, col].set_xlabel(PLANE_COORD_NAMES[axis][0])
+            axes[row, col].set_ylabel(PLANE_COORD_NAMES[axis][1])
+            fig.colorbar(image, ax=axes[row, col], shrink=0.78)
+
+    fig.suptitle(
+        f"{scenario_name}: {monitor_name}/{component} spectral field diagnostic | "
+        f"one carrier phase anchor={np.angle(phase_factor):+.4f} rad",
+        fontsize=15,
+    )
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(output_path, dpi=160, bbox_inches="tight")
     plt.close(fig)

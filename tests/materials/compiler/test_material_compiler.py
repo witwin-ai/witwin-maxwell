@@ -3,6 +3,10 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
+from witwin.maxwell.compiler.materials import (
+    _geometry_occupancy,
+    _static_periodic_shift_options,
+)
 from witwin.maxwell.scene import prepare_scene
 
 
@@ -845,3 +849,161 @@ def test_structure_short_of_periodic_boundary_keeps_partial_edge_nodes():
     assert torch.allclose(eps_slice[0, :], torch.ones_like(eps_slice[0, :]))
     assert torch.allclose(eps_slice[-1, :], torch.ones_like(eps_slice[-1, :]))
     assert float(eps_slice.max()) == pytest.approx(4.0, rel=1.0e-4)
+
+
+def test_grid_aligned_interface_is_not_biased_by_odd_subpixel_counts():
+    interface_values = {}
+    for samples in (2, 3, 4, 5):
+        scene = mw.Scene(
+            domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+            grid=mw.GridSpec.uniform(0.1),
+            boundary=mw.BoundarySpec.pml(num_layers=4).with_faces(
+                x_low="periodic",
+                x_high="periodic",
+                y_low="periodic",
+                y_high="periodic",
+            ),
+            subpixel_samples=mw.SubpixelSpec(samples=samples, averaging="polarized"),
+            device="cpu",
+        )
+        scene.add_structure(
+            mw.Structure(
+                name="aligned_slab",
+                # Deliberately exceed one x/y period. Periodic wrap composition
+                # must affect only the duplicate endpoint planes, not add an
+                # overlapping translated image through this entire volume.
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(2.0, 2.0, 0.2)),
+                material=mw.Material(eps_r=3.0),
+            )
+        )
+        prepared = _prepared_scene(scene)
+        model = prepared.compile_materials()
+        x_index = int(np.argmin(np.abs(prepared.x_nodes64)))
+        y_index = int(np.argmin(np.abs(prepared.y_nodes64)))
+        z_index = int(np.argmin(np.abs(prepared.z_nodes64 - 0.1)))
+        eps_x = model["eps_components"]["x"]
+        interface_values[samples] = (
+            float(eps_x[x_index, y_index, z_index]),
+            float(eps_x[0, 0, z_index]),
+            float(eps_x[-1, -1, z_index]),
+        )
+
+    values = [value for sample_values in interface_values.values() for value in sample_values]
+    assert max(values) - min(values) < 0.03
+    for value in values:
+        assert value == pytest.approx(2.0, abs=0.03)
+
+
+def test_structure_crossing_periodic_seam_wraps_into_opposite_interior():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.uniform(0.1),
+        boundary=mw.BoundarySpec.pml(num_layers=4).with_faces(
+            x_low="periodic",
+            x_high="periodic",
+        ),
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="seam_crossing_box",
+            geometry=mw.Box(position=(0.45, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+            material=mw.Material(eps_r=4.0),
+        )
+    )
+
+    prepared = _prepared_scene(scene)
+    eps_x = prepared.compile_materials()["eps_components"]["x"]
+    negative_wrap = int(np.argmin(np.abs(prepared.x_nodes64 + 0.4)))
+    positive_body = int(np.argmin(np.abs(prepared.x_nodes64 - 0.4)))
+    center_x = int(np.argmin(np.abs(prepared.x_nodes64)))
+    center_y = int(np.argmin(np.abs(prepared.y_nodes64)))
+    center_z = int(np.argmin(np.abs(prepared.z_nodes64)))
+
+    assert float(eps_x[negative_wrap, center_y, center_z]) == pytest.approx(4.0, abs=1e-3)
+    assert float(eps_x[positive_body, center_y, center_z]) == pytest.approx(4.0, abs=1e-3)
+    assert float(eps_x[center_x, center_y, center_z]) == pytest.approx(1.0, abs=1e-3)
+
+
+def test_static_interior_geometry_skips_unneeded_periodic_images():
+    prepared = _prepared_scene(
+        mw.Scene(
+            domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+            grid=mw.GridSpec.uniform(0.1),
+            boundary=mw.BoundarySpec.periodic(),
+            device="cpu",
+        )
+    )
+    geometry = mw.Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2))
+
+    assert _static_periodic_shift_options(prepared, geometry) == (
+        (0.0,),
+        (0.0,),
+        (0.0,),
+    )
+
+
+def test_two_node_periodic_axis_uses_cell_midpoint_for_seam_continuation():
+    transverse_nodes = np.linspace(-0.5, 0.5, 11)
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.custom(
+            np.array((-0.5, 0.5)),
+            transverse_nodes,
+            transverse_nodes,
+        ),
+        boundary=mw.BoundarySpec.pml(num_layers=2).with_faces(
+            x_low="periodic",
+            x_high="periodic",
+        ),
+        subpixel_samples=3,
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="full_period_box",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.0, 2.0, 2.0)),
+            material=mw.Material(eps_r=4.0),
+        )
+    )
+
+    prepared = _prepared_scene(scene)
+    assert prepared.Nx == 2
+    eps_x = prepared.compile_materials()["eps_components"]["x"]
+    center_y = int(np.argmin(np.abs(prepared.y_nodes64)))
+    center_z = int(np.argmin(np.abs(prepared.z_nodes64)))
+    np.testing.assert_allclose(
+        eps_x[:, center_y, center_z].detach().cpu().numpy(),
+        np.full(2, 4.0),
+        atol=1e-3,
+    )
+
+
+def test_exact_interface_half_weight_preserves_geometry_gradient():
+    prepared = _prepared_scene(
+        mw.Scene(
+            domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+            grid=mw.GridSpec.uniform(0.1),
+            device="cpu",
+        )
+    )
+    size = torch.nn.Parameter(torch.tensor((0.2, 0.4, 0.4), dtype=torch.float32))
+    geometry = mw.Box(position=(0.0, 0.0, 0.0), size=size)
+    coords = (
+        torch.tensor([[[0.1]]], dtype=torch.float32),
+        torch.zeros((1, 1, 1), dtype=torch.float32),
+        torch.zeros((1, 1, 1), dtype=torch.float32),
+    )
+
+    occupancy = _geometry_occupancy(
+        prepared,
+        geometry,
+        coords=coords,
+        half_weight_boundary=True,
+    )
+    assert float(occupancy.detach()) == pytest.approx(0.5, abs=1e-6)
+    occupancy.sum().backward()
+
+    assert size.grad is not None
+    assert torch.isfinite(size.grad[0])
+    assert float(size.grad[0].abs()) > 1e-6

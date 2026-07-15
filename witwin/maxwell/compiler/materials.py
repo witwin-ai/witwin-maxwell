@@ -433,61 +433,172 @@ def _pec_geometry_beta(scene) -> float | torch.Tensor:
     return 0.5 * cell
 
 
-def _wrap_axis_shifts(scene, occupancy):
-    """Per-axis periodic image shifts required by ``occupancy``.
+def _wrap_periodic_boundary_planes(scene, occupancy, midpoint_occupancy):
+    """Make duplicate periodic endpoint planes carry their union occupancy.
 
-    On a periodic/Bloch axis the node grid keeps the wrap node explicitly, so a
-    geometry ending exactly at the domain boundary leaves the boundary nodes
-    half-covered even though the wrapped medium is contiguous there. For each
-    such axis whose boundary node planes the geometry touches, this returns the
-    domain-span translation(s) whose image restores the coverage coming from
-    the other side of the wrap. Axes that are not periodic, or that the
-    geometry does not reach, contribute no shifts, keeping the common path
-    byte-identical.
+    Periodic axes retain both endpoint nodes even though they denote one physical
+    plane. Only those endpoint planes need wrap composition. Adding translated
+    geometry through the whole volume is incorrect when a structure spans or
+    exceeds one period because the base and image overlap away from the seam.
     """
-    domain_range = getattr(scene, "physical_domain_range", None)
-    if domain_range is None:
-        return None
-    shifts = []
-    has_any = False
+    wrapped = occupancy
     for axis_index, axis in enumerate(("x", "y", "z")):
-        options = [0.0]
-        if scene.boundary.axis_kind(axis) in ("periodic", "bloch"):
-            span = float(domain_range[2 * axis_index + 1]) - float(domain_range[2 * axis_index])
-            low_plane = occupancy.narrow(axis_index, 0, 1)
-            high_plane = occupancy.narrow(axis_index, occupancy.shape[axis_index] - 1, 1)
-            # Geometry touching the low face wraps onto the high face and
-            # vice versa; a +span image covers the high boundary nodes.
-            if bool((low_plane.max() > 1.0e-3).item()):
-                options.append(span)
-            if bool((high_plane.max() > 1.0e-3).item()):
-                options.append(-span)
-        if len(options) > 1:
-            has_any = True
-        shifts.append(options)
-    if not has_any:
+        if scene.boundary.axis_kind(axis) not in ("periodic", "bloch"):
+            continue
+        axis_size = wrapped.shape[axis_index]
+        if axis_size < 2:
+            raise ValueError("Periodic material occupancy requires at least two axis nodes.")
+        low_plane = wrapped.narrow(axis_index, 0, 1)
+        high_plane = wrapped.narrow(axis_index, axis_size - 1, 1)
+        if axis_size == 2:
+            bridge = midpoint_occupancy(axis_index)
+        else:
+            low_interior = wrapped.narrow(axis_index, 1, 1)
+            high_interior = wrapped.narrow(axis_index, axis_size - 2, 1)
+            bridge = torch.minimum(low_interior, high_interior)
+        # Add the two endpoint coverages only where the geometry continues on
+        # both sides of the seam. An orthogonal interface gives the same partial
+        # occupancy on the adjacent interior planes and must remain partial.
+        seam = torch.maximum(
+            torch.maximum(low_plane, high_plane),
+            torch.minimum((low_plane + high_plane).clamp(max=1.0), bridge),
+        )
+        interior = wrapped.narrow(axis_index, 1, wrapped.shape[axis_index] - 2)
+        wrapped = torch.cat((seam, interior, seam), dim=axis_index)
+    return wrapped
+
+
+def _contains_trainable_tensor(value) -> bool:
+    if torch.is_tensor(value):
+        return bool(value.requires_grad)
+    if isinstance(value, dict):
+        return any(_contains_trainable_tensor(item) for item in value.values())
+    if isinstance(value, (tuple, list)):
+        return any(_contains_trainable_tensor(item) for item in value)
+    return False
+
+
+def _static_periodic_shift_options(scene, geometry):
+    """Limit periodic images from static world-space geometry bounds when possible."""
+    options = [(0.0,), (0.0,), (0.0,)]
+    periodic_axes = [
+        axis_index
+        for axis_index, axis in enumerate(("x", "y", "z"))
+        if scene.boundary.axis_kind(axis) in ("periodic", "bloch")
+    ]
+    if not periodic_axes:
+        return tuple(options)
+    if any(_contains_trainable_tensor(value) for value in vars(geometry).values()):
         return None
-    return shifts
+    try:
+        vertices, _ = geometry.to_mesh()
+    except (AttributeError, NotImplementedError, RuntimeError, TypeError, ValueError):
+        return None
+    vertices = torch.as_tensor(vertices)
+    if vertices.ndim != 2 or vertices.shape[0] == 0 or vertices.shape[1] != 3:
+        return None
+    lower = vertices.amin(dim=0).detach().cpu().numpy()
+    upper = vertices.amax(dim=0).detach().cpu().numpy()
+
+    for axis_index in periodic_axes:
+        axis = "xyz"[axis_index]
+        domain_low, domain_high = scene.domain.bounds[axis_index]
+        span = float(domain_high) - float(domain_low)
+        nodes = np.asarray(getattr(scene, f"{axis}_nodes64"), dtype=np.float64)
+        padding = 0.5 * float(np.max(np.diff(nodes))) + _geometry_beta(scene)
+        axis_options = [0.0]
+        if float(lower[axis_index]) <= float(domain_low) + padding:
+            axis_options.append(span)
+        if float(upper[axis_index]) >= float(domain_high) - padding:
+            axis_options.append(-span)
+        options[axis_index] = tuple(axis_options)
+    return tuple(options)
 
 
-def _geometry_occupancy(scene, geometry, coords=None, beta=None):
+def _geometry_occupancy(
+    scene,
+    geometry,
+    coords=None,
+    beta=None,
+    *,
+    half_weight_boundary=False,
+    periodic_shift_options=None,
+):
     xx, yy, zz = (scene.X, scene.Y, scene.Z) if coords is None else coords
     resolved_beta = _geometry_beta(scene) if beta is None else beta
-    occupancy = geometry.to_mask(xx, yy, zz, offset=0.0, beta=resolved_beta)
-    shifts = _wrap_axis_shifts(scene, occupancy)
-    if shifts is None:
+
+    def _sample(sample_x, sample_y, sample_z):
+        occupancy = geometry.to_mask(
+            sample_x,
+            sample_y,
+            sample_z,
+            offset=0.0,
+            beta=resolved_beta,
+        )
+        if half_weight_boundary:
+            tolerance = 1.0e-5 * min(scene.grid.min_spacing)
+            signed_distance = geometry.signed_distance(sample_x, sample_y, sample_z)
+            half_occupancy = occupancy + (0.5 - occupancy).detach()
+            occupancy = torch.where(
+                torch.abs(signed_distance) <= tolerance,
+                half_occupancy,
+                occupancy,
+            )
         return occupancy
-    # Periodic images are disjoint translates of the geometry, so their smooth
-    # coverages add; clamp absorbs the sub-cell sigmoid overlap right on a face.
-    for shift_x in shifts[0]:
-        for shift_y in shifts[1]:
-            for shift_z in shifts[2]:
-                if shift_x == 0.0 and shift_y == 0.0 and shift_z == 0.0:
-                    continue
-                occupancy = occupancy + geometry.to_mask(
-                    xx - shift_x, yy - shift_y, zz - shift_z, offset=0.0, beta=resolved_beta
+
+    shift_options = periodic_shift_options
+    if shift_options is None:
+        domain_range = getattr(scene, "physical_domain_range", None)
+        shift_options = []
+        for axis_index, axis in enumerate(("x", "y", "z")):
+            if domain_range is not None and scene.boundary.axis_kind(axis) in (
+                "periodic",
+                "bloch",
+            ):
+                span = float(domain_range[2 * axis_index + 1]) - float(
+                    domain_range[2 * axis_index]
                 )
-    return occupancy.clamp(max=1.0)
+                shift_options.append((-span, 0.0, span))
+            else:
+                shift_options.append((0.0,))
+
+    def _periodic_union(sample_coords):
+        union = None
+        for shift_x, shift_y, shift_z in product(*shift_options):
+            shifted = _sample(
+                sample_coords[0] - shift_x,
+                sample_coords[1] - shift_y,
+                sample_coords[2] - shift_z,
+            )
+            union = shifted if union is None else torch.maximum(union, shifted)
+        return union
+
+    coords = (xx, yy, zz)
+    occupancy = _periodic_union(coords)
+
+    def _midpoint_occupancy(axis_index):
+        midpoint_coords = list(coords)
+        reduced_axes = [axis_index]
+        reduced_axes.extend(
+            index
+            for index, axis in enumerate(("x", "y", "z"))
+            if index != axis_index
+            and scene.boundary.axis_kind(axis) in ("periodic", "bloch")
+            and occupancy.shape[index] == 2
+        )
+        for reduced_axis in reduced_axes:
+            for coord_index, coord in enumerate(midpoint_coords):
+                low = coord.narrow(reduced_axis, 0, 1)
+                high = coord.narrow(reduced_axis, coord.shape[reduced_axis] - 1, 1)
+                midpoint_coords[coord_index] = (
+                    0.5 * (low + high) if coord_index == reduced_axis else low
+                )
+        bridge = _periodic_union(tuple(midpoint_coords))
+        bridge_shape = list(occupancy.shape)
+        bridge_shape[axis_index] = 1
+        return bridge.expand(bridge_shape)
+
+    return _wrap_periodic_boundary_planes(scene, occupancy, _midpoint_occupancy)
 
 
 def _layout_pole_entry(scene, structure, pole):
@@ -598,6 +709,8 @@ def _apply_structure_material(
     eps_background=1.0,
     mu_background=1.0,
     averaging="arithmetic",
+    half_weight_boundary=False,
+    periodic_shift_options=None,
 ):
     material, eps_components, eps_offdiag, mu_components, sigma_components, sigma_m_components, nonlinearity = _static_structure_material(structure)
     has_offdiag = any(value != 0.0 for value in eps_offdiag.values())
@@ -606,7 +719,13 @@ def _apply_structure_material(
             "Polarized (Kottke) subpixel averaging is not implemented for full (off-diagonal) "
             "anisotropic permittivity; use arithmetic subpixel averaging."
         )
-    occupancy = _geometry_occupancy(scene, structure.geometry, coords=coords)
+    occupancy = _geometry_occupancy(
+        scene,
+        structure.geometry,
+        coords=coords,
+        half_weight_boundary=half_weight_boundary,
+        periodic_shift_options=periodic_shift_options,
+    )
     normals = _interface_normals(scene, structure.geometry, coords=coords) if averaging == "polarized" else None
 
     for axis in _AXES:
@@ -686,9 +805,12 @@ def _compile_material_sample(
     region_densities=(),
     sample_offset=(0.0, 0.0, 0.0),
     averaging="arithmetic",
+    half_weight_boundary=False,
+    geometry_periodic_shifts=None,
 ):
     model = _new_material_model(scene, layout, eps_fill=eps_background, mu_fill=mu_background)
     coords = _coordinate_grids(scene, sample_offset)
+    geometry_periodic_shifts = geometry_periodic_shifts or {}
 
     for structure, structure_slots in zip(_bulk_structures(scene), layout["structure_slots"]):
         model = _apply_structure_material(
@@ -700,6 +822,8 @@ def _compile_material_sample(
             eps_background=eps_background,
             mu_background=mu_background,
             averaging=averaging,
+            half_weight_boundary=half_weight_boundary,
+            periodic_shift_options=geometry_periodic_shifts.get(id(structure.geometry)),
         )
     if region_densities:
         model = _apply_material_regions(
@@ -708,6 +832,8 @@ def _compile_material_sample(
             region_densities,
             coords=coords,
             averaging=averaging,
+            half_weight_boundary=half_weight_boundary,
+            geometry_periodic_shifts=geometry_periodic_shifts,
         )
     return model
 
@@ -919,13 +1045,21 @@ def _apply_material_regions(
     *,
     coords,
     averaging="arithmetic",
+    half_weight_boundary=False,
+    geometry_periodic_shifts=None,
 ):
     """Blend design regions through the same occupancy path as ordinary structures."""
     eps_base = {axis: model["eps_components"][axis].clone() for axis in _AXES}
     mu_base = {axis: model["mu_components"][axis].clone() for axis in _AXES}
 
     for region, density in zip(scene.material_regions, region_densities):
-        occupancy = _geometry_occupancy(scene, region.geometry, coords=coords)
+        occupancy = _geometry_occupancy(
+            scene,
+            region.geometry,
+            coords=coords,
+            half_weight_boundary=half_weight_boundary,
+            periodic_shift_options=geometry_periodic_shifts.get(id(region.geometry)),
+        )
         normals = (
             _interface_normals(scene, region.geometry, coords=coords)
             if averaging == "polarized"
@@ -1284,6 +1418,12 @@ def compile_material_model(
         _prepare_material_region_density(scene, region)
         for region in getattr(scene, "material_regions", ())
     )
+    geometries = [structure.geometry for structure in _bulk_structures(scene)]
+    geometries.extend(region.geometry for region in getattr(scene, "material_regions", ()))
+    geometry_periodic_shifts = {
+        id(geometry): _static_periodic_shift_options(scene, geometry)
+        for geometry in geometries
+    }
     if samples == (1, 1, 1):
         model = _compile_material_sample(
             scene,
@@ -1292,6 +1432,7 @@ def compile_material_model(
             mu_background=mu_background,
             region_densities=region_densities,
             averaging=averaging,
+            geometry_periodic_shifts=geometry_periodic_shifts,
         )
         if region_densities:
             model["design_mask"] = _material_region_design_mask(scene, model["eps_r"])
@@ -1317,6 +1458,8 @@ def compile_material_model(
             region_densities=region_densities,
             sample_offset=sample_offset,
             averaging=averaging,
+            half_weight_boundary=True,
+            geometry_periodic_shifts=geometry_periodic_shifts,
         )
         for axis in _AXES:
             accum["eps_components"][axis] += sample["eps_components"][axis]

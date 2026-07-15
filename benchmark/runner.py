@@ -37,6 +37,7 @@ from benchmark.plotting import (
     save_field_comparison_plot,
     save_material_source_plot,
     save_scalar_comparison_plot,
+    save_spectral_field_diagnostic_plot,
     save_time_trace_comparison_plot,
     save_vector_field_comparison_plot,
 )
@@ -504,8 +505,19 @@ def _comparison_fields(
     tidy3d_field,
     *,
     monitor_position: float | None = None,
+    phase_factor: complex | None = None,
+    align_phase: bool = True,
 ):
     """Remove source-support cells before comparing propagated fields."""
+    def _finish(support):
+        actual = np.asarray(maxwell_field)
+        reference = np.asarray(tidy3d_field)
+        if phase_factor is not None:
+            actual = actual * complex(phase_factor)
+        elif align_phase:
+            actual, _ = phase_align_field(actual, reference, mask=support)
+        return actual[support], reference[support]
+
     point_sources = [source for source in scene.sources if isinstance(source, mw.PointDipole)]
     coord_names = _PLANE_COORD_NAMES.get(monitor_axis, ())
     if len(point_sources) == 1 and coords is not None and len(coord_names) == 2:
@@ -537,12 +549,7 @@ def _comparison_fields(
             if not np.any(support):
                 support = outside_source
             if np.any(support):
-                phase_aligned, _ = phase_align_field(
-                    maxwell_field,
-                    tidy3d_field,
-                    mask=support,
-                )
-                return phase_aligned[support], np.asarray(tidy3d_field)[support]
+                return _finish(support)
 
     directional_types = (
         mw.PlaneWave,
@@ -553,6 +560,8 @@ def _comparison_fields(
     )
     directional_sources = [source for source in scene.sources if isinstance(source, directional_types)]
     if len(directional_sources) != 1:
+        if phase_factor is not None:
+            return _finish(np.ones(np.asarray(tidy3d_field).shape, dtype=bool))
         return maxwell_field, tidy3d_field
 
     source = directional_sources[0]
@@ -563,13 +572,10 @@ def _comparison_fields(
             # unit phasor. Remove that convention only; retain all significant
             # incident and scattered-field samples.
             support = significant_field_mask(tidy3d_field)
-            phase_aligned, _ = phase_align_field(
-                maxwell_field,
-                tidy3d_field,
-                mask=support,
-            )
-            return phase_aligned[support], np.asarray(tidy3d_field)[support]
+            return _finish(support)
         if getattr(source, "injection", "soft") != "soft":
+            if phase_factor is not None:
+                return _finish(np.ones(np.asarray(tidy3d_field).shape, dtype=bool))
             return maxwell_field, tidy3d_field
         injection_axis = resolve_injection_axis(source.direction, source.injection_axis)
         direction_component = float(source.direction["xyz".index(injection_axis)])
@@ -607,8 +613,51 @@ def _comparison_fields(
         support &= significant_field_mask(tidy3d_field)
     if not np.any(support):
         support = significant_field_mask(tidy3d_field)
-    phase_aligned, _ = phase_align_field(maxwell_field, tidy3d_field, mask=support)
-    return phase_aligned[support], np.asarray(tidy3d_field)[support]
+    return _finish(support)
+
+
+def _prepare_scalar_field_comparison(
+    scene: mw.Scene,
+    maxwell_monitor: dict[str, Any],
+    tidy3d_monitor: dict[str, Any],
+    *,
+    component: str,
+    freq_index: int,
+    phase_factor: complex | None = None,
+    align_phase: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Select, colocate, crop, and phase-reference one scalar monitor field."""
+    maxwell_field = _select_monitor_plane_field(
+        maxwell_monitor,
+        component,
+        maxwell_monitor["fields"][component],
+        freq_index=freq_index,
+    )
+    tidy3d_field = _select_monitor_plane_field(
+        tidy3d_monitor,
+        component,
+        tidy3d_monitor["fields"][component],
+        freq_index=freq_index,
+    )
+    maxwell_field, tidy3d_field, comparison_coords = _align_plane_monitor_fields(
+        scene,
+        maxwell_monitor,
+        tidy3d_monitor,
+        component=component,
+        maxwell_field=maxwell_field,
+        tidy3d_field=tidy3d_field,
+        return_coords=True,
+    )
+    return _comparison_fields(
+        scene,
+        maxwell_monitor.get("axis") or tidy3d_monitor.get("axis"),
+        comparison_coords,
+        maxwell_field,
+        tidy3d_field,
+        monitor_position=maxwell_monitor.get("position", tidy3d_monitor.get("position")),
+        phase_factor=phase_factor,
+        align_phase=align_phase,
+    )
 
 
 def _take_plane_window(values, indices_a: np.ndarray, indices_b: np.ndarray) -> np.ndarray:
@@ -1230,6 +1279,30 @@ def _normalize_monitor_fields_to_spectral_reference(
         for field_name, values in fields.items():
             fields[field_name] = np.asarray(values) / scale
     return normalized
+
+
+def _diagnostic_frequency_index(
+    frequencies: tuple[float, ...],
+    per_frequency: list[dict[str, object]],
+    scalar_metrics: list[dict[str, object]],
+) -> int:
+    """Select the physically relevant field slice for visual diagnostics."""
+    index = int(np.argmax([float(item["field_l2"]) for item in per_frequency]))
+    resonance_metric = next(
+        (
+            item
+            for item in scalar_metrics
+            if item.get("observable") == "resonance_frequency"
+        ),
+        None,
+    )
+    if resonance_metric is None:
+        return index
+    resonance_frequency = 0.5 * (
+        float(complex(resonance_metric["maxwell"]).real)
+        + float(complex(resonance_metric["tidy3d"]).real)
+    )
+    return int(np.argmin(np.abs(np.asarray(frequencies) - resonance_frequency)))
 
 
 def _far_field_scalar_summary(currents) -> dict[str, np.ndarray]:
@@ -2163,8 +2236,24 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                 component=component,
                 reference_index=scenario.spectral_reference_index,
             )
+        spectral_phase_factor = None
+        if scenario.spectral_reference_index is not None and not scenario.comparison_components:
+            carrier_maxwell, carrier_tidy3d = _prepare_scalar_field_comparison(
+                scene,
+                field_maxwell_monitors[monitor_name],
+                field_tidy3d_monitors[monitor_name],
+                component=component,
+                freq_index=scenario.spectral_reference_index,
+                align_phase=False,
+            )
+            _, spectral_phase_factor = phase_align_field(
+                carrier_maxwell,
+                carrier_tidy3d,
+                mask=significant_field_mask(carrier_tidy3d),
+            )
+
         per_frequency = []
-        vector_plot_payload = None
+        vector_plot_payloads = []
         for freq_index, frequency in enumerate(scenario.frequencies):
             if scenario.comparison_components:
                 comparison, maxwell_vector, tidy3d_vector, comparison_coords = (
@@ -2188,34 +2277,20 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                     "field_corr": float(comparison["overlap"]),
                     "field_energy_ratio": float(comparison["energy_ratio"]),
                 })
-                if freq_index == 0:
-                    vector_plot_payload = (
-                        comparison,
-                        maxwell_vector,
-                        tidy3d_vector,
-                        comparison_coords,
-                    )
-            else:
-                maxwell_field = _select_monitor_plane_field(
-                    field_maxwell_monitors[monitor_name], component,
-                    field_maxwell_monitors[monitor_name]["fields"][component], freq_index=freq_index)
-                tidy3d_field = _select_monitor_plane_field(
-                    field_tidy3d_monitors[monitor_name], component,
-                    field_tidy3d_monitors[monitor_name]["fields"][component], freq_index=freq_index)
-                maxwell_field, tidy3d_field, comparison_coords = _align_plane_monitor_fields(
-                    scene, field_maxwell_monitors[monitor_name], field_tidy3d_monitors[monitor_name],
-                    component=component, maxwell_field=maxwell_field, tidy3d_field=tidy3d_field,
-                    return_coords=True)
-                maxwell_field, tidy3d_field = _comparison_fields(
-                    scene,
-                    field_maxwell_monitors[monitor_name].get("axis") or field_tidy3d_monitors[monitor_name].get("axis"),
+                vector_plot_payloads.append((
+                    comparison,
+                    maxwell_vector,
+                    tidy3d_vector,
                     comparison_coords,
-                    maxwell_field,
-                    tidy3d_field,
-                    monitor_position=field_maxwell_monitors[monitor_name].get(
-                        "position",
-                        field_tidy3d_monitors[monitor_name].get("position"),
-                    ),
+                ))
+            else:
+                maxwell_field, tidy3d_field = _prepare_scalar_field_comparison(
+                    scene,
+                    field_maxwell_monitors[monitor_name],
+                    field_tidy3d_monitors[monitor_name],
+                    component=component,
+                    freq_index=freq_index,
+                    phase_factor=spectral_phase_factor,
                 )
                 if scenario.compare_magnitude:
                     maxwell_field = np.abs(maxwell_field)
@@ -2252,6 +2327,11 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             scenario.frequencies,
             scene=scene,
         )
+        plot_frequency_index = _diagnostic_frequency_index(
+            scenario.frequencies,
+            per_frequency,
+            scalar_metrics,
+        )
         reference_label = "FDTD" if scenario.reference_solver == "fdtd" else "Tidy3D"
         if scenario.comparison_components:
             metric_component = "E-vector(" + ",".join(scenario.comparison_components) + ")"
@@ -2268,8 +2348,23 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             maxwell_monitors=field_maxwell_monitors,
             tidy3d_monitors=field_tidy3d_monitors,
             reference_label=reference_label,
+            freq_index=plot_frequency_index,
+            frequency=float(scenario.frequencies[plot_frequency_index]),
         )
-        if vector_plot_payload is None:
+        if spectral_phase_factor is not None:
+            diagnostic_plot = save_spectral_field_diagnostic_plot(
+                scene=scene,
+                scenario_name=name,
+                monitor_name=monitor_name,
+                component=component,
+                maxwell_monitor=field_maxwell_monitors[monitor_name],
+                tidy3d_monitor=field_tidy3d_monitors[monitor_name],
+                frequencies=scenario.frequencies,
+                per_frequency=per_frequency,
+                phase_factor=spectral_phase_factor,
+                reference_label=reference_label,
+            )
+        elif not vector_plot_payloads:
             diagnostic_plot = save_complex_field_diagnostic_plot(
                 scene=scene,
                 scenario_name=name,
@@ -2278,9 +2373,12 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                 maxwell_monitor=field_maxwell_monitors[monitor_name],
                 tidy3d_monitor=field_tidy3d_monitors[monitor_name],
                 reference_label=reference_label,
+                freq_index=plot_frequency_index,
             )
         else:
-            vector_comparison, maxwell_vector, tidy3d_vector, vector_coords = vector_plot_payload
+            vector_comparison, maxwell_vector, tidy3d_vector, vector_coords = (
+                vector_plot_payloads[plot_frequency_index]
+            )
             diagnostic_plot = save_vector_field_comparison_plot(
                 scenario_name=name,
                 components=scenario.comparison_components,
@@ -2289,6 +2387,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                 coords=vector_coords,
                 comparison=vector_comparison,
                 reference_label=reference_label,
+                frequency=float(scenario.frequencies[plot_frequency_index]),
             )
         if scenario.scalar_observable == "time_monitor_traces":
             scalar_plot = save_time_trace_comparison_plot(
@@ -2337,6 +2436,14 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
             f"  {monitor_name}/{metric_component}: L2={l2_error:.4e} "
             f"ShapeL2={shape_l2_error:.4e} Linf={linf_error:.4e} Corr={corr:.4f}"
         )
+        if len(per_frequency) > 1:
+            for item in per_frequency:
+                print(
+                    f"    {float(item['frequency']):.4e} Hz: "
+                    f"L2={float(item['field_l2']):.4e} "
+                    f"ShapeL2={float(item['field_shape_l2']):.4e} "
+                    f"Corr={float(item['field_corr']):.4f}"
+                )
         if scenario.comparison_components:
             print(
                 "  Electric-vector energy ratio: "

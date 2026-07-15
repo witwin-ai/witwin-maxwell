@@ -94,6 +94,24 @@ def test_group7_scenarios_use_supported_source_boundary_and_monitor_contracts():
         assert any(isinstance(monitor, mw.ClosedSurfaceMonitor) for monitor in scene.monitors)
 
 
+def test_plane_slab_continues_through_transverse_external_pml():
+    scene = build_scene("nonuniform_custom_grid")
+    prepared = prepare_scene(scene)
+    geometry = scene.structures[0].geometry
+    lower = geometry.position - geometry.size / 2
+    upper = geometry.position + geometry.size / 2
+
+    assert float(lower[0]) <= float(prepared.x_nodes64[0])
+    assert float(upper[0]) >= float(prepared.x_nodes64[-1])
+    assert float(lower[1]) <= float(prepared.y_nodes64[0])
+    assert float(upper[1]) >= float(prepared.y_nodes64[-1])
+
+    model = prepared.compile_materials()
+    z_index = int(np.argmin(np.abs(prepared.z_nodes64)))
+    eps_slice = model["eps_components"]["x"][:, :, z_index]
+    assert torch.allclose(eps_slice, torch.full_like(eps_slice, 3.0), atol=1.0e-4)
+
+
 def test_source_normalized_tfsf_cache_uses_standard_spatial_unit_conversion():
     scene = build_scene("periodic_grating")
     monitors = {
@@ -658,6 +676,87 @@ def test_tfsf_field_comparison_removes_only_the_global_reference_phase():
 
     np.testing.assert_allclose(compared_actual, compared_reference)
     assert compared_actual.size == reference.size
+
+
+def test_spectral_phase_anchor_preserves_sideband_relative_phase():
+    scene = build_scene("periodic_grating")
+    coords = (np.array((-0.1, 0.1)), np.array((-0.2, 0.2)))
+    reference = np.ones((2, 2), dtype=np.complex128)
+    carrier = reference * np.exp(0.4j)
+    raw_carrier, selected_reference = benchmark_runner._comparison_fields(
+        scene,
+        "y",
+        coords,
+        carrier,
+        reference,
+        align_phase=False,
+    )
+    _, carrier_phase = phase_align_field(raw_carrier, selected_reference)
+    upper_sideband = carrier * 1j
+
+    independently_aligned, _ = benchmark_runner._comparison_fields(
+        scene,
+        "y",
+        coords,
+        upper_sideband,
+        reference,
+    )
+    carrier_anchored, anchored_reference = benchmark_runner._comparison_fields(
+        scene,
+        "y",
+        coords,
+        upper_sideband,
+        reference,
+        phase_factor=carrier_phase,
+    )
+
+    np.testing.assert_allclose(independently_aligned, reference.ravel())
+    np.testing.assert_allclose(carrier_anchored, 1j * anchored_reference)
+    assert np.linalg.norm(carrier_anchored - anchored_reference) > 1.0
+
+
+def test_explicit_phase_factor_applies_without_a_directional_source():
+    scene = mw.Scene(device="cpu")
+    reference = np.ones((2, 2), dtype=np.complex128)
+    actual = reference * np.exp(0.4j)
+    phase_factor = np.exp(-0.4j)
+
+    compared_actual, compared_reference = benchmark_runner._comparison_fields(
+        scene,
+        "y",
+        (np.array((-0.1, 0.1)), np.array((-0.2, 0.2))),
+        actual,
+        reference,
+        phase_factor=phase_factor,
+    )
+
+    np.testing.assert_allclose(compared_actual, compared_reference)
+
+
+def test_resonance_diagnostic_uses_nearest_resonant_field_slice():
+    frequencies = (1.0e9, 2.0e9, 3.0e9)
+    per_frequency = [
+        {"field_l2": 0.9},
+        {"field_l2": 0.1},
+        {"field_l2": 0.2},
+    ]
+    scalar_metrics = [
+        {
+            "observable": "resonance_frequency",
+            "maxwell": 2.10e9,
+            "tidy3d": 2.15e9,
+        }
+    ]
+
+    assert (
+        benchmark_runner._diagnostic_frequency_index(
+            frequencies,
+            per_frequency,
+            scalar_metrics,
+        )
+        == 1
+    )
+    assert benchmark_runner._diagnostic_frequency_index(frequencies, per_frequency, []) == 0
 
 
 def test_point_source_field_comparison_excludes_the_singular_source_disk():
@@ -1956,6 +2055,59 @@ def test_complex_field_diagnostic_plot_smoke(tmp_path, monkeypatch):
     )
 
 
+def test_spectral_field_diagnostic_plots_every_frequency(tmp_path, monkeypatch):
+    monkeypatch.setattr(benchmark_paths, "PLOTS_DIR", tmp_path)
+    coords = np.linspace(-0.4, 0.4, 8)
+    frequencies = (1.8e9, 2.0e9, 2.2e9)
+    fields = np.stack(
+        [np.full((8, 8), index + 1.0, dtype=np.complex128) for index in range(3)]
+    )
+    monitor = {
+        "axis": "y",
+        "frequencies": frequencies,
+        "x": coords,
+        "z": coords,
+        "fields": {"Ex": fields},
+    }
+    metrics = [
+        {
+            "frequency": frequency,
+            "field_l2": 0.1 * (index + 1),
+            "field_shape_l2": 0.05 * (index + 1),
+            "field_corr": 1.0 - 0.01 * index,
+        }
+        for index, frequency in enumerate(frequencies)
+    ]
+    selected_indices = []
+    original_select = benchmark_plotting._select_plot_field
+
+    def tracked_select(monitor_data, component, field_values, *, freq_index=0):
+        selected_indices.append(freq_index)
+        return original_select(
+            monitor_data,
+            component,
+            field_values,
+            freq_index=freq_index,
+        )
+
+    monkeypatch.setattr(benchmark_plotting, "_select_plot_field", tracked_select)
+    output_path = benchmark_plotting.save_spectral_field_diagnostic_plot(
+        scenario_name="modulated_slab",
+        monitor_name="plot_field_y",
+        component="Ex",
+        maxwell_monitor=monitor,
+        tidy3d_monitor=monitor,
+        frequencies=frequencies,
+        per_frequency=metrics,
+        phase_factor=np.exp(-0.2j),
+        scene=build_scene("modulated_slab"),
+    )
+
+    assert output_path.exists()
+    assert output_path.name == "spectral_field_diagnostic.png"
+    assert selected_indices == [0, 0, 1, 1, 2, 2]
+
+
 def test_vector_field_comparison_plot_smoke(tmp_path, monkeypatch):
     monkeypatch.setattr(benchmark_paths, "PLOTS_DIR", tmp_path)
     coords = np.linspace(-0.2, 0.2, 5)
@@ -1998,11 +2150,19 @@ def test_field_comparison_plot_smoke_with_multi_frequency_fields(tmp_path, monke
 def test_field_comparison_plot_smoke_with_trailing_frequency_axis_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(benchmark_paths, "PLOTS_DIR", tmp_path)
 
-    field = np.ones((8, 8, 2))
+    field = np.stack([np.full((8, 8), value) for value in (1.0, 2.0, 3.0)], axis=-1)
+    selected_fields = []
+    original_plot_triplet = benchmark_plotting._plot_triplet
+
+    def tracked_plot_triplet(*args, **kwargs):
+        selected_fields.append(np.asarray(kwargs["left"]))
+        return original_plot_triplet(*args, **kwargs)
+
+    monkeypatch.setattr(benchmark_plotting, "_plot_triplet", tracked_plot_triplet)
     monitors = {
         f"plot_field_{axis}": {
             "axis": axis,
-            "frequencies": (1.0, 2.0),
+            "frequencies": (1.0, 2.0, 3.0),
             "fields": {component: field for component in ("Ex", "Ey", "Ez")},
             **({"y": np.linspace(-1.0, 1.0, 8), "z": np.linspace(-1.0, 1.0, 8)} if axis == "x" else {}),
             **({"x": np.linspace(-1.0, 1.0, 8), "z": np.linspace(-1.0, 1.0, 8)} if axis == "y" else {}),
@@ -2014,9 +2174,13 @@ def test_field_comparison_plot_smoke_with_trailing_frequency_axis_fields(tmp_pat
         scenario_name="dipole_two_freq",
         maxwell_monitors=monitors,
         tidy3d_monitors=monitors,
+        freq_index=2,
+        frequency=3.0,
     )
     assert output_path.exists()
     assert output_path == tmp_path / "dipole" / "dipole_two_freq" / "field_comparison.png"
+    assert selected_fields
+    assert all(np.all(field_values == 3.0) for field_values in selected_fields)
 
 
 def test_scenario_plot_dir_follows_scene_tree(tmp_path, monkeypatch):

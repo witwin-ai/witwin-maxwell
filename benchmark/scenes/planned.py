@@ -48,8 +48,23 @@ def _plane_scene(*, material=None, boundary=None, grid=None, source=None, subpix
             device="cpu",
         )
     if material is not None:
+        absorbing_kinds = {"pml", "absorber", "stablepml"}
+
+        def _transverse_size(axis):
+            has_external_absorber = any(
+                kind in absorbing_kinds for kind in scene.boundary.axis_face_kinds(axis)
+            )
+            return (4 if has_external_absorber else 2) * HALF_SPAN
+
         scene.add_structure(mw.Structure(
-            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(2 * HALF_SPAN, 2 * HALF_SPAN, 0.1)),
+            # Continue a nominally infinite slab through external transverse
+            # absorber cells. Ending it at Domain.bounds creates a finite plate
+            # edge exactly at the PML entrance and contaminates the intended 1D
+            # grid/material comparison with transverse diffraction.
+            geometry=mw.Box(
+                position=(0.0, 0.0, 0.0),
+                size=(_transverse_size("x"), _transverse_size("y"), 0.1),
+            ),
             material=material, name="sample",
         ))
     scene.add_source(source or mw.PlaneWave(direction=(0, 0, 1), polarization="Ex", source_time=PULSE))
