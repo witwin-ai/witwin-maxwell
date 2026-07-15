@@ -269,6 +269,26 @@ def _scene_trainable_material_parameters(scene: Scene) -> tuple[torch.Tensor, ..
     return tuple(trainable)
 
 
+def _scene_trainable_circuit_parameters(scene: Scene) -> tuple[torch.Tensor, ...]:
+    candidates = []
+    for circuit in scene.circuits:
+        candidates.extend(circuit.parameters.values())
+        candidates.extend(value for value, _constraint in circuit.initial_conditions.values())
+        for device in circuit.devices:
+            for value in device.parameters.values():
+                if isinstance(value, torch.Tensor):
+                    candidates.append(value)
+                elif value is not None and hasattr(value, "__dict__"):
+                    candidates.extend(vars(value).values())
+    unique = []
+    seen = set()
+    for value in candidates:
+        if isinstance(value, torch.Tensor) and value.requires_grad and id(value) not in seen:
+            unique.append(value)
+            seen.add(id(value))
+    return tuple(unique)
+
+
 def _trainable_rf_parameters(
     scene: Scene,
     *,
@@ -336,13 +356,7 @@ class Simulation:
             excitations=self.excitations,
             port_sweep=self.port_sweep,
         )
-        self.has_trainable_parameters = bool(
-            any(parameter.requires_grad for parameter in (scene_module.parameters() if scene_module is not None else ()))
-            or _scene_trainable_density_parameters(resolved_scene)
-            or _scene_trainable_geometry_parameters(resolved_scene)
-            or _scene_trainable_material_parameters(resolved_scene)
-            or trainable_rf_parameters
-        )
+        self._refresh_trainable_parameters()
         if self.method != SimulationMethod.FDTD and (self.excitations or self.port_sweep):
             raise ValueError("RF port excitation is supported by Simulation.fdtd(...) only.")
         if self.method != SimulationMethod.FDTD and trainable_rf_parameters:
@@ -578,9 +592,28 @@ class Simulation:
     def _refresh_scene(self):
         if self.scene_module is not None:
             self.scene = self.scene_module.to_scene()
-            return
-        if isinstance(self.scene_input, Scene):
+        elif isinstance(self.scene_input, Scene):
             self.scene = self.scene_input
+        self._refresh_trainable_parameters()
+
+    def _refresh_trainable_parameters(self) -> None:
+        self.has_trainable_parameters = bool(
+            any(
+                parameter.requires_grad
+                for parameter in (
+                    self.scene_module.parameters() if self.scene_module is not None else ()
+                )
+            )
+            or _scene_trainable_density_parameters(self.scene)
+            or _scene_trainable_geometry_parameters(self.scene)
+            or _scene_trainable_material_parameters(self.scene)
+            or _scene_trainable_circuit_parameters(self.scene)
+            or _trainable_rf_parameters(
+                self.scene,
+                excitations=self.excitations,
+                port_sweep=self.port_sweep,
+            )
+        )
 
     def _validate_circuit_execution(self) -> None:
         if not self.scene.circuits:

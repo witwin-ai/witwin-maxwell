@@ -19,27 +19,29 @@ def test_graph_ground_node_and_branch_order_are_deterministic():
     circuit = mw.Circuit("network")
     first = circuit.node("first")
     second = circuit.node("second")
+    third = circuit.node("third")
     circuit.add(mw.VoltageSource("V1", first, circuit.ground, 1.0))
     circuit.add(mw.Resistor("R1", first, second, 50.0))
-    circuit.add(mw.Inductor("L1", second, circuit.ground, 1.0e-9))
-    circuit.add(mw.VoltageControlledVoltageSource("E1", second, circuit.ground, first, circuit.ground, 2.0))
+    circuit.add(mw.Inductor("L1", second, third, 1.0e-9))
+    circuit.add(mw.VoltageControlledVoltageSource("E1", third, circuit.ground, first, circuit.ground, 2.0))
 
     graph = circuit.compile()
 
-    assert tuple(node.name for node in graph.nodes) == ("0", "first", "second")
-    assert dict(graph.node_index) == {"0": 0, "first": 1, "second": 2}
+    assert tuple(node.name for node in graph.nodes) == ("0", "first", "second", "third")
+    assert dict(graph.node_index) == {"0": 0, "first": 1, "second": 2, "third": 3}
     assert graph.branch_names == ("V1", "L1", "E1")
     assert dict(graph.branch_index) == {"V1": 0, "L1": 1, "E1": 2}
-    assert graph.unknown_count == 5
+    assert graph.unknown_count == 6
 
 
 def test_controlled_branch_and_mutual_inductor_dependencies_resolve_case_insensitively():
     circuit = mw.Circuit("network")
     p = circuit.node("p")
     q = circuit.node("q")
+    r = circuit.node("r")
     circuit.add(mw.VoltageSource("Vsense", p, circuit.ground, 0.0))
     circuit.add(mw.Inductor("L1", p, q, 1.0e-9))
-    circuit.add(mw.Inductor("L2", q, circuit.ground, 2.0e-9))
+    circuit.add(mw.Inductor("L2", r, circuit.ground, 2.0e-9))
     circuit.add(mw.CurrentControlledCurrentSource("F1", q, circuit.ground, "vsense", 2.0))
     circuit.add(mw.MutualInductor("K1", "l1", "L2", 0.5))
 

@@ -413,6 +413,115 @@ _CIRCUIT_DEVICE_TYPES = (
 )
 
 
+@dataclass(frozen=True)
+class CircuitData:
+    """Torch-native sampled voltages, currents, power, and solver diagnostics."""
+
+    circuit_name: str
+    times: torch.Tensor
+    node_names: tuple[str, ...]
+    node_voltages: torch.Tensor
+    branch_names: tuple[str, ...]
+    branch_currents: torch.Tensor
+    device_powers: dict[str, torch.Tensor] = field(default_factory=dict)
+    energy_balance: torch.Tensor | None = None
+    diagnostics: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self):
+        object.__setattr__(self, "circuit_name", _name(self.circuit_name, kind="Circuit"))
+        times = torch.as_tensor(self.times)
+        node_voltages = torch.as_tensor(self.node_voltages)
+        branch_currents = torch.as_tensor(self.branch_currents)
+        node_names = tuple(_name(name, kind="Circuit node") for name in self.node_names)
+        branch_names = tuple(_name(name, kind="Circuit branch") for name in self.branch_names)
+        if times.ndim != 1:
+            raise ValueError("CircuitData.times must be one-dimensional.")
+        if times.dtype not in (torch.float32, torch.float64) or times.is_complex():
+            raise ValueError("CircuitData time-domain tensors must use a real floating dtype.")
+        if not bool(torch.all(torch.isfinite(times))):
+            raise ValueError("CircuitData.times must be finite.")
+        if times.numel() > 1 and not bool(torch.all(times[1:] > times[:-1])):
+            raise ValueError("CircuitData.times must be strictly increasing.")
+        if node_voltages.shape != (times.numel(), len(node_names)):
+            raise ValueError("CircuitData.node_voltages must have shape [time, node].")
+        if branch_currents.shape != (times.numel(), len(branch_names)):
+            raise ValueError("CircuitData.branch_currents must have shape [time, branch].")
+        if node_voltages.device != times.device or branch_currents.device != times.device:
+            raise ValueError("CircuitData tensors must share one device.")
+        if node_voltages.dtype != times.dtype or branch_currents.dtype != times.dtype:
+            raise ValueError("CircuitData tensors must share one dtype.")
+        if len(set(node_names)) != len(node_names):
+            raise ValueError("CircuitData.node_names must be unique.")
+        if len(set(branch_names)) != len(branch_names):
+            raise ValueError("CircuitData.branch_names must be unique.")
+        powers = {}
+        for name, value in self.device_powers.items():
+            resolved_name = _name(name, kind="Circuit device")
+            if resolved_name in powers:
+                raise ValueError("CircuitData device power names must be unique.")
+            tensor = torch.as_tensor(value)
+            if tensor.shape != times.shape:
+                raise ValueError(f"Device power {name!r} must have shape [time].")
+            if tensor.device != times.device or tensor.dtype != times.dtype:
+                raise ValueError(f"Device power {name!r} must share CircuitData device and dtype.")
+            powers[resolved_name] = tensor
+        balance = self.energy_balance
+        if balance is not None:
+            balance = torch.as_tensor(balance)
+            if balance.shape != times.shape:
+                raise ValueError("CircuitData.energy_balance must have shape [time].")
+            if balance.device != times.device or balance.dtype != times.dtype:
+                raise ValueError("CircuitData.energy_balance must share CircuitData device and dtype.")
+        object.__setattr__(self, "times", times)
+        object.__setattr__(self, "node_names", node_names)
+        object.__setattr__(self, "node_voltages", node_voltages)
+        object.__setattr__(self, "branch_names", branch_names)
+        object.__setattr__(self, "branch_currents", branch_currents)
+        object.__setattr__(self, "device_powers", powers)
+        object.__setattr__(self, "energy_balance", balance)
+        object.__setattr__(self, "diagnostics", dict(self.diagnostics))
+
+    def node_voltage(self, name: str) -> torch.Tensor:
+        try:
+            index = self.node_names.index(str(name))
+        except ValueError as exc:
+            raise KeyError(f"Circuit node {name!r} is not available; choices are {self.node_names}.") from exc
+        return self.node_voltages[:, index]
+
+    def branch_current(self, name: str) -> torch.Tensor:
+        try:
+            index = self.branch_names.index(str(name))
+        except ValueError as exc:
+            raise KeyError(
+                f"Circuit branch {name!r} is not available; choices are {self.branch_names}."
+            ) from exc
+        return self.branch_currents[:, index]
+
+    def to(self, device) -> "CircuitData":
+        def move(value):
+            if isinstance(value, torch.Tensor):
+                return value.to(device=device)
+            if isinstance(value, dict):
+                return {key: move(item) for key, item in value.items()}
+            if isinstance(value, tuple):
+                return tuple(move(item) for item in value)
+            if isinstance(value, list):
+                return [move(item) for item in value]
+            return value
+
+        return CircuitData(
+            circuit_name=self.circuit_name,
+            times=self.times.to(device=device),
+            node_names=self.node_names,
+            node_voltages=self.node_voltages.to(device=device),
+            branch_names=self.branch_names,
+            branch_currents=self.branch_currents.to(device=device),
+            device_powers={name: value.to(device=device) for name, value in self.device_powers.items()},
+            energy_balance=None if self.energy_balance is None else self.energy_balance.to(device=device),
+            diagnostics=move(self.diagnostics),
+        )
+
+
 class Circuit:
     """Declarative linear circuit graph owned by a Maxwell ``Scene``."""
 
@@ -1260,6 +1369,7 @@ def _serialize_device(device) -> str:
 
 __all__ = [
     "Circuit",
+    "CircuitData",
     "CircuitDevice",
     "CircuitNode",
     "CurrentControlledCurrentSource",

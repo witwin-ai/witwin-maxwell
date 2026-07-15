@@ -2,6 +2,7 @@ from witwin.core import Box, Cone, Cylinder, Ellipsoid, HollowBox, Mesh, Prism, 
 from .antenna import AntennaData, Ludwig3
 from .circuits import (
     Circuit,
+    CircuitData,
     CircuitDevice,
     CircuitNode,
     CurrentControlledCurrentSource,
@@ -128,6 +129,7 @@ __all__ = [
     "ClosedSurfaceMonitor",
     "Capacitor",
     "Circuit",
+    "CircuitData",
     "CircuitDevice",
     "CircuitNode",
     "ComplexPolySlab",

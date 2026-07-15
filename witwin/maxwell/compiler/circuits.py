@@ -135,12 +135,17 @@ def _validate_control_dependencies(devices_by_name, branch_names):
 def _validate_voltage_source_loops(nodes, devices):
     sets = _DisjointSet(node.name for node in nodes)
     for device in devices:
-        if not isinstance(device, (VoltageSource, VoltageControlledVoltageSource, CurrentControlledVoltageSource)):
+        if not isinstance(
+            device,
+            (Inductor, VoltageSource, VoltageControlledVoltageSource, CurrentControlledVoltageSource),
+        ):
             continue
         if not sets.union(device.positive.name, device.negative.name):
-            raise ValueError(
-                f"Ideal voltage-source loop detected at device {device.name!r}."
-            )
+            if isinstance(device, Inductor):
+                raise ValueError(
+                    f"DC ideal-voltage/inductor loop detected at device {device.name!r}."
+                )
+            raise ValueError(f"Ideal voltage-source loop detected at device {device.name!r}.")
 
 
 def _validate_dc_reference(nodes, devices, bindings):

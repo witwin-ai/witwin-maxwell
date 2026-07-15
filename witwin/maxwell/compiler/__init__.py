@@ -1,5 +1,6 @@
 from .circuits import CircuitGraph, compile_circuit_graph, compile_circuits
 from .lumped import CompiledLumpedElement, compile_lumped_elements
+from .mna import CompiledStampPlan, LinearMNASystem, compile_mna_system
 from .materials import compile_material_tensors
 from .monitors import compile_fdtd_observers, compile_fdtd_time_observers
 from .ports import CompiledPortGeometry, compile_port_geometry, compile_ports
@@ -18,6 +19,9 @@ __all__ = [
     "compile_circuits",
     "CompiledLumpedElement",
     "compile_lumped_elements",
+    "CompiledStampPlan",
+    "LinearMNASystem",
+    "compile_mna_system",
     "compile_fdfd_sources",
     "compile_fdtd_observers",
     "compile_fdtd_time_observers",
