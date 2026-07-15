@@ -403,6 +403,10 @@ def _validate_network_matrix(
     frequency_count, port_count, _ = matrix.shape
     if frequency_count == 0 or port_count == 0:
         raise ValueError(f"{name} must have non-empty shape [F, N, N].")
+    if not bool(torch.all(torch.isfinite(torch.real(matrix)))) or not bool(
+        torch.all(torch.isfinite(torch.imag(matrix)))
+    ):
+        raise ValueError(f"{name} must contain only finite values.")
     resolved_frequencies = _validate_frequencies(frequencies, device=matrix.device)
     if resolved_frequencies.numel() != frequency_count:
         raise ValueError(f"{name} frequency dimension must match frequencies shape [F].")
@@ -462,12 +466,52 @@ def _identity_batch(matrix: torch.Tensor) -> torch.Tensor:
     )
 
 
-def _right_solve(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+def _condition_limit(matrix: torch.Tensor) -> float:
+    real_dtype = matrix.real.dtype
+    return 1.0 / (100.0 * torch.finfo(real_dtype).eps * matrix.shape[-1])
+
+
+def _validate_solve_matrix(matrix: torch.Tensor, *, operation: str) -> None:
+    """Reject singular and numerically unsafe batched network solves."""
+
+    condition = torch.linalg.cond(matrix)
+    limit = _condition_limit(matrix)
+    invalid = ~torch.isfinite(condition) | (condition > limit)
+    if bool(torch.any(invalid)):
+        indices = torch.nonzero(invalid, as_tuple=False).flatten().tolist()
+        raise RuntimeError(
+            f"{operation} is singular or ill-conditioned at frequency indices {indices}; "
+            f"the condition number must be finite and no greater than {limit:.3e}."
+        )
+
+
+def _checked_solve(
+    matrix: torch.Tensor,
+    rhs: torch.Tensor,
+    *,
+    operation: str,
+) -> torch.Tensor:
+    _validate_solve_matrix(matrix, operation=operation)
+    result = torch.linalg.solve(matrix, rhs)
+    if not bool(torch.all(torch.isfinite(torch.real(result)))) or not bool(
+        torch.all(torch.isfinite(torch.imag(result)))
+    ):
+        raise RuntimeError(f"{operation} produced non-finite values.")
+    return result
+
+
+def _right_solve(
+    left: torch.Tensor,
+    right: torch.Tensor,
+    *,
+    operation: str,
+) -> torch.Tensor:
     """Return ``left @ inv(right)`` using a batched linear solve."""
 
-    return torch.linalg.solve(
+    return _checked_solve(
         right.transpose(-2, -1),
         left.transpose(-2, -1),
+        operation=operation,
     ).transpose(-2, -1)
 
 
@@ -481,7 +525,11 @@ def _s_to_z(s: torch.Tensor, z0: torch.Tensor) -> torch.Tensor:
     identity = _identity_batch(s)
     z0_matrix = torch.diag_embed(z0)
     rhs = torch.diag_embed(torch.conj(z0)) + normalized_s @ z0_matrix
-    return torch.linalg.solve(identity - normalized_s, rhs)
+    return _checked_solve(
+        identity - normalized_s,
+        rhs,
+        operation="S/Z conversion",
+    )
 
 
 def _z_to_s(z: torch.Tensor, z0: torch.Tensor) -> torch.Tensor:
@@ -489,6 +537,7 @@ def _z_to_s(z: torch.Tensor, z0: torch.Tensor) -> torch.Tensor:
     normalized_s = _right_solve(
         z - torch.diag_embed(torch.conj(z0)),
         z + z0_matrix,
+        operation="Z/S conversion",
     )
     resistance_root = torch.sqrt(torch.real(z0))
     return (
@@ -496,6 +545,107 @@ def _z_to_s(z: torch.Tensor, z0: torch.Tensor) -> torch.Tensor:
         * resistance_root.unsqueeze(-2)
         / resistance_root.unsqueeze(-1)
     )
+
+
+def _normalize_port_distances(
+    distances,
+    *,
+    port_count: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    value = torch.as_tensor(distances, device=device)
+    if value.is_complex():
+        raise TypeError("distances must be real.")
+    value = value.to(dtype=dtype)
+    if value.ndim == 0:
+        value = value.expand(port_count)
+    elif tuple(value.shape) != (port_count,):
+        raise ValueError(f"distances must be scalar or have shape [N] = ({port_count},).")
+    if not bool(torch.all(torch.isfinite(value))):
+        raise ValueError("distances must contain only finite values.")
+    return value
+
+
+def _normalize_propagation_constants(
+    propagation_constants,
+    *,
+    frequency_count: int,
+    port_count: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    value = torch.as_tensor(propagation_constants, device=device).to(dtype=dtype)
+    target = (frequency_count, port_count)
+    if value.ndim == 0:
+        value = value.expand(target)
+    elif tuple(value.shape) == (port_count,):
+        value = value.unsqueeze(0).expand(target)
+    elif tuple(value.shape) == (frequency_count, 1):
+        value = value.expand(target)
+    elif tuple(value.shape) != target:
+        raise ValueError(
+            "propagation_constants must be scalar or broadcastable to "
+            f"shape [F, N] = {target}."
+        )
+    if not bool(torch.all(torch.isfinite(torch.real(value)))) or not bool(
+        torch.all(torch.isfinite(torch.imag(value)))
+    ):
+        raise ValueError("propagation_constants must contain only finite values.")
+    return value
+
+
+def _append_transform_metadata(
+    metadata: Mapping[str, Any],
+    transform: Mapping[str, Any],
+) -> dict[str, Any]:
+    resolved = dict(metadata)
+    history = resolved.get("network_transform_history", ())
+    if not isinstance(history, (list, tuple)):
+        raise TypeError("metadata['network_transform_history'] must be a list or tuple.")
+    resolved["network_transform_history"] = (*history, dict(transform))
+    return resolved
+
+
+def _resolve_mixed_mode_pairs(
+    pairs,
+    *,
+    port_names: tuple[str, ...],
+) -> tuple[tuple[int, int], ...]:
+    try:
+        requested = tuple(tuple(pair) for pair in pairs)
+    except TypeError as exc:
+        raise TypeError("pairs must be an iterable of two-port pairs.") from exc
+    if not requested:
+        raise ValueError("pairs must contain at least one port pair.")
+
+    name_to_index = {name: index for index, name in enumerate(port_names)}
+    resolved: list[tuple[int, int]] = []
+    used: set[int] = set()
+    for pair in requested:
+        if len(pair) != 2:
+            raise ValueError("Each mixed-mode pair must contain exactly two ports.")
+        indices: list[int] = []
+        for port in pair:
+            if isinstance(port, str):
+                if port not in name_to_index:
+                    raise ValueError(f"Unknown port name {port!r} in mixed-mode pairs.")
+                index = name_to_index[port]
+            elif isinstance(port, int) and not isinstance(port, bool):
+                index = port
+                if index < 0 or index >= len(port_names):
+                    raise ValueError(f"Mixed-mode port index {index} is out of range.")
+            else:
+                raise TypeError("Mixed-mode ports must be names or integer indices.")
+            indices.append(index)
+        positive, negative = indices
+        if positive == negative:
+            raise ValueError("A mixed-mode pair must contain two distinct ports.")
+        if positive in used or negative in used:
+            raise ValueError("A port may appear in only one mixed-mode pair.")
+        used.update((positive, negative))
+        resolved.append((positive, negative))
+    return tuple(resolved)
 
 
 @dataclass(frozen=True)
@@ -608,7 +758,11 @@ class NetworkData:
         )
         if not bool(torch.all(valid)):
             raise RuntimeError("S/Y conversion requires complete excitation columns.")
-        z = torch.linalg.solve(y, _identity_batch(y))
+        z = _checked_solve(
+            y,
+            _identity_batch(y),
+            operation="Y/Z conversion",
+        )
         return cls.from_z(
             frequencies=resolved_frequencies,
             z=z,
@@ -652,19 +806,217 @@ class NetworkData:
     def to_y(self) -> torch.Tensor:
         self._require_complete("S/Y conversion")
         z = _s_to_z(self.s, self.z0)
-        return torch.linalg.solve(z, _identity_batch(z))
+        return _checked_solve(
+            z,
+            _identity_batch(z),
+            operation="Z/Y conversion",
+        )
 
     def renormalize(self, z0) -> "NetworkData":
         self._require_complete("renormalization")
+        reference = _normalize_network_z0(
+            z0,
+            frequency_count=self.s.shape[0],
+            port_count=self.s.shape[1],
+            device=self.s.device,
+            dtype=self.s.dtype,
+        )
+        metadata = _append_transform_metadata(
+            self.metadata,
+            {
+                "operation": "renormalize",
+                "source_z0": self.z0.detach().clone(),
+                "target_z0": reference.detach().clone(),
+            },
+        )
         return type(self).from_z(
             frequencies=self.frequencies,
             z=self.to_z(),
-            z0=z0,
+            z0=reference,
             port_names=self.port_names,
             valid_columns=self.valid_columns,
-            metadata=self.metadata,
+            metadata=metadata,
             phasor_convention=self.phasor_convention,
             power_wave_convention=self.power_wave_convention,
+        )
+
+    def shift_reference_planes(
+        self,
+        distances,
+        *,
+        propagation_constants,
+    ) -> "NetworkData":
+        """Shift port reference planes with explicit complex propagation constants.
+
+        ``distances`` follows the outward-positive convention. Under the package's
+        ``exp(-i*omega*t)`` phasor convention, each one-way wave is multiplied by
+        ``exp(1j * propagation_constants * distances)``. Consequently, each
+        scattering entry receives both its output- and input-port factors.
+        """
+
+        self._require_complete("reference-plane shifting")
+        distance = _normalize_port_distances(
+            distances,
+            port_count=self.s.shape[1],
+            device=self.s.device,
+            dtype=self.s.real.dtype,
+        )
+        propagation = _normalize_propagation_constants(
+            propagation_constants,
+            frequency_count=self.s.shape[0],
+            port_count=self.s.shape[1],
+            device=self.s.device,
+            dtype=self.s.dtype,
+        )
+        one_way = torch.exp(1j * propagation * distance.unsqueeze(0))
+        shifted = one_way.unsqueeze(-1) * self.s * one_way.unsqueeze(-2)
+        metadata = _append_transform_metadata(
+            self.metadata,
+            {
+                "operation": "shift_reference_planes",
+                "distances": distance.detach().clone(),
+                "propagation_constants": propagation.detach().clone(),
+                "distance_convention": "outward-positive",
+            },
+        )
+        return type(self)(
+            frequencies=self.frequencies,
+            s=shifted,
+            z0=self.z0,
+            port_names=self.port_names,
+            valid_columns=self.valid_columns,
+            metadata=metadata,
+            phasor_convention=self.phasor_convention,
+            power_wave_convention=self.power_wave_convention,
+        )
+
+    def to_mixed_mode(self, pairs, z0=None) -> "NetworkData":
+        """Convert selected single-ended port pairs to differential/common modes.
+
+        Pair outputs are ordered differential then common in the order supplied;
+        unpaired ports follow in their original order. The voltage basis is
+        ``Vd = Vp - Vn`` and ``Vc = (Vp + Vn) / 2``. Its inverse-transpose
+        current basis gives ``Id = (Ip - In) / 2`` and ``Ic = Ip + In``, preserving
+        complex power. With no explicit mixed-mode ``z0``, paired single-ended
+        impedances must be equal and map to ``Zd = 2*z0`` and ``Zc = z0/2``.
+        """
+
+        self._require_complete("mixed-mode conversion")
+        resolved_pairs = _resolve_mixed_mode_pairs(pairs, port_names=self.port_names)
+        paired_indices = {index for pair in resolved_pairs for index in pair}
+        unpaired_indices = tuple(
+            index for index in range(len(self.port_names)) if index not in paired_indices
+        )
+
+        rows: list[torch.Tensor] = []
+        names: list[str] = []
+        default_references: list[torch.Tensor] = []
+        for positive, negative in resolved_pairs:
+            differential = torch.zeros(
+                (len(self.port_names),),
+                device=self.s.device,
+                dtype=self.s.dtype,
+            )
+            common = torch.zeros_like(differential)
+            differential[positive] = 1.0
+            differential[negative] = -1.0
+            common[positive] = 0.5
+            common[negative] = 0.5
+            rows.extend((differential, common))
+
+            positive_name = self.port_names[positive]
+            negative_name = self.port_names[negative]
+            names.extend(
+                (
+                    f"d({positive_name},{negative_name})",
+                    f"c({positive_name},{negative_name})",
+                )
+            )
+            if z0 is None:
+                positive_z0 = self.z0[:, positive]
+                negative_z0 = self.z0[:, negative]
+                tolerance = 10.0 * torch.finfo(self.s.real.dtype).eps
+                if not bool(
+                    torch.allclose(
+                        positive_z0,
+                        negative_z0,
+                        rtol=tolerance,
+                        atol=tolerance,
+                    )
+                ):
+                    raise ValueError(
+                        "Paired single-ended reference impedances must be equal when "
+                        "mixed-mode z0 is omitted; provide z0 explicitly for unequal ports."
+                    )
+                default_references.extend((2.0 * positive_z0, 0.5 * positive_z0))
+
+        for index in unpaired_indices:
+            row = torch.zeros(
+                (len(self.port_names),),
+                device=self.s.device,
+                dtype=self.s.dtype,
+            )
+            row[index] = 1.0
+            rows.append(row)
+            names.append(self.port_names[index])
+            if z0 is None:
+                default_references.append(self.z0[:, index])
+
+        voltage_basis = torch.stack(rows)
+        source_z = self.to_z()
+        mixed_z = voltage_basis @ source_z @ voltage_basis.transpose(-2, -1)
+        if z0 is None:
+            mixed_reference = torch.stack(default_references, dim=-1)
+        else:
+            mixed_reference = _normalize_network_z0(
+                z0,
+                frequency_count=self.s.shape[0],
+                port_count=self.s.shape[1],
+                device=self.s.device,
+                dtype=self.s.dtype,
+            )
+        pair_names = tuple(
+            (self.port_names[positive], self.port_names[negative])
+            for positive, negative in resolved_pairs
+        )
+        metadata = _append_transform_metadata(
+            self.metadata,
+            {
+                "operation": "to_mixed_mode",
+                "pairs": pair_names,
+                "source_port_names": self.port_names,
+                "target_port_names": tuple(names),
+            },
+        )
+        return type(self).from_z(
+            frequencies=self.frequencies,
+            z=mixed_z,
+            z0=mixed_reference,
+            port_names=tuple(names),
+            valid_columns=self.valid_columns,
+            metadata=metadata,
+            phasor_convention=self.phasor_convention,
+            power_wave_convention=self.power_wave_convention,
+        )
+
+    def to_touchstone(
+        self,
+        path,
+        *,
+        format="ri",
+        frequency_unit="hz",
+        version="auto",
+    ):
+        """Export this complete network to a Touchstone file."""
+
+        from .touchstone import write_touchstone
+
+        return write_touchstone(
+            self,
+            path,
+            format=format,
+            frequency_unit=frequency_unit,
+            version=version,
         )
 
     def save(self, path: str | Path):

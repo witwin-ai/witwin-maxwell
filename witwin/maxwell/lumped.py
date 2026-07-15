@@ -279,6 +279,35 @@ class PortExcitation:
 
 
 @dataclass(frozen=True)
+class PortSweep:
+    """Request one independent single-device FDTD run per input port."""
+
+    ports: tuple[str, ...] | None
+    amplitude: torch.Tensor
+    source_time: SourceTime | None = None
+    kind: str = "port_sweep"
+
+    def __init__(self, ports=None, amplitude=1.0, source_time=None):
+        if ports is None:
+            resolved_ports = None
+        elif isinstance(ports, str):
+            resolved_ports = (ports,)
+        else:
+            resolved_ports = tuple(str(port) for port in ports)
+        if resolved_ports is not None:
+            if not resolved_ports or any(not port for port in resolved_ports):
+                raise ValueError("PortSweep ports must contain non-empty names.")
+            if len(set(resolved_ports)) != len(resolved_ports):
+                raise ValueError("PortSweep ports must be unique.")
+        if source_time is not None and not isinstance(source_time, SourceTime):
+            raise TypeError("PortSweep source_time must be a SourceTime or None.")
+        object.__setattr__(self, "ports", resolved_ports)
+        object.__setattr__(self, "amplitude", _amplitude_tensor(amplitude))
+        object.__setattr__(self, "source_time", source_time)
+        object.__setattr__(self, "kind", "port_sweep")
+
+
+@dataclass(frozen=True)
 class RLCBranchState:
     current: torch.Tensor
     capacitor_voltage: torch.Tensor

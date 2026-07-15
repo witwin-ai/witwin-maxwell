@@ -52,7 +52,7 @@ def test_scene_rejects_duplicate_and_unknown_port_objects():
 
     with pytest.raises(ValueError, match="already present"):
         scene.add_port(_lumped_port())
-    with pytest.raises(TypeError, match="ModePort or LumpedPort"):
+    with pytest.raises(TypeError, match="Maxwell Scene ports"):
         scene.add_port(object())
 
 

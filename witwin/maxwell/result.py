@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from .monitors import ClosedSurfaceMonitor, FinitePlaneMonitor, MediumMonitor, PermittivityMonitor
-from .network import PortData
+from .network import NetworkData, PortData, _validate_safe_persistence
 from .scene import prepare_scene
 from .visualization import extract_orthogonal_slice, plot_slice_image
 
@@ -54,6 +54,7 @@ def _normalize_port_data_mapping(ports) -> dict[str, PortData]:
 
 
 def _port_data_snapshot(data: PortData) -> dict[str, Any]:
+    _validate_safe_persistence(data.metadata, path=f"ports[{data.port_name!r}].metadata")
     return {
         "schema_version": data.schema_version,
         "data_type": "PortData",
@@ -68,6 +69,25 @@ def _port_data_snapshot(data: PortData) -> dict[str, Any]:
         "metadata": _cpu_serializable(data.metadata),
         "phasor_convention": data.phasor_convention,
         "power_wave_convention": data.power_wave_convention,
+    }
+
+
+def _network_data_snapshot(data: NetworkData | None):
+    if data is None:
+        return None
+    _validate_safe_persistence(data.metadata, path="network.metadata")
+    return {
+        "schema_version": data.schema_version,
+        "data_type": "NetworkData",
+        "frequencies": _cpu_serializable(data.frequencies),
+        "s": _cpu_serializable(data.s),
+        "z0": _cpu_serializable(data.z0),
+        "port_names": data.port_names,
+        "valid_columns": _cpu_serializable(data.valid_columns),
+        "metadata": _cpu_serializable(data.metadata),
+        "phasor_convention": data.phasor_convention,
+        "power_wave_convention": data.power_wave_convention,
+        "matrix_order": "[frequency, output_port, input_port]",
     }
 
 
@@ -769,6 +789,7 @@ class Result:
         fields: dict[str, torch.Tensor] | None = None,
         monitors: dict[str, Any] | None = None,
         ports: Mapping[str, PortData] | None = None,
+        network: NetworkData | None = None,
         metadata: dict[str, Any] | None = None,
         solver_stats: dict[str, Any] | None = None,
         raw_output: Any = None,
@@ -782,6 +803,9 @@ class Result:
         self._fields = _clone_mapping(fields)
         self._monitors = _clone_mapping(monitors)
         self._ports = _normalize_port_data_mapping(ports)
+        if network is not None and not isinstance(network, NetworkData):
+            raise TypeError("network must be a NetworkData or None.")
+        self._network = network
         self._metadata = _clone_mapping(metadata)
         self._solver_stats = _clone_mapping(solver_stats)
         self.raw_output = raw_output
@@ -822,6 +846,10 @@ class Result:
     @property
     def ports(self) -> dict[str, PortData]:
         return dict(self._ports)
+
+    @property
+    def network(self) -> NetworkData | None:
+        return self._network
 
     @property
     def E(self) -> ResultFieldAccessor:
@@ -1006,6 +1034,7 @@ class Result:
         stats["num_fields"] = len(self._fields)
         stats["num_monitors"] = len(self._monitors)
         stats["num_ports"] = len(self._ports)
+        stats["has_network"] = self._network is not None
         return stats
 
     def save(self, path: str | Path):
@@ -1033,6 +1062,7 @@ class Result:
                     name: _port_data_snapshot(data)
                     for name, data in self._ports.items()
                 },
+                "network": _network_data_snapshot(self._network),
                 "metadata": _cpu_serializable(self._metadata),
                 "solver_stats": _cpu_serializable(self._solver_stats),
             },

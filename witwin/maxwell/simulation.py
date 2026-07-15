@@ -6,9 +6,9 @@ from typing import Any, Iterable
 
 import torch
 
-from .lumped import PortExcitation
+from .lumped import PortExcitation, PortSweep
 from .monitors import MediumMonitor, PermittivityMonitor
-from .ports import LumpedPort
+from .ports import LumpedPort, TerminalPort
 from .result import Result
 from .scene import Scene, SceneModule, prepare_scene
 
@@ -84,7 +84,7 @@ def _normalize_port_excitations(excitations) -> tuple[PortExcitation, ...]:
         raise ValueError("Each port may appear in excitations at most once.")
     if len(resolved) > 1:
         raise NotImplementedError(
-            "Phase 1 supports one active LumpedPort per FDTD run; use one PortExcitation."
+            "A direct FDTD run supports one active RF port; use PortSweep for independent N-port columns."
         )
     return resolved
 
@@ -295,9 +295,12 @@ class Simulation:
             or _scene_trainable_material_parameters(resolved_scene)
         )
         self.method = SimulationMethod(method)
-        self.excitations = _normalize_port_excitations(excitations)
-        if self.method != SimulationMethod.FDTD and self.excitations:
-            raise ValueError("PortExcitation is supported by Simulation.fdtd(...) only.")
+        self.port_sweep = excitations if isinstance(excitations, PortSweep) else None
+        self.excitations = (
+            () if self.port_sweep is not None else _normalize_port_excitations(excitations)
+        )
+        if self.method != SimulationMethod.FDTD and (self.excitations or self.port_sweep):
+            raise ValueError("RF port excitation is supported by Simulation.fdtd(...) only.")
         self._validate_trainable_rf_support()
         self.frequencies = tuple(float(freq) for freq in frequencies)
         self.frequency = self.frequencies[0]
@@ -375,6 +378,20 @@ class Simulation:
         self._refresh_scene()
         self._validate_trainable_rf_support()
         self._validate_port_excitations()
+        if self.port_sweep is not None:
+            from .network_sweep import resolve_network_run_manifest
+
+            prepared_scene = prepare_scene(self.scene)
+            _require_cuda_scene(prepared_scene, method="fdtd")
+            return PreparedNetworkSweep(
+                self,
+                prepared_scene,
+                resolve_network_run_manifest(
+                    prepared_scene,
+                    self.port_sweep,
+                    self.frequencies,
+                ),
+            )
         if self.method == SimulationMethod.FDFD:
             solver = self._build_fdfd_solver()
         elif self.method == SimulationMethod.FDTD:
@@ -398,6 +415,11 @@ class Simulation:
         raise ValueError(f"Unsupported simulation method {self.method!r}.")
 
     def _validate_port_excitations(self) -> None:
+        if self.port_sweep is not None:
+            from .network_sweep import resolve_network_run_manifest
+
+            resolve_network_run_manifest(self.scene, self.port_sweep, self.frequencies)
+            return
         if not self.excitations:
             return
         ports_by_name = {port.name: port for port in self.scene.ports}
@@ -407,19 +429,21 @@ class Simulation:
                 raise ValueError(
                     f"PortExcitation references missing port {excitation.port_name!r}."
                 )
-            if not isinstance(port, LumpedPort):
+            if not isinstance(port, (LumpedPort, TerminalPort)):
                 raise TypeError(
-                    f"PortExcitation {excitation.port_name!r} requires a LumpedPort, "
+                    f"PortExcitation {excitation.port_name!r} requires an RF port, "
                     f"got {type(port).__name__}."
                 )
 
     def _validate_trainable_rf_support(self) -> None:
         if self.method != SimulationMethod.FDTD or not self.has_trainable_parameters:
             return
-        has_lumped_ports = any(isinstance(port, LumpedPort) for port in self.scene.ports)
-        if has_lumped_ports or self.scene.lumped_elements or self.excitations:
+        has_rf_ports = any(
+            isinstance(port, (LumpedPort, TerminalPort)) for port in self.scene.ports
+        )
+        if has_rf_ports or self.scene.lumped_elements or self.excitations or self.port_sweep:
             raise NotImplementedError(
-                "Trainable FDTD scenes cannot yet include LumpedPort, PortExcitation, "
+                "Trainable FDTD scenes cannot yet include RF ports, port excitations, "
                 "or standalone R/L/C elements because the adjoint does not replay "
                 "their auxiliary state."
             )
@@ -506,18 +530,84 @@ class Simulation:
     def _run_fdtd(self) -> Result:
         if self.has_trainable_parameters:
             return self._run_fdtd_with_gradient_bridge()
+        if self.port_sweep is not None:
+            return self._run_fdtd_network_sweep()
         solver = self._build_fdtd_solver(initialize=True)
         return self._run_fdtd_from_solver(solver)
+
+    def _run_fdtd_network_sweep(self, *, scene=None, manifest=None) -> Result:
+        from .network_sweep import (
+            aggregate_network_columns,
+            build_network_column_run,
+            resolve_network_run_manifest,
+        )
+
+        sweep = self.port_sweep
+        run_scene = self.scene if scene is None else scene
+        if manifest is None:
+            manifest = resolve_network_run_manifest(run_scene, sweep, self.frequencies)
+        columns = []
+        column_stats = []
+        last_solver = None
+        for active_name in manifest.port_names:
+            excitations, overrides = build_network_column_run(
+                run_scene,
+                sweep,
+                manifest,
+                active_name,
+            )
+            solver = self._build_fdtd_solver_for_scene(
+                run_scene,
+                initialize=True,
+                port_excitations=excitations,
+                termination_overrides=overrides,
+            )
+            column_result = self._run_fdtd_from_solver(solver)
+            columns.append(column_result.ports)
+            column_stats.append(column_result.stats())
+            last_solver = solver
+
+        stacked_ports, network = aggregate_network_columns(manifest, tuple(columns))
+        metadata = dict(self.metadata)
+        metadata["network_run_manifest"] = manifest.metadata()
+        return Result(
+            method="fdtd",
+            scene=run_scene,
+            prepared_scene=last_solver.scene,
+            frequency=self.frequency,
+            frequencies=self.frequencies,
+            solver=last_solver,
+            fields={},
+            monitors={},
+            ports=stacked_ports,
+            network=network,
+            metadata=metadata,
+            solver_stats={
+                "network_sweep": manifest.metadata(),
+                "columns": tuple(column_stats),
+            },
+            raw_output={"network_run_manifest": manifest.metadata()},
+        )
 
     def _build_fdtd_solver(self, *, initialize: bool):
         return self._build_fdtd_solver_for_scene(self.scene, initialize=initialize)
 
-    def _build_fdtd_solver_for_scene(self, scene, *, initialize: bool):
+    def _build_fdtd_solver_for_scene(
+        self,
+        scene,
+        *,
+        initialize: bool,
+        port_excitations=None,
+        termination_overrides=None,
+    ):
         prepared_scene = prepare_scene(scene)
         _require_cuda_scene(prepared_scene, method="fdtd")
         fdtd_backend, _ = _resolve_fdtd_backend()
+        resolved_excitations = (
+            self.excitations if port_excitations is None else tuple(port_excitations)
+        )
         time_step_frequency = self.frequency
-        for excitation in self.excitations:
+        for excitation in resolved_excitations:
             source_time = excitation.source_time
             if source_time is not None:
                 time_step_frequency = max(
@@ -531,7 +621,8 @@ class Simulation:
             cpml_config=self.config.cpml_config,
         )
         solver._requested_port_frequencies = self.frequencies
-        solver._port_excitations = self.excitations
+        solver._port_excitations = resolved_excitations
+        solver._port_termination_overrides = dict(termination_overrides or {})
         if initialize:
             solver.init_field()
         return solver
@@ -573,7 +664,7 @@ class Simulation:
         source_time = getattr(solver, "_source_time", None)
         port_source_times = tuple(
             excitation.source_time
-            for excitation in self.excitations
+            for excitation in getattr(solver, "_port_excitations", self.excitations)
             if excitation.source_time is not None
         )
         if port_source_times:
@@ -737,6 +828,19 @@ class Simulation:
         from .fdtd.adjoint import run_fdtd_with_gradient_bridge
 
         return run_fdtd_with_gradient_bridge(self)
+
+
+class PreparedNetworkSweep:
+    def __init__(self, simulation: Simulation, scene, manifest):
+        self.simulation = simulation
+        self.scene = scene
+        self.manifest = manifest
+
+    def run(self) -> Result:
+        return self.simulation._run_fdtd_network_sweep(
+            scene=self.scene,
+            manifest=self.manifest,
+        )
 
 
 class PreparedSimulation:

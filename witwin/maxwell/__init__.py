@@ -37,11 +37,12 @@ from .lumped import (
     Inductor,
     ParallelRLC,
     PortExcitation,
+    PortSweep,
     Resistor,
     SeriesRLC,
 )
 from .network import NetworkData, PortData
-from .ports import AxisPath, LumpedPort, ModePort
+from .ports import AxisPath, LumpedPort, ModePort, TerminalPort, TerminalRef
 from . import postprocess
 from .result import Result
 from .scene import (
@@ -150,6 +151,7 @@ __all__ = [
     "PointMonitor",
     "PortData",
     "PortExcitation",
+    "PortSweep",
     "PolySlab",
     "postprocess",
     "Prism",
@@ -169,6 +171,8 @@ __all__ = [
     "SubpixelSpec",
     "Tensor3x3",
     "TimeConfig",
+    "TerminalPort",
+    "TerminalRef",
     "TFSF",
     "Torus",
     "TwoPhotonAbsorption",

@@ -6,7 +6,7 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
-from ..ports import LumpedPort, ModePort
+from ..ports import LumpedPort, ModePort, TerminalPort, _resolve_terminal_port
 from ..scene import prepare_scene
 
 
@@ -171,7 +171,7 @@ def _compile_voltage_path(
     )
 
 
-def _compile_voltage(port: LumpedPort, scene, *, device: torch.device):
+def _compile_voltage(port: LumpedPort | TerminalPort, scene, *, device: torch.device):
     return _compile_voltage_path(
         scene,
         positive=port.positive,
@@ -181,7 +181,13 @@ def _compile_voltage(port: LumpedPort, scene, *, device: torch.device):
     )
 
 
-def _compile_current(port: LumpedPort, scene, direction: int, *, device: torch.device):
+def _compile_current(
+    port: LumpedPort | TerminalPort,
+    scene,
+    direction: int,
+    *,
+    device: torch.device,
+):
     normal_axis = port.voltage_path.axis
     normal_index = _AXES.index(normal_axis)
     surface_position, surface_size = _box_values(port.current_surface)
@@ -251,30 +257,40 @@ def _compile_current(port: LumpedPort, scene, direction: int, *, device: torch.d
 
 def compile_port_geometry(
     scene,
-    port: LumpedPort,
+    port: LumpedPort | TerminalPort,
     *,
     device: str | torch.device | None = None,
 ) -> CompiledPortGeometry:
     """Compile one axis-aligned lumped port into sparse global Yee indices."""
 
-    if not isinstance(port, LumpedPort):
-        raise TypeError("compile_port_geometry expects a LumpedPort.")
+    if not isinstance(port, (LumpedPort, TerminalPort)):
+        raise TypeError("compile_port_geometry expects a LumpedPort or TerminalPort.")
     resolved_scene = prepare_scene(scene)
+    resolved_port = (
+        _resolve_terminal_port(port, resolved_scene.structures, resolved_scene.domain.bounds)
+        if isinstance(port, TerminalPort)
+        else port
+    )
     target_device = torch.device(resolved_scene.device if device is None else device)
-    direction, voltage_component, voltage_indices, voltage_weights = _compile_voltage(
-        port,
-        resolved_scene,
-        device=target_device,
-    )
-    current_components, current_indices, current_weights = _compile_current(
-        port,
-        resolved_scene,
-        direction,
-        device=target_device,
-    )
+    try:
+        direction, voltage_component, voltage_indices, voltage_weights = _compile_voltage(
+            resolved_port,
+            resolved_scene,
+            device=target_device,
+        )
+        current_components, current_indices, current_weights = _compile_current(
+            resolved_port,
+            resolved_scene,
+            direction,
+            device=target_device,
+        )
+    except (TypeError, ValueError) as error:
+        if isinstance(port, TerminalPort):
+            raise type(error)(f"TerminalPort {port.name!r}: {error}") from error
+        raise
     return CompiledPortGeometry(
-        port_name=port.name,
-        axis=port.voltage_path.axis,
+        port_name=resolved_port.name,
+        axis=resolved_port.voltage_path.axis,
         direction=direction,
         voltage_component=voltage_component,
         voltage_indices=voltage_indices,
@@ -282,10 +298,10 @@ def compile_port_geometry(
         current_components=current_components,
         current_indices=current_indices,
         current_weights=current_weights,
-        reference_impedance=port.reference_impedance,
-        reference_plane=port.reference_plane,
-        phasor_convention=port.phasor_convention,
-        power_convention=port.power_convention,
+        reference_impedance=resolved_port.reference_impedance,
+        reference_plane=resolved_port.reference_plane,
+        phasor_convention=resolved_port.phasor_convention,
+        power_convention=resolved_port.power_convention,
     )
 
 
@@ -302,7 +318,7 @@ def compile_ports(
     for port in selected_ports:
         if isinstance(port, ModePort):
             continue
-        if not isinstance(port, LumpedPort):
+        if not isinstance(port, (LumpedPort, TerminalPort)):
             raise TypeError(f"Unsupported port type: {type(port).__name__}.")
         compiled.append(compile_port_geometry(scene, port, device=device))
     return tuple(compiled)

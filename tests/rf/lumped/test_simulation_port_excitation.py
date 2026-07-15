@@ -45,7 +45,7 @@ def test_fdtd_rejects_duplicate_or_multiple_active_ports_in_phase_one():
             excitations=(mw.PortExcitation("p1"), mw.PortExcitation("p1")),
         )
 
-    with pytest.raises(NotImplementedError, match="one active LumpedPort"):
+    with pytest.raises(NotImplementedError, match="one active RF port"):
         mw.Simulation.fdtd(
             _scene(ports=(_lumped_port("p1"), _lumped_port("p2"))),
             frequency=1.0e9,

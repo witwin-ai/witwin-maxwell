@@ -9,7 +9,7 @@ import torch
 
 from witwin.core import Structure
 from .lumped import Capacitor, Inductor, Resistor
-from .ports import LumpedPort, ModePort
+from .ports import LumpedPort, ModePort, TerminalPort, _resolve_terminal_port
 from .compiler.materials import (
     compile_material_model,
     evaluate_material_components,
@@ -899,11 +899,15 @@ class Scene:
         self.monitors.append(monitor)
         return self
 
-    def add_port(self, port: ModePort | LumpedPort):
-        if not isinstance(port, (ModePort, LumpedPort)):
-            raise TypeError("Maxwell Scene ports must be ModePort or LumpedPort instances.")
+    def add_port(self, port: ModePort | LumpedPort | TerminalPort):
+        if not isinstance(port, (ModePort, LumpedPort, TerminalPort)):
+            raise TypeError(
+                "Maxwell Scene ports must be ModePort, LumpedPort, or TerminalPort instances."
+            )
         if any(existing.name == port.name for existing in self.ports):
             raise ValueError(f"Port name {port.name!r} is already present in the scene.")
+        if isinstance(port, TerminalPort):
+            port = _resolve_terminal_port(port, self.structures, self.domain.bounds)
         if isinstance(port, LumpedPort):
             for terminal_name, terminal in (
                 ("positive", port.positive),

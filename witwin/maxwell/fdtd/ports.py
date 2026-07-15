@@ -204,13 +204,17 @@ def _real_source_resistance(port, excitation: PortExcitation, *, device, dtype) 
     return value
 
 
-def _require_forward_only_parameters(port, excitation: PortExcitation | None) -> None:
+def _require_forward_only_parameters(
+    port,
+    excitation: PortExcitation | None,
+    termination=None,
+) -> None:
     values = []
     if excitation is not None:
         values.extend((excitation.amplitude, excitation.source_impedance))
         if excitation.source_impedance == "matched":
             values.append(port.reference_impedance)
-    termination = getattr(port, "termination", None)
+    termination = getattr(port, "termination", None) if termination is None else termination
     if termination is not None:
         values.extend(getattr(termination, name, None) for name in ("r", "l", "c"))
     if any(isinstance(value, torch.Tensor) and value.requires_grad for value in values):
@@ -422,8 +426,10 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
     )
     excitation_by_name = {excitation.port_name: excitation for excitation in excitations}
     ports_by_name = {port.name: port for port in solver.scene.ports}
+    termination_overrides = getattr(solver, "_port_termination_overrides", {})
     has_coupled_objects = bool(excitation_by_name) or any(
-        getattr(port, "termination", None) is not None for port in ports_by_name.values()
+        termination_overrides.get(port.name, getattr(port, "termination", None)) is not None
+        for port in ports_by_name.values()
     ) or bool(solver.scene.lumped_elements)
     if has_coupled_objects:
         _validate_supported_field_coupling(solver)
@@ -431,8 +437,9 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
     for geometry in solver.scene.compile_ports(device=solver.device):
         port = ports_by_name[geometry.port_name]
         excitation = excitation_by_name.get(port.name)
-        _require_forward_only_parameters(port, excitation)
-        if excitation is not None and port.termination is not None:
+        termination = termination_overrides.get(port.name, port.termination)
+        _require_forward_only_parameters(port, excitation, termination)
+        if excitation is not None and termination is not None:
             raise ValueError(
                 f"Active port {port.name!r} cannot also declare a passive termination in the same run."
             )
@@ -454,14 +461,14 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
                 resistance=resistance,
             )
             _validate_local_update_coefficient(solver, lumped, geometry.voltage_component)
-        elif port.termination is not None:
+        elif termination is not None:
             _open_declared_pec_terminal_edges(solver, geometry, port)
             lumped = prepare_lumped_runtime(
                 geometry,
                 dt=solver.dt,
                 eps_edge=getattr(solver, f"eps_{geometry.voltage_component}"),
                 yee_control_volume=_edge_control_volume(solver, geometry.voltage_component),
-                termination=port.termination,
+                termination=termination,
             )
             _validate_local_update_coefficient(solver, lumped, geometry.voltage_component)
 
@@ -656,20 +663,27 @@ def accumulate_port_observers(solver) -> None:
     for runtime in getattr(solver, "_port_runtimes", ()):
         if runtime.accumulator is None or runtime.window_weights is None:
             raise RuntimeError("Port spectral accumulators were not prepared.")
-        voltage = runtime.geometry.integrate_voltage(fields)
         if runtime.lumped is not None:
-            # The implicit midpoint branch current is aligned with H in time and
-            # is positive from the field into the external lumped branch.  RF
-            # network current is defined in the opposite direction, entering the
-            # field network from the port reference side.
+            # Voltage and current must come from the same implicit coupling
+            # state. The corrected Yee field is the post-branch voltage, whereas
+            # the constitutive branch current is evaluated at the coupling
+            # midpoint. Mixing them creates a false incident wave at a matched
+            # passive port.
+            voltage = runtime.lumped.last_voltage_midpoint
+            voltage_sample_time = runtime.magnetic_time
+            # Branch current is positive from the field into the external
+            # branch. RF network current has the opposite sign: into the field
+            # network from the port reference side.
             current = -runtime.lumped.last_branch_current
         else:
+            voltage = runtime.geometry.integrate_voltage(fields)
+            voltage_sample_time = runtime.electric_time
             current = runtime.geometry.integrate_current(fields)
         weight = runtime.window_weights[runtime.sample_index]
         runtime.accumulator.accumulate(
             voltage,
             current,
-            electric_sample_time=runtime.electric_time,
+            electric_sample_time=voltage_sample_time,
             magnetic_sample_time=runtime.magnetic_time,
             window_weight=weight,
         )
