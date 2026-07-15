@@ -1526,6 +1526,42 @@ class TestGeometryConversion:
         assert result.axis == 1
         assert result.length == 2.0
 
+    @pytest.mark.parametrize(
+        ("axis", "axis_idx", "expected_center"),
+        [
+            ("x", 0, (12.0, 4.0, 6.0)),
+            ("y", 1, (2.0, 14.0, 6.0)),
+            ("z", 2, (2.0, 4.0, 16.0)),
+        ],
+    )
+    def test_cone_preserves_apex_and_axis(self, inject_mock_tidy3d, axis, axis_idx, expected_center):
+        td = inject_mock_tidy3d
+        geom = mw.Cone(position=(1.0, 2.0, 3.0), radius=0.5, height=10.0, axis=axis)
+
+        result = _convert_geometry(geom, td, 2.0)
+
+        assert isinstance(result, td.Cylinder)
+        assert result.center == pytest.approx(expected_center)
+        assert result.radius == pytest.approx(1.0)
+        assert result.length == pytest.approx(20.0)
+        assert result.axis == axis_idx
+        assert result.sidewall_angle == pytest.approx(-math.atan2(0.5, 10.0))
+        assert result.reference_plane == "top"
+
+    def test_rotated_cone_exports_as_triangle_mesh(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        geom = mw.Cone(
+            position=(0.0, 0.0, 0.0),
+            radius=0.5,
+            height=1.0,
+            axis="z",
+            rotation=(0.9238795, 0.0, 0.3826834, 0.0),
+        )
+
+        result = _convert_geometry(geom, td, 1.0)
+
+        assert isinstance(result, td.TriangleMesh)
+
     def test_torus_exports_as_triangle_mesh(self, inject_mock_tidy3d):
         # A torus has no analytic Tidy3D primitive, so it tessellates to a TriangleMesh
         # built from the primitive's own surface mesh (vertices scaled to Tidy3D units).
@@ -2197,6 +2233,46 @@ class TestGeometrySourceMonitorRealTidy3d:
     reproduce the maxwell geometry/placement, so a merely-accepted-but-wrong conversion
     (wrong axis, unscaled coordinate, absolute-instead-of-relative dataset) is caught.
     """
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="requires the real tidy3d package for the tapered Cylinder geometry check",
+    )
+    def test_cone_bounds_and_inside_match_real_tidy3d(self):
+        from witwin.maxwell.adapters.tidy3d import _convert_geometry
+
+        length_scale = 1.0e6
+        position = (0.1, -0.2, -0.3)
+        radius = 0.4
+        height = 0.8
+        geom = mw.Cone(position=position, radius=radius, height=height, axis="z")
+        points = np.asarray(
+            [
+                (0.1, -0.2, 0.3),
+                (0.2, -0.2, 0.3),
+                (0.3, -0.2, -0.22),
+                (0.1, -0.2, -0.4),
+            ]
+        )
+        maxwell_inside = np.asarray(
+            [
+                bool(geom.signed_distance(*(torch.tensor(value) for value in point)) <= 0)
+                for point in points
+            ]
+        )
+
+        with _real_tidy3d() as real_td:
+            cone = _convert_geometry(geom, real_td, length_scale)
+            assert isinstance(cone, real_td.Cylinder)
+            assert cone.bounds[0] == pytest.approx(
+                ((position[0] - radius) * length_scale, (position[1] - radius) * length_scale, position[2] * length_scale)
+            )
+            assert cone.bounds[1] == pytest.approx(
+                ((position[0] + radius) * length_scale, (position[1] + radius) * length_scale, (position[2] + height) * length_scale)
+            )
+            tidy_inside = cone.inside(*(points[:, axis] * length_scale for axis in range(3)))
+
+        assert np.array_equal(tidy_inside, maxwell_inside)
 
     @pytest.mark.skipif(
         importlib.util.find_spec("tidy3d") is None,

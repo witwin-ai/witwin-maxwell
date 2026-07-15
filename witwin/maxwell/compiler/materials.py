@@ -683,6 +683,7 @@ def _compile_material_sample(
     *,
     eps_background,
     mu_background,
+    region_densities=(),
     sample_offset=(0.0, 0.0, 0.0),
     averaging="arithmetic",
 ):
@@ -698,6 +699,14 @@ def _compile_material_sample(
             coords=coords,
             eps_background=eps_background,
             mu_background=mu_background,
+            averaging=averaging,
+        )
+    if region_densities:
+        model = _apply_material_regions(
+            scene,
+            model,
+            region_densities,
+            coords=coords,
             averaging=averaging,
         )
     return model
@@ -848,75 +857,131 @@ def _project_region_density(region, density: torch.Tensor) -> torch.Tensor:
     return numerator / denominator
 
 
-def _region_density_field(scene, region, reference: torch.Tensor):
-    geometry = region.geometry
-    if not isinstance(geometry, Box):
+def _prepare_material_region_density(scene, region) -> torch.Tensor:
+    """Normalize, filter, and project a region density on its native design grid."""
+    if not isinstance(region.geometry, Box):
         raise ValueError(
-            f"MaterialRegion currently supports Box geometry only, got {type(geometry).__name__}."
+            "MaterialRegion currently supports Box geometry only, "
+            f"got {type(region.geometry).__name__}."
         )
-
-    slices = _box_axis_slices(scene, geometry)
-    if slices is None:
-        empty = torch.zeros_like(reference)
-        return empty, empty.to(dtype=torch.bool)
-    x_slice, y_slice, z_slice = slices
-
-    density = region.density.to(device=scene.device, dtype=reference.real.dtype)
+    density = region.density.to(device=scene.device, dtype=torch.float32)
     lower, upper = region.bounds
     if not np.isclose(lower, 0.0) or not np.isclose(upper, 1.0):
         density = (density - lower) / max(upper - lower, 1e-12)
     density = density.clamp(0.0, 1.0)
     density = _filter_region_density(scene, region, density)
-    density = _project_region_density(region, density).clamp(0.0, 1.0)
+    return _project_region_density(region, density).clamp(0.0, 1.0)
 
-    target_shape = (
-        x_slice.stop - x_slice.start,
-        y_slice.stop - y_slice.start,
-        z_slice.stop - z_slice.start,
+
+def _sample_material_region_density(
+    scene,
+    region,
+    density: torch.Tensor,
+    *,
+    coords,
+) -> torch.Tensor:
+    """Trilinearly sample a region density texture at physical query coordinates."""
+    xx, yy, zz = coords
+    center = torch.as_tensor(region.geometry.position, device=scene.device, dtype=torch.float32)
+    size = torch.as_tensor(region.geometry.size, device=scene.device, dtype=torch.float32)
+    normalized = (
+        2.0 * (xx - center[0]) / size[0],
+        2.0 * (yy - center[1]) / size[1],
+        2.0 * (zz - center[2]) / size[2],
     )
-    if density.shape != target_shape:
-        density = F.interpolate(
-            density[None, None, ...],
-            size=target_shape,
-            mode="trilinear",
-            align_corners=False,
-        )[0, 0]
+    query_grid = torch.stack(normalized, dim=-1)[None, ...]
+    # grid_sample uses input order (depth=z, height=y, width=x) and query
+    # components (x, y, z), while public density tensors are stored (x, y, z).
+    texture = density.permute(2, 1, 0)[None, None, ...]
+    return F.grid_sample(
+        texture,
+        query_grid,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=False,
+    )[0, 0]
 
-    field = torch.zeros_like(reference)
+
+def _material_region_design_mask(scene, reference: torch.Tensor) -> torch.Tensor:
+    """Return the nominal hard Box support retained by the public design metadata."""
     mask = torch.zeros(reference.shape, dtype=torch.bool, device=reference.device)
-    field[x_slice, y_slice, z_slice] = density.to(dtype=reference.dtype)
-    mask[x_slice, y_slice, z_slice] = True
-    return field, mask
-
-
-def _apply_material_regions(scene, model):
-    eps_base = model["eps_r"].clone()
-    mu_base = model["mu_r"].clone()
-    eps_design = torch.zeros_like(eps_base)
-    mu_design = torch.zeros_like(mu_base)
-    design_mask = torch.zeros(eps_base.shape, dtype=torch.bool, device=eps_base.device)
-
     for region in getattr(scene, "material_regions", ()):
-        density_field, region_mask = _region_density_field(scene, region, eps_base)
-        if not torch.any(region_mask):
-            continue
+        slices = _box_axis_slices(scene, region.geometry)
+        if slices is not None:
+            mask[slices] = True
+    return mask
+
+
+def _apply_material_regions(
+    scene,
+    model,
+    region_densities,
+    *,
+    coords,
+    averaging="arithmetic",
+):
+    """Blend design regions through the same occupancy path as ordinary structures."""
+    eps_base = {axis: model["eps_components"][axis].clone() for axis in _AXES}
+    mu_base = {axis: model["mu_components"][axis].clone() for axis in _AXES}
+
+    for region, density in zip(scene.material_regions, region_densities):
+        occupancy = _geometry_occupancy(scene, region.geometry, coords=coords)
+        normals = (
+            _interface_normals(scene, region.geometry, coords=coords)
+            if averaging == "polarized"
+            else None
+        )
+        density_field = _sample_material_region_density(
+            scene,
+            region,
+            density,
+            coords=coords,
+        )
         eps_lo, eps_hi = region.eps_bounds
         mu_lo, mu_hi = region.mu_bounds
         eps_region = eps_lo + density_field * (eps_hi - eps_lo)
         mu_region = mu_lo + density_field * (mu_hi - mu_lo)
-        eps_design = torch.where(region_mask, eps_region - eps_base, eps_design)
-        mu_design = torch.where(region_mask, mu_region - mu_base, mu_design)
-        design_mask = torch.where(region_mask, torch.ones_like(design_mask), design_mask)
+        for axis in _AXES:
+            if normals is None:
+                model["eps_components"][axis] = _blend_material(
+                    model["eps_components"][axis], occupancy, value=eps_region
+                )
+                model["mu_components"][axis] = _blend_material(
+                    model["mu_components"][axis], occupancy, value=mu_region
+                )
+            else:
+                model["eps_components"][axis] = _blend_material_polarized(
+                    model["eps_components"][axis],
+                    occupancy,
+                    normals[axis],
+                    value=eps_region,
+                )
+                model["mu_components"][axis] = _blend_material_polarized(
+                    model["mu_components"][axis],
+                    occupancy,
+                    normals[axis],
+                    value=mu_region,
+                )
+            model["sigma_e_components"][axis] = _blend_material(
+                model["sigma_e_components"][axis], occupancy, value=0.0
+            )
+            model["sigma_m_components"][axis] = _blend_material(
+                model["sigma_m_components"][axis], occupancy, value=0.0
+            )
+        for pair in _OFFDIAG_AXES:
+            model["eps_offdiag_components"][pair] = _blend_material(
+                model["eps_offdiag_components"][pair], occupancy, value=0.0
+            )
+        for key in ("kerr_chi3", "chi2", "tpa_sigma", "modulation_cos", "modulation_sin"):
+            model[key] = _blend_material(model[key], occupancy, value=0.0)
+        _clear_dispersive_region(model, occupancy)
 
-    model["eps_r_base"] = eps_base
-    model["mu_r_base"] = mu_base
-    model["eps_r_design"] = eps_design
-    model["mu_r_design"] = mu_design
-    model["design_mask"] = design_mask
-    for axis in _AXES:
-        model["eps_components"][axis] = model["eps_components"][axis] + eps_design
-        model["mu_components"][axis] = model["mu_components"][axis] + mu_design
-    return _refresh_model_summary_aliases(model)
+    model = _refresh_model_summary_aliases(model)
+    model["eps_r_base"] = _component_average(eps_base)
+    model["mu_r_base"] = _component_average(mu_base)
+    model["eps_r_design"] = model["eps_r"] - model["eps_r_base"]
+    model["mu_r_design"] = model["mu_r"] - model["mu_r_base"]
+    return model
 
 
 def _pec_occupancy(scene, coords=None):
@@ -1215,15 +1280,21 @@ def compile_material_model(
     sibc = _compile_sibc_descriptor(scene)
     samples, averaging, pec_mode = _resolve_subpixel(subpixel)
     layout = _build_dispersive_layout(scene)
+    region_densities = tuple(
+        _prepare_material_region_density(scene, region)
+        for region in getattr(scene, "material_regions", ())
+    )
     if samples == (1, 1, 1):
         model = _compile_material_sample(
             scene,
             layout,
             eps_background=eps_background,
             mu_background=mu_background,
+            region_densities=region_densities,
             averaging=averaging,
         )
-        model = _apply_material_regions(scene, model)
+        if region_densities:
+            model["design_mask"] = _material_region_design_mask(scene, model["eps_r"])
         model = _apply_sheet_structures(scene, model)
         model["pec_occupancy"] = _pec_occupancy(scene)
         model["pec_mode"] = pec_mode
@@ -1231,6 +1302,11 @@ def compile_material_model(
         return model
 
     accum = _new_material_model(scene, layout, eps_fill=0.0, mu_fill=0.0)
+    if region_densities:
+        accum["eps_r_base"] = torch.zeros_like(accum["eps_r"])
+        accum["mu_r_base"] = torch.zeros_like(accum["mu_r"])
+        accum["eps_r_design"] = torch.zeros_like(accum["eps_r"])
+        accum["mu_r_design"] = torch.zeros_like(accum["mu_r"])
     sample_offsets = _sample_offsets(scene, samples)
     for sample_offset in sample_offsets:
         sample = _compile_material_sample(
@@ -1238,6 +1314,7 @@ def compile_material_model(
             layout,
             eps_background=eps_background,
             mu_background=mu_background,
+            region_densities=region_densities,
             sample_offset=sample_offset,
             averaging=averaging,
         )
@@ -1253,6 +1330,11 @@ def compile_material_model(
         accum["tpa_sigma"] += sample["tpa_sigma"]
         accum["modulation_cos"] += sample["modulation_cos"]
         accum["modulation_sin"] += sample["modulation_sin"]
+        if region_densities:
+            accum["eps_r_base"] += sample["eps_r_base"]
+            accum["mu_r_base"] += sample["mu_r_base"]
+            accum["eps_r_design"] += sample["eps_r_design"]
+            accum["mu_r_design"] += sample["mu_r_design"]
         # Frequency is a per-cell label, not an amplitude: take the max over
         # sub-samples so a cell the structure touches in any sub-sample keeps the
         # structure's angular frequency (arithmetic averaging would dilute it).
@@ -1285,6 +1367,12 @@ def compile_material_model(
     accum["tpa_sigma"] *= scale
     accum["modulation_cos"] *= scale
     accum["modulation_sin"] *= scale
+    if region_densities:
+        accum["eps_r_base"] *= scale
+        accum["mu_r_base"] *= scale
+        accum["eps_r_design"] *= scale
+        accum["mu_r_design"] *= scale
+        accum["design_mask"] = _material_region_design_mask(scene, accum["eps_r"])
     for entry in accum["debye_poles"]:
         entry["weight"] *= scale
     for entry in accum["drude_poles"]:
@@ -1297,7 +1385,7 @@ def compile_material_model(
         entry["weight"] *= scale
     for entry in accum["mu_lorentz_poles"]:
         entry["weight"] *= scale
-    model = _apply_material_regions(scene, _refresh_model_summary_aliases(accum))
+    model = _refresh_model_summary_aliases(accum)
     model = _apply_sheet_structures(scene, model)
     model["pec_occupancy"] = _pec_occupancy(scene)
     model["pec_mode"] = pec_mode

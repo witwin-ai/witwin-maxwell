@@ -854,14 +854,26 @@ def _convert_geometry(geometry, td, s):
         )
 
     if kind == "cone":
+        rotation = getattr(geometry, "rotation", None)
+        if rotation is not None:
+            quat = [float(v) for v in rotation.detach().cpu().tolist()]
+            is_identity_rotation = abs(quat[0] - 1.0) < 1e-12 and all(
+                abs(component) < 1e-12 for component in quat[1:]
+            )
+            if not is_identity_rotation:
+                return _triangle_mesh(geometry, td, s)
+
         axis_idx = _axis_name_to_index(geometry.axis)
-        sidewall_angle = math.atan2(float(geometry.radius), float(geometry.height))
+        height = float(geometry.height)
+        center = [float(v) for v in geometry.position.detach().cpu().tolist()]
+        center[axis_idx] += 0.5 * height
         return td.Cylinder(
-            center=_scale3(geometry.position, s),
+            center=tuple(coordinate * s for coordinate in center),
             radius=float(geometry.radius) * s,
-            length=float(geometry.height) * s,
+            length=height * s,
             axis=axis_idx,
-            sidewall_angle=sidewall_angle,
+            sidewall_angle=-math.atan2(float(geometry.radius), height),
+            reference_plane="top",
         )
 
     if kind == "ellipsoid":

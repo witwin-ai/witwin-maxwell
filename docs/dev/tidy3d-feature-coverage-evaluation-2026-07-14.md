@@ -436,3 +436,70 @@ The user regenerated the Tidy3D reference under modal export contract version 2.
 The transverse electric-field image is decisive rather than merely illustrative. Tidy3D launches the requested signed second-order `Ez` mode: two transverse lobes with a sign reversal at the central node. Maxwell launches a single central lobe with no transverse node and visible staggered/checkerboard leakage in the weaker components. On the longitudinal `y=0` slice, Tidy3D is consequently near zero because the plane lies on the physical mode node, while Maxwell retains a strong propagating field. One global complex alignment cannot transform either topology into the other, which is consistent with the low vector overlap and rules out a simple unit, phase, or normalization explanation.
 
 Stage B therefore closes with the public polarization-family contract fixed and regression-tested, while the eigensolver checkerboard duplication remains explicitly deferred. The generated `vector_field_comparison.png` is the authoritative visual baseline for the future operator redesign; the old scalar longitudinal slice is not accepted on its own.
+
+## 18. 数值一致性修复阶段 C：几何、设计区域与功率基准
+
+阶段 C 只修改经过独立控制实验确认的局部错误。模式本征算子、Bloch 离散波矢以及 full-tensor 界面算子不通过经验系数或场景特判掩盖，继续保留为独立算法任务。
+
+### 18.1 Cone 导出语义修复
+
+共享 `Cone` primitive 的 `position` 是顶点，几何沿正轴从顶点延伸一个 `height`。旧 Tidy3D 适配器却把顶点直接作为 tapered `Cylinder.center`，使用正 `sidewall_angle` 和默认 middle reference plane。以 `cone_scatter` 为例，Maxwell 几何范围是 `z=[-0.12, 0.12]`、最大半径 `0.15 m`，旧导出则约为 `z=[-0.24, 0]`、最大半径 `0.225 m`；在 `dx=0.025 m` 的硬 mask 对照中 IoU 仅约 0.025。因此旧 Field L2 0.59606、Shape L2 0.56047 和场图中的刚性轴向错位不能作为求解器离散误差证据。
+
+修复后，未旋转 cone 沿所选轴把 Tidy3D center 平移 `height/2`，使用负锥壁角和 `reference_plane="top"`；任意旋转 cone 走 triangle-mesh 精确回退。x/y/z 三轴 mock 测试与真实 Tidy3D `bounds`/`inside` 测试均通过。当前 benchmark 网格上 Maxwell/Tidy3D 导出 mask 均为 337 个节点，XOR 为 0、IoU 为 1.0；三档静态对照的 IoU 为 1.000/0.994/0.998，剩余仅是落在边界上的浮点判定。
+
+### 18.2 诊断图的假阳性修复
+
+旧 `material_source.png` 中所谓 Tidy3D material 实际来自 `prepare_tidy3d_benchmark_scene(scene)` 返回的 `scene.clone()`，因此差值按构造接近零，甚至会把上述错误 cone 导出显示为“材料完全一致”。新诊断图不再作这个声明：它显示 Maxwell 编译介电率、Maxwell 公共几何硬 envelope、调用真实适配器后在同一 Maxwell 网格采样的 Tidy3D geometry envelope、两者 XOR/fraction，以及 Maxwell 源 stencil。shifted-cone 回归证明该图会对刚性错位产生非零 XOR；完整 106 个场景的本地导出采样均成功。
+
+### 18.3 MaterialRegion 亚像素编译修复
+
+旧 MaterialRegion 在所有 subpixel 样本平均完成后才用硬 node slice 覆盖材料，并从三轴平均的 `eps_r/mu_r` 计算一个共同增量再加回 x/y/z。这同时绕过 soft occupancy、Kottke polarized averaging，并在各向异性背景上保留错误的轴间偏差。
+
+现在 density 在原生设计网格上只执行一次 normalize/filter/projection，全程留在 scene device；每个 subpixel 坐标通过 PyTorch `grid_sample` 采样 density texture，并复用普通 Structure 的 geometry occupancy、interface normal、arithmetic/polarized blend。每一 Yee 轴从其实际当前背景混合到 density 定义的标量 `eps/mu`，覆盖区域中的 conductivity、off-diagonal、dispersion、nonlinear 和 modulation channel 也按等价普通标量 Structure 的语义被置换。多样本聚合仍保存 `eps_r_base/mu_r_base`、最终减 base 的 design tensor 和名义 hard design mask。
+
+非网格对齐 Box 在 `samples=1/3`、arithmetic/polarized、对角各向异性底层材料和非平凡 `eps/mu` bounds 下，与等价普通 Structure 的全部六个 `eps/mu` 分量在 `1e-6` 内一致；density 梯度保持 finite 且非零。使用原 Tidy3D reference 的本地增量结果为：
+
+| Scenario | Field L2 | Shape L2 | Corr | Flux err |
+|---|---:|---:|---:|---:|
+| `material_region_slab`（修复前） | 0.22325 | 0.22315 | 0.9748 | 0.137 |
+| `material_region_slab`（修复后） | 0.15706 | 0.15701 | 0.9876 | 0.11751 |
+
+新 geometry XOR 三个正交切片均为 0。复数 `Ex` 图显示传播拓扑和中心线实部已高度重合，主要残差收缩到 slab 两格界面带、源/PML 公共底部条带以及弱的外部纹波；它已不再表现为不同 material extent，但普通 slab 的界面/共点离散差异仍未达到 Shape L2 0.10 的门槛。
+
+### 18.4 强驱动场景的 incident-power 分母
+
+Tidy3D `FluxData` 即使在 field monitor 使用 `normalize_index` 时仍保存物理功率。旧 incident-cache signature 包含 PlaneWave source-time amplitude，导致强 Kerr/TPA 场景无法匹配 amplitude-one vacuum reference，随后错误地用散射/透射 reference flux 自身作分母。新 signature 只忽略单一 PlaneWave 的幅值、绝对相位和单位横向偏振方向，仍严格保留 frequency/fwidth/delay、direction/injection、domain/grid/boundary/symmetry 和 Courant；匹配后的空场物理功率始终乘 `|amplitude|^2`。
+
+为了不把 PML 横向边界的空场功率用于 periodic 非线性场景，新增 `planewave_periodic_vacuum` reference。它与 `kerr_slab`、`kerr_slab_strong`、`tpa_slab` 和 `dispersive_kerr_slab` 的发射/网格/边界物理匹配；PML `planewave_vacuum` 继续只服务相同 PML signature。该改动修正指标定义，不保证数值一定变小。
+
+### 18.5 已验证后暂缓的算法差异
+
+- `DEFERRED(full-tensor-interface-collocation)`：adapter 的 3x3 tensor 行列映射正确，whole-domain tensor 和本征偏振控制通过，而有限 slab 的 Ex/Ey/Ez 系统残差集中在界面；当前 compiler 明确没有 off-diagonal tensor 的 polarized interface averaging，runtime 又在 staggered Yee 场上单独应用 off-diagonal correction。正确修复需要完整 tensor-interface averaging、field colocation 和匹配 adjoint，不能用源旋转或系数拟合代替。
+- `DEFERRED(mesh-interface-subpixel-convergence)`：cylinder、pyramid/explicit-mesh、torus 和 hollow-box 的公共硬导出 mask 已验证一致；pyramid 与由其 `to_mesh()` 生成的 explicit mesh 编译差仅 `1e-6` 量级。现有差异属于共享 triangle-mesh/curved-interface occupancy 与 Tidy3D subpixel 算子的收敛问题。hollow-box 壁厚 `0.05 m` 在当前网格只有两格，必须先细化到 `0.0125 m` 或保证 3--4 cells/壁厚，不能据当前 Shape L2 0.510 宣称独立 geometry bug。
+- `DEFERRED(time-modulation-validation)`：modulation 的 amplitude/phase adapter 映射、`a*cos(phi)/a*sin(phi)` compiler 通道和 conservative D update 相互一致，未发现安全的局部错误。后续必须按 carrier/lower/upper sideband 分频绘图，并做 depth=0、弱调制、运行时间与网格收敛后再判断 finite-window 还是更新算法差异。
+
+### 18.6 External references, incremental metrics, and visual verdict
+
+The user regenerated `cone_scatter` and `planewave_periodic_vacuum` with the current cache contracts. The following run set `WITWIN_BENCHMARK_NO_CLOUD=1`; both references were cache hits, so scoring and plotting did not submit another cloud task.
+
+| Scenario | Field L2 | Shape L2 | Corr | Flux err |
+|---|---:|---:|---:|---:|
+| `cone_scatter` (old invalid export) | 0.59606 | 0.56047 | 0.8282 | 0.069713 |
+| `cone_scatter` (correct export) | 0.17949 | 0.17949 | 0.9838 | 0.012849 |
+| `planewave_periodic_vacuum` | 0.0023268 | 0.0023264 | 1.0000 | 0.0019993 |
+| `kerr_slab` | 0.054233 | 0.054176 | 0.9985 | 0.11318 |
+| `kerr_slab_strong` | 0.14146 | 0.13845 | 0.9904 | 0.18946 |
+| `tpa_slab` | 0.087088 | 0.085988 | 0.9963 | 0.084146 |
+| `dispersive_kerr_slab` | 0.40085 | 0.37835 | 0.9257 | 0.26163 |
+
+The incident-reference correction is most visible in the flux metrics. `kerr_slab` changed from the invalid self-reference value 3.7796 to 0.11318, and `kerr_slab_strong` changed from 1.6381 to 0.18946. `tpa_slab` changed only from 0.085797 to 0.084146 because its previous accidental denominator happened to be close. `dispersive_kerr_slab` changed from 0.34569 to 0.26163. These are semantic corrections to the denominator; they are not solver-output fitting.
+
+The electric-field images support the same conclusions:
+
+- `cone_scatter`: the scattered-wave fronts, shadow, and peak location now agree. The old rigid axial displacement is absent. The remaining residual is concentrated at the cone interface, the source/PML strip, and the local scattering amplitude. The geometry diagnostic reports zero XOR on all three orthogonal slices.
+- `planewave_periodic_vacuum`: all three principal `Ex` slices are visually coincident, while `Ey/Ez` remain zero. This validates the periodic incident-power reference independently of the nonlinear media.
+- `kerr_slab`, `kerr_slab_strong`, `tpa_slab`, and `dispersive_kerr_slab`: the dominant `Ex` propagation topology agrees in the longitudinal slices. Strong Kerr and dispersive Kerr retain visible slab-interior amplitude/phase residuals, consistent with their 0.138 and 0.378 Shape L2 values. Maxwell also has weak transverse-component leakage that appears prominent only when those near-zero components receive their own color scale. Therefore only the weak Kerr and TPA dominant fields are considered close; the strong and dispersive cases remain numerical-improvement targets.
+
+### 18.7 Stage-C regression closure
+
+Targeted regression results are: material compiler `32 passed`, Tidy3D adapter `138 passed`, and benchmark validation `92 passed`. Ruff passes on the modified production modules and the new tests (the adapter test retains only its explicitly listed legacy ignores), and `git diff --check` is clean. The external-cache run above is the final numerical and visual acceptance pass for this stage.

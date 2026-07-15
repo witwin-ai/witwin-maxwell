@@ -293,6 +293,23 @@ def test_mesh_benchmark_cache_key_tracks_export_contract(monkeypatch):
     assert changed != original
 
 
+def test_cone_benchmark_cache_key_tracks_geometry_export_contract(monkeypatch):
+    scenario = SCENARIOS["cone_scatter"]
+    scene = build_scene("cone_scatter")
+    original = benchmark_runner._benchmark_cache_key(
+        scene, scenario.frequencies, scenario.run_time_factor
+    )
+    monkeypatch.setattr(
+        benchmark_runner,
+        "_GEOMETRY_EXPORT_CONTRACT_VERSION",
+        benchmark_runner._GEOMETRY_EXPORT_CONTRACT_VERSION + 1,
+    )
+    changed = benchmark_runner._benchmark_cache_key(
+        scene, scenario.frequencies, scenario.run_time_factor
+    )
+    assert changed != original
+
+
 def test_material_benchmark_cache_key_tracks_export_contract(monkeypatch):
     scenario = SCENARIOS["debye_slab"]
     scene = build_scene("debye_slab")
@@ -447,6 +464,120 @@ def test_incident_scene_signature_ignores_unit_transverse_plane_wave_orientation
     assert benchmark_runner._incident_scene_signature(vacuum, (2.0e9,)) == (
         benchmark_runner._incident_scene_signature(rotated, (2.0e9,))
     )
+
+
+def test_incident_scene_signature_ignores_plane_wave_amplitude_and_phase():
+    unit = build_scene("planewave_periodic_vacuum")
+    driven = build_scene("planewave_periodic_vacuum")
+    source = driven.sources[0]
+    driven.sources[0] = mw.PlaneWave(
+        direction=source.direction,
+        polarization=source.polarization,
+        source_time=mw.GaussianPulse(
+            frequency=source.source_time.frequency,
+            fwidth=source.source_time.fwidth,
+            amplitude=7.0,
+            phase=0.83,
+        ),
+        injection=source.injection,
+        injection_axis=source.injection_axis,
+    )
+
+    assert benchmark_runner._incident_scene_signature(unit, (2.0e9,)) == (
+        benchmark_runner._incident_scene_signature(driven, (2.0e9,))
+    )
+
+
+def test_incident_scene_signature_preserves_boundary_and_direction_requirements():
+    periodic = build_scene("planewave_periodic_vacuum")
+    pml = build_scene("planewave_vacuum")
+    angled = build_scene("planewave_periodic_vacuum")
+    source = angled.sources[0]
+    angled.sources[0] = mw.PlaneWave(
+        direction=(0.6, 0.0, 0.8),
+        polarization=(0.0, 1.0, 0.0),
+        source_time=source.source_time,
+        injection=source.injection,
+        injection_axis="z",
+    )
+
+    periodic_signature = benchmark_runner._incident_scene_signature(periodic, (2.0e9,))
+    assert periodic_signature != benchmark_runner._incident_scene_signature(pml, (2.0e9,))
+    assert periodic_signature != benchmark_runner._incident_scene_signature(angled, (2.0e9,))
+
+
+def test_cached_incident_power_scales_unit_reference_by_amplitude_squared(monkeypatch):
+    scene = build_scene("planewave_periodic_vacuum")
+    source = scene.sources[0]
+    scene.sources[0] = mw.PlaneWave(
+        direction=source.direction,
+        polarization=source.polarization,
+        source_time=mw.GaussianPulse(
+            frequency=source.source_time.frequency,
+            fwidth=source.source_time.fwidth,
+            amplitude=3.0,
+            phase=1.2,
+        ),
+        injection=source.injection,
+        injection_axis=source.injection_axis,
+    )
+    loaded = []
+
+    def fake_load(name, *, expected_cache_key):
+        loaded.append((name, expected_cache_key))
+        return {"incident": {"flux": np.asarray([0.4])}}
+
+    monkeypatch.setattr(benchmark_runner, "load_tidy3d_result", fake_load)
+
+    raw_power = benchmark_runner._cached_plane_wave_incident_power(
+        scene,
+        (2.0e9,),
+        normalize_source=False,
+    )
+    normalized_power = benchmark_runner._cached_plane_wave_incident_power(
+        scene,
+        (2.0e9,),
+        normalize_source=True,
+    )
+
+    assert raw_power == pytest.approx(0.4 * 3.0**2)
+    assert normalized_power == pytest.approx(0.4 * 3.0**2)
+    assert [name for name, _ in loaded] == [
+        "planewave_periodic_vacuum",
+        "planewave_periodic_vacuum",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("scenario_name", "amplitude"),
+    [
+        ("kerr_slab", 3.0e7),
+        ("kerr_slab_strong", 1.0e8),
+        ("tpa_slab", 1.0e5),
+    ],
+)
+def test_nonlinear_plane_wave_uses_matching_periodic_incident_reference(
+    monkeypatch,
+    scenario_name,
+    amplitude,
+):
+    scene = build_scene(scenario_name)
+    loaded = []
+
+    def fake_load(name, *, expected_cache_key):
+        loaded.append((name, expected_cache_key))
+        return {"incident": {"flux": np.asarray([0.25])}}
+
+    monkeypatch.setattr(benchmark_runner, "load_tidy3d_result", fake_load)
+
+    power = benchmark_runner._cached_plane_wave_incident_power(
+        scene,
+        (2.0e9,),
+        normalize_source=False,
+    )
+
+    assert power == pytest.approx(0.25 * amplitude**2)
+    assert [name for name, _ in loaded] == ["planewave_periodic_vacuum"]
 
 
 def test_tfsf_incident_power_uses_physical_box_aperture():
@@ -1602,10 +1733,8 @@ def test_material_source_plot_smoke(tmp_path, monkeypatch):
     monkeypatch.setattr(benchmark_paths, "PLOTS_DIR", tmp_path)
 
     scene = build_scene("dipole_vacuum")
-    tidy_scene = scene
     output_path = benchmark_plotting.save_material_source_plot(
         scene=scene,
-        tidy_scene=tidy_scene,
         scenario_name="dipole_vacuum",
     )
     assert output_path.exists()
@@ -1621,11 +1750,44 @@ def test_material_source_plot_resolves_mode_port_sources(tmp_path, monkeypatch):
 
     output_path = benchmark_plotting.save_material_source_plot(
         scene=scene,
-        tidy_scene=scene,
         scenario_name="mode_port_straight_wg",
     )
 
     assert output_path.exists()
+
+
+def test_geometry_export_masks_detect_a_shifted_cone(monkeypatch):
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.4, 0.4), (-0.4, 0.4))),
+        grid=mw.GridSpec.uniform(0.05),
+        boundary=mw.BoundarySpec.pml(num_layers=2),
+        device="cpu",
+    ).add_structure(
+        mw.Structure(
+            geometry=mw.Cone(
+                position=(0.0, 0.0, -0.1),
+                radius=0.12,
+                height=0.2,
+                axis="z",
+            ),
+            material=mw.Material(eps_r=2.0),
+        )
+    )
+    maxwell_mask, exported_mask = benchmark_plotting._geometry_export_masks(scene)
+    baseline_mismatch = np.count_nonzero(maxwell_mask ^ exported_mask)
+    convert_geometry = benchmark_plotting._convert_geometry
+
+    def shifted_convert_geometry(geometry, td, scale):
+        return convert_geometry(geometry, td, scale).translated(0.2 * scale, 0.0, 0.0)
+
+    monkeypatch.setattr(
+        benchmark_plotting,
+        "_convert_geometry",
+        shifted_convert_geometry,
+    )
+    _, shifted_export = benchmark_plotting._geometry_export_masks(scene)
+
+    assert np.count_nonzero(maxwell_mask ^ shifted_export) > baseline_mismatch
 
 
 def test_prepare_tidy3d_benchmark_scene_preserves_material_regions():

@@ -19,6 +19,7 @@ from benchmark.metrics import (
 )
 from benchmark.paths import ensure_directories, scenario_plot_dir
 from benchmark.tidy3d_scene import benchmark_physical_bounds
+from witwin.maxwell.adapters.tidy3d import _M_TO_UM, _convert_geometry
 from witwin.maxwell.fdtd.excitation.spatial import resolve_injection_axis, soft_plane_wave_index
 from witwin.maxwell.scene import prepare_scene
 from witwin.maxwell.sources import PlaneWave, PointDipole
@@ -297,6 +298,44 @@ def _plot_triplet(
     plt.colorbar(image_diff, ax=ax_right, shrink=0.72)
 
 
+def _plot_map(axis, values, *, title: str, cmap: str, vmin=None, vmax=None) -> None:
+    image = axis.imshow(
+        np.asarray(values).T,
+        origin="lower",
+        cmap=cmap,
+        aspect="equal",
+        vmin=vmin,
+        vmax=vmax,
+    )
+    axis.set_title(title, fontsize=8)
+    plt.colorbar(image, ax=axis, shrink=0.72)
+
+
+def _geometry_export_masks(scene: mw.Scene) -> tuple[np.ndarray, np.ndarray]:
+    """Sample public and Tidy3D-exported geometry envelopes on one Maxwell grid."""
+    import tidy3d as td
+
+    prepared = prepare_scene(scene.clone(device="cpu"))
+    geometries = tuple(structure.geometry for structure in prepared.structures) + tuple(
+        region.geometry for region in prepared.material_regions
+    )
+    maxwell_mask = np.zeros((prepared.Nx, prepared.Ny, prepared.Nz), dtype=bool)
+    tidy3d_mask = np.zeros_like(maxwell_mask)
+    x = prepared.x.detach().cpu().numpy() * _M_TO_UM
+    y = prepared.y.detach().cpu().numpy() * _M_TO_UM
+    z = prepared.z.detach().cpu().numpy() * _M_TO_UM
+
+    for geometry in geometries:
+        signed_distance = geometry.signed_distance(prepared.xx, prepared.yy, prepared.zz)
+        maxwell_mask |= signed_distance.detach().cpu().numpy() <= 0.0
+        exported_geometry = _convert_geometry(geometry, td, _M_TO_UM)
+        tidy3d_mask |= np.asarray(
+            exported_geometry.inside_meshgrid(x=x, y=y, z=z),
+            dtype=bool,
+        )
+    return maxwell_mask, tidy3d_mask
+
+
 def _take_plane_window(values, indices_a: np.ndarray, indices_b: np.ndarray) -> np.ndarray:
     array = np.asarray(values)
     windowed = np.take(array, indices_a, axis=-2)
@@ -334,43 +373,49 @@ def _crop_monitor_field_to_physical_bounds(
 def save_material_source_plot(
     *,
     scene: mw.Scene,
-    tidy_scene: mw.Scene,
     scenario_name: str,
-    reference_label: str = "Tidy3D",
 ) -> Path:
     maxwell_source = _first_resolved_source(scene)
-    tidy_source = _first_resolved_source(tidy_scene)
     source_component = dominant_source_component(scene)
     scene = prepare_scene(scene)
-    tidy_scene = prepare_scene(tidy_scene)
     ensure_directories()
     scenario_dir = scenario_plot_dir(scenario_name)
     scenario_dir.mkdir(parents=True, exist_ok=True)
     output_path = scenario_dir / "material_source.png"
 
     maxwell_eps = scene.permittivity.detach().cpu().numpy()
-    tidy_eps = tidy_scene.permittivity.detach().cpu().numpy()
-    fig, axes = plt.subplots(len(PLOT_AXES), 6, figsize=(24, 12))
-    fig.suptitle(f"{scenario_name}: permittivity and source comparison", fontsize=16)
+    maxwell_geometry, tidy3d_geometry = _geometry_export_masks(scene)
+    geometry_mismatch = np.logical_xor(maxwell_geometry, tidy3d_geometry)
+    fig, axes = plt.subplots(len(PLOT_AXES), 5, figsize=(20, 12))
+    fig.suptitle(
+        f"{scenario_name}: compiled material, exported geometry, and source",
+        fontsize=16,
+    )
 
     for row, axis in enumerate(PLOT_AXES):
-        maxwell_eps_slice, maxwell_eps_coords = get_plane_slice_with_coords(
+        maxwell_eps_slice = get_plane_slice(
             scene,
             axis=axis,
             position=0.0,
             values=maxwell_eps,
         )
-        tidy_eps_slice, tidy_eps_coords = get_plane_slice_with_coords(
-            tidy_scene,
+        maxwell_geometry_slice = get_plane_slice(
+            scene,
             axis=axis,
             position=0.0,
-            values=tidy_eps,
+            values=maxwell_geometry,
         )
-        maxwell_eps_slice, tidy_eps_slice = _align_plane_pair(
-            maxwell_eps_slice,
-            tidy_eps_slice,
-            source_coords=maxwell_eps_coords,
-            reference_coords=tidy_eps_coords,
+        tidy3d_geometry_slice = get_plane_slice(
+            scene,
+            axis=axis,
+            position=0.0,
+            values=tidy3d_geometry,
+        )
+        mismatch_slice = get_plane_slice(
+            scene,
+            axis=axis,
+            position=0.0,
+            values=geometry_mismatch,
         )
 
         maxwell_source_slice = source_plane_map(
@@ -380,45 +425,49 @@ def save_material_source_plot(
             component=source_component,
             source=maxwell_source,
         )
-        maxwell_source_coords = plane_slice_coords(scene, axis)
-        tidy_source_slice = source_plane_map(
-            tidy_scene,
-            axis=axis,
-            position=0.0,
-            component=source_component,
-            source=tidy_source,
-        )
-        tidy_source_coords = plane_slice_coords(tidy_scene, axis)
-        maxwell_source_slice, tidy_source_slice = _align_plane_pair(
-            maxwell_source_slice,
-            tidy_source_slice,
-            source_coords=maxwell_source_coords,
-            reference_coords=tidy_source_coords,
-        )
 
-        _plot_triplet(
+        _plot_map(
             axes[row, 0],
-            axes[row, 1],
-            axes[row, 2],
-            left=maxwell_eps_slice,
-            mid=tidy_eps_slice,
-            title_prefix=f"{axis}=0 eps_r",
+            maxwell_eps_slice,
+            title=f"{axis}=0 Maxwell compiled eps_r",
             cmap="viridis",
-            reference_label=reference_label,
         )
-        _plot_triplet(
+        _plot_map(
+            axes[row, 1],
+            maxwell_geometry_slice,
+            title=f"{axis}=0 Maxwell geometry envelope",
+            cmap="gray_r",
+            vmin=0.0,
+            vmax=1.0,
+        )
+        _plot_map(
+            axes[row, 2],
+            tidy3d_geometry_slice,
+            title=f"{axis}=0 Tidy3D exported geometry envelope",
+            cmap="gray_r",
+            vmin=0.0,
+            vmax=1.0,
+        )
+        _plot_map(
             axes[row, 3],
+            mismatch_slice,
+            title=(
+                f"{axis}=0 geometry XOR\n"
+                f"fraction={float(np.mean(mismatch_slice)):.3e}"
+            ),
+            cmap="Reds",
+            vmin=0.0,
+            vmax=1.0,
+        )
+        _plot_map(
             axes[row, 4],
-            axes[row, 5],
-            left=maxwell_source_slice,
-            mid=tidy_source_slice,
-            title_prefix=f"{axis}=0 source({source_component})",
+            maxwell_source_slice,
+            title=f"{axis}=0 Maxwell source stencil ({source_component})",
             cmap="magma",
-            reference_label=reference_label,
         )
 
         axis_a, axis_b = plane_axes(axis)
-        for col in range(6):
+        for col in range(5):
             axes[row, col].set_xlabel(axis_a)
             axes[row, col].set_ylabel(axis_b)
 

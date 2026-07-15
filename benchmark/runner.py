@@ -67,12 +67,18 @@ NO_CLOUD_ENV_VAR = "WITWIN_BENCHMARK_NO_CLOUD"
 _MODE_EXPORT_CONTRACT_VERSION = 2
 _GRID_EXPORT_CONTRACT_VERSION = 1
 _MESH_EXPORT_CONTRACT_VERSION = 1
+_GEOMETRY_EXPORT_CONTRACT_VERSION = 1
 _MATERIAL_EXPORT_CONTRACT_VERSION = 1
 _DIRECTIONAL_SOURCE_EXPORT_CONTRACT_VERSION = 1
 _SOURCE_TIME_EXPORT_CONTRACT_VERSION = 1
 _BLOCH_BOUNDARY_EXPORT_CONTRACT_VERSION = 1
 _TFSF_SOURCE_EXPORT_CONTRACT_VERSION = 1
 _MESH_EXPORT_KINDS = {"torus", "pyramid", "prism", "hollow_box", "mesh", "poly_slab"}
+_GEOMETRY_EXPORT_CONTRACT_KINDS = {"cone"}
+_INCIDENT_REFERENCE_SCENARIOS = (
+    "planewave_vacuum",
+    "planewave_periodic_vacuum",
+)
 _C0 = 299_792_458.0
 _RING_SELF_COUPLING = 0.8
 _RING_ROUNDTRIP_AMPLITUDE = 0.95
@@ -161,6 +167,13 @@ def _incident_source_payload(source):
         # vacuum reference power is therefore independent of its transverse
         # orientation, although the scattered field is not.
         payload["polarization"] = "unit_transverse"
+        source_time = payload.get("source_time")
+        if isinstance(source_time, dict):
+            # A single plane wave's absolute phase cannot change time-averaged
+            # incident power, while its amplitude is applied after a matching
+            # unit-reference cache has been loaded.
+            source_time.pop("amplitude", None)
+            source_time.pop("phase", None)
     return payload
 
 
@@ -250,6 +263,13 @@ def _benchmark_cache_key(
         # Primitive tessellation changes alter Tidy3D voxelization without changing
         # the declarative geometry parameters serialized above.
         payload["mesh_export_contract_version"] = _MESH_EXPORT_CONTRACT_VERSION
+    if any(
+        getattr(structure.geometry, "kind", None) in _GEOMETRY_EXPORT_CONTRACT_KINDS
+        for structure in tidy_scene.structures
+    ):
+        # Analytic primitive placement/taper changes alter the SaaS geometry
+        # without changing the declarative object serialized above.
+        payload["geometry_export_contract_version"] = _GEOMETRY_EXPORT_CONTRACT_VERSION
     if any(_material_uses_export_contract(structure.material) for structure in tidy_scene.structures):
         # Debye time constants and Lorentz damping use different parameter
         # conventions in Tidy3D, so conversion changes must invalidate SaaS data.
@@ -1449,20 +1469,33 @@ def _cached_plane_wave_incident_power(
     *,
     normalize_source: bool = True,
 ) -> float | None:
-    """Load incident power from the canonical empty scene when its launch physics matches."""
+    """Load and amplitude-scale a matching canonical empty-scene incident power."""
     tfsf_power = _tfsf_plane_wave_incident_power(
         scene,
         normalize_source=normalize_source,
     )
     if tfsf_power is not None:
         return tfsf_power
-    reference_name = "planewave_vacuum"
-    reference_scenario = SCENARIOS.get(reference_name)
-    if reference_scenario is None or tuple(reference_scenario.frequencies) != tuple(frequencies):
+
+    sources = tuple(scene.resolved_sources())
+    if len(sources) != 1 or not isinstance(sources[0], mw.PlaneWave):
         return None
-    reference_scene = build_scene(reference_name)
-    if _incident_scene_signature(scene, frequencies) != _incident_scene_signature(reference_scene, frequencies):
+    source_amplitude = abs(float(getattr(sources[0].source_time, "amplitude", 1.0)))
+    target_signature = _incident_scene_signature(scene, frequencies)
+
+    matched_reference = None
+    for reference_name in _INCIDENT_REFERENCE_SCENARIOS:
+        reference_scenario = SCENARIOS.get(reference_name)
+        if reference_scenario is None or tuple(reference_scenario.frequencies) != tuple(frequencies):
+            continue
+        reference_scene = build_scene(reference_name)
+        if target_signature == _incident_scene_signature(reference_scene, frequencies):
+            matched_reference = (reference_name, reference_scenario, reference_scene)
+            break
+    if matched_reference is None:
         return None
+
+    reference_name, reference_scenario, reference_scene = matched_reference
     try:
         reference_monitors = load_tidy3d_result(
             reference_name,
@@ -1479,7 +1512,12 @@ def _cached_plane_wave_incident_power(
         for monitor in reference_monitors.values()
         if "flux" in monitor and np.asarray(monitor["flux"]).size
     ]
-    return max(powers) if powers else None
+    if not powers:
+        return None
+    # Tidy3D FluxData remains physical power even when field spectra use a
+    # normalize_index, so an amplitude-one incident reference always needs the
+    # target launch amplitude squared.
+    return max(powers) * source_amplitude**2
 
 
 def _pick_flux_error(
@@ -2078,7 +2116,6 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
         scenario = SCENARIOS[name]
         scene = build_scene(name)
         normalize_source = _resolve_source_normalization(scene, scenario.normalize_source)
-        tidy_scene = prepare_tidy3d_benchmark_scene(scene)
         print(f"\n=== {name} ===")
         print(f"{scenario.description}")
 
@@ -2223,9 +2260,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
 
         material_source_plot = save_material_source_plot(
             scene=scene,
-            tidy_scene=tidy_scene,
             scenario_name=name,
-            reference_label=reference_label,
         )
         field_plot = save_field_comparison_plot(
             scene=scene,

@@ -349,6 +349,69 @@ def test_material_region_density_overlay_updates_compiled_materials_without_chan
     assert torch.any(prepared_scene.permittivity != baseline_eps)
 
 
+def _uniform_material_region_scene(*, use_region: bool, samples: int, averaging: str):
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.uniform(0.1),
+        subpixel_samples=mw.SubpixelSpec(samples=samples, averaging=averaging),
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="anisotropic_underlay",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.4, 1.4, 1.4)),
+            material=mw.Material(
+                epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0),
+                mu_tensor=mw.DiagonalTensor3(1.1, 1.2, 1.3),
+            ),
+        )
+    )
+    geometry = mw.Box(position=(0.03, -0.02, 0.01), size=(0.43, 0.37, 0.31))
+    if use_region:
+        scene.add_material_region(
+            mw.MaterialRegion(
+                name="uniform_design",
+                geometry=geometry,
+                density=torch.full((2, 3, 2), 0.5),
+                eps_bounds=(1.0, 5.0),
+                mu_bounds=(1.0, 1.8),
+            )
+        )
+    else:
+        scene.add_structure(
+            mw.Structure(
+                name="equivalent_scalar_structure",
+                geometry=geometry,
+                material=mw.Material(eps_r=3.0, mu_r=1.4),
+            )
+        )
+    return _prepared_scene(scene).compile_materials()
+
+
+@pytest.mark.parametrize("samples", [1, 3])
+@pytest.mark.parametrize("averaging", ["arithmetic", "polarized"])
+def test_uniform_material_region_matches_equivalent_subpixel_structure(samples, averaging):
+    region_model = _uniform_material_region_scene(
+        use_region=True,
+        samples=samples,
+        averaging=averaging,
+    )
+    structure_model = _uniform_material_region_scene(
+        use_region=False,
+        samples=samples,
+        averaging=averaging,
+    )
+
+    for component_group in ("eps_components", "mu_components"):
+        for axis in ("x", "y", "z"):
+            torch.testing.assert_close(
+                region_model[component_group][axis],
+                structure_model[component_group][axis],
+                rtol=1.0e-6,
+                atol=1.0e-6,
+            )
+
+
 def test_material_region_preserves_tensor_device_dtype_and_gradients():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
@@ -376,6 +439,8 @@ def test_material_region_preserves_tensor_device_dtype_and_gradients():
     assert eps_r.device.type == "cpu"
     assert density.grad is not None
     assert density.grad.shape == density.shape
+    assert torch.all(torch.isfinite(density.grad))
+    assert torch.any(density.grad != 0)
 
 
 def test_structure_priority_overrides_append_order():
