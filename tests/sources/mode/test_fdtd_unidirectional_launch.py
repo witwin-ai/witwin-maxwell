@@ -28,7 +28,10 @@ import torch
 
 import witwin.maxwell as mw
 from witwin.maxwell.compiler.sources import _compile_mode_source
-from witwin.maxwell.fdtd.excitation.modes import solve_mode_source_profile
+from witwin.maxwell.fdtd.excitation.modes import (
+    _discrete_mode_profile_power,
+    solve_mode_source_profile,
+)
 from witwin.maxwell.postprocess import compute_mode_overlap
 from witwin.maxwell.scene import prepare_scene
 
@@ -88,9 +91,18 @@ def test_sparse_vector_mode_solve_returns_real_profile_and_stable_neff():
         positioned["position"] = tuple(position)
         mode_data = solve_mode_source_profile(context, positioned)
         assert mode_data["mode_solver_kind"] == "vector_sparse"
+        expected_shape = (mode_data["coords_u"].numel(), mode_data["coords_v"].numel())
         for name in ("Ez", "Hy"):
             profile = mode_data["component_profiles"][name]
             assert not torch.is_complex(profile)
+            assert tuple(profile.shape) == expected_shape
+        power = _discrete_mode_profile_power(
+            mode_data["component_profiles"],
+            coords_u=mode_data["coords_u"],
+            coords_v=mode_data["coords_v"],
+            normal_axis=mode_data["normal_axis"],
+        )
+        assert float(torch.abs(power).item()) == pytest.approx(1.0, rel=1e-6)
         effective_indices.append(float(mode_data["effective_index"]))
 
     for n_eff in effective_indices:

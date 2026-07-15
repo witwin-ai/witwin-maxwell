@@ -959,6 +959,27 @@ def _prepare_power_normalized_surface_source(solver, source, *, source_index):
     ))
 
 
+def _mode_normal_stagger_power_factor(solver, source, mode_data) -> float:
+    """Return the resolved-grid correction for axial Yee interpolation.
+
+    A non-positive cosine means that the requested mode is beyond the normal-axis
+    Nyquist limit.  ModeSource historically permits such coarse grids for setup
+    and adjoint smoke tests, so keep the transverse one-watt normalization there;
+    physically resolved grids receive the exact half-cell correction.
+    """
+    normal_axis = source["normal_axis"]
+    plane_index = int(mode_data["plane_index"])
+    direction_sign = int(source["direction_sign"])
+    plane_coordinate = solver._plane_coordinate(normal_axis, plane_index)
+    half_axis = getattr(solver.scene, f"{normal_axis}_half")
+    half_index = plane_index - 1 if direction_sign > 0 else plane_index
+    normal_half_offset = abs(float(half_axis[half_index].item()) - float(plane_coordinate))
+    factor = math.cos(abs(float(mode_data["beta"])) * normal_half_offset)
+    if factor <= 0.0:
+        return 1.0
+    return float(factor)
+
+
 def _prepare_mode_surface_source(solver, source, *, source_index):
     mode_data = solve_mode_source_profile(solver, source)
     source["effective_index"] = mode_data["effective_index"]
@@ -980,10 +1001,18 @@ def _prepare_mode_surface_source(solver, source, *, source_index):
     plane_coordinate = solver._plane_coordinate(source["normal_axis"], mode_data["plane_index"])
     direction_sign = int(source["direction_sign"])
     phase_speed = source_omega / max(abs(float(mode_data["beta"])), 1.0e-30)
+    normal_stagger_power_factor = _mode_normal_stagger_power_factor(solver, source, mode_data)
+    mode_injection_scale = 1.0 / math.sqrt(normal_stagger_power_factor)
+    source["normal_stagger_power_factor"] = float(normal_stagger_power_factor)
+    source["prepared_mode_power"] = 1.0
 
     def build_profile_term(spec, coeff_patch):
         positions = _surface_plane_spec_positions(solver, spec)
-        component_profile = sample_mode_source_component(mode_data, positions, spec["incident_name"])
+        component_profile = mode_injection_scale * sample_mode_source_component(
+            mode_data,
+            positions,
+            spec["incident_name"],
+        )
         if spec["incident_name"].startswith("H"):
             # TFSF face specifications store the magnetic incident component
             # with the update-equation ``-k x E`` sign. Mode profiles expose

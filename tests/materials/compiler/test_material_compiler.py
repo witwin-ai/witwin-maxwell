@@ -157,6 +157,59 @@ def test_soft_occupancy_polarized_normal_component_uses_harmonic_mean():
     assert abs(eps["z"][node].item() - 3.0) < 1e-2
 
 
+@pytest.mark.parametrize("samples", [2, 3, 4, 5])
+def test_multisample_polarized_interface_preserves_normal_harmonic_mean(samples):
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+        subpixel_samples=mw.SubpixelSpec(samples=samples, averaging="polarized"),
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="slab",
+            geometry=mw.Box(position=(0.625, 0.5, 0.5), size=(0.75, 1.0, 1.0)),
+            material=mw.Material(eps_r=5.0),
+        )
+    )
+
+    eps, _ = _prepared_scene(scene).compile_material_components()
+    node = (1, 2, 2)
+    harmonic = 1.0 / (0.5 / 1.0 + 0.5 / 5.0)
+    assert float(eps["x"][node]) == pytest.approx(harmonic, abs=1e-4)
+    assert float(eps["y"][node]) == pytest.approx(3.0, abs=1e-4)
+    assert float(eps["z"][node]) == pytest.approx(3.0, abs=1e-4)
+
+
+def test_multisample_polarized_equal_trace_tensors_preserve_interface_normal():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="underlay",
+            geometry=mw.Box(position=(0.5, 0.5, 0.5), size=(2.0, 2.0, 2.0)),
+            material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0)),
+        )
+    )
+    scene.add_structure(
+        mw.Structure(
+            name="slab",
+            geometry=mw.Box(position=(0.625, 0.5, 0.5), size=(0.75, 1.0, 1.0)),
+            material=mw.Material(epsilon_tensor=mw.DiagonalTensor3(4.0, 3.0, 2.0)),
+        )
+    )
+
+    eps, _ = _prepared_scene(scene).compile_material_components()
+    node = (1, 2, 2)
+    assert float(eps["x"][node]) == pytest.approx(1.0 / (0.5 / 2.0 + 0.5 / 4.0))
+    assert float(eps["y"][node]) == pytest.approx(3.0)
+    assert float(eps["z"][node]) == pytest.approx(3.0)
+
+
 def test_scene_frequency_specific_material_tensors_match_dispersive_medium_response():
     scene = _build_scene()
     material = mw.Material(
@@ -414,6 +467,14 @@ def test_uniform_material_region_matches_equivalent_subpixel_structure(samples, 
                 rtol=1.0e-6,
                 atol=1.0e-6,
             )
+    torch.testing.assert_close(
+        region_model["eps_r_base"] + region_model["eps_r_design"],
+        region_model["eps_r"],
+    )
+    torch.testing.assert_close(
+        region_model["mu_r_base"] + region_model["mu_r_design"],
+        region_model["mu_r"],
+    )
 
 
 def test_material_region_preserves_tensor_device_dtype_and_gradients():

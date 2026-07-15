@@ -138,22 +138,10 @@ def test_rectangular_pec_waveguide_te10_cutoff_beta_and_power_are_physical():
     assert abs(cutoff_from_beta - cutoff_exact) / cutoff_exact < 0.02
     assert abs(mode["beta"] - beta_exact) / beta_exact < 0.02
 
-    electric = mode["component_profiles"]
-    power_density = 0.5 * torch.real(
-        electric["Ey"] * torch.conj(electric["Hz"])
-        - electric["Ez"] * torch.conj(electric["Hy"])
-    )
-    coords_u = mode["coords_u"]
-    coords_v = mode["coords_v"]
-    if coords_u.numel() != power_density.shape[0]:
-        offset = (coords_u.numel() - power_density.shape[0]) // 2
-        coords_u = coords_u[offset : offset + power_density.shape[0]]
-    if coords_v.numel() != power_density.shape[1]:
-        offset = (coords_v.numel() - power_density.shape[1]) // 2
-        coords_v = coords_v[offset : offset + power_density.shape[1]]
-    power = torch.trapezoid(
-        torch.trapezoid(power_density, x=coords_v, dim=1),
-        x=coords_u,
-        dim=0,
+    power = mode_solver._discrete_mode_profile_power(
+        mode["component_profiles"],
+        coords_u=mode["coords_u"],
+        coords_v=mode["coords_v"],
+        normal_axis=mode["normal_axis"],
     )
     assert abs(abs(float(power)) - 1.0) < 0.01

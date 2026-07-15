@@ -234,7 +234,8 @@ def test_graded_grid_interface_arithmetic_and_polarized():
     eps_y = eps_pol["y"][node].item()
     assert abs(eps_y - arithmetic_mean) < 5e-2
     assert eps_x < eps_y - 0.1  # normal component pulled below arithmetic
-    assert eps_x > 1.0 / (0.5 / 1.0 + 0.5 / eps_r)  # bounded below by harmonic mean
+    harmonic_mean = 1.0 / (0.5 / 1.0 + 0.5 / eps_r)
+    assert eps_x == pytest.approx(harmonic_mean, abs=1e-4)
 
 
 # --- End-to-end: auto + polarized subpixel runs through the FDTD solver ---
