@@ -302,6 +302,9 @@ def _compute_mode_overlap_from_payload(
         "power_fraction_forward": forward_fraction,
         "power_fraction_backward": backward_fraction,
         "coords": (coords_a, coords_b),
+        "candidate_diagnostics": mode_data.get("candidate_diagnostics"),
+        "candidate_overlap_matrix": mode_data.get("candidate_overlap_matrix"),
+        "selected_candidate_index": mode_data.get("selected_candidate_index"),
     }
 
 

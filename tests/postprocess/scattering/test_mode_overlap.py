@@ -153,6 +153,9 @@ def test_compute_mode_overlap_recovers_forward_mode_from_matching_plane_fields()
     assert torch.imag(overlap["amplitude_forward"]) == pytest.approx(0.0, abs=1e-5)
     assert torch.abs(overlap["amplitude_backward"]) == pytest.approx(0.0, abs=1e-5)
     assert overlap["power_fraction_forward"] == pytest.approx(1.0, rel=1e-3, abs=1e-3)
+    assert overlap["candidate_diagnostics"] is not None
+    assert overlap["candidate_overlap_matrix"] is not None
+    assert overlap["candidate_diagnostics"][overlap["selected_candidate_index"]]["selected"]
 
 
 def test_compute_mode_overlap_separates_backward_mode_when_magnetic_field_is_reversed():

@@ -27,6 +27,10 @@ _IMPLICIT_EIGEN_CG_TOL = 1.0e-8
 _VECTOR_EIGEN_REQUEST_PADDING = 4
 _VECTOR_EIGS_MAX_ITER = 600
 _VECTOR_EIGS_TOL = 1.0e-8
+_VECTOR_DEGENERATE_RTOL = 5.0e-5
+_VECTOR_DUPLICATE_BETA_RTOL = 1.0e-5
+_VECTOR_DUPLICATE_OVERLAP_LIMIT = 0.99
+_VECTOR_CHECKERBOARD_FRACTION_LIMIT = 0.35
 _RIGHT_HANDED_TANGENTIAL_AXES = {
     "x": ("y", "z"),
     "y": ("z", "x"),
@@ -227,11 +231,14 @@ def _min_component_real(components: dict) -> float:
     )
 
 
-def _build_first_difference_sparse(count: int, spacing: float):
+def _build_staggered_first_differences_sparse(count: int, spacing: float):
     if count <= 0:
         raise ValueError("count must be > 0 for first-difference assembly.")
-    off = np.full((max(count - 1, 0),), 0.5 / float(spacing), dtype=np.float64)
-    return sparse.diags((-off, off), offsets=(-1, 1), shape=(count, count), format="csr")
+    diagonal = np.full((count,), -1.0 / float(spacing), dtype=np.float64)
+    upper = np.full((max(count - 1, 0),), 1.0 / float(spacing), dtype=np.float64)
+    forward = sparse.diags((diagonal, upper), offsets=(0, 1), shape=(count, count), format="csr")
+    backward = -forward.transpose().tocsr()
+    return forward, backward
 
 
 def _build_vector_operator_sparse(eps_planes, mu_planes, *, k0: float, du: float, dv: float):
@@ -261,12 +268,14 @@ def _build_vector_operator_sparse(eps_planes, mu_planes, *, k0: float, du: float
             "ModeSource aperture must contain at least one interior node after applying zero boundary conditions."
         )
 
-    d1_u = _build_first_difference_sparse(interior_u, du)
-    d1_v = _build_first_difference_sparse(interior_v, dv)
+    d1_u_forward, d1_u_backward = _build_staggered_first_differences_sparse(interior_u, du)
+    d1_v_forward, d1_v_backward = _build_staggered_first_differences_sparse(interior_v, dv)
     identity_u = sparse.eye(interior_u, format="csr", dtype=np.float64)
     identity_v = sparse.eye(interior_v, format="csr", dtype=np.float64)
-    derivative_u = sparse.kron(d1_u, identity_v, format="csr")
-    derivative_v = sparse.kron(identity_u, d1_v, format="csr")
+    derivative_u_forward = sparse.kron(d1_u_forward, identity_v, format="csr")
+    derivative_u_backward = sparse.kron(d1_u_backward, identity_v, format="csr")
+    derivative_v_forward = sparse.kron(identity_u, d1_v_forward, format="csr")
+    derivative_v_backward = sparse.kron(identity_u, d1_v_backward, format="csr")
 
     def _interior_diag(values: np.ndarray):
         return sparse.diags(
@@ -281,15 +290,19 @@ def _build_vector_operator_sparse(eps_planes, mu_planes, *, k0: float, du: float
     mu_v_diag = _interior_diag(mu_vv)
     k0_sq = float(k0) * float(k0)
 
-    a_hu_hu = derivative_v @ eps_w_inv @ derivative_v + k0_sq * mu_u_diag
-    a_hu_hv = -derivative_v @ eps_w_inv @ derivative_u
-    a_hv_hu = -derivative_u @ eps_w_inv @ derivative_v
-    a_hv_hv = derivative_u @ eps_w_inv @ derivative_u + k0_sq * mu_v_diag
+    # Each eliminated curl uses the derivative on its own Yee half-grid and the
+    # outer curl uses the negative-adjoint derivative. Reusing one centered
+    # derivative for both curls composes a stride-two stencil, decoupling the
+    # odd/even transverse sublattices and creating checkerboard mode copies.
+    a_hu_hu = derivative_v_backward @ eps_w_inv @ derivative_v_forward + k0_sq * mu_u_diag
+    a_hu_hv = -derivative_v_backward @ eps_w_inv @ derivative_u_forward
+    a_hv_hu = -derivative_u_backward @ eps_w_inv @ derivative_v_forward
+    a_hv_hv = derivative_u_backward @ eps_w_inv @ derivative_u_forward + k0_sq * mu_v_diag
 
-    a_eu_eu = -derivative_v @ mu_w_inv @ derivative_v - k0_sq * eps_u_diag
-    a_eu_ev = derivative_v @ mu_w_inv @ derivative_u
-    a_ev_eu = derivative_u @ mu_w_inv @ derivative_v
-    a_ev_ev = -derivative_u @ mu_w_inv @ derivative_u - k0_sq * eps_v_diag
+    a_eu_eu = -derivative_v_forward @ mu_w_inv @ derivative_v_backward - k0_sq * eps_u_diag
+    a_eu_ev = derivative_v_forward @ mu_w_inv @ derivative_u_backward
+    a_ev_eu = derivative_u_forward @ mu_w_inv @ derivative_v_backward
+    a_ev_ev = -derivative_u_forward @ mu_w_inv @ derivative_u_backward - k0_sq * eps_v_diag
 
     electric_scale = float(k0) / _ETA0
     magnetic_scale = float(k0) * _ETA0
@@ -338,8 +351,17 @@ def _select_vector_mode_torch(
     *,
     mode_index: int,
 ):
-    order = torch.argsort(torch.real(eigenvalues), descending=True)
-    positive = [int(index) for index in order.tolist() if float(torch.real(eigenvalues[index]).item()) > 0.0]
+    real_values = torch.real(eigenvalues)
+    imag_values = torch.imag(eigenvalues) if torch.is_complex(eigenvalues) else torch.zeros_like(real_values)
+    order = torch.argsort(torch.abs(imag_values), stable=True)
+    order = order[torch.argsort(real_values[order], descending=True, stable=True)]
+    positive = [
+        int(index)
+        for index in order.tolist()
+        if bool(torch.isfinite(real_values[index]).item())
+        and bool(torch.isfinite(imag_values[index]).item())
+        and float(real_values[index].item()) > 0.0
+    ]
     if len(positive) <= int(mode_index):
         raise ValueError(
             f"ModeSource requested mode_index={mode_index}, but only {len(positive)} positive-beta modes were found."
@@ -429,6 +451,114 @@ def _vector_mode_polarization_fraction_numpy(
     return float(np.vdot(preferred, preferred).real) / electric_energy
 
 
+def _vector_mode_power_inner_product_numpy(
+    left: dict[str, np.ndarray],
+    right: dict[str, np.ndarray],
+) -> complex:
+    """Hermitian reciprocal-power product on one transverse Yee plane."""
+    electric_names = [name for name in left if name.startswith("E")]
+    magnetic_names = [name for name in left if name.startswith("H")]
+    if len(electric_names) != 2 or len(magnetic_names) != 2:
+        return 0.0j
+    eu_l, ev_l = (left[name] for name in electric_names)
+    hu_l, hv_l = (left[name] for name in magnetic_names)
+    eu_r, ev_r = (right[name] for name in electric_names)
+    hu_r, hv_r = (right[name] for name in magnetic_names)
+    forward = eu_l * np.conj(hv_r) - ev_l * np.conj(hu_r)
+    reciprocal = np.conj(eu_r) * hv_l - np.conj(ev_r) * hu_l
+    return complex(0.25 * np.sum(forward + reciprocal))
+
+
+def _vector_mode_checkerboard_fraction_numpy(component_profiles: dict[str, np.ndarray]) -> float:
+    """Normalized one-cell electric-field variation, with a Nyquist mode near one."""
+    electric_profiles = [profile for name, profile in component_profiles.items() if name.startswith("E")]
+    energy = sum(float(np.vdot(profile, profile).real) for profile in electric_profiles)
+    if energy <= 0.0:
+        return 1.0
+    variation = 0.0
+    for profile in electric_profiles:
+        variation += float(np.sum(np.abs(np.diff(profile, axis=0)) ** 2))
+        variation += float(np.sum(np.abs(np.diff(profile, axis=1)) ** 2))
+    return variation / (8.0 * energy)
+
+
+def _relative_vector_residual(numerator, *terms) -> float:
+    denominator = sum(float(np.linalg.norm(term)) for term in terms)
+    if denominator <= np.finfo(np.float64).eps:
+        return 0.0
+    return float(np.linalg.norm(numerator)) / denominator
+
+
+def _vector_mode_eigenpair_residual_numpy(operator, beta, eigenvector) -> float | None:
+    if operator is None:
+        return None
+    applied = operator @ eigenvector
+    return _relative_vector_residual(applied - beta * eigenvector, applied, beta * eigenvector)
+
+
+def _vector_mode_divergence_residuals_numpy(
+    eigenvector,
+    *,
+    beta,
+    interior_u: int,
+    interior_v: int,
+    eps_planes,
+    mu_planes,
+    k0: float,
+    du: float,
+    dv: float,
+) -> tuple[float | None, float | None]:
+    if eps_planes is None or mu_planes is None or k0 is None or du is None or dv is None:
+        return None, None
+
+    hu, hv, eu, ev = _split_vector_mode_components(
+        eigenvector,
+        interior_u=interior_u,
+        interior_v=interior_v,
+        backend="numpy",
+    )
+    hu = hu.reshape(-1)
+    hv = hv.reshape(-1)
+    eu = eu.reshape(-1)
+    ev = ev.reshape(-1)
+    eps_u, eps_v, _ = (
+        np.asarray(component, dtype=np.float64)[1:-1, 1:-1].reshape(-1)
+        for component in eps_planes
+    )
+    mu_u, mu_v, _ = (
+        np.asarray(component, dtype=np.float64)[1:-1, 1:-1].reshape(-1)
+        for component in mu_planes
+    )
+    d1_u_forward, d1_u_backward = _build_staggered_first_differences_sparse(interior_u, du)
+    d1_v_forward, d1_v_backward = _build_staggered_first_differences_sparse(interior_v, dv)
+    identity_u = sparse.eye(interior_u, format="csr", dtype=np.float64)
+    identity_v = sparse.eye(interior_v, format="csr", dtype=np.float64)
+    derivative_u_forward = sparse.kron(d1_u_forward, identity_v, format="csr")
+    derivative_u_backward = sparse.kron(d1_u_backward, identity_v, format="csr")
+    derivative_v_forward = sparse.kron(identity_u, d1_v_forward, format="csr")
+    derivative_v_backward = sparse.kron(identity_u, d1_v_backward, format="csr")
+
+    electric_transverse = derivative_u_forward @ (eps_u * eu) + derivative_v_forward @ (eps_v * ev)
+    electric_longitudinal = (beta / (float(k0) / _ETA0)) * (
+        derivative_u_forward @ hv - derivative_v_forward @ hu
+    )
+    magnetic_transverse = derivative_u_backward @ (mu_u * hu) + derivative_v_backward @ (mu_v * hv)
+    magnetic_longitudinal = (beta / (float(k0) * _ETA0)) * (
+        derivative_u_backward @ ev - derivative_v_backward @ eu
+    )
+    electric_residual = _relative_vector_residual(
+        electric_transverse - electric_longitudinal,
+        electric_transverse,
+        electric_longitudinal,
+    )
+    magnetic_residual = _relative_vector_residual(
+        magnetic_transverse + magnetic_longitudinal,
+        magnetic_transverse,
+        magnetic_longitudinal,
+    )
+    return electric_residual, magnetic_residual
+
+
 def _normalize_mode_profiles_to_unit_power(
     component_profiles: dict[str, torch.Tensor],
     *,
@@ -506,9 +636,16 @@ def _select_and_normalize_vector_mode_numpy(
     mode_index: int,
     field_names,
     preferred_field_name: str,
+    operator=None,
+    eps_planes=None,
+    mu_planes=None,
+    k0: float | None = None,
+    du: float | None = None,
+    dv: float | None = None,
 ):
     order = np.lexsort((np.abs(np.imag(eigenvalues)), -np.real(eigenvalues)))
     raw_candidates = []
+    candidate_window = max(2 * (int(mode_index) + _VECTOR_EIGEN_REQUEST_PADDING), 4)
     for index in order:
         value = eigenvalues[index]
         if not np.isfinite(value) or np.real(value) <= 0.0:
@@ -526,22 +663,24 @@ def _select_and_normalize_vector_mode_numpy(
             field_names[3]: hv,
         }
         raw_candidates.append((index, value, component_profiles))
+        if len(raw_candidates) >= candidate_window:
+            break
 
     # A symmetric cross-section can produce an exactly degenerate polarization
     # pair.  Eigensolvers may return an arbitrary rotation of that subspace, so
     # selecting one raw vector makes the launched polarization jump with tiny
     # frequency or grid changes.  Diagonalize the requested-polarization energy
     # inside each degenerate subspace to obtain a deterministic polarized basis.
-    positive_candidates = []
+    independent_candidates = []
     cursor = 0
     while cursor < len(raw_candidates):
         group_stop = cursor + 1
         reference_value = raw_candidates[cursor][1]
-        # Wide enough to capture ARPACK duplicate/conjugate-pair jitter (~1e-9
-        # relative, observed up to ~2e-9 including the imaginary split), yet
-        # orders of magnitude below distinct-mode spacings (>=1e-4 relative for
-        # the polarization pair of a mildly rectangular guide).
-        tolerance = 1.0e-7 * max(abs(reference_value), 1.0)
+        # Wide enough to capture ARPACK duplicate/conjugate-pair jitter and the
+        # small numerical splitting of a symmetric polarization pair (observed
+        # around 1e-5 relative), yet below distinct-mode spacings (>=1e-4
+        # relative for the polarization pair of a mildly rectangular guide).
+        tolerance = _VECTOR_DEGENERATE_RTOL * max(abs(reference_value), 1.0)
         while (
             group_stop < len(raw_candidates)
             and abs(raw_candidates[group_stop][1] - reference_value) <= tolerance
@@ -561,10 +700,10 @@ def _select_and_normalize_vector_mode_numpy(
             stacked = np.concatenate([np.real(stacked), np.imag(stacked)], axis=1)
             basis, singular_values, _ = np.linalg.svd(stacked, full_matrices=False)
             rank = int(np.sum(singular_values > 1.0e-6 * singular_values[0]))
-            reference_index = group[0][0]
+            raw_indices = tuple(int(entry[0]) for entry in group)
             group = []
             for column in range(rank):
-                vector = basis[:, column] * singular_values[0]
+                vector = basis[:, column]
                 hu, hv, eu, ev = _split_vector_mode_components(
                     vector,
                     interior_u=interior_u,
@@ -573,7 +712,7 @@ def _select_and_normalize_vector_mode_numpy(
                 )
                 group.append(
                     (
-                        reference_index,
+                        raw_indices,
                         reference_value,
                         {
                             field_names[0]: eu,
@@ -588,7 +727,8 @@ def _select_and_normalize_vector_mode_numpy(
         if len(group) == 1:
             entry = group[0]
             vector = entry[3] if len(entry) > 3 else eigenvectors[:, entry[0]]
-            rotated = [(entry[0], entry[1], vector, entry[2])]
+            raw_indices = entry[0] if isinstance(entry[0], tuple) else (int(entry[0]),)
+            rotated = [(raw_indices, entry[1], vector, entry[2])]
         else:
             count = len(group)
             preferred_gram = np.empty((count, count), dtype=np.complex128)
@@ -622,40 +762,124 @@ def _select_and_normalize_vector_mode_numpy(
                 }
                 rotated.append((group[0][0], reference_value, combined_vector, combined_profiles))
 
-        for selected_index, value, selected_vector, component_profiles in rotated:
+        for raw_indices, value, selected_vector, component_profiles in rotated:
             component_profiles = _normalize_vector_mode_profiles_numpy(
                 component_profiles,
                 preferred_field_name=preferred_field_name,
             )
-            power_sign = _vector_mode_power_sign_numpy(component_profiles)
-            polarization_fraction = _vector_mode_polarization_fraction_numpy(
-                component_profiles,
-                preferred_field_name=preferred_field_name,
-            )
-            positive_candidates.append(
-                (
-                    selected_index,
-                    value,
-                    selected_vector,
-                    component_profiles,
-                    power_sign,
-                    polarization_fraction,
-                )
+            independent_candidates.append(
+                {
+                    "raw_indices": raw_indices,
+                    "beta": value,
+                    "vector": selected_vector,
+                    "profiles": component_profiles,
+                }
             )
         cursor = group_stop
 
-    forward_candidates = [entry for entry in positive_candidates if entry[4] > 0.0]
-    # Match ModeSortSpec and the scalar mode path: modes dominated by the
-    # requested tangential E polarization form one indexed family. Selecting
-    # an orthogonal mode as a fallback would silently violate polarization.
-    selected_candidates = [entry for entry in forward_candidates if entry[5] >= 0.5]
-    if len(selected_candidates) <= int(mode_index):
+    candidate_count = len(independent_candidates)
+    power_gram = np.zeros((candidate_count, candidate_count), dtype=np.complex128)
+    for row, left in enumerate(independent_candidates):
+        for col, right in enumerate(independent_candidates):
+            power_gram[row, col] = _vector_mode_power_inner_product_numpy(
+                left["profiles"],
+                right["profiles"],
+            )
+    power_norm = np.sqrt(np.maximum(np.abs(np.real(np.diag(power_gram))), np.finfo(np.float64).eps))
+    overlap_matrix = np.abs(power_gram / power_norm[:, None] / power_norm[None, :])
+
+    retained_indices = []
+    family_indices = []
+    candidate_diagnostics = []
+    for candidate_index, candidate in enumerate(independent_candidates):
+        beta = candidate["beta"]
+        profiles = candidate["profiles"]
+        power = _vector_mode_power_sign_numpy(profiles)
+        polarization_fraction = _vector_mode_polarization_fraction_numpy(
+            profiles,
+            preferred_field_name=preferred_field_name,
+        )
+        checkerboard_fraction = _vector_mode_checkerboard_fraction_numpy(profiles)
+        eigenpair_residual = _vector_mode_eigenpair_residual_numpy(operator, beta, candidate["vector"])
+        electric_divergence, magnetic_divergence = _vector_mode_divergence_residuals_numpy(
+            candidate["vector"],
+            beta=beta,
+            interior_u=interior_u,
+            interior_v=interior_v,
+            eps_planes=eps_planes,
+            mu_planes=mu_planes,
+            k0=k0,
+            du=du,
+            dv=dv,
+        )
+        prior_overlaps = [float(overlap_matrix[candidate_index, prior]) for prior in retained_indices]
+        max_overlap = max(prior_overlaps, default=0.0)
+        near_duplicate_overlaps = [
+            float(overlap_matrix[candidate_index, prior])
+            for prior in retained_indices
+            if abs(beta - independent_candidates[prior]["beta"])
+            <= _VECTOR_DUPLICATE_BETA_RTOL * max(abs(beta), 1.0)
+        ]
+        max_near_duplicate_overlap = max(near_duplicate_overlaps, default=0.0)
+
+        family_index = None
+        if power <= 0.0:
+            status = "backward_power"
+        elif checkerboard_fraction > _VECTOR_CHECKERBOARD_FRACTION_LIMIT:
+            status = "checkerboard"
+        elif max_near_duplicate_overlap >= _VECTOR_DUPLICATE_OVERLAP_LIMIT:
+            status = "duplicate"
+        else:
+            retained_indices.append(candidate_index)
+            if polarization_fraction >= 0.5:
+                family_index = len(family_indices)
+                family_indices.append(candidate_index)
+                status = "eligible"
+            else:
+                status = "orthogonal_polarization"
+
+        candidate_diagnostics.append(
+            {
+                "candidate_index": candidate_index,
+                "raw_indices": candidate["raw_indices"],
+                "beta_real": float(np.real(beta)),
+                "beta_imag": float(np.imag(beta)),
+                "effective_index_real": None if k0 is None else float(np.real(beta) / max(float(k0), 1e-30)),
+                "effective_index_imag": None if k0 is None else float(np.imag(beta) / max(float(k0), 1e-30)),
+                "propagating": bool(np.real(beta) > 0.0 and abs(np.imag(beta)) <= 1.0e-7 * max(abs(beta), 1.0)),
+                "eigenpair_residual": eigenpair_residual,
+                "electric_divergence_residual": electric_divergence,
+                "magnetic_divergence_residual": magnetic_divergence,
+                "poynting_power": power,
+                "polarization_fraction": polarization_fraction,
+                "max_weighted_overlap": max_overlap,
+                "checkerboard_fraction": checkerboard_fraction,
+                "family_index": family_index,
+                "status": status,
+                "selected": False,
+            }
+        )
+
+    # Match the scalar mode path: only modes dominated by the requested
+    # tangential E polarization occupy indices in that family.
+    if len(family_indices) <= int(mode_index):
+        rejected = sum(entry["status"] in {"checkerboard", "duplicate"} for entry in candidate_diagnostics)
         raise ValueError(
             f"ModeSource requested mode_index={mode_index}, but only "
-            f"{len(selected_candidates)} forward modes in the requested polarization family were found."
+            f"{len(family_indices)} resolved forward modes in the requested polarization family were found "
+            f"after rejecting {rejected} duplicate/checkerboard candidates."
         )
-    _, selected_beta, selected_vector, selected_profiles, _, _ = selected_candidates[int(mode_index)]
-    return selected_beta, selected_vector, selected_profiles
+    selected_candidate_index = family_indices[int(mode_index)]
+    candidate_diagnostics[selected_candidate_index]["selected"] = True
+    selected = independent_candidates[selected_candidate_index]
+    diagnostics = {
+        "raw_candidate_count": len(raw_candidates),
+        "independent_candidate_count": candidate_count,
+        "selected_candidate_index": selected_candidate_index,
+        "candidates": tuple(candidate_diagnostics),
+        "overlap_matrix": overlap_matrix,
+    }
+    return selected["beta"], selected["vector"], selected["profiles"], diagnostics
 
 
 def _full_field_component_profiles(component_profiles, shape, *, tangential_field_names):
@@ -1066,13 +1290,20 @@ def _solve_vector_mode_eigenpair_sparse(
     operator, interior_u, interior_v = _build_vector_operator_sparse(eps_planes, mu_planes, k0=k0, du=du, dv=dv)
     matrix_size = int(operator.shape[0])
     requested = _vector_mode_request_count(matrix_size, mode_index=int(mode_index))
-    eigenvalues, eigenvectors = scipy_sparse_linalg.eigs(
-        operator,
-        k=requested,
-        which="LR",
-        tol=_VECTOR_EIGS_TOL,
-        maxiter=_VECTOR_EIGS_MAX_ITER,
-    )
+    try:
+        eigenvalues, eigenvectors = scipy_sparse_linalg.eigs(
+            operator,
+            k=requested,
+            which="LR",
+            tol=_VECTOR_EIGS_TOL,
+            maxiter=_VECTOR_EIGS_MAX_ITER,
+        )
+    except scipy_sparse_linalg.ArpackNoConvergence as error:
+        eigenvalues = error.eigenvalues
+        eigenvectors = error.eigenvectors
+        minimum_candidates = max(2 * (int(mode_index) + 1), 4)
+        if eigenvalues is None or eigenvectors is None or len(eigenvalues) < minimum_candidates:
+            raise
     return _select_and_normalize_vector_mode_numpy(
         eigenvalues,
         eigenvectors,
@@ -1081,6 +1312,12 @@ def _solve_vector_mode_eigenpair_sparse(
         mode_index=int(mode_index),
         field_names=field_names,
         preferred_field_name=preferred_field_name,
+        operator=operator,
+        eps_planes=eps_planes,
+        mu_planes=mu_planes,
+        k0=k0,
+        du=du,
+        dv=dv,
     )
 
 
@@ -1106,6 +1343,12 @@ def _solve_vector_mode_eigenpair_dense(
         mode_index=int(mode_index),
         field_names=field_names,
         preferred_field_name=preferred_field_name,
+        operator=operator,
+        eps_planes=eps_planes,
+        mu_planes=mu_planes,
+        k0=k0,
+        du=du,
+        dv=dv,
     )
 
 
@@ -1333,7 +1576,7 @@ def _assemble_vector_mode_data(
 
     unknowns = max((int(eps_planes[0].shape[0]) - 2) * (int(eps_planes[0].shape[1]) - 2), 0)
     if unknowns <= _FULL_VECTOR_DENSE_LIMIT:
-        beta_value, _eigenvector, component_arrays = _solve_vector_mode_eigenpair_dense(
+        beta_value, _eigenvector, component_arrays, candidate_diagnostics = _solve_vector_mode_eigenpair_dense(
             eps_planes,
             mu_planes,
             k0=k0,
@@ -1345,7 +1588,7 @@ def _assemble_vector_mode_data(
         )
         solver_kind = "vector_dense"
     else:
-        beta_value, _eigenvector, component_arrays = _solve_vector_mode_eigenpair_sparse(
+        beta_value, _eigenvector, component_arrays, candidate_diagnostics = _solve_vector_mode_eigenpair_sparse(
             eps_planes,
             mu_planes,
             k0=k0,
@@ -1441,6 +1684,9 @@ def _assemble_vector_mode_data(
         "beta": float(beta_real),
         "effective_index_tensor": None,
         "beta_tensor": None,
+        "candidate_diagnostics": candidate_diagnostics["candidates"],
+        "candidate_overlap_matrix": candidate_diagnostics["overlap_matrix"],
+        "selected_candidate_index": candidate_diagnostics["selected_candidate_index"],
         "plane_index": int(plane_index),
         "box_lower": tuple(int(value) for value in lower),
         "box_upper": tuple(int(value) for value in upper),
