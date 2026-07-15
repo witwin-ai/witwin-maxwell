@@ -1,4 +1,5 @@
 from witwin.core import Box, Cone, Cylinder, Ellipsoid, HollowBox, Mesh, Prism, Pyramid, Sphere, Structure, Torus
+from .antenna import AntennaData, Ludwig3
 from .geometry import ComplexPolySlab, PolySlab
 from .media import (
     CustomDebyePole,
@@ -31,6 +32,7 @@ from .monitors import (
     PermittivityMonitor,
     PlaneMonitor,
     PointMonitor,
+    PowerLossMonitor,
 )
 from .lumped import (
     Capacitor,
@@ -42,6 +44,7 @@ from .lumped import (
     SeriesRLC,
 )
 from .network import NetworkData, PortData
+from .power_loss import PowerLossData
 from .ports import (
     AxisPath,
     LumpedPort,
@@ -97,6 +100,7 @@ from .simulation import (
 
 __all__ = [
     "AstigmaticGaussianBeam",
+    "AntennaData",
     "AxisPath",
     "BoundarySpec",
     "BoundaryKind",
@@ -136,6 +140,7 @@ __all__ = [
     "LayerRefinementSpec",
     "Inductor",
     "LorentzPole",
+    "Ludwig3",
     "LumpedPort",
     "LossyMetalMedium",
     "Material",
@@ -157,6 +162,8 @@ __all__ = [
     "PlaneWave",
     "PointDipole",
     "PointMonitor",
+    "PowerLossData",
+    "PowerLossMonitor",
     "PortData",
     "PortExcitation",
     "PortSweep",

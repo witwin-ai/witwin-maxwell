@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -14,6 +15,15 @@ from .sources import (
 )
 
 _AXES = ("x", "y", "z")
+POWER_LOSS_CHANNELS = (
+    "conduction",
+    "electric_dispersion",
+    "magnetic_dispersion",
+    "nonlinear",
+    "circuit",
+    "surface",
+    "wire",
+)
 
 
 def _normalize_fields(fields):
@@ -462,6 +472,76 @@ class MediumMonitor:
         object.__setattr__(self, "frequencies", _normalize_frequencies(frequencies))
         object.__setattr__(self, "bounds", _material_monitor_bounds(resolved_position, resolved_size))
         object.__setattr__(self, "kind", "medium")
+
+
+@dataclass(frozen=True)
+class PowerLossMonitor:
+    """Select an axis-aligned volume and explicit physical loss channels.
+
+    The current automatic producer supports the ``conduction`` channel from
+    static electric conductivity. Other channel names reserve the stable data
+    contract and require an explicit physical channel input during postprocess.
+    """
+
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    frequencies: tuple[float, ...] | None
+    channels: tuple[str, ...]
+    bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+    kind: str = "power_loss"
+
+    def __init__(
+        self,
+        name,
+        position,
+        size,
+        frequencies=None,
+        channels=("conduction",),
+    ):
+        monitor_name = str(name)
+        if not monitor_name:
+            raise ValueError("PowerLossMonitor name must not be empty.")
+        resolved_position = _require_length3("position", position)
+        resolved_size = _require_nonnegative_length3("size", size)
+        if not all(math.isfinite(value) for value in (*resolved_position, *resolved_size)):
+            raise ValueError("PowerLossMonitor position and size must be finite.")
+        if any(value <= 0.0 for value in resolved_size):
+            raise ValueError("PowerLossMonitor size must contain three positive lengths.")
+
+        resolved_frequencies = _normalize_frequencies(frequencies)
+        if resolved_frequencies is not None and any(
+            not math.isfinite(value) or value <= 0.0 for value in resolved_frequencies
+        ):
+            raise ValueError("PowerLossMonitor frequencies must be finite and strictly positive.")
+
+        if isinstance(channels, str):
+            resolved_channels = (channels,)
+        else:
+            resolved_channels = tuple(str(channel) for channel in channels)
+        if not resolved_channels:
+            raise ValueError("PowerLossMonitor channels must not be empty.")
+        if len(set(resolved_channels)) != len(resolved_channels):
+            raise ValueError("PowerLossMonitor channels must be unique.")
+        unsupported = tuple(
+            channel for channel in resolved_channels if channel not in POWER_LOSS_CHANNELS
+        )
+        if unsupported:
+            raise ValueError(
+                f"Unsupported power-loss channels {unsupported}; choices are {POWER_LOSS_CHANNELS}."
+            )
+
+        object.__setattr__(self, "name", monitor_name)
+        object.__setattr__(self, "position", resolved_position)
+        object.__setattr__(self, "size", resolved_size)
+        object.__setattr__(self, "frequencies", resolved_frequencies)
+        object.__setattr__(self, "channels", resolved_channels)
+        object.__setattr__(
+            self,
+            "bounds",
+            _material_monitor_bounds(resolved_position, resolved_size),
+        )
+        object.__setattr__(self, "kind", "power_loss")
 
 
 @dataclass(frozen=True)

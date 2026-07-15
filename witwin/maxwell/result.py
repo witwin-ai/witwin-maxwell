@@ -8,7 +8,13 @@ from typing import Any
 import numpy as np
 import torch
 
-from .monitors import ClosedSurfaceMonitor, FinitePlaneMonitor, MediumMonitor, PermittivityMonitor
+from .monitors import (
+    ClosedSurfaceMonitor,
+    FinitePlaneMonitor,
+    MediumMonitor,
+    PermittivityMonitor,
+    PowerLossMonitor,
+)
 from .network import NetworkData, PortData, _validate_safe_persistence
 from .scene import prepare_scene
 from .visualization import extract_orthogonal_slice, plot_slice_image
@@ -948,6 +954,14 @@ class Result:
         freq_index: int | None = None,
         resolve_modal: bool = True,
     ):
+        public_monitor = _find_scene_monitor(self.scene, name)
+        if isinstance(public_monitor, PowerLossMonitor):
+            if frequency is not None or freq_index is not None:
+                raise ValueError(
+                    "PowerLossData preserves its explicit frequency axis; retrieve the "
+                    "full typed result and select its tensors explicitly."
+                )
+            return self.power_loss(name)
         payload = self.raw_monitor(name, frequency=frequency, freq_index=freq_index)
         if not resolve_modal or _monitor_payload_is_closed_surface(payload):
             return payload
@@ -1003,6 +1017,117 @@ class Result:
                 f"Choices: {choices}."
             )
         return self._ports[port_name]
+
+    def antenna(
+        self,
+        *,
+        surface: str,
+        driven_port: str | PortData,
+        polarization=None,
+        theta=None,
+        phi=None,
+        theta_points: int = 181,
+        phi_points: int = 361,
+        radius=1.0,
+        phase_center=None,
+        frame=None,
+        batch_size: int = 1024,
+    ):
+        """Compute antenna engineering data from a closed near-field surface."""
+
+        from .postprocess.antenna import antenna_data_from_result
+
+        return antenna_data_from_result(
+            self,
+            surface=surface,
+            driven_port=driven_port,
+            polarization=polarization,
+            theta=theta,
+            phi=phi,
+            theta_points=theta_points,
+            phi_points=phi_points,
+            radius=radius,
+            phase_center=phase_center,
+            frame=frame,
+            batch_size=batch_size,
+        )
+
+    def power_loss(
+        self,
+        name: str,
+        *,
+        electric_fields=None,
+        volume_channels=None,
+        integrated_channels=None,
+        surface_channels=None,
+        face_areas=None,
+        line_channels=None,
+        line_lengths=None,
+        occupancy=None,
+        material_ids=None,
+        geometry_ids=None,
+    ):
+        """Compute typed power-loss channels for a declared loss monitor."""
+
+        monitor = _find_scene_monitor(self.scene, name)
+        if not isinstance(monitor, PowerLossMonitor):
+            raise KeyError(f"PowerLossMonitor {name!r} is not declared in this Scene.")
+        if self.method != "fdtd":
+            raise NotImplementedError(
+                "Automatic PowerLossMonitor field colocation currently supports FDTD results only."
+            )
+
+        from .compiler.power_loss import compile_power_loss_monitor
+        from .postprocess.power_loss import compute_power_loss_data
+
+        compiled = compile_power_loss_monitor(self.prepared_scene, monitor)
+        selected_frequencies = (
+            tuple(self.frequencies)
+            if monitor.frequencies is None
+            else tuple(monitor.frequencies)
+        )
+        frequency_tensor = torch.as_tensor(
+            selected_frequencies,
+            device=compiled.device,
+            dtype=torch.float64,
+        )
+        resolved_fields = electric_fields
+        if resolved_fields is None and "conduction" in monitor.channels:
+            missing = tuple(
+                component
+                for component in ("Ex", "Ey", "Ez")
+                if component.upper() not in self._fields
+            )
+            if missing:
+                raise RuntimeError(
+                    "PowerLossMonitor conduction requires frequency-domain Ex/Ey/Ez fields; "
+                    "run FDTD with full_field_dft=True."
+                )
+            resolved_fields = {
+                component: torch.stack(
+                    [
+                        self.tensor(component, frequency=frequency)
+                        for frequency in selected_frequencies
+                    ],
+                    dim=0,
+                )
+                for component in ("Ex", "Ey", "Ez")
+            }
+        return compute_power_loss_data(
+            compiled,
+            frequency_tensor,
+            electric_fields=resolved_fields,
+            volume_channels=volume_channels,
+            integrated_channels=integrated_channels,
+            surface_channels=surface_channels,
+            face_areas=face_areas,
+            line_channels=line_channels,
+            line_lengths=line_lengths,
+            occupancy=occupancy,
+            material_ids=material_ids,
+            geometry_ids=geometry_ids,
+            source_result_fingerprint=f"runtime-result:{id(self):x}",
+        )
 
     def material(self, name: str = "eps_r", *, expand_symmetry: bool = False) -> torch.Tensor:
         prepared_scene = self.prepared_scene

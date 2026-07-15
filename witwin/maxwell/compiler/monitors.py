@@ -12,6 +12,7 @@ from ..monitors import (
     PermittivityMonitor,
     PlaneMonitor,
     PointMonitor,
+    PowerLossMonitor,
     normalize_component,
     normalize_axis,
 )
@@ -57,7 +58,16 @@ def compile_fdtd_observers(scene):
     compiled = []
     monitors = scene.resolved_monitors() if hasattr(scene, "resolved_monitors") else scene.monitors
     for monitor in monitors:
-        if isinstance(monitor, (FieldTimeMonitor, FluxTimeMonitor, PermittivityMonitor, MediumMonitor)):
+        if isinstance(
+            monitor,
+            (
+                FieldTimeMonitor,
+                FluxTimeMonitor,
+                PermittivityMonitor,
+                MediumMonitor,
+                PowerLossMonitor,
+            ),
+        ):
             # Time-domain monitors are handled by compile_fdtd_time_observers and
             # material monitors are resolved from compiled material tensors at result
             # time; neither must become a running-DFT spectral observer.
