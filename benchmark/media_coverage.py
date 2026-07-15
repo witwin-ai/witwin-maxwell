@@ -335,14 +335,11 @@ def validation_coverage_markdown_lines() -> list[str]:
     lines.extend(
         [
             "",
-            "**Metric staleness.** Group 1 (`planewave_vacuum`, `pml_only`, and the "
-            "duplicate `symmetry_center` baseline) was regenerated on 2026-07-12 after "
-            "the external-PML, grid, CPML, source-power, and flux-monitor repairs. Other "
-            "historical plane-wave/material rows remain STALE until their groups are rerun. "
-            "The P3-media scenarios "
-            "(`debye_slab`, `sigma_e_drude_slab`, `anisotropic_slab`, `kerr_slab`, "
-            "`modulated_slab`, `graphene_sheet`) build and export but have not been "
-            "cloud-run (Tidy3D runs are cache-gated), so they carry no metric row yet.",
+            "**Reference-cache closure.** The 2026-07-15 Stage-E audit validated the "
+            "current cache key for all 102 Tidy3D-reference scenarios (zero stale and zero "
+            "missing); the remaining four registered FDFD scenarios intentionally use a "
+            "local FDTD reference. This is a report snapshot: any later scene, adapter, or "
+            "cache-contract change must rerun the key audit and refresh affected references.",
             "",
         ]
     )

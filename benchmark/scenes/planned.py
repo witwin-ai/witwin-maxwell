@@ -115,7 +115,16 @@ def _waveguide_scene(*, diffraction=False) -> mw.Scene:
 
 def _s_parameter_waveguide_scene(frequencies: tuple[float, ...]) -> mw.Scene:
     """Reciprocal rectangular guide with a calibrated input reference plane."""
-    scene = base_scene()
+    base = base_scene()
+    # Match the mode-source validation grid: the shared 25 mm grid is beyond
+    # the Yee propagation cutoff near 2 GHz for this n_eff ~ 1.96 guide.
+    scene = mw.Scene(
+        domain=base.domain,
+        grid=mw.GridSpec.uniform(DX / 2),
+        boundary=base.boundary,
+        subpixel_samples=base.subpixel,
+        device="cpu",
+    )
     scene.add_structure(
         mw.Structure(
             # Continue the guide through the external PML. Ending it at the

@@ -958,7 +958,14 @@ def save_scalar_comparison_plot(
         }
         series_names = [name for name, rows in rows_by_name.items() if len(rows) > 1]
         scalar_names = [name for name, rows in rows_by_name.items() if len(rows) == 1]
-        panel_count = int(bool(series_names)) + int(bool(scalar_names))
+        diffraction_scalars = bool(scalar_names) and all(
+            name.startswith("eta_") for name in scalar_names
+        )
+        panel_count = (
+            int(bool(series_names))
+            + int(bool(scalar_names))
+            + int(diffraction_scalars)
+        )
         fig, panel_axes = plt.subplots(panel_count, 1, figsize=(11, 4.5 * panel_count))
         axes = np.atleast_1d(panel_axes)
         panel_index = 0
@@ -1041,6 +1048,38 @@ def save_scalar_comparison_plot(
             axis.set_ylabel(ylabel)
             axis.grid(axis="y", alpha=0.25)
             axis.legend()
+
+            if diffraction_scalars:
+                error_axis = axes[panel_index + 1]
+                rows = [rows_by_name[name][0] for name in scalar_names]
+                absolute_error_pp = 100.0 * np.asarray(
+                    [float(row["absolute_efficiency_error"]) for row in rows]
+                )
+                relative_error_percent = 100.0 * np.asarray(
+                    [float(row["complex_error"]) for row in rows]
+                )
+                bars = error_axis.bar(positions, absolute_error_pp, width=0.62)
+                for bar, relative_error in zip(bars, relative_error_percent):
+                    error_axis.annotate(
+                        f"{relative_error:.1f}% rel",
+                        xy=(bar.get_x() + 0.5 * bar.get_width(), bar.get_height()),
+                        xytext=(0, 3),
+                        textcoords="offset points",
+                        ha="center",
+                        va="bottom",
+                        fontsize=8,
+                    )
+                total_variation_pp = 100.0 * float(
+                    rows[0]["distribution_total_variation"]
+                )
+                error_axis.set_xticks(positions, labels, rotation=20, ha="right")
+                error_axis.set_ylabel("absolute efficiency error (percentage points)")
+                error_axis.set_title(
+                    f"Order-distribution total variation: {total_variation_pp:.3f} "
+                    "percentage points"
+                )
+                error_axis.grid(axis="y", alpha=0.25)
+                error_axis.margins(y=0.2)
 
         fig.suptitle(f"{scenario_name}: scalar observables", fontsize=14)
         fig.tight_layout(rect=[0, 0, 1, 0.96])

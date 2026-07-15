@@ -4,6 +4,10 @@
 评估对象：`witwin.maxwell` 与 Tidy3D 的端到端数值一致性  
 基础提交：`a8e7927574889fe5ee3a111d1c48a5ff2e4894f8`（`master`，评估在包含未提交开发改动的工作区上执行）
 
+> Final closure note (2026-07-15): Sections 1--15 preserve the original
+> 101-scenario audit snapshot. Sections 16--20 record the repair stages and
+> supersede that snapshot with the final 102-reference numerical baseline.
+
 ## 1. 执行摘要
 
 本报告仅包含 101 个以 Tidy3D 为 reference 的 benchmark 场景，其中包括 53 个专门的 `feature_coverage` 场景。场景注册、Tidy3D reference、Maxwell 求解、监视器提取、标量后处理、绘图和 Markdown 汇总链路均已实际执行。任何本地求解器互相比对均排除在报告之外。
@@ -671,3 +675,141 @@ and test module, and `git diff --check` is clean. The refreshed-reference run ab
 the final numerical baseline; the
 orthogonal electric-field slices, complex diagnostics, resonance-selected cavity image,
 and carrier-anchored spectral images are the visual acceptance artifacts for this stage.
+
+## 20. Numerical-consistency repair stage E: final cache and modal-grid closure
+
+Stage E closes every current reference-cache contract, fixes one final benchmark scene
+that was operating beyond the Yee propagation cutoff, and makes diffraction-order
+errors visually meaningful near zero. The conclusions below use both the scalar/field
+metrics and the regenerated orthogonal electric-field slices; no field was accepted from
+a scalar metric alone.
+
+### 20.1 S-parameter guide resolution was below the propagation cutoff
+
+`ring_resonator_s21` and `waveguide_s_matrix` still used the shared 25 mm campaign grid,
+although the otherwise identical `mode_source_wg` scene had already been refined to
+12.5 mm. With Tidy3D's extracted effective index, the coarse grid gave only
+3.42/3.06/2.78 cells per guided wavelength at 1.8/2.0/2.2 GHz. The corresponding Yee
+discrete-propagation parameter was 0.9178/1.0244/1.1308; values above one have no real
+propagating solution. The high-frequency field correlation therefore collapsed
+monotonically for a benchmark-grid reason, not because of ring physics.
+
+Both S-parameter scenes now use `DX / 2`. This gives 6.84/6.13/5.55 cells per guided
+wavelength and discrete parameters 0.4589/0.5122/0.5654. Only these two scene cache keys
+changed. The user regenerated both references, and the local acceptance run set
+`WITWIN_BENCHMARK_NO_CLOUD=1`, proving that scoring and plotting were cache-only.
+
+| Scenario / grid | Field L2 | Shape L2 | Linf | Corr |
+|---|---:|---:|---:|---:|
+| `ring_resonator_s21`, 25 mm | 6.7544 | 0.99797 | 8.5562 | 0.0637 |
+| `ring_resonator_s21`, 12.5 mm | 0.46252 | 0.21680 | 0.50444 | 0.9762 |
+| `waveguide_s_matrix`, 25 mm | 1.0878 | 0.94233 | 1.5762 | 0.3347 |
+| `waveguide_s_matrix`, 12.5 mm | 0.44415 | 0.22201 | 0.44743 | 0.9750 |
+
+At the selected 2.0 GHz ring resonance, Field/Shape L2 changed from
+0.93461/0.89604 to 0.44706/0.20879 and correlation changed from 0.4440 to 0.9780.
+Across the complete 1.8--2.2 GHz sweep the refined Shape L2 is stable between 0.2067
+and 0.2168 rather than diverging above 2 GHz. The `n_eff` error is now
+0.0886--0.1103%; the 2 GHz resonance-frequency error is 0.09864%, and the resonant
+analytic S21 error is 0.16117. The straight-guide S21 error changed from 0.25578 to
+0.056715 (phase error 0.056723 rad), while its `n_eff` error changed from 0.44482% to
+0.09864%. This establishes `FIXED(benchmark-grid-below-Yee-cutoff)`.
+
+The electric-field images give the remaining limitation. The output-cross-section `Ez`
+lobe has the same topology in both solvers, but Maxwell's peak is only about 61--62% of
+Tidy3D's. Maxwell also retains transverse phase curvature, parasitic `Ex/Ey`, and weak
+longitudinal ripple. The same amplitude ratio appears in the separately refined
+`mode_source_wg`, while `mode_monitor_two_planes` reproduces the complex propagation
+ratio to 0.2587%. The remaining field error is therefore not a propagation-cutoff
+failure: it is `DEFERRED(mode-source-injection-normalization-and-profile)`. The small
+`n_eff` residual and the previously verified higher-order duplicate/checkerboard modes
+remain `DEFERRED(mode-eigensolver-dispersion/checkerboard)`. Ring/S-matrix values are
+analytic functions of each solver's `n_eff`, not independent measured transmission, so
+the high-Q resonant scalar must not be presented as source-injection validation.
+
+### 20.2 Final refreshed-reference metrics and visual verdict
+
+The final external-refresh set has these authoritative results:
+
+| Scenario | Field L2 | Shape L2 | Corr | Flux err |
+|---|---:|---:|---:|---:|
+| `mode_source_wg` | 0.43016 | 0.12602 | 0.9920 | 0.65646 |
+| `periodic_grating` | 0.042621 | 0.035420 | 0.9994 | 0.054259 |
+| `bloch_oblique` | 0.086987 | 0.083939 | 0.9965 | 0.036553 |
+| `ring_resonator_s21` | 0.46252 | 0.21680 | 0.9762 | - |
+| `waveguide_s_matrix` | 0.44415 | 0.22201 | 0.9750 | - |
+| `grating_diffraction` | 0.042621 | 0.035420 | 0.9994 | 0.054259 |
+| `sphere_rcs` | 0.16977 | 0.16449 | 0.9864 | - |
+| `drude_slab` | 0.015323 | 0.014823 | 0.9999 | 0.012943 |
+| `lorentz_slab` | 0.071678 | 0.071656 | 0.9974 | 0.045394 |
+| `lorentz_two_pole_slab` | 0.098191 | 0.098084 | 0.9952 | 0.035879 |
+| `drude_lorentz_slab` | 0.063865 | 0.063818 | 0.9980 | 0.036632 |
+| `mode_monitor_straight_wg` | 0.53431 | 0.16044 | 0.9870 | - |
+| `mode_monitor_two_planes` | 0.53431 | 0.16044 | 0.9870 | - |
+
+The periodic-grating and Bloch images preserve the same dominant `Ey` diffraction lobes,
+nodes, oblique wavefronts, and unwrapped phase. Geometry XOR is zero. The measured Bloch
+phase residual is only 0.0073 rad in x and 0.0142 rad in the Yee-centred y span; there is
+no seam, sign, or direction defect. The old `DEFERRED(bloch-discrete-wavevector)` label is
+therefore narrowed to a discrete source/boundary convergence target, not evidence of a
+fundamental Bloch-boundary algorithm failure. The periodic flux error of 5.43% is a
+marginal TFSF/quadrature target, while the field itself passes.
+
+For `grating_diffraction`, the apparently large 64.99% error in each `+/-2` order is a
+near-zero denominator effect: Maxwell/Tidy3D efficiencies are 6.6870e-5 and 1.9101e-4,
+an absolute difference of only 0.00012414, or 0.0124 percentage points. The complete
+seven-order distribution has total-variation distance 0.012911 (1.2911 percentage
+points). The evaluator now retains relative error but adds a second scalar-image panel
+for absolute percentage-point error and annotates the distribution TV. This prevents a
+weak order from visually dominating the physically relevant distribution error.
+
+All four refreshed dispersive-slab images are strictly one-dimensional: transverse
+variation and `Ey/Ez` are at numerical zero, and the longitudinal phase slopes overlap.
+Drude and mixed Drude/Lorentz pass all field targets. Single Lorentz misses Linf=0.1 by
+only 0.00010; two-pole Lorentz has Linf 0.11126 with L2 0.09819. Their residuals are
+source/interface standing-wave bands rather than a propagation-constant or attenuation
+drift. There is not enough evidence to classify the ADE recursion as a fundamental
+algorithm difference; spatial/Courant convergence and analytic complex-wavenumber tests
+remain the correct next checks.
+
+The `sphere_rcs` dominant `Ex/Ez` scattering topology and phase agree, and the residual
+is concentrated on the 0.12 m-radius curved interface, which has only 4.8 cells per
+radius. Both solvers preserve the correct forward/back/E-plane/H-plane hierarchy. The
+H-plane broadside error is 2.83%, while the weak back and E-plane channels have large
+relative errors from small denominators. Maxwell and Tidy3D six-face fields are converted
+to SI equivalent currents and passed through the same near-to-far implementation, ruling
+out a second postprocessor or angular convention. This is
+`DEFERRED(curved-dielectric-interface-subpixel-convergence)`, not an RCS unit/scale fix;
+it requires a dedicated multi-grid curved-interface study.
+
+Under the unchanged strict screen, the 13 unique refreshed scenarios classify as:
+two passes (`drude_slab`, `drude_lorentz_slab`); six active numerical/convergence
+targets (`periodic_grating`, `grating_diffraction`, `bloch_oblique`, `lorentz_slab`,
+`lorentz_two_pole_slab`, `sphere_rcs`); and five modal-family deferrals
+(`mode_source_wg`, both mode-monitor scenes, `ring_resonator_s21`, and
+`waveguide_s_matrix`). The ring and S-matrix scenes use their second, grid-corrected
+refresh. Good scalar observables do not override a failed full-field visual verdict.
+
+### 20.3 Final cache, aggregate, and regression closure
+
+The complete cache-key audit is closed:
+
+| Registered scenarios | Current Tidy3D | Stale | Missing | Local FDTD reference |
+|---:|---:|---:|---:|---:|
+| 106 | 102 | 0 | 0 | 4 |
+
+The four local-reference rows are the declared FDFD-vs-FDTD scenarios. No Tidy3D row is
+missing or using an old cache contract. Final aggregate screening statistics are:
+
+| Scope | Field L2 < 0.1 | Shape L2 < 0.1 | Linf < 0.1 | Corr > 0.99 | Flux < 0.05 |
+|---|---:|---:|---:|---:|---:|
+| 102 Tidy3D scenarios | 50/102 | 52/102 | 42/102 | 59/102 | 51/86 |
+| 53 feature-coverage scenarios | 26/53 | 28/53 | 21/53 | 32/53 | 31/45 |
+
+These counts remain engineering screen lines, not a claim that every surviving numerical
+target is solved. The final accepted artifacts are `benchmark/RESULTS.md`, the three
+orthogonal electric-field cuts for every refreshed field, complex magnitude/real/phase
+diagnostics, resonance-selected ring images, carrier-anchored modulation spectra, and
+the absolute-error/TV diffraction chart. The complete benchmark-validation directory
+passes `121` tests, Ruff passes every modified Python file, the cache audit is complete,
+and `git diff --check` is clean.

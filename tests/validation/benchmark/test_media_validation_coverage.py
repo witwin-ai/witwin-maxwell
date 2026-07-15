@@ -131,6 +131,4 @@ def test_validation_coverage_markdown_lists_every_capability():
     assert "## Validation coverage" in lines
     for key in MEDIA_VALIDATION:
         assert f"`{key}`" in lines
-    # Group 1 is current, while the untouched downstream groups remain stale.
-    assert "STALE" in lines
-    assert "Group 1" in lines
+    assert "zero stale and zero missing" in lines

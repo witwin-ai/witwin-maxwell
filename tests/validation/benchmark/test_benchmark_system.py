@@ -24,6 +24,7 @@ from benchmark.metrics import (
 )
 from benchmark.models import ScenarioMetrics
 from benchmark.scenes import SCENARIOS, build_scene
+from benchmark.scenes._common import DX
 from benchmark.tidy3d_scene import benchmark_physical_bounds, prepare_tidy3d_benchmark_scene
 import witwin.maxwell as mw
 from witwin.maxwell.scene import prepare_scene
@@ -225,6 +226,15 @@ def test_s_parameter_benchmarks_compare_the_output_transverse_mode(name):
     assert field_monitor.position == pytest.approx(0.35)
     assert not any(isinstance(monitor, mw.FluxMonitor) for monitor in scene.monitors)
     assert not SCENARIOS[name].compare_flux
+
+
+@pytest.mark.parametrize("name", ("ring_resonator_s21", "waveguide_s_matrix"))
+def test_s_parameter_benchmarks_refine_grid_below_guided_cutoff(name):
+    prepared = prepare_scene(build_scene(name))
+
+    assert prepared.dx == pytest.approx(DX / 2)
+    assert prepared.dy == pytest.approx(DX / 2)
+    assert prepared.dz == pytest.approx(DX / 2)
 
 
 def test_benchmark_cache_key_supports_geometry_and_source_objects():
@@ -1313,6 +1323,82 @@ def test_diffraction_scalar_observable_normalizes_common_orders():
     assert observables["eta_+0_0"][0] == pytest.approx(0.4)
     assert observables["eta_-1_0"][0] == pytest.approx(0.2)
     assert observables["eta_+3_0"][0] == pytest.approx(0.0)
+
+
+def test_diffraction_scalar_metrics_report_absolute_error_and_total_variation():
+    def monitors(power):
+        return {
+            "orders": {
+                "scalars": {
+                    "orders_m": np.arange(-3, 4),
+                    "orders_n": np.zeros(7, dtype=np.int64),
+                    "order_power": np.asarray(power, dtype=np.float64)[:, None],
+                }
+            }
+        }
+
+    maxwell = monitors((0.1, 0.001, 0.2, 0.398, 0.2, 0.001, 0.1))
+    tidy3d = monitors((0.1, 0.002, 0.2, 0.396, 0.2, 0.002, 0.1))
+
+    metrics = benchmark_runner._compare_scalar_observables(
+        "diffraction_orders", maxwell, tidy3d, (1.0e9,)
+    )
+
+    weak_order = next(item for item in metrics if item["observable"] == "eta_+2_0")
+    assert weak_order["complex_error"] == pytest.approx(0.5)
+    assert weak_order["absolute_efficiency_error"] == pytest.approx(0.001)
+    assert all(
+        item["distribution_total_variation"] == pytest.approx(0.002)
+        for item in metrics
+    )
+
+
+def test_diffraction_scalar_plot_explains_weak_order_relative_error(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(benchmark_plotting, "ensure_directories", lambda: None)
+    monkeypatch.setattr(
+        benchmark_plotting,
+        "scenario_plot_dir",
+        lambda _name: tmp_path / "grating_diffraction",
+    )
+    metrics = [
+        {
+            "frequency": 1.0e9,
+            "observable": f"eta_{order:+d}_0",
+            "maxwell": maxwell,
+            "tidy3d": tidy3d,
+            "complex_error": relative_error,
+            "absolute_efficiency_error": abs(maxwell - tidy3d),
+            "distribution_total_variation": 0.002,
+        }
+        for order, maxwell, tidy3d, relative_error in (
+            (-1, 0.2, 0.2, 0.0),
+            (0, 0.398, 0.396, 0.005),
+            (1, 0.001, 0.002, 0.5),
+        )
+    ]
+    captured = {}
+    original_close = benchmark_plotting.plt.close
+    monkeypatch.setattr(
+        benchmark_plotting.plt,
+        "close",
+        lambda figure: captured.setdefault("figure", figure),
+    )
+
+    output = benchmark_plotting.save_scalar_comparison_plot(
+        scenario_name="grating_diffraction", scalar_metrics=metrics
+    )
+
+    figure = captured["figure"]
+    assert output.is_file()
+    assert len(figure.axes) == 2
+    assert figure.axes[1].get_ylabel() == (
+        "absolute efficiency error (percentage points)"
+    )
+    assert "0.200 percentage points" in figure.axes[1].get_title()
+    assert "50.0% rel" in {text.get_text() for text in figure.axes[1].texts}
+    original_close(figure)
 
 
 def test_tidy3d_closed_surface_faces_feed_common_far_field_postprocess(monkeypatch):

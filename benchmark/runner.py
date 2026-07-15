@@ -2125,6 +2125,17 @@ def _compare_scalar_observables(
     if maxwell.keys() != tidy3d.keys():
         raise ValueError("Maxwell and Tidy3D scalar observable sets differ.")
 
+    eta_names = tuple(name for name in maxwell if name.startswith("eta_"))
+    eta_total_variation = None
+    if eta_names:
+        eta_total_variation = 0.5 * np.sum(
+            np.abs(
+                np.stack([np.asarray(maxwell[name]) for name in eta_names])
+                - np.stack([np.asarray(tidy3d[name]) for name in eta_names])
+            ),
+            axis=0,
+        )
+
     metrics: list[dict[str, object]] = []
     for observable, maxwell_values in maxwell.items():
         tidy3d_values = tidy3d[observable]
@@ -2140,11 +2151,11 @@ def _compare_scalar_observables(
             if len(maxwell_values) == 1
             else frequencies
         )
-        for frequency, actual, reference in zip(
+        for value_index, (frequency, actual, reference) in enumerate(zip(
             observable_frequencies,
             maxwell_values,
             tidy3d_values,
-        ):
+        )):
             actual = complex(actual)
             reference = complex(reference)
             scale = max(abs(actual), abs(reference), 1.0e-15)
@@ -2166,17 +2177,21 @@ def _compare_scalar_observables(
                 abs(actual), abs(reference)
             ) > 1.0e-12:
                 phase_error = float(abs(np.angle(actual * np.conj(reference))))
-            metrics.append(
-                {
-                    "frequency": float(frequency),
-                    "observable": observable,
-                    "maxwell": actual,
-                    "tidy3d": reference,
-                    "complex_error": float(abs(actual - reference) / scale),
-                    "magnitude_error": float(abs(abs(actual) - abs(reference)) / scale),
-                    "phase_error": phase_error,
-                }
-            )
+            metric = {
+                "frequency": float(frequency),
+                "observable": observable,
+                "maxwell": actual,
+                "tidy3d": reference,
+                "complex_error": float(abs(actual - reference) / scale),
+                "magnitude_error": float(abs(abs(actual) - abs(reference)) / scale),
+                "phase_error": phase_error,
+            }
+            if observable.startswith("eta_"):
+                metric["absolute_efficiency_error"] = float(abs(actual - reference))
+                metric["distribution_total_variation"] = float(
+                    eta_total_variation[value_index]
+                )
+            metrics.append(metric)
     return metrics
 
 
