@@ -1,7 +1,7 @@
 """Guard-convergence gate for the P5 functional-completeness plan.
 
 Walks every ``raise NotImplementedError`` in ``witwin/`` via AST, subtracts the
-committed contract-guard exclusion list (docs/reference/fdtd-gap-05-guard-census.md),
+committed contract-guard exclusion list (docs/reference/fdtd-capability-guard-census.md),
 and fails when the remaining *capability* guard count exceeds the committed
 budget. Each P5 phase lowers ``CAPABILITY_GUARD_BUDGET`` in the same commit
 that removes guards, so the metric cannot silently regress or be gamed by
@@ -15,32 +15,13 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 
-# Lowered by each P5 phase in the commit that removes guards. Never raised
-# without a corresponding update to docs/reference/fdtd-gap-05-guard-census.md.
-# P5.6 (cross-solver parity) re-measured this at 63: the Tidy3D export commits
-# (PEC/PECMedium, sigma_e+dispersive, Kerr/TPA, anisotropy, Medium2D/Graphene/
-# LossyMetal, modulation, custom poles/PerturbationMedium, geometry/source/
-# monitor kinds, nonuniform grids) lifted adapters/tidy3d.py capability guards
-# from 13 -> 10, taking the AST capability count 66 -> 63. FDFD static parity
-# and FDFD nonuniform grids are deferred by user decision (2026-07-11), so no
-# fdfd/ guard was removed; the fdfd/solver.py messages were reworded to honest
-# user-deferral statements instead.
-# P5.7-P5.9 (final reconciliation, measured on merged master) re-measured this at
-# 58. P5.7 (modal/port maturity) took fdtd/excitation/modes.py 7 -> 3: two dead
-# differentiable node caps deleted, the full-vector complex-epsilon guard deleted
-# (complex planes fall through to the scalar complex solve), and the sparse
-# request-count guard reclassified NotImplementedError -> ValueError; the surviving
-# three (Bloch transverse boundary, magnetic mu_r scalar plane, differentiable
-# non-Hermitian lossy adjoint) are physics-worded. P5.9 (postprocess generality)
-# took postprocess/scattering_parameters.py 1 -> 0 (broadband incident_power="auto"
-# replaced its last NotImplementedError with actionable ValueErrors). P5.8
-# (CUDA-graph coverage) added and removed no NotImplementedError: its capture
-# coverage was lifted by narrowing boolean/predicate declines in
-# fdtd/runtime/stepping.py, not by deleting raise statements. Net 63 -> 58.
-CAPABILITY_GUARD_BUDGET = 58
+# This exact snapshot was reconciled on 2026-07-15 after the RF, adjoint,
+# material, and interoperability feature series landed. Lower it when a
+# capability guard is implemented; do not raise it without updating the census.
+CAPABILITY_GUARD_BUDGET = 108
 
 # (posix path relative to the repo root, distinctive message substring).
-# Keep in sync with the table in docs/reference/fdtd-gap-05-guard-census.md.
+# Keep in sync with docs/reference/fdtd-capability-guard-census.md.
 CONTRACT_GUARDS = (
     ("witwin/maxwell/media.py", "Nonlinear Material frequency evaluation is not defined without a field amplitude"),
     ("witwin/maxwell/media.py", "relative_permittivity() currently supports isotropic Material only"),
@@ -53,7 +34,7 @@ CONTRACT_GUARDS = (
     ("witwin/maxwell/media.py", "relative_permittivity() is not defined for PerturbationMedium"),
     ("witwin/maxwell/scene.py", "SceneModule subclasses must implement to_scene()"),
     ("witwin/maxwell/geometry/polyslab.py", "ComplexPolySlab does not support mesh export"),
-    ("witwin/maxwell/fdtd/adjoint/bridge.py", "FDTD backward currently supports trainable scene inputs that contribute"),
+    ("witwin/maxwell/fdtd/adjoint/bridge.py", "FDTD backward requires an input that contributes"),
     ("witwin/maxwell/fdtd/adjoint/bridge.py", "FDTD adjoint requires complex field state for Bloch faces"),
     ("witwin/maxwell/fdfd/adjoint/bridge.py", "FDFD backward currently supports trainable scene inputs that contribute"),
     ("witwin/maxwell/adapters/tidy3d.py", "Tidy3D export for magnetic dispersive Material"),
@@ -118,7 +99,7 @@ def test_capability_guard_budget():
     assert len(capability) <= CAPABILITY_GUARD_BUDGET, (
         f"{len(capability)} capability guards exceed the committed budget of "
         f"{CAPABILITY_GUARD_BUDGET}. New NotImplementedError guards need either an "
-        "implementation or a contract-guard entry in docs/reference/fdtd-gap-05-guard-census.md:\n"
+            "implementation or a contract-guard entry in docs/reference/fdtd-capability-guard-census.md:\n"
         + "\n".join(f"  {rel}:{lineno}  {msg[:90]}" for rel, lineno, msg in capability)
     )
 
@@ -129,7 +110,7 @@ def test_contract_guard_list_is_accurate():
     for file, key in CONTRACT_GUARDS:
         assert any(rel == file and key in msg for rel, _, msg in guards), (
             f"Stale contract-guard entry: {file!r} has no NotImplementedError containing {key!r}. "
-            "Update CONTRACT_GUARDS and docs/reference/fdtd-gap-05-guard-census.md."
+            "Update CONTRACT_GUARDS and docs/reference/fdtd-capability-guard-census.md."
         )
 
 

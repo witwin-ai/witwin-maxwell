@@ -3,7 +3,9 @@ from collections.abc import Mapping
 import pytest
 import torch
 
+import witwin.maxwell as mw
 from witwin.maxwell.network import NetworkData, PERSISTENCE_SCHEMA_VERSION
+from witwin.maxwell.result import Result
 
 
 def _iter_tensors(value):
@@ -84,3 +86,30 @@ def test_network_data_load_rejects_unknown_schema_version(tmp_path):
 
     with pytest.raises(ValueError, match="Unsupported NetworkData schema_version"):
         NetworkData.load(path)
+
+
+def test_result_round_trip_restores_network_data(tmp_path):
+    network = NetworkData(
+        frequencies=torch.tensor([1.0e9], dtype=torch.float64),
+        s=torch.tensor([[[0.1 + 0.2j]]], dtype=torch.complex128),
+        z0=50.0,
+        port_names=("feed",),
+    )
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+    )
+    path = tmp_path / "result.pt"
+
+    Result(
+        method="fdtd",
+        scene=scene,
+        frequencies=(1.0e9,),
+        network=network,
+    ).save(path)
+    loaded = Result.load(path, scene=scene)
+
+    assert loaded.network is not None
+    assert loaded.network.port_names == network.port_names
+    torch.testing.assert_close(loaded.network.s, network.s)

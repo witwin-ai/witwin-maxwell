@@ -43,7 +43,7 @@ def main() -> None:
     build_dir = Path(
         os.environ.get(
             "WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR",
-            Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda_wheel" / "stable_abi_v1",
+            Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda_wheel" / "stable_abi_v2",
         )
     )
     os.environ["WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR"] = str(build_dir)
@@ -61,6 +61,9 @@ def main() -> None:
             existing.unlink()
     target = cuda_build.prebuilt_extension_path()
     shutil.copy2(module_file, target)
+    marker = cuda_build.prebuilt_abi_marker_path(target)
+    marker.write_text(f"{cuda_build.STABLE_ABI_VERSION}\n", encoding="utf-8")
+
     print(f"Built prebuilt FDTD CUDA extension: {target}")
 
 

@@ -131,5 +131,15 @@ def test_result_save_embeds_detached_cpu_port_snapshots(tmp_path):
     torch.testing.assert_close(saved["metadata"]["calibration"], port.metadata["calibration"])
     assert all(tensor.device.type == "cpu" for tensor in _iter_tensors(payload))
     assert all(not tensor.requires_grad for tensor in _iter_tensors(payload))
+
+    loaded = Result.load(path, scene=_scene())
+    restored = loaded.port("feed")
+    assert restored.port_name == port.port_name
+    assert restored.direction == port.direction
+    assert restored.reference_plane == pytest.approx(port.reference_plane)
+    torch.testing.assert_close(restored.voltage, port.voltage.detach())
+    torch.testing.assert_close(restored.current, port.current.detach())
+    torch.testing.assert_close(restored.z0, port.z0.detach())
+    assert all(not tensor.requires_grad for tensor in _iter_tensors(restored.metadata))
     assert field.requires_grad
     assert port.voltage.requires_grad

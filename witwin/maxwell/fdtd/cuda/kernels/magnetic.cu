@@ -22,6 +22,8 @@ __global__ void update_magnetic_standard_kernel(
     unsigned int nx,
     unsigned int ny,
     unsigned int nz,
+    unsigned int local_x_begin,
+    unsigned int local_x_end,
     const float* __restrict__ first,
     const float* __restrict__ second,
     const float* __restrict__ decay,
@@ -31,8 +33,8 @@ __global__ void update_magnetic_standard_kernel(
     float* __restrict__ field) {
   const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
   const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
+  const unsigned int i = local_x_begin + blockIdx.z * blockDim.z + threadIdx.z;
+  if (i >= local_x_end || i >= nx || j >= ny || k >= nz) {
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
@@ -351,6 +353,47 @@ void check_magnetic_cpml_compressed_inputs(
 
 }  // namespace
 
+void update_magnetic_hx_standard_bounded_cuda(
+    torch::stable::Tensor hx,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& inv_dy,
+    const torch::stable::Tensor& inv_dz,
+    int64_t local_x_begin,
+    int64_t local_x_end,
+    int64_t global_x_offset,
+    int64_t global_x_extent) {
+  check_magnetic_inputs(hx, ey, ez, decay, curl, "hx");
+  check_rank3_shape(ey, "ey", hx.size(0), hx.size(1), hx.size(2) + 1);
+  check_rank3_shape(ez, "ez", hx.size(0), hx.size(1) + 1, hx.size(2));
+  check_spacing_vector(hx, inv_dy, 1, "inv_dy");
+  check_spacing_vector(hx, inv_dz, 2, "inv_dz");
+  check_bounded_x_launch(
+      hx, local_x_begin, local_x_end, global_x_offset, global_x_extent, "hx");
+  if (local_x_begin == local_x_end) {
+    return;
+  }
+  torch::stable::accelerator::DeviceGuard guard(hx.get_device_index());
+  const auto sizes = hx.sizes();
+  const dim3 block = field_block3d();
+  update_magnetic_standard_kernel<0><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      static_cast<unsigned int>(sizes[0]),
+      static_cast<unsigned int>(sizes[1]),
+      static_cast<unsigned int>(sizes[2]),
+      static_cast<unsigned int>(local_x_begin),
+      static_cast<unsigned int>(local_x_end),
+      ey.mutable_data_ptr<float>(),
+      ez.mutable_data_ptr<float>(),
+      decay.mutable_data_ptr<float>(),
+      curl.mutable_data_ptr<float>(),
+      inv_dy.mutable_data_ptr<float>(),
+      inv_dz.mutable_data_ptr<float>(),
+      hx.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
 void update_magnetic_hx_standard_cuda(
     torch::stable::Tensor hx,
     const torch::stable::Tensor& ey,
@@ -359,25 +402,59 @@ void update_magnetic_hx_standard_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& inv_dy,
     const torch::stable::Tensor& inv_dz) {
-  check_magnetic_inputs(hx, ey, ez, decay, curl, "hx");
-  check_rank3_shape(ey, "ey", hx.size(0), hx.size(1), hx.size(2) + 1);
-  check_rank3_shape(ez, "ez", hx.size(0), hx.size(1) + 1, hx.size(2));
-  check_spacing_vector(hx, inv_dy, 1, "inv_dy");
-  check_spacing_vector(hx, inv_dz, 2, "inv_dz");
-  torch::stable::accelerator::DeviceGuard guard(hx.get_device_index());
-  const auto sizes = hx.sizes();
+  const int64_t x_extent = hx.size(0);
+  update_magnetic_hx_standard_bounded_cuda(
+      hx,
+      ey,
+      ez,
+      decay,
+      curl,
+      inv_dy,
+      inv_dz,
+      0,
+      x_extent,
+      0,
+      x_extent);
+}
+
+void update_magnetic_hy_standard_bounded_cuda(
+    torch::stable::Tensor hy,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ez,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dz,
+    int64_t local_x_begin,
+    int64_t local_x_end,
+    int64_t global_x_offset,
+    int64_t global_x_extent) {
+  check_magnetic_inputs(hy, ex, ez, decay, curl, "hy");
+  check_rank3_shape(ex, "ex", hy.size(0), hy.size(1), hy.size(2) + 1);
+  check_rank3_shape(ez, "ez", hy.size(0) + 1, hy.size(1), hy.size(2));
+  check_spacing_vector(hy, inv_dx, 0, "inv_dx");
+  check_spacing_vector(hy, inv_dz, 2, "inv_dz");
+  check_bounded_x_launch(
+      hy, local_x_begin, local_x_end, global_x_offset, global_x_extent, "hy");
+  if (local_x_begin == local_x_end) {
+    return;
+  }
+  torch::stable::accelerator::DeviceGuard guard(hy.get_device_index());
+  const auto sizes = hy.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_standard_kernel<0><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_magnetic_standard_kernel<1><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
-      ey.mutable_data_ptr<float>(),
+      static_cast<unsigned int>(local_x_begin),
+      static_cast<unsigned int>(local_x_end),
+      ex.mutable_data_ptr<float>(),
       ez.mutable_data_ptr<float>(),
       decay.mutable_data_ptr<float>(),
       curl.mutable_data_ptr<float>(),
-      inv_dy.mutable_data_ptr<float>(),
+      inv_dx.mutable_data_ptr<float>(),
       inv_dz.mutable_data_ptr<float>(),
-      hx.mutable_data_ptr<float>());
+      hy.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
@@ -389,25 +466,49 @@ void update_magnetic_hy_standard_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& inv_dx,
     const torch::stable::Tensor& inv_dz) {
-  check_magnetic_inputs(hy, ex, ez, decay, curl, "hy");
-  check_rank3_shape(ex, "ex", hy.size(0), hy.size(1), hy.size(2) + 1);
-  check_rank3_shape(ez, "ez", hy.size(0) + 1, hy.size(1), hy.size(2));
-  check_spacing_vector(hy, inv_dx, 0, "inv_dx");
-  check_spacing_vector(hy, inv_dz, 2, "inv_dz");
-  torch::stable::accelerator::DeviceGuard guard(hy.get_device_index());
-  const auto sizes = hy.sizes();
+  const int64_t x_extent = hy.size(0);
+  update_magnetic_hy_standard_bounded_cuda(
+      hy, ex, ez, decay, curl, inv_dx, inv_dz, 0, x_extent, 0, x_extent);
+}
+
+void update_magnetic_hz_standard_bounded_cuda(
+    torch::stable::Tensor hz,
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl,
+    const torch::stable::Tensor& inv_dx,
+    const torch::stable::Tensor& inv_dy,
+    int64_t local_x_begin,
+    int64_t local_x_end,
+    int64_t global_x_offset,
+    int64_t global_x_extent) {
+  check_magnetic_inputs(hz, ex, ey, decay, curl, "hz");
+  check_rank3_shape(ex, "ex", hz.size(0), hz.size(1) + 1, hz.size(2));
+  check_rank3_shape(ey, "ey", hz.size(0) + 1, hz.size(1), hz.size(2));
+  check_spacing_vector(hz, inv_dx, 0, "inv_dx");
+  check_spacing_vector(hz, inv_dy, 1, "inv_dy");
+  check_bounded_x_launch(
+      hz, local_x_begin, local_x_end, global_x_offset, global_x_extent, "hz");
+  if (local_x_begin == local_x_end) {
+    return;
+  }
+  torch::stable::accelerator::DeviceGuard guard(hz.get_device_index());
+  const auto sizes = hz.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_standard_kernel<1><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_magnetic_standard_kernel<2><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
+      static_cast<unsigned int>(local_x_begin),
+      static_cast<unsigned int>(local_x_end),
       ex.mutable_data_ptr<float>(),
-      ez.mutable_data_ptr<float>(),
+      ey.mutable_data_ptr<float>(),
       decay.mutable_data_ptr<float>(),
       curl.mutable_data_ptr<float>(),
       inv_dx.mutable_data_ptr<float>(),
-      inv_dz.mutable_data_ptr<float>(),
-      hy.mutable_data_ptr<float>());
+      inv_dy.mutable_data_ptr<float>(),
+      hz.mutable_data_ptr<float>());
   WITWIN_CUDA_CHECK();
 }
 
@@ -419,26 +520,9 @@ void update_magnetic_hz_standard_cuda(
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& inv_dx,
     const torch::stable::Tensor& inv_dy) {
-  check_magnetic_inputs(hz, ex, ey, decay, curl, "hz");
-  check_rank3_shape(ex, "ex", hz.size(0), hz.size(1) + 1, hz.size(2));
-  check_rank3_shape(ey, "ey", hz.size(0) + 1, hz.size(1), hz.size(2));
-  check_spacing_vector(hz, inv_dx, 0, "inv_dx");
-  check_spacing_vector(hz, inv_dy, 1, "inv_dy");
-  torch::stable::accelerator::DeviceGuard guard(hz.get_device_index());
-  const auto sizes = hz.sizes();
-  const dim3 block = field_block3d();
-  update_magnetic_standard_kernel<2><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-      static_cast<unsigned int>(sizes[0]),
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      ex.mutable_data_ptr<float>(),
-      ey.mutable_data_ptr<float>(),
-      decay.mutable_data_ptr<float>(),
-      curl.mutable_data_ptr<float>(),
-      inv_dx.mutable_data_ptr<float>(),
-      inv_dy.mutable_data_ptr<float>(),
-      hz.mutable_data_ptr<float>());
-  WITWIN_CUDA_CHECK();
+  const int64_t x_extent = hz.size(0);
+  update_magnetic_hz_standard_bounded_cuda(
+      hz, ex, ey, decay, curl, inv_dx, inv_dy, 0, x_extent, 0, x_extent);
 }
 
 void update_magnetic_hx_cpml_cuda(

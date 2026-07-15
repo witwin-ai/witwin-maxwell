@@ -101,6 +101,57 @@ def _network_data_snapshot(data: NetworkData | None):
     }
 
 
+def _port_data_from_snapshot(payload: Mapping[str, Any]) -> PortData:
+    if not isinstance(payload, Mapping):
+        raise ValueError("Result port snapshot must contain a mapping payload.")
+    if payload.get("data_type") != "PortData":
+        raise ValueError("Result port snapshot has an invalid data_type.")
+    if payload.get("schema_version") != PortData.schema_version:
+        raise ValueError(
+            f"Unsupported PortData schema_version {payload.get('schema_version')!r}."
+        )
+    return PortData(
+        port_name=payload["port_name"],
+        frequencies=payload["frequencies"],
+        voltage=payload["voltage"],
+        current=payload["current"],
+        z0=payload["z0"],
+        direction=payload["direction"],
+        reference_plane=payload["reference_plane"],
+        available_power=payload["available_power"],
+        mode_names=payload.get("mode_names"),
+        beta=payload.get("beta"),
+        characteristic_impedance=payload.get("characteristic_impedance"),
+        tracking_confidence=payload.get("tracking_confidence"),
+        metadata=payload["metadata"],
+        phasor_convention=payload["phasor_convention"],
+        power_wave_convention=payload["power_wave_convention"],
+    )
+
+
+def _network_data_from_snapshot(payload: Mapping[str, Any] | None) -> NetworkData | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, Mapping):
+        raise ValueError("Result network snapshot must contain a mapping payload.")
+    if payload.get("data_type") != "NetworkData":
+        raise ValueError("Result network snapshot has an invalid data_type.")
+    if payload.get("schema_version") != NetworkData.schema_version:
+        raise ValueError(
+            f"Unsupported NetworkData schema_version {payload.get('schema_version')!r}."
+        )
+    return NetworkData(
+        frequencies=payload["frequencies"],
+        s=payload["s"],
+        z0=payload["z0"],
+        port_names=tuple(payload["port_names"]),
+        valid_columns=payload["valid_columns"],
+        metadata=payload["metadata"],
+        phasor_convention=payload["phasor_convention"],
+        power_wave_convention=payload["power_wave_convention"],
+    )
+
+
 def _resolve_result_frequencies(*, frequency: float | None, frequencies) -> tuple[float, ...]:
     if frequencies is not None:
         resolved = tuple(float(freq) for freq in frequencies)
@@ -818,6 +869,8 @@ class Result:
         self._network = network
         self._metadata = _clone_mapping(metadata)
         self._solver_stats = _clone_mapping(solver_stats)
+        self._sharded_manifest = None
+        self._shard_paths: tuple[Path, ...] = ()
         self.raw_output = raw_output
         self.plot = ResultPlotter(self)
 
@@ -860,6 +913,22 @@ class Result:
     @property
     def network(self) -> NetworkData | None:
         return self._network
+
+    @property
+    def solver_stats(self) -> dict[str, Any]:
+        return dict(self._solver_stats)
+
+    @property
+    def is_sharded(self) -> bool:
+        return self._sharded_manifest is not None
+
+    @property
+    def sharded_manifest(self):
+        return self._sharded_manifest
+
+    @property
+    def shard_paths(self) -> tuple[Path, ...]:
+        return self._shard_paths
 
     @property
     def E(self) -> ResultFieldAccessor:
@@ -1171,9 +1240,8 @@ class Result:
 
         Port payloads use the same versioned schema as ``PortData.save``. The
         snapshot intentionally omits the declarative Scene, prepared Scene, solver,
-        raw runtime output, and every live autograd graph. It is therefore not a
-        complete ``Result.load`` format; reconstructing a Result requires a future
-        explicit Scene serialization contract.
+        raw runtime output, and every live autograd graph. Loading therefore requires
+        the caller to supply the corresponding declarative Scene.
         """
 
         output_path = Path(path)
@@ -1182,6 +1250,7 @@ class Result:
             {
                 "schema_version": RESULT_SNAPSHOT_SCHEMA_VERSION,
                 "data_type": "ResultSnapshot",
+                "format_version": 1,
                 "method": self.method,
                 "frequency": self.frequency,
                 "frequencies": self.frequencies,
@@ -1197,3 +1266,142 @@ class Result:
             },
             output_path,
         )
+
+    def save_sharded(self, directory: str | Path):
+        """Persist owned field shards without assembling global field tensors."""
+
+        exporter = getattr(self.solver, "export_field_shards", None)
+        if not callable(exporter):
+            raise RuntimeError(
+                "Result.save_sharded() requires solver.export_field_shards(); "
+                "this Result has no shard field export provider."
+            )
+        from .fdtd.distributed.persistence import write_sharded_result
+
+        payload = {
+            "schema_version": RESULT_SNAPSHOT_SCHEMA_VERSION,
+            "data_type": "ResultSnapshot",
+            "format_version": 1,
+            "method": self.method,
+            "frequency": self.frequency,
+            "frequencies": self.frequencies,
+            "fields": {},
+            "monitors": _cpu_serializable(self._monitors),
+            "ports": {
+                name: _port_data_snapshot(data)
+                for name, data in self._ports.items()
+            },
+            "network": _network_data_snapshot(self._network),
+            "metadata": _cpu_serializable(self._metadata),
+            "solver_stats": _cpu_serializable(self._solver_stats),
+        }
+        return write_sharded_result(
+            directory,
+            result_payload=payload,
+            shard_artifacts=exporter(),
+            frequencies=self.frequencies,
+        )
+
+    @classmethod
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        scene,
+        prepared_scene=None,
+        map_location: Any = "cpu",
+    ) -> "Result":
+        """Load detached inference data saved by :meth:`save`.
+
+        The declarative scene is supplied by the caller because runtime solvers,
+        prepared scenes, and transport state are intentionally not persisted.
+        Result files use pickle-backed ``torch.save`` and must therefore only be
+        loaded from trusted sources.
+        """
+
+        payload = torch.load(
+            Path(path),
+            map_location=map_location,
+            weights_only=False,
+        )
+        if not isinstance(payload, dict):
+            raise ValueError("Result checkpoint must contain a mapping payload.")
+        if payload.get("data_type") != "ResultSnapshot":
+            raise ValueError("Result checkpoint has an invalid data_type.")
+        version = payload.get("schema_version")
+        if version != RESULT_SNAPSHOT_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported Result schema_version={version!r}.")
+        missing = {"method", "fields", "monitors"}.difference(payload)
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise ValueError(f"Result checkpoint is missing required keys: {names}.")
+
+        return cls(
+            method=payload["method"],
+            scene=scene,
+            prepared_scene=prepared_scene,
+            frequency=payload.get("frequency"),
+            frequencies=payload.get("frequencies"),
+            fields=payload["fields"],
+            monitors=payload["monitors"],
+            ports={
+                name: _port_data_from_snapshot(data)
+                for name, data in payload.get("ports", {}).items()
+            },
+            network=_network_data_from_snapshot(payload.get("network")),
+            metadata=payload.get("metadata"),
+            solver_stats=payload.get("solver_stats"),
+        )
+
+    @classmethod
+    def load_sharded(
+        cls,
+        directory: str | Path,
+        *,
+        scene,
+        prepared_scene=None,
+        gather_fields: bool = False,
+        map_location: Any = "cpu",
+    ) -> "Result":
+        """Load sharded metadata lazily, gathering owned fields only on request."""
+
+        if not isinstance(gather_fields, bool):
+            raise TypeError("gather_fields must be a bool.")
+        from .fdtd.distributed.persistence import load_sharded_result
+
+        loaded = load_sharded_result(
+            directory,
+            gather_fields=gather_fields,
+            map_location=map_location,
+        )
+        payload = loaded.result_payload
+        if payload.get("data_type") != "ResultSnapshot":
+            raise ValueError("Sharded Result metadata has an invalid data_type.")
+        version = payload.get("schema_version")
+        if version != RESULT_SNAPSHOT_SCHEMA_VERSION:
+            raise ValueError(
+                f"Unsupported sharded Result schema_version={version!r}."
+            )
+        missing = {"method", "monitors"}.difference(payload)
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise ValueError(f"Sharded Result metadata is missing required keys: {names}.")
+        result = cls(
+            method=payload["method"],
+            scene=scene,
+            prepared_scene=prepared_scene,
+            frequency=payload.get("frequency"),
+            frequencies=payload.get("frequencies"),
+            fields=loaded.fields,
+            monitors=payload["monitors"],
+            ports={
+                name: _port_data_from_snapshot(data)
+                for name, data in payload.get("ports", {}).items()
+            },
+            network=_network_data_from_snapshot(payload.get("network")),
+            metadata=payload.get("metadata"),
+            solver_stats=payload.get("solver_stats"),
+        )
+        result._sharded_manifest = loaded.manifest
+        result._shard_paths = loaded.shard_paths
+        return result
