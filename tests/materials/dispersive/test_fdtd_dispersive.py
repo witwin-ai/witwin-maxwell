@@ -268,15 +268,19 @@ def test_fdtd_anisotropic_slab_is_polarization_selective():
                 material=material,
             )
         )
-        scene.add_monitor(mw.PlaneMonitor("post", axis="x", position=0.30, fields=("Ey", "Ez")))
+        scene.add_monitor(mw.FluxMonitor("post", axis="x", position=0.30, frequencies=(frequency,)))
 
     ey_result = _run_fdtd(ey_scene, frequency)
     ez_result = _run_fdtd(ez_scene, frequency)
 
-    ey_transmission = _plane_field_mean(ey_result.monitor("post")["components"]["Ey"])
-    ez_transmission = _plane_field_mean(ez_result.monitor("post")["components"]["Ez"])
+    # Etalon transmission at 1 GHz through the 0.2 m slab: the eps_yy = 2.25 slab
+    # is exactly one wavelength thick (T ~ 1.0) while eps_zz = 7.0 sits near its
+    # reflection maximum (T ~ 0.44), so the transmitted-power contrast is ~2.3.
+    # Field amplitude would only give ~1.5, too tight against discretization.
+    ey_transmission = float(_to_cpu_numpy(ey_result.monitor("post")["flux"]).reshape(-1)[0])
+    ez_transmission = float(_to_cpu_numpy(ez_result.monitor("post")["flux"]).reshape(-1)[0])
 
-    assert ey_transmission > ez_transmission * 1.5
+    assert ey_transmission > ez_transmission * 1.8
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")

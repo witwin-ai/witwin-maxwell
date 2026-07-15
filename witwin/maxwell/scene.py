@@ -964,16 +964,20 @@ def _axis_nodes64(
     axis: str,
     axis_lo: float,
     axis_hi: float,
-    *,
-    anchor_high: bool = False,
 ) -> np.ndarray:
+    """Yee node (cell-boundary) coordinates spanning ``[axis_lo, axis_hi]`` inclusive.
+
+    ``count`` cells always require ``count + 1`` nodes, matching the
+    ``GridSpec.custom`` convention below. This holds for periodic/bloch axes
+    too: the runtime keeps the wrap node explicitly (the last node duplicates
+    the first, see ``_axis_dual_spacing64`` and the update kernels), so the
+    node array is endpoint-inclusive for every boundary kind.
+    """
     coords = grid.axis_coords(axis)
     if coords is None:
         step = float(getattr(grid, f"d{axis}"))
-        count = max(0, int(math.ceil((float(axis_hi) - float(axis_lo)) / step)))
-        if anchor_high:
-            return np.linspace(float(axis_lo), float(axis_hi), count + 1, endpoint=True, dtype=np.float64)[1:]
-        return np.linspace(float(axis_lo), float(axis_hi), count, endpoint=False, dtype=np.float64)
+        count = max(1, int(math.ceil((float(axis_hi) - float(axis_lo)) / step)))
+        return np.linspace(float(axis_lo), float(axis_hi), count + 1, endpoint=True, dtype=np.float64)
     span = float(axis_hi) - float(axis_lo)
     tolerance = 1e-9 * span
     if abs(float(coords[0]) - float(axis_lo)) > tolerance or abs(float(coords[-1]) - float(axis_hi)) > tolerance:
@@ -1006,10 +1010,8 @@ def _build_axis_grid64(
     axis_hi: float,
     boundary_kind: str,
     pml_layers: tuple[int, int] = (0, 0),
-    *,
-    anchor_high: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    nodes = _axis_nodes64(grid, axis, axis_lo, axis_hi, anchor_high=anchor_high)
+    nodes = _axis_nodes64(grid, axis, axis_lo, axis_hi)
     low_layers, high_layers = (int(value) for value in pml_layers)
     if low_layers or high_layers:
         if nodes.size < 2:
@@ -1055,11 +1057,6 @@ class PreparedScene(Scene):
             self.grid = GridSpec.custom(*resolve_auto_grid(self))
 
         x_start, x_end, y_start, y_end, z_start, z_end = self.physical_domain_range
-        high_symmetry_axes = {
-            axis
-            for axis, entry in zip(("x", "y", "z"), self.symmetry)
-            if entry is not None and entry[1] == "high"
-        }
         self.x_nodes64, self.dx_primal64, self.x_half64, self.dx_dual64 = _build_axis_grid64(
             self.grid,
             "x",
@@ -1067,7 +1064,6 @@ class PreparedScene(Scene):
             x_end,
             self.boundary.axis_kind("x"),
             (self.pml_thickness_for_face("x", "low"), self.pml_thickness_for_face("x", "high")),
-            anchor_high="x" in high_symmetry_axes,
         )
         self.y_nodes64, self.dy_primal64, self.y_half64, self.dy_dual64 = _build_axis_grid64(
             self.grid,
@@ -1076,7 +1072,6 @@ class PreparedScene(Scene):
             y_end,
             self.boundary.axis_kind("y"),
             (self.pml_thickness_for_face("y", "low"), self.pml_thickness_for_face("y", "high")),
-            anchor_high="y" in high_symmetry_axes,
         )
         self.z_nodes64, self.dz_primal64, self.z_half64, self.dz_dual64 = _build_axis_grid64(
             self.grid,
@@ -1085,7 +1080,6 @@ class PreparedScene(Scene):
             z_end,
             self.boundary.axis_kind("z"),
             (self.pml_thickness_for_face("z", "low"), self.pml_thickness_for_face("z", "high")),
-            anchor_high="z" in high_symmetry_axes,
         )
         computational_bounds = []
         for axis_index, (axis, nodes, primal) in enumerate(

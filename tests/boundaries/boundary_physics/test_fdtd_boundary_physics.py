@@ -55,9 +55,12 @@ def _run_fdtd_result(scene):
 
 
 def _build_symmetry_pair(symmetry_mode, *, polarization):
+    # dl and the domain spans are exact binary fractions so span / dl carries no
+    # floating-point excess and both grids mesh commensurately: the full grid
+    # puts nodes exactly on the half-domain grid, including one at x = 0.
     half_scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.15),
+        domain=mw.Domain(bounds=((0.0, 0.625), (-0.625, 0.625), (-0.625, 0.625))),
+        grid=mw.GridSpec.uniform(0.125),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
         symmetry=(symmetry_mode, None, None),
         device="cuda",
@@ -73,8 +76,10 @@ def _build_symmetry_pair(symmetry_mode, *, polarization):
     )
 
     full_scene = mw.Scene(
-        domain=mw.Domain(bounds=((-0.45, 0.599999), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.15),
+        # Symmetric full domain: the dipole sees identical PML distances on both
+        # x faces, so the full run is the exact mirror of the folded half run.
+        domain=mw.Domain(bounds=((-0.625, 0.625), (-0.625, 0.625), (-0.625, 0.625))),
+        grid=mw.GridSpec.uniform(0.125),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
         device="cuda",
     )

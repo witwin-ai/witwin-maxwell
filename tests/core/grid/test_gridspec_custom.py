@@ -104,12 +104,12 @@ def test_prepared_scene_uniform_masters_fill_domain_with_tidy3d_spacing_semantic
     )
     prepared = prepare_scene(scene)
 
-    old_count = torch.arange(-0.64, 0.64, dl).numel()
-    assert prepared.Nx == old_count
-    assert len(prepared.x_nodes64) == old_count
+    cell_count = int(np.ceil(1.28 / dl))
+    assert prepared.Nx == cell_count + 1
+    assert len(prepared.x_nodes64) == cell_count + 1
 
-    expected_nodes = np.linspace(-0.64, 0.64, old_count, endpoint=False, dtype=np.float64)
-    effective_dl = 1.28 / old_count
+    expected_nodes = np.linspace(-0.64, 0.64, cell_count + 1, endpoint=True, dtype=np.float64)
+    effective_dl = 1.28 / cell_count
     np.testing.assert_array_equal(prepared.x_nodes64, expected_nodes)
     np.testing.assert_allclose(prepared.dx_primal64, effective_dl, rtol=1e-12)
     np.testing.assert_allclose(prepared.dx_dual64, effective_dl, rtol=1e-12)
@@ -131,8 +131,8 @@ def test_uniform_grid_treats_requested_dl_as_maximum_step():
 
     prepared = prepare_scene(scene)
 
-    assert prepared.Nx == 4
-    np.testing.assert_allclose(prepared.x_nodes64, (0.0, 0.25, 0.5, 0.75))
+    assert prepared.Nx == 5
+    np.testing.assert_allclose(prepared.x_nodes64, (0.0, 0.25, 0.5, 0.75, 1.0))
     np.testing.assert_allclose(prepared.dx_primal64, 0.25)
 
 
@@ -146,9 +146,9 @@ def test_prepared_scene_appends_uniform_pml_outside_domain():
 
     prepared = prepare_scene(scene)
 
-    assert prepared.Nx == 14
+    assert prepared.Nx == 15
     np.testing.assert_allclose(prepared.x_nodes64[:3], (-0.7, -0.6, -0.5))
-    np.testing.assert_allclose(prepared.x_nodes64[-3:], (0.4, 0.5, 0.6))
+    np.testing.assert_allclose(prepared.x_nodes64[-3:], (0.5, 0.6, 0.7))
     assert prepared.physical_domain_range == pytest.approx((-0.5, 0.5) * 3)
     assert prepared.domain_range == pytest.approx((-0.7, 0.7) * 3)
 

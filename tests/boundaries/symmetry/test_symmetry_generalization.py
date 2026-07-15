@@ -178,11 +178,12 @@ def _rel_err(a, b):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_low_face_y_symmetry_expands_to_full_domain():
-    # PMC on the y-low face; folded half [0, 0.45]. Ez is tangential to the
-    # y-plane so it is even under PMC.
+    # PMC on the y-low face; folded half [0, 0.625]. Ez is tangential to the
+    # y-plane so it is even under PMC. dl and the spans are exact binary
+    # fractions so the folded and full grids mesh commensurately.
     half = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (0.0, 0.599999), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.15),
+        domain=mw.Domain(bounds=((-0.625, 0.625), (0.0, 0.625), (-0.625, 0.625))),
+        grid=mw.GridSpec.uniform(0.125),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
         symmetry=(None, ("PMC", "low"), None),
         device="cuda",
@@ -190,8 +191,8 @@ def test_low_face_y_symmetry_expands_to_full_domain():
     half.add_source(_dipole((0.0, 0.0, 0.0), "Ez"))
 
     full = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.45, 0.599999), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.15),
+        domain=mw.Domain(bounds=((-0.625, 0.625), (-0.625, 0.625), (-0.625, 0.625))),
+        grid=mw.GridSpec.uniform(0.125),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
         device="cuda",
     )
@@ -208,8 +209,8 @@ def test_high_face_x_symmetry_expands_to_full_domain():
     # PEC on the x-high face; folded half nodes end at the plane x=0. Ex is
     # normal to the x-plane so it is even under PEC.
     half = mw.Scene(
-        domain=mw.Domain(bounds=((-0.6, 0.0), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.15),
+        domain=mw.Domain(bounds=((-0.625, 0.0), (-0.625, 0.625), (-0.625, 0.625))),
+        grid=mw.GridSpec.uniform(0.125),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
         symmetry=(("PEC", "high"), None, None),
         device="cuda",
@@ -217,8 +218,8 @@ def test_high_face_x_symmetry_expands_to_full_domain():
     half.add_source(_dipole((0.0, 0.0, 0.0), "Ex"))
 
     full = mw.Scene(
-        domain=mw.Domain(bounds=((-0.45, 0.599999), (-0.6, 0.6), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.15),
+        domain=mw.Domain(bounds=((-0.625, 0.625), (-0.625, 0.625), (-0.625, 0.625))),
+        grid=mw.GridSpec.uniform(0.125),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
         device="cuda",
     )
@@ -234,8 +235,8 @@ def test_high_face_x_symmetry_expands_to_full_domain():
 def test_quarter_domain_two_plane_symmetry_expands_to_full_domain():
     # PMC on x-low and y-low; folded quarter. Ez is tangential to both planes.
     quarter = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 0.599999), (0.0, 0.599999), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.15),
+        domain=mw.Domain(bounds=((0.0, 0.625), (0.0, 0.625), (-0.625, 0.625))),
+        grid=mw.GridSpec.uniform(0.125),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
         symmetry=(("PMC", "low"), ("PMC", "low"), None),
         device="cuda",
@@ -243,8 +244,8 @@ def test_quarter_domain_two_plane_symmetry_expands_to_full_domain():
     quarter.add_source(_dipole((0.0, 0.0, 0.0), "Ez"))
 
     full = mw.Scene(
-        domain=mw.Domain(bounds=((-0.45, 0.599999), (-0.45, 0.599999), (-0.6, 0.6))),
-        grid=mw.GridSpec.uniform(0.15),
+        domain=mw.Domain(bounds=((-0.625, 0.625), (-0.625, 0.625), (-0.625, 0.625))),
+        grid=mw.GridSpec.uniform(0.125),
         boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
         device="cuda",
     )

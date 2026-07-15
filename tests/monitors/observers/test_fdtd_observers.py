@@ -420,11 +420,11 @@ def test_fdtd_odd_grid_dimensions_cover_tail_cells():
     ).run()
     prepared_scene = result.prepared_scene
 
-    # The odd physical counts (13, 11, 9) remain intact and four PML cells are
-    # appended outside each face.
-    assert prepared_scene.Nx == 21
-    assert prepared_scene.Ny == 19
-    assert prepared_scene.Nz == 17
+    # The odd physical cell counts (13, 11, 9 -> 14, 12, 10 nodes) remain intact
+    # and four PML cells are appended outside each face.
+    assert prepared_scene.Nx == 22
+    assert prepared_scene.Ny == 20
+    assert prepared_scene.Nz == 18
     assert result.tensor("Ex").shape == (prepared_scene.Nx - 1, prepared_scene.Ny, prepared_scene.Nz)
     assert result.tensor("Ey").shape == (prepared_scene.Nx, prepared_scene.Ny - 1, prepared_scene.Nz)
     assert result.tensor("Ez").shape == (prepared_scene.Nx, prepared_scene.Ny, prepared_scene.Nz - 1)

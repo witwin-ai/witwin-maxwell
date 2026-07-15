@@ -593,6 +593,13 @@ class Simulation:
     ) -> dict[str, Any]:
         elapsed_s = getattr(solver, "last_solve_elapsed_s", None)
         dft_sample_counts = tuple(getattr(solver, "dft_sample_counts", (getattr(solver, "dft_sample_count", 0),)))
+        observer_sample_counts = tuple(
+            getattr(
+                solver,
+                "observer_sample_counts",
+                (getattr(solver, "observer_sample_count", 0),),
+            )
+        )
         shutoff_triggered = bool(getattr(solver, "_shutoff_triggered", False))
         shutoff_step = getattr(solver, "_shutoff_step", None)
         return {
@@ -618,6 +625,8 @@ class Simulation:
             "num_frequencies": len(self.frequencies),
             "dft_samples": dft_sample_counts[0] if dft_sample_counts else 0,
             "dft_sample_counts": dft_sample_counts,
+            "observer_samples": observer_sample_counts[0] if observer_sample_counts else 0,
+            "observer_sample_counts": observer_sample_counts,
             "full_field_dft": use_full_field_dft,
             "elapsed_s": elapsed_s,
             "ms_per_step": (

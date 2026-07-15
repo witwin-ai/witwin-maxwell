@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import torch
 
 
 @contextlib.contextmanager
@@ -1832,13 +1833,48 @@ class TestSourceTimeConversion:
 
     def test_gaussian_pulse(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
-        st = mw.GaussianPulse(frequency=3e14, fwidth=1e13)
+        st = mw.GaussianPulse(frequency=3e14, fwidth=1e13, phase=0.37)
         result = _convert_source_time(st, td)
         assert isinstance(result, td.GaussianPulse)
         assert result.freq0 == 3e14
         assert result.fwidth == 1e13
         assert result.offset == pytest.approx(st.delay / st.sigma_t)
-        assert result.phase == pytest.approx(st.phase)
+        expected_phase = math.remainder(
+            2.0 * math.pi * st.frequency * st.delay - st.phase - 0.5 * math.pi,
+            2.0 * math.pi,
+        )
+        assert result.phase == pytest.approx(expected_phase)
+        assert result.remove_dc_component is False
+
+        times = np.linspace(st.delay - 3.0 * st.sigma_t, st.delay + 3.0 * st.sigma_t, 101)
+        envelope = np.exp(-0.5 * ((times - st.delay) / st.sigma_t) ** 2)
+        tidy_real = np.real(
+            1j
+            * np.exp(1j * result.phase)
+            * np.exp(-1j * 2.0 * np.pi * st.frequency * times)
+        ) * envelope
+        maxwell_real = np.asarray([st.evaluate(time) for time in times])
+        np.testing.assert_allclose(tidy_real, maxwell_real, rtol=1e-11, atol=1e-11)
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("tidy3d") is None,
+        reason="tidy3d is not installed",
+    )
+    def test_gaussian_pulse_matches_real_tidy3d_time_function(self):
+        st = mw.GaussianPulse(
+            frequency=2.0e9,
+            fwidth=0.4e9,
+            amplitude=1.7,
+            phase=0.37,
+        )
+        times = np.linspace(st.delay - 4.0 * st.sigma_t, st.delay + 4.0 * st.sigma_t, 257)
+
+        with _real_tidy3d() as real_td:
+            exported = _convert_source_time(st, real_td)
+            tidy3d_real = np.real(np.asarray(exported.amp_time(times)))
+
+        maxwell_real = np.asarray([st.evaluate(time) for time in times])
+        np.testing.assert_allclose(tidy3d_real, maxwell_real, rtol=2e-12, atol=2e-12)
 
 
 class TestMonitorConversion:
@@ -1989,6 +2025,42 @@ class TestFullSceneConversion:
         assert len(sim.sources) == 1
         assert len(sim.monitors) == 1
 
+    def test_uniform_material_region_exports_as_homogeneous_structure(self, inject_mock_tidy3d):
+        td = inject_mock_tidy3d
+        scene = mw.Scene(
+            domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
+            grid=mw.GridSpec.uniform(0.1),
+            boundary=mw.BoundarySpec.pml(),
+            device="cpu",
+        ).add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
+                density=torch.full((2, 2, 2), 0.25),
+                eps_bounds=(2.0, 6.0),
+            )
+        )
+
+        sim = scene.to_tidy3d(frequencies=1e9)
+
+        assert len(sim.structures) == 1
+        assert isinstance(sim.structures[0].medium, td.Medium)
+        assert sim.structures[0].medium.permittivity == pytest.approx(3.0)
+
+    def test_spatial_material_region_export_fails_loudly(self):
+        scene = mw.Scene(device="cpu").add_material_region(
+            mw.MaterialRegion(
+                name="design",
+                geometry=mw.Box(position=(0, 0, 0), size=(0.5, 0.5, 0.5)),
+                density=torch.arange(8, dtype=torch.float64).reshape(2, 2, 2),
+                bounds=(0.0, 7.0),
+                eps_bounds=(1.0, 4.0),
+            )
+        )
+
+        with pytest.raises(NotImplementedError, match="spatially uniform"):
+            scene.to_tidy3d(frequencies=1e9)
+
     def test_closed_surface_monitor_exports_as_resolved_finite_faces(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
         scene = (
@@ -2027,12 +2099,33 @@ class TestFullSceneConversion:
             domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
             grid=mw.GridSpec.uniform(0.1),
             boundary=mw.BoundarySpec.pml(),
-            sources=[mw.PointDipole(position=(0, 0, 0), source_time=mw.CW(frequency=1e9))],
-            symmetry=("PEC", None, "PMC"),
+            sources=[
+                mw.PlaneWave(
+                    direction=(0, 0, 1),
+                    polarization="Ex",
+                    source_time=mw.CW(frequency=1e9),
+                )
+            ],
+            symmetry=("PEC", "PMC", None),
             device="cpu",
         )
         sim = scene.to_tidy3d(frequencies=1e9)
-        assert sim.symmetry == (-1, 0, 1)
+        assert sim.symmetry == (-1, 1, 0)
+
+    def test_localized_face_symmetry_is_rejected_as_not_center_equivalent(self):
+        scene = mw.Scene(
+            sources=[
+                mw.PointDipole(
+                    position=(0, 0, 0),
+                    source_time=mw.CW(frequency=1e9),
+                )
+            ],
+            symmetry=("PEC", None, None),
+            device="cpu",
+        )
+
+        with pytest.raises(NotImplementedError, match="center-based"):
+            scene.to_tidy3d(frequencies=1e9)
 
     def test_custom_run_time(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
@@ -2043,6 +2136,36 @@ class TestFullSceneConversion:
         )
         sim = scene.to_tidy3d(frequencies=1e9, run_time=1e-9)
         assert sim.run_time == 1e-9
+
+    def test_scene_time_monitor_steps_are_exported_as_seconds(self):
+        scene = mw.Scene(
+            domain=mw.Domain(bounds=((-0.5, 0.5),) * 3),
+            grid=mw.GridSpec.uniform(0.1),
+            boundary=mw.BoundarySpec.periodic(),
+            sources=[
+                mw.PointDipole(
+                    position=(0, 0, 0),
+                    source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.2e9),
+                )
+            ],
+            monitors=[
+                mw.FieldTimeMonitor(
+                    "trace",
+                    components=("Ez",),
+                    start=2,
+                    stop=6,
+                    interval=2,
+                )
+            ],
+            device="cpu",
+        )
+
+        sim = scene.to_tidy3d(frequencies=1e9, courant=0.5)
+
+        dt = 0.5 / (299_792_458.0 * math.sqrt(3.0 / 0.1**2))
+        assert sim.monitors[0].start == pytest.approx(2 * dt)
+        assert sim.monitors[0].stop == pytest.approx(6 * dt)
+        assert sim.monitors[0].interval == 2
 
     def test_mode_port_without_excitation_exports_as_monitor_only(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d

@@ -13,7 +13,14 @@ from benchmark import plotting as benchmark_plotting
 from benchmark import report as benchmark_report
 from benchmark import runner as benchmark_runner
 from benchmark import paths as benchmark_paths
-from benchmark.metrics import align_arrays, align_plane_fields, phase_align_field, significant_field_mask
+from benchmark.grid_convergence import GridSample, estimate_observed_order, render_markdown
+from benchmark.metrics import (
+    align_arrays,
+    align_plane_fields,
+    best_fit_field_scale,
+    phase_align_field,
+    significant_field_mask,
+)
 from benchmark.models import ScenarioMetrics
 from benchmark.scenes import SCENARIOS, build_scene
 from benchmark.tidy3d_scene import benchmark_physical_bounds, prepare_tidy3d_benchmark_scene
@@ -40,8 +47,12 @@ def test_benchmark_scenes_build():
     }.issubset(set(SCENARIOS))
     for name in SCENARIOS:
         scene = build_scene(name)
-        assert len(scene.sources) == 1
-        assert len(scene.monitors) >= 5
+        assert scene.resolved_sources(), name
+        assert len(scene.resolved_monitors()) >= 5, name
+        scenario = SCENARIOS[name]
+        assert scenario.display_monitor in {
+            monitor.name for monitor in scene.resolved_monitors()
+        }, name
 
 
 def test_group7_scenarios_use_supported_source_boundary_and_monitor_contracts():
@@ -82,7 +93,7 @@ def test_group7_scenarios_use_supported_source_boundary_and_monitor_contracts():
         assert any(isinstance(monitor, mw.ClosedSurfaceMonitor) for monitor in scene.monitors)
 
 
-def test_source_normalized_tfsf_cache_uses_maxwell_incident_field_units():
+def test_source_normalized_tfsf_cache_uses_standard_spatial_unit_conversion():
     scene = build_scene("periodic_grating")
     monitors = {
         "field": {
@@ -100,12 +111,8 @@ def test_source_normalized_tfsf_cache_uses_maxwell_incident_field_units():
         normalize_source=True,
     )
 
-    unit_field = math.sqrt(2.0 / (299_792_458.0 * 8.8541878128e-12))
-    np.testing.assert_allclose(scaled["field"]["fields"]["Ey"], 1.0 / unit_field)
-    np.testing.assert_allclose(
-        scaled["flux"]["flux"],
-        2.0 / (unit_field * 1.0e6) ** 2,
-    )
+    np.testing.assert_allclose(scaled["field"]["fields"]["Ey"], 1.0e6)
+    np.testing.assert_allclose(scaled["flux"]["flux"], 2.0)
     assert scaled["field"]["position"] == pytest.approx(0.25)
     np.testing.assert_allclose(scaled["field"]["x"], (-0.64, 0.64))
 
@@ -293,9 +300,55 @@ def test_default_normal_plane_wave_does_not_use_directional_source_contract():
     assert not benchmark_runner._directional_source_uses_export_contract(scene.sources[0])
 
 
+def test_normalized_tfsf_cache_key_tracks_source_export_contract(monkeypatch):
+    scenario = SCENARIOS["tfsf_vacuum"]
+    scene = build_scene("tfsf_vacuum")
+    original = benchmark_runner._benchmark_cache_key(
+        scene,
+        scenario.frequencies,
+        scenario.run_time_factor,
+        normalize_source=True,
+    )
+    monkeypatch.setattr(
+        benchmark_runner,
+        "_TFSF_SOURCE_EXPORT_CONTRACT_VERSION",
+        benchmark_runner._TFSF_SOURCE_EXPORT_CONTRACT_VERSION + 1,
+    )
+    changed = benchmark_runner._benchmark_cache_key(
+        scene,
+        scenario.frequencies,
+        scenario.run_time_factor,
+        normalize_source=True,
+    )
+    assert changed != original
+
+
 def test_continuous_wave_cache_key_tracks_source_time_export_contract(monkeypatch):
     scenario = SCENARIOS["modulated_slab"]
     scene = build_scene("modulated_slab")
+    original = benchmark_runner._benchmark_cache_key(
+        scene,
+        scenario.frequencies,
+        scenario.run_time_factor,
+        normalize_source=False,
+    )
+    monkeypatch.setattr(
+        benchmark_runner,
+        "_SOURCE_TIME_EXPORT_CONTRACT_VERSION",
+        benchmark_runner._SOURCE_TIME_EXPORT_CONTRACT_VERSION + 1,
+    )
+    changed = benchmark_runner._benchmark_cache_key(
+        scene,
+        scenario.frequencies,
+        scenario.run_time_factor,
+        normalize_source=False,
+    )
+    assert changed != original
+
+
+def test_raw_time_monitor_cache_key_tracks_gaussian_export_contract(monkeypatch):
+    scenario = SCENARIOS["time_monitor_vacuum"]
+    scene = build_scene("time_monitor_vacuum")
     original = benchmark_runner._benchmark_cache_key(
         scene,
         scenario.frequencies,
@@ -348,6 +401,18 @@ def test_incident_scene_signature_ignores_unit_transverse_plane_wave_orientation
     assert benchmark_runner._incident_scene_signature(vacuum, (2.0e9,)) == (
         benchmark_runner._incident_scene_signature(rotated, (2.0e9,))
     )
+
+
+def test_tfsf_incident_power_uses_physical_box_aperture():
+    scene = build_scene("tfsf_vacuum")
+    impedance = 4.0e-7 * np.pi * 299_792_458.0
+
+    power = benchmark_runner._tfsf_plane_wave_incident_power(
+        scene,
+        normalize_source=True,
+    )
+
+    assert power == pytest.approx(0.5 * 0.6 * 0.6 / impedance)
 
 
 def test_flux_error_uses_empty_scene_incident_power_for_reflective_cases():
@@ -535,6 +600,198 @@ def test_phase_alignment_removes_only_global_phasor_on_significant_support():
     np.testing.assert_allclose(aligned[support], 1.2 * reference[support])
     assert abs(factor) == pytest.approx(1.0)
     assert abs(aligned[1]) == pytest.approx(abs(actual[1]))
+
+
+def test_best_fit_field_scale_separates_global_scale_from_shape_error():
+    reference = np.array((1.0 + 2.0j, -0.5 + 0.25j, 0.2 - 0.1j))
+    actual = (1.7 - 0.4j) * reference
+
+    aligned, scale = best_fit_field_scale(actual, reference)
+
+    np.testing.assert_allclose(aligned, reference)
+    assert scale == pytest.approx(1.0 / (1.7 - 0.4j))
+
+
+def test_scalar_observables_compare_point_probes_and_two_mode_planes():
+    point_monitors = {
+        "probe_0": {"fields": {"Ex": np.asarray([1.0 + 2.0j]), "Ey": np.asarray([3.0])}},
+        "probe_1": {"fields": {"Ez": np.asarray([-0.5j])}},
+    }
+    point_values = benchmark_runner._scalar_observables(
+        "point_probe_values", point_monitors, (1.0e9,)
+    )
+    assert set(point_values) == {"probe_0_Ex", "probe_0_Ey", "probe_1_Ez"}
+    np.testing.assert_array_equal(point_values["probe_0_Ex"], [1.0 + 2.0j])
+
+    mode_monitors = {
+        "mode_mid": {
+            "scalars": {
+                "amplitude_forward": np.asarray([2.0 + 0.0j]),
+                "effective_index": np.asarray([1.5]),
+            }
+        },
+        "mode_out": {
+            "scalars": {
+                "amplitude_forward": np.asarray([1.0 + 1.0j]),
+                "effective_index": np.asarray([1.5]),
+            }
+        },
+    }
+    mode_values = benchmark_runner._scalar_observables(
+        "mode_plane_ratio", mode_monitors, (1.0e9,)
+    )
+    np.testing.assert_allclose(mode_values["forward_amplitude_ratio"], [0.5 + 0.5j])
+
+
+def test_scalar_observables_return_permittivity_monitor_statistics():
+    monitors = {
+        "permittivity": {
+            "scalars": {
+                "eps_x_mean": np.asarray([2.0]),
+                "eps_x_min": np.asarray([1.0]),
+                "eps_x_max": np.asarray([4.0]),
+            }
+        }
+    }
+
+    values = benchmark_runner._scalar_observables(
+        "permittivity_stats", monitors, (1.0e9,)
+    )
+
+    assert set(values) == {"eps_x_mean", "eps_x_min", "eps_x_max"}
+    np.testing.assert_array_equal(values["eps_x_max"], [4.0])
+
+
+def test_scalar_observables_resample_and_normalize_time_monitor_traces():
+    monitors = {
+        "field_time": {"fields": {"Ex": np.asarray([0.0, 2.0, 0.0])}},
+        "flux_time": {"flux": np.asarray([0.0, -4.0, 0.0, 1.0])},
+    }
+
+    values = benchmark_runner._scalar_observables(
+        "time_monitor_traces", monitors, (1.0e9,)
+    )
+
+    assert values["field_time_Ex"].shape == (128,)
+    assert values["flux_time"].shape == (128,)
+    assert np.max(np.abs(values["field_time_Ex"])) == pytest.approx(1.0)
+    assert np.max(np.abs(values["flux_time"])) == pytest.approx(1.0)
+
+
+def test_time_monitor_trace_comparison_uses_waveform_l2_not_frequency_count():
+    monitors = {
+        "field_time": {
+            "t": np.asarray([0.0, 1.0, 2.0]),
+            "fields": {"Ex": np.asarray([0.0, 2.0, 0.0])},
+        },
+        "flux_time": {
+            "t": np.asarray([0.0, 1.0, 2.0, 3.0]),
+            "flux": np.asarray([0.0, -4.0, 0.0, 1.0]),
+        },
+    }
+
+    metrics = benchmark_runner._compare_scalar_observables(
+        "time_monitor_traces", monitors, monitors, (1.0e9,)
+    )
+
+    assert {item["observable"] for item in metrics} == {"field_time_Ex", "flux_time"}
+    assert all(item["complex_error"] == pytest.approx(0.0) for item in metrics)
+    assert all(item["phase_error"] is None for item in metrics)
+
+
+def test_time_monitor_trace_comparison_uses_common_physical_time_window():
+    full_times = np.arange(11, dtype=np.float64)
+    truncated_times = np.arange(7, dtype=np.float64)
+    full_trace = np.exp(-0.5 * ((full_times - 3.0) / 1.2) ** 2)
+    truncated_trace = np.exp(-0.5 * ((truncated_times - 3.0) / 1.2) ** 2)
+    maxwell = {
+        "field_time": {"t": full_times, "fields": {"Ex": full_trace}},
+        "flux_time": {"t": full_times, "flux": full_trace},
+    }
+    tidy3d = {
+        "field_time": {"t": truncated_times, "fields": {"Ex": truncated_trace}},
+        "flux_time": {"t": truncated_times, "flux": truncated_trace},
+    }
+
+    metrics = benchmark_runner._compare_scalar_observables(
+        "time_monitor_traces", maxwell, tidy3d, (1.0,),
+    )
+
+    assert all(item["complex_error"] == pytest.approx(0.0) for item in metrics)
+    assert all(item["time_window_s"] == pytest.approx(6.0) for item in metrics)
+
+
+def test_time_lag_diagnostic_reports_bounded_sample_shift():
+    reference = np.zeros(32)
+    reference[10:14] = (0.25, 1.0, 0.5, 0.1)
+    actual = np.roll(reference, 1)
+
+    lag_s, error = benchmark_runner._time_lag_diagnostic(
+        actual,
+        reference,
+        time_step=1.0e-10,
+        frequencies=(5.0e8,),
+    )
+
+    assert abs(lag_s) == pytest.approx(1.0e-10)
+    assert error == pytest.approx(0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs the CUDA FDTD runtime")
+def test_time_monitor_vacuum_peaks_at_physical_propagation_delay():
+    scenario = SCENARIOS["time_monitor_vacuum"]
+    scene = build_scene("time_monitor_vacuum")
+    _, monitors, _, _ = benchmark_runner._run_maxwell(
+        scene,
+        frequencies=scenario.frequencies,
+        run_time_factor=scenario.run_time_factor,
+        normalize_source=False,
+    )
+    source = scene.resolved_sources()[0]
+    source_z = benchmark_runner.soft_plane_wave_coordinate(scene, "z", 1.0)
+
+    field = monitors["field_time"]
+    field_times = np.asarray(field["t"], dtype=np.float64)
+    field_values = np.asarray(field["fields"]["Ex"])
+    field_peak_time = float(field_times[np.argmax(np.abs(field_values))])
+    expected_field_peak = float(source.source_time.delay) + (0.25 - source_z) / 299_792_458.0
+    field_sample_step = float(np.median(np.diff(field_times)))
+
+    flux = monitors["flux_time"]
+    flux_times = np.asarray(flux["t"], dtype=np.float64)
+    flux_values = np.asarray(flux["flux"])
+    flux_peak_time = float(flux_times[np.argmax(np.abs(flux_values))])
+    expected_flux_peak = float(source.source_time.delay) + (0.30 - source_z) / 299_792_458.0
+    flux_sample_step = float(np.median(np.diff(flux_times)))
+
+    assert np.all(np.diff(field_times) > 0.0)
+    assert np.all(np.diff(flux_times) > 0.0)
+    assert abs(field_peak_time - expected_field_peak) <= 1.5 * field_sample_step
+    assert abs(flux_peak_time - expected_flux_peak) <= 1.5 * flux_sample_step
+
+
+def test_grid_convergence_helpers_report_observed_order_and_performance():
+    assert estimate_observed_order(0.09, 0.04, 1.5) == pytest.approx(2.0)
+    samples = [
+        GridSample(0.06, (17, 17, 17), 1.0, 0.2, 5000.0, 100, 64.0),
+        GridSample(0.04, (25, 25, 25), 2.0, 0.3, 3333.0, 150, 96.0),
+        GridSample(0.02666666666666667, (38, 38, 38), 4.0, 0.5, 2000.0, 225, 144.0),
+    ]
+
+    report = render_markdown(samples, 0.09, 0.04, 2.0, updated_at="now")
+
+    assert "Observed order:** 2.0000" in report
+    assert "coarse vs medium | 9.000000e-02" in report
+    assert "Peak GPU (MiB)" in report
+
+
+@pytest.mark.parametrize(
+    ("coarse", "fine", "ratio"),
+    ((0.0, 0.1, 1.5), (0.1, 0.0, 1.5), (0.1, 0.05, 1.0)),
+)
+def test_grid_convergence_rejects_invalid_inputs(coarse, fine, ratio):
+    with pytest.raises(ValueError):
+        estimate_observed_order(coarse, fine, ratio)
 
 
 def test_select_monitor_plane_field_accepts_trailing_frequency_axis():
@@ -734,6 +991,32 @@ def test_real_scalar_comparison_plot_is_generated(tmp_path, monkeypatch):
     assert output.is_file()
 
 
+def test_time_trace_comparison_plot_is_generated(tmp_path, monkeypatch):
+    monkeypatch.setattr(benchmark_plotting, "ensure_directories", lambda: None)
+    monkeypatch.setattr(
+        benchmark_plotting,
+        "scenario_plot_dir",
+        lambda _name: tmp_path / "time_case",
+    )
+    times = np.linspace(0.0, 2.0e-9, 21)
+
+    output = benchmark_plotting.save_time_trace_comparison_plot(
+        scenario_name="time_case",
+        traces=[
+            {
+                "t": times,
+                "maxwell": np.sin(2.0 * np.pi * 1.0e9 * times),
+                "tidy3d": np.sin(2.0 * np.pi * 1.0e9 * times + 0.05),
+                "label": "field_time/Ex",
+                "ylabel": "normalized Ex",
+            }
+        ],
+    )
+
+    assert output == tmp_path / "time_case" / "time_trace_comparison.png"
+    assert output.is_file()
+
+
 def test_diffraction_scalar_observable_normalizes_common_orders():
     monitors = {
         "orders": {
@@ -849,6 +1132,45 @@ def test_extract_maxwell_monitors_prefers_native_component_payload():
         extracted["field_xy"]["field_coords"]["Ez"]["x"],
         np.linspace(-0.15, 0.15, 4),
     )
+
+
+def test_extract_fdfd_monitors_preserves_component_yee_coordinates():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+    ).add_monitor(
+        mw.PlaneMonitor(
+            "field",
+            axis="y",
+            position=0.0,
+            fields=("Ex", "Ey", "Ez"),
+            frequencies=(1.0e9,),
+        )
+    )
+    prepared = prepare_scene(scene)
+    fields = {
+        "EX": torch.ones((prepared.x_half.numel(), prepared.y.numel(), prepared.z.numel())),
+        "EY": torch.ones((prepared.x.numel(), prepared.y_half.numel(), prepared.z.numel())),
+        "EZ": torch.ones((prepared.x.numel(), prepared.y.numel(), prepared.z_half.numel())),
+    }
+
+    class DummyResult:
+        method = "fdfd"
+        frequency = 1.0e9
+        prepared_scene = prepared
+
+        def tensor(self, name):
+            return fields[name]
+
+    result = DummyResult()
+    result.fields = fields
+    extracted = benchmark_runner._extract_maxwell_monitors(result, scene)["field"]
+
+    for component in ("Ex", "Ey", "Ez"):
+        coords = benchmark_runner._component_plane_coords(extracted, component)
+        assert coords is not None
+        assert extracted["fields"][component].shape == tuple(len(axis) for axis in coords)
 
 
 def test_extract_maxwell_point_monitor_unwraps_component_data():
@@ -1069,6 +1391,7 @@ def test_report_writer_updates_markdown(tmp_path, monkeypatch):
         maxwell_time_s=1.23,
         tidy3d_cache_hit=True,
         field_l2=0.1,
+        field_shape_l2=0.01,
         field_linf=0.2,
         field_corr=0.99,
         flux_error=0.05,
@@ -1077,6 +1400,10 @@ def test_report_writer_updates_markdown(tmp_path, monkeypatch):
         material_source_plot=Path("plots/dipole/material_source.png"),
         field_plot=Path("plots/dipole/field_comparison.png"),
         updated_at="2026-03-16T12:00:00-07:00",
+        maxwell_ms_per_step=0.25,
+        maxwell_steps_per_second=4000.0,
+        maxwell_dft_samples=320,
+        maxwell_peak_gpu_memory_mb=128.5,
         scalar_plot=Path("plots/dipole/scalar_comparison.png"),
         scalar_metrics=[
             {
@@ -1089,6 +1416,15 @@ def test_report_writer_updates_markdown(tmp_path, monkeypatch):
                 "phase_error": 0.015,
             }
         ],
+        per_frequency=[
+            {
+                "frequency": 1.5e9,
+                "field_l2": 0.1,
+                "field_shape_l2": 0.01,
+                "field_linf": 0.2,
+                "field_corr": 0.99,
+            }
+        ],
     )
     planewave_result = ScenarioMetrics(
         name="planewave_vacuum",
@@ -1097,6 +1433,7 @@ def test_report_writer_updates_markdown(tmp_path, monkeypatch):
         maxwell_time_s=2.34,
         tidy3d_cache_hit=False,
         field_l2=0.2,
+        field_shape_l2=0.02,
         field_linf=0.3,
         field_corr=0.98,
         flux_error=0.15,
@@ -1105,12 +1442,25 @@ def test_report_writer_updates_markdown(tmp_path, monkeypatch):
         material_source_plot=Path("plots/planewave/material_source.png"),
         field_plot=Path("plots/planewave/field_comparison.png"),
         updated_at="2026-03-16T12:10:00-07:00",
+        per_frequency=[
+            {
+                "frequency": 1.5e9,
+                "field_l2": 0.2,
+                "field_shape_l2": 0.02,
+                "field_linf": 0.3,
+                "field_corr": 0.98,
+            }
+        ],
     )
-    benchmark_report.write_results_markdown([dipole_result, planewave_result])
+    benchmark_report.write_results_markdown([dipole_result])
+    benchmark_report.write_results_markdown([planewave_result])
     content = output_path.read_text(encoding="utf-8")
     assert "## Metric Guide" in content
     assert "Field L2 [smaller, <1e-1]" in content
+    assert "Shape L2 [smaller]" in content
     assert "Field Corr [larger, >0.99]" in content
+    assert "ms/step" in content
+    assert "128.50" in content
     assert "## dipole" in content
     assert "## planewave" in content
     assert "| dipole_vacuum | demo | field_xy | Ez |" in content
@@ -1121,6 +1471,9 @@ def test_report_writer_updates_markdown(tmp_path, monkeypatch):
     assert "[scalar comparison]" in content
     assert "## Scalar observables" in content
     assert "| dipole_vacuum | 1.50000000e+09 | S21 |" in content
+    assert "## Per-frequency field metrics" in content
+    assert "| dipole_vacuum | 1.50000000e+09 | 1.0000e-01 |" in content
+    assert "| planewave_vacuum | 1.50000000e+09 | 2.0000e-01 |" in content
 
 
 def test_material_source_plot_smoke(tmp_path, monkeypatch):
@@ -1135,6 +1488,22 @@ def test_material_source_plot_smoke(tmp_path, monkeypatch):
     )
     assert output_path.exists()
     assert output_path == tmp_path / "dipole" / "dipole_vacuum" / "material_source.png"
+
+
+def test_material_source_plot_resolves_mode_port_sources(tmp_path, monkeypatch):
+    monkeypatch.setattr(benchmark_paths, "PLOTS_DIR", tmp_path)
+
+    scene = build_scene("mode_port_straight_wg")
+    assert not scene.sources
+    assert scene.resolved_sources()
+
+    output_path = benchmark_plotting.save_material_source_plot(
+        scene=scene,
+        tidy_scene=scene,
+        scenario_name="mode_port_straight_wg",
+    )
+
+    assert output_path.exists()
 
 
 def test_prepare_tidy3d_benchmark_scene_preserves_material_regions():

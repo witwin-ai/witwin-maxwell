@@ -447,6 +447,8 @@ def test_simulation_fdtd_multi_frequency_wraps_solver(monkeypatch):
             self.dt = 0.25
             self.dft_sample_count = 6
             self.dft_sample_counts = (6, 5)
+            self.observer_sample_count = 6
+            self.observer_sample_counts = (6, 5)
             self.last_solve_elapsed_s = 0.084
 
         def init_field(self):
@@ -545,6 +547,7 @@ def test_simulation_fdtd_multi_frequency_wraps_solver(monkeypatch):
     stats = result.stats()
     assert stats["num_frequencies"] == 2
     assert stats["dft_sample_counts"] == (6, 5)
+    assert stats["observer_sample_counts"] == (6, 5)
     assert stats["steps_per_second"] == pytest.approx(24 / 0.084)
     assert result.solver.solve_args["dft_frequency"] == (0.9e9, 1.1e9)
     assert result.solver.solve_args["full_field_dft"] is True
@@ -718,9 +721,9 @@ def test_result_can_expand_low_face_symmetry_back_to_full_domain():
         scene=scene,
         frequency=1e9,
         fields={
-            "EX": torch.tensor([[[1.0]], [[2.0]]]),
-            "EY": torch.tensor([[[10.0]], [[20.0]], [[30.0]]]),
-            "EZ": torch.tensor([[[100.0]], [[200.0]], [[300.0]]]),
+            "EX": torch.tensor([[[1.0]], [[2.0]], [[3.0]]]),
+            "EY": torch.tensor([[[10.0]], [[20.0]], [[30.0]], [[40.0]]]),
+            "EZ": torch.tensor([[[100.0]], [[200.0]], [[300.0]], [[400.0]]]),
         },
     )
 
@@ -729,9 +732,9 @@ def test_result_can_expand_low_face_symmetry_back_to_full_domain():
     expanded_ey = expanded.E.y
     expanded_eps = expanded.materials.eps.scalar
 
-    assert expanded_ex[:, 0, 0].tolist() == [-2.0, -1.0, 1.0, 2.0]
-    assert expanded_ey[:, 0, 0].tolist() == [30.0, 20.0, 10.0, 20.0, 30.0]
-    assert expanded_eps.shape == (5, 2, 2)
+    assert expanded_ex[:, 0, 0].tolist() == [-3.0, -2.0, -1.0, 1.0, 2.0, 3.0]
+    assert expanded_ey[:, 0, 0].tolist() == [40.0, 30.0, 20.0, 10.0, 20.0, 30.0, 40.0]
+    assert expanded_eps.shape == (7, 3, 3)
 
 
 def test_fdtd_initialization_builds_dispersive_state(monkeypatch):
@@ -775,16 +778,16 @@ def test_result_expands_pec_symmetry_with_even_normal_component():
         scene=scene,
         frequency=1e9,
         fields={
-            "EX": torch.tensor([[[1.0]], [[2.0]]]),
-            "EZ": torch.tensor([[[10.0]], [[20.0]], [[30.0]]]),
+            "EX": torch.tensor([[[1.0]], [[2.0]], [[3.0]]]),
+            "EZ": torch.tensor([[[10.0]], [[20.0]], [[30.0]], [[40.0]]]),
         },
     )
 
     expanded_ex = result.tensor("Ex", expand_symmetry=True)
     expanded_ez = result.tensor("Ez", expand_symmetry=True)
 
-    assert expanded_ex[:, 0, 0].tolist() == [2.0, 1.0, 1.0, 2.0]
-    assert expanded_ez[:, 0, 0].tolist() == [-30.0, -20.0, 10.0, 20.0, 30.0]
+    assert expanded_ex[:, 0, 0].tolist() == [3.0, 2.0, 1.0, 1.0, 2.0, 3.0]
+    assert expanded_ez[:, 0, 0].tolist() == [-40.0, -30.0, -20.0, 10.0, 20.0, 30.0, 40.0]
 
 
 def test_simulation_fdfd_rejects_non_cuda_scene():

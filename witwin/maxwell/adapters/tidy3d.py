@@ -123,14 +123,22 @@ def _convert_source_time(source_time, td, *, amplitude_scale: float = 1.0):
 
     if isinstance(source_time, GaussianPulse):
         offset = source_time.delay / source_time.sigma_t
+        # Maxwell defines a real Gaussian-envelope cosine centered at ``delay``.
+        # Tidy3D uses Re[i exp(i*phase) exp(-i*omega*t)] when DC removal is off,
+        # so compensate both its Fourier sign convention and the delayed carrier.
+        phase = math.remainder(
+            2.0 * math.pi * source_time.frequency * source_time.delay
+            - source_time.phase
+            - 0.5 * math.pi,
+            2.0 * math.pi,
+        )
         return td.GaussianPulse(
             freq0=source_time.frequency,
             fwidth=source_time.fwidth,
             amplitude=source_time.amplitude * amplitude_scale,
-            # Tidy3D removes the arbitrary waveform delay during source-spectrum
-            # normalization while preserving this user-controlled phase.
-            phase=source_time.phase,
+            phase=phase,
             offset=offset,
+            remove_dc_component=False,
         )
 
     if isinstance(source_time, RickerWavelet):
@@ -889,6 +897,48 @@ def _convert_structure(structure, td, s, frequencies=None):
     return td.Structure(geometry=td_geometry, medium=td_material)
 
 
+def _convert_material_region(region, td, s):
+    """Lower a uniform density region to one homogeneous Tidy3D structure."""
+    import torch
+
+    if getattr(region.geometry, "kind", None) != "box":
+        raise NotImplementedError("Tidy3D export supports MaterialRegion with Box geometry only.")
+    if region.filter_radius is not None:
+        raise NotImplementedError(
+            "Tidy3D export cannot preserve a filtered MaterialRegion density field."
+        )
+
+    density = region.density.detach().cpu().to(torch.float64)
+    density_min = float(density.min())
+    density_max = float(density.max())
+    if not np.isclose(density_min, density_max, rtol=0.0, atol=1.0e-12):
+        raise NotImplementedError(
+            "Tidy3D export currently supports only spatially uniform MaterialRegion density."
+        )
+
+    lower, upper = region.bounds
+    normalized = float(np.clip((density_min - lower) / (upper - lower), 0.0, 1.0))
+    if region.projection_beta is not None:
+        beta = float(region.projection_beta)
+        normalized = float(
+            (np.tanh(0.5 * beta) + np.tanh(beta * (normalized - 0.5)))
+            / (2.0 * np.tanh(0.5 * beta))
+        )
+    eps_lo, eps_hi = region.eps_bounds
+    mu_lo, mu_hi = region.mu_bounds
+    eps_r = eps_lo + normalized * (eps_hi - eps_lo)
+    mu_r = mu_lo + normalized * (mu_hi - mu_lo)
+    if not np.isclose(mu_r, 1.0):
+        raise NotImplementedError(
+            "Tidy3D export does not support MaterialRegion with relative permeability other than 1."
+        )
+
+    return td.Structure(
+        geometry=_convert_geometry(region.geometry, td, s),
+        medium=td.Medium(permittivity=float(eps_r)),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Source conversion
 # ---------------------------------------------------------------------------
@@ -905,8 +955,6 @@ def _tfsf_source(source, scene, td, s):
     the same ``_direction_to_angles`` mapping as the soft plane wave, so a TFSF and a soft plane
     wave of identical direction inject the same incident field.
     """
-    from ..sources import TFSF
-
     injection = source.injection
     # Convert Maxwell's physical V/m incident-field amplitude to the
     # multiplier on Tidy3D's fixed 1 W/um^2 TFSF normalization.
@@ -1258,7 +1306,7 @@ def _plane_center_size(axis_idx, plane_position, domain_bounds, s):
     return center, size
 
 
-def _convert_monitor(monitor, domain_bounds, frequencies, td, s):
+def _convert_monitor(monitor, domain_bounds, frequencies, td, s, *, time_step=None):
     """Convert a maxwell monitor to a Tidy3D monitor (lengths x *s*)."""
     from ..monitors import (
         DiffractionMonitor,
@@ -1274,24 +1322,26 @@ def _convert_monitor(monitor, domain_bounds, frequencies, td, s):
     # Time-domain monitors sample the running field, not a frequency spectrum, so they
     # are converted before the frequency requirement below.
     if isinstance(monitor, FieldTimeMonitor):
+        time_scale = 1.0 if time_step is None else float(time_step)
         return td.FieldTimeMonitor(
             center=_scale3(monitor.position, s),
             size=_scale3(monitor.size, s),
-            start=monitor.start,
-            stop=monitor.stop,
+            start=monitor.start * time_scale,
+            stop=None if monitor.stop is None else monitor.stop * time_scale,
             interval=monitor.interval,
             fields=list(monitor.components),
             name=monitor.name,
         )
 
     if isinstance(monitor, FluxTimeMonitor):
+        time_scale = 1.0 if time_step is None else float(time_step)
         axis_idx = _axis_name_to_index(monitor.axis)
         center, size = _plane_center_size(axis_idx, monitor.position, domain_bounds, s)
         return td.FluxTimeMonitor(
             center=tuple(center),
             size=tuple(size),
-            start=monitor.start,
-            stop=monitor.stop,
+            start=monitor.start * time_scale,
+            stop=None if monitor.stop is None else monitor.stop * time_scale,
             interval=monitor.interval,
             normal_dir=monitor.normal_direction,
             name=monitor.name,
@@ -1557,6 +1607,56 @@ def _convert_grid(scene, td, s):
     )
 
 
+def _scene_time_step(scene, courant: float) -> float:
+    """Return the physical FDTD step represented by Tidy3D's Courant factor."""
+    from ..scene import prepare_scene
+
+    prepared = prepare_scene(scene.clone(device="cpu"))
+    spacings = (
+        float(prepared.dx_primal64.min()),
+        float(prepared.dy_primal64.min()),
+        float(prepared.dz_primal64.min()),
+    )
+    dt_cfl = 1.0 / (_C0 * math.sqrt(sum(1.0 / spacing**2 for spacing in spacings)))
+    return float(courant) * dt_cfl
+
+
+def _validate_tidy3d_symmetry_equivalence(scene) -> None:
+    """Reject face symmetry that is not invariant under moving the plane to center."""
+    from ..sources import PlaneWave
+
+    for axis_index, entry in enumerate(scene.symmetry):
+        if entry is None:
+            continue
+        lower, upper = scene.domain.bounds[axis_index]
+        span = float(upper) - float(lower)
+        for structure in scene.structures:
+            geometry = structure.geometry
+            if getattr(geometry, "kind", None) != "box":
+                raise NotImplementedError(
+                    "Tidy3D symmetry is center-based; Maxwell face symmetry can only be "
+                    "exported when the scene is translation-invariant along the symmetry axis."
+                )
+            if float(geometry.size[axis_index]) < span - 1.0e-12:
+                raise NotImplementedError(
+                    "Tidy3D symmetry is center-based; Maxwell face symmetry can only be "
+                    "exported when every structure spans the symmetry axis."
+                )
+        for region in scene.material_regions:
+            geometry = region.geometry
+            if getattr(geometry, "kind", None) != "box" or float(geometry.size[axis_index]) < span - 1.0e-12:
+                raise NotImplementedError(
+                    "Tidy3D symmetry is center-based; Maxwell MaterialRegion must span the "
+                    "symmetry axis for an equivalent export."
+                )
+        for source in scene.resolved_sources():
+            if not isinstance(source, PlaneWave) or abs(float(source.direction[axis_index])) > 1.0e-12:
+                raise NotImplementedError(
+                    "Tidy3D symmetry is center-based; Maxwell face symmetry with a localized "
+                    "or symmetry-axis-varying source has no equivalent direct export."
+                )
+
+
 # ---------------------------------------------------------------------------
 # Main conversion
 # ---------------------------------------------------------------------------
@@ -1626,6 +1726,8 @@ def scene_to_tidy3d(
     td_structures = []
     for structure in (scene.structures or []):
         td_structures.append(_convert_structure(structure, td, s, frequencies=frequencies))
+    for region in (scene.material_regions or []):
+        td_structures.append(_convert_material_region(region, td, s))
 
     # -- sources ---------------------------------------------------------------
     domain_bounds = scene.domain.bounds
@@ -1637,12 +1739,27 @@ def scene_to_tidy3d(
     # -- monitors --------------------------------------------------------------
     td_monitors = []
     monitors = scene.resolved_monitors() if hasattr(scene, "resolved_monitors") else (scene.monitors or [])
+    from ..monitors import FieldTimeMonitor, FluxTimeMonitor
+
+    time_step = None
+    if any(isinstance(monitor, (FieldTimeMonitor, FluxTimeMonitor)) for monitor in monitors):
+        time_step = _scene_time_step(scene, kwargs.get("courant", 0.99))
     for monitor in monitors:
-        td_monitors.append(_convert_monitor(monitor, domain_bounds, frequencies, td, s))
+        td_monitors.append(
+            _convert_monitor(
+                monitor,
+                domain_bounds,
+                frequencies,
+                td,
+                s,
+                time_step=time_step,
+            )
+        )
 
     # -- symmetry --------------------------------------------------------------
     td_symmetry = (0, 0, 0)
     if scene.symmetry is not None:
+        _validate_tidy3d_symmetry_equivalence(scene)
         # Tidy3D encodes symmetry about the domain center only; the folded face
         # (low/high) has no Tidy3D counterpart and is dropped in the export.
         sym_map = {"PEC": -1, "PMC": 1}
