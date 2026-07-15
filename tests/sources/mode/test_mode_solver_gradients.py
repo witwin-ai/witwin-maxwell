@@ -116,7 +116,7 @@ def test_full_vector_mode_index_is_ordered_within_requested_polarization_family(
         dtype=torch.float64,
     ).numpy()
 
-    beta, _, profiles = mode_solver._select_and_normalize_vector_mode_numpy(
+    beta, _, profiles, diagnostics = mode_solver._select_and_normalize_vector_mode_numpy(
         eigenvalues,
         eigenvectors,
         interior_u=1,
@@ -128,6 +128,7 @@ def test_full_vector_mode_index_is_ordered_within_requested_polarization_family(
 
     assert beta == pytest.approx(3.0)
     assert float(abs(profiles["Ez"]).max()) == pytest.approx(1.0)
+    assert diagnostics["candidates"][2]["selected"]
 
 
 def test_torch_mode_solver_matches_scipy_forward_profile_and_beta():
@@ -164,6 +165,30 @@ def test_torch_mode_solver_backpropagates_through_beta():
     assert context.eps_Ez.grad is not None
     assert torch.isfinite(context.eps_Ez.grad).all()
     assert float(torch.max(torch.abs(context.eps_Ez.grad)).item()) > 0.0
+
+
+def test_real_scalar_mode_beta_gradient_matches_centered_finite_difference():
+    du = 0.08
+    dv = 0.06
+    base = 2000.0 + 0.2 * torch.arange(42, dtype=torch.float64).reshape((6, 7))
+    index_sq = base.clone().requires_grad_(True)
+    operator, _, _ = mode_solver._build_scalar_operator_torch_dense(index_sq, du, dv)
+    beta_sq, _ = mode_solver._solve_mode_eigenpair_torch(operator, mode_index=0)
+    beta = torch.sqrt(beta_sq)
+    beta.backward()
+
+    row, col = 3, 3
+    step = 1.0e-3
+
+    def solve_with_offset(offset: float) -> float:
+        shifted = base.clone()
+        shifted[row, col] += offset
+        shifted_operator, _, _ = mode_solver._build_scalar_operator_torch_dense(shifted, du, dv)
+        shifted_beta_sq, _ = mode_solver._solve_mode_eigenpair_torch(shifted_operator, mode_index=0)
+        return float(torch.sqrt(shifted_beta_sq).item())
+
+    finite_difference = (solve_with_offset(step) - solve_with_offset(-step)) / (2.0 * step)
+    assert float(index_sq.grad[row, col].item()) == pytest.approx(finite_difference, rel=2e-5, abs=1e-8)
 
 
 def test_sparse_lobpcg_mode_solver_matches_dense_forward_baseline(monkeypatch):
