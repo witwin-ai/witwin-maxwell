@@ -436,28 +436,65 @@ def _normalize_mode_profiles_to_unit_power(
     coords_v: torch.Tensor,
     normal_axis: str,
 ) -> dict[str, torch.Tensor]:
-    """Scale a common-grid modal E/H profile to one watt of forward power."""
-    ex, ey, ez = (component_profiles[name] for name in ("Ex", "Ey", "Ez"))
-    hx, hy, hz = (component_profiles[name] for name in ("Hx", "Hy", "Hz"))
-    normal_poynting = {
-        "x": ey * torch.conj(hz) - ez * torch.conj(hy),
-        "y": ez * torch.conj(hx) - ex * torch.conj(hz),
-        "z": ex * torch.conj(hy) - ey * torch.conj(hx),
-    }[normal_axis]
-    power_density = 0.5 * torch.real(normal_poynting)
-    if int(coords_u.numel()) != int(power_density.shape[0]):
-        offset = max((int(coords_u.numel()) - int(power_density.shape[0])) // 2, 0)
-        coords_u = coords_u[offset : offset + int(power_density.shape[0])]
-    if int(coords_v.numel()) != int(power_density.shape[1]):
-        offset = max((int(coords_v.numel()) - int(power_density.shape[1])) // 2, 0)
-        coords_v = coords_v[offset : offset + int(power_density.shape[1])]
-    power_v = torch.trapezoid(power_density, x=coords_v, dim=1)
-    power = torch.trapezoid(power_v, x=coords_u, dim=0)
+    """Scale a common-node modal profile to one watt on the transverse Yee grids."""
+    power = _discrete_mode_profile_power(
+        component_profiles,
+        coords_u=coords_u,
+        coords_v=coords_v,
+        normal_axis=normal_axis,
+    )
     abs_power = torch.abs(power)
     if float(abs_power.detach().item()) <= torch.finfo(abs_power.dtype).eps:
         raise RuntimeError("ModeSource eigenmode profile has zero integrated Poynting power.")
     scale = torch.rsqrt(abs_power)
     return {name: profile * scale for name, profile in component_profiles.items()}
+
+
+def _discrete_mode_profile_power(
+    component_profiles: dict[str, torch.Tensor],
+    *,
+    coords_u: torch.Tensor,
+    coords_v: torch.Tensor,
+    normal_axis: str,
+) -> torch.Tensor:
+    """Integrate signed modal power after interpolation to the transverse Yee grids."""
+    if coords_u.ndim != 1 or coords_v.ndim != 1 or coords_u.numel() < 2 or coords_v.numel() < 2:
+        raise ValueError("ModeSource profile coordinates must be one-dimensional with at least two samples.")
+    expected_shape = (int(coords_u.numel()), int(coords_v.numel()))
+    for field_name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
+        profile = component_profiles[field_name]
+        if tuple(int(dim) for dim in profile.shape) != expected_shape:
+            raise ValueError(
+                f"ModeSource {field_name} profile shape {tuple(profile.shape)} does not match "
+                f"coordinate shape {expected_shape}."
+            )
+
+    axis_u, axis_v = _RIGHT_HANDED_TANGENTIAL_AXES[normal_axis]
+    electric_u = component_profiles[f"E{axis_u}"]
+    electric_v = component_profiles[f"E{axis_v}"]
+    magnetic_u = component_profiles[f"H{axis_u}"]
+    magnetic_v = component_profiles[f"H{axis_v}"]
+
+    coords_u_half = 0.5 * (coords_u[:-1] + coords_u[1:])
+    coords_v_half = 0.5 * (coords_v[:-1] + coords_v[1:])
+    electric_u_half = 0.5 * (electric_u[:-1, :] + electric_u[1:, :])
+    magnetic_v_half = 0.5 * (magnetic_v[:-1, :] + magnetic_v[1:, :])
+    electric_v_half = 0.5 * (electric_v[:, :-1] + electric_v[:, 1:])
+    magnetic_u_half = 0.5 * (magnetic_u[:, :-1] + magnetic_u[:, 1:])
+
+    positive_density = 0.5 * torch.real(electric_u_half * torch.conj(magnetic_v_half))
+    negative_density = 0.5 * torch.real(electric_v_half * torch.conj(magnetic_u_half))
+    positive_power = torch.trapezoid(
+        torch.trapezoid(positive_density, x=coords_v, dim=1),
+        x=coords_u_half,
+        dim=0,
+    )
+    negative_power = torch.trapezoid(
+        torch.trapezoid(negative_density, x=coords_v_half, dim=1),
+        x=coords_u,
+        dim=0,
+    )
+    return positive_power - negative_power
 
 
 def _select_and_normalize_vector_mode_numpy(
@@ -1333,6 +1370,8 @@ def _assemble_vector_mode_data(
         default=0.0,
     )
     imag_bound = 1e-3 * max(profile_scale, 1e-30)
+    plane_shape = tuple(int(dim) for dim in eps_planes[0].shape)
+    interior_shape = (plane_shape[0] - 2, plane_shape[1] - 2)
     component_profiles = {}
     for name, array in component_arrays.items():
         resolved_array = np.asarray(array)
@@ -1341,11 +1380,23 @@ def _assemble_vector_mode_data(
             if imag_max > imag_bound:
                 raise RuntimeError("Full-vector ModeSource forward solve returned a materially complex field profile.")
             resolved_array = np.real(resolved_array)
-        component_profiles[name] = torch.as_tensor(
+        interior_profile = torch.as_tensor(
             resolved_array,
             device=target_device,
             dtype=target_dtype,
         ).contiguous()
+        if tuple(int(dim) for dim in interior_profile.shape) != interior_shape:
+            raise RuntimeError(
+                f"Full-vector ModeSource {name} profile shape {tuple(interior_profile.shape)} "
+                f"does not match operator interior shape {interior_shape}."
+            )
+        component_profile = torch.zeros(
+            plane_shape,
+            device=target_device,
+            dtype=target_dtype,
+        )
+        component_profile[1:-1, 1:-1] = interior_profile
+        component_profiles[name] = component_profile.contiguous()
     reference_profile = next(iter(component_profiles.values()))
     for field_name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
         component_profiles.setdefault(field_name, torch.zeros_like(reference_profile))

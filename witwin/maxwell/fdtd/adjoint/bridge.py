@@ -353,7 +353,10 @@ class _FDTDGradientBridge:
             if solver._electric_source_terms:
                 from ..excitation import inject_electric_surface_source_terms
 
-                inject_electric_surface_source_terms(solver, time_value=time_value)
+                inject_electric_surface_source_terms(
+                    solver,
+                    time_value=time_value + 0.5 * float(solver.dt),
+                )
 
             if solver._source_terms:
                 solver.add_source(time_value=time_value)

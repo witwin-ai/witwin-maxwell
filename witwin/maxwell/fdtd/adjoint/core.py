@@ -575,6 +575,7 @@ def _accumulate_mode_source_cotangents(
     solver,
     *,
     electric_terms,
+    volume_electric_terms,
     magnetic_terms,
     electric_adjoint,
     magnetic_adjoint,
@@ -598,10 +599,11 @@ def _accumulate_mode_source_cotangents(
         accum = {}
         solver._mode_source_cotangent_accum = accum
     groups = (
-        ("E", electric_terms, electric_adjoint),
-        ("H", magnetic_terms, magnetic_adjoint),
+        ("E_surface", electric_terms, electric_adjoint, time_value + 0.5 * float(solver.dt)),
+        ("E_volume", volume_electric_terms, electric_adjoint, time_value),
+        ("H_surface", magnetic_terms, magnetic_adjoint, time_value),
     )
-    for group_name, terms, adjoint_by_field in groups:
+    for group_name, terms, adjoint_by_field, group_time in groups:
         for term_pos, term in enumerate(terms):
             field_name = term["field_name"]
             if field_name not in adjoint_by_field:
@@ -609,7 +611,10 @@ def _accumulate_mode_source_cotangents(
             offsets = term["offsets"]
             patches = _source_term_component_patches(term)
             factors = _source_term_signal_factors(
-                term, source_time=source_time, omega=omega, time_value=time_value
+                term,
+                source_time=source_time,
+                omega=omega,
+                time_value=group_time,
             )
             for comp_idx, (patch, factor) in enumerate(zip(patches, factors)):
                 region = _slice_from_offsets_shape(offsets, patch.shape)
@@ -637,8 +642,9 @@ def _mode_source_profile_pullback(solver, resolved_source_terms, eps_ex, eps_ey,
         return None
     source_terms, electric_source_terms, magnetic_source_terms = resolved_source_terms
     grouped = (
-        ("E", tuple(electric_source_terms) + tuple(source_terms)),
-        ("H", tuple(magnetic_source_terms)),
+        ("E_surface", tuple(electric_source_terms)),
+        ("E_volume", tuple(source_terms)),
+        ("H_surface", tuple(magnetic_source_terms)),
     )
     with torch.enable_grad():
         objective = None
@@ -685,7 +691,8 @@ def _accumulate_source_term_gradients(
         # stage). The per-step step_result eps-grad is returned unchanged.
         _accumulate_mode_source_cotangents(
             solver,
-            electric_terms=tuple(electric_source_terms) + tuple(source_terms),
+            electric_terms=tuple(electric_source_terms),
+            volume_electric_terms=tuple(source_terms),
             magnetic_terms=tuple(magnetic_source_terms),
             electric_adjoint=source_adjoint_state,
             magnetic_adjoint=step_result.magnetic_output_adjoint or {},
@@ -706,55 +713,61 @@ def _accumulate_source_term_gradients(
         "Ez": eps_ez,
     }
 
-    for term in tuple(electric_source_terms) + tuple(source_terms):
-        field_name = term["field_name"]
-        if field_name not in grad_eps_by_field:
-            continue
-        if has_complex_fields(solver):
-            payload = _bloch_source_term_signal_patch(
+    timed_electric_terms = (
+        (electric_source_terms, time_value + 0.5 * float(solver.dt)),
+        (source_terms, time_value),
+    )
+    for terms, term_time in timed_electric_terms:
+        for term in terms:
+            field_name = term["field_name"]
+            if field_name not in grad_eps_by_field:
+                continue
+            if has_complex_fields(solver):
+                payload = _bloch_source_term_signal_patch(
+                    term,
+                    source_time=solver._source_time,
+                    omega=solver.source_omega,
+                    time_value=term_time,
+                )
+                offsets = term["offsets"]
+                region = _slice_from_offsets_shape(offsets, payload.shape)
+                adjoint_patch = _bloch_source_term_adjoint_patch(
+                    source_adjoint_state,
+                    solver=solver,
+                    field_name=field_name,
+                    offsets=offsets,
+                    patch_shape=payload.shape,
+                )
+                eps_patch = eps_by_field[field_name][region]
+                grad_eps_by_field[field_name][region] = (
+                    grad_eps_by_field[field_name][region]
+                    - _complex_inner_real(adjoint_patch, payload) / eps_patch
+                )
+                continue
+            payload = _source_term_signal_patch(
                 term,
                 source_time=solver._source_time,
                 omega=solver.source_omega,
-                time_value=time_value,
+                time_value=term_time,
             )
             offsets = term["offsets"]
             region = _slice_from_offsets_shape(offsets, payload.shape)
-            adjoint_patch = _bloch_source_term_adjoint_patch(
-                source_adjoint_state,
-                solver=solver,
-                field_name=field_name,
-                offsets=offsets,
-                patch_shape=payload.shape,
+            adjoint_field = source_adjoint_state[field_name]
+            adjoint_patch = adjoint_field[region]
+            # A source cell on a PEC domain face is erased by the terminal forward
+            # PEC clamp, so its eps-gradient must be zero; mask the incoming adjoint
+            # exactly as the forward clamp zeroes the injected field (no-op interior).
+            pec_mask = _electric_component_pec_mask(
+                solver, field_name, adjoint_field.shape, adjoint_field.device
             )
+            if pec_mask is not None:
+                adjoint_patch = torch.where(
+                    pec_mask[region], torch.zeros_like(adjoint_patch), adjoint_patch
+                )
             eps_patch = eps_by_field[field_name][region]
             grad_eps_by_field[field_name][region] = (
-                grad_eps_by_field[field_name][region] - _complex_inner_real(adjoint_patch, payload) / eps_patch
+                grad_eps_by_field[field_name][region] - (adjoint_patch * payload) / eps_patch
             )
-            continue
-        payload = _source_term_signal_patch(
-            term,
-            source_time=solver._source_time,
-            omega=solver.source_omega,
-            time_value=time_value,
-        )
-        offsets = term["offsets"]
-        region = _slice_from_offsets_shape(offsets, payload.shape)
-        adjoint_field = source_adjoint_state[field_name]
-        adjoint_patch = adjoint_field[region]
-        # A source cell on a PEC domain face is erased by the terminal forward
-        # PEC clamp, so its eps-gradient must be zero; mask the incoming adjoint
-        # exactly as the forward clamp zeroes the injected field (no-op interior).
-        pec_mask = _electric_component_pec_mask(
-            solver, field_name, adjoint_field.shape, adjoint_field.device
-        )
-        if pec_mask is not None:
-            adjoint_patch = torch.where(
-                pec_mask[region], torch.zeros_like(adjoint_patch), adjoint_patch
-            )
-        eps_patch = eps_by_field[field_name][region]
-        grad_eps_by_field[field_name][region] = (
-            grad_eps_by_field[field_name][region] - (adjoint_patch * payload) / eps_patch
-        )
 
     return _ReverseStepResult(
         pre_step_adjoint=step_result.pre_step_adjoint,
@@ -3423,7 +3436,7 @@ def _step_state(
             terms=electric_source_terms,
             source_time=solver._source_time,
             omega=solver.source_omega,
-            time_value=time_value,
+            time_value=time_value + 0.5 * float(solver.dt),
             solver=None,
         )
         electric_fields = _apply_source_term_list(
