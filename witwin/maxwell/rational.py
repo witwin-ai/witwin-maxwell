@@ -508,6 +508,14 @@ class StateSpaceNetwork:
         )
         if frequencies.ndim != 1 or frequencies.numel() == 0:
             raise ValueError("frequencies must have non-empty shape [F].")
+        if not bool(torch.all(torch.isfinite(frequencies))) or not bool(
+            torch.all(frequencies >= 0.0)
+        ):
+            raise ValueError("frequencies must be finite and non-negative.")
+        if self.state_count == 0:
+            return self.D.to(dtype=_complex_dtype(self.D.dtype))[None, ...].expand(
+                frequencies.numel(), -1, -1
+            )
         s = torch.complex(torch.zeros_like(frequencies), -2.0 * torch.pi * frequencies)
         complex_dtype = _complex_dtype(self.A.dtype)
         A = self.A.to(dtype=complex_dtype)
@@ -518,6 +526,20 @@ class StateSpaceNetwork:
         system = s[:, None, None] * identity[None, ...] - A[None, ...]
         solved = torch.linalg.solve(system, B.expand(frequencies.numel(), -1, -1))
         return torch.einsum("os,fsi->foi", C, solved) + D[None, ...]
+
+    def check_passivity(
+        self,
+        frequencies: torch.Tensor | Sequence[float],
+        *,
+        tolerance: float = 1e-9,
+    ) -> PassivityReport:
+        """Certify passivity between samples with resolvent interval bounds."""
+
+        return _check_state_space_band_passivity(
+            self,
+            frequencies,
+            tolerance=tolerance,
+        )
 
     def discretize(
         self,
@@ -717,6 +739,172 @@ def _check_rational_band_passivity(
     )
 
 
+def _state_space_interval_lipschitz_bound(
+    model: StateSpaceNetwork,
+    intervals: torch.Tensor,
+) -> torch.Tensor:
+    """Bound ``||dH/df||_2`` with a uniform resolvent Neumann bound."""
+
+    if model.state_count == 0:
+        return torch.zeros(
+            intervals.shape[0],
+            dtype=intervals.dtype,
+            device=intervals.device,
+        )
+    midpoint = torch.mean(intervals, dim=1)
+    radius_hz = 0.5 * (intervals[:, 1] - intervals[:, 0])
+    omega = -2.0 * torch.pi * midpoint
+    complex_dtype = _complex_dtype(model.A.dtype)
+    identity = torch.eye(
+        model.state_count,
+        dtype=complex_dtype,
+        device=model.A.device,
+    )
+    operator = torch.complex(torch.zeros_like(omega), omega)
+    system = (
+        operator[:, None, None] * identity[None, ...]
+        - model.A.to(dtype=complex_dtype)[None, ...]
+    )
+    resolvent = torch.linalg.solve(
+        system,
+        identity.expand(intervals.shape[0], -1, -1),
+    )
+    midpoint_norm = torch.linalg.matrix_norm(resolvent, ord=2)
+    neumann_ratio = 2.0 * torch.pi * radius_hz * midpoint_norm
+    denominator = 1.0 - neumann_ratio
+    uniform_norm = torch.where(
+        denominator > 0.0,
+        midpoint_norm / denominator,
+        torch.full_like(midpoint_norm, torch.inf),
+    )
+    input_norm = torch.linalg.matrix_norm(model.B, ord=2)
+    output_norm = torch.linalg.matrix_norm(model.C, ord=2)
+    return 2.0 * torch.pi * output_norm * input_norm * uniform_norm.square()
+
+
+def _check_state_space_band_passivity(
+    model: StateSpaceNetwork,
+    frequencies: torch.Tensor | Sequence[float],
+    *,
+    tolerance: float,
+    max_depth: int = 48,
+    max_intervals: int = 8192,
+) -> PassivityReport:
+    """Verify or refute in-band state-space passivity between input samples."""
+
+    if tolerance < 0.0:
+        raise ValueError("tolerance must be non-negative.")
+    values = torch.as_tensor(
+        frequencies,
+        device=model.A.device,
+        dtype=model.A.dtype,
+    )
+    if values.ndim != 1 or values.numel() == 0:
+        raise ValueError("frequencies must have non-empty shape [F].")
+    if not bool(torch.all(torch.isfinite(values))) or not bool(torch.all(values >= 0.0)):
+        raise ValueError("frequencies must be finite and non-negative.")
+    if model.state_count and bool(
+        torch.any(torch.linalg.eigvals(model.A.clone()).real >= 0.0)
+    ):
+        return PassivityReport(
+            passive=False,
+            margin=float("-inf"),
+            max_violation=float("inf"),
+            tolerance=float(tolerance),
+            sample_count=0,
+            certified=True,
+            method="stability gate",
+        )
+
+    points = torch.unique(values, sorted=True)
+    point_margins = _sample_passivity_margins(
+        model.evaluate(points),
+        representation=model.representation,
+    )
+    minimum_margin = torch.min(point_margins)
+    sample_count = points.numel()
+    if bool(minimum_margin < -tolerance):
+        margin = float(minimum_margin.item())
+        return PassivityReport(
+            passive=False,
+            margin=margin,
+            max_violation=max(0.0, -margin),
+            tolerance=float(tolerance),
+            sample_count=sample_count,
+            certified=True,
+            method="state-space resolvent interval bound",
+        )
+    if points.numel() == 1:
+        margin = float(minimum_margin.item())
+        return PassivityReport(
+            passive=margin >= -tolerance,
+            margin=margin,
+            max_violation=max(0.0, -margin),
+            tolerance=float(tolerance),
+            sample_count=sample_count,
+            certified=False,
+            method="single-frequency sample",
+        )
+
+    unresolved = torch.stack((points[:-1], points[1:]), dim=1)
+    certified = True
+    for _ in range(max_depth):
+        if unresolved.numel() == 0:
+            break
+        if unresolved.shape[0] > max_intervals:
+            certified = False
+            break
+        midpoint = torch.mean(unresolved, dim=1)
+        margins = _sample_passivity_margins(
+            model.evaluate(midpoint),
+            representation=model.representation,
+        )
+        sample_count += midpoint.numel()
+        minimum_margin = torch.minimum(minimum_margin, torch.min(margins))
+        if bool(torch.any(margins < -tolerance)):
+            margin = float(minimum_margin.item())
+            return PassivityReport(
+                passive=False,
+                margin=margin,
+                max_violation=max(0.0, -margin),
+                tolerance=float(tolerance),
+                sample_count=sample_count,
+                certified=True,
+                method="state-space resolvent interval bound",
+            )
+        radius = 0.5 * (unresolved[:, 1] - unresolved[:, 0])
+        lower_bound = (
+            margins
+            - _state_space_interval_lipschitz_bound(model, unresolved) * radius
+        )
+        needs_split = lower_bound < -tolerance
+        if not bool(torch.any(needs_split)):
+            unresolved = unresolved[:0]
+            break
+        selected = unresolved[needs_split]
+        selected_midpoint = midpoint[needs_split]
+        unresolved = torch.cat(
+            (
+                torch.stack((selected[:, 0], selected_midpoint), dim=1),
+                torch.stack((selected_midpoint, selected[:, 1]), dim=1),
+            ),
+            dim=0,
+        )
+    else:
+        certified = False
+
+    margin = float(minimum_margin.item())
+    return PassivityReport(
+        passive=margin >= -tolerance,
+        margin=margin,
+        max_violation=max(0.0, -margin),
+        tolerance=float(tolerance),
+        sample_count=sample_count,
+        certified=certified and unresolved.numel() == 0,
+        method="state-space resolvent interval bound",
+    )
+
+
 def bilinear_discretize(
     system: StateSpaceNetwork,
     dt: float,
@@ -738,8 +926,11 @@ def bilinear_discretize(
     Bd = torch.linalg.solve(left, float(dt) * system.B)
     Cd = torch.linalg.solve(left.T, system.C.T).T
     Dd = system.D + 0.5 * float(dt) * (Cd @ system.B)
-    poles = torch.linalg.eigvals(Ad)
-    radius = float(torch.max(torch.abs(poles)).item())
+    # Some CUDA eigensolver paths use an in-place Schur workspace.  Keep the
+    # transition matrix isolated from that workspace because it is returned to
+    # the time-step runtime below.
+    poles = torch.linalg.eigvals(Ad.clone())
+    radius = 0.0 if poles.numel() == 0 else float(torch.max(torch.abs(poles)).item())
     if radius >= 1.0 - stability_margin:
         raise ValueError(
             "Bilinear discretization failed the strict pole gate: "

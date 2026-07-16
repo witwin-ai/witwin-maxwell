@@ -325,6 +325,10 @@ class _FDTDGradientBridge:
         )
 
     def _validate_supported_configuration(self, solver):
+        if getattr(solver.scene, "networks", ()):
+            raise NotImplementedError(
+                "Embedded-network FDTD adjoints require Phase 4 state replay and pullback."
+            )
         unsupported_medium_message = _unsupported_adjoint_medium(solver.scene)
         if unsupported_medium_message is not None:
             raise NotImplementedError(unsupported_medium_message)

@@ -68,3 +68,30 @@ Known limits recorded rather than hidden:
 - Raw `NetworkData` passivity remains sampled. Rational models use a finite-band pole-aware interval certificate, not an all-frequency Hamiltonian certificate. Enforcement is an explicit isotropic direct-term shift, not a residue-minimal projection.
 - Raw-data causality is a finite-band heuristic and is only evaluated for a uniform sweep starting at DC. A proper stable fitted realization is structurally causal.
 - Pure broadband delay extraction and bounded delay buffers belong to Phase 3; Phase 1 only validates a controlled narrow-band delayed transmission fit.
+
+## Phase 2 evidence
+
+Implemented:
+
+- `NetworkBlock` and `TouchstoneNetwork` declarations with complete one-based/name mapping to unique Scene ports, explicit automatic-fit versus pre-fitted contracts, and no silent detach.
+- Scene/compiler lowering to a stable, interval-certified passive admittance state-space descriptor connected to the existing sparse `LumpedPort` / resolved `TerminalPort` Yee geometry; unsupported `WavePort`, non-FDTD solvers, out-of-fit-band result requests or excitation spectra, and multiport cases fail before stepping.
+- Fixed-shape, device-resident same-step feedback solving `(I + D_d Z_f) i = C_d x + D_d u`, followed by midpoint voltage correction and `x_next = A_d x + B_d v` without a one-step delay.
+- A post-source network update block with reusable hot-path buffers and independent CUDA Graph capture, inserted before dispersion, PEC/Mur, DFT, and port observation.
+- Tensor-native `EmbeddedNetworkData` diagnostics exposed through `Result.embedded_network(...)`, including network-oriented V/I, absorbed/generated frequency power, state norm, typed fit report, model identity, warnings, and runtime provenance.
+- Explicit Phase 4 guards for trainable embedded-network coefficients, FDTD adjoint replay, and embedded-network Result persistence.
+
+Acceptance evidence:
+
+- The algebraic one-port direct-loop test matches an independent same-step formula and detects a one-step-delay implementation.
+- An analytic passive series RLC is written to `.s1p`, read through `TouchstoneNetwork`, automatically fitted to a second-order rational model, and run against native `SeriesRLC` on the same CUDA Yee scene with identical source/grid; V, I, and derived reflection coefficient agree well inside the `< 1%` magnitude / `< 2 deg` phase gate.
+- The same physical run verifies signed absorbed power `P_abs >= -1e-5 P_inc`, network current orientation, model identity, and Result statistics.
+- CUDA profiler coverage spans the real network update plus port observer and asserts no per-step `aten::item`, `_local_scalar_dense`, allocation, or host/device memcpy; pointer-reuse coverage verifies fixed hot-path state, phase tables, and scratch storage.
+- Eager and independently captured network updates agree on field and state after repeated steps.
+- A CUDA regression protects the bilinear transition matrix from the eigensolver's Schur workspace by computing stability poles from a clone.
+- A stable narrow-resonance active model that looks passive at its input samples is rejected by the state-space resolvent interval certificate; a zero-state pure direct conductance compiles and discretizes without dummy poles.
+
+Known limits recorded rather than hidden:
+
+- Phase 2 executes one network port. Multiport implicit coupling and bounded delay realization belong to Phase 3.
+- Embedded-network coefficients are fixed for forward execution. Their analytic reverse and persistence schema belong to Phase 4.
+- Spatial multi-device ownership remains blocked on the missing public port reference-point ownership and hot-path scalar transport contracts recorded in the dependency audit.

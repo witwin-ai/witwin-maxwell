@@ -43,7 +43,14 @@ from .lumped import (
     Resistor,
     SeriesRLC,
 )
-from .network import NetworkData, NetworkPhysicalityReport, PortData
+from .network import (
+    EmbeddedNetworkData,
+    NetworkBlock,
+    NetworkData,
+    NetworkPhysicalityReport,
+    PortData,
+    TouchstoneNetwork,
+)
 from .rational import (
     DiscreteStateSpaceNetwork,
     FitReport,
@@ -138,6 +145,7 @@ __all__ = [
     "Domain",
     "DrudePole",
     "Ellipsoid",
+    "EmbeddedNetworkData",
     "FieldDataset",
     "FieldTimeMonitor",
     "FluxMonitor",
@@ -168,6 +176,7 @@ __all__ = [
     "ModePort",
     "ModeSource",
     "NetworkData",
+    "NetworkBlock",
     "NetworkFitReport",
     "NetworkPhysicalityReport",
     "ModulationSpec",
@@ -208,6 +217,7 @@ __all__ = [
     "Tensor3x3",
     "TimeConfig",
     "TouchstoneParseError",
+    "TouchstoneNetwork",
     "TerminalPort",
     "TerminalRef",
     "DiscreteStateSpaceNetwork",

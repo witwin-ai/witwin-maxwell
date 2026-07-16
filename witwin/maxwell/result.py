@@ -15,7 +15,12 @@ from .monitors import (
     PermittivityMonitor,
     PowerLossMonitor,
 )
-from .network import NetworkData, PortData, _validate_safe_persistence
+from .network import (
+    EmbeddedNetworkData,
+    NetworkData,
+    PortData,
+    _validate_safe_persistence,
+)
 from .scene import prepare_scene
 from .visualization import extract_orthogonal_slice, plot_slice_image
 
@@ -56,6 +61,29 @@ def _normalize_port_data_mapping(ports) -> dict[str, PortData]:
                 f"PortData.port_name {data.port_name!r}."
             )
         normalized[port_name] = data
+    return normalized
+
+
+def _normalize_embedded_network_mapping(networks) -> dict[str, EmbeddedNetworkData]:
+    if networks is None:
+        return {}
+    if not isinstance(networks, Mapping):
+        raise TypeError(
+            "embedded_networks must map network names to EmbeddedNetworkData."
+        )
+    normalized = {}
+    for name, data in networks.items():
+        network_name = str(name)
+        if not isinstance(data, EmbeddedNetworkData):
+            raise TypeError(
+                f"Embedded network {network_name!r} must be EmbeddedNetworkData."
+            )
+        if network_name != data.name:
+            raise ValueError(
+                f"Embedded network key {network_name!r} does not match data name "
+                f"{data.name!r}."
+            )
+        normalized[network_name] = data
     return normalized
 
 
@@ -851,6 +879,7 @@ class Result:
         monitors: dict[str, Any] | None = None,
         ports: Mapping[str, PortData] | None = None,
         network: NetworkData | None = None,
+        embedded_networks: Mapping[str, EmbeddedNetworkData] | None = None,
         metadata: dict[str, Any] | None = None,
         solver_stats: dict[str, Any] | None = None,
         raw_output: Any = None,
@@ -864,6 +893,7 @@ class Result:
         self._fields = _clone_mapping(fields)
         self._monitors = _clone_mapping(monitors)
         self._ports = _normalize_port_data_mapping(ports)
+        self._embedded_networks = _normalize_embedded_network_mapping(embedded_networks)
         if network is not None and not isinstance(network, NetworkData):
             raise TypeError("network must be a NetworkData or None.")
         self._network = network
@@ -913,6 +943,10 @@ class Result:
     @property
     def network(self) -> NetworkData | None:
         return self._network
+
+    @property
+    def embedded_networks(self) -> dict[str, EmbeddedNetworkData]:
+        return dict(self._embedded_networks)
 
     @property
     def solver_stats(self) -> dict[str, Any]:
@@ -1087,6 +1121,16 @@ class Result:
             )
         return self._ports[port_name]
 
+    def embedded_network(self, name: str) -> EmbeddedNetworkData:
+        network_name = str(name)
+        if network_name not in self._embedded_networks:
+            choices = tuple(self._embedded_networks)
+            raise KeyError(
+                f"Embedded network {network_name!r} is not available in this result. "
+                f"Choices: {choices}."
+            )
+        return self._embedded_networks[network_name]
+
     def antenna(
         self,
         *,
@@ -1233,6 +1277,7 @@ class Result:
         stats["num_monitors"] = len(self._monitors)
         stats["num_ports"] = len(self._ports)
         stats["has_network"] = self._network is not None
+        stats["num_embedded_networks"] = len(self._embedded_networks)
         return stats
 
     def save(self, path: str | Path):
@@ -1244,6 +1289,10 @@ class Result:
         the caller to supply the corresponding declarative Scene.
         """
 
+        if self._embedded_networks:
+            raise NotImplementedError(
+                "Embedded-network Result persistence is delivered in network Phase 4."
+            )
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(

@@ -327,6 +327,7 @@ class Simulation:
         self.scene = resolved_scene
         self.scene_module = scene_module
         self.method = SimulationMethod(method)
+        self._validate_network_solver()
         self.port_sweep = excitations if isinstance(excitations, PortSweep) else None
         self.excitations = (
             () if self.port_sweep is not None else _normalize_port_excitations(excitations)
@@ -430,6 +431,7 @@ class Simulation:
 
     def prepare(self):
         self._refresh_scene()
+        self._validate_network_solver()
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         waveport_excitation = self._waveport_excitation()
@@ -467,6 +469,7 @@ class Simulation:
 
     def run(self) -> Result:
         self._refresh_scene()
+        self._validate_network_solver()
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         if self.method == SimulationMethod.FDFD:
@@ -474,6 +477,13 @@ class Simulation:
         if self.method == SimulationMethod.FDTD:
             return self._run_fdtd()
         raise ValueError(f"Unsupported simulation method {self.method!r}.")
+
+    def _validate_network_solver(self) -> None:
+        if getattr(self.scene, "networks", ()) and self.method != SimulationMethod.FDTD:
+            raise NotImplementedError(
+                "Embedded network feedback is defined only for the time-domain FDTD "
+                "update; frequency-domain solvers cannot ignore Scene.networks."
+            )
 
     def _validate_port_excitations(self) -> None:
         if self.port_sweep is not None:
@@ -533,6 +543,11 @@ class Simulation:
     def _validate_trainable_rf_support(self) -> None:
         if self.method != SimulationMethod.FDTD or not self.has_trainable_parameters:
             return
+        if getattr(self.scene, "networks", ()):
+            raise NotImplementedError(
+                "Differentiable FDTD with embedded networks requires the Phase 4 "
+                "network-state adjoint and is not available in Phase 2."
+            )
         rf_ports = tuple(
             port
             for port in self.scene.ports
@@ -957,6 +972,11 @@ class Simulation:
 
         monitors = raw_output.get("observers", {}) if isinstance(raw_output, dict) else {}
         ports = raw_output.get("ports", {}) if isinstance(raw_output, dict) else {}
+        embedded_networks = (
+            raw_output.get("embedded_networks", {})
+            if isinstance(raw_output, dict)
+            else {}
+        )
         field_payload = {
             key: value
             for key, value in (raw_output.items() if isinstance(raw_output, dict) else [])
@@ -991,6 +1011,7 @@ class Simulation:
             fields=fields,
             monitors=monitors,
             ports=ports,
+            embedded_networks=embedded_networks,
             metadata=self.metadata,
             solver_stats=solver_stats,
             raw_output=raw_output,
@@ -1025,6 +1046,9 @@ class Simulation:
             "dt": solver.dt,
             "cuda_graph_active": bool(getattr(solver, "_cuda_graph_active", False)),
             "tail_graph_active": bool(getattr(solver, "_tail_graph_active", False)),
+            "network_cuda_graph_active": bool(
+                getattr(solver, "_network_cuda_graph_active", False)
+            ),
             "boundary": getattr(solver, "boundary_kind", self.scene.boundary.kind),
             "absorber": getattr(solver, "active_absorber_type", self.config.absorber),
             "cpml_memory_mode": getattr(solver, "_cpml_memory_mode", None),

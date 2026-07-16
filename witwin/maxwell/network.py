@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Mapping
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Mapping
 
 import torch
 
 if TYPE_CHECKING:
-    from .rational import RationalFitConfig, RationalModel
+    from .rational import FitReport, RationalFitConfig, RationalModel, StateSpaceNetwork
 
 
 PHASOR_CONVENTION = "peak phasor with exp(-i*omega*t) time dependence"
@@ -1352,12 +1352,225 @@ class NetworkData:
         )
 
 
+@dataclass(frozen=True)
+class NetworkBlock:
+    """Declarative passive network connected to named Scene terminal ports.
+
+    ``connections`` maps every network port (by name or one-based index) to a
+    unique Scene port name. Automatic fitting is a prepare-time operation. Set
+    ``fit=False`` and provide ``model=`` for a pre-fitted, differentiable model.
+    """
+
+    name: str
+    network: NetworkData
+    connections: Mapping[str | int, str]
+    fit: RationalFitConfig | Literal[False] = field(default_factory=lambda: _default_fit_config())
+    model: RationalModel | StateSpaceNetwork | None = None
+    extrapolation: Literal["reject"] = "reject"
+
+    def __post_init__(self) -> None:
+        from .rational import RationalFitConfig, RationalModel, StateSpaceNetwork
+
+        name = str(self.name)
+        if not name or name.strip() != name:
+            raise ValueError("NetworkBlock name must be non-empty without surrounding whitespace.")
+        if not isinstance(self.network, NetworkData):
+            raise TypeError("network must be a NetworkData instance.")
+        if not isinstance(self.connections, Mapping):
+            raise TypeError("connections must map network ports to Scene port names.")
+        if self.extrapolation != "reject":
+            raise ValueError("The initial network embedding API only supports extrapolation='reject'.")
+
+        normalized: dict[str, str] = {}
+        for source, target in self.connections.items():
+            if isinstance(source, bool):
+                raise TypeError("Network connection keys must be port names or one-based indices.")
+            if isinstance(source, int):
+                if not 1 <= source <= len(self.network.port_names):
+                    raise ValueError(f"Network port index {source} is outside 1..{len(self.network.port_names)}.")
+                source_name = self.network.port_names[source - 1]
+            elif isinstance(source, str):
+                source_name = source
+                if source_name not in self.network.port_names:
+                    raise ValueError(f"Unknown network port {source_name!r}.")
+            else:
+                raise TypeError("Network connection keys must be port names or one-based indices.")
+            target_name = str(target)
+            if not target_name or target_name.strip() != target_name:
+                raise ValueError("Scene port names in connections must be non-empty without surrounding whitespace.")
+            if source_name in normalized:
+                raise ValueError(f"Network port {source_name!r} is connected more than once.")
+            normalized[source_name] = target_name
+
+        missing = tuple(port for port in self.network.port_names if port not in normalized)
+        if missing:
+            raise ValueError(f"connections must include every network port; missing {missing!r}.")
+        targets = tuple(normalized[port] for port in self.network.port_names)
+        if len(set(targets)) != len(targets):
+            raise ValueError("Each network port must connect to a distinct Scene port.")
+
+        if self.fit is not False and not isinstance(self.fit, RationalFitConfig):
+            raise TypeError("fit must be a RationalFitConfig or False.")
+        if self.model is not None and not isinstance(self.model, (RationalModel, StateSpaceNetwork)):
+            raise TypeError("model must be a RationalModel, StateSpaceNetwork, or None.")
+        if self.model is None and self.fit is False:
+            raise ValueError("fit=False requires a pre-fitted RationalModel or StateSpaceNetwork in model=.")
+        if self.model is not None and self.fit is not False:
+            raise ValueError("A pre-fitted model requires fit=False so automatic fitting is unambiguous.")
+        if self.model is None and any(
+            tensor.requires_grad for tensor in (self.network.frequencies, self.network.s, self.network.z0)
+        ):
+            raise RuntimeError(
+                "Automatic network fitting is non-differentiable; provide a pre-fitted model and set fit=False."
+            )
+
+        port_count = len(self.network.port_names)
+        if isinstance(self.model, RationalModel):
+            if self.model.representation != "Y":
+                raise ValueError("Embedded RationalModel instances must use the Y representation.")
+            if self.model.input_count != port_count or self.model.output_count != port_count:
+                raise ValueError("The pre-fitted model dimensions must match the NetworkData port count.")
+        elif isinstance(self.model, StateSpaceNetwork):
+            if self.model.representation != "Y":
+                raise ValueError("Embedded StateSpaceNetwork instances must use the Y representation.")
+            if self.model.input_count != port_count or self.model.output_count != port_count:
+                raise ValueError("The pre-fitted model dimensions must match the NetworkData port count.")
+            if self.model.port_order and tuple(self.model.port_order) != self.network.port_names:
+                raise ValueError("StateSpaceNetwork.port_order must match NetworkData.port_names.")
+
+        object.__setattr__(self, "name", name)
+        object.__setattr__(
+            self,
+            "connections",
+            {port: normalized[port] for port in self.network.port_names},
+        )
+
+    @property
+    def port_order(self) -> tuple[str, ...]:
+        return self.network.port_names
+
+    @property
+    def connected_port_names(self) -> tuple[str, ...]:
+        return tuple(self.connections[port] for port in self.port_order)
+
+
+def _default_fit_config():
+    from .rational import RationalFitConfig
+
+    return RationalFitConfig()
+
+
+class TouchstoneNetwork(NetworkBlock):
+    """NetworkBlock convenience constructor accepting a file or NetworkData."""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        connections: Mapping[str | int, str],
+        network: NetworkData | None = None,
+        path: str | Path | None = None,
+        fit=None,
+        model=None,
+        extrapolation: Literal["reject"] = "reject",
+        device: str | torch.device = "cuda",
+        dtype: torch.dtype = torch.complex128,
+    ) -> None:
+        if (network is None) == (path is None):
+            raise ValueError("Provide exactly one of network= or path=.")
+        if network is None:
+            network = NetworkData.from_touchstone(path, device=device, dtype=dtype)
+        resolved_fit = _default_fit_config() if fit is None else fit
+        super().__init__(
+            name=name,
+            network=network,
+            connections=connections,
+            fit=resolved_fit,
+            model=model,
+            extrapolation=extrapolation,
+        )
+
+
+@dataclass(frozen=True)
+class EmbeddedNetworkData:
+    """Structured, tensor-native diagnostics for one embedded network."""
+
+    name: str
+    frequencies: torch.Tensor
+    port_names: tuple[str, ...]
+    voltage: torch.Tensor
+    current: torch.Tensor
+    absorbed_power: torch.Tensor
+    generated_power: torch.Tensor
+    state_norm: torch.Tensor
+    model_id: str
+    fit_report: FitReport | None = None
+    runtime_warnings: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        name = str(self.name)
+        if not name:
+            raise ValueError("EmbeddedNetworkData name must not be empty.")
+        frequencies = self.frequencies
+        if not isinstance(frequencies, torch.Tensor) or frequencies.ndim != 1:
+            raise TypeError("frequencies must be a one-dimensional torch.Tensor.")
+        if frequencies.is_complex() or not frequencies.dtype.is_floating_point:
+            raise TypeError("frequencies must be real floating point.")
+        if not bool(torch.all(torch.isfinite(frequencies))) or not bool(torch.all(frequencies >= 0.0)):
+            raise ValueError("frequencies must be finite and non-negative.")
+        voltage, current = _validate_complex_pair(
+            self.voltage,
+            self.current,
+            first_name="voltage",
+            second_name="current",
+        )
+        names = tuple(str(port) for port in self.port_names)
+        if voltage.ndim != 2 or voltage.shape != (len(names), frequencies.numel()):
+            raise ValueError("voltage/current must have shape [Nport, F].")
+        if voltage.device != frequencies.device:
+            raise ValueError("frequencies and network diagnostics must share a device.")
+        for field_name, value in (
+            ("absorbed_power", self.absorbed_power),
+            ("generated_power", self.generated_power),
+            ("state_norm", self.state_norm),
+        ):
+            if not isinstance(value, torch.Tensor) or value.is_complex() or not value.dtype.is_floating_point:
+                raise TypeError(f"{field_name} must be a real floating-point torch.Tensor.")
+            if value.device != frequencies.device or not bool(torch.all(torch.isfinite(value))):
+                raise ValueError(f"{field_name} must be finite and on the diagnostics device.")
+        expected_power_shape = (len(names), frequencies.numel())
+        if self.absorbed_power.shape != expected_power_shape:
+            raise ValueError("absorbed_power must have shape [Nport, F].")
+        if self.generated_power.shape != expected_power_shape:
+            raise ValueError("generated_power must have shape [Nport, F].")
+        if self.state_norm.ndim != 0:
+            raise ValueError("state_norm must be a scalar tensor.")
+        model_id = str(self.model_id)
+        if not model_id:
+            raise ValueError("EmbeddedNetworkData model_id must not be empty.")
+        if self.fit_report is not None:
+            from .rational import FitReport
+
+            if not isinstance(self.fit_report, FitReport):
+                raise TypeError("fit_report must be a FitReport or None.")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "port_names", names)
+        object.__setattr__(self, "model_id", model_id)
+        object.__setattr__(self, "runtime_warnings", tuple(str(item) for item in self.runtime_warnings))
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
+
 __all__ = [
+    "EmbeddedNetworkData",
+    "NetworkBlock",
     "NetworkData",
+    "NetworkPhysicalityReport",
     "PHASOR_CONVENTION",
     "PERSISTENCE_SCHEMA_VERSION",
     "POWER_WAVE_CONVENTION",
     "PortData",
+    "TouchstoneNetwork",
     "power_waves_to_voltage_current",
     "voltage_current_to_power_waves",
 ]

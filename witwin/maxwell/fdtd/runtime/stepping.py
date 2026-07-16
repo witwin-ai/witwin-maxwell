@@ -34,6 +34,11 @@ from ..ports import (
     prepare_port_runtimes,
     prepare_port_spectral_accumulators,
 )
+from ..networks import (
+    finalize_embedded_networks,
+    make_network_runner,
+    prepare_network_runtimes,
+)
 
 
 def iter_cpml_memory_regions(solver, attr_name):
@@ -1527,6 +1532,7 @@ def init_field(solver):
         getattr(solver, "_requested_port_frequencies", (solver.source_frequency,)),
         getattr(solver, "_port_excitations", ()),
     )
+    prepare_network_runtimes(solver)
 
 
 def _compute_shutoff_min_step(solver, shutoff_check_interval: int) -> int:
@@ -1900,6 +1906,10 @@ def solve(
     shutoff_min_step = _compute_shutoff_min_step(solver, shutoff_check_interval)
 
     run_field_update = _make_field_update_runner(solver, use_cuda_graph)
+    run_network_updates = make_network_runner(
+        solver,
+        use_cuda_graph=use_cuda_graph,
+    )
 
     # When the field-update graph is active, drive the running DFT from a
     # precomputed GPU weight table indexed by a device step counter, dropping the
@@ -1940,6 +1950,7 @@ def solve(
         if solver._source_terms:
             solver.add_source(time_value=time_value)
         apply_port_runtimes(solver)
+        run_network_updates()
         if run_tail is not None:
             run_tail()
         else:
@@ -2004,4 +2015,7 @@ def solve(
     ports = finalize_port_data(solver)
     if ports:
         output["ports"] = ports
+    embedded_networks = finalize_embedded_networks(solver, ports)
+    if embedded_networks:
+        output["embedded_networks"] = embedded_networks
     return output or None

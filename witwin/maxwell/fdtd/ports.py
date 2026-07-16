@@ -39,6 +39,8 @@ class PortDFTAccumulator:
         self._current_sum = torch.complex(zeros, zeros)
         self._window_weight_sum = torch.zeros_like(frequencies)
         self._one = torch.ones((), dtype=self._real_dtype, device=frequencies.device)
+        self._voltage_term = torch.empty_like(self._voltage_sum)
+        self._current_term = torch.empty_like(self._current_sum)
         self._sample_count = 0
 
     def _scalar(
@@ -113,6 +115,25 @@ class PortDFTAccumulator:
         self._window_weight_sum = self._window_weight_sum + weight
         self._sample_count += 1
 
+    def accumulate_precomputed(
+        self,
+        voltage_sample: torch.Tensor,
+        current_sample: torch.Tensor | None,
+        *,
+        voltage_kernel: torch.Tensor,
+        current_kernel: torch.Tensor,
+        window_weight: torch.Tensor,
+    ) -> None:
+        """Accumulate one prepared FDTD step without allocating device tensors."""
+
+        torch.mul(voltage_kernel, voltage_sample, out=self._voltage_term)
+        self._voltage_sum.add_(self._voltage_term)
+        if current_sample is not None:
+            torch.mul(current_kernel, current_sample, out=self._current_term)
+            self._current_sum.add_(self._current_term)
+        self._window_weight_sum.add_(window_weight)
+        self._sample_count += 1
+
     def phasors(
         self,
         *,
@@ -161,7 +182,11 @@ class PreparedPortRuntime:
     window_type: str | None = None
     accumulator: PortDFTAccumulator | None = None
     drive_accumulator: PortDFTAccumulator | None = None
+    voltage_phase_weights: torch.Tensor | None = None
+    current_phase_weights: torch.Tensor | None = None
+    observer_current_buffer: torch.Tensor | None = None
     sample_index: int = 0
+    embedded_network_name: str | None = None
 
 
 def _field_map(solver) -> dict[str, torch.Tensor]:
@@ -445,11 +470,16 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
     )
     excitation_by_name = {excitation.port_name: excitation for excitation in excitations}
     ports_by_name = {port.name: port for port in solver.scene.ports}
+    network_by_port = {
+        port_name: network.name
+        for network in getattr(solver.scene, "networks", ())
+        for port_name in network.connected_port_names
+    }
     termination_overrides = getattr(solver, "_port_termination_overrides", {})
     has_coupled_objects = bool(excitation_by_name) or any(
         termination_overrides.get(port.name, getattr(port, "termination", None)) is not None
         for port in ports_by_name.values()
-    ) or bool(solver.scene.lumped_elements)
+    ) or bool(solver.scene.lumped_elements) or bool(network_by_port)
     if has_coupled_objects:
         _validate_supported_field_coupling(solver)
     runtimes = []
@@ -457,10 +487,16 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
         port = ports_by_name[geometry.port_name]
         excitation = excitation_by_name.get(port.name)
         termination = termination_overrides.get(port.name, port.termination)
+        embedded_network_name = network_by_port.get(port.name)
         _require_forward_only_parameters(port, excitation, termination)
         if excitation is not None and termination is not None:
             raise ValueError(
                 f"Active port {port.name!r} cannot also declare a passive termination in the same run."
+            )
+        if embedded_network_name is not None and (excitation is not None or termination is not None):
+            raise ValueError(
+                f"Port {port.name!r} connected to embedded network "
+                f"{embedded_network_name!r} cannot also declare an excitation or termination."
             )
         field = getattr(solver, geometry.voltage_component)
         lumped = None
@@ -490,6 +526,16 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
                 termination=termination,
             )
             _validate_local_update_coefficient(solver, lumped, geometry.voltage_component)
+        elif embedded_network_name is not None:
+            _open_declared_pec_terminal_edges(solver, geometry, port)
+            lumped = prepare_lumped_runtime(
+                geometry,
+                dt=solver.dt,
+                eps_edge=getattr(solver, f"eps_{geometry.voltage_component}"),
+                yee_control_volume=_edge_control_volume(solver, geometry.voltage_component),
+                resistance=0.0,
+            )
+            _validate_local_update_coefficient(solver, lumped, geometry.voltage_component)
 
         source_kind, source_frequency, source_fwidth, source_phase, source_delay, amplitude = (
             _source_descriptor(
@@ -516,6 +562,7 @@ def prepare_port_runtimes(solver, frequencies, excitations=()) -> tuple[Prepared
                 drive_buffer=torch.zeros((), device=solver.device, dtype=field.dtype),
                 electric_time=torch.as_tensor(solver.dt, device=solver.device, dtype=field.dtype),
                 magnetic_time=torch.as_tensor(0.5 * solver.dt, device=solver.device, dtype=field.dtype),
+                embedded_network_name=embedded_network_name,
             )
         )
     solver._port_runtimes = tuple(runtimes)
@@ -594,6 +641,15 @@ def _spectral_weights(
     return torch.where(active, weights, torch.zeros_like(weights))
 
 
+def _weighted_phase_table(
+    frequencies: torch.Tensor,
+    sample_times: torch.Tensor,
+    weights: torch.Tensor,
+) -> torch.Tensor:
+    angle = 2.0 * torch.pi * sample_times[:, None] * frequencies[None, :]
+    return weights * torch.complex(torch.cos(angle), torch.sin(angle))
+
+
 def prepare_port_spectral_accumulators(solver, time_steps: int, window_type: str) -> None:
     runtimes = getattr(solver, "_port_runtimes", ())
     port_pulse = any(
@@ -615,6 +671,38 @@ def prepare_port_spectral_accumulators(solver, time_steps: int, window_type: str
             PortDFTAccumulator(runtime.frequencies)
             if runtime.excitation is not None
             else None
+        )
+        step = torch.arange(
+            time_steps,
+            device=runtime.frequencies.device,
+            dtype=runtime.frequencies.dtype,
+        )
+        dt = torch.as_tensor(
+            solver.dt,
+            device=runtime.frequencies.device,
+            dtype=runtime.frequencies.dtype,
+        )
+        electric_times = (step + 1.0) * dt
+        magnetic_times = (step + 0.5) * dt
+        voltage_times = magnetic_times if runtime.lumped is not None else electric_times
+        runtime.current_phase_weights = _weighted_phase_table(
+            runtime.frequencies,
+            magnetic_times,
+            runtime.window_weights,
+        )
+        runtime.voltage_phase_weights = (
+            runtime.current_phase_weights
+            if runtime.lumped is not None
+            else _weighted_phase_table(
+                runtime.frequencies,
+                voltage_times,
+                runtime.window_weights,
+            )
+        )
+        runtime.observer_current_buffer = torch.empty(
+            (),
+            device=solver.device,
+            dtype=getattr(solver, runtime.field_name).dtype,
         )
         runtime.sample_index = 0
 
@@ -683,7 +771,7 @@ def replay_port_runtimes(
     traces = []
     for index, port_runtime in enumerate(getattr(solver, "_port_runtimes", ())):
         runtime = port_runtime.lumped
-        if runtime is None:
+        if runtime is None or port_runtime.embedded_network_name is not None:
             continue
         inductor_name = lumped_state_name("port", index, "inductor_current")
         capacitor_name = lumped_state_name("port", index, "capacitor_voltage")
@@ -854,7 +942,7 @@ def apply_port_runtimes(solver) -> None:
     """Apply prepared source/load corrections without host-device transfers."""
 
     for runtime in getattr(solver, "_port_runtimes", ()):
-        if runtime.lumped is None:
+        if runtime.lumped is None or runtime.embedded_network_name is not None:
             continue
         drive = _evaluate_drive(runtime)
         apply_lumped_runtime(
@@ -867,9 +955,15 @@ def apply_port_runtimes(solver) -> None:
 
 
 def accumulate_port_observers(solver) -> None:
-    fields = _field_map(solver)
+    fields = None
     for runtime in getattr(solver, "_port_runtimes", ()):
-        if runtime.accumulator is None or runtime.window_weights is None:
+        if (
+            runtime.accumulator is None
+            or runtime.window_weights is None
+            or runtime.voltage_phase_weights is None
+            or runtime.current_phase_weights is None
+            or runtime.observer_current_buffer is None
+        ):
             raise RuntimeError("Port spectral accumulators were not prepared.")
         if runtime.lumped is not None:
             # Voltage and current must come from the same implicit coupling
@@ -878,29 +972,35 @@ def accumulate_port_observers(solver) -> None:
             # midpoint. Mixing them creates a false incident wave at a matched
             # passive port.
             voltage = runtime.lumped.last_voltage_midpoint
-            voltage_sample_time = runtime.magnetic_time
             # Branch current is positive from the field into the external
             # branch. RF network current has the opposite sign: into the field
             # network from the port reference side.
-            current = -runtime.lumped.last_branch_current
+            torch.neg(
+                runtime.lumped.last_branch_current,
+                out=runtime.observer_current_buffer,
+            )
+            current = runtime.observer_current_buffer
         else:
+            if fields is None:
+                fields = _field_map(solver)
             voltage = runtime.geometry.integrate_voltage(fields)
-            voltage_sample_time = runtime.electric_time
             current = runtime.geometry.integrate_current(fields)
         weight = runtime.window_weights[runtime.sample_index]
-        runtime.accumulator.accumulate(
+        voltage_kernel = runtime.voltage_phase_weights[runtime.sample_index]
+        current_kernel = runtime.current_phase_weights[runtime.sample_index]
+        runtime.accumulator.accumulate_precomputed(
             voltage,
             current,
-            electric_sample_time=voltage_sample_time,
-            magnetic_sample_time=runtime.magnetic_time,
+            voltage_kernel=voltage_kernel,
+            current_kernel=current_kernel,
             window_weight=weight,
         )
         if runtime.drive_accumulator is not None:
-            runtime.drive_accumulator.accumulate(
+            runtime.drive_accumulator.accumulate_precomputed(
                 runtime.drive_buffer,
-                torch.zeros_like(runtime.drive_buffer),
-                electric_sample_time=runtime.magnetic_time,
-                magnetic_sample_time=runtime.magnetic_time,
+                None,
+                voltage_kernel=current_kernel,
+                current_kernel=current_kernel,
                 window_weight=weight,
             )
         runtime.sample_index += 1
