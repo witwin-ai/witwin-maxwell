@@ -1,6 +1,6 @@
 # Network embedding implementation record
 
-Status: active
+Status: blocked on spatial multi-device RF ownership/transport contracts
 Plan: `next-functional-2026-07/03-touchstone-network-embedding.md`
 Branch: `codex/network-embedding`
 
@@ -121,3 +121,35 @@ Known limits recorded rather than hidden:
 - Explicit time-domain delay currently uses a real, constant power-wave reference impedance. Complex or frequency-dependent references remain available for frequency-domain `NetworkData` algebra but are rejected by this real-valued FDTD adapter.
 - Embedded-network coefficients remain fixed during forward stepping; gradient replay and persisted embedded results belong to Phase 4.
 - `WavePort` embedding and spatial multi-device port ownership remain blocked on the missing contracts recorded in the dependency audit.
+
+## Phase 4 evidence
+
+Implemented:
+
+- Ordinary-Y embedded-network state joins the frozen FDTD checkpoint schema. Segment replay reconstructs only checkpoint-bounded state, and the reverse pass applies the network VJP before the existing port and Maxwell reverses.
+- The discrete adjoint covers the implicit direct loop, state recurrence, terminal voltage/current observations, Yee field injection, and local permittivity dependence. Discrete `A/B/C/D` cotangents are pulled through realization and bilinear discretization to pre-fitted `RationalModel.residues` and `direct` tensors.
+- Complex-conjugate residue pairs are canonicalized from both stored coefficients during realization, leaving a valid model's forward response unchanged while producing conjugate gradients on both entries so optimizer steps preserve the real-model constraint.
+- Trainable poles/proportional terms, direct trainable `StateSpaceNetwork` matrices, automatic fitting/enforcement, and explicit delay state are rejected instead of silently detaching. Fixed ordinary-Y networks remain compatible with nearby material gradients.
+- `Result.save/load` and sharded save/load preserve versioned `EmbeddedNetworkData`, exact `FitReport` versus `NetworkFitReport` types, ordered port diagnostics, warnings, safe metadata, and detached CPU tensor payloads. Malformed or unsafe nested payloads fail validation.
+- A reproducible CUDA-event benchmark compares an unconnected FDTD baseline against the same grid with a connected 8-port/order-32 network. The source-free field update, batched terminal gather/correction, native small solve, network recurrence, and terminal observation share one CUDA Graph; capture restores all mutable field, CPML, network, and observer state before physical stepping.
+
+Acceptance evidence:
+
+- One- and four-port one-step analytic network pullbacks match torch-autograd oracles for fields, state, and every discrete matrix cotangent, including several terminals sharing one Yee field component.
+- End-to-end CUDA gradients for residue and direct conductance each pass three-step central finite differences with the best stable relative error below `2%`; a trainable material region adjacent to the connected terminal passes the same gate.
+- A 36-step run stores sublinear checkpoints, includes one unique network state vector in the schema, and replays the terminal state to numerical equality rather than retaining every step.
+- Embedded-result persistence independent review passed 22 focused tests with one hardware-conditioned skip, including ordinary/sharded round trips, CPU detach, typed reports, legacy optional-field loading, malformed schemas, and unsafe metadata.
+- Related RF network, network-gradient, and lumped-adjoint regression: 181 passed after the embedded-port checkpoint schema stopped duplicating the port branch state. Static analysis and diff validation pass.
+- No-feature ABBA comparison against Phase 3 on a 48-cells-per-axis grid, 2000 steps, two rounds and five timed samples per block reported `-6.98%` regression (gate `< 1%`). The initial 24-cell probe was rejected as evidence after its timing MAD dominated the 1% threshold and reported a noisy `+7.26%` result.
+- The true-baseline 8-port/order-32 CUDA Graph benchmark on a representative 272-cells-per-axis grid and 200 steps reported 256 states (`8 * 32`), an 8x8 implicit solve, 6,094,681,088 peak allocated bytes, zero spatial communication in the single-device run, and `5.94%` median overhead (708.98 ms baseline versus 751.10 ms connected; gate `< 10%`). Six ABBA/BAAB samples, their MAD values, the CUDA/PyTorch/GPU environment, and positive runtime activation of the field/network/observer graph are recorded in `.cache/phase4-network-performance-true-grid272.json`.
+- A nonzero-field, nonzero-network-state regression verifies that full-step graph warmup/capture restores the prepared state and matches eight eager field/network/observer steps. The ordinary eager runtime retains its fixed-allocation pivoted-LU path; native LU is isolated to captured replay because profiler coverage showed that eager `torch.linalg.lu_solve(out=...)` allocates scratch tensors.
+
+Blocked exit gate:
+
+- Spatial multi-GPU port V/I parity cannot be executed at this baseline. `DistributedFDTD` rejects scenes with ports, strips ports from local scenes, and has no shard-owned port fragments or scalar reduce-to-owner/scatter-from-owner transport. The current distributed reference also lists ports and distributed adjoint as unsupported.
+- These are the public plan 01/02 contracts Phase 4 depends on. Inventing private ownership from sparse edge ordering inside plan 03 would create a conflicting distributed RF architecture, so the `single/multi GPU port V/I rtol <= 2e-5` gate remains explicitly blocked until that dependency lands. Single-device numerical, gradient, persistence, and performance gates are complete.
+
+Production limits:
+
+- Explicit delay forward execution remains supported, but its ring/filter/cursor state is not yet in the adjoint checkpoint schema; any differentiable run that includes delay is rejected.
+- Spatial communication bytes are zero only for the accepted single-device benchmark. No multi-GPU performance claim is made while the RF ownership/transport contract is absent.

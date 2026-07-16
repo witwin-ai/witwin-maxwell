@@ -185,6 +185,9 @@ class PreparedPortRuntime:
     voltage_phase_weights: torch.Tensor | None = None
     current_phase_weights: torch.Tensor | None = None
     observer_current_buffer: torch.Tensor | None = None
+    observer_window_buffer: torch.Tensor | None = None
+    observer_voltage_kernel_buffer: torch.Tensor | None = None
+    observer_current_kernel_buffer: torch.Tensor | None = None
     sample_index: int = 0
     embedded_network_name: str | None = None
 
@@ -704,7 +707,26 @@ def prepare_port_spectral_accumulators(solver, time_steps: int, window_type: str
             device=solver.device,
             dtype=getattr(solver, runtime.field_name).dtype,
         )
+        runtime.observer_window_buffer = torch.empty(
+            (1, runtime.frequencies.numel()),
+            device=solver.device,
+            dtype=runtime.frequencies.dtype,
+        )
+        runtime.observer_voltage_kernel_buffer = torch.empty(
+            (1, runtime.frequencies.numel()),
+            device=solver.device,
+            dtype=runtime.voltage_phase_weights.dtype,
+        )
+        runtime.observer_current_kernel_buffer = torch.empty_like(
+            runtime.observer_voltage_kernel_buffer
+        )
         runtime.sample_index = 0
+    solver._port_observer_step = torch.zeros(
+        (1,),
+        device=solver.device,
+        dtype=torch.int64,
+    )
+    solver._port_observer_graph_active = False
 
 
 def complete_port_spectral_normalization(solver) -> None:
@@ -1006,6 +1028,120 @@ def accumulate_port_observers(solver) -> None:
         runtime.sample_index += 1
         runtime.electric_time.add_(runtime.lumped.dt if runtime.lumped is not None else solver.dt)
         runtime.magnetic_time.add_(runtime.lumped.dt if runtime.lumped is not None else solver.dt)
+
+
+def _accumulate_embedded_port_observers_gpu(solver) -> None:
+    step = solver._port_observer_step
+    for runtime in solver._port_runtimes:
+        accumulator = runtime.accumulator
+        lumped = runtime.lumped
+        torch.neg(
+            lumped.last_branch_current,
+            out=runtime.observer_current_buffer,
+        )
+        torch.index_select(
+            runtime.window_weights,
+            0,
+            step,
+            out=runtime.observer_window_buffer,
+        )
+        torch.index_select(
+            runtime.voltage_phase_weights,
+            0,
+            step,
+            out=runtime.observer_voltage_kernel_buffer,
+        )
+        torch.index_select(
+            runtime.current_phase_weights,
+            0,
+            step,
+            out=runtime.observer_current_kernel_buffer,
+        )
+        torch.mul(
+            runtime.observer_voltage_kernel_buffer[0],
+            lumped.last_voltage_midpoint,
+            out=accumulator._voltage_term,
+        )
+        accumulator._voltage_sum.add_(accumulator._voltage_term)
+        torch.mul(
+            runtime.observer_current_kernel_buffer[0],
+            runtime.observer_current_buffer,
+            out=accumulator._current_term,
+        )
+        accumulator._current_sum.add_(accumulator._current_term)
+        accumulator._window_weight_sum.add_(runtime.observer_window_buffer[0])
+        runtime.electric_time.add_(lumped.dt)
+        runtime.magnetic_time.add_(lumped.dt)
+    step.add_(1)
+
+
+def make_port_observer_runner(solver, *, use_cuda_graph: bool):
+    """Capture fixed embedded-terminal DFT updates behind one graph launch."""
+
+    def normal() -> None:
+        accumulate_port_observers(solver)
+    runtimes = tuple(getattr(solver, "_port_runtimes", ()))
+    graphable = (
+        use_cuda_graph
+        and torch.cuda.is_available()
+        and torch.device(solver.device).type == "cuda"
+        and bool(runtimes)
+        and all(
+            runtime.lumped is not None
+            and runtime.embedded_network_name is not None
+            and runtime.excitation is None
+            and runtime.drive_accumulator is None
+            for runtime in runtimes
+        )
+        and all(runtime.window_weights.shape[0] >= 4 for runtime in runtimes)
+    )
+    if not graphable:
+        return normal
+
+    from .cuda.runtime.graph import CudaGraphRunner
+
+    tensors = [solver._port_observer_step]
+    for runtime in runtimes:
+        accumulator = runtime.accumulator
+        tensors.extend(
+            (
+                runtime.observer_current_buffer,
+                runtime.observer_window_buffer,
+                runtime.observer_voltage_kernel_buffer,
+                runtime.observer_current_kernel_buffer,
+                runtime.electric_time,
+                runtime.magnetic_time,
+                accumulator._voltage_sum,
+                accumulator._current_sum,
+                accumulator._window_weight_sum,
+                accumulator._voltage_term,
+                accumulator._current_term,
+            )
+        )
+    saved = [tensor.clone() for tensor in tensors]
+
+    def restore() -> None:
+        for tensor, value in zip(tensors, saved):
+            tensor.copy_(value)
+
+    try:
+        replay = CudaGraphRunner(enabled=True, warmup_steps=3).capture(
+            lambda: _accumulate_embedded_port_observers_gpu(solver)
+        )
+    except Exception:
+        restore()
+        return normal
+    restore()
+    solver._port_observer_graph_active = True
+    return replay
+
+
+def complete_port_observer_graph(solver, sample_count: int) -> None:
+    if not getattr(solver, "_port_observer_graph_active", False):
+        return
+    for runtime in getattr(solver, "_port_runtimes", ()):
+        runtime.sample_index = int(sample_count)
+        runtime.accumulator._sample_count = int(sample_count)
 
 
 def finalize_port_data(solver) -> dict[str, PortData]:

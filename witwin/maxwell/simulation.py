@@ -10,6 +10,7 @@ from .fdtd_parallel import FDTDParallelConfig
 from .lumped import PortExcitation, PortSweep
 from .monitors import MediumMonitor, PermittivityMonitor
 from .ports import LumpedPort, TerminalPort, WavePort
+from .rational import RationalModel, StateSpaceNetwork
 from .result import Result
 from .scene import Scene, SceneModule, prepare_scene
 
@@ -286,6 +287,21 @@ def _trainable_rf_parameters(
             )
     for element in scene.lumped_elements:
         candidates.append(getattr(element, "value", None))
+    for block in getattr(scene, "networks", ()):
+        model = getattr(block, "model", None)
+        candidates.extend(
+            getattr(model, name, None)
+            for name in (
+                "poles",
+                "residues",
+                "direct",
+                "proportional",
+                "A",
+                "B",
+                "C",
+                "D",
+            )
+        )
     for excitation in excitations:
         candidates.extend((excitation.amplitude, excitation.source_impedance))
     if port_sweep is not None:
@@ -543,11 +559,26 @@ class Simulation:
     def _validate_trainable_rf_support(self) -> None:
         if self.method != SimulationMethod.FDTD or not self.has_trainable_parameters:
             return
-        if getattr(self.scene, "networks", ()):
-            raise NotImplementedError(
-                "Differentiable FDTD with embedded networks requires the Phase 4 "
-                "network-state adjoint and is not available in Phase 2."
-            )
+        for block in getattr(self.scene, "networks", ()):
+            model = block.model
+            if isinstance(model, RationalModel):
+                unsupported = tuple(
+                    name
+                    for name in ("poles", "proportional")
+                    if getattr(model, name).requires_grad
+                )
+                if unsupported:
+                    raise NotImplementedError(
+                        "Differentiable embedded RationalModel supports residues and direct "
+                        f"terms only; trainable {unsupported!r} are not supported."
+                    )
+            elif isinstance(model, StateSpaceNetwork) and any(
+                getattr(model, name).requires_grad for name in ("A", "B", "C", "D")
+            ):
+                raise NotImplementedError(
+                    "Differentiable embedded networks accept trainable residues/direct on a "
+                    "pre-fitted RationalModel; direct trainable state-space matrices are not supported."
+                )
         rf_ports = tuple(
             port
             for port in self.scene.ports

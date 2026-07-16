@@ -324,7 +324,10 @@ class RationalModel:
                     torch.tensor([[1.0], [0.0]], dtype=real_dtype, device=device)
                 )
                 for input_index in range(port_count):
-                    residue = self.residues[:, input_index, first]
+                    residue = 0.5 * (
+                        self.residues[:, input_index, first]
+                        + self.residues[:, input_index, second].conj()
+                    )
                     residue_columns[input_index].append(
                         torch.stack((2.0 * residue.real, -2.0 * residue.imag), dim=1)
                     )

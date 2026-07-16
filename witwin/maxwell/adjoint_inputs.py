@@ -57,6 +57,19 @@ def scene_trainable_rf_tensors(scene) -> tuple[torch.Tensor, ...]:
         candidates.append(getattr(port, "reference_impedance", None))
     for element in getattr(scene, "lumped_elements", ()):
         candidates.append(getattr(element, "value", None))
+    for block in getattr(scene, "networks", ()):
+        model = getattr(block, "model", None)
+        for name in (
+            "poles",
+            "residues",
+            "direct",
+            "proportional",
+            "A",
+            "B",
+            "C",
+            "D",
+        ):
+            candidates.append(getattr(model, name, None))
     return unique_trainable_tensors(candidates)
 
 

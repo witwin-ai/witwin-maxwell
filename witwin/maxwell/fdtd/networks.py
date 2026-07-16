@@ -6,6 +6,7 @@ import torch
 
 from ..compiler.networks import CompiledNetworkBlock
 from ..network import EmbeddedNetworkData
+from .checkpoint import network_state_name
 from .delay import (
     PreparedBidirectionalDelay,
     prepare_bidirectional_delay,
@@ -15,12 +16,26 @@ from .delay import (
 
 
 @dataclass
+class PreparedNetworkTerminalGroup:
+    """Batched terminal edges sharing one electric-field component."""
+
+    electric_field: torch.Tensor
+    linear_indices: torch.Tensor
+    port_indices: torch.Tensor
+    voltage_weights: torch.Tensor
+    injection: torch.Tensor
+    edge_buffer: torch.Tensor
+    correction_buffer: torch.Tensor
+
+
+@dataclass
 class PreparedNetworkRuntime:
     """Fixed-shape N-port state-space feedback on one FDTD device."""
 
     compiled: CompiledNetworkBlock
     port_runtimes: tuple[object, ...]
     electric_fields: tuple[torch.Tensor, ...]
+    terminal_groups: tuple[PreparedNetworkTerminalGroup, ...]
     A: torch.Tensor
     B: torch.Tensor
     C: torch.Tensor
@@ -30,6 +45,7 @@ class PreparedNetworkRuntime:
     state_drive: torch.Tensor
     free_voltage: torch.Tensor
     network_voltage: torch.Tensor
+    voltage_after: torch.Tensor
     branch_current: torch.Tensor
     output_buffer: torch.Tensor
     direct_drive: torch.Tensor
@@ -86,6 +102,17 @@ class PreparedNetworkRuntime:
         return self.electric_fields[0]
 
 
+@dataclass(frozen=True)
+class NetworkStepTrace:
+    """Small fixed-state trace required by the discrete network adjoint."""
+
+    network_index: int
+    state: torch.Tensor
+    free_voltage: torch.Tensor
+    network_voltage: torch.Tensor
+    branch_current: torch.Tensor
+
+
 def _runtime_matrix(value: torch.Tensor, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     return value.to(device=device, dtype=dtype).contiguous()
 
@@ -94,6 +121,51 @@ def _matvec_out(matrix: torch.Tensor, vector: torch.Tensor, output: torch.Tensor
     """Matrix-vector product without the temporary allocated by CUDA ``mv``."""
 
     torch.mm(matrix, vector.unsqueeze(1), out=output.unsqueeze(1))
+
+
+def _prepare_terminal_groups(
+    connected_runtimes: tuple[object, ...],
+    electric_fields: tuple[torch.Tensor, ...],
+) -> tuple[PreparedNetworkTerminalGroup, ...]:
+    """Pack terminal edges by field component for fixed-allocation GPU updates."""
+
+    grouped: dict[str, list[tuple[int, object, torch.Tensor]]] = {}
+    for port_index, (port_runtime, electric_field) in enumerate(
+        zip(connected_runtimes, electric_fields)
+    ):
+        grouped.setdefault(port_runtime.field_name, []).append(
+            (port_index, port_runtime.lumped, electric_field)
+        )
+    prepared = []
+    for entries in grouped.values():
+        field = entries[0][2]
+        linear_indices = torch.cat(
+            tuple(lumped.linear_indices for _, lumped, _ in entries)
+        ).contiguous()
+        port_indices = torch.cat(
+            tuple(
+                torch.full_like(lumped.linear_indices, port_index)
+                for port_index, lumped, _ in entries
+            )
+        ).contiguous()
+        voltage_weights = torch.cat(
+            tuple(lumped.voltage_weights for _, lumped, _ in entries)
+        ).contiguous()
+        injection = torch.cat(
+            tuple(lumped.injection for _, lumped, _ in entries)
+        ).contiguous()
+        prepared.append(
+            PreparedNetworkTerminalGroup(
+                electric_field=field,
+                linear_indices=linear_indices,
+                port_indices=port_indices,
+                voltage_weights=voltage_weights,
+                injection=injection,
+                edge_buffer=torch.empty_like(voltage_weights),
+                correction_buffer=torch.empty_like(injection),
+            )
+        )
+    return tuple(prepared)
 
 
 def _lu_solve_out(
@@ -124,6 +196,17 @@ def _lu_solve_out(
             torch.sum(workspace[:width], dim=0, out=scalar)
             output[row].sub_(scalar)
         output[row].div_(lu[row, row])
+
+
+def _native_lu_solve_out(
+    lu: torch.Tensor,
+    pivots: torch.Tensor,
+    rhs: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    """Use the native batched solve inside a CUDA graph capture only."""
+
+    torch.linalg.lu_solve(lu, pivots, rhs.unsqueeze(1), out=output.unsqueeze(1))
 
 
 def _effective_source_band(source_time: dict) -> tuple[float, float]:
@@ -220,11 +303,6 @@ def prepare_network_runtimes(solver) -> tuple[PreparedNetworkRuntime, ...]:
         first_lumped = connected_runtimes[0].lumped
         discrete = compiled.discrete
         matrices = (discrete.A, discrete.B, discrete.C, discrete.D)
-        if any(matrix.requires_grad for matrix in matrices):
-            raise NotImplementedError(
-                "Trainable embedded-network state-space coefficients require the Phase 4 "
-                "network adjoint; the fixed runtime accepts fixed coefficients only."
-            )
         dtype = first_lumped.field_dtype
         device = first_lumped.linear_indices.device
         for port_runtime in connected_runtimes[1:]:
@@ -352,11 +430,17 @@ def prepare_network_runtimes(solver) -> tuple[PreparedNetworkRuntime, ...]:
         warnings: list[str] = []
         if compiled.fit_report is not None and compiled.fit_report.passivity_margin is None:
             warnings.append("The fitted model has no recorded passivity margin.")
-        prepared.append(
-            PreparedNetworkRuntime(
+        connected_tuple = tuple(connected_runtimes)
+        field_tuple = tuple(electric_fields)
+        free_voltage = torch.empty((port_count,), device=device, dtype=dtype)
+        network_voltage = torch.empty_like(free_voltage)
+        voltage_after = torch.empty_like(free_voltage)
+        branch_current = torch.empty_like(free_voltage)
+        network_runtime = PreparedNetworkRuntime(
                 compiled=compiled,
-                port_runtimes=tuple(connected_runtimes),
-                electric_fields=tuple(electric_fields),
+                port_runtimes=connected_tuple,
+                electric_fields=field_tuple,
+                terminal_groups=_prepare_terminal_groups(connected_tuple, field_tuple),
                 A=A,
                 B=B,
                 C=C,
@@ -364,9 +448,10 @@ def prepare_network_runtimes(solver) -> tuple[PreparedNetworkRuntime, ...]:
                 state=state,
                 next_state=torch.empty_like(state),
                 state_drive=torch.empty_like(state),
-                free_voltage=torch.empty((port_count,), device=device, dtype=dtype),
-                network_voltage=torch.empty((port_count,), device=device, dtype=dtype),
-                branch_current=torch.empty((port_count,), device=device, dtype=dtype),
+                free_voltage=free_voltage,
+                network_voltage=network_voltage,
+                voltage_after=voltage_after,
+                branch_current=branch_current,
                 output_buffer=torch.empty((port_count,), device=device, dtype=dtype),
                 direct_drive=torch.empty((port_count,), device=device, dtype=dtype),
                 delay_runtime=delay_runtime,
@@ -401,46 +486,269 @@ def prepare_network_runtimes(solver) -> tuple[PreparedNetworkRuntime, ...]:
                 generated_energy=scalar_zeros[4],
                 runtime_warnings=tuple(warnings),
             )
-        )
+        for index, port_runtime in enumerate(connected_tuple):
+            lumped = port_runtime.lumped
+            lumped.last_voltage_before = free_voltage[index]
+            lumped.last_voltage_midpoint = network_voltage[index]
+            lumped.last_model_voltage_midpoint = network_voltage[index]
+            lumped.last_voltage_after = voltage_after[index]
+            lumped.last_branch_current = branch_current[index]
+        prepared.append(network_runtime)
     solver._network_runtimes = tuple(prepared)
     solver._network_cuda_graph_active = False
     return solver._network_runtimes
 
 
-def apply_network_runtime(runtime: PreparedNetworkRuntime) -> None:
+def replay_network_runtimes(
+    solver,
+    electric_fields: dict[str, torch.Tensor],
+    state: dict[str, torch.Tensor],
+    *,
+    capture=None,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """Replay ordinary-Y network feedback without mutating prepared state."""
+
+    fields = dict(electric_fields)
+    next_state: dict[str, torch.Tensor] = {}
+    traces: list[NetworkStepTrace] = []
+    for network_index, runtime in enumerate(
+        getattr(solver, "_network_runtimes", ())
+    ):
+        if runtime.delay_runtime is not None:
+            raise NotImplementedError(
+                "Differentiable embedded-network replay does not support explicit delay state."
+            )
+        name = network_state_name(network_index)
+        old_state = state[name]
+        free_voltage = torch.stack(
+            tuple(
+                torch.dot(
+                    torch.index_select(
+                        fields[port_runtime.field_name].reshape(-1),
+                        0,
+                        port_runtime.lumped.linear_indices,
+                    ),
+                    port_runtime.lumped.voltage_weights,
+                )
+                for port_runtime in runtime.port_runtimes
+            )
+        )
+        drive = runtime.C @ old_state + runtime.D @ free_voltage
+        branch_current = torch.linalg.solve(runtime.loop_denominator, drive)
+        network_voltage = (
+            free_voltage - runtime.feedback_impedance * branch_current
+        )
+        advanced_state = (
+            runtime.A @ old_state + runtime.B @ network_voltage
+        )
+        for port_index, port_runtime in enumerate(runtime.port_runtimes):
+            lumped = port_runtime.lumped
+            corrected = fields[port_runtime.field_name].clone()
+            corrected.reshape(-1).index_add_(
+                0,
+                lumped.linear_indices,
+                -lumped.injection * branch_current[port_index],
+            )
+            fields[port_runtime.field_name] = corrected
+        next_state[name] = advanced_state
+        traces.append(
+            NetworkStepTrace(
+                network_index=network_index,
+                state=old_state,
+                free_voltage=free_voltage,
+                network_voltage=network_voltage,
+                branch_current=branch_current,
+            )
+        )
+    if capture is not None:
+        capture.append(tuple(traces))
+    return fields, next_state
+
+
+def pullback_network_runtimes(
+    solver,
+    traces,
+    adjoint_state: dict[str, torch.Tensor],
+    *,
+    port_sample_adjoints: dict[
+        int,
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ],
+    eps_by_field: dict[str, torch.Tensor],
+):
+    """Reverse ordinary-Y state recurrence and implicit terminal coupling."""
+
+    updated = dict(adjoint_state)
+    grad_eps = {name: torch.zeros_like(value) for name, value in eps_by_field.items()}
+    semantic_grads: dict[tuple[str, str, str], torch.Tensor] = {}
+    port_indices = {
+        id(port_runtime): index
+        for index, port_runtime in enumerate(getattr(solver, "_port_runtimes", ()))
+    }
+    for trace in reversed(tuple(traces)):
+        runtime = solver._network_runtimes[trace.network_index]
+        state_name = network_state_name(trace.network_index)
+        output_field_adjoints = {
+            port_runtime.field_name: updated[port_runtime.field_name]
+            for port_runtime in runtime.port_runtimes
+        }
+        bar_current = torch.zeros_like(trace.branch_current)
+        bar_voltage = torch.zeros_like(trace.network_voltage)
+        bar_injection: list[torch.Tensor] = []
+        for port_index, port_runtime in enumerate(runtime.port_runtimes):
+            lumped = port_runtime.lumped
+            field_adjoint = output_field_adjoints[port_runtime.field_name]
+            local_field_adjoint = torch.index_select(
+                field_adjoint.reshape(-1),
+                0,
+                lumped.linear_indices,
+            )
+            bar_injection.append(
+                -trace.branch_current[port_index] * local_field_adjoint
+            )
+            bar_current[port_index].sub_(
+                torch.dot(lumped.injection, local_field_adjoint)
+            )
+            voltage_seed, current_seed, _drive_seed = port_sample_adjoints.get(
+                port_indices[id(port_runtime)],
+                (
+                    torch.zeros_like(trace.branch_current[port_index]),
+                    torch.zeros_like(trace.branch_current[port_index]),
+                    torch.zeros_like(trace.branch_current[port_index]),
+                ),
+            )
+            bar_voltage[port_index].add_(
+                voltage_seed.to(
+                    device=bar_voltage.device,
+                    dtype=bar_voltage.dtype,
+                )
+            )
+            bar_current[port_index].sub_(
+                current_seed.to(
+                    device=bar_current.device,
+                    dtype=bar_current.dtype,
+                )
+            )
+
+        bar_next_state = updated[state_name]
+        grad_a = torch.outer(bar_next_state, trace.state)
+        grad_b = torch.outer(bar_next_state, trace.network_voltage)
+        bar_state = runtime.A.transpose(0, 1) @ bar_next_state
+        bar_voltage = bar_voltage + runtime.B.transpose(0, 1) @ bar_next_state
+
+        bar_free_voltage = bar_voltage.clone()
+        bar_current = (
+            bar_current - runtime.feedback_impedance * bar_voltage
+        )
+        bar_drive = torch.linalg.solve(
+            runtime.loop_denominator.transpose(0, 1),
+            bar_current,
+        )
+        grad_loop = -torch.outer(bar_drive, trace.branch_current)
+        grad_c = torch.outer(bar_drive, trace.state)
+        grad_d = (
+            torch.outer(bar_drive, trace.free_voltage)
+            + grad_loop * runtime.feedback_impedance.unsqueeze(0)
+        )
+        bar_state = bar_state + runtime.C.transpose(0, 1) @ bar_drive
+        bar_free_voltage = (
+            bar_free_voltage + runtime.D.transpose(0, 1) @ bar_drive
+        )
+        bar_feedback = (
+            -bar_voltage * trace.branch_current
+            + torch.sum(grad_loop * runtime.D, dim=0)
+        )
+
+        for port_index, port_runtime in enumerate(runtime.port_runtimes):
+            lumped = port_runtime.lumped
+            bar_injection[port_index] = (
+                bar_injection[port_index]
+                + 0.5 * lumped.voltage_weights * bar_feedback[port_index]
+            )
+            field_name = port_runtime.field_name
+            field_adjoint = updated[field_name].clone()
+            field_adjoint.reshape(-1).index_add_(
+                0,
+                lumped.linear_indices,
+                lumped.voltage_weights * bar_free_voltage[port_index],
+            )
+            updated[field_name] = field_adjoint
+            local_eps = torch.index_select(
+                eps_by_field[field_name].reshape(-1),
+                0,
+                lumped.linear_indices,
+            )
+            local_grad_eps = (
+                -bar_injection[port_index] * lumped.injection / local_eps
+            )
+            grad_eps[field_name].reshape(-1).index_add_(
+                0,
+                lumped.linear_indices,
+                local_grad_eps,
+            )
+
+        updated[state_name] = bar_state
+        for matrix_name, gradient in (
+            ("A", grad_a),
+            ("B", grad_b),
+            ("C", grad_c),
+            ("D", grad_d),
+        ):
+            key = ("network", runtime.name, matrix_name)
+            semantic_grads[key] = semantic_grads.get(
+                key,
+                torch.zeros_like(gradient),
+            ) + gradient
+    return updated, grad_eps, semantic_grads
+
+
+def apply_network_runtime(
+    runtime: PreparedNetworkRuntime,
+    *,
+    native_lu: bool = False,
+) -> None:
     """Advance one implicit N-port load and correct its Yee fields in place."""
 
-    for index, (port_runtime, electric_field) in enumerate(
-        zip(runtime.port_runtimes, runtime.electric_fields)
-    ):
-        lumped = port_runtime.lumped
-        flat_field = electric_field.view(-1)
+    runtime.free_voltage.zero_()
+    for group in runtime.terminal_groups:
+        flat_field = group.electric_field.view(-1)
         torch.index_select(
             flat_field,
             0,
-            lumped.linear_indices,
-            out=lumped.edge_buffer,
+            group.linear_indices,
+            out=group.edge_buffer,
         )
         torch.mul(
-            lumped.edge_buffer,
-            lumped.voltage_weights,
-            out=lumped.edge_buffer,
+            group.edge_buffer,
+            group.voltage_weights,
+            out=group.edge_buffer,
         )
-        torch.sum(lumped.edge_buffer, dim=0, out=lumped.last_voltage_before)
-        runtime.free_voltage[index].copy_(lumped.last_voltage_before)
+        runtime.free_voltage.index_add_(
+            0,
+            group.port_indices,
+            group.edge_buffer,
+        )
 
     if runtime.delay_runtime is None:
         _matvec_out(runtime.C, runtime.state, runtime.output_buffer)
         _matvec_out(runtime.D, runtime.free_voltage, runtime.direct_drive)
         runtime.output_buffer.add_(runtime.direct_drive)
-        _lu_solve_out(
-            runtime.loop_lu,
-            runtime.loop_permutation,
-            runtime.output_buffer,
-            runtime.branch_current,
-            runtime.solve_workspace,
-            runtime.solve_scalar,
-        )
+        if native_lu:
+            _native_lu_solve_out(
+                runtime.loop_lu,
+                runtime.loop_pivots,
+                runtime.output_buffer,
+                runtime.branch_current,
+            )
+        else:
+            _lu_solve_out(
+                runtime.loop_lu,
+                runtime.loop_permutation,
+                runtime.output_buffer,
+                runtime.branch_current,
+                runtime.solve_workspace,
+                runtime.solve_scalar,
+            )
         runtime.network_voltage.copy_(runtime.free_voltage)
         runtime.network_voltage.addcmul_(
             runtime.feedback_impedance,
@@ -472,14 +780,22 @@ def apply_network_runtime(runtime: PreparedNetworkRuntime) -> None:
             )
             runtime.zero_reflected.mul_(runtime.zero_beta)
             runtime.zero_rhs.sub_(runtime.zero_reflected)
-            _lu_solve_out(
-                runtime.loop_lu,
-                runtime.loop_permutation,
-                runtime.zero_rhs,
-                runtime.zero_solution,
-                runtime.solve_workspace,
-                runtime.solve_scalar,
-            )
+            if native_lu:
+                _native_lu_solve_out(
+                    runtime.loop_lu,
+                    runtime.loop_pivots,
+                    runtime.zero_rhs,
+                    runtime.zero_solution,
+                )
+            else:
+                _lu_solve_out(
+                    runtime.loop_lu,
+                    runtime.loop_permutation,
+                    runtime.zero_rhs,
+                    runtime.zero_solution,
+                    runtime.solve_workspace,
+                    runtime.solve_scalar,
+                )
             runtime.core_incident.index_copy_(
                 0,
                 runtime.zero_indices,
@@ -528,31 +844,31 @@ def apply_network_runtime(runtime: PreparedNetworkRuntime) -> None:
         )
         state_input = runtime.core_incident
 
-    for index, (port_runtime, electric_field) in enumerate(
-        zip(runtime.port_runtimes, runtime.electric_fields)
-    ):
-        lumped = port_runtime.lumped
-        flat_field = electric_field.view(-1)
-        lumped.last_branch_current.copy_(runtime.branch_current[index])
+    for group in runtime.terminal_groups:
+        flat_field = group.electric_field.view(-1)
+        torch.index_select(
+            runtime.branch_current,
+            0,
+            group.port_indices,
+            out=group.edge_buffer,
+        )
         torch.mul(
-            lumped.injection,
-            lumped.last_branch_current,
-            out=lumped.correction_buffer,
+            group.injection,
+            group.edge_buffer,
+            out=group.correction_buffer,
         )
         flat_field.index_add_(
             0,
-            lumped.linear_indices,
-            lumped.correction_buffer,
+            group.linear_indices,
+            group.correction_buffer,
             alpha=-1.0,
         )
-        lumped.last_voltage_midpoint.copy_(runtime.network_voltage[index])
-        lumped.last_voltage_after.copy_(lumped.last_voltage_before)
-        lumped.last_voltage_after.addcmul_(
-            lumped.coupling_impedance,
-            lumped.last_branch_current,
-            value=-1.0,
-        )
-        lumped.last_model_voltage_midpoint.copy_(lumped.last_voltage_midpoint)
+    runtime.voltage_after.copy_(runtime.free_voltage)
+    runtime.voltage_after.addcmul_(
+        runtime.feedback_impedance,
+        runtime.branch_current,
+        value=-1.0,
+    )
 
     _matvec_out(runtime.A, runtime.state, runtime.next_state)
     _matvec_out(
@@ -578,9 +894,9 @@ def apply_network_runtime(runtime: PreparedNetworkRuntime) -> None:
     runtime.generated_energy.add_(runtime.generated_increment)
 
 
-def apply_network_runtimes(solver) -> None:
+def apply_network_runtimes(solver, *, native_lu: bool = False) -> None:
     for runtime in getattr(solver, "_network_runtimes", ()):
-        apply_network_runtime(runtime)
+        apply_network_runtime(runtime, native_lu=native_lu)
 
 
 def make_network_runner(solver, *, use_cuda_graph: bool):
@@ -608,6 +924,7 @@ def make_network_runner(solver, *, use_cuda_graph: bool):
             runtime.state_drive,
             runtime.free_voltage,
             runtime.network_voltage,
+            runtime.voltage_after,
             runtime.branch_current,
             runtime.output_buffer,
             runtime.direct_drive,
@@ -628,6 +945,8 @@ def make_network_runner(solver, *, use_cuda_graph: bool):
             runtime.absorbed_energy,
             runtime.generated_energy,
         ]
+        for group in runtime.terminal_groups:
+            mutated.extend((group.edge_buffer, group.correction_buffer))
         if runtime.delay_runtime is not None:
             delay = runtime.delay_runtime
             mutated.extend(
@@ -749,10 +1068,13 @@ def finalize_embedded_networks(solver, ports) -> dict[str, EmbeddedNetworkData]:
 
 
 __all__ = [
+    "NetworkStepTrace",
     "PreparedNetworkRuntime",
     "apply_network_runtime",
     "apply_network_runtimes",
     "finalize_embedded_networks",
     "make_network_runner",
     "prepare_network_runtimes",
+    "pullback_network_runtimes",
+    "replay_network_runtimes",
 ]

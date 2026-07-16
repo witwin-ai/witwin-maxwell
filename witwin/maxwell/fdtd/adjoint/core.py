@@ -34,6 +34,7 @@ from ..observers import (
     _monitor_payload_is_point,
     _plane_coord_names,
 )
+from ..networks import replay_network_runtimes
 from ..ports import replay_port_runtimes
 
 _TFSF_REFERENCE_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned"}
@@ -3002,6 +3003,7 @@ def _step_state(
     tpa_ez=None,
     capture_magnetic=None,
     capture_lumped=None,
+    capture_network=None,
 ):
     if getattr(solver, "modulation_enabled", False):
         raise NotImplementedError("FDTD adjoint replay does not support time-modulated media.")
@@ -3485,6 +3487,12 @@ def _step_state(
         time_value=time_value,
         capture=capture_lumped,
     )
+    electric_fields, network_state = replay_network_runtimes(
+        solver,
+        electric_fields,
+        state,
+        capture=capture_network,
+    )
 
     dispersive_input_fields = {name: electric_fields[name] for name in ("Ex", "Ey", "Ez")}
     if complex_fields:
@@ -3568,6 +3576,7 @@ def _step_state(
     next_state.update(dispersive_state)
     next_state.update(magnetic_dispersive_state)
     next_state.update(lumped_state)
+    next_state.update(network_state)
     return next_state
 
 
@@ -3647,6 +3656,7 @@ def _replay_segment_states(
     *,
     mid_magnetic_out=None,
     lumped_traces_out=None,
+    network_traces_out=None,
 ):
     """Replay the forward field states of one checkpoint segment.
 
@@ -3670,6 +3680,7 @@ def _replay_segment_states(
                 eps_ez=solver.eps_Ez,
                 capture_magnetic=mid_magnetic_out if capture else None,
                 capture_lumped=lumped_traces_out,
+                capture_network=network_traces_out,
             )
             states.append({name: tensor.detach() for name, tensor in current.items()})
     return states
