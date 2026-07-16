@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
-from ..network import NetworkBlock
+from ..network import NetworkBlock, NetworkData
 from ..ports import LumpedPort, TerminalPort, WavePort
 from ..rational import (
     DiscreteStateSpaceNetwork,
@@ -13,6 +13,11 @@ from ..rational import (
     StateSpaceNetwork,
 )
 from .ports import CompiledPortGeometry, compile_port_geometry
+from .delay import (
+    CompiledNetworkDelay,
+    compile_network_delay,
+    reembed_scattering,
+)
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,8 @@ class CompiledNetworkBlock:
     model_id: str
     frequency_band: tuple[float, float]
     extrapolation: str = "reject"
+    delay: CompiledNetworkDelay | None = None
+    reference_impedance: torch.Tensor | None = None
 
     @property
     def port_count(self) -> int:
@@ -66,17 +73,75 @@ def _move_state_space(model: StateSpaceNetwork, device: torch.device) -> StateSp
 def _resolve_continuous_model(
     block: NetworkBlock,
     *,
+    dt: float,
     device: torch.device,
-) -> tuple[StateSpaceNetwork, RationalModel | StateSpaceNetwork]:
+) -> tuple[
+    StateSpaceNetwork,
+    RationalModel | StateSpaceNetwork,
+    CompiledNetworkDelay | None,
+    torch.Tensor | None,
+]:
+    representation = "Y"
+    delay: CompiledNetworkDelay | None = None
+    reference_impedance: torch.Tensor | None = None
+    fit_network = block.network
+    if block.delay_seconds is not None:
+        representation = "S"
+        band = None if block.fit is False else block.fit.band
+        delay, core_scattering = compile_network_delay(
+            block.network,
+            block.delay_seconds,
+            dt=dt,
+            max_delay_steps=block.max_delay_steps,
+            band=band,
+        )
+        fit_network = NetworkData(
+            frequencies=block.network.frequencies,
+            s=core_scattering,
+            z0=block.network.z0,
+            port_names=block.network.port_names,
+            valid_columns=block.network.valid_columns,
+            metadata=block.network.metadata,
+            phasor_convention=block.network.phasor_convention,
+            power_wave_convention=block.network.power_wave_convention,
+        )
+        z0 = block.network.z0
+        tolerance = 256.0 * torch.finfo(z0.real.dtype).eps
+        scale = max(float(torch.max(torch.abs(z0)).item()), 1.0)
+        if float(torch.max(torch.abs(z0.imag)).item()) > tolerance * scale:
+            raise ValueError("Explicit time-domain delay requires real reference impedances.")
+        real_z0 = z0.real
+        if not torch.allclose(
+            real_z0,
+            real_z0[0].expand_as(real_z0),
+            rtol=tolerance,
+            atol=tolerance * scale,
+        ):
+            raise ValueError(
+                "Explicit time-domain delay requires frequency-independent reference impedances."
+            )
+        if not bool(torch.all(real_z0[0] > 0.0)):
+            raise ValueError("Explicit time-domain delay requires positive reference impedances.")
+        reference_impedance = real_z0[0].to(device=device)
     if block.model is None:
-        model = block.network.fit_rational(block.fit, representation="Y")
+        model = fit_network.fit_rational(block.fit, representation=representation)
         model = _move_rational(model, device)
-        return model.to_state_space(port_order=block.port_order), model
+        return (
+            model.to_state_space(port_order=block.port_order),
+            model,
+            delay,
+            reference_impedance,
+        )
     if isinstance(block.model, RationalModel):
         model = _move_rational(block.model, device)
-        return model.to_state_space(port_order=block.port_order), model
+        return (
+            model.to_state_space(port_order=block.port_order),
+            model,
+            delay,
+            reference_impedance,
+        )
     model = _move_state_space(block.model, device)
-    return model, model
+    return model, model, delay, reference_impedance
 
 
 def _effective_frequency_band(
@@ -100,16 +165,12 @@ def compile_network_block(
     dt: float,
     device: str | torch.device | None = None,
 ) -> CompiledNetworkBlock:
-    """Compile one single-port block for FDTD state-space feedback."""
+    """Compile one fixed-size N-port block for FDTD state-space feedback."""
 
     from ..scene import prepare_scene
 
     if not isinstance(block, NetworkBlock):
         raise TypeError("compile_network_block expects a NetworkBlock.")
-    if len(block.port_order) != 1:
-        raise NotImplementedError(
-            "Phase 2 network compilation supports one port; multiport implicit coupling is Phase 3."
-        )
     resolved_scene = prepare_scene(scene)
     target_device = torch.device(resolved_scene.device if device is None else device)
     ports_by_name = {port.name: port for port in resolved_scene.ports}
@@ -132,14 +193,25 @@ def compile_network_block(
             )
         compiled_ports.append(compile_port_geometry(resolved_scene, port, device=target_device))
 
-    continuous, certificate_model = _resolve_continuous_model(
+    continuous, certificate_model, delay, reference_impedance = _resolve_continuous_model(
         block,
+        dt=float(dt),
         device=target_device,
     )
-    if continuous.representation != "Y":
-        raise ValueError("FDTD embedded networks require an admittance (Y) realization.")
-    if continuous.input_count != 1 or continuous.output_count != 1:
-        raise ValueError("The compiled state-space dimensions must match the one-port block.")
+    expected_representation = "S" if delay is not None else "Y"
+    if continuous.representation != expected_representation:
+        raise ValueError(
+            f"FDTD embedded networks require a {expected_representation} realization "
+            "for the selected delay mode."
+        )
+    port_count = len(block.port_order)
+    if (
+        continuous.input_count != port_count
+        or continuous.output_count != port_count
+    ):
+        raise ValueError(
+            "The compiled state-space input/output dimensions must match the network port count."
+        )
     if continuous.state_count and bool(
         torch.any(torch.linalg.eigvals(continuous.A.clone()).real >= 0.0)
     ):
@@ -175,10 +247,36 @@ def compile_network_block(
             f"certificate={passivity.certified}."
         )
 
+    if delay is not None:
+        selected = (
+            (source_frequencies >= frequency_band[0])
+            & (source_frequencies <= frequency_band[1])
+        )
+        fitted_core = continuous.evaluate(source_frequencies[selected])
+        fitted = reembed_scattering(
+            fitted_core,
+            source_frequencies[selected],
+            delay.delay_seconds,
+        )
+        target = block.network.s.to(device=target_device)[selected]
+        reembedding_error = float(torch.max(torch.abs(fitted - target)).item())
+        if reembedding_error > 0.02:
+            raise ValueError(
+                f"Delayed network re-embedding error {reembedding_error:.6g} exceeds 0.02."
+            )
+        delay = replace(delay, reembedding_max_error=reembedding_error)
+        if continuous.report is not None:
+            updated_report = delay.update_report(
+                continuous.report,
+                port_count=port_count,
+            )
+            continuous = replace(continuous, report=updated_report)
+            certificate_model = replace(certificate_model, report=updated_report)
+
     discrete = continuous.discretize(float(dt))
     model_id = str(block.network.metadata.get("model_id", ""))
     if not model_id:
-        model_id = f"{block.name}:Y:{continuous.state_count}"
+        model_id = f"{block.name}:{expected_representation}:{continuous.state_count}"
     return CompiledNetworkBlock(
         name=block.name,
         port_order=block.port_order,
@@ -190,6 +288,8 @@ def compile_network_block(
         model_id=model_id,
         frequency_band=frequency_band,
         extrapolation=block.extrapolation,
+        delay=delay,
+        reference_impedance=reference_impedance,
     )
 
 

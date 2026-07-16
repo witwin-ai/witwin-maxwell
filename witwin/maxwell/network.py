@@ -1367,6 +1367,8 @@ class NetworkBlock:
     fit: RationalFitConfig | Literal[False] = field(default_factory=lambda: _default_fit_config())
     model: RationalModel | StateSpaceNetwork | None = None
     extrapolation: Literal["reject"] = "reject"
+    delay_seconds: Literal["auto"] | tuple[float, ...] | None = None
+    max_delay_steps: int = 65536
 
     def __post_init__(self) -> None:
         from .rational import RationalFitConfig, RationalModel, StateSpaceNetwork
@@ -1380,6 +1382,12 @@ class NetworkBlock:
             raise TypeError("connections must map network ports to Scene port names.")
         if self.extrapolation != "reject":
             raise ValueError("The initial network embedding API only supports extrapolation='reject'.")
+        if (
+            not isinstance(self.max_delay_steps, int)
+            or isinstance(self.max_delay_steps, bool)
+            or self.max_delay_steps < 1
+        ):
+            raise ValueError("max_delay_steps must be a positive integer.")
 
         normalized: dict[str, str] = {}
         for source, target in self.connections.items():
@@ -1425,14 +1433,48 @@ class NetworkBlock:
             )
 
         port_count = len(self.network.port_names)
+        delay_seconds = self.delay_seconds
+        if delay_seconds is not None and delay_seconds != "auto":
+            if isinstance(delay_seconds, (str, bytes)):
+                raise ValueError("delay_seconds must be None, 'auto', or one value per network port.")
+            try:
+                delay_seconds = tuple(float(value) for value in delay_seconds)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    "delay_seconds must be None, 'auto', or a finite non-negative sequence."
+                ) from exc
+            if len(delay_seconds) != port_count:
+                raise ValueError("delay_seconds must contain one one-way delay per network port.")
+            delay_tensor = torch.tensor(delay_seconds, dtype=torch.float64)
+            if not bool(torch.all(torch.isfinite(delay_tensor))) or not bool(
+                torch.all(delay_tensor >= 0.0)
+            ):
+                raise ValueError("delay_seconds must contain finite non-negative values.")
+        elif delay_seconds not in (None, "auto"):
+            raise ValueError("delay_seconds must be None, 'auto', or one value per network port.")
+        if delay_seconds == "auto" and any(
+            tensor.requires_grad for tensor in (self.network.frequencies, self.network.s, self.network.z0)
+        ):
+            raise RuntimeError(
+                "Automatic delay extraction is non-differentiable; declare fixed delay_seconds instead."
+            )
+        required_representation = "S" if delay_seconds is not None else "Y"
         if isinstance(self.model, RationalModel):
-            if self.model.representation != "Y":
-                raise ValueError("Embedded RationalModel instances must use the Y representation.")
+            if self.model.representation != required_representation:
+                raise ValueError(
+                    "Embedded RationalModel instances must use the "
+                    f"{required_representation} representation when delay_seconds="
+                    f"{delay_seconds!r}."
+                )
             if self.model.input_count != port_count or self.model.output_count != port_count:
                 raise ValueError("The pre-fitted model dimensions must match the NetworkData port count.")
         elif isinstance(self.model, StateSpaceNetwork):
-            if self.model.representation != "Y":
-                raise ValueError("Embedded StateSpaceNetwork instances must use the Y representation.")
+            if self.model.representation != required_representation:
+                raise ValueError(
+                    "Embedded StateSpaceNetwork instances must use the "
+                    f"{required_representation} representation when delay_seconds="
+                    f"{delay_seconds!r}."
+                )
             if self.model.input_count != port_count or self.model.output_count != port_count:
                 raise ValueError("The pre-fitted model dimensions must match the NetworkData port count.")
             if self.model.port_order and tuple(self.model.port_order) != self.network.port_names:
@@ -1444,6 +1486,7 @@ class NetworkBlock:
             "connections",
             {port: normalized[port] for port in self.network.port_names},
         )
+        object.__setattr__(self, "delay_seconds", delay_seconds)
 
     @property
     def port_order(self) -> tuple[str, ...]:
@@ -1473,6 +1516,8 @@ class TouchstoneNetwork(NetworkBlock):
         fit=None,
         model=None,
         extrapolation: Literal["reject"] = "reject",
+        delay_seconds: Literal["auto"] | tuple[float, ...] | None = None,
+        max_delay_steps: int = 65536,
         device: str | torch.device = "cuda",
         dtype: torch.dtype = torch.complex128,
     ) -> None:
@@ -1488,6 +1533,8 @@ class TouchstoneNetwork(NetworkBlock):
             fit=resolved_fit,
             model=model,
             extrapolation=extrapolation,
+            delay_seconds=delay_seconds,
+            max_delay_steps=max_delay_steps,
         )
 
 
@@ -1500,6 +1547,7 @@ class EmbeddedNetworkData:
     port_names: tuple[str, ...]
     voltage: torch.Tensor
     current: torch.Tensor
+    port_power: torch.Tensor
     absorbed_power: torch.Tensor
     generated_power: torch.Tensor
     state_norm: torch.Tensor
@@ -1531,6 +1579,7 @@ class EmbeddedNetworkData:
         if voltage.device != frequencies.device:
             raise ValueError("frequencies and network diagnostics must share a device.")
         for field_name, value in (
+            ("port_power", self.port_power),
             ("absorbed_power", self.absorbed_power),
             ("generated_power", self.generated_power),
             ("state_norm", self.state_norm),
@@ -1539,11 +1588,14 @@ class EmbeddedNetworkData:
                 raise TypeError(f"{field_name} must be a real floating-point torch.Tensor.")
             if value.device != frequencies.device or not bool(torch.all(torch.isfinite(value))):
                 raise ValueError(f"{field_name} must be finite and on the diagnostics device.")
-        expected_power_shape = (len(names), frequencies.numel())
+        expected_port_power_shape = (len(names), frequencies.numel())
+        if self.port_power.shape != expected_port_power_shape:
+            raise ValueError("port_power must have shape [Nport, F].")
+        expected_power_shape = (frequencies.numel(),)
         if self.absorbed_power.shape != expected_power_shape:
-            raise ValueError("absorbed_power must have shape [Nport, F].")
+            raise ValueError("absorbed_power must have shape [F].")
         if self.generated_power.shape != expected_power_shape:
-            raise ValueError("generated_power must have shape [Nport, F].")
+            raise ValueError("generated_power must have shape [F].")
         if self.state_norm.ndim != 0:
             raise ValueError("state_norm must be a scalar tensor.")
         model_id = str(self.model_id)
@@ -1559,6 +1611,12 @@ class EmbeddedNetworkData:
         object.__setattr__(self, "model_id", model_id)
         object.__setattr__(self, "runtime_warnings", tuple(str(item) for item in self.runtime_warnings))
         object.__setattr__(self, "metadata", dict(self.metadata))
+
+    @property
+    def net_power(self) -> torch.Tensor:
+        """Signed total power entering the network at each frequency."""
+
+        return torch.sum(self.port_power, dim=0)
 
 
 __all__ = [

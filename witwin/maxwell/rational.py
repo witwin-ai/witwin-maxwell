@@ -110,6 +110,11 @@ class NetworkFitReport(FitReport):
 
     port_count: int = 0
     delay_seconds: tuple[float, ...] = ()
+    delay_estimation_rank: int | None = None
+    delay_equation_count: int = 0
+    delay_residual_seconds: float | None = None
+    delay_phase_error_degrees: float | None = None
+    delay_reembedding_max_error: float | None = None
 
 
 @dataclass(frozen=True)

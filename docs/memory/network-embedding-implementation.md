@@ -74,7 +74,7 @@ Known limits recorded rather than hidden:
 Implemented:
 
 - `NetworkBlock` and `TouchstoneNetwork` declarations with complete one-based/name mapping to unique Scene ports, explicit automatic-fit versus pre-fitted contracts, and no silent detach.
-- Scene/compiler lowering to a stable, interval-certified passive admittance state-space descriptor connected to the existing sparse `LumpedPort` / resolved `TerminalPort` Yee geometry; unsupported `WavePort`, non-FDTD solvers, out-of-fit-band result requests or excitation spectra, and multiport cases fail before stepping.
+- Scene/compiler lowering to a stable, interval-certified passive admittance state-space descriptor connected to the existing sparse `LumpedPort` / resolved `TerminalPort` Yee geometry; unsupported `WavePort`, non-FDTD solvers, and out-of-fit-band result requests or excitation spectra fail before stepping. Phase 2 acceptance scoped this path to one port.
 - Fixed-shape, device-resident same-step feedback solving `(I + D_d Z_f) i = C_d x + D_d u`, followed by midpoint voltage correction and `x_next = A_d x + B_d v` without a one-step delay.
 - A post-source network update block with reusable hot-path buffers and independent CUDA Graph capture, inserted before dispersion, PEC/Mur, DFT, and port observation.
 - Tensor-native `EmbeddedNetworkData` diagnostics exposed through `Result.embedded_network(...)`, including network-oriented V/I, absorbed/generated frequency power, state norm, typed fit report, model identity, warnings, and runtime provenance.
@@ -92,6 +92,32 @@ Acceptance evidence:
 
 Known limits recorded rather than hidden:
 
-- Phase 2 executes one network port. Multiport implicit coupling and bounded delay realization belong to Phase 3.
 - Embedded-network coefficients are fixed for forward execution. Their analytic reverse and persistence schema belong to Phase 4.
 - Spatial multi-device ownership remains blocked on the missing public port reference-point ownership and hot-path scalar transport contracts recorded in the dependency audit.
+
+## Phase 3 evidence
+
+Implemented:
+
+- Ordered 2/4/N-port compilation and runtime mapping, with all matrices, diagnostics, and Scene connections normalized to `NetworkData.port_names`.
+- Coupled same-step direct feedthrough using a prepare-time pivoted-LU factorization of `I + D_d diag(Z_f)` and fixed solve scratch; no explicit inverse, hot-path allocation, or one-step feedback delay is introduced.
+- Optional per-port `delay_seconds=None | "auto" | tuple[...]` plus a strict `max_delay_steps` storage bound. Automatic extraction solves weighted path-delay equations deterministically in CPU float64 and reports rank, equation count, residual, warnings, and the resolved one-way delays.
+- Delay de-embedding/re-embedding follows the repository `exp(-i*omega*t)` convention, so a causal path contributes `exp(+i omega (tau_i + tau_j))`. The de-embedded passive S core is rationally fitted/certified, while the time-domain reference planes use fixed bidirectional integer rings plus first-order Thiran fractional delay.
+- Mixed zero-delay and delayed ports share one power-wave runtime: the zero-delay subset receives its own prepare-time same-step direct-loop solve, and delayed waves are read before and written after the current terminal solution. All buffers, indices, cursor state, and fractional-filter state are CUDA Graph captured without step-local allocation or host synchronization.
+- Real, positive, frequency-independent reference impedances are required for the time-domain delay adapter; shorter-than-one-step explicit delays and over-budget buffers fail at compile time instead of being silently approximated.
+
+Acceptance evidence:
+
+- Independent NumPy matrix oracles cover non-diagonal direct terms for 2- and 4-port networks; a four-port permutation produces identical physical fields, currents, and state after repeated updates.
+- Static 2/4-port network-file fixtures compile through automatic rational fitting and reproduce their independent scattering references with maximum complex error below `0.02`.
+- A real four-port CUDA FDTD run reproduces its fitted admittance current within `2%`, preserves signed total power, and activates the network CUDA Graph. Per-port signed powers are summed before classifying network-total absorbed/generated power, so a passive transmitting network does not mislabel delivered output power as generation.
+- Explicit and automatic delay compilation re-embed a known two-port network below `0.02`; automatic extraction recovers `(0.2 ns, 0.3 ns)` and persists the typed delay report.
+- A measured 40.5-step fractional delay has unit magnitude to `1e-3` and phase error below `3 deg`; complete reflection paths are gated on their two-way phase, not only one-way port phase. A compiled delayed `NetworkBlock` driven through the prepared FDTD terminal runtime also matches its full frequency-domain response within `2%` and `3 deg` after steady-state DFT.
+- Real CUDA profiler coverage finds no hot-path allocation, scalar synchronization, or host/device copy in either the coupled N-port update or bidirectional delay. Eager/Graph state and field updates agree.
+- Phase 3 targeted plus related RF network/port regression: 149 passed. Independent review findings on explicit inversion, per-port power clamping, and missing integrated delay evidence were fixed with LU parity coverage for an ill-conditioned direct loop, network-total passivity accounting, and a delayed-runtime frequency-response gate.
+
+Known limits recorded rather than hidden:
+
+- Explicit time-domain delay currently uses a real, constant power-wave reference impedance. Complex or frequency-dependent references remain available for frequency-domain `NetworkData` algebra but are rejected by this real-valued FDTD adapter.
+- Embedded-network coefficients remain fixed during forward stepping; gradient replay and persisted embedded results belong to Phase 4.
+- `WavePort` embedding and spatial multi-device port ownership remain blocked on the missing contracts recorded in the dependency audit.

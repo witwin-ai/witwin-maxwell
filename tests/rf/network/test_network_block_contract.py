@@ -116,7 +116,7 @@ def test_network_compiler_builds_fixed_single_port_discrete_descriptor() -> None
     assert compiled.discrete.pole_radius < 1.0 - 1.0e-7
 
 
-def test_phase_two_compiler_rejects_multiport_runtime() -> None:
+def test_compiler_builds_fixed_multiport_discrete_descriptor() -> None:
     frequencies = torch.tensor([0.0, 1.0e9], dtype=torch.float64)
     scattering = torch.zeros((2, 2, 2), dtype=torch.complex128)
     data = mw.NetworkData(
@@ -126,7 +126,7 @@ def test_phase_two_compiler_rejects_multiport_runtime() -> None:
         port_names=("a", "b"),
     )
     model = mw.StateSpaceNetwork(
-        A=-torch.eye(2, dtype=torch.float64),
+        A=-2.0e9 * torch.eye(2, dtype=torch.float64),
         B=torch.zeros((2, 2), dtype=torch.float64),
         C=torch.zeros((2, 2), dtype=torch.float64),
         D=0.02 * torch.eye(2, dtype=torch.float64),
@@ -142,8 +142,14 @@ def test_phase_two_compiler_rejects_multiport_runtime() -> None:
     )
     scene = _scene(ports=(_port("p1"), _port("p2")), networks=(block,))
 
-    with pytest.raises(NotImplementedError, match="multiport"):
-        scene.compile_networks(dt=1.0e-12, device="cpu")
+    (compiled,) = scene.compile_networks(dt=1.0e-12, device="cpu")
+
+    assert compiled.port_order == ("a", "b")
+    assert compiled.connection_names == ("p1", "p2")
+    assert compiled.port_count == 2
+    assert compiled.discrete.B.shape == (2, 2)
+    assert compiled.discrete.C.shape == (2, 2)
+    assert compiled.discrete.D.shape == (2, 2)
 
 
 def test_state_space_certificate_rejects_active_response_between_samples() -> None:
