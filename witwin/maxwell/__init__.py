@@ -44,6 +44,7 @@ from .lumped import (
     SeriesRLC,
 )
 from .network import NetworkData, PortData
+from .touchstone import TouchstoneParseError
 from .power_loss import PowerLossData
 from .ports import (
     AxisPath,
@@ -188,6 +189,7 @@ __all__ = [
     "SubpixelSpec",
     "Tensor3x3",
     "TimeConfig",
+    "TouchstoneParseError",
     "TerminalPort",
     "TerminalRef",
     "TFSF",

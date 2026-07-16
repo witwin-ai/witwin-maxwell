@@ -27,6 +27,14 @@ def _network(
     )
 
 
+def _touchstone_lines(path):
+    return [
+        line
+        for line in path.read_text(encoding="ascii").splitlines()
+        if not line.startswith("! Port[")
+    ]
+
+
 @pytest.mark.parametrize(
     "frequency_unit, expected_frequency",
     (("hz", 1.0e9), ("khz", 1.0e6), ("mhz", 1.0e3), ("ghz", 1.0)),
@@ -41,7 +49,7 @@ def test_write_touchstone_one_port_ri_and_frequency_units(
 
     write_touchstone(network, path, frequency_unit=frequency_unit)
 
-    lines = path.read_text(encoding="ascii").splitlines()
+    lines = _touchstone_lines(path)
     assert lines[0] == f"# {frequency_unit.upper()} S RI R 50"
     assert "[Version]" not in lines[0]
     values = [float(value) for value in lines[1].split()]
@@ -67,7 +75,7 @@ def test_write_touchstone_two_port_uses_historical_column_order(tmp_path):
 
     write_touchstone(network, path)
 
-    lines = path.read_text(encoding="ascii").splitlines()
+    lines = _touchstone_lines(path)
     assert lines[:8] == [
         "[Version] 2.0",
         "# HZ S RI R 50",
@@ -106,7 +114,7 @@ def test_write_touchstone_three_port_is_row_major_with_one_frequency_token(tmp_p
 
     write_touchstone(_network(matrix.unsqueeze(0)), path)
 
-    lines = path.read_text(encoding="ascii").splitlines()
+    lines = _touchstone_lines(path)
     assert len(lines) == 4
     assert [float(value) for value in lines[1].split()] == [
         1.0e9,
@@ -139,7 +147,7 @@ def test_write_touchstone_formats_complex_pairs(
 
     write_touchstone(_network([[[3.0 + 4.0j]]]), path, format=data_format)
 
-    lines = path.read_text(encoding="ascii").splitlines()
+    lines = _touchstone_lines(path)
     assert lines[0] == f"# HZ S {data_format.upper()} R 50"
     _, first, second = (float(value) for value in lines[1].split())
     assert first == pytest.approx(expected_first)
@@ -155,7 +163,7 @@ def test_write_touchstone_explicit_version_two_supports_per_port_real_z0(tmp_pat
 
     write_touchstone(network, path, version="2.0")
 
-    text = path.read_text(encoding="ascii")
+    text = "\n".join(_touchstone_lines(path)) + "\n"
     assert text.startswith("[Version] 2.0\n")
     assert "[Reference] 25 50 75\n" in text
     assert text.endswith("[End]\n")
@@ -212,11 +220,14 @@ def test_write_touchstone_rejects_mismatched_or_unknown_suffix(tmp_path, suffix)
         write_touchstone(network, tmp_path / f"network{suffix}")
 
 
-def test_write_touchstone_rejects_more_than_three_ports(tmp_path):
+def test_write_touchstone_supports_four_ports(tmp_path):
     network = _network(torch.eye(4, dtype=torch.complex128).unsqueeze(0))
+    path = tmp_path / "network.s4p"
 
-    with pytest.raises(ValueError, match="1-, 2-, and 3-port"):
-        write_touchstone(network, tmp_path / "network.s4p")
+    write_touchstone(network, path)
+
+    assert path.is_file()
+    assert len(_touchstone_lines(path)) == 5
 
 
 def test_write_touchstone_detaches_without_mutating_source_graph(tmp_path):

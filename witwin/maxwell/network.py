@@ -72,8 +72,8 @@ def _validate_frequencies(frequencies: torch.Tensor, *, device: torch.device) ->
         raise ValueError("frequencies and network data must be on the same device.")
     if not bool(torch.all(torch.isfinite(frequencies))):
         raise ValueError("frequencies must contain only finite values.")
-    if not bool(torch.all(frequencies > 0.0)):
-        raise ValueError("frequencies must be strictly positive.")
+    if not bool(torch.all(frequencies >= 0.0)):
+        raise ValueError("frequencies must be non-negative.")
     return frequencies
 
 
@@ -495,6 +495,8 @@ def _normalize_port_names(port_names, *, port_count: int) -> tuple[str, ...]:
         raise ValueError(f"port_names must contain exactly {port_count} entries.")
     if any(not name for name in names):
         raise ValueError("port_names must not contain empty names.")
+    if any(name != name.strip() for name in names):
+        raise ValueError("port_names must not contain leading or trailing whitespace.")
     if len(set(names)) != len(names):
         raise ValueError("port_names must be unique.")
     return names
@@ -764,6 +766,24 @@ class NetworkData:
         object.__setattr__(self, "port_names", names)
         object.__setattr__(self, "valid_columns", valid_columns)
         object.__setattr__(self, "metadata", dict(self.metadata))
+
+    @classmethod
+    def from_touchstone(
+        cls,
+        path: str | Path,
+        *,
+        device=None,
+        dtype: torch.dtype = torch.complex128,
+    ) -> "NetworkData":
+        """Read a Touchstone 1.x or 2.0 network file.
+
+        Parsing is a non-differentiable control-plane operation. The returned
+        tensors are created directly on ``device`` and use ``dtype``.
+        """
+
+        from .touchstone import read_touchstone
+
+        return read_touchstone(path, device=device, dtype=dtype)
 
     @classmethod
     def from_z(
@@ -1090,6 +1110,7 @@ class NetworkData:
         format="ri",
         frequency_unit="hz",
         version="auto",
+        parameter="s",
     ):
         """Export this complete network to a Touchstone file."""
 
@@ -1101,6 +1122,7 @@ class NetworkData:
             format=format,
             frequency_unit=frequency_unit,
             version=version,
+            parameter=parameter,
         )
 
     def save(self, path: str | Path):
