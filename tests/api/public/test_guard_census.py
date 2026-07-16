@@ -37,6 +37,10 @@ CONTRACT_GUARDS = (
     ("witwin/maxwell/geometry/polyslab.py", "ComplexPolySlab does not support mesh export"),
     ("witwin/maxwell/fdtd/adjoint/bridge.py", "FDTD backward requires an input that contributes"),
     ("witwin/maxwell/fdtd/adjoint/bridge.py", "FDTD adjoint requires complex field state for Bloch faces"),
+    (
+        "witwin/maxwell/fdtd/adjoint/bridge.py",
+        "Differentiable thin-wire FDTD requires a fixed Maxwell time step",
+    ),
     ("witwin/maxwell/fdfd/adjoint/bridge.py", "FDFD backward currently supports trainable scene inputs that contribute"),
     ("witwin/maxwell/adapters/tidy3d.py", "Tidy3D export for magnetic dispersive Material"),
     ("witwin/maxwell/adapters/tidy3d.py", "Tidy3D export currently assumes mu_r = 1"),

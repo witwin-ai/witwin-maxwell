@@ -53,7 +53,7 @@ def test_thin_wire_objects_are_top_level_public_api():
     assert mw.WireData is not None
 
 
-def test_phase1_conductor_and_endpoint_contracts_are_explicit():
+def test_conductor_and_endpoint_contracts_are_explicit():
     assert mw.WireConductor.pec().kind == "pec"
     with pytest.raises(ValueError, match="supports the 'pec'"):
         mw.WireConductor("finite")
@@ -66,8 +66,15 @@ def test_phase1_conductor_and_endpoint_contracts_are_explicit():
         mw.WireEnd.grounded(structure=" ")
     with pytest.raises(ValueError, match="cannot reference"):
         mw.WireEnd("open", structure="ground")
-    with pytest.raises(ValueError, match="open.*grounded"):
-        mw.WireEnd("node")
+    junction = mw.WireEnd.node("junction")
+    assert junction.kind == "node"
+    assert junction.node_name == "junction"
+    with pytest.raises(ValueError, match="must not be empty"):
+        mw.WireEnd.node(" ")
+    with pytest.raises(ValueError, match="reserved"):
+        mw.WireEnd.node("__closed__:ghost")
+    with pytest.raises(ValueError, match="cannot reference a structure"):
+        mw.WireEnd("node", structure="ground", node_name="junction")
 
 
 def test_thin_wire_preserves_trainable_tensors_and_validates_geometry():
@@ -100,6 +107,17 @@ def test_thin_wire_preserves_trainable_tensors_and_validates_geometry():
     with pytest.raises(ValueError, match="exactly two"):
         _wire(endpoints=(mw.WireEnd.open(),))
 
+    loop = _wire(
+        points=((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 0, 0))
+    )
+    assert loop.is_closed
+    assert loop.endpoints == ()
+    with pytest.raises(ValueError, match="must not specify endpoints"):
+        _wire(
+            points=((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 0, 0)),
+            endpoints=(mw.WireEnd.open(), mw.WireEnd.open()),
+        )
+
 
 def test_scene_owns_wires_separately_and_propagates_through_clone_and_prepare():
     wire = _wire()
@@ -126,11 +144,11 @@ def test_non_fdtd_simulation_rejects_thin_wire_scene_at_construction():
         mw.Simulation.fdfd(scene, frequency=1.0e9)
 
 
-def test_phase1_rejects_trainable_scene_with_wire_before_adjoint_dispatch():
+def test_trainable_wire_radius_is_discovered_by_fdtd_simulation():
     radius = torch.tensor(5.0e-4, dtype=torch.float64, requires_grad=True)
     scene = mw.Scene(thin_wires=(_wire(radius=radius),), device="cpu")
-    with pytest.raises(NotImplementedError, match="exact reverse recurrence"):
-        mw.Simulation.fdtd(scene, frequency=1.0e9)
+    simulation = mw.Simulation.fdtd(scene, frequency=1.0e9)
+    assert simulation.has_trainable_parameters is True
 
 
 def test_scene_thin_wire_compile_seams_forward_to_compiler(monkeypatch):

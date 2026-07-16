@@ -267,7 +267,7 @@ def test_nearest_snap_is_explicit_and_strict_snap_rejects_off_grid_points():
         (_unsafe_straight(conductor=_Kind("finite")), "PEC"),
         (
             _unsafe_straight(endpoints=(_Kind("node"), _Kind("open"))),
-            "open or grounded",
+            "must have a node name",
         ),
     ],
 )
@@ -431,10 +431,10 @@ def test_pml_domain_shared_node_and_loop_contracts_are_rejected():
         _Wire("a", ((0.25, 0.5, 0.5), (0.5, 0.5, 0.5))),
         _Wire("b", ((0.5, 0.5, 0.5), (0.5, 0.75, 0.5))),
     )
-    with pytest.raises(ValueError, match="junctions are Phase 2"):
+    with pytest.raises(ValueError, match="without one shared named node"):
         compile_thin_wires(_prepared(wires=shared))
 
-    loop = _unsafe_straight(
+    loop = _Wire(
         name="loop",
         points=(
             (0.25, 0.25, 0.5),
@@ -444,8 +444,189 @@ def test_pml_domain_shared_node_and_loop_contracts_are_rejected():
             (0.25, 0.25, 0.5),
         ),
     )
-    with pytest.raises(ValueError, match="loops, branches"):
-        compile_thin_wires(_prepared(wires=(loop,)))
+    compiled_loop = compile_thin_wires(_prepared(wires=(loop,)))
+    assert compiled_loop.node_count == 8
+    assert compiled_loop.segment_count == 8
+    assert compiled_loop.metadata["validity"]["cycle_rank"] == 1
+    assert not bool(compiled_loop.open_endpoints.any())
+
+
+def _branch_wires():
+    junction = mw.WireEnd.node("J")
+    return (
+        _Wire(
+            "a",
+            ((0.25, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            endpoints=(mw.WireEnd.open(), junction),
+        ),
+        _Wire(
+            "b",
+            ((0.5, 0.5, 0.5), (0.75, 0.5, 0.5)),
+            endpoints=(junction, mw.WireEnd.open()),
+        ),
+        _Wire(
+            "c",
+            ((0.5, 0.5, 0.5), (0.5, 0.75, 0.5)),
+            endpoints=(junction, mw.WireEnd.open()),
+        ),
+    )
+
+
+def test_named_branch_builds_one_global_node_with_per_wire_membership():
+    wires = _branch_wires()
+    prepared = _prepared(
+        wires=wires,
+        monitors=tuple(_Monitor(f"m_{wire.name}", wire.name) for wire in wires),
+    )
+    network = compile_thin_wires(prepared)
+
+    assert network.wire_names == ("a", "b", "c")
+    assert network.junction_names == ("J",)
+    torch.testing.assert_close(network.junction_node_ids, torch.tensor([1]))
+    torch.testing.assert_close(
+        network.node_grid_indices,
+        torch.tensor(((1, 2, 2), (2, 2, 2), (2, 3, 2), (3, 2, 2))),
+    )
+    torch.testing.assert_close(network.tail, torch.tensor([0, 1, 1]))
+    torch.testing.assert_close(network.head, torch.tensor([1, 3, 2]))
+    torch.testing.assert_close(network.node_offsets, torch.tensor([0, 1, 4, 5, 6]))
+    torch.testing.assert_close(network.wire_node_offsets, torch.tensor([0, 2, 4, 6]))
+    torch.testing.assert_close(network.wire_node_indices, torch.tensor([0, 1, 1, 3, 1, 2]))
+    torch.testing.assert_close(network.node_wire_ids, torch.tensor([0, 0, 2, 1]))
+    assert network.metadata["validity"]["branch_node_count"] == 1
+    assert network.metadata["validity"]["cycle_rank"] == 0
+
+    compiled_monitors = compile_wire_monitors(prepared, network)
+    assert [monitor.node_indices.tolist() for monitor in compiled_monitors] == [
+        [0, 1],
+        [1, 3],
+        [1, 2],
+    ]
+    assert all(1 in monitor.node_indices.tolist() for monitor in compiled_monitors)
+
+
+def test_named_branch_compile_is_deterministic_under_input_permutation():
+    wires = _branch_wires()
+    forward = compile_thin_wires(_prepared(wires=wires))
+    reverse = compile_thin_wires(_prepared(wires=tuple(reversed(wires))))
+
+    assert forward.metadata["compile_fingerprint"] == reverse.metadata["compile_fingerprint"]
+    for name in (
+        "node_grid_indices",
+        "node_wire_ids",
+        "wire_node_offsets",
+        "wire_node_indices",
+        "junction_node_ids",
+        "tail",
+        "head",
+        "node_offsets",
+        "node_segments",
+        "node_signs",
+    ):
+        torch.testing.assert_close(getattr(forward, name), getattr(reverse, name))
+
+
+def test_named_node_validation_rejects_unresolved_moved_and_overlapping_graphs():
+    unresolved = _Wire(
+        "unresolved",
+        ((0.25, 0.25, 0.5), (0.5, 0.25, 0.5)),
+        endpoints=(mw.WireEnd.open(), mw.WireEnd.node("J")),
+    )
+    with pytest.raises(ValueError, match="unresolved"):
+        compile_thin_wires(_prepared(wires=(unresolved,)))
+
+    reserved_endpoint = mw.WireEnd.node("public")
+    object.__setattr__(reserved_endpoint, "node_name", "__closed__:ghost")
+    reserved_prefix = _Wire(
+        "reserved",
+        ((0.25, 0.25, 0.5), (0.5, 0.25, 0.5)),
+        endpoints=(mw.WireEnd.open(), reserved_endpoint),
+    )
+    with pytest.raises(ValueError, match="reserved"):
+        compile_thin_wires(_prepared(wires=(reserved_prefix,)))
+    colliding_loop = _Wire(
+        "ghost",
+        (
+            (0.25, 0.25, 0.5),
+            (0.5, 0.25, 0.5),
+            (0.5, 0.5, 0.5),
+            (0.25, 0.5, 0.5),
+            (0.25, 0.25, 0.5),
+        ),
+    )
+    whitespace_reserved = mw.WireEnd.node("public2")
+    object.__setattr__(
+        whitespace_reserved, "node_name", "  __closed__:ghost  "
+    )
+    exact_collision = _Wire(
+        "collision",
+        ((0.25, 0.25, 0.25), (0.25, 0.25, 0.5)),
+        endpoints=(mw.WireEnd.open(), whitespace_reserved),
+    )
+    with pytest.raises(ValueError, match="reserved"):
+        compile_thin_wires(_prepared(wires=(colliding_loop, exact_collision)))
+
+    moved = (
+        _Wire(
+            "a",
+            ((0.25, 0.25, 0.5), (0.5, 0.25, 0.5)),
+            endpoints=(mw.WireEnd.open(), mw.WireEnd.node("J")),
+        ),
+        _Wire(
+            "b",
+            ((0.5, 0.75, 0.5), (0.75, 0.75, 0.5)),
+            endpoints=(mw.WireEnd.node("J"), mw.WireEnd.open()),
+        ),
+    )
+    with pytest.raises(ValueError, match="multiple grid coordinates"):
+        compile_thin_wires(_prepared(wires=moved))
+
+    overlap = (
+        _Wire(
+            "a",
+            ((0.25, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            endpoints=(mw.WireEnd.node("left"), mw.WireEnd.node("right")),
+        ),
+        _Wire(
+            "b",
+            ((0.25, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            endpoints=(mw.WireEnd.node("left"), mw.WireEnd.node("right")),
+        ),
+    )
+    with pytest.raises(ValueError, match="overlap on Yee edge"):
+        compile_thin_wires(_prepared(wires=overlap))
+
+
+def test_compile_fingerprint_includes_junction_name_to_node_mapping():
+    def network(first_name, second_name):
+        return (
+            _Wire(
+                "a0",
+                ((0.25, 0.25, 0.5), (0.5, 0.25, 0.5)),
+                endpoints=(mw.WireEnd.open(), mw.WireEnd.node(first_name)),
+            ),
+            _Wire(
+                "a1",
+                ((0.5, 0.25, 0.5), (0.75, 0.25, 0.5)),
+                endpoints=(mw.WireEnd.node(first_name), mw.WireEnd.open()),
+            ),
+            _Wire(
+                "b0",
+                ((0.25, 0.75, 0.5), (0.5, 0.75, 0.5)),
+                endpoints=(mw.WireEnd.open(), mw.WireEnd.node(second_name)),
+            ),
+            _Wire(
+                "b1",
+                ((0.5, 0.75, 0.5), (0.75, 0.75, 0.5)),
+                endpoints=(mw.WireEnd.node(second_name), mw.WireEnd.open()),
+            ),
+        )
+
+    original = compile_thin_wires(_prepared(wires=network("J1", "J2")))
+    swapped = compile_thin_wires(_prepared(wires=network("J2", "J1")))
+    assert original.metadata["junction_nodes"] == (("J1", 2), ("J2", 3))
+    assert swapped.metadata["junction_nodes"] == (("J1", 3), ("J2", 2))
+    assert original.metadata["compile_fingerprint"] != swapped.metadata["compile_fingerprint"]
 
 
 def test_wire_order_and_fingerprints_are_deterministic_and_sensitive():

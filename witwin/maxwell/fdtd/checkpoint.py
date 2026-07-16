@@ -32,7 +32,8 @@ _DISPERSIVE_STATE_TENSORS = {
     "drude": ("current",),
     "lorentz": ("polarization", "current"),
 }
-_CHECKPOINT_SCHEMA_VERSION = 1
+_WIRE_STATE_NAMES = ("wire_current", "wire_charge")
+_CHECKPOINT_SCHEMA_VERSION = 2
 
 
 def dispersive_state_name(component_name: str, model_name: str, index: int, tensor_name: str) -> str:
@@ -73,6 +74,7 @@ class FDTDCheckpointSchema:
     dispersive_state_names: tuple[str, ...]
     magnetic_dispersive_state_names: tuple[str, ...] = ()
     lumped_state_names: tuple[str, ...] = ()
+    wire_state_names: tuple[str, ...] = ()
 
     @property
     def state_names(self) -> tuple[str, ...]:
@@ -84,6 +86,7 @@ class FDTDCheckpointSchema:
             + self.dispersive_state_names
             + self.magnetic_dispersive_state_names
             + self.lumped_state_names
+            + self.wire_state_names
         )
 
 
@@ -162,6 +165,9 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
     lumped_state_names = tuple(
         name for name, _runtime, _tensor_name, _field_name, _kind, _index in iter_lumped_state_specs(solver)
     )
+    wire_state_names = (
+        _WIRE_STATE_NAMES if getattr(solver, "_wire_runtime", None) is not None else ()
+    )
 
     return FDTDCheckpointSchema(
         version=_CHECKPOINT_SCHEMA_VERSION,
@@ -172,6 +178,7 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         dispersive_state_names=tuple(dispersive_state_names),
         magnetic_dispersive_state_names=tuple(magnetic_dispersive_state_names),
         lumped_state_names=lumped_state_names,
+        wire_state_names=tuple(wire_state_names),
     )
 
 
@@ -256,6 +263,10 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
                 )
     for name, runtime, tensor_name, _field_name, _kind, _index in iter_lumped_state_specs(solver):
         tensors[name] = getattr(runtime, tensor_name).detach().clone()
+    wire_runtime = getattr(solver, "_wire_runtime", None)
+    if wire_runtime is not None:
+        tensors["wire_current"] = wire_runtime.current.detach().clone()
+        tensors["wire_charge"] = wire_runtime.charge.detach().clone()
     state = FDTDCheckpointState(step=int(step), schema=schema, tensors=tensors)
     validate_checkpoint_state(state)
     return state

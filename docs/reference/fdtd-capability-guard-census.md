@@ -7,10 +7,10 @@ cannot enter unnoticed.
 
 ## Reconciled baseline
 
-The 2026-07-15 repository state contains 137 guards:
+The 2026-07-15 repository state contains 138 guards:
 
 - 117 capability guards tracked by the non-increasing test budget;
-- 20 contract guards excluded by exact file and message substring.
+- 21 contract guards excluded by exact file and message substring.
 
 The capability baseline is distributed as follows:
 
@@ -19,11 +19,11 @@ The capability baseline is distributed as follows:
 | External interoperability adapter | 18 |
 | Material compilers | 10 |
 | Frequency-domain runtime | 5 |
-| Time-domain adjoint | 14 |
+| Time-domain adjoint | 15 |
 | Time-domain excitation | 12 |
 | Time-domain ports and lumped elements | 12 |
 | Time-domain runtime | 17 |
-| Public simulation, result, and network workflows | 19 |
+| Public simulation, result, and network workflows | 18 |
 | Material models | 7 |
 | Postprocessing | 3 |
 | **Total** | **117** |
@@ -38,11 +38,15 @@ not contract exclusions. Phase 2 owns the adjoint guard, Phase 3 owns the Bloch
 path guard. Phase 4 owns distributed execution and SIBC/finite-loss ownership;
 the other host-composition guards remain tracked capability debt for a later
 compatibility plan rather than expanding the Phase 4 exit gate. Each
-implementation phase must lower this budget as it removes its guards.
+implementation phase must lower this budget as it removes its guards. Phase 2
+removed the blanket wire-adjoint guard and retained one narrower Phase 3
+wire/port-composition guard. Its fixed-step requirement is a differentiation
+contract: the automatic joint-CFL clamp is a discrete preparation decision and
+is not differentiated with respect to radius or material parameters.
 
 ## Contract exclusions
 
-`CONTRACT_GUARDS` in the test is the canonical exact-match inventory. Its 20
+`CONTRACT_GUARDS` in the test is the canonical exact-match inventory. Its 21
 entries cover these stable contract families:
 
 | Contract family | Count |
@@ -50,12 +54,12 @@ entries cover these stable contract families:
 | Material frequency-evaluation domains | 9 |
 | Module-style scene implementation requirement | 1 |
 | Non-meshable complex polygon geometry | 1 |
-| Time-domain adjoint input and complex-state requirements | 2 |
+| Time-domain adjoint input, complex-state, and fixed-step requirements | 3 |
 | Frequency-domain adjoint input requirement | 1 |
 | External adapter medium limitations | 2 |
 | Bloch-boundary total-field/scattered-field slab requirement | 1 |
 | Closed-surface exterior-sampling requirements | 3 |
-| **Total** | **20** |
+| **Total** | **21** |
 
 When an implementation removes a capability guard, lower
 `CAPABILITY_GUARD_BUDGET` in the same commit. Reclassifying a guard as a public

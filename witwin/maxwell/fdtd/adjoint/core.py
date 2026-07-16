@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from ...thin_wire import WireData
 from ...sources import evaluate_source_time
 from ..boundary import (
     BOUNDARY_BLOCH,
@@ -35,6 +36,7 @@ from ..observers import (
     _plane_coord_names,
 )
 from ..ports import replay_port_runtimes
+from ..wire import deposit_replayed_wire_current, replay_wire_state
 
 _TFSF_REFERENCE_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned"}
 _TFSF_AUXILIARY_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned", "plane_wave_aux"}
@@ -114,6 +116,8 @@ def _prepare_forward_pack(raw_output):
     monitor_templates = {}
     next_index = len(output_tensors)
     for monitor_name, payload in raw_output.get("observers", {}).items():
+        if isinstance(payload, WireData):
+            continue
         if _monitor_payload_is_point(payload):
             template, next_index = _prepare_point_monitor_template(payload, next_index)
         else:
@@ -126,6 +130,23 @@ def _prepare_forward_pack(raw_output):
             for component_name in template["fields"]:
                 output_tensors.append(payload["components"][component_name]["data"])
 
+    wire_offset = len(output_tensors)
+    wire_monitor_templates = {}
+    for monitor_name, payload in raw_output.get("observers", {}).items():
+        if not isinstance(payload, WireData):
+            continue
+        quantity_indices = {}
+        for quantity in ("current", "charge", "ohmic_loss"):
+            value = getattr(payload, quantity)
+            if value is None:
+                continue
+            quantity_indices[quantity] = len(output_tensors)
+            output_tensors.append(value)
+        wire_monitor_templates[monitor_name] = {
+            "data": payload,
+            "quantity_indices": quantity_indices,
+        }
+
     port_offset = len(output_tensors)
     port_templates = {}
     for port_name, data in raw_output.get("ports", {}).items():
@@ -137,6 +158,8 @@ def _prepare_forward_pack(raw_output):
     return _ForwardPack(
         field_names=tuple(field_names),
         monitor_templates=monitor_templates,
+        wire_monitor_templates=wire_monitor_templates,
+        wire_offset=wire_offset,
         port_templates=port_templates,
         port_offset=port_offset,
         output_tensors=tuple(output_tensors),
@@ -245,6 +268,17 @@ def _rebuild_monitors(monitor_templates, output_tensors, field_offset):
             }
             cursor += 1
         monitors[monitor_name] = _finalize_plane_monitor_payload(payload)
+    return monitors
+
+
+def _rebuild_wire_monitors(wire_monitor_templates, output_tensors):
+    monitors = {}
+    for monitor_name, template in wire_monitor_templates.items():
+        updates = {
+            quantity: output_tensors[index]
+            for quantity, index in template["quantity_indices"].items()
+        }
+        monitors[monitor_name] = replace(template["data"], **updates)
     return monitors
 
 
@@ -817,6 +851,8 @@ def _accumulate_source_term_gradients(
         grad_tpa_ex=step_result.grad_tpa_ex,
         grad_tpa_ey=step_result.grad_tpa_ey,
         grad_tpa_ez=step_result.grad_tpa_ez,
+        grad_wire_inductance=step_result.grad_wire_inductance,
+        grad_wire_capacitance=step_result.grad_wire_capacitance,
     )
 
 
@@ -824,6 +860,8 @@ def _accumulate_source_term_gradients(
 class _ForwardPack:
     field_names: tuple[str, ...]
     monitor_templates: dict[str, dict[str, Any]]
+    wire_monitor_templates: dict[str, dict[str, Any]]
+    wire_offset: int
     port_templates: dict[str, Any]
     port_offset: int
     output_tensors: tuple[torch.Tensor, ...]
@@ -3178,6 +3216,13 @@ def _step_state(
             magnetic_dispersive_state,
         )
     dispersive_state = _advance_dispersive_state(solver, state)
+    wire_state = {}
+    if getattr(solver, "_wire_runtime", None) is not None:
+        wire_current, wire_charge = replay_wire_state(solver, state)
+        wire_state = {
+            "wire_current": wire_current,
+            "wire_charge": wire_charge,
+        }
 
     if capture_magnetic is not None:
         # Post-magnetic, post-source real H that the electric update consumes this
@@ -3446,6 +3491,13 @@ def _step_state(
             ez = ez + aniso_correction["Ez"]
         electric_fields = {"Ex": ex, "Ey": ey, "Ez": ez}
 
+    if wire_state:
+        electric_fields = deposit_replayed_wire_current(
+            solver,
+            electric_fields,
+            wire_state["wire_current"],
+        )
+
     if getattr(solver, "tfsf_enabled", False):
         electric_fields = _apply_tfsf_terms(
             electric_fields,
@@ -3568,6 +3620,7 @@ def _step_state(
     next_state.update(dispersive_state)
     next_state.update(magnetic_dispersive_state)
     next_state.update(lumped_state)
+    next_state.update(wire_state)
     return next_state
 
 

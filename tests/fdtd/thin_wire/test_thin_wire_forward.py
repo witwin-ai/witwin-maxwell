@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import io
 import math
 
 import pytest
@@ -14,6 +15,11 @@ from witwin.maxwell.fdtd.wire import (
     deposit_wire_current,
     sample_and_update_wire,
 )
+from witwin.maxwell.fdtd.checkpoint import (
+    capture_checkpoint_state,
+    validate_checkpoint_state,
+)
+from witwin.maxwell.fdtd.adjoint.core import _replay_segment_states
 from witwin.maxwell.fdtd.runtime.stepping import _field_update_block
 
 
@@ -216,6 +222,11 @@ def test_preparation_validator_rejects_unsafe_native_topology_contents():
     duplicate_components = network.target_components.clone()
     duplicate_offsets[1] = duplicate_offsets[0]
     duplicate_components[1] = duplicate_components[0]
+    duplicate_membership = torch.cat(
+        (network.wire_node_indices, network.wire_node_indices[:1])
+    )
+    duplicate_membership_offsets = network.wire_node_offsets.clone()
+    duplicate_membership_offsets[-1] += 1
 
     invalid_networks = (
         replace(network, edge_components=invalid_components),
@@ -227,10 +238,168 @@ def test_preparation_validator_rejects_unsafe_native_topology_contents():
             target_offsets=duplicate_offsets,
             target_components=duplicate_components,
         ),
+        replace(
+            network,
+            wire_node_indices=duplicate_membership,
+            wire_node_offsets=duplicate_membership_offsets,
+        ),
     )
     for invalid in invalid_networks:
         with pytest.raises(ValueError, match="Invalid compiled thin-wire topology"):
             _validate_compiled_topology(invalid)
+
+
+def _network_scene(wires):
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
+        grid=mw.GridSpec.uniform(0.04),
+        boundary=mw.BoundarySpec.none(),
+        device="cuda",
+    )
+    for wire in wires:
+        scene.add_thin_wire(wire)
+    return scene
+
+
+def _assert_network_continuity_and_energy(solver):
+    runtime = solver._wire_runtime
+    coeff = runtime.coefficients
+    masses = _target_masses(
+        solver, coeff["target_components"], coeff["target_offsets"]
+    )
+    _set_target_values(
+        solver,
+        coeff["target_components"],
+        coeff["target_offsets"],
+        torch.linspace(-2.0, 3.0, masses.numel(), device=solver.device),
+    )
+    energies = []
+    max_continuity = torch.zeros((), device=solver.device)
+    for _ in range(512):
+        electric_before = _target_values(
+            solver, coeff["target_components"], coeff["target_offsets"]
+        )
+        charge_before = runtime.charge.clone()
+        current_before = runtime.current.clone()
+        sample_and_update_wire(solver)
+        current_after = runtime.current.clone()
+        incidence_current = torch.zeros_like(runtime.charge)
+        incidence_current.index_add_(0, coeff["tail"], current_after)
+        incidence_current.index_add_(0, coeff["head"], -current_after)
+        continuity = runtime.charge - charge_before + float(solver.dt) * incidence_current
+        max_continuity = torch.maximum(max_continuity, continuity.abs().max())
+        energies.append(
+            0.5 * torch.sum(masses * electric_before.square())
+            + 0.5 * torch.sum(charge_before.square() / coeff["node_capacitance"])
+            + 0.5 * torch.sum(coeff["inductance"] * current_after * current_before)
+        )
+        deposit_wire_current(solver)
+    energy = torch.stack(energies)
+    relative_drift = (energy - energy[0]).abs().max() / energy[0].abs()
+    assert float(max_continuity) < 1.0e-6 * float(runtime.charge.abs().max() + 1.0e-30)
+    assert float(relative_drift) < 1.0e-4
+
+
+def test_branch_and_closed_loop_cuda_recurrence_meet_continuity_and_energy_gates():
+    junction = mw.WireEnd.node("J")
+    branch = (
+        mw.ThinWire(
+            name="a",
+            points=((-0.08, 0.0, 0.0), (0.0, 0.0, 0.0)),
+            radius=2.0e-3,
+            conductor=mw.WireConductor.pec(),
+            endpoints=(mw.WireEnd.open(), junction),
+        ),
+        mw.ThinWire(
+            name="b",
+            points=((0.0, 0.0, 0.0), (0.08, 0.0, 0.0)),
+            radius=2.0e-3,
+            conductor=mw.WireConductor.pec(),
+            endpoints=(junction, mw.WireEnd.open()),
+        ),
+        mw.ThinWire(
+            name="c",
+            points=((0.0, 0.0, 0.0), (0.0, 0.08, 0.0)),
+            radius=2.0e-3,
+            conductor=mw.WireConductor.pec(),
+            endpoints=(junction, mw.WireEnd.open()),
+        ),
+    )
+    loop = (
+        mw.ThinWire(
+            name="loop",
+            points=(
+                (-0.08, -0.08, 0.0),
+                (0.08, -0.08, 0.0),
+                (0.08, 0.08, 0.0),
+                (-0.08, 0.08, 0.0),
+                (-0.08, -0.08, 0.0),
+            ),
+            radius=2.0e-3,
+            conductor=mw.WireConductor.pec(),
+        ),
+    )
+    branch_solver = _prepared_solver(_network_scene(branch), frequency=2.0e9)
+    wrong_owner = branch_solver._wire_runtime.network.node_wire_ids.clone()
+    wrong_owner[0] = 1
+    with pytest.raises(ValueError, match="Invalid compiled thin-wire topology"):
+        _validate_compiled_topology(
+            replace(branch_solver._wire_runtime.network, node_wire_ids=wrong_owner)
+        )
+    _assert_network_continuity_and_energy(branch_solver)
+    _assert_network_continuity_and_energy(
+        _prepared_solver(_network_scene(loop), frequency=2.0e9)
+    )
+
+
+def test_wire_checkpoint_v2_round_trip_and_segment_replay_match_native_forward():
+    solver = _prepared_solver(_scene(source=False, monitor=False))
+    runtime = solver._wire_runtime
+    coeff = runtime.coefficients
+    _set_target_values(
+        solver,
+        coeff["target_components"],
+        coeff["target_offsets"],
+        torch.linspace(-0.5, 0.75, coeff["target_offsets"].numel(), device=solver.device),
+    )
+    runtime.current.copy_(
+        torch.linspace(-1.0e-6, 2.0e-6, runtime.current.numel(), device=solver.device)
+    )
+    runtime.charge.copy_(
+        torch.linspace(5.0e-15, -4.0e-15, runtime.charge.numel(), device=solver.device)
+    )
+    checkpoint = capture_checkpoint_state(solver, step=0)
+    assert checkpoint.schema.version == 2
+    assert checkpoint.schema.wire_state_names == ("wire_current", "wire_charge")
+    assert tuple(checkpoint.tensors)[-2:] == checkpoint.schema.wire_state_names
+    assert checkpoint.tensors["wire_current"].data_ptr() != runtime.current.data_ptr()
+    assert checkpoint.tensors["wire_charge"].data_ptr() != runtime.charge.data_ptr()
+
+    serialized = io.BytesIO()
+    torch.save(checkpoint, serialized)
+    serialized.seek(0)
+    loaded = torch.load(serialized, weights_only=False)
+    assert loaded.schema == checkpoint.schema
+    for name in checkpoint.schema.state_names:
+        torch.testing.assert_close(loaded.tensors[name], checkpoint.tensors[name], rtol=0.0, atol=0.0)
+
+    missing_wire_charge = dict(checkpoint.tensors)
+    del missing_wire_charge["wire_charge"]
+    with pytest.raises(RuntimeError, match="layout drifted"):
+        validate_checkpoint_state(replace(checkpoint, tensors=missing_wire_charge))
+
+    for step_index in range(4):
+        _field_update_block(solver, step_index * solver.dt)
+    expected = capture_checkpoint_state(solver, step=4)
+    replayed = _replay_segment_states(solver, checkpoint, 0, 4)[-1]
+    for name in checkpoint.schema.state_names:
+        torch.testing.assert_close(
+            replayed[name],
+            expected.tensors[name],
+            rtol=2.0e-5,
+            atol=2.0e-6,
+            msg=lambda message, state_name=name: f"{state_name}: {message}",
+        )
 
 
 def _run_forward(scene, *, cuda_graph):

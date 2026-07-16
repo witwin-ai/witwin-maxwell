@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from types import SimpleNamespace
 
 import torch
@@ -98,6 +99,12 @@ class _PortSeedBatch:
 
 
 @dataclass(frozen=True)
+class _WireSeedBatch:
+    current_samples: torch.Tensor
+    charge_samples: torch.Tensor
+
+
+@dataclass(frozen=True)
 class _SeedRuntime:
     dft_schedule: _ScheduleTensorPack
     observer_schedule: _ScheduleTensorPack
@@ -105,6 +112,7 @@ class _SeedRuntime:
     point_batches: tuple[_PointSeedBatch, ...]
     plane_batches: tuple[_PlaneSeedBatch, ...]
     port_batches: tuple[_PortSeedBatch, ...]
+    wire_batches: tuple[_WireSeedBatch, ...] = ()
     backend: str = "device_batched"
 
 
@@ -340,13 +348,13 @@ def _build_output_seeds(
     with torch.enable_grad():
         seed_solver, leaves, field_pairs, point_pairs, plane_pairs = _clone_seed_solver(solver)
         seed_pack = _dense_seed_output_pairs(seed_solver)
-        if len(seed_pack.output_tensors) != pack.port_offset:
+        if len(seed_pack.output_tensors) != pack.wire_offset:
             raise RuntimeError("Adjoint output pack layout changed between forward and backward.")
         output_grads = tuple(
             torch.zeros_like(output) if grad_output is None else grad_output.to(device=output.device, dtype=output.dtype)
             for output, grad_output in zip(
                 seed_pack.output_tensors,
-                grad_outputs[: pack.port_offset],
+                grad_outputs[: pack.wire_offset],
             )
         )
         leaf_grads = (
@@ -443,6 +451,96 @@ def _build_output_seeds(
                 grad_imag=imag_grad,
                 cos_pack=cos_pack,
                 sin_pack=sin_pack,
+            )
+        )
+
+    wire_batches = []
+    wire_runtime = getattr(solver, "_wire_runtime", None)
+    if pack.wire_monitor_templates:
+        if wire_runtime is None:
+            raise RuntimeError("Wire output seeds require an initialized wire runtime.")
+        monitor_state = {
+            state["compiled"].name: state for state in wire_runtime.monitor_state
+        }
+        entries = [
+            entry
+            for state in wire_runtime.monitor_state
+            for entry in state["entries"]
+        ]
+        time_steps = max((int(entry["end_step"]) for entry in entries), default=0)
+        current_samples = torch.zeros(
+            (time_steps, wire_runtime.current.numel()),
+            device=solver.device,
+            dtype=solver.Ex.dtype,
+        )
+        charge_samples = torch.zeros(
+            (time_steps, wire_runtime.charge.numel()),
+            device=solver.device,
+            dtype=solver.Ex.dtype,
+        )
+        for monitor_name, template in pack.wire_monitor_templates.items():
+            state = monitor_state[monitor_name]
+            quantity_indices = template["quantity_indices"]
+            for quantity, target, indices_key, shift in (
+                ("current", current_samples, "segment_indices", 0.5),
+                ("charge", charge_samples, "node_indices", 1.0),
+            ):
+                output_index = quantity_indices.get(quantity)
+                if output_index is None:
+                    continue
+                output = pack.output_tensors[output_index]
+                gradient = grad_outputs[output_index]
+                gradient = (
+                    torch.zeros_like(output)
+                    if gradient is None
+                    else gradient.to(device=output.device, dtype=output.dtype)
+                )
+                cos_rows = []
+                sin_rows = []
+                for step_index in range(time_steps):
+                    cos_values = []
+                    sin_values = []
+                    for entry in state["entries"]:
+                        active = int(entry["start_step"]) <= step_index < int(entry["end_step"])
+                        window = (
+                            solver._compute_window_weight(
+                                step_index,
+                                start_step=int(entry["start_step"]),
+                                end_step=int(entry["end_step"]),
+                                window_type=solver.observer_window_type,
+                            )
+                            if active
+                            else 0.0
+                        )
+                        normalization = float(entry["window_normalization"])
+                        scale = 2.0 * window / normalization if normalization > 0.0 else 0.0
+                        omega_dt = (
+                            2.0
+                            * math.pi
+                            * float(entry["frequency"])
+                            * float(solver.dt)
+                        )
+                        angle = omega_dt * (step_index + shift)
+                        cos_values.append(scale * math.cos(angle))
+                        sin_values.append(scale * math.sin(angle))
+                    cos_rows.append(cos_values)
+                    sin_rows.append(sin_values)
+                cos_weights = torch.tensor(
+                    cos_rows, device=solver.device, dtype=solver.Ex.dtype
+                )
+                sin_weights = torch.tensor(
+                    sin_rows, device=solver.device, dtype=solver.Ex.dtype
+                )
+                sample_gradient = (
+                    cos_weights @ gradient.real
+                    + sin_weights @ gradient.imag
+                )
+                indices = state[indices_key].to(device=solver.device, dtype=torch.long)
+                target[:, indices] = target[:, indices] + sample_gradient
+        wire_batches.append(
+            _WireSeedBatch(
+                current_samples=current_samples,
+                charge_samples=charge_samples,
             )
         )
 
@@ -554,6 +652,7 @@ def _build_output_seeds(
         point_batches=tuple(point_batches),
         plane_batches=tuple(plane_batches),
         port_batches=tuple(port_batches),
+        wire_batches=tuple(wire_batches),
     )
 
 
@@ -651,3 +750,12 @@ def _apply_seed_runtime(adj_state, seed_runtime: _SeedRuntime, step_index):
     _apply_dense_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
     _apply_point_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
     _apply_plane_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
+    for batch in seed_runtime.wire_batches:
+        cuda_backend._accumulate_in_place(
+            dst=adj_state["wire_current"],
+            src=batch.current_samples[step_index].contiguous(),
+        )
+        cuda_backend._accumulate_in_place(
+            dst=adj_state["wire_charge"],
+            src=batch.charge_samples[step_index].contiguous(),
+        )

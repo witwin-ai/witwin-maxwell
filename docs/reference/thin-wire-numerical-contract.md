@@ -1,6 +1,6 @@
 # Thin-Wire Numerical Contract
 
-Status: Phase 0 frozen contract
+Status: Phase 0 frozen contract with accepted Phase 2 topology/adjoint addendum
 Scope: energy-paired subgrid current/charge network for Yee FDTD
 
 ## Orientation And Continuous Semi-Discrete Equations
@@ -156,3 +156,38 @@ material values, current, charge, and monitor postprocessing remain torch-native
 Graph topology, fragment count, owner assignment, snap decisions, and rational
 model order are discrete preparation decisions. Coordinate gradients are valid
 only while the compiled stencil remains unchanged.
+
+Phase 2 differentiates physical radius and local isotropic host permittivity.
+Centerline-coordinate differentiation remains disabled until the arbitrary-
+direction conservative stencil is frozen. A differentiable run uses the fixed
+Maxwell step selected before wire compilation; the automatic joint-CFL clamp is
+not differentiated because whether it activates is a discrete preparation
+branch.
+
+## Phase 2 Graph, Checkpoint, And Exact Reverse
+
+Named endpoints at the same snapped coordinate merge into one physical node.
+The compiler emits a single global charge state, deterministic minimum-wire
+ownership, per-wire sparse node membership, and one incidence row containing
+all branch currents. A closed path merges its first and last occurrence without
+creating an open endpoint. Internal revisits, undeclared crossings/touches, and
+positive-length overlaps remain errors.
+
+Checkpoint schema version 2 appends `wire_current` and `wire_charge` whenever a
+wire runtime is present. Both are deep-cloned device tensors; EMF is derived
+scratch and is recomputed from the frozen electric fields. No-wire checkpoints
+carry no wire names or storage.
+
+The reverse step is the exact transpose of the ordered Phase 2 forward map:
+
+```text
+sample E -> update I -> update q -> deposit I into E.
+```
+
+It propagates cotangents through deposition, continuity, node potential,
+inductance, and line-integral sampling in reverse order. The coefficient
+pullback returns gradients for segment `L`, node `C`, and the electric mass used
+by reciprocal deposition; recompiling the same fixed graph maps these to radius
+and host material tensors. Standard and CPML Maxwell reverses compose with this
+wire transpose. RF/lumped composition remains guarded until explicit wire-port
+binding defines shared state ownership.

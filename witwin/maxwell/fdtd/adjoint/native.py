@@ -2497,6 +2497,87 @@ def _reverse_step_full_aniso_native(
     )
 
 
+def _reverse_step_wire_native(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+    cpml,
+):
+    """Compose the fused Yee reverse with the sparse wire-network transpose."""
+
+    import dataclasses
+
+    from . import core as _adjoint
+    from ..wire import reverse_wire_step
+
+    base_core = (
+        _reverse_step_cpml_native_core if cpml else _reverse_step_standard_native_core
+    )
+    step_result = base_core(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+    wire_result = reverse_wire_step(
+        solver,
+        forward_state,
+        adjoint_state,
+        eps_by_field={"Ex": eps_ex, "Ey": eps_ey, "Ez": eps_ez},
+    )
+    pre_step_adjoint = dict(step_result.pre_step_adjoint)
+    for name in ("Ex", "Ey", "Ez"):
+        pre_step_adjoint[name] = pre_step_adjoint[name] + wire_result.field_adjoint[name]
+    pre_step_adjoint["wire_current"] = wire_result.pre_current
+    pre_step_adjoint["wire_charge"] = wire_result.pre_charge
+    backend = (
+        _ReverseBackend.WIRE_CPML if cpml else _ReverseBackend.WIRE_STANDARD
+    )
+    step_result = dataclasses.replace(
+        step_result,
+        pre_step_adjoint=pre_step_adjoint,
+        grad_eps_ex=step_result.grad_eps_ex + wire_result.grad_eps["Ex"],
+        grad_eps_ey=step_result.grad_eps_ey + wire_result.grad_eps["Ey"],
+        grad_eps_ez=step_result.grad_eps_ez + wire_result.grad_eps["Ez"],
+        grad_wire_inductance=wire_result.grad_inductance,
+        grad_wire_capacitance=wire_result.grad_node_capacitance,
+        backend=_NATIVE_REVERSE_LABELS[backend],
+    )
+    return _adjoint._accumulate_source_term_gradients(
+        step_result,
+        solver=solver,
+        adjoint_state=adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+
+def _reverse_step_wire_standard_native(solver, forward_state, adjoint_state, **kwargs):
+    return _reverse_step_wire_native(
+        solver, forward_state, adjoint_state, cpml=False, **kwargs
+    )
+
+
+def _reverse_step_wire_cpml_native(solver, forward_state, adjoint_state, **kwargs):
+    return _reverse_step_wire_native(
+        solver, forward_state, adjoint_state, cpml=True, **kwargs
+    )
+
+
 def register_native_reverse_backends() -> None:
     """Register every available native CUDA reverse-step runner."""
     register_native_reverse_backend(
@@ -2522,6 +2603,16 @@ def register_native_reverse_backends() -> None:
     register_native_reverse_backend(
         _ReverseBackend.CPML,
         _reverse_step_cpml_native,
+        qualifier=_cuda_scene_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.WIRE_STANDARD,
+        _reverse_step_wire_standard_native,
+        qualifier=_cuda_scene_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.WIRE_CPML,
+        _reverse_step_wire_cpml_native,
         qualifier=_cuda_scene_native_qualifies,
     )
     register_native_reverse_backend(

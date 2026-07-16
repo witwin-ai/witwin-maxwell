@@ -39,8 +39,15 @@ def _normalize_points(points) -> tuple[tuple[float, float, float], ...] | torch.
             raise ValueError(
                 "points must not contain zero-length consecutive segments."
             )
-        if torch.unique(points.detach(), dim=0).shape[0] != points.shape[0]:
-            raise ValueError("points must not contain duplicate nodes.")
+        unique_count = int(torch.unique(points.detach(), dim=0).shape[0])
+        closed = bool(torch.equal(points.detach()[0], points.detach()[-1]))
+        if closed and points.shape[0] < 4:
+            raise ValueError(
+                "duplicate nodes are valid only for a closed loop with at least three segments."
+            )
+        expected_unique = int(points.shape[0]) - (1 if closed else 0)
+        if unique_count != expected_unique:
+            raise ValueError("points may repeat only the first node as the final node of a closed loop.")
         return points
 
     if isinstance(points, (str, bytes)) or not isinstance(points, Sequence):
@@ -68,8 +75,14 @@ def _normalize_points(points) -> tuple[tuple[float, float, float], ...] | torch.
         raise ValueError("points must contain at least two coordinates.")
     if any(left == right for left, right in zip(resolved, resolved[1:])):
         raise ValueError("points must not contain zero-length consecutive segments.")
-    if len(set(resolved)) != len(resolved):
-        raise ValueError("points must not contain duplicate nodes.")
+    closed = resolved[0] == resolved[-1]
+    if closed and len(resolved) < 4:
+        raise ValueError(
+            "duplicate nodes are valid only for a closed loop with at least three segments."
+        )
+    expected_unique = len(resolved) - (1 if closed else 0)
+    if len(set(resolved)) != expected_unique:
+        raise ValueError("points may repeat only the first node as the final node of a closed loop.")
     return tuple(resolved)
 
 
@@ -113,14 +126,14 @@ def _normalize_radius(radius, *, segment_count: int):
 
 @dataclass(frozen=True)
 class WireConductor:
-    """Thin-wire conductor law. Phase 1 exposes the lossless PEC law."""
+    """Thin-wire conductor law. The current implementation exposes lossless PEC."""
 
     kind: Literal["pec"] = "pec"
 
     def __init__(self, kind: str = "pec"):
         resolved = str(kind).strip().lower()
         if resolved != "pec":
-            raise ValueError("WireConductor Phase 1 supports the 'pec' conductor law.")
+            raise ValueError("WireConductor currently supports the 'pec' conductor law.")
         object.__setattr__(self, "kind", "pec")
 
     @classmethod
@@ -132,23 +145,44 @@ class WireConductor:
 class WireEnd:
     """Boundary condition for one physical endpoint of a thin wire."""
 
-    kind: Literal["open", "grounded"]
+    kind: Literal["open", "grounded", "node"]
     structure: str | None = None
+    node_name: str | None = None
 
-    def __init__(self, kind: str = "open", *, structure: str | None = None):
+    def __init__(
+        self,
+        kind: str = "open",
+        *,
+        structure: str | None = None,
+        node_name: str | None = None,
+    ):
         resolved = str(kind).strip().lower()
-        if resolved not in {"open", "grounded"}:
-            raise ValueError("WireEnd Phase 1 kind must be 'open' or 'grounded'.")
+        if resolved not in {"open", "grounded", "node"}:
+            raise ValueError("WireEnd kind must be 'open', 'grounded', or 'node'.")
         if resolved == "open":
-            if structure is not None:
-                raise ValueError("WireEnd.open() cannot reference a structure.")
+            if structure is not None or node_name is not None:
+                raise ValueError("WireEnd.open() cannot reference a structure or node name.")
             resolved_structure = None
-        else:
+            resolved_node_name = None
+        elif resolved == "grounded":
+            if node_name is not None:
+                raise ValueError("WireEnd.grounded() cannot reference a node name.")
             resolved_structure = _nonempty_name(
                 structure, field_name="grounded structure"
             )
+            resolved_node_name = None
+        else:
+            if structure is not None:
+                raise ValueError("WireEnd.node() cannot reference a structure.")
+            resolved_structure = None
+            resolved_node_name = _nonempty_name(node_name, field_name="wire node name")
+            if resolved_node_name.startswith("__closed__:"):
+                raise ValueError(
+                    "wire node names beginning with '__closed__:' are reserved for internal loop identity."
+                )
         object.__setattr__(self, "kind", resolved)
         object.__setattr__(self, "structure", resolved_structure)
+        object.__setattr__(self, "node_name", resolved_node_name)
 
     @classmethod
     def open(cls) -> "WireEnd":
@@ -158,20 +192,24 @@ class WireEnd:
     def grounded(cls, *, structure: str) -> "WireEnd":
         return cls("grounded", structure=structure)
 
+    @classmethod
+    def node(cls, name: str) -> "WireEnd":
+        return cls("node", node_name=name)
+
 
 @dataclass(frozen=True, eq=False)
 class ThinWire:
     """Immutable centerline definition for a subgrid thin wire.
 
-    Tensor ``points`` and ``radius`` inputs are preserved so a later compiled
-    fixed-stencil workflow can retain their PyTorch autograd graph.
+    Tensor ``radius`` inputs retain their PyTorch autograd graph. Centerline
+    coordinates and topology remain fixed compilation decisions.
     """
 
     name: str
     points: tuple[tuple[float, float, float], ...] | torch.Tensor
     radius: float | tuple[float, ...] | torch.Tensor
     conductor: WireConductor
-    endpoints: tuple[WireEnd, WireEnd]
+    endpoints: tuple[WireEnd, ...]
     snap: Literal["nearest", "strict"] = "strict"
 
     def __init__(
@@ -192,8 +230,22 @@ class ThinWire:
         if not isinstance(conductor, WireConductor):
             raise TypeError("conductor must be a WireConductor.")
         if endpoints is None:
-            resolved_endpoints = (WireEnd.open(), WireEnd.open())
+            if self_closed := (
+                bool(torch.equal(resolved_points[0], resolved_points[-1]))
+                if isinstance(resolved_points, torch.Tensor)
+                else resolved_points[0] == resolved_points[-1]
+            ):
+                resolved_endpoints = ()
+            else:
+                resolved_endpoints = (WireEnd.open(), WireEnd.open())
         else:
+            self_closed = (
+                bool(torch.equal(resolved_points[0], resolved_points[-1]))
+                if isinstance(resolved_points, torch.Tensor)
+                else resolved_points[0] == resolved_points[-1]
+            )
+            if self_closed:
+                raise ValueError("closed-loop ThinWire points must not specify endpoints.")
             if not isinstance(endpoints, Sequence) or len(endpoints) != 2:
                 raise ValueError("endpoints must contain exactly two WireEnd values.")
             resolved_endpoints = tuple(endpoints)
@@ -215,6 +267,12 @@ class ThinWire:
     @property
     def segment_count(self) -> int:
         return _segment_count(self.points)
+
+    @property
+    def is_closed(self) -> bool:
+        if isinstance(self.points, torch.Tensor):
+            return bool(torch.equal(self.points.detach()[0], self.points.detach()[-1]))
+        return self.points[0] == self.points[-1]
 
 
 @dataclass(frozen=True, eq=False)

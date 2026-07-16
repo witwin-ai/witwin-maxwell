@@ -546,11 +546,6 @@ class Simulation:
     def _validate_trainable_rf_support(self) -> None:
         if self.method != SimulationMethod.FDTD or not self.has_trainable_parameters:
             return
-        if getattr(self.scene, "thin_wires", ()):
-            raise NotImplementedError(
-                "Differentiable FDTD scenes cannot include ThinWire until the wire "
-                "state checkpoint and exact reverse recurrence are available in Phase 2."
-            )
         rf_ports = tuple(
             port
             for port in self.scene.ports

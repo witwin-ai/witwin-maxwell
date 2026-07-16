@@ -27,6 +27,18 @@ class WireRuntime:
     state_bytes: int
 
 
+@dataclass(frozen=True)
+class WireReverseResult:
+    """Sparse transpose of one lossless wire-network leapfrog step."""
+
+    pre_current: torch.Tensor
+    pre_charge: torch.Tensor
+    field_adjoint: dict[str, torch.Tensor]
+    grad_inductance: torch.Tensor
+    grad_node_capacitance: torch.Tensor
+    grad_eps: dict[str, torch.Tensor]
+
+
 def _as_runtime_tensor(value, *, device, dtype=None) -> torch.Tensor:
     tensor = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
     return tensor.to(device=device, dtype=dtype, copy=False).contiguous()
@@ -87,6 +99,232 @@ def _target_masses(solver, components: torch.Tensor, offsets: torch.Tensor) -> t
 def _group_indices(offsets: torch.Tensor) -> torch.Tensor:
     counts = offsets[1:] - offsets[:-1]
     return torch.arange(counts.numel(), device=offsets.device, dtype=torch.int64).repeat_interleave(counts)
+
+
+def _segmented_sum(values: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+    """Deterministic CSR reduction with the stored contribution order."""
+
+    prefix = torch.cat((values.new_zeros((1,)), torch.cumsum(values, dim=0)))
+    return prefix.index_select(0, offsets[1:]) - prefix.index_select(0, offsets[:-1])
+
+
+def _field_vector(
+    fields: dict[str, torch.Tensor],
+    components: torch.Tensor,
+    offsets: torch.Tensor,
+) -> torch.Tensor:
+    values = fields["Ex"].new_empty(offsets.numel())
+    for component, name in enumerate(("Ex", "Ey", "Ez")):
+        selected = torch.nonzero(components == component, as_tuple=False).reshape(-1)
+        if selected.numel() == 0:
+            continue
+        values.index_copy_(
+            0,
+            selected,
+            fields[name]
+            .reshape(-1)
+            .index_select(0, offsets.index_select(0, selected)),
+        )
+    return values
+
+
+def replay_wire_state(
+    solver,
+    state: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Replay ``I^(n+1/2), q^(n+1)`` from one frozen checkpoint state."""
+
+    runtime = getattr(solver, "_wire_runtime", None)
+    if runtime is None:
+        raise RuntimeError("Wire replay requires an initialized wire runtime.")
+    coeff = runtime.coefficients
+    sampled = _field_vector(
+        {name: state[name] for name in ("Ex", "Ey", "Ez")},
+        coeff["edge_components"],
+        coeff["edge_offsets"],
+    )
+    emf = _segmented_sum(
+        coeff["weights"] * sampled,
+        coeff["segment_offsets"],
+    )
+    charge = state["wire_charge"]
+    potential = torch.where(
+        coeff["grounded"],
+        torch.zeros_like(charge),
+        charge / coeff["node_capacitance"],
+    )
+    current = state["wire_current"] + float(solver.dt) * (
+        emf
+        + potential.index_select(0, coeff["tail"])
+        - potential.index_select(0, coeff["head"])
+    ) / coeff["inductance"]
+    incidence = coeff["node_signs"].to(dtype=current.dtype) * current.index_select(
+        0, coeff["node_segments"]
+    )
+    flow = _segmented_sum(incidence, coeff["node_offsets"])
+    next_charge = torch.where(
+        coeff["grounded"],
+        torch.zeros_like(charge),
+        charge - float(solver.dt) * flow,
+    )
+    return current, next_charge
+
+
+def deposit_replayed_wire_current(
+    solver,
+    electric_fields: dict[str, torch.Tensor],
+    current: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Apply the sorted reciprocal current deposition without mutating replay state."""
+
+    runtime = getattr(solver, "_wire_runtime", None)
+    if runtime is None:
+        return electric_fields
+    coeff = runtime.coefficients
+    contributions = coeff["contribution_scales"] * current.index_select(
+        0, coeff["contribution_segments"]
+    )
+    deposited = _segmented_sum(contributions, coeff["edge_group_offsets"])
+    result = dict(electric_fields)
+    for component, name in enumerate(("Ex", "Ey", "Ez")):
+        selected = torch.nonzero(
+            coeff["target_components"] == component, as_tuple=False
+        ).reshape(-1)
+        if selected.numel() == 0:
+            continue
+        flat = electric_fields[name].reshape(-1).clone()
+        target_offsets = coeff["target_offsets"].index_select(0, selected)
+        flat.index_copy_(
+            0,
+            target_offsets,
+            flat.index_select(0, target_offsets) - deposited.index_select(0, selected),
+        )
+        result[name] = flat.reshape_as(electric_fields[name])
+    return result
+
+
+def reverse_wire_step(
+    solver,
+    forward_state: dict[str, torch.Tensor],
+    post_step_adjoint: dict[str, torch.Tensor],
+    *,
+    eps_by_field: dict[str, torch.Tensor],
+) -> WireReverseResult:
+    """Apply the exact sparse transpose of wire sampling, recurrence, and deposition."""
+
+    runtime = getattr(solver, "_wire_runtime", None)
+    if runtime is None:
+        raise RuntimeError("Wire reverse requires an initialized wire runtime.")
+    coeff = runtime.coefficients
+    dt = float(solver.dt)
+    current0 = forward_state["wire_current"]
+    charge0 = forward_state["wire_charge"]
+    current1, _charge1 = replay_wire_state(solver, forward_state)
+
+    sample_target_adjoint = _field_vector(
+        {name: post_step_adjoint[name] for name in ("Ex", "Ey", "Ez")},
+        coeff["edge_components"],
+        coeff["edge_offsets"],
+    )
+    target_adjoint = _field_vector(
+        {name: post_step_adjoint[name] for name in ("Ex", "Ey", "Ez")},
+        coeff["target_components"],
+        coeff["target_offsets"],
+    )
+    contribution_segments = coeff["contribution_segments"]
+    contribution_current = current1.index_select(0, contribution_segments)
+    current_adjoint = post_step_adjoint["wire_current"] - _segmented_sum(
+        coeff["sample_deposition_scales"] * sample_target_adjoint,
+        coeff["segment_offsets"],
+    )
+
+    charge_adjoint = torch.where(
+        coeff["grounded"],
+        torch.zeros_like(post_step_adjoint["wire_charge"]),
+        post_step_adjoint["wire_charge"],
+    )
+    tail_charge_adjoint = charge_adjoint.index_select(0, coeff["tail"])
+    head_charge_adjoint = charge_adjoint.index_select(0, coeff["head"])
+    current_adjoint = current_adjoint - dt * (
+        tail_charge_adjoint - head_charge_adjoint
+    )
+
+    scaled_current_adjoint = dt * current_adjoint / coeff["inductance"]
+    node_potential_adjoint = _segmented_sum(
+        coeff["node_signs"].to(dtype=scaled_current_adjoint.dtype)
+        * scaled_current_adjoint.index_select(0, coeff["node_segments"]),
+        coeff["node_offsets"],
+    )
+    nongrounded = ~coeff["grounded"]
+    pre_charge = charge_adjoint + torch.where(
+        nongrounded,
+        node_potential_adjoint / coeff["node_capacitance"],
+        torch.zeros_like(node_potential_adjoint),
+    )
+    grad_node_capacitance = torch.where(
+        nongrounded,
+        -charge0
+        * node_potential_adjoint
+        / (coeff["node_capacitance"] * coeff["node_capacitance"]),
+        torch.zeros_like(charge0),
+    )
+    grad_inductance = -(
+        current1 - current0
+    ) * current_adjoint / coeff["inductance"]
+
+    contribution_sample_adjoint = coeff["contribution_weights"] * (
+        scaled_current_adjoint.index_select(0, contribution_segments)
+    )
+    target_sample_adjoint = _segmented_sum(
+        contribution_sample_adjoint,
+        coeff["edge_group_offsets"],
+    )
+    field_adjoint = {
+        name: torch.zeros_like(forward_state[name]) for name in ("Ex", "Ey", "Ez")
+    }
+    for component, name in enumerate(("Ex", "Ey", "Ez")):
+        selected = torch.nonzero(
+            coeff["target_components"] == component, as_tuple=False
+        ).reshape(-1)
+        if selected.numel() == 0:
+            continue
+        flat = field_adjoint[name].reshape(-1)
+        flat.index_copy_(
+            0,
+            coeff["target_offsets"].index_select(0, selected),
+            target_sample_adjoint.index_select(0, selected),
+        )
+
+    deposited = _segmented_sum(
+        coeff["contribution_scales"] * contribution_current,
+        coeff["edge_group_offsets"],
+    )
+    grad_eps = {
+        name: torch.zeros_like(eps_by_field[name]) for name in ("Ex", "Ey", "Ez")
+    }
+    for component, name in enumerate(("Ex", "Ey", "Ez")):
+        selected = torch.nonzero(
+            coeff["target_components"] == component, as_tuple=False
+        ).reshape(-1)
+        if selected.numel() == 0:
+            continue
+        offsets = coeff["target_offsets"].index_select(0, selected)
+        eps_values = eps_by_field[name].reshape(-1).index_select(0, offsets)
+        values = (
+            target_adjoint.index_select(0, selected)
+            * deposited.index_select(0, selected)
+            / eps_values
+        )
+        grad_eps[name].reshape(-1).index_copy_(0, offsets, values)
+
+    return WireReverseResult(
+        pre_current=current_adjoint,
+        pre_charge=pre_charge,
+        field_adjoint=field_adjoint,
+        grad_inductance=grad_inductance,
+        grad_node_capacitance=grad_node_capacitance,
+        grad_eps=grad_eps,
+    )
 
 
 def _require_topology(condition: torch.Tensor | bool, message: str) -> None:
@@ -238,6 +476,122 @@ def _validate_compiled_topology(network) -> None:
     _require_topology(
         torch.equal(node_groups, expected_nodes),
         "node CSR signs must match tail/head incidence",
+    )
+
+    wire_count = len(network.wire_names)
+    wire_node_count = int(network.wire_node_indices.numel())
+    _validate_csr(
+        network.wire_node_offsets,
+        groups=wire_count,
+        entries=wire_node_count,
+        name="wire_node_offsets",
+    )
+    _require_topology(
+        torch.all(network.wire_node_offsets[1:] > network.wire_node_offsets[:-1]),
+        "every wire must own at least one node",
+    )
+    _require_topology(
+        torch.all(
+            (network.wire_node_indices >= 0) & (network.wire_node_indices < node_count)
+        ),
+        "wire node indices must be in bounds",
+    )
+    _require_topology(
+        network.node_wire_ids.numel() == node_count
+        and torch.all(
+            (network.node_wire_ids >= 0) & (network.node_wire_ids < wire_count)
+        ),
+        "node owner IDs must match the node count and reference a wire",
+    )
+    _validate_csr(
+        network.wire_segment_offsets,
+        groups=wire_count,
+        entries=segment_count,
+        name="wire_segment_offsets",
+    )
+    expected_wire_ids = _group_indices(network.wire_segment_offsets)
+    _require_topology(
+        network.segment_wire_ids.numel() == segment_count
+        and torch.equal(network.segment_wire_ids, expected_wire_ids),
+        "segment wire IDs must match wire_segment_offsets",
+    )
+    _require_topology(
+        network.segment_source_ids.numel() == segment_count
+        and torch.all(network.segment_source_ids >= 0),
+        "source segment IDs must match the segment count and be non-negative",
+    )
+    expected_node_owners = torch.full(
+        (node_count,), wire_count, device=network.node_wire_ids.device, dtype=torch.int64
+    )
+    for wire_id in range(wire_count):
+        node_start = int(network.wire_node_offsets[wire_id])
+        node_end = int(network.wire_node_offsets[wire_id + 1])
+        segment_start = int(network.wire_segment_offsets[wire_id])
+        segment_end = int(network.wire_segment_offsets[wire_id + 1])
+        members = network.wire_node_indices[node_start:node_end]
+        endpoints = torch.cat(
+            (network.tail[segment_start:segment_end], network.head[segment_start:segment_end])
+        )
+        _require_topology(
+            torch.all(torch.isin(endpoints, members)),
+            f"wire {wire_id} segment endpoints must belong to its node membership",
+        )
+        unique_members = torch.unique(members, sorted=True)
+        expected_members = torch.unique(endpoints, sorted=True)
+        _require_topology(
+            unique_members.numel() == members.numel()
+            and torch.equal(unique_members, expected_members),
+            f"wire {wire_id} node membership must exactly match its unique segment endpoints",
+        )
+        owner_candidates = expected_node_owners.index_select(0, members)
+        expected_node_owners.index_copy_(
+            0,
+            members,
+            torch.minimum(owner_candidates, torch.full_like(owner_candidates, wire_id)),
+        )
+    _require_topology(
+        torch.equal(network.node_wire_ids, expected_node_owners),
+        "node owner IDs must be the minimum wire ID in each node membership",
+    )
+
+    _require_topology(
+        network.open_endpoints.numel() == node_count
+        and network.grounded.numel() == node_count,
+        "endpoint flags must match the node count",
+    )
+    _require_topology(
+        torch.all(~(network.open_endpoints & network.grounded)),
+        "a node cannot be both open and grounded",
+    )
+    degrees = network.node_offsets[1:] - network.node_offsets[:-1]
+    _require_topology(
+        torch.all(degrees[network.open_endpoints | network.grounded] == 1),
+        "open and grounded endpoints must have degree one",
+    )
+    junction_count = len(network.junction_names)
+    _require_topology(
+        len(set(network.junction_names)) == junction_count,
+        "junction names must be unique",
+    )
+    _require_topology(
+        network.junction_node_ids.numel() == junction_count,
+        "junction IDs must match junction names",
+    )
+    _require_topology(
+        torch.all(
+            (network.junction_node_ids >= 0) & (network.junction_node_ids < node_count)
+        )
+        and torch.unique(network.junction_node_ids).numel() == junction_count,
+        "junction node IDs must be unique and in bounds",
+    )
+    _require_topology(
+        torch.all(degrees.index_select(0, network.junction_node_ids) >= 2),
+        "named junctions must have degree at least two",
+    )
+    branch_nodes = torch.nonzero(degrees > 2, as_tuple=False).reshape(-1)
+    _require_topology(
+        torch.all(torch.isin(branch_nodes, network.junction_node_ids)),
+        "every branch node must be a named junction",
     )
     _require_topology(
         torch.all(torch.isfinite(network.weights))
@@ -430,6 +784,14 @@ def initialize_wire_runtime(solver) -> WireRuntime | None:
         float(solver.dt)
         * coefficients["contribution_weights"]
         / target_masses.index_select(0, edge_groups)
+    ).contiguous()
+    sample_masses = _target_masses(
+        solver,
+        coefficients["edge_components"],
+        coefficients["edge_offsets"],
+    )
+    coefficients["sample_deposition_scales"] = (
+        float(solver.dt) * coefficients["weights"] / sample_masses
     ).contiguous()
 
     segment_count = int(coefficients["inductance"].numel())
