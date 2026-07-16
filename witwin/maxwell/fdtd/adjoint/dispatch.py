@@ -696,7 +696,9 @@ def reverse_step(
     state_names = tuple(forward_state.keys())
     if tuple(adjoint_state.keys()) != state_names:
         raise RuntimeError(
-            "Reverse step expects forward and adjoint states to share the same frozen checkpoint layout."
+            "Reverse step expects forward and adjoint states to share the same frozen "
+            f"checkpoint layout; forward={state_names!r}, "
+            f"adjoint={tuple(adjoint_state.keys())!r}."
         )
 
     # The FDTD backward bridge resolves the source-term lists once per pass and

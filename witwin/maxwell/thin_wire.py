@@ -8,7 +8,7 @@ from typing import Any, ClassVar, Literal
 import torch
 
 
-_SNAP_POLICIES = {"nearest", "strict"}
+_SNAP_POLICIES = {"continuous", "nearest", "strict"}
 _WIRE_QUANTITIES = {"current", "charge", "ohmic_loss"}
 
 
@@ -201,8 +201,9 @@ class WireEnd:
 class ThinWire:
     """Immutable centerline definition for a subgrid thin wire.
 
-    Tensor ``radius`` inputs retain their PyTorch autograd graph. Centerline
-    coordinates and topology remain fixed compilation decisions.
+    Tensor ``radius`` inputs retain their PyTorch autograd graph. Tensor
+    ``points`` retain coordinate gradients when ``snap="continuous"``; the
+    compiled cell stencil remains a fixed, discrete decision.
     """
 
     name: str
@@ -210,7 +211,7 @@ class ThinWire:
     radius: float | tuple[float, ...] | torch.Tensor
     conductor: WireConductor
     endpoints: tuple[WireEnd, ...]
-    snap: Literal["nearest", "strict"] = "strict"
+    snap: Literal["continuous", "nearest", "strict"] = "strict"
 
     def __init__(
         self,
@@ -255,7 +256,16 @@ class ThinWire:
                 raise TypeError("endpoints must contain only WireEnd values.")
         resolved_snap = str(snap).strip().lower()
         if resolved_snap not in _SNAP_POLICIES:
-            raise ValueError("snap must be 'nearest' or 'strict'.")
+            raise ValueError("snap must be 'continuous', 'nearest', or 'strict'.")
+        if (
+            isinstance(resolved_points, torch.Tensor)
+            and resolved_points.requires_grad
+            and resolved_snap != "continuous"
+        ):
+            raise ValueError(
+                "trainable points require snap='continuous' so the fixed-stencil "
+                "coordinate-gradient contract is explicit."
+            )
 
         object.__setattr__(self, "name", resolved_name)
         object.__setattr__(self, "points", resolved_points)

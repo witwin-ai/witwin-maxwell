@@ -20,7 +20,7 @@ _MAX_RADIUS_TO_SPACING = 0.2
 
 @dataclass(frozen=True)
 class CompiledWireNetwork:
-    """Device-native sparse graph and Yee coupling for axis-aligned thin wires."""
+    """Device-native sparse graph and conservative Yee coupling for thin wires."""
 
     wire_names: tuple[str, ...]
     field_shapes: tuple[tuple[int, int, int], ...]
@@ -30,6 +30,8 @@ class CompiledWireNetwork:
     node_wire_ids: torch.Tensor
     wire_node_offsets: torch.Tensor
     wire_node_indices: torch.Tensor
+    wire_source_point_offsets: torch.Tensor
+    source_point_node_ids: torch.Tensor
     junction_names: tuple[str, ...]
     junction_node_ids: torch.Tensor
     node_offsets: torch.Tensor
@@ -55,6 +57,10 @@ class CompiledWireNetwork:
     local_permittivity: torch.Tensor
     local_permeability: torch.Tensor
     segment_offsets: torch.Tensor
+    fragment_offsets: torch.Tensor
+    fragment_segment_ids: torch.Tensor
+    fragment_cell_indices: torch.Tensor
+    fragment_lengths: torch.Tensor
     edge_components: torch.Tensor
     edge_offsets: torch.Tensor
     weights: torch.Tensor
@@ -63,6 +69,14 @@ class CompiledWireNetwork:
     target_offsets: torch.Tensor
     contribution_segments: torch.Tensor
     contribution_weights: torch.Tensor
+    port_binding_names: tuple[str, ...]
+    port_binding_kinds: tuple[str, ...]
+    port_negative_node_ids: torch.Tensor
+    port_positive_node_ids: torch.Tensor
+    port_gap_offsets: torch.Tensor
+    port_gap_edge_components: torch.Tensor
+    port_gap_edge_offsets: torch.Tensor
+    port_gap_weights: torch.Tensor
     metadata: Mapping[str, Any]
 
     @property
@@ -117,31 +131,47 @@ def _snap_index(coords: np.ndarray, value: float, *, strict: bool, label: str) -
     return index
 
 
-def _point_tensor(points, *, wire_name: str) -> torch.Tensor:
+def _point_tensor(
+    points,
+    *,
+    wire_name: str,
+    allow_trainable: bool = False,
+) -> torch.Tensor:
     if isinstance(points, torch.Tensor):
-        if points.requires_grad:
+        if points.requires_grad and not allow_trainable:
             raise ValueError(
                 f"ThinWire {wire_name!r} trainable points are discrete fixed-stencil "
-                "compilation inputs and cannot require gradients."
+                "compilation inputs unless snap='continuous'."
             )
         tensor = points
     else:
         for point in points:
             for coordinate in point:
-                if isinstance(coordinate, torch.Tensor) and coordinate.requires_grad:
+                if (
+                    isinstance(coordinate, torch.Tensor)
+                    and coordinate.requires_grad
+                    and not allow_trainable
+                ):
                     raise ValueError(
                         f"ThinWire {wire_name!r} trainable points are discrete fixed-stencil "
-                        "compilation inputs and cannot require gradients."
+                        "compilation inputs unless snap='continuous'."
                     )
         tensor = torch.as_tensor(points)
     if tensor.is_complex() or tensor.dtype == torch.bool:
         raise TypeError(f"ThinWire {wire_name!r} points must be real coordinates.")
     if tensor.ndim != 2 or tensor.shape[1] != 3 or tensor.shape[0] < 2:
         raise ValueError(f"ThinWire {wire_name!r} points must have shape (N, 3) with N >= 2.")
-    tensor = tensor.detach().cpu().to(dtype=torch.float64)
     if not bool(torch.all(torch.isfinite(tensor))):
         raise ValueError(f"ThinWire {wire_name!r} points must be finite.")
     return tensor
+
+
+def _point_dtype(value) -> torch.dtype:
+    if not isinstance(value, torch.Tensor):
+        return torch.float64
+    if not value.is_floating_point() or value.is_complex():
+        raise TypeError("ThinWire points must be a real floating-point tensor or coordinates.")
+    return value.dtype
 
 
 def _radius_dtype(value) -> torch.dtype:
@@ -215,6 +245,35 @@ def _bspline_coupling_distance(du: float, dv: float) -> float:
         limit=100,
     )[0]
     return math.exp(log_mean)
+
+
+def _bspline_coupling_distance_tensor(du: torch.Tensor, dv: torch.Tensor) -> torch.Tensor:
+    """Differentiable quadrature for the BS1 x BS1 geometric-mean radius."""
+
+    quadrature_nodes, quadrature_weights = np.polynomial.legendre.leggauss(48)
+    u = torch.as_tensor(
+        0.5 * (quadrature_nodes + 1.0), device=du.device, dtype=du.dtype
+    )
+    weights = torch.as_tensor(
+        0.5 * quadrature_weights, device=du.device, dtype=du.dtype
+    )
+    axial = du * u
+    axial2 = axial.square()
+    dv2 = dv.square()
+    total = axial2 + dv2
+    integral_log = (
+        torch.log(total)
+        - 2.0
+        + 2.0 * axial * torch.atan(dv / axial) / dv
+    )
+    integral_v_log = (
+        total * torch.log(total)
+        - total
+        - axial2 * torch.log(axial2)
+        + axial2
+    ) / (2.0 * dv2)
+    integrate_v = 0.5 * (integral_log - integral_v_log)
+    return torch.exp(4.0 * torch.sum(weights * (1.0 - u) * integrate_v))
 
 
 def _grid_arrays(scene) -> tuple[tuple[np.ndarray, ...], tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
@@ -292,17 +351,35 @@ def _expanded_path(
     scene,
     wire,
     nodes: tuple[np.ndarray, ...],
-) -> tuple[list[tuple[int, int, int]], list[int], int]:
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[
+    list[tuple[float, float, float]],
+    list[torch.Tensor],
+    list[int],
+    int,
+    list[int],
+]:
     name = str(wire.name)
-    points = _point_tensor(wire.points, wire_name=name).numpy()
     snap = _kind_name(getattr(wire, "snap", "strict"))
-    if snap not in {"strict", "nearest"}:
-        raise ValueError(f"ThinWire {name!r} snap must be 'strict' or 'nearest'.")
-    snapped = []
+    if snap not in {"continuous", "strict", "nearest"}:
+        raise ValueError(
+            f"ThinWire {name!r} snap must be 'continuous', 'strict', or 'nearest'."
+        )
+    point_tensor = _point_tensor(
+        wire.points,
+        wire_name=name,
+        allow_trainable=snap == "continuous",
+    ).to(device=device, dtype=dtype)
+    points = point_tensor.detach().cpu().to(dtype=torch.float64).numpy()
+    resolved_points = []
     for point_index, point in enumerate(points):
         _domain_error(scene, point, wire_name=name)
-        snapped.append(
-            tuple(
+        if snap == "continuous":
+            resolved_points.append(tuple(float(value) for value in point))
+        else:
+            snapped_indices = tuple(
                 _snap_index(
                     axis_nodes,
                     float(value),
@@ -311,26 +388,38 @@ def _expanded_path(
                 )
                 for axis_index, (axis_nodes, value) in enumerate(zip(nodes, point))
             )
-        )
-
-    path = [snapped[0]]
-    source_segments = []
-    for source_segment, (start, end) in enumerate(zip(snapped, snapped[1:])):
-        differing = [axis for axis in range(3) if start[axis] != end[axis]]
-        if not differing:
-            raise ValueError(f"ThinWire {name!r} contains a zero-length segment after snapping.")
-        if len(differing) != 1:
-            raise ValueError(
-                f"ThinWire {name!r} requires axis-aligned segments until the conservative "
-                "arbitrary-direction coupling stencil is selected."
+            resolved_points.append(
+                tuple(
+                    float(nodes[axis][index])
+                    for axis, index in enumerate(snapped_indices)
+                )
             )
-        axis = differing[0]
-        direction = 1 if end[axis] > start[axis] else -1
-        current = list(start)
-        while current[axis] != end[axis]:
-            current[axis] += direction
-            path.append(tuple(current))
-            source_segments.append(source_segment)
+
+    source_tensors = (
+        [point_tensor[index] for index in range(point_tensor.shape[0])]
+        if snap == "continuous"
+        else [
+            torch.as_tensor(point, device=device, dtype=dtype)
+            for point in resolved_points
+        ]
+    )
+    path = [resolved_points[0]]
+    path_tensors = [source_tensors[0]]
+    source_segments = []
+    source_point_path_indices = [0]
+    for source_segment, (start, end) in enumerate(
+        zip(resolved_points, resolved_points[1:])
+    ):
+        if start == end:
+            raise ValueError(f"ThinWire {name!r} contains a zero-length segment after snapping.")
+        # A user polyline span is one physical circuit segment. Grid-plane
+        # clipping is coupling-only and is performed later when constructing G.
+        # Keeping those two topologies separate makes I/q ownership independent
+        # of grid orientation and preserves a fixed state shape for coordinates.
+        path.append(end)
+        path_tensors.append(source_tensors[source_segment + 1])
+        source_segments.append(source_segment)
+        source_point_path_indices.append(len(path) - 1)
 
     closed = path[0] == path[-1]
     unique_path = path[:-1] if closed else path
@@ -338,7 +427,325 @@ def _expanded_path(
         raise ValueError(
             f"ThinWire {name!r} repeats an internal grid node; only a first-to-last closed loop is valid."
         )
-    return path, source_segments, len(snapped) - 1
+    return (
+        path,
+        path_tensors,
+        source_segments,
+        len(resolved_points) - 1,
+        source_point_path_indices,
+    )
+
+
+def _point_grid_index(
+    point: tuple[float, float, float],
+    nodes: tuple[np.ndarray, ...],
+) -> tuple[int, int, int]:
+    """Return the nearest grid-node index used only for ownership metadata."""
+
+    return tuple(
+        int(np.argmin(np.abs(axis_nodes - coordinate)))
+        for axis_nodes, coordinate in zip(nodes, point)
+    )
+
+
+def _fragment_cell(
+    start: tuple[float, float, float],
+    end: tuple[float, float, float],
+    start_tensor: torch.Tensor,
+    end_tensor: torch.Tensor,
+    nodes: tuple[np.ndarray, ...],
+    primal: tuple[np.ndarray, ...],
+) -> tuple[tuple[int, int, int], torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Resolve one grid-plane-clipped fragment to a cell and local coordinates."""
+
+    start_array = np.asarray(start, dtype=np.float64)
+    end_array = np.asarray(end, dtype=np.float64)
+    midpoint = 0.5 * (start_array + end_array)
+    cell = tuple(
+        int(np.clip(np.searchsorted(axis_nodes, value, side="right") - 1, 0, len(axis_nodes) - 2))
+        for axis_nodes, value in zip(nodes, midpoint)
+    )
+
+    origin = torch.as_tensor(
+        [nodes[axis][cell[axis]] for axis in range(3)],
+        device=start_tensor.device,
+        dtype=start_tensor.dtype,
+    )
+    spacing = torch.as_tensor(
+        [primal[axis][cell[axis]] for axis in range(3)],
+        device=start_tensor.device,
+        dtype=start_tensor.dtype,
+    )
+
+    def local(point: torch.Tensor) -> torch.Tensor:
+        return (point - origin) / spacing
+
+    return (
+        cell,
+        local(start_tensor),
+        local(end_tensor),
+        local(0.5 * (start_tensor + end_tensor)),
+    )
+
+
+def _transverse_bits(component: int) -> tuple[tuple[int, int, int], ...]:
+    transverse = tuple(axis for axis in range(3) if axis != component)
+    return tuple(
+        tuple(
+            bit_u if axis == transverse[0] else bit_v if axis == transverse[1] else 0
+            for axis in range(3)
+        )
+        for bit_u in (0, 1)
+        for bit_v in (0, 1)
+    )
+
+
+def _point_edge_weights(
+    component: int,
+    local: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    transverse = tuple(axis for axis in range(3) if axis != component)
+    return tuple(
+        (local[transverse[0]] if bits[transverse[0]] else 1.0 - local[transverse[0]])
+        * (local[transverse[1]] if bits[transverse[1]] else 1.0 - local[transverse[1]])
+        for bits in _transverse_bits(component)
+    )
+
+
+def _fragment_edge_coupling(
+    start: tuple[float, float, float],
+    end: tuple[float, float, float],
+    start_tensor: torch.Tensor,
+    end_tensor: torch.Tensor,
+    nodes: tuple[np.ndarray, ...],
+    primal: tuple[np.ndarray, ...],
+    shapes: tuple[tuple[int, int, int], ...],
+) -> tuple[
+    tuple[int, int, int],
+    torch.Tensor,
+    list[tuple[int, int, torch.Tensor]],
+]:
+    """Integrate tensor-product Yee edge basis functions along one fragment."""
+
+    cell, local_start, local_end, local_midpoint = _fragment_cell(
+        start,
+        end,
+        start_tensor,
+        end_tensor,
+        nodes,
+        primal,
+    )
+    displacement = np.asarray(end, dtype=np.float64) - np.asarray(start, dtype=np.float64)
+    tensor_displacement = end_tensor - start_tensor
+    samples: list[tuple[int, int, torch.Tensor]] = []
+    for component in range(3):
+        if displacement[component] == 0.0:
+            continue
+        transverse = tuple(axis for axis in range(3) if axis != component)
+        for bits in _transverse_bits(component):
+            first_start = (
+                local_start[transverse[0]]
+                if bits[transverse[0]]
+                else 1.0 - local_start[transverse[0]]
+            )
+            second_start = (
+                local_start[transverse[1]]
+                if bits[transverse[1]]
+                else 1.0 - local_start[transverse[1]]
+            )
+            first_end = (
+                local_end[transverse[0]]
+                if bits[transverse[0]]
+                else 1.0 - local_end[transverse[0]]
+            )
+            second_end = (
+                local_end[transverse[1]]
+                if bits[transverse[1]]
+                else 1.0 - local_end[transverse[1]]
+            )
+            first_slope = first_end - first_start
+            second_slope = second_end - second_start
+            basis_integral = (
+                first_start * second_start
+                + 0.5
+                * (first_start * second_slope + second_start * first_slope)
+                + first_slope * second_slope / 3.0
+            )
+            weight = tensor_displacement[component] * basis_integral
+            if abs(float(weight.detach().cpu())) <= (
+                64.0 * np.finfo(np.float64).eps * abs(displacement[component])
+            ):
+                continue
+            edge = tuple(cell[axis] + bits[axis] for axis in range(3))
+            samples.append((component, _flat_offset(component, edge, shapes), weight))
+    if not samples:
+        raise RuntimeError("Thin-wire fragment produced no conservative Yee coupling samples.")
+    return cell, local_midpoint, samples
+
+
+def _segment_coupling_fragments(
+    start: tuple[float, float, float],
+    end: tuple[float, float, float],
+    start_tensor: torch.Tensor,
+    end_tensor: torch.Tensor,
+    nodes: tuple[np.ndarray, ...],
+    primal: tuple[np.ndarray, ...],
+    shapes: tuple[tuple[int, int, int], ...],
+    *,
+    continuous: bool,
+) -> list[
+    tuple[
+        torch.Tensor,
+        tuple[int, int, int],
+        torch.Tensor,
+        list[tuple[int, int, torch.Tensor]],
+    ]
+]:
+    """Split one circuit segment into cell-local conservative coupling fragments."""
+
+    start_array = np.asarray(start, dtype=np.float64)
+    end_array = np.asarray(end, dtype=np.float64)
+    delta = end_array - start_array
+    crossings: list[tuple[float, int | None, float | None]] = [
+        (0.0, None, None),
+        (1.0, None, None),
+    ]
+    for axis, axis_nodes in enumerate(nodes):
+        if delta[axis] == 0.0:
+            continue
+        lower = min(start_array[axis], end_array[axis])
+        upper = max(start_array[axis], end_array[axis])
+        tolerance = _grid_tolerance(axis_nodes)
+        interior = axis_nodes[
+            (axis_nodes > lower + tolerance) & (axis_nodes < upper - tolerance)
+        ]
+        crossings.extend(
+            (
+                float((coordinate - start_array[axis]) / delta[axis]),
+                axis,
+                float(coordinate),
+            )
+            for coordinate in interior
+        )
+    crossings.sort(key=lambda entry: (entry[0], -1 if entry[1] is None else entry[1]))
+    crossing_tolerance = 256.0 * np.finfo(np.float64).eps
+    unique = [crossings[0]]
+    for crossing in crossings[1:]:
+        if crossing[0] - unique[-1][0] > crossing_tolerance * max(
+            1.0, abs(crossing[0]), abs(unique[-1][0])
+        ):
+            unique.append(crossing)
+        elif (
+            continuous
+            and 0.0 < crossing[0] < 1.0
+            and crossing[1] != unique[-1][1]
+        ):
+            raise ValueError(
+                "ThinWire snap='continuous' crosses multiple grid planes at one point; "
+                "that stencil is not differentiable. Perturb the centerline or use a "
+                "discrete snap policy."
+            )
+
+    tensor_delta = end_tensor - start_tensor
+    points = [start]
+    point_tensors = [start_tensor]
+    for fraction_value, crossing_axis, crossing_coordinate in unique[1:]:
+        if crossing_axis is None:
+            point = end
+            point_tensor = end_tensor
+        else:
+            point_array = start_array + fraction_value * delta
+            point = tuple(float(value) for value in point_array)
+            plane = torch.as_tensor(
+                crossing_coordinate,
+                device=start_tensor.device,
+                dtype=start_tensor.dtype,
+            )
+            fraction = (plane - start_tensor[crossing_axis]) / tensor_delta[
+                crossing_axis
+            ]
+            point_tensor = torch.stack(
+                tuple(
+                    plane
+                    if axis == crossing_axis
+                    else start_tensor[axis] + fraction * tensor_delta[axis]
+                    for axis in range(3)
+                )
+            )
+        points.append(point)
+        point_tensors.append(point_tensor)
+
+    fragments = []
+    for left, right, left_tensor, right_tensor in zip(
+        points, points[1:], point_tensors, point_tensors[1:]
+    ):
+        cell, local_midpoint, samples = _fragment_edge_coupling(
+            left,
+            right,
+            left_tensor,
+            right_tensor,
+            nodes,
+            primal,
+            shapes,
+        )
+        fragments.append(
+            (
+                torch.linalg.vector_norm(right_tensor - left_tensor),
+                cell,
+                local_midpoint,
+                samples,
+            )
+        )
+    return fragments
+
+
+def _local_transverse_spacing(
+    *,
+    cell: tuple[int, int, int],
+    local_midpoint: torch.Tensor,
+    tangent: torch.Tensor,
+    dual: tuple[np.ndarray, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    local_spacing = torch.stack(
+        [
+            (1.0 - local_midpoint[axis])
+            * torch.as_tensor(
+                dual[axis][cell[axis]],
+                device=local_midpoint.device,
+                dtype=local_midpoint.dtype,
+            )
+            + local_midpoint[axis]
+            * torch.as_tensor(
+                dual[axis][cell[axis] + 1],
+                device=local_midpoint.device,
+                dtype=local_midpoint.dtype,
+            )
+            for axis in range(3)
+        ]
+    )
+    projector = torch.eye(
+        3, device=local_midpoint.device, dtype=local_midpoint.dtype
+    ) - torch.outer(tangent, tangent)
+    projected_metric = projector @ torch.diag(local_spacing.square()) @ projector
+    eigenvalues = torch.linalg.eigvalsh(projected_metric)
+    transverse = torch.sqrt(torch.clamp_min(eigenvalues[-2:], torch.finfo(eigenvalues.dtype).tiny))
+    return transverse[0], transverse[1]
+
+
+def _interpolate_material_component(
+    field: torch.Tensor,
+    component: int,
+    cell: tuple[int, int, int],
+    local_midpoint: torch.Tensor,
+) -> torch.Tensor:
+    values = []
+    for bits, weight in zip(
+        _transverse_bits(component),
+        _point_edge_weights(component, local_midpoint),
+    ):
+        edge = tuple(cell[axis] + bits[axis] for axis in range(3))
+        values.append(weight * field[edge])
+    return torch.stack(values).sum()
 
 
 def _geometry_signed_distance(structure, point: tuple[float, float, float]) -> torch.Tensor:
@@ -361,7 +768,7 @@ def _geometry_signed_distance(structure, point: tuple[float, float, float]) -> t
 def _endpoint_specs(
     scene,
     wire,
-    path: list[tuple[int, int, int]],
+    path: list[tuple[float, float, float]],
     nodes: tuple[np.ndarray, ...],
 ) -> tuple[tuple[str, str | None], tuple[str, str | None]]:
     endpoints = getattr(wire, "endpoints", None)
@@ -383,7 +790,7 @@ def _endpoint_specs(
         min(float(np.min(np.diff(axis_nodes))) for axis_nodes in nodes) * 1.0e-6,
     )
     resolved_node_names: dict[int, str] = {}
-    for endpoint_index, (endpoint, kind, grid_index) in enumerate(
+    for endpoint_index, (endpoint, kind, point) in enumerate(
         zip(endpoints, kinds, (path[0], path[-1]))
     ):
         if kind == "node":
@@ -434,7 +841,6 @@ def _endpoint_specs(
                 f"ThinWire {wire.name!r} grounded endpoint {endpoint_index} "
                 f"structure {structure_name!r} must be PEC."
             )
-        point = tuple(float(nodes[axis][grid_index[axis]]) for axis in range(3))
         distance = _geometry_signed_distance(structure, point)
         if distance.numel() != 1 or not bool(torch.isfinite(distance).all()):
             raise ValueError(
@@ -462,17 +868,27 @@ def _validate_boundary_contacts(scene, wire, path, nodes) -> None:
     bounds = tuple(tuple(float(value) for value in pair) for pair in scene.domain.bounds)
     for axis_index, axis in enumerate(_AXES):
         tolerance = _grid_tolerance(nodes[axis_index])
+        low_kind = _kind_name(boundary.face_kind(axis, "low"))
+        high_kind = _kind_name(boundary.face_kind(axis, "high"))
+        if "bloch" in {low_kind, high_kind}:
+            raise NotImplementedError(
+                f"ThinWire {wire.name!r} with a Bloch boundary requires phase-aware wire "
+                "topology, which is not yet supported."
+            )
         for side_index, side in enumerate(("low", "high")):
-            if _kind_name(boundary.face_kind(axis, side)) != "pec":
-                continue
+            kind = _kind_name(boundary.face_kind(axis, side))
             face = bounds[axis_index][side_index]
-            if any(
-                abs(float(nodes[axis_index][grid_index[axis_index]]) - face) <= tolerance
-                for grid_index in path
-            ):
+            touches = any(abs(float(point[axis_index]) - face) <= tolerance for point in path)
+            if kind == "pec" and touches:
                 raise ValueError(
                     f"ThinWire {wire.name!r} touches the PEC {axis}-{side} boundary; "
                     "Thin-wire grounding requires a named PEC structure."
+                )
+            if kind == "periodic" and touches:
+                raise ValueError(
+                    f"ThinWire {wire.name!r} touches the periodic {axis}-{side} boundary. "
+                    "Wire paths use absolute coordinates inside one fundamental cell; "
+                    "implicit periodic wrap is not supported."
                 )
 
 
@@ -541,13 +957,7 @@ def _validate_pec_contacts(scene, wire, path, nodes, endpoint_kinds) -> None:
         1.0e-12,
         min(float(np.min(np.diff(axis_nodes))) for axis_nodes in nodes) * 1.0e-6,
     )
-    positions = [
-        np.asarray(
-            tuple(float(nodes[axis][grid_index[axis]]) for axis in range(3)),
-            dtype=np.float64,
-        )
-        for grid_index in path
-    ]
+    positions = [np.asarray(point, dtype=np.float64) for point in path]
     last_node = len(path) - 1
     for node_index, point in enumerate(positions):
         for structure in structures:
@@ -647,12 +1057,36 @@ def _validate_wire_proximity(
     return minimum
 
 
+def _validate_unique_physical_segments(
+    node_positions: np.ndarray,
+    tail: list[int],
+    head: list[int],
+) -> None:
+    seen: set[tuple[tuple[float, ...], tuple[float, ...]]] = set()
+    for tail_node, head_node in zip(tail, head):
+        endpoints = sorted(
+            (
+                tuple(float(value) for value in node_positions[tail_node]),
+                tuple(float(value) for value in node_positions[head_node]),
+            )
+        )
+        key = (endpoints[0], endpoints[1])
+        if key in seen:
+            raise ValueError("ThinWire conductors overlap on one physical fragment.")
+        seen.add(key)
+
+
 def _validate_port_ownership(prepared_scene, target_device, shapes, targets) -> None:
-    if not tuple(getattr(prepared_scene, "ports", ())):
+    field_ports = tuple(
+        port
+        for port in getattr(prepared_scene, "ports", ())
+        if getattr(port, "wire_binding", None) is None
+    )
+    if not field_ports:
         return
     from .ports import compile_ports
 
-    for port in compile_ports(prepared_scene, device=target_device):
+    for port in compile_ports(prepared_scene, field_ports, device=target_device):
         component = _COMPONENTS.index(port.voltage_component)
         for index in port.voltage_indices.detach().cpu().tolist():
             key = (component, _flat_offset(component, tuple(index), shapes))
@@ -663,12 +1097,108 @@ def _validate_port_ownership(prepared_scene, target_device, shapes, targets) -> 
                 )
 
 
+def _resolve_port_bindings(prepared_scene, wires) -> tuple[dict[str, Any], ...]:
+    wire_ids = {str(wire.name): index for index, wire in enumerate(wires)}
+    point_counts = {
+        str(wire.name): int(
+            _point_tensor(
+                wire.points,
+                wire_name=str(wire.name),
+                allow_trainable=True,
+            ).shape[0]
+        )
+        for wire in wires
+    }
+    records = []
+    seen_bindings = set()
+    seen_gap_segments = set()
+    ports = sorted(
+        (
+            port
+            for port in getattr(prepared_scene, "ports", ())
+            if getattr(port, "wire_binding", None) is not None
+        ),
+        key=lambda port: str(port.name),
+    )
+    for port in ports:
+        binding = port.wire_binding
+        kind = _kind_name(binding)
+        if kind not in {"nodes", "gap"}:
+            raise ValueError(
+                f"Port {port.name!r} has unsupported wire binding kind {kind!r}."
+            )
+        references = []
+        for terminal, reference in (
+            ("negative", binding.negative),
+            ("positive", binding.positive),
+        ):
+            wire_name = str(reference.wire)
+            if wire_name not in wire_ids:
+                raise ValueError(
+                    f"Port {port.name!r} {terminal} wire reference names unknown "
+                    f"ThinWire {wire_name!r}."
+                )
+            point = int(reference.point)
+            if point < 0:
+                point += point_counts[wire_name]
+            if point < 0 or point >= point_counts[wire_name]:
+                raise ValueError(
+                    f"Port {port.name!r} {terminal} source-point index {point} is out of "
+                    f"range for ThinWire {wire_name!r}."
+                )
+            references.append((wire_name, point))
+        negative, positive = references
+        binding_key = (kind, tuple(sorted((negative, positive))))
+        if binding_key in seen_bindings:
+            raise ValueError(
+                f"Port {port.name!r} duplicates an existing thin-wire binding."
+            )
+        seen_bindings.add(binding_key)
+
+        source_wire = None
+        source_segment = None
+        orientation = 0
+        if kind == "gap":
+            if negative[0] != positive[0]:
+                raise ValueError(
+                    f"Port {port.name!r} gap terminals must reference one ThinWire."
+                )
+            if abs(positive[1] - negative[1]) != 1:
+                raise ValueError(
+                    f"Port {port.name!r} gap terminals must be adjacent source points."
+                )
+            source_wire = negative[0]
+            source_segment = min(negative[1], positive[1])
+            orientation = 1 if positive[1] > negative[1] else -1
+            gap_key = (source_wire, source_segment)
+            if gap_key in seen_gap_segments:
+                raise ValueError(
+                    f"Port {port.name!r} duplicates a feed gap on ThinWire "
+                    f"{source_wire!r} source segment {source_segment}."
+                )
+            seen_gap_segments.add(gap_key)
+        records.append(
+            {
+                "port_name": str(port.name),
+                "kind": kind,
+                "negative_wire": negative[0],
+                "negative_point": negative[1],
+                "positive_wire": positive[0],
+                "positive_point": positive[1],
+                "source_wire": source_wire,
+                "source_segment": source_segment,
+                "orientation": orientation,
+            }
+        )
+    return tuple(records)
+
+
 def compile_thin_wires(
     prepared_scene,
     *,
     device: str | torch.device | None = None,
 ) -> CompiledWireNetwork:
-    """Compile PEC axis-aligned wire graphs into sparse device tensors."""
+    """Compile PEC wire graphs into sparse device tensors."""
 
     nodes, primal, dual = _grid_arrays(prepared_scene)
     shapes = _field_shapes(nodes)
@@ -677,13 +1207,22 @@ def compile_thin_wires(
     names = tuple(str(wire.name) for wire in wires)
     if len(names) != len(set(names)):
         raise ValueError("ThinWire names must be unique.")
+    port_binding_records = _resolve_port_bindings(prepared_scene, wires)
+    gap_segments = {
+        (record["source_wire"], record["source_segment"])
+        for record in port_binding_records
+        if record["kind"] == "gap"
+    }
     coefficient_dtype = None
     for wire in wires:
         radius_dtype = _radius_dtype(wire.radius)
+        wire_dtype = radius_dtype
+        if _kind_name(getattr(wire, "snap", "strict")) == "continuous":
+            wire_dtype = torch.promote_types(wire_dtype, _point_dtype(wire.points))
         coefficient_dtype = (
-            radius_dtype
+            wire_dtype
             if coefficient_dtype is None
-            else torch.promote_types(coefficient_dtype, radius_dtype)
+            else torch.promote_types(coefficient_dtype, wire_dtype)
         )
     if coefficient_dtype is None:
         coefficient_dtype = torch.float64
@@ -711,10 +1250,13 @@ def compile_thin_wires(
     grid_fingerprint = _grid_fingerprint(prepared_scene, nodes, primal, dual)
     wire_records = []
     occurrences: dict[
-        tuple[int, int, int],
+        tuple[float, float, float],
         list[tuple[int, int, tuple[str, str | None] | None]],
     ] = {}
-    named_coordinates: dict[str, tuple[int, int, int]] = {}
+    position_tensor_occurrences: dict[
+        tuple[float, float, float], list[torch.Tensor]
+    ] = {}
+    named_coordinates: dict[str, tuple[float, float, float]] = {}
     named_occurrences: dict[str, int] = {}
     internal_closed_names: set[str] = set()
     tail = []
@@ -731,15 +1273,39 @@ def compile_thin_wires(
     capacitance_per_length = []
     local_permittivity = []
     local_permeability = []
-    edge_offsets = []
+    segment_offsets = [0]
+    fragment_offsets = [0]
+    fragment_segment_ids = []
+    fragment_cell_indices = []
+    fragment_lengths = []
+    sampling_components = []
+    sampling_offsets = []
+    sampling_weights = []
     wire_node_offsets = [0]
     wire_node_indices = []
+    wire_source_point_offsets = [0]
+    source_point_positions = []
     wire_segment_offsets = [0]
+    gap_samples: dict[
+        tuple[str, int], list[tuple[int, int, torch.Tensor]]
+    ] = {}
 
     for wire_id, wire in enumerate(wires):
         if _kind_name(wire.conductor) != "pec":
             raise ValueError(f"ThinWire {wire.name!r} must use a PEC conductor before Phase 4.")
-        path, source_segments, source_count = _expanded_path(prepared_scene, wire, nodes)
+        (
+            path,
+            path_tensors,
+            source_segments,
+            source_count,
+            source_point_path_indices,
+        ) = _expanded_path(
+            prepared_scene,
+            wire,
+            nodes,
+            device=target_device,
+            dtype=coefficient_dtype,
+        )
         radii = _radius_tensor(
             wire.radius,
             source_segment_count=source_count,
@@ -753,7 +1319,18 @@ def compile_thin_wires(
         endpoint_kinds = tuple(spec[0] for spec in endpoint_specs)
         _validate_boundary_contacts(prepared_scene, wire, path, nodes)
         _validate_pec_contacts(prepared_scene, wire, path, nodes, endpoint_kinds)
+        gap_source_segments = {
+            source_segment
+            for wire_name, source_segment in gap_segments
+            if wire_name == str(wire.name)
+        }
+        included_path_nodes = set(source_point_path_indices)
+        for local_segment, source_segment in enumerate(source_segments):
+            if source_segment not in gap_source_segments:
+                included_path_nodes.update((local_segment, local_segment + 1))
         for local_node, grid_index in enumerate(path):
+            if local_node not in included_path_nodes:
+                continue
             endpoint_spec = None
             if local_node == 0:
                 endpoint_spec = endpoint_specs[0]
@@ -761,6 +1338,9 @@ def compile_thin_wires(
                 endpoint_spec = endpoint_specs[1]
             occurrences.setdefault(grid_index, []).append(
                 (wire_id, local_node, endpoint_spec)
+            )
+            position_tensor_occurrences.setdefault(grid_index, []).append(
+                path_tensors[local_node]
             )
             if endpoint_spec is not None and endpoint_spec[0] == "node":
                 node_name = endpoint_spec[1]
@@ -780,7 +1360,10 @@ def compile_thin_wires(
                 "wire": wire,
                 "wire_id": wire_id,
                 "path": path,
+                "path_tensors": path_tensors,
                 "source_segments": source_segments,
+                "source_point_path_indices": source_point_path_indices,
+                "gap_source_segments": gap_source_segments,
                 "radii": radii,
             }
         )
@@ -791,7 +1374,7 @@ def compile_thin_wires(
                 f"Wire node {node_name!r} is unresolved; a named junction requires at least two endpoints."
             )
 
-    node_name_by_grid: dict[tuple[int, int, int], str] = {}
+    node_name_by_grid: dict[tuple[float, float, float], str] = {}
     for grid_index, entries in occurrences.items():
         if len(entries) <= 1:
             continue
@@ -802,7 +1385,7 @@ def compile_thin_wires(
         if any(label is None for label in labels) or len(set(labels)) != 1:
             participants = tuple(names[wire_id] for wire_id, _local_node, _spec in entries)
             raise ValueError(
-                f"ThinWire paths touch at grid node {grid_index} without one shared named node; "
+                f"ThinWire paths touch at position {grid_index} without one shared named node; "
                 f"participants are {participants}."
             )
         node_name = labels[0]
@@ -811,16 +1394,22 @@ def compile_thin_wires(
         if node_name not in internal_closed_names:
             node_name_by_grid[grid_index] = node_name
 
-    node_grid = sorted(occurrences)
-    grid_to_node = {grid_index: index for index, grid_index in enumerate(node_grid)}
+    node_positions = sorted(occurrences)
+    node_position_tensors = [
+        torch.stack(position_tensor_occurrences[position]).mean(dim=0)
+        for position in node_positions
+    ]
+    position_to_node = {
+        position: index for index, position in enumerate(node_positions)
+    }
     node_wire_ids = [
-        min(wire_id for wire_id, _local_node, _spec in occurrences[grid_index])
-        for grid_index in node_grid
+        min(wire_id for wire_id, _local_node, _spec in occurrences[position])
+        for position in node_positions
     ]
     open_flags = []
     grounded_flags = []
-    for grid_index in node_grid:
-        specs = [spec for _wire_id, _local_node, spec in occurrences[grid_index] if spec is not None]
+    for position in node_positions:
+        specs = [spec for _wire_id, _local_node, spec in occurrences[position] if spec is not None]
         open_flags.append(any(spec[0] == "open" for spec in specs))
         grounded_flags.append(any(spec[0] == "grounded" for spec in specs))
 
@@ -828,80 +1417,176 @@ def compile_thin_wires(
         wire = record["wire"]
         wire_id = record["wire_id"]
         path = record["path"]
+        path_tensors = record["path_tensors"]
         source_segments = record["source_segments"]
+        source_point_path_indices = record["source_point_path_indices"]
+        gap_source_segments = record["gap_source_segments"]
         radii = record["radii"]
-        local_node_ids = [grid_to_node[index] for index in path]
-        ordered_membership = tuple(dict.fromkeys(local_node_ids))
-        wire_node_indices.extend(ordered_membership)
+        wire_source_positions = [path[index] for index in source_point_path_indices]
+        source_point_positions.extend(wire_source_positions)
+        wire_source_point_offsets.append(len(source_point_positions))
+        active_node_ids = []
 
-        for local_segment, (start, end, source_segment) in enumerate(
-            zip(path, path[1:], source_segments)
+        for local_segment, (
+            start,
+            end,
+            start_tensor,
+            end_tensor,
+            source_segment,
+        ) in enumerate(
+            zip(
+                path,
+                path[1:],
+                path_tensors,
+                path_tensors[1:],
+                source_segments,
+            )
         ):
-            axis = next(index for index in range(3) if start[index] != end[index])
-            direction = 1 if end[axis] > start[axis] else -1
-            lower = min(start[axis], end[axis])
-            edge = list(start)
-            edge[axis] = lower
-            length = float(primal[axis][lower])
-            transverse = tuple(index for index in range(3) if index != axis)
-            du = float(dual[transverse[0]][start[transverse[0]]])
-            dv = float(dual[transverse[1]][start[transverse[1]]])
-            distance = _bspline_coupling_distance(du, dv)
+            displacement = np.asarray(end, dtype=np.float64) - np.asarray(
+                start, dtype=np.float64
+            )
+            tensor_displacement = end_tensor - start_tensor
+            length = torch.linalg.vector_norm(tensor_displacement)
+            tangent = tensor_displacement / length
+            axis = int(np.argmax(np.abs(displacement)))
+            direction = 1 if displacement[axis] > 0.0 else -1
+            continuous = _kind_name(getattr(wire, "snap", "strict")) == "continuous"
+            coupling_fragments = _segment_coupling_fragments(
+                start,
+                end,
+                start_tensor,
+                end_tensor,
+                nodes,
+                primal,
+                shapes,
+                continuous=continuous,
+            )
+            if source_segment in gap_source_segments:
+                gap_row = gap_samples.setdefault((str(wire.name), source_segment), [])
+                for _micro_length, _cell, _local_midpoint, fragment_samples in coupling_fragments:
+                    gap_row.extend(fragment_samples)
+                continue
             radius = radii[source_segment]
-            spacing = min(du, dv)
-            ratio = radius / spacing
-            distance_t = torch.as_tensor(distance, device=target_device, dtype=coefficient_dtype)
-            if not bool(radius < distance_t):
-                raise ValueError(
-                    f"ThinWire {wire.name!r} radius must remain below the local coupling distance."
+            micro_distances = []
+            micro_ratios = []
+            micro_inductances = []
+            micro_capacitances = []
+            micro_permittivities = []
+            micro_permeabilities = []
+            for micro_length, cell, local_midpoint, micro_samples in coupling_fragments:
+                du, dv = _local_transverse_spacing(
+                    cell=cell,
+                    local_midpoint=local_midpoint,
+                    tangent=tangent,
+                    dual=dual,
                 )
-            if not bool(ratio <= _MAX_RADIUS_TO_SPACING):
-                raise ValueError(
-                    f"ThinWire {wire.name!r} exceeds the accepted a/delta_perp <= "
-                    f"{_MAX_RADIUS_TO_SPACING} validity band."
+                distance_t = (
+                    _bspline_coupling_distance_tensor(du, dv)
+                    if continuous
+                    else torch.as_tensor(
+                        _bspline_coupling_distance(
+                            float(du.detach().cpu()), float(dv.detach().cpu())
+                        ),
+                        device=target_device,
+                        dtype=coefficient_dtype,
+                    )
                 )
-            eps_local = torch.stack(
-                [0.5 * (eps_fields[name][start] + eps_fields[name][end]) for name in _AXES]
+                spacing = torch.minimum(du, dv)
+                ratio = radius / spacing
+                if not bool(radius < distance_t):
+                    raise ValueError(
+                        f"ThinWire {wire.name!r} radius must remain below the local coupling distance."
+                    )
+                if not bool(ratio <= _MAX_RADIUS_TO_SPACING):
+                    raise ValueError(
+                        f"ThinWire {wire.name!r} exceeds the accepted a/delta_perp <= "
+                        f"{_MAX_RADIUS_TO_SPACING} validity band."
+                    )
+                eps_local = torch.stack(
+                    [
+                        _interpolate_material_component(
+                            eps_fields[name], component, cell, local_midpoint
+                        )
+                        for component, name in enumerate(_AXES)
+                    ]
+                )
+                mu_local = torch.stack(
+                    [
+                        _interpolate_material_component(
+                            mu_fields[name], component, cell, local_midpoint
+                        )
+                        for component, name in enumerate(_AXES)
+                    ]
+                )
+                if not torch.allclose(
+                    eps_local,
+                    eps_local[0].expand_as(eps_local),
+                    rtol=1.0e-6,
+                    atol=1.0e-7,
+                ) or not torch.allclose(
+                    mu_local,
+                    mu_local[0].expand_as(mu_local),
+                    rtol=1.0e-6,
+                    atol=1.0e-7,
+                ):
+                    raise NotImplementedError(
+                        f"ThinWire {wire.name!r} requires a locally isotropic host material."
+                    )
+                eps_r = eps_local.mean()
+                mu_r = mu_local.mean()
+                if not bool(torch.isfinite(eps_r)) or not bool(torch.isfinite(mu_r)):
+                    raise ValueError(
+                        f"ThinWire {wire.name!r} local host material must be finite."
+                    )
+                if not bool(eps_r > 0.0) or not bool(mu_r > 0.0):
+                    raise ValueError(
+                        f"ThinWire {wire.name!r} local host material must be positive."
+                    )
+                log_ratio = torch.log(distance_t) - torch.log(radius)
+                if not bool(torch.isfinite(log_ratio)) or not bool(log_ratio > 0.0):
+                    raise ValueError(
+                        f"ThinWire {wire.name!r} logarithmic self term is ill-conditioned."
+                    )
+                l_prime = MU_0 * mu_r * log_ratio / (2.0 * math.pi)
+                c_prime = MU_0 * mu_r * EPSILON_0 * eps_r / l_prime
+                if (
+                    not bool(torch.isfinite(l_prime) & (l_prime > 0.0))
+                    or not bool(torch.isfinite(c_prime) & (c_prime > 0.0))
+                ):
+                    raise ValueError(
+                        f"ThinWire {wire.name!r} local line coefficients must be finite and positive."
+                    )
+                micro_distances.append(distance_t)
+                micro_ratios.append(ratio)
+                micro_inductances.append(l_prime * micro_length)
+                micro_capacitances.append(c_prime * micro_length)
+                micro_permittivities.append(eps_r * micro_length)
+                micro_permeabilities.append(mu_r * micro_length)
+
+            inductance = torch.stack(micro_inductances).sum()
+            capacitance = torch.stack(micro_capacitances).sum()
+            c_prime = capacitance / length
+            eps_r = torch.stack(micro_permittivities).sum() / length
+            mu_r = torch.stack(micro_permeabilities).sum() / length
+            ratio = torch.stack(micro_ratios).max()
+            distance_t = torch.exp(
+                torch.sum(
+                    torch.stack(
+                        [
+                            micro_length * torch.log(distance)
+                            for (micro_length, *_), distance in zip(
+                                coupling_fragments, micro_distances
+                            )
+                        ]
+                    )
+                )
+                / length
             )
-            mu_local = torch.stack(
-                [0.5 * (mu_fields[name][start] + mu_fields[name][end]) for name in _AXES]
-            )
-            if not torch.allclose(
-                eps_local,
-                eps_local[0].expand_as(eps_local),
-                rtol=1.0e-6,
-                atol=1.0e-7,
-            ) or not torch.allclose(
-                mu_local,
-                mu_local[0].expand_as(mu_local),
-                rtol=1.0e-6,
-                atol=1.0e-7,
-            ):
-                raise NotImplementedError(
-                    f"ThinWire {wire.name!r} requires a locally isotropic host material before Phase 3."
-                )
-            eps_r = eps_local.mean()
-            mu_r = mu_local.mean()
-            if not bool(torch.isfinite(eps_r)) or not bool(torch.isfinite(mu_r)):
-                raise ValueError(f"ThinWire {wire.name!r} local host material must be finite.")
-            if not bool(eps_r > 0.0) or not bool(mu_r > 0.0):
-                raise ValueError(f"ThinWire {wire.name!r} local host material must be positive.")
-            log_ratio = torch.log(distance_t) - torch.log(radius)
-            if not bool(torch.isfinite(log_ratio)) or not bool(log_ratio > 0.0):
-                raise ValueError(
-                    f"ThinWire {wire.name!r} logarithmic self term is ill-conditioned."
-                )
-            l_prime = MU_0 * mu_r * log_ratio / (2.0 * math.pi)
-            c_prime = MU_0 * mu_r * EPSILON_0 * eps_r / l_prime
-            if (
-                not bool(torch.isfinite(l_prime) & (l_prime > 0.0))
-                or not bool(torch.isfinite(c_prime) & (c_prime > 0.0))
-            ):
-                raise ValueError(
-                    f"ThinWire {wire.name!r} local line coefficients must be finite and positive."
-                )
-            tail.append(local_node_ids[local_segment])
-            head.append(local_node_ids[local_segment + 1])
+            tail_node = position_to_node[start]
+            head_node = position_to_node[end]
+            tail.append(tail_node)
+            head.append(head_node)
+            active_node_ids.extend((tail_node, head_node))
             segment_wire_ids.append(wire_id)
             segment_source_ids.append(source_segment)
             segment_axes.append(axis)
@@ -910,34 +1595,140 @@ def compile_thin_wires(
             segment_radii.append(radius)
             coupling_distances.append(distance_t)
             radius_to_spacing.append(ratio)
-            inductance_per_segment.append(l_prime * length)
+            inductance_per_segment.append(inductance)
             capacitance_per_length.append(c_prime)
             local_permittivity.append(eps_r)
             local_permeability.append(mu_r)
-            edge_offsets.append(_flat_offset(axis, tuple(edge), shapes))
+            segment_id = len(tail) - 1
+            for micro_length, cell, _local_midpoint, micro_samples in coupling_fragments:
+                for component, offset, weight in micro_samples:
+                    sampling_components.append(component)
+                    sampling_offsets.append(offset)
+                    sampling_weights.append(weight)
+                fragment_offsets.append(len(sampling_weights))
+                fragment_segment_ids.append(segment_id)
+                fragment_cell_indices.append(cell)
+                fragment_lengths.append(micro_length)
+            segment_offsets.append(len(sampling_weights))
+        active_node_set = set(active_node_ids)
+        for source_segment in gap_source_segments:
+            gap_endpoint_ids = {
+                position_to_node[path[source_point_path_indices[source_segment]]],
+                position_to_node[path[source_point_path_indices[source_segment + 1]]],
+            }
+            if not gap_endpoint_ids.issubset(active_node_set):
+                raise ValueError(
+                    f"ThinWire {wire.name!r} feed gap source segment {source_segment} "
+                    "must leave an active wire fragment on both terminals."
+                )
+        wire_node_indices.extend(tuple(dict.fromkeys(active_node_ids)))
         wire_node_offsets.append(len(wire_node_indices))
         wire_segment_offsets.append(len(tail))
 
-    node_count = len(node_grid)
+    node_count = len(node_positions)
     segment_count = len(tail)
-    node_grid_array = np.asarray(node_grid, dtype=np.int64).reshape(node_count, 3)
+    node_position_array = np.asarray(node_positions, dtype=np.float64).reshape(node_count, 3)
+    node_position_t = (
+        torch.stack(node_position_tensors)
+        if node_position_tensors
+        else _empty_tensor(target_device, coefficient_dtype, (0, 3))
+    )
+    node_grid_array = np.asarray(
+        [_point_grid_index(position, nodes) for position in node_positions],
+        dtype=np.int64,
+    ).reshape(node_count, 3)
     wire_node_indices_array = np.asarray(wire_node_indices, dtype=np.int64)
+    source_point_node_ids_array = np.asarray(
+        [position_to_node[position] for position in source_point_positions],
+        dtype=np.int64,
+    )
     public_junction_names = tuple(
         sorted(name for name in named_coordinates if name not in internal_closed_names)
     )
     junction_node_ids = [
-        grid_to_node[named_coordinates[name]] for name in public_junction_names
+        position_to_node[named_coordinates[name]] for name in public_junction_names
     ]
-    node_position_array = np.empty((node_count, 3), dtype=np.float64)
-    for axis in range(3):
-        if node_count:
-            node_position_array[:, axis] = nodes[axis][node_grid_array[:, axis]]
+    wire_id_by_name = {name: index for index, name in enumerate(names)}
+
+    def source_point_node_id(wire_name: str, point: int) -> int:
+        wire_id = wire_id_by_name[wire_name]
+        return int(
+            source_point_node_ids_array[wire_source_point_offsets[wire_id] + point]
+        )
+
+    port_binding_names = []
+    port_binding_kinds = []
+    port_negative_node_ids = []
+    port_positive_node_ids = []
+    port_gap_offsets = [0]
+    port_gap_components = []
+    port_gap_edge_offsets = []
+    port_gap_weights = []
+    port_binding_metadata = []
+    for record in port_binding_records:
+        negative_node = source_point_node_id(
+            record["negative_wire"], record["negative_point"]
+        )
+        positive_node = source_point_node_id(
+            record["positive_wire"], record["positive_point"]
+        )
+        if negative_node == positive_node:
+            raise ValueError(
+                f"Port {record['port_name']!r} wire-binding terminals resolve to the same "
+                "global thin-wire node."
+            )
+        port_binding_names.append(record["port_name"])
+        port_binding_kinds.append(record["kind"])
+        port_negative_node_ids.append(negative_node)
+        port_positive_node_ids.append(positive_node)
+        if record["kind"] == "gap":
+            key = (record["source_wire"], record["source_segment"])
+            combined: dict[tuple[int, int], torch.Tensor] = {}
+            for component, offset, weight in gap_samples.get(key, ()):
+                edge_key = (component, offset)
+                contribution = record["orientation"] * weight
+                combined[edge_key] = (
+                    contribution
+                    if edge_key not in combined
+                    else combined[edge_key] + contribution
+                )
+            for (component, offset), weight in sorted(combined.items()):
+                if float(weight.detach().cpu()) == 0.0:
+                    continue
+                port_gap_components.append(component)
+                port_gap_edge_offsets.append(offset)
+                port_gap_weights.append(weight)
+            if port_gap_offsets[-1] == len(port_gap_weights):
+                raise RuntimeError(
+                    f"Port {record['port_name']!r} feed gap produced an empty conservative row."
+                )
+        port_gap_offsets.append(len(port_gap_weights))
+        port_binding_metadata.append(
+            MappingProxyType(
+                {
+                    "port_name": record["port_name"],
+                    "kind": record["kind"],
+                    "negative": (
+                        record["negative_wire"],
+                        record["negative_point"],
+                    ),
+                    "positive": (
+                        record["positive_wire"],
+                        record["positive_point"],
+                    ),
+                    "negative_node_id": negative_node,
+                    "positive_node_id": positive_node,
+                    "source_wire": record["source_wire"],
+                    "source_segment": record["source_segment"],
+                }
+            )
+        )
 
     tail_t = torch.as_tensor(tail, device=target_device, dtype=torch.int64)
     head_t = torch.as_tensor(head, device=target_device, dtype=torch.int64)
     if segment_count:
         radius_t = torch.stack(segment_radii)
-        length_t = torch.as_tensor(segment_lengths, device=target_device, dtype=coefficient_dtype)
+        length_t = torch.stack(segment_lengths)
         distance_t = torch.stack(coupling_distances)
         ratio_t = torch.stack(radius_to_spacing)
         inductance_t = torch.stack(inductance_per_segment)
@@ -962,6 +1753,7 @@ def compile_thin_wires(
         local_permeability_t = _empty_tensor(target_device, coefficient_dtype, (0,))
         node_capacitance = _empty_tensor(target_device, coefficient_dtype, (0,))
 
+    _validate_unique_physical_segments(node_position_array, tail, head)
     minimum_neighbor_distance = _validate_wire_proximity(
         node_position_array,
         tail,
@@ -995,38 +1787,26 @@ def compile_thin_wires(
     cycle_rank = segment_count - node_count + component_count
     branch_node_count = int(np.count_nonzero(node_counts > 2))
 
-    sampling_components = np.asarray(segment_axes, dtype=np.int32)
-    sampling_offsets = np.asarray(edge_offsets, dtype=np.int64)
-    sampling_weights = np.asarray(segment_directions, dtype=np.float64) * np.asarray(
-        segment_lengths, dtype=np.float64
+    sampling_components_array = np.asarray(sampling_components, dtype=np.int32)
+    sampling_offsets_array = np.asarray(sampling_offsets, dtype=np.int64)
+    sampling_weights_array = np.asarray(
+        [float(weight.detach().cpu()) for weight in sampling_weights],
+        dtype=np.float64,
     )
-    sparse_target_owner = {}
-    for segment, (component, offset) in enumerate(
-        zip(sampling_components, sampling_offsets)
-    ):
-        key = (int(component), int(offset))
-        previous = sparse_target_owner.get(key)
-        if previous is not None:
-            raise ValueError(
-                "ThinWire conductors overlap on Yee edge "
-                f"(component={key[0]}, offset={key[1]})."
-            )
-        sparse_target_owner[key] = segment
     deposition = sorted(
         (
-            int(component),
-            int(offset),
+            int(sampling_components_array[sample]),
+            int(sampling_offsets_array[sample]),
             segment,
-            float(weight),
+            sample,
         )
-        for segment, (component, offset, weight) in enumerate(
-            zip(sampling_components, sampling_offsets, sampling_weights)
-        )
+        for segment in range(segment_count)
+        for sample in range(segment_offsets[segment], segment_offsets[segment + 1])
     )
     target_components = []
     target_offsets = []
     previous_key = None
-    for component, offset, _segment, _weight in deposition:
+    for component, offset, _segment, _sample in deposition:
         key = (component, offset)
         if key != previous_key:
             target_components.append(component)
@@ -1042,11 +1822,41 @@ def compile_thin_wires(
 
     grid_entries = (
         ("node_grid", node_grid_array),
+        ("node_positions", node_position_array),
         ("wire_node_indices", wire_node_indices_array),
+        (
+            "wire_source_point_offsets",
+            np.asarray(wire_source_point_offsets, dtype=np.int64),
+        ),
+        ("source_point_node_ids", source_point_node_ids_array),
         ("tail", np.asarray(tail, dtype=np.int64)),
         ("head", np.asarray(head, dtype=np.int64)),
         ("wire_ids", np.asarray(segment_wire_ids, dtype=np.int64)),
         ("source_segment_ids", np.asarray(segment_source_ids, dtype=np.int64)),
+        (
+            "segment_lengths",
+            length_t.detach().cpu().to(dtype=torch.float64).numpy(),
+        ),
+        ("segment_offsets", np.asarray(segment_offsets, dtype=np.int64)),
+        ("fragment_offsets", np.asarray(fragment_offsets, dtype=np.int64)),
+        (
+            "fragment_segment_ids",
+            np.asarray(fragment_segment_ids, dtype=np.int64),
+        ),
+        (
+            "fragment_cell_indices",
+            np.asarray(fragment_cell_indices, dtype=np.int64).reshape(-1, 3),
+        ),
+        (
+            "fragment_lengths",
+            np.asarray(
+                [float(value.detach().cpu()) for value in fragment_lengths],
+                dtype=np.float64,
+            ),
+        ),
+        ("sampling_components", sampling_components_array),
+        ("sampling_offsets", sampling_offsets_array),
+        ("sampling_weights", sampling_weights_array),
         ("radius", radius_t.detach().cpu().to(dtype=torch.float64).numpy()),
         (
             "local_permittivity",
@@ -1059,6 +1869,30 @@ def compile_thin_wires(
         ("open_endpoints", np.asarray(open_flags, dtype=np.bool_)),
         ("grounded", np.asarray(grounded_flags, dtype=np.bool_)),
         ("junction_node_ids", np.asarray(junction_node_ids, dtype=np.int64)),
+        (
+            "port_negative_node_ids",
+            np.asarray(port_negative_node_ids, dtype=np.int64),
+        ),
+        (
+            "port_positive_node_ids",
+            np.asarray(port_positive_node_ids, dtype=np.int64),
+        ),
+        ("port_gap_offsets", np.asarray(port_gap_offsets, dtype=np.int64)),
+        (
+            "port_gap_components",
+            np.asarray(port_gap_components, dtype=np.int32),
+        ),
+        (
+            "port_gap_edge_offsets",
+            np.asarray(port_gap_edge_offsets, dtype=np.int64),
+        ),
+        (
+            "port_gap_weights",
+            np.asarray(
+                [float(weight.detach().cpu()) for weight in port_gap_weights],
+                dtype=np.float64,
+            ),
+        ),
     )
     compile_digest = hashlib.sha256()
     compile_digest.update(grid_fingerprint.encode("ascii"))
@@ -1070,10 +1904,36 @@ def compile_thin_wires(
         encoded_name = name.encode("utf8")
         compile_digest.update(len(encoded_name).to_bytes(8, byteorder="little"))
         compile_digest.update(encoded_name)
+    for record in port_binding_records:
+        for value in (
+            record["port_name"],
+            record["kind"],
+            record["negative_wire"],
+            record["negative_point"],
+            record["positive_wire"],
+            record["positive_point"],
+            record["source_wire"],
+            record["source_segment"],
+        ):
+            encoded_value = str(value).encode("utf8")
+            compile_digest.update(len(encoded_value).to_bytes(8, byteorder="little"))
+            compile_digest.update(encoded_value)
     compile_digest.update(_hash_arrays(*grid_entries).encode("ascii"))
     compile_fingerprint = compile_digest.hexdigest()
     cache_enabled = not any(
-        tensor.requires_grad for tensor in (radius_t, local_permittivity_t, local_permeability_t)
+        tensor.requires_grad
+        for tensor in (
+            node_position_t,
+            radius_t,
+            local_permittivity_t,
+            local_permeability_t,
+        )
+    )
+    boundary = getattr(prepared_scene, "boundary", None)
+    periodic_axes = tuple(
+        axis
+        for axis in _AXES
+        if boundary is not None and _kind_name(boundary.face_kind(axis, "low")) == "periodic"
     )
     metadata = MappingProxyType(
         {
@@ -1086,20 +1946,33 @@ def compile_thin_wires(
                 for index, name in enumerate(names)
             ),
             "wire_node_index_semantics": "CSR membership into wire_node_indices",
+            "wire_source_point_ranges": tuple(
+                (name, wire_source_point_offsets[index], wire_source_point_offsets[index + 1])
+                for index, name in enumerate(names)
+            ),
             "junction_nodes": tuple(zip(public_junction_names, junction_node_ids)),
             "wire_segment_ranges": tuple(
                 (name, wire_segment_offsets[index], wire_segment_offsets[index + 1])
                 for index, name in enumerate(names)
             ),
+            "segment_semantics": "physical_polyline_span",
+            "fragment_semantics": "cell_local_coupling_without_state",
+            "port_bindings": tuple(port_binding_metadata),
             "validity": MappingProxyType(
                 {
-                    "phase": 2,
+                    "phase": 3,
                     "conductor": "pec",
-                    "topology": "axis_aligned_graph",
+                    "topology": "arbitrary_direction_graph",
                     "junction_count": len(public_junction_names),
                     "branch_node_count": branch_node_count,
                     "cycle_rank": cycle_rank,
                     "coupling_kernel": "BS1xBS1",
+                    "yee_coupling": "cell_local_tensor_product_line_integral",
+                    "fragmentation": "exact_grid_plane_clipping",
+                    "coordinate_gradient": "fixed_stencil_only",
+                    "cross_cell_gradient": "discontinuous",
+                    "periodic_axes": periodic_axes,
+                    "periodic_path_semantics": "absolute_interior_no_wrap",
                     "max_radius_to_spacing": _MAX_RADIUS_TO_SPACING,
                     "minimum_neighbor_distance": minimum_neighbor_distance,
                     "proximity_criterion": "physical_radius_and_sparse_target_ownership",
@@ -1121,13 +1994,19 @@ def compile_thin_wires(
     network = CompiledWireNetwork(
         wire_names=names,
         field_shapes=shapes,
-        node_positions=torch.as_tensor(node_position_array, device=target_device, dtype=torch.float64),
+        node_positions=node_position_t,
         node_grid_indices=torch.as_tensor(node_grid_array, device=target_device, dtype=torch.int64),
         node_ids=torch.arange(node_count, device=target_device, dtype=torch.int64),
         node_wire_ids=torch.as_tensor(node_wire_ids, device=target_device, dtype=torch.int64),
         wire_node_offsets=torch.as_tensor(wire_node_offsets, device=target_device, dtype=torch.int64),
         wire_node_indices=torch.as_tensor(
             wire_node_indices_array, device=target_device, dtype=torch.int64
+        ),
+        wire_source_point_offsets=torch.as_tensor(
+            wire_source_point_offsets, device=target_device, dtype=torch.int64
+        ),
+        source_point_node_ids=torch.as_tensor(
+            source_point_node_ids_array, device=target_device, dtype=torch.int64
         ),
         junction_names=public_junction_names,
         junction_node_ids=torch.as_tensor(
@@ -1161,18 +2040,66 @@ def compile_thin_wires(
         capacitance_per_length=capacitance_t,
         local_permittivity=local_permittivity_t,
         local_permeability=local_permeability_t,
-        segment_offsets=torch.arange(segment_count + 1, device=target_device, dtype=torch.int64),
-        edge_components=torch.as_tensor(sampling_components, device=target_device, dtype=torch.int32),
-        edge_offsets=torch.as_tensor(sampling_offsets, device=target_device, dtype=torch.int64),
-        weights=torch.as_tensor(sampling_weights, device=target_device, dtype=coefficient_dtype),
+        segment_offsets=torch.as_tensor(
+            segment_offsets, device=target_device, dtype=torch.int64
+        ),
+        fragment_offsets=torch.as_tensor(
+            fragment_offsets, device=target_device, dtype=torch.int64
+        ),
+        fragment_segment_ids=torch.as_tensor(
+            fragment_segment_ids, device=target_device, dtype=torch.int64
+        ),
+        fragment_cell_indices=torch.as_tensor(
+            fragment_cell_indices, device=target_device, dtype=torch.int64
+        ).reshape(-1, 3),
+        fragment_lengths=(
+            torch.stack(fragment_lengths)
+            if fragment_lengths
+            else _empty_tensor(target_device, coefficient_dtype, (0,))
+        ),
+        edge_components=torch.as_tensor(
+            sampling_components_array, device=target_device, dtype=torch.int32
+        ),
+        edge_offsets=torch.as_tensor(
+            sampling_offsets_array, device=target_device, dtype=torch.int64
+        ),
+        weights=(
+            torch.stack(sampling_weights)
+            if sampling_weights
+            else _empty_tensor(target_device, coefficient_dtype, (0,))
+        ),
         edge_group_offsets=torch.as_tensor(edge_group_offsets, device=target_device, dtype=torch.int64),
         target_components=torch.as_tensor(target_components, device=target_device, dtype=torch.int32),
         target_offsets=torch.as_tensor(target_offsets, device=target_device, dtype=torch.int64),
         contribution_segments=torch.as_tensor(
             [entry[2] for entry in deposition], device=target_device, dtype=torch.int64
         ),
-        contribution_weights=torch.as_tensor(
-            [entry[3] for entry in deposition], device=target_device, dtype=coefficient_dtype
+        contribution_weights=(
+            torch.stack([sampling_weights[entry[3]] for entry in deposition])
+            if deposition
+            else _empty_tensor(target_device, coefficient_dtype, (0,))
+        ),
+        port_binding_names=tuple(port_binding_names),
+        port_binding_kinds=tuple(port_binding_kinds),
+        port_negative_node_ids=torch.as_tensor(
+            port_negative_node_ids, device=target_device, dtype=torch.int64
+        ),
+        port_positive_node_ids=torch.as_tensor(
+            port_positive_node_ids, device=target_device, dtype=torch.int64
+        ),
+        port_gap_offsets=torch.as_tensor(
+            port_gap_offsets, device=target_device, dtype=torch.int64
+        ),
+        port_gap_edge_components=torch.as_tensor(
+            port_gap_components, device=target_device, dtype=torch.int32
+        ),
+        port_gap_edge_offsets=torch.as_tensor(
+            port_gap_edge_offsets, device=target_device, dtype=torch.int64
+        ),
+        port_gap_weights=(
+            torch.stack(port_gap_weights)
+            if port_gap_weights
+            else _empty_tensor(target_device, coefficient_dtype, (0,))
         ),
         metadata=metadata,
     )

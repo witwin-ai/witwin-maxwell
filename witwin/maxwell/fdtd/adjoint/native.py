@@ -2552,6 +2552,7 @@ def _reverse_step_wire_native(
         grad_eps_ez=step_result.grad_eps_ez + wire_result.grad_eps["Ez"],
         grad_wire_inductance=wire_result.grad_inductance,
         grad_wire_capacitance=wire_result.grad_node_capacitance,
+        grad_wire_weights=wire_result.grad_weights,
         backend=_NATIVE_REVERSE_LABELS[backend],
     )
     return _adjoint._accumulate_source_term_gradients(

@@ -36,6 +36,7 @@ class WireReverseResult:
     field_adjoint: dict[str, torch.Tensor]
     grad_inductance: torch.Tensor
     grad_node_capacitance: torch.Tensor
+    grad_weights: torch.Tensor
     grad_eps: dict[str, torch.Tensor]
 
 
@@ -233,6 +234,7 @@ def reverse_wire_step(
     )
     contribution_segments = coeff["contribution_segments"]
     contribution_current = current1.index_select(0, contribution_segments)
+    sample_segments = _group_indices(coeff["segment_offsets"])
     current_adjoint = post_step_adjoint["wire_current"] - _segmented_sum(
         coeff["sample_deposition_scales"] * sample_target_adjoint,
         coeff["segment_offsets"],
@@ -271,6 +273,18 @@ def reverse_wire_step(
     grad_inductance = -(
         current1 - current0
     ) * current_adjoint / coeff["inductance"]
+    sampled_field = _field_vector(
+        {name: forward_state[name] for name in ("Ex", "Ey", "Ez")},
+        coeff["edge_components"],
+        coeff["edge_offsets"],
+    )
+    grad_weights = (
+        sampled_field * scaled_current_adjoint.index_select(0, sample_segments)
+        - dt
+        * sample_target_adjoint
+        * current1.index_select(0, sample_segments)
+        / coeff["sample_masses"]
+    )
 
     contribution_sample_adjoint = coeff["contribution_weights"] * (
         scaled_current_adjoint.index_select(0, contribution_segments)
@@ -323,6 +337,7 @@ def reverse_wire_step(
         field_adjoint=field_adjoint,
         grad_inductance=grad_inductance,
         grad_node_capacitance=grad_node_capacitance,
+        grad_weights=grad_weights,
         grad_eps=grad_eps,
     )
 
@@ -345,6 +360,7 @@ def _validate_compiled_topology(network) -> None:
     segment_count = int(network.inductance.numel())
     node_count = int(network.node_capacitance.numel())
     sample_count = int(network.weights.numel())
+    fragment_count = int(network.fragment_lengths.numel())
     target_count = int(network.target_offsets.numel())
     contribution_count = int(network.contribution_weights.numel())
     _require_topology(segment_count > 0 and node_count > 0, "network must not be empty")
@@ -362,6 +378,46 @@ def _validate_compiled_topology(network) -> None:
     _require_topology(
         torch.all(network.segment_offsets[1:] > network.segment_offsets[:-1]),
         "every segment must have a sampling entry",
+    )
+    _validate_csr(
+        network.fragment_offsets,
+        groups=fragment_count,
+        entries=sample_count,
+        name="fragment_offsets",
+    )
+    _require_topology(
+        network.fragment_segment_ids.shape == (fragment_count,)
+        and network.fragment_cell_indices.shape == (fragment_count, 3),
+        "fragment metadata shapes",
+    )
+    _require_topology(
+        torch.all(network.fragment_lengths > 0.0),
+        "fragment lengths must be positive",
+    )
+    _require_topology(
+        torch.all(
+            (network.fragment_segment_ids >= 0)
+            & (network.fragment_segment_ids < segment_count)
+        ),
+        "fragment segment indices must be in bounds",
+    )
+    fragment_counts = torch.bincount(
+        network.fragment_segment_ids,
+        minlength=segment_count,
+    )
+    fragment_boundaries = torch.cat(
+        (
+            fragment_counts.new_zeros((1,)),
+            torch.cumsum(fragment_counts, dim=0),
+        )
+    )
+    _require_topology(
+        torch.all(fragment_counts > 0)
+        and torch.equal(
+            network.segment_offsets,
+            network.fragment_offsets.index_select(0, fragment_boundaries),
+        ),
+        "fragment rows must be contiguous within physical segments",
     )
     _require_topology(
         torch.all((network.edge_components >= 0) & (network.edge_components < 3)),
@@ -671,9 +727,9 @@ def _wire_cfl_limit(
 
 
 def _reject_unsupported_composition(solver) -> None:
-    if solver.scene.boundary.uses_kind("periodic") or solver.scene.boundary.uses_kind("bloch"):
+    if solver.scene.boundary.uses_kind("bloch"):
         raise NotImplementedError(
-            "Thin-wire FDTD does not yet support periodic or Bloch-periodic fields."
+            "Thin-wire FDTD does not yet support Bloch-periodic phase topology."
         )
     if getattr(solver, "full_aniso_enabled", False):
         raise NotImplementedError(
@@ -790,6 +846,7 @@ def initialize_wire_runtime(solver) -> WireRuntime | None:
         coefficients["edge_components"],
         coefficients["edge_offsets"],
     )
+    coefficients["sample_masses"] = sample_masses
     coefficients["sample_deposition_scales"] = (
         float(solver.dt) * coefficients["weights"] / sample_masses
     ).contiguous()

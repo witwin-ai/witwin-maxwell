@@ -222,7 +222,6 @@ def test_wire_dispatch_never_falls_back_to_a_non_wire_reverse_backend():
 @pytest.mark.parametrize(
     ("attribute", "value"),
     (
-        ("_port_runtimes", (object(),)),
         ("_lumped_element_runtimes", (object(),)),
         ("tfsf_enabled", True),
         ("magnetic_dispersive_enabled", True),

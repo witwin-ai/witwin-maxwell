@@ -1,7 +1,12 @@
 from .lumped import CompiledLumpedElement, compile_lumped_elements
 from .materials import compile_material_tensors
 from .monitors import compile_fdtd_observers, compile_fdtd_time_observers
-from .ports import CompiledPortGeometry, compile_port_geometry, compile_ports
+from .ports import (
+    CompiledPortGeometry,
+    CompiledWirePortGeometry,
+    compile_port_geometry,
+    compile_ports,
+)
 from .power_loss import CompiledPowerLossMonitor, compile_power_loss_monitor
 from .sources import compile_fdfd_sources, compile_fdtd_sources
 from .thin_wire import (
@@ -24,6 +29,7 @@ __all__ = [
     "compile_fdtd_observers",
     "compile_fdtd_time_observers",
     "CompiledPortGeometry",
+    "CompiledWirePortGeometry",
     "CompiledPowerLossMonitor",
     "CompiledWaveModeSpec",
     "CompiledWavePortCrossSection",

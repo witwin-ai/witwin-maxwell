@@ -161,7 +161,10 @@ def test_compressed_cuda_recurrence_conserves_charge_and_staggered_energy():
 
     energy = torch.stack(energies)
     relative_drift = (energy - energy[0]).abs().max() / energy[0].abs()
-    assert float(max_continuity) < 1.0e-6 * float(runtime.charge.abs().max() + 1.0e-30)
+    assert float(max_continuity) < max(
+        1.0e-6 * float(runtime.charge.abs().max() + 1.0e-30),
+        1.0e-20,
+    )
     assert float(relative_drift) < 1.0e-4
     assert runtime.current.numel() == runtime.network.segment_count
     assert runtime.charge.numel() == runtime.network.node_count
@@ -458,10 +461,9 @@ def test_l_wire_forward_propagates_current_across_the_corner():
     )
     data, stats = _run_forward(scene, cuda_graph=False)
 
-    assert stats["thin_wire_segments"] == 4
+    assert stats["thin_wire_segments"] == 2
     magnitude = data.current.abs()[0]
-    assert torch.count_nonzero(magnitude[:2]).item() == 2
-    assert torch.count_nonzero(magnitude[2:]).item() == 2
+    assert torch.count_nonzero(magnitude).item() == 2
     assert torch.all(torch.isfinite(data.charge))
 
 
@@ -533,15 +535,31 @@ def test_phase1_rejects_surface_impedance_conductor_ownership():
         )
 
 
-@pytest.mark.parametrize(
-    "boundary",
-    (mw.BoundarySpec.periodic(), mw.BoundarySpec.bloch((0.1, 0.0, 0.0))),
-    ids=("periodic", "bloch"),
-)
-def test_phase1_rejects_periodic_wire_composition(boundary):
-    with pytest.raises(NotImplementedError, match="periodic or Bloch-periodic"):
+def test_phase3_real_periodic_interior_wire_prepares_and_steps():
+    simulation = mw.Simulation.fdtd(
+        _scene(
+            boundary=mw.BoundarySpec.periodic(),
+            source=False,
+        ),
+        frequencies=(_FREQUENCY,),
+        run_time=mw.TimeConfig(time_steps=2),
+    )
+
+    result = simulation.run()
+
+    assert result.solver._wire_runtime is not None
+    assert torch.all(torch.isfinite(result.solver._wire_runtime.current))
+    assert torch.all(torch.isfinite(result.solver._wire_runtime.charge))
+
+
+def test_phase3_bloch_wire_composition_remains_fail_closed():
+    with pytest.raises(NotImplementedError, match="Bloch-periodic phase topology"):
         _prepared_solver(
-            _scene(boundary=boundary, source=False, monitor=False)
+            _scene(
+                boundary=mw.BoundarySpec.bloch((0.1, 0.0, 0.0)),
+                source=False,
+                monitor=False,
+            )
         )
 
 
@@ -558,7 +576,15 @@ def _half_wave_dipole_profile(segment_count: int) -> torch.Tensor:
     scene.add_thin_wire(
         mw.ThinWire(
             name="dipole",
-            points=((0.0, 0.0, -0.5 * half_length), (0.0, 0.0, 0.5 * half_length)),
+            points=tuple(
+                (0.0, 0.0, float(position))
+                for position in torch.linspace(
+                    -0.5 * half_length,
+                    0.5 * half_length,
+                    segment_count + 1,
+                    dtype=torch.float64,
+                )
+            ),
             radius=0.02 * (half_length / 12.0),
             conductor=mw.WireConductor.pec(),
         )

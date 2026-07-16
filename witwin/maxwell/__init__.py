@@ -53,6 +53,8 @@ from .ports import (
     ModePort,
     TerminalPort,
     TerminalRef,
+    WireNodeRef,
+    WirePortBinding,
     WaveModeSpec,
     WavePort,
 )
@@ -193,6 +195,8 @@ __all__ = [
     "TimeConfig",
     "TerminalPort",
     "TerminalRef",
+    "WireNodeRef",
+    "WirePortBinding",
     "TFSF",
     "Torus",
     "TwoPhotonAbsorption",

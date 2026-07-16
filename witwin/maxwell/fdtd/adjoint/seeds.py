@@ -591,11 +591,23 @@ def _build_output_seeds(
             device=weights.device,
             dtype=weights.dtype,
         )
-        sample_times = (steps + 0.5) * port_runtime.lumped.dt.to(dtype=weights.dtype)
-        angles = (
+        macro_dt = port_runtime.lumped.dt * float(port_runtime.substeps)
+        magnetic_times = (steps + 0.5) * macro_dt.to(dtype=weights.dtype)
+        electric_times = (
+            (steps + 1.0) * macro_dt.to(dtype=weights.dtype)
+            if port_runtime.wire_provider is not None
+            else magnetic_times
+        )
+        voltage_angles = (
             2.0
             * torch.pi
-            * sample_times[:, None]
+            * electric_times[:, None]
+            * port_runtime.frequencies[None, :]
+        )
+        magnetic_angles = (
+            2.0
+            * torch.pi
+            * magnetic_times[:, None]
             * port_runtime.frequencies[None, :]
         )
         scale = 2.0 / port_runtime.accumulator._window_weight_sum
@@ -603,16 +615,16 @@ def _build_output_seeds(
         voltage_samples = torch.sum(
             weighted_scale
             * (
-                voltage_grad.real[None, :] * torch.cos(angles)
-                + voltage_grad.imag[None, :] * torch.sin(angles)
+                voltage_grad.real[None, :] * torch.cos(voltage_angles)
+                + voltage_grad.imag[None, :] * torch.sin(voltage_angles)
             ),
             dim=1,
         )
         current_samples = torch.sum(
             weighted_scale
             * (
-                current_grad.real[None, :] * torch.cos(angles)
-                + current_grad.imag[None, :] * torch.sin(angles)
+                current_grad.real[None, :] * torch.cos(magnetic_angles)
+                + current_grad.imag[None, :] * torch.sin(magnetic_angles)
             ),
             dim=1,
         )
@@ -631,8 +643,8 @@ def _build_output_seeds(
             drive_samples = torch.sum(
                 weighted_scale
                 * (
-                    source_voltage_grad.real[None, :] * torch.cos(angles)
-                    + source_voltage_grad.imag[None, :] * torch.sin(angles)
+                    source_voltage_grad.real[None, :] * torch.cos(magnetic_angles)
+                    + source_voltage_grad.imag[None, :] * torch.sin(magnetic_angles)
                 ),
                 dim=1,
             )

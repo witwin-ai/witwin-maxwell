@@ -1,6 +1,6 @@
 # Thin-Wire 亚网格导线模型开发计划
 
-> 状态：active；Phase 0-2 accepted，Phase 3-4 pending
+> 状态：active；Phase 0-3 accepted，Phase 4 pending
 > 日期：2026-07-14
 > 目标证据：E3 production
 > 类型：独立数值能力，不是几何体素化便利功能
@@ -181,7 +181,9 @@ Exit gate：直线、L 形和半波偶极子 forward 通过；半径小于 cell 
 
 Exit gate：每个 node 的离散连续方程残差满足容差；闭环/分支能量守恒；梯度通过有限差分。
 
-### Phase 3：任意方向、非均匀网格与端口绑定（E2）
+### Phase 3：任意方向、非均匀网格与端口绑定（E2, accepted 2026-07-16）
+
+验收证据：`docs/assessments/thin-wire-phase-3-acceptance.md`。
 
 交付物：斜向 conservative coupling；custom/auto grid；周期边界合法路径；`LumpedPort`/`TerminalPort` gap/node 绑定。
 

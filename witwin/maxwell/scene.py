@@ -927,9 +927,9 @@ class Scene:
             )
         if any(existing.name == port.name for existing in self.ports):
             raise ValueError(f"Port name {port.name!r} is already present in the scene.")
-        if isinstance(port, TerminalPort):
+        if isinstance(port, TerminalPort) and port.wire_binding is None:
             port = _resolve_terminal_port(port, self.structures, self.domain.bounds)
-        if isinstance(port, LumpedPort):
+        if isinstance(port, LumpedPort) and port.wire_binding is None:
             for terminal_name, terminal in (
                 ("positive", port.positive),
                 ("negative", port.negative),

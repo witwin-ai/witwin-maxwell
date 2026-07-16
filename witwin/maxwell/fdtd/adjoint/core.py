@@ -853,6 +853,7 @@ def _accumulate_source_term_gradients(
         grad_tpa_ez=step_result.grad_tpa_ez,
         grad_wire_inductance=step_result.grad_wire_inductance,
         grad_wire_capacitance=step_result.grad_wire_capacitance,
+        grad_wire_weights=step_result.grad_wire_weights,
     )
 
 
@@ -3530,10 +3531,14 @@ def _step_state(
             solver=solver if complex_fields else None,
         )
 
+    port_input_state = state
+    if wire_state:
+        port_input_state = dict(state)
+        port_input_state["wire_charge"] = wire_state["wire_charge"]
     electric_fields, lumped_state = replay_port_runtimes(
         solver,
         electric_fields,
-        state,
+        port_input_state,
         time_value=time_value,
         capture=capture_lumped,
     )
@@ -3619,6 +3624,9 @@ def _step_state(
         next_state["tfsf_aux_magnetic"] = auxiliary_state["magnetic"]
     next_state.update(dispersive_state)
     next_state.update(magnetic_dispersive_state)
+    corrected_wire_charge = lumped_state.pop("wire_charge", None)
+    if corrected_wire_charge is not None:
+        wire_state["wire_charge"] = corrected_wire_charge
     next_state.update(lumped_state)
     next_state.update(wire_state)
     return next_state
