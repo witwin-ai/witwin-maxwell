@@ -41,3 +41,30 @@ Independent review findings resolved before acceptance:
 - Exact zero DB output uses a finite floor instead of a non-standard infinity token.
 - Duplicate resolved port names report the second offending comment line.
 - Public network port names reject leading/trailing whitespace so named-port text round-trips are lossless.
+
+## Phase 1 evidence
+
+Implemented:
+
+- Direct generalized-Kurokawa S/Y conversion for complex per-frequency, per-port reference impedances without explicit matrix inversion.
+- Shared-pole real rational fitting for scalar and multiport S/Y/Z responses under the repository `exp(-i*omega*t)` convention.
+- Stable conjugate pole/residue validation, auditable fit reports, and versioned rational-model persistence.
+- Sampled raw-data S passivity plus pole-aware rational S/Y/Z in-band interval verification, and explicit direct-term enforcement with a reported relative change and configurable acceptance threshold.
+- Real continuous state-space realization with `Nports * order` states and bilinear/trapezoidal discretization through `torch.linalg.solve`.
+- `NetworkData.validate_physicality(...)` and `NetworkData.fit_rational(...)` public interoperability.
+
+Acceptance evidence:
+
+- Analytic RC, RLC, and matched delayed-transmission responses meet the `< 1e-3` in-band max complex-error gate.
+- Real state-space and rational frequency responses agree to float64 numerical tolerance; bilinear matrices agree with SciPy's independent oracle.
+- Every accepted discrete model is gated at `max |z| < 1-1e-7`; a driven passive corpus obeys the discrete supply-energy inequality while an active-sign control violates it.
+- Sparse-sample regression contains an arbitrarily narrow active resonance between the caller's samples; pole locations plus rational interval bounds detect and certify the violation.
+- Uniform-DC sweeps distinguish delayed from advanced responses through a negative-time-energy diagnostic; nonuniform/non-DC sweeps report causality as indeterminate.
+- Pre-fitted residue/direct gradients propagate through evaluation, while automatic fitting and enforcement reject trainable inputs without silent detach.
+- A real CUDA run keeps pre-fitted evaluation gradients and continuous/discrete state-space tensors device-resident; rational-model save/load round-trips coefficients and response.
+
+Known limits recorded rather than hidden:
+
+- Raw `NetworkData` passivity remains sampled. Rational models use a finite-band pole-aware interval certificate, not an all-frequency Hamiltonian certificate. Enforcement is an explicit isotropic direct-term shift, not a residue-minimal projection.
+- Raw-data causality is a finite-band heuristic and is only evaluated for a uniform sweep starting at DC. A proper stable fitted realization is structurally causal.
+- Pure broadband delay extraction and bounded delay buffers belong to Phase 3; Phase 1 only validates a controlled narrow-band delayed transmission fit.

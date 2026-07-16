@@ -186,14 +186,73 @@ def test_network_algebra_reports_nonfinite_and_ill_conditioned_inputs():
     with pytest.raises(RuntimeError, match=r"ill-conditioned.*frequency indices \[0\]"):
         singular_s.to_z()
 
-    singular_y = torch.tensor(
-        [[[1.0 + 0.0j, 1.0 + 0.0j], [1.0 + 0.0j, 1.0 + 0.0j]]],
-        dtype=torch.complex128,
-    )
-    with pytest.raises(RuntimeError, match="Y/Z conversion.*ill-conditioned"):
+    singular_y = -torch.eye(2, dtype=torch.complex128).unsqueeze(0) / 50.0
+    with pytest.raises(RuntimeError, match="Y/S conversion.*ill-conditioned"):
         NetworkData.from_y(
             frequencies=frequencies,
             y=singular_y,
             z0=50.0,
             port_names=("p1", "p2"),
         )
+
+
+def test_exact_open_converts_directly_between_s_and_y():
+    frequencies = _frequencies(count=3)
+    z0 = torch.tensor(
+        [
+            [40.0 + 5.0j, 70.0 - 3.0j],
+            [45.0 - 2.0j, 75.0 + 4.0j],
+            [50.0 + 1.0j, 80.0 - 6.0j],
+        ],
+        dtype=torch.complex128,
+    )
+    identity = torch.eye(2, dtype=torch.complex128).expand(3, 2, 2)
+    network = NetworkData(
+        frequencies=frequencies,
+        s=identity,
+        z0=z0,
+        port_names=("p1", "p2"),
+    )
+
+    admittance = network.to_y()
+    restored = NetworkData.from_y(
+        frequencies=frequencies,
+        y=admittance,
+        z0=z0,
+        port_names=network.port_names,
+    )
+
+    torch.testing.assert_close(admittance, torch.zeros_like(admittance), rtol=0.0, atol=0.0)
+    torch.testing.assert_close(restored.s, identity, rtol=0.0, atol=0.0)
+
+
+def test_direct_y_round_trip_with_complex_z0_preserves_autograd():
+    generator = torch.Generator().manual_seed(20260715)
+    real = 0.002 * torch.randn((3, 3, 3), generator=generator, dtype=torch.float64)
+    imag = 0.002 * torch.randn((3, 3, 3), generator=generator, dtype=torch.float64)
+    admittance = torch.complex(real, imag).requires_grad_()
+    z0 = torch.tensor(
+        [
+            [35.0 + 4.0j, 50.0 - 3.0j, 80.0 + 2.0j],
+            [38.0 - 2.0j, 55.0 + 5.0j, 75.0 - 4.0j],
+            [42.0 + 1.0j, 60.0 - 6.0j, 70.0 + 3.0j],
+        ],
+        dtype=torch.complex128,
+        requires_grad=True,
+    )
+    network = NetworkData.from_y(
+        frequencies=_frequencies(count=3),
+        y=admittance,
+        z0=z0,
+        port_names=("p1", "p2", "p3"),
+    )
+
+    torch.testing.assert_close(network.to_y(), admittance, rtol=1.0e-11, atol=1.0e-12)
+
+    network.s.abs().square().sum().backward()
+    assert admittance.grad is not None
+    assert z0.grad is not None
+    assert torch.all(torch.isfinite(admittance.grad))
+    assert torch.all(torch.isfinite(z0.grad))
+    assert torch.count_nonzero(admittance.grad) > 0
+    assert torch.count_nonzero(z0.grad) > 0

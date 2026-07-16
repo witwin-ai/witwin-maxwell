@@ -43,7 +43,19 @@ from .lumped import (
     Resistor,
     SeriesRLC,
 )
-from .network import NetworkData, PortData
+from .network import NetworkData, NetworkPhysicalityReport, PortData
+from .rational import (
+    DiscreteStateSpaceNetwork,
+    FitReport,
+    NetworkFitReport,
+    PassivityReport,
+    RationalFitConfig,
+    RationalModel,
+    StateSpaceNetwork,
+    bilinear_discretize,
+    check_sampled_passivity,
+    fit_rational,
+)
 from .touchstone import TouchstoneParseError
 from .power_loss import PowerLossData
 from .ports import (
@@ -156,6 +168,8 @@ __all__ = [
     "ModePort",
     "ModeSource",
     "NetworkData",
+    "NetworkFitReport",
+    "NetworkPhysicalityReport",
     "ModulationSpec",
     "NonlinearSusceptibility",
     "PermittivityMonitor",
@@ -170,11 +184,14 @@ __all__ = [
     "PortData",
     "PortExcitation",
     "PortSweep",
+    "PassivityReport",
     "PolySlab",
     "postprocess",
     "Prism",
     "Pyramid",
     "Result",
+    "RationalFitConfig",
+    "RationalModel",
     "Resistor",
     "RickerWavelet",
     "SeriesRLC",
@@ -182,6 +199,7 @@ __all__ = [
     "SceneModule",
     "Simulation",
     "SimulationMethod",
+    "StateSpaceNetwork",
     "SpectralSampler",
     "SpectralWindowKind",
     "Sphere",
@@ -192,6 +210,11 @@ __all__ = [
     "TouchstoneParseError",
     "TerminalPort",
     "TerminalRef",
+    "DiscreteStateSpaceNetwork",
+    "FitReport",
+    "bilinear_discretize",
+    "check_sampled_passivity",
+    "fit_rational",
     "TFSF",
     "Torus",
     "TwoPhotonAbsorption",

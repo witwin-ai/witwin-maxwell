@@ -2,14 +2,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Mapping
+from typing import TYPE_CHECKING, Any, ClassVar, Mapping
 
 import torch
+
+if TYPE_CHECKING:
+    from .rational import RationalFitConfig, RationalModel
 
 
 PHASOR_CONVENTION = "peak phasor with exp(-i*omega*t) time dependence"
 POWER_WAVE_CONVENTION = "Kurokawa power waves normalized to sqrt(watt)"
 PERSISTENCE_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class NetworkPhysicalityReport:
+    """Sampled passivity and finite-band causality diagnostics.
+
+    ``causal`` is ``None`` when the sweep does not start at DC on a uniform
+    grid.  Even when available, the negative-time energy test is a finite-band
+    diagnostic rather than an all-frequency causality certificate.
+    """
+
+    frequency_band: tuple[float, float]
+    sample_count: int
+    passive: bool
+    passivity_margin: float
+    max_passivity_violation: float
+    stable: bool | None
+    causal: bool | None
+    negative_time_energy_ratio: float | None
+    passivity_tolerance: float
+    causality_tolerance: float
+    warnings: tuple[str, ...] = ()
 
 
 def _detach_to_cpu(value: Any):
@@ -625,6 +650,34 @@ def _z_to_s(z: torch.Tensor, z0: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _s_to_y(s: torch.Tensor, z0: torch.Tensor) -> torch.Tensor:
+    resistance_root = torch.sqrt(torch.real(z0))
+    normalization = resistance_root.unsqueeze(-1) / resistance_root.unsqueeze(-2)
+    normalized_s = normalization * s
+    identity = _identity_batch(s)
+    coefficient = (
+        torch.diag_embed(torch.conj(z0))
+        + normalized_s @ torch.diag_embed(z0)
+    )
+    return _checked_solve(
+        coefficient,
+        identity - normalized_s,
+        operation="S/Y conversion",
+    )
+
+
+def _y_to_s(y: torch.Tensor, z0: torch.Tensor) -> torch.Tensor:
+    identity = _identity_batch(y)
+    normalized_s = _right_solve(
+        identity - torch.diag_embed(torch.conj(z0)) @ y,
+        identity + torch.diag_embed(z0) @ y,
+        operation="Y/S conversion",
+    )
+    resistance_root = torch.sqrt(torch.real(z0))
+    denormalization = resistance_root.unsqueeze(-2) / resistance_root.unsqueeze(-1)
+    return normalized_s * denormalization
+
+
 def _normalize_port_distances(
     distances,
     *,
@@ -842,10 +895,18 @@ class NetworkData:
         phasor_convention: str = PHASOR_CONVENTION,
         power_wave_convention: str = POWER_WAVE_CONVENTION,
     ) -> "NetworkData":
-        y, resolved_frequencies, _, port_count = _validate_network_matrix(
+        y, resolved_frequencies, frequency_count, port_count = _validate_network_matrix(
             y,
             frequencies,
             name="y",
+        )
+        names = _normalize_port_names(port_names, port_count=port_count)
+        reference = _normalize_network_z0(
+            z0,
+            frequency_count=frequency_count,
+            port_count=port_count,
+            device=y.device,
+            dtype=y.dtype,
         )
         valid = _normalize_valid_columns(
             valid_columns,
@@ -854,18 +915,13 @@ class NetworkData:
         )
         if not bool(torch.all(valid)):
             raise RuntimeError("S/Y conversion requires complete excitation columns.")
-        z = _checked_solve(
-            y,
-            _identity_batch(y),
-            operation="Y/Z conversion",
-        )
-        return cls.from_z(
+        return cls(
             frequencies=resolved_frequencies,
-            z=z,
-            z0=z0,
-            port_names=port_names,
+            s=_y_to_s(y, reference),
+            z0=reference,
+            port_names=names,
             valid_columns=valid,
-            metadata=metadata,
+            metadata={} if metadata is None else metadata,
             phasor_convention=phasor_convention,
             power_wave_convention=power_wave_convention,
         )
@@ -901,11 +957,132 @@ class NetworkData:
 
     def to_y(self) -> torch.Tensor:
         self._require_complete("S/Y conversion")
-        z = _s_to_z(self.s, self.z0)
-        return _checked_solve(
-            z,
-            _identity_batch(z),
-            operation="Z/Y conversion",
+        return _s_to_y(self.s, self.z0)
+
+    def validate_physicality(
+        self,
+        *,
+        band: tuple[float, float] | None = None,
+        passivity_tolerance: float = 1e-9,
+        causality_tolerance: float = 1e-2,
+    ) -> NetworkPhysicalityReport:
+        """Return sampled passivity and finite-band causality diagnostics."""
+
+        from .rational import check_sampled_passivity
+
+        self._require_complete("physicality validation")
+        if passivity_tolerance < 0.0 or causality_tolerance < 0.0:
+            raise ValueError("physicality tolerances must be non-negative.")
+        if band is None:
+            mask = torch.ones_like(self.frequencies, dtype=torch.bool)
+        else:
+            if len(band) != 2 or not (0.0 <= band[0] < band[1]):
+                raise ValueError("band must be an increasing non-negative frequency pair.")
+            mask = (self.frequencies >= band[0]) & (self.frequencies <= band[1])
+        if int(torch.count_nonzero(mask).item()) < 2:
+            raise ValueError("physicality validation requires at least two in-band samples.")
+
+        frequencies = self.frequencies[mask]
+        response = self.s[mask]
+        passivity = check_sampled_passivity(
+            response,
+            representation="S",
+            tolerance=passivity_tolerance,
+        )
+        warnings: list[str] = []
+        causal: bool | None = None
+        negative_ratio: float | None = None
+        spacing = frequencies[1:] - frequencies[:-1]
+        spacing_tolerance = 64.0 * torch.finfo(frequencies.dtype).eps
+        starts_at_dc = bool(
+            torch.isclose(
+                frequencies[0],
+                torch.zeros((), dtype=frequencies.dtype, device=frequencies.device),
+                rtol=0.0,
+                atol=spacing_tolerance * torch.max(frequencies[-1], torch.ones_like(frequencies[-1])),
+            )
+        )
+        uniformly_spaced = bool(
+            torch.allclose(
+                spacing,
+                spacing[0].expand_as(spacing),
+                rtol=spacing_tolerance,
+                atol=spacing_tolerance * max(1.0, float(spacing[0].item())),
+            )
+        )
+        if starts_at_dc and uniformly_spaced:
+            mirrored = torch.conj(torch.flip(response[1:-1], dims=(0,)))
+            spectrum = torch.cat((response, mirrored), dim=0)
+            impulse = torch.fft.fft(spectrum, dim=0)
+            energy = torch.abs(impulse) ** 2
+            total_energy = torch.sum(energy)
+            if bool(total_energy == 0.0):
+                negative_ratio = 0.0
+            else:
+                negative_start = spectrum.shape[0] // 2 + 1
+                negative_ratio = float(
+                    (torch.sum(energy[negative_start:]) / total_energy).item()
+                )
+            if negative_ratio <= causality_tolerance:
+                causal = True
+            elif negative_ratio >= max(0.5, 10.0 * causality_tolerance):
+                causal = False
+            else:
+                causal = None
+                warnings.append(
+                    "Causality is indeterminate because finite-band truncation leaves "
+                    "ambiguous negative-time energy."
+                )
+            warnings.append(
+                "Causality uses a finite-band negative-time energy heuristic, not an "
+                "all-frequency certificate."
+            )
+        else:
+            warnings.append(
+                "Causality is indeterminate because the selected sweep must start at DC "
+                "and be uniformly spaced."
+            )
+        return NetworkPhysicalityReport(
+            frequency_band=(float(frequencies[0].item()), float(frequencies[-1].item())),
+            sample_count=frequencies.numel(),
+            passive=passivity.passive,
+            passivity_margin=passivity.margin,
+            max_passivity_violation=passivity.max_violation,
+            stable=None,
+            causal=causal,
+            negative_time_energy_ratio=negative_ratio,
+            passivity_tolerance=float(passivity_tolerance),
+            causality_tolerance=float(causality_tolerance),
+            warnings=tuple(warnings),
+        )
+
+    def fit_rational(
+        self,
+        config: RationalFitConfig | None = None,
+        *,
+        representation: str = "Y",
+        initial_poles: torch.Tensor | None = None,
+    ) -> RationalModel:
+        """Fit a shared-pole rational model in the requested representation."""
+
+        from .rational import fit_rational
+
+        self._require_complete("rational fitting")
+        representation = representation.upper()
+        if representation == "S":
+            values = self.s
+        elif representation == "Y":
+            values = self.to_y()
+        elif representation == "Z":
+            values = self.to_z()
+        else:
+            raise ValueError("representation must be 'Y', 'Z', or 'S'.")
+        return fit_rational(
+            self.frequencies,
+            values,
+            config=config,
+            representation=representation,
+            initial_poles=initial_poles,
         )
 
     def renormalize(self, z0) -> "NetworkData":
