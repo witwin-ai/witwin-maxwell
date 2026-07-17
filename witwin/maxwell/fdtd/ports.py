@@ -1706,9 +1706,11 @@ def apply_port_runtimes(solver) -> None:
     for runtime in getattr(solver, "_port_runtimes", ()):
         if runtime.lumped is None or runtime.embedded_network_name is not None:
             continue
-        if runtime.source_kind is None:
-            # Passive termination: the drive is identically the prepared default
-            # (zero). Skip the per-step waveform evaluation and its allocation.
+        if runtime.source_kind is None and runtime.wire_provider is None:
+            # Passive Yee-field termination: the drive is identically the prepared
+            # default (zero). Skip the per-step waveform evaluation and its
+            # allocation. Wire-bound ports have no Yee field component to read
+            # (field_name is None) and must take the wire substep path below.
             apply_lumped_runtime(
                 runtime.lumped,
                 getattr(solver, runtime.field_name),

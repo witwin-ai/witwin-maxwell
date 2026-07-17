@@ -391,6 +391,11 @@ def test_port_voltage_current_and_available_power_dft_seeds_are_exact():
         accumulator=accumulator,
         drive_accumulator=drive_accumulator,
         lumped=SimpleNamespace(dt=dt, resistance=resistance),
+        # Mirror the merged PreparedPortRuntime contract: an ordinary lumped port
+        # runs one substep per macro step and has no wire provider, which keeps
+        # the electric/magnetic sample times coincident as before.
+        substeps=1,
+        wire_provider=None,
     )
     solver = SimpleNamespace(
         scene=None,
