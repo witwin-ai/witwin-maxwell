@@ -365,74 +365,43 @@ def _reverse_step_standard_native(
     )
 
 
-def _reverse_step_cpml_native_core(
+def reverse_cpml_phase_electric(
     solver,
     forward_state,
     adjoint_state,
+    ctx,
     *,
-    time_value,
+    hx_mid,
+    hy_mid,
+    hz_mid,
     eps_ex,
     eps_ey,
     eps_ez,
-    resolved_source_terms,
-    magnetic_fields=None,
 ):
-    """Fused native CPML reverse math, without the source-term eps gradient.
+    """Phase A of the CPML reverse step: electric adjoint -> pre-step E/psi_e.
 
-    Returns the ``_ReverseStepResult`` the analytic CPML reference produces
-    *before* ``_accumulate_source_term_gradients`` runs. The public runner adds
-    that accumulation; the dispersive runner reuses this core as its CPML base
-    reverse and defers the single source-term accumulation to the end of the step.
+    Runs the three fused ``_reverse_electric_cpml_e{x,y,z}`` kernels and their six
+    ``_accumulate_backward_diff_*`` folds. Each electric kernel *assigns* the
+    pre-step E adjoint (electric decay pullback), the pre-step psi_e adjoint, the
+    eps gradient, and the two curl(H)-derivative adjoint seeds; the backward-diff
+    folds then *add* those seeds into the mid-step H adjoint
+    (``ctx.magnetic_output_adjoint``, which :func:`allocate_cpml_reverse_context`
+    pre-seeds with the incoming post-step H adjoint).
 
-    Mirrors ``reverse_step_cpml_native`` exactly, launching the fused
-    CPML reverse kernels in a fixed order. Every per-cell reverse computation
-    (electric-adjoint -> pre-step E/psi_e adjoint + eps gradient + curl(H)
-    derivative adjoint, and magnetic-decay/psi_h pullback -> pre-step H/psi_h
-    adjoint + curl(E) derivative adjoint) runs inside the compiled kernels; Python
-    only sequences the launches.
-
-    Launch order is load-bearing. The fused CPML electric/magnetic kernels
-    *assign* into their pre-step / eps-gradient / psi outputs, and the transposed
-    difference accumulators *add* into the mid-step H adjoint and the pre-step E
-    adjoint. So all three electric kernels (and their backward-difference folds)
-    must fully populate the mid-step H adjoint before any magnetic kernel reads
-    it, and the electric kernels must assign the pre-step E adjoint before the
-    magnetic kernels add their forward-difference contributions into it.
-
-    The coefficient argument lists are long and per-component permuted (the
-    positive/negative CPML axis, its ``b``/``c``/``inv_kappa`` stretch vectors,
-    and the pre-step psi state all rotate with the component); the wiring here is
-    a line-for-line transcription of the Torch reference and is pinned against it
-    by the step-level parity test.
+    Factored out of :func:`_reverse_step_cpml_native_core` so the distributed
+    reverse loop can insert the transposed magnetic halo (accumulate the Hy/Hz
+    mid-step adjoint into the owner, zero the ghost) between this phase and
+    :func:`reverse_cpml_phase_magnetic`. The launch order below is a line-for-line
+    move of the original inline sequence, so the single-GPU result is bit-for-bit
+    identical. The distributed reverse relies on the S4 audit finding that the
+    interface x-face carries no active x-CPML (PML is pinned to the outer shards),
+    so the cross-interface curl(H) coupling flows entirely through the adj_d folds
+    into ``ctx.magnetic_output_adjoint`` -- exactly the plane the magnetic halo
+    ships -- with no transposed psi halo required.
     """
-    from . import core as _adjoint
-    from .reverse_common import allocate_cpml_reverse_context
-
-    # Mid-step H the forward electric update consumed (shared Torch replay).
-    if magnetic_fields is None:
-        magnetic_fields = _adjoint._forward_magnetic_fields(
-            solver,
-            forward_state,
-            time_value=time_value,
-            resolved_source_terms=resolved_source_terms,
-        )
-    hx_mid = magnetic_fields["Hx"]
-    hy_mid = magnetic_fields["Hy"]
-    hz_mid = magnetic_fields["Hz"]
-
-    ctx = allocate_cpml_reverse_context(
-        solver,
-        forward_state,
-        adjoint_state,
-        eps_ex=eps_ex,
-        eps_ey=eps_ey,
-        eps_ez=eps_ez,
-    )
     pre = ctx.pre_step_adjoint
     adj_h_mid = ctx.magnetic_output_adjoint
 
-    # Phase 1: electric adjoint -> pre-step E/psi_e adjoint + eps gradient, and
-    # fold each curl(H)-derivative adjoint into the mid-step H adjoint.
     _cuda_backend._reverse_electric_cpml_ex(
         AdjExPrev=pre["Ex"],
         GradEpsEx=ctx.grad_eps_ex,
@@ -532,8 +501,27 @@ def _reverse_step_cpml_native_core(
     _cuda_backend._accumulate_backward_diff_x(FieldGrad=adj_h_mid["Hy"], DiffGrad=ctx.adj_d_hy_dx, invDx=solver.inv_dx_e)
     _cuda_backend._accumulate_backward_diff_y(FieldGrad=adj_h_mid["Hx"], DiffGrad=ctx.adj_d_hx_dy, invDy=solver.inv_dy_e)
 
-    # Phase 2: magnetic-decay + psi_h pullback -> pre-step H/psi_h adjoint,
-    # folding each curl(E)-derivative adjoint into the pre-step E adjoint.
+
+def reverse_cpml_phase_magnetic(solver, adjoint_state, ctx):
+    """Phase B of the CPML reverse step: magnetic-decay + psi_h pullback -> pre-H.
+
+    Runs the three fused ``_reverse_magnetic_cpml_h{x,y,z}`` kernels and their six
+    ``_accumulate_forward_diff_*`` folds. Each magnetic kernel reads the mid-step H
+    adjoint (``ctx.magnetic_output_adjoint``, fully populated by
+    :func:`reverse_cpml_phase_electric` and, on the distributed path, refreshed by
+    the transposed magnetic halo), *assigns* the pre-step H/psi_h adjoint, and
+    emits the two curl(E)-derivative adjoint seeds; the forward-diff folds then
+    *add* those seeds into the pre-step E adjoint.
+
+    Factored out of :func:`_reverse_step_cpml_native_core` so the distributed
+    reverse loop can insert the transposed electric halo (accumulate the pre-step
+    Ey/Ez adjoint into the owner, zero the ghost) after this phase. The launch
+    order is a line-for-line move of the original inline sequence, so the
+    single-GPU result is bit-for-bit identical.
+    """
+    pre = ctx.pre_step_adjoint
+    adj_h_mid = ctx.magnetic_output_adjoint
+
     _cuda_backend._reverse_magnetic_cpml_hx(
         AdjHxPrev=pre["Hx"],
         AdjPsiPosPrev=pre["psi_hx_y"],
@@ -596,6 +584,95 @@ def _reverse_step_cpml_native_core(
     )
     _cuda_backend._accumulate_forward_diff_x(FieldGrad=pre["Ey"], DiffGrad=ctx.adj_d_ey_dx, invDx=solver.inv_dx_h)
     _cuda_backend._accumulate_forward_diff_y(FieldGrad=pre["Ex"], DiffGrad=ctx.adj_d_ex_dy, invDy=solver.inv_dy_h)
+
+
+def _reverse_step_cpml_native_core(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    magnetic_fields=None,
+):
+    """Fused native CPML reverse math, without the source-term eps gradient.
+
+    Returns the ``_ReverseStepResult`` the analytic CPML reference produces
+    *before* ``_accumulate_source_term_gradients`` runs. The public runner adds
+    that accumulation; the dispersive runner reuses this core as its CPML base
+    reverse and defers the single source-term accumulation to the end of the step.
+
+    Mirrors ``reverse_step_cpml_native`` exactly, launching the fused
+    CPML reverse kernels in a fixed order. Every per-cell reverse computation
+    (electric-adjoint -> pre-step E/psi_e adjoint + eps gradient + curl(H)
+    derivative adjoint, and magnetic-decay/psi_h pullback -> pre-step H/psi_h
+    adjoint + curl(E) derivative adjoint) runs inside the compiled kernels; Python
+    only sequences the launches.
+
+    Launch order is load-bearing. The fused CPML electric/magnetic kernels
+    *assign* into their pre-step / eps-gradient / psi outputs, and the transposed
+    difference accumulators *add* into the mid-step H adjoint and the pre-step E
+    adjoint. So all three electric kernels (and their backward-difference folds)
+    must fully populate the mid-step H adjoint before any magnetic kernel reads
+    it, and the electric kernels must assign the pre-step E adjoint before the
+    magnetic kernels add their forward-difference contributions into it.
+
+    The coefficient argument lists are long and per-component permuted (the
+    positive/negative CPML axis, its ``b``/``c``/``inv_kappa`` stretch vectors,
+    and the pre-step psi state all rotate with the component); the wiring here is
+    a line-for-line transcription of the Torch reference and is pinned against it
+    by the step-level parity test.
+    """
+    from . import core as _adjoint
+    from .reverse_common import allocate_cpml_reverse_context
+
+    # Mid-step H the forward electric update consumed (shared Torch replay).
+    if magnetic_fields is None:
+        magnetic_fields = _adjoint._forward_magnetic_fields(
+            solver,
+            forward_state,
+            time_value=time_value,
+            resolved_source_terms=resolved_source_terms,
+        )
+    hx_mid = magnetic_fields["Hx"]
+    hy_mid = magnetic_fields["Hy"]
+    hz_mid = magnetic_fields["Hz"]
+
+    ctx = allocate_cpml_reverse_context(
+        solver,
+        forward_state,
+        adjoint_state,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    pre = ctx.pre_step_adjoint
+    adj_h_mid = ctx.magnetic_output_adjoint
+
+    # Phase A: electric adjoint -> pre-step E/psi_e adjoint + eps gradient, folding
+    # each curl(H)-derivative adjoint into the mid-step H adjoint. Phase B: the
+    # magnetic-decay + psi_h pullback -> pre-step H/psi_h adjoint, folding each
+    # curl(E)-derivative adjoint into the pre-step E adjoint. Split into two phase
+    # helpers so the distributed reverse loop can insert the transposed halos
+    # between them; the single-GPU sequence here is bit-for-bit identical to the
+    # original inline launch order (all Phase-A launches complete before Phase B
+    # reads ``adj_h_mid``).
+    reverse_cpml_phase_electric(
+        solver,
+        forward_state,
+        adjoint_state,
+        ctx,
+        hx_mid=hx_mid,
+        hy_mid=hy_mid,
+        hz_mid=hz_mid,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+    reverse_cpml_phase_magnetic(solver, adjoint_state, ctx)
 
     step_result = _adjoint._ReverseStepResult(
         pre_step_adjoint=pre,
