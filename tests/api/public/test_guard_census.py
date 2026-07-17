@@ -15,10 +15,16 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 
-# This exact snapshot was reconciled on 2026-07-15 after the RF, adjoint,
-# material, and interoperability feature series landed. Lower it when a
-# capability guard is implemented; do not raise it without updating the census.
-CAPABILITY_GUARD_BUDGET = 113
+# This exact snapshot was reconciled on 2026-07-16 after integrating both the
+# SPICE/MNA circuit co-simulation series and the Touchstone network-embedding
+# series on top of the 2026-07-15 baseline of 108: the circuit co-simulation
+# work added five capability guards and the network-embedding work added six
+# more (108 + 5 + 6 = 119). The seventh network-embedding guard, simulation.py
+# "Embedded network feedback is defined only for the time-domain FDTD update",
+# is a permanent architectural boundary and is listed in CONTRACT_GUARDS below,
+# not counted here. Lower it when a capability guard is implemented; do not
+# raise it without updating the census.
+CAPABILITY_GUARD_BUDGET = 119
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
@@ -37,6 +43,7 @@ CONTRACT_GUARDS = (
     ("witwin/maxwell/fdtd/adjoint/bridge.py", "FDTD backward requires an input that contributes"),
     ("witwin/maxwell/fdtd/adjoint/bridge.py", "FDTD adjoint requires complex field state for Bloch faces"),
     ("witwin/maxwell/fdfd/adjoint/bridge.py", "FDFD backward currently supports trainable scene inputs that contribute"),
+    ("witwin/maxwell/simulation.py", "Embedded network feedback is defined only for the time-domain FDTD update"),
     ("witwin/maxwell/adapters/tidy3d.py", "Tidy3D export for magnetic dispersive Material"),
     ("witwin/maxwell/adapters/tidy3d.py", "Tidy3D export currently assumes mu_r = 1"),
     ("witwin/maxwell/fdtd/excitation/tfsf_state.py", "TFSF slab mode is required for Bloch-boundary TFSF injection"),

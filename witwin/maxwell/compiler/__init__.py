@@ -10,6 +10,7 @@ from .mna import (
 )
 from .materials import compile_material_tensors
 from .monitors import compile_fdtd_observers, compile_fdtd_time_observers
+from .networks import CompiledNetworkBlock, compile_network_block, compile_networks
 from .ports import CompiledPortGeometry, compile_port_geometry, compile_ports
 from .power_loss import CompiledPowerLossMonitor, compile_power_loss_monitor
 from .sources import compile_fdfd_sources, compile_fdtd_sources
@@ -25,6 +26,7 @@ __all__ = [
     "compile_circuit_graph",
     "compile_circuits",
     "CompiledLumpedElement",
+    "CompiledNetworkBlock",
     "compile_lumped_elements",
     "CompiledStampPlan",
     "BatchedMNAFactors",
@@ -32,6 +34,8 @@ __all__ = [
     "compile_coupled_mna_system",
     "compile_batched_mna_factors",
     "compile_mna_system",
+    "compile_network_block",
+    "compile_networks",
     "compile_fdfd_sources",
     "compile_fdtd_observers",
     "compile_fdtd_time_observers",

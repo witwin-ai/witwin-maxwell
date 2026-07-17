@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import torch
 
-from witwin.maxwell.fdtd.ports import PortDFTAccumulator, _evaluate_drive
+from witwin.maxwell.fdtd.ports import _evaluate_drive
 
 
 def test_complex_cw_drive_recovers_peak_phasor_under_exp_minus_iwt_convention():
@@ -21,18 +21,19 @@ def test_complex_cw_drive_recovers_peak_phasor_under_exp_minus_iwt_convention():
         drive_buffer=torch.zeros((), dtype=dtype),
         magnetic_time=torch.tensor(0.5 * dt, dtype=dtype),
     )
-    accumulator = PortDFTAccumulator(torch.tensor([frequency], dtype=dtype))
 
+    # Independent DFT oracle for the live drive waveform. Production accumulates
+    # the same exp(+i*2*pi*f*t) kernel through ``accumulate_precomputed``; here
+    # we sum it directly so the assertion isolates ``_evaluate_drive``.
+    frequencies = torch.tensor([frequency], dtype=dtype)
+    voltage_sum = torch.zeros(1, dtype=torch.complex128)
     for _ in range(sample_count):
         drive = _evaluate_drive(runtime)
-        accumulator.accumulate(
-            drive,
-            torch.zeros_like(drive),
-            electric_sample_time=runtime.magnetic_time,
-            magnetic_sample_time=runtime.magnetic_time,
-        )
+        angle = 2.0 * torch.pi * frequencies * runtime.magnetic_time
+        phase = torch.complex(torch.cos(angle), torch.sin(angle))
+        voltage_sum = voltage_sum + drive.to(torch.complex128) * phase
         runtime.magnetic_time.add_(dt)
 
-    phasor, _ = accumulator.phasors(normalization="peak")
+    phasor = (2.0 / sample_count) * voltage_sum
 
     torch.testing.assert_close(phasor, expected.unsqueeze(0), rtol=1.0e-12, atol=1.0e-12)

@@ -10,6 +10,7 @@ import torch
 from witwin.core import Structure
 from .circuits import Circuit, CircuitNode
 from .lumped import Capacitor, Inductor, Resistor
+from .network import NetworkBlock
 from .ports import LumpedPort, ModePort, TerminalPort, WavePort, _resolve_terminal_port
 from .compiler.materials import (
     compile_material_model,
@@ -756,6 +757,7 @@ class Scene:
         sources=None,
         monitors=None,
         ports=None,
+        networks=(),
         lumped_elements=(),
         circuits=(),
         material_regions=None,
@@ -792,6 +794,9 @@ class Scene:
         self.ports = []
         for port in ports or ():
             self.add_port(port)
+        self.networks = []
+        for network in networks:
+            self.add_network(network)
         self.lumped_elements = []
         for element in lumped_elements:
             self.add_lumped_element(element)
@@ -975,6 +980,40 @@ class Scene:
         self.lumped_elements.append(element)
         return self
 
+    def add_network(self, network: NetworkBlock):
+        """Attach a passive external network to existing terminal ports."""
+
+        if not isinstance(network, NetworkBlock):
+            raise TypeError("Maxwell Scene networks must be NetworkBlock instances.")
+        if any(existing.name == network.name for existing in self.networks):
+            raise ValueError(f"Network name {network.name!r} is already present in the scene.")
+        ports_by_name = {port.name: port for port in self.ports}
+        already_connected = {
+            port_name
+            for existing in self.networks
+            for port_name in existing.connected_port_names
+        }
+        for port_name in network.connected_port_names:
+            if port_name not in ports_by_name:
+                raise ValueError(
+                    f"Network {network.name!r} references unknown Scene port {port_name!r}."
+                )
+            port = ports_by_name[port_name]
+            if isinstance(port, WavePort):
+                raise ValueError(
+                    f"Network {network.name!r} cannot connect to WavePort {port_name!r}; "
+                    "time-domain wave-port terminal injection is not available."
+                )
+            if not isinstance(port, (LumpedPort, TerminalPort)):
+                raise TypeError(
+                    f"Network {network.name!r} connections require LumpedPort or TerminalPort "
+                    f"targets; {port_name!r} is {type(port).__name__}."
+                )
+            if port_name in already_connected:
+                raise ValueError(f"Scene port {port_name!r} is already connected to another network.")
+        self.networks.append(network)
+        return self
+
     def compile_ports(self, *, device=None):
         """Compile declared port geometry through the solver preparation layer."""
 
@@ -1003,6 +1042,11 @@ class Scene:
 
         return prepare_scene(self).compile_circuits()
 
+    def compile_networks(self, *, dt: float, device=None):
+        """Compile embedded networks for the FDTD preparation layer."""
+
+        return prepare_scene(self).compile_networks(dt=dt, device=device)
+
     def add_material_region(self, material_region: MaterialRegion):
         self.material_regions.append(material_region)
         return self
@@ -1016,6 +1060,7 @@ class Scene:
             "sources": list(self.sources),
             "monitors": list(self.monitors),
             "ports": list(self.ports),
+            "networks": list(self.networks),
             "lumped_elements": list(self.lumped_elements),
             "circuits": list(self.circuits),
             "material_regions": list(self.material_regions),
@@ -1151,6 +1196,7 @@ class PreparedScene(Scene):
             sources=list(scene.sources),
             monitors=list(scene.monitors),
             ports=list(scene.ports),
+            networks=list(scene.networks),
             lumped_elements=list(scene.lumped_elements),
             circuits=list(scene.circuits),
             material_regions=list(scene.material_regions),
@@ -1373,6 +1419,15 @@ class PreparedScene(Scene):
         from .compiler.circuits import compile_circuits
 
         return compile_circuits(self)
+
+    def compile_networks(self, *, dt: float, device=None):
+        from .compiler.networks import compile_networks
+
+        return compile_networks(
+            self,
+            dt=dt,
+            device=self.device if device is None else device,
+        )
 
     def compile_relative_materials(
         self,

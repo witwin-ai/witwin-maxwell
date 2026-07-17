@@ -99,6 +99,19 @@ def scene_trainable_rf_tensors(scene) -> tuple[torch.Tensor, ...]:
                     candidates.append(value)
                 elif value is not None and hasattr(value, "__dict__"):
                     candidates.extend(vars(value).values())
+    for block in getattr(scene, "networks", ()):
+        model = getattr(block, "model", None)
+        for name in (
+            "poles",
+            "residues",
+            "direct",
+            "proportional",
+            "A",
+            "B",
+            "C",
+            "D",
+        ):
+            candidates.append(getattr(model, name, None))
     return unique_trainable_tensors(candidates)
 
 

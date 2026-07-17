@@ -27,10 +27,12 @@ from ..excitation import (
     tfsf_incident_is_gpu_driven,
 )
 from ..ports import (
-    accumulate_port_observers,
+    _accumulate_embedded_port_observers_gpu,
     apply_port_runtimes,
+    complete_port_observer_graph,
     complete_port_spectral_normalization,
     finalize_port_data,
+    make_port_observer_runner,
     prepare_port_runtimes,
     prepare_port_spectral_accumulators,
 )
@@ -38,6 +40,12 @@ from ..circuits import (
     finalize_circuit_data,
     prepare_circuit_graph_runners,
     prepare_circuit_time_series,
+)
+from ..networks import (
+    apply_network_runtimes,
+    finalize_embedded_networks,
+    make_network_runner,
+    prepare_network_runtimes,
 )
 
 
@@ -1532,6 +1540,7 @@ def init_field(solver):
         getattr(solver, "_requested_port_frequencies", (solver.source_frequency,)),
         getattr(solver, "_port_excitations", ()),
     )
+    prepare_network_runtimes(solver)
 
 
 def _compute_shutoff_min_step(solver, shutoff_check_interval: int) -> int:
@@ -1865,6 +1874,130 @@ def _make_tail_runner(solver, use_gpu_dft: bool):
     return replay
 
 
+def _make_full_embedded_step_runner(solver, *, use_cuda_graph: bool):
+    """Capture a source-free field/network/terminal-observer step as one graph."""
+
+    runtimes = tuple(getattr(solver, "_network_runtimes", ()))
+    port_runtimes = tuple(getattr(solver, "_port_runtimes", ()))
+    graphable = (
+        use_cuda_graph
+        and torch.cuda.is_available()
+        and torch.device(solver.device).type == "cuda"
+        and bool(runtimes)
+        and bool(port_runtimes)
+        and all(runtime.delay_runtime is None for runtime in runtimes)
+        and all(
+            runtime.lumped is not None
+            and runtime.embedded_network_name is not None
+            and runtime.excitation is None
+            and runtime.drive_accumulator is None
+            for runtime in port_runtimes
+        )
+        and all(runtime.window_weights.shape[0] >= 4 for runtime in port_runtimes)
+        and not solver._source_terms
+        and not solver._electric_source_terms
+        and not solver._magnetic_source_terms
+        and not solver.tfsf_enabled
+        and not solver.dft_enabled
+        and not solver.observers
+        and not getattr(solver, "time_observers", ())
+        and not getattr(solver, "dispersive_enabled", False)
+        and not getattr(solver, "nonlinear_enabled", False)
+        and not getattr(solver, "nonlinear_general_enabled", False)
+        and not getattr(solver, "modulation_enabled", False)
+        and not getattr(solver, "has_mur_faces", False)
+        and not getattr(solver, "sibc_enabled", False)
+    )
+    if not graphable:
+        return None
+
+    from ..cuda.runtime.graph import CudaGraphRunner
+
+    def step() -> None:
+        _field_update_block(solver, 0.0)
+        apply_port_runtimes(solver)
+        apply_network_runtimes(solver, native_lu=True)
+        solver._apply_dispersive_corrections()
+        if not solver.tfsf_enabled:
+            enforce_pec_boundaries(solver)
+        apply_mur_boundaries(solver)
+        _accumulate_embedded_port_observers_gpu(solver)
+
+    mutable_tensors = [
+        tensor
+        for name, tensor in vars(solver).items()
+        if isinstance(tensor, torch.Tensor)
+        and (
+            name in {"Ex", "Ey", "Ez", "Hx", "Hy", "Hz"}
+            or name.startswith("psi")
+        )
+    ]
+    for runtime in runtimes:
+        mutable_tensors.extend(
+            (
+                runtime.state,
+                runtime.next_state,
+                runtime.state_drive,
+                runtime.free_voltage,
+                runtime.network_voltage,
+                runtime.voltage_after,
+                runtime.branch_current,
+                runtime.output_buffer,
+                runtime.direct_drive,
+                runtime.net_power,
+                runtime.power_buffer,
+                runtime.port_energy,
+                runtime.absorbed_increment,
+                runtime.generated_increment,
+                runtime.absorbed_energy,
+                runtime.generated_energy,
+            )
+        )
+        for group in runtime.terminal_groups:
+            mutable_tensors.extend((group.edge_buffer, group.correction_buffer))
+    observer_tensors = [solver._port_observer_step]
+    for runtime in port_runtimes:
+        accumulator = runtime.accumulator
+        observer_tensors.extend(
+            (
+                runtime.observer_current_buffer,
+                runtime.observer_window_buffer,
+                runtime.observer_voltage_kernel_buffer,
+                runtime.observer_current_kernel_buffer,
+                runtime.electric_time,
+                runtime.magnetic_time,
+                accumulator._voltage_sum,
+                accumulator._current_sum,
+                accumulator._window_weight_sum,
+                accumulator._voltage_term,
+                accumulator._current_term,
+            )
+        )
+    mutable_tensors.extend(observer_tensors)
+    unique_tensors = []
+    seen = set()
+    for tensor in mutable_tensors:
+        if tensor.data_ptr() not in seen:
+            unique_tensors.append(tensor)
+            seen.add(tensor.data_ptr())
+    saved = [tensor.clone() for tensor in unique_tensors]
+
+    def restore() -> None:
+        for tensor, value in zip(unique_tensors, saved):
+            tensor.copy_(value)
+
+    try:
+        replay = CudaGraphRunner(enabled=True, warmup_steps=3).capture(step)
+    except Exception:
+        restore()
+        return None
+    restore()
+    solver._cuda_graph_active = True
+    solver._network_cuda_graph_active = True
+    solver._port_observer_graph_active = True
+    return replay
+
+
 def solve(
     solver,
     time_steps: int,
@@ -1925,7 +2058,24 @@ def solve(
     solver._shutoff_peak = torch.zeros((), device=solver.device, dtype=solver.Ex.dtype)
     shutoff_min_step = _compute_shutoff_min_step(solver, shutoff_check_interval)
 
-    run_field_update = _make_field_update_runner(solver, use_cuda_graph)
+    run_full_embedded_step = _make_full_embedded_step_runner(
+        solver,
+        use_cuda_graph=use_cuda_graph,
+    )
+    if run_full_embedded_step is None:
+        run_field_update = _make_field_update_runner(solver, use_cuda_graph)
+        run_network_updates = make_network_runner(
+            solver,
+            use_cuda_graph=use_cuda_graph,
+        )
+        run_port_observers = make_port_observer_runner(
+            solver,
+            use_cuda_graph=use_cuda_graph,
+        )
+    else:
+        run_field_update = None
+        run_network_updates = None
+        run_port_observers = None
 
     # When the field-update graph is active, drive the running DFT from a
     # precomputed GPU weight table indexed by a device step counter, dropping the
@@ -1969,37 +2119,43 @@ def solve(
         )
         iterator = pbar
 
+    steps_run = 0
     for n in iterator:
+        steps_run = n + 1
         time_value = n * solver.dt
-        run_field_update(time_value)
-
-        if solver.tfsf_enabled:
-            apply_tfsf_e_correction(solver, time_value)
-            advance_tfsf_auxiliary_electric(solver)
-        if solver._electric_source_terms:
-            # The electric equivalent current enters the E update through the
-            # incident H field, which lives at the Yee half step.  Sample it at
-            # the same n + 1/2 instant as the TFSF electric correction.
-            inject_electric_surface_source_terms(
-                solver,
-                time_value=time_value + 0.5 * float(solver.dt),
-            )
-
-        if solver._source_terms:
-            solver.add_source(time_value=time_value)
-        apply_port_runtimes(solver)
-        if run_tail is not None:
-            run_tail()
+        if run_full_embedded_step is not None:
+            run_full_embedded_step()
         else:
-            solver._apply_dispersive_corrections()
-            if not solver.tfsf_enabled:
-                enforce_pec_boundaries(solver)
-            apply_mur_boundaries(solver)
-            if use_gpu_dft:
-                solver.accumulate_dft_gpu()
+            run_field_update(time_value)
+
+            if solver.tfsf_enabled:
+                apply_tfsf_e_correction(solver, time_value)
+                advance_tfsf_auxiliary_electric(solver)
+            if solver._electric_source_terms:
+                # The electric equivalent current enters the E update through the
+                # incident H field, which lives at the Yee half step.  Sample it at
+                # the same n + 1/2 instant as the TFSF electric correction.
+                inject_electric_surface_source_terms(
+                    solver,
+                    time_value=time_value + 0.5 * float(solver.dt),
+                )
+
+            if solver._source_terms:
+                solver.add_source(time_value=time_value)
+            apply_port_runtimes(solver)
+            run_network_updates()
+            if run_tail is not None:
+                run_tail()
             else:
-                solver.accumulate_dft(n)
-        accumulate_port_observers(solver)
+                solver._apply_dispersive_corrections()
+                if not solver.tfsf_enabled:
+                    enforce_pec_boundaries(solver)
+                apply_mur_boundaries(solver)
+                if use_gpu_dft:
+                    solver.accumulate_dft_gpu()
+                else:
+                    solver.accumulate_dft(n)
+            run_port_observers()
         solver.accumulate_observers(n)
         solver.accumulate_time_observers(n)
 
@@ -2038,6 +2194,10 @@ def solve(
             step_start_event.elapsed_time(step_end_event) * 1.0e-3
         )
         solver.last_step_loop_steps = completed_steps
+    # steps_run, not n + 1: the loop variable is unbound for time_steps == 0 and
+    # the graph-driven observer step counter must match the steps actually run,
+    # including an early shutoff break.
+    complete_port_observer_graph(solver, steps_run)
     solver._synchronize_device()
     solver.last_solve_elapsed_s = time.perf_counter() - solve_start
     if end_step < time_steps:
@@ -2069,4 +2229,7 @@ def solve(
     circuits = finalize_circuit_data(solver)
     if circuits:
         output["circuits"] = circuits
+    embedded_networks = finalize_embedded_networks(solver, ports)
+    if embedded_networks:
+        output["embedded_networks"] = embedded_networks
     return output or None

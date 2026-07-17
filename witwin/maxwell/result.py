@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +16,20 @@ from .monitors import (
     PermittivityMonitor,
     PowerLossMonitor,
 )
-from .network import NetworkData, PortData, _validate_safe_persistence
+from .network import (
+    EmbeddedNetworkData,
+    NetworkData,
+    PortData,
+    _validate_safe_persistence,
+)
+from .rational import FitReport, NetworkFitReport
 from .scene import prepare_scene
 from .visualization import extract_orthogonal_slice, plot_slice_image
 
 _UNSET = object()
 RESULT_SNAPSHOT_SCHEMA_VERSION = 2
+_EMBEDDED_NETWORK_SNAPSHOT_SCHEMA_VERSION = 1
+_FIT_REPORT_SNAPSHOT_SCHEMA_VERSION = 1
 
 
 def _clone_mapping(data: dict[str, Any]) -> dict[str, Any]:
@@ -83,6 +91,29 @@ def _normalize_circuit_data_mapping(circuits) -> dict[str, CircuitData]:
     return normalized
 
 
+def _normalize_embedded_network_mapping(networks) -> dict[str, EmbeddedNetworkData]:
+    if networks is None:
+        return {}
+    if not isinstance(networks, Mapping):
+        raise TypeError(
+            "embedded_networks must map network names to EmbeddedNetworkData."
+        )
+    normalized = {}
+    for name, data in networks.items():
+        network_name = str(name)
+        if not isinstance(data, EmbeddedNetworkData):
+            raise TypeError(
+                f"Embedded network {network_name!r} must be EmbeddedNetworkData."
+            )
+        if network_name != data.name:
+            raise ValueError(
+                f"Embedded network key {network_name!r} does not match data name "
+                f"{data.name!r}."
+            )
+        normalized[network_name] = data
+    return normalized
+
+
 def _port_data_snapshot(data: PortData) -> dict[str, Any]:
     _validate_safe_persistence(data.metadata, path=f"ports[{data.port_name!r}].metadata")
     return {
@@ -127,6 +158,47 @@ def _network_data_snapshot(data: NetworkData | None):
 
 def _circuit_data_snapshot(data: CircuitData) -> dict[str, Any]:
     return data._snapshot()
+
+
+def _fit_report_snapshot(report: FitReport | None) -> dict[str, Any] | None:
+    if report is None:
+        return None
+    if type(report) not in (FitReport, NetworkFitReport):
+        raise TypeError(
+            "Embedded network fit_report must be a FitReport or NetworkFitReport."
+        )
+    return {
+        "schema_version": _FIT_REPORT_SNAPSHOT_SCHEMA_VERSION,
+        "data_type": type(report).__name__,
+        "values": {
+            field.name: _cpu_serializable(getattr(report, field.name))
+            for field in fields(report)
+        },
+    }
+
+
+def _embedded_network_snapshot(data: EmbeddedNetworkData) -> dict[str, Any]:
+    _validate_safe_persistence(
+        data.metadata,
+        path=f"embedded_networks[{data.name!r}].metadata",
+    )
+    return {
+        "schema_version": _EMBEDDED_NETWORK_SNAPSHOT_SCHEMA_VERSION,
+        "data_type": "EmbeddedNetworkData",
+        "name": data.name,
+        "frequencies": _cpu_serializable(data.frequencies),
+        "port_names": data.port_names,
+        "voltage": _cpu_serializable(data.voltage),
+        "current": _cpu_serializable(data.current),
+        "port_power": _cpu_serializable(data.port_power),
+        "absorbed_power": _cpu_serializable(data.absorbed_power),
+        "generated_power": _cpu_serializable(data.generated_power),
+        "state_norm": _cpu_serializable(data.state_norm),
+        "model_id": data.model_id,
+        "fit_report": _fit_report_snapshot(data.fit_report),
+        "runtime_warnings": data.runtime_warnings,
+        "metadata": _cpu_serializable(data.metadata),
+    }
 
 
 def _port_data_from_snapshot(payload: Mapping[str, Any]) -> PortData:
@@ -199,6 +271,121 @@ def _validate_result_snapshot_payload(
         raise ValueError(f"{label} schema v2 is missing required key: circuits.")
     if not isinstance(payload["circuits"], Mapping):
         raise ValueError(f"{label} circuits must contain a mapping payload.")
+
+
+def _fit_report_from_snapshot(payload: Mapping[str, Any] | None) -> FitReport | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, Mapping):
+        raise ValueError("Embedded network fit report must contain a mapping payload.")
+    version = payload.get("schema_version")
+    if version != _FIT_REPORT_SNAPSHOT_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported embedded network fit report schema_version {version!r}."
+        )
+    data_type = payload.get("data_type")
+    report_type = {
+        "FitReport": FitReport,
+        "NetworkFitReport": NetworkFitReport,
+    }.get(data_type)
+    if report_type is None:
+        raise ValueError(
+            f"Embedded network fit report has an invalid data_type {data_type!r}."
+        )
+    values = payload.get("values")
+    if not isinstance(values, Mapping):
+        raise ValueError("Embedded network fit report values must be a mapping.")
+    expected = {field.name for field in fields(report_type)}
+    actual = set(values)
+    missing = expected - actual
+    unexpected = actual - expected
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing {', '.join(sorted(missing))}")
+        if unexpected:
+            details.append(f"unexpected {', '.join(sorted(unexpected))}")
+        raise ValueError(
+            "Embedded network fit report fields are invalid: " + "; ".join(details) + "."
+        )
+    try:
+        return report_type(**dict(values))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Embedded network fit report values are invalid.") from exc
+
+
+def _embedded_network_from_snapshot(
+    payload: Mapping[str, Any],
+) -> EmbeddedNetworkData:
+    if not isinstance(payload, Mapping):
+        raise ValueError("Embedded network snapshot must contain a mapping payload.")
+    if payload.get("data_type") != "EmbeddedNetworkData":
+        raise ValueError("Embedded network snapshot has an invalid data_type.")
+    version = payload.get("schema_version")
+    if version != _EMBEDDED_NETWORK_SNAPSHOT_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported EmbeddedNetworkData schema_version {version!r}."
+        )
+    required = {
+        "name",
+        "frequencies",
+        "port_names",
+        "voltage",
+        "current",
+        "port_power",
+        "absorbed_power",
+        "generated_power",
+        "state_norm",
+        "model_id",
+        "fit_report",
+        "runtime_warnings",
+        "metadata",
+    }
+    missing = required.difference(payload)
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise ValueError(f"Embedded network snapshot is missing required keys: {names}.")
+    _validate_safe_persistence(
+        payload["metadata"],
+        path=f"embedded_networks[{payload['name']!r}].metadata",
+    )
+    fit_report = _fit_report_from_snapshot(payload["fit_report"])
+    try:
+        return EmbeddedNetworkData(
+            name=payload["name"],
+            frequencies=payload["frequencies"],
+            port_names=tuple(payload["port_names"]),
+            voltage=payload["voltage"],
+            current=payload["current"],
+            port_power=payload["port_power"],
+            absorbed_power=payload["absorbed_power"],
+            generated_power=payload["generated_power"],
+            state_norm=payload["state_norm"],
+            model_id=payload["model_id"],
+            fit_report=fit_report,
+            runtime_warnings=tuple(payload["runtime_warnings"]),
+            metadata=payload["metadata"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Embedded network snapshot values are invalid.") from exc
+
+
+def _embedded_networks_from_snapshot(payload: Any) -> dict[str, EmbeddedNetworkData]:
+    if payload is None:
+        return {}
+    if not isinstance(payload, Mapping):
+        raise ValueError("Result embedded_networks snapshot must contain a mapping.")
+    restored = {}
+    for key, value in payload.items():
+        name = str(key)
+        data = _embedded_network_from_snapshot(value)
+        if name != data.name:
+            raise ValueError(
+                f"Embedded network snapshot key {name!r} does not match data name "
+                f"{data.name!r}."
+            )
+        restored[name] = data
+    return restored
 
 
 def _resolve_result_frequencies(*, frequency: float | None, frequencies) -> tuple[float, ...]:
@@ -901,6 +1088,7 @@ class Result:
         ports: Mapping[str, PortData] | None = None,
         circuits: Mapping[str, CircuitData] | None = None,
         network: NetworkData | None = None,
+        embedded_networks: Mapping[str, EmbeddedNetworkData] | None = None,
         metadata: dict[str, Any] | None = None,
         solver_stats: dict[str, Any] | None = None,
         raw_output: Any = None,
@@ -915,6 +1103,7 @@ class Result:
         self._monitors = _clone_mapping(monitors)
         self._ports = _normalize_port_data_mapping(ports)
         self._circuits = _normalize_circuit_data_mapping(circuits)
+        self._embedded_networks = _normalize_embedded_network_mapping(embedded_networks)
         if network is not None and not isinstance(network, NetworkData):
             raise TypeError("network must be a NetworkData or None.")
         self._network = network
@@ -968,6 +1157,10 @@ class Result:
     @property
     def network(self) -> NetworkData | None:
         return self._network
+
+    @property
+    def embedded_networks(self) -> dict[str, EmbeddedNetworkData]:
+        return dict(self._embedded_networks)
 
     @property
     def solver_stats(self) -> dict[str, Any]:
@@ -1152,6 +1345,16 @@ class Result:
             )
         return self._circuits[circuit_name]
 
+    def embedded_network(self, name: str) -> EmbeddedNetworkData:
+        network_name = str(name)
+        if network_name not in self._embedded_networks:
+            choices = tuple(self._embedded_networks)
+            raise KeyError(
+                f"Embedded network {network_name!r} is not available in this result. "
+                f"Choices: {choices}."
+            )
+        return self._embedded_networks[network_name]
+
     def antenna(
         self,
         *,
@@ -1299,6 +1502,7 @@ class Result:
         stats["num_ports"] = len(self._ports)
         stats["num_circuits"] = len(self._circuits)
         stats["has_network"] = self._network is not None
+        stats["num_embedded_networks"] = len(self._embedded_networks)
         return stats
 
     def _snapshot_payload(self, *, fields: Mapping[str, torch.Tensor]) -> dict[str, Any]:
@@ -1325,6 +1529,10 @@ class Result:
                 for name, data in self._circuits.items()
             },
             "network": _network_data_snapshot(self._network),
+            "embedded_networks": {
+                name: _embedded_network_snapshot(data)
+                for name, data in self._embedded_networks.items()
+            },
             "metadata": _cpu_serializable(self._metadata),
             "solver_stats": _cpu_serializable(self._solver_stats),
         }
@@ -1332,10 +1540,12 @@ class Result:
     def save(self, path: str | Path):
         """Save a detached CPU data snapshot.
 
-        Port payloads use the same versioned schema as ``PortData.save``. The
-        snapshot intentionally omits the declarative Scene, prepared Scene, solver,
-        raw runtime output, and every live autograd graph. Loading therefore requires
-        the caller to supply the corresponding declarative Scene.
+        Port payloads use the same versioned schema as ``PortData.save``. Embedded
+        network diagnostics use a nested schema that preserves the concrete fit
+        report type. The snapshot intentionally omits the declarative Scene,
+        prepared Scene, solver, raw runtime output, and every live autograd graph.
+        Loading therefore requires the caller to supply the corresponding
+        declarative Scene.
         """
 
         payload = self._snapshot_payload(fields=self._fields)
@@ -1416,6 +1626,9 @@ class Result:
                 for name, data in payload["circuits"].items()
             },
             network=_network_data_from_snapshot(payload.get("network")),
+            embedded_networks=_embedded_networks_from_snapshot(
+                payload.get("embedded_networks")
+            ),
             metadata=payload.get("metadata"),
             solver_stats=payload.get("solver_stats"),
         )
@@ -1464,6 +1677,9 @@ class Result:
                 for name, data in payload["circuits"].items()
             },
             network=_network_data_from_snapshot(payload.get("network")),
+            embedded_networks=_embedded_networks_from_snapshot(
+                payload.get("embedded_networks")
+            ),
             metadata=payload.get("metadata"),
             solver_stats=payload.get("solver_stats"),
         )

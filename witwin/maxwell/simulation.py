@@ -10,6 +10,7 @@ from .fdtd_parallel import FDTDParallelConfig
 from .lumped import PortExcitation, PortSweep
 from .monitors import MediumMonitor, PermittivityMonitor
 from .ports import LumpedPort, TerminalPort, WavePort
+from .rational import RationalModel, StateSpaceNetwork
 from .result import Result
 from .scene import Scene, SceneModule, prepare_scene
 
@@ -306,6 +307,21 @@ def _trainable_rf_parameters(
             )
     for element in scene.lumped_elements:
         candidates.append(getattr(element, "value", None))
+    for block in getattr(scene, "networks", ()):
+        model = getattr(block, "model", None)
+        candidates.extend(
+            getattr(model, name, None)
+            for name in (
+                "poles",
+                "residues",
+                "direct",
+                "proportional",
+                "A",
+                "B",
+                "C",
+                "D",
+            )
+        )
     for excitation in excitations:
         candidates.extend((excitation.amplitude, excitation.source_impedance))
     if port_sweep is not None:
@@ -347,6 +363,7 @@ class Simulation:
         self.scene = resolved_scene
         self.scene_module = scene_module
         self.method = SimulationMethod(method)
+        self._validate_network_solver()
         self.port_sweep = excitations if isinstance(excitations, PortSweep) else None
         self.excitations = (
             () if self.port_sweep is not None else _normalize_port_excitations(excitations)
@@ -445,6 +462,7 @@ class Simulation:
     def prepare(self):
         self._refresh_scene()
         self._validate_circuit_execution()
+        self._validate_network_solver()
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         waveport_excitation = self._waveport_excitation()
@@ -483,6 +501,7 @@ class Simulation:
     def run(self) -> Result:
         self._refresh_scene()
         self._validate_circuit_execution()
+        self._validate_network_solver()
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         if self.method == SimulationMethod.FDFD:
@@ -490,6 +509,13 @@ class Simulation:
         if self.method == SimulationMethod.FDTD:
             return self._run_fdtd()
         raise ValueError(f"Unsupported simulation method {self.method!r}.")
+
+    def _validate_network_solver(self) -> None:
+        if getattr(self.scene, "networks", ()) and self.method != SimulationMethod.FDTD:
+            raise NotImplementedError(
+                "Embedded network feedback is defined only for the time-domain FDTD "
+                "update; frequency-domain solvers cannot ignore Scene.networks."
+            )
 
     def _validate_port_excitations(self) -> None:
         bound_port_names = {
@@ -563,6 +589,26 @@ class Simulation:
     def _validate_trainable_rf_support(self) -> None:
         if self.method != SimulationMethod.FDTD or not self.has_trainable_parameters:
             return
+        for block in getattr(self.scene, "networks", ()):
+            model = block.model
+            if isinstance(model, RationalModel):
+                unsupported = tuple(
+                    name
+                    for name in ("poles", "proportional")
+                    if getattr(model, name).requires_grad
+                )
+                if unsupported:
+                    raise NotImplementedError(
+                        "Differentiable embedded RationalModel supports residues and direct "
+                        f"terms only; trainable {unsupported!r} are not supported."
+                    )
+            elif isinstance(model, StateSpaceNetwork) and any(
+                getattr(model, name).requires_grad for name in ("A", "B", "C", "D")
+            ):
+                raise NotImplementedError(
+                    "Differentiable embedded networks accept trainable residues/direct on a "
+                    "pre-fitted RationalModel; direct trainable state-space matrices are not supported."
+                )
         rf_ports = tuple(
             port
             for port in self.scene.ports
@@ -1032,6 +1078,11 @@ class Simulation:
         monitors = raw_output.get("observers", {}) if isinstance(raw_output, dict) else {}
         ports = raw_output.get("ports", {}) if isinstance(raw_output, dict) else {}
         circuits = raw_output.get("circuits", {}) if isinstance(raw_output, dict) else {}
+        embedded_networks = (
+            raw_output.get("embedded_networks", {})
+            if isinstance(raw_output, dict)
+            else {}
+        )
         field_payload = {
             key: value
             for key, value in (raw_output.items() if isinstance(raw_output, dict) else [])
@@ -1067,6 +1118,7 @@ class Simulation:
             monitors=monitors,
             ports=ports,
             circuits=circuits,
+            embedded_networks=embedded_networks,
             metadata=self.metadata,
             solver_stats=solver_stats,
             raw_output=raw_output,
@@ -1106,6 +1158,9 @@ class Simulation:
                 getattr(solver, "_circuit_graph_active", False)
             ),
             "tail_graph_active": bool(getattr(solver, "_tail_graph_active", False)),
+            "network_cuda_graph_active": bool(
+                getattr(solver, "_network_cuda_graph_active", False)
+            ),
             "boundary": getattr(solver, "boundary_kind", self.scene.boundary.kind),
             "absorber": getattr(solver, "active_absorber_type", self.config.absorber),
             "cpml_memory_mode": getattr(solver, "_cpml_memory_mode", None),

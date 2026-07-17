@@ -317,24 +317,41 @@ def test_port_voltage_current_and_available_power_dft_seeds_are_exact():
     drive_accumulator = PortDFTAccumulator(frequencies)
     dt = torch.tensor(0.2, device="cuda", dtype=torch.float64)
     weights = torch.ones((4, 2), device="cuda", dtype=torch.float64)
+    # Differentiable DFT oracle for the forward phasors (replaces the retired
+    # ``PortDFTAccumulator.accumulate``). The accumulators are still populated
+    # via the live ``accumulate_precomputed`` path so that seed construction can
+    # read ``_window_weight_sum`` and the drive phasor exactly as production does.
+    voltage_sum = torch.zeros(2, device="cuda", dtype=torch.complex128)
+    current_sum = torch.zeros(2, device="cuda", dtype=torch.complex128)
+    drive_sum = torch.zeros(2, device="cuda", dtype=torch.complex128)
+    unit_weight = torch.ones(2, device="cuda", dtype=torch.float64)
     for index, (voltage, current, drive) in enumerate(
         zip(voltage_samples, current_samples, drive_samples)
     ):
         sample_time = (index + 0.5) * dt
-        accumulator.accumulate(
-            voltage,
-            current,
-            electric_sample_time=sample_time,
-            magnetic_sample_time=sample_time,
+        angle = 2.0 * torch.pi * frequencies * sample_time
+        kernel = torch.complex(torch.cos(angle), torch.sin(angle))
+        voltage_sum = voltage_sum + voltage.to(torch.complex128) * kernel
+        current_sum = current_sum + current.to(torch.complex128) * kernel
+        drive_sum = drive_sum + drive.to(torch.complex128) * kernel
+        accumulator.accumulate_precomputed(
+            voltage.detach(),
+            current.detach(),
+            voltage_kernel=kernel,
+            current_kernel=kernel,
+            window_weight=unit_weight,
         )
-        drive_accumulator.accumulate(
-            drive,
-            torch.zeros_like(drive),
-            electric_sample_time=sample_time,
-            magnetic_sample_time=sample_time,
+        drive_accumulator.accumulate_precomputed(
+            drive.detach(),
+            None,
+            voltage_kernel=kernel,
+            current_kernel=kernel,
+            window_weight=unit_weight,
         )
-    voltage, current = accumulator.phasors(normalization="peak")
-    source_voltage, _ = drive_accumulator.phasors(normalization="peak")
+    scale = 2.0 / accumulator._window_weight_sum
+    voltage = voltage_sum * scale
+    current = current_sum * scale
+    source_voltage = drive_sum * scale
     resistance = torch.tensor(2.5, device="cuda", dtype=torch.float64)
     available_power = source_voltage.abs().square() / (8.0 * resistance)
     data = PortData(

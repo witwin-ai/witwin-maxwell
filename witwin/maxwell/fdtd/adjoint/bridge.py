@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import torch
 
@@ -13,6 +14,7 @@ from ...adjoint_inputs import (
     unique_trainable_tensors as _unique_trainable_tensors,
 )
 from ...media import Tensor3x3
+from ...rational import RationalModel, StateSpaceNetwork
 from ...result import Result
 from ..boundary import BOUNDARY_BLOCH, BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_PML, has_complex_fields
 from .profiler import _BackwardProfiler, _clone_backward_profile, _empty_backward_profile
@@ -41,6 +43,11 @@ from .seeds import (
 )
 from ..checkpoint import capture_checkpoint_state
 from ..material_pullback import pullback_material_input_gradients
+from ..networks import (
+    apply_network_runtimes,
+    finalize_embedded_networks,
+    pullback_network_runtimes,
+)
 from .dispatch import reverse_step
 
 
@@ -323,6 +330,7 @@ class _FDTDGradientBridge:
         self._observer_schedule_pack = None
         self._last_backward_profile = None
         self._last_circuits = {}
+        self._last_embedded_networks = {}
 
     def _material_graph_scene(self):
         if self.simulation.scene_module is not None:
@@ -400,6 +408,15 @@ class _FDTDGradientBridge:
             return tuple(torch.zeros_like(tensor) for tensor in base_inputs)
         scene = self._material_graph_scene()
         values = _scene_rf_semantic_values(scene, self.simulation)
+        for compiled in scene.compile_networks(
+            dt=self._last_solver.dt,
+            device=self._last_solver.device,
+        ):
+            for name in ("A", "B", "C", "D"):
+                values[("network", compiled.name, name)] = getattr(
+                    compiled.discrete,
+                    name,
+                )
 
         outputs = []
         output_grads = []
@@ -425,6 +442,30 @@ class _FDTDGradientBridge:
         )
 
     def _validate_supported_configuration(self, solver):
+        for block in getattr(solver.scene, "networks", ()):
+            if block.delay_seconds is not None:
+                raise NotImplementedError(
+                    "Differentiable embedded-network FDTD does not support explicit delay state."
+                )
+            model = block.model
+            if isinstance(model, RationalModel):
+                unsupported = tuple(
+                    name
+                    for name in ("poles", "proportional")
+                    if getattr(model, name).requires_grad
+                )
+                if unsupported:
+                    raise NotImplementedError(
+                        "Differentiable embedded RationalModel supports residues and direct "
+                        f"terms only; trainable {unsupported!r} are not supported."
+                    )
+            elif isinstance(model, StateSpaceNetwork) and any(
+                getattr(model, name).requires_grad for name in ("A", "B", "C", "D")
+            ):
+                raise NotImplementedError(
+                    "Differentiable embedded networks accept trainable residues/direct on a "
+                    "pre-fitted RationalModel; direct trainable state-space matrices are not supported."
+                )
         unsupported_medium_message = _unsupported_adjoint_medium(
             solver.scene,
             trainable_geometry_indices=getattr(
@@ -650,6 +691,7 @@ class _FDTDGradientBridge:
             if solver._source_terms:
                 solver.add_source(time_value=time_value)
             apply_port_runtimes(solver)
+            apply_network_runtimes(solver)
             solver._apply_dispersive_corrections()
             if not getattr(solver, "tfsf_enabled", False):
                 solver._enforce_pec_boundaries()
@@ -676,6 +718,7 @@ class _FDTDGradientBridge:
         circuits = finalize_circuit_data(solver)
         if circuits:
             raw_output["circuits"] = circuits
+        self._last_embedded_networks = finalize_embedded_networks(solver, ports)
         return raw_output or None, tuple(checkpoints)
 
     def forward(self, material_inputs):
@@ -897,6 +940,7 @@ class _FDTDGradientBridge:
                 mid_magnetic = [] if capture_mid_magnetic else None
                 lumped_traces = [] if checkpoint_schema.lumped_state_names else None
                 circuit_traces = [] if checkpoint_schema.circuit_state_names else None
+                network_traces = [] if checkpoint_schema.network_state_names else None
                 with profiler.section("segment_replay"):
                     states = runtime._replay_segment_states(
                         solver,
@@ -906,6 +950,7 @@ class _FDTDGradientBridge:
                         mid_magnetic_out=mid_magnetic,
                         lumped_traces_out=lumped_traces,
                         circuit_traces_out=circuit_traces,
+                        network_traces_out=network_traces,
                     )
                 for offset in range(end_step - start_step - 1, -1, -1):
                     step_index = start_step + offset
@@ -925,6 +970,19 @@ class _FDTDGradientBridge:
                         seed_runtime,
                         step_index,
                     )
+                    if network_traces is not None:
+                        post_step_adjoint, local_grad_eps, step_rf_grads = pullback_network_runtimes(
+                            solver,
+                            network_traces[offset],
+                            post_step_adjoint,
+                            port_sample_adjoints=sample_adjoints,
+                            eps_by_field={"Ex": eps_ex, "Ey": eps_ey, "Ez": eps_ez},
+                        )
+                        for key, value in step_rf_grads.items():
+                            semantic_rf_grads[key] = semantic_rf_grads.get(
+                                key,
+                                torch.zeros_like(value),
+                            ) + value
                     if circuit_traces is not None:
                         (
                             post_step_adjoint,
@@ -1031,6 +1089,8 @@ class _FDTDGradientBridge:
                         checkpoint_schema.lumped_state_names
                         + checkpoint_schema.circuit_state_names
                     ):
+                        adjoint_state[name] = post_step_adjoint[name]
+                    for name in checkpoint_schema.network_state_names:
                         adjoint_state[name] = post_step_adjoint[name]
 
             with profiler.section("material_pullback"):
@@ -1149,6 +1209,23 @@ def run_fdtd_with_gradient_bridge(simulation) -> Result:
     raw_outputs = _FDTDMaterialGradientFunction.apply(bridge, *bridge.trainable_inputs)
     output_tensors = raw_outputs if isinstance(raw_outputs, tuple) else (raw_outputs,)
     fields, monitors, ports, circuits, raw_output = bridge.rebuild_forward_outputs(output_tensors)
+    embedded_networks = {}
+    for name, template in bridge._last_embedded_networks.items():
+        connection_names = tuple(template.metadata["connections"])
+        connected = tuple(ports[port_name] for port_name in connection_names)
+        voltage = torch.stack(tuple(data.voltage for data in connected), dim=0)
+        current = torch.stack(tuple(-data.current for data in connected), dim=0)
+        port_power = 0.5 * torch.real(voltage * torch.conj(current))
+        net_power = torch.sum(port_power, dim=0)
+        embedded_networks[name] = replace(
+            template,
+            frequencies=connected[0].frequencies,
+            voltage=voltage,
+            current=current,
+            port_power=port_power,
+            absorbed_power=torch.clamp(net_power, min=0.0),
+            generated_power=torch.clamp(-net_power, min=0.0),
+        )
     return Result(
         method="fdtd",
         scene=simulation.scene,
@@ -1163,4 +1240,5 @@ def run_fdtd_with_gradient_bridge(simulation) -> Result:
         metadata=simulation.metadata,
         solver_stats=bridge._last_solver_stats,
         raw_output=raw_output,
+        embedded_networks=embedded_networks,
     )
