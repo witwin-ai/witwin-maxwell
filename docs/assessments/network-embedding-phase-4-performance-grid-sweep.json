@@ -1,0 +1,60 @@
+{
+  "device_name": "NVIDIA RTX A6000",
+  "gate": "plan 03 Phase 4 gate (d): connected 8-port/order-32 step overhead < 10% (representative grid)",
+  "gate_10pct_crossover_grid_approx": 224,
+  "harness": "tests/support/benchmark_network_embedding.py",
+  "kind": "network_embedding_phase4_grid_sweep",
+  "notes": "Connected path activates field+network+port_observer CUDA graphs and reports linear state_count=256 (=8*32). The connected network adds a near-constant ~0.20 ms/step absolute cost independent of grid size (8 ports, order-32 model, implicit solve size 8, port observers). The overhead PERCENTAGE therefore only falls below the 10% gate once the bare field step is large enough to amortize it: it crosses 10% near grid 224^3. At the harness's default representative grid (64^3) the overhead is 138%. VERDICT: gate (d) FAILS at the default/representative grid; it passes only for very large (>=~224^3) meshes.",
+  "primary_artifact": "docs/assessments/network-embedding-phase-4-performance.json",
+  "schema_version": 1,
+  "sweep": [
+    {
+      "baseline_median_ms": 279.6922912597656,
+      "connected_median_ms": 665.9415893554688,
+      "connected_minus_baseline_ms_per_step": 0.19312464904785157,
+      "grid_cells_per_axis": 64,
+      "overhead_pct": 138.09794197615983,
+      "passed_10pct_gate": false,
+      "time_steps": 2000
+    },
+    {
+      "baseline_median_ms": 607.679,
+      "connected_median_ms": 910.994,
+      "connected_minus_baseline_ms_per_step": 0.20221000000000003,
+      "grid_cells_per_axis": 96,
+      "overhead_pct": 49.91,
+      "passed_10pct_gate": false,
+      "time_steps": 1500
+    },
+    {
+      "baseline_median_ms": 736.402,
+      "connected_median_ms": 1042.807,
+      "connected_minus_baseline_ms_per_step": 0.20426999999999998,
+      "grid_cells_per_axis": 128,
+      "overhead_pct": 41.61,
+      "passed_10pct_gate": false,
+      "time_steps": 1500
+    },
+    {
+      "baseline_median_ms": 1643.831,
+      "connected_median_ms": 1944.363,
+      "connected_minus_baseline_ms_per_step": 0.20035466666666676,
+      "grid_cells_per_axis": 176,
+      "overhead_pct": 18.28,
+      "passed_10pct_gate": false,
+      "time_steps": 1500
+    },
+    {
+      "baseline_median_ms": 3136.525,
+      "connected_median_ms": 3438.977,
+      "connected_minus_baseline_ms_per_step": 0.20163466666666652,
+      "grid_cells_per_axis": 224,
+      "overhead_pct": 9.64,
+      "passed_10pct_gate": true,
+      "time_steps": 1500
+    }
+  ],
+  "timestamp_utc": "2026-07-17T20:43:16.961385+00:00",
+  "title": "Gate (d) 8-port/order-32 connected overhead vs grid size",
+  "verdict": "FAIL at representative default grid (64^3, 138%); PASS only >=~224^3"
+}

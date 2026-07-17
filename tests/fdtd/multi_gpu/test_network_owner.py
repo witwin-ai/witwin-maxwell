@@ -523,6 +523,26 @@ def test_distributed_out_of_band_frequency_request_is_rejected_like_single_devic
         ).prepare()
 
 
+def test_distributed_multi_frequency_out_of_band_request_is_rejected_via_simulation_plumb(
+    cuda_p2p_devices,
+    cuda_memory_cleanup,
+):
+    # Mixed request: the time-stepping frequency (frequencies[0]) is IN band, so
+    # DistributedFDTD's own default requested-frequency set would NOT contain the
+    # out-of-band member and the fitted-band 'reject' contract would not fire.
+    # Only the Simulation-level plumb (simulation.py:
+    # ``solver._requested_port_frequencies = self.frequencies``) forwards the full
+    # requested-frequency tuple to the owner shard. The single-frequency test above
+    # cannot exercise this line because its lone out-of-band frequency is already
+    # the time-stepping frequency that DistributedFDTD sees by default.
+    with pytest.raises(ValueError, match="rejects requested frequencies"):
+        mw.Simulation.fdtd(
+            _two_shard_network_scene(device=str(cuda_p2p_devices[0])),
+            frequencies=(_FREQUENCY, _OUT_OF_BAND_FREQUENCY),
+            parallel=FDTDParallelConfig(devices=cuda_p2p_devices),
+        ).prepare()
+
+
 def test_in_band_frequency_request_is_accepted_on_distributed_path(
     cuda_p2p_devices,
     cuda_memory_cleanup,

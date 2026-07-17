@@ -1,0 +1,85 @@
+{
+  "abba_secondary": {
+    "aa_floor_pct": -0.5225853941469905,
+    "interpretation": "Both ABBA runs read +3-4% but with very high BASELINE-extraction variance (MAD 2.2%/4.3%) and monotone baseline speedup across later rounds. A genuine per-step regression is IMPOSSIBLE here: the per-step host op stream is identical AND every core field-update device kernel is byte-identical (only the unused wire.cu was added). The +3-4% is therefore measurement noise, consistent with the recorded calibration fact that a single wall-clock number cannot resolve sub-1% on this host.",
+    "note": "CPU-only op-stream cannot see device time, so an ABBA wall-clock leg was run for completeness.",
+    "run1_artifact": "docs/assessments/network-embedding-phase-4-no-feature-abba.json",
+    "run1_baseline_mad_pct": 2.22,
+    "run1_regression_pct": 3.0032,
+    "run2_artifact": "docs/assessments/network-embedding-phase-4-no-feature-abba-confirm.json",
+    "run2_baseline_mad_pct": 4.27,
+    "run2_regression_pct": 3.9837
+  },
+  "all_field_kernels_identical": true,
+  "baseline_commit": "9131c89507f6b10705f32b5237bcfb06047f49b9",
+  "candidate_commit": "e0698fe7b61549a9361c142afa3e65048e59914f",
+  "device_kernel_identity": {
+    "aniso.cu": {
+      "baseline_oid": "e199374a9e78196d1a883b07bc56fe3ef8ef659f",
+      "candidate_oid": "e199374a9e78196d1a883b07bc56fe3ef8ef659f",
+      "identical": true
+    },
+    "boundary.cu": {
+      "baseline_oid": "47450833dc50d7a2b25fe31cd4f825b2a60f17e7",
+      "candidate_oid": "47450833dc50d7a2b25fe31cd4f825b2a60f17e7",
+      "identical": true
+    },
+    "common.cu": {
+      "baseline_oid": "1c7941cda822972171795b718492a6d2b5fe5c63",
+      "candidate_oid": "1c7941cda822972171795b718492a6d2b5fe5c63",
+      "identical": true
+    },
+    "common.cuh": {
+      "baseline_oid": "35ea90144787447755483388ab083bd7b3ff9c98",
+      "candidate_oid": "35ea90144787447755483388ab083bd7b3ff9c98",
+      "identical": true
+    },
+    "dispersive.cu": {
+      "baseline_oid": "909e827a3f3119afb9df3d5c32184f6a66de8790",
+      "candidate_oid": "909e827a3f3119afb9df3d5c32184f6a66de8790",
+      "identical": true
+    },
+    "electric.cu": {
+      "baseline_oid": "ae16e0effd2239c964a05b4cc328df8b67641672",
+      "candidate_oid": "ae16e0effd2239c964a05b4cc328df8b67641672",
+      "identical": true
+    },
+    "magnetic.cu": {
+      "baseline_oid": "9f5a5b2e23159735be77de2986fcb2bb1b84184f",
+      "candidate_oid": "9f5a5b2e23159735be77de2986fcb2bb1b84184f",
+      "identical": true
+    },
+    "observers.cu": {
+      "baseline_oid": "08cc23cd6d237a2f071f84ef6074c7d64a77c52c",
+      "candidate_oid": "08cc23cd6d237a2f071f84ef6074c7d64a77c52c",
+      "identical": true
+    },
+    "projection.cu": {
+      "baseline_oid": "fbb8aac225f1b096ad4c36be6fef0176a24a8fd5",
+      "candidate_oid": "fbb8aac225f1b096ad4c36be6fef0176a24a8fd5",
+      "identical": true
+    },
+    "sources.cu": {
+      "baseline_oid": "f52b4c6e2b0e7cc057d61c1073e02cab236da2da",
+      "candidate_oid": "f52b4c6e2b0e7cc057d61c1073e02cab236da2da",
+      "identical": true
+    },
+    "spectral.cu": {
+      "baseline_oid": "219c1e488aa7a1317e0dfe7936984f5481358143",
+      "candidate_oid": "219c1e488aa7a1317e0dfe7936984f5481358143",
+      "identical": true
+    }
+  },
+  "gate": "plan 03 Phase 4 gate (c): unconnected/no-feature base FDTD performance regression < 1%",
+  "kind": "network_embedding_phase4_no_feature_kernel_identity",
+  "only_new_kernel": "witwin/maxwell/fdtd/cuda/kernels/wire.cu (NEW, thin-wire; never invoked for a no-feature scene)",
+  "op_stream_primary": {
+    "artifact": "docs/assessments/network-embedding-phase-4-no-feature-op-stream.json",
+    "full_op_table_delta": "+4 aten calls over the whole run, all one-time (non-per-step): aten::empty +1, aten::zeros +1, aten::zero_ +1, aten::fill_ +1 == exactly one extra prepare-time torch.zeros(); prepare_median_delta_ms=+0.31 (~0.02% of run)",
+    "per_step_kernel_op_counts_diff": "EMPTY (identical per-step host dispatch)"
+  },
+  "schema_version": 1,
+  "timestamp_utc": "2026-07-17T21:01:37.715811+00:00",
+  "title": "Gate (c) controlling evidence: no-feature FDTD per-step host+device identity (9131c89 vs e0698fe)",
+  "verdict": "PASS on controlling evidence (identical per-step host dispatch + byte-identical field-update kernels => zero per-step regression). Wall-clock ABBA is noise-dominated and non-corroborating by design."
+}

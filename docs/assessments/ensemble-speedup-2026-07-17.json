@@ -1,0 +1,111 @@
+{
+  "configuration": {
+    "cuda_graph": false,
+    "devices": [
+      "cuda:0",
+      "cuda:1"
+    ],
+    "full_field_dft": false,
+    "grid_cells_per_axis": 128,
+    "repeats": 5,
+    "serial_device": [
+      "cuda:0"
+    ],
+    "simulations": 8,
+    "time_steps": 800
+  },
+  "environment": {
+    "compute_capability": "8.6",
+    "cuda_runtime": "13.0",
+    "device_count": 2,
+    "device_name": "NVIDIA RTX A6000",
+    "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "torch": "2.13.0+cu130"
+  },
+  "grid_sweep_context": {
+    "note": "Ensemble parallelism requires GPU-bound tasks. Eager execution dispatches from ThreadPoolExecutor workers that contend on the Python GIL, so dispatch-bound (small) sims do not overlap; genuinely GPU-bound sims do. CUDA graphs (which would free the GIL) cannot be captured concurrently across the ensemble threads, so eager mode is used.",
+    "serial_vs_2gpu_ratio_by_grid": [
+      {
+        "grid": 64,
+        "ratio_median": 0.9256,
+        "regime": "host-dispatch/GIL-bound (no overlap)",
+        "steps": 2000
+      },
+      {
+        "grid": 128,
+        "ratio_median": 1.9628,
+        "regime": "GPU-bound (near-ideal 2x) -- canonical",
+        "steps": 800
+      },
+      {
+        "grid": 160,
+        "ratio_median": 1.9612,
+        "regime": "GPU-bound (near-ideal 2x)",
+        "steps": 500
+      },
+      {
+        "grid": 192,
+        "ratio_median": 1.676,
+        "regime": "GPU-bound, shorter run (warmup/bandwidth erode ratio)",
+        "steps": 350
+      }
+    ]
+  },
+  "ideal_ratio": 2.0,
+  "kind": "ensemble_speedup",
+  "parallel": {
+    "device_task_counts": {
+      "cuda:0": 4,
+      "cuda:1": 4
+    },
+    "mad_wall_s": 0.00125494587700814,
+    "median_wall_s": 1.6736241539474577,
+    "per_task_device_time_s": [
+      0.41818316650390625,
+      0.4148614196777344,
+      0.41456353759765624,
+      0.4172851257324219,
+      0.413973388671875,
+      0.4176486511230469,
+      0.4175390625,
+      0.4185535888671875
+    ],
+    "wall_s_samples": [
+      1.7281049570301548,
+      1.7862868859665468,
+      1.6723692080704495,
+      1.6736241539474577,
+      1.6729778189910576
+    ]
+  },
+  "schema_version": 1,
+  "serial": {
+    "device_task_counts": {
+      "cuda:0": 8
+    },
+    "mad_wall_s": 0.005616741138510406,
+    "median_wall_s": 3.316693152068183,
+    "wall_s_samples": [
+      3.311021149973385,
+      3.3396170740015805,
+      3.3110764109296724,
+      3.319860296905972,
+      3.316693152068183
+    ]
+  },
+  "speedup_ratio": {
+    "mad": 0.0037638403918853758,
+    "median": 1.9798716664664824,
+    "samples": [
+      1.9159838275468872,
+      1.8695860671868159,
+      1.9798716664664824,
+      1.9836355068583678,
+      1.9825087424461012
+    ]
+  },
+  "timestamp_utc": "2026-07-17T21:13:21.822400+00:00",
+  "title": "Ensemble wall-clock speedup (serial vs multi-GPU) over N independent sims",
+  "verdict": "MEASURED: ensemble delivers ~1.96x on 2 GPUs for GPU-bound mid-size sims (128^3/160^3), near the ideal 2x. Dispatch-bound eager 64^3 sims show 0.93x (GIL-serialized), matching the 'GPU-bound' precondition."
+}

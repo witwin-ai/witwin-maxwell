@@ -1,0 +1,1063 @@
+{
+  "baseline": {
+    "environment": {
+      "compute_capability": "8.6",
+      "cuda_extension": "0",
+      "cuda_runtime": "13.0",
+      "device_name": "NVIDIA RTX A6000",
+      "fdtd_backend": "cuda",
+      "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+      "python": "3.11.15",
+      "torch": "2.13.0+cu130"
+    },
+    "git": {
+      "commit": null,
+      "dirty_tracked_files": null,
+      "is_checkout_root": false,
+      "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+      "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw",
+      "tracked_status": []
+    },
+    "mad_ms": 24.03271484375,
+    "median_ms": 2976.8907470703125,
+    "samples_ms": [
+      2977.474365234375,
+      2975.37548828125,
+      3022.290771484375,
+      2980.21923828125,
+      2990.175048828125,
+      3083.842041015625,
+      3082.45458984375,
+      3091.80615234375,
+      3089.886962890625,
+      3102.43359375,
+      2945.923095703125,
+      2940.96142578125,
+      2943.606201171875,
+      2952.07763671875,
+      2956.8125,
+      2958.6552734375,
+      2953.25390625,
+      2941.706298828125,
+      2951.05322265625,
+      2959.8818359375,
+      2959.490234375,
+      2976.30712890625,
+      2987.551025390625,
+      2980.677001953125,
+      2991.8359375,
+      3001.3193359375,
+      2967.97265625,
+      3002.1513671875,
+      2967.191162109375,
+      3005.422607421875
+    ]
+  },
+  "blocks": [
+    {
+      "configuration": {
+        "cuda_graph": false,
+        "device": "cuda",
+        "frequency_hz": 1000000000.0,
+        "full_field_dft": false,
+        "generic_field_monitors": 1,
+        "grid_cells_per_axis": 24,
+        "lumped_elements": 0,
+        "ports": 0,
+        "rf_monitors": 0,
+        "time_steps": 4000,
+        "timed_runs": 5,
+        "warmup_runs": 2
+      },
+      "environment": {
+        "compute_capability": "8.6",
+        "cuda_extension": "0",
+        "cuda_runtime": "13.0",
+        "device_name": "NVIDIA RTX A6000",
+        "fdtd_backend": "cuda",
+        "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+        "python": "3.11.15",
+        "torch": "2.13.0+cu130"
+      },
+      "execution": {
+        "command": [
+          "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+          "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+          "sample",
+          "--label",
+          "baseline",
+          "--warmup",
+          "2",
+          "--repeats",
+          "5",
+          "--steps",
+          "4000",
+          "--grid-cells",
+          "24"
+        ],
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw"
+      },
+      "git": {
+        "commit": null,
+        "dirty_tracked_files": null,
+        "is_checkout_root": false,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw",
+        "tracked_status": []
+      },
+      "kind": "rf_no_feature_sample",
+      "label": "baseline",
+      "mad_ms": 4.84375,
+      "max_ms": 3022.290771484375,
+      "median_ms": 2980.21923828125,
+      "median_ms_per_step": 0.7450548095703124,
+      "min_ms": 2975.37548828125,
+      "samples_ms": [
+        2977.474365234375,
+        2975.37548828125,
+        3022.290771484375,
+        2980.21923828125,
+        2990.175048828125
+      ],
+      "schema_version": 2,
+      "timestamp_utc": "2026-07-17T21:03:39.861089+00:00"
+    },
+    {
+      "configuration": {
+        "cuda_graph": false,
+        "device": "cuda",
+        "frequency_hz": 1000000000.0,
+        "full_field_dft": false,
+        "generic_field_monitors": 1,
+        "grid_cells_per_axis": 24,
+        "lumped_elements": 0,
+        "ports": 0,
+        "rf_monitors": 0,
+        "time_steps": 4000,
+        "timed_runs": 5,
+        "warmup_runs": 2
+      },
+      "environment": {
+        "compute_capability": "8.6",
+        "cuda_extension": "0",
+        "cuda_runtime": "13.0",
+        "device_name": "NVIDIA RTX A6000",
+        "fdtd_backend": "cuda",
+        "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+        "python": "3.11.15",
+        "torch": "2.13.0+cu130"
+      },
+      "execution": {
+        "command": [
+          "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+          "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+          "sample",
+          "--label",
+          "candidate",
+          "--warmup",
+          "2",
+          "--repeats",
+          "5",
+          "--steps",
+          "4000",
+          "--grid-cells",
+          "24"
+        ],
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration"
+      },
+      "git": {
+        "commit": "e0698fe7b61549a9361c142afa3e65048e59914f",
+        "dirty_tracked_files": false,
+        "is_checkout_root": true,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "tracked_status": []
+      },
+      "kind": "rf_no_feature_sample",
+      "label": "candidate",
+      "mad_ms": 4.62744140625,
+      "max_ms": 1320.1336669921875,
+      "median_ms": 1314.2879638671875,
+      "median_ms_per_step": 0.3285719909667969,
+      "min_ms": 1308.4942626953125,
+      "samples_ms": [
+        1309.6605224609375,
+        1320.1336669921875,
+        1308.4942626953125,
+        1314.2879638671875,
+        1318.2913818359375
+      ],
+      "schema_version": 2,
+      "timestamp_utc": "2026-07-17T21:03:52.399249+00:00"
+    },
+    {
+      "configuration": {
+        "cuda_graph": false,
+        "device": "cuda",
+        "frequency_hz": 1000000000.0,
+        "full_field_dft": false,
+        "generic_field_monitors": 1,
+        "grid_cells_per_axis": 24,
+        "lumped_elements": 0,
+        "ports": 0,
+        "rf_monitors": 0,
+        "time_steps": 4000,
+        "timed_runs": 5,
+        "warmup_runs": 2
+      },
+      "environment": {
+        "compute_capability": "8.6",
+        "cuda_extension": "0",
+        "cuda_runtime": "13.0",
+        "device_name": "NVIDIA RTX A6000",
+        "fdtd_backend": "cuda",
+        "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+        "python": "3.11.15",
+        "torch": "2.13.0+cu130"
+      },
+      "execution": {
+        "command": [
+          "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+          "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+          "sample",
+          "--label",
+          "candidate",
+          "--warmup",
+          "2",
+          "--repeats",
+          "5",
+          "--steps",
+          "4000",
+          "--grid-cells",
+          "24"
+        ],
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration"
+      },
+      "git": {
+        "commit": "e0698fe7b61549a9361c142afa3e65048e59914f",
+        "dirty_tracked_files": false,
+        "is_checkout_root": true,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "tracked_status": []
+      },
+      "kind": "rf_no_feature_sample",
+      "label": "candidate",
+      "mad_ms": 1.1339111328125,
+      "max_ms": 1321.1282958984375,
+      "median_ms": 1319.994384765625,
+      "median_ms_per_step": 0.32999859619140626,
+      "min_ms": 1308.45166015625,
+      "samples_ms": [
+        1308.45166015625,
+        1320.29638671875,
+        1319.994384765625,
+        1321.1282958984375,
+        1313.6436767578125
+      ],
+      "schema_version": 2,
+      "timestamp_utc": "2026-07-17T21:04:05.008471+00:00"
+    },
+    {
+      "configuration": {
+        "cuda_graph": false,
+        "device": "cuda",
+        "frequency_hz": 1000000000.0,
+        "full_field_dft": false,
+        "generic_field_monitors": 1,
+        "grid_cells_per_axis": 24,
+        "lumped_elements": 0,
+        "ports": 0,
+        "rf_monitors": 0,
+        "time_steps": 4000,
+        "timed_runs": 5,
+        "warmup_runs": 2
+      },
+      "environment": {
+        "compute_capability": "8.6",
+        "cuda_extension": "0",
+        "cuda_runtime": "13.0",
+        "device_name": "NVIDIA RTX A6000",
+        "fdtd_backend": "cuda",
+        "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+        "python": "3.11.15",
+        "torch": "2.13.0+cu130"
+      },
+      "execution": {
+        "command": [
+          "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+          "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+          "sample",
+          "--label",
+          "baseline",
+          "--warmup",
+          "2",
+          "--repeats",
+          "5",
+          "--steps",
+          "4000",
+          "--grid-cells",
+          "24"
+        ],
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw"
+      },
+      "git": {
+        "commit": null,
+        "dirty_tracked_files": null,
+        "is_checkout_root": false,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw",
+        "tracked_status": []
+      },
+      "kind": "rf_no_feature_sample",
+      "label": "baseline",
+      "mad_ms": 6.044921875,
+      "max_ms": 3102.43359375,
+      "median_ms": 3089.886962890625,
+      "median_ms_per_step": 0.7724717407226562,
+      "min_ms": 3082.45458984375,
+      "samples_ms": [
+        3083.842041015625,
+        3082.45458984375,
+        3091.80615234375,
+        3089.886962890625,
+        3102.43359375
+      ],
+      "schema_version": 2,
+      "timestamp_utc": "2026-07-17T21:04:30.189192+00:00"
+    },
+    {
+      "configuration": {
+        "cuda_graph": false,
+        "device": "cuda",
+        "frequency_hz": 1000000000.0,
+        "full_field_dft": false,
+        "generic_field_monitors": 1,
+        "grid_cells_per_axis": 24,
+        "lumped_elements": 0,
+        "ports": 0,
+        "rf_monitors": 0,
+        "time_steps": 4000,
+        "timed_runs": 5,
+        "warmup_runs": 2
+      },
+      "environment": {
+        "compute_capability": "8.6",
+        "cuda_extension": "0",
+        "cuda_runtime": "13.0",
+        "device_name": "NVIDIA RTX A6000",
+        "fdtd_backend": "cuda",
+        "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+        "python": "3.11.15",
+        "torch": "2.13.0+cu130"
+      },
+      "execution": {
+        "command": [
+          "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+          "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+          "sample",
+          "--label",
+          "candidate",
+          "--warmup",
+          "2",
+          "--repeats",
+          "5",
+          "--steps",
+          "4000",
+          "--grid-cells",
+          "24"
+        ],
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration"
+      },
+      "git": {
+        "commit": "e0698fe7b61549a9361c142afa3e65048e59914f",
+        "dirty_tracked_files": false,
+        "is_checkout_root": true,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "tracked_status": []
+      },
+      "kind": "rf_no_feature_sample",
+      "label": "candidate",
+      "mad_ms": 0.7432861328125,
+      "max_ms": 1312.916015625,
+      "median_ms": 1302.496337890625,
+      "median_ms_per_step": 0.32562408447265623,
+      "min_ms": 1300.0125732421875,
+      "samples_ms": [
+        1303.2396240234375,
+        1312.916015625,
+        1302.058349609375,
+        1300.0125732421875,
+        1302.496337890625
+      ],
+      "schema_version": 2,
+      "timestamp_utc": "2026-07-17T21:04:42.656339+00:00"
+    },
+    {
+      "configuration": {
+        "cuda_graph": false,
+        "device": "cuda",
+        "frequency_hz": 1000000000.0,
+        "full_field_dft": false,
+        "generic_field_monitors": 1,
+        "grid_cells_per_axis": 24,
+        "lumped_elements": 0,
+        "ports": 0,
+        "rf_monitors": 0,
+        "time_steps": 4000,
+        "timed_runs": 5,
+        "warmup_runs": 2
+      },
+      "environment": {
+        "compute_capability": "8.6",
+        "cuda_extension": "0",
+        "cuda_runtime": "13.0",
+        "device_name": "NVIDIA RTX A6000",
+        "fdtd_backend": "cuda",
+        "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+        "python": "3.11.15",
+        "torch": "2.13.0+cu130"
+      },
+      "execution": {
+        "command": [
+          "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+          "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+          "sample",
+          "--label",
+          "baseline",
+          "--warmup",
+          "2",
+          "--repeats",
+          "5",
+          "--steps",
+          "4000",
+          "--grid-cells",
+          "24"
+        ],
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw"
+      },
+      "git": {
+        "commit": null,
+        "dirty_tracked_files": null,
+        "is_checkout_root": false,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw",
+        "tracked_status": []
+      },
+      "kind": "rf_no_feature_sample",
+      "label": "baseline",
+      "mad_ms": 4.961669921875,
+      "max_ms": 2956.8125,
+      "median_ms": 2945.923095703125,
+      "median_ms_per_step": 0.7364807739257813,
+      "min_ms": 2940.96142578125,
+      "samples_ms": [
+        2945.923095703125,
+        2940.96142578125,
+        2943.606201171875,
+        2952.07763671875,
+        2956.8125
+      ],
+      "schema_version": 2,
+      "timestamp_utc": "2026-07-17T21:05:06.843351+00:00"
+    },
+    {
+      "configuration": {
+        "cuda_graph": false,
+        "device": "cuda",
+        "frequency_hz": 1000000000.0,
+        "full_field_dft": false,
+        "generic_field_monitors": 1,
+        "grid_cells_per_axis": 24,
+        "lumped_elements": 0,
+        "ports": 0,
+        "rf_monitors": 0,
+        "time_steps": 4000,
+        "timed_runs": 5,
+        "warmup_runs": 2
+      },
+      "environment": {
+        "compute_capability": "8.6",
+        "cuda_extension": "0",
+        "cuda_runtime": "13.0",
+        "device_name": "NVIDIA RTX A6000",
+        "fdtd_backend": "cuda",
+        "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+        "python": "3.11.15",
+        "torch": "2.13.0+cu130"
+      },
+      "execution": {
+        "command": [
+          "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+          "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+          "sample",
+          "--label",
+          "baseline",
+          "--warmup",
+          "2",
+          "--repeats",
+          "5",
+          "--steps",
+          "4000",
+          "--grid-cells",
+          "24"
+        ],
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw"
+      },
+      "git": {
+        "commit": null,
+        "dirty_tracked_files": null,
+        "is_checkout_root": false,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw",
+        "tracked_status": []
+      },
+      "kind": "rf_no_feature_sample",
+      "label": "baseline",
+      "mad_ms": 5.4013671875,
+      "max_ms": 2959.8818359375,
+      "median_ms": 2953.25390625,
+      "median_ms_per_step": 0.7383134765625,
+      "min_ms": 2941.706298828125,
+      "samples_ms": [
+        2958.6552734375,
+        2953.25390625,
+        2941.706298828125,
+        2951.05322265625,
+        2959.8818359375
+      ],
+      "schema_version": 2,
+      "timestamp_utc": "2026-07-17T21:05:31.074992+00:00"
+    },
+    {
+      "configuration": {
+        "cuda_graph": false,
+        "device": "cuda",
+        "frequency_hz": 1000000000.0,
+        "full_field_dft": false,
+        "generic_field_monitors": 1,
+        "grid_cells_per_axis": 24,
+        "lumped_elements": 0,
+        "ports": 0,
+        "rf_monitors": 0,
+        "time_steps": 4000,
+        "timed_runs": 5,
+        "warmup_runs": 2
+      },
+      "environment": {
+        "compute_capability": "8.6",
+        "cuda_extension": "0",
+        "cuda_runtime": "13.0",
+        "device_name": "NVIDIA RTX A6000",
+        "fdtd_backend": "cuda",
+        "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+        "python": "3.11.15",
+        "torch": "2.13.0+cu130"
+      },
+      "execution": {
+        "command": [
+          "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+          "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+          "sample",
+          "--label",
+          "candidate",
+          "--warmup",
+          "2",
+          "--repeats",
+          "5",
+          "--steps",
+          "4000",
+          "--grid-cells",
+          "24"
+        ],
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration"
+      },
+      "git": {
+        "commit": "e0698fe7b61549a9361c142afa3e65048e59914f",
+        "dirty_tracked_files": false,
+        "is_checkout_root": true,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "tracked_status": []
+      },
+      "kind": "rf_no_feature_sample",
+      "label": "candidate",
+      "mad_ms": 2.4300537109375,
+      "max_ms": 1305.389404296875,
+      "median_ms": 1295.2593994140625,
+      "median_ms_per_step": 0.3238148498535156,
+      "min_ms": 1292.4801025390625,
+      "samples_ms": [
+        1292.4801025390625,
+        1294.58544921875,
+        1297.689453125,
+        1295.2593994140625,
+        1305.389404296875
+      ],
+      "schema_version": 2,
+      "timestamp_utc": "2026-07-17T21:05:43.385909+00:00"
+    },
+    {
+      "configuration": {
+        "cuda_graph": false,
+        "device": "cuda",
+        "frequency_hz": 1000000000.0,
+        "full_field_dft": false,
+        "generic_field_monitors": 1,
+        "grid_cells_per_axis": 24,
+        "lumped_elements": 0,
+        "ports": 0,
+        "rf_monitors": 0,
+        "time_steps": 4000,
+        "timed_runs": 5,
+        "warmup_runs": 2
+      },
+      "environment": {
+        "compute_capability": "8.6",
+        "cuda_extension": "0",
+        "cuda_runtime": "13.0",
+        "device_name": "NVIDIA RTX A6000",
+        "fdtd_backend": "cuda",
+        "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+        "python": "3.11.15",
+        "torch": "2.13.0+cu130"
+      },
+      "execution": {
+        "command": [
+          "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+          "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+          "sample",
+          "--label",
+          "baseline",
+          "--warmup",
+          "2",
+          "--repeats",
+          "5",
+          "--steps",
+          "4000",
+          "--grid-cells",
+          "24"
+        ],
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw"
+      },
+      "git": {
+        "commit": null,
+        "dirty_tracked_files": null,
+        "is_checkout_root": false,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw",
+        "tracked_status": []
+      },
+      "kind": "rf_no_feature_sample",
+      "label": "baseline",
+      "mad_ms": 6.8740234375,
+      "max_ms": 2991.8359375,
+      "median_ms": 2980.677001953125,
+      "median_ms_per_step": 0.7451692504882812,
+      "min_ms": 2959.490234375,
+      "samples_ms": [
+        2959.490234375,
+        2976.30712890625,
+        2987.551025390625,
+        2980.677001953125,
+        2991.8359375
+      ],
+      "schema_version": 2,
+      "timestamp_utc": "2026-07-17T21:06:07.790584+00:00"
+    },
+    {
+      "configuration": {
+        "cuda_graph": false,
+        "device": "cuda",
+        "frequency_hz": 1000000000.0,
+        "full_field_dft": false,
+        "generic_field_monitors": 1,
+        "grid_cells_per_axis": 24,
+        "lumped_elements": 0,
+        "ports": 0,
+        "rf_monitors": 0,
+        "time_steps": 4000,
+        "timed_runs": 5,
+        "warmup_runs": 2
+      },
+      "environment": {
+        "compute_capability": "8.6",
+        "cuda_extension": "0",
+        "cuda_runtime": "13.0",
+        "device_name": "NVIDIA RTX A6000",
+        "fdtd_backend": "cuda",
+        "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+        "python": "3.11.15",
+        "torch": "2.13.0+cu130"
+      },
+      "execution": {
+        "command": [
+          "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+          "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+          "sample",
+          "--label",
+          "candidate",
+          "--warmup",
+          "2",
+          "--repeats",
+          "5",
+          "--steps",
+          "4000",
+          "--grid-cells",
+          "24"
+        ],
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration"
+      },
+      "git": {
+        "commit": "e0698fe7b61549a9361c142afa3e65048e59914f",
+        "dirty_tracked_files": false,
+        "is_checkout_root": true,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "tracked_status": []
+      },
+      "kind": "rf_no_feature_sample",
+      "label": "candidate",
+      "mad_ms": 3.091552734375,
+      "max_ms": 1375.4454345703125,
+      "median_ms": 1372.3538818359375,
+      "median_ms_per_step": 0.3430884704589844,
+      "min_ms": 1363.5567626953125,
+      "samples_ms": [
+        1363.5567626953125,
+        1374.56787109375,
+        1375.4454345703125,
+        1365.9647216796875,
+        1372.3538818359375
+      ],
+      "schema_version": 2,
+      "timestamp_utc": "2026-07-17T21:06:20.691328+00:00"
+    },
+    {
+      "configuration": {
+        "cuda_graph": false,
+        "device": "cuda",
+        "frequency_hz": 1000000000.0,
+        "full_field_dft": false,
+        "generic_field_monitors": 1,
+        "grid_cells_per_axis": 24,
+        "lumped_elements": 0,
+        "ports": 0,
+        "rf_monitors": 0,
+        "time_steps": 4000,
+        "timed_runs": 5,
+        "warmup_runs": 2
+      },
+      "environment": {
+        "compute_capability": "8.6",
+        "cuda_extension": "0",
+        "cuda_runtime": "13.0",
+        "device_name": "NVIDIA RTX A6000",
+        "fdtd_backend": "cuda",
+        "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+        "python": "3.11.15",
+        "torch": "2.13.0+cu130"
+      },
+      "execution": {
+        "command": [
+          "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+          "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+          "sample",
+          "--label",
+          "candidate",
+          "--warmup",
+          "2",
+          "--repeats",
+          "5",
+          "--steps",
+          "4000",
+          "--grid-cells",
+          "24"
+        ],
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration"
+      },
+      "git": {
+        "commit": "e0698fe7b61549a9361c142afa3e65048e59914f",
+        "dirty_tracked_files": false,
+        "is_checkout_root": true,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "tracked_status": []
+      },
+      "kind": "rf_no_feature_sample",
+      "label": "candidate",
+      "mad_ms": 1.226318359375,
+      "max_ms": 1293.53662109375,
+      "median_ms": 1284.6639404296875,
+      "median_ms_per_step": 0.3211659851074219,
+      "min_ms": 1283.4376220703125,
+      "samples_ms": [
+        1289.602294921875,
+        1293.53662109375,
+        1283.7337646484375,
+        1283.4376220703125,
+        1284.6639404296875
+      ],
+      "schema_version": 2,
+      "timestamp_utc": "2026-07-17T21:06:33.038999+00:00"
+    },
+    {
+      "configuration": {
+        "cuda_graph": false,
+        "device": "cuda",
+        "frequency_hz": 1000000000.0,
+        "full_field_dft": false,
+        "generic_field_monitors": 1,
+        "grid_cells_per_axis": 24,
+        "lumped_elements": 0,
+        "ports": 0,
+        "rf_monitors": 0,
+        "time_steps": 4000,
+        "timed_runs": 5,
+        "warmup_runs": 2
+      },
+      "environment": {
+        "compute_capability": "8.6",
+        "cuda_extension": "0",
+        "cuda_runtime": "13.0",
+        "device_name": "NVIDIA RTX A6000",
+        "fdtd_backend": "cuda",
+        "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+        "python": "3.11.15",
+        "torch": "2.13.0+cu130"
+      },
+      "execution": {
+        "command": [
+          "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+          "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+          "sample",
+          "--label",
+          "baseline",
+          "--warmup",
+          "2",
+          "--repeats",
+          "5",
+          "--steps",
+          "4000",
+          "--grid-cells",
+          "24"
+        ],
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw"
+      },
+      "git": {
+        "commit": null,
+        "dirty_tracked_files": null,
+        "is_checkout_root": false,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw",
+        "tracked_status": []
+      },
+      "kind": "rf_no_feature_sample",
+      "label": "baseline",
+      "mad_ms": 4.103271484375,
+      "max_ms": 3005.422607421875,
+      "median_ms": 3001.3193359375,
+      "median_ms_per_step": 0.750329833984375,
+      "min_ms": 2967.191162109375,
+      "samples_ms": [
+        3001.3193359375,
+        2967.97265625,
+        3002.1513671875,
+        2967.191162109375,
+        3005.422607421875
+      ],
+      "schema_version": 2,
+      "timestamp_utc": "2026-07-17T21:06:57.517666+00:00"
+    }
+  ],
+  "candidate": {
+    "environment": {
+      "compute_capability": "8.6",
+      "cuda_extension": "0",
+      "cuda_runtime": "13.0",
+      "device_name": "NVIDIA RTX A6000",
+      "fdtd_backend": "cuda",
+      "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+      "python": "3.11.15",
+      "torch": "2.13.0+cu130"
+    },
+    "git": {
+      "commit": "e0698fe7b61549a9361c142afa3e65048e59914f",
+      "dirty_tracked_files": false,
+      "is_checkout_root": true,
+      "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+      "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+      "tracked_status": []
+    },
+    "mad_ms": 11.7420654296875,
+    "median_ms": 1308.4729614257812,
+    "samples_ms": [
+      1309.6605224609375,
+      1320.1336669921875,
+      1308.4942626953125,
+      1314.2879638671875,
+      1318.2913818359375,
+      1308.45166015625,
+      1320.29638671875,
+      1319.994384765625,
+      1321.1282958984375,
+      1313.6436767578125,
+      1303.2396240234375,
+      1312.916015625,
+      1302.058349609375,
+      1300.0125732421875,
+      1302.496337890625,
+      1292.4801025390625,
+      1294.58544921875,
+      1297.689453125,
+      1295.2593994140625,
+      1305.389404296875,
+      1363.5567626953125,
+      1374.56787109375,
+      1375.4454345703125,
+      1365.9647216796875,
+      1372.3538818359375,
+      1289.602294921875,
+      1293.53662109375,
+      1283.7337646484375,
+      1283.4376220703125,
+      1284.6639404296875
+    ]
+  },
+  "configuration": {
+    "grid_cells_per_axis": 24,
+    "maximum_regression_pct": 1.0,
+    "rounds": 3,
+    "time_steps": 4000,
+    "timed_runs_per_block": 5,
+    "warmup_runs_per_block": 2
+  },
+  "kind": "port_hot_path_timing",
+  "method": "CUDA event timing, untimed warmup, alternating ABBA/BAAB blocks, median paired-round ratio",
+  "passed": true,
+  "provenance": {
+    "baseline": {
+      "archive": {
+        "bytes": 1794296,
+        "resolved_path": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b.zip",
+        "sha256": "7e4b564b3d06f743c05661c3f00d8b36081654585327f55eaee59d322acc8a7e"
+      },
+      "checkout": {
+        "commit": null,
+        "dirty_tracked_files": null,
+        "is_checkout_root": false,
+        "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw",
+        "tracked_status": []
+      },
+      "expected_commit": "eb9258b",
+      "git_tree": "d6c458f856bfde0981bb98aa9943e3331fa5344f",
+      "git_tree_binding": {
+        "archive": {
+          "bytes": 1794296,
+          "file_count": 499,
+          "resolved_path": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b.zip",
+          "sha256": "7e4b564b3d06f743c05661c3f00d8b36081654585327f55eaee59d322acc8a7e",
+          "verified": true
+        },
+        "content_hash_method": "raw extracted bytes",
+        "file_count": 499,
+        "manifest_sha256": "d419829f90b9f82b08fdd3cfbab7547cd649a9ac5e30078f82f240be2bf0a87a",
+        "object_format": "sha1",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw",
+        "verified": true
+      },
+      "resolved_commit": "eb9258b7ae7c033b56f040fee93090d0885fd40e",
+      "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw",
+      "tree_digest": {
+        "algorithm": "sha256",
+        "bytes": 7411455,
+        "file_count": 499,
+        "format": "witwin-maxwell-tree-v1",
+        "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw",
+        "sha256": "033d26ddc54ec4c1c779635af0de6dd252b68898888ef7861f381080f7212fa5"
+      }
+    },
+    "candidate": {
+      "commit": "e0698fe7b61549a9361c142afa3e65048e59914f",
+      "content_manifest": {
+        "format": "witwin-maxwell-worktree-v1",
+        "missing_tracked_paths": [],
+        "relevant_untracked_paths": [],
+        "sha256": "b9a1bae194e506c6424bf7c52a70d58f89aedb49c063fdb9c5af6ae81c6159c6",
+        "tracked_file_count": 546
+      },
+      "dirty_tracked_files": false,
+      "is_checkout_root": true,
+      "repository_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+      "resolved_root": "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+      "tracked_status": []
+    },
+    "orchestrator_command": [
+      "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+      "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py",
+      "compare",
+      "--baseline-root",
+      "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b_raw",
+      "--candidate-root",
+      "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration",
+      "--baseline-commit",
+      "eb9258b",
+      "--baseline-archive",
+      "/home/xingyu/code/witwin/witwin-maxwell/.worktrees/integration/build/baselines/hotpath_eb9258b.zip",
+      "--python",
+      "/home/xingyu/miniconda3/envs/maxwell/bin/python",
+      "--rounds",
+      "3",
+      "--warmup",
+      "2",
+      "--repeats",
+      "5",
+      "--steps",
+      "4000",
+      "--grid-cells",
+      "24",
+      "--max-regression-pct",
+      "1.0",
+      "--output",
+      "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/hotpath_timing.json"
+    ],
+    "python": "/home/xingyu/miniconda3/envs/maxwell/bin/python3.11",
+    "runner": "/tmp/claude-1004/-home-xingyu-code-witwin-witwin-maxwell/fc359859-cab3-4d58-84d4-bba00d3d634c/scratchpad/benchmark_series_rlc_hotpath.py"
+  },
+  "regression_pct": -55.96409912018895,
+  "rounds": [
+    {
+      "baseline_median_ms": 3035.0531005859375,
+      "candidate_median_ms": 1317.1411743164062,
+      "ratio": 0.4339763195781066
+    },
+    {
+      "baseline_median_ms": 2949.5885009765625,
+      "candidate_median_ms": 1298.8778686523438,
+      "ratio": 0.4403590087981105
+    },
+    {
+      "baseline_median_ms": 2990.9981689453125,
+      "candidate_median_ms": 1328.5089111328125,
+      "ratio": 0.44416908205639993
+    }
+  ],
+  "scenario": {
+    "aa_floor_pct": -0.5225853941469905,
+    "baseline_commit": "eb9258b (= 8605d27^, the op-inventory's declared 'before'; 0 hot-path signatures)",
+    "baseline_correction": "The brief specified 1d5e624 as the pre-hot-path baseline, but git shows 1d5e624 ALREADY CONTAINS the hot-path perf commit 8605d27 (both carry the diagnostics_enabled opt-in; 1d5e624 descends from the b70ee2a hot-path merge). Using 1d5e624 would compare optimized-vs-optimized. The true pre-hot-path base is eb9258b (8605d27^), which is exactly the op-inventory JSON's 'before'. Baseline was corrected to eb9258b.",
+    "baseline_ms_per_step": 0.7442226867675781,
+    "candidate_commit": "e0698fe (merged tree; carries hot-path 8605d27 + later port refinements)",
+    "candidate_ms_per_step": 0.3271182403564453,
+    "gate": "deferred ms/step leg of the port hot-path op-inventory (docs/assessments/port-hot-path-op-inventory-2026-07-17.json)",
+    "op_count_corroboration": "op-inventory: series_rlc_lumped_port launches/step 62 -> 22, allocs 12 -> 0, DtoD 16 -> 2",
+    "scene": "one passive SeriesRLC(r=25,l=0.5nH,c=1pF) lumped port, grid 0.005, 24^3 launch-bound, boundary=none, eager (cuda_graph=False)",
+    "speedup_pct": 56.045650559614714,
+    "title": "Passive SeriesRLC lumped-port per-step timing (pre-hot-path vs merged tree)",
+    "verdict": "MEASURED WIN, far outside the A/A floor: candidate is 55.96% faster per step (0.744 -> 0.327 ms/step), round ratios 0.434/0.440/0.444 (stable). The op-count contract is corroborated in wall-clock; NOT INCONCLUSIVE."
+  },
+  "schema_version": 2,
+  "timestamp_utc": "2026-07-17T21:06:58.358674+00:00"
+}
