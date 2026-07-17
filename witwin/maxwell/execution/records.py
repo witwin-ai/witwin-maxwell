@@ -11,7 +11,9 @@ class FailureKind(str, Enum):
     - ``CAPACITY``: the per-task memory-estimation preflight predicted the task
       cannot fit on any leased device; the task was never executed.
     - ``RUNTIME``: the task callable raised while preparing or running.
-    - ``CANCELLED``: ``fail_fast`` aborted the plan before this task started.
+    - ``CANCELLED``: ``fail_fast`` aborted the plan before this task began
+      running -- either before its capacity preflight or right after it leased a
+      device but before entering the task callable.
     """
 
     CAPACITY = "capacity"
@@ -82,8 +84,10 @@ class ResultSequence:
     """Ordered container of ensemble task outcomes preserving submission order.
 
     ``entries`` returns ``Result | DistributedFailure`` per slot without raising;
-    indexing returns the ``Result`` and raises the slot's ``DistributedFailure``
-    for a failed task, so a failure is never silently dropped.
+    indexing and iteration both return the ``Result`` and raise the slot's
+    ``DistributedFailure`` for a failed task, so a failure is never silently
+    dropped and ``list(seq)`` agrees with ``[seq[i] for i in range(len(seq))]``.
+    Use ``entries`` for the non-raising union view.
     """
 
     def __init__(self, entries, records):
@@ -102,7 +106,8 @@ class ResultSequence:
         return entry
 
     def __iter__(self) -> Iterator[Any]:
-        return iter(self._entries)
+        for index in range(len(self._entries)):
+            yield self[index]
 
     @property
     def entries(self) -> tuple[Any, ...]:

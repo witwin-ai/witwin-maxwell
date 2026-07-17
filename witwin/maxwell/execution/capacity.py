@@ -4,7 +4,7 @@ import torch
 
 from ..fdtd.distributed.capacity import local_dft_working_set_bytes
 from ..fdtd.distributed.output import electric_field_output_bytes
-from ..scene import Scene, prepare_scene
+from ..scene import Scene
 
 # Conservative multiplier over the three staggered E-field element counts that
 # approximates one FDTD shard's persistent device state: the six Yee field
@@ -14,7 +14,16 @@ from ..scene import Scene, prepare_scene
 _FIELD_STATE_MULTIPLIER = 8
 
 
-def _uniform_node_counts(scene: Scene) -> tuple[int, int, int] | None:
+def _node_counts(scene: Scene) -> tuple[int, int, int] | None:
+    """Cheaply derive the Yee node counts from a uniform grid.
+
+    Only uniform grids expose their shape from ``Domain`` bounds and spacing
+    alone. Custom and auto grids would require a full ``prepare_scene`` on the
+    coordinator (allocating on the scene's device and discarding the result), so
+    they deliberately return ``None`` and let the scheduler fall back to
+    order-based placement instead of doing placement-time GPU work.
+    """
+
     grid = scene.grid
     if grid.is_custom or grid.is_auto:
         return None
@@ -27,17 +36,6 @@ def _uniform_node_counts(scene: Scene) -> tuple[int, int, int] | None:
             return None
         counts.append(int(round(extent / float(delta))) + 1)
     return tuple(counts)
-
-
-def _node_counts(scene: Scene) -> tuple[int, int, int] | None:
-    counts = _uniform_node_counts(scene)
-    if counts is not None:
-        return counts
-    try:
-        prepared = prepare_scene(scene)
-    except Exception:
-        return None
-    return (int(prepared.Nx), int(prepared.Ny), int(prepared.Nz))
 
 
 def estimate_scene_footprint_bytes(

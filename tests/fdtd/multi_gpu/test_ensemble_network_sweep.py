@@ -95,8 +95,16 @@ def test_two_gpu_ensemble_sweep_matches_serial_with_provenance(
 
     provenance = ensemble.solver_stats["ensemble"]
     column_devices = provenance["column_devices"]
-    # Per-column provenance: one leased device per excitation column, all valid.
+    # Per-column provenance: one leased device per excitation column, and both
+    # pool GPUs were actually exercised. Equality (not just subset) catches a
+    # scheduler regression that pinned every column to a single GPU.
     assert len(column_devices) == 4
-    assert set(column_devices).issubset(set(devices))
+    assert set(column_devices) == set(devices)
     # The assembled matrix and gathered ports live on the single result device.
     assert str(ensemble.network.s.device) == devices[0]
+    assert str(ensemble.network.z0.device) == devices[0]
+    # Device-consistent Result: the representative prepared_scene/solver come from
+    # the column that ran on result_device, so they match the assembled network
+    # rather than whatever GPU the last column happened to lease.
+    assert str(ensemble.prepared_scene.x.device) == devices[0]
+    assert str(ensemble.solver.scene.x.device) == devices[0]

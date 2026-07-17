@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 
 from ..fdtd_parallel import _normalize_devices
@@ -82,18 +83,20 @@ def _run_simulation_on_device(simulation, device):
 
     The Scene is declarative and owns device placement, so prepare/run happen in
     the leased device context rather than materializing a full PreparedScene on a
-    coordinator GPU. The original device is restored so the caller's Simulation
-    is left untouched.
+    coordinator GPU. A per-run shallow copy of the Scene is pinned to the leased
+    device so the returned ``Result.scene.device`` matches the device its tensors
+    live on, while the caller's original Scene object is never mutated (device is
+    a declarative attribute resolved at prepare time, so the copy is cheap).
     """
 
-    scene = simulation.scene_input
-    previous = scene.device
-    scene.device = str(device)
+    original_input = simulation.scene_input
+    column_scene = copy.copy(original_input)
+    column_scene.device = str(device)
+    simulation.scene_input = column_scene
     try:
-        simulation.scene = scene
         return simulation.run()
     finally:
-        scene.device = previous
+        simulation.scene_input = original_input
 
 
 def _reject_ensemble_incompatible(simulation, index: int) -> None:

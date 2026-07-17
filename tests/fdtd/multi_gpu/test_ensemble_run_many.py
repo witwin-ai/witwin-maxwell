@@ -15,6 +15,7 @@ from witwin.maxwell.execution import (
     DistributedFailure,
     MultiGPUExecution,
     build_ensemble_plan,
+    estimate_scene_footprint_bytes,
     execute_plan,
     run_many,
 )
@@ -143,6 +144,27 @@ def test_ensemble_rejects_scene_module_input():
         build_ensemble_plan([sim], execution)
 
 
+def test_footprint_estimate_uniform_grid_is_positive_int():
+    scene = _vacuum_scene(device="cpu")
+    estimated = estimate_scene_footprint_bytes(scene, frequencies=(_FREQUENCY,))
+    assert isinstance(estimated, int)
+    assert estimated > 0
+
+
+def test_footprint_estimate_returns_none_for_auto_grid():
+    """Custom/auto grids cannot be sized from Domain bounds alone; the estimator
+    returns None (order-based placement) rather than doing a coordinator-device
+    prepare_scene at plan-build time."""
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.25, 0.25), (-0.25, 0.25))),
+        grid=mw.GridSpec.auto(wavelength=0.3),
+        boundary=mw.BoundarySpec.none(),
+        device="cpu",
+    )
+    assert estimate_scene_footprint_bytes(scene, frequencies=(_FREQUENCY,)) is None
+
+
 # --------------------------------------------------------------------------- #
 # CUDA placement + identical-to-serial legs.
 # --------------------------------------------------------------------------- #
@@ -182,6 +204,10 @@ def test_run_many_matches_serial_and_respects_lease(cuda_p2p_devices, cuda_memor
         # Device lease respected: returned tensors live on the leased device.
         for tensor in result.fields.values():
             assert str(tensor.device) == leased
+        # Result.scene reports the device its tensors actually live on (the leased
+        # device), not the caller's original scene device: the per-run scene copy
+        # is pinned to the lease instead of being restored to the original.
+        assert str(result.scene.device) == leased
         # Identical to an isolated serial run on the very same device: proves no
         # cross-task state bleed and order fidelity (amplitude drives the field).
         reference = _serial_fields_on_device({"amplitude": amp}, leased)

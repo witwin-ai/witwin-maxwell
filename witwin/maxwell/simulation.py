@@ -987,7 +987,7 @@ class Simulation:
             tasks=tasks,
             placement=execution.placement,
             max_concurrency=execution.max_concurrency,
-            fail_fast=True,
+            fail_fast=execution.fail_fast,
         )
         pool = execution.build_pool(require_cuda=True)
         sequence = execute_plan(plan, pool)
@@ -999,6 +999,20 @@ class Simulation:
         )
         column_stats = tuple(result.stats() for result in column_results)
         stacked_ports, network = aggregate_network_columns(manifest, columns)
+        # Present a device-consistent Result: the assembled network/ports live on
+        # result_device, so pick the column that actually ran on result_device for
+        # the representative solver/prepared_scene rather than the last column
+        # (which may have leased a different GPU). At least one column always leases
+        # result_device (devices[0]) since it is the first device in pool order.
+        result_device_str = str(result_device)
+        representative = next(
+            (
+                result
+                for record, result in zip(sequence.records, column_results)
+                if record.device == result_device_str
+            ),
+            column_results[-1],
+        )
         metadata = dict(self.metadata)
         metadata["network_run_manifest"] = manifest.metadata()
         metadata["ensemble_execution"] = {
@@ -1009,10 +1023,10 @@ class Simulation:
         return Result(
             method="fdtd",
             scene=run_scene,
-            prepared_scene=column_results[-1].prepared_scene,
+            prepared_scene=representative.prepared_scene,
             frequency=self.frequency,
             frequencies=self.frequencies,
-            solver=column_results[-1].solver,
+            solver=representative.solver,
             fields={},
             monitors={},
             ports=stacked_ports,

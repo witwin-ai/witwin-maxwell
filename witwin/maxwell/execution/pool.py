@@ -16,6 +16,13 @@ def _normalize_pool_device(value, *, name: str, require_cuda: bool) -> str:
             raise ValueError(f"{name} must be a CUDA device, got {device}.")
         if device.index is None:
             raise ValueError(f"{name} must include an explicit CUDA index, got {device}.")
+        visible = torch.cuda.device_count()
+        if device.index >= visible:
+            raise ValueError(
+                f"{name} CUDA index {device.index} is out of range; "
+                f"{visible} CUDA device(s) visible. Reject the bad device at pool "
+                "construction rather than surfacing it later as a per-task failure."
+            )
     return str(device)
 
 

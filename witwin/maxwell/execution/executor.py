@@ -119,6 +119,23 @@ def _run_one(task: ExecutionTask, pool: DevicePool, cancellation: _Cancellation)
         )
 
     lease = pool.lease(estimated_bytes=task.estimated_bytes)
+    if cancellation.triggered:
+        # fail_fast tripped while this task blocked in lease(); release the just
+        # acquired slot and cancel before running instead of executing a doomed task.
+        lease.release()
+        failure = DistributedFailure(
+            index=task.index,
+            kind=FailureKind.CANCELLED,
+            device=lease.device,
+            message="cancelled by fail_fast after leasing a device but before running.",
+        )
+        return failure, ExecutionRecord(
+            index=task.index,
+            device=lease.device,
+            status="cancelled",
+            estimated_bytes=task.estimated_bytes,
+            failure=failure,
+        )
     device = lease.torch_device
     wall_start = time.perf_counter()
     timer = _device_timer(device)
@@ -164,9 +181,12 @@ def execute_plan(plan: ExecutionPlan, pool: DevicePool) -> ResultSequence:
     Independent tasks run concurrently up to ``plan.max_concurrency``; each
     leases exactly one device for its lifetime. A task failure is captured as a
     structured ``DistributedFailure`` at its slot; with ``fail_fast`` the plan
-    stops scheduling further tasks and marks the unstarted ones cancelled, while
-    tasks already running are allowed to finish. Nothing is summed or reduced
-    across tasks, so no coordinator global synchronization is required.
+    stops scheduling further tasks and marks them cancelled -- both tasks that
+    never reached their capacity preflight and tasks that had already blocked in
+    ``pool.lease()`` and only then acquired a slot -- while a task already inside
+    ``task.run`` is allowed to finish. Fail-fast is cooperative, so a task that
+    entered ``task.run`` just before the trip still completes. Nothing is summed
+    or reduced across tasks, so no coordinator global synchronization is required.
     """
 
     entries: list[object | None] = [None] * len(plan)

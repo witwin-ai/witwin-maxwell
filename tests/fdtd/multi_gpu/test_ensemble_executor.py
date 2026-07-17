@@ -11,6 +11,7 @@ import threading
 import time
 
 import pytest
+import torch
 
 from witwin.maxwell.execution import (
     DeviceCapability,
@@ -22,6 +23,7 @@ from witwin.maxwell.execution import (
     ResultSequence,
     execute_plan,
 )
+from witwin.maxwell.execution.executor import _run_one
 
 
 def _plan(tasks, *, placement="round_robin", max_concurrency=2, fail_fast=False):
@@ -136,6 +138,85 @@ def test_fail_fast_cancels_unstarted_tasks():
         assert isinstance(seq.entries[i], DistributedFailure)
         assert seq.entries[i].kind is FailureKind.CANCELLED
         assert seq.records[i].status == "cancelled"
+
+
+def test_fail_fast_cancels_after_lease_before_running():
+    """A task that only sees fail_fast tripped *after* acquiring its lease is
+    cancelled, not run: the post-lease cancellation check closes the window where a
+    task blocked in ``pool.lease()`` would otherwise lease and run a doomed task."""
+
+    pool = _cpu_pool(1)
+    ran = []
+
+    def _run(device):
+        ran.append(device)
+        return "should-not-run"
+
+    task = ExecutionTask(index=0, run=_run, estimated_bytes=None, label="late")
+
+    class _TripAfterEntry:
+        # Reports not-triggered at the task-entry check and triggered at the
+        # post-lease check, mirroring a sibling task tripping fail_fast while this
+        # task was blocked inside pool.lease().
+        def __init__(self):
+            self._checks = 0
+
+        @property
+        def triggered(self) -> bool:
+            self._checks += 1
+            return self._checks > 1
+
+        def trip(self) -> None:
+            pass
+
+    entry, record = _run_one(task, pool, _TripAfterEntry())
+
+    assert not ran  # the doomed task never executed
+    assert isinstance(entry, DistributedFailure)
+    assert entry.kind is FailureKind.CANCELLED
+    assert record.status == "cancelled"
+    assert record.device in pool.devices  # a lease was acquired, then released
+    # The lease was returned, so the device is free again.
+    assert pool.peak_concurrency(pool.devices[0]) == 1
+    lease = pool.lease()
+    assert lease.device in pool.devices
+    lease.release()
+
+
+def test_iteration_raises_like_indexing_on_failure():
+    """``list(seq)`` must agree with ``[seq[i] ...]``: iteration raises the failed
+    slot rather than yielding the DistributedFailure as a plain value."""
+
+    pool = _cpu_pool(2)
+
+    def make(i):
+        def _run(device):
+            if i == 1:
+                raise RuntimeError("boom")
+            return i
+
+        return ExecutionTask(index=i, run=_run, estimated_bytes=None, label=str(i))
+
+    seq = execute_plan(_plan((make(i) for i in range(3)), fail_fast=False), pool)
+
+    # entries is the explicit non-raising union view.
+    assert isinstance(seq.entries[1], DistributedFailure)
+    # Iteration matches indexing: both raise on the failed slot.
+    with pytest.raises(DistributedFailure):
+        list(seq)
+    with pytest.raises(DistributedFailure):
+        _ = [item for item in seq]
+    # The surviving Results are still reachable via the union view.
+    assert [x for x in seq.entries if not isinstance(x, DistributedFailure)] == [0, 2]
+
+
+def test_pool_rejects_out_of_range_cuda_index():
+    """A CUDA index past the visible device count is rejected at pool construction
+    rather than being swallowed into a (None, None) capability and surfaced later."""
+
+    bad = f"cuda:{torch.cuda.device_count() + 3}"
+    with pytest.raises(ValueError, match="out of range"):
+        DevicePool([bad], require_cuda=True)
 
 
 def test_capacity_preflight_rejects_oversized_task_before_running():
