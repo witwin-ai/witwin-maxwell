@@ -50,6 +50,33 @@ _CELL_COMPONENTS = frozenset(("Ex", "Hy", "Hz"))
 _NODE_COMPONENTS = frozenset(("Ey", "Ez", "Hx"))
 
 
+def _scene_trainable_tensors(scene: Scene) -> tuple[torch.Tensor, ...]:
+    """Every grad-requiring leaf a distributed run could be asked to differentiate.
+
+    Covers the trainable channels a materialized scene can carry: material-region
+    densities, structure geometry parameters, and material perturbation tensors.
+    Used for the solver-level defense-in-depth trainable guard, independent of the
+    public ``Simulation`` trainable check.
+    """
+
+    trainable: list[torch.Tensor] = []
+    for region in getattr(scene, "material_regions", ()):
+        density = getattr(region, "density", None)
+        if isinstance(density, torch.Tensor) and density.requires_grad:
+            trainable.append(density)
+    for structure in scene.structures:
+        geometry = getattr(structure, "geometry", None)
+        if geometry is not None:
+            for value in vars(geometry).values():
+                if isinstance(value, torch.Tensor) and value.requires_grad:
+                    trainable.append(value)
+        material = getattr(structure, "material", None)
+        perturbation = getattr(material, "perturbation", None)
+        if isinstance(perturbation, torch.Tensor) and perturbation.requires_grad:
+            trainable.append(perturbation)
+    return tuple(trainable)
+
+
 @dataclass
 class FDTDShard:
     rank: int
@@ -376,6 +403,16 @@ class DistributedFDTD:
         self._validate_static_capabilities()
 
     def _validate_static_capabilities(self) -> None:
+        # Defense in depth: the public Simulation entry rejects trainable+parallel,
+        # but the distributed solver must also fail closed if constructed directly
+        # with a trainable scene. The distributed joint-solve adjoint bridge is not
+        # wired yet, so a grad-requiring leaf would otherwise run a forward-only
+        # solve and silently drop its gradient.
+        if _scene_trainable_tensors(self.logical_scene):
+            raise ValueError(
+                "Multi-GPU FDTD does not support trainable scene parameters; the "
+                "distributed joint-solve adjoint bridge is not enabled yet."
+            )
         boundary = self.logical_scene.boundary
         if boundary.uses_kind("bloch"):
             raise ValueError(

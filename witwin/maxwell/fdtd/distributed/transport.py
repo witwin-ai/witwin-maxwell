@@ -48,6 +48,37 @@ class HaloTransport(ABC):
     def exchange_magnetic(self, shards: tuple[_TransportShard, ...]) -> None:
         ...
 
+    @abstractmethod
+    def exchange_magnetic_adjoint(
+        self,
+        shards: tuple[_TransportShard, ...],
+        adjoint_states: tuple[dict, ...],
+    ) -> None:
+        """Transpose of :meth:`exchange_magnetic`.
+
+        The forward magnetic halo copies each left shard's last owned Hy/Hz cell
+        plane into the right neighbour's low ghost. Its transpose accumulates the
+        right neighbour's ghost adjoint plane back into the left owner's last cell
+        and then zeroes the ghost, so the ghost-adjoint-zero invariant the fused
+        reverse kernels rely on holds at the next phase boundary.
+        """
+        ...
+
+    @abstractmethod
+    def exchange_electric_adjoint(
+        self,
+        shards: tuple[_TransportShard, ...],
+        adjoint_states: tuple[dict, ...],
+    ) -> None:
+        """Transpose of :meth:`exchange_electric`.
+
+        The forward electric halo copies each right shard's first owned Ey/Ez node
+        plane into the left neighbour's ghost node. Its transpose accumulates the
+        left neighbour's ghost adjoint node plane back into the right owner's first
+        node and then zeroes the ghost.
+        """
+        ...
+
     def teardown(self) -> None:
         return None
 
@@ -59,6 +90,11 @@ class CudaP2PHaloTransport(HaloTransport):
 
     def __init__(self, devices: tuple[torch.device, ...]):
         self.devices = tuple(torch.device(device) for device in devices)
+        # Preallocated reverse-halo staging planes on the destination (owner)
+        # device, keyed by (kind, destination_rank). Allocated on first use and
+        # reused for every subsequent reverse step so no per-step allocation is
+        # introduced into the adjoint time loop.
+        self._adjoint_staging: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
         self.links = tuple(
             PeerLink(
                 source_rank=rank + 1,
@@ -142,6 +178,147 @@ class CudaP2PHaloTransport(HaloTransport):
                     source.solver.Hz[source_last], non_blocking=True
                 )
                 destination.magnetic_received.record(stream)
+
+    def _staging_pair(
+        self,
+        kind: str,
+        destination_rank: int,
+        first: torch.Tensor,
+        second: torch.Tensor,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return preallocated staging planes matching the given ghost planes.
+
+        Allocated once per (kind, destination) and reused; a later call with an
+        incompatible plane shape/dtype is a programming error (the padded layout
+        is fixed at prepare) and rebuilds the buffer rather than silently
+        mismatching.
+        """
+        key = (kind, int(destination_rank))
+        cached = self._adjoint_staging.get(key)
+        if (
+            cached is None
+            or cached[0].shape != first.shape
+            or cached[1].shape != second.shape
+            or cached[0].dtype != first.dtype
+            or cached[1].dtype != second.dtype
+            or cached[0].device != device
+        ):
+            with torch.cuda.device(device):
+                cached = (
+                    torch.empty(first.shape, device=device, dtype=first.dtype),
+                    torch.empty(second.shape, device=device, dtype=second.dtype),
+                )
+            self._adjoint_staging[key] = cached
+        return cached
+
+    def prepare_adjoint_staging(
+        self,
+        shards: tuple[_TransportShard, ...],
+        adjoint_states: tuple[dict, ...],
+    ) -> None:
+        """Preallocate every reverse-halo staging plane before the reverse loop."""
+
+        for destination, source in zip(shards[:-1], shards[1:]):
+            source_state = adjoint_states[source.rank]
+            self._staging_pair(
+                "magnetic",
+                destination.rank,
+                source_state["Hy"][0],
+                source_state["Hz"][0],
+                destination.device,
+            )
+        for source, destination in zip(shards[:-1], shards[1:]):
+            source_state = adjoint_states[source.rank]
+            ghost = source.layout.storage_node_owned.stop
+            self._staging_pair(
+                "electric",
+                destination.rank,
+                source_state["Ey"][ghost],
+                source_state["Ez"][ghost],
+                destination.device,
+            )
+
+    def exchange_magnetic_adjoint(
+        self,
+        shards: tuple[_TransportShard, ...],
+        adjoint_states: tuple[dict, ...],
+    ) -> None:
+        # Producers: both the right shard's ghost adjoint plane and the left
+        # shard's owner plane are produced on the compute stream.
+        for shard in shards:
+            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
+                shard.magnetic_ready.record(shard.compute_stream)
+
+        for destination, source in zip(shards[:-1], shards[1:]):
+            source_state = adjoint_states[source.rank]
+            destination_state = adjoint_states[destination.rank]
+            source_ghost_hy = source_state["Hy"][0]
+            source_ghost_hz = source_state["Hz"][0]
+            staging_hy, staging_hz = self._staging_pair(
+                "magnetic",
+                destination.rank,
+                source_ghost_hy,
+                source_ghost_hz,
+                destination.device,
+            )
+            owner_cell = destination.layout.storage_cell_owned.stop - 1
+            comm = destination.communication_stream
+            with torch.cuda.device(destination.device), torch.cuda.stream(comm):
+                comm.wait_event(source.magnetic_ready)
+                comm.wait_event(destination.magnetic_ready)
+                staging_hy.copy_(source_ghost_hy, non_blocking=True)
+                staging_hz.copy_(source_ghost_hz, non_blocking=True)
+                destination.magnetic_received.record(comm)
+            with torch.cuda.device(destination.device), torch.cuda.stream(destination.compute_stream):
+                destination.compute_stream.wait_event(destination.magnetic_received)
+                destination_state["Hy"][owner_cell].add_(staging_hy)
+                destination_state["Hz"][owner_cell].add_(staging_hz)
+            with torch.cuda.device(source.device), torch.cuda.stream(source.compute_stream):
+                source.compute_stream.wait_event(destination.magnetic_received)
+                source_ghost_hy.zero_()
+                source_ghost_hz.zero_()
+
+    def exchange_electric_adjoint(
+        self,
+        shards: tuple[_TransportShard, ...],
+        adjoint_states: tuple[dict, ...],
+    ) -> None:
+        # Producers: the left shard's ghost node plane and the right shard's owner
+        # node plane are produced on the compute stream.
+        for shard in shards:
+            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
+                shard.electric_ready.record(shard.compute_stream)
+
+        for source, destination in zip(shards[:-1], shards[1:]):
+            source_state = adjoint_states[source.rank]
+            destination_state = adjoint_states[destination.rank]
+            source_ghost = source.layout.storage_node_owned.stop
+            owner_node = destination.layout.storage_node_owned.start
+            source_ghost_ey = source_state["Ey"][source_ghost]
+            source_ghost_ez = source_state["Ez"][source_ghost]
+            staging_ey, staging_ez = self._staging_pair(
+                "electric",
+                destination.rank,
+                source_ghost_ey,
+                source_ghost_ez,
+                destination.device,
+            )
+            comm = destination.communication_stream
+            with torch.cuda.device(destination.device), torch.cuda.stream(comm):
+                comm.wait_event(source.electric_ready)
+                comm.wait_event(destination.electric_ready)
+                staging_ey.copy_(source_ghost_ey, non_blocking=True)
+                staging_ez.copy_(source_ghost_ez, non_blocking=True)
+                destination.electric_received.record(comm)
+            with torch.cuda.device(destination.device), torch.cuda.stream(destination.compute_stream):
+                destination.compute_stream.wait_event(destination.electric_received)
+                destination_state["Ey"][owner_node].add_(staging_ey)
+                destination_state["Ez"][owner_node].add_(staging_ez)
+            with torch.cuda.device(source.device), torch.cuda.stream(source.compute_stream):
+                source.compute_stream.wait_event(destination.electric_received)
+                source_ghost_ey.zero_()
+                source_ghost_ez.zero_()
 
     @property
     def topology(self) -> dict[str, object]:

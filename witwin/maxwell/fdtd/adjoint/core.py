@@ -2908,6 +2908,102 @@ def _forward_magnetic_fields(solver, state, *, time_value, resolved_source_terms
     )
 
 
+def _forward_electric_fields_standard(
+    solver,
+    state,
+    magnetic_fields,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+):
+    """Recompute the post-source real electric fields of one standard forward step.
+
+    Symmetric to :func:`_forward_magnetic_fields`: mirrors the electric half of
+    ``_step_state`` for the pure real *standard* (open-boundary, no CPML/psi,
+    no dispersion/nonlinearity/conduction/full-anisotropy/TFSF/ports) path. Used
+    by the distributed replay, which advances each shard as two explicit halves
+    with a transposed-free forward halo copy inserted between them. The curl and
+    source-term composition are the same primitives ``_step_state`` uses in that
+    regime, so per shard this is bit-identical to a single-GPU ``_step_state``.
+    """
+    source_terms, electric_source_terms, _magnetic_source_terms = resolved_source_terms
+
+    d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy_e)
+    d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz_e)
+    ex, _, _ = _update_electric_component(
+        state["Ex"],
+        d_pos=d_hz_dy,
+        d_neg=d_hy_dz,
+        decay=solver.cex_decay,
+        curl_prefactor=solver.cex_curl * solver.eps_Ex,
+        eps=eps_ex,
+        low_mode_pos=solver.boundary_y_low_code,
+        high_mode_pos=solver.boundary_y_high_code,
+        low_mode_neg=solver.boundary_z_low_code,
+        high_mode_neg=solver.boundary_z_high_code,
+        axis_pos=1,
+        axis_neg=2,
+    )
+
+    d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz_e)
+    d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx_e)
+    ey, _, _ = _update_electric_component(
+        state["Ey"],
+        d_pos=d_hx_dz,
+        d_neg=d_hz_dx,
+        decay=solver.cey_decay,
+        curl_prefactor=solver.cey_curl * solver.eps_Ey,
+        eps=eps_ey,
+        low_mode_pos=solver.boundary_z_low_code,
+        high_mode_pos=solver.boundary_z_high_code,
+        low_mode_neg=solver.boundary_x_low_code,
+        high_mode_neg=solver.boundary_x_high_code,
+        axis_pos=2,
+        axis_neg=0,
+    )
+
+    d_hy_dx = _backward_diff(magnetic_fields["Hy"], axis=0, inv_delta=solver.inv_dx_e)
+    d_hx_dy = _backward_diff(magnetic_fields["Hx"], axis=1, inv_delta=solver.inv_dy_e)
+    ez, _, _ = _update_electric_component(
+        state["Ez"],
+        d_pos=d_hy_dx,
+        d_neg=d_hx_dy,
+        decay=solver.cez_decay,
+        curl_prefactor=solver.cez_curl * solver.eps_Ez,
+        eps=eps_ez,
+        low_mode_pos=solver.boundary_x_low_code,
+        high_mode_pos=solver.boundary_x_high_code,
+        low_mode_neg=solver.boundary_y_low_code,
+        high_mode_neg=solver.boundary_y_high_code,
+        axis_pos=0,
+        axis_neg=1,
+    )
+
+    electric_fields = {"Ex": ex, "Ey": ey, "Ez": ez}
+    electric_fields = _apply_source_term_list(
+        electric_fields,
+        terms=electric_source_terms,
+        source_time=solver._source_time,
+        omega=solver.source_omega,
+        time_value=time_value + 0.5 * float(solver.dt),
+        solver=None,
+    )
+    electric_fields = _apply_source_term_list(
+        electric_fields,
+        terms=source_terms,
+        source_time=solver._source_time,
+        omega=solver.source_omega,
+        time_value=time_value,
+        solver=None,
+    )
+    if getattr(solver, "has_pec_faces", False):
+        electric_fields.update(_enforce_pec_boundaries(solver, electric_fields))
+    return electric_fields
+
+
 def _forward_magnetic_fields_complex(solver, state, *, time_value, resolved_source_terms):
     """Recompute the post-source complex (split-field) magnetic fields of one Bloch step.
 
