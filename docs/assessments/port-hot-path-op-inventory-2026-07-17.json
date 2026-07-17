@@ -1,0 +1,142 @@
+{
+  "branch": "codex/port-hot-path",
+  "device": "NVIDIA RTX A6000",
+  "fix_summary": "1) Per-step lumped energy/branch diagnostics made opt-in (LumpedRuntime.diagnostics_enabled, default off); the field coupling and port V/I observers keep their required tensors (last_voltage_midpoint, last_branch_current). 2) Series auxiliary state (inductor current, capacitor voltage) advanced with an allocation-free in-place kernel schedule that replicates the diagnostic branch's exact elementary op order (separate multiply then add/sub, no fused multiply-add) so it is bitwise-identical. 3) Passive terminations skip the per-step drive waveform evaluation and its allocation.",
+  "generated": "2026-07-17",
+  "measurement": "Deterministic host/device op tallies from torch.profiler averaged over 16 measured steps after 8 warmup steps. Counts only; NO timing (ms/step) is recorded here per the exclusive-window deferral. 'before' = branch base eb9258b; 'after' = hot-path fix. Harness: scratchpad/profile_hotpath.py.",
+  "op_count_contract": "tests/rf/lumped/test_fdtd_port_end_to_end.py::test_passive_series_rlc_port_step_stays_within_op_count_ceiling asserts 0 allocations, 0 device-memory, 0 host<->device copies, 0 scalar syncs, <=26 launches/step and <=4 DtoD/step. Falsification: un-gating diagnostics_enabled yields 61 launches, 10 allocs and 15 DtoD per step, turning every ceiling red.",
+  "parity": "Full 200-step end-to-end port V/I is bitwise-identical to the pre-change base for both a passive resonant SeriesRLC scene (worst-case ULP amplifier) and an active GaussianPulse excitation scene. The existing atol=0 apply-vs-replay adjoint test and the full tests/rf (464) + adjoint (80) suites are green.",
+  "scenarios": {
+    "bare_fdtd": {
+      "after": {
+        "allocs_per_step": 0.0,
+        "aten_ops_per_step": 0.0,
+        "cuda_launch_per_step": 6.0,
+        "device_mem_bytes_total": 0,
+        "memcpy_dtod_per_step": 0.0,
+        "memcpy_dtoh_per_step": 0.0,
+        "memcpy_htod_per_step": 0.0,
+        "steps_measured": 16
+      },
+      "before": {
+        "allocs_per_step": 0.0,
+        "aten_ops_per_step": 0.0,
+        "cuda_launch_per_step": 6.0,
+        "device_mem_bytes_total": 0,
+        "memcpy_dtod_per_step": 0.0,
+        "memcpy_dtoh_per_step": 0.0,
+        "memcpy_htod_per_step": 0.0,
+        "steps_measured": 16
+      },
+      "delta": {
+        "allocs_per_step": 0.0,
+        "aten_ops_per_step": 0.0,
+        "cuda_launch_per_step": 0.0,
+        "device_mem_bytes_total": 0,
+        "memcpy_dtod_per_step": 0.0,
+        "memcpy_dtoh_per_step": 0.0,
+        "memcpy_htod_per_step": 0.0
+      },
+      "description": "field update block only (one CUDA graph replay budget)"
+    },
+    "circuit_bound_port": {
+      "after": {
+        "allocs_per_step": 15.0,
+        "aten_ops_per_step": 307.0,
+        "cuda_launch_per_step": 103.0,
+        "device_mem_bytes_total": 671744,
+        "memcpy_dtod_per_step": 27.0,
+        "memcpy_dtoh_per_step": 0.0,
+        "memcpy_htod_per_step": 0.0,
+        "steps_measured": 16
+      },
+      "before": {
+        "allocs_per_step": 15.0,
+        "aten_ops_per_step": 307.0,
+        "cuda_launch_per_step": 103.0,
+        "device_mem_bytes_total": 671744,
+        "memcpy_dtod_per_step": 27.0,
+        "memcpy_dtoh_per_step": 0.0,
+        "memcpy_htod_per_step": 0.0,
+        "steps_measured": 16
+      },
+      "delta": {
+        "allocs_per_step": 0.0,
+        "aten_ops_per_step": 0.0,
+        "cuda_launch_per_step": 0.0,
+        "device_mem_bytes_total": 0,
+        "memcpy_dtod_per_step": 0.0,
+        "memcpy_dtoh_per_step": 0.0,
+        "memcpy_htod_per_step": 0.0
+      },
+      "description": "apply_port_runtimes + accumulate_port_observers, one circuit-bound port (R-L-C ladder via MNA)"
+    },
+    "network_bound_port": {
+      "after": {
+        "allocs_per_step": 0.0,
+        "aten_ops_per_step": 71.0,
+        "cuda_launch_per_step": 34.0,
+        "device_mem_bytes_total": 0,
+        "memcpy_dtod_per_step": 3.0,
+        "memcpy_dtoh_per_step": 0.0,
+        "memcpy_htod_per_step": 0.0,
+        "steps_measured": 16
+      },
+      "before": {
+        "allocs_per_step": 0.0,
+        "aten_ops_per_step": 71.0,
+        "cuda_launch_per_step": 34.0,
+        "device_mem_bytes_total": 0,
+        "memcpy_dtod_per_step": 3.0,
+        "memcpy_dtoh_per_step": 0.0,
+        "memcpy_htod_per_step": 0.0,
+        "steps_measured": 16
+      },
+      "delta": {
+        "allocs_per_step": 0.0,
+        "aten_ops_per_step": 0.0,
+        "cuda_launch_per_step": 0.0,
+        "device_mem_bytes_total": 0,
+        "memcpy_dtod_per_step": 0.0,
+        "memcpy_dtoh_per_step": 0.0,
+        "memcpy_htod_per_step": 0.0
+      },
+      "description": "apply_port_runtimes + apply_network_runtimes + accumulate_port_observers, one embedded state-space network port"
+    },
+    "series_rlc_lumped_port": {
+      "after": {
+        "allocs_per_step": 0.0,
+        "aten_ops_per_step": 32.0,
+        "cuda_launch_per_step": 22.0,
+        "device_mem_bytes_total": 0,
+        "memcpy_dtod_per_step": 2.0,
+        "memcpy_dtoh_per_step": 0.0,
+        "memcpy_htod_per_step": 0.0,
+        "steps_measured": 16
+      },
+      "before": {
+        "allocs_per_step": 12.0,
+        "aten_ops_per_step": 122.0,
+        "cuda_launch_per_step": 62.0,
+        "device_mem_bytes_total": 262144,
+        "memcpy_dtod_per_step": 16.0,
+        "memcpy_dtoh_per_step": 0.0,
+        "memcpy_htod_per_step": 0.0,
+        "steps_measured": 16
+      },
+      "delta": {
+        "allocs_per_step": -12.0,
+        "aten_ops_per_step": -90.0,
+        "cuda_launch_per_step": -40.0,
+        "device_mem_bytes_total": -262144,
+        "memcpy_dtod_per_step": -14.0,
+        "memcpy_dtoh_per_step": 0.0,
+        "memcpy_htod_per_step": 0.0
+      },
+      "description": "apply_port_runtimes + accumulate_port_observers, one passive SeriesRLC termination"
+    }
+  },
+  "scope_notes": "The series SeriesRLC lumped/termination path is the target and shows the full reduction. The embedded network path was already allocation-free (pre-existing GPU observer graph). The circuit-bound (MNA companion) path is a separate module (fdtd/circuits.py), unchanged here; it is now the heaviest per-step port path and is the recommended next target.",
+  "title": "Port/lumped FDTD per-step hot-path op inventory (before/after)",
+  "torch_version": "2.13.0+cu130"
+}

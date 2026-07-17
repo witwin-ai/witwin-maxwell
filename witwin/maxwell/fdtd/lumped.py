@@ -24,13 +24,16 @@ class LumpedRuntime:
     inductance_active: bool
     capacitance_active: bool
     resistance_is_open: torch.Tensor
+    resistance_is_open_host: bool
     inductance_enabled: torch.Tensor
     capacitance_enabled: torch.Tensor
+    diagnostics_enabled: bool
     default_thevenin_voltage: torch.Tensor
     coupling_impedance: torch.Tensor
     discrete_port_impedance: torch.Tensor
     series_inductive_impedance: torch.Tensor
     series_capacitive_impedance: torch.Tensor
+    series_capacitive_impedance_x2: torch.Tensor
     parallel_resistive_admittance: torch.Tensor
     parallel_inductive_admittance: torch.Tensor
     parallel_capacitive_admittance: torch.Tensor
@@ -38,6 +41,7 @@ class LumpedRuntime:
     inverse_denominator: torch.Tensor
     edge_buffer: torch.Tensor
     correction_buffer: torch.Tensor
+    fast_state_scratch: torch.Tensor
     inductor_current: torch.Tensor
     capacitor_voltage: torch.Tensor
     last_voltage_before: torch.Tensor
@@ -191,6 +195,7 @@ def prepare_lumped_runtime(
     resistance: torch.Tensor | float | None = None,
     termination: Any | None = None,
     thevenin_voltage: torch.Tensor | float = 0.0,
+    diagnostics: bool = False,
 ) -> LumpedRuntime:
     """Prepare ``q = dt * C_e^-1 w`` and all per-step work buffers.
 
@@ -198,6 +203,13 @@ def prepare_lumped_runtime(
     resistance of a Thevenin excitation. ``termination`` accepts the public
     R/C/L, SeriesRLC, or ParallelRLC descriptors. ``thevenin_voltage`` is the
     prepared default drive value; a device scalar may override it per update.
+
+    ``diagnostics`` selects whether :func:`apply_lumped_runtime` computes the
+    per-step energy/branch bookkeeping tensors (dissipated/stored energy, source
+    work, per-branch currents, post-update port voltage). These are consumed only
+    by validation and are off by default so the per-step hot path issues the
+    minimal in-place kernel schedule required by the field coupling and the port
+    voltage/current observers.
     """
 
     if not isinstance(eps_edge, torch.Tensor):
@@ -305,8 +317,11 @@ def prepare_lumped_runtime(
     else:
         denominator = scalar_one + parallel_total_admittance * discrete_port_impedance
     inverse_denominator = torch.reciprocal(denominator)
+    series_capacitive_impedance_x2 = 2.0 * series_capacitive_impedance
+    resistance_is_open = torch.isinf(resistance_tensor)
     edge_buffer = torch.empty_like(weights)
     correction_buffer = torch.empty_like(weights)
+    fast_state_scratch = torch.zeros((), device=device, dtype=dtype)
     scalar_zeros = [torch.zeros((), device=device, dtype=dtype) for _ in range(14)]
 
     return LumpedRuntime(
@@ -323,14 +338,17 @@ def prepare_lumped_runtime(
         capacitance=capacitance_tensor,
         inductance_active=bool(inductance_enabled),
         capacitance_active=bool(capacitance_enabled),
-        resistance_is_open=torch.isinf(resistance_tensor),
+        resistance_is_open=resistance_is_open,
+        resistance_is_open_host=bool(resistance_is_open),
         inductance_enabled=inductance_enabled,
         capacitance_enabled=capacitance_enabled,
+        diagnostics_enabled=bool(diagnostics),
         default_thevenin_voltage=default_drive,
         coupling_impedance=coupling_impedance,
         discrete_port_impedance=discrete_port_impedance,
         series_inductive_impedance=series_inductive_impedance,
         series_capacitive_impedance=series_capacitive_impedance,
+        series_capacitive_impedance_x2=series_capacitive_impedance_x2,
         parallel_resistive_admittance=parallel_resistive_admittance,
         parallel_inductive_admittance=parallel_inductive_admittance,
         parallel_capacitive_admittance=parallel_capacitive_admittance,
@@ -338,6 +356,7 @@ def prepare_lumped_runtime(
         inverse_denominator=inverse_denominator,
         edge_buffer=edge_buffer,
         correction_buffer=correction_buffer,
+        fast_state_scratch=fast_state_scratch,
         inductor_current=scalar_zeros[0],
         capacitor_voltage=scalar_zeros[1],
         last_voltage_before=scalar_zeros[2],
@@ -672,6 +691,37 @@ def apply_lumped_runtime(
         runtime.last_branch_current,
         value=-0.5,
     )
+    if not (runtime.diagnostics_enabled or runtime.topology != "series"):
+        # Hot path: advance the series auxiliary state in place with the minimal
+        # kernel schedule. This is bitwise-identical to the diagnostic branch's
+        # ``next_*`` state (verified by the parity gate) but skips the per-step
+        # energy/branch bookkeeping that only validation consumes.
+        if not runtime.resistance_is_open_host:
+            if runtime.inductance_active:
+                # next = 2 * branch - old, matching the diagnostic branch's exact
+                # elementary op order (separate multiply, then subtract) so no
+                # fused multiply-add changes the rounding.
+                torch.mul(
+                    runtime.last_branch_current,
+                    2.0,
+                    out=runtime.fast_state_scratch,
+                )
+                torch.sub(
+                    runtime.fast_state_scratch,
+                    runtime.inductor_current,
+                    out=runtime.inductor_current,
+                )
+            if runtime.capacitance_active:
+                # next = old + (2 * Zc) * branch, again as a separate multiply
+                # followed by an addition to match the diagnostic branch bitwise.
+                torch.mul(
+                    runtime.series_capacitive_impedance_x2,
+                    runtime.last_branch_current,
+                    out=runtime.fast_state_scratch,
+                )
+                runtime.capacitor_voltage.add_(runtime.fast_state_scratch)
+        return runtime.last_branch_current
+
     runtime.last_voltage_after.copy_(runtime.last_voltage_before)
     runtime.last_voltage_after.addcmul_(
         runtime.coupling_impedance,
