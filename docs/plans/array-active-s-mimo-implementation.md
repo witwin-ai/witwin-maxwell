@@ -16,16 +16,43 @@ must retain the previous value, measured evidence, and a technical reason.
 | --- | --- |
 | Pure torch analytic combination, float64/complex128 | `rtol <= 1e-6`, `atol <= 1e-10` |
 | CUDA complex64 device parity | `rtol <= 2e-5`, `atol <= 1e-6` |
-| Basis versus direct FDTD complex vector far field | solid-angle-weighted relative L2 `<= 0.03` |
-| Basis versus direct FDTD phase | wrapped RMS `<= 3 deg` above 10% of peak field; no global phase alignment |
-| Basis versus direct port powers | incident/reflected/accepted relative error `<= 1%` |
+| Basis versus direct FDTD complex vector far field, converged Phase 1 scene | solid-angle-weighted relative L2 `<= 1e-4` |
+| Basis versus direct FDTD phase, converged Phase 1 scene | wrapped RMS `<= 1e-2 deg` above 10% of peak field; no global phase alignment |
+| Basis versus direct FDTD complex vector far field, coarse contract scene | solid-angle-weighted relative L2 `<= 5e-3` |
+| Basis versus direct FDTD phase, coarse contract scene | wrapped RMS `<= 0.5 deg` above 10% of peak field; no global phase alignment |
+| Basis versus direct port powers | incident/reflected/accepted relative error `<= 0.5%` |
 | Passive physical power closure | `abs(Paccepted - Prad - Ploss) / Pincident <= 1%` |
+| `Q_rad` positive semidefiniteness | `max_eig > 0` and `min_eig >= -1e-9 * max_eig`, reduced globally over the spectrum (contract and benchmark scenes are single-frequency, so global and per-frequency coincide) |
 | Independent reference | realized-gain error `<= 0.25 dB`; ECC error `<= 0.02` |
 | Active impedance where reference data exists | magnitude error `<= 5%`, phase error `<= 3 deg` |
 | Weight and supported scene gradients | relative error `< 2%`, absolute floor `1e-8` |
 | Inherited distributed diagnostic-field parity | max absolute error `<= 2e-6`, significant-field max relative error `<= 2e-5` |
-| Task-level 1/2/4-GPU S parity | `rtol <= 2e-5`, `atol <= 1e-6`, exact public port order |
 | Domain-decomposition monitor/EEP aggregation | `rtol <= 5e-5`, `atol <= 5e-6`, exact public port order |
+
+### Threshold change record, 2026-07-16
+
+Basis-versus-direct is a linearity check on one solver, so it must agree to solver
+precision, not to an engineering tolerance. The single `0.03` / `3 deg` pair was 4 orders
+looser than the converged measurement and could not discriminate a real superposition
+regression from noise. It was also applied to two scenes whose truncation errors differ
+by three orders, so it is now split per scene.
+
+| Gate | Old | New | Measured worst case | Reason |
+| --- | ---: | ---: | ---: | --- |
+| Converged-scene far-field L2 | 0.03 | 1e-4 | 2.219e-6 (recorded, endfire) | 45x margin over recorded evidence; 300x tighter |
+| Converged-scene phase RMS | 3 deg | 1e-2 deg | 1.518e-4 deg (recorded, endfire) | 66x margin over recorded evidence; 300x tighter |
+| Contract-scene far-field L2 | 0.03 | 5e-3 | 1.433e-4 (re-measured, four-element endfire, 4-layer PML) | 35x margin; the 192-step scene truncates a Gaussian pulse before it decays, so it cannot reach converged-scene precision |
+| Contract-scene phase RMS | 3 deg | 0.5 deg | 6.776e-3 deg (re-measured, four-element endfire, 4-layer PML) | 74x margin, same reason |
+| Port power relative error | 1% | 0.5% | 9.015e-6 (re-measured, two-element endfire accepted power, 4-layer PML) | large margin |
+| Contract-scene PML | 2 layers | 4 layers | min/max eigenvalue ratio -2.833e-5 (2 layers) -> +1.449e-6 (4 layers) | 2-layer PML put the NF2FF box ~1 cell from the boundary; reflected field contaminated the closed-surface complex-Poynting operator and drove `Q_rad` indefinite. 4 layers restore a genuinely PSD spectrum |
+| `Q_rad` PSD floor | none | -1e-9 relative (plus `max_eig > 0`) | +1.449e-6 min/max ratio (re-measured, four-element, 4-layer PML) | new gate; enforces PSD with only an eigvalsh roundoff band (~1e-16*max) instead of the earlier -1e-3 floor that blessed the under-absorbed 2-layer scene |
+
+The converged-scene thresholds derive from the Phase 1 numbers recorded in the
+acceptance document and were **not** independently re-measured here, because the
+benchmark is a timing workload that is serialized separately. The contract-scene and
+`Q_rad` numbers were re-measured directly on 2026-07-16 (`maxwell` env, one RTX A6000)
+after raising the contract scene from 2 to 4 PML layers; the frozen 96^3 benchmark
+scene already uses 8 absorbing cells per face and is unchanged.
 
 Full-wave field comparisons use the same phase center and raw complex fields. Global
 phase or amplitude fitting is prohibited for same-solver basis/direct comparisons.
@@ -48,14 +75,6 @@ rounds.
 - Combination time must be below 10% of one solve.
 - Combining 64, 256, or 1,024 beams must execute zero additional FDTD steps.
 
-Task-level scaling is qualified separately on one host containing four NVIDIA RTX A6000
-48 GiB GPUs on PCIe Gen4 x16 with pairwise peer access enabled. `T1`, `T2`, and `T4`
-use the same host, fixed clocks, 16 independent basis tasks, the exact Phase 1 grid and
-4,096-step workload, and stable round-robin port indices; the two-GPU run uses devices
-0-1 and the four-GPU run uses devices 0-3. Minimum parallel efficiency is
-`E2 = T1 / (2*T2) >= 0.80` and `E4 = T1 / (4*T4) >= 0.70`. The local one-GPU host
-cannot supply that evidence; simulated devices or mocked execution do not satisfy it.
-
 ## Approved scope adjustment
 
 On 2026-07-16 the user explicitly removed task-level multi-GPU work from this
@@ -64,6 +83,19 @@ basis-cache delivery, but omits the device-pool scheduler and 1/2/4-GPU scaling 
 Phase 4 retains single-device weight and scene gradients plus the domain-decomposition
 aggregation contract, but omits multi-GPU value/gradient parity. These omitted gates
 are recorded as user-approved scope reductions, not as passing evidence.
+
+The task-level scaling protocol that this section previously specified (four RTX A6000
+GPUs, `E2 = T1 / (2*T2) >= 0.80`, `E4 = T1 / (4*T4) >= 0.70`, 16 round-robin basis
+tasks) is removed by that adjustment, together with the `two_gpu_parallel_efficiency`,
+`four_gpu_parallel_efficiency`, `scaling_hardware`, `task_s_rtol`, `task_s_atol`, and
+`task_basis_count` budget fields that encoded it. `AcceptanceBudget` no longer defines
+them and `test_acceptance_budget_carries_no_cancelled_task_level_multi_gpu_scope` pins
+their absence, so the cancelled gate cannot silently return.
+
+The plan of record, `next-functional-2026-07/06-array-active-s-mimo.md`, still carries
+the pre-adjustment task-level multi-GPU scope in its section 8, section 9 Phase 2/Phase 4
+exit gates, and section 10.5. This implementation record and that plan disagree; the
+adjustment above is the newer decision, but the plan file itself has not been amended.
 
 ## Phase 0 contract
 

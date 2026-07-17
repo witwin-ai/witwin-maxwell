@@ -730,7 +730,6 @@ class _FDTDGradientBridge:
                     if lumped_traces is not None:
                         (
                             post_step_adjoint,
-                            previous_field_adjoint,
                             local_grad_eps,
                             step_rf_grads,
                         ) = pullback_port_runtimes(
@@ -813,12 +812,11 @@ class _FDTDGradientBridge:
                         grad_tpa_ez = _accumulate_grad(grad_accumulator_backend, grad_tpa_ez, step_result.grad_tpa_ez)
                     adjoint_state = dict(step_result.pre_step_adjoint)
                     if lumped_traces is not None:
-                        for field_name, contribution in previous_field_adjoint.items():
-                            adjoint_state[field_name] = (
-                                adjoint_state[field_name] + contribution
-                            )
-                    for name in checkpoint_schema.lumped_state_names:
-                        adjoint_state[name] = post_step_adjoint[name]
+                        # The previous-step port coupling now flows through the
+                        # scalar ``last_voltage_after`` state carried in the
+                        # lumped adjoint names below, not a previous-field term.
+                        for name in checkpoint_schema.lumped_state_names:
+                            adjoint_state[name] = post_step_adjoint[name]
 
             with profiler.section("material_pullback"):
                 # Mode-source profile terms deferred their eigensolve VJP to keep

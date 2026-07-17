@@ -74,15 +74,56 @@ def _load_persisted_payload(path, *, map_location, expected_type: str):
 
 @dataclass(frozen=True)
 class AcceptanceBudget:
+    """Frozen Phase 0 acceptance thresholds.
+
+    Basis-versus-direct comparison is a linearity check on a single solver, so it
+    must agree to solver precision rather than to an engineering tolerance. The
+    two scenes that run it do not share a truncation error, so they do not share
+    a threshold:
+
+    - the converged Phase 1 benchmark scene (96^3 cells, 4096 steps) drives the
+      ``phase1_fdtd_*`` gates;
+    - the coarse contract scene (192 steps, 4 absorbing cells) truncates a
+      Gaussian pulse long before it decays and drives the ``contract_fdtd_*``
+      gates.
+
+    Threshold changes must retain the previous value, the measured evidence, and
+    the technical reason. See ``docs/plans/array-active-s-mimo-implementation.md``.
+    """
+
     analytic_rtol: float = 1.0e-6
     analytic_atol: float = 1.0e-10
     cuda_complex64_rtol: float = 2.0e-5
     cuda_complex64_atol: float = 1.0e-6
-    fdtd_complex_l2: float = 0.03
-    fdtd_phase_rms_deg: float = 3.0
+    # Was 0.03 for both scenes. Measured worst case on the coarse 4-PML-layer
+    # contract scene is 1.433e-4 (four-element endfire), so 0.03 could not
+    # discriminate a real superposition regression from noise.
+    contract_fdtd_complex_l2: float = 5.0e-3
+    # Was 3.0 deg. Measured worst case on the coarse 4-PML-layer contract scene is
+    # 6.776e-3 deg (four-element endfire).
+    contract_fdtd_phase_rms_deg: float = 0.5
+    # Was 0.03. Recorded Phase 1 benchmark worst case is 2.219e-6 (endfire).
+    phase1_fdtd_complex_l2: float = 1.0e-4
+    # Was 3.0 deg. Recorded Phase 1 benchmark worst case is 1.518e-4 deg (endfire).
+    phase1_fdtd_phase_rms_deg: float = 1.0e-2
     fdtd_phase_support_fraction: float = 0.10
-    port_power_relative_error: float = 0.01
+    # Was 0.01. Measured worst case on the coarse 4-PML-layer contract scene is
+    # 9.015e-6 (two-element endfire accepted power).
+    port_power_relative_error: float = 5.0e-3
     physical_power_residual: float = 0.01
+    # Q_rad is the Hermitian (real-power) part of the closed-surface complex
+    # Poynting operator, so it is positive semidefinite in exact arithmetic. The
+    # earlier -1e-3 floor was masking PML under-absorption: at 2 PML layers the
+    # NF2FF box sits ~1 cell from the boundary and reflected field contaminates
+    # the closed-surface Poynting integral, driving min_eig negative (-2.833e-5
+    # ratio, four-element). Raising the contract scene to 4 PML layers restores a
+    # positive-definite spectrum (measured worst min/max ratio +1.449e-6,
+    # four-element; +4.215e-2 two-element), so the gate now enforces PSD with only
+    # a floating-point roundoff allowance. eigvalsh backward error is ~1e-16*max
+    # eigenvalue, so -1e-9*max is a conservative roundoff band that still rejects
+    # the 2-layer artifact (four decades below the floor) while the 4-layer
+    # spectrum clears it by three decades.
+    radiated_power_psd_relative_floor: float = 1.0e-9
     reference_gain_error_db: float = 0.25
     reference_ecc_error: float = 0.02
     active_impedance_magnitude_error: float = 0.05
@@ -91,8 +132,6 @@ class AcceptanceBudget:
     gradient_absolute_floor: float = 1.0e-8
     distributed_field_max_abs: float = 2.0e-6
     distributed_field_max_rel: float = 2.0e-5
-    task_s_rtol: float = 2.0e-5
-    task_s_atol: float = 1.0e-6
     distributed_result_rtol: float = 5.0e-5
     distributed_result_atol: float = 5.0e-6
     phase1_grid_shape: tuple[int, int, int] = (96, 96, 96)
@@ -105,12 +144,6 @@ class AcceptanceBudget:
     timing_warmups: int = 3
     timing_samples: int = 5
     timing_order_rounds: int = 4
-    task_basis_count: int = 16
-    two_gpu_parallel_efficiency: float = 0.80
-    four_gpu_parallel_efficiency: float = 0.70
-    scaling_hardware: str = (
-        "4x NVIDIA RTX A6000 48 GiB, PCIe Gen4 x16, pairwise peer access enabled"
-    )
     local_hardware: str = (
         "NVIDIA GeForce RTX 5080 16303 MiB, driver 596.49, PCI 00000000:01:00.0"
     )

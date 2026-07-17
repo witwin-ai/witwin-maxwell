@@ -1,6 +1,7 @@
 # Array workflow Phase 1 acceptance
 
-Status: functional and numerical gates accepted; frozen performance qualification pending
+Status: committed as `3223e0c` (checkpoint); functional and numerical gates accepted;
+frozen performance qualification not yet obtained
 
 Date: 2026-07-16
 
@@ -36,8 +37,54 @@ amplitude fit is applied.
 | Endfire basis vs direct multi-source FDTD | 2.219e-6 | 1.518e-4 deg | 8.520e-8 | 9.696e-9 | 1.452e-7 |
 
 The maximum accepted-to-radiated physical power residual is `6.997e-4` (0.0700%),
-below the 1% gate. The measured `Q_rad` is Hermitian to machine precision and its
-minimum eigenvalue in the independent review was `2.47e-4`.
+below the 1% gate.
+
+### Retracted: the `Q_rad` Hermiticity claim
+
+An earlier revision of this document offered "the measured `Q_rad` is Hermitian to
+machine precision" as evidence. That claim is **retracted as tautological**.
+`postprocess/array.py` constructs the operator as `0.5 * (M + M.mH)`, which is the
+correct extraction of the Hermitian (real-power) part of the complex Poynting operator
+but also makes the Hermiticity residual identically zero by construction. Re-measured on
+2026-07-16 the residual is exactly `0.000000e+00`, not a small machine-precision value —
+the signature of an identity, not of a passing test. The check cannot fail and therefore
+proves nothing about the solver.
+
+The same revision reported a "minimum eigenvalue in the independent review of `2.47e-4`".
+That number is real but **unrepresentative**: it is the two-element case only. The
+property that carries physics is positive semidefiniteness, because `real(a^H Q_rad a)`
+is radiated power and a negative eigenvalue means some excitation radiates negative
+power.
+
+Re-measured on the contract scene (`maxwell` env, one RTX A6000), holding grid and
+NF2FF surface fixed and varying only the PML thickness:
+
+| Case | PML layers | min eigenvalue | max eigenvalue | min/max |
+| --- | ---: | ---: | ---: | ---: |
+| Two-element | 2 | 2.469986e-04 | 5.082438e-03 | 4.859846e-02 |
+| Four-element | 2 | -2.394505e-07 | 8.453165e-03 | -2.832672e-05 |
+| Two-element | 4 | 2.304486e-04 | 5.467894e-03 | 4.214577e-02 |
+| Four-element | 4 | 1.312841e-08 | 9.058985e-03 | 1.449214e-06 |
+
+Previous diagnosis: the negative four-element eigenvalue at 2 PML layers was attributed
+to quadrature/truncation error on a near-rank-deficient sub-wavelength operator, and gated
+with a `-1e-3` relative floor. That diagnosis was **refuted** by refinement: the gate
+metric (min/max) does not shrink under grid or time refinement, and the sign of the
+smallest eigenvalue flips with PML thickness alone (2 layers: negative; 4 and 6 layers:
+positive). The root cause is PML under-absorption: the `0.05 m` NF2FF box sits ~1 cell
+inside the `0.06 m` interior, so at 2 layers reflected field contaminates the
+closed-surface complex-Poynting integral and drives `Q_rad` indefinite.
+
+Fix: the contract scene now uses 4 PML layers (`tests/rf/array/test_array_fullwave.py`),
+which restores a genuinely positive-definite spectrum (four-element min/max `+1.449e-6`).
+`radiated_power_psd_relative_floor` was tightened from `1e-3` to `1e-9` — an `eigvalsh`
+roundoff band (~`1e-16 * max_eig`) rather than a floor loose enough to bless the
+under-resolved 2-layer scene — and the gate now also requires `max_eig > 0`, in both
+`test_array_fullwave.py` and the benchmark, so a total sign inversion cannot pass. The
+Hermiticity guard in `ArrayBasisData.__post_init__` is retained: it is unreachable from
+the internal path but still fail-closed for directly constructed or deserialized
+operators, and `test_radiated_power_operator_rejects_non_hermitian_matrix` now covers it.
+The frozen 96^3 benchmark scene already uses 8 absorbing cells per face and is unchanged.
 
 ## Test evidence
 
@@ -50,8 +97,11 @@ minimum eigenvalue in the independent review was `2.47e-4`.
 - Ruff and `git diff --check`: passed.
 - Independent API/RF contract reviews: passed after dtype/device and content
   fingerprint findings were closed.
-- Independent Phase 1 review: implementation passed; it required the frozen
-  performance record and direct adjoint time-schedule tests before commit.
+- Independent Phase 1 review: implementation passed; it asked for the frozen
+  performance record and direct adjoint time-schedule tests before commit. The
+  implementation was committed as `3223e0c` without the frozen performance record, so
+  that condition is outstanding against a commit that already exists rather than a
+  pending one.
 
 ## Performance evidence
 
@@ -68,8 +118,15 @@ CUDA 12.8):
 The exploratory basis/direct ratio is `0.2006` against the `<= 0.40` gate, and the
 combine/one-solve ratio is `0.000130` against the `< 0.10` gate. This run is not the
 frozen qualifying protocol. Qualification requires three warmups, five samples, and
-four alternating order rounds; its complete raw record will be added before Phase 1
-is committed.
+four alternating order rounds. That record does not exist: Phase 1 was committed as
+`3223e0c` without it, so it is now owed against a landed commit. The numbers above are
+exploratory and are not qualification evidence.
+
+The recorded host (RTX 5080, driver 596.49, torch 2.10, CUDA 12.8) is **not** the
+current qualification host, which has two RTX A6000 GPUs on torch 2.13/CUDA 13.0. The
+timings above therefore cannot be reproduced as-is and must be re-measured on the host
+that will issue the frozen record. `AcceptanceBudget.local_hardware` still names the
+5080 and is stale for the same reason.
 
 ## Commands
 

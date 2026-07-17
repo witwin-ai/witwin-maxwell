@@ -687,10 +687,11 @@ def replay_port_runtimes(
             continue
         inductor_name = lumped_state_name("port", index, "inductor_current")
         capacitor_name = lumped_state_name("port", index, "capacitor_voltage")
-        corrected, next_inductor, next_capacitor, trace = replay_lumped_runtime(
+        previous_voltage_name = lumped_state_name("port", index, "last_voltage_after")
+        corrected, next_inductor, next_capacitor, next_previous_voltage, trace = replay_lumped_runtime(
             runtime,
             fields[port_runtime.field_name],
-            previous_electric_field=state[port_runtime.field_name],
+            previous_voltage=state[previous_voltage_name],
             inductor_current=state[inductor_name],
             capacitor_voltage=state[capacitor_name],
             drive=_drive_value(port_runtime, sample_time),
@@ -701,16 +702,18 @@ def replay_port_runtimes(
         fields[port_runtime.field_name] = corrected
         next_auxiliary[inductor_name] = next_inductor
         next_auxiliary[capacitor_name] = next_capacitor
+        next_auxiliary[previous_voltage_name] = next_previous_voltage
         traces.append(trace)
     for index, (runtime, field_name) in enumerate(
         getattr(solver, "_lumped_element_runtimes", ())
     ):
         inductor_name = lumped_state_name("element", index, "inductor_current")
         capacitor_name = lumped_state_name("element", index, "capacitor_voltage")
-        corrected, next_inductor, next_capacitor, trace = replay_lumped_runtime(
+        previous_voltage_name = lumped_state_name("element", index, "last_voltage_after")
+        corrected, next_inductor, next_capacitor, next_previous_voltage, trace = replay_lumped_runtime(
             runtime,
             fields[field_name],
-            previous_electric_field=state[field_name],
+            previous_voltage=state[previous_voltage_name],
             inductor_current=state[inductor_name],
             capacitor_voltage=state[capacitor_name],
             drive=torch.zeros_like(runtime.default_thevenin_voltage),
@@ -721,6 +724,7 @@ def replay_port_runtimes(
         fields[field_name] = corrected
         next_auxiliary[inductor_name] = next_inductor
         next_auxiliary[capacitor_name] = next_capacitor
+        next_auxiliary[previous_voltage_name] = next_previous_voltage
         traces.append(trace)
     if capture is not None:
         capture.append(tuple(traces))
@@ -773,9 +777,6 @@ def pullback_port_runtimes(
     """Reverse all local branch solves before the Maxwell reverse step."""
 
     updated = dict(adjoint_state)
-    previous_field_adjoints = {
-        name: torch.zeros_like(value) for name, value in eps_by_field.items()
-    }
     grad_eps = {name: torch.zeros_like(value) for name, value in eps_by_field.items()}
     semantic_grads = {}
     sample_time = torch.as_tensor(
@@ -786,6 +787,7 @@ def pullback_port_runtimes(
     for trace in reversed(tuple(traces)):
         inductor_name = lumped_state_name(trace.kind, trace.index, "inductor_current")
         capacitor_name = lumped_state_name(trace.kind, trace.index, "capacitor_voltage")
+        previous_voltage_name = lumped_state_name(trace.kind, trace.index, "last_voltage_after")
         voltage_seed, current_seed, direct_drive_seed = port_sample_adjoints.get(
             trace.index,
             (
@@ -815,17 +817,15 @@ def pullback_port_runtimes(
             updated[trace.field_name],
             inductor_current_adjoint=updated[inductor_name],
             capacitor_voltage_adjoint=updated[capacitor_name],
+            previous_voltage_adjoint=updated[previous_voltage_name],
             voltage_sample_adjoint=voltage_seed,
             network_current_sample_adjoint=current_seed,
             eps_edge=eps_by_field[trace.field_name],
         )
         updated[trace.field_name] = result.field_adjoint
-        previous_field_adjoints[trace.field_name] = (
-            previous_field_adjoints[trace.field_name]
-            + result.previous_field_adjoint
-        )
         updated[inductor_name] = result.inductor_current_adjoint
         updated[capacitor_name] = result.capacitor_voltage_adjoint
+        updated[previous_voltage_name] = result.previous_voltage_adjoint
         grad_eps[trace.field_name] = grad_eps[trace.field_name] + result.grad_eps
         if trace.kind == "port":
             port_runtime = solver._port_runtimes[trace.index]
@@ -856,7 +856,7 @@ def pullback_port_runtimes(
             }[element.kind]
             key = ("element", element.name, "value")
             semantic_grads[key] = semantic_grads.get(key, torch.zeros_like(gradient)) + gradient
-    return updated, previous_field_adjoints, grad_eps, semantic_grads
+    return updated, grad_eps, semantic_grads
 
 
 def apply_port_runtimes(solver) -> None:

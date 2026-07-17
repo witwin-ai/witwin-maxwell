@@ -16,9 +16,13 @@ from pathlib import Path
 PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 
 # This exact snapshot was reconciled on 2026-07-15 after the RF, adjoint,
-# material, and interoperability feature series landed. Lower it when a
-# capability guard is implemented; do not raise it without updating the census.
-CAPABILITY_GUARD_BUDGET = 108
+# material, and interoperability feature series landed, then raised by one on
+# 2026-07-16 for the array-basis feature's FDTD-only fail-closed guard
+# (postprocess/array.py: "Array basis extraction is FDTD-only.") -- a genuine
+# capability gap, since non-FDTD backends do not retain the full-wave PortSweep
+# columns array_basis() consumes. Lower it when a capability guard is
+# implemented; do not raise it without updating the census.
+CAPABILITY_GUARD_BUDGET = 109
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

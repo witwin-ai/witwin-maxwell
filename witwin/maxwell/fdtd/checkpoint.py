@@ -98,7 +98,7 @@ def iter_lumped_state_specs(solver):
         runtime = getattr(port_runtime, "lumped", None)
         if runtime is None:
             continue
-        for tensor_name in ("inductor_current", "capacitor_voltage"):
+        for tensor_name in ("inductor_current", "capacitor_voltage", "last_voltage_after"):
             yield (
                 lumped_state_name("port", index, tensor_name),
                 runtime,
@@ -110,7 +110,7 @@ def iter_lumped_state_specs(solver):
     for index, (runtime, field_name) in enumerate(
         getattr(solver, "_lumped_element_runtimes", ())
     ):
-        for tensor_name in ("inductor_current", "capacitor_voltage"):
+        for tensor_name in ("inductor_current", "capacitor_voltage", "last_voltage_after"):
             yield (
                 lumped_state_name("element", index, tensor_name),
                 runtime,

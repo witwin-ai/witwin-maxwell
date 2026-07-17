@@ -7,9 +7,9 @@ cannot enter unnoticed.
 
 ## Reconciled baseline
 
-The 2026-07-15 repository state contains 128 guards:
+The 2026-07-16 repository state contains 129 guards:
 
-- 108 capability guards tracked by the non-increasing test budget;
+- 109 capability guards tracked by the non-increasing test budget;
 - 20 contract guards excluded by exact file and message substring.
 
 The capability baseline is distributed as follows:
@@ -25,8 +25,17 @@ The capability baseline is distributed as follows:
 | Time-domain runtime | 10 |
 | Public simulation, result, and network workflows | 18 |
 | Material models | 7 |
-| Postprocessing | 3 |
-| **Total** | **108** |
+| Postprocessing | 4 |
+| **Total** | **109** |
+
+Capability review (2026-07-16): the budget was raised from 108 to 109 for the
+array-basis feature. `witwin/maxwell/postprocess/array.py` raises
+`NotImplementedError("Array basis extraction is FDTD-only.")` when a non-FDTD
+`Result` is passed to `array_basis()`. It is a genuine capability gap rather
+than a public contract: `array_basis()` consumes the retained in-memory
+full-wave PortSweep field columns, which only the FDTD backend currently
+produces. It stays counted in the budget (Postprocessing 3 -> 4) so extending
+basis extraction to another backend later lowers the count again.
 
 ## Contract exclusions
 

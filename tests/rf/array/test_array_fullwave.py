@@ -34,7 +34,7 @@ def _scene(element_count: int) -> mw.Scene:
     return mw.Scene(
         domain=mw.Domain(bounds=((-0.04, 0.04),) * 3),
         grid=mw.GridSpec.uniform(0.005),
-        boundary=mw.BoundarySpec.pml(num_layers=2),
+        boundary=mw.BoundarySpec.pml(num_layers=4),
         ports=tuple(_port(f"p{index + 1}", float(x)) for index, x in enumerate(positions)),
         monitors=(surface,),
         device="cuda",
@@ -101,6 +101,21 @@ def test_fullwave_basis_matches_direct_multi_source_fdtd(element_count, steering
         theta_points=31,
         phi_points=61,
         radius=1.0,
+    )
+
+    # Q_rad is symmetrized on construction, so asserting Hermiticity here would be
+    # tautological and prove nothing. Positive semidefiniteness is the property
+    # that carries physics: real(a^H Q_rad a) is radiated power, so a negative
+    # eigenvalue means some excitation radiates negative power. With 4 PML layers
+    # the NF2FF box is far enough from the boundary that the closed-surface
+    # Poynting operator is genuinely PSD, so the smallest eigenvalue is gated at
+    # the largest only up to a floating-point roundoff band (2 PML layers put it
+    # ~1 cell from the boundary and reflection drove min_eig to -2.833e-5).
+    eigenvalues = torch.linalg.eigvalsh(basis.radiated_power_matrix)
+    largest = torch.amax(eigenvalues)
+    assert float(largest) > 0.0
+    assert float(torch.amin(eigenvalues)) >= (
+        -ARRAY_ACCEPTANCE_BUDGET.radiated_power_psd_relative_floor * float(largest)
     )
 
     drive_amplitudes = torch.ones(element_count, device=basis.device, dtype=basis.dtype)
@@ -175,7 +190,7 @@ def test_fullwave_basis_matches_direct_multi_source_fdtd(element_count, steering
         beam.far_field.e_phi,
         basis.eep.theta,
     ) <= (
-        ARRAY_ACCEPTANCE_BUDGET.fdtd_complex_l2
+        ARRAY_ACCEPTANCE_BUDGET.contract_fdtd_complex_l2
     )
     assert _phase_rms_degrees(
         transformed["e_theta"],
@@ -183,7 +198,7 @@ def test_fullwave_basis_matches_direct_multi_source_fdtd(element_count, steering
         beam.far_field.e_theta,
         beam.far_field.e_phi,
     ) <= (
-        ARRAY_ACCEPTANCE_BUDGET.fdtd_phase_rms_deg
+        ARRAY_ACCEPTANCE_BUDGET.contract_fdtd_phase_rms_deg
     )
 
     assert basis.metadata["normalization_incident_wave"] == "measured a_n(f)"

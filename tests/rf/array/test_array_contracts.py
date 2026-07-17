@@ -57,18 +57,31 @@ def _basis(*, device="cpu", complex_z0=False, dtype=torch.complex128):
     )
 
 
-def test_phase_zero_acceptance_budget_is_frozen_and_executable():
+def test_phase_zero_acceptance_budget_is_frozen():
+    """Pin the frozen Phase 0 thresholds so a change must be deliberate.
+
+    This is a golden-value test only: it proves the budget has not drifted, not
+    that any gate is enforced. Enforcement is covered by the tests that consume
+    the budget (``test_array_fullwave.py``) and by ``benchmark/array_phase1.py``.
+    """
+
     budget = ARRAY_ACCEPTANCE_BUDGET
 
     assert budget.analytic_rtol == 1.0e-6
-    assert budget.fdtd_complex_l2 == 0.03
+    assert budget.contract_fdtd_complex_l2 == 5.0e-3
+    assert budget.contract_fdtd_phase_rms_deg == 0.5
+    assert budget.phase1_fdtd_complex_l2 == 1.0e-4
+    assert budget.phase1_fdtd_phase_rms_deg == 1.0e-2
     assert budget.fdtd_phase_support_fraction == 0.10
+    assert budget.port_power_relative_error == 5.0e-3
+    assert budget.radiated_power_psd_relative_floor == 1.0e-9
     assert budget.active_impedance_magnitude_error == 0.05
     assert budget.active_impedance_phase_error_deg == 3.0
     assert budget.gradient_absolute_floor == 1.0e-8
-    assert (budget.task_s_rtol, budget.task_s_atol) == (2.0e-5, 1.0e-6)
     assert budget.phase1_grid_shape == (96, 96, 96)
+    assert budget.phase1_pml_cells == 8
     assert budget.phase1_steps == 4096
+    assert budget.phase1_beams == 16
     assert budget.phase1_angular_shape == (181, 361)
     assert budget.phase1_basis_direct_time_ratio == 0.40
     assert budget.phase1_combine_solve_time_ratio == 0.10
@@ -77,9 +90,57 @@ def test_phase_zero_acceptance_budget_is_frozen_and_executable():
         5,
         4,
     )
-    assert budget.two_gpu_parallel_efficiency == 0.80
-    assert budget.four_gpu_parallel_efficiency == 0.70
-    assert "4x NVIDIA RTX A6000 48 GiB" in budget.scaling_hardware
+
+
+def test_acceptance_budget_carries_no_cancelled_task_level_multi_gpu_scope():
+    """Task-level multi-GPU was removed from scope on 2026-07-16.
+
+    See the "Approved scope adjustment" section of
+    ``docs/plans/array-active-s-mimo-implementation.md``. These fields pinned a
+    device-pool scheduler and a 1/2/4-GPU scaling gate that this plan no longer
+    delivers, so their absence is the contract.
+    """
+
+    for cancelled in (
+        "two_gpu_parallel_efficiency",
+        "four_gpu_parallel_efficiency",
+        "scaling_hardware",
+        "task_s_rtol",
+        "task_s_atol",
+        "task_basis_count",
+    ):
+        assert not hasattr(ARRAY_ACCEPTANCE_BUDGET, cancelled)
+
+
+def test_radiated_power_operator_rejects_non_hermitian_matrix():
+    """The Q_rad Hermiticity guard must actually reject a non-Hermitian operator.
+
+    ``postprocess/array.py`` symmetrizes Q_rad before construction, so this guard
+    can only ever fire for a directly constructed or deserialized operator. That
+    is exactly why it needs its own coverage: the internal path cannot exercise it.
+    """
+
+    basis = _basis()
+    frequency_count, port_count = basis.network.s.shape[0], basis.network.s.shape[1]
+    hermitian = torch.eye(port_count, dtype=basis.dtype).expand(
+        frequency_count, port_count, port_count
+    ).clone()
+    mw.ArrayBasisData(
+        network=basis.network,
+        embedded_patterns=basis.eep,
+        fingerprint="hermitian-q-rad",
+        radiated_power_matrix=hermitian,
+    )
+
+    skewed = hermitian.clone()
+    skewed[0, 0, 1] = skewed[0, 0, 1] + 0.5j
+    with pytest.raises(ValueError, match="Hermitian"):
+        mw.ArrayBasisData(
+            network=basis.network,
+            embedded_patterns=basis.eep,
+            fingerprint="non-hermitian-q-rad",
+            radiated_power_matrix=skewed,
+        )
 
 
 def test_two_port_network_and_two_element_fields_match_direct_formulas():
@@ -152,20 +213,6 @@ def test_closed_surface_power_operator_controls_absolute_radiated_power():
     assert beam.metadata["radiated_power_source"] == (
         "closed_surface_complex_poynting_quadratic"
     )
-
-
-def test_radiated_power_operator_rejects_non_hermitian_input():
-    basis = _basis()
-    invalid = torch.ones_like(basis.network.s)
-    invalid[:, 0, 1] = 2.0 + 1.0j
-
-    with pytest.raises(ValueError, match="Hermitian"):
-        mw.ArrayBasisData(
-            network=basis.network,
-            embedded_patterns=basis.eep,
-            fingerprint="invalid-power-operator",
-            radiated_power_matrix=invalid,
-        )
 
 
 def test_two_hertzian_dipoles_match_pointwise_array_formula():

@@ -167,9 +167,19 @@ def _qualification(scene):
     closure = torch.abs(beams.network.accepted_power - beams.antenna.p_rad) / (
         beams.network.incident_power
     )
+    # Q_rad is symmetrized on construction, so its Hermiticity residual is
+    # identically zero and is not evidence. Record the positive-semidefiniteness
+    # margin instead: real(a^H Q_rad a) is radiated power, so a negative
+    # eigenvalue means some excitation radiates negative power.
+    eigenvalues = torch.linalg.eigvalsh(basis.radiated_power_matrix)
     metrics = {
         "comparisons": comparisons,
         "max_physical_power_residual": float(torch.amax(closure)),
+        "radiated_power_min_eigenvalue": float(torch.amin(eigenvalues)),
+        "radiated_power_max_eigenvalue": float(torch.amax(eigenvalues)),
+        "radiated_power_min_eigenvalue_ratio": float(
+            torch.amin(eigenvalues) / torch.amax(eigenvalues)
+        ),
         "grid_cells": tuple(int(value - 1) for value in (len(result.prepared_scene.x), len(result.prepared_scene.y), len(result.prepared_scene.z))),
         "pml_cells_per_face": result.scene.boundary.num_layers,
         "steps": int(
@@ -233,19 +243,32 @@ def _timings(scene, basis, weights, *, warmups: int, samples: int, rounds: int):
     }
 
 
-def _assert_gates(metrics, timings, *, qualifying):
+def _assert_numerical_gates(metrics):
+    """Assert the numerical gates. Runs before the timing loop so a timing hang
+    cannot hide a numerical regression."""
+
     for comparison in metrics["comparisons"].values():
-        assert comparison["weighted_complex_l2"] <= ARRAY_ACCEPTANCE_BUDGET.fdtd_complex_l2
-        assert comparison["phase_rms_deg"] <= ARRAY_ACCEPTANCE_BUDGET.fdtd_phase_rms_deg
+        assert comparison["weighted_complex_l2"] <= ARRAY_ACCEPTANCE_BUDGET.phase1_fdtd_complex_l2
+        assert comparison["phase_rms_deg"] <= ARRAY_ACCEPTANCE_BUDGET.phase1_fdtd_phase_rms_deg
         assert comparison["incident_power_wave_relative_error"] <= ARRAY_ACCEPTANCE_BUDGET.port_power_relative_error
         assert comparison["reflected_power_wave_relative_error"] <= ARRAY_ACCEPTANCE_BUDGET.port_power_relative_error
         assert comparison["accepted_power_relative_error"] <= ARRAY_ACCEPTANCE_BUDGET.port_power_relative_error
     assert metrics["max_physical_power_residual"] <= ARRAY_ACCEPTANCE_BUDGET.physical_power_residual
+    # The min/max ratio alone fails open on a total sign inversion (negating the
+    # operator flips both eigenvalues so the ratio stays positive); require a
+    # positive largest eigenvalue first, matching the fullwave contract gate.
+    assert metrics["radiated_power_max_eigenvalue"] > 0.0
+    assert metrics["radiated_power_min_eigenvalue_ratio"] >= (
+        -ARRAY_ACCEPTANCE_BUDGET.radiated_power_psd_relative_floor
+    )
     assert tuple(metrics["grid_cells"]) == ARRAY_ACCEPTANCE_BUDGET.phase1_grid_shape
-    assert metrics["pml_cells_per_face"] == 8
+    assert metrics["pml_cells_per_face"] == ARRAY_ACCEPTANCE_BUDGET.phase1_pml_cells
     assert metrics["steps"] == ARRAY_ACCEPTANCE_BUDGET.phase1_steps
     assert tuple(metrics["angular_shape"]) == ARRAY_ACCEPTANCE_BUDGET.phase1_angular_shape
-    assert metrics["beam_count"] == 16
+    assert metrics["beam_count"] == ARRAY_ACCEPTANCE_BUDGET.phase1_beams
+
+
+def _assert_timing_gates(timings, *, qualifying):
     assert timings["basis_to_direct_ratio"] <= ARRAY_ACCEPTANCE_BUDGET.phase1_basis_direct_time_ratio
     assert timings["combine_to_one_solve_ratio"] <= ARRAY_ACCEPTANCE_BUDGET.phase1_combine_solve_time_ratio
     if qualifying:
@@ -306,6 +329,10 @@ def main():
 
     scene = build_four_element_linear_scene()
     basis, weights, metrics = _qualification(scene)
+    # Assert the numerical gates before the timing loop. The timing loop repeats
+    # the full workload many times, so deferring these until afterwards means a
+    # timing hang hides a numerical regression for hours instead of minutes.
+    _assert_numerical_gates(metrics)
     timings = _timings(
         scene,
         basis,
@@ -325,7 +352,7 @@ def main():
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
-    _assert_gates(metrics, timings, qualifying=payload["qualifying"])
+    _assert_timing_gates(timings, qualifying=payload["qualifying"])
 
 
 if __name__ == "__main__":

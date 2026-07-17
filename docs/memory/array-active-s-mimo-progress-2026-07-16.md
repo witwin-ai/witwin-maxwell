@@ -4,7 +4,8 @@ Date: 2026-07-16
 
 Branch: `codex/array-mimo`
 
-Status: Phase 0 committed; Phase 1 checkpoint/WIP; later phases not started
+Status: Phase 0 committed; Phase 1 committed as a checkpoint with its performance gate
+unmet; later phases not started
 
 ## Completed work
 
@@ -18,8 +19,10 @@ were accepted at the experimental evidence level.
 
 ### Phase 1 implementation checkpoint
 
-The working tree contains a substantial, uncommitted Phase 1 implementation. This is a
-checkpoint/WIP, not a completed phase commit. Implemented work includes:
+The Phase 1 implementation is committed as `3223e0c` (`Checkpoint full-wave array basis
+implementation`) and the working tree is clean. It is a checkpoint commit, not a
+completed phase: the frozen performance gate is still unmet (see below). Implemented
+work includes:
 
 - compact per-column `PortSweep` execution data with measured incident waves;
 - `Result.array_basis(...)` extraction without an FDTD rerun;
