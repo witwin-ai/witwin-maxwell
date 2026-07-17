@@ -588,16 +588,11 @@ def _preflight_auxiliary(solver, checkpoint: FDTDResumeCheckpoint):
             last_condition,
             runtime.dc_condition,
         )
+        # Keep the persistent tensor identity captured by circuit CUDA Graphs.
+        copy_ops.append((runtime.previous_stored_energy, previous_energy))
         host_updates.extend(
             (
                 (runtime, "step_index", checkpoint.step),
-                (
-                    runtime,
-                    "previous_stored_energy",
-                    previous_energy.to(
-                        device=runtime.system.device, dtype=runtime.system.dtype
-                    ).clone(),
-                ),
                 (
                     runtime,
                     "last_condition",

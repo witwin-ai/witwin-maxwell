@@ -101,6 +101,40 @@ storage writes circuit data once in coordinator metadata rather than duplicating
 it in rank field shards. Loaded tensors are detached and no solver, Scene,
 autograd graph, or companion history is reconstructed.
 
+## Differentiable coupled execution
+
+On one CUDA device, a trainable circuit-coupled FDTD run checkpoints the circuit
+companion state with the Maxwell state and replays the same strongly coupled MNA
+step during backward. PyTorch's linear-solve VJP supplies the transpose solve.
+Gradients propagate through direct, restricted-SPICE-expression, and
+`SceneModule`-derived R/L/C values and independent-source waveform parameters,
+as well as supported bound-port material or geometry inputs. Live port outputs
+and all live `CircuitData` tensor outputs participate in autograd: node voltages,
+physical branch currents (including independent current-source samples),
+per-device powers, cumulative energy balance, port power, field-energy change,
+and DC/transient condition diagnostics.
+
+Direct `Circuit` construction and `parse_spice(...)` use ordinary eager
+PyTorch expression semantics: a derived value such as `2 * base` is
+materialized when the circuit is built. Rebuild or reparse the circuit for each
+finite-difference or optimization evaluation so the expression sees the
+current leaf value and owns a fresh autograd graph. For iterative optimization,
+put that construction in `SceneModule.to_scene()`. Mutating `base` does not
+retroactively update an already materialized device value, and retaining a
+consumed graph is not part of the contract.
+
+This adjoint starts from a fixed exactly-zero coupled operating point and
+companion history. Consequently, an objective must slice `CircuitData` time
+series from sample 1 onward; a tensor seed at sample 0 is an explicit error.
+Trainable DC source values remain unsupported even when the source also has a
+waveform, and trainable circuit initial conditions are unsupported. Fixed
+nonzero DC/initial state, trainable port reference impedance, and distributed
+adjoint execution also fail explicitly. Differentiable circuit parameters use
+the generic forward circuit path rather than the fixed-parameter R/C or CUDA
+Graph fast paths, including when a prepared dtype cast would otherwise erase a
+runtime tensor's `requires_grad` flag. Saved `CircuitData` and `Result` snapshots
+remain detached and do not preserve this live graph.
+
 ## Resumable forward execution
 
 Forward checkpointing is separate from Result persistence. Advance a fresh
@@ -148,3 +182,12 @@ Fixed topology and integration/switch states reuse LU factors and preallocated
 matrix, right-hand-side, and solution buffers. Topology parsing and validation
 are CPU control-plane operations; per-step stamps, histories, source values,
 solves, terminal scatter, samples, and diagnostics are CUDA tensors.
+
+With `cuda_graph=True`, fixed built-in PULSE/SIN/PWL and scheduled-switch inputs
+are precomputed on the device. The runtime captures one circuit replay per
+integration/switch factor class and selects among those static replays without
+freezing the source sample index. Fixed R/C networks additionally use batched
+incidence-matrix updates for histories, currents, powers, and stored energy.
+The internal `compile_batched_mna_factors(...)` primitive caches fixed-shape
+`[batch, unknown, unknown]` GPU factors for task-level batches without widening
+the one-circuit-per-Scene execution contract.

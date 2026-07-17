@@ -70,6 +70,12 @@ def _terminal_voltage(vector: torch.Tensor, graph: CircuitGraph, positive, negat
     return (zero if p is None else vector[p]) - (zero if n is None else vector[n])
 
 
+def _source_value_at(values: torch.Tensor, index: int | torch.Tensor) -> torch.Tensor:
+    if isinstance(index, torch.Tensor):
+        return torch.index_select(values, 0, index.reshape(1)).squeeze(0)
+    return values[index]
+
+
 def _device_tensors(circuit: Circuit):
     for device in circuit.devices:
         for value in device.parameters.values():
@@ -163,6 +169,45 @@ class CircuitState:
     capacitor_current: dict[str, torch.Tensor]
     inductor_current: torch.Tensor
     inductor_voltage: torch.Tensor
+
+
+@dataclass(frozen=True)
+class BatchedMNAFactors:
+    """Cached GPU LU factors for fixed-shape task-level circuit batches."""
+
+    factors: torch.Tensor
+    pivots: torch.Tensor
+    condition: torch.Tensor
+
+    @property
+    def batch_size(self) -> int:
+        return self.factors.shape[0]
+
+    @property
+    def unknown_count(self) -> int:
+        return self.factors.shape[1]
+
+    def solve(self, rhs: torch.Tensor, *, out: torch.Tensor | None = None) -> torch.Tensor:
+        expected = (self.batch_size, self.unknown_count)
+        if rhs.shape != expected:
+            raise ValueError(f"Batched MNA right-hand side must have shape {expected}.")
+        if rhs.device != self.factors.device or rhs.dtype != self.factors.dtype:
+            raise ValueError("Batched MNA right-hand side must match factor device and dtype.")
+        if out is None:
+            return torch.linalg.lu_solve(
+                self.factors,
+                self.pivots,
+                rhs.unsqueeze(-1),
+            ).squeeze(-1)
+        if out.shape != expected or out.device != rhs.device or out.dtype != rhs.dtype:
+            raise ValueError("Batched MNA output must match right-hand-side shape, device, and dtype.")
+        torch.linalg.lu_solve(
+            self.factors,
+            self.pivots,
+            rhs.unsqueeze(-1),
+            out=out.unsqueeze(-1),
+        )
+        return out
 
 
 @dataclass(frozen=True)
@@ -437,7 +482,7 @@ class LinearMNASystem:
             if isinstance(device, TimedSwitch):
                 value = self._switch_resistance(device, time)
             elif isinstance(device, (VoltageSource, CurrentSource)):
-                value = source_values[device.name][step_index]
+                value = _source_value_at(source_values[device.name], step_index)
             else:
                 value = None
             if stamp_matrix:
@@ -671,7 +716,10 @@ class LinearMNASystem:
             elif isinstance(device, (VoltageSource, VoltageControlledVoltageSource, CurrentControlledVoltageSource)):
                 currents[device.name] = solution[_branch_unknown(self.graph, device.name)]
             elif isinstance(device, CurrentSource):
-                currents[device.name] = source_values[device.name][step_index]
+                currents[device.name] = _source_value_at(
+                    source_values[device.name],
+                    step_index,
+                )
             elif isinstance(device, VoltageControlledCurrentSource):
                 control = _terminal_voltage(
                     solution,
@@ -989,11 +1037,48 @@ def compile_coupled_mna_system(
     )
 
 
+def compile_batched_mna_factors(
+    matrices: torch.Tensor,
+    *,
+    pivot_tolerance: float = 1.0e-10,
+) -> BatchedMNAFactors:
+    """Factor a fixed-shape ``[batch, unknown, unknown]`` CUDA MNA batch once."""
+
+    if (
+        matrices.ndim != 3
+        or matrices.shape[0] < 1
+        or matrices.shape[1] < 1
+        or matrices.shape[1] != matrices.shape[2]
+    ):
+        raise ValueError("Batched MNA matrices must have non-empty shape [B, N, N].")
+    if matrices.device.type != "cuda":
+        raise ValueError("Batched MNA factorization requires CUDA matrices.")
+    if matrices.dtype not in (torch.float32, torch.float64) or matrices.is_complex():
+        raise ValueError("Batched MNA matrices require real float32 or float64 values.")
+    if matrices.requires_grad:
+        raise ValueError("Cached batched MNA factors require fixed non-trainable matrices.")
+    if not math.isfinite(pivot_tolerance) or pivot_tolerance <= 0.0:
+        raise ValueError("pivot_tolerance must be finite and positive.")
+    singular_values = torch.linalg.svdvals(matrices)
+    largest = singular_values[:, 0]
+    smallest = singular_values[:, -1]
+    if bool(torch.any(smallest <= pivot_tolerance * largest).detach()):
+        raise ValueError("Batched MNA matrices contain a singular or below-tolerance system.")
+    factors, pivots = torch.linalg.lu_factor(matrices)
+    return BatchedMNAFactors(
+        factors=factors,
+        pivots=pivots,
+        condition=largest / smallest,
+    )
+
+
 __all__ = [
+    "BatchedMNAFactors",
     "CircuitState",
     "CompiledStampPlan",
     "LinearMNASystem",
     "compile_coupled_mna_system",
+    "compile_batched_mna_factors",
     "compile_mna_system",
     "evaluate_waveform",
 ]

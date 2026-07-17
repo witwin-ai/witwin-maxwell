@@ -359,7 +359,7 @@ def test_circuit_step_reuses_factors_without_scalar_sync_or_host_copy():
     )
 
 
-def test_circuit_bound_port_rejects_direct_excitation_and_trainable_runs():
+def test_circuit_bound_port_rejects_direct_excitation():
     circuit = mw.Circuit("load")
     node = circuit.node("input")
     circuit.add(mw.Resistor("R1", node, circuit.ground, 50.0))
@@ -372,24 +372,6 @@ def test_circuit_bound_port_rejects_direct_excitation_and_trainable_runs():
             frequency=3.0e9,
             excitations=mw.PortExcitation("feed"),
         ).prepare()
-
-    trainable = mw.Circuit("trainable")
-    trainable_node = trainable.node("input")
-    trainable.add(
-        mw.Resistor(
-            "R1",
-            trainable_node,
-            trainable.ground,
-            torch.tensor(50.0, device="cuda", requires_grad=True),
-        )
-    )
-    trainable.bind_port("feed", positive=trainable_node, negative=trainable.ground)
-    with pytest.raises(NotImplementedError, match="transpose Schur"):
-        mw.Simulation.fdtd(
-            _scene(_port(), circuits=(trainable,)),
-            frequency=3.0e9,
-        ).run()
-
 
 def test_nonzero_coupled_dc_current_rejects_an_inconsistent_zero_field_start():
     circuit = mw.Circuit("dc_driven")

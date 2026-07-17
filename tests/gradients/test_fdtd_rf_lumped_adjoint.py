@@ -446,7 +446,13 @@ def _passive_port_objective(scene):
     return voltage.abs().square().sum(), result
 
 
-def _assert_three_step_central_difference(parameter, objective, steps):
+def _assert_three_step_central_difference(
+    parameter,
+    objective,
+    steps,
+    *,
+    max_relative_error=0.02,
+):
     loss, result = objective()
     loss.backward()
     adjoint = float(parameter.grad.detach())
@@ -467,7 +473,7 @@ def _assert_three_step_central_difference(parameter, objective, steps):
         abs(value - adjoint) / max(abs(value), abs(adjoint), 1.0e-30)
         for value in finite_differences
     ]
-    assert min(relative_errors) < 0.02, (
+    assert min(relative_errors) < max_relative_error, (
         f"adjoint={adjoint}, finite_differences={finite_differences}, "
         f"relative_errors={relative_errors}"
     )

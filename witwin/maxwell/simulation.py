@@ -563,11 +563,6 @@ class Simulation:
     def _validate_trainable_rf_support(self) -> None:
         if self.method != SimulationMethod.FDTD or not self.has_trainable_parameters:
             return
-        if self.scene.circuits:
-            raise NotImplementedError(
-                "Differentiable circuit-coupled FDTD requires circuit replay and "
-                "transpose Schur solves; this forward runtime rejects partial gradients."
-            )
         rf_ports = tuple(
             port
             for port in self.scene.ports
@@ -640,10 +635,6 @@ class Simulation:
         self.scene.compile_circuits()
         if self.method != SimulationMethod.FDTD:
             raise ValueError("Circuit-coupled scenes are supported by Simulation.fdtd(...) only.")
-        if self.config.parallel is not None:
-            raise NotImplementedError(
-                "Circuit-coupled distributed FDTD is introduced in the multi-GPU phase."
-            )
         if len(self.scene.circuits) != 1 or not self.scene.circuits[0].bindings:
             raise NotImplementedError(
                 "Circuit-coupled FDTD requires one circuit with at least one bound port; "
@@ -1090,6 +1081,8 @@ class Simulation:
         dft_cfg: SpectralSampler,
     ) -> dict[str, Any]:
         elapsed_s = getattr(solver, "last_solve_elapsed_s", None)
+        step_loop_elapsed_s = getattr(solver, "last_step_loop_elapsed_s", None)
+        step_loop_steps = getattr(solver, "last_step_loop_steps", None)
         dft_sample_counts = tuple(getattr(solver, "dft_sample_counts", (getattr(solver, "dft_sample_count", 0),)))
         observer_sample_counts = tuple(
             getattr(
@@ -1109,6 +1102,9 @@ class Simulation:
             "steps_run": (shutoff_step + 1) if shutoff_triggered else time_steps,
             "dt": solver.dt,
             "cuda_graph_active": bool(getattr(solver, "_cuda_graph_active", False)),
+            "circuit_cuda_graph_active": bool(
+                getattr(solver, "_circuit_graph_active", False)
+            ),
             "tail_graph_active": bool(getattr(solver, "_tail_graph_active", False)),
             "boundary": getattr(solver, "boundary_kind", self.scene.boundary.kind),
             "absorber": getattr(solver, "active_absorber_type", self.config.absorber),
@@ -1127,6 +1123,13 @@ class Simulation:
             "observer_sample_counts": observer_sample_counts,
             "full_field_dft": use_full_field_dft,
             "elapsed_s": elapsed_s,
+            "steady_step_elapsed_s": step_loop_elapsed_s,
+            "steady_steps": step_loop_steps,
+            "steady_ms_per_step": (
+                None
+                if step_loop_elapsed_s is None or not step_loop_steps
+                else step_loop_elapsed_s * 1e3 / step_loop_steps
+            ),
             "ms_per_step": (
                 elapsed_s * 1e3 / time_steps
                 if elapsed_s is not None and time_steps > 0

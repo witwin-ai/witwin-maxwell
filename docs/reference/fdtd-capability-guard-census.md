@@ -7,17 +7,18 @@ cannot enter unnoticed.
 
 ## Reconciled baseline
 
-The Phase 3 circuit workflow state on 2026-07-15 contains 134 guards:
+The Phase 4 circuit workflow state on 2026-07-15 contains 133 guards:
 
-- 114 capability guards tracked by the test budget;
+- 113 capability guards tracked by the test budget;
 - 20 contract guards excluded by exact file and message substring.
 
-The remaining phase-owned circuit guards cover multi-circuit execution,
-transpose-solve differentiation, and distributed execution. Phase 3 forward
-resume also explicitly excludes full-field/observer accumulation and
-distributed or adjoint execution. These were reviewed as capability guards
-rather than reclassified as permanent contracts; their owning phases must lower
-this baseline as they land.
+The single-GPU circuit adjoint now provides the circuit replay and transpose
+linear-solve VJP. Its remaining explicit limits are the omitted t=0
+operating-point/initial-state pullback (therefore trainable DC source values and
+circuit initial conditions), tensor seeds on the initial `CircuitData` sample,
+and trainable port reference impedance. Multi-circuit execution, distributed
+adjoints, and full-field/observer forward-resume accumulation remain separate
+capability gaps rather than reclassified permanent contracts.
 
 The capability baseline is distributed as follows:
 
@@ -26,14 +27,14 @@ The capability baseline is distributed as follows:
 | External interoperability adapter | 18 |
 | Material compilers | 9 |
 | Frequency-domain runtime | 5 |
-| Time-domain adjoint | 14 |
+| Time-domain adjoint | 15 |
 | Time-domain excitation | 12 |
 | Time-domain ports and lumped elements | 12 |
 | Time-domain runtime | 11 |
-| Public simulation, result, and network workflows | 23 |
+| Public simulation, result, and network workflows | 21 |
 | Material models | 7 |
 | Postprocessing | 3 |
-| **Total** | **114** |
+| **Total** | **113** |
 
 ## Contract exclusions
 

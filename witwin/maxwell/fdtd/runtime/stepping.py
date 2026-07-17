@@ -34,7 +34,11 @@ from ..ports import (
     prepare_port_runtimes,
     prepare_port_spectral_accumulators,
 )
-from ..circuits import finalize_circuit_data, prepare_circuit_time_series
+from ..circuits import (
+    finalize_circuit_data,
+    prepare_circuit_graph_runners,
+    prepare_circuit_time_series,
+)
 
 
 def iter_cpml_memory_regions(solver, attr_name):
@@ -1912,6 +1916,9 @@ def solve(
         solver._prepare_time_observers(time_steps)
     prepare_port_spectral_accumulators(solver, time_steps, dft_window)
     prepare_circuit_time_series(solver, time_steps)
+    circuit_runtimes = tuple(getattr(solver, "_circuit_runtimes", ()))
+    if circuit_runtimes:
+        prepare_circuit_graph_runners(solver, use_cuda_graph)
 
     solver._shutoff_triggered = False
     solver._shutoff_step = None
@@ -1944,6 +1951,13 @@ def solve(
             f"stop_step={end_step} precedes resume step {start_step}."
         )
 
+    measure_step_loop = bool(
+        circuit_runtimes or getattr(solver, "_port_runtimes", ())
+    )
+    step_start_event = torch.cuda.Event(enable_timing=True) if measure_step_loop else None
+    step_end_event = torch.cuda.Event(enable_timing=True) if measure_step_loop else None
+    if step_start_event is not None:
+        step_start_event.record()
     iterator = range(start_step, end_step)
     pbar = None
     if solver.verbose:
@@ -2012,6 +2026,18 @@ def solve(
         if enable_plot and n % solver.plot_interval == 0:
             visualize_slice(solver, n)
 
+    if step_start_event is not None and step_end_event is not None:
+        step_end_event.record()
+        step_end_event.synchronize()
+        completed_steps = (
+            solver._shutoff_step + 1 - start_step
+            if solver._shutoff_triggered
+            else end_step - start_step
+        )
+        solver.last_step_loop_elapsed_s = (
+            step_start_event.elapsed_time(step_end_event) * 1.0e-3
+        )
+        solver.last_step_loop_steps = completed_steps
     solver._synchronize_device()
     solver.last_solve_elapsed_s = time.perf_counter() - solve_start
     if end_step < time_steps:

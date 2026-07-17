@@ -35,6 +35,7 @@ from ..observers import (
     _plane_coord_names,
 )
 from ..ports import replay_port_runtimes
+from .circuits import replay_circuit_runtimes
 
 _TFSF_REFERENCE_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned"}
 _TFSF_AUXILIARY_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned", "plane_wave_aux"}
@@ -134,11 +135,33 @@ def _prepare_forward_pack(raw_output):
         if data.available_power is not None:
             output_tensors.append(data.available_power)
 
+    circuit_offset = len(output_tensors)
+    circuit_templates = {}
+    circuit_diagnostic_names = {}
+    for circuit_name, data in raw_output.get("circuits", {}).items():
+        circuit_templates[circuit_name] = data
+        output_tensors.extend((data.node_voltages, data.branch_currents))
+        output_tensors.extend(data.device_powers.values())
+        if data.energy_balance is not None:
+            output_tensors.append(data.energy_balance)
+        tensor_diagnostics = tuple(
+            (name, value)
+            for name, value in data.diagnostics.items()
+            if isinstance(value, torch.Tensor)
+        )
+        circuit_diagnostic_names[circuit_name] = tuple(
+            name for name, _value in tensor_diagnostics
+        )
+        output_tensors.extend(value for _name, value in tensor_diagnostics)
+
     return _ForwardPack(
         field_names=tuple(field_names),
         monitor_templates=monitor_templates,
         port_templates=port_templates,
         port_offset=port_offset,
+        circuit_templates=circuit_templates,
+        circuit_offset=circuit_offset,
+        circuit_diagnostic_names=circuit_diagnostic_names,
         output_tensors=tuple(output_tensors),
     )
 
@@ -262,6 +285,41 @@ def _rebuild_ports(port_templates, output_tensors, port_offset):
             cursor += 1
         ports[port_name] = replace(template, **updates)
     return ports
+
+
+def _rebuild_circuits(
+    circuit_templates,
+    circuit_diagnostic_names,
+    output_tensors,
+    circuit_offset,
+):
+    circuits = {}
+    cursor = int(circuit_offset)
+    for circuit_name, template in circuit_templates.items():
+        node_voltages = output_tensors[cursor]
+        branch_currents = output_tensors[cursor + 1]
+        cursor += 2
+        device_powers = {}
+        for device_name in template.device_powers:
+            device_powers[device_name] = output_tensors[cursor]
+            cursor += 1
+        energy_balance = None
+        if template.energy_balance is not None:
+            energy_balance = output_tensors[cursor]
+            cursor += 1
+        diagnostics = dict(template.diagnostics)
+        for diagnostic_name in circuit_diagnostic_names[circuit_name]:
+            diagnostics[diagnostic_name] = output_tensors[cursor]
+            cursor += 1
+        circuits[circuit_name] = replace(
+            template,
+            node_voltages=node_voltages,
+            branch_currents=branch_currents,
+            device_powers=device_powers,
+            energy_balance=energy_balance,
+            diagnostics=diagnostics,
+        )
+    return circuits
 
 
 def _term_grid_tensor(term):
@@ -826,6 +884,9 @@ class _ForwardPack:
     monitor_templates: dict[str, dict[str, Any]]
     port_templates: dict[str, Any]
     port_offset: int
+    circuit_templates: dict[str, Any]
+    circuit_offset: int
+    circuit_diagnostic_names: dict[str, tuple[str, ...]]
     output_tensors: tuple[torch.Tensor, ...]
 
 
@@ -3002,6 +3063,8 @@ def _step_state(
     tpa_ez=None,
     capture_magnetic=None,
     capture_lumped=None,
+    capture_circuit=None,
+    step_index=None,
 ):
     if getattr(solver, "modulation_enabled", False):
         raise NotImplementedError("FDTD adjoint replay does not support time-modulated media.")
@@ -3485,6 +3548,18 @@ def _step_state(
         time_value=time_value,
         capture=capture_lumped,
     )
+    if getattr(solver, "_circuit_runtimes", ()):
+        if step_index is None:
+            raise RuntimeError("Circuit adjoint replay requires an explicit FDTD step index.")
+        electric_fields, circuit_state = replay_circuit_runtimes(
+            solver,
+            electric_fields,
+            state,
+            step_index=step_index,
+            capture=capture_circuit,
+        )
+    else:
+        circuit_state = {}
 
     dispersive_input_fields = {name: electric_fields[name] for name in ("Ex", "Ey", "Ez")}
     if complex_fields:
@@ -3568,6 +3643,7 @@ def _step_state(
     next_state.update(dispersive_state)
     next_state.update(magnetic_dispersive_state)
     next_state.update(lumped_state)
+    next_state.update(circuit_state)
     return next_state
 
 
@@ -3647,6 +3723,7 @@ def _replay_segment_states(
     *,
     mid_magnetic_out=None,
     lumped_traces_out=None,
+    circuit_traces_out=None,
 ):
     """Replay the forward field states of one checkpoint segment.
 
@@ -3670,6 +3747,8 @@ def _replay_segment_states(
                 eps_ez=solver.eps_Ez,
                 capture_magnetic=mid_magnetic_out if capture else None,
                 capture_lumped=lumped_traces_out,
+                capture_circuit=circuit_traces_out,
+                step_index=step_index,
             )
             states.append({name: tensor.detach() for name, tensor in current.items()})
     return states

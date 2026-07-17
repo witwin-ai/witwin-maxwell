@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import torch
@@ -15,7 +16,7 @@ from ..compiler.mna import (
     _terminal_voltage,
     compile_coupled_mna_system,
 )
-from ..lumped import Capacitor, Inductor
+from ..lumped import Capacitor, Inductor, Resistor
 from .lumped import FieldPortCoupling, prepare_field_port_coupling
 
 
@@ -71,6 +72,18 @@ class CircuitPortRuntime:
 
 
 @dataclass
+class _RCFastPlan:
+    device_incidence: torch.Tensor
+    capacitor_incidence: torch.Tensor
+    capacitor_device_indices: torch.Tensor
+    capacitances: torch.Tensor
+    resistor_conductances: torch.Tensor
+    resistor_mask: torch.Tensor
+    capacitor_voltage: torch.Tensor
+    capacitor_current: torch.Tensor
+
+
+@dataclass
 class EMCircuitRuntime:
     circuit: object
     system: object
@@ -92,11 +105,15 @@ class EMCircuitRuntime:
     node_samples: torch.Tensor | None = None
     branch_samples: torch.Tensor | None = None
     device_power_samples: dict[str, torch.Tensor] = field(default_factory=dict)
+    device_power_sample_matrix: torch.Tensor | None = None
     energy_balance_samples: torch.Tensor | None = None
     port_power_samples: torch.Tensor | None = None
     field_energy_change_samples: torch.Tensor | None = None
     previous_stored_energy: torch.Tensor | None = None
+    running_energy_balance: torch.Tensor | None = None
     step_index: int = 0
+    graph_eligible: bool = False
+    rc_fast_plan: _RCFastPlan | None = None
 
     @property
     def physical_devices(self):
@@ -144,15 +161,18 @@ class EMCircuitRuntime:
         port: CircuitPortRuntime,
         current: torch.Tensor,
         voltage: torch.Tensor,
+        *,
+        scatter_field: bool = True,
     ) -> None:
-        field_tensor = getattr(port.solver, port.field_name)
-        torch.mul(port.field.injection, current, out=port.field.correction_buffer)
-        field_tensor.view(-1).index_add_(
-            0,
-            port.field.linear_indices,
-            port.field.correction_buffer,
-            alpha=-1.0,
-        )
+        if scatter_field:
+            field_tensor = getattr(port.solver, port.field_name)
+            torch.mul(port.field.injection, current, out=port.field.correction_buffer)
+            field_tensor.view(-1).index_add_(
+                0,
+                port.field.linear_indices,
+                port.field.correction_buffer,
+                alpha=-1.0,
+            )
         port.field.last_current.copy_(current)
         port.field.last_voltage.copy_(voltage)
         port.field.last_voltage_after.copy_(port.field.last_voltage_before)
@@ -238,6 +258,7 @@ class EMCircuitRuntime:
         )
         for index, device in enumerate(self.physical_devices):
             self.branch_samples[0, index].copy_(currents[device.name])
+        powers = []
         for device in self.circuit.devices:
             if isinstance(device, MutualInductor):
                 power = self.initial_solution.new_zeros(())
@@ -249,8 +270,11 @@ class EMCircuitRuntime:
                     device.negative,
                 )
                 power = voltage * currents[device.name]
-            self.device_power_samples[device.name][0].copy_(power)
-        self.previous_stored_energy = self._stored_energy(self.state)
+            powers.append(power)
+        power_row = torch.stack(powers) if powers else self.initial_solution.new_zeros((0,))
+        self.device_power_sample_matrix[0].copy_(power_row)
+        self.previous_stored_energy.copy_(self._stored_energy(self.state))
+        self.running_energy_balance.zero_()
 
     def prepare_time_series(self, steps: int) -> None:
         if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
@@ -298,9 +322,14 @@ class EMCircuitRuntime:
             device=device,
             dtype=dtype,
         )
+        self.device_power_sample_matrix = torch.empty(
+            (steps + 1, len(self.circuit.devices)),
+            device=device,
+            dtype=dtype,
+        )
         self.device_power_samples = {
-            device_item.name: torch.empty((steps + 1,), device=device, dtype=dtype)
-            for device_item in self.circuit.devices
+            device_item.name: self.device_power_sample_matrix[:, index]
+            for index, device_item in enumerate(self.circuit.devices)
         }
         self.energy_balance_samples = torch.zeros((steps + 1,), device=device, dtype=dtype)
         self.port_power_samples = torch.zeros((steps + 1, len(self.ports)), device=device, dtype=dtype)
@@ -312,6 +341,13 @@ class EMCircuitRuntime:
         self.factor_cache.clear()
         self.step_index = 0
         self.step_tensor.zero_()
+        self.previous_stored_energy = self.initial_solution.new_zeros(())
+        self.running_energy_balance = self.initial_solution.new_zeros(())
+        # Built-in switch/source schedules are fully precomputed on the device.
+        # A separate graph is captured for each integration/switch factor class.
+        self.graph_eligible = not any(
+            value.requires_grad for value in self.system._parameter_cache.values()
+        )
         self._record_initial()
 
         representatives = {}
@@ -342,19 +378,213 @@ class EMCircuitRuntime:
                 )
             self.factor_cache[factor_key] = self.system._factor(matrix)
 
-    def apply(self) -> None:
-        if self.sample_times is None or self.step_index >= self.sample_times.numel() - 1:
-            raise RuntimeError("Circuit time-series buffers were not prepared for this FDTD step.")
-        index = self.step_index
+    def _copy_state_(self, source: CircuitState) -> None:
+        for name, value in source.capacitor_voltage.items():
+            self.state.capacitor_voltage[name].copy_(value)
+        for name, value in source.capacitor_current.items():
+            self.state.capacitor_current[name].copy_(value)
+        self.state.inductor_current.copy_(source.inductor_current)
+        self.state.inductor_voltage.copy_(source.inductor_voltage)
+
+    def _write_step_samples(
+        self,
+        index: int,
+        *,
+        device_indexed_samples: bool,
+        node_row: torch.Tensor,
+        branch_row: torch.Tensor,
+        device_power_row: torch.Tensor,
+        port_power_row: torch.Tensor,
+        field_energy_row: torch.Tensor,
+    ) -> None:
+        if device_indexed_samples:
+            sample_index = (self.step_tensor + 1).reshape(1)
+            self.node_samples.index_copy_(0, sample_index, node_row.unsqueeze(0))
+            self.branch_samples.index_copy_(0, sample_index, branch_row.unsqueeze(0))
+            self.device_power_sample_matrix.index_copy_(
+                0,
+                sample_index,
+                device_power_row.unsqueeze(0),
+            )
+            self.energy_balance_samples.index_copy_(
+                0,
+                sample_index,
+                self.running_energy_balance.reshape(1),
+            )
+            self.port_power_samples.index_copy_(
+                0,
+                sample_index,
+                port_power_row.unsqueeze(0),
+            )
+            self.field_energy_change_samples.index_copy_(
+                0,
+                sample_index,
+                field_energy_row.unsqueeze(0),
+            )
+            return
+        sample_index = index + 1
+        self.node_samples[sample_index].copy_(node_row)
+        self.branch_samples[sample_index].copy_(branch_row)
+        self.device_power_sample_matrix[sample_index].copy_(device_power_row)
+        self.energy_balance_samples[sample_index].copy_(self.running_energy_balance)
+        self.port_power_samples[sample_index].copy_(port_power_row)
+        self.field_energy_change_samples[sample_index].copy_(field_energy_row)
+
+    def _apply_rc_step(
+        self,
+        index: int,
+        *,
+        integration: str,
+        free_voltages: tuple[torch.Tensor, ...],
+        device_indexed_samples: bool,
+        scatter_field_currents: bool,
+    ) -> tuple[torch.Tensor, ...]:
+        plan = self.rc_fast_plan
+        factor = 2.0 if integration == "trapezoidal" else 1.0
+        capacitor_conductance = factor * plan.capacitances / self.system.dt
+        torch.mv(
+            plan.capacitor_incidence.transpose(0, 1),
+            capacitor_conductance * plan.capacitor_voltage,
+            out=self.rhs_buffer,
+        )
+        for port, free_voltage in zip(self.ports, free_voltages):
+            _stamp_norton(
+                self.matrix_buffer,
+                self.rhs_buffer,
+                self.system.graph,
+                port.binding,
+                port.conductance(integration),
+                free_voltage,
+                stamp_matrix=False,
+            )
+        factor_key = (integration, self.switch_keys[index])
+        factors, pivots, condition = self.factor_cache[factor_key]
+        torch.linalg.lu_solve(
+            factors,
+            pivots,
+            self.rhs_buffer.unsqueeze(-1),
+            out=self.solution_column_buffer,
+        )
+        solution = self.solution_column_buffer.squeeze(-1)
+        device_voltages = torch.mv(plan.device_incidence, solution)
+        capacitor_voltages = torch.index_select(
+            device_voltages,
+            0,
+            plan.capacitor_device_indices,
+        )
+        capacitor_currents = capacitor_conductance * (
+            capacitor_voltages - plan.capacitor_voltage
+        )
+        if integration == "trapezoidal":
+            next_capacitor_voltage = 2.0 * capacitor_voltages - plan.capacitor_voltage
+            next_capacitor_current = 2.0 * capacitor_currents - plan.capacitor_current
+        else:
+            next_capacitor_voltage = capacitor_voltages
+            next_capacitor_current = capacitor_currents
+        device_currents = device_voltages * plan.resistor_conductances
+        device_currents.index_copy_(
+            0,
+            plan.capacitor_device_indices,
+            capacitor_currents,
+        )
+
+        port_powers = []
+        field_energy_changes = []
+        for port, free_voltage in zip(self.ports, free_voltages):
+            port.last_integration = integration
+            voltage = _terminal_voltage(
+                solution,
+                self.system.graph,
+                port.binding.positive,
+                port.binding.negative,
+            )
+            current = port.conductance(integration) * (free_voltage - voltage)
+            self._apply_field_current(
+                port,
+                current,
+                voltage,
+                scatter_field=scatter_field_currents,
+            )
+            port_powers.append(voltage * current)
+            field_energy_changes.append(port.field.last_field_energy_change)
+
+        port_power_row = torch.stack(port_powers)
+        field_energy_row = torch.stack(field_energy_changes)
+        device_power_row = device_voltages * device_currents
+        nonreactive_power = torch.dot(device_power_row, plan.resistor_mask)
+        stored_energy = 0.5 * torch.dot(
+            plan.capacitances,
+            next_capacitor_voltage.square(),
+        )
+        port_input_power = port_power_row.sum()
+        balance_increment = (
+            stored_energy
+            - self.previous_stored_energy
+            + self.system.dt * (nonreactive_power - port_input_power)
+        )
+        previous_balance = (
+            torch.index_select(
+                self.energy_balance_samples,
+                0,
+                self.step_tensor.reshape(1),
+            ).squeeze(0)
+            if device_indexed_samples
+            else self.energy_balance_samples[index]
+        )
+        self.running_energy_balance.copy_(previous_balance + balance_increment)
+        self.previous_stored_energy.copy_(stored_energy)
+        plan.capacitor_voltage.copy_(next_capacitor_voltage)
+        plan.capacitor_current.copy_(next_capacitor_current)
+        node_row = torch.cat(
+            (
+                solution.new_zeros((1,)),
+                solution[: len(self.system.graph.nodes) - 1],
+            )
+        )
+        self._write_step_samples(
+            index,
+            device_indexed_samples=device_indexed_samples,
+            node_row=node_row,
+            branch_row=device_currents,
+            device_power_row=device_power_row,
+            port_power_row=port_power_row,
+            field_energy_row=field_energy_row,
+        )
+        self.step_tensor.add_(1)
+        self.last_condition = condition
+        return tuple(port.field.last_current for port in self.ports)
+
+    def _apply_step(
+        self,
+        index: int,
+        *,
+        device_indexed_samples: bool,
+        free_voltages: tuple[torch.Tensor, ...] | None = None,
+        scatter_field_currents: bool = True,
+    ) -> tuple[torch.Tensor, ...]:
         integration = self.integration_keys[index]
         time = self.sample_times[index + 1]
-        free_voltages = tuple(self._sample_field_voltage(port) for port in self.ports)
+        source_index = self.step_tensor if device_indexed_samples else index
+        if free_voltages is None:
+            free_voltages = tuple(self._sample_field_voltage(port) for port in self.ports)
+        else:
+            for port, value in zip(self.ports, free_voltages):
+                port.field.last_voltage_before.copy_(value)
+            free_voltages = tuple(port.field.last_voltage_before for port in self.ports)
+        if self.rc_fast_plan is not None:
+            return self._apply_rc_step(
+                index,
+                integration=integration,
+                free_voltages=free_voltages,
+                device_indexed_samples=device_indexed_samples,
+                scatter_field_currents=scatter_field_currents,
+            )
         previous_state = self.state
         matrix, rhs = self.system.assemble_transient(
             previous_state,
             time=time,
             source_values=self.source_values,
-            step_index=index,
+            step_index=source_index,
             integration=integration,
             midpoint=integration == "trapezoidal",
             out=(self.matrix_buffer, self.rhs_buffer),
@@ -383,18 +613,19 @@ class EMCircuitRuntime:
             solution,
             previous_state,
             integration,
-            index,
+            source_index,
             time,
         )
-        self.state = self.system._update_state(
+        next_state = self.system._update_state(
             previous_state,
             solution,
             integration=integration,
             midpoint=integration == "trapezoidal",
         )
 
-        port_input_power = solution.new_zeros(())
-        for port_index, (port, free_voltage) in enumerate(zip(self.ports, free_voltages)):
+        port_powers = []
+        field_energy_changes = []
+        for port, free_voltage in zip(self.ports, free_voltages):
             port.last_integration = integration
             voltage = _terminal_voltage(
                 solution,
@@ -403,21 +634,28 @@ class EMCircuitRuntime:
                 port.binding.negative,
             )
             current = port.conductance(integration) * (free_voltage - voltage)
-            self._apply_field_current(port, current, voltage)
-            power = voltage * current
-            self.port_power_samples[index + 1, port_index].copy_(power)
-            self.field_energy_change_samples[index + 1, port_index].copy_(
-                port.field.last_field_energy_change
+            self._apply_field_current(
+                port,
+                current,
+                voltage,
+                scatter_field=scatter_field_currents,
             )
-            port_input_power = port_input_power + power
+            port_powers.append(voltage * current)
+            field_energy_changes.append(port.field.last_field_energy_change)
 
-        self.node_samples[index + 1].zero_()
-        self.node_samples[index + 1, 1:].copy_(
-            solution[: len(self.system.graph.nodes) - 1]
+        node_row = torch.cat(
+            (
+                solution.new_zeros((1,)),
+                solution[: len(self.system.graph.nodes) - 1],
+            )
         )
-        for branch_index, device in enumerate(self.physical_devices):
-            self.branch_samples[index + 1, branch_index].copy_(currents[device.name])
-        nonreactive_power = solution.new_zeros(())
+        branch_row = (
+            torch.stack(tuple(currents[device.name] for device in self.physical_devices))
+            if self.physical_devices
+            else solution.new_zeros((0,))
+        )
+        device_powers = []
+        nonreactive_powers = []
         for device in self.circuit.devices:
             if isinstance(device, MutualInductor):
                 power = solution.new_zeros(())
@@ -429,20 +667,104 @@ class EMCircuitRuntime:
                     device.negative,
                 )
                 power = voltage * currents[device.name]
-            self.device_power_samples[device.name][index + 1].copy_(power)
+            device_powers.append(power)
             if not isinstance(device, (Capacitor, Inductor, MutualInductor)):
-                nonreactive_power = nonreactive_power + power
-        stored_energy = self._stored_energy(self.state)
-        self.energy_balance_samples[index + 1].copy_(
-            self.energy_balance_samples[index]
-            + stored_energy
+                nonreactive_powers.append(power)
+        port_power_row = torch.stack(port_powers)
+        field_energy_row = torch.stack(field_energy_changes)
+        device_power_row = (
+            torch.stack(device_powers)
+            if device_powers
+            else solution.new_zeros((0,))
+        )
+        nonreactive_power = (
+            torch.stack(nonreactive_powers).sum()
+            if nonreactive_powers
+            else solution.new_zeros(())
+        )
+        port_input_power = port_power_row.sum()
+        stored_energy = self._stored_energy(next_state)
+        balance_increment = (
+            stored_energy
             - self.previous_stored_energy
             + self.system.dt * (nonreactive_power - port_input_power)
         )
-        self.previous_stored_energy = stored_energy
-        self.step_index += 1
+        previous_balance = (
+            torch.index_select(
+                self.energy_balance_samples,
+                0,
+                self.step_tensor.reshape(1),
+            ).squeeze(0)
+            if device_indexed_samples
+            else self.energy_balance_samples[index]
+        )
+        self.running_energy_balance.copy_(previous_balance + balance_increment)
+        self.previous_stored_energy.copy_(stored_energy)
+        self._copy_state_(next_state)
+
+        self._write_step_samples(
+            index,
+            device_indexed_samples=device_indexed_samples,
+            node_row=node_row,
+            branch_row=branch_row,
+            device_power_row=device_power_row,
+            port_power_row=port_power_row,
+            field_energy_row=field_energy_row,
+        )
         self.step_tensor.add_(1)
         self.last_condition = condition
+        return tuple(port.field.last_current for port in self.ports)
+
+    def _validate_free_voltages(
+        self,
+        free_voltages: tuple[torch.Tensor, ...],
+    ) -> None:
+        if not isinstance(free_voltages, tuple) or len(free_voltages) != len(self.ports):
+            raise ValueError("free_voltages must contain one scalar tensor per bound port.")
+        for value in free_voltages:
+            if not isinstance(value, torch.Tensor) or value.ndim != 0:
+                raise ValueError("free_voltages must contain one scalar tensor per bound port.")
+            if value.device != self.system.device or value.dtype != self.system.dtype:
+                raise ValueError(
+                    "free_voltages must match the compiled circuit device and dtype."
+                )
+
+    def apply(
+        self,
+        *,
+        free_voltages: tuple[torch.Tensor, ...] | None = None,
+        device_indexed_samples: bool = False,
+    ) -> None:
+        if self.sample_times is None or self.step_index >= self.sample_times.numel() - 1:
+            raise RuntimeError("Circuit time-series buffers were not prepared for this FDTD step.")
+        if free_voltages is not None:
+            self._validate_free_voltages(free_voltages)
+        self._apply_step(
+            self.step_index,
+            device_indexed_samples=device_indexed_samples,
+            free_voltages=free_voltages,
+        )
+        self.step_index += 1
+
+    def apply_external(
+        self,
+        free_voltages: tuple[torch.Tensor, ...],
+        *,
+        apply_field_currents: bool = False,
+    ) -> tuple[torch.Tensor, ...]:
+        """Advance from owner-gathered Norton voltages and optionally scatter locally."""
+
+        if self.sample_times is None or self.step_index >= self.sample_times.numel() - 1:
+            raise RuntimeError("Circuit time-series buffers were not prepared for this FDTD step.")
+        self._validate_free_voltages(free_voltages)
+        currents = self._apply_step(
+            self.step_index,
+            device_indexed_samples=False,
+            free_voltages=free_voltages,
+            scatter_field_currents=apply_field_currents,
+        )
+        self.step_index += 1
+        return currents
 
     def checkpoint_tensors(self) -> dict[str, torch.Tensor]:
         tensors = {"step": self.step_tensor}
@@ -484,6 +806,84 @@ class EMCircuitRuntime:
         )
 
 
+def _compile_rc_fast_plan(runtime: EMCircuitRuntime) -> _RCFastPlan | None:
+    devices = tuple(runtime.circuit.devices)
+    capacitors = tuple(device for device in devices if isinstance(device, Capacitor))
+    if (
+        not capacitors
+        or any(not isinstance(device, (Resistor, Capacitor)) for device in devices)
+        or any(value.requires_grad for value in runtime.system._parameter_cache.values())
+    ):
+        return None
+    unknown_count = runtime.system.unknown_count
+
+    def incidence_row(device) -> list[float]:
+        row = [0.0] * unknown_count
+        positive = _node_unknown(runtime.system.graph, device.positive)
+        negative = _node_unknown(runtime.system.graph, device.negative)
+        if positive is not None:
+            row[positive] += 1.0
+        if negative is not None:
+            row[negative] -= 1.0
+        return row
+
+    device_incidence = runtime.initial_solution.new_tensor(
+        tuple(incidence_row(device) for device in devices)
+    )
+    capacitor_indices = tuple(
+        index for index, device in enumerate(devices) if isinstance(device, Capacitor)
+    )
+    capacitor_device_indices = torch.as_tensor(
+        capacitor_indices,
+        device=runtime.system.device,
+        dtype=torch.int64,
+    )
+    capacitor_incidence = torch.index_select(
+        device_incidence,
+        0,
+        capacitor_device_indices,
+    )
+    capacitances = torch.stack(
+        tuple(runtime.system._value(device.capacitance, device.name) for device in capacitors)
+    )
+    zero = runtime.initial_solution.new_zeros(())
+    resistor_conductances = torch.stack(
+        tuple(
+            torch.reciprocal(runtime.system._value(device.resistance, device.name))
+            if isinstance(device, Resistor)
+            else zero
+            for device in devices
+        )
+    )
+    resistor_mask = runtime.initial_solution.new_tensor(
+        tuple(1.0 if isinstance(device, Resistor) else 0.0 for device in devices)
+    )
+    capacitor_voltage = torch.stack(
+        tuple(runtime.state.capacitor_voltage[device.name] for device in capacitors)
+    ).clone()
+    capacitor_current = torch.stack(
+        tuple(runtime.state.capacitor_current[device.name] for device in capacitors)
+    ).clone()
+    runtime.state.capacitor_voltage = {
+        device.name: capacitor_voltage[index]
+        for index, device in enumerate(capacitors)
+    }
+    runtime.state.capacitor_current = {
+        device.name: capacitor_current[index]
+        for index, device in enumerate(capacitors)
+    }
+    return _RCFastPlan(
+        device_incidence=device_incidence,
+        capacitor_incidence=capacitor_incidence,
+        capacitor_device_indices=capacitor_device_indices,
+        capacitances=capacitances,
+        resistor_conductances=resistor_conductances,
+        resistor_mask=resistor_mask,
+        capacitor_voltage=capacitor_voltage,
+        capacitor_current=capacitor_current,
+    )
+
+
 def _initial_coupled_solution(system, ports):
     matrix, rhs = system.assemble_dc()
     zero = rhs.new_zeros(())
@@ -511,8 +911,19 @@ def _initial_coupled_solution(system, ports):
     return constrained[: system.unknown_count], condition
 
 
-def prepare_circuit_runtimes(solver, port_runtimes) -> tuple[EMCircuitRuntime, ...]:
-    circuits = tuple(getattr(solver.scene, "circuits", ()))
+def prepare_circuit_runtimes(
+    solver,
+    port_runtimes,
+    *,
+    circuits=None,
+    field_couplings: Mapping[str, FieldPortCoupling] | None = None,
+) -> tuple[EMCircuitRuntime, ...]:
+    circuits = (
+        tuple(getattr(solver.scene, "circuits", ()))
+        if circuits is None
+        else tuple(circuits)
+    )
+    field_couplings = {} if field_couplings is None else field_couplings
     if not circuits:
         solver._circuit_runtimes = ()
         return ()
@@ -529,16 +940,18 @@ def prepare_circuit_runtimes(solver, port_runtimes) -> tuple[EMCircuitRuntime, .
         for binding in circuit.bindings:
             port_runtime = runtime_by_name[binding.port_name]
             geometry = port_runtime.geometry
-            if port_runtime.yee_control_volume is None:
-                raise RuntimeError(
-                    f"Circuit-bound port {binding.port_name!r} has no Yee control volume."
+            field = field_couplings.get(binding.port_name)
+            if field is None:
+                if port_runtime.yee_control_volume is None:
+                    raise RuntimeError(
+                        f"Circuit-bound port {binding.port_name!r} has no Yee control volume."
+                    )
+                field = prepare_field_port_coupling(
+                    geometry,
+                    dt=solver.dt,
+                    eps_edge=getattr(solver, f"eps_{geometry.voltage_component}"),
+                    yee_control_volume=port_runtime.yee_control_volume,
                 )
-            field = prepare_field_port_coupling(
-                geometry,
-                dt=solver.dt,
-                eps_edge=getattr(solver, f"eps_{geometry.voltage_component}"),
-                yee_control_volume=port_runtime.yee_control_volume,
-            )
             port = CircuitPortRuntime(
                 circuit_name=circuit.name,
                 integration=circuit.config.integration,
@@ -604,6 +1017,7 @@ def prepare_circuit_runtimes(solver, port_runtimes) -> tuple[EMCircuitRuntime, .
                 dtype=solver.Ex.dtype,
             ),
         )
+        runtime.rc_fast_plan = _compile_rc_fast_plan(runtime)
         results.append(runtime)
     solver._circuit_runtimes = tuple(results)
     return solver._circuit_runtimes
@@ -614,8 +1028,123 @@ def prepare_circuit_time_series(solver, steps: int) -> None:
         runtime.prepare_time_series(steps)
 
 
+def _graph_mutable_tensors(runtime: EMCircuitRuntime) -> tuple[torch.Tensor, ...]:
+    tensors = [
+        runtime.step_tensor,
+        runtime.matrix_buffer,
+        runtime.rhs_buffer,
+        runtime.solution_column_buffer,
+        runtime.node_samples,
+        runtime.branch_samples,
+        runtime.device_power_sample_matrix,
+        runtime.energy_balance_samples,
+        runtime.port_power_samples,
+        runtime.field_energy_change_samples,
+        runtime.previous_stored_energy,
+        runtime.running_energy_balance,
+        runtime.state.inductor_current,
+        runtime.state.inductor_voltage,
+        *runtime.state.capacitor_voltage.values(),
+        *runtime.state.capacitor_current.values(),
+    ]
+    field_names = set()
+    for port in runtime.ports:
+        field_names.add(port.field_name)
+        tensors.extend(
+            (
+                port.field.edge_buffer,
+                port.field.correction_buffer,
+                port.field.last_voltage_before,
+                port.field.last_voltage,
+                port.field.last_voltage_after,
+                port.field.last_current,
+                port.field.last_port_work,
+                port.field.last_field_energy_change,
+            )
+        )
+    tensors.extend(getattr(runtime.ports[0].solver, name) for name in sorted(field_names))
+    unique = []
+    pointers = set()
+    for tensor in tensors:
+        if not isinstance(tensor, torch.Tensor):
+            continue
+        pointer = tensor.data_ptr()
+        if pointer not in pointers:
+            pointers.add(pointer)
+            unique.append(tensor)
+    return tuple(unique)
+
+
+def prepare_circuit_graph_runners(solver, use_cuda_graph: bool) -> None:
+    """Capture fixed-schedule circuit steps without changing the Scene contract."""
+
+    runtimes = tuple(getattr(solver, "_circuit_runtimes", ()))
+    solver._circuit_graph_runners = ()
+    solver._circuit_graph_active = False
+    solver._circuit_graph_error = None
+    if not use_cuda_graph or not runtimes or not all(runtime.graph_eligible for runtime in runtimes):
+        return
+
+    from .cuda.runtime.graph import CudaGraphRunner
+
+    replay_maps = []
+    for runtime in runtimes:
+        mutable = _graph_mutable_tensors(runtime)
+        saved = tuple(tensor.clone() for tensor in mutable)
+        saved_step_index = runtime.step_index
+
+        def restore() -> None:
+            for tensor, value in zip(mutable, saved):
+                tensor.copy_(value)
+            runtime.step_index = saved_step_index
+
+        representatives = {}
+        for index, factor_key in enumerate(zip(runtime.integration_keys, runtime.switch_keys)):
+            representatives.setdefault(factor_key, index)
+        runtime_replays = {}
+        for factor_key, representative in representatives.items():
+            try:
+                # Warm the dense solve and allocator before capture. State and samples
+                # are restored immediately, so the physical run still begins at step zero.
+                runtime._apply_step(representative, device_indexed_samples=True)
+                torch.cuda.synchronize(device=runtime.system.device)
+                restore()
+                runtime_replays[factor_key] = CudaGraphRunner(
+                    enabled=True,
+                    warmup_steps=0,
+                ).capture(
+                    lambda runtime=runtime, representative=representative: runtime._apply_step(
+                        representative,
+                        device_indexed_samples=True,
+                    )
+                )
+            except Exception as exc:
+                restore()
+                solver._circuit_graph_error = f"{type(exc).__name__}: {exc}"
+                solver._circuit_graph_runners = ()
+                return
+            restore()
+        replay_maps.append(runtime_replays)
+
+    solver._circuit_graph_runners = tuple(replay_maps)
+    solver._circuit_graph_active = bool(replay_maps)
+
+
 def apply_circuit_runtimes(solver) -> None:
-    for runtime in getattr(solver, "_circuit_runtimes", ()):
+    runtimes = tuple(getattr(solver, "_circuit_runtimes", ()))
+    replay_maps = tuple(getattr(solver, "_circuit_graph_runners", ()))
+    if replay_maps:
+        for runtime, replay_map in zip(runtimes, replay_maps):
+            if runtime.sample_times is None or runtime.step_index >= runtime.sample_times.numel() - 1:
+                raise RuntimeError("Circuit time-series buffers were not prepared for this FDTD step.")
+            factor_key = (
+                runtime.integration_keys[runtime.step_index],
+                runtime.switch_keys[runtime.step_index],
+            )
+            replay_map[factor_key]()
+            runtime.step_index += 1
+        return
+    for runtime in runtimes:
         runtime.apply()
 
 
@@ -631,6 +1160,7 @@ __all__ = [
     "EMCircuitRuntime",
     "apply_circuit_runtimes",
     "finalize_circuit_data",
+    "prepare_circuit_graph_runners",
     "prepare_circuit_runtimes",
     "prepare_circuit_time_series",
 ]

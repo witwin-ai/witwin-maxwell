@@ -17,6 +17,7 @@ def _simulation(
     boundary=None,
     cpml_config=None,
     include_switch=False,
+    cuda_graph=False,
 ):
     port = mw.LumpedPort(
         name="feed",
@@ -72,6 +73,7 @@ def _simulation(
         run_time=mw.TimeConfig(time_steps=steps),
         spectral_sampler=mw.SpectralSampler(window="none"),
         cpml_config={} if cpml_config is None else cpml_config,
+        cuda_graph=cuda_graph,
     )
 
 
@@ -189,3 +191,14 @@ def test_resume_crosses_a_timed_switch_breakpoint_without_schedule_drift():
     assert actual.circuit("pulse_interconnect").diagnostics[
         "factorization_count"
     ] > 1
+
+
+def test_cuda_graph_resume_preserves_circuit_state_tensor_identity():
+    kwargs = {"include_switch": True, "cuda_graph": True}
+    expected = _simulation(**kwargs).run()
+    checkpoint = _simulation(**kwargs).prepare().run_until(5)
+
+    actual = _simulation(**kwargs).prepare().run(resume_from=checkpoint)
+
+    assert actual.stats()["circuit_cuda_graph_active"] is True
+    _assert_result_close(actual, expected)

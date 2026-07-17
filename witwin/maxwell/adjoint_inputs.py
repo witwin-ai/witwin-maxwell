@@ -26,6 +26,36 @@ def unique_trainable_tensors(candidates) -> tuple[torch.Tensor, ...]:
     return tuple(unique)
 
 
+def ancestry_safe_trainable_tensors(candidates) -> tuple[torch.Tensor, ...]:
+    """Keep only candidate tensors that are not derived from another candidate.
+
+    A custom autograd function must not receive both ``p`` and ``q = f(p)`` as
+    independent inputs: returning the semantic pullback for both makes the
+    contribution through ``q`` reach ``p`` twice.  A derived tensor remains a
+    valid input when its ancestor is not itself present in the candidate set.
+    """
+
+    tensors = unique_trainable_tensors(candidates)
+    roots = []
+    for index, tensor in enumerate(tensors):
+        other_tensors = tensors[:index] + tensors[index + 1 :]
+        if not other_tensors or tensor.grad_fn is None:
+            roots.append(tensor)
+            continue
+        probe = tensor.real.sum()
+        if tensor.is_complex():
+            probe = probe + tensor.imag.sum()
+        dependencies = torch.autograd.grad(
+            probe,
+            other_tensors,
+            allow_unused=True,
+            retain_graph=True,
+        )
+        if not any(dependency is not None for dependency in dependencies):
+            roots.append(tensor)
+    return tuple(roots)
+
+
 def scene_trainable_material_tensors(scene) -> tuple[torch.Tensor, ...]:
     candidates = []
     for structure in scene.structures:
@@ -57,11 +87,23 @@ def scene_trainable_rf_tensors(scene) -> tuple[torch.Tensor, ...]:
         candidates.append(getattr(port, "reference_impedance", None))
     for element in getattr(scene, "lumped_elements", ()):
         candidates.append(getattr(element, "value", None))
+    for circuit in getattr(scene, "circuits", ()):
+        candidates.extend(getattr(circuit, "parameters", {}).values())
+        candidates.extend(
+            value
+            for value, _constraint in getattr(circuit, "initial_conditions", {}).values()
+        )
+        for device in getattr(circuit, "devices", ()):
+            for value in getattr(device, "parameters", {}).values():
+                if isinstance(value, torch.Tensor):
+                    candidates.append(value)
+                elif value is not None and hasattr(value, "__dict__"):
+                    candidates.extend(vars(value).values())
     return unique_trainable_tensors(candidates)
 
 
 def rf_dependent_inputs(scene, candidates) -> tuple[torch.Tensor, ...]:
-    inputs = unique_trainable_tensors(candidates)
+    inputs = ancestry_safe_trainable_tensors(candidates)
     if not inputs:
         return ()
     outputs = scene_trainable_rf_tensors(scene)
@@ -75,7 +117,9 @@ def rf_dependent_inputs(scene, candidates) -> tuple[torch.Tensor, ...]:
         probe,
         inputs,
         allow_unused=True,
-        retain_graph=False,
+        # The bridge subsequently enumerates semantic outputs on this same
+        # direct Scene graph.  Keep ancestry available for that census.
+        retain_graph=True,
     )
     return tuple(
         tensor
@@ -98,7 +142,9 @@ def material_dependent_inputs(scene, candidates) -> tuple[torch.Tensor, ...]:
                     eps_r.sum(),
                     inputs,
                     allow_unused=True,
-                    retain_graph=False,
+                    # Direct scenes reuse their geometry graph during semantic
+                    # capability validation and the final material pullback.
+                    retain_graph=True,
                 )
     finally:
         prepared_scene.release_meshgrid()

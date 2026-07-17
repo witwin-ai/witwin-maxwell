@@ -1,8 +1,10 @@
 from .circuits import CircuitGraph, compile_circuit_graph, compile_circuits
 from .lumped import CompiledLumpedElement, compile_lumped_elements
 from .mna import (
+    BatchedMNAFactors,
     CompiledStampPlan,
     LinearMNASystem,
+    compile_batched_mna_factors,
     compile_coupled_mna_system,
     compile_mna_system,
 )
@@ -25,8 +27,10 @@ __all__ = [
     "CompiledLumpedElement",
     "compile_lumped_elements",
     "CompiledStampPlan",
+    "BatchedMNAFactors",
     "LinearMNASystem",
     "compile_coupled_mna_system",
+    "compile_batched_mna_factors",
     "compile_mna_system",
     "compile_fdfd_sources",
     "compile_fdtd_observers",
