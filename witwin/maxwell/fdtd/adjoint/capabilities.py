@@ -21,6 +21,8 @@ NATIVE_ADJOINT_CAPABILITIES = {
     "DISPERSIVE": {"electric_ade": True, "magnetic_ade": True},
     "TFSF": {"tfsf": True},
     "GRATING_TFSF": {"complex": True, "cpml": True, "tfsf": True},
+    "WIRE_STANDARD": {"complex": False, "cpml": False, "thin_wire": True},
+    "WIRE_CPML": {"complex": False, "cpml": True, "thin_wire": True},
 }
 
 

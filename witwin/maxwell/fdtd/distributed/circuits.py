@@ -392,6 +392,7 @@ class DistributedCircuitRuntime:
                     field_name=port_plan.voltage_component,
                     yee_control_volume=None,
                     lumped=None,
+                    wire_provider=None,
                     excitation=None,
                     source_kind=None,
                     source_frequency=0.0,

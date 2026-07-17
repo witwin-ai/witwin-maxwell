@@ -1,0 +1,38 @@
+{
+  "date": "2026-07-15",
+  "device": "NVIDIA GeForce RTX 5080",
+  "dtype": "float32",
+  "command": "python -m tests.support.benchmark_thin_wire_reverse --segments 100 1000 --samples 7",
+  "results": [
+    {
+      "segments": 100,
+      "loops": 1000,
+      "samples_ms_per_100k_segment_steps": [
+        4119.57177734375,
+        4105.44287109375,
+        4133.49853515625,
+        4308.50146484375,
+        4116.22607421875,
+        4156.6826171875,
+        4148.25341796875
+      ],
+      "median_ms_per_100k_segment_steps": 4133.49853515625,
+      "peak_incremental_bytes": 22528
+    },
+    {
+      "segments": 1000,
+      "loops": 100,
+      "samples_ms_per_100k_segment_steps": [
+        417.0851135253906,
+        417.9574890136719,
+        418.95733642578125,
+        417.2117614746094,
+        413.5672302246094,
+        421.3705749511719,
+        428.9576416015625
+      ],
+      "median_ms_per_100k_segment_steps": 417.9574890136719,
+      "peak_incremental_bytes": 140288
+    }
+  ]
+}

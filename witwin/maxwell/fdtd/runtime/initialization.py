@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import torch
 
@@ -212,6 +210,7 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver._point_observer_groups = {}
     solver._plane_observer_groups = {}
     solver.last_solve_elapsed_s = None
+    solver._wire_runtime = None
     solver.tfsf_enabled = False
     solver._tfsf_state = None
 

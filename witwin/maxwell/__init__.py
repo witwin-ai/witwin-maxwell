@@ -53,6 +53,7 @@ from .monitors import (
     PlaneMonitor,
     PointMonitor,
     PowerLossMonitor,
+    WireMonitor,
 )
 from .lumped import (
     Capacitor,
@@ -85,12 +86,15 @@ from .rational import (
 )
 from .touchstone import TouchstoneParseError
 from .power_loss import PowerLossData
+from .thin_wire import ThinWire, WireConductor, WireData, WireEnd
 from .ports import (
     AxisPath,
     LumpedPort,
     ModePort,
     TerminalPort,
     TerminalRef,
+    WireNodeRef,
+    WirePortBinding,
     WaveModeSpec,
     WavePort,
 )
@@ -230,6 +234,7 @@ __all__ = [
     "PointMonitor",
     "PowerLossData",
     "PowerLossMonitor",
+    "ThinWire",
     "PortData",
     "PortBinding",
     "PortExcitation",
@@ -269,6 +274,8 @@ __all__ = [
     "bilinear_discretize",
     "check_sampled_passivity",
     "fit_rational",
+    "WireNodeRef",
+    "WirePortBinding",
     "TFSF",
     "Torus",
     "TwoPhotonAbsorption",
@@ -278,6 +285,10 @@ __all__ = [
     "VoltageSource",
     "WaveModeSpec",
     "WavePort",
+    "WireConductor",
+    "WireData",
+    "WireEnd",
+    "WireMonitor",
     "DiagonalTensor3",
     "AbsorberKind",
     "parse_spice",

@@ -91,6 +91,7 @@ class LumpedStepTrace:
     drive: torch.Tensor
     old_inductor_current: torch.Tensor
     old_capacitor_voltage: torch.Tensor
+    edge_values: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,7 @@ class LumpedStepPullback:
     grad_inductance: torch.Tensor
     grad_capacitance: torch.Tensor
     grad_drive: torch.Tensor
+    grad_voltage_weights: torch.Tensor
 
 
 def _prepared_scalar(
@@ -451,6 +453,7 @@ def replay_lumped_runtime(
         drive=drive,
         old_inductor_current=inductor_current,
         old_capacitor_voltage=capacitor_voltage,
+        edge_values=torch.index_select(flat, 0, runtime.linear_indices),
     )
     return corrected, next_inductor_current, next_capacitor_voltage, trace
 
@@ -546,6 +549,11 @@ def pullback_lumped_runtime(
         runtime.linear_indices,
     )
     local_grad_eps = -bar_injection * runtime.injection / local_eps
+    grad_voltage_weights = (
+        trace.edge_values * bar_voltage
+        + 0.5 * runtime.injection * bar_discrete_impedance
+        + bar_injection * runtime.dt / local_eps
+    )
     grad_eps = torch.zeros_like(eps_edge)
     grad_eps.reshape(-1).index_add_(
         0,
@@ -573,6 +581,7 @@ def pullback_lumped_runtime(
         grad_inductance=grad_inductance,
         grad_capacitance=grad_capacitance,
         grad_drive=bar_drive,
+        grad_voltage_weights=grad_voltage_weights,
     )
 
 

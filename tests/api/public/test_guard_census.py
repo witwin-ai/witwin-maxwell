@@ -15,16 +15,18 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 
-# This exact snapshot was reconciled on 2026-07-16 after integrating both the
-# SPICE/MNA circuit co-simulation series and the Touchstone network-embedding
-# series on top of the 2026-07-15 baseline of 108: the circuit co-simulation
-# work added five capability guards and the network-embedding work added six
-# more (108 + 5 + 6 = 119). The seventh network-embedding guard, simulation.py
-# "Embedded network feedback is defined only for the time-domain FDTD update",
-# is a permanent architectural boundary and is listed in CONTRACT_GUARDS below,
-# not counted here. Lower it when a capability guard is implemented; do not
-# raise it without updating the census.
-CAPABILITY_GUARD_BUDGET = 119
+# This exact snapshot was reconciled on 2026-07-17 by integrating the thin-wire
+# subgrid conductor series (plan 07, phases 0-3) on top of the 2026-07-16
+# baseline of 119. The 119 baseline was itself the 2026-07-15 base of 108 plus
+# the SPICE/MNA circuit co-simulation series (+5) and the Touchstone
+# network-embedding series (+6). The thin-wire series adds ten capability guards
+# (108 base + 10 = the thin-wire branch budget of 118), giving 119 + 10 = 129.
+# The seventh network-embedding guard, simulation.py "Embedded network feedback
+# is defined only for the time-domain FDTD update", is a permanent architectural
+# boundary and is listed in CONTRACT_GUARDS below, not counted here. Lower it
+# when a capability guard is implemented; do not raise it without updating the
+# census.
+CAPABILITY_GUARD_BUDGET = 129
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
@@ -42,6 +44,10 @@ CONTRACT_GUARDS = (
     ("witwin/maxwell/geometry/polyslab.py", "ComplexPolySlab does not support mesh export"),
     ("witwin/maxwell/fdtd/adjoint/bridge.py", "FDTD backward requires an input that contributes"),
     ("witwin/maxwell/fdtd/adjoint/bridge.py", "FDTD adjoint requires complex field state for Bloch faces"),
+    (
+        "witwin/maxwell/fdtd/adjoint/bridge.py",
+        "Differentiable thin-wire FDTD requires a fixed Maxwell time step",
+    ),
     ("witwin/maxwell/fdfd/adjoint/bridge.py", "FDFD backward currently supports trainable scene inputs that contribute"),
     ("witwin/maxwell/simulation.py", "Embedded network feedback is defined only for the time-domain FDTD update"),
     ("witwin/maxwell/adapters/tidy3d.py", "Tidy3D export for magnetic dispersive Material"),

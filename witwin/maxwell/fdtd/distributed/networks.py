@@ -399,6 +399,7 @@ class DistributedNetworkRuntime:
                     field_name=port_plan.voltage_component,
                     yee_control_volume=None,
                     lumped=owner_lumped,
+                    wire_provider=None,
                     excitation=None,
                     source_kind=None,
                     source_frequency=0.0,

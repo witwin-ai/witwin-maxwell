@@ -433,6 +433,11 @@ class DistributedFDTD:
                 "parameters have no distributed reverse core yet."
             )
         boundary = self.logical_scene.boundary
+        if getattr(self.logical_scene, "thin_wires", ()):
+            raise NotImplementedError(
+                "Multi-GPU ThinWire requires distributed fragment/state ownership and "
+                "reverse sparse communication; use single-device FDTD until Phase 4."
+            )
         if boundary.uses_kind("bloch"):
             raise ValueError(
                 "Multi-GPU Bloch fields require complex halo exchange, which is not enabled yet."

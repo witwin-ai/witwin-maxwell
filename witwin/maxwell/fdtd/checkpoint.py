@@ -32,6 +32,7 @@ _DISPERSIVE_STATE_TENSORS = {
     "drude": ("current",),
     "lorentz": ("polarization", "current"),
 }
+_WIRE_STATE_NAMES = ("wire_current", "wire_charge")
 _CHECKPOINT_SCHEMA_VERSION = 2
 
 
@@ -75,6 +76,7 @@ class FDTDCheckpointSchema:
     lumped_state_names: tuple[str, ...] = ()
     circuit_state_names: tuple[str, ...] = ()
     network_state_names: tuple[str, ...] = ()
+    wire_state_names: tuple[str, ...] = ()
 
     @property
     def state_names(self) -> tuple[str, ...]:
@@ -88,6 +90,7 @@ class FDTDCheckpointSchema:
             + self.lumped_state_names
             + self.circuit_state_names
             + self.network_state_names
+            + self.wire_state_names
         )
 
 
@@ -193,6 +196,9 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
     network_state_names = tuple(
         name for name, _runtime in iter_network_state_specs(solver)
     )
+    wire_state_names = (
+        _WIRE_STATE_NAMES if getattr(solver, "_wire_runtime", None) is not None else ()
+    )
 
     return FDTDCheckpointSchema(
         version=_CHECKPOINT_SCHEMA_VERSION,
@@ -205,6 +211,7 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         lumped_state_names=lumped_state_names,
         circuit_state_names=circuit_state_names,
         network_state_names=network_state_names,
+        wire_state_names=tuple(wire_state_names),
     )
 
 
@@ -293,6 +300,10 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
         tensors[name] = tensor.detach().clone()
     for name, runtime in iter_network_state_specs(solver):
         tensors[name] = runtime.state.detach().clone()
+    wire_runtime = getattr(solver, "_wire_runtime", None)
+    if wire_runtime is not None:
+        tensors["wire_current"] = wire_runtime.current.detach().clone()
+        tensors["wire_charge"] = wire_runtime.charge.detach().clone()
     state = FDTDCheckpointState(step=int(step), schema=schema, tensors=tensors)
     validate_checkpoint_state(state)
     return state
@@ -360,6 +371,10 @@ def _checkpoint_tensor_targets(solver, schema: FDTDCheckpointSchema):
         yield name, getattr(runtime, tensor_name), None
     for name, tensor in iter_circuit_state_specs(solver):
         yield name, tensor, None
+    wire_runtime = getattr(solver, "_wire_runtime", None)
+    if wire_runtime is not None:
+        yield "wire_current", wire_runtime.current, None
+        yield "wire_charge", wire_runtime.charge, None
 
 
 def _checkpoint_expected_shape(target: torch.Tensor, layout) -> tuple[int, ...]:

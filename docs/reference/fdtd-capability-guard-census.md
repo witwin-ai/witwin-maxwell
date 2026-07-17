@@ -7,46 +7,70 @@ cannot enter unnoticed.
 
 ## Reconciled baseline
 
-The 2026-07-16 integrated repository state (circuit co-simulation and Touchstone
-network embedding merged) contains 140 guards:
+The 2026-07-17 integrated repository state (circuit co-simulation, Touchstone
+network embedding, and the thin-wire subgrid conductor series in plan 07 phases
+0-3, all merged) contains 151 guards:
 
-- 119 capability guards tracked by the non-increasing test budget;
-- 21 contract guards excluded by exact file and message substring.
+- 129 capability guards tracked by the non-increasing test budget;
+- 22 contract guards excluded by exact file and message substring.
 
-The single-GPU circuit adjoint now provides the circuit replay and transpose
+The single-GPU circuit adjoint provides the circuit replay and transpose
 linear-solve VJP. Its remaining explicit limits are the omitted t=0
 operating-point/initial-state pullback (therefore trainable DC source values and
 circuit initial conditions), tensor seeds on the initial `CircuitData` sample,
 and trainable port reference impedance. Multi-circuit execution, distributed
 adjoints, and full-field/observer forward-resume accumulation remain separate
-capability gaps rather than reclassified permanent contracts.
+capability gaps rather than reclassified permanent contracts. The thin-wire
+series adds ten capability guards on top of the 119-guard circuit/network
+baseline (119 + 10 = 129); their disposition is detailed in the
+[Thin-wire reconciliation](#thin-wire-reconciliation-2026-07-17) note below.
 
 The capability baseline is distributed as follows:
 
 | Area | Capability guards |
 | --- | ---: |
 | External interoperability adapter | 18 |
-| Material compilers | 9 |
+| Material compilers | 11 |
 | Frequency-domain runtime | 5 |
-| Time-domain adjoint | 18 |
+| Time-domain adjoint | 19 |
 | Time-domain excitation | 12 |
-| Time-domain ports and lumped elements | 12 |
-| Time-domain runtime | 11 |
-| Public simulation, result, and network workflows | 24 |
+| Time-domain ports and lumped elements | 13 |
+| Time-domain runtime | 18 |
+| Public simulation, result, and network workflows | 23 |
 | Material models | 7 |
 | Postprocessing | 3 |
-| **Total** | **119** |
+| **Total** | **129** |
 
-This integrated baseline is the 2026-07-15 circuit co-simulation state (113
+This integrated baseline is the 2026-07-16 circuit/network state (119 capability
+guards) plus the ten thin-wire capability guards from plan 07 phases 0-3. The
+119-guard baseline is itself the 2026-07-15 circuit co-simulation state (113
 capability guards) plus the six 2026-07-16 network-embedding capability guards
-(Time-domain adjoint +3, Public simulation/result/network workflows +3). The
-network-embedding reconciliation is detailed in the
+(Time-domain adjoint +3, Public simulation/result/network workflows +3); that
+reconciliation is detailed in the
 [Network-embedding reconciliation](#network-embedding-reconciliation-2026-07-16)
 section below.
 
+### Thin-wire reconciliation (2026-07-17)
+
+The thin-wire subgrid conductor series (plan 07, phases 0-3) adds ten reviewed
+capability guards rather than silently running unsupported compositions: two
+compiler guards (a locally anisotropic self-term guard and a Bloch-boundary
+phase-aware wire-topology guard); a set of single-device runtime host-composition
+guards (off-diagonal, conductive, dispersive, and nonlinear/modulated host
+material, plus a surface-impedance conductor-ownership guard); a distributed
+wire ownership guard; and an adjoint checkpoint/reverse guard. They remain
+capability debt, not contract exclusions. Phase 4 owns finite-conductor loss and
+distributed/SIBC ownership; the remaining host-composition guards stay tracked
+capability debt for a later compatibility plan. Each future phase must lower this
+budget as it removes its guards. The thin-wire differentiable fixed-step
+requirement is instead a differentiation contract (the automatic joint-CFL clamp
+is a discrete preparation decision that is not differentiated with respect to
+radius or material parameters) and is listed under CONTRACT_GUARDS, not counted
+here.
+
 ## Contract exclusions
 
-`CONTRACT_GUARDS` in the test is the canonical exact-match inventory. Its 21
+`CONTRACT_GUARDS` in the test is the canonical exact-match inventory. Its 22
 entries cover these stable contract families:
 
 | Contract family | Count |
@@ -54,13 +78,13 @@ entries cover these stable contract families:
 | Material frequency-evaluation domains | 9 |
 | Module-style scene implementation requirement | 1 |
 | Non-meshable complex polygon geometry | 1 |
-| Time-domain adjoint input and complex-state requirements | 2 |
+| Time-domain adjoint input, complex-state, and fixed-step requirements | 3 |
 | Frequency-domain adjoint input requirement | 1 |
 | External adapter medium limitations | 2 |
 | Bloch-boundary total-field/scattered-field slab requirement | 1 |
 | Closed-surface exterior-sampling requirements | 3 |
 | Time-domain-only embedded network feedback | 1 |
-| **Total** | **21** |
+| **Total** | **22** |
 
 When an implementation removes a capability guard, lower
 `CAPABILITY_GUARD_BUDGET` in the same commit. Reclassifying a guard as a public

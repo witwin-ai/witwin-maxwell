@@ -3446,6 +3446,80 @@ def _apply_sibc_surface(
     )
 
 
+def _sample_wire_emf(
+    *, Ex, Ey, Ez, segmentOffsets, edgeComponents, edgeOffsets, weights, emf
+):
+    """Internal launch; compiled topology contents are validated once at preparation."""
+    _COMPILED_EXTENSION.sample_wire_emf(
+        Ex,
+        Ey,
+        Ez,
+        segmentOffsets,
+        edgeComponents,
+        edgeOffsets,
+        weights,
+        emf,
+    )
+
+
+def _update_wire_state(
+    *,
+    emf,
+    tail,
+    head,
+    inductance,
+    nodeCapacitance,
+    grounded,
+    nodeOffsets,
+    nodeSegments,
+    nodeSigns,
+    dt,
+    current,
+    charge,
+):
+    """Internal launch; compiled topology contents are validated once at preparation."""
+    _COMPILED_EXTENSION.update_wire_state(
+        emf,
+        tail,
+        head,
+        inductance,
+        nodeCapacitance,
+        grounded,
+        nodeOffsets,
+        nodeSegments,
+        nodeSigns,
+        float(dt),
+        current,
+        charge,
+    )
+
+
+def _deposit_wire_current(
+    *,
+    Ex,
+    Ey,
+    Ez,
+    edgeGroupOffsets,
+    targetComponents,
+    targetOffsets,
+    contributionSegments,
+    contributionScales,
+    current,
+):
+    """Internal launch; compiled topology contents are validated once at preparation."""
+    _COMPILED_EXTENSION.deposit_wire_current(
+        Ex,
+        Ey,
+        Ez,
+        edgeGroupOffsets,
+        targetComponents,
+        targetOffsets,
+        contributionSegments,
+        contributionScales,
+        current,
+    )
+
+
 def _project_periodic_boundary(*, field, axis):
     _COMPILED_EXTENSION.project_periodic_boundary(field, int(axis))
 
@@ -3461,6 +3535,9 @@ def _project_bloch_boundary(*, fieldReal, fieldImag, axis, phaseCos, phaseSin):
 
 
 _KERNELS: dict[str, Callable[..., None]] = {
+    "sampleWireEmf3D": _sample_wire_emf,
+    "updateWireState1D": _update_wire_state,
+    "depositWireCurrent3D": _deposit_wire_current,
     "updateMagneticFieldHxStandard3D": _magnetic_hx_standard,
     "updateMagneticFieldHyStandard3D": _magnetic_hy_standard,
     "updateMagneticFieldHzStandard3D": _magnetic_hz_standard,

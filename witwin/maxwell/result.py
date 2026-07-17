@@ -24,6 +24,7 @@ from .network import (
 )
 from .rational import FitReport, NetworkFitReport
 from .scene import prepare_scene
+from .thin_wire import WireData
 from .visualization import extract_orthogonal_slice, plot_slice_image
 
 _UNSET = object()
@@ -39,7 +40,7 @@ def _clone_mapping(data: dict[str, Any]) -> dict[str, Any]:
 def _cpu_serializable(value: Any):
     if isinstance(value, torch.Tensor):
         return value.detach().cpu()
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {key: _cpu_serializable(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_cpu_serializable(item) for item in value]
@@ -112,6 +113,83 @@ def _normalize_embedded_network_mapping(networks) -> dict[str, EmbeddedNetworkDa
             )
         normalized[network_name] = data
     return normalized
+
+
+def _normalize_monitor_data_mapping(monitors) -> dict[str, Any]:
+    normalized = _clone_mapping(monitors)
+    for name, data in normalized.items():
+        if isinstance(data, WireData) and name != data.monitor_name:
+            raise ValueError(
+                f"Result monitor key {name!r} does not match "
+                f"WireData.monitor_name {data.monitor_name!r}."
+            )
+    return normalized
+
+
+def _wire_data_snapshot(data: WireData) -> dict[str, Any]:
+    _validate_safe_persistence(
+        data.metadata,
+        path=f"monitors[{data.monitor_name!r}].metadata",
+    )
+    return {
+        "schema_version": data.schema_version,
+        "data_type": "WireData",
+        "monitor_name": data.monitor_name,
+        "wire_name": data.wire_name,
+        "frequencies": _cpu_serializable(data.frequencies),
+        "current": _cpu_serializable(data.current),
+        "charge": _cpu_serializable(data.charge),
+        "ohmic_loss": _cpu_serializable(data.ohmic_loss),
+        "metadata": _cpu_serializable(data.metadata),
+    }
+
+
+def _wire_data_from_snapshot(payload: Mapping[str, Any]) -> WireData:
+    if not isinstance(payload, Mapping):
+        raise ValueError("WireData snapshot must contain a mapping payload.")
+    if payload.get("data_type") != "WireData":
+        raise ValueError("WireData snapshot has an invalid data_type.")
+    if payload.get("schema_version") != WireData.schema_version:
+        raise ValueError(
+            f"Unsupported WireData schema_version {payload.get('schema_version')!r}."
+        )
+    return WireData(
+        monitor_name=payload["monitor_name"],
+        wire_name=payload["wire_name"],
+        frequencies=payload["frequencies"],
+        current=payload["current"],
+        charge=payload["charge"],
+        ohmic_loss=payload["ohmic_loss"],
+        metadata=payload.get("metadata", {}),
+    )
+
+
+def _monitor_mapping_snapshot(monitors: Mapping[str, Any]) -> dict[str, Any]:
+    snapshot = {}
+    for name, data in monitors.items():
+        if isinstance(data, WireData):
+            snapshot[name] = {
+                "__witwin_result_monitor_type__": "WireData",
+                "payload": _wire_data_snapshot(data),
+            }
+        else:
+            snapshot[name] = _cpu_serializable(data)
+    return snapshot
+
+
+def _monitor_mapping_from_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise ValueError("Result monitor snapshot must contain a mapping payload.")
+    monitors = {}
+    for name, data in payload.items():
+        if (
+            isinstance(data, Mapping)
+            and data.get("__witwin_result_monitor_type__") == "WireData"
+        ):
+            monitors[name] = _wire_data_from_snapshot(data.get("payload"))
+        else:
+            monitors[name] = data
+    return monitors
 
 
 def _port_data_snapshot(data: PortData) -> dict[str, Any]:
@@ -1100,7 +1178,7 @@ class Result:
         self.frequency = self.frequencies[0]
         self.solver = solver
         self._fields = _clone_mapping(fields)
-        self._monitors = _clone_mapping(monitors)
+        self._monitors = _normalize_monitor_data_mapping(monitors)
         self._ports = _normalize_port_data_mapping(ports)
         self._circuits = _normalize_circuit_data_mapping(circuits)
         self._embedded_networks = _normalize_embedded_network_mapping(embedded_networks)
@@ -1247,6 +1325,13 @@ class Result:
             raise KeyError(f"Monitor {name!r} is not available in this result.")
 
         payload = self._monitors[name]
+        if isinstance(payload, WireData):
+            if frequency is not None or freq_index is not None:
+                raise ValueError(
+                    "WireData preserves its explicit frequency axis; retrieve the "
+                    "full typed result and select its tensors explicitly."
+                )
+            return payload
         monitor_frequencies = _monitor_frequencies(payload)
         selected_index = _resolve_frequency_index(
             monitor_frequencies,
@@ -1271,6 +1356,14 @@ class Result:
         freq_index: int | None = None,
         resolve_modal: bool = True,
     ):
+        payload = self._monitors.get(name)
+        if isinstance(payload, WireData):
+            if frequency is not None or freq_index is not None:
+                raise ValueError(
+                    "WireData preserves its explicit frequency axis; retrieve the "
+                    "full typed result and select its tensors explicitly."
+                )
+            return payload
         public_monitor = _find_scene_monitor(self.scene, name)
         if isinstance(public_monitor, PowerLossMonitor):
             if frequency is not None or freq_index is not None:
@@ -1519,7 +1612,7 @@ class Result:
                 name: tensor.detach().cpu()
                 for name, tensor in fields.items()
             },
-            "monitors": _cpu_serializable(self._monitors),
+            "monitors": _monitor_mapping_snapshot(self._monitors),
             "ports": {
                 name: _port_data_snapshot(data)
                 for name, data in self._ports.items()
@@ -1616,7 +1709,7 @@ class Result:
             frequency=payload.get("frequency"),
             frequencies=payload.get("frequencies"),
             fields=payload["fields"],
-            monitors=payload["monitors"],
+            monitors=_monitor_mapping_from_snapshot(payload["monitors"]),
             ports={
                 name: _port_data_from_snapshot(data)
                 for name, data in payload.get("ports", {}).items()
@@ -1667,7 +1760,7 @@ class Result:
             frequency=payload.get("frequency"),
             frequencies=payload.get("frequencies"),
             fields=loaded.fields,
-            monitors=payload["monitors"],
+            monitors=_monitor_mapping_from_snapshot(payload["monitors"]),
             ports={
                 name: _port_data_from_snapshot(data)
                 for name, data in payload.get("ports", {}).items()

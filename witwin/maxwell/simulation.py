@@ -290,6 +290,15 @@ def _scene_trainable_circuit_parameters(scene: Scene) -> tuple[torch.Tensor, ...
     return tuple(unique)
 
 
+def _scene_trainable_wire_parameters(scene: Scene) -> tuple[torch.Tensor, ...]:
+    trainable = []
+    for wire in getattr(scene, "thin_wires", ()):
+        for value in (getattr(wire, "points", None), getattr(wire, "radius", None)):
+            if isinstance(value, torch.Tensor) and value.requires_grad:
+                trainable.append(value)
+    return tuple(trainable)
+
+
 def _trainable_rf_parameters(
     scene: Scene,
     *,
@@ -441,6 +450,7 @@ class Simulation:
         self.scene_module = scene_module
         self.method = SimulationMethod(method)
         self._validate_network_solver()
+        self._validate_method_scene_features()
         self.port_sweep = excitations if isinstance(excitations, PortSweep) else None
         self.excitations = (
             () if self.port_sweep is not None else _normalize_port_excitations(excitations)
@@ -540,6 +550,7 @@ class Simulation:
         self._refresh_scene()
         self._validate_circuit_execution()
         self._validate_network_solver()
+        self._validate_method_scene_features()
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         waveport_excitation = self._waveport_excitation()
@@ -595,6 +606,7 @@ class Simulation:
         self._refresh_scene()
         self._validate_circuit_execution()
         self._validate_network_solver()
+        self._validate_method_scene_features()
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         if self.method == SimulationMethod.FDFD:
@@ -803,6 +815,7 @@ class Simulation:
             or _scene_trainable_geometry_parameters(self.scene)
             or _scene_trainable_material_parameters(self.scene)
             or _scene_trainable_circuit_parameters(self.scene)
+            or _scene_trainable_wire_parameters(self.scene)
             or _trainable_rf_parameters(
                 self.scene,
                 excitations=self.excitations,
@@ -820,6 +833,12 @@ class Simulation:
             raise NotImplementedError(
                 "Circuit-coupled FDTD requires one circuit with at least one bound port; "
                 "multi-circuit execution is not yet supported."
+            )
+
+    def _validate_method_scene_features(self) -> None:
+        if self.method != SimulationMethod.FDTD and getattr(self.scene, "thin_wires", ()):
+            raise ValueError(
+                "ThinWire is an FDTD-only subgrid model; use Simulation.fdtd(...)."
             )
 
     def _run_fdfd(self) -> Result:
@@ -1493,6 +1512,7 @@ class Simulation:
         )
         shutoff_triggered = bool(getattr(solver, "_shutoff_triggered", False))
         shutoff_step = getattr(solver, "_shutoff_step", None)
+        wire_runtime = getattr(solver, "_wire_runtime", None)
         stats = {
             "time_steps": time_steps,
             "shutoff": self.config.shutoff,
@@ -1516,6 +1536,28 @@ class Simulation:
             "cpml_allocated_memory_bytes": getattr(solver, "_cpml_allocated_memory_bytes", None),
             "cpml_dense_memory_bytes": getattr(solver, "_cpml_dense_memory_bytes", None),
             "cpml_slab_memory_bytes": getattr(solver, "_cpml_slab_memory_bytes", None),
+            "thin_wire_enabled": wire_runtime is not None,
+            "thin_wire_segments": (
+                0 if wire_runtime is None else int(wire_runtime.current.numel())
+            ),
+            "thin_wire_nodes": (
+                0 if wire_runtime is None else int(wire_runtime.charge.numel())
+            ),
+            "thin_wire_state_bytes": (
+                0 if wire_runtime is None else int(wire_runtime.state_bytes)
+            ),
+            "thin_wire_cfl_limit": (
+                None if wire_runtime is None else float(wire_runtime.cfl_limit)
+            ),
+            "thin_wire_uncoupled_cfl_limit": (
+                None if wire_runtime is None else float(wire_runtime.wire_cfl_limit)
+            ),
+            "thin_wire_maxwell_cfl_limit": (
+                None if wire_runtime is None else float(wire_runtime.maxwell_cfl_limit)
+            ),
+            "thin_wire_time_step_adjusted": (
+                False if wire_runtime is None else bool(wire_runtime.dt_adjusted)
+            ),
             "dft_window": dft_cfg.window,
             "frequency": self.frequency,
             "frequencies": self.frequencies,

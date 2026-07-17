@@ -41,6 +41,9 @@ class _ReverseStepResult:
     grad_tpa_ex: torch.Tensor | None = None
     grad_tpa_ey: torch.Tensor | None = None
     grad_tpa_ez: torch.Tensor | None = None
+    grad_wire_inductance: torch.Tensor | None = None
+    grad_wire_capacitance: torch.Tensor | None = None
+    grad_wire_weights: torch.Tensor | None = None
 
 
 @dataclass

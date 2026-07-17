@@ -957,6 +957,7 @@ def test_capture_checkpoint_state_freezes_schema_layout():
 
     assert state.step == 3
     assert state.schema.version == 2
+    assert state.schema.wire_state_names == ()
     assert tuple(state.tensors.keys()) == state.schema.state_names
     assert state.schema.field_names == ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
     assert state.schema.complex_field_names == (

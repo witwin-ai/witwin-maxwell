@@ -1817,6 +1817,38 @@ void apply_sibc_surface_cuda(
     double surface_r,
     double surface_l_over_dt,
     torch::stable::Tensor h_prev);
+void sample_wire_emf_cuda(
+    const torch::stable::Tensor& ex,
+    const torch::stable::Tensor& ey,
+    const torch::stable::Tensor& ez,
+    const torch::stable::Tensor& segment_offsets,
+    const torch::stable::Tensor& edge_components,
+    const torch::stable::Tensor& edge_offsets,
+    const torch::stable::Tensor& weights,
+    torch::stable::Tensor emf);
+void update_wire_state_cuda(
+    const torch::stable::Tensor& emf,
+    const torch::stable::Tensor& tail,
+    const torch::stable::Tensor& head,
+    const torch::stable::Tensor& inductance,
+    const torch::stable::Tensor& node_capacitance,
+    const torch::stable::Tensor& grounded,
+    const torch::stable::Tensor& node_offsets,
+    const torch::stable::Tensor& node_segments,
+    const torch::stable::Tensor& node_signs,
+    double dt,
+    torch::stable::Tensor current,
+    torch::stable::Tensor charge);
+void deposit_wire_current_cuda(
+    torch::stable::Tensor ex,
+    torch::stable::Tensor ey,
+    torch::stable::Tensor ez,
+    const torch::stable::Tensor& edge_group_offsets,
+    const torch::stable::Tensor& target_components,
+    const torch::stable::Tensor& target_offsets,
+    const torch::stable::Tensor& contribution_segments,
+    const torch::stable::Tensor& contribution_scales,
+    const torch::stable::Tensor& current);
 void project_periodic_boundary_cuda(torch::stable::Tensor field, int64_t axis);
 void project_bloch_boundary_cuda(
     torch::stable::Tensor field_real,
@@ -1991,6 +2023,9 @@ void add_source_patch_ez_periodic_cuda(
 }
 
 #define WITWIN_CUDA_OPS(_) \
+  _(sample_wire_emf, "sample_wire_emf(Tensor ex, Tensor ey, Tensor ez, Tensor segment_offsets, Tensor edge_components, Tensor edge_offsets, Tensor weights, Tensor(a!) emf) -> ()", sample_wire_emf_cuda) \
+  _(update_wire_state, "update_wire_state(Tensor emf, Tensor tail, Tensor head, Tensor inductance, Tensor node_capacitance, Tensor grounded, Tensor node_offsets, Tensor node_segments, Tensor node_signs, float dt, Tensor(a!) current, Tensor(b!) charge) -> ()", update_wire_state_cuda) \
+  _(deposit_wire_current, "deposit_wire_current(Tensor(a!) ex, Tensor(b!) ey, Tensor(c!) ez, Tensor edge_group_offsets, Tensor target_components, Tensor target_offsets, Tensor contribution_segments, Tensor contribution_scales, Tensor current) -> ()", deposit_wire_current_cuda) \
   _(update_magnetic_hx_standard, "update_magnetic_hx_standard(Tensor(a!) hx, Tensor ey, Tensor ez, Tensor decay, Tensor curl, Tensor inv_dy, Tensor inv_dz) -> ()", update_magnetic_hx_standard_cuda) \
   _(update_magnetic_hy_standard, "update_magnetic_hy_standard(Tensor(a!) hy, Tensor ex, Tensor ez, Tensor decay, Tensor curl, Tensor inv_dx, Tensor inv_dz) -> ()", update_magnetic_hy_standard_cuda) \
   _(update_magnetic_hz_standard, "update_magnetic_hz_standard(Tensor(a!) hz, Tensor ex, Tensor ey, Tensor decay, Tensor curl, Tensor inv_dx, Tensor inv_dy) -> ()", update_magnetic_hz_standard_cuda) \

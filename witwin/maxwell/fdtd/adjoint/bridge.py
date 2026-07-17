@@ -11,11 +11,14 @@ from ...adjoint_inputs import (
     rf_dependent_inputs as _rf_dependent_inputs,
     scene_trainable_material_tensors as _scene_trainable_material_tensors,
     scene_trainable_rf_tensors as _scene_trainable_rf_tensors,
+    scene_trainable_wire_tensors as _scene_trainable_wire_tensors,
     unique_trainable_tensors as _unique_trainable_tensors,
+    wire_dependent_inputs as _wire_dependent_inputs,
 )
 from ...media import Tensor3x3
 from ...rational import RationalModel, StateSpaceNetwork
 from ...result import Result
+from ...scene import prepare_scene
 from ..boundary import BOUNDARY_BLOCH, BOUNDARY_NONE, BOUNDARY_PEC, BOUNDARY_PML, has_complex_fields
 from .profiler import _BackwardProfiler, _clone_backward_profile, _empty_backward_profile
 from ..excitation import (
@@ -34,6 +37,14 @@ from ..ports import (
 )
 from ..circuits import finalize_circuit_data, prepare_circuit_time_series
 from .circuits import pullback_circuit_runtimes
+from ..wire import (
+    accumulate_wire_monitors,
+    complete_wire_monitor_normalization,
+    deposit_wire_current,
+    finalize_wire_data,
+    prepare_wire_monitors,
+    sample_and_update_wire,
+)
 from .seeds import (
     _apply_seed_runtime,
     _build_output_seeds,
@@ -296,18 +307,22 @@ class _FDTDGradientBridge:
         self.base_scene = simulation.scene
         self.material_inputs = self._resolve_material_inputs()
         self.rf_scene_inputs = self._resolve_rf_scene_inputs()
+        self.wire_inputs = self._resolve_wire_inputs()
         self.excitation_inputs = _unique_trainable_tensors(
             value
             for excitation in getattr(simulation, "excitations", ())
             for value in (excitation.amplitude, excitation.source_impedance)
         )
         self.trainable_inputs = _ancestry_safe_trainable_tensors(
-            self.material_inputs + self.rf_scene_inputs + self.excitation_inputs
+            self.material_inputs
+            + self.rf_scene_inputs
+            + self.wire_inputs
+            + self.excitation_inputs
         )
         if not self.trainable_inputs:
             raise NotImplementedError(
                 "FDTD backward requires an input that contributes to prepared-scene material tensors, "
-                "series R/L/C values, or a port amplitude."
+                "series R/L/C values, a thin-wire coefficient, or a port amplitude."
             )
         if any(not tensor.is_cuda for tensor in self.trainable_inputs):
             raise RuntimeError("Differentiable FDTD RF and material inputs must be CUDA tensors.")
@@ -403,6 +418,18 @@ class _FDTDGradientBridge:
                 geometry_indices.add(structure_index)
         return frozenset(semantic_keys), frozenset(geometry_indices)
 
+    def _resolve_wire_inputs(self) -> tuple[torch.Tensor, ...]:
+        scene = self._material_graph_scene()
+        if self.simulation.scene_module is not None:
+            candidates = tuple(
+                parameter
+                for parameter in self.simulation.scene_module.parameters()
+                if parameter.requires_grad
+            )
+        else:
+            candidates = _scene_trainable_wire_tensors(self.base_scene)
+        return _wire_dependent_inputs(scene, candidates)
+
     def _pullback_rf_inputs(self, base_inputs, semantic_grads):
         if not semantic_grads:
             return tuple(torch.zeros_like(tensor) for tensor in base_inputs)
@@ -441,6 +468,57 @@ class _FDTDGradientBridge:
             for tensor, gradient in zip(base_inputs, gradients)
         )
 
+    def _pullback_wire_inputs(
+        self,
+        base_inputs,
+        *,
+        solver,
+        grad_inductance,
+        grad_capacitance,
+        grad_weights,
+        grad_gap_weights,
+    ):
+        if (
+            grad_inductance is None
+            or grad_capacitance is None
+            or grad_weights is None
+            or grad_gap_weights is None
+            or not base_inputs
+        ):
+            return tuple(torch.zeros_like(tensor) for tensor in base_inputs)
+        scene = self._material_graph_scene()
+        prepared_scene = prepare_scene(scene)
+        try:
+            network = prepared_scene.compile_thin_wires(device=solver.device)
+            candidates = (
+                (network.inductance, grad_inductance),
+                (network.node_capacitance, grad_capacitance),
+                (network.weights, grad_weights),
+                (network.port_gap_weights, grad_gap_weights),
+            )
+            outputs = tuple(value for value, _gradient in candidates if value.requires_grad)
+            output_grads = tuple(
+                gradient.to(device=value.device, dtype=value.dtype)
+                for value, gradient in candidates
+                if value.requires_grad
+            )
+            gradients = (
+                torch.autograd.grad(
+                    outputs,
+                    base_inputs,
+                    grad_outputs=output_grads,
+                    allow_unused=True,
+                )
+                if outputs
+                else tuple(None for _input in base_inputs)
+            )
+        finally:
+            prepared_scene.release_meshgrid()
+        return tuple(
+            torch.zeros_like(tensor) if gradient is None else gradient
+            for tensor, gradient in zip(base_inputs, gradients)
+        )
+
     def _validate_supported_configuration(self, solver):
         for block in getattr(solver.scene, "networks", ()):
             if block.delay_seconds is not None:
@@ -474,6 +552,23 @@ class _FDTDGradientBridge:
         )
         if unsupported_medium_message is not None:
             raise NotImplementedError(unsupported_medium_message)
+        wire_runtime = getattr(solver, "_wire_runtime", None)
+        if wire_runtime is not None:
+            if wire_runtime.dt_adjusted:
+                raise NotImplementedError(
+                    "Differentiable thin-wire FDTD requires a fixed Maxwell time step below the "
+                    "joint wire CFL bound; automatic dt adjustment is not differentiated."
+                )
+            if (
+                getattr(solver, "_lumped_element_runtimes", ())
+                or getattr(solver, "tfsf_enabled", False)
+                or getattr(solver, "magnetic_dispersive_enabled", False)
+            ):
+                raise NotImplementedError(
+                    "Differentiable thin-wire FDTD requires a wire-aware reverse for TFSF, "
+                    "magnetic dispersion, and standalone lumped elements; these coupled state "
+                    "transposes are not part of the axis-aligned PEC wire reverse."
+                )
         if getattr(solver, "_full_aniso_cpml_overlap", False):
             # The forward off-diagonal correction coordinate-stretches the tensor
             # coupling inside the CPML with per-direction psi memory, but the
@@ -636,6 +731,7 @@ class _FDTDGradientBridge:
                 for key in self._differentiable_circuit_keys
             ):
                 circuit_runtime.graph_eligible = False
+        prepare_wire_monitors(solver, time_steps, dft_window)
 
         checkpoint_stride = runtime._checkpoint_stride(self.simulation, time_steps)
         checkpoints = [capture_checkpoint_state(solver, step=0)]
@@ -663,6 +759,7 @@ class _FDTDGradientBridge:
 
                 inject_magnetic_surface_source_terms(solver, time_value=time_value)
             solver._apply_magnetic_dispersive_corrections()
+            sample_and_update_wire(solver)
 
             solver._advance_dispersive_state()
             if has_complex_fields(solver):
@@ -676,6 +773,8 @@ class _FDTDGradientBridge:
                 solver._update_electric_fields(solver.Ex, solver.Ey, solver.Ez, solver.Hx, solver.Hy, solver.Hz)
                 if getattr(solver, "full_aniso_enabled", False):
                     apply_full_aniso_corrections(solver)
+
+            deposit_wire_current(solver)
 
             if getattr(solver, "tfsf_enabled", False):
                 apply_tfsf_e_correction(solver, time_value)
@@ -698,6 +797,7 @@ class _FDTDGradientBridge:
             solver.accumulate_dft(step_index)
             accumulate_port_observers(solver)
             solver.accumulate_observers(step_index)
+            accumulate_wire_monitors(solver, step_index)
 
         solver._synchronize_device()
         solver.last_solve_elapsed_s = time.perf_counter() - solve_start
@@ -706,12 +806,18 @@ class _FDTDGradientBridge:
             solver._sync_dft_legacy_state()
         if solver.observers_enabled:
             solver._sync_observer_legacy_state()
+        complete_wire_monitor_normalization(solver, time_steps)
 
         raw_output = {}
         if solver.dft_enabled:
             raw_output.update(solver.get_frequency_solution(all_frequencies=True))
         if solver.observers_enabled:
             raw_output["observers"] = solver.get_observer_results()
+        wire_monitors = finalize_wire_data(solver)
+        if wire_monitors:
+            observers = dict(raw_output.get("observers", {}))
+            observers.update(wire_monitors)
+            raw_output["observers"] = observers
         ports = finalize_port_data(solver)
         if ports:
             raw_output["ports"] = ports
@@ -794,6 +900,12 @@ class _FDTDGradientBridge:
             for index, field_name in enumerate(pack.field_names)
         }
         monitors = runtime._rebuild_monitors(pack.monitor_templates, output_tensors, len(pack.field_names))
+        monitors.update(
+            runtime._rebuild_wire_monitors(
+                pack.wire_monitor_templates,
+                output_tensors,
+            )
+        )
         ports = runtime._rebuild_ports(
             pack.port_templates,
             output_tensors,
@@ -886,6 +998,31 @@ class _FDTDGradientBridge:
         grad_eps_ey = torch.zeros_like(solver.eps_Ey)
         grad_eps_ez = torch.zeros_like(solver.eps_Ez)
         semantic_rf_grads = {}
+        wire_runtime = getattr(solver, "_wire_runtime", None)
+        grad_wire_inductance = (
+            torch.zeros_like(wire_runtime.coefficients["inductance"])
+            if wire_runtime is not None
+            else None
+        )
+        grad_wire_capacitance = (
+            torch.zeros_like(wire_runtime.coefficients["node_capacitance"])
+            if wire_runtime is not None
+            else None
+        )
+        grad_wire_weights = (
+            torch.zeros_like(wire_runtime.coefficients["weights"])
+            if wire_runtime is not None
+            else None
+        )
+        grad_wire_gap_weights = (
+            torch.zeros_like(
+                wire_runtime.network.port_gap_weights,
+                device=solver.device,
+                dtype=solver.Ex.dtype,
+            )
+            if wire_runtime is not None
+            else None
+        )
         nonlinear_enabled = bool(getattr(solver, "nonlinear_enabled", False))
         general_enabled = bool(getattr(solver, "nonlinear_general_enabled", False))
         chi3_ex = chi3_ey = chi3_ez = None
@@ -1007,7 +1144,13 @@ class _FDTDGradientBridge:
                                 torch.zeros_like(value),
                             ) + value
                     if lumped_traces is not None:
-                        post_step_adjoint, lumped_grad_eps, step_rf_grads = pullback_port_runtimes(
+                        (
+                            post_step_adjoint,
+                            lumped_grad_eps,
+                            step_rf_grads,
+                            port_grad_wire_capacitance,
+                            port_grad_wire_gap_weights,
+                        ) = pullback_port_runtimes(
                             solver,
                             lumped_traces[offset],
                             post_step_adjoint,
@@ -1022,6 +1165,18 @@ class _FDTDGradientBridge:
                                 key,
                                 torch.zeros_like(value),
                             ) + value
+                        if port_grad_wire_capacitance is not None:
+                            grad_wire_capacitance = _accumulate_grad(
+                                grad_accumulator_backend,
+                                grad_wire_capacitance,
+                                port_grad_wire_capacitance.contiguous(),
+                            )
+                        if port_grad_wire_gap_weights is not None:
+                            grad_wire_gap_weights = _accumulate_grad(
+                                grad_accumulator_backend,
+                                grad_wire_gap_weights,
+                                port_grad_wire_gap_weights.contiguous(),
+                            )
 
                     step_result = reverse_step(
                         solver,
@@ -1048,6 +1203,30 @@ class _FDTDGradientBridge:
                     grad_eps_ex = _accumulate_grad(grad_accumulator_backend, grad_eps_ex, step_result.grad_eps_ex)
                     grad_eps_ey = _accumulate_grad(grad_accumulator_backend, grad_eps_ey, step_result.grad_eps_ey)
                     grad_eps_ez = _accumulate_grad(grad_accumulator_backend, grad_eps_ez, step_result.grad_eps_ez)
+                    if wire_runtime is not None:
+                        if (
+                            step_result.grad_wire_inductance is None
+                            or step_result.grad_wire_capacitance is None
+                            or step_result.grad_wire_weights is None
+                        ):
+                            raise RuntimeError(
+                                f"Wire reverse backend {step_result.backend!r} omitted coefficient gradients."
+                            )
+                        grad_wire_inductance = _accumulate_grad(
+                            grad_accumulator_backend,
+                            grad_wire_inductance,
+                            step_result.grad_wire_inductance.contiguous(),
+                        )
+                        grad_wire_capacitance = _accumulate_grad(
+                            grad_accumulator_backend,
+                            grad_wire_capacitance,
+                            step_result.grad_wire_capacitance.contiguous(),
+                        )
+                        grad_wire_weights = _accumulate_grad(
+                            grad_accumulator_backend,
+                            grad_wire_weights,
+                            step_result.grad_wire_weights.contiguous(),
+                        )
                     grad_eps_ex = _accumulate_grad(
                         grad_accumulator_backend,
                         grad_eps_ex,
@@ -1092,6 +1271,10 @@ class _FDTDGradientBridge:
                         adjoint_state[name] = post_step_adjoint[name]
                     for name in checkpoint_schema.network_state_names:
                         adjoint_state[name] = post_step_adjoint[name]
+                    adjoint_state = {
+                        name: adjoint_state[name]
+                        for name in checkpoint_schema.state_names
+                    }
 
             with profiler.section("material_pullback"):
                 # Mode-source profile terms deferred their eigensolve VJP to keep
@@ -1141,10 +1324,19 @@ class _FDTDGradientBridge:
                         base_inputs,
                         semantic_rf_grads,
                     )
+                    wire_outputs = self._pullback_wire_inputs(
+                        base_inputs,
+                        solver=solver,
+                        grad_inductance=grad_wire_inductance,
+                        grad_capacitance=grad_wire_capacitance,
+                        grad_weights=grad_wire_weights,
+                        grad_gap_weights=grad_wire_gap_weights,
+                    )
                     outputs = tuple(
-                        rf_gradient + material_gradient
-                        for rf_gradient, material_gradient in zip(
+                        rf_gradient + wire_gradient + material_gradient
+                        for rf_gradient, wire_gradient, material_gradient in zip(
                             rf_outputs,
+                            wire_outputs,
                             material_outputs,
                         )
                     )

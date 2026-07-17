@@ -13,6 +13,7 @@ from .sources import (
     _resolve_mode_source_polarization_axis,
     polarization_vector,
 )
+from .thin_wire import normalize_wire_quantities
 
 _AXES = ("x", "y", "z")
 POWER_LOSS_CHANNELS = (
@@ -164,6 +165,45 @@ class PointMonitor:
         object.__setattr__(self, "position", tuple(float(v) for v in position))
         object.__setattr__(self, "fields", _normalize_fields(fields))
         object.__setattr__(self, "kind", "point")
+
+
+@dataclass(frozen=True)
+class WireMonitor:
+    """Sample frequency-domain state from one declared thin wire."""
+
+    name: str
+    wire: str
+    frequencies: tuple[float, ...]
+    quantities: tuple[str, ...]
+    kind: str = "wire"
+
+    def __init__(
+        self,
+        name,
+        wire,
+        frequencies,
+        quantities=("current", "charge", "ohmic_loss"),
+    ):
+        monitor_name = str(name).strip()
+        if not monitor_name:
+            raise ValueError("WireMonitor name must not be empty.")
+        wire_name = str(wire).strip()
+        if not wire_name:
+            raise ValueError("WireMonitor wire must not be empty.")
+        resolved_frequencies = _normalize_frequencies(frequencies)
+        if resolved_frequencies is None or any(
+            not math.isfinite(frequency) or frequency <= 0.0
+            for frequency in resolved_frequencies
+        ):
+            raise ValueError(
+                "WireMonitor frequencies must be finite and strictly positive."
+            )
+
+        object.__setattr__(self, "name", monitor_name)
+        object.__setattr__(self, "wire", wire_name)
+        object.__setattr__(self, "frequencies", resolved_frequencies)
+        object.__setattr__(self, "quantities", normalize_wire_quantities(quantities))
+        object.__setattr__(self, "kind", "wire")
 
 
 @dataclass(frozen=True)

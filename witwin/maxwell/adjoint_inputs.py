@@ -115,6 +115,45 @@ def scene_trainable_rf_tensors(scene) -> tuple[torch.Tensor, ...]:
     return unique_trainable_tensors(candidates)
 
 
+def scene_trainable_wire_tensors(scene) -> tuple[torch.Tensor, ...]:
+    candidates = []
+    for wire in getattr(scene, "thin_wires", ()):
+        candidates.extend((getattr(wire, "points", None), getattr(wire, "radius", None)))
+    return unique_trainable_tensors(candidates)
+
+
+def wire_dependent_inputs(scene, candidates) -> tuple[torch.Tensor, ...]:
+    inputs = unique_trainable_tensors(candidates)
+    if not inputs or not getattr(scene, "thin_wires", ()):
+        return ()
+    prepared_scene = prepare_scene(scene)
+    try:
+        with torch.enable_grad():
+            network = prepared_scene.compile_thin_wires()
+            outputs = tuple(
+                value
+                for value in (network.inductance, network.node_capacitance)
+                if value.requires_grad
+            )
+            dependencies = (
+                torch.autograd.grad(
+                    outputs,
+                    inputs,
+                    grad_outputs=tuple(torch.ones_like(value) for value in outputs),
+                    allow_unused=True,
+                )
+                if outputs
+                else tuple(None for _input in inputs)
+            )
+    finally:
+        prepared_scene.release_meshgrid()
+    return tuple(
+        tensor
+        for tensor, dependency in zip(inputs, dependencies)
+        if dependency is not None
+    )
+
+
 def rf_dependent_inputs(scene, candidates) -> tuple[torch.Tensor, ...]:
     inputs = ancestry_safe_trainable_tensors(candidates)
     if not inputs:
