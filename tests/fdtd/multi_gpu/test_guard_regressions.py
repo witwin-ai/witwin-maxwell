@@ -225,8 +225,7 @@ def test_solver_trainable_guard_covers_circuit_parameter_channel():
         )
 
 
-def test_thin_wire_is_explicitly_rejected_before_distributed_hardware_prepare():
-    scene = _scene()
+def _wire(scene):
     scene.add_thin_wire(
         mw.ThinWire(
             name="wire",
@@ -235,13 +234,26 @@ def test_thin_wire_is_explicitly_rejected_before_distributed_hardware_prepare():
             conductor=mw.WireConductor.pec(),
         )
     )
+    return scene
 
-    with pytest.raises(NotImplementedError, match="fragment/state ownership"):
-        DistributedFDTD(
-            scene,
-            frequency=_FREQUENCY,
-            parallel=_parallel(),
-        )
+
+def test_supported_thin_wire_forward_passes_static_distributed_validation():
+    # The distributed PEC thin-wire forward is supported (Phase 4). A plain wire on
+    # a non-absorbing boundary must no longer be rejected at static validation; the
+    # constructor runs the full static capability check without touching hardware.
+    solver = DistributedFDTD(
+        _wire(_scene()),
+        frequency=_FREQUENCY,
+        parallel=_parallel(),
+    )
+    assert getattr(solver.logical_scene, "thin_wires", ())
+
+
+def test_thin_wire_with_distributed_cpml_is_rejected_before_hardware_prepare():
+    scene = _wire(_scene())
+    scene = scene.clone(boundary=mw.BoundarySpec.pml(num_layers=4))
+    with pytest.raises(NotImplementedError, match="distributed CPML"):
+        DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_parallel())
 
 
 @pytest.mark.parametrize(

@@ -9,9 +9,10 @@ cannot enter unnoticed.
 
 The 2026-07-17 integrated repository state (circuit co-simulation, Touchstone
 network embedding, and the thin-wire subgrid conductor series in plan 07 phases
-0-3, all merged) contains 151 guards:
+0-3, all merged, plus the plan 07 Phase 4 multi-GPU wire forward slice) contains
+152 guards:
 
-- 129 capability guards tracked by the non-increasing test budget;
+- 130 capability guards tracked by the non-increasing test budget;
 - 22 contract guards excluded by exact file and message substring.
 
 The single-GPU circuit adjoint provides the circuit replay and transpose
@@ -22,7 +23,10 @@ and trainable port reference impedance. Multi-circuit execution, distributed
 adjoints, and full-field/observer forward-resume accumulation remain separate
 capability gaps rather than reclassified permanent contracts. The thin-wire
 series adds ten capability guards on top of the 119-guard circuit/network
-baseline (119 + 10 = 129); their disposition is detailed in the
+baseline (119 + 10 = 129), and the plan 07 Phase 4 multi-GPU wire forward slice
+adds one net capability guard (129 + 1 = 130) by implementing the distributed
+wire forward and replacing its single blanket guard with two narrower ones; their
+disposition is detailed in the
 [Thin-wire reconciliation](#thin-wire-reconciliation-2026-07-17) note below.
 
 The capability baseline is distributed as follows:
@@ -35,11 +39,11 @@ The capability baseline is distributed as follows:
 | Time-domain adjoint | 19 |
 | Time-domain excitation | 12 |
 | Time-domain ports and lumped elements | 13 |
-| Time-domain runtime | 18 |
+| Time-domain runtime | 19 |
 | Public simulation, result, and network workflows | 23 |
 | Material models | 7 |
 | Postprocessing | 3 |
-| **Total** | **129** |
+| **Total** | **130** |
 
 This integrated baseline is the 2026-07-16 circuit/network state (119 capability
 guards) plus the ten thin-wire capability guards from plan 07 phases 0-3. The
@@ -59,10 +63,22 @@ phase-aware wire-topology guard); a set of single-device runtime host-compositio
 guards (off-diagonal, conductive, dispersive, and nonlinear/modulated host
 material, plus a surface-impedance conductor-ownership guard); a distributed
 wire ownership guard; and an adjoint checkpoint/reverse guard. They remain
-capability debt, not contract exclusions. Phase 4 owns finite-conductor loss and
-distributed/SIBC ownership; the remaining host-composition guards stay tracked
-capability debt for a later compatibility plan. Each future phase must lower this
-budget as it removes its guards. The thin-wire differentiable fixed-step
+capability debt, not contract exclusions.
+
+The plan 07 Phase 4 multi-GPU wire forward slice (2026-07-17) implements the
+distributed thin-wire forward and therefore removes the single blanket
+distributed wire guard ("Multi-GPU ThinWire requires distributed fragment/state
+ownership...") and replaces it with two narrower capability guards in
+`fdtd/distributed/solver.py::_validate_distributed_wire_support`: a distributed
+thin-wire + CPML boundary (no verified wire-edge/PML ownership across the split)
+and a thin-wire scene mixed with an embedded network or lumped circuit (both
+claim owner-resident coordination state with no distributed merge). Net +1 in the
+Time-domain runtime area (18 -> 19). Finite-conductor loss and distributed wire
+reverse/gradient are separate slices; lower this budget when those two new guards
+are implemented. Phase 4 also owns finite-conductor loss and SIBC ownership; the
+remaining host-composition guards stay tracked capability debt for a later
+compatibility plan. Each future phase must lower this budget as it removes its
+guards. The thin-wire differentiable fixed-step
 requirement is instead a differentiation contract (the automatic joint-CFL clamp
 is a discrete preparation decision that is not differentiated with respect to
 radius or material parameters) and is listed under CONTRACT_GUARDS, not counted

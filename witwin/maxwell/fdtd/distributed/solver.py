@@ -20,6 +20,7 @@ from ...monitors import (
     PermittivityMonitor,
     PlaneMonitor,
     PointMonitor,
+    WireMonitor,
 )
 from ...scene import Domain, GridSpec, Scene, prepare_scene
 from ...ports import LumpedPort, ModePort, TerminalPort
@@ -46,6 +47,7 @@ from .persistence import export_distributed_field_shards
 from .sources import crop_solver_source_terms_to_owned_x
 from .source_corrections import correct_ideal_point_ex_control_volume
 from .transport import CudaP2PHaloTransport
+from .wire import DistributedWireRuntime, move_wire_monitor
 
 
 _CELL_COMPONENTS = frozenset(("Ex", "Hy", "Hz"))
@@ -164,6 +166,10 @@ def _matches_x_node(nodes: np.ndarray, node_index: int, value: float) -> bool:
 def _local_monitors(scene: Scene, layout: FDTDShardLayout, global_prepared):
     selected = []
     for monitor in scene.monitors:
+        if isinstance(monitor, WireMonitor):
+            # Wire monitors are owned and finalized by DistributedWireRuntime on the
+            # single state-owner shard, not accumulated per field shard.
+            continue
         if isinstance(monitor, (PermittivityMonitor, MediumMonitor)):
             # Material monitors are resolved from compiled tensors, not accumulated.
             selected.append(monitor)
@@ -233,6 +239,11 @@ def _build_local_scene(
         ports=(),
         circuits=(),
         networks=(),
+        # Thin wires are coupled to Yee edges spread across shards, so the
+        # per-shard local solver must not build its own single-GPU wire runtime.
+        # DistributedWireRuntime owns the compressed I/q state on one shard and
+        # drives the distributed sampling/deposition explicitly.
+        thin_wires=(),
         device=str(layout.device),
         symmetry=(None, logical_scene.symmetry[1], logical_scene.symmetry[2]),
     )
@@ -422,6 +433,10 @@ class DistributedFDTD:
         self._observer_frequencies: tuple[float, ...] = ()
         self._distributed_circuit: DistributedCircuitRuntime | None = None
         self._distributed_network: DistributedNetworkRuntime | None = None
+        self._distributed_wire: DistributedWireRuntime | None = None
+        self._wire_network_cpu = None
+        self._wire_monitors_cpu: tuple = ()
+        self._wire_cfl_metadata: dict[str, Any] = {}
         self._network_cuda_graph_active = False
         self._initialized = False
         self._validate_static_capabilities()
@@ -441,10 +456,7 @@ class DistributedFDTD:
             )
         boundary = self.logical_scene.boundary
         if getattr(self.logical_scene, "thin_wires", ()):
-            raise NotImplementedError(
-                "Multi-GPU ThinWire requires distributed fragment/state ownership and "
-                "reverse sparse communication; use single-device FDTD until Phase 4."
-            )
+            self._validate_distributed_wire_support()
         if boundary.uses_kind("bloch"):
             raise ValueError(
                 "Multi-GPU Bloch fields require complex halo exchange, which is not enabled yet."
@@ -597,6 +609,53 @@ class DistributedFDTD:
                     "normalization has exactly one interface owner."
                 )
 
+    def _validate_distributed_wire_support(self) -> None:
+        """Fail-closed gate for the distributed thin-wire forward envelope.
+
+        The distributed forward supports a PEC thin-wire network on the shared
+        real standard path with a non-absorbing boundary. Everything the verified
+        forward does not cover is rejected here with a precise message rather than
+        silently running a partial coupling:
+
+        - a trainable wire (or any trainable scene) is rejected because the Phase 7
+          distributed adjoint bridge has no wire reverse channel -- the compressed
+          I/q recurrence is never checkpointed or replayed across shards;
+        - a distributed-CPML boundary is rejected because wire+CPML ownership on the
+          split is unverified;
+        - mixing a wire with an embedded network or a lumped circuit is rejected
+          because both would claim owner-resident coordination state.
+        """
+
+        from ...simulation import (
+            _scene_trainable_density_parameters,
+            _scene_trainable_wire_parameters,
+        )
+
+        scene = self.logical_scene
+        if (
+            _scene_trainable_wire_parameters(scene)
+            or _scene_trainable_density_parameters(scene)
+            or _unsupported_distributed_trainable_tensors(scene)
+        ):
+            raise ValueError(
+                "Multi-GPU ThinWire supports the forward solve only; a trainable scene "
+                "carrying a ThinWire has no distributed wire reverse (the Phase 7 adjoint "
+                "bridge does not checkpoint or replay wire I/q state). Run forward-only or "
+                "use the single-GPU adjoint path."
+            )
+        if scene.boundary.uses_kind("pml"):
+            raise NotImplementedError(
+                "Multi-GPU ThinWire with a distributed CPML boundary has no verified "
+                "wire-edge/PML ownership across the x split; use a non-absorbing boundary or "
+                "run single-device FDTD."
+            )
+        if scene.networks or scene.circuits:
+            raise NotImplementedError(
+                "Multi-GPU ThinWire and an embedded network or lumped circuit each claim "
+                "owner-resident coordination state on one shard with no distributed ownership "
+                "merge between them; run them in separate simulations."
+            )
+
     def _validate_hardware(self) -> None:
         self.transport.preflight()
         if self.device.index is None:
@@ -636,6 +695,27 @@ class DistributedFDTD:
             absorber_type=self.absorber_type,
             cpml_config=self.cpml_config,
         )
+        if getattr(self.logical_scene, "thin_wires", ()):
+            # Build the full-domain single-GPU wire runtime once so the shared dt is
+            # the exact joint Maxwell+wire CFL step used by the single-GPU solver;
+            # any other derivation risks a dt mismatch that would break field parity.
+            # The compiled network and monitors are captured to host memory and the
+            # transient full-domain reference is then released.
+            reference_solver.init_field()
+            reference_runtime = reference_solver._wire_runtime
+            cpu = torch.device("cpu")
+            from .wire import move_network
+
+            self._wire_network_cpu = move_network(reference_runtime.network, cpu)
+            self._wire_monitors_cpu = tuple(
+                move_wire_monitor(monitor, cpu) for monitor in reference_runtime.monitors
+            )
+            self._wire_cfl_metadata = {
+                "cfl_limit": reference_runtime.cfl_limit,
+                "wire_cfl_limit": reference_runtime.wire_cfl_limit,
+                "maxwell_cfl_limit": reference_runtime.maxwell_cfl_limit,
+                "dt_adjusted": reference_runtime.dt_adjusted,
+            }
         self.dt = float(reference_solver.dt)
         del reference_solver
         low_pml = int(self.scene.pml_thickness_for_face("x", "low"))
@@ -740,6 +820,15 @@ class DistributedFDTD:
             frequency=self.frequency,
             requested_frequencies=self._requested_port_frequencies,
         )
+        if self._wire_network_cpu is not None:
+            self._distributed_wire = DistributedWireRuntime.prepare(
+                network=self._wire_network_cpu,
+                monitors=self._wire_monitors_cpu,
+                partition_plan=self.partition_plan,
+                shards=self.shards,
+                dt=self.dt,
+                cfl_metadata=self._wire_cfl_metadata,
+            )
         self._initialized = True
 
     @staticmethod
@@ -765,7 +854,7 @@ class DistributedFDTD:
         monitor_frequencies = tuple(
             getattr(monitor, "frequencies", None)
             for monitor in self.logical_scene.resolved_monitors()
-            if not isinstance(monitor, FieldTimeMonitor)
+            if not isinstance(monitor, (FieldTimeMonitor, WireMonitor))
         )
         self._observer_frequencies = (
             _merge_frequency_lists(default_frequencies, *monitor_frequencies) if spectral_enabled else ()
@@ -796,6 +885,11 @@ class DistributedFDTD:
             self._distributed_network.prepare_outputs(
                 time_steps=int(time_steps),
                 frequencies=default_frequencies,
+                window_type=dft_window,
+            )
+        if self._distributed_wire is not None:
+            self._distributed_wire.prepare_outputs(
+                time_steps=int(time_steps),
                 window_type=dft_window,
             )
 
@@ -945,10 +1039,22 @@ class DistributedFDTD:
                     solver._update_nonlinear_electric_coefficients()
                 stepping.capture_aniso_conduction_currents(solver)
 
+        # Wire EMF is sampled from the pre-update E field and the compressed I/q
+        # recurrence is advanced on the owner shard before the electric update,
+        # matching the single-GPU schedule (sample -> update -> E update -> deposit).
+        if self._distributed_wire is not None:
+            self._distributed_wire.apply_sample_and_update()
+
         if overlap_active:
             self._advance_electric_overlapped()
         else:
             self._advance_electric_serialized(time_value)
+
+        # Deposit the advanced wire current onto the owned E edges immediately after
+        # the electric update, before any electric source injection, matching the
+        # single-GPU field-update block ordering.
+        if self._distributed_wire is not None:
+            self._distributed_wire.apply_deposit()
 
         for shard in self.shards:
             solver = shard.solver
@@ -979,6 +1085,9 @@ class DistributedFDTD:
                 solver.accumulate_dft(n)
                 solver.accumulate_observers(n)
                 solver.accumulate_time_observers(n)
+
+        if self._distributed_wire is not None:
+            self._distributed_wire.accumulate_monitors(n)
 
     def _owned_electric_energy(self, shard: FDTDShard) -> torch.Tensor:
         solver = shard.solver
@@ -1091,6 +1200,11 @@ class DistributedFDTD:
                 for name in ("Ex", "Ey", "Ez"):
                     values = tuple(getattr(shard.solver, name) for shard in self.shards)
                     output[name] = self._gather_component(name, values)
+        if self._distributed_wire is not None:
+            wire_monitors = self._distributed_wire.finalize(self.device)
+            if wire_monitors:
+                monitors = dict(monitors)
+                monitors.update(wire_monitors)
         if frequency_metadata is not None:
             output["frequencies"] = frequency_metadata
         if monitors:
@@ -1212,6 +1326,9 @@ class DistributedFDTD:
                 solver._sync_observer_legacy_state()
             shard.peak_memory_bytes = int(torch.cuda.max_memory_allocated(shard.device))
 
+        if self._shutoff_triggered and self._distributed_wire is not None:
+            self._distributed_wire.complete_normalization(int(time_steps))
+
         output = self._collect_output()
         for device in self.devices:
             torch.cuda.synchronize(device)
@@ -1283,6 +1400,8 @@ class DistributedFDTD:
             stats["circuit"] = self._distributed_circuit.stats(steps_run=steps_run)
         if self._distributed_network is not None:
             stats["network"] = self._distributed_network.stats(steps_run=steps_run)
+        if self._distributed_wire is not None:
+            stats["thin_wire"] = self._distributed_wire.stats(steps_run=steps_run)
         return stats
 
     @property
@@ -1307,6 +1426,13 @@ class DistributedFDTD:
         if self._distributed_network is None:
             return {}
         return self._distributed_network.checkpoint_tensors()
+
+    def wire_checkpoint_tensors(self) -> dict[str, torch.Tensor]:
+        """Return live owner-GPU thin-wire I/q state without gathering fields."""
+
+        if self._distributed_wire is None:
+            return {}
+        return self._distributed_wire.checkpoint_tensors()
 
     @property
     def dft_sample_counts(self):

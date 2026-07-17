@@ -26,7 +26,17 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # boundary and is listed in CONTRACT_GUARDS below, not counted here. Lower it
 # when a capability guard is implemented; do not raise it without updating the
 # census.
-CAPABILITY_GUARD_BUDGET = 129
+#
+# 2026-07-17 (plan 07 Phase 4, multi-GPU wire forward slice): 129 -> 130 (net +1).
+# The distributed thin-wire FORWARD is now implemented, so the single blanket
+# NotImplementedError "Multi-GPU ThinWire requires distributed fragment/state
+# ownership..." in fdtd/distributed/solver.py is removed (-1). Two narrower
+# capability gaps replace it (+2): a distributed thin-wire + CPML boundary and a
+# thin-wire scene mixed with an embedded network or lumped circuit, both fail
+# closed in DistributedFDTD._validate_distributed_wire_support. Finite-conductor
+# loss and distributed wire reverse/gradient remain separate slices; lower this
+# budget when those two guards are implemented.
+CAPABILITY_GUARD_BUDGET = 130
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
