@@ -11,6 +11,25 @@ import torch
 _SNAP_POLICIES = {"continuous", "nearest", "strict"}
 _WIRE_QUANTITIES = {"current", "charge", "ohmic_loss"}
 
+# Vacuum permeability. A finite conductor defaults to a non-magnetic wire.
+MU_0 = 1.25663706212e-6
+
+
+def _positive_real_scalar(value, *, field_name: str) -> float:
+    if isinstance(value, torch.Tensor):
+        if value.ndim != 0:
+            raise ValueError(f"{field_name} must be a scalar value.")
+        if value.is_complex() or not value.dtype.is_floating_point:
+            raise TypeError(f"{field_name} must be a real floating-point scalar.")
+        resolved = float(value.item())
+    else:
+        if isinstance(value, bool) or isinstance(value, complex):
+            raise TypeError(f"{field_name} must be a real positive scalar.")
+        resolved = float(value)
+    if not math.isfinite(resolved) or resolved <= 0.0:
+        raise ValueError(f"{field_name} must be finite and positive.")
+    return resolved
+
 
 def _nonempty_name(value, *, field_name: str) -> str:
     if not isinstance(value, str):
@@ -126,19 +145,62 @@ def _normalize_radius(radius, *, segment_count: int):
 
 @dataclass(frozen=True)
 class WireConductor:
-    """Thin-wire conductor law. The current implementation exposes lossless PEC."""
+    """Thin-wire conductor law.
 
-    kind: Literal["pec"] = "pec"
+    ``pec`` is the lossless perfect conductor. ``finite`` models a solid round
+    conductor of the given bulk ``conductivity`` (S/m) and ``permeability``
+    (H/m, defaulting to vacuum). The finite law carries the physical material
+    parameters that the compiler turns into a per-unit-length series impedance
+    ``Z'(omega)`` (DC resistance plus a passive skin-effect model); it does not
+    itself fit any poles.
+    """
 
-    def __init__(self, kind: str = "pec"):
+    kind: Literal["pec", "finite"] = "pec"
+    conductivity: float | None = None
+    permeability: float | None = None
+
+    def __init__(
+        self,
+        kind: str = "pec",
+        *,
+        conductivity=None,
+        permeability=None,
+    ):
         resolved = str(kind).strip().lower()
-        if resolved != "pec":
-            raise ValueError("WireConductor currently supports the 'pec' conductor law.")
-        object.__setattr__(self, "kind", "pec")
+        if resolved not in {"pec", "finite"}:
+            raise ValueError("WireConductor kind must be 'pec' or 'finite'.")
+        if resolved == "pec":
+            if conductivity is not None or permeability is not None:
+                raise ValueError(
+                    "WireConductor.pec() does not accept material parameters."
+                )
+            object.__setattr__(self, "kind", "pec")
+            object.__setattr__(self, "conductivity", None)
+            object.__setattr__(self, "permeability", None)
+            return
+        if conductivity is None:
+            raise ValueError("WireConductor.finite() requires a conductivity.")
+        resolved_conductivity = _positive_real_scalar(
+            conductivity, field_name="conductivity"
+        )
+        resolved_permeability = (
+            MU_0
+            if permeability is None
+            else _positive_real_scalar(permeability, field_name="permeability")
+        )
+        object.__setattr__(self, "kind", "finite")
+        object.__setattr__(self, "conductivity", resolved_conductivity)
+        object.__setattr__(self, "permeability", resolved_permeability)
 
     @classmethod
     def pec(cls) -> "WireConductor":
         return cls("pec")
+
+    @classmethod
+    def finite(cls, conductivity, *, permeability=None) -> "WireConductor":
+        """Solid round conductor with bulk ``conductivity`` and ``permeability``."""
+
+        return cls("finite", conductivity=conductivity, permeability=permeability)
 
 
 @dataclass(frozen=True)

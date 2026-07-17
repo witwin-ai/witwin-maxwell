@@ -55,8 +55,13 @@ def test_thin_wire_objects_are_top_level_public_api():
 
 def test_conductor_and_endpoint_contracts_are_explicit():
     assert mw.WireConductor.pec().kind == "pec"
-    with pytest.raises(ValueError, match="supports the 'pec'"):
+    finite = mw.WireConductor.finite(5.8e7)
+    assert finite.kind == "finite"
+    assert finite.conductivity == 5.8e7
+    with pytest.raises(ValueError, match="requires a conductivity"):
         mw.WireConductor("finite")
+    with pytest.raises(ValueError, match="'pec' or 'finite'"):
+        mw.WireConductor("nichrome")
 
     assert mw.WireEnd.open() == mw.WireEnd("open")
     grounded = mw.WireEnd.grounded(structure="ground")
