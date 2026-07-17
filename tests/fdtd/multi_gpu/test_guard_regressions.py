@@ -95,6 +95,89 @@ def test_invalid_dipole_emission_source_is_rejected_before_hardware_prepare():
         )
 
 
+def _trainable_circuit_scene() -> mw.Scene:
+    """Two-shard circuit scene whose load resistance is a trainable tensor.
+
+    The trainable resistance is a circuit-parameter channel the public
+    ``_scene_trainable_circuit_parameters`` collector covers but that the
+    solver-level guard's earlier hand-rolled list did not enumerate.
+    """
+
+    circuit = mw.Circuit("trainable_two_shard")
+    left = circuit.node("left")
+    right = circuit.node("right")
+    circuit.add(
+        mw.CurrentSource(
+            "Iexcite",
+            left,
+            circuit.ground,
+            0.0,
+            waveform=mw.SineWaveform(0.0, 1.0e-3, _FREQUENCY),
+        )
+    )
+    circuit.add(mw.Resistor("Rlink", left, right, 75.0))
+    circuit.add(
+        mw.Resistor(
+            "Rload", right, circuit.ground, torch.tensor(50.0, requires_grad=True)
+        )
+    )
+    circuit.bind_port("left_port", positive=left, negative=circuit.ground)
+    circuit.bind_port("right_port", positive=right, negative=circuit.ground)
+
+    def _port(name, x):
+        return mw.LumpedPort(
+            name=name,
+            positive=(x, 0.0, 0.004),
+            negative=(x, 0.0, -0.004),
+            voltage_path=mw.AxisPath("z"),
+            current_surface=mw.Box(position=(x, 0.0, -0.002), size=(0.012, 0.012, 0.0)),
+            reference_impedance=50.0,
+        )
+
+    return mw.Scene(
+        domain=mw.Domain(bounds=((-0.024, 0.024),) * 3),
+        grid=mw.GridSpec.uniform(0.004),
+        boundary=mw.BoundarySpec.none(),
+        ports=(_port("left_port", -0.008), _port("right_port", 0.008)),
+        circuits=(circuit,),
+        device="cpu",
+    )
+
+
+def test_solver_trainable_guard_covers_circuit_parameter_channel():
+    """Defense in depth: the distributed solver's own trainable guard rejects a
+    trainable circuit parameter even though the public ``Simulation`` guard would
+    have caught it first.
+
+    Regression for the solver-level guard previously enumerating a partial
+    trainable list (density/geometry/perturbation only) that missed the circuit
+    and RF/port channels the public collectors cover. Constructing
+    ``DistributedFDTD`` directly bypasses the public boundary; the assertion that
+    the public ``Simulation`` sees the same parameter pins that this is genuine
+    defense in depth rather than the only guard.
+    """
+
+    scene = _trainable_circuit_scene()
+
+    # The public boundary detects the trainable circuit parameter (and would
+    # reject the parallel run in _reject_trainable_parallel_fdtd).
+    simulation = mw.Simulation.fdtd(
+        scene,
+        frequency=_FREQUENCY,
+        parallel=_parallel(),
+    )
+    assert simulation.has_trainable_parameters
+
+    # Directly constructing the distributed solver bypasses that public guard; the
+    # solver-level guard must still fail closed on the circuit-parameter channel.
+    with pytest.raises(ValueError, match="trainable"):
+        DistributedFDTD(
+            scene,
+            frequency=_FREQUENCY,
+            parallel=_parallel(),
+        )
+
+
 @pytest.mark.parametrize(
     "monitor",
     (

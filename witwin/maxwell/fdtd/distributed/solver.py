@@ -51,30 +51,35 @@ _NODE_COMPONENTS = frozenset(("Ey", "Ez", "Hx"))
 
 
 def _scene_trainable_tensors(scene: Scene) -> tuple[torch.Tensor, ...]:
-    """Every grad-requiring leaf a distributed run could be asked to differentiate.
+    """Every grad-requiring scene leaf a distributed run could be asked to differentiate.
 
-    Covers the trainable channels a materialized scene can carry: material-region
-    densities, structure geometry parameters, and material perturbation tensors.
-    Used for the solver-level defense-in-depth trainable guard, independent of the
-    public ``Simulation`` trainable check.
+    Reuses the public ``Simulation`` trainable collectors so this solver-level
+    defense-in-depth guard covers exactly the same scene-embedded channels the
+    public boundary rejects: material-region densities, structure geometry
+    parameters, material perturbation tensors, circuit parameters, and RF/port
+    parameters. Kept in lockstep with the public check rather than maintaining a
+    parallel partial list (Simulation-level excitations/port sweeps are not scene
+    state and never reach the distributed solver, so they are out of scope here).
     """
 
-    trainable: list[torch.Tensor] = []
-    for region in getattr(scene, "material_regions", ()):
-        density = getattr(region, "density", None)
-        if isinstance(density, torch.Tensor) and density.requires_grad:
-            trainable.append(density)
-    for structure in scene.structures:
-        geometry = getattr(structure, "geometry", None)
-        if geometry is not None:
-            for value in vars(geometry).values():
-                if isinstance(value, torch.Tensor) and value.requires_grad:
-                    trainable.append(value)
-        material = getattr(structure, "material", None)
-        perturbation = getattr(material, "perturbation", None)
-        if isinstance(perturbation, torch.Tensor) and perturbation.requires_grad:
-            trainable.append(perturbation)
-    return tuple(trainable)
+    # Imported lazily to avoid an import cycle: ``simulation`` pulls in the
+    # distributed backend on demand, so the collectors cannot be a module-level
+    # import here.
+    from ...simulation import (
+        _scene_trainable_circuit_parameters,
+        _scene_trainable_density_parameters,
+        _scene_trainable_geometry_parameters,
+        _scene_trainable_material_parameters,
+        _trainable_rf_parameters,
+    )
+
+    return (
+        _scene_trainable_density_parameters(scene)
+        + _scene_trainable_geometry_parameters(scene)
+        + _scene_trainable_material_parameters(scene)
+        + _scene_trainable_circuit_parameters(scene)
+        + _trainable_rf_parameters(scene)
+    )
 
 
 @dataclass

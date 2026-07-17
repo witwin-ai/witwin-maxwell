@@ -5,8 +5,11 @@ assembled from:
 
 * per-shard forward checkpoint capture keyed by the partition manifest, and
 * a distributed forward *replay* that advances every shard as two explicit
-  half-steps with the forward Yee halos copied between them, so the owned states
-  it produces are bit-identical to the native distributed forward run.
+  half-steps with the forward Yee halos copied between them, reproducing the
+  native distributed forward run's owned states to within floating-point
+  reduction-order drift (the replay runs the torch reference update while the
+  native forward runs fused CUDA kernels, so the two reduce in a different
+  order; the decomposition itself adds no algorithmic error).
 
 Only the pure real *standard* (open-boundary) configuration is supported here.
 Every unsupported medium/boundary/coupling is rejected fail-closed by
@@ -48,6 +51,7 @@ _UNSUPPORTED_SHARD_FLAGS = (
     ("full_aniso_enabled", "full off-diagonal anisotropy"),
     ("tfsf_enabled", "total-field/scattered-field injection"),
     ("modulation_enabled", "time-modulated media"),
+    ("sibc_enabled", "surface-impedance boundary (SIBC) media"),
 )
 
 
@@ -186,10 +190,14 @@ def replay_distributed_segment(
     appended per rank so the reverse pass can read valid interface forward H for
     the Phase-2 eps-gradient terms.
 
-    Owned states are bit-identical to the native distributed forward run for the
-    pure real standard configuration (verified by the replay-parity test); the
-    ghost planes carry the neighbour's owned value after each halo copy exactly as
-    the forward serialized path does.
+    Owned states reproduce the native distributed forward run for the pure real
+    standard configuration to within floating-point reduction-order drift, not
+    bitwise: the replay runs the torch reference update while the native forward
+    runs fused CUDA bounded kernels, so the two reduce in a different order. The
+    replay-parity test tolerance-gates this at rtol=1e-5/atol=1e-7, ~200x above
+    the measured ~5e-10 owned-state drift and ~500x below the smallest halo-bug
+    error. The ghost planes carry the neighbour's owned value after each halo
+    copy exactly as the forward serialized path does.
     """
 
     require_distributed_adjoint_support(distributed)

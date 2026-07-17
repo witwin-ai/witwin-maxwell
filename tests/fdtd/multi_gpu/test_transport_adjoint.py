@@ -52,6 +52,24 @@ def _make_shards(devices):
     return plan, tuple(shards)
 
 
+def _order_producers_into_compute(shards):
+    """Order the transport's compute-stream events after this test's producer writes.
+
+    The forward/adjoint exchanges record ``magnetic_ready``/``electric_ready`` on
+    each shard's compute stream, matching the production contract that every field
+    producer runs on that stream. These tests instead write their synthetic input
+    planes (owner cells, ghost cotangents) on the device default stream, so the
+    recorded events do not order after those writes; under non-blocking streams the
+    comm-stream staging copy could read stale planes. Making each compute stream
+    wait on the default stream restores the producer -> event ordering the
+    transport relies on, without changing the (correct) transport itself.
+    """
+
+    for shard in shards:
+        with torch.cuda.device(shard.device):
+            shard.compute_stream.wait_stream(torch.cuda.current_stream(shard.device))
+
+
 def _make_adjoint_states(shards, *, seed):
     """Independent random per-shard adjoint field planes (padded local shapes)."""
 
@@ -87,6 +105,7 @@ def test_magnetic_adjoint_is_discrete_transpose_of_forward_exchange(
         x_hz = torch.rand(left.solver.Hz[left_last].shape, device=left.device)
     left.solver.Hy[left_last].copy_(x_hy)
     left.solver.Hz[left_last].copy_(x_hz)
+    _order_producers_into_compute(shards)
     transport.exchange_magnetic(shards)
     right.magnetic_received.synchronize()
     fx_hy = right.halo_hy_low.clone()
@@ -104,6 +123,7 @@ def test_magnetic_adjoint_is_discrete_transpose_of_forward_exchange(
     adjoint_states[right.rank]["Hy"][0].copy_(y_hy)
     adjoint_states[right.rank]["Hz"][0].copy_(y_hz)
 
+    _order_producers_into_compute(shards)
     transport.exchange_magnetic_adjoint(shards, adjoint_states)
     left.compute_stream.synchronize()
     right.compute_stream.synchronize()
@@ -138,6 +158,7 @@ def test_electric_adjoint_is_discrete_transpose_of_forward_exchange(
         x_ez = torch.rand(right.solver.Ez[right_node].shape, device=right.device)
     right.solver.Ey[right_node].copy_(x_ey)
     right.solver.Ez[right_node].copy_(x_ez)
+    _order_producers_into_compute(shards)
     transport.exchange_electric(shards)
     left.electric_received.synchronize()
     fx_ey = left.solver.Ey[left_ghost].clone()
@@ -153,6 +174,7 @@ def test_electric_adjoint_is_discrete_transpose_of_forward_exchange(
     adjoint_states[left.rank]["Ey"][left_ghost].copy_(y_ey)
     adjoint_states[left.rank]["Ez"][left_ghost].copy_(y_ez)
 
+    _order_producers_into_compute(shards)
     transport.exchange_electric_adjoint(shards, adjoint_states)
     left.compute_stream.synchronize()
     right.compute_stream.synchronize()
@@ -172,6 +194,7 @@ def test_electric_adjoint_is_discrete_transpose_of_forward_exchange(
 
 
 def _run_reverse_pair(transport, shards, adjoint_states):
+    _order_producers_into_compute(shards)
     transport.exchange_magnetic_adjoint(shards, adjoint_states)
     transport.exchange_electric_adjoint(shards, adjoint_states)
     for shard in shards:
