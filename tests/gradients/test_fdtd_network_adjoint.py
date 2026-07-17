@@ -9,7 +9,10 @@ from tests.rf.network.test_network_multiport_runtime import (
 )
 from tests.rf.network.test_network_runtime import _fdtd_scene, _solver
 from witwin.maxwell.fdtd.adjoint import _FDTDGradientBridge, _replay_segment_states
-from witwin.maxwell.fdtd.checkpoint import network_state_name
+from witwin.maxwell.fdtd.checkpoint import (
+    network_carried_voltage_name,
+    network_state_name,
+)
 from witwin.maxwell.fdtd.networks import (
     pullback_network_runtimes,
     replay_network_runtimes,
@@ -20,24 +23,29 @@ def test_network_step_pullback_matches_autograd_oracle() -> None:
     solver = _solver(torch.device("cpu"))
     runtime = solver._network_runtimes[0]
     state_name = network_state_name(0)
+    carried_name = network_carried_voltage_name(0)
     old_state = torch.tensor((0.5,), dtype=torch.float64)
+    # Slice U2: the trapezoidal network interface carries the previous step's
+    # post-step port voltage; exercise a nonzero carry so the reverse threads it.
+    old_carried = torch.tensor((0.3,), dtype=torch.float64)
     input_field = solver.Ex.clone()
     traces = []
     output_fields, next_state = replay_network_runtimes(
         solver,
         {"Ex": input_field},
-        {state_name: old_state},
+        {state_name: old_state, carried_name: old_carried},
         capture=traces,
     )
 
     field_seed = torch.tensor([0.7, -0.2], dtype=torch.float64).reshape(2, 1, 1)
     state_seed = torch.tensor((0.9,), dtype=torch.float64)
+    carried_seed = torch.tensor((0.15,), dtype=torch.float64)
     voltage_seed = torch.tensor(0.35, dtype=torch.float64)
     current_seed = torch.tensor(-0.4, dtype=torch.float64)
     pulled, _grad_eps, matrix_grads = pullback_network_runtimes(
         solver,
         traces[0],
-        {"Ex": field_seed, state_name: state_seed},
+        {"Ex": field_seed, state_name: state_seed, carried_name: carried_seed},
         port_sample_adjoints={
             0: (voltage_seed, current_seed, torch.zeros_like(voltage_seed))
         },
@@ -46,6 +54,7 @@ def test_network_step_pullback_matches_autograd_oracle() -> None:
 
     field = input_field.detach().clone().requires_grad_(True)
     state = old_state.detach().clone().requires_grad_(True)
+    carried = old_carried.detach().clone().requires_grad_(True)
     matrices = tuple(
         getattr(runtime, name).detach().clone().requires_grad_(True)
         for name in ("A", "B", "C", "D")
@@ -56,13 +65,15 @@ def test_network_step_pullback_matches_autograd_oracle() -> None:
         field.reshape(-1).index_select(0, lumped.linear_indices),
         lumped.voltage_weights,
     ).reshape(1)
+    coupling_voltage = 0.5 * (carried + free_voltage)
     loop = torch.eye(1, dtype=field.dtype) + matrix_d * runtime.feedback_impedance
     branch_current = torch.linalg.solve(
         loop,
-        matrix_c @ state + matrix_d @ free_voltage,
+        matrix_c @ state + matrix_d @ coupling_voltage,
     )
-    network_voltage = free_voltage - runtime.feedback_impedance * branch_current
+    network_voltage = coupling_voltage - runtime.feedback_impedance * branch_current
     advanced_state = matrix_a @ state + matrix_b @ network_voltage
+    next_carried = free_voltage - runtime.coupling_impedance * branch_current
     corrected_field = field.clone()
     corrected_field.reshape(-1).index_add_(
         0,
@@ -72,16 +83,19 @@ def test_network_step_pullback_matches_autograd_oracle() -> None:
     objective = (
         torch.sum(corrected_field * field_seed)
         + torch.sum(advanced_state * state_seed)
+        + next_carried[0] * carried_seed[0]
         + network_voltage[0] * voltage_seed
         - branch_current[0] * current_seed
     )
-    expected = torch.autograd.grad(objective, (field, state, *matrices))
+    expected = torch.autograd.grad(objective, (field, state, carried, *matrices))
 
     torch.testing.assert_close(output_fields["Ex"], corrected_field.detach())
     torch.testing.assert_close(next_state[state_name], advanced_state.detach())
+    torch.testing.assert_close(next_state[carried_name], next_carried.detach())
     torch.testing.assert_close(pulled["Ex"], expected[0])
     torch.testing.assert_close(pulled[state_name], expected[1])
-    for name, gradient in zip(("A", "B", "C", "D"), expected[2:]):
+    torch.testing.assert_close(pulled[carried_name], expected[2])
+    for name, gradient in zip(("A", "B", "C", "D"), expected[3:]):
         torch.testing.assert_close(
             matrix_grads[("network", runtime.name, name)],
             gradient,
@@ -92,13 +106,16 @@ def test_multiport_network_step_pullback_matches_autograd_oracle() -> None:
     solver = _multiport_solver(4, torch.device("cpu"))
     runtime = solver._network_runtimes[0]
     state_name = network_state_name(0)
+    carried_name = network_carried_voltage_name(0)
     old_state = runtime.state.clone()
+    # Slice U2: nonzero per-port carried post-step voltage exercises the reverse.
+    old_carried = torch.tensor((0.12, -0.05, 0.2, -0.15), dtype=torch.float64)
     input_field = solver.Ex.clone()
     traces = []
     replay_network_runtimes(
         solver,
         {"Ex": input_field},
-        {state_name: old_state},
+        {state_name: old_state, carried_name: old_carried},
         capture=traces,
     )
 
@@ -109,12 +126,13 @@ def test_multiport_network_step_pullback_matches_autograd_oracle() -> None:
         dtype=torch.float64,
     ).reshape_as(input_field)
     state_seed = torch.tensor((0.2, -0.5, 0.8), dtype=torch.float64)
+    carried_seed = torch.tensor((0.11, -0.22, 0.33, -0.14), dtype=torch.float64)
     voltage_seed = torch.tensor((0.1, 0.3, -0.2, 0.4), dtype=torch.float64)
     current_seed = torch.tensor((-0.3, 0.2, 0.5, -0.1), dtype=torch.float64)
     pulled, _grad_eps, matrix_grads = pullback_network_runtimes(
         solver,
         traces[0],
-        {"Ex": field_seed, state_name: state_seed},
+        {"Ex": field_seed, state_name: state_seed, carried_name: carried_seed},
         port_sample_adjoints={
             index: (
                 voltage_seed[index],
@@ -128,6 +146,7 @@ def test_multiport_network_step_pullback_matches_autograd_oracle() -> None:
 
     field = input_field.detach().clone().requires_grad_(True)
     state = old_state.detach().clone().requires_grad_(True)
+    carried = old_carried.detach().clone().requires_grad_(True)
     matrices = tuple(
         getattr(runtime, name).detach().clone().requires_grad_(True)
         for name in ("A", "B", "C", "D")
@@ -142,13 +161,15 @@ def test_multiport_network_step_pullback_matches_autograd_oracle() -> None:
             for port_runtime in runtime.port_runtimes
         )
     )
+    coupling_voltage = 0.5 * (carried + free_voltage)
     loop = torch.eye(4, dtype=field.dtype) + matrix_d * runtime.feedback_impedance.unsqueeze(0)
     branch_current = torch.linalg.solve(
         loop,
-        matrix_c @ state + matrix_d @ free_voltage,
+        matrix_c @ state + matrix_d @ coupling_voltage,
     )
-    network_voltage = free_voltage - runtime.feedback_impedance * branch_current
+    network_voltage = coupling_voltage - runtime.feedback_impedance * branch_current
     advanced_state = matrix_a @ state + matrix_b @ network_voltage
+    next_carried = free_voltage - runtime.coupling_impedance * branch_current
     corrected_field = field.clone()
     for index, port_runtime in enumerate(runtime.port_runtimes):
         corrected_field.reshape(-1).index_add_(
@@ -159,14 +180,16 @@ def test_multiport_network_step_pullback_matches_autograd_oracle() -> None:
     objective = (
         torch.sum(corrected_field * field_seed)
         + torch.sum(advanced_state * state_seed)
+        + torch.sum(next_carried * carried_seed)
         + torch.sum(network_voltage * voltage_seed)
         - torch.sum(branch_current * current_seed)
     )
-    expected = torch.autograd.grad(objective, (field, state, *matrices))
+    expected = torch.autograd.grad(objective, (field, state, carried, *matrices))
 
     torch.testing.assert_close(pulled["Ex"], expected[0])
     torch.testing.assert_close(pulled[state_name], expected[1])
-    for name, gradient in zip(("A", "B", "C", "D"), expected[2:]):
+    torch.testing.assert_close(pulled[carried_name], expected[2])
+    for name, gradient in zip(("A", "B", "C", "D"), expected[3:]):
         torch.testing.assert_close(
             matrix_grads[("network", runtime.name, name)],
             gradient,
@@ -384,7 +407,12 @@ def test_network_checkpoint_replay_restores_terminal_state_without_per_step_stor
     bridge = _FDTDGradientBridge(simulation)
     bridge.forward(bridge.trainable_inputs)
 
-    assert bridge._checkpoint_schema.network_state_names == (network_state_name(0),)
+    # Slice U2: the trapezoidal network interface carries the post-step port
+    # voltage as dynamic state alongside the state-space vector.
+    assert bridge._checkpoint_schema.network_state_names == (
+        network_state_name(0),
+        network_carried_voltage_name(0),
+    )
     assert len(bridge._last_checkpoints) < bridge._time_steps
     replayed = _replay_segment_states(
         bridge._last_solver,

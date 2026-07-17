@@ -1961,6 +1961,8 @@ def _make_full_embedded_step_runner(solver, *, use_cuda_graph: bool):
                 runtime.next_state,
                 runtime.state_drive,
                 runtime.free_voltage,
+                runtime.raw_free_voltage,
+                runtime.carried_voltage,
                 runtime.network_voltage,
                 runtime.voltage_after,
                 runtime.branch_current,

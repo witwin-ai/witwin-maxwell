@@ -144,11 +144,21 @@ def network_state_name(index: int) -> str:
     return f"network_{int(index)}_state"
 
 
+def network_carried_voltage_name(index: int) -> str:
+    return f"network_{int(index)}_carried_voltage"
+
+
 def iter_network_state_specs(solver):
-    """Yield the unique dynamic state vector for each embedded network."""
+    """Yield the dynamic state tensors for each embedded network.
+
+    Slice U2: the trapezoidal network interface carries the previous step's
+    post-step port voltage, so it is dynamic state alongside the state-space
+    vector -- required by the differentiable adjoint replay (and any resume).
+    """
 
     for index, runtime in enumerate(getattr(solver, "_network_runtimes", ())):
-        yield network_state_name(index), runtime
+        yield network_state_name(index), runtime.state
+        yield network_carried_voltage_name(index), runtime.carried_voltage
 
 
 def checkpoint_schema(solver) -> FDTDCheckpointSchema:
@@ -298,8 +308,8 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
         tensors[name] = getattr(runtime, tensor_name).detach().clone()
     for name, tensor in iter_circuit_state_specs(solver):
         tensors[name] = tensor.detach().clone()
-    for name, runtime in iter_network_state_specs(solver):
-        tensors[name] = runtime.state.detach().clone()
+    for name, tensor in iter_network_state_specs(solver):
+        tensors[name] = tensor.detach().clone()
     wire_runtime = getattr(solver, "_wire_runtime", None)
     if wire_runtime is not None:
         tensors["wire_current"] = wire_runtime.current.detach().clone()

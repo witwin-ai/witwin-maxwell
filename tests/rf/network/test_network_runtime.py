@@ -103,10 +103,17 @@ def test_single_port_runtime_solves_direct_loop_without_one_step_delay() -> None
     before = solver.Ex.clone()
     free_voltage = torch.tensor(1.6, dtype=torch.float64)
     feedback_impedance = runtime.port_runtime.lumped.discrete_port_impedance
-    expected_current = (0.3 * 0.5 + 0.4 * free_voltage) / (
+    # Slice U2 (coordinator unification ruling): the network solve consumes the
+    # trapezoidal half-step voltage 0.5*(V_after_prev + V_free), matching the native
+    # lumped runtime. At this cold-start apply V_after_prev = 0, so the direct loop
+    # sees 0.5 * 1.6 rather than the raw free voltage. This re-pins the solve-mechanics
+    # expectation to the unified convention (the loop denominator/feedback is
+    # unchanged; only the source time-centering moved).
+    coupling_voltage = 0.5 * free_voltage
+    expected_current = (0.3 * 0.5 + 0.4 * coupling_voltage) / (
         1.0 + 0.4 * feedback_impedance
     )
-    expected_voltage = free_voltage - feedback_impedance * expected_current
+    expected_voltage = coupling_voltage - feedback_impedance * expected_current
     expected_state = 0.8 * 0.5 + 0.1 * expected_voltage
 
     apply_network_runtimes(solver)
@@ -382,6 +389,42 @@ def test_touchstone_fitted_series_rlc_matches_native_fdtd_termination(tmp_path) 
     assert diagnostics.metadata["current_convention"] == "entering_embedded_network"
     assert embedded.stats()["num_embedded_networks"] == 1
     assert embedded.stats()["network_cuda_graph_active"] is True
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_embedded_network_stays_finite_over_a_long_run(tmp_path) -> None:
+    # Refinement-stability regression gate (coordinator unification ruling, slice
+    # U2). The pre-unification V_free same-step network coupling is only
+    # CONDITIONALLY stable: a fitted-network termination drove the fields
+    # non-finite over a long run (~800 steps). The unified trapezoidal half-step
+    # interface is unconditionally stable, so the same configuration must stay
+    # finite and bounded.
+    model = _series_rlc_state_space(resistance=25.0, inductance=0.5e-9, capacitance=1.0e-12)
+    file_frequencies = torch.linspace(1.0e9, 5.0e9, 41, dtype=torch.float64)
+    source_data = mw.NetworkData.from_y(
+        frequencies=file_frequencies,
+        y=model.evaluate(file_frequencies),
+        z0=50.0,
+        port_names=("load",),
+    )
+    path = tmp_path / "series_rlc.s1p"
+    source_data.to_touchstone(path, format="ri")
+    block = mw.TouchstoneNetwork(
+        name="load_network",
+        path=path,
+        connections={"load": "feed"},
+        fit=mw.RationalFitConfig(order=2, iterations=2, relative_tolerance=1.0e-3),
+        device="cuda",
+    )
+    result = mw.Simulation.fdtd(
+        _fdtd_scene(network=block),
+        frequencies=(2.5e9, 3.0e9),
+        run_time=mw.TimeConfig(time_steps=1200),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+    ).run()
+    voltage = result.port("feed").voltage
+    assert torch.all(torch.isfinite(voltage))
+    assert float(torch.max(torch.abs(voltage))) < 1.0e3
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

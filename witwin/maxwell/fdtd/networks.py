@@ -6,7 +6,7 @@ import torch
 
 from ..compiler.networks import CompiledNetworkBlock
 from ..network import EmbeddedNetworkData
-from .checkpoint import network_state_name
+from .checkpoint import network_carried_voltage_name, network_state_name
 from .delay import (
     PreparedBidirectionalDelay,
     prepare_bidirectional_delay,
@@ -44,6 +44,9 @@ class PreparedNetworkRuntime:
     next_state: torch.Tensor
     state_drive: torch.Tensor
     free_voltage: torch.Tensor
+    raw_free_voltage: torch.Tensor
+    carried_voltage: torch.Tensor
+    coupling_impedance: torch.Tensor
     network_voltage: torch.Tensor
     voltage_after: torch.Tensor
     branch_current: torch.Tensor
@@ -109,6 +112,8 @@ class NetworkStepTrace:
     network_index: int
     state: torch.Tensor
     free_voltage: torch.Tensor
+    carried_voltage: torch.Tensor
+    coupling_voltage: torch.Tensor
     network_voltage: torch.Tensor
     branch_current: torch.Tensor
 
@@ -447,6 +452,12 @@ def prepare_network_runtimes(
         network_voltage = torch.empty_like(free_voltage)
         voltage_after = torch.empty_like(free_voltage)
         branch_current = torch.empty_like(free_voltage)
+        # Slice U2: the trapezoidal network interface carries the previous step's
+        # post-step port voltage; ``coupling_impedance`` = 2 * feedback (discrete)
+        # is the full port coupling used for the post-step recurrence.
+        raw_free_voltage = torch.empty_like(free_voltage)
+        carried_voltage = torch.zeros_like(free_voltage)
+        coupling_impedance = (2.0 * feedback_impedance).contiguous()
         network_runtime = PreparedNetworkRuntime(
                 compiled=compiled,
                 port_runtimes=connected_tuple,
@@ -460,6 +471,9 @@ def prepare_network_runtimes(
                 next_state=torch.empty_like(state),
                 state_drive=torch.empty_like(state),
                 free_voltage=free_voltage,
+                raw_free_voltage=raw_free_voltage,
+                carried_voltage=carried_voltage,
+                coupling_impedance=coupling_impedance,
                 network_voltage=network_voltage,
                 voltage_after=voltage_after,
                 branch_current=branch_current,
@@ -530,7 +544,9 @@ def replay_network_runtimes(
                 "Differentiable embedded-network replay does not support explicit delay state."
             )
         name = network_state_name(network_index)
+        carried_name = network_carried_voltage_name(network_index)
         old_state = state[name]
+        carried_prev = state[carried_name]
         free_voltage = torch.stack(
             tuple(
                 torch.dot(
@@ -544,14 +560,19 @@ def replay_network_runtimes(
                 for port_runtime in runtime.port_runtimes
             )
         )
-        drive = runtime.C @ old_state + runtime.D @ free_voltage
+        # Slice U2: the network solve consumes the trapezoidal half-step voltage.
+        coupling_voltage = 0.5 * (carried_prev + free_voltage)
+        drive = runtime.C @ old_state + runtime.D @ coupling_voltage
         branch_current = torch.linalg.solve(runtime.loop_denominator, drive)
         network_voltage = (
-            free_voltage - runtime.feedback_impedance * branch_current
+            coupling_voltage - runtime.feedback_impedance * branch_current
         )
         advanced_state = (
             runtime.A @ old_state + runtime.B @ network_voltage
         )
+        # Post-step port voltage carried to the next step (raw free voltage minus
+        # the full coupling drop), matching the forward finalizer.
+        next_carried = free_voltage - runtime.coupling_impedance * branch_current
         for port_index, port_runtime in enumerate(runtime.port_runtimes):
             lumped = port_runtime.lumped
             corrected = fields[port_runtime.field_name].clone()
@@ -562,11 +583,14 @@ def replay_network_runtimes(
             )
             fields[port_runtime.field_name] = corrected
         next_state[name] = advanced_state
+        next_state[carried_name] = next_carried
         traces.append(
             NetworkStepTrace(
                 network_index=network_index,
                 state=old_state,
                 free_voltage=free_voltage,
+                carried_voltage=carried_prev,
+                coupling_voltage=coupling_voltage,
                 network_voltage=network_voltage,
                 branch_current=branch_current,
             )
@@ -642,15 +666,20 @@ def pullback_network_runtimes(
             )
 
         bar_next_state = updated[state_name]
+        carried_name = network_carried_voltage_name(trace.network_index)
+        bar_next_carried = updated[carried_name]
         grad_a = torch.outer(bar_next_state, trace.state)
         grad_b = torch.outer(bar_next_state, trace.network_voltage)
         bar_state = runtime.A.transpose(0, 1) @ bar_next_state
         bar_voltage = bar_voltage + runtime.B.transpose(0, 1) @ bar_next_state
 
-        bar_free_voltage = bar_voltage.clone()
-        bar_current = (
-            bar_current - runtime.feedback_impedance * bar_voltage
-        )
+        # Slice U2 reverse of the trapezoidal interface.
+        #   nv = coupling_voltage - Zf*i      -> cotangent on the coupling voltage
+        #   next_carried = free_voltage - Zc*i (Zc = coupling_impedance = 2*Zf)
+        bar_coupling_voltage = bar_voltage.clone()
+        bar_current = bar_current - runtime.feedback_impedance * bar_voltage
+        bar_free_voltage = bar_next_carried.clone()
+        bar_current = bar_current - runtime.coupling_impedance * bar_next_carried
         bar_drive = torch.linalg.solve(
             runtime.loop_denominator.transpose(0, 1),
             bar_current,
@@ -658,17 +687,25 @@ def pullback_network_runtimes(
         grad_loop = -torch.outer(bar_drive, trace.branch_current)
         grad_c = torch.outer(bar_drive, trace.state)
         grad_d = (
-            torch.outer(bar_drive, trace.free_voltage)
+            torch.outer(bar_drive, trace.coupling_voltage)
             + grad_loop * runtime.feedback_impedance.unsqueeze(0)
         )
         bar_state = bar_state + runtime.C.transpose(0, 1) @ bar_drive
-        bar_free_voltage = (
-            bar_free_voltage + runtime.D.transpose(0, 1) @ bar_drive
+        bar_coupling_voltage = (
+            bar_coupling_voltage + runtime.D.transpose(0, 1) @ bar_drive
         )
+        # feedback (Zf) grad: from nv, the loop denominator, and the post-step
+        # coupling drop Zc = 2*Zf carried into next_carried.
         bar_feedback = (
             -bar_voltage * trace.branch_current
             + torch.sum(grad_loop * runtime.D, dim=0)
+            - 2.0 * bar_next_carried * trace.branch_current
         )
+        # coupling_voltage = 0.5*(carried_prev + free_voltage): split the cotangent
+        # into the carried-state cotangent (returned to the preceding step) and the
+        # free-voltage (field) cotangent.
+        bar_carried_prev = 0.5 * bar_coupling_voltage
+        bar_free_voltage = bar_free_voltage + 0.5 * bar_coupling_voltage
 
         for port_index, port_runtime in enumerate(runtime.port_runtimes):
             lumped = port_runtime.lumped
@@ -699,6 +736,7 @@ def pullback_network_runtimes(
             )
 
         updated[state_name] = bar_state
+        updated[carried_name] = bar_carried_prev
         for matrix_name, gradient in (
             ("A", grad_a),
             ("B", grad_b),
@@ -714,9 +752,16 @@ def pullback_network_runtimes(
 
 
 def _gather_network_free_voltage(runtime: PreparedNetworkRuntime) -> None:
-    """Sample the connected Yee edges into the per-port free-voltage vector."""
+    """Sample the connected Yee edges and form the trapezoidal coupling voltage.
 
-    runtime.free_voltage.zero_()
+    Slice U2: the raw per-port free voltage V_free is gathered into
+    ``raw_free_voltage`` and the network solve consumes the trapezoidal half-step
+    voltage ``free_voltage`` = 0.5 * (V_after_prev + V_free), matching the native
+    lumped runtime so cross-model agreement holds at the unified convention. The
+    raw free voltage is retained for the post-step recurrence in the finalizer.
+    """
+
+    runtime.raw_free_voltage.zero_()
     for group in runtime.terminal_groups:
         flat_field = group.electric_field.view(-1)
         torch.index_select(
@@ -730,11 +775,17 @@ def _gather_network_free_voltage(runtime: PreparedNetworkRuntime) -> None:
             group.voltage_weights,
             out=group.edge_buffer,
         )
-        runtime.free_voltage.index_add_(
+        runtime.raw_free_voltage.index_add_(
             0,
             group.port_indices,
             group.edge_buffer,
         )
+    torch.add(
+        runtime.carried_voltage,
+        runtime.raw_free_voltage,
+        out=runtime.free_voltage,
+    )
+    runtime.free_voltage.mul_(0.5)
 
 
 def _scatter_network_branch_current(runtime: PreparedNetworkRuntime) -> None:
@@ -896,12 +947,16 @@ def _finalize_network_step(
 ) -> None:
     """Advance the network state recurrence and accumulate port power."""
 
-    runtime.voltage_after.copy_(runtime.free_voltage)
+    # Slice U2: the post-step port voltage uses the raw free voltage and the full
+    # port coupling drop (2 * feedback), matching the native runtime's
+    # last_voltage_after. This is the carried state for the next step's average.
+    runtime.voltage_after.copy_(runtime.raw_free_voltage)
     runtime.voltage_after.addcmul_(
-        runtime.feedback_impedance,
+        runtime.coupling_impedance,
         runtime.branch_current,
         value=-1.0,
     )
+    runtime.carried_voltage.copy_(runtime.voltage_after)
 
     _matvec_out(runtime.A, runtime.state, runtime.next_state)
     _matvec_out(
@@ -962,7 +1017,15 @@ def advance_network_external(
             "connected port."
         )
     for index, value in enumerate(free_voltages):
-        runtime.free_voltage[index].copy_(value)
+        runtime.raw_free_voltage[index].copy_(value)
+    # Slice U2: form the trapezoidal coupling voltage from the carried post-step
+    # voltage, identically to the single-device gather.
+    torch.add(
+        runtime.carried_voltage,
+        runtime.raw_free_voltage,
+        out=runtime.free_voltage,
+    )
+    runtime.free_voltage.mul_(0.5)
     state_input = _solve_network_currents(runtime, native_lu=native_lu)
     _finalize_network_step(runtime, state_input)
     return runtime.branch_current
@@ -997,6 +1060,8 @@ def make_network_runner(solver, *, use_cuda_graph: bool):
             runtime.next_state,
             runtime.state_drive,
             runtime.free_voltage,
+            runtime.raw_free_voltage,
+            runtime.carried_voltage,
             runtime.network_voltage,
             runtime.voltage_after,
             runtime.branch_current,

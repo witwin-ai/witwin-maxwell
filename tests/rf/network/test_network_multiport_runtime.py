@@ -185,11 +185,16 @@ def test_multiport_direct_loop_matches_independent_matrix_oracle(port_count: int
     C = runtime.C.detach().numpy()
     D = runtime.D.detach().numpy()
     feedback = runtime.feedback_impedance.detach().numpy()
+    # Slice U2 (coordinator unification ruling): the network solve consumes the
+    # trapezoidal half-step voltage 0.5*(V_after_prev + V_free); at this cold-start
+    # apply V_after_prev = 0, so the direct loop and midpoint observable use
+    # 0.5 * free_voltage. The loop denominator/feedback is unchanged.
+    coupling_voltage = 0.5 * free_voltage
     expected_current = np.linalg.solve(
         np.eye(port_count) + D @ np.diag(feedback),
-        C @ state + D @ free_voltage,
+        C @ state + D @ coupling_voltage,
     )
-    expected_voltage = free_voltage - feedback * expected_current
+    expected_voltage = coupling_voltage - feedback * expected_current
     expected_state = A @ state + B @ expected_voltage
     expected_field = before.copy()
     for index, port_runtime in enumerate(runtime.port_runtimes):
@@ -272,10 +277,12 @@ def test_prepared_lu_matches_oracle_for_ill_conditioned_direct_loop() -> None:
     runtime = solver._network_runtimes[0]
     state = runtime.state.detach().numpy().copy()
     free_voltage = solver.Ex[:, 0, 0].detach().numpy().copy()
+    # Slice U2: cold-start trapezoidal coupling voltage is 0.5 * free_voltage.
+    coupling_voltage = 0.5 * free_voltage
     expected = np.linalg.solve(
         runtime.loop_denominator.detach().numpy(),
         runtime.C.detach().numpy() @ state
-        + runtime.D.detach().numpy() @ free_voltage,
+        + runtime.D.detach().numpy() @ coupling_voltage,
     )
 
     apply_network_runtimes(solver)
