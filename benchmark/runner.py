@@ -497,6 +497,14 @@ def _aligned_vector_field_comparison(
     return comparison, maxwell_vector, reference_vector, shared_coords
 
 
+def _dipole_moment_axis(source: "mw.PointDipole") -> int | None:
+    """Return the cardinal axis index a point dipole's moment points along."""
+    polarization = np.abs(np.asarray(source.polarization, dtype=np.float64)).ravel()
+    if polarization.size != 3 or not np.any(polarization > 0.0):
+        return None
+    return int(np.argmax(polarization))
+
+
 def _comparison_fields(
     scene: mw.Scene,
     monitor_axis: str,
@@ -507,6 +515,7 @@ def _comparison_fields(
     monitor_position: float | None = None,
     phase_factor: complex | None = None,
     align_phase: bool = True,
+    frequency: float | None = None,
 ):
     """Remove source-support cells before comparing propagated fields."""
     def _finish(support):
@@ -531,7 +540,28 @@ def _comparison_fields(
             positive = deltas[deltas > 0.0]
             if positive.size:
                 spacings.append(float(np.median(positive)))
-        source_guard = 2.0 * max(spacings, default=0.0)
+        cell = max(spacings, default=0.0)
+        source_guard = 2.0 * cell
+        # An ideal (delta-function) point dipole has a singular near field that
+        # the two solvers regularize differently in the source cell. On the
+        # equatorial plane -- the monitor whose normal is parallel to the dipole
+        # moment -- the observed component carries that singular near field, and
+        # its weight in the plane norm grows toward low frequency where the
+        # radiated field is weak, so a fixed two-cell disk leaves a residual
+        # near-field halo that dominates the metric. Widen the exclusion to a
+        # quarter wavelength there so the comparison stays on the radiated field.
+        # Planes that contain the dipole axis do not expose the singular
+        # component and keep the default two-cell guard. The quarter-wavelength
+        # floor collapses back to two cells for f >= 1.5 GHz on this grid, so the
+        # already well-resolved cases stay within noise.
+        if (
+            frequency is not None
+            and float(frequency) > 0.0
+            and getattr(source, "profile", None) == "ideal"
+            and _dipole_moment_axis(source) == normal_index
+        ):
+            quarter_wavelength = _C0 / (4.0 * float(frequency))
+            source_guard = max(source_guard, quarter_wavelength)
         intersects_plane = monitor_position is not None and (
             abs(float(source.position[normal_index]) - float(monitor_position))
             <= 0.5 * source_guard
@@ -625,6 +655,7 @@ def _prepare_scalar_field_comparison(
     freq_index: int,
     phase_factor: complex | None = None,
     align_phase: bool = True,
+    frequency: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Select, colocate, crop, and phase-reference one scalar monitor field."""
     maxwell_field = _select_monitor_plane_field(
@@ -657,6 +688,7 @@ def _prepare_scalar_field_comparison(
         monitor_position=maxwell_monitor.get("position", tidy3d_monitor.get("position")),
         phase_factor=phase_factor,
         align_phase=align_phase,
+        frequency=frequency,
     )
 
 
@@ -2306,6 +2338,7 @@ def run_benchmarks(names: list[str] | None = None) -> list[ScenarioMetrics]:
                     component=component,
                     freq_index=freq_index,
                     phase_factor=spectral_phase_factor,
+                    frequency=float(frequency),
                 )
                 if scenario.compare_magnitude:
                     maxwell_field = np.abs(maxwell_field)
