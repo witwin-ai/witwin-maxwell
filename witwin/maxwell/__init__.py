@@ -138,6 +138,14 @@ from .simulation import (
     run,
 )
 from .fdtd_parallel import FDTDParallelConfig
+from .execution import (
+    DistributedFailure,
+    ExecutionRecord,
+    FailureKind,
+    MultiGPUExecution,
+    ResultSequence,
+    run_many,
+)
 from .fdtd.resume import FDTDResumeCheckpoint
 
 __all__ = [
@@ -274,6 +282,12 @@ __all__ = [
     "AbsorberKind",
     "parse_spice",
     "run",
+    "run_many",
+    "MultiGPUExecution",
+    "ResultSequence",
+    "ExecutionRecord",
+    "DistributedFailure",
+    "FailureKind",
 ]
 
 
