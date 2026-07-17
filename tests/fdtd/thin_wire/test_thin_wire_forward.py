@@ -10,10 +10,17 @@ import torch.nn.functional as F
 
 import witwin.maxwell as mw
 from witwin.maxwell.fdtd.wire import (
+    _group_indices,
     _target_masses,
     _validate_compiled_topology,
+    _wire_cfl_limit,
     deposit_wire_current,
     sample_and_update_wire,
+)
+from witwin.maxwell.fdtd.thin_wire_reference import (
+    ACCEPTANCE_BUDGET,
+    AxisAlignedWireReference,
+    WireReferenceState,
 )
 from witwin.maxwell.fdtd.checkpoint import (
     capture_checkpoint_state,
@@ -114,6 +121,442 @@ def _set_target_values(solver, components, offsets, values):
                 offsets.index_select(0, indices),
                 values.index_select(0, indices),
             )
+
+
+def _promote_wire_runtime_to_float64(solver):
+    """Re-derive the compiled wire runtime in float64.
+
+    The reference oracle is a float64 dense model. Promoting the native runtime
+    keeps the comparison limited by the discrete contract rather than by float32
+    rounding, so a real deviation cannot hide under the reference budget.
+    """
+
+    for name in ("Ex", "Ey", "Ez", "eps_Ex", "eps_Ey", "eps_Ez"):
+        setattr(solver, name, getattr(solver, name).to(torch.float64))
+    runtime = solver._wire_runtime
+    runtime.current = runtime.current.to(torch.float64)
+    runtime.charge = runtime.charge.to(torch.float64)
+    runtime.emf = runtime.emf.to(torch.float64)
+    for name, value in tuple(runtime.coefficients.items()):
+        if value.is_floating_point():
+            runtime.coefficients[name] = value.to(torch.float64)
+    coeff = runtime.coefficients
+    masses = _target_masses(solver, coeff["target_components"], coeff["target_offsets"])
+    edge_groups = _group_indices(coeff["edge_group_offsets"])
+    coeff["contribution_scales"] = (
+        float(solver.dt)
+        * coeff["contribution_weights"]
+        / masses.index_select(0, edge_groups)
+    ).contiguous()
+    # Recompute the reverse-path scales from float64 masses too, so the promoted
+    # fixture is internally consistent in precision rather than carrying
+    # float32-rounded values inside float64 containers.
+    sample_masses = _target_masses(solver, coeff["edge_components"], coeff["edge_offsets"])
+    coeff["sample_masses"] = sample_masses
+    coeff["sample_deposition_scales"] = (
+        float(solver.dt) * coeff["weights"] / sample_masses
+    ).contiguous()
+    return solver, masses
+
+
+def _dense_wire_operators(solver):
+    """Rebuild dense ``G`` and ``B`` from the compiled sparse network.
+
+    The transpose ``assert_close`` below only checks that the compiler's own
+    ``searchsorted``/``edge_group_offsets`` bookkeeping is self-consistent: the
+    deposition list is emitted as a permutation of the sampling weights
+    (``compiler/thin_wire.py``), so ``deposition == sampling.mT`` holds for any
+    weights and is NOT an independent reciprocity check. The real end-to-end
+    ``G``/``G^T`` adjointness of the CUDA kernels is verified separately in
+    ``test_wire_sample_and_deposit_kernels_are_energy_adjoint_on_shared_edges``.
+    """
+
+    runtime = solver._wire_runtime
+    coeff = runtime.coefficients
+    device = solver.device
+    dtype = solver.Ex.dtype
+    segment_count = int(coeff["inductance"].numel())
+    node_count = int(coeff["node_capacitance"].numel())
+    target_count = int(coeff["target_offsets"].numel())
+
+    stride = max(field.numel() for field in (solver.Ex, solver.Ey, solver.Ez))
+    target_keys = coeff["target_components"].to(torch.int64) * stride + coeff["target_offsets"]
+    sample_keys = coeff["edge_components"].to(torch.int64) * stride + coeff["edge_offsets"]
+    sorted_targets, order = torch.sort(target_keys)
+    positions = torch.searchsorted(sorted_targets, sample_keys)
+    assert torch.equal(sorted_targets.index_select(0, positions), sample_keys), (
+        "every sampled Yee edge must also be a deposition target"
+    )
+    sample_dofs = order.index_select(0, positions)
+
+    sampling = torch.zeros((segment_count, target_count), device=device, dtype=dtype)
+    sampling.index_put_(
+        (_group_indices(coeff["segment_offsets"]), sample_dofs),
+        coeff["weights"],
+        accumulate=True,
+    )
+    deposition = torch.zeros((target_count, segment_count), device=device, dtype=dtype)
+    deposition.index_put_(
+        (_group_indices(coeff["edge_group_offsets"]), coeff["contribution_segments"]),
+        coeff["contribution_weights"],
+        accumulate=True,
+    )
+    torch.testing.assert_close(deposition, sampling.mT, rtol=0.0, atol=0.0)
+
+    segments = torch.arange(segment_count, device=device, dtype=torch.int64)
+    incidence = torch.zeros((node_count, segment_count), device=device, dtype=dtype)
+    incidence.index_put_(
+        (coeff["tail"], segments), torch.ones_like(coeff["inductance"]), accumulate=True
+    )
+    incidence.index_put_(
+        (coeff["head"], segments), -torch.ones_like(coeff["inductance"]), accumulate=True
+    )
+    return sampling, incidence
+
+
+def _wire_reference_for(solver, masses):
+    coeff = solver._wire_runtime.coefficients
+    sampling, incidence = _dense_wire_operators(solver)
+    return AxisAlignedWireReference(
+        incidence=incidence,
+        sampling=sampling,
+        segment_inductance=coeff["inductance"],
+        node_capacitance=coeff["node_capacitance"],
+        field_mass=masses,
+        dt=float(solver.dt),
+    )
+
+
+@pytest.mark.parametrize(
+    ("points", "expected_components"),
+    (
+        (((0.0, 0.0, -0.08), (0.0, 0.0, 0.08)), {2}),
+        (((-0.08, 0.0, 0.0), (0.08, 0.0, 0.0)), {0}),
+        (((-0.08, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.08, 0.0)), {0, 1}),
+    ),
+    ids=("straight_ez", "straight_ex", "l_bend_ex_ey"),
+)
+def test_native_wire_step_matches_the_torch_reference_oracle(points, expected_components):
+    """Phase 0/1 gate: the CUDA recurrence must reproduce the reference contract.
+
+    Parametrized over the plan's named Phase 1 topologies (straight and L-bend)
+    and both transverse orientations so the ``Ex``/``Ey`` branches of the
+    component plan are actually exercised, not only the degenerate straight-``Ez``
+    single-segment case.
+    """
+
+    solver, masses = _promote_wire_runtime_to_float64(
+        _prepared_solver(_scene(points=points, source=False, monitor=False))
+    )
+    runtime = solver._wire_runtime
+    coeff = runtime.coefficients
+    reference = _wire_reference_for(solver, masses)
+    assert not bool(coeff["grounded"].any()), "oracle parity assumes open endpoints"
+    assert (
+        set(coeff["target_components"].unique().tolist()) == expected_components
+    ), "fixture must exercise the intended field components"
+
+    electric = torch.linspace(
+        -2.0, 3.0, masses.numel(), device=solver.device, dtype=torch.float64
+    )
+    _set_target_values(
+        solver, coeff["target_components"], coeff["target_offsets"], electric
+    )
+    state = WireReferenceState(
+        electric.clone(),
+        torch.zeros_like(runtime.charge),
+        torch.zeros_like(runtime.current),
+    )
+
+    errors = []
+    for _ in range(64):
+        sample_and_update_wire(solver)
+        deposit_wire_current(solver)
+        state = reference.step(state)
+        native_electric = _target_values(
+            solver, coeff["target_components"], coeff["target_offsets"]
+        )
+        for native, expected in (
+            (runtime.current, state.current_half),
+            (runtime.charge, state.charge),
+            (native_electric, state.electric),
+        ):
+            scale = expected.abs().max()
+            errors.append(
+                float((native - expected).abs().max() / torch.clamp(scale, min=1.0e-300))
+            )
+
+    assert max(errors) < ACCEPTANCE_BUDGET.reference_rtol
+    # The comparison is only meaningful if the recurrence actually moved.
+    assert float(state.charge.abs().max()) > 0.0
+    assert float(state.current_half.abs().max()) > 0.0
+
+
+def _gershgorin_wire_cfl_limit(solver, masses):
+    """Recompute the production Gershgorin bound from the promoted coefficients.
+
+    The oracle eigenvalue limit and this bound are then derived from the exact
+    same float64 inductance/capacitance/weights/masses, so the comparison is a
+    pure Gershgorin-vs-eigenvalue statement rather than a float32 rounding
+    artefact of the prepare-time value.
+    """
+
+    coeff = solver._wire_runtime.coefficients
+    return _wire_cfl_limit(
+        inductance=coeff["inductance"],
+        node_capacitance=coeff["node_capacitance"],
+        grounded=coeff["grounded"],
+        node_offsets=coeff["node_offsets"],
+        node_segments=coeff["node_segments"],
+        edge_group_offsets=coeff["edge_group_offsets"],
+        contribution_segments=coeff["contribution_segments"],
+        contribution_weights=coeff["contribution_weights"],
+        target_masses=masses,
+    )
+
+
+def test_native_wire_cfl_bound_is_tight_on_uniform_topology_and_never_exceeds_exact_limit():
+    """Gershgorin equals the exact ``2/omega_max`` limit on a uniform wire.
+
+    Gershgorin's disc theorem upper-bounds the largest eigenvalue by the largest
+    absolute row sum, so it lower-bounds ``dt``: the production bound can never
+    exceed the exact leapfrog limit. On a uniform-coefficient axis-aligned wire
+    that inequality is an *equality* (the bound is TIGHT, not conservative),
+    because the constant-sign coupling makes the maximal row sum coincide with
+    the top eigenvalue. Both quantities are recomputed here from the identical
+    float64 coefficients, so this is a mathematical statement, not the float32
+    prepare-time rounding accident it replaces.
+    """
+
+    solver, masses = _promote_wire_runtime_to_float64(
+        _prepared_solver(_scene(source=False, monitor=False))
+    )
+    runtime = solver._wire_runtime
+    exact_limit = float(_wire_reference_for(solver, masses).maximum_stable_dt())
+    gershgorin_limit = _gershgorin_wire_cfl_limit(solver, masses)
+
+    assert math.isfinite(exact_limit)
+    # Safety property: Gershgorin lower-bounds dt (never exceeds the exact limit).
+    assert gershgorin_limit <= exact_limit * (1.0 + 1.0e-12)
+    # Tightness: on a uniform wire the bound coincides with the exact eigenvalue
+    # limit. Measured ratio is 1.0 in float64 (auditor and re-derived on-host).
+    assert gershgorin_limit >= exact_limit * (1.0 - 1.0e-9)
+    # The float64 prepare-time value the solver actually uses to gate dt must
+    # also respect the exact limit (it is computed from float32-valued masses, so
+    # allow a small margin) and the chosen step must stay strictly below it.
+    assert runtime.wire_cfl_limit <= exact_limit * (1.0 + 1.0e-6)
+    assert float(solver.dt) < runtime.wire_cfl_limit
+
+
+def test_native_wire_cfl_bound_has_strict_gershgorin_slack_on_nonuniform_topology():
+    """On strongly non-uniform coefficients Gershgorin is strictly conservative.
+
+    Varying per-segment radius and segment length makes the self terms
+    (``L'``/``C'``) differ across segments, so the maximal row sum overshoots the
+    top eigenvalue and Gershgorin gains real slack. Measured ratio on this
+    fixture is ~0.936 (a ~6.4% margin); the gate below only requires a >3% strict
+    slack, which is comfortably inside the measured value and still non-trivial.
+    """
+
+    wire = mw.ThinWire(
+        name="nonuniform",
+        points=(
+            (-0.08, 0.0, 0.0),
+            (-0.04, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.08, 0.0, 0.0),
+        ),
+        radius=(2.0e-4, 5.0e-3, 8.0e-4),
+        conductor=mw.WireConductor.pec(),
+        snap="strict",
+    )
+    solver, masses = _promote_wire_runtime_to_float64(
+        _prepared_solver(_network_scene((wire,)))
+    )
+    exact_limit = float(_wire_reference_for(solver, masses).maximum_stable_dt())
+    gershgorin_limit = _gershgorin_wire_cfl_limit(solver, masses)
+
+    assert math.isfinite(exact_limit)
+    # Still a valid lower bound on dt.
+    assert gershgorin_limit <= exact_limit
+    # ...and here it is strictly, non-trivially below the exact limit.
+    assert gershgorin_limit < exact_limit * (1.0 - 3.0e-2)
+
+
+def _run_native_wire_recurrence_peak(solver, dt_fraction, *, steps=400):
+    """Drive the real CUDA sample/update/deposit kernels at a scaled ``dt``.
+
+    ``dt`` and the deposition scales are rebuilt consistently for the requested
+    fraction of the production wire CFL limit, then the compressed recurrence is
+    stepped with the actual production kernels (no Maxwell curl, so the only
+    dynamics are the wire-field coupling the CFL bound governs).
+    """
+
+    runtime = solver._wire_runtime
+    coeff = runtime.coefficients
+    masses = _target_masses(solver, coeff["target_components"], coeff["target_offsets"])
+    solver.dt = dt_fraction * runtime.wire_cfl_limit
+    edge_groups = _group_indices(coeff["edge_group_offsets"])
+    coeff["contribution_scales"] = (
+        float(solver.dt)
+        * coeff["contribution_weights"]
+        / masses.index_select(0, edge_groups)
+    ).contiguous()
+    node_count = masses.numel()
+    seed = torch.where(
+        torch.arange(node_count, device=solver.device) % 2 == 0, 1.0, -1.0
+    ).to(solver.Ex.dtype)
+    _set_target_values(
+        solver, coeff["target_components"], coeff["target_offsets"], seed
+    )
+    runtime.current.zero_()
+    runtime.charge.zero_()
+    peak = 0.0
+    for _ in range(steps):
+        sample_and_update_wire(solver)
+        deposit_wire_current(solver)
+        electric = _target_values(
+            solver, coeff["target_components"], coeff["target_offsets"]
+        )
+        peak = max(
+            peak,
+            float(runtime.charge.abs().max()),
+            float(runtime.current.abs().max()),
+            float(electric.abs().max()),
+        )
+    return peak
+
+
+def _closed_loop_wire():
+    return mw.ThinWire(
+        name="loop",
+        points=(
+            (-0.08, -0.08, 0.0),
+            (0.08, -0.08, 0.0),
+            (0.08, 0.08, 0.0),
+            (-0.08, 0.08, 0.0),
+            (-0.08, -0.08, 0.0),
+        ),
+        radius=2.0e-3,
+        conductor=mw.WireConductor.pec(),
+        snap="strict",
+    )
+
+
+def test_native_wire_recurrence_diverges_when_dt_straddles_the_cfl_limit():
+    """The native kernels are the real safety gate, not just the reference.
+
+    The reference-side straddle test lives in ``test_thin_wire_reference.py``.
+    This is the production-path analogue: the same closed-loop network stepped
+    through the actual ``sampleWireEmf3D``/``updateWireState1D``/
+    ``depositWireCurrent3D`` kernels stays bounded just below the wire CFL limit
+    and blows up just above it. Measured on-host: 0.99x -> ~5.9 peak, 1.01x ->
+    non-finite.
+    """
+
+    stable = _run_native_wire_recurrence_peak(
+        _prepared_solver(_network_scene((_closed_loop_wire(),))), 0.99
+    )
+    unstable = _run_native_wire_recurrence_peak(
+        _prepared_solver(_network_scene((_closed_loop_wire(),))), 1.01
+    )
+
+    assert math.isfinite(stable)
+    assert stable < 1.0e2
+    assert (not math.isfinite(unstable)) or unstable > 1.0e3
+
+
+def test_wire_sample_and_deposit_kernels_are_energy_adjoint_on_shared_edges():
+    """Real ``G``/``G^T`` adjointness through the production CUDA kernels.
+
+    Draws random field and current tensors and runs the actual ``sampleWireEmf3D``
+    and ``depositWireCurrent3D`` kernels. The energy-adjoint identity
+
+        <sample(E), I>  ==  sum_e  mass_e * E_e * (-dE_e) / dt
+
+    (where ``dE`` is the field increment the deposition kernel applies for current
+    ``I``) must hold to float64 machine precision. Unlike the compiler-list
+    transpose check in ``_dense_wire_operators``, this is NOT forced by
+    construction: it fails if either kernel mis-maps an edge or segment, or if the
+    per-edge segmented reduction is wrong. The fixture is a bent oblique polyline
+    chosen to exercise BOTH failure modes empirically: it compiles to more than
+    one segment (asserted below), so a segment-to-edge mis-map on the second arm
+    breaks the identity; and several fragments deposit onto a shared Yee edge
+    (also asserted below), exercising the per-edge segmented reduction rather than
+    the axis-aligned one-contribution-per-edge case.
+    """
+
+    solver, masses = _promote_wire_runtime_to_float64(
+        _prepared_solver(
+            _scene(
+                points=(
+                    (-0.08, -0.04, 0.0),
+                    (0.0, 0.04, 0.0),
+                    (0.08, -0.04, 0.0),
+                ),
+                source=False,
+                monitor=False,
+            )
+        )
+    )
+    runtime = solver._wire_runtime
+    coeff = runtime.coefficients
+
+    num_segments = int(coeff["segment_offsets"].numel()) - 1
+    assert num_segments > 1, (
+        "fixture must compile to multiple segments so the identity gates the "
+        "segment-to-edge mapping, not just a single segment"
+    )
+    edge_group_offsets = coeff["edge_group_offsets"]
+    contributions_per_edge = edge_group_offsets[1:] - edge_group_offsets[:-1]
+    assert int(contributions_per_edge.max()) > 1, (
+        "fixture must exercise multiple fragments depositing onto one Yee edge"
+    )
+
+    device = solver.device
+    torch.manual_seed(0)
+    electric = torch.randn(masses.numel(), device=device, dtype=torch.float64)
+    current = torch.randn(runtime.current.numel(), device=device, dtype=torch.float64)
+
+    # sample(E): zero the fields, imprint the random E on the sampled edges, and
+    # run the real sampling kernel to obtain the segment EMF.
+    for name in ("Ex", "Ey", "Ez"):
+        getattr(solver, name).zero_()
+    _set_target_values(
+        solver, coeff["target_components"], coeff["target_offsets"], electric
+    )
+    runtime.emf.zero_()
+    solver.fdtd_module.sampleWireEmf3D(
+        Ex=solver.Ex,
+        Ey=solver.Ey,
+        Ez=solver.Ez,
+        segmentOffsets=coeff["segment_offsets"],
+        edgeComponents=coeff["edge_components"],
+        edgeOffsets=coeff["edge_offsets"],
+        weights=coeff["weights"],
+        emf=runtime.emf,
+    ).launchRaw()
+    sampled_inner_product = float(torch.dot(runtime.emf, current))
+
+    # deposit(I): zero the fields again, load the random current, and run the real
+    # deposition kernel; the resulting field increment is exactly -deposited.
+    for name in ("Ex", "Ey", "Ez"):
+        getattr(solver, name).zero_()
+    runtime.current.copy_(current)
+    deposit_wire_current(solver)
+    field_increment = _target_values(
+        solver, coeff["target_components"], coeff["target_offsets"]
+    )
+    deposited_inner_product = float(
+        torch.sum(masses * electric * (-field_increment) / float(solver.dt))
+    )
+
+    scale = max(abs(sampled_inner_product), abs(deposited_inner_product), 1.0e-300)
+    assert (
+        abs(sampled_inner_product - deposited_inner_product) / scale < 1.0e-12
+    )
+    # Guard against a silent zero-vs-zero pass.
+    assert abs(sampled_inner_product) > 1.0e-8
 
 
 def test_compressed_cuda_recurrence_conserves_charge_and_staggered_energy():

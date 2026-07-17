@@ -1,7 +1,15 @@
 """Torch reference model for the energy-paired thin-wire discretization.
 
-This module is intentionally independent of the production stepping runtime.  It
-defines the numerical contract used to validate the native implementation.
+This module is intentionally independent of the production stepping runtime. It
+defines the numerical contract used to validate the native implementation, and it
+is deliberately not a CPU fallback: nothing in the solver may import it.
+
+The binding to the production path lives in
+``tests/fdtd/thin_wire/test_thin_wire_forward.py``, which steps the compiled CUDA
+network against :class:`AxisAlignedWireReference` at
+``ACCEPTANCE_BUDGET.reference_rtol`` and checks the production wire CFL bound
+against :meth:`AxisAlignedWireReference.maximum_stable_dt`. Keep that binding
+alive: without a consumer this reference silently stops constraining anything.
 """
 
 from __future__ import annotations

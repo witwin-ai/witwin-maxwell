@@ -84,13 +84,20 @@ def test_thin_wire_preserves_trainable_tensors_and_validates_geometry():
         requires_grad=True,
     )
     radius = torch.tensor([4.0e-4, 5.0e-4], dtype=torch.float64, requires_grad=True)
-    wire = _wire(points=points, radius=radius)
+    # Trainable points are only accepted under the continuous-snap coordinate
+    # gradient contract; the tensors must survive construction unchanged.
+    wire = _wire(points=points, radius=radius, snap="continuous")
 
     assert wire.points is points
     assert wire.radius is radius
     assert wire.segment_count == 2
     assert wire.endpoints == (mw.WireEnd.open(), mw.WireEnd.open())
-    assert wire.snap == "strict"
+    assert wire.snap == "continuous"
+
+    # Trainable points with a non-continuous snap are rejected fail-closed so the
+    # fixed-stencil gradient contract stays explicit.
+    with pytest.raises(ValueError, match="trainable points require snap='continuous'"):
+        _wire(points=points, radius=radius)
 
     with pytest.raises(ValueError, match="P >= 2"):
         _wire(points=torch.zeros((1, 3), dtype=torch.float32))

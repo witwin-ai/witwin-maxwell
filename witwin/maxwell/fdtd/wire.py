@@ -9,6 +9,21 @@ import torch
 from ..thin_wire import WireData
 
 
+@dataclass(frozen=True)
+class WireComponentPlan:
+    """Per-component scatter/gather indices resolved once at prepare time.
+
+    The component code of every sampling and deposition entry is compile-time
+    topology. Resolving it per step with ``torch.nonzero`` would force a
+    device-to-host synchronization on every reverse step, so the plan is built
+    once and reused. ``entries`` holds one ``(destination, flat_offset)`` index
+    pair per electric component, in Ex/Ey/Ez order.
+    """
+
+    entries: tuple[tuple[torch.Tensor, torch.Tensor], ...]
+    count: int
+
+
 @dataclass
 class WireRuntime:
     """Compressed device state for one compiled thin-wire network."""
@@ -19,6 +34,9 @@ class WireRuntime:
     charge: torch.Tensor
     emf: torch.Tensor
     coefficients: dict[str, torch.Tensor]
+    sample_plan: WireComponentPlan
+    target_plan: WireComponentPlan
+    sample_segments: torch.Tensor
     monitor_state: list[dict[str, Any]]
     cfl_limit: float
     wire_cfl_limit: float
@@ -109,22 +127,28 @@ def _segmented_sum(values: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
     return prefix.index_select(0, offsets[1:]) - prefix.index_select(0, offsets[:-1])
 
 
+def _component_plan(components: torch.Tensor, offsets: torch.Tensor) -> WireComponentPlan:
+    """Resolve the per-component index plan for one sampling or deposition list."""
+
+    entries = []
+    for component in range(3):
+        selected = torch.nonzero(components == component, as_tuple=False).reshape(-1)
+        entries.append((selected.contiguous(), offsets.index_select(0, selected).contiguous()))
+    return WireComponentPlan(entries=tuple(entries), count=int(offsets.numel()))
+
+
 def _field_vector(
     fields: dict[str, torch.Tensor],
-    components: torch.Tensor,
-    offsets: torch.Tensor,
+    plan: WireComponentPlan,
 ) -> torch.Tensor:
-    values = fields["Ex"].new_empty(offsets.numel())
-    for component, name in enumerate(("Ex", "Ey", "Ez")):
-        selected = torch.nonzero(components == component, as_tuple=False).reshape(-1)
+    values = fields["Ex"].new_empty(plan.count)
+    for (selected, gather), name in zip(plan.entries, ("Ex", "Ey", "Ez")):
         if selected.numel() == 0:
             continue
         values.index_copy_(
             0,
             selected,
-            fields[name]
-            .reshape(-1)
-            .index_select(0, offsets.index_select(0, selected)),
+            fields[name].reshape(-1).index_select(0, gather),
         )
     return values
 
@@ -141,8 +165,7 @@ def replay_wire_state(
     coeff = runtime.coefficients
     sampled = _field_vector(
         {name: state[name] for name in ("Ex", "Ey", "Ez")},
-        coeff["edge_components"],
-        coeff["edge_offsets"],
+        runtime.sample_plan,
     )
     emf = _segmented_sum(
         coeff["weights"] * sampled,
@@ -187,14 +210,12 @@ def deposit_replayed_wire_current(
     )
     deposited = _segmented_sum(contributions, coeff["edge_group_offsets"])
     result = dict(electric_fields)
-    for component, name in enumerate(("Ex", "Ey", "Ez")):
-        selected = torch.nonzero(
-            coeff["target_components"] == component, as_tuple=False
-        ).reshape(-1)
+    for (selected, target_offsets), name in zip(
+        runtime.target_plan.entries, ("Ex", "Ey", "Ez")
+    ):
         if selected.numel() == 0:
             continue
         flat = electric_fields[name].reshape(-1).clone()
-        target_offsets = coeff["target_offsets"].index_select(0, selected)
         flat.index_copy_(
             0,
             target_offsets,
@@ -224,17 +245,15 @@ def reverse_wire_step(
 
     sample_target_adjoint = _field_vector(
         {name: post_step_adjoint[name] for name in ("Ex", "Ey", "Ez")},
-        coeff["edge_components"],
-        coeff["edge_offsets"],
+        runtime.sample_plan,
     )
     target_adjoint = _field_vector(
         {name: post_step_adjoint[name] for name in ("Ex", "Ey", "Ez")},
-        coeff["target_components"],
-        coeff["target_offsets"],
+        runtime.target_plan,
     )
     contribution_segments = coeff["contribution_segments"]
     contribution_current = current1.index_select(0, contribution_segments)
-    sample_segments = _group_indices(coeff["segment_offsets"])
+    sample_segments = runtime.sample_segments
     current_adjoint = post_step_adjoint["wire_current"] - _segmented_sum(
         coeff["sample_deposition_scales"] * sample_target_adjoint,
         coeff["segment_offsets"],
@@ -275,8 +294,7 @@ def reverse_wire_step(
     ) * current_adjoint / coeff["inductance"]
     sampled_field = _field_vector(
         {name: forward_state[name] for name in ("Ex", "Ey", "Ez")},
-        coeff["edge_components"],
-        coeff["edge_offsets"],
+        runtime.sample_plan,
     )
     grad_weights = (
         sampled_field * scaled_current_adjoint.index_select(0, sample_segments)
@@ -296,16 +314,15 @@ def reverse_wire_step(
     field_adjoint = {
         name: torch.zeros_like(forward_state[name]) for name in ("Ex", "Ey", "Ez")
     }
-    for component, name in enumerate(("Ex", "Ey", "Ez")):
-        selected = torch.nonzero(
-            coeff["target_components"] == component, as_tuple=False
-        ).reshape(-1)
+    for (selected, target_offsets), name in zip(
+        runtime.target_plan.entries, ("Ex", "Ey", "Ez")
+    ):
         if selected.numel() == 0:
             continue
         flat = field_adjoint[name].reshape(-1)
         flat.index_copy_(
             0,
-            coeff["target_offsets"].index_select(0, selected),
+            target_offsets,
             target_sample_adjoint.index_select(0, selected),
         )
 
@@ -316,13 +333,11 @@ def reverse_wire_step(
     grad_eps = {
         name: torch.zeros_like(eps_by_field[name]) for name in ("Ex", "Ey", "Ez")
     }
-    for component, name in enumerate(("Ex", "Ey", "Ez")):
-        selected = torch.nonzero(
-            coeff["target_components"] == component, as_tuple=False
-        ).reshape(-1)
+    for (selected, offsets), name in zip(
+        runtime.target_plan.entries, ("Ex", "Ey", "Ez")
+    ):
         if selected.numel() == 0:
             continue
-        offsets = coeff["target_offsets"].index_select(0, selected)
         eps_values = eps_by_field[name].reshape(-1).index_select(0, offsets)
         values = (
             target_adjoint.index_select(0, selected)
@@ -683,7 +698,18 @@ def _wire_cfl_limit(
     The calculation uses only O(nodes + segments + coupling entries) temporary
     storage. It therefore preserves the compressed-state contract even for long
     wires and shared field edges.
+
+    The row bound is accumulated in float64 regardless of the runtime field
+    dtype. This is a prepare-time cost only, and it keeps the reported limit from
+    depending on float32 rounding: the Gershgorin bound is exactly tight against
+    the leapfrog eigenvalue limit on uniform-coefficient wire topologies, so a
+    float32 accumulation could round it to either side of that equality.
     """
+
+    inductance = inductance.to(torch.float64)
+    node_capacitance = node_capacitance.to(torch.float64)
+    contribution_weights = contribution_weights.to(torch.float64)
+    target_masses = target_masses.to(torch.float64)
 
     segment_count = inductance.numel()
     inv_sqrt_l = torch.rsqrt(inductance)
@@ -864,6 +890,13 @@ def initialize_wire_runtime(solver) -> WireRuntime | None:
         charge=charge,
         emf=emf,
         coefficients=coefficients,
+        sample_plan=_component_plan(
+            coefficients["edge_components"], coefficients["edge_offsets"]
+        ),
+        target_plan=_component_plan(
+            coefficients["target_components"], coefficients["target_offsets"]
+        ),
+        sample_segments=_group_indices(coefficients["segment_offsets"]),
         monitor_state=[],
         cfl_limit=cfl_limit,
         wire_cfl_limit=wire_cfl_limit,

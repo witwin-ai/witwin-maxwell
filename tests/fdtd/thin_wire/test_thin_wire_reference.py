@@ -15,6 +15,36 @@ from witwin.maxwell.fdtd.thin_wire_reference import (
 )
 
 
+# Tail/head node of every ring segment, stated independently of the dense
+# incidence matrix below so continuity can be checked without reusing it.
+_RING_TAIL = torch.tensor([0, 1, 2, 3])
+_RING_HEAD = torch.tensor([1, 2, 3, 0])
+
+
+def _charge_flow_from_topology(tail, head, current, node_count):
+    """Accumulate ``B @ I`` from segment endpoint lists.
+
+    This deliberately avoids ``reference.incidence`` and the matmul that ``step``
+    itself uses, so a wrong incidence, endpoint orientation, or charge update
+    cannot cancel out against the expression that produced it.
+    """
+
+    flow = torch.zeros(node_count, dtype=current.dtype, device=current.device)
+    flow.index_add_(0, tail.to(current.device), current)
+    flow.index_add_(0, head.to(current.device), -current)
+    return flow
+
+
+def _assert_charge_follows_segment_currents(before, after, *, tail, head, dt):
+    expected = before.charge - dt * _charge_flow_from_topology(
+        tail, head, after.current_half, before.charge.numel()
+    )
+    scale = float(before.charge.abs().max()) + float((dt * after.current_half).abs().max())
+    torch.testing.assert_close(
+        after.charge, expected, rtol=0.0, atol=1.0e-13 * max(scale, 1.0e-300)
+    )
+
+
 def _ring_reference(*, dt_fraction=0.4):
     dtype = torch.float64
     incidence = torch.tensor(
@@ -311,9 +341,12 @@ def test_axis_aligned_single_wire_exchanges_field_energy_without_growth():
     for _ in range(500):
         after = reference.step(state)
         energies.append(reference.staggered_energy(state, after.current_half))
-        torch.testing.assert_close(
-            reference.continuity_residual(state, after),
-            torch.zeros_like(charge),
+        _assert_charge_follows_segment_currents(
+            state,
+            after,
+            tail=torch.tensor([0]),
+            head=torch.tensor([1]),
+            dt=reference.dt,
         )
         state = after
 
@@ -337,13 +370,42 @@ def test_closed_lossless_network_conserves_staggered_energy_and_charge():
     for _ in range(2000):
         after = reference.step(state)
         energies.append(reference.staggered_energy(state, after.current_half))
-        torch.testing.assert_close(reference.continuity_residual(state, after), torch.zeros_like(charge))
+        _assert_charge_follows_segment_currents(
+            state, after, tail=_RING_TAIL, head=_RING_HEAD, dt=reference.dt
+        )
         torch.testing.assert_close(after.charge.sum(), total_charge)
         state = after
 
     energy = torch.stack(energies)
     relative_span = (energy.amax() - energy.amin()) / energy.abs().mean()
     assert relative_span < 1.0e-11
+
+
+def test_reference_continuity_residual_is_an_exact_algebraic_identity():
+    """Document what ``continuity_residual`` is, and what it is not.
+
+    ``step`` defines ``charge_next`` from the same expression the residual
+    re-evaluates, so this is zero for any L, C, and incidence and cannot fail on
+    a wrong discretization. It records that the scheme conserves charge exactly
+    rather than approximately. The falsifiable continuity gates are the tail/head
+    reconstructions in the network tests and the native comparison in
+    ``tests/fdtd/thin_wire/test_thin_wire_forward.py``.
+    """
+
+    reference = _ring_reference()
+    electric = torch.empty((0,), dtype=torch.float64)
+    charge = torch.tensor([0.3, -0.2, 0.1, -0.2], dtype=torch.float64)
+    state = WireReferenceState(
+        electric,
+        charge,
+        reference.initialize_current_half(
+            electric, charge, torch.tensor([0.1, -0.05, 0.02, -0.03], dtype=torch.float64)
+        ),
+    )
+    after = reference.step(state)
+    torch.testing.assert_close(
+        reference.continuity_residual(state, after), torch.zeros_like(charge)
+    )
 
 
 def test_stability_limit_separates_bounded_and_unstable_steps():

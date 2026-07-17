@@ -37,22 +37,31 @@ Scope: arbitrary-direction coupling, nonuniform grids, fixed-stencil geometry ad
   refinement, node/gap binding, TerminalPort composition, checkpoint replay,
   profiler guards, and finite-difference gradients.
 - A three-grid rotation study compared the same axis-aligned and oblique dipole
-  at 32, 64, and 128 cells across the reference span. At the finest grid the
-  relative input-impedance difference was `6.56e-4` and the normalized far-field
-  pattern difference was `1.42e-3`, both below the registered 2% budget and
-  below the corresponding coarse-grid errors (`6.41e-2` and `7.54e-3`).
-- A smooth full-pulse PEC dipole run reported accepted power
-  `6.6332e-5 W` and direct closed-surface Poynting flux `6.6377e-5 W`.
-  The relative closure residual was `6.8e-4`, below the registered 1% energy
-  budget; PEC wire ohmic loss is exactly zero.
+  at 32, 64, and 128 cells across the reference span. The rotation gate is
+  enforced by `tests/fdtd/thin_wire/test_thin_wire_rotation_acceptance.py`.
+  UNEVIDENCED: the impedance and far-field figures previously quoted here
+  (`6.56e-4`, `1.42e-3`, `6.41e-2`, `7.54e-3`) have no registered artifact. Unlike
+  Phase 2, which registered `thin-wire-phase-2-reverse-performance.json`, Phase 3
+  registered no machine-readable result. The numbers must be regenerated into an
+  artifact before they can be cited as evidence.
+- A smooth full-pulse PEC dipole run closed accepted power against direct
+  closed-surface Poynting flux below the registered 1% energy budget; PEC wire
+  ohmic loss is exactly zero. The gate is enforced by
+  `test_pec_wire_port_accepted_power_closes_against_radiated_surface_flux`.
+  UNEVIDENCED: the specific power figures previously quoted here (`6.6332e-5 W`,
+  `6.6377e-5 W`, `6.8e-4`) have no registered artifact.
 - End-to-end source-amplitude, radius, and continuous oblique gap-coordinate
-  gradients passed successively halved finite differences within the registered
-  2% relative budget. Exact local port VJPs also cover gap weights, electric
-  masses, node capacitance, resistance, and drive amplitude.
+  gradients agree with central finite differences within the registered 2%
+  relative budget at the finest step of each sweep, and coarser steps either also
+  meet the budget or show measurable improvement under refinement. The radius
+  sweep is truncation-dominated and only converges into budget at its finest
+  step; the amplitude sweep sits at the float32 roundoff floor. Exact local port
+  VJPs also cover gap weights, electric masses, node capacitance, resistance, and
+  drive amplitude.
 - CUDA profiler coverage found no `aten::item`, local-scalar extraction, or
-  host/device copy in the wire-port stepping and observer path. Runtime state
-  remains proportional to physical segments/nodes plus sparse fragment entries,
-  not to the full Yee volume.
+  host/device copy in the wire-port stepping and observer path, nor in the wire
+  reverse transpose. Runtime state remains proportional to physical
+  segments/nodes plus sparse fragment entries, not to the full Yee volume.
 
 ## Independent Review
 

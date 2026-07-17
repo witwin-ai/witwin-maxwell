@@ -32,8 +32,46 @@ cylinder and does not introduce a CPU FDTD fallback.
   8-to-10 change.
 - Changing physical radius below one cell changes the forward current, while
   `L'` and `C'` retain the frozen logarithmic-radius law.
-- CUDA float32 matches the torch reference for sampling, recurrence, charge, and
-  deposition; CUDA Graph replay is bit exact.
+- Each CUDA operator matches an inline torch reimplementation of its own formula
+  for sampling, recurrence, charge, and deposition
+  (`tests/fdtd/cuda/test_cuda_wire_parity.py`); CUDA Graph replay is bit exact.
+  That suite is opt-in behind `WITWIN_RUN_CUDA_EXTENSION_BUILD=1` (it skips by
+  default, not because of missing hardware); re-verified on-host with the flag
+  set: 9 passed.
+- The assembled native recurrence is compared against the Phase 0 reference
+  oracle itself, not only against per-kernel reimplementations. In float64,
+  `test_native_wire_step_matches_the_torch_reference_oracle` steps the compiled
+  network and `AxisAlignedWireReference` from the same state and holds current,
+  charge, and the sampled electric degrees within
+  `ACCEPTANCE_BUDGET.reference_rtol` (`1e-5`) over 64 steps.
+- `G`/`G^T` adjointness is verified end-to-end through the production CUDA
+  kernels by `test_wire_sample_and_deposit_kernels_are_energy_adjoint_on_shared_edges`:
+  it runs the real `sampleWireEmf3D` and `depositWireCurrent3D` kernels on random
+  field/current tensors and checks the energy-adjoint identity
+  `<sample(E), I> == sum_e mass_e * E_e * (-dE_e) / dt` to float64 machine
+  precision, on an oblique fixture where several fragments deposit onto a shared
+  Yee edge (asserted, so the per-edge segmented reduction is exercised). The
+  transpose check inside `_dense_wire_operators` is only a self-consistency check
+  of the compiler's own bookkeeping: the deposition list is emitted as a
+  permutation of the sampling weights, so `deposition == sampling.mT` holds for
+  any weights and does not, on its own, establish reciprocity.
+- The production Gershgorin wire CFL bound is checked against the oracle's exact
+  eigenvalue limit `2 / omega_max` from identical float64 coefficients. On a
+  uniform-coefficient axis-aligned wire the bound is TIGHT (the measured ratio is
+  `1.0`, an equality, not a conservative margin): Gershgorin's disc theorem still
+  lower-bounds `dt`, but the constant-sign coupling makes the maximal row sum
+  coincide with the top eigenvalue
+  (`test_native_wire_cfl_bound_is_tight_on_uniform_topology_and_never_exceeds_exact_limit`).
+  Strongly non-uniform per-segment radius and length recover strict slack
+  (measured ratio ~`0.936`,
+  `test_native_wire_cfl_bound_has_strict_gershgorin_slack_on_nonuniform_topology`).
+  The prepare-time bound is now accumulated in float64 so the reported limit does
+  not depend on float32 rounding.
+- The real stability gate is the dt-straddle instability test, verified for the
+  native path (not only the reference): the same closed loop stepped through the
+  production sample/update/deposit kernels stays bounded at `0.99x` the wire CFL
+  limit (peak ~`5.9`) and diverges to a non-finite peak at `1.01x`
+  (`test_native_wire_recurrence_diverges_when_dt_straddles_the_cfl_limit`).
 - A 512-step lossless recurrence satisfies continuity and keeps staggered energy
   drift below the registered 1% budget.
 - The low-frequency Courant-limit reproduction that previously grew from
@@ -46,9 +84,10 @@ cylinder and does not introduce a CPU FDTD fallback.
   hits/invalidation, finite logarithmic self terms, and device-resident radius
   autograd. Runtime composition guards also reject periodic/Bloch fields and
   overlapping surface-impedance conductor ownership until their owning phases.
-- The consolidated Phase 1 target matrix passed: 97 tests passed and 2 hardware-
-  dependent tests skipped. A separate public API and Result-persistence matrix
-  passed 44 tests with 2 existing skips. Ruff and `git diff --check` passed.
+- The consolidated Phase 1 target matrix passed. The default run skips the
+  opt-in per-kernel CUDA parity suite (behind `WITWIN_RUN_CUDA_EXTENSION_BUILD=1`);
+  those skips are opt-in, not hardware-dependent, and the suite passes when the
+  flag is set. `git diff --check` passed; `ruff` is not installed in this env.
 
 ## Performance And Memory Evidence
 

@@ -7,11 +7,14 @@ import witwin.maxwell as mw
 from witwin.maxwell.fdtd.adjoint.bridge import _FDTDGradientBridge
 from witwin.maxwell.fdtd.adjoint.dispatch import validate_native_adjoint_preparation
 from witwin.maxwell.fdtd.wire import _target_masses, reverse_wire_step
+from tests.gradients.finite_difference_gate import assert_finite_difference_agrees
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="FDTD requires CUDA")
 
 _FREQUENCY = 2.0e9
+
+_assert_finite_difference_agrees = assert_finite_difference_agrees
 
 
 def _wire_simulation(
@@ -418,6 +421,64 @@ def test_branch_wire_reverse_matches_independent_dense_autograd_vjp():
         )
 
 
+def test_wire_reverse_step_is_free_of_per_step_host_synchronization():
+    """The reverse wire transpose must not resolve topology on the device per step.
+
+    Component masks and CSR group ids are compile-time constants. Recomputing them
+    with ``torch.nonzero`` or a tensor-valued ``repeat_interleave`` inside the
+    reverse loop forces a device-to-host copy on every step, so they are resolved
+    once in ``initialize_wire_runtime``. The forward port path has an equivalent
+    guard in ``tests/fdtd/thin_wire/test_thin_wire_port_binding_gpu.py``.
+    """
+
+    solver = _promote_wire_reverse_fixture_to_float64(_branch_solver())
+    runtime = solver._wire_runtime
+    templates = (solver.Ex, solver.Ey, solver.Ez)
+    forward_state = {
+        **{name: torch.zeros_like(value) for name, value in zip(("Ex", "Ey", "Ez"), templates)},
+        "wire_current": torch.zeros_like(runtime.current),
+        "wire_charge": torch.zeros_like(runtime.charge),
+    }
+    adjoint_state = {
+        **{name: torch.zeros_like(value) for name, value in zip(("Ex", "Ey", "Ez"), templates)},
+        "wire_current": torch.zeros_like(runtime.current),
+        "wire_charge": torch.zeros_like(runtime.charge),
+    }
+    eps_by_field = {
+        "Ex": solver.eps_Ex,
+        "Ey": solver.eps_Ey,
+        "Ez": solver.eps_Ez,
+    }
+
+    def reverse():
+        reverse_wire_step(
+            solver, forward_state, adjoint_state, eps_by_field=eps_by_field
+        )
+
+    for _ in range(2):
+        reverse()
+    torch.cuda.synchronize()
+
+    with torch.profiler.profile(
+        activities=(
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ),
+        acc_events=True,
+    ) as profile:
+        for _ in range(8):
+            reverse()
+    torch.cuda.synchronize()
+
+    event_names = {event.key for event in profile.key_averages()}
+    assert "aten::item" not in event_names
+    assert "aten::_local_scalar_dense" not in event_names
+    assert "aten::nonzero" not in event_names
+    assert not any(
+        "Memcpy HtoD" in name or "Memcpy DtoH" in name for name in event_names
+    )
+
+
 def test_wire_adjoint_checkpoint_stride_replay_is_invariant():
     gradients = []
     objectives = []
@@ -457,8 +518,7 @@ def test_wire_radius_adjoint_matches_centered_finite_difference():
         errors.append(
             abs(adjoint - finite_difference) / max(abs(finite_difference), 1.0e-20)
         )
-    assert min(errors) < 2.0e-2
-    assert errors[-1] < errors[0]
+    _assert_finite_difference_agrees(errors, context="radius: ")
 
 
 def test_wire_host_material_adjoint_matches_centered_finite_difference():
@@ -480,5 +540,4 @@ def test_wire_host_material_adjoint_matches_centered_finite_difference():
         errors.append(
             abs(adjoint - finite_difference) / max(abs(finite_difference), 1.0e-20)
         )
-    assert min(errors) < 2.0e-2
-    assert errors[-1] < errors[0]
+    _assert_finite_difference_agrees(errors, context="density: ")

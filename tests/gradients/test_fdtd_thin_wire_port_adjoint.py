@@ -10,6 +10,7 @@ from witwin.maxwell.fdtd.ports import (
     pullback_port_runtimes,
     replay_port_runtimes,
 )
+from tests.gradients.finite_difference_gate import assert_finite_difference_agrees
 
 
 pytestmark = pytest.mark.skipif(
@@ -17,6 +18,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 _FREQUENCY = 1.0e9
+
+_assert_finite_difference_agrees = assert_finite_difference_agrees
 
 _STRICT_POINTS = (
     (-0.08, -0.08, 0.0),
@@ -426,9 +429,12 @@ def test_wire_gap_port_end_to_end_radius_and_amplitude_adjoint_match_finite_diff
             abs(value - adjoint) / max(abs(value), abs(adjoint), 1.0e-30)
             for value in finite_differences[name]
         )
-        assert min(errors) < 0.02, (
-            f"{name}: adjoint={adjoint}, "
-            f"finite_differences={finite_differences[name]}, errors={errors}"
+        _assert_finite_difference_agrees(
+            errors,
+            context=(
+                f"{name}: adjoint={adjoint}, "
+                f"finite_differences={finite_differences[name]}, "
+            ),
         )
     assert result.port("feed").voltage.grad_fn is not None
     assert result.port("feed").current.grad_fn is not None
@@ -462,7 +468,16 @@ def test_continuous_oblique_gap_coordinate_adjoint_matches_fixed_stencil_finite_
 
     center = float(base_points[point_index, axis])
     finite_differences = []
-    for step in (2.0e-5, 1.0e-5, 5.0e-6):
+    # The objective comes from a float32 forward run, so its ~1e-7 relative noise
+    # sets a central-difference roundoff floor of roughly |objective| * 1e-7 /
+    # step that grows as the step shrinks. Across this whole sweep that floor
+    # already dominates truncation error, so all three steps sit at the roundoff
+    # floor: each lands inside the 2% budget but their ordering carries no signal
+    # (the shared gate makes its monotonicity clause conditional for exactly this
+    # reason). The steps are kept large enough that the floor stays within budget
+    # and small enough to stay below the 1.6e-3 displacement at which the port
+    # stencil changes cell.
+    for step in (8.0e-4, 4.0e-4, 2.0e-4):
         with torch.no_grad():
             points[point_index, axis] = center + step
         plus_network = scene.compile_thin_wires()
@@ -482,8 +497,8 @@ def test_continuous_oblique_gap_coordinate_adjoint_matches_fixed_stencil_finite_
         abs(value - adjoint) / max(abs(value), abs(adjoint), 1.0e-30)
         for value in finite_differences
     )
-    assert min(errors) < 0.02, (
-        f"adjoint={adjoint}, finite_differences={finite_differences}, "
-        f"errors={errors}"
+    _assert_finite_difference_agrees(
+        errors,
+        context=f"adjoint={adjoint}, finite_differences={finite_differences}, ",
     )
     assert result.port("feed").voltage.grad_fn is not None

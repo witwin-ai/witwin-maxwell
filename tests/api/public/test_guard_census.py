@@ -16,10 +16,12 @@ from pathlib import Path
 PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 
 # This exact snapshot was reconciled on 2026-07-15 after the RF, adjoint,
-# material, interoperability, and thin-wire Phase 1 feature series landed.
-# Lower it when a capability guard is implemented; do not raise it without
-# updating the census.
-CAPABILITY_GUARD_BUDGET = 117
+# material, interoperability, and thin-wire Phase 1 feature series landed, and
+# corrected on 2026-07-16 to register the tenth thin-wire capability guard (the
+# Bloch-boundary phase-aware wire-topology guard in compiler/thin_wire.py, which
+# the prior baseline under-counted as nine). Lower it when a capability guard is
+# implemented; do not raise it without updating the census.
+CAPABILITY_GUARD_BUDGET = 118
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

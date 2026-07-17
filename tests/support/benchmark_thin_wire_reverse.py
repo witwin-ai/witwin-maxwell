@@ -9,7 +9,11 @@ from types import SimpleNamespace
 
 import torch
 
-from witwin.maxwell.fdtd.wire import reverse_wire_step
+from witwin.maxwell.fdtd.wire import (
+    _component_plan,
+    _group_indices,
+    reverse_wire_step,
+)
 
 
 def _fixture(segment_count: int):
@@ -59,9 +63,18 @@ def _fixture(segment_count: int):
         "contribution_segments": segments,
         "contribution_weights": weights,
         "contribution_scales": contribution_scales,
+        "sample_masses": torch.full((segment_count,), 5.0e-2, device=device, dtype=dtype),
         "sample_deposition_scales": contribution_scales,
     }
-    runtime = SimpleNamespace(coefficients=coefficients)
+    runtime = SimpleNamespace(
+        coefficients=coefficients,
+        # reverse_wire_step consumes the topology plans that are resolved once in
+        # initialize_wire_runtime; the harness rebuilds them from the same
+        # component/offset tensors so the duck-typed runtime matches production.
+        sample_plan=_component_plan(components, segments),
+        target_plan=_component_plan(components, segments),
+        sample_segments=_group_indices(group_offsets),
+    )
     solver = SimpleNamespace(device="cuda", dt=1.0e-3, _wire_runtime=runtime)
     generator = torch.Generator(device=device).manual_seed(702)
     forward_state = {

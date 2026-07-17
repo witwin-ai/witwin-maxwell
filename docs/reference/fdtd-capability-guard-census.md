@@ -7,9 +7,10 @@ cannot enter unnoticed.
 
 ## Reconciled baseline
 
-The 2026-07-15 repository state contains 138 guards:
+The repository state contains 139 guards (corrected 2026-07-16 from the prior
+138-guard baseline, which under-counted the thin-wire compiler guards by one):
 
-- 117 capability guards tracked by the non-increasing test budget;
+- 118 capability guards tracked by the non-increasing test budget;
 - 21 contract guards excluded by exact file and message substring.
 
 The capability baseline is distributed as follows:
@@ -17,7 +18,7 @@ The capability baseline is distributed as follows:
 | Area | Capability guards |
 | --- | ---: |
 | External interoperability adapter | 18 |
-| Material compilers | 10 |
+| Material compilers | 11 |
 | Frequency-domain runtime | 5 |
 | Time-domain adjoint | 15 |
 | Time-domain excitation | 12 |
@@ -26,14 +27,15 @@ The capability baseline is distributed as follows:
 | Public simulation, result, and network workflows | 18 |
 | Material models | 7 |
 | Postprocessing | 3 |
-| **Total** | **117** |
+| **Total** | **118** |
 
-Thin-wire Phase 1 added nine reviewed capability guards rather than silently
-running unsupported compositions: one locally anisotropic self-term guard in
-the compiler; five Bloch, off-diagonal, conductive, dispersive, and nonlinear/
-modulated host guards plus one surface-impedance conductor-ownership guard in
-the single-device runtime; one distributed ownership
-guard; and one adjoint checkpoint/reverse guard. They remain capability debt,
+Thin-wire Phase 1 added ten reviewed capability guards rather than silently
+running unsupported compositions: two compiler guards (a locally anisotropic
+self-term guard and a Bloch-boundary phase-aware wire-topology guard); five
+Bloch, off-diagonal, conductive, dispersive, and nonlinear/modulated host guards
+plus one surface-impedance conductor-ownership guard in the single-device
+runtime; one distributed ownership guard; and one adjoint checkpoint/reverse
+guard. They remain capability debt,
 not contract exclusions. Phase 2 owns the adjoint guard, Phase 3 owns the Bloch
 path guard. Phase 4 owns distributed execution and SIBC/finite-loss ownership;
 the other host-composition guards remain tracked capability debt for a later

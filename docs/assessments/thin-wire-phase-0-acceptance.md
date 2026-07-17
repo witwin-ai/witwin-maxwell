@@ -32,7 +32,11 @@ Scope: numerical derivation and independent torch reference
 - An axis-aligned open segment exchanges energy with a sampled Yee electric
   degree without growth while satisfying endpoint continuity.
 - Closed lossless ring: continuity and total charge hold every step; staggered
-  energy relative span is below `1e-11` over 2,000 steps.
+  energy relative span is below `1e-11` over 2,000 steps. Continuity is checked by
+  reconstructing `B I` from the segment tail/head node lists, independently of the
+  incidence matrix and the matmul that `step` itself uses. `continuity_residual`
+  is an exact algebraic identity of the discretization and is recorded as such,
+  not used as a falsifiable gate.
 - The derived CFL boundary separates bounded and unstable recurrences.
 - The same reference recurrence remains device-resident on the available CUDA
   device.
@@ -45,7 +49,19 @@ $env:CUDA_CACHE_PATH='<worktree>/.cache/cuda'
 C:\Users\Asixa\miniconda3\envs\witwin2\python.exe -m pytest -q -p no:cacheprovider tests\fdtd\thin_wire\test_thin_wire_reference.py
 ```
 
-Measured result: 18 tests passed; lint passed.
+Measured result at acceptance: 18 tests passed; lint passed.
+
+The reference is consumed by the native implementation's acceptance gates, not
+only by its own unit tests: see
+`tests/fdtd/thin_wire/test_thin_wire_forward.py::test_native_wire_step_matches_the_torch_reference_oracle`
+together with the CFL bound pair
+`::test_native_wire_cfl_bound_is_tight_on_uniform_topology_and_never_exceeds_exact_limit`
+and `::test_native_wire_cfl_bound_has_strict_gershgorin_slack_on_nonuniform_topology`,
+which bind `AxisAlignedWireReference` and the frozen `AcceptanceBudget` to the
+compiled CUDA path. The bound is proven tight (an equality with the exact
+`2/omega_max` leapfrog limit) on a uniform wire and strictly conservative only
+where non-uniform coefficients give Gershgorin real slack, rather than merely
+"conservative against the reference spectrum".
 
 Independent module and phase reviews found no remaining must-fix items after the
 kernel-distance oracle, coefficient assembly, convergence, positivity, CFL scope,
