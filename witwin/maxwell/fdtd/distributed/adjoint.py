@@ -69,8 +69,14 @@ _MAGNETIC_NAMES = ("Hx", "Hy", "Hz")
 
 # Shard-solver attributes that place the shard outside the verified pure real
 # standard reverse class. Each maps to the reason surfaced by the guard.
+#
+# Absorbing boundaries are handled separately by ``active_absorber_type`` (below)
+# rather than a single boolean, because the verified envelope is the open-boundary
+# update: the committed parity/finite-difference gates run exclusively on
+# ``BoundarySpec.none()`` scenes (active_absorber_type == "none"). Every absorber
+# family -- "cpml"/"stablepml" (the CPML machinery) and the legacy graded-sigma
+# "pml"/"absorber" -- is therefore unverified and must fail closed, not just CPML.
 _UNSUPPORTED_SHARD_FLAGS = (
-    ("uses_cpml", "CPML absorbing boundaries"),
     ("complex_fields_enabled", "complex (Bloch split-field) state"),
     ("dispersive_enabled", "electric dispersive (ADE) media"),
     ("magnetic_dispersive_enabled", "magnetic dispersive (ADE) media"),
@@ -99,6 +105,14 @@ def require_distributed_adjoint_support(distributed) -> None:
         )
     for shard in distributed.shards:
         solver = shard.solver
+        active_absorber = str(getattr(solver, "active_absorber_type", "none")).lower()
+        if active_absorber != "none":
+            raise ValueError(
+                "Distributed FDTD checkpoint/replay currently supports only the pure "
+                "real standard open-boundary update; shard "
+                f"{shard.rank} runs a {active_absorber!r} absorbing boundary. Use "
+                "open/PEC boundaries for the trainable distributed path."
+            )
         for attribute, reason in _UNSUPPORTED_SHARD_FLAGS:
             if bool(getattr(solver, attribute, False)):
                 raise ValueError(
@@ -602,6 +616,13 @@ class _DistributedFDTDGradientBridge:
         checkpoints = [capture_distributed_checkpoint(distributed, 0)]
         for n in range(int(time_steps)):
             if n > 0 and n % stride == 0:
+                # The step kernels of the preceding iterations are enqueued on each
+                # shard's non-blocking compute/communication streams, while the
+                # checkpoint clones read the padded field storage on the device
+                # default stream. Enforce stream ordering before every mid-loop
+                # capture so the clone never races an in-flight update kernel; the
+                # cost is one sync per checkpoint stride (~sqrt(N) times total).
+                distributed._synchronize_all()
                 checkpoints.append(capture_distributed_checkpoint(distributed, n))
             distributed._advance_one_step(n, overlap_active=overlap_active)
         distributed._synchronize_all()

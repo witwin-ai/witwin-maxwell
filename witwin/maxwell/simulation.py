@@ -568,9 +568,19 @@ class Simulation:
             self._validate_trainable_parallel_fdtd()
             if self.config.parallel is not None and self.has_trainable_parameters:
                 # Trainable multi-GPU FDTD runs through the distributed joint-solve
-                # adjoint bridge; build and init the distributed solver so prepare()
-                # surfaces the same medium/boundary/objective guards a run would.
+                # adjoint bridge; build and init the distributed solver, then run the
+                # same medium/boundary/objective validators the bridge runs at run()
+                # so prepare() genuinely surfaces every fail-closed guard before the
+                # caller ever reaches run() (magnetic surface source terms, embedded
+                # circuit coupling, and non-point/tiled-monitor objectives included).
                 solver = self._build_fdtd_solver(initialize=True)
+                from .fdtd.distributed.adjoint import (
+                    require_distributed_adjoint_objective_support,
+                    require_distributed_adjoint_support,
+                )
+
+                require_distributed_adjoint_support(solver)
+                require_distributed_adjoint_objective_support(solver)
                 return PreparedSimulation(self, solver)
             solver = self._build_fdtd_solver(initialize=True)
             if self.has_trainable_parameters:
@@ -1007,15 +1017,24 @@ class Simulation:
             )
         # Scene/config-static guards for the trainable distributed path, all raised
         # here before the distributed solver allocates any shard. The pure real
-        # standard reverse is the only verified distributed adjoint core, so a CPML
-        # absorber, a dispersive/conductive/nonlinear/anisotropic/modulated medium,
-        # field shutoff, multi-source normalization, or a tiled-monitor objective is
-        # rejected up front rather than after a full forward.
-        if str(self.config.absorber).lower() == "cpml" and self.scene.boundary.uses_kind("pml"):
+        # standard reverse is the only verified distributed adjoint core, so any
+        # absorbing boundary, a dispersive/conductive/nonlinear/anisotropic/modulated
+        # medium, field shutoff, multi-source normalization, or a tiled-monitor
+        # objective is rejected up front rather than after a full forward.
+        #
+        # The absorber only activates when the boundary declares a PML kind
+        # (fdtd/boundary/runtime.py sets active_absorber_type from absorber_type only
+        # then); the verified adjoint envelope is the open-boundary update, whose
+        # parity/FD gates run exclusively on non-PML boundaries. Reject every absorber
+        # family here -- "cpml"/"stablepml" and the legacy graded-sigma "pml"/
+        # "absorber" alike -- rather than only the "cpml" string, so no unverified
+        # absorber slips through to run a distributed reverse outside the envelope.
+        if self.scene.boundary.uses_kind("pml"):
             raise ValueError(
-                "Multi-GPU FDTD adjoint does not support the CPML absorber yet; the "
-                "distributed CPML reverse core is not verified. Use open/PEC boundaries "
-                "for the trainable distributed path."
+                "Multi-GPU FDTD adjoint does not support absorbing (PML) boundaries "
+                f"yet (absorber={str(self.config.absorber).lower()!r}); the distributed "
+                "absorbing reverse core is not verified. Use open/PEC boundaries for "
+                "the trainable distributed path."
             )
         medium_reason = _nonstandard_medium_reason(self.scene)
         if medium_reason is not None:

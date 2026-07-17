@@ -219,6 +219,145 @@ def test_gradient_is_checkpoint_stride_invariant(cuda_p2p_devices, cuda_memory_c
     torch.testing.assert_close(grad_coarse, grad_fine, rtol=1.0e-4, atol=atol_floor)
 
 
+def test_checkpoint_capture_is_preceded_by_stream_sync(
+    cuda_p2p_devices, cuda_memory_cleanup, monkeypatch
+):
+    """Every checkpoint capture must be preceded by a stream synchronization.
+
+    The forward step kernels run on each shard's non-blocking compute/communication
+    streams while ``capture_distributed_checkpoint`` clones the padded field storage
+    on the device default stream. Without a ``_synchronize_all()`` before the clone,
+    a mid-loop capture can race an in-flight update kernel and snapshot torn state,
+    which the replayed segment then turns into a silently wrong gradient. This pins
+    the ordering contract by recording the interleaved call order: every capture --
+    the step-0 one and every mid-loop stride capture -- is immediately preceded by a
+    stream sync. Regression for the mid-loop captures (n % stride == 0, n > 0)
+    previously cloning with no sync ahead of them (only the step-0 capture was
+    synced). Removing the pre-capture ``_synchronize_all()`` makes this go red: a
+    mid-loop capture then follows the previous capture with no sync between them.
+    """
+
+    from witwin.maxwell.fdtd.distributed import adjoint as dist_adjoint
+    from witwin.maxwell.fdtd.distributed.solver import DistributedFDTD
+
+    events: list[tuple] = []
+    real_capture = dist_adjoint.capture_distributed_checkpoint
+    real_sync = DistributedFDTD._synchronize_all
+
+    def recording_capture(distributed, step):
+        events.append(("capture", int(step)))
+        return real_capture(distributed, step)
+
+    def recording_sync(self):
+        events.append(("sync",))
+        return real_sync(self)
+
+    monkeypatch.setattr(dist_adjoint, "capture_distributed_checkpoint", recording_capture)
+    monkeypatch.setattr(DistributedFDTD, "_synchronize_all", recording_sync)
+
+    base = _base_density()
+    # A short stride forces several mid-loop captures (not just step 0), exercising
+    # the loop path the fix guards.
+    _, grad = _solve(
+        base, parallel_devices=cuda_p2p_devices, source_x=-0.3, monitor_x=0.1,
+        want_grad=True, checkpoint_stride=10,
+    )
+    assert float(grad.abs().max()) > 0.0
+
+    capture_positions = [i for i, event in enumerate(events) if event[0] == "capture"]
+    captured_steps = [events[i][1] for i in capture_positions]
+    # Step-0 capture plus at least one mid-loop stride capture must have run, or the
+    # contract this test pins would be vacuous.
+    assert len(capture_positions) >= 2, f"expected multiple captures, got {events}"
+    assert captured_steps[0] == 0
+    assert any(step > 0 for step in captured_steps), captured_steps
+    for i in capture_positions:
+        assert i > 0 and events[i - 1] == ("sync",), (
+            f"capture at position {i} ({events[i]}) is not immediately preceded by a "
+            f"stream sync; the ordering contract is broken. Sequence: {events}"
+        )
+
+
+def _parallel_gather(devices):
+    return FDTDParallelConfig(
+        devices=devices,
+        transport="cuda_p2p",
+        gather_fields=True,
+        overlap=False,
+        result_device=devices[0],
+    )
+
+
+def _solve_full_field_dft(base, *, parallel_devices, source_x, want_grad):
+    """Solve with a full-field-DFT objective built from the gathered global field.
+
+    The loss reads the DFT ``Ez`` power on the right half of the x-axis only -- the
+    non-result-device shard's owned interval -- so the gradient flows through the
+    ``_scatter_field_grad_to_shard`` leg that writes the global field cotangent back
+    onto shard 1's owned slice. gather_fields=True is required so the global DFT
+    cotangent exists to scatter.
+    """
+
+    density = base.clone().to("cuda:0")
+    if want_grad:
+        density.requires_grad_(True)
+    scene = _scene(density, source_x=source_x, monitor_x=0.1, device="cuda:0")
+    kwargs = dict(
+        frequency=_FREQUENCY,
+        run_time=mw.TimeConfig(time_steps=_STEPS),
+        full_field_dft=True,
+    )
+    if parallel_devices is not None:
+        kwargs["parallel"] = _parallel_gather(parallel_devices)
+    result = mw.Simulation.fdtd(scene, **kwargs).run()
+
+    field = result.fields["EZ"]
+    power = field.real ** 2 + field.imag ** 2
+    # x is the third-from-last axis of the DFT field; restrict the loss to the right
+    # half (shard 1's owned columns) to isolate the non-result-device scatter leg.
+    nx = power.shape[-3]
+    right = power[..., nx // 2 + 1:, :, :]
+    loss = right.sum()
+    if want_grad:
+        loss.backward()
+        return float(loss.detach().cpu()), density.grad.detach().cpu().clone()
+    return float(loss.detach().cpu()), None
+
+
+def test_full_field_dft_objective_gradient_parity_single_vs_two_gpu(
+    cuda_p2p_devices, cuda_memory_cleanup
+):
+    """2-GPU backward on a full-field-DFT objective matches single-GPU.
+
+    Coverage gate for the advertised full-field-DFT capability (FEATURE_LIST /
+    support matrix). The loss is built from the gathered global DFT field restricted
+    to the right (non-result-device) shard's owned x-columns, so the cotangent must
+    be scattered back through ``_scatter_field_grad_to_shard`` onto shard 1's owned
+    slice. An off-by-one in that scatter breaks the 1-vs-2-GPU parity below. The
+    forward is bit-identical and the reverse differs only in gather/pullback
+    reduction order, so the gate matches the point-monitor parity gate.
+    """
+
+    base = _base_density()
+    single_loss, single_grad = _solve_full_field_dft(
+        base, parallel_devices=None, source_x=-0.3, want_grad=True
+    )
+    dist_loss, dist_grad = _solve_full_field_dft(
+        base, parallel_devices=cuda_p2p_devices, source_x=-0.3, want_grad=True
+    )
+
+    # Non-vacuity: the right-half field objective and its density gradient must carry
+    # real signal, or the scatter leg would not be exercised.
+    assert abs(single_loss) > 0.0
+    assert float(single_grad.abs().max()) > 0.0
+
+    torch.testing.assert_close(
+        torch.tensor(dist_loss), torch.tensor(single_loss), rtol=5.0e-5, atol=5.0e-6
+    )
+    atol_floor = 1.0e-6 * float(single_grad.abs().max())
+    torch.testing.assert_close(dist_grad, single_grad, rtol=1.0e-4, atol=atol_floor)
+
+
 def _solve_capture_grad_eps(base, *, parallel_devices, source_x, monitor_x):
     density = base.clone().to("cuda:0").requires_grad_(True)
     scene = _scene(density, source_x=source_x, monitor_x=monitor_x, device="cuda:0")
@@ -340,11 +479,27 @@ def test_guard_trainable_material_perturbation_rejected_at_prepare():
         _prepare_parallel(scene)
 
 
-def test_guard_cpml_absorber_rejected_at_prepare():
+@pytest.mark.parametrize(
+    "absorber",
+    ("cpml", "stablepml", "pml", "absorber"),
+)
+def test_guard_absorbing_boundary_rejected_at_prepare(absorber):
+    """Every absorber family must fail closed at prepare before any allocation.
+
+    The verified distributed adjoint envelope is the open-boundary update: the
+    parity/FD gates run exclusively on ``BoundarySpec.none()`` scenes. A PML
+    boundary activates the configured absorber (CPML machinery for
+    "cpml"/"stablepml", legacy graded-sigma for "pml"/"absorber"), none of which
+    has a verified distributed reverse core. Regression for the prepare guard
+    previously testing only ``absorber == "cpml"`` -- "stablepml" was rejected
+    late (after allocation) and "pml"/"absorber" ran the distributed reverse
+    outside the envelope (fail-open).
+    """
+
     scene = _guard_scene(boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0))
     scene.add_material_region(_trainable_density_region())
-    with pytest.raises(ValueError, match="CPML"):
-        _prepare_parallel(scene)
+    with pytest.raises(ValueError, match="absorbing"):
+        _prepare_parallel(scene, absorber=absorber)
 
 
 def test_guard_dispersive_medium_rejected_at_prepare():
@@ -404,3 +559,28 @@ def test_guard_shutoff_rejected_at_prepare():
     scene.add_material_region(_trainable_density_region())
     with pytest.raises(ValueError, match="shutoff"):
         _prepare_parallel(scene, shutoff=1.0e-4)
+
+
+def test_valid_trainable_parallel_scene_prepares(cuda_p2p_devices, cuda_memory_cleanup):
+    """A supported trainable Box-density parallel scene prepares successfully.
+
+    Positive counterpart to the guard regressions: prepare() now runs the same
+    ``require_distributed_adjoint_support`` / ``_objective_support`` validators the
+    bridge runs at run(), so prepare() genuinely surfaces every fail-closed guard.
+    This pins that those validators accept the supported open-boundary point-monitor
+    scene -- i.e. adding them to prepare() did not over-reject the happy path.
+    """
+
+    from witwin.maxwell.fdtd.distributed import DistributedFDTD
+
+    density = _base_density().clone().to("cuda:0").requires_grad_(True)
+    scene = _scene(density, source_x=-0.3, monitor_x=0.1, device="cuda:0")
+    simulation = mw.Simulation.fdtd(
+        scene,
+        frequency=_FREQUENCY,
+        run_time=mw.TimeConfig(time_steps=_STEPS),
+        parallel=_parallel(cuda_p2p_devices),
+    )
+    prepared = simulation.prepare()
+    assert isinstance(prepared.solver, DistributedFDTD)
+    assert prepared.solver.active_absorber_type == "none"

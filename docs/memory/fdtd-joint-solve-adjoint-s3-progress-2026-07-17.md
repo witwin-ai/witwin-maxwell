@@ -60,19 +60,28 @@ Part B. Deviations recorded below.
   reconciliation required. `tests/api/public/test_guard_census.py` green.
 
 ## Exit-gate evidence (2× A6000, CUDA_VISIBLE_DEVICES=0,1)
-- `tests/fdtd/multi_gpu/test_adjoint_parity.py` (12): 1-vs-2-GPU objective parity
+- `tests/fdtd/multi_gpu/test_adjoint_parity.py` (18): 1-vs-2-GPU objective parity
   (bit-identical forward, loss diff 0.0) and gradient parity (measured rel drift ~1e-7;
   gate rtol=1e-4 + atol=1e-6·max|grad|); central finite differences on density texels on
   the x-split and interior to each shard (`(1,2,2)/(2,2,2)/(3,2,2)`, source x=-0.3,
   monitor x=0.1) and with source+monitor on the interface node (min-rel-error over 3 h,
   measured ~1e-5, gate 2e-3); bitwise-reproducible gathered grad_eps (`torch.equal`);
   checkpoint-stride invariance (stride=1 no-replay vs stride=_STEPS full 60-step replay
-  agree within the parity gate, which also validates `replay_distributed_segment`); and
-  seven prepare-time guard regressions (raise before allocation).
+  agree within the parity gate, which also validates `replay_distributed_segment`);
+  1-vs-2-GPU **full-field-DFT** objective gradient parity (right-half `EZ` power loss,
+  isolating the non-result shard's `_scatter_field_grad_to_shard` leg — falsified by a
+  scatter misalignment, 90% grad mismatch); a **checkpoint-capture ordering contract**
+  test (records the interleaved sync/capture call order and asserts every capture — the
+  step-0 one and every mid-loop stride capture — is immediately preceded by a
+  `_synchronize_all()`; falsified by removing the pre-capture sync); and prepare-time
+  guard regressions, including the absorbing-boundary guard parametrized over all four
+  absorber families (`cpml`/`stablepml`/`pml`/`absorber`), all rejected before
+  allocation.
 - `tests/fdtd/multi_gpu/test_material_region_forward.py` (1): distributed Box density
   forward — gathered per-shard compiled eps equals single-GPU exactly (atol 0), plus
   field/monitor parity within the plan gates.
-- `tests/fdtd/multi_gpu` 147 passed; `tests/api/public` 31 passed;
+- `tests/fdtd/multi_gpu` 158 passed; `tests/api/public` 31 passed;
+  `tests/gradients/test_fdtd_adjoint_bridge.py` 54 passed (combined 243);
   `tests/fdtd/multi_gpu/{test_parallel_public_api,test_adjoint_replay,test_guard_regressions}`
   updated for the new capability boundary.
 

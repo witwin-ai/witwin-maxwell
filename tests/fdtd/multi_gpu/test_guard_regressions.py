@@ -144,6 +144,53 @@ def _trainable_circuit_scene() -> mw.Scene:
     )
 
 
+@pytest.mark.parametrize("absorber", ("cpml", "stablepml", "pml", "absorber"))
+def test_require_distributed_adjoint_support_rejects_every_absorber_family(
+    absorber, cuda_p2p_devices, cuda_memory_cleanup
+):
+    """Defense in depth: the reverse-support guard fails closed on any absorber.
+
+    The public ``Simulation`` guard rejects a PML-boundary trainable+parallel scene
+    at prepare, but the distributed reverse-support guard must independently reject
+    every absorber family too, because the verified adjoint envelope is the
+    open-boundary update only. Regression for the guard previously keying on the
+    single ``uses_cpml`` boolean (which the legacy graded-sigma "pml"/"absorber"
+    absorbers do not set), which let them run the distributed reverse outside the
+    verified envelope.
+    """
+
+    from witwin.maxwell.fdtd.distributed.adjoint import (
+        require_distributed_adjoint_support,
+    )
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
+        grid=mw.GridSpec.uniform(0.1),
+        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+        device="cuda:0",
+    )
+    scene.add_source(
+        mw.PointDipole(
+            position=(0.0, 0.0, 0.0),
+            polarization="Ez",
+            profile="ideal",
+            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
+            name="drive",
+        )
+    )
+    distributed = DistributedFDTD(
+        scene,
+        frequency=_FREQUENCY,
+        parallel=_parallel(devices=cuda_p2p_devices),
+        absorber_type=absorber,
+    )
+    distributed.init_field()
+
+    assert distributed.active_absorber_type == absorber
+    with pytest.raises(ValueError, match="absorbing"):
+        require_distributed_adjoint_support(distributed)
+
+
 def test_solver_trainable_guard_covers_circuit_parameter_channel():
     """Defense in depth: the distributed solver's own trainable guard rejects a
     trainable circuit parameter even though the public ``Simulation`` guard would
