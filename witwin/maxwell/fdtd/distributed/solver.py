@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -16,20 +15,14 @@ from ...monitors import (
     FinitePlaneMonitor,
     FluxTimeMonitor,
     MediumMonitor,
-    ModeMonitor,
     PermittivityMonitor,
     PlaneMonitor,
-    PointMonitor,
     WireMonitor,
 )
-from ...scene import Domain, GridSpec, Scene, prepare_scene
+from ...scene import Scene, prepare_scene
 from ...ports import LumpedPort, ModePort, TerminalPort
 from ...sources import PointDipole, UniformCurrentSource
 from ...fdtd_parallel import FDTDParallelConfig, FDTDPartitionPlan, FDTDShardLayout
-from ..excitation import (
-    inject_electric_surface_source_terms,
-    inject_magnetic_surface_source_terms,
-)
 from ..observers import _merge_frequency_lists
 from ..solver import FDTD
 from ..runtime import stepping
@@ -44,14 +37,9 @@ from .networks import DistributedNetworkRuntime
 from .frequency_counts import reduce_frequency_sample_counts
 from .monitor_merge import merge_sharded_monitor_payloads
 from .persistence import export_distributed_field_shards
-from .sources import crop_solver_source_terms_to_owned_x
-from .source_corrections import correct_ideal_point_ex_control_volume
+from .shard_engine import ShardEngine, _plane_position
 from .transport import CudaP2PHaloTransport
 from .wire import DistributedWireRuntime, move_wire_monitor
-
-
-_CELL_COMPONENTS = frozenset(("Ex", "Hy", "Hz"))
-_NODE_COMPONENTS = frozenset(("Ey", "Ez", "Hx"))
 
 
 def _unsupported_distributed_trainable_tensors(scene: Scene) -> tuple[torch.Tensor, ...]:
@@ -88,64 +76,6 @@ def _unsupported_distributed_trainable_tensors(scene: Scene) -> tuple[torch.Tens
     )
 
 
-@dataclass
-class FDTDShard:
-    rank: int
-    device: torch.device
-    layout: FDTDShardLayout
-    solver: FDTD
-    compute_stream: torch.cuda.Stream
-    communication_stream: torch.cuda.Stream
-    electric_ready: torch.cuda.Event
-    electric_received: torch.cuda.Event
-    magnetic_ready: torch.cuda.Event
-    magnetic_received: torch.cuda.Event
-    halo_hy_low: torch.Tensor | None
-    halo_hz_low: torch.Tensor | None
-    peak_memory_bytes: int = 0
-
-    @property
-    def is_first(self) -> bool:
-        return self.rank == 0
-
-    @property
-    def is_last(self) -> bool:
-        return self.layout.owns_physical_face("x", "high")
-
-
-def _physical_axis_nodes(prepared_scene, axis: str) -> np.ndarray:
-    nodes = np.asarray(getattr(prepared_scene, f"{axis}_nodes64"), dtype=np.float64)
-    low = int(prepared_scene.pml_thickness_for_face(axis, "low"))
-    high = int(prepared_scene.pml_thickness_for_face(axis, "high"))
-    stop = nodes.size - high if high else nodes.size
-    return np.array(nodes[low:stop], copy=True)
-
-
-def _owns_global_x(layout: FDTDShardLayout, prepared_scene, x: float) -> bool:
-    nodes = np.asarray(prepared_scene.x_nodes64, dtype=np.float64)
-    value = float(x)
-    if value <= float(nodes[0]):
-        cell = 0
-    elif value >= float(nodes[-1]):
-        cell = nodes.size - 2
-    else:
-        cell = int(np.searchsorted(nodes, value, side="right")) - 1
-    return int(layout.global_cell_owned.start) <= cell < int(layout.global_cell_owned.stop)
-
-
-def _point_source_position(scene: Scene, source_name: str):
-    for source in scene.sources:
-        if getattr(source, "name", None) == source_name and hasattr(source, "position"):
-            return source.position
-    return None
-
-
-def _plane_position(monitor: PlaneMonitor | FinitePlaneMonitor | ModeMonitor) -> float:
-    if isinstance(monitor, PlaneMonitor):
-        return float(monitor.position)
-    return float(monitor.plane_position)
-
-
 def _matches_x_node(nodes: np.ndarray, node_index: int, value: float) -> bool:
     coordinate = float(nodes[node_index])
     spacings = []
@@ -161,92 +91,6 @@ def _matches_x_node(nodes: np.ndarray, node_index: int, value: float) -> bool:
     )
     tolerance = 64.0 * np.finfo(np.float64).eps * scale
     return abs(float(value) - coordinate) <= tolerance
-
-
-def _local_monitors(scene: Scene, layout: FDTDShardLayout, global_prepared):
-    selected = []
-    for monitor in scene.monitors:
-        if isinstance(monitor, WireMonitor):
-            # Wire monitors are owned and finalized by DistributedWireRuntime on the
-            # single state-owner shard, not accumulated per field shard.
-            continue
-        if isinstance(monitor, (PermittivityMonitor, MediumMonitor)):
-            # Material monitors are resolved from compiled tensors, not accumulated.
-            selected.append(monitor)
-            continue
-        if isinstance(monitor, PointMonitor):
-            if _owns_global_x(layout, global_prepared, monitor.position[0]):
-                selected.append(monitor)
-            continue
-        if isinstance(monitor, FieldTimeMonitor) and monitor.region_kind == "point":
-            if _owns_global_x(layout, global_prepared, monitor.position[0]):
-                selected.append(monitor)
-            continue
-        if isinstance(monitor, DipoleEmissionMonitor):
-            position = _point_source_position(scene, monitor.source_name)
-            if position is not None and _owns_global_x(layout, global_prepared, position[0]):
-                selected.append(monitor)
-            continue
-        if isinstance(monitor, (PlaneMonitor, FinitePlaneMonitor, ModeMonitor)):
-            if monitor.axis != "x" or _owns_global_x(
-                layout,
-                global_prepared,
-                _plane_position(monitor),
-            ):
-                selected.append(monitor)
-            continue
-        raise ValueError(
-            f"Multi-GPU FDTD does not support {type(monitor).__name__}."
-        )
-    return selected
-
-
-def _build_local_scene(
-    logical_scene: Scene,
-    global_prepared,
-    layout: FDTDShardLayout,
-    physical_x_nodes: np.ndarray,
-) -> Scene:
-    begin = int(layout.physical_cell_begin)
-    end = int(layout.physical_cell_end)
-    storage_begin = begin - (1 if layout.rank > 0 else 0)
-    local_x = np.array(physical_x_nodes[storage_begin : end + 1], copy=True)
-    local_y = _physical_axis_nodes(global_prepared, "y")
-    local_z = _physical_axis_nodes(global_prepared, "z")
-
-    global_boundary = logical_scene.boundary
-    local_boundary = global_boundary.with_faces(
-        x_low=global_boundary.face_kind("x", "low") if layout.rank == 0 else "none",
-        x_high=(
-            global_boundary.face_kind("x", "high")
-            if layout.owns_physical_face("x", "high")
-            else "none"
-        ),
-    )
-    local_domain = Domain(
-        bounds=(
-            (float(local_x[0]), float(local_x[-1])),
-            (float(local_y[0]), float(local_y[-1])),
-            (float(local_z[0]), float(local_z[-1])),
-        )
-    )
-    local_grid = GridSpec.custom(local_x, local_y, local_z)
-    return logical_scene.clone(
-        domain=local_domain,
-        grid=local_grid,
-        boundary=local_boundary,
-        monitors=_local_monitors(logical_scene, layout, global_prepared),
-        ports=(),
-        circuits=(),
-        networks=(),
-        # Thin wires are coupled to Yee edges spread across shards, so the
-        # per-shard local solver must not build its own single-GPU wire runtime.
-        # DistributedWireRuntime owns the compressed I/q state on one shard and
-        # drives the distributed sampling/deposition explicitly.
-        thin_wires=(),
-        device=str(layout.device),
-        symmetry=(None, logical_scene.symmetry[1], logical_scene.symmetry[2]),
-    )
 
 
 def _bounded_x_kwargs(layout: FDTDShardLayout, component: str, x_slice: slice) -> dict[str, int]:
@@ -416,10 +260,10 @@ class DistributedFDTD:
         self.c = 299792458.0
         self.Nx, self.Ny, self.Nz = self.scene.Nx, self.scene.Ny, self.scene.Nz
         self.dt = None
-        self.shards: tuple[FDTDShard, ...] = ()
+        self.shards: tuple[ShardEngine, ...] = ()
         self.partition_plan: FDTDPartitionPlan | None = None
         self.shard_layouts: tuple[FDTDShardLayout, ...] = ()
-        self.transport = CudaP2PHaloTransport(self.devices)
+        self.transport = CudaP2PHaloTransport(self.devices, result_device=self.device)
         self.last_solve_elapsed_s = None
         self._cuda_graph_active = False
         self._tail_graph_active = False
@@ -738,61 +582,23 @@ class DistributedFDTD:
             high_pml_cells=high_pml,
         )
         self.shard_layouts = self.partition_plan.shard_layouts
-        physical_x = _physical_axis_nodes(self.scene, "x")
 
-        shards = []
-        for layout in self.shard_layouts:
-            device = torch.device(layout.device)
-            with torch.cuda.device(device):
-                torch.cuda.reset_peak_memory_stats(device)
-                local_scene = _build_local_scene(
-                    self.logical_scene,
-                    self.scene,
-                    layout,
-                    physical_x,
-                )
-                local_solver = FDTD(
-                    local_scene,
-                    frequency=self.frequency,
-                    absorber_type=self.absorber_type,
-                    cpml_config=self.cpml_config,
-                )
-                local_solver.dt = self.dt
-                local_solver.init_field()
-                if local_solver.nonlinear_enabled:
-                    raise ValueError(
-                        "Multi-GPU nonlinear media require additional collocation halos and "
-                        "bounded nonlinear kernels."
-                    )
-                if local_solver.full_aniso_enabled:
-                    raise ValueError(
-                        "Multi-GPU full off-diagonal anisotropy requires additional H/curl halos."
-                    )
-                crop_solver_source_terms_to_owned_x(local_solver, layout)
-                correct_ideal_point_ex_control_volume(local_solver, layout, self.scene)
-                compute_stream = torch.cuda.Stream(device=device)
-                communication_stream = torch.cuda.Stream(device=device, priority=-1)
-                halo_hy = local_solver.Hy[0] if layout.rank > 0 else None
-                compute_stream.wait_stream(torch.cuda.current_stream(device))
-                halo_hz = local_solver.Hz[0] if layout.rank > 0 else None
-                shard = FDTDShard(
-                    rank=layout.rank,
-                    device=device,
-                    layout=layout,
-                    solver=local_solver,
-                    compute_stream=compute_stream,
-                    communication_stream=communication_stream,
-                    electric_ready=torch.cuda.Event(),
-                    electric_received=torch.cuda.Event(),
-                    magnetic_ready=torch.cuda.Event(),
-                    magnetic_received=torch.cuda.Event(),
-                    halo_hy_low=halo_hy,
-                    halo_hz_low=halo_hz,
-                )
-                self._validate_local_layout(shard)
-                shards.append(shard)
-
-        self.shards = tuple(shards)
+        # Every rank-local engine is built deterministically from the logical
+        # scene + its partition layout; the single-process coordinator simply
+        # builds one engine per layout. A one-process-per-GPU launcher builds only
+        # its own rank's engine from the identical inputs.
+        self.shards = tuple(
+            ShardEngine.build(
+                self.logical_scene,
+                self.scene,
+                layout,
+                frequency=self.frequency,
+                absorber_type=self.absorber_type,
+                cpml_config=self.cpml_config,
+                dt=self.dt,
+            )
+            for layout in self.shard_layouts
+        )
         dts = tuple(float(shard.solver.dt) for shard in self.shards)
         if not all(np.isclose(self.dt, dt, rtol=0.0, atol=1e-18) for dt in dts):
             raise RuntimeError(f"Shard-local time steps disagree: {dts}.")
@@ -840,23 +646,6 @@ class DistributedFDTD:
             )
         self._initialized = True
 
-    @staticmethod
-    def _validate_local_layout(shard: FDTDShard) -> None:
-        layout = shard.layout
-        solver = shard.solver
-        cell_owned = layout.storage_cell_owned
-        node_owned = layout.storage_node_owned
-        if cell_owned.stop > solver.Nx - 1 or node_owned.stop > solver.Nx:
-            raise RuntimeError(
-                f"Rank {shard.rank} padded storage is smaller than its declared owned slices."
-            )
-        expected_low_pad = 0 if shard.rank == 0 else 1
-        if cell_owned.start != expected_low_pad or node_owned.start != expected_low_pad:
-            raise RuntimeError(
-                f"Rank {shard.rank} has invalid padded low ownership: "
-                f"cell={cell_owned}, node={node_owned}."
-            )
-
     def _prepare_outputs(self, time_steps, dft_frequency, dft_window, full_field_dft):
         spectral_enabled = any(shard.solver.observers for shard in self.shards)
         default_frequencies = dft_frequency if dft_frequency is not None else (self.frequency,)
@@ -869,21 +658,12 @@ class DistributedFDTD:
             _merge_frequency_lists(default_frequencies, *monitor_frequencies) if spectral_enabled else ()
         )
         for shard in self.shards:
-            solver = shard.solver
-            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
-                if dft_frequency is not None and full_field_dft:
-                    solver.enable_dft(dft_frequency, window_type=dft_window, end_step=time_steps)
-                else:
-                    solver.dft_enabled = False
-                    solver._dft_entries = []
-                    solver._sync_dft_legacy_state()
-                observer_frequency = dft_frequency if dft_frequency is not None else solver.source_frequency
-                if solver.observers:
-                    solver._prepare_observers(observer_frequency, dft_window, time_steps)
-                if solver.time_observers:
-                    solver._prepare_time_observers(time_steps)
-                solver._shutoff_triggered = False
-                solver._shutoff_step = None
+            shard.prepare_outputs(
+                dft_frequency=dft_frequency,
+                full_field_dft=full_field_dft,
+                dft_window=dft_window,
+                time_steps=time_steps,
+            )
         if self._distributed_circuit is not None:
             self._distributed_circuit.prepare_outputs(
                 time_steps=int(time_steps),
@@ -1021,16 +801,15 @@ class DistributedFDTD:
                     )
 
     def _advance_one_step(self, n: int, *, overlap_active: bool) -> None:
+        # The coordinator orchestrates one Yee step as an alternation of rank-local
+        # engine phases and transport-mediated field launches: pre-magnetic
+        # bookkeeping, the magnetic update (electric halo inside), magnetic
+        # sources, the electric update (magnetic halo inside), electric sources,
+        # and accumulation. Owner-resident circuit/network/wire runtimes are
+        # driven between the phases at their fixed schedule positions.
         time_value = n * self.dt
         for shard in self.shards:
-            solver = shard.solver
-            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
-                if solver.modulation_enabled:
-                    solver.fdtd_module.advanceModulationTime3D(
-                        ModulationTime=solver._modulation_time,
-                        dt=solver.dt,
-                    ).launchRaw()
-                solver._advance_magnetic_dispersive_state()
+            shard.advance_pre_magnetic()
 
         if overlap_active:
             self._advance_magnetic_overlapped()
@@ -1038,15 +817,7 @@ class DistributedFDTD:
             self._advance_magnetic_serialized()
 
         for shard in self.shards:
-            solver = shard.solver
-            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
-                if solver._magnetic_source_terms:
-                    inject_magnetic_surface_source_terms(solver, time_value=time_value)
-                solver._apply_magnetic_dispersive_corrections()
-                solver._advance_dispersive_state()
-                if solver.nonlinear_enabled:
-                    solver._update_nonlinear_electric_coefficients()
-                stepping.capture_aniso_conduction_currents(solver)
+            shard.apply_magnetic_sources_and_corrections(time_value)
 
         # Wire EMF is sampled from the pre-update E field and the compressed I/q
         # recurrence is advanced on the owner shard before the electric update,
@@ -1066,19 +837,7 @@ class DistributedFDTD:
             self._distributed_wire.apply_deposit()
 
         for shard in self.shards:
-            solver = shard.solver
-            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
-                if solver.full_aniso_enabled:
-                    stepping.apply_full_aniso_corrections(solver)
-                    stepping.apply_full_aniso_conduction(solver)
-                if getattr(solver, "_sibc", None) is not None:
-                    raise RuntimeError("Distributed SIBC surface ownership is not enabled.")
-                if solver._electric_source_terms:
-                    inject_electric_surface_source_terms(
-                        solver, time_value=time_value + 0.5 * float(solver.dt)
-                    )
-                if solver._source_terms:
-                    solver.add_source(time_value=time_value)
+            shard.apply_electric_sources(time_value)
 
         if self._distributed_circuit is not None:
             self._distributed_circuit.apply()
@@ -1086,42 +845,10 @@ class DistributedFDTD:
             self._distributed_network.apply()
 
         for shard in self.shards:
-            solver = shard.solver
-            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
-                solver._apply_dispersive_corrections()
-                stepping.enforce_pec_boundaries(solver)
-                stepping.apply_mur_boundaries(solver)
-                solver.accumulate_dft(n)
-                solver.accumulate_observers(n)
-                solver.accumulate_time_observers(n)
+            shard.accumulate(n)
 
         if self._distributed_wire is not None:
             self._distributed_wire.accumulate_monitors(n)
-
-    def _owned_electric_energy(self, shard: FDTDShard) -> torch.Tensor:
-        solver = shard.solver
-        cs = shard.layout.storage_cell_owned
-        ns = shard.layout.storage_node_owned
-        return (
-            (solver.eps_Ex[cs] * solver.Ex[cs] * solver.Ex[cs]).sum()
-            + (solver.eps_Ey[ns] * solver.Ey[ns] * solver.Ey[ns]).sum()
-            + (solver.eps_Ez[ns] * solver.Ez[ns] * solver.Ez[ns]).sum()
-        )
-
-    def _global_shutoff_energy(self) -> torch.Tensor:
-        local_energies = []
-        for shard in self.shards:
-            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
-                local = self._owned_electric_energy(shard)
-                shard.electric_ready.record(shard.compute_stream)
-            local_energies.append(local)
-        with torch.cuda.device(self.device):
-            result_stream = torch.cuda.current_stream(self.device)
-            total = torch.zeros((), device=self.device, dtype=torch.float32)
-            for shard, local in zip(self.shards, local_energies):
-                result_stream.wait_event(shard.electric_ready)
-                total.add_(local.to(self.device, non_blocking=True))
-            return total
 
     def _synchronize_all(self) -> None:
         for shard in self.shards:
@@ -1129,68 +856,18 @@ class DistributedFDTD:
             shard.communication_stream.synchronize()
 
     def _gather_component(self, component: str, local_values: tuple[torch.Tensor, ...]) -> torch.Tensor:
-        is_cell = component.capitalize() in _CELL_COMPONENTS
-        global_x = self.Nx - 1 if is_cell else self.Nx
-        sample = local_values[0]
-        x_axis = sample.ndim - 3
-        shape = list(sample.shape)
-        shape[x_axis] = global_x
-        destination = torch.empty(tuple(shape), device=self.device, dtype=sample.dtype)
-        for shard, value in zip(self.shards, local_values):
-            local_slice = (
-                shard.layout.storage_cell_owned if is_cell else shard.layout.storage_node_owned
-            )
-            global_slice = (
-                shard.layout.global_cell_owned if is_cell else shard.layout.global_node_owned
-            )
-            src_index = [slice(None)] * value.ndim
-            dst_index = [slice(None)] * destination.ndim
-            src_index[x_axis] = local_slice
-            dst_index[x_axis] = global_slice
-            destination[tuple(dst_index)].copy_(value[tuple(src_index)], non_blocking=True)
-        return destination
+        return self.transport.gather_component_slabs(
+            self.shards,
+            component,
+            local_values,
+            result_device=self.device,
+            global_nx=self.Nx,
+        )
 
     def _collect_output(self) -> dict[str, Any] | None:
-        local_fields: dict[str, list[torch.Tensor]] = {}
-        shard_monitor_payloads: list[tuple[int, dict[str, Any]]] = []
-        frequency_metadata: tuple[float, ...] | None = None
-        for shard in self.shards:
-            solver = shard.solver
-            shard_monitors: dict[str, Any] = {}
-            if solver.dft_enabled:
-                local = solver.get_frequency_solution(all_frequencies=True)
-                metadata = local.get("frequencies")
-                if metadata is not None:
-                    if isinstance(metadata, torch.Tensor):
-                        values = tuple(
-                            float(value) for value in metadata.detach().cpu().tolist()
-                        )
-                    else:
-                        values = tuple(float(value) for value in metadata)
-                    if frequency_metadata is None:
-                        frequency_metadata = values
-                    elif frequency_metadata != values:
-                        raise RuntimeError(
-                            "Shard-local DFT frequency metadata is inconsistent."
-                        )
-                for name, tensor in local.items():
-                    if name not in {"Ex", "Ey", "Ez"}:
-                        continue
-                    local_fields.setdefault(name, []).append(tensor)
-            for enabled, getter in (
-                (solver.observers_enabled, solver.get_observer_results),
-                (solver.time_observers_enabled, solver.get_time_observer_results),
-            ):
-                if not enabled:
-                    continue
-                for name, payload in getter().items():
-                    if name in shard_monitors:
-                        raise RuntimeError(
-                            f"Monitor {name!r} appears in multiple observer groups on shard "
-                            f"{shard.rank}."
-                        )
-                    shard_monitors[name] = payload
-            shard_monitor_payloads.append((shard.rank, shard_monitors))
+        shard_monitor_payloads, local_fields, frequency_metadata = (
+            self.transport.gather_monitor_payloads(self.shards)
+        )
 
         monitors = merge_sharded_monitor_payloads(
             (monitor.name for monitor in self.logical_scene.resolved_monitors()),
@@ -1309,7 +986,7 @@ class DistributedFDTD:
         for n in range(int(time_steps)):
             self._advance_one_step(n, overlap_active=overlap_active)
             if shutoff > 0.0 and (n + 1) % int(shutoff_check_interval) == 0:
-                energy = self._global_shutoff_energy()
+                energy = self.transport.reduce_owned_energy(self.shards)
                 self._shutoff_peak = torch.maximum(self._shutoff_peak, energy)
                 if bool(
                     n >= shutoff_min_step
@@ -1322,18 +999,12 @@ class DistributedFDTD:
         self._synchronize_all()
         self.last_solve_elapsed_s = time.perf_counter() - start
         for shard in self.shards:
-            solver = shard.solver
-            solver.last_solve_elapsed_s = self.last_solve_elapsed_s
-            solver._shutoff_triggered = self._shutoff_triggered
-            solver._shutoff_step = self._shutoff_step
-            if self._shutoff_triggered:
-                with torch.cuda.device(shard.device):
-                    stepping._complete_spectral_normalization(solver, int(time_steps))
-            if solver.dft_enabled:
-                solver._sync_dft_legacy_state()
-            if solver.observers_enabled:
-                solver._sync_observer_legacy_state()
-            shard.peak_memory_bytes = int(torch.cuda.max_memory_allocated(shard.device))
+            shard.finalize_after_solve(
+                time_steps=int(time_steps),
+                elapsed=self.last_solve_elapsed_s,
+                shutoff_triggered=self._shutoff_triggered,
+                shutoff_step=self._shutoff_step,
+            )
 
         if self._shutoff_triggered and self._distributed_wire is not None:
             self._distributed_wire.complete_normalization(int(time_steps))
@@ -1350,34 +1021,8 @@ class DistributedFDTD:
 
     def _build_parallel_stats(self, time_steps: int, overlap_active: bool) -> dict[str, Any]:
         steps_run = (self._shutoff_step + 1) if self._shutoff_triggered else int(time_steps)
-        halo_bytes_per_step = 0
-        for left, right in zip(self.shards[:-1], self.shards[1:]):
-            halo_bytes_per_step += (
-                left.solver.Ey[-1].numel()
-                + left.solver.Ez[-1].numel()
-                + right.solver.Hy[0].numel()
-                + right.solver.Hz[0].numel()
-            ) * left.solver.Ex.element_size()
-        partitions = tuple(
-            {
-                "rank": shard.rank,
-                "device": str(shard.device),
-                "physical_cells": (
-                    shard.layout.physical_cell_begin,
-                    shard.layout.physical_cell_end,
-                ),
-                "global_cells": (
-                    shard.layout.global_cell_owned.start,
-                    shard.layout.global_cell_owned.stop,
-                ),
-                "global_nodes": (
-                    shard.layout.global_node_owned.start,
-                    shard.layout.global_node_owned.stop,
-                ),
-                "peak_memory_bytes": shard.peak_memory_bytes,
-            }
-            for shard in self.shards
-        )
+        gathered = self.transport.gather_stats(self.shards)
+        halo_bytes_per_step = gathered["halo_bytes_per_step"]
         stats = {
             "devices": tuple(str(device) for device in self.devices),
             "decomposition_axis": "x",
@@ -1389,12 +1034,10 @@ class DistributedFDTD:
             "result_device": str(self.device),
             "gather_preflight": dict(self._gather_preflight),
             "dft_preflight": {device: dict(stats) for device, stats in self._dft_preflight.items()},
-            "partitions": partitions,
+            "partitions": gathered["partitions"],
             "halo_bytes_per_step": int(halo_bytes_per_step),
             "halo_bytes_total": int(halo_bytes_per_step * steps_run),
-            "peak_memory_bytes": {
-                str(shard.device): shard.peak_memory_bytes for shard in self.shards
-            },
+            "peak_memory_bytes": gathered["peak_memory_bytes"],
             "peak_memory_bytes_including_gather": dict(self._peak_memory_including_gather),
             "wall_time_s": self.last_solve_elapsed_s,
             "compute_time_s": None,
