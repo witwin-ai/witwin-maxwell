@@ -82,6 +82,7 @@ def _prepare(
         ),
         termination=termination,
         thevenin_voltage=torch.tensor(thevenin_voltage, device=device, dtype=torch.float64),
+        diagnostics=True,
     )
     return runtime, eps_edge, volume
 

@@ -184,3 +184,76 @@ def test_port_step_profiler_has_no_scalar_sync_or_host_device_copy():
     assert "aten::item" not in event_names
     assert "aten::_local_scalar_dense" not in event_names
     assert not any("Memcpy HtoD" in name or "Memcpy DtoH" in name for name in event_names)
+
+
+def _passive_hot_path_op_inventory(solver, *, steps: int = 16) -> dict[str, int]:
+    """Deterministic per-window op tallies for the passive port step."""
+
+    for _ in range(8):
+        apply_port_runtimes(solver)
+        accumulate_port_observers(solver)
+    torch.cuda.synchronize()
+
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        profile_memory=True,
+        acc_events=True,
+    ) as profile:
+        for _ in range(steps):
+            apply_port_runtimes(solver)
+            accumulate_port_observers(solver)
+    torch.cuda.synchronize()
+
+    tally = {
+        "launches": 0,
+        "allocs": 0,
+        "memcpy_dtod": 0,
+        "memcpy_hostside": 0,
+        "scalar_sync": 0,
+        "device_mem": 0,
+    }
+    for event in profile.key_averages():
+        key = event.key
+        if "cudaLaunchKernel" in key:
+            tally["launches"] += event.count
+        if key in ("aten::empty", "aten::empty_strided", "aten::empty_like"):
+            tally["allocs"] += event.count
+        if "Memcpy DtoD" in key:
+            tally["memcpy_dtod"] += event.count
+        if "Memcpy HtoD" in key or "Memcpy DtoH" in key:
+            tally["memcpy_hostside"] += event.count
+        if key in ("aten::item", "aten::_local_scalar_dense"):
+            tally["scalar_sync"] += event.count
+        tally["device_mem"] += max(0, getattr(event, "self_device_memory_usage", 0))
+    return tally
+
+
+def test_passive_series_rlc_port_step_stays_within_op_count_ceiling():
+    # Op-count contract for the passive-termination hot path. Deterministic host
+    # tallies only (no timing asserted). A passive SeriesRLC port must add no
+    # per-step allocation, no host<->device transfer, and no scalar sync, and
+    # must keep the launch/DtoD schedule tight. Un-gating the lumped diagnostics
+    # (LumpedRuntime.diagnostics_enabled) or reintroducing per-step allocations
+    # pushes these tallies over the ceiling and turns this red.
+    solver = mw.Simulation.fdtd(
+        _port_scene(termination=mw.SeriesRLC(r=25.0, l=0.5e-9, c=1.0e-12)),
+        frequency=3.0e9,
+        run_time=mw.TimeConfig(time_steps=96),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+    ).prepare().solver
+    prepare_port_spectral_accumulators(solver, 96, "none")
+
+    steps = 16
+    tally = _passive_hot_path_op_inventory(solver, steps=steps)
+
+    assert tally["allocs"] == 0
+    assert tally["device_mem"] == 0
+    assert tally["scalar_sync"] == 0
+    assert tally["memcpy_hostside"] == 0
+    # Measured post-fix schedule: 21 launches, 2 DtoD copies per step. Ceilings
+    # carry small headroom so genuine reductions pass and regressions fail.
+    assert tally["launches"] <= steps * 26
+    assert tally["memcpy_dtod"] <= steps * 4

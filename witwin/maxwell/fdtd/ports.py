@@ -932,6 +932,14 @@ def apply_port_runtimes(solver) -> None:
     for runtime in getattr(solver, "_port_runtimes", ()):
         if runtime.lumped is None or runtime.embedded_network_name is not None:
             continue
+        if runtime.source_kind is None:
+            # Passive termination: the drive is identically the prepared default
+            # (zero). Skip the per-step waveform evaluation and its allocation.
+            apply_lumped_runtime(
+                runtime.lumped,
+                getattr(solver, runtime.field_name),
+            )
+            continue
         drive = _evaluate_drive(runtime)
         apply_lumped_runtime(
             runtime.lumped,
