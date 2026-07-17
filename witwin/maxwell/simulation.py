@@ -517,7 +517,49 @@ class Simulation:
                 "update; frequency-domain solvers cannot ignore Scene.networks."
             )
 
+    def _reject_embedded_network_port_conflicts(self) -> None:
+        """Reject excitation/termination on network-connected ports on every path.
+
+        The single-device runtime enforces this during port-runtime preparation
+        (see ``witwin/maxwell/fdtd/ports.py``). The multi-GPU path builds its own
+        network port runtimes and hardcodes ``resistance=0.0`` with no excitation,
+        so without this guard a PortExcitation, PortSweep, or ``port.termination``
+        aimed at a network-connected port would be silently dropped rather than
+        rejected. Running this here keeps the rejection identical across both the
+        single-device and distributed paths.
+        """
+
+        network_by_port = {
+            port_name: network.name
+            for network in getattr(self.scene, "networks", ())
+            for port_name in network.connected_port_names
+        }
+        if not network_by_port:
+            return
+
+        def _reject(port_name: str) -> None:
+            embedded_network_name = network_by_port.get(port_name)
+            if embedded_network_name is not None:
+                raise ValueError(
+                    f"Port {port_name!r} connected to embedded network "
+                    f"{embedded_network_name!r} cannot also declare an excitation "
+                    "or termination."
+                )
+
+        if self.port_sweep is not None:
+            swept_ports = self.port_sweep.ports
+            if swept_ports is None:
+                swept_ports = tuple(port.name for port in self.scene.ports)
+            for port_name in swept_ports:
+                _reject(port_name)
+        for excitation in self.excitations:
+            _reject(excitation.port_name)
+        for port in self.scene.ports:
+            if getattr(port, "termination", None) is not None:
+                _reject(port.name)
+
     def _validate_port_excitations(self) -> None:
+        self._reject_embedded_network_port_conflicts()
         bound_port_names = {
             binding.port_name
             for circuit in self.scene.circuits
@@ -909,6 +951,10 @@ class Simulation:
                 absorber_type=self.config.absorber,
                 cpml_config=self.config.cpml_config,
             )
+            # Mirror the single-device path so the owner shard enforces the
+            # embedded-network fitted-band 'reject' contract on the full set of
+            # requested output frequencies, not just the time-stepping frequency.
+            solver._requested_port_frequencies = self.frequencies
             if initialize:
                 solver.init_field()
             return solver

@@ -38,6 +38,7 @@ from .capacity import (
     require_local_dft_capacity,
 )
 from .circuits import DistributedCircuitRuntime
+from .networks import DistributedNetworkRuntime
 from .frequency_counts import reduce_frequency_sample_counts
 from .monitor_merge import merge_sharded_monitor_payloads
 from .persistence import export_distributed_field_shards
@@ -338,6 +339,12 @@ class DistributedFDTD:
         self.logical_scene = scene
         self.scene = prepare_scene(scene)
         self.frequency = float(frequency)
+        # Requested output/port frequencies enforced against an embedded network's
+        # fitted band. Defaults to the time-stepping frequency; the public
+        # Simulation path overwrites this with the full requested set before
+        # init_field so the owner shard rejects out-of-band requests identically
+        # to the single-device runtime.
+        self._requested_port_frequencies: tuple[float, ...] = (self.frequency,)
         self.parallel = parallel
         self.devices = tuple(torch.device(device) for device in parallel.devices)
         self.device = torch.device(parallel.result_device)
@@ -372,6 +379,8 @@ class DistributedFDTD:
         self._parallel_stats: dict[str, Any] = {}
         self._observer_frequencies: tuple[float, ...] = ()
         self._distributed_circuit: DistributedCircuitRuntime | None = None
+        self._distributed_network: DistributedNetworkRuntime | None = None
+        self._network_cuda_graph_active = False
         self._initialized = False
         self._validate_static_capabilities()
 
@@ -392,14 +401,20 @@ class DistributedFDTD:
                 "Multi-GPU material density regions require distributed density slicing and are "
                 "currently limited to the single-GPU adjoint path."
             )
-        if self.logical_scene.networks:
-            # Checked before the port guard so a network scene reports the real
-            # blocker. Embedded networks need a unique owner rank plus per-step
-            # scalar reduce-to-owner / scatter-from-owner port transport, which
-            # the distributed port contract does not expose yet.
+        if self.logical_scene.networks and self.logical_scene.circuits:
+            # Both distributed feedback runtimes claim owner-resident proxy port
+            # runtimes on their owner shard's solver. Supporting both in one scene
+            # would require merging those proxy sets; that combination is a
+            # separate capability, so reject it explicitly rather than let the
+            # second preparation silently clobber the first.
             raise ValueError(
-                "Multi-GPU FDTD embedded networks require distributed port ownership and "
-                "per-step scalar reduce/scatter transport."
+                "Multi-GPU FDTD does not yet support a scene with both embedded networks "
+                "and lumped circuits; run them in separate simulations."
+            )
+        if len(self.logical_scene.networks) > 1:
+            raise ValueError(
+                "Multi-GPU FDTD embedded-network coupling currently supports exactly one "
+                "network per scene."
             )
         unsupported_ports = tuple(
             port
@@ -419,6 +434,11 @@ class DistributedFDTD:
             for circuit in self.logical_scene.circuits
             for binding in circuit.bindings
         }
+        bound_port_names.update(
+            port_name
+            for network in self.logical_scene.networks
+            for port_name in network.connected_port_names
+        )
         unbound_ports = tuple(
             port.name
             for port in self.logical_scene.ports
@@ -427,7 +447,7 @@ class DistributedFDTD:
         if unbound_ports:
             raise ValueError(
                 "Multi-GPU lumped/terminal ports must be bound to the distributed "
-                f"circuit owner; unbound ports: {unbound_ports}."
+                f"circuit or network owner; unbound ports: {unbound_ports}."
             )
         for monitor in self.logical_scene.monitors:
             if isinstance(monitor, ClosedSurfaceMonitor):
@@ -542,7 +562,7 @@ class DistributedFDTD:
             return
         self._validate_hardware()
         timing_scene = prepare_scene(
-            self.logical_scene.clone(ports=(), circuits=())
+            self.logical_scene.clone(ports=(), circuits=(), networks=())
         )
         reference_solver = FDTD(
             timing_scene,
@@ -647,6 +667,13 @@ class DistributedFDTD:
             shards=self.shards,
             frequency=self.frequency,
         )
+        self._distributed_network = DistributedNetworkRuntime.prepare(
+            prepared_scene=self.scene,
+            partition_plan=self.partition_plan,
+            shards=self.shards,
+            frequency=self.frequency,
+            requested_frequencies=self._requested_port_frequencies,
+        )
         self._initialized = True
 
     @staticmethod
@@ -695,6 +722,12 @@ class DistributedFDTD:
                 solver._shutoff_step = None
         if self._distributed_circuit is not None:
             self._distributed_circuit.prepare_outputs(
+                time_steps=int(time_steps),
+                frequencies=default_frequencies,
+                window_type=dft_window,
+            )
+        if self._distributed_network is not None:
+            self._distributed_network.prepare_outputs(
                 time_steps=int(time_steps),
                 frequencies=default_frequencies,
                 window_type=dft_window,
@@ -868,6 +901,8 @@ class DistributedFDTD:
 
         if self._distributed_circuit is not None:
             self._distributed_circuit.apply()
+        if self._distributed_network is not None:
+            self._distributed_network.apply()
 
         for shard in self.shards:
             solver = shard.solver
@@ -1000,6 +1035,12 @@ class DistributedFDTD:
                 output["ports"] = ports
             if circuits:
                 output["circuits"] = circuits
+        if self._distributed_network is not None:
+            ports, networks = self._distributed_network.finalize(self.device)
+            if ports:
+                output.setdefault("ports", {}).update(ports)
+            if networks:
+                output["embedded_networks"] = networks
         return output or None
 
     def solve(
@@ -1174,6 +1215,8 @@ class DistributedFDTD:
         }
         if self._distributed_circuit is not None:
             stats["circuit"] = self._distributed_circuit.stats(steps_run=steps_run)
+        if self._distributed_network is not None:
+            stats["network"] = self._distributed_network.stats(steps_run=steps_run)
         return stats
 
     @property
@@ -1191,6 +1234,13 @@ class DistributedFDTD:
         if self._distributed_circuit is None:
             return {}
         return self._distributed_circuit.checkpoint_tensors()
+
+    def network_checkpoint_tensors(self) -> dict[str, torch.Tensor]:
+        """Return live owner-GPU embedded-network state without gathering fields."""
+
+        if self._distributed_network is None:
+            return {}
+        return self._distributed_network.checkpoint_tensors()
 
     @property
     def dft_sample_counts(self):
