@@ -588,6 +588,13 @@ def prepare_observers(solver, frequencies, window_type, time_steps):
                 "phase_sin": 0.0,
                 "phase_step_cos": np.cos(omega_dt),
                 "phase_step_sin": np.sin(omega_dt),
+                # Magnetic fields live half a time step from the electric fields on
+                # the Yee leapfrog grid, so their running-DFT twiddle must be
+                # retarded by exp(-i*omega*dt/2) to co-locate H(f) with E(f) in
+                # time. Store the half-step rotation once so the accumulation loop
+                # can fold it into the magnetic twiddle at zero per-step cost.
+                "h_cos_half": float(np.cos(0.5 * omega_dt)),
+                "h_sin_half": float(np.sin(0.5 * omega_dt)),
                 "source_dft_real": 0.0,
                 "source_dft_imag": 0.0,
             }
@@ -747,11 +754,23 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
         weighted_cos = window_weight * entry["phase_cos"]
         weighted_sin = window_weight * entry["phase_sin"]
 
+        # Magnetic-field twiddle, retarded by exp(-i*omega*dt/2) to move the H
+        # DFT phasor from the leapfrog half step onto the electric-field time
+        # grid. Rotating the electric twiddle by the stored half-step angle keeps
+        # this a couple of scalar multiplies per frequency with no extra state.
+        h_cos_half = entry["h_cos_half"]
+        h_sin_half = entry["h_sin_half"]
+        weighted_cos_h = weighted_cos * h_cos_half + weighted_sin * h_sin_half
+        weighted_sin_h = weighted_sin * h_cos_half - weighted_cos * h_sin_half
+
         if source_signal is not None:
             entry["source_dft_real"] += source_signal * weighted_cos
             entry["source_dft_imag"] += source_signal * weighted_sin
 
         for group, local_index in solver._observer_point_groups_by_frequency[global_index]:
+            is_magnetic = group["field_name"].startswith("H")
+            group_cos = weighted_cos_h if is_magnetic else weighted_cos
+            group_sin = weighted_sin_h if is_magnetic else weighted_sin
             solver.fdtd_module.accumulatePointObservers3D(
                 field=getattr(solver, group["field_name"]),
                 pointI=group["point_i"],
@@ -759,8 +778,8 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                 pointK=group["point_k"],
                 realAccum=group["real"][local_index],
                 imagAccum=group["imag"][local_index],
-                weightedCos=weighted_cos,
-                weightedSin=weighted_sin,
+                weightedCos=group_cos,
+                weightedSin=group_sin,
             ).launchRaw()
             if has_complex_fields(solver):
                 solver.fdtd_module.accumulatePointObservers3D(
@@ -770,19 +789,22 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     pointK=group["point_k"],
                     realAccum=group["aux_real"][local_index],
                     imagAccum=group["aux_imag"][local_index],
-                    weightedCos=weighted_cos,
-                    weightedSin=weighted_sin,
+                    weightedCos=group_cos,
+                    weightedSin=group_sin,
                 ).launchRaw()
 
         for group, local_index in solver._observer_plane_groups_by_frequency[global_index]:
+            is_magnetic = group["field_name"].startswith("H")
+            group_cos = weighted_cos_h if is_magnetic else weighted_cos
+            group_sin = weighted_sin_h if is_magnetic else weighted_sin
             solver.fdtd_module.accumulatePlaneObserver3D(
                 field=getattr(solver, group["field_name"]),
                 planeRealAccum=group["real"][local_index],
                 planeImagAccum=group["imag"][local_index],
                 axisCode=group["axis_code"],
                 planeIndex=group["plane_index"],
-                weightedCos=weighted_cos,
-                weightedSin=weighted_sin,
+                weightedCos=group_cos,
+                weightedSin=group_sin,
             ).launchRaw()
             if has_complex_fields(solver):
                 solver.fdtd_module.accumulatePlaneObserver3D(
@@ -791,8 +813,8 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     planeImagAccum=group["aux_imag"][local_index],
                     axisCode=group["axis_code"],
                     planeIndex=group["plane_index"],
-                    weightedCos=weighted_cos,
-                    weightedSin=weighted_sin,
+                    weightedCos=group_cos,
+                    weightedSin=group_sin,
                 ).launchRaw()
 
         entry["window_normalization"] += window_weight
