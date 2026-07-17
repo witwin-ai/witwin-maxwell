@@ -37,6 +37,14 @@ from .waveports import (
     compile_waveport_cross_section,
     compile_waveports,
 )
+from .wire_impedance import (
+    SeriesImpedanceModel,
+    dc_resistance,
+    fit_series_impedance,
+    internal_impedance,
+    ohmic_loss_density,
+    surface_resistance,
+)
 
 __all__ = [
     "CircuitGraph",
@@ -66,6 +74,12 @@ __all__ = [
     "CompiledWavePortCrossSection",
     "CompiledWireMonitor",
     "CompiledWireNetwork",
+    "SeriesImpedanceModel",
+    "dc_resistance",
+    "fit_series_impedance",
+    "internal_impedance",
+    "ohmic_loss_density",
+    "surface_resistance",
     "compile_port_geometry",
     "compile_ports",
     "compile_power_loss_monitor",

@@ -1292,7 +1292,13 @@ def compile_thin_wires(
 
     for wire_id, wire in enumerate(wires):
         if _kind_name(wire.conductor) != "pec":
-            raise ValueError(f"ThinWire {wire.name!r} must use a PEC conductor before Phase 4.")
+            raise NotImplementedError(
+                f"ThinWire {wire.name!r} uses a finite conductor. The per-unit-length "
+                "series-impedance model is available via "
+                "witwin.maxwell.compiler.wire_impedance.fit_series_impedance, but the "
+                "lossy current recurrence is not yet wired into the FDTD runtime; use a "
+                "PEC conductor to run a thin-wire FDTD simulation."
+            )
         (
             path,
             path_tensors,

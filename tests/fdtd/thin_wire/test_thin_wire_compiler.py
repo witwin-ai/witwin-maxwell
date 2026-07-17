@@ -414,7 +414,6 @@ def test_nearest_snap_is_explicit_and_strict_snap_rejects_off_grid_points():
         ),
         (_unsafe_straight(radius=0.0), "positive"),
         (_straight(radius=0.1), "validity band"),
-        (_unsafe_straight(conductor=_Kind("finite")), "PEC"),
         (
             _unsafe_straight(endpoints=(_Kind("node"), _Kind("open"))),
             "must have a node name",
@@ -423,6 +422,14 @@ def test_nearest_snap_is_explicit_and_strict_snap_rejects_off_grid_points():
 )
 def test_invalid_wire_contracts_are_rejected(wire, message):
     with pytest.raises(ValueError, match=message):
+        compile_thin_wires(_prepared(wires=(wire,)))
+
+
+def test_finite_conductor_compile_is_a_clear_deferral():
+    # The finite-conductor series-impedance model exists, but the lossy current
+    # recurrence is not yet wired into the FDTD runtime.
+    wire = _unsafe_straight(conductor=_Kind("finite"))
+    with pytest.raises(NotImplementedError, match="finite conductor"):
         compile_thin_wires(_prepared(wires=(wire,)))
 
 
