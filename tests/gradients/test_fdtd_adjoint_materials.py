@@ -312,13 +312,16 @@ _SIGMA_E = 0.1
 
 
 def _conductive_scene(sigma_e, *, density=None):
-    """Design region embedded in a static conductive slab.
+    """Trainable design region behind a static conductive barrier slab.
 
-    The lossy slab spans (and slightly overhangs) the design region so every
-    trainable design edge carries a non-zero sigma_e. The design density then
-    drives the permittivity of conductive cells, whose semi-implicit lossy
-    decay/curl coefficients depend on eps -- the dependence the linear-dielectric
-    reverse rule drops.
+    A ``MaterialRegion`` is a clean dielectric: the compiler zeroes ``sigma_e``
+    inside its footprint (see ``_apply_material_regions``), so a design region
+    cannot itself host conductive cells. The barrier is therefore placed
+    *alongside* the design, as a full-transverse lossy layer between the source
+    and the design/probe. The probe field must cross the barrier, so conduction
+    genuinely damps the objective, and the design cotangent is back-propagated
+    through the barrier's semi-implicit conduction update -- exercising the
+    native conductive reverse transpose that the linear standard/CPML rule drops.
     """
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.6, 0.6), (-0.6, 0.6), (-0.6, 0.6))),
@@ -330,7 +333,7 @@ def _conductive_scene(sigma_e, *, density=None):
         scene.add_structure(
             mw.Structure(
                 name="lossy_slab",
-                geometry=mw.Box(position=(0.06, 0.06, 0.18), size=(0.30, 0.30, 0.30)),
+                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.2, 1.2, 0.12)),
                 material=mw.Material(eps_r=1.0, sigma_e=sigma_e),
             )
         )
@@ -346,21 +349,22 @@ def _conductive_scene(sigma_e, *, density=None):
         )
     scene.add_source(
         mw.PointDipole(
-            position=(0.0, 0.0, -0.18),
+            position=(0.0, 0.0, -0.30),
             polarization="Ez",
             width=0.04,
             source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
         )
     )
-    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
+    scene.add_monitor(mw.PointMonitor("probe", (0.06, 0.06, 0.30), fields=("Ez",)))
     return scene
 
 
 class _ConductiveDensityScene(mw.SceneModule):
-    """Trainable design density inside a static conductive (sigma_e) slab.
+    """Trainable design density behind a static conductive (sigma_e) barrier.
 
-    The reverse step must differentiate the semi-implicit conduction-loss
-    decay/curl coefficients through eps for the design gradients to be correct.
+    The design cotangent is back-propagated through the lossy barrier, so the
+    reverse must transpose the semi-implicit conduction update for the design
+    gradients to be correct -- the sensitivity the linear reverse drops.
     """
 
     def __init__(self, init=0.0, sigma_e=_SIGMA_E):
@@ -374,8 +378,9 @@ class _ConductiveDensityScene(mw.SceneModule):
 
 @_CUDA
 def test_scene_with_conductive_medium_gradient_matches_fd():
-    """Per-element FD validation of design gradients in a scene whose trainable
-    cells carry static electric conductivity (previously rejected by the bridge)."""
+    """Per-element FD validation of design gradients whose adjoint is
+    back-propagated through a static conductive barrier (previously rejected by
+    the bridge)."""
     model = _ConductiveDensityScene(init=0.0)
 
     def loss_fn():
@@ -383,8 +388,9 @@ def test_scene_with_conductive_medium_gradient_matches_fd():
         return _abs2(result.monitor("probe")["data"])
 
     # The conduction loss must actually shape the solution, otherwise this would
-    # only re-validate the lossless path (which the linear reverse handles). A
-    # realistic sigma_e damps the probe field several-fold.
+    # only re-validate the lossless path (which the linear reverse handles). The
+    # barrier sits between source and probe, so a realistic sigma_e damps the
+    # probe field several-fold.
     lossless = _abs2(
         _build_sim(_ConductiveDensityScene(init=0.0, sigma_e=0.0), time_steps=200)
         .run()
@@ -1544,15 +1550,21 @@ def test_scene_with_bloch_dispersive_medium_gradient_matches_fd():
     under Bloch boundaries (previously rejected by the bridge)."""
     model = _BlochDispersiveDensityScene(init=0.0).cuda()
 
+    # The run must be long enough for the dispersive polarization response to
+    # propagate through the slab and reach the probe. At very short horizons the
+    # probe samples only the near-field transient, where the Lorentz term is a
+    # sub-percent perturbation (the ADE current has not built up), so the
+    # dispersion-active precondition below would be dominated by roundoff. 200
+    # steps captures the propagated dispersive response (~12% objective shift).
     def loss_fn():
-        result = _build_sim(model, time_steps=56).run()
+        result = _build_sim(model, time_steps=200).run()
         return _abs2(result.monitor("probe")["data"])
 
     # Dispersion must actually reshape the solution versus a nondispersive slab of
     # the same eps_inf, otherwise this would only re-validate the nondispersive
     # Bloch path (which the earlier Bloch adjoint already covers).
     nondispersive = _abs2(
-        _build_sim(_BlochDispersiveDensityScene(init=0.0, delta_eps=0.0), time_steps=56)
+        _build_sim(_BlochDispersiveDensityScene(init=0.0, delta_eps=0.0), time_steps=200)
         .run()
         .monitor("probe")["data"]
     ).item()
