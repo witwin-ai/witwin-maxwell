@@ -54,7 +54,7 @@ Taga's identity: an ideal lossless single-polarization isotropic antenna has
 | Environment XPR | Expected MEG | Measured MEG | Tolerance |
 | ---: | ---: | ---: | ---: |
 | 0 dB | 0.5 | 0.5 | atol 1e-6 |
-| 6 dB | 0.79950 | 0.79950 | atol 1e-6 |
+| 6 dB | 0.79924 | 0.79924 | atol 1e-6 |
 
 ## Correlation-matrix physicality
 

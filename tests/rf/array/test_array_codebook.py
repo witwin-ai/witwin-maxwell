@@ -194,7 +194,7 @@ def test_from_scan_angles_rejects_bad_positions_and_mismatched_angles():
         )
 
 
-def test_cache_key_is_weight_invariant_but_content_sensitive():
+def test_cache_key_is_weight_invariant():
     basis = _basis()
     key = basis.cache_key
     # Any weight vector reuses the same basis: combine never changes the key.
@@ -203,20 +203,127 @@ def test_cache_key_is_weight_invariant_but_content_sensitive():
         torch.tensor([0.3 + 0.9j, -0.7 + 0.1j], dtype=torch.complex128),
     ):
         assert basis.combine(weights).metadata["basis_fingerprint"] == key
-    # A different embedded pattern (physical content change) must invalidate.
-    shifted = mw.EmbeddedElementPatternData(
-        frequencies=basis.frequencies, port_names=basis.port_names,
-        theta=basis.eep.theta, phi=basis.eep.phi,
-        e_theta=basis.eep.e_theta * 2.0, e_phi=basis.eep.e_phi,
-        phase_center=basis.eep.phase_center, frame=basis.eep.frame,
-    )
-    other = mw.ArrayBasisData(
-        network=basis.network, embedded_patterns=shifted, fingerprint="codebook-basis-shifted"
-    )
-    assert other.cache_key != key
+    # Content sensitivity of the extraction-time fingerprint (physical geometry /
+    # material / port / frequency / surface changes invalidating the key) is
+    # covered against real extracted bases in test_array_fullwave.py; asserting it
+    # here on a manually supplied fingerprint string would only compare literals.
 
 
 def test_scene_gradient_through_basis_fails_closed():
     basis = _basis()
     with pytest.raises(NotImplementedError, match="aggregated per-column adjoint envelope"):
         basis.scene_gradient_vjp()
+
+
+def _z_axis_isotropic_basis(*, spacing_wavelengths=0.25, port_count=4, points_theta=37, points_phi=5):
+    """Isotropic sensors on the z-axis whose EEP columns carry the receive phase.
+
+    Column ``n`` is ``exp(-j k z_n cos(theta))`` (isotropic magnitude), so the
+    physical steering behaviour of :meth:`BeamCodebook.from_scan_angles` can be
+    checked against the combined array factor rather than by recomputing the
+    weight formula.
+    """
+
+    dtype, cdtype = torch.float64, torch.complex128
+    frequency = torch.tensor([1.0e9], dtype=dtype)
+    wave_number = float(2.0 * math.pi * frequency.item() / 299792458.0)
+    wavelength = 299792458.0 / float(frequency.item())
+    spacing = spacing_wavelengths * wavelength
+    offsets = (torch.arange(port_count, dtype=dtype) - 0.5 * (port_count - 1)) * spacing
+    positions = torch.stack((torch.zeros_like(offsets), torch.zeros_like(offsets), offsets), dim=-1)
+    theta_vector = torch.linspace(0.0, math.pi, points_theta, dtype=dtype)
+    phi_vector = torch.linspace(0.0, 2.0 * math.pi, points_phi, dtype=dtype)
+    theta, phi = torch.meshgrid(theta_vector, phi_vector, indexing="ij")
+    columns = [torch.exp(-1j * wave_number * z * torch.cos(theta)).to(cdtype) for z in offsets]
+    e_theta = torch.stack(columns, dim=0)[None]
+    patterns = mw.EmbeddedElementPatternData(
+        frequencies=frequency, port_names=tuple(f"e{i}" for i in range(port_count)),
+        theta=theta, phi=phi, e_theta=e_theta, e_phi=torch.zeros_like(e_theta),
+        phase_center=torch.zeros(3, dtype=dtype), frame=torch.eye(3, dtype=dtype),
+    )
+    network = mw.NetworkData(
+        frequencies=frequency, s=torch.zeros((1, port_count, port_count), dtype=cdtype),
+        z0=50.0, port_names=patterns.port_names,
+    )
+    basis = mw.ArrayBasisData(network=network, embedded_patterns=patterns, fingerprint="scan-peak")
+    return basis, positions, theta_vector
+
+
+def test_from_scan_angles_beam_peaks_at_the_commanded_direction():
+    """Non-circular steering check: the combined pattern peaks at the target angle.
+
+    Builds progressive-phase weights with ``from_scan_angles`` and combines them
+    against an independent z-axis isotropic basis; the realized-gain maximum must
+    fall on the commanded scan angle, proving the sign/phase convention steers the
+    beam (not merely that the weight formula reproduces itself).
+    """
+
+    basis, positions, theta_vector = _z_axis_isotropic_basis()
+    target_theta_index = 12  # off broadside and away from the poles (~60 deg)
+    target_theta = theta_vector[target_theta_index][None]
+    target_phi = torch.zeros(1, dtype=torch.float64)
+
+    codebook = mw.BeamCodebook.from_scan_angles(
+        element_positions=positions,
+        frequencies=basis.frequencies,
+        theta=target_theta,
+        phi=target_phi,
+    )
+    realized_gain = basis.combine(codebook).antenna.realized_gain[0, 0]  # [theta, phi]
+    # A z-axis array pattern is rotationally symmetric in phi; reduce over phi.
+    peak_theta_index = int(torch.argmax(realized_gain.amax(dim=1)))
+    assert peak_theta_index == target_theta_index
+
+
+def test_codebook_weight_gradient_backprops_through_max_hold():
+    """Rank-3 [B, F, N] codebook weights are differentiable through the envelope.
+
+    The batched codebook path feeds ``max_hold('realized_gain').envelope.sum()``;
+    the incident power-wave weights must receive finite, nonzero real and
+    imaginary gradients with zero solver reruns. Falsification (recorded
+    2026-07-17): detaching the normalized weights inside ``combine`` severs the
+    graph so ``backward`` raises 'does not require grad and does not have a
+    grad_fn'; restoring the path returns finite grads.
+    """
+
+    basis = _basis()
+    torch.manual_seed(0)
+    weights = torch.randn(3, 2, 2, dtype=torch.complex128)
+    weights = weights / torch.clamp(torch.abs(weights), min=0.5)
+    weights = weights.requires_grad_(True)
+    codebook = mw.BeamCodebook(weights=weights, names=("b0", "b1", "b2"))
+
+    loss = basis.combine(codebook).max_hold("realized_gain").envelope.sum()
+    loss.backward()
+
+    assert weights.grad is not None
+    assert torch.all(torch.isfinite(weights.grad.real))
+    assert torch.all(torch.isfinite(weights.grad.imag))
+    assert weights.grad.real.abs().sum() > 0.0
+    assert weights.grad.imag.abs().sum() > 0.0
+
+
+def test_codebook_weight_gradient_matches_high_precision_gradcheck():
+    """High-precision gate for the batched codebook -> max_hold envelope path.
+
+    Mirrors test_array_contracts.py conventions (complex128, eps 1e-6, atol 1e-5,
+    rtol 0.02): autograd must agree with a finite-difference reference on the
+    subgradient-carrying ``realized_gain`` envelope of a rank-3 codebook.
+    """
+
+    basis = _basis()
+    torch.manual_seed(1)
+    weights = (torch.randn(3, 2, 2, dtype=torch.complex128) + 2.0).requires_grad_(True)
+    names = ("b0", "b1", "b2")
+
+    def envelope_sum(value):
+        codebook = mw.BeamCodebook(weights=value, names=names)
+        return basis.combine(codebook).max_hold("realized_gain").envelope.sum()
+
+    assert torch.autograd.gradcheck(
+        envelope_sum,
+        (weights,),
+        eps=1e-6,
+        atol=1e-5,
+        rtol=0.02,
+    )

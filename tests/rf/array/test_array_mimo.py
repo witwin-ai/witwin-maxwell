@@ -182,8 +182,11 @@ def test_scattering_ecc_approximation_is_a_distinct_named_method():
     torch.testing.assert_close(ecc[0, 0, 1], (numerator / denominator).to(torch.float64))
 
 
-def test_scattering_ecc_rejects_lossy_ports_it_cannot_approximate():
+def test_scattering_ecc_rejects_non_passive_or_reflective_columns():
     frequencies = torch.tensor([1.0e9], dtype=torch.float64)
+    # Column power sum_n |S_ni|^2 = 0.81 + 0.25 = 1.06 > 1: a non-passive column.
+    # The guard rejects non-passive / fully-reflective columns; it cannot observe
+    # genuine ohmic loss (invisible in S alone).
     s = torch.tensor([[[0.9 + 0.0j, 0.5 + 0.0j], [0.5 + 0.0j, 0.9 + 0.0j]]], dtype=torch.complex128)
     theta, phi = _sphere(9, 17)
     base = torch.sin(theta).to(torch.complex128)
@@ -197,7 +200,7 @@ def test_scattering_ecc_rejects_lossy_ports_it_cannot_approximate():
         network=mw.NetworkData(frequencies=frequencies, s=s, z0=50.0, port_names=("a", "b")),
         embedded_patterns=patterns, fingerprint="lossy-s",
     )
-    with pytest.raises(ValueError, match="lossless/high-efficiency"):
+    with pytest.raises(ValueError, match="non-passive or fully-reflective columns"):
         basis.ecc_from_scattering()
 
 
@@ -247,3 +250,101 @@ def test_mimo_metrics_stay_in_the_torch_autograd_graph():
     (mimo.ecc[0, 0, 1] + mimo.mean_effective_gain.sum()).backward()
     assert raw.grad is not None
     assert torch.all(torch.isfinite(raw.grad.real)) and torch.all(torch.isfinite(raw.grad.imag))
+
+
+def test_polarization_correlation_cross_term_matches_brute_force_integral():
+    """Exercise the rho != 0 dual-polarized cross term in mimo().
+
+    Every other MIMO test uses the default rho = 0, so the two cross-polar
+    coupling terms in the correlation integral (array.py) are otherwise never
+    checked; a conj/sign regression there would survive Hermitian symmetrization
+    and pass every existing gate. This validates the full complex-rho correlation
+    matrix against an independent brute-force trapezoidal integral.
+    """
+
+    dtype = torch.float64
+    cdtype = torch.complex128
+    frequencies = torch.tensor([1.0e9], dtype=dtype)
+    theta, phi = _sphere(61, 121, dtype=dtype)
+    e_theta = torch.stack(
+        [
+            (torch.sin(theta) * torch.exp(1j * 0.7 * torch.cos(theta))).to(cdtype),
+            (torch.sin(theta) * torch.exp(-1j * 1.3 * torch.cos(theta) + 1j * 0.4 * torch.cos(phi))).to(cdtype),
+        ],
+        dim=0,
+    )[None]
+    e_phi = torch.stack(
+        [
+            (0.5 * torch.sin(theta) * torch.exp(1j * 0.2 * torch.sin(phi))).to(cdtype),
+            (0.8 * torch.sin(theta) * torch.exp(1j * 1.1 * torch.cos(theta))).to(cdtype),
+        ],
+        dim=0,
+    )[None]
+    patterns = mw.EmbeddedElementPatternData(
+        frequencies=frequencies, port_names=("a", "b"), theta=theta, phi=phi,
+        e_theta=e_theta, e_phi=e_phi,
+        phase_center=torch.zeros(3, dtype=dtype), frame=torch.eye(3, dtype=dtype),
+    )
+    basis = mw.ArrayBasisData(
+        network=mw.NetworkData(
+            frequencies=frequencies, s=torch.zeros((1, 2, 2), dtype=cdtype), z0=50.0, port_names=("a", "b")
+        ),
+        embedded_patterns=patterns, fingerprint="rho-cross",
+    )
+    rho = 0.3 + 0.4j
+    xpr_db = 5.0
+    environment = mw.MultipathEnvironment(
+        theta=theta, phi=phi, cross_polar_ratio_db=xpr_db, polarization_correlation=rho
+    )
+    correlation = basis.mimo(environment).correlation[0]
+
+    def _trapz(values):
+        deltas = values[1:] - values[:-1]
+        weights = torch.empty_like(values)
+        weights[0] = 0.5 * deltas[0]
+        weights[-1] = 0.5 * deltas[-1]
+        weights[1:-1] = 0.5 * (deltas[:-1] + deltas[1:])
+        return weights
+
+    measure = torch.sin(theta) * _trapz(theta[:, 0])[:, None] * _trapz(phi[0, :])[None, :]
+    power = torch.ones_like(theta)
+    power = power / torch.sum(power * measure)  # uniform spectrum, unit-normalized
+    xpr = 10.0 ** (xpr_db / 10.0)
+    reference = torch.zeros((2, 2), dtype=cdtype)
+    for i in range(2):
+        for j in range(2):
+            ei_t, ej_t = e_theta[0, i], e_theta[0, j]
+            ei_p, ej_p = e_phi[0, i], e_phi[0, j]
+            term = (
+                xpr * ei_t * ej_t.conj()
+                + ei_p * ej_p.conj()
+                + rho * math.sqrt(xpr) * ei_t * ej_p.conj()
+                + complex(rho).conjugate() * math.sqrt(xpr) * ei_p * ej_t.conj()
+            )
+            reference[i, j] = torch.sum(term * power.to(cdtype) * measure.to(cdtype))
+
+    torch.testing.assert_close(correlation, reference, atol=1e-9, rtol=1e-9)
+
+
+def test_mimo_fails_closed_on_a_dark_zero_power_port():
+    """A zero-power (dark) EEP column must fail closed, not return silent NaN ECC."""
+
+    dtype = torch.float64
+    cdtype = torch.complex128
+    frequencies = torch.tensor([1.0e9], dtype=dtype)
+    theta, phi = _sphere(9, 17, dtype=dtype)
+    base = torch.sin(theta).to(cdtype)
+    e_theta = torch.stack((base, torch.zeros_like(base)), dim=0)[None]
+    patterns = mw.EmbeddedElementPatternData(
+        frequencies=frequencies, port_names=("a", "b"), theta=theta, phi=phi,
+        e_theta=e_theta, e_phi=torch.zeros_like(e_theta),
+        phase_center=torch.zeros(3, dtype=dtype), frame=torch.eye(3, dtype=dtype),
+    )
+    basis = mw.ArrayBasisData(
+        network=mw.NetworkData(
+            frequencies=frequencies, s=torch.zeros((1, 2, 2), dtype=cdtype), z0=50.0, port_names=("a", "b")
+        ),
+        embedded_patterns=patterns, fingerprint="dark-mimo",
+    )
+    with pytest.raises(ValueError, match="non-positive"):
+        basis.mimo(mw.MultipathEnvironment(theta=theta, phi=phi))

@@ -10,7 +10,7 @@ cannot enter unnoticed.
 The 2026-07-17 integrated repository state (circuit co-simulation, Touchstone
 network embedding, the thin-wire subgrid conductor series in plan 07 phases
 0-3, the array basis / active-S feature series in plan 06 phases 0-1, and the
-plan 07 Phase 4 multi-GPU wire forward slice, all merged) contains 154 guards:
+plan 07 Phase 4 multi-GPU wire forward slice, all merged) contains 155 guards:
 
 - 133 capability guards tracked by the non-increasing test budget;
 - 22 contract guards excluded by exact file and message substring.

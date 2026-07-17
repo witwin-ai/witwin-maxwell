@@ -1203,6 +1203,15 @@ class ArrayBasisData:
         # Symmetrize away Hermitian roundoff from the independent einsums.
         correlation = 0.5 * (correlation + correlation.mH)
         diagonal = torch.diagonal(correlation, dim1=-2, dim2=-1).real
+        # Fail closed on a zero-power (dark) pattern column: the ECC denominator
+        # would otherwise divide by zero and silently return NaN, unlike the
+        # sibling degeneracy guards in max_hold and ecc_from_scattering.
+        if bool(torch.any(diagonal <= 0.0)):
+            raise ValueError(
+                "MIMO ECC is undefined because at least one port has non-positive "
+                "received correlation power; every embedded-element pattern column must "
+                "carry strictly positive power over the integration sphere."
+            )
         denominator = diagonal[..., :, None] * diagonal[..., None, :]
         ecc = torch.abs(correlation).square() / denominator
         diversity_gain = 10.0 * torch.sqrt(torch.clamp(1.0 - ecc, min=0.0))
@@ -1238,7 +1247,11 @@ class ArrayBasisData:
         Uses ``ecc_ij = |sum_n conj(S_ni) S_nj|^2 / prod_k (1 - sum_n |S_nk|^2)``.
         This is only valid for a lossless, high-radiation-efficiency array; it is
         deliberately a different method from the field-based :meth:`mimo` ECC and
-        must not be used when material or ohmic loss is significant.
+        must not be used when material or ohmic loss is significant. The guard
+        below only rejects non-passive or fully-reflective columns
+        (``1 - sum_n |S_ni|^2 <= 0``); genuine ohmic/material loss is invisible in
+        ``S`` alone and is not detected here, so a matched-but-lossy array can pass
+        this guard and silently receive the invalid lossless approximation.
         """
 
         s = self.network.s
@@ -1247,7 +1260,9 @@ class ArrayBasisData:
         if bool(torch.any(available <= 0.0)):
             raise ValueError(
                 "S-parameter ECC approximation requires 1 - sum_n |S_ni|^2 > 0 for every port; "
-                "the array is not lossless/high-efficiency enough for this approximation."
+                "this rejects non-passive or fully-reflective columns. Note this guard cannot "
+                "detect ohmic/material loss, which is invisible in S alone; do not use this "
+                "approximation when such loss is significant."
             )
         numerator = torch.abs(
             torch.einsum("fni,fnj->fij", torch.conj(s), s)
