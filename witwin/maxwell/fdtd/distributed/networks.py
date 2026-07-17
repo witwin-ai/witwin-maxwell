@@ -305,6 +305,7 @@ class DistributedNetworkRuntime:
         partition_plan: FDTDPartitionPlan,
         shards,
         frequency: float,
+        requested_frequencies: tuple[float, ...] = (),
     ) -> "DistributedNetworkRuntime | None":
         plan = compile_distributed_network_plan(prepared_scene, partition_plan)
         if plan is None:
@@ -452,6 +453,14 @@ class DistributedNetworkRuntime:
         # the owner network buffers, so the owner alone accumulates every port's
         # V/I DFT and the network state advances on one device.
         owner_shard.solver._port_runtimes = tuple(proxy_runtimes)
+        # Propagate the requested output frequencies to the owner shard solver so
+        # ``prepare_network_runtimes`` enforces the fitted-band 'reject' contract
+        # against them, exactly as the single-device runtime does. Without this the
+        # owner shard has no requested frequencies and out-of-band requests silently
+        # pass on every multi-GPU network run.
+        owner_shard.solver._requested_port_frequencies = tuple(
+            float(value) for value in requested_frequencies
+        )
         with torch.cuda.device(owner_device):
             network_runtimes = prepare_network_runtimes(
                 owner_shard.solver,

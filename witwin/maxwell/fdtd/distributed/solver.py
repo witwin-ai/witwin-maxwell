@@ -339,6 +339,12 @@ class DistributedFDTD:
         self.logical_scene = scene
         self.scene = prepare_scene(scene)
         self.frequency = float(frequency)
+        # Requested output/port frequencies enforced against an embedded network's
+        # fitted band. Defaults to the time-stepping frequency; the public
+        # Simulation path overwrites this with the full requested set before
+        # init_field so the owner shard rejects out-of-band requests identically
+        # to the single-device runtime.
+        self._requested_port_frequencies: tuple[float, ...] = (self.frequency,)
         self.parallel = parallel
         self.devices = tuple(torch.device(device) for device in parallel.devices)
         self.device = torch.device(parallel.result_device)
@@ -666,6 +672,7 @@ class DistributedFDTD:
             partition_plan=self.partition_plan,
             shards=self.shards,
             frequency=self.frequency,
+            requested_frequencies=self._requested_port_frequencies,
         )
         self._initialized = True
 
