@@ -85,16 +85,25 @@ for the adjoint, a scalar all-reduce, a cross-rank homogeneity check, and
 deterministic `destroy_process_group` teardown, verified by a two-rank `torchrun`
 worker (`tests/fdtd/multi_gpu/test_nccl_transport.py`).
 
-The single-process guard is now pinned by explicit no-silent-fallback tests:
-`transport="nccl"` raises the `torchrun` `RuntimeError` both from
-`DistributedFDTD` directly and from the public `Simulation` build path, and the
-in-process `CudaP2PHaloTransport` is never constructed as a fallback (asserted by
-monkeypatching it to fail if reached). `preflight()` also validates an *adopted*
-process group: if `torch.distributed` is already initialised, the transport
-verifies the live group's world size, rank, and backend match this rank's
-expectations before adopting it, rather than binding to a mismatched group; the
-matching-group accept path is exercised inside the two-rank worker and the three
-mismatch legs (world size, rank, non-NCCL backend) are covered by host tests.
+The pre-existing single-process `transport="nccl"` guard (the `torchrun`
+`RuntimeError` raised from `DistributedFDTD`) is now pinned by explicit
+no-silent-fallback tests rather than being introduced here: the raise is asserted
+both from `DistributedFDTD` directly and through the public `Simulation.prepare()`
+path, and the in-process `CudaP2PHaloTransport` is verified to never be
+constructed as a fallback (monkeypatched to fail if reached). The code
+contribution alongside those tests is adopted-group validation: `preflight()`
+validates an *adopted* process group so that when `torch.distributed` is already
+initialised, the transport verifies the live group's world size, rank, and
+backend match this rank's expectations before adopting it, rather than binding to
+a mismatched group. Backend validation accepts both the plain `nccl` token and a
+composite device->backend spec (for example `cpu:gloo,cuda:nccl`) whose CUDA
+collectives are NCCL, and fails closed otherwise. The matching-group accept path
+is exercised inside the two-rank worker; the mismatch legs (world size, rank,
+non-NCCL backend, and the composite accept/reject parse) are covered by host
+tests. The two-rank worker also asserts the shared-group teardown contract: after
+one adopted handle destroys the default group, a sibling transport that still
+reads connected fails closed via a vanished-group guard instead of driving a
+collective on a destroyed group.
 
 ### Operational env contract (`torchrun`)
 
@@ -241,8 +250,8 @@ must not be described as independently hardware-qualified.
 | Plotting | Rejected during solve | Run with `gather_fields=True`, then consume the gathered result explicitly. |
 | Trainable scenes / adjoint (Box density, standard path) | Accepted with A6000 parity | A trainable `Box` `MaterialRegion` density on the pure real standard (open/PEC boundary) path routes through the distributed joint-solve adjoint bridge: per-shard forward checkpoints, a transposed reverse step per forward step (Phase 1 → transposed magnetic halo → Phase 2 → transposed electric halo → Phase 3 → per-shard source-term eps grad), and a global grad_eps gather feeding the existing single-GPU material pullback once. Two-GPU acceptance: 1-vs-2-GPU objective parity (bit-identical forward) and gradient parity (rtol 1e-4, atol tied to grad magnitude); central finite differences (~1e-5 relative) on density texels on the x-split and interior to each shard, with the source and point-monitor objective on the interface node; 1-vs-2-GPU full-field-DFT objective gradient parity (right-half `EZ` power loss isolating the non-result shard's cotangent scatter leg); a checkpoint-capture ordering contract (every mid-loop capture preceded by a stream sync); and bitwise-reproducible gathered grad_eps. Point-monitor spectra and full-field DFT objectives only. |
 | Trainable scenes / adjoint (other channels) | Rejected before distributed allocation | Trainable geometry, material perturbation, circuit, RF/port, and embedded-network (residue/direct-term) parameters have no verified distributed reverse core; any absorbing (PML) boundary (CPML/stable-PML and the legacy graded-sigma `pml`/`absorber` absorbers), dispersive/conductive/nonlinear/anisotropic/modulated media, field shutoff, and tiled plane/flux/mode-seeded objectives are rejected at prepare before any distributed allocation. Absorbing-boundary-trainable and tiled-monitor seed scatter are the remaining follow-ups (S4/S5). |
-| NCCL transport primitive | Rank-local primitive implemented and conformance-tested | `fdtd/distributed/nccl_transport.py` provides the one-process-per-GPU (`torchrun`) transport surface: forward electric/magnetic Yee x-plane halos via `batch_isend_irecv`, transposed reverse-halo adjoint accumulations, a scalar all-reduce, an env/world-size/non-Linux failure matrix, an adopted-process-group world-size/rank/backend validation, a cross-rank homogeneity check, and deterministic teardown. A two-rank `torchrun` worker (`tests/fdtd/multi_gpu/test_nccl_transport.py`) asserts bitwise halo round-trips (including endpoint-ghost negative invariants and the matching-group adopt path) and adjoint accumulation. |
-| NCCL no-silent-fallback guard | Pinned | `transport="nccl"` on the single-process runtime raises the `torchrun` `RuntimeError` from both `DistributedFDTD` and the public `Simulation` build path, and never constructs the in-process `CudaP2PHaloTransport` as a fallback (asserted by monkeypatching P2P to fail if reached). |
+| NCCL transport primitive | Rank-local primitive implemented and conformance-tested | `fdtd/distributed/nccl_transport.py` provides the one-process-per-GPU (`torchrun`) transport surface: forward electric/magnetic Yee x-plane halos via `batch_isend_irecv`, transposed reverse-halo adjoint accumulations, a scalar all-reduce, an env/world-size/non-Linux failure matrix, an adopted-process-group world-size/rank/backend validation (accepting a composite `cuda:nccl` backend spec, failing closed otherwise), a cross-rank homogeneity check, and deterministic teardown with a vanished-group guard. A two-rank `torchrun` worker (`tests/fdtd/multi_gpu/test_nccl_transport.py`) asserts bitwise halo round-trips (including endpoint-ghost negative invariants, the matching-group adopt path, and the shared-group teardown contract) and adjoint accumulation. |
+| NCCL no-silent-fallback guard | Pre-existing guard, now pinned | The single-process `transport="nccl"` `torchrun` `RuntimeError` pre-dates this slice; it is now pinned by tests that assert it from both `DistributedFDTD` and the public `Simulation.prepare()` path, and that the in-process `CudaP2PHaloTransport` is never constructed as a fallback (P2P monkeypatched to fail if reached). |
 | End-to-end NCCL solve / multi-process / multi-node | Not landed | `transport="nccl"` still raises explicitly from the single-process `DistributedFDTD`; the rank-local shard-engine coordinator that would drive the NCCL transport across processes is the remaining Phase 8 work. Cross-node is out of scope. |
 | Three or four GPUs | Structurally representable by the partition and neighbor transport | Not qualified in the current hardware acceptance record; no validation claim is made here. |
 

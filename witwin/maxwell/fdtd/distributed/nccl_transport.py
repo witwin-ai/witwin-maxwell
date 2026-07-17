@@ -48,6 +48,38 @@ _REQUIRED_ENV = ("RANK", "WORLD_SIZE", "LOCAL_RANK")
 _DEFAULT_TIMEOUT_S = 1800.0
 
 
+def _cuda_backend_is_nccl(backend: str) -> bool:
+    """Return whether an adopted group's CUDA collectives run on NCCL.
+
+    ``torch.distributed.get_backend()`` returns either a plain backend token
+    (``"nccl"``) or a composite device-to-backend spec such as
+    ``"cpu:gloo,cuda:nccl"`` when a group was created with per-device backends.
+    A composite group whose CUDA backend is NCCL is fully NCCL-capable for the
+    device halos this transport drives, so accept it; reject anything whose CUDA
+    collectives are not NCCL. Parsing fails closed: an unrecognisable spec that
+    does not positively resolve to a CUDA/NCCL binding is treated as non-NCCL.
+    """
+
+    normalized = backend.strip().lower()
+    if not normalized:
+        return False
+    if ":" not in normalized and "," not in normalized:
+        return normalized == "nccl"
+    for entry in normalized.split(","):
+        token = entry.strip()
+        if not token:
+            continue
+        device, sep, name = token.partition(":")
+        if not sep:
+            # Bare backend token inside a composite spec applies to all devices.
+            if device.strip() == "nccl":
+                return True
+            continue
+        if device.strip() == "cuda" and name.strip() == "nccl":
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class _DeviceSignature:
     """Homogeneity fingerprint gathered across ranks before the time loop.
@@ -201,8 +233,8 @@ class NcclHaloTransport:
                 f"{actual_rank}, but this transport was constructed for rank "
                 f"{self.rank}; the launcher rank assignment is inconsistent."
             )
-        backend = str(dist.get_backend()).lower()
-        if backend != "nccl":
+        backend = str(dist.get_backend())
+        if not _cuda_backend_is_nccl(backend):
             raise RuntimeError(
                 "NCCL transport requires a NCCL-backed process group; the adopted "
                 f"group uses backend {backend!r}."
@@ -235,6 +267,18 @@ class NcclHaloTransport:
     def _require_connected(self) -> None:
         if not self._connected:
             raise RuntimeError("NCCL transport used before preflight().")
+        # Defensive guard for the shared-group pattern: several transports may
+        # adopt the same default process group, and a teardown on any one of them
+        # destroys it for all. A sibling that still reads ``_connected == True``
+        # would otherwise drive a collective against a destroyed group. Detect the
+        # vanished group, flip the local flag, and fail closed with an actionable
+        # message instead of surfacing an opaque torch.distributed error.
+        if not dist.is_initialized():
+            self._connected = False
+            raise RuntimeError(
+                "NCCL transport process group has been destroyed; this transport is "
+                "no longer connected. Build and preflight() a fresh transport."
+            )
 
     # -- primitive batched point-to-point ----------------------------------
 

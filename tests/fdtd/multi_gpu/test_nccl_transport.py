@@ -95,7 +95,10 @@ def test_preflight_rejects_adopted_group_rank_mismatch(monkeypatch):
     _skip_without_cuda_linux()
     transport = NcclHaloTransport(rank=0, world_size=2, local_rank=0)
     _patch_adopted_group(monkeypatch, world_size=2, rank=1, backend="nccl")
-    with pytest.raises(RuntimeError, match="rank"):
+    # Pin the rank branch's distinctive phrase: a bare "rank" also matches the
+    # world-size mismatch message ("this rank expects ..."), so match the phrase
+    # unique to the rank-mismatch raise site.
+    with pytest.raises(RuntimeError, match="reporting rank"):
         transport.preflight()
 
 
@@ -105,6 +108,34 @@ def test_preflight_rejects_adopted_group_non_nccl_backend(monkeypatch):
     _patch_adopted_group(monkeypatch, world_size=2, rank=0, backend="gloo")
     with pytest.raises(RuntimeError, match="NCCL-backed"):
         transport.preflight()
+
+
+def test_validate_adopted_group_accepts_composite_cuda_nccl_backend(monkeypatch):
+    """A composite device->backend spec whose CUDA backend is NCCL is accepted.
+
+    ``get_backend()`` reports ``"cpu:gloo,cuda:nccl"`` for a group built with
+    per-device backends; the CUDA collectives that drive the halos are still
+    NCCL, so ``_validate_adopted_group`` must not reject it. Exercised directly
+    (no CUDA/live group needed): the full ``preflight`` accept path continues
+    into the homogeneity all-gather, which is covered by the two-rank worker.
+    """
+
+    transport = NcclHaloTransport(rank=0, world_size=2, local_rank=0)
+    _patch_adopted_group(
+        monkeypatch, world_size=2, rank=0, backend="cpu:gloo,cuda:nccl"
+    )
+    transport._validate_adopted_group()  # must not raise
+
+
+def test_validate_adopted_group_rejects_composite_without_cuda_nccl(monkeypatch):
+    """A composite spec whose CUDA backend is not NCCL still fails closed."""
+
+    transport = NcclHaloTransport(rank=0, world_size=2, local_rank=0)
+    _patch_adopted_group(
+        monkeypatch, world_size=2, rank=0, backend="cpu:gloo,cuda:gloo"
+    )
+    with pytest.raises(RuntimeError, match="NCCL-backed"):
+        transport._validate_adopted_group()
 
 
 def test_neighbor_topology_is_chain():
@@ -158,7 +189,16 @@ def test_nccl_transport_without_launcher_raises_and_never_builds_p2p(monkeypatch
 
 
 def test_public_simulation_nccl_transport_raises_before_solver_allocation():
-    """The public Simulation path surfaces the same torchrun guard."""
+    """The public Simulation path surfaces the same torchrun guard.
+
+    Driven through the public ``Simulation.prepare()`` entrypoint rather than the
+    private solver builder: prepare() reaches ``DistributedFDTD`` construction,
+    which raises the torchrun ``RuntimeError`` before any shard is allocated
+    (``init_field`` runs only after a successful construction). This keeps the
+    assertion on the supported public surface.
+    """
+
+    _skip_without_cuda_linux()
 
     import witwin.maxwell as mw
 
@@ -175,7 +215,7 @@ def test_public_simulation_nccl_transport_raises_before_solver_allocation():
     simulation = mw.Simulation.fdtd(scene, frequency=1.0e9, parallel=parallel)
 
     with pytest.raises(RuntimeError, match="torchrun"):
-        simulation._build_fdtd_solver_for_scene(scene, initialize=False)
+        simulation.prepare()
 
 
 # -- two-rank conformance (torchrun) --------------------------------------

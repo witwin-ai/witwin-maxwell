@@ -134,8 +134,32 @@ def main() -> None:
     adopted.preflight()
     assert adopted._connected, "adopted transport failed to bind the live group"
 
+    # Both handles share the one default process group. Tear the adopted handle
+    # down first: destroy_process_group() releases the shared group for every
+    # transport that adopted it. The original transport still reads
+    # _connected == True at this point, but the group is gone -- a primitive call
+    # on it must fail closed via the vanished-group guard rather than drive a
+    # collective on a destroyed group. This is the safe teardown contract the
+    # future coordinator must copy when it holds a rank-local transport per group.
     transport.barrier()
+    adopted.teardown()
+    assert not adopted._connected, "adopted transport did not disconnect on teardown"
+    assert not torch.distributed.is_initialized(), "adopted teardown left the group alive"
+
+    # transport still believes it is connected; the vanished-group guard must fire
+    # (a pure local check, no collective) and flip the stale flag.
+    try:
+        transport.allreduce_scalar(1.0)
+    except RuntimeError as error:
+        assert "no longer connected" in str(error), f"unexpected teardown error: {error}"
+    else:  # pragma: no cover - defensive: the guard must fire once the group is gone
+        raise AssertionError("transport primitive did not fail closed after group teardown")
+    assert not transport._connected, "vanished-group guard did not flip the stale flag"
+
+    # teardown() remains idempotent even though the shared group is already gone.
     transport.teardown()
+    assert not transport._connected, "primary transport did not disconnect on teardown"
+
     if rank == 0:
         print("NCCL_TRANSPORT_WORKER_OK")
 
