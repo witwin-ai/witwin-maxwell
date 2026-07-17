@@ -4,6 +4,13 @@ import pytest
 import torch
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "nccl: multi-process NCCL transport conformance launched via torchrun",
+    )
+
+
 @pytest.fixture(scope="session")
 def cuda_p2p_devices() -> tuple[torch.device, torch.device]:
     """Return two mutually peer-accessible CUDA devices or skip the test session."""

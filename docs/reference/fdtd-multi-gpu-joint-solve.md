@@ -72,9 +72,18 @@ devices. `result_device` defaults to the first device and must be one of the
 participants. Only `decomposition_axis="x"` is accepted. Passing `parallel=None`
 continues to use the unchanged single-GPU solver.
 
-`transport="auto"` currently selects CUDA P2P. `transport="nccl"` is reserved but
-raises `RuntimeError`; it does not silently switch to P2P or stage through host
-memory.
+`transport="auto"` currently selects CUDA P2P. `transport="nccl"` still raises
+`RuntimeError` from the single-process `DistributedFDTD` coordinator: torch 2.13
+binds one device per rank, so NCCL requires a one-process-per-GPU `torchrun`
+launch, and the coordinator that would drive it from a rank-local shard engine is
+not landed yet. It never silently switches to P2P or stages through host memory.
+The rank-local NCCL transport primitive itself
+(`fdtd/distributed/nccl_transport.py`) is implemented and conformance-tested: it
+performs the forward electric/magnetic Yee x-plane halos via
+`torch.distributed.batch_isend_irecv`, the transposed reverse-halo accumulations
+for the adjoint, a scalar all-reduce, a cross-rank homogeneity check, and
+deterministic `destroy_process_group` teardown, verified by a two-rank `torchrun`
+worker (`tests/fdtd/multi_gpu/test_nccl_transport.py`).
 
 ## Result placement and gathering
 
@@ -207,7 +216,8 @@ must not be described as independently hardware-qualified.
 | Plotting | Rejected during solve | Run with `gather_fields=True`, then consume the gathered result explicitly. |
 | Trainable scenes / adjoint (Box density, standard path) | Accepted with A6000 parity | A trainable `Box` `MaterialRegion` density on the pure real standard (open/PEC boundary) path routes through the distributed joint-solve adjoint bridge: per-shard forward checkpoints, a transposed reverse step per forward step (Phase 1 → transposed magnetic halo → Phase 2 → transposed electric halo → Phase 3 → per-shard source-term eps grad), and a global grad_eps gather feeding the existing single-GPU material pullback once. Two-GPU acceptance: 1-vs-2-GPU objective parity (bit-identical forward) and gradient parity (rtol 1e-4, atol tied to grad magnitude); central finite differences (~1e-5 relative) on density texels on the x-split and interior to each shard, with the source and point-monitor objective on the interface node; 1-vs-2-GPU full-field-DFT objective gradient parity (right-half `EZ` power loss isolating the non-result shard's cotangent scatter leg); a checkpoint-capture ordering contract (every mid-loop capture preceded by a stream sync); and bitwise-reproducible gathered grad_eps. Point-monitor spectra and full-field DFT objectives only. |
 | Trainable scenes / adjoint (other channels) | Rejected before distributed allocation | Trainable geometry, material perturbation, circuit, RF/port, and embedded-network (residue/direct-term) parameters have no verified distributed reverse core; any absorbing (PML) boundary (CPML/stable-PML and the legacy graded-sigma `pml`/`absorber` absorbers), dispersive/conductive/nonlinear/anisotropic/modulated media, field shutoff, and tiled plane/flux/mode-seeded objectives are rejected at prepare before any distributed allocation. Absorbing-boundary-trainable and tiled-monitor seed scatter are the remaining follow-ups (S4/S5). |
-| NCCL / multi-process / multi-node | Reserved, not implemented | `transport="nccl"` raises explicitly. |
+| NCCL transport primitive | Rank-local primitive implemented and conformance-tested | `fdtd/distributed/nccl_transport.py` provides the one-process-per-GPU (`torchrun`) transport surface: forward electric/magnetic Yee x-plane halos via `batch_isend_irecv`, transposed reverse-halo adjoint accumulations, a scalar all-reduce, an env/world-size/non-Linux failure matrix, a cross-rank homogeneity check, and deterministic teardown. A two-rank `torchrun` worker (`tests/fdtd/multi_gpu/test_nccl_transport.py`) asserts bitwise halo round-trips and adjoint accumulation. |
+| End-to-end NCCL solve / multi-process / multi-node | Not landed | `transport="nccl"` still raises explicitly from the single-process `DistributedFDTD`; the rank-local shard-engine coordinator that would drive the NCCL transport across processes is the remaining Phase 8 work. Cross-node is out of scope. |
 | Three or four GPUs | Structurally representable by the partition and neighbor transport | Not qualified in the current hardware acceptance record; no validation claim is made here. |
 
 ## Fail-fast conditions
@@ -406,8 +416,11 @@ only for a trainable `Box` `MaterialRegion` density on the pure real standard pa
 point-monitor/full-field-DFT objectives (1-vs-2-GPU objective/gradient parity and
 interface finite differences; timing/speedup of the reverse pass is not measured here).
 The measurements and tests above do not qualify
-NCCL, multi-process or multi-node execution, distributed CPML-trainable adjoint or
+end-to-end NCCL, multi-process or multi-node execution, distributed CPML-trainable
+adjoint or
 tiled-monitor adjoint seed scatter,
 peer-aware CUDA Graph capture, advanced plane/beam/mode/TFSF sources, ports, x-periodic
 or Bloch decomposition, x symmetry, nonlinear media, full off-diagonal media, SIBC, or
-any other guarded feature.
+any other guarded feature. The rank-local NCCL transport primitive is separately
+conformance-tested (two-rank `torchrun` halo round-trip), but no end-to-end NCCL
+solve is qualified because the shard-engine coordinator is not landed.

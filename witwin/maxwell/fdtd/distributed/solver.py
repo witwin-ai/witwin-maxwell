@@ -368,8 +368,15 @@ class DistributedFDTD:
         if not isinstance(parallel, FDTDParallelConfig):
             raise TypeError("parallel must be an FDTDParallelConfig instance.")
         if parallel.transport == "nccl":
+            # torch 2.13 binds one device per rank, so NCCL requires a
+            # one-process-per-GPU torchrun launch. The rank-local
+            # NcclHaloTransport primitive exists and is conformance-tested, but
+            # the coordinator that drives it from a rank-local ShardEngine is not
+            # wired into this single-process runtime yet.
             raise RuntimeError(
-                "NCCL transport is reserved by the API but is not available in the same-process runtime."
+                "NCCL transport requires a one-process-per-GPU torchrun launch; the "
+                "single-process DistributedFDTD coordinator does not drive it yet. Use "
+                "transport='cuda_p2p' (or 'auto') for the in-process multi-GPU runtime."
             )
         self.logical_scene = scene
         self.scene = prepare_scene(scene)
