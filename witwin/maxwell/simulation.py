@@ -1219,6 +1219,13 @@ class Simulation:
 
         if self.config.parallel is None or not self.has_trainable_parameters:
             return
+        if getattr(self.scene, "thin_wires", ()):
+            raise ValueError(
+                "Multi-GPU FDTD adjoint does not cover thin-wire state; a trainable scene "
+                "carrying a ThinWire has no distributed wire reverse (the Phase 7 adjoint "
+                "bridge does not checkpoint or replay wire I/q). Run forward-only without "
+                "trainable parameters, or use the single-GPU adjoint path by omitting parallel."
+            )
         unsupported = (
             _scene_trainable_geometry_parameters(self.scene)
             + _scene_trainable_material_parameters(self.scene)
