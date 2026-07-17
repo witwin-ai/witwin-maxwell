@@ -1188,9 +1188,9 @@ class Simulation:
         if unsupported:
             raise ValueError(
                 "Multi-GPU FDTD adjoint supports trainable Box material-region densities "
-                "only; trainable geometry, material perturbation, circuit, and RF/port "
-                "parameters have no distributed reverse core yet. Use the single-GPU "
-                "adjoint path by omitting parallel."
+                "only; trainable geometry, material perturbation, circuit, embedded-network, "
+                "and RF/port parameters have no distributed reverse core yet. Use the "
+                "single-GPU adjoint path by omitting parallel."
             )
         # Scene/config-static guards for the trainable distributed path, all raised
         # here before the distributed solver allocates any shard. The pure real

@@ -342,7 +342,10 @@ def test_trainable_network_plus_parallel_is_rejected_before_solver_build():
     )
 
     assert simulation.has_trainable_parameters
-    with pytest.raises(ValueError, match="does not support trainable scene parameters"):
+    with pytest.raises(
+        ValueError,
+        match="trainable Box material-region densities only.*embedded-network",
+    ):
         simulation.prepare()
 
 
