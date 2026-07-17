@@ -905,6 +905,127 @@ class Simulation:
             raw_output={"network_run_manifest": manifest.metadata()},
         )
 
+    def _run_fdtd_network_sweep_ensemble(self, execution, *, scene=None) -> Result:
+        """Distribute independent excitation columns of an RF sweep over GPUs.
+
+        Each column is an independent single-active-port FDTD run, so they map
+        cleanly onto the shared ensemble executor. Plan 01's column builder and
+        matrix assembler are reused verbatim; the executor only guarantees
+        ordered execution, device leasing and a submission-ordered sequence, and
+        this method assembles the identical ``NetworkData`` matrix as the serial
+        path from the per-column ``PortData`` gathered onto one result device.
+        """
+
+        import copy
+
+        from .execution.capacity import estimate_scene_footprint_bytes
+        from .execution.ensemble import MultiGPUExecution
+        from .execution.executor import execute_plan
+        from .execution.plan import ExecutionPlan, ExecutionTask
+        from .network_sweep import aggregate_network_columns, build_network_column_run
+        from .waveport_sweep import WavePortRunManifest
+
+        if not isinstance(execution, MultiGPUExecution):
+            raise TypeError("execution must be a maxwell.MultiGPUExecution.")
+        if self.config.parallel is not None:
+            raise ValueError(
+                "A network sweep cannot combine ensemble execution with an "
+                "FDTDParallelConfig joint solve on the same Simulation."
+            )
+        if self.has_trainable_parameters:
+            raise ValueError(
+                "Ensemble execution does not run the FDTD adjoint through run_many; "
+                "run the trainable sweep without an execution descriptor."
+            )
+
+        run_scene = self.scene if scene is None else scene
+        manifest = self._resolve_port_sweep_manifest(run_scene)
+        if isinstance(manifest, WavePortRunManifest):
+            raise ValueError(
+                "Ensemble execution of a WavePort sweep is not yet available; run the "
+                "WavePort sweep without an execution descriptor."
+            )
+
+        sweep = self.port_sweep
+        result_device = torch.device(execution.devices[0])
+        estimated = estimate_scene_footprint_bytes(
+            run_scene,
+            frequencies=self.frequencies,
+            full_field_dft=self.config.full_field_dft,
+        )
+
+        def _make_run(active_name):
+            def _run(device):
+                column_scene = copy.copy(run_scene)
+                column_scene.device = str(device)
+                excitations, overrides = build_network_column_run(
+                    column_scene,
+                    sweep,
+                    manifest,
+                    active_name,
+                )
+                solver = self._build_fdtd_solver_for_scene(
+                    column_scene,
+                    initialize=True,
+                    port_excitations=excitations,
+                    termination_overrides=overrides,
+                )
+                return self._run_fdtd_from_solver(solver)
+
+            return _run
+
+        tasks = tuple(
+            ExecutionTask(
+                index=index,
+                run=_make_run(active_name),
+                estimated_bytes=estimated,
+                label=f"column[{active_name}]",
+            )
+            for index, active_name in enumerate(manifest.port_names)
+        )
+        plan = ExecutionPlan(
+            tasks=tasks,
+            placement=execution.placement,
+            max_concurrency=execution.max_concurrency,
+            fail_fast=True,
+        )
+        pool = execution.build_pool(require_cuda=True)
+        sequence = execute_plan(plan, pool)
+        column_results = sequence.results()
+
+        columns = tuple(
+            _move_port_mapping_to_device(result.ports, result_device)
+            for result in column_results
+        )
+        column_stats = tuple(result.stats() for result in column_results)
+        stacked_ports, network = aggregate_network_columns(manifest, columns)
+        metadata = dict(self.metadata)
+        metadata["network_run_manifest"] = manifest.metadata()
+        metadata["ensemble_execution"] = {
+            "devices": tuple(execution.devices),
+            "placement": execution.placement,
+            "column_devices": tuple(record.device for record in sequence.records),
+        }
+        return Result(
+            method="fdtd",
+            scene=run_scene,
+            prepared_scene=column_results[-1].prepared_scene,
+            frequency=self.frequency,
+            frequencies=self.frequencies,
+            solver=column_results[-1].solver,
+            fields={},
+            monitors={},
+            ports=stacked_ports,
+            network=network,
+            metadata=metadata,
+            solver_stats={
+                "network_sweep": manifest.metadata(),
+                "columns": column_stats,
+                "ensemble": metadata["ensemble_execution"],
+            },
+            raw_output={"network_run_manifest": manifest.metadata()},
+        )
+
     def _resolve_port_sweep_manifest(self, scene):
         if any(isinstance(port, WavePort) for port in scene.ports):
             from .waveport_sweep import resolve_waveport_run_manifest
@@ -1258,7 +1379,16 @@ class PreparedNetworkSweep:
         self.scene = scene
         self.manifest = manifest
 
-    def run(self) -> Result:
+    def run(self, *, execution=None) -> Result:
+        if execution is not None:
+            # Distribute the excitation columns over the ensemble executor. The
+            # coordinator pre-prepared scene is intentionally not reused: each
+            # column prepares on its own leased device instead of materializing a
+            # full PreparedScene on one GPU.
+            return self.simulation._run_fdtd_network_sweep_ensemble(
+                execution,
+                scene=self.simulation.scene,
+            )
         return self.simulation._run_fdtd_network_sweep(
             scene=self.scene,
             manifest=self.manifest,
@@ -1368,6 +1498,39 @@ class PreparedSimulation:
             total_steps=total_steps,
         )
 
+
+
+def _move_port_mapping_to_device(ports, device: torch.device) -> dict:
+    """Gather a column's PortData mapping onto a single result device.
+
+    Ensemble columns run on different GPUs, so their PortData tensors live on
+    different devices. Matrix assembly requires one common device; this rebuilds
+    each PortData with every tensor field moved to ``device`` while preserving
+    the port contract (convention, direction, reference plane, metadata).
+    """
+
+    import dataclasses
+
+    from .fdtd.distributed.output import move_tensors_to_device
+
+    def _move_value(value):
+        if isinstance(value, torch.Tensor):
+            return value.to(device=device)
+        return value
+
+    moved = {}
+    for name, entry in ports.items():
+        tensor_fields = {}
+        for data_field in dataclasses.fields(entry):
+            current = getattr(entry, data_field.name)
+            if data_field.name == "metadata":
+                tensor_fields["metadata"] = move_tensors_to_device(dict(current), device)
+            elif isinstance(current, torch.Tensor):
+                tensor_fields[data_field.name] = current.to(device=device)
+            elif data_field.name == "z0":
+                tensor_fields["z0"] = _move_value(current)
+        moved[name] = dataclasses.replace(entry, **tensor_fields)
+    return moved
 
 
 def run(simulation: Simulation) -> Result:
