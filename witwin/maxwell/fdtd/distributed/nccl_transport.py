@@ -164,7 +164,9 @@ class NcclHaloTransport:
             )
 
         torch.cuda.set_device(self.device)
-        if not dist.is_initialized():
+        if dist.is_initialized():
+            self._validate_adopted_group()
+        else:
             dist.init_process_group(
                 backend="nccl",
                 rank=self.rank,
@@ -174,6 +176,37 @@ class NcclHaloTransport:
             )
         self._connected = True
         self._verify_homogeneity()
+
+    def _validate_adopted_group(self) -> None:
+        """Reject a pre-existing process group that disagrees with this rank.
+
+        ``preflight`` adopts an already-initialised default group instead of
+        creating a second one, but a group whose world size, rank, or backend
+        does not match this transport's expectations would make every halo
+        exchange address the wrong peer. Fail closed with an explicit message
+        rather than silently binding to a mismatched group.
+        """
+
+        actual_world = dist.get_world_size()
+        if actual_world != self.world_size:
+            raise RuntimeError(
+                "NCCL transport adopted an existing process group with world size "
+                f"{actual_world}, but this rank expects {self.world_size}; the "
+                "launcher and the configured device count disagree."
+            )
+        actual_rank = dist.get_rank()
+        if actual_rank != self.rank:
+            raise RuntimeError(
+                "NCCL transport adopted an existing process group reporting rank "
+                f"{actual_rank}, but this transport was constructed for rank "
+                f"{self.rank}; the launcher rank assignment is inconsistent."
+            )
+        backend = str(dist.get_backend()).lower()
+        if backend != "nccl":
+            raise RuntimeError(
+                "NCCL transport requires a NCCL-backed process group; the adopted "
+                f"group uses backend {backend!r}."
+            )
 
     def _verify_homogeneity(self) -> None:
         properties = torch.cuda.get_device_properties(self.device)

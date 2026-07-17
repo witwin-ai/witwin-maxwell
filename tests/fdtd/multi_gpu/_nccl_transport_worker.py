@@ -47,6 +47,11 @@ def main() -> None:
         # Ghost filled from rank 1's first owned planes.
         assert torch.equal(ghost[0], _plane(101, device)), "electric ghost Ey mismatch"
         assert torch.equal(ghost[1], _plane(201, device)), "electric ghost Ez mismatch"
+    if rank == 1:
+        # Endpoint negative: the rightmost rank has no right neighbour, so its
+        # electric ghost must be left untouched (no phantom receive).
+        assert torch.equal(ghost[0], _plane(-1, device)), "endpoint electric ghost Ey mutated"
+        assert torch.equal(ghost[1], _plane(-1, device)), "endpoint electric ghost Ez mutated"
 
     # -- forward magnetic: left rank's last owned cell -> right rank ghost --
     last_owned = [_plane(300 + rank, device), _plane(400 + rank, device)]
@@ -58,6 +63,11 @@ def main() -> None:
     if rank == 1:
         assert torch.equal(low_ghost[0], _plane(300, device)), "magnetic ghost Hy mismatch"
         assert torch.equal(low_ghost[1], _plane(400, device)), "magnetic ghost Hz mismatch"
+    if rank == 0:
+        # Endpoint negative: the leftmost rank has no left neighbour, so its low
+        # magnetic ghost must be left untouched.
+        assert torch.equal(low_ghost[0], _plane(-1, device)), "endpoint magnetic ghost Hy mutated"
+        assert torch.equal(low_ghost[1], _plane(-1, device)), "endpoint magnetic ghost Hz mutated"
 
     # -- reverse magnetic adjoint: right ghost adj -> left owner (add), zero --
     m_owner = [_plane(10, device), _plane(20, device)]
@@ -72,10 +82,18 @@ def main() -> None:
         # rank 0 owner accumulates rank 1's ghost adjoint (7, 9).
         assert torch.equal(m_owner[0], _plane(17, device)), "magnetic adjoint owner Hy mismatch"
         assert torch.equal(m_owner[1], _plane(29, device)), "magnetic adjoint owner Hz mismatch"
+        # Endpoint negative: leftmost rank has no left neighbour, so it never
+        # ships its own ghost adjoint and must not zero it.
+        assert torch.equal(m_ghost[0], _plane(7, device)), "endpoint magnetic adjoint ghost Hy zeroed"
+        assert torch.equal(m_ghost[1], _plane(9, device)), "endpoint magnetic adjoint ghost Hz zeroed"
     if rank == 1:
         # rank 1's ghost adjoint must be zeroed after shipping it left.
         assert torch.equal(m_ghost[0], _plane(0, device)), "magnetic adjoint ghost Hy not zeroed"
         assert torch.equal(m_ghost[1], _plane(0, device)), "magnetic adjoint ghost Hz not zeroed"
+        # Endpoint negative: rightmost rank has no right neighbour, so its owner
+        # receives nothing and stays at its initial value.
+        assert torch.equal(m_owner[0], _plane(10, device)), "endpoint magnetic adjoint owner Hy mutated"
+        assert torch.equal(m_owner[1], _plane(20, device)), "endpoint magnetic adjoint owner Hz mutated"
 
     # -- reverse electric adjoint: left ghost adj -> right owner (add), zero --
     e_owner = [_plane(30, device), _plane(40, device)]
@@ -90,15 +108,31 @@ def main() -> None:
         # rank 1 owner accumulates rank 0's ghost adjoint (3, 4).
         assert torch.equal(e_owner[0], _plane(33, device)), "electric adjoint owner Ey mismatch"
         assert torch.equal(e_owner[1], _plane(44, device)), "electric adjoint owner Ez mismatch"
+        # Endpoint negative: rightmost rank has no right neighbour, so it never
+        # ships its own ghost adjoint node and must not zero it.
+        assert torch.equal(e_ghost[0], _plane(3, device)), "endpoint electric adjoint ghost Ey zeroed"
+        assert torch.equal(e_ghost[1], _plane(4, device)), "endpoint electric adjoint ghost Ez zeroed"
     if rank == 0:
         assert torch.equal(e_ghost[0], _plane(0, device)), "electric adjoint ghost Ey not zeroed"
         assert torch.equal(e_ghost[1], _plane(0, device)), "electric adjoint ghost Ez not zeroed"
+        # Endpoint negative: leftmost rank has no left neighbour, so its owner
+        # receives nothing and stays at its initial value.
+        assert torch.equal(e_owner[0], _plane(30, device)), "endpoint electric adjoint owner Ey mutated"
+        assert torch.equal(e_owner[1], _plane(40, device)), "endpoint electric adjoint owner Ez mutated"
 
     # -- scalar all-reduce (shutoff-energy shape): 1 + 2 == 3 --
     total = transport.allreduce_scalar(rank + 1)
     assert torch.equal(total, torch.tensor(3.0, device=device, dtype=torch.float64)), (
         f"allreduce_scalar mismatch on rank {rank}: {total.item()}"
     )
+
+    # -- adopted-group accept path: a second transport with matching rank/world --
+    # size must adopt the live group in preflight (not re-initialise it) and pass
+    # the world_size/rank/backend validation. Both ranks run this in lockstep so
+    # the homogeneity all_gather inside preflight completes.
+    adopted = NcclHaloTransport.from_env(expected_world_size=2)
+    adopted.preflight()
+    assert adopted._connected, "adopted transport failed to bind the live group"
 
     transport.barrier()
     transport.teardown()
