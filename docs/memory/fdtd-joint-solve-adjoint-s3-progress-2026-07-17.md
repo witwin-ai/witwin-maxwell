@@ -103,9 +103,28 @@ Part B. Deviations recorded below.
   optimization.
 
 ## Deferred (S4/S5)
-- S4: CPML face-semantics audit + phase-split of `_reverse_step_cpml_native_core` +
-  CPML-trainable distributed reverse/parity/FD. Guarded (CPML absorber rejected at
-  prepare for trainable+parallel) until audited.
+- S4 (CPML-trainable): guarded, not forced. CPML-trainable+parallel is rejected at
+  prepare (`_validate_trainable_parallel_fdtd`, absorber=="cpml"). Concrete blockers
+  found while scoping the audit, recorded so S4 starts from them:
+  1. `_reverse_step_cpml_native_core` (native.py:368) is NOT phase-split (S1 left it
+     unfactored on purpose), so the distributed reverse cannot insert the transposed
+     halos between its electric and magnetic phases the way it does for the standard
+     core.
+  2. The CPML reverse carries per-cell psi_e/psi_h memory state (twelve extra fields).
+     The S1 transposed transports move only Ey/Ez (electric) and Hy/Hz (magnetic) planes;
+     the interface psi coupling would need matching transposed psi halos, which do not
+     exist yet. `capture_checkpoint_state` already stores psi, but the adjoint psi state
+     and its halo are new work.
+  3. Internal-face gating (`cpml_correction_active` / `resolve_electric_cell_status`,
+     blueprint risk 1) must be verified to treat a shard's internal x-face as interior
+     (matching the forward's `effective_x_low/high_mode = BOUNDARY_NONE`) before a
+     per-shard CPML reverse launch is trusted at the interface.
+  These make CPML a genuine slice (phase-split + psi halos + FD gates), not a quick add,
+  so it stays guarded with the reason recorded rather than forced.
+- S4 (ghost-invariant debug asserts): not added to the reverse hot loop. The ghost-zero
+  invariant is currently validated indirectly — the interface FD gate goes red when the
+  transposed halos are no-op'd (falsification above), and grad_eps is bitwise
+  reproducible. Explicit debug asserts remain a follow-up.
 - S5: tiled plane/flux/mode monitor adjoint seed scatter. Guarded
   (`require_distributed_adjoint_objective_support` + prepare-time
   `_tiled_monitor_objective_reason`).
