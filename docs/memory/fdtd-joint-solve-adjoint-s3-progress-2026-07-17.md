@@ -60,13 +60,15 @@ Part B. Deviations recorded below.
   reconciliation required. `tests/api/public/test_guard_census.py` green.
 
 ## Exit-gate evidence (2× A6000, CUDA_VISIBLE_DEVICES=0,1)
-- `tests/fdtd/multi_gpu/test_adjoint_parity.py` (11): 1-vs-2-GPU objective parity
+- `tests/fdtd/multi_gpu/test_adjoint_parity.py` (12): 1-vs-2-GPU objective parity
   (bit-identical forward, loss diff 0.0) and gradient parity (measured rel drift ~1e-7;
   gate rtol=1e-4 + atol=1e-6·max|grad|); central finite differences on density texels on
   the x-split and interior to each shard (`(1,2,2)/(2,2,2)/(3,2,2)`, source x=-0.3,
   monitor x=0.1) and with source+monitor on the interface node (min-rel-error over 3 h,
   measured ~1e-5, gate 2e-3); bitwise-reproducible gathered grad_eps (`torch.equal`);
-  and seven prepare-time guard regressions (raise before allocation).
+  checkpoint-stride invariance (stride=1 no-replay vs stride=_STEPS full 60-step replay
+  agree within the parity gate, which also validates `replay_distributed_segment`); and
+  seven prepare-time guard regressions (raise before allocation).
 - `tests/fdtd/multi_gpu/test_material_region_forward.py` (1): distributed Box density
   forward — gathered per-shard compiled eps equals single-GPU exactly (atol 0), plus
   field/monitor parity within the plan gates.

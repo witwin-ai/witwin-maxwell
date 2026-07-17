@@ -87,7 +87,7 @@ def _scene(density, *, source_x, monitor_x, device):
     return scene
 
 
-def _solve(density_values, *, parallel_devices, source_x, monitor_x, want_grad):
+def _solve(density_values, *, parallel_devices, source_x, monitor_x, want_grad, checkpoint_stride=None):
     density = density_values.clone().to("cuda:0")
     if want_grad:
         density.requires_grad_(True)
@@ -95,7 +95,10 @@ def _solve(density_values, *, parallel_devices, source_x, monitor_x, want_grad):
     kwargs = dict(frequency=_FREQUENCY, run_time=mw.TimeConfig(time_steps=_STEPS))
     if parallel_devices is not None:
         kwargs["parallel"] = _parallel(parallel_devices)
-    result = mw.Simulation.fdtd(scene, **kwargs).run()
+    simulation = mw.Simulation.fdtd(scene, **kwargs)
+    if checkpoint_stride is not None:
+        simulation.config.adjoint_checkpoint_stride = int(checkpoint_stride)
+    result = simulation.run()
     spectrum = result.monitors["probe"]["Ez"]
     loss = (spectrum.real ** 2 + spectrum.imag ** 2).sum()
     if want_grad:
@@ -195,6 +198,25 @@ def test_interface_source_and_monitor_finite_difference(cuda_p2p_devices, cuda_m
         f"interface texel {texel}: distributed grad {analytic:.6e} vs central FD {fd:.6e} "
         f"(h={h:.0e}) rel {rel:.3e} exceeds the FD gate"
     )
+
+
+def test_gradient_is_checkpoint_stride_invariant(cuda_p2p_devices, cuda_memory_cleanup):
+    # Different adjoint checkpoint strides replay different segment lengths but must
+    # reconstruct the same forward trajectory (to replay-drift), so the gradient is
+    # stride-invariant. stride=1 checkpoints every step (no replay); stride=_STEPS is
+    # one segment replayed from step 0.
+    base = _base_density()
+    _, grad_fine = _solve(
+        base, parallel_devices=cuda_p2p_devices, source_x=-0.3, monitor_x=0.1,
+        want_grad=True, checkpoint_stride=1,
+    )
+    _, grad_coarse = _solve(
+        base, parallel_devices=cuda_p2p_devices, source_x=-0.3, monitor_x=0.1,
+        want_grad=True, checkpoint_stride=_STEPS,
+    )
+    assert float(grad_fine.abs().max()) > 0.0
+    atol_floor = 1.0e-6 * float(grad_fine.abs().max())
+    torch.testing.assert_close(grad_coarse, grad_fine, rtol=1.0e-4, atol=atol_floor)
 
 
 def _solve_capture_grad_eps(base, *, parallel_devices, source_x, monitor_x):
