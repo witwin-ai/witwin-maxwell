@@ -25,9 +25,12 @@ shared network/embedding rational-fitting stack:
 * :meth:`RationalModel.check_passivity` — the pole-aware positive-real
   certificate.
 
-The analytic impedance uses ``scipy.special.iv`` for the complex modified
-Bessel functions, in the same prepare-time spirit as the mode solver and the
-material dispersion fits.
+The analytic impedance uses the exponentially scaled complex modified Bessel
+function ``scipy.special.ive`` (where ``ive(n, z) = iv(n, z) * exp(-|Re z|)``),
+in the same prepare-time spirit as the mode solver and the material dispersion
+fits. Only the ratio ``I0(m a) / I1(m a)`` is needed, so the shared scaling
+cancels exactly and the evaluation stays finite even when the unscaled ``iv``
+would overflow at large ``Re(m a)``.
 """
 
 from __future__ import annotations
@@ -141,7 +144,14 @@ def internal_impedance(
     # m = sqrt(j omega mu sigma), principal root (positive real part).
     m = (1j * omega * mu * sigma) ** 0.5  # [F]
     ma = m[:, None] * a[None, :]  # [F, S]
-    ratio = special.iv(0, ma) / special.iv(1, ma)
+    # The impedance only needs the ratio I0(ma) / I1(ma). Evaluating the
+    # unscaled iv overflows once Re(ma) grows large (both I0 and I1 blow up
+    # past |Re| ~ 700), so use the exponentially scaled ive, where
+    # ive(n, z) = iv(n, z) * exp(-|Re z|). Numerator and denominator share the
+    # same argument ``ma``, so the exp(-|Re ma|) scaling cancels exactly and the
+    # ratio equals iv(0, ma) / iv(1, ma) for every z, including the small-z DC
+    # limit, while staying finite for arbitrarily large arguments.
+    ratio = special.ive(0, ma) / special.ive(1, ma)
     prefactor = m[:, None] / (2.0 * math.pi * a[None, :] * sigma)
     impedance = prefactor * ratio
     result = torch.as_tensor(impedance, dtype=torch.complex128)

@@ -127,6 +127,43 @@ def test_internal_impedance_matches_scipy_reference():
     assert np.allclose(got, ref, rtol=1e-10, atol=0.0)
 
 
+@pytest.mark.parametrize(
+    ("radius", "frequency"),
+    [
+        (1.0e-3, 3.0e9),  # copper 1mm @ 3 GHz: Re(m a) ~ 750, iv(0/1) overflow
+        (0.5e-3, 1.0e10),  # copper 0.5mm @ 10 GHz: Re(m a) ~ 685, iv overflow
+    ],
+)
+def test_internal_impedance_finite_at_large_argument(radius, frequency):
+    # Regression: the unscaled scipy.special.iv overflows once Re(m a) grows
+    # (both I0 and I1 blow up past |Re| ~ 700), which raised ValueError for these
+    # radius/frequency combinations. The scaled ive form keeps the ratio finite.
+    freqs = torch.tensor([frequency], dtype=torch.float64)
+    z = wi.internal_impedance(radius, COPPER, wi.MU_0, freqs)
+    assert bool(torch.isfinite(z.real[0]) and torch.isfinite(z.imag[0]))
+    # Deep in the skin-effect regime both real and imaginary parts approach the
+    # surface-resistance asymptote (1 + j) R_s / (2 pi a).
+    r_s = float(wi.surface_resistance(COPPER, wi.MU_0, freqs)[0])
+    asymptote = r_s / (2.0 * math.pi * radius)
+    assert float(z.real[0]) == pytest.approx(asymptote, rel=2.0e-2)
+    assert float(z.imag[0]) == pytest.approx(asymptote, rel=2.0e-2)
+
+
+def test_internal_impedance_finite_and_monotone_across_wide_band():
+    # The (4e8, 1e10) fit band's upper decade drives Re(m a) past the iv
+    # overflow threshold; fit_series_impedance samples internal_impedance across
+    # exactly this band, so its previous ValueError was this overflow. The scaled
+    # form stays finite, keeps the AC resistance monotone, and lands within 2% of
+    # the surface-resistance asymptote at the top of the band.
+    band = torch.logspace(math.log10(4.0e8), math.log10(1.0e10), 120, dtype=torch.float64)
+    z = wi.internal_impedance(RADIUS, COPPER, wi.MU_0, band)
+    assert bool(torch.all(torch.isfinite(z.real) & torch.isfinite(z.imag)))
+    assert bool(torch.all(torch.diff(z.real) > 0.0))
+    r_s = float(wi.surface_resistance(COPPER, wi.MU_0, band[-1:])[0])
+    asymptote = r_s / (2.0 * math.pi * RADIUS)
+    assert float(z.real[-1]) == pytest.approx(asymptote, rel=2.0e-2)
+
+
 def test_ohmic_loss_density_is_half_r_abs_i_squared_and_grows_with_frequency():
     freqs = torch.tensor([1e7, 1e8, 1e9], dtype=torch.float64)
     resistance = wi.internal_impedance(RADIUS, COPPER, wi.MU_0, freqs).real

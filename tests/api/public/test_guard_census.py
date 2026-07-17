@@ -52,7 +52,16 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # fully supported). It becomes a public promise only after the plan 06 Phase 4
 # exit gate lands the aggregated per-column adjoint on the plan 02 Phase 7
 # distributed result-aggregation contract; lower this budget then.
-CAPABILITY_GUARD_BUDGET = 133
+#
+# 2026-07-17 (plan 07 Phase 4, finite-conductor wire series-impedance slice):
+# 133 -> 134 (+1). compiler/thin_wire.py now raises NotImplementedError when a
+# ThinWire carries a finite (non-PEC) conductor: the analytic series-impedance
+# model and passive ADE fit are implemented (wire_impedance.py), but the lossy
+# current recurrence is not yet wired into the FDTD runtime, so the compiler
+# fails closed instead of silently dropping the loss. It is a genuine capability
+# gap (Material compilers 11 -> 12); lower this budget when the lossy recurrence
+# lands in the runtime.
+CAPABILITY_GUARD_BUDGET = 134
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

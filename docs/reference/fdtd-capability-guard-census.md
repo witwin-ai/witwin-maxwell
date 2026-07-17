@@ -10,9 +10,10 @@ cannot enter unnoticed.
 The 2026-07-17 integrated repository state (circuit co-simulation, Touchstone
 network embedding, the thin-wire subgrid conductor series in plan 07 phases
 0-3, the array basis / active-S feature series in plan 06 phases 0-1, and the
-plan 07 Phase 4 multi-GPU wire forward slice, all merged) contains 155 guards:
+plan 07 Phase 4 multi-GPU wire forward slice, plus the plan 07 Phase 4
+finite-conductor wire series-impedance slice, all merged) contains 156 guards:
 
-- 133 capability guards tracked by the non-increasing test budget;
+- 134 capability guards tracked by the non-increasing test budget;
 - 22 contract guards excluded by exact file and message substring.
 
 The single-GPU circuit adjoint provides the circuit replay and transpose
@@ -39,7 +40,7 @@ The capability baseline is distributed as follows:
 | Area | Capability guards |
 | --- | ---: |
 | External interoperability adapter | 18 |
-| Material compilers | 11 |
+| Material compilers | 12 |
 | Frequency-domain runtime | 5 |
 | Time-domain adjoint | 19 |
 | Time-domain excitation | 12 |
@@ -48,7 +49,7 @@ The capability baseline is distributed as follows:
 | Public simulation, result, and network workflows | 24 |
 | Material models | 7 |
 | Postprocessing | 4 |
-| **Total** | **133** |
+| **Total** | **134** |
 
 This integrated baseline is the 2026-07-16 circuit/network state (119 capability
 guards) plus the ten thin-wire capability guards from plan 07 phases 0-3 (giving
@@ -57,6 +58,9 @@ guards) plus the ten thin-wire capability guards from plan 07 phases 0-3 (giving
 forward slice (giving 132) plus the one array scene-gradient capability guard from
 plan 06 Phase 4 (giving 133); its disposition is detailed in the
 [Array scene-gradient reconciliation](#array-scene-gradient-reconciliation-2026-07-17)
+note below. The plan 07 Phase 4 finite-conductor wire series-impedance slice adds
+one further capability guard (giving 134); its disposition is detailed in the
+[Finite-conductor wire reconciliation](#finite-conductor-wire-reconciliation-2026-07-17)
 note below. The 119-guard baseline is itself the 2026-07-15 circuit co-simulation
 state (113 capability guards) plus the six 2026-07-16 network-embedding
 capability guards (Time-domain adjoint +3, Public simulation/result/network
@@ -123,6 +127,25 @@ adjoint (plan 06 Phase 4 exit gate, gated on the plan 02 Phase 7 distributed
 result-aggregation contract) is not wired to this single-device basis. It is
 counted under "Public simulation, result, and network workflows" (23 -> 24);
 lower the budget when the aggregated adjoint lands.
+
+### Finite-conductor wire reconciliation (2026-07-17)
+
+The plan 07 Phase 4 finite-conductor wire series-impedance slice adds one
+reviewed capability guard. `witwin/maxwell/compiler/thin_wire.py` raises
+`NotImplementedError` ("ThinWire ... uses a finite conductor. The per-unit-length
+series-impedance model is available via ...fit_series_impedance, but the lossy
+current recurrence is not yet wired into the FDTD runtime; use a PEC conductor to
+run a thin-wire FDTD simulation.") when a `ThinWire` declares a non-PEC
+conductor. This slice lands the analytic round-wire skin-effect impedance and the
+passive rational ADE fit (`witwin/maxwell/compiler/wire_impedance.py`, reusing
+the shared network rational-fitting stack) plus their acceptance gates, but the
+lossy current recurrence that would feed that impedance into the Yee update is
+not yet wired into the FDTD runtime. The compiler therefore fails closed rather
+than silently running a finite conductor as if it were lossless. It is a genuine
+capability gap, not a public contract: the impedance model itself is implemented
+and the guard disappears once the recurrence lands. It is counted under
+"Material compilers" (11 -> 12); lower the budget when the lossy recurrence is
+wired into the runtime.
 
 ## Contract exclusions
 
