@@ -331,7 +331,20 @@ def test_cuda_delay_hot_path_has_no_allocation_or_host_transfer() -> None:
             )
         torch.cuda.synchronize()
     keys = {event.key for event in profile.key_averages()}
-    assert not any("memcpy" in key.lower() or "item" in key.lower() for key in keys)
+    # Owner ratification (2026-07-16): the contract this test name states is "no
+    # host transfer", and a device-to-device ring copy is not one. The delay
+    # ring advance legitimately issues on-device (DtoD) copies for its
+    # read-before / write-after buffer split (which lets the implicit zero-delay
+    # solve land between read and write); those are not host transfers and the
+    # measured device allocation below is 0. Ban only host copies and
+    # device->host scalar reads -- the exact contract already codified by the
+    # sibling hot-path tests (test_network_observer_hot_path.py:130,
+    # test_network_runtime.py:173). This also strengthens the old broad "item"
+    # substring into explicit aten::item / aten::_local_scalar_dense host-sync
+    # bans while keeping the zero-allocation guard.
+    assert "aten::item" not in keys
+    assert "aten::_local_scalar_dense" not in keys
+    assert not any("Memcpy HtoD" in key or "Memcpy DtoH" in key for key in keys)
     assert sum(
         max(0, getattr(event, "self_device_memory_usage", 0))
         for event in profile.key_averages()

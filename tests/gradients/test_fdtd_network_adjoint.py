@@ -335,7 +335,11 @@ def test_rational_network_gradient_matches_three_step_central_difference(
         abs(value - adjoint) / max(abs(value), abs(adjoint), 1.0e-30)
         for value in differences
     )
-    assert min(relative_errors) < 0.02, (
+    # Require every step size to agree, not just the best one: max() over the
+    # three central differences means a regression that corrupts any one step
+    # is caught. The three FD sizes bracket the truncation/round-off optimum so
+    # all three legitimately land far under the gate today.
+    assert max(relative_errors) < 0.02, (
         f"adjoint={adjoint}, central_differences={differences}, "
         f"relative_errors={relative_errors}"
     )
@@ -357,7 +361,8 @@ def test_network_connected_material_gradient_matches_three_step_central_differen
         abs(value - adjoint) / max(abs(value), abs(adjoint), 1.0e-30)
         for value in differences
     )
-    assert min(relative_errors) < 0.02, (
+    # Require every step size to agree (see the note on the residue/direct case).
+    assert max(relative_errors) < 0.02, (
         f"adjoint={adjoint}, central_differences={differences}, "
         f"relative_errors={relative_errors}"
     )

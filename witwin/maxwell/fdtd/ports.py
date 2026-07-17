@@ -38,82 +38,9 @@ class PortDFTAccumulator:
         self._voltage_sum = torch.complex(zeros, zeros)
         self._current_sum = torch.complex(zeros, zeros)
         self._window_weight_sum = torch.zeros_like(frequencies)
-        self._one = torch.ones((), dtype=self._real_dtype, device=frequencies.device)
         self._voltage_term = torch.empty_like(self._voltage_sum)
         self._current_term = torch.empty_like(self._current_sum)
         self._sample_count = 0
-
-    def _scalar(
-        self,
-        value: torch.Tensor | float | complex,
-        *,
-        name: str,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        if isinstance(value, torch.Tensor):
-            if value.ndim != 0:
-                raise ValueError(f"{name} must be a scalar tensor.")
-            if value.device != self.frequencies.device:
-                raise ValueError(f"{name} must be on the same device as frequencies.")
-            return value.to(dtype=dtype)
-        return torch.as_tensor(
-            value,
-            dtype=dtype,
-            device=self.frequencies.device,
-        )
-
-    def _phase(self, sample_time: torch.Tensor) -> torch.Tensor:
-        angle = 2.0 * torch.pi * self.frequencies * sample_time
-        return torch.complex(torch.cos(angle), torch.sin(angle))
-
-    def _weight(self, value: torch.Tensor | float | None) -> torch.Tensor:
-        if value is None:
-            return self._one
-        if isinstance(value, torch.Tensor):
-            if value.device != self.frequencies.device:
-                raise ValueError("window_weight must be on the same device as frequencies.")
-            if value.ndim == 0 or tuple(value.shape) == tuple(self.frequencies.shape):
-                return value.to(dtype=self._real_dtype)
-            raise ValueError("window_weight must be scalar or have shape [F].")
-        return torch.as_tensor(value, dtype=self._real_dtype, device=self.frequencies.device)
-
-    def accumulate(
-        self,
-        voltage_sample: torch.Tensor | float | complex,
-        current_sample: torch.Tensor | float | complex,
-        *,
-        electric_sample_time: torch.Tensor | float,
-        magnetic_sample_time: torch.Tensor | float,
-        window_weight: torch.Tensor | float | None = None,
-    ) -> None:
-        """Accumulate one Yee step using each field's physical sample time."""
-
-        voltage = self._scalar(
-            voltage_sample,
-            name="voltage_sample",
-            dtype=self._voltage_sum.dtype,
-        )
-        current = self._scalar(
-            current_sample,
-            name="current_sample",
-            dtype=self._current_sum.dtype,
-        )
-        electric_time = self._scalar(
-            electric_sample_time,
-            name="electric_sample_time",
-            dtype=self._real_dtype,
-        )
-        magnetic_time = self._scalar(
-            magnetic_sample_time,
-            name="magnetic_sample_time",
-            dtype=self._real_dtype,
-        )
-        weight = self._weight(window_weight)
-
-        self._voltage_sum = self._voltage_sum + weight * voltage * self._phase(electric_time)
-        self._current_sum = self._current_sum + weight * current * self._phase(magnetic_time)
-        self._window_weight_sum = self._window_weight_sum + weight
-        self._sample_count += 1
 
     def accumulate_precomputed(
         self,

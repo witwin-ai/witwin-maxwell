@@ -2071,7 +2071,9 @@ def solve(
         )
         iterator = pbar
 
+    steps_run = 0
     for n in iterator:
+        steps_run = n + 1
         time_value = n * solver.dt
         if run_full_embedded_step is not None:
             run_full_embedded_step()
@@ -2132,7 +2134,10 @@ def solve(
         if enable_plot and n % solver.plot_interval == 0:
             visualize_slice(solver, n)
 
-    complete_port_observer_graph(solver, n + 1)
+    # steps_run, not n + 1: the loop variable is unbound for time_steps == 0 and
+    # the graph-driven observer step counter must match the steps actually run,
+    # including an early shutoff break.
+    complete_port_observer_graph(solver, steps_run)
     solver._synchronize_device()
     solver.last_solve_elapsed_s = time.perf_counter() - solve_start
     if solver._shutoff_triggered:

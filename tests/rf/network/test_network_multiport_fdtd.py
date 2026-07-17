@@ -84,6 +84,16 @@ def test_touchstone_multiport_fit_matches_independent_network_reference(
     tmp_path: Path,
     port_count: int,
 ) -> None:
+    # CAVEAT: the references here lie inside the order-1 fit's own model class
+    # (the 2-port is a single-pole StateSpaceNetwork fitted at order=1; the
+    # 4-port is a frequency-flat conductance representable by the direct term D
+    # alone), so the measured max|S_pred - S_ref| is ~1e-16 and the < 0.02 gate
+    # is dominated by the float64 Touchstone round-trip, not by a broadband
+    # approximation challenge. This test guards Touchstone round-trip fidelity,
+    # port ordering, and connection mapping. Backing plan section 7 Phase 3's
+    # *independent* reference intent (a reference outside the fit's model class)
+    # is a recorded follow-up; see docs/memory/network-embedding-implementation.md
+    # ("Independence caveat"). Do NOT read the tiny margin as fit accuracy.
     frequencies = torch.linspace(0.1e9, 5.0e9, 49, dtype=torch.float64)
     reference = (
         _two_port_filter(frequencies)

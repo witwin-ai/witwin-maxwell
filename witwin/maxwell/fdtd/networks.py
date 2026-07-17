@@ -1033,7 +1033,11 @@ def finalize_embedded_networks(solver, ports) -> dict[str, EmbeddedNetworkData]:
             port_power=port_power,
             absorbed_power=absorbed,
             generated_power=generated,
-            state_norm=torch.linalg.vector_norm(runtime.state),
+            # state_norm is a reported diagnostic, never an optimization
+            # observable. Detach the state before the norm so the contract is
+            # enforced by construction instead of relying on the runtime state
+            # happening to be graph-free.
+            state_norm=torch.linalg.vector_norm(runtime.state.detach()),
             model_id=runtime.compiled.model_id,
             fit_report=report,
             runtime_warnings=runtime.runtime_warnings,

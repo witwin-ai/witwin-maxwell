@@ -193,6 +193,7 @@ def _build_local_scene(
         boundary=local_boundary,
         monitors=_local_monitors(logical_scene, layout, global_prepared),
         ports=(),
+        networks=(),
         device=str(layout.device),
         symmetry=(None, logical_scene.symmetry[1], logical_scene.symmetry[2]),
     )
@@ -386,6 +387,15 @@ class DistributedFDTD:
             raise ValueError(
                 "Multi-GPU material density regions require distributed density slicing and are "
                 "currently limited to the single-GPU adjoint path."
+            )
+        if self.logical_scene.networks:
+            # Checked before the port guard so a network scene reports the real
+            # blocker. Embedded networks need a unique owner rank plus per-step
+            # scalar reduce-to-owner / scatter-from-owner port transport, which
+            # the distributed port contract does not expose yet.
+            raise ValueError(
+                "Multi-GPU FDTD embedded networks require distributed port ownership and "
+                "per-step scalar reduce/scatter transport."
             )
         if self.logical_scene.ports:
             raise ValueError("Multi-GPU FDTD mode ports require distributed modal plane tiling.")
