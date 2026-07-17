@@ -15,6 +15,7 @@ def _power_normalized_antenna_metrics(
     solid_angle_weights: torch.Tensor,
     incident_power: torch.Tensor,
     accepted_power: torch.Tensor,
+    radiated_power: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Shared torch kernel for absolute-power antenna metrics.
 
@@ -29,7 +30,12 @@ def _power_normalized_antenna_metrics(
         * (torch.abs(e_theta).square() + torch.abs(e_phi).square())
         / (2.0 * wave_impedance)
     )
-    p_rad = torch.sum(intensity * solid_angle_weights, dim=(-2, -1))
+    angular_p_rad = torch.sum(intensity * solid_angle_weights, dim=(-2, -1))
+    p_rad = angular_p_rad if radiated_power is None else radiated_power
+    if p_rad.shape != incident_power.shape:
+        raise ValueError("radiated_power must have the same shape as incident_power.")
+    if p_rad.device != incident_power.device or p_rad.dtype != incident_power.dtype:
+        raise ValueError("radiated_power must share incident_power dtype and device.")
     radiation_valid = torch.isfinite(p_rad) & (p_rad > 0.0)
     accepted_valid = torch.isfinite(accepted_power) & (accepted_power > 0.0)
     incident_valid = torch.isfinite(incident_power) & (incident_power > 0.0)

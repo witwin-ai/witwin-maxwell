@@ -122,7 +122,9 @@ def _broadcast_positive_parameter(
             raise ValueError(f"{name} must be on device {device}.")
         if value.is_complex() or not value.dtype.is_floating_point:
             raise TypeError(f"{name} must be real floating-point data.")
-        parameter = value.to(dtype=dtype)
+        if value.dtype != dtype:
+            raise TypeError(f"{name} tensor must use dtype {dtype}.")
+        parameter = value
     else:
         parameter = torch.as_tensor(value, device=device, dtype=dtype)
 
@@ -157,7 +159,9 @@ def _coordinate_provenance(
             raise ValueError(f"phase_center must be on device {device}.")
         if phase_center.is_complex() or not phase_center.dtype.is_floating_point:
             raise TypeError("phase_center must be real floating-point data.")
-        resolved_center = phase_center.to(dtype=dtype)
+        if phase_center.dtype != dtype:
+            raise TypeError(f"phase_center tensor must use dtype {dtype}.")
+        resolved_center = phase_center
     else:
         resolved_center = torch.as_tensor(phase_center, device=device, dtype=dtype)
     if resolved_center.shape != (3,):
@@ -172,7 +176,9 @@ def _coordinate_provenance(
             raise ValueError(f"frame must be on device {device}.")
         if frame.is_complex() or not frame.dtype.is_floating_point:
             raise TypeError("frame must be real floating-point data.")
-        resolved_frame = frame.to(dtype=dtype)
+        if frame.dtype != dtype:
+            raise TypeError(f"frame tensor must use dtype {dtype}.")
+        resolved_frame = frame
     else:
         resolved_frame = torch.as_tensor(frame, device=device, dtype=dtype)
     if resolved_frame.shape != (3, 3):
@@ -443,7 +449,13 @@ def compute_antenna_data(
 
 def _configuration_tensor(value, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     if isinstance(value, torch.Tensor):
-        return value.to(device=device, dtype=dtype)
+        if value.device != device:
+            raise ValueError(f"configuration tensor must be on device {device}.")
+        if value.is_complex() or not value.dtype.is_floating_point:
+            raise TypeError("configuration tensor must be real floating-point data.")
+        if value.dtype != dtype:
+            raise TypeError(f"configuration tensor must use dtype {dtype}.")
+        return value
     return torch.as_tensor(value, device=device, dtype=dtype)
 
 
@@ -457,12 +469,11 @@ def _select_frequency_parameter(value, index: int, frequency_count: int):
     return value
 
 
-def antenna_data_from_result(
+def _far_fields_from_result(
     result,
     *,
     surface: str,
-    driven_port: str | PortData,
-    polarization: Ludwig3 | None = None,
+    frequencies: torch.Tensor,
     theta: torch.Tensor | Sequence[float] | None = None,
     phi: torch.Tensor | Sequence[float] | None = None,
     theta_points: int = 181,
@@ -471,41 +482,37 @@ def antenna_data_from_result(
     phase_center=None,
     frame=None,
     batch_size: int = 1024,
-) -> AntennaData:
-    """Build antenna results from a closed Huygens monitor and a driven port.
-
-    The angular coordinates are expressed in ``frame``. Its columns are the
-    local x/y/z basis vectors in the simulation coordinates. ``phase_center``
-    is expressed in simulation coordinates and is applied to the far-field
-    phase, rather than being stored as provenance only.
-    """
+) -> dict[str, object]:
+    """Transform a closed-surface result without imposing port-power validity."""
 
     from .nfft import NearFieldFarFieldTransformer
     from .stratton_chu import equivalent_surface_currents_from_monitor
 
     if not isinstance(surface, str) or not surface:
         raise ValueError("surface must be a non-empty monitor name.")
-    if isinstance(driven_port, str):
-        port = result.port(driven_port)
-    elif isinstance(driven_port, PortData):
-        port = driven_port
-    else:
-        raise TypeError("driven_port must be a port name or PortData.")
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
-
-    frequencies = port.frequencies
+    if not isinstance(frequencies, torch.Tensor):
+        raise TypeError("frequencies must be a torch.Tensor.")
+    if (
+        frequencies.ndim != 1
+        or frequencies.is_complex()
+        or not frequencies.dtype.is_floating_point
+    ):
+        raise TypeError("frequencies must be a real floating-point tensor with shape [F].")
+    if frequencies.numel() == 0:
+        raise ValueError("frequencies must not be empty.")
     device = frequencies.device
     dtype = frequencies.dtype
     frequency_count = int(frequencies.numel())
     result_frequencies = tuple(float(value) for value in result.frequencies)
     if len(result_frequencies) != frequency_count:
         raise ValueError(
-            "The driven port and Result must expose the same explicit frequency axis."
+            "The requested far-field frequencies and Result must expose the same explicit frequency axis."
         )
     expected = torch.as_tensor(result_frequencies, device=device, dtype=dtype)
     if not torch.allclose(frequencies, expected, rtol=1e-6, atol=0.0):
-        raise ValueError("The driven-port frequencies must match the Result frequencies.")
+        raise ValueError("The requested far-field frequencies must match the Result frequencies.")
 
     if theta is None:
         if theta_points < 3:
@@ -614,29 +621,82 @@ def antenna_data_from_result(
     e_theta = torch.stack(e_theta_fields, dim=0)
     e_phi = torch.stack(e_phi_fields, dim=0)
     impedance_tensor = torch.as_tensor(impedances, device=device, dtype=dtype)
-    resolved_radius = (
-        radius.to(device=device, dtype=dtype)
-        if isinstance(radius, torch.Tensor)
-        else radius
+    resolved_radius = radius
+    return {
+        "frequencies": frequencies,
+        "theta": theta_grid,
+        "phi": phi_grid,
+        "e_theta": e_theta,
+        "e_phi": e_phi,
+        "radius": resolved_radius,
+        "wave_impedance": impedance_tensor,
+        "phase_center": resolved_center,
+        "frame": resolved_frame,
+        "surface_currents": tuple(current_surfaces),
+    }
+
+
+def antenna_data_from_result(
+    result,
+    *,
+    surface: str,
+    driven_port: str | PortData,
+    polarization: Ludwig3 | None = None,
+    theta: torch.Tensor | Sequence[float] | None = None,
+    phi: torch.Tensor | Sequence[float] | None = None,
+    theta_points: int = 181,
+    phi_points: int = 361,
+    radius=1.0,
+    phase_center=None,
+    frame=None,
+    batch_size: int = 1024,
+) -> AntennaData:
+    """Build antenna results from a closed Huygens monitor and a driven port.
+
+    The angular coordinates are expressed in ``frame``. Its columns are the
+    local x/y/z basis vectors in the simulation coordinates. ``phase_center``
+    is expressed in simulation coordinates and is applied to the far-field
+    phase, rather than being stored as provenance only.
+    """
+
+    if isinstance(driven_port, str):
+        port = result.port(driven_port)
+    elif isinstance(driven_port, PortData):
+        port = driven_port
+    else:
+        raise TypeError("driven_port must be a port name or PortData.")
+    transformed = _far_fields_from_result(
+        result,
+        surface=surface,
+        frequencies=port.frequencies,
+        theta=theta,
+        phi=phi,
+        theta_points=theta_points,
+        phi_points=phi_points,
+        radius=radius,
+        phase_center=phase_center,
+        frame=frame,
+        batch_size=batch_size,
     )
     return compute_antenna_data(
-        frequencies=frequencies,
-        theta=theta_grid,
-        phi=phi_grid,
+        frequencies=transformed["frequencies"],
+        theta=transformed["theta"],
+        phi=transformed["phi"],
         driven_port=port,
-        e_theta=e_theta,
-        e_phi=e_phi,
-        radius=resolved_radius,
-        wave_impedance=impedance_tensor,
+        e_theta=transformed["e_theta"],
+        e_phi=transformed["e_phi"],
+        radius=transformed["radius"],
+        wave_impedance=transformed["wave_impedance"],
         polarization=polarization,
-        phase_center=resolved_center,
-        frame=resolved_frame,
-        surface_currents=tuple(current_surfaces),
+        phase_center=transformed["phase_center"],
+        frame=transformed["frame"],
+        surface_currents=transformed["surface_currents"],
     )
 
 
 __all__ = [
     "FREE_SPACE_IMPEDANCE",
+    "_far_fields_from_result",
     "antenna_data_from_result",
     "compute_antenna_data",
 ]

@@ -690,6 +690,7 @@ def replay_port_runtimes(
         corrected, next_inductor, next_capacitor, trace = replay_lumped_runtime(
             runtime,
             fields[port_runtime.field_name],
+            previous_electric_field=state[port_runtime.field_name],
             inductor_current=state[inductor_name],
             capacitor_voltage=state[capacitor_name],
             drive=_drive_value(port_runtime, sample_time),
@@ -709,6 +710,7 @@ def replay_port_runtimes(
         corrected, next_inductor, next_capacitor, trace = replay_lumped_runtime(
             runtime,
             fields[field_name],
+            previous_electric_field=state[field_name],
             inductor_current=state[inductor_name],
             capacitor_voltage=state[capacitor_name],
             drive=torch.zeros_like(runtime.default_thevenin_voltage),
@@ -771,6 +773,9 @@ def pullback_port_runtimes(
     """Reverse all local branch solves before the Maxwell reverse step."""
 
     updated = dict(adjoint_state)
+    previous_field_adjoints = {
+        name: torch.zeros_like(value) for name, value in eps_by_field.items()
+    }
     grad_eps = {name: torch.zeros_like(value) for name, value in eps_by_field.items()}
     semantic_grads = {}
     sample_time = torch.as_tensor(
@@ -815,6 +820,10 @@ def pullback_port_runtimes(
             eps_edge=eps_by_field[trace.field_name],
         )
         updated[trace.field_name] = result.field_adjoint
+        previous_field_adjoints[trace.field_name] = (
+            previous_field_adjoints[trace.field_name]
+            + result.previous_field_adjoint
+        )
         updated[inductor_name] = result.inductor_current_adjoint
         updated[capacitor_name] = result.capacitor_voltage_adjoint
         grad_eps[trace.field_name] = grad_eps[trace.field_name] + result.grad_eps
@@ -847,7 +856,7 @@ def pullback_port_runtimes(
             }[element.kind]
             key = ("element", element.name, "value")
             semantic_grads[key] = semantic_grads.get(key, torch.zeros_like(gradient)) + gradient
-    return updated, grad_eps, semantic_grads
+    return updated, previous_field_adjoints, grad_eps, semantic_grads
 
 
 def apply_port_runtimes(solver) -> None:

@@ -728,7 +728,12 @@ class _FDTDGradientBridge:
                         "Ez": torch.zeros_like(eps_ez),
                     }
                     if lumped_traces is not None:
-                        post_step_adjoint, local_grad_eps, step_rf_grads = pullback_port_runtimes(
+                        (
+                            post_step_adjoint,
+                            previous_field_adjoint,
+                            local_grad_eps,
+                            step_rf_grads,
+                        ) = pullback_port_runtimes(
                             solver,
                             lumped_traces[offset],
                             post_step_adjoint,
@@ -807,6 +812,11 @@ class _FDTDGradientBridge:
                         grad_tpa_ey = _accumulate_grad(grad_accumulator_backend, grad_tpa_ey, step_result.grad_tpa_ey)
                         grad_tpa_ez = _accumulate_grad(grad_accumulator_backend, grad_tpa_ez, step_result.grad_tpa_ez)
                     adjoint_state = dict(step_result.pre_step_adjoint)
+                    if lumped_traces is not None:
+                        for field_name, contribution in previous_field_adjoint.items():
+                            adjoint_state[field_name] = (
+                                adjoint_state[field_name] + contribution
+                            )
                     for name in checkpoint_schema.lumped_state_names:
                         adjoint_state[name] = post_step_adjoint[name]
 

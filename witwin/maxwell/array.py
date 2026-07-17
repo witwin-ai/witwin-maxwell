@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from pathlib import Path
+from typing import Any, ClassVar, Mapping
 
 import torch
 
@@ -11,6 +12,9 @@ from .network import (
     PHASOR_CONVENTION,
     POWER_WAVE_CONVENTION,
     NetworkData,
+    _network_from_snapshot,
+    _network_snapshot,
+    _validate_safe_persistence,
     power_waves_to_voltage_current,
 )
 
@@ -20,6 +24,52 @@ ARRAY_POWER_NORMALIZATION = (
     "is normalized to a_n=1 sqrt(watt) with all other ports matched"
 )
 ARRAY_FIELD_BASIS = "spherical_theta_phi"
+ARRAY_PERSISTENCE_SCHEMA_VERSION = 1
+
+
+def _detach_to_cpu(value: Any):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, Mapping):
+        return {key: _detach_to_cpu(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_detach_to_cpu(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_detach_to_cpu(item) for item in value)
+    return value
+
+
+def _validate_persisted_payload(
+    payload,
+    *,
+    expected_type: str,
+    expected_schema_version: int,
+) -> Mapping[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"Persisted {expected_type} payload must be a mapping.")
+    actual_type = payload.get("data_type")
+    if actual_type != expected_type:
+        raise ValueError(f"Persisted file contains {actual_type}, not {expected_type}.")
+    schema_version = payload.get("schema_version")
+    if schema_version != expected_schema_version:
+        raise ValueError(
+            f"Unsupported {expected_type} schema_version {schema_version!r}; "
+            f"expected {expected_schema_version}."
+        )
+    return payload
+
+
+def _load_persisted_payload(path, *, map_location, expected_type: str):
+    payload = torch.load(
+        Path(path),
+        map_location=map_location,
+        weights_only=True,
+    )
+    return _validate_persisted_payload(
+        payload,
+        expected_type=expected_type,
+        expected_schema_version=ARRAY_PERSISTENCE_SCHEMA_VERSION,
+    )
 
 
 @dataclass(frozen=True)
@@ -216,6 +266,8 @@ class EmbeddedElementPatternData:
     power_wave_convention: str = POWER_WAVE_CONVENTION
     field_units: str = "V/m per sqrt(W)"
 
+    schema_version: ClassVar[int] = ARRAY_PERSISTENCE_SCHEMA_VERSION
+
     def __post_init__(self):
         if not isinstance(self.e_theta, torch.Tensor) or not isinstance(self.e_phi, torch.Tensor):
             raise TypeError("e_theta and e_phi must be torch.Tensor instances.")
@@ -331,6 +383,85 @@ class EmbeddedElementPatternData:
     @property
     def E_phi(self) -> torch.Tensor:
         return self.e_phi
+
+    def save(self, path: str | Path):
+        """Save a detached CPU snapshot.
+
+        The snapshot omits the live autograd graph and loads through the safe
+        tensor-only ``torch.load(weights_only=True)`` contract.
+        """
+
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(_embedded_pattern_snapshot(self), output_path)
+
+    @classmethod
+    def load(cls, path: str | Path, map_location=None) -> "EmbeddedElementPatternData":
+        """Load a detached safe snapshot onto ``map_location``."""
+
+        payload = _load_persisted_payload(
+            path,
+            map_location=map_location,
+            expected_type=cls.__name__,
+        )
+        return _embedded_pattern_from_snapshot(payload)
+
+
+def _embedded_pattern_snapshot(data: EmbeddedElementPatternData) -> dict[str, Any]:
+    return {
+        "schema_version": data.schema_version,
+        "data_type": type(data).__name__,
+        "frequencies": _detach_to_cpu(data.frequencies),
+        "port_names": data.port_names,
+        "theta": _detach_to_cpu(data.theta),
+        "phi": _detach_to_cpu(data.phi),
+        "e_theta": _detach_to_cpu(data.e_theta),
+        "e_phi": _detach_to_cpu(data.e_phi),
+        "phase_center": _detach_to_cpu(data.phase_center),
+        "frame": _detach_to_cpu(data.frame),
+        "observation_radius": _detach_to_cpu(data.observation_radius),
+        "wave_impedance": _detach_to_cpu(data.wave_impedance),
+        "polarization_basis": {
+            "kind": type(data.polarization_basis).__name__,
+            "reference_angle": data.polarization_basis.reference_angle,
+        },
+        "phase_center_source": data.phase_center_source,
+        "field_basis": data.field_basis,
+        "power_normalization": data.power_normalization,
+        "phasor_convention": data.phasor_convention,
+        "power_wave_convention": data.power_wave_convention,
+        "field_units": data.field_units,
+    }
+
+
+def _embedded_pattern_from_snapshot(payload) -> EmbeddedElementPatternData:
+    payload = _validate_persisted_payload(
+        payload,
+        expected_type=EmbeddedElementPatternData.__name__,
+        expected_schema_version=EmbeddedElementPatternData.schema_version,
+    )
+    polarization = payload["polarization_basis"]
+    if not isinstance(polarization, Mapping) or polarization.get("kind") != Ludwig3.__name__:
+        raise ValueError("EmbeddedElementPatternData has an unsupported polarization basis.")
+    return EmbeddedElementPatternData(
+        frequencies=payload["frequencies"],
+        port_names=tuple(payload["port_names"]),
+        theta=payload["theta"],
+        phi=payload["phi"],
+        e_theta=payload["e_theta"],
+        e_phi=payload["e_phi"],
+        phase_center=payload["phase_center"],
+        frame=payload["frame"],
+        observation_radius=payload["observation_radius"],
+        wave_impedance=payload["wave_impedance"],
+        polarization_basis=Ludwig3(reference_angle=polarization["reference_angle"]),
+        phase_center_source=payload["phase_center_source"],
+        field_basis=payload["field_basis"],
+        power_normalization=payload["power_normalization"],
+        phasor_convention=payload["phasor_convention"],
+        power_wave_convention=payload["power_wave_convention"],
+        field_units=payload["field_units"],
+    )
 
 
 @dataclass(frozen=True)
@@ -496,6 +627,9 @@ class ArrayBasisData:
     embedded_patterns: EmbeddedElementPatternData
     fingerprint: str
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    radiated_power_matrix: torch.Tensor | None = None
+
+    schema_version: ClassVar[int] = ARRAY_PERSISTENCE_SCHEMA_VERSION
 
     def __post_init__(self):
         if not isinstance(self.network, NetworkData):
@@ -525,6 +659,29 @@ class ArrayBasisData:
             )
         if not isinstance(self.fingerprint, str) or not self.fingerprint:
             raise ValueError("fingerprint must be a non-empty string.")
+        if self.radiated_power_matrix is not None:
+            matrix = self.radiated_power_matrix
+            expected_shape = self.network.s.shape
+            if not isinstance(matrix, torch.Tensor) or not matrix.is_complex():
+                raise TypeError("radiated_power_matrix must be a complex torch.Tensor.")
+            if matrix.shape != expected_shape:
+                raise ValueError(
+                    "radiated_power_matrix must have shape [F, N, N] matching NetworkData."
+                )
+            if matrix.device != self.device or matrix.dtype != self.dtype:
+                raise ValueError(
+                    "radiated_power_matrix must share NetworkData dtype and device."
+                )
+            if not _finite_complex(matrix):
+                raise ValueError("radiated_power_matrix must contain only finite values.")
+            tolerance = 512.0 * torch.finfo(matrix.real.dtype).eps
+            if not torch.allclose(
+                matrix,
+                matrix.mH,
+                rtol=tolerance,
+                atol=tolerance * max(1.0, float(torch.amax(torch.abs(matrix)).item())),
+            ):
+                raise ValueError("radiated_power_matrix must be Hermitian at every frequency.")
         object.__setattr__(self, "metadata", dict(self.metadata))
 
     @property
@@ -546,6 +703,51 @@ class ArrayBasisData:
     @property
     def eep(self) -> EmbeddedElementPatternData:
         return self.embedded_patterns
+
+    def save(self, path: str | Path):
+        """Save a detached CPU snapshot.
+
+        The snapshot preserves the complete network, embedded-pattern contract,
+        and metadata but not their live autograd graphs. Metadata follows the
+        same safe primitive/tensor contract as ``NetworkData``.
+        """
+
+        _validate_safe_persistence(self.metadata)
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "schema_version": self.schema_version,
+                "data_type": type(self).__name__,
+                "network": _network_snapshot(self.network),
+                "embedded_patterns": _embedded_pattern_snapshot(self.embedded_patterns),
+                "fingerprint": self.fingerprint,
+                "metadata": _detach_to_cpu(self.metadata),
+                "radiated_power_matrix": _detach_to_cpu(self.radiated_power_matrix),
+            },
+            output_path,
+        )
+
+    @classmethod
+    def load(cls, path: str | Path, map_location=None) -> "ArrayBasisData":
+        """Load a detached safe snapshot onto ``map_location``."""
+
+        payload = _load_persisted_payload(
+            path,
+            map_location=map_location,
+            expected_type=cls.__name__,
+        )
+        if "radiated_power_matrix" not in payload:
+            raise ValueError(
+                "Persisted ArrayBasisData is missing radiated_power_matrix."
+            )
+        return cls(
+            network=_network_from_snapshot(payload["network"]),
+            embedded_patterns=_embedded_pattern_from_snapshot(payload["embedded_patterns"]),
+            fingerprint=payload["fingerprint"],
+            metadata=payload["metadata"],
+            radiated_power_matrix=payload["radiated_power_matrix"],
+        )
 
     def combine(self, weights: BeamWeights | torch.Tensor) -> BeamData:
         """Combine incident power-wave weights without rerunning the field solver."""
@@ -584,6 +786,16 @@ class ArrayBasisData:
         e_theta = torch.einsum("kfn,fntp->kftp", a, patterns.e_theta)
         e_phi = torch.einsum("kfn,fntp->kftp", a, patterns.e_phi)
         angular_weights = _solid_angle_weights(patterns.theta, patterns.phi)
+        radiated_power = None
+        if self.radiated_power_matrix is not None:
+            radiated_power = torch.real(
+                torch.einsum(
+                    "kfm,fmn,kfn->kf",
+                    torch.conj(a),
+                    self.radiated_power_matrix,
+                    a,
+                )
+            )
         metrics = _power_normalized_antenna_metrics(
             e_theta=e_theta,
             e_phi=e_phi,
@@ -592,6 +804,7 @@ class ArrayBasisData:
             solid_angle_weights=angular_weights[None, None, ...],
             incident_power=incident_power,
             accepted_power=accepted_power,
+            radiated_power=radiated_power,
         )
 
         network = _BeamNetworkData(
@@ -649,12 +862,21 @@ class ArrayBasisData:
             far_field=far_field,
             antenna=antenna,
             frequencies=self.frequencies,
-            metadata={"basis_fingerprint": self.fingerprint, "solver_rerun": False},
+            metadata={
+                "basis_fingerprint": self.fingerprint,
+                "solver_rerun": False,
+                "radiated_power_source": (
+                    "closed_surface_complex_poynting_quadratic"
+                    if self.radiated_power_matrix is not None
+                    else "far_field_angular_integral"
+                ),
+            },
         )
 
 
 __all__ = [
     "ARRAY_FIELD_BASIS",
+    "ARRAY_PERSISTENCE_SCHEMA_VERSION",
     "ARRAY_POWER_NORMALIZATION",
     "ARRAY_ACCEPTANCE_BUDGET",
     "ArrayBasisData",

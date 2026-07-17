@@ -37,7 +37,7 @@ def test_fdtd_accepts_one_explicit_port_excitation():
     assert simulation.excitations == (excitation,)
 
 
-def test_fdtd_rejects_duplicate_or_multiple_active_ports_in_phase_one():
+def test_fdtd_rejects_duplicate_but_accepts_distinct_lumped_port_excitations():
     with pytest.raises(ValueError, match="at most once"):
         mw.Simulation.fdtd(
             _scene(ports=(_lumped_port(),)),
@@ -45,12 +45,16 @@ def test_fdtd_rejects_duplicate_or_multiple_active_ports_in_phase_one():
             excitations=(mw.PortExcitation("p1"), mw.PortExcitation("p1")),
         )
 
-    with pytest.raises(NotImplementedError, match="one active RF port"):
-        mw.Simulation.fdtd(
-            _scene(ports=(_lumped_port("p1"), _lumped_port("p2"))),
-            frequency=1.0e9,
-            excitations=(mw.PortExcitation("p1"), mw.PortExcitation("p2")),
-        )
+    simulation = mw.Simulation.fdtd(
+        _scene(ports=(_lumped_port("p1"), _lumped_port("p2"))),
+        frequency=1.0e9,
+        excitations=(mw.PortExcitation("p1"), mw.PortExcitation("p2")),
+    )
+
+    assert tuple(excitation.port_name for excitation in simulation.excitations) == (
+        "p1",
+        "p2",
+    )
 
 
 def test_prepare_reports_missing_excitation_port_before_backend_initialization():

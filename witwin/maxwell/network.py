@@ -1113,24 +1113,9 @@ class NetworkData:
         part of this persistence contract.
         """
 
-        _validate_safe_persistence(self.metadata)
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "schema_version": self.schema_version,
-                "data_type": type(self).__name__,
-                "frequencies": _detach_to_cpu(self.frequencies),
-                "s": _detach_to_cpu(self.s),
-                "z0": _detach_to_cpu(self.z0),
-                "port_names": self.port_names,
-                "valid_columns": _detach_to_cpu(self.valid_columns),
-                "metadata": _detach_to_cpu(self.metadata),
-                "phasor_convention": self.phasor_convention,
-                "power_wave_convention": self.power_wave_convention,
-            },
-            output_path,
-        )
+        torch.save(_network_snapshot(self), output_path)
 
     @classmethod
     def load(cls, path: str | Path, map_location=None) -> "NetworkData":
@@ -1141,16 +1126,49 @@ class NetworkData:
             map_location=map_location,
             expected_type=cls.__name__,
         )
-        return cls(
-            frequencies=payload["frequencies"],
-            s=payload["s"],
-            z0=payload["z0"],
-            port_names=tuple(payload["port_names"]),
-            valid_columns=payload["valid_columns"],
-            metadata=payload["metadata"],
-            phasor_convention=payload["phasor_convention"],
-            power_wave_convention=payload["power_wave_convention"],
+        return _network_from_snapshot(payload)
+
+
+def _network_snapshot(data: NetworkData) -> dict[str, Any]:
+    """Single safe serializer shared by standalone and nested NetworkData."""
+
+    _validate_safe_persistence(data.metadata)
+    return {
+        "schema_version": data.schema_version,
+        "data_type": type(data).__name__,
+        "frequencies": _detach_to_cpu(data.frequencies),
+        "s": _detach_to_cpu(data.s),
+        "z0": _detach_to_cpu(data.z0),
+        "port_names": data.port_names,
+        "valid_columns": _detach_to_cpu(data.valid_columns),
+        "metadata": _detach_to_cpu(data.metadata),
+        "phasor_convention": data.phasor_convention,
+        "power_wave_convention": data.power_wave_convention,
+    }
+
+
+def _network_from_snapshot(payload) -> NetworkData:
+    if not isinstance(payload, dict):
+        raise ValueError("Persisted NetworkData payload must be a mapping.")
+    if payload.get("data_type") != NetworkData.__name__:
+        raise ValueError(
+            f"Persisted file contains {payload.get('data_type')}, not NetworkData."
         )
+    if payload.get("schema_version") != PERSISTENCE_SCHEMA_VERSION:
+        raise ValueError(
+            "Unsupported NetworkData schema_version "
+            f"{payload.get('schema_version')!r}; expected {PERSISTENCE_SCHEMA_VERSION}."
+        )
+    return NetworkData(
+        frequencies=payload["frequencies"],
+        s=payload["s"],
+        z0=payload["z0"],
+        port_names=tuple(payload["port_names"]),
+        valid_columns=payload["valid_columns"],
+        metadata=payload["metadata"],
+        phasor_convention=payload["phasor_convention"],
+        power_wave_convention=payload["power_wave_convention"],
+    )
 
 
 __all__ = [

@@ -56,6 +56,15 @@ use the same host, fixed clocks, 16 independent basis tasks, the exact Phase 1 g
 `E2 = T1 / (2*T2) >= 0.80` and `E4 = T1 / (4*T4) >= 0.70`. The local one-GPU host
 cannot supply that evidence; simulated devices or mocked execution do not satisfy it.
 
+## Approved scope adjustment
+
+On 2026-07-16 the user explicitly removed task-level multi-GPU work from this
+implementation. Phase 2 therefore retains codebook, scan, max-hold, metadata, and
+basis-cache delivery, but omits the device-pool scheduler and 1/2/4-GPU scaling gate.
+Phase 4 retains single-device weight and scene gradients plus the domain-decomposition
+aggregation contract, but omits multi-GPU value/gradient parity. These omitted gates
+are recorded as user-approved scope reductions, not as passing evidence.
+
 ## Phase 0 contract
 
 - Incident beam weights are Kurokawa power waves in `sqrt(W)` and use the existing
@@ -75,3 +84,32 @@ cannot supply that evidence; simulated devices or mocked execution do not satisf
   time-modulated materials by reporting the offending object names.
 
 Phase 0 evidence is maintained in `docs/assessments/array-active-s-mimo-phase-0-acceptance.md`.
+
+## Phase 1 implementation
+
+- `PortSweep` execution retains one compact result per physical input column (and per
+  WavePort frequency) plus the measured diagonal incident wave. Compact columns share
+  one prepared scene, omit full-volume solver fields and port/modal payloads, and keep
+  only declared closed-surface monitor data.
+- `Result.array_basis(...)` performs no solver rerun. It normalizes each embedded
+  `E_theta/E_phi` column by measured `a_n(f)`, preserves manifest port/channel order,
+  and produces a content fingerprint over the complete network, EEP fields, power
+  operator, angular/frame contract, and normalization inputs.
+- Absolute beam power uses a Hermitian closed-surface complex-Poynting operator
+  `Q_rad`; combination evaluates `real(a^H Q_rad a)`. Raw complex far fields are never
+  phase- or amplitude-fitted. Monitor DFTs sample E at `(n+1)dt` and H at
+  `(n+1/2)dt`; the adjoint uses the exact transposed schedules.
+- Monitor-derived equivalent currents carry outward normals and exact primal-cell
+  area weights, including nonuniform and single-cell tangential axes. Standalone
+  user-supplied planar currents retain trapezoidal quadrature by default.
+- Derived solver phasors must remain on the `NetworkData` device. Exact dtype is kept,
+  except the explicit precision policy permits complex64 solver phasors to be promoted
+  to a complex128 `NetworkData`; downcasts and all implicit tensor device moves are
+  rejected. Tensor angle/frame/center/radius configuration follows the same exact
+  device contract.
+- `ArrayBasisData.save/load` reuses the safe `NetworkData` serializer and
+  `weights_only=True`; a saved `Result` intentionally omits in-memory sweep columns,
+  so delayed reuse requires extracting and saving `ArrayBasisData` first.
+
+Phase 1 evidence is maintained in
+`docs/assessments/array-active-s-mimo-phase-1-acceptance.md`.

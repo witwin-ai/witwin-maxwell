@@ -62,6 +62,7 @@ class LumpedStepTrace:
     field_name: str
     kind: str
     index: int
+    previous_voltage: torch.Tensor
     voltage_before: torch.Tensor
     branch_current: torch.Tensor
     voltage_midpoint: torch.Tensor
@@ -73,6 +74,7 @@ class LumpedStepTrace:
 @dataclass(frozen=True)
 class LumpedStepPullback:
     field_adjoint: torch.Tensor
+    previous_field_adjoint: torch.Tensor
     inductor_current_adjoint: torch.Tensor
     capacitor_voltage_adjoint: torch.Tensor
     grad_eps: torch.Tensor
@@ -334,6 +336,7 @@ def replay_lumped_runtime(
     runtime: LumpedRuntime,
     electric_field: torch.Tensor,
     *,
+    previous_electric_field: torch.Tensor,
     inductor_current: torch.Tensor,
     capacitor_voltage: torch.Tensor,
     drive: torch.Tensor,
@@ -348,12 +351,17 @@ def replay_lumped_runtime(
             "Differentiable lumped replay currently supports series R/L/C topology only."
         )
     flat = electric_field.reshape(-1)
+    previous_flat = previous_electric_field.reshape(-1)
+    previous_voltage = torch.dot(
+        torch.index_select(previous_flat, 0, runtime.linear_indices),
+        runtime.voltage_weights,
+    )
     voltage_before = torch.dot(
         torch.index_select(flat, 0, runtime.linear_indices),
         runtime.voltage_weights,
     )
     numerator = (
-        voltage_before
+        0.5 * (previous_voltage + voltage_before)
         - drive
         - capacitor_voltage
         + runtime.series_inductive_impedance * inductor_current
@@ -365,9 +373,8 @@ def replay_lumped_runtime(
         runtime.linear_indices,
         -runtime.injection * branch_current,
     )
-    voltage_midpoint = (
-        voltage_before - runtime.discrete_port_impedance * branch_current
-    )
+    voltage_midpoint = 0.5 * (previous_voltage + voltage_before)
+    voltage_midpoint = voltage_midpoint - runtime.discrete_port_impedance * branch_current
 
     next_inductor_current = 2.0 * branch_current - inductor_current
     if not runtime.inductance_active:
@@ -384,6 +391,7 @@ def replay_lumped_runtime(
         field_name=field_name,
         kind=kind,
         index=int(index),
+        previous_voltage=previous_voltage,
         voltage_before=voltage_before,
         branch_current=branch_current,
         voltage_midpoint=voltage_midpoint,
@@ -422,7 +430,7 @@ def pullback_lumped_runtime(
     bar_injection = -branch_current * local_field_adjoint
     bar_current = bar_current - torch.dot(runtime.injection, local_field_adjoint)
 
-    bar_voltage = voltage_sample_adjoint
+    bar_averaged_voltage = voltage_sample_adjoint
     bar_discrete_impedance = -branch_current * voltage_sample_adjoint
     bar_current = (
         bar_current
@@ -452,7 +460,7 @@ def pullback_lumped_runtime(
     bar_denominator = (
         -bar_current * branch_current * runtime.inverse_denominator
     )
-    bar_voltage = bar_voltage + bar_numerator
+    bar_averaged_voltage = bar_averaged_voltage + bar_numerator
     bar_drive = -bar_numerator
     bar_old_capacitor = bar_old_capacitor - bar_numerator
     bar_inductive_impedance = (
@@ -472,11 +480,17 @@ def pullback_lumped_runtime(
         bar_injection
         + 0.5 * runtime.voltage_weights * bar_discrete_impedance
     )
-    pre_field_adjoint = field_adjoint.clone()
-    pre_field_adjoint.reshape(-1).index_add_(
+    free_field_adjoint = field_adjoint.clone()
+    free_field_adjoint.reshape(-1).index_add_(
         0,
         runtime.linear_indices,
-        runtime.voltage_weights * bar_voltage,
+        0.5 * runtime.voltage_weights * bar_averaged_voltage,
+    )
+    previous_field_adjoint = torch.zeros_like(field_adjoint)
+    previous_field_adjoint.reshape(-1).index_add_(
+        0,
+        runtime.linear_indices,
+        0.5 * runtime.voltage_weights * bar_averaged_voltage,
     )
 
     local_eps = torch.index_select(
@@ -504,7 +518,8 @@ def pullback_lumped_runtime(
         else torch.zeros_like(runtime.capacitance)
     )
     return LumpedStepPullback(
-        field_adjoint=pre_field_adjoint,
+        field_adjoint=free_field_adjoint,
+        previous_field_adjoint=previous_field_adjoint,
         inductor_current_adjoint=bar_old_inductor,
         capacitor_voltage_adjoint=bar_old_capacitor,
         grad_eps=grad_eps,
@@ -524,8 +539,8 @@ def apply_lumped_runtime(
     """Apply one implicit midpoint circuit correction to ``electric_field`` in-place.
 
     Branch current is positive from the field into the termination. The update
-    satisfies ``E_new = E_free - q I`` and uses midpoint port voltage for the
-    circuit constitutive relation.
+    satisfies ``E_new = E_free - q I`` and uses the full Yee-step midpoint
+    ``0.5 * (V_old + V_free)`` for the circuit constitutive relation.
     """
 
     if electric_field.device != runtime.linear_indices.device:
@@ -565,8 +580,10 @@ def apply_lumped_runtime(
         out=runtime.last_voltage_before,
     )
 
+    runtime.last_branch_current.copy_(runtime.last_voltage_after)
+    runtime.last_branch_current.add_(runtime.last_voltage_before)
+    runtime.last_branch_current.mul_(0.5)
     if runtime.topology == "series":
-        runtime.last_branch_current.copy_(runtime.last_voltage_before)
         runtime.last_branch_current.sub_(drive)
         runtime.last_branch_current.sub_(runtime.capacitor_voltage)
         runtime.last_branch_current.addcmul_(
@@ -574,7 +591,6 @@ def apply_lumped_runtime(
             runtime.inductor_current,
         )
     else:
-        runtime.last_branch_current.copy_(runtime.last_voltage_before)
         runtime.last_branch_current.sub_(drive)
         runtime.last_branch_current.mul_(runtime.parallel_total_admittance)
         runtime.last_branch_current.add_(runtime.inductor_current)
@@ -596,11 +612,13 @@ def apply_lumped_runtime(
         alpha=-1.0,
     )
 
-    runtime.last_voltage_midpoint.copy_(runtime.last_voltage_before)
+    runtime.last_voltage_midpoint.copy_(runtime.last_voltage_after)
+    runtime.last_voltage_midpoint.add_(runtime.last_voltage_before)
+    runtime.last_voltage_midpoint.mul_(0.5)
     runtime.last_voltage_midpoint.addcmul_(
-        runtime.coupling_impedance,
+        runtime.discrete_port_impedance,
         runtime.last_branch_current,
-        value=-0.5,
+        value=-1.0,
     )
     runtime.last_voltage_after.copy_(runtime.last_voltage_before)
     runtime.last_voltage_after.addcmul_(

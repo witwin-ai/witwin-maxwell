@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from types import SimpleNamespace
 
 import torch
@@ -400,6 +401,13 @@ def _build_output_seeds(
         )
         entry_indices = torch.tensor(pair.global_indices, device=real_grad.device, dtype=torch.long)
         cos_pack, sin_pack = _schedule_pack_for(observer_schedule, entry_indices)
+        cos_pack, sin_pack = _shift_observer_schedule_for_field(
+            cos_pack,
+            sin_pack,
+            solver=solver,
+            entry_indices=entry_indices,
+            state_field_name=pair.state_field_name,
+        )
         point_i = pair.point_i.to(device=real_grad.device, dtype=torch.long)
         point_j = pair.point_j.to(device=real_grad.device, dtype=torch.long)
         point_k = pair.point_k.to(device=real_grad.device, dtype=torch.long)
@@ -433,6 +441,13 @@ def _build_output_seeds(
         )
         entry_indices = torch.tensor(pair.global_indices, device=real_grad.device, dtype=torch.long)
         cos_pack, sin_pack = _schedule_pack_for(observer_schedule, entry_indices)
+        cos_pack, sin_pack = _shift_observer_schedule_for_field(
+            cos_pack,
+            sin_pack,
+            solver=solver,
+            entry_indices=entry_indices,
+            state_field_name=pair.state_field_name,
+        )
         plane_batches.append(
             _PlaneSeedBatch(
                 state_field_name=pair.state_field_name,
@@ -585,6 +600,36 @@ def _schedule_pack_for(
     cos = schedule.cos.index_select(0, entry_indices).contiguous()
     sin = schedule.sin.index_select(0, entry_indices).contiguous()
     return cos, sin
+
+
+def _shift_observer_schedule_for_field(
+    cos_pack: torch.Tensor,
+    sin_pack: torch.Tensor,
+    *,
+    solver,
+    entry_indices: torch.Tensor,
+    state_field_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Match observer seed weights to the forward Yee sample time."""
+
+    if cos_pack.numel() == 0:
+        return cos_pack, sin_pack
+    offset = 1.0 if state_field_name.startswith("E") else 0.5
+    frequencies = torch.tensor(
+        [
+            float(solver._observer_spectral_entries[int(index)]["frequency"])
+            for index in entry_indices.detach().cpu().tolist()
+        ],
+        device=cos_pack.device,
+        dtype=cos_pack.dtype,
+    )
+    phase = offset * 2.0 * math.pi * frequencies * float(solver.dt)
+    phase_cos = torch.cos(phase)[:, None]
+    phase_sin = torch.sin(phase)[:, None]
+    return (
+        cos_pack * phase_cos - sin_pack * phase_sin,
+        sin_pack * phase_cos + cos_pack * phase_sin,
+    )
 
 
 def _apply_dense_seeds_native(_cuda_backend, adj_state, seed_runtime: _SeedRuntime, step_index):

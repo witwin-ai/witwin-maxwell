@@ -116,6 +116,7 @@ def test_resistive_termination_removes_exactly_its_dissipated_energy():
         ),
         dtype=torch.float64,
     )
+    _seed_previous_voltage(runtime, field)
     energy_before = _field_energy(field, eps_edge, volume)
 
     apply_lumped_runtime(runtime, field)
@@ -165,6 +166,15 @@ def _port_subspace_field(runtime, *, sign: float = 1.0) -> torch.Tensor:
     return field
 
 
+def _seed_previous_voltage(runtime, field: torch.Tensor) -> None:
+    flat = field.reshape(-1)
+    voltage = torch.dot(
+        torch.index_select(flat, 0, runtime.linear_indices),
+        runtime.voltage_weights,
+    )
+    runtime.last_voltage_after.copy_(voltage)
+
+
 def test_open_short_and_discrete_matched_limits():
     device = torch.device("cpu")
     probe, _, _ = _prepare(device)
@@ -172,6 +182,7 @@ def test_open_short_and_discrete_matched_limits():
 
     open_runtime, _, _ = _prepare(device, resistance=float("inf"))
     open_field = _port_subspace_field(open_runtime)
+    _seed_previous_voltage(open_runtime, open_field)
     open_before = open_field.clone()
     apply_lumped_runtime(open_runtime, open_field)
     torch.testing.assert_close(open_field, open_before)
@@ -182,6 +193,7 @@ def test_open_short_and_discrete_matched_limits():
 
     short_runtime, _, _ = _prepare(device, resistance=0.0)
     short_field = _port_subspace_field(short_runtime)
+    _seed_previous_voltage(short_runtime, short_field)
     short_before_voltage = torch.dot(short_runtime.voltage_weights, short_runtime.injection)
     apply_lumped_runtime(short_runtime, short_field)
     torch.testing.assert_close(short_field, -_port_subspace_field(short_runtime))
@@ -195,6 +207,7 @@ def test_open_short_and_discrete_matched_limits():
 
     matched_runtime, _, _ = _prepare(device, resistance=matched_resistance)
     matched_field = _port_subspace_field(matched_runtime)
+    _seed_previous_voltage(matched_runtime, matched_field)
     apply_lumped_runtime(matched_runtime, matched_field)
     torch.testing.assert_close(matched_field, torch.zeros_like(matched_field), atol=1.0e-15, rtol=0.0)
     torch.testing.assert_close(
@@ -212,6 +225,7 @@ def test_fifty_ohm_match_and_open_short_power_wave_exit_gate():
     for resistance, expected_gamma in cases:
         runtime, _, _ = _prepare(device, resistance=resistance)
         field = _port_subspace_field(runtime)
+        _seed_previous_voltage(runtime, field)
         apply_lumped_runtime(runtime, field)
         voltage = torch.complex(
             runtime.last_voltage_midpoint,
@@ -249,6 +263,8 @@ def test_orientation_reversal_preserves_field_update_and_energy():
     )
     forward_field = initial.clone()
     reverse_field = initial.clone()
+    _seed_previous_voltage(forward, forward_field)
+    _seed_previous_voltage(reverse, reverse_field)
 
     apply_lumped_runtime(forward, forward_field)
     apply_lumped_runtime(reverse, reverse_field)
@@ -278,6 +294,7 @@ def test_series_rlc_midpoint_coupling_balances_field_storage_and_loss(terminatio
     device = torch.device("cpu")
     runtime, eps_edge, volume = _prepare(device, termination=termination)
     field = _port_subspace_field(runtime)
+    _seed_previous_voltage(runtime, field)
 
     for _ in range(8):
         field_energy_before = _field_energy(field, eps_edge, volume)
@@ -313,6 +330,7 @@ def test_parallel_rlc_midpoint_coupling_balances_energy_and_branch_currents(term
     device = torch.device("cpu")
     runtime, eps_edge, volume = _prepare(device, termination=termination)
     field = _port_subspace_field(runtime)
+    _seed_previous_voltage(runtime, field)
 
     for _ in range(8):
         field_energy_before = _field_energy(field, eps_edge, volume)

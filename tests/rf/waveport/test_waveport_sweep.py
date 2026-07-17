@@ -9,6 +9,7 @@ from witwin.core import GeometryBase
 import witwin.maxwell as mw
 from witwin.maxwell.waveport_sweep import resolve_waveport_run_manifest
 from witwin.maxwell.scene import prepare_scene
+from witwin.maxwell.postprocess.antenna import _far_fields_from_result
 
 
 _C0 = 299792458.0
@@ -277,6 +278,25 @@ def _hollow_guide_scene():
     return scene
 
 
+def _free_space_waveport_array_scene():
+    left = _wave_port("left", position=(-0.20, 0.0, 0.0), direction="+")
+    right = _wave_port("right", position=(0.20, 0.0, 0.0), direction="-")
+    surface = mw.ClosedSurfaceMonitor.box(
+        "array_nf2ff",
+        position=(0.0, 0.0, 0.0),
+        size=(0.50, 0.70, 0.40),
+        frequencies=(4.5e8, 4.8e8),
+    )
+    return mw.Scene(
+        domain=mw.Domain(bounds=((-0.6, 0.6), (-0.4, 0.4), (-0.25, 0.25))),
+        grid=mw.GridSpec.uniform(0.05),
+        boundary=mw.BoundarySpec.pml(num_layers=2),
+        ports=(left, right),
+        monitors=(surface,),
+        device="cuda",
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs one CUDA device")
 def test_two_waveport_sweep_returns_physical_single_device_network():
     result = mw.Simulation.fdtd(
@@ -296,6 +316,18 @@ def test_two_waveport_sweep_returns_physical_single_device_network():
     assert torch.all(torch.isfinite(network.s))
     assert result.stats()["network_sweep"]["execution"] == (
         "single_device_frequency_sequential_cw"
+    )
+    assert len(result._array_run_data.column_results) == 2
+    assert all(len(column) == 1 for column in result._array_run_data.column_results)
+    torch.testing.assert_close(
+        result._array_run_data.incident,
+        torch.stack(
+            (
+                result.port("left").a[0, :, 0],
+                result.port("right").a[1, :, 0],
+            ),
+            dim=-1,
+        ),
     )
     for name in ("left", "right"):
         port = result.port(name)
@@ -318,6 +350,81 @@ def test_two_waveport_sweep_returns_physical_single_device_network():
         propagation_constants=network.metadata["propagation_constants"],
     )
     torch.testing.assert_close(shifted_auto.s, shifted_explicit.s)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs one CUDA device")
+def test_multifrequency_waveport_sweep_extracts_array_basis_without_rerun():
+    scene = _free_space_waveport_array_scene()
+    result = mw.Simulation.fdtd(
+        scene,
+        frequencies=(4.5e8, 4.8e8),
+        excitations=mw.PortSweep(),
+        run_time=mw.TimeConfig(time_steps=1024),
+        spectral_sampler=mw.SpectralSampler(window="hanning"),
+        full_field_dft=False,
+    ).run()
+
+    basis = result.array_basis(
+        monitor="array_nf2ff",
+        theta_points=9,
+        phi_points=13,
+        radius=1.0,
+    )
+
+    assert basis.port_names == ("left::TE0", "right::TE0")
+    assert basis.eep.e_theta.shape == (2, 2, 9, 13)
+    assert basis.dtype == torch.complex128
+    assert basis.metadata["solver_rerun"] is False
+    assert "complex64 to NetworkData complex128" in basis.metadata["precision_policy"]
+    assert torch.equal(
+        basis.radiated_power_matrix,
+        basis.radiated_power_matrix.mH,
+    )
+    assert all(
+        len(column) == 2 for column in result._array_run_data.column_results
+    )
+    assert all(
+        not compact.ports
+        for column in result._array_run_data.column_results
+        for compact in column
+    )
+
+    for port_index, column in enumerate(result._array_run_data.column_results):
+        for frequency_index, compact in enumerate(column):
+            transformed = _far_fields_from_result(
+                compact,
+                surface="array_nf2ff",
+                frequencies=basis.frequencies[frequency_index : frequency_index + 1],
+                theta=basis.eep.theta,
+                phi=basis.eep.phi,
+                radius=1.0,
+                phase_center=basis.eep.phase_center,
+                frame=basis.eep.frame,
+            )
+            scale = result._array_run_data.incident[frequency_index, port_index]
+            torch.testing.assert_close(
+                transformed["e_theta"][0].to(dtype=basis.dtype),
+                basis.eep.e_theta[frequency_index, port_index] * scale,
+                rtol=2.0e-5,
+                atol=1.0e-8,
+            )
+            torch.testing.assert_close(
+                transformed["e_phi"][0].to(dtype=basis.dtype),
+                basis.eep.e_phi[frequency_index, port_index] * scale,
+                rtol=2.0e-5,
+                atol=1.0e-8,
+            )
+
+    weights = torch.tensor(
+        [[0.5 + 0.1j, -0.2 + 0.3j], [0.4 - 0.2j, 0.1 + 0.6j]],
+        device=basis.device,
+        dtype=basis.dtype,
+    )
+    beam = basis.combine(weights)
+    torch.testing.assert_close(
+        beam.far_field.e_theta,
+        torch.einsum("fn,fntp->ftp", weights, basis.eep.e_theta),
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs one CUDA device")

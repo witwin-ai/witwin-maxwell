@@ -270,7 +270,7 @@ def compile_array_basis_request(
     phase_center=None,
     frame=None,
     device=None,
-    dtype=torch.float64,
+    dtype=None,
     run_manifest=None,
 ) -> CompiledArrayBasisRequest:
     validate_array_superposition(scene)
@@ -283,18 +283,31 @@ def compile_array_basis_request(
     if manifest_frequencies is not None and tuple(float(v) for v in requested_frequencies) != manifest_frequencies:
         raise ValueError("frequencies must exactly match the run manifest frequencies.")
     resolved_frequencies = _resolve_frequencies(surface, requested_frequencies)
-    if not isinstance(dtype, torch.dtype):
-        raise TypeError("dtype must be a torch.dtype.")
-    resolved_dtype = dtype
-    angle_tensors = tuple(value for value in (theta, phi) if isinstance(value, torch.Tensor))
-    if angle_tensors:
+    if dtype is not None and not isinstance(dtype, torch.dtype):
+        raise TypeError("dtype must be a torch.dtype or None.")
+    configuration_tensors = tuple(
+        value
+        for value in (theta, phi, phase_center, frame)
+        if isinstance(value, torch.Tensor)
+    )
+    if configuration_tensors:
         if any(
-            value.is_complex() or not value.dtype.is_floating_point for value in angle_tensors
+            value.is_complex() or not value.dtype.is_floating_point
+            for value in configuration_tensors
         ):
-            raise TypeError("theta and phi must be real floating-point tensors.")
-        if len({value.dtype for value in angle_tensors}) != 1:
-            raise TypeError("theta and phi must have the same dtype.")
-        resolved_dtype = angle_tensors[0].dtype
+            raise TypeError("Array configuration tensors must be real floating-point tensors.")
+        if dtype is not None and any(
+            value.dtype != dtype for value in configuration_tensors
+        ):
+            raise TypeError(f"Array configuration tensors must use dtype {dtype}.")
+        if len({value.dtype for value in configuration_tensors}) != 1:
+            raise TypeError("Array configuration tensors must have the same dtype.")
+        if any(value.device != resolved_device for value in configuration_tensors):
+            raise ValueError(f"Array configuration tensors must be on device {resolved_device}.")
+    inferred_dtype = configuration_tensors[0].dtype if configuration_tensors else torch.float64
+    resolved_dtype = inferred_dtype if dtype is None else dtype
+    if configuration_tensors and inferred_dtype != resolved_dtype:
+        raise TypeError(f"Array configuration tensors must use dtype {resolved_dtype}.")
     if resolved_dtype not in {torch.float32, torch.float64}:
         raise TypeError("dtype must be torch.float32 or torch.float64.")
     resolved_theta, resolved_phi = _resolve_angles(
@@ -312,6 +325,11 @@ def compile_array_basis_request(
         )
         center_source = "array_aabb"
     else:
+        if isinstance(phase_center, torch.Tensor):
+            if phase_center.device != resolved_device:
+                raise ValueError(f"phase_center tensor must be on device {resolved_device}.")
+            if phase_center.dtype != resolved_dtype:
+                raise TypeError(f"phase_center tensor must use dtype {resolved_dtype}.")
         resolved_center = torch.as_tensor(
             phase_center,
             device=resolved_device,
@@ -320,6 +338,11 @@ def compile_array_basis_request(
         center_source = "explicit"
     if resolved_center.shape != (3,) or not bool(torch.all(torch.isfinite(resolved_center))):
         raise ValueError("phase_center must contain three finite coordinates.")
+    if isinstance(frame, torch.Tensor):
+        if frame.device != resolved_device:
+            raise ValueError(f"frame tensor must be on device {resolved_device}.")
+        if frame.dtype != resolved_dtype:
+            raise TypeError(f"frame tensor must use dtype {resolved_dtype}.")
     resolved_frame = _resolve_frame(
         frame,
         device=resolved_device,

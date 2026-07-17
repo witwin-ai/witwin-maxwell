@@ -122,6 +122,52 @@ def test_two_port_network_and_two_element_fields_match_direct_formulas():
     torch.testing.assert_close(beam.network.active_impedance, expected_impedance)
 
 
+def test_closed_surface_power_operator_controls_absolute_radiated_power():
+    base = _basis()
+    power_operator = torch.tensor(
+        [
+            [[0.8 + 0.0j, 0.1 + 0.2j], [0.1 - 0.2j, 0.6 + 0.0j]],
+            [[0.7 + 0.0j, -0.05 + 0.1j], [-0.05 - 0.1j, 0.5 + 0.0j]],
+        ],
+        dtype=torch.complex128,
+    )
+    basis = mw.ArrayBasisData(
+        network=base.network,
+        embedded_patterns=base.eep,
+        fingerprint=base.fingerprint,
+        radiated_power_matrix=power_operator,
+    )
+    weights = torch.tensor([0.6 + 0.1j, -0.2 + 0.7j], dtype=torch.complex128)
+
+    beam = basis.combine(weights)
+    expected = torch.real(
+        torch.einsum("m,fmn,n->f", torch.conj(weights), power_operator, weights)
+    )
+
+    torch.testing.assert_close(beam.antenna.p_rad, expected)
+    torch.testing.assert_close(
+        beam.antenna.system_efficiency,
+        expected / torch.sum(torch.abs(weights).square()),
+    )
+    assert beam.metadata["radiated_power_source"] == (
+        "closed_surface_complex_poynting_quadratic"
+    )
+
+
+def test_radiated_power_operator_rejects_non_hermitian_input():
+    basis = _basis()
+    invalid = torch.ones_like(basis.network.s)
+    invalid[:, 0, 1] = 2.0 + 1.0j
+
+    with pytest.raises(ValueError, match="Hermitian"):
+        mw.ArrayBasisData(
+            network=basis.network,
+            embedded_patterns=basis.eep,
+            fingerprint="invalid-power-operator",
+            radiated_power_matrix=invalid,
+        )
+
+
 def test_two_hertzian_dipoles_match_pointwise_array_formula():
     device = torch.device("cpu")
     frequency = torch.tensor([1.0e9], dtype=torch.float64, device=device)
@@ -348,6 +394,13 @@ def test_scene_compile_array_monitors_freezes_port_order_grid_and_phase_center()
     assert len(request.monitor_faces) == 6
     with pytest.raises(ValueError, match="exactly match"):
         scene.compile_array_monitors(monitor="nf2ff", frequencies=(1.1e9,))
+    with pytest.raises(TypeError, match="configuration tensors must use dtype"):
+        scene.compile_array_monitors(
+            monitor="nf2ff",
+            theta=theta,
+            phi=phi,
+            dtype=torch.float64,
+        )
 
 
 def test_compile_array_request_consumes_selected_network_manifest_order():

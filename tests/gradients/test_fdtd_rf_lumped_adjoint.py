@@ -109,12 +109,23 @@ def test_exact_local_series_pullback_matches_cuda_autograd(component, value):
         dtype=torch.float64,
         requires_grad=True,
     )
+    previous_field = torch.tensor(
+        (
+            ((-0.1, 0.3), (0.2, -0.05)),
+            ((0.25, -0.08), (-0.12, 0.07)),
+            ((-0.2, 0.18), (0.11, -0.09)),
+        ),
+        device="cuda",
+        dtype=torch.float64,
+        requires_grad=True,
+    )
     old_i = torch.tensor(0.13, device="cuda", dtype=torch.float64, requires_grad=True)
     old_vc = torch.tensor(-0.17, device="cuda", dtype=torch.float64, requires_grad=True)
     drive = torch.tensor(0.21, device="cuda", dtype=torch.float64, requires_grad=True)
     corrected, next_i, next_vc, trace = replay_lumped_runtime(
         runtime,
         field,
+        previous_electric_field=previous_field,
         inductor_current=old_i,
         capacitor_voltage=old_vc,
         drive=drive,
@@ -142,7 +153,7 @@ def test_exact_local_series_pullback_matches_cuda_autograd(component, value):
     )
     expected = torch.autograd.grad(
         objective,
-        (field, old_i, old_vc, eps, parameter, drive),
+        (field, previous_field, old_i, old_vc, eps, parameter, drive),
     )
 
     actual = pullback_lumped_runtime(
@@ -162,6 +173,7 @@ def test_exact_local_series_pullback_matches_cuda_autograd(component, value):
     for found, reference in zip(
         (
             actual.field_adjoint,
+            actual.previous_field_adjoint,
             actual.inductor_current_adjoint,
             actual.capacitor_voltage_adjoint,
             actual.grad_eps,
@@ -216,6 +228,7 @@ def test_lumped_checkpoint_and_three_step_replay_match_forward_state():
         torch.tensor(0.05, device="cuda", dtype=torch.float64),
     )
     replay_field = checkpoint.tensors["Ex"]
+    replay_previous_field = torch.zeros_like(replay_field)
     replay_i = checkpoint.tensors[inductor_name]
     replay_vc = checkpoint.tensors[capacitor_name]
     for drive in drives:
@@ -223,6 +236,7 @@ def test_lumped_checkpoint_and_three_step_replay_match_forward_state():
         replay_field, replay_i, replay_vc, _trace = replay_lumped_runtime(
             runtime,
             replay_field,
+            previous_electric_field=replay_previous_field,
             inductor_current=replay_i,
             capacitor_voltage=replay_vc,
             drive=drive,
@@ -230,6 +244,7 @@ def test_lumped_checkpoint_and_three_step_replay_match_forward_state():
             kind="port",
             index=0,
         )
+        replay_previous_field = replay_field
     torch.testing.assert_close(replay_field, forward_field, rtol=0.0, atol=0.0)
     torch.testing.assert_close(replay_i, runtime.inductor_current, rtol=0.0, atol=0.0)
     torch.testing.assert_close(replay_vc, runtime.capacitor_voltage, rtol=0.0, atol=0.0)
@@ -256,6 +271,7 @@ def test_zero_internal_lc_flags_are_mirrored_and_open_resistance_is_rejected():
     corrected, next_i, next_vc, _trace = replay_lumped_runtime(
         zero_runtime,
         field,
+        previous_electric_field=torch.zeros_like(field),
         inductor_current=torch.zeros((), device="cuda", dtype=torch.float64),
         capacitor_voltage=torch.zeros((), device="cuda", dtype=torch.float64),
         drive=torch.zeros((), device="cuda", dtype=torch.float64),

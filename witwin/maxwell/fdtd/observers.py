@@ -289,6 +289,40 @@ def _cell_center_weights_1d(points):
     return weights
 
 
+def _exact_cell_center_widths(solver, axis, points):
+    """Resolve aligned Yee center samples to their exact primal cell widths."""
+
+    axis_name = normalize_axis(axis)
+    centers = np.asarray(
+        {
+            "x": solver.scene.x_half64,
+            "y": solver.scene.y_half64,
+            "z": solver.scene.z_half64,
+        }[axis_name],
+        dtype=np.float64,
+    )
+    widths = np.asarray(
+        {
+            "x": solver.scene.dx_primal64,
+            "y": solver.scene.dy_primal64,
+            "z": solver.scene.dz_primal64,
+        }[axis_name],
+        dtype=np.float64,
+    )
+    requested = np.asarray(points, dtype=np.float64).reshape(-1)
+    indices = np.asarray(
+        [int(np.argmin(np.abs(centers - value))) for value in requested],
+        dtype=np.int64,
+    )
+    matched = centers[indices]
+    tolerance = 1.0e-7 * np.maximum.reduce(
+        (np.ones_like(requested), np.abs(requested), np.abs(matched))
+    )
+    if not np.all(np.abs(requested - matched) <= tolerance):
+        raise ValueError("Aligned plane coordinates do not lie on Yee cell centers.")
+    return widths[indices]
+
+
 def _compute_plane_flux(result):
     axis = normalize_axis(result["axis"])
     axis_index = _AXIS_CODES[axis]
@@ -309,7 +343,17 @@ def _compute_plane_flux(result):
         )
         coord_a = _to_torch_scalar_or_tensor(result[coord_names[0]], device=device, dtype=coord_dtype)
         coord_b = _to_torch_scalar_or_tensor(result[coord_names[1]], device=device, dtype=coord_dtype)
-        weights = _cell_center_weights_1d(coord_a)[:, None] * _cell_center_weights_1d(coord_b)[None, :]
+        exact_widths = result.get("cell_widths")
+        if exact_widths is None:
+            weights = _cell_center_weights_1d(coord_a)[:, None] * _cell_center_weights_1d(coord_b)[None, :]
+        else:
+            width_a = _to_torch_scalar_or_tensor(
+                exact_widths[coord_names[0]], device=device, dtype=coord_dtype
+            )
+            width_b = _to_torch_scalar_or_tensor(
+                exact_widths[coord_names[1]], device=device, dtype=coord_dtype
+            )
+            weights = width_a[:, None] * width_b[None, :]
         field_shape = ((len(frequencies),) if has_multi_frequency else ()) + (coord_a.numel(), coord_b.numel())
         complex_dtype = None
         for component_name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
@@ -349,7 +393,14 @@ def _compute_plane_flux(result):
 
     coord_a = np.asarray(result[coord_names[0]], dtype=float)
     coord_b = np.asarray(result[coord_names[1]], dtype=float)
-    weights = _cell_center_weights_1d(coord_a)[:, None] * _cell_center_weights_1d(coord_b)[None, :]
+    exact_widths = result.get("cell_widths")
+    if exact_widths is None:
+        weights = _cell_center_weights_1d(coord_a)[:, None] * _cell_center_weights_1d(coord_b)[None, :]
+    else:
+        weights = (
+            np.asarray(exact_widths[coord_names[0]], dtype=float)[:, None]
+            * np.asarray(exact_widths[coord_names[1]], dtype=float)[None, :]
+        )
     leading_shape = (len(frequencies),) if has_multi_frequency else ()
     field_shape = leading_shape + (coord_a.size, coord_b.size)
 
@@ -752,6 +803,16 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
             entry["source_dft_imag"] += source_signal * weighted_sin
 
         for group, local_index in solver._observer_point_groups_by_frequency[global_index]:
+            # The stepping tail observes E at (n + 1) dt and H at
+            # (n + 1/2) dt.  Keep both on their physical Yee time locations;
+            # using the common n dt phase introduces a frequency-dependent
+            # E/H phase error in Poynting flux and equivalent currents.
+            field_offset = 1.0 if group["field_name"].startswith("E") else 0.5
+            phase_offset = field_offset * 2.0 * np.pi * entry["frequency"] * solver.dt
+            offset_cos = np.cos(phase_offset)
+            offset_sin = np.sin(phase_offset)
+            group_weighted_cos = weighted_cos * offset_cos - weighted_sin * offset_sin
+            group_weighted_sin = weighted_sin * offset_cos + weighted_cos * offset_sin
             solver.fdtd_module.accumulatePointObservers3D(
                 field=getattr(solver, group["field_name"]),
                 pointI=group["point_i"],
@@ -759,8 +820,8 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                 pointK=group["point_k"],
                 realAccum=group["real"][local_index],
                 imagAccum=group["imag"][local_index],
-                weightedCos=weighted_cos,
-                weightedSin=weighted_sin,
+                weightedCos=group_weighted_cos,
+                weightedSin=group_weighted_sin,
             ).launchRaw()
             if has_complex_fields(solver):
                 solver.fdtd_module.accumulatePointObservers3D(
@@ -770,19 +831,25 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     pointK=group["point_k"],
                     realAccum=group["aux_real"][local_index],
                     imagAccum=group["aux_imag"][local_index],
-                    weightedCos=weighted_cos,
-                    weightedSin=weighted_sin,
+                    weightedCos=group_weighted_cos,
+                    weightedSin=group_weighted_sin,
                 ).launchRaw()
 
         for group, local_index in solver._observer_plane_groups_by_frequency[global_index]:
+            field_offset = 1.0 if group["field_name"].startswith("E") else 0.5
+            phase_offset = field_offset * 2.0 * np.pi * entry["frequency"] * solver.dt
+            offset_cos = np.cos(phase_offset)
+            offset_sin = np.sin(phase_offset)
+            group_weighted_cos = weighted_cos * offset_cos - weighted_sin * offset_sin
+            group_weighted_sin = weighted_sin * offset_cos + weighted_cos * offset_sin
             solver.fdtd_module.accumulatePlaneObserver3D(
                 field=getattr(solver, group["field_name"]),
                 planeRealAccum=group["real"][local_index],
                 planeImagAccum=group["imag"][local_index],
                 axisCode=group["axis_code"],
                 planeIndex=group["plane_index"],
-                weightedCos=weighted_cos,
-                weightedSin=weighted_sin,
+                weightedCos=group_weighted_cos,
+                weightedSin=group_weighted_sin,
             ).launchRaw()
             if has_complex_fields(solver):
                 solver.fdtd_module.accumulatePlaneObserver3D(
@@ -791,8 +858,8 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     planeImagAccum=group["aux_imag"][local_index],
                     axisCode=group["axis_code"],
                     planeIndex=group["plane_index"],
-                    weightedCos=weighted_cos,
-                    weightedSin=weighted_sin,
+                    weightedCos=group_weighted_cos,
+                    weightedSin=group_weighted_sin,
                 ).launchRaw()
 
         entry["window_normalization"] += window_weight
@@ -1005,8 +1072,8 @@ def accumulate_time_observers(solver, n):
                 field = getattr(solver, _field_name(component))
                 buffer = record["buffers"][component]
                 if region_kind == "point":
-                    i, j, l = meta["field_index"]
-                    buffer[k] = field[i, j, l]
+                    i, j, field_k = meta["field_index"]
+                    buffer[k] = field[i, j, field_k]
                 elif region_kind == "plane":
                     buffer[k] = field[meta["field_slice"]].squeeze(meta["axis_code"])
                 else:
@@ -1387,6 +1454,14 @@ def get_observer_results(solver):
         result[coord_names[0]] = aligned[coord_names[0]]
         result[coord_names[1]] = aligned[coord_names[1]]
         result["coords"] = (aligned[coord_names[0]], aligned[coord_names[1]])
+        result["cell_widths"] = {
+            coord_names[0]: _exact_cell_center_widths(
+                solver, coord_names[0], aligned[coord_names[0]]
+            ),
+            coord_names[1]: _exact_cell_center_widths(
+                solver, coord_names[1], aligned[coord_names[1]]
+            ),
+        }
         for component_name, value in aligned["fields"].items():
             result[component_name] = value
         if result.get("compute_flux"):

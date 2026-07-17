@@ -615,11 +615,16 @@ def _execute_columns(
     incident_columns = []
     reflected_columns = []
     column_stats = []
+    column_results = []
     last_result = None
+    shared_prepared_scene = None
+    from .array_execution import compact_array_column_result
+
     for active_port_index, active_mode_index in channel_locations:
         incident_frequencies = []
         reflected_frequencies = []
         stats = []
+        results = []
         for frequency_index, frequency in enumerate(manifest.frequencies):
             run_scene = _column_scene(
                 scene,
@@ -643,6 +648,14 @@ def _execute_columns(
             # an unrelated mode-shape eigen-adjoint from each inner simulation.
             sub_simulation._fixed_waveport_mode_sources = True
             last_result = sub_simulation.run()
+            if shared_prepared_scene is None:
+                shared_prepared_scene = last_result.prepared_scene
+            results.append(
+                compact_array_column_result(
+                    last_result,
+                    prepared_scene=shared_prepared_scene,
+                )
+            )
             incident, reflected = _extract_tracked_waves(
                 last_result,
                 manifest,
@@ -654,10 +667,12 @@ def _execute_columns(
         incident_columns.append(torch.stack(incident_frequencies))
         reflected_columns.append(torch.stack(reflected_frequencies))
         column_stats.append(tuple(stats))
+        column_results.append(tuple(results))
     return (
         torch.stack(incident_columns),
         torch.stack(reflected_columns),
         tuple(column_stats),
+        tuple(column_results),
         last_result,
     )
 
@@ -669,7 +684,7 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
             (port_index, mode_index)
             for mode_index in range(len(prepared_port.port.modes))
         )
-    incident, reflected, column_stats, last_result = _execute_columns(
+    incident, reflected, column_stats, column_results, last_result = _execute_columns(
         simulation,
         scene,
         manifest,
@@ -742,6 +757,12 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
             "propagation_constants": network_beta,
         },
     )
+    from .array_execution import ArrayRunData
+
+    basis_incident = torch.stack(
+        [incident[index, :, index] for index in range(channel_count)],
+        dim=-1,
+    )
     return Result(
         method="fdtd",
         scene=scene,
@@ -753,6 +774,11 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
         monitors={},
         ports=ports,
         network=network,
+        array_run_data=ArrayRunData(
+            manifest=manifest,
+            column_results=column_results,
+            incident=basis_incident,
+        ),
         metadata={**simulation.metadata, "network_run_manifest": manifest.metadata()},
         solver_stats={
             "network_sweep": manifest.metadata(),
@@ -778,7 +804,7 @@ def run_waveport_excitation(simulation, scene, excitation, manifest: WavePortRun
     else:
         active_mode_index = qualified_names.index(requested_name)
 
-    incident, reflected, column_stats, last_result = _execute_columns(
+    incident, reflected, column_stats, _, last_result = _execute_columns(
         simulation,
         scene,
         manifest,
