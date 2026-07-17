@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from witwin.core import Box
 
 from ...monitors import (
     ClosedSurfaceMonitor,
@@ -50,16 +51,20 @@ _CELL_COMPONENTS = frozenset(("Ex", "Hy", "Hz"))
 _NODE_COMPONENTS = frozenset(("Ey", "Ez", "Hx"))
 
 
-def _scene_trainable_tensors(scene: Scene) -> tuple[torch.Tensor, ...]:
-    """Every grad-requiring scene leaf a distributed run could be asked to differentiate.
+def _unsupported_distributed_trainable_tensors(scene: Scene) -> tuple[torch.Tensor, ...]:
+    """Grad-requiring scene leaves the distributed adjoint bridge cannot yet handle.
 
-    Reuses the public ``Simulation`` trainable collectors so this solver-level
-    defense-in-depth guard covers exactly the same scene-embedded channels the
-    public boundary rejects: material-region densities, structure geometry
-    parameters, material perturbation tensors, circuit parameters, and RF/port
-    parameters. Kept in lockstep with the public check rather than maintaining a
-    parallel partial list (Simulation-level excitations/port sweeps are not scene
-    state and never reach the distributed solver, so they are out of scope here).
+    The distributed joint-solve adjoint bridge differentiates Box material-region
+    densities (the density texture rasterizes per shard by physical position, and
+    the reverse pass gathers the per-shard grad_eps owned slices into the logical
+    scene before running the existing single-GPU material pullback). Every other
+    trainable channel -- structure geometry, material perturbation tensors, circuit
+    parameters, and RF/port parameters -- has no verified distributed reverse core,
+    so a scene carrying one is rejected here as defense in depth even if constructed
+    directly, independent of the public ``Simulation`` capability validator.
+
+    Density is intentionally excluded: it is the one supported trainable channel, so
+    rejecting it would block the very workflow the bridge exists to run.
     """
 
     # Imported lazily to avoid an import cycle: ``simulation`` pulls in the
@@ -67,15 +72,13 @@ def _scene_trainable_tensors(scene: Scene) -> tuple[torch.Tensor, ...]:
     # import here.
     from ...simulation import (
         _scene_trainable_circuit_parameters,
-        _scene_trainable_density_parameters,
         _scene_trainable_geometry_parameters,
         _scene_trainable_material_parameters,
         _trainable_rf_parameters,
     )
 
     return (
-        _scene_trainable_density_parameters(scene)
-        + _scene_trainable_geometry_parameters(scene)
+        _scene_trainable_geometry_parameters(scene)
         + _scene_trainable_material_parameters(scene)
         + _scene_trainable_circuit_parameters(scene)
         + _trainable_rf_parameters(scene)
@@ -408,15 +411,17 @@ class DistributedFDTD:
         self._validate_static_capabilities()
 
     def _validate_static_capabilities(self) -> None:
-        # Defense in depth: the public Simulation entry rejects trainable+parallel,
-        # but the distributed solver must also fail closed if constructed directly
-        # with a trainable scene. The distributed joint-solve adjoint bridge is not
-        # wired yet, so a grad-requiring leaf would otherwise run a forward-only
-        # solve and silently drop its gradient.
-        if _scene_trainable_tensors(self.logical_scene):
+        # Defense in depth: the public Simulation entry validates trainable+parallel
+        # per capability, but the distributed solver must also fail closed if
+        # constructed directly with an unsupported trainable channel. Trainable Box
+        # densities are supported by the distributed joint-solve adjoint bridge;
+        # every other trainable channel would otherwise run a forward-only solve and
+        # silently drop its gradient.
+        if _unsupported_distributed_trainable_tensors(self.logical_scene):
             raise ValueError(
-                "Multi-GPU FDTD does not support trainable scene parameters; the "
-                "distributed joint-solve adjoint bridge is not enabled yet."
+                "Multi-GPU FDTD adjoint supports trainable Box material-region densities "
+                "only; trainable geometry, material perturbation, circuit, and RF/port "
+                "parameters have no distributed reverse core yet."
             )
         boundary = self.logical_scene.boundary
         if boundary.uses_kind("bloch"):
@@ -429,11 +434,18 @@ class DistributedFDTD:
             )
         if self.logical_scene.symmetry[0] is not None:
             raise ValueError("Multi-GPU x decomposition does not support x-axis symmetry yet.")
-        if self.logical_scene.material_regions:
-            raise ValueError(
-                "Multi-GPU material density regions require distributed density slicing and are "
-                "currently limited to the single-GPU adjoint path."
-            )
+        for region in self.logical_scene.material_regions:
+            # Box density regions rasterize per shard automatically: each local
+            # scene keeps the same MaterialRegion, and the density texture is
+            # sampled by physical position (grid_sample against the region's global
+            # center/size), so a shard's local grid selects its own sub-window with
+            # no distributed density slicing. Non-Box geometries have no such
+            # position-parameterized rasterization path yet.
+            if not isinstance(region.geometry, Box):
+                raise ValueError(
+                    "Multi-GPU material density regions currently support Box geometry only; "
+                    f"got {type(region.geometry).__name__}."
+                )
         if self.logical_scene.networks:
             # Checked before the port guard so a network scene reports the real
             # blocker. Embedded networks need a unique owner rank plus per-step

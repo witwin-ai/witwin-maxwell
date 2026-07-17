@@ -147,17 +147,30 @@ def test_replay_requires_matching_partition(cuda_p2p_devices, cuda_memory_cleanu
         replay_distributed_segment(distributed, mismatched, 0, 1)
 
 
-def test_distributed_solver_rejects_trainable_scene_directly():
-    """Defense in depth: the distributed solver itself fails closed on a trainable
-    scene, independent of the public Simulation trainable guard, because the
-    distributed joint-solve adjoint bridge is not wired yet."""
-
-    scene = mw.Scene(
+def _base_scene():
+    return mw.Scene(
         domain=mw.Domain(bounds=((-0.4, 0.4), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.1),
         boundary=mw.BoundarySpec.none(),
         device="cpu",
     )
+
+
+def _cpu_parallel():
+    return FDTDParallelConfig(
+        devices=("cuda:0", "cuda:1"),
+        transport="cuda_p2p",
+        gather_fields=False,
+        result_device="cuda:0",
+    )
+
+
+def test_distributed_solver_accepts_trainable_box_density_directly():
+    """A trainable Box material-region density is the one supported trainable channel;
+    the distributed solver's capability-scoped guard must NOT reject it at
+    construction (the joint-solve adjoint bridge differentiates it)."""
+
+    scene = _base_scene()
     density = torch.rand((2, 2, 2), requires_grad=True)
     scene.add_material_region(
         mw.MaterialRegion(
@@ -167,17 +180,29 @@ def test_distributed_solver_rejects_trainable_scene_directly():
             eps_bounds=(1.0, 5.0),
         )
     )
-    with pytest.raises(ValueError, match="trainable"):
-        DistributedFDTD(
-            scene,
-            frequency=_FREQUENCY,
-            parallel=FDTDParallelConfig(
-                devices=("cuda:0", "cuda:1"),
-                transport="cuda_p2p",
-                gather_fields=False,
-                result_device="cuda:0",
+    # Construction validates static capabilities before any hardware use; a
+    # trainable Box density is accepted, so this must not raise.
+    DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_cpu_parallel())
+
+
+def test_distributed_solver_rejects_unsupported_trainable_channel_directly():
+    """Defense in depth: the distributed solver fails closed on an unsupported
+    trainable channel (structure geometry) even when constructed directly, because
+    that channel has no verified distributed reverse core."""
+
+    scene = _base_scene()
+    scene.add_structure(
+        mw.Structure(
+            name="dielectric",
+            geometry=mw.Box(
+                position=torch.zeros(3, requires_grad=True),
+                size=(0.2, 0.2, 0.2),
             ),
+            material=mw.Material(eps_r=3.0),
         )
+    )
+    with pytest.raises(ValueError, match="trainable"):
+        DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_cpu_parallel())
 
 
 def test_checkpoint_rejects_cpml_absorber(cuda_p2p_devices, cuda_memory_cleanup):
