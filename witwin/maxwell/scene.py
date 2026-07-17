@@ -1050,6 +1050,13 @@ class Scene:
 
         return prepare_scene(self).compile_wire_monitors(device=device)
 
+    def compile_array_monitors(self, **kwargs):
+        """Compile closed-surface sampling contracts for an array basis sweep."""
+
+        from .compiler.array import compile_array_monitors
+
+        return compile_array_monitors(self, **kwargs)
+
     def compile_waveports(self, *, device=None):
         """Compile RF wave-port cross sections without solving their modes."""
 
@@ -1448,6 +1455,11 @@ class PreparedScene(Scene):
             self,
             network,
         )
+
+    def compile_array_monitors(self, **kwargs):
+        from .compiler.array import compile_array_monitors
+
+        return compile_array_monitors(self, **kwargs)
 
     def compile_waveports(self, *, device=None):
         from .compiler.waveports import compile_waveports

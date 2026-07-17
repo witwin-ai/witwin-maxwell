@@ -15,18 +15,21 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 
-# This exact snapshot was reconciled on 2026-07-17 by integrating the thin-wire
-# subgrid conductor series (plan 07, phases 0-3) on top of the 2026-07-16
-# baseline of 119. The 119 baseline was itself the 2026-07-15 base of 108 plus
-# the SPICE/MNA circuit co-simulation series (+5) and the Touchstone
-# network-embedding series (+6). The thin-wire series adds ten capability guards
-# (108 base + 10 = the thin-wire branch budget of 118), giving 119 + 10 = 129.
+# This exact snapshot was reconciled on 2026-07-17 by integrating the array
+# basis / active-S feature series (plan 06, phases 0-1) on top of the thin-wire
+# integration baseline of 129. The 129 baseline was the 2026-07-15 base of 108
+# plus the SPICE/MNA circuit co-simulation series (+5), the Touchstone
+# network-embedding series (+6, giving 119), and the thin-wire subgrid conductor
+# series (plan 07, phases 0-3, +10, giving 129). The array-basis series adds one
+# capability guard (postprocess/array.py: "Array basis extraction is FDTD-only.")
+# -- a genuine capability gap, since non-FDTD backends do not retain the
+# full-wave PortSweep columns array_basis() consumes -- giving 129 + 1 = 130.
 # The seventh network-embedding guard, simulation.py "Embedded network feedback
 # is defined only for the time-domain FDTD update", is a permanent architectural
 # boundary and is listed in CONTRACT_GUARDS below, not counted here. Lower it
 # when a capability guard is implemented; do not raise it without updating the
 # census.
-CAPABILITY_GUARD_BUDGET = 129
+CAPABILITY_GUARD_BUDGET = 130
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

@@ -166,6 +166,13 @@ def test_result_antenna_consumes_a_first_class_closed_surface_monitor():
 
     assert data.surface_currents is not None
     assert len(data.surface_currents[0].surfaces) == 6
+    assert all(
+        surface.quadrature_rule == "cell_centered"
+        for surface in data.surface_currents[0].surfaces
+    )
+    assert tuple(
+        surface.normal_direction for surface in data.surface_currents[0].surfaces
+    ) == ("-", "+", "-", "+", "-", "+")
     assert data.radiation_intensity.shape == (1, 11, 17)
     assert torch.all(torch.isfinite(data.realized_gain))
 

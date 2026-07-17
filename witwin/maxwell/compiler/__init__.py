@@ -1,3 +1,9 @@
+from .array import (
+    CompiledArrayBasisRequest,
+    compile_array_basis_request,
+    compile_array_monitors,
+    validate_array_superposition,
+)
 from .circuits import CircuitGraph, compile_circuit_graph, compile_circuits
 from .lumped import CompiledLumpedElement, compile_lumped_elements
 from .mna import (
@@ -36,8 +42,11 @@ __all__ = [
     "CircuitGraph",
     "compile_circuit_graph",
     "compile_circuits",
+    "CompiledArrayBasisRequest",
     "CompiledLumpedElement",
     "CompiledNetworkBlock",
+    "compile_array_basis_request",
+    "compile_array_monitors",
     "compile_lumped_elements",
     "CompiledStampPlan",
     "BatchedMNAFactors",
@@ -66,4 +75,5 @@ __all__ = [
     "compile_material_tensors",
     "compile_thin_wires",
     "compile_wire_monitors",
+    "validate_array_superposition",
 ]

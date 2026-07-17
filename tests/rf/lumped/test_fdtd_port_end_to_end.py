@@ -87,6 +87,40 @@ def test_port_only_gaussian_uses_a_full_pulse_window_by_default():
     assert torch.all(torch.isfinite(data.voltage))
 
 
+def test_cw_port_remains_stable_for_4096_steps_at_the_base_courant_limit():
+    simulation = mw.Simulation.fdtd(
+        _port_scene(),
+        frequency=3.0e9,
+        excitations=mw.PortExcitation("feed", source_time=mw.CW(3.0e9)),
+        run_time=mw.TimeConfig(time_steps=4096),
+        spectral_sampler=mw.SpectralSampler(window="hanning"),
+    )
+    prepared = simulation.prepare()
+    solver = prepared.solver
+    expected_dt = 1.0 / (
+        solver.c
+        * (
+            1.0 / solver.min_dx**2
+            + 1.0 / solver.min_dy**2
+            + 1.0 / solver.min_dz**2
+        )
+        ** 0.5
+    )
+    assert solver.dt == pytest.approx(expected_dt)
+
+    data = prepared.run().port("feed")
+
+    assert torch.all(torch.isfinite(data.voltage))
+    assert torch.all(torch.isfinite(data.current))
+    assert torch.all(torch.abs(data.voltage) < 2.0)
+    torch.testing.assert_close(
+        data.incident_power,
+        data.available_power,
+        rtol=1.0e-3,
+        atol=1.0e-8,
+    )
+
+
 def test_passive_rlc_port_prepares_device_resident_auxiliary_state():
     simulation = mw.Simulation.fdtd(
         _port_scene(termination=mw.SeriesRLC(r=25.0, l=0.5e-9, c=1.0e-12)),

@@ -770,6 +770,29 @@ def _crop_plane_monitor_payload(payload: dict[str, Any], monitor: FinitePlaneMon
     selected[coord_u_name] = selected_u
     selected[coord_v_name] = selected_v
     selected["coords"] = (selected_u, selected_v)
+    if "cell_widths" in payload:
+        width_u = payload["cell_widths"][coord_u_name]
+        width_v = payload["cell_widths"][coord_v_name]
+        selected["cell_widths"] = {
+            coord_u_name: (
+                width_u
+                if u_indices is None
+                else (
+                    width_u.index_select(0, u_indices)
+                    if isinstance(width_u, torch.Tensor)
+                    else np.asarray(width_u)[u_indices]
+                )
+            ),
+            coord_v_name: (
+                width_v
+                if v_indices is None
+                else (
+                    width_v.index_select(0, v_indices)
+                    if isinstance(width_v, torch.Tensor)
+                    else np.asarray(width_v)[v_indices]
+                )
+            ),
+        }
     selected["monitor_type"] = "finite_plane"
     selected["center"] = monitor.position
     selected["size"] = monitor.size
@@ -1167,6 +1190,7 @@ class Result:
         circuits: Mapping[str, CircuitData] | None = None,
         network: NetworkData | None = None,
         embedded_networks: Mapping[str, EmbeddedNetworkData] | None = None,
+        array_run_data=None,
         metadata: dict[str, Any] | None = None,
         solver_stats: dict[str, Any] | None = None,
         raw_output: Any = None,
@@ -1185,6 +1209,7 @@ class Result:
         if network is not None and not isinstance(network, NetworkData):
             raise TypeError("network must be a NetworkData or None.")
         self._network = network
+        self._array_run_data = array_run_data
         self._metadata = _clone_mapping(metadata)
         self._solver_stats = _clone_mapping(solver_stats)
         self._sharded_manifest = None
@@ -1482,6 +1507,38 @@ class Result:
             batch_size=batch_size,
         )
 
+    def array_basis(
+        self,
+        *,
+        monitor: str,
+        polarization=None,
+        theta=None,
+        phi=None,
+        theta_points: int = 181,
+        phi_points: int = 361,
+        radius=1.0,
+        phase_center=None,
+        frame=None,
+        batch_size: int = 1024,
+    ):
+        """Build a reusable power-wave/embedded-pattern basis from a PortSweep."""
+
+        from .postprocess.array import array_basis_from_result
+
+        return array_basis_from_result(
+            self,
+            monitor=monitor,
+            polarization=polarization,
+            theta=theta,
+            phi=phi,
+            theta_points=theta_points,
+            phi_points=phi_points,
+            radius=radius,
+            phase_center=phase_center,
+            frame=frame,
+            batch_size=batch_size,
+        )
+
     def power_loss(
         self,
         name: str,
@@ -1639,6 +1696,10 @@ class Result:
         prepared Scene, solver, raw runtime output, and every live autograd graph.
         Loading therefore requires the caller to supply the corresponding
         declarative Scene.
+
+        Retained in-memory array sweep columns are also omitted. Call
+        ``result.array_basis(...)`` and save the resulting ``ArrayBasisData`` before
+        saving when delayed embedded-pattern reuse is required.
         """
 
         payload = self._snapshot_payload(fields=self._fields)

@@ -1101,11 +1101,19 @@ def replay_port_runtimes(
             continue
         inductor_name = lumped_state_name("port", index, "inductor_current")
         capacitor_name = lumped_state_name("port", index, "capacitor_voltage")
+        previous_voltage_name = lumped_state_name("port", index, "last_voltage_after")
         provider = port_runtime.wire_provider
         if provider is None:
-            corrected, next_inductor, next_capacitor, trace = replay_lumped_runtime(
+            (
+                corrected,
+                next_inductor,
+                next_capacitor,
+                next_previous_voltage,
+                trace,
+            ) = replay_lumped_runtime(
                 runtime,
                 fields[port_runtime.field_name],
+                previous_voltage=state[previous_voltage_name],
                 inductor_current=state[inductor_name],
                 capacitor_voltage=state[capacitor_name],
                 drive=_drive_value(port_runtime, sample_time),
@@ -1135,11 +1143,16 @@ def replay_port_runtimes(
                 ).reshape_as(coordinate)
                 average_current = integrated_current / buffers["macro_dt"]
                 voltage_after = drive + buffers["decay"] * voltage_delta
+                # The exact-resistive wire step carries the post-step port voltage
+                # directly (no averaging recurrence), mirroring the forward
+                # ``_apply_wire_resistive_exact`` scalar update.
+                next_previous_voltage = voltage_after
                 macro_trace = LumpedStepTrace(
                     runtime=runtime,
                     field_name="wire_port_coordinate",
                     kind="port",
                     index=index,
+                    previous_voltage=state[previous_voltage_name],
                     voltage_before=voltage_before,
                     branch_current=average_current,
                     voltage_midpoint=voltage_after,
@@ -1155,11 +1168,22 @@ def replay_port_runtimes(
                 corrected = coordinate
                 next_inductor = state[inductor_name]
                 next_capacitor = state[capacitor_name]
+                # Thread the port's carried post-step voltage through both
+                # midpoint substeps so replay reconstructs ``last_voltage_after``
+                # bit-exactly, matching the forward substep recurrence.
+                next_previous_voltage = state[previous_voltage_name]
                 lumped_substeps = []
                 for _ in range(port_runtime.substeps):
-                    corrected, next_inductor, next_capacitor, lumped_trace = replay_lumped_runtime(
+                    (
+                        corrected,
+                        next_inductor,
+                        next_capacitor,
+                        next_previous_voltage,
+                        lumped_trace,
+                    ) = replay_lumped_runtime(
                         runtime,
                         corrected,
+                        previous_voltage=next_previous_voltage,
                         inductor_current=next_inductor,
                         capacitor_voltage=next_capacitor,
                         drive=drive,
@@ -1197,15 +1221,18 @@ def replay_port_runtimes(
             )
         next_auxiliary[inductor_name] = next_inductor
         next_auxiliary[capacitor_name] = next_capacitor
+        next_auxiliary[previous_voltage_name] = next_previous_voltage
         traces.append(trace)
     for index, (runtime, field_name) in enumerate(
         getattr(solver, "_lumped_element_runtimes", ())
     ):
         inductor_name = lumped_state_name("element", index, "inductor_current")
         capacitor_name = lumped_state_name("element", index, "capacitor_voltage")
-        corrected, next_inductor, next_capacitor, trace = replay_lumped_runtime(
+        previous_voltage_name = lumped_state_name("element", index, "last_voltage_after")
+        corrected, next_inductor, next_capacitor, next_previous_voltage, trace = replay_lumped_runtime(
             runtime,
             fields[field_name],
+            previous_voltage=state[previous_voltage_name],
             inductor_current=state[inductor_name],
             capacitor_voltage=state[capacitor_name],
             drive=torch.zeros_like(runtime.default_thevenin_voltage),
@@ -1216,6 +1243,7 @@ def replay_port_runtimes(
         fields[field_name] = corrected
         next_auxiliary[inductor_name] = next_inductor
         next_auxiliary[capacitor_name] = next_capacitor
+        next_auxiliary[previous_voltage_name] = next_previous_voltage
         traces.append(trace)
     if capture is not None:
         capture.append(tuple(traces))
@@ -1259,6 +1287,7 @@ def _pullback_wire_port_trace(
     *,
     inductor_current_adjoint: torch.Tensor,
     capacitor_voltage_adjoint: torch.Tensor,
+    previous_voltage_adjoint: torch.Tensor,
     voltage_seed: torch.Tensor,
     current_seed: torch.Tensor,
     eps_by_field: dict[str, torch.Tensor],
@@ -1304,9 +1333,14 @@ def _pullback_wire_port_trace(
             corrected = coordinate_input - weights * integrated_current / masses
             average_current = integrated_current / macro_dt
             voltage_after = torch.dot(corrected, weights)
+            # ``voltage_after`` is also carried out as the port's post-step
+            # ``last_voltage_after`` scalar, so its cotangent enters the analytic
+            # objective. The exact-resistive step does not read the incoming
+            # ``previous_voltage`` (pure resistive analytic advance), so the
+            # returned previous-voltage cotangent is zero.
             objective = torch.dot(
                 corrected, coordinate_adjoint.reshape(-1)
-            ) + voltage_after * voltage_seed - average_current * current_seed
+            ) + voltage_after * (voltage_seed + previous_voltage_adjoint) - average_current * current_seed
             (
                 pre_coordinate_adjoint,
                 grad_eps_mass,
@@ -1319,6 +1353,7 @@ def _pullback_wire_port_trace(
             )
         result = LumpedStepPullback(
             field_adjoint=pre_coordinate_adjoint.reshape_as(provider.energy_masses),
+            previous_voltage_adjoint=torch.zeros_like(previous_voltage_adjoint),
             inductor_current_adjoint=torch.zeros_like(inductor_current_adjoint),
             capacitor_voltage_adjoint=torch.zeros_like(capacitor_voltage_adjoint),
             grad_eps=grad_eps_mass.reshape_as(provider.energy_masses),
@@ -1341,6 +1376,10 @@ def _pullback_wire_port_trace(
         ).reshape_as(coordinate_adjoint)
         pre_inductor_adjoint = inductor_current_adjoint
         pre_capacitor_adjoint = capacitor_voltage_adjoint
+        # The macro post-step ``last_voltage_after`` scalar equals the second
+        # substep's carried voltage, so its cotangent threads backward through
+        # both substeps, mirroring the forward averaging recurrence.
+        pre_previous_voltage_adjoint = previous_voltage_adjoint
         grad_eps_mass = torch.zeros_like(provider.energy_masses)
         grad_resistance = torch.zeros_like(runtime.resistance)
         grad_inductance = torch.zeros_like(runtime.inductance)
@@ -1355,6 +1394,7 @@ def _pullback_wire_port_trace(
                 pre_coordinate_adjoint,
                 inductor_current_adjoint=pre_inductor_adjoint,
                 capacitor_voltage_adjoint=pre_capacitor_adjoint,
+                previous_voltage_adjoint=pre_previous_voltage_adjoint,
                 voltage_sample_adjoint=torch.zeros_like(voltage_seed),
                 network_current_sample_adjoint=current_seed * sample_scale,
                 eps_edge=provider.energy_masses,
@@ -1362,6 +1402,7 @@ def _pullback_wire_port_trace(
             pre_coordinate_adjoint = substep_result.field_adjoint
             pre_inductor_adjoint = substep_result.inductor_current_adjoint
             pre_capacitor_adjoint = substep_result.capacitor_voltage_adjoint
+            pre_previous_voltage_adjoint = substep_result.previous_voltage_adjoint
             grad_eps_mass = grad_eps_mass + substep_result.grad_eps
             grad_resistance = grad_resistance + substep_result.grad_resistance
             grad_inductance = grad_inductance + substep_result.grad_inductance
@@ -1372,6 +1413,7 @@ def _pullback_wire_port_trace(
             )
         result = LumpedStepPullback(
             field_adjoint=pre_coordinate_adjoint,
+            previous_voltage_adjoint=pre_previous_voltage_adjoint,
             inductor_current_adjoint=pre_inductor_adjoint,
             capacitor_voltage_adjoint=pre_capacitor_adjoint,
             grad_eps=grad_eps_mass,
@@ -1487,6 +1529,9 @@ def pullback_port_runtimes(
         capacitor_name = lumped_state_name(
             lumped_trace.kind, lumped_trace.index, "capacitor_voltage"
         )
+        previous_voltage_name = lumped_state_name(
+            lumped_trace.kind, lumped_trace.index, "last_voltage_after"
+        )
         voltage_seed, current_seed, direct_drive_seed = port_sample_adjoints.get(
             lumped_trace.index,
             (
@@ -1523,6 +1568,7 @@ def pullback_port_runtimes(
                     updated,
                     inductor_current_adjoint=updated[inductor_name],
                     capacitor_voltage_adjoint=updated[capacitor_name],
+                    previous_voltage_adjoint=updated[previous_voltage_name],
                     voltage_seed=voltage_seed,
                     current_seed=current_seed,
                     eps_by_field=eps_by_field,
@@ -1545,6 +1591,7 @@ def pullback_port_runtimes(
                 updated[trace.field_name],
                 inductor_current_adjoint=updated[inductor_name],
                 capacitor_voltage_adjoint=updated[capacitor_name],
+                previous_voltage_adjoint=updated[previous_voltage_name],
                 voltage_sample_adjoint=voltage_seed,
                 network_current_sample_adjoint=current_seed,
                 eps_edge=eps_by_field[trace.field_name],
@@ -1553,6 +1600,7 @@ def pullback_port_runtimes(
             grad_eps[trace.field_name] = grad_eps[trace.field_name] + result.grad_eps
         updated[inductor_name] = result.inductor_current_adjoint
         updated[capacitor_name] = result.capacitor_voltage_adjoint
+        updated[previous_voltage_name] = result.previous_voltage_adjoint
         if lumped_trace.kind == "port":
             port_runtime = solver._port_runtimes[lumped_trace.index]
             termination = getattr(port_runtime.port, "termination", None)

@@ -8,10 +8,11 @@ cannot enter unnoticed.
 ## Reconciled baseline
 
 The 2026-07-17 integrated repository state (circuit co-simulation, Touchstone
-network embedding, and the thin-wire subgrid conductor series in plan 07 phases
-0-3, all merged) contains 151 guards:
+network embedding, the thin-wire subgrid conductor series in plan 07 phases
+0-3, and the array basis / active-S feature series in plan 06 phases 0-1, all
+merged) contains 152 guards:
 
-- 129 capability guards tracked by the non-increasing test budget;
+- 130 capability guards tracked by the non-increasing test budget;
 - 22 contract guards excluded by exact file and message substring.
 
 The single-GPU circuit adjoint provides the circuit replay and transpose
@@ -23,7 +24,10 @@ adjoints, and full-field/observer forward-resume accumulation remain separate
 capability gaps rather than reclassified permanent contracts. The thin-wire
 series adds ten capability guards on top of the 119-guard circuit/network
 baseline (119 + 10 = 129); their disposition is detailed in the
-[Thin-wire reconciliation](#thin-wire-reconciliation-2026-07-17) note below.
+[Thin-wire reconciliation](#thin-wire-reconciliation-2026-07-17) note below. The
+array-basis series adds one further capability guard (129 + 1 = 130); its
+disposition is detailed in the
+[Array-basis reconciliation](#array-basis-reconciliation-2026-07-17) note below.
 
 The capability baseline is distributed as follows:
 
@@ -38,15 +42,16 @@ The capability baseline is distributed as follows:
 | Time-domain runtime | 18 |
 | Public simulation, result, and network workflows | 23 |
 | Material models | 7 |
-| Postprocessing | 3 |
-| **Total** | **129** |
+| Postprocessing | 4 |
+| **Total** | **130** |
 
 This integrated baseline is the 2026-07-16 circuit/network state (119 capability
-guards) plus the ten thin-wire capability guards from plan 07 phases 0-3. The
-119-guard baseline is itself the 2026-07-15 circuit co-simulation state (113
-capability guards) plus the six 2026-07-16 network-embedding capability guards
-(Time-domain adjoint +3, Public simulation/result/network workflows +3); that
-reconciliation is detailed in the
+guards) plus the ten thin-wire capability guards from plan 07 phases 0-3 (giving
+129) plus the one array-basis capability guard from plan 06 phases 0-1 (giving
+130). The 119-guard baseline is itself the 2026-07-15 circuit co-simulation
+state (113 capability guards) plus the six 2026-07-16 network-embedding
+capability guards (Time-domain adjoint +3, Public simulation/result/network
+workflows +3); that reconciliation is detailed in the
 [Network-embedding reconciliation](#network-embedding-reconciliation-2026-07-16)
 section below.
 
@@ -67,6 +72,17 @@ requirement is instead a differentiation contract (the automatic joint-CFL clamp
 is a discrete preparation decision that is not differentiated with respect to
 radius or material parameters) and is listed under CONTRACT_GUARDS, not counted
 here.
+
+### Array-basis reconciliation (2026-07-17)
+
+The array basis / active-S feature series (plan 06, phases 0-1) adds one reviewed
+capability guard. `witwin/maxwell/postprocess/array.py` raises
+`NotImplementedError("Array basis extraction is FDTD-only.")` when a non-FDTD
+`Result` is passed to `array_basis()`. It is a genuine capability gap rather
+than a public contract: `array_basis()` consumes the retained in-memory
+full-wave PortSweep field columns, which only the FDTD backend currently
+produces. It stays counted in the budget (Postprocessing 3 -> 4) so extending
+basis extraction to another backend later lowers the count again.
 
 ## Contract exclusions
 

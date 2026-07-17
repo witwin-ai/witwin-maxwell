@@ -84,10 +84,6 @@ def _normalize_port_excitations(excitations) -> tuple[PortExcitation, ...]:
     names = tuple(excitation.port_name for excitation in resolved)
     if len(set(names)) != len(names):
         raise ValueError("Each port may appear in excitations at most once.")
-    if len(resolved) > 1:
-        raise NotImplementedError(
-            "A direct FDTD run supports one active RF port; use PortSweep for independent N-port columns."
-        )
     return resolved
 
 
@@ -689,6 +685,14 @@ class Simulation:
         if not self.excitations:
             return
         ports_by_name = {port.name: port for port in self.scene.ports}
+        if len(self.excitations) > 1 and any(
+            isinstance(ports_by_name.get(excitation.port_name), WavePort)
+            for excitation in self.excitations
+        ):
+            raise NotImplementedError(
+                "A direct multi-source FDTD run supports LumpedPort and TerminalPort only; "
+                "WavePort channels require calibrated per-frequency execution."
+            )
         for excitation in self.excitations:
             if excitation.port_name in bound_port_names:
                 raise ValueError(
@@ -977,8 +981,12 @@ class Simulation:
         if isinstance(manifest, WavePortRunManifest):
             return run_waveport_sweep(self, run_scene, manifest)
         columns = []
+        column_results = []
         column_stats = []
         last_solver = None
+        shared_prepared_scene = None
+        from .array_execution import compact_array_column_result
+
         for active_name in manifest.port_names:
             excitations, overrides = build_network_column_run(
                 run_scene,
@@ -994,10 +1002,27 @@ class Simulation:
             )
             column_result = self._run_fdtd_from_solver(solver)
             columns.append(column_result.ports)
+            if shared_prepared_scene is None:
+                shared_prepared_scene = column_result.prepared_scene
+            column_results.append(
+                compact_array_column_result(
+                    column_result,
+                    prepared_scene=shared_prepared_scene,
+                )
+            )
             column_stats.append(column_result.stats())
             last_solver = solver
 
         stacked_ports, network = aggregate_network_columns(manifest, tuple(columns))
+        incident = torch.stack(
+            [
+                column[port_name].a
+                for column, port_name in zip(columns, manifest.port_names)
+            ],
+            dim=-1,
+        )
+        from .array_execution import ArrayRunData
+
         metadata = dict(self.metadata)
         metadata["network_run_manifest"] = manifest.metadata()
         return Result(
@@ -1011,6 +1036,11 @@ class Simulation:
             monitors={},
             ports=stacked_ports,
             network=network,
+            array_run_data=ArrayRunData(
+                manifest=manifest,
+                column_results=tuple((result,) for result in column_results),
+                incident=incident,
+            ),
             metadata=metadata,
             solver_stats={
                 "network_sweep": manifest.metadata(),
