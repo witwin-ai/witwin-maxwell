@@ -160,6 +160,19 @@ This is spatial domain decomposition, not replicated data parallelism:
    its current-scalar peer read, and the next owner solve waits for that event
    before reusing the source buffer; the acknowledgement does not wait for the
    subsequent shard-local field correction.
+9. An embedded-network-coupled run uses the identical ownership rule and scalar
+   contract as the circuit path, applied to the network's connected terminals: the
+   network owner is the shard owning the lexicographically minimum connected
+   voltage edge with the same `Ex`, `Ey`, `Ez` component tie-break, so a scene
+   carrying both a circuit and a network would place them consistently. Each shard
+   samples one voltage scalar per local connected port; the owner gathers the
+   remote scalars, runs the sole authoritative state-space recurrence and the
+   prepare-time pivoted-LU same-step feedthrough solve, accumulates every port's
+   V/I DFT, and scatters one solved branch-current scalar back per remote port
+   under the same copy-acknowledgement discipline. Network state and the owner
+   `PortData`/`EmbeddedNetworkData` remain on the owner until moved once to
+   `result_device`. The distributed apply is multi-stream and event-driven and is
+   never CUDA-Graph captured.
 
 The steady-state fields and field-sized CPML/ADE/DFT state are shard local. The
 coordinator prepares global grid metadata and a common time step, but does not
@@ -184,6 +197,7 @@ must not be described as independently hardware-qualified.
 | Absorbers and boundaries | Global-face CPML/PML/StablePML/absorber behavior and mixed `none`/PEC/PMC/Mur; y/z periodic and y/z symmetry are accepted | XYZ CPML plus dielectric, mixed PEC/PMC/Mur, y periodic, and y symmetry have two-GPU parity coverage. x periodic, all Bloch, and x symmetry fail fast. |
 | Sources | `PointDipole(profile="ideal")` and `UniformCurrentSource` | Point sources on/near interfaces and a current volume crossing the interface have A6000 parity coverage. Plane-wave/TFSF, beam, mode, and other surface sources fail fast. |
 | Circuit co-simulation | One linear circuit with one or more bound `LumpedPort`/`TerminalPort` objects; GPU-native owner MNA and P2P scalar exchange | Each individual port must be wholly owned by one x slab. Multiple ports may reside on different shards. Communication is two scalars per remote bound port per step, and no external circuit process is used. The physical two-GPU parity gate passes on 2x RTX A6000 with exact (bitwise, 0.000e+00) single-versus-two-GPU parity on all six fields, port V/I, and circuit node/branch data. |
+| Embedded-network co-simulation | One `NetworkBlock`/`TouchstoneNetwork` connecting one or more `LumpedPort`/resolved `TerminalPort` terminals; GPU-native owner state-space + same-step LU feedthrough solve and P2P scalar exchange | Each connected terminal must be wholly owned by one x slab. Terminals may reside on different shards. Communication is two scalars per remote connected port per step; the owner alone advances the authoritative network state recurrence and accumulates every port V/I DFT. The physical two-GPU parity gate passes on 2x RTX A6000 with exact (bitwise, 0.000e+00) single-versus-two-GPU parity on all six fields, port V/I, network V/I, and network state. A scene mixing an embedded network with a bound circuit, more than one embedded network, and delayed (`delay_seconds=`) network cores are rejected on the distributed path. |
 | Monitors | Point spectral monitor, point `FieldTimeMonitor`, a valid `DipoleEmissionMonitor`, and spectral `PlaneMonitor`/`FinitePlaneMonitor`/`FluxMonitor`/`ModeMonitor` | y/z-normal planes are tiled across x and stitched from owned component intervals on `result_device`; x-normal planes have exactly one shard owner. Five Plane/Flux/Mode A6000 numerical cases observed exact single/two-GPU parity. Closed-surface, diffraction, flux-time, non-point field-time, and material monitors remain rejected. |
 | Spectral output | One or many requested frequencies; supported point/plane monitor assembly; optional gathered electric fields | Multiple frequencies preserve frequency metadata and leading frequency dimension. |
 | Persistence | Gathered `save`/`load` and distributed `save_sharded`/`load_sharded` | Lazy sharded load leaves `fields` empty and rank tensors unopened; explicit gather validates and stitches owned intervals. Persistence does not restore live solver/transport state. |
@@ -191,7 +205,7 @@ must not be described as independently hardware-qualified.
 | Auto shutoff | Global owned-electric-energy reduction on `result_device` | `steps_run`, halo totals, and normalization reflect early termination. |
 | CUDA Graph | Rejected | Peer communication is not graph captured. |
 | Plotting | Rejected during solve | Run with `gather_fields=True`, then consume the gathered result explicitly. |
-| Trainable scenes / adjoint | Rejected before distributed allocation | The existing differentiable path remains single GPU. Circuit history tensors have one live owner, but full field-shard checkpoint replay and multi-GPU backward remain deferred. |
+| Trainable scenes / adjoint | Rejected before distributed allocation | The existing differentiable path remains single GPU. Circuit history tensors and embedded-network state each have one live owner, but full field-shard checkpoint replay and multi-GPU backward (including trainable embedded-network residues/direct) remain deferred and rejected. |
 | NCCL / multi-process / multi-node | Reserved, not implemented | `transport="nccl"` raises explicitly. |
 | Three or four GPUs | Structurally representable by the partition and neighbor transport | Not qualified in the current hardware acceptance record; no validation claim is made here. |
 
@@ -243,9 +257,12 @@ Use either `result.solver_stats["parallel_stats"]` or
 Circuit-coupled runs additionally expose `parallel_stats["circuit"]`, including
 the circuit and per-port owner ranks, same-shard and remote-port counts, scalar
 transfers, owner copy acknowledgements, bytes per step/total, and the
-circuit-checkpoint owner. These
-statistics count only circuit scalar traffic; halo bytes remain in the top-level
-halo counters.
+circuit-checkpoint owner. Embedded-network-coupled runs expose the same shape
+under `parallel_stats["network"]` (network and per-port owner ranks, connected
+and remote-port counts, scalar transfers, copy acknowledgements, bytes per
+step/total, and `communication_order == "O(connected_ports)"`). These
+statistics count only circuit/network scalar traffic; halo bytes remain in the
+top-level halo counters.
 
 `compute_time_s`, `communication_time_s`, and
 `exposed_communication_time_s` are currently `None`. Per-phase timing would require
@@ -313,6 +330,32 @@ reports `7 passed`, and this gate passes by an exact (bitwise, 0.000e+00) margin
 six fields, both bound-port voltages/currents, and the circuit node/branch series. The
 full deviation table and the scalar-transfer contract are recorded in
 `docs/assessments/spice-mna-phase-4-acceptance.md`.
+
+### Physical two-GPU embedded-network gate
+
+The network-owner acceptance case mirrors the circuit gate for a two-port embedded
+network split across x slabs. A `PointDipole(profile="ideal")` excites a scene whose
+two connected `LumpedPort` terminals sit on different shards; the owner runs the sole
+state-space recurrence and same-step LU solve, and the run compares gathered fields,
+port phasors, network V/I, network state, result placement, the scalar-communication
+contract, and checkpoint ownership:
+
+```bash
+python -m pytest \
+  tests/fdtd/multi_gpu/test_network_owner.py::test_physical_two_gpu_network_matches_single_gpu_and_reports_scalar_contract \
+  -q
+```
+
+The gate requires two homogeneous GPUs with bidirectional CUDA peer access and uses
+`rtol=2e-5` for field/port/network parity. It skips whenever fewer than two
+peer-accessible devices are visible. On 2x RTX A6000 with both devices visible this
+gate passes by an exact (bitwise, 0.000e+00) margin on all six fields, both connected
+port voltages/currents, the network V/I, and the network state, and asserts the
+`parallel_stats["network"]` scalar contract (owner rank, per-port owner ranks, two
+scalar transfers per step, one owner copy-acknowledgement, `O(connected_ports)`). The
+file's ownership-unit and fail-closed cases (deterministic owner independent of
+connection order, one terminal spanning a split, overlapping edges, network+circuit
+rejection, and trainable+parallel rejection) run without GPUs.
 
 ### Clean-build test record
 

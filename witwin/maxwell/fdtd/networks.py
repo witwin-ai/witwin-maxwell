@@ -246,10 +246,21 @@ def _solver_excitation_bands(solver) -> tuple[tuple[float, float], ...]:
     return tuple(bands)
 
 
-def prepare_network_runtimes(solver) -> tuple[PreparedNetworkRuntime, ...]:
-    """Compile embedded networks once and allocate all hot-path tensors."""
+def prepare_network_runtimes(
+    solver, *, compiled_networks=None
+) -> tuple[PreparedNetworkRuntime, ...]:
+    """Compile embedded networks once and allocate all hot-path tensors.
 
-    compiled_networks = solver.scene.compile_networks(dt=solver.dt, device=solver.device)
+    ``compiled_networks`` lets a caller inject already-compiled blocks instead
+    of recompiling from ``solver.scene``. The distributed owner path uses this
+    to build one owner-resident network runtime from the global scene while the
+    owner shard's local scene carries no networks.
+    """
+
+    if compiled_networks is None:
+        compiled_networks = solver.scene.compile_networks(dt=solver.dt, device=solver.device)
+    else:
+        compiled_networks = tuple(compiled_networks)
     port_runtimes = {
         runtime.port.name: runtime
         for runtime in getattr(solver, "_port_runtimes", ())
@@ -702,12 +713,8 @@ def pullback_network_runtimes(
     return updated, grad_eps, semantic_grads
 
 
-def apply_network_runtime(
-    runtime: PreparedNetworkRuntime,
-    *,
-    native_lu: bool = False,
-) -> None:
-    """Advance one implicit N-port load and correct its Yee fields in place."""
+def _gather_network_free_voltage(runtime: PreparedNetworkRuntime) -> None:
+    """Sample the connected Yee edges into the per-port free-voltage vector."""
 
     runtime.free_voltage.zero_()
     for group in runtime.terminal_groups:
@@ -728,6 +735,44 @@ def apply_network_runtime(
             group.port_indices,
             group.edge_buffer,
         )
+
+
+def _scatter_network_branch_current(runtime: PreparedNetworkRuntime) -> None:
+    """Inject the solved branch currents back into the connected Yee edges."""
+
+    for group in runtime.terminal_groups:
+        flat_field = group.electric_field.view(-1)
+        torch.index_select(
+            runtime.branch_current,
+            0,
+            group.port_indices,
+            out=group.edge_buffer,
+        )
+        torch.mul(
+            group.injection,
+            group.edge_buffer,
+            out=group.correction_buffer,
+        )
+        flat_field.index_add_(
+            0,
+            group.linear_indices,
+            group.correction_buffer,
+            alpha=-1.0,
+        )
+
+
+def _solve_network_currents(
+    runtime: PreparedNetworkRuntime,
+    *,
+    native_lu: bool = False,
+) -> torch.Tensor:
+    """Solve the same-step implicit loop from the current ``free_voltage``.
+
+    Writes ``branch_current`` and ``network_voltage`` and returns the state
+    recurrence input (``network_voltage`` for the ordinary-Y form,
+    ``core_incident`` for the delayed form). Neither gather nor scatter is
+    performed here so the single-device and distributed paths can share it.
+    """
 
     if runtime.delay_runtime is None:
         _matvec_out(runtime.C, runtime.state, runtime.output_buffer)
@@ -755,7 +800,7 @@ def apply_network_runtime(
             runtime.branch_current,
             value=-1.0,
         )
-        state_input = runtime.network_voltage
+        return runtime.network_voltage
     else:
         read_bidirectional_delay(
             runtime.delay_runtime,
@@ -842,27 +887,15 @@ def apply_network_runtime(
             runtime.scene_incident,
             runtime.core_reflected,
         )
-        state_input = runtime.core_incident
+        return runtime.core_incident
 
-    for group in runtime.terminal_groups:
-        flat_field = group.electric_field.view(-1)
-        torch.index_select(
-            runtime.branch_current,
-            0,
-            group.port_indices,
-            out=group.edge_buffer,
-        )
-        torch.mul(
-            group.injection,
-            group.edge_buffer,
-            out=group.correction_buffer,
-        )
-        flat_field.index_add_(
-            0,
-            group.linear_indices,
-            group.correction_buffer,
-            alpha=-1.0,
-        )
+
+def _finalize_network_step(
+    runtime: PreparedNetworkRuntime,
+    state_input: torch.Tensor,
+) -> None:
+    """Advance the network state recurrence and accumulate port power."""
+
     runtime.voltage_after.copy_(runtime.free_voltage)
     runtime.voltage_after.addcmul_(
         runtime.feedback_impedance,
@@ -892,6 +925,47 @@ def apply_network_runtime(
     torch.clamp(runtime.generated_increment, min=0.0, out=runtime.generated_increment)
     runtime.absorbed_energy.add_(runtime.absorbed_increment)
     runtime.generated_energy.add_(runtime.generated_increment)
+
+
+def apply_network_runtime(
+    runtime: PreparedNetworkRuntime,
+    *,
+    native_lu: bool = False,
+) -> None:
+    """Advance one implicit N-port load and correct its Yee fields in place."""
+
+    _gather_network_free_voltage(runtime)
+    state_input = _solve_network_currents(runtime, native_lu=native_lu)
+    _scatter_network_branch_current(runtime)
+    _finalize_network_step(runtime, state_input)
+
+
+def advance_network_external(
+    runtime: PreparedNetworkRuntime,
+    free_voltages: tuple[torch.Tensor, ...],
+    *,
+    native_lu: bool = False,
+) -> torch.Tensor:
+    """Advance one network from externally gathered port voltages.
+
+    The caller owns the field gather and the branch-current scatter (the
+    distributed runtime performs both per shard), so this routine only runs the
+    implicit loop solve, the state recurrence, and the port-power accounting on
+    the owner device. It never reads or writes any Yee field, which is what lets
+    a network span multiple shards behind an O(port) scalar contract. Returns
+    the persistent branch-current buffer for the caller to scatter.
+    """
+
+    if len(free_voltages) != runtime.free_voltage.numel():
+        raise ValueError(
+            "advance_network_external requires exactly one voltage scalar per "
+            "connected port."
+        )
+    for index, value in enumerate(free_voltages):
+        runtime.free_voltage[index].copy_(value)
+    state_input = _solve_network_currents(runtime, native_lu=native_lu)
+    _finalize_network_step(runtime, state_input)
+    return runtime.branch_current
 
 
 def apply_network_runtimes(solver, *, native_lu: bool = False) -> None:
@@ -1074,6 +1148,8 @@ def finalize_embedded_networks(solver, ports) -> dict[str, EmbeddedNetworkData]:
 __all__ = [
     "NetworkStepTrace",
     "PreparedNetworkRuntime",
+    "PreparedNetworkTerminalGroup",
+    "advance_network_external",
     "apply_network_runtime",
     "apply_network_runtimes",
     "finalize_embedded_networks",
