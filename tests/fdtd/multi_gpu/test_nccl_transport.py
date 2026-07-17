@@ -67,6 +67,77 @@ def test_use_before_preflight_raises():
         transport.allreduce_scalar(1.0)
 
 
+def _patch_adopted_group(monkeypatch, *, world_size, rank, backend):
+    import witwin.maxwell.fdtd.distributed.nccl_transport as mod
+
+    monkeypatch.setattr(mod.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(mod.dist, "get_world_size", lambda: world_size)
+    monkeypatch.setattr(mod.dist, "get_rank", lambda: rank)
+    monkeypatch.setattr(mod.dist, "get_backend", lambda: backend)
+
+
+def _skip_without_cuda_linux():
+    if platform.system() != "Linux":
+        pytest.skip("NCCL transport is single-node Linux only")
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+
+
+def test_preflight_rejects_adopted_group_world_size_mismatch(monkeypatch):
+    _skip_without_cuda_linux()
+    transport = NcclHaloTransport(rank=0, world_size=2, local_rank=0)
+    _patch_adopted_group(monkeypatch, world_size=4, rank=0, backend="nccl")
+    with pytest.raises(RuntimeError, match="world size"):
+        transport.preflight()
+
+
+def test_preflight_rejects_adopted_group_rank_mismatch(monkeypatch):
+    _skip_without_cuda_linux()
+    transport = NcclHaloTransport(rank=0, world_size=2, local_rank=0)
+    _patch_adopted_group(monkeypatch, world_size=2, rank=1, backend="nccl")
+    # Pin the rank branch's distinctive phrase: a bare "rank" also matches the
+    # world-size mismatch message ("this rank expects ..."), so match the phrase
+    # unique to the rank-mismatch raise site.
+    with pytest.raises(RuntimeError, match="reporting rank"):
+        transport.preflight()
+
+
+def test_preflight_rejects_adopted_group_non_nccl_backend(monkeypatch):
+    _skip_without_cuda_linux()
+    transport = NcclHaloTransport(rank=0, world_size=2, local_rank=0)
+    _patch_adopted_group(monkeypatch, world_size=2, rank=0, backend="gloo")
+    with pytest.raises(RuntimeError, match="NCCL-backed"):
+        transport.preflight()
+
+
+def test_validate_adopted_group_accepts_composite_cuda_nccl_backend(monkeypatch):
+    """A composite device->backend spec whose CUDA backend is NCCL is accepted.
+
+    ``get_backend()`` reports ``"cpu:gloo,cuda:nccl"`` for a group built with
+    per-device backends; the CUDA collectives that drive the halos are still
+    NCCL, so ``_validate_adopted_group`` must not reject it. Exercised directly
+    (no CUDA/live group needed): the full ``preflight`` accept path continues
+    into the homogeneity all-gather, which is covered by the two-rank worker.
+    """
+
+    transport = NcclHaloTransport(rank=0, world_size=2, local_rank=0)
+    _patch_adopted_group(
+        monkeypatch, world_size=2, rank=0, backend="cpu:gloo,cuda:nccl"
+    )
+    transport._validate_adopted_group()  # must not raise
+
+
+def test_validate_adopted_group_rejects_composite_without_cuda_nccl(monkeypatch):
+    """A composite spec whose CUDA backend is not NCCL still fails closed."""
+
+    transport = NcclHaloTransport(rank=0, world_size=2, local_rank=0)
+    _patch_adopted_group(
+        monkeypatch, world_size=2, rank=0, backend="cpu:gloo,cuda:gloo"
+    )
+    with pytest.raises(RuntimeError, match="NCCL-backed"):
+        transport._validate_adopted_group()
+
+
 def test_neighbor_topology_is_chain():
     first = NcclHaloTransport(rank=0, world_size=3, local_rank=0)
     middle = NcclHaloTransport(rank=1, world_size=3, local_rank=1)
@@ -74,6 +145,77 @@ def test_neighbor_topology_is_chain():
     assert (first.left_rank, first.right_rank) == (None, 1)
     assert (middle.left_rank, middle.right_rank) == (0, 2)
     assert (last.left_rank, last.right_rank) == (1, None)
+
+
+# -- no-silent-fallback guard ---------------------------------------------
+
+
+def test_nccl_transport_without_launcher_raises_and_never_builds_p2p(monkeypatch):
+    """``transport="nccl"`` in the single-process runtime must fail closed.
+
+    The single-process ``DistributedFDTD`` coordinator cannot drive the
+    one-process-per-GPU NCCL shape, and it must raise an explicit torchrun error
+    rather than silently constructing the in-process CUDA P2P transport (which
+    would run a different execution than the user requested).
+    """
+
+    import witwin.maxwell as mw
+    import witwin.maxwell.fdtd.distributed.solver as solver_module
+    from witwin.maxwell.fdtd.distributed import DistributedFDTD
+
+    for key in ("RANK", "WORLD_SIZE", "LOCAL_RANK"):
+        monkeypatch.delenv(key, raising=False)
+
+    def _forbidden_p2p(*args, **kwargs):
+        raise AssertionError(
+            "transport='nccl' must not silently fall back to CudaP2PHaloTransport."
+        )
+
+    monkeypatch.setattr(solver_module, "CudaP2PHaloTransport", _forbidden_p2p)
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
+        grid=mw.GridSpec.uniform(0.25),
+        boundary=mw.BoundarySpec.none(),
+        device="cuda:0",
+    )
+    parallel = mw.FDTDParallelConfig(
+        devices=("cuda:0", "cuda:1"),
+        transport="nccl",
+    )
+
+    with pytest.raises(RuntimeError, match="torchrun"):
+        DistributedFDTD(scene, frequency=1.0e9, parallel=parallel)
+
+
+def test_public_simulation_nccl_transport_raises_before_solver_allocation():
+    """The public Simulation path surfaces the same torchrun guard.
+
+    Driven through the public ``Simulation.prepare()`` entrypoint rather than the
+    private solver builder: prepare() reaches ``DistributedFDTD`` construction,
+    which raises the torchrun ``RuntimeError`` before any shard is allocated
+    (``init_field`` runs only after a successful construction). This keeps the
+    assertion on the supported public surface.
+    """
+
+    _skip_without_cuda_linux()
+
+    import witwin.maxwell as mw
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
+        grid=mw.GridSpec.uniform(0.25),
+        boundary=mw.BoundarySpec.none(),
+        device="cuda:0",
+    )
+    parallel = mw.FDTDParallelConfig(
+        devices=("cuda:0", "cuda:1"),
+        transport="nccl",
+    )
+    simulation = mw.Simulation.fdtd(scene, frequency=1.0e9, parallel=parallel)
+
+    with pytest.raises(RuntimeError, match="torchrun"):
+        simulation.prepare()
 
 
 # -- two-rank conformance (torchrun) --------------------------------------
