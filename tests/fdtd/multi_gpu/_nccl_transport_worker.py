@@ -39,7 +39,7 @@ def main() -> None:
     # -- forward electric: right rank's first owned node -> left rank ghost --
     first_owned = [_plane(100 + rank, device), _plane(200 + rank, device)]
     ghost = [_plane(-1, device), _plane(-1, device)]
-    transport.exchange_electric(
+    transport._electric_halo_planes(
         first_owned_node_planes=first_owned,
         ghost_node_planes=ghost,
     )
@@ -56,7 +56,7 @@ def main() -> None:
     # -- forward magnetic: left rank's last owned cell -> right rank ghost --
     last_owned = [_plane(300 + rank, device), _plane(400 + rank, device)]
     low_ghost = [_plane(-1, device), _plane(-1, device)]
-    transport.exchange_magnetic(
+    transport._magnetic_halo_planes(
         last_owned_cell_planes=last_owned,
         low_ghost_planes=low_ghost,
     )
@@ -73,7 +73,7 @@ def main() -> None:
     m_owner = [_plane(10, device), _plane(20, device)]
     m_ghost = [_plane(7, device), _plane(9, device)]
     m_staging = [_plane(0, device), _plane(0, device)]
-    transport.exchange_magnetic_adjoint(
+    transport._magnetic_adjoint_planes(
         ghost_adjoint_planes=m_ghost,
         owner_adjoint_planes=m_owner,
         staging_planes=m_staging,
@@ -99,7 +99,7 @@ def main() -> None:
     e_owner = [_plane(30, device), _plane(40, device)]
     e_ghost = [_plane(3, device), _plane(4, device)]
     e_staging = [_plane(0, device), _plane(0, device)]
-    transport.exchange_electric_adjoint(
+    transport._electric_adjoint_planes(
         ghost_adjoint_planes=e_ghost,
         owner_adjoint_planes=e_owner,
         staging_planes=e_staging,

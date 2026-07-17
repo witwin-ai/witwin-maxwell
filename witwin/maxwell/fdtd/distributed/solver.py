@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -37,6 +38,7 @@ from .networks import DistributedNetworkRuntime
 from .frequency_counts import reduce_frequency_sample_counts
 from .monitor_merge import merge_sharded_monitor_payloads
 from .persistence import export_distributed_field_shards
+from .nccl_transport import NcclHaloTransport
 from .shard_engine import ShardEngine, _plane_position
 from .transport import CudaP2PHaloTransport
 from .wire import DistributedWireRuntime, move_wire_monitor
@@ -222,16 +224,20 @@ class DistributedFDTD:
     ):
         if not isinstance(parallel, FDTDParallelConfig):
             raise TypeError("parallel must be an FDTDParallelConfig instance.")
-        if parallel.transport == "nccl":
+        self._nccl = parallel.transport == "nccl"
+        if self._nccl and not all(
+            os.environ.get(key) for key in ("RANK", "WORLD_SIZE", "LOCAL_RANK")
+        ):
             # torch 2.13 binds one device per rank, so NCCL requires a
-            # one-process-per-GPU torchrun launch. The rank-local
-            # NcclHaloTransport primitive exists and is conformance-tested, but
-            # the coordinator that drives it from a rank-local ShardEngine is not
-            # wired into this single-process runtime yet.
+            # one-process-per-GPU torchrun launch. Without the launcher
+            # environment the single-process coordinator cannot drive the
+            # per-rank shape, and it must fail closed rather than silently build
+            # the in-process CUDA P2P transport (a different execution).
             raise RuntimeError(
-                "NCCL transport requires a one-process-per-GPU torchrun launch; the "
-                "single-process DistributedFDTD coordinator does not drive it yet. Use "
-                "transport='cuda_p2p' (or 'auto') for the in-process multi-GPU runtime."
+                "NCCL transport requires a one-process-per-GPU torchrun launch; "
+                "RANK/WORLD_SIZE/LOCAL_RANK are not set. Launch with "
+                "`torchrun --nproc-per-node=<gpus> ...`, or use transport='cuda_p2p' "
+                "(or 'auto') for the in-process multi-GPU runtime."
             )
         self.logical_scene = scene
         self.scene = prepare_scene(scene)
@@ -263,7 +269,22 @@ class DistributedFDTD:
         self.shards: tuple[ShardEngine, ...] = ()
         self.partition_plan: FDTDPartitionPlan | None = None
         self.shard_layouts: tuple[FDTDShardLayout, ...] = ()
-        self.transport = CudaP2PHaloTransport(self.devices, result_device=self.device)
+        if self._nccl:
+            # One-process-per-GPU: this process owns exactly one rank/device. The
+            # transport reads RANK/WORLD_SIZE/LOCAL_RANK and validates the world
+            # size against the configured device count.
+            self.transport = NcclHaloTransport.from_env(
+                expected_world_size=len(self.devices),
+                timeout_s=float(parallel.timeout_s),
+            )
+            self.rank = int(self.transport.rank)
+            self.world_size = int(self.transport.world_size)
+            self._result_root = self.rank == 0
+        else:
+            self.transport = CudaP2PHaloTransport(self.devices, result_device=self.device)
+            self.rank = 0
+            self.world_size = 1
+            self._result_root = True
         self.last_solve_elapsed_s = None
         self._cuda_graph_active = False
         self._tail_graph_active = False
@@ -286,6 +307,8 @@ class DistributedFDTD:
         self._validate_static_capabilities()
 
     def _validate_static_capabilities(self) -> None:
+        if self._nccl:
+            self._validate_nccl_capabilities()
         # Defense in depth: the public Simulation entry validates trainable+parallel
         # per capability, but the distributed solver must also fail closed if
         # constructed directly with an unsupported trainable channel. Trainable Box
@@ -453,6 +476,42 @@ class DistributedFDTD:
                     "normalization has exactly one interface owner."
                 )
 
+    def _validate_nccl_capabilities(self) -> None:
+        """Fail-closed envelope for the one-process-per-GPU NCCL forward path.
+
+        The NCCL coordinator drives the standard forward field solve and gathers
+        the full-field DFT output to rank 0 via sized point-to-point. Per-monitor
+        payload assembly across ranks (an object gather), the owner-resident
+        circuit/network/wire runtimes, and the distributed adjoint reverse are not
+        wired over NCCL yet, so a scene requesting any of them fails closed here
+        rather than silently dropping output or running a partial coupling. The
+        in-process ``transport="cuda_p2p"`` runtime covers all of them today.
+        """
+
+        from ...simulation import _scene_trainable_density_parameters
+
+        if self.logical_scene.monitors:
+            raise ValueError(
+                "Multi-GPU NCCL forward currently gathers full-field DFT output only; "
+                "per-monitor payload gather across ranks is not wired yet. Remove monitors, "
+                "use gather_fields output, or run transport='cuda_p2p'."
+            )
+        if (
+            self.logical_scene.circuits
+            or self.logical_scene.networks
+            or getattr(self.logical_scene, "thin_wires", ())
+            or self.logical_scene.ports
+        ):
+            raise ValueError(
+                "Multi-GPU NCCL forward does not drive the owner-resident circuit/network/"
+                "wire/port runtimes yet; run transport='cuda_p2p' for coupled scenes."
+            )
+        if _scene_trainable_density_parameters(self.logical_scene):
+            raise ValueError(
+                "Multi-GPU NCCL adjoint (trainable density) is not wired yet; run the "
+                "trainable scene with transport='cuda_p2p'."
+            )
+
     def _validate_distributed_wire_support(self) -> None:
         """Fail-closed gate for the distributed thin-wire forward envelope.
 
@@ -510,7 +569,14 @@ class DistributedFDTD:
             )
 
     def _validate_hardware(self) -> None:
+        # preflight() binds the transport: for NCCL it initialises the process
+        # group and verifies device homogeneity across ranks via an all_gather.
         self.transport.preflight()
+        if self._nccl:
+            # NCCL result assembly moves owned slabs with sized point-to-point,
+            # not cudaMemcpyPeer, so the in-process peer-access matrix does not
+            # apply. Homogeneity is enforced inside the transport preflight.
+            return
         if self.device.index is None:
             raise RuntimeError("Multi-GPU result_device must be an indexed CUDA device.")
         for device in self.devices:
@@ -584,9 +650,15 @@ class DistributedFDTD:
         self.shard_layouts = self.partition_plan.shard_layouts
 
         # Every rank-local engine is built deterministically from the logical
-        # scene + its partition layout; the single-process coordinator simply
-        # builds one engine per layout. A one-process-per-GPU launcher builds only
-        # its own rank's engine from the identical inputs.
+        # scene + its partition layout. The in-process coordinator builds one
+        # engine per layout; a one-process-per-GPU NCCL launch builds only its own
+        # rank's engine from the identical inputs, and binds every layout to the
+        # transport so rank 0 can size the field gather without a shape exchange.
+        if self._nccl:
+            build_layouts = (self.shard_layouts[self.rank],)
+            self.transport.bind_coordinator_layouts(self.shard_layouts)
+        else:
+            build_layouts = self.shard_layouts
         self.shards = tuple(
             ShardEngine.build(
                 self.logical_scene,
@@ -597,7 +669,7 @@ class DistributedFDTD:
                 cpml_config=self.cpml_config,
                 dt=self.dt,
             )
-            for layout in self.shard_layouts
+            for layout in build_layouts
         )
         dts = tuple(float(shard.solver.dt) for shard in self.shards)
         if not all(np.isclose(self.dt, dt, rtol=0.0, atol=1e-18) for dt in dts):
@@ -622,28 +694,32 @@ class DistributedFDTD:
         self._cpml_allocated_memory_bytes = _sum_shard_bytes("_cpml_allocated_memory_bytes")
         self._cpml_dense_memory_bytes = _sum_shard_bytes("_cpml_dense_memory_bytes")
         self._cpml_slab_memory_bytes = _sum_shard_bytes("_cpml_slab_memory_bytes")
-        self._distributed_circuit = DistributedCircuitRuntime.prepare(
-            prepared_scene=self.scene,
-            partition_plan=self.partition_plan,
-            shards=self.shards,
-            frequency=self.frequency,
-        )
-        self._distributed_network = DistributedNetworkRuntime.prepare(
-            prepared_scene=self.scene,
-            partition_plan=self.partition_plan,
-            shards=self.shards,
-            frequency=self.frequency,
-            requested_frequencies=self._requested_port_frequencies,
-        )
-        if self._wire_network_cpu is not None:
-            self._distributed_wire = DistributedWireRuntime.prepare(
-                network=self._wire_network_cpu,
-                monitors=self._wire_monitors_cpu,
+        if not self._nccl:
+            # The owner-resident circuit/network/wire runtimes span shards in one
+            # process; the NCCL forward path guards them out (each rank holds a
+            # single engine and cannot host the cross-shard owner state yet).
+            self._distributed_circuit = DistributedCircuitRuntime.prepare(
+                prepared_scene=self.scene,
                 partition_plan=self.partition_plan,
                 shards=self.shards,
-                dt=self.dt,
-                cfl_metadata=self._wire_cfl_metadata,
+                frequency=self.frequency,
             )
+            self._distributed_network = DistributedNetworkRuntime.prepare(
+                prepared_scene=self.scene,
+                partition_plan=self.partition_plan,
+                shards=self.shards,
+                frequency=self.frequency,
+                requested_frequencies=self._requested_port_frequencies,
+            )
+            if self._wire_network_cpu is not None:
+                self._distributed_wire = DistributedWireRuntime.prepare(
+                    network=self._wire_network_cpu,
+                    monitors=self._wire_monitors_cpu,
+                    partition_plan=self.partition_plan,
+                    shards=self.shards,
+                    dt=self.dt,
+                    cfl_metadata=self._wire_cfl_metadata,
+                )
         self._initialized = True
 
     def _prepare_outputs(self, time_steps, dft_frequency, dft_window, full_field_dft):
@@ -683,6 +759,11 @@ class DistributedFDTD:
             )
 
     def _overlap_active(self) -> bool:
+        if self._nccl:
+            # The NCCL halo exchange is a blocking batched send/recv on the
+            # engine's compute stream; the coordinator runs the serialized
+            # schedule (interior/boundary overlap is a follow-up on work handles).
+            return False
         if not self.parallel.overlap:
             return False
         return all(
@@ -879,13 +960,21 @@ class DistributedFDTD:
 
         output: dict[str, Any] = {}
         if self.parallel.gather_fields:
+            # gather_component_slabs is a collective on the NCCL path: every rank
+            # contributes its owned slab and only the result root receives the
+            # global tensor (None elsewhere). The in-process transport always
+            # returns the tensor, so this loop is unchanged for cuda_p2p.
             if local_fields:
                 for name, values in local_fields.items():
-                    output[name] = self._gather_component(name, tuple(values))
+                    gathered = self._gather_component(name, tuple(values))
+                    if gathered is not None:
+                        output[name] = gathered
             else:
                 for name in ("Ex", "Ey", "Ez"):
                     values = tuple(getattr(shard.solver, name) for shard in self.shards)
-                    output[name] = self._gather_component(name, values)
+                    gathered = self._gather_component(name, values)
+                    if gathered is not None:
+                        output[name] = gathered
         if self._distributed_wire is not None:
             wire_monitors = self._distributed_wire.finalize(self.device)
             if wire_monitors:
@@ -907,6 +996,10 @@ class DistributedFDTD:
                 output.setdefault("ports", {}).update(ports)
             if networks:
                 output["embedded_networks"] = networks
+        # On a one-process-per-GPU launch only the result root assembles output;
+        # non-root ranks have already contributed their slabs to the collective.
+        if not self._result_root:
+            return None
         return output or None
 
     def solve(
@@ -927,6 +1020,15 @@ class DistributedFDTD:
             raise ValueError(
                 "Distributed FDTD checkpoint replay is not available; circuit state is "
                 "owned and checkpointable on one GPU, but field-shard replay is deferred."
+            )
+        if self._nccl and float(shutoff) > 0.0:
+            # reduce_owned_energy is a primitive-tested NCCL collective, but the
+            # coordinator's shutoff bookkeeping (peak tracking on the result
+            # device, cross-rank break lockstep) is not reconciled for the
+            # per-rank shape yet; fail closed rather than diverge silently.
+            raise ValueError(
+                "Multi-GPU NCCL forward does not support field shutoff (shutoff>0) yet; "
+                "run a fixed step count or use transport='cuda_p2p'."
             )
         if not self._initialized:
             self.init_field()
@@ -1018,6 +1120,11 @@ class DistributedFDTD:
         }
         self._parallel_stats = self._build_parallel_stats(time_steps, overlap_active)
         return output
+
+    def teardown(self) -> None:
+        """Release transport resources (NCCL process group) deterministically."""
+
+        self.transport.teardown()
 
     def _build_parallel_stats(self, time_steps: int, overlap_active: bool) -> dict[str, Any]:
         steps_run = (self._shutoff_step + 1) if self._shutoff_triggered else int(time_steps)

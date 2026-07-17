@@ -20,6 +20,23 @@ import torch
 from witwin.maxwell.fdtd.distributed.nccl_transport import NcclHaloTransport
 
 _WORKER = Path(__file__).with_name("_nccl_transport_worker.py")
+_FORWARD_WORKER = Path(__file__).with_name("_nccl_forward_worker.py")
+_RANKDEATH_WORKER = Path(__file__).with_name("_nccl_rankdeath_worker.py")
+
+
+def _torchrun(worker: Path, *, nproc: int = 2, timeout: int = 300, env: dict | None = None):
+    run_env = dict(os.environ) if env is None else env
+    run_env.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
+    cmd = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        "--nnodes=1",
+        f"--nproc-per-node={nproc}",
+        str(worker),
+    ]
+    return subprocess.run(cmd, env=run_env, capture_output=True, text=True, timeout=timeout)
 
 
 # -- failure matrix (host-only guards) ------------------------------------
@@ -253,3 +270,95 @@ def test_two_rank_halo_roundtrip():
         f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
     )
     assert "NCCL_TRANSPORT_WORKER_OK" in completed.stdout, completed.stdout
+
+
+def _skip_without_two_gpu_nccl():
+    if platform.system() != "Linux":
+        pytest.skip("NCCL transport is single-node Linux only")
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        pytest.skip("requires at least two CUDA devices")
+    if not torch.distributed.is_nccl_available():
+        pytest.skip("NCCL backend is unavailable")
+
+
+@pytest.mark.nccl
+def test_two_rank_nccl_forward_matches_single_gpu():
+    """End-to-end NCCL forward solve matches the single-GPU reference.
+
+    The two-rank worker builds a ShardEngine per rank, runs the distributed
+    coordinator loop over ``NcclHaloTransport``, and rank 0 gathers the global
+    full-field DFT and compares it to an independent single-GPU ``FDTD`` at the
+    plan's monitor tolerances (rtol 5e-5 / atol 5e-6) -- the same gate the
+    in-process CUDA P2P conformance leg uses. A nonzero exit means the field
+    parity or the halo/gather transport is wrong.
+    """
+
+    _skip_without_two_gpu_nccl()
+    completed = _torchrun(_FORWARD_WORKER, timeout=300)
+    assert completed.returncode == 0, (
+        "two-rank NCCL forward worker failed\n"
+        f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+    )
+    assert "NCCL_FORWARD_WORKER_OK" in completed.stdout, completed.stdout
+
+
+@pytest.mark.nccl
+def test_nccl_rank_death_propagates_failure():
+    """A dead peer mid-run must surface as a bounded nonzero exit, not a hang.
+
+    Both ranks join the group; rank 1 hard-exits before the first solve halo
+    collective. The survivor's next collective has no peer, so torchrun failure
+    propagation and/or the ProcessGroupNCCL watchdog timeout (configured short via
+    ``FDTDParallelConfig.timeout_s``) aborts the launch. The subprocess timeout is
+    the backstop: if it fired, the survivor hung and this test fails.
+    """
+
+    _skip_without_two_gpu_nccl()
+    completed = _torchrun(_RANKDEATH_WORKER, timeout=180)
+    assert completed.returncode != 0, (
+        "peer death did not propagate as a failure\n"
+        f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+    )
+    assert "UNEXPECTED_SURVIVAL" not in completed.stdout, completed.stdout
+
+
+# -- coordinator-level failure matrix (host-only) -------------------------
+
+
+def test_coordinator_nccl_world_size_mismatch_raises(monkeypatch):
+    """The coordinator rejects a launch whose world size != configured devices.
+
+    Driven at ``DistributedFDTD`` construction: ``NcclHaloTransport.from_env``
+    validates ``WORLD_SIZE`` against the configured two-device count and raises
+    before any process group is created, so a mismatched launcher fails closed on
+    the host without touching CUDA.
+    """
+
+    import witwin.maxwell as mw
+    from witwin.maxwell.fdtd.distributed import DistributedFDTD
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))),
+        grid=mw.GridSpec.uniform(0.25),
+        boundary=mw.BoundarySpec.none(),
+        device="cpu",
+    )
+    parallel = mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1"), transport="nccl")
+    with pytest.raises(RuntimeError, match="does not match the configured device"):
+        DistributedFDTD(scene, frequency=1.0e9, parallel=parallel)
+
+
+def test_parallel_config_timeout_validation():
+    import witwin.maxwell as mw
+
+    with pytest.raises(ValueError, match="timeout_s must be positive"):
+        mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1"), transport="nccl", timeout_s=0.0)
+    with pytest.raises(TypeError, match="timeout_s must be a number"):
+        mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1"), transport="nccl", timeout_s="soon")
+    # A valid positive timeout is accepted and coerced to float.
+    config = mw.FDTDParallelConfig(devices=("cuda:0", "cuda:1"), transport="nccl", timeout_s=30)
+    assert config.timeout_s == 30.0

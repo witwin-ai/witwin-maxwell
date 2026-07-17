@@ -72,18 +72,36 @@ devices. `result_device` defaults to the first device and must be one of the
 participants. Only `decomposition_axis="x"` is accepted. Passing `parallel=None`
 continues to use the unchanged single-GPU solver.
 
-`transport="auto"` currently selects CUDA P2P. `transport="nccl"` still raises
-`RuntimeError` from the single-process `DistributedFDTD` coordinator: torch 2.13
-binds one device per rank, so NCCL requires a one-process-per-GPU `torchrun`
-launch, and the coordinator that would drive it from a rank-local shard engine is
-not landed yet. It never silently switches to P2P or stages through host memory.
-The rank-local NCCL transport primitive itself
-(`fdtd/distributed/nccl_transport.py`) is implemented and conformance-tested: it
-performs the forward electric/magnetic Yee x-plane halos via
-`torch.distributed.batch_isend_irecv`, the transposed reverse-halo accumulations
-for the adjoint, a scalar all-reduce, a cross-rank homogeneity check, and
-deterministic `destroy_process_group` teardown, verified by a two-rank `torchrun`
-worker (`tests/fdtd/multi_gpu/test_nccl_transport.py`).
+`transport="auto"` currently selects CUDA P2P. `transport="nccl"` requires a
+one-process-per-GPU `torchrun` launch (torch 2.13 binds one device per rank);
+without the `RANK`/`WORLD_SIZE`/`LOCAL_RANK` launcher environment it raises an
+explicit `RuntimeError` from `DistributedFDTD` and never silently switches to P2P
+or stages through host memory. Under `torchrun` the coordinator drives the NCCL
+transport directly: the runtime is split into a rank-local `ShardEngine`
+(`fdtd/distributed/shard_engine.py`) that each rank builds deterministically from
+the shared partition plan, and a coordinator that expresses every cross-rank
+operation through transport primitives, so the same coordinator time loop runs
+over both the in-process `CudaP2PHaloTransport` and the one-process-per-GPU
+`NcclHaloTransport` with no per-transport behavior branch. The NCCL transport
+(`fdtd/distributed/nccl_transport.py`) performs the forward electric/magnetic Yee
+x-plane halos via `torch.distributed.batch_isend_irecv` on the engine's compute
+stream, the transposed reverse-halo accumulations for the adjoint, a scalar
+all-reduce (`reduce_owned_energy`), a sized point-to-point field gather to rank 0
+(`gather_component_slabs`, using the deterministic partition layouts so rank 0
+needs no shape exchange), a cross-rank homogeneity check, and deterministic
+`destroy_process_group` teardown.
+
+An **end-to-end two-rank NCCL forward solve** is qualified: each rank builds its
+own `ShardEngine`, the coordinator runs the serialized time loop over the NCCL
+transport, and rank 0 gathers the global full-field DFT (`Ex/Ey/Ez`) and matches
+an independent single-GPU reference at the same tolerances as the in-process P2P
+leg (rtol 5e-5 / atol 5e-6). This is verified by a two-rank `torchrun`
+conformance worker (`tests/fdtd/multi_gpu/_nccl_forward_worker.py`), and a
+rank-death failure-matrix worker confirms a dead peer surfaces as a bounded
+nonzero exit rather than a hang. The NCCL forward path fails closed on monitors,
+coupled circuit/network/wire/port scenes, trainable density (adjoint), and field
+shutoff (each supported today only on `transport="cuda_p2p"`); NCCL monitor
+gather, NCCL adjoint, and multi-node execution remain deferred.
 
 The pre-existing single-process `transport="nccl"` guard (the `torchrun`
 `RuntimeError` raised from `DistributedFDTD`) is now pinned by explicit
@@ -252,7 +270,8 @@ must not be described as independently hardware-qualified.
 | Trainable scenes / adjoint (other channels) | Rejected before distributed allocation | Trainable geometry, material perturbation, circuit, RF/port, and embedded-network (residue/direct-term) parameters have no verified distributed reverse core; any absorbing (PML) boundary (CPML/stable-PML and the legacy graded-sigma `pml`/`absorber` absorbers), dispersive/conductive/nonlinear/anisotropic/modulated media, field shutoff, and tiled plane/flux/mode-seeded objectives are rejected at prepare before any distributed allocation. Absorbing-boundary-trainable and tiled-monitor seed scatter are the remaining follow-ups (S4/S5). |
 | NCCL transport primitive | Rank-local primitive implemented and conformance-tested | `fdtd/distributed/nccl_transport.py` provides the one-process-per-GPU (`torchrun`) transport surface: forward electric/magnetic Yee x-plane halos via `batch_isend_irecv`, transposed reverse-halo adjoint accumulations, a scalar all-reduce, an env/world-size/non-Linux failure matrix, an adopted-process-group world-size/rank/backend validation (accepting a composite `cuda:nccl` backend spec, failing closed otherwise), a cross-rank homogeneity check, and deterministic teardown with a vanished-group guard. A two-rank `torchrun` worker (`tests/fdtd/multi_gpu/test_nccl_transport.py`) asserts bitwise halo round-trips (including endpoint-ghost negative invariants, the matching-group adopt path, and the shared-group teardown contract) and adjoint accumulation. |
 | NCCL no-silent-fallback guard | Pre-existing guard, now pinned | The single-process `transport="nccl"` `torchrun` `RuntimeError` pre-dates this slice; it is now pinned by tests that assert it from both `DistributedFDTD` and the public `Simulation.prepare()` path, and that the in-process `CudaP2PHaloTransport` is never constructed as a fallback (P2P monkeypatched to fail if reached). |
-| End-to-end NCCL solve / multi-process / multi-node | Not landed | `transport="nccl"` still raises explicitly from the single-process `DistributedFDTD`; the rank-local shard-engine coordinator that would drive the NCCL transport across processes is the remaining Phase 8 work. Cross-node is out of scope. |
+| End-to-end NCCL forward solve (2 ranks) | Qualified for the standard forward field solve | Under `torchrun --nproc-per-node=2`, each rank builds its own `ShardEngine` and the coordinator runs the serialized time loop over `NcclHaloTransport`; rank 0 gathers the global full-field DFT via sized point-to-point and matches an independent single-GPU reference at rtol 5e-5 / atol 5e-6 (`tests/fdtd/multi_gpu/_nccl_forward_worker.py`). A rank-death test confirms bounded failure propagation. |
+| NCCL monitors / adjoint / coupled runtimes / shutoff / multi-node | Not landed | The NCCL forward path fails closed on per-monitor payload gather, trainable-density adjoint, coupled circuit/network/wire/port scenes, and field shutoff (each supported on `transport="cuda_p2p"`). Three/four-GPU and cross-node NCCL are out of scope. |
 | Three or four GPUs | Structurally representable by the partition and neighbor transport | Not qualified in the current hardware acceptance record; no validation claim is made here. |
 
 ## Fail-fast conditions
