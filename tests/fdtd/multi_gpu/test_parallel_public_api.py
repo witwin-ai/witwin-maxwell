@@ -105,21 +105,31 @@ def test_parallel_builds_distributed_solver_and_initializes(monkeypatch):
 
 
 @pytest.mark.parametrize("entrypoint", ["prepare", "run"])
-def test_trainable_parallel_is_rejected_before_solver_allocation(monkeypatch, entrypoint):
-    simulation = mw.Simulation.fdtd(
-        _scene(),
-        frequency=1.0e9,
-        parallel=_parallel(),
+def test_unsupported_trainable_parallel_channel_rejected_before_solver_allocation(
+    monkeypatch, entrypoint
+):
+    # A trainable structure geometry has no distributed reverse core, so the
+    # capability-scoped validator must reject it before the distributed solver is
+    # built. (Trainable Box densities are the one supported channel and are routed
+    # to the distributed adjoint bridge instead -- covered by the adjoint parity
+    # suite.)
+    scene = _scene()
+    scene.add_structure(
+        mw.Structure(
+            name="dielectric",
+            geometry=mw.Box(position=torch.zeros(3, requires_grad=True), size=(0.2, 0.2, 0.2)),
+            material=mw.Material(eps_r=3.0),
+        )
     )
-    simulation.has_trainable_parameters = True
-    monkeypatch.setattr(simulation, "_refresh_scene", lambda: None)
+    simulation = mw.Simulation.fdtd(scene, frequency=1.0e9, parallel=_parallel())
+    assert simulation.has_trainable_parameters
 
     def unexpected_allocation(*args, **kwargs):
         raise AssertionError("solver allocation must not be reached")
 
     monkeypatch.setattr(simulation, "_build_fdtd_solver", unexpected_allocation)
 
-    with pytest.raises(ValueError, match="does not support trainable"):
+    with pytest.raises(ValueError, match="trainable geometry"):
         getattr(simulation, entrypoint)()
 
 

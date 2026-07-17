@@ -45,48 +45,27 @@ def _dispersive_native_qualifies(solver, forward_state) -> bool:
     return _cuda_scene_native_qualifies(solver, forward_state)
 
 
-def _reverse_step_standard_native_core(
+def reverse_phase1_electric_to_h(
     solver,
     forward_state,
     adjoint_state,
     *,
-    time_value,
-    eps_ex,
-    eps_ey,
-    eps_ez,
-    resolved_source_terms,
-    magnetic_fields=None,
+    ex_curl,
+    ey_curl,
+    ez_curl,
 ):
-    """Fused native standard reverse math, without the source-term eps gradient.
+    """Phase 1 of the standard reverse step: electric adjoint -> mid-H adjoint.
 
-    Returns the ``_ReverseStepResult`` the analytic standard reference produces
-    *before* ``_accumulate_source_term_gradients`` runs. The public runner adds
-    that accumulation; the dispersive runner reuses this core as its base reverse
-    and defers the single source-term accumulation to the end of the full step.
+    The three fused ``_reverse_electric_h{x,y,z}_standard`` kernels *assign* into
+    freshly allocated mid-step H adjoint tensors (the ``magnetic_output_adjoint``).
+    Returned as a component dict so the distributed reverse loop can transpose the
+    magnetic halo (accumulate-into-owner, zero-ghost) between this phase and
+    :func:`reverse_phase2_magnetic_to_e`. On a single shard the three kernels are
+    independent, so launch order among them is not load-bearing here; the ordering
+    constraint is that all three complete before Phase 2 reads them.
     """
     import torch
 
-    from . import core as _adjoint
-    from .reverse_common import dynamic_electric_curls
-
-    # Mid-step H the forward electric update consumed (shared Torch replay).
-    if magnetic_fields is None:
-        magnetic_fields = _adjoint._forward_magnetic_fields(
-            solver,
-            forward_state,
-            time_value=time_value,
-            resolved_source_terms=resolved_source_terms,
-        )
-    hx_mid = magnetic_fields["Hx"]
-    hy_mid = magnetic_fields["Hy"]
-    hz_mid = magnetic_fields["Hz"]
-
-    # Dynamic electric curl coefficients (cast base curl by the eps leaf).
-    ex_curl, ey_curl, ez_curl = dynamic_electric_curls(
-        solver, eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez
-    )
-
-    # Phase 1: electric adjoint -> mid-H adjoint (the magnetic_output_adjoint).
     adj_hx_mid = torch.empty_like(forward_state["Hx"])
     adj_hy_mid = torch.empty_like(forward_state["Hy"])
     adj_hz_mid = torch.empty_like(forward_state["Hz"])
@@ -120,10 +99,36 @@ def _reverse_step_standard_native_core(
         invDx=solver.inv_dx_e,
         invDy=solver.inv_dy_e,
     )
+    return {"Hx": adj_hx_mid, "Hy": adj_hy_mid, "Hz": adj_hz_mid}
 
-    # Phase 2: magnetic adjoint -> pre-step E adjoint + eps gradient. Each kernel
-    # reconstructs its own curl(H) from the mid-H fields and assigns the complete
-    # pre-step E adjoint (electric decay pullback + magnetic forward-diff).
+
+def reverse_phase2_magnetic_to_e(
+    solver,
+    forward_state,
+    adjoint_state,
+    adj_h_mid,
+    *,
+    hx_mid,
+    hy_mid,
+    hz_mid,
+    ex_curl,
+    ey_curl,
+    ez_curl,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+):
+    """Phase 2 of the standard reverse step: magnetic adjoint -> pre-step E adjoint.
+
+    Each fused ``_reverse_magnetic_e{x,y,z}_standard`` kernel reconstructs its own
+    curl(H) from the mid-H fields and *assigns* the complete pre-step E adjoint
+    (electric decay pullback + magnetic forward-diff) plus the eps gradient. It
+    reads the mid-step H adjoints ``adj_h_mid`` produced by Phase 1 (and, on the
+    distributed path, refreshed by the transposed magnetic halo). Returns the
+    pre-step E adjoint component dict and the three eps-gradient tensors.
+    """
+    import torch
+
     adj_ex_prev = torch.empty_like(forward_state["Ex"])
     adj_ey_prev = torch.empty_like(forward_state["Ey"])
     adj_ez_prev = torch.empty_like(forward_state["Ez"])
@@ -134,8 +139,8 @@ def _reverse_step_standard_native_core(
         AdjExPrev=adj_ex_prev,
         GradEpsEx=grad_eps_ex,
         AdjExPost=adjoint_state["Ex"],
-        AdjHyMid=adj_hy_mid,
-        AdjHzMid=adj_hz_mid,
+        AdjHyMid=adj_h_mid["Hy"],
+        AdjHzMid=adj_h_mid["Hz"],
         ExDecay=solver.cex_decay,
         ExCurl=ex_curl,
         EpsEx=eps_ex,
@@ -156,8 +161,8 @@ def _reverse_step_standard_native_core(
         AdjEyPrev=adj_ey_prev,
         GradEpsEy=grad_eps_ey,
         AdjEyPost=adjoint_state["Ey"],
-        AdjHxMid=adj_hx_mid,
-        AdjHzMid=adj_hz_mid,
+        AdjHxMid=adj_h_mid["Hx"],
+        AdjHzMid=adj_h_mid["Hz"],
         EyDecay=solver.cey_decay,
         EyCurl=ey_curl,
         EpsEy=eps_ey,
@@ -178,8 +183,8 @@ def _reverse_step_standard_native_core(
         AdjEzPrev=adj_ez_prev,
         GradEpsEz=grad_eps_ez,
         AdjEzPost=adjoint_state["Ez"],
-        AdjHxMid=adj_hx_mid,
-        AdjHyMid=adj_hy_mid,
+        AdjHxMid=adj_h_mid["Hx"],
+        AdjHyMid=adj_h_mid["Hy"],
         EzDecay=solver.cez_decay,
         EzCurl=ez_curl,
         EpsEz=eps_ez,
@@ -196,35 +201,120 @@ def _reverse_step_standard_native_core(
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
     )
+    pre_step_electric = {
+        "Ex": adj_ex_prev,
+        "Ey": adj_ey_prev,
+        "Ez": adj_ez_prev,
+    }
+    return pre_step_electric, grad_eps_ex, grad_eps_ey, grad_eps_ez
 
-    # Phase 3: magnetic decay pullback -> pre-step H adjoint.
+
+def reverse_phase3_decay(solver, adj_h_mid, forward_state):
+    """Phase 3 of the standard reverse step: magnetic decay pullback -> pre-step H.
+
+    Reads the mid-step H adjoints (which must already be fully populated by
+    Phase 1 / the transposed magnetic halo) and *assigns* the pre-step H adjoint.
+    Returns the pre-step H adjoint component dict.
+    """
+    import torch
+
     adj_hx_prev = torch.empty_like(forward_state["Hx"])
     adj_hy_prev = torch.empty_like(forward_state["Hy"])
     adj_hz_prev = torch.empty_like(forward_state["Hz"])
     _cuda_backend._reverse_magnetic_hx_decay(
-        AdjHxPrev=adj_hx_prev, AdjHxMid=adj_hx_mid, HxDecay=solver.chx_decay
+        AdjHxPrev=adj_hx_prev, AdjHxMid=adj_h_mid["Hx"], HxDecay=solver.chx_decay
     )
     _cuda_backend._reverse_magnetic_hy_decay(
-        AdjHyPrev=adj_hy_prev, AdjHyMid=adj_hy_mid, HyDecay=solver.chy_decay
+        AdjHyPrev=adj_hy_prev, AdjHyMid=adj_h_mid["Hy"], HyDecay=solver.chy_decay
     )
     _cuda_backend._reverse_magnetic_hz_decay(
-        AdjHzPrev=adj_hz_prev, AdjHzMid=adj_hz_mid, HzDecay=solver.chz_decay
+        AdjHzPrev=adj_hz_prev, AdjHzMid=adj_h_mid["Hz"], HzDecay=solver.chz_decay
+    )
+    return {"Hx": adj_hx_prev, "Hy": adj_hy_prev, "Hz": adj_hz_prev}
+
+
+def _reverse_step_standard_native_core(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    magnetic_fields=None,
+):
+    """Fused native standard reverse math, without the source-term eps gradient.
+
+    Returns the ``_ReverseStepResult`` the analytic standard reference produces
+    *before* ``_accumulate_source_term_gradients`` runs. The public runner adds
+    that accumulation; the dispersive runner reuses this core as its base reverse
+    and defers the single source-term accumulation to the end of the full step.
+
+    The reverse math is factored into three phase helpers
+    (:func:`reverse_phase1_electric_to_h`, :func:`reverse_phase2_magnetic_to_e`,
+    :func:`reverse_phase3_decay`) so the distributed reverse loop can insert the
+    two transposed halo exchanges between them; the single-GPU sequence below is
+    bit-for-bit identical to the original inline launch order.
+    """
+    from . import core as _adjoint
+    from .reverse_common import dynamic_electric_curls
+
+    # Mid-step H the forward electric update consumed (shared Torch replay).
+    if magnetic_fields is None:
+        magnetic_fields = _adjoint._forward_magnetic_fields(
+            solver,
+            forward_state,
+            time_value=time_value,
+            resolved_source_terms=resolved_source_terms,
+        )
+    hx_mid = magnetic_fields["Hx"]
+    hy_mid = magnetic_fields["Hy"]
+    hz_mid = magnetic_fields["Hz"]
+
+    # Dynamic electric curl coefficients (cast base curl by the eps leaf).
+    ex_curl, ey_curl, ez_curl = dynamic_electric_curls(
+        solver, eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez
     )
 
+    # Phase 1: electric adjoint -> mid-H adjoint (the magnetic_output_adjoint).
+    adj_h_mid = reverse_phase1_electric_to_h(
+        solver,
+        forward_state,
+        adjoint_state,
+        ex_curl=ex_curl,
+        ey_curl=ey_curl,
+        ez_curl=ez_curl,
+    )
+
+    # Phase 2: magnetic adjoint -> pre-step E adjoint + eps gradient.
+    pre_step_electric, grad_eps_ex, grad_eps_ey, grad_eps_ez = reverse_phase2_magnetic_to_e(
+        solver,
+        forward_state,
+        adjoint_state,
+        adj_h_mid,
+        hx_mid=hx_mid,
+        hy_mid=hy_mid,
+        hz_mid=hz_mid,
+        ex_curl=ex_curl,
+        ey_curl=ey_curl,
+        ez_curl=ez_curl,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+
+    # Phase 3: magnetic decay pullback -> pre-step H adjoint.
+    pre_step_magnetic = reverse_phase3_decay(solver, adj_h_mid, forward_state)
+
     step_result = _adjoint._ReverseStepResult(
-        pre_step_adjoint={
-            "Ex": adj_ex_prev,
-            "Ey": adj_ey_prev,
-            "Ez": adj_ez_prev,
-            "Hx": adj_hx_prev,
-            "Hy": adj_hy_prev,
-            "Hz": adj_hz_prev,
-        },
+        pre_step_adjoint={**pre_step_electric, **pre_step_magnetic},
         grad_eps_ex=grad_eps_ex,
         grad_eps_ey=grad_eps_ey,
         grad_eps_ez=grad_eps_ez,
         backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.STANDARD],
-        magnetic_output_adjoint={"Hx": adj_hx_mid, "Hy": adj_hy_mid, "Hz": adj_hz_mid},
+        magnetic_output_adjoint=adj_h_mid,
     )
     return step_result
 

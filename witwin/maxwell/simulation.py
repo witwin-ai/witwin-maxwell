@@ -333,6 +333,83 @@ def _trainable_rf_parameters(
     )
 
 
+def _nonstandard_medium_reason(scene: Scene) -> str | None:
+    """Describe the first medium that leaves the pure real standard reverse class.
+
+    The distributed joint-solve adjoint has a verified reverse core only for the
+    real standard (open-boundary, non-dispersive, non-conductive, isotropic, linear,
+    static) update, so a scene carrying any richer medium is rejected before it
+    reaches the distributed bridge. Returns ``None`` when every material is standard.
+    """
+
+    for structure in getattr(scene, "structures", ()):
+        material = getattr(structure, "material", None)
+        if material is None:
+            continue
+        if getattr(material, "is_medium2d", False):
+            return f"structure {structure.name!r} uses a 2D sheet (Medium2D) material"
+        if getattr(material, "is_lossy_metal", False):
+            return f"structure {structure.name!r} uses a lossy-metal (SIBC) material"
+        if getattr(material, "is_electric_dispersive", False):
+            return f"structure {structure.name!r} uses electric dispersive (ADE) media"
+        if getattr(material, "is_magnetic_dispersive", False):
+            return f"structure {structure.name!r} uses magnetic dispersive (ADE) media"
+        if getattr(material, "is_nonlinear", False):
+            return f"structure {structure.name!r} uses nonlinear media"
+        if getattr(material, "is_anisotropic", False):
+            return f"structure {structure.name!r} uses anisotropic media"
+        if getattr(material, "is_modulated", False):
+            return f"structure {structure.name!r} uses time-modulated media"
+        sigma_e = getattr(material, "sigma_e", 0.0)
+        if sigma_e is not None and float(sigma_e) != 0.0:
+            return f"structure {structure.name!r} uses static-conductive media"
+        sigma_tensor = getattr(material, "sigma_e_tensor", None)
+        if sigma_tensor is not None and any(
+            float(component) != 0.0 for component in sigma_tensor.as_tuple()
+        ):
+            return f"structure {structure.name!r} uses static-conductive media"
+    return None
+
+
+def _tiled_monitor_objective_reason(scene: Scene) -> str | None:
+    """Describe the first monitor whose adjoint seed would need tiled scatter.
+
+    Baseline distributed seed routing supports point-monitor spectra (single owner)
+    and full-field DFT (owned x-slices). A plane / flux / mode / closed-surface /
+    diffraction monitor is stitched across shards in the forward, so its cotangent
+    would need the same owned-interval scatter -- the follow-up slice. Returns
+    ``None`` when every monitor is point/field-time/material (analytic).
+    """
+
+    from .monitors import (
+        ClosedSurfaceMonitor,
+        DiffractionMonitor,
+        FieldTimeMonitor,
+        FinitePlaneMonitor,
+        FluxMonitor,
+        FluxTimeMonitor,
+        ModeMonitor,
+        PlaneMonitor,
+        PointMonitor,
+    )
+
+    tiled = (
+        PlaneMonitor,
+        FinitePlaneMonitor,
+        ModeMonitor,
+        FluxMonitor,
+        FluxTimeMonitor,
+        ClosedSurfaceMonitor,
+        DiffractionMonitor,
+    )
+    for monitor in scene.resolved_monitors():
+        if isinstance(monitor, tiled):
+            return f"monitor {getattr(monitor, 'name', '?')!r} is a {type(monitor).__name__}"
+        if isinstance(monitor, FieldTimeMonitor) and monitor.region_kind != "point":
+            return f"FieldTimeMonitor {monitor.name!r} is a {monitor.region_kind} region"
+    return None
+
+
 def _require_cuda_scene(scene: Scene, *, method: str) -> None:
     device = torch.device(scene.device)
     if device.type != "cuda":
@@ -488,7 +565,23 @@ class Simulation:
         if self.method == SimulationMethod.FDFD:
             solver = self._build_fdfd_solver()
         elif self.method == SimulationMethod.FDTD:
-            self._reject_trainable_parallel_fdtd()
+            self._validate_trainable_parallel_fdtd()
+            if self.config.parallel is not None and self.has_trainable_parameters:
+                # Trainable multi-GPU FDTD runs through the distributed joint-solve
+                # adjoint bridge; build and init the distributed solver, then run the
+                # same medium/boundary/objective validators the bridge runs at run()
+                # so prepare() genuinely surfaces every fail-closed guard before the
+                # caller ever reaches run() (magnetic surface source terms, embedded
+                # circuit coupling, and non-point/tiled-monitor objectives included).
+                solver = self._build_fdtd_solver(initialize=True)
+                from .fdtd.distributed.adjoint import (
+                    require_distributed_adjoint_objective_support,
+                    require_distributed_adjoint_support,
+                )
+
+                require_distributed_adjoint_support(solver)
+                require_distributed_adjoint_objective_support(solver)
+                return PreparedSimulation(self, solver)
             solver = self._build_fdtd_solver(initialize=True)
             if self.has_trainable_parameters:
                 from .fdtd.adjoint.dispatch import validate_native_adjoint_preparation
@@ -802,7 +895,9 @@ class Simulation:
         )
 
     def _run_fdtd(self) -> Result:
-        self._reject_trainable_parallel_fdtd()
+        self._validate_trainable_parallel_fdtd()
+        if self.config.parallel is not None and self.has_trainable_parameters:
+            return self._run_distributed_fdtd_with_gradient_bridge()
         if self.port_sweep is not None:
             return self._run_fdtd_network_sweep()
         waveport_excitation = self._waveport_excitation()
@@ -925,11 +1020,83 @@ class Simulation:
     def _build_fdtd_solver(self, *, initialize: bool):
         return self._build_fdtd_solver_for_scene(self.scene, initialize=initialize)
 
-    def _reject_trainable_parallel_fdtd(self) -> None:
-        if self.config.parallel is not None and self.has_trainable_parameters:
+    def _validate_trainable_parallel_fdtd(self) -> None:
+        """Capability-scoped validation of a trainable multi-GPU FDTD run.
+
+        The distributed joint-solve adjoint bridge differentiates Box
+        material-region densities on the pure real standard path. Every other
+        trainable channel -- structure geometry, material perturbation tensors,
+        circuit parameters, and RF/port/excitation parameters -- has no verified
+        distributed reverse core, so a trainable+parallel scene carrying one is
+        rejected here at prepare/run before any distributed allocation. The
+        remaining medium/boundary/objective guards are enforced by the distributed
+        solver and the distributed adjoint bridge once the solver is built.
+        """
+
+        if self.config.parallel is None or not self.has_trainable_parameters:
+            return
+        unsupported = (
+            _scene_trainable_geometry_parameters(self.scene)
+            + _scene_trainable_material_parameters(self.scene)
+            + _scene_trainable_circuit_parameters(self.scene)
+            + _trainable_rf_parameters(
+                self.scene,
+                excitations=self.excitations,
+                port_sweep=self.port_sweep,
+            )
+        )
+        if self.excitations or self.port_sweep is not None:
             raise ValueError(
-                "Multi-GPU FDTD does not support trainable scene parameters; "
-                "use the single-GPU adjoint path by omitting parallel."
+                "Multi-GPU FDTD adjoint does not support RF port excitation or port "
+                "sweeps; the distributed reverse has no port/excitation channel yet."
+            )
+        if unsupported:
+            raise ValueError(
+                "Multi-GPU FDTD adjoint supports trainable Box material-region densities "
+                "only; trainable geometry, material perturbation, circuit, and RF/port "
+                "parameters have no distributed reverse core yet. Use the single-GPU "
+                "adjoint path by omitting parallel."
+            )
+        # Scene/config-static guards for the trainable distributed path, all raised
+        # here before the distributed solver allocates any shard. The pure real
+        # standard reverse is the only verified distributed adjoint core, so any
+        # absorbing boundary, a dispersive/conductive/nonlinear/anisotropic/modulated
+        # medium, field shutoff, multi-source normalization, or a tiled-monitor
+        # objective is rejected up front rather than after a full forward.
+        #
+        # The absorber only activates when the boundary declares a PML kind
+        # (fdtd/boundary/runtime.py sets active_absorber_type from absorber_type only
+        # then); the verified adjoint envelope is the open-boundary update, whose
+        # parity/FD gates run exclusively on non-PML boundaries. Reject every absorber
+        # family here -- "cpml"/"stablepml" and the legacy graded-sigma "pml"/
+        # "absorber" alike -- rather than only the "cpml" string, so no unverified
+        # absorber slips through to run a distributed reverse outside the envelope.
+        if self.scene.boundary.uses_kind("pml"):
+            raise ValueError(
+                "Multi-GPU FDTD adjoint does not support absorbing (PML) boundaries "
+                f"yet (absorber={str(self.config.absorber).lower()!r}); the distributed "
+                "absorbing reverse core is not verified. Use open/PEC boundaries for "
+                "the trainable distributed path."
+            )
+        medium_reason = _nonstandard_medium_reason(self.scene)
+        if medium_reason is not None:
+            raise ValueError(
+                f"Multi-GPU FDTD adjoint supports the pure real standard medium only; {medium_reason}."
+            )
+        if float(getattr(self.config, "shutoff", 0.0)) > 0.0:
+            raise ValueError(
+                "Multi-GPU FDTD adjoint does not support field shutoff (shutoff>0) on "
+                "trainable runs; the reverse pass replays a fixed step count."
+            )
+        if self.config.spectral_sampler.normalize_source and len(self.scene.sources) != 1:
+            raise ValueError(
+                "Multi-GPU FDTD adjoint source normalization requires exactly one logical source."
+            )
+        tiled_reason = _tiled_monitor_objective_reason(self.scene)
+        if tiled_reason is not None:
+            raise ValueError(
+                "Multi-GPU FDTD adjoint objectives support point-monitor spectra and "
+                f"full-field DFT only; {tiled_reason}."
             )
 
     def _build_fdtd_solver_for_scene(
@@ -1250,6 +1417,11 @@ class Simulation:
         from .fdtd.adjoint import run_fdtd_with_gradient_bridge
 
         return run_fdtd_with_gradient_bridge(self)
+
+    def _run_distributed_fdtd_with_gradient_bridge(self) -> Result:
+        from .fdtd.distributed.adjoint import run_distributed_fdtd_with_gradient_bridge
+
+        return run_distributed_fdtd_with_gradient_bridge(self)
 
 
 class PreparedNetworkSweep:

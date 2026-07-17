@@ -205,7 +205,8 @@ must not be described as independently hardware-qualified.
 | Auto shutoff | Global owned-electric-energy reduction on `result_device` | `steps_run`, halo totals, and normalization reflect early termination. |
 | CUDA Graph | Rejected | Peer communication is not graph captured. |
 | Plotting | Rejected during solve | Run with `gather_fields=True`, then consume the gathered result explicitly. |
-| Trainable scenes / adjoint | Rejected before distributed allocation | The existing differentiable path remains single GPU. Circuit history tensors and embedded-network state each have one live owner, but full field-shard checkpoint replay and multi-GPU backward (including trainable embedded-network residues/direct) remain deferred and rejected. |
+| Trainable scenes / adjoint (Box density, standard path) | Accepted with A6000 parity | A trainable `Box` `MaterialRegion` density on the pure real standard (open/PEC boundary) path routes through the distributed joint-solve adjoint bridge: per-shard forward checkpoints, a transposed reverse step per forward step (Phase 1 → transposed magnetic halo → Phase 2 → transposed electric halo → Phase 3 → per-shard source-term eps grad), and a global grad_eps gather feeding the existing single-GPU material pullback once. Two-GPU acceptance: 1-vs-2-GPU objective parity (bit-identical forward) and gradient parity (rtol 1e-4, atol tied to grad magnitude); central finite differences (~1e-5 relative) on density texels on the x-split and interior to each shard, with the source and point-monitor objective on the interface node; 1-vs-2-GPU full-field-DFT objective gradient parity (right-half `EZ` power loss isolating the non-result shard's cotangent scatter leg); a checkpoint-capture ordering contract (every mid-loop capture preceded by a stream sync); and bitwise-reproducible gathered grad_eps. Point-monitor spectra and full-field DFT objectives only. |
+| Trainable scenes / adjoint (other channels) | Rejected before distributed allocation | Trainable geometry, material perturbation, circuit, RF/port, and embedded-network (residue/direct-term) parameters have no verified distributed reverse core; any absorbing (PML) boundary (CPML/stable-PML and the legacy graded-sigma `pml`/`absorber` absorbers), dispersive/conductive/nonlinear/anisotropic/modulated media, field shutoff, and tiled plane/flux/mode-seeded objectives are rejected at prepare before any distributed allocation. Absorbing-boundary-trainable and tiled-monitor seed scatter are the remaining follow-ups (S4/S5). |
 | NCCL / multi-process / multi-node | Reserved, not implemented | `transport="nccl"` raises explicitly. |
 | Three or four GPUs | Structurally representable by the partition and neighbor transport | Not qualified in the current hardware acceptance record; no validation claim is made here. |
 
@@ -221,8 +222,14 @@ following cases rather than silently changing the physics or execution model:
   `result_device` and a shard;
 - too few physical x cells for the shard count/halo, or insufficient device memory
   for local DFT state or an explicitly requested gather;
-- trainable scene parameters, `MaterialRegion` density designs, nonlinear media,
-  full off-diagonal electric anisotropy, or lossy-metal/SIBC ownership;
+- trainable geometry, material-perturbation, circuit, or RF/port parameters (a
+  trainable `Box` `MaterialRegion` density on the standard path is accepted and
+  routed to the distributed adjoint bridge; a non-Box density region still fails);
+- for a trainable distributed run: any absorbing (PML) boundary (CPML/stable-PML or
+  the legacy graded-sigma `pml`/`absorber` absorbers), dispersive/conductive/nonlinear/
+  anisotropic/modulated media, field shutoff, or a tiled plane/flux/mode-seeded
+  objective (point-monitor and full-field-DFT objectives only);
+- nonlinear media, full off-diagonal electric anisotropy, or lossy-metal/SIBC ownership;
 - Bloch boundaries, periodic x, or x-axis symmetry;
 - mode ports, unbound lumped/terminal ports, one bound port whose voltage edges
   cross an x-slab split, unsupported source classes, non-ideal point-dipole
@@ -394,8 +401,13 @@ does not qualify either case. Nsight Systems and Nsight Compute were not availab
 the host; the benchmark therefore supplies no profiler trace or per-kernel roofline
 claim.
 
-This remains an engineering preview. The measurements and tests above do not qualify
-NCCL, multi-process or multi-node execution, distributed adjoint/checkpoint replay,
+This remains an engineering preview. The distributed joint-solve adjoint is qualified
+only for a trainable `Box` `MaterialRegion` density on the pure real standard path with
+point-monitor/full-field-DFT objectives (1-vs-2-GPU objective/gradient parity and
+interface finite differences; timing/speedup of the reverse pass is not measured here).
+The measurements and tests above do not qualify
+NCCL, multi-process or multi-node execution, distributed CPML-trainable adjoint or
+tiled-monitor adjoint seed scatter,
 peer-aware CUDA Graph capture, advanced plane/beam/mode/TFSF sources, ports, x-periodic
 or Bloch decomposition, x symmetry, nonlinear media, full off-diagonal media, SIBC, or
 any other guarded feature.
