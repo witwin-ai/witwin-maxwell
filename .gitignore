@@ -235,3 +235,5 @@ __marimo__/
 docs/
 assets/
 benchmark/
+experiments/
+.worktrees/
