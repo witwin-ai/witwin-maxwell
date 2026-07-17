@@ -183,7 +183,7 @@ must not be described as independently hardware-qualified.
 | Nonlinearity | Rejected | Additional collocation halos and bounded nonlinear kernels are required. |
 | Absorbers and boundaries | Global-face CPML/PML/StablePML/absorber behavior and mixed `none`/PEC/PMC/Mur; y/z periodic and y/z symmetry are accepted | XYZ CPML plus dielectric, mixed PEC/PMC/Mur, y periodic, and y symmetry have two-GPU parity coverage. x periodic, all Bloch, and x symmetry fail fast. |
 | Sources | `PointDipole(profile="ideal")` and `UniformCurrentSource` | Point sources on/near interfaces and a current volume crossing the interface have A6000 parity coverage. Plane-wave/TFSF, beam, mode, and other surface sources fail fast. |
-| Circuit co-simulation | One linear circuit with one or more bound `LumpedPort`/`TerminalPort` objects; GPU-native owner MNA and P2P scalar exchange | Each individual port must be wholly owned by one x slab. Multiple ports may reside on different shards. Communication is two scalars per remote bound port per step, and no external circuit process is used. The physical two-GPU parity gate is present but has not been run on the current one-GPU development host. |
+| Circuit co-simulation | One linear circuit with one or more bound `LumpedPort`/`TerminalPort` objects; GPU-native owner MNA and P2P scalar exchange | Each individual port must be wholly owned by one x slab. Multiple ports may reside on different shards. Communication is two scalars per remote bound port per step, and no external circuit process is used. The physical two-GPU parity gate passes on 2x RTX A6000 with exact (bitwise, 0.000e+00) single-versus-two-GPU parity on all six fields, port V/I, and circuit node/branch data. |
 | Monitors | Point spectral monitor, point `FieldTimeMonitor`, a valid `DipoleEmissionMonitor`, and spectral `PlaneMonitor`/`FinitePlaneMonitor`/`FluxMonitor`/`ModeMonitor` | y/z-normal planes are tiled across x and stitched from owned component intervals on `result_device`; x-normal planes have exactly one shard owner. Five Plane/Flux/Mode A6000 numerical cases observed exact single/two-GPU parity. Closed-surface, diffraction, flux-time, non-point field-time, and material monitors remain rejected. |
 | Spectral output | One or many requested frequencies; supported point/plane monitor assembly; optional gathered electric fields | Multiple frequencies preserve frequency metadata and leading frequency dimension. |
 | Persistence | Gathered `save`/`load` and distributed `save_sharded`/`load_sharded` | Lazy sharded load leaves `fields` empty and rank tensors unopened; explicit gather validates and stitches owned intervals. Persistence does not restore live solver/transport state. |
@@ -306,10 +306,13 @@ python -m pytest \
 ```
 
 The gate requires two homogeneous GPUs with bidirectional CUDA peer access and uses
-`rtol=2e-5` for field/circuit parity. On the one-GPU development host used for this
-phase, the same file reports `6 passed, 1 skipped`; the skipped item is exactly this
-physical two-GPU gate. This is a recorded hardware requirement, not a two-GPU
-qualification claim.
+`rtol=2e-5` for field/circuit parity. It skips whenever the run sees fewer than two
+peer-accessible devices, in which case the file reports `6 passed, 1 skipped` and the
+skipped item is exactly this gate. On 2x RTX A6000 with both devices visible the file
+reports `7 passed`, and this gate passes by an exact (bitwise, 0.000e+00) margin on all
+six fields, both bound-port voltages/currents, and the circuit node/branch series. The
+full deviation table and the scalar-transfer contract are recorded in
+`docs/assessments/spice-mna-phase-4-acceptance.md`.
 
 ### Clean-build test record
 

@@ -190,27 +190,15 @@ def test_result_v2_round_trip_embeds_circuit_data(tmp_path):
     assert data.node_voltages.requires_grad
 
 
-def test_result_v1_without_circuits_remains_loadable(tmp_path):
-    path = tmp_path / "result-v1.pt"
-    _result().save(path)
-    payload = torch.load(path, weights_only=True)
-    payload["schema_version"] = 1
-    payload.pop("circuits")
-    torch.save(payload, path)
-
-    loaded = mw.Result.load(path, scene=mw.Scene(device="cpu"))
-
-    assert loaded.circuits == {}
-
-
-def test_result_rejects_v1_circuits_and_v2_without_circuits(tmp_path):
+def test_result_rejects_superseded_v1_and_v2_without_circuits(tmp_path):
     path = tmp_path / "result.pt"
     _result(circuits={"network": _data()}).save(path)
     payload = torch.load(path, weights_only=True)
 
+    # v1 is superseded, not supported alongside v2: there is no backward-support path.
     payload["schema_version"] = 1
     torch.save(payload, path)
-    with pytest.raises(ValueError, match="schema v1 cannot contain circuit data"):
+    with pytest.raises(ValueError, match="Unsupported result checkpoint schema_version=1"):
         mw.Result.load(path, scene=mw.Scene(device="cpu"))
 
     payload["schema_version"] = 2

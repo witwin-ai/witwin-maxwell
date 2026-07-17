@@ -152,6 +152,17 @@ def test_fixed_builtin_schedules_use_circuit_graph_and_match_eager(scheduled_swi
             rtol=0.0,
             atol=0.0,
         )
+    # Port phasors depend on the per-step integration tag, which a graph replay
+    # cannot re-assign from inside the captured region. A mixed
+    # backward-Euler/trapezoidal schedule must still observe identical spectra.
+    assert set(eager.solver._circuit_runtimes[0].integration_keys) == {
+        "backward_euler",
+        "trapezoidal",
+    }
+    eager_port = eager.port("feed")
+    graph_port = graphed.port("feed")
+    torch.testing.assert_close(graph_port.voltage, eager_port.voltage, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(graph_port.current, eager_port.current, rtol=0.0, atol=0.0)
 
 
 def test_purely_reactive_bound_circuit_has_a_zero_nonreactive_reduction():

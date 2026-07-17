@@ -53,8 +53,6 @@ def _stamp_norton(
 
 @dataclass
 class CircuitPortRuntime:
-    circuit_name: str
-    integration: str
     binding: object
     solver: object
     field_name: str
@@ -953,8 +951,6 @@ def prepare_circuit_runtimes(
                     yee_control_volume=port_runtime.yee_control_volume,
                 )
             port = CircuitPortRuntime(
-                circuit_name=circuit.name,
-                integration=circuit.config.integration,
                 binding=binding,
                 solver=solver,
                 field_name=port_runtime.field_name,
@@ -1142,6 +1138,13 @@ def apply_circuit_runtimes(solver) -> None:
                 runtime.switch_keys[runtime.step_index],
             )
             replay_map[factor_key]()
+            # A graph replay re-executes device work only; the host-side
+            # assignment inside _apply_step does not run. Advance the observer's
+            # integration tag here from the same precomputed schedule, or the
+            # port DFT would keep the last captured factor class and sample
+            # backward-Euler steps at the trapezoidal time.
+            for port in runtime.ports:
+                port.last_integration = factor_key[0]
             runtime.step_index += 1
         return
     for runtime in runtimes:

@@ -95,10 +95,10 @@ result.save("matching-result.pt")
 restored_result = mw.Result.load("matching-result.pt", scene=scene)
 ```
 
-`CircuitData` uses schema v1. New `Result` files use schema v2 and include all
-circuit payloads; circuit-free Result v1 files remain readable. Sharded Result
-storage writes circuit data once in coordinator metadata rather than duplicating
-it in rank field shards. Loaded tensors are detached and no solver, Scene,
+`CircuitData` uses schema v1. `Result` files use schema v2 and always include a
+`circuits` payload; the superseded v1 layout is rejected rather than carried as a
+backward-support path. Sharded Result storage writes circuit data once in
+coordinator metadata rather than duplicating it in rank field shards. Loaded tensors are detached and no solver, Scene,
 autograd graph, or companion history is reconstructed.
 
 ## Differentiable coupled execution

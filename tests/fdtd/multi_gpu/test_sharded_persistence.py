@@ -232,7 +232,7 @@ def test_sharded_v2_stores_circuits_once_in_result_metadata(tmp_path):
     )
 
 
-def test_sharded_v1_without_circuits_loads_but_rejects_nonempty_circuits(tmp_path):
+def test_sharded_rejects_superseded_v1_and_v2_without_circuits(tmp_path):
     fields = _global_fields()
     directory = tmp_path / "sharded-v1"
     _result(
@@ -241,16 +241,21 @@ def test_sharded_v1_without_circuits_loads_but_rejects_nonempty_circuits(tmp_pat
     ).save_sharded(directory)
     result_path = directory / "result.pt"
     payload = torch.load(result_path, weights_only=True)
+
+    # v1 is superseded, not supported alongside v2: there is no backward-support path.
     payload["schema_version"] = 1
     torch.save(payload, result_path)
-
-    with pytest.raises(ValueError, match="schema v1 cannot contain circuit data"):
+    with pytest.raises(
+        ValueError,
+        match="Unsupported sharded result metadata schema_version=1",
+    ):
         Result.load_sharded(directory, scene=_scene())
 
+    payload["schema_version"] = 2
     payload.pop("circuits")
     torch.save(payload, result_path)
-    loaded = Result.load_sharded(directory, scene=_scene())
-    assert loaded.circuits == {}
+    with pytest.raises(ValueError, match="schema v2 is missing required key: circuits"):
+        Result.load_sharded(directory, scene=_scene())
 
 
 def test_save_sharded_prevalidates_circuits_before_calling_exporter(tmp_path):

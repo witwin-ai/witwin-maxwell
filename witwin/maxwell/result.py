@@ -188,21 +188,17 @@ def _validate_result_snapshot_payload(
     payload: Mapping[str, Any],
     *,
     sharded: bool,
-) -> int:
+) -> None:
     label = "Sharded Result metadata" if sharded else "Result checkpoint"
     if payload.get("data_type") != "ResultSnapshot":
         raise ValueError(f"{label} has an invalid data_type.")
     version = payload.get("schema_version")
-    if version not in (1, RESULT_SNAPSHOT_SCHEMA_VERSION):
+    if version != RESULT_SNAPSHOT_SCHEMA_VERSION:
         raise ValueError(f"Unsupported {label.lower()} schema_version={version!r}.")
-    if version == RESULT_SNAPSHOT_SCHEMA_VERSION and "circuits" not in payload:
+    if "circuits" not in payload:
         raise ValueError(f"{label} schema v2 is missing required key: circuits.")
-    circuits = payload.get("circuits", {})
-    if not isinstance(circuits, Mapping):
+    if not isinstance(payload["circuits"], Mapping):
         raise ValueError(f"{label} circuits must contain a mapping payload.")
-    if version == 1 and circuits:
-        raise ValueError(f"{label} schema v1 cannot contain circuit data.")
-    return int(version)
 
 
 def _resolve_result_frequencies(*, frequency: float | None, frequencies) -> tuple[float, ...]:
@@ -1397,7 +1393,7 @@ class Result:
         )
         if not isinstance(payload, dict):
             raise ValueError("Result checkpoint must contain a mapping payload.")
-        version = _validate_result_snapshot_payload(payload, sharded=False)
+        _validate_result_snapshot_payload(payload, sharded=False)
         missing = {"method", "fields", "monitors"}.difference(payload)
         if missing:
             names = ", ".join(sorted(missing))
@@ -1415,14 +1411,10 @@ class Result:
                 name: _port_data_from_snapshot(data)
                 for name, data in payload.get("ports", {}).items()
             },
-            circuits=(
-                {
-                    name: _circuit_data_from_snapshot(data)
-                    for name, data in payload["circuits"].items()
-                }
-                if version == RESULT_SNAPSHOT_SCHEMA_VERSION
-                else {}
-            ),
+            circuits={
+                name: _circuit_data_from_snapshot(data)
+                for name, data in payload["circuits"].items()
+            },
             network=_network_data_from_snapshot(payload.get("network")),
             metadata=payload.get("metadata"),
             solver_stats=payload.get("solver_stats"),
@@ -1450,7 +1442,7 @@ class Result:
             map_location=map_location,
         )
         payload = loaded.result_payload
-        version = _validate_result_snapshot_payload(payload, sharded=True)
+        _validate_result_snapshot_payload(payload, sharded=True)
         missing = {"method", "monitors"}.difference(payload)
         if missing:
             names = ", ".join(sorted(missing))
@@ -1467,14 +1459,10 @@ class Result:
                 name: _port_data_from_snapshot(data)
                 for name, data in payload.get("ports", {}).items()
             },
-            circuits=(
-                {
-                    name: _circuit_data_from_snapshot(data)
-                    for name, data in payload["circuits"].items()
-                }
-                if version == RESULT_SNAPSHOT_SCHEMA_VERSION
-                else {}
-            ),
+            circuits={
+                name: _circuit_data_from_snapshot(data)
+                for name, data in payload["circuits"].items()
+            },
             network=_network_data_from_snapshot(payload.get("network")),
             metadata=payload.get("metadata"),
             solver_stats=payload.get("solver_stats"),

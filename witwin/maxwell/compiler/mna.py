@@ -321,7 +321,7 @@ class LinearMNASystem:
                 values[device.name] = self._value(constant, device.name)
         return values
 
-    def _stamp_static_device(self, matrix, rhs, device, source_value, *, dc: bool):
+    def _stamp_static_device(self, matrix, rhs, device, source_value):
         graph = self.graph
         if isinstance(device, Resistor):
             _stamp_conductance(
@@ -394,7 +394,7 @@ class LinearMNASystem:
                 if isinstance(device, TimedSwitch)
                 else source_values.get(device.name)
             )
-            self._stamp_static_device(matrix, rhs, device, value, dc=True)
+            self._stamp_static_device(matrix, rhs, device, value)
         return matrix, rhs
 
     def _switch_resistance(self, device: TimedSwitch, time: torch.Tensor):
@@ -486,7 +486,7 @@ class LinearMNASystem:
             else:
                 value = None
             if stamp_matrix:
-                self._stamp_static_device(matrix, rhs, device, value, dc=False)
+                self._stamp_static_device(matrix, rhs, device, value)
             elif isinstance(device, VoltageSource):
                 _add_rhs(rhs, _branch_unknown(self.graph, device.name), value)
             elif isinstance(device, CurrentSource):

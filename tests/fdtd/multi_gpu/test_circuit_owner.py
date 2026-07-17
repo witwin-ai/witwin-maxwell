@@ -128,9 +128,18 @@ def _port(name: str, x: float) -> mw.LumpedPort:
         positive=(x, 0.0, 0.004),
         negative=(x, 0.0, -0.004),
         voltage_path=mw.AxisPath("z"),
+        # The port current is an Ampere loop of the tangential H field (Hx, Hy for
+        # this z-normal surface). On the Yee grid Hx lives at (x, y_half, z_half) and
+        # Hy at (x_half, y, z_half): both exist ONLY on z half-integer planes, and the
+        # enclosed Ez sample lives at z_half as well. A surface placed on the primal
+        # plane z=0.0 encircles no Hx/Hy samples, so scene.compile_ports() rejects it
+        # with "z half-grid plane=0.0 must lie on the Yee z half-grid plane grid".
+        # z=-0.002 = -0.5*dz places the loop on a valid dual (half-integer) plane, and
+        # the 0.012 tangential extent keeps the loop bounds off the primal nodes at the
+        # x=-0.008 terminal. See docs/assessments/spice-mna-phase-4-acceptance.md.
         current_surface=mw.Box(
-            position=(x, 0.0, 0.0),
-            size=(0.008, 0.008, 0.0),
+            position=(x, 0.0, -0.002),
+            size=(0.012, 0.012, 0.0),
         ),
         reference_impedance=50.0,
     )

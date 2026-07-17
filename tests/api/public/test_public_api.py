@@ -381,6 +381,8 @@ def test_simulation_fdtd_wraps_solver(monkeypatch):
             shutoff=0.0,
             shutoff_check_interval=100,
             use_cuda_graph=False,
+            resume_from=None,
+            stop_step=None,
         ):
             self.ex = torch.ones((3, 4, 4), dtype=torch.complex64)
             self.ey = torch.ones((4, 3, 4), dtype=torch.complex64) * 2.0
@@ -465,6 +467,8 @@ def test_simulation_fdtd_multi_frequency_wraps_solver(monkeypatch):
             shutoff=0.0,
             shutoff_check_interval=100,
             use_cuda_graph=False,
+            resume_from=None,
+            stop_step=None,
         ):
             self.ex = torch.stack(
                 (
