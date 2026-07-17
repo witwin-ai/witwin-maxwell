@@ -138,5 +138,46 @@
   },
   "scope_notes": "The series SeriesRLC lumped/termination path is the target and shows the full reduction. The embedded network path was already allocation-free (pre-existing GPU observer graph). The circuit-bound (MNA companion) path is a separate module (fdtd/circuits.py), unchanged here; it is now the heaviest per-step port path and is the recommended next target.",
   "title": "Port/lumped FDTD per-step hot-path op inventory (before/after)",
-  "torch_version": "2.13.0+cu130"
+  "torch_version": "2.13.0+cu130",
+  "slice2_circuit_hotpath": {
+    "branch": "codex/circuit-hotpath-slice2",
+    "deferred": "A measurable reduction of the DEFAULT eager path requires generalizing the vectorized rc_fast_plan (pure-RC) to R-L-C-(M) topologies across trapezoidal / backward-Euler / TimedSwitch factor classes while preserving bitwise parity with the generic device path and the adjoint replay -- a dedicated, numerically-sensitive slice. Reducing the graph path's residual 25 DtoD/step (state copy-back + 6 sample index_copy_) needs ping-pong state buffers to avoid the _update_state->_copy_state_ double-write, also a broader refactor. Auto-enabling cuda_graph for graph_eligible circuits would move the default onto the 8-launch path but is a user-visible default change touching memory/adjoint/multi-GPU and is out of scope here.",
+    "delivered": "Falsification-checked op-count contract test tests/rf/circuits/test_circuit_hot_path_op_count.py locks in both the eager per-step budget (<=160 launch, <=24 alloc, <=40 DtoD, 0 sync, 0 hostside per step) and the fixed-schedule graph reduction (graph active, <=12 launch, 0 alloc, <=32 DtoD per step). Falsification: disabling graph capture drops to the eager schedule and the graph-active guard fires red; tightening the eager launch ceiling below 133/step fails the eager test. Both verified red then restored.",
+    "device": "NVIDIA RTX A6000",
+    "findings": "The fixed-schedule CUDA-graph runner (prepare_circuit_graph_runners, landed in a prior slice) already collapses the circuit-bound step from 133->8 launches and 18->0 allocs/step and covers the FULL _apply_step device schedule for graph-eligible circuits. However cuda_graph defaults to False in Simulation.fdtd, so the DEFAULT production path is the 133-launch eager schedule. The eager cost is intrinsic to generic per-topology companion-MNA assembly (assemble_transient) + per-device Python-loop power/current readout with torch.stack over scalar tensors; it is already free of per-step host<->device transfers and scalar syncs (0/0). A tried node_row cat->preallocated-buffer micro-opt was BITWISE-verified safe but produced ZERO measurable op-count change (identical 366/133/31/18 with and without it under a git-stash A/B), so it was reverted rather than add hot-path churn without benefit.",
+    "gates": "eager/graph bitwise (test_phase4_circuit_cuda_graph), full rf/circuits + rf/network parity, circuit adjoint bridge, multi-GPU circuit owner, and a fixed-scene circuit+network physics capture that is bitwise-identical to the pre-change base.",
+    "generated": "2026-07-17",
+    "measurement": "Deterministic host/device op tallies via torch.profiler over 16 measured steps after 8 warmup steps; per-step values shown. Counts only, NO timing. Path = apply_port_runtimes + accumulate_port_observers for one circuit-bound port (R1-L1-C1-C2 ladder via companion MNA) and one embedded state-space network port. Harness: scratch profile_circuit.py (RLC ladder + StateSpaceNetwork scenes).",
+    "scenarios": {
+      "circuit_bound_port_eager": {
+        "allocs_per_step": 18.0,
+        "aten_ops_per_step": 366.0,
+        "cuda_launch_per_step": 133.0,
+        "description": "cuda_graph=False (the DEFAULT production path): generic transient MNA assemble + per-device readout",
+        "memcpy_dtod_per_step": 31.0,
+        "memcpy_hostside_per_step": 0.0,
+        "scalar_sync_per_step": 0.0
+      },
+      "circuit_bound_port_graph": {
+        "allocs_per_step": 0.0,
+        "aten_ops_per_step": 12.0,
+        "circuit_graph_active": true,
+        "cuda_launch_per_step": 8.0,
+        "description": "cuda_graph=True: fixed-schedule CUDA-graph replay of the full _apply_step (graph_eligible ladder)",
+        "memcpy_dtod_per_step": 25.0,
+        "memcpy_hostside_per_step": 0.0,
+        "scalar_sync_per_step": 0.0
+      },
+      "network_bound_port": {
+        "allocs_per_step": 0.0,
+        "aten_ops_per_step": 74.0,
+        "cuda_launch_per_step": 36.0,
+        "description": "apply_port_runtimes + apply_network_runtimes + accumulate_port_observers, one embedded state-space network port",
+        "memcpy_dtod_per_step": 4.0,
+        "memcpy_hostside_per_step": 0.0,
+        "scalar_sync_per_step": 0.0
+      }
+    },
+    "torch_version": "2.13.0+cu130"
+  }
 }
