@@ -154,6 +154,29 @@ class EMCircuitRuntime:
         torch.sum(port.field.edge_buffer, dim=0, out=port.field.last_voltage_before)
         return port.field.last_voltage_before
 
+    def _coupling_voltage(
+        self, port: CircuitPortRuntime, integration: str
+    ) -> torch.Tensor:
+        """Trapezoidal half-step port voltage fed into the field-port Norton source.
+
+        Coordinator unification ruling (slice U1): the trapezoidal interface couples
+        through 0.5*(V_after_prev + V_free), matching the native lumped runtime's
+        averaged constitutive relation so cross-model agreement holds at the unified
+        convention. The result is staged in a persistent scalar buffer so the
+        CUDA-graph capture keeps a stable pointer. Backward-Euler steps keep the
+        end-of-step V_free voltage, consistent with their full-step companion
+        impedance. ``last_voltage_before`` stays the raw free voltage for the
+        post-step recurrence and the field-side energy audit.
+        """
+        field = port.field
+        if integration == "trapezoidal":
+            field.coupling_voltage.copy_(field.last_voltage_after)
+            field.coupling_voltage.add_(field.last_voltage_before)
+            field.coupling_voltage.mul_(0.5)
+        else:
+            field.coupling_voltage.copy_(field.last_voltage_before)
+        return field.coupling_voltage
+
     def _apply_field_current(
         self,
         port: CircuitPortRuntime,
@@ -182,12 +205,13 @@ class EMCircuitRuntime:
         port.field.last_port_work.copy_(voltage)
         port.field.last_port_work.mul_(current)
         port.field.last_port_work.mul_(port.field.dt)
-        port.field.last_field_energy_change.copy_(port.field.last_voltage_before)
-        port.field.last_field_energy_change.addcmul_(
-            port.field.coupling_impedance,
-            current,
-            value=-0.5,
-        )
+        # Slice U1 (coordinator ruling): the field/port power audit uses the shared
+        # exchange voltage -- the port terminal midpoint ``voltage`` = coupling_voltage
+        # - Z_d I at which current I flows across the port -- so the field-energy
+        # change equals minus the port work exactly under the unified trapezoidal
+        # interface. (Pre-unification both sides shared V_free, so this reduced to the
+        # V_free midpoint; the terminal voltage is the convention-independent statement.)
+        port.field.last_field_energy_change.copy_(voltage)
         port.field.last_field_energy_change.mul_(current)
         port.field.last_field_energy_change.mul_(port.field.dt)
         port.field.last_field_energy_change.neg_()
@@ -564,11 +588,20 @@ class EMCircuitRuntime:
         time = self.sample_times[index + 1]
         source_index = self.step_tensor if device_indexed_samples else index
         if free_voltages is None:
-            free_voltages = tuple(self._sample_field_voltage(port) for port in self.ports)
+            for port in self.ports:
+                self._sample_field_voltage(port)
         else:
             for port, value in zip(self.ports, free_voltages):
                 port.field.last_voltage_before.copy_(value)
-            free_voltages = tuple(port.field.last_voltage_before for port in self.ports)
+        # Slice U1 (coordinator unification ruling): couple the field port through
+        # the trapezoidal half-step averaged voltage 0.5*(V_after_prev + V_free),
+        # the same interface the native lumped runtime uses, re-establishing exact
+        # cross-model agreement at the unified (unconditionally stable) convention.
+        # The raw ``last_voltage_before`` is preserved for the post-step recurrence
+        # and the field-side energy audit.
+        free_voltages = tuple(
+            self._coupling_voltage(port, integration) for port in self.ports
+        )
         if self.rc_fast_plan is not None:
             return self._apply_rc_step(
                 index,
@@ -772,6 +805,11 @@ class EMCircuitRuntime:
             tensors[f"capacitor_current_{name}"] = value
         tensors["inductor_current"] = self.state.inductor_current
         tensors["inductor_voltage"] = self.state.inductor_voltage
+        # Slice U1: the trapezoidal field-port interface reads the previous step's
+        # post-step port voltage, so it is carried scalar state that resume must
+        # restore for a bit-exact continuation.
+        for index, port in enumerate(self.ports):
+            tensors[f"port_{index}_last_voltage_after"] = port.field.last_voltage_after
         return tensors
 
     def finalize(self) -> CircuitData:
@@ -1051,6 +1089,7 @@ def _graph_mutable_tensors(runtime: EMCircuitRuntime) -> tuple[torch.Tensor, ...
                 port.field.edge_buffer,
                 port.field.correction_buffer,
                 port.field.last_voltage_before,
+                port.field.coupling_voltage,
                 port.field.last_voltage,
                 port.field.last_voltage_after,
                 port.field.last_current,

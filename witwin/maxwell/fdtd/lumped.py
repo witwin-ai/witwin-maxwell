@@ -74,6 +74,7 @@ class FieldPortCoupling:
     edge_buffer: torch.Tensor
     correction_buffer: torch.Tensor
     last_voltage_before: torch.Tensor
+    coupling_voltage: torch.Tensor
     last_voltage: torch.Tensor
     last_voltage_after: torch.Tensor
     last_current: torch.Tensor
@@ -392,7 +393,7 @@ def prepare_field_port_coupling(
         yee_control_volume=yee_control_volume,
         resistance=torch.inf,
     )
-    zeros = [torch.zeros((), device=eps_edge.device, dtype=eps_edge.dtype) for _ in range(6)]
+    zeros = [torch.zeros((), device=eps_edge.device, dtype=eps_edge.dtype) for _ in range(7)]
     return FieldPortCoupling(
         port_name=open_runtime.port_name,
         field_shape=open_runtime.field_shape,
@@ -406,6 +407,7 @@ def prepare_field_port_coupling(
         edge_buffer=open_runtime.edge_buffer,
         correction_buffer=open_runtime.correction_buffer,
         last_voltage_before=zeros[0],
+        coupling_voltage=zeros[6],
         last_voltage=zeros[1],
         last_voltage_after=zeros[2],
         last_current=zeros[3],

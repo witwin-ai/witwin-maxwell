@@ -199,7 +199,7 @@ def _owner_proxy_field(
     dtype = local_field.field_dtype
     empty_indices = torch.empty((0,), device=owner_device, dtype=torch.int64)
     empty_values = torch.empty((0,), device=owner_device, dtype=dtype)
-    zeros = tuple(torch.zeros((), device=owner_device, dtype=dtype) for _ in range(6))
+    zeros = tuple(torch.zeros((), device=owner_device, dtype=dtype) for _ in range(7))
     return FieldPortCoupling(
         port_name=local_field.port_name,
         field_shape=local_field.field_shape,
@@ -215,6 +215,7 @@ def _owner_proxy_field(
         edge_buffer=empty_values.clone(),
         correction_buffer=empty_values.clone(),
         last_voltage_before=zeros[0],
+        coupling_voltage=zeros[6],
         last_voltage=zeros[1],
         last_voltage_after=zeros[2],
         last_current=zeros[3],

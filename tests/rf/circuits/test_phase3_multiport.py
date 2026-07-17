@@ -92,7 +92,14 @@ def test_two_bound_ports_solve_once_and_cross_port_vccs_preserves_polarity_and_k
             torch.stack((zero + transconductance, output_conductance + 1.0 / output_resistance)),
         )
     )
-    rhs = torch.stack((input_conductance * 0.2, zero))
+    # Coordinator unification ruling (slice U1): the field port couples through the
+    # trapezoidal half-step voltage 0.5*(V_after_prev + V_free), matching the native
+    # lumped runtime. At this cold-start step V_after_prev = 0, so the Norton source
+    # sees 0.5 * 0.2 = 0.1 rather than the raw free voltage 0.2. This re-pins the
+    # solve-mechanics expectation to the unified convention (not a weakening: the
+    # conductance stamp is unchanged; only the source time-centering moved).
+    coupling_voltage = 0.5 * 0.2
+    rhs = torch.stack((input_conductance * coupling_voltage, zero))
     expected_voltage = torch.linalg.solve(matrix, rhs)
     actual_voltage = runtime.node_samples[1, 1:]
     torch.testing.assert_close(actual_voltage, expected_voltage, rtol=2.0e-6, atol=2.0e-9)

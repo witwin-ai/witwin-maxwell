@@ -17,6 +17,11 @@ class CircuitStepTrace:
     field_inputs: dict[str, torch.Tensor]
     previous_state: CircuitState
     port_indices: tuple[int, ...]
+    carried_voltages: tuple[torch.Tensor, ...]
+
+
+def _carried_voltage_name(circuit_index: int, port_index: int) -> str:
+    return circuit_state_name(circuit_index, f"port_{port_index}_last_voltage_after")
 
 
 def _checkpoint_state(runtime, circuit_index: int, state) -> CircuitState:
@@ -142,6 +147,7 @@ def _functional_step(
     previous_state,
     *,
     step_index: int,
+    carried_voltages,
     eps_by_field=None,
     differentiable: bool,
 ):
@@ -154,6 +160,18 @@ def _functional_step(
         )
         for port in runtime.ports
     )
+    # Slice U1 unified interface: the Norton source and branch solve see the
+    # trapezoidal half-step voltage 0.5*(V_after_prev + V_free); backward-Euler
+    # steps keep the end-of-step free voltage. ``carried_voltages`` is the previous
+    # step's post-step port voltage, threaded here as differentiable cross-step
+    # state so torch.autograd routes its cotangent through the averaging.
+    if integration == "trapezoidal":
+        coupling_voltages = tuple(
+            0.5 * (carried + free)
+            for carried, free in zip(carried_voltages, free_voltages)
+        )
+    else:
+        coupling_voltages = free_voltages
     port_terms = tuple(
         _port_terms(
             port,
@@ -184,10 +202,10 @@ def _functional_step(
             integration=integration,
             midpoint=integration == "trapezoidal",
         )
-        for port, conductance, free_voltage in zip(
+        for port, conductance, coupling_voltage in zip(
             runtime.ports,
             conductances,
-            free_voltages,
+            coupling_voltages,
         ):
             _stamp_norton(
                 matrix,
@@ -195,7 +213,7 @@ def _functional_step(
                 system.graph,
                 port.binding,
                 conductance,
-                free_voltage,
+                coupling_voltage,
             )
         condition = _matrix_condition(matrix)
         solution = torch.linalg.solve(matrix, rhs)
@@ -211,10 +229,10 @@ def _functional_step(
             midpoint=integration == "trapezoidal",
             stamp_matrix=False,
         )
-        for port, conductance, free_voltage in zip(
+        for port, conductance, coupling_voltage in zip(
             runtime.ports,
             conductances,
-            free_voltages,
+            coupling_voltages,
         ):
             _stamp_norton(
                 _matrix,
@@ -222,7 +240,7 @@ def _functional_step(
                 system.graph,
                 port.binding,
                 conductance,
-                free_voltage,
+                coupling_voltage,
                 stamp_matrix=False,
             )
         factors, pivots, condition = runtime.factor_cache[
@@ -262,9 +280,11 @@ def _functional_step(
     samples = []
     port_powers = []
     field_energy_changes = []
-    for port, free_voltage, (injection, coupling_impedance), conductance in zip(
+    next_carried = []
+    for port, free_voltage, coupling_voltage, (injection, coupling_impedance), conductance in zip(
         runtime.ports,
         free_voltages,
+        coupling_voltages,
         port_terms,
         conductances,
     ):
@@ -274,7 +294,7 @@ def _functional_step(
             port.binding.positive,
             port.binding.negative,
         )
-        current = conductance * (free_voltage - voltage)
+        current = conductance * (coupling_voltage - voltage)
         field = corrected[port.field_name].clone()
         field.reshape(-1).index_add_(
             0,
@@ -284,11 +304,14 @@ def _functional_step(
         corrected[port.field_name] = field
         samples.append((voltage, current))
         port_powers.append(voltage * current)
-        field_energy_changes.append(
-            -(free_voltage - 0.5 * coupling_impedance * current)
-            * current
-            * port.field.dt
-        )
+        # Slice U1: field/port power audit uses the shared exchange voltage -- the
+        # port terminal midpoint ``voltage`` -- so the field-energy change is minus
+        # the port work exactly under the unified interface.
+        field_energy_changes.append(-voltage * current * port.field.dt)
+        # Post-step port voltage carried to the next step's trapezoidal average
+        # (raw free voltage minus the full coupling drop), matching the native
+        # runtime and circuits.py _apply_field_current.
+        next_carried.append(free_voltage - coupling_impedance * current)
     node_row = torch.cat(
         (
             solution.new_zeros((1,)),
@@ -344,6 +367,7 @@ def _functional_step(
         port_power_row,
         field_energy_row,
         condition,
+        tuple(next_carried),
     )
 
 
@@ -370,17 +394,24 @@ def replay_circuit_runtimes(
         previous_state = _checkpoint_state(runtime, circuit_index, state)
         field_names = tuple(dict.fromkeys(port.field_name for port in runtime.ports))
         field_inputs = {name: fields[name] for name in field_names}
-        corrected, next_state, *_diagnostics = _functional_step(
+        carried_voltages = tuple(
+            state[_carried_voltage_name(circuit_index, port_index)]
+            for port_index in range(len(runtime.ports))
+        )
+        corrected, next_state, *_diagnostics, next_carried = _functional_step(
             runtime,
             field_inputs,
             previous_state,
             step_index=step_index,
+            carried_voltages=carried_voltages,
             differentiable=False,
         )
         fields.update(corrected)
         step_name = circuit_state_name(circuit_index, "step")
         next_auxiliary[step_name] = state[step_name] + 1
         next_auxiliary.update(dict(_state_tensors(runtime, circuit_index, next_state)))
+        for port_index, value in enumerate(next_carried):
+            next_auxiliary[_carried_voltage_name(circuit_index, port_index)] = value
         traces.append(
             CircuitStepTrace(
                 runtime=runtime,
@@ -389,6 +420,7 @@ def replay_circuit_runtimes(
                 field_inputs=field_inputs,
                 previous_state=previous_state,
                 port_indices=tuple(port_runtime_indices[id(port)] for port in runtime.ports),
+                carried_voltages=carried_voltages,
             )
         )
     if capture is not None:
@@ -463,6 +495,10 @@ def pullback_circuit_runtimes(
                 inductor_current=trace.previous_state.inductor_current.detach().requires_grad_(True),
                 inductor_voltage=trace.previous_state.inductor_voltage.detach().requires_grad_(True),
             )
+            carried_leaves = tuple(
+                value.detach().requires_grad_(True)
+                for value in trace.carried_voltages
+            )
             parameter_items, replacements = _parameter_items(
                 runtime.circuit,
                 differentiable_parameter_keys,
@@ -482,11 +518,13 @@ def pullback_circuit_runtimes(
                     port_power_row,
                     field_energy_row,
                     condition,
+                    next_carried,
                 ) = _functional_step(
                     runtime,
                     field_leaves,
                     previous_state,
                     step_index=trace.step_index,
+                    carried_voltages=carried_leaves,
                     eps_by_field=eps_by_field,
                     differentiable=True,
                 )
@@ -509,6 +547,18 @@ def pullback_circuit_runtimes(
             output_pairs.extend(
                 (value, updated[name])
                 for name, value in next_state_pairs
+                if value.requires_grad
+            )
+            # Slice U1: the produced post-step port voltages are carried cross-step
+            # state; pair each with its incoming cotangent so autograd routes it back
+            # through the trapezoidal average to the field and previous carry.
+            carried_names = tuple(
+                _carried_voltage_name(trace.circuit_index, port_index)
+                for port_index in range(len(carried_leaves))
+            )
+            output_pairs.extend(
+                (value, updated[name])
+                for name, value in zip(carried_names, next_carried)
                 if value.requires_grad
             )
             for port_index, (voltage, current) in zip(trace.port_indices, samples):
@@ -600,6 +650,7 @@ def pullback_circuit_runtimes(
                 )
 
             state_inputs = _state_tensors(runtime, trace.circuit_index, previous_state)
+            carried_items = tuple(zip(carried_names, carried_leaves))
             eps_items = tuple(
                 (name, eps_by_field[name])
                 for name in field_leaves
@@ -607,6 +658,7 @@ def pullback_circuit_runtimes(
             inputs = (
                 tuple(field_leaves.items())
                 + state_inputs
+                + carried_items
                 + parameter_items
                 + eps_items
             )
@@ -628,6 +680,9 @@ def pullback_circuit_runtimes(
             updated[name] = gradient_by_position[cursor]
             cursor += 1
         for name, _value in state_inputs:
+            updated[name] = gradient_by_position[cursor]
+            cursor += 1
+        for name, _value in carried_items:
             updated[name] = gradient_by_position[cursor]
             cursor += 1
         for key, _value in parameter_items:

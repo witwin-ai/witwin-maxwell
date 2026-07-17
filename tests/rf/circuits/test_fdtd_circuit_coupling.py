@@ -44,6 +44,48 @@ def _scene(port, *, circuits=()):
     )
 
 
+def _driven_scene(port, dx, *, circuits=()):
+    return mw.Scene(
+        domain=mw.Domain(bounds=((-0.02, 0.02),) * 3),
+        grid=mw.GridSpec.uniform(dx),
+        boundary=mw.BoundarySpec.none(),
+        sources=(
+            mw.PointDipole(
+                position=(0.0, 0.0, 0.0),
+                polarization="Ez",
+                source_time=mw.GaussianPulse(frequency=3.0e9, fwidth=0.6e9),
+            ),
+        ),
+        ports=(port,),
+        circuits=circuits,
+        device="cuda",
+    )
+
+
+@pytest.mark.parametrize("dx", (0.005, 0.005 / 3.0, 0.001))
+def test_mna_coupled_interface_stays_finite_under_grid_refinement(dx):
+    # Refinement-stability regression gate (coordinator unification ruling). The
+    # pre-unification V_free MNA field-port coupling is only CONDITIONALLY stable:
+    # the finer-grid coupled scenes drove the fields non-finite (|v| ~ 1e33) as the
+    # Courant-limited dt shrank. The unified trapezoidal half-step interface is
+    # unconditionally stable, so the same configurations must run finite and bounded.
+    steps = int(round(480 * (0.005 / dx)))
+    result = mw.Simulation.fdtd(
+        _driven_scene(
+            _port(),
+            dx,
+            circuits=(_series_circuit(),),
+        ),
+        frequencies=(2.75e9, 3.0e9),
+        run_time=mw.TimeConfig(time_steps=steps),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+        full_field_dft=False,
+    ).run()
+    voltage = result.port("feed").voltage
+    assert bool(torch.all(torch.isfinite(voltage)))
+    assert float(torch.max(torch.abs(voltage))) < 1.0e3
+
+
 def _series_circuit(*, resistance=25.0, inductance=0.5e-9, capacitance=1.0e-12):
     circuit = mw.Circuit("load")
     input_node = circuit.node("input")
@@ -169,6 +211,9 @@ def test_coupled_mna_matches_native_series_rlc_without_a_delayed_step():
         "circuit_0_capacitor_current_C1",
         "circuit_0_inductor_current",
         "circuit_0_inductor_voltage",
+        # Slice U1: the trapezoidal field-port interface carries the previous
+        # post-step port voltage as resume state.
+        "circuit_0_port_0_last_voltage_after",
     )
     torch.testing.assert_close(
         checkpoint.tensors["circuit_0_capacitor_voltage_C1"],
@@ -209,6 +254,20 @@ def test_passive_rlc_coupling_conserves_field_circuit_energy_and_decays():
         0,
         port_runtime.circuit_port.field.linear_indices,
         0.1,
+    )
+    # Coordinator unification ruling (slice U1): the field port now couples through
+    # the trapezoidal half-step voltage 0.5*(V_after_prev + V_free). This test injects
+    # a non-zero field after prepare, so the carried post-step voltage must be seeded
+    # to that field's port voltage for a physically consistent cold start (mirrors the
+    # native lumped energy test's _seed_previous_voltage). A real coupled run starts
+    # from a zero field, where this seed is identically zero.
+    _energy_field = port_runtime.circuit_port.field
+    _energy_flat = solver.Ez.view(-1)
+    _energy_field.last_voltage_after.copy_(
+        torch.dot(
+            torch.index_select(_energy_flat, 0, _energy_field.linear_indices),
+            _energy_field.voltage_weights,
+        )
     )
 
     def field_energy():
@@ -275,6 +334,9 @@ def test_circuit_run_returns_cuda_data_and_checkpointed_companion_history():
         "circuit_0_step",
         "circuit_0_inductor_current",
         "circuit_0_inductor_voltage",
+        # Slice U1: trapezoidal field-port interface carries the previous
+        # post-step port voltage as resume state.
+        "circuit_0_port_0_last_voltage_after",
     )
     assert checkpoint.tensors["circuit_0_step"].device.type == "cuda"
     assert int(checkpoint.tensors["circuit_0_step"]) == 16
