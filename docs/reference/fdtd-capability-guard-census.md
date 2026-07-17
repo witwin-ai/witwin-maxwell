@@ -10,9 +10,9 @@ cannot enter unnoticed.
 The 2026-07-17 integrated repository state (circuit co-simulation, Touchstone
 network embedding, the thin-wire subgrid conductor series in plan 07 phases
 0-3, the array basis / active-S feature series in plan 06 phases 0-1, and the
-plan 07 Phase 4 multi-GPU wire forward slice, all merged) contains 154 guards:
+plan 07 Phase 4 multi-GPU wire forward slice, all merged) contains 155 guards:
 
-- 132 capability guards tracked by the non-increasing test budget;
+- 133 capability guards tracked by the non-increasing test budget;
 - 22 contract guards excluded by exact file and message substring.
 
 The single-GPU circuit adjoint provides the circuit replay and transpose
@@ -45,16 +45,19 @@ The capability baseline is distributed as follows:
 | Time-domain excitation | 12 |
 | Time-domain ports and lumped elements | 13 |
 | Time-domain runtime | 20 |
-| Public simulation, result, and network workflows | 23 |
+| Public simulation, result, and network workflows | 24 |
 | Material models | 7 |
 | Postprocessing | 4 |
-| **Total** | **132** |
+| **Total** | **133** |
 
 This integrated baseline is the 2026-07-16 circuit/network state (119 capability
 guards) plus the ten thin-wire capability guards from plan 07 phases 0-3 (giving
 129) plus the one array-basis capability guard from plan 06 phases 0-1 (giving
 130) plus the two net capability guards from the plan 07 Phase 4 multi-GPU wire
-forward slice (giving 132). The 119-guard baseline is itself the 2026-07-15 circuit co-simulation
+forward slice (giving 132) plus the one array scene-gradient capability guard from
+plan 06 Phase 4 (giving 133); its disposition is detailed in the
+[Array scene-gradient reconciliation](#array-scene-gradient-reconciliation-2026-07-17)
+note below. The 119-guard baseline is itself the 2026-07-15 circuit co-simulation
 state (113 capability guards) plus the six 2026-07-16 network-embedding
 capability guards (Time-domain adjoint +3, Public simulation/result/network
 workflows +3); that reconciliation is detailed in the
@@ -104,6 +107,22 @@ than a public contract: `array_basis()` consumes the retained in-memory
 full-wave PortSweep field columns, which only the FDTD backend currently
 produces. It stays counted in the budget (Postprocessing 3 -> 4) so extending
 basis extraction to another backend later lowers the count again.
+
+### Array scene-gradient reconciliation (2026-07-17)
+
+The array codebook/MIMO/gradient series (plan 06, phases 2-4) adds one reviewed
+capability guard. `witwin/maxwell/array.py::ArrayBasisData.scene_gradient_vjp`
+raises `NotImplementedError("Scene-parameter gradients through the array basis
+require the aggregated per-column adjoint envelope ...")`. Phases 2-4 land the
+codebook/scan/max-hold workflows, the field- and S-parameter-based MIMO metrics,
+and weight gradients through `combine()` (fully supported, no solver rerun). The
+scene/material/geometry gradient through the basis is deliberately sliced out and
+fails closed: the retained-column basis stores detached embedded-pattern tensors,
+so it cannot back-propagate to scene parameters, and the aggregated per-column
+adjoint (plan 06 Phase 4 exit gate, gated on the plan 02 Phase 7 distributed
+result-aggregation contract) is not wired to this single-device basis. It is
+counted under "Public simulation, result, and network workflows" (23 -> 24);
+lower the budget when the aggregated adjoint lands.
 
 ## Contract exclusions
 

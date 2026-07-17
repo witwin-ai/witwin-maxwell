@@ -278,6 +278,139 @@ class BeamWeights:
 
 
 @dataclass(frozen=True)
+class BeamCodebook:
+    """A named set of incident power-wave weight vectors over one basis.
+
+    ``weights`` has the port axis last and carries a leading beam axis:
+    ``[B, N]`` (frequency-flat) or ``[B, F, N]`` (frequency-dependent). The
+    codebook holds no solver state; it is combined against an
+    :class:`ArrayBasisData` with zero additional field-solver steps.
+    """
+
+    weights: torch.Tensor
+    names: tuple[str, ...]
+    target_angles: torch.Tensor | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not isinstance(self.weights, torch.Tensor):
+            raise TypeError("BeamCodebook.weights must be a torch.Tensor.")
+        if not self.weights.is_complex():
+            raise TypeError("BeamCodebook.weights must be a complex tensor.")
+        if self.weights.ndim not in (2, 3) or self.weights.numel() == 0:
+            raise ValueError("BeamCodebook.weights must have shape [B, N] or [B, F, N].")
+        if not _finite_complex(self.weights):
+            raise ValueError("BeamCodebook.weights must contain only finite values.")
+        names = tuple(str(name) for name in self.names)
+        if len(names) != self.weights.shape[0] or any(not name for name in names):
+            raise ValueError("BeamCodebook.names must contain one non-empty name per beam.")
+        if len(set(names)) != len(names):
+            raise ValueError("BeamCodebook.names must be unique.")
+        if self.target_angles is not None:
+            angles = self.target_angles
+            if not isinstance(angles, torch.Tensor) or angles.is_complex():
+                raise TypeError("target_angles must be a real torch.Tensor.")
+            if angles.shape != (self.weights.shape[0], 2):
+                raise ValueError("target_angles must have shape [B, 2] as (theta, phi).")
+        object.__setattr__(self, "names", names)
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
+    @property
+    def beam_count(self) -> int:
+        return self.weights.shape[0]
+
+    def to_weights(
+        self,
+        *,
+        frequency_count: int,
+        port_count: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Return frequency-explicit ``[B, F, N]`` weights for one basis."""
+
+        values = self.weights
+        if values.device != device:
+            raise ValueError(f"BeamCodebook.weights must be on device {device}.")
+        if values.dtype != dtype:
+            raise TypeError(f"BeamCodebook.weights must use dtype {dtype}.")
+        if values.ndim == 2:
+            if values.shape[1] != port_count:
+                raise ValueError(
+                    f"frequency-flat codebook weights must have shape [B, N] with N={port_count}."
+                )
+            return values[:, None, :].expand(values.shape[0], frequency_count, port_count)
+        if values.shape[1:] != (frequency_count, port_count):
+            raise ValueError(
+                f"codebook weights must have shape [B, F, N] with [F, N]=({frequency_count}, {port_count})."
+            )
+        return values
+
+    @classmethod
+    def from_scan_angles(
+        cls,
+        *,
+        element_positions: torch.Tensor,
+        frequencies: torch.Tensor,
+        theta: torch.Tensor,
+        phi: torch.Tensor,
+        amplitude: torch.Tensor | float = 1.0,
+        speed_of_light: float = 299792458.0,
+        name_prefix: str = "scan",
+    ) -> "BeamCodebook":
+        """Build progressive-phase steering weights for a grid of scan angles.
+
+        For each scan direction ``(theta_b, phi_b)`` the port weight is
+        ``a_{b,n} = amplitude_n * exp(+j k (r_n . d_b))`` with ``d_b`` the unit
+        pointing vector, so the co-phased main beam is steered toward ``d_b``.
+        Element positions are supplied explicitly; no geometry is inferred.
+        """
+
+        if not isinstance(element_positions, torch.Tensor) or element_positions.ndim != 2:
+            raise TypeError("element_positions must be a real tensor of shape [N, 3].")
+        if element_positions.shape[1] != 3 or element_positions.is_complex():
+            raise ValueError("element_positions must have shape [N, 3] with real coordinates.")
+        device = element_positions.device
+        real_dtype = element_positions.dtype
+        for name, value in (("frequencies", frequencies), ("theta", theta), ("phi", phi)):
+            if not isinstance(value, torch.Tensor) or value.is_complex():
+                raise TypeError(f"{name} must be a real torch.Tensor.")
+            if value.device != device:
+                raise ValueError(f"{name} must be on device {device}.")
+        if theta.ndim != 1 or phi.ndim != 1 or theta.shape != phi.shape:
+            raise ValueError("theta and phi must be 1-D tensors of equal length (one per scan angle).")
+        complex_dtype = torch.complex128 if real_dtype == torch.float64 else torch.complex64
+        port_count = element_positions.shape[0]
+        amplitude_tensor = torch.as_tensor(amplitude, device=device, dtype=complex_dtype)
+        if amplitude_tensor.ndim == 0:
+            amplitude_tensor = amplitude_tensor.expand(port_count)
+        if amplitude_tensor.shape != (port_count,):
+            raise ValueError("amplitude must be a scalar or a per-port vector of length N.")
+        directions = torch.stack(
+            (
+                torch.sin(theta) * torch.cos(phi),
+                torch.sin(theta) * torch.sin(phi),
+                torch.cos(theta),
+            ),
+            dim=-1,
+        )
+        wave_number = (2.0 * math.pi * frequencies / speed_of_light).to(real_dtype)
+        projection = torch.einsum("bd,nd->bn", directions, element_positions)
+        phase = wave_number[None, :, None] * projection[:, None, :]
+        weights = amplitude_tensor[None, None, :] * torch.exp(1j * phase.to(complex_dtype))
+        names = tuple(
+            f"{name_prefix}_theta{float(theta[index]):.4f}_phi{float(phi[index]):.4f}"
+            for index in range(theta.shape[0])
+        )
+        return cls(
+            weights=weights,
+            names=names,
+            target_angles=torch.stack((theta, phi), dim=-1),
+            metadata={"builder": "from_scan_angles", "steering": "progressive_phase"},
+        )
+
+
+@dataclass(frozen=True)
 class EmbeddedElementPatternData:
     """Power-normalized embedded element patterns in ``[F, N, T, P]`` order."""
 
@@ -606,6 +739,67 @@ class BeamData:
     def device(self) -> torch.device:
         return self.weights.device
 
+    @property
+    def is_batched(self) -> bool:
+        return self.weights.ndim == 3
+
+    def max_hold(self, metric: str = "realized_gain") -> "MaxHoldComposite":
+        """Envelope (per-direction maximum) of a metric across the beam axis.
+
+        The envelope value carries a subgradient through the winning beam; the
+        discrete winning-beam index is not differentiable, as the plan requires.
+        Angular metrics reduce ``[B, F, T, P]`` to an ``[F, T, P]`` envelope with
+        an ``[F, T, P]`` winning-beam index; the scalar ``eirp`` reduces
+        ``[B, F]`` to an ``[F]`` envelope with an ``[F]`` index.
+        """
+
+        if not self.is_batched:
+            raise ValueError("max_hold requires a batched beam result (rank-3 weights [B, F, N]).")
+        angular_metrics = {
+            "realized_gain": self.antenna.realized_gain,
+            "gain": self.antenna.gain,
+            "directivity": self.antenna.directivity,
+            "radiation_intensity": self.antenna.radiation_intensity,
+        }
+        if metric == "eirp":
+            source = self.antenna.eirp
+        elif metric in angular_metrics:
+            source = angular_metrics[metric]
+        else:
+            raise ValueError(
+                "metric must be one of 'realized_gain', 'gain', 'directivity', "
+                "'radiation_intensity', or 'eirp'."
+            )
+        if bool(torch.any(torch.isnan(source))):
+            raise ValueError(
+                f"max_hold({metric!r}) is undefined because at least one beam has a masked "
+                "(NaN) metric; drive every beam with positive power before taking an envelope."
+            )
+        envelope = torch.amax(source, dim=0)
+        winning_beam = torch.argmax(source.detach(), dim=0)
+        return MaxHoldComposite(
+            metric=metric,
+            envelope=envelope,
+            winning_beam=winning_beam,
+            frequencies=self.frequencies,
+            names=self.names,
+        )
+
+
+@dataclass(frozen=True)
+class MaxHoldComposite:
+    """Per-direction envelope of a beam metric across a codebook."""
+
+    metric: str
+    envelope: torch.Tensor
+    winning_beam: torch.Tensor
+    frequencies: torch.Tensor
+    names: tuple[str, ...] | None = None
+
+    @property
+    def device(self) -> torch.device:
+        return self.envelope.device
+
 
 def _restore_single(value: torch.Tensor, *, single: bool) -> torch.Tensor:
     return value[0] if single else value
@@ -782,10 +976,27 @@ class ArrayBasisData:
             radiated_power_matrix=payload["radiated_power_matrix"],
         )
 
-    def combine(self, weights: BeamWeights | torch.Tensor) -> BeamData:
+    def combine(
+        self, weights: BeamWeights | BeamCodebook | torch.Tensor
+    ) -> BeamData:
         """Combine incident power-wave weights without rerunning the field solver."""
 
         frequency_count, port_count, _ = self.network.s.shape
+        beam_names: tuple[str, ...] | None = None
+        codebook_metadata: dict[str, Any] = {}
+        if isinstance(weights, BeamCodebook):
+            beam_names = weights.names
+            codebook_metadata = {
+                "codebook": True,
+                "beam_count": weights.beam_count,
+                "codebook_metadata": dict(weights.metadata),
+            }
+            weights = weights.to_weights(
+                frequency_count=frequency_count,
+                port_count=port_count,
+                device=self.device,
+                dtype=self.dtype,
+            )
         a, single = _normalize_weights(
             weights,
             frequency_count=frequency_count,
@@ -895,6 +1106,7 @@ class ArrayBasisData:
             far_field=far_field,
             antenna=antenna,
             frequencies=self.frequencies,
+            names=beam_names,
             metadata={
                 "basis_fingerprint": self.fingerprint,
                 "solver_rerun": False,
@@ -903,8 +1115,234 @@ class ArrayBasisData:
                     if self.radiated_power_matrix is not None
                     else "far_field_angular_integral"
                 ),
+                **codebook_metadata,
             },
         )
+
+    @property
+    def cache_key(self) -> str:
+        """Content fingerprint used as the basis reuse key.
+
+        The fingerprint is computed at extraction from scene physical content,
+        resolved grid, boundaries, ports, terminations, frequencies, monitor
+        surface, angular grid, polarization, phase center, and dtype. Combining
+        different beam weights never changes this key (weights are not part of
+        the basis); any geometry, material, port, frequency, or surface change
+        does, because those tensors feed the digest.
+        """
+
+        return self.fingerprint
+
+    def scene_gradient_vjp(self, *args, **kwargs):
+        """Aggregated scene-parameter adjoint through the N-column basis.
+
+        Fail-closed: the retained-column basis stores detached embedded-pattern
+        tensors, so it cannot back-propagate to scene materials or geometry. The
+        aggregated per-column adjoint envelope (plan 06 Phase 4, gated on the
+        plan 02 Phase 7 distributed result-aggregation contract) is not wired to
+        this single-device basis. Weight gradients through :meth:`combine` are
+        fully supported and require no solver rerun.
+        """
+
+        raise NotImplementedError(
+            "Scene-parameter gradients through the array basis require the aggregated "
+            "per-column adjoint envelope (plan 06 Phase 4 / plan 02 Phase 7); this "
+            "single-device retained-column basis only supports weight gradients through "
+            "combine()."
+        )
+
+    def _environment_spectra(
+        self, environment: "MultipathEnvironment"
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        patterns = self.embedded_patterns
+        if not torch.equal(environment.theta, patterns.theta) or not torch.equal(
+            environment.phi, patterns.phi
+        ):
+            raise ValueError(
+                "MultipathEnvironment angular grid must match the embedded-pattern grid exactly."
+            )
+        angular_weights = _solid_angle_weights(patterns.theta, patterns.phi)
+        density = environment.resolved_power_density(
+            device=self.device, dtype=patterns.theta.dtype
+        )
+        total = torch.sum(density * angular_weights)
+        if not bool(total > 0.0):
+            raise ValueError("MultipathEnvironment power_density must integrate to a positive value.")
+        normalized = density / total
+        xpr = environment.cross_polar_ratio(device=self.device, dtype=patterns.theta.dtype)
+        return normalized, angular_weights, xpr, total
+
+    def mimo(self, environment: "MultipathEnvironment") -> "MIMOData":
+        """Field-based MIMO metrics from the dual-polarized embedded patterns.
+
+        The complex correlation matrix, ECC, apparent diversity gain, and mean
+        effective gain are integrated over the full sphere against the supplied
+        angular power spectrum and cross-polar ratio (Taga/Vaughan convention).
+        """
+
+        patterns = self.embedded_patterns
+        normalized, angular_weights, xpr, _ = self._environment_spectra(environment)
+        rho = environment.polarization_correlation_value(
+            device=self.device, dtype=self.dtype
+        )
+        # P_theta and P_phi are each normalized to integrate to unity; the XPR
+        # multiplier carries the polarization power imbalance explicitly.
+        coef_theta = (xpr * normalized * angular_weights).to(self.dtype)
+        coef_phi = (normalized * angular_weights).to(self.dtype)
+        coef_cross = (torch.sqrt(xpr) * normalized * angular_weights).to(self.dtype)
+        e_theta = patterns.e_theta
+        e_phi = patterns.e_phi
+        correlation = (
+            torch.einsum("fitp,fjtp,tp->fij", e_theta, torch.conj(e_theta), coef_theta)
+            + torch.einsum("fitp,fjtp,tp->fij", e_phi, torch.conj(e_phi), coef_phi)
+            + rho
+            * torch.einsum("fitp,fjtp,tp->fij", e_theta, torch.conj(e_phi), coef_cross)
+            + torch.conj(rho)
+            * torch.einsum("fitp,fjtp,tp->fij", e_phi, torch.conj(e_theta), coef_cross)
+        )
+        # Symmetrize away Hermitian roundoff from the independent einsums.
+        correlation = 0.5 * (correlation + correlation.mH)
+        diagonal = torch.diagonal(correlation, dim1=-2, dim2=-1).real
+        # Fail closed on a zero-power (dark) pattern column: the ECC denominator
+        # would otherwise divide by zero and silently return NaN, unlike the
+        # sibling degeneracy guards in max_hold and ecc_from_scattering.
+        if bool(torch.any(diagonal <= 0.0)):
+            raise ValueError(
+                "MIMO ECC is undefined because at least one port has non-positive "
+                "received correlation power; every embedded-element pattern column must "
+                "carry strictly positive power over the integration sphere."
+            )
+        denominator = diagonal[..., :, None] * diagonal[..., None, :]
+        ecc = torch.abs(correlation).square() / denominator
+        diversity_gain = 10.0 * torch.sqrt(torch.clamp(1.0 - ecc, min=0.0))
+
+        # Mean effective gain: realized-gain patterns (per unit incident power,
+        # so the EEP columns already carry P_incident = 1 W) split by polarization
+        # and integrated against the XPR-weighted angular spectra.
+        radius_sq = patterns.observation_radius.square()
+        u_theta = radius_sq * torch.abs(e_theta).square() / (2.0 * patterns.wave_impedance)
+        u_phi = radius_sq * torch.abs(e_phi).square() / (2.0 * patterns.wave_impedance)
+        gain_theta = 4.0 * math.pi * u_theta
+        gain_phi = 4.0 * math.pi * u_phi
+        weighted = normalized * angular_weights
+        xpr_ratio = xpr / (1.0 + xpr)
+        mean_effective_gain = (
+            xpr_ratio * torch.einsum("fitp,tp->fi", gain_theta, weighted)
+            + (1.0 - xpr_ratio) * torch.einsum("fitp,tp->fi", gain_phi, weighted)
+        )
+        return MIMOData(
+            correlation=correlation,
+            ecc=ecc,
+            diversity_gain=diversity_gain,
+            mean_effective_gain=mean_effective_gain,
+            frequencies=self.frequencies,
+            port_names=self.port_names,
+            environment_metadata=environment.metadata_snapshot(),
+            source="dual_polarized_far_field_integral",
+        )
+
+    def ecc_from_scattering(self) -> torch.Tensor:
+        """S-parameter ECC approximation (Blanch/Thaysen), lossless assumption.
+
+        Uses ``ecc_ij = |sum_n conj(S_ni) S_nj|^2 / prod_k (1 - sum_n |S_nk|^2)``.
+        This is only valid for a lossless, high-radiation-efficiency array; it is
+        deliberately a different method from the field-based :meth:`mimo` ECC and
+        must not be used when material or ohmic loss is significant. The guard
+        below only rejects non-passive or fully-reflective columns
+        (``1 - sum_n |S_ni|^2 <= 0``); genuine ohmic/material loss is invisible in
+        ``S`` alone and is not detected here, so a matched-but-lossy array can pass
+        this guard and silently receive the invalid lossless approximation.
+        """
+
+        s = self.network.s
+        column_power = torch.sum(torch.abs(s).square(), dim=-2)  # [F, N]
+        available = 1.0 - column_power
+        if bool(torch.any(available <= 0.0)):
+            raise ValueError(
+                "S-parameter ECC approximation requires 1 - sum_n |S_ni|^2 > 0 for every port; "
+                "this rejects non-passive or fully-reflective columns. Note this guard cannot "
+                "detect ohmic/material loss, which is invisible in S alone; do not use this "
+                "approximation when such loss is significant."
+            )
+        numerator = torch.abs(
+            torch.einsum("fni,fnj->fij", torch.conj(s), s)
+        ).square()
+        denominator = available[..., :, None] * available[..., None, :]
+        return numerator / denominator
+
+
+@dataclass(frozen=True)
+class MultipathEnvironment:
+    """Angular power spectrum and polarization statistics of an incident field."""
+
+    theta: torch.Tensor
+    phi: torch.Tensor
+    power_density: torch.Tensor | float = 1.0
+    cross_polar_ratio_db: float = 0.0
+    polarization_correlation: complex = 0.0
+
+    def __post_init__(self):
+        if not isinstance(self.theta, torch.Tensor) or not isinstance(self.phi, torch.Tensor):
+            raise TypeError("theta and phi must be torch.Tensor instances.")
+        _validate_angular_grid(self.theta, self.phi, device=self.theta.device)
+        if abs(complex(self.polarization_correlation)) > 1.0:
+            raise ValueError("polarization_correlation magnitude must be <= 1.")
+        if not math.isfinite(float(self.cross_polar_ratio_db)):
+            raise ValueError("cross_polar_ratio_db must be finite.")
+
+    def resolved_power_density(self, *, device, dtype) -> torch.Tensor:
+        if isinstance(self.power_density, torch.Tensor):
+            if self.power_density.shape != self.theta.shape:
+                raise ValueError("power_density tensor must match the [T, P] angular grid.")
+            density = self.power_density.to(device=device, dtype=dtype)
+        else:
+            density = torch.full(
+                self.theta.shape, float(self.power_density), device=device, dtype=dtype
+            )
+        if not bool(torch.all(torch.isfinite(density))) or not bool(torch.all(density >= 0.0)):
+            raise ValueError("power_density must be finite and non-negative.")
+        return density
+
+    def cross_polar_ratio(self, *, device, dtype) -> torch.Tensor:
+        return torch.tensor(
+            10.0 ** (float(self.cross_polar_ratio_db) / 10.0), device=device, dtype=dtype
+        )
+
+    def polarization_correlation_value(self, *, device, dtype) -> torch.Tensor:
+        return torch.tensor(complex(self.polarization_correlation), device=device, dtype=dtype)
+
+    def metadata_snapshot(self) -> dict[str, Any]:
+        return {
+            "cross_polar_ratio_db": float(self.cross_polar_ratio_db),
+            "polarization_correlation": complex(self.polarization_correlation),
+            "angular_shape": tuple(int(v) for v in self.theta.shape),
+            "power_density": (
+                "uniform"
+                if not isinstance(self.power_density, torch.Tensor)
+                else "custom_angular"
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class MIMOData:
+    """MIMO correlation metrics with the environment that produced them."""
+
+    correlation: torch.Tensor
+    ecc: torch.Tensor
+    diversity_gain: torch.Tensor
+    mean_effective_gain: torch.Tensor
+    frequencies: torch.Tensor
+    port_names: tuple[str, ...]
+    environment_metadata: Mapping[str, Any]
+    source: str
+
+    def __post_init__(self):
+        object.__setattr__(self, "environment_metadata", dict(self.environment_metadata))
+
+    @property
+    def device(self) -> torch.device:
+        return self.correlation.device
 
 
 __all__ = [
@@ -913,7 +1351,11 @@ __all__ = [
     "ARRAY_POWER_NORMALIZATION",
     "ARRAY_ACCEPTANCE_BUDGET",
     "ArrayBasisData",
+    "BeamCodebook",
     "BeamData",
     "BeamWeights",
     "EmbeddedElementPatternData",
+    "MaxHoldComposite",
+    "MIMOData",
+    "MultipathEnvironment",
 ]
