@@ -269,6 +269,26 @@ def _scene_trainable_material_parameters(scene: Scene) -> tuple[torch.Tensor, ..
     return tuple(trainable)
 
 
+def _scene_trainable_circuit_parameters(scene: Scene) -> tuple[torch.Tensor, ...]:
+    candidates = []
+    for circuit in scene.circuits:
+        candidates.extend(circuit.parameters.values())
+        candidates.extend(value for value, _constraint in circuit.initial_conditions.values())
+        for device in circuit.devices:
+            for value in device.parameters.values():
+                if isinstance(value, torch.Tensor):
+                    candidates.append(value)
+                elif value is not None and hasattr(value, "__dict__"):
+                    candidates.extend(vars(value).values())
+    unique = []
+    seen = set()
+    for value in candidates:
+        if isinstance(value, torch.Tensor) and value.requires_grad and id(value) not in seen:
+            unique.append(value)
+            seen.add(id(value))
+    return tuple(unique)
+
+
 def _trainable_rf_parameters(
     scene: Scene,
     *,
@@ -336,13 +356,7 @@ class Simulation:
             excitations=self.excitations,
             port_sweep=self.port_sweep,
         )
-        self.has_trainable_parameters = bool(
-            any(parameter.requires_grad for parameter in (scene_module.parameters() if scene_module is not None else ()))
-            or _scene_trainable_density_parameters(resolved_scene)
-            or _scene_trainable_geometry_parameters(resolved_scene)
-            or _scene_trainable_material_parameters(resolved_scene)
-            or trainable_rf_parameters
-        )
+        self._refresh_trainable_parameters()
         if self.method != SimulationMethod.FDTD and (self.excitations or self.port_sweep):
             raise ValueError("RF port excitation is supported by Simulation.fdtd(...) only.")
         if self.method != SimulationMethod.FDTD and trainable_rf_parameters:
@@ -430,6 +444,7 @@ class Simulation:
 
     def prepare(self):
         self._refresh_scene()
+        self._validate_circuit_execution()
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         waveport_excitation = self._waveport_excitation()
@@ -467,6 +482,7 @@ class Simulation:
 
     def run(self) -> Result:
         self._refresh_scene()
+        self._validate_circuit_execution()
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         if self.method == SimulationMethod.FDFD:
@@ -476,7 +492,16 @@ class Simulation:
         raise ValueError(f"Unsupported simulation method {self.method!r}.")
 
     def _validate_port_excitations(self) -> None:
+        bound_port_names = {
+            binding.port_name
+            for circuit in self.scene.circuits
+            for binding in circuit.bindings
+        }
         if self.port_sweep is not None:
+            if bound_port_names:
+                raise NotImplementedError(
+                    "Circuit-bound ports do not support PortSweep execution."
+                )
             if any(isinstance(port, WavePort) for port in self.scene.ports):
                 if self.port_sweep.amplitude.requires_grad:
                     raise NotImplementedError(
@@ -492,6 +517,11 @@ class Simulation:
             return
         ports_by_name = {port.name: port for port in self.scene.ports}
         for excitation in self.excitations:
+            if excitation.port_name in bound_port_names:
+                raise ValueError(
+                    f"Circuit-bound port {excitation.port_name!r} cannot also declare "
+                    "a direct PortExcitation."
+                )
             port = ports_by_name.get(excitation.port_name)
             if port is None:
                 raise ValueError(
@@ -576,9 +606,40 @@ class Simulation:
     def _refresh_scene(self):
         if self.scene_module is not None:
             self.scene = self.scene_module.to_scene()
-            return
-        if isinstance(self.scene_input, Scene):
+        elif isinstance(self.scene_input, Scene):
             self.scene = self.scene_input
+        self._refresh_trainable_parameters()
+
+    def _refresh_trainable_parameters(self) -> None:
+        self.has_trainable_parameters = bool(
+            any(
+                parameter.requires_grad
+                for parameter in (
+                    self.scene_module.parameters() if self.scene_module is not None else ()
+                )
+            )
+            or _scene_trainable_density_parameters(self.scene)
+            or _scene_trainable_geometry_parameters(self.scene)
+            or _scene_trainable_material_parameters(self.scene)
+            or _scene_trainable_circuit_parameters(self.scene)
+            or _trainable_rf_parameters(
+                self.scene,
+                excitations=self.excitations,
+                port_sweep=self.port_sweep,
+            )
+        )
+
+    def _validate_circuit_execution(self) -> None:
+        if not self.scene.circuits:
+            return
+        self.scene.compile_circuits()
+        if self.method != SimulationMethod.FDTD:
+            raise ValueError("Circuit-coupled scenes are supported by Simulation.fdtd(...) only.")
+        if len(self.scene.circuits) != 1 or not self.scene.circuits[0].bindings:
+            raise NotImplementedError(
+                "Circuit-coupled FDTD requires one circuit with at least one bound port; "
+                "multi-circuit execution is not yet supported."
+            )
 
     def _run_fdfd(self) -> Result:
         if self.has_trainable_parameters:
@@ -906,7 +967,14 @@ class Simulation:
             source_time=source_time,
         )
 
-    def _execute_fdtd_solve(self, solver, scene=None):
+    def _execute_fdtd_solve(
+        self,
+        solver,
+        scene=None,
+        *,
+        resume_from=None,
+        stop_step: int | None = None,
+    ):
         resolved_scene = self.scene if scene is None else scene
         time_steps = self._resolve_fdtd_time_steps(solver, resolved_scene)
         dft_cfg = self.config.spectral_sampler
@@ -926,6 +994,8 @@ class Simulation:
             shutoff=self.config.shutoff,
             shutoff_check_interval=self.config.shutoff_check_interval,
             use_cuda_graph=self.config.cuda_graph,
+            resume_from=resume_from,
+            stop_step=stop_step,
         )
         return raw_output, time_steps, use_full_field_dft, dft_cfg
 
@@ -948,8 +1018,12 @@ class Simulation:
             "Ez": _field("Ez"),
         }
 
-    def _run_fdtd_from_solver(self, solver) -> Result:
-        raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(solver, self.scene)
+    def _run_fdtd_from_solver(self, solver, *, resume_from=None) -> Result:
+        raw_output, time_steps, use_full_field_dft, dft_cfg = self._execute_fdtd_solve(
+            solver,
+            self.scene,
+            resume_from=resume_from,
+        )
         if raw_output is None:
             if self.config.parallel is None or self.config.parallel.gather_fields:
                 raise RuntimeError("FDTD solve did not return any output.")
@@ -957,6 +1031,7 @@ class Simulation:
 
         monitors = raw_output.get("observers", {}) if isinstance(raw_output, dict) else {}
         ports = raw_output.get("ports", {}) if isinstance(raw_output, dict) else {}
+        circuits = raw_output.get("circuits", {}) if isinstance(raw_output, dict) else {}
         field_payload = {
             key: value
             for key, value in (raw_output.items() if isinstance(raw_output, dict) else [])
@@ -991,6 +1066,7 @@ class Simulation:
             fields=fields,
             monitors=monitors,
             ports=ports,
+            circuits=circuits,
             metadata=self.metadata,
             solver_stats=solver_stats,
             raw_output=raw_output,
@@ -1005,6 +1081,8 @@ class Simulation:
         dft_cfg: SpectralSampler,
     ) -> dict[str, Any]:
         elapsed_s = getattr(solver, "last_solve_elapsed_s", None)
+        step_loop_elapsed_s = getattr(solver, "last_step_loop_elapsed_s", None)
+        step_loop_steps = getattr(solver, "last_step_loop_steps", None)
         dft_sample_counts = tuple(getattr(solver, "dft_sample_counts", (getattr(solver, "dft_sample_count", 0),)))
         observer_sample_counts = tuple(
             getattr(
@@ -1024,6 +1102,9 @@ class Simulation:
             "steps_run": (shutoff_step + 1) if shutoff_triggered else time_steps,
             "dt": solver.dt,
             "cuda_graph_active": bool(getattr(solver, "_cuda_graph_active", False)),
+            "circuit_cuda_graph_active": bool(
+                getattr(solver, "_circuit_graph_active", False)
+            ),
             "tail_graph_active": bool(getattr(solver, "_tail_graph_active", False)),
             "boundary": getattr(solver, "boundary_kind", self.scene.boundary.kind),
             "absorber": getattr(solver, "active_absorber_type", self.config.absorber),
@@ -1042,6 +1123,13 @@ class Simulation:
             "observer_sample_counts": observer_sample_counts,
             "full_field_dft": use_full_field_dft,
             "elapsed_s": elapsed_s,
+            "steady_step_elapsed_s": step_loop_elapsed_s,
+            "steady_steps": step_loop_steps,
+            "steady_ms_per_step": (
+                None
+                if step_loop_elapsed_s is None or not step_loop_steps
+                else step_loop_elapsed_s * 1e3 / step_loop_steps
+            ),
             "ms_per_step": (
                 elapsed_s * 1e3 / time_steps
                 if elapsed_s is not None and time_steps > 0
@@ -1095,14 +1183,89 @@ class PreparedSimulation:
     def __init__(self, simulation: Simulation, solver):
         self.simulation = simulation
         self.solver = solver
+        self._consumed = False
 
-    def run(self) -> Result:
+    def _claim(self) -> None:
+        if self._consumed:
+            raise RuntimeError(
+                "A PreparedSimulation can execute only once; call Simulation.prepare() "
+                "again for a fresh solver."
+            )
+        self._consumed = True
+
+    def _validate_resume_support(self) -> None:
+        if (
+            self.simulation.config.parallel is not None
+            or self.simulation.has_trainable_parameters
+        ):
+            raise NotImplementedError(
+                "FDTD resume currently requires a single-GPU detached forward run; "
+                "distributed circuit-owner state and adjoint replay are separate contracts."
+            )
+
+    def run(self, *, resume_from=None) -> Result:
         if self.simulation.method == SimulationMethod.FDFD:
+            if resume_from is not None:
+                raise TypeError("resume_from is available only for FDTD simulations.")
+            self._claim()
             solver_cfg = self.simulation.config.solver
             return self.simulation._build_fdfd_result(self.solver, solver_cfg)
+        if resume_from is not None:
+            self._validate_resume_support()
+            total_steps = self.simulation._resolve_fdtd_time_steps(
+                self.solver,
+                self.simulation.scene,
+            )
+            from .fdtd.resume import preflight_resume_checkpoint
+
+            preflight_resume_checkpoint(
+                self.solver,
+                resume_from,
+                total_steps=total_steps,
+            )
+            self._claim()
+            return self.simulation._run_fdtd_from_solver(
+                self.solver,
+                resume_from=resume_from,
+            )
+        self._claim()
         if self.simulation.has_trainable_parameters:
             return self.simulation._run_fdtd()
         return self.simulation._run_fdtd_from_solver(self.solver)
+
+    def run_until(self, step: int):
+        """Advance exactly ``step`` FDTD steps and return a detached resume state."""
+
+        if self.simulation.method != SimulationMethod.FDTD:
+            raise TypeError("run_until() is available only for FDTD simulations.")
+        self._validate_resume_support()
+        total_steps = self.simulation._resolve_fdtd_time_steps(
+            self.solver,
+            self.simulation.scene,
+        )
+        if isinstance(step, bool) or not isinstance(step, int):
+            raise TypeError("step must be an integer.")
+        if not 0 <= step < total_steps:
+            raise ValueError(
+                f"step must satisfy 0 <= step < {total_steps} for this simulation."
+            )
+        self._claim()
+        raw_output, resolved_steps, _use_full_field_dft, _dft_cfg = (
+            self.simulation._execute_fdtd_solve(
+                self.solver,
+                self.simulation.scene,
+                stop_step=step,
+            )
+        )
+        if raw_output is not None or resolved_steps != total_steps:
+            raise RuntimeError("Partial FDTD execution did not stop at its checkpoint boundary.")
+        from .fdtd.resume import capture_resume_checkpoint
+
+        return capture_resume_checkpoint(
+            self.solver,
+            step=step,
+            total_steps=total_steps,
+        )
 
 
 

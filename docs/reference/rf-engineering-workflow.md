@@ -58,6 +58,16 @@ A port may carry a passive `SeriesRLC` or `ParallelRLC` termination. Independent
 `Scene.add_lumped_element(...)`. Active and passive termination semantics are
 mutually exclusive in one run.
 
+## Linear circuit co-simulation
+
+Use `Circuit` when a load has internal nodes, controlled sources, scheduled
+switches, transient PULSE/SIN/PWL sources, or connections across multiple EM
+ports. The circuit binds existing lumped/terminal port names and runs as a
+same-step GPU MNA/DAE solve inside FDTD; results are available through
+`result.circuit(name)`. The restricted SPICE import, persistence schemas, and
+forward checkpoint/resume workflow are documented in
+[SPICE/MNA circuit co-simulation](spice-mna-cosimulation.md).
+
 ## Network Sweeps
 
 `PortSweep` performs one deterministic run per selected input and returns a

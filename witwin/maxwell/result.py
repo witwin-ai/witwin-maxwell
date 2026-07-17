@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from .circuits import CircuitData
 from .monitors import (
     ClosedSurfaceMonitor,
     FinitePlaneMonitor,
@@ -20,7 +21,7 @@ from .scene import prepare_scene
 from .visualization import extract_orthogonal_slice, plot_slice_image
 
 _UNSET = object()
-RESULT_SNAPSHOT_SCHEMA_VERSION = 1
+RESULT_SNAPSHOT_SCHEMA_VERSION = 2
 
 
 def _clone_mapping(data: dict[str, Any]) -> dict[str, Any]:
@@ -56,6 +57,29 @@ def _normalize_port_data_mapping(ports) -> dict[str, PortData]:
                 f"PortData.port_name {data.port_name!r}."
             )
         normalized[port_name] = data
+    return normalized
+
+
+def _normalize_circuit_data_mapping(circuits) -> dict[str, CircuitData]:
+    if circuits is None:
+        return {}
+    if not isinstance(circuits, Mapping):
+        raise TypeError("circuits must be a mapping from circuit names to CircuitData.")
+    normalized = {}
+    for name, data in circuits.items():
+        circuit_name = str(name)
+        if circuit_name in normalized:
+            raise ValueError(f"Duplicate normalized circuit key {circuit_name!r}.")
+        if not isinstance(data, CircuitData):
+            raise TypeError(
+                f"Result circuit {circuit_name!r} must be a CircuitData instance."
+            )
+        if circuit_name != data.circuit_name:
+            raise ValueError(
+                f"Result circuit key {circuit_name!r} does not match "
+                f"CircuitData.circuit_name {data.circuit_name!r}."
+            )
+        normalized[circuit_name] = data
     return normalized
 
 
@@ -99,6 +123,10 @@ def _network_data_snapshot(data: NetworkData | None):
         "power_wave_convention": data.power_wave_convention,
         "matrix_order": "[frequency, output_port, input_port]",
     }
+
+
+def _circuit_data_snapshot(data: CircuitData) -> dict[str, Any]:
+    return data._snapshot()
 
 
 def _port_data_from_snapshot(payload: Mapping[str, Any]) -> PortData:
@@ -150,6 +178,27 @@ def _network_data_from_snapshot(payload: Mapping[str, Any] | None) -> NetworkDat
         phasor_convention=payload["phasor_convention"],
         power_wave_convention=payload["power_wave_convention"],
     )
+
+
+def _circuit_data_from_snapshot(payload: Mapping[str, Any]) -> CircuitData:
+    return CircuitData._from_snapshot(payload)
+
+
+def _validate_result_snapshot_payload(
+    payload: Mapping[str, Any],
+    *,
+    sharded: bool,
+) -> None:
+    label = "Sharded Result metadata" if sharded else "Result checkpoint"
+    if payload.get("data_type") != "ResultSnapshot":
+        raise ValueError(f"{label} has an invalid data_type.")
+    version = payload.get("schema_version")
+    if version != RESULT_SNAPSHOT_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported {label.lower()} schema_version={version!r}.")
+    if "circuits" not in payload:
+        raise ValueError(f"{label} schema v2 is missing required key: circuits.")
+    if not isinstance(payload["circuits"], Mapping):
+        raise ValueError(f"{label} circuits must contain a mapping payload.")
 
 
 def _resolve_result_frequencies(*, frequency: float | None, frequencies) -> tuple[float, ...]:
@@ -850,6 +899,7 @@ class Result:
         fields: dict[str, torch.Tensor] | None = None,
         monitors: dict[str, Any] | None = None,
         ports: Mapping[str, PortData] | None = None,
+        circuits: Mapping[str, CircuitData] | None = None,
         network: NetworkData | None = None,
         metadata: dict[str, Any] | None = None,
         solver_stats: dict[str, Any] | None = None,
@@ -864,6 +914,7 @@ class Result:
         self._fields = _clone_mapping(fields)
         self._monitors = _clone_mapping(monitors)
         self._ports = _normalize_port_data_mapping(ports)
+        self._circuits = _normalize_circuit_data_mapping(circuits)
         if network is not None and not isinstance(network, NetworkData):
             raise TypeError("network must be a NetworkData or None.")
         self._network = network
@@ -909,6 +960,10 @@ class Result:
     @property
     def ports(self) -> dict[str, PortData]:
         return dict(self._ports)
+
+    @property
+    def circuits(self) -> dict[str, CircuitData]:
+        return dict(self._circuits)
 
     @property
     def network(self) -> NetworkData | None:
@@ -1087,6 +1142,16 @@ class Result:
             )
         return self._ports[port_name]
 
+    def circuit(self, name: str) -> CircuitData:
+        circuit_name = str(name)
+        if circuit_name not in self._circuits:
+            choices = tuple(self._circuits)
+            raise KeyError(
+                f"Circuit {circuit_name!r} is not available in this result. "
+                f"Choices: {choices}."
+            )
+        return self._circuits[circuit_name]
+
     def antenna(
         self,
         *,
@@ -1232,8 +1297,37 @@ class Result:
         stats["num_fields"] = len(self._fields)
         stats["num_monitors"] = len(self._monitors)
         stats["num_ports"] = len(self._ports)
+        stats["num_circuits"] = len(self._circuits)
         stats["has_network"] = self._network is not None
         return stats
+
+    def _snapshot_payload(self, *, fields: Mapping[str, torch.Tensor]) -> dict[str, Any]:
+        """Build and validate the detached payload before any I/O side effect."""
+
+        return {
+            "schema_version": RESULT_SNAPSHOT_SCHEMA_VERSION,
+            "data_type": "ResultSnapshot",
+            "format_version": 1,
+            "method": self.method,
+            "frequency": self.frequency,
+            "frequencies": self.frequencies,
+            "fields": {
+                name: tensor.detach().cpu()
+                for name, tensor in fields.items()
+            },
+            "monitors": _cpu_serializable(self._monitors),
+            "ports": {
+                name: _port_data_snapshot(data)
+                for name, data in self._ports.items()
+            },
+            "circuits": {
+                name: _circuit_data_snapshot(data)
+                for name, data in self._circuits.items()
+            },
+            "network": _network_data_snapshot(self._network),
+            "metadata": _cpu_serializable(self._metadata),
+            "solver_stats": _cpu_serializable(self._solver_stats),
+        }
 
     def save(self, path: str | Path):
         """Save a detached CPU data snapshot.
@@ -1244,32 +1338,20 @@ class Result:
         the caller to supply the corresponding declarative Scene.
         """
 
+        payload = self._snapshot_payload(fields=self._fields)
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "schema_version": RESULT_SNAPSHOT_SCHEMA_VERSION,
-                "data_type": "ResultSnapshot",
-                "format_version": 1,
-                "method": self.method,
-                "frequency": self.frequency,
-                "frequencies": self.frequencies,
-                "fields": {name: tensor.detach().cpu() for name, tensor in self._fields.items()},
-                "monitors": _cpu_serializable(self._monitors),
-                "ports": {
-                    name: _port_data_snapshot(data)
-                    for name, data in self._ports.items()
-                },
-                "network": _network_data_snapshot(self._network),
-                "metadata": _cpu_serializable(self._metadata),
-                "solver_stats": _cpu_serializable(self._solver_stats),
-            },
-            output_path,
-        )
+        torch.save(payload, output_path)
 
     def save_sharded(self, directory: str | Path):
         """Persist owned field shards without assembling global field tensors."""
 
+        destination = Path(directory)
+        if destination.exists():
+            raise FileExistsError(
+                "Sharded Result directory already exists; refusing non-atomic overwrite: "
+                f"{destination}."
+            )
         exporter = getattr(self.solver, "export_field_shards", None)
         if not callable(exporter):
             raise RuntimeError(
@@ -1278,27 +1360,12 @@ class Result:
             )
         from .fdtd.distributed.persistence import write_sharded_result
 
-        payload = {
-            "schema_version": RESULT_SNAPSHOT_SCHEMA_VERSION,
-            "data_type": "ResultSnapshot",
-            "format_version": 1,
-            "method": self.method,
-            "frequency": self.frequency,
-            "frequencies": self.frequencies,
-            "fields": {},
-            "monitors": _cpu_serializable(self._monitors),
-            "ports": {
-                name: _port_data_snapshot(data)
-                for name, data in self._ports.items()
-            },
-            "network": _network_data_snapshot(self._network),
-            "metadata": _cpu_serializable(self._metadata),
-            "solver_stats": _cpu_serializable(self._solver_stats),
-        }
+        payload = self._snapshot_payload(fields={})
+        shard_artifacts = exporter()
         return write_sharded_result(
-            directory,
+            destination,
             result_payload=payload,
-            shard_artifacts=exporter(),
+            shard_artifacts=shard_artifacts,
             frequencies=self.frequencies,
         )
 
@@ -1326,11 +1393,7 @@ class Result:
         )
         if not isinstance(payload, dict):
             raise ValueError("Result checkpoint must contain a mapping payload.")
-        if payload.get("data_type") != "ResultSnapshot":
-            raise ValueError("Result checkpoint has an invalid data_type.")
-        version = payload.get("schema_version")
-        if version != RESULT_SNAPSHOT_SCHEMA_VERSION:
-            raise ValueError(f"Unsupported Result schema_version={version!r}.")
+        _validate_result_snapshot_payload(payload, sharded=False)
         missing = {"method", "fields", "monitors"}.difference(payload)
         if missing:
             names = ", ".join(sorted(missing))
@@ -1347,6 +1410,10 @@ class Result:
             ports={
                 name: _port_data_from_snapshot(data)
                 for name, data in payload.get("ports", {}).items()
+            },
+            circuits={
+                name: _circuit_data_from_snapshot(data)
+                for name, data in payload["circuits"].items()
             },
             network=_network_data_from_snapshot(payload.get("network")),
             metadata=payload.get("metadata"),
@@ -1375,13 +1442,7 @@ class Result:
             map_location=map_location,
         )
         payload = loaded.result_payload
-        if payload.get("data_type") != "ResultSnapshot":
-            raise ValueError("Sharded Result metadata has an invalid data_type.")
-        version = payload.get("schema_version")
-        if version != RESULT_SNAPSHOT_SCHEMA_VERSION:
-            raise ValueError(
-                f"Unsupported sharded Result schema_version={version!r}."
-            )
+        _validate_result_snapshot_payload(payload, sharded=True)
         missing = {"method", "monitors"}.difference(payload)
         if missing:
             names = ", ".join(sorted(missing))
@@ -1397,6 +1458,10 @@ class Result:
             ports={
                 name: _port_data_from_snapshot(data)
                 for name, data in payload.get("ports", {}).items()
+            },
+            circuits={
+                name: _circuit_data_from_snapshot(data)
+                for name, data in payload["circuits"].items()
             },
             network=_network_data_from_snapshot(payload.get("network")),
             metadata=payload.get("metadata"),

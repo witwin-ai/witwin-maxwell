@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from witwin.core import Structure
+from .circuits import Circuit, CircuitNode
 from .lumped import Capacitor, Inductor, Resistor
 from .ports import LumpedPort, ModePort, TerminalPort, WavePort, _resolve_terminal_port
 from .compiler.materials import (
@@ -756,6 +757,7 @@ class Scene:
         monitors=None,
         ports=None,
         lumped_elements=(),
+        circuits=(),
         material_regions=None,
         metadata=None,
         device="cuda",
@@ -793,6 +795,9 @@ class Scene:
         self.lumped_elements = []
         for element in lumped_elements:
             self.add_lumped_element(element)
+        self.circuits = []
+        for circuit in circuits:
+            self.add_circuit(circuit)
         self.lazy_meshgrid = bool(lazy_meshgrid)
 
     @property
@@ -936,6 +941,11 @@ class Scene:
             raise ValueError(
                 f"Lumped element name {element.name!r} is already present in the scene."
             )
+        if isinstance(element.positive, CircuitNode) or isinstance(element.negative, CircuitNode):
+            raise TypeError(
+                "Scene-local lumped elements require 3D coordinate terminals; "
+                "add circuit-node elements through Circuit.add(...)."
+            )
 
         for terminal_name, terminal in (
             ("positive", element.positive),
@@ -980,6 +990,19 @@ class Scene:
 
         return prepare_scene(self).compile_lumped_elements(device=device)
 
+    def add_circuit(self, circuit: Circuit):
+        if not isinstance(circuit, Circuit):
+            raise TypeError("Maxwell Scene circuits must be Circuit instances.")
+        if any(existing.name.casefold() == circuit.name.casefold() for existing in self.circuits):
+            raise ValueError(f"Circuit name {circuit.name!r} is already present in the scene.")
+        self.circuits.append(circuit)
+        return self
+
+    def compile_circuits(self):
+        """Compile declared circuit topology through the preparation layer."""
+
+        return prepare_scene(self).compile_circuits()
+
     def add_material_region(self, material_region: MaterialRegion):
         self.material_regions.append(material_region)
         return self
@@ -994,6 +1017,7 @@ class Scene:
             "monitors": list(self.monitors),
             "ports": list(self.ports),
             "lumped_elements": list(self.lumped_elements),
+            "circuits": list(self.circuits),
             "material_regions": list(self.material_regions),
             "metadata": dict(self.metadata),
             "device": self.device,
@@ -1128,6 +1152,7 @@ class PreparedScene(Scene):
             monitors=list(scene.monitors),
             ports=list(scene.ports),
             lumped_elements=list(scene.lumped_elements),
+            circuits=list(scene.circuits),
             material_regions=list(scene.material_regions),
             metadata=dict(scene.metadata),
             device=scene.device,
@@ -1343,6 +1368,11 @@ class PreparedScene(Scene):
             self,
             device=self.device if device is None else device,
         )
+
+    def compile_circuits(self):
+        from .compiler.circuits import compile_circuits
+
+        return compile_circuits(self)
 
     def compile_relative_materials(
         self,

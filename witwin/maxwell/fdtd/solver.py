@@ -456,6 +456,8 @@ class FDTD:
         shutoff: float = 0.0,
         shutoff_check_interval: int = 100,
         use_cuda_graph: bool = False,
+        resume_from=None,
+        stop_step: int | None = None,
     ):
         return solve_impl(
             self,
@@ -468,6 +470,8 @@ class FDTD:
             shutoff=shutoff,
             shutoff_check_interval=shutoff_check_interval,
             use_cuda_graph=use_cuda_graph,
+            resume_from=resume_from,
+            stop_step=stop_step,
         )
 
     def _interpolate_yee_to_center(self, freq_solution):

@@ -7,7 +7,7 @@ The documentation tree is organized by document purpose. Solver and feature name
 - [`plans/`](plans/): implementation plans and functional roadmaps that still have open work.
 - [`memory/`](memory/): current implementation notes and durable engineering context.
 - [`assessments/`](assessments/): current audits, gap analyses, and capability evaluations.
-- [`reference/`](reference/): maintained technical facts, capability matrices, and code-linked inventories, including the [FDTD multi-GPU joint-solve guide](reference/fdtd-multi-gpu-joint-solve.md) and [capability-guard census](reference/fdtd-capability-guard-census.md).
+- [`reference/`](reference/): maintained technical facts, capability matrices, and code-linked inventories, including the [SPICE/MNA circuit co-simulation workflow](reference/spice-mna-cosimulation.md), [FDTD multi-GPU joint-solve guide](reference/fdtd-multi-gpu-joint-solve.md), and [capability-guard census](reference/fdtd-capability-guard-census.md).
 - [`releases/`](releases/): release notes.
 - [`validation/`](validation/): stable release-validation records.
 

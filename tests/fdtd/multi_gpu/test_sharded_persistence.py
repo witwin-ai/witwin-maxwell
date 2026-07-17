@@ -70,7 +70,31 @@ def _artifacts(
     return tuple(by_rank[rank] for rank in order)
 
 
-def _result(artifacts, *, fields=None) -> Result:
+def _circuit_data(*, requires_grad=False) -> mw.CircuitData:
+    return mw.CircuitData(
+        circuit_name="network",
+        times=torch.tensor([0.0, 1.0], dtype=torch.float64),
+        node_names=("0", "signal"),
+        node_voltages=torch.tensor(
+            [[0.0, 0.0], [0.0, 1.0]],
+            dtype=torch.float64,
+            requires_grad=requires_grad,
+        ),
+        branch_names=("R1",),
+        branch_currents=torch.tensor(
+            [[0.0], [0.02]],
+            dtype=torch.float64,
+            requires_grad=requires_grad,
+        ),
+        device_powers={
+            "R1": torch.tensor([0.0, 0.02], dtype=torch.float64)
+        },
+        energy_balance=torch.tensor([0.0, 1.0e-12], dtype=torch.float64),
+        diagnostics={"condition": torch.tensor([1.0, 1.5], dtype=torch.float64)},
+    )
+
+
+def _result(artifacts, *, fields=None, circuits=None) -> Result:
     solver = SimpleNamespace(export_field_shards=lambda: artifacts)
     monitor_data = torch.tensor((1.0 + 2.0j, 3.0 + 4.0j))
     return Result(
@@ -87,6 +111,7 @@ def _result(artifacts, *, fields=None) -> Result:
                 "data": monitor_data,
             }
         },
+        circuits=circuits,
         metadata={"run": "uneven-multifrequency"},
         solver_stats={"parallel_stats": {"devices": ("cuda:0", "cuda:1")}},
     )
@@ -166,6 +191,122 @@ def test_sharded_round_trip_sorts_ranks_and_gathers_uneven_multifrequency_fields
     )
 
 
+def test_sharded_v2_stores_circuits_once_in_result_metadata(tmp_path):
+    fields = _global_fields()
+    data = _circuit_data(requires_grad=True)
+    directory = tmp_path / "sharded-circuit"
+
+    _result(
+        _artifacts(fields),
+        circuits={"network": data},
+    ).save_sharded(directory)
+
+    payload = torch.load(directory / "result.pt", weights_only=True)
+    assert payload["schema_version"] == 2
+    assert tuple(payload["circuits"]) == ("network",)
+    assert payload["circuits"]["network"]["schema_version"] == 1
+    for rank in range(3):
+        rank_payload = torch.load(
+            directory / f"rank-{rank:04d}.pt",
+            weights_only=True,
+        )
+        assert "circuits" not in rank_payload
+
+    lazy = Result.load_sharded(directory, scene=_scene())
+    restored = lazy.circuit("network")
+    torch.testing.assert_close(restored.node_voltages, data.node_voltages.detach())
+    torch.testing.assert_close(
+        restored.diagnostics["condition"],
+        data.diagnostics["condition"],
+    )
+    assert restored.node_voltages.requires_grad is False
+
+    gathered = Result.load_sharded(
+        directory,
+        scene=_scene(),
+        gather_fields=True,
+    )
+    torch.testing.assert_close(
+        gathered.circuit("network").branch_currents,
+        data.branch_currents.detach(),
+    )
+
+
+def test_sharded_rejects_superseded_v1_and_v2_without_circuits(tmp_path):
+    fields = _global_fields()
+    directory = tmp_path / "sharded-v1"
+    _result(
+        _artifacts(fields),
+        circuits={"network": _circuit_data()},
+    ).save_sharded(directory)
+    result_path = directory / "result.pt"
+    payload = torch.load(result_path, weights_only=True)
+
+    # v1 is superseded, not supported alongside v2: there is no backward-support path.
+    payload["schema_version"] = 1
+    torch.save(payload, result_path)
+    with pytest.raises(
+        ValueError,
+        match="Unsupported sharded result metadata schema_version=1",
+    ):
+        Result.load_sharded(directory, scene=_scene())
+
+    payload["schema_version"] = 2
+    payload.pop("circuits")
+    torch.save(payload, result_path)
+    with pytest.raises(ValueError, match="schema v2 is missing required key: circuits"):
+        Result.load_sharded(directory, scene=_scene())
+
+
+def test_save_sharded_prevalidates_circuits_before_calling_exporter(tmp_path):
+    calls = 0
+
+    def exporter():
+        nonlocal calls
+        calls += 1
+        return ()
+
+    data = _circuit_data()
+    data.diagnostics["unsafe"] = object()
+    result = Result(
+        method="fdtd",
+        scene=_scene(),
+        frequency=1.0e9,
+        solver=SimpleNamespace(export_field_shards=exporter),
+        circuits={"network": data},
+    )
+    directory = tmp_path / "unsafe-circuit"
+
+    with pytest.raises(TypeError, match="CircuitData.diagnostics.*object"):
+        result.save_sharded(directory)
+
+    assert calls == 0
+    assert directory.exists() is False
+
+
+def test_save_sharded_rejects_existing_destination_before_exporting(tmp_path):
+    calls = 0
+
+    def exporter():
+        nonlocal calls
+        calls += 1
+        return ()
+
+    destination = tmp_path / "existing"
+    destination.mkdir()
+    result = Result(
+        method="fdtd",
+        scene=_scene(),
+        frequency=1.0e9,
+        solver=SimpleNamespace(export_field_shards=exporter),
+    )
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        result.save_sharded(destination)
+
+    assert calls == 0
+
+
 def test_lazy_load_does_not_deserialize_existing_corrupt_rank_until_gather(tmp_path):
     directory, _manifest, _fields = _save_fixture(tmp_path)
     corrupt = directory / "rank-0001.pt"
@@ -225,10 +366,11 @@ def test_noncontiguous_owned_intervals_are_rejected_before_publication(tmp_path)
         components=tuple(components),
     )
 
-    directory = tmp_path / "gap"
+    directory = tmp_path / "nested" / "gap"
     with pytest.raises(ValueError, match="leaves a gap"):
         _result(tuple(artifacts)).save_sharded(directory)
     assert directory.exists() is False
+    assert directory.parent.exists() is False
 
 
 def test_rank_tensors_are_detached_and_written_on_cpu(

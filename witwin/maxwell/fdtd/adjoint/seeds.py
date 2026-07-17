@@ -98,6 +98,19 @@ class _PortSeedBatch:
 
 
 @dataclass(frozen=True)
+class _CircuitSeedBatch:
+    circuit_index: int
+    node_samples: torch.Tensor
+    branch_samples: torch.Tensor
+    device_power_samples: torch.Tensor
+    balance_increment_samples: torch.Tensor
+    port_power_samples: torch.Tensor
+    field_energy_samples: torch.Tensor
+    dc_condition: torch.Tensor
+    last_condition: torch.Tensor
+
+
+@dataclass(frozen=True)
 class _SeedRuntime:
     dft_schedule: _ScheduleTensorPack
     observer_schedule: _ScheduleTensorPack
@@ -105,6 +118,7 @@ class _SeedRuntime:
     point_batches: tuple[_PointSeedBatch, ...]
     plane_batches: tuple[_PlaneSeedBatch, ...]
     port_batches: tuple[_PortSeedBatch, ...]
+    circuit_batches: tuple[_CircuitSeedBatch, ...]
     backend: str = "device_batched"
 
 
@@ -493,7 +507,28 @@ def _build_output_seeds(
             device=weights.device,
             dtype=weights.dtype,
         )
-        sample_times = (steps + 0.5) * port_runtime.lumped.dt.to(dtype=weights.dtype)
+        coupling = (
+            port_runtime.lumped
+            if port_runtime.lumped is not None
+            else port_runtime.circuit_port.field
+        )
+        if port_runtime.lumped is not None:
+            fractions = torch.full_like(steps, 0.5)
+        else:
+            circuit_runtime = next(
+                runtime
+                for runtime in getattr(solver, "_circuit_runtimes", ())
+                if port_runtime.circuit_port in runtime.ports
+            )
+            fractions = torch.as_tensor(
+                tuple(
+                    0.5 if integration == "trapezoidal" else 1.0
+                    for integration in circuit_runtime.integration_keys
+                ),
+                device=weights.device,
+                dtype=weights.dtype,
+            )
+        sample_times = (steps + fractions) * coupling.dt.to(dtype=weights.dtype)
         angles = (
             2.0
             * torch.pi
@@ -547,6 +582,102 @@ def _build_output_seeds(
             )
         )
 
+    circuit_batches = []
+    if cursor != int(pack.circuit_offset):
+        raise RuntimeError("Adjoint port output layout changed before circuit seed construction.")
+    for circuit_index, circuit_name in enumerate(pack.circuit_templates):
+        template = pack.circuit_templates[circuit_name]
+        node_output = pack.output_tensors[cursor]
+        branch_output = pack.output_tensors[cursor + 1]
+        node_grad = (
+            torch.zeros_like(node_output)
+            if grad_outputs[cursor] is None
+            else grad_outputs[cursor].to(device=node_output.device, dtype=node_output.dtype)
+        )
+        branch_grad = (
+            torch.zeros_like(branch_output)
+            if grad_outputs[cursor + 1] is None
+            else grad_outputs[cursor + 1].to(
+                device=branch_output.device,
+                dtype=branch_output.dtype,
+            )
+        )
+        cursor += 2
+        device_power_grads = []
+        for _device_name in template.device_powers:
+            output = pack.output_tensors[cursor]
+            gradient = grad_outputs[cursor]
+            device_power_grads.append(
+                torch.zeros_like(output)
+                if gradient is None
+                else gradient.to(device=output.device, dtype=output.dtype)
+            )
+            cursor += 1
+        device_power_grad = (
+            torch.stack(device_power_grads, dim=1)
+            if device_power_grads
+            else node_output.new_zeros((node_output.shape[0], 0))
+        )
+        if template.energy_balance is None:
+            energy_grad = node_output.new_zeros((node_output.shape[0],))
+        else:
+            energy_output = pack.output_tensors[cursor]
+            energy_grad = (
+                torch.zeros_like(energy_output)
+                if grad_outputs[cursor] is None
+                else grad_outputs[cursor].to(
+                    device=energy_output.device,
+                    dtype=energy_output.dtype,
+                )
+            )
+            cursor += 1
+        diagnostic_grads = {}
+        for diagnostic_name in pack.circuit_diagnostic_names[circuit_name]:
+            output = pack.output_tensors[cursor]
+            gradient = grad_outputs[cursor]
+            diagnostic_grads[diagnostic_name] = (
+                torch.zeros_like(output)
+                if gradient is None
+                else gradient.to(device=output.device, dtype=output.dtype)
+            )
+            cursor += 1
+        port_power_grad = diagnostic_grads["port_powers"]
+        field_energy_grad = diagnostic_grads["field_energy_changes"]
+        field_energy_grad = field_energy_grad + diagnostic_grads[
+            "field_energy_change_total"
+        ].unsqueeze(1)
+        initial_seeds = (
+            node_grad[0],
+            branch_grad[0],
+            device_power_grad[0],
+            energy_grad[0],
+            port_power_grad[0],
+            field_energy_grad[0],
+        )
+        if any(bool(torch.any(seed != 0.0)) for seed in initial_seeds):
+            raise RuntimeError(
+                f"Differentiable CircuitData for {circuit_name!r} does not accept a t=0 "
+                "tensor seed; the coupled adjoint starts from the explicitly zero "
+                "companion state. Slice samples from index 1 or use port/field outputs."
+            )
+        balance_increment_grad = torch.flip(
+            torch.cumsum(torch.flip(energy_grad, dims=(0,)), dim=0),
+            dims=(0,),
+        )
+        circuit_batches.append(
+            _CircuitSeedBatch(
+                circuit_index=circuit_index,
+                node_samples=node_grad,
+                branch_samples=branch_grad,
+                device_power_samples=device_power_grad,
+                balance_increment_samples=balance_increment_grad,
+                port_power_samples=port_power_grad,
+                field_energy_samples=field_energy_grad,
+                dc_condition=diagnostic_grads["dc_condition"],
+                last_condition=diagnostic_grads["last_condition"],
+            )
+        )
+
     return _SeedRuntime(
         dft_schedule=dft_schedule,
         observer_schedule=observer_schedule,
@@ -554,6 +685,7 @@ def _build_output_seeds(
         point_batches=tuple(point_batches),
         plane_batches=tuple(plane_batches),
         port_batches=tuple(port_batches),
+        circuit_batches=tuple(circuit_batches),
     )
 
 
@@ -565,6 +697,30 @@ def _port_sample_adjoints(seed_runtime: _SeedRuntime, step_index: int):
             batch.drive_samples[step_index],
         )
         for batch in seed_runtime.port_batches
+    }
+
+
+def _circuit_sample_adjoints(seed_runtime: _SeedRuntime, step_index: int):
+    return {
+        batch.circuit_index: (
+            batch.node_samples[step_index + 1],
+            batch.branch_samples[step_index + 1],
+            batch.device_power_samples[step_index + 1],
+            batch.balance_increment_samples[step_index + 1],
+            batch.port_power_samples[step_index + 1],
+            batch.field_energy_samples[step_index + 1],
+            (
+                batch.dc_condition
+                if step_index == 0
+                else torch.zeros_like(batch.dc_condition)
+            ),
+            (
+                batch.last_condition
+                if step_index + 2 == batch.node_samples.shape[0]
+                else torch.zeros_like(batch.last_condition)
+            ),
+        )
+        for batch in seed_runtime.circuit_batches
     }
 
 

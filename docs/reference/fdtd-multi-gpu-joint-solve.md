@@ -149,6 +149,17 @@ This is spatial domain decomposition, not replicated data parallelism:
 7. Only the first and last slabs apply physical x-face boundary behavior. Internal
    interfaces never apply PML, PEC, PMC, Mur, periodic, or symmetry boundary rules.
    Every shard still owns the global y/z faces.
+8. For a circuit-coupled run, each bound lumped/terminal port has one Yee-edge
+   owner. The circuit owner is the shard owning the lexicographically minimum
+   bound voltage edge, with `Ex`, `Ey`, `Ez` as the deterministic component
+   tie-break. A remote port sends one voltage scalar to that owner and receives
+   one solved current scalar per step; ports already on the circuit owner take a
+   zero-P2P fast path. MNA state, circuit time series, port spectra, and live
+   circuit checkpoint tensors remain on the circuit owner until final results are
+   moved once to `result_device`. Each remote stream acknowledges completion of
+   its current-scalar peer read, and the next owner solve waits for that event
+   before reusing the source buffer; the acknowledgement does not wait for the
+   subsequent shard-local field correction.
 
 The steady-state fields and field-sized CPML/ADE/DFT state are shard local. The
 coordinator prepares global grid metadata and a common time step, but does not
@@ -172,6 +183,7 @@ must not be described as independently hardware-qualified.
 | Nonlinearity | Rejected | Additional collocation halos and bounded nonlinear kernels are required. |
 | Absorbers and boundaries | Global-face CPML/PML/StablePML/absorber behavior and mixed `none`/PEC/PMC/Mur; y/z periodic and y/z symmetry are accepted | XYZ CPML plus dielectric, mixed PEC/PMC/Mur, y periodic, and y symmetry have two-GPU parity coverage. x periodic, all Bloch, and x symmetry fail fast. |
 | Sources | `PointDipole(profile="ideal")` and `UniformCurrentSource` | Point sources on/near interfaces and a current volume crossing the interface have A6000 parity coverage. Plane-wave/TFSF, beam, mode, and other surface sources fail fast. |
+| Circuit co-simulation | One linear circuit with one or more bound `LumpedPort`/`TerminalPort` objects; GPU-native owner MNA and P2P scalar exchange | Each individual port must be wholly owned by one x slab. Multiple ports may reside on different shards. Communication is two scalars per remote bound port per step, and no external circuit process is used. The physical two-GPU parity gate passes on 2x RTX A6000 with exact (bitwise, 0.000e+00) single-versus-two-GPU parity on all six fields, port V/I, and circuit node/branch data. |
 | Monitors | Point spectral monitor, point `FieldTimeMonitor`, a valid `DipoleEmissionMonitor`, and spectral `PlaneMonitor`/`FinitePlaneMonitor`/`FluxMonitor`/`ModeMonitor` | y/z-normal planes are tiled across x and stitched from owned component intervals on `result_device`; x-normal planes have exactly one shard owner. Five Plane/Flux/Mode A6000 numerical cases observed exact single/two-GPU parity. Closed-surface, diffraction, flux-time, non-point field-time, and material monitors remain rejected. |
 | Spectral output | One or many requested frequencies; supported point/plane monitor assembly; optional gathered electric fields | Multiple frequencies preserve frequency metadata and leading frequency dimension. |
 | Persistence | Gathered `save`/`load` and distributed `save_sharded`/`load_sharded` | Lazy sharded load leaves `fields` empty and rank tensors unopened; explicit gather validates and stitches owned intervals. Persistence does not restore live solver/transport state. |
@@ -179,7 +191,7 @@ must not be described as independently hardware-qualified.
 | Auto shutoff | Global owned-electric-energy reduction on `result_device` | `steps_run`, halo totals, and normalization reflect early termination. |
 | CUDA Graph | Rejected | Peer communication is not graph captured. |
 | Plotting | Rejected during solve | Run with `gather_fields=True`, then consume the gathered result explicitly. |
-| Trainable scenes / adjoint | Rejected before distributed allocation | The existing differentiable path remains single GPU. No multi-GPU backward or distributed checkpoint/replay claim. |
+| Trainable scenes / adjoint | Rejected before distributed allocation | The existing differentiable path remains single GPU. Circuit history tensors have one live owner, but full field-shard checkpoint replay and multi-GPU backward remain deferred. |
 | NCCL / multi-process / multi-node | Reserved, not implemented | `transport="nccl"` raises explicitly. |
 | Three or four GPUs | Structurally representable by the partition and neighbor transport | Not qualified in the current hardware acceptance record; no validation claim is made here. |
 
@@ -198,8 +210,9 @@ following cases rather than silently changing the physics or execution model:
 - trainable scene parameters, `MaterialRegion` density designs, nonlinear media,
   full off-diagonal electric anisotropy, or lossy-metal/SIBC ownership;
 - Bloch boundaries, periodic x, or x-axis symmetry;
-- ports, unsupported source classes, non-ideal point-dipole profiles, or an invalid
-  dipole-emission source reference;
+- mode ports, unbound lumped/terminal ports, one bound port whose voltage edges
+  cross an x-slab split, unsupported source classes, non-ideal point-dipole
+  profiles, or an invalid dipole-emission source reference;
 - `ClosedSurfaceMonitor`, `DiffractionMonitor`, `FluxTimeMonitor`, non-point
   `FieldTimeMonitor`, `PermittivityMonitor`, and `MediumMonitor`;
 - an ordinary non-flux x-normal `PlaneMonitor` or `FinitePlaneMonitor` that requests
@@ -226,6 +239,13 @@ Use either `result.solver_stats["parallel_stats"]` or
 - per-device `peak_memory_bytes` before gathering and
   `peak_memory_bytes_including_gather` after output collection;
 - `wall_time_s`.
+
+Circuit-coupled runs additionally expose `parallel_stats["circuit"]`, including
+the circuit and per-port owner ranks, same-shard and remote-port counts, scalar
+transfers, owner copy acknowledgements, bytes per step/total, and the
+circuit-checkpoint owner. These
+statistics count only circuit scalar traffic; halo bytes remain in the top-level
+halo counters.
 
 `compute_time_s`, `communication_time_s`, and
 `exposed_communication_time_s` are currently `None`. Per-phase timing would require
@@ -270,6 +290,29 @@ weak scaling, and peak memory. Its default gates are:
 The benchmark's default `gather_fields=False` measures the scalable monitor-first
 solve. Run an additional `--gather-fields` pass when validating result assembly, but
 do not mix gather allocation/time into the core scaling number.
+
+### Physical two-GPU circuit gate
+
+The circuit-owner acceptance case is a real single-versus-two-GPU solve, not a
+mock transport test. It places two bound ports on different x slabs, exercises the
+same-shard fast path and one bidirectional remote scalar exchange, and compares
+gathered fields, port phasors, circuit time series, result placement, communication
+accounting, and checkpoint ownership:
+
+```bash
+python -m pytest \
+  tests/fdtd/multi_gpu/test_circuit_owner.py::test_physical_two_gpu_circuit_matches_single_gpu_and_reports_scalar_contract \
+  -q
+```
+
+The gate requires two homogeneous GPUs with bidirectional CUDA peer access and uses
+`rtol=2e-5` for field/circuit parity. It skips whenever the run sees fewer than two
+peer-accessible devices, in which case the file reports `6 passed, 1 skipped` and the
+skipped item is exactly this gate. On 2x RTX A6000 with both devices visible the file
+reports `7 passed`, and this gate passes by an exact (bitwise, 0.000e+00) margin on all
+six fields, both bound-port voltages/currents, and the circuit node/branch series. The
+full deviation table and the scalar-transfer contract are recorded in
+`docs/assessments/spice-mna-phase-4-acceptance.md`.
 
 ### Clean-build test record
 

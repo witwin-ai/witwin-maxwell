@@ -690,13 +690,13 @@ def write_sharded_result(
     """Atomically publish ``manifest.json``, ``result.pt``, and rank tensor files."""
 
     destination = Path(directory)
-    destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         raise FileExistsError(
             "Sharded Result directory already exists; refusing non-atomic overwrite: "
             f"{destination}."
         )
     manifest, artifacts = _build_manifest(shard_artifacts, frequencies=frequencies)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(
         tempfile.mkdtemp(
             prefix=f".{destination.name}.tmp-",

@@ -21,6 +21,7 @@ from ...monitors import (
     PointMonitor,
 )
 from ...scene import Domain, GridSpec, Scene, prepare_scene
+from ...ports import LumpedPort, ModePort, TerminalPort
 from ...sources import PointDipole, UniformCurrentSource
 from ...fdtd_parallel import FDTDParallelConfig, FDTDPartitionPlan, FDTDShardLayout
 from ..excitation import (
@@ -36,6 +37,7 @@ from .capacity import (
     require_gather_capacity,
     require_local_dft_capacity,
 )
+from .circuits import DistributedCircuitRuntime
 from .frequency_counts import reduce_frequency_sample_counts
 from .monitor_merge import merge_sharded_monitor_payloads
 from .persistence import export_distributed_field_shards
@@ -193,6 +195,7 @@ def _build_local_scene(
         boundary=local_boundary,
         monitors=_local_monitors(logical_scene, layout, global_prepared),
         ports=(),
+        circuits=(),
         device=str(layout.device),
         symmetry=(None, logical_scene.symmetry[1], logical_scene.symmetry[2]),
     )
@@ -367,6 +370,7 @@ class DistributedFDTD:
         self._shutoff_peak = None
         self._parallel_stats: dict[str, Any] = {}
         self._observer_frequencies: tuple[float, ...] = ()
+        self._distributed_circuit: DistributedCircuitRuntime | None = None
         self._initialized = False
         self._validate_static_capabilities()
 
@@ -387,8 +391,34 @@ class DistributedFDTD:
                 "Multi-GPU material density regions require distributed density slicing and are "
                 "currently limited to the single-GPU adjoint path."
             )
-        if self.logical_scene.ports:
-            raise ValueError("Multi-GPU FDTD mode ports require distributed modal plane tiling.")
+        unsupported_ports = tuple(
+            port
+            for port in self.logical_scene.ports
+            if not isinstance(port, (LumpedPort, TerminalPort))
+        )
+        if unsupported_ports:
+            names = tuple(port.name for port in unsupported_ports)
+            if any(isinstance(port, ModePort) for port in unsupported_ports):
+                raise ValueError(
+                    "Multi-GPU FDTD mode ports require distributed modal plane tiling; "
+                    f"unsupported ports: {names}."
+                )
+            raise ValueError(f"Multi-GPU FDTD does not support port types for {names}.")
+        bound_port_names = {
+            binding.port_name
+            for circuit in self.logical_scene.circuits
+            for binding in circuit.bindings
+        }
+        unbound_ports = tuple(
+            port.name
+            for port in self.logical_scene.ports
+            if port.name not in bound_port_names
+        )
+        if unbound_ports:
+            raise ValueError(
+                "Multi-GPU lumped/terminal ports must be bound to the distributed "
+                f"circuit owner; unbound ports: {unbound_ports}."
+            )
         for monitor in self.logical_scene.monitors:
             if isinstance(monitor, ClosedSurfaceMonitor):
                 raise ValueError(
@@ -501,8 +531,11 @@ class DistributedFDTD:
         if self._initialized:
             return
         self._validate_hardware()
+        timing_scene = prepare_scene(
+            self.logical_scene.clone(ports=(), circuits=())
+        )
         reference_solver = FDTD(
-            self.scene,
+            timing_scene,
             frequency=self.frequency,
             absorber_type=self.absorber_type,
             cpml_config=self.cpml_config,
@@ -598,6 +631,12 @@ class DistributedFDTD:
         self._cpml_allocated_memory_bytes = _sum_shard_bytes("_cpml_allocated_memory_bytes")
         self._cpml_dense_memory_bytes = _sum_shard_bytes("_cpml_dense_memory_bytes")
         self._cpml_slab_memory_bytes = _sum_shard_bytes("_cpml_slab_memory_bytes")
+        self._distributed_circuit = DistributedCircuitRuntime.prepare(
+            prepared_scene=self.scene,
+            partition_plan=self.partition_plan,
+            shards=self.shards,
+            frequency=self.frequency,
+        )
         self._initialized = True
 
     @staticmethod
@@ -644,6 +683,12 @@ class DistributedFDTD:
                     solver._prepare_time_observers(time_steps)
                 solver._shutoff_triggered = False
                 solver._shutoff_step = None
+        if self._distributed_circuit is not None:
+            self._distributed_circuit.prepare_outputs(
+                time_steps=int(time_steps),
+                frequencies=default_frequencies,
+                window_type=dft_window,
+            )
 
     def _overlap_active(self) -> bool:
         if not self.parallel.overlap:
@@ -810,6 +855,13 @@ class DistributedFDTD:
                     )
                 if solver._source_terms:
                     solver.add_source(time_value=time_value)
+
+        if self._distributed_circuit is not None:
+            self._distributed_circuit.apply()
+
+        for shard in self.shards:
+            solver = shard.solver
+            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
                 solver._apply_dispersive_corrections()
                 stepping.enforce_pec_boundaries(solver)
                 stepping.apply_mur_boundaries(solver)
@@ -932,6 +984,12 @@ class DistributedFDTD:
             output["frequencies"] = frequency_metadata
         if monitors:
             output["observers"] = monitors
+        if self._distributed_circuit is not None:
+            ports, circuits = self._distributed_circuit.finalize(self.device)
+            if ports:
+                output["ports"] = ports
+            if circuits:
+                output["circuits"] = circuits
         return output or None
 
     def solve(
@@ -945,7 +1003,14 @@ class DistributedFDTD:
         shutoff: float = 0.0,
         shutoff_check_interval: int = 100,
         use_cuda_graph: bool = False,
+        resume_from=None,
+        stop_step: int | None = None,
     ):
+        if resume_from is not None or stop_step is not None:
+            raise ValueError(
+                "Distributed FDTD checkpoint replay is not available; circuit state is "
+                "owned and checkpointable on one GPU, but field-shard replay is deferred."
+            )
         if not self._initialized:
             self.init_field()
         self._gather_preflight = {}
@@ -1070,7 +1135,7 @@ class DistributedFDTD:
             }
             for shard in self.shards
         )
-        return {
+        stats = {
             "devices": tuple(str(device) for device in self.devices),
             "decomposition_axis": "x",
             "transport": self.transport.name,
@@ -1097,6 +1162,9 @@ class DistributedFDTD:
                 "is intentionally not inserted into the production solve loop."
             ),
         }
+        if self._distributed_circuit is not None:
+            stats["circuit"] = self._distributed_circuit.stats(steps_run=steps_run)
+        return stats
 
     @property
     def parallel_stats(self) -> dict[str, Any]:
@@ -1106,6 +1174,13 @@ class DistributedFDTD:
         """Export owned electric-field shards without a global gather."""
 
         return export_distributed_field_shards(self)
+
+    def circuit_checkpoint_tensors(self) -> dict[str, torch.Tensor]:
+        """Return live owner-GPU circuit history tensors without gathering fields."""
+
+        if self._distributed_circuit is None:
+            return {}
+        return self._distributed_circuit.checkpoint_tensors()
 
     @property
     def dft_sample_counts(self):

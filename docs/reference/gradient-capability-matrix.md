@@ -48,7 +48,13 @@ checkpoints as the Yee fields.
 | Active `LumpedPort` / `TerminalPort` | Source amplitude, material/design tensors, port V/I and accepted/incident/reflected/available power | Real, nondispersive, nonconductive standard/CPML field coupling |
 | Finite positive `SeriesRLC` or standalone R/C/L | R/L/C values, material/design tensors, and the same port objectives | No `ParallelRLC`, open internal resistance, observer-only contour, or trainable source/reference impedance |
 | Fixed single-mode `WavePort` direct run or `PortSweep` | Eligible material/design tensors through `PortData` or `NetworkData` | Fixed amplitude and modal aperture/launch plane; no multimode or mixed lumped workflow |
+| Bound `Circuit` graph (linear MNA co-simulation) | R/L/C and independent-source waveform tensors (direct, restricted-SPICE-expression, or `SceneModule`-derived), bound-port material/geometry inputs, port outputs, and every live `CircuitData` node-voltage, branch-current, device-power, energy-balance, port-power, field-energy, and tensor-diagnostic output | Requires an exactly zero coupled DC solution and companion history; a tensor seed at `CircuitData` sample 0, trainable DC source values, trainable circuit initial conditions, trainable port reference impedance, and distributed execution all fail explicitly. Differentiable circuit runs bypass the RC and CUDA-Graph forward fast paths |
 | `NetworkData` and `AntennaData` postprocessing | Torch-native S/Z/Y, renormalization, reference-plane, gain, realized-gain, and efficiency objectives | Detached persistence/export is not differentiable |
+
+The circuit adjoint follows the same composition rule: it adds no second Maxwell
+reverse implementation. Checkpoint replay rebuilds each strongly coupled MNA step
+and PyTorch's linear-solve VJP supplies the transpose solve, seeded against the
+field adjoint at the bound ports.
 
 Differentiable lumped `PortSweep`, conductive/dispersive/nonlinear/modulated or
 full-anisotropy circuit coupling, and Bloch/complex-field circuit coupling fail
@@ -71,7 +77,11 @@ Correctness is checked independently through:
 - preparation-time failure tests when a native runner is unavailable.
 - three-step central finite differences for lumped R/L/C, source amplitude,
   material-region density, fixed single-mode WavePort material response, and RF
-  postprocessing objectives.
+  postprocessing objectives;
+- central finite differences for bound-`Circuit` R/L/C and source-amplitude
+  parameters (RC cutoff, RLC near resonance, two-port insertion loss, bound-port
+  material), plus explicit rejection tests for each unsupported circuit-adjoint
+  configuration, in `tests/gradients/test_fdtd_circuit_adjoint.py`.
 
 ## Profiling record (2026-07-12)
 

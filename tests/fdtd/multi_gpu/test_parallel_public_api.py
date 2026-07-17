@@ -112,6 +112,7 @@ def test_trainable_parallel_is_rejected_before_solver_allocation(monkeypatch, en
         parallel=_parallel(),
     )
     simulation.has_trainable_parameters = True
+    monkeypatch.setattr(simulation, "_refresh_scene", lambda: None)
 
     def unexpected_allocation(*args, **kwargs):
         raise AssertionError("solver allocation must not be reached")
@@ -146,7 +147,7 @@ def test_gather_fields_false_does_not_fallback_to_shard_fields(monkeypatch):
     monkeypatch.setattr(
         simulation,
         "_execute_fdtd_solve",
-        lambda *args: (None, 2, False, simulation.config.spectral_sampler),
+        lambda *args, **kwargs: (None, 2, False, simulation.config.spectral_sampler),
     )
     monkeypatch.setattr(
         simulation,
@@ -171,7 +172,7 @@ def test_gather_fields_true_requires_distributed_field_output(monkeypatch):
     monkeypatch.setattr(
         simulation,
         "_execute_fdtd_solve",
-        lambda *args: (None, 1, False, simulation.config.spectral_sampler),
+        lambda *args, **kwargs: (None, 1, False, simulation.config.spectral_sampler),
     )
 
     with pytest.raises(RuntimeError, match="did not return any output"):
@@ -188,7 +189,7 @@ def test_gathered_fields_are_normalized_on_explicit_result_device(monkeypatch):
     monkeypatch.setattr(
         simulation,
         "_execute_fdtd_solve",
-        lambda *args: (raw_fields, 1, False, simulation.config.spectral_sampler),
+        lambda *args, **kwargs: (raw_fields, 1, False, simulation.config.spectral_sampler),
     )
 
     def capture_device(fields, device):
