@@ -486,6 +486,14 @@ def test_physical_two_gpu_network_matches_single_gpu_and_reports_scalar_contract
 
     checkpoint = distributed_solver.network_checkpoint_tensors()
     assert checkpoint["network_state_split_net"].device == cuda_p2p_devices[0]
+    # Slice U2: the trapezoidal interface carries the previous step's post-step
+    # port voltage as dynamic owner-GPU state; a resume that dropped it would
+    # restart the coupling from a zero half-step. It must live on the owner GPU
+    # next to the state-space vector.
+    assert "network_carried_voltage_split_net" in checkpoint
+    assert (
+        checkpoint["network_carried_voltage_split_net"].device == cuda_p2p_devices[0]
+    )
 
 
 # The _two_port_network fitted band is [0.2 GHz, 6.0 GHz]; this request sits above

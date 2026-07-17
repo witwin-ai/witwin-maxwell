@@ -70,6 +70,27 @@ def _backward_and_fd_grads(model, loss_fn, *, delta=_FD_DELTA):
     return backward_grad, fd_grad
 
 
+def _averaged_central_difference(model, loss_fn, deltas):
+    """Average per-element central differences over several steps.
+
+    The float32 forward evaluates a loss with a large constant offset (the
+    single-frequency DFT magnitude), so a single central difference sits on a
+    catastrophic-cancellation roundoff floor: each ``(L(+h) - L(-h))`` subtracts
+    two ~equal float32 values, leaving an absolute error ~ eps * |L| that no FD
+    stencil order can remove. Every step in ``deltas`` is chosen in the
+    truncation-negligible regime (the sigmoid density is near-linear in the logit
+    at init=0, and 3- vs 5-point stencils agree here), so each difference is an
+    unbiased estimate of the same gradient plus an independent roundoff term.
+    Averaging them reduces that roundoff variance without biasing the estimate.
+    """
+
+    accumulated = None
+    for delta in deltas:
+        contribution = _central_difference_per_element(model, loss_fn, delta=delta)
+        accumulated = contribution if accumulated is None else accumulated + contribution
+    return accumulated / float(len(deltas))
+
+
 # ---------------------------------------------------------------------------
 # Diagonal anisotropic epsilon
 # ---------------------------------------------------------------------------
@@ -1574,11 +1595,11 @@ def test_scene_with_bloch_dispersive_medium_gradient_matches_fd():
     Measured sensitivity of this gate (single GPU, 200 steps, seed-free scene):
       * forward dispersion shift (delta_eps 3.5 vs 0): objective changes ~79%, so
         the transmitted field is genuinely dispersion-shaped;
-      * unmodified reverse: dominant-element rel err ~2.7e-4 (< 1e-3 bar);
+      * unmodified reverse: dominant-element rel err ~1.1e-4 (< 1e-3 bar);
       * zeroing ``AdjCurrentCorrected`` (drops the electric-dispersive coupling
-        entirely): dominant rel err ~9.3e-1 -- RED by ~3 orders of magnitude;
+        entirely): dominant rel err ~9.3e-1 -- RED by ~4 orders of magnitude;
       * scaling ``AdjCurrentCorrected`` by 1.05 (a 5% coupling error): dominant rel
-        err ~1e-1 -- RED by ~2 orders of magnitude.
+        err ~9.9e-2 -- RED by ~3 orders of magnitude.
 
     Correction to the record: the earlier commit
     (``test(gradients): reanchor conductive and Bloch-dispersive adjoint FD gates``)
@@ -1589,6 +1610,19 @@ def test_scene_with_bloch_dispersive_medium_gradient_matches_fd():
     dominant gradient by only ~1e-4 and the gate stayed GREEN, so a regression that
     silently dropped the electric-dispersive adjoint coupling would have shipped
     undetected. The relocated transmission layout above closes that gap.
+
+    Finite-difference reference: this transmission layout is deliberately
+    ill-conditioned (the design sits far from the probe, behind the slab), so the
+    loss changes only weakly per design element while carrying a large constant DFT
+    offset. A single float32 central difference therefore rides a
+    catastrophic-cancellation roundoff floor (~1e-3, no better with a 5-point
+    stencil, and non-monotonic in the step size). The reference below averages
+    central differences over several truncation-negligible steps, which reduces the
+    roundoff variance to a dominant-element rel err ~1.1e-4 -- a clean reference the
+    correct adjoint clears with ~10x margin while the falsifications above stay RED
+    by orders of magnitude. The analytic adjoint itself is float32-stable and
+    respects the scene's pair symmetry exactly; only the FD *reference* needs the
+    conditioning.
 
     The run must be long enough for the dispersive polarization response to
     propagate through the slab and reach the probe; 200 steps captures the
@@ -1613,7 +1647,16 @@ def test_scene_with_bloch_dispersive_medium_gradient_matches_fd():
         f"dispersion inactive: nondispersive={nondispersive:.6e}, dispersive={dispersive:.6e}"
     )
 
-    backward_grad, fd_grad = _backward_and_fd_grads(model, loss_fn)
+    loss = loss_fn()
+    loss.backward()
+    backward_grad = model.logits.grad.detach().clone()
+    model.logits.grad = None
+    # Roundoff-conditioned reference (see docstring): average central differences
+    # over several truncation-negligible steps to lift the dominant element off the
+    # single-step float32 cancellation floor.
+    fd_grad = _averaged_central_difference(
+        model, loss_fn, deltas=(4.0e-2, 5.0e-2, 6.0e-2, 7.0e-2, 8.0e-2)
+    )
 
     assert (fd_grad != 0).any(), "FD gradient is identically zero; test setup is broken."
     # Acceptance bar: dominant-element relative error below 1e-3.

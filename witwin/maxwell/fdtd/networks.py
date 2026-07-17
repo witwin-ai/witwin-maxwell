@@ -513,6 +513,16 @@ def prepare_network_runtimes(
             )
         for index, port_runtime in enumerate(connected_tuple):
             lumped = port_runtime.lumped
+            # Slice U2 caveat: for embedded-network ports ``last_voltage_before``
+            # aliases ``free_voltage``, which the forward step overwrites with the
+            # trapezoidal *coupling* voltage 0.5 * (carried_voltage +
+            # raw_free_voltage) -- not the raw pre-step free voltage the name
+            # implies elsewhere (lumped/circuit ports keep the raw meaning). The
+            # raw free voltage lives in ``raw_free_voltage``; the post-step
+            # recurrence carries it via ``carried_voltage``. The only outside
+            # consumer of this alias is the CUDA-graph snapshot list, which just
+            # needs every mutated buffer, so the aliased semantics are harmless
+            # there.
             lumped.last_voltage_before = free_voltage[index]
             lumped.last_voltage_midpoint = network_voltage[index]
             lumped.last_model_voltage_midpoint = network_voltage[index]
@@ -611,7 +621,16 @@ def pullback_network_runtimes(
     ],
     eps_by_field: dict[str, torch.Tensor],
 ):
-    """Reverse ordinary-Y state recurrence and implicit terminal coupling."""
+    """Reverse ordinary-Y state recurrence and implicit terminal coupling.
+
+    Accuracy note (slice U2): the manual VJP matches a torch-autograd oracle to
+    within 1-2 float64 ULP, not bit-for-bit. On fixed pinned seeds it is exact
+    (0 ULP) for most cotangents; the worst case measured over fresh random seeds
+    is ~1.2 ULP on the multiport leg and ~1.0 ULP single-port, from the
+    LU-solve reassociating floating-point sums differently than autograd's
+    recorded graph. The oracle tests gate this with ``assert_close`` (float64
+    tolerance), which is the truthful contract, not ``torch.equal``.
+    """
 
     updated = dict(adjoint_state)
     grad_eps = {name: torch.zeros_like(value) for name, value in eps_by_field.items()}

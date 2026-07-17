@@ -196,12 +196,17 @@ def test_wire_gap_port_replay_pullback_matches_dense_float64_cuda_autograd(mode)
     old_capacitor = torch.tensor(
         -0.09, device="cuda", dtype=torch.float64, requires_grad=True
     )
+    old_last_voltage = torch.tensor(
+        0.11, device="cuda", dtype=torch.float64, requires_grad=True
+    )
     inductor_name = lumped_state_name("port", 0, "inductor_current")
     capacitor_name = lumped_state_name("port", 0, "capacitor_voltage")
+    last_voltage_name = lumped_state_name("port", 0, "last_voltage_after")
     state = {
         "wire_charge": charge,
         inductor_name: old_inductor,
         capacitor_name: old_capacitor,
+        last_voltage_name: old_last_voltage,
     }
     captured = []
     time_value = -0.5 * float(solver.dt)
@@ -234,6 +239,7 @@ def test_wire_gap_port_replay_pullback_matches_dense_float64_cuda_autograd(mode)
     )
     inductor_seed = torch.tensor(0.23, device="cuda", dtype=torch.float64)
     capacitor_seed = torch.tensor(-0.19, device="cuda", dtype=torch.float64)
+    last_voltage_seed = torch.tensor(0.17, device="cuda", dtype=torch.float64)
     voltage_seed = torch.tensor(0.31, device="cuda", dtype=torch.float64)
     current_seed = torch.tensor(-0.27, device="cuda", dtype=torch.float64)
     objective = sum(
@@ -245,6 +251,7 @@ def test_wire_gap_port_replay_pullback_matches_dense_float64_cuda_autograd(mode)
     )
     objective = objective + output_auxiliary[inductor_name] * inductor_seed
     objective = objective + output_auxiliary[capacitor_name] * capacitor_seed
+    objective = objective + output_auxiliary[last_voltage_name] * last_voltage_seed
     objective = objective + trace.lumped.voltage_midpoint * voltage_seed
     objective = objective - trace.lumped.branch_current * current_seed
 
@@ -261,6 +268,7 @@ def test_wire_gap_port_replay_pullback_matches_dense_float64_cuda_autograd(mode)
         parameter,
         old_inductor,
         old_capacitor,
+        old_last_voltage,
     )
     expected_raw = torch.autograd.grad(objective, inputs, allow_unused=True)
     expected = tuple(
@@ -283,6 +291,7 @@ def test_wire_gap_port_replay_pullback_matches_dense_float64_cuda_autograd(mode)
                 "wire_charge": charge_seed,
                 inductor_name: inductor_seed,
                 capacitor_name: capacitor_seed,
+                last_voltage_name: last_voltage_seed,
             },
             port_sample_adjoints={
                 0: (
@@ -308,6 +317,7 @@ def test_wire_gap_port_replay_pullback_matches_dense_float64_cuda_autograd(mode)
         semantic_grads[semantic_key],
         actual_state[inductor_name],
         actual_state[capacitor_name],
+        actual_state[last_voltage_name],
     )
     for found, reference in zip(actual, expected):
         torch.testing.assert_close(

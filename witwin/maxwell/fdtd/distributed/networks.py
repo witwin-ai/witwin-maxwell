@@ -607,7 +607,16 @@ class DistributedNetworkRuntime:
                 shard.compute_stream.wait_event(runtime.current_received)
 
     def checkpoint_tensors(self) -> dict[str, torch.Tensor]:
-        return {f"network_state_{self.plan.network_name}": self.network_runtime.state}
+        # Slice U2: the trapezoidal interface carries the previous step's
+        # post-step port voltage, so it is dynamic owner-GPU state alongside the
+        # state-space vector -- a resume that dropped it would restart the
+        # coupling from a zero half-step and desynchronize the network trace.
+        return {
+            f"network_state_{self.plan.network_name}": self.network_runtime.state,
+            f"network_carried_voltage_{self.plan.network_name}": (
+                self.network_runtime.carried_voltage
+            ),
+        }
 
     def finalize(self, result_device: torch.device):
         ports = finalize_port_data(self.owner_solver)

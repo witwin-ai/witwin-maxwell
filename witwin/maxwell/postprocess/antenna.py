@@ -618,8 +618,16 @@ def _far_fields_from_result(
         current_surfaces.append(currents)
         impedances.append(impedance.real)
 
-    e_theta = torch.stack(e_theta_fields, dim=0)
-    e_phi = torch.stack(e_phi_fields, dim=0)
+    # The far field inherits its precision from the monitor payload (the solve
+    # dtype), while the angular grid, radius, impedance, and driven-port powers
+    # all live at ``dtype`` (the requested frequency dtype). Promote the far field
+    # to the matching complex dtype so the whole metric pipeline runs at a single
+    # real precision -- the driven-port powers must stay at ``dtype`` for the
+    # mismatch-ratio bookkeeping, and ``compute_antenna_data`` now rejects mixed
+    # real dtypes outright rather than silently casting.
+    complex_dtype = torch.complex128 if dtype == torch.float64 else torch.complex64
+    e_theta = torch.stack(e_theta_fields, dim=0).to(dtype=complex_dtype)
+    e_phi = torch.stack(e_phi_fields, dim=0).to(dtype=complex_dtype)
     impedance_tensor = torch.as_tensor(impedances, device=device, dtype=dtype)
     resolved_radius = radius
     return {

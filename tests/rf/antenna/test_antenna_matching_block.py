@@ -22,10 +22,12 @@ referenced to accepted power (invariant under an external match) and realized
 gain referenced to incident power (scaling by the network mismatch ratio). It
 does **not** validate an input-impedance-driven match against the radiator's own
 port impedance: extracting a reliable input impedance from an electrically small
-lumped-port radiator is a separate validation left out of scope (the raw port
-reflection of this crude radiator is not physical, see the assertion below). The
-antenna load ``Gamma_L`` presented to the matching network is therefore modelled
-as a representative reactive load rather than read back from the port.
+lumped-port radiator is a separate validation left out of scope (the unified
+trapezoidal coupling makes the raw port reflection passive, |Gamma| < 1, but it
+sits at ~0.996 -- nearly total reflection -- so it is no useful match target, see
+the assertion below). The antenna load ``Gamma_L`` presented to the matching
+network is therefore modelled as a representative reactive load rather than read
+back from the port.
 
 The public network surface exposes ``NetworkData.from_y`` (construction) and
 ``NetworkData.s`` (S-parameters) but no two-port/one-port cascade or termination
@@ -157,11 +159,18 @@ def _antenna(result, port):
 def test_realized_gain_lift_matches_network_mismatch_ratio_on_a_real_solve():
     result = _real_far_field_result()
 
-    # The electrically small lumped-port radiator does not yield a physical input
-    # reflection (|Gamma| > 1), which is exactly why the matched load below is
-    # modelled externally rather than read back from the port. This assertion
-    # documents that scope boundary instead of hiding it.
-    assert float(torch.abs(result.port("feed").reflection_coefficient)[0]) > 1.0
+    # The unified trapezoidal port coupling samples the port voltage and current
+    # at the same magnetic half-step, so the crude radiator's raw port reflection
+    # is now passive (|Gamma| < 1) instead of the non-passive |Gamma| > 1 the old
+    # half-step-staggered sampling produced. It is passive but still not a useful
+    # match target: an electrically small lumped-port radiator reflects almost all
+    # of the incident power (|Gamma| ~ 0.996, mismatch efficiency < 1%), so the
+    # matched load below is still modelled externally rather than read back from
+    # the port. This assertion pins the restored passivity and documents that
+    # scope boundary instead of hiding it.
+    raw_reflection = float(torch.abs(result.port("feed").reflection_coefficient)[0])
+    assert raw_reflection < 1.0
+    assert raw_reflection > 0.99
 
     # Modelled representative antenna load: 50 + j60 Ohm, a reactive mismatch a
     # lossless series reactance can conjugate-match. The far field the matching

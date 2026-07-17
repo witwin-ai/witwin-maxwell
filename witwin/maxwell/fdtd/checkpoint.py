@@ -381,6 +381,8 @@ def _checkpoint_tensor_targets(solver, schema: FDTDCheckpointSchema):
         yield name, getattr(runtime, tensor_name), None
     for name, tensor in iter_circuit_state_specs(solver):
         yield name, tensor, None
+    for name, tensor in iter_network_state_specs(solver):
+        yield name, tensor, None
     wire_runtime = getattr(solver, "_wire_runtime", None)
     if wire_runtime is not None:
         yield "wire_current", wire_runtime.current, None

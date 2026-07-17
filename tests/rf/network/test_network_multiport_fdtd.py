@@ -4,6 +4,13 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
+from witwin.maxwell.fdtd import checkpoint as checkpoint_module
+from witwin.maxwell.fdtd.checkpoint import (
+    capture_checkpoint_state,
+    network_carried_voltage_name,
+    network_state_name,
+    restore_checkpoint_state,
+)
 
 
 def _port(index: int, count: int) -> mw.LumpedPort:
@@ -130,6 +137,105 @@ def test_touchstone_multiport_fit_matches_independent_network_reference(
     assert compiled.connection_names == tuple(
         f"field_{index}" for index in range(port_count)
     )
+
+
+def _two_port_block(frequencies: torch.Tensor) -> mw.NetworkBlock:
+    """A single-pole passive two-port bound to ``field_0``/``field_1``."""
+
+    resistance = 50.0
+    capacitance = 5.0e-12
+    shunt = 2.0e-3
+    incidence = torch.tensor((1.0, -1.0), dtype=torch.float64)
+    model = mw.StateSpaceNetwork(
+        A=torch.tensor(((-1.0 / (resistance * capacitance),),), dtype=torch.float64),
+        B=(incidence / (resistance * capacitance)).reshape(1, 2),
+        C=(-incidence / resistance).reshape(2, 1),
+        D=(
+            torch.outer(incidence, incidence) / resistance
+            + shunt * torch.eye(2, dtype=torch.float64)
+        ),
+        representation="Y",
+        port_order=("network_0", "network_1"),
+    )
+    data = mw.NetworkData.from_y(
+        frequencies=frequencies,
+        y=model.evaluate(frequencies),
+        z0=50.0,
+        port_names=model.port_order,
+    )
+    return mw.NetworkBlock(
+        name="two_port_load",
+        network=data,
+        connections={"network_0": "field_0", "network_1": "field_1"},
+        fit=False,
+        model=model,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_embedded_network_checkpoint_resume_round_trips_carried_voltage(
+    monkeypatch,
+) -> None:
+    # Slice U2: the embedded-network dynamic state is the state-space vector AND
+    # the trapezoidal carried post-step port voltage. A resume must restore both,
+    # so the checkpoint schema, the capture, and the restore targets must agree
+    # on every network tensor. Run a real solve so the carried voltage is a
+    # genuine nonzero coupling state, capture it, then restore it into a freshly
+    # prepared solver whose network state is still zero.
+    band = torch.linspace(1.0e9, 5.0e9, 17, dtype=torch.float64)
+    requested = (2.5e9, 3.0e9)
+    block = _two_port_block(band)
+
+    result = mw.Simulation.fdtd(
+        _scene(2, network=_two_port_block(band), device="cuda"),
+        frequencies=requested,
+        run_time=mw.TimeConfig(time_steps=96),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+    ).run()
+    solver = result.solver
+    checkpoint = capture_checkpoint_state(solver, step=96)
+
+    state_name = network_state_name(0)
+    carried_name = network_carried_voltage_name(0)
+    # Both network tensors are part of the frozen schema.
+    assert state_name in checkpoint.schema.network_state_names
+    assert carried_name in checkpoint.schema.network_state_names
+    # The carried voltage is genuine dynamic state after a real coupled solve,
+    # otherwise the round-trip below would be vacuously satisfied by zeros.
+    assert torch.any(torch.abs(checkpoint.tensors[carried_name]) > 0.0)
+
+    fresh = mw.Simulation.fdtd(
+        _scene(2, network=block, device="cuda"),
+        frequencies=requested,
+        run_time=mw.TimeConfig(time_steps=96),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+    ).prepare().solver
+    fresh_runtime = fresh._network_runtimes[0]
+    assert torch.all(fresh_runtime.carried_voltage == 0.0)
+
+    restore_checkpoint_state(fresh, checkpoint)
+    torch.testing.assert_close(fresh_runtime.state, checkpoint.tensors[state_name])
+    torch.testing.assert_close(
+        fresh_runtime.carried_voltage, checkpoint.tensors[carried_name]
+    )
+
+    # Falsification: if the restore targets drop a network tensor (the pre-fix
+    # bug, where `_checkpoint_tensor_targets` never yielded network state), the
+    # targets no longer match the schema the solver still reports, so restore
+    # must refuse rather than silently resuming from an incomplete state.
+    original_targets = checkpoint_module._checkpoint_tensor_targets
+
+    def _drop_network_targets(target_solver, schema):
+        for name, tensor, layout in original_targets(target_solver, schema):
+            if name == carried_name:
+                continue
+            yield name, tensor, layout
+
+    monkeypatch.setattr(
+        checkpoint_module, "_checkpoint_tensor_targets", _drop_network_targets
+    )
+    with pytest.raises(RuntimeError, match="drifted from its schema"):
+        restore_checkpoint_state(fresh, checkpoint)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

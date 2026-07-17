@@ -35,6 +35,10 @@ def _runtime(field_name: str, *, lumped: object | None) -> SimpleNamespace:
         frequencies=frequencies,
         excitation=None,
         lumped=lumped,
+        # A non-wire lumped port: the live path samples its voltage at the
+        # magnetic half-step. Wire-bound ports keep the electric full-step
+        # voltage stagger, which this fixture is not exercising.
+        wire_provider=None,
         field_name=field_name,
     )
 
