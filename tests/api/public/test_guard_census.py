@@ -42,7 +42,17 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # split is undocumented and unverified). Finite-conductor loss and distributed
 # wire reverse/gradient remain separate slices; lower this budget when those
 # guards are implemented.
-CAPABILITY_GUARD_BUDGET = 132
+#
+# 2026-07-17 (plan 06 Phase 4, array scene-gradient slice): 132 -> 133 (+1).
+# ArrayBasisData.scene_gradient_vjp in witwin/maxwell/array.py fails closed:
+# "Scene-parameter gradients through the array basis require the aggregated
+# per-column adjoint envelope". The retained-column basis stores detached
+# embedded-pattern tensors, so scene/material/geometry backprop through the
+# basis is a genuine capability gap (weight gradients through combine() are
+# fully supported). It becomes a public promise only after the plan 06 Phase 4
+# exit gate lands the aggregated per-column adjoint on the plan 02 Phase 7
+# distributed result-aggregation contract; lower this budget then.
+CAPABILITY_GUARD_BUDGET = 133
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
