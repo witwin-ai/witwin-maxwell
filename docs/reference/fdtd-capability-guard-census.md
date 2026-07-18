@@ -15,6 +15,10 @@ finite-conductor wire series-impedance slice, and the plan 05
 nonlinear-circuit-device Phase 0 slice, all merged) contains 161 guards:
 
 - 137 capability guards tracked by the non-increasing test budget;
+finite-conductor wire series-impedance slice, plus the plan 08 Phase-0
+gyromagnetic ferrite slices 0a/0b/1a, all merged) contains 160 guards:
+
+- 136 capability guards tracked by the non-increasing test budget;
 - 24 contract guards excluded by exact file and message substring.
 
 The single-GPU circuit adjoint provides the circuit replay and transpose
@@ -41,16 +45,16 @@ The capability baseline is distributed as follows:
 | Area | Capability guards |
 | --- | ---: |
 | External interoperability adapter | 18 |
-| Material compilers | 12 |
+| Material compilers | 15 |
 | Frequency-domain runtime | 5 |
 | Time-domain adjoint | 19 |
 | Time-domain excitation | 12 |
 | Time-domain ports and lumped elements | 16 |
 | Time-domain runtime | 20 |
 | Public simulation, result, and network workflows | 24 |
-| Material models | 7 |
+| Material models | 8 |
 | Postprocessing | 4 |
-| **Total** | **137** |
+| **Total** | **139** |
 
 This integrated baseline is the 2026-07-16 circuit/network state (119 capability
 guards) plus the ten thin-wire capability guards from plan 07 phases 0-3 (giving
@@ -197,6 +201,38 @@ removed when its runtime slice (nonlinear device-runtime integration, the series
 branch, and the charge-aware transient solve) lands. The `q(v)` / `C(v)` charge
 model is still fully exercised through `CompiledNonlinearDevice.charge`, so the
 device math surface is unaffected.
+### Gyromagnetic ferrite reconciliation (2026-07-17)
+
+The plan 08 Phase-0 gyromagnetic ferrite slices (0a physics contract, 0b torch
+reference oracle, 1a `GyromagneticFerrite` material type) add four reviewed
+`NotImplementedError` guards: two capability gaps and two permanent contracts.
+
+Capability gaps (+2, `134 -> 136`):
+
+- `witwin/maxwell/compiler/materials.py` `_static_structure_material` rejects a
+  `GyromagneticFerrite` structure. Its non-reciprocal off-diagonal permeability
+  is produced by a local linearized-LLG magnetization ADE that the material
+  compiler does not yet lower; compiling it as a plain `Material` would silently
+  discard the gyrotropy and simulate a reciprocal medium, so the compiler fails
+  closed. It is a genuine capability gap (Material compilers `12 -> 13`); lower
+  the budget when the compiler/runtime slices (1b/1c) land.
+- `witwin/maxwell/media.py` `PerturbationMedium.__init__` rejects a
+  `GyromagneticFerrite` base. The medium perturbs a scalar permittivity
+  background, which would silently discard the ferrite's magnetization state
+  (Material models `7 -> 8`); lower the budget when a ferrite perturbation branch
+  is implemented.
+
+Permanent contracts (+2, listed in `CONTRACT_GUARDS`, Material
+frequency-evaluation domains `9 -> 11`):
+
+- `GyromagneticFerrite.relative_permeability` and
+  `GyromagneticFerrite.evaluate_at_frequency` both fail closed because a scalar
+  (or diagonal) `FrequencyMaterialSample` cannot represent the off-diagonal
+  gyromagnetic Polder tensor. Callers use `permeability_tensor_at_freq()` /
+  `polder_tensor()` instead. These are definitionally the same family as the
+  existing material "…is not defined for…" frequency-evaluation contracts, so they
+  are excluded by exact `(file, substring)` match rather than counted against the
+  capability budget.
 
 ## Contract exclusions
 
@@ -205,7 +241,7 @@ entries cover these stable contract families:
 
 | Contract family | Count |
 | --- | ---: |
-| Material frequency-evaluation domains | 9 |
+| Material frequency-evaluation domains | 11 |
 | Module-style scene implementation requirement | 1 |
 | Non-meshable complex polygon geometry | 1 |
 | Time-domain adjoint input, complex-state, and fixed-step requirements | 3 |
