@@ -251,6 +251,20 @@ class ShardEngine:
                 raise ValueError(
                     "Multi-GPU full off-diagonal anisotropy requires additional H/curl halos."
                 )
+            if getattr(local_solver, "gyromagnetic_enabled", False):
+                # The shard phases never advance/apply the magnetization-ADE hooks,
+                # and the rank-local build wires an independent gyromagnetic layout
+                # per shard-local grid whose overlap slice drops the top plane at
+                # rank seams (physical interior planes, not domain boundaries). A
+                # joint solve would silently simulate a reciprocal medium with
+                # uncorrected seam planes. Fail closed until seam-aware distributed
+                # ferrite support exists (contract boundary 8: rejected until Phase 4).
+                raise NotImplementedError(
+                    "Multi-GPU distributed FDTD does not support GyromagneticFerrite media: the "
+                    "shard phases do not run the magnetization-ADE hooks and the shard-local "
+                    "gyromagnetic layout has no rank-seam handling, so a joint solve would silently "
+                    "drop the non-reciprocal gyrotropy. Run the ferrite scene on a single device."
+                )
             crop_solver_source_terms_to_owned_x(local_solver, layout)
             correct_ideal_point_ex_control_volume(local_solver, layout, global_prepared)
             compute_stream = torch.cuda.Stream(device=device)
@@ -322,8 +336,10 @@ class ShardEngine:
             if solver.full_aniso_enabled:
                 stepping.apply_full_aniso_corrections(solver)
                 stepping.apply_full_aniso_conduction(solver)
-            if getattr(solver, "_sibc", None) is not None:
-                raise RuntimeError("Distributed SIBC surface ownership is not enabled.")
+            if getattr(solver, "_surface_impedance", None) is not None:
+                raise RuntimeError(
+                    "Distributed surface-impedance ownership is not enabled."
+                )
             if solver._electric_source_terms:
                 inject_electric_surface_source_terms(
                     solver, time_value=time_value + 0.5 * float(solver.dt)

@@ -214,6 +214,41 @@ def test_gathered_fields_are_normalized_on_explicit_result_device(monkeypatch):
     assert set(result.fields) == {"EX", "EY", "EZ"}
 
 
+def test_distributed_solver_rejects_surface_impedance_ownership():
+    """The distributed static-capability gate must fail closed on a surface-impedance
+    metal: the tangential surface E write (and its per-edge ADE state) has no distributed
+    owner-shard implementation yet, so it cannot silently run forward-only."""
+    from witwin.core import Box
+    from witwin.maxwell.fdtd.distributed.solver import DistributedFDTD
+    from witwin.maxwell.scene import prepare_scene
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
+        grid=mw.GridSpec.uniform(0.05),
+        boundary=mw.BoundarySpec.pml(num_layers=4),
+        device="cpu",
+        structures=[
+            mw.Structure(
+                geometry=Box(position=(0.3, 0.0, 0.0), size=(0.4, 1.0, 1.0)),
+                material=mw.LossyMetalMedium(conductivity=5.8e7),
+            )
+        ],
+    )
+    prepared = prepare_scene(scene)
+
+    # Drive the static-capability gate directly (no GPU transport), the same partial-
+    # construction style the adjoint-bridge guard tests use.
+    solver = object.__new__(DistributedFDTD)
+    solver._nccl = False
+    solver.logical_scene = scene
+    solver.scene = prepared
+    solver.Nx, solver.Ny, solver.Nz = prepared.Nx, prepared.Ny, prepared.Nz
+    solver.devices = (torch.device("cuda:0"), torch.device("cuda:1"))
+
+    with pytest.raises(ValueError, match="distributed surface-impedance ownership"):
+        solver._validate_static_capabilities()
+
+
 def test_result_solver_stats_is_a_read_only_copy_property():
     result = Result(
         method="fdtd",

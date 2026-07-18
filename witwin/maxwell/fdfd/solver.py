@@ -307,6 +307,18 @@ class FDFD:
                     "the in-domain Dirichlet/mask handling for a perfect conductor is unimplemented here. Use "
                     "FDTD for PEC-material scenes."
                 )
+            if material is not None and bool(getattr(material, "is_gyromagnetic", False)):
+                # The static material compile lowers a GyromagneticFerrite to its
+                # diagonal background (eps_r, mu_infinity, sigma_e) only; the
+                # non-reciprocal off-diagonal Polder permeability is carried by the
+                # FDTD magnetization-ADE runtime, which the FDFD solver never runs.
+                # Fail closed rather than silently solving a reciprocal medium.
+                raise NotImplementedError(
+                    "FDFD does not support GyromagneticFerrite media: the frequency-domain "
+                    "solver would ingest only the diagonal background permeability and silently "
+                    "drop the non-reciprocal off-diagonal Polder gyrotropy. Use FDTD, whose "
+                    "magnetization-ADE runtime carries the gyromagnetic tensor."
+                )
         self.material_eps_components, self.material_mu_components = self.scene.compile_material_components(
             frequency=self.frequency
         )

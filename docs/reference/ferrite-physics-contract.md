@@ -326,7 +326,16 @@ in the ADE state, never widened into `mu_tensor`):
 10. Explicit-Euler / dt-shrinking stability escape -- forbidden; the update is implicit midpoint (section 3.3).
 11. Resonance / band mismatch -- warn (not silent) when the discrete pole is near the band edge; reject configurations where the discrete pole is unresolvable.
 
-Until the compiler/runtime slices (1b/1c) land, a `GyromagneticFerrite` reaching
-the material compiler fails closed (`compiler/materials.py`): running it as a
-plain `Material` would silently discard the non-reciprocal off-diagonal
-permeability.
+Slices 1b/1c have landed. The compiler lowers a ferrite to
+`CompiledGyromagneticLayout` (`compiler/gyromagnetic.py`,
+`Scene.compile_gyromagnetic_materials`) and its diagonal background compiles
+through the ordinary material path; the FDTD forward advances the local
+magnetization-ADE and applies `H -= dM/mu_infinity`
+(`fdtd/runtime/gyromagnetic.py`, inserted at the magnetic-update slot in
+`stepping.py`). Slice 1c covers the axis-aligned z/x/y fast path with identity
+collocation (`C = I`), valid for the transversely-uniform-field regime; the
+general-bias 4-point collocation and the arbitrary-bias local-frame rotation (and
+a complex-field / Bloch ferrite correction) remain fail-closed until the later
+slices. The magnetization state is co-located per transverse component on the
+shared Yee overlap; the 4-point gather/deposit `C`/`C^T` of section 5 is exercised
+only by the arbitrary-bias kernel.

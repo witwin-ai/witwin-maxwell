@@ -100,7 +100,53 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # its dedicated lossy-metal surface path). It is a genuine capability gap (External
 # interoperability adapter 18 -> 19); lower this budget when the surface-impedance
 # adapter mapping is designed.
-CAPABILITY_GUARD_BUDGET = 140
+# 2026-07-18 (plan 05 nonlinear-device N1, standalone transient + DC continuation):
+# 140 -> 139 (-1). The N0 conduction-only Newton solve fail-closed on a nonzero
+# diode junction_capacitance ("... the stored charge q(v) is never differentiated
+# into the system ...", compiler/nonlinear_devices.py). N1 implements the trapezoidal/
+# backward-Euler stored-charge companion (NonlinearMNASystem charge integration,
+# run_nonlinear_transient), so the transient path now consumes q(v) and the DC
+# operating point correctly treats the capacitance as an open circuit; the guard is
+# removed. The diode series_resistance guard stays: the internal-node ohmic branch is
+# not implemented this round.
+# 2026-07-18 (plan 08 slices 1b/1c, gyromagnetic ferrite compiler + forward):
+# 140 -> 141 (net +1). The compiler/materials.py ferrite reject is REMOVED (-1):
+# a GyromagneticFerrite now compiles as its diagonal background (eps_r /
+# mu_infinity / sigma_e) and its non-reciprocal off-diagonal permeability is
+# produced by the compiled magnetization-ADE layout plus the FDTD gyromagnetic
+# forward hooks (fdtd/runtime/gyromagnetic.py), so it no longer silently drops the
+# gyrotropy. Two narrower forward-runtime capability gaps replace it (+2), both in
+# fdtd/runtime/gyromagnetic.py: (1) a general (non-axis-aligned) bias, or a scene
+# mixing bias axes, fails closed because slice 1c advances only the axis-aligned
+# z/x/y fast path (the arbitrary-bias local-frame rotation + 4-point Yee
+# collocation is Phase 2); (2) a Bloch-periodic ferrite run fails closed because
+# the real-valued magnetization-ADE correction would break the complex Bloch phase
+# (the magnetic mirror of the existing nonlinear/full-aniso/modulation + Bloch
+# guards). Both are genuine capability gaps; lower this budget as the arbitrary-
+# bias kernel (Phase 2) and a complex-field ferrite correction land. The
+# PerturbationMedium-wraps-a-ferrite reject stays (a scalar-eps perturbation cannot
+# represent the gyromagnetic state).
+# 2026-07-18 (plan 08 slice 1c fail-closed hardening): 141 -> 144 (net +3). Lifting
+# the compiler-level ferrite reject exposed silently-wrong paths in every non-FDTD-
+# forward consumer of a ferrite scene; each now fails closed with a narrower guard:
+# (1) fdfd/solver.py rejects a GyromagneticFerrite in _ensure_material_components --
+# the frequency-domain solver ingests only the diagonal background permeability and
+# would silently drop the off-diagonal Polder gyrotropy; (2)
+# fdtd/distributed/shard_engine.py rejects a gyromagnetic_enabled local solver -- the
+# shard phases never run the magnetization-ADE hooks and the shard-local layout has
+# no rank-seam handling (contract boundary 8, rejected until Phase 4); (3)
+# fdtd/runtime/gyromagnetic.py splits the former single axis-aligned guard into a
+# general-bias reject and a mixed-bias-direction reject, closing the sign-mixed hole
+# (a scene mixing +z and -z ferrites previously passed the axis-only guard and
+# silently inverted the non-reciprocity of the -bias region). The adjoint reject
+# (contract boundary 9) is added as a return-string branch in
+# _unsupported_adjoint_medium, reusing the existing generic raise, so it adds no new
+# guard node. The checkpoint/resume schema gains the gyromagnetic magnetization state
+# names (no new guard). All three new guards are genuine capability gaps; lower this
+# budget as distributed ferrite (Phase 4), the FDFD gyromagnetic ingest, and the
+# arbitrary-bias kernel (Phase 2) land.
+# Merged union 2026-07-18: 140 - 1 (plan 05 N1) + 4 (plan 08 1b/1c+hardening) = 143.
+CAPABILITY_GUARD_BUDGET = 143
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

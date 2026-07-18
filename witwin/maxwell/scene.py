@@ -1312,6 +1312,7 @@ class PreparedScene(Scene):
         self._yy = None
         self._zz = None
         self._material_model_cache = {}
+        self._gyromagnetic_layout_cache = {}
         self._permittivity_components = None
         self._permeability_components = None
         self._permittivity = None
@@ -1338,6 +1339,7 @@ class PreparedScene(Scene):
 
     def _invalidate_material_cache(self):
         self._material_model_cache = {}
+        self._gyromagnetic_layout_cache = {}
         self._permittivity_components = None
         self._permeability_components = None
         self._permittivity = None
@@ -1433,6 +1435,32 @@ class PreparedScene(Scene):
             self._material_model_cache[key] = cached
             self.release_meshgrid()
         return cached
+
+    def compile_gyromagnetic_materials(self, *, dt=None, device=None):
+        """Compile every gyromagnetic ferrite structure into a layout SoA.
+
+        Returns a
+        :class:`~witwin.maxwell.compiler.gyromagnetic.CompiledGyromagneticLayout`
+        (active-cell indices, occupancy, per-cell bias/local basis, ADE state
+        matrices, and -- when ``dt`` is given -- the implicit-midpoint propagator).
+        Cached per ``(subpixel spec, device)``; the ``dt`` binding is applied on
+        top of the cached dt-independent layout so changing ``dt`` does not
+        re-rasterize.
+        """
+        from .compiler.gyromagnetic import compile_gyromagnetic_layout
+
+        target_device = self.device if device is None else device
+        key = (self.subpixel, str(torch.device(target_device)))
+        if self._has_dynamic_materials() or self._has_trainable_geometry():
+            layout = compile_gyromagnetic_layout(self, device=target_device)
+        else:
+            layout = self._gyromagnetic_layout_cache.get(key)
+            if layout is None:
+                layout = compile_gyromagnetic_layout(self, device=target_device)
+                self._gyromagnetic_layout_cache[key] = layout
+        if dt is not None:
+            layout = layout.with_timestep(dt)
+        return layout
 
     def compile_ports(self, *, device=None):
         from .compiler.ports import compile_ports

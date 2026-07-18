@@ -85,7 +85,7 @@ _UNSUPPORTED_SHARD_FLAGS = (
     ("full_aniso_enabled", "full off-diagonal anisotropy"),
     ("tfsf_enabled", "total-field/scattered-field injection"),
     ("modulation_enabled", "time-modulated media"),
-    ("sibc_enabled", "surface-impedance boundary (SIBC) media"),
+    ("surface_impedance_enabled", "surface-impedance boundary media"),
 )
 
 

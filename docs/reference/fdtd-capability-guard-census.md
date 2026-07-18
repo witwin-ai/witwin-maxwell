@@ -13,9 +13,10 @@ network embedding, the thin-wire subgrid conductor series in plan 07 phases
 plan 07 Phase 4 multi-GPU wire forward slice, plus the plan 07 Phase 4
 finite-conductor wire series-impedance slice, the plan 05 nonlinear-device
 Phase 0 slice, the plan 08 gyromagnetic-ferrite Phase 0 slices, and the plan 09
-surface-impedance Phase 0 slices, all merged) contains 166 guards:
+surface-impedance Phase 0 slices, and the plan 05 nonlinear-device N1 standalone
+transient slice, all merged) contains 165 guards:
 
-- 140 capability guards tracked by the non-increasing test budget;
+- 139 capability guards tracked by the non-increasing test budget;
 - 26 contract guards excluded by exact file and message substring.
 
 The single-GPU circuit adjoint provides the circuit replay and transpose
@@ -198,21 +199,35 @@ removed when its runtime slice (nonlinear device-runtime integration, the series
 branch, and the charge-aware transient solve) lands. The `q(v)` / `C(v)` charge
 model is still fully exercised through `CompiledNonlinearDevice.charge`, so the
 device math surface is unaffected.
+
+### Nonlinear-device N1 standalone-transient reconciliation (2026-07-18)
+
+The plan 05 N1 slice implements the charge-aware transient solve, so the third
+guard above is removed and the capability budget drops `140 -> 139`
+("Time-domain ports and lumped elements"). `NonlinearMNASystem` now folds the
+trapezoidal / backward-Euler stored-charge companion into the residual and
+Jacobian (`_charge_companion`, `advance_charge_state`) and `run_nonlinear_transient`
+drives Newton in the transient loop with gmin/source DC continuation
+(`solve_dc_operating_point`) and local backward-Euler PWL-kink breakpoints. The
+diode `junction_capacitance` and `VoltageDependentCapacitor` `q(v)` are therefore
+consumed by the integrator, and the DC operating point correctly treats the
+capacitance as an open circuit. The diode `series_resistance` guard stays: the
+internal-node ohmic branch is still not assembled this round.
+
 ### Gyromagnetic ferrite reconciliation (2026-07-17)
 
 The plan 08 Phase-0 gyromagnetic ferrite slices (0a physics contract, 0b torch
 reference oracle, 1a `GyromagneticFerrite` material type) add four reviewed
 `NotImplementedError` guards: two capability gaps and two permanent contracts.
 
-Capability gaps (+2, `134 -> 136`):
+Capability gaps (Phase 0 added +2, `134 -> 136`; slices 1b/1c then net +1 to the
+integrated budget, see the 1b/1c reconciliation below):
 
-- `witwin/maxwell/compiler/materials.py` `_static_structure_material` rejects a
-  `GyromagneticFerrite` structure. Its non-reciprocal off-diagonal permeability
-  is produced by a local linearized-LLG magnetization ADE that the material
-  compiler does not yet lower; compiling it as a plain `Material` would silently
-  discard the gyrotropy and simulate a reciprocal medium, so the compiler fails
-  closed. It is a genuine capability gap (Material compilers `12 -> 13`); lower
-  the budget when the compiler/runtime slices (1b/1c) land.
+- `witwin/maxwell/compiler/materials.py` `_static_structure_material` rejected a
+  `GyromagneticFerrite` structure at Phase 0. **Removed in slice 1c**: a ferrite
+  now compiles as its diagonal background and the gyrotropy is produced by the
+  magnetization-ADE layout + FDTD forward hooks (see the slice-1b/1c
+  reconciliation).
 - `witwin/maxwell/media.py` `PerturbationMedium.__init__` rejects a
   `GyromagneticFerrite` base. The medium perturbs a scalar permittivity
   background, which would silently discard the ferrite's magnetization state
@@ -230,6 +245,81 @@ frequency-evaluation domains `9 -> 11`):
   existing material "…is not defined for…" frequency-evaluation contracts, so they
   are excluded by exact `(file, substring)` match rather than counted against the
   capability budget.
+### Gyromagnetic ferrite slices 1b/1c reconciliation (2026-07-18)
+
+Slice 1b (compiler layout) added no guards: `compile_gyromagnetic_layout` and
+`Scene.compile_gyromagnetic_materials` are pure lowering with no fail-closed path,
+and the full-tensor `mu(f)` accessor is total.
+
+Slice 1c (axis-aligned forward) is a net `+1` capability guard (`140 -> 141`):
+
+- Removed (`-1`): the `compiler/materials.py` `_static_structure_material` ferrite
+  reject. A `GyromagneticFerrite` now compiles as its diagonal background
+  (`eps_r` / `mu_infinity` / `sigma_e`), and the non-reciprocal off-diagonal
+  permeability is produced by `compile_gyromagnetic_layout` plus the FDTD
+  gyromagnetic forward hooks (`fdtd/runtime/gyromagnetic.py`
+  `advance_gyromagnetic_state` / `apply_gyromagnetic_correction`), so it no longer
+  silently drops the gyrotropy.
+- Added (`+2`), both in `witwin/maxwell/fdtd/runtime/gyromagnetic.py`
+  `build_gyromagnetic`:
+  1. A general (non-axis-aligned) bias, or a scene mixing bias axes, fails closed.
+     Slice 1c advances only the axis-aligned z/x/y fast path where the two
+     transverse H components co-locate on the shared Yee overlap (identity
+     collocation); an arbitrary bias needs the local-frame rotation and 4-point
+     collocation of the Phase-2 kernel. Genuine capability gap; lower the budget
+     when the arbitrary-bias kernel lands.
+  2. A Bloch-periodic ferrite run fails closed: the real-valued magnetization-ADE
+     correction would break the complex Bloch phase relation (the magnetic mirror
+     of the existing nonlinear / full-anisotropy / modulation + Bloch guards).
+     Genuine capability gap; lower the budget when a complex-field ferrite
+     correction lands.
+
+The `PerturbationMedium`-wraps-a-ferrite reject and the two
+`GyromagneticFerrite` scalar frequency-evaluation contracts are unchanged.
+
+### Gyromagnetic ferrite consumer-side fail-close hardening (2026-07-18)
+
+Slice 1c lifted the `compiler/materials.py` ferrite reject globally, but that
+compiler guard had also protected every *non-FDTD-forward* consumer of a ferrite
+scene, none of which received a replacement at the time. This hardening round adds
+the missing consumer-side guards, a net `+3` (`141 -> 144`), so each consumer fails
+closed instead of silently simulating a reciprocal medium:
+
+- Added (`+1`): `witwin/maxwell/fdfd/solver.py` `_ensure_material_components`
+  rejects a `GyromagneticFerrite`. The static material compile lowers a ferrite to
+  its diagonal background only; the frequency-domain solver never runs the
+  magnetization-ADE runtime, so it would ingest a reciprocal permeability and
+  silently drop the off-diagonal Polder gyrotropy. Frequency-domain runtime gap;
+  lower the budget when an FDFD gyromagnetic ingest lands.
+- Added (`+1`): `witwin/maxwell/fdtd/distributed/shard_engine.py` `ShardEngine.build`
+  rejects a `gyromagnetic_enabled` local solver. The shard phases never call the
+  magnetization-ADE hooks, and each shard-local layout has no rank-seam handling
+  (the overlap slice drops the top plane at rank seams), so a joint solve would
+  silently simulate a reciprocal medium with uncorrected seams. This restores the
+  frozen contract boundary 8 ("Multi-GPU ferrite -- rejected until Phase 4").
+- Split (`+1`): the former single axis-aligned guard in
+  `fdtd/runtime/gyromagnetic.py` `build_gyromagnetic` is now two guards -- a
+  general (non-axis-aligned) bias reject and a mixed-bias-direction reject. The old
+  `torch.unique(fast_axis)` check collapsed `+e_k` and `-e_k` to the same axis code,
+  so a scene mixing `+z` and `-z` ferrites passed the axis-only guard and the single
+  global transverse sign then silently inverted the non-reciprocity of the `-bias`
+  region (the opposed-bias latching-circulator device class). The mixed guard now
+  tests bias-vector uniformity, so both mixed axes and opposed signs on one axis
+  fail closed.
+
+Not a new guard node (no census delta):
+
+- The adjoint reject (frozen contract boundary 9) is a new `return`-string branch in
+  `fdtd/adjoint/bridge.py` `_unsupported_adjoint_medium`, reusing the existing generic
+  `raise NotImplementedError(unsupported_medium_message)`; the non-reciprocal
+  magnetization-ADE correction has no reverse (transpose) core, so a differentiable
+  ferrite run would return gradients for a reciprocal medium.
+- The checkpoint/resume schema (`fdtd/checkpoint.py`, `fdtd/resume.py`) gains the
+  persistent gyromagnetic magnetization state names (`m_u` / `m_v` / `dm_u` / `dm_v`),
+  so a mid-run save/resume round-trips the magnetization instead of silently
+  re-zeroing it; `validate_checkpoint_state` now raises on a dropped gyromagnetic
+  state name.
+
 ### Surface-impedance adapter reconciliation (2026-07-17)
 
 The surface-impedance Phase 0 slice froze the contract, the rational model, the
@@ -249,6 +339,24 @@ lossy-metal surface path). It is a genuine capability gap, not a public contract
 the guard disappears once the surface-impedance adapter mapping is designed. It is
 counted under "External interoperability adapter" (18 -> 19); lower the budget when
 the mapping lands.
+
+### Surface-impedance Phase 1 slices S1.1 + S1.2 reconciliation (2026-07-18)
+
+The Phase 1 slices generalized the surface-impedance runtime (axis-aligned
+exposed-face layout for finite blocks, mid-domain double-sided plates, multiple
+metals, and multiple orientations; the generic per-edge Z-form ADE forward with the
+narrowband good conductor as its order-0 case). The single re-authored
+`witwin/maxwell/compiler/materials.py::_reject_surface_impedance` funnel now rejects
+strictly fewer cases -- finite blocks, mid-domain plates, multiple metals, multiple
+orientations, and the generic `SurfaceImpedanceMedium` all compile -- but it remains
+one `raise NotImplementedError` site (the oblique/rotated/curved and Bloch cases
+still funnel through it), so the capability count is unchanged. No guard was added or
+removed: the budget stays at **140**. The adjoint bridge guard
+(`fdtd/adjoint/bridge.py`) and the distributed-solver guard
+(`fdtd/distributed/solver.py`, a `ValueError`, not census-counted) were widened to
+also cover the generic `SurfaceImpedanceMedium` (previously only `LossyMetalMedium`),
+closing a fail-open gap without changing the count. The interoperability-adapter
+guard for a generic `SurfaceImpedanceMedium` remains until its export mapping lands.
 
 ## Contract exclusions
 

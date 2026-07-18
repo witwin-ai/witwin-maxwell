@@ -1471,34 +1471,83 @@ def enforce_pec_boundaries(solver):
             clamp_field_face(solver, getattr(solver, field_name), axis, side)
 
 
-def apply_sibc_surface(solver):
-    """Override the tangential E on a ``LossyMetalMedium`` surface via the resistive
-    Leontovich surface-impedance relation ``E_t = R * (n_hat x H)``.
+def apply_surface_impedance(solver):
+    """Override the tangential E on every exposed surface-impedance face.
 
-    The narrowband good-conductor surface resistance
-    ``R = sqrt(omega0*mu0/(2*sigma))`` is the dissipative part of ``Zs(omega0)``;
-    each tangential face reads the vacuum-side tangential H (index-aligned on the Yee
-    grid by ``_configure_sibc``) and forms ``E_surface = sign * R * H``. The reactive
-    part of ``Zs`` is intentionally omitted: its explicit time-derivative overwrite is
-    non-passive and unstable (it injects energy at ~R,L ~ sqrt(f) per step), and for a
-    good conductor it shifts ``|Gamma|`` by < 1e-3. The metal interior is masked to
-    zero by the coefficient setup, so the surface acts as a semi-infinite
-    good-conductor termination at roughly a skin-depth-free (>=10x coarser) cell size.
+    Each write realizes the Leontovich relation ``E_t = Z_s * (n_hat x H)`` from the
+    vacuum-side tangential H (index-aligned on the Yee grid by
+    ``_configure_surface_impedance``). Two realizations of the same contract share this
+    loop:
+
+    * a narrowband good-conductor face is pure resistance ``Z_s = R``: a full-plane
+      face uses the fused native kernel ``E_surface = sign * R * H`` (bit-identical to
+      the generic ``D * (sign * H)`` scalar path, since ``sign`` is exactly +/-1); a
+      finite (sub-plane) face writes only its transverse window with torch slicing.
+    * a generic rational face is a passive Z-form ADE: per edge, output
+      ``E = C x + D u`` then state advance ``x <- A x + B u`` with input ``u = sign * H``
+      (the trapezoidal ``|z| < 1`` discretization from the shared fitter).
+
+    The metal interior is masked to zero by the coefficient setup, so each surface acts
+    as a good-conductor termination without resolving the skin depth. Writes run in the
+    layout's deterministic owner order (minimum-rank owner writes last), so a corner
+    edge shared by two faces has a single deterministic owner.
     """
-    state = getattr(solver, "_sibc", None)
+    state = getattr(solver, "_surface_impedance", None)
     if state is None:
         return
-    surface_r = state["surface_r"]
-    for face in state["faces"]:
-        solver.fdtd_module.applySibcSurface3D(
-            electric=getattr(solver, face["e_name"]),
-            magnetic=getattr(solver, face["h_name"]),
-            axis=face["axis"],
-            electricIndex=face["electric_index"],
-            magneticIndex=face["magnetic_index"],
-            sign=face["sign"],
-            surfaceR=surface_r,
-        ).launchRaw()
+    for face in state["writes"]:
+        electric = getattr(solver, face["e_name"])
+        magnetic = getattr(solver, face["h_name"])
+        axis = face["axis"]
+        ade = face.get("ade")
+        if ade is None and face["full_plane"]:
+            solver.fdtd_module.applySibcSurface3D(
+                electric=electric,
+                magnetic=magnetic,
+                axis=axis,
+                electricIndex=face["electric_index"],
+                magneticIndex=face["magnetic_index"],
+                sign=face["sign"],
+                surfaceR=face["surface_r"],
+            ).launchRaw()
+            continue
+        e_index = _surface_face_index(
+            electric.dim(), axis, face["electric_index"], face
+        )
+        h_index = _surface_face_index(
+            magnetic.dim(), axis, face["magnetic_index"], face
+        )
+        h_sub = magnetic[h_index]
+        if ade is None:
+            electric[e_index] = face["sign"] * face["surface_r"] * h_sub
+            continue
+        u = (face["sign"] * h_sub).reshape(-1)
+        electric[e_index] = surface_ade_step(ade, u).reshape(h_sub.shape)
+
+
+def surface_ade_step(ade, u):
+    """Advance a batch of per-edge Z-form surface ADEs and return the tangential E.
+
+    ``ade`` holds the shared discrete state space ``(A, B, C, D)`` (scalar input/output)
+    and a per-edge state ``x`` of shape ``[order, M]``; ``u`` is the length-``M`` input
+    ``sign * H``. Per edge this is exactly the shared
+    ``DiscreteStateSpaceNetwork.step``: output ``E = C x + D u`` uses the pre-update
+    state, then the state advances ``x <- A x + B u`` in place (so the recurrence is
+    captured into the CUDA graph). Returns ``E`` of shape ``[M]``.
+    """
+    x = ade["state"]
+    u_row = u.reshape(1, -1)
+    output = (ade["C"] @ x).reshape(-1) + ade["D"].reshape(()) * u
+    x.copy_(ade["A"] @ x + ade["B"] @ u_row)
+    return output
+
+
+def _surface_face_index(ndim, axis, axis_index, face):
+    index = [slice(None)] * ndim
+    index[axis] = int(axis_index)
+    index[face["b_axis"]] = face["b_slice"]
+    index[face["c_axis"]] = face["c_slice"]
+    return tuple(index)
 
 
 def clamp_pec_boundaries(solver):
@@ -1545,6 +1594,7 @@ def init_field(solver):
     solver._build_update_coefficients()
     solver._initialize_dispersive_state()
     solver._initialize_magnetic_dispersive_state()
+    solver._initialize_gyromagnetic_state()
     initialize_tfsf_state(solver)
     initialize_source_terms(solver)
     prepare_port_runtimes(
@@ -1655,6 +1705,10 @@ def _field_update_block(solver, time_value):
             dt=solver.dt,
         ).launchRaw()
     solver._advance_magnetic_dispersive_state()
+    # Record the pre-update (leapfrog) transverse H so the post-update coupled step
+    # can form the time-centred magnetization drive (H_pre + H_tmp)/2. The coupled
+    # implicit-midpoint solve + correction runs after the plain magnetic update.
+    solver._snapshot_gyromagnetic_drive()
     update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
     if has_complex_fields(solver):
         update_magnetic_fields(
@@ -1673,6 +1727,11 @@ def _field_update_block(solver, time_value):
     if solver._magnetic_source_terms:
         inject_magnetic_surface_source_terms(solver, time_value=time_value)
     solver._apply_magnetic_dispersive_corrections()
+    # Non-reciprocal gyromagnetic step: the coupled implicit-midpoint magnetization
+    # advance plus the correction H -= dM/mu_inf (magnetic mirror of the electric-side
+    # full-anisotropy correction). Passive (discretely non-growing at zero damping),
+    # unlike an explicit pre-update advance / post-update correct split.
+    solver._step_gyromagnetic_coupled()
     if solver._wire_runtime is not None:
         sample_and_update_wire(solver)
 
@@ -1704,7 +1763,7 @@ def _field_update_block(solver, time_value):
             apply_full_aniso_conduction(solver)
     if solver._wire_runtime is not None:
         deposit_wire_current(solver)
-    apply_sibc_surface(solver)
+    apply_surface_impedance(solver)
 
 
 def _make_field_update_runner(solver, use_cuda_graph: bool):
@@ -1822,8 +1881,30 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         state["_wire_current"] = wire_runtime.current
         state["_wire_charge"] = wire_runtime.charge
         state["_wire_emf"] = wire_runtime.emf
+    # The gyromagnetic magnetization ADE advances persistent state (m/dm) inside the
+    # captured block. On a zero field it stays at zero through warmup/capture (the ADE
+    # is linear with zero forcing at H = 0), but snapshotting it keeps capture correct
+    # even when the block is captured on a non-zero seeded field; the scratch buffers
+    # (hu/hv/new_u/new_v) are overwritten before they are read every step, so they are
+    # not carried state. It lives on the ``_gyromagnetic_state`` dict, not in
+    # ``vars(solver)``, so the "psi"/field filter above does not reach it.
+    gyro_state = getattr(solver, "_gyromagnetic_state", None)
+    if gyro_state is not None:
+        for gyro_name in ("m_u", "m_v", "dm_u", "dm_v"):
+            state[f"_gyro_{gyro_name}"] = gyro_state[gyro_name]
     # The resistive SIBC surface overwrite is stateless (it writes only the surface E
     # plane, already snapshotted above), so it needs no extra capture state.
+    # A resistive surface-impedance write is stateless (it writes only the surface E
+    # plane, already snapshotted above). A generic rational face carries a per-edge ADE
+    # state; snapshot it so warmup/capture on the zero field leave it at zero, which is
+    # a fixed point of the linear ADE with zero forcing, so the physical run is not
+    # perturbed and the state advance stays inside the captured graph.
+    surface_state = getattr(solver, "_surface_impedance", None)
+    if surface_state is not None:
+        for index, write in enumerate(surface_state["writes"]):
+            ade = write.get("ade")
+            if ade is not None:
+                state[("_surface_ade", index)] = ade["state"]
     saved = {k: v.clone() for k, v in state.items()}
 
     def _restore():
@@ -1925,7 +2006,7 @@ def _make_full_embedded_step_runner(solver, *, use_cuda_graph: bool):
         and not getattr(solver, "nonlinear_general_enabled", False)
         and not getattr(solver, "modulation_enabled", False)
         and not getattr(solver, "has_mur_faces", False)
-        and not getattr(solver, "sibc_enabled", False)
+        and not getattr(solver, "surface_impedance_enabled", False)
     )
     if not graphable:
         return None

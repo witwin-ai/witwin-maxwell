@@ -53,74 +53,63 @@ def _slab_scene(*, device="cpu", conductivity=5.8e7, side="high"):
     )
 
 
-def test_lossy_metal_compiles_to_sibc_descriptor():
+def test_lossy_metal_compiles_to_order0_surface_layout():
     scene = prepare_scene(_slab_scene())
-    model = scene.compile_materials()
-    descriptor = model.get("sibc")
-    assert descriptor is not None
-    # Slab is bounded along x and flush against the +x edge, so the metal occupies
-    # the high side of the illuminated surface node.
-    assert descriptor["axis"] == 0
-    assert descriptor["metal_side"] == "high"
-    assert descriptor["conductivity"] == pytest.approx(5.8e7)
-    assert scene.x_nodes64[descriptor["surface_node"]] == pytest.approx(0.1)
+    layout = scene.compile_materials().get("surface_impedance")
+    assert layout is not None and bool(layout)
+    assert len(layout.faces) == 1
+    face = layout.faces[0]
+    # Slab is bounded along x and flush against the +x edge, so the metal occupies the
+    # high side of the illuminated surface node.
+    assert face.axis == 0
+    assert face.metal_side == "high"
+    assert face.full_plane is True
+    metal = layout.metals[face.metal_index]
+    # A narrowband LossyMetalMedium is realized as an order-0 pure-resistance surface.
+    assert metal.conductivity == pytest.approx(5.8e7)
+    assert scene.x_nodes64[face.surface_node] == pytest.approx(0.1)
 
 
 def test_lossy_metal_low_side_surface_uses_upper_geometry_face():
     scene = prepare_scene(_slab_scene(side="low"))
-    descriptor = scene.compile_materials()["sibc"]
-
-    assert descriptor["axis"] == 0
-    assert descriptor["metal_side"] == "low"
-    assert scene.x_nodes64[descriptor["surface_node"]] == pytest.approx(-0.1)
-
-
-def test_lossy_metal_finite_block_raises_physics_guard():
-    # A laterally finite block exposes edge faces the scalar normal-incidence Zs
-    # does not model; the guard must be physics-worded, not "not implemented yet".
-    scene = prepare_scene(
-        mw.Scene(
-            domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
-            grid=mw.GridSpec.uniform(0.05),
-            boundary=mw.BoundarySpec.pml(num_layers=4, strength=1.0),
-            device="cpu",
-            structures=[
-                mw.Structure(
-                    geometry=Box(position=(0.3, 0.0, 0.0), size=(0.4, 0.2, 0.2)),
-                    material=mw.LossyMetalMedium(conductivity=5.8e7),
-                )
-            ],
-        )
-    )
-    with pytest.raises(NotImplementedError, match="transverse cross-section"):
-        scene.compile_materials()
-    with pytest.raises(NotImplementedError) as info:
-        scene.compile_materials()
-    assert "not implemented yet" not in str(info.value)
+    layout = scene.compile_materials()["surface_impedance"]
+    assert len(layout.faces) == 1
+    face = layout.faces[0]
+    assert face.axis == 0
+    assert face.metal_side == "low"
+    assert scene.x_nodes64[face.surface_node] == pytest.approx(-0.1)
 
 
-def test_lossy_metal_mid_domain_slab_raises_physics_guard():
-    # A slab with vacuum on both sides exposes two faces; v1 supports a single
-    # illuminated face flush against a domain boundary.
-    scene = prepare_scene(
+def _box_scene(box):
+    return prepare_scene(
         mw.Scene(
             domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
             grid=mw.GridSpec.uniform(0.05),
             boundary=mw.BoundarySpec.faces(default="periodic", num_layers=4, strength=1.0, x=("pml", "pml")),
             device="cpu",
-            structures=[
-                mw.Structure(
-                    geometry=Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.4, 0.4)),
-                    material=mw.LossyMetalMedium(conductivity=5.8e7),
-                )
-            ],
+            structures=[mw.Structure(geometry=box, material=mw.LossyMetalMedium(conductivity=5.8e7))],
         )
     )
-    with pytest.raises(NotImplementedError, match="single illuminated face"):
-        scene.compile_materials()
 
 
-def test_lossy_metal_multiple_slabs_raise_physics_guard():
+def test_lossy_metal_finite_block_exposes_all_faces():
+    # A laterally finite block now compiles: every axis-aligned exposed face is a
+    # surface-impedance plane (S1.1 replaced the single-plane restriction).
+    scene = _box_scene(Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2)))
+    layout = scene.compile_materials()["surface_impedance"]
+    assert len(layout.faces) == 6
+    assert layout.total_area == pytest.approx(0.24)
+
+
+def test_lossy_metal_mid_domain_double_sided_plate_compiles():
+    # A slab with vacuum on both sides now compiles to a two-face double-sided plate.
+    scene = _box_scene(Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.4, 0.4)))
+    layout = scene.compile_materials()["surface_impedance"]
+    assert len(layout.faces) == 2
+    assert sorted(face.metal_side for face in layout.faces) == ["high", "low"]
+
+
+def test_lossy_metal_multiple_slabs_compile():
     scene = prepare_scene(
         mw.Scene(
             domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
@@ -135,8 +124,10 @@ def test_lossy_metal_multiple_slabs_raise_physics_guard():
             ],
         )
     )
-    with pytest.raises(NotImplementedError, match="single metal slab"):
-        scene.compile_materials()
+    layout = scene.compile_materials()["surface_impedance"]
+    assert len(layout.metals) == 2
+    # Each full-span slab flush against a domain boundary exposes one illuminated face.
+    assert len(layout.faces) == 2
 
 
 def test_lossy_metal_adjoint_is_rejected():
@@ -144,21 +135,22 @@ def test_lossy_metal_adjoint_is_rejected():
 
     message = _unsupported_adjoint_medium(_slab_scene())
     assert message is not None
-    assert "LossyMetalMedium" in message
+    assert "surface-impedance boundary" in message
     assert "not implemented yet" not in message
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
-def test_lossy_metal_simulation_prepare_configures_sibc():
+def test_lossy_metal_simulation_prepare_configures_surface_impedance():
     solver = mw.Simulation.fdtd(_slab_scene(device="cuda"), frequencies=[1.0e9]).prepare().solver
-    assert solver.sibc_enabled
-    state = solver._sibc
-    # Resistive Leontovich surface: R = sqrt(omega0*mu0/(2*sigma)). The reactive part
-    # of Zs is intentionally omitted (its explicit derivative overwrite is non-passive
-    # and unstable), so the descriptor carries only the surface resistance.
+    assert solver.surface_impedance_enabled
+    state = solver._surface_impedance
+    # One full-plane order-0 face -> two tangential-component writes, each a resistive
+    # surface with R = sqrt(omega0*mu0/(2*sigma)) and no ADE state.
+    writes = state["writes"]
+    assert len(writes) == 2
     omega0 = 2.0 * np.pi * solver.source_frequency
     expected_r = float(np.sqrt(omega0 * solver.mu0 / (2.0 * 5.8e7)))
-    assert state["surface_r"] == pytest.approx(expected_r, rel=1e-9)
-    assert "surface_l" not in state
-    # Two tangential faces are configured on the illuminated surface.
-    assert len(state["faces"]) == 2
+    for write in writes:
+        assert write["surface_r"] == pytest.approx(expected_r, rel=1e-9)
+        assert write.get("ade") is None
+        assert write["full_plane"] is True
