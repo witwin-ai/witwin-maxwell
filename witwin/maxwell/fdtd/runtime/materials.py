@@ -92,6 +92,12 @@ def build_materials(solver, scene):
 
     build_dispersive_templates(solver, material_model)
     build_magnetic_dispersive_templates(solver, material_model)
+    # Gyromagnetic (Polder) ferrite: the background eps/mu_inf/sigma already
+    # compiled through the diagonal path above; this only wires the local
+    # magnetization-ADE state that produces the non-reciprocal off-diagonal mu.
+    from .gyromagnetic import build_gyromagnetic
+
+    build_gyromagnetic(solver, scene)
     solver.dispersive_enabled = solver.electric_dispersive_enabled or solver.magnetic_dispersive_enabled
     # Full (off-diagonal) anisotropic permittivity now composes with dispersion:
     # electric poles enter isotropically and the ADE polarization current is folded

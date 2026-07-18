@@ -19,6 +19,12 @@ from .materials import (
     update_kerr_electric_curls,
     update_nonlinear_electric_coefficients,
 )
+from .gyromagnetic import (
+    advance_gyromagnetic_state,
+    apply_gyromagnetic_correction,
+    build_gyromagnetic,
+    initialize_gyromagnetic_state,
+)
 from .module_cache import get_fdtd_module, require_cuda_scene
 from .spectral import (
     accumulate_dft,
@@ -89,6 +95,10 @@ __all__ = [
     "init_field",
     "initialize_dispersive_state",
     "initialize_magnetic_dispersive_state",
+    "advance_gyromagnetic_state",
+    "apply_gyromagnetic_correction",
+    "build_gyromagnetic",
+    "initialize_gyromagnetic_state",
     "initialize_solver",
     "iter_cpml_memory_regions",
     "normalize_target_frequencies",

@@ -244,10 +244,19 @@ def test_perturbation_medium_rejects_ferrite():
     assert "GyromagneticFerrite" in str(exc.value)
 
 
-def test_compiler_fails_closed_on_ferrite():
-    """Fail-closed: the material compiler rejects a ferrite rather than dropping gyrotropy."""
+def test_material_compiler_lowers_ferrite_background():
+    """The material compiler lowers a ferrite to its diagonal background only.
+
+    The non-reciprocal off-diagonal permeability is carried by the separate
+    magnetization-ADE runtime (compile_gyromagnetic_layout + the FDTD forward
+    hooks), never by widening mu_tensor -- so here the ferrite compiles as its
+    eps_r / mu_infinity / sigma_e background exactly like a plain diagonal medium.
+    """
+    ferrite = _ferrite(eps_r=14.5, mu_infinity=1.0)
     box = mw.Box(size=(1e-3, 1e-3, 1e-3))
-    structure = mw.Structure(geometry=box, material=_ferrite())
-    with pytest.raises(NotImplementedError) as exc:
-        material_compiler._static_structure_material(structure)
-    assert "GyromagneticFerrite" in str(exc.value)
+    structure = mw.Structure(geometry=box, material=ferrite)
+    result = material_compiler._static_structure_material(structure)
+    material, eps_components, _eps_offdiag, mu_components, _sigma, _sigma_m, _nl = result
+    assert material is ferrite
+    assert eps_components["x"] == pytest.approx(14.5)
+    assert mu_components["z"] == pytest.approx(1.0)

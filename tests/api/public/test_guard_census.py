@@ -100,7 +100,24 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # its dedicated lossy-metal surface path). It is a genuine capability gap (External
 # interoperability adapter 18 -> 19); lower this budget when the surface-impedance
 # adapter mapping is designed.
-CAPABILITY_GUARD_BUDGET = 140
+# 2026-07-18 (plan 08 slices 1b/1c, gyromagnetic ferrite compiler + forward):
+# 140 -> 141 (net +1). The compiler/materials.py ferrite reject is REMOVED (-1):
+# a GyromagneticFerrite now compiles as its diagonal background (eps_r /
+# mu_infinity / sigma_e) and its non-reciprocal off-diagonal permeability is
+# produced by the compiled magnetization-ADE layout plus the FDTD gyromagnetic
+# forward hooks (fdtd/runtime/gyromagnetic.py), so it no longer silently drops the
+# gyrotropy. Two narrower forward-runtime capability gaps replace it (+2), both in
+# fdtd/runtime/gyromagnetic.py: (1) a general (non-axis-aligned) bias, or a scene
+# mixing bias axes, fails closed because slice 1c advances only the axis-aligned
+# z/x/y fast path (the arbitrary-bias local-frame rotation + 4-point Yee
+# collocation is Phase 2); (2) a Bloch-periodic ferrite run fails closed because
+# the real-valued magnetization-ADE correction would break the complex Bloch phase
+# (the magnetic mirror of the existing nonlinear/full-aniso/modulation + Bloch
+# guards). Both are genuine capability gaps; lower this budget as the arbitrary-
+# bias kernel (Phase 2) and a complex-field ferrite correction land. The
+# PerturbationMedium-wraps-a-ferrite reject stays (a scalar-eps perturbation cannot
+# represent the gyromagnetic state).
+CAPABILITY_GUARD_BUDGET = 141
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

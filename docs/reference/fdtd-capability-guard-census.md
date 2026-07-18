@@ -204,15 +204,14 @@ The plan 08 Phase-0 gyromagnetic ferrite slices (0a physics contract, 0b torch
 reference oracle, 1a `GyromagneticFerrite` material type) add four reviewed
 `NotImplementedError` guards: two capability gaps and two permanent contracts.
 
-Capability gaps (+2, `134 -> 136`):
+Capability gaps (Phase 0 added +2, `134 -> 136`; slices 1b/1c then net +1 to the
+integrated budget, see the 1b/1c reconciliation below):
 
-- `witwin/maxwell/compiler/materials.py` `_static_structure_material` rejects a
-  `GyromagneticFerrite` structure. Its non-reciprocal off-diagonal permeability
-  is produced by a local linearized-LLG magnetization ADE that the material
-  compiler does not yet lower; compiling it as a plain `Material` would silently
-  discard the gyrotropy and simulate a reciprocal medium, so the compiler fails
-  closed. It is a genuine capability gap (Material compilers `12 -> 13`); lower
-  the budget when the compiler/runtime slices (1b/1c) land.
+- `witwin/maxwell/compiler/materials.py` `_static_structure_material` rejected a
+  `GyromagneticFerrite` structure at Phase 0. **Removed in slice 1c**: a ferrite
+  now compiles as its diagonal background and the gyrotropy is produced by the
+  magnetization-ADE layout + FDTD forward hooks (see the slice-1b/1c
+  reconciliation).
 - `witwin/maxwell/media.py` `PerturbationMedium.__init__` rejects a
   `GyromagneticFerrite` base. The medium perturbs a scalar permittivity
   background, which would silently discard the ferrite's magnetization state
@@ -230,6 +229,38 @@ frequency-evaluation domains `9 -> 11`):
   existing material "…is not defined for…" frequency-evaluation contracts, so they
   are excluded by exact `(file, substring)` match rather than counted against the
   capability budget.
+### Gyromagnetic ferrite slices 1b/1c reconciliation (2026-07-18)
+
+Slice 1b (compiler layout) added no guards: `compile_gyromagnetic_layout` and
+`Scene.compile_gyromagnetic_materials` are pure lowering with no fail-closed path,
+and the full-tensor `mu(f)` accessor is total.
+
+Slice 1c (axis-aligned forward) is a net `+1` capability guard (`140 -> 141`):
+
+- Removed (`-1`): the `compiler/materials.py` `_static_structure_material` ferrite
+  reject. A `GyromagneticFerrite` now compiles as its diagonal background
+  (`eps_r` / `mu_infinity` / `sigma_e`), and the non-reciprocal off-diagonal
+  permeability is produced by `compile_gyromagnetic_layout` plus the FDTD
+  gyromagnetic forward hooks (`fdtd/runtime/gyromagnetic.py`
+  `advance_gyromagnetic_state` / `apply_gyromagnetic_correction`), so it no longer
+  silently drops the gyrotropy.
+- Added (`+2`), both in `witwin/maxwell/fdtd/runtime/gyromagnetic.py`
+  `build_gyromagnetic`:
+  1. A general (non-axis-aligned) bias, or a scene mixing bias axes, fails closed.
+     Slice 1c advances only the axis-aligned z/x/y fast path where the two
+     transverse H components co-locate on the shared Yee overlap (identity
+     collocation); an arbitrary bias needs the local-frame rotation and 4-point
+     collocation of the Phase-2 kernel. Genuine capability gap; lower the budget
+     when the arbitrary-bias kernel lands.
+  2. A Bloch-periodic ferrite run fails closed: the real-valued magnetization-ADE
+     correction would break the complex Bloch phase relation (the magnetic mirror
+     of the existing nonlinear / full-anisotropy / modulation + Bloch guards).
+     Genuine capability gap; lower the budget when a complex-field ferrite
+     correction lands.
+
+The `PerturbationMedium`-wraps-a-ferrite reject and the two
+`GyromagneticFerrite` scalar frequency-evaluation contracts are unchanged.
+
 ### Surface-impedance adapter reconciliation (2026-07-17)
 
 The surface-impedance Phase 0 slice froze the contract, the rational model, the

@@ -1120,7 +1120,7 @@ def gyromagnetic_local_basis(bias_unit_vector, *, dtype=torch.float64, atol=1.0e
     """
     b = torch.as_tensor(bias_unit_vector, dtype=dtype)
     b = b / torch.linalg.vector_norm(b)
-    axes = torch.eye(3, dtype=dtype)
+    axes = torch.eye(3, dtype=dtype, device=b.device)
     # Axis-aligned fast path: b == +/- e_k -> pick a canonical right-handed frame.
     for k in range(3):
         for sign in (1.0, -1.0):

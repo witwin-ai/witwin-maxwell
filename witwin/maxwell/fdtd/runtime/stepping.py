@@ -1545,6 +1545,7 @@ def init_field(solver):
     solver._build_update_coefficients()
     solver._initialize_dispersive_state()
     solver._initialize_magnetic_dispersive_state()
+    solver._initialize_gyromagnetic_state()
     initialize_tfsf_state(solver)
     initialize_source_terms(solver)
     prepare_port_runtimes(
@@ -1655,6 +1656,9 @@ def _field_update_block(solver, time_value):
             dt=solver.dt,
         ).launchRaw()
     solver._advance_magnetic_dispersive_state()
+    # Advance the local magnetization ADE from the pre-update (leapfrog) H drive;
+    # the resulting dM is applied after the plain magnetic update below.
+    solver._advance_gyromagnetic_state()
     update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
     if has_complex_fields(solver):
         update_magnetic_fields(
@@ -1673,6 +1677,9 @@ def _field_update_block(solver, time_value):
     if solver._magnetic_source_terms:
         inject_magnetic_surface_source_terms(solver, time_value=time_value)
     solver._apply_magnetic_dispersive_corrections()
+    # Non-reciprocal gyromagnetic correction H -= dM/mu_inf (magnetic mirror of
+    # the electric-side full-anisotropy correction).
+    solver._apply_gyromagnetic_correction()
     if solver._wire_runtime is not None:
         sample_and_update_wire(solver)
 
