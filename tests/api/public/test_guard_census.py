@@ -66,6 +66,8 @@ CAPABILITY_GUARD_BUDGET = 134
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
 CONTRACT_GUARDS = (
+    ("witwin/maxwell/circuit_devices.py", "Transistor device BJT is gated behind the independent Phase 5"),
+    ("witwin/maxwell/circuit_devices.py", "Transistor device MOSFET is gated behind the independent Phase 5"),
     ("witwin/maxwell/media.py", "Nonlinear Material frequency evaluation is not defined without a field amplitude"),
     ("witwin/maxwell/media.py", "relative_permittivity() currently supports isotropic Material only"),
     ("witwin/maxwell/media.py", "relative_permittivity() is not defined for nonlinear Material"),

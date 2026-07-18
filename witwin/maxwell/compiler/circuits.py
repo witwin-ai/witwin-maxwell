@@ -18,6 +18,7 @@ from ..circuits import (
     VoltageSource,
 )
 from ..lumped import Inductor, Resistor
+from ..circuit_devices import Diode, PiecewiseLinearIV, PolynomialIV
 
 
 _BRANCH_TYPES = (
@@ -31,6 +32,10 @@ _CURRENT_SOURCE_TYPES = (
     VoltageControlledCurrentSource,
     CurrentControlledCurrentSource,
 )
+# Nonlinear conduction devices (diode, behavioral I-V) provide a finite DC
+# conductance between their terminals, so they establish a DC path exactly like a
+# resistor. A VoltageDependentCapacitor is charge-only (open at DC) and is
+# therefore deliberately absent, matching the linear Capacitor.
 _DC_CONNECTING_TYPES = (
     Resistor,
     Inductor,
@@ -38,6 +43,9 @@ _DC_CONNECTING_TYPES = (
     VoltageControlledVoltageSource,
     CurrentControlledVoltageSource,
     TimedSwitch,
+    Diode,
+    PiecewiseLinearIV,
+    PolynomialIV,
 )
 
 
