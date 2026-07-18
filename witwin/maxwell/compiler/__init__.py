@@ -37,6 +37,10 @@ from .waveports import (
     compile_waveport_cross_section,
     compile_waveports,
 )
+from .surface_impedance import (
+    SurfaceImpedanceRationalModel,
+    fit_surface_impedance,
+)
 from .wire_impedance import (
     SeriesImpedanceModel,
     dc_resistance,
@@ -75,6 +79,8 @@ __all__ = [
     "CompiledWireMonitor",
     "CompiledWireNetwork",
     "SeriesImpedanceModel",
+    "SurfaceImpedanceRationalModel",
+    "fit_surface_impedance",
     "dc_resistance",
     "fit_series_impedance",
     "internal_impedance",
