@@ -802,7 +802,31 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
             entry["source_dft_real"] += source_signal * weighted_cos
             entry["source_dft_imag"] += source_signal * weighted_sin
 
+        # Yee time-stagger convention for spectral observers.
+        #
+        # The electric observers accumulate at the plain running-DFT step phase
+        # (offset 0), colocated with the full-field DFT accumulator and the
+        # source-current DFT: E^(n+1) is labelled at (n+1)dt. The magnetic
+        # observers carry an extra -0.5*omega*dt phase (a half-step retard), so
+        # H^(n+1/2) is labelled at (n+1/2)dt. The E-H *relative* label offset is
+        # therefore exactly +1/2 step -- the physical Yee stagger the
+        # time-averaged Poynting cross term S = 1/2 Re(E x H*) requires. The
+        # common step-phase cancels in S, so only the +1/2 relative offset is
+        # observable; retarding H (rather than advancing E) keeps E colocated
+        # with the plain DFT slices used everywhere else.
+        def _h_offset_weights(field_name):
+            if field_name.startswith("E"):
+                return weighted_cos, weighted_sin
+            phase_offset = -0.5 * 2.0 * np.pi * entry["frequency"] * solver.dt
+            offset_cos = np.cos(phase_offset)
+            offset_sin = np.sin(phase_offset)
+            return (
+                weighted_cos * offset_cos - weighted_sin * offset_sin,
+                weighted_sin * offset_cos + weighted_cos * offset_sin,
+            )
+
         for group, local_index in solver._observer_point_groups_by_frequency[global_index]:
+            group_cos, group_sin = _h_offset_weights(group["field_name"])
             solver.fdtd_module.accumulatePointObservers3D(
                 field=getattr(solver, group["field_name"]),
                 pointI=group["point_i"],
@@ -810,8 +834,8 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                 pointK=group["point_k"],
                 realAccum=group["real"][local_index],
                 imagAccum=group["imag"][local_index],
-                weightedCos=weighted_cos,
-                weightedSin=weighted_sin,
+                weightedCos=group_cos,
+                weightedSin=group_sin,
             ).launchRaw()
             if has_complex_fields(solver):
                 solver.fdtd_module.accumulatePointObservers3D(
@@ -821,19 +845,20 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     pointK=group["point_k"],
                     realAccum=group["aux_real"][local_index],
                     imagAccum=group["aux_imag"][local_index],
-                    weightedCos=weighted_cos,
-                    weightedSin=weighted_sin,
+                    weightedCos=group_cos,
+                    weightedSin=group_sin,
                 ).launchRaw()
 
         for group, local_index in solver._observer_plane_groups_by_frequency[global_index]:
+            group_cos, group_sin = _h_offset_weights(group["field_name"])
             solver.fdtd_module.accumulatePlaneObserver3D(
                 field=getattr(solver, group["field_name"]),
                 planeRealAccum=group["real"][local_index],
                 planeImagAccum=group["imag"][local_index],
                 axisCode=group["axis_code"],
                 planeIndex=group["plane_index"],
-                weightedCos=weighted_cos,
-                weightedSin=weighted_sin,
+                weightedCos=group_cos,
+                weightedSin=group_sin,
             ).launchRaw()
             if has_complex_fields(solver):
                 solver.fdtd_module.accumulatePlaneObserver3D(
@@ -842,8 +867,8 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     planeImagAccum=group["aux_imag"][local_index],
                     axisCode=group["axis_code"],
                     planeIndex=group["plane_index"],
-                    weightedCos=weighted_cos,
-                    weightedSin=weighted_sin,
+                    weightedCos=group_cos,
+                    weightedSin=group_sin,
                 ).launchRaw()
 
         entry["window_normalization"] += window_weight
