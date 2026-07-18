@@ -95,6 +95,11 @@ class FDTDParallelConfig:
     overlap: bool = True
     gather_fields: bool = False
     result_device: str | torch.device | None = None
+    # Collective timeout (seconds) for the one-process-per-GPU NCCL transport. A
+    # stalled or dead peer surfaces as a ProcessGroupNCCL watchdog abort after
+    # this bound rather than an indefinite hang. Ignored by the in-process
+    # cuda_p2p transport, which has no cross-process collectives.
+    timeout_s: float = 1800.0
 
     def __post_init__(self) -> None:
         devices = _normalize_devices(self.devices, minimum=2)
@@ -106,6 +111,11 @@ class FDTDParallelConfig:
             raise TypeError("overlap must be a bool.")
         if not isinstance(self.gather_fields, bool):
             raise TypeError("gather_fields must be a bool.")
+        if isinstance(self.timeout_s, bool) or not isinstance(self.timeout_s, (int, float)):
+            raise TypeError("timeout_s must be a number.")
+        if float(self.timeout_s) <= 0.0:
+            raise ValueError("timeout_s must be positive.")
+        object.__setattr__(self, "timeout_s", float(self.timeout_s))
 
         result_device = devices[0]
         if self.result_device is not None:

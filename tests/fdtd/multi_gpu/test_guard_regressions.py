@@ -327,6 +327,7 @@ def test_active_absorber_type_aggregates_x_high_only_pml_from_last_shard():
 
 def _hardware_probe(monkeypatch, *, missing_pair=None):
     solver = object.__new__(DistributedFDTD)
+    solver._nccl = False
     solver.devices = tuple(torch.device(f"cuda:{index}") for index in range(3))
     solver.device = torch.device("cuda:0")
     solver.transport = SimpleNamespace(preflight=Mock())
