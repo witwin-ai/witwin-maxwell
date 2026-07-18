@@ -26,6 +26,7 @@ _SCHEMA_TUPLE_FIELDS = (
     "magnetic_dispersive_state_names",
     "lumped_state_names",
     "circuit_state_names",
+    "gyromagnetic_state_names",
 )
 
 

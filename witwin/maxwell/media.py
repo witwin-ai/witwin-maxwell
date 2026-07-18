@@ -751,6 +751,11 @@ class Material(CoreMaterial):
     def is_pec(self) -> bool:
         return self.pec
 
+    @property
+    def is_gyromagnetic(self) -> bool:
+        """Whether this material carries a non-reciprocal gyromagnetic tensor."""
+        return False
+
     @classmethod
     def pec(cls, name: str | None = None) -> "Material":
         """Construct a perfect-electric-conductor marker material."""
@@ -1050,6 +1055,96 @@ def gyromagnetic_polder_tensor(
     return mu * (eye - bbT) + mu_inf * bbT + i * kappa * _gyromagnetic_cross_matrix(b)
 
 
+def gyromagnetic_state_space(omega_0, omega_m, gilbert_damping, *, dtype=torch.float64):
+    """Local-frame magnetization-ADE matrices ``P``, ``Q`` (2x2 real tensors).
+
+    ``dm/dt = P m + Q h`` in the transverse local frame ``b = z_hat`` (frozen
+    contract section 2.2). With ``c = 1/(1 + alpha^2)``,
+    ``P = c*omega_0*[[-alpha, -1], [1, -alpha]]`` and
+    ``Q = c*omega_m*[[alpha, 1], [-1, alpha]]``.
+
+    This is the production twin of ``ferrite_reference.state_space_matrices``; the
+    two must agree bit-for-bit (a falsification gate). Torch-native and
+    differentiable in every argument that is a leaf tensor.
+    """
+
+    def _c(value):
+        if isinstance(value, torch.Tensor):
+            return value.to(dtype)
+        return torch.as_tensor(value, dtype=dtype)
+
+    w0 = _c(omega_0)
+    wm = _c(omega_m)
+    alpha = _c(gilbert_damping)
+    c = 1.0 / (1.0 + alpha * alpha)
+    one = torch.ones_like(w0)
+    P = c * w0 * torch.stack(
+        [
+            torch.stack([-alpha, -one]),
+            torch.stack([one, -alpha]),
+        ]
+    )
+    Q = c * wm * torch.stack(
+        [
+            torch.stack([alpha, one]),
+            torch.stack([-one, alpha]),
+        ]
+    )
+    return P, Q
+
+
+def gyromagnetic_update_matrices(omega_0, omega_m, gilbert_damping, dt, *, dtype=torch.float64):
+    """Implicit-midpoint (Cayley) propagator ``Phi`` and drive ``Gamma`` (2x2).
+
+    ``m^{n+1} = Phi m^n + Gamma h^{n+1/2}`` with
+    ``Phi = (I - (dt/2) P)^-1 (I + (dt/2) P)`` and
+    ``Gamma = (I - (dt/2) P)^-1 (dt Q)`` (frozen contract section 3.1). ``Phi`` is
+    orthogonal when ``alpha = 0`` (exact energy conservation) and a strict
+    contraction when ``alpha > 0``; unconditionally stable for every ``dt > 0``
+    (contract section 3.3). The production twin of the Cayley step embedded in
+    ``ferrite_reference.LLGReference``.
+    """
+    P, Q = gyromagnetic_state_space(omega_0, omega_m, gilbert_damping, dtype=dtype)
+    dt_t = torch.as_tensor(dt, dtype=dtype) if not isinstance(dt, torch.Tensor) else dt.to(dtype)
+    eye = torch.eye(2, dtype=dtype)
+    a_inv = torch.linalg.inv(eye - (dt_t / 2.0) * P)
+    phi = a_inv @ (eye + (dt_t / 2.0) * P)
+    gamma = (a_inv * dt_t) @ Q
+    return phi, gamma
+
+
+def gyromagnetic_local_basis(bias_unit_vector, *, dtype=torch.float64, atol=1.0e-9):
+    """Right-handed orthonormal local frame columns ``(u, v, w)`` with ``w = b``.
+
+    Returns a 3x3 rotation matrix ``R = [u | v | w]`` (lab<-local) whose third
+    column is the bias unit vector ``b``. When ``b`` is axis-aligned (``+/-`` a
+    Cartesian axis) the frame is chosen from the remaining Cartesian axes so that
+    ``R`` is a signed permutation with no interpolation -- the axis-aligned
+    fast path (contract 2.4 / slice 1c z/x/y fast paths). ``u``, ``v`` span the
+    transverse plane in which the magnetization ``m = (m_u, m_v)`` precesses.
+    """
+    b = torch.as_tensor(bias_unit_vector, dtype=dtype)
+    b = b / torch.linalg.vector_norm(b)
+    axes = torch.eye(3, dtype=dtype, device=b.device)
+    # Axis-aligned fast path: b == +/- e_k -> pick a canonical right-handed frame.
+    for k in range(3):
+        for sign in (1.0, -1.0):
+            axis = sign * axes[k]
+            if torch.linalg.vector_norm(b - axis) <= atol:
+                w = axis
+                u = axes[(k + 1) % 3]
+                v = torch.linalg.cross(w, u)
+                return torch.stack([u, v, w], dim=1)
+    # General bias: Gram-Schmidt from the least-aligned Cartesian axis.
+    seed_index = int(torch.argmin(torch.abs(b)))
+    seed = axes[seed_index]
+    u = seed - torch.dot(seed, b) * b
+    u = u / torch.linalg.vector_norm(u)
+    v = torch.linalg.cross(b, u)
+    v = v / torch.linalg.vector_norm(v)
+    return torch.stack([u, v, b], dim=1)
+
+
 @dataclass(frozen=True, init=False)
 class GyromagneticFerrite(Material):
     """DC-biased ferrite with a gyromagnetic (Polder) permeability tensor.
@@ -1204,6 +1299,10 @@ class GyromagneticFerrite(Material):
         return mu, kappa
 
     # --- Material-family overrides -------------------------------------------
+
+    @property
+    def is_gyromagnetic(self) -> bool:
+        return True
 
     def capabilities(self) -> MaterialCapabilities:
         return MaterialCapabilities(

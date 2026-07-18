@@ -33,6 +33,10 @@ _DISPERSIVE_STATE_TENSORS = {
     "lorentz": ("polarization", "current"),
 }
 _WIRE_STATE_NAMES = ("wire_current", "wire_charge")
+# Persistent gyromagnetic (Polder ferrite) magnetization-ADE state carried across
+# a checkpoint/resume boundary. Scratch buffers (drive gather, staged propagator
+# output) are recomputed each step and are not part of the frozen layout.
+_GYROMAGNETIC_STATE_TENSOR_NAMES = ("m_u", "m_v", "dm_u", "dm_v")
 _CHECKPOINT_SCHEMA_VERSION = 2
 
 
@@ -64,6 +68,26 @@ def iter_magnetic_dispersive_state_specs(solver):
                 yield component_name, model_name, index, tensor_names, entry
 
 
+def gyromagnetic_state_name(tensor_name: str) -> str:
+    return f"gyromagnetic_{tensor_name}"
+
+
+def iter_gyromagnetic_state_specs(solver):
+    """Yield ``(schema_name, tensor)`` for each persistent ferrite ADE buffer.
+
+    Empty unless the solver is a single-device ferrite forward run: the
+    distributed and adjoint paths fail closed on gyromagnetic media, so this
+    state family only ever appears on the single-GPU forward checkpoint layout.
+    """
+    if not getattr(solver, "gyromagnetic_enabled", False):
+        return
+    state = getattr(solver, "_gyromagnetic_state", None)
+    if not state:
+        return
+    for tensor_name in _GYROMAGNETIC_STATE_TENSOR_NAMES:
+        yield gyromagnetic_state_name(tensor_name), state[tensor_name]
+
+
 @dataclass(frozen=True)
 class FDTDCheckpointSchema:
     version: int
@@ -77,6 +101,7 @@ class FDTDCheckpointSchema:
     circuit_state_names: tuple[str, ...] = ()
     network_state_names: tuple[str, ...] = ()
     wire_state_names: tuple[str, ...] = ()
+    gyromagnetic_state_names: tuple[str, ...] = ()
 
     @property
     def state_names(self) -> tuple[str, ...]:
@@ -91,6 +116,7 @@ class FDTDCheckpointSchema:
             + self.circuit_state_names
             + self.network_state_names
             + self.wire_state_names
+            + self.gyromagnetic_state_names
         )
 
 
@@ -209,6 +235,9 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
     wire_state_names = (
         _WIRE_STATE_NAMES if getattr(solver, "_wire_runtime", None) is not None else ()
     )
+    gyromagnetic_state_names = tuple(
+        name for name, _tensor in iter_gyromagnetic_state_specs(solver)
+    )
 
     return FDTDCheckpointSchema(
         version=_CHECKPOINT_SCHEMA_VERSION,
@@ -222,6 +251,7 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         circuit_state_names=circuit_state_names,
         network_state_names=network_state_names,
         wire_state_names=tuple(wire_state_names),
+        gyromagnetic_state_names=gyromagnetic_state_names,
     )
 
 
@@ -314,6 +344,8 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
     if wire_runtime is not None:
         tensors["wire_current"] = wire_runtime.current.detach().clone()
         tensors["wire_charge"] = wire_runtime.charge.detach().clone()
+    for name, tensor in iter_gyromagnetic_state_specs(solver):
+        tensors[name] = tensor.detach().clone()
     state = FDTDCheckpointState(step=int(step), schema=schema, tensors=tensors)
     validate_checkpoint_state(state)
     return state
@@ -387,6 +419,8 @@ def _checkpoint_tensor_targets(solver, schema: FDTDCheckpointSchema):
     if wire_runtime is not None:
         yield "wire_current", wire_runtime.current, None
         yield "wire_charge", wire_runtime.charge, None
+    for name, tensor in iter_gyromagnetic_state_specs(solver):
+        yield name, tensor, None
 
 
 def _checkpoint_expected_shape(target: torch.Tensor, layout) -> tuple[int, ...]:
