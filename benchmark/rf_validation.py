@@ -186,11 +186,6 @@ def _nrw_beta(s_matrix, length: float):
     return beta, alpha
 
 
-def _raw_beta(s_matrix, length: float):
-    phase = np.unwrap(np.angle(s_matrix[:, 1, 0]))
-    return np.abs(phase) / length
-
-
 def _passivity(s_matrix) -> float:
     return float(max(np.linalg.svd(s_matrix[i], compute_uv=False).max()
                      for i in range(s_matrix.shape[0])))
