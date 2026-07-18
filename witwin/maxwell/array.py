@@ -144,8 +144,15 @@ class AcceptanceBudget:
     timing_warmups: int = 3
     timing_samples: int = 5
     timing_order_rounds: int = 4
+    # Re-anchored 2026-07-18 from the retired RTX 5080 to this A6000 host by the
+    # passing frozen 3/5/4 qualification (basis/direct ratio 0.2055 <= 0.40,
+    # combine/one-solve 3.43e-4 < 0.10). Previous value:
+    # "NVIDIA GeForce RTX 5080 16303 MiB, driver 596.49, PCI 00000000:01:00.0".
+    # A frozen qualification host may only be re-anchored by a passing
+    # qualification; see docs/plans/array-active-s-mimo-implementation.md.
     local_hardware: str = (
-        "NVIDIA GeForce RTX 5080 16303 MiB, driver 596.49, PCI 00000000:01:00.0"
+        "NVIDIA RTX A6000 48541 MiB, driver 595.71.05, PCI 00000000:17:00.0, "
+        "torch 2.13.0+cu130, CUDA 13.0 (one GPU, numactl node 0)"
     )
 
 

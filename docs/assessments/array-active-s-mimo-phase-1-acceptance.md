@@ -1,13 +1,15 @@
 # Array workflow Phase 1 acceptance
 
 Status: committed as `3223e0c` (checkpoint); functional and numerical gates accepted on
-that commit. On the final integrated tree (`4b24b60`) the frozen qualification attempt of
-2026-07-17 FAILED the physical-power-closure numerical gate (2.865% vs 1%), so the frozen
-performance qualification is still not obtained and is now blocked by a numerical
-regression rather than by host execution state. See "Frozen qualification attempt
-2026-07-17" below.
+that commit. The 2026-07-17 attempt on `4b24b60` FAILED the physical-power-closure gate
+(2.865% vs 1%) under the plain-plain observer convention. That convention was corrected in
+commit `1cc4a71` (Yee-staggered E-plain/H-retard observer DFT, full-primal NF2FF
+quadrature), and the frozen 3/5/4 qualification was **rerun on 2026-07-18 and PASSED every
+gate** (closure `6.971e-4`, basis/direct time ratio `0.2055`, combine/one-solve
+`3.434e-4`). The performance contract is therefore qualified and re-anchored to this A6000
+host. See "Frozen qualification 2026-07-18 (corrected convention): PASS" below.
 
-Date: 2026-07-16
+Date: 2026-07-16 (functional/numerical); 2026-07-18 (performance qualification)
 
 Scope: one CUDA device. Task-level multi-GPU execution was removed from scope by the
 user and is not claimed here.
@@ -126,11 +128,12 @@ four alternating order rounds. That record does not exist: Phase 1 was committed
 `3223e0c` without it, so it is now owed against a landed commit. The numbers above are
 exploratory and are not qualification evidence.
 
-The recorded host (RTX 5080, driver 596.49, torch 2.10, CUDA 12.8) is **not** the
-current qualification host, which has two RTX A6000 GPUs on torch 2.13/CUDA 13.0. The
-timings above therefore cannot be reproduced as-is and must be re-measured on the host
-that will issue the frozen record. `AcceptanceBudget.local_hardware` still names the
-5080 and is stale for the same reason.
+The RTX 5080 timings above are exploratory and were superseded on 2026-07-18 by the
+passing frozen 3/5/4 record on the A6000 host (below). `AcceptanceBudget.local_hardware`
+was re-anchored on 2026-07-18 from `NVIDIA GeForce RTX 5080 16303 MiB, driver 596.49, PCI
+00000000:01:00.0` to `NVIDIA RTX A6000 48541 MiB, driver 595.71.05, PCI 00000000:17:00.0,
+torch 2.13.0+cu130, CUDA 13.0 (one GPU, numactl node 0)`, because a frozen qualification
+host may only be re-anchored by a passing qualification and that qualification now exists.
 
 ## Commands
 
@@ -159,43 +162,46 @@ seconds, so the failure is specific to the large solver workflow. No shared lock
 compiler process was present. A clean driver/host execution window is required before
 the frozen 3/5/4 qualification can be rerun.
 
-## Frozen qualification attempt 2026-07-17 (final tree `4b24b60`, A6000 host): FAIL
+## Frozen qualification 2026-07-18 (corrected convention, A6000 host): PASS
 
-The frozen 3-warmup/5-sample/4-round qualification was rerun on a clean host to
-re-anchor the performance contract: 2x NVIDIA RTX A6000 (driver 595.71.05, torch
-2.13.0+cu130, CUDA 13.0), one quiet GPU, `numactl --cpunodebind=0 --membind=0`, governor
-`performance`, no competing compute. The host execution problem described above did not
-recur; the harness ran to the numerical gate in under a minute.
+The 2026-07-17 attempt on the final tree `4b24b60` FAILED at the physical-power-closure
+gate (`max_physical_power_residual = 0.028646`, 2.865%, against the 1% gate) under the
+plain-plain observer convention; the timing loop was never reached. That failure was
+localized to the NF2FF/observer flux machinery, not to superposition or to the host: the
+basis-vs-direct linearity check passed then, and the same-day external-reference refresh
+showed a systematic flux (Poynting) regression across many scenarios while field
+correlation was unchanged.
 
-Outcome: FAIL at the physical-power-closure gate, which the harness asserts before the
-timing loop. Measured `max_physical_power_residual = |P_accepted - P_rad| / P_incident =
-0.028646 (2.865%)` against the 1% frozen gate; the recorded `3223e0c` value was `6.997e-4`
-(0.07%). The timing loop was never reached, so no basis/direct or combine timing ratio was
-measured and the performance contract remains unqualified.
+Commit `1cc4a71` corrected exactly that machinery (Yee-staggered E-plain/H-retard observer
+DFT, full-primal NF2FF quadrature). The frozen 3-warmup/5-sample/4-round qualification was
+rerun on 2026-07-18 on the same clean host — 2x NVIDIA RTX A6000 (driver 595.71.05, torch
+2.13.0+cu130, CUDA 13.0), one quiet GPU, `CUDA_VISIBLE_DEVICES=0`,
+`numactl --cpunodebind=0 --membind=0`, governor `performance`, no competing compute — and
+**PASSED every gate**.
 
-All other numerical gates passed with wide margin on this host:
+Numerical: physical power closure `|P_accepted - P_rad| / P_incident = 6.971e-4 (0.0697%)`
+against the 1% gate, restored to the `3223e0c` golden value of `6.997e-4` (0.07%).
 
 | Comparison | Weighted complex L2 | Phase RMS | Incident power rel. | Reflected power rel. | Accepted power rel. |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Broadside basis vs direct | 7.839e-7 | 4.689e-5 deg | 1.040e-7 | 9.952e-8 | 9.993e-8 |
-| Endfire basis vs direct | 8.970e-7 | 6.518e-5 deg | 1.334e-8 | 7.031e-8 | 6.718e-8 |
+| Broadside basis vs direct | 7.856e-7 | 4.605e-5 deg | 1.040e-7 | 9.952e-8 | 9.993e-8 |
+| Endfire basis vs direct | 8.837e-7 | 6.524e-5 deg | 1.334e-8 | 7.031e-8 | 6.718e-8 |
 
-`Q_rad` spectrum: min eig `0.442`, max eig `0.929`, min/max `0.476`, `max_eig > 0` (PSD).
+`Q_rad` spectrum: min eig `0.456`, max eig `0.955`, min/max `0.478`, `max_eig > 0` (PSD).
 Grid `96^3`, 8 PML cells/face, 4096 steps, `181x361` angular grid, 16 beams: all match.
 
-Diagnosis: the basis-vs-direct comparisons are a same-solver linearity check and are
-insensitive to absolute calibration, so their agreement (in fact tighter than the
-`3223e0c` record) shows superposition is intact. The power-closure gate is the only one
-that compares the network accepted power against the NF2FF-integrated radiated power, so
-the 2.865% mismatch is an absolute NF2FF radiated-power calibration regression introduced
-between `3223e0c` and `4b24b60` — the spectral observer colocation (`21be130`) and the
-NF2FF quadrature clip (`3f13ff2`). The same-day external-reference refresh
-(`benchmark/RESULTS.md`, `7932af3`) corroborates this independently and shows it is not
-confined to the array: 242 accuracy cells worsened vs the ad3427f baseline (187 improved,
-910 unchanged), dominated by a systematic flux (Poynting) regression on nearly every
-flux-comparison scenario (worst `mixed_faces` `1.004e-2 -> 1.444e0`) while field
-correlation stayed unchanged, plus far-field/RCS/directivity complex-error regressions.
-This is a numerical regression to be resolved before the frozen performance qualification
-can be re-attempted; it is not a host or timing artifact.
+Timing (CUDA-event medians, 3/5/4 protocol):
+
+| Workflow | Median seconds |
+| --- | ---: |
+| Four basis solves plus 16 combinations | 24.527 |
+| Sixteen direct solves | 119.361 |
+| Sixteen combinations only | 2.561e-3 |
+
+Basis/direct ratio `0.2055` against the `<= 0.40` gate; combine/one-solve ratio `3.434e-4`
+against the `< 0.10` gate; combination executes zero additional FDTD steps (pure einsum).
+Per-sample spread was tight (direct `118.8-120.2 s`, basis `24.3-24.7 s`), corroborating
+an uncontended GPU. This is the qualifying frozen record, and it re-anchors
+`AcceptanceBudget.local_hardware` to this host.
 
 Evidence: `docs/assessments/array-active-s-mimo-phase-1-qualification.json`.
