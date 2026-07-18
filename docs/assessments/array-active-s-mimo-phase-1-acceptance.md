@@ -1,7 +1,11 @@
 # Array workflow Phase 1 acceptance
 
-Status: committed as `3223e0c` (checkpoint); functional and numerical gates accepted;
-frozen performance qualification not yet obtained
+Status: committed as `3223e0c` (checkpoint); functional and numerical gates accepted on
+that commit. On the final integrated tree (`4b24b60`) the frozen qualification attempt of
+2026-07-17 FAILED the physical-power-closure numerical gate (2.865% vs 1%), so the frozen
+performance qualification is still not obtained and is now blocked by a numerical
+regression rather than by host execution state. See "Frozen qualification attempt
+2026-07-17" below.
 
 Date: 2026-07-16
 
@@ -154,3 +158,44 @@ context. A separate synchronized CUDA tensor probe completed successfully in 2.8
 seconds, so the failure is specific to the large solver workflow. No shared lock or
 compiler process was present. A clean driver/host execution window is required before
 the frozen 3/5/4 qualification can be rerun.
+
+## Frozen qualification attempt 2026-07-17 (final tree `4b24b60`, A6000 host): FAIL
+
+The frozen 3-warmup/5-sample/4-round qualification was rerun on a clean host to
+re-anchor the performance contract: 2x NVIDIA RTX A6000 (driver 595.71.05, torch
+2.13.0+cu130, CUDA 13.0), one quiet GPU, `numactl --cpunodebind=0 --membind=0`, governor
+`performance`, no competing compute. The host execution problem described above did not
+recur; the harness ran to the numerical gate in under a minute.
+
+Outcome: FAIL at the physical-power-closure gate, which the harness asserts before the
+timing loop. Measured `max_physical_power_residual = |P_accepted - P_rad| / P_incident =
+0.028646 (2.865%)` against the 1% frozen gate; the recorded `3223e0c` value was `6.997e-4`
+(0.07%). The timing loop was never reached, so no basis/direct or combine timing ratio was
+measured and the performance contract remains unqualified.
+
+All other numerical gates passed with wide margin on this host:
+
+| Comparison | Weighted complex L2 | Phase RMS | Incident power rel. | Reflected power rel. | Accepted power rel. |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Broadside basis vs direct | 7.839e-7 | 4.689e-5 deg | 1.040e-7 | 9.952e-8 | 9.993e-8 |
+| Endfire basis vs direct | 8.970e-7 | 6.518e-5 deg | 1.334e-8 | 7.031e-8 | 6.718e-8 |
+
+`Q_rad` spectrum: min eig `0.442`, max eig `0.929`, min/max `0.476`, `max_eig > 0` (PSD).
+Grid `96^3`, 8 PML cells/face, 4096 steps, `181x361` angular grid, 16 beams: all match.
+
+Diagnosis: the basis-vs-direct comparisons are a same-solver linearity check and are
+insensitive to absolute calibration, so their agreement (in fact tighter than the
+`3223e0c` record) shows superposition is intact. The power-closure gate is the only one
+that compares the network accepted power against the NF2FF-integrated radiated power, so
+the 2.865% mismatch is an absolute NF2FF radiated-power calibration regression introduced
+between `3223e0c` and `4b24b60` — the spectral observer colocation (`21be130`) and the
+NF2FF quadrature clip (`3f13ff2`). The same-day external-reference refresh
+(`benchmark/RESULTS.md`, `7932af3`) corroborates this independently and shows it is not
+confined to the array: 242 accuracy cells worsened vs the ad3427f baseline (187 improved,
+910 unchanged), dominated by a systematic flux (Poynting) regression on nearly every
+flux-comparison scenario (worst `mixed_faces` `1.004e-2 -> 1.444e0`) while field
+correlation stayed unchanged, plus far-field/RCS/directivity complex-error regressions.
+This is a numerical regression to be resolved before the frozen performance qualification
+can be re-attempted; it is not a host or timing artifact.
+
+Evidence: `docs/assessments/array-active-s-mimo-phase-1-qualification.json`.

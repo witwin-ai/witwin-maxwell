@@ -145,3 +145,55 @@ Phase 0 evidence is maintained in `docs/assessments/array-active-s-mimo-phase-0-
 
 Phase 1 evidence is maintained in
 `docs/assessments/array-active-s-mimo-phase-1-acceptance.md`.
+
+## Phase 1 qualification amendment, 2026-07-17 (host re-anchor attempt: FAIL)
+
+The frozen `96^3` performance qualification (`benchmark/array_phase1.py`, 3 warmups,
+5 samples, 4 alternating rounds) was rerun to re-anchor the performance contract away
+from the retired RTX 5080.
+
+- Previous recorded host (`AcceptanceBudget.local_hardware`): NVIDIA GeForce RTX 5080,
+  16,303 MiB, driver 596.49, torch 2.10, CUDA 12.8. That host is retired and cannot
+  reproduce the timings.
+- Re-anchor host: 2x NVIDIA RTX A6000, driver 595.71.05, torch 2.13.0+cu130, CUDA 13.0,
+  run on one quiet GPU (`CUDA_VISIBLE_DEVICES=0`, `numactl --cpunodebind=0 --membind=0`,
+  governor `performance`, no competing compute processes).
+
+Outcome: **FAIL**. The harness aborts at the numerical gate it asserts before the timing
+loop (by design, so a multi-hour timing loop cannot mask a numerical regression). The
+physical power closure `|P_accepted - P_rad| / P_incident` measured **0.028646 (2.865%)**,
+exceeding the 1% frozen gate (`physical_power_residual = 0.01`). The recorded value on
+commit `3223e0c` was `6.997e-4` (0.07%), so the closure regressed by ~41x. Because the
+numerical gate fails first, the basis/direct and combine timing ratios were **not
+measured** and the performance contract remains unqualified on this host.
+
+All other numerical gates pass with wide margin on this host: basis-vs-direct far-field
+weighted complex L2 `7.839e-7` (broadside) / `8.970e-7` (endfire) against `1e-4`; phase
+RMS `4.689e-5 deg` / `6.518e-5 deg` against `1e-2 deg`; port powers `~1e-7` against
+`5e-3`; and the `Q_rad` spectrum is positive definite (min eig `0.442`, max eig `0.929`,
+min/max `0.476`, `max_eig > 0`). Grid `96^3`, 8 PML cells/face, 4096 steps, `181x361`
+angular grid, and 16 beams all match the frozen contract.
+
+Interpretation: the basis-vs-direct comparisons are a linearity check on one solver and
+are insensitive to absolute calibration, so their excellent agreement shows superposition
+is intact. The power-closure gate compares network accepted power against the
+NF2FF-integrated radiated power `real(a^H Q_rad a)`; a 2.865% mismatch localizes the
+regression to absolute NF2FF radiated-power calibration on the final integrated tree
+(spectral observer colocation `21be130` + NF2FF quadrature clip `3f13ff2`), not to
+superposition or to the host. The same-day external-reference validation refresh
+(`benchmark/RESULTS.md`, commit `7932af3`) corroborates this independently and shows the
+regression is broader than the array: against the ad3427f baseline 242 accuracy cells
+worsened, 187 improved, 910 unchanged. The dominant effect is a **systematic flux
+(Poynting) regression** — flux error grew on nearly every flux-comparison scenario
+(worst: `mixed_faces` `1.004e-2 -> 1.444e0`, `kerr_slab` `3.114e-3 -> 1.132e-1`,
+`pml_slab_through` `5.693e-3 -> 1.087e-1`) while field correlation and field L2 stayed
+essentially unchanged, so the field solution is intact and only the flux/power integral
+regressed. Far-field/RCS/directivity complex errors regressed on the same NF2FF/observer
+machinery. This is the same root cause as the array power-closure failure.
+
+`AcceptanceBudget.local_hardware` is intentionally left naming the retired RTX 5080
+rather than the A6000: a frozen qualification host may only be re-anchored by a passing
+qualification, and this attempt did not pass. Re-anchoring the constant is deferred until
+the power-closure regression is resolved and the frozen 3/5/4 protocol completes.
+
+Evidence: `docs/assessments/array-active-s-mimo-phase-1-qualification.json`.

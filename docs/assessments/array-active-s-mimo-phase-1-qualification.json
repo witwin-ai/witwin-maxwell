@@ -1,0 +1,72 @@
+{
+  "qualifying": false,
+  "verdict": "FAIL",
+  "failed_gate": "max_physical_power_residual <= physical_power_residual",
+  "verdict_detail": "Frozen 96^3 3-warmup/5-sample/4-round qualification aborted at the numerical gate that the harness asserts before the timing loop. The physical power closure |P_accepted - P_rad| / P_incident is 0.028646 (2.865%), exceeding the 1% frozen gate. The recorded Phase 1 value on commit 3223e0c was 6.997e-4 (0.07%). All other numerical gates pass with wide margin and the timing contract was not reached, so no basis/direct timing ratio was measured.",
+  "protocol": {
+    "warmups": 3,
+    "samples": 5,
+    "alternating_rounds": 4,
+    "note": "Timing loop not executed; numerical gate failed first, by design."
+  },
+  "host": {
+    "current": "2x NVIDIA RTX A6000 (50899386368 bytes), driver 595.71.05, torch 2.13.0+cu130, CUDA 13.0, run on one GPU (CUDA_VISIBLE_DEVICES=0), numactl --cpunodebind=0 --membind=0",
+    "previous_recorded": "NVIDIA GeForce RTX 5080 (16303 MiB), driver 596.49, torch 2.10, CUDA 12.8",
+    "re_anchor_reason": "The frozen performance contract host is being re-anchored from the RTX 5080 to this 2x A6000 host per the plan re-qualification host rule. Qualification could not complete because the numerical gate failed before timing."
+  },
+  "hardware": {
+    "device": "NVIDIA RTX A6000",
+    "total_memory_bytes": 50899386368,
+    "driver": "595.71.05",
+    "pci_bus": "00000000:17:00.0",
+    "torch": "2.13.0+cu130",
+    "cuda_runtime": "13.0"
+  },
+  "metrics": {
+    "comparisons": {
+      "broadside": {
+        "weighted_complex_l2": 7.838550108841051e-07,
+        "phase_rms_deg": 4.689317116894346e-05,
+        "incident_power_wave_relative_error": 1.0402730676872807e-07,
+        "reflected_power_wave_relative_error": 9.952144954943329e-08,
+        "accepted_power_relative_error": 9.993349871014173e-08
+      },
+      "endfire": {
+        "weighted_complex_l2": 8.970069314586663e-07,
+        "phase_rms_deg": 6.518221331867464e-05,
+        "incident_power_wave_relative_error": 1.3341992843862727e-08,
+        "reflected_power_wave_relative_error": 7.030903752428457e-08,
+        "accepted_power_relative_error": 6.718344597740954e-08
+      }
+    },
+    "max_physical_power_residual": 0.028646358588356735,
+    "radiated_power_min_eigenvalue": 0.44195969319722755,
+    "radiated_power_max_eigenvalue": 0.9289885907349252,
+    "radiated_power_min_eigenvalue_ratio": 0.47574286444959685,
+    "grid_cells": [96, 96, 96],
+    "pml_cells_per_face": 8,
+    "steps": 4096,
+    "angular_shape": [181, 361],
+    "beam_count": 16
+  },
+  "budget": {
+    "phase1_fdtd_complex_l2": 0.0001,
+    "phase1_fdtd_phase_rms_deg": 0.01,
+    "port_power_relative_error": 0.005,
+    "physical_power_residual": 0.01,
+    "radiated_power_psd_relative_floor": 1e-09
+  },
+  "gate_evaluation": {
+    "broadside_weighted_complex_l2": "PASS",
+    "endfire_weighted_complex_l2": "PASS",
+    "broadside_phase_rms_deg": "PASS",
+    "endfire_phase_rms_deg": "PASS",
+    "port_powers": "PASS",
+    "max_physical_power_residual": "FAIL",
+    "radiated_power_psd": "PASS",
+    "grid_pml_steps_angular_beams": "PASS",
+    "timing_basis_direct_ratio": "NOT MEASURED",
+    "timing_combine_solve_ratio": "NOT MEASURED"
+  },
+  "date": "2026-07-17"
+}
