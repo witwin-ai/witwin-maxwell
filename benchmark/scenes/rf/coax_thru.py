@@ -10,9 +10,18 @@ compared against the exact analytic coax references::
 
 with ``a`` the inner-conductor radius and ``b`` the shield inner radius. The
 outer shield is a hollow PEC cylinder built from a signed-distance geometry (no
-hollow-cylinder primitive exists in the public geometry set). Port apertures,
-voltage paths, and current contours are snapped to the Yee node / half-grid for
-the requested ``dx`` so the same scene supports the three-tier grid convergence.
+hollow-cylinder primitive exists in the public geometry set). The current-contour
+half-width is snapped deterministically to the Yee transverse half-grid for the
+requested ``dx`` (see :func:`snap_contour_half`, B5) so the scene builds across
+refinement tiers instead of raising a snapping error.
+
+Honest-exit note (audit S1): a genuine FDTD two-port sweep of this bench reflects
+almost all incident power (|S11| ~ 1, gross non-passivity) because the TEM
+WavePort does not launch/absorb a clean matched TEM wave on the round coax at
+benchmark resolution, and the mirror-symmetric geometry makes reciprocity
+trivial. The validation runner therefore records this scene as a wave-level FAIL
+with the measured numbers; the modal-eigensolve ``Z0`` is kept only as supporting
+evidence, never as the exit gate.
 """
 
 from __future__ import annotations
@@ -69,17 +78,35 @@ class _HollowCylinder(GeometryBase):
         ).to_mesh(segments=segments)
 
 
+def snap_contour_half(dx: float, *, target: float = CONTOUR_HALF) -> tuple[float, float]:
+    """Deterministic half-grid snap of the current-contour half-width (B5).
+
+    The contour box boundary at +-half must land on the Yee transverse half-grid
+    (node + dx/2), where the node grid is ``y_n = -DOMAIN_TRANSVERSE + n*dx``.
+    Returns the snapped half-width and the snap distance so refinement tiers can
+    be built deterministically (grid-commensurate across dx) and the snap is
+    recorded rather than crashing the contour builder.
+    """
+    lo = -DOMAIN_TRANSVERSE
+    # half-grid coordinate: lo + (n + 0.5)*dx ; solve for the n nearest to +target
+    n = round((target - lo) / dx - 0.5)
+    snapped_edge = lo + (n + 0.5) * dx
+    half = abs(snapped_edge)
+    return half, abs(half - target)
+
+
 def _coax_port(name: str, x: float, direction: str, *, dx: float) -> mw.WavePort:
     # The current contour sits on the magnetic half-grid one half-cell into the
     # guide from the reference plane, in the propagation direction.
     contour_x = x + (0.5 * dx if direction == "+" else -0.5 * dx)
+    contour_half, _snap = snap_contour_half(dx)
     mode = mw.WaveModeSpec(
         "tem",
         polarization="Ey",
         voltage_path=((x, INNER_RADIUS, 0.0), (x, OUTER_RADIUS, 0.0)),
         current_contour=mw.Box(
             position=(contour_x, 0.0, 0.0),
-            size=(0.0, 2.0 * CONTOUR_HALF, 2.0 * CONTOUR_HALF),
+            size=(0.0, 2.0 * contour_half, 2.0 * contour_half),
         ),
     )
     return mw.WavePort(

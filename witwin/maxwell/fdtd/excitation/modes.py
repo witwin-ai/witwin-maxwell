@@ -1564,7 +1564,22 @@ def _solve_vector_mode_eigenpair_sparse(
         eigenvectors = error.eigenvectors
         minimum_candidates = max(2 * (int(mode_index) + 1), 4)
         if eigenvalues is None or eigenvectors is None or len(eigenvalues) < minimum_candidates:
-            raise
+            # ARPACK's iterative "LR" search can fail to converge on fine
+            # transverse grids (e.g. refined hollow-waveguide TE cross-sections).
+            # Fall back to a dense eigen-decomposition, which is deterministic and
+            # tractable for benchmark-scale cross-sections. This changes nothing
+            # when ARPACK converges; it only unblocks the fine grid tiers that the
+            # wave-level convergence study (audit S1) requires.
+            return _solve_vector_mode_eigenpair_dense(
+                eps_planes,
+                mu_planes,
+                k0=k0,
+                du=du,
+                dv=dv,
+                mode_index=int(mode_index),
+                field_names=field_names,
+                preferred_field_name=preferred_field_name,
+            )
     return _select_and_normalize_vector_mode_numpy(
         eigenvalues,
         eigenvectors,
