@@ -24,6 +24,8 @@ from .gyromagnetic import (
     apply_gyromagnetic_correction,
     build_gyromagnetic,
     initialize_gyromagnetic_state,
+    snapshot_gyromagnetic_drive,
+    step_gyromagnetic_coupled,
 )
 from .module_cache import get_fdtd_module, require_cuda_scene
 from .spectral import (
@@ -99,6 +101,8 @@ __all__ = [
     "apply_gyromagnetic_correction",
     "build_gyromagnetic",
     "initialize_gyromagnetic_state",
+    "snapshot_gyromagnetic_drive",
+    "step_gyromagnetic_coupled",
     "initialize_solver",
     "iter_cpml_memory_regions",
     "normalize_target_frequencies",

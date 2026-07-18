@@ -261,6 +261,49 @@ Slice 1c (axis-aligned forward) is a net `+1` capability guard (`140 -> 141`):
 The `PerturbationMedium`-wraps-a-ferrite reject and the two
 `GyromagneticFerrite` scalar frequency-evaluation contracts are unchanged.
 
+### Gyromagnetic ferrite consumer-side fail-close hardening (2026-07-18)
+
+Slice 1c lifted the `compiler/materials.py` ferrite reject globally, but that
+compiler guard had also protected every *non-FDTD-forward* consumer of a ferrite
+scene, none of which received a replacement at the time. This hardening round adds
+the missing consumer-side guards, a net `+3` (`141 -> 144`), so each consumer fails
+closed instead of silently simulating a reciprocal medium:
+
+- Added (`+1`): `witwin/maxwell/fdfd/solver.py` `_ensure_material_components`
+  rejects a `GyromagneticFerrite`. The static material compile lowers a ferrite to
+  its diagonal background only; the frequency-domain solver never runs the
+  magnetization-ADE runtime, so it would ingest a reciprocal permeability and
+  silently drop the off-diagonal Polder gyrotropy. Frequency-domain runtime gap;
+  lower the budget when an FDFD gyromagnetic ingest lands.
+- Added (`+1`): `witwin/maxwell/fdtd/distributed/shard_engine.py` `ShardEngine.build`
+  rejects a `gyromagnetic_enabled` local solver. The shard phases never call the
+  magnetization-ADE hooks, and each shard-local layout has no rank-seam handling
+  (the overlap slice drops the top plane at rank seams), so a joint solve would
+  silently simulate a reciprocal medium with uncorrected seams. This restores the
+  frozen contract boundary 8 ("Multi-GPU ferrite -- rejected until Phase 4").
+- Split (`+1`): the former single axis-aligned guard in
+  `fdtd/runtime/gyromagnetic.py` `build_gyromagnetic` is now two guards -- a
+  general (non-axis-aligned) bias reject and a mixed-bias-direction reject. The old
+  `torch.unique(fast_axis)` check collapsed `+e_k` and `-e_k` to the same axis code,
+  so a scene mixing `+z` and `-z` ferrites passed the axis-only guard and the single
+  global transverse sign then silently inverted the non-reciprocity of the `-bias`
+  region (the opposed-bias latching-circulator device class). The mixed guard now
+  tests bias-vector uniformity, so both mixed axes and opposed signs on one axis
+  fail closed.
+
+Not a new guard node (no census delta):
+
+- The adjoint reject (frozen contract boundary 9) is a new `return`-string branch in
+  `fdtd/adjoint/bridge.py` `_unsupported_adjoint_medium`, reusing the existing generic
+  `raise NotImplementedError(unsupported_medium_message)`; the non-reciprocal
+  magnetization-ADE correction has no reverse (transpose) core, so a differentiable
+  ferrite run would return gradients for a reciprocal medium.
+- The checkpoint/resume schema (`fdtd/checkpoint.py`, `fdtd/resume.py`) gains the
+  persistent gyromagnetic magnetization state names (`m_u` / `m_v` / `dm_u` / `dm_v`),
+  so a mid-run save/resume round-trips the magnetization instead of silently
+  re-zeroing it; `validate_checkpoint_state` now raises on a dropped gyromagnetic
+  state name.
+
 ### Surface-impedance adapter reconciliation (2026-07-17)
 
 The surface-impedance Phase 0 slice froze the contract, the rational model, the

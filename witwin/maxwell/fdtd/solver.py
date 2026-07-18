@@ -48,6 +48,8 @@ from .runtime import (
     advance_gyromagnetic_state as advance_gyromagnetic_state_impl,
     apply_gyromagnetic_correction as apply_gyromagnetic_correction_impl,
     initialize_gyromagnetic_state as initialize_gyromagnetic_state_impl,
+    snapshot_gyromagnetic_drive as snapshot_gyromagnetic_drive_impl,
+    step_gyromagnetic_coupled as step_gyromagnetic_coupled_impl,
     average_node_to_component as average_node_to_component_impl,
     average_node_to_magnetic_component as average_node_to_magnetic_component_impl,
     build_dispersive_templates as build_dispersive_templates_impl,
@@ -308,6 +310,12 @@ class FDTD:
 
     def _apply_gyromagnetic_correction(self):
         apply_gyromagnetic_correction_impl(self)
+
+    def _snapshot_gyromagnetic_drive(self):
+        snapshot_gyromagnetic_drive_impl(self)
+
+    def _step_gyromagnetic_coupled(self):
+        step_gyromagnetic_coupled_impl(self)
 
     def _build_update_coefficients(self):
         build_update_coefficients_impl(self)

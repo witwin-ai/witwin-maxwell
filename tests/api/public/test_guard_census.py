@@ -117,7 +117,26 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # bias kernel (Phase 2) and a complex-field ferrite correction land. The
 # PerturbationMedium-wraps-a-ferrite reject stays (a scalar-eps perturbation cannot
 # represent the gyromagnetic state).
-CAPABILITY_GUARD_BUDGET = 141
+# 2026-07-18 (plan 08 slice 1c fail-closed hardening): 141 -> 144 (net +3). Lifting
+# the compiler-level ferrite reject exposed silently-wrong paths in every non-FDTD-
+# forward consumer of a ferrite scene; each now fails closed with a narrower guard:
+# (1) fdfd/solver.py rejects a GyromagneticFerrite in _ensure_material_components --
+# the frequency-domain solver ingests only the diagonal background permeability and
+# would silently drop the off-diagonal Polder gyrotropy; (2)
+# fdtd/distributed/shard_engine.py rejects a gyromagnetic_enabled local solver -- the
+# shard phases never run the magnetization-ADE hooks and the shard-local layout has
+# no rank-seam handling (contract boundary 8, rejected until Phase 4); (3)
+# fdtd/runtime/gyromagnetic.py splits the former single axis-aligned guard into a
+# general-bias reject and a mixed-bias-direction reject, closing the sign-mixed hole
+# (a scene mixing +z and -z ferrites previously passed the axis-only guard and
+# silently inverted the non-reciprocity of the -bias region). The adjoint reject
+# (contract boundary 9) is added as a return-string branch in
+# _unsupported_adjoint_medium, reusing the existing generic raise, so it adds no new
+# guard node. The checkpoint/resume schema gains the gyromagnetic magnetization state
+# names (no new guard). All three new guards are genuine capability gaps; lower this
+# budget as distributed ferrite (Phase 4), the FDFD gyromagnetic ingest, and the
+# arbitrary-bias kernel (Phase 2) land.
+CAPABILITY_GUARD_BUDGET = 144
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

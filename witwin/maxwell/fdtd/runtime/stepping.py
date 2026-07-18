@@ -1656,9 +1656,10 @@ def _field_update_block(solver, time_value):
             dt=solver.dt,
         ).launchRaw()
     solver._advance_magnetic_dispersive_state()
-    # Advance the local magnetization ADE from the pre-update (leapfrog) H drive;
-    # the resulting dM is applied after the plain magnetic update below.
-    solver._advance_gyromagnetic_state()
+    # Record the pre-update (leapfrog) transverse H so the post-update coupled step
+    # can form the time-centred magnetization drive (H_pre + H_tmp)/2. The coupled
+    # implicit-midpoint solve + correction runs after the plain magnetic update.
+    solver._snapshot_gyromagnetic_drive()
     update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
     if has_complex_fields(solver):
         update_magnetic_fields(
@@ -1677,9 +1678,11 @@ def _field_update_block(solver, time_value):
     if solver._magnetic_source_terms:
         inject_magnetic_surface_source_terms(solver, time_value=time_value)
     solver._apply_magnetic_dispersive_corrections()
-    # Non-reciprocal gyromagnetic correction H -= dM/mu_inf (magnetic mirror of
-    # the electric-side full-anisotropy correction).
-    solver._apply_gyromagnetic_correction()
+    # Non-reciprocal gyromagnetic step: the coupled implicit-midpoint magnetization
+    # advance plus the correction H -= dM/mu_inf (magnetic mirror of the electric-side
+    # full-anisotropy correction). Passive (discretely non-growing at zero damping),
+    # unlike an explicit pre-update advance / post-update correct split.
+    solver._step_gyromagnetic_coupled()
     if solver._wire_runtime is not None:
         sample_and_update_wire(solver)
 
@@ -1829,6 +1832,17 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         state["_wire_current"] = wire_runtime.current
         state["_wire_charge"] = wire_runtime.charge
         state["_wire_emf"] = wire_runtime.emf
+    # The gyromagnetic magnetization ADE advances persistent state (m/dm) inside the
+    # captured block. On a zero field it stays at zero through warmup/capture (the ADE
+    # is linear with zero forcing at H = 0), but snapshotting it keeps capture correct
+    # even when the block is captured on a non-zero seeded field; the scratch buffers
+    # (hu/hv/new_u/new_v) are overwritten before they are read every step, so they are
+    # not carried state. It lives on the ``_gyromagnetic_state`` dict, not in
+    # ``vars(solver)``, so the "psi"/field filter above does not reach it.
+    gyro_state = getattr(solver, "_gyromagnetic_state", None)
+    if gyro_state is not None:
+        for gyro_name in ("m_u", "m_v", "dm_u", "dm_v"):
+            state[f"_gyro_{gyro_name}"] = gyro_state[gyro_name]
     # The resistive SIBC surface overwrite is stateless (it writes only the surface E
     # plane, already snapshotted above), so it needs no extra capture state.
     saved = {k: v.clone() for k, v in state.items()}

@@ -243,6 +243,20 @@ def _unsupported_adjoint_medium(scene, *, trainable_geometry_indices=()):
                 "FDTD adjoint does not support trainable geometry on magnetic dispersive "
                 "structures (no mu gradient channel) yet."
             )
+        if getattr(material, "is_gyromagnetic", False):
+            # The gyrotropy is carried entirely by the forward magnetization-ADE
+            # runtime (a per-cell non-reciprocal H correction), for which no reverse
+            # (transpose) core exists yet: the native reverse steps advance only the
+            # reciprocal Yee/CPML/dispersive state, so a differentiable ferrite run
+            # would replay a reciprocal primal and return gradients for the wrong
+            # (reciprocal) medium. A non-reciprocal adjoint additionally requires
+            # bias reversal in the reverse operator. Fail closed until a
+            # gyromagnetic-aware reverse core lands.
+            return (
+                "FDTD adjoint does not support GyromagneticFerrite media: the non-reciprocal "
+                "magnetization-ADE correction has no reverse (transpose) core, so the reverse "
+                "replay would advance a reciprocal primal and return gradients for the wrong medium."
+            )
         if getattr(material, "is_modulated", False):
             return "FDTD adjoint does not support time-modulated media yet."
     return None

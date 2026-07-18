@@ -77,6 +77,39 @@ def test_public_prepare_rejects_materials_without_complete_interface_halos(
         simulation.prepare()
 
 
+def test_public_prepare_rejects_gyromagnetic_ferrite(
+    cuda_p2p_devices,
+    cuda_memory_cleanup,
+):
+    """Multi-GPU distributed FDTD must fail closed on a gyromagnetic ferrite.
+
+    The shard phases never run the magnetization-ADE hooks and the shard-local
+    layout has no rank-seam handling, so a joint solve would silently simulate a
+    reciprocal medium (frozen contract boundary 8, rejected until Phase 4).
+    """
+    scene = _scene(device="cuda:0")
+    scene.add_structure(
+        mw.Structure(
+            name="ferrite",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+            material=mw.GyromagneticFerrite(
+                eps_r=14.5,
+                saturation_magnetization=1.40e5,
+                bias_field=(0.0, 0.0, 1.75e5),
+                gilbert_damping=1.0e-2,
+            ),
+        )
+    )
+    simulation = mw.Simulation.fdtd(
+        scene,
+        frequencies=(_FREQUENCY,),
+        parallel=_parallel(devices=cuda_p2p_devices),
+    )
+
+    with pytest.raises(NotImplementedError, match="GyromagneticFerrite"):
+        simulation.prepare()
+
+
 def test_invalid_dipole_emission_source_is_rejected_before_hardware_prepare():
     scene = _scene()
     scene.add_monitor(

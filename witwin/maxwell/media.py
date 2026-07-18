@@ -751,6 +751,11 @@ class Material(CoreMaterial):
     def is_pec(self) -> bool:
         return self.pec
 
+    @property
+    def is_gyromagnetic(self) -> bool:
+        """Whether this material carries a non-reciprocal gyromagnetic tensor."""
+        return False
+
     @classmethod
     def pec(cls, name: str | None = None) -> "Material":
         """Construct a perfect-electric-conductor marker material."""
@@ -1294,6 +1299,10 @@ class GyromagneticFerrite(Material):
         return mu, kappa
 
     # --- Material-family overrides -------------------------------------------
+
+    @property
+    def is_gyromagnetic(self) -> bool:
+        return True
 
     def capabilities(self) -> MaterialCapabilities:
         return MaterialCapabilities(
