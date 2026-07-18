@@ -100,7 +100,16 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # its dedicated lossy-metal surface path). It is a genuine capability gap (External
 # interoperability adapter 18 -> 19); lower this budget when the surface-impedance
 # adapter mapping is designed.
-CAPABILITY_GUARD_BUDGET = 140
+# 2026-07-18 (plan 05 nonlinear-device N1, standalone transient + DC continuation):
+# 140 -> 139 (-1). The N0 conduction-only Newton solve fail-closed on a nonzero
+# diode junction_capacitance ("... the stored charge q(v) is never differentiated
+# into the system ...", compiler/nonlinear_devices.py). N1 implements the trapezoidal/
+# backward-Euler stored-charge companion (NonlinearMNASystem charge integration,
+# run_nonlinear_transient), so the transient path now consumes q(v) and the DC
+# operating point correctly treats the capacitance as an open circuit; the guard is
+# removed. The diode series_resistance guard stays: the internal-node ohmic branch is
+# not implemented this round.
+CAPABILITY_GUARD_BUDGET = 139
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
