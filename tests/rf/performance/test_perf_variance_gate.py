@@ -1,5 +1,8 @@
 """Unit tests for the variance-aware performance gate statistics.
 
+Gate class: ``perf-statistical`` (non-numerical performance gate; see
+``docs/reference/gate-classification.md`` §5).
+
 These exercise the S2.3 gate logic with no GPU and no wall-clock timing: every
 input is a hand-chosen list of floats so the pass/fail behavior and the
 confidence-interval arithmetic are deterministic and independently checkable.
@@ -13,6 +16,7 @@ from pathlib import Path
 import sys
 
 import pytest
+from scipy import stats
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "support"))
@@ -33,10 +37,29 @@ def test_student_t_matches_known_table_values():
     assert student_t_95_one_sided(1) == pytest.approx(6.313752, abs=1e-6)
     assert student_t_95_one_sided(10) == pytest.approx(1.812461, abs=1e-6)
     assert student_t_95_one_sided(30) == pytest.approx(1.697261, abs=1e-6)
-    # Beyond the table the conservative normal quantile is used.
-    assert student_t_95_one_sided(500) == pytest.approx(1.644854, abs=1e-6)
-    # The critical value shrinks monotonically toward the normal limit.
-    assert student_t_95_one_sided(5) > student_t_95_one_sided(20) > student_t_95_one_sided(500)
+
+
+def test_student_t_is_exact_vs_scipy_for_all_df():
+    # The quantile is the exact scipy Student-t ppf for every df, including the
+    # large-df regime where the previous normal-quantile fallback (1.6449) was
+    # anti-conservative: t_{0.95, 31} = 1.6955 > 1.6449.
+    for df in (1, 2, 5, 30, 31, 60, 200, 500):
+        assert student_t_95_one_sided(df) == pytest.approx(
+            float(stats.t.ppf(0.95, df)), rel=1e-12
+        )
+    # The old fallback would have returned 1.644854 for df > 30; the exact value
+    # is strictly larger, confirming the fix widens (not narrows) the interval.
+    assert student_t_95_one_sided(31) == pytest.approx(1.695519, abs=1e-6)
+    assert student_t_95_one_sided(31) > 1.644854
+
+
+def test_student_t_decreases_monotonically_in_df():
+    # t_{0.95, df} shrinks monotonically toward the normal limit 1.6449 as df
+    # grows, always approaching from above.
+    dfs = [1, 2, 3, 5, 10, 20, 30, 31, 60, 120, 500, 1000]
+    values = [student_t_95_one_sided(df) for df in dfs]
+    assert all(a > b for a, b in zip(values, values[1:]))
+    assert values[-1] > 1.644854
 
 
 def test_student_t_rejects_zero_degrees_of_freedom():

@@ -1,5 +1,9 @@
 """Variance-aware performance gate statistics for the port hot path.
 
+Gate class: ``perf-statistical`` (non-numerical performance gate; see
+``docs/reference/gate-classification.md`` §5). Wall-clock regression judged by a
+one-sided 95% CI upper bound, never a single-point min/median.
+
 The audit (``docs/assessments/next-functional-audit-2026-07-18.md`` §2.6 and
 step S2.3) rejects single-point min/median performance gates: a lone median that
 lands inside its own noise band cannot certify a ``< 5%`` / ``< 2%`` target.
@@ -23,52 +27,25 @@ import math
 import statistics
 from dataclasses import dataclass
 
-
-# One-sided Student-t 95% critical values, t_{0.95, df}, for df = 1..30.  A
-# small explicit table keeps the gate dependency-free and deterministic; beyond
-# df = 30 the normal approximation (1.645) is used, which is conservative here
-# because t_{0.95, df} decreases monotonically toward 1.645 as df grows.
-_T_95_ONE_SIDED = {
-    1: 6.313752,
-    2: 2.919986,
-    3: 2.353363,
-    4: 2.131847,
-    5: 2.015048,
-    6: 1.943180,
-    7: 1.894579,
-    8: 1.859548,
-    9: 1.833113,
-    10: 1.812461,
-    11: 1.795885,
-    12: 1.782288,
-    13: 1.770933,
-    14: 1.761310,
-    15: 1.753050,
-    16: 1.745884,
-    17: 1.739607,
-    18: 1.734064,
-    19: 1.729133,
-    20: 1.724718,
-    21: 1.720743,
-    22: 1.717144,
-    23: 1.713872,
-    24: 1.710882,
-    25: 1.708141,
-    26: 1.705618,
-    27: 1.703288,
-    28: 1.701131,
-    29: 1.699127,
-    30: 1.697261,
-}
-_T_95_LARGE_DF = 1.644854  # standard normal 95th percentile
+from scipy import stats
 
 
 def student_t_95_one_sided(degrees_of_freedom: int) -> float:
-    """Return the one-sided 95% Student-t critical value for ``df``."""
+    """Return the exact one-sided 95% Student-t critical value ``t_{0.95, df}``.
+
+    Computed with :func:`scipy.stats.t.ppf` for *every* ``df`` (SciPy is a
+    primary dependency).  An earlier revision used a small table for ``df <= 30``
+    and fell back to the standard-normal quantile ``1.6449`` for larger ``df``,
+    calling it "conservative"; it is not.  Because ``t_{0.95, df}`` decreases
+    monotonically toward ``1.6449`` from *above*, the normal quantile is always
+    *smaller* than the true critical value (e.g. ``t_{0.95, 31} = 1.6955``), so
+    that fallback under-inflated the confidence interval and was
+    *anti*-conservative.  Using the exact quantile removes the bias for all df.
+    """
 
     if degrees_of_freedom < 1:
         raise ValueError("degrees_of_freedom must be at least 1.")
-    return _T_95_ONE_SIDED.get(degrees_of_freedom, _T_95_LARGE_DF)
+    return float(stats.t.ppf(0.95, degrees_of_freedom))
 
 
 def median_absolute_deviation(values: list[float]) -> float:

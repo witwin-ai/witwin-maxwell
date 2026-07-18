@@ -6,6 +6,22 @@
 > diagnostics-off guard, and the variance-aware gate machinery. Op-count
 > ceilings only — no wall-clock number is asserted here.
 
+## S2 exit-gate mapping
+
+Explicit mapping of each S2 sub-step to its evidence, landing commit, and status.
+The scope call is: **S2.2's fix already landed pre-branch at `b70ee2a`** (the
+SeriesRLC diagnostics-off fast path), and the audit's conditional weight-table
+rewrite precondition is **false** (per-frequency accumulation does not dominate),
+so no further code fix is owed for S2.2. **S2.3 timing measurement is deferred to
+the exclusive-GPU window (S2b)**; this round lands only the deterministic
+op-count evidence and the variance-gate machinery it will consume.
+
+| S2 sub-step | Evidence | Commit | Status |
+|---|---|---|---|
+| S2.1 harness (reproducible baseline artifact) | `tests/rf/performance/profile_port_hot_path.py` + `docs/assessments/port-hot-path-op-inventory-2026-07-18.json`; op-count ceilings in `tests/rf/performance/test_port_hot_path_op_count.py` and `tests/rf/lumped/test_fdtd_port_end_to_end.py` (class `perf-opcount`) | this branch (`codex/port-perf-s2`) | done (op-count only) |
+| S2.2 fix disposition (SeriesRLC fast path; weight-table precondition) | SeriesRLC schedule 62/12/16 → 25/0/3 per step; launches frequency-count independent ⇒ weight-table precondition false; diagnostics default-off pinned by `tests/rf/performance/test_port_energy_diagnostics_default_off.py` | fast path landed pre-branch at `b70ee2a` | landed pre-branch; no new fix owed |
+| S2.3 measurement (timed `<5%` / `<2%` gate) | variance-aware gate machinery `tests/support/perf_variance_gate.py` + unit tests `tests/rf/performance/test_perf_variance_gate.py` (class `perf-statistical`); no wall-clock number asserted this round | this branch (machinery only) | **deferred to S2b exclusive-GPU window** |
+
 ## S2.1 — reproducible baseline artifact
 
 `tests/rf/performance/profile_port_hot_path.py` turns the audit's 14.4x port

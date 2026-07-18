@@ -1,5 +1,9 @@
 """Op-count ceilings for the RF port per-step hot path (audit step S2).
 
+Gate class: ``perf-opcount`` (non-numerical performance gate; see
+``docs/reference/gate-classification.md`` §5). Not a physical exit-gate; it
+locks schedule shape, not any physical quantity.
+
 Deterministic host/device dispatch tallies only -- no wall-clock timing is
 asserted here (the timed ``< 5% / < 2%`` targets run later in an exclusive
 window via the variance-aware gate in ``tests/support/perf_variance_gate.py``).

@@ -46,6 +46,18 @@ from pathlib import Path
 from typing import Any
 
 
+# The shared op-count tally helper lives under ``tests/support``. Importing it by
+# path keeps a single implementation of the profiled window and its event
+# classification (CLAUDE.md forbids duplicate implementations) and works both
+# in-tree and inside the isolated baseline subprocess, which injects this helper
+# alongside the runner.
+_SUPPORT_DIR = Path(__file__).resolve().parents[2] / "support"
+if str(_SUPPORT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SUPPORT_DIR))
+
+from port_hot_path_tally import tally_hot_path_window  # noqa: E402
+
+
 SCHEMA_VERSION = 1
 PROFILE_KIND = "rf_port_hot_path_profile"
 COMPARISON_KIND = "rf_port_hot_path_before_after"
@@ -150,55 +162,29 @@ def _build_solver(
 
 
 def _inventory_per_step(mw_ports, solver) -> dict[str, float]:
-    """Return per-step dispatch counts for the port apply/observe hot path."""
+    """Return per-step dispatch counts for the port apply/observe hot path.
 
-    import torch
+    The profiled window and its event classification come from the shared
+    :func:`tally_hot_path_window` helper; this function only normalizes the raw
+    window tally to per-step counts for the JSON artifact (``device_mem`` is
+    exposed as ``device_mem_bytes`` here).
+    """
 
     apply_port_runtimes = mw_ports.apply_port_runtimes
     accumulate_port_observers = mw_ports.accumulate_port_observers
     prepare = mw_ports.prepare_port_spectral_accumulators
     prepare(solver, 64, "none")
 
-    for _ in range(WARMUP_STEPS):
+    def _step() -> None:
         apply_port_runtimes(solver)
         accumulate_port_observers(solver)
-    torch.cuda.synchronize()
 
-    with torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ],
-        profile_memory=True,
-        acc_events=True,
-    ) as prof:
-        for _ in range(PROFILED_STEPS):
-            apply_port_runtimes(solver)
-            accumulate_port_observers(solver)
-    torch.cuda.synchronize()
-
-    tally = {
-        "launches": 0,
-        "allocs": 0,
-        "memcpy_dtod": 0,
-        "memcpy_hostside": 0,
-        "scalar_sync": 0,
-        "device_mem_bytes": 0,
-    }
-    for event in prof.key_averages():
-        key = event.key
-        if "cudaLaunchKernel" in key:
-            tally["launches"] += event.count
-        if key in ("aten::empty", "aten::empty_strided", "aten::empty_like"):
-            tally["allocs"] += event.count
-        if "Memcpy DtoD" in key:
-            tally["memcpy_dtod"] += event.count
-        if "Memcpy HtoD" in key or "Memcpy DtoH" in key:
-            tally["memcpy_hostside"] += event.count
-        if key in ("aten::item", "aten::_local_scalar_dense"):
-            tally["scalar_sync"] += event.count
-        tally["device_mem_bytes"] += max(0, getattr(event, "self_device_memory_usage", 0))
-    return {key: value / PROFILED_STEPS for key, value in tally.items()}
+    tally = tally_hot_path_window(
+        _step, warmup_steps=WARMUP_STEPS, profiled_steps=PROFILED_STEPS
+    )
+    per_step = {key: value / PROFILED_STEPS for key, value in tally.items()}
+    per_step["device_mem_bytes"] = per_step.pop("device_mem")
+    return per_step
 
 
 def _run_profile(args: argparse.Namespace) -> dict[str, Any]:
@@ -316,6 +302,14 @@ def _profile_baseline_checkout(args: argparse.Namespace, repository_root: Path) 
         baseline_runner = checkout / runner_relative
         baseline_runner.parent.mkdir(parents=True, exist_ok=True)
         baseline_runner.write_bytes(Path(__file__).resolve().read_bytes())
+        # The runner imports the shared op-count tally helper from tests/support;
+        # inject it too so the baseline tree resolves the same single window
+        # implementation the candidate uses.
+        helper_source = _SUPPORT_DIR / "port_hot_path_tally.py"
+        helper_relative = helper_source.resolve().relative_to(repository_root)
+        baseline_helper = checkout / helper_relative
+        baseline_helper.parent.mkdir(parents=True, exist_ok=True)
+        baseline_helper.write_bytes(helper_source.read_bytes())
         command = [
             str(args.python),
             str(baseline_runner),
