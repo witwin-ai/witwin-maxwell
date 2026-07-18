@@ -1,6 +1,8 @@
 # SPICE/MNA Co-simulation Phase 4 Acceptance
 
-Status: accepted (4 of 4 exit gates evidenced)
+Status: reopened-for-evidence (2026-07-18 audit; see "Measured evidence grade" section at end)
+
+Original status (archived): accepted (4 of 4 exit gates evidenced)
 
 Date: 2026-07-16
 
@@ -356,3 +358,40 @@ directory that is not covered by the `docs/` ignore rule.
 All four gates are evidenced; Phase 4 is complete on this host. The gate (d)
 timing leg should be re-anchored (larger workload or an A/A-derived resolution
 criterion) before any future host re-qualification relies on timing alone.
+
+## Measured evidence grade (2026-07-18 audit rollback)
+
+Appended per `docs/assessments/next-functional-audit-2026-07-18.md` §1.3 and §4
+(no-inflation rule). The gate tables above are retained verbatim; this section
+only records the **measured grade and outstanding debt**. Where it conflicts
+with the "accepted" claim above, this section's grade judgment governs.
+
+- **Measured grade: E1–E2** (not the claimed E3). Native GPU MNA, same-step
+  strong coupling, companion model, pivoted-LU, CUDA Graph replay and
+  single-device adjoint are landed and in `FEATURE_LIST`. Gate (a) (parameter
+  gradients vs three-step central difference) and gate (b) (single/multi-GPU
+  bitwise parity) are credible E2-grade evidence. The cap below E3 is the
+  absence of **multi-scenario conservation / energy-residual** checks and an
+  **independent circuit-solver (offline) cross-validation**.
+- **No external reference for end-to-end EM+circuit transient strong coupling.**
+  The reference-solver policy (audit §3, row 04) marks FDTD+SPICE strong
+  coupling as not covered by the external reference backend. Current evidence is
+  self-consistency (cross-path trapezoidal interface at `rtol=2e-6`) plus
+  analytic RC/RLC gates only; the end-to-end strong-coupling gate must be
+  tagged `reference: future-xfdtd`.
+- **Inherits 01 port-power convention risk.** Lumped/TerminalPort V/I/power
+  conventions descend from `01`, whose port-power chain is not yet wave-level
+  validated (audit §1.1).
+- **Gate (c) is a matched-baseline definition.** The `-64.507%` reflects a
+  matched baseline (native SeriesRLC termination) that is itself slow, not
+  "circuit co-simulation is nearly free"; the caveat is recorded above and is
+  confirmed here as not constituting a bare-FDTD-relative performance result.
+- **Evidence required to reach E2/E3 (convergence route, audit S3.2):**
+  1. multi-scenario conservation / energy residual + **independent circuit
+     solver (offline)** cross-validation (lifts to E2);
+  2. end-to-end EM+circuit strong-coupling gate tagged `reference: future-xfdtd`
+     with analytic/conservation placeholders — no self-gate, no skip;
+  3. combination matrix, named-hardware performance envelope, distributed/gradient
+     declarations and a public benchmark entering RESULTS (lifts to E3; README §7).
+- Entry gate: this plan's S3.2 convergence work is blocked on S1 (01 port
+  wave-level validation) passing first.
