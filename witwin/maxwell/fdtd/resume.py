@@ -249,10 +249,24 @@ def _configuration_fingerprint(solver) -> str:
     for name, value in sorted(vars(solver).items()):
         if isinstance(value, torch.Tensor) and name.startswith(static_tensor_prefixes):
             _hash_tensor(hasher, f"solver.{name}", value)
-    sibc = getattr(solver, "_sibc", None)
-    if sibc is not None:
-        for index, face in enumerate(sibc["faces"]):
-            _hash_value(hasher, f"sibc[{index}]", face)
+    surface = getattr(solver, "_surface_impedance", None)
+    if surface is not None:
+        for index, write in enumerate(surface["writes"]):
+            # Hash only the stable descriptor scalars (the write also carries torch
+            # slices and, for a generic rational face, ADE state tensors that are not
+            # part of the resume identity).
+            descriptor = (
+                write["e_name"],
+                write["h_name"],
+                write["sign"],
+                write["axis"],
+                write["electric_index"],
+                write["magnetic_index"],
+                write["full_plane"],
+                write["surface_r"],
+                write.get("ade") is not None,
+            )
+            _hash_value(hasher, f"surface_impedance[{index}]", descriptor)
     for index, runtime in enumerate(getattr(solver, "_port_runtimes", ())):
         _hash_value(hasher, f"port[{index}].definition", runtime.port)
         _hash_value(hasher, f"port[{index}].frequencies", runtime.frequencies)

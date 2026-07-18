@@ -444,9 +444,12 @@ class DistributedFDTD:
                 )
         if any(
             bool(getattr(getattr(structure, "material", None), "is_lossy_metal", False))
+            or bool(getattr(getattr(structure, "material", None), "is_surface_impedance", False))
             for structure in self.logical_scene.structures
         ):
-            raise ValueError("Multi-GPU FDTD does not yet support distributed SIBC ownership.")
+            raise ValueError(
+                "Multi-GPU FDTD does not yet support distributed surface-impedance ownership."
+            )
         for monitor in self.logical_scene.resolved_monitors():
             if isinstance(monitor, (PermittivityMonitor, MediumMonitor)):
                 raise ValueError(

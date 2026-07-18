@@ -242,5 +242,5 @@ def test_full_embedded_step_cuda_graph_restores_and_matches_nonzero_eager() -> N
 
 def test_full_embedded_step_graph_rejects_nested_surface_state() -> None:
     solver = _prepared_embedded_solver()
-    solver.sibc_enabled = True
+    solver.surface_impedance_enabled = True
     assert _make_full_embedded_step_runner(solver, use_cuda_graph=True) is None
