@@ -336,8 +336,10 @@ class ShardEngine:
             if solver.full_aniso_enabled:
                 stepping.apply_full_aniso_corrections(solver)
                 stepping.apply_full_aniso_conduction(solver)
-            if getattr(solver, "_sibc", None) is not None:
-                raise RuntimeError("Distributed SIBC surface ownership is not enabled.")
+            if getattr(solver, "_surface_impedance", None) is not None:
+                raise RuntimeError(
+                    "Distributed surface-impedance ownership is not enabled."
+                )
             if solver._electric_source_terms:
                 inject_electric_surface_source_terms(
                     solver, time_value=time_value + 0.5 * float(solver.dt)

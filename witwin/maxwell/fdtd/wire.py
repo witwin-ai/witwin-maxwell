@@ -772,8 +772,8 @@ def _reject_unsupported_composition(solver) -> None:
             "Thin-wire FDTD does not yet support nonlinear or time-modulated background media."
         )
     material_model = getattr(solver, "_compiled_material_model", None)
-    if getattr(solver, "sibc_enabled", False) or (
-        material_model is not None and material_model.get("sibc") is not None
+    if getattr(solver, "surface_impedance_enabled", False) or (
+        material_model is not None and material_model.get("surface_impedance")
     ):
         raise NotImplementedError(
             "Thin-wire FDTD cannot share conductor ownership with a surface-impedance "

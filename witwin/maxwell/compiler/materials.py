@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from itertools import product
 
 import numpy as np
@@ -1367,41 +1368,17 @@ def _apply_sheet_structures(scene, model):
     return _refresh_model_summary_aliases(model)
 
 
-def _lossy_metal_structures(scene):
-    """Enabled structures carrying a good-conductor ``LossyMetalMedium``."""
-    return [
-        structure
-        for structure in _sorted_structures(scene)
-        if _structure_material(structure) is not None
-        and bool(getattr(_structure_material(structure), "is_lossy_metal", False))
-    ]
-
-
-def _generic_surface_impedance_structures(scene):
-    """Enabled structures carrying a generic rational ``SurfaceImpedanceMedium``.
-
-    A ``LossyMetalMedium`` is a good-conductor convenience over the same surface model
-    but has its own narrowband runtime path, so it is excluded here.
-    """
-    return [
-        structure
-        for structure in _sorted_structures(scene)
-        if _structure_material(structure) is not None
-        and bool(getattr(_structure_material(structure), "is_surface_impedance", False))
-        and not bool(getattr(_structure_material(structure), "is_lossy_metal", False))
-    ]
-
-
 def _reject_surface_impedance(reason: str, *, phase: str):
     """Single physically-worded rejection for unsupported surface-impedance configs.
 
     Every surface-impedance scope limit funnels through this one ``raise`` so the
     reason is always contextual -- it states the physical or mathematical reason the
     case is unsupported and names the phase that lifts it -- while the guard census
-    counts a single capability guard for the surface-impedance boundary. The narrowband
-    good-conductor ``LossyMetalMedium`` is the only surface currently wired into the
-    runtime; the generalized rational, finite, mid-domain, multi-metal, oblique, and
-    conformal cases are converged in later phases.
+    counts a single capability guard for the surface-impedance boundary. Axis-aligned
+    finite blocks, mid-domain double-sided plates, multiple metals, multiple
+    orientations, and the generic rational surface impedance are wired into the runtime;
+    the oblique/curved (conformal) and Bloch-periodic cases are converged in later
+    phases.
     """
     raise NotImplementedError(
         f"Surface-impedance boundary: {reason} "
@@ -1467,141 +1444,353 @@ def _reject_overlapping_surface_ownership(scene, surface_structures):
                 )
 
 
-def _compile_sibc_descriptor(scene):
-    """Build the narrowband good-conductor surface-impedance descriptor for a slab.
+@dataclass(frozen=True)
+class CompiledSurfaceMetal:
+    """One compiled axis-aligned metal volume carrying a surface-impedance boundary.
 
-    The good-conductor surface-impedance boundary replaces the resolved skin-depth
-    interior with the first-order Leontovich relation ``E_t = Z_s(omega) * (n x H)`` on
-    the metal surface, where ``Z_s(omega) = (1 - i) * sqrt(omega * mu0 / (2 * sigma))``.
-    The runtime evaluates ``Z_s`` at the operating frequency (a narrowband surface R-L),
-    masks the metal interior, and updates the two tangential E faces from the
-    vacuum-side tangential H each step; see ``fdtd/runtime/materials.py``
-    (``_configure_sibc``) and ``fdtd/runtime/stepping.py`` (``apply_sibc_surface``).
-
-    The currently-wired runtime path handles normal incidence on an axis-aligned planar
-    face: a single metal slab that spans the full transverse cross-section and sits
-    flush against one domain boundary, so exactly one face is illuminated. Returns
-    ``None`` when the scene holds no surface-impedance structure. Generic rational
-    surfaces, non-planar/oblique/laterally-finite/mid-domain slabs, and overlapping
-    ownership funnel through ``_reject_surface_impedance`` with the physical reason and
-    the phase that lifts each restriction.
+    ``structure_index`` is the global scene structure index. Metals are enumerated in
+    ascending ``structure_index`` order, so a face's ``metal_index`` (the final key of
+    :attr:`CompiledSurfaceFace.owner_rank`) realizes the deterministic owner tie-break
+    for edges shared by two faces: the minimum-structure-index owner wins, matching the
+    plan-07 minimum-global-edge owner discipline and the reference oracle's
+    ``assemble_surface_dissipation``. ``cell_slices`` is the box's lower-inclusive /
+    upper-exclusive node window per axis (the metal interior masked to a
+    good-conductor termination). ``touches_lower`` / ``touches_upper`` flag whether the
+    box is flush against the physical domain boundary on each axis-side (a flush face is
+    a half-space against the PML, never an illuminated surface). ``material`` is the
+    public surface material; ``conductivity`` is the good-conductor bulk conductivity
+    for the narrowband order-0 path, or ``None`` for a generic rational model.
     """
-    generic = _generic_surface_impedance_structures(scene)
-    if generic:
-        _reject_surface_impedance(
-            "a rational SurfaceImpedanceMedium carries a broadband causal tangential "
-            "response whose per-edge auxiliary-differential-equation stepping kernel is "
-            "not yet wired into the runtime, so its surface loss would be dropped.",
-            phase="Phase 1",
+
+    structure_index: int
+    cell_slices: tuple[slice, slice, slice]
+    touches_lower: tuple[bool, bool, bool]
+    touches_upper: tuple[bool, bool, bool]
+    material: object
+    conductivity: float | None
+
+
+@dataclass(frozen=True)
+class CompiledSurfaceFace:
+    """One axis-aligned exposed metal face (a tangential surface-impedance plane).
+
+    ``metal_index`` indexes into :attr:`CompiledSurfaceImpedanceLayout.metals`.
+    ``axis`` is the outward-normal axis; ``metal_side`` is ``"high"`` when the metal
+    fills the node indices at or above ``surface_node`` (outward normal ``-axis``) and
+    ``"low"`` when it fills below (outward normal ``+axis``). ``surface_node`` is the
+    node plane where the tangential E is written and ``magnetic_index`` the
+    vacuum-side tangential H plane one cell out. ``transverse_slices`` is the face's
+    node window in the two non-normal axes (``(b_slice, c_slice)`` with
+    ``b = (axis + 1) % 3``, ``c = (axis + 2) % 3``); ``full_plane`` is true when it
+    spans the whole transverse cross-section (the fused-kernel fast path). ``area`` is
+    the face's physical area in m^2 (the per-face dual-area sum).
+    """
+
+    metal_index: int
+    axis: int
+    metal_side: str
+    surface_node: int
+    magnetic_index: int
+    transverse_slices: tuple[slice, slice]
+    full_plane: bool
+    area: float
+
+    @property
+    def owner_rank(self) -> tuple[int, int, int, int, int]:
+        """Deterministic total order for shared-edge ownership (lower wins).
+
+        ``metal_index`` is the final tie-break so two coincident same-material faces
+        from distinct abutting metals never tie: because ``metal_index`` is assigned in
+        ascending scene-structure order and ``faces`` is sorted descending (the minimum
+        owner sorts last and last-writer-wins), the minimum-structure-index metal owns a
+        shared edge, matching the plan-07 minimum-global-edge owner discipline instead of
+        relying on enumeration order.
+        """
+        b = (self.axis + 1) % 3
+        return (
+            self.axis,
+            self.surface_node,
+            b,
+            int(self.transverse_slices[0].start),
+            self.metal_index,
         )
-    structures = _lossy_metal_structures(scene)
-    if not structures:
-        return None
-    _reject_overlapping_surface_ownership(scene, structures)
-    if len(structures) > 1:
-        _reject_surface_impedance(
-            "the good-conductor surface replaces a single metal slab; multiple lossy-metal "
-            "surfaces couple at their mutual edges, whose shared-edge unique-owner "
-            "assembly is not yet built.",
-            phase="Phase 1",
-        )
-    structure = structures[0]
-    material = _structure_material(structure)
-    geometry = structure.geometry
-    if not isinstance(geometry, Box):
-        _reject_surface_impedance(
-            f"requires an axis-aligned Box slab; a {type(geometry).__name__} surface is "
-            "curved or non-planar, so its local normal and cut-face area vary along the "
-            "surface.",
-            phase="Phase 2",
-        )
-    rotation = getattr(geometry, "rotation", None)
-    if rotation is not None:
-        quaternion = np.asarray(rotation.detach().cpu(), dtype=np.float64)
-        if not np.allclose(np.abs(quaternion), (1.0, 0.0, 0.0, 0.0), atol=1.0e-6):
-            _reject_surface_impedance(
-                "requires an axis-aligned (unrotated) slab; an oblique surface presents "
-                "an angle-dependent tangential tensor impedance.",
-                phase="Phase 2",
-            )
-    if scene.boundary.uses_kind("bloch"):
-        _reject_surface_impedance(
-            "uses a real-valued surface update; a Bloch-periodic run carries complex "
-            "phase-shifted fields for which the real surface update is undefined.",
-            phase="Phase 1",
-        )
-    slices = _box_axis_slices(scene, geometry)
-    if slices is None:
-        _reject_surface_impedance(
-            "requires the metal slab to lie inside the grid; the descriptor covers no cells.",
-            phase="Phase 1",
-        )
-    geometry_center = tuple(float(value) for value in geometry.position)
-    geometry_size = tuple(float(value) for value in geometry.size)
-    geometry_lower = tuple(
-        geometry_center[axis] - 0.5 * geometry_size[axis] for axis in range(3)
+
+
+@dataclass(frozen=True)
+class CompiledSurfaceImpedanceLayout:
+    """Axis-aligned exposed-face layout for the surface-impedance boundary.
+
+    Replaces the single-plane v1 SIBC descriptor: it enumerates every illuminated
+    axis-aligned face of every surface-impedance metal in the scene (finite blocks,
+    mid-domain double-sided plates, multiple metals, and multiple orientations), with a
+    deterministic ownership order for edges shared at box corners and overlap rejection
+    for contradictory owners on one interface. ``faces`` is sorted by
+    :attr:`CompiledSurfaceFace.owner_rank`; ``total_area`` is the summed face area.
+    """
+
+    metals: tuple[CompiledSurfaceMetal, ...]
+    faces: tuple[CompiledSurfaceFace, ...]
+    total_area: float
+
+    def __bool__(self) -> bool:
+        return bool(self.faces)
+
+
+def _surface_metal_conductivity(material) -> float | None:
+    """Good-conductor bulk conductivity for the narrowband order-0 path, else ``None``.
+
+    A ``LossyMetalMedium`` without a broadband ``frequency_range`` is realized as an
+    order-0 (pure-resistance) surface evaluated at the operating frequency; a generic
+    ``SurfaceImpedanceMedium`` (or a future broadband metal) uses the rational ADE and
+    reports ``None`` here.
+    """
+    if bool(getattr(material, "is_lossy_metal", False)) and getattr(
+        material, "frequency_range", None
+    ) is None:
+        return float(material.conductivity)
+    return None
+
+
+def _surface_impedance_structures(scene):
+    """Enabled structures carrying any surface-impedance material (metal or rational)."""
+    structures = []
+    for index, structure in enumerate(scene.structures):
+        if not getattr(structure, "enabled", True):
+            continue
+        material = _structure_material(structure)
+        if material is None:
+            continue
+        if bool(getattr(material, "is_lossy_metal", False)) or bool(
+            getattr(material, "is_surface_impedance", False)
+        ):
+            structures.append((index, structure))
+    return structures
+
+
+def _axis_span(nodes, axis_slice: slice) -> float:
+    """Physical extent (m) spanned by a cell-node window, clamped to the node grid.
+
+    A box larger than the domain yields a slice stop equal to the node count, so the
+    span is clamped to the physical grid ends (the face never extends past the domain).
+    """
+    last = len(nodes) - 1
+    start = max(0, min(int(axis_slice.start), last))
+    stop = max(0, min(int(axis_slice.stop), last))
+    return float(nodes[stop] - nodes[start])
+
+
+def _axis_face_area(scene, b_axis: int, b_slice: slice, c_axis: int, c_slice: slice) -> float:
+    """Physical area (m^2) of an axis-aligned face over its transverse node window."""
+    nodes = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)
+    return _axis_span(nodes[b_axis], b_slice) * _axis_span(nodes[c_axis], c_slice)
+
+
+def _transverse_full_plane(scene, b_axis: int, b_slice: slice, c_axis: int, c_slice: slice) -> bool:
+    """Whether a face spans the entire transverse cross-section (fused-kernel path).
+
+    A metal that covers every transverse cell owns the whole surface E plane, so the
+    fused whole-plane kernel is exact. Node counts are ``scene.N*``; the cell count is
+    one fewer, and a box exactly filling the domain (or overflowing it) reaches it.
+    """
+    node_counts = (scene.Nx, scene.Ny, scene.Nz)
+    b_cells = node_counts[b_axis] - 1
+    c_cells = node_counts[c_axis] - 1
+    return (
+        b_slice.start == 0
+        and b_slice.stop >= b_cells
+        and c_slice.start == 0
+        and c_slice.stop >= c_cells
     )
-    geometry_upper = tuple(
-        geometry_center[axis] + 0.5 * geometry_size[axis] for axis in range(3)
-    )
+
+
+def compile_surface_impedance_layout(scene):
+    """Extract every axis-aligned exposed surface-impedance face in the scene.
+
+    The surface-impedance boundary replaces the resolved skin-depth interior of a metal
+    with the first-order tangential relation ``E_t = Z_s(omega) * (n x H)`` on the
+    metal's illuminated faces. This walks every enabled surface-impedance metal, rejects
+    the cases a later phase owns (rotated/curved geometry, Bloch runs) through the single
+    ``_reject_surface_impedance`` funnel, masks each metal interior to a good-conductor
+    termination, and enumerates the exposed faces: a face on the box's low/high side of
+    an axis is illuminated when the box does not touch the physical domain boundary on
+    that side (a flush face backs onto the PML and is not illuminated). Finite blocks,
+    mid-domain double-sided plates, multiple metals, and multiple orientations are all
+    supported; the runtime consumes the returned :class:`CompiledSurfaceImpedanceLayout`
+    (``fdtd/runtime/materials.py`` and ``fdtd/runtime/stepping.py``). Returns an empty
+    layout when the scene holds no surface-impedance structure.
+    """
+    indexed = _surface_impedance_structures(scene)
+    if not indexed:
+        return CompiledSurfaceImpedanceLayout(metals=(), faces=(), total_area=0.0)
+
+    surface_structures = [structure for _, structure in indexed]
+    _reject_overlapping_surface_ownership(scene, surface_structures)
+
     physical_bounds = scene.domain.bounds
     tolerances = tuple(
         1.0e-6 * max(float(upper) - float(lower), 1.0)
         for lower, upper in physical_bounds
     )
-    # Domain.bounds stays physical when PreparedScene appends PML nodes. SIBC
-    # coverage is a physical geometry contract, so a slab ending at that
-    # boundary is a half-space even though the external PML grid continues.
-    covers_full = tuple(
-        geometry_lower[axis] <= float(physical_bounds[axis][0]) + tolerances[axis]
-        and geometry_upper[axis] >= float(physical_bounds[axis][1]) - tolerances[axis]
-        for axis in range(3)
-    )
-    bounded_axes = [axis for axis in range(3) if not covers_full[axis]]
-    if len(bounded_axes) != 1:
-        _reject_surface_impedance(
-            "requires a metal slab that spans the full transverse cross-section (bounded "
-            "along exactly one axis); a laterally finite block exposes edge faces whose "
-            "edge/corner unique-owner assembly is not yet built.",
-            phase="Phase 1",
+
+    metals: list[CompiledSurfaceMetal] = []
+    faces: list[CompiledSurfaceFace] = []
+    for structure_index, structure in indexed:
+        material = _structure_material(structure)
+        geometry = structure.geometry
+        if not isinstance(geometry, Box):
+            _reject_surface_impedance(
+                f"requires an axis-aligned Box surface; a {type(geometry).__name__} surface "
+                "is curved or non-planar, so its local normal and cut-face area vary along "
+                "the surface.",
+                phase="Phase 2",
+            )
+        rotation = getattr(geometry, "rotation", None)
+        if rotation is not None:
+            quaternion = np.asarray(rotation.detach().cpu(), dtype=np.float64)
+            if not np.allclose(np.abs(quaternion), (1.0, 0.0, 0.0, 0.0), atol=1.0e-6):
+                _reject_surface_impedance(
+                    "requires an axis-aligned (unrotated) surface; an oblique surface "
+                    "presents an angle-dependent tangential tensor impedance.",
+                    phase="Phase 2",
+                )
+        if scene.boundary.uses_kind("bloch"):
+            _reject_surface_impedance(
+                "uses a real-valued surface update; a Bloch-periodic run carries complex "
+                "phase-shifted fields for which the real surface update is undefined.",
+                phase="Phase 3",
+            )
+        slices = _box_axis_slices(scene, geometry)
+        if slices is None:
+            _reject_surface_impedance(
+                "requires the metal to lie inside the grid; the surface covers no cells.",
+                phase="Phase 1",
+            )
+        center = tuple(float(value) for value in geometry.position)
+        size = tuple(float(value) for value in geometry.size)
+        lower = tuple(center[axis] - 0.5 * size[axis] for axis in range(3))
+        upper = tuple(center[axis] + 0.5 * size[axis] for axis in range(3))
+        # Domain.bounds stays physical when PreparedScene appends PML nodes. Surface
+        # coverage is a physical geometry contract, so a box face flush against the
+        # physical boundary backs onto the PML half-space and is never illuminated.
+        touches_lower = tuple(
+            lower[axis] <= float(physical_bounds[axis][0]) + tolerances[axis]
+            for axis in range(3)
         )
-    axis = bounded_axes[0]
-    axis_slice = slices[axis]
-    touches_low = (
-        geometry_lower[axis]
-        <= float(physical_bounds[axis][0]) + tolerances[axis]
-    )
-    touches_high = (
-        geometry_upper[axis]
-        >= float(physical_bounds[axis][1]) - tolerances[axis]
-    )
-    if touches_low and touches_high:
-        _reject_surface_impedance(
-            "requires a vacuum region in front of the metal; the slab fills the domain "
-            "along its normal axis and exposes no illuminated face.",
-            phase="Phase 1",
+        touches_upper = tuple(
+            upper[axis] >= float(physical_bounds[axis][1]) - tolerances[axis]
+            for axis in range(3)
         )
-    if not touches_low and not touches_high:
-        _reject_surface_impedance(
-            "the metal slab is mid-domain and exposes two faces (a double-sided plate); "
-            "the currently-wired path is a slab flush against one domain boundary with a "
-            "single illuminated face.",
-            phase="Phase 1",
+        fills_every_axis = all(
+            touches_lower[axis] and touches_upper[axis] for axis in range(3)
         )
-    if touches_high:
-        metal_side = "high"
-        surface_node = int(axis_slice.start)
-    else:
-        metal_side = "low"
-        # The upper geometry face is the first node after the lower-inclusive,
-        # upper-exclusive metal-cell window.
-        surface_node = int(axis_slice.stop)
-    return {
-        "axis": axis,
-        "metal_side": metal_side,
-        "surface_node": int(surface_node),
-        "conductivity": float(material.conductivity),
-    }
+        if fills_every_axis:
+            _reject_surface_impedance(
+                "requires a vacuum region in front of the metal; the box fills the domain "
+                "on every axis and exposes no illuminated face.",
+                phase="Phase 1",
+            )
+        conductivity = _surface_metal_conductivity(material)
+        if conductivity is None:
+            impedance = getattr(material, "impedance", None)
+            if impedance is not None and int(getattr(impedance, "port_count", 1)) != 1:
+                _reject_surface_impedance(
+                    "carries a tangential 2x2 surface response; the per-edge ADE steps a "
+                    "scalar impedance, and the cross-polarized 2x2 tangential coupling is "
+                    "a distinct local update.",
+                    phase="Phase 2",
+                )
+        metal_index = len(metals)
+        metals.append(
+            CompiledSurfaceMetal(
+                structure_index=int(structure_index),
+                cell_slices=slices,
+                touches_lower=touches_lower,
+                touches_upper=touches_upper,
+                material=material,
+                conductivity=conductivity,
+            )
+        )
+        for axis in range(3):
+            b = (axis + 1) % 3
+            c = (axis + 2) % 3
+            b_slice = slices[b]
+            c_slice = slices[c]
+            area = _axis_face_area(scene, b, b_slice, c, c_slice)
+            full_plane = _transverse_full_plane(scene, b, b_slice, c, c_slice)
+            # Low face (metal fills at/above surface_node): illuminated iff the box does
+            # not sit flush against the physical low boundary on this axis.
+            if not touches_lower[axis]:
+                start = int(slices[axis].start)
+                faces.append(
+                    CompiledSurfaceFace(
+                        metal_index=metal_index,
+                        axis=axis,
+                        metal_side="high",
+                        surface_node=start,
+                        magnetic_index=start - 1,
+                        transverse_slices=(b_slice, c_slice),
+                        full_plane=full_plane,
+                        area=area,
+                    )
+                )
+            # High face (metal fills below surface_node): illuminated iff not flush
+            # against the physical high boundary on this axis.
+            if not touches_upper[axis]:
+                stop = int(slices[axis].stop)
+                faces.append(
+                    CompiledSurfaceFace(
+                        metal_index=metal_index,
+                        axis=axis,
+                        metal_side="low",
+                        surface_node=stop,
+                        magnetic_index=stop,
+                        transverse_slices=(b_slice, c_slice),
+                        full_plane=full_plane,
+                        area=area,
+                    )
+                )
+
+    _reject_conflicting_surface_faces(metals, faces)
+    # Sort by deterministic owner rank so a shared corner edge has a single owner: the
+    # minimum-rank face writes last (last-write-wins), making its Leontovich value the
+    # deterministic owner of the shared tangential edge.
+    faces.sort(key=lambda face: face.owner_rank, reverse=True)
+    total_area = float(sum(face.area for face in faces))
+    return CompiledSurfaceImpedanceLayout(
+        metals=tuple(metals), faces=tuple(faces), total_area=total_area
+    )
+
+
+def _reject_conflicting_surface_faces(metals, faces):
+    """Fail closed when two metals with different materials claim one interface plane.
+
+    Two coincident faces (same axis and surface node, overlapping transverse window)
+    from different metals with different surface materials are two contradictory owners
+    of the same tangential-E degree of freedom. Identical materials on a shared corner
+    edge are resolved by the deterministic owner rank, not rejected.
+    """
+    for i in range(len(faces)):
+        for j in range(i + 1, len(faces)):
+            first, second = faces[i], faces[j]
+            if first.axis != second.axis or first.surface_node != second.surface_node:
+                continue
+            b_first, c_first = first.transverse_slices
+            b_second, c_second = second.transverse_slices
+            if (
+                b_first.start < b_second.stop
+                and b_second.start < b_first.stop
+                and c_first.start < c_second.stop
+                and c_second.start < c_first.stop
+            ):
+                mat_first = metals[first.metal_index].material
+                mat_second = metals[second.metal_index].material
+                if mat_first is not mat_second:
+                    _reject_surface_impedance(
+                        "the same interface plane is claimed by two surface-impedance "
+                        "metals with different materials, so its tangential-E write has "
+                        "two contradictory owners.",
+                        phase="Phase 2",
+                    )
 
 
 def compile_material_model(
@@ -1610,7 +1799,7 @@ def compile_material_model(
     mu_background=1.0,
     subpixel=None,
 ):
-    sibc = _compile_sibc_descriptor(scene)
+    surface_layout = compile_surface_impedance_layout(scene)
     samples, averaging, pec_mode = _resolve_subpixel(subpixel)
     layout = _build_dispersive_layout(scene)
     region_densities = tuple(
@@ -1638,7 +1827,7 @@ def compile_material_model(
         model = _apply_sheet_structures(scene, model)
         model["pec_occupancy"] = _pec_occupancy(scene)
         model["pec_mode"] = pec_mode
-        model["sibc"] = sibc
+        model["surface_impedance"] = surface_layout
         return model
 
     collect_inverse = averaging == "polarized"
@@ -1766,7 +1955,7 @@ def compile_material_model(
     model = _apply_sheet_structures(scene, model)
     model["pec_occupancy"] = _pec_occupancy(scene)
     model["pec_mode"] = pec_mode
-    model["sibc"] = sibc
+    model["surface_impedance"] = surface_layout
     return model
 
 

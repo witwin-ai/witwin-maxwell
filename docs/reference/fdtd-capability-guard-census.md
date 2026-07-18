@@ -340,6 +340,24 @@ the guard disappears once the surface-impedance adapter mapping is designed. It 
 counted under "External interoperability adapter" (18 -> 19); lower the budget when
 the mapping lands.
 
+### Surface-impedance Phase 1 slices S1.1 + S1.2 reconciliation (2026-07-18)
+
+The Phase 1 slices generalized the surface-impedance runtime (axis-aligned
+exposed-face layout for finite blocks, mid-domain double-sided plates, multiple
+metals, and multiple orientations; the generic per-edge Z-form ADE forward with the
+narrowband good conductor as its order-0 case). The single re-authored
+`witwin/maxwell/compiler/materials.py::_reject_surface_impedance` funnel now rejects
+strictly fewer cases -- finite blocks, mid-domain plates, multiple metals, multiple
+orientations, and the generic `SurfaceImpedanceMedium` all compile -- but it remains
+one `raise NotImplementedError` site (the oblique/rotated/curved and Bloch cases
+still funnel through it), so the capability count is unchanged. No guard was added or
+removed: the budget stays at **140**. The adjoint bridge guard
+(`fdtd/adjoint/bridge.py`) and the distributed-solver guard
+(`fdtd/distributed/solver.py`, a `ValueError`, not census-counted) were widened to
+also cover the generic `SurfaceImpedanceMedium` (previously only `LossyMetalMedium`),
+closing a fail-open gap without changing the count. The interoperability-adapter
+guard for a generic `SurfaceImpedanceMedium` remains until its export mapping lands.
+
 ## Contract exclusions
 
 `CONTRACT_GUARDS` in the test is the canonical exact-match inventory. Its 24

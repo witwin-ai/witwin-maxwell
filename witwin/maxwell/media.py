@@ -1772,20 +1772,23 @@ class LossyMetalMedium(Material):
 
     so the skin-depth interior never needs to be meshed.
 
-    The v1 runtime is scoped to normal incidence on a single axis-aligned planar
-    face: the metal must be a ``Box`` slab that spans the full transverse
-    cross-section and sits flush against one domain boundary. The surface
-    impedance is realized as a narrowband series R-L evaluated at the operating
-    frequency (``Z_s(omega0) = R + i*omega0*L_s`` with ``L_s = R/omega0``), so it
-    reproduces the exact Leontovich value at the source frequency; the metal
-    interior is masked and the two tangential E faces are updated each step from
-    the vacuum-side tangential H (see ``compiler/materials.py`` and
-    ``fdtd/runtime/materials.py``). Laterally finite blocks, oblique/curved
-    surfaces, mid-domain slabs, and Bloch runs raise ``NotImplementedError`` with
-    a physical reason; resolve those metals volumetrically with
-    ``Material(sigma_e=...)`` (or ``Material.pec()`` for a lossless shortcut). The
-    analytic helpers ``surface_impedance`` / ``surface_impedance_at_freq`` /
-    ``skin_depth`` are exposed for validation and design work.
+    The runtime covers axis-aligned metal ``Box`` regions in any orientation:
+    boundary-flush half-spaces, laterally finite blocks, and mid-domain
+    double-sided slabs, with multiple metals in one scene. Every exposed
+    axis-aligned face is realized as a per-edge surface write; a full-plane face
+    uses a fused native kernel and a finite (sub-plane) face writes only its
+    transverse window. The surface impedance is a narrowband series R-L evaluated
+    at the operating frequency (``Z_s(omega0) = R + i*omega0*L_s`` with
+    ``L_s = R/omega0``), so it reproduces the exact Leontovich value at the source
+    frequency; the metal interior is masked and the two tangential E faces are
+    updated each step from the vacuum-side tangential H (see
+    ``compiler/materials.py`` and ``fdtd/runtime/materials.py``). Oblique or
+    curved surfaces, and differentiable/distributed runs through the surface, are
+    not supported and fail closed with a physical reason; resolve those metals
+    volumetrically with ``Material(sigma_e=...)`` (or ``Material.pec()`` for a
+    lossless shortcut). The analytic helpers ``surface_impedance`` /
+    ``surface_impedance_at_freq`` / ``skin_depth`` are exposed for validation and
+    design work.
     """
 
     def __init__(self, *, conductivity: float, name: str | None = None):
@@ -2095,11 +2098,14 @@ class SurfaceImpedanceMedium(Material):
     (a good conductor, a user rational model, or a fitted model). The bulk permittivity
     is vacuum; the surface response replaces the resolved skin-depth interior.
 
-    The generalized surface-impedance runtime (finite blocks, mid-domain double-sided
-    plates, multiple metals, and multiple orientations) is not yet wired into the
-    stepping kernels, so the material compiler currently fails closed for a
-    ``SurfaceImpedanceMedium`` and states which phase lifts the restriction. The model
-    layer, the shared passive fitter, and this public type are the Phase 0 contract.
+    The generalized surface-impedance runtime is wired into the stepping kernels: the
+    model is refit as a passive Z-form rational and discretized (bilinear, ``|z| < 1``)
+    to a per-edge auxiliary-differential-equation (ADE) that each exposed axis-aligned
+    face advances every step (finite blocks, mid-domain double-sided plates, multiple
+    metals, and multiple orientations). A tangential 2x2 (anisotropic) surface model,
+    and differentiable or distributed runs through the surface, are not supported and
+    fail closed with a physical reason. Checkpoint/resume of a generic surface run
+    captures the per-edge ADE state and fingerprints the discrete coefficients.
     """
 
     def __init__(self, *, impedance: SurfaceImpedanceModel, name: str | None = None):

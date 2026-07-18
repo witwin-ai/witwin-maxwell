@@ -27,6 +27,7 @@ _SCHEMA_TUPLE_FIELDS = (
     "lumped_state_names",
     "circuit_state_names",
     "gyromagnetic_state_names",
+    "surface_impedance_state_names",
 )
 
 
@@ -250,10 +251,31 @@ def _configuration_fingerprint(solver) -> str:
     for name, value in sorted(vars(solver).items()):
         if isinstance(value, torch.Tensor) and name.startswith(static_tensor_prefixes):
             _hash_tensor(hasher, f"solver.{name}", value)
-    sibc = getattr(solver, "_sibc", None)
-    if sibc is not None:
-        for index, face in enumerate(sibc["faces"]):
-            _hash_value(hasher, f"sibc[{index}]", face)
+    surface = getattr(solver, "_surface_impedance", None)
+    if surface is not None:
+        for index, write in enumerate(surface["writes"]):
+            ade = write.get("ade")
+            # Hash the stable descriptor scalars plus, for a generic rational face, the
+            # discrete state-space coefficients (A, B, C, D). The per-edge ADE *state*
+            # is dynamic and travels in the physics checkpoint, but the coefficients are
+            # part of the resume identity: a checkpoint captured against a different
+            # rational surface model with the same geometry must fail this fingerprint
+            # rather than resume its state under mismatched dynamics.
+            descriptor = (
+                write["e_name"],
+                write["h_name"],
+                write["sign"],
+                write["axis"],
+                write["electric_index"],
+                write["magnetic_index"],
+                write["full_plane"],
+                write["surface_r"],
+                ade is not None,
+            )
+            _hash_value(hasher, f"surface_impedance[{index}]", descriptor)
+            if ade is not None:
+                for key in ("A", "B", "C", "D"):
+                    _hash_value(hasher, f"surface_impedance[{index}].{key}", ade[key])
     for index, runtime in enumerate(getattr(solver, "_port_runtimes", ())):
         _hash_value(hasher, f"port[{index}].definition", runtime.port)
         _hash_value(hasher, f"port[{index}].frequencies", runtime.frequencies)

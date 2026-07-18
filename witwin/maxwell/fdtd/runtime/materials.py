@@ -1083,100 +1083,220 @@ def _axis_index_tuple(ndim, axis, index_or_slice):
     return tuple(selector)
 
 
-def _configure_sibc(solver):
-    """Set up the surface-impedance (Leontovich) boundary from the compiled descriptor.
+def _surface_box_interior_mask(solver, metal):
+    """Zero the E-update coefficients inside one metal box (a good-conductor fill).
 
-    The good-conductor SIBC is realized by (a) masking the metal interior so its
-    tangential E edges stay zero (a zero open-fraction folded into the update
-    coefficients, exactly as PEC does) and (b) overriding the two tangential E
-    faces on the surface node plane each step from the vacuum-side tangential H,
-    which ``apply_sibc_surface`` in ``stepping.py`` performs. The surface is the
-    dissipative (resistive) part of the Leontovich impedance evaluated at the
-    operating frequency, ``R = sqrt(omega0*mu0/(2*sigma))``.
-
-    The reactive part of ``Zs(omega0) = (1 + j) * R`` is intentionally dropped. Its
-    only stable-looking discretization in this E-from-H overwrite is the explicit
-    forward difference ``(Ls/dt) * (H^{n+1/2} - H^{n-1/2})``, which is non-passive:
-    it injects energy at the surface every step (numerical round-trip gain growing
-    as ``R, Ls ~ sqrt(f)``) and drives the solve to non-finite fields once the
-    surface gain exceeds the ambient radiation/PML loss. For a good conductor the
-    reactance is negligible for the reflection magnitude the SIBC targets --
-    ``|Gamma|`` from the full ``(1 + j) R`` versus the resistive ``R`` differs by
-    ``< 1.3e-4`` across the validity domain -- so the resistive surface reproduces
-    the analytic Leontovich reflection while remaining stable.
+    The surface-impedance boundary masks the metal interior so its E edges stay at
+    their zero initial value (a zero open-fraction folded into the decay/curl
+    coefficients, exactly as PEC does); the exposed-face tangential-E writes then
+    override the surface plane each step. The masked window is the box's node cell
+    region, extended to the tensor end on any axis-side flush against the physical
+    domain boundary so a boundary-backed metal is a full half-space (the same
+    coverage the single-plane path used). Masking the surface-plane tangential edges
+    too is harmless: the per-step write overwrites them before any field reads them.
     """
-    solver.sibc_enabled = False
-    solver._sibc = None
-    model = getattr(solver, "_compiled_material_model", None)
-    descriptor = None if model is None else model.get("sibc")
-    if descriptor is None:
-        return
-    axis = int(descriptor["axis"])
-    metal_side = descriptor["metal_side"]
-    surface_node = int(descriptor["surface_node"])
-    sigma = float(descriptor["conductivity"])
-    omega0 = 2.0 * np.pi * float(solver.source_frequency)
-    if omega0 <= 0.0:
-        raise ValueError("LossyMetalMedium SIBC requires a positive operating frequency.")
-    surface_r = float(np.sqrt(omega0 * solver.mu0 / (2.0 * sigma)))
-
-    # Mask the metal interior: zero the update coefficients of the tangential
-    # E edges strictly inside the metal (node index on the metal side of the
-    # surface) and the normal E edges from the surface inward, so those edges
-    # stay at their zero initial value and the surface behaves as a termination.
-    if metal_side == "high":
-        tangential_interior = slice(surface_node + 1, None)
-        normal_interior = slice(surface_node, None)
-        vacuum_h_index = surface_node - 1
-    else:
-        tangential_interior = slice(None, surface_node)
-        normal_interior = slice(None, surface_node)
-        vacuum_h_index = surface_node
+    windows = []
+    for axis in range(3):
+        cell_slice = metal.cell_slices[axis]
+        lo = 0 if metal.touches_lower[axis] else int(cell_slice.start)
+        hi = None if metal.touches_upper[axis] else int(cell_slice.stop)
+        windows.append(slice(lo, hi))
     for component in _E_COMPONENTS:
-        component_axis = _E_COMPONENTS.index(component)
-        interior = normal_interior if component_axis == axis else tangential_interior
         decay = getattr(solver, f"c{component.lower()}_decay", None)
         if decay is None:
             continue
-        # Open-fraction mask (1 outside the metal, 0 inside), multiplied into the
-        # decay and curl coefficients out-of-place, mirroring the PEC suppression so
-        # a covered edge keeps E exactly zero without perturbing autograd.
         mask = torch.ones_like(decay)
-        mask[_axis_index_tuple(mask.dim(), axis, interior)] = 0.0
+        index = tuple(
+            slice(w.start, None if w.stop is None else min(w.stop, size))
+            for w, size in zip(windows, mask.shape)
+        )
+        mask[index] = 0.0
         for suffix in ("decay", "curl"):
             name = f"c{component.lower()}_{suffix}"
             setattr(solver, name, (getattr(solver, name) * mask).contiguous())
 
-    # Tangential components (b, c) in cyclic order after the normal axis, each
-    # paired with the transverse H one cell out on the vacuum side. The resistive
-    # Leontovich relation E_t = R * (n_hat x H) with the metal outward normal n_hat
-    # gives E_b = +sn*R*H_c, E_c = -sn*R*H_b; sn = +1 when the metal fills the high
-    # side of the surface (n_hat = -axis) and -1 for the low side. This is the
-    # passive (energy-absorbing) branch: the opposite sign is a negative surface
-    # resistance and grows without bound.
-    b = (axis + 1) % 3
-    c = (axis + 2) % 3
-    sn = 1.0 if metal_side == "high" else -1.0
-    faces = (
-        (_E_COMPONENTS[b], _H_COMPONENTS[c], +sn),
-        (_E_COMPONENTS[c], _H_COMPONENTS[b], -sn),
+
+def _surface_discrete_state_space(solver, material):
+    """Discretize a generic rational surface impedance into a Z-form ADE at ``dt``.
+
+    The generic per-edge surface update steps the impedance relation
+    ``E_t = Z_s(omega) * (n_hat x H)`` (an E-from-H overwrite), so it needs the
+    impedance (Z) realization. The user model may be fit as an admittance (``Y``,
+    the good-conductor default, whose ``Z_s ~ sqrt(omega)`` is bounded only over the
+    band), so ``Z_s`` is resampled over the declared band and refit as a passive
+    ``Z``-form rational through the shared fitter, then discretized with the bilinear
+    (trapezoidal, ``|z| < 1``) transform. Passivity is a compile exit gate: a fit
+    that is accurate but not certified passive over the band is rejected here, before
+    any step runs -- a non-passive surface injects energy and diverges. Returns the
+    discrete ``(A, B, C, D)`` tensors (real, on the solver device) for a scalar
+    surface.
+
+    The passivity certificate bounds the continuous surface response, not the coupled
+    surface-plus-Yee discrete stability: a certified-passive high-order fit at coarse
+    resolution (e.g. order ~10 near ~40 cells/wavelength) can still diverge. Stability is
+    established in the moderate-order / adequate-resolution regime the acceptance suite
+    covers; use a moderate fit order at adequate cells-per-wavelength.
+    """
+    from ...compiler.surface_impedance import fit_surface_impedance
+
+    impedance = material.impedance
+    band = impedance.frequency_range
+    samples = impedance.sample_frequencies
+    if samples is None:
+        samples = torch.logspace(
+            float(np.log10(band[0])), float(np.log10(band[1])), 200, dtype=torch.float64
+        )
+    else:
+        samples = samples.detach().to(dtype=torch.float64)
+    z_values = impedance.surface_impedance(samples).to(dtype=torch.complex128)
+    order = int(impedance.model.poles.numel())
+    fitted = fit_surface_impedance(
+        (samples, z_values),
+        band=band,
+        order=order,
+        dt=float(solver.dt),
+        device=solver.device,
+        representation="Z",
+        dtype=torch.float32,
     )
-    face_state = tuple(
-        {
-            "e_name": e_name,
-            "h_name": h_name,
-            "sign": float(sign),
-            "axis": axis,
-            "electric_index": surface_node,
-            "magnetic_index": vacuum_h_index,
-        }
-        for e_name, h_name, sign in faces
+    discrete = fitted.discrete
+    return (
+        discrete.A.contiguous(),
+        discrete.B.contiguous(),
+        discrete.C.contiguous(),
+        discrete.D.contiguous(),
+        fitted,
     )
-    solver._sibc = {
-        "surface_r": surface_r,
-        "faces": face_state,
-    }
-    solver.sibc_enabled = True
+
+
+def _configure_surface_impedance(solver):
+    """Set up the generalized surface-impedance boundary from the compiled layout.
+
+    Consumes the ``CompiledSurfaceImpedanceLayout`` (``model["surface_impedance"]``):
+    it masks every metal interior to a good-conductor termination and builds one
+    per-tangential-component surface write for every exposed axis-aligned face
+    (finite blocks, mid-domain double-sided plates, multiple metals, multiple
+    orientations). Each write realizes the Leontovich relation
+    ``E_t = Z_s * (n_hat x H)`` with the metal outward normal ``n_hat`` from the
+    vacuum-side tangential H: ``E_b = +sn * Z_s{H_c}``, ``E_c = -sn * Z_s{H_b}``,
+    ``sn = +1`` for a metal on the high side of the surface (``n_hat = -axis``) and
+    ``-1`` for the low side -- the passive (energy-absorbing) branch.
+
+    Two realizations of the same contract share one code path:
+
+    * a narrowband good-conductor ``LossyMetalMedium`` is order-0 (pure resistance):
+      ``Z_s = R = sqrt(omega0 * mu0 / (2 * sigma))`` at the operating frequency, no
+      auxiliary state. A full-plane order-0 face uses the fused native kernel
+      (``applySibcSurface3D``); its output ``sign * R * H`` is bit-identical to the
+      generic ``D * (sign * H)`` scalar path (multiplication by ``sign = +/-1`` is
+      exact), so the fused path is a pure optimization of the same relation.
+    * a generic rational ``SurfaceImpedanceMedium`` is a passive Z-form ADE
+      discretized at ``dt`` (``_surface_discrete_state_space``); each edge carries a
+      state vector advanced by ``x <- A x + B u`` with output ``E = C x + D u`` and
+      input ``u = sign * H``. ``apply_surface_impedance`` in ``stepping.py`` steps it.
+    """
+    solver.surface_impedance_enabled = False
+    solver._surface_impedance = None
+    model = getattr(solver, "_compiled_material_model", None)
+    layout = None if model is None else model.get("surface_impedance")
+    if not layout:
+        return
+
+    omega0 = 2.0 * np.pi * float(solver.source_frequency)
+    discrete_cache: dict[int, tuple] = {}
+    writes = []
+    for metal in layout.metals:
+        _surface_box_interior_mask(solver, metal)
+
+    for face in layout.faces:
+        metal = layout.metals[face.metal_index]
+        axis = face.axis
+        b = (axis + 1) % 3
+        c = (axis + 2) % 3
+        sn = 1.0 if face.metal_side == "high" else -1.0
+        components = (
+            (_E_COMPONENTS[b], _H_COMPONENTS[c], +sn),
+            (_E_COMPONENTS[c], _H_COMPONENTS[b], -sn),
+        )
+        b_slice, c_slice = face.transverse_slices
+        if face.full_plane:
+            # A full-plane face owns the entire transverse surface E plane. The node-
+            # coverage slices under-cover by one the tangential component whose transverse
+            # dimension is node-length (an exact-fill box gives b_slice.stop == cell_count,
+            # missing the last node row), which would leave a masked-zero PEC seam where
+            # the fused order-0 kernel writes the Leontovich value. Widen to the whole
+            # plane so the generic sliced write and the fused kernel share one footprint.
+            b_slice = slice(None)
+            c_slice = slice(None)
+
+        surface_r = None
+        discrete = None
+        if metal.conductivity is not None:
+            if omega0 <= 0.0:
+                raise ValueError(
+                    "A narrowband good-conductor surface requires a positive operating "
+                    "frequency."
+                )
+            surface_r = float(np.sqrt(omega0 * solver.mu0 / (2.0 * metal.conductivity)))
+        else:
+            key = id(metal.material)
+            if key not in discrete_cache:
+                discrete_cache[key] = _surface_discrete_state_space(solver, metal.material)
+            discrete = discrete_cache[key]
+
+        for e_name, h_name, sign in components:
+            entry = {
+                "e_name": e_name,
+                "h_name": h_name,
+                "sign": float(sign),
+                "axis": axis,
+                "electric_index": int(face.surface_node),
+                "magnetic_index": int(face.magnetic_index),
+                "full_plane": bool(face.full_plane),
+                "b_axis": b,
+                "c_axis": c,
+                "b_slice": b_slice,
+                "c_slice": c_slice,
+                "surface_r": surface_r,
+            }
+            if discrete is not None:
+                a_d, b_d, c_d, d_d, _fitted = discrete
+                # One state vector per edge in this face's transverse write window.
+                electric = getattr(solver, e_name)
+                e_index = _surface_write_index(
+                    electric.dim(), axis, int(face.surface_node), b, b_slice, c, c_slice
+                )
+                edge_count = electric[e_index].numel()
+                order = a_d.shape[0]
+                entry["ade"] = {
+                    "A": a_d,
+                    "B": b_d,
+                    "C": c_d,
+                    "D": d_d,
+                    "state": torch.zeros(
+                        (order, edge_count), device=solver.device, dtype=electric.dtype
+                    ),
+                }
+            writes.append(entry)
+
+    solver._surface_impedance = {"writes": writes}
+    solver.surface_impedance_enabled = True
+
+
+def _surface_write_index(ndim, axis, axis_index, b_axis, b_slice, c_axis, c_slice):
+    """Index tuple selecting a face's transverse write window on a field tensor.
+
+    The paired tangential-E and vacuum-side-H tensors have identical sizes on the two
+    transverse (``b_axis``, ``c_axis``) dimensions of a surface plane, so the same node
+    cell window slices both to matching shapes; torch clamps a full-span stop to the
+    tensor size. ``axis_index`` is the (component-specific) plane index along the
+    outward-normal axis.
+    """
+    index = [slice(None)] * ndim
+    index[axis] = int(axis_index)
+    index[b_axis] = b_slice
+    index[c_axis] = c_slice
+    return tuple(index)
 
 
 def _store_nonlinear_external_decay(solver, ex_decay, ey_decay, ez_decay):
@@ -1390,7 +1510,7 @@ def build_update_coefficients(solver):
         _store_nonlinear_external_decay(solver, None, None, None)
         _build_full_aniso_curl_coefficients(solver)
         _apply_pec_edge_suppression(solver)
-        _configure_sibc(solver)
+        _configure_surface_impedance(solver)
         _store_coefficient_uniformity(solver)
         return
 
@@ -1457,7 +1577,7 @@ def build_update_coefficients(solver):
     _store_nonlinear_external_decay(solver, ex_decay, ey_decay, ez_decay)
     _build_full_aniso_curl_coefficients(solver)
     _apply_pec_edge_suppression(solver)
-    _configure_sibc(solver)
+    _configure_surface_impedance(solver)
     _store_coefficient_uniformity(solver)
 
 
