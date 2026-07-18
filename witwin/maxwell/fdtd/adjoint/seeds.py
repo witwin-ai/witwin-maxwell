@@ -887,15 +887,36 @@ def _shift_observer_schedule_for_field(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Adjoint transpose of the forward observer running-DFT schedule.
 
-    The forward pass accumulates both electric and magnetic observer samples at
-    the plain running-DFT step phase (the same phase used by the full-field DFT
-    accumulator), so the exact adjoint transpose applies no per-field time
-    shift.  The signature is preserved so the seed builder and the stagger
-    regression test can pin this identity against a re-introduced offset.
+    The forward pass (observers.py::accumulate_observers) keeps the electric
+    observers on the plain running-DFT step phase (offset 0) and retards the
+    magnetic observers by a half step (an extra ``-0.5*omega*dt`` phase). The
+    exact adjoint transpose reuses the identical per-step weights, so this
+    function is the mirror image: electric fields pass through unshifted, while
+    magnetic (``H*``) fields have their ``(cos, sin)`` schedule rotated by the
+    same ``-0.5*omega*dt`` angle per entry. The rotation commutes with the
+    common window weight, so applying it to the schedule pack reproduces the
+    forward ``group_cos``/``group_sin`` weights column-for-column.
     """
 
-    del solver, entry_indices, state_field_name
-    return cos_pack, sin_pack
+    if (
+        state_field_name.startswith("E")
+        or entry_indices.numel() == 0
+        or cos_pack.numel() == 0
+    ):
+        return cos_pack, sin_pack
+
+    entries = solver._observer_spectral_entries
+    frequencies = torch.tensor(
+        [float(entries[int(index)]["frequency"]) for index in entry_indices.tolist()],
+        device=cos_pack.device,
+        dtype=cos_pack.dtype,
+    )
+    phase_offset = (-0.5 * 2.0 * math.pi * float(solver.dt)) * frequencies
+    offset_cos = torch.cos(phase_offset).view(-1, 1)
+    offset_sin = torch.sin(phase_offset).view(-1, 1)
+    shifted_cos = cos_pack * offset_cos - sin_pack * offset_sin
+    shifted_sin = sin_pack * offset_cos + cos_pack * offset_sin
+    return shifted_cos, shifted_sin
 
 
 def _apply_dense_seeds_native(_cuda_backend, adj_state, seed_runtime: _SeedRuntime, step_index):

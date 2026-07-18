@@ -30,7 +30,21 @@ class _Recorder:
         return _Launch()
 
 
-def test_spectral_observers_share_the_running_dft_step_phase():
+def test_spectral_observers_apply_the_yee_half_step_stagger():
+    r"""Electric observers sample at the plain step phase; magnetic observers retard by 1/2 step.
+
+    Yee time-stagger derivation for the time-averaged Poynting observable:
+      - E is advanced to integer steps: E^(n+1) is stored at physical time (n+1)dt.
+      - H is advanced to half steps:    H^(n+1/2) is stored at physical time (n+1/2)dt.
+    The running-DFT accumulator labels every sample with the plain step phase
+    2*pi*f*n*dt.  Keeping E on that phase (offset 0) and retarding H by an extra
+    -0.5*omega*dt (offset -1/2 step) reproduces the physical +1/2-step E-H offset.
+    In the time-averaged Poynting cross term S = 1/2 Re(E x H*) the common step
+    phase cancels, so only the +1/2 *relative* offset is observable, and it is
+    the offset the Yee grid requires.  E stays colocated with the plain full-field
+    DFT slices; only H carries the half-step retard.
+    """
+
     recorder = _Recorder()
     frequency = 2.0
     dt = 0.025
@@ -85,27 +99,31 @@ def test_spectral_observers_share_the_running_dft_step_phase():
     accumulate_observers(solver, 1)
 
     electric, magnetic = recorder.calls
-    # Plain running-DFT convention: electric and magnetic observers share the
-    # step-index phase (2*pi*f*n*dt) with no per-field Yee half-step offset, so
-    # the point/plane spectral observers stay consistent with the full-field DFT
-    # accumulator.  A re-introduced E(+dt)/H(+dt/2) offset would rotate these.
+    # Electric observers stay on the plain step-index phase (offset 0), colocated
+    # with the full-field DFT accumulator.  Magnetic observers carry an extra
+    # -0.5*omega*dt phase, i.e. they sample at the half-step-retarded phase
+    # 2*pi*f*(n - 1/2)*dt.  Reverting H to the plain phase (plain-plain) would
+    # collapse the two branches and destroy the physical Yee stagger.
     step_phase = 2.0 * math.pi * frequency * (1.0 * dt)
+    magnetic_phase = 2.0 * math.pi * frequency * ((1.0 - 0.5) * dt)
     assert electric["weightedCos"] == pytest.approx(math.cos(step_phase))
     assert electric["weightedSin"] == pytest.approx(math.sin(step_phase))
-    assert magnetic["weightedCos"] == pytest.approx(math.cos(step_phase))
-    assert magnetic["weightedSin"] == pytest.approx(math.sin(step_phase))
+    assert magnetic["weightedCos"] == pytest.approx(math.cos(magnetic_phase))
+    assert magnetic["weightedSin"] == pytest.approx(math.sin(magnetic_phase))
     assert entry["sample_count"] == 2
 
 
 @pytest.mark.parametrize(
     ("observer_kind", "field_name", "time_offset"),
     (
-        # Plain running-DFT: electric and magnetic observers both sample at the
-        # step-index phase (offset 0), matching the full-field DFT accumulator.
+        # Yee half-step stagger: electric observers sample at the plain step-index
+        # phase (offset 0); magnetic observers are retarded by half a step
+        # (offset -1/2), matching observers.py::accumulate_observers.  The adjoint
+        # schedule must reproduce the same per-field offset (exact transpose).
         ("point", "Ex", 0.0),
-        ("point", "Hy", 0.0),
+        ("point", "Hy", -0.5),
         ("plane", "Ez", 0.0),
-        ("plane", "Hx", 0.0),
+        ("plane", "Hx", -0.5),
     ),
 )
 def test_observer_adjoint_schedule_is_exact_transpose_of_forward_yee_dft(
