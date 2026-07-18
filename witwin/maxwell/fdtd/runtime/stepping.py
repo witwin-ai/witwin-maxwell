@@ -1472,22 +1472,23 @@ def enforce_pec_boundaries(solver):
 
 
 def apply_sibc_surface(solver):
-    """Override the tangential E on a ``LossyMetalMedium`` surface via the Leontovich
-    surface-impedance relation ``E_t = Zs * (n_hat x H)`` (passive/absorbing branch).
+    """Override the tangential E on a ``LossyMetalMedium`` surface via the resistive
+    Leontovich surface-impedance relation ``E_t = R * (n_hat x H)``.
 
-    The surface impedance is a narrowband series R-L, ``Zs(omega0) = R + j*omega0*Ls``,
-    so in the time domain each tangential face reads the vacuum-side tangential H
-    (index-aligned on the Yee grid by ``_configure_sibc``) and forms
-    ``E_surface = sign * (R * H + Ls * dH/dt)``, storing the previous H for the
-    surface-inductance dH/dt term. The metal interior is masked to zero by the
-    coefficient setup, so the surface acts as a semi-infinite good-conductor
-    termination at roughly a skin-depth-free (>=10x coarser) cell size.
+    The narrowband good-conductor surface resistance
+    ``R = sqrt(omega0*mu0/(2*sigma))`` is the dissipative part of ``Zs(omega0)``;
+    each tangential face reads the vacuum-side tangential H (index-aligned on the Yee
+    grid by ``_configure_sibc``) and forms ``E_surface = sign * R * H``. The reactive
+    part of ``Zs`` is intentionally omitted: its explicit time-derivative overwrite is
+    non-passive and unstable (it injects energy at ~R,L ~ sqrt(f) per step), and for a
+    good conductor it shifts ``|Gamma|`` by < 1e-3. The metal interior is masked to
+    zero by the coefficient setup, so the surface acts as a semi-infinite
+    good-conductor termination at roughly a skin-depth-free (>=10x coarser) cell size.
     """
     state = getattr(solver, "_sibc", None)
     if state is None:
         return
     surface_r = state["surface_r"]
-    surface_l_over_dt = state["surface_l"] / solver.dt
     for face in state["faces"]:
         solver.fdtd_module.applySibcSurface3D(
             electric=getattr(solver, face["e_name"]),
@@ -1497,8 +1498,6 @@ def apply_sibc_surface(solver):
             magneticIndex=face["magnetic_index"],
             sign=face["sign"],
             surfaceR=surface_r,
-            surfaceLOverDt=surface_l_over_dt,
-            hPrev=face["h_prev"],
         ).launchRaw()
 
 
@@ -1823,10 +1822,8 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         state["_wire_current"] = wire_runtime.current
         state["_wire_charge"] = wire_runtime.charge
         state["_wire_emf"] = wire_runtime.emf
-    sibc_state = getattr(solver, "_sibc", None)
-    if sibc_state is not None:
-        for index, face in enumerate(sibc_state["faces"]):
-            state[f"_sibc_h_prev_{index}"] = face["h_prev"]
+    # The resistive SIBC surface overwrite is stateless (it writes only the surface E
+    # plane, already snapshotted above), so it needs no extra capture state.
     saved = {k: v.clone() for k, v in state.items()}
 
     def _restore():

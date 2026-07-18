@@ -1814,9 +1814,7 @@ void apply_sibc_surface_cuda(
     int64_t electric_index,
     int64_t magnetic_index,
     double sign,
-    double surface_r,
-    double surface_l_over_dt,
-    torch::stable::Tensor h_prev);
+    double surface_r);
 void sample_wire_emf_cuda(
     const torch::stable::Tensor& ex,
     const torch::stable::Tensor& ey,
@@ -2145,7 +2143,7 @@ void add_source_patch_ez_periodic_cuda(
   _(clamp_field_face, "clamp_field_face(Tensor(a!) field, int axis, int side) -> ()", clamp_field_face_cuda) \
   _(clamp_pec_boundary, "clamp_pec_boundary(Tensor(a!) field, int axis_a, int axis_b) -> ()", clamp_pec_boundary_cuda) \
   _(mur_abc_face, "mur_abc_face(Tensor(a!) field, int axis, int boundary_index, int adjacent_index, float coef, Tensor(b!) prev_boundary, Tensor(c!) prev_adjacent) -> ()", mur_abc_face_cuda) \
-  _(apply_sibc_surface, "apply_sibc_surface(Tensor(a!) electric, Tensor magnetic, int axis, int electric_index, int magnetic_index, float sign, float surface_r, float surface_l_over_dt, Tensor(b!) h_prev) -> ()", apply_sibc_surface_cuda) \
+  _(apply_sibc_surface, "apply_sibc_surface(Tensor(a!) electric, Tensor magnetic, int axis, int electric_index, int magnetic_index, float sign, float surface_r) -> ()", apply_sibc_surface_cuda) \
   _(project_periodic_boundary, "project_periodic_boundary(Tensor(a!) field, int axis) -> ()", project_periodic_boundary_cuda) \
   _(project_bloch_boundary, "project_bloch_boundary(Tensor(a!) field_real, Tensor(b!) field_imag, int axis, float phase_cos, float phase_sin) -> ()", project_bloch_boundary_cuda) \
   _(update_electric_ex_bloch_y_standard_z, "update_electric_ex_bloch_y_standard_z(Tensor(a!) ex_real, Tensor(b!) ex_imag, Tensor hy_real, Tensor hy_imag, Tensor hz_real, Tensor hz_imag, Tensor decay, Tensor curl, float phase_cos_y, float phase_sin_y, Tensor inv_dy, Tensor inv_dz, int z_low_mode, int z_high_mode) -> ()", update_electric_ex_bloch_y_standard_z_cuda) \

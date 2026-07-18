@@ -252,11 +252,7 @@ def _configuration_fingerprint(solver) -> str:
     sibc = getattr(solver, "_sibc", None)
     if sibc is not None:
         for index, face in enumerate(sibc["faces"]):
-            _hash_value(
-                hasher,
-                f"sibc[{index}]",
-                {key: value for key, value in face.items() if key != "h_prev"},
-            )
+            _hash_value(hasher, f"sibc[{index}]", face)
     for index, runtime in enumerate(getattr(solver, "_port_runtimes", ())):
         _hash_value(hasher, f"port[{index}].definition", runtime.port)
         _hash_value(hasher, f"port[{index}].frequencies", runtime.frequencies)
@@ -388,18 +384,11 @@ def capture_resume_checkpoint(
         }
         for entry in getattr(solver, "_mur_state", ())
     ]
-    sibc = []
-    if getattr(solver, "_sibc", None) is not None:
-        sibc = [
-            face["h_prev"].detach().clone()
-            for face in solver._sibc["faces"]
-        ]
     modulation_time = getattr(solver, "_modulation_time", None)
     auxiliary = {
         "ports": ports,
         "circuits": circuits,
         "mur": mur,
-        "sibc": sibc,
         "modulation_time": (
             None if modulation_time is None else modulation_time.detach().clone()
         ),
@@ -616,15 +605,6 @@ def _preflight_auxiliary(solver, checkpoint: FDTDResumeCheckpoint):
             target = entry[key]
             _require_tensor_compatible(f"mur.{index}.{key}", source, target)
             copy_ops.append((target, source))
-
-    sibc_payloads = auxiliary.get("sibc")
-    sibc_faces = () if getattr(solver, "_sibc", None) is None else tuple(solver._sibc["faces"])
-    if not isinstance(sibc_payloads, (list, tuple)) or len(sibc_payloads) != len(sibc_faces):
-        raise ValueError("FDTD resume SIBC layout changed.")
-    for index, (face, source) in enumerate(zip(sibc_faces, sibc_payloads)):
-        target = face["h_prev"]
-        _require_tensor_compatible(f"sibc.{index}", source, target)
-        copy_ops.append((target, source))
 
     modulation_source = auxiliary.get("modulation_time")
     modulation_target = getattr(solver, "_modulation_time", None)
