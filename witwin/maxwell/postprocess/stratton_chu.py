@@ -129,6 +129,27 @@ def _trapz_weights_1d(points: torch.Tensor) -> torch.Tensor:
     return weights
 
 
+def _clip_boundary_control_widths(widths: torch.Tensor) -> torch.Tensor:
+    """Clip exact primal cell widths to the sampled equivalent-current surface.
+
+    The Stratton-Chu / NF2FF radiation integral is a nodal quadrature over the
+    sampled Huygens surface, whose extent is bounded by the outermost samples
+    (and, on a closed surface, whose boundary cells are shared with the
+    perpendicular adjacent face).  Each boundary sample therefore contributes
+    half its primal cell; counting the full end cell extends the integral half a
+    cell past the sampled surface and systematically over-counts the far field
+    (over-unity closed-surface power, inflated RCS).  On a uniform grid this
+    reduces the cell-centered rule to the trapezoidal rule at the edges while
+    the interior keeps the exact primal widths.
+    """
+    if widths.numel() <= 1:
+        return widths
+    clipped = widths.clone()
+    clipped[0] = clipped[0] * 0.5
+    clipped[-1] = clipped[-1] * 0.5
+    return clipped
+
+
 def _cell_center_weights_1d(points: torch.Tensor) -> torch.Tensor:
     """Control-volume widths for Yee samples located at cell centers."""
 
@@ -904,11 +925,11 @@ def _equivalent_surface_currents_from_payload(
         real_dtype = _resolve_real_dtype(
             monitor[coord_name_a], monitor[coord_name_b], *field_values
         )
-        width_u = torch.as_tensor(
-            cell_widths[coord_name_a], device=device, dtype=real_dtype
+        width_u = _clip_boundary_control_widths(
+            torch.as_tensor(cell_widths[coord_name_a], device=device, dtype=real_dtype)
         )
-        width_v = torch.as_tensor(
-            cell_widths[coord_name_b], device=device, dtype=real_dtype
+        width_v = _clip_boundary_control_widths(
+            torch.as_tensor(cell_widths[coord_name_b], device=device, dtype=real_dtype)
         )
         area_weights = width_u[:, None] * width_v[None, :]
     return equivalent_surface_currents_from_fields(
