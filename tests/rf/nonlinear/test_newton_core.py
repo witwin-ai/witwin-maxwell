@@ -181,16 +181,35 @@ def test_diode_series_resistance_fails_closed_at_compile():
         compile_nonlinear_devices([diode], {"a": 0}, dtype=torch.float64, device="cpu")
 
 
-def test_diode_junction_capacitance_fails_closed_in_conduction_only_solve():
+def test_diode_junction_capacitance_is_open_in_the_dc_operating_point():
+    # In a DC operating point the junction capacitance is an open circuit and must
+    # not perturb the node voltage: the DC solve is identical with and without the
+    # capacitance (charge is only consumed by the transient path, gated separately).
     circuit = mw.Circuit("cj")
     node = circuit.node("a")
-    diode = mw.Diode("d1", node, circuit.ground, saturation_current=1e-12, junction_capacitance=1e-12)
-    compiled = compile_nonlinear_devices([diode], {"a": 0}, dtype=torch.float64, device="cpu")
-    system = NonlinearMNASystem(
-        1, torch.tensor([[1e-3]], dtype=torch.float64), torch.tensor([1e-3], dtype=torch.float64), compiled
+    node_index = {"a": 0}
+    conductance = torch.tensor([[1e-3]], dtype=torch.float64)
+    injection = torch.tensor([1e-3], dtype=torch.float64)
+    with_cap = compile_nonlinear_devices(
+        [mw.Diode("d1", node, circuit.ground, saturation_current=1e-12, junction_capacitance=1e-12)],
+        node_index,
+        dtype=torch.float64,
+        device="cpu",
     )
-    with pytest.raises(NotImplementedError, match="junction_capacitance"):
-        newton_solve(system, torch.zeros(1), mw.NonlinearSolveConfig())
+    without_cap = compile_nonlinear_devices(
+        [mw.Diode("d1", node, circuit.ground, saturation_current=1e-12)],
+        node_index,
+        dtype=torch.float64,
+        device="cpu",
+    )
+    solution_cap, stats_cap = newton_solve(
+        NonlinearMNASystem(1, conductance, injection, with_cap), torch.zeros(1), mw.NonlinearSolveConfig()
+    )
+    solution_ref, _ = newton_solve(
+        NonlinearMNASystem(1, conductance, injection, without_cap), torch.zeros(1), mw.NonlinearSolveConfig()
+    )
+    assert stats_cap.converged
+    assert abs(solution_cap.item() - solution_ref.item()) <= 1e-14
 
 
 def test_newton_solve_validates_x0_dtype_device_and_shape():

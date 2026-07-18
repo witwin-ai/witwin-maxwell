@@ -338,12 +338,24 @@ class NonlinearMNASystem:
     Norton-equivalent sources); the nonlinear device contribution is assembled
     per iterate. Node ``0`` (ground) is eliminated, so unknowns are the
     ``num_unknowns`` non-ground node voltages.
+
+    When ``dt`` is set (via :meth:`init_transient`), the assembler also folds each
+    device's stored-charge companion into the residual and Jacobian using the same
+    bilinear-transform convention as the linear reactive companion
+    (``compiler/mna.py`` / ``lumped.py``): trapezoidal uses ``2/dt`` with the
+    prior capacitive-current history, backward Euler uses ``1/dt`` with none. The
+    charge history advances only on an accepted step (:meth:`advance_charge_state`),
+    so a rejected/limited Newton iterate never corrupts the integrator memory.
     """
 
     num_unknowns: int
     conductance: torch.Tensor
     injection: torch.Tensor
     devices: tuple[CompiledNonlinearDevice, ...]
+    dt: float | None = None
+    integration: str = "trapezoidal"
+    charge_prev: list[torch.Tensor] = field(default_factory=list)
+    capacitive_current_prev: list[torch.Tensor] = field(default_factory=list)
 
     @property
     def dtype(self) -> torch.dtype:
@@ -353,15 +365,74 @@ class NonlinearMNASystem:
     def device(self) -> torch.device:
         return self.conductance.device
 
+    def init_transient(self, x0: torch.Tensor, dt: float, integration: str) -> None:
+        """Arm the charge integrator from the operating point ``x0``.
+
+        ``charge_prev`` is seeded with ``q(v0)`` (not zero) so the first companion
+        step measures the true charge increment from the DC operating point, and
+        the capacitive-current history starts at zero (DC steady state carries no
+        displacement current).
+        """
+
+        if integration not in ("trapezoidal", "backward_euler"):
+            raise ValueError("integration must be 'trapezoidal' or 'backward_euler'.")
+        if not (dt > 0.0):
+            raise ValueError("dt must be positive.")
+        self.dt = float(dt)
+        self.integration = integration
+        self.charge_prev = []
+        self.capacitive_current_prev = []
+        for compiled in self.devices:
+            v = compiled.terminal_voltage(x0)
+            q, _ = compiled.charge(v)
+            self.charge_prev.append(q)
+            self.capacitive_current_prev.append(torch.zeros_like(q))
+
+    def _charge_factor(self) -> float:
+        return (2.0 if self.integration == "trapezoidal" else 1.0) / self.dt
+
+    def _charge_companion(
+        self, slot: int, compiled: CompiledNonlinearDevice, v: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Trapezoidal/BE stored-charge companion ``(i_cap(v), dcap/dv)``."""
+
+        q, capacitance = compiled.charge(v)
+        factor = self._charge_factor()
+        current = factor * (q - self.charge_prev[slot])
+        if self.integration == "trapezoidal":
+            current = current - self.capacitive_current_prev[slot]
+        return current, factor * capacitance
+
+    def advance_charge_state(self, x: torch.Tensor) -> None:
+        """Commit the charge integrator history after an accepted step."""
+
+        if self.dt is None:
+            return
+        for slot, compiled in enumerate(self.devices):
+            v = compiled.terminal_voltage(x)
+            current, _ = self._charge_companion(slot, compiled, v)
+            q, _ = compiled.charge(v)
+            self.charge_prev[slot] = q
+            self.capacitive_current_prev[slot] = current
+
+    def _device_current(
+        self, slot: int, compiled: CompiledNonlinearDevice, v: torch.Tensor
+    ) -> torch.Tensor:
+        current, _ = compiled.conduction(v)
+        if self.dt is not None:
+            cap_current, _ = self._charge_companion(slot, compiled, v)
+            current = current + cap_current
+        return current
+
     def true_residual(self, x: torch.Tensor, *, gmin: float = 0.0) -> torch.Tensor:
         """KCL residual ``F(x)`` using the exact device laws (no limiting)."""
 
         residual = self.conductance @ x - self.injection
         if gmin:
             residual = residual + gmin * x
-        for compiled in self.devices:
+        for slot, compiled in enumerate(self.devices):
             v = compiled.terminal_voltage(x)
-            current, _ = compiled.conduction(v)
+            current = self._device_current(slot, compiled, v)
             if not bool(torch.all(torch.isfinite(current))):
                 bad = compiled.names[int(torch.nonzero(~torch.isfinite(current))[0, 0])]
                 raise NonlinearDeviceError(
@@ -372,9 +443,9 @@ class NonlinearMNASystem:
 
     def residual_scale(self, x: torch.Tensor) -> torch.Tensor:
         scale = self.injection.abs().max() if self.injection.numel() else self.injection.new_zeros(())
-        for compiled in self.devices:
+        for slot, compiled in enumerate(self.devices):
             v = compiled.terminal_voltage(x)
-            current, _ = compiled.conduction(v)
+            current = self._device_current(slot, compiled, v)
             if current.numel():
                 scale = torch.maximum(scale, current.abs().max())
         return scale
@@ -396,6 +467,10 @@ def _assemble_linear_step(
         v_lim = compiled.limit(v_raw, limiting_state[slot])
         limiting_state[slot] = v_lim
         current, conductance = compiled.conduction(v_lim)
+        if system.dt is not None:
+            cap_current, cap_conductance = system._charge_companion(slot, compiled, v_lim)
+            current = current + cap_current
+            conductance = conductance + cap_conductance
         if not (bool(torch.all(torch.isfinite(current))) and bool(torch.all(torch.isfinite(conductance)))):
             raise NonlinearDeviceError(
                 f"Nonlinear device group {compiled.kind!r} produced a non-finite linearization."
@@ -444,22 +519,6 @@ def newton_solve(
         raise ValueError(
             f"newton_solve x0 must have shape {(system.num_unknowns,)}, got {tuple(x0.shape)}."
         )
-    for compiled in system.devices:
-        capacitance = compiled.parameters.get("junction_capacitance")
-        if capacitance is not None and bool(torch.any(capacitance != 0.0)):
-            charged = tuple(
-                name
-                for name, value in zip(compiled.names, capacitance.tolist())
-                if value != 0.0
-            )
-            raise NotImplementedError(
-                f"Diodes {charged} declare a nonzero junction_capacitance, but this "
-                "Newton solve assembles only the conduction current i(v); the stored "
-                "charge q(v) is never differentiated into the system, so the parameter "
-                "would be silently ignored. This fails closed until a charge-aware "
-                "(transient) solve consumes it."
-            )
-
     x = x0.clone()
     limiting_state = [compiled.terminal_voltage(x) for compiled in system.devices]
     trajectory: list[float] = []
@@ -562,12 +621,250 @@ def _backtrack(
     return x, max_steps
 
 
+def _gmin_ladder(config: NonlinearSolveConfig) -> tuple[float, ...]:
+    """Descending gmin continuation ladder ending exactly at zero.
+
+    A shunt conductance ``gmin`` on every node makes the first (cold-start) solves
+    trivially well-conditioned; the ladder decreases geometrically and the final
+    solve is at ``gmin=0`` so the accepted operating point contains no residual
+    artificial conductance (fail-closed boundary 2).
+    """
+
+    if config.gmin_steps <= 0 or config.gmin_start <= 0.0:
+        return (0.0,)
+    ladder = [config.gmin_start * (0.1 ** step) for step in range(config.gmin_steps)]
+    ladder.append(0.0)
+    return tuple(ladder)
+
+
+def solve_dc_operating_point(
+    system: NonlinearMNASystem,
+    injection: torch.Tensor,
+    config: NonlinearSolveConfig,
+    *,
+    x0: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, NonlinearSolveStats]:
+    """DC operating point with gmin continuation (charge devices held open).
+
+    The stored charge is a DC open circuit, so the operating-point solve runs the
+    pure-conduction system (``dt`` temporarily cleared). The gmin ladder warm-starts
+    each solve from the previous converged point and the last rung is ``gmin=0`` so
+    no artificial conductance survives into the returned state.
+    """
+
+    saved_dt = system.dt
+    system.dt = None
+    try:
+        if injection.shape != (system.num_unknowns,):
+            raise ValueError(
+                f"injection must have shape {(system.num_unknowns,)}, got {tuple(injection.shape)}."
+            )
+        saved_injection = system.injection
+        system.injection = injection.to(device=system.device, dtype=system.dtype)
+        try:
+            x = x0.clone() if x0 is not None else torch.zeros(
+                system.num_unknowns, device=system.device, dtype=system.dtype
+            )
+            stats = None
+            for gmin in _gmin_ladder(config):
+                x, stats = newton_solve(system, x, config, gmin=gmin)
+            return x, stats
+        finally:
+            system.injection = saved_injection
+    finally:
+        system.dt = saved_dt
+
+
+def _pwl_segments(system: NonlinearMNASystem, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """Per-PWL-device segment index at the node voltages ``x`` (empty otherwise)."""
+
+    segments = []
+    for compiled in system.devices:
+        if compiled.kind != "piecewise_linear_iv":
+            continue
+        voltages = compiled.parameters["voltages"]
+        v = compiled.terminal_voltage(x)
+        knots = voltages.shape[-1]
+        segment = torch.searchsorted(voltages, v.unsqueeze(-1), right=True).squeeze(-1) - 1
+        segments.append(segment.clamp(0, knots - 2))
+    return tuple(segments)
+
+
+@dataclass(frozen=True)
+class NonlinearTransientResult:
+    """Standalone nonlinear transient trajectory and per-step Newton diagnostics."""
+
+    times: torch.Tensor
+    node_voltages: torch.Tensor
+    kcl_residual_norm: torch.Tensor
+    iterations: tuple[int, ...]
+    conditions: tuple[float, ...]
+    breakpoint_steps: tuple[int, ...]
+    converged: bool
+
+
+def run_nonlinear_transient(
+    system: NonlinearMNASystem,
+    times: torch.Tensor,
+    source_injection,
+    config: NonlinearSolveConfig,
+    *,
+    integration: str = "trapezoidal",
+    x0: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+) -> NonlinearTransientResult:
+    """Newton-in-the-loop transient on the standalone nonlinear MNA system.
+
+    ``times`` is the strictly increasing sample grid; the remaining points are
+    solved with a fixed step ``dt = times[k+1]-times[k]`` (a non-uniform grid is
+    honoured per step). ``source_injection(t)`` returns the linear-block Norton
+    injection vector at time ``t`` (solved at the step end ``t_{k+1}`` for the
+    trapezoidal/BE companion). When a piecewise-linear device crosses a knot inside
+    a step, that single step is re-solved with a local backward-Euler companion so
+    the trapezoidal reactive companion does not ring on the conduction-slope kink
+    (the standalone analogue of ``LinearMNASystem._local_backward_euler_steps``).
+
+    ``times[0]`` sets the initial state: by default it is the DC operating point
+    (``solve_dc_operating_point``, gmin/source continuation, ``x0`` warm start);
+    pass ``initial_state`` to prescribe the ``t=0`` node voltages directly (an
+    initial-condition run such as a charged-capacitor discharge), which seeds the
+    charge integrator from that state instead of the DC steady state.
+    """
+
+    if times.ndim != 1 or times.numel() < 2:
+        raise ValueError("times must be a 1-D grid with at least two samples.")
+    if integration not in ("trapezoidal", "backward_euler"):
+        raise ValueError("integration must be 'trapezoidal' or 'backward_euler'.")
+
+    if initial_state is not None:
+        if initial_state.shape != (system.num_unknowns,):
+            raise ValueError(
+                f"initial_state must have shape {(system.num_unknowns,)}, got {tuple(initial_state.shape)}."
+            )
+        x_dc = initial_state.to(device=system.device, dtype=system.dtype).clone()
+    else:
+        x_dc, _ = solve_dc_operating_point(system, source_injection(float(times[0])), config, x0=x0)
+    num_steps = times.numel()
+    voltages = x_dc.new_zeros((num_steps, system.num_unknowns))
+    voltages[0] = x_dc
+    residual_norm = x_dc.new_zeros((num_steps,))
+    iterations = [0]
+    conditions = [float("inf")]
+    breakpoint_steps: list[int] = []
+
+    system.init_transient(x_dc, float(times[1] - times[0]), integration)
+    x = x_dc
+    for step in range(1, num_steps):
+        dt = float(times[step] - times[step - 1])
+        system.dt = dt
+        system.injection = source_injection(float(times[step])).to(device=system.device, dtype=system.dtype)
+        # First step: run backward Euler even when the caller asked for trapezoidal.
+        # Trapezoidal needs the prior capacitive-current history i_cap^0, which is
+        # unknown for a prescribed non-DC initial state (a charged capacitor at
+        # t=0 carries a nonzero displacement current). A BE first step needs no
+        # history, is unconditionally stable, and hands the exact i_cap^1 to the
+        # trapezoidal steps that follow (the standard TR startup), so the run does
+        # not carry the first-step artifact of assuming i_cap^0 = 0.
+        step_integration = "backward_euler" if step == 1 else integration
+        system.integration = step_integration
+        pre_segments = _pwl_segments(system, x)
+        candidate, stats = newton_solve(system, x, config)
+        post_segments = _pwl_segments(system, candidate)
+        crossed = any(bool(torch.any(a != b)) for a, b in zip(pre_segments, post_segments))
+        if crossed and step_integration == "trapezoidal":
+            # Local backward-Euler breakpoint step: recompute this step from the
+            # committed prior state with the BE companion, then restore trapezoidal.
+            system.integration = "backward_euler"
+            candidate, stats = newton_solve(system, x, config)
+            system.integration = integration
+            breakpoint_steps.append(step)
+        x = candidate
+        # Measure the converged KCL residual against the history this step was
+        # solved with, *before* advancing the charge integrator (advancing rewrites
+        # charge_prev to q(x), which would zero the companion and report a false
+        # residual).
+        residual_norm[step] = torch.linalg.vector_norm(system.true_residual(x))
+        system.advance_charge_state(x)
+        voltages[step] = x
+        iterations.append(stats.iterations)
+        conditions.append(stats.condition_estimate)
+
+    return NonlinearTransientResult(
+        times=times,
+        node_voltages=voltages,
+        kcl_residual_norm=residual_norm,
+        iterations=tuple(iterations),
+        conditions=tuple(conditions),
+        breakpoint_steps=tuple(breakpoint_steps),
+        converged=True,
+    )
+
+
+@dataclass(frozen=True)
+class MultistartReport:
+    """Distinct DC operating points found from a seed sweep (multistability audit)."""
+
+    roots: tuple[torch.Tensor, ...]
+    seeds: tuple[torch.Tensor, ...]
+    seed_to_root: tuple[int, ...]
+
+    @property
+    def num_operating_points(self) -> int:
+        return len(self.roots)
+
+
+def multistart_dc(
+    system: NonlinearMNASystem,
+    injection: torch.Tensor,
+    seeds,
+    config: NonlinearSolveConfig,
+    *,
+    dedup_tolerance: float = 1.0e-6,
+) -> MultistartReport:
+    """Run the DC solve from several seeds and report the distinct operating points.
+
+    Devices with an incremental-negative-resistance region (a PWL curve with a
+    negative-slope segment, or a load line crossing an N-shaped curve) admit
+    multiple operating points; a single Newton run only reports the branch its
+    seed falls into. This sweeps seeds and deduplicates the converged roots so a
+    caller can see whether the operating point is unique or multistable.
+    """
+
+    seeds = tuple(seed.to(device=system.device, dtype=system.dtype) for seed in seeds)
+    roots: list[torch.Tensor] = []
+    seed_to_root: list[int] = []
+    for seed in seeds:
+        try:
+            root, stats = solve_dc_operating_point(system, injection, config, x0=seed)
+        except (NonlinearConvergenceError, NonlinearDeviceError):
+            seed_to_root.append(-1)
+            continue
+        if not stats.converged:
+            seed_to_root.append(-1)
+            continue
+        matched = -1
+        for index, existing in enumerate(roots):
+            if float(torch.linalg.vector_norm(root - existing)) <= dedup_tolerance:
+                matched = index
+                break
+        if matched < 0:
+            matched = len(roots)
+            roots.append(root)
+        seed_to_root.append(matched)
+    return MultistartReport(roots=tuple(roots), seeds=seeds, seed_to_root=tuple(seed_to_root))
+
+
 __all__ = [
     "CompiledNonlinearDevice",
+    "MultistartReport",
     "NonlinearConvergenceError",
     "NonlinearDeviceError",
     "NonlinearMNASystem",
     "NonlinearSolveStats",
+    "NonlinearTransientResult",
     "compile_nonlinear_devices",
+    "multistart_dc",
     "newton_solve",
+    "run_nonlinear_transient",
+    "solve_dc_operating_point",
 ]

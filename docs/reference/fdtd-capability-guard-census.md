@@ -13,9 +13,10 @@ network embedding, the thin-wire subgrid conductor series in plan 07 phases
 plan 07 Phase 4 multi-GPU wire forward slice, plus the plan 07 Phase 4
 finite-conductor wire series-impedance slice, the plan 05 nonlinear-device
 Phase 0 slice, the plan 08 gyromagnetic-ferrite Phase 0 slices, and the plan 09
-surface-impedance Phase 0 slices, all merged) contains 166 guards:
+surface-impedance Phase 0 slices, and the plan 05 nonlinear-device N1 standalone
+transient slice, all merged) contains 165 guards:
 
-- 140 capability guards tracked by the non-increasing test budget;
+- 139 capability guards tracked by the non-increasing test budget;
 - 26 contract guards excluded by exact file and message substring.
 
 The single-GPU circuit adjoint provides the circuit replay and transpose
@@ -198,6 +199,21 @@ removed when its runtime slice (nonlinear device-runtime integration, the series
 branch, and the charge-aware transient solve) lands. The `q(v)` / `C(v)` charge
 model is still fully exercised through `CompiledNonlinearDevice.charge`, so the
 device math surface is unaffected.
+
+### Nonlinear-device N1 standalone-transient reconciliation (2026-07-18)
+
+The plan 05 N1 slice implements the charge-aware transient solve, so the third
+guard above is removed and the capability budget drops `140 -> 139`
+("Time-domain ports and lumped elements"). `NonlinearMNASystem` now folds the
+trapezoidal / backward-Euler stored-charge companion into the residual and
+Jacobian (`_charge_companion`, `advance_charge_state`) and `run_nonlinear_transient`
+drives Newton in the transient loop with gmin/source DC continuation
+(`solve_dc_operating_point`) and local backward-Euler PWL-kink breakpoints. The
+diode `junction_capacitance` and `VoltageDependentCapacitor` `q(v)` are therefore
+consumed by the integrator, and the DC operating point correctly treats the
+capacitance as an open circuit. The diode `series_resistance` guard stays: the
+internal-node ohmic branch is still not assembled this round.
+
 ### Gyromagnetic ferrite reconciliation (2026-07-17)
 
 The plan 08 Phase-0 gyromagnetic ferrite slices (0a physics contract, 0b torch
