@@ -1677,6 +1677,15 @@ def compile_surface_impedance_layout(scene):
                 phase="Phase 1",
             )
         conductivity = _surface_metal_conductivity(material)
+        if conductivity is None:
+            impedance = getattr(material, "impedance", None)
+            if impedance is not None and int(getattr(impedance, "port_count", 1)) != 1:
+                _reject_surface_impedance(
+                    "carries a tangential 2x2 surface response; the per-edge ADE steps a "
+                    "scalar impedance, and the cross-polarized 2x2 tangential coupling is "
+                    "a distinct local update.",
+                    phase="Phase 2",
+                )
         metal_index = len(metals)
         metals.append(
             CompiledSurfaceMetal(
