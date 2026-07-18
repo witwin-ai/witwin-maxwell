@@ -1,8 +1,9 @@
 # Thin-Wire Phase 3 Acceptance
 
 Date: 2026-07-16
-Status: accepted
-Maturity: E2
+Status: reopened-for-evidence (2026-07-18 audit; see "Measured evidence grade" section at end)
+Original status (archived): accepted
+Maturity: PEC E2 / lossy E0 (measured; plan-level E3 claim not met — see end section)
 Scope: arbitrary-direction coupling, nonuniform grids, fixed-stencil geometry adjoint, and single-device RF port binding
 
 ## Delivered
@@ -80,3 +81,36 @@ were corrected before acceptance and locked by focused regressions.
 - Single-device execution is accepted here. Multi-GPU value/energy/gradient
   parity depends on the distributed reverse and RF ownership infrastructure
   identified by the Phase 4 dependency contract.
+
+## Measured evidence grade (2026-07-18 audit rollback)
+
+Appended per `docs/assessments/next-functional-audit-2026-07-18.md` §1.5 and §4
+(no-inflation rule). The Phase 3 record above is retained verbatim; this section
+records the **plan-level measured grade and outstanding debt**. Where it
+conflicts with the plan's E3 production claim, this section's grade governs.
+
+- **Measured grade: PEC E2 / lossy E0** (not the plan-level claimed E3). The PEC
+  straight / bent / branched / closed-loop paths (forward + adjoint + multi-GPU
+  forward, energy-consistent recurrence) hold and are credible E2-grade
+  evidence — Phase 3 (PEC, single device) is genuinely E2 in its own scope.
+- **Finite conductivity is only a series-impedance model.** Analytic
+  skin-effect (scaled-Bessel internal impedance) + passive rational ADE passes
+  the 2% analytic gate, but this is a compile-time impedance layer; **the solver
+  does not yet consume lossy current physics.**
+- **All lossy runtime paths fail closed (lossy is E0).** Lossy current
+  recurrence, the `ohmic_loss` monitor, conductivity adjoint and distributed
+  wire reverse all reject with explicit errors; trainable wire under multi-GPU,
+  distributed CPML/Mur, and wire-with-circuit/network mixing also fail closed.
+- **Unevidenced numbers noted.** Some previously cited impedance / far-field /
+  power numbers were honestly flagged UNEVIDENCED above (no registered
+  artifact); confirmed here as not constituting E2 evidence until regenerated.
+- **Evidence required to lift lossy from E0 (convergence route, audit S6; this
+  is Wave C, unfrozen only after S1–S3 all pass):**
+  1. lossy current recurrence (energy-consistent staggering) + `ohmic_loss` +
+     conductivity adjoint landed and consumed by the solver (lossy E0 -> E2);
+  2. independent reference: the external reference backend does not cover
+     subgrid thin wires (audit §3, row 07), so place analytic skin-effect /
+     transmission-line and tag `reference: future-xfdtd`;
+  3. convergence report + a wire benchmark scenario entering RESULTS.
+- Entry gate: this plan is Wave C solver consumption; the lossy runtime is not
+  started before S6 unfreezes (see S0.2 freeze).
