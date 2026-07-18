@@ -885,26 +885,17 @@ def _shift_observer_schedule_for_field(
     entry_indices: torch.Tensor,
     state_field_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Match observer seed weights to the forward Yee sample time."""
+    """Adjoint transpose of the forward observer running-DFT schedule.
 
-    if cos_pack.numel() == 0:
-        return cos_pack, sin_pack
-    offset = 1.0 if state_field_name.startswith("E") else 0.5
-    frequencies = torch.tensor(
-        [
-            float(solver._observer_spectral_entries[int(index)]["frequency"])
-            for index in entry_indices.detach().cpu().tolist()
-        ],
-        device=cos_pack.device,
-        dtype=cos_pack.dtype,
-    )
-    phase = offset * 2.0 * math.pi * frequencies * float(solver.dt)
-    phase_cos = torch.cos(phase)[:, None]
-    phase_sin = torch.sin(phase)[:, None]
-    return (
-        cos_pack * phase_cos - sin_pack * phase_sin,
-        sin_pack * phase_cos + cos_pack * phase_sin,
-    )
+    The forward pass accumulates both electric and magnetic observer samples at
+    the plain running-DFT step phase (the same phase used by the full-field DFT
+    accumulator), so the exact adjoint transpose applies no per-field time
+    shift.  The signature is preserved so the seed builder and the stagger
+    regression test can pin this identity against a re-introduced offset.
+    """
+
+    del solver, entry_indices, state_field_name
+    return cos_pack, sin_pack
 
 
 def _apply_dense_seeds_native(_cuda_backend, adj_state, seed_runtime: _SeedRuntime, step_index):

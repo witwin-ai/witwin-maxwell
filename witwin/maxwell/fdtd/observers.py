@@ -803,16 +803,6 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
             entry["source_dft_imag"] += source_signal * weighted_sin
 
         for group, local_index in solver._observer_point_groups_by_frequency[global_index]:
-            # The stepping tail observes E at (n + 1) dt and H at
-            # (n + 1/2) dt.  Keep both on their physical Yee time locations;
-            # using the common n dt phase introduces a frequency-dependent
-            # E/H phase error in Poynting flux and equivalent currents.
-            field_offset = 1.0 if group["field_name"].startswith("E") else 0.5
-            phase_offset = field_offset * 2.0 * np.pi * entry["frequency"] * solver.dt
-            offset_cos = np.cos(phase_offset)
-            offset_sin = np.sin(phase_offset)
-            group_weighted_cos = weighted_cos * offset_cos - weighted_sin * offset_sin
-            group_weighted_sin = weighted_sin * offset_cos + weighted_cos * offset_sin
             solver.fdtd_module.accumulatePointObservers3D(
                 field=getattr(solver, group["field_name"]),
                 pointI=group["point_i"],
@@ -820,8 +810,8 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                 pointK=group["point_k"],
                 realAccum=group["real"][local_index],
                 imagAccum=group["imag"][local_index],
-                weightedCos=group_weighted_cos,
-                weightedSin=group_weighted_sin,
+                weightedCos=weighted_cos,
+                weightedSin=weighted_sin,
             ).launchRaw()
             if has_complex_fields(solver):
                 solver.fdtd_module.accumulatePointObservers3D(
@@ -831,25 +821,19 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     pointK=group["point_k"],
                     realAccum=group["aux_real"][local_index],
                     imagAccum=group["aux_imag"][local_index],
-                    weightedCos=group_weighted_cos,
-                    weightedSin=group_weighted_sin,
+                    weightedCos=weighted_cos,
+                    weightedSin=weighted_sin,
                 ).launchRaw()
 
         for group, local_index in solver._observer_plane_groups_by_frequency[global_index]:
-            field_offset = 1.0 if group["field_name"].startswith("E") else 0.5
-            phase_offset = field_offset * 2.0 * np.pi * entry["frequency"] * solver.dt
-            offset_cos = np.cos(phase_offset)
-            offset_sin = np.sin(phase_offset)
-            group_weighted_cos = weighted_cos * offset_cos - weighted_sin * offset_sin
-            group_weighted_sin = weighted_sin * offset_cos + weighted_cos * offset_sin
             solver.fdtd_module.accumulatePlaneObserver3D(
                 field=getattr(solver, group["field_name"]),
                 planeRealAccum=group["real"][local_index],
                 planeImagAccum=group["imag"][local_index],
                 axisCode=group["axis_code"],
                 planeIndex=group["plane_index"],
-                weightedCos=group_weighted_cos,
-                weightedSin=group_weighted_sin,
+                weightedCos=weighted_cos,
+                weightedSin=weighted_sin,
             ).launchRaw()
             if has_complex_fields(solver):
                 solver.fdtd_module.accumulatePlaneObserver3D(
@@ -858,8 +842,8 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     planeImagAccum=group["aux_imag"][local_index],
                     axisCode=group["axis_code"],
                     planeIndex=group["plane_index"],
-                    weightedCos=group_weighted_cos,
-                    weightedSin=group_weighted_sin,
+                    weightedCos=weighted_cos,
+                    weightedSin=weighted_sin,
                 ).launchRaw()
 
         entry["window_normalization"] += window_weight

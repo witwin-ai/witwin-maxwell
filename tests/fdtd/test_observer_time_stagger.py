@@ -30,14 +30,14 @@ class _Recorder:
         return _Launch()
 
 
-def test_spectral_observers_use_physical_yee_time_locations():
+def test_spectral_observers_share_the_running_dft_step_phase():
     recorder = _Recorder()
     frequency = 2.0
     dt = 0.025
     entry = {
         "frequency": frequency,
         "start_step": 0,
-        "end_step": 1,
+        "end_step": 2,
         "window_normalization": 0.0,
         "sample_count": 0,
         "phase_cos": 1.0,
@@ -81,24 +81,31 @@ def test_spectral_observers_use_physical_yee_time_locations():
     )
 
     accumulate_observers(solver, 0)
+    recorder.calls.clear()
+    accumulate_observers(solver, 1)
 
     electric, magnetic = recorder.calls
-    electric_phase = 2.0 * math.pi * frequency * dt
-    magnetic_phase = 0.5 * electric_phase
-    assert electric["weightedCos"] == pytest.approx(math.cos(electric_phase))
-    assert electric["weightedSin"] == pytest.approx(math.sin(electric_phase))
-    assert magnetic["weightedCos"] == pytest.approx(math.cos(magnetic_phase))
-    assert magnetic["weightedSin"] == pytest.approx(math.sin(magnetic_phase))
-    assert entry["sample_count"] == 1
+    # Plain running-DFT convention: electric and magnetic observers share the
+    # step-index phase (2*pi*f*n*dt) with no per-field Yee half-step offset, so
+    # the point/plane spectral observers stay consistent with the full-field DFT
+    # accumulator.  A re-introduced E(+dt)/H(+dt/2) offset would rotate these.
+    step_phase = 2.0 * math.pi * frequency * (1.0 * dt)
+    assert electric["weightedCos"] == pytest.approx(math.cos(step_phase))
+    assert electric["weightedSin"] == pytest.approx(math.sin(step_phase))
+    assert magnetic["weightedCos"] == pytest.approx(math.cos(step_phase))
+    assert magnetic["weightedSin"] == pytest.approx(math.sin(step_phase))
+    assert entry["sample_count"] == 2
 
 
 @pytest.mark.parametrize(
     ("observer_kind", "field_name", "time_offset"),
     (
-        ("point", "Ex", 1.0),
-        ("point", "Hy", 0.5),
-        ("plane", "Ez", 1.0),
-        ("plane", "Hx", 0.5),
+        # Plain running-DFT: electric and magnetic observers both sample at the
+        # step-index phase (offset 0), matching the full-field DFT accumulator.
+        ("point", "Ex", 0.0),
+        ("point", "Hy", 0.0),
+        ("plane", "Ez", 0.0),
+        ("plane", "Hx", 0.0),
     ),
 )
 def test_observer_adjoint_schedule_is_exact_transpose_of_forward_yee_dft(
