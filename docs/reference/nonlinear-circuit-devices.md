@@ -66,14 +66,21 @@ from the nonlinear electromagnetic *material* constitutive path.
   non-uniform time grid, with a backward-Euler first step (TR startup) that avoids
   the trapezoidal `i_cap^0 = 0` first-step artifact for prescribed initial
   conditions, per-step KCL diagnostics, and an optional `initial_state` for
-  initial-condition runs.
+  initial-condition runs. Under `failure='record_and_stop'` a non-convergent
+  step (or DC start) truncates the trajectory: the unconverged iterate is neither
+  committed as a sample nor advanced into the charge history, `converged=False`,
+  and `stopped_step` records the failing step index (`0` for the DC start). The
+  default `failure='raise'` path never returns an unconverged iterate.
 * `solve_dc_operating_point`: DC operating point with a geometric gmin
   continuation ladder ending exactly at `gmin=0` (no residual artificial
   conductance) and a warm-started source path.
 * PWL-kink breakpoints: a step in which a `PiecewiseLinearIV` device crosses a
   knot is re-solved with a local backward-Euler companion (the standalone analogue
   of `LinearMNASystem._local_backward_euler_steps`) so the trapezoidal reactive
-  companion does not ring on the conduction-slope kink.
+  companion does not ring on the conduction-slope kink. The breakpoint step's KCL
+  residual is measured and its charge history advanced under the same backward-Euler
+  companion it was solved with; the requested companion is restored only after the
+  step is committed.
 * `multistart_dc` + `MultistartReport`: a seed sweep that deduplicates the
   converged DC operating points, reporting uniqueness vs multistability on an
   N-shaped negative-differential-resistance device.
@@ -93,7 +100,11 @@ from the nonlinear electromagnetic *material* constitutive path.
   convention.
 * Multistart reports `>= 2` distinct operating points on the N-shaped device and
   exactly one in the monostable bias; PWL knot crossing triggers a backward-Euler
-  breakpoint step.
+  breakpoint step whose per-step KCL residual clears the residual tolerance (the
+  breakpoint step is measured under its own BE companion).
+* `record_and_stop` truncates the transient at the first non-convergent step (or
+  at the DC start): `converged=False`, `stopped_step` set, and no unconverged
+  iterate is committed to the trajectory or the charge history.
 
 ## Frozen AcceptanceBudget
 

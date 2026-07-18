@@ -692,7 +692,16 @@ def _pwl_segments(system: NonlinearMNASystem, x: torch.Tensor) -> tuple[torch.Te
 
 @dataclass(frozen=True)
 class NonlinearTransientResult:
-    """Standalone nonlinear transient trajectory and per-step Newton diagnostics."""
+    """Standalone nonlinear transient trajectory and per-step Newton diagnostics.
+
+    ``converged`` is ``True`` only when the DC start and every committed step
+    converged. Under ``NonlinearSolveConfig(failure='record_and_stop')`` a
+    non-convergent step truncates the run: the trajectory is populated up to and
+    including the last converged step, ``converged`` is ``False``, and
+    ``stopped_step`` records the index of the step that failed to converge (or
+    ``0`` when the DC operating point itself did not converge). ``stopped_step``
+    is ``None`` on a fully converged run.
+    """
 
     times: torch.Tensor
     node_voltages: torch.Tensor
@@ -701,6 +710,7 @@ class NonlinearTransientResult:
     conditions: tuple[float, ...]
     breakpoint_steps: tuple[int, ...]
     converged: bool
+    stopped_step: int | None = None
 
 
 def run_nonlinear_transient(
@@ -736,6 +746,7 @@ def run_nonlinear_transient(
     if integration not in ("trapezoidal", "backward_euler"):
         raise ValueError("integration must be 'trapezoidal' or 'backward_euler'.")
 
+    dc_converged = True
     if initial_state is not None:
         if initial_state.shape != (system.num_unknowns,):
             raise ValueError(
@@ -743,7 +754,12 @@ def run_nonlinear_transient(
             )
         x_dc = initial_state.to(device=system.device, dtype=system.dtype).clone()
     else:
-        x_dc, _ = solve_dc_operating_point(system, source_injection(float(times[0])), config, x0=x0)
+        x_dc, dc_stats = solve_dc_operating_point(
+            system, source_injection(float(times[0])), config, x0=x0
+        )
+        # An unconverged DC start (only reachable under record_and_stop; the raise
+        # path never returns) must not silently seed the whole transient.
+        dc_converged = bool(dc_stats.converged)
     num_steps = times.numel()
     voltages = x_dc.new_zeros((num_steps, system.num_unknowns))
     voltages[0] = x_dc
@@ -752,8 +768,23 @@ def run_nonlinear_transient(
     conditions = [float("inf")]
     breakpoint_steps: list[int] = []
 
+    if not dc_converged:
+        # DC operating point did not converge: the t=0 sample is invalid, so the
+        # trajectory is truncated at step 0 before any transient step is taken.
+        return NonlinearTransientResult(
+            times=times,
+            node_voltages=voltages,
+            kcl_residual_norm=residual_norm,
+            iterations=tuple(iterations),
+            conditions=tuple(conditions),
+            breakpoint_steps=tuple(breakpoint_steps),
+            converged=False,
+            stopped_step=0,
+        )
+
     system.init_transient(x_dc, float(times[1] - times[0]), integration)
     x = x_dc
+    stopped_step: int | None = None
     for step in range(1, num_steps):
         dt = float(times[step] - times[step - 1])
         system.dt = dt
@@ -771,20 +802,30 @@ def run_nonlinear_transient(
         candidate, stats = newton_solve(system, x, config)
         post_segments = _pwl_segments(system, candidate)
         crossed = any(bool(torch.any(a != b)) for a, b in zip(pre_segments, post_segments))
-        if crossed and step_integration == "trapezoidal":
+        breakpoint_step = crossed and step_integration == "trapezoidal"
+        if breakpoint_step:
             # Local backward-Euler breakpoint step: recompute this step from the
-            # committed prior state with the BE companion, then restore trapezoidal.
+            # committed prior state with the BE companion so the trapezoidal
+            # reactive companion does not ring on the conduction-slope kink.
             system.integration = "backward_euler"
             candidate, stats = newton_solve(system, x, config)
-            system.integration = integration
             breakpoint_steps.append(step)
+        # A non-convergent step (only reachable under record_and_stop; the raise
+        # path never returns) must not be committed as a valid sample nor advance
+        # the charge history. Truncate the trajectory at the prior converged step.
+        if not stats.converged:
+            stopped_step = step
+            break
         x = candidate
-        # Measure the converged KCL residual against the history this step was
-        # solved with, *before* advancing the charge integrator (advancing rewrites
-        # charge_prev to q(x), which would zero the companion and report a false
-        # residual).
+        # Measure the converged KCL residual and advance the charge integrator
+        # under the SAME companion the step was solved with (backward Euler for a
+        # breakpoint step), *before* advancing rewrites charge_prev to q(x) (which
+        # would zero the companion and report a false residual). Restore the
+        # requested companion only after the breakpoint step is committed.
         residual_norm[step] = torch.linalg.vector_norm(system.true_residual(x))
         system.advance_charge_state(x)
+        if breakpoint_step:
+            system.integration = integration
         voltages[step] = x
         iterations.append(stats.iterations)
         conditions.append(stats.condition_estimate)
@@ -796,7 +837,8 @@ def run_nonlinear_transient(
         iterations=tuple(iterations),
         conditions=tuple(conditions),
         breakpoint_steps=tuple(breakpoint_steps),
-        converged=True,
+        converged=stopped_step is None,
+        stopped_step=stopped_step,
     )
 
 
@@ -836,7 +878,11 @@ def multistart_dc(
     for seed in seeds:
         try:
             root, stats = solve_dc_operating_point(system, injection, config, x0=seed)
-        except (NonlinearConvergenceError, NonlinearDeviceError):
+        except NonlinearConvergenceError:
+            # Benign: this seed's Newton run did not settle on a root. A
+            # NonlinearDeviceError (a non-finite device evaluation) is a
+            # device-model bug, not a missed operating point, so it is left to
+            # propagate rather than being masked as seed_to_root=-1.
             seed_to_root.append(-1)
             continue
         if not stats.converged:

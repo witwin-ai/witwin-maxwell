@@ -258,6 +258,75 @@ def test_pwl_knot_crossing_triggers_backward_euler_breakpoint():
     def ramp(t):
         return torch.tensor([(1.5 * (t / 1.0e-6)) / resistance], dtype=torch.float64)
 
-    result = run_nonlinear_transient(system, times, ramp, mw.NonlinearSolveConfig(), integration="trapezoidal")
+    config = mw.NonlinearSolveConfig()
+    result = run_nonlinear_transient(system, times, ramp, config, integration="trapezoidal")
     assert len(result.breakpoint_steps) >= 1
     assert torch.isfinite(result.node_voltages).all()
+    # Falsification gate: a breakpoint step must be measured (and its charge
+    # history advanced) under the SAME backward-Euler companion it was solved
+    # with. If the trapezoidal companion is restored before the residual/advance,
+    # the KCL residual at exactly the breakpoint steps blows up to ~1e-5 (12+
+    # orders above tolerance). Assert every step -- breakpoints included -- clears
+    # the residual gate for the ramp's current scale.
+    scale = 1.5 / resistance
+    tolerance = config.relative_tolerance * scale + config.absolute_tolerance
+    for step in result.breakpoint_steps:
+        assert float(result.kcl_residual_norm[step]) <= tolerance, (
+            step,
+            float(result.kcl_residual_norm[step]),
+        )
+    assert float(result.kcl_residual_norm.max()) <= tolerance
+    assert result.converged
+    assert result.stopped_step is None
+
+
+# --------------------------------------------------------------------------- #
+# Gate: record_and_stop truncates the trajectory instead of committing garbage.
+# --------------------------------------------------------------------------- #
+def test_record_and_stop_transient_truncates_and_flags_unconverged():
+    # A hard-forward diode with max_iterations=1 cannot converge a transient step.
+    # A prescribed initial_state bypasses the DC solve (so the run reaches the
+    # transient loop), then step 1 fails. Under record_and_stop the driver must
+    # NOT commit the unconverged iterate to the trajectory or the charge history,
+    # must report converged=False, and must record the step index it stopped on --
+    # not affirm converged=True over a garbage (~1e119) iterate.
+    system, _ = _diode_divider(8.0, 5.0, 1e-14)
+    config = mw.NonlinearSolveConfig(max_iterations=1, failure="record_and_stop")
+    times = torch.linspace(0.0, 1.0e-9, 5, dtype=torch.float64)
+    injection = system.injection.clone()
+    result = run_nonlinear_transient(
+        system,
+        times,
+        lambda t: injection.clone(),
+        config,
+        integration="trapezoidal",
+        initial_state=torch.zeros(1, dtype=torch.float64),
+    )
+    assert result.converged is False
+    assert result.stopped_step is not None and result.stopped_step >= 1
+    # No unconverged iterate leaked into the trajectory or the residual record:
+    # every committed sample is finite and no residual exceeds the DC start's.
+    assert torch.isfinite(result.node_voltages).all()
+    # Steps at and beyond the stop are never written (left at their zero init).
+    stopped = result.stopped_step
+    assert torch.all(result.node_voltages[stopped:] == 0.0)
+    assert torch.all(result.kcl_residual_norm[stopped:] == 0.0)
+
+
+# --------------------------------------------------------------------------- #
+# Gate: an unconverged DC start truncates the transient at step 0.
+# --------------------------------------------------------------------------- #
+def test_record_and_stop_unconverged_dc_start_truncates_at_step_zero():
+    system, _ = _diode_divider(8.0, 5.0, 1e-14)
+    # max_iterations=1 with no gmin continuation cannot converge the cold DC start.
+    config = mw.NonlinearSolveConfig(
+        max_iterations=1, failure="record_and_stop", gmin_start=0.0, gmin_steps=0
+    )
+    times = torch.linspace(0.0, 1.0e-9, 5, dtype=torch.float64)
+    injection = system.injection.clone()
+    result = run_nonlinear_transient(
+        system, times, lambda t: injection.clone(), config, integration="trapezoidal"
+    )
+    assert result.converged is False
+    assert result.stopped_step == 0
+    assert torch.all(result.kcl_residual_norm == 0.0)

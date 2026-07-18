@@ -5,14 +5,22 @@ change) to regenerate ``goldens/rectifier_goldens.pt``:
 
     conda run -n maxwell python tests/rf/nonlinear/_generate_goldens.py
 
-The reference is an *independent* integration of the same circuit: a backward-Euler
-run at ``REFERENCE_SUBDIVISION`` x finer time step than the graded coarse run,
-linearly interpolated back onto the coarse grid. The graded gate runs the coarse
-solver with the trapezoidal companion and asserts normalized-RMS agreement < 1%,
-so a match cross-validates the transient integrator, the charge companion, and the
-Newton solve against a finer, differently-integrated solution -- not against the
-graded run's own arithmetic. Provenance (parameters, dt, integration, torch/commit)
-is stored alongside the arrays.
+The reference is a *differently-integrated* solution of the same circuit: a
+backward-Euler run at ``REFERENCE_SUBDIVISION`` x finer time step than the graded
+coarse run, linearly interpolated back onto the coarse grid. The graded gate runs
+the coarse solver with the trapezoidal companion and asserts normalized-RMS
+agreement < 1%, so a match cross-validates the transient integrator (TR vs a finer
+BE reference), the charge companion, and the Newton solve against a finer solution
+rather than the graded run's own arithmetic.
+
+Known limitation: the reference is NOT code-independent. It is produced by the
+same ``run_nonlinear_transient``/``newton_solve``/device-model code under test;
+only the step size and the TR-vs-BE companion differ. A shared systematic error in
+q(v), conduction, or terminal mapping would cancel across both runs and pass this
+gate. The code-independent discriminators are the analytic Shockley DC gate
+(< 1e-5) and the analytic RC-decay gate (< 1e-4) in ``test_nonlinear_transient``;
+this golden gate adds integration-convergence coverage on top of those. Provenance
+(parameters, dt, integration, torch/commit) is stored alongside the arrays.
 """
 
 from __future__ import annotations
