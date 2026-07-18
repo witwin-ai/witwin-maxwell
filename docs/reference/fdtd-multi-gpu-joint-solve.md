@@ -476,11 +476,11 @@ only for a trainable `Box` `MaterialRegion` density on the pure real standard pa
 point-monitor/full-field-DFT objectives (1-vs-2-GPU objective/gradient parity and
 interface finite differences; timing/speedup of the reverse pass is not measured here).
 The measurements and tests above do not qualify
-end-to-end NCCL, multi-process or multi-node execution, distributed CPML-trainable
-adjoint or
-tiled-monitor adjoint seed scatter,
-peer-aware CUDA Graph capture, advanced plane/beam/mode/TFSF sources, ports, x-periodic
+multi-node execution, the NCCL adjoint or NCCL monitor-payload gather, distributed
+CPML-trainable adjoint or tiled-monitor adjoint seed scatter, peer-aware CUDA Graph
+capture, advanced plane/beam/mode/TFSF sources, ports on the NCCL path, x-periodic
 or Bloch decomposition, x symmetry, nonlinear media, full off-diagonal media, SIBC, or
-any other guarded feature. The rank-local NCCL transport primitive is separately
-conformance-tested (two-rank `torchrun` halo round-trip), but no end-to-end NCCL
-solve is qualified because the shard-engine coordinator is not landed.
+any other guarded feature. The end-to-end one-process-per-GPU NCCL FORWARD solve IS
+qualified on this host at the P2P tolerances (two-rank `torchrun`, seam-crossing
+precondition, rank-death failure matrix; see the transport section above); every
+unimplemented NCCL adjacency fails closed with a pinned test.
