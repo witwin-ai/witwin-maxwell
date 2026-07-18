@@ -1,18 +1,28 @@
-"""RF port wave-level validation scenes.
+"""RF port validation scenes.
 
-Every builder here returns a standard ``Scene`` that is driven by a *real* FDTD
-run through the public ``Scene -> Simulation -> Result`` path. The scenes exist
-so that scattering/impedance quantities extracted from the FDTD fields can be
-compared against analytic transmission-line / waveguide references (the
-first-line reference per the S-reference-solver policy). No scene here relies on
-an algebraic identity, a symmetric fixture, or a post-processing shortcut for its
-exit gate; those classifications live with the wave-level gate tests under
-``tests/rf/wave_validation/``.
+Every builder returns a standard ``Scene``. The validation runner
+(``benchmark/rf_validation.py``) drives each scene through the public
+``Scene -> Simulation -> Result`` path and compares against analytic
+transmission-line / waveguide references (first-line per the S-reference-solver
+policy).
 
-The builders are intentionally light: they construct geometry and ports only.
-Excitation, run length, and spectral sampling are chosen by the validation
-runner (``benchmark/rf_validation.py``) so that a single scene can be reused at
-several grid/dt settings for the three-tier convergence report.
+Honest status (audit S1, 2026-07-18) -- these are NOT six passing wave-level
+scenes:
+
+* ``rectangular_waveguide`` -- reaches a wave-level FDTD S-matrix; beta(omega) is
+  de-embedded from the fields (NRW) with passivity/reciprocity convergence.
+* ``coax_thru`` -- runs a real FDTD two-port but the TEM WavePort does not match
+  the round coax (|S11| ~ 1); recorded as a wave-level FAIL, modal Z0 supporting
+  only.
+* ``microstrip_two_port`` / ``differential_pair`` -- BLOCKED: WaveModeSpec('tem')
+  is categorically inapplicable to their inhomogeneous (substrate + air)
+  cross-sections (a hybrid mode solve is required).
+* ``series_parallel_rlc`` -- lumped resonance is parasitic-dominated; open gap.
+* ``lumped_open_short_match`` -- broken bench (feed decoupled from load); FAIL.
+
+The builders construct geometry and ports only; excitation, run length, and
+spectral sampling are chosen by the runner so a scene can be reused across grid
+tiers for the convergence report.
 """
 
 from __future__ import annotations

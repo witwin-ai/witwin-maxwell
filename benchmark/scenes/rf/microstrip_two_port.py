@@ -1,13 +1,17 @@
 """Microstrip line two-port scene (quasi-TEM).
 
-A metal strip over a grounded dielectric substrate is driven through two
-``WavePort`` quasi-TEM mode ports. The extracted characteristic impedance and
-effective permittivity are compared against the Hammerstad-Jensen closed-form
-microstrip references. Because microstrip is quasi-TEM (fringing fields split
-between substrate and air), the analytic reference itself carries a few-percent
-model uncertainty; the benchmark records the measured value against Hammerstad
-with that modelling gap stated rather than asserting a tighter bound than the
-quasi-static formula supports.
+A metal strip over a grounded dielectric substrate. The Hammerstad-Jensen
+closed-form ``Z0`` / ``eps_eff`` are the analytic references.
+
+BLOCKED (audit S1, correct root cause): the microstrip cross-section is
+inhomogeneous (eps=4.4 substrate + air), so ``WaveModeSpec('tem')`` is
+categorically inapplicable -- the TEM electrostatic normalization requires a
+uniformly filled cross-section and raises ``NotImplementedError``
+(``witwin/maxwell/fdtd/excitation/modes.py:1846-1849``). A hybrid full-vector mode
+solve is required before any wave-level extraction. This is NOT a half-grid
+snapping issue (a secondary contour-snapping error also appears, but the primary
+blocker is the TEM path). The validation runner records this scene as ``blocked``
+with ``reference: pending-generation``.
 """
 
 from __future__ import annotations
