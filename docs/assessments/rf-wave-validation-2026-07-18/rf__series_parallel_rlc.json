@@ -1,30 +1,35 @@
 {
   "name": "rf/series_parallel_rlc",
   "description": "Series RLC one-port: FDTD resonance peak vs analytic f0 = 1/(2pi sqrt(LC)).",
-  "gate_class": "open-gap (wave-level pending)",
+  "gate_class": "wave-level",
+  "status": "gap",
   "reference": "analytic-RLC (f0=7.118 GHz, Q=2.80)",
   "tidy3d_reference": "n/a (lumped-circuit resonance; analytic first-line reference)",
   "target": "f0 within 2% (plan-01 section 10)",
+  "tolerance_basis": "",
+  "falsification": "A valid RLC-resonance bench must track C: doubling C should lower the peak by sqrt(2). Measured ratio 1.030 vs sqrt(2)=1.414 shows it does NOT -- the peak is parasitic, so this gate correctly stays red.",
   "metrics": [
     {
       "quantity": "f0",
       "measured": 7901143009.953025,
       "reference": 7117625434.17177,
       "rel_error": 0.11008131616754956,
-      "unit": "Hz"
+      "unit": "Hz",
+      "class": "wave-level"
     },
     {
       "quantity": "C-tracking ratio f0(C)/f0(2C)",
       "measured": 1.0302050134176688,
       "reference": 1.4142135623730951,
-      "rel_error": 0.27153504899998826
+      "rel_error": 0.27153504899998826,
+      "class": "wave-level"
     }
   ],
+  "supporting": [],
   "convergence": [],
   "conservation": {},
-  "status": "gap",
   "notes": [
-    "FDTD load-port current peak at 7.901 GHz (C=1pF) vs analytic 7.118 GHz, and 7.669 GHz at C=2pF. The C(1)->C(2) peak ratio is 1.030 vs the ideal sqrt(2)=1.414: the lumped two-port bench is parasitic-dominated and does NOT isolate the RLC resonance. Analytic f0 binds as the first-line reference; the wave-level RLC resonance from a propagating transmission structure is recorded as an open gap (see tests/rf/wave_validation/test_rlc_resonance_wave_level.py) rather than a parasitic peak that would pass by coincidence."
+    "FDTD load-port current peak at 7.901 GHz (C=1pF) vs analytic 7.118 GHz, and 7.669 GHz at C=2pF. The C(1)->C(2) peak ratio is 1.030 vs ideal sqrt(2)=1.414: the lumped two-port bench is parasitic-dominated and does NOT isolate the RLC resonance. Analytic f0 binds as the first-line reference; the wave-level RLC resonance from a propagating transmission structure is an OPEN GAP (tests/rf/wave_validation/test_rlc_resonance_wave_level.py, xfail strict)."
   ],
-  "updated_at": "2026-07-18T22:11:23+00:00"
+  "updated_at": "2026-07-18T23:45:21+00:00"
 }

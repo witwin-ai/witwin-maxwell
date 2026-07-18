@@ -2,37 +2,55 @@
   "name": "rf/lumped_open_short_match",
   "description": "Lumped one-port open/short/match: feed S11 vs analytic Gamma over a real pulse.",
   "gate_class": "wave-level",
+  "status": "fail",
   "reference": "analytic-Gamma ((R-Z0)/(R+Z0): matched 0, short -1, open +1)",
   "tidy3d_reference": "pending-generation",
-  "target": "matched |S11| < -30 dB (plan-01 section 10)",
+  "target": "matched |S11| < -30 dB, and Gamma must DISCRIMINATE the three loads",
+  "tolerance_basis": "",
+  "falsification": "A working one-port calibration bench must DISCRIMINATE the loads: |Gamma_matched| ~ 0, |Gamma_short| ~ |Gamma_open| ~ 1. Measured spread across the three loads is 0.0004 (all ~0.997 at the same phase ~13 deg) -- the gate correctly stays red.",
   "metrics": [
     {
       "case": "matched",
       "gamma_measured_mag": 0.9967109571093362,
       "gamma_measured_deg": 12.932204791227655,
       "gamma_reference_mag": 0.0,
-      "s11_db": -0.02861534795532403
+      "s11_db": -0.02861534795532403,
+      "class": "wave-level"
     },
     {
       "case": "short",
       "gamma_measured_mag": 0.9968130127612472,
       "gamma_measured_deg": 12.930522948248186,
       "gamma_reference_mag": 0.9996000799840032,
-      "s11_db": -0.027726024181332198
+      "s11_db": -0.027726024181332198,
+      "class": "wave-level"
     },
     {
       "case": "open",
       "gamma_measured_mag": 0.9964391531349978,
       "gamma_measured_deg": 12.880601788103498,
       "gamma_reference_mag": 0.99990000499975,
-      "s11_db": -0.030984320895988786
+      "s11_db": -0.030984320895988786,
+      "class": "wave-level"
     }
   ],
+  "supporting": [],
   "convergence": [],
-  "conservation": {},
-  "status": "gap",
+  "conservation": {
+    "gamma_mag": {
+      "matched": 0.9967109571093362,
+      "short": 0.9968130127612472,
+      "open": 0.9964391531349978
+    },
+    "gamma_deg": {
+      "matched": 12.932204791227655,
+      "short": 12.930522948248186,
+      "open": 12.880601788103498
+    },
+    "gamma_mag_spread_across_loads": 0.0003738596262494731
+  },
   "notes": [
-    "Matched feed |S11| = -0.0 dB from the FDTD fields over a full pulse window. The lumped two-port bench couples the feed and load in the near field, so the reflection floor is above the -30 dB plan-01 target; the measured floor is recorded with the gap stated. A propagating matched-load gate is exercised in tests/rf/wave_validation on a transmission structure."
+    "BROKEN BENCH (root cause): matched/short/open all read |Gamma|~0.997 at the SAME phase ~13 deg. The feed sees near-total reflection independent of the load, i.e. the feed port is not coupled to the load port -- two lumped ports two cells apart in a tiny PML box radiate into the boundary rather than forming a transmission path, so the load never affects the feed reflection. This is not a '-30 dB floor'; the calibration standard is not being sensed at all. A propagating feed line terminated by the load is required. Recorded as a wave-level FAIL."
   ],
-  "updated_at": "2026-07-18T22:11:33+00:00"
+  "updated_at": "2026-07-18T23:45:28+00:00"
 }

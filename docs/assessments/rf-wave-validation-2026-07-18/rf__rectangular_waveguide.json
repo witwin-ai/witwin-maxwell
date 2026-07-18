@@ -1,72 +1,104 @@
 {
   "name": "rf/rectangular_waveguide",
-  "description": "Hollow TE10 guide two-port: cutoff / beta / Z_TE and S-matrix passivity.",
+  "description": "Hollow TE10 guide two-port: FDTD beta(omega) from the S-matrix vs analytic dispersion, with passivity/reciprocity convergence.",
   "gate_class": "wave-level",
-  "reference": "analytic-TE10 (fc=c/2a; beta=sqrt(k0^2-(pi/a)^2); Z=eta0 k0/beta)",
+  "status": "gap",
+  "reference": "analytic-TE10 (fc=c/2a; beta=sqrt(k0^2-(pi/a)^2))",
   "tidy3d_reference": "pending-generation",
-  "target": "beta / Z_TE within 2% (plan-01 section 10)",
+  "target": "FDTD beta within the Yee numerical-dispersion floor over the band",
+  "tolerance_basis": "Yee numerical-dispersion floor at dx=0.02 (Courant dt=dx/(c*sqrt3)): |beta_numeric - beta_continuous|/beta_continuous over the band = 0.095%. Derived from the 3D Yee dispersion relation, not tuned to the measurement.",
+  "falsification": "Perturbing the reference-plane separation L by +10% shifts the extracted beta by ~10% (>> the 0.09% floor), and detuning the matched load to a PEC short spikes |S11| toward unity (tests/rf/wave_validation/test_matched_s11_wave_level.py). The gate is falsifiable and load-discriminating.",
   "metrics": [
     {
       "quantity": "fc_cutoff",
       "reference": 249827048.33333334,
       "unit": "Hz",
-      "note": "TE10 cutoff"
+      "class": "wave-level",
+      "note": "TE10 cutoff; band is 1.2 fc .. 2.2 fc (all propagating)"
     },
     {
-      "quantity": "beta",
+      "quantity": "beta_median_rel_error (NRW de-embedded)",
+      "measured": 0.015943547177800922,
+      "reference": 0.0009486878787511466,
+      "rel_error": 0.015943547177800922,
+      "unit": "fraction",
+      "class": "wave-level"
+    }
+  ],
+  "supporting": [
+    {
+      "quantity": "beta (modal eigensolve)",
       "measured": 7.842891082189595,
       "reference": 7.836508905692665,
       "rel_error": 0.0008144157779612929,
-      "unit": "rad/m"
-    },
-    {
-      "quantity": "Z_TE10",
-      "measured": 452.71565296426786,
-      "reference": 453.0843517363509,
-      "rel_error": 0.0008137530476832923,
-      "unit": "ohm"
+      "class": "modal-eigensolve",
+      "note": "supporting only; NOT the wave-level exit gate"
     }
   ],
   "convergence": [
     {
+      "dx": 0.05,
+      "beta_rel_error_median": 0.00388463601246088,
+      "beta_rel_error_max": 0.033978248022368825,
+      "yee_dispersion_floor": 0.006073536337647488,
+      "max_singular_value_midband": 1.1642307772196272,
+      "max_singular_value_bandmax": 1.1907569230443684,
+      "reciprocity_midband": 0.02744206035074492,
+      "reciprocity_bandmax": 0.07092819602123192,
+      "s11_abs_min": 0.16420695293709453,
+      "s11_abs_max": 0.48514981977049954
+    },
+    {
       "dx": 0.025,
-      "beta_measured": 9.424777960769408,
-      "beta_analytic": 7.836508905692665,
-      "beta_rel_error": 0.20267558860591334,
-      "z_te_measured": 376.73031366685234,
-      "z_te_analytic": 453.0843517363509,
-      "z_te_rel_error": 0.16852058071943496
+      "beta_rel_error_median": 0.007882221253388208,
+      "beta_rel_error_max": 0.06462972539746206,
+      "yee_dispersion_floor": 0.001486089253990774,
+      "max_singular_value_midband": 1.114982398684552,
+      "max_singular_value_bandmax": 1.1831941996211137,
+      "reciprocity_midband": 0.029668770054645754,
+      "reciprocity_bandmax": 0.07061506557716038,
+      "s11_abs_min": 0.22695139239736867,
+      "s11_abs_max": 0.48970511968935987
     },
     {
       "dx": 0.02,
-      "beta_measured": 7.842891082189595,
-      "beta_analytic": 7.836508905692665,
-      "beta_rel_error": 0.0008144157779612929,
-      "z_te_measured": 452.71565296426786,
-      "z_te_analytic": 453.0843517363509,
-      "z_te_rel_error": 0.0008137530476832923
-    },
-    {
-      "dx": 0.0125,
-      "beta_measured": 9.424777960858698,
-      "beta_analytic": 7.836508905692665,
-      "beta_rel_error": 0.20267558861730747,
-      "z_te_measured": 376.7303136632832,
-      "z_te_analytic": 453.0843517363509,
-      "z_te_rel_error": 0.16852058072731238
+      "beta_rel_error_median": 0.015943547177800922,
+      "beta_rel_error_max": 0.05147909961256155,
+      "yee_dispersion_floor": 0.0009486878787511466,
+      "max_singular_value_midband": 1.14457063243035,
+      "max_singular_value_bandmax": 1.2303238826229073,
+      "reciprocity_midband": 0.05620956147886112,
+      "reciprocity_bandmax": 0.1209481239696332,
+      "s11_abs_min": 0.1379980485871911,
+      "s11_abs_max": 0.670637756369234
     }
   ],
   "conservation": {
-    "reciprocity_S12_minus_S21": 0.05768146772074676,
-    "max_singular_value": 1.141334638618166,
-    "power_balance_col1_|S11|2+|S21|2": 0.988766652104022,
-    "s11_db": -11.37482260554953
+    "max_singular_value_midband_by_tier": {
+      "0.05": 1.1642307772196272,
+      "0.025": 1.114982398684552,
+      "0.02": 1.14457063243035
+    },
+    "max_singular_value_bandmax_by_tier": {
+      "0.05": 1.1907569230443684,
+      "0.025": 1.1831941996211137,
+      "0.02": 1.2303238826229073
+    },
+    "reciprocity_midband_by_tier": {
+      "0.05": 0.02744206035074492,
+      "0.025": 0.029668770054645754,
+      "0.02": 0.05620956147886112
+    },
+    "reciprocity_bandmax_by_tier": {
+      "0.05": 0.07092819602123192,
+      "0.025": 0.07061506557716038,
+      "0.02": 0.1209481239696332
+    }
   },
-  "status": "pass",
   "notes": [
-    "TE10 mode tracker fell back to the free-space (k0) branch at dx in 0.025, 0.0125; those tiers are recorded as mode-selection fallbacks, not convergence data.",
-    "FDTD S-matrix max singular value 1.141 and reciprocity 0.058 at the coarse dx=0.02 two-port run are grid-limited conservation diagnostics; the binding modal beta/Z gate passes analytically at 2%.",
-    "beta rel error 0.081% and Z_TE10 rel error 0.081% at the finest tested grid, both within 2%."
+    "NRW-de-embedded FDTD beta agrees to 1.59% (median) at dx=0.02; this exceeds the 0.09% Yee floor. Residual is port-mismatch standing-wave ripple, not solver dispersion; recorded as a gap.",
+    "Mid-band (1.7-1.8 fc) conservation on the real S-matrix: max singular value 0.05->1.164, 0.025->1.115, 0.02->1.145 (non-monotone); reciprocity 0.05->0.027, 0.025->0.030, 0.02->0.056. Band-max singular value stays ~1.2 (near-cutoff / band-edge frequencies where the modal de-embedding is weakest); reported as a diagnostic, not hidden.",
+    "beta median rel error per tier: 0.05->0.39%, 0.025->0.79%, 0.02->1.59%; interior-band ripple (max) per tier: 0.05->3.40%, 0.025->6.46%, 0.02->5.15%. NOTE: error does NOT decrease monotonically under refinement -- it is dominated by port-mismatch standing-wave ripple (|S11| up to ~0.7), not by grid discretization, so refining the grid does not tighten it toward the Yee floor. Fixing this needs a better-matched port / TRL de-embedding, recorded as the open work for a clean wave-level pass."
   ],
-  "updated_at": "2026-07-18T22:11:14+00:00"
+  "updated_at": "2026-07-18T23:45:14+00:00"
 }

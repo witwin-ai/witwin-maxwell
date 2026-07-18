@@ -631,15 +631,15 @@ _Last regenerated: 2026-07-18T03:17:10-07:00_
 
 ## RF wave-level validation
 
-Real FDTD `Scene -> Simulation -> Result` runs with S/Z extracted from the fields and compared against analytic transmission-line / waveguide references (S1, audit 2026-07-18). Every gate here is classed `wave-level`; the retired plan-01 algebraic identities are relabelled `analytic-identity` fast contract tests and no longer gate. Machine-readable per-scene artifacts (three-tier convergence + conservation/passivity) live under `docs/assessments/rf-wave-validation-2026-07-18/`.
+RF port validation (audit S1, 2026-07-18). The binding metric for each scene is measured from a real FDTD `Scene -> Simulation -> Result` run wherever the two-port bench produces a usable S-matrix; it is NEVER taken from the 2D mode eigensolve. Only `rf/rectangular_waveguide` currently reaches a wave-level FDTD S-matrix (beta de-embedded via NRW, with passivity/reciprocity convergence). The coax and lumped benches are recorded as honest wave-level FAILs with the measured numbers and root cause; microstrip / differential_pair are BLOCKED because WaveModeSpec('tem') is categorically inapplicable to their inhomogeneous cross-sections. Gate classes are the verbatim taxonomy (`docs/reference/gate-classification.md`); `modal-eigensolve` quantities are supporting only. Per-scene machine-readable artifacts live under `docs/assessments/rf-wave-validation-2026-07-18/`.
 
-| Scene | Gate class | Quantity | Measured | Analytic | Rel error | Target | Status | Tidy3D ref |
-| --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |
-| rf/coax_thru | wave-level | Z0 | 82.24 | 83.12 | 1.059% | Z0 within 2% (plan-01 section 10) | pass | pending-generation |
-| rf/rectangular_waveguide | wave-level | beta | 7.843 | 7.837 | 0.081% | beta / Z_TE within 2% (plan-01 section 10) | pass | pending-generation |
-| rf/microstrip_two_port | wave-level | see artifact | - | - | - | Z0 within 5% of quasi-static Hammerstad (model-limited) | gap | pending-generation |
-| rf/series_parallel_rlc | open-gap (wave-level pending) | f0 | 7.901e+09 | 7.118e+09 | 11.008% | f0 within 2% (plan-01 section 10) | gap | n/a (lumped-circuit resonance; analytic first-line reference) |
-| rf/lumped_open_short_match | wave-level | see artifact | - | - | - | matched \|S11\| < -30 dB (plan-01 section 10) | gap | pending-generation |
-| rf/differential_pair | wave-level | see artifact | - | - | - | mixed-mode Sdd21 / mode-conversion vs coupled-line reference | pending | pending-generation |
+| Scene | Gate class | Quantity | Measured | Reference | Rel error | Status | Tidy3D ref |
+| --- | --- | --- | ---: | ---: | ---: | --- | --- |
+| rf/coax_thru | wave-level | see artifact | - | - | - | fail | pending-generation |
+| rf/rectangular_waveguide | wave-level | beta_median_rel_error (NRW de-embedded) | 0.01594 | 0.0009487 | 1.594% | gap | pending-generation |
+| rf/microstrip_two_port | wave-level | see artifact | - | - | - | blocked | pending-generation |
+| rf/series_parallel_rlc | wave-level | f0 | 7.901e+09 | 7.118e+09 | 11.008% | gap | n/a (lumped-circuit resonance; analytic first-line reference) |
+| rf/lumped_open_short_match | wave-level | see artifact | - | - | - | fail | pending-generation |
+| rf/differential_pair | wave-level | see artifact | - | - | - | blocked | pending-generation |
 
-_RF section regenerated: 2026-07-18T22:12:08+00:00_
+_RF section regenerated: 2026-07-18T23:45:28+00:00_

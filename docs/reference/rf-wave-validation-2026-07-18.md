@@ -1,42 +1,76 @@
 # RF port wave-level validation (audit step S1)
 
-> Date: 2026-07-18
+> Date: 2026-07-18 (revised after the double-REJECT adversarial audit)
 > Implements: `docs/assessments/next-functional-audit-2026-07-18.md` step S1
+> Binding taxonomy: `docs/reference/gate-classification.md`
 > Scope: RF port wave-level validation (P0 -- the single biggest plan-01 debt)
-> Evidence target: E2 (wave-level); honest-exit where the bench falls short
 
-This document is the maintained reference for the RF wave-level validation
-delivered under audit step S1. It records the scenes, the binding analytic
-references, the gate taxonomy re-labelling, and -- per the audit's honest-exit
-mandate -- the gaps that remain, with measured values rather than API-existence.
+This is the maintained reference for the RF validation delivered under audit step
+S1. It records the scenes, the binding analytic references, the gate taxonomy
+re-labelling, and -- per the honest-exit mandate -- the gaps that remain, with
+measured values rather than API-existence. Exact per-scene numbers live in the
+machine-readable artifacts under
+`docs/assessments/rf-wave-validation-2026-07-18/` and in
+`benchmark/RESULTS.md`; this document does not restate drifting figures.
 
-## 1. Scenes (S1.1)
+## 0. What changed and why
 
-Six scenes live under `benchmark/scenes/rf/` and are driven by real FDTD through
-`python -m benchmark rf`:
+The first S1 round was rejected because it re-badged the 2D **mode eigensolve**
+as "wave-level" evidence and shipped false "pass" claims. In particular the
+retired round claimed coax "Z0 ~1.1%, beta exact (0.0%)" and waveguide
+"beta/Z ~0.08%" -- but those numbers came from
+`resolve_waveport_run_manifest(...)` (the modal solver), not from a time-stepped
+FDTD S-matrix, and the coax "beta = k0 sqrt(eps mu)" is assigned *by construction*
+in the TEM path (`witwin/maxwell/fdtd/excitation/modes.py:1879-1884`) -- an
+`analytic-identity`, forbidden as gate evidence by the taxonomy.
 
-| Scene | Realisation | Analytic reference | Status |
+This round makes the binding metric a genuine FDTD `Scene -> Simulation -> Result`
+measurement wherever the two-port bench yields a usable S-matrix, and records the
+honest outcome (including FAIL / BLOCKED) everywhere else. The modal Z0/beta are
+kept only as `modal-eigensolve` supporting rows and never gate.
+
+## 1. Scenes and honest status (S1.1)
+
+Six scenes live under `benchmark/scenes/rf/` and are driven through
+`python -m benchmark rf`. This is **not** six passing wave-level scenes:
+
+| Scene | Binding metric | Class | Status |
 |---|---|---|---|
-| `rf/coax_thru` | round coax, two TEM `WavePort`s | `Z0 = eta0/(2pi) ln(b/a)`, `beta = k0` | **pass** (Z0 ~1.1%, beta exact) |
-| `rf/rectangular_waveguide` | hollow guide, two TE10 `WavePort`s | `fc = c/2a`, `beta = sqrt(k0^2-(pi/a)^2)`, `Z = eta0 k0/beta` | **pass** (beta/Z ~0.08%) |
-| `rf/microstrip_two_port` | grounded substrate + strip, quasi-TEM `WavePort`s | Hammerstad-Jensen `Z0`/`eps_eff` | gap (modal contour snapping; analytic recorded) |
-| `rf/series_parallel_rlc` | lumped feed + RLC-terminated port | `f0 = 1/(2pi sqrt(LC))`, `Q` | open gap (parasitic-dominated bench; see section 3) |
-| `rf/lumped_open_short_match` | lumped feed + resistively terminated port | `Gamma = (R-Z0)/(R+Z0)` | gap (near-field coupling; measured floor recorded) |
-| `rf/differential_pair` | coupled microstrip, four quasi-TEM ports | coupled-line even/odd mixed-mode | pending-generation (4-port mixed-mode) |
+| `rf/rectangular_waveguide` | FDTD S-matrix -> NRW-de-embedded `beta(omega)` vs analytic TE10 dispersion; passivity/reciprocity convergence | `wave-level` | see artifact (pass/gap vs the Yee floor) |
+| `rf/coax_thru` | real FDTD two-port S-matrix | `wave-level` | **FAIL** (|S11| ~ 1, gross non-passivity; TEM WavePort does not match the round line) |
+| `rf/microstrip_two_port` | -- | `wave-level` | **BLOCKED** (TEM categorically inapplicable to substrate+air) |
+| `rf/differential_pair` | -- | `wave-level` | **BLOCKED** (same TEM inapplicability, coupled 4-port) |
+| `rf/series_parallel_rlc` | FDTD load-port resonance peak vs analytic f0 | `wave-level` | **gap** (parasitic-dominated; peak does not track C) |
+| `rf/lumped_open_short_match` | FDTD feed |S11| vs analytic Gamma | `wave-level` | **FAIL** (feed decoupled from load; identical Gamma for all loads) |
 
-Each scene writes a machine-readable artifact (grid convergence + conservation /
-passivity) under `docs/assessments/rf-wave-validation-2026-07-18/` and a row in
-the `## RF wave-level validation` table of `benchmark/RESULTS.md`.
+### 1.1 Rectangular waveguide (the one genuine wave-level FDTD scene)
 
-The two scenes with **exact** analytic references and proven WavePort mode-solve
-paths (coax, rectangular waveguide) pass their plan-01 section-10 targets and
-carry a grid study. The remaining scenes record measured-with-gap or
-pending-generation honestly.
+- A real two-port `PortSweep` FDTD run is executed at three grid-commensurate
+  tiers (dx in {0.05, 0.025, 0.02}, each dividing 0.1 so the a/b aperture edges
+  land on Yee nodes).
+- `beta(omega)` is extracted from the FDTD S-matrix by **Nicolson-Ross-Weir
+  de-embedding** (symmetrized S11/S21), which removes the port-mismatch
+  standing-wave ripple that contaminates the raw `arg(S21)/L`. Raw phase gives
+  ~2% band-averaged ripple; NRW recovers the intrinsic beta.
+- **Tolerance basis (not tuned-to-pass):** the 3D Yee numerical-dispersion floor
+  at the run's dx and Courant dt, `|beta_numeric - beta_continuous|/beta` over
+  the band, computed from the discrete dispersion relation (transverse
+  second-difference eigenvalue `(2/dx^2)(1-cos(pi dx/a))`). The artifact records
+  the floor and the measured median rel error; status is `pass` iff the measured
+  value is within the floor, else `gap` with the residual attributed to port
+  mismatch.
+- **Conservation (wave-level):** max singular value and reciprocity of the real
+  S-matrix are reported per tier and **converge toward the physical limits (1 and
+  0) under refinement** -- this is the wave-level conservation evidence.
+- **Supporting only:** a `modal-eigensolve` beta/Z_TE cross-check is recorded but
+  never gates.
 
 ## 2. Gate taxonomy re-labelling (S1.2)
 
 The S0.3 taxonomy uses five verbatim classes:
-`analytic-identity | tautology | symmetric | postprocess-only | wave-level`.
+`analytic-identity | tautology | symmetric | postprocess-only | wave-level`,
+plus `modal-eigensolve` for supporting rows. Status (`pass | gap | fail |
+blocked | pending`) is a separate axis and is never folded into the class.
 
 The retired plan-01 Phase-1/2 headline gates are re-classified and **lose
 exit-gate status**:
@@ -45,45 +79,50 @@ exit-gate status**:
 |---|---|---|---|
 | "matched load \|S11\| < -30 dB" (single implicit update, `V=Z0 I` at 1e-12) | E3 | `analytic-identity` | `tests/rf/wave_validation/test_matched_s11_wave_level.py` (propagating waveguide matched vs shorted, from fields) |
 | "series/parallel RLC resonance < 2%" (trapezoidal-formula sweep, solver not run) | E3 | `analytic-identity` | RLC resonance recorded as an **open gap** (section 3) |
-| "coax/microstrip reciprocity < 0.02" (mirror-symmetric fixture) | E3 | `symmetric` | `tests/rf/wave_validation/test_asymmetric_reciprocity_power_balance.py` (asymmetric ports, `S12==S21` is physics) |
+| "coax/microstrip reciprocity < 0.02" (mirror-symmetric fixture) | E3 | `symmetric` | `tests/rf/wave_validation/test_asymmetric_reciprocity_power_balance.py` (physically asymmetric ports, `S12==S21` is physics) |
 | "power imbalance < 2%" (hand-written unitary matrix `assert`) | E3 | `tautology` | field-derived power balance in the same asymmetric-reciprocity test |
+| coax "beta exact / beta measured 0.0%" | E3 | `analytic-identity` | **removed** -- beta = k0 sqrt(eps mu) is assigned by construction (modes.py:1879-1884), never a gate |
+| coax/waveguide modal `Z0`/`beta` "pass" | E3 | `modal-eigensolve` | supporting rows only; FDTD S-matrix is the binding metric |
 
-The old formula/identity checks may remain as **fast contract tests** (e.g.
-`test_series_rlc_companion_impedance_matches_analytic` in the wave_validation
-suite is explicitly `analytic-identity` and non-gating), but they are no longer
-the exit evidence. Every new wave-level gate is falsification-checked: detuning
-the matched load to a short drives `|S11|` red, and injecting non-reciprocity /
-gain into the measured S matrix drives the reciprocity / power-balance gates red.
+Every new wave-level gate is falsification-checked (perturb -> red -> restore);
+the records are in the test docstrings and the scene artifacts.
 
-## 3. Honest gaps
+## 3. Honest gaps and defects (measured, not papered over)
 
-* **Wave-level RLC resonance is an open gap.** Three benches were attempted this
-  session (details in `test_rlc_resonance_wave_level.py`): the lumped two-port
-  bench is parasitic-dominated (the load-port current peak barely moves,
-  7.90 GHz at C=1pF vs 7.74 GHz at C=2pF where the ideal ratio is `sqrt(2)`), the
-  circuit-bound port imposes `V/I` (tautological), and a parallel-plate line did
-  not guide a clean TEM wave at benchmark resolution. The analytic `f0` binds as
-  the first-line reference; a propagating transmission-structure RLC gate is the
-  outstanding work. This is recorded, not papered over with the coincidental
-  parasitic peak.
-* **Matched \|S11\| floor.** The propagating waveguide matched load reflects at
-  ~-12 dB on the coarse grid, above the -30 dB plan-01 target; the gap is
-  recorded. What binds is the wave-level, load-discriminating behaviour (matched
-  << short), which the falsification confirms.
-* **microstrip / differential_pair.** Quasi-TEM and coupled-line mixed-mode
-  extraction did not fully resolve (contour half-grid snapping / 4-port coupled
-  apertures). Scenes, analytic references, and the Tidy3D generation path are
-  registered; status is gap / pending-generation.
-* **Grid convergence.** Round-coax and TE10 apertures snap to the Yee half-grid
-  only at specific float32-safe resolutions, and the TE10 tracker occasionally
-  locks onto the free-space (k0) branch; the artifacts record the resolved tiers
-  and flag the fallback tiers rather than reporting them as convergence data.
+* **Coax two-port is a wave-level FAIL.** A real FDTD sweep reflects almost all
+  incident power (|S11| ~ 1) with a max singular value well above 1: the TEM
+  WavePort does not launch/absorb a matched TEM wave on the round coax at
+  benchmark resolution, and the mirror-symmetric geometry makes reciprocity
+  trivial. The half-grid contour snapping is now deterministic (B5,
+  `benchmark/scenes/rf/coax_thru.py:snap_contour_half`) so tiers build, but that
+  does not fix the matching. Open work: an impedance-matched coax feed.
+* **microstrip / differential_pair are BLOCKED for the correct reason.**
+  `WaveModeSpec('tem')` is categorically inapplicable to their inhomogeneous
+  (substrate + air) cross-sections: the TEM electrostatic normalization requires
+  a uniformly filled cross-section and raises `NotImplementedError`
+  (`modes.py:1846-1849`). A hybrid full-vector mode solve is required. The
+  earlier "snapping" attribution was wrong; a secondary contour-snapping error
+  also exists but is not the primary blocker. `reference: pending-generation`.
+* **Wave-level RLC resonance is an open gap.** The lumped two-port bench is
+  parasitic-dominated: the load-port current peak barely tracks the circuit `C`
+  (the C(1pF)->C(2pF) peak ratio is far from the ideal sqrt(2); exact numbers in
+  the artifact). Analytic `f0` binds; the propagating-structure RLC gate is
+  outstanding and encoded as a **strict** xfail
+  (`tests/rf/wave_validation/test_rlc_resonance_wave_level.py`, `strict=True` so a
+  silent xpass cannot close the gap).
+* **lumped_open_short_match is a broken bench (FAIL), not a floor.** matched,
+  short and open all read |Gamma| ~ 0.997 at the *same* phase: the feed sees
+  near-total reflection independent of the load, i.e. the feed port is not
+  coupled to the load. Two lumped ports two cells apart in a tiny PML box radiate
+  into the boundary rather than forming a transmission path. A propagating feed
+  line terminated by the load is required.
 
 ## 4. Reference-solver policy
 
 Analytic transmission-line / waveguide solutions are the binding first-line
-reference (audit section 3). Tidy3D cross-references for the covered port families
-are generated through `python -m benchmark.rf_tidy3d_references`; offline it
-stamps `reference: pending-generation` markers under `benchmark/cache/rf/` and the
-analytic gate is not relaxed. `series_parallel_rlc` is a lumped-circuit resonance
-with no Tidy3D cross-reference (analytic only).
+reference (audit section 3). External reference-solver cross-references are the
+future primary cross-check for the covered port families; adapter-driven
+generation is **not yet wired** (M3), so `python -m benchmark.rf_tidy3d_references`
+only stamps `reference: pending-generation` markers under `benchmark/cache/rf/`
+and never fabricates a numerical comparison. `series_parallel_rlc` is a
+lumped-circuit resonance with an analytic-only reference.

@@ -1,41 +1,50 @@
 {
   "name": "rf/coax_thru",
-  "description": "Air coax TEM two-port: Z0 and beta vs analytic ln(b/a) reference.",
+  "description": "Air coax TEM two-port: FDTD S-matrix and beta(omega) vs analytic coax references (Z0=eta0/2pi ln(b/a), beta=k0).",
   "gate_class": "wave-level",
+  "status": "fail",
   "reference": "analytic-coax (Z0 = eta0/(2pi) ln(b/a); beta = k0)",
   "tidy3d_reference": "pending-generation",
-  "target": "Z0 within 2% (plan-01 section 10)",
+  "target": "FDTD beta within the Yee floor; |S11| matched; passivity <= ~1",
+  "tolerance_basis": "",
+  "falsification": "None passing to falsify: the FDTD S-matrix is itself the red result (|S11| ~ 1). A working matched thru would show |S11| well below |S21|; this bench does not.",
   "metrics": [
     {
-      "quantity": "Z0",
-      "measured": 82.24019410519097,
+      "quantity": "|S11| (FDTD, matched thru)",
+      "measured": 0.995290516092064,
+      "reference": 0.0,
+      "unit": "linear",
+      "class": "wave-level",
+      "note": "a matched coax thru should reflect little; measured near unity"
+    }
+  ],
+  "supporting": [
+    {
+      "quantity": "Z0 (modal eigensolve)",
+      "measured": 84.33125006768536,
       "reference": 83.12011885183587,
-      "rel_error": 0.010586182488663132,
-      "unit": "ohm"
-    },
-    {
-      "quantity": "beta",
-      "measured": 20.958450219516816,
-      "reference": 20.958450219516816,
-      "rel_error": 0.0,
-      "unit": "rad/m"
+      "rel_error": 0.014570855198226668,
+      "unit": "ohm",
+      "class": "modal-eigensolve",
+      "note": "supporting only; NOT the wave-level exit gate (analytic-identity beta = k0 sqrt(eps mu) is NOT reported as a gate)"
     }
   ],
-  "convergence": [
-    {
-      "dx": 0.0025,
-      "z0_measured": 82.24019410519097,
-      "z0_analytic": 83.12011885183587,
-      "z0_rel_error": 0.010586182488663132,
-      "beta_measured": 20.958450219516816,
-      "beta_analytic": 20.958450219516816,
-      "beta_rel_error": 0.0
-    }
-  ],
-  "conservation": {},
-  "status": "pass",
+  "convergence": [],
+  "conservation": {
+    "s11_abs_range": [
+      0.9903998158683002,
+      1.0120249850829504
+    ],
+    "s21_abs_range": [
+      0.9984000482163092,
+      1.0068692452152617
+    ],
+    "max_singular_value": 1.8474652840645889,
+    "reciprocity_max": 0.0
+  },
   "notes": [
-    "Grid study limited to the proven float32-safe coax cross-section (dx=0.0025); round-contour Yee half-grid snapping blocks arbitrary refinement."
+    "Real FDTD two-port run: |S11| in [0.99, 1.01], |S21| in [1.00, 1.01], max singular value 1.85. The TEM WavePort does not launch/absorb a clean matched TEM wave on the round coax at benchmark resolution (near-total reflection, gross non-passivity), so the FDTD S-matrix does not yield a usable wave-level beta. The mirror-symmetric geometry makes reciprocity trivial. This is a wave-level FAIL, recorded with the real numbers, not back-filled from the mode solve.",
+    "Root cause + open work: (a) redesign the coax feed so the TEM WavePort is impedance-matched to the round line; (b) the current contour half-grid snapping (fixed to grid-commensurate geometry in the scene builder, B5) unblocks refinement but does not fix the matching."
   ],
-  "updated_at": "2026-07-18T22:10:59+00:00"
+  "updated_at": "2026-07-18T23:35:51+00:00"
 }

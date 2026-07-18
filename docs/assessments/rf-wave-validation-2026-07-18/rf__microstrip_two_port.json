@@ -2,15 +2,26 @@
   "name": "rf/microstrip_two_port",
   "description": "Microstrip quasi-TEM two-port: Z0 / eps_eff vs Hammerstad-Jensen.",
   "gate_class": "wave-level",
+  "status": "blocked",
   "reference": "analytic-Hammerstad (Z0=57.73 ohm, eps_eff=3.267)",
   "tidy3d_reference": "pending-generation",
   "target": "Z0 within 5% of quasi-static Hammerstad (model-limited)",
-  "metrics": [],
+  "tolerance_basis": "",
+  "falsification": "",
+  "metrics": [
+    {
+      "quantity": "Z0 (analytic Hammerstad)",
+      "reference": 57.72792917053757,
+      "unit": "ohm",
+      "class": "wave-level",
+      "note": "reference only; no FDTD extraction (blocked)"
+    }
+  ],
+  "supporting": [],
   "convergence": [],
   "conservation": {},
-  "status": "gap",
   "notes": [
-    "Quasi-TEM microstrip modal solve did not resolve cleanly (ValueError: WavePort 'in': mode TEM0 current contour plane=-0.14749999344348907 must lie on the Yee mode TEM0 current contour plane grid.); analytic Hammerstad reference recorded; wave-level extraction pending."
+    "BLOCKED (correct root cause): the microstrip cross-section is inhomogeneous (eps=4.4 substrate + air), and WaveModeSpec('tem') is categorically inapplicable there -- the TEM electrostatic normalization requires a uniformly filled cross-section and raises NotImplementedError (witwin/maxwell/fdtd/excitation/modes.py:1846-1849). A hybrid (full-vector) mode solve is required. This is NOT a half-grid snapping issue (a secondary contour-snapping error also appears, but the primary blocker is the TEM path). reference: pending-generation for the wave-level extraction."
   ],
-  "updated_at": "2026-07-18T22:11:14+00:00"
+  "updated_at": "2026-07-18T23:45:14+00:00"
 }
