@@ -16,6 +16,8 @@ from witwin.core import (
 from witwin.core.material import VACUUM_PERMITTIVITY
 
 _SPEED_OF_LIGHT = 299_792_458.0
+_DEFAULT_GYROMAGNETIC_RATIO = 1.760859e11  # rad/(s*T), electron gyromagnetic ratio magnitude
+_OERSTED_TO_A_PER_M = 1.0e-4 / (4.0e-7 * np.pi)  # 1 Oe of H -> A/m (= 1000/(4*pi))
 
 
 def _coerce_frequency(value: float, *, name: str) -> float:
@@ -982,6 +984,331 @@ class Material(CoreMaterial):
         )
 
 
+def _gyromagnetic_cross_matrix(bias_unit_vector: torch.Tensor) -> torch.Tensor:
+    bx, by, bz = bias_unit_vector[0], bias_unit_vector[1], bias_unit_vector[2]
+    zero = torch.zeros_like(bx)
+    return torch.stack(
+        [
+            torch.stack([zero, -bz, by]),
+            torch.stack([bz, zero, -bx]),
+            torch.stack([-by, bx, zero]),
+        ]
+    )
+
+
+def gyromagnetic_polder_tensor(
+    omega,
+    *,
+    omega_0,
+    omega_m,
+    gilbert_damping,
+    mu_infinity,
+    bias_unit_vector,
+    dtype=torch.complex128,
+) -> torch.Tensor:
+    """Lab-frame 3x3 complex Polder permeability tensor.
+
+    Frozen convention (``exp(-i*omega*t)``, contract section 2.3/2.4):
+
+    ``W = omega_0 - i*alpha*omega``, ``D = W^2 - omega^2``,
+    ``mu = mu_infinity + omega_m*W/D``, ``kappa = omega_m*omega/D``, and
+
+    ``mu_r = mu*(I - b b^T) + mu_infinity*(b b^T) + i*kappa*[b]_x``.
+
+    Torch-native and differentiable in ``omega`` and any keyword argument that is
+    a leaf tensor (used for material-parameter autograd).
+    """
+    real_dtype = torch.float64 if dtype == torch.complex128 else torch.float32
+
+    def _c(value):
+        if isinstance(value, torch.Tensor):
+            return value.to(dtype)
+        return torch.as_tensor(value, dtype=real_dtype).to(dtype)
+
+    w = _c(omega)
+    w0 = _c(omega_0)
+    wm = _c(omega_m)
+    alpha = _c(gilbert_damping)
+    mu_inf = _c(mu_infinity)
+    i = torch.tensor(1j, dtype=dtype)
+    W = w0 - i * alpha * w
+    D = W * W - w * w
+    mu = mu_inf + wm * W / D
+    kappa = wm * w / D
+
+    if isinstance(bias_unit_vector, torch.Tensor):
+        b = bias_unit_vector.to(real_dtype)
+    else:
+        b = torch.as_tensor(bias_unit_vector, dtype=real_dtype)
+    b = (b / torch.linalg.vector_norm(b)).to(dtype)
+    eye = torch.eye(3, dtype=dtype)
+    bbT = torch.outer(b, b)
+    return mu * (eye - bbT) + mu_inf * bbT + i * kappa * _gyromagnetic_cross_matrix(b)
+
+
+@dataclass(frozen=True, init=False)
+class GyromagneticFerrite(Material):
+    """DC-biased ferrite with a gyromagnetic (Polder) permeability tensor.
+
+    The first non-reciprocal material in the framework. Its frequency-domain
+    permeability is the tensor
+
+    ``mu_r(omega) = mu*(I - b b^T) + mu_infinity*(b b^T) + i*kappa*[b]_x``
+
+    with the scalar Polder components in
+    :func:`gyromagnetic_polder_tensor`. The gyrotropy is carried by a local
+    linearized Landau-Lifshitz-Gilbert magnetization ADE state (see the FDTD
+    runtime slices), never by widening ``mu_tensor`` -- the off-diagonal
+    ``mu_tensor`` guard stays in force. The full derivation, sign/unit
+    conventions, discretization, and acceptance budget are frozen in
+    ``docs/reference/ferrite-physics-contract.md``.
+
+    All parameters are SI. Datasheet CGS quantities enter only through
+    :meth:`from_cgs`, which records the conversion in :attr:`cgs_conversion`.
+
+    Parameters
+    ----------
+    eps_r:
+        Relative permittivity of the ferrite host (real, ``> 0``).
+    saturation_magnetization:
+        ``Ms`` [A/m], ``> 0``.
+    bias_field:
+        Static internal bias ``H0`` [A/m], a 3-vector (``!= 0``). The user
+        supplies the internal field; there is no magnetostatic solve.
+    gilbert_damping:
+        Gilbert damping ``alpha`` (dimensionless, ``>= 0``).
+    gyromagnetic_ratio:
+        ``gamma`` [rad/(s*T)], ``> 0`` (default the electron value).
+    mu_infinity:
+        High-frequency background permeability (``> 0``, default ``1.0``).
+    sigma_e:
+        Electric conductivity [S/m] (``>= 0``).
+    """
+
+    saturation_magnetization: float
+    bias_field: tuple[float, float, float]
+    gilbert_damping: float
+    gyromagnetic_ratio: float
+    mu_infinity: float
+    cgs_conversion: tuple
+
+    def __init__(
+        self,
+        *,
+        eps_r: float = 1.0,
+        saturation_magnetization: float,
+        bias_field,
+        gilbert_damping: float = 0.0,
+        gyromagnetic_ratio: float = _DEFAULT_GYROMAGNETIC_RATIO,
+        mu_infinity: float = 1.0,
+        sigma_e: float = 0.0,
+        name: str | None = None,
+        cgs_conversion: tuple = (),
+    ):
+        saturation = _coerce_positive(saturation_magnetization, name="saturation_magnetization")
+        damping = _coerce_nonnegative(gilbert_damping, name="gilbert_damping")
+        gamma = _coerce_positive(gyromagnetic_ratio, name="gyromagnetic_ratio")
+        mu_inf = _coerce_positive(mu_infinity, name="mu_infinity")
+        _coerce_positive(eps_r, name="eps_r")
+
+        bias = tuple(_coerce_real_scalar(component, name="bias_field") for component in bias_field)
+        if len(bias) != 3:
+            raise ValueError("bias_field must be a 3-vector [A/m].")
+        bias_norm = float(np.sqrt(sum(component * component for component in bias)))
+        if bias_norm <= 0.0:
+            raise ValueError(
+                "bias_field must be non-zero: a zero-bias ferrite has no gyrotropy and the local "
+                "precession frame is degenerate."
+            )
+
+        super().__init__(eps_r=eps_r, mu_r=mu_inf, sigma_e=sigma_e, name=name)
+        object.__setattr__(self, "saturation_magnetization", saturation)
+        object.__setattr__(self, "bias_field", bias)
+        object.__setattr__(self, "gilbert_damping", damping)
+        object.__setattr__(self, "gyromagnetic_ratio", gamma)
+        object.__setattr__(self, "mu_infinity", mu_inf)
+        object.__setattr__(self, "cgs_conversion", tuple(cgs_conversion))
+
+    # --- Derived physical quantities -----------------------------------------
+
+    @property
+    def bias_magnitude(self) -> float:
+        """Static bias magnitude ``|H0|`` [A/m]."""
+        return float(np.sqrt(sum(component * component for component in self.bias_field)))
+
+    @property
+    def bias_unit_vector(self) -> tuple[float, float, float]:
+        magnitude = self.bias_magnitude
+        return tuple(component / magnitude for component in self.bias_field)
+
+    @property
+    def omega_0(self) -> float:
+        """Larmor precession frequency ``omega_0 = gamma*mu_0*|H0|`` [rad/s]."""
+        return self.gyromagnetic_ratio * _VACUUM_PERMEABILITY * self.bias_magnitude
+
+    @property
+    def omega_m(self) -> float:
+        """Magnetization frequency ``omega_m = gamma*mu_0*Ms`` [rad/s]."""
+        return self.gyromagnetic_ratio * _VACUUM_PERMEABILITY * self.saturation_magnetization
+
+    @property
+    def resonance_frequency(self) -> float:
+        """Gyromagnetic resonance frequency ``omega_0/(2*pi)`` [Hz]."""
+        return self.omega_0 / (2.0 * np.pi)
+
+    # --- Torch-native Polder tensor accessors --------------------------------
+
+    def polder_tensor(self, angular_frequency, *, dtype=torch.complex128) -> torch.Tensor:
+        """Lab-frame complex 3x3 permeability tensor at ``omega`` (angular frequency).
+
+        Torch-native and differentiable in ``angular_frequency``.
+        """
+        return gyromagnetic_polder_tensor(
+            angular_frequency,
+            omega_0=self.omega_0,
+            omega_m=self.omega_m,
+            gilbert_damping=self.gilbert_damping,
+            mu_infinity=self.mu_infinity,
+            bias_unit_vector=self.bias_unit_vector,
+            dtype=dtype,
+        )
+
+    def permeability_tensor_at_freq(self, frequency, *, dtype=torch.complex128) -> torch.Tensor:
+        """Lab-frame complex 3x3 permeability tensor at ordinary ``frequency`` [Hz]."""
+        if isinstance(frequency, torch.Tensor):
+            omega = 2.0 * np.pi * frequency
+        else:
+            omega = 2.0 * np.pi * _coerce_frequency(frequency, name="frequency")
+        return self.polder_tensor(omega, dtype=dtype)
+
+    def scalar_polder_components(self, frequency):
+        """Analytic scalar ``(mu, kappa)`` (complex) at ordinary ``frequency`` [Hz]."""
+        tensor = self.permeability_tensor_at_freq(frequency)
+        mu = complex(tensor[0, 0])
+        kappa = complex(tensor[1, 0] / 1j)
+        return mu, kappa
+
+    # --- Material-family overrides -------------------------------------------
+
+    def capabilities(self) -> MaterialCapabilities:
+        return MaterialCapabilities(
+            conductive=float(self.sigma_e) != 0.0,
+            magnetic=True,
+            anisotropic=True,
+            dispersive=True,
+        )
+
+    def relative_permeability(self, frequency: float) -> complex:
+        raise NotImplementedError(
+            "relative_permeability() is not defined for a GyromagneticFerrite: its permeability is a "
+            "non-reciprocal complex 3x3 Polder tensor, not a scalar. Use permeability_tensor_at_freq() "
+            "(or polder_tensor() for the angular-frequency form)."
+        )
+
+    def evaluate_at_frequency(self, frequency: float) -> FrequencyMaterialSample:
+        raise NotImplementedError(
+            "evaluate_at_frequency() is not defined for a GyromagneticFerrite: a FrequencyMaterialSample "
+            "carries a scalar/diagonal mu, which cannot represent the off-diagonal gyromagnetic Polder "
+            "tensor. Use permeability_tensor_at_freq() for the full 3x3 permeability."
+        )
+
+    @classmethod
+    def from_cgs(
+        cls,
+        *,
+        saturation_4piMs_gauss: float,
+        bias_Oe: float,
+        bias_direction=(0.0, 0.0, 1.0),
+        eps_r: float = 1.0,
+        gilbert_damping: float = 0.0,
+        gyromagnetic_ratio: float = _DEFAULT_GYROMAGNETIC_RATIO,
+        mu_infinity: float = 1.0,
+        sigma_e: float = 0.0,
+        name: str | None = None,
+    ) -> "GyromagneticFerrite":
+        """Construct from CGS datasheet quantities, recording the SI conversion.
+
+        ``saturation_4piMs_gauss`` is ``4*pi*Ms`` in Gauss and ``bias_Oe`` is the
+        internal bias in Oersted. Both convert as ``x[A/m] = x_cgs * 1e-4 / mu_0``
+        (i.e. ``1000/(4*pi) = 79.57747`` A/m per Gauss / per Oersted). The exact
+        factors are stored in :attr:`cgs_conversion`.
+        """
+        four_pi_ms = _coerce_positive(saturation_4piMs_gauss, name="saturation_4piMs_gauss")
+        bias_oe = _coerce_positive(bias_Oe, name="bias_Oe")
+        saturation = four_pi_ms * _OERSTED_TO_A_PER_M
+        bias_magnitude = bias_oe * _OERSTED_TO_A_PER_M
+        direction = tuple(_coerce_real_scalar(component, name="bias_direction") for component in bias_direction)
+        if len(direction) != 3:
+            raise ValueError("bias_direction must be a 3-vector.")
+        direction_norm = float(np.sqrt(sum(component * component for component in direction)))
+        if direction_norm <= 0.0:
+            raise ValueError("bias_direction must be non-zero.")
+        bias_field = tuple(component / direction_norm * bias_magnitude for component in direction)
+        conversion = (
+            ("saturation_4piMs_gauss", four_pi_ms),
+            ("bias_Oe", bias_oe),
+            ("saturation_magnetization_A_per_m", saturation),
+            ("bias_magnitude_A_per_m", bias_magnitude),
+            ("cgs_to_A_per_m", _OERSTED_TO_A_PER_M),
+        )
+        return cls(
+            eps_r=eps_r,
+            saturation_magnetization=saturation,
+            bias_field=bias_field,
+            gilbert_damping=gilbert_damping,
+            gyromagnetic_ratio=gyromagnetic_ratio,
+            mu_infinity=mu_infinity,
+            sigma_e=sigma_e,
+            name=name,
+            cgs_conversion=conversion,
+        )
+
+    @classmethod
+    def from_resonance(
+        cls,
+        *,
+        resonance_frequency: float,
+        saturation_magnetization: float,
+        linewidth: float = 0.0,
+        bias_direction=(0.0, 0.0, 1.0),
+        eps_r: float = 1.0,
+        gyromagnetic_ratio: float = _DEFAULT_GYROMAGNETIC_RATIO,
+        mu_infinity: float = 1.0,
+        sigma_e: float = 0.0,
+        name: str | None = None,
+    ) -> "GyromagneticFerrite":
+        """Construct from the gyromagnetic resonance frequency and FMR linewidth.
+
+        The bias magnitude is back-computed from ``omega_0 = 2*pi*resonance_frequency
+        = gamma*mu_0*|H0|``. ``linewidth`` is the full-width (FWHM) resonance
+        linewidth in Hz; it maps to Gilbert damping ``alpha = linewidth /
+        (2*resonance_frequency)`` (``Delta_omega = 2*alpha*omega_0``).
+        """
+        f_res = _coerce_frequency(resonance_frequency, name="resonance_frequency")
+        gamma = _coerce_positive(gyromagnetic_ratio, name="gyromagnetic_ratio")
+        width = _coerce_nonnegative(linewidth, name="linewidth")
+        omega_0 = 2.0 * np.pi * f_res
+        bias_magnitude = omega_0 / (gamma * _VACUUM_PERMEABILITY)
+        damping = width / (2.0 * f_res)
+        direction = tuple(_coerce_real_scalar(component, name="bias_direction") for component in bias_direction)
+        if len(direction) != 3:
+            raise ValueError("bias_direction must be a 3-vector.")
+        direction_norm = float(np.sqrt(sum(component * component for component in direction)))
+        if direction_norm <= 0.0:
+            raise ValueError("bias_direction must be non-zero.")
+        bias_field = tuple(component / direction_norm * bias_magnitude for component in direction)
+        return cls(
+            eps_r=eps_r,
+            saturation_magnetization=saturation_magnetization,
+            bias_field=bias_field,
+            gilbert_damping=damping,
+            gyromagnetic_ratio=gamma,
+            mu_infinity=mu_infinity,
+            sigma_e=sigma_e,
+            name=name,
+        )
+
+
 class Medium2D(Material):
     """Zero-thickness conductive sheet (2D material).
 
@@ -1403,6 +1730,13 @@ class PerturbationMedium(Material):
     ):
         if not isinstance(base, CoreMaterial):
             raise TypeError("PerturbationMedium base must be a Material.")
+        if isinstance(base, GyromagneticFerrite):
+            raise NotImplementedError(
+                "PerturbationMedium cannot wrap a GyromagneticFerrite: it perturbs a scalar permittivity "
+                "background, but a ferrite carries a non-reciprocal gyromagnetic permeability in a local "
+                "magnetization state that this scalar-eps perturbation would silently discard. Perturb the "
+                "ferrite parameters directly instead."
+            )
         if bool(getattr(base, "is_pec", False)):
             raise ValueError("PerturbationMedium cannot wrap a PEC base material.")
         if not torch.is_tensor(perturbation):

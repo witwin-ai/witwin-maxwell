@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from witwin.core import Box
 from witwin.core.material import VACUUM_PERMITTIVITY
 
-from ..media import CustomPole, DiagonalTensor3, DrudePole, LorentzPole, ModulationSpec, PerturbationMedium, Tensor3x3
+from ..media import CustomPole, DiagonalTensor3, DrudePole, GyromagneticFerrite, LorentzPole, ModulationSpec, PerturbationMedium, Tensor3x3
 
 _AXES = ("x", "y", "z")
 _OFFDIAG_AXES = ("xy", "xz", "yz")
@@ -148,6 +148,14 @@ def _structure_nonlinearity(material):
 
 def _static_structure_material(structure):
     material = structure.material
+    if isinstance(material, GyromagneticFerrite):
+        raise NotImplementedError(
+            "GyromagneticFerrite compilation is not part of this build: its non-reciprocal off-diagonal "
+            "permeability is produced by a local linearized-LLG magnetization ADE that the material "
+            "compiler does not yet lower. Compiling it as a plain Material would silently discard the "
+            "gyrotropy and simulate a reciprocal medium. Remove the ferrite structure until the "
+            "gyromagnetic compiler/runtime slices land."
+        )
     sample = material.evaluate_static()
     try:
         eps_components, eps_offdiag = _eps_values_from_sample(sample.eps_r)

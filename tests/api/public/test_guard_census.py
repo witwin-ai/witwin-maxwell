@@ -61,7 +61,20 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # fails closed instead of silently dropping the loss. It is a genuine capability
 # gap (Material compilers 11 -> 12); lower this budget when the lossy recurrence
 # lands in the runtime.
-CAPABILITY_GUARD_BUDGET = 134
+#
+# 2026-07-17 (plan 08 Phase 0, gyromagnetic ferrite slices 0a/0b/1a): 134 -> 136
+# (+2 capability). The GyromagneticFerrite material type lands with two fail-closed
+# capability guards: compiler/materials.py rejects a ferrite structure ("its
+# non-reciprocal off-diagonal permeability is produced by a local linearized-LLG
+# magnetization ADE that the material compiler does not yet lower") because
+# compiling it as a plain Material would silently discard the gyrotropy, and
+# media.py PerturbationMedium rejects a GyromagneticFerrite base (its scalar-eps
+# perturbation would silently discard the gyromagnetic state). Both disappear when
+# the compiler/runtime slices (1b/1c) land; lower this budget then. The two scalar
+# frequency-evaluation guards on GyromagneticFerrite (relative_permeability and
+# evaluate_at_frequency) are permanent contracts -- a scalar/diagonal sample cannot
+# represent an off-diagonal Polder tensor -- and are listed in CONTRACT_GUARDS.
+CAPABILITY_GUARD_BUDGET = 136
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
@@ -73,6 +86,8 @@ CONTRACT_GUARDS = (
     ("witwin/maxwell/media.py", "relative_permeability() currently supports isotropic Material only"),
     ("witwin/maxwell/media.py", "relative_permeability() is not defined for nonlinear Material"),
     ("witwin/maxwell/media.py", "relative_permeability() is not defined for spatially-varying custom dispersive poles"),
+    ("witwin/maxwell/media.py", "relative_permeability() is not defined for a GyromagneticFerrite"),
+    ("witwin/maxwell/media.py", "evaluate_at_frequency() is not defined for a GyromagneticFerrite"),
     ("witwin/maxwell/media.py", "PerturbationMedium frequency evaluation is spatially varying"),
     ("witwin/maxwell/media.py", "relative_permittivity() is not defined for PerturbationMedium"),
     ("witwin/maxwell/scene.py", "SceneModule subclasses must implement to_scene()"),

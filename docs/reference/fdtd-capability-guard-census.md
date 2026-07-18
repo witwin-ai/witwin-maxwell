@@ -11,10 +11,11 @@ The 2026-07-17 integrated repository state (circuit co-simulation, Touchstone
 network embedding, the thin-wire subgrid conductor series in plan 07 phases
 0-3, the array basis / active-S feature series in plan 06 phases 0-1, and the
 plan 07 Phase 4 multi-GPU wire forward slice, plus the plan 07 Phase 4
-finite-conductor wire series-impedance slice, all merged) contains 156 guards:
+finite-conductor wire series-impedance slice, plus the plan 08 Phase-0
+gyromagnetic ferrite slices 0a/0b/1a, all merged) contains 160 guards:
 
-- 134 capability guards tracked by the non-increasing test budget;
-- 22 contract guards excluded by exact file and message substring.
+- 136 capability guards tracked by the non-increasing test budget;
+- 24 contract guards excluded by exact file and message substring.
 
 The single-GPU circuit adjoint provides the circuit replay and transpose
 linear-solve VJP. Its remaining explicit limits are the omitted t=0
@@ -40,16 +41,16 @@ The capability baseline is distributed as follows:
 | Area | Capability guards |
 | --- | ---: |
 | External interoperability adapter | 18 |
-| Material compilers | 12 |
+| Material compilers | 13 |
 | Frequency-domain runtime | 5 |
 | Time-domain adjoint | 19 |
 | Time-domain excitation | 12 |
 | Time-domain ports and lumped elements | 13 |
 | Time-domain runtime | 20 |
 | Public simulation, result, and network workflows | 24 |
-| Material models | 7 |
+| Material models | 8 |
 | Postprocessing | 4 |
-| **Total** | **134** |
+| **Total** | **136** |
 
 This integrated baseline is the 2026-07-16 circuit/network state (119 capability
 guards) plus the ten thin-wire capability guards from plan 07 phases 0-3 (giving
@@ -147,14 +148,47 @@ and the guard disappears once the recurrence lands. It is counted under
 "Material compilers" (11 -> 12); lower the budget when the lossy recurrence is
 wired into the runtime.
 
+### Gyromagnetic ferrite reconciliation (2026-07-17)
+
+The plan 08 Phase-0 gyromagnetic ferrite slices (0a physics contract, 0b torch
+reference oracle, 1a `GyromagneticFerrite` material type) add four reviewed
+`NotImplementedError` guards: two capability gaps and two permanent contracts.
+
+Capability gaps (+2, `134 -> 136`):
+
+- `witwin/maxwell/compiler/materials.py` `_static_structure_material` rejects a
+  `GyromagneticFerrite` structure. Its non-reciprocal off-diagonal permeability
+  is produced by a local linearized-LLG magnetization ADE that the material
+  compiler does not yet lower; compiling it as a plain `Material` would silently
+  discard the gyrotropy and simulate a reciprocal medium, so the compiler fails
+  closed. It is a genuine capability gap (Material compilers `12 -> 13`); lower
+  the budget when the compiler/runtime slices (1b/1c) land.
+- `witwin/maxwell/media.py` `PerturbationMedium.__init__` rejects a
+  `GyromagneticFerrite` base. The medium perturbs a scalar permittivity
+  background, which would silently discard the ferrite's magnetization state
+  (Material models `7 -> 8`); lower the budget when a ferrite perturbation branch
+  is implemented.
+
+Permanent contracts (+2, listed in `CONTRACT_GUARDS`, Material
+frequency-evaluation domains `9 -> 11`):
+
+- `GyromagneticFerrite.relative_permeability` and
+  `GyromagneticFerrite.evaluate_at_frequency` both fail closed because a scalar
+  (or diagonal) `FrequencyMaterialSample` cannot represent the off-diagonal
+  gyromagnetic Polder tensor. Callers use `permeability_tensor_at_freq()` /
+  `polder_tensor()` instead. These are definitionally the same family as the
+  existing material "…is not defined for…" frequency-evaluation contracts, so they
+  are excluded by exact `(file, substring)` match rather than counted against the
+  capability budget.
+
 ## Contract exclusions
 
-`CONTRACT_GUARDS` in the test is the canonical exact-match inventory. Its 22
+`CONTRACT_GUARDS` in the test is the canonical exact-match inventory. Its 24
 entries cover these stable contract families:
 
 | Contract family | Count |
 | --- | ---: |
-| Material frequency-evaluation domains | 9 |
+| Material frequency-evaluation domains | 11 |
 | Module-style scene implementation requirement | 1 |
 | Non-meshable complex polygon geometry | 1 |
 | Time-domain adjoint input, complex-state, and fixed-step requirements | 3 |
@@ -163,7 +197,7 @@ entries cover these stable contract families:
 | Bloch-boundary total-field/scattered-field slab requirement | 1 |
 | Closed-surface exterior-sampling requirements | 3 |
 | Time-domain-only embedded network feedback | 1 |
-| **Total** | **22** |
+| **Total** | **24** |
 
 When an implementation removes a capability guard, lower
 `CAPABILITY_GUARD_BUDGET` in the same commit. Reclassifying a guard as a public
