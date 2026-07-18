@@ -3431,7 +3431,7 @@ def _mur_abc_face(*, field, axis, boundaryIndex, adjacentIndex, coef, prevBounda
 
 
 def _apply_sibc_surface(
-    *, electric, magnetic, axis, electricIndex, magneticIndex, sign, surfaceR, surfaceLOverDt, hPrev
+    *, electric, magnetic, axis, electricIndex, magneticIndex, sign, surfaceR
 ):
     _COMPILED_EXTENSION.apply_sibc_surface(
         electric,
@@ -3441,8 +3441,6 @@ def _apply_sibc_surface(
         int(magneticIndex),
         float(sign),
         float(surfaceR),
-        float(surfaceLOverDt),
-        hPrev,
     )
 
 

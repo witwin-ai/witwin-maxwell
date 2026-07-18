@@ -1084,11 +1084,20 @@ def _configure_sibc(solver):
     tangential E edges stay zero (a zero open-fraction folded into the update
     coefficients, exactly as PEC does) and (b) overriding the two tangential E
     faces on the surface node plane each step from the vacuum-side tangential H,
-    which ``apply_sibc_surface`` in ``stepping.py`` performs. The surface
-    impedance is evaluated at the operating frequency as a narrowband series R-L,
-    ``Zs(omega0) = R + j*omega0*Ls`` with ``R = sqrt(omega0*mu0/(2*sigma))`` and
-    ``Ls = R/omega0``, so ``Zs(omega0)`` reproduces the exact Leontovich value at
-    the source frequency.
+    which ``apply_sibc_surface`` in ``stepping.py`` performs. The surface is the
+    dissipative (resistive) part of the Leontovich impedance evaluated at the
+    operating frequency, ``R = sqrt(omega0*mu0/(2*sigma))``.
+
+    The reactive part of ``Zs(omega0) = (1 + j) * R`` is intentionally dropped. Its
+    only stable-looking discretization in this E-from-H overwrite is the explicit
+    forward difference ``(Ls/dt) * (H^{n+1/2} - H^{n-1/2})``, which is non-passive:
+    it injects energy at the surface every step (numerical round-trip gain growing
+    as ``R, Ls ~ sqrt(f)``) and drives the solve to non-finite fields once the
+    surface gain exceeds the ambient radiation/PML loss. For a good conductor the
+    reactance is negligible for the reflection magnitude the SIBC targets --
+    ``|Gamma|`` from the full ``(1 + j) R`` versus the resistive ``R`` differs by
+    ``< 1.3e-3`` across the validity domain -- so the resistive surface reproduces
+    the analytic Leontovich reflection while remaining stable.
     """
     solver.sibc_enabled = False
     solver._sibc = None
@@ -1104,7 +1113,6 @@ def _configure_sibc(solver):
     if omega0 <= 0.0:
         raise ValueError("LossyMetalMedium SIBC requires a positive operating frequency.")
     surface_r = float(np.sqrt(omega0 * solver.mu0 / (2.0 * sigma)))
-    surface_l = surface_r / omega0
 
     # Mask the metal interior: zero the update coefficients of the tangential
     # E edges strictly inside the metal (node index on the metal side of the
@@ -1134,12 +1142,12 @@ def _configure_sibc(solver):
             setattr(solver, name, (getattr(solver, name) * mask).contiguous())
 
     # Tangential components (b, c) in cyclic order after the normal axis, each
-    # paired with the transverse H one cell out on the vacuum side. The Leontovich
-    # relation E_t = Zs * (n_hat x H) with the metal outward normal n_hat gives
-    # E_b = +sn*(R*H_c + Ls*dH_c/dt), E_c = -sn*(R*H_b + Ls*dH_b/dt); sn = +1 when
-    # the metal fills the high side of the surface (n_hat = -axis) and -1 for the
-    # low side. This is the passive (energy-absorbing) branch: the opposite sign is
-    # a negative surface resistance and grows without bound.
+    # paired with the transverse H one cell out on the vacuum side. The resistive
+    # Leontovich relation E_t = R * (n_hat x H) with the metal outward normal n_hat
+    # gives E_b = +sn*R*H_c, E_c = -sn*R*H_b; sn = +1 when the metal fills the high
+    # side of the surface (n_hat = -axis) and -1 for the low side. This is the
+    # passive (energy-absorbing) branch: the opposite sign is a negative surface
+    # resistance and grows without bound.
     b = (axis + 1) % 3
     c = (axis + 2) % 3
     sn = 1.0 if metal_side == "high" else -1.0
@@ -1147,28 +1155,20 @@ def _configure_sibc(solver):
         (_E_COMPONENTS[b], _H_COMPONENTS[c], +sn),
         (_E_COMPONENTS[c], _H_COMPONENTS[b], -sn),
     )
-    face_state = []
-    for e_name, h_name, sign in faces:
-        h_tensor = getattr(solver, h_name)
-        h_selector = _axis_index_tuple(h_tensor.dim(), axis, vacuum_h_index)
-        e_selector = _axis_index_tuple(getattr(solver, e_name).dim(), axis, surface_node)
-        face_state.append(
-            {
-                "e_name": e_name,
-                "h_name": h_name,
-                "sign": float(sign),
-                "axis": axis,
-                "electric_index": surface_node,
-                "magnetic_index": vacuum_h_index,
-                "e_selector": e_selector,
-                "h_selector": h_selector,
-                "h_prev": torch.zeros_like(h_tensor[h_selector]),
-            }
-        )
+    face_state = tuple(
+        {
+            "e_name": e_name,
+            "h_name": h_name,
+            "sign": float(sign),
+            "axis": axis,
+            "electric_index": surface_node,
+            "magnetic_index": vacuum_h_index,
+        }
+        for e_name, h_name, sign in faces
+    )
     solver._sibc = {
         "surface_r": surface_r,
-        "surface_l": surface_l,
-        "faces": tuple(face_state),
+        "faces": face_state,
     }
     solver.sibc_enabled = True
 

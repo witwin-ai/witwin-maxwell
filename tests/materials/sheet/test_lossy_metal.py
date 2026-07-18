@@ -153,9 +153,12 @@ def test_lossy_metal_simulation_prepare_configures_sibc():
     solver = mw.Simulation.fdtd(_slab_scene(device="cuda"), frequencies=[1.0e9]).prepare().solver
     assert solver.sibc_enabled
     state = solver._sibc
-    assert state["surface_r"] > 0.0
-    # Narrowband series R-L: Ls = R / omega0 (surface inductance).
+    # Resistive Leontovich surface: R = sqrt(omega0*mu0/(2*sigma)). The reactive part
+    # of Zs is intentionally omitted (its explicit derivative overwrite is non-passive
+    # and unstable), so the descriptor carries only the surface resistance.
     omega0 = 2.0 * np.pi * solver.source_frequency
-    assert state["surface_l"] == pytest.approx(state["surface_r"] / omega0, rel=1e-9)
+    expected_r = float(np.sqrt(omega0 * solver.mu0 / (2.0 * 5.8e7)))
+    assert state["surface_r"] == pytest.approx(expected_r, rel=1e-9)
+    assert "surface_l" not in state
     # Two tangential faces are configured on the illuminated surface.
     assert len(state["faces"]) == 2
