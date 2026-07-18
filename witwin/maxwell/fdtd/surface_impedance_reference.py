@@ -111,7 +111,7 @@ class SurfaceAcceptanceBudget:
     # and issues no surface kernel launches). Multi-GPU value/loss/gradient parity
     # inherits plan 02's frozen distributed budget verbatim; that budget is referenced,
     # not re-frozen here.
-    no_sibc_runtime_regression: float = 1.0e-2
+    no_surface_impedance_runtime_regression: float = 1.0e-2
 
 
 SURFACE_ACCEPTANCE_BUDGET = SurfaceAcceptanceBudget()

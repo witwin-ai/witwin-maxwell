@@ -708,6 +708,27 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
         return _medium2d(material, td, length_scale)
     if getattr(material, "is_lossy_metal", False):
         return _lossy_metal_medium(material, td, length_scale, frequencies)
+    if getattr(material, "is_surface_impedance", False):
+        # A generic SurfaceImpedanceMedium carries its physics in a broadband causal
+        # rational surface-impedance model, not in a finite bulk permittivity (eps_r
+        # stays at its 1.0 default, sigma_e = 0). Without this branch it would fall
+        # through to the non-dispersive td.Medium(permittivity=1.0) path and silently
+        # export as vacuum, dropping the entire surface response -- the exact trap the
+        # PEC branch documents. The good-conductor LossyMetalMedium is the only surface
+        # with a designed reference-backend mapping (handled above); the generic
+        # rational surface has no reference-backend surface-impedance construct wired
+        # yet, so fail closed rather than export a physically wrong vacuum structure.
+        raise NotImplementedError(
+            "Reference-backend export of a generic SurfaceImpedanceMedium is not yet "
+            "designed: its physics is a broadband causal rational tangential surface "
+            "impedance E_t = Z_s(omega) (n x H), which has no finite bulk-permittivity "
+            "equivalent and no reference-backend surface-impedance construct mapped for "
+            "it. The narrowband good-conductor LossyMetalMedium exports through the "
+            "dedicated lossy-metal surface path; a rational model has no such mapping "
+            "until the surface-impedance adapter is designed. Resolve the metal "
+            "volumetrically with Material(sigma_e=...), use a LossyMetalMedium for a "
+            "good conductor, or use Material.pec() for a lossless conductor."
+        )
     if getattr(material, "perturbation", None) is not None:
         # Resolve the background shift first: the lowered Material may still carry
         # (custom) poles, which the recursion then handles through the pole path.

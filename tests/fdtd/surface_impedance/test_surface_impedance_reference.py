@@ -65,7 +65,7 @@ def test_surface_acceptance_budget_is_frozen():
         "convergence_levels": 3,
         "gradient_relative_error": 2.0e-2,
         "gradient_absolute_floor": 1.0e-8,
-        "no_sibc_runtime_regression": 1.0e-2,
+        "no_surface_impedance_runtime_regression": 1.0e-2,
     }
     actual = {f.name: getattr(BUDGET, f.name) for f in dataclasses.fields(BUDGET)}
     assert actual == expected

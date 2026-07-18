@@ -151,6 +151,24 @@ def test_bad_frequency_range_and_representation_are_rejected():
         RationalSurfaceImpedance(good_poles, good_res, frequency_range=_BAND, representation="S")
 
 
+def test_representation_kwarg_contradicting_passed_model_is_rejected():
+    """Fail closed: a representation kwarg that contradicts a passed RationalModel's own
+    representation must raise, not silently reinterpret Z-samples as admittance."""
+    model = RationalModel(
+        poles=torch.tensor([-1.0e10], dtype=torch.complex128),
+        residues=torch.tensor([[[1.0e9]]], dtype=torch.complex128),
+        representation="Y",
+    )
+    with pytest.raises(ValueError, match="contradicts"):
+        RationalSurfaceImpedance(model, None, frequency_range=_BAND, representation="Z")
+    # Omitting the kwarg (or passing the matching one) keeps the model's representation.
+    assert RationalSurfaceImpedance(model, None, frequency_range=_BAND).representation == "Y"
+    assert (
+        RationalSurfaceImpedance(model, None, frequency_range=_BAND, representation="Y").representation
+        == "Y"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # SurfaceImpedanceMedium
 # --------------------------------------------------------------------------- #

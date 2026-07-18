@@ -1199,6 +1199,62 @@ class TestSheetAndMetalConversion:
         with pytest.raises(ValueError, match="frequenc"):
             _convert_material(medium, td)
 
+    def _narrowband_surface_impedance_medium(self):
+        # A minimal generic surface-impedance model: the order-1 series R-L admittance
+        # Y_s(s) = (1/L)/(s + omega0), a single stable positive-real pole. Its physics
+        # lives entirely in the tangential surface response, not in any bulk permittivity.
+        omega0 = 2.0 * math.pi * 2.0e9
+        inductance = math.sqrt(omega0 * 1.25663706212e-6 / (2.0 * 50.0)) / omega0
+        model = mw.RationalSurfaceImpedance(
+            poles=torch.tensor([-omega0], dtype=torch.complex128),
+            residues=torch.tensor([[[1.0 / inductance]]], dtype=torch.complex128),
+            frequency_range=(1.0e8, 1.0e10),
+            representation="Y",
+        )
+        return mw.SurfaceImpedanceMedium(impedance=model, name="coating")
+
+    def test_generic_surface_impedance_medium_is_rejected(self, inject_mock_tidy3d):
+        # A generic SurfaceImpedanceMedium carries no finite bulk permittivity (eps_r
+        # stays 1.0, sigma_e = 0), so without a dedicated branch it would silently fall
+        # through to td.Medium(permittivity=1.0) and export as vacuum, dropping the whole
+        # surface response. The adapter must fail closed instead.
+        td = inject_mock_tidy3d
+        medium = self._narrowband_surface_impedance_medium()
+        with pytest.raises(NotImplementedError, match="SurfaceImpedanceMedium"):
+            _convert_material(medium, td, frequencies=(2.0e9,))
+
+    def test_generic_surface_impedance_medium_never_exports_vacuum(self, inject_mock_tidy3d):
+        # Falsification guard for the "silently export as vacuum" trap: confirm the
+        # rejection does not return a vacuum-like td.Medium.
+        td = inject_mock_tidy3d
+        medium = self._narrowband_surface_impedance_medium()
+        try:
+            result = _convert_material(medium, td, frequencies=(2.0e9,))
+        except NotImplementedError:
+            result = None
+        assert result is None or not isinstance(result, td.Medium)
+
+    def test_generic_surface_impedance_structure_scene_is_rejected(self, inject_mock_tidy3d):
+        # End-to-end: a scene carrying a generic surface-impedance structure must not
+        # export a vacuum structure through scene_to_tidy3d. It fails closed at the
+        # compile gate (generic surface runtime is unwired) before reaching the adapter.
+        inject_mock_tidy3d
+        medium = self._narrowband_surface_impedance_medium()
+        scene = (
+            mw.Scene(
+                domain=mw.Domain(bounds=((-1, 1), (-1, 1), (-1, 1))),
+                grid=mw.GridSpec.uniform(0.05),
+                boundary=mw.BoundarySpec.pml(num_layers=10),
+                device="cpu",
+            )
+            .add_structure(
+                mw.Structure(mw.Box(position=(0, 0, -0.9), size=(2.0, 2.0, 0.2)), medium)
+            )
+            .add_source(mw.PointDipole(position=(0, 0, 0.3), polarization="Ex", source_time=mw.CW(frequency=2e9)))
+        )
+        with pytest.raises(NotImplementedError, match="[Ss]urface"):
+            scene.to_tidy3d(frequencies=2e9)
+
     def test_medium2d_structure_scene_exports_medium2d(self, inject_mock_tidy3d):
         td = inject_mock_tidy3d
         scene = (

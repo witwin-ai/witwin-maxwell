@@ -61,7 +61,18 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # fails closed instead of silently dropping the loss. It is a genuine capability
 # gap (Material compilers 11 -> 12); lower this budget when the lossy recurrence
 # lands in the runtime.
-CAPABILITY_GUARD_BUDGET = 134
+#
+# 2026-07-17 (surface-impedance Phase 0 adapter fail-close): 134 -> 135 (+1).
+# adapters/tidy3d.py::_convert_material now raises NotImplementedError for a generic
+# SurfaceImpedanceMedium instead of letting it fall through to the non-dispersive
+# td.Medium(permittivity=1.0) path and silently export as vacuum. Its physics is a
+# broadband causal rational tangential surface impedance with no finite bulk-
+# permittivity equivalent, and the reference backend has no surface-impedance mapping
+# wired for a rational model yet (the narrowband good-conductor LossyMetalMedium keeps
+# its dedicated lossy-metal surface path). It is a genuine capability gap (External
+# interoperability adapter 18 -> 19); lower this budget when the surface-impedance
+# adapter mapping is designed.
+CAPABILITY_GUARD_BUDGET = 135
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

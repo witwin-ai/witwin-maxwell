@@ -1409,9 +1409,11 @@ def _reject_surface_impedance(reason: str, *, phase: str):
 def _geometries_coincide(first, second) -> bool:
     """Whether two axis-aligned ``Box`` geometries occupy the same extent.
 
-    A Phase 0 skeleton for surface-ownership overlap detection: it recognizes the
-    unambiguous case of two boxes sharing a position and size. Per-face conformal
-    overlap resolution is built with the surface layout in a later phase.
+    A Phase 0 skeleton for surface-ownership overlap detection: it recognizes only the
+    unambiguous case of two boxes sharing a position and size. A PEC or 2D sheet that
+    partially overlaps the metal's illuminated face (different extent, same interface
+    plane) is NOT detected here and passes silently; per-face conformal / partial-overlap
+    ownership resolution is deferred to the Phase 1 surface layout.
     """
     if not isinstance(first, Box) or not isinstance(second, Box):
         return False
@@ -1419,7 +1421,17 @@ def _geometries_coincide(first, second) -> bool:
     second_center = tuple(float(value) for value in second.position)
     first_size = tuple(float(value) for value in first.size)
     second_size = tuple(float(value) for value in second.size)
-    scale = max(max(first_size), max(second_size), 1.0)
+    # Scale the coincidence tolerance to the geometry's own extents (sizes and
+    # positions) rather than clamping at a 1-metre absolute floor: a 1e-9-metre floor
+    # is ~1e-3 relative for micron-scale photonics, which would falsely merge two
+    # genuinely distinct sub-nanometre-offset boxes. Falling back to 1.0 only for the
+    # fully degenerate all-zero geometry keeps the tolerance well defined.
+    extent = max(
+        max(first_size),
+        max(second_size),
+        max(abs(value) for value in first_center + second_center),
+    )
+    scale = extent if extent > 0.0 else 1.0
     tolerance = 1.0e-9 * scale
     return all(
         abs(first_center[axis] - second_center[axis]) <= tolerance

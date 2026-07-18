@@ -1432,6 +1432,12 @@ class RationalSurfaceImpedance(SurfaceImpedanceModel):
     like ``sqrt(omega)`` and whose ``Y_s`` is bounded) or the impedance ``Z_s``
     (``"Z"``). :meth:`surface_impedance` always returns ``Z_s`` regardless of the
     internal representation.
+
+    Passivity is certified only over ``frequency_range``. Evaluating
+    :meth:`surface_impedance`, :meth:`admittance`, or :meth:`evaluate` outside that
+    band extrapolates the rational model and carries no passivity or accuracy
+    certificate; the Phase 1 compile gate enforces in-band-only use for the stepping
+    runtime, so out-of-band queries are for inspection only.
     """
 
     def __init__(
@@ -1441,23 +1447,32 @@ class RationalSurfaceImpedance(SurfaceImpedanceModel):
         direct=0.0,
         *,
         frequency_range,
-        representation: str = "Y",
+        representation: str | None = None,
         fit_report: FitReport | None = None,
         sample_frequencies: torch.Tensor | None = None,
         passivity_tolerance: float = 1.0e-9,
         certificate_samples: int = 64,
     ):
-        model = (
-            poles
-            if isinstance(poles, RationalModel)
-            else RationalModel(
+        if isinstance(poles, RationalModel):
+            model = poles
+            if representation is not None and representation != model.representation:
+                # Fail closed: silently letting the passed model's representation win
+                # would reinterpret Z-samples as admittance (or vice versa) and invert
+                # the physics without any error.
+                raise ValueError(
+                    "representation kwarg "
+                    f"{representation!r} contradicts the passed RationalModel's own "
+                    f"representation {model.representation!r}; omit representation or "
+                    "pass a model already built with the intended representation."
+                )
+        else:
+            model = RationalModel(
                 poles=poles,
                 residues=residues,
                 direct=direct,
-                representation=representation,
+                representation="Y" if representation is None else representation,
                 report=fit_report,
             )
-        )
         band = _coerce_frequency_range(frequency_range, name="frequency_range")
         if model.representation not in {"Y", "Z"}:
             raise ValueError("surface impedance representation must be 'Y' or 'Z'.")

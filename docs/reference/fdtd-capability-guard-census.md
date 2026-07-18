@@ -11,9 +11,9 @@ The 2026-07-17 integrated repository state (circuit co-simulation, Touchstone
 network embedding, the thin-wire subgrid conductor series in plan 07 phases
 0-3, the array basis / active-S feature series in plan 06 phases 0-1, and the
 plan 07 Phase 4 multi-GPU wire forward slice, plus the plan 07 Phase 4
-finite-conductor wire series-impedance slice, all merged) contains 156 guards:
+finite-conductor wire series-impedance slice, all merged) contains 157 guards:
 
-- 134 capability guards tracked by the non-increasing test budget;
+- 135 capability guards tracked by the non-increasing test budget;
 - 22 contract guards excluded by exact file and message substring.
 
 The single-GPU circuit adjoint provides the circuit replay and transpose
@@ -39,7 +39,7 @@ The capability baseline is distributed as follows:
 
 | Area | Capability guards |
 | --- | ---: |
-| External interoperability adapter | 18 |
+| External interoperability adapter | 19 |
 | Material compilers | 12 |
 | Frequency-domain runtime | 5 |
 | Time-domain adjoint | 19 |
@@ -49,7 +49,7 @@ The capability baseline is distributed as follows:
 | Public simulation, result, and network workflows | 24 |
 | Material models | 7 |
 | Postprocessing | 4 |
-| **Total** | **134** |
+| **Total** | **135** |
 
 This integrated baseline is the 2026-07-16 circuit/network state (119 capability
 guards) plus the ten thin-wire capability guards from plan 07 phases 0-3 (giving
@@ -146,6 +146,26 @@ capability gap, not a public contract: the impedance model itself is implemented
 and the guard disappears once the recurrence lands. It is counted under
 "Material compilers" (11 -> 12); lower the budget when the lossy recurrence is
 wired into the runtime.
+
+### Surface-impedance adapter reconciliation (2026-07-17)
+
+The surface-impedance Phase 0 slice froze the contract, the rational model, the
+shared fitter, and the compiler funnel with the guard census reconciled unchanged
+at 134 (the single re-authored `_reject_surface_impedance` funnel replaced the
+prior surface-impedance rejection, no net change). The follow-up fail-close in the
+interoperability adapter adds one reviewed capability guard.
+`witwin/maxwell/adapters/tidy3d.py::_convert_material` now raises
+`NotImplementedError` for a generic `SurfaceImpedanceMedium` instead of letting it
+fall through to the non-dispersive `td.Medium(permittivity=1.0)` path and silently
+export as vacuum. A generic surface-impedance medium carries its physics in a
+broadband causal rational tangential surface impedance
+`E_t = Z_s(omega) (n x H)` with no finite bulk-permittivity equivalent, and the
+reference backend has no surface-impedance construct mapped for a rational model
+yet (the narrowband good-conductor `LossyMetalMedium` keeps its dedicated
+lossy-metal surface path). It is a genuine capability gap, not a public contract:
+the guard disappears once the surface-impedance adapter mapping is designed. It is
+counted under "External interoperability adapter" (18 -> 19); lower the budget when
+the mapping lands.
 
 ## Contract exclusions
 
