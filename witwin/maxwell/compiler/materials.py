@@ -1451,10 +1451,12 @@ def _reject_overlapping_surface_ownership(scene, surface_structures):
 class CompiledSurfaceMetal:
     """One compiled axis-aligned metal volume carrying a surface-impedance boundary.
 
-    ``structure_index`` is the global scene structure index, used as the deterministic
-    owner tie-break for edges shared by two faces (minimum-index owner wins, matching
-    the plan-07 minimum-global-edge owner discipline and the reference oracle's
-    ``assemble_surface_dissipation``). ``cell_slices`` is the box's lower-inclusive /
+    ``structure_index`` is the global scene structure index. Metals are enumerated in
+    ascending ``structure_index`` order, so a face's ``metal_index`` (the final key of
+    :attr:`CompiledSurfaceFace.owner_rank`) realizes the deterministic owner tie-break
+    for edges shared by two faces: the minimum-structure-index owner wins, matching the
+    plan-07 minimum-global-edge owner discipline and the reference oracle's
+    ``assemble_surface_dissipation``. ``cell_slices`` is the box's lower-inclusive /
     upper-exclusive node window per axis (the metal interior masked to a
     good-conductor termination). ``touches_lower`` / ``touches_upper`` flag whether the
     box is flush against the physical domain boundary on each axis-side (a flush face is
@@ -1497,10 +1499,24 @@ class CompiledSurfaceFace:
     area: float
 
     @property
-    def owner_rank(self) -> tuple[int, int, int, int]:
-        """Deterministic total order for shared-edge ownership (lower wins)."""
+    def owner_rank(self) -> tuple[int, int, int, int, int]:
+        """Deterministic total order for shared-edge ownership (lower wins).
+
+        ``metal_index`` is the final tie-break so two coincident same-material faces
+        from distinct abutting metals never tie: because ``metal_index`` is assigned in
+        ascending scene-structure order and ``faces`` is sorted descending (the minimum
+        owner sorts last and last-writer-wins), the minimum-structure-index metal owns a
+        shared edge, matching the plan-07 minimum-global-edge owner discipline instead of
+        relying on enumeration order.
+        """
         b = (self.axis + 1) % 3
-        return (self.axis, self.surface_node, b, int(self.transverse_slices[0].start))
+        return (
+            self.axis,
+            self.surface_node,
+            b,
+            int(self.transverse_slices[0].start),
+            self.metal_index,
+        )
 
 
 @dataclass(frozen=True)

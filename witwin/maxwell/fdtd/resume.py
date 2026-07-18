@@ -26,6 +26,7 @@ _SCHEMA_TUPLE_FIELDS = (
     "magnetic_dispersive_state_names",
     "lumped_state_names",
     "circuit_state_names",
+    "surface_impedance_state_names",
 )
 
 
@@ -252,9 +253,13 @@ def _configuration_fingerprint(solver) -> str:
     surface = getattr(solver, "_surface_impedance", None)
     if surface is not None:
         for index, write in enumerate(surface["writes"]):
-            # Hash only the stable descriptor scalars (the write also carries torch
-            # slices and, for a generic rational face, ADE state tensors that are not
-            # part of the resume identity).
+            ade = write.get("ade")
+            # Hash the stable descriptor scalars plus, for a generic rational face, the
+            # discrete state-space coefficients (A, B, C, D). The per-edge ADE *state*
+            # is dynamic and travels in the physics checkpoint, but the coefficients are
+            # part of the resume identity: a checkpoint captured against a different
+            # rational surface model with the same geometry must fail this fingerprint
+            # rather than resume its state under mismatched dynamics.
             descriptor = (
                 write["e_name"],
                 write["h_name"],
@@ -264,9 +269,12 @@ def _configuration_fingerprint(solver) -> str:
                 write["magnetic_index"],
                 write["full_plane"],
                 write["surface_r"],
-                write.get("ade") is not None,
+                ade is not None,
             )
             _hash_value(hasher, f"surface_impedance[{index}]", descriptor)
+            if ade is not None:
+                for key in ("A", "B", "C", "D"):
+                    _hash_value(hasher, f"surface_impedance[{index}].{key}", ade[key])
     for index, runtime in enumerate(getattr(solver, "_port_runtimes", ())):
         _hash_value(hasher, f"port[{index}].definition", runtime.port)
         _hash_value(hasher, f"port[{index}].frequencies", runtime.frequencies)

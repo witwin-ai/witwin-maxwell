@@ -189,6 +189,35 @@ def test_two_different_surface_materials_on_one_interface_fail_closed():
         scene.compile_materials()
 
 
+def test_tangential_2x2_surface_model_fails_closed_with_a_phase():
+    """Falsification of the S1.2 scalar-ADE scope: a tangential 2x2 (anisotropic) surface
+    response must fail closed. The per-edge ADE steps a scalar impedance; the
+    cross-polarized 2x2 tangential coupling is a distinct local update."""
+    omega0 = 2.0 * math.pi * 2.0e9
+    r = math.sqrt(omega0 * 1.25663706212e-6 / (2.0 * 50.0))
+    admittance = 1.0 / (r / omega0)  # 1/L for the passive order-1 R-L special case
+    # A diagonal 2x2 tangential model: passive on each tangential component, port_count 2.
+    # residues carry shape [Nout, Nin, order]; order (one pole) is the last axis.
+    residues = torch.zeros((2, 2, 1), dtype=torch.complex128)
+    residues[0, 0, 0] = admittance
+    residues[1, 1, 0] = admittance
+    model = RationalSurfaceImpedance(
+        poles=torch.tensor([-omega0], dtype=torch.complex128),
+        residues=residues,
+        frequency_range=(1.0e9, 5.0e9),
+        representation="Y",
+    )
+    assert model.port_count == 2
+    medium = SurfaceImpedanceMedium(impedance=model, name="anisotropic")
+    scene = prepare_scene(_scene([mw.Structure(geometry=Box(**_FLUSH_SLAB), material=medium)]))
+    with pytest.raises(NotImplementedError) as info:
+        scene.compile_materials()
+    message = str(info.value)
+    assert "tangential 2x2" in message
+    assert "Phase" in message
+    assert not any(phrase in message.lower() for phrase in _BANNED_DEFERRALS)
+
+
 # --- remaining fail-closed cases name a phase, avoid deferral phrases ---------
 
 

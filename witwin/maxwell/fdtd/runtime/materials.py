@@ -1124,6 +1124,12 @@ def _surface_discrete_state_space(solver, material):
     any step runs -- a non-passive surface injects energy and diverges. Returns the
     discrete ``(A, B, C, D)`` tensors (real, on the solver device) for a scalar
     surface.
+
+    The passivity certificate bounds the continuous surface response, not the coupled
+    surface-plus-Yee discrete stability: a certified-passive high-order fit at coarse
+    resolution (e.g. order ~10 near ~40 cells/wavelength) can still diverge. Stability is
+    established in the moderate-order / adequate-resolution regime the acceptance suite
+    covers; use a moderate fit order at adequate cells-per-wavelength.
     """
     from ...compiler.surface_impedance import fit_surface_impedance
 
@@ -1207,6 +1213,15 @@ def _configure_surface_impedance(solver):
             (_E_COMPONENTS[c], _H_COMPONENTS[b], -sn),
         )
         b_slice, c_slice = face.transverse_slices
+        if face.full_plane:
+            # A full-plane face owns the entire transverse surface E plane. The node-
+            # coverage slices under-cover by one the tangential component whose transverse
+            # dimension is node-length (an exact-fill box gives b_slice.stop == cell_count,
+            # missing the last node row), which would leave a masked-zero PEC seam where
+            # the fused order-0 kernel writes the Leontovich value. Widen to the whole
+            # plane so the generic sliced write and the fused kernel share one footprint.
+            b_slice = slice(None)
+            c_slice = slice(None)
 
         surface_r = None
         discrete = None

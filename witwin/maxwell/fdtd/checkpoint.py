@@ -77,6 +77,7 @@ class FDTDCheckpointSchema:
     circuit_state_names: tuple[str, ...] = ()
     network_state_names: tuple[str, ...] = ()
     wire_state_names: tuple[str, ...] = ()
+    surface_impedance_state_names: tuple[str, ...] = ()
 
     @property
     def state_names(self) -> tuple[str, ...]:
@@ -91,6 +92,7 @@ class FDTDCheckpointSchema:
             + self.circuit_state_names
             + self.network_state_names
             + self.wire_state_names
+            + self.surface_impedance_state_names
         )
 
 
@@ -161,6 +163,32 @@ def iter_network_state_specs(solver):
         yield network_carried_voltage_name(index), runtime.carried_voltage
 
 
+def surface_impedance_state_name(index: int) -> str:
+    return f"surface_ade_{int(index)}_state"
+
+
+def iter_surface_impedance_state_specs(solver):
+    """Yield (name, state_tensor) for each generic rational surface-impedance write.
+
+    Order-0 (pure-resistance) surface writes are memoryless and carry no auxiliary
+    state; only the generic Z-form ADE writes hold a per-edge state vector that must
+    survive checkpoint/resume. The key is the write's position in the deterministic
+    owner-ordered write list, which is rebuilt identically by
+    ``_configure_surface_impedance`` on the resuming solver, so the per-edge state
+    layout ``[order, edges]`` round-trips exactly (single-GPU only; the distributed
+    solver rejects surface-impedance ownership before this path is reached).
+    """
+
+    surface = getattr(solver, "_surface_impedance", None)
+    if surface is None:
+        return
+    for index, write in enumerate(surface.get("writes", ())):
+        ade = write.get("ade")
+        if ade is None:
+            continue
+        yield surface_impedance_state_name(index), ade["state"]
+
+
 def checkpoint_schema(solver) -> FDTDCheckpointSchema:
     complex_field_names = _COMPLEX_FIELD_STATE_NAMES if bool(getattr(solver, "complex_fields_enabled", False)) else ()
     cpml_state_names = ()
@@ -209,6 +237,9 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
     wire_state_names = (
         _WIRE_STATE_NAMES if getattr(solver, "_wire_runtime", None) is not None else ()
     )
+    surface_impedance_state_names = tuple(
+        name for name, _tensor in iter_surface_impedance_state_specs(solver)
+    )
 
     return FDTDCheckpointSchema(
         version=_CHECKPOINT_SCHEMA_VERSION,
@@ -222,6 +253,7 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         circuit_state_names=circuit_state_names,
         network_state_names=network_state_names,
         wire_state_names=tuple(wire_state_names),
+        surface_impedance_state_names=surface_impedance_state_names,
     )
 
 
@@ -314,6 +346,8 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
     if wire_runtime is not None:
         tensors["wire_current"] = wire_runtime.current.detach().clone()
         tensors["wire_charge"] = wire_runtime.charge.detach().clone()
+    for name, tensor in iter_surface_impedance_state_specs(solver):
+        tensors[name] = tensor.detach().clone()
     state = FDTDCheckpointState(step=int(step), schema=schema, tensors=tensors)
     validate_checkpoint_state(state)
     return state
@@ -387,6 +421,8 @@ def _checkpoint_tensor_targets(solver, schema: FDTDCheckpointSchema):
     if wire_runtime is not None:
         yield "wire_current", wire_runtime.current, None
         yield "wire_charge", wire_runtime.charge, None
+    for name, tensor in iter_surface_impedance_state_specs(solver):
+        yield name, tensor, None
 
 
 def _checkpoint_expected_shape(target: torch.Tensor, layout) -> tuple[int, ...]:
