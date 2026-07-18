@@ -352,6 +352,173 @@ def test_coordinator_nccl_world_size_mismatch_raises(monkeypatch):
         DistributedFDTD(scene, frequency=1.0e9, parallel=parallel)
 
 
+# -- NCCL forward fail-closed fences (host-only) --------------------------
+#
+# The one-process-per-GPU NCCL forward path drives only the standard field solve
+# and the sized full-field gather. Monitors, coupled circuit/network/wire/port
+# runtimes, the trainable-density adjoint, and field shutoff are guarded out until
+# they are wired over NCCL. These pin each fence's specific message at
+# construction/solve time on the host: setting RANK/WORLD_SIZE/LOCAL_RANK lets
+# ``NcclHaloTransport.from_env`` bind without a torchrun launch, and the fences run
+# in ``DistributedFDTD.__init__`` (``_validate_nccl_capabilities``) or at the top of
+# ``solve`` before any CUDA allocation, so no GPU is required.
+
+
+def _set_nccl_launcher_env(monkeypatch, *, world_size=2):
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", str(world_size))
+    monkeypatch.setenv("LOCAL_RANK", "0")
+
+
+def _nccl_parallel():
+    import witwin.maxwell as mw
+
+    return mw.FDTDParallelConfig(
+        devices=("cuda:0", "cuda:1"),
+        transport="nccl",
+        gather_fields=True,
+        result_device="cuda:0",
+    )
+
+
+def _nccl_base_scene():
+    """A scene the NCCL forward path fully accepts (no guarded feature)."""
+
+    import witwin.maxwell as mw
+
+    return mw.Scene(
+        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
+        grid=mw.GridSpec.uniform(0.1),
+        boundary=mw.BoundarySpec.none(),
+        device="cpu",
+    )
+
+
+def test_nccl_forward_rejects_monitors(monkeypatch):
+    import witwin.maxwell as mw
+    from witwin.maxwell.fdtd.distributed import DistributedFDTD
+
+    _set_nccl_launcher_env(monkeypatch)
+    scene = _nccl_base_scene()
+    scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.0), fields=("Ez",)))
+
+    with pytest.raises(ValueError, match="per-monitor payload gather"):
+        DistributedFDTD(scene, frequency=1.0e9, parallel=_nccl_parallel())
+
+
+def _coupled_wire_scene():
+    import witwin.maxwell as mw
+
+    scene = _nccl_base_scene()
+    scene.add_thin_wire(
+        mw.ThinWire(
+            name="wire",
+            points=((-0.2, 0.0, 0.0), (0.2, 0.0, 0.0)),
+            radius=1.0e-3,
+            conductor=mw.WireConductor.pec(),
+        )
+    )
+    return scene
+
+
+def _coupled_port_scene():
+    import witwin.maxwell as mw
+
+    scene = _nccl_base_scene()
+    scene.add_port(
+        mw.LumpedPort(
+            name="port",
+            positive=(0.0, 0.0, 0.1),
+            negative=(0.0, 0.0, -0.1),
+            voltage_path=mw.AxisPath("z"),
+            current_surface=mw.Box(position=(0.0, 0.0, -0.05), size=(0.2, 0.2, 0.0)),
+            reference_impedance=50.0,
+        )
+    )
+    return scene
+
+
+@pytest.mark.parametrize(
+    "scene_builder",
+    (_coupled_wire_scene, _coupled_port_scene),
+    ids=("wire", "port"),
+)
+def test_nccl_forward_rejects_coupled_runtimes(monkeypatch, scene_builder):
+    from witwin.maxwell.fdtd.distributed import DistributedFDTD
+
+    _set_nccl_launcher_env(monkeypatch)
+    scene = scene_builder()
+
+    with pytest.raises(ValueError, match="owner-resident circuit/network/wire/port"):
+        DistributedFDTD(scene, frequency=1.0e9, parallel=_nccl_parallel())
+
+
+def test_nccl_forward_rejects_trainable_density(monkeypatch):
+    import torch
+
+    import witwin.maxwell as mw
+    from witwin.maxwell.fdtd.distributed import DistributedFDTD
+
+    _set_nccl_launcher_env(monkeypatch)
+    scene = _nccl_base_scene()
+    density = torch.rand((4, 4, 4), dtype=torch.float32, requires_grad=True)
+    scene.add_material_region(
+        mw.MaterialRegion(
+            name="design",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+            density=density,
+            eps_bounds=(1.0, 4.0),
+        )
+    )
+
+    with pytest.raises(ValueError, match="Multi-GPU NCCL adjoint"):
+        DistributedFDTD(scene, frequency=1.0e9, parallel=_nccl_parallel())
+
+
+def test_nccl_forward_rejects_field_shutoff(monkeypatch):
+    from witwin.maxwell.fdtd.distributed import DistributedFDTD
+
+    _set_nccl_launcher_env(monkeypatch)
+    # A fully accepted scene constructs on the host; the shutoff fence is at the top
+    # of solve(), before init_field(), so it raises without any CUDA allocation.
+    distributed = DistributedFDTD(
+        _nccl_base_scene(), frequency=1.0e9, parallel=_nccl_parallel()
+    )
+
+    with pytest.raises(ValueError, match="does not support field shutoff"):
+        distributed.solve(time_steps=8, shutoff=0.5)
+
+
+# -- NCCL gather result_device fail-fast (host-only) -----------------------
+
+
+def test_gather_component_slabs_rejects_non_bound_result_device(monkeypatch):
+    """rank 0 must receive peer slabs on its NCCL-bound device.
+
+    ``gather_component_slabs`` posts ``dist.recv`` into buffers on ``result_device``;
+    NCCL requires that device to be the rank's bound device. A ``result_device`` on
+    any other device fails fast with the constraint named, before any collective.
+    Driven as a pure host check: the connected flag and layouts are set directly so
+    the validation runs without a live process group.
+    """
+
+    import witwin.maxwell.fdtd.distributed.nccl_transport as mod
+
+    monkeypatch.setattr(mod.dist, "is_initialized", lambda: True)
+    transport = NcclHaloTransport(rank=0, world_size=2, local_rank=0)
+    transport._connected = True
+    transport._shard_layouts = (object(), object())
+
+    with pytest.raises(ValueError, match="NCCL-bound device"):
+        transport.gather_component_slabs(
+            engines=(object(),),
+            component="Ez",
+            local_values=(None,),
+            result_device=torch.device("cuda:1"),
+            global_nx=13,
+        )
+
+
 def test_parallel_config_timeout_validation():
     import witwin.maxwell as mw
 

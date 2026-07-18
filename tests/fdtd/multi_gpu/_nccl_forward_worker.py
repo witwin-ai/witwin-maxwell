@@ -29,7 +29,21 @@ from witwin.maxwell.scene import prepare_scene
 
 _FREQUENCY = 1.0e9
 _DFT_FREQUENCIES = (0.8e9, 1.0e9, 1.2e9)
-_STEPS = 48
+# The Gaussian pulse must physically cross the x=0 partition seam before the
+# gathered parity check runs, or the halo exchange carries no signal and the gate
+# is vacuous: at 48 steps a no-op'd electric halo still passes within atol 5e-6
+# because nothing has reached the seam. Measured single-GPU seam-plane amplitudes
+# (drive frequency, reference solve on this scene) as a fraction of each
+# component's domain max: at 48 steps the largest is Ex 6.1e-3 (below the floor);
+# at 120 steps Ex reaches 1.3e-2; at 160 steps Ex reaches 2.65e-2. 160 steps
+# clears the 1e-2 precondition floor by ~2.6x while keeping the run short.
+_STEPS = 160
+# Minimum seam-plane DFT amplitude (largest E component, relative to that
+# component's domain max) the reference solve must exhibit for the gathered halo
+# parity check to be meaningful. Justified above: 48-step (pre-crossing) configs
+# sit at 6.1e-3 and fail this floor, so the worker can never silently regress to a
+# pre-seam-crossing step count; 160 steps sits at 2.65e-2.
+_SEAM_AMPLITUDE_FLOOR = 1.0e-2
 
 
 def _scene() -> mw.Scene:
@@ -61,6 +75,42 @@ def _scene() -> mw.Scene:
         )
     )
     return scene
+
+
+def _assert_seam_carries_signal(reference_output, shard_layouts) -> None:
+    """Precondition: the reference solve must carry real signal across the seam.
+
+    Guards the gate against a silent regression to a pre-seam-crossing step count.
+    Measures, on the independent single-GPU reference DFT at the drive frequency,
+    the seam-plane amplitude of each gathered electric component (the plane the
+    coordinator halo exchanges: the internal x partition node for the node-owned
+    ``Ey``/``Ez`` and the last owned cell for the cell-owned ``Ex``) relative to
+    that component's own domain max. If no component reaches ``_SEAM_AMPLITUDE_FLOOR``
+    the pulse has not meaningfully crossed x=0 and the halo parity check would be
+    vacuous, so the worker fails closed here.
+    """
+
+    layout0 = shard_layouts[0]
+    seam_node = int(layout0.global_node_owned.stop)
+    seam_cell = int(layout0.global_cell_owned.stop)
+    freq_index = _DFT_FREQUENCIES.index(_FREQUENCY)
+
+    ratios: dict[str, float] = {}
+    for name in ("Ex", "Ey", "Ez"):
+        field = reference_output[name][freq_index]
+        seam_index = (seam_cell - 1) if name == "Ex" else seam_node
+        domain_max = float(torch.abs(field).max().item())
+        assert domain_max > 0.0, f"{name} reference domain max is zero"
+        seam_amplitude = float(torch.abs(field[seam_index]).max().item())
+        ratios[name] = seam_amplitude / domain_max
+
+    best = max(ratios.values())
+    assert best >= _SEAM_AMPLITUDE_FLOOR, (
+        "seam-plane DFT amplitude is below the crossing floor; the halo carries no "
+        f"meaningful signal and the parity gate is vacuous. Per-component "
+        f"seam/domain-max ratios={ratios}, floor={_SEAM_AMPLITUDE_FLOOR}. Raise "
+        "_STEPS until the pulse crosses the x=0 seam."
+    )
 
 
 def _parallel() -> FDTDParallelConfig:
@@ -104,6 +154,9 @@ def main() -> None:
                 use_cuda_graph=False,
             )
             assert output["frequencies"] == _DFT_FREQUENCIES, output["frequencies"]
+            # Fail closed before the parity loop if the pulse has not crossed the
+            # seam, so the gate can never silently regress to a vacuous config.
+            _assert_seam_carries_signal(single_output, distributed.shard_layouts)
             for name in ("Ex", "Ey", "Ez"):
                 dist_field = output[name]
                 ref_field = single_output[name]

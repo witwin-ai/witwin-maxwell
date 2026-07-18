@@ -80,9 +80,15 @@ or stages through host memory. Under `torchrun` the coordinator drives the NCCL
 transport directly: the runtime is split into a rank-local `ShardEngine`
 (`fdtd/distributed/shard_engine.py`) that each rank builds deterministically from
 the shared partition plan, and a coordinator that expresses every cross-rank
-operation through transport primitives, so the same coordinator time loop runs
-over both the in-process `CudaP2PHaloTransport` and the one-process-per-GPU
-`NcclHaloTransport` with no per-transport behavior branch. The NCCL transport
+operation through transport primitives, so the same coordinator **per-step time
+loop** runs over both the in-process `CudaP2PHaloTransport` and the
+one-process-per-GPU `NcclHaloTransport` branch-free over the transport
+primitives. The claim is scoped to the per-step field/halo loop, not to all of
+`DistributedFDTD`: construction, validation, and result-gather scope still branch
+on transport kind (`self._nccl` at `solver.py` around lines 227, 272, 575, 657,
+697, 762, and 1024 -- transport selection, rank-local vs. all-shard engine build,
+NCCL-specific hardware preflight, the narrower NCCL capability envelope, the
+overlap gate, and the field-shutoff gate). The NCCL transport
 (`fdtd/distributed/nccl_transport.py`) performs the forward electric/magnetic Yee
 x-plane halos via `torch.distributed.batch_isend_irecv` on the engine's compute
 stream, the transposed reverse-halo accumulations for the adjoint, a scalar

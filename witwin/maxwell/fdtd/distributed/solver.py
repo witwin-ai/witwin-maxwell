@@ -1130,7 +1130,13 @@ class DistributedFDTD:
         steps_run = (self._shutoff_step + 1) if self._shutoff_triggered else int(time_steps)
         gathered = self.transport.gather_stats(self.shards)
         halo_bytes_per_step = gathered["halo_bytes_per_step"]
+        # A rank-local transport (one-process-per-GPU NCCL) cannot see both sides
+        # of any halo, so it reports ``halo_bytes_per_step`` as ``None`` and marks
+        # its partitions/peak-memory snapshot as rank-local rather than global.
+        # Propagate that honestly instead of coercing ``None`` to a misleading 0.
+        stats_are_rank_local = bool(gathered.get("rank_local", False))
         stats = {
+            "stats_rank_local": stats_are_rank_local,
             "devices": tuple(str(device) for device in self.devices),
             "decomposition_axis": "x",
             "transport": self.transport.name,
@@ -1142,8 +1148,12 @@ class DistributedFDTD:
             "gather_preflight": dict(self._gather_preflight),
             "dft_preflight": {device: dict(stats) for device, stats in self._dft_preflight.items()},
             "partitions": gathered["partitions"],
-            "halo_bytes_per_step": int(halo_bytes_per_step),
-            "halo_bytes_total": int(halo_bytes_per_step * steps_run),
+            "halo_bytes_per_step": (
+                None if halo_bytes_per_step is None else int(halo_bytes_per_step)
+            ),
+            "halo_bytes_total": (
+                None if halo_bytes_per_step is None else int(halo_bytes_per_step * steps_run)
+            ),
             "peak_memory_bytes": gathered["peak_memory_bytes"],
             "peak_memory_bytes_including_gather": dict(self._peak_memory_including_gather),
             "wall_time_s": self.last_solve_elapsed_s,

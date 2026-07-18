@@ -497,6 +497,21 @@ class NcclHaloTransport:
             raise RuntimeError(
                 "NCCL field gather requires bind_coordinator_layouts() before solve()."
             )
+        if self.rank == 0:
+            # Only rank 0 posts dist.recv, and every peer slab is received into a
+            # buffer on ``result_device``. NCCL point-to-point requires that buffer
+            # to live on this rank's NCCL-bound device (``init_process_group`` binds
+            # exactly one device per rank). A result_device on any other device would
+            # post the recv on a non-bound device, so fail fast with the constraint
+            # named rather than let NCCL surface an opaque device error.
+            requested = torch.device(result_device)
+            if requested.type != self.device.type or requested.index != self.device.index:
+                raise ValueError(
+                    "NCCL field gather receives every peer slab on rank 0's "
+                    f"NCCL-bound device {self.device}; result_device={requested} "
+                    "would post dist.recv on a device this rank has not bound. Set "
+                    f"result_device to rank 0's bound device ({self.device})."
+                )
         engine = engines[0]
         is_cell = component.capitalize() in _CELL_COMPONENTS
         value = local_values[0]
@@ -556,7 +571,13 @@ class NcclHaloTransport:
 
     def gather_stats(self, engines) -> dict:
         # Rank-local partition snapshot; cross-rank stat aggregation is a
-        # follow-up gather and is not required for numerical conformance.
+        # follow-up gather and is not required for numerical conformance. This
+        # process owns exactly one rank/engine, so ``partitions`` and
+        # ``peak_memory_bytes`` describe only this rank -- they are NOT global.
+        # The ``rank_local`` marker makes that explicit for consumers, and
+        # ``halo_bytes_per_step`` is reported as ``None`` (unknown here) rather
+        # than a misleading ``0``: a single rank cannot see both sides of any
+        # halo, so no per-step halo byte count is derivable without a collective.
         partitions = tuple(
             {
                 "rank": engine.rank,
@@ -578,7 +599,8 @@ class NcclHaloTransport:
             for engine in engines
         )
         return {
-            "halo_bytes_per_step": 0,
+            "rank_local": True,
+            "halo_bytes_per_step": None,
             "partitions": partitions,
             "peak_memory_bytes": {
                 str(engine.device): engine.peak_memory_bytes for engine in engines
