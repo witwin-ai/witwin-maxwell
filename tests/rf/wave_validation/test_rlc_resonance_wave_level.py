@@ -13,8 +13,10 @@ running the solver. Running the solver was attempted three ways this session:
 
 1. a lumped two-port bench (feed + RLC-terminated port) -- the load-port branch
    current peak is dominated by the feed/load near-field parasitic resonance and
-   is nearly independent of the RLC ``C`` (measured 7.90 GHz at C=1pF vs 7.74 GHz
-   at C=2pF, where the ideal ratio is sqrt(2)); it does not isolate the RLC;
+   barely tracks the RLC ``C`` (the measured C(1pF)->C(2pF) peak ratio is far from
+   the ideal sqrt(2); exact numbers are in the regenerated benchmark artifact
+   ``docs/assessments/rf-wave-validation-2026-07-18/rf__series_parallel_rlc.json``);
+   it does not isolate the RLC;
 2. a circuit-bound port -- ``V/I`` at the bound port is imposed by the MNA circuit
    solve (tautological), and the port cannot also be directly excited;
 3. a parallel-plate transmission line fed by a lumped port -- did not guide a
@@ -63,8 +65,10 @@ def test_series_rlc_companion_impedance_matches_analytic():
 @pytest.mark.xfail(
     reason="Wave-level RLC resonance from a propagating transmission structure is an "
     "open gap (S1.2): the lumped/circuit benches are parasitic-dominated or "
-    "tautological. Analytic f0 binds; recorded honestly, not faked.",
-    strict=False,
+    "tautological. Analytic f0 binds; recorded honestly, not faked. strict=True so a "
+    "silent xpass (bench unexpectedly tracking C) fails the run and reopens the gap "
+    "for real evidence rather than closing it invisibly.",
+    strict=True,
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_wave_level_rlc_resonance_open_gap():

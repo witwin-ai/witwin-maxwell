@@ -324,6 +324,11 @@ def test_result_snapshot_rejects_unsafe_embedded_network_metadata(tmp_path):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_two_port_single_device_sweep_returns_network_data():
+    # Gate class (S0.3): symmetric. The reciprocity (|S12-S21|<0.02) and passivity
+    # asserts below run on a mirror-symmetric fixture, so S12==S21 follows from
+    # symmetry, not physics. This is a runtime/contract smoke test, NOT a
+    # wave-level reciprocity gate (that lives in tests/rf/wave_validation on a
+    # physically asymmetric two-port).
     result = mw.Simulation.fdtd(
         _scene(device="cuda"),
         frequency=2.5e9,

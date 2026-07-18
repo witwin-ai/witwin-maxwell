@@ -12,10 +12,11 @@ reflection coefficient from the fields:
 * the falsification detunes the load by replacing the far port with a PEC short,
   which must drive |S11| back toward unity.
 
-The absolute matched floor here (~-12 dB on a coarse grid) does not meet the
--30 dB plan-01 target -- that gap is recorded in the benchmark artifact. What
+The absolute matched floor here (roughly -10 to -12 dB on a coarse grid) does not
+meet the -30 dB plan-01 target -- that gap is recorded in the benchmark. What
 binds here is the *wave-level, load-discriminating* behaviour: a matched load
-reflects far less than a short, measured from the FDTD fields.
+reflects far less than a short, measured from the FDTD fields (asserted with a
+loose threshold so the exact dB does not drift against the artifact).
 """
 
 from __future__ import annotations

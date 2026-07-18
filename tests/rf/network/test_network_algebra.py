@@ -9,6 +9,9 @@ def _frequencies(count=2):
 
 
 def test_lossless_thru_power_balance_is_below_two_percent():
+    # Gate class (S0.3): tautology. Power balance is asserted on a hand-written
+    # unitary S matrix (zero solve content); it validates the algebra only and is
+    # NOT a wave-level exit gate.
     phase = torch.tensor((0.2, 0.7), dtype=torch.float64)
     transmission = torch.exp(-1j * phase)
     scattering = torch.zeros((2, 2, 2), dtype=torch.complex128)

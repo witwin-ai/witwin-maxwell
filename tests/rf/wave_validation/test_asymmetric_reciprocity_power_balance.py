@@ -6,13 +6,22 @@ Gate taxonomy (S0.3): **wave-level** (replacing a ``symmetric`` fixture and a
 The retired plan-01 Phase-2 gates were degenerate: reciprocity was asserted on a
 mirror-symmetric fixture (so S12=S21 followed from symmetry, not physics), and
 "power balance" asserted a hand-written unitary matrix (zero solve content). This
-gate uses a genuinely asymmetric two-port -- the two lumped ports have different
-reference impedances *and* different current-aperture geometry -- so:
+gate uses a genuinely asymmetric two-port whose asymmetry is PHYSICAL (geometry):
+the two lumped ports sit at different distances from the origin AND have different
+current-aperture widths, with the SAME reference impedance so the asymmetry
+cannot be attributed to a bookkeeping impedance difference. Therefore:
 
-* S11 != S22 confirms the fixture is not symmetric (reciprocity here is physics,
-  not a mirror), yet S12 == S21 must still hold for the reciprocal FDTD medium;
+* S11 != S22 confirms the fixture is not mirror-symmetric (reciprocity here is
+  physics, not a mirror), yet S12 == S21 must still hold for the reciprocal FDTD
+  medium;
 * power balance is read from the fields: incident = reflected + transmitted +
   loss, with loss >= 0 (no gain) for the passive structure.
+
+One-sidedness (stated explicitly, M6): the power-balance gate below checks only
+COLUMN 1 (excite p1). It verifies no apparent gain for that excitation; it does
+not independently check column 2. That is sufficient to catch a non-passive
+(gain) medium on the driven column, but it is a one-column check, not a full
+two-column passivity proof.
 
 Both gates are falsified by injecting an asymmetric / gain error into the measured
 S matrix and asserting the checks go red -- proving they detect non-reciprocity
@@ -35,7 +44,13 @@ _HALF = 0.02
 
 
 def _asymmetric_scene() -> mw.Scene:
-    """Two lumped ports with different reference impedance and aperture width."""
+    """Two lumped ports asymmetric by GEOMETRY only (same reference impedance).
+
+    p1 and p2 sit at different distances from the origin and have different
+    current-aperture widths; both use the SAME 50 ohm reference impedance so the
+    resulting S11 != S22 is a physical (geometric) asymmetry, not an artefact of
+    differing port normalization (M6).
+    """
 
     feed = mw.LumpedPort(
         name="p1",
@@ -47,20 +62,31 @@ def _asymmetric_scene() -> mw.Scene:
     )
     load = mw.LumpedPort(
         name="p2",
+        # Wider current aperture than p1 (different port self-coupling geometry);
+        # reference impedance is identical to p1, so S11 != S22 is physical.
         positive=(2 * _DX, 0.0, _DX),
         negative=(2 * _DX, 0.0, -_DX),
         voltage_path=mw.AxisPath("z"),
-        # Different aperture width and reference impedance -> asymmetric ports.
         current_surface=mw.Box(position=(2 * _DX, 0.0, -0.5 * _DX), size=(_DX, 5 * _DX, 0.0)),
-        reference_impedance=75.0,
+        reference_impedance=50.0,
     )
-    return mw.Scene(
+    scene = mw.Scene(
         domain=mw.Domain(bounds=((-_HALF, _HALF), (-_HALF, _HALF), (-_HALF, _HALF))),
         grid=mw.GridSpec.uniform(_DX),
         boundary=mw.BoundarySpec.pml(num_layers=6),
         ports=(feed, load),
         device="cuda",
     )
+    # Physical geometric asymmetry: a lossless dielectric block sits next to p2
+    # only (not p1). The medium stays isotropic/reciprocal (so S12==S21 must hold),
+    # but the two ports now see different surroundings, forcing S11 != S22 by
+    # physics rather than by port normalization (M6).
+    scene.add_structure(
+        mw.Box(position=(2 * _DX, 0.0, 0.0), size=(2 * _DX, 4 * _DX, 4 * _DX)).with_material(
+            mw.Material(eps_r=9.0), name="p2_dielectric_load"
+        )
+    )
+    return scene
 
 
 def _run_network():
