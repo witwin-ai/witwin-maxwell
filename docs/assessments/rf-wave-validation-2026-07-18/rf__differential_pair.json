@@ -1,0 +1,16 @@
+{
+  "name": "rf/differential_pair",
+  "description": "Coupled-line four-port: mixed-mode S (Sdd/Scc/Sdc) vs coupled-line model.",
+  "gate_class": "wave-level",
+  "reference": "analytic coupled-line even/odd-mode model (mixed-mode conversion)",
+  "tidy3d_reference": "pending-generation",
+  "target": "mixed-mode Sdd21 / mode-conversion vs coupled-line reference",
+  "metrics": [],
+  "convergence": [],
+  "conservation": {},
+  "status": "pending",
+  "notes": [
+    "Four-port coupled-line sweep did not resolve in this session (ValueError: WavePort 'p1': y aperture lower bound=0.0 must lie on the Yee y aperture lower bound grid.); scene + generation path registered. reference: pending-generation."
+  ],
+  "updated_at": "2026-07-18T22:11:33+00:00"
+}

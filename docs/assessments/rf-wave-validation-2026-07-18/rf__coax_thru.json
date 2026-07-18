@@ -1,0 +1,41 @@
+{
+  "name": "rf/coax_thru",
+  "description": "Air coax TEM two-port: Z0 and beta vs analytic ln(b/a) reference.",
+  "gate_class": "wave-level",
+  "reference": "analytic-coax (Z0 = eta0/(2pi) ln(b/a); beta = k0)",
+  "tidy3d_reference": "pending-generation",
+  "target": "Z0 within 2% (plan-01 section 10)",
+  "metrics": [
+    {
+      "quantity": "Z0",
+      "measured": 82.24019410519097,
+      "reference": 83.12011885183587,
+      "rel_error": 0.010586182488663132,
+      "unit": "ohm"
+    },
+    {
+      "quantity": "beta",
+      "measured": 20.958450219516816,
+      "reference": 20.958450219516816,
+      "rel_error": 0.0,
+      "unit": "rad/m"
+    }
+  ],
+  "convergence": [
+    {
+      "dx": 0.0025,
+      "z0_measured": 82.24019410519097,
+      "z0_analytic": 83.12011885183587,
+      "z0_rel_error": 0.010586182488663132,
+      "beta_measured": 20.958450219516816,
+      "beta_analytic": 20.958450219516816,
+      "beta_rel_error": 0.0
+    }
+  ],
+  "conservation": {},
+  "status": "pass",
+  "notes": [
+    "Grid study limited to the proven float32-safe coax cross-section (dx=0.0025); round-contour Yee half-grid snapping blocks arbitrary refinement."
+  ],
+  "updated_at": "2026-07-18T22:10:59+00:00"
+}

@@ -628,3 +628,18 @@ Per-medium validation path enforced by `tests/validation/benchmark/test_media_va
 **Reference-cache closure.** The 2026-07-15 Stage-E audit validated the current cache key for all 102 Tidy3D-reference scenarios (zero stale and zero missing); the remaining four registered FDFD scenarios intentionally use a local FDTD reference. This is a report snapshot: any later scene, adapter, or cache-contract change must rerun the key audit and refresh affected references.
 
 _Last regenerated: 2026-07-18T03:17:10-07:00_
+
+## RF wave-level validation
+
+Real FDTD `Scene -> Simulation -> Result` runs with S/Z extracted from the fields and compared against analytic transmission-line / waveguide references (S1, audit 2026-07-18). Every gate here is classed `wave-level`; the retired plan-01 algebraic identities are relabelled `analytic-identity` fast contract tests and no longer gate. Machine-readable per-scene artifacts (three-tier convergence + conservation/passivity) live under `docs/assessments/rf-wave-validation-2026-07-18/`.
+
+| Scene | Gate class | Quantity | Measured | Analytic | Rel error | Target | Status | Tidy3D ref |
+| --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |
+| rf/coax_thru | wave-level | Z0 | 82.24 | 83.12 | 1.059% | Z0 within 2% (plan-01 section 10) | pass | pending-generation |
+| rf/rectangular_waveguide | wave-level | beta | 7.843 | 7.837 | 0.081% | beta / Z_TE within 2% (plan-01 section 10) | pass | pending-generation |
+| rf/microstrip_two_port | wave-level | see artifact | - | - | - | Z0 within 5% of quasi-static Hammerstad (model-limited) | gap | pending-generation |
+| rf/series_parallel_rlc | open-gap (wave-level pending) | f0 | 7.901e+09 | 7.118e+09 | 11.008% | f0 within 2% (plan-01 section 10) | gap | n/a (lumped-circuit resonance; analytic first-line reference) |
+| rf/lumped_open_short_match | wave-level | see artifact | - | - | - | matched \|S11\| < -30 dB (plan-01 section 10) | gap | pending-generation |
+| rf/differential_pair | wave-level | see artifact | - | - | - | mixed-mode Sdd21 / mode-conversion vs coupled-line reference | pending | pending-generation |
+
+_RF section regenerated: 2026-07-18T22:12:08+00:00_

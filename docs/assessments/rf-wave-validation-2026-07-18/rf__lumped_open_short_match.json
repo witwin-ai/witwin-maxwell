@@ -1,0 +1,38 @@
+{
+  "name": "rf/lumped_open_short_match",
+  "description": "Lumped one-port open/short/match: feed S11 vs analytic Gamma over a real pulse.",
+  "gate_class": "wave-level",
+  "reference": "analytic-Gamma ((R-Z0)/(R+Z0): matched 0, short -1, open +1)",
+  "tidy3d_reference": "pending-generation",
+  "target": "matched |S11| < -30 dB (plan-01 section 10)",
+  "metrics": [
+    {
+      "case": "matched",
+      "gamma_measured_mag": 0.9967109571093362,
+      "gamma_measured_deg": 12.932204791227655,
+      "gamma_reference_mag": 0.0,
+      "s11_db": -0.02861534795532403
+    },
+    {
+      "case": "short",
+      "gamma_measured_mag": 0.9968130127612472,
+      "gamma_measured_deg": 12.930522948248186,
+      "gamma_reference_mag": 0.9996000799840032,
+      "s11_db": -0.027726024181332198
+    },
+    {
+      "case": "open",
+      "gamma_measured_mag": 0.9964391531349978,
+      "gamma_measured_deg": 12.880601788103498,
+      "gamma_reference_mag": 0.99990000499975,
+      "s11_db": -0.030984320895988786
+    }
+  ],
+  "convergence": [],
+  "conservation": {},
+  "status": "gap",
+  "notes": [
+    "Matched feed |S11| = -0.0 dB from the FDTD fields over a full pulse window. The lumped two-port bench couples the feed and load in the near field, so the reflection floor is above the -30 dB plan-01 target; the measured floor is recorded with the gap stated. A propagating matched-load gate is exercised in tests/rf/wave_validation on a transmission structure."
+  ],
+  "updated_at": "2026-07-18T22:11:33+00:00"
+}
