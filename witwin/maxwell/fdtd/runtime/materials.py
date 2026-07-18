@@ -1096,7 +1096,7 @@ def _configure_sibc(solver):
     surface gain exceeds the ambient radiation/PML loss. For a good conductor the
     reactance is negligible for the reflection magnitude the SIBC targets --
     ``|Gamma|`` from the full ``(1 + j) R`` versus the resistive ``R`` differs by
-    ``< 1.3e-3`` across the validity domain -- so the resistive surface reproduces
+    ``< 1.3e-4`` across the validity domain -- so the resistive surface reproduces
     the analytic Leontovich reflection while remaining stable.
     """
     solver.sibc_enabled = False

@@ -32,11 +32,17 @@ energy at the surface every step, with a per-step growth rate that scales with
 Evidence:
 
 - A 1D leapfrog model (`vacuum + resistive/RL surface`, PEC-terminated resonator)
-  reproduces it exactly: the RL form grows (isolated peak 13.6 -> 119 -> 837 as f
-  goes 1 -> 2 -> 3 GHz); dropping only the inductive term is stable at all f;
-  flipping the inductive sign is also stable, so the physically-correct `+` sign is
-  precisely the unstable one -- the explicit surface inductance has no passive
-  realization in this overwrite.
+  shows the same class of behavior: the RL form grows with an f-scaled rate while
+  the resistive form stays bounded. CAVEAT (independent audit, 2026-07-17): the 1D
+  rig's SIGN conventions did not replicate under re-derivation — an auditor's 1D
+  model with the actual 3D stepper ordering found the physically-signed inductive
+  term stable at normal incidence and the FLIPPED sign unstable, i.e. the 1D
+  narrative here is likely sign-mirrored and setup-dependent. The 3D instability
+  itself is reproduced empirically and unambiguously (re-adding the inductive term
+  to the fixed 3D code brings the 2 GHz divergence back; the destabilizing channel
+  is 3D-specific — oblique/transverse-mode or CPML coupling — not the pure
+  normal-incidence 1D story). Plan 09 work must treat the 3D empirical
+  characterization as the ground truth and NOT build on the 1D sign claim.
 - Why 1 GHz survived but 2/3 GHz did not: the growth rate scales with `sqrt(f)`. At
   1 GHz the open scene's ambient radiation/PML loss exceeds the tiny surface gain
   (field saturates ~3e8, bounded); at >=2 GHz the surface gain exceeds ambient loss
