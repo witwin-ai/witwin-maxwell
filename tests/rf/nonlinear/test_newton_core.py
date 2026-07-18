@@ -15,9 +15,23 @@ from witwin.maxwell.compiler.nonlinear_devices import (
     newton_solve,
 )
 
-torch.set_default_dtype(torch.float64)
-
 ROOT_TOL = 1.0e-10
+
+
+@pytest.fixture(autouse=True)
+def _default_float64():
+    # The nonlinear device constructors store their scalar parameters at the
+    # active default dtype (circuits._scalar_tensor), and these gates assert
+    # analytic-root agreement at 1e-10, so they require the float64 default.
+    # Scope it to this module's tests and restore it afterwards instead of a
+    # module-import torch.set_default_dtype that would leak float64 into every
+    # other test collected in the same pytest session.
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(previous)
 
 
 def _diode_divider(*, source_voltage, resistance, saturation_current, ideality=1.0):
@@ -142,3 +156,46 @@ def test_non_finite_device_output_is_localized():
     system = NonlinearMNASystem(1, torch.zeros(1, 1), torch.zeros(1), compiled)
     with pytest.raises(NonlinearDeviceError, match="non-finite"):
         system.true_residual(torch.tensor([float("nan")]))
+
+
+def test_pnjlim_is_load_bearing_without_line_search():
+    # With the backtracking line search disabled, only pnjlim keeps the hard
+    # forward drive from overflowing exp(5 / Vt) on the first Newton step. This
+    # falsifies pnjlim: if limiting were removed the solve would diverge and this
+    # convergence assertion would go red (the previous hard-drive test is rescued
+    # by backtracking and cannot detect a broken pnjlim).
+    system, vte = _diode_divider(source_voltage=5.0, resistance=10.0, saturation_current=1e-14)
+    config = mw.NonlinearSolveConfig(line_search="none")
+    solution, stats = newton_solve(system, torch.zeros(1), config)
+    assert stats.converged
+    assert stats.line_search_reductions == 0
+    root = _bisection_root(5.0, 10.0, 1e-14, vte)
+    assert abs(solution.item() - root) / abs(root) <= ROOT_TOL
+
+
+def test_diode_series_resistance_fails_closed_at_compile():
+    circuit = mw.Circuit("rs")
+    node = circuit.node("a")
+    diode = mw.Diode("d1", node, circuit.ground, saturation_current=1e-12, series_resistance=10.0)
+    with pytest.raises(NotImplementedError, match="series_resistance"):
+        compile_nonlinear_devices([diode], {"a": 0}, dtype=torch.float64, device="cpu")
+
+
+def test_diode_junction_capacitance_fails_closed_in_conduction_only_solve():
+    circuit = mw.Circuit("cj")
+    node = circuit.node("a")
+    diode = mw.Diode("d1", node, circuit.ground, saturation_current=1e-12, junction_capacitance=1e-12)
+    compiled = compile_nonlinear_devices([diode], {"a": 0}, dtype=torch.float64, device="cpu")
+    system = NonlinearMNASystem(
+        1, torch.tensor([[1e-3]], dtype=torch.float64), torch.tensor([1e-3], dtype=torch.float64), compiled
+    )
+    with pytest.raises(NotImplementedError, match="junction_capacitance"):
+        newton_solve(system, torch.zeros(1), mw.NonlinearSolveConfig())
+
+
+def test_newton_solve_validates_x0_dtype_device_and_shape():
+    system, _ = _diode_divider(source_voltage=1.0, resistance=1000.0, saturation_current=1e-12)
+    with pytest.raises(ValueError, match="dtype"):
+        newton_solve(system, torch.zeros(1, dtype=torch.float32), mw.NonlinearSolveConfig())
+    with pytest.raises(ValueError, match="shape"):
+        newton_solve(system, torch.zeros(2), mw.NonlinearSolveConfig())

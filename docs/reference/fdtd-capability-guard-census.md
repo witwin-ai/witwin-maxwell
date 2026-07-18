@@ -12,9 +12,9 @@ network embedding, the thin-wire subgrid conductor series in plan 07 phases
 0-3, the array basis / active-S feature series in plan 06 phases 0-1, and the
 plan 07 Phase 4 multi-GPU wire forward slice, plus the plan 07 Phase 4
 finite-conductor wire series-impedance slice, and the plan 05
-nonlinear-circuit-device Phase 0 slice, all merged) contains 158 guards:
+nonlinear-circuit-device Phase 0 slice, all merged) contains 161 guards:
 
-- 134 capability guards tracked by the non-increasing test budget;
+- 137 capability guards tracked by the non-increasing test budget;
 - 24 contract guards excluded by exact file and message substring.
 
 The single-GPU circuit adjoint provides the circuit replay and transpose
@@ -45,12 +45,12 @@ The capability baseline is distributed as follows:
 | Frequency-domain runtime | 5 |
 | Time-domain adjoint | 19 |
 | Time-domain excitation | 12 |
-| Time-domain ports and lumped elements | 13 |
+| Time-domain ports and lumped elements | 16 |
 | Time-domain runtime | 20 |
 | Public simulation, result, and network workflows | 24 |
 | Material models | 7 |
 | Postprocessing | 4 |
-| **Total** | **134** |
+| **Total** | **137** |
 
 This integrated baseline is the 2026-07-16 circuit/network state (119 capability
 guards) plus the ten thin-wire capability guards from plan 07 phases 0-3 (giving
@@ -164,9 +164,39 @@ transistor terminal physics, charge conservation, and gradients are a separate,
 independent go/no-go phase whose non-completion does not block the Phase 0-4
 release. Reserving the surface fail-closed makes "a parser or factory recognising
 a model card is not the same thing as supported physics" machine-checkable. The
-Diode/behavioral devices themselves add no `NotImplementedError` (they are fully
-implemented at the Phase-0 contract level), so the capability count is unchanged;
-the contract table above rises from 22 to 24.
+Device + Newton contract itself adds no `NotImplementedError`; that part of the
+count is unchanged and the contract table above rises from 22 to 24.
+
+### Nonlinear-device fail-closed hardening (2026-07-17)
+
+Phase 0 admits the nonlinear device family through `Circuit.add` and validates
+its DC topology in `compile_circuit_graph`, but the executable runtimes were not
+yet extended: the linear MNA, coupled MNA, and FDTD Norton-companion paths build
+a single constant-conductance stamp with no Newton iteration, and the standalone
+Newton core consumes only the conduction law `i(v)`. Left unguarded, a diode
+compiled through those paths ran with the device silently absent, and validated
+`series_resistance` / `junction_capacitance` parameters were silently dropped.
+This slice closes those fail-open gaps with three capability guards (capability
+budget 134 -> 137, all under "Time-domain ports and lumped elements", 13 -> 16):
+
+- `compiler/circuits.py::reject_nonlinear_devices` rejects any nonlinear device
+  reaching a linear executable runtime, reached from `compile_mna_system`,
+  `compile_coupled_mna_system` (both via `_compile_mna_system`), and
+  `scene.compile_circuits()` (the FDTD circuit prepare path in
+  `Simulation._validate_circuit_execution`).
+- `compiler/nonlinear_devices.py::compile_nonlinear_devices` fails closed on a
+  diode with nonzero `series_resistance`: the ohmic series branch (an internal
+  node with the resistive drop) is not assembled into the ideal-Shockley `i(v)`,
+  so honouring the parameter needs the extended device topology.
+- `compiler/nonlinear_devices.py::newton_solve` fails closed on a diode with
+  nonzero `junction_capacitance` entering the conduction-only DC solve, which
+  never differentiates the stored charge `q(v)` into the system.
+
+All three are genuine capability gaps, not permanent contracts: each guard is
+removed when its runtime slice (nonlinear device-runtime integration, the series
+branch, and the charge-aware transient solve) lands. The `q(v)` / `C(v)` charge
+model is still fully exercised through `CompiledNonlinearDevice.charge`, so the
+device math surface is unaffected.
 
 ## Contract exclusions
 

@@ -111,6 +111,34 @@ touching earlier-phase numbers.
 9. Trainable nonlinear params + spatial multi-GPU rejected until distributed adjoint lands.
 10. `BJT` / `MOSFET` raise a contract guard until Phase 5 passes; a parser recognising a card is not support.
 11. Bound port cannot also be directly excited / in `PortSweep`.
+12. Nonlinear device in a linear executable runtime (linear/coupled MNA, FDTD Norton companion) -> capability guard; the constant-conductance stamp cannot carry a nonlinear terminal law, so the device is rejected rather than silently dropped. Lifted when the device-runtime Newton integration lands.
+13. Diode nonzero `series_resistance` -> compile fails closed; the ohmic series branch is not assembled into the ideal-Shockley `i(v)`. Lifted when the series branch lands.
+14. Diode nonzero `junction_capacitance` in the conduction-only DC Newton solve -> fails closed; the solve never differentiates `q(v)`. Lifted when the charge-aware transient solve lands. (`charge()` itself remains exercised for the device-math surface.)
+
+### N0 implementation deviations (recorded)
+
+* **Boundary 4 singular-Jacobian gate.** The N0 Newton core (`_solve_linear`)
+  fails closed on an exactly-singular / below-pivot Jacobian by wrapping
+  `torch.linalg.solve` in `try/except RuntimeError` and re-raising as
+  `NonlinearDeviceError`, and records an (ungated) `torch.linalg.cond` estimate;
+  it does not reuse the linear MNA `_factor` SVD singular-value gate
+  (`compiler/mna.py`). This is a deliberate Phase-0 deviation from the brief's
+  boundary-4 parenthetical: exactly-singular raises, and near-singular /
+  non-converged iterates are caught by the dual convergence gate plus the
+  iteration cap (boundary 1), so no finite-but-wrong iterate is returned. The
+  shared SVD pivot gate is adopted when the nonlinear solve is integrated into
+  the MNA `_factor` path.
+* **Census document name.** The brief referred to a census file
+  `docs/reference/fdtd-gap-05-guard-census.md` that does not exist in this
+  repository; the guards are registered in the maintained
+  `docs/reference/fdtd-capability-guard-census.md` (the actual census consumed by
+  `tests/api/public/test_guard_census.py`), following repo convention.
+* **Per-iteration host syncs.** The eager Newton path performs per-iteration host
+  reductions (residual `.item()` trajectory, `bool()` convergence branch, mask
+  `.any()` gates) beyond the `torch.linalg.cond` estimate. The "0 per-iteration
+  host syncs" gate needs the full N3 device-resident / fixed-iteration unrolled
+  restructure and is CUDA-deferred, not achievable by moving `cond` off the hot
+  path alone.
 
 ## Numerical notes
 

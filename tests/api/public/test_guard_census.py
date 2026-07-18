@@ -61,7 +61,23 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # fails closed instead of silently dropping the loss. It is a genuine capability
 # gap (Material compilers 11 -> 12); lower this budget when the lossy recurrence
 # lands in the runtime.
-CAPABILITY_GUARD_BUDGET = 134
+#
+# 2026-07-17 (plan 05 nonlinear-device fail-closed hardening): 134 -> 137 (+3).
+# The nonlinear device family (diode / behavioral I-V / voltage-dependent
+# capacitor) is admitted by Circuit.add and structurally validated by
+# compile_circuit_graph, but the executable runtimes carry no Newton loop, so
+# three genuine capability gaps now fail closed instead of silently dropping the
+# device: (1) compiler/circuits.py reject_nonlinear_devices -- any nonlinear
+# device in the linear MNA / coupled / FDTD Norton-companion path (reached from
+# compile_mna_system, compile_coupled_mna_system, and scene.compile_circuits);
+# (2) compiler/nonlinear_devices.py -- a diode with nonzero series_resistance,
+# whose ohmic branch is not assembled into the ideal-Shockley conduction law;
+# (3) compiler/nonlinear_devices.py newton_solve -- a diode with nonzero
+# junction_capacitance entering the conduction-only DC solve that never
+# differentiates the stored charge q(v). All three are Time-domain ports and
+# lumped elements gaps (13 -> 16); lower this budget as the nonlinear
+# device-runtime slices wire each capability in.
+CAPABILITY_GUARD_BUDGET = 137
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

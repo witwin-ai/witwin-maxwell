@@ -258,6 +258,16 @@ def compile_nonlinear_devices(
         negative = torch.tensor([index_of(member.negative) for member in members], device=device, dtype=torch.long)
         parameters: dict[str, torch.Tensor] = {}
         if kind == "diode":
+            resistive = tuple(m.name for m in members if bool(m.series_resistance != 0.0))
+            if resistive:
+                raise NotImplementedError(
+                    f"Diodes {resistive} declare a nonzero series_resistance, but the "
+                    "compiled conduction law is the ideal Shockley junction i(v); the "
+                    "series-resistance branch (an internal node with the ohmic drop) is "
+                    "not assembled, so honouring the parameter requires the extended "
+                    "device topology. This fails closed until that branch is implemented "
+                    "rather than silently solving the resistance-free junction."
+                )
             saturation = _stack([m.saturation_current for m in members], device=device, dtype=dtype)
             ideality = _stack([m.ideality for m in members], device=device, dtype=dtype)
             temperature = _stack([m.temperature for m in members], device=device, dtype=dtype)
@@ -422,6 +432,34 @@ def newton_solve(
     to ``False`` (``failure='record_and_stop'``).
     """
 
+    if x0.dtype != system.dtype:
+        raise ValueError(
+            f"newton_solve x0 dtype {x0.dtype} does not match the system dtype {system.dtype}."
+        )
+    if x0.device != system.device:
+        raise ValueError(
+            f"newton_solve x0 device {x0.device} does not match the system device {system.device}."
+        )
+    if x0.shape != (system.num_unknowns,):
+        raise ValueError(
+            f"newton_solve x0 must have shape {(system.num_unknowns,)}, got {tuple(x0.shape)}."
+        )
+    for compiled in system.devices:
+        capacitance = compiled.parameters.get("junction_capacitance")
+        if capacitance is not None and bool(torch.any(capacitance != 0.0)):
+            charged = tuple(
+                name
+                for name, value in zip(compiled.names, capacitance.tolist())
+                if value != 0.0
+            )
+            raise NotImplementedError(
+                f"Diodes {charged} declare a nonzero junction_capacitance, but this "
+                "Newton solve assembles only the conduction current i(v); the stored "
+                "charge q(v) is never differentiated into the system, so the parameter "
+                "would be silently ignored. This fails closed until a charge-aware "
+                "(transient) solve consumes it."
+            )
+
     x = x0.clone()
     limiting_state = [compiled.terminal_voltage(x) for compiled in system.devices]
     trajectory: list[float] = []
@@ -517,7 +555,11 @@ def _backtrack(
             return trial, reductions
         scale *= 0.5
         trial = x + scale * step
-    return trial, max_steps
+    # No damped step reduced the residual within the cap. Return the starting
+    # iterate so the accepted point is never worse than where the step began (the
+    # last computed trial was halved again and never residual-checked); Newton
+    # then stalls and the iteration cap fails closed deterministically.
+    return x, max_steps
 
 
 __all__ = [

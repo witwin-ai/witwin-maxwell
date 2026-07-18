@@ -21,7 +21,7 @@ from ..circuits import (
     VoltageSource,
 )
 from ..lumped import Capacitor, Inductor, Resistor
-from .circuits import CircuitGraph, compile_circuit_graph
+from .circuits import CircuitGraph, compile_circuit_graph, reject_nonlinear_devices
 
 
 def _node_unknown(graph: CircuitGraph, node) -> int | None:
@@ -954,6 +954,7 @@ def _compile_mna_system(
 ) -> LinearMNASystem:
     if not isinstance(circuit, Circuit):
         raise TypeError("compile_mna_system requires a Circuit instance.")
+    reject_nonlinear_devices(circuit)
     if circuit.bindings and not allow_bindings:
         raise ValueError(
             "Standalone MNA cannot solve EM-bound ports without the FDTD Norton companion."

@@ -98,6 +98,48 @@ def test_diode_establishes_dc_path_but_varactor_does_not():
         floating.compile()
 
 
+def test_standalone_mna_rejects_nonlinear_devices():
+    # compile_mna_system fails closed before touching CUDA: a diode cannot be
+    # assembled into the linear constant-conductance stamp, so the linear runtime
+    # must reject it instead of silently dropping the device (fail-open).
+    from witwin.maxwell.compiler.mna import compile_mna_system
+
+    circuit = mw.Circuit("nl")
+    node = circuit.node("a")
+    circuit.add(mw.Resistor("r1", node, circuit.ground, resistance=1000.0))
+    circuit.add(mw.Diode("d1", node, circuit.ground, saturation_current=1e-12))
+    with pytest.raises(NotImplementedError, match="nonlinear terminal law"):
+        compile_mna_system(circuit, dt=1e-12)
+
+
+def test_coupled_mna_rejects_nonlinear_devices():
+    from witwin.maxwell.compiler.mna import compile_coupled_mna_system
+
+    circuit = mw.Circuit("nl")
+    node = circuit.node("a")
+    circuit.add(mw.Resistor("r1", node, circuit.ground, resistance=1000.0))
+    circuit.add(mw.Diode("d1", node, circuit.ground, saturation_current=1e-12))
+    circuit.bind_port("p1", positive=node, negative=circuit.ground)
+    with pytest.raises(NotImplementedError, match="nonlinear terminal law"):
+        compile_coupled_mna_system(circuit, dt=1e-12)
+
+
+def test_scene_circuit_prepare_rejects_nonlinear_devices():
+    # This is the exact entry the FDTD circuit prepare path uses
+    # (Simulation._validate_circuit_execution -> scene.compile_circuits()).
+    from types import SimpleNamespace
+
+    from witwin.maxwell.compiler.circuits import compile_circuits
+
+    circuit = mw.Circuit("nl")
+    node = circuit.node("a")
+    circuit.add(mw.Resistor("r1", node, circuit.ground, resistance=1000.0))
+    circuit.add(mw.Diode("d1", node, circuit.ground, saturation_current=1e-12))
+    scene = SimpleNamespace(circuits=(circuit,), ports=())
+    with pytest.raises(NotImplementedError, match="nonlinear terminal law"):
+        compile_circuits(scene)
+
+
 def test_nonlinear_solve_config_validation():
     with pytest.raises(ValueError, match="absolute_tolerance must be positive"):
         mw.NonlinearSolveConfig(absolute_tolerance=0.0)
