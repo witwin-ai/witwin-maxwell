@@ -11,15 +11,12 @@ The 2026-07-17 integrated repository state (circuit co-simulation, Touchstone
 network embedding, the thin-wire subgrid conductor series in plan 07 phases
 0-3, the array basis / active-S feature series in plan 06 phases 0-1, and the
 plan 07 Phase 4 multi-GPU wire forward slice, plus the plan 07 Phase 4
-finite-conductor wire series-impedance slice, and the plan 05
-nonlinear-circuit-device Phase 0 slice, all merged) contains 161 guards:
+finite-conductor wire series-impedance slice, the plan 05 nonlinear-device
+Phase 0 slice, the plan 08 gyromagnetic-ferrite Phase 0 slices, and the plan 09
+surface-impedance Phase 0 slices, all merged) contains 166 guards:
 
-- 137 capability guards tracked by the non-increasing test budget;
-finite-conductor wire series-impedance slice, plus the plan 08 Phase-0
-gyromagnetic ferrite slices 0a/0b/1a, all merged) contains 160 guards:
-
-- 136 capability guards tracked by the non-increasing test budget;
-- 24 contract guards excluded by exact file and message substring.
+- 140 capability guards tracked by the non-increasing test budget;
+- 26 contract guards excluded by exact file and message substring.
 
 The single-GPU circuit adjoint provides the circuit replay and transpose
 linear-solve VJP. Its remaining explicit limits are the omitted t=0
@@ -44,8 +41,8 @@ The capability baseline is distributed as follows:
 
 | Area | Capability guards |
 | --- | ---: |
-| External interoperability adapter | 18 |
-| Material compilers | 15 |
+| External interoperability adapter | 19 |
+| Material compilers | 14 |
 | Frequency-domain runtime | 5 |
 | Time-domain adjoint | 19 |
 | Time-domain excitation | 12 |
@@ -54,7 +51,7 @@ The capability baseline is distributed as follows:
 | Public simulation, result, and network workflows | 24 |
 | Material models | 8 |
 | Postprocessing | 4 |
-| **Total** | **139** |
+| **Total** | **140** |
 
 This integrated baseline is the 2026-07-16 circuit/network state (119 capability
 guards) plus the ten thin-wire capability guards from plan 07 phases 0-3 (giving
@@ -233,6 +230,25 @@ frequency-evaluation domains `9 -> 11`):
   existing material "…is not defined for…" frequency-evaluation contracts, so they
   are excluded by exact `(file, substring)` match rather than counted against the
   capability budget.
+### Surface-impedance adapter reconciliation (2026-07-17)
+
+The surface-impedance Phase 0 slice froze the contract, the rational model, the
+shared fitter, and the compiler funnel with the guard census reconciled unchanged
+at 134 (the single re-authored `_reject_surface_impedance` funnel replaced the
+prior surface-impedance rejection, no net change). The follow-up fail-close in the
+interoperability adapter adds one reviewed capability guard.
+`witwin/maxwell/adapters/tidy3d.py::_convert_material` now raises
+`NotImplementedError` for a generic `SurfaceImpedanceMedium` instead of letting it
+fall through to the non-dispersive `td.Medium(permittivity=1.0)` path and silently
+export as vacuum. A generic surface-impedance medium carries its physics in a
+broadband causal rational tangential surface impedance
+`E_t = Z_s(omega) (n x H)` with no finite bulk-permittivity equivalent, and the
+reference backend has no surface-impedance construct mapped for a rational model
+yet (the narrowband good-conductor `LossyMetalMedium` keeps its dedicated
+lossy-metal surface path). It is a genuine capability gap, not a public contract:
+the guard disappears once the surface-impedance adapter mapping is designed. It is
+counted under "External interoperability adapter" (18 -> 19); lower the budget when
+the mapping lands.
 
 ## Contract exclusions
 

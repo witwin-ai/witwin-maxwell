@@ -1370,7 +1370,8 @@ def _apply_sheet_structures(scene, model):
     return _refresh_model_summary_aliases(model)
 
 
-def _sibc_structures(scene):
+def _lossy_metal_structures(scene):
+    """Enabled structures carrying a good-conductor ``LossyMetalMedium``."""
     return [
         structure
         for structure in _sorted_structures(scene)
@@ -1379,72 +1380,165 @@ def _sibc_structures(scene):
     ]
 
 
-def _reject_sibc(reason: str):
-    """Single physically-worded rejection for unsupported SIBC configurations.
+def _generic_surface_impedance_structures(scene):
+    """Enabled structures carrying a generic rational ``SurfaceImpedanceMedium``.
 
-    All the SIBC scope limits funnel through this one ``raise`` so the reason is
-    always contextual (never "not implemented yet") while the guard census counts a
-    single capability guard for the surface-impedance boundary.
+    A ``LossyMetalMedium`` is a good-conductor convenience over the same surface model
+    but has its own narrowband runtime path, so it is excluded here.
+    """
+    return [
+        structure
+        for structure in _sorted_structures(scene)
+        if _structure_material(structure) is not None
+        and bool(getattr(_structure_material(structure), "is_surface_impedance", False))
+        and not bool(getattr(_structure_material(structure), "is_lossy_metal", False))
+    ]
+
+
+def _reject_surface_impedance(reason: str, *, phase: str):
+    """Single physically-worded rejection for unsupported surface-impedance configs.
+
+    Every surface-impedance scope limit funnels through this one ``raise`` so the
+    reason is always contextual -- it states the physical or mathematical reason the
+    case is unsupported and names the phase that lifts it -- while the guard census
+    counts a single capability guard for the surface-impedance boundary. The narrowband
+    good-conductor ``LossyMetalMedium`` is the only surface currently wired into the
+    runtime; the generalized rational, finite, mid-domain, multi-metal, oblique, and
+    conformal cases are converged in later phases.
     """
     raise NotImplementedError(
-        f"LossyMetalMedium surface-impedance boundary: {reason} "
-        "The scalar normal-incidence Leontovich Z_s only models an axis-aligned planar face; resolve "
-        "the metal volumetrically with Material(sigma_e=...) or use Material.pec() for other cases."
+        f"Surface-impedance boundary: {reason} "
+        f"The runtime is generalized to this case in {phase}; until then resolve the "
+        "metal volumetrically with Material(sigma_e=...) or use Material.pec() for a "
+        "lossless conductor."
     )
 
 
-def _compile_sibc_descriptor(scene):
-    """Build the surface-impedance (Leontovich) descriptor for a ``LossyMetalMedium`` slab.
+def _geometries_coincide(first, second) -> bool:
+    """Whether two axis-aligned ``Box`` geometries occupy the same extent.
 
-    The good-conductor SIBC replaces the resolved skin-depth interior with the
-    first-order Leontovich relation ``E_t = Z_s(omega) * (n x H)`` on the metal
-    surface, where ``Z_s(omega) = (1 - i) * sqrt(omega * mu0 / (2 * sigma))``.
-    The runtime evaluates ``Z_s`` at the operating frequency (a narrowband
-    surface R-L), masks the metal interior, and updates the two tangential E
-    faces from the vacuum-side tangential H each step; see
-    ``fdtd/runtime/materials.py`` (``_configure_sibc``) and
-    ``fdtd/runtime/stepping.py`` (``apply_sibc_surface``).
-
-    v1 is scoped to normal incidence on an axis-aligned planar face: a single
-    metal slab that spans the full transverse cross-section and sits flush
-    against one domain boundary, so exactly one face is illuminated. Returns
-    ``None`` when the scene holds no lossy-metal structure. Non-planar, oblique,
-    laterally finite, or mid-domain slabs raise via ``_reject_sibc`` because the
-    scalar normal-incidence ``Z_s`` does not model their tangential impedance or
-    edge diffraction.
+    A Phase 0 skeleton for surface-ownership overlap detection: it recognizes only the
+    unambiguous case of two boxes sharing a position and size. A PEC or 2D sheet that
+    partially overlaps the metal's illuminated face (different extent, same interface
+    plane) is NOT detected here and passes silently; per-face conformal / partial-overlap
+    ownership resolution is deferred to the Phase 1 surface layout.
     """
-    structures = _sibc_structures(scene)
+    if not isinstance(first, Box) or not isinstance(second, Box):
+        return False
+    first_center = tuple(float(value) for value in first.position)
+    second_center = tuple(float(value) for value in second.position)
+    first_size = tuple(float(value) for value in first.size)
+    second_size = tuple(float(value) for value in second.size)
+    # Scale the coincidence tolerance to the geometry's own extents (sizes and
+    # positions) rather than clamping at a 1-metre absolute floor: a 1e-9-metre floor
+    # is ~1e-3 relative for micron-scale photonics, which would falsely merge two
+    # genuinely distinct sub-nanometre-offset boxes. Falling back to 1.0 only for the
+    # fully degenerate all-zero geometry keeps the tolerance well defined.
+    extent = max(
+        max(first_size),
+        max(second_size),
+        max(abs(value) for value in first_center + second_center),
+    )
+    scale = extent if extent > 0.0 else 1.0
+    tolerance = 1.0e-9 * scale
+    return all(
+        abs(first_center[axis] - second_center[axis]) <= tolerance
+        and abs(first_size[axis] - second_size[axis]) <= tolerance
+        for axis in range(3)
+    )
+
+
+def _reject_overlapping_surface_ownership(scene, surface_structures):
+    """Fail closed when a surface impedance and a PEC / 2D sheet claim one interface.
+
+    The tangential-E write on a shared interface has exactly one physical owner; a PEC
+    (E_t = 0) and a surface impedance (E_t = Z_s (n x H)) on the same face are two
+    contradictory owners of the same degree of freedom.
+    """
+    others = _pec_structures(scene) + _sheet_structures(scene)
+    if not others:
+        return
+    for surface in surface_structures:
+        surface_geometry = getattr(surface, "geometry", None)
+        for other in others:
+            if _geometries_coincide(surface_geometry, getattr(other, "geometry", None)):
+                _reject_surface_impedance(
+                    "the same interface is claimed by both a surface impedance and a PEC "
+                    "or 2D sheet, so the tangential-E write on that interface has two "
+                    "contradictory owners.",
+                    phase="Phase 1",
+                )
+
+
+def _compile_sibc_descriptor(scene):
+    """Build the narrowband good-conductor surface-impedance descriptor for a slab.
+
+    The good-conductor surface-impedance boundary replaces the resolved skin-depth
+    interior with the first-order Leontovich relation ``E_t = Z_s(omega) * (n x H)`` on
+    the metal surface, where ``Z_s(omega) = (1 - i) * sqrt(omega * mu0 / (2 * sigma))``.
+    The runtime evaluates ``Z_s`` at the operating frequency (a narrowband surface R-L),
+    masks the metal interior, and updates the two tangential E faces from the
+    vacuum-side tangential H each step; see ``fdtd/runtime/materials.py``
+    (``_configure_sibc``) and ``fdtd/runtime/stepping.py`` (``apply_sibc_surface``).
+
+    The currently-wired runtime path handles normal incidence on an axis-aligned planar
+    face: a single metal slab that spans the full transverse cross-section and sits
+    flush against one domain boundary, so exactly one face is illuminated. Returns
+    ``None`` when the scene holds no surface-impedance structure. Generic rational
+    surfaces, non-planar/oblique/laterally-finite/mid-domain slabs, and overlapping
+    ownership funnel through ``_reject_surface_impedance`` with the physical reason and
+    the phase that lifts each restriction.
+    """
+    generic = _generic_surface_impedance_structures(scene)
+    if generic:
+        _reject_surface_impedance(
+            "a rational SurfaceImpedanceMedium carries a broadband causal tangential "
+            "response whose per-edge auxiliary-differential-equation stepping kernel is "
+            "not yet wired into the runtime, so its surface loss would be dropped.",
+            phase="Phase 1",
+        )
+    structures = _lossy_metal_structures(scene)
     if not structures:
         return None
+    _reject_overlapping_surface_ownership(scene, structures)
     if len(structures) > 1:
-        _reject_sibc(
-            "supports a single metal slab per scene; multiple lossy-metal surfaces would couple at "
-            "their mutual edges."
+        _reject_surface_impedance(
+            "the good-conductor surface replaces a single metal slab; multiple lossy-metal "
+            "surfaces couple at their mutual edges, whose shared-edge unique-owner "
+            "assembly is not yet built.",
+            phase="Phase 1",
         )
     structure = structures[0]
     material = _structure_material(structure)
     geometry = structure.geometry
     if not isinstance(geometry, Box):
-        _reject_sibc(
-            f"requires an axis-aligned Box slab; a {type(geometry).__name__} surface is curved or "
-            "non-planar."
+        _reject_surface_impedance(
+            f"requires an axis-aligned Box slab; a {type(geometry).__name__} surface is "
+            "curved or non-planar, so its local normal and cut-face area vary along the "
+            "surface.",
+            phase="Phase 2",
         )
     rotation = getattr(geometry, "rotation", None)
     if rotation is not None:
         quaternion = np.asarray(rotation.detach().cpu(), dtype=np.float64)
         if not np.allclose(np.abs(quaternion), (1.0, 0.0, 0.0, 0.0), atol=1.0e-6):
-            _reject_sibc(
-                "requires an axis-aligned (unrotated) slab; an oblique surface needs the "
-                "angle-dependent tensor impedance."
+            _reject_surface_impedance(
+                "requires an axis-aligned (unrotated) slab; an oblique surface presents "
+                "an angle-dependent tangential tensor impedance.",
+                phase="Phase 2",
             )
     if scene.boundary.uses_kind("bloch"):
-        _reject_sibc(
-            "uses a real-valued surface update; a Bloch-periodic run carries complex phase-shifted "
-            "fields for which the real Leontovich surface update is undefined."
+        _reject_surface_impedance(
+            "uses a real-valued surface update; a Bloch-periodic run carries complex "
+            "phase-shifted fields for which the real surface update is undefined.",
+            phase="Phase 1",
         )
     slices = _box_axis_slices(scene, geometry)
     if slices is None:
-        _reject_sibc("requires the metal slab to lie inside the grid; the descriptor covers no cells.")
+        _reject_surface_impedance(
+            "requires the metal slab to lie inside the grid; the descriptor covers no cells.",
+            phase="Phase 1",
+        )
     geometry_center = tuple(float(value) for value in geometry.position)
     geometry_size = tuple(float(value) for value in geometry.size)
     geometry_lower = tuple(
@@ -1468,9 +1562,11 @@ def _compile_sibc_descriptor(scene):
     )
     bounded_axes = [axis for axis in range(3) if not covers_full[axis]]
     if len(bounded_axes) != 1:
-        _reject_sibc(
-            "requires a metal slab that spans the full transverse cross-section (bounded along "
-            "exactly one axis); a laterally finite block exposes edge faces."
+        _reject_surface_impedance(
+            "requires a metal slab that spans the full transverse cross-section (bounded "
+            "along exactly one axis); a laterally finite block exposes edge faces whose "
+            "edge/corner unique-owner assembly is not yet built.",
+            phase="Phase 1",
         )
     axis = bounded_axes[0]
     axis_slice = slices[axis]
@@ -1483,14 +1579,17 @@ def _compile_sibc_descriptor(scene):
         >= float(physical_bounds[axis][1]) - tolerances[axis]
     )
     if touches_low and touches_high:
-        _reject_sibc(
-            "requires a vacuum region in front of the metal; the slab fills the domain along its "
-            "normal axis and exposes no illuminated face."
+        _reject_surface_impedance(
+            "requires a vacuum region in front of the metal; the slab fills the domain "
+            "along its normal axis and exposes no illuminated face.",
+            phase="Phase 1",
         )
     if not touches_low and not touches_high:
-        _reject_sibc(
-            "supports a metal slab flush against one domain boundary (a single illuminated face); a "
-            "mid-domain plate exposes two faces."
+        _reject_surface_impedance(
+            "the metal slab is mid-domain and exposes two faces (a double-sided plate); "
+            "the currently-wired path is a slab flush against one domain boundary with a "
+            "single illuminated face.",
+            phase="Phase 1",
         )
     if touches_high:
         metal_side = "high"

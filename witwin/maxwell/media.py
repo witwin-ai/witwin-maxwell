@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import math
 import warnings
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
 import torch
+
+from .rational import FitReport, RationalFitConfig, RationalModel, fit_rational
 
 from witwin.core import (
     FrequencyMaterialSample,
@@ -1710,6 +1714,308 @@ class LossyMetalMedium(Material):
 
     def surface_impedance_at_freq(self, frequency: float) -> complex:
         return self.surface_impedance(2.0 * np.pi * _coerce_frequency(frequency, name="frequency"))
+
+
+def _coerce_frequency_range(value, *, name: str) -> tuple[float, float]:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise ValueError(f"{name} must be an increasing (f_min, f_max) pair.")
+    f_min, f_max = float(value[0]), float(value[1])
+    if not (0.0 < f_min < f_max) or not math.isfinite(f_max):
+        raise ValueError(f"{name} must satisfy 0 < f_min < f_max.")
+    return (f_min, f_max)
+
+
+class SurfaceImpedanceModel(ABC):
+    """Read-only contract for a causal surface impedance/admittance model.
+
+    A surface impedance model represents the tangential constitutive relation
+    ``E_t = Z_s(omega) (n x H_t)`` on a metal surface as a causal, passive response
+    over a declared ``frequency_range``. Implementations expose the surface impedance
+    ``Z_s(omega)`` (and its admittance ``Y_s = Z_s^{-1}``) and declare whether the
+    response is scalar (``port_count == 1``) or a tangential 2x2 tensor
+    (``port_count == 2``). The model is a prepare-time object: it is fit or specified
+    once and then discretized for time stepping; it is not a per-step frequency
+    interpolation.
+    """
+
+    is_surface_impedance = True
+
+    @property
+    @abstractmethod
+    def frequency_range(self) -> tuple[float, float]:
+        """Declared validity band ``(f_min, f_max)`` in hertz."""
+
+    @property
+    @abstractmethod
+    def port_count(self) -> int:
+        """1 for a scalar surface response, 2 for a tangential 2x2 response."""
+
+    @abstractmethod
+    def surface_impedance(self, frequencies) -> torch.Tensor:
+        """Surface impedance ``Z_s(omega)`` in ohms, shape ``[F]`` or ``[F, P, P]``."""
+
+
+class RationalSurfaceImpedance(SurfaceImpedanceModel):
+    """Passive rational-model surface impedance over a declared frequency band.
+
+    Wraps a shared :class:`~witwin.maxwell.rational.RationalModel` (the same
+    stable/passive realization the embedded networks and the thin-wire series
+    impedance reuse). Construction is fail-closed: the model must be stable and
+    certified passive over its ``frequency_range`` (a non-passive surface injects
+    energy and diverges), and its transfer matrix must be square and scalar (1x1) or
+    tangential (2x2).
+
+    ``representation`` selects whether the rational fit represents the admittance
+    ``Y_s`` (``"Y"``, the default, preferred for a good conductor whose ``Z_s`` grows
+    like ``sqrt(omega)`` and whose ``Y_s`` is bounded) or the impedance ``Z_s``
+    (``"Z"``). :meth:`surface_impedance` always returns ``Z_s`` regardless of the
+    internal representation.
+
+    Passivity is certified only over ``frequency_range``. Evaluating
+    :meth:`surface_impedance`, :meth:`admittance`, or :meth:`evaluate` outside that
+    band extrapolates the rational model and carries no passivity or accuracy
+    certificate; the Phase 1 compile gate enforces in-band-only use for the stepping
+    runtime, so out-of-band queries are for inspection only.
+    """
+
+    def __init__(
+        self,
+        poles,
+        residues,
+        direct=0.0,
+        *,
+        frequency_range,
+        representation: str | None = None,
+        fit_report: FitReport | None = None,
+        sample_frequencies: torch.Tensor | None = None,
+        passivity_tolerance: float = 1.0e-9,
+        certificate_samples: int = 64,
+    ):
+        if isinstance(poles, RationalModel):
+            model = poles
+            if representation is not None and representation != model.representation:
+                # Fail closed: silently letting the passed model's representation win
+                # would reinterpret Z-samples as admittance (or vice versa) and invert
+                # the physics without any error.
+                raise ValueError(
+                    "representation kwarg "
+                    f"{representation!r} contradicts the passed RationalModel's own "
+                    f"representation {model.representation!r}; omit representation or "
+                    "pass a model already built with the intended representation."
+                )
+        else:
+            model = RationalModel(
+                poles=poles,
+                residues=residues,
+                direct=direct,
+                representation="Y" if representation is None else representation,
+                report=fit_report,
+            )
+        band = _coerce_frequency_range(frequency_range, name="frequency_range")
+        if model.representation not in {"Y", "Z"}:
+            raise ValueError("surface impedance representation must be 'Y' or 'Z'.")
+        if model.output_count != model.input_count:
+            raise ValueError("A surface impedance transfer matrix must be square.")
+        if model.output_count not in (1, 2):
+            raise ValueError(
+                "A surface impedance model must be scalar (1x1) or tangential (2x2); "
+                f"got a {model.output_count}x{model.input_count} transfer matrix."
+            )
+        if not model.is_stable:
+            raise ValueError(
+                "A causal surface impedance requires a stable rational model "
+                "(all poles with Re(pole) < 0)."
+            )
+        tolerance = float(passivity_tolerance)
+        if tolerance < 0.0:
+            raise ValueError("passivity_tolerance must be non-negative.")
+        certificate = self._certificate_frequencies(band, int(certificate_samples), model)
+        passivity = model.check_passivity(certificate, tolerance=tolerance)
+        if not passivity.passive or not passivity.certified:
+            raise ValueError(
+                "A surface impedance model must be certified passive over its "
+                f"frequency_range; maximum violation is {passivity.max_violation:.6g}, "
+                f"certificate={passivity.certified}."
+            )
+        object.__setattr__(self, "_model", model)
+        object.__setattr__(self, "_frequency_range", band)
+        object.__setattr__(self, "_fit_report", fit_report)
+        object.__setattr__(self, "_passivity", passivity)
+        object.__setattr__(
+            self,
+            "_sample_frequencies",
+            None if sample_frequencies is None else sample_frequencies.detach().clone(),
+        )
+
+    @staticmethod
+    def _certificate_frequencies(band, samples: int, model: RationalModel) -> torch.Tensor:
+        if samples < 2:
+            raise ValueError("certificate_samples must be at least 2.")
+        f_min, f_max = band
+        points = torch.logspace(
+            math.log10(f_min), math.log10(f_max), samples, dtype=torch.float64
+        )
+        endpoints = torch.tensor([f_min, f_max], dtype=torch.float64)
+        return torch.unique(torch.cat((points, endpoints)), sorted=True).to(
+            device=model.poles.device
+        )
+
+    @property
+    def model(self) -> RationalModel:
+        return self._model
+
+    @property
+    def representation(self) -> str:
+        return self._model.representation
+
+    @property
+    def frequency_range(self) -> tuple[float, float]:
+        return self._frequency_range
+
+    @property
+    def port_count(self) -> int:
+        return int(self._model.output_count)
+
+    @property
+    def fit_report(self) -> FitReport | None:
+        return self._fit_report
+
+    @property
+    def passivity(self):
+        return self._passivity
+
+    @property
+    def sample_frequencies(self) -> torch.Tensor | None:
+        return self._sample_frequencies
+
+    def evaluate(self, frequencies) -> torch.Tensor:
+        """Return the represented transfer (``Y_s`` or ``Z_s``), shape ``[F, P, P]``."""
+
+        return self._model.evaluate(frequencies)
+
+    def surface_impedance(self, frequencies) -> torch.Tensor:
+        """Return ``Z_s(omega)`` in ohms, shape ``[F]`` (scalar) or ``[F, P, P]``."""
+
+        response = self._model.evaluate(frequencies)
+        if self._model.representation == "Z":
+            impedance = response
+        else:
+            if self.port_count == 1:
+                impedance = 1.0 / response
+            else:
+                impedance = torch.linalg.inv(response)
+        if self.port_count == 1:
+            return impedance.reshape(impedance.shape[0])
+        return impedance
+
+    def admittance(self, frequencies) -> torch.Tensor:
+        """Return ``Y_s(omega)`` in siemens, shape ``[F]`` (scalar) or ``[F, P, P]``."""
+
+        response = self._model.evaluate(frequencies)
+        if self._model.representation == "Y":
+            admittance = response
+        else:
+            if self.port_count == 1:
+                admittance = 1.0 / response
+            else:
+                admittance = torch.linalg.inv(response)
+        if self.port_count == 1:
+            return admittance.reshape(admittance.shape[0])
+        return admittance
+
+    @classmethod
+    def fit(
+        cls,
+        frequencies,
+        values,
+        *,
+        order: int,
+        band: tuple[float, float] | None = None,
+        representation: str = "Y",
+        iterations: int = 20,
+        relative_tolerance: float = 1.0e-3,
+        relative_weighting: bool = True,
+        enforce_passivity: bool = False,
+        passivity_tolerance: float = 1.0e-9,
+        config: RationalFitConfig | None = None,
+    ) -> "RationalSurfaceImpedance":
+        """Fit a passive rational surface model from frequency samples.
+
+        Reuses the shared vector fitter :func:`~witwin.maxwell.rational.fit_rational`
+        on the requested ``representation`` (``"Y"`` fits the admittance ``Y_s``,
+        ``"Z"`` fits the impedance ``Z_s``). ``frequencies`` [Hz] and ``values`` (the
+        matching ``Y_s`` or ``Z_s`` samples) must have shape ``[F]`` for a scalar
+        surface. The returned model is validated passive over ``band`` at construction
+        (fail-closed), and its shared fitter report is exposed as ``fit_report``.
+        """
+
+        freqs = torch.as_tensor(frequencies, dtype=torch.float64)
+        if freqs.ndim != 1 or freqs.numel() == 0:
+            raise ValueError("frequencies must have non-empty shape [F].")
+        if not bool(torch.all(torch.isfinite(freqs))) or not bool(torch.all(freqs > 0.0)):
+            raise ValueError("frequencies must be finite and strictly positive.")
+        sample_values = torch.as_tensor(values).to(dtype=torch.complex128)
+        if sample_values.shape[0] != freqs.numel():
+            raise ValueError("values must have a leading dimension matching frequencies.")
+        if band is None:
+            band = (float(freqs.min()), float(freqs.max()))
+        band = _coerce_frequency_range(band, name="band")
+        if config is None:
+            weights = None
+            if relative_weighting:
+                flat = sample_values.reshape(freqs.numel(), -1)
+                magnitude = flat.abs().amax(dim=1)
+                weights = 1.0 / magnitude.clamp_min(torch.finfo(torch.float64).tiny)
+            config = RationalFitConfig(
+                order=int(order),
+                band=band,
+                iterations=int(iterations),
+                proportional=False,
+                relative_tolerance=float(relative_tolerance),
+                enforce_passivity=bool(enforce_passivity),
+                passivity_tolerance=float(passivity_tolerance),
+                weights=weights,
+            )
+        model = fit_rational(freqs, sample_values, config, representation=representation)
+        return cls(
+            model,
+            None,
+            frequency_range=band,
+            representation=model.representation,
+            fit_report=model.report,
+            sample_frequencies=freqs,
+            passivity_tolerance=float(passivity_tolerance),
+        )
+
+
+class SurfaceImpedanceMedium(Material):
+    """A surface-impedance boundary material carrying a :class:`SurfaceImpedanceModel`.
+
+    Attaching this material to a ``Structure`` declares the structure's exposed metal
+    faces as a causal, passive surface-impedance boundary described by ``impedance``
+    (a good conductor, a user rational model, or a fitted model). The bulk permittivity
+    is vacuum; the surface response replaces the resolved skin-depth interior.
+
+    The generalized surface-impedance runtime (finite blocks, mid-domain double-sided
+    plates, multiple metals, and multiple orientations) is not yet wired into the
+    stepping kernels, so the material compiler currently fails closed for a
+    ``SurfaceImpedanceMedium`` and states which phase lifts the restriction. The model
+    layer, the shared passive fitter, and this public type are the Phase 0 contract.
+    """
+
+    def __init__(self, *, impedance: SurfaceImpedanceModel, name: str | None = None):
+        if not isinstance(impedance, SurfaceImpedanceModel):
+            raise TypeError("impedance must be a SurfaceImpedanceModel instance.")
+        super().__init__(eps_r=1.0, mu_r=1.0, sigma_e=0.0, name=name)
+        object.__setattr__(self, "impedance", impedance)
+
+    @property
+    def is_surface_impedance(self) -> bool:
+        return True
+
+    @property
+    def frequency_range(self) -> tuple[float, float]:
+        return self.impedance.frequency_range
 
 
 class PerturbationMedium(Material):
