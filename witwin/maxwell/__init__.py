@@ -30,6 +30,15 @@ from .circuits import (
     VoltageSource,
     parse_spice,
 )
+from .circuit_devices import (
+    BJT,
+    Diode,
+    MOSFET,
+    NonlinearSolveConfig,
+    PiecewiseLinearIV,
+    PolynomialIV,
+    VoltageDependentCapacitor,
+)
 from .geometry import ComplexPolySlab, PolySlab
 from .media import (
     CustomDebyePole,
@@ -179,6 +188,13 @@ __all__ = [
     "CircuitData",
     "CircuitDevice",
     "CircuitNode",
+    "BJT",
+    "Diode",
+    "MOSFET",
+    "NonlinearSolveConfig",
+    "PiecewiseLinearIV",
+    "PolynomialIV",
+    "VoltageDependentCapacitor",
     "ComplexPolySlab",
     "DiffractionMonitor",
     "Cone",

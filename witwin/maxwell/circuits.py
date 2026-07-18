@@ -692,9 +692,13 @@ class Circuit:
 
     def add(self, device):
         from .lumped import Capacitor, Inductor, Resistor
+        from .circuit_devices import NONLINEAR_DEVICE_TYPES
 
-        if not isinstance(device, (Resistor, Capacitor, Inductor, *_CIRCUIT_DEVICE_TYPES)):
-            raise TypeError("Circuit devices must be supported linear circuit device instances.")
+        if not isinstance(
+            device,
+            (Resistor, Capacitor, Inductor, *_CIRCUIT_DEVICE_TYPES, *NONLINEAR_DEVICE_TYPES),
+        ):
+            raise TypeError("Circuit devices must be supported linear or nonlinear circuit device instances.")
         key = device.name.casefold()
         if key in self._device_names:
             raise ValueError(f"Circuit device name {device.name!r} is already present.")

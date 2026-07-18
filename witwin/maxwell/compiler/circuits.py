@@ -18,6 +18,7 @@ from ..circuits import (
     VoltageSource,
 )
 from ..lumped import Inductor, Resistor
+from ..circuit_devices import Diode, PiecewiseLinearIV, PolynomialIV
 
 
 _BRANCH_TYPES = (
@@ -31,6 +32,10 @@ _CURRENT_SOURCE_TYPES = (
     VoltageControlledCurrentSource,
     CurrentControlledCurrentSource,
 )
+# Nonlinear conduction devices (diode, behavioral I-V) provide a finite DC
+# conductance between their terminals, so they establish a DC path exactly like a
+# resistor. A VoltageDependentCapacitor is charge-only (open at DC) and is
+# therefore deliberately absent, matching the linear Capacitor.
 _DC_CONNECTING_TYPES = (
     Resistor,
     Inductor,
@@ -38,6 +43,9 @@ _DC_CONNECTING_TYPES = (
     VoltageControlledVoltageSource,
     CurrentControlledVoltageSource,
     TimedSwitch,
+    Diode,
+    PiecewiseLinearIV,
+    PolynomialIV,
 )
 
 
@@ -242,6 +250,37 @@ def compile_circuit_graph(
     )
 
 
+def reject_nonlinear_devices(circuit) -> None:
+    """Fail closed when a nonlinear device enters a linear executable runtime.
+
+    ``Circuit.add`` and :func:`compile_circuit_graph` admit the nonlinear device
+    family (diode / behavioral I-V / voltage-dependent capacitor) so their DC
+    topology and structural validation are exercised. Their terminal ``i(v)`` /
+    ``q(v)`` law is not linear, so it cannot be assembled into the single
+    constant-conductance stamp that the linear MNA runtime (standalone, coupled,
+    and the FDTD Norton companion) builds: those paths carry no Newton iteration,
+    and would otherwise solve the network with the device silently absent. This
+    rejects such a circuit at the linear runtime boundary until the nonlinear
+    device-runtime integration wires the Newton loop into these paths.
+    """
+
+    from ..circuit_devices import NONLINEAR_DEVICE_TYPES
+
+    offenders = tuple(
+        device.name
+        for device in circuit.devices
+        if isinstance(device, NONLINEAR_DEVICE_TYPES)
+    )
+    if offenders:
+        raise NotImplementedError(
+            f"Circuit {circuit.name!r} contains nonlinear devices {offenders} whose "
+            "nonlinear terminal law cannot be assembled into the constant-conductance "
+            "stamp of the linear MNA / FDTD Norton-companion runtime; that path has no "
+            "Newton iteration and would solve the network with the device absent. This "
+            "fails closed until the nonlinear device-runtime integration lands."
+        )
+
+
 def compile_circuits(scene) -> tuple[CircuitGraph, ...]:
     circuits = tuple(getattr(scene, "circuits", ()))
     circuit_names = [circuit.name.casefold() for circuit in circuits]
@@ -256,6 +295,7 @@ def compile_circuits(scene) -> tuple[CircuitGraph, ...]:
     bound_port_names: set[str] = set()
     result = []
     for circuit in circuits:
+        reject_nonlinear_devices(circuit)
         graph = compile_circuit_graph(circuit, available_ports=allowed_ports)
         for binding in graph.bindings:
             port = allowed_ports[binding.port_name]
@@ -272,4 +312,9 @@ def compile_circuits(scene) -> tuple[CircuitGraph, ...]:
     return tuple(result)
 
 
-__all__ = ["CircuitGraph", "compile_circuit_graph", "compile_circuits"]
+__all__ = [
+    "CircuitGraph",
+    "compile_circuit_graph",
+    "compile_circuits",
+    "reject_nonlinear_devices",
+]

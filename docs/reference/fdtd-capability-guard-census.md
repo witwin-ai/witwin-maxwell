@@ -11,10 +11,11 @@ The 2026-07-17 integrated repository state (circuit co-simulation, Touchstone
 network embedding, the thin-wire subgrid conductor series in plan 07 phases
 0-3, the array basis / active-S feature series in plan 06 phases 0-1, and the
 plan 07 Phase 4 multi-GPU wire forward slice, plus the plan 07 Phase 4
-finite-conductor wire series-impedance slice, all merged) contains 156 guards:
+finite-conductor wire series-impedance slice, and the plan 05
+nonlinear-circuit-device Phase 0 slice, all merged) contains 161 guards:
 
-- 134 capability guards tracked by the non-increasing test budget;
-- 22 contract guards excluded by exact file and message substring.
+- 137 capability guards tracked by the non-increasing test budget;
+- 24 contract guards excluded by exact file and message substring.
 
 The single-GPU circuit adjoint provides the circuit replay and transpose
 linear-solve VJP. Its remaining explicit limits are the omitted t=0
@@ -44,12 +45,12 @@ The capability baseline is distributed as follows:
 | Frequency-domain runtime | 5 |
 | Time-domain adjoint | 19 |
 | Time-domain excitation | 12 |
-| Time-domain ports and lumped elements | 13 |
+| Time-domain ports and lumped elements | 16 |
 | Time-domain runtime | 20 |
 | Public simulation, result, and network workflows | 24 |
 | Material models | 7 |
 | Postprocessing | 4 |
-| **Total** | **134** |
+| **Total** | **137** |
 
 This integrated baseline is the 2026-07-16 circuit/network state (119 capability
 guards) plus the ten thin-wire capability guards from plan 07 phases 0-3 (giving
@@ -147,9 +148,59 @@ and the guard disappears once the recurrence lands. It is counted under
 "Material compilers" (11 -> 12); lower the budget when the lossy recurrence is
 wired into the runtime.
 
+### Nonlinear-circuit-device reconciliation (2026-07-17)
+
+The plan 05 nonlinear-circuit-device Phase 0 slice adds the Device + Newton
+contract (`witwin/maxwell/circuit_devices.py`,
+`witwin/maxwell/compiler/nonlinear_devices.py`) and two reviewed contract guards,
+with **no** change to the capability budget (it stays 134). The two guards are
+the reserved transistor public surfaces `circuit_devices.py::BJT.__init__` and
+`circuit_devices.py::MOSFET.__init__`, each raising `NotImplementedError`
+("Transistor device BJT/MOSFET is gated behind the independent Phase 5 go/no-go
+transistor evaluation ..."). They are contract guards, not capability debt: per
+plan 05 §8 the diode/behavioral nonlinear device family (Diode, PiecewiseLinearIV,
+PolynomialIV, VoltageDependentCapacitor) is delivered by Phases 0-4, while
+transistor terminal physics, charge conservation, and gradients are a separate,
+independent go/no-go phase whose non-completion does not block the Phase 0-4
+release. Reserving the surface fail-closed makes "a parser or factory recognising
+a model card is not the same thing as supported physics" machine-checkable. The
+Device + Newton contract itself adds no `NotImplementedError`; that part of the
+count is unchanged and the contract table above rises from 22 to 24.
+
+### Nonlinear-device fail-closed hardening (2026-07-17)
+
+Phase 0 admits the nonlinear device family through `Circuit.add` and validates
+its DC topology in `compile_circuit_graph`, but the executable runtimes were not
+yet extended: the linear MNA, coupled MNA, and FDTD Norton-companion paths build
+a single constant-conductance stamp with no Newton iteration, and the standalone
+Newton core consumes only the conduction law `i(v)`. Left unguarded, a diode
+compiled through those paths ran with the device silently absent, and validated
+`series_resistance` / `junction_capacitance` parameters were silently dropped.
+This slice closes those fail-open gaps with three capability guards (capability
+budget 134 -> 137, all under "Time-domain ports and lumped elements", 13 -> 16):
+
+- `compiler/circuits.py::reject_nonlinear_devices` rejects any nonlinear device
+  reaching a linear executable runtime, reached from `compile_mna_system`,
+  `compile_coupled_mna_system` (both via `_compile_mna_system`), and
+  `scene.compile_circuits()` (the FDTD circuit prepare path in
+  `Simulation._validate_circuit_execution`).
+- `compiler/nonlinear_devices.py::compile_nonlinear_devices` fails closed on a
+  diode with nonzero `series_resistance`: the ohmic series branch (an internal
+  node with the resistive drop) is not assembled into the ideal-Shockley `i(v)`,
+  so honouring the parameter needs the extended device topology.
+- `compiler/nonlinear_devices.py::newton_solve` fails closed on a diode with
+  nonzero `junction_capacitance` entering the conduction-only DC solve, which
+  never differentiates the stored charge `q(v)` into the system.
+
+All three are genuine capability gaps, not permanent contracts: each guard is
+removed when its runtime slice (nonlinear device-runtime integration, the series
+branch, and the charge-aware transient solve) lands. The `q(v)` / `C(v)` charge
+model is still fully exercised through `CompiledNonlinearDevice.charge`, so the
+device math surface is unaffected.
+
 ## Contract exclusions
 
-`CONTRACT_GUARDS` in the test is the canonical exact-match inventory. Its 22
+`CONTRACT_GUARDS` in the test is the canonical exact-match inventory. Its 24
 entries cover these stable contract families:
 
 | Contract family | Count |
@@ -163,7 +214,8 @@ entries cover these stable contract families:
 | Bloch-boundary total-field/scattered-field slab requirement | 1 |
 | Closed-surface exterior-sampling requirements | 3 |
 | Time-domain-only embedded network feedback | 1 |
-| **Total** | **22** |
+| Transistor Phase-5 go/no-go boundary | 2 |
+| **Total** | **24** |
 
 When an implementation removes a capability guard, lower
 `CAPABILITY_GUARD_BUDGET` in the same commit. Reclassifying a guard as a public
