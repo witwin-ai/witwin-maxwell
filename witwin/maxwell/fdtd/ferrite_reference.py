@@ -37,7 +37,7 @@ import torch
 
 
 EPSILON_0 = 8.8541878128e-12
-MU_0 = 1.25663706212e-6
+MU_0 = 4.0e-7 * math.pi  # frozen contract section 1; identical to media._VACUUM_PERMEABILITY
 SPEED_OF_LIGHT = 1.0 / math.sqrt(EPSILON_0 * MU_0)
 GAMMA_DEFAULT = 1.760859e11  # rad/(s*T)
 
@@ -46,10 +46,14 @@ GAMMA_DEFAULT = 1.760859e11  # rad/(s*T)
 class AcceptanceBudget:
     """Pre-registered acceptance limits for the gyromagnetic ferrite implementation.
 
-    Mirrors ``docs/reference/ferrite-physics-contract.md`` section 6 verbatim;
-    the two must stay identical. Loosening any value is governed by the change
-    rule in that document (pre-register a named near-resonance scene with its
-    physical budget); tightening is always allowed.
+    Mirrors the eight numeric gates of
+    ``docs/reference/ferrite-physics-contract.md`` section 6; those values must
+    stay identical to the frozen table (each is asserted in
+    ``test_budget_matches_frozen_contract``). The two non-numeric section-6 gates
+    (``multigpu_parity`` and ``high_Q_near_resonance``) are prose policies with no
+    dataclass field. Loosening any value is governed by the change rule in that
+    document (pre-register a named near-resonance scene with its physical budget);
+    tightening is always allowed.
     """
 
     reference_polder_rtol: float = 1.0e-5
@@ -390,7 +394,10 @@ class LLGReference:
             h = torch.tensor([math.cos(omega * t_half), 0.0], dtype=self.dtype)
             m = self.Phi @ m + self.Gamma @ h
             if n >= n_settle:
-                phase = torch.tensor(math.cos(omega * n * self.dt) + 1j * math.sin(omega * n * self.dt))
+                # After the update, ``m`` is m^{n+1} at time (n+1)*dt; demodulate at
+                # the state's own time so the extracted chi is not stale by exp(-i*omega*dt).
+                t_state = (n + 1) * self.dt
+                phase = torch.tensor(math.cos(omega * t_state) + 1j * math.sin(omega * t_state))
                 acc = acc + m.to(torch.complex128) * phase
         chi = 2.0 * acc / n_window
         return chi[0], chi[1]

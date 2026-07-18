@@ -34,12 +34,16 @@ def _in_band_omega():
 
 
 def test_budget_matches_frozen_contract():
+    # All eight numeric gates of contract section 6 must stay pinned; none may
+    # drift from the frozen document without a test going red.
     assert BUDGET.reference_polder_rtol == 1.0e-5
     assert BUDGET.analytic_response_rel_err == 2.0e-2
     assert BUDGET.analytic_phase_err_deg == 3.0
     assert BUDGET.passive_energy_residual == 1.0e-2
     assert BUDGET.convergence_tiers == 3
+    assert BUDGET.param_gradient_rel_err == 2.0e-2
     assert BUDGET.bias_reversal_symmetry_rtol == 1.0e-5
+    assert BUDGET.ferrite_free_perf_regression == 1.0e-2
 
 
 def test_recurrence_algebra_identity_in_band():
@@ -50,22 +54,53 @@ def test_recurrence_algebra_identity_in_band():
         assert resid <= BUDGET.reference_polder_rtol
 
 
+def test_state_space_susceptibility_matches_scalar_closed_form():
+    """The state-space inverse chi = (-i w I - P)^-1 Q equals the scalar Polder
+    closed form to machine precision (contract 2.3), binding the gyromagnetic
+    handedness: chi_xx = mu - mu_inf, chi_yy = mu - mu_inf, chi_yx = +i*kappa,
+    chi_xy = -i*kappa. Conjugating the off-diagonal signs of P and Q (a flipped
+    precession/kappa sign, the brief's Risk-1 convention flip) inverts chi_yx and
+    breaks this gate even though the scalar-formula material path is untouched.
+    """
+    params = _params(alpha=1.0e-2)
+    for fghz in (8.0, 9.0, 12.0):
+        omega = 2.0 * math.pi * fghz * 1e9
+        chi = fr.continuous_susceptibility(params, omega)
+        mu, kappa = fr.continuous_polder(params, omega)
+        chi_diag = complex(mu) - params.mu_infinity
+        assert abs(complex(chi[0, 0]) - chi_diag) <= BUDGET.reference_polder_rtol * abs(chi_diag)
+        assert abs(complex(chi[1, 1]) - chi_diag) <= BUDGET.reference_polder_rtol * abs(chi_diag)
+        # Handedness (sign-bound): chi_yx = +i*kappa, chi_xy = -i*kappa exactly.
+        assert abs(complex(chi[1, 0]) - 1j * complex(kappa)) <= BUDGET.reference_polder_rtol * abs(complex(kappa))
+        assert abs(complex(chi[0, 1]) + 1j * complex(kappa)) <= BUDGET.reference_polder_rtol * abs(complex(kappa))
+
+
 def test_discrete_converges_to_continuous_three_dt_tiers():
     """>=3 dt tiers, monotone O(dt^2) convergence to the analytic Polder (<2%)."""
     params = _params()
     omega = _in_band_omega()
     mu_cont, kappa_cont = fr.continuous_polder(params, omega)
     errors = []
+    kappa_errors = []
     for dt in (4.0e-13, 2.0e-13, 1.0e-13):
         mu_d, kappa_d = fr.discrete_polder(params, omega, dt)
         err = abs(complex(mu_d - mu_cont)) / abs(complex(mu_cont))
         errors.append(err)
+        kappa_errors.append(abs(complex(kappa_d - kappa_cont)) / abs(complex(kappa_cont)))
     assert len(errors) >= BUDGET.convergence_tiers
     assert errors[-1] < BUDGET.analytic_response_rel_err
     # Monotone decreasing with ~4x per halving (second order).
     assert errors[0] > errors[1] > errors[2]
     assert errors[0] / errors[1] > 3.0
     assert errors[1] / errors[2] > 3.0
+    # kappa (the gyrotropic off-diagonal, carrying the precession handedness)
+    # must converge to the closed-form value with the correct sign; a flipped
+    # kappa sign yields a ~200% error. This binds the handedness of the
+    # discrete state-space matrices, not only their diagonal block.
+    assert kappa_errors[-1] < BUDGET.analytic_response_rel_err
+    assert kappa_errors[0] > kappa_errors[1] > kappa_errors[2]
+    assert kappa_errors[0] / kappa_errors[1] > 3.0
+    assert kappa_errors[1] / kappa_errors[2] > 3.0
 
 
 def test_material_polder_matches_oracle_continuous():
@@ -129,8 +164,14 @@ def test_stepping_matches_discrete_transfer_function():
     dt = 2.0e-13
     chi_xx, chi_yx = fr.LLGReference(params, dt=dt).run_cw(omega, periods=3000, settle=1500)
     chi = fr.discrete_susceptibility(params, omega, dt)
-    assert abs(complex(chi_xx) - complex(chi[0, 0])) / abs(complex(chi[0, 0])) < BUDGET.analytic_response_rel_err
-    assert abs(complex(chi_yx) - complex(chi[1, 0])) / abs(complex(chi[1, 0])) < BUDGET.analytic_response_rel_err
+    # With the demodulation phase referenced to the state's own time, the DFT
+    # extraction reproduces the exact discrete transfer function to finite-window
+    # tolerance (~3e-5), far below the 2% analytic budget. A stale one-step phase
+    # would consume >half the 2% gate; this tight bound catches any sub-percent
+    # stepping defect the loose gate would mask.
+    stepping_rtol = 1.0e-4
+    assert abs(complex(chi_xx) - complex(chi[0, 0])) / abs(complex(chi[0, 0])) < stepping_rtol
+    assert abs(complex(chi_yx) - complex(chi[1, 0])) / abs(complex(chi[1, 0])) < stepping_rtol
 
 
 def test_circular_resonance_handedness():

@@ -93,6 +93,51 @@ def test_polder_tensor_frozen_form():
         assert torch.allclose(t[idx], torch.zeros((), dtype=torch.complex128))
 
 
+def _scalar_polder_closed_form(f, frequency):
+    """Independent scalar (mu, kappa) from the frozen omega_0/omega_m formula."""
+    omega = 2.0 * math.pi * frequency
+    w0, wm, alpha = f.omega_0, f.omega_m, f.gilbert_damping
+    W = w0 - 1j * alpha * omega
+    D = W * W - omega * omega
+    mu = f.mu_infinity + wm * W / D
+    kappa = wm * omega / D
+    return mu, kappa
+
+
+def test_scalar_polder_components_z_bias():
+    """z-aligned bias: extracted (mu, kappa) match the closed-form scalars."""
+    f = _ferrite()
+    mu, kappa = f.scalar_polder_components(9.0e9)
+    mu_t, kappa_t = _scalar_polder_closed_form(f, 9.0e9)
+    assert abs(mu - mu_t) <= 1e-12 * abs(mu_t)
+    assert abs(kappa - kappa_t) <= 1e-12 * abs(kappa_t)
+
+
+@pytest.mark.parametrize(
+    "bias_field",
+    [
+        (1.75e5, 0.0, 0.0),
+        (0.0, 1.75e5, 0.0),
+        (1.0e5, 1.0e5, 1.0e5),
+        (-0.7e5, 1.2e5, -0.9e5),
+    ],
+)
+def test_scalar_polder_components_frame_invariant(bias_field):
+    """Non-z bias must yield the same frame-invariant scalars as z-bias.
+
+    Falsification of the old fail-open extraction (mu = tensor[0,0],
+    kappa = tensor[1,0]/1j only valid for b = z_hat): those hardcoded entries
+    report near-zero gyrotropy for an x-aligned bias.
+    """
+    f = _ferrite(bias_field=bias_field)
+    mu, kappa = f.scalar_polder_components(9.0e9)
+    mu_t, kappa_t = _scalar_polder_closed_form(f, 9.0e9)
+    assert abs(mu - mu_t) <= 1e-12 * abs(mu_t)
+    assert abs(kappa - kappa_t) <= 1e-12 * abs(kappa_t)
+    # Guard against the degenerate old behavior: real gyrotropy is resolved.
+    assert abs(kappa) > 1e-3
+
+
 def test_polder_hermitian_lossless_antihermitian_lossy():
     omega = 2.0 * math.pi * 9.0e9
     lossless = _ferrite(gilbert_damping=0.0).polder_tensor(omega)

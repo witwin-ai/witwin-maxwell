@@ -1182,10 +1182,21 @@ class GyromagneticFerrite(Material):
         return self.polder_tensor(omega, dtype=dtype)
 
     def scalar_polder_components(self, frequency):
-        """Analytic scalar ``(mu, kappa)`` (complex) at ordinary ``frequency`` [Hz]."""
+        """Analytic scalar ``(mu, kappa)`` (complex) at ordinary ``frequency`` [Hz].
+
+        Frame-invariant: valid for any bias orientation, not only ``b = z_hat``.
+        ``mu`` is recovered from the isotropic transverse block via
+        ``trace(mu_r) = 2*mu + mu_infinity`` (since ``tr(I - b b^T) = 2``,
+        ``tr(b b^T) = 1``, ``tr([b]_x) = 0``), and ``kappa`` from the gyrotropic
+        (antisymmetric) part contracted against the bias cross matrix ``[b]_x``,
+        for which ``sum_ij (mu_r)_ij ([b]_x)_ij = 2*i*kappa`` (the symmetric part
+        contracts to zero and ``sum_ij ([b]_x)_ij^2 = 2`` for a unit bias).
+        """
         tensor = self.permeability_tensor_at_freq(frequency)
-        mu = complex(tensor[0, 0])
-        kappa = complex(tensor[1, 0] / 1j)
+        b = torch.as_tensor(self.bias_unit_vector, dtype=torch.float64)
+        cross = _gyromagnetic_cross_matrix(b).to(tensor.dtype)
+        mu = complex((torch.trace(tensor) - self.mu_infinity) / 2.0)
+        kappa = complex((tensor * cross).sum() / 2.0j)
         return mu, kappa
 
     # --- Material-family overrides -------------------------------------------
