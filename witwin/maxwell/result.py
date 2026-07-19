@@ -1272,6 +1272,15 @@ class Result:
         the charge-conserving projection of the injected current onto the run
         time grid, and full provenance (standard revision, level voltage,
         colocation-independent scalar metrics, model version).
+
+        The record also carries a ``measured`` port record recovered from the
+        run when terminal-port voltage/current was recorded for the bound port
+        (the RF ``PortData``), so users can compare the injected/target current
+        against the measured port. For the Phase-1 ideal-current injection path
+        no terminal-port recorder runs (the ESD source lowers to a volumetric
+        current source), so ``measured`` is ``None`` and the injected current on
+        the run grid is the ``resampled`` record; see :class:`ESDPortRecord` for
+        the documented target-vs-measured limitation and workaround.
         """
 
         from .esd import ESDPortRecord
@@ -1301,12 +1310,16 @@ class Result:
                     t_end = float(waveform.support[1])
             resampled = waveform.resample_to_grid(dt, t_end=t_end)
         provenance = source.provenance()
+        # Expose a measured terminal-port record if the run recorded one for this
+        # port (RF PortData); None for the ideal-current injection path.
+        measured = self._ports.get(source.port_name)
         return ESDPortRecord(
             name=source.name,
             port_name=source.port_name,
             diagnostics=diagnostics,
             resampled=resampled,
             provenance=provenance,
+            measured=measured,
         )
 
     def breakdown_names(self) -> tuple[str, ...]:

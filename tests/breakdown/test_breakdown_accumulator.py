@@ -196,7 +196,12 @@ def test_colocation_energy_density_consistency_on_uniform_field():
     mag = colocate_electric_magnitude(Ex, Ey, Ez)
     energy_density = 0.5 * eps * mag.square()
     analytic = 0.5 * eps * (ex ** 2 + ey ** 2 + ez ** 2)
-    assert torch.allclose(energy_density, torch.full_like(energy_density, analytic), rtol=1e-6)
+    # atol=0.0 keeps the comparison purely relative: with the eps-scaled energy
+    # densities (~1e-10) the default absolute tolerance (1e-8) would otherwise
+    # swamp the check and pass even if a colocation term were dropped.
+    assert torch.allclose(
+        energy_density, torch.full_like(energy_density, analytic), rtol=1e-6, atol=0.0
+    )
 
 
 def test_colocation_requires_consistent_staggered_shapes():

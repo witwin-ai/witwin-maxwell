@@ -166,6 +166,50 @@ def _to_numpy(value):
     return tensor.detach().cpu().numpy()
 
 
+# ---------------------------------------------------------------------------
+# Target vs measured port record exposure (CPU, no FDTD run).
+# ---------------------------------------------------------------------------
+
+
+def _esd_result(*, ports=None):
+    from witwin.maxwell.result import Result
+
+    scene = _terminal_scene()
+    scene.add_source(
+        mw.ESDCurrentSource("gun", port="feed", waveform=mw.ESDWaveform.iec_61000_4_2(8000.0))
+    )
+    # Provide run dt / time_steps so the charge-conserving projection is built.
+    metadata = {"dt": 2e-10, "time_steps": 200}
+    return Result(method="fdtd", scene=scene, frequency=1e9, metadata=metadata, ports=ports)
+
+
+def test_esd_waveform_exposes_target_and_no_measured_for_ideal_injection():
+    # Ideal-current injection lowers to a volumetric source and runs no
+    # terminal-port recorder, so the measured record is None by design; the
+    # injected current on the run grid is the resampled (target) projection.
+    record = _esd_result().esd_waveform("gun")
+    assert record.resampled is not None
+    assert record.target_currents is not None
+    assert record.measured is None
+
+
+def test_esd_waveform_exposes_measured_port_record_when_recorded():
+    # When the run recorded terminal-port V/I (RF PortData) for the bound port,
+    # esd_waveform surfaces it as the measured record for a target-vs-measured
+    # comparison.
+    from witwin.maxwell.network import PortData
+
+    port = PortData(
+        port_name="feed",
+        frequencies=torch.tensor([1e9]),
+        voltage=torch.tensor([1.0 + 0.0j]),
+        current=torch.tensor([0.02 + 0.0j]),
+        z0=50.0,
+    )
+    record = _esd_result(ports={"feed": port}).esd_waveform("gun")
+    assert record.measured is port
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for native FDTD")
 def test_esd_terminal_injection_drives_causal_transient_and_records_provenance():
     waveform = mw.ESDWaveform.iec_61000_4_2(8000.0)

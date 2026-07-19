@@ -630,9 +630,24 @@ class ESDCurrentSource:
 class ESDPortRecord:
     """Typed ESD injection summary exposed on a run result.
 
-    ``target`` diagnostics describe the analytic (or measured) waveform. The
+    ``diagnostics`` describe the analytic (or measured) *target* waveform. The
     ``resampled`` samples are the charge-conserving projection onto the run time
-    grid that the injected current reproduces.
+    grid that the injected current reproduces (the injected current on the run
+    grid).
+
+    ``measured`` is the *measured* port record recovered from the run, if the
+    run recorded terminal-port voltage/current for this port. It carries the RF
+    terminal-port :class:`~witwin.maxwell.network.PortData` (frequency-domain
+    voltage/current phasors) when present, enabling a target-vs-measured check.
+    For the Phase-1 ideal-current injection path it is typically ``None``: the
+    ESD source lowers to a volumetric additive current source and does not route
+    through the RF terminal-port recorder, so no independent measured port
+    current is synthesized. In that case the injected current on the run grid is
+    the ``resampled`` record, and a measured *gap voltage* can be obtained by
+    attaching a ``FieldTimeMonitor`` across the port gap (whose time derivative
+    tracks the injected current for a capacitive gap). This is the documented
+    stress-only limitation; a fully calibrated field-integrated H-contour
+    measured port current is Phase-3 (source-impedance) scope.
     """
 
     name: str
@@ -640,6 +655,7 @@ class ESDPortRecord:
     diagnostics: ESDDiagnostics
     resampled: ESDResampledWaveform | None
     provenance: dict[str, Any]
+    measured: Any | None = None
 
     @property
     def target_times(self) -> torch.Tensor | None:

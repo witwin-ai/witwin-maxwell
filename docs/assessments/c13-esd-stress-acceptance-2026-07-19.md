@@ -26,8 +26,8 @@ conda run -n maxwell --no-capture-output python -m pytest <targets> -q
 ## Test inventory (pass counts)
 
 - `tests/esd/test_esd_waveform.py` — 15 passed (analytic diagnostics vs `scipy.integrate.quad`, dense-argmax peak, level scaling, IEC first-transient sanity band, rise-time reconstruction, charge conservation across 3 dt, action convergence, MeasuredWaveform).
-- `tests/esd/test_esd_injection.py` — 10 passed (8 CPU construction/geometry/lowering + 2 CUDA end-to-end on GPU 0).
-- Combined: `tests/esd/` — **25 passed in ~8 s**.
+- `tests/esd/test_esd_injection.py` — 12 passed (10 CPU construction/geometry/lowering + target-vs-measured record exposure, 2 CUDA end-to-end on GPU 0).
+- Combined: `tests/esd/` — **27 passed**.
 - Adjacent suites (regression): `tests/api/public/test_public_api.py`, `tests/api/public/test_simulation_smoke.py`, `tests/core/scene/test_scene.py`, `tests/rf/terminal/test_terminal_port_contract.py`, `tests/sources/definitions/test_custom_uniform_sources.py` — **90 passed**.
 
 ## Key measured numbers (all reproducible via the nodes above)
@@ -85,10 +85,10 @@ Environment: conda env `maxwell`, `CUDA_VISIBLE_DEVICES=0`, `PYTHONPATH=<worktre
 ## Test inventory (all under `tests/breakdown/`)
 
 - `test_breakdown_accumulator.py` — 16 passed. Two-pulse exact exceedance + longest run; longest-run reset between pulses; exactly-at-threshold counts; just-below excluded; damage integral golden; damage disabled without exponent; minimum_duration qualifying mask/locations; zero-occupancy excluded from peak/exceedance; partial-occupancy volume·time weighting; colocation uniform-field magnitude; colocation-vs-energy-density consistency; shape/validation guards.
-- `test_component_stress.py` — 10 passed (includes cuda-parity + cpu-parity parametrization). Rating validation; power/energy golden; exceedance flags; disabled-channel; increasing-time guard; float32-vs-float64 parity (cpu + cuda); trapezoid-vs-rectangle falsification.
-- `test_breakdown_monitor.py` — 8 passed. Construction/validation, region-with-bounds, region+box conflict, scene attach, ComponentStressMonitor binding/type guard.
-- `test_breakdown_fdtd.py` — 3 passed (CUDA). End-to-end device stress maps + provenance; no-perturbation bitwise field parity with/without the monitor; component-stress reduction float64 parity on a real run.
-- Total: **37 passed** (`tests/breakdown/`).
+- `test_component_stress.py` — 12 passed (includes cuda-parity + cpu-parity parametrization). Rating validation; power/energy golden; exceedance flags; disabled-channel; increasing-time guard; float32-vs-float64 parity (cpu + cuda); trapezoid-vs-rectangle falsification; `Result.component_stress` shared-time-axis reduction and mismatched-time-axis rejection.
+- `test_breakdown_monitor.py` — 11 passed. Construction/validation, region-with-bounds, region+box conflict, scene attach, ComponentStressMonitor binding/type guard, and port-binding validation (accepts existing port, rejects typo'd port, rejects when scene has no ports).
+- `test_breakdown_fdtd.py` — 3 passed (CUDA). End-to-end device stress maps + provenance; no-perturbation bitwise field parity with/without the monitor; component-stress reduction float64 parity on a real run (now binds a real `TerminalPort` "feed").
+- Total: **42 passed** (`tests/breakdown/`).
 
 Adjacent suites rerun: `tests/api/public/test_public_api.py`, `tests/api/public/test_simulation_smoke.py`, `tests/core/scene/test_scene.py`, `tests/esd/` (C1), `tests/monitors/observers/test_fdtd_observers.py` — **96 passed**.
 
@@ -112,4 +112,30 @@ Adjacent suites rerun: `tests/api/public/test_public_api.py`, `tests/api/public/
 
 ## Guard census
 
-No fail-closed capability guard added, removed, or weakened; the FDTD capability-guard census budget stays at 144 and `tests/api/public/test_guard_census.py` passes. New validations (unsupported quantities, missing critical_field, damage-without-exponent, region/box conflict, rating type/positivity, increasing-time, mismatched V/I time axes) are local `ValueError`/`TypeError`s, not tracked-census FDTD capability guards. The FDTD resume guard was extended to also reject `breakdown_observers` (same NotImplementedError policy as existing observer types, no new census node), not weakened.
+No fail-closed capability guard added, removed, or weakened; the FDTD capability-guard census budget stays at 144 and `tests/api/public/test_guard_census.py` passes. New validations (unsupported quantities, missing critical_field, damage-without-exponent, region/box conflict, rating type/positivity, increasing-time, mismatched V/I time axes, ComponentStressMonitor port existence) are local `ValueError`/`TypeError`s, not tracked-census FDTD capability guards. The FDTD resume guard was extended to also reject `breakdown_observers` (same NotImplementedError policy as existing observer types, no new census node), not weakened.
+
+---
+
+# C3 stage — audit-driven hardening (2026-07-19)
+
+Supervisor-selected fixes applied in this worktree; all tests reproduced with `tests/esd`, `tests/breakdown`, `tests/api/public/test_guard_census.py` (**72 passed**).
+
+## Delivered fixes
+
+1. **ComponentStressMonitor.port validation.** `validate_component_stress_ports(scene)` (in `compiler/monitors.py`, invoked from `compile_fdtd_breakdown_observers`, which the FDTD initializer calls) raises `ValueError` when a bound port name is not a scene port. The end-to-end run test now binds a real `TerminalPort` "feed"; negative tests cover a typo'd port and a scene with no ports.
+2. **Measured port record exposure.** `ESDPortRecord` gains a `measured` field and `Result.esd_waveform` populates it from the run's recorded terminal-port `PortData` for the bound port. For the Phase-1 ideal-current injection path no terminal-port recorder runs (the ESD source lowers to a volumetric current source), so `measured` is `None` by design; the accessor and `ESDPortRecord` docstrings document this limitation and the workaround (the injected current on the run grid is `resampled`; a measured gap voltage comes from a user `FieldTimeMonitor` across the gap, whose `dV/dt` tracks the injected current). Tests cover both the `None`-for-ideal-injection path and the wired positive path (measured `PortData` surfaced when present).
+3. **Colocation energy-density test made load-bearing.** The field is generic (`3,4,12`, all nonzero/unequal) AND the comparison uses `atol=0.0` (relative-only). The committed `3,4,12` change alone was NOT falsifiable: the eps-scaled energy densities (~1e-10) sit below `torch.allclose`'s default `atol=1e-8`, so the test stayed green with a colocation term dropped until `atol=0.0` was added.
+4. **Time-axis validation in `Result.component_stress`.** Voltage/current series recorded on different time axes (even with equal sample counts) are rejected rather than silently adopting the voltage axis. New CPU tests cover the shared-axis reduction and the mismatch rejection.
+5. **Acceptance-doc test counts corrected** to the actuals after these additions: `test_breakdown_accumulator.py` 16, `test_component_stress.py` 12, `test_breakdown_monitor.py` 11, `test_breakdown_fdtd.py` 3 (breakdown total 42); `test_esd_injection.py` 12 (esd total 27).
+
+## Falsifications performed (red observed; restored; green reconfirmed)
+
+1. **Port validation** (`test_component_stress_port_binding_rejects_missing_port`): removed the `validate_component_stress_ports(scene, monitors)` call in `compile_fdtd_breakdown_observers` → the typo'd-port test no longer raised → FAILED. Restored → PASSED.
+2. **Measured wiring** (`test_esd_waveform_exposes_measured_port_record_when_recorded`): forced `measured = None` in `esd_waveform` → FAILED (`assert record.measured is port`). Restored → PASSED.
+3. **Colocation energy density** (`test_colocation_energy_density_consistency_on_uniform_field`): dropped the `ez_c` term from `colocate_electric_magnitude` → FAILED (1.11e-10 vs 7.48e-10 under the now relative-only tolerance; the same edit did NOT fail before `atol=0.0` was added). Restored → PASSED.
+4. **Time-axis check** (`test_component_stress_rejects_mismatched_time_axes`): removed the `torch.allclose` time-axis raise block in `Result.component_stress` → the mismatch test no longer raised → FAILED. Restored → PASSED.
+
+## Known gaps / deferred (unchanged scope)
+
+- `ESDPortRecord.measured` is `None` for the ideal-current injection path by design (documented). A calibrated field-integrated H-contour measured port current time series is Phase-3 (source-impedance) scope; the wiring surfaces frequency-domain terminal `PortData` if a run records it.
+- Guard census budget unchanged (144); all new validations are local `ValueError`s, not tracked-census FDTD capability guards.

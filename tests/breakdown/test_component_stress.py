@@ -11,7 +11,9 @@ import numpy as np
 import pytest
 import torch
 
+import witwin.maxwell as mw
 from witwin.maxwell.breakdown_stress import ComponentRating, ComponentStressData
+from witwin.maxwell.result import Result
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +133,52 @@ def test_float32_reduction_matches_float64_reference(device):
     assert data.total_energy == pytest.approx(ref_energy, rel=1e-3, abs=1e-9 * abs(ref_energy) + 1e-15)
     assert data.peak_voltage == pytest.approx(ref_peak_v, rel=1e-5)
     assert data.peak_current == pytest.approx(ref_peak_i, rel=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Result.component_stress time-axis validation.
+# ---------------------------------------------------------------------------
+
+
+def _stress_result(v_time, i_time):
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
+        grid=mw.GridSpec.uniform(0.5),
+        device="cpu",
+    )
+    scene.add_monitor(
+        mw.ComponentStressMonitor(
+            "part",
+            port="feed",
+            rating=ComponentRating(voltage=100.0),
+            voltage_series="vprobe",
+            current_series="iprobe",
+        )
+    )
+    n = v_time.numel()
+    monitors = {
+        "vprobe": {"t": v_time, "field": torch.ones(n, dtype=torch.float64)},
+        "iprobe": {"t": i_time, "field": torch.full((n,), 2.0, dtype=torch.float64)},
+    }
+    return Result(method="fdtd", scene=scene, frequency=1e9, monitors=monitors)
+
+
+def test_component_stress_reduces_on_shared_time_axis():
+    t = torch.linspace(0.0, 1e-8, 6, dtype=torch.float64)
+    result = _stress_result(t, t.clone())
+    data = result.component_stress("part")
+    # P = V*I = 1*2 = 2 everywhere on a shared axis.
+    assert float(data.power[0]) == pytest.approx(2.0)
+
+
+def test_component_stress_rejects_mismatched_time_axes():
+    # Same sample count but different time axes must fail closed, not silently
+    # adopt the voltage axis.
+    v_time = torch.linspace(0.0, 1e-8, 6, dtype=torch.float64)
+    i_time = torch.linspace(0.0, 2e-8, 6, dtype=torch.float64)
+    result = _stress_result(v_time, i_time)
+    with pytest.raises(ValueError, match="different time axes"):
+        result.component_stress("part")
 
 
 def test_falsify_rectangle_energy_would_break_trapezoid_parity():

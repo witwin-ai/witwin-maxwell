@@ -88,6 +88,52 @@ def test_component_stress_monitor_requires_rating_type():
         )
 
 
+def _stress_scene(port_name, *, with_port=True):
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),
+        grid=mw.GridSpec.uniform(0.2),
+        ports=(mw.ModePort("feed", position=(0.0, 0.0, 0.0), size=(1.0, 1.0, 0.0)),)
+        if with_port
+        else (),
+        device="cpu",
+    )
+    scene.add_monitor(
+        mw.ComponentStressMonitor(
+            "part",
+            port=port_name,
+            rating=ComponentRating(voltage=100.0),
+            voltage_series="vprobe",
+            current_series="iprobe",
+        )
+    )
+    return scene
+
+
+def test_component_stress_port_binding_accepts_existing_port():
+    from witwin.maxwell.compiler.monitors import compile_fdtd_breakdown_observers
+
+    scene = _stress_scene("feed")
+    # Compiles without raising when the bound port exists on the scene.
+    assert compile_fdtd_breakdown_observers(scene) == []
+
+
+def test_component_stress_port_binding_rejects_missing_port():
+    from witwin.maxwell.compiler.monitors import compile_fdtd_breakdown_observers
+
+    # A typo'd port name must fail closed at compile/prepare time.
+    scene = _stress_scene("feeed")
+    with pytest.raises(ValueError, match="not a port on the scene"):
+        compile_fdtd_breakdown_observers(scene)
+
+
+def test_component_stress_port_binding_rejects_when_scene_has_no_ports():
+    from witwin.maxwell.compiler.monitors import compile_fdtd_breakdown_observers
+
+    scene = _stress_scene("feed", with_port=False)
+    with pytest.raises(ValueError, match="<none>"):
+        compile_fdtd_breakdown_observers(scene)
+
+
 def test_monitors_attach_to_scene():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))),

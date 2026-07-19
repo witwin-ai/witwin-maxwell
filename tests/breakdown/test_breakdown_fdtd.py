@@ -105,15 +105,55 @@ def test_breakdown_monitor_does_not_perturb_fields():
         ), f"BreakdownMonitor perturbed field component {key}"
 
 
+def _pec_box(name, position, size):
+    return mw.Structure(
+        geometry=mw.Box(position=position, size=size),
+        material=mw.Material.pec(),
+        name=name,
+    )
+
+
+def _terminal_stress_scene():
+    # Aligned two-terminal geometry (footprint edges + reference plane on the Yee
+    # half-grid for a 0.02 m uniform grid) so the bound TerminalPort compiles.
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.3, 0.3), (-0.3, 0.3), (-0.3, 0.3))),
+        grid=mw.GridSpec.uniform(0.02),
+        boundary=mw.BoundarySpec.pml(num_layers=6, strength=1.0),
+        device="cuda",
+    )
+    scene.add_structure(_pec_box("signal", (0.0, 0.0, 0.06), (0.10, 0.10, 0.04)))
+    scene.add_structure(_pec_box("ground", (0.0, 0.0, -0.06), (0.10, 0.10, 0.04)))
+    scene.add_port(
+        mw.TerminalPort(
+            "feed",
+            mw.TerminalRef("signal"),
+            mw.TerminalRef("ground"),
+            mw.AxisPath("z"),
+            0.01,
+        )
+    )
+    scene.add_source(
+        mw.UniformCurrentSource(
+            size=(0.06, 0.06, 0.04),
+            polarization="Ez",
+            source_time=mw.GaussianPulse(frequency=1e9, fwidth=5e8),
+            center=(0.0, 0.0, 0.0),
+        )
+    )
+    return scene
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for native FDTD")
 def test_component_stress_reduction_matches_float64_reference_on_run():
-    scene = _base_scene()
-    # Two point time series used as V(t) and I(t) proxies for the reduction.
+    scene = _terminal_stress_scene()
+    # Two point time series used as V(t) and I(t) proxies for the reduction; the
+    # ComponentStressMonitor binds a real scene port ("feed").
     scene.add_monitor(
-        mw.FieldTimeMonitor("vprobe", components=("Ez",), position=(0.0, 0.0, 0.03), interval=1)
+        mw.FieldTimeMonitor("vprobe", components=("Ez",), position=(0.0, 0.0, 0.0), interval=1)
     )
     scene.add_monitor(
-        mw.FieldTimeMonitor("iprobe", components=("Ez",), position=(0.03, 0.0, 0.0), interval=1)
+        mw.FieldTimeMonitor("iprobe", components=("Ez",), position=(0.02, 0.0, 0.0), interval=1)
     )
     rating = ComponentRating(voltage=1e-2, current=1e-2, energy=1e-6, model="demo-rev1")
     scene.add_monitor(

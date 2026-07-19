@@ -181,17 +181,47 @@ def compile_fdtd_time_observers(scene):
     return compiled
 
 
+def validate_component_stress_ports(scene, monitors=None) -> None:
+    """Fail closed when a ComponentStressMonitor names a non-existent port.
+
+    ``ComponentStressMonitor.port`` is a free string at construction; the bound
+    port must resolve to an actual scene port at prepare/compile time. Raising
+    here turns a silent typo into an explicit error before the run.
+    """
+
+    if monitors is None:
+        monitors = scene.resolved_monitors() if hasattr(scene, "resolved_monitors") else scene.monitors
+    stress_monitors = [m for m in monitors if isinstance(m, ComponentStressMonitor)]
+    if not stress_monitors:
+        return
+    port_names = {
+        str(getattr(port, "name", ""))
+        for port in getattr(scene, "ports", ())
+    }
+    for monitor in stress_monitors:
+        if monitor.port not in port_names:
+            available = ", ".join(sorted(name for name in port_names if name)) or "<none>"
+            raise ValueError(
+                f"ComponentStressMonitor {monitor.name!r} references port "
+                f"{monitor.port!r}, which is not a port on the scene; available "
+                f"ports: {available}."
+            )
+
+
 def compile_fdtd_breakdown_observers(scene):
     """Collect lightweight BreakdownMonitor records (grid-resolved at prepare).
 
     Only region bounds, thresholds, and requested quantities are captured here;
     the region cell mask, control volumes, and occupancy are resolved from the
     solver grid in ``prepare_breakdown_observers`` so no per-step Scene raster is
-    needed.
+    needed. ComponentStressMonitor port bindings are validated here so a typo'd
+    port name fails closed at compile time rather than binding silently.
     """
 
     compiled = []
     monitors = scene.resolved_monitors() if hasattr(scene, "resolved_monitors") else scene.monitors
+    monitors = list(monitors)
+    validate_component_stress_ports(scene, monitors)
     for monitor in monitors:
         if isinstance(monitor, BreakdownMonitor):
             compiled.append(
