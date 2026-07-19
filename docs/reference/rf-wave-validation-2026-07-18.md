@@ -36,56 +36,77 @@ Six scenes live under `benchmark/scenes/rf/` and are driven through
 
 | Scene | Binding metric | Class | Status |
 |---|---|---|---|
-| `rf/rectangular_waveguide` | terminated FDTD two-port; NRW-de-embedded `beta(omega)` vs analytic TE10 dispersion, gated on the `a_passive/a_driven` precondition | `wave-level` | see artifact (pass/gap vs the Yee floor) |
-| `rf/coax_thru` | terminated FDTD two-port; clean TEM launch but `a_passive/a_driven ~ 1` (far-end re-entry) | `wave-level` | **gap** (S=b/a premise violated; thin-PML-vs-wavelength, NOT a port/line mismatch) |
+| `rf/coax_thru` | terminated FDTD two-port; `beta` from `arg(S21)/L` vs `k0`, S via `B=S*A`, gated on extraction conditioning + passivity | `wave-level` | **pass** (a_passive/a_driven 0.17, \|S11\|<0.02, \|S21\|~1, max sv ~1, cond(A) ~1.2) |
+| `rf/rectangular_waveguide` | terminated FDTD two-port; TE10 `beta(omega)` | `modal-eigensolve` | **BLOCKED** on the transverse mode-operator redesign (see 1.1 / open items) |
 | `rf/microstrip_two_port` | -- | `wave-level` | **BLOCKED** (TEM categorically inapplicable to substrate+air) |
 | `rf/differential_pair` | -- | `wave-level` | **BLOCKED** (same TEM inapplicability, coupled 4-port) |
 | `rf/series_parallel_rlc` | FDTD load-port resonance peak vs analytic f0 | `wave-level` | **gap** (parasitic-dominated; peak does not track C) |
 | `rf/lumped_open_short_match` | FDTD feed |S11| vs analytic Gamma | `wave-level` | **FAIL** (feed decoupled from load; identical Gamma for all loads) |
 
-### 1.1 Rectangular waveguide (the one genuine wave-level FDTD scene)
+### PML-padding semantics (so "through the PML" claims are checkable)
 
-- **Terminated bench:** the PEC walls run the full x-domain, through the PML to
-  the boundaries, and the **PML physical thickness is held fixed in metres across
-  tiers** (`num_layers` scales with 1/dx: 0.2 m -> 4 / 8 / 10 layers at
-  dx = 0.05 / 0.025 / 0.02). The first round left the walls short of the boundary
-  with a fixed layer count, so the PML thickness shrank with dx and the open guide
-  end drifted out of the absorber -- a dx-dependent standing-wave ripple that
-  masqueraded as a refinement trend. That defect is fixed.
-- A real two-port `PortSweep` FDTD run is executed at the three grid-commensurate
-  tiers (dx in {0.05, 0.025, 0.02}, each dividing 0.1 so the a/b aperture edges
-  land on Yee nodes).
-- **S-extraction precondition (F2):** every S-derived quantity is gated on
-  `a_passive/a_driven` (the `S = b/a` extraction assumes the passive port carries
-  no incident wave). The measured ratio is recorded per tier; the exact numbers
-  live in the artifact.
-- `beta(omega)` is extracted from the FDTD S-matrix by **Nicolson-Ross-Weir
-  de-embedding** (symmetrized S11/S21), which de-embeds the interface reflection
-  that contaminates the raw `arg(S21)/L`. The effective reference-plane separation
-  is re-fit from the `arg(S21)` phase slope and reconciled against the nominal
-  port separation (exact value in the artifact).
-- **Tolerance basis (not tuned-to-pass):** the 3D Yee numerical-dispersion floor
-  at the run's dx and **the dt the runtime actually selects** (`min(period/30,
-  Courant)`, F7b), `|beta_numeric - beta_continuous|/beta` over the band, computed
-  from the discrete dispersion relation (transverse second-difference eigenvalue
-  `(2/dx^2)(1-cos(pi dx/a))`). The artifact records the floor and the measured
-  median rel error; status is `pass` iff the precondition holds and the measured
-  value is within the floor, else `gap` with the measured residual disclosed.
-- **Conservation (wave-level), actual per-tier numbers** (regenerated; replacing
-  the retired and false "converge toward the physical limits" sentence): the
-  quantities do **not** converge monotonically toward their ideal limits under
-  refinement, because the residual passive-port reflection dominates over grid
-  discretization. At dx = 0.05 / 0.025 / 0.02 -- `a_passive/a_driven` (interior)
-  = 0.523 / 0.606 / 0.419, max singular value (mid-band) = 1.119 / 1.174 / 1.176,
-  reciprocity (mid-band) = 3.5e-5 / 7.6e-5 / 2.3e-2. Only the finest tier both
-  transmits across the band (|S21| mid-band 0.988 vs 0.037 / 0.033 at the coarse
-  tiers, which sit below the shifted 3D-Yee TE10 onset) and meets the
-  `a_passive/a_driven <= 0.5` precondition, so it is the sole valid wave-level
-  tier; the coarse-tier beta errors (~85%) reflect the absent transmission, not a
-  refinement trend.
-- **Supporting only:** a `modal-eigensolve` beta cross-check is recorded but never
-  gates. (The guided TE10 mode selection was itself fixed this round -- see the
-  spurious near-`k0` rejection, F5, `modes.py`.)
+The FDTD grid appends the absorbing-boundary nodes **outside** the declared domain
+bounds: `scene._build_axis_grid64` extends each declared `[-DOMAIN, DOMAIN]` by
+`num_layers * dx` on each side before building the primal/dual spacings. The
+prepared solver grid therefore spans `+-(DOMAIN + num_layers*dx)`, and a structure
+that reaches only `+-DOMAIN` ends **at the PML interface**, not through it. To
+terminate a line in the absorber a conductor/wall must span `>= 2*(DOMAIN +
+num_layers*dx)` (plus a margin). Any "the conductor runs through the PML" claim
+must be verified against the **prepared** PEC occupancy along the axis (the grid
+edges), never the scene-file length constant -- the round-2/3 benches set
+`2*DOMAIN` and were NOT terminated despite the docstring saying so.
+
+### 1.1 Coax two-port thru (the genuine wave-level PASS)
+
+- **Terminated bench (round-4 root cause):** the inner rod and outer shield now
+  span `2*(DOMAIN_X + num_layers*dx)` plus a margin, so they run **through** the
+  computational PML to the padded grid edges (verified against the prepared PEC
+  occupancy: at dx=0.01 the grid spans `+-0.18` and the rod PEC spans `+-0.18`).
+  Rounds 2/3 set `2*DOMAIN_X`, ending the line at the PML interface (`+-0.12`) in
+  an open stub; the launched TEM wave reflected off it and re-entered the passive
+  port. Extending through the PML is by itself sufficient: `a_passive/a_driven`
+  collapses `1.17 -> 0.17` (executed).
+- **S extraction (F3):** the network S is assembled by solving `B = S*A` across
+  the drive columns, the correct extraction whenever the passive port carries any
+  incident wave; the per-drive `b/a` ratio is a special case (A diagonal). cond(A)
+  of the incident matrix is recorded per frequency (~1.2 -- near-orthonormal
+  drives).
+- **Gate (F5):** the wave-level precondition is now **extraction conditioning**
+  (cond(A) small) plus **post-solve passivity** (max singular value <= 1 + slack),
+  not the retired `a_passive/a_driven <= 0.5` validity gate; `a_passive/a_driven`
+  is kept as a bench-quality diagnostic. Measured (finest tier): `a_passive` 0.17,
+  |S11| < 0.02, |S21| ~ 1, max singular value ~1.0, reciprocity ~1e-3, `beta` from
+  `arg(S21)/L` within 0.83% of `k0`. Exact per-tier numbers live in the artifact.
+- **Reciprocity is symmetric-trivial** for this fixture: the coax is
+  mirror-symmetric about x=0, so `S12 = S21` by construction. It is a sanity check,
+  NOT independent conservation evidence -- the passivity singular value carries the
+  conservation content.
+
+### 1.2 Rectangular waveguide (BLOCKED on the transverse mode-operator)
+
+- The withdrawn round-3 "shifted 3D-Yee TE10 onset" story was **false physics**:
+  the discrete TE10 cutoff is `0.99752 fc`, BELOW the continuum, and the band
+  propagates at every tier. The real defect was in mode SELECTION: the vector
+  selector injected a **checkerboard-aliased** eigenvector that merely shares the
+  TE10 eigenvalue (`sin(pi y/a)`-correlation `0.000`), whose odd profile couples to
+  TE20 (cutoff exactly `2 fc`) and whose evanescent tunnelling reproduced the old
+  measured |S21| to 3 significant figures.
+- The selector is now hardened (F1): it rejects the `k0` transverse null branch by
+  an **absolute** transverse-uniformity signature (the old squared-difference
+  threshold scaled as `dx^2` and silently rejected legitimate fine-grid / high-f
+  modes -- TE10 at 6 fc has `beta/k0 = 0.986`, executed), enables the checkerboard
+  and wall-peak/boundary-consistency filters on the uniform-isotropic aperture, and
+  **never substitutes** a spurious eigenvector -- it raises.
+- The transverse VECTOR operator itself, however, cannot yet produce a clean
+  full-grid TE10 on a hollow metallic guide. Executed evidence: the centered
+  uniform-isotropic branch composes a stride-two stencil that decouples the
+  odd/even transverse sublattices, so the half-wave `sin(pi y/a)` lives on ONE
+  sublattice with the other ~0; the best full-grid `sin`-correlation recoverable
+  over the **entire** degenerate subspace at `beta_TE10` is only ~0.62, and every
+  candidate has `checkerboard_fraction > 0.35`. The alternative staggered branch
+  couples the sublattices but has an asymmetric boundary (one wall Neumann, one
+  Dirichlet) that shifts `beta` ~10% low. The waveguide is therefore recorded as
+  **blocked** (status), pending the operator redesign in the open items.
 
 ## 2. Gate taxonomy re-labelling (S1.2)
 
@@ -111,25 +132,18 @@ the records are in the test docstrings and the scene artifacts.
 
 ## 3. Honest gaps and defects (measured, not papered over)
 
-* **Coax two-port is a wave-level gap (terminated, clean launch).** The false
-  "TEM WavePort does not match the round line / redesign the feed" attribution is
-  **withdrawn**. The bench is now terminated -- the inner rod and outer shield run
-  the full x-domain through the PML to the boundaries -- and the TEM launch is
-  clean: `|arg(S21)|` tracks `k0*L` to a few percent (executed; exact number in
-  the artifact). What still fails is the `S = b/a` extraction premise: the
-  launched TEM wave reflects off the far termination and re-enters the passive
-  port, so `a_passive/a_driven ~ 1` (the fully re-entrant limit). Root cause: the
-  coax TEM wavelength (~0.3 m at 1 GHz) is large versus the PML that fits its
-  compact ~0.4 m transverse cross-section -- `BoundarySpec.num_layers` is uniform
-  across axes, so a thick enough x-PML would swallow the transverse cross-section
-  (or force an intractable grid). Increasing PML layers 12 -> 20 and lengthening
-  the run leave the standing wave unchanged (executed), confirming the far-end
-  reflection is the limit, not launch matching. The half-grid contour snap is
-  deterministic and its snap distance is persisted per tier
-  (`benchmark/scenes/rf/coax_thru.py:snap_contour_half`). Per the F2 precondition
-  no S-derived coax quantity is reported as a valid wave measurement; recorded as
-  a gap with the measured residual. Open work: per-axis PML layer counts (thick x,
-  thin transverse) or a lower single-mode band.
+* **Coax two-port is now a wave-level PASS.** Two false attributions are
+  **withdrawn**: the round-2 "TEM WavePort does not match the round line" and the
+  round-3 "TEM wavelength vs thin PML under a uniform num_layers API" stories, and
+  the round-3 coax falsification note that extension through the PML was "necessary
+  but not sufficient". Executed: extension through the computational PML IS
+  sufficient. The only defect was that the conductors ended at the declared bounds
+  (the PML interface); running them to the padded grid edges terminates the line
+  (`a_passive/a_driven` 1.17 -> 0.17). With `B=S*A` extraction the S-matrix is
+  physical and passive: |S11| < 0.02, |S21| ~ 1, max singular value ~1.0, cond(A)
+  ~1.2, `beta` from `arg(S21)/L` within 0.83% of `k0` (finest tier). No API change
+  was needed. The half-grid contour snap is deterministic and its snap distance is
+  persisted per tier (`benchmark/scenes/rf/coax_thru.py:snap_contour_half`).
 * **microstrip / differential_pair are BLOCKED, with the blockers in firing
   order.** The current-contour plane does not land on the Yee half-grid, so a
   contour-snap `ValueError` (`witwin/maxwell/compiler/waveports.py`) fires **first**
@@ -166,3 +180,23 @@ External reference-solver generation (S1.1) is **deferred pending owner
 authorization of external-solver (cloud) runs**: this is a cost decision, so no
 cloud generation was run this round and the `pending-generation` markers are kept
 deliberately. Recorded as an S1.1 re-scope question for the owner.
+
+## 5. Open items (round-4, filed not implemented)
+
+* **Transverse mode-operator redesign (blocks the waveguide).** The full-vector
+  transverse operator (`modes.py:_build_vector_operator_sparse`) cannot represent a
+  clean full-grid guided mode on a hollow metallic aperture: the centered
+  uniform-isotropic branch decouples the odd/even sublattices (checkerboard
+  copies), and the staggered branch has an asymmetric metallic boundary that shifts
+  `beta` ~10%. A symmetric-BC Yee-staggered transverse operator (or a mixed
+  Dirichlet/Neumann scalar Helmholtz reduction for the homogeneous-guide case) is
+  required so the selector's structural filters have a genuine `sin(pi y/a)`
+  candidate to return. Until then `rf/rectangular_waveguide` and the matched/short
+  |S11| gate are xfail/blocked. Evidence: `sin`-correlation cap 0.62 over the full
+  degenerate subspace, all candidates `checkerboard_fraction > 0.35` (executed).
+* **PlaneMonitors are silently dropped from WavePort / PortSweep Results.** This
+  blocks field-level falsification of the wave benches (you cannot inspect the
+  injected/propagated transverse field to confirm the mode shape from a normal
+  run). Filed as an open item; not addressed this round.
+* **External reference-solver generation remains deferred** pending owner cost
+  authorization (section 4).
