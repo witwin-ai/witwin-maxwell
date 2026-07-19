@@ -1436,6 +1436,17 @@ class PreparedScene(Scene):
             self.release_meshgrid()
         return cached
 
+    def compile_mass_density(self):
+        """Compile the tissue mass model (rho_cell, occupancy, tissue_id, cell_volume).
+
+        Shares the EM material compiler's soft-occupancy provenance so the SAR mass
+        model and the loss model agree about tissue placement. Returns a
+        :class:`~witwin.maxwell.compiler.mass_density.CompiledMassDensity`.
+        """
+        from .compiler.mass_density import compile_mass_density
+
+        return compile_mass_density(self)
+
     def compile_gyromagnetic_materials(self, *, dt=None, device=None):
         """Compile every gyromagnetic ferrite structure into a layout SoA.
 

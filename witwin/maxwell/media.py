@@ -45,6 +45,31 @@ def _coerce_positive(value: float, *, name: str) -> float:
     return number
 
 
+def _coerce_mass_density(value):
+    """Validate a tissue mass density (kg/m^3) as a positive scalar or 3D grid.
+
+    ``None`` marks a material excluded from SAR. A scalar must be strictly
+    positive. A tensor is a per-cell mass-density grid spanning the structure Box
+    extent (same node-coverage / trilinear-resampling convention as
+    ``MaterialRegion.density``) and every entry must be finite and > 0.
+    """
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        if value.ndim != 3:
+            raise ValueError(f"mass_density grid must be a 3D tensor, got ndim={value.ndim}.")
+        with torch.no_grad():
+            if not torch.isfinite(value).all():
+                raise ValueError("mass_density grid must be finite everywhere.")
+            if float(value.min()) <= 0.0:
+                raise ValueError("mass_density grid must be strictly positive everywhere.")
+        return value
+    density = float(value)
+    if not np.isfinite(density) or density <= 0.0:
+        raise ValueError("mass_density must be a strictly positive kg/m^3 value.")
+    return density
+
+
 def _normalize_poles(value, pole_types, *, name: str):
     if not isinstance(pole_types, tuple):
         pole_types = (pole_types,)
@@ -537,6 +562,7 @@ class Material(CoreMaterial):
     nonlinearity: tuple
     modulation: ModulationSpec | None
     pec: bool
+    mass_density: float | torch.Tensor | None
 
     def __init__(
         self,
@@ -560,9 +586,14 @@ class Material(CoreMaterial):
         nonlinearity=None,
         modulation: ModulationSpec | None = None,
         pec: bool = False,
+        mass_density: float | torch.Tensor | None = None,
     ):
         super().__init__(eps_r=eps_r, mu_r=mu_r, sigma_e=sigma_e, name=name)
         object.__setattr__(self, "pec", bool(pec))
+        # Tissue mass density [kg/m^3] for SAR / exposure analysis. ``None`` means
+        # the material is excluded from SAR; a SAR request covering a lossy
+        # material without a density fails closed in the SAR reducer.
+        object.__setattr__(self, "mass_density", _coerce_mass_density(mass_density))
         object.__setattr__(self, "debye_poles", _normalize_poles(debye_poles, (DebyePole, CustomDebyePole), name="debye_poles"))
         object.__setattr__(self, "drude_poles", _normalize_poles(drude_poles, (DrudePole, CustomDrudePole), name="drude_poles"))
         object.__setattr__(self, "lorentz_poles", _normalize_poles(lorentz_poles, (LorentzPole, CustomLorentzPole), name="lorentz_poles"))
@@ -750,6 +781,25 @@ class Material(CoreMaterial):
     @property
     def is_pec(self) -> bool:
         return self.pec
+
+    @property
+    def has_mass_density(self) -> bool:
+        """Whether this material carries a tissue mass density for SAR."""
+        return self.mass_density is not None
+
+    @property
+    def is_electrically_lossy(self) -> bool:
+        """Whether the material dissipates electric power (conduction/dispersion/nonlinear).
+
+        A SAR request covering an electrically lossy material without a
+        ``mass_density`` is undefined and must fail closed.
+        """
+        return (
+            float(self.sigma_e) != 0.0
+            or self.sigma_e_tensor is not None
+            or self.is_electric_dispersive
+            or self.is_nonlinear
+        )
 
     @property
     def is_gyromagnetic(self) -> bool:

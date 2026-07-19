@@ -109,6 +109,12 @@ from .rational import (
 )
 from .touchstone import TouchstoneParseError
 from .power_loss import PowerLossData
+from .sar import (
+    AVERAGING_PROFILE,
+    PowerNormalization,
+    SARAveraging,
+    SARResult,
+)
 from .thin_wire import ThinWire, WireConductor, WireData, WireEnd
 from .ports import (
     AxisPath,
@@ -276,6 +282,10 @@ __all__ = [
     "PointMonitor",
     "PowerLossData",
     "PowerLossMonitor",
+    "PowerNormalization",
+    "SARAveraging",
+    "SARResult",
+    "AVERAGING_PROFILE",
     "ThinWire",
     "PortData",
     "PortBinding",

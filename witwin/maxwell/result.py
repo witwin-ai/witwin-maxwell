@@ -1616,6 +1616,61 @@ class Result:
             source_result_fingerprint=f"runtime-result:{id(self):x}",
         )
 
+    def sar(
+        self,
+        monitor: str,
+        *,
+        averaging=None,
+        normalization=None,
+        electric_fields=None,
+        volume_channels=None,
+    ):
+        """Reduce a PowerLossMonitor and the tissue mass model to point SAR.
+
+        Pure result-domain reduction: it never runs a solver. It fails explicitly
+        when the named ``PowerLossMonitor``, the frequency-domain fields, or the
+        tissue mass densities required to form SAR are missing. ``averaging`` (a
+        :class:`~witwin.maxwell.SARAveraging`) is recorded in the result
+        provenance; the mass-averaging computation is delivered by a later stage.
+        ``normalization`` defaults to unit source amplitude.
+        """
+
+        from .compiler.mass_density import compile_mass_density
+        from .compiler.power_loss import compile_power_loss_monitor
+        from .postprocess.sar import compute_sar
+        from .sar import PowerNormalization
+
+        public_monitor = _find_scene_monitor(self.scene, monitor)
+        if not isinstance(public_monitor, PowerLossMonitor):
+            raise KeyError(
+                f"Result.sar requires a declared PowerLossMonitor; {monitor!r} is not one."
+            )
+        if self.method != "fdtd":
+            raise NotImplementedError(
+                "Result.sar currently consumes FDTD PowerLossData only."
+            )
+        resolved_normalization = (
+            PowerNormalization.none() if normalization is None else normalization
+        )
+
+        power_loss = self.power_loss(
+            monitor,
+            electric_fields=electric_fields,
+            volume_channels=volume_channels,
+        )
+        prepared = self.prepared_scene
+        mass = compile_mass_density(prepared)
+        compiled_loss = compile_power_loss_monitor(prepared, public_monitor)
+        return compute_sar(
+            prepared_scene=prepared,
+            monitor=public_monitor,
+            power_loss=power_loss,
+            mass=mass,
+            compiled_loss=compiled_loss,
+            normalization=resolved_normalization,
+            averaging=averaging,
+        )
+
     def material(self, name: str = "eps_r", *, expand_symmetry: bool = False) -> torch.Tensor:
         prepared_scene = self.prepared_scene
         key = name.lower()
