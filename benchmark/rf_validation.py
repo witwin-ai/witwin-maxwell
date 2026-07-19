@@ -572,17 +572,6 @@ def run_rectangular_waveguide() -> SceneReport:
         "arithmetic error -- it is disclosed alongside the a_passive ratio rather than "
         "asserted as a clean L_eff."
     )
-    # F2/F4: report the a_passive/a_driven precondition per tier and its behaviour
-    # under refinement (executed).
-    report.notes.append(
-        "a_passive/a_driven (F2 precondition) per tier, interior band: "
-        + ", ".join(f"{c['dx']}->{c['a_passive_ratio_interior']:.3f}" for c in resolved)
-        + f" (limit {A_PASSIVE_RATIO_LIMIT:.2f}). It is a stable port mode-decomposition "
-        "floor -- invariant under PML thickness and run length (executed) -- and stays "
-        "well below the re-entrant limit of 1, so the NRW de-embedding is well "
-        "conditioned. This is the passive-port illumination the S=b/a premise depends on, "
-        "not a port/line impedance mismatch."
-    )
     report.notes.append(
         "Mid-band (1.7-1.8 fc) conservation on the real S-matrix: max singular value "
         + ", ".join(f"{c['dx']}->{c['max_singular_value_midband']:.3f}" for c in resolved)
@@ -592,18 +581,13 @@ def run_rectangular_waveguide() -> SceneReport:
         "where the modal de-embedding is weakest; reported as a diagnostic, not hidden."
     )
     report.notes.append(
-        "beta median rel error per tier: "
-        + ", ".join(f"{c['dx']}->{c['beta_rel_error_median']:.2%}" for c in resolved)
-        + "; |S21| midband (1.8 fc) per tier: "
-        + ", ".join(f"{c['dx']}->{c['s21_abs_midband']:.3f}" for c in resolved)
-        + ". The coarse tiers transmit poorly across the lower band (|S21| -> 0: the 3D "
-        "Yee numerical dispersion pushes the effective TE10 onset up, so most interior "
-        "frequencies are evanescent at dx=0.05/0.025) -- their de-embedded beta is NOT a "
-        "valid propagating measurement and the large rel error simply reflects the absent "
-        "transmission, not a refinement trend. The finest tier (dx=0.02) transmits across "
-        "the band and is the valid wave-level headline. Per-tier complex S(f), port a/b "
-        "and the a_passive ratio spectrum are stored in the artifact 'raw' block so any "
-        "frequency can be recomputed by hand (F7c)."
+        "This post-gate reporting path is currently UNREACHABLE: the mode-shape quality "
+        "gate returns BLOCKED before any tier is swept. It becomes reachable only once "
+        "the transverse mode-operator redesign lands (open item). When it does, the "
+        "per-tier interpretation of |S21|, beta and the a_passive diagnostic must be "
+        "re-derived from the redesigned operator -- it must NOT be reused from the "
+        "withdrawn round-3 narrative. Per-tier complex S(f), port a/b and the a_passive "
+        "ratio spectrum are stored in the artifact 'raw' block (F7c)."
     )
     return report
 
@@ -767,15 +751,17 @@ def run_coax_thru() -> SceneReport:
         "EXECUTED (round-4 correction, replacing the false 'necessary but not "
         "sufficient' record): extending the conductors THROUGH the computational PML "
         "IS sufficient. With the rod/shield ending at the declared bounds (the PML "
-        f"interface) the bench was re-entrant (a_passive/a_driven ~ 1.17); running "
-        f"them to the padded grid edges collapses it to ~{a_ratio:.2f} and yields "
+        f"interface) the bench was re-entrant (a_passive/a_driven ~ 1.17, round-3 "
+        f"config at dx=0.005); running them to the padded grid edges collapses it to "
+        f"~{a_ratio:.2f} and yields "
         f"|S11| < {finest['s11_abs_max']:.3f}, |S21| ~ 1, max singular value "
         f"{sv_max:.3f}, cond(A) {cond_max:.2f}. Counterfactual: shortening the "
         "conductors back to 2*DOMAIN_X restores the re-entrant standing wave "
-        "(termination is the causal variable)."
+        "(a_passive/a_driven bandmax ~ 1.478, round-4 config at dx=0.01; termination "
+        "is the causal variable)."
     )
 
-    if precondition_met and beta_med <= 0.06:
+    if precondition_met and beta_med <= 0.03:
         report.status = "pass"
     else:
         report.status = "gap"
@@ -789,8 +775,9 @@ def run_coax_thru() -> SceneReport:
         "in an open stub; the launched TEM wave reflected off that open end and re-entered "
         "the passive port. This was a bench TERMINATION defect. Running the conductors "
         "through the full padded grid (verified against the prepared PEC occupancy, not the "
-        "scene constant) terminates the line: a_passive/a_driven collapses from ~1.17 to "
-        f"~{a_ratio:.2f}. The earlier 'uniform num_layers cannot fit a thick x-PML' "
+        "scene constant) terminates the line: a_passive/a_driven collapses from ~1.17 "
+        f"(round-3 config at dx=0.005) to ~{a_ratio:.2f}. The earlier 'uniform num_layers "
+        "cannot fit a thick x-PML' "
         "narrative is FALSE -- the fix needed no API change, only a longer conductor."
     )
     report.notes.append(

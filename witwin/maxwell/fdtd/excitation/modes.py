@@ -48,10 +48,6 @@ _VECTOR_CHECKERBOARD_FRACTION_LIMIT = 0.35
 # modes above ~5 fc (audit S1, executed).
 _SPURIOUS_NEAR_K0_BETA_LIMIT = 0.995        # beta/k0 above this = candidate transverse null-space branch
 _SPURIOUS_UNIFORMITY_LIMIT = 0.6            # min/max block envelope above this = transverse-uniform (plane-wave-like)
-# Preferred-field magnitude on the first/last interior rows adjacent to a metallic
-# aperture wall, relative to the profile peak, above which the candidate is
-# wall-peaked and rejected (a genuine guided profile decays toward the wall).
-_WALL_PEAK_FRACTION_LIMIT = 0.6
 _RIGHT_HANDED_TANGENTIAL_AXES = {
     "x": ("y", "z"),
     "y": ("z", "x"),
@@ -1150,15 +1146,13 @@ def _select_and_normalize_vector_mode_numpy(
         # eps/mu planes alone (audit S1 round-4, executed: enabling the checkerboard
         # filter here rejected the legitimate free-space array-port modes).
         enforce_structure = reject_spurious
-        # The wall-peak fraction is recorded as a diagnostic but is NOT used as a
-        # rejection gate: it requires knowing that the aperture edge is a metallic
-        # (Dirichlet) wall, which is true only for a closed metallic guide -- a
-        # signal not available at the selector level. On a graded mode source or a
-        # free-space port the aperture edge is a computational truncation, so a
-        # legitimate higher-order mode may carry amplitude there (executed: gating
-        # on it rejected valid graded / degenerate-pair modes). Closed-guide
+        # wall_peak_fraction is computed and recorded purely as a diagnostic; it is
+        # NOT a rejection gate. Using it would require knowing that the aperture edge
+        # is a metallic (Dirichlet) wall, which holds only for a closed metallic
+        # guide -- a signal not available at the selector level. On a graded mode
+        # source or a free-space port the aperture edge is a computational truncation,
+        # so a legitimate higher-order mode may carry amplitude there. Closed-guide
         # enforcement is deferred with the transverse-operator redesign (open item).
-        wall_peaked = False
         eigenpair_residual = _vector_mode_eigenpair_residual_numpy(operator, beta, candidate["vector"])
         electric_divergence, magnetic_divergence = _vector_mode_divergence_residuals_numpy(
             candidate["vector"],
@@ -1188,8 +1182,6 @@ def _select_and_normalize_vector_mode_numpy(
             status = "spurious_near_k0"
         elif enforce_structure and checkerboard_fraction > _VECTOR_CHECKERBOARD_FRACTION_LIMIT:
             status = "checkerboard"
-        elif wall_peaked:
-            status = "wall_peaked"
         elif enforce_structure and max_near_duplicate_overlap >= _VECTOR_DUPLICATE_OVERLAP_LIMIT:
             status = "duplicate"
         else:
@@ -1231,7 +1223,7 @@ def _select_and_normalize_vector_mode_numpy(
     if len(family_indices) <= int(mode_index):
         # F1d: never silently substitute another mode. If every candidate for the
         # requested index was rejected, raise a diagnostic error listing why.
-        reject_reasons = {"checkerboard", "duplicate", "spurious_near_k0", "wall_peaked"}
+        reject_reasons = {"checkerboard", "duplicate", "spurious_near_k0"}
         rejected = sum(entry["status"] in reject_reasons for entry in candidate_diagnostics)
         breakdown = ", ".join(
             f"{status}={sum(1 for e in candidate_diagnostics if e['status'] == status)}"

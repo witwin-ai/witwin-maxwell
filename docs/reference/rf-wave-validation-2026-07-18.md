@@ -65,7 +65,10 @@ edges), never the scene-file length constant -- the round-2/3 benches set
   Rounds 2/3 set `2*DOMAIN_X`, ending the line at the PML interface (`+-0.12`) in
   an open stub; the launched TEM wave reflected off it and re-entered the passive
   port. Extending through the PML is by itself sufficient: `a_passive/a_driven`
-  collapses `1.17 -> 0.17` (executed).
+  collapses `1.17 -> 0.17` (executed). The `1.17` re-entrant figure is the round-3
+  config at dx=0.005; the round-4 shortened-conductor counterfactual measures a
+  higher `a_passive/a_driven` bandmax `~1.478` at dx=0.01 -- the two counterfactual
+  figures are labelled by config/tier so they are not read as contradictory.
 - **S extraction (F3):** the network S is assembled by solving `B = S*A` across
   the drive columns, the correct extraction whenever the passive port carries any
   incident wave; the per-drive `b/a` ratio is a special case (A diagonal). cond(A)
@@ -94,16 +97,26 @@ edges), never the scene-file length constant -- the round-2/3 benches set
 - The selector is now hardened (F1): it rejects the `k0` transverse null branch by
   an **absolute** transverse-uniformity signature (the old squared-difference
   threshold scaled as `dx^2` and silently rejected legitimate fine-grid / high-f
-  modes -- TE10 at 6 fc has `beta/k0 = 0.986`, executed), enables the checkerboard
-  and wall-peak/boundary-consistency filters on the uniform-isotropic aperture, and
-  **never substitutes** a spurious eigenvector -- it raises.
+  modes -- TE10 at 6 fc has `beta/k0 = 0.986`, executed). The checkerboard filter is
+  **scoped to the graded (structure-enforcing) path only** and is NOT applied on the
+  uniform-isotropic aperture (that path also serves free-space / open TE ports whose
+  fundamental is legitimately plane-wave-like, so a generic checkerboard reject there
+  discards valid modes). The **wall-peak gate is disabled** (`wall_peaked` is
+  hard-coded `False`; `wall_peak_fraction` is retained only as a persisted diagnostic).
+  On the hollow guide the selector therefore **returns the checkerboard-aliased
+  candidate** with its `checkerboard_fraction` persisted; it is the **benchmark's
+  `sin(pi y/a)`-correlation gate** (< 0.9, section 1.2 head) that refuses to use it.
+  The `k0` null branch is still rejected structurally, and the selector **never
+  substitutes** another mode for a genuinely absent requested index -- it raises.
 - The transverse VECTOR operator itself, however, cannot yet produce a clean
   full-grid TE10 on a hollow metallic guide. Executed evidence: the centered
   uniform-isotropic branch composes a stride-two stencil that decouples the
   odd/even transverse sublattices, so the half-wave `sin(pi y/a)` lives on ONE
   sublattice with the other ~0; the best full-grid `sin`-correlation recoverable
-  over the **entire** degenerate subspace at `beta_TE10` is only ~0.62, and every
-  candidate has `checkerboard_fraction > 0.35`. The alternative staggered branch
+  over the **entire** degenerate subspace at `beta_TE10` is only in the `0.51-0.59`
+  range (independently measured: dx=0.05->0.548, 0.025->0.522, 0.02->0.592,
+  0.01->0.509), and every candidate has `checkerboard_fraction > 0.35`. The
+  alternative staggered branch
   couples the sublattices but has an asymmetric boundary (one wall Neumann, one
   Dirichlet) that shifts `beta` ~10% low. The waveguide is therefore recorded as
   **blocked** (status), pending the operator redesign in the open items.
@@ -139,7 +152,8 @@ the records are in the test docstrings and the scene artifacts.
   but not sufficient". Executed: extension through the computational PML IS
   sufficient. The only defect was that the conductors ended at the declared bounds
   (the PML interface); running them to the padded grid edges terminates the line
-  (`a_passive/a_driven` 1.17 -> 0.17). With `B=S*A` extraction the S-matrix is
+  (`a_passive/a_driven` 1.17 -> 0.17, the `1.17` re-entrant figure being the round-3
+  config at dx=0.005). With `B=S*A` extraction the S-matrix is
   physical and passive: |S11| < 0.02, |S21| ~ 1, max singular value ~1.0, cond(A)
   ~1.2, `beta` from `arg(S21)/L` within 0.83% of `k0` (finest tier). No API change
   was needed. The half-grid contour snap is deterministic and its snap distance is
@@ -192,8 +206,9 @@ deliberately. Recorded as an S1.1 re-scope question for the owner.
   Dirichlet/Neumann scalar Helmholtz reduction for the homogeneous-guide case) is
   required so the selector's structural filters have a genuine `sin(pi y/a)`
   candidate to return. Until then `rf/rectangular_waveguide` and the matched/short
-  |S11| gate are xfail/blocked. Evidence: `sin`-correlation cap 0.62 over the full
-  degenerate subspace, all candidates `checkerboard_fraction > 0.35` (executed).
+  |S11| gate are xfail/blocked. Evidence: `sin`-correlation cap in the `0.51-0.59`
+  range over the full degenerate subspace (dx=0.05->0.548, 0.025->0.522,
+  0.02->0.592, 0.01->0.509), all candidates `checkerboard_fraction > 0.35` (executed).
 * **PlaneMonitors are silently dropped from WavePort / PortSweep Results.** This
   blocks field-level falsification of the wave benches (you cannot inspect the
   injected/propagated transverse field to confirm the mode shape from a normal

@@ -11,14 +11,21 @@ matches analytic TE10 to <1%. Asserting only the eigenVALUE (the previous test)
 therefore passed on a physically wrong mode. This test asserts the eigenVECTOR.
 
 The selector (F1) now rejects the k0 branch by an absolute transverse-uniformity
-signature, enables the checkerboard/wall-peak filters on the uniform-isotropic
-aperture, and NEVER substitutes a spurious eigenvector -- it raises instead. The
-underlying transverse VECTOR operator, however, cannot represent a clean full-grid
-TE10 on this hollow guide: the centered uniform-isotropic branch composes a
-stride-two stencil that decouples the odd/even transverse sublattices, so the
-half-wave ``sin(pi y/a)`` lives on ONE sublattice with the other ~0 (executed:
-best recoverable full-grid sin-correlation over the whole degenerate subspace is
-~0.62). Fixing that needs a symmetric-BC Yee-staggered transverse operator (see
+signature. The checkerboard filter is scoped to the graded (structure-enforcing)
+path only and is NOT applied on the uniform-isotropic aperture, and the wall-peak
+gate is disabled (``wall_peaked`` is hard-coded ``False``; ``wall_peak_fraction``
+is kept only as a diagnostic). On this hollow guide the selector therefore RETURNS
+the checkerboard-aliased candidate (its ``checkerboard_fraction`` is persisted); it
+is the BENCHMARK's ``sin(pi y/a)``-correlation gate (< 0.9) that refuses to use it,
+not the selector. The selector still never substitutes another mode for a genuinely
+absent requested index -- it raises. The underlying transverse VECTOR operator
+cannot represent a clean full-grid TE10 on this hollow guide: the centered
+uniform-isotropic branch composes a stride-two stencil that decouples the odd/even
+transverse sublattices, so the half-wave ``sin(pi y/a)`` lives on ONE sublattice
+with the other ~0 (executed: best recoverable full-grid sin-correlation over the
+whole degenerate subspace is in the 0.51-0.59 range -- dx=0.05->0.548,
+0.025->0.522, 0.02->0.592, 0.01->0.509). Fixing that needs a symmetric-BC
+Yee-staggered transverse operator (see
 docs/reference/rf-wave-validation-2026-07-18.md, "open items"). Until then the
 waveguide eigenVECTOR assertion is an xfail; the coax TEM path (separate
 electrostatic solve) is unchanged and green.

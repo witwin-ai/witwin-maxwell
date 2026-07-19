@@ -27,7 +27,7 @@ the 2D mode eigensolve. This is **not** a set of passing wave-level scenes:
 | Artifact | Scene | Status | Note |
 |---|---|---|---|
 | `rf__coax_thru.json` | coax TEM two-port | **pass** | terminated through the padded PML; S via `B=S*A`. a_passive/a_driven 0.17 (diagnostic), \|S11\|<0.02, \|S21\|~1, max sv ~1.0, cond(A) ~1.2, beta from arg(S21)/L within 0.83% of k0 (finest tier) |
-| `rf__rectangular_waveguide.json` | TE10 two-port | **blocked** | selector now refuses the checkerboard-aliased TE10; the transverse vector operator cannot yet produce a clean full-grid TE10 (sublattice decoupling). Operator redesign filed as an open item |
+| `rf__rectangular_waveguide.json` | TE10 two-port | **blocked** | selector returns the checkerboard-aliased TE10 (checkerboard filter scoped to the graded path only; wall-peak gate disabled; `checkerboard_fraction` persisted as a diagnostic) and the benchmark's `sin(pi y/a)`-correlation gate refuses to use it; the transverse vector operator cannot yet produce a clean full-grid TE10 (sublattice decoupling). Operator redesign filed as an open item |
 | `rf__microstrip_two_port.json` | microstrip quasi-TEM | blocked | WaveModeSpec('tem') categorically inapplicable to substrate+air (hybrid solve required) |
 | `rf__differential_pair.json` | coupled-line 4-port | blocked | same TEM inapplicability on the coupled inhomogeneous cross-section |
 | `rf__series_parallel_rlc.json` | series RLC resonance | gap | parasitic-dominated bench; peak does not track C |
