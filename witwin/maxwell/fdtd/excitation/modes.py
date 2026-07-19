@@ -377,6 +377,205 @@ def _build_vector_operator_sparse(eps_planes, mu_planes, *, k0: float, du: float
     return operator, interior_u, interior_v
 
 
+def _yee_half_to_node_first_difference(cells: int, spacing: float):
+    """Backward first difference from a Yee half grid to the interior nodes.
+
+    ``cells`` is the number of Yee cells across the aperture along one transverse
+    axis (so the wall-to-wall extent is ``cells * spacing``). The half grid holds
+    ``cells`` samples at ``(i + 1/2) * spacing`` (``i = 0 .. cells - 1``); the node
+    grid holds ``cells + 1`` samples at ``i * spacing`` with the two end nodes lying
+    ON the metallic walls. This returns the ``(cells - 1) x cells`` operator ``G``
+    that maps a half-grid field to the ``cells - 1`` INTERIOR nodes only::
+
+        (G f)_i = (f_{i+1/2} - f_{i-1/2}) / spacing ,   i = 1 .. cells - 1
+
+    Both half neighbours of every interior node exist, so ``G`` needs no boundary
+    ghost. Its negative transpose ``S = -G.T`` is the matching forward difference
+    from the interior nodes back to the half grid, with the wall nodes eliminated
+    (Dirichlet 0). The two composites reproduce the staggered transverse Laplacians:
+    ``G @ S`` is the Dirichlet second difference on the interior nodes and ``S @ G``
+    is the Neumann second difference on the half grid (a constant half field lies in
+    its null space, which is exactly the ``TE_{m0}`` transverse-uniform direction).
+    """
+    if cells <= 1:
+        raise ValueError("Transverse Yee operator needs at least two cells per axis.")
+    interior = cells - 1
+    scale = 1.0 / float(spacing)
+    rows = np.repeat(np.arange(interior, dtype=np.int64), 2)
+    cols = np.empty(2 * interior, dtype=np.int64)
+    data = np.empty(2 * interior, dtype=np.float64)
+    cols[0::2] = np.arange(interior, dtype=np.int64)      # half index i - 1/2
+    cols[1::2] = np.arange(1, interior + 1, dtype=np.int64)  # half index i + 1/2
+    data[0::2] = -scale
+    data[1::2] = scale
+    return sparse.csr_matrix((data, (rows, cols)), shape=(interior, cells))
+
+
+def _yee_transverse_grids(nu_cells: int, nv_cells: int, du: float, dv: float) -> dict:
+    """Yee sample coordinates for the staggered transverse mode operator.
+
+    ``Eu`` lives on the ``u`` half grid and the interior ``v`` nodes; ``Ev`` lives
+    on the interior ``u`` nodes and the ``v`` half grid. Returns the 1D coordinate
+    arrays and the block shapes so a caller can reshape an eigenvector into its two
+    component profiles. Wall-to-wall extents are ``a = nu_cells * du`` (``u``) and
+    ``b = nv_cells * dv`` (``v``); the wall nodes sit at ``0`` and the extent.
+    """
+    u_half = (np.arange(nu_cells, dtype=np.float64) + 0.5) * du
+    v_half = (np.arange(nv_cells, dtype=np.float64) + 0.5) * dv
+    u_interior_node = np.arange(1, nu_cells, dtype=np.float64) * du
+    v_interior_node = np.arange(1, nv_cells, dtype=np.float64) * dv
+    return {
+        "nu_cells": nu_cells,
+        "nv_cells": nv_cells,
+        "shape_eu": (nu_cells, nv_cells - 1),          # (u half, v interior node)
+        "shape_ev": (nu_cells - 1, nv_cells),          # (u interior node, v half)
+        "n_eu": nu_cells * (nv_cells - 1),
+        "n_ev": (nu_cells - 1) * nv_cells,
+        "eu_u": u_half,
+        "eu_v": v_interior_node,
+        "ev_u": u_interior_node,
+        "ev_v": v_half,
+        "extent_u": nu_cells * du,
+        "extent_v": nv_cells * dv,
+    }
+
+
+def _yee_transverse_discrete_transverse_wavenumber(order: int, extent: float, spacing: float) -> float:
+    """Discrete transverse wavenumber ``k~ = (2/dx) sin(m pi dx / (2 a))``.
+
+    This is the exact eigen-wavenumber of the staggered transverse Laplacian for a
+    half-wave of continuum wavenumber ``k = m pi / a`` on a mesh of spacing ``dx``;
+    substituting ``sin(m pi u / a)`` (Dirichlet) or ``cos(m pi u / a)`` (Neumann)
+    into the second-difference operator returns ``-k~**2`` to machine precision.
+    """
+    return (2.0 / float(spacing)) * math.sin(order * math.pi * float(spacing) / (2.0 * float(extent)))
+
+
+def _build_yee_transverse_operator_sparse(
+    *,
+    nu_cells: int,
+    nv_cells: int,
+    du: float,
+    dv: float,
+    k0: float,
+    eps_uu=None,
+    eps_vv=None,
+    eps_ww=None,
+):
+    """Genuinely Yee-staggered transverse full-vector mode operator ``P``.
+
+    Solves ``P et = beta**2 et`` for the transverse electric field ``et = (Eu, Ev)``
+    with the two components kept on their own Yee locations (``Eu`` at the ``u``
+    half / ``v`` node grid, ``Ev`` at the ``u`` node / ``v`` half grid). It is the
+    exact 2D restriction of the repo's 3D Yee cell (``Ex`` at ``(i+1/2, j)``, ``Ey``
+    at ``(i, j+1/2)``, ``Ez`` at ``(i, j)``); the derivation is recorded in
+    ``docs/assessments/e1-rf-modes-acceptance-2026-07-19.md``.
+
+    Assumes a non-magnetic medium (``mu = 1``): the RF port families in scope are
+    dielectric. ``eps_uu`` / ``eps_vv`` / ``eps_ww`` are the diagonal permittivity
+    sampled at the ``Eu`` grid ``(nu_cells, nv_cells-1)``, the ``Ev`` grid
+    ``(nu_cells-1, nv_cells)`` and the interior-node grid ``(nu_cells-1,
+    nv_cells-1)`` respectively; ``None`` means vacuum (``eps = 1``). The eigenvalue
+    is ``beta**2`` and the operator is real; for a homogeneous cross-section it is
+    symmetric and the two blocks decouple into scalar transverse Helmholtz problems
+    with the physically correct mixed walls (Dirichlet for the tangential component,
+    natural/Neumann for the normal component) built in by the staggering.
+    """
+    if int(nu_cells) <= 1 or int(nv_cells) <= 1:
+        raise ValueError("Transverse Yee mode operator needs at least two cells per axis.")
+    nu_cells = int(nu_cells)
+    nv_cells = int(nv_cells)
+    meta = _yee_transverse_grids(nu_cells, nv_cells, du, dv)
+    n_eu = meta["n_eu"]
+    n_ev = meta["n_ev"]
+
+    gu = _yee_half_to_node_first_difference(nu_cells, du)   # (nu-1) x nu  : u half -> u interior node
+    gv = _yee_half_to_node_first_difference(nv_cells, dv)   # (nv-1) x nv  : v half -> v interior node
+    su = (-gu.transpose()).tocsr()                          # nu x (nu-1)  : u interior node -> u half
+    sv = (-gv.transpose()).tocsr()                          # nv x (nv-1)  : v interior node -> v half
+
+    identity_u_half = sparse.eye(nu_cells, format="csr", dtype=np.float64)
+    identity_v_half = sparse.eye(nv_cells, format="csr", dtype=np.float64)
+    identity_u_node = sparse.eye(nu_cells - 1, format="csr", dtype=np.float64)
+    identity_v_node = sparse.eye(nv_cells - 1, format="csr", dtype=np.float64)
+
+    # Transverse Laplacian pieces (see _yee_half_to_node_first_difference).
+    lap_u_neumann = (su @ gu).tocsr()      # nu x nu           (half grid)
+    lap_v_neumann = (sv @ gv).tocsr()      # nv x nv           (half grid)
+    lap_u_dirichlet = (gu @ su).tocsr()    # (nu-1) x (nu-1)   (interior nodes)
+    lap_v_dirichlet = (gv @ sv).tocsr()    # (nv-1) x (nv-1)   (interior nodes)
+
+    # Node <-> component maps used by the eps_ww divergence coupling.
+    gu_big = sparse.kron(gu, identity_v_node, format="csr")   # n_d x n_eu : d/du of Eu -> node
+    gv_big = sparse.kron(identity_u_node, gv, format="csr")   # n_d x n_ev : d/dv of Ev -> node
+    su_big = sparse.kron(su, identity_v_node, format="csr")   # n_eu x n_d : d/du of node -> Eu
+    sv_big = sparse.kron(identity_u_node, sv, format="csr")   # n_ev x n_d : d/dv of node -> Ev
+
+    def _component_diag(values, shape) -> sparse.csr_matrix:
+        if values is None:
+            return sparse.eye(shape[0] * shape[1], format="csr", dtype=np.float64)
+        array = np.asarray(values, dtype=np.float64)
+        if tuple(array.shape) != tuple(shape):
+            raise ValueError(
+                f"Yee transverse eps slice shape {tuple(array.shape)} does not match the "
+                f"expected component grid {tuple(shape)}."
+            )
+        return sparse.diags(array.reshape(-1), offsets=0, format="csr")
+
+    shape_d = (nu_cells - 1, nv_cells - 1)
+    eps_uu_diag = _component_diag(eps_uu, meta["shape_eu"])
+    eps_vv_diag = _component_diag(eps_vv, meta["shape_ev"])
+    if eps_ww is None:
+        eps_ww_inv_diag = sparse.eye(shape_d[0] * shape_d[1], format="csr", dtype=np.float64)
+    else:
+        eps_ww_array = np.asarray(eps_ww, dtype=np.float64)
+        if tuple(eps_ww_array.shape) != shape_d:
+            raise ValueError(
+                f"Yee transverse eps_ww slice shape {tuple(eps_ww_array.shape)} does not match the "
+                f"interior-node grid {shape_d}."
+            )
+        eps_ww_inv_diag = sparse.diags(1.0 / eps_ww_array.reshape(-1), offsets=0, format="csr")
+
+    k0_sq = float(k0) * float(k0)
+
+    # P_uu = d/dv(d/dv) + k0^2 eps_uu + d/du eps_ww^{-1} d/du eps_uu
+    p_uu = (
+        sparse.kron(identity_u_half, lap_v_dirichlet, format="csr")
+        + k0_sq * eps_uu_diag
+        + su_big @ eps_ww_inv_diag @ gu_big @ eps_uu_diag
+    )
+    # P_vv = d/du(d/du) + k0^2 eps_vv + d/dv eps_ww^{-1} d/dv eps_vv
+    p_vv = (
+        sparse.kron(lap_u_dirichlet, identity_v_half, format="csr")
+        + k0_sq * eps_vv_diag
+        + sv_big @ eps_ww_inv_diag @ gv_big @ eps_vv_diag
+    )
+    # P_uv (Ev -> Eu) = -d/dv d/du + d/du eps_ww^{-1} d/dv eps_vv
+    p_uv = -sparse.kron(su, gv, format="csr") + su_big @ eps_ww_inv_diag @ gv_big @ eps_vv_diag
+    # P_vu (Eu -> Ev) = -d/du d/dv + d/dv eps_ww^{-1} d/du eps_uu
+    p_vu = -sparse.kron(gu, sv, format="csr") + sv_big @ eps_ww_inv_diag @ gu_big @ eps_uu_diag
+
+    operator = sparse.bmat([[p_uu, p_uv], [p_vu, p_vv]], format="csr")
+    meta["operator"] = operator
+    meta["block_uu"] = p_uu.tocsr()
+    meta["block_vv"] = p_vv.tocsr()
+    meta["block_uv"] = p_uv.tocsr()
+    meta["block_vu"] = p_vu.tocsr()
+    meta["k0"] = float(k0)
+    meta["du"] = float(du)
+    meta["dv"] = float(dv)
+    return operator, meta
+
+
+def _split_yee_transverse_eigenvector(eigenvector, meta: dict):
+    """Reshape a stacked ``(Eu, Ev)`` eigenvector into its two component profiles."""
+    vector = np.asarray(eigenvector).reshape(-1)
+    n_eu = int(meta["n_eu"])
+    eu = vector[:n_eu].reshape(meta["shape_eu"])
+    ev = vector[n_eu:].reshape(meta["shape_ev"])
+    return eu, ev
+
+
 def _pec_first_difference(count: int, spacing: float, *, device: torch.device) -> torch.Tensor:
     if count <= 0:
         raise ValueError("count must be > 0 for PEC mode first-difference assembly.")
