@@ -359,9 +359,9 @@ def test_result_sar_peak_matches_point_analytic_for_uniform_field():
 def test_peak_requires_averaging_request():
     result, _ = _uniform_cube_result()
     sar = result.sar("loss")  # no averaging
-    with pytest.raises(NotImplementedError, match="No mass-averaged peak"):
+    with pytest.raises(ValueError, match="No mass-averaged peak"):
         sar.peak(1e-3)
-    with pytest.raises(NotImplementedError, match="No mass-averaged SAR field"):
+    with pytest.raises(ValueError, match="No mass-averaged SAR field"):
         sar.averaged_sar(1e-3)
 
 

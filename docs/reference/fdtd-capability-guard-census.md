@@ -525,3 +525,18 @@ The multi-GPU breakdown reject (`fdtd/distributed/solver.py`
 Lower this budget as the later breakdown phases land (recovery/damage state
 machines, the coefficient-path compositions, an FDFD or trainable smooth
 surrogate, and distributed breakdown).
+
+### SAR reconciliation (2026-07-19, plan 10 merge)
+
+The SAR merge adds four reviewed capability guards; `CAPABILITY_GUARD_BUDGET`
+rises `168 -> 172` in the merge-reconciliation change. `witwin/maxwell/sar.py`:
+(1) `SARAveraging.connectivity` other than `"cube"` (tissue flood-fill
+connectivity is a later averaging phase); (2) `SARAveraging.boundary_policy`
+other than `"strict-interior"`; (3) `PowerNormalization.input_power`, because
+this build exposes no total injected source-power diagnostic (use
+`accepted_power` or `source`). `witwin/maxwell/result.py`: (4) `Result.sar`
+consumes FDTD `PowerLossData` only. Four additional SAR raises that guarded pure
+usage errors (asking for a mass-averaged peak / field / soft peak without
+requesting averaging, and calling `accepted_power` on the bare reducer without a
+`Result`) were converted to `ValueError` at merge so they do not occupy
+capability budget.

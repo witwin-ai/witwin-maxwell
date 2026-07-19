@@ -157,7 +157,7 @@ class PowerNormalization:
             return float(self.amplitude) ** 2
         if self.kind == "accepted_power":
             if result is None:
-                raise NotImplementedError(
+                raise ValueError(
                     "PowerNormalization.accepted_power needs the Result carrying the port; "
                     "resolve it through Result.sar(...), not the bare reducer."
                 )
@@ -351,7 +351,7 @@ class SARResult:
         silently substituting a point-SAR peak.
         """
         if not self.peaks:
-            raise NotImplementedError(
+            raise ValueError(
                 "No mass-averaged peak is available: call Result.sar(..., averaging="
                 "SARAveraging(mass=...)) to request cubical-prefix-v1 averaging."
             )
@@ -361,7 +361,7 @@ class SARResult:
     def averaged_sar(self, mass: float) -> torch.Tensor:
         """Return the ``[F, nx, ny, nz]`` mass-averaged SAR field (W/kg, NaN at invalid)."""
         if not self.averaged:
-            raise NotImplementedError(
+            raise ValueError(
                 "No mass-averaged SAR field is available: request averaging on Result.sar(...)."
             )
         key = _match_mass_key(self.averaged.keys(), mass)
@@ -385,7 +385,7 @@ class SARResult:
         Requires that :class:`SARAveraging` was requested on ``Result.sar(...)``.
         """
         if not self.averaged:
-            raise NotImplementedError(
+            raise ValueError(
                 "soft_peak needs mass-averaged SAR: call Result.sar(..., averaging="
                 "SARAveraging(mass=...)) first."
             )

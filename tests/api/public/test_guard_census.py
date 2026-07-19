@@ -212,7 +212,16 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # 2026-07-19 (merge reconciliation, plans 12 + 13 phase 4): the electrostatic
 # ledger above (144 -> 153, net +9) and the breakdown ledger above (144 -> 159,
 # net +15) merged onto the same base; the combined measured total is 144 + 9 + 15.
-CAPABILITY_GUARD_BUDGET = 168
+# 2026-07-19 (plan 10 SAR merge reconciliation): the SAR branch landed without a
+# census update (its worktree never ran this test). Of its eight new
+# NotImplementedError raises, four were usage errors (missing averaging request,
+# bare-reducer accepted_power) and were converted to ValueError at merge; the four
+# genuine capability guards are counted here: sar.py connectivity != "cube",
+# boundary_policy != "strict-interior", PowerNormalization.input_power (no total
+# injected source-power diagnostic), and Result.sar consuming FDTD PowerLossData
+# only. 168 -> 172. Lower this budget as tissue flood-fill connectivity, boundary
+# policies, input-power normalization, or non-FDTD SAR land.
+CAPABILITY_GUARD_BUDGET = 172
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

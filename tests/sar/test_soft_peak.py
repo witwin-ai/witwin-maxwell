@@ -95,7 +95,7 @@ def test_soft_peak_is_differentiable():
 def test_soft_peak_requires_averaging():
     result, params = _ramp_field_result()
     sar = result.sar("loss")  # no averaging
-    with pytest.raises(NotImplementedError, match="mass-averaged"):
+    with pytest.raises(ValueError, match="mass-averaged"):
         sar.soft_peak(temperature=0.1, mass=params["m0"])
 
 
