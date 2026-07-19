@@ -1,6 +1,13 @@
 # SAR 与人体暴露分析开发计划
 
-> 状态：proposed  
+> 状态：in-progress (phases delivered 2026-07-19)  
+> Delivered 2026-07-19 (Wave D selective start, owner-authorized): Phases 0–3
+> (spec/mass-density contract, point SAR, 1 g/10 g mass averaging, normalization +
+> coherent/incoherent multi-source combination) plus a Phase-4 slice (`soft_peak`
+> surrogate + finite-difference gradient gates). Evidence is E1 (analytic /
+> golden / brute-force parity / grid-convergence gates, no external reference
+> solver cross-check); NOT `completed`. See
+> `docs/assessments/b10-sar-acceptance-2026-07-19.md` and `tests/sar/`.  
 > 路线定位：后续垂直能力，不作为当前 RF 闭环的近期交付承诺  
 > 日期：2026-07-14  
 > 目标证据：E3 production  

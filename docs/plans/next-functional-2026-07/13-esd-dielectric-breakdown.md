@@ -1,6 +1,19 @@
 # ESD 激励、耐压评估与介电击穿开发计划
 
-> 状态：proposed  
+> 状态：in-progress (phases delivered 2026-07-19)  
+> Delivered 2026-07-19 (Wave D selective start, owner-authorized): Phases 0–2
+> (product/credibility gate, IEC 61000-4-2 standard waveform + ideal terminal
+> injection, non-feedback stress/rating monitors) and Phase 4 (deterministic
+> field-duration/latching dynamic dielectric breakdown with dynamic conductivity,
+> typed event log, and breakdown-dissipation energy channel). Phase 3
+> (electrostatic pre-bias + circuit-ESD co-simulation), Phase 5 (multi-GPU /
+> scale-out / smooth surrogate), and the calibration/standard Phases 6–7 are NOT
+> delivered. Evidence is E1 (analytic waveform diagnostics, golden state-machine
+> and energy-closure gates, dt-convergence, bitwise no-op parity; no external
+> reference solver / calibrated failure cross-check); NOT `completed`. See
+> `docs/assessments/c13-esd-stress-acceptance-2026-07-19.md`,
+> `docs/assessments/d13-breakdown-acceptance-2026-07-19.md`, `tests/esd/`,
+> and `tests/breakdown/`.  
 > 路线定位：分级垂直能力，当前不排期交付  
 > 日期：2026-07-14  
 > 目标证据：stress-only E2；deterministic breakdown E2；经校准系统预测 E3  

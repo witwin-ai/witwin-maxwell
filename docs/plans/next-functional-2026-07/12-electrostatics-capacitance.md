@@ -1,6 +1,16 @@
 # 静电与电容矩阵开发计划
 
-> 状态：proposed  
+> 状态：in-progress (phases delivered 2026-07-19)  
+> Delivered 2026-07-19 (Wave D selective start, owner-authorized): Phases 0–3
+> (product/convention freeze, scalar Laplace/Poisson matrix-free FVM + PCG,
+> floating conductors + gauge handling, N-terminal Maxwell capacitance matrix)
+> plus a Phase-5 differentiability slice (implicit-differentiation backward,
+> central-difference gradient gates). Phase 4 (nonuniform grid / tensor eps /
+> open boundary) and the Phase-5 multi-GPU/large-scale piece remain fail-closed.
+> Evidence is E1–E2 (analytic / convergence / conservation / energy-identity /
+> gradient gates, no external reference solver cross-check); NOT `completed`.
+> See `docs/assessments/a12-electrostatics-acceptance-2026-07-19.md` and
+> `tests/electrostatic/`.  
 > 路线定位：独立求解器后续项目，当前不排期交付  
 > 日期：2026-07-14  
 > 目标证据：E3 production  

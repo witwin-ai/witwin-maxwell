@@ -10,8 +10,10 @@
 
 ## Purpose
 
-Single objective status-and-gaps reference for the fourteen-plan
-next-functional-2026-07 program (plans 01–13; plan 05 = nonlinear devices).
+Single objective status-and-gaps reference for the next-functional-2026-07
+program (plans 01–13; plan 05 = nonlinear devices; plan 11 bioheat DROPPED by
+owner 2026-07-19, plan file deleted in commit `4c521ab`, so thirteen active
+plans remain).
 It records, per plan, what is DELIVERED with evidence pointers, what is NOT
 delivered with each gap's blocker or route dependency, and the conservative
 evidence grade. It uses the audit's vocabulary verbatim and never restates a
@@ -40,10 +42,10 @@ grade.
 | 07 | Thin-wire model | 0–3 + Phase-4 partial | PEC E2 / lossy E0 | lossy current recurrence, `ohmic_loss`, conductivity adjoint, distributed wire reverse all fail-closed | Wave C consumption = S6; series-Z layer landed |
 | 08 | Gyromagnetic ferrite | Phase 0 + axis-aligned forward slice | E0 | FDFD, multi-GPU, adjoint, Bloch, arbitrary-bias all fail-closed | Wave C — FROZEN until S3 (S0.2) |
 | 09 | Surface impedance / roughness | Phase 0 + Phase-1 runtime generalization | E0 | oblique/curved/Bloch fail-closed; adapter export fail-closed; no wave-level SIBC benchmark | Wave C — FROZEN until S3 (S0.2) |
-| 10 | SAR | 0 / — | — (design only) | no implementation | Wave D — not started (frozen), S7 |
-| 11 | Bioheat | 0 / — | — (design only) | no implementation | Wave D — not started (frozen), S7 |
-| 12 | Electrostatic / capacitance | 0 / — | — (design only) | no implementation | Wave D — not started (frozen), S7 |
-| 13 | ESD / dielectric breakdown | 0 / — | — (design only) | no implementation | Wave D — not started (frozen), S7 |
+| 10 | SAR | 0–3 + P4 slice / 0–5 | E1 (analytic/golden/brute-force-parity/grid-convergence; no external ref) | IEEE/IEC phantom benchmark, incident power density, VOP (P5), multi-GPU scale-out (P4) all deferred/fail-closed | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
+| 11 | Bioheat | — (dropped by owner) | — | plan dropped by owner 2026-07-19; plan file deleted (commit `4c521ab`) | Wave D — DROPPED (not implemented) |
+| 12 | Electrostatic / capacitance | 0–3 + P5 diff slice / 0–6 | E1–E2 (analytic/convergence/conservation/energy-identity/gradient; no external ref) | tensor eps + open boundary (P4), multi-GPU (P5), touchscreen/packaging workflow (P6) fail-closed/deferred | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
+| 13 | ESD / dielectric breakdown | 0–2 + P4 / 0–7 | E1 (analytic waveform/golden state-machine/energy-closure/dt-convergence; no external/calibrated ref) | P3 circuit-ESD co-sim, P5 multi-GPU/smooth surrogate, P6–7 calibration/standard workflow deferred | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
 
 Route status (S0–S7) and owner decision points are in the final two sections.
 
@@ -364,20 +366,118 @@ as ground truth.
 correctness/robustness landing, not a wave-level validation grade).
 **Freeze:** Wave C — solver consumption FROZEN until S3 passes (audit S0.2).
 
-### 10 — SAR  •  11 — Bioheat  •  12 — Electrostatic / capacitance  •  13 — ESD / dielectric breakdown
+### Wave D (10 / 11 / 12 / 13) — owner-authorized selective start (2026-07-19)
 
-Plans: `docs/plans/next-functional-2026-07/10-sar.md`,
-`11-bioheat.md`, `12-electrostatics-capacitance.md`,
-`13-esd-dielectric-breakdown.md` (design proposals, not progress); audit §1 row
-"10–13 `proposed`" (design only) and §3 route step S7. **Not started (frozen).**
-The plan files are forward-looking design proposals — zero implementation exists;
-there is no delivered phase, artifact, or test to point to. Per audit S0.2 they may
-not begin until S3 passes, and per S7 only after an explicit product goal, reusing
-01's `PowerLossData` contract (no duplicate data model). Do not read the plan files
-or the audit's reference-mapping table (§3: 10/13 `future-xfdtd`, 11/12 🟡) as
-progress — they are forward planning, not delivered capability.
+On 2026-07-19 the owner lifted the S0.2/S7 freeze **for plans 10, 12, and 13
+only** (an explicit selective start, not a general Wave D unfreeze) and dropped
+plan 11 (bioheat); its plan file was deleted in commit `4c521ab`. Plans 10/12/13
+were implemented in parallel worktrees and merged to master (`git log`:
+`d0ca5e5` electrostatics, `315d4ee` ESD stress, `de053e6` breakdown, `549c6a0`
+SAR, plus follow-up fixes `f05c4c2`/`6056c60`/`e819777`/`cfb5a32`/`841aecb`/
+`b237946`/`1b89b4f`). Each delivery is E1–E2 evidence (analytic / golden /
+convergence / falsified gates) with **no external reference-solver cross-check**,
+so no phase is `completed` (the audit §4 `completed` bar — wave-level headline
+gate + independent reference + non-author review — is unmet). Bioheat is not
+covered below (dropped).
 
-**Evidence grade:** — (no measured grade; nothing to grade).
+#### 10 — SAR
+
+Plan: `10-sar.md` (status `in-progress`, 2026-07-19). Acceptance
+`docs/assessments/b10-sar-acceptance-2026-07-19.md`; tests `tests/sar/`
+(60 passed per the audit-fix pass in that doc).
+
+**Delivered (with evidence):** Phase 0 (mass-density `Material` channel +
+`Scene.compile_mass_density`), Phase 1 (point SAR reusing 01's `PowerLossData`
+W/m³ with a power-conserving Yee→cell colocation; analytic conduction gate,
+volume-integral closure vs `PowerLossData.total`, float64 oracle parity), Phase 2
+(1 g/10 g cubical-prefix-v1 mass averaging; integral-image vs brute-force parity,
+golden 3×3×3 cube, strict-interior/min-fraction validity, grid convergence),
+Phase 3 (`accepted_power`/`source` normalization, coherent/incoherent
+multi-source combination), and a Phase-4 slice (`soft_peak` surrogate +
+finite-difference gradient gates, float32-limited per the acceptance doc's
+precision note). Falsifications recorded per phase (see acceptance doc).
+
+**Not delivered / open gaps:** IEEE/IEC 62704-1 standard-phantom benchmark and
+independent-reference cross-check NOT run (no redistributable phantom fixture;
+golden + brute-force parity + grid convergence stand in). `IncidentPowerDensity`
+monitor and `input_power` normalization fail closed (no injected-source-power
+diagnostic in this build). VOP and multi-GPU SAR reduction (Phase 5 / Phase-4
+scale-out) OUT of scope, fail closed. Gradient path is float32-limited.
+
+**Evidence grade:** **E1** (analytic/golden/parity/convergence; no external ref).
+
+#### 12 — Electrostatic / capacitance
+
+Plan: `12-electrostatics-capacitance.md` (status `in-progress`, 2026-07-19).
+Acceptance `docs/assessments/a12-electrostatics-acceptance-2026-07-19.md`
+(A1/A2/A3 stages + audit-fix pass); tests `tests/electrostatic/` (46 passed).
+Reproduction script `docs/assessments/a12_electrostatics_metrics.py`.
+
+**Delivered (with evidence):** Phase 0+1 (electrostatic API objects,
+matrix-free FVM `-div(eps grad phi)` operator, float64 Jacobi-PCG, Dirichlet/
+Neumann boundaries, `ElectrostaticResultData`; parallel-plate/concentric-sphere/
+coax analytic gates, monotone grid convergence, Gauss/energy-identity
+conservation), Phase 2 (floating conductors by exact linear superposition, pure-
+Neumann gauge handling), Phase 3 (N-terminal Maxwell `CapacitanceData` matrix;
+reciprocity/sign/row-sum/energy gates), and a Phase-5 differentiability slice
+(implicit-function-theorem backward on the reduced SPD solve; six central-
+difference gradient gates rel err `< 1e-4`). Falsifications recorded per stage.
+
+**Not delivered / open gaps:** Phase 4 (nonuniform grid, tensor/anisotropic eps,
+open boundary) rejected at prepare / out of scope. Phase-5 multi-GPU — no
+electrostatic distributed entrypoint (single `scene.device`), noted out-of-scope
+rather than a dead guard. Phase 6 (touchscreen/packaging workflow) not started.
+Floating-conductor gradients and trainable-terminal-voltage / `Material`-eps
+public differentiation fail closed / require caller-supplied compiled tensors
+(only `ChargeDensity` is a public differentiable leaf). No external
+reference-solver cross-check.
+
+**Evidence grade:** **E1–E2** (analytic/convergence/conservation/energy/gradient;
+no external ref).
+
+#### 13 — ESD / dielectric breakdown
+
+Plan: `13-esd-dielectric-breakdown.md` (status `in-progress`, 2026-07-19).
+Acceptance `docs/assessments/c13-esd-stress-acceptance-2026-07-19.md` (Phases
+1–2, stages C1–C3) and `docs/assessments/d13-breakdown-acceptance-2026-07-19.md`
+(Phase 4, stages D1–D3). Tests: `tests/esd/` (27 passed, Phase-1 waveform +
+injection) and `tests/breakdown/`, which after merge holds BOTH the Phase-2
+non-feedback stress/rating suite (42 passed per the C2/C3 doc) and the Phase-4
+dynamic-breakdown suite (25 passed per the D2/D3 doc). Reproduction probe
+`docs/assessments/d13-breakdown-probes/report_numbers.py`.
+
+**Delivered (with evidence):** Phase 0+1 (IEC 61000-4-2 two-term Heidler
+`ESDWaveform`, charge-conserving resampling, ideal terminal-port current
+injection; analytic charge/action vs `scipy.quad`, IEC rise-time/current-band
+sanity, end-to-end causal-transient tracking), Phase 2 (non-feedback
+`BreakdownMonitor` + `ComponentStressMonitor` stress/rating reduction;
+exceedance/longest-run/occupancy/trapezoid-energy/Yee-colocation golden gates,
+bitwise no-perturbation parity), and Phase 4 (deterministic field-duration/
+latching dynamic dielectric breakdown: per-node state machine, dynamic-
+conductivity ramp, typed event log, dedicated breakdown-dissipation channel;
+golden trigger-step, dt-convergence, analytic energy-closure rel err `2.94e-08`,
+below-threshold six-field bitwise parity, event-log determinism, structure-
+overlap last-writer-wins, zero-cost-when-unused). Falsifications recorded per
+stage.
+
+**Not delivered / open gaps:** Phase 3 (electrostatic pre-bias + system
+circuit-ESD co-simulation) NOT delivered — injection uses the additive
+current-source path, not a source-impedance/discharge-gun network. Phase 5
+(multi-GPU, scale-out, trainable smooth surrogate) fail-closed. Phases 6–7
+(surface/random/thermal feedback, gun/system calibrated-standard workflow) not
+started. Decision-6 closed-box global energy balance explicitly deferred
+(framework exposes no injected-source-energy / running-stored-EM-energy monitor;
+analytic dissipation closure substituted, stated not silent). `ESDPortRecord.
+measured` is `None` for the ideal-injection path. No external / calibrated
+failure-prediction cross-check.
+
+**Evidence grade:** **E1** (analytic waveform/golden state-machine/energy-closure/
+dt-convergence/bitwise parity; no external or calibrated reference).
+
+#### 11 — Bioheat (DROPPED)
+
+Dropped by owner 2026-07-19; the plan file `11-bioheat.md` was deleted in commit
+`4c521ab`. No implementation, no evidence, no residual scope.
 
 ---
 
@@ -409,11 +509,28 @@ regression before it is checked off.
   TFSF/diffraction R/T/A normalization, S1 RF scenes resident in RESULTS.
 - **S6 — Wave C solver consumption: FROZEN until S1–S3 pass** (07 lossy wire, 08
   ferrite kernel, 09 SIBC runtime; each E0→E2 with independent reference).
-- **S7 — Wave D (10–13): FROZEN.** Not started; selective start only after a product
-  goal, reusing `PowerLossData`.
+- **S7 — Wave D (10–13): OWNER-AUTHORIZED SELECTIVE START (2026-07-19).** The
+  owner lifted the S0.2/S7 freeze for plans **10, 12, 13 only** and dropped plan
+  11 (bioheat, plan file deleted in commit `4c521ab`). Delivered against master:
+  plan 12 electrostatics Phases 0–3 + diff slice (`d0ca5e5`), plan 13 ESD Phases
+  0–2 (`315d4ee`) + breakdown Phase 4 (`de053e6`), plan 10 SAR Phases 0–3 + P4
+  slice (`549c6a0`), with follow-up census/audit fixes (`f05c4c2` etc.). SAR
+  reuses 01's `PowerLossData` contract (no duplicate data model), per the S7
+  precondition. **Still open per plan** — 12: tensor eps / open boundary (P4),
+  multi-GPU (P5), touchscreen workflow (P6); 10: IEEE/IEC phantom benchmark,
+  incident power density, VOP + multi-GPU (P5); 13: P3 circuit-ESD co-simulation,
+  P5 multi-GPU/smooth surrogate, P6–7 calibration/standard workflow. All three
+  are E1–E2 (no external reference), so none is `completed`.
+  **Capability-guard census budget history** (`docs/reference/fdtd-capability-guard-census.md`,
+  `CAPABILITY_GUARD_BUDGET` in `tests/api/public/test_guard_census.py`, now 172):
+  `144 → 153` (plan 12 electrostatics merge) `→ 168` (plan 13 Phase-4 breakdown
+  merge, +15 guards) `→ 172` (plan 10 SAR merge reconciliation, +4 guards); ESD
+  Phases 1–2 added no capability guards (local `ValueError`/`TypeError` only).
 
-**Freeze rules restated:** no Wave C/D new-physics implementation may start until
-S3 passes (S0.2). No plan phase may be marked `completed` without a `wave-level`
+**Freeze rules restated:** the S0.2 rule that no Wave C/D new-physics
+implementation starts until S3 passes was **selectively overridden by the owner
+on 2026-07-19 for plans 10/12/13 only** (see S7 above); Wave C (07/08/09) and the
+general S3 gate remain in force for everything else. No plan phase may be marked `completed` without a `wave-level`
 headline gate + independent reference + convergence report + RESULTS presence +
 non-author review (audit §4). External-solver cross-references follow the
 reference-solver policy: use the covered external reference solver where it covers
