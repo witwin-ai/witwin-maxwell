@@ -729,6 +729,22 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
             "volumetrically with Material(sigma_e=...), use a LossyMetalMedium for a "
             "good conductor, or use Material.pec() for a lossless conductor."
         )
+    if getattr(material, "is_gyromagnetic", False):
+        # A gyromagnetic ferrite carries its physics in a non-reciprocal complex 3x3
+        # Polder permeability tensor. Because its scalar mu_r stays at mu_infinity
+        # (= 1 by default) and it exposes no permeability pole, it is neither caught
+        # by the magnetic-dispersive guard nor the mu_r != 1 guard below, and would
+        # fall through to the plain td.Medium(permittivity=eps_r) path -- silently
+        # exporting as a reciprocal isotropic dielectric and dropping the entire
+        # gyrotropy (the same silent-vacuum trap the PEC branch documents). Tidy3D
+        # has no non-reciprocal / gyromagnetic medium construct, so fail closed.
+        raise NotImplementedError(
+            "Tidy3D export for a gyromagnetic ferrite has no equivalent: its permeability is a "
+            "non-reciprocal complex 3x3 Polder tensor, and Tidy3D has no gyromagnetic (magnetic, "
+            "non-reciprocal) material model -- its FDTD solver fixes mu_r = 1 and exposes no "
+            "permeability tensor. Validate the ferrite against the analytic LLG reference oracle "
+            "(tests/materials/ferrite/test_ferrite_reference.py) instead."
+        )
     if getattr(material, "perturbation", None) is not None:
         # Resolve the background shift first: the lowered Material may still carry
         # (custom) poles, which the recursion then handles through the pole path.

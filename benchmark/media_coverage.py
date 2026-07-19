@@ -156,6 +156,13 @@ def _lossy_metal() -> Material:
     return LossyMetalMedium(conductivity=6.0e7)
 
 
+def _gyromagnetic() -> Material:
+    return mw.GyromagneticFerrite(
+        eps_r=14.5, saturation_magnetization=1.40e5, bias_field=(0.0, 0.0, 1.75e5),
+        gilbert_damping=2.0e-3,
+    )
+
+
 def _sigma_e() -> Material:
     return Material(eps_r=2.0, sigma_e=50.0)
 
@@ -250,6 +257,13 @@ MEDIA_VALIDATION: dict[str, MediumValidation] = {
         _lossy_metal, True,
         "SIBC metal exports as td.LossyMetalMedium (needs export frequencies).",
         export_frequencies=(2.0e14,),
+    ),
+    "is_gyromagnetic": MediumValidation(
+        "is_gyromagnetic", FDTD_ANALYTIC,
+        "tests/materials/ferrite/test_ferrite_reference.py", _gyromagnetic, False,
+        "Non-reciprocal Polder-tensor ferrite validated against an independent torch LLG "
+        "analytic oracle (Polder tensor, precession handedness, passivity); Tidy3D has no "
+        "gyromagnetic model.",
     ),
     # --- physically-distinct sub-capabilities (explicit, non-flag keys) ------
     "conductive_sigma_e": MediumValidation(
