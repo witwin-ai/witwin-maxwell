@@ -146,7 +146,26 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # budget as distributed ferrite (Phase 4), the FDFD gyromagnetic ingest, and the
 # arbitrary-bias kernel (Phase 2) land.
 # Merged union 2026-07-18: 140 - 1 (plan 05 N1) + 4 (plan 08 1b/1c+hardening) = 143.
-CAPABILITY_GUARD_BUDGET = 144
+# 2026-07-19 (plan 12 electrostatics Phase 0+1, scalar Laplace/Poisson slice):
+# 144 -> 152 (+8 capability). The new cell-centred finite-volume electrostatic
+# solver lands with eight fail-closed capability guards, all covering features
+# that are genuinely out of this stage's scope and would otherwise be silently
+# mishandled. Six are in compiler/electrostatic.py: (1) a grid-extending Scene
+# boundary (PML/periodic) is rejected because electrostatics owns its own
+# ElectrostaticBoundarySpec and must not solve on a PML-padded grid; (2) a
+# PEC-material structure is rejected (a conductor must be an ElectrostaticTerminal
+# equipotential, not a zero-permittivity dielectric); (3) a dispersive material is
+# rejected because it exposes no zero-frequency permittivity and the solver refuses
+# to guess a DC limit; (4) a DiagonalTensor3/Tensor3x3 anisotropic permittivity is
+# rejected (scalar operator only; tensor eps is Phase 4); (5) a per-cell tensor
+# permittivity sample is rejected; (6) a complex permittivity sample is rejected as
+# not a valid DC static value. Two are in electrostatic/runtime.py: (7) a floating
+# conductor with prescribed charge is rejected (the linear-superposition solve is
+# Phase 2); (8) a pure-Neumann problem with no fixed potential is rejected as
+# gauge-singular (charge-compatibility + gauge fix is Phase 2). Lower this budget as
+# tensor-eps/open-boundary (Phase 4), floating-charge superposition, and pure-Neumann
+# gauge handling (Phase 2) land.
+CAPABILITY_GUARD_BUDGET = 152
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

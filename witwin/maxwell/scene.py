@@ -763,6 +763,8 @@ class Scene:
         lumped_elements=(),
         circuits=(),
         material_regions=None,
+        electrostatic_terminals=None,
+        charge_densities=None,
         metadata=None,
         device="cuda",
         verbose=False,
@@ -796,6 +798,12 @@ class Scene:
         self.subpixel = _coerce_subpixel(subpixel_samples)
         self.symmetry = _normalize_symmetry(symmetry)
         self.material_regions = list(material_regions or [])
+        self.electrostatic_terminals = []
+        for terminal in electrostatic_terminals or ():
+            self.add_electrostatic_terminal(terminal)
+        self.charge_densities = []
+        for charge_density in charge_densities or ():
+            self.add_charge_density(charge_density)
         self.ports = []
         for port in ports or ():
             self.add_port(port)
@@ -1089,6 +1097,41 @@ class Scene:
         self.material_regions.append(material_region)
         return self
 
+    def add_electrostatic_terminal(self, terminal):
+        """Register an equipotential conductor for the electrostatic solver.
+
+        Terminals live in a solver-specific collection and never enter the RF
+        ``Scene.ports`` set, so the RF port compiler cannot reinterpret an
+        equipotential constraint as an impedance/power-wave port.
+        """
+        from .electrostatic.api import ElectrostaticTerminal
+
+        if not isinstance(terminal, ElectrostaticTerminal):
+            raise TypeError(
+                "Scene.add_electrostatic_terminal requires an ElectrostaticTerminal."
+            )
+        if any(existing.name == terminal.name for existing in self.electrostatic_terminals):
+            raise ValueError(
+                f"Electrostatic terminal name {terminal.name!r} is already present in the scene."
+            )
+        self.electrostatic_terminals.append(terminal)
+        return self
+
+    def add_charge_density(self, charge_density):
+        """Register a volumetric free-charge source for the electrostatic solver."""
+        from .electrostatic.api import ChargeDensity
+
+        if not isinstance(charge_density, ChargeDensity):
+            raise TypeError("Scene.add_charge_density requires a ChargeDensity.")
+        self.charge_densities.append(charge_density)
+        return self
+
+    def compile_electrostatics(self, boundary=None, *, dtype=torch.float64):
+        """Compile the electrostatic block (epsilon, free charge, terminal masks)."""
+        from .compiler.electrostatic import compile_electrostatics
+
+        return compile_electrostatics(self, boundary, dtype=dtype)
+
     def clone(self, **overrides):
         params = {
             "domain": self.domain,
@@ -1103,6 +1146,8 @@ class Scene:
             "lumped_elements": list(self.lumped_elements),
             "circuits": list(self.circuits),
             "material_regions": list(self.material_regions),
+            "electrostatic_terminals": list(self.electrostatic_terminals),
+            "charge_densities": list(self.charge_densities),
             "metadata": dict(self.metadata),
             "device": self.device,
             "verbose": self.verbose,
@@ -1240,6 +1285,8 @@ class PreparedScene(Scene):
             lumped_elements=list(scene.lumped_elements),
             circuits=list(scene.circuits),
             material_regions=list(scene.material_regions),
+            electrostatic_terminals=list(scene.electrostatic_terminals),
+            charge_densities=list(scene.charge_densities),
             metadata=dict(scene.metadata),
             device=scene.device,
             verbose=scene.verbose,

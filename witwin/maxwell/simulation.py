@@ -542,6 +542,19 @@ class Simulation:
             excitations=excitations,
         )
 
+    @staticmethod
+    def electrostatic(scene, *, boundary=None, solver=None):
+        """Build an electrostatic (Laplace/Poisson) solver run.
+
+        Returns an ``ElectrostaticSimulation`` runner whose ``run()`` yields a
+        standard ``Result(method="electrostatic")``. Boundary conditions are an
+        ``ElectrostaticBoundarySpec`` (independent of the full-wave
+        ``Scene.boundary``); ``solver`` is an ``ElectrostaticSolverConfig``.
+        """
+        from .electrostatic.runtime import ElectrostaticSimulation
+
+        return ElectrostaticSimulation(scene, boundary=boundary, solver=solver)
+
     def prepare(self):
         self._refresh_scene()
         self._validate_circuit_execution()

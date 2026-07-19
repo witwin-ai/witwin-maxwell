@@ -39,6 +39,13 @@ from .circuit_devices import (
     PolynomialIV,
     VoltageDependentCapacitor,
 )
+from .electrostatic import (
+    ChargeDensity,
+    ElectrostaticBoundarySpec,
+    ElectrostaticResultData,
+    ElectrostaticSolverConfig,
+    ElectrostaticTerminal,
+)
 from .geometry import ComplexPolySlab, PolySlab
 from .media import (
     CustomDebyePole,
@@ -218,6 +225,11 @@ __all__ = [
     "DipoleEmissionMonitor",
     "Domain",
     "DrudePole",
+    "ChargeDensity",
+    "ElectrostaticBoundarySpec",
+    "ElectrostaticResultData",
+    "ElectrostaticSolverConfig",
+    "ElectrostaticTerminal",
     "Ellipsoid",
     "EmbeddedElementPatternData",
     "EmbeddedNetworkData",

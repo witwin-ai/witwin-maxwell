@@ -424,3 +424,24 @@ isotropic medium, dropping the Polder tensor. `adapters/tidy3d.py` now raises
 non-reciprocal tensor model). One reviewed capability guard added, counted under
 "External interoperability adapter" (19 -> 20); measured capability total 143 -> 144
 and `CAPABILITY_GUARD_BUDGET` raised in the same change.
+
+### Electrostatics reconciliation (2026-07-19, plan 12 Phase 0+1)
+
+The new cell-centred finite-volume electrostatic (Laplace/Poisson) solver adds
+eight reviewed capability guards; `CAPABILITY_GUARD_BUDGET` is raised `144 -> 152`
+in the same change. All eight fail closed on features that are genuinely out of
+this stage's scope and would otherwise be silently mishandled.
+
+| Guard | Message substring | Capability review |
+| --- | --- | --- |
+| `compiler/electrostatic.py` `_require_electrostatic_boundary` | "requires Scene.boundary = BoundarySpec.none()" | Deferred capability. Electrostatics owns its boundary conditions through `ElectrostaticBoundarySpec`; a PML/periodic Scene boundary would extend the grid with absorber padding that has no electrostatic meaning. Periodic electrostatics is a later phase. |
+| `compiler/electrostatic.py` `_static_epsilon_scalar` (PEC) | "represent conductors with ElectrostaticTerminal" | Deferred capability. A PEC-material structure has no dielectric permittivity; conductors are equipotential terminals, not zero-permittivity dielectrics. |
+| `compiler/electrostatic.py` `_static_epsilon_scalar` (dispersive) | "do not define a zero-frequency permittivity" | Deferred capability. A dispersive material exposes no DC permittivity and the solver refuses to guess a zero-frequency limit; users must supply an explicit real static value (Phase 4 API). |
+| `compiler/electrostatic.py` `_static_epsilon_scalar` (tensor eps) | "Anisotropic (tensor) permittivity is not supported" | Deferred capability. The scalar operator handles isotropic media only; SPD tensor-eps is Phase 4. |
+| `compiler/electrostatic.py` `_static_epsilon_scalar` (per-cell tensor) | "Per-cell tensor permittivity is not supported" | Deferred capability, same Phase 4 tensor-eps family. |
+| `compiler/electrostatic.py` `_static_epsilon_scalar` (complex) | "not a valid DC static permittivity" | Deferred capability. A complex permittivity is not a DC static value. |
+| `electrostatic/runtime.py` `solve_electrostatics` (floating) | "requires the linear-superposition solve" | Deferred capability. A floating conductor with prescribed charge needs the Phase 2 linear-superposition solve; rejected rather than solved wrongly. |
+| `electrostatic/runtime.py` `solve_electrostatics` (pure Neumann) | "gauge-singular" | Deferred capability. A pure-Neumann problem with no fixed potential is defined only up to a constant; charge-compatibility plus a gauge fix is Phase 2. |
+
+Lower this budget as tensor-eps / open boundary (Phase 4), floating-charge
+superposition, and pure-Neumann gauge handling (Phase 2) land.
