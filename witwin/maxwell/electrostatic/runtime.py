@@ -444,6 +444,25 @@ def differentiable_solve(compiled, fixed_value, free_mask, config, *, use_free_c
     return phi, stats["report"]
 
 
+def _aggregate_reports(reports) -> PCGReport:
+    """Fold the per-solve PCG diagnostics of a multi-solve run into one report.
+
+    A composite solve (floating-conductor superposition runs one base solve plus
+    one unit solve per floating conductor) must surface diagnostics that reflect
+    the real work done, not the first solve. The base solve of a floating-only
+    scene has ``b = 0`` and short-circuits at zero iterations, so reporting it
+    verbatim would claim ``iterations = 0, residual = 0`` while genuine unit
+    solves converged. Report the worst-case iteration count / residual and require
+    every constituent solve to have converged.
+    """
+    return PCGReport(
+        iterations=max(r.iterations for r in reports),
+        residual=max(r.residual for r in reports),
+        residual_abs=max(r.residual_abs for r in reports),
+        converged=all(r.converged for r in reports),
+    )
+
+
 def _terminal_charges(reaction, terminals) -> dict[str, torch.Tensor]:
     return {t.name: reaction[t.mask].sum() for t in terminals}
 
@@ -589,7 +608,7 @@ def solve_electrostatics(
             operator, compiled, fixed_terms, floating_terms, free_mask, config,
             has_level_anchor=has_level_anchor,
         )
-        report = reports[0]
+        report = _aggregate_reports(reports)
         if not has_level_anchor:
             # Only floating conductors and an insulated boundary: the potential
             # level is a pure gauge freedom. Fix it with mean(phi) = 0.

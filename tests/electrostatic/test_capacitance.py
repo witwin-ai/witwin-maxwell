@@ -151,7 +151,7 @@ def test_row_sum_charge_conservation_under_insulating_boundary():
     assert cap.row_sum_error < 1e-6
 
 
-def test_two_terminal_equivalent_capacitance():
+def test_capacitance_to_reference_single_terminal():
     a, b = 0.2, 0.8
     scene = _shell_scene(60, a=a, b=b)
     cap = mw.Simulation.capacitance(
@@ -161,6 +161,39 @@ def test_two_terminal_equivalent_capacitance():
     # Single active terminal: capacitance-to-reference equals the self term.
     c_self = float(cap.capacitance_to_reference("inner"))
     assert abs(c_self - float(cap.capacitance("inner", "inner"))) < 1e-18
+
+
+def test_two_terminal_equivalent_capacitance():
+    """two_terminal_capacitance() (det/(sum) closed form) must equal the charge
+    seen when solving the actual +Q/-Q floating problem on the 2x2 submatrix."""
+    scene = _three_terminal_scene()
+    # Reference "c" leaves an active 2x2 matrix over ("a", "b"), so the derived
+    # two-terminal accessor exercises its full det/(Caa+Cbb+Cab+Cba) formula.
+    cap = mw.Simulation.capacitance(
+        scene, terminals=("a", "b", "c"), reference="c",
+        boundary=mw.ElectrostaticBoundarySpec.grounded_box(), solver=_tol(),
+    ).run().capacitance
+
+    assert cap.terminal_order == ("a", "b")
+    C = cap.matrix
+    assert C.shape == (2, 2)
+
+    # Independent route: put +Q on "a", -Q on "b" (reference grounded) and solve
+    # C @ V = [Q, -Q] for the terminal potentials, then C_eq = Q / (V_a - V_b).
+    Q = 1.0
+    rhs = torch.tensor([Q, -Q], dtype=C.dtype, device=C.device)
+    v = torch.linalg.solve(C, rhs)
+    c_eq_direct = Q / float(v[0] - v[1])
+
+    c_eq = float(cap.two_terminal_capacitance("a", "b"))
+    assert c_eq > 0.0
+    assert abs(c_eq - c_eq_direct) / abs(c_eq_direct) < 1e-9
+    # Default 2x2 dispatch and terminal-order symmetry.
+    assert abs(float(cap.two_terminal_capacitance()) - c_eq) < 1e-18
+    assert abs(float(cap.two_terminal_capacitance("b", "a")) - c_eq) / abs(c_eq) < 1e-9
+
+    with pytest.raises(ValueError):
+        cap.two_terminal_capacitance("a", "a")
 
 
 def test_capacitance_needs_return_path():

@@ -159,8 +159,10 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # to guess a DC limit; (4) a DiagonalTensor3/Tensor3x3 anisotropic permittivity is
 # rejected (scalar operator only; tensor eps is Phase 4); (5) a per-cell tensor
 # permittivity sample is rejected; (6) a complex permittivity sample is rejected as
-# not a valid DC static value. One is in electrostatic/runtime.py: (7) a pure-Neumann
-# problem with no conductor and no Dirichlet boundary is rejected as gauge-singular.
+# not a valid DC static value. Two are in electrostatic/runtime.py: (7) a floating
+# conductor with prescribed charge is rejected (needs the Phase 2 linear-superposition
+# solve); (8) a pure-Neumann problem with no conductor and no Dirichlet boundary is
+# rejected as gauge-singular.
 # 2026-07-19 (plan 12 electrostatics Phase 2+3): floating-conductor linear
 # superposition and pure-Neumann gauge handling are now implemented, so the former
 # floating-conductor guard (previously counted as #7) is removed; the measured
@@ -175,7 +177,14 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # floating-conductor superposition solve"). Measured electrostatic capability
 # count rises 151 -> 152 total, exactly at the ceiling. Lower this budget when the
 # floating-superposition gradient (or tensor-eps / open boundary, Phase 4) lands.
-CAPABILITY_GUARD_BUDGET = 152
+# 2026-07-19 (plan 12 electrostatics audit fix): compiler/electrostatic.py adds one
+# capability guard, "does not support Scene.material_regions" -- a MaterialRegion
+# design region is an RF-path feature the electrostatic compiler does not rasterize,
+# so it now fails closed instead of silently solving with eps_r=1 in the region.
+# Measured electrostatic capability count rises 152 -> 153 total; budget raised
+# 152 -> 153. Lower it when MaterialRegion electrostatics (or tensor-eps / open
+# boundary, Phase 4) lands.
+CAPABILITY_GUARD_BUDGET = 153
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

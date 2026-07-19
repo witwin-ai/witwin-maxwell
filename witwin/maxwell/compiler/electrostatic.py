@@ -73,6 +73,25 @@ def _require_electrostatic_boundary(scene) -> None:
         )
 
 
+def _reject_material_regions(scene) -> None:
+    """Fail closed on RF ``MaterialRegion`` design regions.
+
+    The electrostatic compiler rasterizes permittivity only from ``Structure``
+    bulk media; it does not consume ``Scene.material_regions`` (the RF density
+    design-region object). Silently ignoring them would solve with eps_r=1 inside
+    a declared region, which is wrong physics, so reject them explicitly instead.
+    """
+    regions = list(getattr(scene, "material_regions", ()))
+    if regions:
+        raise NotImplementedError(
+            "The electrostatic solver does not support Scene.material_regions "
+            f"(found {len(regions)}); MaterialRegion design regions are an RF-path "
+            "feature and are not rasterized into the electrostatic permittivity. "
+            "Represent static dielectrics with Structure(material=Material(...)) bulk "
+            "media instead."
+        )
+
+
 def _static_epsilon_scalar(material, terminal_name_hint: str | None = None):
     """Extract a real, positive DC relative permittivity from a Material.
 
@@ -203,6 +222,7 @@ def compile_electrostatics(
 ) -> CompiledElectrostatics:
     prepared = prepare_scene(scene)
     _require_electrostatic_boundary(prepared)
+    _reject_material_regions(scene)
     if boundary is None:
         boundary = ElectrostaticBoundarySpec.grounded_box()
     if not isinstance(boundary, ElectrostaticBoundarySpec):

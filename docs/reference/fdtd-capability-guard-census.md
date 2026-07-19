@@ -440,9 +440,12 @@ this stage's scope and would otherwise be silently mishandled.
 | `compiler/electrostatic.py` `_static_epsilon_scalar` (tensor eps) | "Anisotropic (tensor) permittivity is not supported" | Deferred capability. The scalar operator handles isotropic media only; SPD tensor-eps is Phase 4. |
 | `compiler/electrostatic.py` `_static_epsilon_scalar` (per-cell tensor) | "Per-cell tensor permittivity is not supported" | Deferred capability, same Phase 4 tensor-eps family. |
 | `compiler/electrostatic.py` `_static_epsilon_scalar` (complex) | "not a valid DC static permittivity" | Deferred capability. A complex permittivity is not a DC static value. |
+| `electrostatic/runtime.py` `solve_electrostatics` (floating) | "requires the linear-superposition solve" | Deferred capability *at Phase 0+1*. A floating conductor with prescribed charge needs the Phase 2 linear-superposition solve; rejected rather than solved wrongly. Implemented and removed in Phase 2+3 (see below). |
 | `electrostatic/runtime.py` `solve_electrostatics` (pure Neumann) | "gauge-singular" | Deferred capability. A pure-Neumann problem with no conductor and no Dirichlet boundary is defined only up to a constant and cannot be solved; the gauge-fixable cases (floating conductors, mean(phi)=0) are now handled in Phase 2. |
 
-Lower this budget as tensor-eps / open boundary (Phase 4) land.
+This is the historical Phase 0+1 record (eight guards, matching the `144 -> 152`
+budget raise); the floating-conductor guard is removed by the Phase 2+3 slice
+documented below. Lower this budget as tensor-eps / open boundary (Phase 4) land.
 
 ### Electrostatics reconciliation (2026-07-19, plan 12 Phase 2+3)
 
@@ -470,3 +473,21 @@ rather than returning silently wrong gradients. Net measured capability total
 `151 -> 152`, exactly at the `CAPABILITY_GUARD_BUDGET` ceiling of `152`. Lower the
 budget when the floating-superposition gradient (or tensor-eps / open boundary,
 Phase 4) lands.
+
+### Electrostatics reconciliation (2026-07-19, plan 12 audit fix)
+
+Audit finding: the electrostatic compiler silently ignored `Scene.material_regions`
+(the RF density design-region object), solving with `eps_r = 1` inside a declared
+region instead of failing closed. `compiler/electrostatic.py` `_reject_material_regions`
+now raises `NotImplementedError` ("does not support Scene.material_regions") because
+`MaterialRegion` design regions are an RF-path feature that is not rasterized into the
+electrostatic permittivity; static dielectrics must be `Structure(material=Material(...))`
+bulk media. One reviewed capability guard added; net measured capability total
+`152 -> 153`; `CAPABILITY_GUARD_BUDGET` raised `152 -> 153` in the same change.
+
+| Guard | Message substring | Capability review |
+| --- | --- | --- |
+| `compiler/electrostatic.py` `_reject_material_regions` | "does not support Scene.material_regions" | Deferred capability. `MaterialRegion` is the RF differentiable design-region object; the electrostatic compiler rasterizes permittivity only from `Structure` bulk media, so a region would otherwise solve as vacuum. Rejected rather than solved wrongly. |
+
+Lower this budget when MaterialRegion electrostatics (or tensor-eps / open
+boundary, Phase 4) lands.

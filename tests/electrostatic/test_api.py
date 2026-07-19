@@ -128,6 +128,29 @@ def test_pml_boundary_rejected():
 
 
 @gpu
+def test_material_region_rejected():
+    """A MaterialRegion (RF design-region object) must fail closed rather than
+    silently solving with eps_r=1 inside the declared region."""
+    n = 16
+    domain = mw.Domain(bounds=((-1, 1),) * 3)
+    grid = mw.GridSpec.uniform(2.0 / n)
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
+    scene.add_electrostatic_terminal(
+        mw.ElectrostaticTerminal(name="inner", geometry=Sphere(position=(0, 0, 0), radius=0.3), potential=1.0)
+    )
+    scene.add_material_region(
+        mw.MaterialRegion(
+            name="design",
+            geometry=Box(position=(0, 0, 0), size=(1.0, 1.0, 1.0)),
+            density=torch.full((n, n, n), 0.5),
+            eps_bounds=(1.0, 4.0),
+        )
+    )
+    with pytest.raises(NotImplementedError):
+        mw.Simulation.electrostatic(scene, boundary=mw.ElectrostaticBoundarySpec.grounded_box()).run()
+
+
+@gpu
 def test_pure_neumann_without_fixed_potential_rejected():
     domain = mw.Domain(bounds=((-1, 1),) * 3)
     grid = mw.GridSpec.uniform(2.0 / 16)
