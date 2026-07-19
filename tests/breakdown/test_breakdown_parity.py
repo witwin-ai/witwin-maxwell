@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tests.breakdown_data._common import build_breakdown_scene, build_plain_scene, run_breakdown
+from tests.breakdown._common import build_breakdown_scene, build_plain_scene, run_breakdown
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="FDTD breakdown requires CUDA"
@@ -74,7 +74,7 @@ def test_plain_scene_never_compiles_breakdown_layout(monkeypatch):
     layout compiler, so it allocates none of the seven full-grid breakdown
     tensors. Monkeypatch the compiler with a raising stub; prepare+run must still
     succeed because the cheap structure pre-scan short-circuits ahead of it."""
-    import witwin.maxwell.fdtd.runtime.breakdown_data as breakdown_runtime
+    import witwin.maxwell.fdtd.runtime.breakdown as breakdown_runtime
 
     def _forbidden(*_args, **_kwargs):
         raise AssertionError(

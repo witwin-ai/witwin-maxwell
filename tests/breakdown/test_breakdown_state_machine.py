@@ -20,13 +20,13 @@ import math
 import pytest
 import torch
 
-from witwin.maxwell.breakdown_data import (
+from witwin.maxwell.breakdown import (
     BREAKDOWN_STATE_CONDUCTING,
     BREAKDOWN_STATE_INTACT,
 )
-from witwin.maxwell.fdtd.runtime.breakdown_data import advance_breakdown_state
+from witwin.maxwell.fdtd.runtime.breakdown import advance_breakdown_state
 
-from tests.breakdown_data._common import build_breakdown_scene, prepare_solver, set_uniform_ez
+from tests.breakdown._common import build_breakdown_scene, prepare_solver, set_uniform_ez
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="FDTD breakdown requires CUDA"

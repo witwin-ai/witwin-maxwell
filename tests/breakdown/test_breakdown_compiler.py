@@ -10,11 +10,11 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
-from witwin.maxwell.compiler.breakdown_data import compile_breakdown_layout
-from witwin.maxwell.fdtd.runtime.breakdown_data import advance_breakdown_state
+from witwin.maxwell.compiler.breakdown import compile_breakdown_layout
+from witwin.maxwell.fdtd.runtime.breakdown import advance_breakdown_state
 from witwin.maxwell.scene import prepare_scene
 
-from tests.breakdown_data._common import prepare_solver, set_uniform_ez
+from tests.breakdown._common import prepare_solver, set_uniform_ez
 
 
 def _layout(scene):
