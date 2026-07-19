@@ -14,6 +14,65 @@ conda run -n maxwell --no-capture-output python -m pytest <targets> -q
 > Slice 2 (defense-in-depth trainable guard on `DistributedFDTD`, forward monitor
 > gather, FEATURE_LIST) is E3b's deliverable and will be appended to this doc.
 
+## Post-audit fix — Hy/Ey CPML psi axis-convention bug (2026-07-19)
+
+An audit found that the S4 CPML-trainable adjoint shipped percent-level-wrong
+gradients whenever the psi memory is numerically active (long run, objective
+sensitivity flowing through a PML region). Two independent latent bugs on the
+same `(pos, neg) = (z, x)` axis order of the Hy/Ey components — pre-existing at
+parent `039cead`, made load-bearing by S4 — were fixed:
+
+1. **Native reverse adjoint-psi carry** (`witwin/maxwell/fdtd/adjoint/native.py`,
+   the operative bug): `_reverse_electric_cpml_ey` and `_reverse_magnetic_cpml_hy`
+   read `AdjPsiPosPost`/`AdjPsiNegPost` from the swapped keys
+   (`psi_ey_x`/`psi_hy_x` for the *pos* = z-family) while writing
+   `AdjPsiPosPrev`/`AdjPsiNegPrev` to the canonical keys (`psi_ey_z`/`psi_hy_z`).
+   Since `pre_step_adjoint` feeds straight back as the next `adjoint_state`
+   (`bridge.py` `adjoint_state = dict(step_result.pre_step_adjoint)`), the psi
+   cotangent recursion connected the wrong family step-to-step. Ex/Ez/Hx/Hz were
+   already self-consistent; only Hy/Ey (5 call sites: the two split phase helpers
+   + the conductive/nonlinear electric variants) were swapped. Fixed to match the
+   canonical `_CPML_MEMORY_SPECS` convention.
+2. **Forward replay psi storage** (`witwin/maxwell/fdtd/adjoint/core.py`, latent):
+   `_step_state` and the `_forward_*_fields_cpml` mirrors unpacked
+   `_update_magnetic_component`/`_update_electric_component` returns as
+   `hy, psi_hy_x, psi_hy_z` / `ey, psi_ey_x, psi_ey_z`, storing the advanced
+   z-family psi under the x key (the imag branch at ~line 3525 was already
+   correct). Inert for a design region in the non-PML interior (psi ~ 0 there),
+   but it corrupts the replayed psi ~4400x vs the native kernel and would corrupt
+   the gradient for any design region overlapping a PML. Fixed to
+   `hy, psi_hy_z, psi_hy_x` / `ey, psi_ey_z, psi_ey_x`.
+
+**Why the S4 headline gates missed it:** the calibrated gate scene runs STEPS=50
+with the probe in the interior, where psi maxima are ~1e-15..2.5e-6 vs |E|~1 —
+psi-inert, so both swaps are undetectable (zeroing the replay psi leaves the
+parity metric bit-identical). The 1-vs-2-GPU parity gates also compare
+distributed against single-GPU, and both used the same buggy reverse, so they
+agreed while both being wrong. New psi-active tests close the gap.
+
+**Reproduction / evidence (single GPU, RTX A6000):** the audit's psi-active scene
+(the CPML Box-density scene, STEPS=400, probe at x=0.48 inside the high x-PML):
+before fix analytic grad `-298.72` vs central FD `-288.5`, rel `3.43e-2`
+(h-converged over h=2e-2..5e-4); after fix analytic `-288.48` vs FD `-288.48`,
+rel `9.1e-6`.
+
+**New committed gates + falsifications:**
+
+| Gate | Test | Result | Falsification |
+|---|---|---|---|
+| psi-active single-GPU CPML adjoint vs central FD (probe in PML) | `tests/gradients/test_fdtd_cpml_psi_active_adjoint.py::test_cpml_psi_active_adjoint_matches_central_fd` | passed (rel 9.1e-6, gate 2e-3) | reverting the native `AdjPsiPost` keys → rel 3.43e-2 (fail, 17x over gate) |
+| distributed CPML replay reproduces native forward OWNED psi + fields | `tests/fdtd/multi_gpu/test_adjoint_replay.py::test_distributed_cpml_replay_reproduces_forward_owned_psi_and_fields` | passed (psi rel ~1e-7, gate rtol 1e-4/atol 1e-6) | reverting the `_step_state`/mirror unpack → psi moves ~O(scale) (fail) |
+
+Non-vacuity in-code: both tests assert the psi memory is a significant fraction
+of the field scale and that `psi_hy_z`/`psi_hy_x` are numerically distinct, so a
+swap actually changes the compared numbers.
+
+Regression check after the fix: `tests/fdtd/multi_gpu/test_adjoint_parity_cpml.py`
++ `test_adjoint_replay.py` (14+7 passed) and the single-GPU adjoint suites
+`test_fdtd_adjoint_rigorous/bridge/materials/p6_acceptance.py` (106 passed) all
+green; the fix is bit-identical in the psi-inert regime so the prior gates are
+unaffected.
+
 ## Slice 1 — S4 distributed CPML-trainable bridge (E3a) — DELIVERED
 
 ### Delivered items
@@ -165,8 +224,10 @@ pytest tests/fdtd/multi_gpu/
   + graded-sigma-absorber defense-in-depth guard in `_validate_static_capabilities`)
 - `tests/fdtd/multi_gpu/test_guard_regressions.py` (new: both-layer graded-sigma
   rejection test + CPML positive-control construction test)
-- `tests/fdtd/multi_gpu/test_monitor_merge_ownership.py` (new: seam double-count
-  falsification via a widened owned x slice)
+- `tests/fdtd/multi_gpu/test_monitor_merge_ownership.py` (pre-existing file;
+  E3b added the `_widen_owned_x` helper and the seam double-count falsification
+  `test_seam_double_count_is_rejected_by_the_owned_overlap_guard`, ~86 insertions,
+  no deletions)
 - `FEATURE_LIST.md` (additive Track E3 subsection: CPML-trainable adjoint,
   defense-in-depth guard, forward monitor gather + seam rule)
 - `docs/assessments/e3-distributed-adjoint-acceptance-2026-07-19.md` (this section)
@@ -221,7 +282,9 @@ pytest tests/fdtd/multi_gpu/ tests/api/public/test_guard_census.py
 # Single-GPU adjoint/gradient regression + public API smoke
 pytest tests/gradients/ tests/api/public/test_public_api.py \
        tests/api/public/test_simulation_smoke.py
-# -> see run log (all passed)
+# -> 229 passed, 3 failed. All 3 failures are in tests/gradients/test_fdfd_adjoint.py
+#    (the user-deferred FDFD known-failing set, unrelated to this track); every
+#    FDTD adjoint/gradient and public-API test passed.
 ```
 
 ### Known gaps / deferred (E3b scope)

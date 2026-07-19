@@ -3079,7 +3079,7 @@ def _forward_magnetic_fields_cpml(solver, state, *, time_value, resolved_source_
 
     d_ex_dz = _forward_diff(state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
     d_ez_dx = _forward_diff(state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
-    hy, psi_hy_x, psi_hy_z = _update_magnetic_component(
+    hy, psi_hy_z, psi_hy_x = _update_magnetic_component(
         state["Hy"],
         d_pos=d_ex_dz,
         d_neg=d_ez_dx,
@@ -3184,7 +3184,7 @@ def _forward_electric_fields_cpml(
 
     d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz_e)
     d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx_e)
-    ey, psi_ey_x, psi_ey_z = _update_electric_component(
+    ey, psi_ey_z, psi_ey_x = _update_electric_component(
         state["Ey"],
         d_pos=d_hx_dz,
         d_neg=d_hz_dx,
@@ -3456,7 +3456,7 @@ def _step_state(
 
     d_ex_dz = _forward_diff(state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
     d_ez_dx = _forward_diff(state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
-    hy, psi_hy_x, psi_hy_z = _update_magnetic_component(
+    hy, psi_hy_z, psi_hy_x = _update_magnetic_component(
         state["Hy"],
         d_pos=d_ex_dz,
         d_neg=d_ez_dx,
@@ -3814,7 +3814,7 @@ def _step_state(
 
         d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz_e)
         d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx_e)
-        ey, psi_ey_x, psi_ey_z = _update_electric_component(
+        ey, psi_ey_z, psi_ey_x = _update_electric_component(
             state["Ey"],
             d_pos=d_hx_dz,
             d_neg=d_hz_dx,
