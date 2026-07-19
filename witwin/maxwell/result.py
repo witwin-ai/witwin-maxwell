@@ -1309,6 +1309,126 @@ class Result:
             provenance=provenance,
         )
 
+    def breakdown_names(self) -> tuple[str, ...]:
+        """Names of BreakdownMonitor stress records present in the result."""
+
+        from .breakdown_stress import BreakdownStressData
+
+        return tuple(
+            name
+            for name, data in self._monitors.items()
+            if isinstance(data, BreakdownStressData)
+        )
+
+    def breakdown(self, name: str):
+        """Return the typed non-feedback dielectric-stress record for ``name``.
+
+        Capability level: stress-only. Exposes peak field, exceedance duration,
+        longest contiguous exceedance, qualifying sustained-stress locations, and
+        per-cell maps (kept on device), with full threshold/colocation provenance.
+        """
+
+        from .breakdown_stress import BreakdownStressData
+
+        payload = self._monitors.get(name)
+        if not isinstance(payload, BreakdownStressData):
+            available = ", ".join(sorted(self.breakdown_names())) or "<none>"
+            raise KeyError(
+                f"Breakdown stress record {name!r} is not present; available: {available}."
+            )
+        return payload
+
+    def _extract_time_series(self, monitor_name: str):
+        payload = self._monitors.get(monitor_name)
+        if payload is None:
+            raise KeyError(
+                f"Time series {monitor_name!r} is not present in the result monitors."
+            )
+        if not isinstance(payload, Mapping):
+            raise TypeError(
+                f"Monitor {monitor_name!r} does not expose a time-series payload."
+            )
+        time = payload.get("t")
+        if time is None:
+            raise ValueError(f"Monitor {monitor_name!r} has no time axis 't'.")
+        if "flux" in payload:
+            values = payload["flux"]
+        elif "data" in payload:
+            values = payload["data"]
+        elif "field" in payload:
+            values = payload["field"]
+        else:
+            raise ValueError(
+                f"Monitor {monitor_name!r} does not expose a scalar time series "
+                "('data', 'field', or 'flux')."
+            )
+        return time, values
+
+    def component_stress_names(self) -> tuple[str, ...]:
+        """Names of ComponentStressMonitor bindings declared on the run scene."""
+
+        from .monitors import ComponentStressMonitor
+
+        scene = self.scene
+        monitors = getattr(scene, "resolved_monitors", None)
+        monitor_iter = monitors() if callable(monitors) else getattr(scene, "monitors", ())
+        return tuple(
+            monitor.name
+            for monitor in monitor_iter
+            if isinstance(monitor, ComponentStressMonitor)
+        )
+
+    def component_stress(self, name: str):
+        """Return the typed component port-stress and rating-exceedance summary.
+
+        Capability level: stress-only. Reduces the bound voltage/current time
+        series into ``P = V I``, cumulative ``integral P dt`` and an exceedance
+        summary versus the declared :class:`ComponentRating` envelope.
+        """
+
+        from .monitors import ComponentStressMonitor
+        from .breakdown_stress import ComponentStressData
+
+        scene = self.scene
+        monitors = getattr(scene, "resolved_monitors", None)
+        monitor_iter = monitors() if callable(monitors) else getattr(scene, "monitors", ())
+        binding = None
+        for monitor in monitor_iter:
+            if isinstance(monitor, ComponentStressMonitor) and monitor.name == name:
+                binding = monitor
+                break
+        if binding is None:
+            available = ", ".join(sorted(self.component_stress_names())) or "<none>"
+            raise KeyError(
+                f"ComponentStressMonitor {name!r} is not present; available: {available}."
+            )
+        v_time, voltage = self._extract_time_series(binding.voltage_series)
+        i_time, current = self._extract_time_series(binding.current_series)
+        if not isinstance(v_time, torch.Tensor):
+            v_time = torch.as_tensor(v_time)
+        if not isinstance(i_time, torch.Tensor):
+            i_time = torch.as_tensor(i_time)
+        if v_time.numel() != i_time.numel():
+            raise ValueError(
+                f"ComponentStressMonitor {name!r} voltage series "
+                f"{binding.voltage_series!r} and current series "
+                f"{binding.current_series!r} have mismatched sample counts."
+            )
+        voltage = voltage if isinstance(voltage, torch.Tensor) else torch.as_tensor(voltage)
+        current = current if isinstance(current, torch.Tensor) else torch.as_tensor(current)
+        return ComponentStressData.from_time_series(
+            v_time,
+            voltage,
+            current,
+            binding.rating,
+            name=binding.name,
+            port_name=binding.port,
+            provenance_extra={
+                "voltage_series": binding.voltage_series,
+                "current_series": binding.current_series,
+            },
+        )
+
     @property
     def ports(self) -> dict[str, PortData]:
         return dict(self._ports)

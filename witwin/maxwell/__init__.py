@@ -47,6 +47,11 @@ from .esd import (
     ESDWaveform,
     MeasuredWaveform,
 )
+from .breakdown_stress import (
+    BreakdownStressData,
+    ComponentRating,
+    ComponentStressData,
+)
 from .geometry import ComplexPolySlab, PolySlab
 from .media import (
     CustomDebyePole,
@@ -71,7 +76,9 @@ from .media import (
     TwoPhotonAbsorption,
 )
 from .monitors import (
+    BreakdownMonitor,
     ClosedSurfaceMonitor,
+    ComponentStressMonitor,
     DiffractionMonitor,
     DipoleEmissionMonitor,
     FieldTimeMonitor,
@@ -220,6 +227,11 @@ __all__ = [
     "CustomDebyePole",
     "CustomDrudePole",
     "CustomLorentzPole",
+    "BreakdownMonitor",
+    "BreakdownStressData",
+    "ComponentRating",
+    "ComponentStressData",
+    "ComponentStressMonitor",
     "CustomSourceTime",
     "Cylinder",
     "DebyePole",

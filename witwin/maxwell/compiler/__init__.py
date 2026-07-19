@@ -15,7 +15,11 @@ from .mna import (
     compile_mna_system,
 )
 from .materials import compile_material_tensors
-from .monitors import compile_fdtd_observers, compile_fdtd_time_observers
+from .monitors import (
+    compile_fdtd_breakdown_observers,
+    compile_fdtd_observers,
+    compile_fdtd_time_observers,
+)
 from .networks import CompiledNetworkBlock, compile_network_block, compile_networks
 from .ports import (
     CompiledPortGeometry,
@@ -71,6 +75,7 @@ __all__ = [
     "compile_fdfd_sources",
     "compile_fdtd_observers",
     "compile_fdtd_time_observers",
+    "compile_fdtd_breakdown_observers",
     "CompiledPortGeometry",
     "CompiledWirePortGeometry",
     "CompiledPowerLossMonitor",

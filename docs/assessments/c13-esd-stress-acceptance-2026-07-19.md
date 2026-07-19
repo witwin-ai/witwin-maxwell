@@ -62,3 +62,54 @@ End-to-end FDTD (GPU 0, two PEC terminal boxes + `TerminalPort` + `ESDCurrentSou
 ## Guard census
 
 No fail-closed guard added, removed, or weakened; the FDTD capability-guard census budget is untouched. New fail-closed validations added inside `esd.py` (unsupported revision/discharge, non-terminal port, missing port, degenerate footprint) are local `ValueError`s, not tracked-census FDTD capability guards.
+
+---
+
+# C2 stage — Plan 13 Phase 2 (non-feedback stress/rating monitors, typed results)
+
+Environment: conda env `maxwell`, `CUDA_VISIBLE_DEVICES=0`, `PYTHONPATH=<worktree>`, `CUDA_HOME` set to the env `nvidia/cu13` tree.
+
+## Delivered items
+
+- `witwin/maxwell/breakdown_stress.py` (new): core stress-only primitives.
+  - `colocate_electric_magnitude(Ex, Ey, Ez)` — energy-consistent cell-center `|E|` (each Yee component averaged along its two node-staggered axes onto the common cell center `(x_half, y_half, z_half)`); exact on uniform fields.
+  - `BreakdownStressAccumulator` — per-cell device-tensor running reduction with `allocate(...)` / `update(e_magnitude)` / `finalize(...)`. Update rule (pure device ops, no `.item()`/host sync): `max_field = max(max_field, |E|)` on occupied cells; `exceedance_time += dt·H(|E|−Ecrit)` with `H(0)=1` (`|E| >= Ecrit`); contiguous-run bookkeeping → `longest_exceedance`; optional `damage_integral += dt·(|E|/Ecrit)^k` accrued only while exceeding.
+  - `BreakdownStressData` — typed result (peak field + index, exceedance / longest durations, qualifying-cell count, occupancy-weighted exceedance volume·time, damage volume, per-cell device maps, `locations()`, provenance with thresholds/colocation/occupancy-policy/model version/capability level).
+  - `ComponentRating(voltage, current, energy, pulse_width, model)` and `ComponentStressData.from_time_series(t, V, I, rating)` → `P=V·I`, cumulative `∫P dt` (trapezoidal), peaks, coarse pulse width, per-channel exceedance summary vs the rating envelope.
+- `witwin/maxwell/monitors.py`: `BreakdownMonitor(name, region|position/size, quantities, critical_field, minimum_duration, damage_exponent)` and `ComponentStressMonitor(name, port, rating, voltage_series, current_series)`, plus `_resolve_region_geometry`.
+- Compiler: `compile_fdtd_breakdown_observers(scene)` (lightweight region/threshold records); breakdown/component monitors excluded from the spectral-observer path.
+- FDTD runtime: `prepare_breakdown_observers` / `accumulate_breakdown_observers` / `get_breakdown_observer_results` in `fdtd/observers.py`; region cell-slice + fractional-overlap occupancy + control-volume resolution at prepare; region-sliced colocation each step; solver delegation methods; wired into `runtime/initialization.py` (compile), `runtime/stepping.py` (prepare/accumulate/finalize, resume guard), enabled only when a monitor is present (zero cost otherwise).
+- `Result`: `breakdown(name)` / `breakdown_names()` (typed `BreakdownStressData`), `component_stress(name)` / `component_stress_names()` (resolves bound V/I series and reduces via `ComponentStressData`).
+- Public exports (`BreakdownMonitor`, `ComponentStressMonitor`, `ComponentRating`, `BreakdownStressData`, `ComponentStressData`) in `witwin/maxwell/__init__.py`; `FEATURE_LIST.md` subsection appended.
+
+## Test inventory (all under `tests/breakdown/`)
+
+- `test_breakdown_accumulator.py` — 20 passed. Two-pulse exact exceedance + longest run; longest-run reset between pulses; exactly-at-threshold counts; just-below excluded; damage integral golden; damage disabled without exponent; minimum_duration qualifying mask/locations; zero-occupancy excluded from peak/exceedance; partial-occupancy volume·time weighting; colocation uniform-field magnitude; colocation-vs-energy-density consistency; shape/validation guards.
+- `test_component_stress.py` — 11 passed (1 cuda-parity + 1 cpu-parity parametrization). Rating validation; power/energy golden; exceedance flags; disabled-channel; increasing-time guard; float32-vs-float64 parity (cpu + cuda); trapezoid-vs-rectangle falsification.
+- `test_breakdown_monitor.py` — 8 passed. Construction/validation, region-with-bounds, region+box conflict, scene attach, ComponentStressMonitor binding/type guard.
+- `test_breakdown_fdtd.py` — 3 passed (CUDA). End-to-end device stress maps + provenance; no-perturbation bitwise field parity with/without the monitor; component-stress reduction float64 parity on a real run.
+- Total: **37 passed** (`tests/breakdown/`).
+
+Adjacent suites rerun: `tests/api/public/test_public_api.py`, `tests/api/public/test_simulation_smoke.py`, `tests/core/scene/test_scene.py`, `tests/esd/` (C1), `tests/monitors/observers/test_fdtd_observers.py` — **96 passed**.
+
+## Falsifications performed (red observed; source restored; green reconfirmed)
+
+1. **Longest contiguous run** (`test_longest_run_resets_between_pulses`): removed the `torch.where(exceed, run+dt, 0)` reset so the run never resets → FAILED (longest = total exceedance). Restored → PASSED.
+2. **Threshold convention** (`test_exactly_at_threshold_counts_as_exceedance`): changed `|E| >= Ecrit` to `>` → FAILED (exactly-at-threshold no longer counted). Restored → PASSED.
+3. **Occupancy weighting** (`test_partial_occupancy_weights_region_volume_time`, `test_falsify_occupancy_ignored_would_change_weighted_metric`): dropped `occupancy` from the region weight (`weight = cell_volume`) → both FAILED. Restored → PASSED.
+4. **Trapezoidal energy** (`test_falsify_rectangle_energy_would_break_trapezoid_parity`): replaced the trapezoid segment with a left-rectangle (`segment = power[:-1]*dt`) → FAILED. Restored → PASSED.
+5. **Yee colocation** (`test_colocation_uniform_field_matches_analytic_magnitude`): dropped Ey/Ez from the magnitude (`sqrt(ex_c^2)`) → FAILED. Restored → PASSED.
+
+(All five falsification edits were reversed and the full `tests/breakdown/` suite reconfirmed at 37 passed.)
+
+## Known gaps / deferred
+
+- `ComponentStressMonitor` consumes user-declared time-series monitors as V(t) and I(t) (e.g. a gap-voltage `FieldTimeMonitor` and a current proxy) and reduces them; it does not itself synthesize a calibrated H-contour port current (that stays with the RF terminal path / Phase 3). The reduction math (P, ∫P dt, exceedance) and its float64 parity are the tested contract. The measured pulse width is a coarse half-peak-of-power span, reported for information.
+- Occupancy in the real run is computed as the fractional overlap of each cell control volume with the monitor box (partial voxels at the region boundary). Binding occupancy to a specific target *material* mask (rather than the monitor region) is a straightforward extension for material-scoped breakdown regions and is left for Phase 4 material breakdown descriptors.
+- `BreakdownStressData` / `ComponentStressData` are not yet covered by `Result.save()` serialization (breakdown save/load is out of C2 scope; the payloads carry device tensors). If a stress run is persisted, exclude these monitors or extend the snapshot codec.
+- Breakdown observers intentionally raise on FDTD resume/checkpoint (added to the existing resume guard), matching the field/time-observer policy.
+- No dynamic feedback, conductivity switching, or event log — that is Phase 4 (other track), deliberately absent here (stress-only).
+
+## Guard census
+
+No fail-closed guard added, removed, or weakened; the FDTD capability-guard census budget is untouched. New validations (unsupported quantities, missing critical_field, damage-without-exponent, region/box conflict, rating type/positivity, increasing-time) are local `ValueError`/`TypeError`s, not tracked-census FDTD capability guards. The FDTD resume guard was extended to also reject `breakdown_observers` (same NotImplementedError policy as existing observer types), not weakened.
