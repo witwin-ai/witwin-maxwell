@@ -37,12 +37,18 @@
    the defect fingerprint) is repurposed to `..._operator_returns_clean_sin` asserting
    `corr >= 0.99`. The module docstring is updated to record the fix.
 3. **Inhomogeneous (hybrid) operator validation** — three new gates in
-   `tests/rf/wave_validation/test_transverse_operator.py` prove the per-component-eps
+   `tests/rf/wave_validation/test_transverse_operator.py` exercise the per-component-eps
    path against a half-filled parallel-plate guide (`eps1` for `u < d`, `eps2` for
    `u > d`): machine-precision agreement with an independently assembled 1D discrete
    `LSE` Sturm-Liouville operator, the physical mode structure (uniform along the
    plates, `Ev`-polarized, concentrated in the high-permittivity half), and continuum
-   convergence to the analytic transverse-resonance root.
+   convergence to the analytic transverse-resonance root. Scope of what these gate: the
+   `LSE` mode is `v`-uniform, so `Gv @ Ev = 0` and the `eps_ww` divergence coupling and
+   the cross blocks `P_uv/P_vu` vanish identically for it — the gates therefore pin the
+   `eps_vv` placement and the `u`-Laplacian block, not the full inhomogeneous stencil.
+   The complete operator (all three eps components, cross terms, `eps_ww` divergence) was
+   independently checked against the discrete Yee Maxwell curl system to `~6e-14` in the
+   audit; that broader check is not yet a committed pytest node.
 4. **FEATURE_LIST.md** gains an additive `e1-rf-modes-b` subsection.
 
 ## 2. Grid / reconstruction (integration derivation)
@@ -70,31 +76,60 @@ non-magnetic families in scope).
 ## 3. Scope decision — routing and the retained legacy operator
 
 The Yee-staggered operator is the production path for **homogeneous non-magnetic**
-cross-sections (`_is_uniform_isotropic_vector_plane` true): the hollow metallic guide
-(the six pins) and free-space `WavePort` apertures. **Inhomogeneous** (dielectric-graded)
-and **magnetic** (`mu_r != 1`) cross-sections keep the legacy diagonal-anisotropic
+cross-sections — routed on `_is_uniform_isotropic_vector_plane(...)` true **and**
+`mu = 1` everywhere. This covers the hollow metallic guide (the six pins), a
+**uniformly dielectric-filled** guide (any uniform `eps_r` with `mu = 1`), and
+free-space `WavePort` apertures. **Inhomogeneous** (dielectric-graded) and **magnetic**
+(`mu_r != 1`, uniform or graded) cross-sections keep the legacy diagonal-anisotropic
 operator (`_build_vector_operator_sparse`). This is a regime split, not a duplicate:
 
+- **Uniform dielectric fill carries its real eps.** For a homogeneous cross-section the
+  Yee operator with the aperture's actual per-component eps equals the vacuum operator
+  plus a scalar `(eps_r - 1) * k0**2` identity shift — it stays exactly symmetric and
+  every eigenvalue is its vacuum counterpart shifted by `(eps_r - 1) * k0**2`, so the
+  fundamental sits at `beta**2 = eps_r * k0**2 - k~c**2` (EXECUTED: uniform `eps_r = 4`
+  guide `beta = 41.406` vs analytic `41.403`, vs the vacuum `19.916`).
+  `_solve_yee_transverse_vector_mode` therefore always assembles the operator from the
+  real staggered eps; the `uniform` flag only selects the symmetric eigensolve and
+  disables the structure-enforcing filters, it does not mean vacuum. Gated by
+  `test_uniform_dielectric_fill_shifts_spectrum_and_stays_symmetric`
+  (`tests/rf/wave_validation/test_transverse_operator.py`) at the operator level and by
+  `test_waveguide_te10_beta_matches_analytic`
+  (`tests/rf/wave_validation/test_te10_mode_selection.py`) at the integration level.
 - **Magnetic (`mu != 1`)** is out of the E1 redesign scope by construction — the
-  Yee-staggered derivation eliminates `Hz` assuming `mu = 1` (E1a §8). Retaining the
-  legacy operator preserves `test_full_vector_mode_solver_supports_mu_not_unity`.
-- **Inhomogeneous production integration is deferred, with measured cause.** The
-  inhomogeneous operator is real but non-symmetric and carries **spurious high-`|beta|`
-  eigenvalues above the physical spectrum** (EXECUTED: for the half-filled guide the
-  spectral maximum grows as `~1/dx^2` — `beta^2 = 785 / 2746 / 10600` at
-  `nu = 24 / 48 / 96` — while the physical `LSE` mode sits at `beta^2 ≈ 225`). A
-  `which='LA'` selection would pick a spurious mode, so a production inhomogeneous path
-  needs a spurious-mode filter and a power-orthogonality reconstruction on the
-  staggered (not node) grid. The existing inhomogeneous unit tests
-  (`tests/sources/mode/test_mode_eigensolver_physics.py`) also pin legacy-specific
+  Yee-staggered derivation eliminates `Hz` assuming `mu = 1` (E1a §8). A **uniformly**
+  magnetic aperture also classifies as uniform-isotropic, so the routing explicitly
+  requires `mu = 1` and sends every magnetic cross-section (uniform or graded) to the
+  legacy operator, which threads `mu` through the eliminated longitudinal fields
+  (EXECUTED: uniform `mu_r = 2` guide routes to the legacy operator and returns a
+  `mu`-dependent `beta = 29.64`, not the `mu = 1` value `19.92`). This preserves
+  `test_full_vector_mode_solver_supports_mu_not_unity`.
+- **Inhomogeneous production integration is deferred, on verified grounds.** The
+  inhomogeneous operator is real-valued in storage but **non-symmetric**; its spectrum,
+  however, is **entirely real and bounded by the physical mode** — for the half-filled
+  `LSE` gate a dense `eigvals` gives `max Re(beta**2) = 224.2 / 225.1 / 225.5` with
+  `max|Im| = 0` at `nu = 24 / 48 / 96`, i.e. the physical `LSE` mode IS the spectral
+  maximum and `eigs(which='LR')` returns the physical branch cleanly (EXECUTED,
+  `scratchpad/verify_spurious_claim.py`). (An earlier revision of this doc claimed
+  spurious `beta**2 = 785 / 2746 / 10600` maxima growing as `~1/dx^2`; that was a
+  symmetrization artifact — `eigvalsh` of the *symmetrized* operator does grow like that
+  — not the true spectrum, and it is retracted here.) The genuine, verified reason to
+  defer is **test-migration risk**: the existing inhomogeneous unit tests
+  (`tests/sources/mode/test_mode_eigensolver_physics.py`) pin legacy-operator-specific
   invariants — candidate power-orthogonality to `1e-6`, `raw_indices` grouping, and
-  three-grid mode-index ordering — that a node-grid reconstruction does not reproduce
-  to those tolerances. Rerouting inhomogeneous to the new operator (EXECUTED) broke
-  four of them; migrating those pins is a supervisor-gated decision, so inhomogeneous
-  stays on the legacy operator and the **operator-level** hybrid capability is proven
-  by the new half-filled gates instead.
+  three-grid mode-index ordering — that the node-grid reconstruction path does not
+  reproduce to those tolerances. Rerouting the inhomogeneous non-magnetic path through
+  the Yee operator (EXECUTED, temporary reroute) turns **3 of the 9**
+  `test_mode_eigensolver_physics.py` tests RED
+  (`test_higher_order_mode_converges_on_three_grids_without_index_changes`,
+  `test_square_degenerate_subspace_rotates_to_stable_requested_polarizations`,
+  `test_candidate_power_gram_and_discrete_divergence_are_orthogonal` — the last with an
+  off-diagonal power-overlap of `7.5e-3` vs the `1e-6` gate). Migrating those pins is a
+  supervisor-gated decision, so inhomogeneous stays on the legacy operator and the
+  **operator-level** hybrid capability is exercised by the new half-filled gates
+  instead.
 - **Microstrip / differential-pair production hybrid gates are deferred** (fail-closed
-  unchanged). Beyond the spurious-mode filtering above, these carry an **interior PEC
+  unchanged). Beyond the test-migration above, these carry an **interior PEC
   conductor** in the aperture (the signal strip/ground), which the Yee-staggered
   operator does not yet mask; the existing `NotImplementedError`
   (`_solve_pec_tem_mode_torch`, inhomogeneous TEM cross-section) remains the
@@ -119,26 +154,33 @@ conda run -n maxwell --no-capture-output python -m pytest <targets> -q
 
 | target | result |
 |---|---|
-| `tests/rf/wave_validation/test_transverse_operator.py` | **11 passed** (8 E1a + 3 new inhomogeneous) |
-| `tests/rf/wave_validation/test_te10_mode_selection.py` | all pass incl. the six former xfails |
-| `tests/rf/wave_validation tests/rf/waveport tests/sources/mode tests/api/public/test_public_api.py tests/api/public/test_simulation_smoke.py tests/api/public/test_guard_census.py` | **171 passed, 2 xfailed** |
+| `tests/rf/wave_validation/test_transverse_operator.py` | **12 passed** (8 E1a + 3 inhomogeneous + 1 uniform-fill regression) |
+| `tests/rf/wave_validation/test_te10_mode_selection.py` | all pass incl. the six former xfails and 3 new `beta`-vs-analytic tiers |
+| `tests/rf/wave_validation tests/rf/waveport tests/sources/mode tests/api/public/test_public_api.py tests/api/public/test_simulation_smoke.py tests/api/public/test_guard_census.py` | **175 passed, 2 xfailed** |
 
 The two remaining xfails are pre-existing and unrelated: `test_wave_level_rlc_resonance_open_gap`
 (S1.2 open gap) and `test_bent_effective_index_is_symmetric_in_radius_sign_for_a_symmetric_guide`
 (the bent-mode conformal-eps path is inhomogeneous and stays on the legacy operator).
 
 Measured TE10 acceptance (`sin`-correlation, EXECUTED via the WavePort manifest):
-`dx = 0.05 / 0.025 / 0.02 / 0.0125 / 0.01 -> corr 1.00000` (all), `beta` matching
-analytic `sqrt(k0^2 - (pi/a)^2)` to `< 0.15%`; high-frequency `dx = 0.005, 6 fc ->
-corr 1.00000` (genuine TE10, not TE20). Inhomogeneous half-filled `LSE`: 2D operator vs
-1D discrete reference `rtol 1.1e-14 / 3.2e-15 / 7.4e-13` at `nu = 24 / 48 / 96`;
-continuum transverse-resonance error `0.41% / 0.22% / 0.11%` (first-order, material
-discontinuity on a node), fundamental analytic `beta = 15.0354`.
+`dx = 0.05 / 0.025 / 0.02 / 0.0125 / 0.01 -> corr 1.00000` (all); high-frequency
+`dx = 0.005, 6 fc -> corr 1.00000` (genuine TE10, not TE20). The `beta`-vs-analytic
+`sqrt(k0^2 - (pi/a)^2)` acceptance is now a committed pytest node
+(`test_waveguide_te10_beta_matches_analytic`, error `0.127% / 0.020% / 0.008%` at
+`dx = 0.05 / 0.02 / 0.0125`, gated `<= 0.15% / 0.05% / 0.02%`). Uniform-fill regression
+(`test_uniform_dielectric_fill_shifts_spectrum_and_stays_symmetric`): `eps_r = 4` guide
+`beta**2` equals the vacuum value plus `(eps_r - 1) k0**2` to `1e-12`, operator symmetric
+to `1e-9`. Inhomogeneous half-filled `LSE`: 2D operator vs 1D discrete reference agrees
+to `rtol ~1e-14` (only the `nu = 48` tier is test-gated; the exact residual is
+ARPACK-seed dependent at the `1e-15`–`1e-13` level, so the specific triple is not pinned
+as an acceptance number); continuum transverse-resonance error `0.41% / 0.22% / 0.11%`
+(first-order, material discontinuity on a node), fundamental analytic `beta = 15.0354`.
 
 ## 5. Falsifications performed (perturb → red → restore → green)
 
 1. **Integration is load-bearing (headline TE10 gate).** Forcing the uniform guide back
-   through the legacy operator (`if uniform_isotropic:` → `if False:`) reintroduced the
+   through the legacy operator (`if uniform_isotropic and nonmagnetic:` → `if False:`)
+   reintroduced the
    sublattice-decoupling defect: `test_waveguide_te10_eigenvector_is_sin[0.02]` and
    `..._operator_returns_clean_sin` went **RED** with `corr 0.554` (vs the `>= 0.99`
    gate). Restored → green.
@@ -148,7 +190,22 @@ discontinuity on a node), fundamental analytic `beta = 15.0354`.
    `test_inhomogeneous_operator_spectrum_matches_one_dimensional_lse_reference` **RED**
    (2D eigenvalue no longer matches the independent 1D reference). Restored → green.
 
-(Both were scratch edits reverted immediately; reproducible from the descriptions.)
+3. **The uniform-fill routing carries the real eps (post-audit fix).** Reverting
+   `_solve_yee_transverse_vector_mode` to the old `operator_eps = (None, None, None)`
+   for the `uniform` branch drove
+   `test_uniform_dielectric_fill_shifts_spectrum_and_stays_symmetric` **RED**: the
+   `eps_r = 4` guide `beta**2` collapsed onto the vacuum value (identity-shift assertion
+   fails). Restored → green. A companion end-to-end probe
+   (`scratchpad/repro_uniform_eps.py`) shows the `eps_r = 4` guide `beta` moving from the
+   bit-identical vacuum `19.916` (pre-fix) to `41.406` (post-fix, analytic `41.403`).
+4. **Uniform magnetic routes to legacy (post-audit fix).** Dropping the `nonmagnetic`
+   conjunct from the routing (`if uniform_isotropic and nonmagnetic:` →
+   `if uniform_isotropic:`) sends a uniform `mu_r = 2` guide back into the `mu = 1` Yee
+   operator, returning the `mu`-independent `beta = 19.92`; with the conjunct it routes
+   to the legacy operator and returns the `mu`-dependent `beta = 29.64`
+   (`scratchpad/repro_uniform_mu_e2e.py`). Restored → green.
+
+(All were scratch edits reverted immediately; reproducible from the descriptions.)
 
 ## 6. Files added / changed
 
@@ -157,19 +214,26 @@ discontinuity on a node), fundamental analytic `beta = 15.0354`.
   `_yee_reconstruct_node_profiles`, `_select_yee_transverse_mode_numpy`,
   `_solve_yee_transverse_vector_mode`; stashed the staggered differences in the E1a
   builder's `meta`; routed the homogeneous non-magnetic branch of
-  `_assemble_vector_mode_data` to the new solver.
+  `_assemble_vector_mode_data` to the new solver. Post-audit: the Yee solver always
+  assembles from the real staggered eps (uniform dielectric fill no longer collapses to
+  vacuum), and the routing requires `mu = 1` (uniform magnetic goes to the legacy
+  operator).
 - `tests/rf/wave_validation/test_te10_mode_selection.py`: un-xfailed the six pins,
-  repurposed the blocker regression, updated the docstring.
+  repurposed the blocker regression, updated the docstring; added
+  `test_waveguide_te10_beta_matches_analytic` (3 tiers) pinning the eigenvalue.
 - `tests/rf/wave_validation/test_transverse_operator.py`: three inhomogeneous
-  half-filled `LSE` gates.
+  half-filled `LSE` gates and `test_uniform_dielectric_fill_shifts_spectrum_and_stays_symmetric`.
 - `FEATURE_LIST.md`: additive `e1-rf-modes-b` subsection.
 - `docs/assessments/e1-rf-mode-operator-acceptance-2026-07-19.md`: this document.
 
 ## 7. Known gaps / handoff
 
 - **Inhomogeneous / hybrid production integration is deferred** (see §3): needs a
-  spurious-mode filter, staggered-grid power-orthogonal reconstruction, and migration
-  of the four legacy-invariant `test_mode_eigensolver_physics.py` pins.
+  staggered-grid power-orthogonal reconstruction that reproduces the legacy candidate
+  invariants, and migration of the **3** legacy-invariant
+  `test_mode_eigensolver_physics.py` pins that a direct reroute turns red. (The
+  inhomogeneous operator's spectrum is real and physical-mode-bounded; no
+  spurious-high-`|beta|` filter is required — see the §3 retraction.)
 - **Microstrip / differential-pair (interior-PEC) hybrid gates deferred**: additionally
   need interior-PEC masking on the staggered operator. Fail-closed behavior
   (`NotImplementedError` on an inhomogeneous TEM cross-section) is unchanged.
@@ -177,5 +241,8 @@ discontinuity on a node), fundamental analytic `beta = 15.0354`.
   order-`1e-6` mirror-symmetry xfail would likely close once the component-staggered
   operator serves the inhomogeneous path — a bonus for the deferred integration.
 - **Legacy `_build_vector_operator_sparse` retained** as the inhomogeneous + magnetic
-  regime operator (not a duplicate); the uniform-isotropic production case no longer
-  reaches its defective centered branch.
+  regime operator (not a duplicate); the uniform non-magnetic production case no longer
+  reaches its defective centered branch. A **uniform magnetic** aperture does still hit
+  the legacy centered (uniform-isotropic) branch, which carries the correct eigenvalue
+  but the known checkerboard eigenvector — acceptable within the out-of-scope magnetic
+  regime, and superseded whenever the magnetic Yee derivation lands.

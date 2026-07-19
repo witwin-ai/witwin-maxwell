@@ -56,6 +56,32 @@ def _te10_ez_correlation(scene, frequency: float) -> float:
     return float(np.dot(ez_flat, ref_flat) / denom) if denom > 0 else 0.0
 
 
+def _te10_beta(scene, frequency: float) -> float:
+    """Propagation constant of the selected TE10 mode from the WavePort manifest."""
+    prepared = prepare_scene(scene)
+    manifest = resolve_waveport_run_manifest(prepared, mw.PortSweep(), (frequency,))
+    md = manifest.prepared_ports[0].mode_data[0][0]
+    return float(np.real(md["beta"]))
+
+
+@pytest.mark.parametrize("dx,tol_pct", [(0.05, 0.15), (0.02, 0.05), (0.0125, 0.02)])
+def test_waveguide_te10_beta_matches_analytic(dx: float, tol_pct: float) -> None:
+    """The selected TE10 beta matches the analytic sqrt(k0^2 - (pi/a)^2).
+
+    This pins the eigenvalue (not just the sin eigenvector) and converges toward the
+    continuum value as dx shrinks (0.127% -> 0.020% -> 0.008% at dx=0.05/0.02/0.0125).
+    A filled-guide variant of this assertion is what catches a vacuum-vs-filled
+    operator-eps routing regression at the integration layer.
+    """
+    fc = C0 / (2.0 * GUIDE_A)
+    frequency = 1.8 * fc
+    k0 = 2.0 * math.pi * frequency / C0
+    analytic = math.sqrt(k0 * k0 - (math.pi / GUIDE_A) ** 2)
+    beta = _te10_beta(rectangular_waveguide_scene(dx=dx, device="cuda"), frequency)
+    error_pct = abs(beta - analytic) / analytic * 100.0
+    assert error_pct <= tol_pct, f"dx={dx}: TE10 beta error {error_pct:.4f}% > {tol_pct}%"
+
+
 @pytest.mark.parametrize("dx", [0.05, 0.025, 0.02, 0.0125, 0.01])
 def test_waveguide_te10_eigenvector_is_sin(dx: float) -> None:
     """The selected TE10 Ez profile must be sin(pi y/a) (correlation >= 0.99).

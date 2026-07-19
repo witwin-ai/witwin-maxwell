@@ -948,10 +948,16 @@ def _solve_yee_transverse_vector_mode(
     eps_uu, eps_vv, eps_ww = _yee_stagger_eps_from_nodes(
         eps_node_planes, nu_cells=nu_cells, nv_cells=nv_cells
     )
-    if uniform:
-        operator_eps = (None, None, None)
-    else:
-        operator_eps = (eps_uu, eps_vv, eps_ww)
+    # Always assemble the operator with the aperture's actual per-component eps.
+    # ``uniform`` selects the symmetric eigensolve path (eigsh) and disables the
+    # structure-enforcing spurious/checkerboard filters; it does NOT mean vacuum.
+    # For a homogeneous (uniform) non-magnetic cross-section the operator equals
+    # the vacuum operator plus a scalar ``(eps - 1) * k0**2`` identity shift, so it
+    # stays exactly symmetric while returning the correct filled-guide beta
+    # (``beta**2 = eps * k0**2 - kc**2``). Passing the real eps here is what keeps a
+    # uniformly dielectric-filled aperture from collapsing onto the vacuum
+    # propagation constant.
+    operator_eps = (eps_uu, eps_vv, eps_ww)
     operator, meta = _build_yee_transverse_operator_sparse(
         nu_cells=nu_cells,
         nv_cells=nv_cells,
@@ -2823,13 +2829,24 @@ def _assemble_vector_mode_data(
         )
         use_dense = unknowns <= _FULL_VECTOR_DENSE_LIMIT
         uniform_isotropic = _is_uniform_isotropic_vector_plane(eps_planes, mu_planes)
-        if uniform_isotropic:
-            # A homogeneous non-magnetic aperture (the hollow metallic guide and
-            # free-space WavePorts) is solved on the Yee-staggered transverse
-            # full-vector operator: each transverse E component stays on its own Yee
-            # location, so the symmetric PEC walls yield a clean full-grid guided
-            # mode (E1b). Inhomogeneous / magnetic cross-sections keep the legacy
-            # diagonal-anisotropic operator (see the E1 acceptance doc for scope).
+        # The Yee-staggered operator eliminates Hz assuming mu = 1, so it is only
+        # valid for a NON-MAGNETIC cross-section. A uniformly magnetic aperture
+        # (uniform mu_r != 1) also classifies as uniform-isotropic, but must stay on
+        # the legacy diagonal-anisotropic operator, which threads mu through the
+        # eliminated longitudinal fields. Uniform *dielectric* filling (any uniform
+        # eps_r with mu = 1) is handled correctly by the Yee operator: it carries the
+        # true per-component eps, not vacuum.
+        nonmagnetic = bool(np.allclose(np.asarray(mu_planes[0]).reshape(-1)[0], 1.0)) and all(
+            bool(np.allclose(component, 1.0)) for component in mu_planes
+        )
+        if uniform_isotropic and nonmagnetic:
+            # A homogeneous non-magnetic aperture (the hollow metallic guide, a
+            # uniformly dielectric-filled guide, and free-space WavePorts) is solved
+            # on the Yee-staggered transverse full-vector operator: each transverse E
+            # component stays on its own Yee location, so the symmetric PEC walls
+            # yield a clean full-grid guided mode (E1b). Inhomogeneous / magnetic
+            # cross-sections keep the legacy diagonal-anisotropic operator (see the
+            # E1 acceptance doc for scope).
             beta_value, component_arrays, diagnostics = _solve_yee_transverse_vector_mode(
                 eps_planes,
                 k0=k0,

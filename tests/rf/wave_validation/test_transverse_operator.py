@@ -31,6 +31,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 from scipy import linalg as scipy_linalg
 from scipy.sparse import linalg as scipy_sparse_linalg
 from scipy.sparse.csgraph import connected_components
@@ -38,6 +39,7 @@ from scipy.sparse.csgraph import connected_components
 from witwin.maxwell.fdtd.excitation.modes import (
     _build_yee_transverse_operator_sparse,
     _split_yee_transverse_eigenvector,
+    _yee_stagger_eps_from_nodes,
     _yee_transverse_discrete_transverse_wavenumber as _ktilde,
 )
 
@@ -114,6 +116,45 @@ def test_operator_is_symmetric_for_homogeneous_cross_section() -> None:
     operator, _ = _homogeneous_operator()
     dense = operator.toarray()
     assert np.allclose(dense, dense.T, atol=1e-9)
+
+
+def _uniform_filled_operator(eps_r: float, *, nu=_NU_CELLS, nv=_NV_CELLS, du=_DU, dv=_DV, k0=_K0):
+    """Yee operator for a homogeneous cross-section uniformly filled with ``eps_r``."""
+    node = np.full((nu + 1, nv + 1), float(eps_r), dtype=np.float64)
+    eps_uu, eps_vv, eps_ww = _yee_stagger_eps_from_nodes((node, node, node), nu_cells=nu, nv_cells=nv)
+    return _build_yee_transverse_operator_sparse(
+        nu_cells=nu, nv_cells=nv, du=du, dv=dv, k0=k0, eps_uu=eps_uu, eps_vv=eps_vv, eps_ww=eps_ww
+    )
+
+
+def test_uniform_dielectric_fill_shifts_spectrum_and_stays_symmetric() -> None:
+    """A uniformly dielectric-filled guide carries the filled propagation constant.
+
+    Regression for the routing defect where a uniform eps_r != 1 aperture was solved
+    with the vacuum operator and returned the vacuum beta. For a homogeneous
+    cross-section the Yee operator equals the vacuum operator plus a scalar
+    ``(eps_r - 1) * k0**2`` identity shift, so (a) it stays exactly symmetric and
+    (b) every discrete eigenvalue is exactly its vacuum counterpart shifted by
+    ``(eps_r - 1) * k0**2``. The fundamental therefore sits at
+    ``beta**2 = eps_r * k0**2 - k~x**2 - k~y**2``, NOT the vacuum value.
+    """
+    eps_r = 4.0
+    vac_operator, _ = _homogeneous_operator()
+    filled_operator, _ = _uniform_filled_operator(eps_r)
+    dense = filled_operator.toarray()
+    assert np.allclose(dense, dense.T, atol=1e-9)
+
+    shift = (eps_r - 1.0) * _K0 * _K0
+    expected = vac_operator.toarray() + shift * np.eye(dense.shape[0])
+    assert np.allclose(dense, expected, atol=1e-9)
+
+    vac_beta_sq = float(np.linalg.eigvalsh(vac_operator.toarray()).max())
+    filled_beta_sq = float(np.linalg.eigvalsh(dense).max())
+    analytic = eps_r * _K0 * _K0 - _ktilde(1, _APERTURE_A, _DU) ** 2 - _ktilde(0, _APERTURE_B, _DV) ** 2
+    assert abs(filled_beta_sq - analytic) <= 1e-9 * abs(analytic)
+    # The filled beta must not collapse onto the vacuum value (the defect).
+    assert filled_beta_sq == pytest.approx(vac_beta_sq + shift, rel=1e-12)
+    assert abs(filled_beta_sq - vac_beta_sq) > 0.5 * shift
 
 
 def test_full_discrete_spectrum_matches_closed_form() -> None:
