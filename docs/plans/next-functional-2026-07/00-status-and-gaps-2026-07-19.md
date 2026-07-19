@@ -45,7 +45,7 @@ grade.
 | 10 | SAR | 0–3 + P4 slice / 0–5 | E1 (analytic/golden/brute-force-parity/grid-convergence; no external ref) | IEEE/IEC phantom benchmark, incident power density, VOP (P5), multi-GPU scale-out (P4) all deferred/fail-closed | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
 | 11 | Bioheat | — (dropped by owner) | — | plan dropped by owner 2026-07-19; plan file deleted (commit `4c521ab`) | Wave D — DROPPED (not implemented) |
 | 12 | Electrostatic / capacitance | 0–3 + P5 diff slice / 0–6 | E1–E2 (analytic/convergence/conservation/energy-identity/gradient; no external ref) | tensor eps + open boundary (P4), multi-GPU (P5), touchscreen/packaging workflow (P6) fail-closed/deferred | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
-| 13 | ESD / dielectric breakdown | 0–2 + P4 / 0–7 | E1 (analytic waveform/golden state-machine/energy-closure/dt-convergence; no external/calibrated ref) | P3 circuit-ESD co-sim, P5 multi-GPU/smooth surrogate, P6–7 calibration/standard workflow deferred | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
+| 13 | ESD / dielectric breakdown | 0–2 + P3 pre-bias slice + P4 / 0–7 | E1 (analytic waveform/golden state-machine/energy-closure/dt-convergence; no external/calibrated ref) | P3 circuit-ESD co-sim, P5 multi-GPU/smooth surrogate, P6–7 calibration/standard workflow deferred | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
 
 Route status (S0–S7) and owner decision points are in the final two sections.
 
@@ -460,9 +460,15 @@ below-threshold six-field bitwise parity, event-log determinism, structure-
 overlap last-writer-wins, zero-cost-when-unused). Falsifications recorded per
 stage.
 
-**Not delivered / open gaps:** Phase 3 (electrostatic pre-bias + system
-circuit-ESD co-simulation) NOT delivered — injection uses the additive
-current-source path, not a source-impedance/discharge-gun network. Phase 5
+**Not delivered / open gaps:** Phase 3 is PARTIALLY delivered post-snapshot:
+the electrostatic pre-bias slice landed in commit `d180125`
+(`ElectrostaticInitialCondition.from_result(...)` node-interpolated exact
+discrete-gradient seed — Yee curl ~1e-15, PEC-plate interior drift 0.0 over 300
+no-source steps — plus Gauss-residual gate and a prebias+waveform+stress+
+breakdown cross-feature e2e; `docs/assessments/wave-d-integration-acceptance-2026-07-19.md`).
+System circuit-ESD co-simulation remains NOT delivered — injection uses the
+additive current-source path, not a source-impedance/discharge-gun network;
+MNA/SPICE coupling through `TerminalPort` is recorded untested. Phase 5
 (multi-GPU, scale-out, trainable smooth surrogate) fail-closed. Phases 6–7
 (surface/random/thermal feedback, gun/system calibrated-standard workflow) not
 started. Decision-6 closed-box global energy balance explicitly deferred
@@ -518,13 +524,14 @@ regression before it is checked off.
   reuses 01's `PowerLossData` contract (no duplicate data model), per the S7
   precondition. **Still open per plan** — 12: tensor eps / open boundary (P4),
   multi-GPU (P5), touchscreen workflow (P6); 10: IEEE/IEC phantom benchmark,
-  incident power density, VOP + multi-GPU (P5); 13: P3 circuit-ESD co-simulation,
+  incident power density, VOP + multi-GPU (P5); 13: P3 circuit-ESD co-simulation (pre-bias slice delivered, `d180125`),
   P5 multi-GPU/smooth surrogate, P6–7 calibration/standard workflow. All three
   are E1–E2 (no external reference), so none is `completed`.
   **Capability-guard census budget history** (`docs/reference/fdtd-capability-guard-census.md`,
-  `CAPABILITY_GUARD_BUDGET` in `tests/api/public/test_guard_census.py`, now 172):
+  `CAPABILITY_GUARD_BUDGET` in `tests/api/public/test_guard_census.py`, now 176):
   `144 → 153` (plan 12 electrostatics merge) `→ 168` (plan 13 Phase-4 breakdown
-  merge, +15 guards) `→ 172` (plan 10 SAR merge reconciliation, +4 guards); ESD
+  merge, +15 guards) `→ 172` (plan 10 SAR merge reconciliation, +4 guards)
+  `→ 176` (plan 13 Phase-3 pre-bias slice, commit `d180125`, +4 guards); ESD
   Phases 1–2 added no capability guards (local `ValueError`/`TypeError` only).
 
 **Freeze rules restated:** the S0.2 rule that no Wave C/D new-physics
