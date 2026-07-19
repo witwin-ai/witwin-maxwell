@@ -1,0 +1,721 @@
+{
+  "aa_calibration": {
+    "criterion": "two-sided 95% CI of base-vs-base regression pct straddles 0; half-width is the measurement floor",
+    "mad_ratio": 0.00066506614822337,
+    "one_sided_ci95_upper_ratio": 1.0018539119483523,
+    "samples": [
+      1.0026636826531796,
+      0.995495884001112,
+      1.0038200014122,
+      1.0020247971167988,
+      0.998898960824456,
+      1.000823549792583,
+      1.0020809963639281,
+      1.0011431443347514,
+      1.0020830487310668,
+      1.0010152838278608,
+      1.0018688877364395,
+      1.0010001434271212,
+      1.001962955428292,
+      1.0006686044619297,
+      1.0023399970425972,
+      1.0008723331662357,
+      1.002210358052889,
+      1.0007131645198672,
+      1.0021391898705247,
+      1.0007725554905933,
+      1.0022191170628663,
+      1.0008583499821613
+    ],
+    "t95_df": 1.720742902811878,
+    "two_sided": {
+      "ci_high_pct": 0.19782022811636135,
+      "ci_low_pct": 0.0537707291513992,
+      "half_width_pct": 0.07202474948248107,
+      "mean_pct": 0.12579547863388027,
+      "rounds": 22,
+      "straddles_zero": false
+    }
+  },
+  "audit_step": "S2.3",
+  "clock_snapshots": {
+    "after": {
+      "current": {
+        "Graphics": "1890 MHz",
+        "Memory": "7601 MHz",
+        "SM": "1890 MHz",
+        "Video": "1650 MHz"
+      },
+      "max": {
+        "Graphics": "2100 MHz",
+        "Memory": "8001 MHz",
+        "SM": "2100 MHz"
+      }
+    },
+    "before": {
+      "current": {
+        "Graphics": "210 MHz",
+        "Memory": "405 MHz",
+        "SM": "210 MHz",
+        "Video": "555 MHz"
+      },
+      "max": {
+        "Graphics": "2100 MHz",
+        "Memory": "8001 MHz",
+        "SM": "2100 MHz"
+      }
+    },
+    "cpu_governor": "performance"
+  },
+  "commit": "3aca95f3803e0fd815f9eabef7eda7cc06178d5a",
+  "environment": {
+    "compute_capability": "8.6",
+    "cuda_runtime": "13.0",
+    "cuda_visible_devices": "0",
+    "device_name": "NVIDIA RTX A6000",
+    "numactl": "--cpunodebind=0 --membind=0",
+    "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "torch": "2.13.0+cu130"
+  },
+  "exclusive_window": {
+    "foreign_compute_apps_after": [],
+    "foreign_compute_apps_before": [],
+    "pinning": "numactl --cpunodebind=0 --membind=0, CUDA_VISIBLE_DEVICES=0, single measurement process",
+    "verified": true
+  },
+  "falsification": {
+    "base_ms_per_step": 4.857715606689453,
+    "description": "Synthetic port-only per-step overhead injected via monkeypatch of apply_port_runtimes (fires only when the scene has port runtimes, so the base reference stays clean). Same 27M-cell grid and gate as the primary run.",
+    "gate_detected_injected_regression": true,
+    "inject_overhead_us_param": 120.0,
+    "injected_single_port_add_ms": 0.6686386557186346,
+    "injected_single_port_ci95_upper_pct": 13.792181825698012,
+    "injected_single_port_mean_pct": 13.730230313389713,
+    "injected_single_port_passed": false,
+    "one_port_ms_per_step": 5.526354262408088,
+    "reference_uninjected_single_port_ci95_upper_pct": 1.568656329662521,
+    "reference_uninjected_single_port_mean_pct": 1.5373770236481343,
+    "reference_uninjected_single_port_passed": true,
+    "rounds": 6
+  },
+  "governing_docs": [
+    "docs/assessments/next-functional-audit-2026-07-18.md (step S2)",
+    "docs/assessments/port-hot-path-perf-s2-progress-2026-07-18.md",
+    "docs/plans/next-functional-2026-07/01-rf-engineering-workflow.md (S9.4)"
+  ],
+  "grid_sweep": {
+    "note": "Per-step overhead vs grid size, port geometry held identical (fixed 5 mm cell, domain scaled). Shows the crossover: the port's ~0.07-0.44 ms fixed per-step cost is a large fraction of a bare Yee step on small/medium grids and negligible on large grids. Sweep rounds are 3-4 (characterization); the primary gate above is the high-round verdict.",
+    "rows": [
+      {
+        "base_ms_per_step": 0.15890946524483818,
+        "grid_cells_per_axis": [
+          60,
+          24,
+          24
+        ],
+        "one_port_ms_per_step": 0.593659657069615,
+        "per_extra_port_add_ms": 0.3900081634521484,
+        "per_extra_port_ci95_upper_pct": 72.31500288356368,
+        "per_extra_port_mean_pct": 65.54710765163072,
+        "per_extra_port_passed": false,
+        "rounds": 4,
+        "single_port_add_ms": 0.4347501918247768,
+        "single_port_ci95_upper_pct": 289.7424974872748,
+        "single_port_mean_pct": 275.0071433797867,
+        "single_port_passed": false,
+        "total_cells": 34560,
+        "two_port_ms_per_step": 0.9836678205217634
+      },
+      {
+        "base_ms_per_step": 0.15821802139282226,
+        "grid_cells_per_axis": [
+          60,
+          48,
+          48
+        ],
+        "one_port_ms_per_step": 0.5876178850446429,
+        "per_extra_port_add_ms": 0.3991576712472099,
+        "per_extra_port_ci95_upper_pct": 68.82309891065681,
+        "per_extra_port_mean_pct": 67.40843588059859,
+        "per_extra_port_passed": false,
+        "rounds": 4,
+        "single_port_add_ms": 0.4293998636518206,
+        "single_port_ci95_upper_pct": 276.70203842059067,
+        "single_port_mean_pct": 271.26703501755634,
+        "single_port_passed": false,
+        "total_cells": 138240,
+        "two_port_ms_per_step": 0.9867755562918528
+      },
+      {
+        "base_ms_per_step": 0.2766890444074358,
+        "grid_cells_per_axis": [
+          60,
+          96,
+          96
+        ],
+        "one_port_ms_per_step": 0.5941173226492745,
+        "per_extra_port_add_ms": 0.3987803431919643,
+        "per_extra_port_ci95_upper_pct": 72.72357957639093,
+        "per_extra_port_mean_pct": 68.13481755354616,
+        "per_extra_port_passed": false,
+        "rounds": 4,
+        "single_port_add_ms": 0.3174282782418387,
+        "single_port_ci95_upper_pct": 117.28557623653471,
+        "single_port_mean_pct": 113.60177729842538,
+        "single_port_passed": false,
+        "total_cells": 552960,
+        "two_port_ms_per_step": 0.9928976658412388
+      },
+      {
+        "base_ms_per_step": 0.36626102992466514,
+        "grid_cells_per_axis": [
+          120,
+          120,
+          120
+        ],
+        "one_port_ms_per_step": 0.6236533900669643,
+        "per_extra_port_add_ms": 0.3990308489118304,
+        "per_extra_port_ci95_upper_pct": 66.42623975890456,
+        "per_extra_port_mean_pct": 64.55250532357452,
+        "per_extra_port_passed": false,
+        "rounds": 4,
+        "single_port_add_ms": 0.25739236014229916,
+        "single_port_ci95_upper_pct": 71.24415151458103,
+        "single_port_mean_pct": 69.77557378131766,
+        "single_port_passed": false,
+        "total_cells": 1728000,
+        "two_port_ms_per_step": 1.0226842389787947
+      },
+      {
+        "base_ms_per_step": 1.3342419978550502,
+        "grid_cells_per_axis": [
+          180,
+          192,
+          192
+        ],
+        "one_port_ms_per_step": 1.4070040893554687,
+        "per_extra_port_add_ms": 0.0712356131417411,
+        "per_extra_port_ci95_upper_pct": 5.232461575557745,
+        "per_extra_port_mean_pct": 4.8819146413342285,
+        "per_extra_port_passed": false,
+        "rounds": 4,
+        "single_port_add_ms": 0.07276209150041857,
+        "single_port_ci95_upper_pct": 5.830531964161434,
+        "single_port_mean_pct": 5.47409009570885,
+        "single_port_passed": false,
+        "total_cells": 6635520,
+        "two_port_ms_per_step": 1.4782397024972098
+      },
+      {
+        "base_ms_per_step": 2.5155692138671872,
+        "grid_cells_per_axis": [
+          240,
+          240,
+          240
+        ],
+        "one_port_ms_per_step": 2.5882830810546875,
+        "per_extra_port_add_ms": 0.06919787597656235,
+        "per_extra_port_ci95_upper_pct": 2.8596031553398182,
+        "per_extra_port_mean_pct": 2.7206916673358172,
+        "per_extra_port_passed": false,
+        "rounds": 3,
+        "single_port_add_ms": 0.07271386718750028,
+        "single_port_ci95_upper_pct": 2.9818627455769464,
+        "single_port_mean_pct": 2.921482451824109,
+        "single_port_passed": true,
+        "total_cells": 13824000,
+        "two_port_ms_per_step": 2.65748095703125
+      },
+      {
+        "base_ms_per_step": 4.844748046875,
+        "grid_cells_per_axis": [
+          300,
+          300,
+          300
+        ],
+        "one_port_ms_per_step": 4.921704833984375,
+        "per_extra_port_add_ms": 0.07426611328124988,
+        "per_extra_port_ci95_upper_pct": 1.6637235839640052,
+        "per_extra_port_mean_pct": 1.486007795767863,
+        "per_extra_port_passed": true,
+        "rounds": 3,
+        "single_port_add_ms": 0.07695678710937504,
+        "single_port_ci95_upper_pct": 1.6238613063568996,
+        "single_port_mean_pct": 1.5389567274107785,
+        "single_port_passed": true,
+        "total_cells": 27000000,
+        "two_port_ms_per_step": 4.995970947265625
+      },
+      {
+        "base_ms_per_step": 7.846286254882813,
+        "grid_cells_per_axis": [
+          360,
+          360,
+          360
+        ],
+        "one_port_ms_per_step": 7.91386083984375,
+        "per_extra_port_add_ms": 0.0671381835937499,
+        "per_extra_port_ci95_upper_pct": 1.103447010474623,
+        "per_extra_port_mean_pct": 0.9285067719869922,
+        "per_extra_port_passed": true,
+        "rounds": 3,
+        "single_port_add_ms": 0.06757458496093705,
+        "single_port_ci95_upper_pct": 1.0805275588964713,
+        "single_port_mean_pct": 0.908679864651285,
+        "single_port_passed": true,
+        "total_cells": 46656000,
+        "two_port_ms_per_step": 7.9809990234375
+      }
+    ]
+  },
+  "harness": "tests/rf/performance/measure_port_overhead_s2b.py",
+  "kind": "rf_port_overhead_s2b_measurement_artifact",
+  "method": "two-point per-step subtraction (t_hi - t_lo)/(steps_hi - steps_lo), CUDA-event timed full Simulation.run(), eager stepping (cuda_graph=False), palindromic ABBA per-round ordering, one process on one CUDA device; variance-aware 95% CI upper-bound gate",
+  "primary_gate": {
+    "aa_calibration": {
+      "criterion": "two-sided 95% CI of base-vs-base regression pct straddles 0; half-width is the measurement floor",
+      "mad_ratio": 0.00066506614822337,
+      "one_sided_ci95_upper_ratio": 1.0018539119483523,
+      "samples": [
+        1.0026636826531796,
+        0.995495884001112,
+        1.0038200014122,
+        1.0020247971167988,
+        0.998898960824456,
+        1.000823549792583,
+        1.0020809963639281,
+        1.0011431443347514,
+        1.0020830487310668,
+        1.0010152838278608,
+        1.0018688877364395,
+        1.0010001434271212,
+        1.001962955428292,
+        1.0006686044619297,
+        1.0023399970425972,
+        1.0008723331662357,
+        1.002210358052889,
+        1.0007131645198672,
+        1.0021391898705247,
+        1.0007725554905933,
+        1.0022191170628663,
+        1.0008583499821613
+      ],
+      "t95_df": 1.720742902811878,
+      "two_sided": {
+        "ci_high_pct": 0.19782022811636135,
+        "ci_low_pct": 0.0537707291513992,
+        "half_width_pct": 0.07202474948248107,
+        "mean_pct": 0.12579547863388027,
+        "rounds": 22,
+        "straddles_zero": false
+      }
+    },
+    "configuration": {
+      "cell_size_m": 0.005,
+      "cuda_graph": false,
+      "device": "cuda",
+      "domain_bounds": [
+        [
+          -0.75,
+          0.75
+        ],
+        [
+          -0.75,
+          0.75
+        ],
+        [
+          -0.75,
+          0.75
+        ]
+      ],
+      "frequency_count": 181,
+      "full_field_dft": false,
+      "grid_cells_per_axis": [
+        300,
+        300,
+        300
+      ],
+      "inject_overhead_us": 0.0,
+      "rounds": 22,
+      "steps_hi": 900,
+      "steps_lo": 220,
+      "total_cells": 27000000,
+      "warmup_rounds": 2
+    },
+    "gates": {
+      "per_extra_passive_port_lt_2pct": {
+        "ci95_upper_pct": 1.5308958375765513,
+        "ci95_upper_ratio": 1.0153089583757655,
+        "mad_ratio": 0.0011829887738845635,
+        "mean_pct": 1.4589853745948345,
+        "mean_ratio": 1.0145898537459483,
+        "median_ratio": 1.014610798044504,
+        "passed": true,
+        "rounds": 22,
+        "samples": [
+          1.0144335205268533,
+          1.0144444258311753,
+          1.0218505421402324,
+          1.0161341500309795,
+          1.0151749070693354,
+          1.0129535790472748,
+          1.015466227917286,
+          1.0132258767659987,
+          1.0155918543137679,
+          1.0131278338534173,
+          1.015270341249697,
+          1.0131039367330268,
+          1.015102600945341,
+          1.0131444471064475,
+          1.0148623227631204,
+          1.0128663543218654,
+          1.015271710844565,
+          1.0130651804903137,
+          1.0152294751773234,
+          1.012979072949777,
+          1.014777170257833,
+          1.0129012520752338
+        ],
+        "target": "each additional passive port < 2% ms/step",
+        "target_pct": 2.0000000000000018,
+        "target_ratio": 1.02
+      },
+      "single_port_lt_5pct": {
+        "ci95_upper_pct": 1.568656329662521,
+        "ci95_upper_ratio": 1.0156865632966252,
+        "mad_ratio": 0.0006054632976333352,
+        "mean_pct": 1.5373770236481343,
+        "mean_ratio": 1.0153737702364813,
+        "median_ratio": 1.015370287176401,
+        "passed": true,
+        "rounds": 22,
+        "samples": [
+          1.0163677812079706,
+          1.0148633882844544,
+          1.012986014821124,
+          1.0147606388130332,
+          1.0165216413719718,
+          1.0162204216662987,
+          1.0149490975474296,
+          1.015945324574344,
+          1.014769008944502,
+          1.0162705730069275,
+          1.0147903745518647,
+          1.0160402087222578,
+          1.0148041479307504,
+          1.0157914768053724,
+          1.014742658595644,
+          1.016058578991224,
+          1.0147499578625074,
+          1.0159363872043343,
+          1.0148233873671617,
+          1.0159250540359073,
+          1.0148399108223745,
+          1.0160669120751373
+        ],
+        "target": "one passive LumpedPort + 181-freq observer < 5% ms/step vs no-port",
+        "target_pct": 5.000000000000004,
+        "target_ratio": 1.05
+      }
+    },
+    "grid": {
+      "cell_size_m": 0.005,
+      "grid_cells_per_axis": [
+        300,
+        300,
+        300
+      ],
+      "rationale": "300^3 = 27,000,000-cell uniform grid at 5 mm/cell (15 wavelengths at 3 GHz) -- a representative large RF full-wave grid. The port cost is a roughly fixed per-step launch cost (~0.07 ms/port); the base per-step cost scales with cell count, so the overhead ratio is grid-dependent and this is the regime where a representative full-wave grid places it.",
+      "total_cells": 27000000
+    },
+    "host_state": {
+      "after": {
+        "clocks": [
+          "0, NVIDIA RTX A6000, 1680 MHz, 2100 MHz, 7601 MHz, Enabled",
+          "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled"
+        ],
+        "compute_apps": [
+          "2862405, python"
+        ],
+        "cpu_governor": "performance",
+        "utilization": [
+          "0, 100 %, 28154 MiB, 87",
+          "1, 0 %, 661 MiB, 44"
+        ]
+      },
+      "before": {
+        "clocks": [
+          "0, NVIDIA RTX A6000, 1815 MHz, 2100 MHz, 7601 MHz, Enabled",
+          "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled"
+        ],
+        "compute_apps": [
+          "2862405, python"
+        ],
+        "cpu_governor": "performance",
+        "utilization": [
+          "0, 100 %, 21680 MiB, 78",
+          "1, 0 %, 661 MiB, 44"
+        ]
+      },
+      "exclusive_window_verified": true,
+      "foreign_compute_apps_after": [],
+      "foreign_compute_apps_before": []
+    },
+    "rounds_detail": [
+      {
+        "aa_ratio": 1.0026636826531796,
+        "base_a_ms_per_step": 4.836299582088695,
+        "base_b_ms_per_step": 4.849181949391085,
+        "base_mean_ms_per_step": 4.84274076573989,
+        "one_ms_per_step": 4.922005687040441,
+        "per_extra_port_ratio": 1.0144335205268533,
+        "round": 0,
+        "single_port_ratio": 1.0163677812079706,
+        "two_ms_per_step": 4.993047557157628
+      },
+      {
+        "aa_ratio": 0.995495884001112,
+        "base_a_ms_per_step": 4.878748994715074,
+        "base_b_ms_per_step": 4.856774543313419,
+        "base_mean_ms_per_step": 4.867761769014246,
+        "one_ms_per_step": 4.940113202263327,
+        "per_extra_port_ratio": 1.0144444258311753,
+        "round": 1,
+        "single_port_ratio": 1.0148633882844544,
+        "two_ms_per_step": 5.0114703010110295
+      },
+      {
+        "aa_ratio": 1.0038200014122,
+        "base_a_ms_per_step": 4.855883430032169,
+        "base_b_ms_per_step": 4.874432911592371,
+        "base_mean_ms_per_step": 4.86515817081227,
+        "one_ms_per_step": 4.9283371869255514,
+        "per_extra_port_ratio": 1.0218505421402324,
+        "round": 2,
+        "single_port_ratio": 1.012986014821124,
+        "two_ms_per_step": 5.036024026309742
+      },
+      {
+        "aa_ratio": 1.0020247971167988,
+        "base_a_ms_per_step": 4.860605217428768,
+        "base_b_ms_per_step": 4.870446956858915,
+        "base_mean_ms_per_step": 4.8655260871438415,
+        "one_ms_per_step": 4.937344360351562,
+        "per_extra_port_ratio": 1.0161341500309795,
+        "round": 3,
+        "single_port_ratio": 1.0147606388130332,
+        "two_ms_per_step": 5.017004215016085
+      },
+      {
+        "aa_ratio": 0.998898960824456,
+        "base_a_ms_per_step": 4.86891066607307,
+        "base_b_ms_per_step": 4.8635498046875,
+        "base_mean_ms_per_step": 4.866230235380285,
+        "one_ms_per_step": 4.946628346162684,
+        "per_extra_port_ratio": 1.0151749070693354,
+        "round": 4,
+        "single_port_ratio": 1.0165216413719718,
+        "two_ms_per_step": 5.021692971622243
+      },
+      {
+        "aa_ratio": 1.000823549792583,
+        "base_a_ms_per_step": 4.858932136086857,
+        "base_b_ms_per_step": 4.862933708639706,
+        "base_mean_ms_per_step": 4.860932922363281,
+        "one_ms_per_step": 4.939779304055607,
+        "per_extra_port_ratio": 1.0129535790472748,
+        "round": 5,
+        "single_port_ratio": 1.0162204216662987,
+        "two_ms_per_step": 5.0037671257467835
+      },
+      {
+        "aa_ratio": 1.0020809963639281,
+        "base_a_ms_per_step": 4.866413610121783,
+        "base_b_ms_per_step": 4.876540599149816,
+        "base_mean_ms_per_step": 4.871477104635799,
+        "one_ms_per_step": 4.94430129107307,
+        "per_extra_port_ratio": 1.015466227917286,
+        "round": 6,
+        "single_port_ratio": 1.0149490975474296,
+        "two_ms_per_step": 5.020770981732537
+      },
+      {
+        "aa_ratio": 1.0011431443347514,
+        "base_a_ms_per_step": 4.856975959329044,
+        "base_b_ms_per_step": 4.862528183880975,
+        "base_mean_ms_per_step": 4.859752071605009,
+        "one_ms_per_step": 4.9372423957375915,
+        "per_extra_port_ratio": 1.0132258767659987,
+        "round": 7,
+        "single_port_ratio": 1.015945324574344,
+        "two_ms_per_step": 5.002541755227481
+      },
+      {
+        "aa_ratio": 1.0020830487310668,
+        "base_a_ms_per_step": 4.86472132065717,
+        "base_b_ms_per_step": 4.874854772231158,
+        "base_mean_ms_per_step": 4.869788046444164,
+        "one_ms_per_step": 4.941709989659927,
+        "per_extra_port_ratio": 1.0155918543137679,
+        "round": 8,
+        "single_port_ratio": 1.014769008944502,
+        "two_ms_per_step": 5.018760411879596
+      },
+      {
+        "aa_ratio": 1.0010152838278608,
+        "base_a_ms_per_step": 4.855456004423254,
+        "base_b_ms_per_step": 4.860385670381434,
+        "base_mean_ms_per_step": 4.857920837402344,
+        "one_ms_per_step": 4.936961993049173,
+        "per_extra_port_ratio": 1.0131278338534173,
+        "round": 9,
+        "single_port_ratio": 1.0162705730069275,
+        "two_ms_per_step": 5.001773609834559
+      },
+      {
+        "aa_ratio": 1.0018688877364395,
+        "base_a_ms_per_step": 4.863433837890625,
+        "base_b_ms_per_step": 4.872523049747243,
+        "base_mean_ms_per_step": 4.867978443818934,
+        "one_ms_per_step": 4.93997766831342,
+        "per_extra_port_ratio": 1.015270341249697,
+        "round": 10,
+        "single_port_ratio": 1.0147903745518647,
+        "two_ms_per_step": 5.015412813074448
+      },
+      {
+        "aa_ratio": 1.0010001434271212,
+        "base_a_ms_per_step": 4.853752944048713,
+        "base_b_ms_per_step": 4.858607393152574,
+        "base_mean_ms_per_step": 4.856180168600643,
+        "one_ms_per_step": 4.934074312097886,
+        "per_extra_port_ratio": 1.0131039367330268,
+        "round": 11,
+        "single_port_ratio": 1.0160402087222578,
+        "two_ms_per_step": 4.998730109719669
+      },
+      {
+        "aa_ratio": 1.001962955428292,
+        "base_a_ms_per_step": 4.862109015969669,
+        "base_b_ms_per_step": 4.871653119255515,
+        "base_mean_ms_per_step": 4.866881067612592,
+        "one_ms_per_step": 4.938931094898897,
+        "per_extra_port_ratio": 1.015102600945341,
+        "round": 12,
+        "single_port_ratio": 1.0148041479307504,
+        "two_ms_per_step": 5.0135218003216915
+      },
+      {
+        "aa_ratio": 1.0006686044619297,
+        "base_a_ms_per_step": 4.853535730698529,
+        "base_b_ms_per_step": 4.85678082634421,
+        "base_mean_ms_per_step": 4.855158278521369,
+        "one_ms_per_step": 4.931828397863051,
+        "per_extra_port_ratio": 1.0131444471064475,
+        "round": 13,
+        "single_port_ratio": 1.0157914768053724,
+        "two_ms_per_step": 4.996654555376838
+      },
+      {
+        "aa_ratio": 1.0023399970425972,
+        "base_a_ms_per_step": 4.8608779009650736,
+        "base_b_ms_per_step": 4.872252340877758,
+        "base_mean_ms_per_step": 4.866565120921416,
+        "one_ms_per_step": 4.938311229032629,
+        "per_extra_port_ratio": 1.0148623227631204,
+        "round": 14,
+        "single_port_ratio": 1.014742658595644,
+        "two_ms_per_step": 5.011706004423254
+      },
+      {
+        "aa_ratio": 1.0008723331662357,
+        "base_a_ms_per_step": 4.852672442267923,
+        "base_b_ms_per_step": 4.8569055893841915,
+        "base_mean_ms_per_step": 4.854789015826057,
+        "one_ms_per_step": 4.932750028722427,
+        "per_extra_port_ratio": 1.0128663543218654,
+        "round": 15,
+        "single_port_ratio": 1.016058578991224,
+        "two_ms_per_step": 4.996216538373162
+      },
+      {
+        "aa_ratio": 1.002210358052889,
+        "base_a_ms_per_step": 4.860337021771599,
+        "base_b_ms_per_step": 4.871080106847426,
+        "base_mean_ms_per_step": 4.865708564309513,
+        "one_ms_per_step": 4.93747756060432,
+        "per_extra_port_ratio": 1.015271710844565,
+        "round": 16,
+        "single_port_ratio": 1.0147499578625074,
+        "two_ms_per_step": 5.012881290211397
+      },
+      {
+        "aa_ratio": 1.0007131645198672,
+        "base_a_ms_per_step": 4.852839391371783,
+        "base_b_ms_per_step": 4.8563002642463236,
+        "base_mean_ms_per_step": 4.854569827809053,
+        "one_ms_per_step": 4.931934132295496,
+        "per_extra_port_ratio": 1.0130651804903137,
+        "round": 17,
+        "single_port_ratio": 1.0159363872043343,
+        "two_ms_per_step": 4.996370741900276
+      },
+      {
+        "aa_ratio": 1.0021391898705247,
+        "base_a_ms_per_step": 4.860409545898437,
+        "base_b_ms_per_step": 4.870806884765625,
+        "base_mean_ms_per_step": 4.865608215332031,
+        "one_ms_per_step": 4.937733010684743,
+        "per_extra_port_ratio": 1.0152294751773234,
+        "round": 18,
+        "single_port_ratio": 1.0148233873671617,
+        "two_ms_per_step": 5.012932093003217
+      },
+      {
+        "aa_ratio": 1.0007725554905933,
+        "base_a_ms_per_step": 4.852486644071691,
+        "base_b_ms_per_step": 4.856235459271599,
+        "base_mean_ms_per_step": 4.8543610516716456,
+        "one_ms_per_step": 4.93166701372932,
+        "per_extra_port_ratio": 1.012979072949777,
+        "round": 19,
+        "single_port_ratio": 1.0159250540359073,
+        "two_ms_per_step": 4.995675479664522
+      },
+      {
+        "aa_ratio": 1.0022191170628663,
+        "base_a_ms_per_step": 4.8605676987591915,
+        "base_b_ms_per_step": 4.871353867474724,
+        "base_mean_ms_per_step": 4.865960783116957,
+        "one_ms_per_step": 4.938171207203585,
+        "per_extra_port_ratio": 1.014777170257833,
+        "round": 20,
+        "single_port_ratio": 1.0148399108223745,
+        "two_ms_per_step": 5.011143403894761
+      },
+      {
+        "aa_ratio": 1.0008583499821613,
+        "base_a_ms_per_step": 4.852462230009191,
+        "base_b_ms_per_step": 4.856627340877758,
+        "base_mean_ms_per_step": 4.8545447854434745,
+        "one_ms_per_step": 4.932542329676011,
+        "per_extra_port_ratio": 1.0129012520752338,
+        "round": 21,
+        "single_port_ratio": 1.0160669120751373,
+        "two_ms_per_step": 4.996178301642923
+      }
+    ]
+  },
+  "schema_version": 1,
+  "targets": {
+    "acceptance": "one-sided 95% CI UPPER BOUND of paired per-round overhead < target (variance-aware)",
+    "per_extra_passive_port_lt_2pct": "each additional passive port < 2% ms/step on a representative grid (plan 01 S9.4)",
+    "single_port_lt_5pct": "one passive LumpedPort + 181-freq observer < 5% ms/step vs same-grid base FDTD (plan 01 S9.4)"
+  },
+  "variance_gate": "tests/support/perf_variance_gate.py (one-sided 95% CI upper bound, exact Student-t)",
+  "verdict": {
+    "per_extra_passive_port_lt_2pct": true,
+    "single_port_lt_5pct": true
+  }
+}

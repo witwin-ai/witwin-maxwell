@@ -20,7 +20,7 @@ op-count evidence and the variance-gate machinery it will consume.
 |---|---|---|---|
 | S2.1 harness (reproducible baseline artifact) | `tests/rf/performance/profile_port_hot_path.py` + `docs/assessments/port-hot-path-op-inventory-2026-07-18.json`; op-count ceilings in `tests/rf/performance/test_port_hot_path_op_count.py` and `tests/rf/lumped/test_fdtd_port_end_to_end.py` (class `perf-opcount`) | this branch (`codex/port-perf-s2`) | done (op-count only) |
 | S2.2 fix disposition (SeriesRLC fast path; weight-table precondition) | SeriesRLC schedule 62/12/16 → 25/0/3 per step; launches frequency-count independent ⇒ weight-table precondition false; diagnostics default-off pinned by `tests/rf/performance/test_port_energy_diagnostics_default_off.py` | fast path landed pre-branch at `b70ee2a` | landed pre-branch; no new fix owed |
-| S2.3 measurement (timed `<5%` / `<2%` gate) | variance-aware gate machinery `tests/support/perf_variance_gate.py` + unit tests `tests/rf/performance/test_perf_variance_gate.py` (class `perf-statistical`); no wall-clock number asserted this round | this branch (machinery only) | **deferred to S2b exclusive-GPU window** |
+| S2.3 measurement (timed `<5%` / `<2%` gate) | `tests/rf/performance/measure_port_overhead_s2b.py` + artifact `docs/assessments/port-perf-s2b-measurement-2026-07-18.json`; 22-round variance-aware gate on a representative 27 M-cell grid: single-port CI95-upper **1.57 % < 5 %**, per-extra-passive-port CI95-upper **1.53 % < 2 %**; A/A floor half-width 0.07 %; injected-overhead falsification detected (13.8 %). Machinery `tests/support/perf_variance_gate.py` + `tests/rf/performance/test_perf_variance_gate.py` (class `perf-statistical`) | `codex/port-perf-s2b` | **measured (PASS at representative grid; grid-dependent — see §S2.3 measured)** |
 
 ## S2.1 — reproducible baseline artifact
 
@@ -87,9 +87,75 @@ Op-count ceilings for the port hot path are gated by
 per-additional-port marginal cost, SeriesRLC fast-path `allocs == 0`), with a
 recorded falsification against the eb9258b schedule.
 
-## For the S2b exclusive window
+## S2.3 — measured (S2b exclusive window, 2026-07-19)
 
-Measure the paired baseline/candidate step time for (1 port + 181 freqs) and the
-per-extra-passive-port increment over several ABBA rounds, feed the per-round
-ratios to `evaluate_regression_gate(..., target_ratio=1.05 / 1.02)`, and assert
-`RegressionGateResult.passed`. Do not assert a single-point median.
+Run in an exclusive single-GPU window (RTX A6000, `cuda:0`, `numactl
+--cpunodebind=0 --membind=0`, one measurement process, `nvidia-smi` compute-apps
+verified empty before and after every measured session). Harness
+`tests/rf/performance/measure_port_overhead_s2b.py`; artifact
+`docs/assessments/port-perf-s2b-measurement-2026-07-18.json`. Per-step time is
+isolated by two-point subtraction `(t_hi - t_lo)/(steps_hi - steps_lo)` of
+CUDA-event-timed full `Simulation.run()` calls (cancels one-time prepare /
+result-extraction cost), eager stepping (`cuda_graph=False`, the audit's
+outside-the-graph regime), palindromic ABBA per-round ordering, paired per-round
+ratios fed to `evaluate_regression_gate(target_ratio=1.05 / 1.02)`.
+
+The comparison isolates the port: the base is a genuine bare-FDTD stepping
+reference (source + Yee update + CPML + one 1-frequency point-monitor kernel; a
+multi-frequency point monitor or the auto full-field DFT that a no-port
+multi-frequency run enables would otherwise dominate the base and flatter the
+ratio). Port configs carry the port and its 181-frequency observer, no monitor.
+
+**Primary gate — representative 27,000,000-cell grid (300³ @ 5 mm, 22 rounds): PASS.**
+
+| Gate | Target | Mean | CI95 upper | Verdict |
+|---|---|---|---|---|
+| single passive LumpedPort + 181-freq observer vs no-port | < 5 % | 1.54 % | **1.57 %** | PASS |
+| each additional passive port | < 2 % | 1.46 % | **1.53 %** | PASS |
+
+A/A calibration (base-vs-base, same 22 rounds): two-sided 95 % CI mean +0.126 %,
+half-width **0.072 %** — the measurement floor, ~40× below the target margins and
+below the previously cited ~0.5 % host floor. It *narrowly excludes zero* (a
++0.13 % residual ordering systematic between the two base blocks); recorded
+honestly. It is smaller than the tightest gate margin (per-extra-port: 2.00 −
+1.53 = 0.47 %), so it does not overturn the verdicts.
+
+**Grid dependence (the honest headline).** The per-port cost is a roughly fixed
+per-step launch cost, not a fraction of the field update: ~0.4 ms/port on small
+grids, falling to ~0.07 ms/port once field-update kernels are long enough to hide
+the port-observer launch latency (≳7 M cells). The base per-step cost scales with
+cell count, so the overhead *ratio* is grid-dependent. Sweep (identical port
+geometry, domain scaled at fixed 5 mm cell; 3–4 rounds each):
+
+| cells | base ms/step | 1-port add | +1-port add | single CI95-up | extra CI95-up |
+|---|---|---|---|---|---|
+| 34,560 | 0.16 | 0.44 | 0.39 | 290 % ✗ | 72 % ✗ |
+| 552,960 | 0.28 | 0.32 | 0.40 | 117 % ✗ | 73 % ✗ |
+| 1,728,000 | 0.37 | 0.26 | 0.40 | 71 % ✗ | 66 % ✗ |
+| 6,635,520 | 1.33 | 0.073 | 0.071 | 5.8 % ✗ | 5.2 % ✗ |
+| 13,824,000 | 2.52 | 0.073 | 0.069 | 3.0 % ✓ | 2.9 % ✗ |
+| 27,000,000 | 4.84 | 0.077 | 0.074 | 1.6 % ✓ | 1.7 % ✓ |
+| 46,656,000 | 7.85 | 0.068 | 0.067 | 1.1 % ✓ | 1.1 % ✓ |
+
+Crossover: single-port `< 5 %` above ~7 M cells; per-extra-port `< 2 %` (the
+binding target) above ~27 M cells. **On small/medium grids (≤ ~2 M cells) the
+passive-port overhead is large (single-port 70–290 %, per-extra 66–73 %)** —
+because the eager 181-frequency port observer's fixed cost is comparable to an
+entire bare Yee step there. This directly corroborates the audit's outside-the-
+graph port-cost concern and bounds where the §9.4 targets hold.
+
+**Falsification (harness wiring).** A synthetic port-only per-step cost injected
+via monkeypatch of `apply_port_runtimes` (fires only when the scene has port
+runtimes, so the base stays clean) added 0.669 ms/step at 27 M cells; the
+single-port gate flipped PASS→FAIL (CI95 upper 13.79 % > 5 %), while the same
+uninjected gate passes at 1.57 %. The gate detects a real regression.
+
+**Honest notes.**
+- Verdict is grid-dependent; PASS is asserted at a representative large RF
+  full-wave grid (27 M cells). The `< 2 %` per-extra-port target is met only
+  above ~27 M cells; smaller grids fail and are reported, not tuned away.
+- `cuda_graph=False` throughout (apples-to-apples eager stepping; the passive
+  port observer is not CUDA-graph-capturable, so this is also the production
+  regime for a passive-port S-parameter run).
+- A/A CI narrowly excludes zero (+0.13 %); the floor half-width (0.07 %) is still
+  far below the gate margins.
