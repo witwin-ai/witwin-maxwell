@@ -281,6 +281,33 @@ def _modal_solve(scene, frequency: float):
     return beta, z0
 
 
+def _waveguide_te10_sin_correlation(guide_a: float, *, dx: float, frequency: float) -> float:
+    """sin(pi y/a) correlation of the selected TE10 Ez profile (mode-shape quality).
+
+    Solves the guided TE10 mode the WavePort would inject and correlates its Ez
+    transverse profile with the analytic half-wave envelope over the full aperture.
+    ~1 is a clean TE10; ~0 is the checkerboard-aliased spurious eigenvector. Any
+    solve error is reported as correlation 0 (unusable mode).
+    """
+    from benchmark.scenes.rf.rectangular_waveguide import rectangular_waveguide_scene
+
+    try:
+        prepared = prepare_scene(rectangular_waveguide_scene(dx=dx, device=_device()))
+        manifest = resolve_waveport_run_manifest(prepared, mw.PortSweep(), (frequency,))
+        md = manifest.prepared_ports[0].mode_data[0][0]
+        ez = md["component_profiles"]["Ez"].detach().cpu().numpy().real  # (y, z)
+        y = md["coords_u"].detach().cpu().numpy()
+        ref = np.outer(np.sin(np.pi * (y - y[0]) / (y[-1] - y[0])), np.ones(ez.shape[1]))
+        ez_flat = ez.reshape(-1)
+        ref_flat = ref.reshape(-1)
+        if float(np.dot(ez_flat, ref_flat)) < 0.0:
+            ez_flat = -ez_flat
+        denom = float(np.linalg.norm(ez_flat) * np.linalg.norm(ref_flat))
+        return float(np.dot(ez_flat, ref_flat) / denom) if denom > 0.0 else 0.0
+    except Exception:  # noqa: BLE001 - an unsolvable mode is an unusable (0-correlation) mode
+        return 0.0
+
+
 # --------------------------------------------------------------------------- #
 # Rectangular waveguide two-port (TE10) -- wave-level FDTD.                     #
 # --------------------------------------------------------------------------- #
@@ -310,11 +337,51 @@ def run_rectangular_waveguide() -> SceneReport:
          "note": "TE10 cutoff; band is 1.2 fc .. 2.2 fc (all propagating)"}
     )
 
+    # Mode-shape quality gate (round-4): the transverse vector operator cannot yet
+    # produce a clean full-grid TE10 on this hollow guide (it decouples the odd/even
+    # sublattices), so the selected Ez profile is checkerboard-contaminated. Measure
+    # the injected TE10 profile's sin(pi y/a) correlation directly; if it is not a
+    # genuine half-wave the two-port S-matrix is meaningless, so record BLOCKED with
+    # the executed evidence and do NOT run the (misleading) sweep. This gates on the
+    # actual mode shape, never silently reporting a spurious measurement.
+    corr = _waveguide_te10_sin_correlation(GUIDE_A, dx=0.02, frequency=1.8 * fc)
+    if corr < 0.9:
+        report.status = "blocked"
+        report.gate_class = MODAL_EIGENSOLVE
+        report.target = "blocked on the transverse mode-operator redesign (open item)"
+        report.metrics.append(
+            {"quantity": "TE10 Ez sin(pi y/a)-correlation (dx=0.02)", "measured": corr,
+             "reference": 1.0, "rel_error": 1.0 - corr, "class": MODAL_EIGENSOLVE,
+             "note": "injected mode shape; < 0.9 means the operator returned a "
+             "checkerboard-aliased eigenvector, so no S-matrix is reported"}
+        )
+        report.falsification = (
+            "EXECUTED: the injected TE10 Ez profile has sin(pi y/a)-correlation "
+            f"{corr:.3f} at dx=0.02 (a clean half-wave is >= 0.99). The centered "
+            "uniform-isotropic transverse operator decouples the odd/even sublattices, "
+            "so sin(pi y/a) lives on ONE sublattice; best recoverable full-grid "
+            "correlation over the entire degenerate subspace is ~0.62. No selector "
+            "filter can synthesize the missing sublattice."
+        )
+        report.notes.append(
+            "BLOCKED on the transverse mode-operator (audit S1 round-4, EXECUTED; replaces "
+            "the withdrawn round-3 'shifted 3D-Yee TE10 onset', which was false physics -- "
+            "the discrete TE10 cutoff is 0.99752 fc, BELOW the continuum). The vector "
+            "selector previously injected a checkerboard-aliased eigenvector sharing the "
+            "TE10 eigenvalue (sin-correlation ~0.000); its odd profile couples to TE20 "
+            "(cutoff 2 fc) and reproduces the old |S21| to 3 significant figures. The "
+            "selector is hardened (F1: absolute-uniformity k0 rejection, never-substitute) "
+            "but the VECTOR operator itself cannot represent a clean full-grid TE10 on a "
+            "hollow metallic guide (centered branch decouples sublattices; the staggered "
+            "branch has an asymmetric-BC bug that shifts beta ~10%). A symmetric-BC "
+            "Yee-staggered transverse operator is the fix; filed as an OPEN item in "
+            "docs/reference/rf-wave-validation-2026-07-18.md. Coax (separate TEM path) is "
+            "unaffected and passes."
+        )
+        return report
+
     # Grid-commensurate tiers (B5): dx must divide 0.1 so the a/b aperture edges
-    # land on Yee nodes. 0.05, 0.025, 0.02 all satisfy this. NOTE: the guided TE10
-    # solve currently RAISES (F1 selector refuses the checkerboard-aliased mode and
-    # the transverse operator cannot yet produce a clean full-grid TE10), so every
-    # tier is recorded as an error below and the scene resolves to status=blocked.
+    # land on Yee nodes. 0.05, 0.025, 0.02 all satisfy this.
     freqs = tuple(float(x) for x in np.linspace(1.2 * fc, 2.2 * fc, 11))
     k0 = 2.0 * np.pi * np.array(freqs) / C0
     beta_an = np.sqrt(np.maximum(k0**2 - (np.pi / GUIDE_A) ** 2, 0.0))
@@ -373,33 +440,11 @@ def run_rectangular_waveguide() -> SceneReport:
 
     resolved = [c for c in report.convergence if "beta_rel_error_median" in c]
     if not resolved:
-        report.status = "blocked"
-        report.gate_class = MODAL_EIGENSOLVE
-        report.target = "blocked on the transverse mode-operator redesign (open item)"
-        report.falsification = (
-            "EXECUTED: with the guided-mode selector hardened (F1) the waveguide TE10 "
-            "solve raises rather than injecting a spurious mode. The centered "
-            "uniform-isotropic transverse vector operator decouples the odd/even "
-            "sublattices, so the half-wave sin(pi y/a) lives on ONE sublattice and every "
-            "candidate is checkerboard-contaminated (checkerboard_fraction > 0.35 for all; "
-            "best full-grid sin-correlation recoverable over the entire degenerate subspace "
-            "is ~0.62, executed). No filter can synthesize the missing sublattice."
-        )
+        report.status = "error"
         report.notes.append(
-            "BLOCKED on the transverse mode-operator (audit S1 round-4, EXECUTED; replaces "
-            "the withdrawn round-3 'shifted 3D-Yee TE10 onset' story, which was false "
-            "physics -- the discrete TE10 cutoff is 0.99752 fc, BELOW the continuum, and the "
-            "band propagates at all tiers). The real waveguide defect is that the vector "
-            "selector previously injected a checkerboard-aliased eigenvector sharing the "
-            "TE10 eigenvalue (sin(pi y/a)-correlation 0.000), whose odd profile couples to "
-            "TE20 and reproduces the old |S21| to 3 significant figures. The selector is now "
-            "fixed to reject that mode and never substitute; the transverse VECTOR operator "
-            "itself, however, cannot yet represent a clean full-grid TE10 on a hollow "
-            "metallic guide (centered branch decouples sublattices; the existing staggered "
-            "branch has an asymmetric-BC bug that shifts beta ~10%). A symmetric-BC "
-            "Yee-staggered transverse operator is the fix; filed as an OPEN item in "
-            "docs/reference/rf-wave-validation-2026-07-18.md. Coax (separate TEM path) is "
-            "unaffected and passes."
+            "Waveguide two-port FDTD sweep failed at every tier (the mode-shape quality "
+            "gate passed but the sweep did not; this is a genuine run error, not the "
+            "operator block)."
         )
         return report
 

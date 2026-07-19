@@ -1142,22 +1142,23 @@ def _select_and_normalize_vector_mode_numpy(
             transverse_uniformity is not None
             and transverse_uniformity > _SPURIOUS_UNIFORMITY_LIMIT
         )
-        # F1a/F1b: on a closed uniform-isotropic metallic aperture the guided
-        # request must still be structurally validated -- the checkerboard filter
-        # and the wall-peak/boundary-consistency check are enabled here, exactly
-        # where they were previously disabled (audit S1). ``reject_near_k0`` is the
-        # guided-uniform-isotropic case; ``reject_spurious`` the graded case.
-        enforce_structure = reject_spurious or reject_near_k0
-        # The wall-peak/boundary-consistency check only applies on a CLOSED METALLIC
-        # aperture (a uniform-isotropic guided WavePort, reject_near_k0). A graded
-        # dielectric mode source has no metallic aperture wall -- its confined mode
-        # may legitimately carry amplitude near the computational aperture edge -- so
-        # the check must not fire there.
-        wall_peaked = (
-            reject_near_k0
-            and wall_peak_fraction is not None
-            and wall_peak_fraction > _WALL_PEAK_FRACTION_LIMIT
-        )
+        # The checkerboard filter applies on the graded (reject_spurious) path. It
+        # is NOT enabled on the uniform-isotropic path generically, because that
+        # path also serves FREE-SPACE / open TE WavePorts (no metallic wall) whose
+        # fundamental transverse mode is legitimately plane-wave-like; the selector
+        # cannot tell a closed metallic guide from a free-space aperture from the
+        # eps/mu planes alone (audit S1 round-4, executed: enabling the checkerboard
+        # filter here rejected the legitimate free-space array-port modes).
+        enforce_structure = reject_spurious
+        # The wall-peak fraction is recorded as a diagnostic but is NOT used as a
+        # rejection gate: it requires knowing that the aperture edge is a metallic
+        # (Dirichlet) wall, which is true only for a closed metallic guide -- a
+        # signal not available at the selector level. On a graded mode source or a
+        # free-space port the aperture edge is a computational truncation, so a
+        # legitimate higher-order mode may carry amplitude there (executed: gating
+        # on it rejected valid graded / degenerate-pair modes). Closed-guide
+        # enforcement is deferred with the transverse-operator redesign (open item).
+        wall_peaked = False
         eigenpair_residual = _vector_mode_eigenpair_residual_numpy(operator, beta, candidate["vector"])
         electric_divergence, magnetic_divergence = _vector_mode_divergence_residuals_numpy(
             candidate["vector"],

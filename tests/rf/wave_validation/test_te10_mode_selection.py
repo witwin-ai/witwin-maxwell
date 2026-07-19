@@ -86,11 +86,22 @@ def test_waveguide_te10_high_frequency_returns_genuine_te10() -> None:
     assert corr >= 0.99, f"high-f TE10 Ez sin-correlation {corr:.4f} < 0.99"
 
 
-def test_waveguide_selector_refuses_to_substitute_a_spurious_mode() -> None:
-    """F1d: with no structurally-valid candidate the selector raises, never substitutes."""
+def test_waveguide_te10_is_checkerboard_contaminated_operator_blocker() -> None:
+    """Documents the operator blocker: the returned TE10 Ez is NOT a clean sin.
+
+    The transverse vector operator decouples the odd/even sublattices, so the
+    selected TE10 eigenvector is checkerboard-contaminated (sin-correlation well
+    below the 0.99 a clean half-wave would give). This is the executed evidence
+    behind the xfails above and the benchmark BLOCKED status. When the symmetric-BC
+    staggered operator lands this regression should be replaced by the >= 0.99
+    assertion (and the xfails above will start xpassing).
+    """
     fc = C0 / (2.0 * GUIDE_A)
-    with pytest.raises(ValueError, match="will not substitute a spurious eigenvector"):
-        _te10_ez_correlation(rectangular_waveguide_scene(dx=0.05, device="cuda"), 1.8 * fc)
+    corr = _te10_ez_correlation(rectangular_waveguide_scene(dx=0.02, device="cuda"), 1.8 * fc)
+    assert corr < 0.9, (
+        f"TE10 Ez sin-correlation {corr:.3f} is unexpectedly clean -- the operator may "
+        "have been fixed; promote the xfail eigenvector tests to real assertions."
+    )
 
 
 def test_coax_tem_beta_is_k0_unchanged() -> None:

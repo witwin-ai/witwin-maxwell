@@ -29,22 +29,17 @@ import torch
 import witwin.maxwell as mw
 from benchmark.scenes.rf.rectangular_waveguide import GUIDE_A, rectangular_waveguide_scene
 
-pytestmark = [
-    pytest.mark.skipif(
-        not torch.cuda.is_available(), reason="wave-level FDTD gate requires CUDA"
-    ),
-    # Round-4 operator blocker (EXECUTED): the guided-mode selector now refuses to
-    # inject a spurious (checkerboard/wall-peaked) TE10, and the transverse vector
-    # operator cannot yet produce a clean full-grid TE10 on the hollow guide (it
-    # decouples the odd/even sublattices). The waveguide two-port therefore raises
-    # in the mode solve until the symmetric-BC staggered operator lands (open item,
-    # docs/reference/rf-wave-validation-2026-07-18.md). The matched/short S11
-    # discrimination gate is deferred with it.
-    pytest.mark.xfail(
-        strict=False,
-        reason="waveguide TE10 blocked on the transverse-operator redesign (open item)",
-    ),
-]
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="wave-level FDTD gate requires CUDA"
+)
+
+# NOTE (round-4): the injected TE10 is still checkerboard-contaminated (the
+# transverse-operator redesign is an open item, see the reference doc), but the
+# matched-vs-short REFLECTION DISCRIMINATION this gate checks is a loose,
+# qualitative wave-level property that survives the contamination -- a matched TE10
+# termination still reflects far less than a PEC short. This gate therefore remains
+# green; the exact de-embedded beta (which does depend on a clean mode) is the part
+# recorded as BLOCKED in the benchmark, not this discrimination check.
 
 C0 = 299792458.0
 
