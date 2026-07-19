@@ -51,6 +51,7 @@ from types import SimpleNamespace
 
 import witwin.maxwell as mw
 from witwin.maxwell.fdtd_parallel import FDTDParallelConfig
+from witwin.maxwell.fdtd.distributed import adjoint as _dist_adjoint
 
 
 _FREQUENCY = 1.0e9
@@ -60,6 +61,24 @@ _DENS_SHAPE = (5, 4, 4)
 # no-op'd halo (>=1e-2): comfortably above the reduction-order drift and below the
 # smallest halo-bug error, so the falsification is non-vacuous.
 _HALO_FALSIFICATION_MIN_REL = 1.0e-3
+
+# ---------------------------------------------------------------------------
+# psi-active distributed regime. The S3/S4 parity gates above drive an interior
+# probe (monitor_x=0.18) where the CPML psi memory is ~machine-zero, so the
+# distributed psi-carrying reverse path is exercised but numerically inert. These
+# constants drive the probe deep into the high x-PML band -- which the partition
+# pins entirely to the outer (rank 1) shard -- for a long run, so the objective's
+# sensitivity flows back THROUGH the CPML psi recursion and the distributed psi
+# cotangent carry becomes load-bearing (measured psi cotangent ~1.8x the E/H
+# adjoint scale on this scene, recorded in the acceptance doc).
+_PSI_STEPS = 360
+_PSI_MONITOR_X = 0.48
+# Gradient rel-error threshold separating a working psi carry (~6e-7 baseline
+# parity) from a zeroed carry (~6.5e-2 measured): >=1 order below the falsified
+# error and >=3 orders above the baseline floor, so the falsification is
+# non-vacuous.
+_PSI_CARRY_FALSIFICATION_MIN_REL = 1.0e-3
+_EH_STATE_NAMES = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 
 
 def _parallel(devices):
@@ -109,14 +128,14 @@ def _scene(density, *, source_x, monitor_x, device):
     return scene
 
 
-def _solve(density_values, *, parallel_devices, source_x, monitor_x, want_grad):
+def _solve(density_values, *, parallel_devices, source_x, monitor_x, want_grad, steps=_STEPS):
     density = density_values.clone().to("cuda:0")
     if want_grad:
         density.requires_grad_(True)
     scene = _scene(density, source_x=source_x, monitor_x=monitor_x, device="cuda:0")
     kwargs = dict(
         frequency=_FREQUENCY,
-        run_time=mw.TimeConfig(time_steps=_STEPS),
+        run_time=mw.TimeConfig(time_steps=steps),
         absorber="cpml",
     )
     if parallel_devices is not None:
@@ -268,6 +287,176 @@ def test_cpml_no_field_halo_falsification(
     assert rel_no_elec > _HALO_FALSIFICATION_MIN_REL, (
         f"no-op electric-adjoint halo left parity intact (rel {rel_no_elec:.3e}); the "
         "field halo is not load-bearing, contradicting the no-psi-halo audit"
+    )
+
+
+# ---------------------------------------------------------------------------
+# psi-active distributed gradient parity gate + zero-psi-carry falsification.
+# ---------------------------------------------------------------------------
+
+
+def _wrap_reverse_cpml_record(record):
+    """Wrap the distributed CPML reverse to record psi vs E/H adjoint magnitude.
+
+    ``post`` is the accumulated per-shard adjoint state entering each reverse step,
+    carrying the twelve CPML psi cotangents (seeded to zero, grown by the psi
+    pullbacks) alongside the six Yee adjoints. Recording their running max proves
+    the distributed psi-carrying reverse path is genuinely active on this scene.
+    """
+
+    original = _dist_adjoint._DistributedFDTDGradientBridge._reverse_phases_cpml
+
+    def wrapped(self, distributed, shards, devices, *, offset, trajectories,
+                mid_magnetic, post, eps_by_shard):
+        psi_mag = 0.0
+        eh_mag = 0.0
+        for rank_post in post.values():
+            for name in _dist_adjoint._CPML_PSI_NAMES:
+                tensor = rank_post.get(name)
+                if tensor is not None:
+                    psi_mag = max(psi_mag, float(tensor.abs().max()))
+            for name in _EH_STATE_NAMES:
+                tensor = rank_post.get(name)
+                if tensor is not None:
+                    eh_mag = max(eh_mag, float(tensor.abs().max()))
+        record["max_psi_cotangent"] = max(record["max_psi_cotangent"], psi_mag)
+        record["max_eh_adjoint"] = max(record["max_eh_adjoint"], eh_mag)
+        return original(self, distributed, shards, devices, offset=offset,
+                        trajectories=trajectories, mid_magnetic=mid_magnetic,
+                        post=post, eps_by_shard=eps_by_shard)
+
+    return wrapped
+
+
+def _wrap_reverse_cpml_zero_psi_carry():
+    """Wrap the distributed CPML reverse to zero the psi cotangent carry.
+
+    Zeroing the accumulated psi cotangents in ``post`` before every CPML reverse
+    step breaks the step-to-step psi recursion (each step sees psi=0 incoming), so
+    the distributed reverse no longer propagates the objective's sensitivity through
+    the absorbing-layer psi memory. Applied to the distributed path ONLY (the
+    single-GPU native reference is untouched), so the 1-vs-2-GPU parity must break.
+    """
+
+    original = _dist_adjoint._DistributedFDTDGradientBridge._reverse_phases_cpml
+
+    def wrapped(self, distributed, shards, devices, *, offset, trajectories,
+                mid_magnetic, post, eps_by_shard):
+        for rank_post in post.values():
+            for name in _dist_adjoint._CPML_PSI_NAMES:
+                tensor = rank_post.get(name)
+                if tensor is not None:
+                    tensor.zero_()
+        return original(self, distributed, shards, devices, offset=offset,
+                        trajectories=trajectories, mid_magnetic=mid_magnetic,
+                        post=post, eps_by_shard=eps_by_shard)
+
+    return wrapped
+
+
+def test_cpml_psi_active_objective_and_gradient_parity_single_vs_two_gpu(
+    cuda_p2p_devices, cuda_memory_cleanup, monkeypatch
+):
+    """1-vs-2-GPU parity with the objective INSIDE the CPML psi-active region.
+
+    The probe sits deep in the high x-PML (owned entirely by the outer rank-1
+    shard), so the distributed reverse must thread the objective cotangent back
+    through the CPML psi recursion. This pins the psi-carrying distributed reverse
+    path end-to-end -- the S3/S4 gates run an interior probe where psi is inert.
+    """
+
+    base = _base_density()
+    single_loss, single_grad = _solve(
+        base, parallel_devices=None, source_x=-0.18, monitor_x=_PSI_MONITOR_X,
+        want_grad=True, steps=_PSI_STEPS,
+    )
+    grad_scale = float(single_grad.abs().max())
+    assert grad_scale > 1.0, (
+        f"objective too weak to be a meaningful psi-active gate: grad_scale={grad_scale:.3e}"
+    )
+
+    record = {"max_psi_cotangent": 0.0, "max_eh_adjoint": 0.0}
+    monkeypatch.setattr(
+        _dist_adjoint._DistributedFDTDGradientBridge,
+        "_reverse_phases_cpml",
+        _wrap_reverse_cpml_record(record),
+        raising=True,
+    )
+    dist_loss, dist_grad = _solve(
+        base, parallel_devices=cuda_p2p_devices, source_x=-0.18,
+        monitor_x=_PSI_MONITOR_X, want_grad=True, steps=_PSI_STEPS,
+    )
+    monkeypatch.undo()
+
+    # (1) Non-vacuity: the DISTRIBUTED CPML reverse must carry a psi cotangent that
+    # is a significant fraction of the E/H adjoint scale at some reverse step, i.e.
+    # the psi-carrying reverse path is genuinely exercised (not inert as in the
+    # interior-probe S3 gates). Measured ratio ~1.8 on this scene.
+    assert record["max_eh_adjoint"] > 0.0
+    assert record["max_psi_cotangent"] > 0.1 * record["max_eh_adjoint"], (
+        f"distributed psi cotangent inert (psi={record['max_psi_cotangent']:.3e} vs "
+        f"E/H={record['max_eh_adjoint']:.3e}); the psi-active gate would be vacuous"
+    )
+
+    # (2) 1-vs-2-GPU objective + gradient parity at the S3-calibrated tolerances,
+    # now with meaningful adjoint signal flowing through the psi-active CPML region.
+    torch.testing.assert_close(
+        torch.tensor(dist_loss), torch.tensor(single_loss), rtol=5.0e-5, atol=5.0e-6
+    )
+    atol_floor = 1.0e-6 * grad_scale
+    torch.testing.assert_close(dist_grad, single_grad, rtol=1.0e-4, atol=atol_floor)
+
+
+def test_cpml_psi_active_zero_psi_carry_falsification(
+    cuda_p2p_devices, cuda_memory_cleanup, monkeypatch
+):
+    """Zeroing the distributed psi cotangent carry breaks the psi-active parity.
+
+    With the psi carry intact the psi-active 2-GPU gradient matches single-GPU to
+    the reduction-order floor. Zeroing the accumulated psi cotangents before every
+    distributed CPML reverse step (the single-GPU reference untouched) must drive
+    the 2-GPU gradient off the reference, proving the distributed psi-carrying
+    reverse path is load-bearing for parity -- not merely present. Measured: the
+    falsified gradient moves ~6.5e-2 vs the ~6e-7 baseline (recorded in the
+    acceptance doc).
+    """
+
+    base = _base_density()
+    single_loss, single_grad = _solve(
+        base, parallel_devices=None, source_x=-0.18, monitor_x=_PSI_MONITOR_X,
+        want_grad=True, steps=_PSI_STEPS,
+    )
+    grad_scale = float(single_grad.abs().max())
+    assert grad_scale > 1.0
+
+    # Baseline: psi carry intact -> parity holds.
+    _, base_grad = _solve(
+        base, parallel_devices=cuda_p2p_devices, source_x=-0.18,
+        monitor_x=_PSI_MONITOR_X, want_grad=True, steps=_PSI_STEPS,
+    )
+    base_rel = float((base_grad - single_grad).abs().max()) / grad_scale
+    assert base_rel < 1.0e-4, (
+        f"baseline psi-active parity unexpectedly loose: rel {base_rel:.3e}"
+    )
+
+    # Falsify: zero the psi cotangent carry in the DISTRIBUTED reverse only.
+    monkeypatch.setattr(
+        _dist_adjoint._DistributedFDTDGradientBridge,
+        "_reverse_phases_cpml",
+        _wrap_reverse_cpml_zero_psi_carry(),
+        raising=True,
+    )
+    _, fals_grad = _solve(
+        base, parallel_devices=cuda_p2p_devices, source_x=-0.18,
+        monitor_x=_PSI_MONITOR_X, want_grad=True, steps=_PSI_STEPS,
+    )
+    monkeypatch.undo()
+
+    fals_rel = float((fals_grad - single_grad).abs().max()) / grad_scale
+    assert fals_rel > _PSI_CARRY_FALSIFICATION_MIN_REL, (
+        f"zeroing the distributed psi cotangent carry left parity intact "
+        f"(rel {fals_rel:.3e}); the psi-carrying reverse path is not load-bearing, "
+        "contradicting the psi-active audit"
     )
 
 

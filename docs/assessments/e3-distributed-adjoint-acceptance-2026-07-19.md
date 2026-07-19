@@ -299,3 +299,66 @@ pytest tests/gradients/ tests/api/public/test_public_api.py \
   was widened silently.
 - Timing/speedup deferred-pending-exclusive-window.
 - S5 tiled adjoint seeds not attempted (slices 1-2 delivered and audited first).
+
+## Follow-up — psi-active DISTRIBUTED gradient-parity gate (2026-07-19)
+
+**Residual coverage gap closed.** The S3/S4 1-vs-2-GPU objective/gradient parity
+gates (`test_cpml_..._parity_single_vs_two_gpu`, STEPS=50, probe at x=0.18)
+exercise the CPML distributed reverse in a regime where the psi memory is
+numerically inert (interior probe), so the distributed psi-carrying reverse path
+was never pinned end-to-end against the single-GPU reference. A psi-active
+DISTRIBUTED parity gate now closes this.
+
+**Scene:** identical 2-shard x-split CPML geometry (Nx=29, cell_count=28, x-split
+at global cell 14, high x-PML `[24,28)` pinned to the outer rank-1 shard), but the
+objective `PointMonitor` is driven to `x=0.48` — deep in the high x-PML band on
+rank 1 — for STEPS=360, so the objective's sensitivity flows back THROUGH the CPML
+psi recursion on the outer shard. Design Box straddles the x=0 split as before.
+
+**psi-activity is genuine and load-bearing (measured, not assumed).** Instrumenting
+the distributed CPML reverse (`_reverse_phases_cpml`, recording the running max of
+the accumulated psi cotangents in `post` vs the E/H adjoints):
+
+| Quantity | Measured |
+|---|---|
+| max psi cotangent (distributed reverse, rank-1 high x-PML) | **67.15** |
+| max E/H adjoint (distributed reverse) | **37.0** |
+| psi / E-H ratio | **1.82** (psi larger than the field adjoint — strongly active) |
+
+**Gates (2-GPU, executed on 2x A6000):**
+
+| Gate | Test | Measured | Gate |
+|---|---|---|---|
+| psi-active objective parity 1-vs-2-GPU | `test_cpml_psi_active_objective_and_gradient_parity_single_vs_two_gpu` | rel **0.0** (bit-identical) | rtol 5e-5 / atol 5e-6 |
+| psi-active gradient parity 1-vs-2-GPU | same | rel **5.94e-7** | rtol 1e-4, atol 1e-6·max |
+| distributed psi cotangent non-inert | same (companion assertion) | ratio **1.82** | psi > 0.1·(E/H) |
+
+**Falsification (load-bearing, recorded).** Zeroing the distributed psi cotangent
+carry — `post[rank][psi_*].zero_()` before every distributed CPML reverse step, so
+the step-to-step psi recursion is broken — applied to the DISTRIBUTED path ONLY
+(the single-GPU native reference untouched):
+
+- The gathered-gradient parity moves from rel **5.94e-7** (carry intact) to rel
+  **6.55e-2** (carry zeroed) — a **~1.1e5x** jump, ~650x above the 1e-4 gradient
+  gate. Encoded as `test_cpml_psi_active_zero_psi_carry_falsification` (asserts the
+  falsified rel > 1e-3; passes at 6.55e-2).
+- Applied to the parity gate's `assert_close` directly, it goes RED: *"Tensor-likes
+  are not close! Mismatched elements: 78 / 80 (97.5%). Greatest absolute difference:
+  0.0920 at index (1,2,1) (up to 1.40e-6 allowed)."* Restore → green (5.94e-7).
+
+This proves the distributed psi-carrying reverse path is load-bearing for
+1-vs-2-GPU parity, not merely present — genuine psi-activity moves the gradient
+~5 orders above the parity floor. **Not** a bounded-by-measurement / vacuous gate.
+
+**Commands (executed):**
+
+```bash
+pytest tests/fdtd/multi_gpu/test_adjoint_parity_cpml.py -k psi_active   # 2 passed (16.0s)
+pytest tests/fdtd/multi_gpu/ tests/api/public/test_guard_census.py       # 259 passed (78.1s)
+pytest tests/gradients/test_fdtd_cpml_psi_active_adjoint.py \
+       tests/gradients/test_fdtd_adjoint_bridge.py \
+       tests/api/public/test_public_api.py \
+       tests/api/public/test_simulation_smoke.py                          # 84 passed (39.5s)
+```
+
+Capability-guard census budget unchanged (176); no guard added/removed/widened.
