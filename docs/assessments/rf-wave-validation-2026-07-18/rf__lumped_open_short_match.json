@@ -53,5 +53,5 @@
   "notes": [
     "BROKEN BENCH (root cause): matched/short/open all read |Gamma|~0.997 at the SAME phase ~13 deg. The feed sees near-total reflection independent of the load, i.e. the feed port is not coupled to the load port -- two lumped ports two cells apart in a tiny PML box radiate into the boundary rather than forming a transmission path, so the load never affects the feed reflection. This is not a '-30 dB floor'; the calibration standard is not being sensed at all. A propagating feed line terminated by the load is required. Recorded as a wave-level FAIL."
   ],
-  "updated_at": "2026-07-19T03:02:00+00:00"
+  "updated_at": "2026-07-19T04:32:24+00:00"
 }

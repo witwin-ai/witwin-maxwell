@@ -32,5 +32,5 @@
   "notes": [
     "FDTD load-port current peak at 7.901 GHz (C=1pF) vs analytic 7.118 GHz, and 7.669 GHz at C=2pF. The C(1)->C(2) peak ratio is 1.030 vs ideal sqrt(2)=1.414: the lumped two-port bench is parasitic-dominated and does NOT isolate the RLC resonance. Analytic f0 binds as the first-line reference; the wave-level RLC resonance from a propagating transmission structure is an OPEN GAP (tests/rf/wave_validation/test_rlc_resonance_wave_level.py, xfail strict)."
   ],
-  "updated_at": "2026-07-19T03:01:53+00:00"
+  "updated_at": "2026-07-19T04:32:17+00:00"
 }

@@ -635,11 +635,11 @@ RF port validation (audit S1, 2026-07-18, round 2). The binding metric for each 
 
 | Scene | Gate class | Quantity | Measured | Reference | Rel error | Status | Tidy3D ref |
 | --- | --- | --- | ---: | ---: | ---: | --- | --- |
-| rf/coax_thru | wave-level | a_passive/a_driven (F2 precondition) | 2.3 | 0.5 | 230.038% | gap | pending-generation |
-| rf/rectangular_waveguide | wave-level | beta_median_rel_error (NRW de-embedded) | 0.009629 | 0.0009487 | 0.963% | gap | pending-generation |
+| rf/coax_thru | wave-level | beta from arg(S21)/L (median rel error) | 0.008256 | 0 | 0.826% | pass | pending-generation |
+| rf/rectangular_waveguide | modal-eigensolve | see artifact | - | - | - | blocked | pending-generation |
 | rf/microstrip_two_port | wave-level | see artifact | - | - | - | blocked | pending-generation |
 | rf/series_parallel_rlc | wave-level | f0 | 7.901e+09 | 7.118e+09 | 11.008% | gap | n/a (lumped-circuit resonance; analytic first-line reference) |
 | rf/lumped_open_short_match | wave-level | see artifact | - | - | - | fail | pending-generation |
 | rf/differential_pair | wave-level | see artifact | - | - | - | blocked | pending-generation |
 
-_RF section regenerated: 2026-07-19T03:02:00+00:00_
+_RF section regenerated: 2026-07-19T04:32:24+00:00_
