@@ -1380,18 +1380,22 @@ class Simulation:
         #
         # The absorber only activates when the boundary declares a PML kind
         # (fdtd/boundary/runtime.py sets active_absorber_type from absorber_type only
-        # then); the verified adjoint envelope is the open-boundary update, whose
-        # parity/FD gates run exclusively on non-PML boundaries. Reject every absorber
-        # family here -- "cpml"/"stablepml" and the legacy graded-sigma "pml"/
-        # "absorber" alike -- rather than only the "cpml" string, so no unverified
-        # absorber slips through to run a distributed reverse outside the envelope.
+        # then). The verified distributed adjoint envelope covers two boundary
+        # regimes: the open-boundary standard update AND the CPML absorbing update
+        # (absorber "cpml"/"stablepml"), whose parity/FD gates run on an x-CPML
+        # dielectric scene. The legacy graded-sigma absorbers ("pml"/"absorber")
+        # have no verified distributed reverse core and stay rejected here so no
+        # unverified absorber slips through. The distributed solver additionally
+        # asserts the x-CPML pinning invariant before trusting the per-shard reverse.
         if self.scene.boundary.uses_kind("pml"):
-            raise ValueError(
-                "Multi-GPU FDTD adjoint does not support absorbing (PML) boundaries "
-                f"yet (absorber={str(self.config.absorber).lower()!r}); the distributed "
-                "absorbing reverse core is not verified. Use open/PEC boundaries for "
-                "the trainable distributed path."
-            )
+            absorber_name = str(self.config.absorber).lower()
+            if absorber_name not in ("cpml", "stablepml"):
+                raise ValueError(
+                    "Multi-GPU FDTD adjoint supports open/PEC or CPML absorbing "
+                    f"boundaries only; the graded-sigma absorber={absorber_name!r} has "
+                    "no verified distributed reverse core. Use absorber='cpml' (or "
+                    "'stablepml') for an absorbing trainable distributed run."
+                )
         medium_reason = _nonstandard_medium_reason(self.scene)
         if medium_reason is not None:
             raise ValueError(

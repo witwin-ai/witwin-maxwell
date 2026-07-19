@@ -205,7 +205,7 @@ def test_distributed_solver_rejects_unsupported_trainable_channel_directly():
         DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_cpu_parallel())
 
 
-def test_checkpoint_rejects_cpml_absorber(cuda_p2p_devices, cuda_memory_cleanup):
+def _pml_scene():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.4, 0.4), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.1),
@@ -221,12 +221,36 @@ def test_checkpoint_rejects_cpml_absorber(cuda_p2p_devices, cuda_memory_cleanup)
             name="drive",
         )
     )
+    return scene
+
+
+def test_checkpoint_accepts_cpml_absorber(cuda_p2p_devices, cuda_memory_cleanup):
+    # The distributed CPML adjoint (S4) is now a supported capability: the
+    # checkpoint/replay/reverse path accepts the CPML absorbing update, with the
+    # x-CPML pinning invariant asserted. capture must succeed and produce a
+    # checkpoint carrying the twelve psi fields.
     distributed = DistributedFDTD(
-        scene,
+        _pml_scene(),
         frequency=_FREQUENCY,
         parallel=_parallel(cuda_p2p_devices),
         absorber_type="cpml",
     )
     distributed.init_field()
-    with pytest.raises(ValueError, match="pure real standard"):
+    checkpoint = capture_distributed_checkpoint(distributed, 0)
+    for shard in distributed.shards:
+        tensors = checkpoint.states[shard.rank].tensors
+        assert "psi_ex_y" in tensors and "psi_hz_y" in tensors
+
+
+def test_checkpoint_rejects_graded_sigma_absorber(cuda_p2p_devices, cuda_memory_cleanup):
+    # The legacy graded-sigma absorbers have no verified distributed reverse core
+    # and stay rejected at the checkpoint entry point.
+    distributed = DistributedFDTD(
+        _pml_scene(),
+        frequency=_FREQUENCY,
+        parallel=_parallel(cuda_p2p_devices),
+        absorber_type="pml",
+    )
+    distributed.init_field()
+    with pytest.raises(ValueError, match="CPML absorbing update"):
         capture_distributed_checkpoint(distributed, 0)

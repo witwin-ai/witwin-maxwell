@@ -37,20 +37,27 @@ from ..adjoint.core import (
     _accumulate_source_term_gradients,
     _build_spectral_weight_schedule,
     _checkpoint_stride,
+    _forward_electric_fields_cpml,
     _forward_electric_fields_standard,
     _forward_magnetic_fields,
+    _forward_magnetic_fields_cpml,
     _monitor_template_is_point,
     _prepare_forward_pack,
     _resolved_source_term_lists,
 )
 from ..adjoint.dispatch import _NATIVE_REVERSE_LABELS, _ReverseBackend
 from ..adjoint.native import (
+    reverse_cpml_phase_electric,
+    reverse_cpml_phase_magnetic,
     reverse_phase1_electric_to_h,
     reverse_phase2_magnetic_to_e,
     reverse_phase3_decay,
 )
 from ..adjoint.profiler import _ReverseStepResult
-from ..adjoint.reverse_common import dynamic_electric_curls
+from ..adjoint.reverse_common import (
+    allocate_cpml_reverse_context,
+    dynamic_electric_curls,
+)
 from ..adjoint.seeds import (
     _apply_seed_runtime,
     _build_output_seeds,
@@ -66,16 +73,42 @@ from .capacity import require_gather_capacity
 
 _ELECTRIC_NAMES = ("Ex", "Ey", "Ez")
 _MAGNETIC_NAMES = ("Hx", "Hy", "Hz")
+# The 12 CPML memory (psi) fields carried alongside the six Yee fields on the
+# CPML distributed reverse. psi_e_* are advanced by the electric half-step and
+# read by the CPML electric reverse; psi_h_* are advanced by the magnetic
+# half-step. The adjoint state carries a psi cotangent for each (seeded to zero;
+# monitor seeds inject only E/H), and the CPML reverse kernels assign the pre-step
+# psi adjoint. No psi is exchanged across the x halo: the partition pins every
+# x-CPML region to the outer shards, so internal-face psi is inactive by
+# construction (see the S4 audit).
+_CPML_PSI_NAMES = (
+    "psi_ex_y",
+    "psi_ex_z",
+    "psi_ey_x",
+    "psi_ey_z",
+    "psi_ez_x",
+    "psi_ez_y",
+    "psi_hx_y",
+    "psi_hx_z",
+    "psi_hy_x",
+    "psi_hy_z",
+    "psi_hz_x",
+    "psi_hz_y",
+)
 
-# Shard-solver attributes that place the shard outside the verified pure real
-# standard reverse class. Each maps to the reason surfaced by the guard.
+# Shard-solver attributes that place the shard outside the verified reverse
+# class. Each maps to the reason surfaced by the guard.
 #
 # Absorbing boundaries are handled separately by ``active_absorber_type`` (below)
-# rather than a single boolean, because the verified envelope is the open-boundary
-# update: the committed parity/finite-difference gates run exclusively on
-# ``BoundarySpec.none()`` scenes (active_absorber_type == "none"). Every absorber
-# family -- "cpml"/"stablepml" (the CPML machinery) and the legacy graded-sigma
-# "pml"/"absorber" -- is therefore unverified and must fail closed, not just CPML.
+# rather than a single boolean, because the verified envelope now covers two
+# boundary regimes: the open-boundary standard update (active_absorber_type ==
+# "none") AND the CPML absorbing update (active_absorber_type in {"cpml",
+# "stablepml"}, i.e. ``uses_cpml``). The CPML distributed reverse is gated by the
+# S4 parity/finite-difference gates on an x-CPML dielectric scene and relies on
+# the partition pinning every x-CPML region to the outer shards (asserted by
+# :func:`_assert_x_pml_pinned_to_outer_shards`). The legacy graded-sigma absorber
+# families -- "pml"/"absorber" -- have no verified distributed reverse core and
+# stay rejected.
 _UNSUPPORTED_SHARD_FLAGS = (
     ("complex_fields_enabled", "complex (Bloch split-field) state"),
     ("dispersive_enabled", "electric dispersive (ADE) media"),
@@ -89,14 +122,60 @@ _UNSUPPORTED_SHARD_FLAGS = (
 )
 
 
-def require_distributed_adjoint_support(distributed) -> None:
-    """Reject any distributed configuration outside the verified standard class.
+def _assert_x_pml_pinned_to_outer_shards(distributed) -> None:
+    """Fail closed unless every x-CPML region lives entirely on an outer shard.
 
-    Fail-closed guard: the distributed checkpoint/replay/reverse path is only
-    validated for the pure real standard (open-boundary) update. CPML, dispersive,
+    The per-shard CPML reverse is interface-correct only because the partition
+    excludes x-PML from the split: rank 0 owns all low x-PML cells and the last
+    rank owns all high x-PML cells, so every internal x-face carries inactive
+    x-CPML (``c == 0``) and the cross-interface curl coupling flows entirely
+    through the existing Yee field halos -- no psi halo is required (S4 audit,
+    PART A). This is guaranteed by construction today; assert it here so a future
+    partition change cannot silently break the invariant and run an unverified
+    CPML reverse. The check is vacuous when there is no x-PML (``low == high ==
+    0``), so it is safe to run on every distributed adjoint configuration.
+    """
+
+    plan = getattr(distributed, "partition_plan", None)
+    if plan is None:
+        return
+    layouts = tuple(plan.shard_layouts)
+    if not layouts:
+        return
+    low = int(getattr(plan, "low_pml_cells", 0))
+    high = int(getattr(plan, "high_pml_cells", 0))
+    cell_count = int(getattr(plan, "cell_count"))
+    last_rank = len(layouts) - 1
+    for layout in layouts:
+        start = int(layout.global_cell_owned.start)
+        stop = int(layout.global_cell_owned.stop)
+        if low > 0 and start < low and int(layout.rank) != 0:
+            raise RuntimeError(
+                "Distributed CPML reverse invariant violated: low x-PML cells "
+                f"[0, {low}) are owned by shard {layout.rank} (owns cells "
+                f"[{start}, {stop})), not rank 0. The x-CPML region must be pinned "
+                "to the outer shards for the per-shard reverse to be interface-correct."
+            )
+        if high > 0 and stop > cell_count - high and int(layout.rank) != last_rank:
+            raise RuntimeError(
+                "Distributed CPML reverse invariant violated: high x-PML cells "
+                f"[{cell_count - high}, {cell_count}) are owned by shard "
+                f"{layout.rank} (owns cells [{start}, {stop})), not the last rank "
+                f"{last_rank}. The x-CPML region must be pinned to the outer shards."
+            )
+
+
+def require_distributed_adjoint_support(distributed) -> None:
+    """Reject any distributed configuration outside the verified reverse class.
+
+    Fail-closed guard: the distributed checkpoint/replay/reverse path is validated
+    for the pure real standard (open/PEC-boundary) update and the CPML absorbing
+    update (``uses_cpml``, i.e. ``active_absorber_type`` in {"cpml", "stablepml"}).
+    The legacy graded-sigma absorbers ("pml"/"absorber"), and dispersive,
     nonlinear, conductive, anisotropic, complex/Bloch, TFSF, modulated, and any
     coupled port/circuit/network configuration are rejected here rather than
-    producing an unverified gradient.
+    producing an unverified gradient. On the CPML path the x-PML pinning invariant
+    is asserted so the per-shard reverse stays interface-correct.
     """
 
     if not getattr(distributed, "_initialized", False):
@@ -106,18 +185,18 @@ def require_distributed_adjoint_support(distributed) -> None:
     for shard in distributed.shards:
         solver = shard.solver
         active_absorber = str(getattr(solver, "active_absorber_type", "none")).lower()
-        if active_absorber != "none":
+        if active_absorber not in ("none", "cpml", "stablepml"):
             raise ValueError(
-                "Distributed FDTD checkpoint/replay currently supports only the pure "
-                "real standard open-boundary update; shard "
+                "Distributed FDTD checkpoint/replay supports only the pure real "
+                "standard open-boundary update or the CPML absorbing update; shard "
                 f"{shard.rank} runs a {active_absorber!r} absorbing boundary. Use "
-                "open/PEC boundaries for the trainable distributed path."
+                "open/PEC or CPML boundaries for the trainable distributed path."
             )
         for attribute, reason in _UNSUPPORTED_SHARD_FLAGS:
             if bool(getattr(solver, attribute, False)):
                 raise ValueError(
-                    "Distributed FDTD checkpoint/replay currently supports only the "
-                    f"pure real standard update; shard {shard.rank} uses {reason}."
+                    "Distributed FDTD checkpoint/replay supports only the pure real "
+                    f"standard or CPML update; shard {shard.rank} uses {reason}."
                 )
         if getattr(solver, "_magnetic_source_terms", ()):
             raise ValueError(
@@ -129,6 +208,7 @@ def require_distributed_adjoint_support(distributed) -> None:
             "Distributed FDTD checkpoint/replay does not yet support embedded "
             "circuit/port/network coupling."
         )
+    _assert_x_pml_pinned_to_outer_shards(distributed)
 
 
 @dataclass(frozen=True)
@@ -263,8 +343,15 @@ def replay_distributed_segment(
             )
             current[shard.rank] = clone_checkpoint_tensors(checkpoint.states[shard.rank])
 
+    uses_cpml = _distributed_uses_cpml(distributed)
+    # The reverse reads the pre-step forward psi_e alongside E/H on the CPML
+    # branch, and the CPML reverse context allocates a pre-step adjoint per
+    # forward-state key, so the trajectory carries the full 18-field CPML state
+    # (six Yee + twelve psi). On the standard branch it carries the six Yee fields.
+    state_names = _CPML_STATE_NAMES if uses_cpml else _STANDARD_STATE_NAMES
+
     trajectories = {
-        shard.rank: [{name: current[shard.rank][name].clone() for name in _ELECTRIC_NAMES + _MAGNETIC_NAMES}]
+        shard.rank: [{name: current[shard.rank][name].clone() for name in state_names}]
         for shard in shards
     }
 
@@ -272,17 +359,28 @@ def replay_distributed_segment(
         for step_index in range(start_step, end_step):
             time_value = step_index * dt
 
-            # (1) Electric halo, then (2) magnetic half on every shard.
+            # (1) Electric halo, then (2) magnetic half on every shard. The CPML
+            # half additionally advances psi_h (a same-x-slice recurrence, no
+            # halo); the standard half advances only the fields.
             _forward_electric_halo(shards, current)
             _synchronize(devices)
             for shard in shards:
                 with torch.cuda.device(shard.device):
-                    magnetic = _forward_magnetic_fields(
-                        shard.solver,
-                        current[shard.rank],
-                        time_value=time_value,
-                        resolved_source_terms=resolved[shard.rank],
-                    )
+                    if uses_cpml:
+                        magnetic, psi_h = _forward_magnetic_fields_cpml(
+                            shard.solver,
+                            current[shard.rank],
+                            time_value=time_value,
+                            resolved_source_terms=resolved[shard.rank],
+                        )
+                        current[shard.rank].update(psi_h)
+                    else:
+                        magnetic = _forward_magnetic_fields(
+                            shard.solver,
+                            current[shard.rank],
+                            time_value=time_value,
+                            resolved_source_terms=resolved[shard.rank],
+                        )
                     for name in _MAGNETIC_NAMES:
                         current[shard.rank][name] = magnetic[name]
             _synchronize(devices)
@@ -297,19 +395,35 @@ def replay_distributed_segment(
                             {name: current[shard.rank][name].clone() for name in _MAGNETIC_NAMES}
                         )
 
-            # (4) Electric half on every shard.
+            # (4) Electric half on every shard (CPML additionally advances psi_e).
             for shard in shards:
                 with torch.cuda.device(shard.device):
-                    electric = _forward_electric_fields_standard(
-                        shard.solver,
-                        current[shard.rank],
-                        {name: current[shard.rank][name] for name in _MAGNETIC_NAMES},
-                        time_value=time_value,
-                        eps_ex=shard.solver.eps_Ex,
-                        eps_ey=shard.solver.eps_Ey,
-                        eps_ez=shard.solver.eps_Ez,
-                        resolved_source_terms=resolved[shard.rank],
-                    )
+                    magnetic_fields = {
+                        name: current[shard.rank][name] for name in _MAGNETIC_NAMES
+                    }
+                    if uses_cpml:
+                        electric, psi_e = _forward_electric_fields_cpml(
+                            shard.solver,
+                            current[shard.rank],
+                            magnetic_fields,
+                            time_value=time_value,
+                            eps_ex=shard.solver.eps_Ex,
+                            eps_ey=shard.solver.eps_Ey,
+                            eps_ez=shard.solver.eps_Ez,
+                            resolved_source_terms=resolved[shard.rank],
+                        )
+                        current[shard.rank].update(psi_e)
+                    else:
+                        electric = _forward_electric_fields_standard(
+                            shard.solver,
+                            current[shard.rank],
+                            magnetic_fields,
+                            time_value=time_value,
+                            eps_ex=shard.solver.eps_Ex,
+                            eps_ey=shard.solver.eps_Ey,
+                            eps_ez=shard.solver.eps_Ez,
+                            resolved_source_terms=resolved[shard.rank],
+                        )
                     for name in _ELECTRIC_NAMES:
                         current[shard.rank][name] = electric[name]
             _synchronize(devices)
@@ -318,7 +432,7 @@ def replay_distributed_segment(
                 trajectories[shard.rank].append(
                     {
                         name: current[shard.rank][name].clone()
-                        for name in _ELECTRIC_NAMES + _MAGNETIC_NAMES
+                        for name in state_names
                     }
                 )
 
@@ -330,8 +444,23 @@ def replay_distributed_segment(
 # ---------------------------------------------------------------------------
 
 _STANDARD_STATE_NAMES = _ELECTRIC_NAMES + _MAGNETIC_NAMES
+_CPML_STATE_NAMES = _STANDARD_STATE_NAMES + _CPML_PSI_NAMES
 _CELL_COMPONENTS = frozenset(("Ex", "Hy", "Hz"))
 _STANDARD_BACKEND_LABEL = _NATIVE_REVERSE_LABELS[_ReverseBackend.STANDARD]
+_CPML_BACKEND_LABEL = _NATIVE_REVERSE_LABELS[_ReverseBackend.CPML]
+
+
+def _reverse_state_names(distributed) -> tuple:
+    """The Yee (+psi on CPML) state names the distributed reverse carries."""
+    if distributed.shards and bool(getattr(distributed.shards[0].solver, "uses_cpml", False)):
+        return _CPML_STATE_NAMES
+    return _STANDARD_STATE_NAMES
+
+
+def _distributed_uses_cpml(distributed) -> bool:
+    return bool(distributed.shards) and bool(
+        getattr(distributed.shards[0].solver, "uses_cpml", False)
+    )
 
 
 def require_distributed_adjoint_objective_support(distributed) -> None:
@@ -494,6 +623,7 @@ class _DistributedFDTDGradientBridge:
         self._solver_stats = None
         self._raw_output = None
         self._overlap_active = False
+        self._uses_cpml = False
         self._last_global_grad_eps = None
 
     def _material_graph_scene(self):
@@ -569,6 +699,7 @@ class _DistributedFDTDGradientBridge:
         # (whose ``solver`` is the DistributedFDTD) can inspect the reverse product.
         distributed._adjoint_bridge = self
         self._distributed = distributed
+        self._uses_cpml = _distributed_uses_cpml(distributed)
         self._pack = pack
         self._checkpoints = checkpoints
         self._time_steps = int(time_steps)
@@ -677,10 +808,11 @@ class _DistributedFDTDGradientBridge:
                     "Ez": torch.zeros_like(eps[2]),
                 }
 
+        state_names = _CPML_STATE_NAMES if self._uses_cpml else _STANDARD_STATE_NAMES
         adjoint_states = {
             shard.rank: {
                 name: torch.zeros_like(self._checkpoints[0].states[shard.rank].tensors[name])
-                for name in _STANDARD_STATE_NAMES
+                for name in state_names
             }
             for shard in shards
         }
@@ -808,14 +940,17 @@ class _DistributedFDTDGradientBridge:
         grad_eps_accum,
     ):
         time_value = step_index * dt
+        state_names = _CPML_STATE_NAMES if self._uses_cpml else _STANDARD_STATE_NAMES
 
         # Post-step adjoint = current accumulated adjoint plus this step's monitor
         # seed injection (owned indices only; each shard owns its point monitors and
-        # the scattered slice of the full-field DFT cotangent).
+        # the scattered slice of the full-field DFT cotangent). The seed injects into
+        # E/H only; the psi adjoints (CPML branch) carry their accumulated value,
+        # which is 0 on the first reverse step and grows through the psi pullbacks.
         post = {
             shard.rank: {
                 name: adjoint_states[shard.rank][name].clone()
-                for name in _STANDARD_STATE_NAMES
+                for name in state_names
             }
             for shard in shards
         }
@@ -824,7 +959,86 @@ class _DistributedFDTDGradientBridge:
                 _apply_seed_runtime(post[shard.rank], seed_runtimes[shard.rank], step_index)
         _synchronize(devices)
 
-        # Phase 1: electric adjoint -> mid-H adjoint, per shard.
+        # The two reverse-phase runners insert the transposed Yee halos at the same
+        # seams the single-GPU cores expose: the standard core splits at Phase 1/2/3;
+        # the CPML core splits at the electric/magnetic phase boundary. Each returns
+        # ``{rank: (pre_step_adjoint, (gx, gy, gz), adj_h_mid)}`` plus the backend
+        # label so the shared source-term/accumulation tail below is regime-agnostic.
+        if self._uses_cpml:
+            per_shard, backend_label = self._reverse_phases_cpml(
+                distributed,
+                shards,
+                devices,
+                offset=offset,
+                trajectories=trajectories,
+                mid_magnetic=mid_magnetic,
+                post=post,
+                eps_by_shard=eps_by_shard,
+            )
+        else:
+            per_shard, backend_label = self._reverse_phases_standard(
+                distributed,
+                shards,
+                devices,
+                offset=offset,
+                trajectories=trajectories,
+                mid_magnetic=mid_magnetic,
+                post=post,
+                eps_by_shard=eps_by_shard,
+                curls_by_shard=curls_by_shard,
+            )
+
+        # Per-shard source-term eps gradient + grad_eps accumulation, then roll the
+        # adjoint state back one step.
+        for shard in shards:
+            pre_step_adjoint, (gx, gy, gz), adj_h_mid = per_shard[shard.rank]
+            eps_ex, eps_ey, eps_ez = eps_by_shard[shard.rank]
+            with torch.cuda.device(shard.device):
+                step_result = _ReverseStepResult(
+                    pre_step_adjoint=pre_step_adjoint,
+                    grad_eps_ex=gx,
+                    grad_eps_ey=gy,
+                    grad_eps_ez=gz,
+                    backend=backend_label,
+                    magnetic_output_adjoint=adj_h_mid,
+                )
+                step_result = _accumulate_source_term_gradients(
+                    step_result,
+                    solver=shard.solver,
+                    adjoint_state=post[shard.rank],
+                    time_value=time_value,
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                    resolved_source_terms=resolved_by_shard[shard.rank],
+                )
+                accum = grad_eps_accum[shard.rank]
+                accum["Ex"] = accum["Ex"] + step_result.grad_eps_ex
+                accum["Ey"] = accum["Ey"] + step_result.grad_eps_ey
+                accum["Ez"] = accum["Ez"] + step_result.grad_eps_ez
+                adjoint_states[shard.rank] = dict(step_result.pre_step_adjoint)
+        _synchronize(devices)
+
+    def _reverse_phases_standard(
+        self,
+        distributed,
+        shards,
+        devices,
+        *,
+        offset,
+        trajectories,
+        mid_magnetic,
+        post,
+        eps_by_shard,
+        curls_by_shard,
+    ):
+        """Standard (open/PEC) reverse phases with the two transposed Yee halos.
+
+        Phase 1 (electric adjoint -> mid-H adjoint) -> transposed magnetic halo
+        (Hy/Hz) -> Phase 2 (magnetic adjoint -> pre-step E adjoint + eps gradient)
+        -> transposed electric halo (Ey/Ez) -> Phase 3 (magnetic decay pullback ->
+        pre-step H adjoint).
+        """
         adj_h_mid = {}
         for shard in shards:
             ex_curl, ey_curl, ez_curl = curls_by_shard[shard.rank]
@@ -839,11 +1053,9 @@ class _DistributedFDTDGradientBridge:
                 )
         _synchronize(devices)
 
-        # Transposed magnetic halo: right ghost AdjHy/Hz -> left owner, zero ghost.
         distributed.transport.exchange_magnetic_adjoint(shards, adj_h_mid)
         _synchronize(devices)
 
-        # Phase 2: magnetic adjoint -> pre-step E adjoint + eps gradient, per shard.
         pre_electric = {}
         step_grad_eps = {}
         for shard in shards:
@@ -870,11 +1082,9 @@ class _DistributedFDTDGradientBridge:
                 step_grad_eps[shard.rank] = (gx, gy, gz)
         _synchronize(devices)
 
-        # Transposed electric halo: left ghost AdjEy/Ez -> right owner, zero ghost.
         distributed.transport.exchange_electric_adjoint(shards, pre_electric)
         _synchronize(devices)
 
-        # Phase 3: magnetic decay pullback -> pre-step H adjoint, per shard.
         pre_magnetic = {}
         for shard in shards:
             with torch.cuda.device(shard.device):
@@ -883,39 +1093,102 @@ class _DistributedFDTDGradientBridge:
                 )
         _synchronize(devices)
 
-        # Per-shard source-term eps gradient + grad_eps accumulation, then roll the
-        # adjoint state back one step.
+        per_shard = {
+            shard.rank: (
+                {**pre_electric[shard.rank], **pre_magnetic[shard.rank]},
+                step_grad_eps[shard.rank],
+                adj_h_mid[shard.rank],
+            )
+            for shard in shards
+        }
+        return per_shard, _STANDARD_BACKEND_LABEL
+
+    def _reverse_phases_cpml(
+        self,
+        distributed,
+        shards,
+        devices,
+        *,
+        offset,
+        trajectories,
+        mid_magnetic,
+        post,
+        eps_by_shard,
+    ):
+        """CPML reverse phases with the two transposed Yee halos.
+
+        ``reverse_cpml_phase_electric`` (electric adjoint -> pre-step E/psi_e
+        adjoint + eps gradient, folding curl(H) into the mid-step H adjoint that is
+        pre-seeded with the post-step H adjoint) -> transposed magnetic halo (Hy/Hz)
+        -> ``reverse_cpml_phase_magnetic`` (magnetic-decay + psi_h pullback ->
+        pre-step H/psi_h adjoint, folding curl(E) into the pre-step E adjoint) ->
+        transposed electric halo (Ey/Ez). No psi halo is exchanged: the x-CPML
+        pinning invariant (asserted at prepare) keeps every internal-face psi
+        inactive, so the cross-interface curl coupling rides the Yee field halos
+        exactly as on the standard path (S4 audit).
+        """
+        ctx_by_rank = {}
+        adj_h_mid = {}
         for shard in shards:
-            gx, gy, gz = step_grad_eps[shard.rank]
+            forward_state = trajectories[shard.rank][offset]
             eps_ex, eps_ey, eps_ez = eps_by_shard[shard.rank]
+            mids = mid_magnetic[shard.rank][offset]
             with torch.cuda.device(shard.device):
-                step_result = _ReverseStepResult(
-                    pre_step_adjoint={
-                        **pre_electric[shard.rank],
-                        **pre_magnetic[shard.rank],
-                    },
-                    grad_eps_ex=gx,
-                    grad_eps_ey=gy,
-                    grad_eps_ez=gz,
-                    backend=_STANDARD_BACKEND_LABEL,
-                    magnetic_output_adjoint=adj_h_mid[shard.rank],
-                )
-                step_result = _accumulate_source_term_gradients(
-                    step_result,
-                    solver=shard.solver,
-                    adjoint_state=post[shard.rank],
-                    time_value=time_value,
+                ctx = allocate_cpml_reverse_context(
+                    shard.solver,
+                    forward_state,
+                    post[shard.rank],
                     eps_ex=eps_ex,
                     eps_ey=eps_ey,
                     eps_ez=eps_ez,
-                    resolved_source_terms=resolved_by_shard[shard.rank],
                 )
-                accum = grad_eps_accum[shard.rank]
-                accum["Ex"] = accum["Ex"] + step_result.grad_eps_ex
-                accum["Ey"] = accum["Ey"] + step_result.grad_eps_ey
-                accum["Ez"] = accum["Ez"] + step_result.grad_eps_ez
-                adjoint_states[shard.rank] = dict(step_result.pre_step_adjoint)
+                reverse_cpml_phase_electric(
+                    shard.solver,
+                    forward_state,
+                    post[shard.rank],
+                    ctx,
+                    hx_mid=mids["Hx"],
+                    hy_mid=mids["Hy"],
+                    hz_mid=mids["Hz"],
+                    eps_ex=eps_ex,
+                    eps_ey=eps_ey,
+                    eps_ez=eps_ez,
+                )
+                ctx_by_rank[shard.rank] = ctx
+                adj_h_mid[shard.rank] = ctx.magnetic_output_adjoint
         _synchronize(devices)
+
+        distributed.transport.exchange_magnetic_adjoint(shards, adj_h_mid)
+        _synchronize(devices)
+
+        for shard in shards:
+            with torch.cuda.device(shard.device):
+                reverse_cpml_phase_magnetic(
+                    shard.solver, post[shard.rank], ctx_by_rank[shard.rank]
+                )
+        _synchronize(devices)
+
+        # The pre-step E adjoint (Ey/Ez) lives inside ctx.pre_step_adjoint; the
+        # electric halo accumulates the left ghost into the right owner in place.
+        pre_electric = {
+            shard.rank: ctx_by_rank[shard.rank].pre_step_adjoint for shard in shards
+        }
+        distributed.transport.exchange_electric_adjoint(shards, pre_electric)
+        _synchronize(devices)
+
+        per_shard = {
+            shard.rank: (
+                ctx_by_rank[shard.rank].pre_step_adjoint,
+                (
+                    ctx_by_rank[shard.rank].grad_eps_ex,
+                    ctx_by_rank[shard.rank].grad_eps_ey,
+                    ctx_by_rank[shard.rank].grad_eps_ez,
+                ),
+                adj_h_mid[shard.rank],
+            )
+            for shard in shards
+        }
+        return per_shard, _CPML_BACKEND_LABEL
 
     def _material_pullback(self, distributed, shards, base_inputs, grad_eps_accum):
         global_grad_eps = {}
