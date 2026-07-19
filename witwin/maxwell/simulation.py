@@ -579,6 +579,7 @@ class Simulation:
         self._validate_method_scene_features()
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
+        self._validate_breakdown_support()
         waveport_excitation = self._waveport_excitation()
         if waveport_excitation is not None:
             prepared_scene = prepare_scene(self.scene)
@@ -635,11 +636,38 @@ class Simulation:
         self._validate_method_scene_features()
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
+        self._validate_breakdown_support()
         if self.method == SimulationMethod.FDFD:
             return self._run_fdfd()
         if self.method == SimulationMethod.FDTD:
             return self._run_fdtd()
         raise ValueError(f"Unsupported simulation method {self.method!r}.")
+
+    def _validate_breakdown_support(self) -> None:
+        """Fail closed for unsupported deterministic-breakdown combinations.
+
+        Deterministic dynamic breakdown is a time-domain FDTD feature. The hard
+        (non-smooth) feedback is not differentiable, so a trainable scene is
+        rejected rather than silently running a forward-only solve. Multi-GPU is
+        rejected by the distributed solver's static-capability guard.
+        """
+        from .compiler.breakdown import scene_has_breakdown
+
+        if not scene_has_breakdown(self.scene):
+            return
+        if self.method != SimulationMethod.FDTD:
+            raise NotImplementedError(
+                "DielectricBreakdown is a time-domain (FDTD) feedback model; the "
+                "frequency-domain solver has no dynamic conductivity update. Run the "
+                "breakdown scene with the FDTD method."
+            )
+        if self.has_trainable_parameters:
+            raise NotImplementedError(
+                "Trainable scenes cannot enable hard dielectric breakdown: the "
+                "field-duration/latching switch is non-differentiable at the trigger "
+                "time, so prepare() rejects backward rather than fabricating a gradient. "
+                "Use a smooth breakdown-risk surrogate for optimization (deferred)."
+            )
 
     def _validate_network_solver(self) -> None:
         if getattr(self.scene, "networks", ()) and self.method != SimulationMethod.FDTD:
@@ -1541,6 +1569,11 @@ class Simulation:
             use_full_field_dft=use_full_field_dft,
             dft_cfg=dft_cfg,
         )
+        breakdown = None
+        if getattr(solver, "breakdown_enabled", False):
+            from .fdtd.runtime.breakdown import finalize_breakdown_data
+
+            breakdown = finalize_breakdown_data(solver)
         return Result(
             method="fdtd",
             scene=self.scene,
@@ -1556,6 +1589,7 @@ class Simulation:
             metadata=self.metadata,
             solver_stats=solver_stats,
             raw_output=raw_output,
+            breakdown=breakdown,
         )
 
     def _build_fdtd_solver_stats(

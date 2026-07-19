@@ -56,6 +56,7 @@ from ..wire import (
     prepare_wire_monitors,
     sample_and_update_wire,
 )
+from .breakdown import advance_breakdown_state, initialize_breakdown_runtime
 
 
 def iter_cpml_memory_regions(solver, attr_name):
@@ -1592,6 +1593,11 @@ def init_field(solver):
     initialize_wire_runtime(solver)
     initialize_boundary_state(solver)
     solver._build_update_coefficients()
+    # Compile the deterministic breakdown state machine after the base update
+    # coefficients exist (they seed the exact intact-edge reconstruction). A scene
+    # with no breakdown material leaves solver.breakdown_enabled False and adds no
+    # per-step machinery.
+    initialize_breakdown_runtime(solver)
     solver._initialize_dispersive_state()
     solver._initialize_magnetic_dispersive_state()
     solver._initialize_gyromagnetic_state()
@@ -2159,6 +2165,12 @@ def solve(
         prepare_circuit_graph_runners(solver, use_cuda_graph)
     prepare_wire_monitors(solver, time_steps, dft_window)
 
+    # Deterministic breakdown mutates the electric update coefficients in place
+    # between steps from an accumulated per-cell state; a captured CUDA graph would
+    # freeze the pre-breakdown coefficient reads, so keep the eager path.
+    if getattr(solver, "breakdown_enabled", False):
+        use_cuda_graph = False
+
     solver._shutoff_triggered = False
     solver._shutoff_step = None
     solver._shutoff_peak = torch.zeros((), device=solver.device, dtype=solver.Ex.dtype)
@@ -2262,6 +2274,11 @@ def solve(
                 else:
                     solver.accumulate_dft(n)
             run_port_observers()
+        if getattr(solver, "breakdown_enabled", False):
+            # After the full E-update (sources, PEC clamp, and tail applied), run the
+            # per-cell breakdown state machine and scatter the updated conductivity
+            # into the electric coefficients used by the next step.
+            advance_breakdown_state(solver, n)
         solver.accumulate_observers(n)
         solver.accumulate_time_observers(n)
         solver.accumulate_breakdown_observers(n)

@@ -61,12 +61,17 @@ from .breakdown_stress import (
     ComponentStressData,
 )
 from .geometry import ComplexPolySlab, PolySlab
+from .breakdown import (
+    BreakdownEvent,
+    BreakdownResultData,
+)
 from .media import (
     CustomDebyePole,
     CustomDrudePole,
     CustomLorentzPole,
     DebyePole,
     DiagonalTensor3,
+    DielectricBreakdown,
     DrudePole,
     Graphene,
     GyromagneticFerrite,
@@ -209,6 +214,8 @@ __all__ = [
     "BeamData",
     "BeamWeights",
     "Box",
+    "BreakdownEvent",
+    "BreakdownResultData",
     "ClosedSurfaceMonitor",
     "Capacitor",
     "Circuit",
@@ -243,6 +250,7 @@ __all__ = [
     "CustomSourceTime",
     "Cylinder",
     "DebyePole",
+    "DielectricBreakdown",
     "DipoleEmissionMonitor",
     "Domain",
     "DrudePole",

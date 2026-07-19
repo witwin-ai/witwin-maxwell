@@ -184,7 +184,35 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # Measured electrostatic capability count rises 152 -> 153 total; budget raised
 # 152 -> 153. Lower it when MaterialRegion electrostatics (or tensor-eps / open
 # boundary, Phase 4) lands.
-CAPABILITY_GUARD_BUDGET = 153
+# 2026-07-19 (plan 13 Phase 4, deterministic dynamic dielectric breakdown): 144 -> 159
+# (+15 capability). The DielectricBreakdown feedback model lands with fifteen
+# fail-closed capability guards, all genuine gaps whose closure belongs to a later
+# breakdown phase:
+#   media.py (10): the DielectricBreakdown descriptor rejects the four unsupported
+#   descriptor settings whose state machines are a later phase (model !=
+#   'field_duration', state != 'latching', a reserved recovery model, a reserved
+#   cumulative-damage model), and a Material carrying a breakdown descriptor rejects
+#   the six coefficient-path combinations the scalar conductivity scatter cannot
+#   represent yet (PEC, anisotropic tensor, dispersive poles, instantaneous
+#   nonlinearity, time modulation, 2D sheet);
+#   fdtd/runtime/breakdown.py (3): initialize_breakdown_runtime rejects a complex
+#   (Bloch) field run, a scene that mixes breakdown with dispersive/nonlinear/full-
+#   anisotropic/modulated media, and a gyromagnetic-ferrite scene -- each shares or
+#   redefines the per-edge E-update coefficient representation the breakdown scatter
+#   rewrites;
+#   simulation.py (2): _validate_breakdown_support rejects a frequency-domain (FDFD)
+#   breakdown scene (no dynamic conductivity update) and a trainable breakdown scene
+#   (the hard field-duration/latching switch is non-differentiable at the trigger
+#   time; the smooth surrogate is deferred).
+# The multi-GPU breakdown reject (fdtd/distributed/solver.py) and the event-buffer
+# overflow guard (fdtd/runtime/breakdown.py) raise ValueError/RuntimeError and are
+# not counted here. Lower this budget as the later breakdown phases (recovery/damage
+# state machines, the coefficient-path compositions, FDFD/trainable surrogates, and
+# distributed breakdown) land.
+# 2026-07-19 (merge reconciliation, plans 12 + 13 phase 4): the electrostatic
+# ledger above (144 -> 153, net +9) and the breakdown ledger above (144 -> 159,
+# net +15) merged onto the same base; the combined measured total is 144 + 9 + 15.
+CAPABILITY_GUARD_BUDGET = 168
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

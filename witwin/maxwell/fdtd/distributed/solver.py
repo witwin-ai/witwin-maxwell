@@ -321,6 +321,15 @@ class DistributedFDTD:
                 "only; trainable geometry, material perturbation, circuit, and RF/port "
                 "parameters have no distributed reverse core yet."
             )
+        from ...compiler.breakdown import scene_has_breakdown
+
+        if scene_has_breakdown(self.logical_scene):
+            raise ValueError(
+                "Multi-GPU FDTD does not yet support deterministic dielectric breakdown: "
+                "the per-cell state machine, conductivity scatter, and event log require an "
+                "owner-write halo contract and deterministic cross-shard event ordering that "
+                "the distributed runtime does not implement yet."
+            )
         boundary = self.logical_scene.boundary
         if getattr(self.logical_scene, "thin_wires", ()):
             self._validate_distributed_wire_support()

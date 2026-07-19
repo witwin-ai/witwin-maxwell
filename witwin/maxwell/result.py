@@ -1194,6 +1194,7 @@ class Result:
         metadata: dict[str, Any] | None = None,
         solver_stats: dict[str, Any] | None = None,
         raw_output: Any = None,
+        breakdown=None,
     ):
         self.method = method
         self.scene = scene
@@ -1215,7 +1216,25 @@ class Result:
         self._sharded_manifest = None
         self._shard_paths: tuple[Path, ...] = ()
         self.raw_output = raw_output
+        self._breakdown = breakdown
         self.plot = ResultPlotter(self)
+
+    @property
+    def breakdown_data(self):
+        """Deterministic dielectric-breakdown outputs, or ``None`` for scenes with no
+        breakdown material. See :class:`witwin.maxwell.breakdown.BreakdownResultData`.
+
+        Distinct from :meth:`breakdown`, which returns the non-feedback
+        dielectric-stress record of a named :class:`BreakdownMonitor`."""
+        return self._breakdown
+
+    @property
+    def breakdown_events(self):
+        """The typed breakdown event log ordered by ``(step, cell_index)`` (empty tuple
+        when breakdown is inactive)."""
+        if self._breakdown is None:
+            return ()
+        return self._breakdown.events
 
     @property
     def prepared_scene(self):
