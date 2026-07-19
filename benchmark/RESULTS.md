@@ -643,3 +643,27 @@ RF port validation (audit S1, 2026-07-18, round 4). The binding metric for each 
 | rf/differential_pair | wave-level | see artifact | - | - | - | blocked | pending-generation |
 
 _RF section regenerated: 2026-07-19T04:48:42+00:00_
+
+## RF / antenna external reference generation
+
+External reference-solver cross-reference generation for the RF / antenna scenes (M3, 2026-07-19). Each row is the honest outcome of an adapter-driven generation attempt (`python -m benchmark.rf_tidy3d_references`): the scene is exported through `Scene.to_tidy3d`, gated on being physically runnable (>= 1 source), and only then cost-estimated and cloud-run. A `pending-generation` status is NOT a fabricated comparison -- it records that no numerical cross-reference exists yet and names the concrete reason; the analytic transmission-line / waveguide / dipole references remain the binding gate. The four scenes below currently export with `sources=0` (their port / lumped-port excitation has no adapter source mapping), so generation fail-closes at the runnable gate BEFORE any cloud cost; mapping port/lumped excitation to the reference solver is a deferred adapter feature.
+
+| Scene | Exported sources | Exported monitors | Runnable | Reference | Task id | Cost (FlexCredits) | Reason |
+| --- | ---: | ---: | :---: | --- | --- | ---: | --- |
+| rf/coax_thru | 0 | 0 | no | pending-generation | - | - | adapter exported the scene with sources=0: the port/lumped-port excitation has no external-reference-solver source mapping (adapter _convert_source maps only field sources), so the exported reference simulation has nothing to drive. Refused before any cloud cost. Mapping port/lumped excitation to the reference solver is a deferred adapter feature. |
+| rf/lumped_open_short_match | 0 | 0 | no | pending-generation | - | - | adapter exported the scene with sources=0: the port/lumped-port excitation has no external-reference-solver source mapping (adapter _convert_source maps only field sources), so the exported reference simulation has nothing to drive. Refused before any cloud cost. Mapping port/lumped excitation to the reference solver is a deferred adapter feature. |
+| antenna/half_wave_dipole | 0 | 6 | no | pending-generation | - | - | adapter exported the scene with sources=0: the port/lumped-port excitation has no external-reference-solver source mapping (adapter _convert_source maps only field sources), so the exported reference simulation has nothing to drive. Refused before any cloud cost. Mapping port/lumped excitation to the reference solver is a deferred adapter feature. |
+| antenna/patch | 0 | 6 | no | pending-generation | - | - | adapter exported the scene with sources=0: the port/lumped-port excitation has no external-reference-solver source mapping (adapter _convert_source maps only field sources), so the exported reference simulation has nothing to drive. Refused before any cloud cost. Mapping port/lumped excitation to the reference solver is a deferred adapter feature. |
+
+_RF/antenna reference section regenerated: 2026-07-19T15:02:30+00:00_
+
+## Antenna wave-level validation
+
+FDTD antenna validation (plan-01 Phase 4, 2026-07-19). Each row is measured from a real `Scene -> Simulation -> Result` run whose near-field-to-far-field transform is consumed through `Result.antenna` with NO monkeypatch (the driven lumped feed `PortData` and the `ClosedSurfaceMonitor` both come from the time-stepped solver). `antenna/half_wave_dipole` is a radiation-physics PASS (broadside directivity in the 2.15 dBi band, E-plane sin^2 pattern, radiated-vs-accepted power closure, and the radiation resistance sweeping through the thin-dipole 73 Ohm class; the input reactance carries a documented delta-gap feed offset and is not gated). `antenna/patch` is a PIPELINE pass with a documented PHYSICS gap: `Result.antenna` runs end to end over the finite grounded slab (6 air-exterior NF2FF faces per frequency, p_rad>0, closure<0.05), but the probe on the thick finite-ground slab is reactance-dominated and radiates off-broadside, so the matched-broadside TM010 D >= 5 dBi target is an open gap (strict xfail in the e2e test). The external reference-solver cross-check is `pending-generation` for both: the adapter has no lumped-feed source mapping, so the exported reference simulation is source-less (see the RF/antenna external reference generation section). Reproduce with `tests/rf/antenna/test_antenna_benchmark_e2e.py`.
+
+| Scene | Gate class | Quantity | Measured | Reference | Rel error | Status | Tidy3D ref |
+| --- | --- | --- | ---: | ---: | ---: | --- | --- |
+| antenna/half_wave_dipole | wave-level | broadside directivity | 2.194 | 2.156 | 1.756% | pass | pending-generation (sources=0; see RF/antenna reference section) |
+| antenna/patch | wave-level | broadside directivity (in-band max) | -6.974 | 5 | 239.471% | gap | pending-generation (sources=0; see RF/antenna reference section) |
+
+_Section regenerated: 2026-07-19T15:09:03+00:00_

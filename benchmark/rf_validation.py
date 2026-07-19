@@ -1112,6 +1112,257 @@ def run_lumped_open_short_match() -> SceneReport:
     return report
 
 
+# --------------------------------------------------------------------------- #
+# FDTD antenna benchmarks (real Result.antenna path, no monkeypatch).          #
+# --------------------------------------------------------------------------- #
+def _run_antenna_fdtd(scene, frequencies, *, design_frequency, fwidth, physical_ns):
+    """Drive an antenna scene through a real FDTD run and Result.antenna.
+
+    Mirrors the end-to-end test config (a Gaussian feed pulse injected at the
+    lumped feed port, stepped to a fixed physical duration), so the RESULTS row
+    numbers are consistent with tests/rf/antenna/test_antenna_benchmark_e2e.py.
+    """
+    simulation = mw.Simulation.fdtd(
+        scene,
+        frequencies=list(frequencies),
+        excitations=mw.PortExcitation(
+            "feed",
+            source_time=mw.GaussianPulse(frequency=design_frequency, fwidth=fwidth),
+        ),
+        run_time=mw.TimeConfig(time_steps=1),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+        full_field_dft=False,
+    )
+    prepared = simulation.prepare()
+    steps = math.ceil(physical_ns * 1.0e-9 / float(prepared.solver.dt))
+    simulation.config.run_time = mw.TimeConfig(time_steps=steps)
+    return prepared.run()
+
+
+def _antenna_reference_status(name: str) -> str:
+    """Short external-reference status for the antenna RESULTS row (no cloud)."""
+    try:
+        from benchmark.rf_tidy3d_references import PENDING, attempt_reference
+
+        record = attempt_reference(name, run_cloud=False)
+        if record.status == PENDING:
+            return f"{TIDY3D_PENDING} (sources={record.exported_sources}; see RF/antenna reference section)"
+        return "generated"
+    except Exception as exc:  # noqa: BLE001 - never let the status probe break the run
+        return f"{TIDY3D_PENDING} ({type(exc).__name__})"
+
+
+def run_half_wave_dipole() -> SceneReport:
+    from benchmark.scenes.antenna.half_wave_dipole import (
+        analytic_directivity_dbi,
+        analytic_radiation_resistance,
+        default_frequencies,
+        half_wave_dipole_scene,
+    )
+
+    design_frequency = 3.0e9
+    report = SceneReport(
+        name="antenna/half_wave_dipole",
+        description=(
+            "Center-fed thin-wire half-wave dipole (lumped wire-gap feed + NF2FF box): "
+            "real Result.antenna directivity / pattern / power balance vs the analytic "
+            "thin dipole."
+        ),
+        gate_class=WAVE_LEVEL,
+        status="pending",
+        reference="analytic thin half-wave dipole (D=2.15 dBi, R~73 Ohm, sin^2 pattern)",
+        tidy3d_reference=_antenna_reference_status("antenna/half_wave_dipole"),
+        target="broadside directivity in [1.9,2.4] dBi; E-plane sin^2 corr >= 0.99; power closure < 0.08",
+    )
+    try:
+        frequencies = default_frequencies(design_frequency)
+        scene = half_wave_dipole_scene(
+            design_frequency=design_frequency, frequencies=frequencies, device=_device()
+        )
+        result = _run_antenna_fdtd(
+            scene, frequencies, design_frequency=design_frequency, fwidth=1.5e9, physical_ns=12.0
+        )
+        design_index = frequencies.index(design_frequency)
+        resistance = result.port("feed").z_in.real
+        data = result.antenna(
+            surface="radiation", driven_port="feed", theta_points=181, phi_points=8, radius=10.0
+        )
+    except Exception as exc:  # noqa: BLE001 - record honestly
+        report.status = "error"
+        report.notes.append(f"{type(exc).__name__}: {exc}")
+        return report
+
+    theta = data.theta[:, 0]
+    e_plane = data.directivity[design_index, :, 0]
+    ref_pattern = torch.sin(theta).square()
+    pattern = e_plane / e_plane.max()
+    ref_pattern = ref_pattern / ref_pattern.max()
+    sin2_corr = float(
+        torch.sum(pattern * ref_pattern)
+        / torch.sqrt(torch.sum(pattern.square()) * torch.sum(ref_pattern.square()))
+    )
+    directivity_dbi = float(data.directivity_db.amax(dim=(-2, -1))[design_index])
+    analytic_dbi = analytic_directivity_dbi()
+    p_rad = float(data.p_rad[design_index])
+    p_acc = float(data.p_accepted[design_index])
+    closure = abs(p_rad - p_acc) / abs(p_acc)
+    r_min = float(resistance.min())
+    r_max = float(resistance.max())
+
+    report.metrics.append(
+        {"quantity": "broadside directivity", "measured": directivity_dbi,
+         "reference": analytic_dbi, "rel_error": _rel(directivity_dbi, analytic_dbi),
+         "unit": "dBi", "class": WAVE_LEVEL}
+    )
+    report.metrics.append(
+        {"quantity": "E-plane sin^2 correlation", "measured": sin2_corr, "reference": 1.0,
+         "rel_error": 1.0 - sin2_corr, "class": WAVE_LEVEL}
+    )
+    report.metrics.append(
+        {"quantity": "radiated-vs-accepted power closure", "measured": closure,
+         "reference": 0.0, "class": WAVE_LEVEL}
+    )
+    report.conservation = {
+        "directivity_dbi": directivity_dbi,
+        "analytic_directivity_dbi": analytic_dbi,
+        "sin2_correlation": sin2_corr,
+        "power_closure": closure,
+        "radiation_resistance_min_ohm": r_min,
+        "radiation_resistance_max_ohm": r_max,
+        "analytic_radiation_resistance_ohm": analytic_radiation_resistance(),
+        "frequencies_hz": [float(f) for f in frequencies],
+    }
+    report.tolerance_basis = (
+        "Radiation physics is the binding evidence: broadside directivity in "
+        "[1.9,2.4] dBi and within 0.3 dB of 2.15; E-plane pattern sin^2-correlation "
+        ">= 0.99; radiated-vs-accepted power closure < 0.08; and R sweeps THROUGH the "
+        "thin-dipole 73 Ohm class. Input reactance carries a documented positive "
+        "delta-gap feed offset and is not gated."
+    )
+    report.falsification = (
+        "EXECUTED (tests/rf/antenna/test_antenna_benchmark_e2e.py): sin^2 corr REAL "
+        f"{sin2_corr:.3f} pass vs isotropic ~0.81 / cos^2 ~0.33 fail; directivity REAL "
+        f"{directivity_dbi:.3f} dBi pass vs isotropic 0.0 fail; closure REAL {closure:.3f} "
+        "pass vs 2x-mis-scaled p_rad ~0.92 fail."
+    )
+    passed = (
+        1.9 <= directivity_dbi <= 2.4
+        and abs(directivity_dbi - analytic_dbi) <= 0.3
+        and sin2_corr >= 0.99
+        and closure < 0.08
+        and r_min < 73.0 < r_max
+    )
+    report.status = "pass" if passed else "gap"
+    report.notes.append(
+        f"Real NF2FF Result.antenna: D={directivity_dbi:.3f} dBi, sin^2 corr {sin2_corr:.4f}, "
+        f"power closure {closure:.4f}, R sweep {r_min:.1f}->{r_max:.1f} Ohm through 73 Ohm. "
+        "External reference-solver cross-check is pending-generation (adapter has no "
+        "lumped-feed source mapping; see the RF/antenna reference section)."
+    )
+    return report
+
+
+def run_patch() -> SceneReport:
+    from benchmark.scenes.antenna.patch import (
+        DEFAULT_PERMITTIVITY,
+        PATCH_LENGTH_CELLS,
+        PATCH_WIDTH_CELLS,
+        SUBSTRATE_HEIGHT_CELLS,
+        cavity_resonance,
+        patch_antenna_scene,
+    )
+
+    frequencies = tuple(f * 1e9 for f in (4.4, 4.8, 5.2, 5.6, 6.0))
+    dx = 1.0e-3
+    f_cavity = cavity_resonance(
+        eps_r=DEFAULT_PERMITTIVITY,
+        height=SUBSTRATE_HEIGHT_CELLS * dx,
+        length=PATCH_LENGTH_CELLS * dx,
+        width=PATCH_WIDTH_CELLS * dx,
+    )
+    report = SceneReport(
+        name="antenna/patch",
+        description=(
+            "Probe-fed rectangular patch on a finite grounded slab: real Result.antenna "
+            "pipeline over the NF2FF box; matched-broadside TM010 is a documented gap."
+        ),
+        gate_class=WAVE_LEVEL,
+        status="pending",
+        reference=f"cavity model TM010 (f_r={f_cavity/1e9:.3f} GHz), broadside D >= 5 dBi",
+        tidy3d_reference=_antenna_reference_status("antenna/patch"),
+        target="pipeline valid (6 NF2FF faces, p_rad>0, closure<0.05); broadside D>=5 dBi matched (GAP)",
+    )
+    try:
+        scene = patch_antenna_scene(frequencies=frequencies, device=_device())
+        result = _run_antenna_fdtd(
+            scene, frequencies, design_frequency=5.2e9, fwidth=2.2e9, physical_ns=16.0
+        )
+        data = result.antenna(
+            surface="radiation", driven_port="feed", theta_points=91, phi_points=73, radius=10.0
+        )
+    except Exception as exc:  # noqa: BLE001 - record honestly
+        report.status = "error"
+        report.notes.append(f"{type(exc).__name__}: {exc}")
+        return report
+
+    theta = data.theta[:, 0]
+    broadside_index = int(torch.argmin(torch.abs(theta)))
+    broadside_dbi = float(data.directivity_db[:, broadside_index, :].amax())
+    reflection = result.port("feed").reflection_coefficient.abs()
+    matched_db_best = float((20.0 * torch.log10(reflection)).min())
+    closure = torch.abs(data.p_rad - data.p_accepted) / torch.abs(data.p_accepted)
+    closure_min = float(closure.min())
+    faces = [len(c.surfaces) for c in data.surface_currents]
+    pipeline_valid = (
+        bool(torch.all(data.p_rad > 0.0))
+        and bool(torch.all(torch.isfinite(data.directivity)))
+        and all(n == 6 for n in faces)
+        and closure_min < 0.05
+    )
+
+    report.metrics.append(
+        {"quantity": "broadside directivity (in-band max)", "measured": broadside_dbi,
+         "reference": 5.0, "rel_error": _rel(broadside_dbi, 5.0), "unit": "dBi",
+         "class": WAVE_LEVEL,
+         "note": "matched-broadside TM010 gate target; documented GAP on this thick "
+         "finite-ground slab"}
+    )
+    report.conservation = {
+        "pipeline_valid": pipeline_valid,
+        "nf2ff_faces_per_freq": faces,
+        "power_closure_min": closure_min,
+        "broadside_directivity_dbi_max": broadside_dbi,
+        "best_match_db": matched_db_best,
+        "cavity_resonance_ghz": f_cavity / 1e9,
+        "frequencies_hz": [float(f) for f in frequencies],
+    }
+    report.tolerance_basis = (
+        "Two-part: (1) PIPELINE (pass) -- Result.antenna runs end to end over the "
+        "grounded slab, returns 6 air-exterior NF2FF faces per frequency, p_rad>0, and "
+        "a best radiated-vs-accepted closure < 0.05. (2) PHYSICS (gap) -- the probe on "
+        "this thick finite-ground slab is reactance-dominated (best |S11| ~ 0 dB) and "
+        "radiates off-broadside, so the matched-broadside TM010 D >= 5 dBi target is not "
+        "met and is a documented gap (strict xfail in the e2e test)."
+    )
+    report.falsification = (
+        "EXECUTED (tests/rf/antenna/test_antenna_benchmark_e2e.py): the pipeline gate is "
+        "a real PASS; the physical matched-broadside gate genuinely xfails (broadside "
+        f"D max {broadside_dbi:.2f} dBi < 5 and best match {matched_db_best:.1f} dB > -10), "
+        "so its strict xfail is exercised, not vacuous."
+    )
+    # Pipeline passes; the physics gate is an honest, documented gap.
+    report.status = "gap"
+    report.notes.append(
+        f"Pipeline valid={pipeline_valid} (faces={faces}, closure_min={closure_min:.4f}); "
+        f"broadside D max {broadside_dbi:.2f} dBi, best match {matched_db_best:.1f} dB, cavity "
+        f"f_r ~ {f_cavity/1e9:.3f} GHz (outside the 4.4-6.0 GHz run band). The "
+        "matched-broadside TM010 physics + the external reference-solver cross-check remain "
+        "open (feed/ground redesign); reference is pending-generation (no lumped-feed adapter "
+        "mapping)."
+    )
+    return report
+
+
 SCENE_RUNNERS = {
     "rf/coax_thru": run_coax_thru,
     "rf/rectangular_waveguide": run_rectangular_waveguide,
@@ -1119,6 +1370,8 @@ SCENE_RUNNERS = {
     "rf/series_parallel_rlc": run_series_rlc,
     "rf/lumped_open_short_match": run_lumped_open_short_match,
     "rf/differential_pair": run_differential_pair,
+    "antenna/half_wave_dipole": run_half_wave_dipole,
+    "antenna/patch": run_patch,
 }
 
 
@@ -1131,35 +1384,60 @@ def _write_artifact(report: SceneReport) -> Path:
 
 
 _SECTION_HEADER = "## RF wave-level validation"
+_ANTENNA_SECTION_HEADER = "## Antenna wave-level validation"
+
+_RF_INTRO = (
+    "RF port validation (audit S1, 2026-07-18, round 4). The binding metric for each "
+    "scene is measured from a real FDTD `Scene -> Simulation -> Result` run wherever "
+    "the two-port bench produces a usable S-matrix; it is NEVER taken from the 2D mode "
+    "eigensolve. This is NOT a set of passing wave-level scenes -- the per-scene status "
+    "column below is authoritative. `rf/coax_thru` is a wave-level PASS: a terminated "
+    "air-line TEM two-port (conductors run through the computational PML to the padded "
+    "grid edges) whose S-matrix is assembled by solving `B = S*A` across the drive "
+    "columns; the precondition is extraction conditioning (cond(A) small) plus "
+    "post-solve passivity (max singular value <= 1 + slack), with `a_passive/a_driven` "
+    "kept only as a bench-quality diagnostic, and `beta` from `arg(S21)/L` tracks `k0`. "
+    "`rf/rectangular_waveguide` is BLOCKED on the transverse mode-operator redesign: the "
+    "vector operator cannot yet produce a clean full-grid TE10 on a hollow metallic "
+    "guide (it decouples the odd/even sublattices), so the selected mode is "
+    "checkerboard-aliased and the benchmark's `sin(pi y/a)`-correlation gate refuses it. "
+    "`rf/microstrip_two_port` and `rf/differential_pair` are BLOCKED (a contour-snap "
+    "error fires first; underneath, WaveModeSpec('tem') is categorically inapplicable to "
+    "their inhomogeneous substrate+air cross-sections). `rf/series_parallel_rlc` is an "
+    "open gap (parasitic-dominated: the load-port peak does not track C). "
+    "`rf/lumped_open_short_match` is a wave-level FAIL (the feed port is decoupled from "
+    "the load). Gate classes are the verbatim taxonomy "
+    "(`docs/reference/gate-classification.md`); `modal-eigensolve` quantities are "
+    "supporting only. Per-scene machine-readable artifacts (with per-tier complex S(f) "
+    "and port a/b) live under `docs/assessments/rf-wave-validation-2026-07-18/`."
+)
+
+_ANTENNA_INTRO = (
+    "FDTD antenna validation (plan-01 Phase 4, 2026-07-19). Each row is measured from a "
+    "real `Scene -> Simulation -> Result` run whose near-field-to-far-field transform is "
+    "consumed through `Result.antenna` with NO monkeypatch (the driven lumped feed "
+    "`PortData` and the `ClosedSurfaceMonitor` both come from the time-stepped solver). "
+    "`antenna/half_wave_dipole` is a radiation-physics PASS (broadside directivity in the "
+    "2.15 dBi band, E-plane sin^2 pattern, radiated-vs-accepted power closure, and the "
+    "radiation resistance sweeping through the thin-dipole 73 Ohm class; the input "
+    "reactance carries a documented delta-gap feed offset and is not gated). "
+    "`antenna/patch` is a PIPELINE pass with a documented PHYSICS gap: `Result.antenna` "
+    "runs end to end over the finite grounded slab (6 air-exterior NF2FF faces per "
+    "frequency, p_rad>0, closure<0.05), but the probe on the thick finite-ground slab is "
+    "reactance-dominated and radiates off-broadside, so the matched-broadside TM010 "
+    "D >= 5 dBi target is an open gap (strict xfail in the e2e test). The external "
+    "reference-solver cross-check is `pending-generation` for both: the adapter has no "
+    "lumped-feed source mapping, so the exported reference simulation is source-less "
+    "(see the RF/antenna external reference generation section). Reproduce with "
+    "`tests/rf/antenna/test_antenna_benchmark_e2e.py`."
+)
 
 
-def _results_section(reports: list[SceneReport]) -> str:
+def _results_section(reports: list[SceneReport], *, header: str, intro: str) -> str:
     lines = [
-        _SECTION_HEADER,
+        header,
         "",
-        "RF port validation (audit S1, 2026-07-18, round 4). The binding metric for each "
-        "scene is measured from a real FDTD `Scene -> Simulation -> Result` run wherever "
-        "the two-port bench produces a usable S-matrix; it is NEVER taken from the 2D mode "
-        "eigensolve. This is NOT a set of passing wave-level scenes -- the per-scene status "
-        "column below is authoritative. `rf/coax_thru` is a wave-level PASS: a terminated "
-        "air-line TEM two-port (conductors run through the computational PML to the padded "
-        "grid edges) whose S-matrix is assembled by solving `B = S*A` across the drive "
-        "columns; the precondition is extraction conditioning (cond(A) small) plus "
-        "post-solve passivity (max singular value <= 1 + slack), with `a_passive/a_driven` "
-        "kept only as a bench-quality diagnostic, and `beta` from `arg(S21)/L` tracks `k0`. "
-        "`rf/rectangular_waveguide` is BLOCKED on the transverse mode-operator redesign: the "
-        "vector operator cannot yet produce a clean full-grid TE10 on a hollow metallic "
-        "guide (it decouples the odd/even sublattices), so the selected mode is "
-        "checkerboard-aliased and the benchmark's `sin(pi y/a)`-correlation gate refuses it. "
-        "`rf/microstrip_two_port` and `rf/differential_pair` are BLOCKED (a contour-snap "
-        "error fires first; underneath, WaveModeSpec('tem') is categorically inapplicable to "
-        "their inhomogeneous substrate+air cross-sections). `rf/series_parallel_rlc` is an "
-        "open gap (parasitic-dominated: the load-port peak does not track C). "
-        "`rf/lumped_open_short_match` is a wave-level FAIL (the feed port is decoupled from "
-        "the load). Gate classes are the verbatim taxonomy "
-        "(`docs/reference/gate-classification.md`); `modal-eigensolve` quantities are "
-        "supporting only. Per-scene machine-readable artifacts (with per-tier complex S(f) "
-        "and port a/b) live under `docs/assessments/rf-wave-validation-2026-07-18/`.",
+        intro,
         "",
         "| Scene | Gate class | Quantity | Measured | Reference | Rel error | Status | Tidy3D ref |",
         "| --- | --- | --- | ---: | ---: | ---: | --- | --- |",
@@ -1186,25 +1464,42 @@ def _results_section(reports: list[SceneReport]) -> str:
             )
         )
     lines.append("")
-    lines.append(f"_RF section regenerated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}_")
+    lines.append(f"_Section regenerated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}_")
     lines.append("")
     return "\n".join(lines)
 
 
-def _update_results_md(reports: list[SceneReport]) -> None:
-    section = _results_section(reports)
-    if not RESULTS_MD.exists():
-        RESULTS_MD.write_text(section, encoding="utf-8")
-        return
-    text = RESULTS_MD.read_text(encoding="utf-8")
-    if _SECTION_HEADER in text:
-        head, _, tail = text.partition(_SECTION_HEADER)
+def _section_spec(family: str) -> tuple[str, str]:
+    """(header, intro) for a scene-name family prefix (`rf` / `antenna`)."""
+    if family == "antenna":
+        return _ANTENNA_SECTION_HEADER, _ANTENNA_INTRO
+    return _SECTION_HEADER, _RF_INTRO
+
+
+def _replace_or_append_section(text: str, header: str, section: str) -> str:
+    if header in text:
+        head, _, tail = text.partition(header)
         rest = tail.split("\n", 1)[1] if "\n" in tail else ""
         next_idx = rest.find("\n## ")
         remainder = rest[next_idx + 1 :] if next_idx != -1 else ""
-        RESULTS_MD.write_text(head + section + remainder, encoding="utf-8")
-    else:
-        RESULTS_MD.write_text(text.rstrip() + "\n\n" + section, encoding="utf-8")
+        return head + section + remainder
+    return text.rstrip() + "\n\n" + section
+
+
+def _update_results_md(reports: list[SceneReport]) -> None:
+    # Group by scene family so an antenna-only run does not overwrite the RF
+    # section (and vice versa); each family owns its own RESULTS.md section.
+    families: dict[str, list[SceneReport]] = {}
+    for report in reports:
+        family = report.name.split("/", 1)[0]
+        families.setdefault(family, []).append(report)
+
+    text = RESULTS_MD.read_text(encoding="utf-8") if RESULTS_MD.exists() else ""
+    for family, family_reports in families.items():
+        header, intro = _section_spec(family)
+        section = _results_section(family_reports, header=header, intro=intro)
+        text = _replace_or_append_section(text, header, section)
+    RESULTS_MD.write_text(text, encoding="utf-8")
 
 
 def run(selected: list[str] | None = None) -> list[SceneReport]:
