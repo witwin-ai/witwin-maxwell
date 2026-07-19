@@ -368,6 +368,44 @@ def _median_absolute_deviation(values: list[float]) -> float:
     return statistics.median(abs(value - median) for value in values)
 
 
+def _variance_aware_gate(ratios: list[float], *, target_ratio: float) -> dict[str, Any]:
+    """Return the S2.3 variance-aware verdict for paired-round ratios.
+
+    Imported lazily so this module keeps its stdlib-only import-time surface
+    (``compare_no_feature_op_stream.py`` loads it by path without a package
+    context). Fewer than two rounds cannot support a confidence interval, so the
+    verdict records that the gate was not applicable rather than fabricating a
+    bound.
+    """
+
+    if len(ratios) < 2:
+        return {
+            "applicable": False,
+            "reason": "fewer than two paired rounds",
+            "target_ratio": float(target_ratio),
+            "rounds": len(ratios),
+        }
+    support_dir = str(Path(__file__).resolve().parent)
+    if support_dir not in sys.path:
+        sys.path.insert(0, support_dir)
+    from perf_variance_gate import evaluate_regression_gate
+
+    result = evaluate_regression_gate(ratios, target_ratio=target_ratio)
+    return {
+        "applicable": True,
+        "criterion": "95% CI upper bound of mean paired-round ratio < target",
+        "target_ratio": result.target_ratio,
+        "target_regression_pct": result.target_regression_pct,
+        "rounds": result.rounds,
+        "mean_ratio": result.mean_ratio,
+        "median_ratio": result.median_ratio,
+        "mad_ratio": result.mad_ratio,
+        "ci95_upper_ratio": result.ci95_upper_ratio,
+        "ci95_upper_regression_pct": result.ci95_upper_regression_pct,
+        "passed": result.passed,
+    }
+
+
 def _insert_checkout_on_path(root: Path) -> None:
     root_text = str(root)
     try:
@@ -682,6 +720,14 @@ def _run_compare(args: argparse.Namespace) -> dict[str, Any]:
 
     paired_ratio = float(statistics.median(round_["ratio"] for round_ in round_summaries))
     regression_pct = 100.0 * (paired_ratio - 1.0)
+    # Variance-aware verdict (audit step S2.3): the single-point median ratio
+    # above is retained unchanged, but a regression is only certified when the
+    # 95% CI upper bound of the paired-round ratio also clears the target. This
+    # is additive -- it never relaxes the existing ``passed`` field.
+    variance_gate = _variance_aware_gate(
+        [float(round_["ratio"]) for round_ in round_summaries],
+        target_ratio=1.0 + args.max_regression_pct / 100.0,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": "rf_no_feature_comparison",
@@ -738,6 +784,7 @@ def _run_compare(args: argparse.Namespace) -> dict[str, Any]:
         },
         "regression_pct": regression_pct,
         "passed": regression_pct < args.max_regression_pct,
+        "variance_gate": variance_gate,
         "rounds": round_summaries,
         "blocks": blocks,
     }

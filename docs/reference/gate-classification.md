@@ -81,6 +81,32 @@
 
 只有以上全部满足，phase 才能标 `completed`；否则如实记录实测证据级（E0–E3，见 `docs/plans/next-functional-2026-07/README.md` §7）与差距，不得以"API 存在"充数。
 
+## 5. 性能门标签族（`perf` label family，非数值门）
+
+第 1 节的五个类别针对**数值/物理门**。运行成本门（op-count 调度计数、方差感知
+时间判据）不断言任何物理量，落在那五类之外，因此单独给出一个 `perf` 标签族。此
+为 additive 扩展，不改动第 1–4 节对数值门的约束。
+
+| 标签 | 一句话定义 | 断言对象 | 能否作为物理 exit gate 头条证据 |
+|---|---|---|---|
+| `perf-opcount` | 确定性主机/设备 dispatch 计数（kernel launch、alloc、DtoD、host<->device 拷贝、scalar sync、device mem），不断言墙钟时间 | 调度形状（schedule shape） | ❌ 否（非物理门） |
+| `perf-statistical` | 方差感知的时间判据：预热丢弃 + 多重复配对比 + 95% CI 上界 < 目标 + 方差报告，不用单点 min/中位数 | 墙钟性能回归 | ❌ 否（非物理门） |
+
+规则：
+
+1. **`perf` 门永远不是物理可用性证据。** 它锁定成本/回归，不替代第 1 节的
+   `wave-level` 头条门；一个 phase 的物理等级仍由数值门决定。
+2. **`perf-statistical` 必须满足第 3 节"判据统计法"条目**（95% CI 上界、预热、
+   多重复中位数、方差报告），不得退回单点 min/中位数。
+3. **`perf-opcount` 必须自带 falsification 记录**：写明什么调度回归会使其变红，
+   并给出一个确曾变红的对照（如还原某条 fast-path）。
+4. **类别自标写在测试 docstring / 门表**，与第 1 节数值门一致，复核者据此判断。
+
+现有自标示例：`tests/rf/performance/test_port_hot_path_op_count.py` 与
+`tests/rf/lumped/test_fdtd_port_end_to_end.py` 的 op-count 天花板门标
+`perf-opcount`；`tests/support/perf_variance_gate.py` 与
+`tests/rf/performance/test_perf_variance_gate.py` 标 `perf-statistical`。
+
 ## 4. 与验收文档的衔接
 
 - 每份 `docs/assessments/*-acceptance.md` 的门表新增一列 `class`，逐门标类别。

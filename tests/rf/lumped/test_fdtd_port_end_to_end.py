@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -7,6 +10,11 @@ from witwin.maxwell.fdtd.ports import (
     apply_port_runtimes,
     prepare_port_spectral_accumulators,
 )
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "support"))
+
+from port_hot_path_tally import tally_hot_path_window  # noqa: E402
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
@@ -221,51 +229,22 @@ def test_port_step_profiler_has_no_scalar_sync_or_host_device_copy():
 
 
 def _passive_hot_path_op_inventory(solver, *, steps: int = 16) -> dict[str, int]:
-    """Deterministic per-window op tallies for the passive port step."""
+    """Deterministic per-window op tallies for the passive port step.
 
-    for _ in range(8):
+    Routes through the shared :func:`tally_hot_path_window` helper so this
+    per-window ceiling test and the per-step artifact profiler share one
+    implementation of the profiled window and its event classification.
+    """
+
+    def _step() -> None:
         apply_port_runtimes(solver)
         accumulate_port_observers(solver)
-    torch.cuda.synchronize()
 
-    with torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ],
-        profile_memory=True,
-        acc_events=True,
-    ) as profile:
-        for _ in range(steps):
-            apply_port_runtimes(solver)
-            accumulate_port_observers(solver)
-    torch.cuda.synchronize()
-
-    tally = {
-        "launches": 0,
-        "allocs": 0,
-        "memcpy_dtod": 0,
-        "memcpy_hostside": 0,
-        "scalar_sync": 0,
-        "device_mem": 0,
-    }
-    for event in profile.key_averages():
-        key = event.key
-        if "cudaLaunchKernel" in key:
-            tally["launches"] += event.count
-        if key in ("aten::empty", "aten::empty_strided", "aten::empty_like"):
-            tally["allocs"] += event.count
-        if "Memcpy DtoD" in key:
-            tally["memcpy_dtod"] += event.count
-        if "Memcpy HtoD" in key or "Memcpy DtoH" in key:
-            tally["memcpy_hostside"] += event.count
-        if key in ("aten::item", "aten::_local_scalar_dense"):
-            tally["scalar_sync"] += event.count
-        tally["device_mem"] += max(0, getattr(event, "self_device_memory_usage", 0))
-    return tally
+    return tally_hot_path_window(_step, warmup_steps=8, profiled_steps=steps)
 
 
 def test_passive_series_rlc_port_step_stays_within_op_count_ceiling():
+    # Gate class: perf-opcount (docs/reference/gate-classification.md §5).
     # Op-count contract for the passive-termination hot path. Deterministic host
     # tallies only (no timing asserted). A passive SeriesRLC port must add no
     # per-step allocation, no host<->device transfer, and no scalar sync, and
