@@ -7,12 +7,13 @@ mixed-mode (differential/common) representation. The analytic reference is the
 weak-coupling coupled-line model (even/odd-mode impedances); mixed-mode
 conversion and mode-conversion terms (Sdc / Scd) are the validation targets.
 
-BLOCKED (audit S1, correct root cause): the coupled microstrip cross-section is
-inhomogeneous (substrate + air), so all four ``WaveModeSpec('tem')`` ports hit the
-same categorical TEM-inapplicability as microstrip
-(``modes.py:1846-1849`` ``NotImplementedError``). A hybrid vector mode solve on the
-coupled cross-section is required before any 4-port / mixed-mode extraction. The
-validation runner records this scene as ``blocked`` with
+BLOCKED (audit S1). As with microstrip, the contour-snap ``ValueError`` fires
+first and masks the mode solve; underneath it the coupled microstrip cross-section
+is inhomogeneous (substrate + air), so all four ``WaveModeSpec('tem')`` ports hit
+the same categorical TEM-inapplicability
+(``NotImplementedError`` at ``modes.py:1943-1946``). A hybrid vector mode solve on
+the coupled cross-section is required before any 4-port / mixed-mode extraction.
+The validation runner records this scene as ``blocked`` with
 ``reference: pending-generation``.
 """
 

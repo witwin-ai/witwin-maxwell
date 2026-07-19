@@ -3,15 +3,17 @@
 A metal strip over a grounded dielectric substrate. The Hammerstad-Jensen
 closed-form ``Z0`` / ``eps_eff`` are the analytic references.
 
-BLOCKED (audit S1, correct root cause): the microstrip cross-section is
-inhomogeneous (eps=4.4 substrate + air), so ``WaveModeSpec('tem')`` is
-categorically inapplicable -- the TEM electrostatic normalization requires a
-uniformly filled cross-section and raises ``NotImplementedError``
-(``witwin/maxwell/fdtd/excitation/modes.py:1846-1849``). A hybrid full-vector mode
-solve is required before any wave-level extraction. This is NOT a half-grid
-snapping issue (a secondary contour-snapping error also appears, but the primary
-blocker is the TEM path). The validation runner records this scene as ``blocked``
-with ``reference: pending-generation``.
+BLOCKED (audit S1). Two stacked blockers, in the order they actually fire: the
+current-contour plane does not land on the Yee half-grid, so
+``compile_waveport_cross_section`` raises a ``ValueError`` BEFORE the mode solve
+runs (this snap error fires first and masks the TEM check). Underneath it the
+deeper categorical blocker is that the microstrip cross-section is inhomogeneous
+(eps=4.4 substrate + air), so ``WaveModeSpec('tem')`` is inapplicable -- the TEM
+electrostatic normalization requires a uniformly filled cross-section and raises
+``NotImplementedError`` (``witwin/maxwell/fdtd/excitation/modes.py:1943-1946``). A
+hybrid full-vector mode solve is required before any wave-level extraction. The
+validation runner records this scene as ``blocked`` with
+``reference: pending-generation``.
 """
 
 from __future__ import annotations

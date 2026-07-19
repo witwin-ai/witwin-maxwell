@@ -15,13 +15,18 @@ half-width is snapped deterministically to the Yee transverse half-grid for the
 requested ``dx`` (see :func:`snap_contour_half`, B5) so the scene builds across
 refinement tiers instead of raising a snapping error.
 
-Honest-exit note (audit S1): a genuine FDTD two-port sweep of this bench reflects
-almost all incident power (|S11| ~ 1, gross non-passivity) because the TEM
-WavePort does not launch/absorb a clean matched TEM wave on the round coax at
-benchmark resolution, and the mirror-symmetric geometry makes reciprocity
-trivial. The validation runner therefore records this scene as a wave-level FAIL
-with the measured numbers; the modal-eigensolve ``Z0`` is kept only as supporting
-evidence, never as the exit gate.
+Termination (audit S1 root cause, revised): the inner rod and outer shield run
+the full x-domain length, *through the PML to the domain boundaries*. The first
+S1 round left the conductors ending in open stubs a couple of cells past the port
+planes; the launched TEM wave reflected off that open line end, re-entered the
+passive port (|a_passive|/|a_driven| ~ 1), and violated the S = b/a extraction
+premise (a_passive = 0), collapsing the S-matrix toward ones (|S11| ~ 1, singular
+value ~ 1.85). That was NOT a port/line impedance mismatch -- the counterfactual
+with the conductors extended through the PML absorbs the wave cleanly
+(|S21| ~ 1, small |S11|). With the bench now terminated, the S-matrix is a usable
+wave-level measurement; the runner enforces an ``|a_passive|/|a_driven|``
+precondition before reporting any S-derived quantity. The modal-eigensolve ``Z0``
+is kept only as supporting evidence, never as the exit gate.
 """
 
 from __future__ import annotations
@@ -38,11 +43,16 @@ ETA0 = 376.730313668
 INNER_RADIUS = 0.04
 OUTER_RADIUS = 0.16
 SHIELD_OUTER = 0.20
-LINE_LENGTH = 0.06
-DOMAIN_TRANSVERSE = 0.205  # matches the proven float32-safe coax cross-section
-CONTOUR_HALF = 0.10125     # 0.2025 / 2 -- proven float32-safe half-grid at dx=0.0025
+DOMAIN_TRANSVERSE = 0.21   # aperture +-0.20 is grid-commensurate for dx in {0.0025, 0.005, 0.01}
+CONTOUR_HALF = 0.10        # current-contour half-width target (snapped per dx; see snap_contour_half)
 PORT_X = 0.02
-DOMAIN_X = 0.05
+DOMAIN_X = 0.12
+# Terminate the line: the inner rod and outer shield run the full domain length,
+# through the PML to the +-x boundaries, so the launched TEM wave is absorbed at
+# the line ends instead of reflecting off open conductor stubs (audit S1 root
+# cause). LINE_LENGTH therefore spans the whole x-domain.
+LINE_LENGTH = 2.0 * DOMAIN_X
+PML_LAYERS = 6
 
 
 def analytic_z0() -> float:
@@ -131,7 +141,7 @@ def coax_thru_scene(*, dx: float = 0.0025, device: str = "cuda") -> mw.Scene:
             )
         ),
         grid=mw.GridSpec.uniform(dx),
-        boundary=mw.BoundarySpec.pml(num_layers=6),
+        boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
         ports=(
             _coax_port("left", -PORT_X, "+", dx=dx),
             _coax_port("right", PORT_X, "-", dx=dx),

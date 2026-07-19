@@ -9,14 +9,20 @@ policy).
 Honest status (audit S1, 2026-07-18) -- these are NOT six passing wave-level
 scenes:
 
-* ``rectangular_waveguide`` -- reaches a wave-level FDTD S-matrix; beta(omega) is
-  de-embedded from the fields (NRW) with passivity/reciprocity convergence.
-* ``coax_thru`` -- runs a real FDTD two-port but the TEM WavePort does not match
-  the round coax (|S11| ~ 1); recorded as a wave-level FAIL, modal Z0 supporting
-  only.
-* ``microstrip_two_port`` / ``differential_pair`` -- BLOCKED: WaveModeSpec('tem')
-  is categorically inapplicable to their inhomogeneous (substrate + air)
-  cross-sections (a hybrid mode solve is required).
+* ``rectangular_waveguide`` -- terminated guide (walls through the PML, PML held
+  fixed in metres across tiers); reaches a wave-level FDTD S-matrix; beta(omega)
+  is de-embedded from the fields (NRW) with the a_passive/a_driven precondition,
+  passivity and reciprocity recorded.
+* ``coax_thru`` -- terminated bench (conductors through the PML); the TEM launch
+  is clean (arg(S21)/L ~ k0), but the S=b/a premise is still violated because the
+  passive port is re-illuminated by the far-end reflection (a_passive/a_driven
+  ~ 1): the ~0.3 m TEM wavelength is large versus the PML that fits the compact
+  transverse cross-section under the uniform-num_layers boundary API. Recorded as
+  a wave-level gap with the measured residual; NOT a port/line impedance mismatch.
+* ``microstrip_two_port`` / ``differential_pair`` -- BLOCKED: a contour-snap error
+  fires first, and underneath it WaveModeSpec('tem') is categorically inapplicable
+  to their inhomogeneous (substrate + air) cross-sections (a hybrid mode solve is
+  required).
 * ``series_parallel_rlc`` -- lumped resonance is parasitic-dominated; open gap.
 * ``lumped_open_short_match`` -- broken bench (feed decoupled from load); FAIL.
 
