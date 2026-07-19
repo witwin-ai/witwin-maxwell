@@ -43,7 +43,7 @@ from ...breakdown import (
     BreakdownEvent,
     BreakdownResultData,
 )
-from ...compiler.breakdown import compile_breakdown_layout
+from ...compiler.breakdown import compile_breakdown_layout, scene_has_breakdown
 from ..boundary.common import has_complex_fields
 
 
@@ -205,6 +205,13 @@ def initialize_breakdown_runtime(solver):
     """
     solver.breakdown_enabled = False
     solver.breakdown_runtime = None
+    # Zero-impact-when-unused: a cheap structure pre-scan gates ALL breakdown
+    # allocation. A scene whose materials carry no breakdown descriptor never
+    # calls compile_breakdown_layout (which would otherwise allocate seven
+    # full-grid (Nx,Ny,Nz) tensors on every FDTD prepare), so the breakdown
+    # machinery costs nothing on non-breakdown scenes.
+    if not scene_has_breakdown(solver.scene):
+        return
     layout = compile_breakdown_layout(solver.scene)
     if not layout.has_breakdown or int(layout.node_mask.sum().item()) == 0:
         return
@@ -417,20 +424,19 @@ def advance_breakdown_state(solver, step):
     runtime["timer"] = new_timer
 
     trigger = intact & exceeding & (new_timer >= runtime["minimum_duration"])
-    if trigger is not None:
-        runtime["state"] = torch.where(
-            trigger, torch.full_like(state, BREAKDOWN_STATE_CONDUCTING), state
-        )
-        runtime["trigger_step"] = torch.where(
-            trigger, torch.full_like(runtime["trigger_step"], int(step)), runtime["trigger_step"]
-        )
-        runtime["field_before"] = torch.where(
-            trigger, magnitude, runtime["field_before"]
-        )
-        deposited = 0.5 * runtime["eps_abs"] * e2 * runtime["node_volume"]
-        runtime["deposited_at_trigger"] = torch.where(
-            trigger, deposited, runtime["deposited_at_trigger"]
-        )
+    runtime["state"] = torch.where(
+        trigger, torch.full_like(state, BREAKDOWN_STATE_CONDUCTING), state
+    )
+    runtime["trigger_step"] = torch.where(
+        trigger, torch.full_like(runtime["trigger_step"], int(step)), runtime["trigger_step"]
+    )
+    runtime["field_before"] = torch.where(
+        trigger, magnitude, runtime["field_before"]
+    )
+    deposited = 0.5 * runtime["eps_abs"] * e2 * runtime["node_volume"]
+    runtime["deposited_at_trigger"] = torch.where(
+        trigger, deposited, runtime["deposited_at_trigger"]
+    )
 
     node_extra = _node_extra_conductivity(runtime, step)
     _scatter_edge_coefficients(solver, runtime, node_extra)

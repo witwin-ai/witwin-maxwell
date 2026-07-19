@@ -68,13 +68,31 @@ def compile_breakdown_layout(scene) -> CompiledBreakdownLayout:
 
     structures = list(scene.structures)
     has_breakdown = False
+    # ``_bulk_structures`` is priority-sorted (ascending): a later structure is
+    # the higher-priority writer and overwrites the cells it owns, exactly like
+    # the material compiler. Iterating in that order and applying each structure
+    # to the cells it covers gives last-writer-wins for the breakdown mask too.
     for structure in _bulk_structures(scene):
         breakdown = _structure_breakdown(structure)
-        if breakdown is None:
-            continue
-        has_breakdown = True
         occupancy = _geometry_occupancy(scene, structure.geometry)
         covered = occupancy >= 0.5
+        if breakdown is None:
+            # A later non-breakdown structure claims these cells: strip any stale
+            # breakdown capability an earlier breakdown structure stamped there,
+            # so an overwritten region never triggers a phantom breakdown.
+            node_mask = node_mask & ~covered
+            zero_f = torch.zeros((), dtype=torch.float32, device=device)
+            zero_i = torch.zeros((), dtype=torch.int64, device=device)
+            critical_field = torch.where(covered, zero_f, critical_field)
+            minimum_duration = torch.where(covered, zero_f, minimum_duration)
+            post_conductivity = torch.where(covered, zero_f, post_conductivity)
+            ramp_time_explicit = torch.where(covered, zero_f, ramp_time_explicit)
+            ramp_steps = torch.where(covered, zero_i, ramp_steps)
+            material_id = torch.where(
+                covered, torch.full_like(material_id, -1), material_id
+            )
+            continue
+        has_breakdown = True
         # Stable material id: the structure's index in the scene structure list.
         try:
             sid = structures.index(structure)

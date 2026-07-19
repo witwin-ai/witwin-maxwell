@@ -139,9 +139,11 @@ sweep below).
 
 ## Reproducible metrics
 
-dt-convergence (`test_trigger_time_converges_with_dt`; regenerate with
-`python scratch/report_numbers.py`), linear ramp `E(t)=5e12*t`, `critical=50`,
-`t* = 1.0000e-11 s`, `minimum_duration=0`:
+dt-convergence (`test_trigger_time_converges_with_dt`; regenerate with the
+committed probe `python docs/assessments/d13-breakdown-probes/report_numbers.py`,
+which reuses the `tests/breakdown` builders so its output is the numbers the tests
+assert on), linear ramp `E(t)=5e12*t`, `critical=50`, `t* = 1.0000e-11 s`,
+`minimum_duration=0`:
 
 | h (m)  | dt (s)     | trigger_step | trigger_time (s) | error (s)  | band ceiling = dt (s) |
 |--------|------------|--------------|------------------|------------|-----------------------|
@@ -195,17 +197,120 @@ Adjacent suites (regression, this stage): `tests/breakdown/ -> 20 passed`;
 
 ## Known gaps / deferred (D2)
 
-- **Global boundary-flux energy balance** (source-injected = boundary-outflow +
-  stored-EM change + material dissipation + breakdown dissipation) is not asserted
-  on a live radiating run: the framework exposes no stored-EM-energy or
-  injected-source-energy monitor this round. The breakdown dissipation channel
-  `integral(J.E dV dt)` is instead validated against an analytic ground truth on a
-  prescribed-field cell plus per-node/total partition consistency, which is the
-  load-bearing part of decision 6. A closed PEC-box global balance is deferred to
-  when a stored-energy monitor lands.
+- **Global boundary-flux energy balance — decision-6 gate, explicitly deferred
+  (substitution, not silent).** The brief's decision-6 closed-PEC-box balance
+  (`injected = stored-EM change + material dissipation + breakdown dissipation`,
+  radiation zero) is **not** asserted on a live run, because the framework exposes
+  no observer for two of its terms. Attempt made (2026-07-19,
+  `scratch/energy_probe.py`, not committed): a tiny closed PEC-box scene
+  (`BoundarySpec.pec()`, `0.24 m` box, `0.02 m` grid) with a CW point dipole and a
+  breakdown dielectric was run for 60 steps; it triggers and dissipates
+  (`Result.breakdown.total_dissipated_energy = 1.95e-2 J`). Inspecting `Result`
+  shows the only energy/power accessor is `power_loss` — a **frequency-domain
+  phasor** steady-state loss postprocessor (peak-phasor `sigma*|E|^2`), not a
+  transient audit; there is **no injected-source-energy accessor and no running
+  stored-EM-energy time series** (`has injected/source energy accessor: False`; a
+  final field snapshot is available but not a time-integrated injected work or a
+  per-step EM-energy audit). A clean global time-domain accounting therefore cannot
+  be assembled from existing observers. **Substitution kept:** the breakdown
+  dissipation channel `integral(sigma_breakdown*|E|^2 dV dt)` is validated instead
+  against an analytic closed form on a prescribed-field cell
+  (`test_dissipated_energy_matches_analytic_closed_form`, rel err `2.94e-08` at
+  `rel_tol=2e-4`) plus per-node/total partition consistency — the load-bearing part
+  of decision 6. The full closed-box global balance is deferred until an
+  injected-source-energy or running stored-EM-energy monitor lands.
 - **Multi-GPU guard** is exercised by invoking
   `DistributedFDTD._validate_static_capabilities` directly on the breakdown scene
   (only one physical GPU is visible under `CUDA_VISIBLE_DEVICES=1`); an end-to-end
   two-GPU rejection is deferred to an exclusive multi-GPU window.
 - **Performance / zero-overhead timing** for the no-breakdown path is not measured
   (correctness-only shared-GPU window); deferred pending an exclusive window.
+
+---
+
+# Stage D3 (audit remediation) acceptance
+
+Date: 2026-07-19. Stage: D3 (post-audit remediation) of track `d13-breakdown`.
+Environment: conda env `maxwell`, `CUDA_VISIBLE_DEVICES=1`,
+`PYTHONPATH=<worktree>`, `CUDA_HOME=.../nvidia/cu13`.
+
+Supervisor-selected audit fixes applied to this worktree.
+
+## Fix 1 — zero-impact-when-unused (merge-blocking priority)
+
+`initialize_breakdown_runtime` (`fdtd/runtime/breakdown.py`) previously called
+`compile_breakdown_layout` on **every** FDTD prepare, allocating seven full-grid
+`(Nx,Ny,Nz)` tensors (~0.9 GB transient at 27M cells) even for scenes with no
+breakdown material. Added a cheap structure pre-scan
+(`scene_has_breakdown(solver.scene)`) that short-circuits **before** any
+allocation/compilation when no material carries a breakdown descriptor.
+
+Tests added (`tests/breakdown/test_breakdown_parity.py`):
+- `test_plain_scene_never_compiles_breakdown_layout` — monkeypatches
+  `compile_breakdown_layout` with a raising stub; a breakdown-free prepare+run must
+  still succeed (proves the compiler is never reached).
+- `test_plain_scene_run_is_bitwise_deterministic` — the headline field-level
+  no-breakdown parity gate: two identical plain-scene runs reproduce all six Yee
+  fields bit for bit with the breakdown module imported and its prepare-hook active.
+
+Falsification (recorded): disabled the pre-scan short-circuit (unconditional
+`compile_breakdown_layout`); `test_plain_scene_never_compiles_breakdown_layout`
+went **red** (`AssertionError: compile_breakdown_layout must not run for a
+breakdown-free scene`). Restored → green.
+
+## Fix 2 — structure-overlap phantom capability
+
+`compile_breakdown_layout` (`compiler/breakdown.py`) previously `continue`d past
+non-breakdown structures, so a later (higher-priority) non-breakdown structure that
+overwrote a breakdown region left stale breakdown capability behind. Now the loop
+follows the material compiler's last-writer-wins: iterating the priority-sorted
+bulk structures, a non-breakdown structure strips the breakdown mask and resets all
+per-node parameters (`critical_field`, `minimum_duration`, `post_conductivity`,
+`ramp_time_explicit`, `ramp_steps`, `material_id = -1`) on the cells it covers.
+
+Tests added (`tests/breakdown/test_breakdown_compiler.py`, 3):
+`test_later_nonbreakdown_structure_clears_overlapped_cells` (subset/strict-shrink
+invariants + cleared params on removed cells),
+`test_fully_overwritten_breakdown_box_never_triggers` (fully-covered box → empty
+capable set, `solver.breakdown_runtime is None`),
+`test_partial_overwrite_only_survivors_trigger` (drive supra-critical field; only
+the surviving cells fire, count matches the shrunk mask).
+
+Falsification (recorded): reverted the clearing branch to a bare `continue`; all 3
+compiler tests went **red** (overwritten box kept full capability, `node_count`
+343 == reference instead of the shrunk survivor count). Restored → 3 pass.
+
+## Fix 3 — global energy balance
+
+Attempted the true closed-PEC-box global balance; existing observers cannot supply
+the injected-source-energy or running stored-EM-energy terms (see the decision-6
+deferred-gate note in the D2 "Known gaps" section above — substitution stated
+explicitly, not silent). Analytic dissipation closure retained as the load-bearing
+check.
+
+## Fix 4 — acceptance-doc reproduction pointer
+
+Committed the dt-convergence / energy-closure reproduction probe at
+`docs/assessments/d13-breakdown-probes/report_numbers.py` (`git add -f`; `docs/`
+is gitignored wholesale). The D2 table pointer now references the committed path
+instead of the uncommitted `scratch/report_numbers.py`. The probe reuses the
+`tests/breakdown` builders so its printed numbers are exactly the asserted ones.
+
+## Fix 5 — cosmetic
+
+- Removed the always-true `if trigger is not None:` dead conditional in
+  `advance_breakdown_state` (the mask is always a tensor); dedented the body.
+- `test_below_threshold_descriptor_is_bitwise_identical` now asserts
+  `total_dissipated_energy == 0.0` exactly (and the per-node channel sums to 0.0),
+  replacing the `int(...) == 0` truncation that silently accepted any value in
+  `[0, 1)`.
+
+## Test inventory (D3, env as above)
+
+- `pytest tests/breakdown -q` → **25 passed** (20 prior + 2 new parity + 3 new
+  compiler).
+- `pytest tests/api/public/test_guard_census.py` → passed.
+- `pytest tests/api/public/test_simulation_smoke.py` → passed.
+
+Falsifications this stage: Fix 1(a) zero-cost gate (red→restore→green); Fix 2
+phantom-capability clearing (3 red→restore→3 green).

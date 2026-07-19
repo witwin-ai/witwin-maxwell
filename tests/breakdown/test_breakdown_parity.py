@@ -48,7 +48,11 @@ def test_below_threshold_descriptor_is_bitwise_identical():
     # but it never triggered.
     assert with_descriptor.breakdown is not None
     assert with_descriptor.breakdown.triggered_count == 0
-    assert int(with_descriptor.breakdown.total_dissipated_energy) == 0
+    # A never-triggering descriptor deposits exactly zero breakdown energy: the
+    # dissipation channel only accumulates on conducting edges. Assert exact 0.0
+    # (not int-truncated, which would silently pass any value in [0, 1)).
+    assert with_descriptor.breakdown.total_dissipated_energy == 0.0
+    assert float(with_descriptor.breakdown.dissipated_energy.abs().sum().item()) == 0.0
 
     a = _last_step_fields(with_descriptor)
     b = _last_step_fields(without)
@@ -63,6 +67,38 @@ def test_scene_without_breakdown_material_reports_none():
     result = run_breakdown(build_plain_scene(source_amplitude=50.0))
     assert result.breakdown is None
     assert result.breakdown_events == ()
+
+
+def test_plain_scene_never_compiles_breakdown_layout(monkeypatch):
+    """Zero-impact-when-unused gate: a breakdown-free scene never invokes the
+    layout compiler, so it allocates none of the seven full-grid breakdown
+    tensors. Monkeypatch the compiler with a raising stub; prepare+run must still
+    succeed because the cheap structure pre-scan short-circuits ahead of it."""
+    import witwin.maxwell.fdtd.runtime.breakdown as breakdown_runtime
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError(
+            "compile_breakdown_layout must not run for a breakdown-free scene"
+        )
+
+    monkeypatch.setattr(breakdown_runtime, "compile_breakdown_layout", _forbidden)
+
+    result = run_breakdown(build_plain_scene(source_amplitude=50.0))
+    assert result.breakdown is None
+    assert result.breakdown_events == ()
+
+
+def test_plain_scene_run_is_bitwise_deterministic():
+    """Field-level no-breakdown parity: with the breakdown module imported and its
+    prepare-time hook active, two identical plain-scene runs reproduce all six Yee
+    fields bit for bit -- the (guarded) breakdown machinery perturbs nothing."""
+    a = _last_step_fields(run_breakdown(build_plain_scene(source_amplitude=50.0)))
+    b = _last_step_fields(run_breakdown(build_plain_scene(source_amplitude=50.0)))
+    for name in _FIELDS:
+        assert torch.equal(a[name], b[name]), (
+            f"{name} diverged across identical plain-scene runs: "
+            f"max|delta|={(a[name]-b[name]).abs().max().item():.3e}"
+        )
 
 
 def test_triggering_breaks_parity_control():
