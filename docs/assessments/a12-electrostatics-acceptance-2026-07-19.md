@@ -354,15 +354,19 @@ conda run -n maxwell --no-capture-output python -m pytest \
 - All six gradient gates: analytic (implicit-diff) vs central-difference relative
   error `< 1e-4` at solver tolerance `1e-12`, float64, on 12–14 cell/axis grids.
 - Stationarity: the fixed-Dirichlet field energy is variationally stationary in
-  phi, so the implicit contribution to `d(energy)/d(eps)` (`~ -4e-14` relative to
-  the total in a parallel-plate probe) is negligible and `d(energy)/d(eps)` is
-  explicit-`dA/d(eps)`-dominated. This is corroborated by committed evidence
-  rather than a bare number: falsification 1 below inverts the residual-VJP sign
-  and the capacitance / potential-probe / free-charge gates flip red while the
-  fixed-voltage energy gate stays green — exactly what a negligible implicit
-  contribution predicts. It is why the strong implicit-backward gates are the
-  capacitance, potential-probe, and free-charge functionals, not the fixed-voltage
-  energy.
+  phi, so the implicit contribution to `d(energy)/d(eps)` is negligible and
+  `d(energy)/d(eps)` is explicit-`dA/d(eps)`-dominated. The committed
+  `docs/assessments/a12_electrostatics_metrics.py` `stationarity()` probe
+  reproduces the exact figure — it computes the total gradient through the
+  implicit-diff solve, subtracts the explicit-only gradient (energy re-evaluated
+  at the frozen solved potential), and prints the implicit fraction of the total,
+  `stationarity: implicit/total d(energy)/d(eps) = -4.09e-14` (a parallel-plate
+  probe; run the script to regenerate). This is independently corroborated by
+  falsification 1 below: inverting the residual-VJP sign flips the capacitance /
+  potential-probe / free-charge gates red while the fixed-voltage energy gate
+  stays green — exactly what a negligible implicit contribution predicts. It is
+  why the strong implicit-backward gates are the capacitance, potential-probe, and
+  free-charge functionals, not the fixed-voltage energy.
 
 ## Falsifications performed
 
@@ -447,19 +451,48 @@ Applied after the track audit; each item addresses a specific finding.
   aggregates the superposition sub-solve reports (`_aggregate_reports`: max
   iterations / residual, all-converged) instead of returning `reports[0]` (the
   trivial `b = 0` base solve that reported `iterations = 0, residual = 0` while
-  real unit solves ran). Recorded residual/iteration count now reflects real work.
-- **`test_two_terminal_equivalent_capacitance` was tautological (minor).**
-  Rewritten to build a 2x2 active matrix (reference `c`) and cross-check
-  `two_terminal_capacitance()` (det/(sum) closed form) against an independent
-  `C @ V = [Q, -Q]` solve, plus default-2x2 dispatch, terminal-order symmetry, and
-  the distinct-terminal guard. The old single-active-terminal assertion is kept as
-  `test_capacitance_to_reference_single_terminal`.
+  real unit solves ran). Recorded residual/iteration count now reflects real work,
+  gated by `test_floating.py::test_floating_only_diagnostics_reflect_real_solves`
+  (a floating-only scene must report `iterations > 0` and `0 < residual <= tol`;
+  without the aggregation it would report `0 / 0`).
+- **`test_two_terminal_equivalent_capacitance` was tautological (minor).** The
+  earlier form reduced to a matrix identity (`Q / (V_a - V_b)` with
+  `V = C^{-1}[Q, -Q]` is algebraically `det/(sum)`, the same closed form the
+  accessor computes). Rewritten to cross-check `two_terminal_capacitance()`
+  (det/(sum) on the 2x2 active matrix, reference `c`) against the **energy
+  identity** of the physical +Q/-Q floating problem, `W = 0.5 Q^2 / C_eq`, where
+  `W` is the field energy of a *separate* floating-charge superposition solve on
+  the same geometry — a genuinely independent route (agrees to rel `< 1e-6`;
+  measured rel diff `~ 1.7e-12`). Default-2x2 dispatch, terminal-order symmetry,
+  and the distinct-terminal guard are retained. The old single-active-terminal
+  assertion is kept as `test_capacitance_to_reference_single_terminal`.
 - **Census "eight guards" listed only seven (minor).** Restored the historical
   Phase 0+1 floating-conductor guard row to the census table and the
   `test_guard_census.py` Phase 0+1 enumeration (removed by the Phase 2+3 rewrite),
   so the eight-guard `144 -> 152` record is internally consistent; the Phase 2+3
   section still documents that guard's removal.
-- **Orphan acceptance numbers (minor).** Added committed
-  `docs/assessments/a12_electrostatics_metrics.py`, which reproduces the
-  plate/sphere/coax/dielectric figures exactly; the stationarity number is now
-  cited to committed falsification 1 rather than an uncommitted scratch probe.
+- **Orphan acceptance numbers (minor).** Every quoted metric now has a committed
+  reproducing command. `docs/assessments/a12_electrostatics_metrics.py` reproduces
+  the plate/sphere/coax/dielectric figures exactly (including the coax per-level
+  errors `5.1%/4.4%/3.8%`), and a new `stationarity()` probe in the same script
+  reproduces the A3 stationarity figure `implicit/total d(energy)/d(eps) =
+  -4.09e-14` (previously a bare `~ -4e-14` with no command). The stationarity note
+  in the A3 section now cites that command directly.
+
+### Falsifications (audit-fix pass)
+
+Each break was applied in place, the target test shown red, then reverted and
+re-run green.
+
+1. Floating diagnostics — `report = _aggregate_reports(reports)` ->
+   `report = reports[0]` (the trivial `b = 0` base solve) in
+   `electrostatic/runtime.py`. Result:
+   `test_floating_only_diagnostics_reflect_real_solves` FAILED
+   (`assert 0 > 0` on `es.iterations`). Restored -> green.
+2. Two-terminal energy identity — `two_terminal_capacitance` return
+   `det/(caa+cbb+cab+cba)` -> `det/(caa+cbb)` (dropping the cross terms) in
+   `electrostatic/capacitance.py`. Result:
+   `test_two_terminal_equivalent_capacitance` FAILED (closed-form `1.187e-11` vs
+   independent energy-route `1.239e-11`, rel diff `~4%`), confirming the rewritten
+   test couples the matrix closed form to the independent floating-solve energy
+   route rather than restating a matrix identity. Restored -> green.

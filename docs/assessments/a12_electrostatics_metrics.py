@@ -114,6 +114,58 @@ def dielectric_ratio(a=0.2, b=0.8):
     return _sphere(60, a, b, eps_r=4.0) / _sphere(60, a, b, eps_r=1.0)
 
 
+def stationarity():
+    """Implicit contribution to d(energy)/d(eps), relative to the total gradient.
+
+    For a fixed-Dirichlet (fixed-voltage) parallel-plate cell the field energy is
+    variationally stationary in the potential, so d(energy)/d(eps) is dominated by
+    the explicit dA/d(eps) term and the implicit dphi/d(eps) path contributes only
+    at the residual/round-off floor. This computes the total gradient through the
+    implicit-diff solve, subtracts the explicit-only gradient (energy re-evaluated
+    at the frozen solved potential), and returns the implicit fraction of the
+    total -- the number the A3 acceptance stationarity note quotes.
+    """
+    import dataclasses
+
+    from witwin.maxwell.compiler.electrostatic import compile_electrostatics
+    from witwin.maxwell.electrostatic.runtime import ElectrostaticOperator, solve_electrostatics
+
+    gap, n = 1.0e-3, 12
+    domain = mw.Domain(bounds=((0.0, gap), (0.0, gap), (0.0, gap)))
+    grid = mw.GridSpec.uniform(gap / n)
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
+    boundary = mw.ElectrostaticBoundarySpec(
+        default="neumann", z_low=("dirichlet", 1.0), z_high=("dirichlet", 0.0)
+    )
+    compiled = compile_electrostatics(scene, boundary, dtype=torch.float64)
+    config = _tol(1e-12)
+
+    zc = compiled.zc
+    band = (zc > 0.35 * gap) & (zc < 0.65 * gap)
+    mask = torch.zeros(compiled.shape, dtype=compiled.dtype, device=compiled.device)
+    mask[:, :, band] = 1.0
+    base = compiled.epsilon_r.detach()
+    theta0 = 3.0
+
+    # Total gradient d(energy)/d(theta) through the implicit-diff backward.
+    theta = torch.tensor(theta0, dtype=torch.float64, device=compiled.device, requires_grad=True)
+    eps = base + mask * (theta - 1.0)
+    solve_electrostatics(dataclasses.replace(compiled, epsilon_r=eps), config).energy.backward()
+    g_total = float(theta.grad)
+
+    # Explicit-only gradient: energy re-evaluated at the frozen solved potential,
+    # so the implicit dphi/d(eps) path is severed. The difference is the implicit part.
+    with torch.no_grad():
+        eps0 = base + mask * (theta0 - 1.0)
+        phi = solve_electrostatics(dataclasses.replace(compiled, epsilon_r=eps0), config).potential
+    theta_e = torch.tensor(theta0, dtype=torch.float64, device=compiled.device, requires_grad=True)
+    eps_e = base + mask * (theta_e - 1.0)
+    ElectrostaticOperator(dataclasses.replace(compiled, epsilon_r=eps_e)).field_energy(phi).backward()
+    g_explicit = float(theta_e.grad)
+
+    return (g_total - g_explicit) / g_total
+
+
 def main():
     plate_err, plate_c_err = parallel_plate()
     print(f"parallel_plate: max_potential_err={plate_err:.2e}  rel_C_err={plate_c_err:.2e}")
@@ -124,6 +176,7 @@ def main():
     print(f"coaxial: Cp_analytic={c_c:.4e}  errs(48/72/96)="
           + "/".join(f"{100*e:.1f}%" for e in c_errs))
     print(f"dielectric_fill ratio (eps_r=4): {dielectric_ratio():.5f}")
+    print(f"stationarity: implicit/total d(energy)/d(eps) = {stationarity():.2e}")
 
 
 if __name__ == "__main__":

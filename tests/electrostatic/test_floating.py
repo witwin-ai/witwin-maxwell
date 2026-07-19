@@ -116,6 +116,32 @@ def test_two_floating_conductors_charge_split():
     assert abs(float(es.terminal_charge("b")) - (-1.0e-12)) / 1.0e-12 < 1e-7
 
 
+def test_floating_only_diagnostics_reflect_real_solves():
+    """A floating-only scene must report the superposition sub-solve work, not the
+    trivial base solve.
+
+    With no fixed-potential terminal the base solve has a zero right-hand side and
+    short-circuits at ``iterations = 0`` / ``residual = 0``; the genuine work is the
+    per-conductor unit solves. The reported diagnostics must aggregate those, so a
+    floating-only run still shows a nonzero iteration count and a residual at the
+    solver floor rather than claiming nothing ran.
+    """
+    half = 1.0
+    domain = mw.Domain(bounds=((-half, half),) * 3)
+    grid = mw.GridSpec.uniform(2.0 * half / 40)
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
+    scene.add_electrostatic_terminal(
+        mw.ElectrostaticTerminal(name="float", geometry=Sphere(position=(0, 0, 0), radius=0.3), charge=3.0e-12)
+    )
+    tol = 1e-11
+    es = mw.Simulation.electrostatic(
+        scene, boundary=mw.ElectrostaticBoundarySpec.grounded_box(), solver=_tol(tol)
+    ).run().electrostatic
+    # The unit solve genuinely iterates; the trivial b=0 base solve would report 0/0.
+    assert es.iterations > 0
+    assert 0.0 < es.residual <= tol
+
+
 def test_isolated_floating_conductor_nonzero_charge_incompatible():
     """A charged floating conductor in a fully insulated box is gauge/charge-incompatible."""
     half = 1.0

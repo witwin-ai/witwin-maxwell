@@ -79,6 +79,26 @@ def _three_terminal_scene(n=40):
     return scene
 
 
+def _two_terminal_floating_scene(q, n=40):
+    """Same three-sphere geometry as ``_three_terminal_scene`` driven as the
+    physical two-terminal problem: +q on "a", -q on "b", "c" grounded."""
+    half = 1.0
+    r = 0.18
+    domain = mw.Domain(bounds=((-half, half),) * 3)
+    grid = mw.GridSpec.uniform(2.0 * half / n)
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
+    scene.add_electrostatic_terminal(
+        mw.ElectrostaticTerminal(name="a", geometry=Sphere(position=(-0.5, 0, 0), radius=r), charge=q)
+    )
+    scene.add_electrostatic_terminal(
+        mw.ElectrostaticTerminal(name="b", geometry=Sphere(position=(0.5, 0, 0), radius=r), charge=-q)
+    )
+    scene.add_electrostatic_terminal(
+        mw.ElectrostaticTerminal(name="c", geometry=Sphere(position=(0, 0.5, 0), radius=r), grounded=True)
+    )
+    return scene
+
+
 def test_three_terminal_matrix_symmetry_and_signs():
     scene = _three_terminal_scene()
     cap = mw.Simulation.capacitance(
@@ -164,31 +184,37 @@ def test_capacitance_to_reference_single_terminal():
 
 
 def test_two_terminal_equivalent_capacitance():
-    """two_terminal_capacitance() (det/(sum) closed form) must equal the charge
-    seen when solving the actual +Q/-Q floating problem on the 2x2 submatrix."""
-    scene = _three_terminal_scene()
-    # Reference "c" leaves an active 2x2 matrix over ("a", "b"), so the derived
-    # two-terminal accessor exercises its full det/(Caa+Cbb+Cab+Cba) formula.
+    """two_terminal_capacitance() (det/(sum) closed form on the Maxwell matrix)
+    must match the equivalent capacitance measured by the energy identity of the
+    physical +Q/-Q floating problem, ``W = 0.5 Q^2 / C_eq``.
+
+    The two routes share no algebra: one derives ``C_eq`` from unit-voltage
+    capacitance-matrix entries, the other from the field energy of a *separate*
+    floating-charge superposition solve. Agreement is therefore a genuine
+    cross-check, not a restatement of the 2x2 matrix inverse.
+    """
+    boundary = mw.ElectrostaticBoundarySpec.grounded_box()
+    # Closed-form route: reference "c" leaves an active 2x2 matrix over ("a", "b").
     cap = mw.Simulation.capacitance(
-        scene, terminals=("a", "b", "c"), reference="c",
-        boundary=mw.ElectrostaticBoundarySpec.grounded_box(), solver=_tol(),
+        _three_terminal_scene(), terminals=("a", "b", "c"), reference="c",
+        boundary=boundary, solver=_tol(),
     ).run().capacitance
-
     assert cap.terminal_order == ("a", "b")
-    C = cap.matrix
-    assert C.shape == (2, 2)
-
-    # Independent route: put +Q on "a", -Q on "b" (reference grounded) and solve
-    # C @ V = [Q, -Q] for the terminal potentials, then C_eq = Q / (V_a - V_b).
-    Q = 1.0
-    rhs = torch.tensor([Q, -Q], dtype=C.dtype, device=C.device)
-    v = torch.linalg.solve(C, rhs)
-    c_eq_direct = Q / float(v[0] - v[1])
-
+    assert cap.matrix.shape == (2, 2)
     c_eq = float(cap.two_terminal_capacitance("a", "b"))
     assert c_eq > 0.0
-    assert abs(c_eq - c_eq_direct) / abs(c_eq_direct) < 1e-9
-    # Default 2x2 dispatch and terminal-order symmetry.
+
+    # Independent route: drive the same geometry as the physical two-terminal
+    # problem (+Q on "a", -Q on "b", "c" grounded) through the floating-charge
+    # solver and recover C_eq from the stored field energy W = 0.5 Q^2 / C_eq.
+    Q = 1.0e-12
+    es = mw.Simulation.electrostatic(
+        _two_terminal_floating_scene(Q), boundary=boundary, solver=_tol()
+    ).run().electrostatic
+    c_eq_energy = Q * Q / (2.0 * float(es.energy))
+    assert abs(c_eq - c_eq_energy) / abs(c_eq_energy) < 1e-6
+
+    # Default 2x2 dispatch and terminal-order symmetry of the accessor.
     assert abs(float(cap.two_terminal_capacitance()) - c_eq) < 1e-18
     assert abs(float(cap.two_terminal_capacitance("b", "a")) - c_eq) / abs(c_eq) < 1e-9
 
