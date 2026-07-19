@@ -134,3 +134,104 @@ Changed: `witwin/maxwell/media.py` (Material.mass_density + flags),
 
 No existing fail-closed guard or test was removed or weakened; no FDTD capability-guard
 census entry was added or removed.
+
+---
+
+# Track B (Plan 10 SAR) — B2 acceptance (Phase 2: mass averaging)
+
+Date: 2026-07-19 (same worktree/branch/env prelude as B1 above).
+
+## Scope delivered (B2: Phase 2 — cubical-prefix-v1)
+
+- **Mass-averaging kernel.** `witwin/maxwell/postprocess/sar_averaging.py::compute_mass_averaged_sar`.
+  For each target averaging mass and every candidate tissue center, the smallest
+  symmetric axis-aligned cube (half-width `h` cells, edge `2h+1`) whose enclosed
+  tissue mass reaches `m0` is selected; averaged SAR = `enclosed_power / enclosed_mass`
+  with the ACTUAL enclosed mass recorded. Enclosed mass / power / tissue-volume /
+  total-volume of any cube are read in O(1) from zero-padded 3D inclusive prefix sums
+  (integral images) via 8-term inclusion-exclusion; the per-center search is one
+  prefix lookup per half-width (O(N·H)) versus the O(N·k^3) brute force.
+- **Validity rules (mask + NaN, never padded), all in provenance.**
+  `boundary_policy="strict-interior"`: a center's max half-width is its Chebyshev
+  distance to the region boundary; a cube that would clip is disallowed and an
+  unreachable target within the interior cube marks the center invalid. Tissue fill
+  fraction of the chosen cube must be ≥ `min_tissue_fraction` (default 0.1, the
+  "no air-mass makeup" rule). Averaged SAR is reported only at tissue-bearing centers.
+- **Peaks.** `SARResult.peak(mass)` → typed `SARPeak` (per-frequency peak value,
+  center index + physical position, actual enclosed mass, cube half-width in cells,
+  physical cube edge per axis). `argmax` center is stop-grad; the peak value keeps
+  the field graph. `SARResult.averaged_sar(mass)` returns the `[F,nx,ny,nz]` field;
+  `SARResult.averaging_masses` lists computed masses. Both accessors fail closed when
+  no averaging was requested or an unrequested mass is asked for.
+- **Differentiability.** Fixed-window averaged SAR stays in autograd: the search runs
+  on detached prefixes, then enclosed power/mass are re-gathered WITH grad at the
+  chosen half-width (grouped by unique `h`, selected via `torch.where`). Verified by
+  a backward pass with nonzero, finite gradient (`test_averaged_sar_is_differentiable`).
+- **Serialization.** `averaged` and `peaks` ride the existing `SARResult.save/load`
+  typed payload (`SARPeak.payload/from_payload`). Roundtrip verified.
+- **Public surface.** `SARPeak` exported from `witwin.maxwell`; `SARResult.peak/
+  averaged_sar/averaging_masses` implemented (were `NotImplementedError` in B1).
+
+## Difference from IEEE/IEC 62704-1 (documented, not certified)
+
+Symmetric index-space cube — no cube-face expansion asymmetry; no tissue-connectivity
+flood fill in v1 (`connectivity="cube"` only, others raise). On nonuniform grids the
+cube is symmetric in index space, not a physical cube.
+
+## Test inventory
+
+Command (env prelude above):
+`conda run -n maxwell --no-capture-output python -m pytest tests/sar/test_mass_averaging.py -q`
+→ **15 passed** (incl. 1 CUDA device test, executed on `CUDA_VISIBLE_DEVICES=0`).
+
+Adjacent regression:
+`... python -m pytest tests/sar/ tests/rf/power_loss/ tests/api/public/test_public_api.py tests/api/public/test_simulation_smoke.py -q`
+→ **70 passed**.
+
+Key tests in `tests/sar/test_mass_averaging.py`:
+- `test_uniform_one_gram_cube_exact_size_and_mass` — golden: dx=0.1, rho=1000 ⇒
+  mass_cell=1 kg; m0=27 kg ⇒ exact 3×3×3 cube (h=1, size 0.3 m, mass 27.0), averaged
+  SAR = point SAR; strict-interior invalidates the border (9³ of 11³ valid).
+- `test_prefix_matches_bruteforce_random` — **load-bearing**: integral-image result
+  equals an independent O(N·k^3) NumPy reference (avg field, enclosed mass, half-width,
+  and validity mask) on random rho/occupancy/power over three (mass, min_fraction) cases.
+- `test_peak_monotonic_in_mass` — 10 g peak ≤ 1 g peak (and half-width grows).
+- `test_two_material_halfspace_average_is_mass_weighted` — straddling cube = Σ(qV)/Σ(ρV).
+- `test_partial_occupancy_uses_effective_mass` — enclosed mass uses effective ρ·V.
+- `test_min_tissue_fraction_rejects_air_makeup` — mostly-air cube invalid.
+- `test_unreachable_mass_marks_invalid` / `test_strict_interior_boundary_invalidates_clipped_centers`.
+- `test_grid_convergence_of_peak_averaged_sar` — Gaussian power on 3 grids (n=16/24/40),
+  peak 1 g averaged SAR converges (successive differences shrink).
+- `test_averaged_sar_is_differentiable`.
+- Full-pipeline: `test_result_sar_peak_matches_point_analytic_for_uniform_field`,
+  `test_peak_requires_averaging_request`, `test_peak_unknown_mass_fails_closed`,
+  `test_averaged_and_peaks_serialization_roundtrip`, `test_averaging_stays_on_cuda_device`.
+
+## Falsifications performed (recorded per brief)
+
+1. **Box-sum inclusion-exclusion sign** — flipped `+ gather(ax, ay, bz)` to `-` in
+   `sar_averaging.py::_box_sum`. `test_prefix_matches_bruteforce_random` went RED
+   (`AssertionError`). Restored → green.
+2. **Strict-interior clip guard** — replaced `within_interior = h <= max_halfwidth`
+   with an all-True mask (clipped cubes allowed). `test_strict_interior_boundary_
+   invalidates_clipped_centers` went RED. Restored → full file 15 passed.
+
+## Known gaps / deferred (unchanged from B1 for B3)
+
+- Power normalization `accepted_power`/`input_power`, coherent/incoherent multi-source
+  combination, `soft_peak`, finite-difference gradient gates on σ/density — **B3**.
+- Standard/independent-reference phantom cross-check (plan §9) not run (no
+  redistributable phantom fixture in-repo yet); golden + brute-force parity + algorithmic
+  grid convergence stand in for correctness. Full "completed" gating is the supervisor's.
+
+## Files added / changed (B2)
+
+Added: `witwin/maxwell/postprocess/sar_averaging.py`,
+`tests/sar/test_mass_averaging.py`.
+Changed: `witwin/maxwell/sar.py` (`SARPeak`, `SARResult.peak/averaged_sar/
+averaging_masses`, averaged/peaks fields populated + serialization),
+`witwin/maxwell/postprocess/sar.py` (wire averaging into `compute_sar`),
+`witwin/maxwell/__init__.py` (`SARPeak` export), `FEATURE_LIST.md`.
+
+No existing fail-closed guard or test was removed or weakened; no FDTD capability-guard
+census entry was added or removed.

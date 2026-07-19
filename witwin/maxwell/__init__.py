@@ -113,6 +113,7 @@ from .sar import (
     AVERAGING_PROFILE,
     PowerNormalization,
     SARAveraging,
+    SARPeak,
     SARResult,
 )
 from .thin_wire import ThinWire, WireConductor, WireData, WireEnd
@@ -285,6 +286,7 @@ __all__ = [
     "PowerNormalization",
     "SARAveraging",
     "SARResult",
+    "SARPeak",
     "AVERAGING_PROFILE",
     "ThinWire",
     "PortData",

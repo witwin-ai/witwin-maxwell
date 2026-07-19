@@ -242,6 +242,28 @@ def compute_sar(
     x = prepared_scene.x[region[0]]
     y = prepared_scene.y[region[1]]
     z = prepared_scene.z[region[2]]
+    coordinates = MappingProxyType({"x": x, "y": y, "z": z})
+
+    averaged = {}
+    peaks = {}
+    if averaging is not None:
+        from .sar_averaging import compute_mass_averaged_sar
+
+        device = rho_cell.device
+        dx = torch.as_tensor(prepared_scene.dx_dual64, device=device, dtype=torch.float32)[region[0]]
+        dy = torch.as_tensor(prepared_scene.dy_dual64, device=device, dtype=torch.float32)[region[1]]
+        dz = torch.as_tensor(prepared_scene.dz_dual64, device=device, dtype=torch.float32)[region[2]]
+        averaged, peaks = compute_mass_averaged_sar(
+            averaging,
+            power_total=absorbed_power_density["total"],
+            rho_cell=rho_cell,
+            cell_volume=cell_volume,
+            occupancy=occupancy,
+            valid=valid,
+            coordinates=coordinates,
+            cell_sizes=(dx, dy, dz),
+            frequencies=power_loss.frequencies,
+        )
 
     electric_total = torch.stack(
         [power_loss.channel_power[channel] for channel in channels], dim=0
@@ -281,7 +303,7 @@ def compute_sar(
         normalization=normalization,
         provenance=provenance,
         frequencies=power_loss.frequencies,
-        coordinates=MappingProxyType({"x": x, "y": y, "z": z}),
+        coordinates=coordinates,
         valid=valid,
         occupancy=occupancy,
         rho_cell=rho_cell,
@@ -289,6 +311,8 @@ def compute_sar(
         tissue_id=tissue_id,
         tissue_names=mass.tissue_names,
         absorbed_power_density=MappingProxyType(absorbed_power_density),
+        averaged=MappingProxyType(averaged),
+        peaks=MappingProxyType(peaks),
     )
 
 
