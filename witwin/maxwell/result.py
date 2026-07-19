@@ -1249,6 +1249,210 @@ class Result:
     def monitors(self) -> dict[str, Any]:
         return dict(self._monitors)
 
+    def _esd_sources(self):
+        from .esd import ESDCurrentSource
+
+        scene = self.scene
+        sources = getattr(scene, "sources", ()) if scene is not None else ()
+        return {
+            source.name: source
+            for source in sources
+            if isinstance(source, ESDCurrentSource)
+        }
+
+    def esd_waveform_names(self) -> tuple[str, ...]:
+        """Names of ESD current sources declared on the run scene."""
+
+        return tuple(self._esd_sources())
+
+    def esd_waveform(self, name: str):
+        """Return the typed ESD injection record for source ``name``.
+
+        Capability level: stress-only. Exposes the target waveform diagnostics,
+        the charge-conserving projection of the injected current onto the run
+        time grid, and full provenance (standard revision, level voltage,
+        colocation-independent scalar metrics, model version).
+
+        The record also carries a ``measured`` port record recovered from the
+        run when terminal-port voltage/current was recorded for the bound port
+        (the RF ``PortData``), so users can compare the injected/target current
+        against the measured port. For the Phase-1 ideal-current injection path
+        no terminal-port recorder runs (the ESD source lowers to a volumetric
+        current source), so ``measured`` is ``None`` and the injected current on
+        the run grid is the ``resampled`` record; see :class:`ESDPortRecord` for
+        the documented target-vs-measured limitation and workaround.
+        """
+
+        from .esd import ESDPortRecord
+
+        sources = self._esd_sources()
+        if name not in sources:
+            available = ", ".join(sorted(sources)) or "<none>"
+            raise KeyError(
+                f"ESD waveform {name!r} is not present; available ESD sources: {available}."
+            )
+        source = sources[name]
+        waveform = source.waveform
+        diagnostics = waveform.diagnostics()
+        resampled = None
+        dt = None
+        metadata = self._metadata or {}
+        if metadata.get("dt") is not None:
+            dt = float(metadata["dt"])
+        elif self.solver is not None and getattr(self.solver, "dt", None) is not None:
+            dt = float(self.solver.dt)
+        if dt is not None and dt > 0.0:
+            time_steps = metadata.get("time_steps")
+            t_end = None
+            if time_steps is not None:
+                t_end = min(float(time_steps) * dt, float(waveform.support[1]))
+                if t_end <= float(waveform.support[0]):
+                    t_end = float(waveform.support[1])
+            resampled = waveform.resample_to_grid(dt, t_end=t_end)
+        provenance = source.provenance()
+        # Expose a measured terminal-port record if the run recorded one for this
+        # port (RF PortData); None for the ideal-current injection path.
+        measured = self._ports.get(source.port_name)
+        return ESDPortRecord(
+            name=source.name,
+            port_name=source.port_name,
+            diagnostics=diagnostics,
+            resampled=resampled,
+            provenance=provenance,
+            measured=measured,
+        )
+
+    def breakdown_names(self) -> tuple[str, ...]:
+        """Names of BreakdownMonitor stress records present in the result."""
+
+        from .breakdown_stress import BreakdownStressData
+
+        return tuple(
+            name
+            for name, data in self._monitors.items()
+            if isinstance(data, BreakdownStressData)
+        )
+
+    def breakdown(self, name: str):
+        """Return the typed non-feedback dielectric-stress record for ``name``.
+
+        Capability level: stress-only. Exposes peak field, exceedance duration,
+        longest contiguous exceedance, qualifying sustained-stress locations, and
+        per-cell maps (kept on device), with full threshold/colocation provenance.
+        """
+
+        from .breakdown_stress import BreakdownStressData
+
+        payload = self._monitors.get(name)
+        if not isinstance(payload, BreakdownStressData):
+            available = ", ".join(sorted(self.breakdown_names())) or "<none>"
+            raise KeyError(
+                f"Breakdown stress record {name!r} is not present; available: {available}."
+            )
+        return payload
+
+    def _extract_time_series(self, monitor_name: str):
+        payload = self._monitors.get(monitor_name)
+        if payload is None:
+            raise KeyError(
+                f"Time series {monitor_name!r} is not present in the result monitors."
+            )
+        if not isinstance(payload, Mapping):
+            raise TypeError(
+                f"Monitor {monitor_name!r} does not expose a time-series payload."
+            )
+        time = payload.get("t")
+        if time is None:
+            raise ValueError(f"Monitor {monitor_name!r} has no time axis 't'.")
+        if "flux" in payload:
+            values = payload["flux"]
+        elif "data" in payload:
+            values = payload["data"]
+        elif "field" in payload:
+            values = payload["field"]
+        else:
+            raise ValueError(
+                f"Monitor {monitor_name!r} does not expose a scalar time series "
+                "('data', 'field', or 'flux')."
+            )
+        return time, values
+
+    def component_stress_names(self) -> tuple[str, ...]:
+        """Names of ComponentStressMonitor bindings declared on the run scene."""
+
+        from .monitors import ComponentStressMonitor
+
+        scene = self.scene
+        monitors = getattr(scene, "resolved_monitors", None)
+        monitor_iter = monitors() if callable(monitors) else getattr(scene, "monitors", ())
+        return tuple(
+            monitor.name
+            for monitor in monitor_iter
+            if isinstance(monitor, ComponentStressMonitor)
+        )
+
+    def component_stress(self, name: str):
+        """Return the typed component port-stress and rating-exceedance summary.
+
+        Capability level: stress-only. Reduces the bound voltage/current time
+        series into ``P = V I``, cumulative ``integral P dt`` and an exceedance
+        summary versus the declared :class:`ComponentRating` envelope.
+        """
+
+        from .monitors import ComponentStressMonitor
+        from .breakdown_stress import ComponentStressData
+
+        scene = self.scene
+        monitors = getattr(scene, "resolved_monitors", None)
+        monitor_iter = monitors() if callable(monitors) else getattr(scene, "monitors", ())
+        binding = None
+        for monitor in monitor_iter:
+            if isinstance(monitor, ComponentStressMonitor) and monitor.name == name:
+                binding = monitor
+                break
+        if binding is None:
+            available = ", ".join(sorted(self.component_stress_names())) or "<none>"
+            raise KeyError(
+                f"ComponentStressMonitor {name!r} is not present; available: {available}."
+            )
+        v_time, voltage = self._extract_time_series(binding.voltage_series)
+        i_time, current = self._extract_time_series(binding.current_series)
+        if not isinstance(v_time, torch.Tensor):
+            v_time = torch.as_tensor(v_time)
+        if not isinstance(i_time, torch.Tensor):
+            i_time = torch.as_tensor(i_time)
+        if v_time.numel() != i_time.numel():
+            raise ValueError(
+                f"ComponentStressMonitor {name!r} voltage series "
+                f"{binding.voltage_series!r} and current series "
+                f"{binding.current_series!r} have mismatched sample counts."
+            )
+        i_time_cmp = i_time.to(device=v_time.device, dtype=v_time.dtype)
+        span = torch.abs(v_time[-1] - v_time[0]) if v_time.numel() > 1 else torch.abs(v_time).max()
+        atol = float(span) * 1e-6 if float(span) > 0.0 else 1e-12
+        if not torch.allclose(v_time, i_time_cmp, rtol=1e-6, atol=atol):
+            raise ValueError(
+                f"ComponentStressMonitor {name!r} voltage series "
+                f"{binding.voltage_series!r} and current series "
+                f"{binding.current_series!r} are recorded on different time axes; "
+                "voltage and current must share a common time grid for power and "
+                "energy integration."
+            )
+        voltage = voltage if isinstance(voltage, torch.Tensor) else torch.as_tensor(voltage)
+        current = current if isinstance(current, torch.Tensor) else torch.as_tensor(current)
+        return ComponentStressData.from_time_series(
+            v_time,
+            voltage,
+            current,
+            binding.rating,
+            name=binding.name,
+            port_name=binding.port,
+            provenance_extra={
+                "voltage_series": binding.voltage_series,
+                "current_series": binding.current_series,
+            },
+        )
+
     @property
     def ports(self) -> dict[str, PortData]:
         return dict(self._ports)

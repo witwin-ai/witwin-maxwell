@@ -2123,10 +2123,11 @@ def solve(
         (dft_frequency is not None and full_field_dft)
         or bool(getattr(solver, "observers", ()))
         or bool(getattr(solver, "time_observers", ()))
+        or bool(getattr(solver, "breakdown_observers", ()))
     ):
         raise NotImplementedError(
             "FDTD resume currently supports circuit/port workflows without full-field "
-            "DFT or field/time observers."
+            "DFT or field/time/breakdown observers."
         )
     if stop_step is not None:
         if isinstance(stop_step, bool) or not isinstance(stop_step, int):
@@ -2149,6 +2150,8 @@ def solve(
         solver._prepare_observers(observer_frequency, dft_window, time_steps)
     if getattr(solver, "time_observers", None):
         solver._prepare_time_observers(time_steps)
+    if getattr(solver, "breakdown_observers", None):
+        solver._prepare_breakdown_observers()
     prepare_port_spectral_accumulators(solver, time_steps, dft_window)
     prepare_circuit_time_series(solver, time_steps)
     circuit_runtimes = tuple(getattr(solver, "_circuit_runtimes", ()))
@@ -2261,6 +2264,7 @@ def solve(
             run_port_observers()
         solver.accumulate_observers(n)
         solver.accumulate_time_observers(n)
+        solver.accumulate_breakdown_observers(n)
         accumulate_wire_monitors(solver, n)
 
         if shutoff > 0 and (n + 1) % shutoff_check_interval == 0:
@@ -2326,6 +2330,9 @@ def solve(
     if getattr(solver, "time_observers_enabled", False):
         monitors = dict(monitors)
         monitors.update(solver.get_time_observer_results())
+    if getattr(solver, "breakdown_observers_enabled", False):
+        monitors = dict(monitors)
+        monitors.update(solver.get_breakdown_observer_results())
     wire_monitors = finalize_wire_data(solver)
     if wire_monitors:
         monitors = dict(monitors)

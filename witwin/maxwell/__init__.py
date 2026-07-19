@@ -47,6 +47,19 @@ from .electrostatic import (
     ElectrostaticSolverConfig,
     ElectrostaticTerminal,
 )
+from .esd import (
+    ESDCurrentSource,
+    ESDDiagnostics,
+    ESDPortRecord,
+    ESDResampledWaveform,
+    ESDWaveform,
+    MeasuredWaveform,
+)
+from .breakdown_stress import (
+    BreakdownStressData,
+    ComponentRating,
+    ComponentStressData,
+)
 from .geometry import ComplexPolySlab, PolySlab
 from .media import (
     CustomDebyePole,
@@ -71,7 +84,9 @@ from .media import (
     TwoPhotonAbsorption,
 )
 from .monitors import (
+    BreakdownMonitor,
     ClosedSurfaceMonitor,
+    ComponentStressMonitor,
     DiffractionMonitor,
     DipoleEmissionMonitor,
     FieldTimeMonitor,
@@ -220,6 +235,11 @@ __all__ = [
     "CustomDebyePole",
     "CustomDrudePole",
     "CustomLorentzPole",
+    "BreakdownMonitor",
+    "BreakdownStressData",
+    "ComponentRating",
+    "ComponentStressData",
+    "ComponentStressMonitor",
     "CustomSourceTime",
     "Cylinder",
     "DebyePole",
@@ -233,6 +253,11 @@ __all__ = [
     "ElectrostaticSolverConfig",
     "ElectrostaticTerminal",
     "Ellipsoid",
+    "ESDCurrentSource",
+    "ESDDiagnostics",
+    "ESDPortRecord",
+    "ESDResampledWaveform",
+    "ESDWaveform",
     "EmbeddedElementPatternData",
     "EmbeddedNetworkData",
     "FieldDataset",
@@ -263,6 +288,7 @@ __all__ = [
     "SurfaceImpedanceModel",
     "MaterialRegion",
     "MaxHoldComposite",
+    "MeasuredWaveform",
     "Medium2D",
     "MediumMonitor",
     "Mesh",

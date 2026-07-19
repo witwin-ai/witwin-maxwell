@@ -3,7 +3,11 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from ...compiler.monitors import compile_fdtd_observers, compile_fdtd_time_observers
+from ...compiler.monitors import (
+    compile_fdtd_breakdown_observers,
+    compile_fdtd_observers,
+    compile_fdtd_time_observers,
+)
 from ...compiler.sources import compile_fdtd_sources
 from ..boundary import DEFAULT_CPML_CONFIG
 from .module_cache import get_fdtd_module, require_cuda_scene
@@ -218,6 +222,8 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver.observers_enabled = False
     solver.time_observers = compile_fdtd_time_observers(scene)
     solver.time_observers_enabled = False
+    solver.breakdown_observers = compile_fdtd_breakdown_observers(scene)
+    solver.breakdown_observers_enabled = False
     solver.observer_frequency = None
     solver.observer_frequencies = ()
     solver.observer_window_type = "hanning"

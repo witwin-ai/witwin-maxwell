@@ -584,6 +584,170 @@ class PowerLossMonitor:
         object.__setattr__(self, "kind", "power_loss")
 
 
+BREAKDOWN_QUANTITIES = ("electric_field", "exposure", "dissipated_energy", "damage")
+
+
+@dataclass(frozen=True)
+class BreakdownMonitor:
+    """Non-feedback dielectric-stress accumulator over an axis-aligned region.
+
+    Capability level: **stress-only**. During a standard FDTD run this records,
+    per cell and entirely on device, the running ``max|E|``, the exceedance time
+    ``integral H(|E| - critical_field) dt``, the longest contiguous exceedance
+    duration and (when ``damage_exponent`` is set) a damage integral
+    ``integral (|E|/critical_field)^k dt``. It performs NO feedback into the
+    field solve and predicts nothing about device failure; a recorded exceedance
+    is a stress indicator only. ``minimum_duration`` is the reporting threshold
+    for a qualifying sustained exceedance and does not alter accumulation. Only
+    target-material occupancy of partially filled cells counts.
+    """
+
+    name: str
+    position: tuple[float, float, float]
+    size: tuple[float, float, float]
+    quantities: tuple[str, ...]
+    critical_field: float
+    minimum_duration: float
+    damage_exponent: float | None
+    bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+    kind: str = "breakdown"
+
+    def __init__(
+        self,
+        name,
+        region=None,
+        *,
+        position=None,
+        size=None,
+        quantities=("electric_field", "exposure", "dissipated_energy"),
+        critical_field=None,
+        minimum_duration=0.0,
+        damage_exponent=None,
+    ):
+        monitor_name = str(name).strip()
+        if not monitor_name:
+            raise ValueError("BreakdownMonitor name must not be empty.")
+        resolved_position, resolved_size = _resolve_region_geometry(region, position, size)
+        if not all(math.isfinite(value) for value in (*resolved_position, *resolved_size)):
+            raise ValueError("BreakdownMonitor position and size must be finite.")
+        if any(value <= 0.0 for value in resolved_size):
+            raise ValueError("BreakdownMonitor size must contain three positive lengths.")
+        if critical_field is None:
+            raise ValueError("BreakdownMonitor requires an explicit critical_field.")
+        resolved_field = float(critical_field)
+        if not math.isfinite(resolved_field) or resolved_field <= 0.0:
+            raise ValueError("critical_field must be a positive finite field strength.")
+        resolved_duration = float(minimum_duration)
+        if not math.isfinite(resolved_duration) or resolved_duration < 0.0:
+            raise ValueError("minimum_duration must be a non-negative finite time.")
+        resolved_exponent = None if damage_exponent is None else float(damage_exponent)
+        if resolved_exponent is not None and (
+            not math.isfinite(resolved_exponent) or resolved_exponent <= 0.0
+        ):
+            raise ValueError("damage_exponent must be a positive finite exponent or None.")
+
+        if isinstance(quantities, str):
+            resolved_quantities = (quantities,)
+        else:
+            resolved_quantities = tuple(str(quantity) for quantity in quantities)
+        if not resolved_quantities:
+            raise ValueError("BreakdownMonitor quantities must not be empty.")
+        if len(set(resolved_quantities)) != len(resolved_quantities):
+            raise ValueError("BreakdownMonitor quantities must be unique.")
+        unsupported = tuple(q for q in resolved_quantities if q not in BREAKDOWN_QUANTITIES)
+        if unsupported:
+            raise ValueError(
+                f"Unsupported BreakdownMonitor quantities {unsupported}; choices are {BREAKDOWN_QUANTITIES}."
+            )
+        if "damage" in resolved_quantities and resolved_exponent is None:
+            raise ValueError("BreakdownMonitor 'damage' quantity requires damage_exponent.")
+
+        object.__setattr__(self, "name", monitor_name)
+        object.__setattr__(self, "position", resolved_position)
+        object.__setattr__(self, "size", resolved_size)
+        object.__setattr__(self, "quantities", resolved_quantities)
+        object.__setattr__(self, "critical_field", resolved_field)
+        object.__setattr__(self, "minimum_duration", resolved_duration)
+        object.__setattr__(self, "damage_exponent", resolved_exponent)
+        object.__setattr__(
+            self,
+            "bounds",
+            _material_monitor_bounds(resolved_position, resolved_size),
+        )
+        object.__setattr__(self, "kind", "breakdown")
+
+
+@dataclass(frozen=True)
+class ComponentStressMonitor:
+    """Bind a :class:`ComponentRating` to a port's recorded V(t)/I(t) series.
+
+    Capability level: **stress-only**. ``voltage_series`` and ``current_series``
+    name time-series monitors present in the run result (for example a
+    ``FieldTimeMonitor`` sampling the gap voltage and a current time series);
+    the result reduces them to ``P = V I``, cumulative ``integral P dt`` and an
+    exceedance summary versus the rating envelope. It flags stress against the
+    declared absolute-maximum envelope, never device failure.
+    """
+
+    name: str
+    port: str
+    rating: object
+    voltage_series: str
+    current_series: str
+    kind: str = "component_stress"
+
+    def __init__(self, name, *, port, rating, voltage_series, current_series):
+        from .breakdown_stress import ComponentRating
+
+        monitor_name = str(name).strip()
+        if not monitor_name:
+            raise ValueError("ComponentStressMonitor name must not be empty.")
+        port_name = str(port).strip()
+        if not port_name:
+            raise ValueError("ComponentStressMonitor port must not be empty.")
+        if not isinstance(rating, ComponentRating):
+            raise TypeError("rating must be a ComponentRating instance.")
+        voltage_name = str(voltage_series).strip()
+        current_name = str(current_series).strip()
+        if not voltage_name or not current_name:
+            raise ValueError("voltage_series and current_series must name time-series monitors.")
+        object.__setattr__(self, "name", monitor_name)
+        object.__setattr__(self, "port", port_name)
+        object.__setattr__(self, "rating", rating)
+        object.__setattr__(self, "voltage_series", voltage_name)
+        object.__setattr__(self, "current_series", current_name)
+        object.__setattr__(self, "kind", "component_stress")
+
+
+def _resolve_region_geometry(region, position, size):
+    """Resolve a monitor region from an explicit box or a bounded scene object."""
+
+    if region is not None:
+        if position is not None or size is not None:
+            raise ValueError("Provide either region or position/size, not both.")
+        bounds = getattr(region, "bounds", None)
+        if bounds is not None and len(bounds) == 3:
+            resolved_position = tuple(
+                0.5 * (float(lower) + float(upper)) for lower, upper in bounds
+            )
+            resolved_size = tuple(float(upper) - float(lower) for lower, upper in bounds)
+            return resolved_position, resolved_size
+        region_position = getattr(region, "position", None)
+        region_size = getattr(region, "size", None)
+        if region_position is not None and region_size is not None:
+            return (
+                _require_length3("region.position", region_position),
+                _require_nonnegative_length3("region.size", region_size),
+            )
+        raise TypeError("region must expose bounds or position/size.")
+    if position is None or size is None:
+        raise ValueError("Provide a region or an explicit position and size.")
+    return (
+        _require_length3("position", position),
+        _require_nonnegative_length3("size", size),
+    )
+
+
 @dataclass(frozen=True)
 class DipoleEmissionMonitor:
     """Measure the power a named ``PointDipole`` delivers to the field.

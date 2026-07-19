@@ -1535,3 +1535,125 @@ def get_observer_results(solver):
             _normalize_monitor_result_inplace(result, spectrum)
 
     return results
+
+
+# --------------------------------------------------------------------------- #
+# Breakdown (non-feedback dielectric-stress) observers                        #
+# --------------------------------------------------------------------------- #
+
+
+def clear_breakdown_observers(solver):
+    solver.breakdown_observers = []
+    solver.breakdown_observers_enabled = False
+
+
+def _region_cell_slice(centers, lower, upper):
+    """Contiguous cell index range whose centers fall within [lower, upper]."""
+
+    mask = (centers >= lower) & (centers <= upper)
+    hits = np.nonzero(mask)[0]
+    if hits.size == 0:
+        return None
+    return int(hits[0]), int(hits[-1] + 1)
+
+
+def _axis_occupancy(nodes, cell_slice, lower, upper):
+    """Fractional overlap of each cell in the slice with [lower, upper]."""
+
+    i0, i1 = cell_slice
+    left = nodes[i0:i1]
+    right = nodes[i0 + 1 : i1 + 1]
+    widths = right - left
+    overlap = np.clip(np.minimum(right, upper) - np.maximum(left, lower), 0.0, None)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fraction = np.where(widths > 0.0, overlap / widths, 0.0)
+    return np.clip(fraction, 0.0, 1.0)
+
+
+def prepare_breakdown_observers(solver):
+    from ..breakdown_stress import BreakdownStressAccumulator
+
+    records = getattr(solver, "breakdown_observers", None)
+    if not records:
+        solver.breakdown_observers_enabled = False
+        return
+
+    scene = solver.scene
+    x_nodes = np.asarray(scene.x_nodes64, dtype=np.float64)
+    y_nodes = np.asarray(scene.y_nodes64, dtype=np.float64)
+    z_nodes = np.asarray(scene.z_nodes64, dtype=np.float64)
+    x_centers = np.asarray(scene.x_half64, dtype=np.float64)
+    y_centers = np.asarray(scene.y_half64, dtype=np.float64)
+    z_centers = np.asarray(scene.z_half64, dtype=np.float64)
+    dx = np.asarray(scene.dx_primal64, dtype=np.float64)
+    dy = np.asarray(scene.dy_primal64, dtype=np.float64)
+    dz = np.asarray(scene.dz_primal64, dtype=np.float64)
+
+    for record in records:
+        (x_lo, x_hi), (y_lo, y_hi), (z_lo, z_hi) = record["bounds"]
+        x_slice = _region_cell_slice(x_centers, x_lo, x_hi)
+        y_slice = _region_cell_slice(y_centers, y_lo, y_hi)
+        z_slice = _region_cell_slice(z_centers, z_lo, z_hi)
+        if x_slice is None or y_slice is None or z_slice is None:
+            raise ValueError(
+                f"BreakdownMonitor {record['name']!r} selects no interior cells; "
+                "increase its size or refine the grid."
+            )
+        record["cell_slices"] = (x_slice, y_slice, z_slice)
+
+        occ_x = _axis_occupancy(x_nodes, x_slice, x_lo, x_hi)
+        occ_y = _axis_occupancy(y_nodes, y_slice, y_lo, y_hi)
+        occ_z = _axis_occupancy(z_nodes, z_slice, z_lo, z_hi)
+        occupancy = (
+            occ_x[:, None, None] * occ_y[None, :, None] * occ_z[None, None, :]
+        )
+        vol = (
+            dx[x_slice[0] : x_slice[1]][:, None, None]
+            * dy[y_slice[0] : y_slice[1]][None, :, None]
+            * dz[z_slice[0] : z_slice[1]][None, None, :]
+        )
+        shape = occupancy.shape
+        occupancy_t = torch.as_tensor(occupancy, device=solver.device, dtype=solver.Ex.dtype)
+        volume_t = torch.as_tensor(vol, device=solver.device, dtype=solver.Ex.dtype)
+        record["accumulator"] = BreakdownStressAccumulator.allocate(
+            shape=shape,
+            critical_field=record["critical_field"],
+            dt=float(solver.dt),
+            minimum_duration=record["minimum_duration"],
+            damage_exponent=record["damage_exponent"],
+            cell_volume=volume_t,
+            occupancy=occupancy_t,
+            device=solver.device,
+            dtype=solver.Ex.dtype,
+        )
+
+    solver.breakdown_observers_enabled = any(records)
+
+
+def accumulate_breakdown_observers(solver, n):
+    if not getattr(solver, "breakdown_observers_enabled", False):
+        return
+    from ..breakdown_stress import colocate_electric_magnitude
+
+    for record in solver.breakdown_observers:
+        (x0, x1), (y0, y1), (z0, z1) = record["cell_slices"]
+        # Node-overhang sub-blocks so colocation yields exactly the region cells.
+        ex = solver.Ex[x0:x1, y0 : y1 + 1, z0 : z1 + 1]
+        ey = solver.Ey[x0 : x1 + 1, y0:y1, z0 : z1 + 1]
+        ez = solver.Ez[x0 : x1 + 1, y0 : y1 + 1, z0:z1]
+        magnitude = colocate_electric_magnitude(ex, ey, ez)
+        record["accumulator"].update(magnitude)
+
+
+def get_breakdown_observer_results(solver):
+    results = {}
+    for record in getattr(solver, "breakdown_observers", ()):
+        accumulator = record.get("accumulator")
+        if accumulator is None:
+            continue
+        results[record["name"]] = accumulator.finalize(
+            name=record["name"],
+            region_bounds=record["bounds"],
+            provenance_extra={"quantities": tuple(record["quantities"])},
+        )
+    return results

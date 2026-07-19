@@ -1159,7 +1159,15 @@ class Scene:
         return Scene(**params)
 
     def resolved_sources(self):
-        resolved = list(self.sources)
+        resolved = []
+        for source in self.sources:
+            # Declarative sources that lower to a core source (e.g. an ESD
+            # terminal injection) expose ``resolve(scene)``; expand them here so
+            # downstream compilers only see core source primitives.
+            if hasattr(source, "resolve") and callable(getattr(source, "resolve")):
+                resolved.append(source.resolve(self))
+            else:
+                resolved.append(source)
         for port in self.ports:
             if isinstance(port, ModePort):
                 source = port.to_mode_source()
