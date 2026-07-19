@@ -146,7 +146,45 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # budget as distributed ferrite (Phase 4), the FDFD gyromagnetic ingest, and the
 # arbitrary-bias kernel (Phase 2) land.
 # Merged union 2026-07-18: 140 - 1 (plan 05 N1) + 4 (plan 08 1b/1c+hardening) = 143.
-CAPABILITY_GUARD_BUDGET = 144
+# 2026-07-19 (plan 12 electrostatics Phase 0+1, scalar Laplace/Poisson slice):
+# 144 -> 152 (+8 capability). The new cell-centred finite-volume electrostatic
+# solver lands with eight fail-closed capability guards, all covering features
+# that are genuinely out of this stage's scope and would otherwise be silently
+# mishandled. Six are in compiler/electrostatic.py: (1) a grid-extending Scene
+# boundary (PML/periodic) is rejected because electrostatics owns its own
+# ElectrostaticBoundarySpec and must not solve on a PML-padded grid; (2) a
+# PEC-material structure is rejected (a conductor must be an ElectrostaticTerminal
+# equipotential, not a zero-permittivity dielectric); (3) a dispersive material is
+# rejected because it exposes no zero-frequency permittivity and the solver refuses
+# to guess a DC limit; (4) a DiagonalTensor3/Tensor3x3 anisotropic permittivity is
+# rejected (scalar operator only; tensor eps is Phase 4); (5) a per-cell tensor
+# permittivity sample is rejected; (6) a complex permittivity sample is rejected as
+# not a valid DC static value. Two are in electrostatic/runtime.py: (7) a floating
+# conductor with prescribed charge is rejected (needs the Phase 2 linear-superposition
+# solve); (8) a pure-Neumann problem with no conductor and no Dirichlet boundary is
+# rejected as gauge-singular.
+# 2026-07-19 (plan 12 electrostatics Phase 2+3): floating-conductor linear
+# superposition and pure-Neumann gauge handling are now implemented, so the former
+# floating-conductor guard (previously counted as #7) is removed; the measured
+# electrostatic capability count drops by one (152 -> 151 total). The budget is a
+# ceiling and stays 152 (151 <= 152). Incompatible floating-charge / missing
+# capacitance-return-path cases now fail closed with ValueError, not capability
+# guards. Lower this budget as tensor-eps / open-boundary (Phase 4) land.
+# 2026-07-19 (plan 12 electrostatics differentiability slice): the reduced
+# electrostatic solve now supports implicit-diff backward, but gradients through
+# the floating-conductor superposition path are not implemented, so
+# electrostatic/runtime.py adds one capability guard ("Gradients through the
+# floating-conductor superposition solve"). Measured electrostatic capability
+# count rises 151 -> 152 total, exactly at the ceiling. Lower this budget when the
+# floating-superposition gradient (or tensor-eps / open boundary, Phase 4) lands.
+# 2026-07-19 (plan 12 electrostatics audit fix): compiler/electrostatic.py adds one
+# capability guard, "does not support Scene.material_regions" -- a MaterialRegion
+# design region is an RF-path feature the electrostatic compiler does not rasterize,
+# so it now fails closed instead of silently solving with eps_r=1 in the region.
+# Measured electrostatic capability count rises 152 -> 153 total; budget raised
+# 152 -> 153. Lower it when MaterialRegion electrostatics (or tensor-eps / open
+# boundary, Phase 4) lands.
+CAPABILITY_GUARD_BUDGET = 153
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

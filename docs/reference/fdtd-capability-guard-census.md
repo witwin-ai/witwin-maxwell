@@ -424,3 +424,70 @@ isotropic medium, dropping the Polder tensor. `adapters/tidy3d.py` now raises
 non-reciprocal tensor model). One reviewed capability guard added, counted under
 "External interoperability adapter" (19 -> 20); measured capability total 143 -> 144
 and `CAPABILITY_GUARD_BUDGET` raised in the same change.
+
+### Electrostatics reconciliation (2026-07-19, plan 12 Phase 0+1)
+
+The new cell-centred finite-volume electrostatic (Laplace/Poisson) solver adds
+eight reviewed capability guards; `CAPABILITY_GUARD_BUDGET` is raised `144 -> 152`
+in the same change. All eight fail closed on features that are genuinely out of
+this stage's scope and would otherwise be silently mishandled.
+
+| Guard | Message substring | Capability review |
+| --- | --- | --- |
+| `compiler/electrostatic.py` `_require_electrostatic_boundary` | "requires Scene.boundary = BoundarySpec.none()" | Deferred capability. Electrostatics owns its boundary conditions through `ElectrostaticBoundarySpec`; a PML/periodic Scene boundary would extend the grid with absorber padding that has no electrostatic meaning. Periodic electrostatics is a later phase. |
+| `compiler/electrostatic.py` `_static_epsilon_scalar` (PEC) | "represent conductors with ElectrostaticTerminal" | Deferred capability. A PEC-material structure has no dielectric permittivity; conductors are equipotential terminals, not zero-permittivity dielectrics. |
+| `compiler/electrostatic.py` `_static_epsilon_scalar` (dispersive) | "do not define a zero-frequency permittivity" | Deferred capability. A dispersive material exposes no DC permittivity and the solver refuses to guess a zero-frequency limit; users must supply an explicit real static value (Phase 4 API). |
+| `compiler/electrostatic.py` `_static_epsilon_scalar` (tensor eps) | "Anisotropic (tensor) permittivity is not supported" | Deferred capability. The scalar operator handles isotropic media only; SPD tensor-eps is Phase 4. |
+| `compiler/electrostatic.py` `_static_epsilon_scalar` (per-cell tensor) | "Per-cell tensor permittivity is not supported" | Deferred capability, same Phase 4 tensor-eps family. |
+| `compiler/electrostatic.py` `_static_epsilon_scalar` (complex) | "not a valid DC static permittivity" | Deferred capability. A complex permittivity is not a DC static value. |
+| `electrostatic/runtime.py` `solve_electrostatics` (floating) | "requires the linear-superposition solve" | Deferred capability *at Phase 0+1*. A floating conductor with prescribed charge needs the Phase 2 linear-superposition solve; rejected rather than solved wrongly. Implemented and removed in Phase 2+3 (see below). |
+| `electrostatic/runtime.py` `solve_electrostatics` (pure Neumann) | "gauge-singular" | Deferred capability. A pure-Neumann problem with no conductor and no Dirichlet boundary is defined only up to a constant and cannot be solved; the gauge-fixable cases (floating conductors, mean(phi)=0) are now handled in Phase 2. |
+
+This is the historical Phase 0+1 record (eight guards, matching the `144 -> 152`
+budget raise); the floating-conductor guard is removed by the Phase 2+3 slice
+documented below. Lower this budget as tensor-eps / open boundary (Phase 4) land.
+
+### Electrostatics reconciliation (2026-07-19, plan 12 Phase 2+3)
+
+The Phase 2+3 slice (floating-conductor linear superposition, pure-Neumann gauge
+handling, N-terminal capacitance matrix) **implements** the previously deferred
+floating-conductor guard, so its `NotImplementedError` in
+`electrostatic/runtime.py` (`"requires the linear-superposition solve"`) is
+removed. Incompatible floating-charge constraints and missing capacitance return
+paths now fail closed with `ValueError` diagnostics (not counted as capability
+guards). Net measured capability total `152 -> 151`; `CAPABILITY_GUARD_BUDGET`
+is a ceiling and stays `152` (`151 <= 152`).
+
+### Electrostatics reconciliation (2026-07-19, plan 12 differentiability slice)
+
+The reduced electrostatic solve now provides implicit-differentiation backward
+(a `torch.autograd.Function`: forward Jacobi-PCG under `no_grad`, backward adjoint
+solve on the SPD reduced operator plus a residual VJP), so `d(energy)/d(eps)`,
+`dC_ij/d(eps)`, and `d(energy)/d(free_charge)` flow through the fixed-potential
+path. Gradients through the **floating-conductor** superposition solve are not
+implemented (the prescribed-charge `k x k` reduction is undifferentiated), so
+`electrostatic/runtime.py` adds one reviewed capability guard,
+`"Gradients through the floating-conductor superposition solve"`: a floating
+terminal combined with a differentiable permittivity / free charge fails closed
+rather than returning silently wrong gradients. Net measured capability total
+`151 -> 152`, exactly at the `CAPABILITY_GUARD_BUDGET` ceiling of `152`. Lower the
+budget when the floating-superposition gradient (or tensor-eps / open boundary,
+Phase 4) lands.
+
+### Electrostatics reconciliation (2026-07-19, plan 12 audit fix)
+
+Audit finding: the electrostatic compiler silently ignored `Scene.material_regions`
+(the RF density design-region object), solving with `eps_r = 1` inside a declared
+region instead of failing closed. `compiler/electrostatic.py` `_reject_material_regions`
+now raises `NotImplementedError` ("does not support Scene.material_regions") because
+`MaterialRegion` design regions are an RF-path feature that is not rasterized into the
+electrostatic permittivity; static dielectrics must be `Structure(material=Material(...))`
+bulk media. One reviewed capability guard added; net measured capability total
+`152 -> 153`; `CAPABILITY_GUARD_BUDGET` raised `152 -> 153` in the same change.
+
+| Guard | Message substring | Capability review |
+| --- | --- | --- |
+| `compiler/electrostatic.py` `_reject_material_regions` | "does not support Scene.material_regions" | Deferred capability. `MaterialRegion` is the RF differentiable design-region object; the electrostatic compiler rasterizes permittivity only from `Structure` bulk media, so a region would otherwise solve as vacuum. Rejected rather than solved wrongly. |
+
+Lower this budget when MaterialRegion electrostatics (or tensor-eps / open
+boundary, Phase 4) lands.

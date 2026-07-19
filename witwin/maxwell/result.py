@@ -1282,6 +1282,28 @@ class Result:
         return self._shard_paths
 
     @property
+    def electrostatic(self):
+        """Typed electrostatic solver output (``ElectrostaticResultData``)."""
+        from .electrostatic.runtime import ElectrostaticResultData
+
+        if self.method != "electrostatic" or not isinstance(self.raw_output, ElectrostaticResultData):
+            raise AttributeError(
+                "result.electrostatic is only available for Simulation.electrostatic(...) runs."
+            )
+        return self.raw_output
+
+    @property
+    def capacitance(self):
+        """Typed capacitance-matrix output (``CapacitanceData``)."""
+        from .electrostatic.capacitance import CapacitanceData
+
+        if self.method != "capacitance" or not isinstance(self.raw_output, CapacitanceData):
+            raise AttributeError(
+                "result.capacitance is only available for Simulation.capacitance(...) runs."
+            )
+        return self.raw_output
+
+    @property
     def E(self) -> ResultFieldAccessor:
         return self.at().E
 
