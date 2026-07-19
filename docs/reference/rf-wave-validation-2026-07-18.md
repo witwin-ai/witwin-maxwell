@@ -71,10 +71,18 @@ Six scenes live under `benchmark/scenes/rf/` and are driven through
   `(2/dx^2)(1-cos(pi dx/a))`). The artifact records the floor and the measured
   median rel error; status is `pass` iff the precondition holds and the measured
   value is within the floor, else `gap` with the measured residual disclosed.
-- **Conservation (wave-level):** the `a_passive/a_driven` precondition, max
-  singular value and reciprocity of the real S-matrix are reported per tier; the
-  per-tier numbers and their behaviour under refinement are stated in the artifact
-  and `benchmark/RESULTS.md`, not paraphrased here.
+- **Conservation (wave-level), actual per-tier numbers** (regenerated; replacing
+  the retired and false "converge toward the physical limits" sentence): the
+  quantities do **not** converge monotonically toward their ideal limits under
+  refinement, because the residual passive-port reflection dominates over grid
+  discretization. At dx = 0.05 / 0.025 / 0.02 -- `a_passive/a_driven` (interior)
+  = 0.523 / 0.606 / 0.419, max singular value (mid-band) = 1.119 / 1.174 / 1.176,
+  reciprocity (mid-band) = 3.5e-5 / 7.6e-5 / 2.3e-2. Only the finest tier both
+  transmits across the band (|S21| mid-band 0.988 vs 0.037 / 0.033 at the coarse
+  tiers, which sit below the shifted 3D-Yee TE10 onset) and meets the
+  `a_passive/a_driven <= 0.5` precondition, so it is the sole valid wave-level
+  tier; the coarse-tier beta errors (~85%) reflect the absent transmission, not a
+  refinement trend.
 - **Supporting only:** a `modal-eigensolve` beta cross-check is recorded but never
   gates. (The guided TE10 mode selection was itself fixed this round -- see the
   spurious near-`k0` rejection, F5, `modes.py`.)
