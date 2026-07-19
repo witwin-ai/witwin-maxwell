@@ -15,18 +15,23 @@ half-width is snapped deterministically to the Yee transverse half-grid for the
 requested ``dx`` (see :func:`snap_contour_half`, B5) so the scene builds across
 refinement tiers instead of raising a snapping error.
 
-Termination (audit S1 root cause, revised): the inner rod and outer shield run
-the full x-domain length, *through the PML to the domain boundaries*. The first
-S1 round left the conductors ending in open stubs a couple of cells past the port
-planes; the launched TEM wave reflected off that open line end, re-entered the
-passive port (|a_passive|/|a_driven| ~ 1), and violated the S = b/a extraction
-premise (a_passive = 0), collapsing the S-matrix toward ones (|S11| ~ 1, singular
-value ~ 1.85). That was NOT a port/line impedance mismatch -- the counterfactual
-with the conductors extended through the PML absorbs the wave cleanly
-(|S21| ~ 1, small |S11|). With the bench now terminated, the S-matrix is a usable
-wave-level measurement; the runner enforces an ``|a_passive|/|a_driven|``
-precondition before reporting any S-derived quantity. The modal-eigensolve ``Z0``
-is kept only as supporting evidence, never as the exit gate.
+Termination (audit S1 round-4 root cause, EXECUTED): the FDTD grid appends the
+PML nodes OUTSIDE the declared domain bounds -- ``scene._build_axis_grid64``
+extends the declared ``+-DOMAIN_X`` by ``num_layers*dx`` on each side (verified by
+inspecting the prepared solver x-grid: at dx=0.01 the grid spans ``+-0.18`` while
+``DOMAIN_X = 0.12``). Rounds 2/3 set ``LINE_LENGTH = 2*DOMAIN_X``, so the
+conductors ended at ``+-DOMAIN_X`` -- exactly the PML interface, in an OPEN STUB in
+front of the absorber. The launched TEM wave reflected off that open line end,
+re-entered the passive port (``|a_passive|/|a_driven| ~ 1``), and made the raw
+per-drive ``S = b/a`` extraction meaningless. This was a bench TERMINATION defect,
+not a port/line impedance mismatch: extending the conductors through the full
+padded grid (into the computational PML) is BY ITSELF sufficient -- executed
+counterfactual, a_passive/a_driven collapses from ~1.17 to ~0.17 (6 layers). The
+conductors now run ``2*(DOMAIN_X + num_layers*dx)`` plus a margin so they cross
+the PML to the grid edges at every tier (verified against the prepared geometry,
+not the scene constant). The network S is assembled by solving ``B = S*A`` across
+the drive columns (see waveport_sweep), which is the correct extraction whenever
+the passive port carries any incident wave.
 """
 
 from __future__ import annotations
@@ -47,12 +52,25 @@ DOMAIN_TRANSVERSE = 0.21   # aperture +-0.20 is grid-commensurate for dx in {0.0
 CONTOUR_HALF = 0.10        # current-contour half-width target (snapped per dx; see snap_contour_half)
 PORT_X = 0.02
 DOMAIN_X = 0.12
-# Terminate the line: the inner rod and outer shield run the full domain length,
-# through the PML to the +-x boundaries, so the launched TEM wave is absorbed at
-# the line ends instead of reflecting off open conductor stubs (audit S1 root
-# cause). LINE_LENGTH therefore spans the whole x-domain.
-LINE_LENGTH = 2.0 * DOMAIN_X
 PML_LAYERS = 6
+
+
+def line_length(dx: float) -> float:
+    """Conductor length that runs THROUGH the PML to the padded grid edges.
+
+    The prepared grid extends the declared ``+-DOMAIN_X`` by ``PML_LAYERS*dx`` on
+    each side (``scene._build_axis_grid64`` appends the PML nodes OUTSIDE the
+    declared bounds). To terminate the line the conductors must span the full
+    padded extent, not just ``2*DOMAIN_X`` (which ends at the PML interface). A
+    few-cell margin guarantees the rod/shield reach the outermost grid nodes at
+    every tier; verified by inspecting the prepared PEC occupancy, not this
+    constant.
+    """
+    return 2.0 * (DOMAIN_X + PML_LAYERS * dx) + 8.0 * dx
+
+
+# Nominal length at the default (finest) tier for callers that import a constant.
+LINE_LENGTH = line_length(0.0025)
 
 
 def analytic_z0() -> float:
@@ -132,6 +150,7 @@ def _coax_port(name: str, x: float, direction: str, *, dx: float) -> mw.WavePort
 def coax_thru_scene(*, dx: float = 0.0025, device: str = "cuda") -> mw.Scene:
     """Build a two-port air-filled coaxial thru line."""
 
+    length = line_length(dx)
     scene = mw.Scene(
         domain=mw.Domain(
             bounds=(
@@ -152,7 +171,7 @@ def coax_thru_scene(*, dx: float = 0.0025, device: str = "cuda") -> mw.Scene:
         mw.Cylinder(
             position=(0.0, 0.0, 0.0),
             radius=INNER_RADIUS,
-            height=LINE_LENGTH,
+            height=length,
             axis="x",
         ).with_material(mw.Material.pec(), name="inner_conductor")
     )
@@ -161,7 +180,7 @@ def coax_thru_scene(*, dx: float = 0.0025, device: str = "cuda") -> mw.Scene:
             position=(0.0, 0.0, 0.0),
             inner_radius=OUTER_RADIUS,
             outer_radius=SHIELD_OUTER,
-            length=LINE_LENGTH,
+            length=length,
         ).with_material(mw.Material.pec(), name="outer_conductor")
     )
     return scene
