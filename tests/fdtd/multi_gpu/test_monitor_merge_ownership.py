@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 import torch
@@ -322,6 +324,90 @@ def test_x_normal_flux_and_mode_require_exactly_one_owner(monitor_type, compute_
             result_device="cpu",
         )
 
+
+
+def _widen_owned_x(
+    layout: FDTDShardLayout, component: str, *, extra: int
+) -> FDTDShardLayout:
+    """Return a copy of ``layout`` whose ``component`` owns ``extra`` more x cells.
+
+    The widened owned x span extends past the shard's true seam into the
+    neighbour's owned region -- i.e. it double-counts ``extra`` seam strips. Both
+    the owned-global and owned-local x slices grow together so the cropped strip
+    stays self-consistent (the merge's per-shard extent check passes) and the
+    contiguity/overlap guard is what actually trips.
+    """
+
+    target = layout.component(component)
+    owned_global = target.owned_global_slice
+    owned_local = target.owned_local_slice
+    new_owned_global = (
+        slice(owned_global[0].start, owned_global[0].stop + extra),
+        owned_global[1],
+        owned_global[2],
+    )
+    new_owned_local = (
+        slice(owned_local[0].start, owned_local[0].stop + extra),
+        owned_local[1],
+        owned_local[2],
+    )
+    widened = dataclasses.replace(
+        target,
+        owned_global_slice=new_owned_global,
+        owned_local_slice=new_owned_local,
+    )
+    new_components = tuple(
+        widened if entry.component == target.component else entry
+        for entry in layout.component_layouts
+    )
+    return dataclasses.replace(layout, component_layouts=new_components)
+
+
+def test_seam_double_count_is_rejected_by_the_owned_overlap_guard():
+    """Falsify the tiled-plane seam ownership rule by double-counting one strip.
+
+    Seam ownership rule: for a y/z-normal plane tiled along the x split, every
+    global x index is owned by exactly one shard (its ``owned_global_slice``); each
+    shard contributes only that owned strip (halo/ghost x cells are cropped away),
+    so the seam sample between two shards is assembled exactly once and the flux
+    quadrature integrates each cell weight once.
+
+    Here rank 0's owned ``Ez`` strip is widened one x cell past the seam so both
+    shards claim the seam sample -- the double-count the rule forbids. The correct
+    partition (control) merges into full contiguous global coverage; the
+    double-counted partition must be rejected by the owned-slice overlap guard
+    rather than silently produce a plane with the seam counted twice.
+    """
+
+    plan = _plan()
+    layouts = _layout_map(plan)
+    payloads = tuple(
+        (layout.rank, {"plane": _tagged_plane(layout)})
+        for layout in reversed(plan.shard_layouts)
+    )
+
+    # Control: the true owned partition assembles clean contiguous global coverage.
+    control = merge_sharded_monitor_payloads(
+        ("plane",),
+        payloads,
+        shard_layouts=layouts,
+        physical_bounds=_PHYSICAL_BOUNDS,
+        result_device="cpu",
+    )["plane"]
+    np.testing.assert_array_equal(control["components"]["Ez"]["coords"][0], _X_NODES)
+
+    # Double-count one seam strip: rank 0 now owns one x cell into rank 1's region.
+    corrupted = dict(layouts)
+    corrupted[0] = _widen_owned_x(layouts[0], "Ez", extra=1)
+
+    with pytest.raises(ValueError, match="overlap"):
+        merge_sharded_monitor_payloads(
+            ("plane",),
+            payloads,
+            shard_layouts=corrupted,
+            physical_bounds=_PHYSICAL_BOUNDS,
+            result_device="cpu",
+        )
 
 
 def test_nm_scale_physical_crop_does_not_admit_pml_samples():

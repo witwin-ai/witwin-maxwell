@@ -124,3 +124,115 @@ pytest tests/fdtd/multi_gpu/
   OUT of scope, fail-closed (#13/#18 tail).
 - Timing/speedup is out of scope this round (deferred-pending-exclusive-window).
 - S5 tiled seeds not attempted this slice.
+
+## Slice 2 — defense-in-depth trainable guard + forward monitor gather (E3b) — DELIVERED
+
+### Delivered items
+
+1. **DistributedFDTD-layer trainable guard, defense in depth (closing the
+   self-reported 00 §02 gap).** The pre-existing solver-layer guard
+   (`_unsupported_distributed_trainable_tensors`, S3) already rejected trainable
+   geometry / material-perturbation / circuit / RF-port channels at construction.
+   The remaining hole after E3a: a trainable `Box` density resolving to a
+   graded-sigma absorber constructed the `DistributedFDTD` coordinator without
+   raising (only the reverse-time `require_distributed_adjoint_support` and the
+   public `Simulation` validator caught it). E3b adds a construction-time check in
+   `_validate_static_capabilities`: if the scene carries a trainable density and
+   the resolved active absorber (`absorber_type` when `boundary.uses_kind("pml")`,
+   else `"none"`) is graded-sigma (`"pml"`/`"absorber"`), it raises `ValueError`
+   (substring `"graded-sigma"`) before any hardware allocation. CPML/stable-PML and
+   open/PEC trainable-density scenes still construct. Both layers are tested: the
+   public `Simulation.fdtd(..., parallel=...).prepare()` boundary and the direct
+   `DistributedFDTD(...)` constructor.
+2. **Forward distributed monitor gather — seam ownership documented + falsified.**
+   The forward one-process monitor gather (`fdtd/distributed/monitor_merge.py`,
+   `merge_sharded_monitor_payloads`) was delivered in an earlier forward slice and
+   is exercised end-to-end by `test_monitor_numerical.py` (1-vs-2-GPU parity for a
+   spanning y-normal plane, a spanning z-normal flux, an off-split x-normal plane,
+   a split x-normal flux, and a mode monitor). E3b derives/documents the **seam
+   ownership rule** and adds the mandated double-count falsification. Seam rule:
+   for a y/z-normal plane tiled along the x split, each global x index is owned by
+   exactly one shard (its `owned_global_slice`); every shard contributes only its
+   owned strip (halo/ghost x cells cropped by `owned_local_slice`), so the seam
+   sample between two shards is assembled exactly once and the flux quadrature —
+   recomputed on the result device from the merged owned components with
+   cell-center weights derived from the reassembled global coordinates, then
+   cropped to the physical bounds — never double-counts a seam cell weight.
+
+### Files changed / added
+
+- `witwin/maxwell/fdtd/distributed/solver.py` (construction-time trainable-density
+  + graded-sigma-absorber defense-in-depth guard in `_validate_static_capabilities`)
+- `tests/fdtd/multi_gpu/test_guard_regressions.py` (new: both-layer graded-sigma
+  rejection test + CPML positive-control construction test)
+- `tests/fdtd/multi_gpu/test_monitor_merge_ownership.py` (new: seam double-count
+  falsification via a widened owned x slice)
+- `FEATURE_LIST.md` (additive Track E3 subsection: CPML-trainable adjoint,
+  defense-in-depth guard, forward monitor gather + seam rule)
+- `docs/assessments/e3-distributed-adjoint-acceptance-2026-07-19.md` (this section)
+
+### Gates / tests (executed on 2x A6000)
+
+| Gate | Test | Result |
+|---|---|---|
+| trainable density + graded-sigma rejected at BOTH layers | `test_guard_regressions.py::test_solver_trainable_density_with_graded_sigma_absorber_rejected_at_construction[pml,absorber]` | 2 passed (public prepare + direct construct both raise `graded-sigma`) |
+| trainable density + CPML/stable-PML constructs (positive control) | `test_guard_regressions.py::test_solver_trainable_density_with_cpml_constructs[cpml,stablepml]` | 2 passed |
+| unsupported-channel defense in depth (pre-existing, still green) | `test_guard_regressions.py::test_solver_trainable_guard_covers_circuit_parameter_channel` | passed |
+| 1-vs-2-GPU monitor parity, spanning y-plane | `test_monitor_numerical.py::test_y_normal_single_component_plane_monitor_matches_one_gpu` | passed (rtol 5e-5 / atol 5e-6) |
+| 1-vs-2-GPU flux parity, spanning z-flux | `test_monitor_numerical.py::test_z_normal_flux_monitor_matches_fields_and_integrated_flux` | passed (fields 5e-5; flux rel <=1e-3) |
+| 1-vs-2-GPU parity, non-spanning off-split x-plane | `test_monitor_numerical.py::test_off_split_x_normal_plane_monitor_matches_one_gpu` | passed |
+| 1-vs-2-GPU parity, split x-normal flux | `test_monitor_numerical.py::test_split_x_normal_flux_monitor_matches_fields_and_integrated_flux` | passed |
+| seam double-count rejected (falsification test) | `test_monitor_merge_ownership.py::test_seam_double_count_is_rejected_by_the_owned_overlap_guard` | passed |
+| non-gathered monitors stay fail-closed | `test_guard_regressions.py::test_material_monitors_are_explicitly_rejected_before_hardware_prepare` + solver static guards (closed-surface/diffraction/flux-time/non-point-time/breakdown) | passed |
+| capability-guard census unchanged | `tests/api/public/test_guard_census.py` | passed (budget 176) |
+
+### Falsifications recorded (load-bearing)
+
+1. **DistributedFDTD graded-sigma trainable guard is load-bearing.** Disabled the
+   new check (`if False and resolved_absorber in ("pml","absorber")`) in
+   `_validate_static_capabilities`; reran
+   `test_solver_trainable_density_with_graded_sigma_absorber_rejected_at_construction`.
+   Layer 1 (public `Simulation`) still raised, but layer 2 (direct
+   `DistributedFDTD(...)`) failed with `DID NOT RAISE ValueError` (2 failed).
+   Restored the guard -> green. Confirms the constructor guard, not only the public
+   validator, is what closes the direct-construction hole.
+2. **Seam overlap guard is load-bearing.** Neutralized the overlap branch in
+   `monitor_merge._stitch_owned_component` (kept only the `gap` case); reran
+   `test_seam_double_count_is_rejected_by_the_owned_overlap_guard`. The test went
+   red — the specific `"overlap"` diagnosis vanished and the double-counted strip
+   was instead caught one layer later by the strictly-increasing-coordinate guard
+   (`"owned global x coordinates are not strictly increasing"`), demonstrating both
+   that the overlap guard is the primary seam-double-count defense and that a
+   second line exists. Restored -> green.
+
+### Test commands + pass counts (executed)
+
+```bash
+# New slice-2 tests + guard suites + census
+pytest tests/fdtd/multi_gpu/test_monitor_merge_ownership.py \
+       tests/fdtd/multi_gpu/test_guard_regressions.py \
+       tests/api/public/test_guard_census.py
+# -> 34 passed
+
+# Full multi-GPU suite (regression, includes monitor parity + slice-1 CPML gates) + census
+pytest tests/fdtd/multi_gpu/ tests/api/public/test_guard_census.py
+# -> 256 passed
+
+# Single-GPU adjoint/gradient regression + public API smoke
+pytest tests/gradients/ tests/api/public/test_public_api.py \
+       tests/api/public/test_simulation_smoke.py
+# -> see run log (all passed)
+```
+
+### Known gaps / deferred (E3b scope)
+
+- Forward monitor gather is single-process (`transport="cuda_p2p"`). NCCL
+  (one-process-per-GPU) monitor gather, CPML adjoint, and coupled-runtime
+  (circuit/network/wire) joint-solve stay OUT of scope and fail-closed — the
+  remaining blueprint #13/#18 tail.
+- Non-gathered monitor classes (closed-surface, diffraction, time-domain flux,
+  non-point time, permittivity/medium material, breakdown/ESD observers) remain
+  fail-closed; the capability-guard census budget is unchanged (176) — no guard
+  was widened silently.
+- Timing/speedup deferred-pending-exclusive-window.
+- S5 tiled adjoint seeds not attempted (slices 1-2 delivered and audited first).
