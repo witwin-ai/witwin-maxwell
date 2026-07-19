@@ -184,8 +184,14 @@ def compile_network_block(
             ) from exc
         if isinstance(port, WavePort):
             raise ValueError(
-                f"Network {block.name!r} cannot connect to WavePort {connection_name!r}; "
-                "time-domain terminal injection is unavailable."
+                f"Network {block.name!r} cannot connect to WavePort {connection_name!r}: "
+                "an embedded state-space network couples through a scalar "
+                "voltage/current terminal on a single lumped Yee edge "
+                "(LumpedPort or resolved TerminalPort), but a WavePort is a modal "
+                "port defined by a cross-sectional mode-overlap field pattern with "
+                "no scalar time-domain terminal (V, I) contract. This is a missing "
+                "design contract, not a bug; use a LumpedPort or TerminalPort "
+                "terminal for embedded-network connections."
             )
         if not isinstance(port, (LumpedPort, TerminalPort)):
             raise TypeError(

@@ -100,6 +100,7 @@ class FDTDCheckpointSchema:
     lumped_state_names: tuple[str, ...] = ()
     circuit_state_names: tuple[str, ...] = ()
     network_state_names: tuple[str, ...] = ()
+    network_delay_state_names: tuple[str, ...] = ()
     wire_state_names: tuple[str, ...] = ()
     gyromagnetic_state_names: tuple[str, ...] = ()
     surface_impedance_state_names: tuple[str, ...] = ()
@@ -116,6 +117,7 @@ class FDTDCheckpointSchema:
             + self.lumped_state_names
             + self.circuit_state_names
             + self.network_state_names
+            + self.network_delay_state_names
             + self.wire_state_names
             + self.gyromagnetic_state_names
             + self.surface_impedance_state_names
@@ -189,6 +191,44 @@ def iter_network_state_specs(solver):
         yield network_carried_voltage_name(index), runtime.carried_voltage
 
 
+# Persistent bidirectional-delay state carried across a checkpoint/resume
+# boundary for an embedded network with explicit port delay. The Thiran
+# fractional-filter memory (previous_input/previous_output) and the shared ring
+# cursor are dynamic state; the per-step scratch (integer/fractional samples,
+# temporaries, read/write index vectors) is recomputed each step from the cursor
+# and is deliberately excluded from the frozen layout.
+_NETWORK_DELAY_STATE_TENSOR_NAMES = (
+    "forward_ring",
+    "reverse_ring",
+    "forward_previous_input",
+    "forward_previous_output",
+    "reverse_previous_input",
+    "reverse_previous_output",
+    "cursor",
+)
+
+
+def network_delay_state_name(index: int, tensor_name: str) -> str:
+    return f"network_{int(index)}_delay_{tensor_name}"
+
+
+def iter_network_delay_state_specs(solver):
+    """Yield (name, tensor) for each embedded network carrying explicit delay.
+
+    Empty for delay-free networks: only the bidirectional-delay reference-plane
+    runtime holds ring/filter/cursor state that must survive checkpoint/resume.
+    Without this state a resumed delayed network would restart its reference
+    planes from zero and desynchronize from the interrupted run.
+    """
+
+    for index, runtime in enumerate(getattr(solver, "_network_runtimes", ())):
+        delay = getattr(runtime, "delay_runtime", None)
+        if delay is None:
+            continue
+        for tensor_name in _NETWORK_DELAY_STATE_TENSOR_NAMES:
+            yield network_delay_state_name(index, tensor_name), getattr(delay, tensor_name)
+
+
 def surface_impedance_state_name(index: int) -> str:
     return f"surface_ade_{int(index)}_state"
 
@@ -260,6 +300,9 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
     network_state_names = tuple(
         name for name, _runtime in iter_network_state_specs(solver)
     )
+    network_delay_state_names = tuple(
+        name for name, _tensor in iter_network_delay_state_specs(solver)
+    )
     wire_state_names = (
         _WIRE_STATE_NAMES if getattr(solver, "_wire_runtime", None) is not None else ()
     )
@@ -281,6 +324,7 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         lumped_state_names=lumped_state_names,
         circuit_state_names=circuit_state_names,
         network_state_names=network_state_names,
+        network_delay_state_names=network_delay_state_names,
         wire_state_names=tuple(wire_state_names),
         gyromagnetic_state_names=gyromagnetic_state_names,
         surface_impedance_state_names=surface_impedance_state_names,
@@ -372,6 +416,8 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
         tensors[name] = tensor.detach().clone()
     for name, tensor in iter_network_state_specs(solver):
         tensors[name] = tensor.detach().clone()
+    for name, tensor in iter_network_delay_state_specs(solver):
+        tensors[name] = tensor.detach().clone()
     wire_runtime = getattr(solver, "_wire_runtime", None)
     if wire_runtime is not None:
         tensors["wire_current"] = wire_runtime.current.detach().clone()
@@ -448,6 +494,8 @@ def _checkpoint_tensor_targets(solver, schema: FDTDCheckpointSchema):
     for name, tensor in iter_circuit_state_specs(solver):
         yield name, tensor, None
     for name, tensor in iter_network_state_specs(solver):
+        yield name, tensor, None
+    for name, tensor in iter_network_delay_state_specs(solver):
         yield name, tensor, None
     wire_runtime = getattr(solver, "_wire_runtime", None)
     if wire_runtime is not None:

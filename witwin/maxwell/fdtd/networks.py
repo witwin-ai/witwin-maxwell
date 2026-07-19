@@ -52,6 +52,8 @@ class PreparedNetworkRuntime:
     branch_current: torch.Tensor
     output_buffer: torch.Tensor
     direct_drive: torch.Tensor
+    gain_state: torch.Tensor
+    gain_voltage: torch.Tensor
     delay_runtime: PreparedBidirectionalDelay | None
     reference_impedance: torch.Tensor
     sqrt_reference_impedance: torch.Tensor
@@ -431,6 +433,23 @@ def prepare_network_runtimes(
             device=device,
             dtype=torch.int64,
         )
+        # E4b fixed-cost reduction: the same-step direct loop matrix
+        # ``M = I + D * diag(Z_f)`` is constant across the whole run, so the
+        # ordinary-Y branch-current solve ``M x = C@state + D@v`` collapses to
+        # ``x = (M^-1 C)@state + (M^-1 D)@v``. Applying the already-computed
+        # pivoted LU to the *constant* C and D once here replaces the per-step
+        # sequential triangular substitution (O(port) tiny kernels) with two
+        # dense matvecs, without introducing a naive matrix inverse: the
+        # composite operators are LU-solved, not formed by inversion, and the
+        # ill-conditioned direct-loop parity gate is preserved. Only the
+        # delay-free path uses these; the delayed reference-plane solve keeps its
+        # own LU over the zero-delay subset.
+        if compiled.delay is None:
+            gain_state = torch.linalg.lu_solve(loop_lu, loop_pivots, C).contiguous()
+            gain_voltage = torch.linalg.lu_solve(loop_lu, loop_pivots, D).contiguous()
+        else:
+            gain_state = torch.empty((port_count, 0), device=device, dtype=dtype)
+            gain_voltage = torch.empty((port_count, 0), device=device, dtype=dtype)
         solve_workspace = torch.empty(
             (loop_denominator.shape[0],),
             device=device,
@@ -479,6 +498,8 @@ def prepare_network_runtimes(
                 branch_current=branch_current,
                 output_buffer=torch.empty((port_count,), device=device, dtype=dtype),
                 direct_drive=torch.empty((port_count,), device=device, dtype=dtype),
+                gain_state=gain_state,
+                gain_voltage=gain_voltage,
                 delay_runtime=delay_runtime,
                 reference_impedance=reference_impedance,
                 sqrt_reference_impedance=sqrt_reference_impedance,
@@ -551,7 +572,17 @@ def replay_network_runtimes(
     ):
         if runtime.delay_runtime is not None:
             raise NotImplementedError(
-                "Differentiable embedded-network replay does not support explicit delay state."
+                "Differentiable embedded-network replay does not support explicit "
+                "delay state: the bidirectional reference-plane ring couples a "
+                "step to samples written up to max_delay_steps earlier (a "
+                "coupling that can span checkpoint segments), and the Thiran "
+                "fractional-delay filter is an IIR recurrence over consecutive "
+                "steps. The segment-local network pullback reverses only a "
+                "self-contained same-step recurrence, so a correct delay adjoint "
+                "requires a delay-aware reverse ring carried across segments. The "
+                "delay forward state is captured in the checkpoint schema for "
+                "forward resume; the reverse pass is intentionally fail-closed "
+                "rather than approximate."
             )
         name = network_state_name(network_index)
         carried_name = network_carried_voltage_name(network_index)
@@ -845,25 +876,14 @@ def _solve_network_currents(
     """
 
     if runtime.delay_runtime is None:
-        _matvec_out(runtime.C, runtime.state, runtime.output_buffer)
-        _matvec_out(runtime.D, runtime.free_voltage, runtime.direct_drive)
-        runtime.output_buffer.add_(runtime.direct_drive)
-        if native_lu:
-            _native_lu_solve_out(
-                runtime.loop_lu,
-                runtime.loop_pivots,
-                runtime.output_buffer,
-                runtime.branch_current,
-            )
-        else:
-            _lu_solve_out(
-                runtime.loop_lu,
-                runtime.loop_permutation,
-                runtime.output_buffer,
-                runtime.branch_current,
-                runtime.solve_workspace,
-                runtime.solve_scalar,
-            )
+        # E4b: constant-loop composite solve. ``branch_current`` =
+        # (M^-1 C) @ state + (M^-1 D) @ free_voltage, two dense matvecs, instead
+        # of a per-step sequential triangular substitution over the prepared LU.
+        # ``native_lu`` no longer changes the delay-free result: eager and
+        # CUDA-graph replay now produce bitwise-identical branch currents.
+        _matvec_out(runtime.gain_state, runtime.state, runtime.branch_current)
+        _matvec_out(runtime.gain_voltage, runtime.free_voltage, runtime.output_buffer)
+        runtime.branch_current.add_(runtime.output_buffer)
         runtime.network_voltage.copy_(runtime.free_voltage)
         runtime.network_voltage.addcmul_(
             runtime.feedback_impedance,

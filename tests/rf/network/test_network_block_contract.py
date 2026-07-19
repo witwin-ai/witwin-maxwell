@@ -190,6 +190,38 @@ def test_state_space_certificate_rejects_active_response_between_samples() -> No
         scene.compile_networks(dt=1.0e-12, device="cpu")
 
 
+def test_network_embedding_rejects_waveport_terminal_with_accurate_reason() -> None:
+    # E4b disposition: WavePort embedding stays fail-closed. A modal WavePort has
+    # no scalar time-domain (V, I) terminal contract for a lumped state-space
+    # network to couple to; the rejection must name that design gap, not read as
+    # a transient bug.
+    waveport = mw.WavePort(
+        name="wp",
+        position=(-0.01, 0.0, 0.0),
+        size=(0.0, 0.03, 0.03),
+        direction="+",
+        reference_plane=-0.01,
+        modes=(
+            mw.WaveModeSpec(
+                family="tem",
+                voltage_path=((-0.01, -0.01, 0.0), (-0.01, 0.01, 0.0)),
+                current_contour=mw.Box(
+                    position=(-0.01, 0.0, 0.0), size=(0.0, 0.02, 0.02)
+                ),
+            ),
+        ),
+    )
+    block = mw.NetworkBlock(
+        name="modal_load",
+        network=_network_data(),
+        connections={"load": "wp"},
+        fit=False,
+        model=_state_space(),
+    )
+    with pytest.raises(ValueError, match=r"WavePort.*modal port.*no scalar time-domain"):
+        _scene(ports=(waveport,), networks=(block,))
+
+
 def test_zero_state_direct_network_discretizes_and_certifies_band() -> None:
     model = mw.StateSpaceNetwork(
         A=torch.zeros((0, 0), dtype=torch.float64),
