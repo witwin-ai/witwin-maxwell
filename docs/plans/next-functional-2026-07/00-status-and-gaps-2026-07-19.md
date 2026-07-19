@@ -230,7 +230,7 @@ multi-GPU contract). Inherits 01 port-power risk. E2 upgrade gated on S1-pass + 
 
 ### 05 — Nonlinear circuit devices
 
-No plan file under `next-functional-2026-07/` (design/§8 referenced in audit).
+Plan: `docs/plans/next-functional-2026-07/05-nonlinear-circuit-devices.md`.
 Audit §1.6 / §3 row 05. Census
 `docs/reference/fdtd-capability-guard-census.md` (nonlinear reconciliations).
 
@@ -314,8 +314,8 @@ impedance/far-field numbers flagged UNEVIDENCED (regenerate before citing).
 
 ### 08 — Gyromagnetic ferrite
 
-No plan file under `next-functional-2026-07/`. Audit §1.6 / §3 row 08. Reference
-`docs/reference/ferrite-physics-contract.md`. Census
+Plan: `docs/plans/next-functional-2026-07/08-ferrite-materials.md`. Audit §1.6 /
+§3 row 08. Reference `docs/reference/ferrite-physics-contract.md`. Census
 `fdtd-capability-guard-census.md` (gyromagnetic reconciliations).
 
 **Delivered (with evidence):** Phase 0 physics contract + torch reference oracle +
@@ -337,7 +337,8 @@ over a ferrite rejected. Scalar frequency-evaluation is a permanent contract.
 
 ### 09 — Surface impedance / metal roughness
 
-No plan file under `next-functional-2026-07/`. Audit §1.6 / §3 row 09. References
+Plan: `docs/plans/next-functional-2026-07/09-surface-impedance-metal-roughness.md`.
+Audit §1.6 / §3 row 09. References
 `docs/reference/rf-port-conventions.md` (SIBC runtime), memory
 `sibc-resistive-stability-fix-2026-07-17.md`, `surface-impedance-phase0-p09-fixer-2026-07-17.md`.
 Census `fdtd-capability-guard-census.md` (surface-impedance reconciliations).
@@ -365,13 +366,16 @@ correctness/robustness landing, not a wave-level validation grade).
 
 ### 10 — SAR  •  11 — Bioheat  •  12 — Electrostatic / capacitance  •  13 — ESD / dielectric breakdown
 
-No plan files under `next-functional-2026-07/`; audit §1 row "10–13 `proposed`"
-(design only) and §3 route step S7. **Not started (frozen).** Zero implementation
-exists; there is no delivered phase, artifact, or test to point to. Per audit S0.2
-they may not begin until S3 passes, and per S7 only after an explicit product goal,
-reusing 01's `PowerLossData` contract (no duplicate data model). Do not read the
-audit's reference-mapping table (§3: 10/13 `future-xfdtd`, 11/12 🟡) as progress —
-it is forward planning, not delivered capability.
+Plans: `docs/plans/next-functional-2026-07/10-sar.md`,
+`11-bioheat.md`, `12-electrostatics-capacitance.md`,
+`13-esd-dielectric-breakdown.md` (design proposals, not progress); audit §1 row
+"10–13 `proposed`" (design only) and §3 route step S7. **Not started (frozen).**
+The plan files are forward-looking design proposals — zero implementation exists;
+there is no delivered phase, artifact, or test to point to. Per audit S0.2 they may
+not begin until S3 passes, and per S7 only after an explicit product goal, reusing
+01's `PowerLossData` contract (no duplicate data model). Do not read the plan files
+or the audit's reference-mapping table (§3: 10/13 `future-xfdtd`, 11/12 🟡) as
+progress — they are forward planning, not delivered capability.
 
 **Evidence grade:** — (no measured grade; nothing to grade).
 
@@ -416,7 +420,7 @@ reference-solver policy: use the covered external reference solver where it cove
 the capability (via the existing Tidy3D benchmark adapter under
 `witwin/maxwell/adapters/` and `benchmark/cache/`), otherwise mark
 `reference: future-xfdtd` and hold the line with analytic/independent references —
-never downgrade a gate to self-证 for lack of an external run.
+never downgrade a gate to self-certification for lack of an external run.
 
 ## Owner decision points
 
@@ -462,3 +466,19 @@ never downgrade a gate to self-证 for lack of an external run.
   its running prose tracks 144 after the gyromagnetic export guard (143→144). The
   144 measured total is the current budget; the 140 table is stale relative to the
   later reconciliations in the same document.
+- **C-5 (plan corpus force-added to tracking, 2026-07-19).** `docs/` is gitignored,
+  so the full plan corpus existed only as untracked files in the main checkout, not
+  in this worktree — the first draft of this document therefore wrongly stated "No
+  plan file under `next-functional-2026-07/`" for plans 05/08/09/10–13. On this date
+  the previously-untracked plan files were copied into the worktree at the same path
+  and `git add -f`'d so the whole corpus is tracked and the worktree trap is closed:
+  `02-multi-gpu-execution.md`, `02-phase-7-8-blueprint-2026-07-16.md`,
+  `03-distributed-networks-spec-2026-07-16.md`, `05-nonlinear-circuit-devices.md`,
+  `08-ferrite-materials.md`, `09-surface-impedance-metal-roughness.md`, `10-sar.md`,
+  `11-bioheat.md`, `12-electrostatics-capacitance.md`,
+  `13-esd-dielectric-breakdown.md`, and `README.md`. The already-tracked
+  01/02-ensemble/03-touchstone/04/06/07 files (which carry the S0.1 evidence-grade
+  re-annotations) were left untouched. Plans 10–13 remain **not started (frozen)**:
+  their newly-tracked files are `proposed` design documents, not progress. The
+  S0.2/S3/S7 gating identifiers come from the audit, not from the 10–13 plan files
+  themselves (which express an internal deferral gate).
