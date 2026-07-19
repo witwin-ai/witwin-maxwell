@@ -503,6 +503,83 @@ class Tensor3x3:
         object.__setattr__(self, "rows", _normalize_tensor_rows(rows, name="rows"))
 
 
+@dataclass(frozen=True)
+class DielectricBreakdown:
+    """Deterministic field-duration/latching dynamic dielectric breakdown.
+
+    A breakdown-capable cell flips from ``intact`` to ``conducting`` once the
+    energy-consistent cell-center field magnitude ``|E|`` stays at or above
+    ``critical_field`` [V/m] for a contiguous ``minimum_duration`` [s]. On
+    trigger, the cell conductivity ramps linearly from its base value toward
+    ``post_breakdown_conductivity`` [S/m] over ``ramp_time`` (default a small
+    documented multiple of the time step). ``state="latching"`` keeps a triggered
+    cell conducting for the rest of the run.
+
+    This is a deterministic, uncalibrated comparison / conductive-path model, not
+    a validated arc or device-failure predictor. v1 supports exactly
+    ``model="field_duration"`` and ``state="latching"``; ``recovery`` and
+    ``damage_parameters`` are reserved for a later phase and must be left unset.
+    """
+
+    critical_field: float
+    post_breakdown_conductivity: float
+    minimum_duration: float = 0.0
+    model: str = "field_duration"
+    state: str = "latching"
+    recovery: object | None = None
+    damage_parameters: object | None = None
+    ramp_time: float | None = None
+    # Default ramp is 10 time steps, resolved against dt at prepare time when
+    # ``ramp_time`` is None. A finite ramp keeps the semi-implicit lossy update
+    # well-conditioned instead of switching the conductivity in a single step.
+    default_ramp_steps: int = 10
+
+    def __post_init__(self):
+        object.__setattr__(
+            self, "critical_field", _coerce_positive(self.critical_field, name="critical_field")
+        )
+        object.__setattr__(
+            self,
+            "post_breakdown_conductivity",
+            _coerce_positive(
+                self.post_breakdown_conductivity, name="post_breakdown_conductivity"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "minimum_duration",
+            _coerce_nonnegative(self.minimum_duration, name="minimum_duration"),
+        )
+        if self.model != "field_duration":
+            raise NotImplementedError(
+                "DielectricBreakdown v1 supports model='field_duration' only; "
+                f"got {self.model!r}. Other criteria (instantaneous, damage) are a "
+                "later phase."
+            )
+        if self.state != "latching":
+            raise NotImplementedError(
+                "DielectricBreakdown v1 supports state='latching' only; "
+                f"got {self.state!r}. Recovering/failed state machines are a later phase."
+            )
+        if self.recovery is not None:
+            raise NotImplementedError(
+                "DielectricBreakdown.recovery is a reserved field with no v1 behavior; "
+                "leave it unset until the recovery model lands."
+            )
+        if self.damage_parameters is not None:
+            raise NotImplementedError(
+                "DielectricBreakdown.damage_parameters is a reserved field with no v1 "
+                "behavior; leave it unset until the cumulative-damage model lands."
+            )
+        if self.ramp_time is not None:
+            object.__setattr__(
+                self, "ramp_time", _coerce_positive(self.ramp_time, name="ramp_time")
+            )
+        if int(self.default_ramp_steps) <= 0:
+            raise ValueError("DielectricBreakdown.default_ramp_steps must be positive.")
+        object.__setattr__(self, "default_ramp_steps", int(self.default_ramp_steps))
+
+
 def _shift_permittivity_real(value, susceptibility: complex):
     """Add the real part of a homogeneous susceptibility to a permittivity sample.
 
@@ -537,6 +614,7 @@ class Material(CoreMaterial):
     nonlinearity: tuple
     modulation: ModulationSpec | None
     pec: bool
+    breakdown: DielectricBreakdown | None
 
     def __init__(
         self,
@@ -560,9 +638,13 @@ class Material(CoreMaterial):
         nonlinearity=None,
         modulation: ModulationSpec | None = None,
         pec: bool = False,
+        breakdown: DielectricBreakdown | None = None,
     ):
         super().__init__(eps_r=eps_r, mu_r=mu_r, sigma_e=sigma_e, name=name)
         object.__setattr__(self, "pec", bool(pec))
+        if breakdown is not None and not isinstance(breakdown, DielectricBreakdown):
+            raise TypeError("Material.breakdown must be a DielectricBreakdown instance.")
+        object.__setattr__(self, "breakdown", breakdown)
         object.__setattr__(self, "debye_poles", _normalize_poles(debye_poles, (DebyePole, CustomDebyePole), name="debye_poles"))
         object.__setattr__(self, "drude_poles", _normalize_poles(drude_poles, (DrudePole, CustomDrudePole), name="drude_poles"))
         object.__setattr__(self, "lorentz_poles", _normalize_poles(lorentz_poles, (LorentzPole, CustomLorentzPole), name="lorentz_poles"))
@@ -665,6 +747,46 @@ class Material(CoreMaterial):
                 raise ValueError(
                     "A PEC Material must not carry dispersion, anisotropy, Kerr, modulation, or "
                     "non-default eps/mu/sigma; its permittivity is not a finite number."
+                )
+
+        if self.breakdown is not None:
+            # v1 deterministic breakdown drives the real-valued semi-implicit lossy
+            # E-update through a scalar per-cell conductivity. It composes with a
+            # scalar base permittivity and scalar static conductivity only: the
+            # anisotropic/dispersive/nonlinear/modulated coefficient paths each own a
+            # different per-edge coefficient representation the breakdown conductivity
+            # scatter does not model yet.
+            if self.pec:
+                raise NotImplementedError(
+                    "A PEC Material cannot carry dielectric breakdown: a perfect conductor "
+                    "has no finite field-duration threshold."
+                )
+            if self.is_anisotropic:
+                raise NotImplementedError(
+                    "Dielectric breakdown requires an isotropic (scalar) Material: the "
+                    "anisotropic tensor update forms a per-edge 3x3 inverse the breakdown "
+                    "conductivity scatter does not model. Use scalar eps_r/sigma_e."
+                )
+            if self.is_dispersive:
+                raise NotImplementedError(
+                    "Dielectric breakdown does not compose with dispersive poles yet: the ADE "
+                    "polarization current shares the same E-update coefficients the breakdown "
+                    "scatter rewrites. Use a non-dispersive scalar Material."
+                )
+            if self.is_nonlinear:
+                raise NotImplementedError(
+                    "Dielectric breakdown does not compose with the instantaneous nonlinear "
+                    "channels yet: both rewrite the per-step E-update coefficients. Use a linear "
+                    "scalar Material."
+                )
+            if self.modulation is not None:
+                raise NotImplementedError(
+                    "Dielectric breakdown does not compose with time modulation yet: both scale "
+                    "the E-update coefficients per step. Drop the modulation."
+                )
+            if getattr(self, "is_medium2d", False):
+                raise NotImplementedError(
+                    "Dielectric breakdown requires a bulk (3D) Material, not a 2D sheet medium."
                 )
 
     @property

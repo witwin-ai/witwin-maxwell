@@ -424,3 +424,38 @@ isotropic medium, dropping the Polder tensor. `adapters/tidy3d.py` now raises
 non-reciprocal tensor model). One reviewed capability guard added, counted under
 "External interoperability adapter" (19 -> 20); measured capability total 143 -> 144
 and `CAPABILITY_GUARD_BUDGET` raised in the same change.
+
+### Deterministic dielectric breakdown reconciliation (2026-07-19)
+
+Plan 13 Phase 4 lands the deterministic field-duration/latching dynamic
+dielectric-breakdown feedback model (`DielectricBreakdown` composed into
+`Material`, a compiled per-node state machine, a dynamic conductivity scatter, a
+typed event log, and a dedicated breakdown-dissipation energy channel). It adds
+fifteen fail-closed capability guards, all genuine gaps whose closure belongs to a
+later breakdown phase; the measured capability total moves 144 -> 159 and
+`CAPABILITY_GUARD_BUDGET` is raised in the same change.
+
+- `media.py` (10): the `DielectricBreakdown` descriptor rejects the four
+  unsupported descriptor settings whose state machines are a later phase
+  (`model != "field_duration"`, `state != "latching"`, a reserved `recovery`
+  model, a reserved `damage_parameters` model). A `Material` carrying a breakdown
+  descriptor rejects the six coefficient-path combinations the scalar conductivity
+  scatter cannot represent yet (PEC, anisotropic tensor, dispersive poles,
+  instantaneous nonlinearity, time modulation, 2D sheet).
+- `fdtd/runtime/breakdown.py` (3): `initialize_breakdown_runtime` rejects a complex
+  (Bloch) field run, a scene mixing breakdown with dispersive / nonlinear /
+  full-anisotropic / modulated media, and a gyromagnetic-ferrite scene — each
+  shares or redefines the per-edge electric-update coefficient representation the
+  breakdown scatter rewrites.
+- `simulation.py` (2): `_validate_breakdown_support` rejects a frequency-domain
+  (FDFD) breakdown scene (no dynamic conductivity update exists there) and a
+  trainable breakdown scene (the hard field-duration/latching switch is
+  non-differentiable at the trigger time; the smooth surrogate is deferred).
+
+The multi-GPU breakdown reject (`fdtd/distributed/solver.py`
+`_validate_static_capabilities`) and the event-buffer overflow guard
+(`fdtd/runtime/breakdown.py` `finalize_breakdown_data`) raise `ValueError` /
+`RuntimeError` respectively and are not counted against the capability budget.
+Lower this budget as the later breakdown phases land (recovery/damage state
+machines, the coefficient-path compositions, an FDFD or trainable smooth
+surrogate, and distributed breakdown).
