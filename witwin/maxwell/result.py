@@ -1661,6 +1661,9 @@ class Result:
         prepared = self.prepared_scene
         mass = compile_mass_density(prepared)
         compiled_loss = compile_power_loss_monitor(prepared, public_monitor)
+        power_scale = resolved_normalization.resolve_scale(
+            result=self, frequencies=power_loss.frequencies
+        )
         return compute_sar(
             prepared_scene=prepared,
             monitor=public_monitor,
@@ -1669,6 +1672,7 @@ class Result:
             compiled_loss=compiled_loss,
             normalization=resolved_normalization,
             averaging=averaging,
+            power_scale=power_scale,
         )
 
     def material(self, name: str = "eps_r", *, expand_symmetry: bool = False) -> torch.Tensor:

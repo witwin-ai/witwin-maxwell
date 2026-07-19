@@ -142,21 +142,56 @@ class PowerNormalization:
             raise ValueError("PowerNormalization.input_power watts must be > 0.")
         return cls(kind="input_power", watts=watts)
 
-    def resolve_scale(self, result=None, *, measured_power=None):
+    def resolve_scale(self, result=None, *, frequencies=None):
         """Return the multiplicative power scale (SAR is linear in this scale).
 
         ``source`` resolves to ``amplitude**2`` with no solver data. The
-        port-accepted-power and total-input-power scalings need a measured power
-        from the run and are wired in the normalization stage; until then they
-        fail closed rather than silently returning an unnormalized scale.
+        port-accepted-power scaling reads the run's measured accepted power at the
+        SAR frequencies from the named port and returns a per-frequency scale
+        ``watts / measured``; it keeps the port's autograd graph. Total-input-power
+        scaling requires a total injected source-power diagnostic that this build
+        does not expose, so it fails closed rather than silently returning an
+        unnormalized scale.
         """
         if self.kind == "source":
             return float(self.amplitude) ** 2
+        if self.kind == "accepted_power":
+            if result is None:
+                raise NotImplementedError(
+                    "PowerNormalization.accepted_power needs the Result carrying the port; "
+                    "resolve it through Result.sar(...), not the bare reducer."
+                )
+            return self._resolve_accepted_power_scale(result, frequencies)
         raise NotImplementedError(
-            f"PowerNormalization.{self.kind} scaling is resolved in the SAR normalization "
-            "stage (it consumes the run's measured accepted/input power); it is not yet "
-            "available from this reducer."
+            "PowerNormalization.input_power scaling requires a total injected source-power "
+            "diagnostic, which this build does not expose; use accepted_power(port=...) or "
+            "source(amplitude=...) instead."
         )
+
+    def _resolve_accepted_power_scale(self, result, frequencies) -> torch.Tensor:
+        if frequencies is None:
+            raise ValueError("accepted_power normalization requires the SAR frequencies.")
+        port = result.port(self.port)  # KeyError (fail closed) when the port is missing
+        measured = port.accepted_power
+        if measured.is_complex():
+            raise TypeError("Port accepted_power must be a real tensor.")
+        # Collapse any leading singleton excitation axes to a plain [F] spectrum.
+        while measured.ndim > 1 and measured.shape[0] == 1:
+            measured = measured[0]
+        if measured.ndim != 1:
+            raise ValueError(
+                "accepted_power normalization requires a single-excitation port spectrum; "
+                f"port {self.port!r} accepted_power has shape {tuple(measured.shape)}."
+            )
+        indices = _match_frequency_indices(port.frequencies, frequencies)
+        measured_at = measured.index_select(0, indices.to(measured.device))
+        if not bool(torch.all(measured_at > 0.0)):
+            raise ValueError(
+                f"Port {self.port!r} measured accepted power must be strictly positive at every "
+                "SAR frequency to normalize to a target watt level."
+            )
+        watts = torch.as_tensor(self.watts, device=measured_at.device, dtype=measured_at.dtype)
+        return watts / measured_at
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -165,6 +200,27 @@ class PowerNormalization:
             "port": self.port,
             "watts": self.watts,
         }
+
+
+def _match_frequency_indices(available, requested) -> torch.Tensor:
+    """Return the index into ``available`` nearest each ``requested`` frequency.
+
+    Both are real 1D frequency tensors (Hz). Every requested frequency must match
+    an available one within a tight relative tolerance, else the reduction fails
+    closed rather than silently normalizing at the wrong frequency.
+    """
+    available64 = available.detach().to(torch.float64).reshape(-1)
+    requested64 = requested.detach().to(torch.float64).reshape(-1).to(available64.device)
+    diffs = (available64[None, :] - requested64[:, None]).abs()
+    best = diffs.argmin(dim=1)
+    best_diff = diffs.gather(1, best[:, None]).squeeze(1)
+    tolerance = 1e-6 * requested64.abs().clamp(min=1.0)
+    if bool(torch.any(best_diff > tolerance)):
+        raise KeyError(
+            "SAR frequencies are not all present in the normalization port spectrum; "
+            f"requested {requested64.tolist()} Hz, port has {available64.tolist()} Hz."
+        )
+    return best
 
 
 @dataclass(frozen=True)
@@ -315,11 +371,54 @@ class SARResult:
     def averaging_masses(self) -> tuple[float, ...]:
         return tuple(sorted(float(k) for k in self.averaged))
 
-    def soft_peak(self, temperature: float):
-        raise NotImplementedError(
-            "Differentiable soft_peak is produced by the differentiable-workflow stage; it is "
-            "explicitly non-regulatory and not available from this reducer."
-        )
+    def soft_peak(self, temperature: float, *, mass: float | None = None) -> torch.Tensor:
+        """Differentiable temperature-weighted softmax surrogate for the peak, per frequency.
+
+        Returns ``[F]`` where each entry is ``sum_i w_i * sar_i`` with
+        ``w = softmax(sar / temperature)`` taken over the VALID mass-averaged cube
+        centers for the requested averaging ``mass``. As ``temperature -> 0`` it
+        approaches the hard :meth:`peak`; unlike the argmax peak it stays in
+        autograd (the field graph flows through both the values and the weights).
+
+        This is explicitly NON-REGULATORY: it is a smooth optimization surrogate,
+        not the IEEE/IEC-style local peak. Use :meth:`peak` for the reported value.
+        Requires that :class:`SARAveraging` was requested on ``Result.sar(...)``.
+        """
+        if not self.averaged:
+            raise NotImplementedError(
+                "soft_peak needs mass-averaged SAR: call Result.sar(..., averaging="
+                "SARAveraging(mass=...)) first."
+            )
+        temp = float(temperature)
+        if not (temp > 0.0):
+            raise ValueError("soft_peak temperature must be strictly positive.")
+        if mass is None:
+            keys = tuple(self.averaged)
+            if len(keys) != 1:
+                raise ValueError(
+                    "soft_peak requires an explicit mass when several averaging masses "
+                    f"were computed; available masses are {self.averaging_masses}."
+                )
+            mass = keys[0]
+        key = _match_mass_key(self.averaged.keys(), mass)
+        entry = self.averaged[key]
+        sar = entry["sar"]  # [F, nx, ny, nz], NaN at invalid centers
+        valid = entry["valid"]  # [nx, ny, nz] bool, stop-grad membership
+        freq_count = sar.shape[0]
+        flat = sar.reshape(freq_count, -1)
+        valid_flat = valid.reshape(-1)[None, :].expand_as(flat)
+        admissible = valid_flat & torch.isfinite(flat)
+        neg_inf = torch.full((), float("-inf"), device=flat.device, dtype=flat.dtype)
+        # Softmax over admissible centers only; the invalid centers get zero weight.
+        logits = torch.where(admissible, flat / temp, neg_inf)
+        weights = torch.softmax(logits, dim=1)
+        values = torch.where(admissible, flat, torch.zeros_like(flat))
+        soft = (weights * values).sum(dim=1)
+        no_valid = ~admissible.any(dim=1)
+        if bool(torch.any(no_valid)):
+            nan = torch.full((), float("nan"), device=soft.device, dtype=soft.dtype)
+            soft = torch.where(no_valid, nan, soft)
+        return soft
 
     def payload(self) -> dict[str, Any]:
         """Detached CPU serialization payload (typed data, not anonymous metadata)."""

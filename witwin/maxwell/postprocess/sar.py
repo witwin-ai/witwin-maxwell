@@ -132,6 +132,56 @@ def _grid_hash(scene, region: tuple[slice, slice, slice]) -> str:
     return hasher.hexdigest()
 
 
+def _broadcast_power_scale(power_scale, device) -> torch.Tensor | float:
+    """Shape a scalar or ``[F]`` power scale to multiply a ``[F, nx, ny, nz]`` field."""
+    if torch.is_tensor(power_scale):
+        scale = power_scale.to(device)
+        if scale.ndim == 0:
+            return scale
+        return scale.reshape(-1, 1, 1, 1)
+    return float(power_scale)
+
+
+def compute_tissue_statistics(
+    *,
+    tissue_id: torch.Tensor,
+    valid: torch.Tensor,
+    rho_cell: torch.Tensor,
+    cell_volume: torch.Tensor,
+    total_power: torch.Tensor,
+    total_sar: torch.Tensor,
+    tissue_names,
+) -> dict[int, MappingProxyType]:
+    """Per-tissue absorbed power and SAR summaries over the valid cells of a region.
+
+    ``total_power`` is ``[F, nx, ny, nz]`` colocated absorbed power (W) and
+    ``total_sar`` the matching point SAR (W/kg); background/invalid cells are
+    excluded. Shared by the point-SAR reducer and the incoherent combiner so both
+    report identical statistics conventions.
+    """
+    statistics: dict[int, MappingProxyType] = {}
+    for tid in torch.unique(tissue_id).tolist():
+        if int(tid) == BACKGROUND_TISSUE_ID:
+            continue
+        tissue_mask = (tissue_id == tid) & valid
+        if not bool(torch.any(tissue_mask)):
+            continue
+        selected_power = total_power[:, tissue_mask]
+        selected_sar = total_sar[:, tissue_mask]
+        tissue_mass = (rho_cell * cell_volume)[tissue_mask].sum()
+        statistics[int(tid)] = MappingProxyType(
+            {
+                "name": tissue_names.get(int(tid), f"tissue_{int(tid)}"),
+                "cell_count": int(tissue_mask.sum()),
+                "mass_kg": tissue_mass,
+                "total_absorbed_power": selected_power.sum(dim=1),
+                "mean_sar": selected_sar.mean(dim=1),
+                "max_sar": selected_sar.amax(dim=1),
+            }
+        )
+    return statistics
+
+
 def compute_sar(
     *,
     prepared_scene,
@@ -141,12 +191,16 @@ def compute_sar(
     compiled_loss: CompiledPowerLossMonitor,
     normalization: PowerNormalization,
     averaging: SARAveraging | None = None,
+    power_scale=None,
 ) -> SARResult:
     """Reduce absorbed-power density and a tissue mass model to point SAR.
 
     Pure result-domain reduction: no solver is run. Fails closed if the region
     carries electric loss in cells with no mass density, or if no electric
-    volumetric loss channel is available.
+    volumetric loss channel is available. ``power_scale`` is the resolved
+    multiplicative power scale (scalar or per-frequency ``[F]`` tensor). When
+    ``None`` it is resolved from ``normalization`` (source-amplitude only); the
+    port-accepted-power scale is resolved by ``Result.sar`` which carries the port.
     """
     if not isinstance(power_loss, PowerLossData):
         raise TypeError("power_loss must be a PowerLossData instance.")
@@ -170,14 +224,16 @@ def compute_sar(
 
     node_shape = mass.shape
     frequency_count = power_loss.frequencies.numel()
-    power_scale = normalization.resolve_scale(result=None)
+    if power_scale is None:
+        power_scale = normalization.resolve_scale(result=None)
+    scale = _broadcast_power_scale(power_scale, power_loss.device)
 
     node_power_by_channel = {}
     for channel in channels:
         node_power = _channel_node_power(
             power_loss, compiled_loss, channel, node_shape, frequency_count
         )
-        node_power_by_channel[channel] = power_scale * node_power
+        node_power_by_channel[channel] = scale * node_power
     node_power_total = sum(node_power_by_channel.values())
 
     occupancy_full = mass.occupancy
@@ -217,42 +273,32 @@ def compute_sar(
     point["total"] = torch.where(valid[None], total_q / safe_rho[None], nan)
 
     node_power_total_region = _crop_field(node_power_total)
-    statistics = {}
-    unique_ids = torch.unique(tissue_id)
-    for tid in unique_ids.tolist():
-        if int(tid) == BACKGROUND_TISSUE_ID:
-            continue
-        tissue_mask = (tissue_id == tid) & valid
-        if not bool(torch.any(tissue_mask)):
-            continue
-        selected_power = node_power_total_region[:, tissue_mask]
-        selected_sar = point["total"][:, tissue_mask]
-        tissue_mass = (rho_cell * cell_volume)[tissue_mask].sum()
-        statistics[int(tid)] = MappingProxyType(
-            {
-                "name": mass.tissue_names.get(int(tid), f"tissue_{int(tid)}"),
-                "cell_count": int(tissue_mask.sum()),
-                "mass_kg": tissue_mass,
-                "total_absorbed_power": selected_power.sum(dim=1),
-                "mean_sar": selected_sar.mean(dim=1),
-                "max_sar": selected_sar.amax(dim=1),
-            }
-        )
+    statistics = compute_tissue_statistics(
+        tissue_id=tissue_id,
+        valid=valid,
+        rho_cell=rho_cell,
+        cell_volume=cell_volume,
+        total_power=node_power_total_region,
+        total_sar=point["total"],
+        tissue_names=mass.tissue_names,
+    )
 
     x = prepared_scene.x[region[0]]
     y = prepared_scene.y[region[1]]
     z = prepared_scene.z[region[2]]
     coordinates = MappingProxyType({"x": x, "y": y, "z": z})
 
+    device = rho_cell.device
+    dx = torch.as_tensor(prepared_scene.dx_dual64, device=device, dtype=torch.float32)[region[0]]
+    dy = torch.as_tensor(prepared_scene.dy_dual64, device=device, dtype=torch.float32)[region[1]]
+    dz = torch.as_tensor(prepared_scene.dz_dual64, device=device, dtype=torch.float32)[region[2]]
+    cell_sizes = (dx, dy, dz)
+
     averaged = {}
     peaks = {}
     if averaging is not None:
         from .sar_averaging import compute_mass_averaged_sar
 
-        device = rho_cell.device
-        dx = torch.as_tensor(prepared_scene.dx_dual64, device=device, dtype=torch.float32)[region[0]]
-        dy = torch.as_tensor(prepared_scene.dy_dual64, device=device, dtype=torch.float32)[region[1]]
-        dz = torch.as_tensor(prepared_scene.dz_dual64, device=device, dtype=torch.float32)[region[2]]
         averaged, peaks = compute_mass_averaged_sar(
             averaging,
             power_total=absorbed_power_density["total"],
@@ -261,13 +307,18 @@ def compute_sar(
             occupancy=occupancy,
             valid=valid,
             coordinates=coordinates,
-            cell_sizes=(dx, dy, dz),
+            cell_sizes=cell_sizes,
             frequencies=power_loss.frequencies,
         )
 
     electric_total = torch.stack(
         [power_loss.channel_power[channel] for channel in channels], dim=0
     ).sum(dim=0)
+
+    if torch.is_tensor(power_scale) and power_scale.ndim > 0:
+        power_scale_record = power_scale.detach().to("cpu").tolist()
+    else:
+        power_scale_record = float(power_scale)
 
     provenance = MappingProxyType(
         {
@@ -282,7 +333,8 @@ def compute_sar(
                 "occupancy-weighted so the occupancy cancels in point SAR"
             ),
             "occupancy_epsilon": OCCUPANCY_EPSILON,
-            "power_scale": float(power_scale),
+            "power_scale": power_scale_record,
+            "cell_sizes_dual": tuple(size.detach() for size in cell_sizes),
             "monitor": monitor.name,
             "monitor_bounds": monitor.bounds,
             "region_index_bounds": tuple((sl.start, sl.stop) for sl in region),
@@ -316,4 +368,4 @@ def compute_sar(
     )
 
 
-__all__ = ["compute_sar", "ELECTRIC_SAR_CHANNELS"]
+__all__ = ["compute_sar", "compute_tissue_statistics", "ELECTRIC_SAR_CHANNELS"]

@@ -235,3 +235,129 @@ averaging_masses`, averaged/peaks fields populated + serialization),
 
 No existing fail-closed guard or test was removed or weakened; no FDTD capability-guard
 census entry was added or removed.
+
+---
+
+# B3 — Phase 3 (normalization + multi-source combination) + Phase 4 slice (soft_peak, gradient gates)
+
+## Delivered items
+
+- **Power normalization resolution** (`sar.py::PowerNormalization.resolve_scale`):
+  - `source(amplitude)` → `amplitude**2` (unchanged, exact square law).
+  - `accepted_power(port, watts)` → per-frequency scale `watts / measured` read from the
+    named port's `accepted_power` at the SAR frequencies, keeping the port autograd graph.
+    Fails closed on missing port (`KeyError`), frequency not in the port spectrum
+    (`KeyError`), or non-positive measured accepted power (`ValueError`).
+  - `input_power(watts)` fails closed (`NotImplementedError`): this build exposes no total
+    injected source-power diagnostic (searched — none present). Sanctioned by supervisor
+    decision #4 ("if not available fail closed").
+  - Resolution is wired at `Result.sar` (which carries the ports); `compute_sar` accepts a
+    resolved `power_scale` (scalar or `[F]`) and broadcasts it over `[F, nx, ny, nz]`.
+- **Coherent combination** (`postprocess/sar_combine.py::combine_coherent_sar`): sums the
+  complex electric spectra of same-frequency runs (optional complex weights) BEFORE the loss,
+  then one SAR reduction — interference exact. Differentiable in per-run fields.
+- **Incoherent combination** (`combine_incoherent_sar`): power-domain sum of absorbed-power
+  densities, point SAR re-formed as `power/rho`, per-tissue statistics recomputed via the
+  shared `compute_tissue_statistics` helper; `averaging` recomputes cubical-prefix-v1 peaks on
+  the combined power using the dual cell sizes stored in provenance. Validates grid hash,
+  tissue model, frequencies, field convention, channels, and normalization; fails closed on
+  mismatch.
+- **soft_peak** (`sar.py::SARResult.soft_peak`): temperature-weighted softmax over valid
+  mass-averaged cube centers, per frequency; approaches the hard `peak(...)` as temperature
+  → 0, stays in autograd. Explicitly non-regulatory. `mass` optional for a single averaging
+  mass.
+- Provenance additions: resolved `power_scale`, `cell_sizes_dual`, and a `combination`
+  descriptor on combined results. `compute_tissue_statistics` factored out of `compute_sar`
+  and reused by the incoherent combiner.
+- Exports: `mw.combine_coherent_sar`, `mw.combine_incoherent_sar`.
+
+## Test inventory (env `maxwell`, `CUDA_VISIBLE_DEVICES=0`)
+
+Command:
+```
+export CUDA_HOME=/home/xingyu/miniconda3/envs/maxwell/lib/python3.11/site-packages/nvidia/cu13
+export PATH="$CUDA_HOME/bin:$PATH"
+export PYTHONPATH=<worktree>
+conda run -n maxwell --no-capture-output python -m pytest tests/sar/ -q
+```
+
+- `tests/sar/` → **57 passed**.
+- New files:
+  - `tests/sar/test_normalization.py` (7): accepted-power watts/measured scaling, per-frequency
+    scaling, missing-port fail-closed, frequency-mismatch fail-closed, non-positive-measured
+    fail-closed, input_power fail-closed, source square-law exactness.
+  - `tests/sar/test_sar_combine.py` (7): coherent in-phase 4×, coherent opposite-phase cancel,
+    incoherent field sum, incoherent recomputed peak (2× single), normalization-mismatch
+    fail-closed, two-operand requirement, coherent field autograd preserved.
+  - `tests/sar/test_soft_peak.py` (6): below-hard/above-mean, approaches-hard-as-T-drops,
+    single-mass default, differentiable, requires-averaging, rejects non-positive temperature.
+  - `tests/sar/test_sar_gradients.py` (5): field-amplitude autograd vs central difference for
+    point and fixed-cube averaged SAR; density-grid autograd vs FD; conductivity and density
+    central-difference vs analytic.
+- Updated `tests/sar/test_point_sar.py`: the B1/B2 placeholder
+  `test_accepted_and_input_power_normalization_fail_closed` (which asserted the OLD
+  "normalization stage" `NotImplementedError`) is replaced by
+  `test_accepted_power_normalization_fails_closed_without_port` (KeyError) and
+  `test_input_power_normalization_fails_closed` (NotImplementedError) to match the
+  now-implemented capability. No guard was weakened — the fail-closed behavior is retained,
+  only its trigger and message changed.
+
+Adjacent suites (regression):
+```
+conda run -n maxwell ... python -m pytest tests/api/public/test_public_api.py \
+  tests/api/public/test_simulation_smoke.py tests/rf/power_loss/ -q
+```
+→ **39 passed**.
+
+## Numerical-precision note (gradient gates)
+
+The point-SAR reducer runs in float32 (GPU-first design from B1). Autograd and central
+differences therefore agree to float32 precision (~2–4e-4 relative in measured runs), not
+float64. Gradient gates use `rtol=2e-3` for autograd-vs-FD (field) and `rtol=1e-3/1e-4` for
+central-difference-vs-analytic (density/conductivity) with wide FD steps to defeat float32
+catastrophic cancellation. This is a documented limit of the differentiable path, not a bug in
+the SAR math. `Material.sigma_e` as a plain scalar is floated at compile time (not an autograd
+leaf in this build), so the conductivity gate is central-difference-vs-analytic rather than
+autograd-vs-FD; the E-field amplitude and a 3D `mass_density` grid ARE autograd leaves and are
+checked against FD directly.
+
+## Falsifications performed (B3)
+
+1. **Accepted-power scale inversion** — `watts / measured_at` → `watts * measured_at` in
+   `sar.py::_resolve_accepted_power_scale`. `test_accepted_power_scales_by_watts_over_measured`
+   and `test_accepted_power_is_per_frequency` went RED (ratio 0.75× wrong). Restored → green.
+2. **Coherent field-sum sign** — `summed + weight*tensor` → `summed - weight*tensor` in
+   `sar_combine.py`. `test_coherent_in_phase_doubles_field_and_quadruples_sar` went RED (result
+   0 instead of 4×). Restored → green.
+3. **soft_peak → softmin** — `flat / temp` → `-flat / temp` in `SARResult.soft_peak`.
+   `test_soft_peak_below_hard_peak_and_above_mean` and
+   `test_soft_peak_approaches_hard_peak_as_temperature_drops` went RED (surrogate collapsed to
+   the min). Restored → green.
+4. **SAR density law** — point-SAR total `total_q / safe_rho` → `total_q / safe_rho**2 * 1000`.
+   `test_point_sar_density_central_difference_matches_analytic` went RED (FD derivative doubled,
+   ∝ 1/rho² not 1/rho). Restored → `tests/sar/` 57 passed.
+
+## Known gaps / deferred (B3)
+
+- `input_power` normalization fails closed: no total injected source-power diagnostic exists in
+  this build. Wiring one (from source monitors) is future work.
+- `IncidentPowerDensityMonitor` not implemented (did not fall out cheaply from existing
+  Poynting/flux machinery); absorbed-power SAR is the deliverable, per track brief.
+- Gradient gates are float32-limited (reducer dtype); a float64 differentiable reducer path is
+  not in scope for this slice.
+- Multi-GPU SAR reduction and VOP (Phase 5) remain out of scope (fail closed).
+- Standard/independent-reference phantom cross-check (plan §9) still not run (no redistributable
+  phantom fixture in-repo).
+
+## Files added / changed (B3)
+
+Added: `witwin/maxwell/postprocess/sar_combine.py`, `tests/sar/test_normalization.py`,
+`tests/sar/test_sar_combine.py`, `tests/sar/test_soft_peak.py`,
+`tests/sar/test_sar_gradients.py`.
+Changed: `witwin/maxwell/sar.py` (accepted-power resolution + frequency matcher + `soft_peak`),
+`witwin/maxwell/postprocess/sar.py` (`power_scale` param + broadcast, `compute_tissue_statistics`
+helper, cell-size/scale provenance), `witwin/maxwell/result.py` (resolve + pass `power_scale`),
+`witwin/maxwell/__init__.py` (combiner exports), `tests/sar/test_point_sar.py` (placeholder
+normalization tests updated for the now-implemented capability), `FEATURE_LIST.md`.
+
+No FDTD capability-guard census entry was added or removed.

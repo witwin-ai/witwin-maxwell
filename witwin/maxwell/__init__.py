@@ -116,6 +116,7 @@ from .sar import (
     SARPeak,
     SARResult,
 )
+from .postprocess.sar_combine import combine_coherent_sar, combine_incoherent_sar
 from .thin_wire import ThinWire, WireConductor, WireData, WireEnd
 from .ports import (
     AxisPath,
@@ -287,6 +288,8 @@ __all__ = [
     "SARAveraging",
     "SARResult",
     "SARPeak",
+    "combine_coherent_sar",
+    "combine_incoherent_sar",
     "AVERAGING_PROFILE",
     "ThinWire",
     "PortData",

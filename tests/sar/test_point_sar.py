@@ -277,12 +277,23 @@ def test_normalization_source_amplitude_scales_sar_by_square():
     torch.testing.assert_close(ratio, torch.full_like(ratio, 4.0), rtol=1e-5, atol=1e-6)
 
 
-def test_accepted_and_input_power_normalization_fail_closed():
+def test_accepted_power_normalization_fails_closed_without_port():
+    """accepted_power normalization must fail closed when the named port is absent."""
     result, _ = _uniform_cube_result(frequencies=(1.0e9,))
-    with pytest.raises(NotImplementedError, match="normalization stage"):
+    with pytest.raises(KeyError, match="feed"):
         result.sar(
             "loss",
             normalization=mw.PowerNormalization.accepted_power(port="feed", watts=1.0),
+        )
+
+
+def test_input_power_normalization_fails_closed():
+    """input_power scaling has no source-power diagnostic in this build; fail closed."""
+    result, _ = _uniform_cube_result(frequencies=(1.0e9,))
+    with pytest.raises(NotImplementedError, match="input_power"):
+        result.sar(
+            "loss",
+            normalization=mw.PowerNormalization.input_power(watts=1.0),
         )
 
 
