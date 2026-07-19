@@ -159,12 +159,15 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # to guess a DC limit; (4) a DiagonalTensor3/Tensor3x3 anisotropic permittivity is
 # rejected (scalar operator only; tensor eps is Phase 4); (5) a per-cell tensor
 # permittivity sample is rejected; (6) a complex permittivity sample is rejected as
-# not a valid DC static value. Two are in electrostatic/runtime.py: (7) a floating
-# conductor with prescribed charge is rejected (the linear-superposition solve is
-# Phase 2); (8) a pure-Neumann problem with no fixed potential is rejected as
-# gauge-singular (charge-compatibility + gauge fix is Phase 2). Lower this budget as
-# tensor-eps/open-boundary (Phase 4), floating-charge superposition, and pure-Neumann
-# gauge handling (Phase 2) land.
+# not a valid DC static value. One is in electrostatic/runtime.py: (7) a pure-Neumann
+# problem with no conductor and no Dirichlet boundary is rejected as gauge-singular.
+# 2026-07-19 (plan 12 electrostatics Phase 2+3): floating-conductor linear
+# superposition and pure-Neumann gauge handling are now implemented, so the former
+# floating-conductor guard (previously counted as #7) is removed; the measured
+# electrostatic capability count drops by one (152 -> 151 total). The budget is a
+# ceiling and stays 152 (151 <= 152). Incompatible floating-charge / missing
+# capacitance-return-path cases now fail closed with ValueError, not capability
+# guards. Lower this budget as tensor-eps / open-boundary (Phase 4) land.
 CAPABILITY_GUARD_BUDGET = 152
 
 # (posix path relative to the repo root, distinctive message substring).

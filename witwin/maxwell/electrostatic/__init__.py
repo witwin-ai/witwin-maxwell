@@ -4,6 +4,11 @@ from .api import (
     ElectrostaticSolverConfig,
     ElectrostaticTerminal,
 )
+from .capacitance import (
+    CapacitanceData,
+    CapacitanceSimulation,
+    extract_capacitance,
+)
 from .runtime import (
     ElectrostaticResultData,
     ElectrostaticSimulation,
@@ -18,4 +23,7 @@ __all__ = [
     "ElectrostaticResultData",
     "ElectrostaticSimulation",
     "solve_electrostatics",
+    "CapacitanceData",
+    "CapacitanceSimulation",
+    "extract_capacitance",
 ]

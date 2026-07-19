@@ -106,6 +106,17 @@ class ElectrostaticOperator:
             b = b + _slab_full(entry["gb"] * entry["value"], entry["axis"], entry["side"], self.shape[entry["axis"]])
         return b
 
+    def rhs_boundary(self) -> torch.Tensor:
+        """Right-hand side from Dirichlet boundary values only (no free charge).
+
+        Used by the capacitance extraction, which measures the pure conductor
+        response and ignores any volumetric free-charge sources.
+        """
+        b = torch.zeros(self.shape, dtype=self.dtype, device=self.device)
+        for entry in self._boundary:
+            b = b + _slab_full(entry["gb"] * entry["value"], entry["axis"], entry["side"], self.shape[entry["axis"]])
+        return b
+
     def field_energy(self, phi: torch.Tensor) -> torch.Tensor:
         energy = 0.5 * (self.gx * (phi[:-1, :, :] - phi[1:, :, :]) ** 2).sum()
         energy = energy + 0.5 * (self.gy * (phi[:, :-1, :] - phi[:, 1:, :]) ** 2).sum()
@@ -274,6 +285,144 @@ def _cell_e_field(phi, coord, axis):
     return -grad
 
 
+def _pinned_value(shape, dtype, device, entries) -> torch.Tensor:
+    """Build a full-grid tensor holding each pinned cell's fixed potential.
+
+    ``entries`` is an iterable of ``(mask, value)`` pairs; masks must be disjoint
+    (the compiler already rejects overlapping terminals). Cells outside every
+    mask stay at zero, which is also the value the reduced solve assigns to free
+    cells.
+    """
+    value = torch.zeros(shape, dtype=dtype, device=device)
+    for mask, magnitude in entries:
+        value = torch.where(mask, torch.full(shape, float(magnitude), dtype=dtype, device=device), value)
+    return value
+
+
+def _reduced_solve(operator, free_mask, fixed_value, b_full, config):
+    """Solve the Dirichlet-reduced SPD system on the free cells.
+
+    ``fixed_value`` pins the potential on the complement of ``free_mask`` (it is
+    zero on free cells). Returns ``(phi_full, PCGReport)`` with ``phi_full`` equal
+    to ``fixed_value`` on pinned cells and the solved potential on free cells.
+    """
+    free = free_mask.to(fixed_value.dtype)
+
+    def apply_A(x):
+        return free * operator.apply_full(free * x)
+
+    b_free = free * (b_full - operator.apply_full(fixed_value))
+    inv_diag = torch.where(free_mask, 1.0 / operator.diag, torch.zeros_like(operator.diag))
+    with torch.no_grad():
+        x, report = _pcg(
+            apply_A,
+            b_free,
+            inv_diag,
+            tol=config.tolerance,
+            max_iterations=config.max_iterations,
+        )
+    if not report.converged:
+        raise RuntimeError(
+            "Electrostatic PCG failed to converge: "
+            f"{report.iterations} iterations, relative residual {report.residual:.3e} "
+            f"(tolerance {config.tolerance:.3e}, absolute residual {report.residual_abs:.3e}). "
+            "Increase max_iterations, loosen tolerance, or check the problem conditioning."
+        )
+    return x + fixed_value, report
+
+
+def _terminal_charges(reaction, terminals) -> dict[str, torch.Tensor]:
+    return {t.name: reaction[t.mask].sum() for t in terminals}
+
+
+def _solve_floating_superposition(
+    operator, compiled, fixed_terms, floating_terms, free_mask, config, *, has_level_anchor
+):
+    """Resolve floating-conductor potentials by linear superposition.
+
+    Each floating conductor is an equipotential of unknown level ``alpha_j`` whose
+    induced free charge is prescribed. Because the field is linear in the pinned
+    potentials, ``phi = phi_base + sum_j alpha_j * phi_unit_j`` where
+
+    - ``phi_base`` fixes the potential terminals at their voltages, pins every
+      floating conductor at 0, and keeps the true sources / boundary values on;
+    - ``phi_unit_j`` pins floating conductor ``j`` at 1 V, everything else at 0,
+      with sources and boundary values off (homogeneous).
+
+    The prescribed-charge constraints give a small dense ``k x k`` system
+    ``M alpha = q_target - q_base`` where ``M_ij`` is the charge induced on
+    floating conductor ``i`` by a unit potential on conductor ``j`` (a capacitance
+    submatrix). ``k`` equals the number of floating conductors, so this reduction
+    solve is tiny; it runs on CPU float64 with a rank-revealing least-squares
+    driver so a gauge-singular (fully floating, insulated) system is handled
+    cleanly rather than silently mis-solved.
+    """
+    shape = compiled.shape
+    dtype = compiled.dtype
+    device = compiled.device
+
+    fixed_entries = [(t.mask, t.potential) for t in fixed_terms]
+    fixed_value_base = _pinned_value(shape, dtype, device, fixed_entries)
+    phi_base, report_base = _reduced_solve(
+        operator, free_mask, fixed_value_base, operator.rhs_full(), config
+    )
+    reaction_base = operator.apply_full(phi_base) - operator.rhs_full()
+
+    zero_rhs = torch.zeros(shape, dtype=dtype, device=device)
+    phi_units: list[torch.Tensor] = []
+    reaction_units: list[torch.Tensor] = []
+    reports = [report_base]
+    for term in floating_terms:
+        unit_value = _pinned_value(shape, dtype, device, [(term.mask, 1.0)])
+        phi_j, report_j = _reduced_solve(operator, free_mask, unit_value, zero_rhs, config)
+        phi_units.append(phi_j)
+        reaction_units.append(operator.apply_full(phi_j))
+        reports.append(report_j)
+
+    k = len(floating_terms)
+    q_base = torch.stack([reaction_base[t.mask].sum() for t in floating_terms])
+    q_target = torch.tensor(
+        [float(t.charge) for t in floating_terms], dtype=dtype, device=device
+    )
+    matrix = torch.stack(
+        [
+            torch.stack([reaction_units[j][floating_terms[i].mask].sum() for j in range(k)])
+            for i in range(k)
+        ]
+    )
+
+    rhs_vec = q_target - q_base
+
+    if not has_level_anchor:
+        # No grounded electrode or Dirichlet boundary: the floating-conductor
+        # capacitance submatrix is singular (uniform-potential null vector). The
+        # discrete divergence theorem forces the total charge to balance, so the
+        # prescribed conductor charges plus any free charge must sum to zero;
+        # otherwise the constraints are physically incompatible.
+        total_free = float(compiled.free_charge.sum())
+        total_q = float(q_target.sum()) + total_free
+        scale = float(q_target.abs().max()) + abs(total_free) + 1.0e-300
+        if abs(total_q) > 1.0e-6 * scale:
+            raise ValueError(
+                "Floating-conductor charge constraints are incompatible with an insulated "
+                "(pure-Neumann) enclosure: the prescribed conductor charges plus any free "
+                f"charge must sum to zero (got net {total_q:.3e} C). Add a grounded electrode "
+                "or a Dirichlet boundary as a charge return path."
+            )
+
+    # Tiny k x k control solve. CPU least squares (gelsd) is rank-revealing; a
+    # singular gauge direction is nulled by rcond and gauge-fixed afterwards.
+    matrix_cpu = matrix.detach().double().cpu()
+    rhs_cpu = rhs_vec.detach().double().cpu()
+    lstsq = torch.linalg.lstsq(matrix_cpu, rhs_cpu.unsqueeze(-1), driver="gelsd", rcond=1.0e-10)
+    alpha = lstsq.solution.squeeze(-1).to(device=device, dtype=dtype)
+
+    phi = phi_base
+    for j in range(k):
+        phi = phi + alpha[j] * phi_units[j]
+    return phi, reports
+
+
 def solve_electrostatics(
     compiled: CompiledElectrostatics,
     config: ElectrostaticSolverConfig | None = None,
@@ -290,68 +439,52 @@ def solve_electrostatics(
     device = compiled.device
     shape = compiled.shape
 
-    for terminal in compiled.terminals:
-        if terminal.is_floating:
-            raise NotImplementedError(
-                f"Floating conductor {terminal.name!r} with prescribed charge requires the "
-                "linear-superposition solve (electrostatics Phase 2); it is not available in "
-                "this stage."
-            )
+    fixed_terms = [t for t in compiled.terminals if not t.is_floating]
+    floating_terms = [t for t in compiled.terminals if t.is_floating]
 
-    fixed_mask = torch.zeros(shape, dtype=torch.bool, device=device)
-    fixed_value = torch.zeros(shape, dtype=dtype, device=device)
+    all_mask = torch.zeros(shape, dtype=torch.bool, device=device)
     for terminal in compiled.terminals:
-        fixed_mask = fixed_mask | terminal.mask
-        fixed_value = torch.where(
-            terminal.mask,
-            torch.full(shape, float(terminal.potential), dtype=dtype, device=device),
-            fixed_value,
-        )
-
-    free_mask = ~fixed_mask
+        all_mask = all_mask | terminal.mask
+    free_mask = ~all_mask
     if not bool(free_mask.any()):
         raise ValueError("Electrostatic problem has no free cells; every cell is pinned.")
-    if not bool(fixed_mask.any()) and not compiled.boundary.has_dirichlet:
+
+    # A well-posed reduced solve needs at least one pinned cell (any conductor) or
+    # a Dirichlet boundary face; otherwise the free-cell operator is singular.
+    has_solve_anchor = bool(all_mask.any()) or compiled.boundary.has_dirichlet
+    # The absolute potential level is fixed only by a Dirichlet boundary or a
+    # fixed-potential/grounded terminal; floating conductors do not anchor it.
+    has_level_anchor = bool(fixed_terms) or compiled.boundary.has_dirichlet
+    if not has_solve_anchor:
         raise NotImplementedError(
             "Pure-Neumann electrostatic problems are gauge-singular (potential defined only "
             "up to a constant) and require charge-compatibility plus a gauge fix; supply at "
             "least one Dirichlet boundary face or a fixed-potential/grounded terminal."
         )
 
-    free = free_mask.to(dtype)
     b_full = operator.rhs_full()
-    phi_fixed = fixed_value  # zero on free cells by construction
-
-    def apply_A(x):
-        return free * operator.apply_full(free * x)
-
-    b_free = free * (b_full - operator.apply_full(phi_fixed))
-    inv_diag = torch.where(free_mask, 1.0 / operator.diag, torch.zeros_like(operator.diag))
-
-    with torch.no_grad():
-        x, report = _pcg(
-            apply_A,
-            b_free,
-            inv_diag,
-            tol=config.tolerance,
-            max_iterations=config.max_iterations,
+    if floating_terms:
+        phi, reports = _solve_floating_superposition(
+            operator, compiled, fixed_terms, floating_terms, free_mask, config,
+            has_level_anchor=has_level_anchor,
         )
-    if not report.converged:
-        raise RuntimeError(
-            "Electrostatic PCG failed to converge: "
-            f"{report.iterations} iterations, relative residual {report.residual:.3e} "
-            f"(tolerance {config.tolerance:.3e}, absolute residual {report.residual_abs:.3e}). "
-            "Increase max_iterations, loosen tolerance, or check the problem conditioning."
-        )
+        report = reports[0]
+        if not has_level_anchor:
+            # Only floating conductors and an insulated boundary: the potential
+            # level is a pure gauge freedom. Fix it with mean(phi) = 0.
+            phi = phi - phi.mean()
+    else:
+        # Without floating conductors, any terminal set consists of fixed-potential
+        # electrodes, so a solve anchor is also a level anchor; the pure-Neumann,
+        # no-conductor case was already rejected by the has_solve_anchor check.
+        fixed_value = _pinned_value(shape, dtype, device, [(t.mask, t.potential) for t in fixed_terms])
+        phi, report = _reduced_solve(operator, free_mask, fixed_value, b_full, config)
 
-    phi = x + phi_fixed
-
+    free = free_mask.to(dtype)
     reaction = operator.apply_full(phi) - b_full
     gauss_error = float((reaction * free).abs().max()) if bool(free_mask.any()) else 0.0
 
-    charges: dict[str, torch.Tensor] = {}
-    for terminal in compiled.terminals:
-        charges[terminal.name] = reaction[terminal.mask].sum()
+    charges = _terminal_charges(reaction, compiled.terminals)
 
     energy = operator.field_energy(phi)
 

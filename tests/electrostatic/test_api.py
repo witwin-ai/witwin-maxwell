@@ -20,6 +20,7 @@ def test_public_exports_present():
         "ElectrostaticBoundarySpec",
         "ElectrostaticSolverConfig",
         "ElectrostaticResultData",
+        "CapacitanceData",
     ):
         assert hasattr(mw, name)
         assert name in mw.__all__
@@ -121,18 +122,6 @@ def test_pml_boundary_rejected():
     scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.pml(num_layers=4))
     scene.add_electrostatic_terminal(
         mw.ElectrostaticTerminal(name="inner", geometry=Sphere(position=(0, 0, 0), radius=0.3), potential=1.0)
-    )
-    with pytest.raises(NotImplementedError):
-        mw.Simulation.electrostatic(scene, boundary=mw.ElectrostaticBoundarySpec.grounded_box()).run()
-
-
-@gpu
-def test_floating_charge_terminal_rejected_in_this_stage():
-    domain = mw.Domain(bounds=((-1, 1),) * 3)
-    grid = mw.GridSpec.uniform(2.0 / 16)
-    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    scene.add_electrostatic_terminal(
-        mw.ElectrostaticTerminal(name="float", geometry=Sphere(position=(0, 0, 0), radius=0.3), charge=1e-12)
     )
     with pytest.raises(NotImplementedError):
         mw.Simulation.electrostatic(scene, boundary=mw.ElectrostaticBoundarySpec.grounded_box()).run()

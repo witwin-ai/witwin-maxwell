@@ -440,8 +440,17 @@ this stage's scope and would otherwise be silently mishandled.
 | `compiler/electrostatic.py` `_static_epsilon_scalar` (tensor eps) | "Anisotropic (tensor) permittivity is not supported" | Deferred capability. The scalar operator handles isotropic media only; SPD tensor-eps is Phase 4. |
 | `compiler/electrostatic.py` `_static_epsilon_scalar` (per-cell tensor) | "Per-cell tensor permittivity is not supported" | Deferred capability, same Phase 4 tensor-eps family. |
 | `compiler/electrostatic.py` `_static_epsilon_scalar` (complex) | "not a valid DC static permittivity" | Deferred capability. A complex permittivity is not a DC static value. |
-| `electrostatic/runtime.py` `solve_electrostatics` (floating) | "requires the linear-superposition solve" | Deferred capability. A floating conductor with prescribed charge needs the Phase 2 linear-superposition solve; rejected rather than solved wrongly. |
-| `electrostatic/runtime.py` `solve_electrostatics` (pure Neumann) | "gauge-singular" | Deferred capability. A pure-Neumann problem with no fixed potential is defined only up to a constant; charge-compatibility plus a gauge fix is Phase 2. |
+| `electrostatic/runtime.py` `solve_electrostatics` (pure Neumann) | "gauge-singular" | Deferred capability. A pure-Neumann problem with no conductor and no Dirichlet boundary is defined only up to a constant and cannot be solved; the gauge-fixable cases (floating conductors, mean(phi)=0) are now handled in Phase 2. |
 
-Lower this budget as tensor-eps / open boundary (Phase 4), floating-charge
-superposition, and pure-Neumann gauge handling (Phase 2) land.
+Lower this budget as tensor-eps / open boundary (Phase 4) land.
+
+### Electrostatics reconciliation (2026-07-19, plan 12 Phase 2+3)
+
+The Phase 2+3 slice (floating-conductor linear superposition, pure-Neumann gauge
+handling, N-terminal capacitance matrix) **implements** the previously deferred
+floating-conductor guard, so its `NotImplementedError` in
+`electrostatic/runtime.py` (`"requires the linear-superposition solve"`) is
+removed. Incompatible floating-charge constraints and missing capacitance return
+paths now fail closed with `ValueError` diagnostics (not counted as capability
+guards). Net measured capability total `152 -> 151`; `CAPABILITY_GUARD_BUDGET`
+is a ceiling and stays `152` (`151 <= 152`).

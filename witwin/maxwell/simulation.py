@@ -555,6 +555,23 @@ class Simulation:
 
         return ElectrostaticSimulation(scene, boundary=boundary, solver=solver)
 
+    @staticmethod
+    def capacitance(scene, *, terminals=None, reference=None, boundary=None, solver=None):
+        """Build an N-terminal Maxwell capacitance-matrix extraction run.
+
+        Returns a ``CapacitanceSimulation`` runner whose ``run()`` yields a
+        standard ``Result(method="capacitance")`` with a typed
+        ``result.capacitance`` accessor (``CapacitanceData``). ``terminals`` selects
+        and orders the electrostatic terminals (default: all); ``reference`` names
+        the grounded return conductor excluded from the matrix. Boundary conditions
+        and solver settings mirror ``Simulation.electrostatic(...)``.
+        """
+        from .electrostatic.capacitance import CapacitanceSimulation
+
+        return CapacitanceSimulation(
+            scene, terminals=terminals, reference=reference, boundary=boundary, solver=solver
+        )
+
     def prepare(self):
         self._refresh_scene()
         self._validate_circuit_execution()

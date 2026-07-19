@@ -125,3 +125,134 @@ code was restored and re-run green.
 - Floating-charge superposition (A2) should reuse `ElectrostaticOperator` and
   solve the V=1/all-off and V=0/sources-on systems, then pick alpha to match the
   prescribed induced charge (charges are linear in the floating potential).
+
+---
+
+# Track A12 — Electrostatics Phase 2+3 acceptance (2026-07-19, stage A2)
+
+Stage A2 of `a12-electrostatics`: floating-conductor linear superposition,
+pure-Neumann gauge handling, N-terminal Maxwell capacitance matrix
+(`Simulation.capacitance` + `CapacitanceData`), and matrix-property tests. Same
+worktree/env/command preamble as A1 above.
+
+## Delivered items
+
+- Floating conductors (`ElectrostaticTerminal(..., charge=)`) resolved by exact
+  linear superposition in `electrostatic/runtime.py`: one base solve (fixed
+  electrodes at their potentials, floating conductors grounded, sources/boundary
+  on) plus one unit solve per floating conductor (conductor at 1 V, everything
+  else homogeneous), then a tiny dense `k x k` charge-constraint solve
+  (`M alpha = q_target - q_base`, `M_ij` = induced charge on floating `i` from a
+  unit potential on floating `j`). Reusable helpers extracted:
+  `_reduced_solve` (Dirichlet-reduced SPD solve), `_pinned_value`,
+  `_terminal_charges`, `_solve_floating_superposition`.
+- Gauge handling: an insulated all-floating problem is charge-compatibility
+  checked (prescribed charges + free charge must sum to zero, else `ValueError`)
+  and gauge-fixed by `mean(phi)=0`; the unreachable duplicate pure-Neumann guard
+  from the A1 draft was removed (see census reconciliation).
+- Capacitance extraction (`electrostatic/capacitance.py`): `CapacitanceData`
+  (`matrix`, `terminal_order`, `reference`, `charges`, `energy`,
+  `reciprocity_error`, `row_sum_error`, plus `capacitance`, `mutual_capacitance`,
+  `capacitance_to_reference`, `two_terminal_capacitance` accessors) and the
+  `CapacitanceSimulation` runner. Raw matrix; NO silent symmetrization.
+- `Simulation.capacitance(scene, *, terminals=, reference=, boundary=, solver=)`
+  classmethod and `Result.capacitance` accessor (`Result(method="capacitance")`).
+- Exports: `CapacitanceData` added to `witwin/maxwell/electrostatic/__init__.py`,
+  `witwin/maxwell/__init__.py`, and `mw.__all__`.
+
+## Test inventory
+
+New suite total `tests/electrostatic/` = 39 tests, all pass:
+
+```
+conda run -n maxwell --no-capture-output python -m pytest tests/electrostatic -q
+# 39 passed
+```
+
+- `test_floating.py` (5): floating sphere holds its prescribed charge (rel
+  `< 1e-8`), floating conductor is exactly equipotential (spread/level `< 1e-9`)
+  and floats to an intermediate level, charge-neutral midplane slab floats to
+  0.5 V between 1 V/0 V plates (`< 5e-3`), two floating conductors each keep their
+  own charge (rel `< 1e-7`), and a charged isolated conductor in a Neumann box is
+  rejected as incompatible (`ValueError`).
+- `test_capacitance.py` (9): sphere-in-grounded-shell analytic C (rel `< 6%`) with
+  monotone grid convergence (n=40/60/80), 3-terminal matrix symmetry
+  (`reciprocity_error < 1e-6`) + positive diagonal + non-positive off-diagonal,
+  `0.5 V^T C V` vs field energy (rel `< 1e-6`), terminal-reordering invariance
+  (`< 1e-9`), insulating-boundary row-sum conservation (`row_sum_error < 1e-6`),
+  two-terminal/`capacitance_to_reference` consistency, no-return-path rejection,
+  and the `result.capacitance` accessor guard.
+- `test_api.py` (17): A1 guards retained; the A1 "floating rejected in this stage"
+  test was removed (floating is now implemented) and `CapacitanceData` added to
+  the export check.
+
+Adjacent suites (no regressions):
+
+```
+conda run -n maxwell --no-capture-output python -m pytest \
+  tests/electrostatic tests/api/public/test_public_api.py \
+  tests/api/public/test_simulation_smoke.py tests/api/public/test_guard_census.py \
+  tests/api/public/test_dependency_contract.py tests/core/scene/test_scene.py -q
+# 106 passed (guard census green, budget ceiling 152, measured 151)
+```
+
+### Recorded metrics
+
+- Sphere-in-shell a=0.2, b=0.8 (C_analytic = 2.9671e-11 F) via
+  `Simulation.capacitance`: C(inner,inner) rel error `< 6%` at n=80, monotone
+  decreasing across n=40/60/80.
+- 3-terminal grounded-box matrix (three spheres): `reciprocity_error < 1e-6`,
+  diagonal `> 0`, off-diagonal `<= 1e-18`; `0.5 V^T C V` matches field energy to
+  rel `< 1e-6` at V=(1,2,-1).
+- Row-sum conservation (Neumann box, explicit reference): `row_sum_error < 1e-6`.
+- Floating midplane slab floats to 0.5 V to `< 5e-3` (grid-symmetric mask);
+  floating sphere charge reproduced to rel `< 1e-8`.
+
+## Falsifications performed
+
+Each break was applied in place, the target test shown red, then reverted and
+re-run green. (F1 used a scratch break restored via git; F2/F3 used in-place edit
+then edit-restore — never `git checkout` on uncommitted work.)
+
+1. Floating superposition reconstruction — `phi = phi + alpha[j]*phi_units[j]`
+   -> `phi - alpha[j]*phi_units[j]` (`electrostatic/runtime.py`). Result:
+   `test_floating_conductor_prescribed_charge_conservation` FAILED. Restored.
+2. Capacitance charge sign — `reaction = apply_full(phi) - b_full` ->
+   `b_full - apply_full(phi)` (`electrostatic/capacitance.py`). Result:
+   `test_three_terminal_matrix_symmetry_and_signs` FAILED (diagonal went
+   negative). Restored.
+3. Row-sum reference inclusion — uniform excitation `{name: 1.0 for name in
+   terminals}` -> `... for name in active` (reference dropped). Result:
+   `test_row_sum_charge_conservation_under_insulating_boundary` FAILED. Restored.
+
+Final state after restores: `tests/electrostatic` 39 passed.
+
+## Guard census reconciliation (Phase 2+3)
+
+Floating superposition + gauge handling implement the previously deferred
+floating-conductor `NotImplementedError`, which is removed. Net measured
+capability guards `152 -> 151`; `CAPABILITY_GUARD_BUDGET` is a ceiling and stays
+`152` (`151 <= 152`). New incompatibility/return-path failures use `ValueError`
+(not capability guards). Documented in `test_guard_census.py` comment and
+`docs/reference/fdtd-capability-guard-census.md`.
+
+## Known gaps / deferred (for A3)
+
+- Implicit-diff backward (`torch.autograd.Function`) + FD gradient gates on
+  `d(energy)/d(eps_region)` and `dC_ij/d(eps)` — A3.
+- Prepare-time rejections for dispersive-without-static-value / tensor-eps /
+  multi-GPU hardening pass — A3 (mostly already fail closed from A1).
+- Tensor/anisotropic eps, open boundary, multi-GPU — out of program scope.
+
+## Design notes for A3
+
+- The capacitance/floating solves all route through `_reduced_solve`, whose
+  operator `A_free(x) = free * apply_full(free * x)` is SPD — reuse it verbatim
+  for the adjoint `A^T lambda = grad_phi` (A is symmetric).
+- The `k x k` floating solve runs on CPU float64 (`torch.linalg.lstsq`, gelsd,
+  `rcond=1e-10`) as a tiny control-plane reduction; it is not a field-solver CPU
+  fallback. For A3 differentiability, the alpha reconstruction is linear in the
+  unit solves, so gradients flow through the superposition weights.
+- Capacitance ignores volumetric free charge by design (uses
+  `operator.rhs_boundary()`), matching the Maxwell-matrix definition (pure
+  conductor response).

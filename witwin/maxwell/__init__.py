@@ -40,6 +40,7 @@ from .circuit_devices import (
     VoltageDependentCapacitor,
 )
 from .electrostatic import (
+    CapacitanceData,
     ChargeDensity,
     ElectrostaticBoundarySpec,
     ElectrostaticResultData,
@@ -225,6 +226,7 @@ __all__ = [
     "DipoleEmissionMonitor",
     "Domain",
     "DrudePole",
+    "CapacitanceData",
     "ChargeDensity",
     "ElectrostaticBoundarySpec",
     "ElectrostaticResultData",
