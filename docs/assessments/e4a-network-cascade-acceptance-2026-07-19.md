@@ -35,9 +35,19 @@ Env: conda `maxwell`, `CUDA_HOME=.../nvidia/cu13`, `PYTHONPATH=<worktree>`.
 3. **Multi-scenario passivity/conservation suite**
    (`tests/rf/network/test_network_conservation.py`). Three embedded scenarios (lossy 2-port,
    reactive 2-port, 4-port), each real FDTD run gated on:
-   - (a) **Terminal power balance** — `P1 = Σ 0.5 Re(V·conj(I))` (field-solve voltage, network-solve
-     current) vs `P2 = Σ 0.5 Re(V^H · Y(ω) · V)` (field-solve voltage, model admittance). Independent
-     computations; agreement is conservation, not identity. Also `Σ|a|² ≥ Σ|b|²` (passive sink).
+   - (a) **Terminal power-balance magnitude** — `P1 = Σ 0.5 Re(V·conj(I))` (field-solve voltage,
+     network-solve current) vs `P2 = Σ 0.5 Re(V^H · Y(ω) · V)` (field-solve voltage, model
+     admittance). **Gate class (honest):** *consistency* for the two memoryless scenarios and
+     *genuine two-sided* for the reactive scenario. For a memoryless network the embedding enforces
+     the terminal law `I = Y·V` exactly, so `P1 == P2` is an algebraic identity (it confirms the
+     solve applied `D` and DFT'd consistently, not an independent conservation law). For the reactive
+     state-space scenario `I(t)` carries a dynamic history, so `DFT(I) = Y(ω)·DFT(V)` only holds once
+     the finite analysis window has captured the LTI response — a transient/window bug breaks it —
+     making that scenario a real balance. The only field-side records are `V` and `I` (linked by the
+     model), so a model-independent dissipation estimate would need field-energy monitors and is
+     deliberately not added; the conservation content lives in (b)/(c). Also `Σ|a|² ≥ Σ|b|²` is a
+     separate non-tautological **sign** check (`Re(V·conj(I)) ≥ 0`, net power into the network — holds
+     for any model value, fails for a non-passive embedding).
    - (b) **Passivity** — `generated_energy ≤ 1e-6 · absorbed_energy` and running cumulative net
      energy `≥ 0` sampled at run lengths spanning pulse rise/peak/ring-down (both energies are
      time-domain accumulations of per-step port V/I).
@@ -50,7 +60,8 @@ and NOT touched here.
 ## Files added / changed
 
 - `witwin/maxwell/network.py` — cascade/terminate helpers + module algebra helpers (+242 lines).
-- `tests/rf/network/test_network_cascade.py` — new, 15 analytic-identity + fail-closed unit gates.
+- `tests/rf/network/test_network_cascade.py` — new, 16 analytic-identity + fail-closed unit gates
+  (includes the post-audit `TypeError`-ordering negative gate).
 - `tests/rf/network/test_network_cascade_crosscheck.py` — new, 2 raw-sample cross-check gates (CUDA).
 - `tests/rf/network/test_network_conservation.py` — new, 7 passivity/conservation gates (CUDA).
 - `FEATURE_LIST.md` — additive subsection `e4a-network-cascade`.
@@ -61,7 +72,7 @@ and NOT touched here.
 Commands (env exports as above):
 
 ```
-python -m pytest tests/rf/network/test_network_cascade.py -q            # 15 passed
+python -m pytest tests/rf/network/test_network_cascade.py -q            # 16 passed
 python -m pytest tests/rf/network/test_network_cascade_crosscheck.py \
                  tests/rf/network/test_network_conservation.py -q       # 9 passed (44.8s)
 python -m pytest tests/rf/network/ -q                                   # 182 passed (32.4s)
@@ -74,20 +85,40 @@ python -m pytest tests/rf/network/test_network_cascade.py \
   tests/api/public/test_simulation_smoke.py -q                          # 63 passed (51.8s)
 ```
 
-New tests: 24 total (15 unit + 2 cross-check + 7 conservation).
+New tests: 26 total (16 cascade unit + 2 cross-check + 7 conservation + 1 op-stream gain_voltage-path
+gate; the op-stream file also carries the pre-existing 2 composite-solve gates). The post-audit
+additions are the cascade `TypeError`-ordering negative gate and the op-stream gain_voltage-path
+no-regression gate.
 
 ## Pre-registered tolerances and observed margins
 
-- **Cross-check** `|ΔS| < 1e-5` across the band. Observed residuals: lossy ~8e-9, reactive ~7e-8
-  (≥140× margin). The connected network changes the input reflection by ~2e-4 (≥16× the tolerance),
-  asserted in-test (`network_effect > 10·tol`) so the gate provably exercises the connection algebra.
-  Bare device S is passive (`svd max ≤ 1.01`). Grid `dx=5mm`, PML 8 layers, 2000 steps, adjacent
-  ports (±5mm) for strong coupling.
-- **Power balance** `|P1−P2|/|P1| < 1e-3`. Observed ≤1.3e-5.
-- **Passivity** `generated_energy ≤ 1e-6·absorbed_energy` (observed 0 to ~1e-25 relative ~1e-10),
-  cumulative net `≥ −1e-15`.
+Emitter for the observed margins below (they are otherwise not reproducible from a committed
+artifact): `docs/assessments/e4-network-e2-probes/cascade_margins_probe.py`. It reuses the test
+fixtures (bare sweep, Touchstone round-trip, cascade algebra, embedding, conservation scenarios) so
+the printed numbers cannot drift from the asserted gates. Run from the worktree root with the env
+exports above:
+
+```
+CUDA_VISIBLE_DEVICES=1 python docs/assessments/e4-network-e2-probes/cascade_margins_probe.py
+```
+
+Observed margins below are the values printed by that probe on this GPU; the asserted tolerances are
+the committed thresholds in the corresponding test nodes.
+
+- **Cross-check** `|ΔS| < 1e-5` across the band. Observed residuals (probe): lossy ~4.6e-9, reactive
+  ~5.7e-8 (≥170× margin). The connected network changes the input reflection by ~3.9e-4 (lossy) /
+  ~4.8e-3 (reactive) — well above the in-test `network_effect > 10·tol` requirement, so the gate
+  provably exercises the connection algebra. Bare device S is passive (`svd max ≤ 1.01`). Grid
+  `dx=5mm`, PML 8 layers, 2000 steps, adjacent ports (±5mm) for strong coupling.
+- **Power balance** `|P1−P2|/|P1| < 1e-3`. Observed (probe) ≤~1.1e-5 (max over scenarios; reactive is
+  the largest, the two memoryless are ~1.6e-7).
+- **Passivity** `generated_energy ≤ 1e-6·absorbed_energy` (probe: 0 for the memoryless scenarios,
+  ~1.8e-10 relative for reactive), cumulative net `≥ −1e-15`.
 - **Stability** `|net(2T)−net(T)| ≤ 1e-3·net(T)` (observed ~0, energy converges by T), reactive
-  state norm rings down 4.6e-6→5.9e-7 over T→4T.
+  state norm rings down (probe) ~5.8e-6→~1.5e-6 over T→4T.
+
+(Exact last-digit values shift slightly run-to-run on a shared GPU; the probe reprints them and the
+committed thresholds — not the observed values — are what the gates assert.)
 
 ## Falsifications recorded
 
@@ -108,6 +139,27 @@ residue remains (`grep -rn FALSIFY witwin/` clean).
   `test_embedded_network_power_balance_and_passivity[lossy]` FAILED (5% P1/P2 mismatch ≫ 1e-3).
   Restored → clean.
 
+## Post-audit fix falsifications (2026-07-19)
+
+Supervisor-selected minor fixes after both audits passed; each new/tightened gate re-falsified.
+
+- **F5 — cascade error-type ordering.** `NetworkData.cascade` now runs the `isinstance(other,
+  NetworkData)` check before `other._require_complete(...)`, so a non-NetworkData `other` raises the
+  intended `TypeError` rather than `AttributeError`. New gate
+  `test_cascade_rejects_non_network_other_with_type_error` passes on the fix. Falsification: reverting
+  the two lines (completeness checks first) turned the gate RED — with an incomplete `self` the call
+  raised `RuntimeError: cascade requires complete excitation columns` instead of `TypeError`. Restored
+  → green.
+
+- **F6 — op-stream gain_voltage-path blindness.** The combined no-regression gate
+  (`test_composite_solve_matches_legacy_lu_no_regression`) stays green under a 5% `gain_voltage`
+  corruption because its roundoff bound is dominated by the ill-scaled `C@state` matvec. Added a
+  dedicated path-specific gate `test_composite_solve_matches_legacy_lu_gain_voltage_path` (support
+  helper `gain_voltage_path_equivalence`) that holds `state=0`, removing the `C` term from both the
+  compared value and the bound. Falsification: corrupting the source
+  (`gain_voltage = 1.05 * lu_solve(...)` in `fdtd/networks.py`) left the combined gate GREEN (passed)
+  while the new gate went RED (residual/bound ratio 8.24e+03 ≫ 1). Restored → both green.
+
 ## Capability-guard census
 
 Budget unchanged at **176** (`tests/api/public/test_guard_census.py` passes in every run above).
@@ -116,6 +168,18 @@ raises on a public algebra method, not FDTD capability-rejection guards tracked 
 census-tracked guard was added or removed, so no reconciliation was required.
 
 ## Design notes / decisions
+
+- **Cross-check bench is a lumped three-port (accepted deviation from the brief).** The brief's
+  deliverable 2 suggested a coax two-port bench. This cross-check instead uses a lumped-port
+  three-port device (`d0`/`d1`/`d2` `LumpedPort`s on a uniform grid), connecting the network across
+  `d1`/`d2` and reading the input reflection at the free port `d0`. This is a deliberate, accepted
+  substitution: the independence requirements the brief actually demands are met — the reference path
+  (raw Touchstone samples read via `from_touchstone` + the first-principles `cascade` algebra in
+  `network.py`) shares no code with the embedded path (rational fit in `rational.py` + state-space
+  time stepping in `fdtd/networks.py`), two network classes are exercised (lossy flat conductance and
+  reactive single-pole RC), and the connection changes S11 by ~2e-4 (≫ the 1e-5 tolerance, asserted
+  in-test). The lumped three-port is cheaper to set up on the existing uniform-grid lumped-port
+  infrastructure and gives the same code-path-independence guarantee a coax bench would.
 
 - **Wave convention.** The connection relation `a_k = b_l` is exact for real reference impedances
   (traveling-wave S). Connected ports are required real; complex `z0` fails closed and must be

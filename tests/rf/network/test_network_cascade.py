@@ -251,6 +251,23 @@ def test_cascade_rejects_fully_connected_result_without_external_ports():
         device.cascade(other, port_map={"a": "n0", "b": "n1"})
 
 
+def test_cascade_rejects_non_network_other_with_type_error():
+    # The isinstance check must run before ``other._require_complete``; otherwise
+    # a non-NetworkData ``other`` raises AttributeError instead of the intended
+    # TypeError. Use an incomplete self to prove the type check wins over the
+    # completeness check regardless of ordering.
+    frequencies = _frequencies()
+    incomplete = NetworkData(
+        frequencies=frequencies,
+        s=torch.zeros((frequencies.numel(), 2, 2), dtype=torch.complex128),
+        z0=50.0,
+        port_names=("a", "b"),
+        valid_columns=torch.tensor([True, False]),
+    )
+    with pytest.raises(TypeError, match="another NetworkData instance"):
+        incomplete.cascade(object(), port_map={"a": 0})
+
+
 def test_terminate_requires_exactly_one_of_gamma_or_impedance():
     frequencies = _frequencies()
     device = _random_two_port(frequencies)

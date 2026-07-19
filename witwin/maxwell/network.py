@@ -1269,10 +1269,10 @@ class NetworkData:
         and cascading two attenuators multiplies their transmissions.
         """
 
-        self._require_complete("cascade")
-        other._require_complete("cascade")
         if not isinstance(other, NetworkData):
             raise TypeError("cascade requires another NetworkData instance.")
+        self._require_complete("cascade")
+        other._require_complete("cascade")
         if self.s.device != other.s.device or self.s.dtype != other.s.dtype:
             raise ValueError("cascade requires matching device and dtype.")
         if self.frequencies.shape != other.frequencies.shape or not bool(

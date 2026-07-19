@@ -20,6 +20,7 @@ import torch
 
 from tests.support.network_coupling_op_stream import (
     build_connected_solver,
+    gain_voltage_path_equivalence,
     measure,
     numerical_equivalence,
 )
@@ -58,3 +59,16 @@ def test_composite_solve_matches_legacy_lu_no_regression() -> None:
     # floating-point roundoff bound. A ratio < 1 means the change is pure
     # rounding; a real algebra regression rides orders of magnitude past it.
     assert ratio < 1.0, f"composite vs legacy LU residual/bound ratio {ratio:.3e}"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_composite_solve_matches_legacy_lu_gain_voltage_path() -> None:
+    # Path-specific no-regression oracle for the gain_voltage (M^-1 D) branch.
+    # The combined gate's bound is dominated by the ill-scaled C@state matvec, so
+    # a corruption confined to gain_voltage stays hidden under it. Holding state
+    # at zero removes the C term from both the compared value and the bound, so a
+    # gain_voltage scaling (e.g. a 5% corruption) rides far past the D-only bound
+    # and this assertion goes red where the combined one stays green.
+    solver = build_connected_solver(grid_cells=48)
+    ratio = gain_voltage_path_equivalence(solver, steps=64)
+    assert ratio < 1.0, f"gain_voltage path residual/bound ratio {ratio:.3e}"

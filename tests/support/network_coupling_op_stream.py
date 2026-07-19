@@ -158,6 +158,57 @@ def numerical_equivalence(solver, *, steps: int, seed: int = 0) -> float:
     return worst_ratio
 
 
+def gain_voltage_path_equivalence(solver, *, steps: int, seed: int = 1) -> float:
+    """Worst residual/bound ratio for the ``gain_voltage`` (M^-1 D) path alone.
+
+    The combined :func:`numerical_equivalence` bound is dominated by the
+    ill-scaled ``C@state`` matvec (``||C|| ~ 6e5``), so a corruption confined to
+    ``gain_voltage`` hides under it and the no-regression gate stays green. Here
+    the ``state`` is held at zero, which removes the ``gain_state``/``C`` term
+    from both the compared value *and* the roundoff bound, leaving a bound that
+    depends only on ``|D| @ |free_voltage|``. The comparison is therefore
+    path-specific: ``composite_v = gain_voltage @ free_voltage`` against the
+    pivoted-LU solve of ``M x = D @ free_voltage``. A rounding-only change keeps
+    the ratio below one; any scaling of ``gain_voltage`` (e.g. the auditor's 5%
+    corruption) rides orders of magnitude past the bound and turns the gate red.
+    """
+
+    generator = torch.Generator(device=solver.device).manual_seed(seed)
+    runtime = solver._network_runtimes[0]
+    port_count = runtime.free_voltage.numel()
+    eps = torch.finfo(runtime.state.dtype).eps
+    fan_in = port_count
+    worst_ratio = 0.0
+    runtime.state.zero_()
+    for _ in range(steps):
+        runtime.free_voltage.copy_(
+            torch.randn(
+                port_count,
+                generator=generator,
+                device=solver.device,
+                dtype=runtime.free_voltage.dtype,
+            )
+        )
+        legacy = torch.empty_like(runtime.branch_current)
+        _networks._lu_solve_out(
+            runtime.loop_lu,
+            runtime.loop_permutation,
+            (runtime.D @ runtime.free_voltage).clone(),
+            legacy,
+            runtime.solve_workspace.clone(),
+            runtime.solve_scalar.clone(),
+        )
+        composite = runtime.gain_voltage @ runtime.free_voltage
+        bound = (
+            2.0 * fan_in * eps * runtime.loop_condition
+            * (runtime.D.abs() @ runtime.free_voltage.abs())
+        )
+        bound = torch.clamp(bound, min=torch.finfo(runtime.state.dtype).tiny)
+        ratio = float(((composite - legacy).abs() / bound).max())
+        worst_ratio = max(worst_ratio, ratio)
+    return worst_ratio
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--grid-cells", type=int, default=48)

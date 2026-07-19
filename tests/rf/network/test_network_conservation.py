@@ -3,26 +3,42 @@
 For three embedded scenarios (a lossy two-port, a reactive two-port, and a
 four-port) this suite gates each real FDTD run on:
 
-(a) Port power balance. The power flowing into the network computed from the
-    field-solve port voltages and the network-solve branch currents,
-    ``P1 = sum 0.5*Re(V * conj(I))``, must equal the power the network model
-    would dissipate for the same field-imposed voltages,
-    ``P2 = sum 0.5*Re(V^H * Y(w) * V)``. These are two independent computations
-    (P1 uses the solved current, P2 uses only the field voltage and the model
-    admittance), so agreement is a genuine terminal conservation check, not an
-    algebraic identity. The incident wave power must also exceed the reflected +
-    transmitted wave power (the network is a passive sink).
+Gate classes (honest labelling -- do not overclaim conservation where the
+embedding makes a check tautological):
 
-(b) Passivity. The passive network never generates net energy: the cumulative
-    generated energy stays negligible relative to the absorbed energy, and the
-    running cumulative net energy into the network stays non-negative when
-    sampled at several run lengths. Both energies are accumulated in the time
-    domain from the per-step port V/I.
+(a) Port power-balance magnitude -- CONSISTENCY class for the memoryless
+    scenarios, genuine two-sided check for the reactive scenario. The magnitude
+    comparison is ``P1 = sum 0.5*Re(V*conj(I))`` (field voltage, solved current)
+    against ``P2 = sum 0.5*Re(V^H*Y(w)*V)`` (field voltage, model admittance).
+    For a *memoryless* network the embedding enforces the terminal law
+    ``I = Y*V`` exactly, so ``P1 == P2`` is an algebraic identity: it verifies
+    the solve applied ``D`` and DFT'd consistently, but it is NOT an independent
+    conservation law. For the *reactive* (state-space) scenario ``I(t)`` carries
+    a dynamic history, so ``DFT(I) == Y(w)*DFT(V)`` only holds when the finite
+    analysis window has captured the LTI response -- a real transient/window bug
+    breaks it -- making that scenario a genuine two-sided balance. The only
+    field-side records are ``V`` and ``I`` (linked by the model), so a
+    model-independent dissipation estimate would require field-energy monitors
+    and is deliberately not attempted here; the conservation content lives in
+    gates (b) and (c) instead.
 
-(c) Time-domain stability. Between a run of length T and 2T there is no late
-    time growth: the accumulated net energy converges (does not diverge), the
-    dynamic state norm does not grow (it rings down under the PML), and every
-    diagnostic stays finite.
+    The incident wave power exceeding the reflected wave power is a separate,
+    non-tautological SIGN check: ``|a|^2 >= |b|^2`` iff ``Re(V*conj(I)) >= 0``,
+    i.e. net power flows *into* the network. That holds for any model value and
+    would fail for a non-passive (energy-injecting) embedding.
+
+(b) Passivity -- CONSERVATION class. The passive network never generates net
+    energy: cumulative generated energy stays negligible relative to absorbed
+    energy, and the running cumulative net energy stays non-negative when sampled
+    at several run lengths. Both energies are accumulated in the time domain from
+    the per-step product ``V(t)*I(t)*dt`` and split by sign; a sign flip on any
+    step (energy leaving the network) shows up as ``generated_energy > 0``. This
+    is independent of the frequency-domain ``Y@V`` relationship used in (a).
+
+(c) Time-domain stability -- CONSERVATION class. Between a run of length T and 2T
+    there is no late-time growth: the accumulated net energy converges (does not
+    diverge), the dynamic state norm does not grow (it rings down under the PML),
+    and every diagnostic stays finite.
 """
 
 import pytest
@@ -180,7 +196,10 @@ def test_embedded_network_power_balance_and_passivity(scenario):
     assert torch.all(torch.isfinite(torch.abs(voltage)))
     assert torch.all(torch.isfinite(torch.abs(current)))
 
-    # (a) Power balance: field-side V + solved I vs field-side V + model Y.
+    # (a) Power-balance magnitude: field-side V + solved I vs field-side V +
+    # model Y. Consistency-class for the memoryless scenarios (the embedding
+    # enforces I = Y@V exactly, so this is an identity); genuine two-sided for
+    # the reactive scenario (finite-window transients could break DFT(I)=Y@DFT(V)).
     admittance = model.evaluate(torch.tensor(MEASURE_FREQUENCIES, dtype=torch.float64, device=DEVICE))
     solved_power = torch.sum(0.5 * torch.real(voltage * torch.conj(current)), dim=0)
     model_current = torch.einsum("fij,jf->if", admittance, voltage)
