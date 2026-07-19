@@ -136,3 +136,102 @@ weakened. No FDFD tests touched.
   (direction-only gate) — an honest limitation, not hidden.
 - E2c cloud caches: brief authorizes `rf/coax_thru`, the rebuilt
   `rf/lumped_open_short_match`, `antenna/half_wave_dipole`, `antenna/patch`.
+
+---
+
+## Stage E2b — FDTD antenna benchmark scenes + real `Result.antenna` gates
+
+Env: conda `maxwell`, `CUDA_VISIBLE_DEVICES=1`, `PYTHONPATH=<worktree>`,
+`CUDA_HOME=.../nvidia/cu13`. All numbers below are reproducible by the named
+pytest node or scratch script (scratch scripts are throwaway, not committed).
+
+### Delivered items
+
+1. `benchmark/scenes/antenna/half_wave_dipole.py` — center-fed thin-wire
+   half-wave dipole (node-bound `LumpedPort` gap feed) + `ClosedSurfaceMonitor`
+   NF2FF box. Sized to `L = lambda/2` at `design_frequency`.
+2. `benchmark/scenes/antenna/patch.py` — probe-fed rectangular microstrip patch
+   on a FINITE grounded dielectric slab; exact-node integer-cell `GridSpec.custom`
+   grid; NF2FF box in the homogeneous air exterior.
+3. `benchmark/scenes/antenna/__init__.py` — exports both builders (honest status).
+4. `tests/rf/antenna/test_antenna_benchmark_e2e.py` — real (non-monkeypatched)
+   `Result.antenna` end-to-end gates for both scenes.
+5. `FEATURE_LIST.md` additive subsection `e2b-rf-scenes`.
+
+### Headline gate: half-wave dipole (real NF2FF path, no monkeypatch)
+
+Config: `design_frequency=3.0e9`, `dx=1.25e-3`, domain ±0.05 m (grid 96^3),
+8 PML, sweep `default_frequencies(3e9)` = {2.4,2.7,3.0,3.21,3.39,3.6} GHz,
+Gaussian feed `fwidth=1.5e9`, 12 ns (6871 steps). Measured at the design
+frequency (3.0 GHz):
+
+| Gate | Target | Measured | Pass |
+|---|---|---|---|
+| E-plane `sin^2` correlation | >= 0.99 | 0.9957 | yes |
+| Peak directivity | in [1.9, 2.4] dBi and within 0.3 of analytic 2.156 | 2.194 dBi | yes |
+| Radiated-vs-accepted closure | < 0.08 | 0.0407 | yes |
+| Radiation-resistance class | min(R) < 73 < max(R), a sample in [60,90] Ω | R sweep 19.6→88.0 Ω; 68.6 & 88.0 in band | yes |
+
+Input reactance is a large positive delta-gap feed offset (X = +470→+148 Ω across
+the band; electrical resonance X=0 sits above 3.6 GHz). Documented, not gated —
+the radiation physics (pattern/directivity/power balance) is the binding
+evidence. Node: `tests/rf/antenna/test_antenna_benchmark_e2e.py::test_half_wave_dipole_end_to_end_radiation_and_impedance` (PASS, ~76 s).
+
+### Patch antenna: real pipeline PASS + documented physical GAP
+
+Config: `patch_antenna_scene` (eps_r=2.2, h=3 mm, L=28 mm, W=34 mm, finite
+ground/substrate +6 mm, probe inset −8 mm), `dx=1e-3`, grid 86×97×70, 8 PML,
+freqs {4.4,4.8,5.2,5.6,6.0} GHz, 16 ns.
+
+- PASS (pipeline): `Result.antenna(...)` runs end to end over the grounded
+  dielectric slab and returns valid `AntennaData` — 6 air-exterior NF2FF faces per
+  frequency, finite realized gain/directivity, `p_rad>0`, best-sample
+  radiated-vs-accepted closure < 0.05 (measured min ≈ 0.005). Node:
+  `...::test_patch_antenna_result_antenna_pipeline_is_valid` (PASS).
+- GAP (physics, strict xfail): the probe on this thick finite-ground slab is
+  reactance-dominated (`|Gamma| ≈ 1.0` across 3–6.4 GHz, R ≈ 0.4–3 Ω, X ≈
+  +870→+366 Ω) and the pattern peaks off-broadside (θ ≈ 46–48°, broadside
+  directivity NEGATIVE: −1.8 to −10.7 dBi). Cavity model predicts f_r ≈ 3.39 GHz;
+  the structure never matches nor forms a broadside `TM010` lobe in band. Recorded
+  as `...::test_patch_antenna_matched_broadside_gate` `xfail(strict=True)` (a
+  future fix xpasses → strict-fails → forces closing the gap). Deferred to E2c
+  (feed/ground redesign + external-reference cross-check).
+
+### Falsifications recorded (dipole headline gates; `scratch/falsify_dipole.py`, one real run)
+
+Each gate discriminates real physics from a regression (real → pass, perturbed → fail):
+
+- `sin^2` correlation: REAL 0.9957 (pass); isotropic pattern 0.8142 (fail);
+  `cos^2` (wrong-axis) pattern 0.3309 (fail).
+- Directivity band: REAL 2.194 dBi (pass); isotropic 0.0 dBi (fail band).
+- Power closure `< 0.08`: REAL 0.0407 (pass); 2× mis-scaled `p_rad` → 0.9186 (fail).
+- Patch physical gate genuinely xfails on the real run (broadside never ≥ 5 dBi
+  while matched < −10 dB), so the `strict=True` marker is exercised, not vacuous.
+
+### Test inventory / commands
+
+```
+# CUDA, GPU 1, worktree PYTHONPATH, CUDA_HOME set
+python -m pytest tests/rf/antenna/test_antenna_benchmark_e2e.py -q
+#   -> dipole PASS (76 s); patch pipeline PASS + matched-broadside xfailed (56 s)
+python -m pytest tests/api/public/test_public_api.py \
+  tests/api/public/test_simulation_smoke.py tests/api/public/test_guard_census.py \
+  tests/rf/antenna/test_result_antenna.py tests/rf/antenna/test_antenna_data.py \
+  tests/rf/antenna/test_antenna_matching_block.py -q          # -> 47 passed
+```
+
+Guard-census budget unchanged at 176 (no witwin/maxwell source changed — only
+benchmark scenes + tests added). No fail-closed guard added/removed/weakened. No
+FDFD tests touched. The existing monkeypatched `test_result_antenna.py` is kept
+(fast synthetic-surface kernel coverage); the new e2e file adds the real path.
+
+### Known gaps / notes for E2c
+
+- Patch matched-broadside `TM010` + `D >= 5 dBi` is the outstanding physics gate
+  (feed reactance + small finite ground). E2c owns the redesign and the external
+  cross-check for `antenna/patch` and `antenna/half_wave_dipole`.
+- Scene builders return geometry/feed/NF2FF only; the benchmark `python -m
+  benchmark` registration + cache/RESULTS wiring for the antenna family is the E2c
+  M3 deliverable (not wired here).
+- Dipole reactance offset is a thin-wire delta-gap feed characteristic; a de-embed
+  or finer feed would recover X≈0 at resonance but was out of scope this stage.

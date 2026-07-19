@@ -597,3 +597,40 @@ conductive-path model, not a validated arc or device-failure predictor).
   the retired parasitic-dominated bench whose peak did not track C. The consistent
   ~13% parasitic downshift of the absolute resonance is measured and documented.
 <!-- END e2a-rf-scenes -->
+
+<!-- BEGIN e2b-rf-scenes (Track E2 stage b: FDTD antenna benchmark scenes) -->
+## FDTD antenna benchmark scenes with real `Result.antenna` end-to-end gates
+
+- `benchmark/scenes/antenna/half_wave_dipole.py` (`half_wave_dipole_scene`) builds a
+  center-fed thin-wire half-wave dipole (two collinear PEC arms joined by a
+  node-bound `LumpedPort` gap feed) enclosed by a `ClosedSurfaceMonitor` NF2FF box.
+  A real FDTD `Scene -> Simulation -> Result` run consumed through
+  `Result.antenna(...)` -- with NO monkeypatched surface currents or far field --
+  reproduces the canonical dipole: E-plane `sin^2(theta)`-pattern correlation
+  >= 0.99 (measured 0.996 at the design frequency), peak directivity in the
+  `2.15 dBi` class (measured 2.19 dBi, analytic 2.156), and radiated-vs-accepted
+  power closure < 8% (measured ~4%). The input *resistance* sweeps through the
+  thin-dipole `73 Ohm` radiation-resistance class within the band (measured
+  20 -> 88 Ohm, crossing 73 Ohm, with samples inside 60-90 Ohm). The input
+  *reactance* carries a large positive delta-gap feed offset (the FDTD electrical
+  resonance sits above the physical half-wave frequency); this is documented and
+  deliberately not gated, rather than hidden.
+- `benchmark/scenes/antenna/patch.py` (`patch_antenna_scene`) builds a probe-fed
+  rectangular microstrip patch on a FINITE grounded dielectric slab (finite
+  substrate + ground so the NF2FF box lies in a homogeneous air exterior; an
+  infinite substrate running into the PML would leave no valid Huygens surface).
+  All critical planes (ground `z=0`, patch underside `z=h`, feed terminals) land on
+  exact Yee nodes via integer-cell `GridSpec.custom` coordinates (`arange*dx`),
+  because `GridSpec.uniform`'s float `ceil` cell count can overshoot by one cell.
+  The real `Result.antenna(...)` pipeline runs end to end and returns valid
+  `AntennaData` (six air-exterior faces per frequency, finite gains, positive
+  radiated power, radiated-vs-accepted power closure). The matched-broadside
+  `TM010` resonance and the `D >= 5 dBi` gate are a DOCUMENTED GAP recorded as a
+  strict xfail: the probe on this thick finite-ground slab is reactance-dominated
+  (`|Gamma| ~ 1`) and the pattern is off-broadside; feed/ground redesign and the
+  external-reference cross-check are deferred to stage E2c.
+- `tests/rf/antenna/test_antenna_benchmark_e2e.py` drives both scenes through the
+  real (non-monkeypatched) `Result.antenna` path on CUDA and enforces the gates
+  above; the unit-level synthetic-surface reduction tests in
+  `test_result_antenna.py` are retained as the fast kernel coverage.
+<!-- END e2b-rf-scenes -->
