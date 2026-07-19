@@ -631,15 +631,15 @@ _Last regenerated: 2026-07-18T03:17:10-07:00_
 
 ## RF wave-level validation
 
-RF port validation (audit S1, 2026-07-18). The binding metric for each scene is measured from a real FDTD `Scene -> Simulation -> Result` run wherever the two-port bench produces a usable S-matrix; it is NEVER taken from the 2D mode eigensolve. Only `rf/rectangular_waveguide` currently reaches a wave-level FDTD S-matrix (beta de-embedded via NRW, with passivity/reciprocity convergence). The coax and lumped benches are recorded as honest wave-level FAILs with the measured numbers and root cause; microstrip / differential_pair are BLOCKED because WaveModeSpec('tem') is categorically inapplicable to their inhomogeneous cross-sections. Gate classes are the verbatim taxonomy (`docs/reference/gate-classification.md`); `modal-eigensolve` quantities are supporting only. Per-scene machine-readable artifacts live under `docs/assessments/rf-wave-validation-2026-07-18/`.
+RF port validation (audit S1, 2026-07-18, round 2). The binding metric for each scene is measured from a real FDTD `Scene -> Simulation -> Result` run wherever the two-port bench produces a usable S-matrix; it is NEVER taken from the 2D mode eigensolve. Both wave benches are now TERMINATED (conductors/walls run through the PML to the domain boundary; the waveguide holds its PML thickness fixed in metres across tiers). Every S-derived quantity is gated on an a_passive/a_driven precondition (the S=b/a extraction assumes the passive port carries no incident wave). `rf/rectangular_waveguide` reaches a wave-level FDTD S-matrix (beta de-embedded via NRW). `rf/coax_thru` has a clean TEM launch (arg(S21)/L ~ k0) but the passive port is re-illuminated by the far-end reflection (a_passive/a_driven ~ 1) because the ~0.3 m TEM wavelength is large versus the PML that fits its compact transverse cross-section under the uniform-num_layers boundary API -- a gap, NOT a port/line mismatch. microstrip / differential_pair are BLOCKED (a contour-snap error fires first; underneath, WaveModeSpec('tem') is categorically inapplicable to their inhomogeneous cross-sections). Gate classes are the verbatim taxonomy (`docs/reference/gate-classification.md`); `modal-eigensolve` quantities are supporting only. Per-scene machine-readable artifacts (with per-tier complex S(f) and port a/b) live under `docs/assessments/rf-wave-validation-2026-07-18/`.
 
 | Scene | Gate class | Quantity | Measured | Reference | Rel error | Status | Tidy3D ref |
 | --- | --- | --- | ---: | ---: | ---: | --- | --- |
-| rf/coax_thru | wave-level | see artifact | - | - | - | fail | pending-generation |
-| rf/rectangular_waveguide | wave-level | beta_median_rel_error (NRW de-embedded) | 0.01594 | 0.0009487 | 1.594% | gap | pending-generation |
+| rf/coax_thru | wave-level | a_passive/a_driven (F2 precondition) | 2.3 | 0.5 | 230.038% | gap | pending-generation |
+| rf/rectangular_waveguide | wave-level | beta_median_rel_error (NRW de-embedded) | 0.009629 | 0.0009487 | 0.963% | gap | pending-generation |
 | rf/microstrip_two_port | wave-level | see artifact | - | - | - | blocked | pending-generation |
 | rf/series_parallel_rlc | wave-level | f0 | 7.901e+09 | 7.118e+09 | 11.008% | gap | n/a (lumped-circuit resonance; analytic first-line reference) |
 | rf/lumped_open_short_match | wave-level | see artifact | - | - | - | fail | pending-generation |
 | rf/differential_pair | wave-level | see artifact | - | - | - | blocked | pending-generation |
 
-_RF section regenerated: 2026-07-18T23:45:28+00:00_
+_RF section regenerated: 2026-07-19T03:02:00+00:00_
