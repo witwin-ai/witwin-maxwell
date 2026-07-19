@@ -221,7 +221,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # injected source-power diagnostic), and Result.sar consuming FDTD PowerLossData
 # only. 168 -> 172. Lower this budget as tissue flood-fill connectivity, boundary
 # policies, input-power normalization, or non-FDTD SAR land.
-CAPABILITY_GUARD_BUDGET = 172
+CAPABILITY_GUARD_BUDGET = 176
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

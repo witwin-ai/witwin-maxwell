@@ -14,6 +14,10 @@ from .runtime import (
     ElectrostaticSimulation,
     solve_electrostatics,
 )
+from .initial_condition import (
+    DEFAULT_GAUSS_TOLERANCE,
+    ElectrostaticInitialCondition,
+)
 
 __all__ = [
     "ChargeDensity",
@@ -26,4 +30,6 @@ __all__ = [
     "CapacitanceData",
     "CapacitanceSimulation",
     "extract_capacitance",
+    "ElectrostaticInitialCondition",
+    "DEFAULT_GAUSS_TOLERANCE",
 ]

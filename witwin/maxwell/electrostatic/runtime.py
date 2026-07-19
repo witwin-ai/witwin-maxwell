@@ -257,6 +257,7 @@ class ElectrostaticResultData:
     gauss_error: float
     _charges: dict[str, torch.Tensor] = field(default_factory=dict)
     boundary_charge: torch.Tensor | None = None
+    conductor_mask: torch.Tensor | None = None  # bool (nx, ny, nz): pinned conductor cells
 
     @property
     def E(self) -> torch.Tensor:
@@ -663,6 +664,7 @@ def solve_electrostatics(
         gauss_error=gauss_error,
         _charges=charges,
         boundary_charge=boundary_charge,
+        conductor_mask=all_mask,
     )
 
 

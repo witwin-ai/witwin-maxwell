@@ -169,6 +169,7 @@ class FDTDConfig:
     shutoff_check_interval: int = 100
     cuda_graph: bool = False  # capture the field-update core into a CUDA graph (opt-in)
     parallel: FDTDParallelConfig | None = None
+    initial_condition: Any = None  # ElectrostaticInitialCondition pre-bias (opt-in)
 
     def __post_init__(self):
         if not isinstance(self.run_time, TimeConfig):
@@ -522,6 +523,7 @@ class Simulation:
         cuda_graph: bool = False,
         excitations=None,
         parallel: FDTDParallelConfig | None = None,
+        initial_condition=None,
     ) -> "Simulation":
         return cls(
             scene=scene,
@@ -538,6 +540,7 @@ class Simulation:
                 shutoff_check_interval=shutoff_check_interval,
                 cuda_graph=cuda_graph,
                 parallel=parallel,
+                initial_condition=initial_condition,
             ),
             excitations=excitations,
         )
@@ -580,6 +583,7 @@ class Simulation:
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         self._validate_breakdown_support()
+        self._validate_initial_condition_support()
         waveport_excitation = self._waveport_excitation()
         if waveport_excitation is not None:
             prepared_scene = prepare_scene(self.scene)
@@ -637,11 +641,58 @@ class Simulation:
         self._validate_port_excitations()
         self._validate_trainable_rf_support()
         self._validate_breakdown_support()
+        self._validate_initial_condition_support()
         if self.method == SimulationMethod.FDFD:
             return self._run_fdfd()
         if self.method == SimulationMethod.FDTD:
             return self._run_fdtd()
         raise ValueError(f"Unsupported simulation method {self.method!r}.")
+
+    def _validate_initial_condition_support(self) -> None:
+        """Fail closed for unsupported electrostatic pre-bias combinations.
+
+        The pre-bias seeds the staggered E buffers of the single-device, real-field
+        FDTD run before step 0. Distributed/multi-GPU seeding (shard-local E buffers
+        with halo/ownership), differentiable/adjoint runs (the DC field enters the
+        taped state), and complex (Bloch) field runs (the seed is real-valued and
+        does not carry the Bloch phase) are genuine capability gaps, rejected here so
+        they never silently drop or mis-seed the pre-bias.
+        """
+        from .electrostatic.initial_condition import ElectrostaticInitialCondition
+
+        condition = getattr(self.config, "initial_condition", None)
+        if condition is None:
+            return
+        if not isinstance(condition, ElectrostaticInitialCondition):
+            raise TypeError(
+                "Simulation.fdtd(initial_condition=...) must be an "
+                "ElectrostaticInitialCondition (build it with "
+                "ElectrostaticInitialCondition.from_result(dc_result))."
+            )
+        if self.method != SimulationMethod.FDTD:
+            raise NotImplementedError(
+                "Electrostatic pre-bias initial conditions seed the time-domain FDTD "
+                "field buffers; the frequency-domain solver has no time-stepped state."
+            )
+        if self.config.parallel is not None:
+            raise NotImplementedError(
+                "Distributed/multi-GPU FDTD does not support an electrostatic pre-bias "
+                "initial condition yet: seeding shard-local staggered E buffers with the "
+                "correct halo/ownership is a later phase. Run the pre-bias on a single GPU."
+            )
+        if self.has_trainable_parameters:
+            raise NotImplementedError(
+                "Trainable/adjoint FDTD does not support an electrostatic pre-bias initial "
+                "condition yet: the seeded DC field would enter the taped forward state "
+                "without a differentiated map back to the electrostatic solve. Detach the "
+                "scene parameters to run a forward pre-bias."
+            )
+        if self.scene.boundary.uses_kind("bloch"):
+            raise NotImplementedError(
+                "Bloch-periodic FDTD carries complex phase-shifted fields; the real-valued "
+                "electrostatic pre-bias seed does not track the Bloch phase. Use a real-field "
+                "boundary (PEC/PMC/periodic) for a pre-charged run."
+            )
 
     def _validate_breakdown_support(self) -> None:
         """Fail closed for unsupported deterministic-breakdown combinations.
@@ -1259,6 +1310,20 @@ class Simulation:
             self.frequencies,
         )
 
+    def _apply_initial_condition(self, solver) -> None:
+        """Seed the solver's E buffers with the electrostatic pre-bias, if any.
+
+        Runs after ``init_field()`` (the compiled edge permittivity and the zeroed
+        field/CPML buffers exist) and records the mapping provenance on the solver so
+        the run result can surface it. Fail-closed guards ran already in
+        ``_validate_initial_condition_support``.
+        """
+        condition = getattr(self.config, "initial_condition", None)
+        if condition is None:
+            return
+        condition.apply_to_solver(solver)
+        solver._electrostatic_prebias_provenance = dict(condition.provenance)
+
     def _build_fdtd_solver(self, *, initialize: bool):
         return self._build_fdtd_solver_for_scene(self.scene, initialize=initialize)
 
@@ -1400,6 +1465,7 @@ class Simulation:
         solver._port_termination_overrides = dict(termination_overrides or {})
         if initialize:
             solver.init_field()
+            self._apply_initial_condition(solver)
         if getattr(self, "_fixed_waveport_mode_sources", False):
             compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())
             frozen_sources = []
@@ -1574,6 +1640,11 @@ class Simulation:
             from .fdtd.runtime.breakdown import finalize_breakdown_data
 
             breakdown = finalize_breakdown_data(solver)
+        metadata = self.metadata
+        prebias_provenance = getattr(solver, "_electrostatic_prebias_provenance", None)
+        if prebias_provenance is not None:
+            metadata = dict(metadata)
+            metadata["electrostatic_prebias"] = prebias_provenance
         return Result(
             method="fdtd",
             scene=self.scene,
@@ -1586,7 +1657,7 @@ class Simulation:
             ports=ports,
             circuits=circuits,
             embedded_networks=embedded_networks,
-            metadata=self.metadata,
+            metadata=metadata,
             solver_stats=solver_stats,
             raw_output=raw_output,
             breakdown=breakdown,

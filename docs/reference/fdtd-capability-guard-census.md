@@ -540,3 +540,25 @@ usage errors (asking for a mass-averaged peak / field / soft peak without
 requesting averaging, and calling `accepted_power` on the bare reducer without a
 `Result`) were converted to `ValueError` at merge so they do not occupy
 capability budget.
+
+### Electrostatic pre-bias reconciliation (2026-07-19, plan 13 Phase 3 slice)
+
+The electrostatic pre-bias initial-condition slice adds four reviewed capability
+guards; `CAPABILITY_GUARD_BUDGET` rises `172 -> 176` in this change. All four live
+in `witwin/maxwell/simulation.py` `Simulation._validate_initial_condition_support`
+and reject an unsupported combination of `Simulation.fdtd(initial_condition=...)`:
+
+- a non-FDTD method (the pre-bias seeds the time-stepped E buffers; there is no
+  time-domain state to seed in the frequency-domain solver);
+- a distributed / multi-GPU run (seeding shard-local staggered E buffers with the
+  correct halo/ownership is a later phase);
+- a trainable / adjoint run (the seeded DC field would enter the taped forward
+  state without a differentiated map back to the electrostatic solve);
+- a Bloch-periodic run (the real-valued electrostatic seed does not carry the
+  complex Bloch phase).
+
+Lower this budget when any of those pre-bias combinations is implemented. The
+grid-identity mismatch, the discrete-Gauss tolerance gate, the negative-tolerance
+check, and the non-electrostatic-`Result` / wrong-type rejections in
+`electrostatic/initial_condition.py` raise `ValueError` / `TypeError` and are not
+counted against the capability budget.

@@ -1516,6 +1516,17 @@ class Result:
         return self.raw_output
 
     @property
+    def electrostatic_prebias(self):
+        """Provenance of the electrostatic pre-bias initial condition, or ``None``.
+
+        Populated when the FDTD run was seeded with an
+        :class:`~witwin.maxwell.ElectrostaticInitialCondition` (see
+        ``Simulation.fdtd(initial_condition=...)``). Carries the DC solve
+        diagnostics, the mapped-field discrete-Gauss residual, and the tolerance."""
+        metadata = self._metadata or {}
+        return metadata.get("electrostatic_prebias")
+
+    @property
     def capacitance(self):
         """Typed capacitance-matrix output (``CapacitanceData``)."""
         from .electrostatic.capacitance import CapacitanceData
