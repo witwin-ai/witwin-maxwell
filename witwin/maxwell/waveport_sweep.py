@@ -27,6 +27,12 @@ _EPS0 = 8.8541878128e-12
 _MU0 = 1.25663706212e-6
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 
+# Prefix stamped on the internal per-port ModeMonitors used to extract the
+# S-matrix. User-declared monitors never carry this prefix, so it is the single
+# discriminator between machinery monitors (dropped from the user-facing Result)
+# and monitors the user attached to the scene (which must ride through).
+WAVEPORT_MONITOR_PREFIX = "__waveport__::"
+
 
 @dataclass(frozen=True)
 class PreparedWavePort:
@@ -518,7 +524,23 @@ def _coefficient_source_time(frequency: float, coefficient: complex) -> CW:
 
 
 def _monitor_name(port_name: str, raw_index: int) -> str:
-    return f"__waveport__::{port_name}::{raw_index}"
+    return f"{WAVEPORT_MONITOR_PREFIX}{port_name}::{raw_index}"
+
+
+def _user_monitor_payloads(result, scene) -> dict:
+    """Return the user-declared monitor payloads captured on a column run.
+
+    The internal per-port ModeMonitors (``WAVEPORT_MONITOR_PREFIX``) drive the
+    S-matrix extraction and are machinery, not user-facing. Every other monitor
+    payload was requested by the user on the original scene and must survive into
+    the assembled Result instead of being silently dropped.
+    """
+    user_names = {monitor.name for monitor in scene.monitors}
+    return {
+        name: payload
+        for name, payload in result.monitors.items()
+        if name in user_names and not name.startswith(WAVEPORT_MONITOR_PREFIX)
+    }
 
 
 def _column_scene(
@@ -617,6 +639,7 @@ def _execute_columns(
     column_stats = []
     column_results = []
     last_result = None
+    first_result = None
     shared_prepared_scene = None
     from .array_execution import compact_array_column_result
 
@@ -648,6 +671,8 @@ def _execute_columns(
             # an unrelated mode-shape eigen-adjoint from each inner simulation.
             sub_simulation._fixed_waveport_mode_sources = True
             last_result = sub_simulation.run()
+            if first_result is None:
+                first_result = last_result
             if shared_prepared_scene is None:
                 shared_prepared_scene = last_result.prepared_scene
             results.append(
@@ -674,6 +699,7 @@ def _execute_columns(
         tuple(column_stats),
         tuple(column_results),
         last_result,
+        first_result,
     )
 
 
@@ -684,7 +710,14 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
             (port_index, mode_index)
             for mode_index in range(len(prepared_port.port.modes))
         )
-    incident, reflected, column_stats, column_results, last_result = _execute_columns(
+    (
+        incident,
+        reflected,
+        column_stats,
+        column_results,
+        last_result,
+        first_result,
+    ) = _execute_columns(
         simulation,
         scene,
         manifest,
@@ -779,6 +812,18 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
         [incident[index, :, index] for index in range(channel_count)],
         dim=-1,
     )
+    # User-declared monitors ride through the sweep. A PortSweep drives one channel
+    # per column, so a field monitor genuinely has one payload per drive; the flat
+    # top-level Result.monitors carries the FIRST drive channel at the first swept
+    # frequency (recorded in metadata), while per-drive / per-frequency field data
+    # is preserved column-by-column in ``array_run_data.column_results``.
+    user_monitors = _user_monitor_payloads(first_result, scene)
+    monitor_drive_note = {}
+    if user_monitors:
+        monitor_drive_note = {
+            "user_monitor_drive_channel": manifest.channel_names[0],
+            "user_monitor_frequency": manifest.frequencies[0],
+        }
     return Result(
         method="fdtd",
         scene=scene,
@@ -787,7 +832,7 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
         frequencies=manifest.frequencies,
         solver=last_result.solver,
         fields={},
-        monitors={},
+        monitors=user_monitors,
         ports=ports,
         network=network,
         array_run_data=ArrayRunData(
@@ -795,7 +840,11 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
             column_results=column_results,
             incident=basis_incident,
         ),
-        metadata={**simulation.metadata, "network_run_manifest": manifest.metadata()},
+        metadata={
+            **simulation.metadata,
+            "network_run_manifest": manifest.metadata(),
+            **monitor_drive_note,
+        },
         solver_stats={
             "network_sweep": manifest.metadata(),
             "columns": column_stats,
@@ -820,7 +869,7 @@ def run_waveport_excitation(simulation, scene, excitation, manifest: WavePortRun
     else:
         active_mode_index = qualified_names.index(requested_name)
 
-    incident, reflected, column_stats, _, last_result = _execute_columns(
+    incident, reflected, column_stats, _, last_result, _first_result = _execute_columns(
         simulation,
         scene,
         manifest,
@@ -855,6 +904,9 @@ def run_waveport_excitation(simulation, scene, excitation, manifest: WavePortRun
         "active_channel": qualified_names[active_mode_index],
         "kind": "direct_waveport_excitation",
     }
+    # A direct WavePort excitation is a single drive column, so user-declared
+    # monitors map unambiguously to this excitation and ride through unchanged --
+    # identical to a plain FDTD run of the injected mode source.
     return Result(
         method="fdtd",
         scene=scene,
@@ -863,7 +915,7 @@ def run_waveport_excitation(simulation, scene, excitation, manifest: WavePortRun
         frequencies=manifest.frequencies,
         solver=last_result.solver,
         fields={},
-        monitors={},
+        monitors=_user_monitor_payloads(last_result, scene),
         ports={prepared_port.port.name: port_data},
         network=None,
         metadata={**simulation.metadata, "waveport_run_manifest": run_metadata},

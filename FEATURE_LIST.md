@@ -563,3 +563,18 @@ conductive-path model, not a validated arc or device-failure predictor).
 - Deterministic single-GPU only this round: trainable scenes are rejected at `prepare()` (the hard field-duration/latching switch is non-differentiable at the trigger time; a smooth surrogate is deferred), the frequency-domain solver is rejected (no dynamic conductivity update), and multi-GPU runs are rejected at prepare. Breakdown scenes run on the eager step path (no CUDA-graph capture of the coefficient-mutating step).
 - Validation coverage (`tests/breakdown/`): manufactured golden trigger step (`trigger_step = ceil(minimum_duration/dt) - 1`), contiguous-timer reset, trigger-time dt convergence with a reported staircase error band, breakdown-dissipation closure against the analytic `integral(sigma_breakdown*|E|^2 dV dt)`, below-threshold six-field bitwise parity, no-breakdown plain-scene determinism and never-compiles-layout gates, structure-overlap last-writer-wins clearing, event-log determinism, and the trainable / multi-GPU / unsupported-model / buffer-overflow fail-closed guards.
 <!-- END d13-breakdown -->
+<!-- BEGIN e2a-rf-scenes (Track E2 stage a: RF wave-level bench fixes) -->
+## RF wave-level bench fixes (WavePort monitor passthrough, lumped calibration/RLC rebuild)
+
+- User-declared monitors (e.g. `PlaneMonitor`) now ride through `WavePort` direct
+  excitations and `PortSweep` Results instead of being silently dropped. A direct
+  `PortExcitation` of a `WavePort` is a single drive column, so its user monitors
+  map unambiguously to that excitation and appear on `Result.monitor(...)`
+  identical to a plain FDTD run of the injected mode. A `PortSweep` drives one
+  channel per column: the flat top-level `Result.monitors` carries the first drive
+  channel (recorded in `Result` metadata as `user_monitor_drive_channel` /
+  `user_monitor_frequency`), and per-drive / per-frequency field payloads are
+  preserved column-by-column in `Result.array_run_data.column_results`. The
+  internal per-port ModeMonitors that extract the S-matrix stay hidden. This
+  unblocks field-level inspection/falsification of the RF wave benches.
+<!-- END e2a-rf-scenes -->
