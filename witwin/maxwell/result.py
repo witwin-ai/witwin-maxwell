@@ -1249,6 +1249,66 @@ class Result:
     def monitors(self) -> dict[str, Any]:
         return dict(self._monitors)
 
+    def _esd_sources(self):
+        from .esd import ESDCurrentSource
+
+        scene = self.scene
+        sources = getattr(scene, "sources", ()) if scene is not None else ()
+        return {
+            source.name: source
+            for source in sources
+            if isinstance(source, ESDCurrentSource)
+        }
+
+    def esd_waveform_names(self) -> tuple[str, ...]:
+        """Names of ESD current sources declared on the run scene."""
+
+        return tuple(self._esd_sources())
+
+    def esd_waveform(self, name: str):
+        """Return the typed ESD injection record for source ``name``.
+
+        Capability level: stress-only. Exposes the target waveform diagnostics,
+        the charge-conserving projection of the injected current onto the run
+        time grid, and full provenance (standard revision, level voltage,
+        colocation-independent scalar metrics, model version).
+        """
+
+        from .esd import ESDPortRecord
+
+        sources = self._esd_sources()
+        if name not in sources:
+            available = ", ".join(sorted(sources)) or "<none>"
+            raise KeyError(
+                f"ESD waveform {name!r} is not present; available ESD sources: {available}."
+            )
+        source = sources[name]
+        waveform = source.waveform
+        diagnostics = waveform.diagnostics()
+        resampled = None
+        dt = None
+        metadata = self._metadata or {}
+        if metadata.get("dt") is not None:
+            dt = float(metadata["dt"])
+        elif self.solver is not None and getattr(self.solver, "dt", None) is not None:
+            dt = float(self.solver.dt)
+        if dt is not None and dt > 0.0:
+            time_steps = metadata.get("time_steps")
+            t_end = None
+            if time_steps is not None:
+                t_end = min(float(time_steps) * dt, float(waveform.support[1]))
+                if t_end <= float(waveform.support[0]):
+                    t_end = float(waveform.support[1])
+            resampled = waveform.resample_to_grid(dt, t_end=t_end)
+        provenance = source.provenance()
+        return ESDPortRecord(
+            name=source.name,
+            port_name=source.port_name,
+            diagnostics=diagnostics,
+            resampled=resampled,
+            provenance=provenance,
+        )
+
     @property
     def ports(self) -> dict[str, PortData]:
         return dict(self._ports)

@@ -39,6 +39,14 @@ from .circuit_devices import (
     PolynomialIV,
     VoltageDependentCapacitor,
 )
+from .esd import (
+    ESDCurrentSource,
+    ESDDiagnostics,
+    ESDPortRecord,
+    ESDResampledWaveform,
+    ESDWaveform,
+    MeasuredWaveform,
+)
 from .geometry import ComplexPolySlab, PolySlab
 from .media import (
     CustomDebyePole,
@@ -219,6 +227,11 @@ __all__ = [
     "Domain",
     "DrudePole",
     "Ellipsoid",
+    "ESDCurrentSource",
+    "ESDDiagnostics",
+    "ESDPortRecord",
+    "ESDResampledWaveform",
+    "ESDWaveform",
     "EmbeddedElementPatternData",
     "EmbeddedNetworkData",
     "FieldDataset",
@@ -249,6 +262,7 @@ __all__ = [
     "SurfaceImpedanceModel",
     "MaterialRegion",
     "MaxHoldComposite",
+    "MeasuredWaveform",
     "Medium2D",
     "MediumMonitor",
     "Mesh",
