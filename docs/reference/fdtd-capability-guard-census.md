@@ -412,3 +412,15 @@ deleting them.
 | Guard | Message | Contract review |
 | --- | --- | --- |
 | `simulation.py` `_validate_network_solver` | "Embedded network feedback is defined only for the time-domain FDTD update; frequency-domain solvers cannot ignore Scene.networks." | Permanent architectural boundary, not a capability gap. Per plan 03 (2026-07-14 decision, §2.1 goal 3 and §5.2) network embedding is unified as a **time-domain** passive state-space recurrence `x[n+1]=Ad x[n]+Bd v[n]` fed back into each FDTD step; there is no per-step update in a frequency-domain solve for a network to couple into, and the plan explicitly rejects a post-simulation S-matrix cascade. This is definitionally the same family as the material "…is defined only for / is not defined for…" contract guards, so it is excluded by exact `(file, substring)` match rather than counted against the capability budget. |
+
+### Gyromagnetic export reconciliation (2026-07-18)
+
+The media-validation coverage fix (`is_gyromagnetic` registration) closed a
+fail-open export path: a `GyromagneticFerrite` kept scalar `mu_r = mu_infinity`
+and exposed no permeability pole, so it bypassed both the magnetic-dispersive and
+`mu_r != 1` interoperability guards and silently exported as a plain reciprocal
+isotropic medium, dropping the Polder tensor. `adapters/tidy3d.py` now raises
+`NotImplementedError` for gyromagnetic media (the external format has no
+non-reciprocal tensor model). One reviewed capability guard added, counted under
+"External interoperability adapter" (19 -> 20); measured capability total 143 -> 144
+and `CAPABILITY_GUARD_BUDGET` raised in the same change.

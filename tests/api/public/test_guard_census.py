@@ -146,7 +146,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # budget as distributed ferrite (Phase 4), the FDFD gyromagnetic ingest, and the
 # arbitrary-bias kernel (Phase 2) land.
 # Merged union 2026-07-18: 140 - 1 (plan 05 N1) + 4 (plan 08 1b/1c+hardening) = 143.
-CAPABILITY_GUARD_BUDGET = 143
+CAPABILITY_GUARD_BUDGET = 144
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
