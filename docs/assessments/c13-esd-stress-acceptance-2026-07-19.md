@@ -61,7 +61,7 @@ End-to-end FDTD (GPU 0, two PEC terminal boxes + `TerminalPort` + `ESDCurrentSou
 
 ## Guard census
 
-No fail-closed guard added, removed, or weakened; the FDTD capability-guard census budget is untouched. New fail-closed validations added inside `esd.py` (unsupported revision/discharge, non-terminal port, missing port, degenerate footprint) are local `ValueError`s, not tracked-census FDTD capability guards.
+No fail-closed capability guard added, removed, or weakened; the FDTD capability-guard census budget stays at 144 and `tests/api/public/test_guard_census.py` passes (3 passed). New fail-closed validations added inside `esd.py` (unsupported revision/discharge, non-terminal port, missing port, degenerate footprint) are local `ValueError`s, not tracked-census FDTD capability guards. The abstract `_WaveformBase` interface methods (`current`/`support`/`provenance`) use `abc.abstractmethod` with an ellipsis body rather than `raise NotImplementedError`, so the AST census scanner does not count them as capability guards (fixed 2026-07-19 after an initial regression to 147 was caught by the census gate).
 
 ---
 
@@ -84,8 +84,8 @@ Environment: conda env `maxwell`, `CUDA_VISIBLE_DEVICES=0`, `PYTHONPATH=<worktre
 
 ## Test inventory (all under `tests/breakdown/`)
 
-- `test_breakdown_accumulator.py` — 20 passed. Two-pulse exact exceedance + longest run; longest-run reset between pulses; exactly-at-threshold counts; just-below excluded; damage integral golden; damage disabled without exponent; minimum_duration qualifying mask/locations; zero-occupancy excluded from peak/exceedance; partial-occupancy volume·time weighting; colocation uniform-field magnitude; colocation-vs-energy-density consistency; shape/validation guards.
-- `test_component_stress.py` — 11 passed (1 cuda-parity + 1 cpu-parity parametrization). Rating validation; power/energy golden; exceedance flags; disabled-channel; increasing-time guard; float32-vs-float64 parity (cpu + cuda); trapezoid-vs-rectangle falsification.
+- `test_breakdown_accumulator.py` — 16 passed. Two-pulse exact exceedance + longest run; longest-run reset between pulses; exactly-at-threshold counts; just-below excluded; damage integral golden; damage disabled without exponent; minimum_duration qualifying mask/locations; zero-occupancy excluded from peak/exceedance; partial-occupancy volume·time weighting; colocation uniform-field magnitude; colocation-vs-energy-density consistency; shape/validation guards.
+- `test_component_stress.py` — 10 passed (includes cuda-parity + cpu-parity parametrization). Rating validation; power/energy golden; exceedance flags; disabled-channel; increasing-time guard; float32-vs-float64 parity (cpu + cuda); trapezoid-vs-rectangle falsification.
 - `test_breakdown_monitor.py` — 8 passed. Construction/validation, region-with-bounds, region+box conflict, scene attach, ComponentStressMonitor binding/type guard.
 - `test_breakdown_fdtd.py` — 3 passed (CUDA). End-to-end device stress maps + provenance; no-perturbation bitwise field parity with/without the monitor; component-stress reduction float64 parity on a real run.
 - Total: **37 passed** (`tests/breakdown/`).
@@ -112,4 +112,4 @@ Adjacent suites rerun: `tests/api/public/test_public_api.py`, `tests/api/public/
 
 ## Guard census
 
-No fail-closed guard added, removed, or weakened; the FDTD capability-guard census budget is untouched. New validations (unsupported quantities, missing critical_field, damage-without-exponent, region/box conflict, rating type/positivity, increasing-time) are local `ValueError`/`TypeError`s, not tracked-census FDTD capability guards. The FDTD resume guard was extended to also reject `breakdown_observers` (same NotImplementedError policy as existing observer types), not weakened.
+No fail-closed capability guard added, removed, or weakened; the FDTD capability-guard census budget stays at 144 and `tests/api/public/test_guard_census.py` passes. New validations (unsupported quantities, missing critical_field, damage-without-exponent, region/box conflict, rating type/positivity, increasing-time, mismatched V/I time axes) are local `ValueError`/`TypeError`s, not tracked-census FDTD capability guards. The FDTD resume guard was extended to also reject `breakdown_observers` (same NotImplementedError policy as existing observer types, no new census node), not weakened.

@@ -25,6 +25,7 @@ networks and discharge-gun coupling are out of scope for this phase.
 
 from __future__ import annotations
 
+import abc
 from dataclasses import dataclass, field
 import math
 from typing import Any, Mapping
@@ -163,19 +164,22 @@ class ESDResampledWaveform:
         return abs(1.0 - self.action_ratio)
 
 
-class _WaveformBase:
+class _WaveformBase(abc.ABC):
     """Shared diagnostics, resampling, and source-time lowering for waveforms."""
 
-    def current(self, t) -> torch.Tensor:  # pragma: no cover - abstract
-        raise NotImplementedError
+    @abc.abstractmethod
+    def current(self, t) -> torch.Tensor:
+        ...
 
     @property
-    def support(self) -> tuple[float, float]:  # pragma: no cover - abstract
-        raise NotImplementedError
+    @abc.abstractmethod
+    def support(self) -> tuple[float, float]:
+        ...
 
     @property
-    def provenance(self) -> dict[str, Any]:  # pragma: no cover - abstract
-        raise NotImplementedError
+    @abc.abstractmethod
+    def provenance(self) -> dict[str, Any]:
+        ...
 
     def _dense_grid(self, samples: int = 400_001) -> torch.Tensor:
         start, stop = self.support

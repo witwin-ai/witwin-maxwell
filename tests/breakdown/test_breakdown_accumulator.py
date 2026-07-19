@@ -189,7 +189,9 @@ def test_colocation_energy_density_consistency_on_uniform_field():
     # u_E = 0.5 * eps * |E|^2 with the same colocation reproduces the analytic
     # energy density of the uniform field exactly.
     eps = 8.854e-12
-    ex, ey, ez = 5.0, 0.0, 0.0
+    # All three components nonzero so a dropped term in the colocation would
+    # break this test, not just the companion analytic-magnitude test.
+    ex, ey, ez = 3.0, 4.0, 12.0
     Ex, Ey, Ez = _staggered_uniform((2, 2, 2), ex, ey, ez)
     mag = colocate_electric_magnitude(Ex, Ey, Ez)
     energy_density = 0.5 * eps * mag.square()

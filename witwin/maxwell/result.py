@@ -1414,6 +1414,17 @@ class Result:
                 f"{binding.voltage_series!r} and current series "
                 f"{binding.current_series!r} have mismatched sample counts."
             )
+        i_time_cmp = i_time.to(device=v_time.device, dtype=v_time.dtype)
+        span = torch.abs(v_time[-1] - v_time[0]) if v_time.numel() > 1 else torch.abs(v_time).max()
+        atol = float(span) * 1e-6 if float(span) > 0.0 else 1e-12
+        if not torch.allclose(v_time, i_time_cmp, rtol=1e-6, atol=atol):
+            raise ValueError(
+                f"ComponentStressMonitor {name!r} voltage series "
+                f"{binding.voltage_series!r} and current series "
+                f"{binding.current_series!r} are recorded on different time axes; "
+                "voltage and current must share a common time grid for power and "
+                "energy integration."
+            )
         voltage = voltage if isinstance(voltage, torch.Tensor) else torch.as_tensor(voltage)
         current = current if isinstance(current, torch.Tensor) else torch.as_tensor(current)
         return ComponentStressData.from_time_series(
