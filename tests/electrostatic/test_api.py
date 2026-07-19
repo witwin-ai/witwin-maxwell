@@ -180,3 +180,17 @@ def test_dispersive_material_rejected():
     )
     with pytest.raises(NotImplementedError):
         mw.Simulation.electrostatic(scene, boundary=mw.ElectrostaticBoundarySpec.grounded_box()).run()
+
+
+def test_anisotropic_tensor_permittivity_rejected():
+    """The scalar operator rejects anisotropic (tensor) permittivity at prepare."""
+    domain = mw.Domain(bounds=((-1, 1),) * 3)
+    grid = mw.GridSpec.uniform(2.0 / 16)
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
+    material = mw.Material(eps_r=2.0, epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0))
+    scene.add_structure(mw.Structure(geometry=Box(position=(0, 0, 0), size=(1, 1, 1)), material=material))
+    scene.add_electrostatic_terminal(
+        mw.ElectrostaticTerminal(name="inner", geometry=Sphere(position=(0, 0, 0), radius=0.2), potential=1.0)
+    )
+    with pytest.raises(NotImplementedError):
+        mw.Simulation.electrostatic(scene, boundary=mw.ElectrostaticBoundarySpec.grounded_box()).run()

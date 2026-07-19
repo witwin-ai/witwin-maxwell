@@ -256,3 +256,151 @@ capability guards `152 -> 151`; `CAPABILITY_GUARD_BUDGET` is a ceiling and stays
 - Capacitance ignores volumetric free charge by design (uses
   `operator.rhs_boundary()`), matching the Maxwell-matrix definition (pure
   conductor response).
+
+---
+
+# Track A12 — Electrostatics differentiability + hardening (2026-07-19, stage A3)
+
+Stage A3 of `a12-electrostatics`: implicit-differentiation backward on the
+reduced electrostatic solve, central-difference gradient gates on
+`d(energy)/d(eps)` and `dC_ij/d(eps)` (plus stronger implicit-path gates),
+prepare-time rejection hardening, `FEATURE_LIST.md` section, and this doc. Same
+worktree/env/command preamble as A1 above.
+
+## Delivered items
+
+- Implicit-diff backward (`witwin/maxwell/electrostatic/runtime.py`):
+  `_ElectrostaticSolve(torch.autograd.Function)` + `differentiable_solve(...)`
+  wrapper. Forward runs Jacobi-PCG (`_pcg_free`, refactored out of
+  `_reduced_solve`) under `no_grad` — the iteration is never taped. Backward uses
+  the implicit function theorem on the full-grid residual
+  `G_free = apply_full(phi;eps) - b(theta)` (free cells),
+  `G_pinned = phi - fixed_value` (pinned cells): the free-cell adjoint multiplier
+  solves the *same* SPD reduced operator (`A^T = A`), the pinned-cell multiplier
+  `mu_p = grad_phi_p - apply_full(embed(mu_f))_p` is closed-form, and the
+  parameter gradients are the residual VJP `-(dG/d theta)^T mu` evaluated by one
+  `torch.autograd.grad` pass over the operator re-derived through
+  `dataclasses.replace` (so no hand-coded `dA/d(eps)`).
+- Wiring: `solve_electrostatics` routes the fixed-terminal (non-floating) branch
+  through `differentiable_solve`, and `capacitance._excitation_charges` does the
+  same (`use_free_charge=False`). Downstream `energy`, `terminal_charge`, fields,
+  and every `CapacitanceData.matrix` entry are read back with the grad-enabled
+  operator, so they backprop to `Material` permittivity, `ChargeDensity`
+  magnitude, and terminal voltage. Diagnostic scalars (`gauss_error`,
+  `reciprocity_error`, `row_sum_error`) now `.detach()` before `float()`.
+- Fail-closed: a floating terminal combined with a differentiable
+  permittivity/free charge raises `NotImplementedError` (the prescribed-charge
+  `k x k` reduction is undifferentiated) rather than returning silently wrong
+  gradients.
+- Hardening: verified/added prepare-time rejections — dispersive-without-static
+  (existing, `test_dispersive_material_rejected`) and anisotropic tensor eps
+  (new, `test_anisotropic_tensor_permittivity_rejected`). Multi-GPU: there is no
+  electrostatic distributed entrypoint (single `scene.device`), so there is no
+  reachable API to reject; noted as out-of-scope rather than adding a dead guard.
+
+## Test inventory
+
+New suite total `tests/electrostatic/` = 46 tests, all pass (was 39 in A2: +6
+gradient tests in `test_gradients.py`, +1 tensor-eps rejection in `test_api.py`):
+
+```
+conda run -n maxwell --no-capture-output python -m pytest tests/electrostatic -q
+# 46 passed
+```
+
+`test_gradients.py` (6), all float64, all central-difference rel err `< 1e-4`:
+
+- `test_energy_gradient_wrt_region_permittivity` — `d(energy)/d(eps_region)` for a
+  dielectric-slab scalar (the brief's gate (a); total-gradient correctness, but
+  see the stationarity note below).
+- `test_potential_probe_gradient_wrt_permittivity` — interior-potential probe
+  `d(phi)/d(eps_region)`; a non-variational functional that gates the eps->phi
+  implicit-backward path directly (`|g_ad| > 1e-3` sanity + FD match).
+- `test_capacitance_gradient_wrt_permittivity` — `dC_00/d(eps)` for a
+  center-conductor-in-grounded-box capacitance (the brief's gate (b)).
+- `test_energy_gradient_wrt_free_charge` — `d(energy)/d(rho)`; a pure-implicit
+  functional (`A` is charge-independent, so the explicit partial is 0).
+- `test_potential_probe_gradient_wrt_terminal_voltage` — `d(phi)/d(V_terminal)`;
+  gates the pinned-cell adjoint multiplier `mu_p`.
+- `test_floating_conductor_gradient_fails_closed` — floating terminal + grad
+  permittivity raises `NotImplementedError`.
+
+Adjacent suites (no regressions):
+
+```
+conda run -n maxwell --no-capture-output python -m pytest \
+  tests/electrostatic tests/api/public/test_public_api.py \
+  tests/api/public/test_simulation_smoke.py tests/api/public/test_guard_census.py \
+  tests/api/public/test_dependency_contract.py tests/core/scene/test_scene.py -q
+# 112 passed (guard census green, budget ceiling 152, measured 152)
+```
+
+### Recorded metrics
+
+- All six gradient gates: analytic (implicit-diff) vs central-difference relative
+  error `< 1e-4` at solver tolerance `1e-12`, float64, on 12–14 cell/axis grids.
+- Stationarity measurement (scratch probe, parallel-plate fixed-voltage energy):
+  the implicit contribution to `d(energy)/d(eps)` is `~ -4e-14` relative to the
+  total — i.e. the fixed-Dirichlet field energy is variationally stationary in
+  phi, so `d(energy)/d(eps)` is explicit-`dA/d(eps)`-dominated. This is why the
+  strong implicit-backward gates are the capacitance, potential-probe, and
+  free-charge functionals, not the fixed-voltage energy.
+
+## Falsifications performed
+
+Each break was applied in place, the target gate shown red, then reverted and
+re-run green (edit-then-edit-restore; never `git checkout` on uncommitted work).
+
+1. Residual-VJP sign — `grad_outputs=-mu_full` -> `grad_outputs=mu_full`
+   (`electrostatic/runtime.py` backward). Result:
+   `test_potential_probe_gradient_wrt_permittivity`,
+   `test_capacitance_gradient_wrt_permittivity`, and
+   `test_energy_gradient_wrt_free_charge` all FAILED (analytic gradient sign
+   inverted). Restored -> green. (Note: the fixed-voltage energy gate did *not*
+   fail under this break, confirming its implicit contribution is negligible —
+   the stationarity result above.)
+2. Pinned-cell multiplier — `mu_full = mu_free + (1-free)*resid_p` ->
+   `... + 0.0*(1-free)*resid_p` (drop `mu_p`). Result:
+   `test_potential_probe_gradient_wrt_terminal_voltage` FAILED while
+   `test_capacitance_gradient_wrt_permittivity` stayed green — confirming `mu_p`
+   feeds only the terminal-voltage (`fixed_value`) gradient, as the block
+   algebra predicts. Restored -> green.
+3. Floating-gradient guard — `if requires_grad:` -> `if False and requires_grad:`
+   (`electrostatic/runtime.py`). Result:
+   `test_floating_conductor_gradient_fails_closed` FAILED (no raise). Restored ->
+   green.
+
+## Guard census reconciliation (differentiability slice)
+
+The floating-gradient `NotImplementedError` is one new reviewed capability guard.
+Measured capability count `151 -> 152`, exactly at the `CAPABILITY_GUARD_BUDGET`
+ceiling of `152` (`152 <= 152`, unchanged). Documented in
+`test_guard_census.py` comment and `docs/reference/fdtd-capability-guard-census.md`
+(new "differentiability slice" reconciliation entry). Verified count:
+`collect_guards()` minus `CONTRACT_GUARDS` = 152.
+
+## Known gaps / deferred
+
+- Gradients through the floating-conductor superposition (`k x k`) solve — fails
+  closed; the alpha reconstruction is linear in the unit solves so it is
+  differentiable in principle, but not implemented/gated this stage.
+- Terminal-voltage gradients flow through `differentiable_solve`'s `fixed_value`
+  input, but the public `compile_electrostatics` path builds `fixed_value` with
+  detached floats (`_pinned_value` uses `torch.full`), so voltage gradients are
+  reachable only when the caller supplies a tensor `fixed_value` directly (as the
+  voltage gate test does), not yet from a trainable `ElectrostaticTerminal`.
+- Tensor/anisotropic eps, open boundary, multi-GPU — out of program scope
+  (rejected at prepare / no reachable API).
+
+## Design notes
+
+- `_pcg_free(operator, free_mask, b_free, config)` is the shared reduced-solve
+  core (used by forward, adjoint, and `_reduced_solve`). `_build_operator_with`
+  re-derives an `ElectrostaticOperator` from substituted `eps`/`free_charge` via
+  `dataclasses.replace`, which is what lets the backward form the residual VJP
+  with plain autograd instead of hand-differentiating the harmonic-mean stencil
+  and boundary conductances.
+- The full-grid residual `G` (free block + pinned block) is the single object the
+  backward differentiates; its pinned block is the only place `fixed_value`
+  (terminal voltage) enters `dG/d theta`, which is why `mu_p` gates voltage
+  gradients and nothing else.

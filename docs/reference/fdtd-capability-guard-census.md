@@ -454,3 +454,19 @@ removed. Incompatible floating-charge constraints and missing capacitance return
 paths now fail closed with `ValueError` diagnostics (not counted as capability
 guards). Net measured capability total `152 -> 151`; `CAPABILITY_GUARD_BUDGET`
 is a ceiling and stays `152` (`151 <= 152`).
+
+### Electrostatics reconciliation (2026-07-19, plan 12 differentiability slice)
+
+The reduced electrostatic solve now provides implicit-differentiation backward
+(a `torch.autograd.Function`: forward Jacobi-PCG under `no_grad`, backward adjoint
+solve on the SPD reduced operator plus a residual VJP), so `d(energy)/d(eps)`,
+`dC_ij/d(eps)`, and `d(energy)/d(free_charge)` flow through the fixed-potential
+path. Gradients through the **floating-conductor** superposition solve are not
+implemented (the prescribed-charge `k x k` reduction is undifferentiated), so
+`electrostatic/runtime.py` adds one reviewed capability guard,
+`"Gradients through the floating-conductor superposition solve"`: a floating
+terminal combined with a differentiable permittivity / free charge fails closed
+rather than returning silently wrong gradients. Net measured capability total
+`151 -> 152`, exactly at the `CAPABILITY_GUARD_BUDGET` ceiling of `152`. Lower the
+budget when the floating-superposition gradient (or tensor-eps / open boundary,
+Phase 4) lands.

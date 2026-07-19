@@ -6,7 +6,7 @@ import torch
 
 from ..compiler.electrostatic import CompiledElectrostatics, compile_electrostatics
 from .api import ElectrostaticBoundarySpec, ElectrostaticSolverConfig
-from .runtime import ElectrostaticOperator, _pinned_value, _reduced_solve
+from .runtime import ElectrostaticOperator, _pinned_value, differentiable_solve
 
 
 @dataclass
@@ -97,11 +97,20 @@ class CapacitanceData:
 
 
 def _excitation_charges(operator, compiled, drive: dict[str, float], b_full, config):
-    """Solve one unit-excitation problem and return (charges_by_name, phi)."""
+    """Solve one unit-excitation problem and return (charges_by_name, phi).
+
+    The solve routes through the implicit-diff wrapper and the induced charges are
+    read back with the grad-enabled ``operator`` (built from the live
+    ``compiled.epsilon_r``), so each capacitance entry is differentiable in the
+    permittivity. Capacitance measures the pure conductor response, so the free
+    charge is excluded (``use_free_charge=False``).
+    """
     shape, dtype, device = compiled.shape, compiled.dtype, compiled.device
     entries = [(t.mask, drive.get(t.name, 0.0)) for t in compiled.terminals]
     fixed_value = _pinned_value(shape, dtype, device, entries)
-    phi, _ = _reduced_solve(operator, free_mask_of(compiled), fixed_value, b_full, config)
+    phi, _ = differentiable_solve(
+        compiled, fixed_value, free_mask_of(compiled), config, use_free_charge=False
+    )
     reaction = operator.apply_full(phi) - b_full
     charges = {t.name: reaction[t.mask].sum() for t in compiled.terminals}
     return charges, phi
@@ -179,9 +188,9 @@ def extract_capacitance(
     # Charge conservation check: all conductors (active + reference) at 1 V.
     uniform_drive = {name: 1.0 for name in terminals}
     uniform_charges, _ = _excitation_charges(operator, compiled, uniform_drive, b_full, config)
-    scale = float(matrix.abs().max()) + 1.0e-300
-    row_sum_error = max(abs(float(uniform_charges[name])) for name in active) / scale
-    reciprocity_error = float((matrix - matrix.T).abs().max()) / scale
+    scale = float(matrix.detach().abs().max()) + 1.0e-300
+    row_sum_error = max(abs(float(uniform_charges[name].detach())) for name in active) / scale
+    reciprocity_error = float((matrix - matrix.T).detach().abs().max()) / scale
 
     index = {name: i for i, name in enumerate(active)}
     return CapacitanceData(

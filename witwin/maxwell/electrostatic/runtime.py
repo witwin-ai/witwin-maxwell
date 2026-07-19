@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -299,19 +300,20 @@ def _pinned_value(shape, dtype, device, entries) -> torch.Tensor:
     return value
 
 
-def _reduced_solve(operator, free_mask, fixed_value, b_full, config):
-    """Solve the Dirichlet-reduced SPD system on the free cells.
+def _pcg_free(operator, free_mask, b_free, config):
+    """Jacobi-PCG solve of the reduced free-cell SPD system ``A_free x = b_free``.
 
-    ``fixed_value`` pins the potential on the complement of ``free_mask`` (it is
-    zero on free cells). Returns ``(phi_full, PCGReport)`` with ``phi_full`` equal
-    to ``fixed_value`` on pinned cells and the solved potential on free cells.
+    ``A_free(x) = free * apply_full(free * x)`` and ``b_free`` is already projected
+    onto the free cells (zero on pinned cells). Returns ``(x, PCGReport)`` with
+    ``x`` supported on the free cells (zero on pinned cells). Runs under
+    ``no_grad``; differentiability is provided by the implicit-diff wrapper, not
+    by taping the iteration.
     """
-    free = free_mask.to(fixed_value.dtype)
+    free = free_mask.to(b_free.dtype)
 
     def apply_A(x):
         return free * operator.apply_full(free * x)
 
-    b_free = free * (b_full - operator.apply_full(fixed_value))
     inv_diag = torch.where(free_mask, 1.0 / operator.diag, torch.zeros_like(operator.diag))
     with torch.no_grad():
         x, report = _pcg(
@@ -328,7 +330,118 @@ def _reduced_solve(operator, free_mask, fixed_value, b_full, config):
             f"(tolerance {config.tolerance:.3e}, absolute residual {report.residual_abs:.3e}). "
             "Increase max_iterations, loosen tolerance, or check the problem conditioning."
         )
+    return x, report
+
+
+def _reduced_solve(operator, free_mask, fixed_value, b_full, config):
+    """Solve the Dirichlet-reduced SPD system on the free cells.
+
+    ``fixed_value`` pins the potential on the complement of ``free_mask`` (it is
+    zero on free cells). Returns ``(phi_full, PCGReport)`` with ``phi_full`` equal
+    to ``fixed_value`` on pinned cells and the solved potential on free cells.
+    """
+    free = free_mask.to(fixed_value.dtype)
+    b_free = free * (b_full - operator.apply_full(fixed_value))
+    x, report = _pcg_free(operator, free_mask, b_free, config)
     return x + fixed_value, report
+
+
+def _build_operator_with(compiled, eps, free_charge):
+    """Rebuild an :class:`ElectrostaticOperator` with substituted field tensors.
+
+    Used by the implicit-differentiation wrapper: the operator conductances and
+    boundary right-hand side are analytic functions of ``eps`` (and ``free_charge``
+    for the volumetric source), so re-deriving them through ``dataclasses.replace``
+    lets autograd form the residual VJP without hand-coding ``dA/d(eps)``.
+    """
+    comp = dataclasses.replace(compiled, epsilon_r=eps, free_charge=free_charge)
+    return ElectrostaticOperator(comp)
+
+
+class _ElectrostaticSolve(torch.autograd.Function):
+    """Implicit-differentiation wrapper around the reduced electrostatic solve.
+
+    Forward solves the Dirichlet-reduced SPD system ``A(theta) phi = b(theta)``
+    with Jacobi-PCG under ``no_grad`` (the iteration is never taped). Backward uses
+    the implicit function theorem on the full-grid residual
+
+        G_free(phi, theta)  = apply_full(phi; eps) - b(theta)    (free cells)
+        G_pinned(phi, theta) = phi - fixed_value                 (pinned cells)
+
+    with ``G = 0`` at the solution. Because ``A`` is symmetric positive definite
+    the adjoint multiplier on the free cells solves the *same* reduced operator,
+    reusing the forward preconditioner; the pinned-cell multiplier follows in
+    closed form. The parameter gradients are then the residual vector-Jacobian
+    product ``-(dG/d theta)^T mu``, evaluated by a single autograd pass over the
+    re-derived operator so ``d(eps)`` / ``d(free_charge)`` / ``d(fixed_value)``
+    never need explicit stencil derivatives.
+    """
+
+    @staticmethod
+    def forward(ctx, eps, free_charge, fixed_value, payload):
+        compiled, free_mask, config, use_free_charge, stats = payload
+        operator = _build_operator_with(compiled, eps.detach(), free_charge.detach())
+        b_full = operator.rhs_full() if use_free_charge else operator.rhs_boundary()
+        free = free_mask.to(eps.dtype)
+        b_free = free * (b_full - operator.apply_full(fixed_value.detach()))
+        x, report = _pcg_free(operator, free_mask, b_free, config)
+        phi = x + fixed_value.detach()
+        ctx.save_for_backward(eps, free_charge, fixed_value, phi)
+        ctx.payload = payload
+        if stats is not None:
+            stats["report"] = report
+        return phi
+
+    @staticmethod
+    def backward(ctx, grad_phi):
+        eps, free_charge, fixed_value, phi = ctx.saved_tensors
+        compiled, free_mask, config, use_free_charge, _stats = ctx.payload
+        free = free_mask.to(eps.dtype)
+
+        # Adjoint multiplier. A is SPD, so A_free^T = A_free and the free-cell
+        # block reuses the forward reduced operator/preconditioner.
+        operator = _build_operator_with(compiled, eps.detach(), free_charge.detach())
+        rhs = free * grad_phi
+        mu_free, _ = _pcg_free(operator, free_mask, rhs, config)
+        # Pinned-cell multiplier: mu_p = grad_phi_p - (A_fp^T mu_f)_p, and since A is
+        # symmetric (A_fp^T mu_f)_p = apply_full(embed(mu_f))_p.
+        resid_p = grad_phi - operator.apply_full(mu_free)
+        mu_full = mu_free + (1.0 - free) * resid_p
+
+        # Residual VJP: grad_theta = -(dG/d theta)^T mu, formed by autograd over the
+        # re-derived operator with the solution held constant.
+        with torch.enable_grad():
+            eps_ = eps.detach().requires_grad_(True)
+            fc_ = free_charge.detach().requires_grad_(True)
+            fx_ = fixed_value.detach().requires_grad_(True)
+            operator_ = _build_operator_with(compiled, eps_, fc_)
+            b_ = operator_.rhs_full() if use_free_charge else operator_.rhs_boundary()
+            phi_c = phi.detach()
+            g_free = free * (operator_.apply_full(phi_c) - b_)
+            g_pinned = (1.0 - free) * (phi_c - fx_)
+            residual = g_free + g_pinned
+            g_eps, g_fc, g_fx = torch.autograd.grad(
+                residual,
+                (eps_, fc_, fx_),
+                grad_outputs=-mu_full,
+                allow_unused=True,
+            )
+        return g_eps, g_fc, g_fx, None
+
+
+def differentiable_solve(compiled, fixed_value, free_mask, config, *, use_free_charge=True):
+    """Solve ``A(theta) phi = b(theta)`` with implicit-diff backward support.
+
+    Returns ``(phi_full, PCGReport)``. ``phi`` is differentiable with respect to
+    ``compiled.epsilon_r`` and ``compiled.free_charge`` (and ``fixed_value``); the
+    forward PCG still runs under ``no_grad`` so there is no autograd-tape overhead.
+    """
+    stats: dict[str, Any] = {}
+    payload = (compiled, free_mask, config, use_free_charge, stats)
+    phi = _ElectrostaticSolve.apply(
+        compiled.epsilon_r, compiled.free_charge, fixed_value, payload
+    )
+    return phi, stats["report"]
 
 
 def _terminal_charges(reaction, terminals) -> dict[str, torch.Tensor]:
@@ -462,8 +575,16 @@ def solve_electrostatics(
             "least one Dirichlet boundary face or a fixed-potential/grounded terminal."
         )
 
+    requires_grad = compiled.epsilon_r.requires_grad or compiled.free_charge.requires_grad
     b_full = operator.rhs_full()
     if floating_terms:
+        if requires_grad:
+            raise NotImplementedError(
+                "Gradients through the floating-conductor superposition solve are not "
+                "implemented; the prescribed-charge k x k reduction is not yet differentiated. "
+                "Detach the permittivity / free charge, or use only fixed-potential "
+                "(grounded / potential=) terminals for a differentiable electrostatic solve."
+            )
         phi, reports = _solve_floating_superposition(
             operator, compiled, fixed_terms, floating_terms, free_mask, config,
             has_level_anchor=has_level_anchor,
@@ -477,12 +598,16 @@ def solve_electrostatics(
         # Without floating conductors, any terminal set consists of fixed-potential
         # electrodes, so a solve anchor is also a level anchor; the pure-Neumann,
         # no-conductor case was already rejected by the has_solve_anchor check.
+        # The reduced solve routes through the implicit-diff wrapper so downstream
+        # energy / charge / field quantities are differentiable in eps and charge.
         fixed_value = _pinned_value(shape, dtype, device, [(t.mask, t.potential) for t in fixed_terms])
-        phi, report = _reduced_solve(operator, free_mask, fixed_value, b_full, config)
+        phi, report = differentiable_solve(
+            compiled, fixed_value, free_mask, config, use_free_charge=True
+        )
 
     free = free_mask.to(dtype)
     reaction = operator.apply_full(phi) - b_full
-    gauss_error = float((reaction * free).abs().max()) if bool(free_mask.any()) else 0.0
+    gauss_error = float((reaction * free).detach().abs().max()) if bool(free_mask.any()) else 0.0
 
     charges = _terminal_charges(reaction, compiled.terminals)
 

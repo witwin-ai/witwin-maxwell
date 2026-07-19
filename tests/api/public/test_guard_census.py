@@ -168,6 +168,13 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # ceiling and stays 152 (151 <= 152). Incompatible floating-charge / missing
 # capacitance-return-path cases now fail closed with ValueError, not capability
 # guards. Lower this budget as tensor-eps / open-boundary (Phase 4) land.
+# 2026-07-19 (plan 12 electrostatics differentiability slice): the reduced
+# electrostatic solve now supports implicit-diff backward, but gradients through
+# the floating-conductor superposition path are not implemented, so
+# electrostatic/runtime.py adds one capability guard ("Gradients through the
+# floating-conductor superposition solve"). Measured electrostatic capability
+# count rises 151 -> 152 total, exactly at the ceiling. Lower this budget when the
+# floating-superposition gradient (or tensor-eps / open boundary, Phase 4) lands.
 CAPABILITY_GUARD_BUDGET = 152
 
 # (posix path relative to the repo root, distinctive message substring).
