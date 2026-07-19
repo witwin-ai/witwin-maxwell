@@ -81,6 +81,9 @@ def test_passive_series_rlc_energy_does_not_increase_without_drive():
 
 
 def test_trapezoidal_series_and_parallel_resonance_error_is_below_two_percent():
+    # Gate class (S0.3): analytic-identity. This sweeps the trapezoidal
+    # companion-impedance FORMULA against the closed-form resonance; the FDTD
+    # solver is not run. It is a fast contract test, NOT a wave-level exit gate.
     inductance = 1.0e-3
     capacitance = 1.0e-6
     expected = 1.0 / (2.0 * math.pi * math.sqrt(inductance * capacitance))

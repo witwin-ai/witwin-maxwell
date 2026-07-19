@@ -628,3 +628,18 @@ Per-medium validation path enforced by `tests/validation/benchmark/test_media_va
 **Reference-cache closure.** The 2026-07-15 Stage-E audit validated the current cache key for all 102 Tidy3D-reference scenarios (zero stale and zero missing); the remaining four registered FDFD scenarios intentionally use a local FDTD reference. This is a report snapshot: any later scene, adapter, or cache-contract change must rerun the key audit and refresh affected references.
 
 _Last regenerated: 2026-07-18T03:17:10-07:00_
+
+## RF wave-level validation
+
+RF port validation (audit S1, 2026-07-18, round 4). The binding metric for each scene is measured from a real FDTD `Scene -> Simulation -> Result` run wherever the two-port bench produces a usable S-matrix; it is NEVER taken from the 2D mode eigensolve. This is NOT a set of passing wave-level scenes -- the per-scene status column below is authoritative. `rf/coax_thru` is a wave-level PASS: a terminated air-line TEM two-port (conductors run through the computational PML to the padded grid edges) whose S-matrix is assembled by solving `B = S*A` across the drive columns; the precondition is extraction conditioning (cond(A) small) plus post-solve passivity (max singular value <= 1 + slack), with `a_passive/a_driven` kept only as a bench-quality diagnostic, and `beta` from `arg(S21)/L` tracks `k0`. `rf/rectangular_waveguide` is BLOCKED on the transverse mode-operator redesign: the vector operator cannot yet produce a clean full-grid TE10 on a hollow metallic guide (it decouples the odd/even sublattices), so the selected mode is checkerboard-aliased and the benchmark's `sin(pi y/a)`-correlation gate refuses it. `rf/microstrip_two_port` and `rf/differential_pair` are BLOCKED (a contour-snap error fires first; underneath, WaveModeSpec('tem') is categorically inapplicable to their inhomogeneous substrate+air cross-sections). `rf/series_parallel_rlc` is an open gap (parasitic-dominated: the load-port peak does not track C). `rf/lumped_open_short_match` is a wave-level FAIL (the feed port is decoupled from the load). Gate classes are the verbatim taxonomy (`docs/reference/gate-classification.md`); `modal-eigensolve` quantities are supporting only. Per-scene machine-readable artifacts (with per-tier complex S(f) and port a/b) live under `docs/assessments/rf-wave-validation-2026-07-18/`.
+
+| Scene | Gate class | Quantity | Measured | Reference | Rel error | Status | Tidy3D ref |
+| --- | --- | --- | ---: | ---: | ---: | --- | --- |
+| rf/coax_thru | wave-level | beta from arg(S21)/L (median rel error) | 0.008256 | 0 | 0.826% | pass | pending-generation |
+| rf/rectangular_waveguide | modal-eigensolve | TE10 Ez sin(pi y/a)-correlation (dx=0.02) | 0.5539 | 1 | 44.606% | blocked | pending-generation |
+| rf/microstrip_two_port | wave-level | see artifact | - | - | - | blocked | pending-generation |
+| rf/series_parallel_rlc | wave-level | f0 | 7.901e+09 | 7.118e+09 | 11.008% | gap | n/a (lumped-circuit resonance; analytic first-line reference) |
+| rf/lumped_open_short_match | wave-level | see artifact | - | - | - | fail | pending-generation |
+| rf/differential_pair | wave-level | see artifact | - | - | - | blocked | pending-generation |
+
+_RF section regenerated: 2026-07-19T04:48:42+00:00_

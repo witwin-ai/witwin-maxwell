@@ -1,0 +1,28 @@
+{
+  "name": "rf/microstrip_two_port",
+  "description": "Microstrip quasi-TEM two-port: Z0 / eps_eff vs Hammerstad-Jensen.",
+  "gate_class": "wave-level",
+  "status": "blocked",
+  "reference": "analytic-Hammerstad (Z0=57.73 ohm, eps_eff=3.267)",
+  "tidy3d_reference": "pending-generation",
+  "target": "Z0 within 5% of quasi-static Hammerstad (model-limited)",
+  "tolerance_basis": "",
+  "falsification": "",
+  "metrics": [
+    {
+      "quantity": "Z0 (analytic Hammerstad)",
+      "reference": 57.72792917053757,
+      "unit": "ohm",
+      "class": "wave-level",
+      "note": "reference only; no FDTD extraction (blocked)"
+    }
+  ],
+  "supporting": [],
+  "convergence": [],
+  "conservation": {},
+  "raw": {},
+  "notes": [
+    "BLOCKED. Two stacked blockers, in the order they fire (EXECUTED): (1) the current-contour plane does not land on the Yee half-grid, so compile_waveport_cross_section raises a ValueError (witwin/maxwell/compiler/waveports.py:_compile_current_geometry) BEFORE the mode solve runs -- this snap error currently fires FIRST and masks the TEM check. (2) The deeper categorical blocker: the microstrip cross-section is inhomogeneous (eps=4.4 substrate + air), and WaveModeSpec('tem') is inapplicable there -- the TEM electrostatic normalization requires a uniformly filled cross-section and raises NotImplementedError (witwin/maxwell/fdtd/excitation/modes.py:1943-1946). A hybrid (full-vector) mode solve is required. reference: pending-generation for the wave-level extraction."
+  ],
+  "updated_at": "2026-07-19T04:48:29+00:00"
+}

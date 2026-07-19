@@ -693,20 +693,31 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
     )
 
     channel_count = len(manifest.channel_names)
-    s_columns = []
-    for input_index in range(channel_count):
-        driven = incident[input_index, :, input_index]
-        threshold = torch.clamp(
-            torch.max(torch.abs(driven)) * 1.0e-6,
-            min=torch.finfo(driven.real.dtype).tiny,
+    # Network S by solving the full system B = S * A across the drive columns
+    # (F3). ``incident``/``reflected`` are indexed ``[drive, frequency, channel]``.
+    # The per-drive ``b/a`` ratio is only correct when the passive channels carry
+    # no incident wave (A diagonal); on a re-illuminated bench A has off-diagonal
+    # incident amplitudes and the ratio is generically wrong. Assembling
+    #   A[f, i, j] = incident[j, f, i]      (incident at channel i under drive j)
+    #   B[f, i, j] = reflected[j, f, i]
+    # and solving S[f] = B[f] @ A[f]^{-1} recovers the physical scattering matrix.
+    # When A is diagonal this reduces to the old b/a extraction bit-for-bit.
+    incident_matrix = incident.permute(1, 2, 0).contiguous()   # [freq, i, j]
+    reflected_matrix = reflected.permute(1, 2, 0).contiguous()  # [freq, i, j]
+    self_incident = torch.diagonal(incident_matrix, dim1=-2, dim2=-1)  # [freq, channel]
+    threshold = torch.clamp(
+        torch.max(torch.abs(self_incident)) * 1.0e-6,
+        min=torch.finfo(self_incident.real.dtype).tiny,
+    )
+    if bool(torch.any(torch.abs(self_incident) < threshold)):
+        raise RuntimeError(
+            "WavePort drive has insufficient self-incident spectrum for the B = S*A extraction."
         )
-        if bool(torch.any(torch.abs(driven) < threshold)):
-            raise RuntimeError(
-                f"WavePort input channel {manifest.channel_names[input_index]!r} has "
-                "insufficient incident spectrum."
-            )
-        s_columns.append(reflected[input_index] / driven[:, None])
-    scattering = torch.stack(s_columns, dim=-1)
+    condition_numbers = torch.linalg.cond(incident_matrix)  # [freq]
+    scattering = torch.linalg.solve(
+        incident_matrix.transpose(-2, -1),
+        reflected_matrix.transpose(-2, -1),
+    ).transpose(-2, -1)  # S = B A^{-1} solved as S^T = (A^T)^{-1} B^T
 
     frequency_tensor = torch.as_tensor(
         manifest.frequencies,
@@ -755,6 +766,11 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
         metadata={
             "run_manifest": manifest.metadata(),
             "propagation_constants": network_beta,
+            # Conditioning of the incident matrix A per frequency (F3). A large
+            # cond(A) means the drive columns are near-collinear (a re-entrant /
+            # under-driven bench) and the extracted S is untrustworthy; this is the
+            # extraction-conditioning precondition that replaces the a_passive gate.
+            "extraction_condition_number": condition_numbers,
         },
     )
     from .array_execution import ArrayRunData

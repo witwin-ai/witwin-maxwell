@@ -220,6 +220,11 @@ def test_open_short_and_discrete_matched_limits():
 
 
 def test_fifty_ohm_match_and_open_short_power_wave_exit_gate():
+    # Gate class (S0.3): analytic-identity. This applies a single implicit lumped
+    # update and checks the constructed pair Gamma = (R-Z0)/(R+Z0) at ~1e-12 with
+    # no wave, grid, or frequency window. Despite the historical name it is NOT a
+    # wave-level exit gate; the wave-level matched-|S11| gate lives in
+    # tests/rf/wave_validation/test_matched_s11_wave_level.py.
     device = torch.device("cpu")
     cases = ((50.0, 0.0), (float("inf"), 1.0), (0.0, -1.0))
 

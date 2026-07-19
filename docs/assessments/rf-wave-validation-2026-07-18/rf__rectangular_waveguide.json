@@ -1,0 +1,36 @@
+{
+  "name": "rf/rectangular_waveguide",
+  "description": "Hollow TE10 guide two-port: FDTD beta(omega) from the S-matrix vs analytic dispersion, with passivity/reciprocity convergence.",
+  "gate_class": "modal-eigensolve",
+  "status": "blocked",
+  "reference": "analytic-TE10 (fc=c/2a; beta=sqrt(k0^2-(pi/a)^2))",
+  "tidy3d_reference": "pending-generation",
+  "target": "blocked on the transverse mode-operator redesign (open item)",
+  "tolerance_basis": "",
+  "falsification": "EXECUTED: the injected TE10 Ez profile has sin(pi y/a)-correlation 0.554 at dx=0.02 (a clean half-wave is >= 0.99). The centered uniform-isotropic transverse operator decouples the odd/even sublattices, so sin(pi y/a) lives on ONE sublattice; best recoverable full-grid correlation over the entire degenerate subspace is ~0.62. No selector filter can synthesize the missing sublattice.",
+  "metrics": [
+    {
+      "quantity": "fc_cutoff",
+      "reference": 249827048.33333334,
+      "unit": "Hz",
+      "class": "wave-level",
+      "note": "TE10 cutoff; band is 1.2 fc .. 2.2 fc (all propagating)"
+    },
+    {
+      "quantity": "TE10 Ez sin(pi y/a)-correlation (dx=0.02)",
+      "measured": 0.5539407683560068,
+      "reference": 1.0,
+      "rel_error": 0.4460592316439932,
+      "class": "modal-eigensolve",
+      "note": "injected mode shape; < 0.9 means the operator returned a checkerboard-aliased eigenvector, so no S-matrix is reported"
+    }
+  ],
+  "supporting": [],
+  "convergence": [],
+  "conservation": {},
+  "raw": {},
+  "notes": [
+    "BLOCKED on the transverse mode-operator (audit S1 round-4, EXECUTED; replaces the withdrawn round-3 'shifted 3D-Yee TE10 onset', which was false physics -- the discrete TE10 cutoff is 0.99752 fc, BELOW the continuum). The vector selector previously injected a checkerboard-aliased eigenvector sharing the TE10 eigenvalue (sin-correlation ~0.000); its odd profile couples to TE20 (cutoff 2 fc) and reproduces the old |S21| to 3 significant figures. The selector is hardened (F1: absolute-uniformity k0 rejection, never-substitute) but the VECTOR operator itself cannot represent a clean full-grid TE10 on a hollow metallic guide (centered branch decouples sublattices; the staggered branch has an asymmetric-BC bug that shifts beta ~10%). A symmetric-BC Yee-staggered transverse operator is the fix; filed as an OPEN item in docs/reference/rf-wave-validation-2026-07-18.md. Coax (separate TEM path) is unaffected and passes."
+  ],
+  "updated_at": "2026-07-19T04:48:29+00:00"
+}

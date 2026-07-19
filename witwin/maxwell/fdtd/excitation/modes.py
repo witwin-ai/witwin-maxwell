@@ -33,6 +33,21 @@ _VECTOR_DEGENERATE_RTOL = 5.0e-5
 _VECTOR_DUPLICATE_BETA_RTOL = 1.0e-5
 _VECTOR_DUPLICATE_OVERLAP_LIMIT = 0.99
 _VECTOR_CHECKERBOARD_FRACTION_LIMIT = 0.35
+# A transverse-uniform (kc^2 -> 0, beta -> k0) candidate is the discrete
+# null-space branch of the transverse operator. It is the physically correct
+# TEM answer for a doubly-connected metallic line (coax, solved on the separate
+# electrostatic path), but for a *guided* (TE/TM/hybrid) mode request on a closed
+# metallic aperture it is spurious: no hollow-guide mode has beta = k0. It is
+# rejected only when BOTH its eigenvalue sits at beta^2 ~ k0^2 AND its transverse
+# profile is UNIFORM in an absolute sense (min/max envelope ratio near 1). A
+# genuine guided mode -- even a high-frequency one whose beta/k0 approaches 1
+# (TE10 at 6 fc has beta/k0 = 0.986, EXECUTED) -- has a half-wave envelope that
+# decays to the walls, so its min/max ratio is far below the uniformity limit and
+# it is never rejected. This replaces the earlier squared-difference envelope
+# threshold, which scaled as (dx)^2 and silently rejected legitimate fine-grid
+# modes above ~5 fc (audit S1, executed).
+_SPURIOUS_NEAR_K0_BETA_LIMIT = 0.995        # beta/k0 above this = candidate transverse null-space branch
+_SPURIOUS_UNIFORMITY_LIMIT = 0.6            # min/max block envelope above this = transverse-uniform (plane-wave-like)
 _RIGHT_HANDED_TANGENTIAL_AXES = {
     "x": ("y", "z"),
     "y": ("z", "x"),
@@ -639,6 +654,109 @@ def _vector_mode_checkerboard_fraction_numpy(component_profiles: dict[str, np.nd
     return variation / (8.0 * energy)
 
 
+def _vector_mode_envelope_variation_numpy(
+    component_profiles: dict[str, np.ndarray],
+    *,
+    preferred_field_name: str,
+) -> float | None:
+    """Anti-checkerboard transverse-envelope variation of the preferred field.
+
+    A raw one-cell gradient of a uniform-plane mode is dominated by the
+    centered-grid Nyquist/checkerboard content (present on both spurious and
+    guided candidates), so it cannot separate them. Block-averaging ``|profile|``
+    over 2x2 cells removes that Nyquist content and leaves the smooth transverse
+    envelope; the normalized squared first-difference of that envelope is ~0 for a
+    transverse-uniform (plane-wave-like / null-space) mode and O(1e-2) or larger
+    for a genuine guided mode with a half-wave envelope. This is a profile-based
+    structural signal independent of the returned eigenvalue. Returns ``None``
+    when the profile is empty.
+    """
+    profile = np.abs(np.asarray(component_profiles[preferred_field_name]))
+    if profile.size == 0:
+        return None
+    nu, nv = profile.shape
+    nu2, nv2 = nu - (nu % 2), nv - (nv % 2)
+    if nu2 < 2 or nv2 < 2:
+        return None
+    blocks = profile[:nu2, :nv2].reshape(nu2 // 2, 2, nv2 // 2, 2).mean(axis=(1, 3))
+    energy = float(np.sum(blocks ** 2))
+    if energy <= 0.0:
+        return None
+    variation = 0.0
+    if blocks.shape[0] > 1:
+        variation += float(np.sum(np.diff(blocks, axis=0) ** 2))
+    if blocks.shape[1] > 1:
+        variation += float(np.sum(np.diff(blocks, axis=1) ** 2))
+    return variation / energy
+
+
+def _vector_mode_transverse_uniformity_numpy(
+    component_profiles: dict[str, np.ndarray],
+    *,
+    preferred_field_name: str,
+) -> float | None:
+    """Absolute (dx-independent) transverse-uniformity of the preferred field.
+
+    Returns ``min(|env|) / max(|env|)`` of the 2x2 block-averaged (anti-
+    checkerboard) preferred-field envelope. The discrete transverse null-space
+    branch (beta -> k0, E ~ const) is transverse-UNIFORM: its envelope barely
+    varies, so this ratio is ~1. A genuine guided mode has a half-wave envelope
+    that decays toward the metallic walls, so the ratio is well below 1 (sin(pi
+    y/a) reaches sin(pi h/a) at the first interior node -> ratio < 0.3 across grid
+    tiers, essentially independent of dx). Unlike the squared-difference envelope
+    variation, which scales as (dx)^2 and false-triggers on legitimate fine-grid
+    modes above ~5 fc (audit S1, executed), this magnitude ratio is an absolute
+    structural signature. Returns ``None`` when the profile is empty.
+    """
+    profile = np.abs(np.asarray(component_profiles[preferred_field_name]))
+    if profile.size == 0:
+        return None
+    nu, nv = profile.shape
+    nu2, nv2 = nu - (nu % 2), nv - (nv % 2)
+    if nu2 < 2 or nv2 < 2:
+        return None
+    blocks = profile[:nu2, :nv2].reshape(nu2 // 2, 2, nv2 // 2, 2).mean(axis=(1, 3))
+    peak = float(np.max(blocks))
+    if peak <= 0.0:
+        return None
+    return float(np.min(blocks)) / peak
+
+
+def _vector_mode_wall_peak_fraction_numpy(
+    component_profiles: dict[str, np.ndarray],
+    *,
+    preferred_field_name: str,
+    field_names,
+) -> float | None:
+    """Boundary-consistency check (F1b): |preferred| on the tangential metallic wall.
+
+    A tangential electric field must vanish on a PEC wall. The preferred component
+    ``E_p`` is tangential to the aperture edge whose in-plane normal is the OTHER
+    tangential axis, so its magnitude on the first/last interior rows adjacent to
+    that edge must be small relative to the profile peak. A checkerboard/wall-peaked
+    spurious candidate carries its maximum |E_p| ON those wall-adjacent rows. The
+    edge along the preferred axis itself (where ``E_p`` is normal to the wall) is
+    left free -- TE10 ``E_z`` is uniform along z and full-amplitude at the z-walls.
+    Returns ``None`` when the preferred profile is absent or empty.
+    """
+    profile = np.abs(np.asarray(component_profiles.get(preferred_field_name)))
+    if profile.size == 0 or profile.ndim != 2:
+        return None
+    peak = float(np.max(profile))
+    if peak <= 0.0:
+        return None
+    # field_names = (E_u, E_v, H_u, H_v). Axis 0 of the interior profile is u,
+    # axis 1 is v. E_u is tangential to the v-walls (axis-1 edges); E_v is
+    # tangential to the u-walls (axis-0 edges).
+    if preferred_field_name == field_names[0]:
+        wall = np.concatenate([profile[:, 0], profile[:, -1]])
+    elif preferred_field_name == field_names[1]:
+        wall = np.concatenate([profile[0, :], profile[-1, :]])
+    else:
+        return None
+    return float(np.max(wall)) / peak
+
+
 def _relative_vector_residual(numerator, *terms) -> float:
     denominator = sum(float(np.linalg.norm(term)) for term in terms)
     if denominator <= np.finfo(np.float64).eps:
@@ -800,7 +918,20 @@ def _select_and_normalize_vector_mode_numpy(
     du: float | None = None,
     dv: float | None = None,
     reject_spurious: bool = True,
+    wave_family: str | None = None,
 ):
+    # A closed uniform-isotropic aperture (reject_spurious is False -> a hollow
+    # metallic guide with Dirichlet walls) hosts a discrete transverse null-space
+    # branch at beta ~ k0. That branch is the correct TEM answer for a
+    # doubly-connected line (handled on the separate electrostatic path), but for
+    # a guided (non-TEM) mode request it is spurious and must be rejected.
+    reject_near_k0 = (
+        not reject_spurious
+        and wave_family is not None
+        and str(wave_family).lower() != "tem"
+        and k0 is not None
+        and float(k0) > 0.0
+    )
     order = np.lexsort((np.abs(np.imag(eigenvalues)), -np.real(eigenvalues)))
     raw_candidates = []
     candidate_window = (
@@ -842,7 +973,7 @@ def _select_and_normalize_vector_mode_numpy(
         # small numerical splitting of a symmetric polarization pair (observed
         # around 1e-5 relative), yet below distinct-mode spacings (>=1e-4
         # relative for the polarization pair of a mildly rectangular guide).
-        degenerate_rtol = _VECTOR_DEGENERATE_RTOL if reject_spurious else 1.0e-7
+        degenerate_rtol = _VECTOR_DEGENERATE_RTOL if (reject_spurious or reject_near_k0) else 1.0e-7
         tolerance = degenerate_rtol * max(abs(reference_value), 1.0)
         while (
             group_stop < len(raw_candidates)
@@ -982,6 +1113,46 @@ def _select_and_normalize_vector_mode_numpy(
             preferred_field_name=preferred_field_name,
         )
         checkerboard_fraction = _vector_mode_checkerboard_fraction_numpy(profiles)
+        envelope_variation = _vector_mode_envelope_variation_numpy(
+            profiles,
+            preferred_field_name=preferred_field_name,
+        )
+        transverse_uniformity = _vector_mode_transverse_uniformity_numpy(
+            profiles,
+            preferred_field_name=preferred_field_name,
+        )
+        wall_peak_fraction = _vector_mode_wall_peak_fraction_numpy(
+            profiles,
+            preferred_field_name=preferred_field_name,
+            field_names=field_names,
+        )
+        near_k0 = (
+            reject_near_k0
+            and abs(np.imag(beta)) <= 1.0e-6 * max(abs(beta), 1.0)
+            and np.real(beta) >= _SPURIOUS_NEAR_K0_BETA_LIMIT * float(k0)
+        )
+        # F1c: the k0 null branch is identified by its ABSOLUTE transverse
+        # uniformity (min/max envelope near 1), not the dx-dependent squared
+        # envelope variation that over-rejected legitimate fine-grid / high-f modes.
+        planewave_like = (
+            transverse_uniformity is not None
+            and transverse_uniformity > _SPURIOUS_UNIFORMITY_LIMIT
+        )
+        # The checkerboard filter applies on the graded (reject_spurious) path. It
+        # is NOT enabled on the uniform-isotropic path generically, because that
+        # path also serves FREE-SPACE / open TE WavePorts (no metallic wall) whose
+        # fundamental transverse mode is legitimately plane-wave-like; the selector
+        # cannot tell a closed metallic guide from a free-space aperture from the
+        # eps/mu planes alone (audit S1 round-4, executed: enabling the checkerboard
+        # filter here rejected the legitimate free-space array-port modes).
+        enforce_structure = reject_spurious
+        # wall_peak_fraction is computed and recorded purely as a diagnostic; it is
+        # NOT a rejection gate. Using it would require knowing that the aperture edge
+        # is a metallic (Dirichlet) wall, which holds only for a closed metallic
+        # guide -- a signal not available at the selector level. On a graded mode
+        # source or a free-space port the aperture edge is a computational truncation,
+        # so a legitimate higher-order mode may carry amplitude there. Closed-guide
+        # enforcement is deferred with the transverse-operator redesign (open item).
         eigenpair_residual = _vector_mode_eigenpair_residual_numpy(operator, beta, candidate["vector"])
         electric_divergence, magnetic_divergence = _vector_mode_divergence_residuals_numpy(
             candidate["vector"],
@@ -1007,9 +1178,11 @@ def _select_and_normalize_vector_mode_numpy(
         family_index = None
         if power <= 0.0:
             status = "backward_power"
-        elif reject_spurious and checkerboard_fraction > _VECTOR_CHECKERBOARD_FRACTION_LIMIT:
+        elif near_k0 and planewave_like:
+            status = "spurious_near_k0"
+        elif enforce_structure and checkerboard_fraction > _VECTOR_CHECKERBOARD_FRACTION_LIMIT:
             status = "checkerboard"
-        elif reject_spurious and max_near_duplicate_overlap >= _VECTOR_DUPLICATE_OVERLAP_LIMIT:
+        elif enforce_structure and max_near_duplicate_overlap >= _VECTOR_DUPLICATE_OVERLAP_LIMIT:
             status = "duplicate"
         else:
             retained_indices.append(candidate_index)
@@ -1036,6 +1209,9 @@ def _select_and_normalize_vector_mode_numpy(
                 "polarization_fraction": polarization_fraction,
                 "max_weighted_overlap": max_overlap,
                 "checkerboard_fraction": checkerboard_fraction,
+                "envelope_variation": envelope_variation,
+                "transverse_uniformity": transverse_uniformity,
+                "wall_peak_fraction": wall_peak_fraction,
                 "family_index": family_index,
                 "status": status,
                 "selected": False,
@@ -1045,11 +1221,20 @@ def _select_and_normalize_vector_mode_numpy(
     # Match the scalar mode path: only modes dominated by the requested
     # tangential E polarization occupy indices in that family.
     if len(family_indices) <= int(mode_index):
-        rejected = sum(entry["status"] in {"checkerboard", "duplicate"} for entry in candidate_diagnostics)
+        # F1d: never silently substitute another mode. If every candidate for the
+        # requested index was rejected, raise a diagnostic error listing why.
+        reject_reasons = {"checkerboard", "duplicate", "spurious_near_k0"}
+        rejected = sum(entry["status"] in reject_reasons for entry in candidate_diagnostics)
+        breakdown = ", ".join(
+            f"{status}={sum(1 for e in candidate_diagnostics if e['status'] == status)}"
+            for status in sorted(reject_reasons)
+        )
         raise ValueError(
             f"ModeSource requested mode_index={mode_index}, but only "
-            f"{len(family_indices)} resolved forward modes in the requested polarization family were found "
-            f"after rejecting {rejected} duplicate/checkerboard candidates."
+            f"{len(family_indices)} structurally-valid forward modes in the requested polarization "
+            f"family were found after rejecting {rejected} spurious candidates ({breakdown}). "
+            "The guided mode selector will not substitute a spurious eigenvector; refine the "
+            "aperture grid or check the requested mode/polarization."
         )
     selected_candidate_index = family_indices[int(mode_index)]
     candidate_diagnostics[selected_candidate_index]["selected"] = True
@@ -1545,6 +1730,7 @@ def _solve_vector_mode_eigenpair_sparse(
     mode_index: int,
     field_names,
     preferred_field_name: str,
+    wave_family: str | None = None,
 ):
     operator, interior_u, interior_v = _build_vector_operator_sparse(eps_planes, mu_planes, k0=k0, du=du, dv=dv)
     matrix_size = int(operator.shape[0])
@@ -1564,7 +1750,23 @@ def _solve_vector_mode_eigenpair_sparse(
         eigenvectors = error.eigenvectors
         minimum_candidates = max(2 * (int(mode_index) + 1), 4)
         if eigenvalues is None or eigenvectors is None or len(eigenvalues) < minimum_candidates:
-            raise
+            # ARPACK's iterative "LR" search can fail to converge on fine
+            # transverse grids (e.g. refined hollow-waveguide TE cross-sections).
+            # Fall back to a dense eigen-decomposition, which is deterministic and
+            # tractable for benchmark-scale cross-sections. This changes nothing
+            # when ARPACK converges; it only unblocks the fine grid tiers that the
+            # wave-level convergence study (audit S1) requires.
+            return _solve_vector_mode_eigenpair_dense(
+                eps_planes,
+                mu_planes,
+                k0=k0,
+                du=du,
+                dv=dv,
+                mode_index=int(mode_index),
+                field_names=field_names,
+                preferred_field_name=preferred_field_name,
+                wave_family=wave_family,
+            )
     return _select_and_normalize_vector_mode_numpy(
         eigenvalues,
         eigenvectors,
@@ -1580,6 +1782,7 @@ def _solve_vector_mode_eigenpair_sparse(
         du=du,
         dv=dv,
         reject_spurious=not _is_uniform_isotropic_vector_plane(eps_planes, mu_planes),
+        wave_family=wave_family,
     )
 
 
@@ -1593,6 +1796,7 @@ def _solve_vector_mode_eigenpair_dense(
     mode_index: int,
     field_names,
     preferred_field_name: str,
+    wave_family: str | None = None,
 ):
     operator, interior_u, interior_v = _build_vector_operator_sparse(eps_planes, mu_planes, k0=k0, du=du, dv=dv)
     dense = operator.toarray()
@@ -1612,6 +1816,7 @@ def _solve_vector_mode_eigenpair_dense(
         du=du,
         dv=dv,
         reject_spurious=not _is_uniform_isotropic_vector_plane(eps_planes, mu_planes),
+        wave_family=wave_family,
     )
 
 
@@ -1997,6 +2202,7 @@ def _assemble_vector_mode_data(
                 mode_index=int(source["mode_index"]),
                 field_names=field_names,
                 preferred_field_name=preferred_field_name,
+                wave_family=source.get("wave_family"),
             )
             solver_kind = "vector_dense"
         else:
@@ -2009,6 +2215,7 @@ def _assemble_vector_mode_data(
                 mode_index=int(source["mode_index"]),
                 field_names=field_names,
                 preferred_field_name=preferred_field_name,
+                wave_family=source.get("wave_family"),
             )
             solver_kind = "vector_sparse"
 
