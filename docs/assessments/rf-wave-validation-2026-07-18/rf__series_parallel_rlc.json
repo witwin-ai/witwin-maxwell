@@ -7,7 +7,7 @@
   "tidy3d_reference": "n/a (lumped-circuit resonance; analytic first-line reference)",
   "target": "f0 within 2% (plan-01 section 10)",
   "tolerance_basis": "",
-  "falsification": "A valid RLC-resonance bench must track C: doubling C should lower the peak by sqrt(2). Measured ratio 1.030 vs sqrt(2)=1.414 shows it does NOT -- the peak is parasitic, so this gate correctly stays red.",
+  "falsification": "EXECUTED: a valid RLC-resonance bench must track C: doubling C should lower the peak by sqrt(2). Measured ratio 1.030 vs sqrt(2)=1.414 shows it does NOT -- the peak is parasitic, so this gate correctly stays red.",
   "metrics": [
     {
       "quantity": "f0",

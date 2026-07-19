@@ -845,9 +845,9 @@ def run_series_rlc() -> SceneReport:
              "class": WAVE_LEVEL}
         )
         report.falsification = (
-            "A valid RLC-resonance bench must track C: doubling C should lower the peak "
-            f"by sqrt(2). Measured ratio {tracking_ratio:.3f} vs sqrt(2)=1.414 shows it "
-            "does NOT -- the peak is parasitic, so this gate correctly stays red."
+            "EXECUTED: a valid RLC-resonance bench must track C: doubling C should lower "
+            f"the peak by sqrt(2). Measured ratio {tracking_ratio:.3f} vs sqrt(2)=1.414 "
+            "shows it does NOT -- the peak is parasitic, so this gate correctly stays red."
         )
         report.notes.append(
             f"FDTD load-port current peak at {f0_meas/1e9:.3f} GHz (C=1pF) vs analytic "
@@ -922,7 +922,7 @@ def run_lumped_open_short_match() -> SceneReport:
             "gamma_mag_spread_across_loads": spread,
         }
         report.falsification = (
-            "A working one-port calibration bench must DISCRIMINATE the loads: "
+            "EXECUTED: a working one-port calibration bench must DISCRIMINATE the loads: "
             "|Gamma_matched| ~ 0, |Gamma_short| ~ |Gamma_open| ~ 1. Measured spread across "
             f"the three loads is {spread:.4f} (all ~{mags['matched']:.3f} at the same phase "
             f"~{phases['matched']:.0f} deg) -- the gate correctly stays red."

@@ -7,7 +7,7 @@
   "tidy3d_reference": "pending-generation",
   "target": "matched |S11| < -30 dB, and Gamma must DISCRIMINATE the three loads",
   "tolerance_basis": "",
-  "falsification": "A working one-port calibration bench must DISCRIMINATE the loads: |Gamma_matched| ~ 0, |Gamma_short| ~ |Gamma_open| ~ 1. Measured spread across the three loads is 0.0004 (all ~0.997 at the same phase ~13 deg) -- the gate correctly stays red.",
+  "falsification": "EXECUTED: a working one-port calibration bench must DISCRIMINATE the loads: |Gamma_matched| ~ 0, |Gamma_short| ~ |Gamma_open| ~ 1. Measured spread across the three loads is 0.0004 (all ~0.997 at the same phase ~13 deg) -- the gate correctly stays red.",
   "metrics": [
     {
       "case": "matched",
