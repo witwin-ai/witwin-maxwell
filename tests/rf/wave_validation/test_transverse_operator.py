@@ -32,6 +32,7 @@ import math
 
 import numpy as np
 from scipy import linalg as scipy_linalg
+from scipy.sparse import linalg as scipy_sparse_linalg
 from scipy.sparse.csgraph import connected_components
 
 from witwin.maxwell.fdtd.excitation.modes import (
@@ -225,3 +226,133 @@ def test_operator_rejects_degenerate_grid() -> None:
 
     with pytest.raises(ValueError):
         _build_yee_transverse_operator_sparse(nu_cells=1, nv_cells=8, du=_DU, dv=_DV, k0=_K0)
+
+
+# --- Inhomogeneous hybrid capability (E1b): half-filled parallel-plate guide ---
+#
+# The Yee-staggered operator carries per-component permittivity at each field's own
+# Yee location, so it is the full-vectorial hybrid-mode solver for an inhomogeneous
+# cross-section. A half-filled guide -- eps = EPS1 for u < D, EPS2 for u > D, uniform
+# in v -- hosts an LSE mode uniform in v whose transverse-electric field Ev(u) obeys
+# the 1D Sturm-Liouville problem  Ev'' + (k0^2 eps(u) - beta^2) Ev = 0  with Dirichlet
+# walls, i.e. the classic slab-loaded transverse resonance
+#   k1 cot(k1 D) + k2 cot(k2 (a - D)) = 0 ,  k_i^2 = k0^2 eps_i - beta^2 .
+# The operator's inhomogeneous spectrum is validated to machine precision against an
+# independently assembled 1D discrete operator and, in the continuum limit, against
+# the analytic transcendental root.
+
+_HF_A = 1.0
+_HF_B = 0.6
+_HF_K0 = 8.0
+_HF_EPS1 = 4.0
+_HF_EPS2 = 1.0
+_HF_D = 0.5  # dielectric interface position along u
+
+
+def _hf_eps_of_u(u: np.ndarray) -> np.ndarray:
+    return np.where(np.asarray(u) < _HF_D, _HF_EPS1, _HF_EPS2)
+
+
+def _half_filled_operator(nu: int, nv: int):
+    du = _HF_A / nu
+    dv = _HF_B / nv
+    u_half = (np.arange(nu) + 0.5) * du
+    u_int = np.arange(1, nu) * du
+    eps_uu = np.repeat(_hf_eps_of_u(u_half)[:, None], nv - 1, axis=1)
+    eps_vv = np.repeat(_hf_eps_of_u(u_int)[:, None], nv, axis=1)
+    eps_ww = np.repeat(_hf_eps_of_u(u_int)[:, None], nv - 1, axis=1)
+    operator, meta = _build_yee_transverse_operator_sparse(
+        nu_cells=nu, nv_cells=nv, du=du, dv=dv, k0=_HF_K0,
+        eps_uu=eps_uu, eps_vv=eps_vv, eps_ww=eps_ww,
+    )
+    return operator, meta, u_int
+
+
+def _one_dimensional_reference_beta_sq(nu: int) -> float:
+    """Largest eigenvalue of the independently built 1D LSE Sturm-Liouville operator."""
+    du = _HF_A / nu
+    u_int = np.arange(1, nu) * du
+    n = nu - 1
+    main = np.full(n, -2.0 / (du * du))
+    off = np.full(n - 1, 1.0 / (du * du))
+    laplacian = np.diag(main) + np.diag(off, 1) + np.diag(off, -1)
+    operator = laplacian + _HF_K0 * _HF_K0 * np.diag(_hf_eps_of_u(u_int))
+    return float(np.max(np.linalg.eigvalsh(operator)))
+
+
+def _matched_inhomogeneous_eigenpair(nu: int, nv: int):
+    operator, meta, u_int = _half_filled_operator(nu, nv)
+    reference = _one_dimensional_reference_beta_sq(nu)
+    # The inhomogeneous operator is real but non-symmetric and (as with every
+    # full-vector transverse operator) carries spurious high-|beta| eigenvalues, so
+    # the physical LSE mode is selected via a shift-invert eigensolve centred on the
+    # 1D reference (fast and robust; the spectral maximum is spurious).
+    eigenvalues, eigenvectors = scipy_sparse_linalg.eigs(
+        operator, k=4, sigma=reference, which="LM"
+    )
+    real_mask = np.abs(eigenvalues.imag) < 1.0e-6 * np.maximum(np.abs(eigenvalues.real), 1.0)
+    real_indices = np.where(real_mask)[0]
+    best = real_indices[np.argmin(np.abs(eigenvalues.real[real_indices] - reference))]
+    beta_sq = float(eigenvalues.real[best])
+    eu, ev = _split_yee_transverse_eigenvector(eigenvectors[:, best].real, meta)
+    return beta_sq, reference, eu, ev, u_int
+
+
+def _analytic_lse_fundamental_beta() -> float:
+    """Largest propagating root of the half-filled transverse-resonance condition."""
+    from scipy import optimize
+
+    def dispersion(beta: float) -> float:
+        k1 = np.sqrt(complex(_HF_K0 ** 2 * _HF_EPS1 - beta * beta))
+        k2 = np.sqrt(complex(_HF_K0 ** 2 * _HF_EPS2 - beta * beta))
+        return float(np.real(k1 / np.tan(k1 * _HF_D) + k2 / np.tan(k2 * (_HF_A - _HF_D))))
+
+    grid = np.linspace(0.01, _HF_K0 * math.sqrt(_HF_EPS1) - 1.0e-3, 40000)
+    values = [dispersion(b) for b in grid]
+    roots = []
+    for i in range(len(grid) - 1):
+        if np.isfinite(values[i]) and np.isfinite(values[i + 1]) and values[i] * values[i + 1] < 0.0:
+            try:
+                roots.append(optimize.brentq(dispersion, grid[i], grid[i + 1]))
+            except ValueError:
+                pass
+    return max(roots)
+
+
+def test_inhomogeneous_operator_spectrum_matches_one_dimensional_lse_reference() -> None:
+    """The half-filled operator's LSE mode equals the 1D discrete SL eigenvalue."""
+    beta_sq, reference, _eu, _ev, _u_int = _matched_inhomogeneous_eigenpair(48, 24)
+    assert abs(beta_sq - reference) <= 1.0e-10 * abs(reference), (
+        f"inhomogeneous LSE beta^2 {beta_sq:.8f} != 1D reference {reference:.8f}"
+    )
+
+
+def test_inhomogeneous_lse_mode_is_v_uniform_ev_polarized_and_field_concentrates() -> None:
+    """The LSE mode is uniform in v, Ev-dominant, and concentrated in the high-eps half."""
+    _beta_sq, _reference, eu, ev, u_int = _matched_inhomogeneous_eigenpair(48, 24)
+    ev_energy = float(np.sum(ev ** 2))
+    eu_energy = float(np.sum(eu ** 2))
+    assert eu_energy < 1.0e-12 * ev_energy, "LSE mode should be Ev-polarized (Eu ~ 0)"
+    peak = float(np.max(np.abs(ev)))
+    v_nonuniformity = float(np.max(np.std(np.abs(ev), axis=1))) / peak
+    assert v_nonuniformity < 1.0e-9, f"LSE mode is not v-uniform ({v_nonuniformity:.2e})"
+    high_eps = u_int < _HF_D
+    high_energy = float(np.sum(ev[high_eps, :] ** 2))
+    low_energy = float(np.sum(ev[~high_eps, :] ** 2))
+    assert high_energy > 3.0 * low_energy, "LSE field should concentrate in the high-eps half"
+
+
+def test_inhomogeneous_lse_beta_converges_to_analytic_transverse_resonance() -> None:
+    """Operator LSE beta approaches the analytic slab-loaded transcendental root."""
+    analytic = _analytic_lse_fundamental_beta()
+    errors = []
+    for nu in (24, 48, 96):
+        beta_sq, _reference, _eu, _ev, _u_int = _matched_inhomogeneous_eigenpair(nu, max(2, nu // 2))
+        errors.append(abs(math.sqrt(beta_sq) - analytic))
+    # A material discontinuity landing on a node gives first-order (staircase)
+    # convergence; the error must decrease monotonically and the finest grid must
+    # agree with the analytic LSE root to better than half a percent.
+    assert errors[0] > errors[1] > errors[2], f"non-monotonic convergence: {errors}"
+    assert errors[2] / analytic < 5.0e-3, (
+        f"finest-grid LSE beta error {errors[2] / analytic:.2e} exceeds 0.5%"
+    )

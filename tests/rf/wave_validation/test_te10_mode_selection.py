@@ -3,32 +3,20 @@
 Gate taxonomy (S0.3): **modal-eigensolve** (supporting; a solver-correctness
 regression, not a wave-level exit gate).
 
-Round-4 correction (EXECUTED). Ordering candidates by the largest real eigenvalue
-selected the transverse null-space branch at ``beta = k0``; when that was avoided
-the selector still returned a CHECKERBOARD-aliased eigenvector that merely SHARES
-the TE10 eigenvalue -- its ``sin(pi y/a)``-correlation is ~0.000 while its beta
-matches analytic TE10 to <1%. Asserting only the eigenVALUE (the previous test)
-therefore passed on a physically wrong mode. This test asserts the eigenVECTOR.
+These assertions gate the eigenVECTOR, not just the eigenVALUE: the retired
+transverse operator returned a CHECKERBOARD-aliased eigenvector that merely SHARED
+the TE10 eigenvalue (beta matched analytic TE10 to <1% while its ``sin(pi y/a)``
+correlation capped at 0.51-0.59), so a value-only check passed on a physically
+wrong mode.
 
-The selector (F1) now rejects the k0 branch by an absolute transverse-uniformity
-signature. The checkerboard filter is scoped to the graded (structure-enforcing)
-path only and is NOT applied on the uniform-isotropic aperture, and the wall-peak
-gate is disabled (``wall_peaked`` is hard-coded ``False``; ``wall_peak_fraction``
-is kept only as a diagnostic). On this hollow guide the selector therefore RETURNS
-the checkerboard-aliased candidate (its ``checkerboard_fraction`` is persisted); it
-is the BENCHMARK's ``sin(pi y/a)``-correlation gate (< 0.9) that refuses to use it,
-not the selector. The selector still never substitutes another mode for a genuinely
-absent requested index -- it raises. The underlying transverse VECTOR operator
-cannot represent a clean full-grid TE10 on this hollow guide: the centered
-uniform-isotropic branch composes a stride-two stencil that decouples the odd/even
-transverse sublattices, so the half-wave ``sin(pi y/a)`` lives on ONE sublattice
-with the other ~0 (executed: best recoverable full-grid sin-correlation over the
-whole degenerate subspace is in the 0.51-0.59 range -- dx=0.05->0.548,
-0.025->0.522, 0.02->0.592, 0.01->0.509). Fixing that needs a symmetric-BC
-Yee-staggered transverse operator (see
-docs/reference/rf-wave-validation-2026-07-18.md, "open items"). Until then the
-waveguide eigenVECTOR assertion is an xfail; the coax TEM path (separate
-electrostatic solve) is unchanged and green.
+E1b (EXECUTED). The selector now solves the closed hollow guide on the
+Yee-staggered transverse full-vector operator
+(``modes.py:_build_yee_transverse_operator_sparse``), which keeps each transverse
+E component on its own Yee location and imposes symmetric PEC walls. The selected
+TE10 ``Ez`` is now a clean full-grid ``sin(pi y/a)`` (correlation >= 0.99 across
+dx tiers and at 6 fc), so these tests are real asserts. The selector still never
+substitutes another mode for a genuinely absent requested index -- it raises. The
+coax TEM path (separate electrostatic solve) is unchanged and green.
 """
 
 from __future__ import annotations
@@ -68,24 +56,19 @@ def _te10_ez_correlation(scene, frequency: float) -> float:
     return float(np.dot(ez_flat, ref_flat) / denom) if denom > 0 else 0.0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Transverse vector operator decouples odd/even sublattices; a clean "
-    "full-grid TE10 (corr>=0.99) needs a symmetric-BC staggered operator (open item).",
-)
 @pytest.mark.parametrize("dx", [0.05, 0.025, 0.02, 0.0125, 0.01])
 def test_waveguide_te10_eigenvector_is_sin(dx: float) -> None:
-    """The selected TE10 Ez profile must be sin(pi y/a) (correlation >= 0.99)."""
+    """The selected TE10 Ez profile must be sin(pi y/a) (correlation >= 0.99).
+
+    Passing this (E1b) is the acceptance of the Yee-staggered transverse operator:
+    it was pinned strict-xfail as the fingerprint of the retired sublattice-
+    decoupling defect, whose full-grid sin-correlation capped at 0.51-0.59.
+    """
     fc = C0 / (2.0 * GUIDE_A)
     corr = _te10_ez_correlation(rectangular_waveguide_scene(dx=dx, device="cuda"), 1.8 * fc)
     assert corr >= 0.99, f"dx={dx}: TE10 Ez sin-correlation {corr:.4f} < 0.99"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Same transverse-operator sublattice decoupling; also exercises the "
-    "high-frequency (6 fc) branch where the old envelope threshold mis-fired.",
-)
 def test_waveguide_te10_high_frequency_returns_genuine_te10() -> None:
     """At dx=0.005, f=6 fc the genuine TE10 (not TE20) must be returned."""
     fc = C0 / (2.0 * GUIDE_A)
@@ -93,22 +76,18 @@ def test_waveguide_te10_high_frequency_returns_genuine_te10() -> None:
     assert corr >= 0.99, f"high-f TE10 Ez sin-correlation {corr:.4f} < 0.99"
 
 
-def test_waveguide_te10_is_checkerboard_contaminated_operator_blocker() -> None:
-    """Documents the operator blocker: the returned TE10 Ez is NOT a clean sin.
+def test_waveguide_te10_operator_returns_clean_sin() -> None:
+    """The Yee-staggered operator returns a clean (non-checkerboard) TE10.
 
-    The transverse vector operator decouples the odd/even sublattices, so the
-    selected TE10 eigenvector is checkerboard-contaminated (sin-correlation well
-    below the 0.99 a clean half-wave would give). This is the executed evidence
-    behind the xfails above and the benchmark BLOCKED status. When the symmetric-BC
-    staggered operator lands this regression should be replaced by the >= 0.99
-    assertion (and the xfails above will start xpassing).
+    This was previously the ``blocker`` regression asserting ``corr < 0.9`` as the
+    fingerprint of the sublattice-decoupling defect. With the symmetric-BC staggered
+    operator wired into the selector it now asserts the clean half-wave the fixed
+    operator produces (correlation >= 0.99, checkerboard content well below the 0.35
+    rejection limit).
     """
     fc = C0 / (2.0 * GUIDE_A)
     corr = _te10_ez_correlation(rectangular_waveguide_scene(dx=0.02, device="cuda"), 1.8 * fc)
-    assert corr < 0.9, (
-        f"TE10 Ez sin-correlation {corr:.3f} is unexpectedly clean -- the operator may "
-        "have been fixed; promote the xfail eigenvector tests to real assertions."
-    )
+    assert corr >= 0.99, f"TE10 Ez sin-correlation {corr:.4f} < 0.99 (operator regressed)"
 
 
 def test_coax_tem_beta_is_k0_unchanged() -> None:
