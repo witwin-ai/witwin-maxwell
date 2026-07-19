@@ -1,0 +1,58 @@
+{
+  "name": "antenna/half_wave_dipole",
+  "description": "Center-fed thin-wire half-wave dipole (lumped wire-gap feed + NF2FF box): real Result.antenna directivity / pattern / power balance vs the analytic thin dipole.",
+  "gate_class": "wave-level",
+  "status": "pass",
+  "reference": "analytic thin half-wave dipole (D=2.15 dBi, R~73 Ohm, sin^2 pattern)",
+  "tidy3d_reference": "pending-generation (sources=0; see RF/antenna reference section)",
+  "target": "broadside directivity in [1.9,2.4] dBi; E-plane sin^2 corr >= 0.99; power closure < 0.08",
+  "tolerance_basis": "Radiation physics is the binding evidence: broadside directivity in [1.9,2.4] dBi and within 0.3 dB of 2.15; E-plane pattern sin^2-correlation >= 0.99; radiated-vs-accepted power closure < 0.08; and R sweeps THROUGH the thin-dipole 73 Ohm class. Input reactance carries a documented positive delta-gap feed offset and is not gated.",
+  "falsification": "EXECUTED (tests/rf/antenna/test_antenna_benchmark_e2e.py): sin^2 corr REAL 0.996 pass vs isotropic ~0.81 / cos^2 ~0.33 fail; directivity REAL 2.194 dBi pass vs isotropic 0.0 fail; closure REAL 0.041 pass vs 2x-mis-scaled p_rad ~0.92 fail.",
+  "metrics": [
+    {
+      "quantity": "broadside directivity",
+      "measured": 2.1942363739797157,
+      "reference": 2.156375634350617,
+      "rel_error": 0.017557580889889915,
+      "unit": "dBi",
+      "class": "wave-level"
+    },
+    {
+      "quantity": "E-plane sin^2 correlation",
+      "measured": 0.9957438415119025,
+      "reference": 1.0,
+      "rel_error": 0.004256158488097461,
+      "class": "wave-level"
+    },
+    {
+      "quantity": "radiated-vs-accepted power closure",
+      "measured": 0.04070402531223483,
+      "reference": 0.0,
+      "class": "wave-level"
+    }
+  ],
+  "supporting": [],
+  "convergence": [],
+  "conservation": {
+    "directivity_dbi": 2.1942363739797157,
+    "analytic_directivity_dbi": 2.156375634350617,
+    "sin2_correlation": 0.9957438415119025,
+    "power_closure": 0.04070402531223483,
+    "radiation_resistance_min_ohm": 19.63879783189196,
+    "radiation_resistance_max_ohm": 87.97892321472561,
+    "analytic_radiation_resistance_ohm": 73.1,
+    "frequencies_hz": [
+      2400000000.0,
+      2700000000.0,
+      3000000000.0,
+      3210000000.0,
+      3389999999.9999995,
+      3600000000.0
+    ]
+  },
+  "raw": {},
+  "notes": [
+    "Real NF2FF Result.antenna: D=2.194 dBi, sin^2 corr 0.9957, power closure 0.0407, R sweep 19.6->88.0 Ohm through 73 Ohm. External reference-solver cross-check is pending-generation (adapter has no lumped-feed source mapping; see the RF/antenna reference section)."
+  ],
+  "updated_at": "2026-07-19T15:08:29+00:00"
+}

@@ -25,7 +25,8 @@ References (cavity model, dominant ``TM010`` mode):
 The probe carries a large inductive reactance on this thick (``h ~ 0.03 lambda``)
 finite-ground slab, so the feed is intentionally left un-matched by the builder;
 the reactance and the resonance/directivity cross-check against the external
-reference solver are handled in stage E2c. The builder's contract here is a valid
+reference solver remain open items, deferred past stage E2c to a future stage.
+The builder's contract here is a valid
 radiating structure that exercises the real ``Result.antenna`` pipeline.
 """
 

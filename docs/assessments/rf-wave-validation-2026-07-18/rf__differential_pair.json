@@ -16,5 +16,5 @@
   "notes": [
     "BLOCKED. As with microstrip, the contour-snap ValueError (witwin/maxwell/compiler/waveports.py) fires FIRST and masks the mode solve; the deeper categorical blocker is that the coupled microstrip cross-section is inhomogeneous (substrate + air), so the four WaveModeSpec('tem') ports hit the same TEM inapplicability (NotImplementedError at witwin/maxwell/fdtd/excitation/modes.py:1943-1946). A hybrid vector mode solve on the coupled cross-section is required before any 4-port / mixed-mode extraction. reference: pending-generation."
   ],
-  "updated_at": "2026-07-19T04:48:42+00:00"
+  "updated_at": "2026-07-19T15:37:19+00:00"
 }

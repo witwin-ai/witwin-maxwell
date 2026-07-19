@@ -862,7 +862,7 @@ def run_differential_pair() -> SceneReport:
 
 
 # --------------------------------------------------------------------------- #
-# Series RLC resonator -- wave-level open gap (parasitic-dominated bench).      #
+# Series/parallel RLC resonator -- wave-level PASS (in-line coax element).       #
 # --------------------------------------------------------------------------- #
 def run_series_rlc() -> SceneReport:
     from benchmark.scenes.rf.series_parallel_rlc import (
@@ -992,7 +992,7 @@ def run_series_rlc() -> SceneReport:
 
 
 # --------------------------------------------------------------------------- #
-# Lumped open / short / match -- broken bench (feed decoupled from load).       #
+# Lumped open / short / match -- wave-level PASS (coax SOL, feed coupled).       #
 # --------------------------------------------------------------------------- #
 def run_lumped_open_short_match() -> SceneReport:
     from benchmark.scenes.rf.lumped_open_short_match import (
@@ -1387,11 +1387,12 @@ _SECTION_HEADER = "## RF wave-level validation"
 _ANTENNA_SECTION_HEADER = "## Antenna wave-level validation"
 
 _RF_INTRO = (
-    "RF port validation (audit S1, 2026-07-18, round 4). The binding metric for each "
-    "scene is measured from a real FDTD `Scene -> Simulation -> Result` run wherever "
-    "the two-port bench produces a usable S-matrix; it is NEVER taken from the 2D mode "
-    "eigensolve. This is NOT a set of passing wave-level scenes -- the per-scene status "
-    "column below is authoritative. `rf/coax_thru` is a wave-level PASS: a terminated "
+    "RF port validation (audit S1, 2026-07-18 round 4; `rf/lumped_open_short_match` and "
+    "`rf/series_parallel_rlc` rebuilt on the coax line 2026-07-19). The binding metric "
+    "for each scene is measured from a real FDTD `Scene -> Simulation -> Result` run "
+    "wherever the two-port bench produces a usable S-matrix; it is NEVER taken from the "
+    "2D mode eigensolve. Not every scene passes -- the per-scene status column below is "
+    "authoritative. `rf/coax_thru` is a wave-level PASS: a terminated "
     "air-line TEM two-port (conductors run through the computational PML to the padded "
     "grid edges) whose S-matrix is assembled by solving `B = S*A` across the drive "
     "columns; the precondition is extraction conditioning (cond(A) small) plus "
@@ -1403,10 +1404,17 @@ _RF_INTRO = (
     "checkerboard-aliased and the benchmark's `sin(pi y/a)`-correlation gate refuses it. "
     "`rf/microstrip_two_port` and `rf/differential_pair` are BLOCKED (a contour-snap "
     "error fires first; underneath, WaveModeSpec('tem') is categorically inapplicable to "
-    "their inhomogeneous substrate+air cross-sections). `rf/series_parallel_rlc` is an "
-    "open gap (parasitic-dominated: the load-port peak does not track C). "
-    "`rf/lumped_open_short_match` is a wave-level FAIL (the feed port is decoupled from "
-    "the load). Gate classes are the verbatim taxonomy "
+    "their inhomogeneous substrate+air cross-sections). `rf/series_parallel_rlc` is a "
+    "wave-level PASS: the RLC is an in-line two-terminal element in the coax inner "
+    "conductor carrying the full axial line current, so its resonance controls the feed "
+    "reflection -- the series `|S11|` notch tracks the analytic `f0 = 1/(2*pi*sqrt(L C))` "
+    "(`f_res*sqrt(C)` constant to ~1%, moving by the analytic `1/sqrt(C)` ratio under a "
+    "+/-20% C change), with a documented ~13% parasitic downshift of the absolute "
+    "resonance. `rf/lumped_open_short_match` is a wave-level PASS: a coax short-open-load "
+    "calibration bench whose TEM `WavePort` feed is coupled to a de-embedded load plane, "
+    "so the three standards are mutually distinguishable (matched `|Gamma| <= -20 dB`; "
+    "short/open `|Gamma| ~ 1`; open in the +1 class and short in the -1 class after "
+    "short-referenced de-embedding). Gate classes are the verbatim taxonomy "
     "(`docs/reference/gate-classification.md`); `modal-eigensolve` quantities are "
     "supporting only. Per-scene machine-readable artifacts (with per-tier complex S(f) "
     "and port a/b) live under `docs/assessments/rf-wave-validation-2026-07-18/`."
@@ -1482,7 +1490,11 @@ def _replace_or_append_section(text: str, header: str, section: str) -> str:
         rest = tail.split("\n", 1)[1] if "\n" in tail else ""
         next_idx = rest.find("\n## ")
         remainder = rest[next_idx + 1 :] if next_idx != -1 else ""
-        return head + section + remainder
+        if remainder:
+            # `section` ends with a single newline; add one more so a blank line
+            # separates it from the following `## ` header (idempotent on regen).
+            return head + section + "\n" + remainder
+        return head + section
     return text.rstrip() + "\n\n" + section
 
 

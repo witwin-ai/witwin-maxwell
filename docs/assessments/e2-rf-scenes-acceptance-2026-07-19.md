@@ -374,7 +374,12 @@ Budget unchanged at **176**: no `witwin/maxwell` source was modified (only
   `pending-generation` with the reason recorded in `benchmark/RESULTS.md`.
 - The patch matched-broadside TM010 physics gate (feed/ground redesign) remains
   open and is independent of the reference-generation blocker.
-- RESULTS.md rows for `rf/coax_thru` / `rf/lumped_open_short_match` retain their
-  E2a Maxwell metrics in the `## RF wave-level validation` section (not re-run this
-  stage to conserve GPU time); their external-reference status is covered uniformly
-  by the new reference-generation section.
+- The `## RF wave-level validation` section of RESULTS.md (and the per-scene
+  artifact JSONs) was regenerated from the post-rebuild E2a runners by rerunning
+  all six `rf/*` scenes together (`python -m benchmark rf rf/coax_thru
+  rf/rectangular_waveguide rf/microstrip_two_port rf/series_parallel_rlc
+  rf/lumped_open_short_match rf/differential_pair`), so `rf/lumped_open_short_match`
+  and `rf/series_parallel_rlc` now read `pass` with their coax-line rebuild metrics
+  instead of the retired decoupled-bench `fail`/`gap` records; their
+  external-reference status is covered uniformly by the new reference-generation
+  section.

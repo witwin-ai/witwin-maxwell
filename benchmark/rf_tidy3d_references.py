@@ -319,7 +319,10 @@ def _update_results_md(records: list[ReferenceRecord]) -> None:
         rest = tail.split("\n", 1)[1] if "\n" in tail else ""
         next_idx = rest.find("\n## ")
         remainder = rest[next_idx + 1 :] if next_idx != -1 else ""
-        RESULTS_MD.write_text(head + section + remainder, encoding="utf-8")
+        # `section` ends with a single newline; when another `## ` section follows,
+        # add one more so a blank line separates them (idempotent on regen).
+        joined = head + section + ("\n" + remainder if remainder else "")
+        RESULTS_MD.write_text(joined, encoding="utf-8")
     else:
         RESULTS_MD.write_text(text.rstrip() + "\n\n" + section, encoding="utf-8")
 

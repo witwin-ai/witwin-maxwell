@@ -18,7 +18,8 @@ analytic antenna references.
   closure). The matched-broadside ``TM010`` resonance and the ``D >= 5 dBi`` gate
   are a DOCUMENTED GAP: the probe on this thick finite-ground slab is
   reactance-dominated (``|Gamma| ~ 1``) and the pattern is off-broadside. Feed/
-  ground redesign and the external-reference cross-check are handled in stage E2c.
+  ground redesign and the external-reference cross-check remain open items,
+  deferred past stage E2c to a future stage.
 """
 
 from __future__ import annotations
