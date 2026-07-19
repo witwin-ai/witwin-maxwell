@@ -1048,24 +1048,29 @@ def _results_section(reports: list[SceneReport]) -> str:
     lines = [
         _SECTION_HEADER,
         "",
-        "RF port validation (audit S1, 2026-07-18, round 2). The binding metric for each "
+        "RF port validation (audit S1, 2026-07-18, round 4). The binding metric for each "
         "scene is measured from a real FDTD `Scene -> Simulation -> Result` run wherever "
         "the two-port bench produces a usable S-matrix; it is NEVER taken from the 2D mode "
-        "eigensolve. Both wave benches are now TERMINATED (conductors/walls run through the "
-        "PML to the domain boundary; the waveguide holds its PML thickness fixed in metres "
-        "across tiers). Every S-derived quantity is gated on an a_passive/a_driven "
-        "precondition (the S=b/a extraction assumes the passive port carries no incident "
-        "wave). `rf/rectangular_waveguide` reaches a wave-level FDTD S-matrix (beta "
-        "de-embedded via NRW). `rf/coax_thru` has a clean TEM launch (arg(S21)/L ~ k0) but "
-        "the passive port is re-illuminated by the far-end reflection (a_passive/a_driven "
-        "~ 1) because the ~0.3 m TEM wavelength is large versus the PML that fits its "
-        "compact transverse cross-section under the uniform-num_layers boundary API -- a "
-        "gap, NOT a port/line mismatch. microstrip / differential_pair are BLOCKED (a "
-        "contour-snap error fires first; underneath, WaveModeSpec('tem') is categorically "
-        "inapplicable to their inhomogeneous cross-sections). Gate classes are the verbatim "
-        "taxonomy (`docs/reference/gate-classification.md`); `modal-eigensolve` quantities "
-        "are supporting only. Per-scene machine-readable artifacts (with per-tier complex "
-        "S(f) and port a/b) live under `docs/assessments/rf-wave-validation-2026-07-18/`.",
+        "eigensolve. This is NOT a set of passing wave-level scenes -- the per-scene status "
+        "column below is authoritative. `rf/coax_thru` is a wave-level PASS: a terminated "
+        "air-line TEM two-port (conductors run through the computational PML to the padded "
+        "grid edges) whose S-matrix is assembled by solving `B = S*A` across the drive "
+        "columns; the precondition is extraction conditioning (cond(A) small) plus "
+        "post-solve passivity (max singular value <= 1 + slack), with `a_passive/a_driven` "
+        "kept only as a bench-quality diagnostic, and `beta` from `arg(S21)/L` tracks `k0`. "
+        "`rf/rectangular_waveguide` is BLOCKED on the transverse mode-operator redesign: the "
+        "vector operator cannot yet produce a clean full-grid TE10 on a hollow metallic "
+        "guide (it decouples the odd/even sublattices), so the selected mode is "
+        "checkerboard-aliased and the benchmark's `sin(pi y/a)`-correlation gate refuses it. "
+        "`rf/microstrip_two_port` and `rf/differential_pair` are BLOCKED (a contour-snap "
+        "error fires first; underneath, WaveModeSpec('tem') is categorically inapplicable to "
+        "their inhomogeneous substrate+air cross-sections). `rf/series_parallel_rlc` is an "
+        "open gap (parasitic-dominated: the load-port peak does not track C). "
+        "`rf/lumped_open_short_match` is a wave-level FAIL (the feed port is decoupled from "
+        "the load). Gate classes are the verbatim taxonomy "
+        "(`docs/reference/gate-classification.md`); `modal-eigensolve` quantities are "
+        "supporting only. Per-scene machine-readable artifacts (with per-tier complex S(f) "
+        "and port a/b) live under `docs/assessments/rf-wave-validation-2026-07-18/`.",
         "",
         "| Scene | Gate class | Quantity | Measured | Reference | Rel error | Status | Tidy3D ref |",
         "| --- | --- | --- | ---: | ---: | ---: | --- | --- |",
