@@ -7,7 +7,7 @@
   "tidy3d_reference": "pending-generation",
   "target": "blocked on the transverse mode-operator redesign (open item)",
   "tolerance_basis": "",
-  "falsification": "EXECUTED: with the guided-mode selector hardened (F1) the waveguide TE10 solve raises rather than injecting a spurious mode. The centered uniform-isotropic transverse vector operator decouples the odd/even sublattices, so the half-wave sin(pi y/a) lives on ONE sublattice and every candidate is checkerboard-contaminated (checkerboard_fraction > 0.35 for all; best full-grid sin-correlation recoverable over the entire degenerate subspace is ~0.62, executed). No filter can synthesize the missing sublattice.",
+  "falsification": "EXECUTED: the injected TE10 Ez profile has sin(pi y/a)-correlation 0.554 at dx=0.02 (a clean half-wave is >= 0.99). The centered uniform-isotropic transverse operator decouples the odd/even sublattices, so sin(pi y/a) lives on ONE sublattice; best recoverable full-grid correlation over the entire degenerate subspace is ~0.62. No selector filter can synthesize the missing sublattice.",
   "metrics": [
     {
       "quantity": "fc_cutoff",
@@ -15,27 +15,22 @@
       "unit": "Hz",
       "class": "wave-level",
       "note": "TE10 cutoff; band is 1.2 fc .. 2.2 fc (all propagating)"
+    },
+    {
+      "quantity": "TE10 Ez sin(pi y/a)-correlation (dx=0.02)",
+      "measured": 0.5539407683560068,
+      "reference": 1.0,
+      "rel_error": 0.4460592316439932,
+      "class": "modal-eigensolve",
+      "note": "injected mode shape; < 0.9 means the operator returned a checkerboard-aliased eigenvector, so no S-matrix is reported"
     }
   ],
   "supporting": [],
-  "convergence": [
-    {
-      "dx": 0.05,
-      "error": "ValueError: ModeSource requested mode_index=0, but only 0 structurally-valid forward modes in the requested polarization family were found after rejecting 25 spurious candidates (checkerboard=23, duplicate=0, spurious_near_k0=1, wall_peaked=1). The guided mode selector will not substitute a spurious eigenvector; refine the aperture grid or check the requested mode/polarization."
-    },
-    {
-      "dx": 0.025,
-      "error": "ValueError: ModeSource requested mode_index=0, but only 0 structurally-valid forward modes in the requested polarization family were found after rejecting 150 spurious candidates (checkerboard=149, duplicate=0, spurious_near_k0=1, wall_peaked=0). The guided mode selector will not substitute a spurious eigenvector; refine the aperture grid or check the requested mode/polarization."
-    },
-    {
-      "dx": 0.02,
-      "error": "ValueError: ModeSource requested mode_index=0, but only 0 structurally-valid forward modes in the requested polarization family were found after rejecting 3 spurious candidates (checkerboard=2, duplicate=0, spurious_near_k0=0, wall_peaked=1). The guided mode selector will not substitute a spurious eigenvector; refine the aperture grid or check the requested mode/polarization."
-    }
-  ],
+  "convergence": [],
   "conservation": {},
   "raw": {},
   "notes": [
-    "BLOCKED on the transverse mode-operator (audit S1 round-4, EXECUTED; replaces the withdrawn round-3 'shifted 3D-Yee TE10 onset' story, which was false physics -- the discrete TE10 cutoff is 0.99752 fc, BELOW the continuum, and the band propagates at all tiers). The real waveguide defect is that the vector selector previously injected a checkerboard-aliased eigenvector sharing the TE10 eigenvalue (sin(pi y/a)-correlation 0.000), whose odd profile couples to TE20 and reproduces the old |S21| to 3 significant figures. The selector is now fixed to reject that mode and never substitute; the transverse VECTOR operator itself, however, cannot yet represent a clean full-grid TE10 on a hollow metallic guide (centered branch decouples sublattices; the existing staggered branch has an asymmetric-BC bug that shifts beta ~10%). A symmetric-BC Yee-staggered transverse operator is the fix; filed as an OPEN item in docs/reference/rf-wave-validation-2026-07-18.md. Coax (separate TEM path) is unaffected and passes."
+    "BLOCKED on the transverse mode-operator (audit S1 round-4, EXECUTED; replaces the withdrawn round-3 'shifted 3D-Yee TE10 onset', which was false physics -- the discrete TE10 cutoff is 0.99752 fc, BELOW the continuum). The vector selector previously injected a checkerboard-aliased eigenvector sharing the TE10 eigenvalue (sin-correlation ~0.000); its odd profile couples to TE20 (cutoff 2 fc) and reproduces the old |S21| to 3 significant figures. The selector is hardened (F1: absolute-uniformity k0 rejection, never-substitute) but the VECTOR operator itself cannot represent a clean full-grid TE10 on a hollow metallic guide (centered branch decouples sublattices; the staggered branch has an asymmetric-BC bug that shifts beta ~10%). A symmetric-BC Yee-staggered transverse operator is the fix; filed as an OPEN item in docs/reference/rf-wave-validation-2026-07-18.md. Coax (separate TEM path) is unaffected and passes."
   ],
-  "updated_at": "2026-07-19T04:32:11+00:00"
+  "updated_at": "2026-07-19T04:48:29+00:00"
 }

@@ -1098,5 +1098,5 @@
     "Terminated wave-level measurement (EXECUTED): |arg(S21)|/L agrees with the TEM phase constant k0 to 0.83% median at dx=0.0025; |S11| in [0.008, 0.018], |S21| ~ 1, max singular value 1.001 (passive), reciprocity max 0.0029. The network S is assembled by solving B=S*A across the drive columns; cond(A) = 1.19 (near-orthonormal drives), so the extraction is well conditioned. Coax reciprocity here is SYMMETRIC-TRIVIAL: the fixture is mirror-symmetric about x=0, so S12=S21 by construction -- it is a sanity check, NOT independent energy-conservation evidence (the passivity singular value is the conservation evidence).",
     "Determinism/record: the current-contour half-grid snap distance is persisted per tier (0.0025->1.25e-03, 0.005->2.50e-03, 0.01->5.00e-03); complex S(f) and per-port a/b are stored in the artifact 'raw' block (F7c)."
   ],
-  "updated_at": "2026-07-19T04:32:04+00:00"
+  "updated_at": "2026-07-19T04:48:28+00:00"
 }
