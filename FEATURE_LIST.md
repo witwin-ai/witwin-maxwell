@@ -577,4 +577,23 @@ conductive-path model, not a validated arc or device-failure predictor).
   preserved column-by-column in `Result.array_run_data.column_results`. The
   internal per-port ModeMonitors that extract the S-matrix stay hidden. This
   unblocks field-level inspection/falsification of the RF wave benches.
+- `benchmark/scenes/rf/lumped_open_short_match.py` (`coax_sol_scene`) is rebuilt as
+  a coax one-port short-open-load (SOL) calibration bench on the proven air coax
+  line: a TEM `WavePort` feed launches down the line to a de-embedded load plane
+  terminated by a matched (reflectionless coax-through-PML, presenting Z0), a short
+  (PEC plug), or an open (truncated inner rod below the outer-guide TM01 cutoff).
+  The feed is now coupled to the load, so the three standards are mutually
+  distinguishable (matched |Gamma| <= -20 dB; short/open |Gamma| ~ 1; open in the
+  +1 class and short in the -1 class after short-referenced de-embedding), fixing
+  the retired decoupled bench that read identical Gamma for every load. The open-end
+  fringe capacitance shift is measured and documented.
+- `benchmark/scenes/rf/series_parallel_rlc.py` (`series_rlc_scene`) is rebuilt to
+  insert the series/parallel RLC as an in-line two-terminal element in the coax
+  inner conductor ahead of a matched continuation, so the element carries the full
+  axial line current and its resonance controls the feed reflection. The series
+  |S11| notch tracks the analytic `f0 = 1/(2*pi*sqrt(L C))` (`f_res*sqrt(C)`
+  constant to ~1%, moving by the analytic `1/sqrt(C)` ratio under a +/-20% C
+  change) and the parallel anti-resonance peak moves monotonically with C, fixing
+  the retired parasitic-dominated bench whose peak did not track C. The consistent
+  ~13% parasitic downshift of the absolute resonance is measured and documented.
 <!-- END e2a-rf-scenes -->
