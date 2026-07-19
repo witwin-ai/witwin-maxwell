@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from types import MappingProxyType
 from typing import Sequence
 
+import numpy as np
 import torch
 
 from ..sar import PowerNormalization, SARAveraging, SARResult
@@ -40,6 +42,16 @@ def _monitor_frequencies(result, monitor: str):
     return public_monitor, frequencies
 
 
+def _prepared_grid_hash(result) -> str:
+    """Hash a run's node-grid coordinates so same-shaped but differently spaced
+    grids are distinguished (a bare field-shape check cannot tell them apart)."""
+    scene = result.prepared_scene
+    hasher = hashlib.sha256()
+    for name in ("x_nodes64", "y_nodes64", "z_nodes64"):
+        hasher.update(np.ascontiguousarray(getattr(scene, name), dtype=np.float64).tobytes())
+    return hasher.hexdigest()
+
+
 def _stacked_electric_fields(result, frequencies):
     """Stack per-frequency complex Ex/Ey/Ez the way Result.power_loss consumes them."""
     fields = {}
@@ -70,6 +82,7 @@ def combine_coherent_sar(
     resolved = _require_results(results, "combine_coherent_sar")
     reference, frequencies = _monitor_frequencies(resolved[0], monitor)
     freq_ref = torch.as_tensor(frequencies, dtype=torch.float64)
+    grid_ref = _prepared_grid_hash(resolved[0])
 
     if weights is None:
         weights = [1.0] * len(resolved)
@@ -78,6 +91,12 @@ def combine_coherent_sar(
 
     summed = None
     for result, weight in zip(resolved, weights):
+        if _prepared_grid_hash(result) != grid_ref:
+            raise ValueError(
+                "combine_coherent_sar requires an identical grid (node-coordinate "
+                "hash mismatch); two runs with the same field shape but different "
+                "spacing cannot be combined."
+            )
         _, other_frequencies = _monitor_frequencies(result, monitor)
         other = torch.as_tensor(other_frequencies, dtype=torch.float64)
         if other.shape != freq_ref.shape or not bool(
@@ -160,10 +179,12 @@ def _check_metadata_match(reference: SARResult, other: SARResult):
         raise ValueError("combine_incoherent_sar requires an identical tissue map.")
     if not torch.equal(reference.valid, other.valid):
         raise ValueError("combine_incoherent_sar requires identical validity masks.")
-    torch.testing.assert_close(
-        reference.rho_cell, other.rho_cell, rtol=0.0, atol=0.0,
-        msg="combine_incoherent_sar requires an identical mass-density model.",
-    )
+    if reference.rho_cell.shape != other.rho_cell.shape or not torch.equal(
+        reference.rho_cell, other.rho_cell
+    ):
+        raise ValueError(
+            "combine_incoherent_sar requires an identical mass-density model."
+        )
 
 
 def combine_incoherent_sar(

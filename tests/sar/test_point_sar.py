@@ -1,3 +1,5 @@
+import dataclasses
+
 import numpy as np
 import pytest
 import torch
@@ -5,10 +7,12 @@ import torch
 import witwin.maxwell as mw
 from witwin.maxwell.compiler.mass_density import (
     BACKGROUND_TISSUE_ID,
+    OCCUPANCY_EPSILON,
     compile_mass_density,
 )
 from witwin.maxwell.compiler.power_loss import compile_power_loss_monitor
 from witwin.maxwell.postprocess.sar import compute_sar
+from witwin.maxwell.sar import PowerNormalization
 from witwin.maxwell.scene import prepare_scene
 
 _USE_RHO = object()
@@ -25,23 +29,30 @@ def _uniform_cube_result(
     dtype=torch.complex64,
     requires_grad=False,
     mass_density=_USE_RHO,
+    scale=1.0,
 ):
     """Uniform lossy cube filling the domain, illuminated by a constant field.
 
     Constant Yee-edge fields make the conduction density exactly
     ``0.5*sigma*|E|^2`` at every edge, so point SAR has a closed form and the
     analytic cross-check is machine-tight rather than FDTD-accuracy-limited.
+
+    ``scale`` multiplies the domain extent, grid spacing, and monitor/box geometry
+    together, so the node count (hence field shape) is invariant while the physical
+    grid spacing changes -- used to build two same-shaped, differently-spaced runs.
     """
     mass_density = rho if mass_density is _USE_RHO else mass_density
     material = mw.Material(sigma_e=sigma, mass_density=mass_density, name="tissue")
     scene = mw.Scene(
-        domain=mw.Domain(bounds=((0.0, 2.0),) * 3),
-        grid=mw.GridSpec.uniform(0.1),
+        domain=mw.Domain(bounds=((0.0, 2.0 * scale),) * 3),
+        grid=mw.GridSpec.uniform(0.1 * scale),
         boundary=mw.BoundarySpec.none(),
         structures=(
             mw.Structure(
                 name="bulk",
-                geometry=mw.Box(position=(1.0, 1.0, 1.0), size=(8.0, 8.0, 8.0)),
+                geometry=mw.Box(
+                    position=(1.0 * scale,) * 3, size=(8.0 * scale,) * 3
+                ),
                 material=material,
             ),
         ),
@@ -49,8 +60,8 @@ def _uniform_cube_result(
     )
     monitor = mw.PowerLossMonitor(
         "loss",
-        position=(1.0, 1.0, 1.0),
-        size=(1.0, 1.0, 1.0),
+        position=(1.0 * scale,) * 3,
+        size=(1.0 * scale,) * 3,
         frequencies=frequencies,
         channels=channels,
     )
@@ -243,6 +254,61 @@ def test_cpu_float64_oracle_parity():
     np.testing.assert_allclose(
         reducer[valid], oracle_region[valid], rtol=1e-4, atol=1e-9
     )
+
+
+def _compute_sar_with_mass(result, mass, *, normalization=None):
+    """Run the point-SAR reducer with an explicitly supplied mass model."""
+    prepared = result.prepared_scene
+    monitor = result.scene.monitors[0]
+    compiled = compile_power_loss_monitor(prepared, monitor)
+    power_loss = result.power_loss("loss")
+    return compute_sar(
+        prepared_scene=prepared,
+        monitor=monitor,
+        power_loss=power_loss,
+        mass=mass,
+        compiled_loss=compiled,
+        normalization=normalization or PowerNormalization.none(),
+    )
+
+
+def test_occupancy_below_epsilon_is_excluded_from_point_sar_and_statistics():
+    """A cell whose tissue fill fraction is below the occupancy epsilon must be
+    masked out (NaN point SAR, dropped from per-tissue statistics), even when it
+    still carries a positive effective density and absorbed power.
+
+    This isolates the occupancy-validity clause of ``valid``: only the cell's
+    occupancy is pushed below the epsilon; its ``rho_cell`` stays positive, so the
+    ``rho_cell > 0`` clause alone would keep it valid. Deleting the occupancy clause
+    (``valid = rho_cell > 0``) makes this test go red — the recorded falsification.
+    """
+    result, _ = _uniform_cube_result(frequencies=(1.0e9,))
+    prepared = result.prepared_scene
+    mass = compile_mass_density(prepared)
+
+    baseline = _compute_sar_with_mass(result, mass)
+    region = baseline.provenance["region_index_bounds"]
+    # Full-grid physical-center node; it sits inside the monitor region and is a
+    # fully occupied, valid tissue cell in the baseline.
+    center = (prepared.Nx // 2, prepared.Ny // 2, prepared.Nz // 2)
+    local = tuple(center[axis] - region[axis][0] for axis in range(3))
+    assert all(0 <= local[axis] < baseline.valid.shape[axis] for axis in range(3))
+    assert bool(baseline.valid[local])
+    assert torch.isfinite(baseline.point_sar("total")[0][local])
+    baseline_valid = int(baseline.valid.sum())
+    baseline_count = baseline.statistics[0]["cell_count"]
+
+    occupancy = mass.occupancy.clone()
+    occupancy[center] = 0.1 * OCCUPANCY_EPSILON  # below epsilon, still > 0
+    starved = dataclasses.replace(mass, occupancy=occupancy)
+    sar = _compute_sar_with_mass(result, starved)
+
+    # The starved cell is masked: NaN point SAR, dropped from the valid count and
+    # from the per-tissue cell tally; every other cell is unchanged.
+    assert not bool(sar.valid[local])
+    assert torch.isnan(sar.point_sar("total")[0][local])
+    assert int(sar.valid.sum()) == baseline_valid - 1
+    assert sar.statistics[0]["cell_count"] == baseline_count - 1
 
 
 def test_region_statistics_report_power_and_sar_per_tissue():

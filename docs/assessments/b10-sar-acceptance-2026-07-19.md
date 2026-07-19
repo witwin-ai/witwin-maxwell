@@ -65,13 +65,18 @@ but NOT certified. `connectivity` other than `"cube"` (tissue flood-fill) and
 
 ## Test inventory
 
-`tests/sar/test_point_sar.py` (13) + `tests/sar/test_mass_density.py` (5): 16 passed on
-CPU; the CUDA-device test runs and passes on device 0.
+The B1 files are `tests/sar/test_point_sar.py` (point-SAR reducer) and
+`tests/sar/test_mass_density.py` (mass-density compiler). They have since been
+extended by B2/B3 and the 2026-07-19 audit-fix pass, so their totals now exceed the
+original B1 scope. Current collected counts are reproducible:
 
 ```
-conda run -n maxwell ... python -m pytest tests/sar/ -q
-# 16 passed
+conda run -n maxwell ... python -m pytest \
+  tests/sar/test_point_sar.py tests/sar/test_mass_density.py --collect-only -q | tail -1
+# 18 tests collected  (test_point_sar.py: 14, test_mass_density.py: 4)
 ```
+
+The CUDA-device test (`test_sar_stays_on_cuda_device`) runs and passes on device 0.
 
 Headline gates:
 - `test_point_sar_matches_analytic_conduction` — uniform lossy cube, constant Yee-edge
@@ -312,9 +317,11 @@ conda run -n maxwell ... python -m pytest tests/api/public/test_public_api.py \
 ## Numerical-precision note (gradient gates)
 
 The point-SAR reducer runs in float32 (GPU-first design from B1). Autograd and central
-differences therefore agree to float32 precision (~2–4e-4 relative in measured runs), not
-float64. Gradient gates use `rtol=2e-3` for autograd-vs-FD (field) and `rtol=1e-3/1e-4` for
-central-difference-vs-analytic (density/conductivity) with wide FD steps to defeat float32
+differences therefore agree to float32 precision, not float64. The gate tolerances are
+asserted in the tests themselves (reproducible via
+`conda run -n maxwell ... python -m pytest tests/sar/test_sar_gradients.py -q`):
+`rtol=2e-3` for autograd-vs-FD (field) and `rtol=1e-3/1e-4` for
+central-difference-vs-analytic (density/conductivity), with wide FD steps to defeat float32
 catastrophic cancellation. This is a documented limit of the differentiable path, not a bug in
 the SAR math. `Material.sigma_e` as a plain scalar is floated at compile time (not an autograd
 leaf in this build), so the conductivity gate is central-difference-vs-analytic rather than
@@ -361,3 +368,81 @@ helper, cell-size/scale provenance), `witwin/maxwell/result.py` (resolve + pass 
 normalization tests updated for the now-implemented capability), `FEATURE_LIST.md`.
 
 No FDTD capability-guard census entry was added or removed.
+
+---
+
+# Audit-fix pass (2026-07-19)
+
+Same worktree/branch/env prelude as above. Supervisor-selected fixes from the B10 audit.
+
+## Delivered fixes
+
+1. **Occupancy-epsilon exclusion is now tested.** The `valid` mask in
+   `postprocess/sar.py::compute_sar` is `(occupancy >= OCCUPANCY_EPSILON) & (rho_cell > 0)`,
+   but no test isolated the occupancy clause (deleting it left the suite green). New test
+   `tests/sar/test_point_sar.py::test_occupancy_below_epsilon_is_excluded_from_point_sar_and_statistics`:
+   a fully-occupied uniform cube is reduced once for a baseline, then one interior region cell's
+   occupancy is pushed to `0.1 * OCCUPANCY_EPSILON` (still `> 0`, `rho_cell` unchanged and positive)
+   via `dataclasses.replace` on the compiled mass model. The cell must become NaN in point SAR,
+   drop from `valid.sum()` by exactly 1, and drop from the tissue `cell_count` by exactly 1.
+   Because only occupancy is starved, the `rho_cell > 0` clause alone would keep the cell valid,
+   so the test pins the occupancy clause specifically.
+
+2. **Incoherent error taxonomy unified.** `postprocess/sar_combine.py::_check_metadata_match` used
+   `torch.testing.assert_close` for the `rho_cell` mismatch (raising `AssertionError`) while every
+   sibling mismatch raised `ValueError`. Replaced with an explicit shape+`torch.equal` comparison
+   raising `ValueError`. New test
+   `tests/sar/test_sar_combine.py::test_incoherent_density_mismatch_raises_value_error` builds two
+   otherwise-identical runs (same grid/tissue map/validity/frequencies/channels/normalization)
+   that differ only in `rho_cell` (rho 1000 vs 1100) and asserts `ValueError`.
+
+3. **`combine_coherent_sar` now validates the grid.** It previously checked monitor name,
+   frequencies and field shape but not grid spacing (the incoherent path checks `grid_hash`). Added
+   a node-coordinate grid hash (`_prepared_grid_hash`) comparison across runs. New test
+   `tests/sar/test_sar_combine.py::test_coherent_rejects_same_shape_different_spacing` builds two
+   runs with identical field shapes but different spacing (via the new `scale` parameter on
+   `_uniform_cube_result`, which scales domain + spacing + geometry together so the node count is
+   invariant) and asserts `ValueError`.
+
+4. **Acceptance-doc corrections.** Fixed the internally-inconsistent B1 test-count breakdown
+   (was `13+5=16`); the B1 files now collect 18 tests, stated with a reproducible `--collect-only`
+   command. Removed the unreproducible "~2-4e-4 relative in measured runs" precision figure from the
+   B3 gradient note and pointed instead at the gate tolerances asserted in
+   `tests/sar/test_sar_gradients.py` (reproducible via a pytest command).
+
+## Falsifications performed (recorded per brief)
+
+1. **Occupancy-epsilon clause** — in `postprocess/sar.py` changed
+   `valid = (occupancy >= OCCUPANCY_EPSILON) & (rho_cell > 0)` to `valid = (rho_cell > 0)`.
+   `test_occupancy_below_epsilon_is_excluded_from_point_sar_and_statistics` went RED
+   (`assert not bool(sar.valid[local])` → `assert not True`). Restored → green.
+2. **Incoherent density-mismatch taxonomy** — reverted the new `ValueError` block to
+   `torch.testing.assert_close`. `test_incoherent_density_mismatch_raises_value_error` went RED
+   (raised `AssertionError`, not the expected `ValueError`). Restored → green.
+3. **Coherent grid check** — short-circuited the new guard with `if False and ...`.
+   `test_coherent_rejects_same_shape_different_spacing` went RED (no `ValueError` raised).
+   Restored → green.
+
+## Test inventory (this pass)
+
+```
+conda run -n maxwell ... python -m pytest tests/sar -q
+# 60 passed  (was 57; +3 new: occupancy-epsilon, coherent grid-mismatch, incoherent density-mismatch taxonomy)
+```
+
+Adjacent regression:
+```
+conda run -n maxwell ... python -m pytest tests/api/public/test_public_api.py \
+  tests/api/public/test_simulation_smoke.py tests/rf/power_loss/ -q
+```
+
+## Files changed (audit-fix pass)
+
+Changed: `witwin/maxwell/postprocess/sar_combine.py` (ValueError for rho_cell mismatch;
+`_prepared_grid_hash` + coherent grid check), `tests/sar/test_point_sar.py`
+(`scale` parameter on `_uniform_cube_result`; occupancy-epsilon test),
+`tests/sar/test_sar_combine.py` (coherent grid-mismatch + incoherent density-mismatch tests),
+`docs/assessments/b10-sar-acceptance-2026-07-19.md` (this section + B1/B3 corrections).
+`witwin/maxwell/postprocess/sar.py` unchanged (only used transiently for falsification 1).
+
+No FDTD capability-guard census entry was added or removed; no existing guard or test was weakened.

@@ -72,11 +72,41 @@ def test_incoherent_normalization_mismatch_fails_closed():
         mw.combine_incoherent_sar([sar_a, sar_scaled])
 
 
+def test_incoherent_density_mismatch_raises_value_error():
+    """A mass-density mismatch must raise ValueError -- the same error taxonomy as
+    every sibling metadata mismatch -- not an AssertionError. Everything else
+    (grid, tissue map, validity, frequencies, channels, normalization) matches, so
+    only the differing rho_cell can trip the guard."""
+    a, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0, rho=1000.0)
+    b, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0, rho=1100.0)
+    sar_a = a.sar("loss")
+    sar_b = b.sar("loss")
+    assert not torch.equal(sar_a.rho_cell, sar_b.rho_cell)
+    with pytest.raises(ValueError, match="mass-density"):
+        mw.combine_incoherent_sar([sar_a, sar_b])
+
+
 def test_incoherent_requires_two_operands():
     a, _ = _uniform_cube_result(frequencies=(1.0e9,))
     sar_a = a.sar("loss")
     with pytest.raises(ValueError, match="at least two"):
         mw.combine_incoherent_sar([sar_a])
+
+
+def test_coherent_rejects_same_shape_different_spacing():
+    """Two runs with identical field shapes but different grid spacing must be
+    rejected: the field-shape check alone cannot see the spacing difference, so the
+    combiner compares the node-coordinate grid hash and fails closed."""
+    a, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0, scale=1.0)
+    b, _ = _uniform_cube_result(frequencies=(1.0e9,), e0=2.0, scale=2.0)
+    # Same field shape, different physical spacing (guards the test's premise).
+    assert a.tensor("Ex", frequency=1.0e9).shape == b.tensor("Ex", frequency=1.0e9).shape
+    assert not torch.allclose(
+        torch.as_tensor(a.prepared_scene.x_nodes64),
+        torch.as_tensor(b.prepared_scene.x_nodes64),
+    )
+    with pytest.raises(ValueError, match="identical grid"):
+        mw.combine_coherent_sar([a, b], monitor="loss")
 
 
 def test_coherent_preserves_field_autograd():
