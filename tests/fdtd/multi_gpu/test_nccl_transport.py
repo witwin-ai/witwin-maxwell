@@ -394,6 +394,7 @@ def _torchrun_adjoint(mode: str, *, timeout: int):
     "mode,timeout",
     (
         ("standard", 400),
+        ("plane", 400),
         ("cpml", 400),
         ("cpml_psi", 900),
         ("determinism", 600),
@@ -407,8 +408,11 @@ def test_two_rank_nccl_adjoint_parity(mode, timeout):
     seed, transposed NCCL adjoint reverse, grad_eps gather to rank 0 + rank-0
     pullback) and, on rank 0, compares the world-summed objective and the gathered
     grad_eps material gradient against an independent single-GPU adjoint on the same
-    scene. ``standard`` is an open-boundary cross-seam objective; ``cpml`` an
-    x-CPML interior probe; ``cpml_psi`` drives the probe deep into the high x-PML so
+    scene. ``standard`` is an open-boundary cross-seam point objective; ``plane`` is
+    an open-boundary y-normal ``PlaneMonitor`` spanning the x seam whose separable
+    owned-strip objective seeds both shards (S5) and must match the single-GPU
+    full-plane adjoint; ``cpml`` an x-CPML interior probe; ``cpml_psi`` drives the
+    probe deep into the high x-PML so
     the reverse threads the objective back through the CPML psi recursion (the
     worker asserts the world-max psi cotangent is a significant fraction of the E/H
     adjoint scale before the parity gate); ``determinism`` reruns the reverse twice
@@ -433,12 +437,17 @@ def test_two_rank_nccl_adjoint_parity(mode, timeout):
         ("falsify_mag_halo", 400),
         ("falsify_elec_halo", 400),
         ("falsify_psi", 900),
+        ("plane_seam", 400),
     ),
 )
 def test_two_rank_nccl_adjoint_falsification(mode, timeout):
-    """No-op'ing a reverse halo or zeroing the psi carry must break parity.
+    """No-op'ing a reverse halo, zeroing the psi carry, or mis-owning the seam strip must break parity.
 
-    Each falsification perturbs only the distributed reverse (the single-GPU
+    ``plane_seam`` sums each rank's FULL local plane strip (halo included) instead of
+    its owned strip, double-counting the live seam cell on both shards -- the
+    single-GPU full-plane reference then rejects the world sum and its gradient,
+    proving the owned-strip seam rule (S5) is load-bearing. Each falsification
+    perturbs only the distributed reverse (the single-GPU
     reference is untouched) and asserts the 2-GPU gradient moves off the reference
     by >= 1e-3 relative -- well above the ~1e-7 baseline drift and below the smallest
     real error, so the parity gate is non-vacuous. The worker prints OK only when

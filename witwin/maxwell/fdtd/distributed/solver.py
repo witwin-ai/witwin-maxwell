@@ -534,13 +534,17 @@ class DistributedFDTD:
 
         from ...monitors import FieldTimeMonitor, PointMonitor
         from ...simulation import _scene_trainable_density_parameters
+        from .adjoint import is_separable_plane_monitor
 
         # The verified NCCL adjoint driver (allow_adjoint=True) seeds a separable
-        # local objective per rank: a point monitor is owned by exactly one rank and
-        # a full-field DFT is gathered slab-wise, so neither needs the cross-rank
-        # per-monitor payload gather the forward path lacks. Point-region monitors
-        # are therefore admitted on the adjoint path; every non-point (tiled) monitor
-        # still needs the unimplemented cotangent scatter and stays rejected.
+        # local objective per rank: a point monitor is owned by exactly one rank, a
+        # y/z-normal plane monitor is summed over each rank's owned strip, and a
+        # full-field DFT is gathered slab-wise -- none needs the cross-rank
+        # per-monitor payload gather the forward output path lacks (the adjoint driver
+        # reads each rank's shard-local monitor output directly, never the collective
+        # gather). Point-region monitors and separable y/z plane monitors are
+        # therefore admitted on the adjoint path; every other (tiled flux/mode/x-plane)
+        # monitor still needs the unimplemented cotangent scatter and stays rejected.
         if self.logical_scene.monitors:
             non_point = [
                 monitor
@@ -553,6 +557,7 @@ class DistributedFDTD:
                             isinstance(monitor, FieldTimeMonitor)
                             and monitor.region_kind == "point"
                         )
+                        or is_separable_plane_monitor(monitor)
                     )
                 )
             ]

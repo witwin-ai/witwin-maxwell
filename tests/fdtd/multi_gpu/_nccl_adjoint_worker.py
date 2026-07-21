@@ -8,6 +8,12 @@ independently constructed single-GPU adjoint reference on the same scene.
 
 Modes (env ``WITWIN_NCCL_ADJ_MODE``):
   standard        - open-boundary cross-seam point-monitor parity (gate 2a).
+  plane           - open-boundary y-normal PlaneMonitor spanning the x seam: the
+                    separable owned-strip objective must match the single-GPU
+                    full-plane adjoint (S5 gate).
+  plane_seam      - sum the FULL local strip (halo included) instead of the owned
+                    strip -> the seam ghost cell is double-counted -> parity MUST
+                    break (S5 seam-ownership falsification).
   cpml            - x-CPML interior-probe point-monitor parity (gate 2a).
   cpml_psi        - x-CPML probe deep in the high x-PML: the reverse must thread
                     the objective back through the CPML psi recursion; asserts the
@@ -95,6 +101,39 @@ def _standard_scene(density, *, source_x, monitor_x, device):
     return scene
 
 
+def _plane_scene(density, *, source_x, axis, device):
+    x = np.linspace(-0.5, 0.5, 11, dtype=np.float64)
+    y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
+    z = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
+        grid=mw.GridSpec.custom(x, y, z),
+        boundary=mw.BoundarySpec.none(),
+        device=device,
+    )
+    scene.add_material_region(
+        mw.MaterialRegion(
+            name="design",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.6, 0.3, 0.3)),
+            density=density,
+            eps_bounds=(1.0, 6.0),
+        )
+    )
+    scene.add_source(
+        mw.PointDipole(
+            position=(source_x, 0.0, 0.0),
+            polarization="Ez",
+            profile="ideal",
+            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
+            name="drive",
+        )
+    )
+    # A y-normal plane at y=0 spans the full x extent, so it is tiled across the x
+    # partition seam -- exactly the case the owned-strip seed must handle.
+    scene.add_monitor(mw.PlaneMonitor("plane", axis=axis, position=0.0, fields=("Ez",)))
+    return scene
+
+
 def _cpml_scene(density, *, source_x, monitor_x, device):
     x = np.linspace(-0.6, 0.6, 21, dtype=np.float64)
     y = np.linspace(-0.2, 0.2, 9, dtype=np.float64)
@@ -139,6 +178,12 @@ def _parallel():
 def _build_scene(kind, density, device):
     if kind == "standard":
         return _standard_scene(density, source_x=-0.3, monitor_x=0.1, device=device)
+    if kind in ("plane", "plane_seam"):
+        # Source just left of the x seam (global cell 5 = x=0): both shards' owned
+        # plane strips carry comparable field (genuinely dual-sided seeding) AND the
+        # seam cell is live, so the rank-0 ghost column that the owned crop discards
+        # is non-trivial -- making the seam-ownership falsification bite.
+        return _plane_scene(density, source_x=-0.05, axis="y", device=device)
     if kind == "cpml":
         return _cpml_scene(density, source_x=-0.18, monitor_x=0.18, device=device)
     if kind == "cpml_psi":
@@ -147,7 +192,7 @@ def _build_scene(kind, density, device):
 
 
 def _kwargs(kind):
-    if kind == "standard":
+    if kind in ("standard", "plane", "plane_seam"):
         return dict(
             frequency=_FREQUENCY,
             run_time=mw.TimeConfig(time_steps=_STD_STEPS),
@@ -167,13 +212,19 @@ def _kwargs(kind):
     raise ValueError(kind)
 
 
-def _distributed_solve(kind, density_values, *, capture=None):
+def _objective_for(kind):
+    if kind in ("plane", "plane_seam"):
+        return _dist_adjoint.plane_monitor_l2_objective
+    return _dist_adjoint.point_monitor_l2_objective
+
+
+def _distributed_solve(kind, density_values, *, capture=None, objective=None):
     """Run the per-rank NCCL adjoint driver. Returns (total_loss, grad, bridge)."""
     density = density_values.clone().to("cuda:0").requires_grad_(True)
     scene = _build_scene(kind, density, "cuda:0")
     simulation = mw.Simulation.fdtd(scene, parallel=_parallel(), **_kwargs(kind))
     total_loss, grads, bridge = _dist_adjoint.run_nccl_distributed_reverse(
-        simulation, objective=_dist_adjoint.point_monitor_l2_objective
+        simulation, objective=objective if objective is not None else _objective_for(kind)
     )
     grad = grads[0].detach().to("cpu") if grads else None
     if capture is not None:
@@ -182,11 +233,19 @@ def _distributed_solve(kind, density_values, *, capture=None):
 
 
 def _reference_solve(kind, density_values):
-    """Single-GPU adjoint reference on rank 0 only."""
+    """Single-GPU adjoint reference on rank 0 only.
+
+    For plane kinds the reference sums ``|Ez|^2`` over the FULL global plane; the
+    distributed owned strips tile that plane with no overlap, so the world sum of
+    the separable per-strip objective must reproduce it (and its gradient).
+    """
     density = density_values.clone().to("cuda:0").requires_grad_(True)
     scene = _build_scene(kind, density, "cuda:0")
     result = mw.Simulation.fdtd(scene, **_kwargs(kind)).run()
-    spectrum = result.monitors["probe"]["Ez"]
+    if kind in ("plane", "plane_seam"):
+        spectrum = result.monitors["plane"]["Ez"]
+    else:
+        spectrum = result.monitors["probe"]["Ez"]
     loss = (spectrum.real ** 2 + spectrum.imag ** 2).sum()
     loss.backward()
     return float(loss.detach().cpu()), density.grad.detach().cpu().clone()
@@ -265,6 +324,50 @@ def _run_parity(kind):
         single_loss, single_grad = _reference_solve(kind, base)
         _assert_parity(kind, dist_loss, dist_grad, single_loss, single_grad)
         print(f"NCCL_ADJOINT_WORKER_OK[{kind}]")
+
+
+def _plane_full_leaf_objective(pack, leaves, layout):
+    """FALSIFICATION objective: sum the FULL local strip, ignoring owned ownership.
+
+    The correct separable objective restricts each rank's plane sum to its owned-local
+    x slice so the seam ghost cell is counted on exactly one rank. Summing the full
+    allocation strip (halo included) double-counts the seam cell on both shards, so
+    the world sum -- and its gradient -- must diverge from the single-GPU full-plane
+    reference. This proves the owned-strip seam rule is load-bearing.
+    """
+    del layout
+    cursor = len(pack.field_names)
+    loss = None
+    for _monitor_name, template in pack.monitor_templates.items():
+        for _component_name in template["fields"]:
+            spectrum = leaves[cursor]
+            cursor += 1
+            term = (spectrum.real ** 2 + spectrum.imag ** 2).sum()
+            loss = term if loss is None else loss + term
+    if loss is None:
+        return 0.0
+    return loss
+
+
+def _run_plane_seam():
+    base = _base_density()
+    dist_loss, dist_grad, _ = _distributed_solve(
+        "plane_seam", base, objective=_plane_full_leaf_objective
+    )
+    torch.distributed.barrier()
+    if torch.distributed.get_rank() == 0:
+        single_loss, single_grad = _reference_solve("plane_seam", base)
+        grad_scale = float(single_grad.abs().max())
+        assert grad_scale > 0.0, "reference gradient is zero (vacuous)"
+        rel = float((dist_grad - single_grad).abs().max()) / grad_scale
+        assert rel > _FALSIFY_MIN_REL, (
+            f"double-counting the seam strip cell left parity intact (rel {rel:.3e}); "
+            "the owned-strip seam rule is not load-bearing"
+        )
+        loss_rel = abs(dist_loss - single_loss) / max(abs(single_loss), 1e-30)
+        print(
+            f"NCCL_ADJOINT_WORKER_OK[plane_seam rel={rel:.3e} loss_rel={loss_rel:.3e}]"
+        )
 
 
 def _run_cpml_psi():
@@ -426,6 +529,8 @@ def _run_guard_deadlock():
 
 _MODES = {
     "standard": lambda: _run_parity("standard"),
+    "plane": lambda: _run_parity("plane"),
+    "plane_seam": _run_plane_seam,
     "cpml": lambda: _run_parity("cpml"),
     "cpml_psi": _run_cpml_psi,
     "falsify_mag_halo": lambda: _run_falsify_halo("mag"),

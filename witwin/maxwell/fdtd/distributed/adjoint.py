@@ -438,15 +438,42 @@ def _distributed_uses_cpml(distributed) -> bool:
     )
 
 
+def is_separable_plane_monitor(monitor) -> bool:
+    """Whether ``monitor`` is a y/z-normal ``PlaneMonitor`` seedable per owned strip.
+
+    A y/z-normal :class:`PlaneMonitor` is tiled across the x partition: each rank owns
+    a contiguous strip of the plane's x extent (the forward monitor-merge seam rule),
+    so a ``sum|spectrum|^2`` objective restricted to each rank's owned strip is
+    separable -- the world sum reproduces the global objective with no seam cell
+    double-counted, and each rank seeds only its owned strip. Flux planes
+    (:class:`FluxMonitor`, ``compute_flux``) need cross-seam tangential-field
+    interpolation for the Poynting cross product and are *not* separable this way;
+    mode / finite-plane / x-normal planes are excluded too. Only the exact plain
+    ``PlaneMonitor`` class on a y/z normal without flux qualifies.
+    """
+
+    from ...monitors import PlaneMonitor
+
+    return (
+        type(monitor) is PlaneMonitor
+        and str(getattr(monitor, "axis", "")).lower() in {"y", "z"}
+        and not bool(getattr(monitor, "compute_flux", False))
+    )
+
+
 def require_distributed_adjoint_objective_support(distributed) -> None:
-    """Reject objectives seeded from tiled plane/flux/mode monitors.
+    """Reject objectives seeded from tiled flux/mode monitors (and non-separable planes).
 
     Baseline distributed seed routing supports point-monitor spectra (single owner)
-    and full-field DFT (owned x-slices scattered from the gathered global grad). A
-    plane / flux / mode / closed-surface / diffraction monitor is stitched across
-    shards in the forward, so its cotangent would have to be scattered by the same
-    owned intervals -- the follow-up seed-scatter slice. Until that lands, an
-    objective that reads a tiled monitor is rejected here before any reverse work.
+    and full-field DFT (owned x-slices scattered from the gathered global grad). On
+    the per-rank NCCL adjoint driver (``allow_adjoint``) a y/z-normal
+    :class:`PlaneMonitor` is additionally admitted: the objective sums each rank's
+    owned plane strip, so its cotangent is already shard-local (no cross-rank
+    scatter) -- see :func:`is_separable_plane_monitor`. A flux / mode / closed-surface
+    / diffraction / finite-plane monitor still requires seam-crossing assembly whose
+    cotangent scatter is not wired, so it is rejected here before any reverse work. On
+    the in-process bridge (``allow_adjoint`` False) every tiled monitor stays rejected
+    exactly as before.
     """
 
     from ...monitors import (
@@ -470,11 +497,15 @@ def require_distributed_adjoint_objective_support(distributed) -> None:
         ClosedSurfaceMonitor,
         DiffractionMonitor,
     )
+    allow_adjoint = bool(getattr(distributed, "_allow_adjoint", False))
     for monitor in distributed.logical_scene.resolved_monitors():
+        if allow_adjoint and is_separable_plane_monitor(monitor):
+            continue
         if isinstance(monitor, _TILED):
             raise ValueError(
                 "Distributed FDTD adjoint objectives currently support point-monitor "
-                "spectra and full-field DFT only; tiled plane/flux/mode monitor "
+                "spectra, full-field DFT, and (on the NCCL adjoint driver) separable "
+                "y/z-normal plane monitors only; tiled flux/mode/closed-surface monitor "
                 f"cotangent scatter is not enabled yet ({type(monitor).__name__} "
                 f"{getattr(monitor, 'name', '?')!r})."
             )
@@ -535,11 +566,12 @@ def _index_global_grads(global_pack, grad_outputs):
         field_grads[field_name] = grad_outputs[cursor]
         cursor += 1
     for monitor_name, template in global_pack.monitor_templates.items():
-        if not _monitor_template_is_point(template):
-            raise RuntimeError(
-                "Distributed adjoint seed routing reached a non-point monitor template; "
-                "the objective-support guard should have rejected it."
-            )
+        # Point and separable (y/z-normal) plane monitors both emit exactly one
+        # output tensor per component, so the cotangent routing is identical: index
+        # by (monitor, component) in pack order. The plane cotangent is already
+        # shard-local (the NCCL objective sums each rank's owned strip), so no
+        # cross-rank scatter is needed; any other tiled monitor is rejected upstream
+        # by the objective-support guard before reaching this routing.
         for component_name in template["fields"]:
             monitor_grads[(monitor_name, component_name)] = grad_outputs[cursor]
             cursor += 1
@@ -866,11 +898,18 @@ class _DistributedFDTDGradientBridge:
                         )
                     )
                 for monitor_name, template in local_pack.monitor_templates.items():
+                    is_point = _monitor_template_is_point(template)
                     for component_name in template["fields"]:
                         global_grad = monitor_grads.get((monitor_name, component_name))
-                        local_output = local_raw["observers"][monitor_name]["components"][
-                            component_name
-                        ]
+                        component_payload = local_raw["observers"][monitor_name][
+                            "components"
+                        ][component_name]
+                        # A point component payload is the spectrum tensor itself; a
+                        # tiled plane component payload is a dict whose "data" holds
+                        # the per-strip spectrum tensor.
+                        local_output = (
+                            component_payload if is_point else component_payload["data"]
+                        )
                         if global_grad is None:
                             shard_grads.append(torch.zeros_like(local_output))
                         else:
@@ -1472,6 +1511,45 @@ def point_monitor_l2_objective(pack, leaves, layout):
             spectrum = leaves[cursor]
             cursor += 1
             term = (spectrum.real ** 2 + spectrum.imag ** 2).sum()
+            loss = term if loss is None else loss + term
+    if loss is None:
+        return 0.0
+    return loss
+
+
+def plane_monitor_l2_objective(pack, leaves, layout):
+    """Separable ``sum |spectrum|^2`` over each rank's owned plane strip.
+
+    A y/z-normal plane monitor is tiled across the x partition. Each rank's local
+    plane spectrum spans its *allocation* x extent (owned cells plus the halo ghost
+    the neighbour also carries), so the objective restricts the sum to the rank's
+    owned-local x slice -- the exact forward monitor-merge seam rule
+    (``owned_local_slice``). The owned strips tile the global plane with no overlap,
+    so the world sum reproduces the single-process objective and every seam cell is
+    counted on exactly one rank. Point-monitor components (single owner) contribute
+    their full spectrum. Off-owner ranks whose owned strip is empty contribute
+    nothing and seed nothing (they receive adjoint solely through the halos).
+
+    ``leaves`` are differentiable copies of the pack output tensors ordered
+    fields-then-monitor-components; a tiled plane spectrum is stored with its x axis
+    at dim ``-2`` (transverse at ``-1``), matching ``owned_local_slice[0]``.
+    """
+
+    cursor = len(pack.field_names)
+    loss = None
+    for _monitor_name, template in pack.monitor_templates.items():
+        is_point = _monitor_template_is_point(template)
+        for component_name in template["fields"]:
+            spectrum = leaves[cursor]
+            cursor += 1
+            if is_point:
+                strip = spectrum
+            else:
+                owned_x = layout.component(component_name).owned_local_slice[0]
+                index = [slice(None)] * spectrum.ndim
+                index[-2] = owned_x
+                strip = spectrum[tuple(index)]
+            term = (strip.real ** 2 + strip.imag ** 2).sum()
             loss = term if loss is None else loss + term
     if loss is None:
         return 0.0
