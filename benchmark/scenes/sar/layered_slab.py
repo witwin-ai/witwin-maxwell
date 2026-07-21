@@ -83,6 +83,78 @@ def build_scene(*, dx: float = 0.004, device: str = "cuda") -> mw.Scene:
     return scene
 
 
+def build_conservation_scene(*, dx: float = 0.004, device: str = "cuda") -> mw.Scene:
+    """Periodic-transverse variant for a clean 1-D power-conservation balance.
+
+    The shipped :func:`build_scene` uses PML on every face: it illuminates a
+    finite transverse patch, so a closed surface around the slab leaks laterally
+    (edge diffraction into the transverse PML) and the surface Poynting balance
+    does not close against the absorbed-power volume integral. For an infinite
+    planar slab under normal incidence the physical boundary is periodic in the
+    transverse plane; the field is then transverse-uniform and the net power
+    balance reduces to two z-planes:
+
+        P_absorbed = flux(z_in, +z) - flux(z_out, +z)
+
+    where ``z_in`` sits in the vacuum ahead of the slab and ``z_out`` in the
+    vacuum behind it. The absorbed power measured this way (surface E x H) is
+    independent of the volume ``sigma |E|^2`` integral that SAR is built from, so
+    their agreement is a wave-level conservation check, not a self-consistency
+    identity. A small transverse extent is sufficient because the field is
+    uniform there; the loss monitor still spans the full cross-section.
+    """
+
+    lat = 0.02
+    bounds = layer_bounds()
+    stack_end = bounds["muscle"][1]
+    scene = mw.Scene(
+        domain=mw.Domain(
+            bounds=((-0.5 * lat, 0.5 * lat), (-0.5 * lat, 0.5 * lat), (-0.05, stack_end + 0.05))
+        ),
+        grid=mw.GridSpec.uniform(dx),
+        boundary=mw.BoundarySpec(kind="pml", num_layers=10, x="periodic", y="periodic"),
+        device=device,
+    )
+    for tissue, (z_lo, z_hi) in bounds.items():
+        thickness = z_hi - z_lo
+        scene.add_structure(
+            mw.Structure(
+                geometry=mw.Box(
+                    position=(0.0, 0.0, 0.5 * (z_lo + z_hi)),
+                    size=(10.0, 10.0, thickness),
+                ),
+                material=tissue_material(tissue),
+                name=tissue,
+            )
+        )
+    scene.add_source(
+        mw.PlaneWave(
+            direction=(0.0, 0.0, 1.0),
+            polarization=(1.0, 0.0, 0.0),
+            source_time=mw.GaussianPulse(frequency=BENCHMARK_FREQUENCY, fwidth=0.5 * BENCHMARK_FREQUENCY),
+            name="pw",
+        )
+    )
+    scene.add_monitor(
+        mw.PowerLossMonitor(
+            "loss",
+            position=(0.0, 0.0, 0.5 * stack_end),
+            size=(lat, lat, stack_end),
+            frequencies=FREQUENCIES,
+            channels=("conduction",),
+        )
+    )
+    scene.add_monitor(
+        mw.FluxMonitor("flux_in", axis="z", position=-0.02, frequencies=FREQUENCIES, normal_direction="+")
+    )
+    scene.add_monitor(
+        mw.FluxMonitor(
+            "flux_out", axis="z", position=stack_end + 0.02, frequencies=FREQUENCIES, normal_direction="+"
+        )
+    )
+    return scene
+
+
 SCENARIO = ScenarioDefinition(
     name="sar_layered_slab",
     description="Skin/fat/muscle three-layer slab under a plane wave (layered SAR phantom)",
