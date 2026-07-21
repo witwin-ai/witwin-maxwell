@@ -65,6 +65,17 @@ MAX_TIDY3D_COST_PER_SCENARIO = 2.0
 # instead of a billable Tidy3D cloud submission. Use it whenever the benchmark is driven
 # from an automated loop that is only meant to re-score against existing references.
 NO_CLOUD_ENV_VAR = "WITWIN_BENCHMARK_NO_CLOUD"
+# Set WITWIN_BENCHMARK_TRUST_CACHE=1 to load an existing reference cache by name even
+# when its stored cache key does not byte-match the recomputed key. This is a scoped
+# DIAGNOSTIC escape hatch, OFF by default: it exists solely to re-score against
+# references whose key drifted for a provably physics-neutral reason (post-generation
+# key bookkeeping such as always-null Material fields or export contract-version
+# stamps that do not change the exported reference simulation). It does NOT relax the
+# default fail-closed staleness guard used by `python -m benchmark`; every load taken
+# under it prints a loud warning and the caller is responsible for vouching that the
+# cached reference physics still matches the current scene (the geometry-cluster
+# report uses per-scene field correlation as the validity sentinel).
+TRUST_CACHE_ENV_VAR = "WITWIN_BENCHMARK_TRUST_CACHE"
 _MODE_EXPORT_CONTRACT_VERSION = 2
 _GRID_EXPORT_CONTRACT_VERSION = 1
 _MESH_EXPORT_CONTRACT_VERSION = 1
@@ -1506,12 +1517,20 @@ def _load_or_run_tidy3d(
         run_time_factor,
         normalize_source=normalize_source,
     )
+    trust_cache = os.environ.get(TRUST_CACHE_ENV_VAR) == "1"
     cached = has_cache(name) and not force_refresh
     if cached:
         try:
             print(f"  Tidy3D: using cache for {name}")
+            if trust_cache:
+                print(
+                    f"  Tidy3D: WARNING {TRUST_CACHE_ENV_VAR}=1 -- loading {name} reference "
+                    "WITHOUT cache-key validation (physics-neutral drift assumed by caller)"
+                )
             monitors = _rescale_tidy3d_fields(
-                load_tidy3d_result(name, expected_cache_key=cache_key),
+                load_tidy3d_result(
+                    name, expected_cache_key=None if trust_cache else cache_key
+                ),
                 scene=scene,
                 normalize_source=normalize_source,
             )

@@ -22,7 +22,12 @@ def base_scene() -> mw.Scene:
         ),
         grid=mw.GridSpec.uniform(DX),
         boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
+        # Conformal PEC edge handling is the benchmark default: PEC-material faces
+        # that partially fill a Yee cell get fractional-fill edge suppression rather
+        # than a hard staircase edge, matching the external reference solver's
+        # curved/oblique metal treatment. Dielectric scenes are unaffected (no PEC
+        # material); the curved/faceted PEC scenes gain the conformal boundary.
+        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized", pec="conformal"),
         device="cpu",
     )
 

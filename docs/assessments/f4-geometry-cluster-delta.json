@@ -1,0 +1,160 @@
+{
+  "cluster": "grid_geometry",
+  "max_field_l2_after": 0.420144,
+  "max_field_l2_before": 0.526226,
+  "median_field_l2_after": 0.083642,
+  "median_field_l2_before": 0.207163,
+  "median_pct_change": -59.62,
+  "note": "Before = master b3d3c77 node-centered Kottke + arithmetic node->edge smear; After = edge-native per-Yee-component sampling (branch fable/subpixel-lever). Both scored against the IDENTICAL 2026-07-14 external-reference caches under WITWIN_BENCHMARK_TRUST_CACHE=1 (physics-neutral post-generation key drift); the improvement is a delta against a fixed reference. Per-scene field_corr is the reference-validity sentinel and improves or holds on every scene.",
+  "scene_count": 16,
+  "scenes": {
+    "anisotropic_uniform_grid": {
+      "delta": 0.0,
+      "field_corr_after": 1.0,
+      "field_corr_before": 1.0,
+      "field_l2_after": 0.008008,
+      "field_l2_before": 0.008008,
+      "pct_change": 0.0,
+      "reference_cache_hit": true
+    },
+    "autogrid_override_refinement": {
+      "delta": 0.0,
+      "field_corr_after": 0.999,
+      "field_corr_before": 0.999,
+      "field_l2_after": 0.045899,
+      "field_l2_before": 0.045899,
+      "pct_change": 0.0,
+      "reference_cache_hit": true
+    },
+    "autogrid_ring": {
+      "delta": -0.094025,
+      "field_corr_after": 0.9962,
+      "field_corr_before": 0.9835,
+      "field_l2_after": 0.08718,
+      "field_l2_before": 0.181205,
+      "pct_change": -51.89,
+      "reference_cache_hit": true
+    },
+    "autogrid_slab": {
+      "delta": 0.0,
+      "field_corr_after": 0.9994,
+      "field_corr_before": 0.9994,
+      "field_l2_after": 0.035718,
+      "field_l2_before": 0.035718,
+      "pct_change": 0.0,
+      "reference_cache_hit": true
+    },
+    "cone_scatter": {
+      "delta": -0.107745,
+      "field_corr_after": 0.9914,
+      "field_corr_before": 0.9713,
+      "field_l2_after": 0.130604,
+      "field_l2_before": 0.238349,
+      "pct_change": -45.2,
+      "reference_cache_hit": true
+    },
+    "custom_grid_slab": {
+      "delta": 0.0,
+      "field_corr_after": 0.9999,
+      "field_corr_before": 0.9999,
+      "field_l2_after": 0.015353,
+      "field_l2_before": 0.015353,
+      "pct_change": 0.0,
+      "reference_cache_hit": true
+    },
+    "cylinder_scatter": {
+      "delta": -0.034405,
+      "field_corr_after": 0.9556,
+      "field_corr_before": 0.9454,
+      "field_l2_after": 0.296972,
+      "field_l2_before": 0.331377,
+      "pct_change": -10.38,
+      "reference_cache_hit": true
+    },
+    "ellipsoid_scatter": {
+      "delta": -0.083064,
+      "field_corr_after": 0.9972,
+      "field_corr_before": 0.9876,
+      "field_l2_after": 0.075012,
+      "field_l2_before": 0.158076,
+      "pct_change": -52.55,
+      "reference_cache_hit": true
+    },
+    "explicit_mesh_scatter": {
+      "delta": -0.057813,
+      "field_corr_after": 0.9106,
+      "field_corr_before": 0.8845,
+      "field_l2_after": 0.420144,
+      "field_l2_before": 0.477957,
+      "pct_change": -12.1,
+      "reference_cache_hit": true
+    },
+    "hollow_box_scatter": {
+      "delta": -0.481429,
+      "field_corr_after": 0.999,
+      "field_corr_before": 0.8603,
+      "field_l2_after": 0.044797,
+      "field_l2_before": 0.526226,
+      "pct_change": -91.49,
+      "reference_cache_hit": true
+    },
+    "mesh_primitive_scatter": {
+      "delta": -0.10125,
+      "field_corr_after": 0.9968,
+      "field_corr_before": 0.9835,
+      "field_l2_after": 0.080104,
+      "field_l2_before": 0.181354,
+      "pct_change": -55.83,
+      "reference_cache_hit": true
+    },
+    "nonuniform_custom_grid": {
+      "delta": 0.0,
+      "field_corr_after": 0.9976,
+      "field_corr_before": 0.9976,
+      "field_l2_after": 0.069794,
+      "field_l2_before": 0.069794,
+      "pct_change": 0.0,
+      "reference_cache_hit": true
+    },
+    "polyslab_pentagon": {
+      "delta": -0.204251,
+      "field_corr_after": 0.9945,
+      "field_corr_before": 0.9521,
+      "field_l2_after": 0.105262,
+      "field_l2_before": 0.309513,
+      "pct_change": -65.99,
+      "reference_cache_hit": true
+    },
+    "polyslab_wg": {
+      "delta": -0.285318,
+      "field_corr_after": 0.9941,
+      "field_corr_before": 0.9222,
+      "field_l2_after": 0.108811,
+      "field_l2_before": 0.394129,
+      "pct_change": -72.39,
+      "reference_cache_hit": true
+    },
+    "prism_scatter": {
+      "delta": -0.126141,
+      "field_corr_after": 0.9943,
+      "field_corr_before": 0.9728,
+      "field_l2_after": 0.106831,
+      "field_l2_before": 0.232972,
+      "pct_change": -54.14,
+      "reference_cache_hit": true
+    },
+    "pyramid_scatter": {
+      "delta": -0.057813,
+      "field_corr_after": 0.9106,
+      "field_corr_before": 0.8845,
+      "field_l2_after": 0.420144,
+      "field_l2_before": 0.477957,
+      "pct_change": -12.1,
+      "reference_cache_hit": true
+    }
+  },
+  "scenes_flat": 5,
+  "scenes_improved": 11,
+  "scenes_regressed": 0,
+  "worst_regression_delta": 0.0
+}
