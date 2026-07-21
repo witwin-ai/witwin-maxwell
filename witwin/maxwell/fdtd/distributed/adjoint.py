@@ -769,11 +769,12 @@ class _DistributedFDTDGradientBridge:
         for n in range(int(time_steps)):
             if n > 0 and n % stride == 0:
                 # The step kernels of the preceding iterations are enqueued on each
-                # shard's non-blocking compute/communication streams, while the
-                # checkpoint clones read the padded field storage on the device
-                # default stream. Enforce stream ordering before every mid-loop
-                # capture so the clone never races an in-flight update kernel; the
-                # cost is one sync per checkpoint stride (~sqrt(N) times total).
+                # shard's non-blocking compute/communication streams; the checkpoint
+                # clones now also run on each shard's compute stream (see
+                # capture_distributed_checkpoint), so the clone is FIFO-ordered
+                # against the surrounding updates. This sync still settles the
+                # cross-stream/halo state before every mid-loop capture; the cost is
+                # one sync per checkpoint stride (~sqrt(N) times total).
                 distributed._synchronize_all()
                 checkpoints.append(capture_distributed_checkpoint(distributed, n))
             distributed._advance_one_step(n, overlap_active=overlap_active)
