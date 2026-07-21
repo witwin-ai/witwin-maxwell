@@ -193,7 +193,7 @@
       "source": "docs/assessments/network-embedding-gate-d-remeasure-2026-07-20.json sweep[*].baseline_median_ms"
     },
     "delta_vs_historical_pct": -0.09804526932556401,
-    "harness": "scratch/task3_nofeature.py reusing benchmark_network_embedding._scene(dynamic=False)",
+    "harness": "docs/assessments/exclusive-timing-window-probes/task3_nofeature.py reusing benchmark_network_embedding._scene(dynamic=False)",
     "historical_median_ms_per_step": 0.4909346666666667,
     "historical_source": "network-embedding-phase-4-performance-grid-sweep.json baseline grid 128",
     "host_cross_session_aa_floor_pct": 0.523,

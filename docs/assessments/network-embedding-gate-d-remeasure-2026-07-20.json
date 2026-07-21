@@ -31,8 +31,8 @@
     "rounds": 6,
     "time_steps": 1500
   },
-  "command": "numactl --cpunodebind=0 --membind=0 conda run -n maxwell python scratch/task1_gate_d.py --rounds 6 --aa-grid 224 --output docs/assessments/network-embedding-gate-d-remeasure-2026-07-20.json",
-  "driver": "scratch/task1_gate_d.py (not committed)",
+  "command": "numactl --cpunodebind=0 --membind=0 conda run -n maxwell python docs/assessments/exclusive-timing-window-probes/task1_gate_d.py --rounds 6 --aa-grid 224 --output docs/assessments/network-embedding-gate-d-remeasure-2026-07-20.json",
+  "driver": "docs/assessments/exclusive-timing-window-probes/task1_gate_d.py (not committed)",
   "environment": {
     "compute_capability": "8.6",
     "cpu_governor": "performance",
