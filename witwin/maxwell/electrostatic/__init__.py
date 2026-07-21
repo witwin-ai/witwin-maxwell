@@ -7,6 +7,8 @@ from .api import (
 from .capacitance import (
     CapacitanceData,
     CapacitanceSimulation,
+    TruncationEstimate,
+    TruncationReport,
     extract_capacitance,
 )
 from .runtime import (
@@ -29,6 +31,8 @@ __all__ = [
     "solve_electrostatics",
     "CapacitanceData",
     "CapacitanceSimulation",
+    "TruncationEstimate",
+    "TruncationReport",
     "extract_capacitance",
     "ElectrostaticInitialCondition",
     "DEFAULT_GAUSS_TOLERANCE",

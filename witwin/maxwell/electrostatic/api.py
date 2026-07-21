@@ -120,6 +120,17 @@ def _normalize_bc_entry(name: str, value) -> tuple[str, float]:
             raise ValueError(f"{name} boundary override must be a kind or a (kind, value) pair.")
         kind = str(value[0]).strip().lower()
         magnitude = float(value[1])
+    if kind == "open":
+        raise NotImplementedError(
+            "Open (infinite-domain) electrostatic boundaries are not implemented: a "
+            "grounded-box (Dirichlet) or insulating (Neumann) enclosure is a finite "
+            "truncation of an open problem, and there is no exact radiation condition on "
+            "the scalar potential at a finite Cartesian face. Model an isolated structure "
+            "by enlarging the grounded-box domain until the capacitance converges, and "
+            "quantify the residual truncation error with the opt-in truncation_estimate on "
+            "Simulation.capacitance(...). A boundary-element exact open boundary is a later "
+            "phase."
+        )
     if kind not in _BC_KINDS:
         raise ValueError(
             f"{name} boundary kind must be one of {_BC_KINDS!r}, got {kind!r}."

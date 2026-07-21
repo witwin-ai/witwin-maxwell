@@ -644,6 +644,34 @@ removed and one reachable guard is added.
   `ChargeDensity` in a tensor-dielectric scene). Lower this budget when the
   tensor-eps backward (or the open-boundary work, stage H2b) lands.
 
+### Electrostatics reconciliation (2026-07-21, plan 12 Phase 4 open boundary / truncation, stage H2b)
+
+The controlled open-boundary (domain-extension) piece lands: an opt-in
+`TruncationEstimate` runs one additional enlarged grounded-box capacitance solve
+(interior grid held byte-identical, the grounded box pushed out by whole cells) and
+reports the finite-enclosure truncation error plus a 1/L Richardson extrapolation
+to the infinite-domain limit (`CapacitanceData.truncation_estimate`). The second
+solve is never run silently; it is triggered only by `Simulation.capacitance(...,
+truncation_estimate=...)`.
+
+Net capability-guard change is **+1** (budget `175 -> 176`):
+
+- Added (`+1`): `electrostatic/api.py` `_normalize_bc_entry` rejects an `open`
+  (infinite-domain) boundary kind (`"Open (infinite-domain) electrostatic
+  boundaries are not implemented..."`). There is no exact radiation condition on
+  the scalar potential at a finite Cartesian face, so an `open` face fails closed
+  rather than silently solving a grounded/insulating truncation the user did not
+  request. The supported path is the domain-extension `truncation_estimate`. A
+  boundary-element exact open boundary is a later phase; lower this budget when it
+  lands.
+
+The `truncation_estimate` misuse cases (a non-Dirichlet enclosure, a non-uniform
+grid) raise `ValueError` (usage errors, not capability guards). The tensor-eps
+**differentiability disposition** is decided as **fail-closed**: Phase 4 owns the
+forward SPD tensor-eps operator and the plan defers electrostatic gradients to
+Phase 5, so the H2a `_reject_trainable_tensor` guard is retained unchanged and no
+differentiability guard is added or removed here.
+
 ### Deterministic dielectric breakdown reconciliation (2026-07-19)
 
 Plan 13 Phase 4 lands the deterministic field-duration/latching dynamic

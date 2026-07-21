@@ -176,3 +176,137 @@ passes.
   `torch.Tensor` `eps_r` with `numel != 1`) remains rejected (`NotImplementedError`,
   unchanged). Anisotropy is expressed per-structure via `DiagonalTensor3` /
   `Tensor3x3`; spatial variation comes from multiple structures.
+
+---
+
+## Stage H2b — open-boundary / domain-extension convergence + `truncation_estimate` API + differentiability disposition
+
+Base for this stage: `70074e7` (the H2a commit on branch `fable/es-tensor-open`).
+Environment: conda `maxwell`, `CUDA_VISIBLE_DEVICES=1`, float64 oracles on GPU.
+
+### Delivered items
+
+1. **`open` electrostatic boundary fail-close.** `ElectrostaticBoundarySpec` now
+   rejects an `open` (infinite-domain) boundary kind on any face with a clear
+   `NotImplementedError` (there is no exact radiation condition on the scalar
+   potential at a finite Cartesian face; a boundary-element open boundary is a
+   later phase). One reviewed capability guard, `electrostatic/api.py`
+   `_normalize_bc_entry`.
+
+2. **Opt-in `truncation_estimate` domain-extension API.** New public
+   `TruncationEstimate(padding_cells=N)` config and `TruncationReport` result type
+   (exported from `witwin.maxwell`). `Simulation.capacitance(scene, ...,
+   truncation_estimate=...)` runs ONE additional enlarged grounded-box capacitance
+   solve — never silently; only when the config is passed. The enlarged solve holds
+   the interior cell grid byte-identical (the domain grows by exactly `padding_cells`
+   cell widths per side per axis, so the original cell centres are reproduced and
+   only the grounded box moves), so the reported change isolates the pure
+   boundary-truncation effect. `result.capacitance.truncation_estimate` carries the
+   base/enlarged matrices, their `delta`, `max_relative_delta` (relative sensitivity
+   of C to the enclosure size), the effective base/enlarged enclosure sizes, and a
+   1/L Richardson extrapolation `richardson_matrix` to the infinite-domain limit
+   with `richardson_max_relative_shift`. `max_relative_delta` and the Richardson
+   shift are also surfaced on `Result.solver_stats`.
+
+3. **Two-axis domain-extension convergence study** (committed tests): self-capacitance
+   of an isolated conductor vs enclosure size `L` at fixed grid (monotone decrease
+   toward a stable Richardson `C_inf`; every finite-`L` capacitance exceeds `C_inf`;
+   truncation error shrinks with `L`) AND vs grid at fixed `L` (Cauchy-convergent
+   under refinement).
+
+4. **Differentiability disposition — decided: fail-closed.** Plan 12 assigns
+   electrostatic gradients to Phase 5; Phase 4 owns the forward SPD tensor-eps
+   operator only. A trainable input under a tensor dielectric therefore fails closed
+   on both the `Simulation.electrostatic(...)` (H2a `_reject_trainable_tensor`) and
+   `Simulation.capacitance(...)` public paths (the capacitance extractor calls the
+   same guard), rather than shipping an unverified/detached gradient. No new
+   differentiability guard is added or removed; the isotropic implicit-diff backward
+   is unchanged.
+
+### Files added / changed (H2b)
+
+- `witwin/maxwell/electrostatic/api.py`: `_normalize_bc_entry` `open`-boundary reject.
+- `witwin/maxwell/electrostatic/capacitance.py`: `TruncationEstimate`,
+  `TruncationReport`, `CapacitanceData.truncation_estimate`, `_enlarged_scene`,
+  `CapacitanceSimulation._truncation_report` + opt-in wiring in `run()`.
+- `witwin/maxwell/simulation.py`: `Simulation.capacitance(..., truncation_estimate=...)`.
+- `witwin/maxwell/electrostatic/__init__.py`, `witwin/maxwell/__init__.py`: export
+  `TruncationEstimate` / `TruncationReport`.
+- `tests/electrostatic/test_open_boundary.py`: new gate suite (11 tests).
+- `docs/reference/fdtd-capability-guard-census.md`,
+  `tests/api/public/test_guard_census.py`: H2b census note, budget `175 -> 176`.
+- `FEATURE_LIST.md`: additive H2b lines in the `h2-es-tensor` subsection.
+
+### Test inventory (H2b; all pass; float64, GPU 1)
+
+Command:
+```
+export CUDA_HOME=/home/xingyu/miniconda3/envs/maxwell/lib/python3.11/site-packages/nvidia/cu13
+export PATH="$CUDA_HOME/bin:$PATH"; export PYTHONPATH=<worktree>; export CUDA_VISIBLE_DEVICES=1
+conda run -n maxwell --no-capture-output python -m pytest \
+  tests/electrostatic/ tests/api/public/test_guard_census.py \
+  tests/api/public/test_public_api.py tests/api/public/test_simulation_smoke.py \
+  tests/materials/compiler/test_material_compiler.py tests/core/scene/test_scene.py -q
+```
+Result: **194 passed** (183 from H2a + 11 new H2b `test_open_boundary.py`).
+
+`tests/electrostatic/test_open_boundary.py` (11 tests):
+- `test_open_boundary_default_fails_closed`, `test_open_boundary_per_face_fails_closed`
+  — the `open` boundary raises `NotImplementedError`.
+- `test_domain_extension_convergence_vs_size` — C(L) strictly decreasing over
+  L in {0.8, 1.2, 1.6, 2.0} (fixed h=0.05); consecutive 1/L Richardson `C_inf`
+  agree to `< 5%`; `C_inf` below every finite-L C; truncation error shrinks with L.
+- `test_grid_convergence_at_fixed_size` — C Cauchy-convergent under h in
+  {0.1, 0.05, 0.025} at fixed L=1.0.
+- `test_truncation_estimate_is_opt_in` — no report unless requested.
+- `test_truncation_estimate_reports_domain_error` — report populated; enlarged
+  domain grew by exactly `2*pad` cells/axis; `delta[0,0] < 0`; Richardson below
+  enlarged; stats surfaced.
+- `test_truncation_estimate_reduces_with_larger_padding` — larger extension moves
+  C more (captures more residual truncation).
+- `test_truncation_estimate_requires_dirichlet_enclosure`,
+  `test_truncation_estimate_requires_uniform_grid`, `test_truncation_estimate_type_check`
+  — misuse `ValueError`/`TypeError`.
+- `test_capacitance_trainable_tensor_fails_closed` — public capacitance path rejects
+  a trainable free charge under an anisotropic dielectric (`NotImplementedError`).
+
+### Falsifications recorded (H2b)
+
+1. **Remove the `open`-boundary special-case** (`electrostatic/api.py`: change the
+   `if kind == "open":` trigger to an impossible kind). Observed RED:
+   `test_open_boundary_default_fails_closed` and `test_open_boundary_per_face_fails_closed`
+   both fail — an `open` face now falls through to the generic `_BC_KINDS` check and
+   raises `ValueError` ("boundary kind must be one of ...") instead of the specific
+   `NotImplementedError`. Restored -> green.
+
+2. **Neutralize the enlargement** (`_enlarged_scene`: pad by zero cells so the
+   enlarged domain equals the base). Observed RED:
+   `test_truncation_estimate_reports_domain_error` fails — `enlarged_size == base_size`
+   (1.0 vs the expected 1.8), `delta ~ 0`, and the 1/L Richardson divides by
+   `f - 1 = 0` producing `nan`. Restored -> green. (Confirms the report genuinely
+   reflects a real, non-trivial domain extension, not a self-comparison.)
+
+### Capability-guard census (H2b)
+
+Net **+1**, budget `175 -> 176` (measured 176 == budget; `test_guard_census.py`
+passes). Added: `electrostatic/api.py` `_normalize_bc_entry` `open`-boundary reject.
+The differentiability disposition is fail-closed (Phase 4 forward-only; gradients are
+Phase 5), so the H2a `_reject_trainable_tensor` guard is retained unchanged and no
+differentiability guard is added or removed. `truncation_estimate` misuse cases
+(non-Dirichlet enclosure, non-uniform grid) raise `ValueError` and are not capability
+guards.
+
+### Known gaps / deferred (after H2b)
+
+- **Tensor-eps differentiable backward** (Phase 5): the off-diagonal cross-flux VJP
+  is still unimplemented; trainable tensor eps / free charge under a tensor
+  dielectric fails closed. Decided disposition, not an oversight.
+- **Exact open boundary** (boundary-element / infinite-domain): deferred to a later
+  phase; the domain-extension `truncation_estimate` is the controlled-truncation
+  substitute this round.
+- **Dirichlet-wall cross-flux boundary layer** (carried from H2a): the interior
+  cross-flux is 2nd-order, the one-sided wall cross-flux is 1st-order for a field
+  with a strong tangential wall gradient. Untouched this stage.
+- The Richardson extrapolation assumes a 1/L leading truncation error (physically
+  the monopole image term of a charged conductor in a grounded shell); it is an
+  estimate, not a certified bound, and is documented as such on `TruncationReport`.

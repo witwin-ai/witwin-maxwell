@@ -47,6 +47,8 @@ from .electrostatic import (
     ElectrostaticResultData,
     ElectrostaticSolverConfig,
     ElectrostaticTerminal,
+    TruncationEstimate,
+    TruncationReport,
 )
 from .esd import (
     ESDCurrentSource,
@@ -278,6 +280,8 @@ __all__ = [
     "ElectrostaticResultData",
     "ElectrostaticSolverConfig",
     "ElectrostaticTerminal",
+    "TruncationEstimate",
+    "TruncationReport",
     "Ellipsoid",
     "ESDCurrentSource",
     "ESDDiagnostics",

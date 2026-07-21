@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import torch
 
 from ..compiler.electrostatic import CompiledElectrostatics, compile_electrostatics
+from ..scene import Domain
 from .api import ElectrostaticBoundarySpec, ElectrostaticSolverConfig
 from .runtime import (
     ElectrostaticOperator,
@@ -12,6 +13,84 @@ from .runtime import (
     _reject_trainable_tensor,
     solve_fixed_potential,
 )
+
+
+@dataclass(frozen=True)
+class TruncationEstimate:
+    """Opt-in configuration for the domain-extension truncation-error estimate.
+
+    A finite grounded-box (Dirichlet) enclosure truncates the open-domain field of
+    an isolated structure, so the extracted capacitance carries a boundary
+    truncation error. Requesting this triggers ONE additional, enlarged capacitance
+    solve -- never run silently. The interior grid is held byte-identical: the
+    grounded box is pushed outward by ``padding_cells`` whole cells on every side of
+    every axis (the domain grows by exactly ``padding_cells`` cell widths per side,
+    so the original cell centres are reproduced and only the enclosure moves). The
+    report quantifies how much the capacitance matrix moved and a 1/L Richardson
+    extrapolation to the infinite-domain limit.
+    """
+
+    padding_cells: int = 8
+
+    def __post_init__(self):
+        pad = int(self.padding_cells)
+        if pad <= 0:
+            raise ValueError("TruncationEstimate.padding_cells must be > 0.")
+        object.__setattr__(self, "padding_cells", pad)
+
+
+@dataclass
+class TruncationReport:
+    """Boundary-truncation error estimate from a domain-extension resolve.
+
+    ``base_matrix`` / ``enlarged_matrix`` are the capacitance matrices on the
+    original and the enlarged grounded-box domain (identical interior grid).
+    ``delta = enlarged - base``. ``max_relative_delta = max|delta| / max|base|`` is
+    a direct measure of how sensitive the extracted capacitance is to the enclosure
+    size; a small value means the box is far enough away that truncation is
+    negligible. ``base_size`` / ``enlarged_size`` are the effective linear enclosure
+    sizes (the smallest domain extent, which bounds the nearest-wall distance that
+    dominates the truncation). ``richardson_matrix`` is a 1/L Richardson
+    extrapolation to the infinite-domain limit assuming the leading grounded-box
+    truncation error scales as 1/L (the monopole image term of a charged conductor
+    in a grounded shell of linear size L): ``C_inf = C_enl + (C_enl - C_base) /
+    (enlarged_size / base_size - 1)``. It is an estimate, not a certified bound.
+    ``richardson_max_relative_shift = max|richardson - enlarged| / max|base|`` is
+    the estimated residual truncation still present at the enlarged size.
+    """
+
+    padding_cells: int
+    base_matrix: torch.Tensor
+    enlarged_matrix: torch.Tensor
+    delta: torch.Tensor
+    max_relative_delta: float
+    base_size: float
+    enlarged_size: float
+    richardson_matrix: torch.Tensor
+    richardson_max_relative_shift: float
+
+
+def _min_domain_extent(bounds) -> float:
+    return min(float(hi - lo) for lo, hi in bounds)
+
+
+def _enlarged_scene(scene, padding_cells: int):
+    """Clone ``scene`` with the domain grown by whole cells on every side.
+
+    Keeps the interior cell grid byte-identical (the domain grows by exactly
+    ``padding_cells`` cell widths per side per axis), so the only change is that the
+    grounded box moves outward. Requires a uniform grid.
+    """
+    grid = scene.grid
+    if grid.is_custom or grid.is_auto:
+        raise ValueError(
+            "truncation_estimate requires a uniform GridSpec so the interior grid stays "
+            "fixed while the grounded box is pushed out by whole cells; got a custom/auto grid."
+        )
+    hx, hy, hz = grid.spacing
+    pads = (padding_cells * hx, padding_cells * hy, padding_cells * hz)
+    new_bounds = tuple((lo - pad, hi + pad) for (lo, hi), pad in zip(scene.domain.bounds, pads))
+    return scene.clone(domain=Domain(new_bounds))
 
 
 @dataclass
@@ -49,6 +128,9 @@ class CapacitanceData:
     energy: torch.Tensor
     reciprocity_error: float
     row_sum_error: float
+    # Optional domain-extension truncation-error estimate (opt-in second solve);
+    # None unless a TruncationEstimate was requested. See TruncationReport.
+    truncation_estimate: "TruncationReport | None" = None
     _index: dict[str, int] = field(default_factory=dict, repr=False)
 
     def _resolve(self, name: str) -> int:
@@ -219,7 +301,10 @@ class CapacitanceSimulation:
     is the typed :class:`CapacitanceData`.
     """
 
-    def __init__(self, scene, *, terminals=None, reference=None, boundary=None, solver=None):
+    def __init__(
+        self, scene, *, terminals=None, reference=None, boundary=None, solver=None,
+        truncation_estimate=None,
+    ):
         self.scene = scene
         self.terminals = None if terminals is None else tuple(terminals)
         self.reference = None if reference is None else str(reference)
@@ -233,15 +318,62 @@ class CapacitanceSimulation:
         if not isinstance(solver, ElectrostaticSolverConfig):
             raise TypeError("solver must be an ElectrostaticSolverConfig.")
         self.solver = solver
+        if truncation_estimate is not None and not isinstance(truncation_estimate, TruncationEstimate):
+            raise TypeError("truncation_estimate must be a TruncationEstimate or None.")
+        self.truncation_estimate = truncation_estimate
 
     def prepare(self) -> CompiledElectrostatics:
         return compile_electrostatics(self.scene, self.boundary, dtype=self.solver.dtype)
+
+    def _truncation_report(self, base_data: CapacitanceData) -> TruncationReport:
+        """Run one enlarged grounded-box solve and estimate the truncation error."""
+        if not self.boundary.has_dirichlet:
+            raise ValueError(
+                "truncation_estimate is defined for a Dirichlet enclosure (e.g. "
+                "ElectrostaticBoundarySpec.grounded_box()): it measures how the capacitance "
+                "changes as the grounded box is pushed outward. The current boundary has no "
+                "Dirichlet face, so there is no enclosure to extend."
+            )
+        pad = self.truncation_estimate.padding_cells
+        enlarged_scene = _enlarged_scene(self.scene, pad)
+        enlarged_compiled = compile_electrostatics(
+            enlarged_scene, self.boundary, dtype=self.solver.dtype
+        )
+        enlarged_data = extract_capacitance(
+            enlarged_compiled, self.terminals, self.reference, self.solver
+        )
+        base_m = base_data.matrix
+        enl_m = enlarged_data.matrix
+        delta = enl_m - base_m
+        scale = float(base_m.detach().abs().max()) + 1.0e-300
+        max_rel = float(delta.detach().abs().max()) / scale
+
+        base_size = _min_domain_extent(self.scene.domain.bounds)
+        enlarged_size = _min_domain_extent(enlarged_scene.domain.bounds)
+        f = enlarged_size / base_size
+        # 1/L Richardson: C(L) = C_inf + K/L, two sizes give
+        # C_inf = C_enl + (C_enl - C_base) / (f - 1), f = enlarged/base.
+        richardson = enl_m + (enl_m - base_m) / (f - 1.0)
+        rich_shift = float((richardson - enl_m).detach().abs().max()) / scale
+        return TruncationReport(
+            padding_cells=pad,
+            base_matrix=base_m,
+            enlarged_matrix=enl_m,
+            delta=delta,
+            max_relative_delta=max_rel,
+            base_size=base_size,
+            enlarged_size=enlarged_size,
+            richardson_matrix=richardson,
+            richardson_max_relative_shift=rich_shift,
+        )
 
     def run(self):
         from ..result import Result
 
         compiled = self.prepare()
         data = extract_capacitance(compiled, self.terminals, self.reference, self.solver)
+        if self.truncation_estimate is not None:
+            data.truncation_estimate = self._truncation_report(data)
         return Result(
             method="capacitance",
             scene=self.scene,
@@ -251,6 +383,16 @@ class CapacitanceSimulation:
                 "row_sum_error": data.row_sum_error,
                 "terminal_order": data.terminal_order,
                 "reference": data.reference,
+                **(
+                    {
+                        "truncation_max_relative_delta": data.truncation_estimate.max_relative_delta,
+                        "truncation_richardson_max_relative_shift": (
+                            data.truncation_estimate.richardson_max_relative_shift
+                        ),
+                    }
+                    if data.truncation_estimate is not None
+                    else {}
+                ),
             },
             raw_output=data,
         )
