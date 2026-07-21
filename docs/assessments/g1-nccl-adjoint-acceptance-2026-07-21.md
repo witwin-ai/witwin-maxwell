@@ -156,3 +156,168 @@ python -m pytest tests/api/public/test_guard_census.py tests/api/public/test_pub
   dict-based forward NCCL halos and a `scatter`/local-seed path (a separable
   full-field-DFT objective avoids a cotangent scatter for the standard gate).
 - Census budget unchanged at 176; no guard added or relaxed.
+
+---
+
+# G1 NCCL adjoint — acceptance (stage G1b)
+
+Stage G1b scope: **CPML psi-carrying NCCL reverse + psi-active parity + opt-in
+timing hooks (zero-cost-off asserted) + S5 tiled-seed stretch or deferral +
+docs/census/FEATURE_LIST**. Same hardware/env/PYTHONPATH preamble as G1a.
+
+## Delivered (G1b)
+
+### 1. Opt-in per-rank step-rate timing instrument (supervisor decision 3) — DONE
+
+`witwin/maxwell/fdtd/distributed/instrumentation.py` :: `StepRateInstrument`.
+Env-gated (`WITWIN_FDTD_STEP_TIMING`, off by default; `WITWIN_FDTD_STEP_TIMING_DIR`
+selects the output directory; `WITWIN_FDTD_STEP_TIMING_STEPS` sizes the worker's
+timing pass). Brackets a rank's time loop (`loop_begin` / `step_begin` /
+`step_end` / `loop_end`) and `finalize()` writes one machine-readable
+`step_timing_rank{r}.json` per rank (schema `witwin.fdtd.step_timing/1`: per-step
+wall mean/median/min/max/p95 in ms, aggregate steps-per-second, plus
+rank/world-size/device/step-count).
+
+* **Zero-cost-off (asserted):** with the env var unset the bracket calls return
+  immediately and never synchronize the device — a unit test injects a counting
+  `synchronize` stand-in and asserts **0** synchronizations across a full disabled
+  loop and that **no** artifact is written; the enabled path synchronizes exactly
+  `2 + 2·steps` times (bracketing each step so the recorded interval reflects
+  completed GPU work, not launch latency).
+* **NCCL worker wiring:** `_nccl_forward_worker.py` runs the instrument as an
+  opt-in collective pass after its parity solve; disabled (default, and always in
+  CI) it drives no collective and is byte-identical to the un-instrumented run, so
+  the exclusive-GPU window can flip the env var and collect per-rank JSON later. No
+  wall-clock number is asserted anywhere.
+
+Files:
+- `witwin/maxwell/fdtd/distributed/instrumentation.py` (new).
+- `tests/fdtd/multi_gpu/test_step_instrument.py` (new host unit tests).
+- `tests/fdtd/multi_gpu/_nccl_forward_worker.py` (`_run_timing_pass`, opt-in).
+- `tests/fdtd/multi_gpu/test_nccl_transport.py`
+  (`test_two_rank_nccl_step_timing_emits_per_rank_json` launcher).
+- `FEATURE_LIST.md` (additive G1b subsection).
+
+Commit: `feat(fdtd-distributed): opt-in per-rank step-rate timing instrument (zero-cost-off)`.
+
+### 2. CPML psi-carrying NCCL reverse + psi-active parity (decisions 1–2) — FAIL-CLOSED DEFERRAL
+
+Retained fail-closed (unchanged guard: `_validate_nccl_capabilities` still raises
+`"Multi-GPU NCCL adjoint (trainable density) is not wired yet; ..."`; census
+budget 176 unchanged). Reason (design blocker, per common-brief clause): the CPML
+psi-carrying NCCL reverse layers directly on top of the **end-to-end
+trainable-density NCCL reverse driver** that G1a deferred as a multi-file
+subsystem. That base driver does not exist yet, so the CPML variant has no host to
+extend. Verifying it to the mandated gates (objective + gathered-gradient parity
+vs the single-GPU reference on the standard dielectric Box AND the psi-active CPML
+scene, repeat-determinism, and the no-op-halo / zero-psi-carry falsifications —
+mirroring `tests/fdtd/multi_gpu/test_adjoint_parity_cpml.py` over NCCL) requires a
+working, green driver; shipping an unverified per-rank gradient path would violate
+the fail-closed-over-unverified-gradient rule and evidence discipline. It is
+therefore recorded as a documented deferral rather than a partial/flaky landing.
+
+**What is already proven (the load-bearing prerequisites):**
+- Transport-level discrete-transpose identity of both NCCL reverse halos across 2
+  real processes (G1a, bitwise) — the reverse loop's cross-interface transport is
+  exact.
+- The in-process CPML psi-carrying reverse itself is validated end-to-end
+  (`_DistributedFDTDGradientBridge._reverse_phases_cpml`, no psi halo, S4 audit +
+  `test_adjoint_parity_cpml.py`): the per-engine reverse cores and the "field
+  halos carry all cross-interface coupling, psi stays rank-local" result the NCCL
+  driver will reuse verbatim are already gated.
+
+**Concrete remaining subsystem for the next agent (executable order):**
+1. **Relax the entry guard** narrowly: add an internal `allow_adjoint` path so an
+   adjoint driver may construct the per-rank `DistributedFDTD` with a point-monitor
+   (or full-field-DFT) trainable scene without tripping the forward-only
+   monitor/trainable fences — keep every other fence and add a census-tracked
+   guard if the relaxation widens the envelope (reconcile the 176 budget then).
+2. **Per-rank checkpoint capture** (`capture_checkpoint_state(shard.solver, step)`
+   for the single local shard) inside the real NCCL forward loop
+   (`_advance_one_step`, collective).
+3. **NCCL forward-replay dict halos** — the one genuinely new transport primitive:
+   dict-based forward electric/magnetic x-plane send/recv (transpose siblings of
+   the G1a adjoint halos) so `replay_distributed_segment`'s in-process tensor-dict
+   halos (no-ops with one local shard) become collective. Gate it standalone: a
+   2-process worker replaying a checkpoint segment must reproduce a second
+   independent NCCL `solve()`'s owned+interface state to reduction-order drift
+   (rtol 1e-5 / atol 1e-7, matching the in-process replay-parity gate).
+4. **Local separable seed:** for the point-monitor objective (as in
+   `test_adjoint_parity_cpml.py`) only the owning rank has a nonzero seed — read
+   its shard-local monitor output and build the seed with `_build_output_seeds`;
+   every other rank seeds zero and receives adjoint solely through the halos.
+   (Avoids the global monitor gather NCCL forward rejects.)
+5. **Per-rank reverse loop:** reuse the per-engine reverse cores + this track's
+   NCCL adjoint halos exactly as `_reverse_phases_standard` / `_reverse_phases_cpml`
+   already do — those methods iterate `distributed.shards` (which is `(local,)` per
+   NCCL rank) and call `distributed.transport.exchange_*_adjoint`, so they are
+   already transport-agnostic; factor them to module-level free functions (re-run
+   the in-process CPML parity suite to prove no regression) OR reimplement the
+   ~40-line orchestration in the driver.
+6. **grad_eps gather + rank-0 pullback:** `distributed._gather_component` (NCCL:
+   global on rank 0, `None` elsewhere) then `pullback_material_input_gradients`
+   on rank 0; compare loss + density grad against a single-GPU trainable reference
+   built in the same worker on rank 0 (standard scene at the plan monitor gate;
+   CPML psi-active scene at rtol 1e-4 / atol-floor 1e-6·max|grad|, `_PSI_STEPS`/
+   `_PSI_MONITOR_X` from the in-process test).
+7. **Gates:** parity (2a), no-op-one-adjoint-halo falsification (2b),
+   repeat-determinism of gathered grad_eps (2c), and the psi-active variant + the
+   zero-psi-carry falsification.
+
+### 3. S5 tiled monitor seeds (decision 4, stretch) — DEFERRED
+
+Deferred, as the decision permits ("stretch only if 1–3 are green and
+audited-quality"). Item 2 (the CPML psi-carrying reverse) is not green, so S5 is
+not entered. The plane/flux/mode cotangent scatter across shards remains rejected
+fail-closed by `require_distributed_adjoint_objective_support` (unchanged); the
+scatter design is the S3 deferral (`fdtd-joint-solve-adjoint-s4-progress`
+step 5 / `_scatter_field_grad_to_shard`'s per-owned-interval transpose applied to
+tiled monitor cotangents). No code change; no census impact.
+
+## Test inventory (G1b, executed on 2x A6000)
+
+Exact commands (preamble: `CUDA_HOME=.../nvidia/cu13`, `PATH=$CUDA_HOME/bin:$PATH`,
+`PYTHONPATH=<this worktree>`, `CUDA_VISIBLE_DEVICES=0,1`,
+`TORCH_NCCL_ASYNC_ERROR_HANDLING=1`):
+
+```
+# instrument host unit tests + full NCCL transport suite + census + public/smoke
+python -m pytest tests/fdtd/multi_gpu/test_step_instrument.py \
+  tests/fdtd/multi_gpu/test_nccl_transport.py \
+  tests/api/public/test_guard_census.py tests/api/public/test_public_api.py \
+  tests/api/public/test_simulation_smoke.py -q
+#   -> 65 passed
+
+# opt-in timing pass emits per-rank JSON in the real NCCL worker (schema only)
+WITWIN_FDTD_STEP_TIMING=1 WITWIN_FDTD_STEP_TIMING_DIR=<dir> WITWIN_FDTD_STEP_TIMING_STEPS=64 \
+  python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node=2 \
+  tests/fdtd/multi_gpu/_nccl_forward_worker.py
+#   -> NCCL_FORWARD_WORKER_OK; step_timing_rank0.json + step_timing_rank1.json written
+```
+
+- `test_step_instrument.py`: **5 passed** (disabled-by-default; zero-cost-off with
+  0 synchronizations + no artifact; enabled schema + `2+2N` sync count; per-rank
+  distinct files; `step_end`-without-`step_begin` raises).
+- `test_nccl_transport.py`: full suite green including
+  `test_two_rank_nccl_step_timing_emits_per_rank_json` (new), the G1a forward /
+  transpose-identity / falsification launchers, and the host guard matrix.
+- `test_guard_census.py`: budget **176**, unchanged (no guard added/relaxed).
+
+## Falsifications recorded (G1b)
+
+- **Zero-cost-off has teeth:** editing `StepRateInstrument.step_begin` to
+  synchronize *before* the `enabled` guard (i.e. even when disabled) makes
+  `test_disabled_never_synchronizes_and_writes_nothing` fail with
+  `assert 25 == 0` (25 = one synchronize per disabled step across the 25-step
+  loop). Restored → green. This proves the zero-cost-off assertion catches an
+  unconditional per-step synchronize regression.
+
+## Known gaps / deferred (G1b)
+
+- CPML psi-carrying NCCL reverse + psi-active parity: fail-closed deferral with the
+  executable subsystem plan above (blocked on the G1a-deferred base driver).
+- S5 tiled monitor seeds: deferred (gated on item 2).
+- No wall-clock/timing numbers produced (correctness-only shared GPUs); the timing
+  instrument is delivered and unit-tested but the exclusive window produces the
+  numbers.
+- Census budget unchanged at 176; no guard added or relaxed.
