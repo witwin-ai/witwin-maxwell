@@ -119,3 +119,137 @@ python -m pytest tests/materials/ferrite/ tests/api/public/test_guard_census.py 
 - Bloch-periodic, FDFD ingest, multi-GPU, adjoint, PerturbationMedium-over-ferrite
   remain fail-closed (unchanged).
 - No wall-clock timing measured (shared-GPU policy).
+
+---
+
+## G3b — handedness / passivity / zero-impact gates, mixed-bias support, census
+
+### Delivered
+
+- **Mixed-bias support (disposition: SUPPORT).** The "single uniform bias direction"
+  fail-closed guard in `build_gyromagnetic` is **removed**. A mixed-bias scene
+  (different bias axes, opposed signs on one axis such as a `+z`/`-z` latching
+  circulator, or differing magnitudes/materials) now routes through the per-cell
+  general path. The compiled layout already stores a per-cell bias, right-handed
+  local frame `[u|v|w]`, and per-cell `Phi`/`Gamma`/`B`/`C`; the magnetization ADE is
+  purely local (fields couple only via the ordinary reciprocal Yee curl), so a
+  mixed-bias scene is the exact direct sum of independent per-cell passive blocks.
+  Routing rule: the axis-aligned fast path is used **only** when the bias is uniform
+  (sign included) AND axis-aligned; every other case (uniform oblique, or any mixed
+  bias) uses the general per-cell path. No new kernel, no new coefficients.
+- **Handedness / Faraday-direction gate** (lab-frame runtime extraction): reversing
+  an oblique bias flips the gyrotropic (cross-polarized) lab response and leaves the
+  co-polarized response unchanged.
+- **Oblique driven-cavity passivity** (real CUDA solver): energy-envelope non-growth
+  in a closed lossless PEC cavity.
+- **Zero-impact** gates: a ferrite-free scene and a PEC-only scene leave the runtime
+  disabled and every hook a bitwise no-op.
+- **Polder-tensor spot check**: the compiled per-cell full permeability tensor equals
+  the frozen lab-frame Polder tensor, and its antisymmetric (gyrotropic) part flips
+  sign under bias reversal while the symmetric part does not.
+- **Census reconciliation, FEATURE_LIST, this doc.**
+
+### Files changed (G3b)
+
+- `witwin/maxwell/fdtd/runtime/gyromagnetic.py` — removed the uniform-bias guard;
+  route non-uniform (oblique/mixed) bias to the per-cell general path; docstrings.
+- `tests/materials/ferrite/test_gyromagnetic_general_bias.py` — G3b gate suite
+  (handedness, Polder spot-check, mixed-bias per-cell independence, zero-impact,
+  CUDA oblique driven-cavity passivity).
+- `tests/materials/ferrite/test_gyromagnetic_forward.py` — the two mixed-bias
+  fail-closed tests become positive per-cell-frame build tests.
+- `tests/api/public/test_guard_census.py` — `CAPABILITY_GUARD_BUDGET` `175 -> 173`.
+- `docs/reference/fdtd-capability-guard-census.md` — general+mixed reconciliation.
+- `FEATURE_LIST.md` — corrected the stale "fail closed" clause + new delimited
+  subsection.
+
+### Census reconciliation
+
+- Measured capability guards: **173** (was 174 after G3a's general-bias removal;
+  anchor 175). G3a removed the general-bias guard (budget left at ceiling 175,
+  measured 174); G3b removes the mixed-bias-direction guard → measured **173**.
+  `CAPABILITY_GUARD_BUDGET` lowered `175 -> 173` in this change, tracking both G3
+  removals. Only the Bloch-periodic ferrite guard remains in
+  `fdtd/runtime/gyromagnetic.py`. Verified: `test_guard_census.py` all pass; the
+  AST counter reports `capability: 173`.
+
+### Gates (test inventory) — G3b additions
+
+Mock (float64), `test_gyromagnetic_general_bias.py`:
+
+| Gate | Test | Result |
+| --- | --- | --- |
+| Handedness / Faraday direction: oblique bias reversal flips lab gyrotropy, co-pol unchanged | `test_oblique_bias_reversal_flips_lab_gyrotropy` | pass (`gyro_down ≈ -gyro_up` rel 1e-6, `|gyro|>1e-2`) |
+| Polder spot check: compiled tensor == frozen Polder; antisymmetric part flips under reversal | `test_compiled_polder_tensor_gyrotropy_flips_under_reversal` | pass (rtol 1e-10) |
+| Mixed-bias per-cell independence: combined == direct sum of standalone runs, BIT-FOR-BIT | `test_mixed_bias_per_cell_independence` | pass (opposed oblique regions, differing materials) |
+| Zero-impact: ferrite-free scene disables, hooks bitwise no-op on random field | `test_no_ferrite_zero_impact_bitwise` | pass |
+| Zero-impact: PEC-only scene disables | `test_pec_only_scene_zero_impact` | pass |
+
+`test_gyromagnetic_forward.py` (mixed-bias now builds):
+
+| Gate | Test | Result |
+| --- | --- | --- |
+| Mixed-sign +z/-z builds via general path; opposed per-cell `w` | `test_mixed_sign_bias_builds_via_general_path` | pass |
+| Mixed-axis +z/+x builds via general path; per-region `w` | `test_mixed_axis_bias_builds_via_general_path` | pass |
+
+CUDA (real FDTD):
+
+| Gate | Test | Result |
+| --- | --- | --- |
+| Oblique driven-cavity passivity (α=0): energy-envelope non-growth over 12k steps | `test_cuda_oblique_driven_cavity_energy_non_growth_lossless` | pass (2nd/1st half peak ratio ≈ 1.00) |
+
+### Falsifications recorded (G3b)
+
+1. **Mixed-bias per-cell independence (production-code break).** In
+   `_build_general_state`, replaced the per-cell `u`/`v` projection fields with the
+   global cell-0 frame (`basis[:, comp, 0] * 0 + basis[0, comp, 0]`, same for `v`).
+   `test_mixed_bias_per_cell_independence` went red: the combined scene's high-region
+   magnetization no longer matched the standalone high run (the high cells used the
+   low region's frame — values came out near-negated). Restored → green. (A `u`-only
+   break did NOT falsify — the two regions' `u` columns coincide — confirming the
+   test's sensitivity is carried by the full per-cell frame.)
+2. **Handedness gate teeth (media-level monkeypatch, `scratch/falsify_handedness.py`).**
+   Patched `compiler.gyromagnetic.gyromagnetic_local_basis` to strip the bias sign
+   (`b -> |b|`), so `-b` builds the same frame as `+b`. The extracted
+   `gyro_down = -1.428e-7 - 1.0003j` became **equal** to `gyro_up` (not negated), so
+   the assertion `gyro_down ≈ -gyro_up` would fail. This proves the runtime must
+   encode the bias sign in the local frame to reverse the Faraday direction.
+3. **Oblique passivity metric.** Probed the oblique cavity energy trajectory: it
+   OSCILLATES 1x↔3.66x with a **flat envelope** over 20k steps (first-half peak
+   3.666, second-half peak 3.665, ratio 0.9998) — bounded/passive. The naive
+   `eps0|E|²+mu0|H|²` proxy is not the conserved leapfrog invariant, so an oblique
+   mode sloshes it within a bounded envelope; the gate therefore checks envelope
+   non-growth, not peak-vs-initial. (The axis-aligned +z mode kept the proxy flat by
+   coincidence.) The energy-injection teeth remain the axis-aligned
+   `test_cuda_driven_cavity_energy_growth_detected`.
+
+### Commands (G3b)
+
+```
+# env prefix per top of doc; CUDA_VISIBLE_DEVICES=1
+python -m pytest tests/materials/ferrite/ -q                              # 107 passed
+python -m pytest tests/api/public/test_guard_census.py \
+  tests/api/public/test_public_api.py tests/api/public/test_simulation_smoke.py -q  # 30 passed
+```
+
+### Mixed-bias disposition — honest assessment
+
+Mixed-bias is **trivially correct and cheap** with the general path, so it is
+supported (not rejected). Justification: (a) the magnetization ADE carries no spatial
+coupling — each active cell advances independently from its own per-cell frame and
+per-cell `Phi`/`Gamma`/`B`/`C`, which the layout already stores; (b) the gather
+`h = [u|v]^T H` and scatter `H -= [u|v] dm / mu` are per-cell transposes, so each cell
+is an independent passive block; (c) the opposed-bias (`+z`/`-z`) handedness is
+carried by the right-handed local frame, verified. The former guard existed only to
+stop the axis-aligned FAST path from applying a single global transverse sign to both
+regions; the fast path is now restricted to uniform axis-aligned bias, closing that
+hole structurally.
+
+### Known gaps / deferred (unchanged from G3a)
+
+- Bloch-periodic ferrite, FDFD ingest, multi-GPU, adjoint,
+  PerturbationMedium-over-ferrite remain fail-closed.
+- Identity collocation: the general/oblique path is accurate for smooth/uniform
+  fields and passive (non-secularly-growing) in a closed cavity, but it is NOT the
+  4-point-collocated Yee gather; a higher-order collocation is a later refinement.
+- No wall-clock timing measured (shared-GPU policy).

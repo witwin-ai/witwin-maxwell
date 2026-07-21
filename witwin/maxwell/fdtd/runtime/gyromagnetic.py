@@ -52,11 +52,18 @@ transverse RF field is gathered from / scattered back to the staggered Yee ``H``
   truncation to the cell overlap) is reused (contract section 5); no 4-point
   gather is introduced.
 
-Both regimes require a single uniform bias direction (sign included) across the
-scene; a mixed-bias scene still fails closed (the per-cell state layout carries
-per-cell ``u``/``v`` fields, so relaxing that guard is cheap, but it is deferred).
-A Bloch-periodic ferrite still fails closed (the real magnetization-ADE
-correction cannot carry the complex Bloch phase).
+A mixed-bias scene (different bias axes, or opposed signs on one axis such as a
+``+z`` / ``-z`` latching circulator, or differing magnitudes/materials) is
+supported through the general path: the compiled layout already stores a per-cell
+bias, local frame ``[u|v|w]`` and per-cell ``Phi``/``Gamma``/``B``/``C``, and the
+magnetization ADE is purely local (no spatial coupling in the magnetization
+update -- fields couple only through the ordinary reciprocal Yee curl). A
+mixed-bias scene is therefore the direct sum of independent per-cell passive
+blocks: each cell precesses around its own ``b`` with the correct handedness
+(the right-handed local frame flips the lab-frame off-diagonal for an opposed
+bias), and per-cell passivity gives global passivity. Only a Bloch-periodic
+ferrite still fails closed (the real magnetization-ADE correction cannot carry
+the complex Bloch phase).
 
 Every entry point is gated by ``solver.gyromagnetic_enabled``; a ferrite-free
 scene allocates no state and issues no operations. The persistent state
@@ -96,8 +103,9 @@ def build_gyromagnetic(solver, scene, *, force_general=False):
     fast path, or dense ``u``/``v`` projection fields for the general-bias path),
     the dense per-cell Cayley (``Phi``/``Gamma``) and coupled implicit-midpoint
     (``B``/``C``) fields, the active mask, and the preallocated magnetization /
-    drive / scratch buffers. Fails closed on a scene mixing bias directions and on
-    a Bloch boundary.
+    drive / scratch buffers. A uniform axis-aligned bias uses the fast path; a
+    uniform oblique bias or any mixed-bias scene uses the per-cell general path.
+    Fails closed only on a Bloch boundary.
 
     ``force_general`` selects the general-bias path even when the bias is
     axis-aligned. It changes no physics (the general path reduces to the fast path
@@ -116,21 +124,6 @@ def build_gyromagnetic(solver, scene, *, force_general=False):
             "Bloch-periodic run carries complex phase-shifted fields, and the real "
             "magnetization-ADE correction would break the Bloch phase relation. Use a "
             "real-field boundary (PML/PEC/PMC/periodic) with the ferrite."
-        )
-
-    # A single uniform bias direction (sign included) is required across the scene.
-    # Guarding on the bias unit vectors themselves (not torch.unique(fast_axis))
-    # closes two holes at once: mixed axes AND opposed signs on one axis (e.g. +z
-    # and -z ferrites, whose v-column signs are opposed) both fail closed, so the
-    # single global transverse frame cannot silently invert the non-reciprocity of
-    # an opposed-bias region (e.g. a latching circulator).
-    bias = layout.bias_unit
-    if not torch.allclose(bias, bias[:1], atol=1.0e-9):
-        raise NotImplementedError(
-            "FDTD gyromagnetic ferrite forward requires a single uniform bias direction "
-            "(sign included) across the scene: a scene mixing bias axes, or mixing opposed "
-            "signs on one axis (e.g. +z and -z ferrites), needs the per-cell local-frame "
-            "signs of a mixed-bias kernel. Use one signed bias direction for every ferrite."
         )
 
     nx, ny, nz = solver.Nx, solver.Ny, solver.Nz
@@ -213,8 +206,20 @@ def build_gyromagnetic(solver, scene, *, force_general=False):
     ):
         state[name] = torch.zeros(overlap_shape, dtype=field_dtype, device=device)
 
+    # The axis-aligned fast path assumes ONE signed Cartesian bias for the whole
+    # scene (a single global transverse frame). It is used only when the bias is
+    # uniform (sign included) and axis-aligned. Every other case -- a uniform
+    # oblique bias, or a mixed-bias scene (different axes, or opposed signs on one
+    # axis, e.g. a latching circulator) -- routes to the per-cell general path,
+    # whose dense u/v projection fields carry each cell's own local frame. Because
+    # the ADE is purely local (no spatial coupling in the magnetization update) and
+    # the compiled layout already stores per-cell bias_unit / local_basis /
+    # phi / gamma, a mixed-bias scene is the direct sum of independent per-cell
+    # passive blocks: correct and passive without a dedicated mixed-bias kernel.
+    bias = layout.bias_unit
+    uniform_bias = bool(torch.allclose(bias, bias[:1], atol=1.0e-9))
     fast_axis = int(layout.fast_axis[0])
-    if fast_axis >= 0 and not force_general:
+    if uniform_bias and fast_axis >= 0 and not force_general:
         _build_fast_axis_state(solver, layout, state, overlap_shape, field_dtype)
     else:
         _build_general_state(solver, layout, state, overlap_shape, field_dtype, _dense_from)

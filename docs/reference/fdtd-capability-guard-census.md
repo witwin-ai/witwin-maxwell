@@ -297,6 +297,52 @@ Slice 1c (axis-aligned forward) is a net `+1` capability guard (`140 -> 141`):
 The `PerturbationMedium`-wraps-a-ferrite reject and the two
 `GyromagneticFerrite` scalar frequency-evaluation contracts are unchanged.
 
+### Gyromagnetic ferrite general + mixed bias forward reconciliation (2026-07-21)
+
+The plan 08 slice 2a/2b general-bias forward implements the arbitrary- and
+mixed-bias magnetization ADE, so the two remaining gyromagnetic forward-runtime
+capability guards in `witwin/maxwell/fdtd/runtime/gyromagnetic.py`
+`build_gyromagnetic` are **removed**; `CAPABILITY_GUARD_BUDGET` drops `175 -> 173`
+("Time-domain runtime" `20 -> 18`).
+
+- Removed (`-1`): the general (non-axis-aligned) bias reject. The general-bias
+  forward is a pure per-cell coordinate rotation of the SAME axis-aligned contracted
+  implicit-midpoint (Cayley) update -- no new integrator, no new coefficients. The
+  compiled layout already carries a per-cell bias, right-handed local frame
+  `[u|v|w]` (`w = b`), and per-cell `Phi`/`Gamma`/`B`/`C`; the runtime gathers the
+  RF drive `h_u = u . H`, `h_v = v . H` from all three lab `H` components and
+  scatters the back-reaction `dM = dm_u u + dm_v v` onto all three, with identity
+  collocation `C = I` reused from the axis-aligned slice (contract section 5). Because
+  `[u|v]^T[u|v] = I`, the local reduction and the coupled 2x2 solve are algebraically
+  identical to the fast path, so the general path reproduces it bit-for-bit for an
+  axis-aligned bias (rotation-equivalence gate). Verified against the Phase-0 torch
+  oracle for `b = (1,1,1)/sqrt(3)` at `reference_polder_rtol`.
+- Removed (`-1`): the mixed-bias-direction reject (the former "single uniform bias
+  direction" guard). A mixed-bias scene -- different bias axes, opposed signs on one
+  axis (e.g. a `+z`/`-z` latching circulator), or differing magnitudes/materials --
+  is supported through the SAME per-cell general path. The magnetization ADE is
+  purely local (no spatial coupling in the magnetization update; fields couple only
+  through the ordinary reciprocal Yee curl), so a mixed-bias scene is the direct sum
+  of independent per-cell passive blocks: each cell precesses around its own `b` with
+  the correct handedness (the right-handed local frame flips the lab-frame
+  off-diagonal for an opposed bias), and per-cell passivity gives global passivity.
+  Verified bit-for-bit against the two standalone single-material runs
+  (`test_mixed_bias_per_cell_independence`) and by the opposed-region frame check in
+  the forward suite. The old guard rejected mixed bias only because the axis-aligned
+  fast path applied a single global transverse sign; the fast path is now used only
+  for a uniform axis-aligned bias, and everything else routes to the per-cell path.
+
+Only the Bloch-periodic ferrite reject remains in that file (the real
+magnetization-ADE correction cannot carry the complex Bloch phase). The
+identity-collocation general path is accurate for smooth/uniform fields and passive
+(non-secularly-growing) in a closed lossless cavity, verified by
+`test_cuda_oblique_driven_cavity_energy_non_growth_lossless` (energy-envelope
+non-growth over 12k steps); the naive `eps0|E|^2 + mu0|H|^2` proxy oscillates within
+a bounded envelope for an oblique mode because it is not the exact conserved
+leapfrog invariant. The `PerturbationMedium`-wraps-a-ferrite reject, the FDFD /
+adjoint / distributed-shard consumer rejects, and the two `GyromagneticFerrite`
+scalar frequency-evaluation contract guards are all unchanged.
+
 ### Gyromagnetic ferrite consumer-side fail-close hardening (2026-07-18)
 
 Slice 1c lifted the `compiler/materials.py` ferrite reject globally, but that

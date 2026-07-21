@@ -230,7 +230,28 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # deterministic order. Detached columns / no-contribution now raise ValueError (a
 # usage error, not a capability gap). "Public simulation, result, and network
 # workflows" 24 -> 23; budget lowered in the same change.
-CAPABILITY_GUARD_BUDGET = 175
+# 2026-07-21 (plan 08 slice 2a/2b, general + mixed bias gyromagnetic ferrite
+# forward): 175 -> 173 (-2). The two remaining gyromagnetic forward-runtime
+# capability guards in fdtd/runtime/gyromagnetic.py::build_gyromagnetic are REMOVED:
+# (1) the general (non-axis-aligned) bias reject and (2) the mixed-bias-direction
+# reject. The general-bias forward is implemented as a pure per-cell coordinate
+# rotation of the SAME axis-aligned contracted implicit-midpoint update (the
+# compiled layout already stores a per-cell bias, right-handed local frame [u|v|w],
+# and per-cell Phi/Gamma/B/C; identity collocation C=I is reused, contract section
+# 5), so an arbitrary uniform bias runs through the general path. A mixed-bias scene
+# (different axes, opposed signs such as a +z/-z latching circulator, or differing
+# magnitudes/materials) is supported through that SAME per-cell path: the
+# magnetization ADE is purely local (no spatial coupling in the magnetization
+# update; fields couple only via the ordinary reciprocal Yee curl), so a mixed-bias
+# scene is the direct sum of independent per-cell passive blocks -- each cell
+# precesses around its own b with the correct handedness (the right-handed local
+# frame flips the lab-frame off-diagonal for an opposed bias), and per-cell
+# passivity gives global passivity. Only the Bloch-periodic ferrite reject remains
+# in that file (the real magnetization-ADE correction cannot carry the complex Bloch
+# phase). "Time-domain runtime" 20 -> 18. The PerturbationMedium-wraps-a-ferrite
+# reject, the FDFD/adjoint/distributed consumer rejects, and the two scalar
+# frequency-evaluation contract guards are all unchanged.
+CAPABILITY_GUARD_BUDGET = 173
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
