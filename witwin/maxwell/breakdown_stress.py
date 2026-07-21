@@ -62,11 +62,17 @@ def colocate_electric_magnitude(
 ) -> torch.Tensor:
     """Energy-consistent cell-center magnitude ``|E|`` from Yee components.
 
+    The three spatial Yee components live on the last three axes ``(X, Y, Z)``:
     ``ex`` is on ``(x_half, y, z)``, ``ey`` on ``(x, y_half, z)`` and ``ez`` on
     ``(x, y, z_half)``. Each component is averaged along the two axes on which it
     sits on integer nodes so all three land on the common cell center
     ``(x_half, y_half, z_half)``; the returned magnitude is
-    ``sqrt(Ex_c^2 + Ey_c^2 + Ez_c^2)`` with shape ``(Ncx, Ncy, Ncz)``.
+    ``sqrt(Ex_c^2 + Ey_c^2 + Ez_c^2)`` with cell-center spatial shape
+    ``(Ncx, Ncy, Ncz)``.
+
+    Any number of leading batch axes (for example a time axis ``(T, X, Y, Z)``)
+    is preserved, so the same reduction serves both the per-step observer and a
+    recorded ``|E|(t)`` series consumed by the differentiable risk surrogate.
 
     On a spatially uniform field this reproduces the analytic magnitude exactly,
     matching ``u_E = (1/2) sum_c eps_c E_c^2`` under the same colocation.
@@ -74,17 +80,21 @@ def colocate_electric_magnitude(
 
     if not (torch.is_tensor(ex) and torch.is_tensor(ey) and torch.is_tensor(ez)):
         raise TypeError("colocate_electric_magnitude requires torch tensors.")
-    # Ex: average along y (axis 1) and z (axis 2).
+    if not (ex.dim() >= 3 and ey.dim() >= 3 and ez.dim() >= 3):
+        raise ValueError("colocate_electric_magnitude expects Yee components on the last three axes.")
+    # Slices act on the trailing (X, Y, Z) axes; leading batch/time axes ride
+    # through the ellipsis untouched.
+    # Ex: average along Y and Z (the two node-staggered axes).
     ex_c = 0.25 * (
-        ex[:, :-1, :-1] + ex[:, 1:, :-1] + ex[:, :-1, 1:] + ex[:, 1:, 1:]
+        ex[..., :, :-1, :-1] + ex[..., :, 1:, :-1] + ex[..., :, :-1, 1:] + ex[..., :, 1:, 1:]
     )
-    # Ey: average along x (axis 0) and z (axis 2).
+    # Ey: average along X and Z.
     ey_c = 0.25 * (
-        ey[:-1, :, :-1] + ey[1:, :, :-1] + ey[:-1, :, 1:] + ey[1:, :, 1:]
+        ey[..., :-1, :, :-1] + ey[..., 1:, :, :-1] + ey[..., :-1, :, 1:] + ey[..., 1:, :, 1:]
     )
-    # Ez: average along x (axis 0) and y (axis 1).
+    # Ez: average along X and Y.
     ez_c = 0.25 * (
-        ez[:-1, :-1, :] + ez[1:, :-1, :] + ez[:-1, 1:, :] + ez[1:, 1:, :]
+        ez[..., :-1, :-1, :] + ez[..., 1:, :-1, :] + ez[..., :-1, 1:, :] + ez[..., 1:, 1:, :]
     )
     if not (ex_c.shape == ey_c.shape == ez_c.shape):
         raise ValueError(

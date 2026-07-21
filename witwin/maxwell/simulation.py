@@ -726,7 +726,8 @@ class Simulation:
                 "Trainable scenes cannot enable hard dielectric breakdown: the "
                 "field-duration/latching switch is non-differentiable at the trigger "
                 "time, so prepare() rejects backward rather than fabricating a gradient. "
-                "Use a smooth breakdown-risk surrogate for optimization (deferred)."
+                "For optimization use the separate non-feedback SmoothBreakdownRisk "
+                "surrogate (mw.SmoothBreakdownRisk), which never drives the field solve."
             )
 
     def _validate_network_solver(self) -> None:

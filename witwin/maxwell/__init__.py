@@ -55,6 +55,7 @@ from .esd import (
     ESDDiagnostics,
     ESDPortRecord,
     ESDResampledWaveform,
+    ESDVoltageSource,
     ESDWaveform,
     MeasuredWaveform,
 )
@@ -67,6 +68,10 @@ from .geometry import ComplexPolySlab, PolySlab
 from .breakdown import (
     BreakdownEvent,
     BreakdownResultData,
+)
+from .breakdown_risk import (
+    SmoothBreakdownRisk,
+    SmoothBreakdownRiskData,
 )
 from .media import (
     CustomDebyePole,
@@ -265,6 +270,8 @@ __all__ = [
     "CustomLorentzPole",
     "BreakdownMonitor",
     "BreakdownStressData",
+    "SmoothBreakdownRisk",
+    "SmoothBreakdownRiskData",
     "ComponentRating",
     "ComponentStressData",
     "ComponentStressMonitor",
@@ -289,6 +296,7 @@ __all__ = [
     "ESDDiagnostics",
     "ESDPortRecord",
     "ESDResampledWaveform",
+    "ESDVoltageSource",
     "ESDWaveform",
     "EmbeddedElementPatternData",
     "EmbeddedNetworkData",

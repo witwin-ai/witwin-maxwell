@@ -272,6 +272,44 @@ class _WaveformBase(abc.ABC):
             characteristic_frequency=char_freq,
         )
 
+    def to_circuit_waveform(
+        self,
+        *,
+        t_end: float | None = None,
+        samples: int = 4001,
+        scale: float = 1.0,
+    ):
+        """Resample this ESD current onto a piecewise-linear MNA source waveform.
+
+        Returns a :class:`~witwin.maxwell.circuits.PiecewiseLinearWaveform`
+        tabulating ``(t, scale * i(t))`` on a dense uniform grid over the
+        waveform support (or ``[start, t_end]``). The MNA runtime linearly
+        interpolates this table at each solver step, so a dense table reproduces
+        the smooth analytic current within tabulation error and its trapezoidal
+        integral (delivered charge/impulse) converges to the analytic value.
+
+        ``scale`` maps the ampere-valued standard current onto the circuit-source
+        quantity: pass a generator Thevenin resistance to drive a voltage source
+        (so the network short-circuit current equals the standard waveform), or
+        ``1.0`` to drive a current source with the current directly.
+        """
+
+        from .circuits import PiecewiseLinearWaveform
+
+        factor = float(scale)
+        if not math.isfinite(factor):
+            raise ValueError("scale must be a finite value.")
+        count = int(samples)
+        if count < 2:
+            raise ValueError("samples must be >= 2 for a piecewise-linear table.")
+        start, stop = self.support
+        end = float(stop if t_end is None else t_end)
+        if end <= float(start):
+            raise ValueError("t_end must be greater than the waveform start time.")
+        grid = torch.linspace(float(start), end, count, dtype=torch.float64)
+        values = self.current(grid).to(dtype=torch.float64) * factor
+        return PiecewiseLinearWaveform(grid, values)
+
 
 def _rise_time_10_90(grid: torch.Tensor, current: torch.Tensor, peak_index: int) -> float:
     peak = float(current[peak_index])
@@ -670,13 +708,151 @@ def _resolve_esd_sources(scene) -> tuple[ESDCurrentSource, ...]:
     return tuple(source for source in scene.sources if isinstance(source, ESDCurrentSource))
 
 
+# Standard IEC 61000-4-2 generator-network element values. These are the classic
+# lumped RC of the ESD generator body (discharge resistor and energy-storage
+# capacitor). Modeling the generator with these elements is a *circuit
+# approximation of the standard network*, NOT discharge-gun geometry, a
+# calibration-target measurement, or system certification.
+ESD_STANDARD_DISCHARGE_RESISTANCE = 330.0     # ohms (R_d)
+ESD_STANDARD_STORAGE_CAPACITANCE = 150.0e-12  # farads (C_s)
+
+
+@dataclass(frozen=True)
+class ESDVoltageSource:
+    """ESD generator driven through the standard 330 ohm / 150 pF source network.
+
+    Capability level: **stress-only** (circuit approximation of the standard
+    network; NOT discharge-gun geometry, calibration-target, or system
+    certification -- a standard element set does not by itself constitute
+    standard certification).
+
+    Unlike :class:`ESDCurrentSource` (which injects an ideal prescribed current
+    directly onto the field), this excitation routes the versioned ESD current
+    waveform through a source-impedance network: the waveform drives a
+    time-dependent voltage source inside an MNA circuit whose Thevenin source
+    impedance is the standard 330 ohm discharge resistor shunted by the 150 pF
+    storage capacitance. The network output node is bound to a scene
+    ``TerminalPort``/``LumpedPort`` exactly as the plan-04 strong FDTD+MNA
+    coupling does, so the delivered discharge current is shaped by the source
+    network and the device-under-test back-reacts on the generator.
+
+    The generator source voltage is ``discharge_resistance * i_esd(t)`` so that
+    the network short-circuit current (port terminals shorted) equals the
+    standard current waveform; into a real load the 330 ohm / 150 pF elements
+    act as the source impedance the port sees.
+    """
+
+    name: str
+    port_name: str
+    waveform: Waveform
+    discharge_resistance: float
+    storage_capacitance: float
+    kind: str = "esd_voltage_source"
+
+    def __init__(
+        self,
+        name,
+        *,
+        port,
+        waveform,
+        discharge_resistance: float = ESD_STANDARD_DISCHARGE_RESISTANCE,
+        storage_capacitance: float = ESD_STANDARD_STORAGE_CAPACITANCE,
+    ):
+        resolved_name = str(name).strip()
+        if not resolved_name:
+            raise ValueError("ESDVoltageSource name must not be empty.")
+        resolved_port = str(port).strip()
+        if not resolved_port:
+            raise ValueError("ESDVoltageSource port must name a terminal/lumped port.")
+        if not isinstance(waveform, (ESDWaveform, MeasuredWaveform)):
+            raise TypeError("waveform must be an ESDWaveform or MeasuredWaveform.")
+        resistance = float(discharge_resistance)
+        capacitance = float(storage_capacitance)
+        if not math.isfinite(resistance) or resistance <= 0.0:
+            raise ValueError("discharge_resistance must be a positive finite resistance.")
+        if not math.isfinite(capacitance) or capacitance <= 0.0:
+            raise ValueError("storage_capacitance must be a positive finite capacitance.")
+        object.__setattr__(self, "name", resolved_name)
+        object.__setattr__(self, "port_name", resolved_port)
+        object.__setattr__(self, "waveform", waveform)
+        object.__setattr__(self, "discharge_resistance", resistance)
+        object.__setattr__(self, "storage_capacitance", capacitance)
+        object.__setattr__(self, "kind", "esd_voltage_source")
+
+    def circuit_waveform(self, *, t_end: float | None = None, samples: int = 4001):
+        """Piecewise-linear generator drive ``discharge_resistance * i_esd(t)``."""
+
+        return self.waveform.to_circuit_waveform(
+            t_end=t_end, samples=int(samples), scale=self.discharge_resistance
+        )
+
+    def build_circuit(
+        self,
+        *,
+        t_end: float | None = None,
+        samples: int = 4001,
+        circuit_name: str | None = None,
+        config=None,
+    ):
+        """Assemble the standard 330 ohm / 150 pF ESD generator network circuit.
+
+        The returned :class:`~witwin.maxwell.circuits.Circuit` drives the ESD
+        waveform through the source network and binds its output node to
+        ``port_name``. Attach it to a scene via ``circuits=(...)`` (with the
+        matching port also on the scene) and run the standard
+        ``Scene -> Simulation.fdtd -> Result`` flow; the generator provenance is
+        stamped on ``circuit.metadata['esd_generator']`` so it rides to the
+        result.
+        """
+
+        from .circuits import Circuit, VoltageSource
+        from .lumped import Capacitor, Resistor
+
+        name = str(circuit_name).strip() if circuit_name is not None else f"esd_{self.name}"
+        circuit = Circuit(name, metadata={"esd_generator": self.provenance()}, config=config)
+        gen = circuit.node("gen")
+        tip = circuit.node("tip")
+        waveform = self.circuit_waveform(t_end=t_end, samples=int(samples))
+        circuit.add(VoltageSource(f"Vgen_{self.name}", gen, circuit.ground, 0.0, waveform=waveform))
+        circuit.add(Resistor(f"Rd_{self.name}", gen, tip, self.discharge_resistance))
+        circuit.add(Capacitor(f"Cs_{self.name}", tip, circuit.ground, self.storage_capacitance))
+        circuit.bind_port(self.port_name, positive=tip, negative=circuit.ground)
+        return circuit
+
+    def provenance(self) -> dict[str, Any]:
+        return {
+            "kind": "esd_voltage_source",
+            "name": self.name,
+            "port": self.port_name,
+            "waveform": self.waveform.provenance,
+            "discharge_resistance": self.discharge_resistance,
+            "storage_capacitance": self.storage_capacitance,
+            "capability_level": ESD_CAPABILITY_LEVEL,
+            "model_version": ESD_MODEL_VERSION,
+            "injection": "source_impedance_network",
+            "network": (
+                "standard 330 ohm / 150 pF generator RC "
+                "(circuit approximation, not gun/system certification)"
+            ),
+            "units": {
+                "time": "s",
+                "voltage": "V",
+                "resistance": "ohm",
+                "capacitance": "F",
+            },
+        }
+
+
 __all__ = [
     "ESD_CAPABILITY_LEVEL",
     "ESD_MODEL_VERSION",
+    "ESD_STANDARD_DISCHARGE_RESISTANCE",
+    "ESD_STANDARD_STORAGE_CAPACITANCE",
     "ESDCurrentSource",
     "ESDDiagnostics",
     "ESDPortRecord",
     "ESDResampledWaveform",
+    "ESDVoltageSource",
     "ESDWaveform",
     "MeasuredWaveform",
 ]
