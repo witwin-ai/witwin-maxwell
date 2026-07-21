@@ -107,16 +107,18 @@ Robustness: the companion suite and the forward suite were each rerun 3-5x to
 confirm the nondeterministic shared fitter (B1) stays within the pre-registered
 tolerances.
 
-## Falsifications (recorded; `scratch/falsify.py`, not committed)
+## Falsifications (recorded; `docs/assessments/g2-lossy-wire-probes/falsify.py`, committed)
 
 - **F1 — ADE consumption is load-bearing (Gate a).** Zeroing the ADE history term
   `Cs x` (drop the excess-voltage feedback) blows the analytic-AC error at 1.5 GHz
-  from `0.0225` to `1205` (>> 0.08) → RED. Restored → green.
+  from `0.0225` to `1205` (>> 0.08) → RED. Restored → green. (Reproduce:
+  `docs/assessments/g2-lossy-wire-probes/falsify.py`, F1 block.)
 - **F2 — DC exactness (Gate c).** Perturbing `R0` by +1% gives DC rel error `1e-2`
   (>> `1e-12`) → RED.
 - **F3 — stability certificate (Gate d).** Accepting order 16 without the spectral
   certificate yields combined spectral radius `1.000075 > 1` (would grow over a
   long run) → RED; the adaptive build rejects it and selects a certified order.
+  (Reproduce: `docs/assessments/g2-lossy-wire-probes/falsify.py`, F3 block.)
 - **PEC parity (Gate e)** is falsified in-suite: `test_pec_parity_falsification`
   and `test_lossy_current_differs_from_pec` show the finite path changes fields /
   current, proving the PEC parity is a real bypass, not a no-op.
@@ -239,10 +241,11 @@ commit on `fable/lossy-wire`:
   determinism, not vs-base bitwise parity. The vs-base claim was independently
   confirmed by the auditor (SHA256-identical DFT current / final Ez / wire current
   vs base `b89a75c`); recommend keeping that evidence on record.
-- **Falsification metrics from uncommitted scratch.** The F1/F3 exact numbers in the
-  falsification sections originate from untracked `scratch/` scripts (per the brief's
-  do-not-commit rule); the falsification classes are reproducible, the exact numbers
-  are not regenerable from a tracked artifact.
+- **Falsification metrics now committed.** The F1/F3 exact numbers in the
+  falsification sections originated from throwaway `scratch/` scripts; the driving
+  script is now committed at `docs/assessments/g2-lossy-wire-probes/falsify.py`
+  (with `verify_grad.py`), so the exact numbers are regenerable from a tracked
+  artifact (round-G audit-minor remediation).
 
 ---
 
@@ -312,12 +315,13 @@ the radius, leaving the one-line form above. Its DC limit is exactly
   `test_thin_wire_forward.py`, `test_thin_wire_reference.py` — **119 passed** (PEC
   reverse path unaffected by the sharpened lossy guard; no regression).
 
-Standalone closed-form cross-check (`scratch/verify_grad.py`, not committed):
+Standalone closed-form cross-check
+(`docs/assessments/g2-lossy-wire-probes/verify_grad.py`, committed):
 `dZ'/dsigma` vs central difference `< 1e-6` over `a in {1,2} mm`,
 `sigma in {5.8e7, 3.5e7, 1e6}`, `f in {1e3 .. 2e10}`; DC real part matches
 `-1/(pi a^2 sigma^2)`.
 
-## Falsifications (recorded; `scratch/`, not committed)
+## Falsifications (recorded; `docs/assessments/g2-lossy-wire-probes/`, committed)
 
 - **F1 — closed-form gradient (Gate a/DC).** Flip `(1 - R^2)` to `(1 + R^2)` in
   `internal_impedance_conductivity_gradient`: the central-difference gate and the

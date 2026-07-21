@@ -55,7 +55,8 @@ fail-closed: `_validate_nccl_capabilities` still raises
 `"Multi-GPU NCCL adjoint (trainable density) is not wired yet; run the trainable
 scene with transport='cuda_p2p'."` (unchanged; covered by
 `test_nccl_forward_rejects_trainable_density`). No capability guard was relaxed, so
-the census budget (176) is unchanged.
+the census budget is unchanged (the worktree base carried 175 after the F3a
+lowering; unchanged at 175).
 
 Reason (architectural, not a stall): the validated in-process adjoint bridge
 (`fdtd/distributed/adjoint.py`, `_DistributedFDTDGradientBridge`) is structurally
@@ -100,7 +101,7 @@ Pytest (pass counts):
   `tests/api/public/test_guard_census.py` → **6 passed, 30 deselected** (guard census
   deselected by the `-k` filter; run separately below).
 - `tests/api/public/test_guard_census.py tests/api/public/test_public_api.py
-  tests/api/public/test_simulation_smoke.py` → **30 passed** (census budget 176
+  tests/api/public/test_simulation_smoke.py` → **30 passed** (census budget 175
   intact).
 
 Exact commands:
@@ -155,7 +156,8 @@ python -m pytest tests/api/public/test_guard_census.py tests/api/public/test_pub
   per-engine cores and this stage's adjoint halos; add a distributed replay with
   dict-based forward NCCL halos and a `scatter`/local-seed path (a separable
   full-field-DFT objective avoids a cotangent scatter for the standard gate).
-- Census budget unchanged at 176; no guard added or relaxed.
+- Census budget unchanged at 175 (the worktree base carried 175 after the F3a
+  lowering); no guard added or relaxed.
 
 ---
 
@@ -204,7 +206,7 @@ Commit: `feat(fdtd-distributed): opt-in per-rank step-rate timing instrument (ze
 
 Retained fail-closed (unchanged guard: `_validate_nccl_capabilities` still raises
 `"Multi-GPU NCCL adjoint (trainable density) is not wired yet; ..."`; census
-budget 176 unchanged). Reason (design blocker, per common-brief clause): the CPML
+budget 175 unchanged). Reason (design blocker, per common-brief clause): the CPML
 psi-carrying NCCL reverse layers directly on top of the **end-to-end
 trainable-density NCCL reverse driver** that G1a deferred as a multi-file
 subsystem. That base driver does not exist yet, so the CPML variant has no host to
@@ -231,7 +233,7 @@ therefore recorded as a documented deferral rather than a partial/flaky landing.
    adjoint driver may construct the per-rank `DistributedFDTD` with a point-monitor
    (or full-field-DFT) trainable scene without tripping the forward-only
    monitor/trainable fences — keep every other fence and add a census-tracked
-   guard if the relaxation widens the envelope (reconcile the 176 budget then).
+   guard if the relaxation widens the envelope (reconcile the 175 budget then).
 2. **Per-rank checkpoint capture** (`capture_checkpoint_state(shard.solver, step)`
    for the single local shard) inside the real NCCL forward loop
    (`_advance_one_step`, collective).
@@ -301,7 +303,7 @@ WITWIN_FDTD_STEP_TIMING=1 WITWIN_FDTD_STEP_TIMING_DIR=<dir> WITWIN_FDTD_STEP_TIM
 - `test_nccl_transport.py`: full suite green including
   `test_two_rank_nccl_step_timing_emits_per_rank_json` (new), the G1a forward /
   transpose-identity / falsification launchers, and the host guard matrix.
-- `test_guard_census.py`: budget **176**, unchanged (no guard added/relaxed).
+- `test_guard_census.py`: budget **175**, unchanged (no guard added/relaxed).
 
 ## Falsifications recorded (G1b)
 
@@ -320,4 +322,5 @@ WITWIN_FDTD_STEP_TIMING=1 WITWIN_FDTD_STEP_TIMING_DIR=<dir> WITWIN_FDTD_STEP_TIM
 - No wall-clock/timing numbers produced (correctness-only shared GPUs); the timing
   instrument is delivered and unit-tested but the exclusive window produces the
   numbers.
-- Census budget unchanged at 176; no guard added or relaxed.
+- Census budget unchanged at 175 (the worktree base carried 175 after the F3a
+  lowering); no guard added or relaxed.

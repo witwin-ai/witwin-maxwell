@@ -20,9 +20,10 @@ with ``R0 = R_dc * length`` the segment series resistance and ``w`` the excess
 voltage from the ADE state ``x``. The excess state space is length-scaled
 (``Cs = length * Cd``, ``direct = length * Dd``) so ``w`` is a segment voltage.
 
-Passive companion discretization (energy-consistent by construction). Keep the
-leapfrog current at half steps and evaluate every loss term with the trapezoidal
-integer-step current ``I_bar = (I^{n+1/2} + I^{n-1/2}) / 2``:
+Companion discretization (dissipativity asserted via checked positive-real
+conditions, not by construction). Keep the leapfrog current at half steps and
+evaluate every loss term with the trapezoidal integer-step current
+``I_bar = (I^{n+1/2} + I^{n-1/2}) / 2``:
 
     L (I^+ - I^-) / dt = e - R0 I_bar - (Cs x + direct I_bar)
                        = e - Cs x - G I_bar,     G = R0 + direct

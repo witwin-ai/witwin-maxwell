@@ -60,7 +60,7 @@ conda run -n maxwell --no-capture-output python -m pytest <targets> -q
   `test_double_sided_plate_exercises_both_signs_and_stays_passive`,
   `test_mixed_orientation_finite_block_is_stable[50.0/5.0/1.0]`). Cyclic-permutation
   equivalence residual ~1.7e-7 (float32 round-off).
-- `tests/validation/physics/test_sibc_staircase.py` -- **7 passed**
+- `tests/validation/physics/test_sibc_staircase.py` -- **6 passed**
   (`test_staircased_slab_matches_analytic_leontovich_at_three_frequencies` rel err
   0.006 / 0.000 / 0.000 at 1/2/3 GHz; `test_staircased_slab_absorbs_more_than_pec`
   0.936 vs 0.999; `test_voxel_cylinder_enumerates_all_orientations_with_masks` 30 faces
@@ -193,7 +193,12 @@ conda run -n maxwell --no-capture-output python -m pytest <targets> -q
   SIBC-vs-resolved gap is grid-independent on BOTH sides and R/delta-independent
   (measured 0.172 at R/delta=6.7 and 0.194 at R/delta=10.1), i.e. the intrinsic
   first-order-Leontovich-on-a-staircased-curve systematic -- on a FLAT surface the same
-  boundary matches the analytic Leontovich value to <1% (`test_sibc_staircase`).
+  boundary matches the analytic Leontovich value to <1% (`test_sibc_staircase`). The
+  R/delta-independence and 4-tier SIBC grid-independence numbers are reproduced by the
+  committed probes `docs/assessments/g4-sibc-oblique-probes/probe_cyl_conv.py`
+  (R/delta=6.7 -> 0.172), `probe_cyl_rd10.py` (R/delta=10.1 -> 0.194), and
+  `probe_cyl_sibc_tiers.py` (dx 1.5/1.2/1.0/0.8 mm SIBC absorbed-power tiers); the
+  committed convergence gate itself is `test_sibc_cylinder_convergence.py`.
 - Adjacent (unchanged solver): **67 passed** for `tests/api/public/test_guard_census.py
   tests/api/public/test_public_api.py tests/api/public/test_simulation_smoke.py
   tests/validation/physics/test_sibc_staircase.py tests/validation/physics/
@@ -249,6 +254,22 @@ hidden; the cache (h5) is a local gitignored artifact as for every reference.
   documented first-order-boundary-on-a-staircased-curve systematic (the flat-surface
   value is <1%); a second-order / curvature-corrected surface impedance is the future
   improvement. The gate is set at 25% so it fails closed on any regression toward PEC.
+- **Half-cell surface-node placement asymmetry (convention, not a bug).** In
+  `_compile_voxel_surface_metal` (`witwin/maxwell/compiler/materials.py`) both face
+  orientations write the tangential-E surface node at node index `p` across the
+  metal/vacuum interface between nodes `p-1` and `p`, but that index sits on opposite
+  sides of the physical boundary depending on the outward normal: a `-axis`-normal
+  (low-side) face writes E at the first metal node while a `+axis`-normal (high-side)
+  face writes E at the first vacuum node, so the effective surface of a `+axis`-facing
+  step lands a half cell farther into the vacuum than a `-axis`-facing step at the same
+  interface. On a flat axis-aligned plate this is exact (a Yee symmetry, validated to
+  near-bitwise by `test_staircased_orientation_equivalence_z_to_x`); on a staircased
+  curved conductor the low-side and high-side steps are therefore offset by up to one
+  cell relative to the true surface, which is one contributor to the grid-independent
+  ~18% absorbed-power under-prediction above. Consequence: this is a half-cell
+  discretization convention consistent with the Yee staggering, not an implementation
+  error, and it is removed by the same curvature-corrected surface impedance that would
+  close the ~18% systematic. A source comment at the placement site records the same.
 - External lossy-metal surface-impedance export under-applies the wall loss (above):
   an adapter-fidelity gap, not fixed here.
 - All G4a deferrals stand: true oblique/conformal (non-staircase) SIBC, rotated `Box`,
@@ -260,3 +281,46 @@ hidden; the cache (h5) is a local gitignored artifact as for every reference.
 No capability guard added or removed in G4b (only a benchmark scene, a benchmark run
 function, an external-reference target, and a physics test). Budget unchanged at
 **176**; `tests/api/public/test_guard_census.py` passes.
+
+---
+
+# Round-G audit-minor addendum (2026-07-21)
+
+Supervisor-selected round-G cleanup applied on master (post-merge). Items G4a-e:
+
+- **(a)** Corrected the `test_sibc_staircase.py` pass count in the G4a inventory from
+  `7 passed` to **6 passed** (the file has six test functions; the count was a
+  miscount).
+- **(b)** The R/delta-independence (`0.172` at R/delta=6.7, `0.194` at R/delta=10.1)
+  and the 4-tier SIBC grid-independence (`dx 1.5/1.2/1.0/0.8 mm`) numbers, previously
+  from untracked scratch, are now reproduced by committed probes under
+  `docs/assessments/g4-sibc-oblique-probes/` (`probe_cyl_conv.py`, `probe_cyl_rd10.py`,
+  `probe_cyl_sibc_tiers.py`, `git add -f`). The committed convergence gate is
+  `tests/validation/physics/test_sibc_cylinder_convergence.py`.
+- **(c) Explicit zero-impact gate (new committed test).**
+  `tests/validation/physics/test_sibc_zero_impact.py` asserts a SIBC-free scene's six
+  raw last-step Yee fields are **bitwise identical** with the SIBC machinery present
+  vs. a monkeypatched-out `compile_surface_impedance_layout` (patched to the empty
+  layout it returns for a metal-free scene). It mirrors the breakdown track's
+  `test_breakdown_parity.py` zero-impact pattern and uses a fixed step count + full
+  PML box + `window="none"` so the single-GPU forward is run-to-run deterministic.
+  A committed control (`test_removing_compile_hook_changes_a_real_sibc_scene`) proves
+  the monkeypatch is load-bearing: with a real `LossyMetalMedium` box, removing the
+  hook changes the fields.
+  - **Falsification (recorded).** Forcing the SIBC compile path on for the free-scene
+    gate (`present = _run(_scene(metal=True))`) made the `present` run carry the metal
+    surface writes while the hook-removed `removed` run dropped them, so the six fields
+    diverged and the bitwise assertion fired **RED** (`test ... FAILED, 1 failed`).
+    Restored to `metal=False` -> **2 passed**. This proves the gate has teeth (it
+    catches a SIBC effect leaking into a supposedly SIBC-free run).
+- **(d) Documented half-cell surface-node placement asymmetry.** A source comment at
+  the placement site (`_compile_voxel_surface_metal` in
+  `witwin/maxwell/compiler/materials.py`) and the Known-gaps note above record that the
+  low-side (`-axis`-normal) and high-side (`+axis`-normal) staircase faces write the
+  tangential-E surface node at the same node index `p` but on opposite sides of the
+  physical metal/vacuum boundary, a half-cell convention (exact on a flat plate,
+  up-to-one-cell offset on a curved conductor) that contributes to the grid-independent
+  ~18% absorbed-power under-prediction. Convention, not a bug.
+- **(e)** The FEATURE_LIST lossy-metal export line was reworded so it no longer reads
+  as a new adapter capability (the `LossyMetalMedium` export predates G4; no adapter
+  code changed) -- it is now a validation note pointing at the pre-existing export.

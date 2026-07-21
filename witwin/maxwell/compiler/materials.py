@@ -2064,6 +2064,24 @@ def _compile_voxel_surface_metal(
         naxes = tuple(a for a in range(3) if a != axis)
         cell_area = _mean_node_spacing(nodes[naxes[0]]) * _mean_node_spacing(nodes[naxes[1]])
         n_along = occ.shape[axis]
+        # Half-cell surface-node placement convention (documented asymmetry, not a bug).
+        # The physical metal/vacuum boundary between nodes p-1 and p is a half-cell wide
+        # region on the staggered Yee grid; the tangential-E surface node is written at
+        # node index p in BOTH orientations, but that index sits on OPPOSITE sides of the
+        # boundary depending on the outward normal:
+        #   * -axis-normal (low-side) face: metal at p, vacuum at p-1 -> E written at the
+        #     first metal node p (surface_node=p, paired H at p-1).
+        #   * +axis-normal (high-side) face: metal at p-1, vacuum at p -> E written at the
+        #     first vacuum node p (surface_node=p, paired H at p).
+        # So a face whose normal points toward +axis places the effective surface a half
+        # cell farther into the vacuum than a -axis-facing face at the same physical
+        # interface. On a flat axis-aligned plate this is exact (Yee symmetry); on a
+        # staircased CURVED conductor the two step orientations are offset by up to one
+        # cell relative to the true surface, which is part of the grid- and
+        # R/delta-independent ~18% absorbed-power under-prediction documented in
+        # docs/assessments/g4-sibc-oblique-acceptance-2026-07-21.md (a first-order
+        # boundary-on-a-staircased-curve systematic, not an implementation error; a
+        # curvature-corrected surface impedance is the future refinement).
         for p in range(1, n_along):
             plane_metal = _select_node_plane(occ, axis, p)
             plane_vacuum = _select_node_plane(occ, axis, p - 1)

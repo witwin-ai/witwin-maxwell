@@ -47,7 +47,7 @@ def _env_enabled(env) -> bool:
 
 
 def _percentile(sorted_values: Sequence[float], fraction: float) -> float:
-    """Nearest-rank percentile of an already-sorted, non-empty sequence."""
+    """Linear-interpolated percentile of an already-sorted, non-empty sequence."""
 
     if not sorted_values:
         raise ValueError("percentile of an empty sequence")

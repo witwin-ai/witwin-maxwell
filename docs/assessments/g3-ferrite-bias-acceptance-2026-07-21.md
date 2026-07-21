@@ -69,7 +69,7 @@ Mock (float64, deterministic) — `test_gyromagnetic_general_bias.py`:
 | --- | --- | --- |
 | Rotation equivalence (headline): general reduces to fast bit-for-bit, b∈{z,x,y}, coupled step + m | `test_general_reduces_to_fast_bitwise[2/0/1]` | max\|diff\| = **0.0** (bitwise) |
 | Reduction gate has teeth | `test_general_path_perturbation_breaks_bitwise_reduction` | pass (corrupt `ux` → diverges) |
-| Oblique vs oracle (headline): b=(1,1,1)/√3 CW vs discrete Polder oracle | `test_oblique_cw_matches_oracle` | rel ≈ 1.6e-13 / 1.9e-13 ≤ `reference_polder_rtol`=1e-5 |
+| Oblique vs oracle (headline): b=(1,1,1)/√3 CW vs discrete Polder oracle | `test_oblique_cw_matches_oracle` | chi_uu rel ≈ 1.197e-13 / chi_vu rel ≈ 1.9e-13 ≤ `reference_polder_rtol`=1e-5 |
 | Oblique oracle gate has teeth (gyrotropy sign) | `test_oblique_cw_gyrotropy_sign_falsification` | pass (κ→−κ mismatches oracle) |
 | Oblique passivity (α=0 energy non-growth) | `test_oblique_energy_non_growth_lossless` | \|E₁/E₀−1\| < 1e-9 over 2e5 steps |
 | General path builds & engages | `test_oblique_bias_builds_and_engages_general_path` | pass (orthonormal u,v) |
