@@ -1,0 +1,249 @@
+{
+  "aa_calibration": {
+    "a_samples_ms": [
+      3153.227783203125,
+      3155.995849609375,
+      3156.377685546875,
+      3157.48046875,
+      3157.396728515625,
+      3157.40576171875
+    ],
+    "aa_abs_max_delta_pct": 0.029971458592670253,
+    "aa_ci95_upper_pct": 0.018551483012685388,
+    "aa_mean_pct": 0.0017796382379975384,
+    "aa_ratios": [
+      1.0002997145859267,
+      0.9997072784094078,
+      1.000108365046804,
+      0.999874816748421,
+      1.0000566780463502,
+      1.0000599254573703
+    ],
+    "b_samples_ms": [
+      3154.1728515625,
+      3155.072021484375,
+      3156.7197265625,
+      3157.085205078125,
+      3157.57568359375,
+      3157.594970703125
+    ],
+    "grid_cells_per_axis": 224,
+    "rounds": 6,
+    "time_steps": 1500
+  },
+  "command": "numactl --cpunodebind=0 --membind=0 conda run -n maxwell python scratch/task1_gate_d.py --rounds 6 --aa-grid 224 --output docs/assessments/network-embedding-gate-d-remeasure-2026-07-20.json",
+  "driver": "scratch/task1_gate_d.py (not committed)",
+  "environment": {
+    "compute_capability": "8.6",
+    "cpu_governor": "performance",
+    "cuda_runtime": "13.0",
+    "cuda_visible_devices": "0",
+    "device_name": "NVIDIA RTX A6000",
+    "numactl": "--cpunodebind=0 --membind=0",
+    "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "torch": "2.13.0+cu130"
+  },
+  "exclusive_window": {
+    "clocks_after": [
+      "0, NVIDIA RTX A6000, 1725 MHz, 2100 MHz, 7601 MHz, Enabled",
+      "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled"
+    ],
+    "clocks_before": [
+      "0, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled",
+      "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled"
+    ],
+    "foreign_compute_apps_after": [],
+    "foreign_compute_apps_before": [],
+    "verified": true
+  },
+  "gate": "plan 03 Phase 4 gate (d): connected 8-port/order-32 step overhead < 10% at crossover grid",
+  "git_sha": "ead70c06487dac060d03fb4d5e1f9fe9a2127a21",
+  "harness": "tests/support/benchmark_network_embedding.py",
+  "kind": "network_embedding_gate_d_remeasure",
+  "method": "Reuses tests/support/benchmark_network_embedding.py scene/sample builders (cuda_graph field+network+port_observer, CUDA-event timed). N>=5 paired ABBA rounds per grid; per-step fixed cost = (connected_med - baseline_med)/steps; overhead CI = one-sided 95% upper bound on paired connected/baseline ratio.",
+  "model_order": 32,
+  "ports": 8,
+  "reference_before_composite": {
+    "launches_per_step_after": 27.0,
+    "launches_per_step_before": 78.0,
+    "op_stream_artifact": "docs/assessments/e4-network-coupling-op-stream-2026-07-19.json",
+    "prior_crossover_grid_approx": 224,
+    "prior_fixed_cost_ms_per_step_range": [
+      0.193,
+      0.204
+    ],
+    "prior_grid_sweep_artifact": "docs/assessments/network-embedding-phase-4-performance-grid-sweep.json"
+  },
+  "schema_version": 1,
+  "summary": {
+    "new_crossover_grid_point_overhead_lt_10pct": 224,
+    "new_fixed_cost_ms_per_step_max": 0.19066341145833332,
+    "new_fixed_cost_ms_per_step_median": 0.1830300496419271,
+    "new_fixed_cost_ms_per_step_min": 0.17922264099121094
+  },
+  "sweep": [
+    {
+      "baseline_mad_ms": 0.126312255859375,
+      "baseline_median_ms": 279.4132080078125,
+      "baseline_samples_ms": [
+        279.9604797363281,
+        279.3738098144531,
+        279.07379150390625,
+        279.5035705566406,
+        279.4526062011719,
+        279.2509460449219
+      ],
+      "connected_mad_ms": 0.26568603515625,
+      "connected_median_ms": 637.8584899902344,
+      "connected_minus_baseline_ms_per_step": 0.17922264099121094,
+      "connected_samples_ms": [
+        637.3716430664062,
+        637.0581665039062,
+        637.8141479492188,
+        638.1992797851562,
+        638.049072265625,
+        637.90283203125
+      ],
+      "expected_state_count": 256,
+      "grid_cells_per_axis": 64,
+      "network_state_count": 256,
+      "overhead_ci95_upper_pct": 128.48681469098443,
+      "overhead_pct": 128.2850172109257,
+      "passed_10pct_gate_ci95": false,
+      "passed_10pct_gate_point": false,
+      "rounds": 6,
+      "time_steps": 2000
+    },
+    {
+      "baseline_mad_ms": 0.018341064453125,
+      "baseline_median_ms": 606.254638671875,
+      "baseline_samples_ms": [
+        606.2523193359375,
+        606.2569580078125,
+        605.9563598632812,
+        606.26025390625,
+        606.048095703125,
+        606.2857055664062
+      ],
+      "connected_mad_ms": 0.23516845703125,
+      "connected_median_ms": 880.7997131347656,
+      "connected_minus_baseline_ms_per_step": 0.1830300496419271,
+      "connected_samples_ms": [
+        881.7368774414062,
+        881.9476318359375,
+        880.7367553710938,
+        880.618408203125,
+        880.5106811523438,
+        880.8626708984375
+      ],
+      "expected_state_count": 256,
+      "grid_cells_per_axis": 96,
+      "network_state_count": 256,
+      "overhead_ci95_upper_pct": 45.422615851024695,
+      "overhead_pct": 45.28543898061348,
+      "passed_10pct_gate_ci95": false,
+      "passed_10pct_gate_point": false,
+      "rounds": 6,
+      "time_steps": 1500
+    },
+    {
+      "baseline_mad_ms": 0.309906005859375,
+      "baseline_median_ms": 733.8753356933594,
+      "baseline_samples_ms": [
+        733.571044921875,
+        733.559814453125,
+        733.9225463867188,
+        733.828125,
+        734.904296875,
+        734.8388061523438
+      ],
+      "connected_mad_ms": 0.078521728515625,
+      "connected_median_ms": 1009.9202270507812,
+      "connected_minus_baseline_ms_per_step": 0.18402992757161457,
+      "connected_samples_ms": [
+        1009.8635864257812,
+        1009.8785400390625,
+        1009.81982421875,
+        1009.9619140625,
+        1012.7984619140625,
+        1012.5082397460938
+      ],
+      "expected_state_count": 256,
+      "grid_cells_per_axis": 128,
+      "network_state_count": 256,
+      "overhead_ci95_upper_pct": 37.76491686145966,
+      "overhead_pct": 37.61468439276774,
+      "passed_10pct_gate_ci95": false,
+      "passed_10pct_gate_point": false,
+      "rounds": 6,
+      "time_steps": 1500
+    },
+    {
+      "baseline_mad_ms": 0.7786865234375,
+      "baseline_median_ms": 1639.4931030273438,
+      "baseline_samples_ms": [
+        1636.6051025390625,
+        1638.6058349609375,
+        1639.147705078125,
+        1639.8385009765625,
+        1640.1632080078125,
+        1641.817138671875
+      ],
+      "connected_mad_ms": 2.4456787109375,
+      "connected_median_ms": 1913.0917358398438,
+      "connected_minus_baseline_ms_per_step": 0.18239908854166667,
+      "connected_samples_ms": [
+        1909.6123046875,
+        1911.3280029296875,
+        1913.0150146484375,
+        1913.16845703125,
+        1916.2193603515625,
+        1917.1495361328125
+      ],
+      "expected_state_count": 256,
+      "grid_cells_per_axis": 176,
+      "network_state_count": 256,
+      "overhead_ci95_upper_pct": 16.775088333510823,
+      "overhead_pct": 16.68800145040543,
+      "passed_10pct_gate_ci95": false,
+      "passed_10pct_gate_point": false,
+      "rounds": 6,
+      "time_steps": 1500
+    },
+    {
+      "baseline_mad_ms": 2.671630859375,
+      "baseline_median_ms": 3148.319091796875,
+      "baseline_samples_ms": [
+        3143.55712890625,
+        3145.312255859375,
+        3146.355712890625,
+        3150.282470703125,
+        3150.655517578125,
+        3152.154541015625
+      ],
+      "connected_mad_ms": 3.684814453125,
+      "connected_median_ms": 3434.314208984375,
+      "connected_minus_baseline_ms_per_step": 0.19066341145833332,
+      "connected_samples_ms": [
+        3422.091064453125,
+        3423.7021484375,
+        3433.78515625,
+        3434.84326171875,
+        3438.122802734375,
+        3437.875244140625
+      ],
+      "expected_state_count": 256,
+      "grid_cells_per_axis": 224,
+      "network_state_count": 256,
+      "overhead_ci95_upper_pct": 9.115268216608285,
+      "overhead_pct": 9.084057519222766,
+      "passed_10pct_gate_ci95": true,
+      "passed_10pct_gate_point": true,
+      "rounds": 6,
+      "time_steps": 1500
+    }
+  ],
+  "timestamp_utc": "2026-07-21T07:30:09.382505+00:00",
+  "title": "plan 03 gate (d) re-measurement after round-E composite matvec coupling"
+}
