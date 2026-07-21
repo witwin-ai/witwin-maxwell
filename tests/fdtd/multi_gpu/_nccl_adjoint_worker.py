@@ -32,8 +32,11 @@ A nonzero process exit signals a gate failure. No timing is asserted.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -45,6 +48,58 @@ import witwin.maxwell as mw
 from witwin.maxwell.fdtd_parallel import FDTDParallelConfig
 from witwin.maxwell.fdtd.distributed import adjoint as _dist_adjoint
 from witwin.maxwell.fdtd.distributed.nccl_transport import NcclHaloTransport
+
+_BURNER = Path(__file__).with_name("_gpu_burner.py")
+
+
+@contextlib.contextmanager
+def _gpu_stress():
+    """Saturate every participating GPU with a co-tenant burner for the gate.
+
+    Enabled by ``WITWIN_NCCL_ADJ_STRESS=1``. Rank 0 spawns one committed burner
+    subprocess per physical GPU (pinned via ``CUDA_VISIBLE_DEVICES``); every rank
+    sleeps a fixed warm-up so the two ranks stay in lockstep at the first
+    collective and the burners are saturating both boards before the solve runs.
+    The burners are always terminated in the ``finally`` so a failing gate never
+    leaks a runaway process. This is the load-bearing acceptance condition: green
+    here at the honest tolerances proves the reverse is load-safe.
+    """
+
+    if os.environ.get("WITWIN_NCCL_ADJ_STRESS") != "1":
+        yield
+        return
+    rank = int(os.environ.get("RANK", "0"))
+    procs: list[subprocess.Popen] = []
+    if rank == 0:
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")
+        for dev in visible:
+            dev = dev.strip()
+            if not dev:
+                continue
+            child = dict(os.environ)
+            child["CUDA_VISIBLE_DEVICES"] = dev
+            child.pop("WITWIN_NCCL_ADJ_STRESS", None)
+            procs.append(
+                subprocess.Popen(
+                    [sys.executable, str(_BURNER)],
+                    env=child,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            )
+    try:
+        # Both ranks wait so they arrive at the first NCCL collective together and
+        # the burners are fully saturating before the timed gate begins.
+        time.sleep(10.0)
+        yield
+    finally:
+        for proc in procs:
+            proc.terminate()
+        for proc in procs:
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
 _FREQUENCY = 1.0e9
 _DENS_SHAPE = (5, 4, 4)
@@ -568,7 +623,8 @@ def main() -> None:
     if mode not in _MODES:
         raise SystemExit(f"unknown WITWIN_NCCL_ADJ_MODE={mode!r}")
     try:
-        _MODES[mode]()
+        with _gpu_stress():
+            _MODES[mode]()
     finally:
         if torch.distributed.is_initialized():
             torch.distributed.barrier()

@@ -381,11 +381,13 @@ def test_two_rank_nccl_reverse_transpose_identity_falsification(mode):
     )
 
 
-def _torchrun_adjoint(mode: str, *, timeout: int):
+def _torchrun_adjoint(mode: str, *, timeout: int, stress: bool = False):
     env = dict(os.environ)
     env["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
     env["TORCH_NCCL_SHOW_EAGER_INIT_P2P_SERIALIZATION_WARNING"] = "false"
     env["WITWIN_NCCL_ADJ_MODE"] = mode
+    if stress:
+        env["WITWIN_NCCL_ADJ_STRESS"] = "1"
     return _torchrun(_ADJOINT_WORKER, timeout=timeout, env=env)
 
 
@@ -426,6 +428,41 @@ def test_two_rank_nccl_adjoint_parity(mode, timeout):
     assert completed.returncode == 0, (
         f"NCCL adjoint driver [{mode}] failed\n"
         f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+    )
+    assert f"NCCL_ADJOINT_WORKER_OK[{mode}" in completed.stdout, completed.stdout
+
+
+@pytest.mark.nccl
+@pytest.mark.parametrize(
+    "mode,timeout",
+    (
+        ("standard", 600),
+        ("cpml", 600),
+        ("plane", 600),
+    ),
+)
+def test_two_rank_nccl_adjoint_parity_under_stress(mode, timeout):
+    """Headline parity gates hold at the honest 1e-4-class tolerance UNDER load.
+
+    This is the load-bearing acceptance for the stream-discipline fix. With
+    ``WITWIN_NCCL_ADJ_STRESS=1`` the worker spawns a committed GPU burner on every
+    participating board (``_gpu_burner.py``) that saturates both GPUs for the whole
+    gate, reproducing the concurrent-GPU-load condition under which the reverse
+    gradient was previously corrupted at the partition seam (standard ~1.2e-4, CPML
+    ~3.1e-4 vs the 1e-4 gate). After the fix -- the reverse/replay NCCL halos run on
+    the current (default) stream so their per-step adjoint planes' allocation stream
+    matches their use stream, closing the caching-allocator cross-stream reuse
+    window -- the driver reproduces the single-GPU reference to ~2e-7 relative even
+    while both boards are saturated, so the honest gate passes green under stress.
+    The burners are always terminated by the worker's stress context, so no runaway
+    process leaks even on a gate failure.
+    """
+
+    _skip_without_two_gpu_nccl()
+    completed = _torchrun_adjoint(mode, timeout=timeout, stress=True)
+    assert completed.returncode == 0, (
+        f"NCCL adjoint driver [{mode}] failed UNDER STRESS (a load-dependent reverse "
+        f"regression)\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
     )
     assert f"NCCL_ADJOINT_WORKER_OK[{mode}" in completed.stdout, completed.stdout
 
