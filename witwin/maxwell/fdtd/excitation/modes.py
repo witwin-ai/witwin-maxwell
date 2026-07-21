@@ -1414,6 +1414,50 @@ def _quasistatic_laplace_energy(
     return phi, energy
 
 
+def _tem_signal_potentials(pec_occupancy: torch.Tensor, mode_index: int) -> list[float]:
+    """Drive potentials for the quasi-static line mode selected by ``mode_index``.
+
+    Counts the isolated (non-grounded) signal conductors on the aperture and maps the
+    requested ``mode_index`` to a driving-potential vector for
+    :func:`_solve_quasistatic_line_modes`. A single-signal line (coax, single-strip
+    microstrip port) carries one mode driven ``[1.0]``. A two-signal coupled line
+    (a differential pair whose aperture spans both strips) carries an even/common mode
+    (``mode_index 0`` -> ``[1, 1]``) and an odd/differential mode (``mode_index 1`` ->
+    ``[1, -1]``). More than two coupled signal conductors need explicit user-supplied
+    potentials and are rejected (a routing boundary, not a solver capability).
+    """
+    conductor = pec_occupancy >= _PEC_OCCUPANCY_THRESHOLD
+    grounded = _boundary_connected_conductor(conductor)
+    isolated = (conductor & ~grounded).detach().to(dtype=torch.bool).cpu().numpy()
+    _labels, count = _label_connected_components(isolated)
+    index = int(mode_index)
+    if count == 0:
+        raise ValueError(
+            "A quasi-TEM WavePort requires at least one isolated signal conductor and a "
+            "grounded aperture boundary; none was found on the mode plane."
+        )
+    if count == 1:
+        if index != 0:
+            raise ValueError(
+                "A single-signal quasi-TEM line carries one mode; mode_index must be 0."
+            )
+        return [1.0]
+    if count == 2:
+        if index == 0:
+            return [1.0, 1.0]
+        if index == 1:
+            return [1.0, -1.0]
+        raise ValueError(
+            "A two-signal coupled quasi-TEM line carries two modes (mode_index 0 = even/"
+            "common, 1 = odd/differential)."
+        )
+    raise ValueError(
+        f"Quasi-TEM drive for {count} coupled signal conductors is not defined; a "
+        "cross-section with more than two signal conductors needs explicit driving "
+        "potentials."
+    )
+
+
 def _solve_quasistatic_line_modes(
     eps_planes: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     pec_occupancy: torch.Tensor,
@@ -3305,17 +3349,47 @@ def _assemble_vector_mode_data(
         torch.any(pec_occupancy[1:-1, 1:-1] >= _PEC_OCCUPANCY_THRESHOLD)
     )
     if has_interior_pec and source.get("wave_family") == "tem":
-        beta_value, component_arrays, pec_node_count = _solve_pec_tem_mode_torch(
-            tensor_eps_planes,
-            tensor_mu_planes,
-            pec_occupancy,
-            k0=k0,
-            du=du,
-            dv=dv,
-            mode_index=int(source["mode_index"]),
-            field_names=field_names,
-        )
-        solver_kind = "tem_electrostatic_torch"
+        try:
+            beta_value, component_arrays, pec_node_count = _solve_pec_tem_mode_torch(
+                tensor_eps_planes,
+                tensor_mu_planes,
+                pec_occupancy,
+                k0=k0,
+                du=du,
+                dv=dv,
+                mode_index=int(source["mode_index"]),
+                field_names=field_names,
+            )
+            solver_kind = "tem_electrostatic_torch"
+        except NotImplementedError:
+            # Inhomogeneous cross-section (substrate + air microstrip / coupled pair):
+            # the uniform-fill electrostatic normalization does not apply, so the legacy
+            # closed-form TEM solve fails closed. Route to the quasi-static variable-eps
+            # Laplace engine, which returns eps_eff = C / C0 for the true dielectric
+            # profile. That engine is non-magnetic; a magnetic inhomogeneous line is out
+            # of scope and re-raises the uniform-fill guard.
+            mu_uniform_unit = all(
+                bool(np.allclose(_real_plane_numpy(component), 1.0))
+                for component in tensor_mu_planes
+            )
+            if not mu_uniform_unit:
+                raise
+            signal_potentials = _tem_signal_potentials(
+                pec_occupancy, int(source["mode_index"])
+            )
+            line = _solve_quasistatic_line_modes(
+                tensor_eps_planes,
+                pec_occupancy,
+                k0=k0,
+                du=du,
+                dv=dv,
+                field_names=field_names,
+                signal_potentials=signal_potentials,
+            )
+            beta_value = line["beta"]
+            component_arrays = line["component_profiles"]
+            pec_node_count = int(line["conductor_count"])
+            solver_kind = "quasistatic_line_torch"
     elif has_interior_pec:
         operator, active, interior_u, interior_v, pec_node_count = _pec_vector_operator_torch(
             tensor_eps_planes,

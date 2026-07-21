@@ -179,9 +179,14 @@ def test_patch_antenna_result_antenna_pipeline_is_valid(patch_antenna_run):
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Probe-fed patch on the thick finite-ground slab is reactance-dominated "
-        "(|Gamma| ~ 1) and radiates off-broadside; matched-broadside TM010 with "
-        "D >= 5 dBi needs feed/ground redesign + external cross-check (stage E2c)."
+        "Probe-fed patch does not resonate: F2b diagnosis (docs/assessments/"
+        "f2-rf-trio-acceptance-2026-07-21.md) shows Re(Zin) < 4 Ohm with no resonance "
+        "peak across 2-8 GHz and a purely capacitive reactance -- the lumped feed couples "
+        "capacitively, never galvanically exciting the TM010 cavity mode; the cavity "
+        "resonance (~3.39 GHz) also sits below the driven band and the finite ground is "
+        "~0.07 lambda. The galvanic via added in F2b cut the feed reactance ~5x but a "
+        "matched broadside D >= 5 dBi needs a wire-bound clean-gap probe feed + larger "
+        "ground + on-resonance drive (multi-run antenna co-design, deferred)."
     ),
 )
 def test_patch_antenna_matched_broadside_gate(patch_antenna_run):
