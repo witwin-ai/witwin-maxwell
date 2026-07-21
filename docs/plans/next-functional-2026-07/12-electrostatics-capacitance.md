@@ -11,6 +11,21 @@
 > gradient gates, no external reference solver cross-check); NOT `completed`.
 > See `docs/assessments/a12-electrostatics-acceptance-2026-07-19.md` and
 > `tests/electrostatic/`.  
+> **Round-H revision (2026-07-21, master `6f3b0c8`; merge `4a0555d`).** Phase 4 SPD
+> tensor-eps + open boundary delivered: a full SPD 3×3 tensor permittivity in the FVM operator
+> (`A = A_diag + A_cross`, `A_cross` = gradient of a discrete quadratic energy → symmetric by
+> construction), gated by dense/random operator symmetry, rotated-frame MMS 2nd-order
+> convergence, anisotropic-capacitance reciprocity (<1e-6) and energy identity; an `open`
+> boundary now fails closed; and the opt-in `truncation_estimate` domain-extension API reports a
+> base/enlarged/delta + 1/L Richardson infinite-domain limit. Cleanup added a wall-tangential
+> MMS (exposing the documented 1st-order wall cross-flux), a precomputed-stencil `_apply_cross`
+> (bit-equal, no per-iteration autograd), and a boundary-touching-structure confound fail-close.
+> Trainable tensor-eps backward stays fail-closed (Phase 5). Evidence E2-class for the delivered
+> envelope (no external reference). **Still open:** exact (BEM) open boundary, trainable
+> tensor-eps backward (P5), 2nd-order wall cross-flux, multi-GPU (P5), touchscreen workflow (P6).
+> Phase-status bookkeeping / any `completed` mark is the supervisor's job (audit §4
+> non-author-review bar), not set here. See
+> `docs/assessments/h2-es-tensor-acceptance-2026-07-21.md`.  
 > 路线定位：独立求解器后续项目，当前不排期交付  
 > 日期：2026-07-14  
 > 目标证据：E3 production  

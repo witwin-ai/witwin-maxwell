@@ -1,6 +1,7 @@
 # Program continuation plan — rounds F/G/H (post round-E tiers 1–4)
 
-> Status: active — **Rounds F & G DELIVERED & merged (2026-07-21); Round H launching**
+> Status: **delivered (2026-07-21)** — **all three rounds F / G / H of this continuation
+> plan are now DELIVERED & merged to master**
 > Date: 2026-07-21
 > Anchor: master `164c263` (round E merged; final battery 2836 passed / 16 expected-FDFD / 3 xfailed)
 > Round-F merge anchor: master `b89a75c` (F1 `07e8e99`, F2 `0546b0a`, F3 `7ec99c7`,
@@ -8,7 +9,10 @@
 > Round-G merge anchor: master `18bc42a` (G1 `42ac3f1`, G2 `3884bb7`, G3 `5dd100e`,
 > G4 `c9b4bfc`, audit-minor cleanup `18bc42a`; full battery **2982 passed / 16
 > expected-FDFD / 3 xfailed / 1 xpassed**)
-> Governing status doc: `00-status-and-gaps-2026-07-19.md` (round-E + round-F + round-G revisions)
+> Round-H merge anchor: master `6f3b0c8` (H1 `acea86e`, H2 `4a0555d`, H3 `8ebaec0`,
+> H4 `df8ef96`, audit-minor cleanup `6f3b0c8`; final battery **3076 passed / 16
+> expected-FDFD / 3 xfailed / 1 xpassed**; census reconciled to **176**)
+> Governing status doc: `00-status-and-gaps-2026-07-19.md` (round-E + round-F + round-G + round-H revisions)
 
 ## Delivery status (2026-07-21)
 
@@ -71,21 +75,60 @@ census reconciled to **175**, round-G net ±2):
 place. No Round-G phase is `completed` (audit §4 non-author-review + external-reference bar
 unmet; 09's external cross-check is a documented adapter-fidelity gap, not a pass).
 
-**Round H — LAUNCHING (2026-07-21), tracks:**
+**Round H — DELIVERED & merged to master `6f3b0c8`** (all four tracks adversarially
+audited; load-bearing tests falsified; per-track acceptance docs under `docs/assessments/`;
+census reconciled to **176**; final battery **3076 passed / 16 expected-FDFD / 3 xfailed /
+1 xpassed**):
 
-1. **02 — NCCL end-to-end reverse DRIVER** per the written 7-step plan in
-   `g1-nccl-adjoint-acceptance-2026-07-21.md` (guard-relax → per-rank checkpoint capture →
-   NCCL forward-replay dict halos → local separable seed → per-rank reverse loop → grad_eps
-   gather + rank-0 pullback → parity/determinism/falsification gates), on top of the landed
-   reverse-halo transport primitives.
-2. **12 — tensor-eps + open boundary** (electrostatics Phase 4: nonuniform grid,
-   tensor/anisotropic eps, open-boundary truncation — the P4 items rejected at prepare).
-3. **10 — IEEE/IEC phantom benchmark + incident power density** (SAR: standard-phantom
-   cross-check + the `IncidentPowerDensity` monitor / `input_power` normalization currently
-   fail-closed).
-4. **13 — circuit-ESD co-simulation + smooth breakdown surrogate** (Phase 3 source-impedance/
-   discharge-network coupling consuming F1's co-sim path + the Phase-5 trainable smooth
-   breakdown surrogate).
+1. **02 — per-rank collective NCCL end-to-end reverse DRIVER + S5 tiled-plane seeds, merge
+   `acea86e`.** The written G1 7-step plan executed (guard-relax → per-rank checkpoint
+   capture → NCCL forward-replay dict halos → local separable seed → per-rank reverse loop →
+   grad_eps gather + rank-0 pullback → parity/determinism/falsification gates): a
+   trainable-density scene backpropagates over a one-process-per-GPU NCCL launch with per-rank
+   point/plane objective+grad parity ~2e-7 (incl. psi-active) at honest 1e-4-class tolerances,
+   plus a separable y/z-plane monitor seed with a seam-ownership falsification. A **cross-stream
+   caching-allocator race** was found and fixed (commit `c233d8b`; honest tolerances restored,
+   committed stressed-mode gate). Acceptance `h1-nccl-driver-acceptance-2026-07-21.md`.
+2. **12 — electrostatics Phase-4 SPD tensor-eps + open boundary, merge `4a0555d`.** Full SPD
+   3×3 tensor permittivity in the FVM operator (symmetric-by-construction cross term, rotated
+   MMS 2nd-order, anisotropic-capacitance reciprocity), `open`-boundary fail-close, and the
+   opt-in `truncation_estimate` domain-extension API with a Richardson infinite-domain limit;
+   a wall-tangential MMS + boundary-touching-structure confound fail-close added in cleanup.
+   Acceptance `h2-es-tensor-acceptance-2026-07-21.md`.
+3. **10 — SAR incident power density + canonical phantom benchmark family, merge `8ebaec0`.**
+   `IncidentPowerDensityMonitor` / `Result.incident_power_density` (was fail-closed), the
+   redistributable canonical phantom family, and SAR RESULTS rows (`layered_slab` wave-level
+   surface/volume conservation closure). `uniform_lossy_cube` closure honestly reclassified a
+   tautology; `antenna_near_phantom` blocked (conductive-media port), recorded with-target-class.
+   Acceptance `h3-sar-phantom-acceptance-2026-07-21.md`.
+4. **13 — circuit-driven ESD + smooth breakdown surrogate, merge `df8ef96`.** ESD through the
+   standard 330 Ω / 150 pF source-impedance network (independent offline scipy circuit
+   cross-check + an EM-load-bearing companion gate from cleanup) + a differentiable
+   `SmoothBreakdownRisk` surrogate (typed non-physical / non-regulatory). Phase 3 now
+   substantially delivered (prebias + circuit ESD); phases 6–7 remain excluded. Acceptance
+   `h4-esd-circuit-acceptance-2026-07-21.md`.
+
+**Consequence:** **all three rounds F / G / H of this continuation plan are delivered.** No
+Round-H phase is `completed` (audit §4 non-author-review + external-reference bar unmet);
+rounds record delivery + evidence grade only.
+
+**Residual open items (seed list for any future round):**
+
+1. **02** — in-process `cuda_p2p` bridge cross-stream load hazard (same race class the NCCL
+   fix closed; pre-existing, separately owned); NCCL driver timing pending an exclusive window;
+   coupled-runtime (circuit/network/wire) joint solve; flux/mode/x-normal NCCL adjoint objectives
+   + monitor gather beyond forward.
+2. **01** — microstrip/diff-pair resolution-limited `eps_eff` gap; patch antenna feed
+   (matched-broadside `TM010` strict xfail); guided interior-PEC production wiring.
+3. **09** — true-oblique / conformal (non-staircase) SIBC; external-reference caches for the
+   SIBC benches (adapter under-applies wall loss).
+4. **03/04** — external-reference caches for port/lumped-load scenes; explicit-delay
+   differentiable adjoint; strong-coupling external reference.
+5. **10** — IEEE/IEC *certified* SAR phantom profiles + external reference cross-check; VOP;
+   `antenna_near_phantom` conductive-media port.
+6. **12** — exact (BEM) open boundary; trainable tensor-eps backward; 2nd-order wall cross-flux.
+7. **13** — ESD phases 6–7 (surface/random/thermal feedback, gun/system calibrated-standard
+   workflow); conductive-media breakdown-feedback port coefficient.
 
 > Execution model unchanged (parallel single-writer worktrees, two adversarial audits,
 > supervisor merge gate, integration battery — see below).

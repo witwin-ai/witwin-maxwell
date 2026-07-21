@@ -38,6 +38,25 @@
 > `g4-sibc-oblique-acceptance-2026-07-21.md`. All Round-G deliveries were
 > adversarially audited; no phase is `completed` (audit §4 non-author-review +
 > external-reference bar unmet).
+> **Round-H update: 2026-07-21, master `6f3b0c8`.** Round H delivered and merged
+> (all four tracks adversarially audited; audit-minor cleanup `6f3b0c8`; final
+> battery **3076 passed / 16 expected-FDFD / 3 xfailed / 1 xpassed**; census
+> reconciled to **176**): 02 per-rank collective NCCL end-to-end reverse **driver**
+> + S5 separable tiled-plane monitor seeds, with psi-active and stressed parity
+> gates, and a cross-stream caching-allocator race found and fixed (merge `acea86e`);
+> 12 SPD tensor-permittivity FVM operator + open-boundary fail-close +
+> domain-extension `truncation_estimate` (merge `4a0555d`); 10 incident power density
+> monitor + canonical phantom benchmark family + SAR RESULTS rows (merge `8ebaec0`);
+> 13 circuit-driven ESD through the standard source network + differentiable
+> `SmoothBreakdownRisk` surrogate (merge `df8ef96`). This update revises the
+> 02/10/12/13 rows and sections, the census history (→176), route steps S4/S5/S7, and
+> records the cross-stream allocator-race root-cause + the in-process `cuda_p2p` load
+> hazard as a new open item. Sources:
+> `docs/assessments/h1-nccl-driver-acceptance-2026-07-21.md` (incl. the cross-stream
+> allocator-race root-cause section), `h2-es-tensor-acceptance-2026-07-21.md`,
+> `h3-sar-phantom-acceptance-2026-07-21.md`, `h4-esd-circuit-acceptance-2026-07-21.md`.
+> All Round-H deliveries were adversarially audited; no phase is `completed`
+> (audit §4 non-author-review + external-reference bar unmet).
 > Governing audit: `docs/assessments/next-functional-audit-2026-07-18.md`.
 > Binding vocabularies: E0–E3 evidence grades (audit §0/§4), the five-class gate
 > taxonomy + `perf` labels (`docs/reference/gate-classification.md`), the S0–S7
@@ -69,7 +88,7 @@ grade.
 | # | Title | Phases delivered / total | Evidence grade (measured) | Headline gaps | Freeze state |
 |---|---|---|---|---|---|
 | 01 | RF engineering workflow | 0–5 declared; per-gate re-classified; S1 keystone (round-E) + F2 trio | **E2 for the validated scene set** (`coax_thru` + `rectangular_waveguide` wave-level, external-reference cross-check); microstrip/diff-pair now production quasi-TEM benches (measured `gap`, resolution-limited); E0–E1 elsewhere; §9.4 perf gates PASS (`perf`) via S2 | microstrip/diff-pair `eps_eff` resolution-limited (~24% low at dx=5 mm; quasi-static engine itself converges to H–J); patch broadside honest strict-xfail (not flipped); guided interior-PEC path not yet production-wired | reopened; S1 + F2 trio landed (microstrip/diff-pair un-BLOCKED); four external caches generated; S2/S3 done |
-| 02 | Multi-GPU execution | ensemble + joint-solve forward + S4 distributed CPML-trainable adjoint (psi-active) + Round-G NCCL reverse-halo adjoint transport primitives + step-rate instrument | forward **E2**; CPML-trainable distributed adjoint **E2** (psi-active parity 5.94e-7); NCCL reverse **transport E2** (bitwise 2-process transpose identity); NCCL end-to-end reverse driver / coupled E0 | NCCL one-process-per-GPU end-to-end reverse **driver** (7-step plan in G1 acceptance) + monitor gather; coupled-runtime joint solve; joint-solve strong scaling grid-conditional (128³ 0.544×, 192³ 1.726×); static-capability exclusions remain | S4 CPML-adjoint landed; Round-G NCCL adjoint transport landed, driver deferred |
+| 02 | Multi-GPU execution | ensemble + joint-solve forward + S4 distributed CPML-trainable adjoint (psi-active) + Round-H per-rank collective NCCL end-to-end reverse **driver** + S5 separable tiled-plane monitor seeds | forward **E2**; CPML-trainable distributed adjoint **E2**; NCCL reverse transport **E2**; **NCCL end-to-end reverse driver E2** (per-rank point/plane parity ~2e-7 incl. psi-active + stressed; cross-stream allocator race fixed); coupled joint-solve E0 | flux/mode/x-normal NCCL objectives + monitor gather beyond forward; coupled-runtime joint solve; in-process `cuda_p2p` load hazard (same class, pre-existing, separately owned); NCCL driver timing pending exclusive window; static-capability exclusions remain | S4 landed; Round-H NCCL driver + S5 tiled seeds landed (driver E2); timing pending exclusive window |
 | 03 | Touchstone network embedding | 0–4 + round-E E2 evidence (gate (d) grid-conditional) | **E2** (embedded path: independent raw-sample S-cascade cross-check <1e-5 + multi-scenario passivity/conservation) | gate (d) still grid-conditional (PASS ≥224³, compute-bound ruling); delay adjoint fail-closed; WavePort embedding = missing design contract; inherits 01 port-power (now partly wave-validated) | E2 evidence landed; gate (d) grid-conditional; delay-adjoint/WavePort open |
 | 04 | SPICE/MNA co-simulation | 0–4 + F1 conservation suite + independent offline cross-check | **E2** (multi-scenario conservation + code-path-independent circuit cross-check landed) | strong-coupling end-to-end ref still `future-xfdtd`; reactive `dU_circuit` channel stays consistency-class (not lifted by F1b); external lumped-load cross-check pending | E2 evidence landed (F1); S3 closed |
 | 05 | Nonlinear circuit devices | Phase 0 + N1 standalone transient | E0 | FDTD coupling / transient companion / adjoint / benchmark not built; BJT/MOSFET fail-closed | Wave C — S3 passed 2026-07-21, unfrozen; not scheduled in Round G |
@@ -77,10 +96,10 @@ grade.
 | 07 | Thin-wire model | 0–3 + Phase-4 + Round-G B2 lossy recurrence + B3 conductivity adjoint | PEC **E2** / lossy **E1–E2** | field-coupled `dI/dσ` reverse fail-closed (nondeterministic shared fit); B4 distributed lossy reverse fail-closed; distributed lossy forward now fail-closed (was silent-PEC); analytic-AC gate 8% (fit-limited, not 2%); closed-box field-energy closure not performed (companion-level only) | Wave C unfrozen (S3 passed); Round G B2+B3 landed |
 | 08 | Gyromagnetic ferrite | Phase 0 + arbitrary-bias forward + mixed-bias support (Round G) | **E1** | FDFD, multi-GPU, adjoint, Bloch, `PerturbationMedium`-over-ferrite fail-closed; identity collocation (not 4-point Yee gather) | Wave C — unfrozen (S3 passed); Round G general+mixed-bias landed |
 | 09 | Surface impedance / roughness | Phase 0 + Phase-1 + Round-G all-orientation staircased SIBC + cylinder physics gate + skin-effect bench | **E1** | true oblique/conformal (non-staircase) fail-closed; rotated Box / rational-on-curved / Bloch fail-closed; adapter export fail-closed (external ref under-applies wall loss); ~18% staircase-curve absorbed-power systematic | Wave C — unfrozen (S3 passed); Round G orientation generalization landed |
-| 10 | SAR | 0–3 + P4 slice / 0–5 | E1 (analytic/golden/brute-force-parity/grid-convergence; no external ref) | IEEE/IEC phantom benchmark, incident power density, VOP (P5), multi-GPU scale-out (P4) all deferred/fail-closed | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
+| 10 | SAR | 0–3 + P4 slice + Round-H incident power density + canonical phantom family + SAR RESULTS rows / 0–5 | **E1–E2** (analytic/golden/brute-force-parity/grid-convergence + wave-level conservation closure; no external ref) | IEEE/IEC *certified* phantom profiles + external ref still deferred; `antenna_near_phantom` blocked (conductive-media port); `input_power` normalization + VOP (P5) + multi-GPU scale-out (P4) fail-closed/deferred | Wave D — selective start 2026-07-19; Round-H IPD + phantom benches landed; S7 partial |
 | 11 | Bioheat | — (dropped by owner) | — | plan dropped by owner 2026-07-19; plan file deleted (commit `4c521ab`) | Wave D — DROPPED (not implemented) |
-| 12 | Electrostatic / capacitance | 0–3 + P5 diff slice / 0–6 | E1–E2 (analytic/convergence/conservation/energy-identity/gradient; no external ref) | tensor eps + open boundary (P4), multi-GPU (P5), touchscreen/packaging workflow (P6) fail-closed/deferred | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
-| 13 | ESD / dielectric breakdown | 0–2 + P3 pre-bias slice + P4 / 0–7 | E1 (analytic waveform/golden state-machine/energy-closure/dt-convergence; no external/calibrated ref) | P3 circuit-ESD co-sim, P5 multi-GPU/smooth surrogate, P6–7 calibration/standard workflow deferred | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
+| 12 | Electrostatic / capacitance | 0–3 + P5 diff slice + Round-H P4 SPD tensor-eps + open-boundary truncation_estimate / 0–6 | **E2-class for the delivered envelope** (SPD-symmetry/rotated-MMS-convergence/reciprocity/energy-identity/domain-extension; no external ref) | exact open boundary (BEM) + trainable tensor-eps backward (P5) fail-closed; 1st-order wall cross-flux; multi-GPU (P5), touchscreen workflow (P6) deferred | Wave D — selective start 2026-07-19; Round-H P4 tensor-eps + open-boundary landed; S7 partial |
+| 13 | ESD / dielectric breakdown | 0–2 + P3 pre-bias + Round-H P3 circuit-ESD + P4 + P5 smooth-risk surrogate / 0–7 | **E1–E2** (analytic waveform/golden state-machine/energy-closure/dt-convergence + independent offline circuit cross-check + EM-load-bearing gate; no external/calibrated ref) | P3 substantially delivered (prebias + circuit ESD); conductive-media breakdown-feedback port fail-closed; P5 multi-GPU, P6–7 calibration/standard workflow deferred | Wave D — selective start 2026-07-19; Round-H circuit-ESD + smooth-risk surrogate landed; S7 partial |
 
 Route status (S0–S7) and owner decision points are in the final two sections.
 
@@ -322,17 +341,79 @@ progress `docs/plans/next-functional-2026-07/02-ensemble-progress.md`,
     forward-replay dict halos, local separable seed, per-rank reverse loop, grad_eps
     gather + rank-0 pullback, gates). `_validate_nccl_capabilities` still raises for
     trainable density; census unchanged at **175**.
+- **Round-H per-rank collective NCCL end-to-end reverse DRIVER + S5 tiled-plane seeds
+  (merge `acea86e`, acceptance `h1-nccl-driver-acceptance-2026-07-21.md`):**
+  - **The end-to-end per-rank reverse driver is DELIVERED** (the G1 7-step plan executed):
+    a trainable Box-`MaterialRegion` density scene now backpropagates over a
+    one-process-per-GPU NCCL launch and matches the single-process single-GPU adjoint.
+    New forward-replay dict halos (`NcclHaloTransport.forward_electric_halo` /
+    `forward_magnetic_halo`, the transpose siblings of the G1 reverse halos) route the
+    replay's per-rank state-dict Yee x-planes collectively; a narrow `allow_adjoint` entry
+    fence admits the trainable-density + point-monitor scene on the NCCL path (every other
+    fence stays; census unchanged); `_NcclDistributedFDTDGradientBridge` reuses the
+    in-process reverse math verbatim with the three single-process assumptions replaced
+    (per-rank LOCAL output pack, separable local objective seeded per rank, slab-wise
+    `grad_eps` gather + rank-0-only pullback); off-owner ranks still drive the full
+    collective reverse so no deadlock, and the rank-0 gather-capacity preflight is
+    **collective-safe** (all ranks `allreduce` the verdict and raise together). Gates
+    (2 procs × 1 GPU, honest 1e-4-class tolerances): objective+grad parity for standard
+    open-boundary cross-seam / x-CPML interior / x-CPML **psi-active** (~2e-7); reverse
+    magnetic/electric halo + psi-carry falsifications red (rel 9.31e-1 / 1.64e-2 /
+    6.88e-2); repeat-determinism < 1e-9; symmetric guard/capacity reject with no hang.
+  - **S5 separable tiled-plane monitor adjoint seed delivered:** a y/z-normal `PlaneMonitor`
+    objective is now seedable on the NCCL driver — each rank sums its owned plane strip
+    (`plane_monitor_l2_objective`, owned-`owned_local_slice[0]` crop) so the world sum
+    reproduces the single-process full-plane objective with every seam cell counted once and
+    no cross-rank cotangent scatter. Parity vs an independent single-GPU full-plane adjoint
+    at the point-gate tolerances; **seam-ownership falsification** (sum the FULL local strip
+    → double-count the live seam cell) reddens parity (grad rel 4.005e-1). Flux/mode/finite/
+    x-normal-plane objectives stay fail-closed (they need seam-crossing tangential-field
+    assembly, not an owned-cell separable sum), rejected by
+    `require_distributed_adjoint_objective_support`.
+  - **Cross-stream caching-allocator race found and fixed** (commit `c233d8b`): before the
+    fix the driver's gathered gradient was **load-dependent** — bitwise-correct on exclusive
+    GPUs (~1.5e-7) but deterministically wrong at the partition seam under concurrent GPU
+    load (standard rel ~1.2e-4, CPML ~3.1e-4, seam-spanning plane ~2.7e-2, occasional
+    blow-ups), with the forward loss staying bitwise identical (isolating the defect to the
+    distributed reverse). Root cause: the four reverse/replay NCCL halos ran their in-place
+    accumulate + posted the collective inside `with torch.cuda.stream(engine.compute_stream)`,
+    but the per-step adjoint-state planes they touch are allocated on the **default** stream
+    by the reverse kernels; the CUDA caching allocator tags a freed block only with its
+    allocation stream, so under load a default-stream reuse could overwrite a block the
+    compute-stream halo was still writing (the live-forward halos are immune — they slice
+    persistent field storage — which is why the forward loss stays clean). Fix: run those
+    four halos on the current (default) stream (the reverse driver already host-synchronizes
+    between phases, so `compute_stream` bought no overlap) — matching allocation-stream to
+    use-stream closes the window at zero cost. **Honest tolerances restored** (the prior
+    round's rtol-1e-3/atol-1e-2 grad-gate widening that laundered the drift is reverted) and
+    a **committed stressed-mode parity gate**
+    (`test_two_rank_nccl_adjoint_parity_under_stress[standard|cpml|plane]`) runs the three
+    objectives at the honest 1e-4 gate under an in-worker saturating co-tenant burner (max
+    ~3e-7). Load-bearing falsification: reverting the four halos collectively onto
+    `compute_stream` under the burner reddens standard/CPML deterministically (~1.223e-4 /
+    ~3.120e-4) and the plane gate intermittently (worst-case run 2.684e-2).
+  - **NEW open item recorded (pre-existing, separately owned):** the same race class
+    reproduces on the **in-process `transport="cuda_p2p"` bridge** under load — the fix
+    landed on the NCCL transport halos; the shared-machinery hazard on the in-process bridge
+    is pre-existing and separately owned, and is recorded here so it is not lost.
 
 **Not delivered / open gaps:**
-- **NCCL one-process-per-GPU (torchrun) end-to-end reverse DRIVER + monitor gather,
-  CPML psi-carrying NCCL reverse, S5 tiled monitor seeds, and coupled-runtime
-  (circuit/network/wire) joint solve remain OUT of scope, fail-closed** — the
-  blueprint #13/#18 tail. Round G landed the reverse-halo transport foundation (the
-  load-bearing correctness prerequisite, bitwise transpose-exact) and the opt-in timing
-  instrument, but NOT the driver; the 7-step executable plan is recorded in
-  `g1-nccl-adjoint-acceptance-2026-07-21.md`. The NCCL forward path still has only a
-  correctness worker (`_nccl_forward_worker.py`); the timing instrument is delivered and
-  unit-tested but produces numbers only under an exclusive window (none asserted here).
+- **NCCL end-to-end reverse driver + S5 y/z-plane seeds DELIVERED (Round H, merge
+  `acea86e`)** — see the Round-H block above. **Still OUT of scope, fail-closed:** flux /
+  mode / finite-plane / x-normal-plane NCCL adjoint objectives (they need seam-crossing
+  tangential-field interpolation, not an owned-cell separable sum; rejected by
+  `require_distributed_adjoint_objective_support`), CPML **psi-carrying** NCCL reverse beyond
+  the delivered psi-active point/plane parity, monitor gather **beyond the forward path** (the
+  driver reads each rank's shard-local monitor output directly, not a collective per-monitor
+  gather), and coupled-runtime (circuit/network/wire) joint solve — the blueprint #13/#18 tail.
+- **In-process `cuda_p2p` bridge cross-stream load hazard (NEW open item, pre-existing,
+  separately owned):** the caching-allocator cross-stream race fixed on the NCCL transport
+  halos (commit `c233d8b`) reproduces on the in-process `transport="cuda_p2p"` bridge under
+  concurrent GPU load — it is in the shared reverse machinery. The in-process fix is
+  pre-existing scope, separately owned; recorded here so it is not lost.
+- **NCCL driver timing pending an exclusive window:** the opt-in per-rank step-rate instrument
+  (Round G) is delivered and unit-tested, but the driver produces wall-clock numbers only
+  under an exclusive window (none asserted here; correctness-only shared GPUs).
 - Joint-solve forward strong scaling is grid-conditional (payoff only ≥192³; 128³ is
   communication-bound). Ensemble+joint-solve composition still rejected.
 - `_validate_static_capabilities` still rejects Bloch/x-periodic/x-symmetry,
@@ -344,11 +425,14 @@ progress `docs/plans/next-functional-2026-07/02-ensemble-progress.md`,
 
 **Evidence grade:** forward **E2**; **CPML-trainable distributed adjoint E2**
 (psi-active 1-vs-2-GPU parity 5.94e-7, load-bearing falsified); **NCCL reverse-halo
-adjoint transport E2** (Round G, bitwise 2-process transpose identity + falsified);
-timing measured on the exclusive window (ensemble 2×, joint-solve grid-conditional),
-opt-in NCCL step-rate instrument delivered (numbers pending exclusive window). NCCL
-end-to-end reverse **driver** / coupled-runtime joint solve **E0** (deferred with a
-written 7-step plan).
+adjoint transport E2** (Round G, bitwise 2-process transpose identity); **NCCL
+end-to-end reverse DRIVER E2** (Round H — per-rank point/plane objective+grad parity
+~2e-7 including psi-active, honest 1e-4-class gates green on exclusive GPUs AND under a
+saturating co-tenant burner after the cross-stream allocator-race fix, load-bearing
+falsifications recorded). Timing measured on the exclusive window (ensemble 2×,
+joint-solve grid-conditional); NCCL driver timing pending an exclusive window.
+Coupled-runtime joint solve **E0**; the in-process `cuda_p2p` load hazard is an open
+pre-existing item (see gaps).
 
 ### 03 — Touchstone network embedding
 
@@ -777,8 +861,12 @@ SAR, plus follow-up fixes `f05c4c2`/`6056c60`/`e819777`/`cfb5a32`/`841aecb`/
 `b237946`/`1b89b4f`). Each delivery is E1–E2 evidence (analytic / golden /
 convergence / falsified gates) with **no external reference-solver cross-check**,
 so no phase is `completed` (the audit §4 `completed` bar — wave-level headline
-gate + independent reference + non-author review — is unmet). Bioheat is not
-covered below (dropped).
+gate + independent reference + non-author review — is unmet). **Round H
+(2026-07-21)** deepened all three — 12 Phase-4 SPD tensor-eps + open-boundary
+`truncation_estimate` (`4a0555d`), 10 incident power density + canonical phantom
+benches + SAR RESULTS rows (`8ebaec0`), 13 circuit-driven ESD + `SmoothBreakdownRisk`
+surrogate (`df8ef96`), audit-minor cleanup `6f3b0c8`; still E1–E2 / E2-class with no
+external reference, so none is `completed`. Bioheat is not covered below (dropped).
 
 #### 10 — SAR
 
@@ -797,14 +885,57 @@ multi-source combination), and a Phase-4 slice (`soft_peak` surrogate +
 finite-difference gradient gates, float32-limited per the acceptance doc's
 precision note). Falsifications recorded per phase (see acceptance doc).
 
-**Not delivered / open gaps:** IEEE/IEC 62704-1 standard-phantom benchmark and
-independent-reference cross-check NOT run (no redistributable phantom fixture;
-golden + brute-force parity + grid convergence stand in). `IncidentPowerDensity`
-monitor and `input_power` normalization fail closed (no injected-source-power
-diagnostic in this build). VOP and multi-GPU SAR reduction (Phase 5 / Phase-4
-scale-out) OUT of scope, fail closed. Gradient path is float32-limited.
+**Round-H incident power density + canonical phantom family + RESULTS rows (merge
+`8ebaec0`, acceptance `h3-sar-phantom-acceptance-2026-07-21.md`):**
+- **`IncidentPowerDensityMonitor` + `Result.incident_power_density`** (the previously
+  fail-closed incident power density): a `PlaneMonitor` subclass carrying the four tangential
+  fields for the normal Poynting component, reusing the `FluxMonitor` machinery
+  (`plane_normal_poynting` factored as the single source of truth so the monitor's integrated
+  flux is identically the `FluxMonitor` integral); typed `IncidentPowerDensity` output with
+  signed `normal_poynting`, `|S.n|`, plane-integrated flux, and an explicitly **non-certified**
+  (`certified: False`) versioned `spatial-average-v1` moving-window average. Analytic gates:
+  plane-wave `|S| = |E|²/(2·eta)` exact-class, flux == `_compute_plane_flux` == analytic, sign
+  flips with `normal_direction`, spatial-average vs independent brute-force reference, and an
+  end-to-end vacuum plane-wave FDTD tie to a co-located `FluxMonitor`.
+- **Canonical phantom benchmark family** (`benchmark/scenes/sar/`, redistributable canonical
+  geometry; published-class 900 MHz tissue values): `uniform_lossy_cube`, `layered_slab`
+  (skin/fat/muscle), `one_gram_cube` (hand-computable exact 1 g window), `antenna_near_phantom`.
+  **SAR RESULTS rows** via a self-contained `benchmark/sar_validation.py` harness
+  (`python -m benchmark sar`), gate classes self-labelled from `gate-classification.md`:
+  `layered_slab` **wave-level** (surface/volume power-conservation closure 16.7% at dx=4 mm,
+  monotonically converging 0.200→0.167→0.125 over 5/4/3 mm), `one_gram_cube`
+  **analytic-identity**, `uniform_lossy_cube` **analytic-identity** (self-consistency,
+  supporting only), `antenna_near_phantom` **blocked**; every row
+  `external_reference: analytic-only`. Falsifications: Poynting-factor, box-sum
+  inclusion-exclusion, one-gram grid, power-conservation colocation split each redden the
+  headline gate.
+- **Honest reclassifications (cleanup `6f3b0c8`):** the `uniform_lossy_cube` volume/channel
+  closure is reclassified from analytic-identity to a **tautology** (self-comparison of the
+  same field), and the blocked `antenna_near_phantom` row records its wave-level target as a
+  **target only, never an achieved gate class** (blocked-with-target-class convention).
+- **`antenna_near_phantom` blocked (recorded design blocker):** the driven end-to-end SAR
+  chain fails closed on a conductive (tissue) background — the thin-wire and lumped-port
+  runtimes require a conductance-aware port update coefficient (`fdtd/ports.py`,
+  `fdtd/wire.py`); a tissue phantom is conductive by construction, so this is fundamental to
+  the antenna+phantom combination. The scene builds and preparing it raises
+  `NotImplementedError`, pinned as a gate.
 
-**Evidence grade:** **E1** (analytic/golden/parity/convergence; no external ref).
+**Not delivered / open gaps:** the **IEEE/IEC-*certified* standard-phantom profiles +
+external reference-solver cross-check** are still NOT run — the canonical phantom family
+(Round H) supplies redistributable geometry + wave-level conservation closure, but the single
+owner-authorized external run is assessed and **deferred** (the only naturally driven
+cross-check target, `antenna_near_phantom`, is blocked upstream; the conservation closure
+already provides the binding evidence). `input_power` normalization stays **fail-closed**
+(removing the guard needs a total-injected-source-power diagnostic — a real capability, left
+out per the "only if clean" rule; census stays). `IncidentPowerDensity` is now delivered (was
+fail-closed). Peak 1 g SAR is documented **grid-sensitive** (not tightly convergent — a
+source-normalized plane wave delivers grid-dependent incident power density; the conservation
+closure is the convergent wave-level observable). VOP and multi-GPU SAR reduction (Phase 5 /
+Phase-4 scale-out) OUT of scope, fail closed. Gradient path is float32-limited.
+
+**Evidence grade:** **E1–E2** (analytic/golden/brute-force-parity/grid-convergence + the
+Round-H wave-level surface/volume power-conservation closure on `layered_slab`; no external
+reference — the certified-phantom + external cross-check caveat holds).
 
 #### 12 — Electrostatic / capacitance
 
@@ -823,17 +954,63 @@ reciprocity/sign/row-sum/energy gates), and a Phase-5 differentiability slice
 (implicit-function-theorem backward on the reduced SPD solve; six central-
 difference gradient gates rel err `< 1e-4`). Falsifications recorded per stage.
 
-**Not delivered / open gaps:** Phase 4 (nonuniform grid, tensor/anisotropic eps,
-open boundary) rejected at prepare / out of scope. Phase-5 multi-GPU — no
-electrostatic distributed entrypoint (single `scene.device`), noted out-of-scope
-rather than a dead guard. Phase 6 (touchscreen/packaging workflow) not started.
-Floating-conductor gradients and trainable-terminal-voltage / `Material`-eps
-public differentiation fail closed / require caller-supplied compiled tensors
-(only `ChargeDensity` is a public differentiable leaf). No external
-reference-solver cross-check.
+**Round-H Phase-4 SPD tensor-eps + open-boundary truncation_estimate (merge `4a0555d`,
+acceptance `h2-es-tensor-acceptance-2026-07-21.md`):**
+- **SPD full 3×3 tensor permittivity in the FVM electrostatic operator** (H2a): a `Structure`
+  material with `DiagonalTensor3(...)` / `Tensor3x3(...)` now compiles and solves through
+  `Simulation.electrostatic(...)` / `.capacitance(...)`. The operator is `A = A_diag + A_cross`,
+  where `A_cross` (the off-diagonals) is defined as the gradient of a discrete quadratic energy
+  `W_cross(phi)`, so it is **symmetric by construction**; the compiler validates the
+  relative-permittivity matrix as real/symmetric/positive-definite (asymmetric/indefinite →
+  `ValueError`). Gates: dense/random operator **symmetry** (asymmetry < 1e-9, min symmetric
+  eigenvalue > 0), **rotated-frame MMS 2nd-order convergence** (orders > 1.9), Gauss closure,
+  **anisotropic capacitance reciprocity** (< 1e-6) and energy consistency, diagonal-reduction
+  parity, isotropic byte-identical scalar path. Falsifications: detaching the cross-term
+  symmetrization (asymmetry 8.4e-2, reciprocity 1.92e-5) and dropping the cross term (MMS order
+  collapse to ~0.03) each redden the discriminating gate. **Wall-tangential MMS added in
+  cleanup** (`6f3b0c8`): the sin² MMS is flat at the walls, so a `phi = prod sin(t+0.5)`
+  manufactured solution with nonzero wall gradient now exercises the wall cross-flux — it shows
+  the documented **1st-order** wall boundary layer (interior stays 2nd-order); dropping the
+  cross term makes it diverge. The per-PCG-iteration autograd `_apply_cross` was replaced with a
+  precomputed-stencil direct application (bit-equal, equality-gated).
+- **`open` electrostatic boundary fail-close + `truncation_estimate` domain-extension API**
+  (H2b): an `open` (infinite-domain) boundary kind now raises `NotImplementedError` on any face
+  (no exact radiation condition on the scalar potential at a finite Cartesian face; a BEM open
+  boundary is a later phase). The opt-in `TruncationEstimate(padding_cells=N)` /
+  `TruncationReport` runs ONE additional enlarged grounded-box capacitance solve (interior cells
+  fixed to ULP, ~1.1e-16 drift), isolating the pure boundary-truncation effect; reports
+  base/enlarged/delta/`max_relative_delta` + a 1/L Richardson extrapolation to the
+  infinite-domain limit. Two-axis domain-extension convergence study committed (C(L) monotone
+  toward a stable Richardson `C_inf`; grid-Cauchy at fixed L). **Boundary-touching-structure
+  confound fails closed** (cleanup `6f3b0c8`): if a dielectric structure reaches the base domain
+  wall the enlarged solve would replace it with background there, confounding truncation with a
+  medium change — `_structure_reaches_boundary` now raises `ValueError`. Falsifications:
+  removing the `open` special-case (falls through to a `ValueError`), neutralizing the
+  enlargement (delta ~0, Richardson nan), forcing the confound check false (confounded delta
+  reported) each redden.
+- **Differentiability disposition — fail-closed (decided):** Phase 4 owns the forward SPD
+  tensor-eps operator only (gradients are Phase 5); a trainable input under a tensor dielectric
+  fails closed on both the electrostatic and capacitance public paths rather than detaching an
+  unverified gradient.
 
-**Evidence grade:** **E1–E2** (analytic/convergence/conservation/energy/gradient;
-no external ref).
+**Not delivered / open gaps:** Phase-4 **tensor eps + open-boundary `truncation_estimate`
+DELIVERED (Round H)** — see above. Still open: an **exact open boundary** (boundary-element /
+infinite-domain) is deferred (the domain-extension `truncation_estimate` is the
+controlled-truncation substitute); the **trainable tensor-eps backward** (off-diagonal
+cross-flux VJP, Phase 5) fails closed; the **wall cross-flux is 1st-order** for a field with a
+strong tangential wall gradient (interior is 2nd-order); the Richardson extrapolation assumes a
+1/L leading term (estimate, not a certified bound). Phase-5 multi-GPU — no electrostatic
+distributed entrypoint (single `scene.device`), noted out-of-scope rather than a dead guard.
+Phase 6 (touchscreen/packaging workflow) not started. Floating-conductor gradients and
+trainable-terminal-voltage / `Material`-eps public differentiation fail closed (only
+`ChargeDensity` is a public differentiable leaf). No external reference-solver cross-check.
+
+**Evidence grade:** **E2-class for the delivered envelope** (Round H: SPD operator symmetry /
+rotated-MMS 2nd-order convergence / anisotropic-capacitance reciprocity / energy-identity /
+two-axis domain-extension convergence + `truncation_estimate`, all falsified; earlier
+Phases 0–3 + diff slice analytic/convergence/conservation/energy/gradient) — capped below full
+E2 only by the absence of an external reference-solver cross-check and the 1st-order wall
+cross-flux.
 
 #### 13 — ESD / dielectric breakdown
 
@@ -860,25 +1037,65 @@ below-threshold six-field bitwise parity, event-log determinism, structure-
 overlap last-writer-wins, zero-cost-when-unused). Falsifications recorded per
 stage.
 
-**Not delivered / open gaps:** Phase 3 is PARTIALLY delivered post-snapshot:
-the electrostatic pre-bias slice landed in commit `d180125`
-(`ElectrostaticInitialCondition.from_result(...)` node-interpolated exact
-discrete-gradient seed — Yee curl ~1e-15, PEC-plate interior drift 0.0 over 300
-no-source steps — plus Gauss-residual gate and a prebias+waveform+stress+
-breakdown cross-feature e2e; `docs/assessments/wave-d-integration-acceptance-2026-07-19.md`).
-System circuit-ESD co-simulation remains NOT delivered — injection uses the
-additive current-source path, not a source-impedance/discharge-gun network;
-MNA/SPICE coupling through `TerminalPort` is recorded untested. Phase 5
-(multi-GPU, scale-out, trainable smooth surrogate) fail-closed. Phases 6–7
-(surface/random/thermal feedback, gun/system calibrated-standard workflow) not
-started. Decision-6 closed-box global energy balance explicitly deferred
-(framework exposes no injected-source-energy / running-stored-EM-energy monitor;
-analytic dissipation closure substituted, stated not silent). `ESDPortRecord.
-measured` is `None` for the ideal-injection path. No external / calibrated
-failure-prediction cross-check.
+**Round-H circuit-driven ESD + SmoothBreakdownRisk surrogate (merge `df8ef96`,
+acceptance `h4-esd-circuit-acceptance-2026-07-21.md`):**
+- **Circuit-driven ESD through the standard source-impedance network** (H4a, Phase 3): a new
+  `ESDVoltageSource` assembles the standard 330 Ω / 150 pF generator `Circuit` (voltage source
+  driven by `R_d·i_esd(t)` → discharge resistor → storage capacitor to ground, bound to the
+  named scene port) with generator provenance stamped and surfaced via
+  `Result.esd_generator(...)`; `_WaveformBase.to_circuit_waveform(...)` resamples any
+  ESD/measured waveform onto a `PiecewiseLinearWaveform` MNA source table (charge/impulse
+  converges to analytic). Framed as a circuit **approximation of the standard network**, NOT
+  discharge-gun geometry or a certification target. Gates: (a) RC-load analytic cross-check via
+  an **independent scipy `solve_ivp` integration** sharing no runtime code (port-voltage rel
+  7.8e-4, gate 1e-2; fit rel 1.9e-5) with a storage-cap-perturbation falsification (rel 4.5e-2);
+  (b) closed-box coupled global energy conservation (residual 1.34e-4, gate 1.5e-2) with a
+  channel-imbalance falsification; (c) provenance ride-through; (d) circuit-driven end-to-end
+  (electrostatic pre-bias + circuit-driven ESD through the `TerminalPort` strong MNA coupling +
+  non-feedback stress, one FDTD run). **EM-load-bearing companion gate added in cleanup**
+  (`6f3b0c8`): the standard 150 pF network so heavily shunts the ~0.13 pF field one-port that
+  zeroing the EM one-port in gate (a)'s prediction changes nothing (0.89×), so gate (a) alone is
+  EM-insensitive — a variant high-impedance network (1 pF / 2 kΩ) where the field one-port
+  materially shifts the port voltage was added, with the true prediction beating the zeroed-EM
+  prediction **~12.7×** (a fresh runtime falsification).
+- **`SmoothBreakdownRisk` differentiable surrogate** (H4b, Phase 5;
+  `witwin/maxwell/breakdown_risk.py`, typed SEPARATELY, **non-physical / non-regulatory**):
+  `risk = reduce_cells(occupancy · sum_t sigmoid((|E|−Ecrit)/w) dt)` with sum/mean/softmax
+  reductions and an optional non-invasive `soft_damage` map. Gates (CPU float64): analytic
+  backward vs central difference < 1e-4 with opposite-sign source/material sensitivities and a
+  `torch.nn.Parameter` reach; strict monotonicity in source amplitude; vanishing far below
+  threshold; colocation reuse; typing / non-physical-tag provenance; fail-closed input
+  validation. Falsifications: detaching the sigmoid margin (grad tests error) and flipping the
+  margin sign (monotonicity/threshold tests) redden. The `simulation.py` hard-breakdown
+  trainable-rejection guard is KEPT (only its hint updated to point at the surrogate).
+- **Conductive-media breakdown-feedback port fail-closed (recorded design blocker):** the strong
+  FDTD+MNA port coupling does not support conductive media (a `DielectricBreakdown` introduces
+  post-breakdown conductivity), so the **dynamic conductive breakdown feedback cannot ride the
+  circuit-driven port path** in the current runtime; gate (d) pairs the circuit-driven port with
+  a lossless dielectric + non-feedback stress monitor, and the dynamic feedback stays on the
+  ideal-current-injection path (unchanged companion test). A conductance-aware port update
+  coefficient is the required future work; the fail-closed guard is pinned.
 
-**Evidence grade:** **E1** (analytic waveform/golden state-machine/energy-closure/
-dt-convergence/bitwise parity; no external or calibrated reference).
+**Not delivered / open gaps:** **Phase 3 is now substantially delivered** — the electrostatic
+pre-bias slice (commit `d180125`, `ElectrostaticInitialCondition.from_result(...)`) PLUS the
+Round-H circuit-driven ESD through the standard 330 Ω / 150 pF source-impedance network (merge
+`df8ef96`, above), so excitation is no longer additive-current-only and the `TerminalPort` MNA
+coupling is now tested (was recorded untested). The **Phase-5 trainable smooth surrogate is
+delivered** (`SmoothBreakdownRisk`, typed non-regulatory); Phase-5 **multi-GPU / scale-out**
+remains fail-closed. The **dynamic conductive breakdown feedback through the circuit-driven
+port** stays fail-closed (conductive-media port coefficient, above). **Phases 6–7**
+(surface/random/thermal feedback, gun/system calibrated-standard workflow) remain **excluded /
+not started**. Decision-6 closed-box global energy balance for the ideal path stays deferred
+(analytic dissipation closure substituted, stated not silent — the Round-H gate (b) does close a
+coupled global balance on the circuit-driven path). `ESDPortRecord.measured` is `None` for the
+ideal-injection path. No external / calibrated failure-prediction cross-check.
+
+**Evidence grade:** **E1–E2** (Round H adds the independent offline circuit cross-check
+[port-voltage rel 7.8e-4, no shared runtime code], the EM-load-bearing companion gate [~12.7×],
+and the coupled global energy conservation closure on the circuit-driven path, on top of the
+earlier analytic waveform / golden state-machine / energy-closure / dt-convergence /
+bitwise-parity gates; the `SmoothBreakdownRisk` surrogate is gradient/monotonicity gated) —
+capped below full E2 by the absence of an external or calibrated failure-prediction reference.
 
 #### 11 — Bioheat (DROPPED)
 
@@ -945,11 +1162,18 @@ regression before it is checked off.
   `g1-nccl-adjoint-acceptance-2026-07-21.md`): the transposed reverse halos are gated by a
   bitwise 2-process discrete-transpose identity, and an opt-in per-rank step-rate
   instrument (zero-cost-off asserted) resolves the round-E "not-measurable-by-hooks"
-  finding (numbers pending an exclusive window). **Still open:** the NCCL
-  one-process-per-GPU **end-to-end reverse driver** (honestly deferred fail-closed with a
-  written 7-step plan in the G1 acceptance doc — the in-process bridge is structurally
-  single-process) + monitor gather, CPML psi-carrying NCCL reverse, S5 tiled seeds,
-  coupled-runtime (circuit/network/wire) joint solve, guard-list disposition.
+  finding (numbers pending an exclusive window). **Round-H NCCL end-to-end reverse DRIVER
+  + S5 tiled-plane seeds LANDED** (merge `acea86e`,
+  `h1-nccl-driver-acceptance-2026-07-21.md`): the G1 7-step plan is executed — a
+  trainable-density scene backpropagates over a one-process-per-GPU NCCL launch with per-rank
+  point/plane objective+grad parity ~2e-7 (incl. psi-active) at honest 1e-4-class tolerances,
+  green both on exclusive GPUs AND under a saturating co-tenant burner after a **cross-stream
+  caching-allocator race** was found and fixed (commit `c233d8b`; honest tolerances restored,
+  stressed-mode gate committed). **S4 is substantially closed** (driver landed). **Still
+  open:** flux/mode/x-normal NCCL adjoint objectives + monitor gather beyond forward, CPML
+  psi-carrying NCCL reverse beyond the delivered psi-active parity, coupled-runtime
+  (circuit/network/wire) joint solve, the in-process `cuda_p2p` load hazard (same race class,
+  pre-existing / separately owned), and the NCCL driver timing (pending an exclusive window).
 - **S5 — Full benchmark convergence: GEOMETRY LEVER LANDED (Round-F F4); rest QUEUED.**
   The §1.7 geometry/subpixel systemic lever shipped: **edge-native per-Yee-component
   material sampling** (drops the node→edge arithmetic smear; the Kottke/arithmetic subpixel
@@ -993,13 +1217,19 @@ regression before it is checked off.
   0–2 (`315d4ee`) + breakdown Phase 4 (`de053e6`), plan 10 SAR Phases 0–3 + P4
   slice (`549c6a0`), with follow-up census/audit fixes (`f05c4c2` etc.). SAR
   reuses 01's `PowerLossData` contract (no duplicate data model), per the S7
-  precondition. **Still open per plan** — 12: tensor eps / open boundary (P4),
-  multi-GPU (P5), touchscreen workflow (P6); 10: IEEE/IEC phantom benchmark,
-  incident power density, VOP + multi-GPU (P5); 13: P3 circuit-ESD co-simulation (pre-bias slice delivered, `d180125`),
-  P5 multi-GPU/smooth surrogate, P6–7 calibration/standard workflow. All three
-  are E1–E2 (no external reference), so none is `completed`.
+  precondition. **Round-H Wave-D deepening delivered & merged (2026-07-21):** 12
+  Phase-4 SPD tensor-eps + open-boundary `truncation_estimate` (`4a0555d`); 10 incident
+  power density monitor + canonical phantom family + SAR RESULTS rows (`8ebaec0`); 13
+  circuit-driven ESD through the standard network + `SmoothBreakdownRisk` surrogate
+  (`df8ef96`); audit-minor cleanup `6f3b0c8`. **Still open per plan** — 12: exact open
+  boundary (BEM) + trainable tensor-eps backward (P5), multi-GPU (P5), touchscreen
+  workflow (P6); 10: IEEE/IEC *certified* phantom profiles + external reference
+  cross-check, VOP + multi-GPU (P5), `antenna_near_phantom` conductive-media port blocker;
+  13: P3 substantially delivered (prebias + circuit ESD), conductive-media
+  breakdown-feedback port, P5 multi-GPU, P6–7 calibration/standard workflow. All three
+  remain E1–E2 / E2-class (no external reference), so none is `completed`.
   **Capability-guard census budget history** (`docs/reference/fdtd-capability-guard-census.md`,
-  `CAPABILITY_GUARD_BUDGET` in `tests/api/public/test_guard_census.py`, now **175**):
+  `CAPABILITY_GUARD_BUDGET` in `tests/api/public/test_guard_census.py`, now **176**):
   `144 → 153` (plan 12 electrostatics merge) `→ 168` (plan 13 Phase-4 breakdown
   merge, +15 guards) `→ 172` (plan 10 SAR merge reconciliation, +4 guards)
   `→ 176` (plan 13 Phase-3 pre-bias slice, commit `d180125`, +4 guards) `→ 175`
@@ -1007,8 +1237,12 @@ regression before it is checked off.
   lossy-wire **+2** — −1 finite-conductor compile deferral removed, +2 lossy
   reverse/checkpoint guards, +1 distributed lossy-forward reject; 08 ferrite **−2** —
   general-bias and mixed-bias-direction guards removed; 02 NCCL and 09 SIBC net 0,
-  no guard added/removed). ESD Phases 1–2 added no capability guards (local
-  `ValueError`/`TypeError` only).
+  no guard added/removed) `→ 176` (Round H, **net +1**: 12 electrostatics H2b
+  open-boundary reject **+1** [H2a net 0 — anisotropic-tensor reject removed −1,
+  `_reject_trainable_tensor` added +1]; 02 NCCL driver, 10 SAR, 13 ESD net 0 — the
+  `allow_adjoint` relaxations only re-condition existing `ValueError` fences, and the
+  new features use `ValueError`/`TypeError` validation the census does not count). ESD
+  Phases 1–2 added no capability guards (local `ValueError`/`TypeError` only).
 
 **Freeze rules restated:** the S0.2 rule that no Wave C/D new-physics
 implementation starts until S3 passes was first **selectively overridden by the owner

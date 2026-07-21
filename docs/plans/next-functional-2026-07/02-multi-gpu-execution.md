@@ -37,6 +37,29 @@
 > coupled-runtime joint solve remain fail-closed; census unchanged at 175; no non-author
 > review. See `docs/assessments/g1-nccl-adjoint-acceptance-2026-07-21.md`,
 > `00-status-and-gaps-2026-07-19.md` §02. Round H carries the driver.
+>
+> **Round-H revision (2026-07-21, master `6f3b0c8`; merge `acea86e`).** The per-rank
+> collective NCCL **end-to-end reverse driver** is delivered (the G1 7-step plan executed):
+> a trainable-density scene backpropagates over a one-process-per-GPU NCCL launch and matches
+> the single-process single-GPU adjoint, with per-rank point/plane objective+grad parity ~2e-7
+> (incl. psi-active) at honest 1e-4-class tolerances; new forward-replay dict halos, a narrow
+> `allow_adjoint` entry fence, per-rank LOCAL output + separable seed + rank-0-only pullback,
+> collective-safe capacity reject. The **separable y/z-plane monitor adjoint seed** (S5) landed
+> with a seam-ownership falsification. A **cross-stream caching-allocator race** was found and
+> fixed (commit `c233d8b`): the four reverse/replay halos ran their in-place accumulate on
+> `engine.compute_stream` while the adjoint-state planes are allocated on the default stream, so
+> under load a default-stream reuse could overwrite in-flight halo writes; running the halos on
+> the default stream closes the window at zero cost. Honest tolerances restored (prior grad-gate
+> widening reverted); committed stressed-mode parity gate under a co-tenant burner. Evidence:
+> NCCL end-to-end reverse driver E2; census unchanged at 175 within this track. **Still open
+> (NOT completed):** the same race class reproduces on the in-process `transport="cuda_p2p"`
+> bridge under load (pre-existing, separately owned); flux/mode/x-normal NCCL objectives +
+> monitor gather beyond forward, CPML psi-carrying NCCL reverse beyond the delivered psi-active
+> parity, and coupled-runtime joint solve remain fail-closed; NCCL driver timing pending an
+> exclusive window; no non-author review. Per program governance, phase-status bookkeeping and
+> any `completed` mark are the supervisor's job (audit §4 non-author-review bar), not set here.
+> See `docs/assessments/h1-nccl-driver-acceptance-2026-07-21.md`,
+> `00-status-and-gaps-2026-07-19.md` §02.
 
 ## 1. 功能定位
 

@@ -14,6 +14,23 @@
 > `docs/assessments/c13-esd-stress-acceptance-2026-07-19.md`,
 > `docs/assessments/d13-breakdown-acceptance-2026-07-19.md`, `tests/esd/`,
 > and `tests/breakdown/`.  
+> **Round-H revision (2026-07-21, master `6f3b0c8`; merge `df8ef96`).** Phase 3 circuit-driven
+> ESD delivered: a new `ESDVoltageSource` drives ESD through the standard 330 Ω / 150 pF
+> source-impedance network (a circuit **approximation of the standard network**, not
+> discharge-gun geometry or certification), gated by an independent scipy `solve_ivp` cross-check
+> sharing no runtime code (port-voltage rel 7.8e-4), a closed-box coupled energy conservation
+> closure (1.34e-4), provenance ride-through, and a circuit-driven prebias+ESD end-to-end; a
+> cleanup EM-load-bearing companion gate makes the field one-port load-bearing (true beats
+> zeroed-EM ~12.7× on a high-impedance variant). The Phase-5 differentiable `SmoothBreakdownRisk`
+> surrogate (typed **non-physical / non-regulatory**) landed with gradient/monotonicity gates.
+> Phase 3 is now substantially delivered (prebias + circuit ESD) and the `TerminalPort` MNA
+> coupling is tested. Evidence E1–E2 (no external / calibrated reference). **Still open:** the
+> dynamic conductive breakdown feedback through the circuit-driven port is fail-closed
+> (conductive-media port coefficient); Phase 5 multi-GPU / scale-out; Phases 6–7
+> (surface/random/thermal feedback, gun/system calibrated-standard workflow) excluded.
+> Phase-status bookkeeping / any `completed` mark is the supervisor's job (audit §4
+> non-author-review bar), not set here. See
+> `docs/assessments/h4-esd-circuit-acceptance-2026-07-21.md`.  
 > 路线定位：分级垂直能力，当前不排期交付  
 > 日期：2026-07-14  
 > 目标证据：stress-only E2；deterministic breakdown E2；经校准系统预测 E3  

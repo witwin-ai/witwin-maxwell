@@ -8,6 +8,19 @@
 > golden / brute-force parity / grid-convergence gates, no external reference
 > solver cross-check); NOT `completed`. See
 > `docs/assessments/b10-sar-acceptance-2026-07-19.md` and `tests/sar/`.  
+> **Round-H revision (2026-07-21, master `6f3b0c8`; merge `8ebaec0`).** Delivered:
+> `IncidentPowerDensityMonitor` + `Result.incident_power_density` (was fail-closed) with
+> plane-wave `|S|=|E|²/(2·eta)` analytic gates; the redistributable canonical phantom family
+> (`uniform_lossy_cube`, `layered_slab`, `one_gram_cube`, `antenna_near_phantom`) + SAR RESULTS
+> rows via `python -m benchmark sar` (`layered_slab` wave-level surface/volume conservation
+> closure 16.7% at dx=4 mm, converging). Cleanup honestly reclassified the `uniform_lossy_cube`
+> volume/channel closure a tautology and recorded the blocked `antenna_near_phantom` wave-level
+> target as target-only. Evidence E1–E2 (no external reference). **Still open:** IEEE/IEC
+> *certified* phantom profiles + external cross-check (deferred), `input_power` normalization
+> (fail-closed), `antenna_near_phantom` conductive-media port blocker, VOP + multi-GPU (P5).
+> Phase-status bookkeeping / any `completed` mark is the supervisor's job (audit §4
+> non-author-review bar), not set here. See
+> `docs/assessments/h3-sar-phantom-acceptance-2026-07-21.md`.  
 > 路线定位：后续垂直能力，不作为当前 RF 闭环的近期交付承诺  
 > 日期：2026-07-14  
 > 目标证据：E3 production  
