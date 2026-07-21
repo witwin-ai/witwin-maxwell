@@ -202,3 +202,146 @@ no census reconciliation was required.
   first).
 - No product-code change; no `FEATURE_LIST` capability change — the additive
   `FEATURE_LIST` note records this as validation evidence, not a new feature.
+
+## Stage F1b — independent offline circuit cross-check (the E2-blocking item)
+
+New test module: `tests/rf/circuits/test_circuit_independent_crosscheck.py`. This
+predicts a coupled FDTD+MNA run's port voltage/current from a fully independent
+path — a hand-derived equivalent-circuit ODE integrated by
+`scipy.integrate.solve_ivp` — that shares no runtime code with the solver, closing
+the E2 gap left open by F1a (which was consistency-class on the circuit channels).
+
+### Structure and method
+
+1. **EM one-port under test.** A small PML-terminated (open) vacuum box with a
+   single `LumpedPort` (`feed`). The box is the "EM structure characterized as a
+   port network"; the port is the field/circuit interface.
+2. **Measure (passive characterization).** A broadband modulated-Gaussian source
+   drives the port through a reference resistor. The port driving-point admittance
+   `Y_em(f) = I_port(f)/V_port(f)` is read off the port DFT phasors
+   (`result.port("feed").current / .voltage`) across `1.5–5.5 GHz` (25 points). The
+   V/I ratio is intrinsic to the linear one-port (independent of the drive), so it
+   is **data**, not a shared code path.
+3. **Fit.** `Y_em(f)` is fit to an order-4 stable rational model with the shared
+   vector fitter `fit_rational` (representation `Y`). Per the brief, `fit_rational`
+   is reused **only** to fit the measured data — it is not the MNA runtime. Fit
+   rel. error `2.41e-5` over the band.
+4. **Derive the state equations by hand.** `_realize_admittance` builds a real
+   modal state-space `(A, B, C, D, Cp)` for `Y_em(s)` directly from the fit
+   poles/residues (2×2 controllable-companion block per conjugate pair; the
+   proportional term `Cp` is the port shunt-capacitance). **No framework
+   realization helper is called** — the realization is written in the test.
+   `_predict_port_voltage` writes the series-loop KVL ODE by hand:
+
+       dx/dt  = A x + B v_port
+       dv/dt  = ( V1(t) − v_port − R ( C x + D v_port ) ) / ( R Cp )
+       I_port = ( V1(t) − v_port ) / R
+
+   (`Cp>0` regularizes the port node, giving a well-posed explicit ODE).
+5. **Integrate independently.** `solve_ivp` (RK45, `rtol 1e-9`, `max_step 2·dt`)
+   integrates the ODE for a **different** drive waveform and a **different** series
+   resistance (`R_test = 30 Ω`, center `2.6 GHz`) than the characterization run
+   (`R_char = 50 Ω`, center `3.5 GHz`). Because the characterization is a separate
+   run with a different stimulus, the agreement is a genuine prediction, not a
+   self-fit.
+
+The two transient paths (FDTD+MNA vs scipy modal ODE) share no runtime code; only
+the measured impedance data (via `fit_rational`) and the excitation waveform (a
+shared input) cross between them.
+
+### Honest gate classes
+
+- **Load-bearing, two-path:** the port **voltage** `v_port(t)`. `v_port` is the
+  electrically dominant quantity (the electrically small port is high-impedance, so
+  most of the source voltage stands across it), which is why it is the tight gate.
+- **Corroboration (cancellation-limited):** the port **current**
+  `I_port(t) = (V1 − v_port)/R` is a small difference of near-equal terminal
+  voltages (the port draws little current), so its relative precision floor is set
+  by the ~`3e-4` difference between the independent analytic stimulus and the
+  solver's internal source sampling — not a physics disagreement. It is gated at a
+  correspondingly looser, honestly-derived tolerance.
+
+### Pre-registered tolerances and observed margins
+
+Tolerances are frozen in the module (`_FIT_TOL=1e-3`, `_VOLTAGE_TOL=5e-4`,
+`_CURRENT_TOL=2e-2`, `_FIT_ORDER=4`, `_FALSIFY_SCALE=1.05`). Reproduced by a
+committed probe that reuses the test fixtures:
+
+```
+CUDA_VISIBLE_DEVICES=0 python \
+  docs/assessments/f1-cosim-e2-probes/crosscheck_margins_probe.py
+```
+
+| quantity                     | tol   | observed | headroom |
+| ---------------------------- | ----: | -------: | -------: |
+| rational fit rel. error      | 1e-3  | 2.41e-5  | ~41×     |
+| port-voltage cross-check     | 5e-4  | 1.16e-5  | ~43×     |
+| port-current corroboration   | 2e-2  | 7.02e-3  | ~2.8×    |
+
+Context: `peak|v_port| = 5.48e-1 V`, `peak|i_port| = 1.41e-3 A` (the port draws
+little current, hence the cancellation-limited current floor). Fit poles
+`≈ -9.3e9 ± 2.4e10 j` and `-8.7e9 ± 5.1e10 j` rad/s (stable). The port voltage
+rings up and fully decays (tail mean `< 1e-3 ·` peak) so the comparison spans the
+whole pulse.
+
+### Falsification recorded
+
+- **F4 — port-voltage gate vs MNA field-port companion (in-suite + driver).**
+  `test_crosscheck_rejects_perturbed_mna_companion` builds the independent
+  prediction from the **unperturbed** characterization, then scales the MNA
+  field-port **companion conductance** (`CircuitPortRuntime.conductance`) by
+  `1.05` in a fresh coupled run and asserts the coupled port voltage departs from
+  the prediction beyond `_VOLTAGE_TOL`. Baseline `1.16e-5` (GREEN), perturbed
+  `4.10e-3` (RED) — a ~350× separation, comfortably straddling the `5e-4` gate.
+  This is the brief-mandated "perturb an MNA companion coefficient → coupled trace
+  departs → gate red" falsification. Standing in-suite; also reproduced by the
+  driver:
+
+  ```
+  CUDA_VISIBLE_DEVICES=0 python \
+    docs/assessments/f1-cosim-e2-probes/falsify_mna_companion.py
+  ```
+
+### Test inventory and pass counts
+
+```
+python -m pytest tests/rf/circuits/test_circuit_independent_crosscheck.py -q   # 4 passed (~20 s)
+```
+
+Nodes:
+
+- `test_measured_admittance_fits_low_order_rational` — data-quality gate (stable
+  order-4 rational fit of the measured `Y_em`).
+- `test_independent_prediction_matches_coupled_port_voltage` — **headline gate**:
+  independent scipy ODE reproduces the coupled port voltage (with non-vacuous +
+  full-decay checks).
+- `test_independent_prediction_matches_coupled_port_current` — current
+  corroboration.
+- `test_crosscheck_rejects_perturbed_mna_companion` — falsification (F4).
+
+Adjacent suites (env exports as above):
+
+```
+python -m pytest \
+  tests/rf/circuits/test_circuit_independent_crosscheck.py \
+  tests/rf/circuits/test_circuit_conservation.py \
+  tests/rf/circuits/test_fdtd_circuit_coupling.py \
+  tests/api/public/test_guard_census.py \
+  tests/api/public/test_public_api.py \
+  tests/api/public/test_simulation_smoke.py -q                                  # 50 passed (~49 s)
+```
+
+### Capability-guard census
+
+Budget unchanged at **176** (`tests/api/public/test_guard_census.py` passes in the
+run above). Stage F1b adds only a test module and two probe scripts; no product
+code and no fail-closed FDTD capability guard was added or removed.
+
+### Known gaps / deferred
+
+- **External-reference lumped-load cross-check (stretch).** Still pending: F2's
+  adapter lumped mapping has not landed on the merge base (`git -C <main> log`
+  head is `b3d3c77`), so the brief's stretch item is recorded as pending, not
+  attempted.
+- The port-current comparison is cancellation-limited (see gate classes) and is
+  corroboration, not an independent gate; the load-bearing content is `v_port(t)`.

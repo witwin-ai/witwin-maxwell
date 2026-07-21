@@ -735,4 +735,16 @@ conductive-path model, not a validated arc or device-failure predictor).
   (raw fields vs MNA V/I record, no shared code) — and each headline channel has
   a recorded falsification. Pre-registered tolerances: global residual
   `<= 5e-3` of throughput, field-link residual `<= 2e-2` of peak field energy.
+- Validation evidence, not a new public feature (F1b, independent circuit
+  cross-check): `tests/rf/circuits/test_circuit_independent_crosscheck.py`
+  characterizes an EM one-port (open, PML-terminated box with a `LumpedPort`) by a
+  passive port-admittance sweep, fits the measured `Y_em(f)` to a low-order stable
+  rational (`fit_rational`, data-fitting only), derives the series-loop
+  equivalent-circuit ODE state equations by hand, and integrates them with
+  `scipy.integrate.solve_ivp` for a *different* drive/resistance than the sweep.
+  The independent transient reproduces the coupled FDTD + MNA run's port voltage to
+  `~1.2e-5` (relative, headline gate) with no shared runtime code between the two
+  paths, lifting the coupled circuit transient off the consistency class. A
+  recorded falsification perturbs the MNA field-port companion conductance and
+  shows the cross-check goes red.
 <!-- END f1-cosim-e2 -->
