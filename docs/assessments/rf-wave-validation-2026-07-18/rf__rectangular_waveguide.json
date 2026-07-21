@@ -32,5 +32,5 @@
   "notes": [
     "BLOCKED on the transverse mode-operator (audit S1 round-4, EXECUTED; replaces the withdrawn round-3 'shifted 3D-Yee TE10 onset', which was false physics -- the discrete TE10 cutoff is 0.99752 fc, BELOW the continuum). The vector selector previously injected a checkerboard-aliased eigenvector sharing the TE10 eigenvalue (sin-correlation ~0.000); its odd profile couples to TE20 (cutoff 2 fc) and reproduces the old |S21| to 3 significant figures. The selector is hardened (F1: absolute-uniformity k0 rejection, never-substitute) but the VECTOR operator itself cannot represent a clean full-grid TE10 on a hollow metallic guide (centered branch decouples sublattices; the staggered branch has an asymmetric-BC bug that shifts beta ~10%). A symmetric-BC Yee-staggered transverse operator is the fix; filed as an OPEN item in docs/reference/rf-wave-validation-2026-07-18.md. Coax (separate TEM path) is unaffected and passes."
   ],
-  "updated_at": "2026-07-19T04:48:29+00:00"
+  "updated_at": "2026-07-19T15:34:36+00:00"
 }

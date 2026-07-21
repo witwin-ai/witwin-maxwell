@@ -24,7 +24,10 @@ scenes:
   to their inhomogeneous (substrate + air) cross-sections (a hybrid mode solve is
   required).
 * ``series_parallel_rlc`` -- lumped resonance is parasitic-dominated; open gap.
-* ``lumped_open_short_match`` -- broken bench (feed decoupled from load); FAIL.
+* ``lumped_open_short_match`` -- REBUILT on the coax bench (SOL standards at the end
+  of the proven air coax line); the feed is now coupled to the load and the three
+  standards are mutually distinguishable (matched |Gamma| <= -20 dB, short/open
+  |Gamma| ~ 1 with anti-phase-class discrimination).
 
 The builders construct geometry and ports only; excitation, run length, and
 spectral sampling are chosen by the runner so a scene can be reused across grid
@@ -35,15 +38,15 @@ from __future__ import annotations
 
 from benchmark.scenes.rf.coax_thru import coax_thru_scene
 from benchmark.scenes.rf.differential_pair import differential_pair_scene
-from benchmark.scenes.rf.lumped_open_short_match import lumped_one_port_scene
+from benchmark.scenes.rf.lumped_open_short_match import coax_sol_scene
 from benchmark.scenes.rf.microstrip_two_port import microstrip_two_port_scene
 from benchmark.scenes.rf.rectangular_waveguide import rectangular_waveguide_scene
 from benchmark.scenes.rf.series_parallel_rlc import series_rlc_scene
 
 __all__ = [
+    "coax_sol_scene",
     "coax_thru_scene",
     "differential_pair_scene",
-    "lumped_one_port_scene",
     "microstrip_two_port_scene",
     "rectangular_waveguide_scene",
     "series_rlc_scene",

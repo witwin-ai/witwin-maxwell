@@ -27,25 +27,28 @@ class ArrayRunData:
 
 
 def compact_array_column_result(result, *, prepared_scene):
-    """Drop solver state and retain only declared closed-surface payloads."""
+    """Drop solver state and retain the per-column user-declared monitor payloads.
 
-    from .monitors import ClosedSurfaceMonitor
+    Closed-surface payloads feed array/antenna postprocessing, and every other
+    user monitor (field probes such as ``PlaneMonitor``) must survive per drive
+    column so a WavePort/PortSweep Result can expose per-drive field data instead
+    of silently dropping the monitors. The internal per-port ModeMonitors that
+    drive the S-matrix extraction carry the ``WAVEPORT_MONITOR_PREFIX`` and are
+    the only monitors excluded here.
+    """
+
     from .result import Result
+    from .waveport_sweep import WAVEPORT_MONITOR_PREFIX
 
     constants = SimpleNamespace(
         c=result.solver.c,
         eps0=result.solver.eps0,
         mu0=result.solver.mu0,
     )
-    retained_monitor_names = set()
-    for monitor in result.scene.monitors:
-        if isinstance(monitor, ClosedSurfaceMonitor):
-            retained_monitor_names.add(monitor.name)
-            retained_monitor_names.update(face.name for face in monitor.faces)
     retained_monitors = {
         name: payload
         for name, payload in result.monitors.items()
-        if name in retained_monitor_names
+        if not name.startswith(WAVEPORT_MONITOR_PREFIX)
     }
     return Result(
         method=result.method,

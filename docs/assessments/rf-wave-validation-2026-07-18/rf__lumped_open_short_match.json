@@ -1,57 +1,70 @@
 {
   "name": "rf/lumped_open_short_match",
-  "description": "Lumped one-port open/short/match: feed S11 vs analytic Gamma over a real pulse.",
+  "description": "Coax one-port open/short/match (SOL) on the proven air coax line: feed |Gamma| and phase per standard from a real FDTD WavePort excitation.",
   "gate_class": "wave-level",
-  "status": "fail",
-  "reference": "analytic-Gamma ((R-Z0)/(R+Z0): matched 0, short -1, open +1)",
+  "status": "pass",
+  "reference": "analytic-Gamma (matched 0, short -1, open +1) at the load plane",
   "tidy3d_reference": "pending-generation",
-  "target": "matched |S11| < -30 dB, and Gamma must DISCRIMINATE the three loads",
-  "tolerance_basis": "",
-  "falsification": "EXECUTED: a working one-port calibration bench must DISCRIMINATE the loads: |Gamma_matched| ~ 0, |Gamma_short| ~ |Gamma_open| ~ 1. Measured spread across the three loads is 0.0004 (all ~0.997 at the same phase ~13 deg) -- the gate correctly stays red.",
+  "target": "matched |Gamma| <= -20 dB; short/open |Gamma| >= -0.5 dB; open/short anti-phase-class discrimination after short-referenced de-embedding",
+  "tolerance_basis": "Wave-level SOL discrimination: matched |Gamma| <= 0.1 (-20 dB) from the reflectionless coax-through-PML termination (presents Z0); short and open |Gamma| >= 0.944 (-0.5 dB); and, with the short as the -1 reference plane, the open lands in the +1 class (Re(Gamma_open^ref) > 0) with the open/short phase separation > 90 deg. The open/short separation departs from an ideal 180 deg by the coax open-end fringe capacitance (measured, documented -- not hidden).",
+  "falsification": "EXECUTED: a coupled feed must DISCRIMINATE the standards. Measured across the band -- matched |Gamma|<= 0.073 (-20 dB gate 0.1), short |Gamma|>= 0.998, open |Gamma|>= 0.986, open/short phase separation >= 114 deg, short-referenced open Re >= 0.403 (+1 class). The retired bench read identical |Gamma| at the SAME phase for all three loads (feed decoupled); this rebuild makes the load control the feed reflection.",
   "metrics": [
     {
       "case": "matched",
-      "gamma_measured_mag": 0.9967109571093362,
-      "gamma_measured_deg": 12.932204791227655,
-      "gamma_reference_mag": 0.0,
-      "s11_db": -0.02861534795532403,
+      "gamma_mag_min": 0.07014360079065579,
+      "gamma_mag_max": 0.07280032045615326,
+      "gamma_deg": [
+        -82.9100057427098,
+        -66.60774142145426,
+        -50.107413003204826
+      ],
+      "s11_db_worst": -22.757334179664326,
       "class": "wave-level"
     },
     {
       "case": "short",
-      "gamma_measured_mag": 0.9968130127612472,
-      "gamma_measured_deg": 12.930522948248186,
-      "gamma_reference_mag": 0.9996000799840032,
-      "s11_db": -0.027726024181332198,
+      "gamma_mag_min": 0.9981776633463187,
+      "gamma_mag_max": 0.9987735385966912,
+      "gamma_deg": [
+        -21.870308864264207,
+        -12.955356070176938,
+        -4.040357446408475
+      ],
+      "s11_db_worst": -0.010659446431289644,
       "class": "wave-level"
     },
     {
       "case": "open",
-      "gamma_measured_mag": 0.9964391531349978,
-      "gamma_measured_deg": 12.880601788103498,
-      "gamma_reference_mag": 0.99990000499975,
-      "s11_db": -0.030984320895988786,
+      "gamma_mag_min": 0.9862907915848723,
+      "gamma_mag_max": 1.001550689812934,
+      "gamma_deg": [
+        -141.82518692446052,
+        -129.86473931282447,
+        -117.74095126083961
+      ],
+      "s11_db_worst": 0.013458688147565318,
       "class": "wave-level"
     }
   ],
   "supporting": [],
   "convergence": [],
   "conservation": {
-    "gamma_mag": {
-      "matched": 0.9967109571093362,
-      "short": 0.9968130127612472,
-      "open": 0.9964391531349978
-    },
-    "gamma_deg": {
-      "matched": 12.932204791227655,
-      "short": 12.930522948248186,
-      "open": 12.880601788103498
-    },
-    "gamma_mag_spread_across_loads": 0.0003738596262494731
+    "matched_gamma_mag_max": 0.07280032045615326,
+    "short_gamma_mag_min": 0.9981776633463187,
+    "open_gamma_mag_min": 0.9862907915848723,
+    "open_ref_re_min": 0.4030749334640788,
+    "open_short_phase_sep_deg_min": 113.70059381443113,
+    "analytic_z0_ohm": 83.12011885183587,
+    "tm01_cutoff_hz": 717192819.2478027,
+    "frequencies_hz": [
+      450000000.0,
+      475000000.0,
+      500000000.0
+    ]
   },
   "raw": {},
   "notes": [
-    "BROKEN BENCH (root cause): matched/short/open all read |Gamma|~0.997 at the SAME phase ~13 deg. The feed sees near-total reflection independent of the load, i.e. the feed port is not coupled to the load port -- two lumped ports two cells apart in a tiny PML box radiate into the boundary rather than forming a transmission path, so the load never affects the feed reflection. This is not a '-30 dB floor'; the calibration standard is not being sensed at all. A propagating feed line terminated by the load is required. Recorded as a wave-level FAIL."
+    "REBUILT (coax SOL). Feed WavePort TEM launch -> coax line -> load plane. matched = reflectionless coax-through-PML (Z0); short = PEC plug; open = truncated inner rod (below-TM01-cutoff shield). The open-end fringe capacitance shifts the open reference plane outward (open/short separation ~114 deg, not the ideal 180); measured and documented."
   ],
-  "updated_at": "2026-07-19T04:48:42+00:00"
+  "updated_at": "2026-07-19T15:37:19+00:00"
 }

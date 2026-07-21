@@ -1,0 +1,50 @@
+{
+  "name": "antenna/patch",
+  "description": "Probe-fed rectangular patch on a finite grounded slab: real Result.antenna pipeline over the NF2FF box; matched-broadside TM010 is a documented gap.",
+  "gate_class": "wave-level",
+  "status": "gap",
+  "reference": "cavity model TM010 (f_r=3.391 GHz), broadside D >= 5 dBi",
+  "tidy3d_reference": "pending-generation (sources=0; see RF/antenna reference section)",
+  "target": "pipeline valid (6 NF2FF faces, p_rad>0, closure<0.05); broadside D>=5 dBi matched (GAP)",
+  "tolerance_basis": "Two-part: (1) PIPELINE (pass) -- Result.antenna runs end to end over the grounded slab, returns 6 air-exterior NF2FF faces per frequency, p_rad>0, and a best radiated-vs-accepted closure < 0.05. (2) PHYSICS (gap) -- the probe on this thick finite-ground slab is reactance-dominated (best |S11| ~ 0 dB) and radiates off-broadside, so the matched-broadside TM010 D >= 5 dBi target is not met and is a documented gap (strict xfail in the e2e test).",
+  "falsification": "EXECUTED (tests/rf/antenna/test_antenna_benchmark_e2e.py): the pipeline gate is a real PASS; the physical matched-broadside gate genuinely xfails (broadside D max -6.97 dBi < 5 and best match -0.0 dB > -10), so its strict xfail is exercised, not vacuous.",
+  "metrics": [
+    {
+      "quantity": "broadside directivity (in-band max)",
+      "measured": -6.9735653892355565,
+      "reference": 5.0,
+      "rel_error": 2.3947130778471113,
+      "unit": "dBi",
+      "class": "wave-level",
+      "note": "matched-broadside TM010 gate target; documented GAP on this thick finite-ground slab"
+    }
+  ],
+  "supporting": [],
+  "convergence": [],
+  "conservation": {
+    "pipeline_valid": true,
+    "nf2ff_faces_per_freq": [
+      6,
+      6,
+      6,
+      6,
+      6
+    ],
+    "power_closure_min": 0.005042142402496146,
+    "broadside_directivity_dbi_max": -6.9735653892355565,
+    "best_match_db": -0.014610395620529935,
+    "cavity_resonance_ghz": 3.3914642520259646,
+    "frequencies_hz": [
+      4400000000.0,
+      4800000000.0,
+      5200000000.0,
+      5600000000.0,
+      6000000000.0
+    ]
+  },
+  "raw": {},
+  "notes": [
+    "Pipeline valid=True (faces=[6, 6, 6, 6, 6], closure_min=0.0050); broadside D max -6.97 dBi, best match -0.0 dB, cavity f_r ~ 3.391 GHz (outside the 4.4-6.0 GHz run band). The matched-broadside TM010 physics + the external reference-solver cross-check remain open (feed/ground redesign); reference is pending-generation (no lumped-feed adapter mapping)."
+  ],
+  "updated_at": "2026-07-19T15:09:03+00:00"
+}

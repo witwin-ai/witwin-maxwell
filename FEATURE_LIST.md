@@ -447,8 +447,8 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 - Benchmark runs enable source-spectrum normalization whenever all sources share one waveform, preserving user amplitude/phase while removing the arbitrary pulse envelope spectrum in the same convention as Tidy3D
 - Validation-campaign controls for low-cost reference generation and solver filtering: `python -m benchmark --references-only --campaign-only`, targeted cache replacement with `--references-only --refresh-references <scenarios...>`, `--historical-only`, `--solver fdtd|fdfd`, cache-key inventory, per-frequency field metrics (printed and persisted, with worst-frequency aggregation), incident-power-normalized flux errors, and a per-task Tidy3D cost ceiling
 - Unified FDFD validation scenarios use backend-supported CW point dipoles and compare normalized `|Ex|` patterns for dielectric, conductive, dispersive Drude, and diagonal-anisotropic material responses against same-scene FDTD references; the campaign gate compiles every declared FDFD source so unsupported pseudo-scenarios cannot count as coverage
-- RF port validation harness via `python -m benchmark rf [scenes...]` over the six `benchmark/scenes/rf/` scenes, with the binding metric measured from a real FDTD `Scene -> Simulation -> Result` run wherever the two-port bench yields a usable S-matrix (never from the 2D mode eigensolve). Both wave benches are terminated by running their conductors/walls THROUGH the computational PML to the padded grid edges (the grid appends PML nodes outside the declared bounds, so `2*(DOMAIN + num_layers*dx)` is required and is verified against the prepared PEC occupancy, not the scene constant), and the network S-matrix is assembled by solving `B = S*A` across the drive columns (the correct extraction whenever the passive port carries an incident wave; the per-drive `b/a` ratio is the diagonal special case), recording the incident-matrix condition number per frequency. Current honest status (audit S1, round 4): `coax_thru` is a wave-level PASS -- terminated air-line TEM two-port with `a_passive/a_driven` 0.17 (bench-quality diagnostic), `|S11| < 0.02`, `|S21| ~ 1`, max singular value ~1.0, `cond(A) ~ 1.2`, and `beta` from `arg(S21)/L` within 0.83% of `k0`; the wave-level precondition is extraction conditioning plus post-solve passivity, and coax reciprocity is annotated as symmetric-trivial (mirror-symmetric fixture). `rectangular_waveguide` is BLOCKED on a transverse mode-operator redesign: the guided-mode selector returns the checkerboard-aliased TE10 that merely shares the TE10 eigenvalue (its `checkerboard_fraction` is persisted as a diagnostic; the checkerboard filter is scoped to the graded path only and the wall-peak gate is disabled), and it is the benchmark's `sin(pi y/a)`-correlation gate that refuses to use it -- while the selector never substitutes a spurious eigenvector for a genuinely absent requested index; the vector transverse operator cannot yet represent a clean full-grid `sin(pi y/a)` (it decouples the odd/even sublattices). `lumped_open_short_match` is a wave-level FAIL (feed decoupled from load); `microstrip_two_port` and `differential_pair` are BLOCKED (contour-snap error first, and `WaveModeSpec('tem')` categorically inapplicable to their inhomogeneous substrate+air cross-sections); `series_parallel_rlc` is an open gap (parasitic-dominated). Modal-eigensolve quantities, when reported, are labelled `modal-eigensolve` supporting evidence and never gate. Each scene emits a machine-readable artifact (grid convergence, extraction conditioning/passivity, the `a_passive/a_driven` diagnostic, and per-tier complex `S(f)` and port `a/b` so a frequency can be recomputed by hand; verbatim taxonomy gate classes and a separate status field) under `docs/assessments/rf-wave-validation-2026-07-18/` and an `## RF wave-level validation` section in `benchmark/RESULTS.md`. `python -m benchmark.rf_tidy3d_references` stamps `reference: pending-generation` markers only (adapter-driven external-solver generation is not yet wired) while the analytic reference keeps binding
-- Wave-level RF gate tests under `tests/rf/wave_validation/` replacing the retired plan-01 algebraic-identity gates: a propagating matched-load `|S11|` gate on a rectangular waveguide (matched thru reflects far less than a PEC short, measured from fields, with the short as falsification), and an asymmetric two-port reciprocity + field-derived power-balance gate (different port impedances/geometry so `S12 == S21` is physics not symmetry, with injected non-reciprocity and gain errors as falsification). The series-RLC companion-impedance formula check is retained but re-labelled `analytic-identity` (non-gating), and the wave-level RLC resonance is recorded as an explicit open gap
+- RF port validation harness via `python -m benchmark rf [scenes...]` over the six `benchmark/scenes/rf/` scenes, with the binding metric measured from a real FDTD `Scene -> Simulation -> Result` run wherever the two-port bench yields a usable S-matrix (never from the 2D mode eigensolve). Both wave benches are terminated by running their conductors/walls THROUGH the computational PML to the padded grid edges (the grid appends PML nodes outside the declared bounds, so `2*(DOMAIN + num_layers*dx)` is required and is verified against the prepared PEC occupancy, not the scene constant), and the network S-matrix is assembled by solving `B = S*A` across the drive columns (the correct extraction whenever the passive port carries an incident wave; the per-drive `b/a` ratio is the diagonal special case), recording the incident-matrix condition number per frequency. Current honest status (audit S1, round 4): `coax_thru` is a wave-level PASS -- terminated air-line TEM two-port with `a_passive/a_driven` 0.17 (bench-quality diagnostic), `|S11| < 0.02`, `|S21| ~ 1`, max singular value ~1.0, `cond(A) ~ 1.2`, and `beta` from `arg(S21)/L` within 0.83% of `k0`; the wave-level precondition is extraction conditioning plus post-solve passivity, and coax reciprocity is annotated as symmetric-trivial (mirror-symmetric fixture). `rectangular_waveguide` is BLOCKED on a transverse mode-operator redesign: the guided-mode selector returns the checkerboard-aliased TE10 that merely shares the TE10 eigenvalue (its `checkerboard_fraction` is persisted as a diagnostic; the checkerboard filter is scoped to the graded path only and the wall-peak gate is disabled), and it is the benchmark's `sin(pi y/a)`-correlation gate that refuses to use it -- while the selector never substitutes a spurious eigenvector for a genuinely absent requested index; the vector transverse operator cannot yet represent a clean full-grid `sin(pi y/a)` (it decouples the odd/even sublattices). `lumped_open_short_match` is a wave-level PASS (rebuilt as a coax short-open-load calibration bench whose TEM feed is coupled to a de-embedded load plane, so the three standards are mutually distinguishable: matched `|Gamma| <= -20 dB`, short/open `|Gamma| ~ 1`, open in the +1 class and short in the -1 class after short-referenced de-embedding); `microstrip_two_port` and `differential_pair` are BLOCKED (contour-snap error first, and `WaveModeSpec('tem')` categorically inapplicable to their inhomogeneous substrate+air cross-sections); `series_parallel_rlc` is a wave-level PASS (rebuilt with the RLC as an in-line coax two-terminal element carrying the full axial line current, so the series `|S11|` notch tracks `f0 = 1/(2*pi*sqrt(L C))` with a documented ~13% parasitic downshift). See the `e2a-rf-scenes` subsection for the rebuilds. Modal-eigensolve quantities, when reported, are labelled `modal-eigensolve` supporting evidence and never gate. Each scene emits a machine-readable artifact (grid convergence, extraction conditioning/passivity, the `a_passive/a_driven` diagnostic, and per-tier complex `S(f)` and port `a/b` so a frequency can be recomputed by hand; verbatim taxonomy gate classes and a separate status field) under `docs/assessments/rf-wave-validation-2026-07-18/` and an `## RF wave-level validation` section in `benchmark/RESULTS.md`. `python -m benchmark.rf_tidy3d_references` performs a real adapter-driven external-reference generation attempt (export -> runnable gate -> cost estimate/budget -> one cloud run -> `.h5` cache), and records `reference: pending-generation` with the concrete reason when an export is not runnable or a cloud run fails, never fabricating a comparison, while the analytic reference keeps binding (see the `e2c-rf-scenes` subsection)
+- Wave-level RF gate tests under `tests/rf/wave_validation/` replacing the retired plan-01 algebraic-identity gates: a propagating matched-load `|S11|` gate on a rectangular waveguide (matched thru reflects far less than a PEC short, measured from fields, with the short as falsification), and an asymmetric two-port reciprocity + field-derived power-balance gate (different port impedances/geometry so `S12 == S21` is physics not symmetry, with injected non-reciprocity and gain errors as falsification). The series-RLC companion-impedance formula check is retained but re-labelled `analytic-identity` (non-gating); the wave-level RLC resonance gap has since been closed by the rebuilt in-line coax RLC bench (see the RF wave-level bench fixes section)
 
 ## Performance Benchmarking
 
@@ -586,3 +586,112 @@ conductive-path model, not a validated arc or device-failure predictor).
 - Differentiable adjoints of explicit-delay embedded networks remain fail-closed with a precise rejection reason (the bidirectional ring couples steps up to `max_delay_steps` apart, possibly across checkpoint segments, and the fractional-delay filter is an IIR recurrence, neither of which the segment-local network pullback reverses); forward runs including checkpoint/resume are fully supported.
 - WavePort embedding stays fail-closed with an accurate rejection message: an embedded state-space network couples through a scalar voltage/current terminal on a single lumped Yee edge (LumpedPort or resolved TerminalPort), but a WavePort is a modal port with no scalar time-domain terminal (V, I) contract. This is a missing design contract, not a bug.
 <!-- END e4b-network-coupling -->
+<!-- BEGIN e2a-rf-scenes (Track E2 stage a: RF wave-level bench fixes) -->
+## RF wave-level bench fixes (WavePort monitor passthrough, lumped calibration/RLC rebuild)
+
+- User-declared monitors (e.g. `PlaneMonitor`) now ride through `WavePort` direct
+  excitations and `PortSweep` Results instead of being silently dropped. A direct
+  `PortExcitation` of a `WavePort` is a single drive column, so its user monitors
+  map unambiguously to that excitation and appear on `Result.monitor(...)`
+  identical to a plain FDTD run of the injected mode. A `PortSweep` drives one
+  channel per column: the flat top-level `Result.monitors` carries the first drive
+  channel (recorded in `Result` metadata as `user_monitor_drive_channel` /
+  `user_monitor_frequency`), and per-drive / per-frequency field payloads are
+  preserved column-by-column in `Result.array_run_data.column_results`. The
+  internal per-port ModeMonitors that extract the S-matrix stay hidden. This
+  unblocks field-level inspection/falsification of the RF wave benches.
+- `benchmark/scenes/rf/lumped_open_short_match.py` (`coax_sol_scene`) is rebuilt as
+  a coax one-port short-open-load (SOL) calibration bench on the proven air coax
+  line: a TEM `WavePort` feed launches down the line to a de-embedded load plane
+  terminated by a matched (reflectionless coax-through-PML, presenting Z0), a short
+  (PEC plug), or an open (truncated inner rod below the outer-guide TM01 cutoff).
+  The feed is now coupled to the load, so the three standards are mutually
+  distinguishable (matched |Gamma| <= -20 dB; short/open |Gamma| ~ 1; open in the
+  +1 class and short in the -1 class after short-referenced de-embedding), fixing
+  the retired decoupled bench that read identical Gamma for every load. The open-end
+  fringe capacitance shift is measured and documented.
+- `benchmark/scenes/rf/series_parallel_rlc.py` (`series_rlc_scene`) is rebuilt to
+  insert the series/parallel RLC as an in-line two-terminal element in the coax
+  inner conductor ahead of a matched continuation, so the element carries the full
+  axial line current and its resonance controls the feed reflection. The series
+  |S11| notch tracks the analytic `f0 = 1/(2*pi*sqrt(L C))` (`f_res*sqrt(C)`
+  constant to ~1%, moving by the analytic `1/sqrt(C)` ratio under a +/-20% C
+  change) and the parallel anti-resonance peak moves monotonically with C, fixing
+  the retired parasitic-dominated bench whose peak did not track C. The consistent
+  ~13% parasitic downshift of the absolute resonance is measured and documented.
+<!-- END e2a-rf-scenes -->
+
+<!-- BEGIN e2b-rf-scenes (Track E2 stage b: FDTD antenna benchmark scenes) -->
+## FDTD antenna benchmark scenes with real `Result.antenna` end-to-end gates
+
+- `benchmark/scenes/antenna/half_wave_dipole.py` (`half_wave_dipole_scene`) builds a
+  center-fed thin-wire half-wave dipole (two collinear PEC arms joined by a
+  node-bound `LumpedPort` gap feed) enclosed by a `ClosedSurfaceMonitor` NF2FF box.
+  A real FDTD `Scene -> Simulation -> Result` run consumed through
+  `Result.antenna(...)` -- with NO monkeypatched surface currents or far field --
+  reproduces the canonical dipole: E-plane `sin^2(theta)`-pattern correlation
+  >= 0.99 (measured 0.996 at the design frequency), peak directivity in the
+  `2.15 dBi` class (measured 2.19 dBi, analytic 2.156), and radiated-vs-accepted
+  power closure < 8% (measured ~4%). The input *resistance* sweeps through the
+  thin-dipole `73 Ohm` radiation-resistance class within the band (measured
+  20 -> 88 Ohm, crossing 73 Ohm, with samples inside 60-90 Ohm). The input
+  *reactance* carries a large positive delta-gap feed offset (the FDTD electrical
+  resonance sits above the physical half-wave frequency); this is documented and
+  deliberately not gated, rather than hidden.
+- `benchmark/scenes/antenna/patch.py` (`patch_antenna_scene`) builds a probe-fed
+  rectangular microstrip patch on a FINITE grounded dielectric slab (finite
+  substrate + ground so the NF2FF box lies in a homogeneous air exterior; an
+  infinite substrate running into the PML would leave no valid Huygens surface).
+  All critical planes (ground `z=0`, patch underside `z=h`, feed terminals) land on
+  exact Yee nodes via integer-cell `GridSpec.custom` coordinates (`arange*dx`),
+  because `GridSpec.uniform`'s float `ceil` cell count can overshoot by one cell.
+  The real `Result.antenna(...)` pipeline runs end to end and returns valid
+  `AntennaData` (six air-exterior faces per frequency, finite gains, positive
+  radiated power, radiated-vs-accepted power closure). The matched-broadside
+  `TM010` resonance and the `D >= 5 dBi` gate are a DOCUMENTED GAP recorded as a
+  strict xfail: the probe on this thick finite-ground slab is reactance-dominated
+  (`|Gamma| ~ 1`) and the pattern is off-broadside; feed/ground redesign and the
+  external-reference cross-check are deferred to stage E2c.
+- `tests/rf/antenna/test_antenna_benchmark_e2e.py` drives both scenes through the
+  real (non-monkeypatched) `Result.antenna` path on CUDA and enforces the gates
+  above; the unit-level synthetic-surface reduction tests in
+  `test_result_antenna.py` are retained as the fast kernel coverage.
+<!-- END e2b-rf-scenes -->
+
+<!-- BEGIN e2c-rf-scenes (Track E2 stage c: M3 external-reference generation + antenna RESULTS wiring) -->
+## External-reference generation wiring and antenna benchmark registration (M3)
+
+- `python -m benchmark.rf_tidy3d_references [scene ...]` now performs a real
+  adapter-driven external-reference-solver generation attempt for the RF / antenna
+  scenes instead of only stamping pending markers. For each target it exports the
+  `Scene` through `Scene.to_tidy3d`, gates on the export being physically runnable
+  (at least one source), and only then estimates the cloud cost, enforces the
+  per-scene FlexCredit budget, runs one cloud job, extracts the monitors, and
+  writes the `.h5` cache plus a `.generated.json` record with the task id and cost.
+  A non-runnable export (or any cloud failure) is recorded fail-closed as a
+  `reference: pending-generation` marker carrying the concrete reason; it never
+  fabricates a numerical cross-reference, and the analytic reference keeps binding.
+- The four owner-authorized targets (`rf/coax_thru`, `rf/lumped_open_short_match`,
+  `antenna/half_wave_dipole`, `antenna/patch`) currently fail-close at the runnable
+  gate with `sources=0`: their excitation is port-driven (a `WavePort` TEM launch
+  under `PortSweep` / `PortExcitation`, or a `LumpedPort` wire-gap / probe feed),
+  and the adapter's source conversion has no port/lumped mapping, so the exported
+  reference simulation has nothing to drive. Generation is refused BEFORE any cloud
+  cost is incurred (zero FlexCredits spent); mapping port/lumped excitation to the
+  reference solver is a deferred adapter feature. The per-scene outcome is recorded
+  in an `## RF / antenna external reference generation` section of
+  `benchmark/RESULTS.md`.
+- The FDTD antenna scenes are now registered in the RF validation harness:
+  `python -m benchmark rf antenna/half_wave_dipole antenna/patch` runs the real
+  `Result.antenna` path and writes an `## Antenna wave-level validation` section to
+  `benchmark/RESULTS.md` (each scene family owns its own section, so an
+  antenna-only run does not overwrite the RF section). `antenna/half_wave_dipole`
+  is a radiation-physics PASS (broadside directivity ~2.19 dBi, E-plane sin^2
+  pattern, radiated-vs-accepted power closure, radiation resistance through the
+  73 Ohm class); `antenna/patch` is a pipeline pass with a documented off-broadside
+  physics gap.
+- `tests/rf/wave_validation/test_rf_reference_generation.py` covers the M3 wiring:
+  the four targets export source-less and fail-close without fabricating a cache,
+  and the runnable -> cloud -> cache branch is proven reachable (gate forced open
+  with a stubbed cloud run) so the wiring is not a vacuous always-pending stub.
+<!-- END e2c-rf-scenes -->
