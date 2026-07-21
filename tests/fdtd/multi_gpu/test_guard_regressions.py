@@ -252,6 +252,70 @@ def test_require_distributed_adjoint_support_rejects_graded_sigma_absorber(
         require_distributed_adjoint_support(distributed)
 
 
+def _objective_guard_scene(monitor) -> mw.Scene:
+    """A bare CPU scene carrying exactly one monitor, for the objective guard.
+
+    ``require_distributed_adjoint_objective_support`` reads only
+    ``distributed._allow_adjoint`` and ``distributed.logical_scene.resolved_monitors()``,
+    so a stub distributed object over a monitor-only scene exercises the exact guard
+    branch without allocating any GPU shard.
+    """
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
+        grid=mw.GridSpec.uniform(0.1),
+        boundary=mw.BoundarySpec.none(),
+        device="cpu",
+    )
+    scene.add_monitor(monitor)
+    return scene
+
+
+def test_objective_guard_rejects_flux_monitor_even_under_allow_adjoint():
+    """A tiled ``FluxMonitor`` is rejected on the NCCL driver (``allow_adjoint``).
+
+    Closes the H1b "confirmed by direct check" gap: a flux plane needs cross-seam
+    tangential-field assembly for the Poynting product, so it is NOT separable per
+    owned strip and stays fail-closed even when the separable-plane relaxation is
+    active. ``is_separable_plane_monitor`` admits only the exact ``PlaneMonitor``
+    class (a ``FluxMonitor`` subclass with ``compute_flux`` is excluded), so the
+    tiled rejection fires.
+    """
+
+    from witwin.maxwell.fdtd.distributed.adjoint import (
+        require_distributed_adjoint_objective_support,
+    )
+
+    scene = _objective_guard_scene(mw.FluxMonitor("flux", axis="y", position=0.0))
+    distributed = SimpleNamespace(_allow_adjoint=True, logical_scene=scene)
+    with pytest.raises(ValueError, match="FluxMonitor"):
+        require_distributed_adjoint_objective_support(distributed)
+
+
+def test_objective_guard_rejects_separable_plane_on_in_process_bridge():
+    """A y-normal ``PlaneMonitor`` stays rejected off the NCCL driver.
+
+    The separable owned-strip relaxation is gated on ``_allow_adjoint``: the
+    in-process cuda_p2p bridge (``allow_adjoint`` False) has no per-owned-strip seed
+    routing, so a tiled plane objective must still fail closed there.
+    """
+
+    from witwin.maxwell.fdtd.distributed.adjoint import (
+        require_distributed_adjoint_objective_support,
+    )
+
+    scene = _objective_guard_scene(
+        mw.PlaneMonitor("plane", axis="y", position=0.0, fields=("Ez",))
+    )
+    distributed = SimpleNamespace(_allow_adjoint=False, logical_scene=scene)
+    with pytest.raises(ValueError, match="PlaneMonitor"):
+        require_distributed_adjoint_objective_support(distributed)
+
+    # Positive control: the same plane is admitted once the driver relaxation is on.
+    admitted = SimpleNamespace(_allow_adjoint=True, logical_scene=scene)
+    require_distributed_adjoint_objective_support(admitted)  # must not raise
+
+
 def test_solver_trainable_guard_covers_circuit_parameter_channel():
     """Defense in depth: the distributed solver's own trainable guard rejects a
     trainable circuit parameter even though the public ``Simulation`` guard would

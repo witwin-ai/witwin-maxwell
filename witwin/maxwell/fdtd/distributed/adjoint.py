@@ -264,31 +264,6 @@ def capture_distributed_checkpoint(distributed, step: int) -> DistributedCheckpo
     )
 
 
-def _forward_electric_halo(shards, current) -> None:
-    """Forward electric halo: right owned Ey/Ez node -> left neighbour ghost node."""
-
-    for destination, source in zip(shards[:-1], shards[1:]):
-        destination_state = current[destination.rank]
-        source_state = current[source.rank]
-        destination_ghost = destination.layout.storage_node_owned.stop
-        source_node = source.layout.storage_node_owned.start
-        with torch.cuda.device(destination.device):
-            destination_state["Ey"][destination_ghost].copy_(source_state["Ey"][source_node])
-            destination_state["Ez"][destination_ghost].copy_(source_state["Ez"][source_node])
-
-
-def _forward_magnetic_halo(shards, current) -> None:
-    """Forward magnetic halo: left owned Hy/Hz cell -> right neighbour ghost cell."""
-
-    for source, destination in zip(shards[:-1], shards[1:]):
-        source_state = current[source.rank]
-        destination_state = current[destination.rank]
-        source_last = source.layout.storage_cell_owned.stop - 1
-        with torch.cuda.device(destination.device):
-            destination_state["Hy"][0].copy_(source_state["Hy"][source_last])
-            destination_state["Hz"][0].copy_(source_state["Hz"][source_last])
-
-
 def _synchronize(devices) -> None:
     for device in devices:
         torch.cuda.synchronize(device)
@@ -362,7 +337,7 @@ def replay_distributed_segment(
             # (1) Electric halo, then (2) magnetic half on every shard. The CPML
             # half additionally advances psi_h (a same-x-slice recurrence, no
             # halo); the standard half advances only the fields.
-            _forward_electric_halo(shards, current)
+            distributed.transport.forward_electric_halo(shards, current)
             _synchronize(devices)
             for shard in shards:
                 with torch.cuda.device(shard.device):
@@ -386,7 +361,7 @@ def replay_distributed_segment(
             _synchronize(devices)
 
             # (3) Magnetic halo; the mid-step H is valid on owned + ghost after it.
-            _forward_magnetic_halo(shards, current)
+            distributed.transport.forward_magnetic_halo(shards, current)
             _synchronize(devices)
             if mid_magnetic_out is not None:
                 for shard in shards:
@@ -463,15 +438,42 @@ def _distributed_uses_cpml(distributed) -> bool:
     )
 
 
+def is_separable_plane_monitor(monitor) -> bool:
+    """Whether ``monitor`` is a y/z-normal ``PlaneMonitor`` seedable per owned strip.
+
+    A y/z-normal :class:`PlaneMonitor` is tiled across the x partition: each rank owns
+    a contiguous strip of the plane's x extent (the forward monitor-merge seam rule),
+    so a ``sum|spectrum|^2`` objective restricted to each rank's owned strip is
+    separable -- the world sum reproduces the global objective with no seam cell
+    double-counted, and each rank seeds only its owned strip. Flux planes
+    (:class:`FluxMonitor`, ``compute_flux``) need cross-seam tangential-field
+    interpolation for the Poynting cross product and are *not* separable this way;
+    mode / finite-plane / x-normal planes are excluded too. Only the exact plain
+    ``PlaneMonitor`` class on a y/z normal without flux qualifies.
+    """
+
+    from ...monitors import PlaneMonitor
+
+    return (
+        type(monitor) is PlaneMonitor
+        and str(getattr(monitor, "axis", "")).lower() in {"y", "z"}
+        and not bool(getattr(monitor, "compute_flux", False))
+    )
+
+
 def require_distributed_adjoint_objective_support(distributed) -> None:
-    """Reject objectives seeded from tiled plane/flux/mode monitors.
+    """Reject objectives seeded from tiled flux/mode monitors (and non-separable planes).
 
     Baseline distributed seed routing supports point-monitor spectra (single owner)
-    and full-field DFT (owned x-slices scattered from the gathered global grad). A
-    plane / flux / mode / closed-surface / diffraction monitor is stitched across
-    shards in the forward, so its cotangent would have to be scattered by the same
-    owned intervals -- the follow-up seed-scatter slice. Until that lands, an
-    objective that reads a tiled monitor is rejected here before any reverse work.
+    and full-field DFT (owned x-slices scattered from the gathered global grad). On
+    the per-rank NCCL adjoint driver (``allow_adjoint``) a y/z-normal
+    :class:`PlaneMonitor` is additionally admitted: the objective sums each rank's
+    owned plane strip, so its cotangent is already shard-local (no cross-rank
+    scatter) -- see :func:`is_separable_plane_monitor`. A flux / mode / closed-surface
+    / diffraction / finite-plane monitor still requires seam-crossing assembly whose
+    cotangent scatter is not wired, so it is rejected here before any reverse work. On
+    the in-process bridge (``allow_adjoint`` False) every tiled monitor stays rejected
+    exactly as before.
     """
 
     from ...monitors import (
@@ -495,11 +497,15 @@ def require_distributed_adjoint_objective_support(distributed) -> None:
         ClosedSurfaceMonitor,
         DiffractionMonitor,
     )
+    allow_adjoint = bool(getattr(distributed, "_allow_adjoint", False))
     for monitor in distributed.logical_scene.resolved_monitors():
+        if allow_adjoint and is_separable_plane_monitor(monitor):
+            continue
         if isinstance(monitor, _TILED):
             raise ValueError(
                 "Distributed FDTD adjoint objectives currently support point-monitor "
-                "spectra and full-field DFT only; tiled plane/flux/mode monitor "
+                "spectra, full-field DFT, and (on the NCCL adjoint driver) separable "
+                "y/z-normal plane monitors only; tiled flux/mode/closed-surface monitor "
                 f"cotangent scatter is not enabled yet ({type(monitor).__name__} "
                 f"{getattr(monitor, 'name', '?')!r})."
             )
@@ -560,11 +566,12 @@ def _index_global_grads(global_pack, grad_outputs):
         field_grads[field_name] = grad_outputs[cursor]
         cursor += 1
     for monitor_name, template in global_pack.monitor_templates.items():
-        if not _monitor_template_is_point(template):
-            raise RuntimeError(
-                "Distributed adjoint seed routing reached a non-point monitor template; "
-                "the objective-support guard should have rejected it."
-            )
+        # Point and separable (y/z-normal) plane monitors both emit exactly one
+        # output tensor per component, so the cotangent routing is identical: index
+        # by (monitor, component) in pack order. The plane cotangent is already
+        # shard-local (the NCCL objective sums each rank's owned strip), so no
+        # cross-rank scatter is needed; any other tiled monitor is rejected upstream
+        # by the objective-support guard before reaching this routing.
         for component_name in template["fields"]:
             monitor_grads[(monitor_name, component_name)] = grad_outputs[cursor]
             cursor += 1
@@ -768,11 +775,21 @@ class _DistributedFDTDGradientBridge:
         return raw_output, tuple(checkpoints)
 
     # -- backward ----------------------------------------------------------
+    def _backward_is_noop(self, grad_outputs) -> bool:
+        """Whether the reverse can be skipped entirely (single-process only).
+
+        In one process a fully-empty cotangent means zero gradient. The per-rank
+        NCCL driver overrides this to always return ``False``: an off-owner rank
+        carries empty cotangents yet must still drive the collective reverse (halo
+        exchanges and the grad_eps gather) in lockstep, or the ranks deadlock.
+        """
+        return all(grad_output is None for grad_output in grad_outputs)
+
     def backward(self, base_inputs, grad_outputs):
         distributed = self._distributed
         if distributed is None or self._pack is None or not self._checkpoints:
             raise RuntimeError("Distributed FDTD backward called before forward initialized the bridge.")
-        if all(grad_output is None for grad_output in grad_outputs):
+        if self._backward_is_noop(grad_outputs):
             return tuple(torch.zeros_like(tensor) for tensor in base_inputs)
 
         shards = distributed.shards
@@ -852,6 +869,16 @@ class _DistributedFDTDGradientBridge:
 
         return self._material_pullback(distributed, shards, base_inputs, grad_eps_accum)
 
+    def _scatter_field_grad(self, global_grad, shard, field_name, local_reference):
+        """Restrict a global DFT field cotangent to this shard's owned slice.
+
+        In-process the field cotangents come from the single global forward pack, so
+        each shard's local cotangent is the global grad restricted to its owned
+        x-interval. The per-rank NCCL driver overrides this: its cotangents are
+        already local (a separable per-owned-slab objective), so no scatter runs.
+        """
+        return _scatter_field_grad_to_shard(global_grad, shard, field_name, local_reference)
+
     def _build_shard_seed_runtimes(self, shards, field_grads, monitor_grads):
         seed_runtimes = {}
         for shard in shards:
@@ -866,16 +893,23 @@ class _DistributedFDTDGradientBridge:
                         shard_grads.append(torch.zeros_like(local_raw[field_name]))
                         continue
                     shard_grads.append(
-                        _scatter_field_grad_to_shard(
+                        self._scatter_field_grad(
                             global_grad, shard, field_name, local_raw[field_name]
                         )
                     )
                 for monitor_name, template in local_pack.monitor_templates.items():
+                    is_point = _monitor_template_is_point(template)
                     for component_name in template["fields"]:
                         global_grad = monitor_grads.get((monitor_name, component_name))
-                        local_output = local_raw["observers"][monitor_name]["components"][
-                            component_name
-                        ]
+                        component_payload = local_raw["observers"][monitor_name][
+                            "components"
+                        ][component_name]
+                        # A point component payload is the spectrum tensor itself; a
+                        # tiled plane component payload is a dict whose "data" holds
+                        # the per-strip spectrum tensor.
+                        local_output = (
+                            component_payload if is_point else component_payload["data"]
+                        )
                         if global_grad is None:
                             shard_grads.append(torch.zeros_like(local_output))
                         else:
@@ -1197,12 +1231,16 @@ class _DistributedFDTDGradientBridge:
             global_grad_eps[name] = distributed._gather_component(name, local_values)
         for device in distributed.devices:
             torch.cuda.synchronize(device)
-        # The distributed reverse product (gathered grad_eps) is the deterministic
-        # output of S3; the assign-semantics fused reverse kernels, ordered add_
-        # accumulation, and deterministic gather copies make it bitwise reproducible.
-        # Stashed so a determinism test can assert on it directly, isolated from the
-        # shared torch grid_sample material VJP (whose backward uses atomicAdd and is
-        # not bitwise reproducible, single- and multi-GPU alike).
+        # The distributed reverse product (gathered grad_eps) is the reduction-order
+        # deterministic output of S3: the assign-semantics fused reverse kernels,
+        # ordered add_ accumulation, and deterministic gather copies make it bitwise
+        # reproducible under identical (exclusive-GPU) block scheduling. Under
+        # concurrent multi-GPU load the fused-kernel reductions can be rescheduled and
+        # flip at the ULP level, so the determinism gate asserts reduction-order
+        # equality (relative ~ULP) rather than strict bitwise. Stashed so that gate can
+        # assert on it directly, isolated from the shared torch grid_sample material
+        # VJP (whose backward uses atomicAdd and is not bitwise reproducible, single-
+        # and multi-GPU alike).
         self._last_global_grad_eps = {
             name: value.detach().clone() for name, value in global_grad_eps.items()
         }
@@ -1231,6 +1269,335 @@ class _DistributedFDTDMaterialGradientFunction(torch.autograd.Function):
     def backward(ctx, *grad_outputs):
         gradients = ctx.bridge.backward(ctx.material_inputs, grad_outputs)
         return (None, *gradients)
+
+
+class _NcclDistributedFDTDGradientBridge(_DistributedFDTDGradientBridge):
+    """Per-rank collective reverse driver for a one-process-per-GPU NCCL launch.
+
+    Reuses the in-process bridge's reverse math verbatim -- the transposed reverse
+    cores (``_reverse_phases_standard`` / ``_reverse_phases_cpml``), this track's
+    NCCL adjoint halos, the checkpoint/replay schedule, and the source-term eps
+    accumulation -- and replaces the three single-process assumptions the in-process
+    bridge makes:
+
+    1. the forward output is built from a per-rank LOCAL pack (the global
+       ``_collect_output`` returns ``None`` off root), so each rank has its own
+       objective-facing tensors;
+    2. the objective is seeded locally -- a point monitor is owned by exactly one
+       rank (the others seed zero and receive adjoint only through the halos), and a
+       full-field DFT is separable across owned slabs -- so no cross-rank cotangent
+       scatter is needed;
+    3. grad_eps is gathered slab-wise to rank 0 with the already-NCCL-capable
+       component gather and the material pullback runs on rank 0 only.
+
+    Everything cross-interface (both Yee field families, and the psi coupling that
+    rides them on the CPML branch) travels through the transposed NCCL halos, whose
+    discrete-transpose identity is independently proven at the transport level.
+    """
+
+    def __init__(self, simulation, *, objective):
+        super().__init__(simulation)
+        # objective(pack, leaf_outputs, layout) -> real scalar loss tensor built
+        # from differentiable copies of the local pack output tensors. The driver
+        # differentiates it to obtain the local seed cotangents.
+        self._objective = objective
+        self._local_cotangents: tuple[torch.Tensor, ...] | None = None
+        self._local_loss = None
+        self._rank = None
+
+    def _backward_is_noop(self, grad_outputs) -> bool:
+        # Every rank must drive the collective reverse in lockstep even when its
+        # local seed is empty (off-owner ranks receive adjoint only via the halos),
+        # so the reverse is never skipped on the per-rank NCCL path.
+        return False
+
+    def _scatter_field_grad(self, global_grad, shard, field_name, local_reference):
+        # The per-rank objective already produces cotangents in this shard's local
+        # padded layout (nonzero on owned indices, zero in the ghost), so they are
+        # used directly -- there is no global field to restrict.
+        return global_grad
+
+    def _run_forward_capture_local(
+        self,
+        distributed,
+        *,
+        time_steps,
+        dft_frequency,
+        dft_window,
+        full_field_dft,
+        normalize_source,
+    ):
+        """Drive the real NCCL forward loop capturing per-rank checkpoints.
+
+        Mirrors ``_run_forward_with_checkpoints`` but omits the global
+        ``_collect_output`` -- the driver reads each rank's shard-local DFT/observer
+        output directly, so the cross-rank monitor/field gather (which returns
+        ``None`` off root) is never needed here.
+        """
+
+        for shard in distributed.shards:
+            shard.solver._normalize_source = bool(normalize_source)
+        distributed._prepare_outputs(time_steps, dft_frequency, dft_window, full_field_dft)
+        overlap_active = distributed._overlap_active()
+        self._overlap_active = overlap_active
+        stride = _checkpoint_stride(self.simulation, time_steps)
+
+        distributed._synchronize_all()
+        checkpoints = [capture_distributed_checkpoint(distributed, 0)]
+        for n in range(int(time_steps)):
+            if n > 0 and n % stride == 0:
+                distributed._synchronize_all()
+                checkpoints.append(capture_distributed_checkpoint(distributed, n))
+            distributed._advance_one_step(n, overlap_active=overlap_active)
+        distributed._synchronize_all()
+
+        for shard in distributed.shards:
+            solver = shard.solver
+            if solver.dft_enabled:
+                solver._sync_dft_legacy_state()
+            if solver.observers_enabled:
+                solver._sync_observer_legacy_state()
+        return tuple(checkpoints)
+
+    def forward(self, material_inputs):
+        del material_inputs
+        from ..distributed import DistributedFDTD
+
+        simulation = self.simulation
+        config = simulation.config
+        if float(getattr(config, "shutoff", 0.0)) > 0.0:
+            raise ValueError(
+                "Distributed FDTD adjoint does not support field shutoff (shutoff>0) on "
+                "trainable runs; the reverse pass replays a fixed step count."
+            )
+
+        dft_cfg = config.spectral_sampler
+        with torch.no_grad():
+            simulation._refresh_scene()
+            scene = simulation.scene
+            distributed = DistributedFDTD(
+                scene,
+                frequency=simulation.frequency,
+                parallel=config.parallel,
+                absorber_type=config.absorber,
+                cpml_config=config.cpml_config,
+                allow_adjoint=True,
+            )
+            distributed.init_field()
+            require_distributed_adjoint_support(distributed)
+            require_distributed_adjoint_objective_support(distributed)
+
+            time_steps = simulation._resolve_fdtd_time_steps(distributed, scene)
+            use_full_field_dft = config.full_field_dft or len(simulation.frequencies) > 1
+            dft_request = (
+                simulation.frequency
+                if len(simulation.frequencies) == 1
+                else simulation.frequencies
+            )
+            normalize_source = dft_cfg.normalize_source
+            if normalize_source and len(scene.sources) != 1:
+                raise ValueError(
+                    "Distributed source normalization requires exactly one logical source."
+                )
+            # The eps-shaped grad gather lands only on rank 0, so only rank 0 can
+            # size it; but the reject must be COLLECTIVE. If rank 0 raised locally
+            # while the peers proceeded into _run_forward_capture_local, the peers
+            # would block forever in the forward halo collectives (rank 0 never
+            # posts them). Rank 0 evaluates capacity, then all ranks all-reduce the
+            # verdict and raise together, so the reject stays deadlock-free.
+            capacity_error = None
+            if distributed.rank == 0:
+                try:
+                    self._preflight_gather_capacity(
+                        distributed, dft_request, use_full_field_dft
+                    )
+                except MemoryError as exc:
+                    capacity_error = exc
+            failed = distributed.transport.allreduce_scalar(
+                1.0 if capacity_error is not None else 0.0
+            )
+            if float(failed.item()) > 0.0:
+                if capacity_error is not None:
+                    raise capacity_error
+                raise RuntimeError(
+                    "Distributed NCCL adjoint gather-capacity preflight failed on "
+                    "rank 0; this rank aborts collectively to avoid a forward-halo "
+                    "deadlock. See rank 0's log for the capacity detail."
+                )
+
+            checkpoints = self._run_forward_capture_local(
+                distributed,
+                time_steps=time_steps,
+                dft_frequency=dft_request,
+                dft_window=dft_cfg.window,
+                full_field_dft=use_full_field_dft,
+                normalize_source=normalize_source,
+            )
+
+        local_raw = self._shard_local_raw_output(distributed.shards[0].solver)
+        pack = _prepare_forward_pack(local_raw)
+        distributed._adjoint_bridge = self
+        self._distributed = distributed
+        self._rank = int(distributed.rank)
+        self._uses_cpml = _distributed_uses_cpml(distributed)
+        self._pack = pack
+        self._checkpoints = checkpoints
+        self._time_steps = int(time_steps)
+        self._dt = float(distributed.dt)
+        self._eps0 = float(distributed.shards[0].solver.eps0)
+        self._raw_output = local_raw
+        self._solver_stats = None
+        return pack.output_tensors
+
+    def compute_local_objective(self):
+        """Differentiate the local objective into per-rank seed cotangents.
+
+        Builds differentiable leaf copies of the local pack output tensors, runs the
+        objective callable, and returns ``(local_loss, cotangents)`` where the
+        cotangents align to the pack output order (exactly what
+        ``_build_output_seeds`` consumes). Off-owner ranks whose local pack is empty
+        return a zero loss and an empty cotangent tuple; they still run the reverse
+        loop and receive adjoint through the halos.
+        """
+
+        pack = self._pack
+        n = int(pack.wire_offset)
+        layout = self._distributed.shards[0].layout
+        device = self._distributed.shards[0].device
+        leaves = tuple(
+            tensor.detach().clone().requires_grad_(True)
+            for tensor in pack.output_tensors[:n]
+        )
+        with torch.enable_grad():
+            loss = self._objective(pack, leaves, layout)
+            if not isinstance(loss, torch.Tensor):
+                loss = torch.as_tensor(float(loss), device=device)
+            loss = loss.reshape(())
+            if leaves:
+                grads = torch.autograd.grad(loss, leaves, allow_unused=True)
+                cotangents = tuple(
+                    torch.zeros_like(leaf) if grad is None else grad
+                    for leaf, grad in zip(leaves, grads)
+                )
+            else:
+                cotangents = ()
+        self._local_loss = loss.detach()
+        self._local_cotangents = cotangents
+        return self._local_loss, cotangents
+
+    def _material_pullback(self, distributed, shards, base_inputs, grad_eps_accum):
+        # grad_eps is gathered slab-wise: the NCCL component gather returns the
+        # global tensor on rank 0 and None on every other rank. The single-GPU
+        # material pullback then runs on rank 0 only; other ranks hold no global
+        # density and return zeros so the driver contract (grads meaningful on
+        # rank 0) is explicit rather than crashing on a None gather result.
+        global_grad_eps = {}
+        for name in ("Ex", "Ey", "Ez"):
+            local_values = tuple(grad_eps_accum[shard.rank][name] for shard in shards)
+            global_grad_eps[name] = distributed._gather_component(name, local_values)
+        for device in distributed.devices:
+            torch.cuda.synchronize(device)
+
+        if distributed.rank != 0:
+            self._last_global_grad_eps = None
+            return tuple(torch.zeros_like(tensor) for tensor in base_inputs)
+
+        self._last_global_grad_eps = {
+            name: value.detach().clone() for name, value in global_grad_eps.items()
+        }
+        with torch.enable_grad():
+            scene = self._material_graph_scene()
+            return pullback_material_input_gradients(
+                scene,
+                inputs=base_inputs,
+                grad_eps_ex=global_grad_eps["Ex"],
+                grad_eps_ey=global_grad_eps["Ey"],
+                grad_eps_ez=global_grad_eps["Ez"],
+                eps0=self._eps0,
+            )
+
+
+def point_monitor_l2_objective(pack, leaves, layout):
+    """Separable ``sum |spectrum|^2`` over every local point-monitor component.
+
+    A point monitor is owned by exactly one rank, so only the owner's local pack
+    carries monitor outputs; every other rank has an empty monitor set and returns a
+    zero loss, contributing nothing to the world sum and seeding nothing (it receives
+    adjoint solely through the halos). ``leaves`` are differentiable copies of the
+    pack output tensors, ordered fields-then-monitor-components, so the monitor
+    cursor starts past the (here empty) field block.
+    """
+
+    del layout
+    cursor = len(pack.field_names)
+    loss = None
+    for _monitor_name, template in pack.monitor_templates.items():
+        for _component_name in template["fields"]:
+            spectrum = leaves[cursor]
+            cursor += 1
+            term = (spectrum.real ** 2 + spectrum.imag ** 2).sum()
+            loss = term if loss is None else loss + term
+    if loss is None:
+        return 0.0
+    return loss
+
+
+def plane_monitor_l2_objective(pack, leaves, layout):
+    """Separable ``sum |spectrum|^2`` over each rank's owned plane strip.
+
+    A y/z-normal plane monitor is tiled across the x partition. Each rank's local
+    plane spectrum spans its *allocation* x extent (owned cells plus the halo ghost
+    the neighbour also carries), so the objective restricts the sum to the rank's
+    owned-local x slice -- the exact forward monitor-merge seam rule
+    (``owned_local_slice``). The owned strips tile the global plane with no overlap,
+    so the world sum reproduces the single-process objective and every seam cell is
+    counted on exactly one rank. Point-monitor components (single owner) contribute
+    their full spectrum. Off-owner ranks whose owned strip is empty contribute
+    nothing and seed nothing (they receive adjoint solely through the halos).
+
+    ``leaves`` are differentiable copies of the pack output tensors ordered
+    fields-then-monitor-components; a tiled plane spectrum is stored with its x axis
+    at dim ``-2`` (transverse at ``-1``), matching ``owned_local_slice[0]``.
+    """
+
+    cursor = len(pack.field_names)
+    loss = None
+    for _monitor_name, template in pack.monitor_templates.items():
+        is_point = _monitor_template_is_point(template)
+        for component_name in template["fields"]:
+            spectrum = leaves[cursor]
+            cursor += 1
+            if is_point:
+                strip = spectrum
+            else:
+                owned_x = layout.component(component_name).owned_local_slice[0]
+                index = [slice(None)] * spectrum.ndim
+                index[-2] = owned_x
+                strip = spectrum[tuple(index)]
+            term = (strip.real ** 2 + strip.imag ** 2).sum()
+            loss = term if loss is None else loss + term
+    if loss is None:
+        return 0.0
+    return loss
+
+
+def run_nccl_distributed_reverse(simulation, *, objective):
+    """Run the per-rank collective NCCL forward+reverse and return the gradient.
+
+    Returns ``(total_loss, grads, bridge)`` where ``total_loss`` is the world-summed
+    objective (identical on every rank), ``grads`` is the tuple of gradients w.r.t.
+    the trainable inputs (meaningful on rank 0, zeros elsewhere), and ``bridge``
+    exposes ``_last_global_grad_eps`` (rank 0) for determinism checks. The objective
+    is a separable local functional; the world sum reproduces the single-process
+    objective because the owned slabs tile the global domain with no overlap.
+    """
+
+    bridge = _NcclDistributedFDTDGradientBridge(simulation, objective=objective)
+    bridge.forward(bridge.trainable_inputs)
+    local_loss, cotangents = bridge.compute_local_objective()
+    total_loss = bridge._distributed.transport.allreduce_scalar(local_loss)
+    grads = bridge.backward(bridge.trainable_inputs, cotangents)
+    return total_loss, grads, bridge
 
 
 def run_distributed_fdtd_with_gradient_bridge(simulation):

@@ -864,3 +864,60 @@ Capability level: **differentiable-surrogate (non-physical, non-regulatory)**. T
   staircase edge, matching an external reference solver's curved/oblique metal
   treatment. Dielectric scenes are unaffected.
 <!-- END f4-subpixel-lever -->
+<!-- BEGIN h1-nccl-driver (per-rank collective NCCL reverse driver) -->
+## Multi-GPU NCCL trainable-density adjoint (one-process-per-GPU)
+
+- A trainable Box-`MaterialRegion` density scene now backpropagates over a
+  single-node one-process-per-GPU NCCL launch (`transport="nccl"`, `torchrun
+  --nproc-per-node=<gpus>`), not only the in-process `transport="cuda_p2p"`
+  runtime. The per-rank collective reverse driver
+  (`run_nccl_distributed_reverse`) runs the distributed forward with per-rank
+  checkpoints, replays each checkpoint segment with NCCL forward-replay dict
+  halos, seeds a separable local objective per rank (a point monitor is owned by
+  exactly one rank; every other rank seeds zero and receives adjoint only through
+  the transposed NCCL halos), runs the transposed reverse with this track's NCCL
+  adjoint halos, gathers the per-rank `grad_eps` owned slabs to rank 0, and runs
+  the single-GPU material pullback once on rank 0. The open-boundary standard
+  update and the x-CPML absorbing update (including objectives whose sensitivity
+  threads the CPML psi memory recursion) are both supported.
+- Objective + gathered-`grad_eps` gradient parity against the single-process
+  single-GPU adjoint is gated on two processes for the open-boundary standard
+  geometry and the psi-active x-CPML geometry (loss rtol 5e-5 / atol 5e-6; grad
+  rtol 1e-4 with an atol floor 1e-6*max|grad|), the gathered `grad_eps` is bitwise
+  reproducible across repeated backward passes, and an unsupported-adjoint scene
+  (e.g. a trainable density on a legacy graded-sigma absorber) is rejected cleanly
+  and symmetrically on every rank without deadlocking.
+- The reverse gradient is load-safe: the headline parity gates (standard / x-CPML /
+  seam-spanning plane) hold at the same honest 1e-4-class tolerance while both GPUs
+  are saturated by a co-tenant burner (a committed stress gate spawns the load), and
+  a rank-0-only gather-capacity failure raises collectively on every rank without
+  hanging. This closes a caching-allocator cross-stream reuse hazard in which the
+  reverse/replay NCCL halos previously ran on a non-default stream while their
+  per-step adjoint planes were allocated on the default stream, deterministically
+  corrupting the partition-seam gradient under concurrent GPU load; the halos now
+  run on the current (default) stream so allocation-stream == use-stream.
+- The forward-only NCCL fence still rejects a trainable/monitor scene on the plain
+  NCCL forward path; the relaxation is internal to the verified adjoint driver.
+- A y/z-normal `PlaneMonitor` objective is now also supported on the NCCL adjoint
+  driver: the plane is tiled across the x seam, so a `sum|spectrum|^2` objective
+  restricted to each rank's owned plane strip (the forward monitor-merge
+  owned-local x slice) is separable -- the world sum reproduces the single-process
+  full-plane objective with every seam cell counted on exactly one rank, and each
+  rank seeds only its owned strip (no cross-rank cotangent scatter). Two-process
+  acceptance gates the owned-strip objective and its gathered `grad_eps` against
+  the single-GPU full-plane adjoint on a plane spanning the seam, plus a
+  seam-ownership falsification (summing each rank's full local strip double-counts
+  the live seam cell and reddens parity). Flux / mode / finite-plane / x-normal
+  plane objectives stay fail-closed (they need seam-crossing tangential-field
+  assembly whose cotangent scatter is not wired), and the in-process
+  `transport="cuda_p2p"` bridge continues to reject every tiled monitor.
+- The NCCL adjoint driver reproduces the single-GPU reference to ~2e-7 of scale
+  both on exclusive GPUs and under a saturating co-tenant, so no shared-GPU caveat
+  applies to it. (The in-process `transport="cuda_p2p"` bridge carries the same
+  class of caching-allocator cross-stream hazard on its cross-device peer-copy
+  path and can still drift the gradient at the seam under concurrent load; its fix
+  is tracked separately as it needs cross-device event/`record_stream` handling
+  rather than the single-device stream swap the NCCL path uses.) See
+  `docs/assessments/h1-nccl-driver-acceptance-2026-07-21.md` "Load-dependence
+  episode and fix".
+<!-- END h1-nccl-driver -->

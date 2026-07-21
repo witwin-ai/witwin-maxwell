@@ -237,6 +237,43 @@ class CudaP2PHaloTransport(HaloTransport):
                 )
                 destination.magnetic_received.record(stream)
 
+    def forward_electric_halo(self, shards, current) -> None:
+        """Forward electric replay halo on a per-rank state dict (in-process).
+
+        Transpose sibling of :meth:`exchange_electric_adjoint`, operating on the
+        replay's ``current[rank]`` field-dict tensors rather than the live solver
+        fields: the right shard's first owned Ey/Ez node is copied into the left
+        shard's high ghost node. In-process every shard lives in this process, so
+        the copy iterates neighbour pairs directly; the byte-for-byte behaviour of
+        the previous module-level ``_forward_electric_halo`` is preserved so the
+        validated in-process replay parity is unchanged.
+        """
+
+        for destination, source in zip(shards[:-1], shards[1:]):
+            destination_state = current[destination.rank]
+            source_state = current[source.rank]
+            destination_ghost = destination.layout.storage_node_owned.stop
+            source_node = source.layout.storage_node_owned.start
+            with torch.cuda.device(destination.device):
+                destination_state["Ey"][destination_ghost].copy_(source_state["Ey"][source_node])
+                destination_state["Ez"][destination_ghost].copy_(source_state["Ez"][source_node])
+
+    def forward_magnetic_halo(self, shards, current) -> None:
+        """Forward magnetic replay halo on a per-rank state dict (in-process).
+
+        The left shard's last owned Hy/Hz cell is copied into the right shard's low
+        ghost cell (data flows left -> right), mirroring the forward magnetic halo.
+        Preserves the previous module-level ``_forward_magnetic_halo`` numerics.
+        """
+
+        for source, destination in zip(shards[:-1], shards[1:]):
+            source_state = current[source.rank]
+            destination_state = current[destination.rank]
+            source_last = source.layout.storage_cell_owned.stop - 1
+            with torch.cuda.device(destination.device):
+                destination_state["Hy"][0].copy_(source_state["Hy"][source_last])
+                destination_state["Hz"][0].copy_(source_state["Hz"][source_last])
+
     def _staging_pair(
         self,
         kind: str,
