@@ -461,6 +461,9 @@ def _build_yee_transverse_operator_sparse(
     eps_uu=None,
     eps_vv=None,
     eps_ww=None,
+    pec_eu=None,
+    pec_ev=None,
+    pec_ww=None,
 ):
     """Genuinely Yee-staggered transverse full-vector mode operator ``P``.
 
@@ -526,7 +529,7 @@ def _build_yee_transverse_operator_sparse(
     eps_uu_diag = _component_diag(eps_uu, meta["shape_eu"])
     eps_vv_diag = _component_diag(eps_vv, meta["shape_ev"])
     if eps_ww is None:
-        eps_ww_inv_diag = sparse.eye(shape_d[0] * shape_d[1], format="csr", dtype=np.float64)
+        eps_ww_inv_values = np.ones((shape_d[0] * shape_d[1],), dtype=np.float64)
     else:
         eps_ww_array = np.asarray(eps_ww, dtype=np.float64)
         if tuple(eps_ww_array.shape) != shape_d:
@@ -534,7 +537,23 @@ def _build_yee_transverse_operator_sparse(
                 f"Yee transverse eps_ww slice shape {tuple(eps_ww_array.shape)} does not match the "
                 f"interior-node grid {shape_d}."
             )
-        eps_ww_inv_diag = sparse.diags(1.0 / eps_ww_array.reshape(-1), offsets=0, format="csr")
+        eps_ww_inv_values = 1.0 / eps_ww_array.reshape(-1)
+
+    # Interior-PEC masking (F2a): a longitudinal node inside a conductor carries no
+    # Ew, so it drops from the eps_ww divergence coupling. Zeroing its eps_ww^{-1}
+    # diagonal entry removes its contribution to every ``su_big @ eps_ww^{-1} @
+    # gu_big`` block symmetrically, exactly as the outer Dirichlet walls do -- no
+    # penalty term, no asymmetry (the term is ``-gu_big^T D gu_big`` with D diagonal).
+    pec_ww_mask = None
+    if pec_ww is not None:
+        pec_ww_mask = np.asarray(pec_ww, dtype=bool)
+        if tuple(pec_ww_mask.shape) != shape_d:
+            raise ValueError(
+                f"Yee transverse pec_ww mask shape {tuple(pec_ww_mask.shape)} does not match the "
+                f"interior-node grid {shape_d}."
+            )
+        eps_ww_inv_values = np.where(pec_ww_mask.reshape(-1), 0.0, eps_ww_inv_values)
+    eps_ww_inv_diag = sparse.diags(eps_ww_inv_values, offsets=0, format="csr")
 
     k0_sq = float(k0) * float(k0)
 
@@ -572,6 +591,32 @@ def _build_yee_transverse_operator_sparse(
     meta["gv_big"] = gv_big
     meta["su_big"] = su_big
     meta["sv_big"] = sv_big
+
+    # Stacked active-unknown mask over (Eu, Ev). A transverse component sample whose
+    # staggered location lies inside a conductor is eliminated (Dirichlet 0) just like
+    # a wall node -- the caller reduces the operator to ``P[active][:, active]``.
+    if pec_eu is None:
+        eu_active = np.ones((n_eu,), dtype=bool)
+    else:
+        eu_mask = np.asarray(pec_eu, dtype=bool)
+        if tuple(eu_mask.shape) != tuple(meta["shape_eu"]):
+            raise ValueError(
+                f"Yee transverse pec_eu mask shape {tuple(eu_mask.shape)} does not match the "
+                f"Eu grid {tuple(meta['shape_eu'])}."
+            )
+        eu_active = ~eu_mask.reshape(-1)
+    if pec_ev is None:
+        ev_active = np.ones((n_ev,), dtype=bool)
+    else:
+        ev_mask = np.asarray(pec_ev, dtype=bool)
+        if tuple(ev_mask.shape) != tuple(meta["shape_ev"]):
+            raise ValueError(
+                f"Yee transverse pec_ev mask shape {tuple(ev_mask.shape)} does not match the "
+                f"Ev grid {tuple(meta['shape_ev'])}."
+            )
+        ev_active = ~ev_mask.reshape(-1)
+    meta["pec_active"] = np.concatenate([eu_active, ev_active])
+    meta["pec_ww_mask"] = pec_ww_mask
     return operator, meta
 
 
@@ -635,7 +680,7 @@ def _yee_interior_to_node_dirichlet(values: np.ndarray, axis: int, *, cells: int
     return np.moveaxis(node, 0, axis)
 
 
-def _yee_reconstruct_node_profiles(eu_stag, ev_stag, *, beta, meta, eps_stag, field_names):
+def _yee_reconstruct_node_profiles(eu_stag, ev_stag, *, beta, meta, eps_stag, field_names, pec_ww_mask=None):
     """Rebuild the transverse mode fields on the aperture node grid.
 
     From the transverse electric eigenvector ``(Eu, Ev)`` (each on its own Yee
@@ -668,6 +713,10 @@ def _yee_reconstruct_node_profiles(eu_stag, ev_stag, *, beta, meta, eps_stag, fi
     else:
         divergence = meta["gu_big"] @ (eps_u_flat * eu) + meta["gv_big"] @ (eps_v_flat * ev)
         ew_node = -np.real(divergence) / (np.real(beta_val) if abs(np.real(beta_val)) > 0 else beta_mag) / eps_w_flat
+    if pec_ww_mask is not None:
+        # A longitudinal node inside a conductor carries no Ew (its eps_ww coupling
+        # was dropped from the operator); keep the reconstruction consistent.
+        ew_node = np.where(np.asarray(pec_ww_mask, dtype=bool).reshape(-1), 0.0, ew_node)
 
     eta_scale = k0 * _ETA0  # omega * mu0 = k0 * eta0
     # Hu shares the Ev grid, Hv shares the Eu grid (standard Yee co-location).
@@ -713,6 +762,7 @@ def _select_yee_transverse_mode_numpy(
     preferred_field_name: str,
     reject_spurious: bool,
     wave_family: str | None,
+    pec_ww_mask=None,
 ):
     """Select one forward guided mode of the Yee-staggered transverse operator.
 
@@ -784,6 +834,7 @@ def _select_yee_transverse_mode_numpy(
                     meta=meta,
                     eps_stag=eps_stag,
                     field_names=field_names,
+                    pec_ww_mask=pec_ww_mask,
                 )
                 for vector in vectors
             ]
@@ -812,7 +863,8 @@ def _select_yee_transverse_mode_numpy(
         for vector in rotated_vectors:
             eu, ev = _split_yee_transverse_eigenvector(vector, meta)
             profiles = _yee_reconstruct_node_profiles(
-                eu, ev, beta=raw_candidates[cursor][2], meta=meta, eps_stag=eps_stag, field_names=field_names
+                eu, ev, beta=raw_candidates[cursor][2], meta=meta, eps_stag=eps_stag,
+                field_names=field_names, pec_ww_mask=pec_ww_mask,
             )
             profiles = _normalize_vector_mode_profiles_numpy(profiles, preferred_field_name=preferred_field_name)
             independent.append({"beta": raw_candidates[cursor][2], "vector": vector, "profiles": profiles})
@@ -1010,6 +1062,469 @@ def _solve_yee_transverse_vector_mode(
         wave_family=wave_family,
     )
     return beta, component_arrays, diagnostics
+
+
+def _yee_stagger_pec_from_nodes(pec_node_occupancy, *, nu_cells: int, nv_cells: int, threshold: float):
+    """Rasterize node PEC occupancy onto the three staggered Yee component grids.
+
+    ``pec_node_occupancy`` is the aperture node-grid conductor occupancy (shape
+    ``(nu_cells + 1, nv_cells + 1)``, walls included) in ``[0, 1]``. A staggered
+    component is declared inside the conductor when its rasterized occupancy reaches
+    ``threshold`` -- the SAME placement the eps staggering uses
+    (``_yee_stagger_eps_from_nodes``): node -> half is the arithmetic mean of the two
+    bracketing nodes, interior-node selection drops the two wall rows/columns. Returns
+    boolean masks ``(pec_eu, pec_ev, pec_ww)`` matching the ``Eu`` grid ``(nu_cells,
+    nv_cells - 1)``, the ``Ev`` grid ``(nu_cells - 1, nv_cells)`` and the interior-node
+    grid ``(nu_cells - 1, nv_cells - 1)``.
+    """
+    occupancy = np.asarray(pec_node_occupancy, dtype=np.float64)
+    expected = (nu_cells + 1, nv_cells + 1)
+    if tuple(occupancy.shape) != expected:
+        raise ValueError(
+            f"PEC node occupancy shape {tuple(occupancy.shape)} does not match the aperture "
+            f"node grid {expected}."
+        )
+    eu_occ = 0.5 * (occupancy[:-1, 1:-1] + occupancy[1:, 1:-1])   # (u half, v interior node)
+    ev_occ = 0.5 * (occupancy[1:-1, :-1] + occupancy[1:-1, 1:])   # (u interior node, v half)
+    ww_occ = occupancy[1:-1, 1:-1]                                # interior nodes
+    return eu_occ >= threshold, ev_occ >= threshold, ww_occ >= threshold
+
+
+def _label_connected_components(active: np.ndarray) -> tuple[np.ndarray, int]:
+    """Label 4-connected components of a boolean 2D mask (True = member).
+
+    Returns ``(labels, count)`` with ``labels`` a ``int32`` array (0 for non-members,
+    1..count for members) and ``count`` the number of connected components. A small
+    flood-fill keeps this dependency-free (SciPy's ``label`` is avoided so the mode
+    solver has no new import).
+    """
+    active = np.asarray(active, dtype=bool)
+    labels = np.zeros(active.shape, dtype=np.int32)
+    count = 0
+    nu, nv = active.shape
+    for start_u in range(nu):
+        for start_v in range(nv):
+            if not active[start_u, start_v] or labels[start_u, start_v] != 0:
+                continue
+            count += 1
+            stack = [(start_u, start_v)]
+            labels[start_u, start_v] = count
+            while stack:
+                cu, cv = stack.pop()
+                for du_step, dv_step in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nu_i, nv_i = cu + du_step, cv + dv_step
+                    if 0 <= nu_i < nu and 0 <= nv_i < nv and active[nu_i, nv_i] and labels[nu_i, nv_i] == 0:
+                        labels[nu_i, nv_i] = count
+                        stack.append((nu_i, nv_i))
+    return labels, count
+
+
+def _yee_pec_connectivity_check(pec_ww_mask: np.ndarray) -> dict:
+    """Fail-closed connectivity check over the interior-node conductor-free region.
+
+    ``pec_ww_mask`` is the interior-node conductor mask (True = inside a conductor).
+    The transverse mode is supported on the conductor-free (dielectric) node region; a
+    dielectric node that is fully surrounded by conductor -- a numerically degenerate
+    pinch point -- carries a spurious isolated null and is rejected. Returns a
+    diagnostics dict with the count of connected conductor-free regions and the count of
+    distinct interior conductors so the caller can record how many independent line
+    modes the geometry supports (``conductors - 1`` for a doubly/multiply-connected
+    line).
+    """
+    pec_ww_mask = np.asarray(pec_ww_mask, dtype=bool)
+    dielectric = ~pec_ww_mask
+    active_count = int(np.count_nonzero(dielectric))
+    if active_count < 2:
+        raise ValueError(
+            "Interior-PEC mode plane leaves fewer than two conductor-free interior nodes; "
+            "refine the aperture grid or check the conductor geometry."
+        )
+    dielectric_labels, dielectric_regions = _label_connected_components(dielectric)
+    # A dielectric node with no conductor-free 4-neighbour is a degenerate pinch.
+    isolated = np.zeros_like(dielectric)
+    for shift_axis in (0, 1):
+        for shift in (1, -1):
+            neighbour = np.roll(dielectric, shift=shift, axis=shift_axis)
+            # np.roll wraps; clear the wrapped edge so borders are not treated as neighbours.
+            if shift_axis == 0:
+                if shift == 1:
+                    neighbour[0, :] = False
+                else:
+                    neighbour[-1, :] = False
+            else:
+                if shift == 1:
+                    neighbour[:, 0] = False
+                else:
+                    neighbour[:, -1] = False
+            isolated |= dielectric & ~neighbour
+    fully_isolated = dielectric.copy()
+    for shift_axis in (0, 1):
+        for shift in (1, -1):
+            neighbour = np.roll(dielectric, shift=shift, axis=shift_axis)
+            if shift_axis == 0:
+                if shift == 1:
+                    neighbour[0, :] = False
+                else:
+                    neighbour[-1, :] = False
+            else:
+                if shift == 1:
+                    neighbour[:, 0] = False
+                else:
+                    neighbour[:, -1] = False
+            fully_isolated &= ~neighbour
+    if bool(np.any(fully_isolated)):
+        raise ValueError(
+            "Interior-PEC mode plane has a conductor-free node fully surrounded by conductor "
+            "(degenerate pinch point); refine the aperture grid across the conductor gap."
+        )
+    _, conductor_regions = _label_connected_components(pec_ww_mask)
+    return {
+        "dielectric_regions": int(dielectric_regions),
+        "conductor_regions": int(conductor_regions),
+        "active_interior_nodes": active_count,
+    }
+
+
+def _solve_yee_transverse_pec_mode(
+    eps_node_planes,
+    pec_node_occupancy,
+    *,
+    k0: float,
+    du: float,
+    dv: float,
+    mode_index: int,
+    field_names,
+    preferred_field_name: str,
+    wave_family: str | None,
+    uniform: bool,
+    use_dense: bool,
+    threshold: float = _PEC_OCCUPANCY_THRESHOLD,
+):
+    """Solve one transverse mode on the interior-PEC-masked Yee-staggered operator.
+
+    ``eps_node_planes`` is the ``(eps_uu, eps_vv, eps_ww)`` node-grid permittivity of
+    the aperture (walls included); ``pec_node_occupancy`` is the matching node-grid
+    conductor occupancy. Conductor-interior transverse-component unknowns are eliminated
+    (Dirichlet 0) with the same symmetric row/column removal as the outer walls, and the
+    conductor-interior longitudinal nodes drop from the eps_ww divergence coupling. For a
+    doubly/multiply-connected line (an isolated interior conductor) the transverse
+    null-space branch at ``beta**2 = eps * k0**2`` is the physical TEM answer and is
+    kept -- pass ``wave_family = "tem"``. Returns ``(beta, component_arrays,
+    diagnostics)`` with ``component_arrays`` the four tangential fields on the aperture
+    node grid; ``diagnostics`` carries the connectivity report under ``connectivity``.
+    """
+    eps_uu_node, eps_vv_node, eps_ww_node = eps_node_planes
+    nu_nodes = int(np.asarray(eps_uu_node).shape[0])
+    nv_nodes = int(np.asarray(eps_uu_node).shape[1])
+    nu_cells = nu_nodes - 1
+    nv_cells = nv_nodes - 1
+    if nu_cells <= 1 or nv_cells <= 1:
+        raise ValueError("Transverse Yee mode aperture needs at least two cells per axis.")
+
+    eps_uu, eps_vv, eps_ww = _yee_stagger_eps_from_nodes(
+        eps_node_planes, nu_cells=nu_cells, nv_cells=nv_cells
+    )
+    pec_eu, pec_ev, pec_ww = _yee_stagger_pec_from_nodes(
+        pec_node_occupancy, nu_cells=nu_cells, nv_cells=nv_cells, threshold=threshold
+    )
+    if not bool(np.any(pec_eu) or np.any(pec_ev) or np.any(pec_ww)):
+        raise ValueError(
+            "Interior-PEC mode solve was requested but no staggered component falls inside a "
+            "conductor: the PEC structure is under-resolved on the mode plane (raise the "
+            "aperture resolution) or absent."
+        )
+    if wave_family is not None and str(wave_family).lower() == "tem":
+        # The staggered curl-curl beta**2 operator does not carry the TEM branch: for a
+        # doubly/multiply-connected line the transverse mode is a curl-free gradient field
+        # at beta**2 = eps * k0**2, but the operator's spectral maximum is the lowest-cutoff
+        # guided mode (verified: a square coax annulus tops out well below eps*k0**2). TEM /
+        # quasi-TEM interior-PEC lines are solved on the quasi-static electrostatic engine
+        # (_solve_quasistatic_line_modes); this masked operator serves the guided (non-TEM,
+        # hybrid) interior-PEC modes only.
+        raise ValueError(
+            "The interior-PEC-masked staggered mode operator does not support TEM/quasi-TEM "
+            "line modes (its curl-curl beta**2 spectrum excludes the gradient TEM branch); "
+            "route TEM lines through the quasi-static electrostatic engine "
+            "(_solve_quasistatic_line_modes) instead."
+        )
+    connectivity = _yee_pec_connectivity_check(pec_ww)
+
+    operator, meta = _build_yee_transverse_operator_sparse(
+        nu_cells=nu_cells,
+        nv_cells=nv_cells,
+        du=du,
+        dv=dv,
+        k0=k0,
+        eps_uu=eps_uu,
+        eps_vv=eps_vv,
+        eps_ww=eps_ww,
+        pec_eu=pec_eu,
+        pec_ev=pec_ev,
+        pec_ww=pec_ww,
+    )
+    eps_stag = (eps_uu, eps_vv, eps_ww)
+    active = np.asarray(meta["pec_active"], dtype=bool)
+    full_size = int(active.size)
+    reduced = operator[active][:, active].tocsr()
+    reduced_size = int(reduced.shape[0])
+    if reduced_size < 2:
+        raise ValueError("Interior-PEC masking leaves fewer than two active transverse unknowns.")
+
+    dense_cutoff = min(_FULL_VECTOR_DENSE_LIMIT * 4, _PEC_VECTOR_MATRIX_LIMIT)
+    solve_dense = use_dense or reduced_size <= dense_cutoff
+    if solve_dense:
+        dense = reduced.toarray()
+        if uniform:
+            reduced_values, reduced_vectors = scipy_linalg.eigh(dense)
+        else:
+            reduced_values, reduced_vectors = scipy_linalg.eig(dense)
+    else:
+        requested = min(max(2 * (int(mode_index) + _VECTOR_EIGEN_REQUEST_PADDING), 4), reduced_size - 2)
+        initial_vector = np.random.default_rng(0).standard_normal(reduced_size)
+        try:
+            if uniform:
+                reduced_values, reduced_vectors = scipy_sparse_linalg.eigsh(
+                    reduced, k=requested, which="LA", tol=_VECTOR_EIGS_TOL,
+                    maxiter=_VECTOR_EIGS_MAX_ITER, v0=initial_vector,
+                )
+            else:
+                reduced_values, reduced_vectors = scipy_sparse_linalg.eigs(
+                    reduced, k=requested, which="LR", tol=_VECTOR_EIGS_TOL,
+                    maxiter=_VECTOR_EIGS_MAX_ITER, v0=initial_vector,
+                )
+        except scipy_sparse_linalg.ArpackNoConvergence:
+            dense = reduced.toarray()
+            if uniform:
+                reduced_values, reduced_vectors = scipy_linalg.eigh(dense)
+            else:
+                reduced_values, reduced_vectors = scipy_linalg.eig(dense)
+
+    # Scatter each reduced eigenvector back onto the full (Eu, Ev) stacked grid; the
+    # eliminated conductor unknowns stay zero (Dirichlet), exactly as the wall nodes.
+    eigenvectors = np.zeros((full_size, reduced_vectors.shape[1]), dtype=reduced_vectors.dtype)
+    eigenvectors[active, :] = reduced_vectors
+
+    beta, component_arrays, diagnostics = _select_yee_transverse_mode_numpy(
+        reduced_values,
+        eigenvectors,
+        meta=meta,
+        eps_stag=eps_stag,
+        mode_index=int(mode_index),
+        field_names=field_names,
+        preferred_field_name=preferred_field_name,
+        reject_spurious=not uniform,
+        wave_family=wave_family,
+        pec_ww_mask=meta["pec_ww_mask"],
+    )
+    diagnostics["connectivity"] = connectivity
+    diagnostics["pec_active_count"] = int(np.count_nonzero(~active))
+    return beta, component_arrays, diagnostics
+
+
+def _quasistatic_laplace_energy(
+    eps_node: np.ndarray,
+    fixed_mask: np.ndarray,
+    fixed_value: np.ndarray,
+    *,
+    du: float,
+    dv: float,
+):
+    """Solve ``div(eps grad phi) = 0`` (Dirichlet on ``fixed_mask``) and return energy.
+
+    Variable-coefficient 5-point Laplace on the node grid with face permittivities
+    (arithmetic node average -- the Yee dielectric average). Assembled as a sparse
+    symmetric-positive-definite system over the free interior nodes and solved directly
+    with the same SciPy sparse path the transverse mode operators already use (a one-time
+    mode-setup solve, not the FDTD hot loop). Returns ``(phi, energy)`` with ``energy =
+    sum_faces eps_face (grad phi)^2 * du * dv`` (proportional to the per-length
+    electrostatic energy; the ``1/2`` and area cancel in the ``eps_eff = C / C0`` ratio).
+    """
+    eps_node = np.asarray(eps_node, dtype=np.float64)
+    fixed_mask = np.asarray(fixed_mask, dtype=bool)
+    fixed_value = np.asarray(fixed_value, dtype=np.float64)
+    nu, nv = eps_node.shape
+    phi = np.where(fixed_mask, fixed_value, 0.0)
+    free = ~fixed_mask.copy()
+    free[0, :] = False
+    free[-1, :] = False
+    free[:, 0] = False
+    free[:, -1] = False
+
+    eps_up = 0.5 * (eps_node[:-1, :] + eps_node[1:, :])   # u faces  (nu-1, nv)
+    eps_vp = 0.5 * (eps_node[:, :-1] + eps_node[:, 1:])   # v faces  (nu, nv-1)
+    wu = 1.0 / (float(du) * float(du))
+    wv = 1.0 / (float(dv) * float(dv))
+
+    free_indices = np.nonzero(free.reshape(-1))[0]
+    if free_indices.size == 0:
+        raise ValueError("Quasi-static line-mode solve has no free nodes; the plane is fully constrained.")
+    index_of = -np.ones((nu * nv,), dtype=np.int64)
+    index_of[free_indices] = np.arange(free_indices.size, dtype=np.int64)
+
+    flat = np.arange(nu * nv, dtype=np.int64).reshape(nu, nv)
+    rows = []
+    cols = []
+    data = []
+    rhs = np.zeros((free_indices.size,), dtype=np.float64)
+
+    def _add_coupling(coeff2d, node_flat, neigh_flat, node_mask):
+        # coeff2d, node_flat, neigh_flat, node_mask all share one 2D shape.
+        sel = node_mask
+        c = coeff2d[sel]
+        n_idx = index_of[node_flat[sel]]
+        m_idx = index_of[neigh_flat[sel]]
+        # diagonal for the free node
+        rows.append(n_idx)
+        cols.append(n_idx)
+        data.append(c)
+        neighbour_free = m_idx >= 0
+        rows.append(n_idx[neighbour_free])
+        cols.append(m_idx[neighbour_free])
+        data.append(-c[neighbour_free])
+        neighbour_fixed = ~neighbour_free
+        np.add.at(rhs, n_idx[neighbour_fixed], c[neighbour_fixed] * phi.reshape(-1)[neigh_flat[sel][neighbour_fixed]])
+
+    # For each free node, add its four face couplings. Build per-direction on the
+    # interior slice so the neighbour indices stay in-bounds.
+    # -u neighbour (i-1): face eps_up[i-1, j], present for i>=1.
+    node = flat[1:, :]; neigh = flat[:-1, :]; coeff = eps_up * wu; mask = free[1:, :]
+    _add_coupling(coeff, node, neigh, mask)
+    # +u neighbour (i+1): face eps_up[i, j], present for i<=nu-2.
+    node = flat[:-1, :]; neigh = flat[1:, :]; coeff = eps_up * wu; mask = free[:-1, :]
+    _add_coupling(coeff, node, neigh, mask)
+    # -v neighbour (j-1): face eps_vp[i, j-1], present for j>=1.
+    node = flat[:, 1:]; neigh = flat[:, :-1]; coeff = eps_vp * wv; mask = free[:, 1:]
+    _add_coupling(coeff, node, neigh, mask)
+    # +v neighbour (j+1): face eps_vp[i, j], present for j<=nv-2.
+    node = flat[:, :-1]; neigh = flat[:, 1:]; coeff = eps_vp * wv; mask = free[:, :-1]
+    _add_coupling(coeff, node, neigh, mask)
+
+    matrix = sparse.csr_matrix(
+        (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(free_indices.size, free_indices.size),
+    )
+    solution = scipy_sparse_linalg.spsolve(matrix, rhs)
+    phi.reshape(-1)[free_indices] = solution
+
+    grad_u = (phi[1:, :] - phi[:-1, :]) / float(du)
+    grad_v = (phi[:, 1:] - phi[:, :-1]) / float(dv)
+    energy = float(
+        (np.sum(eps_up * grad_u * grad_u) + np.sum(eps_vp * grad_v * grad_v)) * float(du) * float(dv)
+    )
+    return phi, energy
+
+
+def _solve_quasistatic_line_modes(
+    eps_planes: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    pec_occupancy: torch.Tensor,
+    *,
+    k0: float,
+    du: float,
+    dv: float,
+    field_names,
+    signal_potentials,
+    threshold: float = _PEC_OCCUPANCY_THRESHOLD,
+):
+    """Quasi-static (electrostatic) TEM/quasi-TEM line mode on an interior-PEC plane.
+
+    ``eps_planes`` is the ``(eps_uu, eps_vv, eps_ww)`` node-grid permittivity (walls
+    included); ``pec_occupancy`` is the node conductor occupancy. Conductors touching the
+    aperture boundary are grounded (potential 0); each isolated interior conductor is a
+    signal conductor. ``signal_potentials`` sets the driving potential on the isolated
+    conductors ordered by ascending ``(u, v)`` centroid -- ``[1.0]`` for a single-signal
+    line (coax, microstrip), ``[1.0, 1.0]`` for the even (common) and ``[1.0, -1.0]`` for
+    the odd (differential) mode of a two-signal pair.
+
+    The effective permittivity is the capacitance ratio ``eps_eff = C / C0`` where ``C``
+    is solved with the true (inhomogeneous) permittivity and ``C0`` with vacuum, and the
+    propagation constant is ``beta = k0 sqrt(eps_eff)``. The transverse fields are the
+    electrostatic ``E = -grad phi`` with ``H`` from the effective wave impedance
+    ``Z_eff = eta0 / sqrt(eps_eff)`` (so the forward Poynting power is positive). Returns
+    a dict with ``beta``, ``eps_eff``, ``potential``, ``component_profiles``, and the
+    conductor / isolated-conductor counts.
+    """
+    eps_uu_node, eps_vv_node, eps_ww_node = eps_planes
+    eps_uu_real = torch.real(eps_uu_node) if eps_uu_node.is_complex() else eps_uu_node
+    eps_vv_real = torch.real(eps_vv_node) if eps_vv_node.is_complex() else eps_vv_node
+    target_device = eps_uu_node.device
+    eps_node = (0.5 * (eps_uu_real + eps_vv_real)).detach().to(dtype=torch.float64).cpu().numpy()
+    occupancy = np.asarray(pec_occupancy.detach().to(dtype=torch.float64).cpu().numpy())
+    conductor = occupancy >= threshold
+    if not bool(np.any(conductor)):
+        raise ValueError(
+            "Quasi-static line-mode solve found no conductor on the mode plane; the PEC "
+            "structure is under-resolved or absent."
+        )
+    grounded = _boundary_connected_conductor(torch.as_tensor(conductor)).cpu().numpy()
+    isolated = conductor & ~grounded
+    labels, count = _label_connected_components(isolated)
+    signal_potentials = list(signal_potentials)
+    if count == 0:
+        raise ValueError(
+            "Quasi-static line-mode solve requires at least one isolated signal conductor and a "
+            "grounded aperture boundary; none was found (single-conductor / hollow cross-section)."
+        )
+    if count != len(signal_potentials):
+        raise ValueError(
+            f"Quasi-static line-mode solve found {count} isolated signal conductor(s) but "
+            f"{len(signal_potentials)} driving potential(s) were supplied."
+        )
+    # Order isolated conductors by ascending (u, v) centroid for a deterministic assignment.
+    centroids = []
+    for label in range(1, count + 1):
+        rows, cols = np.nonzero(labels == label)
+        centroids.append((float(rows.mean()), float(cols.mean()), label))
+    centroids.sort()
+
+    fixed_mask = conductor.copy()
+    fixed_mask[0, :] = True
+    fixed_mask[-1, :] = True
+    fixed_mask[:, 0] = True
+    fixed_mask[:, -1] = True
+    fixed_value = np.zeros_like(eps_node)
+    for potential, (_, _, label) in zip(signal_potentials, centroids):
+        fixed_value = np.where(labels == label, float(potential), fixed_value)
+
+    phi_eps, energy_eps = _quasistatic_laplace_energy(eps_node, fixed_mask, fixed_value, du=du, dv=dv)
+    _, energy_vac = _quasistatic_laplace_energy(np.ones_like(eps_node), fixed_mask, fixed_value, du=du, dv=dv)
+    if energy_vac <= 0.0:
+        raise RuntimeError("Quasi-static line-mode solve produced a non-positive vacuum capacitance.")
+    eps_eff = float(energy_eps / energy_vac)
+    if eps_eff <= 0.0:
+        raise RuntimeError("Quasi-static line-mode solve produced a non-positive effective permittivity.")
+    beta_value = float(k0) * math.sqrt(eps_eff)
+
+    du_f = float(du)
+    dv_f = float(dv)
+    electric_u = np.zeros_like(phi_eps)
+    electric_v = np.zeros_like(phi_eps)
+    electric_u[1:-1, :] = -(phi_eps[2:, :] - phi_eps[:-2, :]) / (2.0 * du_f)
+    electric_u[0, :] = -(phi_eps[1, :] - phi_eps[0, :]) / du_f
+    electric_u[-1, :] = -(phi_eps[-1, :] - phi_eps[-2, :]) / du_f
+    electric_v[:, 1:-1] = -(phi_eps[:, 2:] - phi_eps[:, :-2]) / (2.0 * dv_f)
+    electric_v[:, 0] = -(phi_eps[:, 1] - phi_eps[:, 0]) / dv_f
+    electric_v[:, -1] = -(phi_eps[:, -1] - phi_eps[:, -2]) / dv_f
+    impedance = _ETA0 / math.sqrt(eps_eff)
+    magnetic_u = -electric_v / impedance
+    magnetic_v = electric_u / impedance
+
+    def _to_device(array):
+        return torch.as_tensor(array, dtype=torch.float64, device=target_device)
+
+    component_profiles = {
+        field_names[0]: _to_device(electric_u),
+        field_names[1]: _to_device(electric_v),
+        field_names[2]: _to_device(magnetic_u),
+        field_names[3]: _to_device(magnetic_v),
+    }
+    return {
+        "beta": _to_device(np.asarray(beta_value)),
+        "eps_eff": eps_eff,
+        "potential": _to_device(phi_eps),
+        "component_profiles": component_profiles,
+        "conductor_count": int(np.count_nonzero(conductor)),
+        "isolated_conductor_count": int(count),
+    }
 
 
 def _pec_first_difference(count: int, spacing: float, *, device: torch.device) -> torch.Tensor:
