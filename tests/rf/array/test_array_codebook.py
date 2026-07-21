@@ -209,10 +209,47 @@ def test_cache_key_is_weight_invariant():
     # here on a manually supplied fingerprint string would only compare literals.
 
 
-def test_scene_gradient_through_basis_fails_closed():
+def test_scene_gradient_through_basis_aggregates_live_columns():
+    """The former fail-closed guard is now the aggregated per-column VJP.
+
+    ``scene_gradient_vjp`` requires *live* embedded-pattern columns (the retained
+    basis stores them detached) and returns a finite scene gradient. Full
+    equivalence to autograd, central-difference agreement, and the FDTD end-to-end
+    gate live in ``test_array_scene_gradient.py``; here we only pin that the
+    method is wired and still fails closed on detached columns.
+    """
+
     basis = _basis()
-    with pytest.raises(NotImplementedError, match="aggregated per-column adjoint envelope"):
-        basis.scene_gradient_vjp()
+    frequency_count, port_count, _ = basis.network.s.shape
+    theta_shape = basis.embedded_patterns.theta.shape
+    weights = torch.ones(port_count, dtype=torch.complex128)
+
+    param = torch.tensor(0.3, dtype=torch.float64, requires_grad=True)
+    columns = [
+        (
+            basis.embedded_patterns.e_theta[:, index] * (1.0 + 0.2 * param.to(torch.complex128)),
+            basis.embedded_patterns.e_phi[:, index] * torch.exp(1j * param.to(torch.complex128)),
+        )
+        for index in range(port_count)
+    ]
+    gradient = basis.scene_gradient_vjp(
+        columns=columns,
+        weights=weights,
+        parameters=param,
+        objective=lambda e_theta, e_phi: (e_theta * e_theta.conj()).real.sum()
+        + (e_phi * e_phi.conj()).real.sum(),
+    )
+    assert gradient.shape == ()
+    assert torch.isfinite(gradient)
+
+    detached = [(e_theta.detach(), e_phi.detach()) for e_theta, e_phi in columns]
+    with pytest.raises(ValueError, match="stores detached patterns"):
+        basis.scene_gradient_vjp(
+            columns=detached,
+            weights=weights,
+            parameters=param,
+            objective=lambda e_theta, e_phi: e_theta.real.sum(),
+        )
 
 
 def _z_axis_isotropic_basis(*, spacing_wavelengths=0.25, port_count=4, points_theta=37, points_phi=5):

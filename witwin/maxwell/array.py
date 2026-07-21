@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Mapping
+from typing import Any, ClassVar, Mapping, Sequence
 
 import torch
 
@@ -853,6 +853,50 @@ def _normalize_weights(
     raise ValueError("weights must have shape [N], [F, N], or [B, F, N].")
 
 
+def _single_beam_weights(
+    weights: "BeamWeights | torch.Tensor",
+    *,
+    frequency_count: int,
+    port_count: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Validate a single-beam incident power-wave weight vector to ``[F, N]``.
+
+    Accepts a frequency-flat ``[N]`` vector (broadcast across frequency) or a
+    frequency-explicit ``[F, N]`` vector, matching the ``a`` convention of
+    :meth:`ArrayBasisData.combine`. Batched ``[B, F, N]`` weights are rejected:
+    a scene-gradient VJP aggregates one combined objective, not a codebook.
+    """
+
+    values = weights.values if isinstance(weights, BeamWeights) else weights
+    if not isinstance(values, torch.Tensor):
+        raise TypeError("weights must be a complex torch.Tensor or BeamWeights.")
+    if not values.is_complex():
+        raise TypeError("weights must be a complex tensor of incident power-wave amplitudes.")
+    if values.device != device:
+        raise ValueError(f"weights must be on device {device}.")
+    if values.dtype != dtype:
+        raise TypeError(f"weights must use dtype {dtype}.")
+    if not _finite_complex(values):
+        raise ValueError("weights must contain only finite values.")
+    if values.ndim == 1:
+        if values.shape != (port_count,):
+            raise ValueError(f"rank-1 weights must have shape [N] = ({port_count},).")
+        return values[None, :].expand(frequency_count, port_count)
+    if values.ndim == 2:
+        if values.shape != (frequency_count, port_count):
+            raise ValueError(
+                "rank-2 weights are frequency-dependent and must have exact shape "
+                f"[F, N] = ({frequency_count}, {port_count}); frequency interpolation is forbidden."
+            )
+        return values
+    raise ValueError(
+        "scene_gradient_vjp weights must have shape [N] or [F, N]; a batched [B, F, N] "
+        "codebook has no single combined objective to aggregate."
+    )
+
+
 @dataclass(frozen=True)
 class ArrayBasisData:
     """Reusable N-port network and embedded-pattern basis for one physical scene."""
@@ -1140,23 +1184,209 @@ class ArrayBasisData:
 
         return self.fingerprint
 
-    def scene_gradient_vjp(self, *args, **kwargs):
-        """Aggregated scene-parameter adjoint through the N-column basis.
+    def scene_gradient_vjp(
+        self,
+        *,
+        columns: "Sequence[tuple[torch.Tensor, torch.Tensor]]",
+        weights: "BeamWeights | torch.Tensor",
+        parameters: "torch.Tensor | Sequence[torch.Tensor]",
+        objective=None,
+        field_cotangents: "tuple[torch.Tensor, torch.Tensor] | None" = None,
+        reduction_order: "Sequence[int] | None" = None,
+        retain_graph: bool = False,
+    ):
+        r"""Aggregated scene-parameter adjoint through the N-column basis.
 
-        Fail-closed: the retained-column basis stores detached embedded-pattern
-        tensors, so it cannot back-propagate to scene materials or geometry. The
-        aggregated per-column adjoint envelope (plan 06 Phase 4, gated on the
-        plan 02 Phase 7 distributed result-aggregation contract) is not wired to
-        this single-device basis. Weight gradients through :meth:`combine` are
-        fully supported and require no solver rerun.
+        The retained basis stores the embedded-pattern columns detached, so it
+        cannot back-propagate on its own. Scene gradients require re-running the
+        per-column forwards under autograd and passing the resulting *live*
+        embedded-pattern columns here. Each column ``n`` is the unit-incident
+        embedded far field ``e_n(theta)`` as a differentiable function of the
+        scene parameters; ``combine`` forms the beam field ``E = sum_n a_n e_n``
+        with the incident power-wave weights ``a_n``. This method aggregates the
+        per-column adjoints of that same linear combine.
+
+        Weight conjugation (derived, verified against the repository adjoint
+        convention rather than assumed):
+
+        For a real objective ``L`` of the combined field ``E = sum_n w_n e_n``
+        (``w_n`` complex constants, ``e_n`` complex), the cotangent PyTorch
+        propagates to a leaf is the conjugate-Wirtinger derivative
+        ``cot_E = autograd.grad(L, E)``. The complex multiply ``w_n * e_n`` sends
+        that cotangent to column ``n`` as ``conj(w_n) * cot_E`` (PyTorch's
+        complex-product backward), so the per-column adjoint seed is
+
+            seed_n = conj(w_n) * cot_E = w_n^* . (dL/dE)^* ,
+
+        and ``dL/dtheta = sum_n VJP_n(seed_n)``. Summing the per-column seeded
+        VJPs is therefore bit-identical to end-to-end autograd of ``L``; the
+        column loop only makes the seed and the deterministic reduction order
+        explicit so the distributed aggregation (plan 06 Phase 4 / plan 02
+        Phase 7) can gather per-column gradients.
+
+        Zero extra FDTD *forward* steps is a forward-combine contract only
+        (Phase 1); gradients legitimately re-run the per-column forwards.
+
+        Parameters
+        ----------
+        columns
+            Length-``N`` sequence of ``(e_theta_n, e_phi_n)`` live complex
+            tensors of shape ``[F, T, P]`` matching the embedded-pattern grid,
+            each differentiable w.r.t. ``parameters``.
+        weights
+            Incident power-wave amplitudes ``[N]`` or ``[F, N]`` (the ``a`` of
+            :meth:`combine`).
+        parameters
+            A trainable tensor or sequence of trainable tensors.
+        objective
+            Callable ``(E_theta, E_phi) -> real scalar`` on the combined field.
+            Exactly one of ``objective`` / ``field_cotangents`` must be given.
+        field_cotangents
+            Pre-computed ``(cot_E_theta, cot_E_phi)`` cotangents on the combined
+            field, in the ``autograd.grad(L, E)`` convention.
+        reduction_order
+            Optional permutation of ``range(N)`` fixing the summation order of
+            the per-column gradients (deterministic distributed reduction).
+        retain_graph
+            Keep the per-column autograd graphs after the final column.
+
+        Returns
+        -------
+        A gradient tensor aligned with ``parameters`` (a single tensor when a
+        single tensor is passed, otherwise a tuple).
         """
 
-        raise NotImplementedError(
-            "Scene-parameter gradients through the array basis require the aggregated "
-            "per-column adjoint envelope (plan 06 Phase 4 / plan 02 Phase 7); this "
-            "single-device retained-column basis only supports weight gradients through "
-            "combine()."
+        if (objective is None) == (field_cotangents is None):
+            raise ValueError(
+                "Provide exactly one of objective (a callable on the combined field) or "
+                "field_cotangents (pre-computed combined-field cotangents)."
+            )
+        patterns = self.embedded_patterns
+        device = self.device
+        dtype = self.dtype
+        frequency_count, port_count, _ = self.network.s.shape
+        angular_shape = tuple(patterns.theta.shape)
+        expected_shape = (frequency_count, *angular_shape)
+
+        column_list = list(columns)
+        if len(column_list) != port_count:
+            raise ValueError(
+                f"columns must contain one (e_theta, e_phi) pair per port (N={port_count}); "
+                f"got {len(column_list)}."
+            )
+        e_theta_cols: list[torch.Tensor] = []
+        e_phi_cols: list[torch.Tensor] = []
+        for index, column in enumerate(column_list):
+            if not isinstance(column, (tuple, list)) or len(column) != 2:
+                raise TypeError(f"columns[{index}] must be an (e_theta, e_phi) pair.")
+            e_theta_n, e_phi_n = column
+            for name, tensor in (("e_theta", e_theta_n), ("e_phi", e_phi_n)):
+                if not isinstance(tensor, torch.Tensor) or not tensor.is_complex():
+                    raise TypeError(f"columns[{index}] {name} must be a complex torch.Tensor.")
+                if tensor.device != device:
+                    raise ValueError(f"columns[{index}] {name} must be on device {device}.")
+                if tensor.dtype != dtype:
+                    raise TypeError(f"columns[{index}] {name} must use dtype {dtype}.")
+                if tuple(tensor.shape) != expected_shape:
+                    raise ValueError(
+                        f"columns[{index}] {name} must have shape [F, T, P] = {expected_shape}."
+                    )
+            e_theta_cols.append(e_theta_n)
+            e_phi_cols.append(e_phi_n)
+
+        weight_matrix = _single_beam_weights(
+            weights,
+            frequency_count=frequency_count,
+            port_count=port_count,
+            device=device,
+            dtype=dtype,
         )
+
+        single_parameter = isinstance(parameters, torch.Tensor)
+        parameter_tuple = (parameters,) if single_parameter else tuple(parameters)
+        if not parameter_tuple:
+            raise ValueError("parameters must contain at least one tensor.")
+        for parameter in parameter_tuple:
+            if not isinstance(parameter, torch.Tensor):
+                raise TypeError("parameters must be torch.Tensor instances.")
+
+        column_weight = weight_matrix[:, :, None, None]  # [F, N, 1, 1]
+        e_theta_combined = sum(
+            column_weight[:, index] * e_theta_cols[index] for index in range(port_count)
+        )
+        e_phi_combined = sum(
+            column_weight[:, index] * e_phi_cols[index] for index in range(port_count)
+        )
+
+        if objective is not None:
+            loss = objective(e_theta_combined, e_phi_combined)
+            if not isinstance(loss, torch.Tensor) or loss.is_complex() or loss.ndim != 0:
+                raise TypeError("objective must return a real scalar torch.Tensor.")
+            if not loss.requires_grad:
+                raise ValueError(
+                    "objective(combined field) does not depend on the supplied columns; "
+                    "re-run the per-column forwards under autograd before calling "
+                    "scene_gradient_vjp (the retained basis stores detached patterns)."
+                )
+            cot_theta, cot_phi = torch.autograd.grad(
+                loss,
+                (e_theta_combined, e_phi_combined),
+                retain_graph=True,
+                allow_unused=True,
+            )
+            if cot_theta is None:
+                cot_theta = torch.zeros_like(e_theta_combined)
+            if cot_phi is None:
+                cot_phi = torch.zeros_like(e_phi_combined)
+        else:
+            cot_theta, cot_phi = field_cotangents
+            for name, tensor in (("cot_E_theta", cot_theta), ("cot_E_phi", cot_phi)):
+                if not isinstance(tensor, torch.Tensor) or not tensor.is_complex():
+                    raise TypeError(f"field_cotangents {name} must be a complex torch.Tensor.")
+                if tensor.device != device or tensor.dtype != dtype:
+                    raise ValueError(
+                        f"field_cotangents {name} must share the basis device and dtype."
+                    )
+                if tuple(tensor.shape) != expected_shape:
+                    raise ValueError(
+                        f"field_cotangents {name} must have shape [F, T, P] = {expected_shape}."
+                    )
+
+        if reduction_order is None:
+            order = tuple(range(port_count))
+        else:
+            order = tuple(int(index) for index in reduction_order)
+            if sorted(order) != list(range(port_count)):
+                raise ValueError("reduction_order must be a permutation of range(N).")
+
+        totals = [torch.zeros_like(parameter) for parameter in parameter_tuple]
+        seen_contribution = False
+        conjugate_weights = torch.conj(weight_matrix)
+        for position, index in enumerate(order):
+            seed_scale = conjugate_weights[:, index, None, None]
+            seed_theta = seed_scale * cot_theta
+            seed_phi = seed_scale * cot_phi
+            keep = retain_graph or position != len(order) - 1
+            column_grads = torch.autograd.grad(
+                (e_theta_cols[index], e_phi_cols[index]),
+                parameter_tuple,
+                grad_outputs=(seed_theta, seed_phi),
+                retain_graph=keep,
+                allow_unused=True,
+            )
+            for slot, gradient in enumerate(column_grads):
+                if gradient is not None:
+                    totals[slot] = totals[slot] + gradient
+                    seen_contribution = True
+
+        if not seen_contribution:
+            raise ValueError(
+                "None of the embedded-pattern columns are differentiable w.r.t. the supplied "
+                "parameters. The array basis stores detached patterns, so the per-column "
+                "forwards must be re-run under autograd before scene_gradient_vjp."
+            )
+
+        return totals[0] if single_parameter else tuple(totals)
 
     def _environment_spectra(
         self, environment: "MultipathEnvironment"

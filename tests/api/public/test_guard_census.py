@@ -221,7 +221,16 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # injected source-power diagnostic), and Result.sar consuming FDTD PowerLossData
 # only. 168 -> 172. Lower this budget as tissue flood-fill connectivity, boundary
 # policies, input-power normalization, or non-FDTD SAR land.
-CAPABILITY_GUARD_BUDGET = 176
+# 2026-07-21 (plan 06 Phase 4, array scene-gradient VJP): 176 -> 175 (-1). The
+# ArrayBasisData.scene_gradient_vjp fail-closed guard is REMOVED: the method now
+# aggregates the per-column adjoints of the linear beam combine (E = sum_n w_n e_n)
+# back onto the scene parameters. It consumes the *live* embedded-pattern columns
+# from re-run per-column forwards (the retained basis still stores them detached),
+# applies the derived per-column seed conj(w_n) * (dL/dE), and sums the VJPs in a
+# deterministic order. Detached columns / no-contribution now raise ValueError (a
+# usage error, not a capability gap). "Public simulation, result, and network
+# workflows" 24 -> 23; budget lowered in the same change.
+CAPABILITY_GUARD_BUDGET = 175
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
