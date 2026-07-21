@@ -210,11 +210,19 @@ from .execution import (
     ResultSequence,
     run_many,
 )
+from .array_gradient import (
+    AggregatedSceneGradient,
+    aggregate_scene_gradient_vjp,
+    ensemble_scene_gradient_vjp,
+)
 from .fdtd.resume import FDTDResumeCheckpoint
 
 __all__ = [
     "AstigmaticGaussianBeam",
     "AntennaData",
+    "AggregatedSceneGradient",
+    "aggregate_scene_gradient_vjp",
+    "ensemble_scene_gradient_vjp",
     "ArrayBasisData",
     "AxisPath",
     "BoundarySpec",
