@@ -141,3 +141,113 @@ same commit (`docs/reference/fdtd-capability-guard-census.md`,
 
 - `590aa74` feat(thin-wire): passive lossy-current ADE companion (B2 recurrence)
 - `c1b5205` feat(thin-wire): consume lossy ADE recurrence in the FDTD runtime + real ohmic_loss
+
+---
+
+# G2b acceptance — conductivity adjoint (B3) + multi-GPU disposition
+
+Stage: **G2b** (B3 conductivity adjoint + FD gates + multi-GPU disposition + docs/census/FEATURE_LIST).
+Env `maxwell`, `CUDA_VISIBLE_DEVICES=0`. Date 2026-07-21. Builds on G2a (base as above).
+
+## Design decision (binding)
+
+The finite-conductor recurrence coefficients `(G, Cs, Ad, Bd, ade_output, R0)` are
+derived from the shared rational vector fit, which is **nondeterministic (B1)** and
+is not a differentiable/reproducible map of `sigma`. So the field-coupled current
+sensitivity `dI/dsigma` through the multi-step recurrence cannot be certified by an
+exact reverse replay and **stays fail closed** (per the brief's explicit
+"fail closed on the affected configs rather than shipping a noisy gradient").
+
+What **ships** is the *deterministic* conductivity adjoint of the dissipation
+channel, computed in closed form from the exact scaled-Bessel internal impedance
+(no fit involved):
+
+    d Z'(omega)/d sigma = (i omega mu) / (4 pi sigma) . (1 - R^2),   R = I0(ma)/I1(ma), ma = sqrt(i omega mu sigma) . a
+
+Derivation: differentiate `Z' = m/(2 pi a sigma) . I0(ma)/I1(ma)` with the Bessel
+recurrences `I0'=I1`, `I1'=I0 - I1/z` and `d(ma)/d sigma = ma/(2 sigma)`; the
+`z R'(z) - R` term telescopes to `z(1 - R^2)` and `m^2 = i omega mu sigma` cancels
+the radius, leaving the one-line form above. Its DC limit is exactly
+`d R_dc/d sigma = -1/(pi a^2 sigma^2)` (matches the closed-form DC resistance).
+
+## Delivered
+
+1. **Analytic conductivity gradient** (`compiler/wire_impedance.py`):
+   `internal_impedance_conductivity_gradient(radius, sigma, mu, freqs)` -> complex
+   `d Z'/d sigma`, `[F]` or `[F, S]`, reusing the same scaled-Bessel `ive` ratio.
+2. **PyTorch-native autograd path** (`fdtd/wire_lossy.py`): a
+   `torch.autograd.Function` and `analytic_ac_resistance(sigma_leaf, radius=, permeability=, frequencies=)`
+   so a scalar conductivity leaf differentiates `Re(Z'(f; sigma))`; hence
+   `0.5 . Re(Z') . length . |I|^2` has an exact conductivity gradient.
+   `LossySegmentModel.conductivity_ac_resistance_gradient(freqs)` returns the
+   per-segment `d Re(Z')/d sigma` from the built model.
+3. **Sharpened fail-closed guard** (`fdtd/wire.py::replay_wire_state`): the message
+   now names the conductivity-fit nondeterminism and points to
+   `analytic_ac_resistance`. Checkpoint guard unchanged (ADE schema still B3+).
+4. **Multi-GPU disposition** (`fdtd/distributed/solver.py::_validate_distributed_wire_support`):
+   a finite-conductor wire on the distributed forward now fails closed. Verified
+   defect it prevents: the distributed owner runtime (`fdtd/distributed/wire.py`)
+   builds a `WireRuntime` with **no** `lossy_model`, so a lossy wire would silently
+   run as PEC across shards. B4 distributed reverse stays fail closed.
+
+## Test inventory (env `maxwell`, GPU 0)
+
+- `tests/gradients/test_fdtd_thin_wire_conductivity_adjoint.py` — **7 passed** (new):
+  closed-form `dZ'/dsigma` vs float64 central difference `< 1e-6` across a freq
+  sweep and 3 (radius, sigma) cases; DC-limit `dR_dc/dsigma` exact; autograd of the
+  AC resistance and of the full ohmic-loss objective vs central difference `< 1e-6`;
+  the built model's per-segment gradient == the analytic closed form; scalar-input
+  guard; PEC -> no lossy model.
+- `tests/fdtd/thin_wire/test_thin_wire_lossy_forward.py`, `test_wire_lossy_recurrence.py`,
+  `tests/fdtd/multi_gpu/test_wire_owner.py`, `tests/api/public/test_guard_census.py`,
+  `test_public_api.py`, `test_simulation_smoke.py` — **58 passed, 3 skipped** (the
+  3 skips are the two-GPU physical-parity tests; all reject/guard tests run on GPU 0).
+  Includes the new `test_distributed_lossy_wire_is_rejected` and the sharpened
+  `test_lossy_reverse_replay_fails_closed` (asserts the message names `conductivity`
+  and `analytic_ac_resistance`).
+- `tests/gradients/test_fdtd_thin_wire_adjoint.py`,
+  `tests/fdtd/thin_wire/test_wire_finite_conductivity.py`, `test_thin_wire_compiler.py`,
+  `test_thin_wire_forward.py`, `test_thin_wire_reference.py` — **119 passed** (PEC
+  reverse path unaffected by the sharpened lossy guard; no regression).
+
+Standalone closed-form cross-check (`scratch/verify_grad.py`, not committed):
+`dZ'/dsigma` vs central difference `< 1e-6` over `a in {1,2} mm`,
+`sigma in {5.8e7, 3.5e7, 1e6}`, `f in {1e3 .. 2e10}`; DC real part matches
+`-1/(pi a^2 sigma^2)`.
+
+## Falsifications (recorded; `scratch/`, not committed)
+
+- **F1 — closed-form gradient (Gate a/DC).** Flip `(1 - R^2)` to `(1 + R^2)` in
+  `internal_impedance_conductivity_gradient`: the central-difference gate and the
+  DC-exactness gate go RED; restore -> GREEN.
+- **F2 — autograd backward (Gate: autograd == FD).** Scale the backward gradient by
+  2x: the AC-resistance-autograd and ohmic-loss-gradient gates go RED; restore ->
+  GREEN.
+- **F3 — multi-GPU lossy reject.** Disable the finite-conductor branch in
+  `_validate_distributed_wire_support` (`and False`): `test_distributed_lossy_wire_is_rejected`
+  goes RED (no raise); restore -> GREEN.
+
+## Guard-census reconciliation
+
+`176 -> 177` (net +1). No guard removed (the field-coupled `dI/dsigma` reverse and
+the ADE checkpoint schema stay fail closed; the replay message is only sharpened).
+Added (+1): the distributed lossy-wire forward reject
+(`fdtd/distributed/solver.py`). Budget, `CONTRACT_GUARDS`-unrelated ledger comment,
+and `docs/reference/fdtd-capability-guard-census.md` updated in the same change.
+
+## Known gaps / deferred
+
+- **Field-coupled conductivity adjoint `dI/dsigma`**: fail closed (nondeterministic
+  shared fit -> non-differentiable, non-reproducible `sigma -> coeffs` map). A
+  positive-real / reproducible fit refinement is the prerequisite.
+- **ADE loss-state checkpoint/resume**: fail closed (schema unchanged).
+- **B4 distributed lossy reverse**: fail closed. **Distributed lossy forward**: now
+  fail closed (was a silent-PEC hole).
+- Public `WireConductor.finite(conductivity=...)` takes a Python float, so there is
+  no scene-level trainable-conductivity path yet; the shipped adjoint is the
+  model-layer differentiable readout usable in a torch optimization loop.
+- No wall-clock timing claims (shared GPU).
+
+## Commits (G2b)
+
+- see `git log` for the G2b commit hash(es) on `fable/lossy-wire`.

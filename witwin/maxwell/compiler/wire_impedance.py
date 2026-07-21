@@ -162,6 +162,59 @@ def internal_impedance(
     return result if per_segment else result.reshape(-1)
 
 
+def internal_impedance_conductivity_gradient(
+    radius,
+    conductivity,
+    permeability,
+    frequencies,
+) -> torch.Tensor:
+    """Analytic derivative ``d Z'(omega) / d sigma`` of the internal impedance.
+
+    Differentiating ``Z'(omega) = m / (2 pi a sigma) * I0(m a) / I1(m a)`` with
+    ``m = sqrt(j omega mu sigma)`` in closed form collapses to
+
+        d Z' / d sigma = (j omega mu) / (4 pi sigma) * (1 - R^2),   R = I0(m a) / I1(m a),
+
+    using the Bessel recurrences ``I0'(z) = I1(z)`` and ``I1'(z) = I0(z) - I1(z)/z``
+    together with ``d(m a)/d sigma = (m a) / (2 sigma)``. The bulky ``z R'(z) - R``
+    term telescopes to ``z (1 - R^2)`` and ``m^2 = j omega mu sigma`` cancels the
+    radius dependence, so the derivative needs only the same scaled-Bessel ratio
+    ``R`` the impedance itself uses. Its DC limit is exactly ``d R_dc / d sigma =
+    -1 / (pi a^2 sigma^2)`` (verified against the closed-form DC resistance), and
+    ``Re`` of the result is the per-unit-length AC-resistance sensitivity that the
+    reported ohmic dissipation differentiates through.
+
+    Returns shape ``[F]`` for a scalar radius or ``[F, S]`` for a per-segment
+    radius tensor, complex ``complex128`` (same layout as :func:`internal_impedance`).
+    """
+
+    from scipy import special
+
+    sigma = _positive(conductivity, "conductivity")
+    mu = _positive(permeability, "permeability")
+    freqs = _as_1d_frequencies(frequencies).to(dtype=torch.float64)
+    radius_vector, per_segment = _radius_vector(radius)
+    if not bool(torch.all(radius_vector > 0.0)):
+        raise ValueError("radius must be positive.")
+
+    omega = (2.0 * math.pi * freqs).numpy()
+    a = radius_vector.numpy()
+    m = (1j * omega * mu * sigma) ** 0.5  # [F]
+    ma = m[:, None] * a[None, :]  # [F, S]
+    # Same exponentially scaled ratio as internal_impedance: ive(n, z) = iv(n, z)
+    # * exp(-|Re z|), so the scaling cancels in the ratio and stays finite for
+    # large Re(ma).
+    ratio = special.ive(0, ma) / special.ive(1, ma)
+    gradient = (1j * omega[:, None] * mu) / (4.0 * math.pi * sigma) * (1.0 - ratio * ratio)
+    result = torch.as_tensor(gradient, dtype=torch.complex128)
+    if not bool(torch.all(torch.isfinite(result.real) & torch.isfinite(result.imag))):
+        raise ValueError(
+            "internal_impedance_conductivity_gradient produced non-finite values; "
+            "check radius/conductivity."
+        )
+    return result if per_segment else result.reshape(-1)
+
+
 def ohmic_loss_density(
     current: torch.Tensor,
     resistance: torch.Tensor,
@@ -367,6 +420,7 @@ __all__ = [
     "dc_resistance",
     "fit_series_impedance",
     "internal_impedance",
+    "internal_impedance_conductivity_gradient",
     "ohmic_loss_density",
     "surface_resistance",
 ]

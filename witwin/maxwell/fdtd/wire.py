@@ -171,10 +171,17 @@ def replay_wire_state(
         raise RuntimeError("Wire replay requires an initialized wire runtime.")
     if runtime.lossy_model is not None:
         raise NotImplementedError(
-            "Reverse/adjoint replay of a finite-conductor thin wire is not yet "
-            "implemented: the lossy current recurrence carries auxiliary ADE state "
-            "that the reverse pass must transpose (conductivity adjoint, B3). Run a "
-            "PEC wire for differentiable workflows until the lossy reverse lands."
+            "Field-coupled reverse/adjoint replay of a finite-conductor thin wire is "
+            "not implemented: transposing the lossy current recurrence would require "
+            "the derivative of the passive series-impedance ADE coefficients with "
+            "respect to conductivity, but those coefficients come from the shared "
+            "rational vector fit, which is nondeterministic (B1) and not a "
+            "differentiable map of sigma -- so an exact reverse replay of dI/dsigma "
+            "through the recurrence cannot be certified. The deterministic conductivity "
+            "adjoint of the dissipation channel (d Re(Z')/d sigma via the analytic "
+            "internal impedance) is available through "
+            "witwin.maxwell.fdtd.wire_lossy.analytic_ac_resistance; run a PEC wire for "
+            "field-coupled differentiable workflows."
         )
     coeff = runtime.coefficients
     sampled = _field_vector(

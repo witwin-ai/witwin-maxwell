@@ -184,6 +184,29 @@ transposes the ADE state) and the finite-conductor checkpoint/resume
 Net budget `175 -> 176`; lower it when the lossy reverse and checkpoint schema
 land (B3).
 
+**2026-07-21 update (plan 07 Wave C, B3 conductivity adjoint + multi-GPU
+disposition):** the deterministic conductivity adjoint of the dissipation channel
+lands as the closed-form `d Re(Z')/d sigma` of the analytic scaled-Bessel internal
+impedance (`witwin/maxwell/compiler/wire_impedance.py::internal_impedance_conductivity_gradient`)
+plus a PyTorch-native autograd path
+(`witwin/maxwell/fdtd/wire_lossy.py::analytic_ac_resistance`,
+`LossySegmentModel.conductivity_ac_resistance_gradient`). No guard is removed: the
+field-coupled current sensitivity `dI/dsigma` through the recurrence still fails
+closed, because the ADE coefficients come from the nondeterministic shared rational
+fit (B1) and are not a differentiable/reproducible map of `sigma`, so an exact
+reverse replay cannot be certified. The `fdtd/wire.py::replay_wire_state` and
+`fdtd/checkpoint.py` finite-conductor guards are only sharpened (the replay message
+now names the conductivity-fit nondeterminism and points to the shipped analytic
+adjoint), not lifted. One NEW capability guard is added (+1): the distributed
+lossy-wire forward reject in
+`fdtd/distributed/solver.py::_validate_distributed_wire_support`
+("Multi-GPU ThinWire with a finite-conductivity (lossy) conductor is not
+supported..."), because the distributed owner runtime builds only the lossless PEC
+current update and never constructs the passive series-impedance ADE companion, so
+a lossy wire would silently run as PEC across shards. Net budget `176 -> 177`;
+lower it when the distributed lossy forward (and its owner-resident ADE state) is
+implemented.
+
 ### Nonlinear-circuit-device reconciliation (2026-07-17)
 
 The plan 05 nonlinear-circuit-device Phase 0 slice adds the Device + Newton

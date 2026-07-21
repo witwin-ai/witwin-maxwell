@@ -63,8 +63,70 @@ from ..compiler.wire_impedance import (
     SeriesImpedanceModel,
     dc_resistance,
     fit_series_impedance,
+    internal_impedance,
+    internal_impedance_conductivity_gradient,
 )
 from ..thin_wire import MU_0
+
+
+class _AnalyticACResistance(torch.autograd.Function):
+    """PyTorch-native analytic AC resistance ``Re(Z'(f; sigma))`` of a round wire.
+
+    The forward evaluates the exact scaled-Bessel per-unit-length AC resistance at
+    the requested frequencies; the backward returns the closed-form conductivity
+    sensitivity ``Re(d Z'/d sigma)`` (compiler/wire_impedance.py), so a differentiable
+    conductivity leaf flows through the wire's dissipation channel exactly. Only the
+    scalar ``conductivity`` carries a gradient (radius/permeability/frequencies are
+    fixed geometry passed as plain values); the analytic model is deterministic, so
+    this path is free of the shared rational fit's nondeterminism (B1) that blocks
+    the field-coupled current sensitivity.
+    """
+
+    @staticmethod
+    def forward(ctx, conductivity, radius, permeability, frequencies):
+        sigma = float(conductivity.detach().reshape(()).item())
+        resistance = internal_impedance(
+            radius, sigma, permeability, frequencies
+        ).real.to(dtype=torch.float64)
+        gradient = internal_impedance_conductivity_gradient(
+            radius, sigma, permeability, frequencies
+        ).real.to(dtype=torch.float64)
+        ctx.save_for_backward(gradient.to(device=conductivity.device))
+        return resistance.to(device=conductivity.device, dtype=conductivity.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (gradient,) = ctx.saved_tensors
+        grad_sigma = torch.sum(
+            grad_output.to(dtype=gradient.dtype) * gradient
+        ).to(dtype=grad_output.dtype)
+        return grad_sigma.reshape(()), None, None, None
+
+
+def analytic_ac_resistance(
+    conductivity: torch.Tensor,
+    *,
+    radius: float,
+    permeability: float,
+    frequencies,
+) -> torch.Tensor:
+    """Differentiable per-unit-length AC resistance ``Re(Z'(f; sigma))`` in ``[F]``.
+
+    ``conductivity`` is a scalar tensor (a trainable conductivity leaf). The result
+    is differentiable with respect to it via the closed-form analytic gradient, so
+    ``0.5 * analytic_ac_resistance(...) * length * |I|^2`` gives an ohmic-dissipation
+    objective whose conductivity gradient matches a central difference of the
+    analytic internal impedance (the deterministic conductivity adjoint channel).
+    """
+
+    if not isinstance(conductivity, torch.Tensor) or conductivity.numel() != 1:
+        raise ValueError("conductivity must be a scalar tensor.")
+    freqs = tuple(float(value) for value in frequencies)
+    if not freqs:
+        raise ValueError("frequencies must be non-empty.")
+    return _AnalyticACResistance.apply(
+        conductivity, float(radius), float(permeability), freqs
+    )
 
 
 @dataclass(frozen=True)
@@ -185,6 +247,37 @@ class LossySegmentModel:
         # occasional sub-tolerance undershoot so the reported ohmic dissipation
         # 0.5 Re(Z') |I|^2 stays a valid (non-negative) energy accounting.
         return resistance.clamp_min(0.0)
+
+    def conductivity_ac_resistance_gradient(
+        self, frequencies: torch.Tensor
+    ) -> torch.Tensor:
+        """Return the analytic ``d Re(Z'(f)) / d sigma`` per length, shape ``[F, S]``.
+
+        The deterministic conductivity-adjoint channel: the closed-form derivative
+        of the exact scaled-Bessel AC resistance (compiler/wire_impedance.py),
+        evaluated at each segment's built ``(radius, sigma, mu)``. PEC segments
+        return zero. This is the sensitivity the reported ohmic dissipation
+        ``0.5 Re(Z') length |I|^2`` differentiates through with the current held
+        fixed; it does not require refitting the (nondeterministic) rational model.
+        """
+
+        freqs = torch.as_tensor(frequencies, dtype=torch.float64).reshape(-1)
+        gradient = torch.zeros(
+            freqs.numel(),
+            self.segment_count,
+            device=self.inductance.device,
+            dtype=self.inductance.dtype,
+        )
+        index = self.segment_model_index.tolist()
+        for segment, model_index in enumerate(index):
+            if model_index < 0:
+                continue
+            model = self.models[model_index]
+            values = internal_impedance_conductivity_gradient(
+                model.radius, model.conductivity, model.permeability, freqs
+            ).real.to(dtype=gradient.dtype)
+            gradient[:, segment] = values.to(device=gradient.device)
+        return gradient
 
 
 def _companion_spectral_radius(
@@ -491,6 +584,7 @@ def resolve_lossy_band(
 
 __all__ = [
     "LossySegmentModel",
+    "analytic_ac_resistance",
     "build_lossy_segment_model",
     "resolve_lossy_band",
     "dc_resistance",

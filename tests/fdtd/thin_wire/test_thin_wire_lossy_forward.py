@@ -141,7 +141,10 @@ def test_pec_ohmic_loss_is_zero():
 
 
 def test_lossy_reverse_replay_fails_closed():
-    # G2a fails closed on the lossy reverse pass (the ADE-state transpose is B3).
+    # B3: the FIELD-COUPLED reverse pass (dI/dsigma through the recurrence) stays
+    # fail closed because the ADE coefficients come from the nondeterministic shared
+    # rational fit; the message points to the analytic conductivity adjoint that did
+    # ship (analytic_ac_resistance).
     from witwin.maxwell.fdtd.wire import replay_wire_state
 
     prepared = _prepare(_scene(conductor=mw.WireConductor.finite(5.8e7)))
@@ -154,7 +157,9 @@ def test_lossy_reverse_replay_fails_closed():
         "wire_current": runtime.current,
         "wire_charge": runtime.charge,
     }
-    with pytest.raises(NotImplementedError, match="[Rr]everse"):
+    with pytest.raises(NotImplementedError, match="conductivity"):
+        replay_wire_state(solver, state)
+    with pytest.raises(NotImplementedError, match="analytic_ac_resistance"):
         replay_wire_state(solver, state)
 
 

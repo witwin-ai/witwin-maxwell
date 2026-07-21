@@ -243,7 +243,19 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # finite-conductor checkpoint/resume (fdtd/checkpoint.py, the ADE loss state is not
 # yet in the checkpoint schema), both fail closed for a lossy wire. "Material
 # compilers" 12 -> 11 and "Time-domain wire runtime" +2 in the same change.
-CAPABILITY_GUARD_BUDGET = 176
+# 2026-07-21 (plan 07 Wave C, lossy-wire conductivity adjoint B3 + multi-GPU
+# disposition): 176 -> 177 (net +1). The deterministic conductivity adjoint of the
+# dissipation channel ships (analytic d Re(Z')/d sigma of the exact scaled-Bessel
+# internal impedance, compiler/wire_impedance.py + a PyTorch-native autograd path in
+# fdtd/wire_lossy.py); no guard is removed because the field-coupled current
+# sensitivity dI/dsigma through the recurrence still fails closed (the ADE
+# coefficients come from the nondeterministic shared rational fit, B1) -- the
+# fdtd/wire.py replay_wire_state guard is only sharpened, not lifted. One NEW
+# capability guard is added (+1): the distributed lossy-wire forward reject in
+# fdtd/distributed/solver.py::_validate_distributed_wire_support, because the owner
+# runtime builds only the lossless PEC update and would silently run a finite
+# conductor as PEC across shards. "Multi-GPU wire" +1.
+CAPABILITY_GUARD_BUDGET = 177
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
