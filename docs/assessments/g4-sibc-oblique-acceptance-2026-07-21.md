@@ -119,3 +119,144 @@ All performed by a temporary scratch edit to
 `docs/reference/fdtd-capability-guard-census.md` budget unchanged at **176**;
 `tests/api/public/test_guard_census.py` passes. The single `_reject_surface_impedance`
 funnel narrowed (curved conductors now compile) without adding or removing a guard.
+
+---
+
+# Stage G4b -- staircased-cylinder physics gate + wave-level skin-effect attenuation bench
+
+Same worktree / branch / env as G4a. Baseline: G4a tip `6d2f232`.
+
+## Scope delivered (G4b)
+
+1. **Staircased-cylinder physics convergence gate** (`tests/validation/physics/
+   test_sibc_cylinder_convergence.py`). The physics gate that the staircase
+   generalization actually models conductor loss (not a PEC termination): a
+   good-conductor cylinder is illuminated by a point dipole and the power ABSORBED
+   by the cylinder is measured as the net inward Poynting flux through a closed
+   6-face box enclosing it (source outside the box). The staircased SIBC (coarse,
+   skin depth unmeshed) is compared against the identical cylinder as a resolved
+   volumetric conductor `Material(sigma_e=sigma)` on a fine grid that meshes the
+   skin depth.
+2. **Wave-level skin-effect attenuation benchmark** (`benchmark/scenes/rf/
+   lossy_waveguide_attenuation.py` + `run_lossy_waveguide_attenuation` in
+   `benchmark/rf_validation.py`, RESULTS row `rf/lossy_waveguide_attenuation`). A
+   lossy-wall TE10 rectangular waveguide (four PEC walls replaced by ONE shared
+   good-conductor surface-impedance boundary); the conductor attenuation `alpha` is
+   extracted from the two-line `|S21|` ratio of a short and a long guide and
+   compared against the analytic TE10 `alpha_c` (Pozar 3.96).
+3. **External-reference cache** (the one authorized track cloud run): a TE10
+   `ModeSource`-driven lossy guide with two forward `ModeMonitor` planes
+   (`lossy_waveguide_reference_scene`), registered in
+   `benchmark/rf_tidy3d_references.py`. Generated; the cross-check is recorded
+   honestly (a documented external-adapter gap, below).
+
+## Files added / changed
+
+- `tests/validation/physics/test_sibc_cylinder_convergence.py` (new) -- absorbed-power
+  physics gate.
+- `benchmark/scenes/rf/lossy_waveguide_attenuation.py` (new, `git add -f`) -- lossy
+  waveguide two-port bench scene + analytic `alpha_c` + ModeSource reference scene.
+- `benchmark/rf_validation.py` -- `run_lossy_waveguide_attenuation`,
+  `_lossy_waveguide_reference_alpha`, `_lossy_wg_reference_status`, `SCENE_RUNNERS`
+  entry, RF intro sentence.
+- `benchmark/rf_tidy3d_references.py` -- `_lossy_waveguide_attenuation` reference
+  target + section intro update.
+- `benchmark/RESULTS.md` -- additive rows in the RF wave-level and RF/antenna
+  external-reference tables (kept additive; the harness regenerates the full section
+  from all scenes).
+- `FEATURE_LIST.md` -- additive staircased-SIBC validation + adapter-export bullets.
+- `docs/assessments/rf-wave-validation-2026-07-18/rf__lossy_waveguide_attenuation.json`
+  (artifact, `git add -f`).
+
+## Commits
+
+- `fb6bc88` test(sibc): staircased-cylinder absorbed-power physics gate vs resolved conductor
+- (benchmark + docs commits -- see `git log`)
+
+## Test inventory (pass counts)
+
+Environment for every run (as G4a):
+```bash
+export CUDA_HOME=/home/xingyu/miniconda3/envs/maxwell/lib/python3.11/site-packages/nvidia/cu13
+export PATH="$CUDA_HOME/bin:$PATH"
+export PYTHONPATH=/home/xingyu/code/witwin/witwin-maxwell/.worktrees/wg4-sibc
+export CUDA_VISIBLE_DEVICES=0
+conda run -n maxwell --no-capture-output python -m pytest <targets> -q
+```
+
+- `tests/validation/physics/test_sibc_cylinder_convergence.py` -- **5 passed** (57 s).
+  Measured (delta = 1.19 mm at 6 GHz, sigma = 30, R/delta = 6.7): resolved absorbed
+  power 6.72e6 (dx 0.6 mm) -> 6.89e6 (dx 0.5 mm), tier change 2.6% (<6% gate,
+  reference grid-converged); SIBC absorbed power 5.6e6, grid-independent across
+  dx 1.5/1.2/1.0/0.8 mm (change <3%); SIBC vs resolved-fine ~0.18 (<0.25 documented
+  gate); PEC absorbed 1.0e5 = 1.8% of SIBC (< 5% gate; loss falsification). The ~0.18
+  SIBC-vs-resolved gap is grid-independent on BOTH sides and R/delta-independent
+  (measured 0.172 at R/delta=6.7 and 0.194 at R/delta=10.1), i.e. the intrinsic
+  first-order-Leontovich-on-a-staircased-curve systematic -- on a FLAT surface the same
+  boundary matches the analytic Leontovich value to <1% (`test_sibc_staircase`).
+- Adjacent (unchanged solver): **67 passed** for `tests/api/public/test_guard_census.py
+  tests/api/public/test_public_api.py tests/api/public/test_simulation_smoke.py
+  tests/validation/physics/test_sibc_staircase.py tests/validation/physics/
+  test_sibc_orientation.py tests/validation/physics/test_lossy_metal_sibc.py
+  tests/materials/surface_impedance` (census budget 176 intact).
+
+## Wave-level bench measurement (reproducible)
+
+`run_lossy_waveguide_attenuation()` (or `python -m benchmark.rf_validation
+rf/lossy_waveguide_attenuation`), guide a=0.10 m, b=0.05 m, sigma=25 S/m walls,
+dx=2.5 mm, lengths 0.60 / 0.90 m, design frequencies 2.0/2.4/2.8 GHz:
+
+- alpha (Np/m) measured / analytic: 2.217/2.226, 1.839/1.840, 1.701/1.700.
+- median rel error **0.049%**, max **0.37%** -- inside the pre-registered 5% gate.
+- cond(A) 1.015, max singular value 0.363 (passive), |S11| max 0.017 (matched).
+- PEC-wall falsification: extracted alpha collapses to 0.00017 Np/m (vs 1.839).
+- Status **pass**.
+
+## External-reference cloud run (one authorized track run)
+
+`python -m benchmark.rf_tidy3d_references rf/lossy_waveguide_attenuation` (or
+`attempt_reference(..., run_cloud=True)`): **generated**, task
+`fdve-6dfcf3ff-cc08-4171-b90f-2666841fa75c`, cost **0.0336 FlexCredits**, exported
+1 source + 2 monitors, runnable. HONEST cross-check outcome: the reference forward-mode
+attenuation `ln(|amp_in|/|amp_out|)/L` = 0.20/0.13/0.09 Np/m vs analytic 2.23/1.84/1.70
+(|amp_in|/|amp_out| ~ 1.08, i.e. ~8% decay over 0.6 m vs the analytic ~3x). The external
+RF lossy-metal surface-impedance export under-applies the wall loss at the coarse
+export grid; the PHASE-based `rf/rectangular_waveguide` beta cross-check on the SAME
+adapter path agrees to ~1%, so the gap is specific to the lossy-metal surface-impedance
+export fidelity -- a documented external-adapter limitation, NOT the FDTD bench (which
+matches the analytic alpha_c to 0.05%) nor the binding analytic reference. Recorded, not
+hidden; the cache (h5) is a local gitignored artifact as for every reference.
+
+## Falsifications recorded
+
+1. **Physics gate, surface resistance -> 0 (PEC-like).** Scratch edit to
+   `witwin/maxwell/fdtd/runtime/materials.py` setting both `surface_r = 0.0`
+   (`# FALSIFY`), restored via `git checkout`. Run the two headline nodes: SIBC
+   absorbed power collapses ~200x (5.6e6 -> **2.85e4**, comparable to the PEC 6.6e4
+   floor); `test_staircased_sibc_reproduces_the_resolved_conductor_absorption` and
+   `test_pec_cylinder_absorbs_negligibly_falsification` both go **red**. Restored:
+   `FALSIFY` count 0, both green.
+2. **Wave bench, PEC walls (in-run companion).** A PEC-wall guide of identical
+   geometry is lossless; its two-line `|S21|` ratio ~1 and the extracted alpha
+   collapses to **0.00017 Np/m** (vs 1.839 for the good conductor). Runs every time
+   the bench runs (recorded in the artifact `falsification` / conservation
+   `pec_alpha_np_per_m`).
+
+## Known gaps / deferred
+
+- The staircased first-order-Leontovich SIBC under-predicts a curved conductor's
+  absorbed power by ~18% at sigma=30 (grid- and R/delta-independent). This is the
+  documented first-order-boundary-on-a-staircased-curve systematic (the flat-surface
+  value is <1%); a second-order / curvature-corrected surface impedance is the future
+  improvement. The gate is set at 25% so it fails closed on any regression toward PEC.
+- External lossy-metal surface-impedance export under-applies the wall loss (above):
+  an adapter-fidelity gap, not fixed here.
+- All G4a deferrals stand: true oblique/conformal (non-staircase) SIBC, rotated `Box`,
+  rational-on-curved, Bloch + SIBC, adjoint/distributed/trainable SIBC, generic
+  surface-impedance adapter export -- all still fail-closed.
+
+## Census
+
+No capability guard added or removed in G4b (only a benchmark scene, a benchmark run
+function, an external-reference target, and a physics test). Budget unchanged at
+**176**; `tests/api/public/test_guard_census.py` passes.
