@@ -230,8 +230,10 @@ the records are in the test docstrings and the scene artifacts.
   passive S-matrix. The remaining gap is the absolute quasi-TEM `eps_eff` accuracy vs
   Hammerstad (~24% low at dx = 5 mm), a documented first-order under-resolution of the thin
   substrate that converges with aperture resolution -- recorded, not forced to pass.
-  `reference: pending-generation` (the adapter port/lumped source mapping for the external
-  cross-check is F2c).
+  `reference: generated` (F2c): the WavePort TEM aperture now maps through the adapter to a
+  reference `ModeSource` launch + `ModeMonitor` per port, so the microstrip/diff-pair-class
+  external cross-check is cloud-runnable (the two RF port caches `coax_thru` and
+  `lumped_open_short_match` were generated; see section 4).
 * **Wave-level RLC resonance is an open gap.** The lumped two-port bench is
   parasitic-dominated: the load-port current peak barely tracks the circuit `C`
   (the C(1pF)->C(2pF) peak ratio is far from the ideal sqrt(2); exact numbers in
@@ -259,15 +261,18 @@ never fabricates a comparison: a source-less export records `pending-generation`
 the concrete reason. `series_parallel_rlc` is a lumped-circuit resonance with an
 analytic-only reference.
 
-External reference-solver generation is **authorized and executed** for the covered
+External reference-solver generation is **authorized and executed** for all covered
 scenes. `rf/rectangular_waveguide` was generated (a TE10 `ModeSource`-driven guide;
 one cloud run, 0.025 FlexCredits, task id in the acceptance doc; beta cross-check
 1.21% median, section 1.2). The four port/lumped-driven scenes (`coax_thru`,
-`lumped_open_short_match`, `antenna/half_wave_dipole`, `antenna/patch`) still export
-with `sources=0` -- the adapter has no port/lumped source mapping -- so they fail-close
-at the runnable gate with `sources=0` recorded and spend no credits; mapping port/lumped
-excitation to the reference solver is a deferred adapter feature. The analytic references
-remain binding regardless.
+`lumped_open_short_match`, `antenna/half_wave_dipole`, `antenna/patch`) are now
+**mapped and generated (F2c)**: the adapter maps each `WavePort` TEM aperture to a
+reference `ModeSource` drive (port 0) + a receiving `ModeMonitor` per port, and each
+`LumpedPort` delta-gap feed to an equivalent `UniformCurrentSource` current injection,
+with the NF2FF box lowered to six face field monitors. All four export with `sources=1`
+and were cloud-generated (one run each, 0.025 FlexCredits each; task ids in the F2c
+acceptance doc and `benchmark/RESULTS.md`). The analytic references remain binding
+regardless.
 
 ## 5. Open items
 
@@ -289,8 +294,8 @@ remain binding regardless.
   (`tests/rf/wave_validation/test_planemonitor_waveport_passthrough.py`).
 * **External reference-solver generation — AUTHORIZED and GENERATED for the covered
   scenes (round E).** The M3 adapter-driven generation path is wired (section 4). The
-  waveguide reference was cloud-generated (one run, 0.025 FlexCredits); the port/lumped
-  scenes fail-close at the `sources=0` runnable gate (deferred adapter source mapping).
+  waveguide reference was cloud-generated (one run, 0.025 FlexCredits); the four
+  port/lumped scenes are now mapped and cloud-generated as well (F2c; section 4).
 
 ### Resolved (F2b)
 
@@ -308,5 +313,12 @@ remain binding regardless.
   block below. The residual item is the absolute quasi-TEM `eps_eff` accuracy (a
   resolution gap, section 1.3), not a blocker.
 * **RLC resonance wave-level gate** remains a strict xfail open gap (section 3).
-* **Adapter port/lumped source mapping** (so `coax_thru`, `lumped_open_short_match`,
-  and the antenna scenes become cloud-runnable) is a deferred adapter feature.
+
+### Resolved (F2c)
+
+* **Adapter port/lumped source mapping — RESOLVED (F2c).** `coax_thru`,
+  `lumped_open_short_match`, and the antenna scenes are cloud-runnable and were
+  generated: `WavePort` -> reference `ModeSource` + `ModeMonitor`, `LumpedPort` ->
+  equivalent `UniformCurrentSource` current injection (adapter
+  `_convert_ports_for_reference`; gates
+  `tests/api/adapters/tidy3d/test_port_source_mapping.py`).

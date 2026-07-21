@@ -1,17 +1,18 @@
 """M3 external-reference generation wiring: honest fail-closed behavior.
 
 These tests exercise ``benchmark.rf_tidy3d_references`` WITHOUT touching the cloud.
-They assert that the port / lumped-port target scenes export source-less (their
-excitation has no adapter source mapping) and therefore fail-close at the runnable
-gate with ``pending-generation`` and a recorded reason, never fabricating an ``.h5``
-cache -- while the ``rf/rectangular_waveguide`` reference (a TE10 ``ModeSource``-driven
-guide) exports WITH a source and is genuinely runnable -- and that the runnable ->
-cloud -> cache branch is wired and reachable (proven by monkeypatching the gate open
-with a stubbed cloud run, so the wiring is not a vacuous always-pending stub).
+Since the F2c adapter RF-port mapping, all five target scenes export with a genuine
+drive (``sources >= 1``) and are runnable: the ``rf/rectangular_waveguide`` TE10
+``ModeSource`` launch, the two ``WavePort`` port scenes (mapped to a modal launch +
+receive mode monitors), and the two antenna ``LumpedPort`` feeds (mapped to an
+equivalent ``UniformCurrentSource`` current injection). The tests assert that the
+runnable gate is reached only by a genuine source, that ``run_cloud=False`` suppresses
+the cloud without fabricating a cache, and that the runnable -> cloud -> cache branch is
+wired and reachable (stubbed cloud run), so the wiring is not a vacuous always-pending
+stub.
 
 Falsification records live in
-``docs/assessments/e2-rf-scenes-acceptance-2026-07-19.md`` and
-``docs/assessments/round-e-integration-2026-07-20.md``.
+``docs/assessments/f2-rf-trio-acceptance-2026-07-21.md``.
 """
 
 from __future__ import annotations
@@ -28,40 +29,17 @@ from benchmark.rf_tidy3d_references import (
 )
 
 
-# The waveguide reference is a TE10 ModeSource-driven guide (runnable); the rest are
-# port/lumped-driven and export source-less.
-RUNNABLE_TARGETS = ("rf/rectangular_waveguide",)
-SOURCE_LESS_TARGETS = tuple(n for n in REFERENCE_TARGETS if n not in RUNNABLE_TARGETS)
-
-
-@pytest.mark.parametrize("name", SOURCE_LESS_TARGETS)
-def test_target_scene_exports_source_less_and_fails_closed(name, tmp_path, monkeypatch):
-    """Port/lumped targets export with sources=0, so generation refuses before cloud cost."""
-    # Guard: if the gate ever proceeded to the cloud, the test must fail loudly
-    # rather than spend credits.
-    def _forbid_cloud(*args, **kwargs):
-        raise AssertionError("cloud generation must not be reached for a source-less export")
-
-    monkeypatch.setattr(refs, "_run_cloud_reference", _forbid_cloud)
-
-    record = attempt_reference(name, run_cloud=False)
-
-    assert record.status == PENDING
-    assert record.runnable is False
-    assert record.exported_sources == 0
-    assert record.task_id is None
-    assert record.cost_flexcredits is None
-    assert record.cache is None
-    assert "sources=0" in record.reason
+# Every reference target now exports with a genuine drive and is runnable.
+RUNNABLE_TARGETS = tuple(REFERENCE_TARGETS)
 
 
 @pytest.mark.parametrize("name", RUNNABLE_TARGETS)
-def test_runnable_target_exports_with_a_source_and_passes_the_gate(name, monkeypatch):
-    """The ModeSource-driven waveguide reference exports sources>=1 and is runnable.
+def test_target_scene_exports_runnable_with_a_source(name, monkeypatch):
+    """Every target exports sources>=1 and stops cleanly at the suppressed gate.
 
-    With ``run_cloud=False`` it stops at the runnable gate WITHOUT touching the cloud,
-    recording the suppression reason -- proving the runnable branch is reached only by
-    a genuine source, not by fabricating one. (Any cloud call would fail this test.)
+    With ``run_cloud=False`` generation reaches the runnable gate on a genuine source
+    but does NOT touch the cloud (any cloud call fails the test) and does NOT fabricate
+    a cache -- it records the suppression reason with ``pending-generation``.
     """
     def _forbid_cloud(*args, **kwargs):
         raise AssertionError("run_cloud=False must not reach the cloud")
@@ -76,6 +54,7 @@ def test_runnable_target_exports_with_a_source_and_passes_the_gate(name, monkeyp
     assert record.status == PENDING  # suppressed, not generated (no cloud)
     assert record.task_id is None
     assert record.cost_flexcredits is None
+    assert record.cache is None
     assert "suppressed" in record.reason
 
 
@@ -141,3 +120,39 @@ def test_unknown_target_is_rejected():
     assert isinstance(record, ReferenceRecord)
     assert record.status == PENDING
     assert "unknown reference target" in record.reason
+
+
+def test_marker_rebuild_reconstructs_records_without_cloud(tmp_path, monkeypatch):
+    """``rebuild_from_markers`` rebuilds RESULTS rows from on-disk markers only.
+
+    It reconstructs a generated record for a scene with a marker and a pending
+    placeholder for one without -- with no cloud call and no scene rebuild.
+    """
+    monkeypatch.setattr(refs, "CACHE_DIR", tmp_path)
+    results_md = tmp_path / "RESULTS.md"
+    monkeypatch.setattr(refs, "RESULTS_MD", results_md)
+
+    generated = ReferenceRecord(
+        scene="rf/coax_thru",
+        status=GENERATED,
+        exported_sources=1,
+        exported_monitors=2,
+        runnable=True,
+        task_id="task-xyz",
+        cost_flexcredits=0.025,
+        cache=str(tmp_path / "rf" / "coax_thru.h5"),
+    )
+    refs.write_marker(generated)
+
+    roundtrip = refs.load_marker("rf/coax_thru")
+    assert roundtrip.status == GENERATED
+    assert roundtrip.task_id == "task-xyz"
+    assert roundtrip.exported_monitors == 2
+
+    records = refs.rebuild_from_markers(["rf/coax_thru", "antenna/patch"])
+    by_scene = {record.scene: record for record in records}
+    assert by_scene["rf/coax_thru"].status == GENERATED
+    assert by_scene["antenna/patch"].status == PENDING  # no marker on disk
+    text = results_md.read_text(encoding="utf-8")
+    assert "task-xyz" in text
+    assert "rf/coax_thru" in text
