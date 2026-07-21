@@ -38,6 +38,7 @@ from scipy.sparse.csgraph import connected_components
 
 from witwin.maxwell.fdtd.excitation.modes import (
     _build_yee_transverse_operator_sparse,
+    _solve_yee_transverse_vector_mode,
     _split_yee_transverse_eigenvector,
     _yee_stagger_eps_from_nodes,
     _yee_transverse_discrete_transverse_wavenumber as _ktilde,
@@ -155,6 +156,56 @@ def test_uniform_dielectric_fill_shifts_spectrum_and_stays_symmetric() -> None:
     # The filled beta must not collapse onto the vacuum value (the defect).
     assert filled_beta_sq == pytest.approx(vac_beta_sq + shift, rel=1e-12)
     assert abs(filled_beta_sq - vac_beta_sq) > 0.5 * shift
+
+
+def test_uniform_dielectric_fill_selector_path_carries_filled_beta() -> None:
+    """Selector-path pin: a uniformly filled guide keeps its FILLED beta end to end.
+
+    This exercises ``_solve_yee_transverse_vector_mode`` -- the production routing
+    function ``_assemble_vector_mode_data`` calls for a homogeneous non-magnetic
+    aperture -- NOT just the raw operator builder. The routing must assemble the
+    operator from the aperture's real per-component eps: for a hollow rectangular
+    guide uniformly filled with ``eps_r``, the fundamental TE10 branch sits at the
+    exact discrete ``beta**2 = eps_r*k0**2 - k~x(1)**2 - k~y(0)**2`` and the selected
+    ``Ev`` (here ``Ey``) profile is the exact ``sin(pi u / a)``. If the routing dropped
+    the real eps (the ``operator_eps = (None, None, None)`` vacuum defect) the solved
+    ``beta**2`` would collapse onto the vacuum value ``k0**2 - k~x(1)**2``; the last two
+    assertions forbid exactly that collapse.
+    """
+    eps_r = 2.25
+    node = np.full((_NU_CELLS + 1, _NV_CELLS + 1), eps_r, dtype=np.float64)
+    beta, components, _diagnostics = _solve_yee_transverse_vector_mode(
+        (node, node, node),
+        k0=_K0,
+        du=_DU,
+        dv=_DV,
+        mode_index=0,
+        field_names=("Ex", "Ey", "Hx", "Hy"),
+        preferred_field_name="Ey",
+        wave_family="te",
+        uniform=True,
+        use_dense=True,
+    )
+    beta_sq = float(beta) ** 2
+    ktx = _ktilde(1, _APERTURE_A, _DU)
+    kty = _ktilde(0, _APERTURE_B, _DV)
+    analytic = eps_r * _K0 * _K0 - ktx * ktx - kty * kty
+    assert abs(beta_sq - analytic) <= 1.0e-10 * abs(analytic), (
+        f"filled TE10 beta**2 {beta_sq:.10f} != discrete analytic {analytic:.10f}"
+    )
+
+    # The selected TE10 field is Ev-polarized (=Ey) and an exact sin(pi u / a).
+    ey = np.asarray(components["Ey"]).real
+    u_node = np.arange(_NU_CELLS + 1) * _DU
+    reference = np.outer(np.sin(math.pi * u_node / _APERTURE_A), np.ones(_NV_CELLS + 1))
+    corr = _profile_correlation(ey, reference)
+    assert corr >= 0.9999, f"filled TE10 Ey sin-correlation {corr:.6f} < 0.9999"
+
+    # The filled beta must NOT collapse onto the vacuum propagation constant.
+    vacuum_beta_sq = _K0 * _K0 - ktx * ktx - kty * kty
+    shift = (eps_r - 1.0) * _K0 * _K0
+    assert beta_sq == pytest.approx(vacuum_beta_sq + shift, rel=1e-10)
+    assert abs(beta_sq - vacuum_beta_sq) > 0.5 * shift
 
 
 def test_full_discrete_spectrum_matches_closed_form() -> None:
