@@ -820,3 +820,31 @@ conductive-path model, not a validated arc or device-failure predictor).
   staircase edge, matching an external reference solver's curved/oblique metal
   treatment. Dielectric scenes are unaffected.
 <!-- END f4-subpixel-lever -->
+<!-- BEGIN h1-nccl-driver (per-rank collective NCCL reverse driver) -->
+## Multi-GPU NCCL trainable-density adjoint (one-process-per-GPU)
+
+- A trainable Box-`MaterialRegion` density scene now backpropagates over a
+  single-node one-process-per-GPU NCCL launch (`transport="nccl"`, `torchrun
+  --nproc-per-node=<gpus>`), not only the in-process `transport="cuda_p2p"`
+  runtime. The per-rank collective reverse driver
+  (`run_nccl_distributed_reverse`) runs the distributed forward with per-rank
+  checkpoints, replays each checkpoint segment with NCCL forward-replay dict
+  halos, seeds a separable local objective per rank (a point monitor is owned by
+  exactly one rank; every other rank seeds zero and receives adjoint only through
+  the transposed NCCL halos), runs the transposed reverse with this track's NCCL
+  adjoint halos, gathers the per-rank `grad_eps` owned slabs to rank 0, and runs
+  the single-GPU material pullback once on rank 0. The open-boundary standard
+  update and the x-CPML absorbing update (including objectives whose sensitivity
+  threads the CPML psi memory recursion) are both supported.
+- Objective + gathered-`grad_eps` gradient parity against the single-process
+  single-GPU adjoint is gated on two processes for the open-boundary standard
+  geometry and the psi-active x-CPML geometry (loss rtol 5e-5 / atol 5e-6; grad
+  rtol 1e-4 with an atol floor 1e-6*max|grad|), the gathered `grad_eps` is bitwise
+  reproducible across repeated backward passes, and an unsupported-adjoint scene
+  (e.g. a trainable density on a legacy graded-sigma absorber) is rejected cleanly
+  and symmetrically on every rank without deadlocking.
+- The forward-only NCCL fence still rejects a trainable/monitor scene on the plain
+  NCCL forward path; the relaxation is internal to the verified adjoint driver.
+  Tiled plane/flux/mode monitor adjoint objectives over NCCL remain rejected
+  fail-closed (owner-strip cotangent seed scatter is a separate follow-up).
+<!-- END h1-nccl-driver -->
