@@ -678,6 +678,85 @@ def _y_to_s(y: torch.Tensor, z0: torch.Tensor) -> torch.Tensor:
     return normalized_s * denormalization
 
 
+def _resolve_single_port(port, *, port_names: tuple[str, ...], role: str = "port") -> int:
+    """Resolve a port name or zero-based integer index to its index."""
+
+    if isinstance(port, bool):
+        raise TypeError(f"{role} must be a port name or a zero-based integer index.")
+    if isinstance(port, int):
+        if port < 0 or port >= len(port_names):
+            raise ValueError(f"{role} index {port} is outside 0..{len(port_names) - 1}.")
+        return port
+    if isinstance(port, str):
+        try:
+            return port_names.index(port)
+        except ValueError as exc:
+            raise ValueError(f"Unknown {role} name {port!r}.") from exc
+    raise TypeError(f"{role} must be a port name or a zero-based integer index.")
+
+
+def _require_real_reference(z0: torch.Tensor, *, context: str) -> None:
+    """Fail closed when a connected reference impedance is not real.
+
+    The traveling-wave junction relation ``a_k = b_l`` used by the S-parameter
+    connection algebra is only exact for real reference impedances; complex
+    reference impedances must be renormalized to a real reference first.
+    """
+
+    tolerance = 1.0e-9 * torch.clamp(torch.abs(torch.real(z0)), min=1.0)
+    if bool(torch.any(torch.abs(torch.imag(z0)) > tolerance)):
+        raise ValueError(
+            f"{context} requires a real reference impedance at the connected ports; "
+            "renormalize to a real reference before connecting."
+        )
+
+
+def _connect_s_matrix(
+    s: torch.Tensor,
+    *,
+    external: list[int],
+    connected: list[int],
+) -> torch.Tensor:
+    """Close the ``connected`` port list pairwise and return the external S-block.
+
+    ``connected`` is ordered as consecutive junction pairs ``[k0, l0, k1, l1, ...]``;
+    each pair is joined by the traveling-wave relation ``a_k = b_l`` and ``a_l = b_k``.
+    Implements the general multiport connection
+    ``S'_EE = S_EE + S_EC P (I - S_CC P)^{-1} S_CE`` from first principles.
+    """
+
+    if len(connected) % 2 != 0:
+        raise ValueError("connected ports must form an even number of junction members.")
+    if not external:
+        raise ValueError("A connection must leave at least one external port.")
+
+    external_index = torch.tensor(external, device=s.device, dtype=torch.long)
+    connected_index = torch.tensor(connected, device=s.device, dtype=torch.long)
+
+    def _block(rows: torch.Tensor, cols: torch.Tensor) -> torch.Tensor:
+        return s.index_select(-2, rows).index_select(-1, cols)
+
+    s_ee = _block(external_index, external_index)
+    if connected_index.numel() == 0:
+        return s_ee
+    s_ec = _block(external_index, connected_index)
+    s_ce = _block(connected_index, external_index)
+    s_cc = _block(connected_index, connected_index)
+
+    nc = connected_index.numel()
+    permutation = torch.zeros((nc, nc), device=s.device, dtype=s.dtype)
+    for pair in range(nc // 2):
+        first = 2 * pair
+        second = first + 1
+        permutation[first, second] = 1.0
+        permutation[second, first] = 1.0
+
+    identity = torch.eye(nc, device=s.device, dtype=s.dtype).expand(s.shape[:-2] + (nc, nc))
+    denominator = identity - s_cc @ permutation
+    solved = _checked_solve(denominator, s_ce, operation="network connection")
+    return s_ee + s_ec @ permutation @ solved
+
+
 def _normalize_port_distances(
     distances,
     *,
@@ -1108,6 +1187,169 @@ class NetworkData:
             z0=reference,
             port_names=self.port_names,
             valid_columns=self.valid_columns,
+            metadata=metadata,
+            phasor_convention=self.phasor_convention,
+            power_wave_convention=self.power_wave_convention,
+        )
+
+    def terminate(self, port, *, gamma=None, impedance=None) -> "NetworkData":
+        """Close one port with a reflection coefficient or load impedance.
+
+        Exactly one of ``gamma`` (a reflection coefficient at the port reference
+        plane) or ``impedance`` (a load impedance) must be given. Each may be a
+        scalar or a length-``F`` frequency-dependent tensor. The remaining ports
+        keep their order and reference impedances. For a two-port terminated on
+        its second port this reduces to the closed-form input reflection
+        ``S11 + S12 * gamma * S21 / (1 - S22 * gamma)``.
+        """
+
+        self._require_complete("termination")
+        if (gamma is None) == (impedance is None):
+            raise ValueError("Provide exactly one of gamma= or impedance=.")
+
+        index = _resolve_single_port(port, port_names=self.port_names, role="terminated port")
+        port_z0 = self.z0[:, index]
+
+        if gamma is not None:
+            reflection = torch.as_tensor(gamma, device=self.s.device).to(dtype=self.s.dtype)
+        else:
+            load = torch.as_tensor(impedance, device=self.s.device).to(dtype=self.s.dtype)
+            reflection = (load - torch.conj(port_z0)) / (load + port_z0)
+        if reflection.ndim == 0:
+            reflection = reflection.expand(self.s.shape[0])
+        elif tuple(reflection.shape) != (self.s.shape[0],):
+            raise ValueError("gamma/impedance must be scalar or have shape [F].")
+        if not bool(torch.all(torch.isfinite(torch.real(reflection)))) or not bool(
+            torch.all(torch.isfinite(torch.imag(reflection)))
+        ):
+            raise ValueError("The terminating reflection coefficient must be finite.")
+
+        keep = [i for i in range(len(self.port_names)) if i != index]
+        s_pp = self.s[:, index, index]
+        s_kp = self.s[:, keep, index]
+        s_pk = self.s[:, index, keep]
+        s_kk = self.s.index_select(-2, torch.tensor(keep, device=self.s.device)).index_select(
+            -1, torch.tensor(keep, device=self.s.device)
+        )
+        denom = 1.0 - s_pp * reflection
+        if bool(torch.any(torch.abs(denom) < 1.0e3 * torch.finfo(self.s.real.dtype).eps)):
+            raise RuntimeError(
+                "termination is singular; (1 - S_pp * gamma) is numerically zero."
+            )
+        scale = (reflection / denom).unsqueeze(-1).unsqueeze(-1)
+        reduced = s_kk + scale * (s_kp.unsqueeze(-1) * s_pk.unsqueeze(-2))
+
+        metadata = _append_transform_metadata(
+            self.metadata,
+            {
+                "operation": "terminate",
+                "terminated_port": self.port_names[index],
+                "reflection": reflection.detach().clone(),
+            },
+        )
+        return type(self)(
+            frequencies=self.frequencies,
+            s=reduced,
+            z0=self.z0[:, keep],
+            port_names=tuple(self.port_names[i] for i in keep),
+            metadata=metadata,
+            phasor_convention=self.phasor_convention,
+            power_wave_convention=self.power_wave_convention,
+        )
+
+    def cascade(self, other: "NetworkData", *, port_map: Mapping) -> "NetworkData":
+        """Connect ports of this network to ports of ``other`` and reduce them out.
+
+        ``port_map`` maps each connected self port (name or zero-based index) to a
+        connected ``other`` port. Every mapped pair is joined at a matched junction
+        and removed; the result keeps this network's remaining ports first (in
+        order) followed by ``other``'s remaining ports. Connected ports must share
+        a real reference impedance. This is the general N-port star connection, so
+        cascading a two-port through an ideal matched thru returns the original,
+        and cascading two attenuators multiplies their transmissions.
+        """
+
+        if not isinstance(other, NetworkData):
+            raise TypeError("cascade requires another NetworkData instance.")
+        self._require_complete("cascade")
+        other._require_complete("cascade")
+        if self.s.device != other.s.device or self.s.dtype != other.s.dtype:
+            raise ValueError("cascade requires matching device and dtype.")
+        if self.frequencies.shape != other.frequencies.shape or not bool(
+            torch.equal(self.frequencies, other.frequencies)
+        ):
+            raise ValueError("cascade requires an identical frequency grid on both networks.")
+        if not isinstance(port_map, Mapping) or len(port_map) == 0:
+            raise ValueError("port_map must map at least one self port to an other port.")
+
+        na = len(self.port_names)
+        nb = len(other.port_names)
+        self_pairs: list[int] = []
+        other_pairs: list[int] = []
+        for self_port, other_port in port_map.items():
+            i = _resolve_single_port(self_port, port_names=self.port_names, role="self port")
+            j = _resolve_single_port(other_port, port_names=other.port_names, role="other port")
+            if i in self_pairs:
+                raise ValueError(f"self port {self.port_names[i]!r} is connected more than once.")
+            if j in other_pairs:
+                raise ValueError(f"other port {other.port_names[j]!r} is connected more than once.")
+            _require_real_reference(self.z0[:, i], context="cascade")
+            _require_real_reference(other.z0[:, j], context="cascade")
+            tolerance = 1.0e-6 * torch.clamp(torch.abs(torch.real(self.z0[:, i])), min=1.0)
+            if bool(
+                torch.any(torch.abs(self.z0[:, i] - other.z0[:, j]) > tolerance)
+            ):
+                raise ValueError(
+                    f"connected ports {self.port_names[i]!r} and {other.port_names[j]!r} "
+                    "must share the same reference impedance; renormalize first."
+                )
+            self_pairs.append(i)
+            other_pairs.append(j)
+
+        combined = torch.zeros(
+            (self.s.shape[0], na + nb, na + nb),
+            device=self.s.device,
+            dtype=self.s.dtype,
+        )
+        combined[:, :na, :na] = self.s
+        combined[:, na:, na:] = other.s
+
+        external_self = [i for i in range(na) if i not in self_pairs]
+        external_other = [j for j in range(nb) if j not in other_pairs]
+        external = external_self + [na + j for j in external_other]
+        connected: list[int] = []
+        for i, j in zip(self_pairs, other_pairs):
+            connected.extend((i, na + j))
+
+        result_names = tuple(self.port_names[i] for i in external_self) + tuple(
+            other.port_names[j] for j in external_other
+        )
+        if len(set(result_names)) != len(result_names):
+            raise ValueError(
+                "cascade result would have duplicate external port names; rename ports first."
+            )
+        result_z0 = torch.cat(
+            (
+                self.z0[:, external_self],
+                other.z0[:, external_other],
+            ),
+            dim=-1,
+        )
+        reduced = _connect_s_matrix(combined, external=external, connected=connected)
+        metadata = _append_transform_metadata(
+            self.metadata,
+            {
+                "operation": "cascade",
+                "self_ports": tuple(self.port_names[i] for i in self_pairs),
+                "other_ports": tuple(other.port_names[j] for j in other_pairs),
+                "result_port_names": result_names,
+            },
+        )
+        return type(self)(
+            frequencies=self.frequencies,
+            s=reduced,
+            z0=result_z0,
+            port_names=result_names,
             metadata=metadata,
             phasor_convention=self.phasor_convention,
             power_wave_convention=self.power_wave_convention,

@@ -540,7 +540,14 @@ class _FDTDGradientBridge:
         for block in getattr(solver.scene, "networks", ()):
             if block.delay_seconds is not None:
                 raise NotImplementedError(
-                    "Differentiable embedded-network FDTD does not support explicit delay state."
+                    "Differentiable embedded-network FDTD does not support explicit "
+                    "delay state: the bidirectional reference-plane ring couples "
+                    "steps up to max_delay_steps apart (possibly across checkpoint "
+                    "segments) and the fractional-delay filter is an IIR recurrence, "
+                    "neither of which the segment-local network pullback can reverse "
+                    "without a delay-aware reverse ring. Forward runs (including "
+                    "checkpoint/resume, whose schema now carries the delay ring, "
+                    "filter, and cursor) remain fully supported."
                 )
             model = block.model
             if isinstance(model, RationalModel):

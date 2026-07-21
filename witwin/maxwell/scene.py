@@ -1030,8 +1030,14 @@ class Scene:
             port = ports_by_name[port_name]
             if isinstance(port, WavePort):
                 raise ValueError(
-                    f"Network {network.name!r} cannot connect to WavePort {port_name!r}; "
-                    "time-domain wave-port terminal injection is not available."
+                    f"Network {network.name!r} cannot connect to WavePort {port_name!r}: "
+                    "an embedded state-space network couples through a scalar "
+                    "voltage/current terminal on a single lumped Yee edge "
+                    "(LumpedPort or resolved TerminalPort), but a WavePort is a "
+                    "modal port defined by a cross-sectional mode-overlap field "
+                    "pattern with no scalar time-domain terminal (V, I) contract. "
+                    "This is a missing design contract, not a bug; use a LumpedPort "
+                    "or TerminalPort terminal for embedded-network connections."
                 )
             if not isinstance(port, (LumpedPort, TerminalPort)):
                 raise TypeError(
