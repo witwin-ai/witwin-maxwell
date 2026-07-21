@@ -131,6 +131,26 @@ result-aggregation contract) is not wired to this single-device basis. It is
 counted under "Public simulation, result, and network workflows" (23 -> 24);
 lower the budget when the aggregated adjoint lands.
 
+### Array scene-gradient implemented (2026-07-21, plan 06 Phase 4)
+
+`ArrayBasisData.scene_gradient_vjp` is now implemented on the single-device
+basis, so the fail-closed guard above is removed and `CAPABILITY_GUARD_BUDGET`
+drops `176 -> 175` in the same change ("Public simulation, result, and network
+workflows" `24 -> 23`). The method aggregates the per-column adjoints of the
+linear beam combine `E = sum_n w_n e_n` onto the scene parameters: the caller
+re-runs each column's forward under autograd and passes the resulting live
+embedded-pattern columns; the method forms the combined field, takes the
+combined-field cotangent `cot_E = autograd.grad(L, E)`, seeds each column with
+`conj(w_n) * cot_E` (`= w_n^* . (dL/dE)^*`, the PyTorch complex-product backward
+of the combine), and sums the per-column VJPs in a deterministic reduction
+order. The seeded sum is bit-identical to end-to-end autograd of the combined
+objective (verified in `tests/rf/array/test_array_scene_gradient.py`). Detached
+columns, a no-contribution parameter set, wrong column counts, batched
+`[B, F, N]` weights, and shape/dtype/device mismatches raise `ValueError` /
+`TypeError` (usage errors, not capability gaps) and do not occupy budget. The
+2-GPU ensemble aggregation of the same per-column VJPs is the plan 06 Phase 4b
+follow-on (plan 02 Phase 7 distributed result-aggregation contract).
+
 ### Finite-conductor wire reconciliation (2026-07-17)
 
 The plan 07 Phase 4 finite-conductor wire series-impedance slice adds one
