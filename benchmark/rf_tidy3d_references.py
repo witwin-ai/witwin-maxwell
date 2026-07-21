@@ -23,23 +23,22 @@ stub. For each target scene it:
    exception or the source-count gate) so the gap is explicit and the analytic
    gate keeps binding. This never fabricates a numerical cross-reference.
 
-Adapter capability status (measured, EXECUTED 2026-07-19/20): the ``rectangular_waveguide``
-reference is a genuine cloud run -- it is a TE10 ``ModeSource``-driven guide (the adapter
-maps ``ModeSource`` -> reference ``ModeSource`` and ``ModeMonitor`` -> reference
-``ModeMonitor``), so it exports with ``sources == 1`` and IS runnable. The other four
-target scenes export with ``sources == 0``: their excitation is port-driven -- a
-``WavePort`` TEM launch under ``PortSweep`` / ``PortExcitation`` (coax_thru,
-lumped_open_short_match) or a ``LumpedPort`` wire-gap / probe feed (antenna dipole,
-patch) -- and the adapter's ``_convert_source`` has no mapping for port/lumped
-excitation (only field sources: PointDipole, PlaneWave, GaussianBeam, ModeSource,
-UniformCurrentSource, CustomField/CurrentSource). A ``ClosedSurfaceMonitor`` also has no
-adapter monitor mapping. Those four therefore fail-close at the runnable gate with
-``sources=0`` recorded, and NO cloud credits are spent on them. Mapping port/lumped
-excitation to the reference solver is a separate adapter feature (deferred); until then
-those references stay ``pending-generation`` with the reason recorded here and in
-``benchmark/RESULTS.md``.
+Adapter capability status (measured, EXECUTED 2026-07-19/21): all five target scenes now
+export with ``sources >= 1`` and ARE runnable. The ``rectangular_waveguide`` reference is a
+TE10 ``ModeSource``-driven guide. The other four are port-driven and now map through the
+adapter's RF port excitation layer (``_convert_ports_for_reference``): a ``WavePort`` TEM
+aperture maps to a reference modal launch (``ModeSource``) plus a receiving ``ModeMonitor``
+per wave port (coax_thru: 2 ports; lumped_open_short_match: 1 port), and a ``LumpedPort``
+delta-gap feed maps to its equivalent current injection (a ``UniformCurrentSource`` electric
+filament spanning the feed gap along the voltage-path axis; antenna dipole wire-gap and patch
+probe feeds). The ``ClosedSurfaceMonitor`` NF2FF box already lowers to six face field
+monitors through ``Scene.resolved_monitors``, so the antenna exports carry their near-field
+surface. The single-export drive convention drives port index 0; a full N-port scattering
+reference is one export per driven port.
 
-Invoke with ``python -m benchmark.rf_tidy3d_references [scene ...]``.
+Invoke with ``python -m benchmark.rf_tidy3d_references [scene ...]``. Pass ``--from-markers``
+to rebuild the ``benchmark/RESULTS.md`` section from the on-disk generation markers without
+touching the cloud (used to refresh the aggregate table after per-scene runs).
 """
 
 from __future__ import annotations
@@ -278,6 +277,42 @@ def write_marker(record: ReferenceRecord) -> Path:
     return path
 
 
+def _marker_paths(name: str) -> tuple[Path, Path]:
+    slug = name.replace("/", "__")
+    directory = CACHE_DIR.joinpath(*name.split("/")[:-1])
+    return (
+        directory / f"{slug}.generated.json",
+        directory / f"{slug}.pending.json",
+    )
+
+
+def load_marker(name: str) -> ReferenceRecord | None:
+    """Reconstruct a ReferenceRecord from the on-disk marker, or None if absent."""
+    generated_path, pending_path = _marker_paths(name)
+    for path in (generated_path, pending_path):
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return ReferenceRecord(**data)
+    return None
+
+
+def rebuild_from_markers(selected: list[str] | None = None) -> list[ReferenceRecord]:
+    """Rebuild the RESULTS.md section from on-disk markers without any cloud call."""
+    names = selected or list(REFERENCE_TARGETS)
+    records: list[ReferenceRecord] = []
+    for name in names:
+        record = load_marker(name)
+        if record is None:
+            record = ReferenceRecord(
+                scene=name,
+                status=PENDING,
+                reason="no generation marker on disk; run the cloud generation to create one.",
+            )
+        records.append(record)
+    _update_results_md(records)
+    return records
+
+
 _SECTION_HEADER = "## RF / antenna external reference generation"
 
 
@@ -292,12 +327,13 @@ def _results_section(records: list[ReferenceRecord]) -> str:
         "source), and only then cost-estimated and cloud-run. A `pending-generation` "
         "status is NOT a fabricated comparison -- it records that no numerical "
         "cross-reference exists yet and names the concrete reason; the analytic "
-        "transmission-line / waveguide / dipole references remain the binding gate. The "
-        "`rf/rectangular_waveguide` reference is a real cloud run (a TE10 `ModeSource`-driven "
-        "guide exports with `sources=1`); the remaining scenes export with `sources=0` (their "
-        "port / lumped-port excitation has no adapter source mapping), so their generation "
-        "fail-closes at the runnable gate BEFORE any cloud cost. Mapping port/lumped "
-        "excitation to the reference solver is a deferred adapter feature.",
+        "transmission-line / waveguide / dipole references remain the binding gate. All five "
+        "targets are runnable: `rf/rectangular_waveguide` is a TE10 `ModeSource` launch, the "
+        "two RF port scenes map each `WavePort` TEM aperture to a reference `ModeSource` drive "
+        "(port 0) plus a receiving `ModeMonitor` per port, and the two antenna scenes map their "
+        "`LumpedPort` delta-gap feed to an equivalent `UniformCurrentSource` current injection "
+        "with the NF2FF box lowered to six face field monitors. The single export drives port "
+        "index 0; a full N-port scattering reference is one export per driven port.",
         "",
         "| Scene | Exported sources | Exported monitors | Runnable | Reference | Task id | Cost (FlexCredits) | Reason |",
         "| --- | ---: | ---: | :---: | --- | --- | ---: | --- |",
@@ -375,6 +411,10 @@ def main(argv: list[str] | None = None) -> None:
         "--no-cloud", action="store_true",
         help="Do not touch the cloud; record the runnable gate only.",
     )
+    parser.add_argument(
+        "--from-markers", action="store_true",
+        help="Rebuild the RESULTS.md section from on-disk markers without any cloud call.",
+    )
     args = parser.parse_args(argv)
     selected = None
     if args.scenes:
@@ -384,6 +424,14 @@ def main(argv: list[str] | None = None) -> None:
                 f"Unknown reference targets: {unknown}. Available: {list(REFERENCE_TARGETS)}"
             )
         selected = args.scenes
+    if args.from_markers:
+        records = rebuild_from_markers(selected)
+        generated = sum(1 for r in records if r.status == GENERATED)
+        print(
+            f"\nRESULTS.md rebuilt from markers: {generated}/{len(records)} generated, "
+            f"{len(records) - generated} pending (no cloud calls)."
+        )
+        return
     records = generate(selected, run_cloud=not args.no_cloud)
     generated = sum(1 for r in records if r.status == GENERATED)
     print(

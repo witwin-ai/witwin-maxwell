@@ -22,12 +22,22 @@ References (cavity model, dominant ``TM010`` mode):
     dL      = 0.412 h (eps_eff+0.3)(W/h+0.264) / ((eps_eff-0.258)(W/h+0.8))
     f_r     = c / (2 (L + 2 dL) sqrt(eps_eff))
 
-The probe carries a large inductive reactance on this thick (``h ~ 0.03 lambda``)
-finite-ground slab, so the feed is intentionally left un-matched by the builder;
-the reactance and the resonance/directivity cross-check against the external
-reference solver remain open items, deferred past stage E2c to a future stage.
-The builder's contract here is a valid
-radiating structure that exercises the real ``Result.antenna`` pipeline.
+Feed (F2b): a galvanic PEC probe via now carries the feed current from the patch
+underside down to a single-cell lumped-port gap above the ground plane (the retired
+design drove the whole substrate gap with no metal probe and coupled only
+capacitively). The via cut the feed reactance ~5x, but the patch still does NOT
+resonate at feasible resolution: a wide-band sweep shows ``Re(Zin) < 4`` Ohm with no
+resonance peak across 2-8 GHz and a purely capacitive reactance -- the lumped gap is
+still capacitively shorted by the adjacent PEC, so the TM010 cavity mode is not
+galvanically excited, and the radiation is a broadside-null monopole pattern from the
+via. The cavity resonance (~3.39 GHz) also sits below the historically driven band,
+and the finite ground extends only ~0.07 lambda beyond the patch. A matched broadside
+``TM010`` (``D >= 5`` dBi, ``|Gamma|`` dip at resonance) needs a wire-bound clean-gap
+probe feed, a larger finite ground, and an on-resonance drive -- a multi-run antenna
+co-design deferred with the strict-xfail gate kept fail-closed (see
+``docs/assessments/f2-rf-trio-acceptance-2026-07-21.md``). The builder's contract here
+remains a valid radiating structure that exercises the real ``Result.antenna``
+pipeline.
 """
 
 from __future__ import annotations
@@ -128,13 +138,24 @@ def patch_antenna_scene(
         position=(0.0, 0.0, height + 0.5 * dx),
         size=(length, width, dx),
     ).with_material(mw.Material.pec(), name="patch")
+    # Galvanic coaxial-probe feed: a PEC via carries the feed current from the patch
+    # underside (z = height) down to one cell above the ground plane, and the LumpedPort
+    # drives the single-cell gap between the ground (z = 0) and the via base (z = dx).
+    # Driving the full substrate gap with no metal probe (the retired design) couples only
+    # capacitively -- Re(Zin) stays ~0.5 Ohm and the cavity mode is never excited. The via
+    # gives the galvanic coupling that lets the patch resonate and present its radiation
+    # resistance at the feed.
+    probe = mw.Box(
+        position=(feed_x, 0.0, 0.5 * (dx + height)),
+        size=(dx, dx, height - dx),
+    ).with_material(mw.Material.pec(), name="probe")
     feed = mw.LumpedPort(
         "feed",
-        positive=(feed_x, 0.0, height),
+        positive=(feed_x, 0.0, dx),
         negative=(feed_x, 0.0, 0.0),
         voltage_path=mw.AxisPath("z"),
         current_surface=mw.Box(
-            position=(feed_x, 0.0, 0.5 * height), size=(dx, dx, 0.0)
+            position=(feed_x, 0.0, 0.5 * dx), size=(dx, dx, 0.0)
         ),
         reference_impedance=50.0,
     )
@@ -156,7 +177,7 @@ def patch_antenna_scene(
         boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
         device=device,
     )
-    for structure in (substrate, ground, patch):
+    for structure in (substrate, ground, patch, probe):
         scene.add_structure(structure)
     scene.add_port(feed)
     scene.add_monitor(surface)

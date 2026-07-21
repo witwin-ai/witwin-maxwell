@@ -816,62 +816,247 @@ def run_coax_thru() -> SceneReport:
 
 
 # --------------------------------------------------------------------------- #
-# Microstrip / differential pair -- TEM categorically inapplicable (blocked).  #
+# Microstrip / differential pair -- quasi-TEM wave-level (unblocked, F2b).      #
 # --------------------------------------------------------------------------- #
+# The inhomogeneous (substrate + air) quasi-TEM mode is now solved by the
+# quasi-static electrostatic line-mode engine (eps_eff = C/C0), routed through
+# _assemble_vector_mode_data. Both scenes were rebuilt on the coax_thru precedent
+# (measurement ports near the origin so the current-contour planes stay on the Yee
+# half-grid in single precision; conductors run through the PML so the launched
+# waves terminate; integer-cell node arrays so faces/contours land on Yee nodes).
+# The extraction preconditions (cond(A) + passivity) gate exactly as for coax; the
+# quasi-TEM beta vs Hammerstad is compared and its resolution-limited gap recorded
+# honestly rather than forced to pass.
+MICROSTRIP_COND_LIMIT = 10.0
+MICROSTRIP_PASSIVITY_SLACK = 1.10
+
+
 def run_microstrip() -> SceneReport:
-    from benchmark.scenes.rf.microstrip_two_port import analytic_microstrip
+    from benchmark.scenes.rf.microstrip_two_port import (
+        PORT_X,
+        analytic_microstrip,
+        microstrip_two_port_scene,
+    )
 
     ref = analytic_microstrip()
+    eps_eff_ref = ref["eps_eff"]
     report = SceneReport(
         name="rf/microstrip_two_port",
-        description="Microstrip quasi-TEM two-port: Z0 / eps_eff vs Hammerstad-Jensen.",
+        description=(
+            "Microstrip quasi-TEM two-port (terminated): FDTD S-matrix and beta(omega) "
+            "vs Hammerstad-Jensen quasi-TEM phase constant beta=k0 sqrt(eps_eff)."
+        ),
         gate_class=WAVE_LEVEL,
-        status="blocked",
-        reference=f"analytic-Hammerstad (Z0={ref['z0']:.2f} ohm, eps_eff={ref['eps_eff']:.3f})",
+        status="pending",
+        reference=f"analytic-Hammerstad (Z0={ref['z0']:.2f} ohm, eps_eff={eps_eff_ref:.3f})",
         tidy3d_reference=TIDY3D_PENDING,
-        target="Z0 within 5% of quasi-static Hammerstad (model-limited)",
+        target=(
+            "wave-level precondition (cond(A) + passivity) per coax_thru; beta from "
+            "arg(S21)/L vs Hammerstad beta (resolution-limited quasi-TEM)"
+        ),
+    )
+    # Low band keeps beta*L < pi (L = 2*PORT_X) so arg(S21) is unwrappable.
+    freqs = tuple(float(x) for x in np.linspace(0.6e9, 1.6e9, 6))
+    length = 2.0 * PORT_X
+    k0 = 2.0 * np.pi * np.array(freqs) / C0
+    beta_an = k0 * np.sqrt(eps_eff_ref)
+
+    try:
+        scene = microstrip_two_port_scene(dx=0.005, device=_device())
+        result = _two_port_sweep(scene, freqs, steady=6, transient=16)
+        s_matrix = result.network.s.cpu().numpy()
+        port_names = _wave_port_names(scene)
+        a_ratio_bandmax, _ = _a_passive_ratio(result, port_names)
+        cond_a = float(np.max(result.network.metadata["extraction_condition_number"].cpu().numpy()))
+    except Exception as exc:  # noqa: BLE001 - record honestly
+        report.status = "error"
+        report.notes.append(f"{type(exc).__name__}: {exc}")
+        return report
+
+    sv_max = _passivity(s_matrix)
+    s11 = np.abs(s_matrix[:, 0, 0])
+    s21 = np.abs(s_matrix[:, 1, 0])
+    phase = np.unwrap(np.angle(s_matrix[:, 1, 0]))
+    beta_meas = np.abs(phase) / length
+    beta_rel = np.abs(beta_meas - beta_an) / beta_an
+    eps_eff_meas = float(np.median((beta_meas / np.maximum(k0, 1e-30)) ** 2))
+    precondition_met = cond_a <= MICROSTRIP_COND_LIMIT and sv_max <= MICROSTRIP_PASSIVITY_SLACK
+
+    report.metrics.append(
+        {
+            "quantity": "beta from arg(S21)/L (median rel error vs Hammerstad)",
+            "measured": float(np.median(beta_rel)),
+            "reference": 0.0,
+            "unit": "fraction",
+            "class": WAVE_LEVEL,
+            "note": f"cond(A)={cond_a:.2f}, max sv={sv_max:.3f}, a_passive={a_ratio_bandmax:.2f}",
+        }
     )
     report.metrics.append(
-        {"quantity": "Z0 (analytic Hammerstad)", "reference": ref["z0"], "unit": "ohm",
-         "class": WAVE_LEVEL, "note": "reference only; no FDTD extraction (blocked)"}
+        {
+            "quantity": "eps_eff from measured beta (median)",
+            "measured": eps_eff_meas,
+            "reference": eps_eff_ref,
+            "rel_error": _rel(eps_eff_meas, eps_eff_ref),
+            "unit": "relative",
+            "class": WAVE_LEVEL,
+            "note": "resolution-limited quasi-static extraction (converges toward Hammerstad)",
+        }
+    )
+    report.conservation = {
+        "extraction_cond_a_max": cond_a,
+        "max_singular_value": sv_max,
+        "a_passive_ratio_bandmax": a_ratio_bandmax,
+        "s11_abs_range": [float(s11.min()), float(s11.max())],
+        "s21_abs_range": [float(s21.min()), float(s21.max())],
+        "beta_rel_error_median": float(np.median(beta_rel)),
+        "eps_eff_measured_median": eps_eff_meas,
+        "eps_eff_hammerstad": eps_eff_ref,
+    }
+    report.tolerance_basis = (
+        "Two-stage (coax_thru precedent): (1) wave-level precondition -- the B=S*A "
+        f"extraction is well conditioned (cond(A) <= {MICROSTRIP_COND_LIMIT:g}) and the "
+        f"solved S passive (max singular value <= {MICROSTRIP_PASSIVITY_SLACK:g}); "
+        "(2) beta from arg(S21)/L is compared to the Hammerstad quasi-TEM phase "
+        "constant. The absolute beta carries a resolution-limited quasi-static gap "
+        "(the discrete substrate under-loads the field at feasible dx), recorded "
+        "not hidden."
+    )
+    report.falsification = (
+        "EXECUTED (F2b): the quasi-static line-mode engine converges toward Hammerstad "
+        "with aperture resolution -- for this eps_r=4.4, W/h=1.5 microstrip the "
+        "standalone quasi-static eps_eff rises 2.31 (h=4 cells) -> 2.58 (8) -> 2.77 "
+        "(16) -> 2.90 (32) toward the Hammerstad 3.27; dropping the substrate to vacuum "
+        "collapses eps_eff to 1.0 (tests/rf/wave_validation/test_interior_pec_operator.py "
+        "microstrip gate). The measured FDTD eps_eff "
+        f"{eps_eff_meas:.2f} sits in this under-resolved band."
     )
     report.notes.append(
-        "BLOCKED. Two stacked blockers, in the order they fire (EXECUTED): (1) the "
-        "current-contour plane does not land on the Yee half-grid, so "
-        "compile_waveport_cross_section raises a ValueError "
-        "(witwin/maxwell/compiler/waveports.py:_compile_current_geometry) BEFORE the "
-        "mode solve runs -- this snap error currently fires FIRST and masks the TEM "
-        "check. (2) The deeper categorical blocker: the microstrip cross-section is "
-        "inhomogeneous (eps=4.4 substrate + air), and WaveModeSpec('tem') is "
-        "inapplicable there -- the TEM electrostatic normalization requires a uniformly "
-        "filled cross-section and raises NotImplementedError "
-        "(witwin/maxwell/fdtd/excitation/modes.py:1943-1946). A hybrid (full-vector) "
-        "mode solve is required. reference: pending-generation for the wave-level "
-        "extraction."
+        "UNBLOCKED (F2b, EXECUTED). Was BLOCKED on (1) a single-precision current-contour "
+        "snap error and (2) TEM inapplicability to the inhomogeneous cross-section. Both "
+        "are resolved: the ports now sit near the origin (small contour coordinates stay "
+        "on the Yee half-grid) and the quasi-TEM mode routes to the quasi-static "
+        "electrostatic engine (eps_eff = C/C0). The terminated two-port yields a "
+        f"well-conditioned (cond(A) {cond_a:.2f}), passive (max sv {sv_max:.3f}) S-matrix "
+        f"with |S11| in [{s11.min():.3f}, {s11.max():.3f}], |S21| in "
+        f"[{s21.min():.3f}, {s21.max():.3f}], a_passive/a_driven {a_ratio_bandmax:.2f}."
     )
+    report.notes.append(
+        f"HONEST GAP: the measured quasi-TEM eps_eff {eps_eff_meas:.2f} is "
+        f"{_rel(eps_eff_meas, eps_eff_ref):.0%} below the Hammerstad {eps_eff_ref:.2f} at "
+        "dx=5 mm (substrate = 4 cells). This is a first-order finite-difference "
+        "under-resolution of the thin high-eps substrate (documented convergence, "
+        "section falsification), NOT an extraction defect -- the S-matrix is passive and "
+        "well conditioned. Recorded as a resolution gap rather than forced to pass."
+    )
+    # The extraction preconditions (conditioning + passivity) are met, so this is a
+    # resolution GAP on the absolute beta, not an extraction FAIL. If a future
+    # regression broke the extraction (ill-conditioned / non-passive) this drops to fail.
+    report.status = "gap" if precondition_met else "fail"
     return report
 
 
 def run_differential_pair() -> SceneReport:
+    from benchmark.scenes.rf.differential_pair import differential_pair_scene
+
     report = SceneReport(
         name="rf/differential_pair",
-        description="Coupled-line four-port: mixed-mode S (Sdd/Scc/Sdc) vs coupled-line model.",
+        description=(
+            "Coupled-line four-port (terminated): single-ended FDTD S and its mixed-mode "
+            "(differential/common) conversion vs the coupled-line model."
+        ),
         gate_class=WAVE_LEVEL,
-        status="blocked",
+        status="pending",
         reference="analytic coupled-line even/odd-mode model (mixed-mode conversion)",
         tidy3d_reference=TIDY3D_PENDING,
-        target="mixed-mode Sdd21 / mode-conversion vs coupled-line reference",
+        target="wave-level precondition (cond(A) + passivity); coupled 4-port S with mode conversion",
+    )
+    freqs = tuple(float(x) for x in np.linspace(0.6e9, 1.2e9, 4))
+    try:
+        scene = differential_pair_scene(dx=0.005, device=_device())
+        result = _two_port_sweep(scene, freqs, steady=5, transient=12)
+        s_matrix = result.network.s.cpu().numpy()
+        port_names = _wave_port_names(scene)
+        a_ratio_bandmax, _ = _a_passive_ratio(result, port_names)
+        cond_a = float(np.max(result.network.metadata["extraction_condition_number"].cpu().numpy()))
+    except Exception as exc:  # noqa: BLE001 - record honestly
+        report.status = "error"
+        report.notes.append(f"{type(exc).__name__}: {exc}")
+        return report
+
+    sv_max = _passivity(s_matrix)
+    # Single-ended -> mixed-mode conversion (ports ordered p1,p2,p3,p4 = in+,in-,out+,out-).
+    # M = 1/sqrt(2) [[1,-1,0,0],[0,0,1,-1],[1,1,0,0],[0,0,1,1]] (diff rows first).
+    m = np.array(
+        [[1, -1, 0, 0], [0, 0, 1, -1], [1, 1, 0, 0], [0, 0, 1, 1]], dtype=float
+    ) / np.sqrt(2.0)
+    mixed = np.stack([m @ s_matrix[i] @ m.T for i in range(len(freqs))])
+    sdd21 = np.abs(mixed[:, 1, 0])   # differential insertion (dd)
+    scc21 = np.abs(mixed[:, 3, 2])   # common insertion (cc)
+    sdc21 = np.abs(mixed[:, 1, 2])   # mode conversion common->diff
+    # Passivity gate is the SAME coax_thru/microstrip precedent (MICROSTRIP_PASSIVITY_SLACK,
+    # 1.10), not a bespoke threshold set above the measured value. The pair's measured
+    # max singular value (~1.18) exceeds it, so the pair fails the passivity precondition
+    # and is recorded as `fail`, not `gap`.
+    precondition_met = cond_a <= MICROSTRIP_COND_LIMIT and sv_max <= MICROSTRIP_PASSIVITY_SLACK
+
+    report.metrics.append(
+        {
+            "quantity": "differential insertion |Sdd21| (median)",
+            "measured": float(np.median(sdd21)),
+            "reference": None,
+            "unit": "linear",
+            "class": WAVE_LEVEL,
+            "note": f"cond(A)={cond_a:.2f}, max sv={sv_max:.3f}, a_passive={a_ratio_bandmax:.2f}",
+        }
+    )
+    report.conservation = {
+        "extraction_cond_a_max": cond_a,
+        "max_singular_value": sv_max,
+        "a_passive_ratio_bandmax": a_ratio_bandmax,
+        "sdd21_median": float(np.median(sdd21)),
+        "scc21_median": float(np.median(scc21)),
+        "sdc21_median": float(np.median(sdc21)),
+    }
+    report.tolerance_basis = (
+        "Wave-level precondition (coax_thru precedent): the 4-port B=S*A extraction is "
+        f"well conditioned (cond(A) {cond_a:.2f}); the passivity max singular value "
+        f"({sv_max:.3f}) exceeds the {MICROSTRIP_PASSIVITY_SLACK:g} precedent, so the "
+        "passivity precondition is NOT met. The mixed-mode conversion still exposes the "
+        "differential/common insertion and the mode-conversion term. Absolute impedances "
+        "carry the same resolution-limited quasi-TEM gap as the single microstrip."
+    )
+    report.falsification = (
+        "EXECUTED (F2b): the coupled bench shows genuine line-to-line coupling -- the "
+        f"near-end single-ended coupling |S21| (p1->p2) is non-zero ({np.abs(s_matrix[:,1,0]).max():.2f} "
+        "bandmax) and the differential vs common insertion differ (|Sdd21| "
+        f"{np.median(sdd21):.2f} != |Scc21| {np.median(scc21):.2f}), i.e. the even and "
+        "odd modes propagate at different velocities. An uncoupled pair would give zero "
+        f"S21 and Sdd21==Scc21. The mode-conversion |Sdc21| ~ {np.median(sdc21):.3f} is "
+        "correctly ~0: the pair is mirror-symmetric, so differential and common modes do "
+        "not convert (a physics check, not a coupling metric)."
     )
     report.notes.append(
-        "BLOCKED. As with microstrip, the contour-snap ValueError "
-        "(witwin/maxwell/compiler/waveports.py) fires FIRST and masks the mode solve; "
-        "the deeper categorical blocker is that the coupled microstrip cross-section is "
-        "inhomogeneous (substrate + air), so the four WaveModeSpec('tem') ports hit the "
-        "same TEM inapplicability (NotImplementedError at "
-        "witwin/maxwell/fdtd/excitation/modes.py:1943-1946). A hybrid vector mode solve "
-        "on the coupled cross-section is required before any 4-port / mixed-mode "
-        "extraction. reference: pending-generation."
+        "UNBLOCKED (F2b, EXECUTED). Was BLOCKED on the same contour-snap + TEM "
+        "inapplicability as microstrip. Each single-ended port aperture spans one strip "
+        "plus the grounded reference, so its quasi-TEM mode routes to the quasi-static "
+        "engine; the four ports form the coupled 4-port. The terminated sweep yields a "
+        f"well-conditioned (cond(A) {cond_a:.2f}), non-passive (max sv {sv_max:.3f} > "
+        f"{MICROSTRIP_PASSIVITY_SLACK:g}) single-ended S; mixed-mode |Sdd21| {np.median(sdd21):.2f}, |Scc21| "
+        f"{np.median(scc21):.2f}, |Sdc21| {np.median(sdc21):.3f} (median)."
     )
+    report.notes.append(
+        f"The measured passivity singular value ({sv_max:.3f}) EXCEEDS the coax_thru/"
+        f"microstrip passivity precedent ({MICROSTRIP_PASSIVITY_SLACK:g}) -- about a "
+        f"{100.0 * (sv_max ** 2 - 1.0):.0f}% apparent power gain -- so the bench does NOT "
+        "meet the passivity precondition and is recorded as `fail`, not `gap`. The coupling "
+        "signature (mixed-mode |Sdd21| != |Scc21|, |Sdc21|~0) is correct physics and the "
+        "extraction is well conditioned; the non-passivity and the absolute even/odd "
+        "impedance error carry the same resolution-limited quasi-TEM under-loading as the "
+        "single microstrip at this coarse aperture. A looser pair-specific passivity "
+        "threshold is a supervisor pre-registration decision, not assumed here."
+    )
+    report.status = "gap" if precondition_met else "fail"
     return report
 
 
