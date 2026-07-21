@@ -293,3 +293,41 @@ Exit gate：参数梯度有限差分通过；单/多 GPU value/loss/gradient par
 4. 解析、Mie/FEM/测量、resolved-skin-depth 重叠区、收敛、能量和性能验收通过。
 5. adjoint 与 single/multi-GPU value/loss/gradient parity 通过，无 SIBC 场景零开销。
 6. 公共示例遵守 `Scene -> Simulation -> Result`，`FEATURE_LIST.md` 同步记录能力和有效范围。
+
+## 14. 修订记录（append-only，不重写历史）
+
+### 2026-07-21 Round-G revision (master `18bc42a`; merge `c9b4bfc`) — all-orientation staircased SIBC + cylinder physics gate + skin-effect bench LANDED (not `completed`)
+
+S6 unfroze (S1–S3 passed) and Round G generalized the boundary beyond the axis-aligned
+exposed-face layout. Evidence per `docs/assessments/g4-sibc-oblique-acceptance-2026-07-21.md`;
+append-only note.
+
+- **All-orientation staircased exposed-face SIBC** (`compiler/materials.py`,
+  `fdtd/runtime/materials.py`, `fdtd/runtime/stepping.py`): a non-`Box` good conductor is
+  staircased from its node occupancy — each axis-aligned voxel face becomes a masked
+  Leontovich surface-impedance write (cylinder/sphere, all six orientations, mixed).
+  Orientation-equivalence (cyclic-permutation residual ~1.7e-7) + mixed-orientation stability
+  gates (`test_sibc_orientation.py` 6, `test_sibc_staircase.py` 6); staircase analytic
+  flat-plate match <1%. Falsifications: face-normal sign flip + active-branch sign flip.
+- **Staircased-cylinder physics convergence gate** (`test_sibc_cylinder_convergence.py`, 5):
+  SIBC/resolved absorbed-power ratio ≈ **0.18**, **grid- AND R/δ-independent** (0.172 at
+  R/δ=6.7, 0.194 at R/δ=10.1) — the intrinsic **first-order-Leontovich-on-a-staircased-curve
+  systematic** (flat-surface value <1%); a half-cell low/high surface-node placement asymmetry
+  is a documented contributing convention (not a bug). Gate at 25% (fails closed toward PEC).
+  Committed probes under `docs/assessments/g4-sibc-oblique-probes/`.
+- **Wave-level skin-effect attenuation benchmark**
+  (`benchmark/scenes/rf/lossy_waveguide_attenuation.py`): alpha vs analytic `alpha_c`
+  (Pozar 3.96) median rel err **0.049%** / max 0.37% (<5%); PEC-wall falsification collapses
+  alpha to 0.00017 Np/m. The one authorized external-reference run is recorded **honestly** —
+  the external lossy-metal surface-impedance export **under-applies the wall loss** (a
+  documented adapter-fidelity gap, NOT the FDTD bench, which matches analytic to 0.05%).
+- **Committed zero-impact gate** (`test_sibc_zero_impact.py`): a SIBC-free scene's six raw
+  Yee fields are **bitwise identical** with the compile hook present vs monkeypatched out,
+  with a load-bearing control; falsification recorded.
+- **Still fail-closed (NOT completed):** true oblique/conformal (non-staircase) SIBC, rotated
+  `Box`, generic rational (`SurfaceImpedanceMedium`) ADE on a curved conductor, Bloch + SIBC,
+  adjoint/distributed/trainable SIBC, generic surface-impedance adapter export. The ~18%
+  curved-conductor systematic awaits a curvature-corrected surface impedance. Census unchanged
+  (SIBC funnel narrowed, no guard added/removed). Measured grade **E1**; the external
+  cross-check is a documented adapter gap (not a pass) and there is no non-author review, so
+  no `completed`.

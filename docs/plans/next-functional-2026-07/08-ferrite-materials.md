@@ -250,3 +250,34 @@ Exit gate：单/多 GPU value/phase/loss/gradient parity；dense/sparse parity�
 4. 参数梯度、checkpoint 和单/多 GPU value/gradient parity 通过。
 5. 无 ferrite 场景零额外状态与 kernel，active-cell 内存线性可解释。
 6. 用户示例只使用 `Scene -> Simulation -> Result`，公共能力同步更新 `FEATURE_LIST.md`。
+
+## 14. 修订记录（append-only，不重写历史）
+
+### 2026-07-21 Round-G revision (master `18bc42a`; merge `5dd100e`) — arbitrary-bias forward + mixed-bias support LANDED (not `completed`)
+
+S6 unfroze (S1–S3 passed) and Round G widened the forward beyond the axis-aligned slice.
+Evidence per `docs/assessments/g3-ferrite-bias-acceptance-2026-07-21.md`; append-only note.
+
+- **General (non-axis-aligned) bias forward** (`fdtd/runtime/gyromagnetic.py`): the
+  axis-aligned guard is lifted; the general path is a pure per-cell coordinate rotation of
+  the SAME contracted implicit-midpoint (Cayley) magnetization ADE (frame-independence
+  proven in the module docstring) — no new integrator/coefficients; the axis-aligned fast
+  path is retained as an exact optimization.
+- **Mixed-bias support** (disposition SUPPORT): the "single uniform bias direction" guard is
+  removed; different bias axes / opposed signs (`+z`/`−z`) / differing materials route
+  through the per-cell general path — the magnetization ADE has no spatial coupling, so a
+  mixed-bias scene is the exact direct sum of independent per-cell passive blocks.
+- **Gates** (`tests/materials/ferrite/test_gyromagnetic_general_bias.py`; suite 107 passed):
+  rotation-equivalence general reduces to fast **bit-for-bit** (max|diff| = 0.0, incl. CUDA);
+  oblique-vs-Polder-oracle `chi_uu` rel **1.197e-13**; handedness (bias reversal flips lab
+  gyrotropy, co-pol unchanged); Polder spot-check (antisymmetric part flips under reversal);
+  mixed-bias per-cell independence (direct-sum bit-for-bit); zero-impact (ferrite-free +
+  PEC-only bitwise no-op); CUDA oblique driven-cavity passivity (envelope non-growth 12k
+  steps). Falsifications recorded.
+- **Contract-doc supersession:** `docs/reference/ferrite-physics-contract.md` §7 item 6
+  marked **superseded** (mixed / per-material bias now ships via the per-cell general path);
+  historical text retained.
+- **Still fail-closed (NOT completed):** Bloch-periodic ferrite, FDFD ingest, multi-GPU,
+  adjoint, `PerturbationMedium`-over-ferrite; identity collocation (`C = I`) is not the
+  4-point Yee gather (later refinement). Census `175 → 173` (both bias guards removed).
+  Measured grade **E1**; no external reference / non-author review, so no `completed`.

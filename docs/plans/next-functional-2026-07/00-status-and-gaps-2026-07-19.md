@@ -21,6 +21,23 @@
 > condition met + Round G launched, and resolves owner decision points 1/3. All
 > Round-F deliveries were adversarially audited; no phase is `completed` (no
 > non-author review — the audit §4 bar is unmet).
+> **Round-G update: 2026-07-21, master `18bc42a`.** Round G delivered and merged
+> (all four tracks adversarially audited; audit-minor cleanup `18bc42a`; full
+> battery **2982 passed / 16 expected-FDFD / 3 xfailed / 1 xpassed**): 02 NCCL
+> reverse-halo adjoint **transport primitives** + bitwise 2-process transpose
+> identity + opt-in step-rate instrumentation (`42ac3f1`), the end-to-end per-rank
+> reverse **driver** honestly deferred with a written 7-step plan; 07 lossy-wire
+> B2 passive current recurrence + real `ohmic_loss` + B3 conductivity adjoint
+> (`3884bb7`); 08 ferrite arbitrary-bias forward + mixed-bias support (`5dd100e`);
+> 09 all-orientation staircased SIBC + cylinder physics gate + skin-effect
+> attenuation benchmark (`c9b4bfc`). This update revises the 02/07/08/09 rows and
+> sections, the census history (→175, round-G ±2), route steps S4/S6, and marks the
+> three Wave-C consumption tracks (07/08/09) landed post-unfreeze. Sources:
+> `docs/assessments/g1-nccl-adjoint-acceptance-2026-07-21.md`,
+> `g2-lossy-wire-acceptance-2026-07-21.md`, `g3-ferrite-bias-acceptance-2026-07-21.md`,
+> `g4-sibc-oblique-acceptance-2026-07-21.md`. All Round-G deliveries were
+> adversarially audited; no phase is `completed` (audit §4 non-author-review +
+> external-reference bar unmet).
 > Governing audit: `docs/assessments/next-functional-audit-2026-07-18.md`.
 > Binding vocabularies: E0–E3 evidence grades (audit §0/§4), the five-class gate
 > taxonomy + `perf` labels (`docs/reference/gate-classification.md`), the S0–S7
@@ -52,14 +69,14 @@ grade.
 | # | Title | Phases delivered / total | Evidence grade (measured) | Headline gaps | Freeze state |
 |---|---|---|---|---|---|
 | 01 | RF engineering workflow | 0–5 declared; per-gate re-classified; S1 keystone (round-E) + F2 trio | **E2 for the validated scene set** (`coax_thru` + `rectangular_waveguide` wave-level, external-reference cross-check); microstrip/diff-pair now production quasi-TEM benches (measured `gap`, resolution-limited); E0–E1 elsewhere; §9.4 perf gates PASS (`perf`) via S2 | microstrip/diff-pair `eps_eff` resolution-limited (~24% low at dx=5 mm; quasi-static engine itself converges to H–J); patch broadside honest strict-xfail (not flipped); guided interior-PEC path not yet production-wired | reopened; S1 + F2 trio landed (microstrip/diff-pair un-BLOCKED); four external caches generated; S2/S3 done |
-| 02 | Multi-GPU execution | ensemble + joint-solve forward + S4 distributed CPML-trainable adjoint (psi-active) | forward **E2**; CPML-trainable distributed adjoint **E2** (psi-active parity 5.94e-7); NCCL-adjoint/coupled E0 | NCCL one-process-per-GPU adjoint + monitor gather; coupled-runtime joint solve; joint-solve strong scaling grid-conditional (128³ 0.544×, 192³ 1.726×); static-capability exclusions remain | S4 CPML-adjoint landed; NCCL-adjoint/coupled-runtime open |
+| 02 | Multi-GPU execution | ensemble + joint-solve forward + S4 distributed CPML-trainable adjoint (psi-active) + Round-G NCCL reverse-halo adjoint transport primitives + step-rate instrument | forward **E2**; CPML-trainable distributed adjoint **E2** (psi-active parity 5.94e-7); NCCL reverse **transport E2** (bitwise 2-process transpose identity); NCCL end-to-end reverse driver / coupled E0 | NCCL one-process-per-GPU end-to-end reverse **driver** (7-step plan in G1 acceptance) + monitor gather; coupled-runtime joint solve; joint-solve strong scaling grid-conditional (128³ 0.544×, 192³ 1.726×); static-capability exclusions remain | S4 CPML-adjoint landed; Round-G NCCL adjoint transport landed, driver deferred |
 | 03 | Touchstone network embedding | 0–4 + round-E E2 evidence (gate (d) grid-conditional) | **E2** (embedded path: independent raw-sample S-cascade cross-check <1e-5 + multi-scenario passivity/conservation) | gate (d) still grid-conditional (PASS ≥224³, compute-bound ruling); delay adjoint fail-closed; WavePort embedding = missing design contract; inherits 01 port-power (now partly wave-validated) | E2 evidence landed; gate (d) grid-conditional; delay-adjoint/WavePort open |
 | 04 | SPICE/MNA co-simulation | 0–4 + F1 conservation suite + independent offline cross-check | **E2** (multi-scenario conservation + code-path-independent circuit cross-check landed) | strong-coupling end-to-end ref still `future-xfdtd`; reactive `dU_circuit` channel stays consistency-class (not lifted by F1b); external lumped-load cross-check pending | E2 evidence landed (F1); S3 closed |
 | 05 | Nonlinear circuit devices | Phase 0 + N1 standalone transient | E0 | FDTD coupling / transient companion / adjoint / benchmark not built; BJT/MOSFET fail-closed | Wave C — S3 passed 2026-07-21, unfrozen; not scheduled in Round G |
 | 06 | Array / Active-S / MIMO | 0–3 + Phase-4 weight gradients + F3 scene-gradient VJP (single-device + 2-GPU ensemble) | **E2** (VJP bit-for-bit vs single-device path; 1-vs-2-GPU bitwise parity; central-difference gated) | throughput/scaling deferred-pending-exclusive-window; network/S-param scene gradients + NCCL joint-solve adjoint out of scope; inherits 01 port-power risk | reopened; Phase-4 exit gate closed (F3); S3 closed |
-| 07 | Thin-wire model | 0–3 + Phase-4 partial | PEC E2 / lossy E0 | lossy current recurrence, `ohmic_loss`, conductivity adjoint, distributed wire reverse all fail-closed | Wave C unfrozen (S3 passed); Round G lossy-wire track; series-Z layer landed |
-| 08 | Gyromagnetic ferrite | Phase 0 + axis-aligned forward slice | E0 | FDFD, multi-GPU, adjoint, Bloch, arbitrary-bias all fail-closed | Wave C — unfrozen (S3 passed); Round G general-bias track |
-| 09 | Surface impedance / roughness | Phase 0 + Phase-1 runtime generalization | E0 | oblique/curved/Bloch fail-closed; adapter export fail-closed; no wave-level SIBC benchmark | Wave C — unfrozen (S3 passed); Round G orientation-generalization track |
+| 07 | Thin-wire model | 0–3 + Phase-4 + Round-G B2 lossy recurrence + B3 conductivity adjoint | PEC **E2** / lossy **E1–E2** | field-coupled `dI/dσ` reverse fail-closed (nondeterministic shared fit); B4 distributed lossy reverse fail-closed; distributed lossy forward now fail-closed (was silent-PEC); analytic-AC gate 8% (fit-limited, not 2%); closed-box field-energy closure not performed (companion-level only) | Wave C unfrozen (S3 passed); Round G B2+B3 landed |
+| 08 | Gyromagnetic ferrite | Phase 0 + arbitrary-bias forward + mixed-bias support (Round G) | **E1** | FDFD, multi-GPU, adjoint, Bloch, `PerturbationMedium`-over-ferrite fail-closed; identity collocation (not 4-point Yee gather) | Wave C — unfrozen (S3 passed); Round G general+mixed-bias landed |
+| 09 | Surface impedance / roughness | Phase 0 + Phase-1 + Round-G all-orientation staircased SIBC + cylinder physics gate + skin-effect bench | **E1** | true oblique/conformal (non-staircase) fail-closed; rotated Box / rational-on-curved / Bloch fail-closed; adapter export fail-closed (external ref under-applies wall loss); ~18% staircase-curve absorbed-power systematic | Wave C — unfrozen (S3 passed); Round G orientation generalization landed |
 | 10 | SAR | 0–3 + P4 slice / 0–5 | E1 (analytic/golden/brute-force-parity/grid-convergence; no external ref) | IEEE/IEC phantom benchmark, incident power density, VOP (P5), multi-GPU scale-out (P4) all deferred/fail-closed | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
 | 11 | Bioheat | — (dropped by owner) | — | plan dropped by owner 2026-07-19; plan file deleted (commit `4c521ab`) | Wave D — DROPPED (not implemented) |
 | 12 | Electrostatic / capacitance | 0–3 + P5 diff slice / 0–6 | E1–E2 (analytic/convergence/conservation/energy-identity/gradient; no external ref) | tensor eps + open boundary (P4), multi-GPU (P5), touchscreen/packaging workflow (P6) fail-closed/deferred | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
@@ -278,13 +295,44 @@ progress `docs/plans/next-functional-2026-07/02-ensemble-progress.md`,
   **0.544× at 128³** (communication-bound, 2 GPUs slower) → **1.726× at 192³**
   (in-process cuda_p2p); a no-feature bare-step regression spot-check shows −0.098%
   (no resolvable regression).
+- **Round-G NCCL reverse-halo adjoint transport primitives (merge `42ac3f1`,
+  acceptance `g1-nccl-adjoint-acceptance-2026-07-21.md`):**
+  - **Transport-level reverse halos delivered** (`fdtd/distributed/nccl_transport.py`:
+    `prepare_adjoint_staging` / `exchange_magnetic_adjoint` / `exchange_electric_adjoint`) —
+    engine-based coordinator primitives that are exact transposes of the forward Yee
+    halos, same `(engines, adjoint_states)` signature as the in-process
+    `CudaP2PHaloTransport` so the reverse loop stays transport-agnostic. Gated by a
+    **2-process `torchrun` discrete-transpose identity** `<A x, y> == <x, A^T y>`
+    asserted **bitwise** (pure-copy halos, atol == 0) plus ghost-adjoint-zero and
+    repeat-determinism (`tests/fdtd/multi_gpu/test_nccl_transport.py`,
+    `_nccl_transport_adjoint_worker.py`). Falsification:
+    `NCCL_TRANSPOSE_FALSIFY=magnetic|electric` corrupts only the local accumulation →
+    identity fires, exit 1.
+  - **Opt-in per-rank step-rate instrument** (`fdtd/distributed/instrumentation.py`
+    `StepRateInstrument`, env-gated `WITWIN_FDTD_STEP_TIMING`): writes per-rank
+    `step_timing_rank{r}.json`, **zero-cost-off asserted** (0 device synchronizations
+    + no artifact when disabled; exactly `2+2N` when enabled), wired into the NCCL
+    forward worker so the exclusive window can flip it on later. **No wall-clock number
+    asserted** (shared-GPU). Addresses the round-E "not-measurable-by-hooks" finding.
+  - **The end-to-end per-rank reverse DRIVER is honestly deferred, fail-closed**, with
+    a written **7-step implementation plan** in the G1 acceptance doc (G1b §2): the
+    validated in-process adjoint bridge is structurally single-process (global output +
+    single autograd graph on rank 0), so a torchrun reverse needs a new
+    distributed-collective driver (guard-relax, per-rank checkpoint capture, NCCL
+    forward-replay dict halos, local separable seed, per-rank reverse loop, grad_eps
+    gather + rank-0 pullback, gates). `_validate_nccl_capabilities` still raises for
+    trainable density; census unchanged at **175**.
 
 **Not delivered / open gaps:**
-- **NCCL one-process-per-GPU (torchrun) adjoint, monitor gather, and coupled-runtime
+- **NCCL one-process-per-GPU (torchrun) end-to-end reverse DRIVER + monitor gather,
+  CPML psi-carrying NCCL reverse, S5 tiled monitor seeds, and coupled-runtime
   (circuit/network/wire) joint solve remain OUT of scope, fail-closed** — the
-  blueprint #13/#18 tail. The NCCL forward path has only a correctness worker
-  (`_nccl_forward_worker.py`); its step rate is **not-measurable via existing hooks**
-  and is recorded as such (not fabricated).
+  blueprint #13/#18 tail. Round G landed the reverse-halo transport foundation (the
+  load-bearing correctness prerequisite, bitwise transpose-exact) and the opt-in timing
+  instrument, but NOT the driver; the 7-step executable plan is recorded in
+  `g1-nccl-adjoint-acceptance-2026-07-21.md`. The NCCL forward path still has only a
+  correctness worker (`_nccl_forward_worker.py`); the timing instrument is delivered and
+  unit-tested but produces numbers only under an exclusive window (none asserted here).
 - Joint-solve forward strong scaling is grid-conditional (payoff only ≥192³; 128³ is
   communication-bound). Ensemble+joint-solve composition still rejected.
 - `_validate_static_capabilities` still rejects Bloch/x-periodic/x-symmetry,
@@ -295,9 +343,12 @@ progress `docs/plans/next-functional-2026-07/02-ensemble-progress.md`,
   known.
 
 **Evidence grade:** forward **E2**; **CPML-trainable distributed adjoint E2**
-(psi-active 1-vs-2-GPU parity 5.94e-7, load-bearing falsified); timing measured on
-the exclusive window (ensemble 2×, joint-solve grid-conditional). NCCL adjoint /
-coupled-runtime joint solve **E0** (deferred).
+(psi-active 1-vs-2-GPU parity 5.94e-7, load-bearing falsified); **NCCL reverse-halo
+adjoint transport E2** (Round G, bitwise 2-process transpose identity + falsified);
+timing measured on the exclusive window (ensemble 2×, joint-solve grid-conditional),
+opt-in NCCL step-rate instrument delivered (numbers pending exclusive window). NCCL
+end-to-end reverse **driver** / coupled-runtime joint solve **E0** (deferred with a
+written 7-step plan).
 
 ### 03 — Touchstone network embedding
 
@@ -526,21 +577,67 @@ layer** (analytic scaled-Bessel internal impedance, exact DC, passive rational A
 fit reusing the shared network rational stack, <2% analytic gate;
 `witwin/maxwell/compiler/wire_impedance.py`, `tests/fdtd/thin_wire/test_wire_finite_conductivity.py`).
 
-**Not delivered / open gaps:** finite-conductor pieces **all fail closed** — the
-lossy current recurrence, the `ohmic_loss` monitor (currently emits zeros),
-conductivity adjoint, and distributed wire **reverse** reject with explicit errors;
-trainable wire under multi-GPU, distributed CPML/Mur, and wire-with-circuit/network
-mixing also fail closed (a finite conductor compiled into an FDTD run raises
-`NotImplementedError`, `compiler/thin_wire.py`). The series-impedance layer is
-**compile-time only — the solver does not yet consume lossy current physics**.
-Blockers: energy-consistent lossy recurrence + CUDA `update_wire_state` extension
-(B2), conductivity adjoint (B3, depends B2), distributed wire reverse (B4, depends
-02 Phase 7 wire-state channel; also needs a second local GPU). Some Phase-3
-impedance/far-field numbers flagged UNEVIDENCED (regenerate before citing).
+**Round-G B2 lossy recurrence + real `ohmic_loss` + B3 conductivity adjoint (merge
+`3884bb7`, acceptance `g2-lossy-wire-acceptance-2026-07-21.md`):**
+- **B2 passive lossy-current ADE companion consumed by the runtime**
+  (`fdtd/wire_lossy.py`, `fdtd/wire.py`): the per-unit-length internal series impedance
+  folds into the current update as an energy-consistent trapezoidal (Tustin) companion
+  with the loss terms on the integer-step trapezoidal current; the finite-conductor
+  compile deferral is removed. Gates (`tests/fdtd/thin_wire/test_wire_lossy_recurrence.py`
+  9 passed, `test_thin_wire_lossy_forward.py` 7 passed): **analytic-AC** realized
+  internal resistance vs scaled-Bessel pre-registered **< 8%** (fit-limited, NOT the 2%
+  compile-layer gate — the shared complex vector fit recovers `Re(Z')` only to ~1–6%
+  nondeterministically, blocker B1); **DC** `R0 == R_dc·length` to rel **1e-12** (exact);
+  **PEC-parity** the PEC (`lossy_model is None`) path is **bitwise** identical run-to-run
+  (and SHA256-identical vs base, auditor-confirmed); **stability** an adaptive spectral
+  certificate fits the highest order in `[6,13]` with combined `[I;x]` spectral radius
+  `< 1` (else fails closed). Falsifications committed
+  (`docs/assessments/g2-lossy-wire-probes/falsify.py`): zeroing the ADE feedback blows the
+  analytic-AC error 0.0225→1205; +1% `R0` breaks DC exactness; order-16 without the
+  certificate gives spectral radius 1.000075.
+- **Real `ohmic_loss` monitor**: emits `0.5·Re(Z')·length·|I(f)|²` per segment (was zeros);
+  PEC segments report exactly zero; PEC ohmic-only monitor returns a zeros channel (fixed
+  a blocking PEC regression that raised at finalize). The reported dissipation matches the
+  companion formula to `rtol 1e-4` on the run's own fit.
+  - **Energy-closure honest substitution history:** the shipped
+    `test_energy_closure_single_tone` is a **companion-level** closure only (isolated
+    per-segment input power == companion dissipation + reported-formula identity, load-bearing
+    assertion falsified by a 1.2× `ac_resistance` scaling). The brief's **closed-box 3D
+    field-energy closure** (source input == field-energy delta + radiated/absorbed + wire
+    ohmic on a real FDTD run) was **NOT performed** — scope reduction, supervisor sign-off;
+    physical risk assessed low, but the wire↔field coupled-passivity guarantee is an open item
+    (the companion is not positive-real by construction; it is active out of band, stability is
+    an isolated per-segment spectral-radius certificate).
+- **B3 conductivity adjoint** (deterministic dissipation channel):
+  closed-form `dZ'/dσ` of the analytic scaled-Bessel impedance
+  (`compiler/wire_impedance.py::internal_impedance_conductivity_gradient`) + a PyTorch-native
+  autograd path (`analytic_ac_resistance`). Gated vs float64 central difference **< 1e-6**
+  across a frequency sweep and DC limit `dR_dc/dσ = −1/(π a²σ²)` exact
+  (`tests/gradients/test_fdtd_thin_wire_conductivity_adjoint.py` 7 passed;
+  `verify_grad.py` committed). Falsifications: `(1−R²)→(1+R²)` and a 2× backward scaling
+  each go RED.
 
-**Evidence grade:** **PEC E2 / lossy E0**.
+**Not delivered / open gaps:** the **field-coupled current sensitivity `dI/dσ`** through
+the multi-step recurrence **stays fail closed** — the ADE coefficients come from the
+nondeterministic shared rational fit (B1), not a differentiable/reproducible map of σ, so
+an exact reverse replay cannot be certified (`fdtd/wire.py::replay_wire_state` sharpened,
+not lifted). The ADE loss-state checkpoint/resume fails closed (B3+ schema). **B4
+distributed lossy reverse** fails closed; the **distributed lossy forward** now fails
+closed too (`fdtd/distributed/solver.py::_validate_distributed_wire_support`) — closing a
+verified silent-PEC hole where the distributed owner built only the lossless update. No
+scene-level trainable-conductivity leaf yet (`WireConductor.finite(conductivity=)` takes a
+Python float; the shipped adjoint is the model-layer differentiable readout). No wall-clock
+timing (shared GPU); the lossy update is a torch path gated to lossy wires (PEC CUDA kernel
+untouched, brief-sanctioned). Some Phase-3 impedance/far-field numbers flagged UNEVIDENCED
+(regenerate before citing).
+
+**Evidence grade:** **PEC E2 / lossy E1–E2** — B2 recurrence (analytic-AC/DC/PEC-parity/
+stability gated + falsified) and B3 conductivity adjoint (closed-form vs central-difference
+< 1e-6, autograd == FD, falsified) landed; the lossy grade is capped below full E2 by the
+fit-limited 8% analytic-AC gate, the companion-level (not closed-box) energy substitution,
+and the fail-closed field-coupled `dI/dσ`.
 **Freeze:** lossy-wire solver consumption is Wave C step S6, now **unfrozen (S1–S3 all
-passed 2026-07-21)**; it is a Round G track (B2 lossy recurrence → B3 conductivity adjoint).
+passed 2026-07-21)**; Round G B2+B3 landed (merge `3884bb7`).
 
 ### 08 — Gyromagnetic ferrite
 
@@ -557,14 +654,47 @@ background with the gyrotropy produced by the magnetization-ADE hooks. A
 `GyromagneticFerrite` previously exported silently as a plain isotropic medium,
 dropping the Polder tensor (`adapters/tidy3d.py`; guard census 143→144).
 
-**Not delivered / open gaps:** general/non-axis-aligned bias, mixed-bias scenes,
-Bloch-periodic ferrite, FDFD ingest, multi-GPU (ShardEngine), adjoint (no reverse
-core for the non-reciprocal correction) all **fail closed**. `PerturbationMedium`
-over a ferrite rejected. Scalar frequency-evaluation is a permanent contract.
+**Round-G arbitrary-bias forward + mixed-bias support (merge `5dd100e`, acceptance
+`g3-ferrite-bias-acceptance-2026-07-21.md`):**
+- **General (non-axis-aligned) bias forward** (`fdtd/runtime/gyromagnetic.py`): the
+  axis-aligned fail-closed guard is lifted. The general path is a pure per-cell
+  coordinate rotation of the SAME axis-aligned contracted implicit-midpoint (Cayley)
+  magnetization ADE — RF drive projected onto the per-cell right-handed local frame
+  `[u|v|w]` (`w = b̂`) and back-reaction scattered onto all three lab components; the
+  2×2 solve is proven frame-independent (module docstring), so **no new integrator or
+  coefficients**. The axis-aligned fast path is retained as an exact optimization.
+- **Mixed-bias support** (disposition: SUPPORT, not reject): the "single uniform bias
+  direction" guard is removed; different bias axes / opposed signs (`+z`/`−z` latching
+  circulator) / differing materials route through the per-cell general path. The
+  magnetization ADE carries no spatial coupling, so a mixed-bias scene is the exact
+  direct sum of independent per-cell passive blocks.
+- **Gates** (`tests/materials/ferrite/test_gyromagnetic_general_bias.py`, mock float64 +
+  CUDA; suite 107 passed): **rotation-equivalence** general reduces to fast **bit-for-bit**
+  (max|diff| = 0.0, b∈{z,x,y}, incl. the production CUDA solver over 200 steps/6 fields);
+  **oblique-vs-oracle** b=(1,1,1)/√3 vs a discrete Polder oracle `chi_uu` rel **1.197e-13**
+  ≤ 1e-5; **handedness** oblique bias reversal flips lab gyrotropy, co-pol unchanged;
+  **Polder spot-check** compiled tensor == frozen Polder, antisymmetric part flips under
+  reversal (rtol 1e-10); **mixed-bias per-cell independence** combined == direct sum
+  bit-for-bit; **zero-impact** ferrite-free and PEC-only scenes leave hooks bitwise no-op;
+  **CUDA oblique driven-cavity passivity** energy-envelope non-growth over 12k steps.
+  Falsifications recorded (dropped `uz` projection breaks the oblique oracle + b=y reduction;
+  global-frame substitution breaks mixed-bias independence; sign-stripped frame breaks
+  handedness).
+- **Contract-doc supersession**: `docs/reference/ferrite-physics-contract.md` §7 item 6 is
+  marked **superseded** (mixed / per-material bias now ships via the per-cell general path),
+  historical text retained.
 
-**Evidence grade:** **E0** (contract + narrow axis-aligned forward slice).
-**Freeze:** Wave C — **unfrozen (S3 passed 2026-07-21)**; general/non-axis-aligned bias
-is a Round G track.
+**Not delivered / open gaps:** Bloch-periodic ferrite, FDFD ingest, multi-GPU (ShardEngine),
+adjoint (no reverse core for the non-reciprocal correction), and `PerturbationMedium` over a
+ferrite all **fail closed**. Scalar frequency-evaluation is a permanent contract. **Identity
+collocation** (`C = I`, each lab `H` truncated to the shared cell overlap) is reused from the
+axis-aligned slice — accurate for smooth/uniform fields and passive in a closed cavity, but
+it is NOT the 4-point-collocated Yee gather; higher-order collocation is a later refinement.
+
+**Evidence grade:** **E1** (arbitrary/mixed-bias forward: rotation-equivalence/oblique-oracle/
+handedness/passivity/zero-impact gated + falsified; no external reference, no adjoint).
+**Freeze:** Wave C — **unfrozen (S3 passed 2026-07-21)**; Round G general+mixed-bias landed
+(merge `5dd100e`; census `175 → 173`, both bias guards removed).
 
 ### 09 — Surface impedance / metal roughness
 
@@ -584,17 +714,57 @@ landed (dropped the non-passive inductive term; stateless surface update) with t
 (`tests/validation/physics/test_lossy_metal_sibc.py`, 3/3 pass; falsification by
 re-adding the inductive term reproduces divergence).
 
-**Not delivered / open gaps:** oblique/rotated/curved and Bloch cases still funnel
-through the single `_reject_surface_impedance` `NotImplementedError`; the generic
-`SurfaceImpedanceMedium` adapter export mapping fails closed (no external construct).
-No wave-level SIBC/roughness benchmark in RESULTS. The documented 1D stability
-narrative is sign-mirrored/setup-dependent — treat the 3D empirical characterization
-as ground truth.
+**Round-G all-orientation staircased SIBC + cylinder physics gate + skin-effect bench
+(merge `c9b4bfc`, acceptance `g4-sibc-oblique-acceptance-2026-07-21.md`):**
+- **All-orientation staircased exposed-face SIBC** (`compiler/materials.py`,
+  `fdtd/runtime/materials.py`, `fdtd/runtime/stepping.py`): a non-`Box` good conductor is
+  staircased from its node occupancy — every axis-aligned voxel face becomes a masked
+  Leontovich surface-impedance write, covering cylinder/sphere, all six orientations, and
+  mixed orientations. Orientation-equivalence (cyclic-permutation residual ~1.7e-7, float32
+  round-off) + mixed-orientation stability gates
+  (`tests/validation/physics/test_sibc_orientation.py` 6 passed,
+  `test_sibc_staircase.py` 6 passed). Falsifications: face-normal sign flip breaks
+  orientation-precise equivalence; active-branch sign flip diverges (Box + voxel paths).
+- **Staircased-cylinder physics convergence gate**
+  (`test_sibc_cylinder_convergence.py`, 5 passed): absorbed power (net inward Poynting flux)
+  of a staircased-SIBC cylinder vs the same cylinder as a resolved volumetric conductor on a
+  skin-depth-meshed grid. **Documented ~18% offset**: SIBC/resolved ratio ≈ **0.18**, and it
+  is **grid-independent on both sides AND R/δ-independent** (0.172 at R/δ=6.7, 0.194 at
+  R/δ=10.1) — i.e. the intrinsic **first-order-Leontovich-on-a-staircased-curve systematic**
+  (on a FLAT surface the same boundary matches analytic Leontovich to <1%); a contributing
+  half-cell low/high surface-node placement asymmetry is documented (convention, not a bug).
+  Gate set at 25% so it fails closed on any regression toward PEC (PEC absorbs 1.8% of SIBC).
+  Committed probes `docs/assessments/g4-sibc-oblique-probes/` reproduce the R/δ and 4-tier
+  grid-independence numbers.
+- **Wave-level skin-effect attenuation benchmark**
+  (`benchmark/scenes/rf/lossy_waveguide_attenuation.py`, RESULTS row): a lossy-wall TE10
+  guide's conductor attenuation `alpha` from a two-line `|S21|` ratio vs analytic
+  `alpha_c` (Pozar 3.96) — median rel err **0.049%**, max **0.37%** (< 5% gate), passive
+  (max singular value 0.363), matched (|S11| max 0.017); PEC-wall falsification collapses
+  alpha to 0.00017 Np/m. The one authorized external-reference cloud run is recorded
+  **honestly**: the external lossy-metal surface-impedance export **under-applies the wall
+  loss** at the coarse export grid (forward-mode ~0.1–0.2 Np/m vs analytic ~1.7–2.2) — a
+  documented **adapter-fidelity gap**, NOT the FDTD bench (matches analytic to 0.05%); the
+  same adapter's phase-based beta cross-check agrees to ~1%.
+- **Explicit committed zero-impact gate** (`test_sibc_zero_impact.py`): a SIBC-free scene's
+  six raw last-step Yee fields are **bitwise identical** with the compile hook present vs
+  monkeypatched out, with a load-bearing control (a real `LossyMetalMedium` box changes the
+  fields when the hook is removed). Falsification recorded.
 
-**Evidence grade:** **E0** (contract + runtime generalization; stability fix is a
-correctness/robustness landing, not a wave-level validation grade).
-**Freeze:** Wave C — **unfrozen (S3 passed 2026-07-21)**; oblique/curved orientation
-generalization is a Round G track.
+**Not delivered / open gaps:** **true oblique/conformal (non-staircase) SIBC** remains the
+recorded gap, fail closed — a rotated `Box` (grid-unaligned face normal) is not staircased
+and fails closed; the generic rational (`SurfaceImpedanceMedium`) ADE on a curved conductor
+fails closed (only the narrowband good conductor is staircased). Bloch + SIBC,
+adjoint/distributed/trainable SIBC, and generic surface-impedance adapter export remain
+fail closed (external export under-applies wall loss, above). The ~18% staircase-curve
+absorbed-power systematic awaits a second-order / curvature-corrected surface impedance.
+
+**Evidence grade:** **E1** (all-orientation staircased SIBC: orientation-equivalence /
+staircased-cylinder absorbed-power convergence / wave-level analytic-alpha bench / zero-impact
+gated + falsified; the external cross-check is a documented adapter gap, not a passing
+reference, and the ~18% curved-conductor systematic caps the grade below E2).
+**Freeze:** Wave C — **unfrozen (S3 passed 2026-07-21)**; Round G orientation generalization
+landed (merge `c9b4bfc`; census unchanged at the SIBC funnel — no guard added/removed).
 
 ### Wave D (10 / 11 / 12 / 13) — owner-authorized selective start (2026-07-19)
 
@@ -770,9 +940,16 @@ regression before it is checked off.
   seam-ownership rule + defense-in-depth trainable guard landed
   (`2364533`/`f7e8e9a`, `docs/assessments/e3-distributed-adjoint-acceptance-2026-07-19.md`).
   Timing measured on the exclusive window (`multi-gpu-timing-2026-07-20.json`):
-  ensemble 1.98–2.00×, joint-solve 128³ 0.544× / 192³ 1.726×, NCCL step-rate
-  not-measurable-by-hooks. **Still open:** NCCL one-process-per-GPU adjoint + monitor
-  gather, coupled-runtime (circuit/network/wire) joint solve, guard-list disposition.
+  ensemble 1.98–2.00×, joint-solve 128³ 0.544× / 192³ 1.726×. **Round-G NCCL
+  reverse-halo adjoint TRANSPORT PRIMITIVES landed** (merge `42ac3f1`,
+  `g1-nccl-adjoint-acceptance-2026-07-21.md`): the transposed reverse halos are gated by a
+  bitwise 2-process discrete-transpose identity, and an opt-in per-rank step-rate
+  instrument (zero-cost-off asserted) resolves the round-E "not-measurable-by-hooks"
+  finding (numbers pending an exclusive window). **Still open:** the NCCL
+  one-process-per-GPU **end-to-end reverse driver** (honestly deferred fail-closed with a
+  written 7-step plan in the G1 acceptance doc — the in-process bridge is structurally
+  single-process) + monitor gather, CPML psi-carrying NCCL reverse, S5 tiled seeds,
+  coupled-runtime (circuit/network/wire) joint solve, guard-list disposition.
 - **S5 — Full benchmark convergence: GEOMETRY LEVER LANDED (Round-F F4); rest QUEUED.**
   The §1.7 geometry/subpixel systemic lever shipped: **edge-native per-Yee-component
   material sampling** (drops the node→edge arithmetic smear; the Kottke/arithmetic subpixel
@@ -797,13 +974,18 @@ regression before it is checked off.
   reference for both material paths (`field_corr` is the reference-validity sentinel).
   **Still QUEUED:** §1.7 remaining over-target scenes, TFSF/diffraction R/T/A normalization,
   S1 RF scenes resident in RESULTS.
-- **S6 — Wave C solver consumption: UNFROZEN (2026-07-21); Round G in flight.**
+- **S6 — Wave C solver consumption: UNFROZEN (2026-07-21); Round G DELIVERED & merged.**
   S1/S2/S3 all pass (see S3 above), so the S0.2 freeze on Wave-C new-physics solver
-  consumption is lifted. **Round G** carries the Wave-C tracks — 07 lossy-wire recurrence
-  (B2→B3), 08 ferrite general/non-axis-aligned bias, 09 SIBC oblique/curved orientation
-  generalization — plus the 02 NCCL one-process-per-GPU adjoint tail (see
-  `14-program-continuation-2026-07-21.md`). Each still targets E0→E2 with an independent
-  reference before any `completed` mark.
+  consumption is lifted. **Round G delivered the three Wave-C consumption tracks**
+  (master `18bc42a`): **07** lossy-wire B2 recurrence + real `ohmic_loss` + B3 conductivity
+  adjoint (`3884bb7`, lossy E0→**E1–E2**); **08** ferrite arbitrary-bias forward + mixed-bias
+  support (`5dd100e`, E0→**E1**); **09** all-orientation staircased SIBC + cylinder physics
+  gate + skin-effect bench (`c9b4bfc`, E0→**E1**) — plus the 02 NCCL reverse-halo adjoint
+  transport primitives (`42ac3f1`, driver deferred). Each still carries fail-closed items
+  (07 field-coupled `dI/dσ` + distributed lossy; 08 Bloch/multi-GPU/adjoint; 09
+  oblique/conformal/rational-on-curved) and none is `completed` (audit §4 non-author-review +
+  external-reference bar unmet — 09's external cross-check is a documented adapter gap, not a
+  pass). **Round H** carries the follow-ons (see `14-program-continuation-2026-07-21.md`).
 - **S7 — Wave D (10–13): OWNER-AUTHORIZED SELECTIVE START (2026-07-19).** The
   owner lifted the S0.2/S7 freeze for plans **10, 12, 13 only** and dropped plan
   11 (bioheat, plan file deleted in commit `4c521ab`). Delivered against master:
@@ -817,11 +999,16 @@ regression before it is checked off.
   P5 multi-GPU/smooth surrogate, P6–7 calibration/standard workflow. All three
   are E1–E2 (no external reference), so none is `completed`.
   **Capability-guard census budget history** (`docs/reference/fdtd-capability-guard-census.md`,
-  `CAPABILITY_GUARD_BUDGET` in `tests/api/public/test_guard_census.py`, now 176):
+  `CAPABILITY_GUARD_BUDGET` in `tests/api/public/test_guard_census.py`, now **175**):
   `144 → 153` (plan 12 electrostatics merge) `→ 168` (plan 13 Phase-4 breakdown
   merge, +15 guards) `→ 172` (plan 10 SAR merge reconciliation, +4 guards)
-  `→ 176` (plan 13 Phase-3 pre-bias slice, commit `d180125`, +4 guards); ESD
-  Phases 1–2 added no capability guards (local `ValueError`/`TypeError` only).
+  `→ 176` (plan 13 Phase-3 pre-bias slice, commit `d180125`, +4 guards) `→ 175`
+  (Round-F F3a `scene_gradient_vjp` lands, −1) `→ 175` (Round G, **net ±2**: 07
+  lossy-wire **+2** — −1 finite-conductor compile deferral removed, +2 lossy
+  reverse/checkpoint guards, +1 distributed lossy-forward reject; 08 ferrite **−2** —
+  general-bias and mixed-bias-direction guards removed; 02 NCCL and 09 SIBC net 0,
+  no guard added/removed). ESD Phases 1–2 added no capability guards (local
+  `ValueError`/`TypeError` only).
 
 **Freeze rules restated:** the S0.2 rule that no Wave C/D new-physics
 implementation starts until S3 passes was first **selectively overridden by the owner

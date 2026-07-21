@@ -297,3 +297,37 @@ OPEN 并记录：
   2. 独立参考：Tidy3D 不覆盖亚网格细线（审计 §3 表 07 行），以**解析趋肤/传输线**占位并标 `reference: future-xfdtd`；
   3. 收敛报告 + 相关 benchmark 场景进入 RESULTS。
 - 进入门：本计划为 Wave C 求解器消费，S6 解冻前不启动有损运行时实现（见 S0.2 冻结与 S2 §S6）。
+
+### 2026-07-21 Round-G revision (master `18bc42a`; merge `3884bb7`) — B2 lossy recurrence + B3 conductivity adjoint LANDED (not `completed`)
+
+S6 unfroze (S1–S3 all passed) and Round G consumed the lossy physics in the solver.
+Evidence per `docs/assessments/g2-lossy-wire-acceptance-2026-07-21.md`; this note only
+appends delivered status + honest caveats (append-only; does not rewrite the above).
+
+- **B2 passive lossy-current ADE companion consumed by the runtime**
+  (`fdtd/wire_lossy.py`, `fdtd/wire.py`): energy-consistent trapezoidal (Tustin) companion
+  in the current update; the finite-conductor compile deferral is removed. Gates
+  (`tests/fdtd/thin_wire/test_wire_lossy_recurrence.py` 9 / `test_thin_wire_lossy_forward.py`
+  7): analytic-AC realized resistance vs scaled-Bessel **< 8%** (fit-limited, NOT the 2%
+  compile-layer gate — B1 nondeterministic shared fit); DC `R0==R_dc·length` rel **1e-12**;
+  **bitwise** PEC parity (SHA256-identical vs base, auditor-confirmed); adaptive spectral
+  certificate (combined `[I;x]` radius `< 1`, else fail-closed). Falsifications committed
+  (`docs/assessments/g2-lossy-wire-probes/falsify.py`).
+- **Real `ohmic_loss` monitor** `0.5·Re(Z')·length·|I(f)|²` (was zeros; PEC exactly zero;
+  PEC ohmic-only returns zeros — fixed a PEC finalize regression). **Energy-closure caveat
+  (honest substitution):** only the **companion-level** closure ships
+  (`test_energy_closure_single_tone`); the **closed-box 3D field-energy closure** was **NOT
+  performed** (scope reduction, supervisor sign-off) — the wire↔field coupled-passivity
+  guarantee is an open item (the companion is not positive-real by construction, active out
+  of band; stability is an isolated per-segment spectral-radius certificate).
+- **B3 conductivity adjoint** (deterministic dissipation channel): closed-form `dZ'/dσ` +
+  autograd `analytic_ac_resistance`, vs float64 central difference **< 1e-6**, DC limit
+  `dR_dc/dσ = −1/(π a²σ²)` exact (`tests/gradients/test_fdtd_thin_wire_conductivity_adjoint.py`
+  7; `verify_grad.py` committed).
+- **Still fail-closed (NOT completed):** field-coupled `dI/dσ` reverse (nondeterministic
+  shared fit → non-differentiable σ→coeffs map; `replay_wire_state` sharpened, not lifted);
+  ADE loss-state checkpoint/resume (B3+ schema); **B4** distributed lossy reverse; and now
+  the **distributed lossy forward** (`fdtd/distributed/solver.py`) — closing a verified
+  silent-PEC hole. No scene-level trainable-conductivity leaf. Census `175 → 176 → 177` in
+  the track worktree, reconciled to master 175 (round-G net ±2). Measured grade: **PEC E2 /
+  lossy E1–E2**; no non-author review, so no `completed`.

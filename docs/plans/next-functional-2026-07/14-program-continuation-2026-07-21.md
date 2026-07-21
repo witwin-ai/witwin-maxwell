@@ -1,11 +1,14 @@
 # Program continuation plan — rounds F/G/H (post round-E tiers 1–4)
 
-> Status: active — **Round F DELIVERED & merged (2026-07-21); Round G in flight**
+> Status: active — **Rounds F & G DELIVERED & merged (2026-07-21); Round H launching**
 > Date: 2026-07-21
 > Anchor: master `164c263` (round E merged; final battery 2836 passed / 16 expected-FDFD / 3 xfailed)
 > Round-F merge anchor: master `b89a75c` (F1 `07e8e99`, F2 `0546b0a`, F3 `7ec99c7`,
 > F4 `431bd7f`, hygiene `b89a75c`; full battery **2911 passed / 16 expected-FDFD / 3 xfailed**)
-> Governing status doc: `00-status-and-gaps-2026-07-19.md` (round-E + round-F revisions)
+> Round-G merge anchor: master `18bc42a` (G1 `42ac3f1`, G2 `3884bb7`, G3 `5dd100e`,
+> G4 `c9b4bfc`, audit-minor cleanup `18bc42a`; full battery **2982 passed / 16
+> expected-FDFD / 3 xfailed / 1 xpassed**)
+> Governing status doc: `00-status-and-gaps-2026-07-19.md` (round-E + round-F + round-G revisions)
 
 ## Delivery status (2026-07-21)
 
@@ -34,18 +37,58 @@ audited; load-bearing tests falsified; per-track acceptance docs under `docs/ass
 (audit §4 non-author-review + external-reference bar unmet); rounds record delivery +
 evidence grade only.
 
-**Round G — IN FLIGHT (launched 2026-07-21), four tracks:**
+**Round G — DELIVERED & merged to master `18bc42a`** (all four tracks adversarially
+audited; load-bearing tests falsified; per-track acceptance docs under `docs/assessments/`;
+census reconciled to **175**, round-G net ±2):
 
-1. **02 — NCCL one-process-per-GPU adjoint** (+ monitor gather, coupled-runtime joint solve,
-   NCCL timing hooks — the round-E "not-measurable" finding).
-2. **07 — lossy-wire recurrence** (B2 energy-consistent lossy current recurrence + CUDA
-   `update_wire_state` extension → B3 conductivity adjoint).
-3. **08 — ferrite general/non-axis-aligned bias** (forward consumption widening beyond the
-   axis-aligned slice).
-4. **09 — SIBC oblique/curved orientation generalization** (beyond the axis-aligned
-   exposed-face layout).
+1. **02 — NCCL reverse-halo adjoint transport primitives, merge `42ac3f1`.**
+   `prepare_adjoint_staging` / `exchange_magnetic_adjoint` / `exchange_electric_adjoint`
+   gated by a **bitwise** 2-process discrete-transpose identity + an opt-in per-rank
+   step-rate instrument (zero-cost-off asserted, resolves the round-E "not-measurable"
+   finding). The **end-to-end per-rank reverse driver is honestly deferred, fail-closed**,
+   with a written **7-step plan** (the in-process bridge is structurally single-process).
+   Acceptance `g1-nccl-adjoint-acceptance-2026-07-21.md`.
+2. **07 — lossy-wire B2 recurrence + B3 conductivity adjoint, merge `3884bb7`.** Passive
+   lossy-current ADE companion consumed by the runtime + real `ohmic_loss`
+   (`0.5·Re(Z')·L·|I|²`), analytic-AC (<8%, fit-limited) / DC-exact / bitwise-PEC-parity /
+   spectral-stability gates; closed-form `dZ'/dσ` adjoint vs central difference <1e-6.
+   Field-coupled `dI/dσ` + distributed lossy stay fail-closed; closed-box field-energy
+   closure not performed (companion-level only). Acceptance
+   `g2-lossy-wire-acceptance-2026-07-21.md`.
+3. **08 — ferrite arbitrary-bias forward + mixed-bias support, merge `5dd100e`.** Per-cell
+   coordinate-rotation general path (rotation-equivalence bit-for-bit, oblique-vs-Polder-oracle
+   1.197e-13, handedness, per-cell independence, zero-impact, CUDA passivity); contract-doc
+   §7 item 6 superseded; census `175 → 173`. Acceptance `g3-ferrite-bias-acceptance-2026-07-21.md`.
+4. **09 — all-orientation staircased SIBC, merge `c9b4bfc`.** Curved conductors staircased
+   into masked Leontovich exposed-face writes + staircased-cylinder absorbed-power convergence
+   gate (documented ~18% first-order-on-curve systematic, grid/R/δ-independent) + wave-level
+   skin-effect attenuation bench (alpha median rel err 0.049%) + committed zero-impact gate.
+   True oblique/conformal remains fail-closed; external cross-check is a documented adapter gap.
+   Acceptance `g4-sibc-oblique-acceptance-2026-07-21.md`.
 
-Round H (Wave D deepening) remains queued as specified in Tier 4 below.
+**Consequence:** the three Wave-C solver-consumption tracks (07/08/09) landed post-unfreeze
+(07 lossy E0→E1–E2; 08 E0→E1; 09 E0→E1) and the 02 NCCL adjoint transport foundation is in
+place. No Round-G phase is `completed` (audit §4 non-author-review + external-reference bar
+unmet; 09's external cross-check is a documented adapter-fidelity gap, not a pass).
+
+**Round H — LAUNCHING (2026-07-21), tracks:**
+
+1. **02 — NCCL end-to-end reverse DRIVER** per the written 7-step plan in
+   `g1-nccl-adjoint-acceptance-2026-07-21.md` (guard-relax → per-rank checkpoint capture →
+   NCCL forward-replay dict halos → local separable seed → per-rank reverse loop → grad_eps
+   gather + rank-0 pullback → parity/determinism/falsification gates), on top of the landed
+   reverse-halo transport primitives.
+2. **12 — tensor-eps + open boundary** (electrostatics Phase 4: nonuniform grid,
+   tensor/anisotropic eps, open-boundary truncation — the P4 items rejected at prepare).
+3. **10 — IEEE/IEC phantom benchmark + incident power density** (SAR: standard-phantom
+   cross-check + the `IncidentPowerDensity` monitor / `input_power` normalization currently
+   fail-closed).
+4. **13 — circuit-ESD co-simulation + smooth breakdown surrogate** (Phase 3 source-impedance/
+   discharge-network coupling consuming F1's co-sim path + the Phase-5 trainable smooth
+   breakdown surrogate).
+
+> Execution model unchanged (parallel single-writer worktrees, two adversarial audits,
+> supervisor merge gate, integration battery — see below).
 > Execution model: parallel single-writer worktrees, Workflow orchestration, per-track
 > dev stages → two adversarial audits (regression + claim lens, evidence reproduced
 > independently, load-bearing tests falsified) → fix rounds → supervisor merge gate →

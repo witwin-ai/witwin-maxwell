@@ -20,6 +20,23 @@
 > coupled-runtime (circuit/network/wire) joint solve remain fail-closed (blueprint
 > #13/#18); no non-author review. See `docs/assessments/e3-distributed-adjoint-acceptance-2026-07-19.md`,
 > `multi-gpu-timing-2026-07-20.json`, `00-status-and-gaps-2026-07-19.md` §02.
+>
+> **Round-G revision (2026-07-21, master `18bc42a`; merge `42ac3f1`).** NCCL
+> reverse-halo adjoint **transport primitives** delivered
+> (`fdtd/distributed/nccl_transport.py`: `prepare_adjoint_staging`,
+> `exchange_magnetic_adjoint`, `exchange_electric_adjoint`) — exact transposes of the
+> forward Yee halos, gated by a **bitwise** 2-process `torchrun` discrete-transpose
+> identity `<A x, y> == <x, A^T y>` (atol == 0) with a `NCCL_TRANSPOSE_FALSIFY` teeth
+> check. Opt-in per-rank step-rate instrument (`fdtd/distributed/instrumentation.py`,
+> `WITWIN_FDTD_STEP_TIMING`) with **zero-cost-off asserted** (0 syncs disabled / `2+2N`
+> enabled), resolving the round-E "not-measurable-by-hooks" finding; no wall-clock number
+> asserted. **Still open (NOT completed):** the NCCL one-process-per-GPU **end-to-end
+> reverse driver** is honestly deferred fail-closed (the in-process adjoint bridge is
+> structurally single-process) with a written **7-step implementation plan** in the G1
+> acceptance doc; CPML psi-carrying NCCL reverse, S5 tiled seeds, monitor gather, and
+> coupled-runtime joint solve remain fail-closed; census unchanged at 175; no non-author
+> review. See `docs/assessments/g1-nccl-adjoint-acceptance-2026-07-21.md`,
+> `00-status-and-gaps-2026-07-19.md` §02. Round H carries the driver.
 
 ## 1. 功能定位
 
