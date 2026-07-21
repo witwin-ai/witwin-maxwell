@@ -6,7 +6,11 @@ Gates (design brief slice 1c):
   * discrete-energy non-growth at zero damping (falsifiable zero-growth form);
   * composes with PML / conductivity;
   * ferrite-free scene adds zero gyromagnetic operations (gated flag);
-  * general (non-axis-aligned) bias and Bloch fail closed.
+  * mixed-bias-direction and Bloch fail closed.
+
+General (non-axis-aligned) bias is no longer fail-closed: slice 2a lifts that
+guard and routes an arbitrary bias through the general-bias path. Its gates live
+in ``test_gyromagnetic_general_bias.py``.
 
 The runtime-vs-oracle gates run on a lightweight float64 mock solver so they test
 the exact stepping code path without the CUDA field update; the integration gates
@@ -216,10 +220,14 @@ def test_energy_decays_when_lossy():
 # --- fail-closed boundaries --------------------------------------------------
 
 
-def test_general_bias_fails_closed():
+def test_general_bias_builds_via_general_path():
+    """A general (non-axis-aligned) bias no longer fails closed: slice 2a routes it
+    through the general-bias path (dense u/v projection fields, identity
+    collocation). Full physics gates live in test_gyromagnetic_general_bias.py."""
     material = _ferrite(bias=(1.0e5, 1.0e5, 1.0e5))
-    with pytest.raises(NotImplementedError, match="axis-aligned"):
-        _build_mock(material, 1e-12)
+    solver = _build_mock(material, 1e-12)
+    assert solver.gyromagnetic_enabled
+    assert solver._gyromagnetic_state["general"] is True
 
 
 def _two_region_bias_scene(bias_low, bias_high, *, spacing=0.02, half=0.06):
