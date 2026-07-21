@@ -99,6 +99,7 @@ from .monitors import (
     FinitePlaneMonitor,
     FluxMonitor,
     FluxTimeMonitor,
+    IncidentPowerDensityMonitor,
     MediumMonitor,
     ModeMonitor,
     PermittivityMonitor,
@@ -146,6 +147,7 @@ from .sar import (
     SARResult,
 )
 from .postprocess.sar_combine import combine_coherent_sar, combine_incoherent_sar
+from .postprocess.incident_power import IncidentPowerDensity
 from .thin_wire import ThinWire, WireConductor, WireData, WireEnd
 from .ports import (
     AxisPath,
@@ -295,6 +297,8 @@ __all__ = [
     "FDTDParallelConfig",
     "FDTDResumeCheckpoint",
     "FinitePlaneMonitor",
+    "IncidentPowerDensity",
+    "IncidentPowerDensityMonitor",
     "GaussianBeam",
     "GaussianPulse",
     "GMRES",

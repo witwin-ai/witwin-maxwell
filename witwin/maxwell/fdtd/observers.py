@@ -323,7 +323,18 @@ def _exact_cell_center_widths(solver, axis, points):
     return widths[indices]
 
 
-def _compute_plane_flux(result):
+def plane_normal_poynting(result):
+    """Per-cell time-averaged normal Poynting ``S.n`` and cell-area weights.
+
+    ``S.n = 0.5 * Re((E x conj(H)) . n_hat)`` in W/m^2, oriented by the payload's
+    ``normal_direction`` (``"+"`` -> ``+axis``, ``"-"`` -> ``-axis``). The returned
+    ``poynting`` carries a leading frequency axis only when the payload is
+    multi-frequency; ``weights`` is the ``(nu, nv)`` cell-area map. Returns torch
+    tensors when the payload holds tensors, else NumPy arrays. This is the single
+    source of truth shared by plane-flux integration and incident power density so
+    both stay exactly consistent (``flux == sum(poynting * weights)``).
+    """
+
     axis = normalize_axis(result["axis"])
     axis_index = _AXIS_CODES[axis]
     coord_names = _plane_coord_names(axis)
@@ -386,10 +397,7 @@ def _compute_plane_flux(result):
 
         direction = 1.0 if result.get("normal_direction", "+") == "+" else -1.0
         poynting = 0.5 * torch.real(torch.cross(e_field, torch.conj(h_field), dim=-1)[..., axis_index]) * direction
-        flux = torch.sum(poynting * weights, dim=(-2, -1))
-        if not has_multi_frequency:
-            return flux.reshape(())
-        return flux
+        return poynting, weights
 
     coord_a = np.asarray(result[coord_names[0]], dtype=float)
     coord_b = np.asarray(result[coord_names[1]], dtype=float)
@@ -421,6 +429,18 @@ def _compute_plane_flux(result):
 
     direction = 1.0 if result.get("normal_direction", "+") == "+" else -1.0
     poynting = 0.5 * np.real(np.cross(e_field, np.conj(h_field), axis=-1)[..., axis_index]) * direction
+    return poynting, weights
+
+
+def _compute_plane_flux(result):
+    frequencies = tuple(float(freq) for freq in result.get("frequencies", (result["frequency"],)))
+    has_multi_frequency = len(frequencies) > 1
+    poynting, weights = plane_normal_poynting(result)
+    if isinstance(poynting, torch.Tensor):
+        flux = torch.sum(poynting * weights, dim=(-2, -1))
+        if not has_multi_frequency:
+            return flux.reshape(())
+        return flux
     flux = np.sum(poynting * weights, axis=(-2, -1))
     if not has_multi_frequency:
         return float(flux)

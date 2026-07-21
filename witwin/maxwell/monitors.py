@@ -255,6 +255,70 @@ class FluxMonitor(PlaneMonitor):
         )
 
 
+# The single versioned spatial-averaging window for incident power density. It is
+# an engineering convenience for exposure reporting and does NOT claim compliance
+# with any specific standard averaging area or window shape.
+INCIDENT_SPATIAL_AVERAGE_VERSION = "spatial-average-v1"
+
+
+class IncidentPowerDensityMonitor(PlaneMonitor):
+    """Time-averaged incident power density ``|S.n|`` on a plane (W/m^2).
+
+    A plane monitor variant that carries the tangential fields required to form
+    the normal Poynting component ``S.n = 0.5 * Re((E x conj(H)).n_hat)``. The
+    result-domain accessor :meth:`Result.incident_power_density` returns the
+    signed per-cell normal Poynting, its magnitude ``|S.n|`` (the exposure
+    incident power density), the plane-integrated flux (identically equal to the
+    :class:`FluxMonitor` integral on the same plane), and, when
+    ``spatial_average`` is set, an area-weighted moving-window average of
+    ``|S.n|``.
+
+    ``spatial_average`` is the moving-window **area** in m^2 (for example
+    ``4e-4`` for a 4 cm^2-class window). The window is an axis-aligned square of
+    side ``sqrt(area)`` centred on each cell; near the plane edge it is truncated
+    to the in-domain cells (``edge_policy="truncate"``). The averaging is
+    versioned ``spatial-average-v1`` and is NOT a certified standards window.
+
+    The monitor reports whatever field is present at its plane; place it in the
+    incident region (ahead of any scatterer) to read the exposure incident power
+    density.
+    """
+
+    spatial_average: float | None
+    spatial_average_version: str | None
+
+    def __init__(
+        self,
+        name,
+        axis="z",
+        position=0.0,
+        frequencies=None,
+        normal_direction="+",
+        spatial_average=None,
+    ):
+        super().__init__(
+            name=name,
+            axis=axis,
+            position=position,
+            fields=required_flux_fields(axis),
+            frequencies=frequencies,
+            compute_flux=True,
+            normal_direction=normal_direction,
+        )
+        resolved_area = None
+        version = None
+        if spatial_average is not None:
+            resolved_area = float(spatial_average)
+            if not math.isfinite(resolved_area) or resolved_area <= 0.0:
+                raise ValueError(
+                    "IncidentPowerDensityMonitor spatial_average must be a positive "
+                    "window area in m^2, or None to disable."
+                )
+            version = INCIDENT_SPATIAL_AVERAGE_VERSION
+        object.__setattr__(self, "spatial_average", resolved_area)
+        object.__setattr__(self, "spatial_average_version", version)
+
+
 @dataclass(frozen=True)
 class FinitePlaneMonitor:
     name: str
