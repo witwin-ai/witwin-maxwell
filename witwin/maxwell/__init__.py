@@ -67,6 +67,10 @@ from .breakdown import (
     BreakdownEvent,
     BreakdownResultData,
 )
+from .breakdown_risk import (
+    SmoothBreakdownRisk,
+    SmoothBreakdownRiskData,
+)
 from .media import (
     CustomDebyePole,
     CustomDrudePole,
@@ -262,6 +266,8 @@ __all__ = [
     "CustomLorentzPole",
     "BreakdownMonitor",
     "BreakdownStressData",
+    "SmoothBreakdownRisk",
+    "SmoothBreakdownRiskData",
     "ComponentRating",
     "ComponentStressData",
     "ComponentStressMonitor",

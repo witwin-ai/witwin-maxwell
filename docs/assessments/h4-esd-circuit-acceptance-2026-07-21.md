@@ -162,3 +162,97 @@ Result: **31 passed**.
 `tests/api/public/test_guard_census.py` -> 3 passed). This stage adds **no**
 `raise NotImplementedError` guards (it adds a capability and reuses an existing
 fail-closed guard), so the budget is unchanged at 175.
+
+---
+
+# H4b — SmoothBreakdownRisk differentiable surrogate (non-physical, non-regulatory)
+
+Base for this stage: `3ad6e53` (H4a). Delivered on branch `fable/esd-circuit`.
+
+## Delivered
+
+- `witwin/maxwell/breakdown_risk.py` (new module, typed SEPARATELY from
+  `breakdown.py` and `breakdown_stress.py`): `SmoothBreakdownRisk` (config +
+  differentiable `evaluate` / `evaluate_from_components`) and
+  `SmoothBreakdownRiskData` (typed output). Risk =
+  `reduce_cells(occupancy * sum_t sigmoid((|E|-Ecrit)/w) dt)`; reductions
+  `sum` (soft over-stress dose, s) / `mean` / `softmax` (temperature-weighted
+  worst cell). Optional `damage_exponent` adds a `soft_damage` map without
+  changing the primary `risk`. Provenance carries `non_physical=True`,
+  `non_regulatory=True`, the sigmoid-margin definition, model version
+  `smooth-breakdown-risk-1`, and the verbose capability tag.
+- `colocate_electric_magnitude` refactored to slice the trailing three (X,Y,Z)
+  axes, so a leading time axis `(T,X,Y,Z)` rides through untouched — a single
+  implementation now serves both the per-step observer and the surrogate's
+  recorded `|E|(t)` series (no duplicate colocation). Backward compatible with
+  the 3D observer call.
+- Public exports: `mw.SmoothBreakdownRisk`, `mw.SmoothBreakdownRiskData`.
+- `simulation.py` hard-breakdown trainable-rejection guard KEPT (not weakened);
+  only its hint text updated to point at the now-available surrogate.
+
+## Gates + observed margins (pre-registered tolerances)
+
+All in `tests/breakdown/test_smooth_breakdown_risk.py`, CPU float64 (pure torch,
+no CUDA kernels):
+
+- **gradient (FD, small scene, float64)**: analytic backward vs central
+  difference for a source-amplitude and a material-screening parameter threaded
+  through a synthetic differentiable `|E|(t)` — both relative errors `< 1e-4`
+  (gate 1e-4), opposite-sign sensitivities (source `> 0`, material `< 0`), and a
+  `torch.nn.Parameter` reach check.
+- **monotonicity**: `risk` strictly increases across source amplitudes
+  `[0.8, 1.0, 1.2, 1.5, 2.0] MV/m`.
+- **zero far below threshold**: peak field ~1e-2 of `Ecrit` (margin ~ -50
+  widths) → `risk < 1e-18`, `peak_instant_risk < 1e-15`; and a far-vs-at
+  contrast with `at > 1e6 * far`.
+- **colocation reuse**: `evaluate_from_components` == manual colocation; batched
+  colocation == per-step loop; uniform field → `sqrt(3)*val` exactly.
+- **typing / non-physical tag**: `SmoothBreakdownRiskData`, capability level
+  contains "non-physical" and "non-regulatory", provenance flags asserted.
+- **reductions/diagnostics**: softmax bracketed `mean <= soft <= peak`;
+  occupancy zeroing; damage map optional and non-invasive.
+- **fail-closed validation**: bad `critical_field`/`width`/`reduction`/
+  `temperature`/`damage_exponent` and bad `evaluate` inputs all raise.
+
+## Falsifications recorded (headline gates)
+
+- **A (gradient)**: `p = torch.sigmoid(margin.detach())` — both gradient tests go
+  red with `RuntimeError: element 0 ... does not require grad`. Restored.
+- **B/C (monotonicity + zero-far-below)**: `p = torch.sigmoid(-margin)` (sign
+  flip) — `test_risk_monotone_in_source_amplitude`,
+  `test_risk_grows_from_negligible_to_finite_across_threshold`, and
+  `test_risk_vanishes_far_below_threshold` all go red. Restored.
+
+## Test commands / counts
+
+```bash
+export CUDA_HOME=.../nvidia/cu13; export PATH="$CUDA_HOME/bin:$PATH"
+export PYTHONPATH=<worktree>; export CUDA_VISIBLE_DEVICES=1
+python -m pytest tests/breakdown/test_smooth_breakdown_risk.py -q          # 17 passed
+python -m pytest tests/breakdown tests/esd \
+  tests/api/public/test_public_api.py \
+  tests/api/public/test_simulation_smoke.py \
+  tests/api/public/test_guard_census.py -q                                 # 157 passed
+```
+
+## Census
+
+`CAPABILITY_GUARD_BUDGET = 175` verified at this stage's base (`test_guard_census`
+green). H4b adds **no** `raise NotImplementedError` guards (the surrogate's input
+validation uses `ValueError`/`TypeError`, which the census does not count), and
+the hard-breakdown trainable-rejection guard is retained. Budget unchanged at 175.
+
+## Known gaps / must-know for the next agent
+
+- The surrogate is a post-hoc differentiable functional (SAR `soft_peak`
+  precedent): gradient flows through whatever produces `e_magnitude_series`. The
+  production CUDA forward does NOT autograd-tape `FieldTimeMonitor` time-series
+  buffers, so an end-to-end gradient through the real solver's recorded `|E|(t)`
+  is out of scope here — it would require seeding time-domain observers in the
+  FDTD adjoint bridge (a separate, larger slice). The gate validates the
+  surrogate's differentiability on a small taped `|E|(t)` field, exactly as the
+  SAR surrogate is gated on leaf field tensors.
+- No `Result` convenience method was wired to a `FieldTimeMonitor` this stage
+  (colocation from volume buffers is non-differentiable through the forward and
+  would risk implying a trainable path that does not exist). The public entry is
+  the functional `SmoothBreakdownRisk.evaluate[_from_components]`.
