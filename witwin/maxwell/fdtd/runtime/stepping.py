@@ -1500,6 +1500,18 @@ def apply_surface_impedance(solver):
         electric = getattr(solver, face["e_name"])
         magnetic = getattr(solver, face["h_name"])
         axis = face["axis"]
+        mask = face.get("mask")
+        if mask is not None:
+            # Staircased (voxelized) face: overwrite the exposed transverse footprint of
+            # the surface E plane with the Leontovich value, leaving lateral (interior)
+            # edges at their coefficient-masked zero. ``torch.where`` is static-shape so it
+            # captures into the field-update graph.
+            e_index = _surface_plane_index(electric.dim(), axis, face["electric_index"])
+            h_index = _surface_plane_index(magnetic.dim(), axis, face["magnetic_index"])
+            electric[e_index] = torch.where(
+                mask, face["sign"] * face["surface_r"] * magnetic[h_index], electric[e_index]
+            )
+            continue
         ade = face.get("ade")
         if ade is None and face["full_plane"]:
             solver.fdtd_module.applySibcSurface3D(
@@ -1548,6 +1560,13 @@ def _surface_face_index(ndim, axis, axis_index, face):
     index[axis] = int(axis_index)
     index[face["b_axis"]] = face["b_slice"]
     index[face["c_axis"]] = face["c_slice"]
+    return tuple(index)
+
+
+def _surface_plane_index(ndim, axis, axis_index):
+    """Index tuple selecting the whole transverse plane at ``axis_index`` along ``axis``."""
+    index = [slice(None)] * ndim
+    index[axis] = int(axis_index)
     return tuple(index)
 
 

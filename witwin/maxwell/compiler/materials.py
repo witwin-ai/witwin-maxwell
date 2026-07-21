@@ -1843,6 +1843,12 @@ class CompiledSurfaceMetal:
     touches_upper: tuple[bool, bool, bool]
     material: object
     conductivity: float | None
+    # Staircased (voxelized) metals carry a boolean node-occupancy mask instead of a
+    # rectangular ``cell_slices`` window: the runtime zeroes the E-update coefficients on
+    # every edge the occupancy fills (node->edge fill >= 0.5), so an arbitrary voxelized
+    # conductor (a curved cylinder/sphere) terminates as a good conductor. ``None`` for an
+    # axis-aligned Box metal (which uses the analytic ``cell_slices`` interior mask).
+    interior_node_mask: object = None
 
 
 @dataclass(frozen=True)
@@ -1869,6 +1875,12 @@ class CompiledSurfaceFace:
     transverse_slices: tuple[slice, slice]
     full_plane: bool
     area: float
+    # Staircased faces carry a boolean node-plane mask over the ``(b, c)`` transverse
+    # dimensions (``b = (axis + 1) % 3``, ``c = (axis + 2) % 3``) selecting exactly the
+    # exposed voxel faces at ``surface_node``; the runtime reduces it to each tangential
+    # E component's edge grid and writes the Leontovich value only there. ``None`` for an
+    # axis-aligned Box face (which owns a rectangular ``transverse_slices`` window).
+    transverse_mask: object = None
 
     @property
     def owner_rank(self) -> tuple[int, int, int, int, int]:
@@ -1978,6 +1990,147 @@ def _transverse_full_plane(scene, b_axis: int, b_slice: slice, c_axis: int, c_sl
     )
 
 
+def _is_axis_aligned_box(geometry) -> bool:
+    """Whether a geometry is an unrotated (axis-aligned) Box."""
+    if not isinstance(geometry, Box):
+        return False
+    rotation = getattr(geometry, "rotation", None)
+    if rotation is None:
+        return True
+    quaternion = np.asarray(rotation.detach().cpu(), dtype=np.float64)
+    return bool(np.allclose(np.abs(quaternion), (1.0, 0.0, 0.0, 0.0), atol=1.0e-6))
+
+
+def _select_node_plane(occupancy, axis: int, index: int):
+    """The 2D node plane of ``occupancy`` at ``index`` along ``axis`` (ascending order)."""
+    return occupancy[_axis_index_tuple(3, axis, index)]
+
+
+def _axis_index_tuple(ndim, axis, index_or_slice):
+    selector = [slice(None)] * ndim
+    selector[axis] = index_or_slice
+    return tuple(selector)
+
+
+def _mean_node_spacing(nodes) -> float:
+    array = np.asarray(nodes, dtype=np.float64)
+    if array.size < 2:
+        return 0.0
+    return float((array[-1] - array[0]) / (array.size - 1))
+
+
+def _compile_voxel_surface_metal(
+    scene, structure_index, geometry, material, metal_index, physical_bounds, tolerances
+):
+    """Staircase a voxelized (possibly curved) good-conductor into exposed faces.
+
+    A node belongs to the metal when its center is inside the geometry
+    (``signed_distance <= 0``): the staircase approximation of an arbitrary conductor.
+    Every axis-aligned voxel face on the metal/vacuum boundary is an exposed
+    surface-impedance face; faces of a given orientation at one node plane are grouped
+    into a boolean transverse node mask. A voxel face is illuminated only when its
+    vacuum-side node lies inside the physical domain (a face backing onto the PML is a
+    half-space, never illuminated), matching the Box path's flush-face exclusion. Only the
+    narrowband good-conductor (order-0 resistance) surface is wired for the staircase; the
+    per-edge rational ADE stays Box-only.
+    """
+    conductivity = _surface_metal_conductivity(material)
+    if conductivity is None:
+        _reject_surface_impedance(
+            "requires a narrowband good-conductor metal for a staircased (voxelized) "
+            "curved surface; the per-edge rational surface ADE is wired only for "
+            "axis-aligned Box faces.",
+            phase="Phase 2",
+        )
+    occupancy = geometry.signed_distance(scene.X, scene.Y, scene.Z) <= 0.0
+    if not bool(occupancy.any().item()):
+        _reject_surface_impedance(
+            "requires the metal to lie inside the grid; the surface covers no cells.",
+            phase="Phase 1",
+        )
+    occ = occupancy.detach().to("cpu")
+    nodes = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)
+    physical_node = []
+    for axis in range(3):
+        coords = np.asarray(nodes[axis], dtype=np.float64)
+        lo = float(physical_bounds[axis][0]) - tolerances[axis]
+        hi = float(physical_bounds[axis][1]) + tolerances[axis]
+        physical_node.append((coords >= lo) & (coords <= hi))
+
+    faces: list[CompiledSurfaceFace] = []
+    for axis in range(3):
+        b = (axis + 1) % 3
+        c = (axis + 2) % 3
+        naxes = tuple(a for a in range(3) if a != axis)
+        cell_area = _mean_node_spacing(nodes[naxes[0]]) * _mean_node_spacing(nodes[naxes[1]])
+        n_along = occ.shape[axis]
+        for p in range(1, n_along):
+            plane_metal = _select_node_plane(occ, axis, p)
+            plane_vacuum = _select_node_plane(occ, axis, p - 1)
+            # Low-side face: node p is metal, node p-1 is vacuum (outward normal -axis).
+            if physical_node[axis][p - 1]:
+                mask = plane_metal & (~plane_vacuum)
+                if bool(mask.any().item()):
+                    faces.append(
+                        _make_voxel_face(
+                            metal_index, axis, "high", p, p - 1, mask, naxes, cell_area
+                        )
+                    )
+            # High-side face: node p-1 is metal, node p is vacuum (outward normal +axis).
+            # The paired vacuum-side H sits at index p on the axis-reduced H grid, so the
+            # face is only valid when that index exists (p <= n_along - 2); the boundary
+            # node is otherwise a PML node and is excluded by the physical-node test.
+            if p <= n_along - 2 and physical_node[axis][p]:
+                mask = plane_vacuum & (~plane_metal)
+                if bool(mask.any().item()):
+                    faces.append(
+                        _make_voxel_face(
+                            metal_index, axis, "low", p, p, mask, naxes, cell_area
+                        )
+                    )
+    if not faces:
+        _reject_surface_impedance(
+            "requires a vacuum region in front of the metal; the voxelized conductor "
+            "exposes no illuminated face inside the physical domain.",
+            phase="Phase 1",
+        )
+    metal = CompiledSurfaceMetal(
+        structure_index=int(structure_index),
+        cell_slices=tuple(slice(0, occ.shape[axis]) for axis in range(3)),
+        touches_lower=(False, False, False),
+        touches_upper=(False, False, False),
+        material=material,
+        conductivity=conductivity,
+        interior_node_mask=occupancy.to(torch.float32),
+    )
+    return metal, faces
+
+
+def _make_voxel_face(metal_index, axis, side, surface_node, magnetic_index, mask, naxes, cell_area):
+    """Build one staircased face from a boolean node-plane mask in ``naxes`` order.
+
+    ``mask`` is indexed by the two non-normal axes in ascending order (``naxes``), the same
+    layout as a field tensor's transverse plane, so the runtime reduces it to each
+    tangential E component's edge grid without any axis reordering. ``transverse_slices`` is
+    a full-plane placeholder used only by the deterministic owner ordering; the boolean
+    ``transverse_mask`` is the true footprint.
+    """
+    mask = mask.contiguous()
+    nb, nc = int(mask.shape[0]), int(mask.shape[1])
+    area = float(mask.sum().item()) * float(cell_area)
+    return CompiledSurfaceFace(
+        metal_index=metal_index,
+        axis=axis,
+        metal_side=side,
+        surface_node=int(surface_node),
+        magnetic_index=int(magnetic_index),
+        transverse_slices=(slice(0, nb), slice(0, nc)),
+        full_plane=False,
+        area=area,
+        transverse_mask=mask,
+    )
+
+
 def compile_surface_impedance_layout(scene):
     """Extract every axis-aligned exposed surface-impedance face in the scene.
 
@@ -2012,27 +2165,29 @@ def compile_surface_impedance_layout(scene):
     for structure_index, structure in indexed:
         material = _structure_material(structure)
         geometry = structure.geometry
-        if not isinstance(geometry, Box):
-            _reject_surface_impedance(
-                f"requires an axis-aligned Box surface; a {type(geometry).__name__} surface "
-                "is curved or non-planar, so its local normal and cut-face area vary along "
-                "the surface.",
-                phase="Phase 2",
-            )
-        rotation = getattr(geometry, "rotation", None)
-        if rotation is not None:
-            quaternion = np.asarray(rotation.detach().cpu(), dtype=np.float64)
-            if not np.allclose(np.abs(quaternion), (1.0, 0.0, 0.0, 0.0), atol=1.0e-6):
-                _reject_surface_impedance(
-                    "requires an axis-aligned (unrotated) surface; an oblique surface "
-                    "presents an angle-dependent tangential tensor impedance.",
-                    phase="Phase 2",
-                )
         if scene.boundary.uses_kind("bloch"):
             _reject_surface_impedance(
                 "uses a real-valued surface update; a Bloch-periodic run carries complex "
                 "phase-shifted fields for which the real surface update is undefined.",
                 phase="Phase 3",
+            )
+        if not isinstance(geometry, Box):
+            # Any non-Box conductor (a curved cylinder/sphere) is staircased: the
+            # occupancy grid supplies the axis-aligned exposed faces directly. True
+            # oblique/conformal (non-staircase) SIBC remains the deferred gap.
+            metal, voxel_faces = _compile_voxel_surface_metal(
+                scene, structure_index, geometry, material, len(metals),
+                physical_bounds, tolerances,
+            )
+            metals.append(metal)
+            faces.extend(voxel_faces)
+            continue
+        if not _is_axis_aligned_box(geometry):
+            _reject_surface_impedance(
+                "requires an axis-aligned (unrotated) surface; a rotated Box presents an "
+                "oblique face whose local normal is not grid-aligned, which is the deferred "
+                "conformal/oblique case (staircasing a rotated Box is not wired).",
+                phase="Phase 2",
             )
         slices = _box_axis_slices(scene, geometry)
         if slices is None:
@@ -2149,23 +2304,43 @@ def _reject_conflicting_surface_faces(metals, faces):
             first, second = faces[i], faces[j]
             if first.axis != second.axis or first.surface_node != second.surface_node:
                 continue
-            b_first, c_first = first.transverse_slices
-            b_second, c_second = second.transverse_slices
-            if (
-                b_first.start < b_second.stop
-                and b_second.start < b_first.stop
-                and c_first.start < c_second.stop
-                and c_second.start < c_first.stop
-            ):
-                mat_first = metals[first.metal_index].material
-                mat_second = metals[second.metal_index].material
-                if mat_first is not mat_second:
-                    _reject_surface_impedance(
-                        "the same interface plane is claimed by two surface-impedance "
-                        "metals with different materials, so its tangential-E write has "
-                        "two contradictory owners.",
-                        phase="Phase 2",
-                    )
+            if not _faces_transverse_overlap(first, second):
+                continue
+            mat_first = metals[first.metal_index].material
+            mat_second = metals[second.metal_index].material
+            if mat_first is not mat_second:
+                _reject_surface_impedance(
+                    "the same interface plane is claimed by two surface-impedance "
+                    "metals with different materials, so its tangential-E write has "
+                    "two contradictory owners.",
+                    phase="Phase 2",
+                )
+
+
+def _faces_transverse_overlap(first, second) -> bool:
+    """Whether two coincident-plane faces share any transverse footprint.
+
+    Box faces overlap by rectangular slice intersection; staircased faces by boolean
+    mask intersection (both masks are in the same ascending non-normal-axis node order).
+    A mixed Box/staircase pair uses the mask restricted to the Box's slice window, which is
+    conservative (it never misses a genuine overlap) so the fail-closed owner guard holds.
+    """
+    mask_first = getattr(first, "transverse_mask", None)
+    mask_second = getattr(second, "transverse_mask", None)
+    if mask_first is not None and mask_second is not None:
+        return bool((mask_first & mask_second).any().item())
+    if mask_first is None and mask_second is None:
+        b_first, c_first = first.transverse_slices
+        b_second, c_second = second.transverse_slices
+        return (
+            b_first.start < b_second.stop
+            and b_second.start < b_first.stop
+            and c_first.start < c_second.stop
+            and c_second.start < c_first.stop
+        )
+    mask_face, slice_face = (first, second) if mask_first is not None else (second, first)
+    b_slice, c_slice = slice_face.transverse_slices
+    return bool(mask_face.transverse_mask[b_slice, c_slice].any().item())
 
 
 def compile_material_model(
