@@ -47,10 +47,11 @@ Honest gate classes
 * **Corroboration (cancellation-limited):** the port *current*
   ``I_port(t) = (V1 - v_port)/R`` is a small difference of near-equal terminal
   voltages (the port draws little current), so its relative precision floor is set
-  by the ~3e-4 difference between the independent analytic stimulus and the
-  solver's internal source sampling, not by a physics disagreement. It is gated at
-  a correspondingly looser, honestly-derived tolerance and is corroboration, not
-  the headline gate.
+  by the small difference between the independent analytic stimulus and the
+  solver's internal source sampling, not by a physics disagreement. Its observed
+  relative error (~7.0e-3, reproduced by the committed probe) is therefore looser
+  than the port-voltage gate; it is gated at a correspondingly looser tolerance and
+  is corroboration, not the headline gate.
 
 Falsification (brief-mandated): perturbing the MNA field-port *companion
 conductance* by a few percent in the coupled run makes its port voltage depart
@@ -78,8 +79,8 @@ pytestmark = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 # Pre-registered tolerances (frozen before measurement; see acceptance doc).
 # Observed on the reference host: fit relerr ~2.4e-5, port-voltage cross-check
-# ~1.2e-5, port-current ~1.2e-5; the MNA-companion falsification drives the
-# port-voltage error to ~4e-3 (>300x the baseline).
+# ~1.2e-5, port-current ~7.0e-3 (cancellation-limited); the MNA-companion
+# falsification drives the port-voltage error to ~4e-3 (>300x the baseline).
 # ---------------------------------------------------------------------------
 _FIT_TOL = 1.0e-3          # rational fit rel. error vs measured Y over the band
 _VOLTAGE_TOL = 5.0e-4      # |v_ode - v_fdtd|_inf / peak(|v_fdtd|)  (headline gate)

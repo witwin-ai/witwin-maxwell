@@ -8,7 +8,7 @@ committed gate thresholds. Run from the worktree root with the standard env
       docs/assessments/f1-cosim-e2-probes/conservation_margins_probe.py
 
 The asserted tolerances live in ``tests/rf/circuits/test_circuit_conservation.py``
-(``_CONSERVATION_TOL`` = 5e-3 of throughput, ``_LINK_TOL`` = 2e-2 of peak field
+(``_CONSERVATION_TOL`` = 1.5e-2 of throughput, ``_LINK_TOL`` = 2e-2 of peak field
 energy). The margins below are observations on the current host; the gates assert
 the thresholds, not these values.
 """
@@ -36,9 +36,9 @@ def _report(name, circuit, resistor_names, source_names):
     print(f"  peak field energy               = {record.peak_field:.3e} J")
     print(f"  circuit stored (peak)           = {record.u_circuit.max():.3e} J")
     print(f"  conservation residual           = {conservation:.3e} J"
-          f"  ({conservation / throughput:.3e} of throughput; tol {suite._CONSERVATION_TOL:.0e})")
+          f"  ({conservation / throughput:.3e} of throughput; tol {suite._CONSERVATION_TOL:.1e})")
     print(f"  field-link residual             = {link:.3e} J"
-          f"  ({link / record.peak_field:.3e} of peak field; tol {suite._LINK_TOL:.0e})")
+          f"  ({link / record.peak_field:.3e} of peak field; tol {suite._LINK_TOL:.1e})")
 
 
 def main():

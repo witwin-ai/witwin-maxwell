@@ -20,16 +20,32 @@ import test_circuit_conservation as suite  # noqa: E402
 from witwin.maxwell.fdtd.circuits import EMCircuitRuntime  # noqa: E402
 
 
+_STEPS = 800
+
+
 def _run():
+    """Return (field_link_ok, conservation_residual/throughput) at a fixed length.
+
+    The conservation ratio is always computed (never aborted on the field-link
+    assert) so the broken case reports a reproducible number rather than raising.
+    """
+
     record = suite._run_coupled_balance(
-        suite._scenario_a_circuit(), resistor_names=("R1",), source_names=("V1",), steps=800
+        suite._scenario_a_circuit(), resistor_names=("R1",), source_names=("V1",), steps=_STEPS
     )
-    suite._assert_field_link(record)
-    return float(np.abs(record.conservation_residual()).max() / record.throughput)
+    ratio = float(np.abs(record.conservation_residual()).max() / record.throughput)
+    try:
+        suite._assert_field_link(record)
+        link_ok = True
+    except AssertionError:
+        link_ok = False
+    return link_ok, ratio
 
 
 def main():
-    print(f"baseline field-link PASS; conservation residual/throughput = {_run():.3e}")
+    link_ok, ratio = _run()
+    print(f"baseline ({_STEPS} steps): field-link {'PASS' if link_ok else 'RED'}; "
+          f"conservation residual/throughput = {ratio:.3e}")
 
     original = EMCircuitRuntime._apply_field_current
 
@@ -44,14 +60,16 @@ def main():
 
     EMCircuitRuntime._apply_field_current = broken
     try:
-        _run()
-        print("BROKEN: field-link did NOT fail (unexpected)")
-    except AssertionError:
-        print("BROKEN: field-link RED as expected (injection over-scatter by 5%)")
+        link_ok, ratio = _run()
+        status = "RED as expected" if not link_ok else "did NOT fail (unexpected)"
+        print(f"broken (injection over-scatter by 5%): field-link {status}; "
+              f"conservation residual/throughput = {ratio:.3e}")
     finally:
         EMCircuitRuntime._apply_field_current = original
 
-    print(f"restored field-link PASS; conservation residual/throughput = {_run():.3e}")
+    link_ok, ratio = _run()
+    print(f"restored ({_STEPS} steps): field-link {'PASS' if link_ok else 'RED'}; "
+          f"conservation residual/throughput = {ratio:.3e}")
 
 
 if __name__ == "__main__":
