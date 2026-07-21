@@ -68,9 +68,17 @@ conda run -n maxwell --no-capture-output python -m pytest \
     pre-registered **< 8%** (compile-layer relative-max class; B1 fit noise).
   - `test_realized_matches_fitted_model` — recurrence realizes the fitted model to
     `< 2e-3` (recurrence correctness, fit-independent).
-  - `test_energy_closure_single_tone` — Gate (b). Cycle-averaged input power ==
-    companion dissipation (`rel 3e-3`); reported `0.5 Re(Z') len |I|^2` matches
-    that dissipation (`rel 8%`).
+  - `test_energy_closure_single_tone` — **Gate (b), companion-level only (partial)**.
+    Drives the isolated per-segment companion (L + R0 + ADE) with a voltage tone;
+    cycle-averaged input power == companion dissipation (`rel 3e-3`) and the reported
+    `0.5 Re(Z') len |I|^2` matches that dissipation (`rel 8%`). This is NOT the
+    closed-box 3D field-energy closure the brief's gate (b) specifies (source input
+    == field-energy delta + radiated/absorbed + wire ohmic on a real FDTD run); the
+    wire<->field energy exchange is not part of this oracle. See Known gaps. Note the
+    first assertion (input power == companion dissipation) is a near-algebraic
+    identity of `advance_current`/`instantaneous_dissipation`; the load-bearing
+    assertion is the second (reported formula == companion dissipation), which a
+    1.2x `ac_resistance_per_length` scaling turns red.
   - `test_dc_resistance_exact` — Gate (c). `R0 == R_dc*length` to `rel 1e-12`.
   - `test_companion_is_passive_and_positive` / `test_unforced_non_growing_from_physical_state`
     / `test_long_run_stability_no_growth` — Gate (d). `spectral_radius < 1`,
@@ -82,7 +90,10 @@ conda run -n maxwell --no-capture-output python -m pytest \
   - `test_pec_parity_falsification`, `test_lossy_current_differs_from_pec` —
     finite conductor takes the lossy path and changes the answer.
   - `test_lossy_wire_runs_and_emits_ohmic_loss` — stable run, finite/positive
-    ohmic_loss, `spectral_radius < 1`.
+    ohmic_loss, `spectral_radius < 1`, and the reported dissipation matches
+    `0.5 Re(Z') length |I|^2` from the same run's companion model to `rtol 1e-4`
+    (prepares once and runs from that prepared solver so the identity uses the run's
+    own nondeterministic fit).
   - `test_pec_ohmic_loss_is_zero` — Gate (f)-adjacent: PEC dissipation exactly 0.
   - `test_lossy_reverse_replay_fails_closed`, `test_lossy_checkpoint_fails_closed`.
 - `test_wire_finite_conductivity.py`, `test_thin_wire_compiler.py` — updated the two
@@ -136,11 +147,102 @@ same commit (`docs/reference/fdtd-capability-guard-census.md`,
 - **CUDA kernel not extended**: the lossy update is a torch path gated to lossy
   wires (brief-sanctioned alternative); the PEC CUDA kernel is untouched. No
   wall-clock timing claims (shared GPU).
+- **Gate (b) closed-box field-energy closure NOT performed (scope reduction —
+  needs supervisor sign-off).** The brief's gate (b) asks for a full closed-box
+  energy budget on a real FDTD run (source input == field-energy delta +
+  radiated/absorbed + wire ohmic dissipation). Only the isolated companion-level
+  closure (`test_energy_closure_single_tone`) ships; the new ohmic channel is not
+  yet validated against the coupled 3D field energy budget. Physical risk is
+  assessed low (the emf sampling / current deposition are unchanged from the
+  energy-paired PEC graph and the certified companion only removes energy), but
+  given the out-of-band active-companion envelope (see the stability note below and
+  the `wire_lossy.py` docstring), the box closure is exactly the test that would
+  certify the new channel against the field energy budget. Deferred; supervisor to
+  decide whether to require it before merge.
+- **Companion is not passive by construction (isolated-stability certificate only).**
+  `G = R0 + length*Dd` is not guaranteed non-negative; the realized loss-branch
+  resistance is positive in band but goes negative out of band (an active
+  one-port). Stability is certified numerically per-segment by the combined
+  `[I; x]` spectral radius `< 1` (`_fit_stable_order`), which bounds each segment's
+  isolated recurrence but does not by itself prove the field-coupled system passive.
+  The shipped smoke geometry stayed bounded vs PEC through long runs; the coupled
+  passivity guarantee is the same open item as the closed-box closure above.
 
 ## Commits
 
 - `590aa74` feat(thin-wire): passive lossy-current ADE companion (B2 recurrence)
 - `c1b5205` feat(thin-wire): consume lossy ADE recurrence in the FDTD runtime + real ohmic_loss
+
+## Fix-agent addendum (2026-07-21 review remediation)
+
+Blocking + cheap-minor findings from the track review, remediated in a follow-up
+commit on `fable/lossy-wire`:
+
+1. **Zero-impact-when-unused PEC regression (blocking).** `finalize_wire_data`
+   raised `A wire ohmic_loss monitor requires the current quantity.` on ANY
+   ohmic_loss-only monitor, including PEC wires — a valid public config that
+   returned zeros on base `b89a75c` — and only at end-of-run finalize (whole run
+   wasted). Fixed: the PEC (`lossy_model is None`) branch now emits a zeros channel
+   without requiring current; the lossy current requirement is enforced at prepare
+   (in `initialize_wire_runtime`, before any stepping), not at finalize. New tests:
+   `test_pec_ohmic_loss_only_monitor_returns_zeros` (PEC ohmic-only -> zeros, no
+   raise) and `test_lossy_ohmic_loss_without_current_fails_at_prepare` (lossy
+   ohmic-only -> ValueError at prepare).
+   - Falsification (PEC zeros): reinserting the pre-branch `current is None` raise
+     turns `test_pec_ohmic_loss_only_monitor_returns_zeros` RED; restored GREEN.
+   - Falsification (prepare guard): `and False` on the guard condition turns
+     `test_lossy_ohmic_loss_without_current_fails_at_prepare` RED (DID NOT RAISE);
+     restored GREEN.
+
+2. **False passivity docstring (blocking).** The `wire_lossy.py` module docstring
+   claimed `G >= 0 is guaranteed by passivity ... never creates energy`. Measured
+   `G` is negative in the shipped configs and the loss branch is active
+   (negative-resistance) out of band. Docstring rewritten to state accurately: the
+   companion is NOT positive-real by construction; stability is an *isolated*
+   per-segment combined-`[I; x]` spectral-radius `< 1` certificate that does not by
+   itself prove field-coupled passivity; the in-band resistance is positive and the
+   reported dissipation is clamped non-negative. Known gaps updated with the
+   active-out-of-band envelope and the coupled-passivity open item.
+
+3. **Gate (b) overclaim (blocking).** `test_energy_closure_single_tone` is a
+   companion-level closure, not the brief's closed-box 3D field-energy closure. The
+   test inventory now labels it "companion-level only (partial)" and Known gaps
+   records that the closed-box field-energy closure was NOT performed (scope
+   reduction, supervisor sign-off required). The load-bearing assertion (reported
+   formula == companion dissipation) and its 1.2x-scaling falsification are noted.
+
+4. **Ohmic identity now asserted (minor).** `test_lossy_wire_runs_and_emits_ohmic_loss`
+   previously computed `length`/`segment_indices` as dead variables and only a
+   comment claimed the `0.5 Re(Z') L |I|^2` identity. It now prepares once and runs
+   from that prepared solver (so the identity uses the run's own nondeterministic
+   fit) and asserts `ohmic == 0.5 Re(Z') length |I|^2` to `rtol 1e-4`.
+   - Falsification: changing the finalize factor `0.5 -> 0.6` turns the identity
+     RED (31.26 vs 26.05); restored GREEN.
+
+5. **`relative_tolerance=0.5` documented (minor).** `_fit_stable_order` now carries
+   an inline comment explaining why the fitter's fail-closed error ceiling is loosened
+   (accuracy/stability trade-off; the binding gates are the in-band positivity check,
+   the spectral-radius certificate, and the analytic AC sweep) and the cost (a config
+   whose only stable fit has 10-50% in-band error runs instead of failing closed).
+
+### Supervisor merge items (not code-fixable here)
+
+- **FEATURE_LIST edit is not purely additive.** It rewrites the tail of the existing
+  thin-wire bullet (the now-false "fails closed" sentence) plus appends a new bullet.
+  The rewrite is factually necessary; flagged as cross-track merge-conflict surface.
+- **Census budget anchor.** This worktree's base `b89a75c` has
+  `CAPABILITY_GUARD_BUDGET = 175`; the track lands `175 -> 176 -> 177`. The common
+  brief cites the Wave-D anchor as 176. Internally consistent with this base; the +1
+  divergence must be reconciled against the parallel track that produced the 176
+  anchor at merge.
+- **`test_pec_wire_bitwise_parity` scope.** The in-tree test checks run-to-run
+  determinism, not vs-base bitwise parity. The vs-base claim was independently
+  confirmed by the auditor (SHA256-identical DFT current / final Ez / wire current
+  vs base `b89a75c`); recommend keeping that evidence on record.
+- **Falsification metrics from uncommitted scratch.** The F1/F3 exact numbers in the
+  falsification sections originate from untracked `scratch/` scripts (per the brief's
+  do-not-commit rule); the falsification classes are reproducible, the exact numbers
+  are not regenerable from a tracked artifact.
 
 ---
 

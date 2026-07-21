@@ -106,15 +106,24 @@ def test_pec_parity_falsification():
 def test_lossy_wire_runs_and_emits_ohmic_loss():
     # Gate: a finite-conductor wire runs stably (no NaN/inf), carries the lossy
     # model, and emits a real, positive, finite ohmic_loss channel (previously
-    # zeros).
+    # zeros). Prepare once and run from the SAME prepared solver so the reported
+    # dissipation and the model it was computed from share one companion build
+    # (the rational fit is nondeterministic across rebuilds, so the identity check
+    # below must use this run's own model, not a fresh _prepare()).
     scene = _scene(conductor=mw.WireConductor.finite(5.8e7))
-    prepared = _prepare(scene)
-    model = prepared.solver._wire_runtime.lossy_model
+    prepared = mw.Simulation.fdtd(
+        scene,
+        frequencies=(_FREQUENCY,),
+        run_time=mw.TimeConfig(time_steps=400),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+    ).prepare()
+    solver = prepared.solver
+    model = solver._wire_runtime.lossy_model
     assert model is not None
     assert model.spectral_radius < 1.0
     assert bool(torch.all(model.is_lossy))
 
-    result = _run(scene)
+    result = prepared.run()
     monitor = result.monitor("wire_state")
     current = monitor.current
     ohmic = monitor.ohmic_loss
@@ -123,12 +132,28 @@ def test_lossy_wire_runs_and_emits_ohmic_loss():
     assert torch.all(torch.isfinite(ohmic))
     assert torch.all(ohmic >= 0.0)
     assert float(ohmic.max().item()) > 0.0
-    # The reported dissipation equals 0.5 Re(Z') length |I|^2 from the same model.
-    length = prepared.solver._wire_runtime.network.length
-    segment_indices = monitor.metadata["segment_ids"]
+
+    # Identity (previously only asserted in a comment): the reported dissipation
+    # equals 0.5 * Re(Z'(f)) * length * |I(f)|^2 evaluated with this run's own
+    # companion model and monitored segments — the exact formula finalize_wire_data
+    # uses, verified end to end rather than merely asserted positive.
+    runtime = solver._wire_runtime
+    compiled = runtime.monitor_state[0]["compiled"]
+    segment_indices = compiled.segment_indices.to(
+        device=solver.device, dtype=torch.int64
+    )
     frequencies = torch.tensor([_FREQUENCY], dtype=torch.float64)
-    ac_resistance = model.ac_resistance_per_length(frequencies)
+    ac_resistance = model.ac_resistance_per_length(frequencies).index_select(
+        1, segment_indices
+    )
     assert float(ac_resistance.max().item()) > 0.0
+    seg_length = runtime.network.length.index_select(0, segment_indices).to(
+        device=solver.device, dtype=ohmic.dtype
+    )
+    expected = (
+        0.5 * ac_resistance * seg_length.reshape(1, -1) * current.abs().square()
+    )
+    assert torch.allclose(ohmic, expected, rtol=1.0e-4, atol=1.0e-6)
 
 
 def test_pec_ohmic_loss_is_zero():
@@ -138,6 +163,29 @@ def test_pec_ohmic_loss_is_zero():
     ohmic = result.monitor("wire_state").ohmic_loss
     assert ohmic is not None
     assert float(ohmic.abs().max().item()) == 0.0
+
+
+def test_pec_ohmic_loss_only_monitor_returns_zeros():
+    # Zero-impact-when-unused (gate (f)): a PEC wire with an ohmic_loss-ONLY monitor
+    # (no 'current') is a valid public config. Before the lossy feature it returned
+    # a zeros channel; it must still return zeros and must NOT raise at finalize
+    # (the PEC dissipation channel is identically zero and needs no current).
+    scene = _scene(conductor=mw.WireConductor.pec(), quantities=("ohmic_loss",))
+    result = _run(scene)
+    ohmic = result.monitor("wire_state").ohmic_loss
+    assert ohmic is not None
+    assert float(ohmic.abs().max().item()) == 0.0
+
+
+def test_lossy_ohmic_loss_without_current_fails_at_prepare():
+    # A finite-conductor wire needs the segment current spectrum to compute ohmic
+    # loss. The requirement is enforced at prepare (before any stepping), not at
+    # finalize, so an invalid monitor config does not waste an entire run.
+    scene = _scene(
+        conductor=mw.WireConductor.finite(5.8e7), quantities=("ohmic_loss",)
+    )
+    with pytest.raises(ValueError, match="current"):
+        _prepare(scene)
 
 
 def test_lossy_reverse_replay_fails_closed():

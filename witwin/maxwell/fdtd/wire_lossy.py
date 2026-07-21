@@ -34,17 +34,37 @@ only ``I^+`` and ``I^-`` and the current update stays explicit:
 
     (L/dt + G/2) I^+ = (L/dt - G/2) I^- + (e - Cs x)
 
-The homogeneous gain ``(L/dt - G/2) / (L/dt + G/2)`` has magnitude ``< 1`` for
-``G > 0`` and exactly ``1`` for ``G = 0`` (PEC), where the update reduces bitwise
-to the lossless leapfrog and no ADE state is carried. ``G >= 0`` is guaranteed by
-passivity: ``R0 >= 0`` and ``Dd = D + (dt/2) Cd B >= 0`` is the positive-real
-companion conductance of the certified-passive excess fit. The scheme therefore
-never creates energy (Section 5.2 discrete-energy requirement of the thin-wire
-plan): the discrete inductor-energy identity
+For ``G = 0`` (PEC) the update reduces bitwise to the lossless leapfrog and no
+ADE state is carried. The discrete inductor-energy identity is
 
-    Delta(1/2 L I^2)/dt = e I_bar - G I_bar^2 - Cs x I_bar
+    Delta(1/2 L I^2)/dt = e I_bar - G I_bar^2 - Cs x I_bar,
 
-has a strictly dissipative ``G I_bar^2`` term and a lossless leapfrog limit.
+so ``e I_bar`` drives the segment and ``G I_bar^2 + Cs x I_bar`` is the power into
+the loss/storage branch.
+
+Stability certificate (important — not positive-real by construction). ``G`` is
+*not* guaranteed non-negative. ``G = R0 + length * Dd`` with ``Dd = D + (dt/2) Cd B``
+the discrete direct term of the shared rational excess fit, and ``Dd`` is not
+sign-definite: the skin-effect internal impedance is improper, so the fit carries
+an out-of-band direct term whose sign is not controlled. The realized loss-branch
+resistance ``Re(Z_branch)`` is positive across the fitting band (where the fit
+reproduces the passive analytic internal impedance) but can go negative out of
+band — the discrete companion is an active (negative-resistance) one-port outside
+the fitted band. The recurrence is therefore *not* certified passive by a
+positive-real realization argument.
+
+Instead, stability is certified numerically at build time: the combined ``[I; x]``
+linear transition of each segment companion is formed (``_companion_spectral_radius``)
+and the highest fit order whose spectral radius is ``< 1 - margin`` on every sharing
+segment is selected (``_fit_stable_order``); the build fails closed when no order in
+range qualifies. This is an *isolated* per-segment certificate (the wire decoupled
+from the Maxwell field). It bounds the homogeneous growth of each segment's own
+recurrence but does not by itself prove the field-coupled system (the wire exchanges
+energy with the grid every step via emf sampling and current deposition) is passive;
+empirical closed-run boundedness against the PEC reference is used to check the
+coupled behavior. The reported ohmic dissipation ``0.5 Re(Z') |I|^2`` uses the
+in-band series AC resistance and is additionally clamped non-negative
+(``ac_resistance_per_length``), so the monitored energy channel stays physical.
 
 The realized excess impedance ``Cs (zI - Ad)^{-1} Bd + direct`` equals the fitted
 continuous ``length * Z_excess(s)`` under the bilinear map ``s = (2/dt)(z-1)/(z+1)``,
@@ -363,6 +383,20 @@ def _fit_stable_order(
     last_error: str | None = None
     for order in range(order_max, order_min - 1, -1):
         try:
+            # relative_tolerance here is deliberately loose (0.5, vs the fitter
+            # default 0.1). This is NOT the accuracy contract for the shipped
+            # model: the binding acceptance gates are downstream — (1) the in-band
+            # AC-resistance positivity check below, (2) the combined-companion
+            # spectral-radius stability certificate, and (3) the analytic
+            # AC-resistance sweep test (gate (a), ~8% on the certified config).
+            # We loosen the fitter's own fail-closed error ceiling so that when
+            # accuracy and stability trade off (high order fits accurately but can
+            # exceed the spectral-radius bound; low order is stable but less
+            # accurate), a stable lower-order fit is not rejected purely on the
+            # fitter's raw in-band error before the stability selection runs. The
+            # cost is that a config whose only stable fit has 10-50% in-band error
+            # runs instead of failing closed; such configs are surfaced by the
+            # analytic AC sweep gate rather than by this ceiling.
             model = fit_series_impedance(
                 a,
                 sigma,

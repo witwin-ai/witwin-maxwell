@@ -925,6 +925,24 @@ def initialize_wire_runtime(solver) -> WireRuntime | None:
         if lossy_model is not None:
             ade_state = lossy_model.initial_state()
 
+    if lossy_model is not None:
+        # Fail closed at prepare (before any stepping): computing the lossy ohmic
+        # dissipation 0.5*Re(Z')*length*|I|^2 needs the segment current spectrum, so
+        # an ohmic_loss monitor on a finite-conductivity wire must also request
+        # 'current'. Enforced here rather than at finalize so an invalid monitor
+        # config does not waste an entire run. PEC wires do not require current
+        # (their dissipation channel is identically zero, emitted as a zeros
+        # channel by finalize_wire_data).
+        for monitor in monitors:
+            quantities = set(monitor.quantities)
+            if "ohmic_loss" in quantities and "current" not in quantities:
+                raise ValueError(
+                    f"Wire monitor {monitor.name!r} requests 'ohmic_loss' on a "
+                    "finite-conductivity wire but not 'current'; the lossy "
+                    "dissipation 0.5*Re(Z')*length*|I|^2 requires the current "
+                    "quantity. Add 'current' to the monitor quantities."
+                )
+
     state_bytes = sum(value.numel() * value.element_size() for value in (current, charge, emf))
     if ade_state is not None:
         state_bytes += ade_state.numel() * ade_state.element_size()
@@ -1275,17 +1293,20 @@ def finalize_wire_data(solver) -> dict[str, WireData]:
             # cycle-averaged dissipation the recurrence removes (the instantaneous
             # companion dissipation integrates to it), so the monitored channel
             # closes the wire energy budget.
-            if current is None:
-                raise ValueError(
-                    "A wire ohmic_loss monitor requires the current quantity."
-                )
             if runtime.lossy_model is None:
+                # PEC (no loss descriptor): the dissipation channel is exactly
+                # zero and requires no current accumulation, so a
+                # WireMonitor(quantities=('ohmic_loss',)) on a PEC wire returns a
+                # zeros channel — byte-identical to the pre-lossy path (gate (f)).
                 ohmic_loss = torch.zeros(
                     (len(state["entries"]), segment_indices.numel()),
                     device=solver.device,
                     dtype=solver.Ex.dtype,
                 )
             else:
+                # The lossy dissipation needs |I(f)|^2; the current requirement is
+                # enforced at prepare time (initialize_wire_runtime), so current is
+                # guaranteed present here.
                 frequencies = torch.tensor(
                     [entry["frequency"] for entry in state["entries"]],
                     dtype=torch.float64,
