@@ -6,7 +6,11 @@ Gates (design brief slice 1c):
   * discrete-energy non-growth at zero damping (falsifiable zero-growth form);
   * composes with PML / conductivity;
   * ferrite-free scene adds zero gyromagnetic operations (gated flag);
-  * general (non-axis-aligned) bias and Bloch fail closed.
+  * mixed-bias-direction and Bloch fail closed.
+
+General (non-axis-aligned) bias is no longer fail-closed: slice 2a lifts that
+guard and routes an arbitrary bias through the general-bias path. Its gates live
+in ``test_gyromagnetic_general_bias.py``.
 
 The runtime-vs-oracle gates run on a lightweight float64 mock solver so they test
 the exact stepping code path without the CUDA field update; the integration gates
@@ -216,10 +220,14 @@ def test_energy_decays_when_lossy():
 # --- fail-closed boundaries --------------------------------------------------
 
 
-def test_general_bias_fails_closed():
+def test_general_bias_builds_via_general_path():
+    """A general (non-axis-aligned) bias no longer fails closed: slice 2a routes it
+    through the general-bias path (dense u/v projection fields, identity
+    collocation). Full physics gates live in test_gyromagnetic_general_bias.py."""
     material = _ferrite(bias=(1.0e5, 1.0e5, 1.0e5))
-    with pytest.raises(NotImplementedError, match="axis-aligned"):
-        _build_mock(material, 1e-12)
+    solver = _build_mock(material, 1e-12)
+    assert solver.gyromagnetic_enabled
+    assert solver._gyromagnetic_state["general"] is True
 
 
 def _two_region_bias_scene(bias_low, bias_high, *, spacing=0.02, half=0.06):
@@ -245,28 +253,57 @@ def _two_region_bias_scene(bias_low, bias_high, *, spacing=0.02, half=0.06):
     return prepare_scene(scene)
 
 
-def test_mixed_sign_bias_fails_closed():
-    """A scene mixing +z and -z ferrites must fail closed, not silently invert the
-    non-reciprocity of the -bias region.
+def _region_cell_masks(solver, scene):
+    """Boolean overlap-shaped masks selecting the z<0 and z>0 halves of the domain."""
+    nz = solver.Nz
+    z_index = torch.arange(nz - 1)  # overlap runs 0..nz-2 along z
+    low = (z_index < (nz - 1) // 2).view(1, 1, -1).expand(solver.Nx - 1, solver.Ny - 1, nz - 1)
+    high = ~low
+    return low, high
 
-    Falsification: the old guard used ``torch.unique(fast_axis)``, which collapses
-    +z and -z to the same axis code, so this scene built successfully and the single
-    global transverse sign (taken from cell 0) applied a +z response to the -z-owned
-    cells -- inverting kappa exactly where a latching (opposed-bias) circulator needs
-    it opposed. Guarding on bias-vector uniformity closes the hole.
+
+def test_mixed_sign_bias_builds_via_general_path():
+    """A scene mixing +z and -z ferrites now builds through the per-cell general
+    path (mixed-bias is supported in G3b), and each region carries its OWN local
+    frame -- so the -bias region is not silently given the +bias response.
+
+    The former guard rejected this to avoid the axis-aligned fast path applying a
+    single global transverse sign to both regions (inverting kappa in the -bias
+    latching-circulator region). The general path stores per-cell u/v/w, so the two
+    regions correctly get opposed w columns (w = b): +z below, -z above.
     """
     scene = _two_region_bias_scene((0.0, 0.0, 1.75e5), (0.0, 0.0, -1.75e5))
     solver = _MockSolver(scene, 1e-12)
-    with pytest.raises(NotImplementedError, match="single uniform bias direction"):
-        build_gyromagnetic(solver, scene)
+    build_gyromagnetic(solver, scene)
+    assert solver.gyromagnetic_enabled
+    state = solver._gyromagnetic_state
+    assert state["general"] is True  # mixed bias forces the per-cell path
+    # w = b is the bias unit vector; recover it as u x v per cell and check the sign
+    # of its z component splits by region (below: +z, above: -z).
+    ux, uy, uz = (state[k] for k in ("ux", "uy", "uz"))
+    vx, vy, vz = (state[k] for k in ("vx", "vy", "vz"))
+    wz = ux * vy - uy * vx  # (u x v)_z = w_z
+    low, high = _region_cell_masks(solver, scene)
+    assert float(wz[low].min()) > 0.5 and float(wz[low].max()) < 1.5  # +z below
+    assert float(wz[high].min()) > -1.5 and float(wz[high].max()) < -0.5  # -z above
 
 
-def test_mixed_axis_bias_fails_closed():
-    """A scene mixing +z and +x axis-aligned biases must also fail closed."""
+def test_mixed_axis_bias_builds_via_general_path():
+    """A scene mixing +z and +x axis-aligned biases also builds via the general path;
+    each region's bias axis is carried per cell (w = +z below, w = +x above)."""
     scene = _two_region_bias_scene((0.0, 0.0, 1.75e5), (1.75e5, 0.0, 0.0))
     solver = _MockSolver(scene, 1e-12)
-    with pytest.raises(NotImplementedError, match="single uniform bias direction"):
-        build_gyromagnetic(solver, scene)
+    build_gyromagnetic(solver, scene)
+    assert solver.gyromagnetic_enabled
+    state = solver._gyromagnetic_state
+    assert state["general"] is True
+    ux, uy, uz = (state[k] for k in ("ux", "uy", "uz"))
+    vx, vy, vz = (state[k] for k in ("vx", "vy", "vz"))
+    wz = ux * vy - uy * vx  # (u x v)_z
+    wx = uy * vz - uz * vy  # (u x v)_x
+    low, high = _region_cell_masks(solver, scene)
+    assert float(wz[low].min()) > 0.5  # bias along +z below
+    assert float(wx[high].min()) > 0.5  # bias along +x above
 
 
 def test_uniform_sign_two_region_builds():
