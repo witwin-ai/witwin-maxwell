@@ -858,4 +858,13 @@ conductive-path model, not a validated arc or device-failure predictor).
   plane objectives stay fail-closed (they need seam-crossing tangential-field
   assembly whose cotangent scatter is not wired), and the in-process
   `transport="cuda_p2p"` bridge continues to reject every tiled monitor.
+- Known limitation (load-dependent gradient): the distributed adjoint gradient is
+  reproduced to ~1.5e-7 of scale against the single-GPU reference on **exclusive**
+  GPUs, but under concurrent multi-GPU activity from other CUDA processes the
+  shared multi-GPU adjoint stack (transposed halos + fused reverse kernels + the
+  `atomicAdd` material VJP, all predating this driver) drifts the gathered gradient
+  by up to ~5e-3 of scale at the partition seam, with no error raised (the forward
+  loss stays bitwise identical). For gradient-accurate optimization, run the
+  distributed adjoint on GPUs not shared with other CUDA processes. See
+  `docs/assessments/h1-nccl-driver-acceptance-2026-07-21.md` "Known defect".
 <!-- END h1-nccl-driver -->

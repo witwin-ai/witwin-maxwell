@@ -1231,12 +1231,16 @@ class _DistributedFDTDGradientBridge:
             global_grad_eps[name] = distributed._gather_component(name, local_values)
         for device in distributed.devices:
             torch.cuda.synchronize(device)
-        # The distributed reverse product (gathered grad_eps) is the deterministic
-        # output of S3; the assign-semantics fused reverse kernels, ordered add_
-        # accumulation, and deterministic gather copies make it bitwise reproducible.
-        # Stashed so a determinism test can assert on it directly, isolated from the
-        # shared torch grid_sample material VJP (whose backward uses atomicAdd and is
-        # not bitwise reproducible, single- and multi-GPU alike).
+        # The distributed reverse product (gathered grad_eps) is the reduction-order
+        # deterministic output of S3: the assign-semantics fused reverse kernels,
+        # ordered add_ accumulation, and deterministic gather copies make it bitwise
+        # reproducible under identical (exclusive-GPU) block scheduling. Under
+        # concurrent multi-GPU load the fused-kernel reductions can be rescheduled and
+        # flip at the ULP level, so the determinism gate asserts reduction-order
+        # equality (relative ~ULP) rather than strict bitwise. Stashed so that gate can
+        # assert on it directly, isolated from the shared torch grid_sample material
+        # VJP (whose backward uses atomicAdd and is not bitwise reproducible, single-
+        # and multi-GPU alike).
         self._last_global_grad_eps = {
             name: value.detach().clone() for name, value in global_grad_eps.items()
         }
@@ -1395,10 +1399,31 @@ class _NcclDistributedFDTDGradientBridge(_DistributedFDTDGradientBridge):
                 raise ValueError(
                     "Distributed source normalization requires exactly one logical source."
                 )
-            # The eps-shaped grad gather lands only on rank 0; preflight its capacity
-            # there so the check runs on the device that actually allocates it.
+            # The eps-shaped grad gather lands only on rank 0, so only rank 0 can
+            # size it; but the reject must be COLLECTIVE. If rank 0 raised locally
+            # while the peers proceeded into _run_forward_capture_local, the peers
+            # would block forever in the forward halo collectives (rank 0 never
+            # posts them). Rank 0 evaluates capacity, then all ranks all-reduce the
+            # verdict and raise together, so the reject stays deadlock-free.
+            capacity_error = None
             if distributed.rank == 0:
-                self._preflight_gather_capacity(distributed, dft_request, use_full_field_dft)
+                try:
+                    self._preflight_gather_capacity(
+                        distributed, dft_request, use_full_field_dft
+                    )
+                except MemoryError as exc:
+                    capacity_error = exc
+            failed = distributed.transport.allreduce_scalar(
+                1.0 if capacity_error is not None else 0.0
+            )
+            if float(failed.item()) > 0.0:
+                if capacity_error is not None:
+                    raise capacity_error
+                raise RuntimeError(
+                    "Distributed NCCL adjoint gather-capacity preflight failed on "
+                    "rank 0; this rank aborts collectively to avoid a forward-halo "
+                    "deadlock. See rank 0's log for the capacity detail."
+                )
 
             checkpoints = self._run_forward_capture_local(
                 distributed,
