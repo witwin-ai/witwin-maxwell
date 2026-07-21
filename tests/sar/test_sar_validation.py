@@ -38,10 +38,24 @@ def test_one_gram_cube_is_analytic_identity_and_matches_hand_computed_value():
 def test_antenna_near_phantom_is_reported_blocked():
     report = sv.run_antenna_near_phantom()
     assert report.status == "blocked"
-    assert report.gate_class in _TAXONOMY
+    # A blocked scene records no ACHIEVED gate class; its wave-level class is a
+    # target only, so the row cannot read as a measured wave-level result.
+    assert report.gate_class == ""
+    assert report.target_gate_class == sv.WAVE_LEVEL
+    assert report.target_gate_class in _TAXONOMY
     assert "conductance-aware" in " ".join(report.notes)
     # A blocked scene carries no measured headline metric.
     assert report.metrics == []
+    # The rendered table cell marks it as a target, not an achieved class.
+    section = sv._results_section([report])
+    assert "wave-level (target; blocked)" in section
+
+
+def test_uniform_lossy_cube_closure_is_labelled_tautology():
+    # The volume/channel closure is a self-comparison of the same field data, so it
+    # is a tautology (verbatim taxonomy), not an analytic identity or wave-level gate.
+    assert sv.TAUTOLOGY == "tautology"
+    assert sv.TAUTOLOGY in _TAXONOMY
 
 
 def test_layered_slab_headline_is_wave_level():

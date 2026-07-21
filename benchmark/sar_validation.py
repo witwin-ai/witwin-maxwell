@@ -15,9 +15,12 @@ shrinks monotonically as the grid refines. Surface E x H is independent of the
 volume loss, so this is a conservation-law reference, not a self-consistency
 identity. ``sar/one_gram_cube`` is an ``analytic-identity`` (hand-computable 1 g
 average); ``sar/uniform_lossy_cube`` reports the self-consistency volume/channel
-closure (``analytic-identity``, supporting only). ``sar/antenna_near_phantom`` is
-``blocked`` -- the FDTD port machinery fails closed on a conductive tissue
-background, which a phantom is by construction.
+closure (``tautology`` -- the volume integral and the channel total are two
+reductions of the same edge-loss field, so their closure is exact by construction
+and supporting only). ``sar/antenna_near_phantom`` is ``blocked`` -- the FDTD port
+machinery fails closed on a conductive tissue background, which a phantom is by
+construction; its wave-level class is recorded as a TARGET only (``target_gate_class``),
+never as an achieved gate.
 
 Reference-solver policy (audit section 3): the conservation-law / analytic gates
 are the binding first-line references. No external reference-solver run backs this
@@ -51,6 +54,7 @@ SECTION_HEADER = "## SAR exposure validation"
 
 WAVE_LEVEL = "wave-level"
 ANALYTIC_IDENTITY = "analytic-identity"
+TAUTOLOGY = "tautology"
 ANALYTIC_ONLY = "analytic-only"
 
 # Three refinement tiers (m) for the layered-slab conservation convergence.
@@ -61,11 +65,15 @@ _CONVERGENCE_GRIDS = (0.005, 0.004, 0.003)
 class SarReport:
     name: str
     description: str
-    gate_class: str
+    gate_class: str  # the ACHIEVED headline gate class ("" when the scene is blocked)
     status: str  # pass | gap | fail | blocked | pending | error
     reference: str
     external_reference: str
     target: str
+    # Aspirational class of the gate the scene targets. Recorded (with the blocked
+    # status and a blocked marker in the table) when the wave-level gate cannot run,
+    # so a blocked row never claims an unachieved class as if measured.
+    target_gate_class: str = ""
     metrics: list[dict] = field(default_factory=list)
     convergence: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -163,9 +171,9 @@ def run_uniform_lossy_cube() -> SarReport:
     report = SarReport(
         name="sar/uniform_lossy_cube",
         description="Uniform lossy phantom under a normally incident plane wave",
-        gate_class=ANALYTIC_IDENTITY,
+        gate_class=TAUTOLOGY,
         status="error",
-        reference="absorbed-power volume integral vs shared electric-channel total",
+        reference="absorbed-power volume integral vs shared electric-channel total (self-comparison)",
         external_reference=ANALYTIC_ONLY,
         target="volume/channel closure < 1e-4; positive point SAR",
     )
@@ -184,16 +192,18 @@ def run_uniform_lossy_cube() -> SarReport:
         )
         report.metrics.append(
             {"quantity": "volume/channel_closure", "measured": volume_absorbed, "reference": channel,
-             "rel_error": _rel(volume_absorbed, channel), "unit": "W", "class": ANALYTIC_IDENTITY}
+             "rel_error": _rel(volume_absorbed, channel), "unit": "W", "class": TAUTOLOGY}
         )
         report.metrics.append(
             {"quantity": "peak_point_sar", "measured": peak_point, "reference": float("nan"),
-             "rel_error": float("nan"), "unit": "W/kg", "class": ANALYTIC_IDENTITY}
+             "rel_error": float("nan"), "unit": "W/kg", "class": TAUTOLOGY}
         )
         report.notes.append(
-            "Self-consistency closure only (the channel total and the volume integral "
-            "share the same edge loss). The independent conservation reference is the "
-            "sar/layered_slab surface-vs-volume balance."
+            "Tautology (self-comparison), supporting only: the volume integral and the "
+            "channel total are two reductions of the SAME edge loss field data, so their "
+            "closure is exact by construction and carries no independent physical "
+            "information. The independent conservation reference is the sar/layered_slab "
+            "surface-vs-volume balance."
         )
         report.status = "pass" if report.metrics[0]["rel_error"] < 1e-4 and peak_point > 0.0 else "fail"
     except Exception as exc:  # pragma: no cover
@@ -270,8 +280,12 @@ def run_antenna_near_phantom() -> SarReport:
     return SarReport(
         name="sar/antenna_near_phantom",
         description="Driven dipole near a tissue block (conductive-media port blocker)",
-        gate_class=WAVE_LEVEL,
+        # No gate ran, so no class is achieved. The wave-level class is the TARGET
+        # only; it is recorded in target_gate_class (with the blocked status), never
+        # in gate_class, so the row cannot read as a measured wave-level result.
+        gate_class="",
         status="blocked",
+        target_gate_class=WAVE_LEVEL,
         reference="pending: needs a conductance-aware lumped-port update coefficient",
         external_reference=ANALYTIC_ONLY,
         target="accepted-power 1 W -> point SAR -> 1 g/10 g peaks (blocked upstream)",
@@ -308,8 +322,10 @@ _INTRO = (
     "`sar/one_gram_cube` is an `analytic-identity` (a 3x3x3 window weighing exactly 1 g, "
     "whose uniform-field average equals the hand-computed point SAR). "
     "`sar/uniform_lossy_cube` reports the volume/channel self-consistency closure "
-    "(`analytic-identity`, supporting only). `sar/antenna_near_phantom` is `blocked` -- "
-    "the FDTD port machinery fails closed on the conductive tissue background. Gate "
+    "(`tautology` -- a self-comparison of the same edge-loss field, supporting only). "
+    "`sar/antenna_near_phantom` is `blocked` -- the FDTD port machinery fails closed on "
+    "the conductive tissue background; its wave-level class is a TARGET only (blocked "
+    "upstream), never an achieved gate. Gate "
     "classes are the verbatim taxonomy (`docs/reference/gate-classification.md`); no "
     "external reference-solver run backs this family (every row `analytic-only`). "
     "Per-scene JSON artifacts live under `docs/assessments/sar-phantom-validation/`."
@@ -329,6 +345,15 @@ def _results_section(reports: list[SarReport]) -> str:
     def esc(value: str) -> str:
         return str(value).replace("|", r"\|")
 
+    def gate_cell(report: SarReport) -> str:
+        # A blocked row shows its TARGET class with an explicit blocked marker,
+        # never a bare (unachieved) class.
+        if report.gate_class:
+            return esc(report.gate_class)
+        if report.target_gate_class:
+            return esc(f"{report.target_gate_class} (target; blocked)")
+        return "-"
+
     for report in reports:
         headline = next((m for m in report.metrics if "rel_error" in m), None)
         if headline is not None:
@@ -341,7 +366,7 @@ def _results_section(reports: list[SarReport]) -> str:
             quantity = "see artifact"
         lines.append(
             "| {name} | {cls} | {q} | {m} | {r} | {rel} | {st} | {ext} |".format(
-                name=report.name, cls=esc(report.gate_class), q=esc(quantity),
+                name=report.name, cls=gate_cell(report), q=esc(quantity),
                 m=measured, r=reference, rel=rel, st=report.status,
                 ext=esc(report.external_reference),
             )

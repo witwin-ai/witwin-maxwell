@@ -69,7 +69,8 @@ Environment: conda `maxwell`, `CUDA_VISIBLE_DEVICES=1`, float64 oracles on GPU.
   implicit-diff wrapper, tensor -> plain reduced solve).
 - `witwin/maxwell/electrostatic/capacitance.py`: tensor routing via
   `solve_fixed_potential`; `_reject_trainable_tensor`.
-- `tests/electrostatic/test_tensor_eps.py`: new gate suite (12 tests).
+- `tests/electrostatic/test_tensor_eps.py`: new gate suite (13 tests -- the
+  original 11, plus two audit-minor additions, see "Audit-minor cleanup" below).
 - `tests/electrostatic/test_api.py`: repurposed the obsolete
   `test_anisotropic_tensor_permittivity_rejected` into
   `test_anisotropic_tensor_permittivity_supported`.
@@ -90,7 +91,7 @@ conda run -n maxwell --no-capture-output python -m pytest \
 ```
 Result: **183 passed**.
 
-`tests/electrostatic/test_tensor_eps.py` (12 tests) headline gates:
+`tests/electrostatic/test_tensor_eps.py` (13 tests) headline gates:
 - `test_operator_symmetry_and_positive_definite` — dense 216x216 operator (grounded
   6^3 box): asymmetry `< 1e-9`, min symmetric eigenvalue `> 0`.
 - `test_operator_symmetry_random_vectors` — `<Ax,y> = <x,Ay>` to `< 1e-10` relative.
@@ -198,10 +199,11 @@ Environment: conda `maxwell`, `CUDA_VISIBLE_DEVICES=1`, float64 oracles on GPU.
    (exported from `witwin.maxwell`). `Simulation.capacitance(scene, ...,
    truncation_estimate=...)` runs ONE additional enlarged grounded-box capacitance
    solve — never silently; only when the config is passed. The enlarged solve holds
-   the interior cell grid byte-identical (the domain grows by exactly `padding_cells`
-   cell widths per side per axis, so the original cell centres are reproduced and
-   only the grounded box moves), so the reported change isolates the pure
-   boundary-truncation effect. `result.capacitance.truncation_estimate` carries the
+   the interior cell grid fixed to floating-point round-off (the domain grows by
+   exactly `padding_cells` cell widths per side per axis, so the recomputed cell
+   centres reproduce the originals to ULP — max ~1.1e-16 absolute drift, measured
+   base-vs-enlarged on the isolated-conductor scene; not literally "byte-identical"),
+   so the reported change isolates the pure boundary-truncation effect. `result.capacitance.truncation_estimate` carries the
    base/enlarged matrices, their `delta`, `max_relative_delta` (relative sensitivity
    of C to the enclosure size), the effective base/enlarged enclosure sizes, and a
    1/L Richardson extrapolation `richardson_matrix` to the infinite-domain limit
@@ -306,7 +308,88 @@ guards.
   substitute this round.
 - **Dirichlet-wall cross-flux boundary layer** (carried from H2a): the interior
   cross-flux is 2nd-order, the one-sided wall cross-flux is 1st-order for a field
-  with a strong tangential wall gradient. Untouched this stage.
+  with a strong tangential wall gradient. Now covered by a committed convergence gate
+  (see Audit-minor cleanup (a)); a *second-order* wall cross-flux remains future work.
 - The Richardson extrapolation assumes a 1/L leading truncation error (physically
   the monopole image term of a charged conductor in a grounded shell); it is an
   estimate, not a certified bound, and is documented as such on `TruncationReport`.
+
+---
+
+## Audit-minor cleanup (round-H, 2026-07-21)
+
+Round-H audit minors on the H2 delivery. Env: `maxwell`, `CUDA_VISIBLE_DEVICES=1`,
+float64 oracles on GPU. `python -m pytest tests/electrostatic -q -> 90 passed`.
+
+### (a) Wall cross-flux now exercised with a nonzero tangential wall gradient
+
+The rotated-MMS gate (`test_rotated_mms_second_order_convergence`) uses
+`phi = prod sin^2(pi t)`, whose `f` and `f'` both vanish at the walls, so its
+tangential (and normal) gradient is zero on every Dirichlet face — the wall
+cross-flux was never exercised. Added
+`test_wall_tangential_cross_flux_mms_converges`: a manufactured solution
+`phi = prod sin(t + 0.5)` with nonzero value AND nonzero derivative at `t = 0, 1`,
+so on every wall face the field has a genuine tangential gradient and the full
+rotated tensor's off-diagonal cross-flux is active up to the boundary (walls pinned
+to the exact nonzero values). Observed L2 errors at `n = 24/36/54`:
+`1.789e-3 / 1.224e-3 / 8.297e-4`, orders `0.936 / 0.958` (first order — the
+documented one-sided wall cross-flux + half-cell Dirichlet ghost are first order for
+a field with a nonzero wall gradient, versus the interior second order the sin^2
+gate sees). Gate: monotone AND `min order > 0.85`.
+- **Falsification**: dropping the cross term (`_apply_cross -> 0`) makes it diverge —
+  errors *rise* `4.865e-3 / 4.893e-3 / 4.912e-3`, orders `-0.014 / -0.010`,
+  non-monotone → RED. Restored → green.
+
+### (b) `_apply_cross` no longer rebuilds an autograd graph per PCG iteration
+
+`ElectrostaticOperator._apply_cross` previously ran `torch.enable_grad()` +
+`torch.autograd.grad(_cross_energy)` on every reduced-solve iteration. Replaced with
+a direct precomputed stencil: the per-axis central-difference gradient operator is
+materialized once at construction (`_gradient_matrix`, the exact linear map
+`torch.gradient` applies), and `A_cross = Mx^T sx + My^T sy + Mz^T sz` is applied as
+matrix products / transposes. This is bit-for-bit the autograd result (same
+finite-difference map and its transpose), so the energy identity still closes
+(`0.5 phi^T A_cross phi == _cross_energy`).
+- **Equality gate** (committed): `test_apply_cross_matches_autograd_energy_gradient`
+  — direct stencil vs `grad_phi(_cross_energy)` on random fields (nonzero tangential
+  gradient at every wall): rel `4.9e-16` (gate `< 1e-12`). Energy identity rel `0.0`.
+- **Falsification**: applying `M` instead of `M^T` in the transpose step (a wrong
+  adjoint) drives the equality rel to `2.15` → RED.
+- This resolves the H2a "per-iteration autograd" perf note; no accuracy change.
+
+### (c) Test count corrected
+
+The doc previously said `test_tensor_eps.py` had "12 tests"; the original suite had
+**11**. With the two audit-minor additions above it is now **13**. (`test_open_boundary.py`
+likewise grows from 11 to 13, see (e).)
+
+### (d) "byte-identical" corrected to the ULP statement
+
+The `truncation_estimate` enlargement recomputes the interior cell centres; they
+reproduce the originals only to floating-point round-off, not byte-for-byte. Measured
+base-vs-enlarged cell-centre drift on the isolated-conductor scene (pad 8, h 0.05):
+**max 1.1102e-16** absolute. Docstrings (`TruncationEstimate`, `_enlarged_scene`) and
+this doc now say "fixed to ULP (~1.1e-16)" instead of "byte-identical".
+
+### (e) `truncation_estimate` structure-at-wall confound now fails closed
+
+Enlarging the domain fills the new cells with background medium. If a dielectric
+structure reaches the base domain wall, the enlarged solve replaces it with
+background there, so `delta` would confound boundary truncation with a change of the
+surrounding medium. `_structure_reaches_boundary` (checked in `_truncation_report`)
+now **raises `ValueError`** when the compiled permittivity deviates from the vacuum
+background on the outer cell shell — the documented fail-closed choice (matching the
+other truncation misuse guards, which also raise). Terminals/conductors are
+unaffected (the existing isolated-conductor convergence tests have no structures and
+still run). Tests: `test_truncation_estimate_rejects_structure_touching_boundary`
+(a full-span dielectric bar → raises), `test_truncation_estimate_allows_interior_structure`
+(a dielectric with a background margin → runs).
+- **Falsification**: forcing `_structure_reaches_boundary -> False` lets the
+  wall-touching scene run and report a confounded `delta[0,0] = -1.20e-12` (no
+  error); with the check restored it raises. RED without the guard.
+
+### Census
+
+No `raise NotImplementedError` guard added or removed by this cleanup (the confound
+check raises `ValueError`, which the census does not count). Budget unchanged at
+**176**.

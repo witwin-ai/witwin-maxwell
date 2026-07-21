@@ -153,11 +153,18 @@ The committed `test_two_rank_nccl_adjoint_parity_under_stress[standard|cpml|plan
 runs these three at the honest gate with the burner load spawned in-worker
 (`WITWIN_NCCL_ADJ_STRESS=1`): **3 passed**.
 
-**Load-bearing falsification (the fix is the load-bearing sync).** Re-wrapping the
-four halos back onto `engine.compute_stream` (the pre-fix behaviour) under the same
-saturating burner reddens every headline gate at the honest 1e-4 tolerance:
-standard rel 1.223e-4, CPML 3.120e-4, plane 2.684e-2 — each `> 1e-4`, RED. Restoring
-the default-stream fix returns them to ~2e-7 (green). Exact site: the
+**Load-bearing falsification (the fix is the load-bearing sync).** The falsification
+granularity is the **four-method revert taken collectively** — the four
+reverse/replay halos are reverted together onto `engine.compute_stream` (the pre-fix
+behaviour), not one at a time — so the recorded reddening is attributed to the
+stream-discipline change as a whole, not to any single halo. Under the same
+saturating co-tenant burner this reddens the standard and CPML gates
+**deterministically** at the recorded classes (standard rel ~1.223e-4, CPML
+~3.120e-4, both `> 1e-4` across the observed runs). The seam-spanning plane gate
+reddens **intermittently** (the race is load- and timing-dependent): the recorded
+plane rel 2.684e-2 is a worst-case single-run record, not a per-run guarantee —
+some runs land below 1e-4. Restoring the default-stream fix returns all three to
+~2e-7 (green) on every run. Exact site: the
 `with torch.cuda.stream(engine.compute_stream)` wrapper on the four reverse/replay
 halos; observed drift as tabulated.
 
@@ -180,11 +187,15 @@ halos; observed drift as tabulated.
 
 ### Falsifications recorded
 
-- **Stream-discipline fix is load-bearing (load).** Re-wrapping the four
-  reverse/replay halos onto `engine.compute_stream` under a saturating co-tenant
-  burner reddens every headline gate at the honest 1e-4 tolerance (standard 1.223e-4,
-  CPML 3.120e-4, plane 2.684e-2). Restoring the default-stream fix returns them to
-  ~2e-7. See "Load-dependence episode and fix" above for the exact site and mechanism.
+- **Stream-discipline fix is load-bearing (load).** Reverting the four reverse/replay
+  halos *collectively* onto `engine.compute_stream` (the granularity of this
+  falsification is the whole four-method change, not a single halo) under a
+  saturating co-tenant burner reddens the standard and CPML gates deterministically
+  at the honest 1e-4 tolerance (standard ~1.223e-4, CPML ~3.120e-4) and reddens the
+  seam-spanning plane gate intermittently (worst-case run record plane 2.684e-2; the
+  race is timing-dependent, so some runs stay green). Restoring the default-stream
+  fix returns all three to ~2e-7 on every run. See "Load-dependence episode and fix"
+  above for the exact site and mechanism.
 - **Reverse halos are load-bearing (2b).** No-op'ing either NCCL reverse field
   halo (`exchange_magnetic_adjoint` → rel 9.31e-1; `exchange_electric_adjoint` →
   rel 1.64e-2) drives the 2-GPU gradient far off the single-GPU reference; both
@@ -249,8 +260,13 @@ Adjacent suites (census + public/smoke + edited-module suites):
 ```bash
 python -m pytest tests/api/public/test_guard_census.py tests/api/public/test_public_api.py \
   tests/api/public/test_simulation_smoke.py tests/fdtd/multi_gpu/test_transport_adjoint.py \
-  tests/fdtd/multi_gpu/test_guard_regressions.py -q       # -> 57 passed
+  tests/fdtd/multi_gpu/test_guard_regressions.py -q       # -> 59 passed
 ```
+
+(59, not the 57 originally recorded: the two objective-guard regression tests
+`test_objective_guard_rejects_flux_monitor_even_under_allow_adjoint` /
+`test_objective_guard_rejects_separable_plane_on_in_process_bridge` were added in
+stage H1b and land in this same adjacent suite.)
 
 Commit: `2e99e6c feat(fdtd-distributed): per-rank collective NCCL reverse driver`.
 
@@ -393,8 +409,11 @@ python -m pytest tests/fdtd/multi_gpu/test_adjoint_replay.py \
 # adjacent (census + public + smoke + transport_adjoint + guard_regressions)
 python -m pytest tests/api/public/test_guard_census.py tests/api/public/test_public_api.py \
   tests/api/public/test_simulation_smoke.py tests/fdtd/multi_gpu/test_transport_adjoint.py \
-  tests/fdtd/multi_gpu/test_guard_regressions.py -q     # -> 57 passed
+  tests/fdtd/multi_gpu/test_guard_regressions.py -q     # -> 59 passed
 ```
+
+(59 = the H1a adjacent suite plus the two objective-guard regression tests added
+this stage.)
 
 ### Known gaps / deferred (H1b)
 

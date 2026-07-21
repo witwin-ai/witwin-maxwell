@@ -22,10 +22,11 @@ class TruncationEstimate:
     A finite grounded-box (Dirichlet) enclosure truncates the open-domain field of
     an isolated structure, so the extracted capacitance carries a boundary
     truncation error. Requesting this triggers ONE additional, enlarged capacitance
-    solve -- never run silently. The interior grid is held byte-identical: the
-    grounded box is pushed outward by ``padding_cells`` whole cells on every side of
-    every axis (the domain grows by exactly ``padding_cells`` cell widths per side,
-    so the original cell centres are reproduced and only the enclosure moves). The
+    solve -- never run silently. The interior grid is held fixed to floating-point
+    round-off: the grounded box is pushed outward by ``padding_cells`` whole cells
+    on every side of every axis (the domain grows by exactly ``padding_cells`` cell
+    widths per side, so the recomputed cell centres reproduce the originals to ULP
+    -- max ~1.1e-16 absolute drift -- and only the enclosure moves). The
     report quantifies how much the capacitance matrix moved and a 1/L Richardson
     extrapolation to the infinite-domain limit.
     """
@@ -74,12 +75,36 @@ def _min_domain_extent(bounds) -> float:
     return min(float(hi - lo) for lo, hi in bounds)
 
 
+def _structure_reaches_boundary(compiled: CompiledElectrostatics) -> bool:
+    """True when a dielectric structure occupies the base domain's outer cell shell.
+
+    The truncation estimate assumes the enlargement extends only the *background*
+    medium so that ``delta`` isolates the pure boundary-truncation effect. If a
+    structure reaches the domain wall, the enlarged solve replaces that structure
+    with background in the new cells, so ``delta`` then confounds truncation with a
+    change of the surrounding medium. Detected from the compiled permittivity
+    (background is vacuum ``eps_r == 1``): a material present on the outer shell
+    deviates from 1 there. Robust to arbitrary geometry (uses the same rasterized
+    occupancy the solver sees).
+    """
+    dev = (compiled.epsilon_r - 1.0).abs()
+    peak = float(dev.max())
+    if peak == 0.0:
+        return False
+    shell = torch.zeros_like(dev, dtype=torch.bool)
+    shell[0, :, :] = shell[-1, :, :] = True
+    shell[:, 0, :] = shell[:, -1, :] = True
+    shell[:, :, 0] = shell[:, :, -1] = True
+    return float(dev[shell].max()) > 1.0e-3 * peak
+
+
 def _enlarged_scene(scene, padding_cells: int):
     """Clone ``scene`` with the domain grown by whole cells on every side.
 
-    Keeps the interior cell grid byte-identical (the domain grows by exactly
-    ``padding_cells`` cell widths per side per axis), so the only change is that the
-    grounded box moves outward. Requires a uniform grid.
+    Keeps the interior cell grid fixed to floating-point round-off (the domain
+    grows by exactly ``padding_cells`` cell widths per side per axis, so the
+    recomputed cell centres reproduce the originals to ULP), so the only material
+    change is that the grounded box moves outward. Requires a uniform grid.
     """
     grid = scene.grid
     if grid.is_custom or grid.is_auto:
@@ -333,6 +358,16 @@ class CapacitanceSimulation:
                 "ElectrostaticBoundarySpec.grounded_box()): it measures how the capacitance "
                 "changes as the grounded box is pushed outward. The current boundary has no "
                 "Dirichlet face, so there is no enclosure to extend."
+            )
+        base_compiled = compile_electrostatics(self.scene, self.boundary, dtype=self.solver.dtype)
+        if _structure_reaches_boundary(base_compiled):
+            raise ValueError(
+                "truncation_estimate is confounded: a dielectric structure reaches the base "
+                "domain boundary, so enlarging the domain replaces that structure with "
+                "background medium in the new cells and the reported delta mixes the "
+                "boundary-truncation effect with a change of the surrounding medium. Shrink the "
+                "structure away from the walls (leave a background margin) or enlarge the base "
+                "domain before requesting a truncation estimate."
             )
         pad = self.truncation_estimate.padding_cells
         enlarged_scene = _enlarged_scene(self.scene, pad)

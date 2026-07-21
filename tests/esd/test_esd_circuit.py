@@ -55,6 +55,20 @@ _CURRENT_TOL = 3.0e-2    # |i_ode - i_fdtd|_inf / peak(|i_fdtd|)   (source curre
 _FIT_ORDER = 4
 _FALSIFY_CS_SCALE = 1.06  # storage-capacitance perturbation for the falsification
 
+# EM-coupling load-bearing variant (audit-minor H4a). The standard 150 pF network
+# shunts the ~0.13 pF field one-port so heavily that dropping the EM coupling from
+# the prediction changes nothing -- gate (a) alone does NOT make EM coupling
+# load-bearing. This variant drives a small storage cap into a high-impedance load
+# so the field one-port materially shifts the port voltage. Tolerances are
+# pre-registered from the reference host (observed rel_true 2.0e-3, rel_zero 2.5e-2,
+# ~12.7x margin); the gates below sit well inside those with slack for CUDA
+# reduction/integration noise.
+_EM_VARIANT_CS = 1.0e-12       # small storage capacitance (vs 150 pF standard)
+_EM_VARIANT_RLOAD = 2000.0     # high-impedance load
+_EM_MATERIAL_TOL = 1.0e-2      # zeroed-EM prediction must MISS by more than this
+_EM_VOLTAGE_TOL = 6.0e-3       # with-EM prediction still reproduces the coupled run
+_EM_IMPROVEMENT_FACTOR = 4.0   # with-EM must beat zeroed-EM by at least this factor
+
 _DX = 0.005
 _BOUNDS = ((-0.02, 0.02),) * 3
 _BAND = np.linspace(1.5e9, 5.5e9, 25)
@@ -223,14 +237,14 @@ def _generator():
     return mw.ESDVoltageSource("gun", port="feed", waveform=_waveform())
 
 
-def _test_circuit(*, storage_capacitance=_CS):
+def _test_circuit(*, storage_capacitance=_CS, rload=_RLOAD):
     generator = mw.ESDVoltageSource(
         "gun", port="feed", waveform=_waveform(),
         discharge_resistance=_RD, storage_capacitance=storage_capacitance,
     )
     t_end = _TEST_STEPS * _prepared_dt()
     circuit = generator.build_circuit(t_end=t_end)
-    circuit.add(mw.Resistor("Rload", circuit.node("tip"), circuit.ground, _RLOAD))
+    circuit.add(mw.Resistor("Rload", circuit.node("tip"), circuit.ground, rload))
     return circuit
 
 
@@ -242,15 +256,26 @@ def _generator_drive_table():
     return pwl.times.detach().cpu().numpy(), pwl.values.detach().cpu().numpy()
 
 
-def _predict(model, times) -> _PortTrace:
+def _predict(model, times, *, zero_em=False, storage_capacitance=_CS, rload=_RLOAD) -> _PortTrace:
     """Independent scipy integration of the hand-derived ESD-network loop ODE.
 
         node 'tip':  (V_gen - v)/R_d = C_s dv/dt + v/R_load + I_field
         I_field    = C x + D v + C_p dv/dt      (measured EM one-port)
         dx/dt      = A x + B v
+
+    ``zero_em=True`` drops the EM one-port entirely (``I_field = 0``, ``C_p = 0``):
+    the prediction then models the bare R_d / C_s network into R_load with no field
+    coupling. Used to prove the EM one-port is load-bearing (the with-EM vs
+    zeroed-EM contrast). ``storage_capacitance`` / ``rload`` let the load-bearing
+    variant use a small storage cap into a high-impedance load (where the field
+    one-port materially shifts the port voltage).
     """
 
     A, B, C, D, Cp = _realize_admittance(model)
+    if zero_em:
+        C = np.zeros_like(C)
+        D = 0.0
+        Cp = 0.0
     n = A.shape[0]
     drive_t, drive_v = _generator_drive_table()
 
@@ -263,7 +288,7 @@ def _predict(model, times) -> _PortTrace:
     def rhs(t, z):
         x = z[:n]
         v = z[n]
-        dv = ((vgen(t) - v) / _RD - v / _RLOAD - (C @ x + D * v)) / (_CS + Cp)
+        dv = ((vgen(t) - v) / _RD - v / rload - (C @ x + D * v)) / (storage_capacitance + Cp)
         dx = A @ x + B * v
         return np.concatenate([dx, [dv]])
 
@@ -365,6 +390,52 @@ def test_crosscheck_rejects_perturbed_storage_capacitance(characterization, pred
     rel = float(np.abs(predicted.voltage - perturbed.voltage).max() / peak)
     assert rel > _VOLTAGE_TOL, (
         f"perturbed storage cap not detected: rel. error {rel:.3e} within tol {_VOLTAGE_TOL:.1e}"
+    )
+
+
+@pytest.fixture(scope="module")
+def coupled_em_variant():
+    circuit = _test_circuit(storage_capacitance=_EM_VARIANT_CS, rload=_EM_VARIANT_RLOAD)
+    result = _run(circuit, steps=_TEST_STEPS)
+    return circuit.name, _coupled_trace(result, circuit.name)
+
+
+def test_em_one_port_is_load_bearing(characterization, coupled_em_variant):
+    """Gate (a) companion: the measured EM field one-port materially shifts v_port.
+
+    Gate (a)'s standard 150 pF network so heavily shunts the ~0.13 pF field one-port
+    that the zeroed-EM prediction matches the coupled run just as well -- i.e. gate
+    (a) alone is EM-insensitive. This variant (small storage cap into a
+    high-impedance load) brings the field one-port into play. Load-bearing evidence:
+    the with-EM prediction reproduces the coupled FDTD, while dropping the EM
+    one-port (``zero_em=True``) misses by more than the material tolerance and is
+    beaten by the pre-registered factor. The zeroed-EM branch here is the committed
+    falsification of "the EM one-port is load-bearing": removing the field coupling
+    from the prediction reddens the reproduction against the same coupled run.
+    """
+    _, model = characterization
+    _, trace = coupled_em_variant
+    peak = trace.peak_voltage
+    # Non-vacuous: the discharge rings the high-impedance variant network up.
+    assert peak > 100.0
+    kwargs = dict(storage_capacitance=_EM_VARIANT_CS, rload=_EM_VARIANT_RLOAD)
+    pred_true = _predict(model, trace.times, zero_em=False, **kwargs)
+    pred_zero = _predict(model, trace.times, zero_em=True, **kwargs)
+    rel_true = float(np.abs(pred_true.voltage - trace.voltage).max() / peak)
+    rel_zero = float(np.abs(pred_zero.voltage - trace.voltage).max() / peak)
+    # (1) EM coupling materially shifts the port voltage: dropping it misses badly.
+    assert rel_zero > _EM_MATERIAL_TOL, (
+        f"EM one-port not load-bearing in this variant: zeroed-EM rel {rel_zero:.3e} "
+        f"within material tol {_EM_MATERIAL_TOL:.1e}"
+    )
+    # (2) Only the full model (with the measured EM one-port) reproduces the run.
+    assert rel_true < _EM_VOLTAGE_TOL, (
+        f"with-EM prediction rel {rel_true:.3e} exceeds {_EM_VOLTAGE_TOL:.1e}"
+    )
+    # (3) ... and it beats the zeroed-EM prediction by the pre-registered factor.
+    assert rel_true < rel_zero / _EM_IMPROVEMENT_FACTOR, (
+        f"with-EM ({rel_true:.3e}) does not beat zeroed-EM ({rel_zero:.3e}) by "
+        f"{_EM_IMPROVEMENT_FACTOR}x"
     )
 
 

@@ -141,8 +141,9 @@ python -m pytest tests/esd tests/api/public/test_public_api.py \
 Result: **73 passed** (includes the pre-existing ESD/prebias suites plus the new
 `test_esd_circuit*.py`). New nodes:
 
-- `tests/esd/test_esd_circuit.py`: 9 passed (gate a headline+corroboration+fit,
-  gate-a falsification, gate c, waveform-resample unit x2, topology, validation).
+- `tests/esd/test_esd_circuit.py`: 10 passed (gate a headline+corroboration+fit,
+  gate-a falsification, gate-a EM-load-bearing companion [audit-minor, see below],
+  gate c, waveform-resample unit x2, topology, validation).
 - `tests/esd/test_esd_circuit_energy.py`: 3 passed (gate b conservation, field
   link, gate-b falsification).
 - `tests/esd/test_esd_circuit_e2e.py`: 2 passed (gate d, fail-closed blocker pin).
@@ -256,3 +257,70 @@ the hard-breakdown trainable-rejection guard is retained. Budget unchanged at 17
   (colocation from volume buffers is non-differentiable through the forward and
   would risk implying a trainable path that does not exist). The public entry is
   the functional `SmoothBreakdownRisk.evaluate[_from_components]`.
+
+---
+
+## Audit-minor cleanup (round-H, 2026-07-21)
+
+Round-H audit minors on the H4 delivery. Env: `maxwell`, `CUDA_VISIBLE_DEVICES=1`.
+`python -m pytest tests/esd -q -> 44 passed`.
+
+### (a) Gate (a) is EM-insensitive on its own; added an EM-load-bearing companion
+
+Gate (a) compares the coupled FDTD+MNA port voltage to an independent scipy ODE that
+includes the measured EM one-port. But the standard network's 150 pF storage cap so
+heavily shunts the ~0.13 pF field one-port (measured `Im(Y)/omega ~ -1.3e-13 F`,
+`|Y| ~ 1e-3..6e-3 S` over 1.5-5.5 GHz) that **zeroing the EM one-port in the
+prediction changes nothing** at the slow ESD timescale: on the standard bench the
+with-EM prediction rel is `7.76e-4` and the zeroed-EM prediction rel is `6.90e-4`
+(0.89x — the field coupling is immaterial), so gate (a) alone does not make EM
+coupling load-bearing. Confirmed the auditor's finding directly.
+
+Added `test_em_one_port_is_load_bearing`: a variant network (storage cap 1 pF into a
+2000 ohm load — same characterized scene / same field one-port, just a fast
+high-impedance drive network) where the field one-port materially shifts the port
+voltage. Reusing the existing characterization fixture, with a fresh coupled run of
+the variant network:
+
+- with-EM prediction rel (headline): **2.0e-3** (gate `_EM_VOLTAGE_TOL = 6.0e-3`).
+- zeroed-EM prediction rel: **2.5e-2** (gate `_EM_MATERIAL_TOL = 1.0e-2` — EM must
+  MISS by more than this), improvement factor **~12.7x** (gate
+  `_EM_IMPROVEMENT_FACTOR = 4.0x`).
+
+So the field one-port is now load-bearing: only the full model reproduces the coupled
+FDTD, and dropping it misses materially. Tolerances pre-registered from the reference
+host with generous slack. Probe of candidate networks (all on `CUDA_VISIBLE_DEVICES=1`):
+`cs=2pF/rload=1k -> 7.9x`, `cs=1pF/rload=1k -> 12.0x`, `cs=1pF/rload=2k -> 12.7x`,
+`cs=0.5pF/rload=2k -> 19.8x`; chose `1pF/2k` (robust, rel_true well inside the fit's
+valid band).
+
+- **Falsification (committed, in-test)**: the `zero_em=True` branch **is** the
+  falsification — it drops the field coupling (`I_field = 0`, `C_p = 0`) from the
+  prediction and the reproduction against the same coupled run reddens to `2.5e-2`
+  (`> _EM_VOLTAGE_TOL`, failing both assertion (2) and the improvement-factor
+  assertion (3)). The with-EM branch stays green at `2.0e-3`.
+
+### (b) Gate (b) falsification is post-hoc arithmetic; runtime sensitivity noted
+
+Gate (b)'s committed falsification
+(`test_conservation_gate_rejects_channel_imbalance`) scales the **recorded** balance
+channels (`conservation_residual(dissipation_scale=1.03)` /
+`source_scale=1.03`) — a post-hoc arithmetic perturbation of the already-integrated
+energy record, not a re-run of the solver with a corrupted runtime. It proves the
+balance residual is sensitive to a channel imbalance (a genuine and useful guard) but
+does not by itself re-exercise the runtime. The auditor verified runtime sensitivity
+separately (a real runtime change also breaks the balance).
+
+A committed runtime falsification would require a **second full closed-box balance
+run** (the `record` fixture is one ~2400-step FDTD run; a leaky-boundary or
+corrupted-coupling variant is another of the same cost) for coverage the auditor has
+already confirmed and the post-hoc gate already localizes. Judged **not cheap**
+relative to that redundancy, so it is left out per the "if cheap" latitude; this note
+records the honest disposition. (The new gate-(a) EM-load-bearing test above is itself
+a fresh *runtime* falsification of the ESD field coupling — a real coupled run whose
+result changes load-bearingly with the field one-port.)
+
+### Census
+
+No `raise NotImplementedError` guard added or removed by this cleanup. Budget
+unchanged at **176** (current master lineage).

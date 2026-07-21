@@ -214,6 +214,58 @@ def test_truncation_estimate_requires_uniform_grid():
         _enlarged_scene(scene, 4)
 
 
+def test_truncation_estimate_rejects_structure_touching_boundary():
+    """A dielectric structure at the wall confounds the truncation estimate.
+
+    Enlarging the domain replaces the structure with background medium in the new
+    cells, so ``delta`` would mix boundary truncation with a change of the
+    surrounding medium. The request must fail closed.
+    """
+    domain = mw.Domain(bounds=((-0.5, 0.5),) * 3)
+    grid = mw.GridSpec.uniform(0.05)
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
+    # A dielectric bar spanning the full x extent reaches both x walls.
+    scene.add_structure(
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(2.0, 0.4, 0.4)),
+            material=mw.Material(eps_r=4.0),
+        )
+    )
+    scene.add_electrostatic_terminal(
+        mw.ElectrostaticTerminal(name="c", geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)), potential=1.0)
+    )
+    with pytest.raises(ValueError, match="reaches the base domain boundary"):
+        mw.Simulation.capacitance(
+            scene,
+            terminals=("c",),
+            boundary=ElectrostaticBoundarySpec.grounded_box(),
+            truncation_estimate=TruncationEstimate(padding_cells=4),
+        ).run()
+
+
+def test_truncation_estimate_allows_interior_structure():
+    """A dielectric structure that keeps a background margin from the walls is fine."""
+    domain = mw.Domain(bounds=((-0.5, 0.5),) * 3)
+    grid = mw.GridSpec.uniform(0.05)
+    scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
+    scene.add_structure(
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.2, 0.2, 0.2)),
+            material=mw.Material(eps_r=4.0),
+        )
+    )
+    scene.add_electrostatic_terminal(
+        mw.ElectrostaticTerminal(name="c", geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)), potential=1.0)
+    )
+    report = mw.Simulation.capacitance(
+        scene,
+        terminals=("c",),
+        boundary=ElectrostaticBoundarySpec.grounded_box(),
+        truncation_estimate=TruncationEstimate(padding_cells=4),
+    ).run().capacitance.truncation_estimate
+    assert isinstance(report, TruncationReport)
+
+
 def test_truncation_estimate_type_check():
     scene = _isolated_conductor_scene(1.0, 0.05)
     with pytest.raises(TypeError, match="TruncationEstimate"):

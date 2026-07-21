@@ -57,6 +57,15 @@ class ElectrostaticOperator:
             self._eps_xy, self._eps_xz, self._eps_yz = tensor.xy, tensor.xz, tensor.yz
             self._cell_volume = compiled.cell_volume
             self._xc, self._yc, self._zc = compiled.xc, compiled.yc, compiled.zc
+            # Precompute the central-difference gradient operator per axis (the
+            # exact linear map torch.gradient applies) and the cross-flux weight.
+            # A_cross is then a fixed sparse stencil (matrix + its transpose), so
+            # the reduced solve no longer rebuilds an autograd graph per PCG
+            # iteration. See ``_apply_cross``.
+            self._grad_mx = _gradient_matrix(self._xc)
+            self._grad_my = _gradient_matrix(self._yc)
+            self._grad_mz = _gradient_matrix(self._zc)
+            self._cross_weight = self.eps0 * self._cell_volume
         else:
             eps_xx = eps_yy = eps_zz = compiled.epsilon_r
 
@@ -130,12 +139,37 @@ class ElectrostaticOperator:
         return energy
 
     def _apply_cross(self, phi: torch.Tensor) -> torch.Tensor:
-        """Symmetric cross-flux operator ``A_cross phi = grad_phi(_cross_energy)``."""
-        with torch.enable_grad():
-            probe = phi.detach().requires_grad_(True)
-            energy = self._cross_energy(probe)
-            (grad,) = torch.autograd.grad(energy, probe)
-        return grad
+        """Symmetric cross-flux operator ``A_cross phi = grad_phi(_cross_energy)``.
+
+        Applied directly as a precomputed stencil rather than by taping
+        ``_cross_energy`` per call. ``_cross_energy`` is the quadratic form
+        ``sum_c w_c (eps_xy gx gy + eps_xz gx gz + eps_yz gy gz)`` with
+        ``g. = M. @ phi`` (``M.`` the per-axis central-difference gradient
+        matrix). Its gradient is the exactly symmetric
+
+            ``A_cross = Mx^T sx + My^T sy + Mz^T sz``,
+            ``sx = w (eps_xy gy + eps_xz gz)``,
+            ``sy = w (eps_xy gx + eps_yz gz)``,
+            ``sz = w (eps_xz gx + eps_yz gy)``,
+
+        which is bit-for-bit the autograd result of ``_cross_energy`` (``M.`` is
+        the same finite-difference map ``torch.gradient`` applies), so
+        ``0.5 phi^T A_cross phi == _cross_energy(phi)`` and the energy identity
+        still closes. The one-sided ``torch.gradient`` edge rows make the wall
+        cross-flux first-order for a field with a strong tangential wall
+        gradient (documented limitation); the interior stencil is second-order.
+        """
+        gx = _apply_axis_matrix(self._grad_mx, phi, 0)
+        gy = _apply_axis_matrix(self._grad_my, phi, 1)
+        gz = _apply_axis_matrix(self._grad_mz, phi, 2)
+        w = self._cross_weight
+        sx = w * (self._eps_xy * gy + self._eps_xz * gz)
+        sy = w * (self._eps_xy * gx + self._eps_yz * gz)
+        sz = w * (self._eps_xz * gx + self._eps_yz * gy)
+        out = _apply_axis_matrix(self._grad_mx.transpose(0, 1), sx, 0)
+        out = out + _apply_axis_matrix(self._grad_my.transpose(0, 1), sy, 1)
+        out = out + _apply_axis_matrix(self._grad_mz.transpose(0, 1), sz, 2)
+        return out
 
     def apply_full(self, phi: torch.Tensor) -> torch.Tensor:
         out = torch.zeros(self.shape, dtype=phi.dtype, device=phi.device)
@@ -206,6 +240,29 @@ class ElectrostaticOperator:
 
 def _harmonic(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return 2.0 * a * b / (a + b)
+
+
+def _gradient_matrix(coord: torch.Tensor) -> torch.Tensor:
+    """Dense (n, n) matrix of the ``torch.gradient`` central difference on ``coord``.
+
+    ``M @ line == torch.gradient(line, spacing=(coord,))[0]`` for any 1-D signal:
+    the gradient is a fixed linear map (central difference interior, one-sided at
+    the edges), so materializing it once lets ``A_cross`` be applied as a plain
+    matrix product / transpose instead of an autograd pass per solver iteration.
+    Column ``j`` is the gradient of the unit vector ``e_j``.
+    """
+    n = int(coord.shape[0])
+    eye = torch.eye(n, dtype=coord.dtype, device=coord.device)
+    return torch.gradient(eye, spacing=(coord,), dim=0)[0]
+
+
+def _apply_axis_matrix(matrix: torch.Tensor, field: torch.Tensor, dim: int) -> torch.Tensor:
+    """Contract ``matrix`` (n_out, n_in) with ``field`` along ``dim``.
+
+    Returns a tensor of the same rank with the output axis restored at ``dim``.
+    """
+    out = torch.tensordot(matrix, field, dims=([1], [dim]))
+    return torch.moveaxis(out, 0, dim)
 
 
 def _broadcast_face(area: torch.Tensor, axis: int, index: int, shape) -> torch.Tensor:

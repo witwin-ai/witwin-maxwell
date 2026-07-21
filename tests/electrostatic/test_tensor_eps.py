@@ -167,6 +167,29 @@ def test_isotropic_material_stays_on_scalar_path():
         assert compiled.epsilon_tensor is None
 
 
+def test_apply_cross_matches_autograd_energy_gradient():
+    """A_cross (direct precomputed stencil) == grad_phi(_cross_energy) to round-off.
+
+    The cross operator is applied as a fixed matrix stencil (`_apply_cross`) rather
+    than by taping the cross-energy per PCG iteration. This equality gate protects
+    that refactor: the direct stencil must be bit-for-bit the autograd gradient of
+    the cross-energy quadratic form, including the one-sided wall rows (the random
+    field carries nonzero tangential gradient at every wall).
+    """
+    matrix = _rotated_spd((1.0, 2.5, 4.0))
+    compiled = _const_compiled(10, 1.0, matrix, ElectrostaticBoundarySpec.neumann())
+    operator = ElectrostaticOperator(compiled)
+    torch.manual_seed(0)
+    for _ in range(3):
+        phi = torch.randn(compiled.shape, dtype=torch.float64, device=compiled.device)
+        direct = operator._apply_cross(phi)
+        with torch.enable_grad():
+            probe = phi.detach().requires_grad_(True)
+            (autograd_cross,) = torch.autograd.grad(operator._cross_energy(probe), probe)
+        scale = float(autograd_cross.abs().max())
+        assert float((direct - autograd_cross).abs().max()) / scale < 1e-12
+
+
 def test_diagonal_tensor_has_zero_cross_coupling():
     """A diagonal tensor (zero off-diagonals) reduces exactly to the face-flux path.
 
@@ -279,6 +302,94 @@ def test_mms_gauss_closure():
     matrix = _rotated_spd((1.0, 2.0, 3.0))
     _, gauss_rel = _mms_solve(36, matrix)
     assert gauss_rel < 1e-9
+
+
+# --------------------------------------------------------------------------- #
+# Wall cross-flux: manufactured solution with NONZERO tangential wall gradient.
+# --------------------------------------------------------------------------- #
+#
+# The sin^2 MMS above has both f and f' vanishing at the walls, so its tangential
+# (and normal) gradient is zero on every Dirichlet face: the wall region carries
+# no active cross-coupling and the one-sided wall cross-flux is never exercised.
+# phi = g(x) g(y) g(z) with g(t) = sin(t + 0.5) instead has nonzero VALUE and
+# nonzero derivative at t = 0, 1, so on every wall face the manufactured field has
+# a genuine tangential gradient AND the full rotated tensor's off-diagonal
+# cross-flux is active right up to the boundary. The boundary is pinned to the
+# exact (nonzero) values.
+def _wall_bump_fields(coords):
+    shifted = coords + 0.5
+    f = torch.sin(shifted)
+    df = torch.cos(shifted)
+    d2f = -torch.sin(shifted)
+    return f, df, d2f
+
+
+def _wall_mms_solve(n, matrix):
+    compiled = _const_compiled(n, 1.0, matrix, ElectrostaticBoundarySpec.neumann())
+    op = ElectrostaticOperator(compiled)
+    device = compiled.device
+    xx, yy, zz = torch.meshgrid(compiled.xc, compiled.yc, compiled.zc, indexing="ij")
+    fx, dfx, d2x = _wall_bump_fields(xx)
+    fy, dfy, d2y = _wall_bump_fields(yy)
+    fz, dfz, d2z = _wall_bump_fields(zz)
+    phi_exact = fx * fy * fz
+    m = np.asarray(matrix, dtype=np.float64)
+    hxx, hyy, hzz = d2x * fy * fz, fx * d2y * fz, fx * fy * d2z
+    hxy, hxz, hyz = dfx * dfy * fz, dfx * fy * dfz, fx * dfy * dfz
+    div = (
+        m[0, 0] * hxx + m[1, 1] * hyy + m[2, 2] * hzz
+        + 2.0 * m[0, 1] * hxy + 2.0 * m[0, 2] * hxz + 2.0 * m[1, 2] * hyz
+    )
+    free_charge = compiled.eps0 * (-div) * compiled.cell_volume
+
+    shape = compiled.shape
+    boundary = torch.zeros(shape, dtype=torch.bool, device=device)
+    boundary[0, :, :] = boundary[-1, :, :] = True
+    boundary[:, 0, :] = boundary[:, -1, :] = True
+    boundary[:, :, 0] = boundary[:, :, -1] = True
+    free_mask = ~boundary
+    # Pin the Dirichlet walls to the exact (nonzero) manufactured values.
+    fixed_value = torch.where(boundary, phi_exact, torch.zeros_like(phi_exact))
+
+    config = ElectrostaticSolverConfig(tolerance=1e-13, max_iterations=80000)
+    phi, report = _reduced_solve(op, free_mask, fixed_value, free_charge, config)
+    assert report.converged
+    err = (phi - phi_exact)[free_mask]
+    volume = compiled.cell_volume[free_mask]
+    l2 = float(torch.sqrt((err * err * volume).sum() / volume.sum()))
+    return l2
+
+
+def test_wall_tangential_cross_flux_mms_converges():
+    """A manufactured solution with nonzero tangential wall gradient converges.
+
+    Unlike the sin^2 MMS (zero wall gradient), ``g(t) = sin(t + 0.5)`` has a
+    genuine tangential gradient on every Dirichlet face, so the full rotated
+    tensor's off-diagonal cross-flux is exercised up to the walls. The observed
+    rate is first order (the documented one-sided wall cross-flux + half-cell
+    Dirichlet ghost are first order for a field with nonzero wall gradient), so
+    the gate asserts a CONVERGENT solve (monotone, order > 0.85) rather than the
+    interior second-order rate: the discriminator is that the solve stays
+    consistent with active cross-coupling at the boundary. Dropping the cross term
+    makes it diverge (recorded falsification).
+    """
+    matrix = _rotated_spd((1.0, 2.0, 3.0))
+
+    # The manufactured field genuinely has a nonzero tangential gradient along the
+    # walls (contrast: the sin^2 MMS is flat there, f = f' = 0 at t = 0, 1), so this
+    # probes the wall cross-flux regime. g'(t) = cos(t + 0.5) is O(1) across [0, 1].
+    coords = torch.linspace(0.0, 1.0, 6, dtype=torch.float64)
+    _, dfy, _ = _wall_bump_fields(coords)
+    assert float(dfy.abs().max()) > 0.5
+
+    ns = (24, 36, 54)
+    errors = [_wall_mms_solve(n, matrix) for n in ns]
+    assert errors[0] > errors[1] > errors[2], f"wall MMS not converging: {errors}"
+    orders = [
+        math.log(errors[i] / errors[i + 1]) / math.log(ns[i + 1] / ns[i])
+        for i in range(len(ns) - 1)
+    ]
+    assert min(orders) > 0.85, f"wall cross-flux MMS orders {orders} below first order"
 
 
 # --------------------------------------------------------------------------- #
