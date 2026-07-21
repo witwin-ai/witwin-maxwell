@@ -913,11 +913,18 @@ Capability level: **differentiable-surrogate (non-physical, non-regulatory)**. T
   `transport="cuda_p2p"` bridge continues to reject every tiled monitor.
 - The NCCL adjoint driver reproduces the single-GPU reference to ~2e-7 of scale
   both on exclusive GPUs and under a saturating co-tenant, so no shared-GPU caveat
-  applies to it. (The in-process `transport="cuda_p2p"` bridge carries the same
-  class of caching-allocator cross-stream hazard on its cross-device peer-copy
-  path and can still drift the gradient at the seam under concurrent load; its fix
-  is tracked separately as it needs cross-device event/`record_stream` handling
-  rather than the single-device stream swap the NCCL path uses.) See
-  `docs/assessments/h1-nccl-driver-acceptance-2026-07-21.md` "Load-dependence
-  episode and fix".
+  applies to it. The in-process `transport="cuda_p2p"` bridge is now load-safe too:
+  its own cross-stream drift was a distinct hazard from the NCCL path -- a
+  checkpoint-capture happens-before race, not the allocator-reuse class. The
+  mid-forward checkpoint clone read the persistent field storage on the device
+  default stream while the forward field updates run on each shard's compute
+  stream, so nothing ordered the next update after the clone and under load the
+  update tore the snapshot, drifting the replayed seam gradient (~8e-2) while the
+  forward output stayed bitwise clean. Cloning the checkpoint on the shard's
+  compute stream serializes previous-update -> clone -> next-update on one stream,
+  restoring ~2e-7 parity under a saturating co-tenant burner. A committed stressed
+  gate holds the standard and x-CPML 1-vs-2-GPU parity over six rounds under load
+  at the unchanged honest tolerances, with a falsification that reverts the clone
+  to the default stream and shows the seam drift return. See
+  `docs/assessments/i1-p2p-race-acceptance-2026-07-21.md`.
 <!-- END h1-nccl-driver -->
