@@ -488,6 +488,21 @@ class NcclHaloTransport:
     # (:meth:`CudaP2PHaloTransport.forward_electric_halo`); over NCCL they become
     # collective x-plane sends so the interface mid-step is correct with a single
     # local shard per rank.
+    #
+    # Stream discipline (load-safety, critical): unlike the live-field forward
+    # halos above -- which move slices of the solver's PERSISTENT field storage --
+    # the replay and reverse halos below touch PER-STEP tensors (freshly cloned
+    # checkpoint state, and the reverse adjoint states produced by the reverse
+    # kernels). Those tensors are allocated on the default compute stream. The CUDA
+    # caching allocator tags every freed block with only its allocation stream, so
+    # if these halos ran their in-place accumulate/zero on ``engine.compute_stream``
+    # (a non-default stream), a block freed on the default stream could be handed
+    # back to the next default-stream allocation while the compute-stream halo were
+    # still writing it -- a cross-stream reuse hazard whose window only opens under
+    # concurrent GPU load, deterministically corrupting the partition-seam cell.
+    # The reverse driver already fully host-synchronizes between phases, so these
+    # halos gain nothing from a private stream; running them on the CURRENT
+    # (default) stream keeps allocation-stream == use-stream and closes the window.
 
     def forward_electric_halo(self, engines, current) -> None:
         """Forward electric replay halo over NCCL on a per-rank state dict.
@@ -495,12 +510,14 @@ class NcclHaloTransport:
         Ships this rank's first owned Ey/Ez node plane to the left neighbour's
         high ghost node (data flows right -> left) and receives the right
         neighbour's first owned node plane into this rank's high ghost node.
+
+        Runs on the current (default) stream: see the stream-discipline note above.
         """
 
         engine = engines[0]
         state = current[engine.rank]
         ns = engine.layout.storage_node_owned
-        with torch.cuda.device(engine.device), torch.cuda.stream(engine.compute_stream):
+        with torch.cuda.device(engine.device):
             first_owned = None
             if self.left_rank is not None:
                 first_owned = [state["Ey"][ns.start], state["Ez"][ns.start]]
@@ -510,7 +527,7 @@ class NcclHaloTransport:
             self._electric_halo_planes(
                 first_owned_node_planes=first_owned, ghost_node_planes=ghost
             )
-            engine.electric_received.record(engine.compute_stream)
+            engine.electric_received.record()
 
     def forward_magnetic_halo(self, engines, current) -> None:
         """Forward magnetic replay halo over NCCL on a per-rank state dict.
@@ -518,12 +535,14 @@ class NcclHaloTransport:
         Ships this rank's last owned Hy/Hz cell plane to the right neighbour's low
         ghost cell (data flows left -> right) and receives the left neighbour's
         last owned cell plane into this rank's low ghost cell.
+
+        Runs on the current (default) stream: see the stream-discipline note above.
         """
 
         engine = engines[0]
         state = current[engine.rank]
         cs = engine.layout.storage_cell_owned
-        with torch.cuda.device(engine.device), torch.cuda.stream(engine.compute_stream):
+        with torch.cuda.device(engine.device):
             last_owned = None
             if self.right_rank is not None:
                 last_owned = [state["Hy"][cs.stop - 1], state["Hz"][cs.stop - 1]]
@@ -533,7 +552,7 @@ class NcclHaloTransport:
             self._magnetic_halo_planes(
                 last_owned_cell_planes=last_owned, low_ghost_planes=low_ghost
             )
-            engine.magnetic_received.record(engine.compute_stream)
+            engine.magnetic_received.record()
 
     # -- engine-based reverse (adjoint transpose) exchanges -----------------
     #
@@ -602,7 +621,10 @@ class NcclHaloTransport:
         engine = engines[0]
         state = adjoint_states[engine.rank]
         cs = engine.layout.storage_cell_owned
-        with torch.cuda.device(engine.device), torch.cuda.stream(engine.compute_stream):
+        # Current (default) stream, not compute_stream: the adjoint-state planes are
+        # per-step allocations on the default stream; see the stream-discipline note
+        # above the forward-replay halos for the cross-stream reuse hazard this avoids.
+        with torch.cuda.device(engine.device):
             ghost = None
             if self.left_rank is not None:
                 ghost = [state["Hy"][0], state["Hz"][0]]
@@ -617,7 +639,7 @@ class NcclHaloTransport:
                 owner_adjoint_planes=owner,
                 staging_planes=staging,
             )
-            engine.magnetic_received.record(engine.compute_stream)
+            engine.magnetic_received.record()
 
     def exchange_electric_adjoint(self, engines, adjoint_states) -> None:
         """Transpose of :meth:`exchange_electric` over NCCL.
@@ -631,7 +653,10 @@ class NcclHaloTransport:
         engine = engines[0]
         state = adjoint_states[engine.rank]
         ns = engine.layout.storage_node_owned
-        with torch.cuda.device(engine.device), torch.cuda.stream(engine.compute_stream):
+        # Current (default) stream, not compute_stream: the adjoint-state planes are
+        # per-step allocations on the default stream; see the stream-discipline note
+        # above the forward-replay halos for the cross-stream reuse hazard this avoids.
+        with torch.cuda.device(engine.device):
             ghost = None
             if self.right_rank is not None:
                 g = ns.stop
@@ -646,7 +671,7 @@ class NcclHaloTransport:
                 owner_adjoint_planes=owner,
                 staging_planes=staging,
             )
-            engine.electric_received.record(engine.compute_stream)
+            engine.electric_received.record()
 
     def reduce_owned_energy(self, engines) -> torch.Tensor:
         engine = engines[0]

@@ -49,32 +49,29 @@ from witwin.maxwell.fdtd.distributed.nccl_transport import NcclHaloTransport
 _FREQUENCY = 1.0e9
 _DENS_SHAPE = (5, 4, 4)
 
-# Parity gates. The forward loss is load-insensitive (bitwise identical across GPU
-# cohabitation conditions), so its tolerances stay tight. The distributed *reverse*
-# gradient, however, is load-dependent: under concurrent multi-GPU activity from
-# co-resident processes the shared multi-GPU adjoint stack (transposed halos +
-# fused reverse kernels + the grid_sample material VJP, all predating this track)
-# drifts the gathered gradient by up to ~5e-3 of the gradient scale (measured worst
-# case on the small-element plane objective; ~1.2e-4 standard, ~3.3e-4 CPML). On
-# exclusive GPUs the driver reproduces the single-GPU reference to ~1.5e-7. The grad
-# tolerance is therefore a flake-guard band sized to sit ABOVE the documented
-# load-induced drift and BELOW the smallest deliberate falsification signal
-# (electric-halo no-op, rel 1.64e-2); the load-bearing correctness proof is carried
-# by the falsification gates below, not by this band. See the H1 acceptance doc's
-# "Known defect: load-dependent distributed adjoint gradient" section.
+# Parity gates (honest 1e-4-class, mirroring the in-process
+# ``test_adjoint_parity_cpml`` tolerances). The forward loss is bitwise identical
+# across GPU cohabitation conditions. The distributed *reverse* gradient is now
+# load-safe: the reverse/replay NCCL halos run on the current (default) stream so
+# their per-step adjoint planes' allocation stream matches their use stream,
+# closing the caching-allocator cross-stream reuse window that previously
+# corrupted the partition-seam gradient under concurrent GPU load (see the H1
+# acceptance doc's "Load-dependence episode and fix"). With that fix the driver
+# reproduces the single-GPU reference to ~2e-7 relative BOTH on exclusive GPUs and
+# under a saturating co-tenant burner (proven by the stressed gate), so the grad
+# tolerance is the genuine numerical-parity gate, not a drift-absorbing band.
 _LOSS_RTOL = 5.0e-5
 _LOSS_ATOL = 5.0e-6
-_GRAD_RTOL = 1.0e-3
-_GRAD_ATOL_FLOOR = 1.0e-2
+_GRAD_RTOL = 1.0e-4
+_GRAD_ATOL_FLOOR = 1.0e-6
 # Falsification separation: a deliberately broken reverse (no-op'd halo or zeroed
-# psi carry) moves >=1.64e-2 relative; healthy load-induced drift stays <=5e-3.
-# Threshold sits between the two.
+# psi carry) moves >=1.64e-2 relative; healthy parity (exclusive OR stressed) stays
+# ~2e-7. Threshold sits well between the two.
 _FALSIFY_MIN_REL = 1.0e-3
-# Repeat-determinism band. The gathered grad_eps reverse product is bitwise
-# reproducible only under identical (exclusive-GPU) block scheduling; under
-# concurrent load the fused reverse kernels' / VJP reductions can flip at the ULP
-# level (observed max abs diff ~1.9e-18). The gate asserts reduction-order
-# determinism (relative < 1e-9), which still catches any material nondeterminism.
+# Repeat-determinism band. The gathered grad_eps reverse product is reduction-order
+# reproducible (bitwise under identical block scheduling; concurrent load may flip
+# fused-kernel/VJP reductions at the ULP level). The gate asserts relative < 1e-9,
+# which still catches any material nondeterminism.
 _DETERMINISM_MAX_REL = 1.0e-9
 
 # psi-active probe constants (mirror test_adjoint_parity_cpml).
