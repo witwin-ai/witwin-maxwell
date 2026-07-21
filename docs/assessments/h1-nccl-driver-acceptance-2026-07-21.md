@@ -153,67 +153,145 @@ Commit: `2e99e6c feat(fdtd-distributed): per-rank collective NCCL reverse driver
 
 ---
 
-## Stage H1b — S5 tiled monitor seeds (DEFERRED, precise notes) + docs/census/FEATURE_LIST
+## Stage H1b — S5 separable tiled-plane monitor adjoint seed (DELIVERED, all gates green) + docs/census/FEATURE_LIST
+
+### Delivered
+
+A y/z-normal `PlaneMonitor` objective is now seedable on the per-rank NCCL adjoint
+driver. The plane is tiled across the x seam; the objective sums each rank's owned
+plane strip (`plane_monitor_l2_objective`), so the world sum reproduces the
+single-process full-plane objective with every seam cell counted on exactly one
+rank and each rank seeding only its owned strip. No cross-rank cotangent scatter is
+introduced — the seam ownership is carried entirely by the separable objective.
+
+Commit `b402074 feat(fdtd-distributed): separable tiled-plane monitor adjoint seed
+over NCCL`.
+
+**Code (`witwin/maxwell/fdtd/distributed/`):**
+1. `adjoint.is_separable_plane_monitor(monitor)` — the exact-class `PlaneMonitor`
+   on a y/z normal without flux. Flux/mode/finite/x-plane are excluded (they need
+   seam-crossing tangential-field assembly, not owned-strip separable).
+2. `adjoint.require_distributed_adjoint_objective_support` — the tiled rejection is
+   now gated on `distributed._allow_adjoint`: a separable y/z plane is admitted only
+   on the NCCL adjoint driver; the in-process bridge (`allow_adjoint=False`) still
+   rejects every tiled monitor.
+3. `solver._validate_nccl_capabilities` — the forward NCCL fence admits a separable
+   y/z plane under `allow_adjoint` (the adjoint driver reads each rank's
+   shard-local monitor output directly via `_shard_local_raw_output`, never the
+   collective per-monitor gather the forward output path lacks, so the "gather not
+   wired" concern does not apply).
+4. `adjoint._index_global_grads` / `_build_shard_seed_runtimes` route plane-template
+   cotangents: one output tensor per plane component (its `["data"]` strip), indexed
+   by `(monitor, component)` exactly like the point path; `_build_output_seeds`
+   already builds plane seed batches from the shard solver's
+   `_plane_observer_groups`, so the shard-local owned-strip cotangent is consumed
+   directly (no scatter).
+5. `adjoint.plane_monitor_l2_objective` — owned-strip separable `sum|spectrum|^2`
+   (plane x axis at dim −2, restricted to `layout.component(name).owned_local_slice[0]`,
+   the forward monitor-merge seam rule); point components contribute their full
+   spectrum.
+
+**Load-bearing seam fact (verified empirically):** the shard-local plane observer
+records the DFT only on cells the shard drives, and the ghost/halo column carries
+real field exactly when the forward halo keeps it live (measured: with the source
+just left of the seam, rank 0's owned strip sum = 5.56e-2, rank 1's = 5.43e-2 —
+genuinely dual-sided — and rank 0's discarded ghost column = 2.89e-2, ~34% of its
+full strip). The owned-`owned_local_slice[0]` crop is therefore load-bearing on a
+seam-spanning plane, not a no-op.
+
+### Gates (2 processes × 1 GPU) — all green
+
+Worker mode via `WITWIN_NCCL_ADJ_MODE`; pytest launchers in
+`tests/fdtd/multi_gpu/test_nccl_transport.py`.
+
+| Gate | Mode | Result |
+|------|------|--------|
+| S5 objective+grad parity, y-normal plane spanning the x seam | `plane` | `NCCL_ADJOINT_WORKER_OK[plane]` |
+| S5 seam-ownership falsification: sum full local strip (double-count live seam cell) → parity red | `plane_seam` | grad rel 4.005e-1, loss rel 2.599e-1 (>> 1e-3 gate) → OK |
+
+Parity tolerances mirror the point gates: loss rtol 5e-5 / atol 5e-6; grad rtol
+1e-4 with an atol floor 1e-6·max|grad|. The plane scene is `_plane_scene` (open
+boundary, y-normal `PlaneMonitor("plane", axis="y", position=0.0, fields=("Ez",))`,
+source at x=−0.05 just left of the seam so both owned strips and the seam ghost are
+live), 60 steps.
+
+Reference oracle: an independent single-GPU adjoint on the same scene summing
+`|Ez|²` over the FULL global plane (`result.monitors["plane"]["Ez"]`,
+`loss.backward()`). The distributed owned strips tile that plane with no overlap, so
+the world sum of the separable per-strip objective — and its gathered `grad_eps` —
+must reproduce it. Single-GPU plane-monitor adjoint is itself covered by
+`tests/gradients/test_fdtd_adjoint_rigorous.py::test_plane_flux_gradient_matches_fd`.
+
+### Falsifications recorded (H1b)
+
+- **Owned-strip seam rule is load-bearing (S5 seam-ownership).** Replacing the
+  owned-strip sum with the FULL local-strip sum (`_plane_full_leaf_objective`,
+  worker mode `plane_seam`) double-counts the live seam cell on both shards; the
+  single-GPU full-plane reference then rejects the world sum and its gradient —
+  grad rel 4.005e-1, loss rel 2.599e-1, both >> the 1e-3 gate. Permanent launcher
+  `test_two_rank_nccl_adjoint_falsification[plane_seam-400]`.
+
+### Fail-closed regression checks (verified this stage)
+
+- In-process bridge (`allow_adjoint=False`): `require_distributed_adjoint_objective_support`
+  still **rejects** a trainable plane scene (ValueError). Confirmed by direct check.
+- Flux plane (`FluxMonitor`) is **rejected even under `allow_adjoint`** (not
+  separable). Confirmed by direct check.
+- H1a point-path gates unchanged: `standard` parity OK, `falsify_mag_halo` rel
+  9.311e-1 OK, `guard_deadlock` OK (re-run this stage after the shared-plumbing
+  edits to `_index_global_grads` / `_build_shard_seed_runtimes` / objective guard).
 
 ### Census reconciliation
 
-Capability-guard census budget verified against THIS base: `CAPABILITY_GUARD_BUDGET
-= 175` (`tests/api/public/test_guard_census.py`), and `test_guard_census.py`
-passes unchanged. H1a added no `raise NotImplementedError` and removed none; the
-`allow_adjoint` relaxation only re-conditions existing `ValueError` fences (not
-counted by the census). Budget stays **175**.
+Capability-guard census budget verified against THIS base (`18bc42a` lineage):
+`CAPABILITY_GUARD_BUDGET = 175` (`tests/api/public/test_guard_census.py` passes
+unchanged). S5 added no `raise NotImplementedError` and removed none; the
+`allow_adjoint`-gated relaxations only re-condition existing `ValueError` fences,
+and the added plane branches are ordinary routing (not census-tracked). Budget
+stays **175**.
 
 ### FEATURE_LIST
 
-Additive subsection `h1-nccl-driver` appended (multi-GPU NCCL trainable-density
-adjoint).
+The additive `h1-nccl-driver` subsection's final bullet is updated: the separable
+y/z `PlaneMonitor` objective is now supported on the NCCL adjoint driver with the
+seam-ownership guarantee; flux/mode/finite/x-plane and the in-process bridge stay
+fail-closed.
 
-### S5 tiled monitor seeds — DEFERRED (never half-land)
+### Test inventory (H1b)
 
-Supervisor decision 3 makes S5 a stretch conditional on H1a landing green. H1a is
-green, but S5 is a genuinely separate subsystem, not an increment on the H1a
-driver, and is deferred with the executable plan below rather than risk a partial
-landing.
+- `tests/fdtd/multi_gpu/_nccl_adjoint_worker.py`: `_plane_scene`, modes `plane` /
+  `plane_seam`, `plane_monitor_l2_objective` selection, plane reference, and the
+  `_plane_full_leaf_objective` falsification.
+- `tests/fdtd/multi_gpu/test_nccl_transport.py`: `plane` added to the parity
+  parametrize, `plane_seam` to the falsification parametrize.
 
-**Why it is not a small add-on:**
-- Tiled (plane/flux/mode) monitors are not wired through the NCCL *forward* at all:
-  `DistributedFDTD._validate_nccl_capabilities` admits only point-region monitors
-  even under `allow_adjoint` ("per-monitor payload gather across ranks is not wired
-  yet"). A separable per-strip objective can avoid the forward gather (each rank
-  sums its owned strip; the world sum reproduces the global objective), but that
-  still requires relaxing this forward fence for the separable-tiled case.
-- `require_distributed_adjoint_objective_support` fail-closed-rejects every tiled
-  monitor cotangent today; it must be relaxed for the separable case.
-- The owner-strip decomposition must mirror the forward monitor seam rule exactly.
-  `fdtd/distributed/monitor_merge.py` (l.381+) records that point monitors and
-  x-normal planes have exactly one owner, but **y/z-normal planes are stitched
-  from per-shard strips**; a reverse seed that double-counts a seam-boundary strip
-  cell would corrupt both the objective and the gradient. This seam-consistent
-  owner-strip rule is the load-bearing subtlety.
+Commands (env exports as in the H1a header):
 
-**Executable plan for the next agent:**
-1. Relax `_validate_nccl_capabilities` (under `allow_adjoint`) and
-   `require_distributed_adjoint_objective_support` to admit a *separable* tiled
-   objective (`sum|E_strip|^2` per owned strip), keeping non-separable tiled
-   objectives rejected.
-2. Confirm the shard-local forward pack exposes each rank's owned plane strip with
-   the seam-boundary cell owned by exactly one shard (reuse the `monitor_merge`
-   owner rule; assert single-owner per strip cell, mirroring l.412's "more than one
-   shard owner" guard on the reverse side).
-3. Reuse the H1a local-seed path unchanged: the per-strip cotangent is already the
-   shard-local owned-strip grad, so `_build_output_seeds` consumes it directly
-   (no scatter), exactly as the point-monitor path does.
-4. Gate: seeded-objective + gathered-grad_eps parity vs single-GPU for a y/z-normal
-   plane objective spanning the x seam (loss rtol 5e-5/atol 5e-6, grad rtol
-   1e-4/atol-floor 1e-6·max|grad|), plus a **seam-ownership falsification** (assign
-   a seam-boundary strip cell to the wrong shard → parity red).
-
-No code change and no census impact for S5.
+```bash
+# S5 pytest launchers
+python -m pytest \
+  "tests/fdtd/multi_gpu/test_nccl_transport.py::test_two_rank_nccl_adjoint_parity[plane-400]" \
+  "tests/fdtd/multi_gpu/test_nccl_transport.py::test_two_rank_nccl_adjoint_falsification[plane_seam-400]" \
+  -q                                                    # -> 2 passed
+# in-process no-regression (shared adjoint.py plumbing)
+python -m pytest tests/fdtd/multi_gpu/test_adjoint_replay.py \
+  tests/fdtd/multi_gpu/test_adjoint_parity.py \
+  tests/fdtd/multi_gpu/test_adjoint_parity_cpml.py -q   # -> 33 passed
+# adjacent (census + public + smoke + transport_adjoint + guard_regressions)
+python -m pytest tests/api/public/test_guard_census.py tests/api/public/test_public_api.py \
+  tests/api/public/test_simulation_smoke.py tests/fdtd/multi_gpu/test_transport_adjoint.py \
+  tests/fdtd/multi_gpu/test_guard_regressions.py -q     # -> 57 passed
+```
 
 ### Known gaps / deferred (H1b)
 
-- S5 tiled (plane/flux/mode) monitor adjoint seed scatter over NCCL — deferred as
-  above, fail-closed retained.
+- Flux / mode / finite-plane / x-normal-plane adjoint objectives over NCCL remain
+  fail-closed: they need seam-crossing tangential-field interpolation (the Poynting
+  cross product / mode overlap is not a per-owned-cell separable sum), so the
+  owned-strip trick does not apply. Rejected precisely by
+  `require_distributed_adjoint_objective_support`.
+- The in-process `transport="cuda_p2p"` bridge continues to reject every tiled
+  monitor (its `_index_global_grads` path is point/full-field only; the plane path
+  is exercised solely under `allow_adjoint` on the NCCL driver).
 - No wall-clock/timing numbers produced (correctness-only shared GPUs).
-- The census budget is unchanged at 175 (verified against this base; no guard
-  added or relaxed).
+- Census budget unchanged at 175.

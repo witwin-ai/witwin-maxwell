@@ -845,6 +845,17 @@ conductive-path model, not a validated arc or device-failure predictor).
   and symmetrically on every rank without deadlocking.
 - The forward-only NCCL fence still rejects a trainable/monitor scene on the plain
   NCCL forward path; the relaxation is internal to the verified adjoint driver.
-  Tiled plane/flux/mode monitor adjoint objectives over NCCL remain rejected
-  fail-closed (owner-strip cotangent seed scatter is a separate follow-up).
+- A y/z-normal `PlaneMonitor` objective is now also supported on the NCCL adjoint
+  driver: the plane is tiled across the x seam, so a `sum|spectrum|^2` objective
+  restricted to each rank's owned plane strip (the forward monitor-merge
+  owned-local x slice) is separable -- the world sum reproduces the single-process
+  full-plane objective with every seam cell counted on exactly one rank, and each
+  rank seeds only its owned strip (no cross-rank cotangent scatter). Two-process
+  acceptance gates the owned-strip objective and its gathered `grad_eps` against
+  the single-GPU full-plane adjoint on a plane spanning the seam, plus a
+  seam-ownership falsification (summing each rank's full local strip double-counts
+  the live seam cell and reddens parity). Flux / mode / finite-plane / x-normal
+  plane objectives stay fail-closed (they need seam-crossing tangential-field
+  assembly whose cotangent scatter is not wired), and the in-process
+  `transport="cuda_p2p"` bridge continues to reject every tiled monitor.
 <!-- END h1-nccl-driver -->
