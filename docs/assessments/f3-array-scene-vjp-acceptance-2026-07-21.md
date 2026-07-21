@@ -58,8 +58,8 @@ single-device `scene_gradient_vjp` bit-for-bit
 
 ## 1-vs-2-GPU parity: measured BITWISE
 
-Reproduce with `scratch/measure_parity.py` (not committed; the two pytest nodes
-below assert the gates). Same objective, same fixed reduction order, only the
+Reproduced by the two committed pytest nodes below (they assert the gates directly;
+no auxiliary script is needed). Same objective, same fixed reduction order, only the
 column-to-GPU placement differs:
 
 - Synthetic analytic float64 map, 4 columns, 2 frequencies:
