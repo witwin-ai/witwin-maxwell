@@ -279,6 +279,16 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # 2026-07-21 (round-G merge reconciliation): the lossy-wire ledger (175 -> 177,
 # net +2) and the ferrite general-bias ledger (175 -> 173, net -2) merged onto the
 # same base; combined measured total is 175 + 2 - 2.
+# 2026-07-21 (plan 12 Phase 4 SPD tensor eps, stage H2a): net 0 (budget stays 175).
+# The compiler/electrostatic.py anisotropic-tensor reject ("Anisotropic (tensor)
+# permittivity is not supported...") is REMOVED (-1) -- a DiagonalTensor3/Tensor3x3
+# material now compiles into a per-cell TensorEpsilon field and solves through the
+# symmetric SPD cross-flux operator. One reachable guard is added (+1):
+# electrostatic/runtime.py _reject_trainable_tensor ("Differentiable electrostatics
+# through a full tensor (anisotropic) permittivity is not implemented..."), because
+# the off-diagonal cross-flux has no reverse-mode VJP, so a trainable tensor
+# permittivity / free charge fails closed instead of silently detaching. Lower this
+# budget when the tensor-eps backward (or the open-boundary work, stage H2b) lands.
 CAPABILITY_GUARD_BUDGET = 175
 
 # (posix path relative to the repo root, distinctive message substring).

@@ -6,7 +6,12 @@ import torch
 
 from ..compiler.electrostatic import CompiledElectrostatics, compile_electrostatics
 from .api import ElectrostaticBoundarySpec, ElectrostaticSolverConfig
-from .runtime import ElectrostaticOperator, _pinned_value, differentiable_solve
+from .runtime import (
+    ElectrostaticOperator,
+    _pinned_value,
+    _reject_trainable_tensor,
+    solve_fixed_potential,
+)
 
 
 @dataclass
@@ -108,8 +113,8 @@ def _excitation_charges(operator, compiled, drive: dict[str, float], b_full, con
     shape, dtype, device = compiled.shape, compiled.dtype, compiled.device
     entries = [(t.mask, drive.get(t.name, 0.0)) for t in compiled.terminals]
     fixed_value = _pinned_value(shape, dtype, device, entries)
-    phi, _ = differentiable_solve(
-        compiled, fixed_value, free_mask_of(compiled), config, use_free_charge=False
+    phi, _ = solve_fixed_potential(
+        compiled, operator, fixed_value, free_mask_of(compiled), config, use_free_charge=False
     )
     reaction = operator.apply_full(phi) - b_full
     charges = {t.name: reaction[t.mask].sum() for t in compiled.terminals}
@@ -136,6 +141,7 @@ def extract_capacitance(
             "CompiledElectrostatics dtype must match the solver dtype; compile with the "
             "same dtype the solver uses."
         )
+    _reject_trainable_tensor(compiled)
 
     names = [t.name for t in compiled.terminals]
     if not names:

@@ -43,21 +43,36 @@ class ElectrostaticOperator:
         self.dtype = compiled.dtype
         self.shape = compiled.shape
         self.eps0 = compiled.eps0
-        eps = compiled.epsilon_r
         hx, hy, hz = compiled.hx, compiled.hy, compiled.hz
         dxc, dyc, dzc = compiled.dxc, compiled.dyc, compiled.dzc
+
+        # Diagonal permittivity components drive the conservative two-point face
+        # fluxes. In the isotropic path all three are the scalar ``epsilon_r``,
+        # so a diagonal or isotropic tensor reduces exactly to the scalar
+        # operator; a full tensor additionally adds symmetric cross-flux terms.
+        self.tensor_mode = compiled.epsilon_tensor is not None
+        if self.tensor_mode:
+            tensor = compiled.epsilon_tensor
+            eps_xx, eps_yy, eps_zz = tensor.xx, tensor.yy, tensor.zz
+            self._eps_xy, self._eps_xz, self._eps_yz = tensor.xy, tensor.xz, tensor.yz
+            self._cell_volume = compiled.cell_volume
+            self._xc, self._yc, self._zc = compiled.xc, compiled.yc, compiled.zc
+        else:
+            eps_xx = eps_yy = eps_zz = compiled.epsilon_r
 
         area_x = (hy[None, :, None] * hz[None, None, :])
         area_y = (hx[:, None, None] * hz[None, None, :])
         area_z = (hx[:, None, None] * hy[None, :, None])
 
-        self.gx = self.eps0 * _harmonic(eps[:-1, :, :], eps[1:, :, :]) * area_x / dxc[:, None, None]
-        self.gy = self.eps0 * _harmonic(eps[:, :-1, :], eps[:, 1:, :]) * area_y / dyc[None, :, None]
-        self.gz = self.eps0 * _harmonic(eps[:, :, :-1], eps[:, :, 1:]) * area_z / dzc[None, None, :]
+        self.gx = self.eps0 * _harmonic(eps_xx[:-1, :, :], eps_xx[1:, :, :]) * area_x / dxc[:, None, None]
+        self.gy = self.eps0 * _harmonic(eps_yy[:, :-1, :], eps_yy[:, 1:, :]) * area_y / dyc[None, :, None]
+        self.gz = self.eps0 * _harmonic(eps_zz[:, :, :-1], eps_zz[:, :, 1:]) * area_z / dzc[None, None, :]
 
         # Boundary Dirichlet ghost conductances: eps at the boundary cell over a
         # half-cell distance to the domain face. Neumann/symmetry faces contribute
-        # nothing (zero normal displacement).
+        # nothing (zero normal displacement). Each axis uses its own diagonal
+        # permittivity component (the face-normal entry of the tensor).
+        eps_axis = {0: eps_xx, 1: eps_yy, 2: eps_zz}
         self._boundary: list[dict[str, Any]] = []
         axis_area = {0: area_x, 1: area_y, 2: area_z}
         half_cell = {0: hx, 1: hy, 2: hz}
@@ -67,7 +82,7 @@ class ElectrostaticOperator:
                 if kind != "dirichlet":
                     continue
                 index = 0 if side == "low" else self.shape[axis] - 1
-                eps_slab = eps.select(axis, index).unsqueeze(axis)
+                eps_slab = eps_axis[axis].select(axis, index).unsqueeze(axis)
                 area_slab = _broadcast_face(axis_area[axis], axis, index, self.shape)
                 dist = half_cell[axis][index] * 0.5
                 gb = self.eps0 * eps_slab * area_slab / dist
@@ -86,6 +101,42 @@ class ElectrostaticOperator:
             diag = diag + _slab_full(entry["gb"], entry["axis"], entry["side"], self.shape[entry["axis"]])
         return diag
 
+    def _cross_energy(self, phi: torch.Tensor) -> torch.Tensor:
+        """Off-diagonal (cross-derivative) contribution to ``0.5 phi^T A phi``.
+
+        Uses cell-centred central-difference gradients (one-sided at the domain
+        edges, via ``torch.gradient``) so the cross term
+        ``sum_c V_c eps0 (eps_xy gx gy + eps_xz gx gz + eps_yz gy gz)`` is a
+        genuine quadratic form in ``phi``. Its gradient is therefore the exactly
+        symmetric cross-flux operator ``A_cross phi`` and this same expression is
+        the physical cross energy, so the discrete identity
+        ``field_energy(phi) = 0.5 phi^T A phi`` holds. The cross operator has an
+        identically-zero main diagonal (a cell couples to itself only through the
+        face-flux diagonal terms), so the Jacobi preconditioner is unchanged.
+        """
+        # Cell-centred central-difference gradients (one-sided at the domain
+        # faces). The expression is linear in ``phi``, so the operator is the
+        # exactly symmetric gradient of a quadratic energy. The scheme is
+        # second-order in the interior; the one-sided cross-flux at a Dirichlet
+        # wall is first-order, so a field with a strong tangential gradient at a
+        # wall shows a boundary-layer error there (documented limitation).
+        gx = torch.gradient(phi, spacing=(self._xc,), dim=0)[0]
+        gy = torch.gradient(phi, spacing=(self._yc,), dim=1)[0]
+        gz = torch.gradient(phi, spacing=(self._zc,), dim=2)[0]
+        weight = self.eps0 * self._cell_volume
+        energy = (weight * self._eps_xy * gx * gy).sum()
+        energy = energy + (weight * self._eps_xz * gx * gz).sum()
+        energy = energy + (weight * self._eps_yz * gy * gz).sum()
+        return energy
+
+    def _apply_cross(self, phi: torch.Tensor) -> torch.Tensor:
+        """Symmetric cross-flux operator ``A_cross phi = grad_phi(_cross_energy)``."""
+        with torch.enable_grad():
+            probe = phi.detach().requires_grad_(True)
+            energy = self._cross_energy(probe)
+            (grad,) = torch.autograd.grad(energy, probe)
+        return grad
+
     def apply_full(self, phi: torch.Tensor) -> torch.Tensor:
         out = torch.zeros(self.shape, dtype=phi.dtype, device=phi.device)
         fx = self.gx * (phi[:-1, :, :] - phi[1:, :, :])
@@ -99,6 +150,8 @@ class ElectrostaticOperator:
             index = 0 if side == "low" else self.shape[axis] - 1
             phi_slab = phi.select(axis, index).unsqueeze(axis)
             out = out + _slab_full(entry["gb"] * phi_slab, axis, side, self.shape[axis])
+        if self.tensor_mode:
+            out = out + self._apply_cross(phi)
         return out
 
     def rhs_full(self) -> torch.Tensor:
@@ -127,6 +180,8 @@ class ElectrostaticOperator:
             index = 0 if side == "low" else self.shape[axis] - 1
             phi_slab = phi.select(axis, index).unsqueeze(axis)
             energy = energy + 0.5 * (entry["gb"] * (phi_slab - entry["value"]) ** 2).sum()
+        if self.tensor_mode:
+            energy = energy + self._cross_energy(phi)
         return energy
 
     def boundary_electrode_charge(self, phi: torch.Tensor) -> float:
@@ -258,6 +313,9 @@ class ElectrostaticResultData:
     _charges: dict[str, torch.Tensor] = field(default_factory=dict)
     boundary_charge: torch.Tensor | None = None
     conductor_mask: torch.Tensor | None = None  # bool (nx, ny, nz): pinned conductor cells
+    # Full symmetric permittivity tensor field when the scene is anisotropic,
+    # else None (isotropic scalar path). D is computed from it when present.
+    epsilon_tensor: Any = None
 
     @property
     def E(self) -> torch.Tensor:
@@ -445,6 +503,49 @@ def differentiable_solve(compiled, fixed_value, free_mask, config, *, use_free_c
     return phi, stats["report"]
 
 
+def _reject_trainable_tensor(compiled) -> None:
+    """Fail closed on a trainable full-tensor-eps electrostatic solve.
+
+    The isotropic reduced solve carries an implicit-differentiation backward
+    (``_ElectrostaticSolve``). The full-tensor operator adds the symmetric
+    cross-flux terms, whose reverse (transpose) VJP against the off-diagonal
+    permittivity is not implemented, so the tensor solve runs forward-only under
+    ``no_grad``. Routing a trainable tensor permittivity (or a trainable free
+    charge alongside a tensor dielectric) through that path would silently detach
+    those gradients; reject it instead of returning a wrong/zero gradient.
+    """
+    if compiled.epsilon_tensor is None:
+        return
+    if (
+        compiled.epsilon_tensor.requires_grad
+        or compiled.free_charge.requires_grad
+        or compiled.epsilon_r.requires_grad
+    ):
+        raise NotImplementedError(
+            "Differentiable electrostatics through a full tensor (anisotropic) permittivity is "
+            "not implemented: the tensor operator's off-diagonal cross-flux terms have no "
+            "reverse-mode (implicit-diff) VJP, so a trainable tensor permittivity or free charge "
+            "would silently detach its gradient. Detach the permittivity and free charge, or use "
+            "an isotropic Material for a differentiable electrostatic solve."
+        )
+
+
+def solve_fixed_potential(compiled, operator, fixed_value, free_mask, config, *, use_free_charge):
+    """Solve the Dirichlet-reduced fixed-potential system for one excitation.
+
+    The isotropic path routes through the implicit-differentiation wrapper so the
+    solution stays differentiable in ``epsilon_r`` / ``free_charge``. The tensor
+    path is forward-only (see :func:`_reject_trainable_tensor`) and uses the plain
+    reduced solve on the supplied operator.
+    """
+    if compiled.epsilon_tensor is None:
+        return differentiable_solve(
+            compiled, fixed_value, free_mask, config, use_free_charge=use_free_charge
+        )
+    b_full = operator.rhs_full() if use_free_charge else operator.rhs_boundary()
+    return _reduced_solve(operator, free_mask, fixed_value, b_full, config)
+
+
 def _aggregate_reports(reports) -> PCGReport:
     """Fold the per-solve PCG diagnostics of a multi-solve run into one report.
 
@@ -568,6 +669,7 @@ def solve_electrostatics(
             "CompiledElectrostatics dtype must match the solver dtype; compile with the "
             "same dtype the solver uses."
         )
+    _reject_trainable_tensor(compiled)
     operator = ElectrostaticOperator(compiled)
     device = compiled.device
     shape = compiled.shape
@@ -621,8 +723,8 @@ def solve_electrostatics(
         # The reduced solve routes through the implicit-diff wrapper so downstream
         # energy / charge / field quantities are differentiable in eps and charge.
         fixed_value = _pinned_value(shape, dtype, device, [(t.mask, t.potential) for t in fixed_terms])
-        phi, report = differentiable_solve(
-            compiled, fixed_value, free_mask, config, use_free_charge=True
+        phi, report = solve_fixed_potential(
+            compiled, operator, fixed_value, free_mask, config, use_free_charge=True
         )
 
     free = free_mask.to(dtype)
@@ -636,10 +738,17 @@ def solve_electrostatics(
     Ex = _cell_e_field(phi, compiled.xc, 0)
     Ey = _cell_e_field(phi, compiled.yc, 1)
     Ez = _cell_e_field(phi, compiled.zc, 2)
-    eps_abs = compiled.eps0 * compiled.epsilon_r
-    Dx = eps_abs * Ex
-    Dy = eps_abs * Ey
-    Dz = eps_abs * Ez
+    if compiled.epsilon_tensor is None:
+        eps_abs = compiled.eps0 * compiled.epsilon_r
+        Dx = eps_abs * Ex
+        Dy = eps_abs * Ey
+        Dz = eps_abs * Ez
+    else:
+        t = compiled.epsilon_tensor
+        e0 = compiled.eps0
+        Dx = e0 * (t.xx * Ex + t.xy * Ey + t.xz * Ez)
+        Dy = e0 * (t.xy * Ex + t.yy * Ey + t.yz * Ez)
+        Dz = e0 * (t.xz * Ex + t.yz * Ey + t.zz * Ez)
 
     boundary_charge = operator.boundary_electrode_charge(phi) if operator._boundary else None
 
@@ -665,6 +774,7 @@ def solve_electrostatics(
         _charges=charges,
         boundary_charge=boundary_charge,
         conductor_mask=all_mask,
+        epsilon_tensor=compiled.epsilon_tensor,
     )
 
 

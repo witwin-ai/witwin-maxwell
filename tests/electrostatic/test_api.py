@@ -205,15 +205,23 @@ def test_dispersive_material_rejected():
         mw.Simulation.electrostatic(scene, boundary=mw.ElectrostaticBoundarySpec.grounded_box()).run()
 
 
-def test_anisotropic_tensor_permittivity_rejected():
-    """The scalar operator rejects anisotropic (tensor) permittivity at prepare."""
+def test_anisotropic_tensor_permittivity_supported():
+    """Anisotropic (tensor) permittivity now compiles and solves (SPD tensor FVM)."""
     domain = mw.Domain(bounds=((-1, 1),) * 3)
     grid = mw.GridSpec.uniform(2.0 / 16)
     scene = mw.Scene(domain=domain, grid=grid, boundary=mw.BoundarySpec.none())
-    material = mw.Material(eps_r=2.0, epsilon_tensor=mw.DiagonalTensor3(2.0, 3.0, 4.0))
+    material = mw.Material(
+        epsilon_tensor=mw.Tensor3x3(((3.0, 0.6, 0.4), (0.6, 2.5, 0.3), (0.4, 0.3, 2.0)))
+    )
     scene.add_structure(mw.Structure(geometry=Box(position=(0, 0, 0), size=(1, 1, 1)), material=material))
     scene.add_electrostatic_terminal(
         mw.ElectrostaticTerminal(name="inner", geometry=Sphere(position=(0, 0, 0), radius=0.2), potential=1.0)
     )
-    with pytest.raises(NotImplementedError):
-        mw.Simulation.electrostatic(scene, boundary=mw.ElectrostaticBoundarySpec.grounded_box()).run()
+    result = mw.Simulation.electrostatic(
+        scene, boundary=mw.ElectrostaticBoundarySpec.grounded_box()
+    ).run()
+    es = result.electrostatic
+    assert es.epsilon_tensor is not None
+    assert es.residual <= 1e-9
+    # Positive stored energy for a nonzero driven potential.
+    assert float(es.energy) > 0.0
