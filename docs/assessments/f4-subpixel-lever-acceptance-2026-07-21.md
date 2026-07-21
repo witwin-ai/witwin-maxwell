@@ -195,10 +195,10 @@ evidenced below.
   rasterized: the old hard node-staircase over-represented the polarizability
   (~2.30), edge-native subpixel gives ~0.396. The re-anchor keeps the SAME
   box-independence rigor that validated the old value — verified with
-  `scratch/rayleigh_box_independence.py`: `sigma_max_ratio = 0.3961, 0.3965, 0.3969`
+  `docs/assessments/f4-subpixel-lever-probes/rayleigh_box_independence.py`: `sigma_max_ratio = 0.3961, 0.3965, 0.3969`
   at `box_half = 0.05, 0.06, 0.07` (0.2% drift), so the NF2FF far field is still
   self-consistent; only the marginally-resolved sphere's effective polarizability
-  moved with the sampling. Reproduce: `python scratch/rayleigh_box_independence.py`.
+  moved with the sampling. Reproduce: `python docs/assessments/f4-subpixel-lever-probes/rayleigh_box_independence.py`.
 
 ### Convergence-order retention
 
