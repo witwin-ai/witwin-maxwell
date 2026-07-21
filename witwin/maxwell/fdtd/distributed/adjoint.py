@@ -255,7 +255,21 @@ def capture_distributed_checkpoint(distributed, step: int) -> DistributedCheckpo
     require_distributed_adjoint_support(distributed)
     states: dict[int, FDTDCheckpointState] = {}
     for shard in distributed.shards:
-        with torch.cuda.device(shard.device):
+        # Cross-stream happens-before fix (in-process cuda_p2p adjoint race): the
+        # forward field updates run on the shard's ``compute_stream``, but the
+        # checkpoint clone reads the persistent padded field storage. Cloning on the
+        # device default stream leaves the clone unordered w.r.t. the *next*
+        # ``_advance_one_step`` (compute_stream) that overwrites the same storage --
+        # the pre-capture ``_synchronize_all()`` only orders the clone after the
+        # *previous* step. Under concurrent GPU load the compute-stream update raced
+        # ahead of the lagging default-stream clone, tearing the snapshot and drifting
+        # the replayed gradient at the partition seam (the forward output stayed
+        # bitwise clean because it is collected separately). Cloning on the shard's
+        # compute_stream serializes previous-update -> clone -> next-update on one
+        # stream, closing the window at zero added host-sync cost; the existing
+        # pre-capture ``_synchronize_all()`` still guarantees the clone reads settled
+        # cross-stream (communication) halo data.
+        with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
             states[shard.rank] = capture_checkpoint_state(shard.solver, step)
     return DistributedCheckpoint(
         step=int(step),
