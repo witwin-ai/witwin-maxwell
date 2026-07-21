@@ -83,11 +83,17 @@ green.
   route to `quasistatic_line_torch`; single-ended 4-port cond(A) 1.31, max singular value
   1.18. Mixed-mode `|Sdd21|` ≈ 0.88 != `|Scc21|` ≈ 0.68 (even/odd coupling), non-zero
   single-ended `|S21|`, `|Sdc21|` ≈ 0 (mirror-symmetry — correct physics).
-- **Quasi-static `eps_eff` convergence** (standalone, `scratch/probe_qs_res.py`, same
-  eps_r=4.4 / W/h=1.5 geometry): 2.31 (substrate 4 cells) → 2.58 (8) → 2.77 (16) → 2.90
-  (32) toward the Hammerstad 3.27 — a slow, edge-singularity-limited first-order
-  convergence. This is the evidence that the ~24% microstrip gap is a discretization
-  under-loading of the thin high-eps substrate, not an extraction defect.
+- **Quasi-static `eps_eff` convergence toward Hammerstad** (committed pytest node
+  `tests/rf/wave_validation/test_interior_pec_operator.py::test_microstrip_eps_eff_converges_toward_hammerstad_with_resolution`,
+  eps_r=4.4 / W/h=1.5 on a large box so finite-box truncation is small): substrate 4/8/16
+  cells → `eps_eff` 3.4276 / 3.3304 / 3.2661, converging monotonically to Hammerstad–Jensen
+  **3.2646** (<1% at 16 cells). This isolates the substrate-resolution effect and shows the
+  quasi-static engine itself reaches the closed form. **Attribution correction:** the ~24%
+  gap of the *shielded bench* microstrip is not substrate resolution alone — the bench's
+  small shielded aperture also under-loads the field (aperture-shielding); the earlier
+  shielded-box ladder (2.31→2.58→2.77→2.90) mixed those two effects and its low values were
+  specific to that aperture. The correct diagnosis of the bench gap is aperture-shielding +
+  resolution together, and the extraction itself is not the defect.
 
 ## 3. Falsifications performed (perturb → red → restore → green)
 
@@ -162,6 +168,16 @@ diagnosis is thorough and recorded:
   (~24% low at dx = 5 mm; converges with aperture resolution). The benches are recorded as
   `gap`, not forced. A finer dx or a subpixel-aware capacitance would close it but costs a
   much larger 3D grid.
+- **Guided (non-TEM) interior-PEC path is not wired into production** (decision #2 partial).
+  Only the quasi-TEM half was routed: an inhomogeneous-with-interior-PEC quasi-TEM request
+  falls through to the quasi-static engine, but the *guided* interior-PEC branch of
+  `_assemble_vector_mode_data` (`elif has_interior_pec`) still routes to the legacy
+  `_pec_vector_operator_torch`; the new `_solve_yee_transverse_pec_mode` is exercised only by
+  the F2a operator tests, not by any production scene. F2a's handoff flagged this; it is
+  recorded here explicitly. No production scene currently needs the masked guided path, and
+  wiring it would also require resolving the surface-sample rasterization tradeoff noted in
+  the F2a acceptance §3 (a guided interior-PEC mode with nonzero normal `E` at the conductor
+  surface is affected by the threshold-0.5 masking). Deferred pending a scene that needs it.
 - **Adapter port/lumped source mapping + 4 cloud caches + RESULTS rows** (decision #3) are
   F2c. The microstrip/diff-pair external cross-check remains `pending-generation`.
 - **Patch matched-broadside redesign** (§4) is deferred as a multi-run antenna co-design;

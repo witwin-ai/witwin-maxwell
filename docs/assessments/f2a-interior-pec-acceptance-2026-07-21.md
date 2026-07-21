@@ -32,10 +32,13 @@
    pinch (a conductor-free node fully surrounded by conductor) and on fewer than two
    conductor-free interior nodes.
 3. **Fail-closed TEM boundary**: `_solve_yee_transverse_pec_mode` raises for a
-   `wave_family="tem"` request. The staggered curl-curl `beta**2` operator structurally
-   does not carry the TEM branch (see §3); TEM/quasi-TEM lines route to the quasi-static
-   engine instead. This is a `ValueError` (a routing/capability boundary, not a new
-   `NotImplementedError`), so the capability-guard census budget is unchanged (176).
+   `wave_family="tem"` request. The staggered curl-curl `beta**2` operator *does* carry the
+   TEM branch in its spectrum, but the shipped occupancy rasterization (threshold 0.5)
+   eliminates the conductor-surface straddling normal-`E` samples where the TEM energy
+   concentrates, so the masked reduced operator exposes only guided modes (see §3);
+   TEM/quasi-TEM lines route to the quasi-static engine instead. This is a `ValueError`
+   (a routing/capability boundary, not a new `NotImplementedError`), so the capability-guard
+   census budget is unchanged (176).
 4. **Quasi-static electrostatic line-mode engine** (`_solve_quasistatic_line_modes`,
    `_quasistatic_laplace_energy`). Solves the variable-coefficient Laplace
    `div(eps grad phi) = 0` with face permittivities (the Yee dielectric average) as a
@@ -98,34 +101,65 @@ Formula variant: Hammerstad–Jensen effective permittivity as published in E. H
 and O. Jensen, "Accurate Models for Microstrip Computer-Aided Design", IEEE MTT-S 1980
 (the `a(u)`, `b(eps_r)` form), coded in `_hammerstad_jensen_eps_eff`.
 
-## 3. Design blocker — the staggered curl-curl operator has no TEM branch (evidence)
+## 3. Why TEM routes to the quasi-static engine — the operator carries TEM, the shipped masking removes it (evidence)
+
+> **Correction (2026-07-21, audit remediation).** An earlier draft of this section claimed
+> the staggered curl-curl operator "structurally has no TEM branch" and that "there is no
+> eigenvalue near 56.25." That claim is false and is retracted here. The operator **does**
+> carry the gradient TEM branch in its spectrum; the TEM branch is absent from the shipped
+> *masked* reduced operator because of the occupancy rasterization threshold (0.5), a
+> masking choice, not a structural property. The fail-closed TEM routing to the quasi-static
+> engine is unchanged and correct, but for the accurate reason stated below.
 
 The stage brief's decision #1 asks the coax/microstrip/diff-pair **TEM-class** fundamentals
-to come from the interior-PEC-masked staggered operator. That is not achievable: the E1
-staggered full-vector operator solves `P et = beta**2 et` for a curl-curl-based `P`, and
-its spectral maximum is the lowest-cutoff **guided** mode, not the `beta**2 = eps k0**2`
-gradient TEM. Evidence (each a one-off probe, reproducible by reconstructing the small
-scripts; numbers are also implied by the committed septum/coax gates):
+to come from the interior-PEC-masked staggered operator. The math: for a curl-free field
+`Et = -grad(phi)` with `div(eps grad phi) = 0`, both the curl-curl term and the divergence-
+coupling term of `P` vanish identically, leaving `P Et = eps k0**2 Et`. So the TEM branch is
+an **exact eigenvalue `eps k0**2`** of the operator, discretely as well as in the continuum.
 
-- Hollow homogeneous guide `a = b = 1`, `eps_r = 2.25`, `k0 = 5`: `eps k0**2 = 56.25`, but
-  the operator's largest eigenvalue is `beta**2 = 46.385 = eps k0**2 - (pi/a)**2` (TE10) —
-  there is no eigenvalue near `56.25`.
-- Square coax annulus (same box, inner square PEC), masked and reduced: largest
-  `beta**2 = 30.366`, far below `eps k0**2 = 56.25`; a directly constructed discrete TEM
-  gradient field has a large curl-curl residual (Rayleigh `beta**2 < 0`). Zeroing vs
-  keeping the `eps_ww` coupling at conductor nodes does not move the top of the spectrum.
-- Shielded microstrip through the masked operator at low frequency returns no forward
-  polarization-family mode (the quasi-TEM `beta**2 -> eps_eff k0**2` is not in the
-  operator's spectrum); at moderate `k0` the top eigenvalue does not scale as
-  `eps_eff k0**2` (it is a cutoff mode, not quasi-TEM).
+What actually removes it is the rasterization of the PEC occupancy onto the staggered grids.
+The shipped `_yee_stagger_pec_from_nodes` with `_PEC_OCCUPANCY_THRESHOLD = 0.5` and `>=`
+eliminates the conductor-surface *straddling* normal-`E` samples (occupancy exactly 0.5),
+which physically carry the TEM surface charge and where the TEM field energy concentrates.
+Killing those samples is what drops the TEM branch from the masked reduced operator.
 
-This matches the existing architecture: every TEM interior-PEC path in the repository is
-electrostatic (`_solve_pec_tem_mode_torch`), never the vector operator. The **closest
-fail-closed behavior** is therefore implemented: the masked operator raises on a TEM
-request and points at the quasi-static engine, which delivers the coax/microstrip/diff-pair
-physics with the analytic agreement recorded in §2. The masked operator itself is validated
-on the regime it does serve — **guided** (non-TEM, hybrid) interior-PEC modes — by the
-analytic septum gate.
+Evidence (reproducible pytest node
+`tests/rf/wave_validation/test_interior_pec_operator.py::test_masked_operator_tem_branch_is_a_masking_artifact`;
+uses the identical committed operator builder `_build_yee_transverse_operator_sparse`):
+
+- Square coax annulus `a = b = 1`, inner square PEC, `eps_r = 2.25`, `k0 = 5`
+  (`eps k0**2 = 56.25`):
+  - **Shipped threshold 0.5** (surface-straddling normal-`E` samples eliminated): the reduced
+    operator's spectral maximum is `beta**2 = 30.366`, well below `56.25` — no TEM branch.
+  - **Keep-straddle threshold 0.75** (only fully-interior transverse samples eliminated,
+    `pec_ww` unchanged): the spectral maximum is `56.25000` `= eps k0**2` exactly, and the
+    directly constructed discrete TEM gradient field `-grad(phi)` of the discrete harmonic
+    potential is that eigenvector (Rayleigh `56.2500`, relative curl-curl residual `2.2e-13`).
+- A hollow homogeneous guide (same box, no inner conductor) tops out at
+  `beta**2 = 46.385 = eps k0**2 - (pi/a)**2` (TE10). This is **expected physics** and is *not*
+  evidence about the coax: a simply-connected hollow guide has no TEM mode at all, so its
+  spectral maximum is correctly TE10. It does not bear on whether the doubly-connected coax
+  operator carries TEM.
+
+Consequence for the shipped code: **no wrong numbers ship.** The masked operator is fail-
+closed on TEM (raises and points at the quasi-static engine), and the guided interior-PEC
+non-TEM branch is not routed through this operator in production (it still uses the legacy
+`_pec_vector_operator_torch`; `_solve_yee_transverse_pec_mode` is exercised only by tests).
+The quasi-static engine delivers the coax/microstrip/diff-pair physics with the analytic
+agreement recorded in §2. The masked operator itself is validated on the guided regime it
+does serve by the analytic septum gate (whose normal `E` is zero at the septum, so the septum
+gate alone cannot see the surface-sample masking tradeoff).
+
+**Open item for the supervisor (decision #1):** the original decision #1 asked for a coax
+TEM cross-implementation gate *on the masked staggered operator* vs the legacy
+`_solve_pec_tem_mode_torch`. That gate is achievable — the keep-straddle rasterization above
+recovers the exact TEM eigenvalue — but switching the shipped elimination criterion to keep-
+straddle carries a real tradeoff: a one-cell-thick conductor sheet (occupancy exactly 0.5 at
+its straddling samples) would then be left entirely unmasked. Because this changes the
+binding decision #1 gate design and trades off thin-sheet masking, the elimination-criterion
+change and the re-execution of the coax cross-implementation gate are **deferred to the
+supervisor** rather than made unilaterally here. The doc/code claims are corrected; the
+behavior is unchanged and fail-closed.
 
 ## 4. Falsifications performed (perturb → red → restore → green)
 

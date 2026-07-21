@@ -39,7 +39,7 @@ Six scenes live under `benchmark/scenes/rf/` and are driven through
 | `rf/coax_thru` | terminated FDTD two-port; `beta` from `arg(S21)/L` vs `k0`, S via `B=S*A`, gated on extraction conditioning + passivity | `wave-level` | **pass** (a_passive/a_driven 0.17, \|S11\|<0.02, \|S21\|~1, max sv ~1, cond(A) ~1.2) |
 | `rf/rectangular_waveguide` | terminated FDTD two-port; TE10 `beta(omega)` from `arg(S21)/L` vs analytic dispersion, S via `B=S*A`, gated on extraction conditioning + passivity | `wave-level` | **pass** (sin-corr 1.0000, cond(A) ~1.1, max sv ~1.001, beta 0.05% median vs 1% gate; external-reference cross-check 1.2%) — see 1.2 |
 | `rf/microstrip_two_port` | terminated FDTD two-port; `beta` from `arg(S21)/L` vs Hammerstad `beta=k0 sqrt(eps_eff)`, S via `B=S*A`, gated on extraction conditioning + passivity | `wave-level` | **gap** (F2b: unblocked and RUNS -- cond(A) 1.23, max sv 1.09, a_passive 0.16, \|S21\| 0.77-0.89, \|S11\| 0.05-0.24; measured eps_eff ~1.86 vs Hammerstad 3.27 is a resolution-limited quasi-TEM under-loading, recorded not forced) -- see 1.3 |
-| `rf/differential_pair` | terminated FDTD four-port; single-ended `B=S*A` + mixed-mode conversion, gated on extraction conditioning + passivity | `wave-level` | **gap** (F2b: unblocked and RUNS -- cond(A) 1.31, max sv 1.18, coupled 4-port with \|Sdd21\|!=\|Scc21\|; same resolution-limited impedance gap) -- see 1.3 |
+| `rf/differential_pair` | terminated FDTD four-port; single-ended `B=S*A` + mixed-mode conversion, gated on extraction conditioning + passivity | `wave-level` | **fail** (F2b: unblocked and RUNS with correct coupling -- cond(A) 1.31, coupled 4-port with \|Sdd21\|!=\|Scc21\|; but max sv 1.18 EXCEEDS the 1.10 coax_thru/microstrip passivity precedent, so the passivity precondition is not met -- recorded fail, not forced. Same resolution-limited impedance gap) -- see 1.3 |
 | `rf/series_parallel_rlc` | FDTD load-port resonance peak vs analytic f0 | `wave-level` | **gap** (parasitic-dominated; peak does not track C) |
 | `rf/lumped_open_short_match` | FDTD feed |S11| vs analytic Gamma | `wave-level` | **FAIL** (feed decoupled from load; identical Gamma for all loads) |
 
@@ -173,13 +173,16 @@ air) cross-section. F2b resolves both.
   to pass. Dropping the substrate to vacuum collapses `eps_eff` to 1.0 (the substrate is
   load-bearing).
 - **Differential pair measured (executed):** the single-ended four-port S is
-  well-conditioned (cond(A) 1.31) and near-passive (max singular value 1.18); the
+  well-conditioned (cond(A) 1.31); its max singular value 1.18 **exceeds** the 1.10
+  coax_thru/microstrip passivity precedent (~39% apparent power gain), so the passivity
+  precondition is not met and the bench is recorded `fail`, not forced. The
   mixed-mode conversion gives `|Sdd21| ~ 0.88` != `|Scc21| ~ 0.68` (even and odd modes at
   different velocities -- a genuine coupled line) with non-zero single-ended coupling
   `|S21|`. The mode-conversion `|Sdc21| ~ 0` is correct physics (the pair is
   mirror-symmetric, so differential and common modes do not convert). The absolute even/odd
-  impedances carry the same resolution-limited under-loading, and the passivity singular
-  value rides slightly above unity at this coarse aperture.
+  impedances and the non-passivity carry the same resolution-limited quasi-TEM under-loading
+  at this coarse aperture; a looser pair-specific passivity threshold is a supervisor
+  pre-registration decision.
 - **The legacy inhomogeneous diagonal-anisotropic operator is retained** for magnetic
   (mu != 1) apertures: the quasi-static line-mode fallback is guarded to non-magnetic
   cross-sections and re-raises the uniform-fill guard for a magnetic inhomogeneous line.
@@ -226,14 +229,17 @@ the records are in the test docstrings and the scene artifacts.
   single-precision truncation of large port coordinates (fixed by placing the ports near
   the origin, coax_thru precedent), and the TEM inapplicability is resolved by routing the
   inhomogeneous quasi-TEM mode to the quasi-static electrostatic line-mode engine
-  (`eps_eff = C/C0`). The terminated FDTD two-/four-port now yields a well-conditioned,
-  passive S-matrix. The remaining gap is the absolute quasi-TEM `eps_eff` accuracy vs
-  Hammerstad (~24% low at dx = 5 mm), a documented first-order under-resolution of the thin
-  substrate that converges with aperture resolution -- recorded, not forced to pass.
-  `reference: generated` (F2c): the WavePort TEM aperture now maps through the adapter to a
-  reference `ModeSource` launch + `ModeMonitor` per port, so the microstrip/diff-pair-class
-  external cross-check is cloud-runnable (the two RF port caches `coax_thru` and
-  `lumped_open_short_match` were generated; see section 4).
+  (`eps_eff = C/C0`). The terminated FDTD two-/four-port now yields a well-conditioned
+  S-matrix (the microstrip is passive, max sv 1.09; the differential pair's max sv 1.18
+  exceeds the 1.10 passivity precedent, recorded `fail` not forced). The remaining gap is the
+  absolute quasi-TEM `eps_eff` accuracy vs Hammerstad (~24% low at dx = 5 mm), a documented
+  first-order under-resolution of the thin substrate that converges with aperture resolution
+  -- recorded, not forced to pass.
+  `reference: pending-generation` (F2c mapping done, no microstrip/diff-pair cache
+  generated): the adapter now maps the WavePort TEM aperture to a reference `ModeSource`
+  launch + `ModeMonitor` per port, so the microstrip/diff-pair-class external cross-check is
+  *cloud-runnable* -- but no microstrip or differential-pair external cache exists (only the
+  RF port caches `coax_thru` and `lumped_open_short_match` were generated; see section 4).
 * **Wave-level RLC resonance is an open gap.** The lumped two-port bench is
   parasitic-dominated: the load-port current peak barely tracks the circuit `C`
   (the C(1pF)->C(2pF) peak ratio is far from the ideal sqrt(2); exact numbers in
@@ -303,8 +309,10 @@ regardless.
   inhomogeneous interior-PEC quasi-TEM mode routes through the quasi-static electrostatic
   line-mode engine; the scenes were rebuilt on the coax_thru precedent (ports near the
   origin, conductors through the PML, integer-cell node arrays). Both now run a terminated
-  FDTD two-/four-port with a well-conditioned, passive S-matrix; the absolute quasi-TEM
-  `eps_eff` is a documented resolution gap (section 1.3). Gates:
+  FDTD two-/four-port with a well-conditioned S-matrix (microstrip passive at max sv 1.09,
+  recorded `gap`; the differential pair's max sv 1.18 exceeds the 1.10 passivity precedent,
+  recorded `fail`); the absolute quasi-TEM `eps_eff` is a documented resolution gap
+  (section 1.3). Gates:
   `tests/rf/wave_validation/test_microstrip_diffpair_wave_level.py`.
 
 ### Still open

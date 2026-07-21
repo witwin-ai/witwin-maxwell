@@ -9,11 +9,14 @@ Two engines are pinned here:
 1. ``_solve_yee_transverse_pec_mode`` -- the staggered curl-curl ``beta**2`` operator with
    conductor-interior transverse-component unknowns eliminated (Dirichlet 0) and the
    conductor-interior longitudinal nodes dropped from the ``eps_ww`` divergence coupling.
-   This serves the **guided** (non-TEM, hybrid) interior-PEC modes; it structurally does
-   not carry the TEM branch (its spectral maximum is the lowest-cutoff guided mode, not
-   the ``beta**2 = eps k0**2`` gradient TEM), so a ``wave_family="tem"`` request fails
-   closed. The masking is validated against a PEC-septum half-guide whose cutoff is
-   analytic.
+   This serves the **guided** (non-TEM, hybrid) interior-PEC modes. The operator DOES
+   carry the ``beta**2 = eps k0**2`` gradient TEM branch in its spectrum, but the shipped
+   occupancy rasterization (threshold 0.5) eliminates the conductor-surface straddling
+   normal-E samples where the TEM energy concentrates, so the masked reduced operator
+   exposes only guided modes and a ``wave_family="tem"`` request fails closed (this
+   masking artifact vs the recovered exact TEM eigenvalue is pinned by
+   ``test_masked_operator_tem_branch_is_a_masking_artifact``). The masking is validated
+   against a PEC-septum half-guide whose cutoff is analytic.
 
 2. ``_solve_quasistatic_line_modes`` -- the quasi-static electrostatic line-mode engine
    that serves the TEM/quasi-TEM interior-PEC lines (coax, microstrip, differential pair)
@@ -39,6 +42,7 @@ from witwin.maxwell.fdtd.excitation.modes import (
     _yee_pec_connectivity_check,
     _yee_stagger_pec_from_nodes,
     _yee_stagger_eps_from_nodes,
+    _quasistatic_laplace_energy,
 )
 
 _FIELD_NAMES = ("Eu", "Ev", "Hu", "Hv")
@@ -274,6 +278,39 @@ def test_microstrip_without_dielectric_has_unit_eps_eff():
     assert result["eps_eff"] == pytest.approx(1.0, rel=1e-6)
 
 
+def test_microstrip_eps_eff_converges_toward_hammerstad_with_resolution():
+    """Committed reproduction path for the "converges toward Hammerstad with aperture
+    resolution" claim (F2a §2 / F2b §2). The quasi-static eps_eff approaches the
+    Hammerstad-Jensen closed form monotonically as the substrate is resolved with more
+    cells, on a large box so the finite-box truncation is small.
+    """
+    eps_r = 4.4
+    h = 1.0
+    w = 1.5  # W/h = 1.5
+    box_height, box_width = 6.0 * h, 8.0 * h
+    hj = _hammerstad_jensen_eps_eff(w / h, eps_r)
+
+    eps_effs = []
+    for cells_per_h in (4, 8, 16):
+        dx = h / cells_per_h
+        nc_u, nc_v = int(round(box_height / dx)), int(round(box_width / dx))
+        u = np.arange(nc_u + 1) * dx
+        v = np.arange(nc_v + 1) * dx
+        gu, _ = np.meshgrid(u, v, indexing="ij")
+        eps = np.where(gu <= h + 1e-9, eps_r, 1.0)
+        occ = np.zeros_like(eps)
+        occ[int(round(h / dx)), np.abs(v - box_width / 2.0) <= w / 2.0 + 1e-9] = 1.0
+        result = _solve_quasistatic_line_modes(
+            (torch.tensor(eps), torch.tensor(eps), torch.tensor(eps)), torch.tensor(occ),
+            k0=5.0, du=dx, dv=dx, field_names=_FIELD_NAMES, signal_potentials=[1.0],
+        )
+        eps_effs.append(float(result["eps_eff"]))
+
+    # Monotone approach toward the closed form from above, tightening with resolution.
+    assert eps_effs[0] > eps_effs[1] > eps_effs[2] > hj
+    assert abs(eps_effs[-1] - hj) / hj < 0.01
+
+
 # --------------------------------------------------------------------------------------
 # 5. Differential pair even/odd modes
 # --------------------------------------------------------------------------------------
@@ -362,17 +399,92 @@ def test_masked_operator_guided_septum_matches_half_guide_analytic():
 
 
 def test_masked_operator_rejects_tem_request():
-    # The curl-curl beta**2 operator has no TEM branch; a TEM request fails closed.
+    # The masked operator (threshold-0.5 rasterization) does not expose the TEM branch;
+    # a TEM request fails closed and routes to the quasi-static engine.
     nc = 40
     du = dv = 1.0 / nc
     eps = np.ones((nc + 1, nc + 1), dtype=np.float64)
     occ = _square_annulus_occupancy(nc + 1, nc + 1, 0.3)
-    with pytest.raises(ValueError, match="does not support TEM"):
+    with pytest.raises(ValueError, match="does not expose the TEM"):
         _solve_yee_transverse_pec_mode(
             (eps.copy(), eps.copy(), eps.copy()), occ, k0=5.0, du=du, dv=dv, mode_index=0,
             field_names=_FIELD_NAMES, preferred_field_name="Ev", wave_family="tem",
             uniform=True, use_dense=True,
         )
+
+
+def test_masked_operator_tem_branch_is_a_masking_artifact():
+    """The curl-curl operator DOES carry the TEM branch; the shipped threshold-0.5
+    rasterization is what removes it, not a structural property of the operator.
+
+    Continuum: for a curl-free field ``Et = -grad(phi)`` with ``div(eps grad phi) = 0``
+    both the curl-curl and the divergence-coupling terms vanish, so ``P Et = eps*k0^2 Et``
+    -- the TEM branch is an exact eigenvalue ``eps*k0^2``.
+
+    Discrete: on the identical committed operator builder for a square coax annulus,
+    - the shipped threshold-0.5 masking (eliminates conductor-surface straddling normal-E
+      samples, occupancy exactly 0.5) drops the TEM branch: the reduced operator's spectral
+      maximum sits well below ``eps*k0^2``;
+    - a strictly-interior keep-straddle masking (threshold 0.75) recovers the exact TEM
+      eigenvalue ``eps*k0^2`` and the discrete TEM gradient field is its eigenvector.
+    This is the falsification of the earlier "structurally excludes TEM" claim.
+    """
+    nc = 40
+    du = dv = 1.0 / nc
+    eps_r = 2.25
+    k0 = 5.0
+    target = eps_r * k0 * k0  # 56.25
+    nodes = nc + 1
+
+    occ = _square_annulus_occupancy(nodes, nodes, 0.3)
+    eps_planes = tuple(np.full((nodes, nodes), eps_r, dtype=np.float64) for _ in range(3))
+    eps_uu, eps_vv, eps_ww = _yee_stagger_eps_from_nodes(eps_planes, nu_cells=nc, nv_cells=nc)
+
+    # Discrete harmonic potential: phi = 1 on the inner conductor, 0 on the outer walls.
+    fixed_mask = (occ >= 0.5).copy()
+    fixed_mask[0, :] = fixed_mask[-1, :] = fixed_mask[:, 0] = fixed_mask[:, -1] = True
+    fixed_value = np.where(occ >= 0.5, 1.0, 0.0)
+    phi, _ = _quasistatic_laplace_energy(
+        np.ones((nodes, nodes)), fixed_mask, fixed_value, du=du, dv=dv
+    )
+    # Discrete TEM candidate Et = -grad(phi) on the staggered transverse grids.
+    eu = -(phi[1:, 1:-1] - phi[:-1, 1:-1]) / du
+    ev = -(phi[1:-1, 1:] - phi[1:-1, :-1]) / dv
+    v_full = np.concatenate([eu.reshape(-1), ev.reshape(-1)])
+
+    def _reduced_spectrum(threshold):
+        pec_eu, pec_ev, pec_ww = _yee_stagger_pec_from_nodes(
+            occ, nu_cells=nc, nv_cells=nc, threshold=threshold
+        )
+        op, meta = _build_yee_transverse_operator_sparse(
+            nu_cells=nc, nv_cells=nc, du=du, dv=dv, k0=k0,
+            eps_uu=eps_uu, eps_vv=eps_vv, eps_ww=eps_ww,
+            pec_eu=pec_eu, pec_ev=pec_ev, pec_ww=pec_ww,
+        )
+        active = np.asarray(meta["pec_active"], dtype=bool)
+        reduced = op[active][:, active].toarray()
+        reduced = 0.5 * (reduced + reduced.T)
+        eigs = np.linalg.eigvalsh(reduced)
+        v = v_full[active]
+        rayleigh = float(v @ (reduced @ v) / (v @ v))
+        residual = float(np.linalg.norm(reduced @ v - target * v) / (target * np.linalg.norm(v)))
+        return float(eigs[-1]), rayleigh, residual
+
+    # Shipped rasterization: the TEM branch is gone (spectral max is a guided cutoff mode).
+    max_ship, _, _ = _reduced_spectrum(0.5)
+    assert max_ship < 0.9 * target, (
+        f"threshold-0.5 spectral max {max_ship:.4f} should sit below eps*k0^2 = {target}"
+    )
+
+    # Keep-straddle rasterization: the exact TEM eigenvalue is recovered.
+    max_keep, rayleigh_keep, residual_keep = _reduced_spectrum(0.75)
+    assert max_keep == pytest.approx(target, rel=1e-6), (
+        f"keep-straddle spectral max {max_keep:.6f} != eps*k0^2 = {target}"
+    )
+    assert rayleigh_keep == pytest.approx(target, rel=1e-6)
+    assert residual_keep < 1e-6, (
+        f"discrete TEM gradient field residual {residual_keep:.2e} is not an eigenvector"
+    )
 
 
 def test_masked_operator_under_resolved_conductor_raises():

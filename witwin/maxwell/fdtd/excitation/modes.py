@@ -1234,17 +1234,25 @@ def _solve_yee_transverse_pec_mode(
             "aperture resolution) or absent."
         )
     if wave_family is not None and str(wave_family).lower() == "tem":
-        # The staggered curl-curl beta**2 operator does not carry the TEM branch: for a
-        # doubly/multiply-connected line the transverse mode is a curl-free gradient field
-        # at beta**2 = eps * k0**2, but the operator's spectral maximum is the lowest-cutoff
-        # guided mode (verified: a square coax annulus tops out well below eps*k0**2). TEM /
-        # quasi-TEM interior-PEC lines are solved on the quasi-static electrostatic engine
+        # The curl-curl beta**2 operator DOES carry the gradient TEM branch in its spectrum:
+        # for a curl-free field et = -grad(phi) with div(eps grad phi) = 0 both the curl-curl
+        # and the divergence-coupling terms vanish identically, leaving P et = eps*k0**2 * et.
+        # The TEM branch is removed from THIS masked reduced operator by the shipped occupancy
+        # rasterization (_PEC_OCCUPANCY_THRESHOLD = 0.5 with '>='), which eliminates the
+        # conductor-surface straddling normal-E samples (occupancy exactly 0.5) where the TEM
+        # surface charge and field energy concentrate -- a masking-rasterization choice, not a
+        # structural property of the operator. A strictly-interior (keep-straddle, threshold
+        # > 0.5) elimination recovers the exact TEM eigenvalue eps*k0**2 (see
+        # test_masked_operator_tem_branch_is_a_masking_artifact), but would leave a one-cell-
+        # thick conductor sheet entirely unmasked. Rather than trade that off on this path,
+        # TEM/quasi-TEM interior-PEC lines are solved on the quasi-static electrostatic engine
         # (_solve_quasistatic_line_modes); this masked operator serves the guided (non-TEM,
-        # hybrid) interior-PEC modes only.
+        # hybrid) interior-PEC modes.
         raise ValueError(
-            "The interior-PEC-masked staggered mode operator does not support TEM/quasi-TEM "
-            "line modes (its curl-curl beta**2 spectrum excludes the gradient TEM branch); "
-            "route TEM lines through the quasi-static electrostatic engine "
+            "The interior-PEC-masked staggered mode operator (as rasterized here, occupancy "
+            "threshold 0.5) does not expose the TEM/quasi-TEM gradient branch: the surface-"
+            "straddling normal-E samples that carry the TEM energy are eliminated by the "
+            "masking. Route TEM lines through the quasi-static electrostatic engine "
             "(_solve_quasistatic_line_modes) instead."
         )
     connectivity = _yee_pec_connectivity_check(pec_ww)

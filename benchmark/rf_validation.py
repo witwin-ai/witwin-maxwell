@@ -994,7 +994,11 @@ def run_differential_pair() -> SceneReport:
     sdd21 = np.abs(mixed[:, 1, 0])   # differential insertion (dd)
     scc21 = np.abs(mixed[:, 3, 2])   # common insertion (cc)
     sdc21 = np.abs(mixed[:, 1, 2])   # mode conversion common->diff
-    precondition_met = cond_a <= MICROSTRIP_COND_LIMIT and sv_max <= 1.25
+    # Passivity gate is the SAME coax_thru/microstrip precedent (MICROSTRIP_PASSIVITY_SLACK,
+    # 1.10), not a bespoke threshold set above the measured value. The pair's measured
+    # max singular value (~1.18) exceeds it, so the pair fails the passivity precondition
+    # and is recorded as `fail`, not `gap`.
+    precondition_met = cond_a <= MICROSTRIP_COND_LIMIT and sv_max <= MICROSTRIP_PASSIVITY_SLACK
 
     report.metrics.append(
         {
@@ -1016,10 +1020,11 @@ def run_differential_pair() -> SceneReport:
     }
     report.tolerance_basis = (
         "Wave-level precondition (coax_thru precedent): the 4-port B=S*A extraction is "
-        f"well conditioned (cond(A) {cond_a:.2f}) and near-passive (max sv {sv_max:.3f}); "
-        "the mixed-mode conversion exposes the differential/common insertion and the "
-        "mode-conversion term. Absolute impedances carry the same resolution-limited "
-        "quasi-TEM gap as the single microstrip."
+        f"well conditioned (cond(A) {cond_a:.2f}); the passivity max singular value "
+        f"({sv_max:.3f}) exceeds the {MICROSTRIP_PASSIVITY_SLACK:g} precedent, so the "
+        "passivity precondition is NOT met. The mixed-mode conversion still exposes the "
+        "differential/common insertion and the mode-conversion term. Absolute impedances "
+        "carry the same resolution-limited quasi-TEM gap as the single microstrip."
     )
     report.falsification = (
         "EXECUTED (F2b): the coupled bench shows genuine line-to-line coupling -- the "
@@ -1036,16 +1041,20 @@ def run_differential_pair() -> SceneReport:
         "inapplicability as microstrip. Each single-ended port aperture spans one strip "
         "plus the grounded reference, so its quasi-TEM mode routes to the quasi-static "
         "engine; the four ports form the coupled 4-port. The terminated sweep yields a "
-        f"well-conditioned (cond(A) {cond_a:.2f}), near-passive (max sv {sv_max:.3f}) "
-        f"single-ended S; mixed-mode |Sdd21| {np.median(sdd21):.2f}, |Scc21| "
+        f"well-conditioned (cond(A) {cond_a:.2f}), non-passive (max sv {sv_max:.3f} > "
+        f"{MICROSTRIP_PASSIVITY_SLACK:g}) single-ended S; mixed-mode |Sdd21| {np.median(sdd21):.2f}, |Scc21| "
         f"{np.median(scc21):.2f}, |Sdc21| {np.median(sdc21):.3f} (median)."
     )
     report.notes.append(
-        "HONEST GAP: the absolute even/odd impedances carry the same resolution-limited "
-        "quasi-TEM under-loading as the single microstrip, and the passivity singular "
-        f"value ({sv_max:.3f}) rides slightly above unity at this coarse aperture. "
-        "Recorded as a coupled-line wave-level bench that RUNS with the expected coupling "
-        "signature, with the impedance accuracy flagged as a resolution gap."
+        f"The measured passivity singular value ({sv_max:.3f}) EXCEEDS the coax_thru/"
+        f"microstrip passivity precedent ({MICROSTRIP_PASSIVITY_SLACK:g}) -- about a "
+        f"{100.0 * (sv_max ** 2 - 1.0):.0f}% apparent power gain -- so the bench does NOT "
+        "meet the passivity precondition and is recorded as `fail`, not `gap`. The coupling "
+        "signature (mixed-mode |Sdd21| != |Scc21|, |Sdc21|~0) is correct physics and the "
+        "extraction is well conditioned; the non-passivity and the absolute even/odd "
+        "impedance error carry the same resolution-limited quasi-TEM under-loading as the "
+        "single microstrip at this coarse aperture. A looser pair-specific passivity "
+        "threshold is a supervisor pre-registration decision, not assumed here."
     )
     report.status = "gap" if precondition_met else "fail"
     return report
