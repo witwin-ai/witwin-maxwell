@@ -420,6 +420,13 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
         tensors[name] = tensor.detach().clone()
     wire_runtime = getattr(solver, "_wire_runtime", None)
     if wire_runtime is not None:
+        if getattr(wire_runtime, "lossy_model", None) is not None:
+            raise NotImplementedError(
+                "Checkpoint/resume of a finite-conductor thin wire is not yet "
+                "implemented: the auxiliary ADE loss state is not part of the "
+                "checkpoint schema (added with the lossy reverse pass, B3). Run a "
+                "PEC wire to checkpoint a thin-wire simulation."
+            )
         tensors["wire_current"] = wire_runtime.current.detach().clone()
         tensors["wire_charge"] = wire_runtime.charge.detach().clone()
     for name, tensor in iter_gyromagnetic_state_specs(solver):

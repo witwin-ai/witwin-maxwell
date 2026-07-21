@@ -239,6 +239,29 @@ def test_distributed_wire_with_mur_boundary_is_rejected():
         DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_parallel())
 
 
+def test_distributed_lossy_wire_is_rejected():
+    # Multi-GPU disposition (B3/B4): a finite-conductivity wire fails closed on the
+    # distributed forward. The owner runtime builds only the lossless PEC update, so
+    # a lossy wire would silently run as PEC across shards.
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.12, 0.12),) * 3),
+        grid=mw.GridSpec.uniform(0.04),
+        boundary=mw.BoundarySpec.none(),
+        device="cuda:0",
+    )
+    scene.add_thin_wire(
+        mw.ThinWire(
+            name="wire",
+            points=((-0.08, 0.0, 0.0), (0.08, 0.0, 0.0)),
+            radius=2.0e-3,
+            conductor=mw.WireConductor.finite(5.8e7),
+            snap="strict",
+        )
+    )
+    with pytest.raises(NotImplementedError, match="finite-conductivity"):
+        DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_parallel())
+
+
 def test_distributed_wire_with_circuit_is_rejected():
     circuit = mw.Circuit("c")
     node = circuit.node("n")

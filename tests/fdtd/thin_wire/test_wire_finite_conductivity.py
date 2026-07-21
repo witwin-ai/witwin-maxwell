@@ -3,7 +3,8 @@
 These cover the Phase 4 model layer only: the public ``WireConductor.finite``
 law, the analytic round-wire skin-effect impedance, and the passive rational
 ADE fit that reuses the shared network rational-fitting stack. The lossy current
-recurrence and its CUDA runtime are not exercised here (they are not yet wired).
+recurrence itself is exercised in test_wire_lossy_recurrence.py and
+test_thin_wire_lossy_forward.py.
 """
 
 from __future__ import annotations
@@ -248,11 +249,13 @@ def test_fit_series_impedance_rejects_per_segment_radius_and_bad_band():
 
 
 # --------------------------------------------------------------------------- #
-# Honest deferral: finite conductors cannot run through the FDTD compiler yet
+# Finite conductors compile and carry conductor metadata for the lossy runtime
 # --------------------------------------------------------------------------- #
 
 
-def test_scene_compile_rejects_finite_conductor_with_clear_message():
+def test_scene_compile_accepts_finite_conductor_metadata():
+    # Finite conductors are consumed by the lossy current recurrence: compilation
+    # succeeds and carries the conductor material parameters through metadata.
     wire = mw.ThinWire(
         name="lossy",
         points=((0.25, 0.5, 0.5), (0.75, 0.5, 0.5)),
@@ -266,5 +269,9 @@ def test_scene_compile_rejects_finite_conductor_with_clear_message():
         thin_wires=(wire,),
         device="cpu",
     )
-    with pytest.raises(NotImplementedError, match="finite conductor"):
-        compile_thin_wires(prepare_scene(scene))
+    network = compile_thin_wires(prepare_scene(scene))
+    conductor = network.metadata["conductor"]
+    assert conductor["kinds"] == ("finite",)
+    assert conductor["conductivity"] == (COPPER,)
+    assert conductor["permeability"][0] == pytest.approx(wi.MU_0)
+    assert network.metadata["has_finite_conductor"] is True

@@ -425,12 +425,19 @@ def test_invalid_wire_contracts_are_rejected(wire, message):
         compile_thin_wires(_prepared(wires=(wire,)))
 
 
-def test_finite_conductor_compile_is_a_clear_deferral():
-    # The finite-conductor series-impedance model exists, but the lossy current
-    # recurrence is not yet wired into the FDTD runtime.
-    wire = _unsafe_straight(conductor=_Kind("finite"))
-    with pytest.raises(NotImplementedError, match="finite conductor"):
-        compile_thin_wires(_prepared(wires=(wire,)))
+def test_finite_conductor_compile_carries_conductor_metadata():
+    # The finite-conductor series-impedance model is now consumed by the lossy
+    # current recurrence, so compilation succeeds and records the conductor
+    # material parameters in metadata (the topology itself stays PEC-identical).
+    import witwin.maxwell as mw
+
+    wire = _straight(conductor=mw.WireConductor.finite(5.8e7))
+    network = compile_thin_wires(_prepared(wires=(wire,)))
+    conductor = network.metadata["conductor"]
+    assert conductor["kinds"] == ("finite",)
+    assert conductor["conductivity"] == (5.8e7,)
+    assert network.metadata["has_finite_conductor"] is True
+    assert network.metadata["validity"]["conductor"] == "finite"
 
 
 @pytest.mark.parametrize("snap", ("strict", "nearest"))

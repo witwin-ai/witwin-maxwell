@@ -574,6 +574,18 @@ class DistributedFDTD:
         )
 
         scene = self.logical_scene
+        for wire in getattr(scene, "thin_wires", ()):
+            conductor = getattr(wire, "conductor", None)
+            if conductor is not None and getattr(conductor, "kind", "pec") == "finite":
+                raise NotImplementedError(
+                    "Multi-GPU ThinWire with a finite-conductivity (lossy) conductor is "
+                    "not supported: the distributed owner runtime builds only the "
+                    "lossless PEC current update and never constructs the passive "
+                    "series-impedance ADE companion, so a lossy wire would silently run "
+                    "as PEC across shards. The owner-reduction contract does not carry "
+                    "the per-segment ADE loss state. Run a lossy thin wire on the "
+                    "single-GPU FDTD path."
+                )
         if (
             _scene_trainable_wire_parameters(scene)
             or _scene_trainable_density_parameters(scene)
