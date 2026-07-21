@@ -22,6 +22,7 @@ from witwin.maxwell.fdtd.distributed.nccl_transport import NcclHaloTransport
 _WORKER = Path(__file__).with_name("_nccl_transport_worker.py")
 _FORWARD_WORKER = Path(__file__).with_name("_nccl_forward_worker.py")
 _RANKDEATH_WORKER = Path(__file__).with_name("_nccl_rankdeath_worker.py")
+_TRANSPOSE_WORKER = Path(__file__).with_name("_nccl_transport_adjoint_worker.py")
 
 
 def _torchrun(worker: Path, *, nproc: int = 2, timeout: int = 300, env: dict | None = None):
@@ -300,6 +301,83 @@ def test_two_rank_nccl_forward_matches_single_gpu():
         f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
     )
     assert "NCCL_FORWARD_WORKER_OK" in completed.stdout, completed.stdout
+
+
+@pytest.mark.nccl
+def test_two_rank_nccl_step_timing_emits_per_rank_json(tmp_path):
+    """Opt-in step-rate instrumentation emits one JSON per rank from the worker.
+
+    Enabling ``WITWIN_FDTD_STEP_TIMING`` runs the forward worker's collective
+    timing pass and writes ``step_timing_rank{r}.json`` on every rank. This guards
+    the worker wiring (the unit test covers the instrument logic); it asserts the
+    per-rank artifact schema only, never a wall-clock number, so it is safe on
+    shared GPUs. The default (env unset) forward run above must stay a no-op pass.
+    """
+
+    _skip_without_two_gpu_nccl()
+    env = dict(os.environ)
+    env["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+    env["WITWIN_FDTD_STEP_TIMING"] = "1"
+    env["WITWIN_FDTD_STEP_TIMING_DIR"] = str(tmp_path)
+    env["WITWIN_FDTD_STEP_TIMING_STEPS"] = "32"
+    completed = _torchrun(_FORWARD_WORKER, timeout=300, env=env)
+    assert completed.returncode == 0, (
+        "timing-enabled NCCL forward worker failed\n"
+        f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+    )
+    assert "NCCL_FORWARD_WORKER_OK" in completed.stdout, completed.stdout
+    import json as _json
+
+    for rank in (0, 1):
+        path = tmp_path / f"step_timing_rank{rank}.json"
+        assert path.exists(), f"missing per-rank timing artifact for rank {rank}"
+        payload = _json.loads(path.read_text(encoding="utf-8"))
+        assert payload["schema"] == "witwin.fdtd.step_timing/1"
+        assert payload["enabled"] is True
+        assert payload["rank"] == rank
+        assert payload["steps"] == 32
+        assert "steps_per_second" in payload
+
+
+@pytest.mark.nccl
+def test_two_rank_nccl_reverse_halo_transpose_identity():
+    """The NCCL reverse halos are the discrete transpose of the forward halos.
+
+    The two-rank worker forms ``<A x, y>`` and ``<x, A^T y>`` for both the magnetic
+    and electric Yee x halos (each inner product's two halves live on opposite
+    ranks and are combined by an all-reduce), asserts bitwise equality, checks the
+    ghost-adjoint-zero invariant, and pins bitwise determinism across repeats. A
+    nonzero exit means the reverse exchange is not the forward's transpose.
+    """
+
+    _skip_without_two_gpu_nccl()
+    completed = _torchrun(_TRANSPOSE_WORKER, timeout=300)
+    assert completed.returncode == 0, (
+        "two-rank NCCL transpose-identity worker failed\n"
+        f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+    )
+    assert "NCCL_TRANSPOSE_ADJOINT_WORKER_OK" in completed.stdout, completed.stdout
+
+
+@pytest.mark.nccl
+@pytest.mark.parametrize("mode", ("magnetic", "electric"))
+def test_two_rank_nccl_reverse_transpose_identity_falsification(mode):
+    """No-op'ing one adjoint accumulation must break the transpose identity.
+
+    The falsification gate: with ``NCCL_TRANSPOSE_FALSIFY`` set, the worker skips
+    the named reverse accumulation, so ``<x, A^T y>`` no longer equals ``<A x, y>``
+    and the worker's identity assertion fires -> nonzero exit. If the exit were
+    clean the identity check would be vacuous, so a zero return fails this test.
+    """
+
+    _skip_without_two_gpu_nccl()
+    env = dict(os.environ)
+    env["NCCL_TRANSPOSE_FALSIFY"] = mode
+    completed = _torchrun(_TRANSPOSE_WORKER, timeout=300, env=env)
+    assert completed.returncode != 0, (
+        "falsified NCCL transpose identity unexpectedly passed\n"
+        f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+    )
 
 
 @pytest.mark.nccl

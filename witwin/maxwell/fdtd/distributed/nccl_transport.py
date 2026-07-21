@@ -129,6 +129,11 @@ class NcclHaloTransport:
         self.timeout_s = float(timeout_s)
         self.device = torch.device(f"cuda:{self.local_rank}")
         self._connected = False
+        # Preallocated reverse-halo staging planes on this rank's bound device,
+        # keyed by halo kind ("magnetic"/"electric"). Allocated on first use and
+        # reused for every reverse step so the adjoint time loop introduces no
+        # per-step allocation, exactly like the in-process P2P transport.
+        self._adjoint_staging: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         # Every rank's partition layout, bound by the coordinator before solve()
         # so rank 0 can size field gathers without a shape-exchange round trip.
         self._shard_layouts = None
@@ -470,6 +475,119 @@ class NcclHaloTransport:
                 last_owned_cell_planes=last_owned, low_ghost_planes=low_ghost
             )
             engine.magnetic_received.record(engine.compute_stream)
+
+    # -- engine-based reverse (adjoint transpose) exchanges -----------------
+    #
+    # The distributed reverse driver invokes these exactly as the in-process
+    # ``CudaP2PHaloTransport`` variants: it passes its rank-local engine tuple and
+    # an ``adjoint_states`` dict keyed by rank. Each method extracts the local
+    # rank's contiguous Yee x-plane and drives the transposed NCCL plane primitive,
+    # so the reverse loop never branches on transport kind. The transpose pairing
+    # identity across two real ranks is covered by the transport-adjoint worker.
+
+    def _adjoint_staging_pair(
+        self, kind: str, reference_a: torch.Tensor, reference_b: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return this rank's preallocated staging planes for ``kind``.
+
+        Allocated once per halo kind on the bound device and reused; a plane whose
+        shape/dtype no longer matches the fixed padded layout is a programming
+        error and rebuilds the buffer rather than silently mismatching.
+        """
+
+        cached = self._adjoint_staging.get(kind)
+        if (
+            cached is None
+            or cached[0].shape != reference_a.shape
+            or cached[1].shape != reference_b.shape
+            or cached[0].dtype != reference_a.dtype
+            or cached[1].dtype != reference_b.dtype
+            or cached[0].device != self.device
+        ):
+            with torch.cuda.device(self.device):
+                cached = (
+                    torch.empty(reference_a.shape, device=self.device, dtype=reference_a.dtype),
+                    torch.empty(reference_b.shape, device=self.device, dtype=reference_b.dtype),
+                )
+            self._adjoint_staging[kind] = cached
+        return cached
+
+    def prepare_adjoint_staging(self, engines, adjoint_states) -> None:
+        """Preallocate this rank's reverse-halo staging before the reverse loop.
+
+        The magnetic reverse receives the right neighbour's low ghost adjoint
+        plane; the electric reverse receives the left neighbour's high ghost
+        adjoint node plane. An endpoint that lacks the relevant neighbour
+        allocates nothing on that side.
+        """
+
+        engine = engines[0]
+        state = adjoint_states[engine.rank]
+        if self.right_rank is not None:
+            last = engine.layout.storage_cell_owned.stop - 1
+            self._adjoint_staging_pair("magnetic", state["Hy"][last], state["Hz"][last])
+        if self.left_rank is not None:
+            first = engine.layout.storage_node_owned.start
+            self._adjoint_staging_pair("electric", state["Ey"][first], state["Ez"][first])
+
+    def exchange_magnetic_adjoint(self, engines, adjoint_states) -> None:
+        """Transpose of :meth:`exchange_magnetic` over NCCL.
+
+        Data flows right -> left: this rank ships its low ghost adjoint Hy/Hz plane
+        to the left neighbour and zeroes it, while receiving the right neighbour's
+        ghost adjoint plane into staging and accumulating it into its last owned
+        cell. The accumulate-then-zero keeps the ghost-adjoint-zero invariant the
+        fused reverse kernels rely on.
+        """
+
+        engine = engines[0]
+        state = adjoint_states[engine.rank]
+        cs = engine.layout.storage_cell_owned
+        with torch.cuda.device(engine.device), torch.cuda.stream(engine.compute_stream):
+            ghost = None
+            if self.left_rank is not None:
+                ghost = [state["Hy"][0], state["Hz"][0]]
+            owner = None
+            staging = None
+            if self.right_rank is not None:
+                last = cs.stop - 1
+                owner = [state["Hy"][last], state["Hz"][last]]
+                staging = list(self._adjoint_staging_pair("magnetic", owner[0], owner[1]))
+            self._magnetic_adjoint_planes(
+                ghost_adjoint_planes=ghost,
+                owner_adjoint_planes=owner,
+                staging_planes=staging,
+            )
+            engine.magnetic_received.record(engine.compute_stream)
+
+    def exchange_electric_adjoint(self, engines, adjoint_states) -> None:
+        """Transpose of :meth:`exchange_electric` over NCCL.
+
+        Data flows left -> right: this rank ships its high ghost adjoint Ey/Ez node
+        plane to the right neighbour and zeroes it, while receiving the left
+        neighbour's ghost adjoint node plane into staging and accumulating it into
+        its first owned node.
+        """
+
+        engine = engines[0]
+        state = adjoint_states[engine.rank]
+        ns = engine.layout.storage_node_owned
+        with torch.cuda.device(engine.device), torch.cuda.stream(engine.compute_stream):
+            ghost = None
+            if self.right_rank is not None:
+                g = ns.stop
+                ghost = [state["Ey"][g], state["Ez"][g]]
+            owner = None
+            staging = None
+            if self.left_rank is not None:
+                owner = [state["Ey"][ns.start], state["Ez"][ns.start]]
+                staging = list(self._adjoint_staging_pair("electric", owner[0], owner[1]))
+            self._electric_adjoint_planes(
+                ghost_adjoint_planes=ghost,
+                owner_adjoint_planes=owner,
+                staging_planes=staging,
+            )
+            engine.electric_received.record(engine.compute_stream)
 
     def reduce_owned_energy(self, engines) -> torch.Tensor:
         engine = engines[0]
