@@ -86,6 +86,22 @@ def _rectangular_waveguide():
     return scene, freqs
 
 
+def _lossy_waveguide_attenuation():
+    from benchmark.scenes.rf.lossy_waveguide_attenuation import (
+        design_frequencies,
+        lossy_waveguide_reference_scene,
+    )
+
+    # The good-conductor surface-impedance walls export through the adapter's dedicated
+    # lossy-metal surface path (a bulk conductivity mapped to the reference solver's own
+    # surface-impedance boundary). A single TE10 ModeSource launches into the lossy guide
+    # and two forward ModeMonitors a known distance apart give the conductor attenuation
+    # alpha from the forward-mode decay in ONE run (no second length needed).
+    freqs = design_frequencies()
+    scene = lossy_waveguide_reference_scene(dx=0.0025, frequencies=freqs, device="cpu")
+    return scene, freqs
+
+
 def _lumped_open_short_match():
     from benchmark.scenes.rf.lumped_open_short_match import (
         coax_sol_scene,
@@ -118,6 +134,7 @@ def _patch():
 # name -> builder returning (scene, frequencies). Order is the run order.
 REFERENCE_TARGETS = {
     "rf/rectangular_waveguide": _rectangular_waveguide,
+    "rf/lossy_waveguide_attenuation": _lossy_waveguide_attenuation,
     "rf/coax_thru": _coax_thru,
     "rf/lumped_open_short_match": _lumped_open_short_match,
     "antenna/half_wave_dipole": _half_wave_dipole,
@@ -327,8 +344,14 @@ def _results_section(records: list[ReferenceRecord]) -> str:
         "source), and only then cost-estimated and cloud-run. A `pending-generation` "
         "status is NOT a fabricated comparison -- it records that no numerical "
         "cross-reference exists yet and names the concrete reason; the analytic "
-        "transmission-line / waveguide / dipole references remain the binding gate. All five "
-        "targets are runnable: `rf/rectangular_waveguide` is a TE10 `ModeSource` launch, the "
+        "transmission-line / waveguide / dipole references remain the binding gate. All six "
+        "targets are runnable: `rf/rectangular_waveguide` is a TE10 `ModeSource` launch, "
+        "`rf/lossy_waveguide_attenuation` is the same TE10 launch into a good-conductor "
+        "surface-impedance guide with two forward `ModeMonitor` planes for the attenuation "
+        "decay (the lossy-metal wall exports through the adapter's dedicated surface path; the "
+        "cross-check reveals the external RF surface-impedance export under-applies the wall "
+        "loss at a coarse export grid, a documented adapter-fidelity gap recorded in the RF "
+        "wave-level section, while the analytic `alpha_c` binds), the "
         "two RF port scenes map each `WavePort` TEM aperture to a reference `ModeSource` drive "
         "(port 0) plus a receiving `ModeMonitor` per port, and the two antenna scenes map their "
         "`LumpedPort` delta-gap feed to an equivalent `UniformCurrentSource` current injection "

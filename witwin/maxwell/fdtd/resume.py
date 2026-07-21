@@ -276,6 +276,13 @@ def _configuration_fingerprint(solver) -> str:
             if ade is not None:
                 for key in ("A", "B", "C", "D"):
                     _hash_value(hasher, f"surface_impedance[{index}].{key}", ade[key])
+            # A staircased face carries its exposed-footprint edge mask; it is part of the
+            # resume identity so a checkpoint from a different voxelized geometry with the
+            # same plane index fails the fingerprint rather than resuming under the wrong
+            # footprint.
+            mask = write.get("mask")
+            if mask is not None:
+                _hash_tensor(hasher, f"surface_impedance[{index}].mask", mask)
     for index, runtime in enumerate(getattr(solver, "_port_runtimes", ())):
         _hash_value(hasher, f"port[{index}].definition", runtime.port)
         _hash_value(hasher, f"port[{index}].frequencies", runtime.frequencies)

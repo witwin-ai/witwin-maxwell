@@ -1242,7 +1242,10 @@ def _configure_surface_impedance(solver):
     discrete_cache: dict[int, tuple] = {}
     writes = []
     for metal in layout.metals:
-        _surface_box_interior_mask(solver, metal)
+        if getattr(metal, "interior_node_mask", None) is not None:
+            _surface_occupancy_interior_mask(solver, metal)
+        else:
+            _surface_box_interior_mask(solver, metal)
 
     for face in layout.faces:
         metal = layout.metals[face.metal_index]
@@ -1250,6 +1253,9 @@ def _configure_surface_impedance(solver):
         b = (axis + 1) % 3
         c = (axis + 2) % 3
         sn = 1.0 if face.metal_side == "high" else -1.0
+        if getattr(face, "transverse_mask", None) is not None:
+            writes.extend(_voxel_surface_writes(solver, face, metal, axis, b, c, sn, omega0))
+            continue
         components = (
             (_E_COMPONENTS[b], _H_COMPONENTS[c], +sn),
             (_E_COMPONENTS[c], _H_COMPONENTS[b], -sn),
@@ -1317,6 +1323,70 @@ def _configure_surface_impedance(solver):
 
     solver._surface_impedance = {"writes": writes}
     solver.surface_impedance_enabled = True
+
+
+def _surface_occupancy_interior_mask(solver, metal):
+    """Zero the E-update coefficients inside a staircased (voxelized) good conductor.
+
+    The node occupancy is averaged onto each Yee E edge (the same node->edge stencil as
+    the permittivity), and an edge whose fill reaches half is treated as inside the metal
+    and clamped to zero (decay and curl scaled by zero), exactly the PEC-staircase
+    treatment. Surface edges are also zeroed here; the per-face Leontovich write overrides
+    the exposed transverse footprint each step before any field reads it.
+    """
+    occupancy = metal.interior_node_mask.to(device=solver.device, dtype=torch.float32)
+    for component in _E_COMPONENTS:
+        decay = getattr(solver, f"c{component.lower()}_decay", None)
+        if decay is None:
+            continue
+        fill = average_node_to_component(solver, occupancy, component)
+        keep = (fill < 0.5).to(fill.dtype)
+        for suffix in ("decay", "curl"):
+            name = f"c{component.lower()}_{suffix}"
+            setattr(solver, name, (getattr(solver, name) * keep).contiguous())
+
+
+def _voxel_surface_writes(solver, face, metal, axis, b, c, sn, omega0):
+    """Build the two tangential-E mask writes for one staircased face.
+
+    The face carries a boolean node-plane mask in ascending non-normal-axis order (the same
+    layout as a field tensor's transverse plane). For each tangential E component the mask
+    is reduced to that component's edge grid (an edge is on the surface when both bounding
+    nodes are), matching the paired vacuum-side H plane's transverse shape. The runtime
+    write is ``E_plane = where(mask, sign * R * H_plane, E_plane)``, static-shape and
+    graph-capturable. Only the narrowband good-conductor (order-0 resistance) surface is
+    supported for the staircase; ``metal.conductivity`` is guaranteed non-None by the
+    compiler.
+    """
+    if omega0 <= 0.0:
+        raise ValueError(
+            "A narrowband good-conductor surface requires a positive operating frequency."
+        )
+    surface_r = float(np.sqrt(omega0 * solver.mu0 / (2.0 * metal.conductivity)))
+    node_mask = face.transverse_mask.to(device=solver.device)
+    naxes = tuple(a for a in range(3) if a != axis)
+    writes = []
+    for e_axis, h_axis, sign in ((b, c, +sn), (c, b, -sn)):
+        # Reduce the node mask along the E component's own (edge) direction.
+        position = naxes.index(e_axis)
+        if position == 0:
+            edge_mask = node_mask[:-1, :] & node_mask[1:, :]
+        else:
+            edge_mask = node_mask[:, :-1] & node_mask[:, 1:]
+        writes.append(
+            {
+                "e_name": _E_COMPONENTS[e_axis],
+                "h_name": _H_COMPONENTS[h_axis],
+                "sign": float(sign),
+                "axis": axis,
+                "electric_index": int(face.surface_node),
+                "magnetic_index": int(face.magnetic_index),
+                "full_plane": False,
+                "surface_r": surface_r,
+                "mask": edge_mask.contiguous(),
+            }
+        )
+    return writes
 
 
 def _surface_write_index(ndim, axis, axis_index, b_axis, b_slice, c_axis, c_slice):
