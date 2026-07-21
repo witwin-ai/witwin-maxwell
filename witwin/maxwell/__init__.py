@@ -53,6 +53,7 @@ from .esd import (
     ESDDiagnostics,
     ESDPortRecord,
     ESDResampledWaveform,
+    ESDVoltageSource,
     ESDWaveform,
     MeasuredWaveform,
 )
@@ -283,6 +284,7 @@ __all__ = [
     "ESDDiagnostics",
     "ESDPortRecord",
     "ESDResampledWaveform",
+    "ESDVoltageSource",
     "ESDWaveform",
     "EmbeddedElementPatternData",
     "EmbeddedNetworkData",

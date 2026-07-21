@@ -1341,6 +1341,46 @@ class Result:
             measured=measured,
         )
 
+    def _esd_generator_circuits(self):
+        scene = self.scene
+        circuits = getattr(scene, "circuits", ()) if scene is not None else ()
+        return {
+            circuit.name: dict(circuit.metadata["esd_generator"])
+            for circuit in circuits
+            if isinstance(getattr(circuit, "metadata", None), dict)
+            and "esd_generator" in circuit.metadata
+        }
+
+    def esd_generator_names(self) -> tuple[str, ...]:
+        """Names of circuit-driven ESD generator networks on the run scene.
+
+        These are the circuits assembled by :meth:`ESDVoltageSource.build_circuit`
+        (the source-impedance-network ESD excitation), identified by the
+        generator provenance stamped on their circuit metadata.
+        """
+
+        return tuple(self._esd_generator_circuits())
+
+    def esd_generator(self, name: str) -> dict[str, Any]:
+        """Return the ESD generator-network provenance for circuit ``name``.
+
+        Capability level: stress-only. The provenance carries the versioned
+        waveform metadata (standard, revision, level voltage, model version) and
+        the source-network element values (330 ohm discharge resistor / 150 pF
+        storage capacitor by default), documenting that this is a circuit
+        approximation of the standard network rather than gun/system
+        certification. The coupled port voltage/current time series lives on the
+        associated :class:`CircuitData` (``result.circuit(name)``).
+        """
+
+        generators = self._esd_generator_circuits()
+        if name not in generators:
+            available = ", ".join(sorted(generators)) or "<none>"
+            raise KeyError(
+                f"ESD generator {name!r} is not present; available: {available}."
+            )
+        return generators[name]
+
     def breakdown_names(self) -> tuple[str, ...]:
         """Names of BreakdownMonitor stress records present in the result."""
 
