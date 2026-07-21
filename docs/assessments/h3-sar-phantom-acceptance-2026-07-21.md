@@ -155,3 +155,122 @@ INCIDENT_SPATIAL_AVERAGE_VERSION), `witwin/maxwell/fdtd/observers.py`
 
 No existing fail-closed guard or test was removed or weakened; no FDTD capability-guard
 census entry was added or removed (budget stays 175).
+
+---
+
+# Stage H3b acceptance
+
+Stage: **H3b** — layered-slab grid convergence + power-conservation closure +
+RESULTS rows + docs/census/FEATURE_LIST (external run and `input_power` guard both
+assessed and deferred with rationale).
+
+Date: 2026-07-21. Same reproduce prelude as H3a (env `maxwell`, `CUDA_VISIBLE_DEVICES=0`).
+
+## Delivered
+
+### Power-conservation closure + grid convergence (plan §1)
+
+- `benchmark/scenes/sar/layered_slab.py::build_conservation_scene(dx=, device=)` —
+  a periodic-transverse variant of the layered slab. Under normal incidence on an
+  infinite planar slab the physically correct transverse boundary is periodic (not
+  PML), which makes the field transverse-uniform, so the closed-surface balance
+  reduces to two z-planes: `P_absorbed = flux(z_in,+z) - flux(z_out,+z)`. The shipped
+  `build_scene` (PML on all faces, golden-anchored in H3a) is unchanged.
+- `tests/sar/test_phantom_convergence.py` (3 tests):
+  - `test_layered_slab_power_conservation_via_flux` — the absorbed power measured as
+    the volume conduction-loss integral (`sigma|E|^2`, the SAR basis) closes against
+    the net surface Poynting balance (`flux_in - flux_out`, `E x H` on two planes) at
+    dx=4 mm: residual 0.167 (< 0.20), magnitude ratio 0.833 in [0.75, 1.0].
+    **wave-level** (surface `E x H` is independent of the volume loss).
+  - `test_layered_slab_conservation_closure_converges` — 3 grids (5/4/3 mm): residual
+    0.200 -> 0.167 -> 0.125, monotone, finest < 0.15 and coarse-minus-fine > 0.04.
+  - `test_layered_slab_peak_1g_sar_three_grid_study` — records peak 1 g / 10 g SAR at
+    3 grids (peak 1 g = 0.469 / 0.570 / 0.532 W/kg); gates the robust structure only
+    (finite, positive, 10 g <= 1 g), and bounds the documented spread < 0.6. The peak
+    is NOT gated to converge tightly: a source-normalized plane wave delivers a
+    grid-dependent incident power density (peak `|S.n|` 9.7 -> 14.8 W/m^2 across the
+    same 3 grids), and the peak is a pointwise max over a thin under-resolved 8 mm
+    skin layer. The convergent, gate-bearing observable is the conservation closure.
+
+### Benchmark RESULTS rows (plan §3)
+
+- `benchmark/sar_validation.py` — a self-contained SAR phantom exposure validation
+  harness (same pattern as `benchmark/rf_validation.py`): drives the phantom family
+  through the public `Scene -> Simulation -> Result` path, writes a
+  `## SAR exposure validation` section to `benchmark/RESULTS.md`, and a JSON artifact
+  per scene under `docs/assessments/sar-phantom-validation/`. Wired as
+  `python -m benchmark sar [scenes...]` (`benchmark/__main__.py`).
+- Gate classes self-labelled with the verbatim `docs/reference/gate-classification.md`
+  taxonomy: `sar/layered_slab` = **wave-level** (headline surface/volume closure
+  16.7% at dx=4 mm, converging), `sar/one_gram_cube` = **analytic-identity** (rel 0.0),
+  `sar/uniform_lossy_cube` = **analytic-identity** (volume/channel self-consistency
+  0.0, supporting only), `sar/antenna_near_phantom` = **blocked**. Every row
+  `external_reference: analytic-only`.
+- `tests/sar/test_sar_validation.py` (5 tests): runner coverage; the analytic 1 g cube
+  runner matches the hand-computed value (< 1e-4, GPU-free); the antenna runner reports
+  `blocked` with the conductance-aware note and no headline metric; the layered-slab
+  headline class is verbatim `wave-level`; the RESULTS section writer is idempotent
+  (re-running replaces in place, preserves neighbouring sections).
+
+## Test inventory (env prelude above)
+
+```
+python -m pytest tests/sar/test_phantom_convergence.py -q            # 3 passed (~25 s)
+python -m pytest tests/sar/test_sar_validation.py -q                 # 5 passed (~3 s)
+python -m pytest tests/sar/ tests/api/public/test_guard_census.py \
+  tests/api/public/test_public_api.py tests/api/public/test_simulation_smoke.py -q
+                                                                     # 109 passed
+python -m benchmark sar                                              # 4 rows: 3 pass, 1 blocked
+```
+
+`tests/sar/` is now 79 tests (71 H3a + 8 H3b). The capability-guard census is unchanged
+at **175** (`tests/api/public/test_guard_census.py` passes); H3b adds no
+`NotImplementedError` guard and removes none.
+
+## Falsifications performed (evidence discipline)
+
+1. **Conservation closure (headline wave-level gate).** With the run held fixed
+   (dx=4 mm), injecting a 30% error into the absorbed-power volume integral pushes
+   the surface/volume residual to 0.359 (> 0.20 gate) and the magnitude ratio to
+   0.641 (< 0.75 gate) — both RED. A 0.5 -> 0.25 Poynting-factor error (halving both
+   surface fluxes) pushes the residual to 0.583 — RED. Restored -> green
+   (`scratch/falsify.py`, not committed). Note: merely dropping the transmitted term
+   `flux_out` does NOT falsify (transmittance is ~2%), which is itself the physical
+   content — nearly all incident power is absorbed.
+2. **RESULTS section writer idempotency.** `test_results_section_writer_is_idempotent`
+   asserts a second `_replace_or_append_section` call keeps exactly one section header
+   and preserves neighbouring `## ` sections; a duplicating writer would make the
+   header count 2 (RED).
+
+## Known gaps / deferred (with rationale)
+
+- **External reference-solver run — assessed, deferred.** The plan authorizes at most
+  one cloud run for `layered_slab`. Export feasibility is clean (the slab uses simple
+  lossy `eps_r + sigma_e` media, already covered by the adapter's `sigma_e_drude_slab`
+  / `debye_slab` media-family exports; `mass_density` is postprocess-only and stripped
+  from the cache key). It is deferred because: (a) the binding evidence is already the
+  independent, monotonically-converging conservation-law closure (wave-level); (b) the
+  only scene whose *absorbed-power field* an external solver could naturally
+  cross-check driven is `antenna_near_phantom`, which is blocked upstream; and (c) the
+  single owner-authorized run is better reserved than spent duplicating a conservation
+  check the closure already provides. Recorded for the supervisor to spend if desired.
+- **`input_power` normalization census guard — assessed, not removed.** Removing the
+  `PowerNormalization.input_power` fail-closed guard requires wiring a total injected
+  source-power diagnostic from the conservation-suite machinery. That is a real
+  capability addition (not a clean, incidental change), so per the "only if clean"
+  instruction it is left fail-closed and the census stays 175. `accepted_power` and
+  `source` normalization remain fully supported.
+- **Peak 1 g SAR grid convergence.** Documented as grid-sensitive rather than tightly
+  convergent (see the three-grid study above); this is an honest finding, not a gap in
+  the gate — the conservation closure is the convergent wave-level observable.
+
+## Files added / changed (H3b)
+
+Added: `benchmark/sar_validation.py`, `tests/sar/test_phantom_convergence.py`,
+`tests/sar/test_sar_validation.py`,
+`docs/assessments/sar-phantom-validation/*.json` (4 artifacts).
+Changed: `benchmark/scenes/sar/layered_slab.py` (`build_conservation_scene`),
+`benchmark/__main__.py` (`sar` subcommand), `benchmark/RESULTS.md`
+(`## SAR exposure validation` section), `FEATURE_LIST.md` (H3b subsection), this doc.
+
+No existing fail-closed guard or test was removed or weakened.
