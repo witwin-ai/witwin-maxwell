@@ -714,3 +714,37 @@ conductive-path model, not a validated arc or device-failure predictor).
 - `python -m benchmark rf rf/rectangular_waveguide` is now a committed wave-level PASS on the Yee-staggered transverse operator. The terminated hollow-guide TE10 two-port S-matrix is assembled by solving `B = S*A` across the drive columns and gated on extraction conditioning (`cond(A) <= 10`) plus post-solve passivity (max singular value `<= 1.05`), then `beta(omega)` from `arg(S21)/L` is compared against the analytic TE10 dispersion `beta = sqrt(k0^2 - (pi/a)^2)` across 11 frequencies above cutoff. Measured (dx=0.02): `sin(pi y/a)`-correlation 1.0000, `cond(A) ~ 1.09`, max singular value ~1.0007, `|S11|` best ~2e-4, `|S21| ~ 1`, and beta median relative error ~0.05% against a pre-registered 1% tolerance (all three grid tiers pass). The mode-shape correlation check is retained as a fail-closed regression guard (< 0.9 records BLOCKED rather than reporting a spurious S-matrix). Committed gate: `tests/rf/wave_validation/test_waveguide_wave_level.py` (conditioning + passivity + beta, plus a reference-plane-length falsification).
 - The external-reference-solver generation path (`python -m benchmark.rf_tidy3d_references`) gains a runnable `rf/rectangular_waveguide` target: a TE10 `ModeSource`-driven guide with two `ModeMonitor` planes exports through the interoperability adapter with a genuine reference source (`sources=1`), so one cloud job produces an S-parameter cross-reference. The reference forward-mode-amplitude phase constant confirms the analytic TE10 `beta(omega)` to ~1.2% median over the band; the analytic dispersion remains the binding first-line reference. The remaining port/lumped-driven RF/antenna targets still fail-close at the `sources=0` runnable gate (deferred adapter source mapping) and spend no cloud credits.
 <!-- END round-e-integration -->
+
+<!-- BEGIN f1-cosim-e2 (coupled FDTD+MNA energy-conservation evidence, F1a) -->
+## Coupled FDTD + circuit (MNA) energy-conservation validation (F1a)
+
+- Validation evidence, not a new public feature: a multi-scenario coupled
+  FDTD + MNA global energy-residual suite
+  (`tests/rf/circuits/test_circuit_conservation.py`) closes the whole-system
+  energy balance `source injected = delta EM stored + circuit dissipated +
+  circuit stored` for three strongly coupled scenarios driven from an in-circuit
+  source in a closed (PEC, zero-outflow) vacuum box: (a) a resistive load on a
+  driven lumped terminal port, (b) a resonant series RLC assembled from MNA
+  primitives (not the native `SeriesRLC`), and (c) a controlled-source (VCVS)
+  network. The EM-stored term is measured from the raw Yee E/H fields
+  (`0.5 eps E^2 + 0.5 mu H(n-1/2).H(n+1/2)`), independent of the port record; the
+  circuit terms come from the MNA companion state. The suite annotates gate
+  classes honestly — the source/dissipation/circuit-store channels are
+  consistency-class (Tellegen / companion algebra) and the genuine two-sided
+  content is the field-link equality `delta EM stored == -(port work)`
+  (raw fields vs MNA V/I record, no shared code) — and each headline channel has
+  a recorded falsification. Pre-registered tolerances: global residual
+  `<= 5e-3` of throughput, field-link residual `<= 2e-2` of peak field energy.
+- Validation evidence, not a new public feature (F1b, independent circuit
+  cross-check): `tests/rf/circuits/test_circuit_independent_crosscheck.py`
+  characterizes an EM one-port (open, PML-terminated box with a `LumpedPort`) by a
+  passive port-admittance sweep, fits the measured `Y_em(f)` to a low-order stable
+  rational (`fit_rational`, data-fitting only), derives the series-loop
+  equivalent-circuit ODE state equations by hand, and integrates them with
+  `scipy.integrate.solve_ivp` for a *different* drive/resistance than the sweep.
+  The independent transient reproduces the coupled FDTD + MNA run's port voltage to
+  `~1.2e-5` (relative, headline gate) with no shared runtime code between the two
+  paths, lifting the coupled circuit transient off the consistency class. A
+  recorded falsification perturbs the MNA field-port companion conductance and
+  shows the cross-check goes red.
+<!-- END f1-cosim-e2 -->
