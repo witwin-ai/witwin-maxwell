@@ -37,7 +37,7 @@ Six scenes live under `benchmark/scenes/rf/` and are driven through
 | Scene | Binding metric | Class | Status |
 |---|---|---|---|
 | `rf/coax_thru` | terminated FDTD two-port; `beta` from `arg(S21)/L` vs `k0`, S via `B=S*A`, gated on extraction conditioning + passivity | `wave-level` | **pass** (a_passive/a_driven 0.17, \|S11\|<0.02, \|S21\|~1, max sv ~1, cond(A) ~1.2) |
-| `rf/rectangular_waveguide` | terminated FDTD two-port; TE10 `beta(omega)` | `modal-eigensolve` | **BLOCKED** on the transverse mode-operator redesign (see 1.1 / open items) |
+| `rf/rectangular_waveguide` | terminated FDTD two-port; TE10 `beta(omega)` from `arg(S21)/L` vs analytic dispersion, S via `B=S*A`, gated on extraction conditioning + passivity | `wave-level` | **pass** (sin-corr 1.0000, cond(A) ~1.1, max sv ~1.001, beta 0.05% median vs 1% gate; external-reference cross-check 1.2%) — see 1.2 |
 | `rf/microstrip_two_port` | -- | `wave-level` | **BLOCKED** (TEM categorically inapplicable to substrate+air) |
 | `rf/differential_pair` | -- | `wave-level` | **BLOCKED** (same TEM inapplicability, coupled 4-port) |
 | `rf/series_parallel_rlc` | FDTD load-port resonance peak vs analytic f0 | `wave-level` | **gap** (parasitic-dominated; peak does not track C) |
@@ -85,41 +85,53 @@ edges), never the scene-file length constant -- the round-2/3 benches set
   NOT independent conservation evidence -- the passivity singular value carries the
   conservation content.
 
-### 1.2 Rectangular waveguide (BLOCKED on the transverse mode-operator)
+### 1.2 Rectangular waveguide (wave-level PASS on the Yee-staggered operator)
 
-- The withdrawn round-3 "shifted 3D-Yee TE10 onset" story was **false physics**:
-  the discrete TE10 cutoff is `0.99752 fc`, BELOW the continuum, and the band
-  propagates at every tier. The real defect was in mode SELECTION: the vector
-  selector injected a **checkerboard-aliased** eigenvector that merely shares the
-  TE10 eigenvalue (`sin(pi y/a)`-correlation `0.000`), whose odd profile couples to
-  TE20 (cutoff exactly `2 fc`) and whose evanescent tunnelling reproduced the old
-  measured |S21| to 3 significant figures.
-- The selector is now hardened (F1): it rejects the `k0` transverse null branch by
-  an **absolute** transverse-uniformity signature (the old squared-difference
-  threshold scaled as `dx^2` and silently rejected legitimate fine-grid / high-f
-  modes -- TE10 at 6 fc has `beta/k0 = 0.986`, executed). The checkerboard filter is
-  **scoped to the graded (structure-enforcing) path only** and is NOT applied on the
-  uniform-isotropic aperture (that path also serves free-space / open TE ports whose
-  fundamental is legitimately plane-wave-like, so a generic checkerboard reject there
-  discards valid modes). The **wall-peak gate is disabled** (`wall_peaked` is
-  hard-coded `False`; `wall_peak_fraction` is retained only as a persisted diagnostic).
-  On the hollow guide the selector therefore **returns the checkerboard-aliased
-  candidate** with its `checkerboard_fraction` persisted; it is the **benchmark's
-  `sin(pi y/a)`-correlation gate** (< 0.9, section 1.2 head) that refuses to use it.
-  The `k0` null branch is still rejected structurally, and the selector **never
-  substitutes** another mode for a genuinely absent requested index -- it raises.
-- The transverse VECTOR operator itself, however, cannot yet produce a clean
-  full-grid TE10 on a hollow metallic guide. Executed evidence: the centered
-  uniform-isotropic branch composes a stride-two stencil that decouples the
-  odd/even transverse sublattices, so the half-wave `sin(pi y/a)` lives on ONE
-  sublattice with the other ~0; the best full-grid `sin`-correlation recoverable
-  over the **entire** degenerate subspace at `beta_TE10` is only in the `0.51-0.59`
-  range (independently measured: dx=0.05->0.548, 0.025->0.522, 0.02->0.592,
-  0.01->0.509), and every candidate has `checkerboard_fraction > 0.35`. The
-  alternative staggered branch
-  couples the sublattices but has an asymmetric boundary (one wall Neumann, one
-  Dirichlet) that shifts `beta` ~10% low. The waveguide is therefore recorded as
-  **blocked** (status), pending the operator redesign in the open items.
+**Status: PASS (round E, E1b).** The transverse mode-operator redesign filed as the
+round-4 open item landed: the selector now solves the hollow guide on the genuinely
+Yee-staggered transverse full-vector operator
+(`modes.py:_build_yee_transverse_operator_sparse`), which keeps each transverse E
+component on its own Yee location and imposes symmetric PEC walls, reproducing the
+closed-form discrete eigenpairs of the guide to machine precision. The injected TE10
+`Ez` is now a clean full-grid `sin(pi y/a)` (**correlation 1.0000** at dx=0.05 / 0.025 /
+0.02 and at 6 fc), so the terminated two-port yields a physical, passive S-matrix and a
+genuine wave-level `beta(omega)`.
+
+- **Measured wave-level gate (executed, `python -m benchmark rf rf/rectangular_waveguide`;
+  `tests/rf/wave_validation/test_waveguide_wave_level.py`):** the two-port S is assembled
+  by solving `B = S*A` across the drive columns, gated (coax_thru precedent) on
+  extraction conditioning `cond(A)` and post-solve passivity, then `beta` from
+  `arg(S21)/L` vs the analytic dispersion `beta = sqrt(k0^2 - (pi/a)^2)` across the
+  1.2 fc .. 2.2 fc band (11 frequencies, all propagating). Finest tier (dx=0.02):
+  `cond(A) = 1.09`, max singular value `1.0007`, `|S11|` in `[0.0002, 0.0083]`,
+  `|S21| ~ 1.0`, `a_passive/a_driven = 0.088` (diagnostic), and **beta median rel error
+  `0.05%`** (per tier: dx=0.05 -> 0.41%, 0.025 -> 0.07%, 0.02 -> 0.05%) against a
+  pre-registered **1%** gate (1%-class, coax bench gates its own `arg(S21)/L` beta at 3%;
+  the independent Yee numerical-dispersion floor at dx=0.02 is ~0.03%). The a_passive
+  ratio collapsing to ~0.09 (from the contaminated-mode ~0.4 floor) confirms the old
+  floor was the checkerboard mode, not the termination.
+- **External-reference-solver cross-check (one authorized cloud run, M3).** A TE10
+  `ModeSource`-driven guide with two `ModeMonitor` planes exports through the adapter
+  with `sources=1` (the adapter maps `ModeSource`/`ModeMonitor` to the reference solver's
+  native modal source/monitor), so it is genuinely runnable. Cost 0.025 FlexCredits (task
+  id in the acceptance doc). The reference forward-mode-amplitude phase constant
+  `|d arg(amp_fwd)|/L` agrees with the analytic TE10 dispersion to **1.21% median / 2.74%
+  max** over 11 frequencies (an independent solver at a coarse auto-mesh; the ~1% class
+  is expected). The analytic dispersion remains the binding first-line reference; the
+  external solver is a supporting cross-check.
+- **Historical defect (withdrawn).** The withdrawn round-3 "shifted 3D-Yee TE10 onset"
+  story was false physics (the discrete TE10 cutoff is `0.99752 fc`, BELOW the continuum,
+  and the band propagates at every tier). The round-4 defect was that the centered
+  uniform-isotropic transverse operator composed a stride-two stencil that decoupled the
+  odd/even transverse sublattices, capping the full-grid `sin(pi y/a)` correlation at
+  `0.51-0.59` (dx=0.05->0.548, 0.025->0.522, 0.02->0.592, 0.01->0.509) with every
+  candidate `checkerboard_fraction > 0.35`. The Yee-staggered operator resolves this at
+  the operator level (golden gates:
+  `tests/rf/wave_validation/test_transverse_operator.py`,
+  `test_te10_mode_selection.py`). The benchmark's `sin(pi y/a)`-correlation gate is kept
+  as a fail-closed regression guard: if the sublattice-decoupling defect ever returns,
+  the correlation drops below 0.9 and the scene records BLOCKED rather than reporting a
+  spurious S-matrix.
 
 ## 2. Gate taxonomy re-labelling (S1.2)
 
@@ -184,34 +196,58 @@ the records are in the test docstrings and the scene artifacts.
 
 Analytic transmission-line / waveguide solutions are the binding first-line
 reference (audit section 3). External reference-solver cross-references are the
-future primary cross-check for the covered port families; adapter-driven
-generation is **not yet wired** (M3), so `python -m benchmark.rf_tidy3d_references`
-only stamps `reference: pending-generation` markers under `benchmark/cache/rf/`
-and never fabricates a numerical comparison. `series_parallel_rlc` is a
-lumped-circuit resonance with an analytic-only reference.
+primary cross-check for the covered port families; adapter-driven generation is
+now **wired and authorized** (M3, round E): `python -m benchmark.rf_tidy3d_references`
+exports each target scene through `Scene.to_tidy3d`, gates it on being physically
+runnable (>= 1 source), cost-estimates, and runs one cloud job per runnable scene,
+writing an `.h5` cache plus a `.generated.json` record with the task id and cost. It
+never fabricates a comparison: a source-less export records `pending-generation` with
+the concrete reason. `series_parallel_rlc` is a lumped-circuit resonance with an
+analytic-only reference.
 
-External reference-solver generation (S1.1) is **deferred pending owner
-authorization of external-solver (cloud) runs**: this is a cost decision, so no
-cloud generation was run this round and the `pending-generation` markers are kept
-deliberately. Recorded as an S1.1 re-scope question for the owner.
+External reference-solver generation is **authorized and executed** for the covered
+scenes. `rf/rectangular_waveguide` was generated (a TE10 `ModeSource`-driven guide;
+one cloud run, 0.025 FlexCredits, task id in the acceptance doc; beta cross-check
+1.21% median, section 1.2). The four port/lumped-driven scenes (`coax_thru`,
+`lumped_open_short_match`, `antenna/half_wave_dipole`, `antenna/patch`) still export
+with `sources=0` -- the adapter has no port/lumped source mapping -- so they fail-close
+at the runnable gate with `sources=0` recorded and spend no credits; mapping port/lumped
+excitation to the reference solver is a deferred adapter feature. The analytic references
+remain binding regardless.
 
-## 5. Open items (round-4, filed not implemented)
+## 5. Open items
 
-* **Transverse mode-operator redesign (blocks the waveguide).** The full-vector
-  transverse operator (`modes.py:_build_vector_operator_sparse`) cannot represent a
-  clean full-grid guided mode on a hollow metallic aperture: the centered
-  uniform-isotropic branch decouples the odd/even sublattices (checkerboard
-  copies), and the staggered branch has an asymmetric metallic boundary that shifts
-  `beta` ~10%. A symmetric-BC Yee-staggered transverse operator (or a mixed
-  Dirichlet/Neumann scalar Helmholtz reduction for the homogeneous-guide case) is
-  required so the selector's structural filters have a genuine `sin(pi y/a)`
-  candidate to return. Until then `rf/rectangular_waveguide` and the matched/short
-  |S11| gate are xfail/blocked. Evidence: `sin`-correlation cap in the `0.51-0.59`
-  range over the full degenerate subspace (dx=0.05->0.548, 0.025->0.522,
-  0.02->0.592, 0.01->0.509), all candidates `checkerboard_fraction > 0.35` (executed).
-* **PlaneMonitors are silently dropped from WavePort / PortSweep Results.** This
-  blocks field-level falsification of the wave benches (you cannot inspect the
-  injected/propagated transverse field to confirm the mode shape from a normal
-  run). Filed as an open item; not addressed this round.
-* **External reference-solver generation remains deferred** pending owner cost
-  authorization (section 4).
+### Resolved (round E)
+
+* **Transverse mode-operator redesign — RESOLVED.** The symmetric-BC Yee-staggered
+  transverse full-vector operator (`modes.py:_build_yee_transverse_operator_sparse`)
+  landed and is wired into the selector. It keeps each transverse E component on its own
+  Yee location, imposes symmetric PEC walls, and reproduces the closed-form discrete
+  eigenpairs of the hollow guide to machine precision (golden gates:
+  `tests/rf/wave_validation/test_transverse_operator.py` — full discrete spectrum,
+  exact TE10/TE20/TM11 eigenpairs, second-order convergence, inhomogeneous half-filled
+  LSE mode). The selected TE10 is a clean full-grid `sin(pi y/a)` (correlation 1.0000),
+  so `rf/rectangular_waveguide` is a wave-level PASS (section 1.2) and the matched/short
+  `|S11|` discrimination gate (`test_matched_s11_wave_level.py`) is green.
+* **PlaneMonitors are dropped from WavePort / PortSweep Results — RESOLVED (round E).**
+  Monitor passthrough for WavePort / PortSweep Results was added, so the
+  injected/propagated transverse field is inspectable for field-level falsification
+  (`tests/rf/wave_validation/test_planemonitor_waveport_passthrough.py`).
+* **External reference-solver generation — AUTHORIZED and GENERATED for the covered
+  scenes (round E).** The M3 adapter-driven generation path is wired (section 4). The
+  waveguide reference was cloud-generated (one run, 0.025 FlexCredits); the port/lumped
+  scenes fail-close at the `sources=0` runnable gate (deferred adapter source mapping).
+
+### Still open
+
+* **microstrip / differential_pair remain BLOCKED** on interior-PEC masking of the
+  staggered operator for production substrate+air scenes. The operator-level hybrid
+  physics is validated (E1 acceptance: the half-filled-guide LSE mode matches the 1D
+  Sturm-Liouville reference to machine precision and converges to the analytic
+  transverse-resonance root — `test_transverse_operator.py`), but the production
+  microstrip/differential scenes still hit the contour-snap `ValueError` first and,
+  underneath, need the inhomogeneous full-vector solve wired through the compiler with
+  interior-PEC (trace) masking. `reference: pending-generation`.
+* **RLC resonance wave-level gate** remains a strict xfail open gap (section 3).
+* **Adapter port/lumped source mapping** (so `coax_thru`, `lumped_open_short_match`,
+  and the antenna scenes become cloud-runnable) is a deferred adapter feature.

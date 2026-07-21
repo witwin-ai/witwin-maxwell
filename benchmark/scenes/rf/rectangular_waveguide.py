@@ -114,3 +114,95 @@ def rectangular_waveguide_scene(
         structures=tuple(structures),
         device=device,
     )
+
+
+# Shared TE10 sweep band (1.2 fc .. 2.2 fc, all propagating). The wave-level bench
+# and the external-reference cross-check use the same frequencies so the reference
+# beta(omega) can be compared point-for-point.
+def sweep_frequencies(n: int = 11) -> tuple[float, ...]:
+    import numpy as np
+
+    fc = 299792458.0 / (2.0 * GUIDE_A)
+    return tuple(float(x) for x in np.linspace(1.2 * fc, 2.2 * fc, n))
+
+
+# Reference cross-check monitor planes (inside the guide, symmetric about x=0). The
+# TE10 ModeSource sits upstream of ``ref_in``; the forward mode amplitude at the two
+# planes gives a normalization-independent beta = |d arg(amp_fwd)| / REF_LENGTH.
+REF_IN_X = -0.30
+REF_OUT_X = 0.30
+REF_SOURCE_X = -0.45
+REF_LENGTH = REF_OUT_X - REF_IN_X
+
+
+def rectangular_waveguide_reference_scene(
+    *,
+    dx: float = 0.05,
+    frequencies: tuple[float, ...] | None = None,
+    device: str = "cpu",
+) -> mw.Scene:
+    """Mode-source-driven TE10 guide for the external-reference-solver cross-check.
+
+    Identical PEC-walled air guide as the two-port bench, but excited by a single
+    TE10 ``ModeSource`` (which the interoperability adapter can export as a genuine
+    reference source) with ``ModeMonitor`` planes at ``REF_IN_X`` / ``REF_OUT_X``.
+    The reference solver reports the forward mode amplitude at each plane; their
+    phase difference over ``REF_LENGTH`` is the TE10 phase constant.
+    """
+    freqs = tuple(frequencies) if frequencies is not None else sweep_frequencies()
+    center = 0.5 * (freqs[0] + freqs[-1])
+    fwidth = max(freqs[-1] - freqs[0], 0.3 * center)
+
+    wl = wall_length(dx)
+    walls = (
+        ((0.0, 0.40, 0.0), (wl, 0.20, 0.70), "wall_y_high"),
+        ((0.0, -0.40, 0.0), (wl, 0.20, 0.70), "wall_y_low"),
+        ((0.0, 0.0, 0.25), (wl, 0.60, 0.20), "wall_z_high"),
+        ((0.0, 0.0, -0.25), (wl, 0.60, 0.20), "wall_z_low"),
+    )
+    structures = [
+        mw.Box(position=position, size=size).with_material(mw.Material.pec(), name=name)
+        for position, size, name in walls
+    ]
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-DOMAIN_X, DOMAIN_X), (-0.5, 0.5), (-0.35, 0.35))),
+        grid=mw.GridSpec.uniform(dx),
+        boundary=mw.BoundarySpec.pml(num_layers=_pml_layers(dx)),
+        structures=tuple(structures),
+        device=device,
+    )
+    scene.add_source(
+        mw.ModeSource(
+            position=(REF_SOURCE_X, 0.0, 0.0),
+            size=(0.0, GUIDE_A, GUIDE_B),
+            mode_index=0,
+            direction="+",
+            polarization="Ez",
+            source_time=mw.GaussianPulse(frequency=center, fwidth=fwidth),
+            name="te10_source",
+        )
+    )
+    scene.add_monitor(
+        mw.ModeMonitor(
+            "ref_in",
+            position=(REF_IN_X, 0.0, 0.0),
+            size=(0.0, GUIDE_A, GUIDE_B),
+            mode_index=0,
+            direction="+",
+            polarization="Ez",
+            frequencies=freqs,
+        )
+    )
+    scene.add_monitor(
+        mw.ModeMonitor(
+            "ref_out",
+            position=(REF_OUT_X, 0.0, 0.0),
+            size=(0.0, GUIDE_A, GUIDE_B),
+            mode_index=0,
+            direction="+",
+            polarization="Ez",
+            frequencies=freqs,
+        )
+    )
+    return scene

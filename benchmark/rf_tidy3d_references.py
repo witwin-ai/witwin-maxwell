@@ -23,18 +23,20 @@ stub. For each target scene it:
    exception or the source-count gate) so the gap is explicit and the analytic
    gate keeps binding. This never fabricates a numerical cross-reference.
 
-Adapter capability status (measured, EXECUTED 2026-07-19): the four authorized
-target scenes all export with ``sources == 0``. Their excitation is port-driven
--- a ``WavePort`` TEM launch under ``PortSweep`` / ``PortExcitation`` (coax_thru,
-lumped_open_short_match) or a ``LumpedPort`` wire-gap / probe feed (antenna
-dipole, patch) -- and the adapter's ``_convert_source`` has no mapping for
-port/lumped excitation (only field sources: PointDipole, PlaneWave, GaussianBeam,
-ModeSource, UniformCurrentSource, CustomField/CurrentSource). A ``ClosedSurfaceMonitor``
-also has no adapter monitor mapping. The generation therefore fail-closes at the
-runnable gate for all four scenes with ``sources=0`` recorded, and NO cloud
-credits are spent. Mapping port/lumped excitation to the reference solver is a
-separate adapter feature (deferred); until then these references stay
-``pending-generation`` with the reason recorded here and in
+Adapter capability status (measured, EXECUTED 2026-07-19/20): the ``rectangular_waveguide``
+reference is a genuine cloud run -- it is a TE10 ``ModeSource``-driven guide (the adapter
+maps ``ModeSource`` -> reference ``ModeSource`` and ``ModeMonitor`` -> reference
+``ModeMonitor``), so it exports with ``sources == 1`` and IS runnable. The other four
+target scenes export with ``sources == 0``: their excitation is port-driven -- a
+``WavePort`` TEM launch under ``PortSweep`` / ``PortExcitation`` (coax_thru,
+lumped_open_short_match) or a ``LumpedPort`` wire-gap / probe feed (antenna dipole,
+patch) -- and the adapter's ``_convert_source`` has no mapping for port/lumped
+excitation (only field sources: PointDipole, PlaneWave, GaussianBeam, ModeSource,
+UniformCurrentSource, CustomField/CurrentSource). A ``ClosedSurfaceMonitor`` also has no
+adapter monitor mapping. Those four therefore fail-close at the runnable gate with
+``sources=0`` recorded, and NO cloud credits are spent on them. Mapping port/lumped
+excitation to the reference solver is a separate adapter feature (deferred); until then
+those references stay ``pending-generation`` with the reason recorded here and in
 ``benchmark/RESULTS.md``.
 
 Invoke with ``python -m benchmark.rf_tidy3d_references [scene ...]``.
@@ -71,6 +73,20 @@ def _coax_thru():
     return scene, freqs
 
 
+def _rectangular_waveguide():
+    from benchmark.scenes.rf.rectangular_waveguide import (
+        rectangular_waveguide_reference_scene,
+        sweep_frequencies,
+    )
+
+    # Smallest honest grid: dx=0.05 (grid-commensurate, ~1/13 wavelength at the top
+    # of the band). The reference solver auto-meshes, so this only sets the exported
+    # structure resolution; the TE10 ModeSource makes the export genuinely runnable.
+    freqs = sweep_frequencies()
+    scene = rectangular_waveguide_reference_scene(dx=0.05, frequencies=freqs, device="cpu")
+    return scene, freqs
+
+
 def _lumped_open_short_match():
     from benchmark.scenes.rf.lumped_open_short_match import (
         coax_sol_scene,
@@ -102,6 +118,7 @@ def _patch():
 
 # name -> builder returning (scene, frequencies). Order is the run order.
 REFERENCE_TARGETS = {
+    "rf/rectangular_waveguide": _rectangular_waveguide,
     "rf/coax_thru": _coax_thru,
     "rf/lumped_open_short_match": _lumped_open_short_match,
     "antenna/half_wave_dipole": _half_wave_dipole,
@@ -276,10 +293,11 @@ def _results_section(records: list[ReferenceRecord]) -> str:
         "status is NOT a fabricated comparison -- it records that no numerical "
         "cross-reference exists yet and names the concrete reason; the analytic "
         "transmission-line / waveguide / dipole references remain the binding gate. The "
-        "four scenes below currently export with `sources=0` (their port / lumped-port "
-        "excitation has no adapter source mapping), so generation fail-closes at the "
-        "runnable gate BEFORE any cloud cost; mapping port/lumped excitation to the "
-        "reference solver is a deferred adapter feature.",
+        "`rf/rectangular_waveguide` reference is a real cloud run (a TE10 `ModeSource`-driven "
+        "guide exports with `sources=1`); the remaining scenes export with `sources=0` (their "
+        "port / lumped-port excitation has no adapter source mapping), so their generation "
+        "fail-closes at the runnable gate BEFORE any cloud cost. Mapping port/lumped "
+        "excitation to the reference solver is a deferred adapter feature.",
         "",
         "| Scene | Exported sources | Exported monitors | Runnable | Reference | Task id | Cost (FlexCredits) | Reason |",
         "| --- | ---: | ---: | :---: | --- | --- | ---: | --- |",
