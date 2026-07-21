@@ -8,6 +8,19 @@
 > `6c621a2`; exclusive-window timing `6b523b8`). This update revises the 01/02/03
 > rows, per-plan sections, route steps S1/S4, and owner decision points 1/2; the
 > 04–13 rows are unchanged from the 2026-07-19 snapshot.
+> **Round-F update: 2026-07-21, master `b89a75c`.** Round F delivered and merged:
+> F1 plan-04 coupled-EM+circuit conservation suite + independent offline circuit
+> cross-check (`07e8e99`); F2 plan-01 trio — interior-PEC staggered modes, production
+> quasi-TEM microstrip/diff-pair benches, adapter port/lumped source mapping with four
+> external caches, patch feed diagnosis (`0546b0a`); F3 plan-06 array scene-gradient
+> VJP single-device + 2-GPU ensemble (`7ec99c7`); F4 S5 geometry subpixel lever —
+> edge-native per-Yee-component material sampling + conformal-PEC benchmark default
+> (`431bd7f`); hygiene (`b89a75c`). Full battery **2911 passed / 16 expected-FDFD /
+> 3 xfailed**. This update revises the 01/04/06 rows and sections, S5, marks **route
+> step S3 = DONE** (all three members landed), records the Wave-C (S6) unfreeze
+> condition met + Round G launched, and resolves owner decision points 1/3. All
+> Round-F deliveries were adversarially audited; no phase is `completed` (no
+> non-author review — the audit §4 bar is unmet).
 > Governing audit: `docs/assessments/next-functional-audit-2026-07-18.md`.
 > Binding vocabularies: E0–E3 evidence grades (audit §0/§4), the five-class gate
 > taxonomy + `perf` labels (`docs/reference/gate-classification.md`), the S0–S7
@@ -38,15 +51,15 @@ grade.
 
 | # | Title | Phases delivered / total | Evidence grade (measured) | Headline gaps | Freeze state |
 |---|---|---|---|---|---|
-| 01 | RF engineering workflow | 0–5 declared; per-gate re-classified; S1 keystone landed round-E | **E2 for the validated scene set** (`coax_thru` + `rectangular_waveguide` wave-level; waveguide has an external-reference cross-check); E0–E1 elsewhere; §9.4 perf gates PASS (`perf`) via S2 | microstrip/diff-pair still BLOCKED (interior-PEC masking); patch broadside honest strict-xfail; 4 port/lumped external refs pending adapter port-source mapping; RLC parallel slope parasitic-diluted | reopened; S1 keystone landed (waveguide un-BLOCKED), microstrip/patch gaps remain; S2 done; S3 pending |
+| 01 | RF engineering workflow | 0–5 declared; per-gate re-classified; S1 keystone (round-E) + F2 trio | **E2 for the validated scene set** (`coax_thru` + `rectangular_waveguide` wave-level, external-reference cross-check); microstrip/diff-pair now production quasi-TEM benches (measured `gap`, resolution-limited); E0–E1 elsewhere; §9.4 perf gates PASS (`perf`) via S2 | microstrip/diff-pair `eps_eff` resolution-limited (~24% low at dx=5 mm; quasi-static engine itself converges to H–J); patch broadside honest strict-xfail (not flipped); guided interior-PEC path not yet production-wired | reopened; S1 + F2 trio landed (microstrip/diff-pair un-BLOCKED); four external caches generated; S2/S3 done |
 | 02 | Multi-GPU execution | ensemble + joint-solve forward + S4 distributed CPML-trainable adjoint (psi-active) | forward **E2**; CPML-trainable distributed adjoint **E2** (psi-active parity 5.94e-7); NCCL-adjoint/coupled E0 | NCCL one-process-per-GPU adjoint + monitor gather; coupled-runtime joint solve; joint-solve strong scaling grid-conditional (128³ 0.544×, 192³ 1.726×); static-capability exclusions remain | S4 CPML-adjoint landed; NCCL-adjoint/coupled-runtime open |
 | 03 | Touchstone network embedding | 0–4 + round-E E2 evidence (gate (d) grid-conditional) | **E2** (embedded path: independent raw-sample S-cascade cross-check <1e-5 + multi-scenario passivity/conservation) | gate (d) still grid-conditional (PASS ≥224³, compute-bound ruling); delay adjoint fail-closed; WavePort embedding = missing design contract; inherits 01 port-power (now partly wave-validated) | E2 evidence landed; gate (d) grid-conditional; delay-adjoint/WavePort open |
-| 04 | SPICE/MNA co-simulation | 0–4 (4/4 gates evidenced) | E1–E2 | no conservation/energy-residual + independent circuit-solver cross-check; strong-coupling ref = `future-xfdtd`; inherits 01 risk | E2 upgrade gated on S1-pass + S3 |
-| 05 | Nonlinear circuit devices | Phase 0 + N1 standalone transient | E0 | FDTD coupling / transient companion / adjoint / benchmark not built; BJT/MOSFET fail-closed | Wave C — FROZEN until S3 (S0.2) |
-| 06 | Array / Active-S / MIMO | 0–3 + Phase-4 weight gradients | E1–E2 | scene-gradient VJP fail-closed (needs 02 Phase 7 aggregation); inherits 01 port-power risk | reopened; scene-grad gated on 02 P7 + S3 |
-| 07 | Thin-wire model | 0–3 + Phase-4 partial | PEC E2 / lossy E0 | lossy current recurrence, `ohmic_loss`, conductivity adjoint, distributed wire reverse all fail-closed | Wave C consumption = S6; series-Z layer landed |
-| 08 | Gyromagnetic ferrite | Phase 0 + axis-aligned forward slice | E0 | FDFD, multi-GPU, adjoint, Bloch, arbitrary-bias all fail-closed | Wave C — FROZEN until S3 (S0.2) |
-| 09 | Surface impedance / roughness | Phase 0 + Phase-1 runtime generalization | E0 | oblique/curved/Bloch fail-closed; adapter export fail-closed; no wave-level SIBC benchmark | Wave C — FROZEN until S3 (S0.2) |
+| 04 | SPICE/MNA co-simulation | 0–4 + F1 conservation suite + independent offline cross-check | **E2** (multi-scenario conservation + code-path-independent circuit cross-check landed) | strong-coupling end-to-end ref still `future-xfdtd`; reactive `dU_circuit` channel stays consistency-class (not lifted by F1b); external lumped-load cross-check pending | E2 evidence landed (F1); S3 closed |
+| 05 | Nonlinear circuit devices | Phase 0 + N1 standalone transient | E0 | FDTD coupling / transient companion / adjoint / benchmark not built; BJT/MOSFET fail-closed | Wave C — S3 passed 2026-07-21, unfrozen; not scheduled in Round G |
+| 06 | Array / Active-S / MIMO | 0–3 + Phase-4 weight gradients + F3 scene-gradient VJP (single-device + 2-GPU ensemble) | **E2** (VJP bit-for-bit vs single-device path; 1-vs-2-GPU bitwise parity; central-difference gated) | throughput/scaling deferred-pending-exclusive-window; network/S-param scene gradients + NCCL joint-solve adjoint out of scope; inherits 01 port-power risk | reopened; Phase-4 exit gate closed (F3); S3 closed |
+| 07 | Thin-wire model | 0–3 + Phase-4 partial | PEC E2 / lossy E0 | lossy current recurrence, `ohmic_loss`, conductivity adjoint, distributed wire reverse all fail-closed | Wave C unfrozen (S3 passed); Round G lossy-wire track; series-Z layer landed |
+| 08 | Gyromagnetic ferrite | Phase 0 + axis-aligned forward slice | E0 | FDFD, multi-GPU, adjoint, Bloch, arbitrary-bias all fail-closed | Wave C — unfrozen (S3 passed); Round G general-bias track |
+| 09 | Surface impedance / roughness | Phase 0 + Phase-1 runtime generalization | E0 | oblique/curved/Bloch fail-closed; adapter export fail-closed; no wave-level SIBC benchmark | Wave C — unfrozen (S3 passed); Round G orientation-generalization track |
 | 10 | SAR | 0–3 + P4 slice / 0–5 | E1 (analytic/golden/brute-force-parity/grid-convergence; no external ref) | IEEE/IEC phantom benchmark, incident power density, VOP (P5), multi-GPU scale-out (P4) all deferred/fail-closed | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
 | 11 | Bioheat | — (dropped by owner) | — | plan dropped by owner 2026-07-19; plan file deleted (commit `4c521ab`) | Wave D — DROPPED (not implemented) |
 | 12 | Electrostatic / capacitance | 0–3 + P5 diff slice / 0–6 | E1–E2 (analytic/convergence/conservation/energy-identity/gradient; no external ref) | tensor eps + open boundary (P4), multi-GPU (P5), touchscreen/packaging workflow (P6) fail-closed/deferred | Wave D — owner-authorized selective start 2026-07-19; S7 partial |
@@ -126,15 +139,64 @@ Plan: `docs/plans/next-functional-2026-07/01-rf-engineering-workflow.md`
     reactance-dominated). Acceptance `e2-rf-scenes-acceptance-2026-07-19.md`
     (`tests/rf/antenna/test_antenna_benchmark_e2e.py`).
 
+**Round-F F2 trio (merge `0546b0a`):**
+- **Interior-PEC masking on the Yee-staggered transverse operator + quasi-static
+  electrostatic line-mode engine** (`witwin/maxwell/fdtd/excitation/modes.py`):
+  symmetric Dirichlet elimination of PEC-occupied `Eu`/`Ev`/`Ew` unknowns, per-conductor
+  connectivity check, and a variable-coefficient Laplace `div(eps grad phi)=0`
+  capacitance-ratio (`eps_eff = C/C0`) engine for TEM/quasi-TEM lines. Operator-level
+  gates (`tests/rf/wave_validation/test_interior_pec_operator.py`, 13 passed): coax
+  `eps_eff = 2.2500` exact + `beta` to `rel ≤ 1e-6` of analytic and legacy;
+  microstrip `eps_eff = 3.0920` vs Hammerstad–Jensen `3.0701` (`0.71%`, gate `≤ 3%`);
+  diff-pair even/odd distinct (`3.2040` / `2.9048`, parity-classified); masked septum
+  half-guide `beta = 2.4788` vs analytic `2.4760` (`0.11%`). Acceptance
+  `docs/assessments/f2a-interior-pec-acceptance-2026-07-21.md`.
+  - **Corrected TEM claim (audit remediation):** an earlier draft asserted the staggered
+    curl-curl operator "structurally excludes TEM" — that is **false and retracted**. The
+    operator carries the gradient TEM branch as the exact eigenvalue `eps·k0²`; it is the
+    shipped occupancy rasterization (threshold 0.5, which eliminates the conductor-surface
+    straddling normal-`E` samples) that drops TEM from the *masked* reduced operator, a
+    masking choice, not a structural property. TEM/quasi-TEM lines therefore route
+    fail-closed to the quasi-static engine (a `ValueError`, no census change). Evidenced by
+    `test_masked_operator_tem_branch_is_a_masking_artifact` (keep-straddle threshold 0.75
+    recovers `beta² = 56.25 = eps·k0²` exactly). The coax cross-implementation gate on the
+    masked operator is deferred to the supervisor (switching the elimination criterion
+    trades off thin-sheet masking).
+- **`rf/microstrip_two_port` and `rf/differential_pair` un-BLOCKED to production quasi-TEM
+  wave-level benches** (F2b, `benchmark/scenes/rf/*`, `benchmark/rf_validation.py`): the
+  inhomogeneous interior-PEC quasi-TEM mode is wired into the WavePort path
+  (`quasistatic_line_torch`), the terminated FDTD sweeps run, `B=S·A` extraction is
+  well-conditioned (microstrip cond(A) 1.23, diff-pair 1.31), and mixed-mode conversion is
+  correct (`|Sdd21|≈0.88 ≠ |Scc21|≈0.68`, `|Sdc21|≈0`). Status recorded **`gap` (measured,
+  not forced)**, not BLOCKED. `tests/rf/wave_validation/test_microstrip_diffpair_wave_level.py`
+  (6 passed). Acceptance `docs/assessments/f2b-quasistatic-benches-acceptance-2026-07-21.md`.
+- **Adapter port/lumped source mapping + four external caches** (F2c,
+  `witwin/maxwell/adapters/tidy3d.py`): `WavePort`→reference `ModeSource`+`ModeMonitor`,
+  `LumpedPort`→`UniformCurrentSource` delta-gap filament; `TerminalPort` out of scope. The
+  four previously `sources=0` scenes (`coax_thru`, `lumped_open_short_match`,
+  `half_wave_dipole`, `patch`) now export runnable and were each cloud-generated (one
+  authorized job, 0.025 FlexCredits each, task ids recorded; `benchmark/RESULTS.md` rows
+  `generated`). `tests/api/adapters/tidy3d/test_port_source_mapping.py` (6 passed).
+  Acceptance `docs/assessments/f2-rf-trio-acceptance-2026-07-21.md`.
+- **Patch antenna feed diagnosis (fail-closed, xfail NOT flipped):** a galvanic PEC probe
+  via cut the feed reactance ~5× but the patch still does not resonate (off-resonance
+  historical band + lumped gap capacitively shorted by adjacent PEC + finite ground too
+  small); the matched-broadside `TM010` strict xfail stays the fail-closed guard, reason
+  string updated to the F2b diagnosis. Redesign deferred (multi-run antenna co-design).
+
 **Not delivered / open gaps:**
-- `rf/microstrip_two_port` and `rf/differential_pair` = **still BLOCKED** — the
-  production substrate+air scenes need **interior-PEC (trace/ground) masking** of
-  the staggered operator plus the contour-snap fix. Operator-level hybrid physics
-  is validated (half-filled-guide LSE, machine-precision vs the 1D SL reference),
-  but the inhomogeneous production wiring is deferred on verified test-migration
-  risk (rerouting turns 3 legacy `test_mode_eigensolver_physics.py` invariants red)
-  and interior-PEC masking (`e1-rf-mode-operator-acceptance-2026-07-19.md` §3,
-  `round-e-integration-2026-07-20.md` §6).
+- `rf/microstrip_two_port` and `rf/differential_pair` — **SUPERSEDED by Round-F F2
+  above**: no longer BLOCKED; the interior-PEC masking + quasi-static line-mode engine
+  landed (F2a) and the production quasi-TEM benches are wired and run (F2b). The
+  *residual* gap is now **absolute `eps_eff` accuracy**: the shielded bench reads
+  `eps_eff ≈ 1.86` vs H–J `3.27` (`~24%` low at dx = 5 mm), attributed to
+  aperture-shielding + substrate resolution — **not** an extraction defect (the
+  quasi-static engine itself converges monotonically to H–J, `<1%` at 16 substrate
+  cells, `test_microstrip_eps_eff_converges_toward_hammerstad_with_resolution`).
+  Recorded `gap` (measured), not BLOCKED. The **guided (non-TEM) interior-PEC** branch
+  of `_assemble_vector_mode_data` is still on the legacy operator — the masked guided
+  path is exercised only by the F2a operator tests, not production (no scene needs it;
+  wiring also requires resolving the surface-sample rasterization tradeoff).
 - Patch matched-broadside `TM010` + `D ≥ 5 dBi` remains an open physics gap (feed
   reactance + small finite ground), recorded as a strict xfail.
 - `rf/series_parallel_rlc` parallel tracking slope is parasitic-diluted
@@ -144,20 +206,23 @@ Plan: `docs/plans/next-functional-2026-07/01-rf-engineering-workflow.md`
   (`rf-wave-validation-2026-07-18.md` §2). (The matched/open/short and RLC
   `analytic-identity` retirements are superseded by the round-E wave-level rebuilds
   above.)
-- **External reference caches for the four port/lumped scenes stay
-  `pending-generation`** — the blocker is now identified as an **adapter capability**
-  (all four export with `sources == 0`: no `WavePort`/`PortSweep`/`PortExcitation`
-  or `LumpedPort` → reference-solver source mapping, no `ClosedSurfaceMonitor`
-  mapping), **not** a cost decision; 0 credits spent, refused at the runnable gate.
-  Only `rf/rectangular_waveguide` (a `ModeSource`-driven scene) is cloud-runnable
-  and was generated (`e2-rf-scenes-acceptance-2026-07-19.md` Stage E2c).
+- External reference caches for the four port/lumped scenes — **SUPERSEDED by
+  Round-F F2c above**: the adapter port/lumped source-mapping feature landed (owner
+  decision point 1 funded), so all four scenes now export `sources ≥ 1` and were
+  cloud-generated (0.025 FlexCredits each; task ids in
+  `f2-rf-trio-acceptance-2026-07-21.md` §4; `benchmark/RESULTS.md` rows `generated`).
+  These are generated cross-reference artifacts; wiring a per-scene numeric
+  Maxwell-vs-reference comparison into each runner (as done for the waveguide in
+  round E) remains a separate follow-on.
 
 **Evidence grade:** **E2 for the validated scene set** — `coax_thru` (S1) and
 `rectangular_waveguide` (round-E, with an external-reference cross-check) are
 tracked `wave-level` PASS; the open/short/match and RLC coax rebuilds and the
-dipole antenna benchmark are wave-level/real-NF2FF PASS. The blocked microstrip/
-diff-pair and the xfail patch broadside stay E0–E1. S2's §9.4 gates are `perf`
-(never a physical-usability grade).
+dipole antenna benchmark are wave-level/real-NF2FF PASS. Round-F un-BLOCKED the
+microstrip/diff-pair benches (now production quasi-TEM, recorded `gap` — the
+extraction/mode physics validate but absolute `eps_eff` is resolution-limited); the
+xfail patch broadside stays E0–E1 (honest strict xfail, not flipped). S2's §9.4
+gates are `perf` (never a physical-usability grade).
 
 ### 02 — Multi-GPU execution
 
@@ -330,15 +395,45 @@ cost flat 8/32/128 unknowns; `docs/assessments/spice-mna-phase-4-circuit-perform
 `-no-feature-aa-calibration.json`; the clock-floored +1.227% B-run lies inside the
 calibrated no-difference band).
 
-**Not delivered / open gaps:** cap below E3 = no multi-scenario
-conservation/energy-residual checks and **no independent circuit-solver (offline)
-cross-validation**; the end-to-end EM+circuit strong-coupling gate has no external
-reference (tagged `reference: future-xfdtd`). gate (c) −64.5% is a matched baseline
-(native SeriesRLC termination is itself slow), not "co-simulation is nearly free"
-(+407% vs bare FDTD). Distributed adjoint rejected before allocation (forward-only
-multi-GPU contract). Inherits 01 port-power risk. E2 upgrade gated on S1-pass + S3.
+**Round-F F1 evidence (merge `07e8e99`, closes the E2-blocking gap):**
+- **Coupled EM+circuit conservation suite** (`tests/rf/circuits/test_circuit_conservation.py`,
+  6 passed): three genuinely two-way-coupled scenarios (resistive load / series RLC /
+  VCVS network), each driven from an in-circuit source in a closed PEC vacuum box, close
+  the global balance `S_source = dU_field + dU_circuit + D_circuit` to a bounded
+  half-step-stagger residual (**absolute constant in step count**, ~1.6–3.1e-14 J;
+  relative 1.0e-4–6.7e-3 of throughput at 6000 steps, gate 1.5e-2). Honest gate classes
+  are annotated: the field-coupling term rides the load-bearing **two-sided field-link
+  gate** `dU_field == -W_port` (raw Yee E/H energy vs the MNA port V/I record, no shared
+  code path; ~2.9e-3 of peak field, gate 2e-2), while `S_source`/`D_circuit`/`dU_circuit`
+  are Tellegen/companion **consistency-class** within the coupled run. The port is bound
+  *behind* a series impedance so the field genuinely back-reacts (anti-degeneracy guard
+  `test_scenarios_are_distinct_em_coupling_cases`). Falsifications: in-suite +3% channel
+  imbalance rejected; field-link injection over-scatter drives the residual 1.5%→44%.
+- **Independent offline circuit cross-check** (`tests/rf/circuits/test_circuit_independent_crosscheck.py`,
+  4 passed) — the E2-blocking item: a hand-derived equivalent-circuit ODE integrated by
+  `scipy.integrate.solve_ivp` **sharing no runtime code** with the MNA solver predicts the
+  coupled port voltage of a one-port EM structure characterized from a **different** drive
+  waveform and series resistance. Headline gate: port-voltage rel err **1.16e-5** (tol
+  5e-4, ~43× headroom); port-current corroboration (cancellation-limited) 7.02e-3.
+  Falsification: perturbing the MNA field-port companion conductance by 1.05 drives the
+  coupled voltage off the independent prediction (1.16e-5→4.10e-3, ~350× separation). This
+  lifts `S_source`/`D_circuit` and the resistive port coupling off consistency-class.
+  Acceptance `docs/assessments/f1-cosim-e2-acceptance-2026-07-21.md`.
 
-**Evidence grade:** **E1–E2** (re-annotated from claimed E3).
+**Not delivered / open gaps:** the end-to-end EM+circuit strong-coupling gate still
+has no external reference (tagged `reference: future-xfdtd`); F1b's cross-check circuit
+is source + series **R** only, so the reactive companion storage `dU_circuit` (C/L)
+**stays consistency-class**, not lifted by F1b; the external-reference lumped-load
+cross-check is still pending. gate (c) −64.5% is a matched baseline (native SeriesRLC
+termination is itself slow), not "co-simulation is nearly free" (+407% vs bare FDTD).
+Distributed adjoint rejected before allocation (forward-only multi-GPU contract).
+Inherits 01 port-power risk.
+
+**Evidence grade:** **E2** (re-annotated from E1–E2) — the F1 multi-scenario
+conservation suite + code-path-independent offline circuit cross-check supply the E2
+evidence the audit required for S3; the E3 upgrade still needs the combination
+matrix + named-hardware envelope + public-benchmark residence (+ an external
+strong-coupling reference the reference solver does not cover).
 
 ### 05 — Nonlinear circuit devices
 
@@ -361,7 +456,8 @@ branch still fails closed. BJT/MOSFET reserved and fail-closed (contract guards;
 independent Phase-5 go/no-go).
 
 **Evidence grade:** **E0** (contract + standalone-transient layer only).
-**Freeze:** Wave C — solver consumption FROZEN until S3 passes (audit S0.2).
+**Freeze:** Wave C — S3 passed 2026-07-21 (unfrozen); plan 05 is not among the Round G
+tracks (02/07/08/09), so its solver consumption is eligible but not yet scheduled.
 
 ### 06 — Array / Active-S / MIMO
 
@@ -380,15 +476,36 @@ qualification PASS** landed post-audit on the exclusive window: power closure
 zero extra FDTD steps. `docs/assessments/array-active-s-mimo-phase-1-qualification.json`
 (`"verdict":"PASS"`, `"qualifying":true`).
 
-**Not delivered / open gaps:** `ArrayBasisData.scene_gradient_vjp(...)` **fail-closed
-(NotImplementedError)** — scene/material/geometry gradients do not propagate through
-the basis (retained columns store detached embedded-pattern tensors); blocked on the
-aggregated per-column adjoint, which depends on **02 Phase 7 distributed
-result-aggregation** (Phase-4 exit gate). Task-level multi-GPU was **removed from
-scope** by user decision (not delivered, not evidence). All EIRP/realized-gain
-descend from 01's port-power chain (not wave-level validated).
+**Round-F F3 (merge `7ec99c7`) — the Phase-4 exit-gate item closes:**
+- **F3a single-device `ArrayBasisData.scene_gradient_vjp(...)` delivered**, replacing the
+  `NotImplementedError` (capability-guard census `176 → 175`, reconciled). Far-field VJP
+  propagates through the embedded-pattern basis columns to scene/material/geometry
+  parameters via an aggregated per-column adjoint; the weight-conjugation seed
+  `seed_n = conj(w_n)·cot_E` is **bit-for-bit** identical to end-to-end `autograd.grad`,
+  and a real two-column FDTD array (trainable `MaterialRegion` density, NF2FF column) passes
+  central-difference gates within the FDTD-adjoint band. Acceptance
+  `docs/assessments/f3-array-vjp-acceptance-2026-07-21.md`.
+- **F3b 2-GPU ensemble aggregation** (`witwin/maxwell/array_gradient.py`:
+  `aggregate_scene_gradient_vjp` / `ensemble_scene_gradient_vjp`): per-column forwards
+  distribute over the ensemble `DevicePool` as independent Simulations (the NCCL joint-solve
+  adjoint stays out of scope); the seeded backward + a fixed public-port-order reduction run
+  on the caller thread. **1-vs-2-GPU aggregated-gradient parity is measured BITWISE**
+  (`maxabsdiff = 0`, `torch.equal`) on the homogeneous A6000 pair — both the synthetic
+  float64 map and a real two-column FDTD array — so the F3a-anticipated "`<1e-12` floor or
+  bitwise" resolves to bitwise. Falsifications: dropped weight conjugation, skipped column,
+  and removed cross-device gradient move each go RED. Acceptance
+  `docs/assessments/f3-array-scene-vjp-acceptance-2026-07-21.md`.
 
-**Evidence grade:** **E1–E2** (re-annotated from claimed E3).
+**Not delivered / open gaps:** throughput / speedup is **not** claimed this round
+(shared-GPU correctness window) — recorded deferred-pending-exclusive-window. Network /
+S-parameter scene gradients, `combine()` weight gradients (regression-gated unchanged),
+and the NCCL joint-solve adjoint remain out of scope. Task-level multi-GPU was **removed
+from scope** by user decision earlier. All EIRP/realized-gain still descend from 01's
+port-power chain (not wave-level validated).
+
+**Evidence grade:** **E2** (re-annotated from E1–E2) — the F3 scene-gradient VJP
+(bit-for-bit vs the single-device path, 1-vs-2-GPU bitwise parity, central-difference
+gated, load-bearing falsified) closes the Phase-4 exit-gate item that capped this plan.
 
 ### 07 — Thin-wire model
 
@@ -422,7 +539,8 @@ Blockers: energy-consistent lossy recurrence + CUDA `update_wire_state` extensio
 impedance/far-field numbers flagged UNEVIDENCED (regenerate before citing).
 
 **Evidence grade:** **PEC E2 / lossy E0**.
-**Freeze:** lossy-wire solver consumption is Wave C step S6 (unfrozen after S1–S3).
+**Freeze:** lossy-wire solver consumption is Wave C step S6, now **unfrozen (S1–S3 all
+passed 2026-07-21)**; it is a Round G track (B2 lossy recurrence → B3 conductivity adjoint).
 
 ### 08 — Gyromagnetic ferrite
 
@@ -445,7 +563,8 @@ core for the non-reciprocal correction) all **fail closed**. `PerturbationMedium
 over a ferrite rejected. Scalar frequency-evaluation is a permanent contract.
 
 **Evidence grade:** **E0** (contract + narrow axis-aligned forward slice).
-**Freeze:** Wave C — solver consumption FROZEN until S3 passes (audit S0.2).
+**Freeze:** Wave C — **unfrozen (S3 passed 2026-07-21)**; general/non-axis-aligned bias
+is a Round G track.
 
 ### 09 — Surface impedance / metal roughness
 
@@ -474,7 +593,8 @@ as ground truth.
 
 **Evidence grade:** **E0** (contract + runtime generalization; stability fix is a
 correctness/robustness landing, not a wave-level validation grade).
-**Freeze:** Wave C — solver consumption FROZEN until S3 passes (audit S0.2).
+**Freeze:** Wave C — **unfrozen (S3 passed 2026-07-21)**; oblique/curved orientation
+generalization is a Round G track.
 
 ### Wave D (10 / 11 / 12 / 13) — owner-authorized selective start (2026-07-19)
 
@@ -622,10 +742,27 @@ regression before it is checked off.
 - **S2 — Port hot-path performance: DONE.** Both §9.4 timing gates PASS at 27M
   cells under the variance-aware 95%-CI criterion (grid-conditional — see below).
   Artifact `docs/assessments/port-perf-s2b-measurement-2026-07-18.json`.
-- **S3 — Network/co-sim/array E2 evidence: QUEUED.** Not started; **user
-  authorization pending**. Enters only after S1 passes (03/04/06 inherit 01's
-  port-power convention). Includes 03 gate (d) generalization, 04 conservation +
-  independent circuit-solver cross-check, 06 `scene_gradient_vjp` (depends 02 P7).
+- **S3 — Network/co-sim/array E2 evidence: DONE (2026-07-21).** All three members
+  landed with tracked artifacts:
+  - **03** — round-E independent raw-sample S-cascade cross-check (`<1e-5`,
+    code-path-independent) + multi-scenario passivity/conservation suite supply the E2
+    evidence; gate (d) received the **compute-bound ruling** (grid-conditional PASS at
+    ≥224³, further launch reduction will not move the crossover;
+    `network-embedding-gate-d-remeasure-2026-07-20.json`,
+    `e4a-network-cascade-acceptance-2026-07-19.md`).
+  - **04** — Round-F F1 multi-scenario conservation suite + independent offline circuit
+    cross-check (port-voltage rel err 1.16e-5), merge `07e8e99`,
+    `f1-cosim-e2-acceptance-2026-07-21.md`.
+  - **06** — Round-F F3 `scene_gradient_vjp` single-device + 2-GPU ensemble (bit-for-bit /
+    bitwise parity), merge `7ec99c7`, `f3-array-vjp-acceptance-2026-07-21.md` +
+    `f3-array-scene-vjp-acceptance-2026-07-21.md`.
+
+  **Consequence:** the S0.2 rule "no Wave-C new-physics solver consumption starts until
+  S3 passes" is now satisfied — the **Wave-C (S6) unfreeze condition is met**. **Round G
+  launched 2026-07-21** (four tracks: 02 NCCL one-process-per-GPU adjoint; 07 lossy-wire
+  recurrence; 08 ferrite general/non-axis-aligned bias; 09 SIBC oblique/curved orientation
+  generalization). No plan phase is thereby `completed` (each Round-F/S3 member still lacks
+  the audit §4 non-author-review + external-reference bar).
 - **S4 — Multi-GPU convergence: DISTRIBUTED CPML ADJOINT LANDED (round-E).** The
   distributed CPML-trainable adjoint bridge shipped with psi-active 1-vs-2-GPU
   gradient parity (rel 5.94e-7, ~1.1e5× falsification) after fixing a pre-existing
@@ -636,10 +773,37 @@ regression before it is checked off.
   ensemble 1.98–2.00×, joint-solve 128³ 0.544× / 192³ 1.726×, NCCL step-rate
   not-measurable-by-hooks. **Still open:** NCCL one-process-per-GPU adjoint + monitor
   gather, coupled-runtime (circuit/network/wire) joint solve, guard-list disposition.
-- **S5 — Full benchmark convergence: QUEUED.** Diagnose §1.7 over-target scenes,
-  TFSF/diffraction R/T/A normalization, S1 RF scenes resident in RESULTS.
-- **S6 — Wave C solver consumption: FROZEN until S1–S3 pass** (07 lossy wire, 08
-  ferrite kernel, 09 SIBC runtime; each E0→E2 with independent reference).
+- **S5 — Full benchmark convergence: GEOMETRY LEVER LANDED (Round-F F4); rest QUEUED.**
+  The §1.7 geometry/subpixel systemic lever shipped: **edge-native per-Yee-component
+  material sampling** (drops the node→edge arithmetic smear; the Kottke/arithmetic subpixel
+  blend is now evaluated at each Yee edge/face directly) + the **conformal-PEC benchmark
+  default** (`SubpixelSpec(pec="conformal")` in `benchmark/scenes/_common.py`), merge
+  `431bd7f`. Pre-registered geometry-cluster gate PASSES against the **identical existing
+  caches** (no new cloud runs): **median field_l2 0.2072 → 0.0836 (−59.6%), 11 scenes
+  improved / 0 regressed / 5 flat**, worst per-scene Δ = +0.0000, every scene's field
+  correlation improves or holds (lowest after 0.911). The 5 flat scenes are the
+  axis-and-node-aligned grid/slab controls (edge-native = node-smear there, bit-identical).
+  Committed artifacts `docs/assessments/f4-geometry-cluster-{before,after,delta}.json`;
+  acceptance `docs/assessments/f4-subpixel-lever-acceptance-2026-07-21.md`. Two
+  `tests/validation` gates were re-anchored (autogrid ratio 0.6→0.8 and Rayleigh
+  `sigma_max_ratio` band) as **intended, quantified** edge-native consequences (both
+  absolute errors drop; box-independence re-verified), and one dispersive tolerance was
+  restructured into a tight deterministic bound (stdev 0 over 12 runs). **Caveat:** the
+  before/after was scored under `WITWIN_BENCHMARK_TRUST_CACHE=1` — a new off-by-default,
+  loudly-warning diagnostic hook in `benchmark/runner.py` — because the 2026-07-14 caches'
+  stored keys no longer byte-match after the physics-neutral null-material-field strip
+  (`ee3d631`) + export-contract-version stamps; the default `python -m benchmark`
+  staleness guard is untouched, and the improvement is a delta against the *same* fixed
+  reference for both material paths (`field_corr` is the reference-validity sentinel).
+  **Still QUEUED:** §1.7 remaining over-target scenes, TFSF/diffraction R/T/A normalization,
+  S1 RF scenes resident in RESULTS.
+- **S6 — Wave C solver consumption: UNFROZEN (2026-07-21); Round G in flight.**
+  S1/S2/S3 all pass (see S3 above), so the S0.2 freeze on Wave-C new-physics solver
+  consumption is lifted. **Round G** carries the Wave-C tracks — 07 lossy-wire recurrence
+  (B2→B3), 08 ferrite general/non-axis-aligned bias, 09 SIBC oblique/curved orientation
+  generalization — plus the 02 NCCL one-process-per-GPU adjoint tail (see
+  `14-program-continuation-2026-07-21.md`). Each still targets E0→E2 with an independent
+  reference before any `completed` mark.
 - **S7 — Wave D (10–13): OWNER-AUTHORIZED SELECTIVE START (2026-07-19).** The
   owner lifted the S0.2/S7 freeze for plans **10, 12, 13 only** and dropped plan
   11 (bioheat, plan file deleted in commit `4c521ab`). Delivered against master:
@@ -660,9 +824,10 @@ regression before it is checked off.
   Phases 1–2 added no capability guards (local `ValueError`/`TypeError` only).
 
 **Freeze rules restated:** the S0.2 rule that no Wave C/D new-physics
-implementation starts until S3 passes was **selectively overridden by the owner
-on 2026-07-19 for plans 10/12/13 only** (see S7 above); Wave C (07/08/09) and the
-general S3 gate remain in force for everything else. No plan phase may be marked `completed` without a `wave-level`
+implementation starts until S3 passes was first **selectively overridden by the owner
+on 2026-07-19 for plans 10/12/13 only** (see S7 above), and is now **generally lifted for
+Wave C (07/08/09) as of 2026-07-21** because **S3 has passed** (see route step S3) —
+Round G carries those tracks. No plan phase may be marked `completed` without a `wave-level`
 headline gate + independent reference + convergence report + RESULTS presence +
 non-author review (audit §4). External-solver cross-references follow the
 reference-solver policy: use the covered external reference solver where it covers
@@ -673,17 +838,15 @@ never downgrade a gate to self-certification for lack of an external run.
 
 ## Owner decision points
 
-1. **External reference-solver generation — PARTIALLY RESOLVED (round-E).** The owner
-   authorized external-reference validation for this round ("ONE cloud run, smallest
-   honest grid"); M3 generation is now **wired** (`benchmark/rf_tidy3d_references.py`)
-   and `rf/rectangular_waveguide` was generated (task id
-   `fdve-3c2a2d95-4809-4dfb-98d6-1b6b5416c39a`, 0.025 FlexCredits). The remaining four
-   port/lumped scenes (`coax_thru`, `lumped_open_short_match`, `half_wave_dipole`,
-   `patch`) stay `pending-generation` — but the blocker is now identified as an
-   **adapter capability** (`WavePort`/`PortSweep`/`PortExcitation`/`LumpedPort` →
-   reference-solver source mapping and `ClosedSurfaceMonitor` → field-box mapping are
-   unimplemented, so exports carry `sources == 0`), **not** a cost decision. Owner
-   decision now: whether to fund the adapter port/lumped source-mapping feature.
+1. **External reference-solver generation — RESOLVED (Round-F F2c).** The adapter
+   port/lumped source-mapping feature was funded and landed (`WavePort`→`ModeSource`+
+   `ModeMonitor`, `LumpedPort`→`UniformCurrentSource` delta-gap filament; `TerminalPort`
+   out of scope). All four previously-blocked scenes now export `sources ≥ 1` and were
+   cloud-generated (`coax_thru`, `lumped_open_short_match`, `half_wave_dipole`, `patch`;
+   0.025 FlexCredits each, task ids in `f2-rf-trio-acceptance-2026-07-21.md` §4;
+   `benchmark/RESULTS.md` rows `generated`), alongside the round-E
+   `rf/rectangular_waveguide`. Remaining follow-on (not an owner decision): wiring a
+   per-scene numeric Maxwell-vs-reference comparison into each runner.
 2. **§9.4 / gate (d) grid-conditional pass — now has compute-bound evidence
    (round-E).** The exclusive-window remeasure
    (`network-embedding-gate-d-remeasure-2026-07-20.json`) shows the composite matvec
@@ -693,13 +856,14 @@ never downgrade a gate to self-certification for lack of an external run.
    reduction will not move it. Owner must rule whether "PASS at representative
    production scale (≥224³)" satisfies §9.4 / gate (d), or whether a compute-bound
    small-grid fixed-cost reduction is required.
-3. **S3 go/no-go.** S0/S1/S2 are complete (S1 keystone landed round-E); S3 is queued
-   pending explicit user authorization. 03/04/06 inherit 01's port-power convention,
-   which is now **partly** wave-validated (`coax_thru` + `rectangular_waveguide`
-   wave-level; the coax open/short/match + RLC rebuilds also wave-level), but
-   microstrip/diff-pair stay BLOCKED on interior-PEC masking. The owner should decide
-   whether S3 proceeds now on the validated scene set or waits on the microstrip/
-   diff-pair hybrid production wiring.
+3. **S3 go/no-go — RESOLVED: S3 PASSED (2026-07-21).** S0/S1/S2 complete; S3 proceeded
+   on the validated scene set and all three members landed with artifacts (03 round-E
+   cross-check + gate-(d) compute-bound ruling, 04 Round-F F1 evidence, 06 Round-F F3 VJP —
+   see route step S3). The microstrip/diff-pair production wiring also landed (F2, now
+   `gap`-classified, no longer BLOCKED). **Consequence:** the Wave-C (S6) unfreeze condition
+   is met and **Round G launched 2026-07-21** (02 NCCL adjoint, 07 lossy wire, 08 ferrite
+   general bias, 09 SIBC orientation generalization). No S3 member is `completed` (audit §4
+   non-author-review + external-reference bar still unmet).
 
 ## Caveats and flagged discrepancies
 

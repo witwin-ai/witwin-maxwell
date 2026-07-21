@@ -1,9 +1,51 @@
 # Program continuation plan — rounds F/G/H (post round-E tiers 1–4)
 
-> Status: active
+> Status: active — **Round F DELIVERED & merged (2026-07-21); Round G in flight**
 > Date: 2026-07-21
 > Anchor: master `164c263` (round E merged; final battery 2836 passed / 16 expected-FDFD / 3 xfailed)
-> Governing status doc: `00-status-and-gaps-2026-07-19.md` (round-E revision)
+> Round-F merge anchor: master `b89a75c` (F1 `07e8e99`, F2 `0546b0a`, F3 `7ec99c7`,
+> F4 `431bd7f`, hygiene `b89a75c`; full battery **2911 passed / 16 expected-FDFD / 3 xfailed**)
+> Governing status doc: `00-status-and-gaps-2026-07-19.md` (round-E + round-F revisions)
+
+## Delivery status (2026-07-21)
+
+**Round F — DELIVERED & merged to master `b89a75c`** (all four tracks adversarially
+audited; load-bearing tests falsified; per-track acceptance docs under `docs/assessments/`):
+
+- **F1 — plan 04 E2 evidence (closes S3), merge `07e8e99`.** Multi-scenario coupled
+  EM+circuit conservation suite (3 two-way-coupled scenarios, honest gate classes) +
+  independent offline `scipy` circuit cross-check (port-voltage rel err 1.16e-5, no shared
+  runtime code). Acceptance `f1-cosim-e2-acceptance-2026-07-21.md`.
+- **F2 — plan 01 trio, merge `0546b0a`.** Interior-PEC masking on the Yee-staggered
+  operator + quasi-static line-mode engine (F2a); production quasi-TEM microstrip/diff-pair
+  benches un-BLOCKED (F2b, recorded `gap` — resolution-limited, honest); adapter port/lumped
+  source mapping + four external caches generated (F2c); patch feed diagnosis (xfail kept
+  fail-closed, not flipped). Acceptances `f2a-…`, `f2b-…`, `f2-rf-trio-acceptance-2026-07-21.md`.
+- **F3 — plan 06 scene-gradient VJP + 02 P7 aggregation, merge `7ec99c7`.** Single-device
+  `ArrayBasisData.scene_gradient_vjp` (census 176→175) + 2-GPU ensemble aggregation;
+  1-vs-2-GPU parity measured **bitwise**. Acceptances `f3-array-vjp-…`, `f3-array-scene-vjp-…`.
+- **F4 — S5 geometry/subpixel lever, merge `431bd7f`.** Edge-native per-Yee-component
+  material sampling + conformal-PEC benchmark default; geometry-cluster median field_l2
+  0.2072→0.0836 (−59.6%), 11 improved / 0 regressed. Acceptance
+  `f4-subpixel-lever-acceptance-2026-07-21.md` + `f4-geometry-cluster-{before,after,delta}.json`.
+
+**Consequence:** **route step S3 PASSED** (03 round-E cross-check + gate-(d) ruling, 04 F1,
+06 F3) → the **Wave-C (S6) unfreeze condition is met**. No Round-F phase is `completed`
+(audit §4 non-author-review + external-reference bar unmet); rounds record delivery +
+evidence grade only.
+
+**Round G — IN FLIGHT (launched 2026-07-21), four tracks:**
+
+1. **02 — NCCL one-process-per-GPU adjoint** (+ monitor gather, coupled-runtime joint solve,
+   NCCL timing hooks — the round-E "not-measurable" finding).
+2. **07 — lossy-wire recurrence** (B2 energy-consistent lossy current recurrence + CUDA
+   `update_wire_state` extension → B3 conductivity adjoint).
+3. **08 — ferrite general/non-axis-aligned bias** (forward consumption widening beyond the
+   axis-aligned slice).
+4. **09 — SIBC oblique/curved orientation generalization** (beyond the axis-aligned
+   exposed-face layout).
+
+Round H (Wave D deepening) remains queued as specified in Tier 4 below.
 > Execution model: parallel single-writer worktrees, Workflow orchestration, per-track
 > dev stages → two adversarial audits (regression + claim lens, evidence reproduced
 > independently, load-bearing tests falsified) → fix rounds → supervisor merge gate →
