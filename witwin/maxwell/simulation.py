@@ -559,7 +559,10 @@ class Simulation:
         return ElectrostaticSimulation(scene, boundary=boundary, solver=solver)
 
     @staticmethod
-    def capacitance(scene, *, terminals=None, reference=None, boundary=None, solver=None):
+    def capacitance(
+        scene, *, terminals=None, reference=None, boundary=None, solver=None,
+        truncation_estimate=None,
+    ):
         """Build an N-terminal Maxwell capacitance-matrix extraction run.
 
         Returns a ``CapacitanceSimulation`` runner whose ``run()`` yields a
@@ -568,11 +571,17 @@ class Simulation:
         and orders the electrostatic terminals (default: all); ``reference`` names
         the grounded return conductor excluded from the matrix. Boundary conditions
         and solver settings mirror ``Simulation.electrostatic(...)``.
+
+        ``truncation_estimate`` (a ``TruncationEstimate``, opt-in) requests one
+        additional enlarged grounded-box solve so ``result.capacitance.truncation_estimate``
+        reports the domain-truncation error of the finite enclosure. No second solve
+        runs unless it is passed.
         """
         from .electrostatic.capacitance import CapacitanceSimulation
 
         return CapacitanceSimulation(
-            scene, terminals=terminals, reference=reference, boundary=boundary, solver=solver
+            scene, terminals=terminals, reference=reference, boundary=boundary, solver=solver,
+            truncation_estimate=truncation_estimate,
         )
 
     def prepare(self):

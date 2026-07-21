@@ -279,7 +279,28 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # 2026-07-21 (round-G merge reconciliation): the lossy-wire ledger (175 -> 177,
 # net +2) and the ferrite general-bias ledger (175 -> 173, net -2) merged onto the
 # same base; combined measured total is 175 + 2 - 2.
-CAPABILITY_GUARD_BUDGET = 175
+# 2026-07-21 (plan 12 Phase 4 SPD tensor eps, stage H2a): net 0 (budget stays 175).
+# The compiler/electrostatic.py anisotropic-tensor reject ("Anisotropic (tensor)
+# permittivity is not supported...") is REMOVED (-1) -- a DiagonalTensor3/Tensor3x3
+# material now compiles into a per-cell TensorEpsilon field and solves through the
+# symmetric SPD cross-flux operator. One reachable guard is added (+1):
+# electrostatic/runtime.py _reject_trainable_tensor ("Differentiable electrostatics
+# through a full tensor (anisotropic) permittivity is not implemented..."), because
+# the off-diagonal cross-flux has no reverse-mode VJP, so a trainable tensor
+# permittivity / free charge fails closed instead of silently detaching. Lower this
+# budget when the tensor-eps backward (or the open-boundary work, stage H2b) lands.
+# 2026-07-21 (plan 12 Phase 4 open-boundary/truncation, stage H2b): 175 -> 176 (+1).
+# electrostatic/api.py _normalize_bc_entry adds one capability guard for an ``open``
+# (infinite-domain) electrostatic boundary: there is no exact radiation condition on
+# the scalar potential at a finite Cartesian face, so an open boundary fails closed
+# instead of silently solving a grounded/insulating truncation the user did not ask
+# for. The supported path is the opt-in domain-extension truncation_estimate (an
+# enlarged grounded-box solve reporting the finite-enclosure error). A boundary-
+# element exact open boundary is a later phase; lower this budget when it lands. The
+# tensor-eps differentiability disposition stays fail-closed (Phase 4 owns forward
+# tensor-eps; gradients are Phase 5), so the _reject_trainable_tensor guard added at
+# H2a is unchanged and no differentiability guard is added or removed here.
+CAPABILITY_GUARD_BUDGET = 176
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
