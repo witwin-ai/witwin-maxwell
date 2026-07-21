@@ -285,27 +285,49 @@ def pullback_material_input_gradients(
         return ()
     prepared_scene = prepare_scene(scene)
 
-    component_gradients = component_node_gradients_from_yee_permittivity(
-        prepared_scene,
-        grad_eps_ex=grad_eps_ex,
-        grad_eps_ey=grad_eps_ey,
-        grad_eps_ez=grad_eps_ez,
-        eps0=eps0,
-    )
-    # Back-propagate through the per-axis relative-permittivity node components
-    # rather than their scalar average so diagonal-anisotropic sensitivities are
-    # attributed to the correct axis. For isotropic media this is exactly the
-    # previous scalar-eps pullback.
     model = prepared_scene.compile_materials()
-    eps_components = model["eps_components"]
+    edge_components = model.get("edge_components")
     outputs = []
     grad_outputs = []
-    for axis in ("x", "y", "z"):
-        component = eps_components[axis]
-        if not component.requires_grad:
-            continue
-        outputs.append(component)
-        grad_outputs.append(component_gradients[axis].to(device=component.device, dtype=component.dtype))
+    if edge_components is not None:
+        # Edge-native forward: the relative permittivity was evaluated directly at
+        # each Yee edge, so the sensitivity flows through the edge fields with no
+        # node->edge transpose. ``eps_E<c> = eps_edge<c> * eps0`` gives the relative
+        # edge gradient ``grad_eps_e<c> * eps0``. Autograd then carries it through
+        # the same SDF / density sampling the forward used, which stays consistent
+        # for any geometry, region density or subpixel/polarized blend.
+        eps_edge = edge_components["eps"]
+        for component_name, grad_edge in (
+            ("Ex", grad_eps_ex),
+            ("Ey", grad_eps_ey),
+            ("Ez", grad_eps_ez),
+        ):
+            component = eps_edge[component_name]
+            if not component.requires_grad:
+                continue
+            outputs.append(component)
+            grad_outputs.append(
+                (grad_edge * float(eps0)).to(device=component.device, dtype=component.dtype)
+            )
+    else:
+        component_gradients = component_node_gradients_from_yee_permittivity(
+            prepared_scene,
+            grad_eps_ex=grad_eps_ex,
+            grad_eps_ey=grad_eps_ey,
+            grad_eps_ez=grad_eps_ez,
+            eps0=eps0,
+        )
+        # Back-propagate through the per-axis relative-permittivity node components
+        # rather than their scalar average so diagonal-anisotropic sensitivities are
+        # attributed to the correct axis. For isotropic media this is exactly the
+        # previous scalar-eps pullback.
+        eps_components = model["eps_components"]
+        for axis in ("x", "y", "z"):
+            component = eps_components[axis]
+            if not component.requires_grad:
+                continue
+            outputs.append(component)
+            grad_outputs.append(component_gradients[axis].to(device=component.device, dtype=component.dtype))
 
     if grad_chi3_ex is not None:
         # Kerr channel: the compiled chi3 node field feeds all three Yee-edge

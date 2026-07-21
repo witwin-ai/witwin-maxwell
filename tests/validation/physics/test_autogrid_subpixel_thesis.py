@@ -38,6 +38,16 @@ The auto grid at 174_960 cells reaches 0.022 error -- ~5x lower than the uniform
 284_456 cells (0.117), i.e. **lower field error at fewer cells**. The uniform error
 plateaus near 0.12-0.16 (curved-boundary staircasing floor) no matter how many cells it
 spends; the conformal auto+subpixel grid does not. That is the AutoGrid thesis.
+
+Note (edge-native subpixel, F4): the prose numbers above are the historical
+pre-edge-native RTX 5080 measurement and are illustrative only; the binding numbers are
+the measured (cells, error) pairs the test prints at runtime. Per-Yee-component
+(edge-native) subpixel sampling gives the UNIFORM grid a conformal boundary too, so its
+staircasing floor drops (this exact config, A6000: uniform dl=0.024 err 0.0922 ->
+0.0552) and the auto-vs-uniform ratio rises from 0.527 to 0.614 even though BOTH absolute
+errors fall. The auto grid still wins the whole uniform curve at fewer cells; the margin
+assertion below is set to that edge-native regime (see the F4 subpixel acceptance ledger
+for the full before/after table).
 """
 
 from __future__ import annotations
@@ -178,9 +188,23 @@ def test_autogrid_subpixel_beats_uniform_at_fewer_cells():
     # matched accuracy the uniform grid needs even more than its 284k cells).
     assert auto12_cells < uniform_fine_cells, (auto12_cells, uniform_fine_cells)
     assert auto12_err < uniform_fine_err, (auto12_err, uniform_fine_err)
-    # Keep a material margin while allowing the cell-count-preserving uniform
-    # adjustment to move the sampled sphere boundary (measured ratio ~0.55).
-    assert auto12_err < 0.6 * uniform_fine_err, (auto12_err, uniform_fine_err)
+    # Keep a material margin. Edge-native (per-Yee-component) subpixel sampling
+    # gives the UNIFORM grid a conformal, occupancy-weighted sphere boundary too,
+    # cutting its curved-boundary staircasing floor. Measured on this exact scene
+    # config (A6000, GPU 1) the node->edge smear "before" and edge-native "after":
+    #   uniform dl=0.024 err 0.0922 -> 0.0552   (both errors DROP; -40%)
+    #   auto    msw=12   err 0.0486 -> 0.0339   (-30%)
+    #   ratio auto12/uniform_fine   0.527  -> 0.614
+    # Both absolute errors improve; the auto-vs-uniform RATIO rises only because the
+    # uniform grid no longer pays a staircasing penalty (it now samples the interface
+    # natively too), so the auto grid's advantage is now purely its cell budget, not a
+    # discretization handicap the uniform grid used to carry. The auto grid still wins
+    # by a material margin (ratio ~0.61, i.e. ~39% lower error at fewer cells); the
+    # bound is set at 0.8 so it asserts a real >=20% margin with headroom, where the
+    # old 0.6 was calibrated to the pre-edge-native uniform staircasing floor. This is
+    # an intended, disclosed consequence of edge-native sampling, not a defect -- see
+    # the F4 subpixel acceptance ledger for the full before/after table.
+    assert auto12_err < 0.8 * uniform_fine_err, (auto12_err, uniform_fine_err)
 
     # The auto grid dominates the entire uniform curve: it beats the uniform_coarse
     # grid on error too, despite spending more cells there than the coarse grid.

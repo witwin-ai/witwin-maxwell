@@ -781,3 +781,31 @@ conductive-path model, not a validated arc or device-failure predictor).
 - `aggregate_scene_gradient_vjp(basis, columns=..., parameters=..., weights=..., objective=...)` reduces per-column scene-gradient VJPs whose columns may live on *different* devices, returning an `AggregatedSceneGradient` (the reduced gradient plus provenance: the fixed reduction order, the reduction device, the per-column devices, and the port order). The combined field and its cotangent are formed on the reduction device from detached column values; each column is seeded with `conj(w_n) * cot_E` on its own device, back-propagated there, moved to the reduction device, and summed in a fixed public-port order. `parameters` is a per-column sequence of trainable leaf(s) — the same object for every column in the single-device case, or a per-device replica of the shared design in the multi-GPU case; the summed per-column VJPs are the gradient of that shared design. The reduction reproduces the single-device `ArrayBasisData.scene_gradient_vjp` bit-for-bit for the same order.
 - `ensemble_scene_gradient_vjp(basis, column_forward=..., weights=..., execution=mw.MultiGPUExecution.ensemble(devices=...), objective=...)` distributes the per-column forwards over the ensemble device pool as independent tasks (each `column_forward(index, device)` runs column `index`'s forward on `device` under autograd and returns its live embedded far-field column plus the trainable leaf(s)), then reduces with `aggregate_scene_gradient_vjp`. The per-column adjoint is not routed through `run_many` (which refuses trainable simulations); the pool only places and orders the forwards, and the seeded backward + deterministic reduction run on the caller thread. 1-GPU-vs-2-GPU aggregated-gradient parity is bitwise on homogeneous GPUs (measured maxabsdiff 0 on both a synthetic float64 map and a real two-column FDTD array with a trainable `MaterialRegion` density split one column per GPU). A non-`MultiGPUExecution` execution, a failed column forward, detached columns, an inconsistent per-column parameter structure, and the F3a validation contracts all fail closed. The NCCL joint-solve adjoint remains out of scope (independent Simulations only); no timing/throughput scaling is claimed.
 <!-- END f3-array-scene-vjp-ensemble -->
+<!-- BEGIN f4-subpixel-lever (edge-native per-Yee-component material sampling) -->
+## Edge-native per-Yee-component material sampling and conformal-PEC benchmark default (F4)
+
+- FDTD material coefficients are now sampled **edge-native**: the diagonal
+  background permittivity / permeability and the static electric / magnetic
+  conductivities are evaluated directly at each Yee component's own staggered
+  location (`Ex/Ey/Ez` edges, `Hx/Hy/Hz` faces), with the SDF occupancy, the
+  interface normal, and any `MaterialRegion` density sampled there and the
+  polarized (Kottke) or arithmetic subpixel blend formed at that location. This
+  replaces the previous node-centered blend followed by an arithmetic node->edge
+  average (the "smear"), which applied the interface operator at the wrong place
+  and then interpolated it. The node-centered model is still produced as the
+  canonical representation for summaries, monitors, the mode solver, and the
+  SAR / mass models; only the FDTD update coefficients switch to the edge fields.
+  This is the standard path for isotropic, axis-aligned diagonal-anisotropic, and
+  `PerturbationMedium` families (with or without static conductivity, dispersion,
+  nonlinearity, or modulation layered on the edge-native background). Full
+  off-diagonal anisotropy, 2D sheets, and surface-impedance metals fail closed to
+  the node->edge path (unchanged capability scope; no guard added or removed).
+- The differentiable material VJP follows the forward: when edge-native sampling
+  is active the permittivity sensitivity back-propagates directly through the edge
+  fields (no node->edge transpose), so geometry, region-density, and
+  diagonal-anisotropy gradients stay consistent by construction.
+- The benchmark harness default is `pec="conformal"`: partially-filled PEC faces
+  get fractional-fill edge suppression (sub-cell wall placement) rather than a hard
+  staircase edge, matching an external reference solver's curved/oblique metal
+  treatment. Dielectric scenes are unaffected.
+<!-- END f4-subpixel-lever -->

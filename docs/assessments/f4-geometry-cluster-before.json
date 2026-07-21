@@ -1,0 +1,122 @@
+{
+  "cluster": "grid_geometry",
+  "generated_at": "2026-07-21T11:37:23+00:00",
+  "label": "before",
+  "max_field_l2": 0.5262257175655619,
+  "median_field_l2": 0.20716295831807136,
+  "scene_count": 16,
+  "scenes": {
+    "anisotropic_uniform_grid": {
+      "field_corr": 0.9999707102279408,
+      "field_l2": 0.008008190411282527,
+      "field_linf": 0.007315729205948446,
+      "field_shape_l2": 0.007653671421367896,
+      "reference_cache_hit": true
+    },
+    "autogrid_override_refinement": {
+      "field_corr": 0.9990491305937627,
+      "field_l2": 0.045898879104428844,
+      "field_linf": 0.05344677100780851,
+      "field_shape_l2": 0.043598562589217245,
+      "reference_cache_hit": true
+    },
+    "autogrid_ring": {
+      "field_corr": 0.9834751672885351,
+      "field_l2": 0.18120456746195845,
+      "field_linf": 0.7039379548939744,
+      "field_shape_l2": 0.1810430758874468,
+      "reference_cache_hit": true
+    },
+    "autogrid_slab": {
+      "field_corr": 0.9993662340563293,
+      "field_l2": 0.03571762791402638,
+      "field_linf": 0.03667522170111833,
+      "field_shape_l2": 0.035596772719857596,
+      "reference_cache_hit": true
+    },
+    "cone_scatter": {
+      "field_corr": 0.9713473881740076,
+      "field_l2": 0.2383494238252938,
+      "field_linf": 0.5040707266055786,
+      "field_shape_l2": 0.23766415692639278,
+      "reference_cache_hit": true
+    },
+    "custom_grid_slab": {
+      "field_corr": 0.9998902871007221,
+      "field_l2": 0.015353164247475,
+      "field_linf": 0.013590327031002528,
+      "field_shape_l2": 0.014812621700286516,
+      "reference_cache_hit": true
+    },
+    "cylinder_scatter": {
+      "field_corr": 0.9453952548434339,
+      "field_l2": 0.3313768268750561,
+      "field_linf": 1.0070996286708467,
+      "field_shape_l2": 0.32592608382809307,
+      "reference_cache_hit": true
+    },
+    "ellipsoid_scatter": {
+      "field_corr": 0.9875867628021953,
+      "field_l2": 0.15807648579844225,
+      "field_linf": 0.3396627831447695,
+      "field_shape_l2": 0.15707445985226176,
+      "reference_cache_hit": true
+    },
+    "explicit_mesh_scatter": {
+      "field_corr": 0.8844882015287219,
+      "field_l2": 0.47795725790489785,
+      "field_linf": 1.0625141157738842,
+      "field_shape_l2": 0.46656255888839493,
+      "reference_cache_hit": true
+    },
+    "hollow_box_scatter": {
+      "field_corr": 0.860343840130331,
+      "field_l2": 0.5262257175655619,
+      "field_linf": 0.8330916798674092,
+      "field_shape_l2": 0.5097141127630221,
+      "reference_cache_hit": true
+    },
+    "mesh_primitive_scatter": {
+      "field_corr": 0.9835244690966862,
+      "field_l2": 0.18135406015708272,
+      "field_linf": 0.9618200672275082,
+      "field_shape_l2": 0.18077504996011204,
+      "reference_cache_hit": true
+    },
+    "nonuniform_custom_grid": {
+      "field_corr": 0.9975667584792909,
+      "field_l2": 0.06979353616042112,
+      "field_linf": 0.07439509693661699,
+      "field_shape_l2": 0.06971773359140086,
+      "reference_cache_hit": true
+    },
+    "polyslab_pentagon": {
+      "field_corr": 0.9521339921449886,
+      "field_l2": 0.3095133536237698,
+      "field_linf": 0.7277970246153046,
+      "field_shape_l2": 0.30568097913027853,
+      "reference_cache_hit": true
+    },
+    "polyslab_wg": {
+      "field_corr": 0.9221761752441847,
+      "field_l2": 0.39412877604993624,
+      "field_linf": 0.6604088634442978,
+      "field_shape_l2": 0.38677008908653426,
+      "reference_cache_hit": true
+    },
+    "prism_scatter": {
+      "field_corr": 0.9727941403887455,
+      "field_l2": 0.23297185647905996,
+      "field_linf": 0.40905677351009084,
+      "field_shape_l2": 0.2316712334868567,
+      "reference_cache_hit": true
+    },
+    "pyramid_scatter": {
+      "field_corr": 0.8844884036795476,
+      "field_l2": 0.47795686928471226,
+      "field_linf": 1.062513119333861,
+      "field_shape_l2": 0.4665621756597999,
+      "reference_cache_hit": true
+    }
+  }
+}
