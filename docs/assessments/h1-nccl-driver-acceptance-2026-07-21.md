@@ -79,58 +79,112 @@ Worker: `tests/fdtd/multi_gpu/_nccl_adjoint_worker.py` (mode via
 | 2c zero psi cotangent carry → psi-active parity red | `falsify_psi` | diverges rel=6.88e-2 → OK |
 | 2d reduction-order repeat-determinism of gathered grad_eps | `determinism` | rel < 1e-9 on Ex/Ey/Ez → OK |
 | 2e unsupported-adjoint scene rejects on all ranks, no hang | `guard_deadlock` | clean symmetric reject under 200 s timeout → OK |
+| 2e' rank-0-only gather-capacity failure rejects on all ranks, no hang | `capacity_deadlock` | collective verdict → both ranks raise under 200 s timeout → OK |
+| headline parity under a saturating co-tenant burner, honest 1e-4 gate | `standard`/`cpml`/`plane` + `WITWIN_NCCL_ADJ_STRESS=1` | ~2e-7 → OK (3 passed) |
 
-> Gate results above are on **exclusive** GPUs. Under concurrent multi-GPU load the
-> parity/determinism gates are subject to the load-dependent gradient drift
-> documented in "Known defect" below; the gate tolerances are sized to absorb that
-> drift without flaking while still failing on any real halo/reverse break.
+> Gate results above hold at the **honest** tolerances below, both on exclusive
+> GPUs and under a saturating co-tenant burner on both boards — see the stressed
+> gate and "Load-dependence episode and fix" below.
 
-Parity tolerances: loss rtol 5e-5 / atol 5e-6 (the forward is load-insensitive —
-bitwise-identical loss across GPU cohabitation — so the loss stays tight); grad
-rtol 1e-3 with an atol floor 1e-2·max|grad|, sized as a flake-guard band above the
-documented load-induced reverse drift (worst case ~5e-3 of scale, see "Known
-defect") and below the smallest deliberate falsification (electric-halo no-op, rel
-1.64e-2). Determinism gate: reduction-order equality, relative < 1e-9 (bitwise only
-under exclusive-GPU scheduling). Falsification separation threshold 1e-3 (healthy
-load drift stays <=5e-3; deliberate breaks are >=1.64e-2).
+Parity tolerances (honest, 1e-4-class, mirroring the in-process
+`test_adjoint_parity_cpml`): loss rtol 5e-5 / atol 5e-6 (the forward is
+load-insensitive — bitwise-identical loss across GPU cohabitation); grad rtol 1e-4
+with an atol floor 1e-6·max|grad|. Determinism gate: reduction-order equality,
+relative < 1e-9. Falsification separation threshold 1e-3 (healthy parity, exclusive
+OR stressed, stays ~2e-7; deliberate breaks are >=1.64e-2). A prior round had
+widened the grad gate to rtol 1e-3 / atol 1e-2·scale to absorb the drift below;
+that laundering is reverted — the fix removes the drift instead.
 
-### Known defect: load-dependent distributed adjoint gradient (pre-existing, shared stack)
+### Load-dependence episode and fix (root cause + stressed-gate evidence)
 
-The distributed adjoint gradient is **load-dependent**. On exclusive GPUs the
-per-rank NCCL driver reproduces the single-GPU reference to ~1.5e-7 relative
-(6/6 clean probe runs). Under concurrent multi-GPU activity from co-resident
-processes (this program shares GPUs between agents), the *gathered gradient* drifts
-by up to ~5e-3 of the gradient scale at the partition seam (measured worst case on
-the small-element plane objective; ~1.2e-4 standard, ~3.3e-4 CPML), while in the
-same process the forward loss stays **bitwise identical** and the single-GPU
-reference moves only ~1e-7. Saved-tensor isolation places the defect in the
-distributed **reverse** path, not the forward and not the objective.
+**Symptom.** Before the fix the driver's *gathered gradient* was load-dependent:
+bitwise-correct on exclusive GPUs (~1.5e-7 relative, 6/6) but deterministically
+wrong at the partition seam under concurrent GPU activity — standard rel ~1.2e-4,
+CPML ~3.1e-4, seam-spanning plane ~2.7e-2 (`grad_scale` 5.3e-2, a non-degenerate
+gradient), with occasional catastrophic blow-ups (rel ~9.7e+2 on standard). In the
+same process the forward loss stayed **bitwise identical** and the single-GPU
+reference moved only ~7.6e-8, isolating the defect to the distributed **reverse**.
+The prior round mischaracterised the worst case as "~5e-3 of scale"; the measured
+worst case is ~2.7e-2 on the plane objective (that understatement is removed).
 
-**Attribution.** The sensitivity **predates this track**: at base `18bc42a` the
-in-process `test_adjoint_parity_cpml` suite also fails under the same concurrent
-load, and H1's only change to the shared reverse machinery is a verbatim-logic
-routing move (the replay halos now route through `distributed.transport`). The
-affected components — the transposed halo exchanges (G1a), the fused reverse
-kernels (round E), and the shared grid_sample material VJP (`atomicAdd`, already
-documented as non-bitwise) — are all inherited. A definitive single-line root cause
-was not isolated (the failure only reproduces under foreign-process GPU load, which
-is not controllable from this track), so a verified sync fix is deferred to the
-owner of the shared multi-GPU adjoint stack.
+**Race class (confirmed).** `CUDA_LAUNCH_BLOCKING=1` collapses the drift to the
+reference floor (standard 2.2e-7, CPML 7.6e-8) — an async happens-before violation,
+not intra-kernel reduction order (the `grad_eps` kernels write with `=`, and
+`TORCH_NCCL_BLOCKING_WAIT=1` does **not** help). The error is spatially localized to
+the two density texels straddling the seam (x=2: 1.2e-4, x=3: 3.7e-5; off-seam
+cells at the ~1e-7 floor), i.e. an interface hazard, not spread noise. The same
+drift reproduces on the in-process `transport="cuda_p2p"` bridge, placing the class
+in the shared reverse machinery.
 
-**Consequence for users.** A distributed NCCL adjoint gradient computed while the
-GPUs are busy with other work can be up to ~5e-3-of-scale wrong at the seam with no
-error raised. For gradient-accurate optimization, run the distributed adjoint on
-GPUs not shared with other CUDA processes. This limitation is recorded in
-`FEATURE_LIST.md`.
+**Root cause (single line).** `PYTORCH_NO_CUDA_MEMORY_CACHING=1` also eliminates the
+drift → a **caching-allocator cross-stream memory-reuse hazard**. The four reverse
+and forward-replay NCCL halo methods (`exchange_magnetic_adjoint`,
+`exchange_electric_adjoint`, `forward_electric_halo`, `forward_magnetic_halo` in
+`fdtd/distributed/nccl_transport.py`) ran their in-place accumulate/zero — and
+posted the collective — inside `with torch.cuda.stream(engine.compute_stream)`. But
+the per-step adjoint-state planes they touch are allocated on the **default** stream
+by the reverse kernels. The CUDA caching allocator tags a freed block with only its
+*allocation* stream, so a block freed on the default stream could be handed to the
+next default-stream allocation while the compute-stream halo was still writing it;
+under concurrent load the compute-stream work lags and the block is overwritten
+mid-`add_`. The **live-forward** halos are immune because they slice the solver's
+*persistent* (never-freed) field storage — which is exactly why the forward loss
+stays bitwise-clean while only the reverse (which churns per-step allocations)
+corrupts.
 
-**Gate posture.** Rather than assert exclusive-GPU-only numbers that would flake in
-the supervisor's shared-GPU battery, the H1 parity/determinism gate tolerances are
-sized to absorb the documented drift (grad band 1e-2·scale; determinism 1e-9) while
-the falsification gates (halo no-ops, psi zeroing, seam double-count — all >=1.64e-2)
-carry the load-bearing correctness proof and retain their separation under load.
+**Fix.** Run those four halos on the current (**default**) stream (keep the device
+guard, drop the `compute_stream` context; record the vestigial forward-overlap
+events on the current stream). The reverse driver already fully host-synchronizes
+between phases (`_synchronize(devices)`), so `compute_stream` bought no overlap
+there; matching allocation-stream to use-stream closes the window at zero cost.
+Commit `c233d8b`.
+
+**Stressed-gate evidence (honest tolerances, both GPUs saturated by a committed
+co-tenant burner).** Distribution of grad relative error vs the single-GPU
+reference, 6 runs each (gate 1e-4):
+
+| Mode | runs (grad rel) | max | gate |
+|------|-----------------|-----|------|
+| standard | 2.18e-7 ×3, 1.09e-7 ×3 | 2.18e-7 | 1e-4 |
+| cpml | 2.28e-7, 1.52e-7, 3.04e-7, 1.52e-7, 2.28e-7, 1.52e-7 | 3.04e-7 | 1e-4 |
+| plane (`grad_scale` 5.3e-2) | 1.40e-7 ×4, 1.36e-10, 1.40e-7 | 1.40e-7 | 1e-4 |
+
+The committed `test_two_rank_nccl_adjoint_parity_under_stress[standard|cpml|plane]`
+runs these three at the honest gate with the burner load spawned in-worker
+(`WITWIN_NCCL_ADJ_STRESS=1`): **3 passed**.
+
+**Load-bearing falsification (the fix is the load-bearing sync).** Re-wrapping the
+four halos back onto `engine.compute_stream` (the pre-fix behaviour) under the same
+saturating burner reddens every headline gate at the honest 1e-4 tolerance:
+standard rel 1.223e-4, CPML 3.120e-4, plane 2.684e-2 — each `> 1e-4`, RED. Restoring
+the default-stream fix returns them to ~2e-7 (green). Exact site: the
+`with torch.cuda.stream(engine.compute_stream)` wrapper on the four reverse/replay
+halos; observed drift as tabulated.
+
+### Audit minors addressed
+
+- **Collective-safe gather-capacity reject + deadlock-freedom test.** The eps-shaped
+  grad gather lands only on rank 0, so only rank 0 can size it; the reject is made
+  collective by having rank 0 evaluate capacity, all ranks `allreduce_scalar` the
+  verdict, and all raise together (already in `_NcclDistributedFDTDGradientBridge.forward`).
+  Now covered by a committed deadlock-freedom test: worker mode `capacity_deadlock`
+  forces the rank-0 capacity preflight to raise (as an over-large grid would) and
+  asserts every rank raises within the launcher timeout, so a capacity failure can
+  never leave a peer blocked in the forward-halo collectives. Launcher
+  `test_two_rank_nccl_adjoint_capacity_reject_without_deadlock` (2 passed with
+  `guard_deadlock`).
+- **Seam-liveness numbers repointed at the committed gate.** No uncommitted per-strip
+  sums are cited; the seam-liveness conclusion rests entirely on the committed
+  `plane_seam` falsification launcher (double-counting the live seam cell reddens
+  parity, grad rel 4.005e-1), as already recorded in the H1b section below.
 
 ### Falsifications recorded
 
+- **Stream-discipline fix is load-bearing (load).** Re-wrapping the four
+  reverse/replay halos onto `engine.compute_stream` under a saturating co-tenant
+  burner reddens every headline gate at the honest 1e-4 tolerance (standard 1.223e-4,
+  CPML 3.120e-4, plane 2.684e-2). Restoring the default-stream fix returns them to
+  ~2e-7. See "Load-dependence episode and fix" above for the exact site and mechanism.
 - **Reverse halos are load-bearing (2b).** No-op'ing either NCCL reverse field
   halo (`exchange_magnetic_adjoint` → rel 9.31e-1; `exchange_electric_adjoint` →
   rel 1.64e-2) drives the 2-GPU gradient far off the single-GPU reference; both

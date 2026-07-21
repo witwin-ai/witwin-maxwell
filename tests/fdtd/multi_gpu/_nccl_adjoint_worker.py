@@ -604,6 +604,42 @@ def _run_guard_deadlock():
         print("NCCL_ADJOINT_WORKER_OK[guard_deadlock]")
 
 
+def _run_capacity_deadlock():
+    """A rank-0-only gather-capacity failure must raise on ALL ranks (no hang).
+
+    The eps-shaped grad gather lands only on rank 0, so only rank 0 can size it --
+    but the reject must be collective. This forces the rank-0 capacity preflight to
+    fail (as an over-large grid would) and asserts every rank raises together within
+    the launcher timeout: rank 0 evaluates capacity, all ranks all-reduce the
+    verdict, and all raise, so a capacity failure can never leave a peer blocked in
+    the forward-halo collectives. A hang would exceed the launcher timeout and fail
+    the gate.
+    """
+    original = _dist_adjoint._NcclDistributedFDTDGradientBridge._preflight_gather_capacity
+
+    def failing(self, distributed, dft_frequency, full_field_dft):
+        # Only rank 0 reaches this in forward(); raise the same MemoryError an
+        # over-capacity grid would, exercising the collective verdict path.
+        raise MemoryError("forced gather-capacity failure (deadlock-freedom probe)")
+
+    _dist_adjoint._NcclDistributedFDTDGradientBridge._preflight_gather_capacity = failing
+    base = _base_density()
+    rejected = False
+    message = ""
+    try:
+        _distributed_solve("standard", base)
+    except (MemoryError, RuntimeError) as exc:
+        rejected = True
+        message = str(exc)
+    finally:
+        _dist_adjoint._NcclDistributedFDTDGradientBridge._preflight_gather_capacity = original
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    assert rejected, "rank-0-only capacity failure did not raise on this rank (deadlock risk)"
+    if int(os.environ.get("RANK", "0")) == 0:
+        print(f"NCCL_ADJOINT_WORKER_OK[capacity_deadlock msg={message[:40]!r}]")
+
+
 _MODES = {
     "standard": lambda: _run_parity("standard"),
     "plane": lambda: _run_parity("plane"),
@@ -615,6 +651,7 @@ _MODES = {
     "falsify_psi": _run_falsify_psi,
     "determinism": _run_determinism,
     "guard_deadlock": _run_guard_deadlock,
+    "capacity_deadlock": _run_capacity_deadlock,
 }
 
 

@@ -523,6 +523,27 @@ def test_two_rank_nccl_adjoint_unsupported_rejects_without_deadlock():
 
 
 @pytest.mark.nccl
+def test_two_rank_nccl_adjoint_capacity_reject_without_deadlock():
+    """A rank-0-only gather-capacity failure rejects on all ranks (no hang).
+
+    The eps-shaped grad gather lands only on rank 0, so only rank 0 sizes it; the
+    reject must nonetheless be collective. The worker forces the rank-0 capacity
+    preflight to fail (as an over-large grid would) and asserts every rank raises
+    together: rank 0 evaluates capacity, all ranks all-reduce the verdict, and all
+    raise, so a capacity failure can never leave a peer blocked in the forward-halo
+    collectives. The subprocess timeout is the deadlock witness.
+    """
+
+    _skip_without_two_gpu_nccl()
+    completed = _torchrun_adjoint("capacity_deadlock", timeout=200)
+    assert completed.returncode == 0, (
+        "NCCL adjoint capacity-reject deadlock-freedom guard failed\n"
+        f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+    )
+    assert "NCCL_ADJOINT_WORKER_OK[capacity_deadlock" in completed.stdout, completed.stdout
+
+
+@pytest.mark.nccl
 def test_nccl_rank_death_propagates_failure():
     """A dead peer mid-run must surface as a bounded nonzero exit, not a hang.
 

@@ -843,6 +843,15 @@ conductive-path model, not a validated arc or device-failure predictor).
   reproducible across repeated backward passes, and an unsupported-adjoint scene
   (e.g. a trainable density on a legacy graded-sigma absorber) is rejected cleanly
   and symmetrically on every rank without deadlocking.
+- The reverse gradient is load-safe: the headline parity gates (standard / x-CPML /
+  seam-spanning plane) hold at the same honest 1e-4-class tolerance while both GPUs
+  are saturated by a co-tenant burner (a committed stress gate spawns the load), and
+  a rank-0-only gather-capacity failure raises collectively on every rank without
+  hanging. This closes a caching-allocator cross-stream reuse hazard in which the
+  reverse/replay NCCL halos previously ran on a non-default stream while their
+  per-step adjoint planes were allocated on the default stream, deterministically
+  corrupting the partition-seam gradient under concurrent GPU load; the halos now
+  run on the current (default) stream so allocation-stream == use-stream.
 - The forward-only NCCL fence still rejects a trainable/monitor scene on the plain
   NCCL forward path; the relaxation is internal to the verified adjoint driver.
 - A y/z-normal `PlaneMonitor` objective is now also supported on the NCCL adjoint
@@ -858,13 +867,13 @@ conductive-path model, not a validated arc or device-failure predictor).
   plane objectives stay fail-closed (they need seam-crossing tangential-field
   assembly whose cotangent scatter is not wired), and the in-process
   `transport="cuda_p2p"` bridge continues to reject every tiled monitor.
-- Known limitation (load-dependent gradient): the distributed adjoint gradient is
-  reproduced to ~1.5e-7 of scale against the single-GPU reference on **exclusive**
-  GPUs, but under concurrent multi-GPU activity from other CUDA processes the
-  shared multi-GPU adjoint stack (transposed halos + fused reverse kernels + the
-  `atomicAdd` material VJP, all predating this driver) drifts the gathered gradient
-  by up to ~5e-3 of scale at the partition seam, with no error raised (the forward
-  loss stays bitwise identical). For gradient-accurate optimization, run the
-  distributed adjoint on GPUs not shared with other CUDA processes. See
-  `docs/assessments/h1-nccl-driver-acceptance-2026-07-21.md` "Known defect".
+- The NCCL adjoint driver reproduces the single-GPU reference to ~2e-7 of scale
+  both on exclusive GPUs and under a saturating co-tenant, so no shared-GPU caveat
+  applies to it. (The in-process `transport="cuda_p2p"` bridge carries the same
+  class of caching-allocator cross-stream hazard on its cross-device peer-copy
+  path and can still drift the gradient at the seam under concurrent load; its fix
+  is tracked separately as it needs cross-device event/`record_stream` handling
+  rather than the single-device stream swap the NCCL path uses.) See
+  `docs/assessments/h1-nccl-driver-acceptance-2026-07-21.md` "Load-dependence
+  episode and fix".
 <!-- END h1-nccl-driver -->
