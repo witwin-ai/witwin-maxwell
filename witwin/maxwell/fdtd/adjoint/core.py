@@ -3043,6 +3043,225 @@ def _forward_electric_fields_standard(
     return electric_fields
 
 
+def _forward_magnetic_fields_cpml(solver, state, *, time_value, resolved_source_terms):
+    """Magnetic half-step for the real CPML path: post-source H plus advanced psi_h.
+
+    Mirrors the real magnetic half of :func:`_step_state` on the CPML branch
+    exactly -- the same three :func:`_update_magnetic_component` calls with the
+    same per-component psi recurrence and the same resolved magnetic source
+    terms -- but returns the advanced psi_h dict alongside the fields. Used by the
+    distributed CPML replay, which advances each shard as two explicit halves with
+    a transposed-free forward Yee halo copy between them; per shard this is
+    bit-identical to :func:`_step_state`'s magnetic half. The psi recurrence is a
+    same-x-slice update (``b*psi + c*d``) with no x halo, so it is local to each
+    shard, and the audit-pinned x-PML confinement to the outer shards keeps every
+    internal x-face psi inactive (``c==0``).
+    """
+    d_ez_dy = _forward_diff(state["Ez"], axis=1, inv_delta=solver.inv_dy_h)
+    d_ey_dz = _forward_diff(state["Ey"], axis=2, inv_delta=solver.inv_dz_h)
+    hx, psi_hx_y, psi_hx_z = _update_magnetic_component(
+        state["Hx"],
+        d_pos=d_ez_dy,
+        d_neg=d_ey_dz,
+        decay=solver.chx_decay,
+        curl=solver.chx_curl,
+        psi_pos=state["psi_hx_y"],
+        psi_neg=state["psi_hx_z"],
+        b_pos=solver.cpml_b_h_y,
+        c_pos=solver.cpml_c_h_y,
+        inv_kappa_pos=solver.cpml_inv_kappa_h_y,
+        b_neg=solver.cpml_b_h_z,
+        c_neg=solver.cpml_c_h_z,
+        inv_kappa_neg=solver.cpml_inv_kappa_h_z,
+        axis_pos=1,
+        axis_neg=2,
+    )
+
+    d_ex_dz = _forward_diff(state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
+    d_ez_dx = _forward_diff(state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
+    hy, psi_hy_z, psi_hy_x = _update_magnetic_component(
+        state["Hy"],
+        d_pos=d_ex_dz,
+        d_neg=d_ez_dx,
+        decay=solver.chy_decay,
+        curl=solver.chy_curl,
+        psi_pos=state["psi_hy_z"],
+        psi_neg=state["psi_hy_x"],
+        b_pos=solver.cpml_b_h_z,
+        c_pos=solver.cpml_c_h_z,
+        inv_kappa_pos=solver.cpml_inv_kappa_h_z,
+        b_neg=solver.cpml_b_h_x,
+        c_neg=solver.cpml_c_h_x,
+        inv_kappa_neg=solver.cpml_inv_kappa_h_x,
+        axis_pos=2,
+        axis_neg=0,
+    )
+
+    d_ey_dx = _forward_diff(state["Ey"], axis=0, inv_delta=solver.inv_dx_h)
+    d_ex_dy = _forward_diff(state["Ex"], axis=1, inv_delta=solver.inv_dy_h)
+    hz, psi_hz_x, psi_hz_y = _update_magnetic_component(
+        state["Hz"],
+        d_pos=d_ey_dx,
+        d_neg=d_ex_dy,
+        decay=solver.chz_decay,
+        curl=solver.chz_curl,
+        psi_pos=state["psi_hz_x"],
+        psi_neg=state["psi_hz_y"],
+        b_pos=solver.cpml_b_h_x,
+        c_pos=solver.cpml_c_h_x,
+        inv_kappa_pos=solver.cpml_inv_kappa_h_x,
+        b_neg=solver.cpml_b_h_y,
+        c_neg=solver.cpml_c_h_y,
+        inv_kappa_neg=solver.cpml_inv_kappa_h_y,
+        axis_pos=0,
+        axis_neg=1,
+    )
+
+    magnetic_fields = _apply_resolved_magnetic_source_terms(
+        {"Hx": hx, "Hy": hy, "Hz": hz},
+        solver=solver,
+        time_value=time_value,
+        resolved_source_terms=resolved_source_terms,
+    )
+    psi_h = {
+        "psi_hx_y": psi_hx_y,
+        "psi_hx_z": psi_hx_z,
+        "psi_hy_x": psi_hy_x,
+        "psi_hy_z": psi_hy_z,
+        "psi_hz_x": psi_hz_x,
+        "psi_hz_y": psi_hz_y,
+    }
+    return magnetic_fields, psi_h
+
+
+def _forward_electric_fields_cpml(
+    solver,
+    state,
+    magnetic_fields,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+):
+    """Electric half-step for the real CPML path: post-source E plus advanced psi_e.
+
+    Symmetric to :func:`_forward_magnetic_fields_cpml`: mirrors the real electric
+    half of :func:`_step_state` on the linear CPML branch (open/PEC boundary, no
+    dispersion/nonlinearity/conduction/full-anisotropy/TFSF/ports) exactly, with
+    the per-component psi_e recurrence, and returns the advanced psi_e dict
+    alongside the fields. Used by the distributed CPML replay after the transposed
+    Yee magnetic halo has refreshed the mid-step H ghost planes; per shard this is
+    bit-identical to :func:`_step_state`'s electric half.
+    """
+    source_terms, electric_source_terms, _magnetic_source_terms = resolved_source_terms
+
+    d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy_e)
+    d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz_e)
+    ex, psi_ex_y, psi_ex_z = _update_electric_component(
+        state["Ex"],
+        d_pos=d_hz_dy,
+        d_neg=d_hy_dz,
+        decay=solver.cex_decay,
+        curl_prefactor=solver.cex_curl * solver.eps_Ex,
+        eps=eps_ex,
+        low_mode_pos=solver.boundary_y_low_code,
+        high_mode_pos=solver.boundary_y_high_code,
+        low_mode_neg=solver.boundary_z_low_code,
+        high_mode_neg=solver.boundary_z_high_code,
+        axis_pos=1,
+        axis_neg=2,
+        psi_pos=state["psi_ex_y"],
+        psi_neg=state["psi_ex_z"],
+        b_pos=solver.cpml_b_e_y,
+        c_pos=solver.cpml_c_e_y,
+        inv_kappa_pos=solver.cpml_inv_kappa_e_y,
+        b_neg=solver.cpml_b_e_z,
+        c_neg=solver.cpml_c_e_z,
+        inv_kappa_neg=solver.cpml_inv_kappa_e_z,
+    )
+
+    d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz_e)
+    d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx_e)
+    ey, psi_ey_z, psi_ey_x = _update_electric_component(
+        state["Ey"],
+        d_pos=d_hx_dz,
+        d_neg=d_hz_dx,
+        decay=solver.cey_decay,
+        curl_prefactor=solver.cey_curl * solver.eps_Ey,
+        eps=eps_ey,
+        low_mode_pos=solver.boundary_z_low_code,
+        high_mode_pos=solver.boundary_z_high_code,
+        low_mode_neg=solver.boundary_x_low_code,
+        high_mode_neg=solver.boundary_x_high_code,
+        axis_pos=2,
+        axis_neg=0,
+        psi_pos=state["psi_ey_z"],
+        psi_neg=state["psi_ey_x"],
+        b_pos=solver.cpml_b_e_z,
+        c_pos=solver.cpml_c_e_z,
+        inv_kappa_pos=solver.cpml_inv_kappa_e_z,
+        b_neg=solver.cpml_b_e_x,
+        c_neg=solver.cpml_c_e_x,
+        inv_kappa_neg=solver.cpml_inv_kappa_e_x,
+    )
+
+    d_hy_dx = _backward_diff(magnetic_fields["Hy"], axis=0, inv_delta=solver.inv_dx_e)
+    d_hx_dy = _backward_diff(magnetic_fields["Hx"], axis=1, inv_delta=solver.inv_dy_e)
+    ez, psi_ez_x, psi_ez_y = _update_electric_component(
+        state["Ez"],
+        d_pos=d_hy_dx,
+        d_neg=d_hx_dy,
+        decay=solver.cez_decay,
+        curl_prefactor=solver.cez_curl * solver.eps_Ez,
+        eps=eps_ez,
+        low_mode_pos=solver.boundary_x_low_code,
+        high_mode_pos=solver.boundary_x_high_code,
+        low_mode_neg=solver.boundary_y_low_code,
+        high_mode_neg=solver.boundary_y_high_code,
+        axis_pos=0,
+        axis_neg=1,
+        psi_pos=state["psi_ez_x"],
+        psi_neg=state["psi_ez_y"],
+        b_pos=solver.cpml_b_e_x,
+        c_pos=solver.cpml_c_e_x,
+        inv_kappa_pos=solver.cpml_inv_kappa_e_x,
+        b_neg=solver.cpml_b_e_y,
+        c_neg=solver.cpml_c_e_y,
+        inv_kappa_neg=solver.cpml_inv_kappa_e_y,
+    )
+
+    electric_fields = {"Ex": ex, "Ey": ey, "Ez": ez}
+    electric_fields = _apply_source_term_list(
+        electric_fields,
+        terms=electric_source_terms,
+        source_time=solver._source_time,
+        omega=solver.source_omega,
+        time_value=time_value + 0.5 * float(solver.dt),
+        solver=None,
+    )
+    electric_fields = _apply_source_term_list(
+        electric_fields,
+        terms=source_terms,
+        source_time=solver._source_time,
+        omega=solver.source_omega,
+        time_value=time_value,
+        solver=None,
+    )
+    if getattr(solver, "has_pec_faces", False):
+        electric_fields.update(_enforce_pec_boundaries(solver, electric_fields))
+    psi_e = {
+        "psi_ex_y": psi_ex_y,
+        "psi_ex_z": psi_ex_z,
+        "psi_ey_x": psi_ey_x,
+        "psi_ey_z": psi_ey_z,
+        "psi_ez_x": psi_ez_x,
+        "psi_ez_y": psi_ez_y,
+    }
+    return electric_fields, psi_e
+
+
 def _forward_magnetic_fields_complex(solver, state, *, time_value, resolved_source_terms):
     """Recompute the post-source complex (split-field) magnetic fields of one Bloch step.
 
@@ -3237,7 +3456,7 @@ def _step_state(
 
     d_ex_dz = _forward_diff(state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
     d_ez_dx = _forward_diff(state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
-    hy, psi_hy_x, psi_hy_z = _update_magnetic_component(
+    hy, psi_hy_z, psi_hy_x = _update_magnetic_component(
         state["Hy"],
         d_pos=d_ex_dz,
         d_neg=d_ez_dx,
@@ -3595,7 +3814,7 @@ def _step_state(
 
         d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz_e)
         d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx_e)
-        ey, psi_ey_x, psi_ey_z = _update_electric_component(
+        ey, psi_ey_z, psi_ey_x = _update_electric_component(
             state["Ey"],
             d_pos=d_hx_dz,
             d_neg=d_hz_dx,

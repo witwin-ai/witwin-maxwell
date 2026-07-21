@@ -177,25 +177,7 @@ def _trainable_circuit_scene() -> mw.Scene:
     )
 
 
-@pytest.mark.parametrize("absorber", ("cpml", "stablepml", "pml", "absorber"))
-def test_require_distributed_adjoint_support_rejects_every_absorber_family(
-    absorber, cuda_p2p_devices, cuda_memory_cleanup
-):
-    """Defense in depth: the reverse-support guard fails closed on any absorber.
-
-    The public ``Simulation`` guard rejects a PML-boundary trainable+parallel scene
-    at prepare, but the distributed reverse-support guard must independently reject
-    every absorber family too, because the verified adjoint envelope is the
-    open-boundary update only. Regression for the guard previously keying on the
-    single ``uses_cpml`` boolean (which the legacy graded-sigma "pml"/"absorber"
-    absorbers do not set), which let them run the distributed reverse outside the
-    verified envelope.
-    """
-
-    from witwin.maxwell.fdtd.distributed.adjoint import (
-        require_distributed_adjoint_support,
-    )
-
+def _absorber_guard_scene():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
         grid=mw.GridSpec.uniform(0.1),
@@ -211,8 +193,26 @@ def test_require_distributed_adjoint_support_rejects_every_absorber_family(
             name="drive",
         )
     )
+    return scene
+
+
+@pytest.mark.parametrize("absorber", ("cpml", "stablepml"))
+def test_require_distributed_adjoint_support_accepts_cpml_family(
+    absorber, cuda_p2p_devices, cuda_memory_cleanup
+):
+    """The reverse-support guard now accepts the CPML absorbing update (S4).
+
+    ``uses_cpml`` (absorber "cpml"/"stablepml") is a verified distributed adjoint
+    capability: the guard accepts it and asserts the x-CPML pinning invariant. The
+    legacy graded-sigma absorbers stay rejected (companion test below).
+    """
+
+    from witwin.maxwell.fdtd.distributed.adjoint import (
+        require_distributed_adjoint_support,
+    )
+
     distributed = DistributedFDTD(
-        scene,
+        _absorber_guard_scene(),
         frequency=_FREQUENCY,
         parallel=_parallel(devices=cuda_p2p_devices),
         absorber_type=absorber,
@@ -220,7 +220,35 @@ def test_require_distributed_adjoint_support_rejects_every_absorber_family(
     distributed.init_field()
 
     assert distributed.active_absorber_type == absorber
-    with pytest.raises(ValueError, match="absorbing"):
+    assert all(shard.solver.uses_cpml for shard in distributed.shards)
+    require_distributed_adjoint_support(distributed)  # must not raise
+
+
+@pytest.mark.parametrize("absorber", ("pml", "absorber"))
+def test_require_distributed_adjoint_support_rejects_graded_sigma_absorber(
+    absorber, cuda_p2p_devices, cuda_memory_cleanup
+):
+    """Defense in depth: the reverse-support guard fails closed on graded sigma.
+
+    The legacy graded-sigma absorbers ("pml"/"absorber") have no verified
+    distributed reverse core (they do not set ``uses_cpml``), so the guard must
+    reject them independently of the public ``Simulation`` prepare guard.
+    """
+
+    from witwin.maxwell.fdtd.distributed.adjoint import (
+        require_distributed_adjoint_support,
+    )
+
+    distributed = DistributedFDTD(
+        _absorber_guard_scene(),
+        frequency=_FREQUENCY,
+        parallel=_parallel(devices=cuda_p2p_devices),
+        absorber_type=absorber,
+    )
+    distributed.init_field()
+
+    assert distributed.active_absorber_type == absorber
+    with pytest.raises(ValueError, match="CPML absorbing update"):
         require_distributed_adjoint_support(distributed)
 
 
@@ -256,6 +284,94 @@ def test_solver_trainable_guard_covers_circuit_parameter_channel():
             frequency=_FREQUENCY,
             parallel=_parallel(),
         )
+
+
+def _trainable_density_pml_scene(*, device="cpu") -> mw.Scene:
+    """Two-shard scene whose Box material-region density is a trainable tensor,
+    on a graded-sigma PML boundary.
+
+    Trainable Box densities are the one distributed adjoint channel, but only on
+    the open/PEC standard core or the CPML absorbing update. A graded-sigma
+    absorber ("pml"/"absorber") has no verified distributed reverse core, so this
+    scene must fail closed -- at the public ``Simulation`` boundary and, as defense
+    in depth, at the ``DistributedFDTD`` constructor itself.
+    """
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
+        grid=mw.GridSpec.uniform(0.1),
+        boundary=mw.BoundarySpec.pml(num_layers=2),
+        device=device,
+    )
+    scene.add_material_region(
+        mw.MaterialRegion(
+            name="design",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+            density=torch.rand((4, 4, 4), dtype=torch.float64, requires_grad=True),
+            eps_bounds=(1.0, 6.0),
+        )
+    )
+    return scene
+
+
+@pytest.mark.parametrize("absorber", ("pml", "absorber"))
+def test_solver_trainable_density_with_graded_sigma_absorber_rejected_at_construction(
+    absorber,
+):
+    """Defense in depth: constructing ``DistributedFDTD`` directly with a trainable
+    Box density on a graded-sigma absorber fails closed at construction.
+
+    The public ``Simulation`` boundary already rejects this combination
+    (``test_adjoint_parity.py::test_guard_graded_sigma_absorber_rejected_at_prepare``),
+    but a direct construction bypasses it. The one supported trainable channel
+    (Box density) reverses only through the open/PEC or CPML core, so a graded-sigma
+    absorber must not slip through and run a forward whose backward the reverse
+    guard would later refuse -- it fails here, before any hardware allocation.
+    """
+
+    scene = _trainable_density_pml_scene()
+
+    # Layer 1 (public): the boundary detects the trainable density + graded-sigma
+    # absorber and rejects the parallel run before allocation.
+    simulation = mw.Simulation.fdtd(
+        scene,
+        frequency=_FREQUENCY,
+        parallel=_parallel(),
+        absorber=absorber,
+    )
+    with pytest.raises(ValueError, match="graded-sigma"):
+        simulation.prepare()
+
+    # Layer 2 (solver): directly constructing the distributed solver bypasses the
+    # public boundary; the constructor's own static guard must still fail closed.
+    with pytest.raises(ValueError, match="graded-sigma"):
+        DistributedFDTD(
+            scene,
+            frequency=_FREQUENCY,
+            parallel=_parallel(),
+            absorber_type=absorber,
+        )
+
+
+@pytest.mark.parametrize("absorber", ("cpml", "stablepml"))
+def test_solver_trainable_density_with_cpml_constructs(
+    absorber, cuda_p2p_devices, cuda_memory_cleanup
+):
+    """The supported trainable-density channel on a CPML absorber constructs.
+
+    Positive control for the graded-sigma rejection above: the same trainable Box
+    density on absorber "cpml"/"stablepml" is a verified distributed adjoint
+    capability and must pass the constructor's static guard.
+    """
+
+    scene = _trainable_density_pml_scene(device="cuda:0")
+    solver = DistributedFDTD(
+        scene,
+        frequency=_FREQUENCY,
+        parallel=_parallel(devices=cuda_p2p_devices),
+        absorber_type=absorber,
+    )
+    assert solver.logical_scene.material_regions
 
 
 def _wire(scene):

@@ -321,6 +321,30 @@ class DistributedFDTD:
                 "only; trainable geometry, material perturbation, circuit, and RF/port "
                 "parameters have no distributed reverse core yet."
             )
+        # Defense in depth for the one supported trainable channel: trainable Box
+        # densities reverse only through the open/PEC standard core or the CPML
+        # absorbing update. The legacy graded-sigma absorbers ("pml"/"absorber")
+        # have no verified distributed reverse (require_distributed_adjoint_support
+        # rejects them at reverse time), so a trainable-density scene resolving to a
+        # graded absorber must fail closed here at construction rather than run a
+        # forward that a later backward cannot service. The active absorber only
+        # engages when the boundary declares a PML kind (see fdtd/boundary/runtime).
+        from ...simulation import _scene_trainable_density_parameters
+
+        if _scene_trainable_density_parameters(self.logical_scene):
+            resolved_absorber = (
+                str(self.absorber_type).lower()
+                if self.logical_scene.boundary.uses_kind("pml")
+                else "none"
+            )
+            if resolved_absorber in ("pml", "absorber"):
+                raise ValueError(
+                    "Multi-GPU FDTD adjoint supports trainable Box densities on open/PEC "
+                    f"or CPML absorbing boundaries only; the graded-sigma absorber="
+                    f"{resolved_absorber!r} has no verified distributed reverse core. "
+                    "Use absorber='cpml' (or 'stablepml') for an absorbing trainable "
+                    "distributed run."
+                )
         from ...compiler.breakdown import scene_has_breakdown
 
         if scene_has_breakdown(self.logical_scene):

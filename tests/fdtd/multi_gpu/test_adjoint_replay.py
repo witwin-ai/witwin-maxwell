@@ -128,6 +128,104 @@ def test_distributed_replay_reproduces_forward_owned_states_exactly(
     assert nonzero_energy > 0.0
 
 
+def test_distributed_cpml_replay_reproduces_forward_owned_psi_and_fields(
+    cuda_p2p_devices, cuda_memory_cleanup
+):
+    """CPML replay parity including the twelve psi memory fields.
+
+    The open-boundary parity test above exercises only the six E/H fields on a
+    psi-free scene, so it cannot see the CPML replay half-steps. This test runs a
+    psi-active x-CPML forward and pins that the distributed replay reproduces the
+    native forward's OWNED psi state as well as the fields. It is the committed
+    guard on the Hy/Ey psi axis convention in the forward replay
+    (``adjoint/core._forward_magnetic_fields_cpml`` /
+    ``_forward_electric_fields_cpml`` and ``_step_state``): the psi keys follow
+    ``fdtd/boundary/cpml._CPML_MEMORY_SPECS`` (``psi_hy_z`` = z-family,
+    ``psi_hy_x`` = x-family), and a swap stores the advanced z-family psi under
+    the x key. Because ``psi_hy_z`` and ``psi_hy_x`` differ by ~3 orders of
+    magnitude here, that swap moves a psi field by its full scale (~6e-2), far
+    above the gate -- falsification-checked by transposing the unpack order,
+    which drives the compared diff to ~O(scale).
+
+    Gate: fixed replay matches the native CPML forward to ~1e-7 relative / ~3e-8
+    absolute on the significant psi families (the fused CPML kernel and the torch
+    replay differ only in reduction order); rtol=1e-4/atol=1e-6 sits comfortably
+    above that drift and orders of magnitude below the swap error.
+    """
+    from witwin.maxwell.fdtd.boundary.cpml import _CPML_MEMORY_SPECS
+
+    steps = 80
+    distributed = DistributedFDTD(
+        _pml_scene(),
+        frequency=_FREQUENCY,
+        parallel=_parallel(cuda_p2p_devices),
+        absorber_type="cpml",
+    )
+    distributed.init_field()
+    require_distributed_adjoint_support(distributed)
+
+    field_names = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+    psi_names = tuple(_CPML_MEMORY_SPECS)
+
+    checkpoint = capture_distributed_checkpoint(distributed, 0)
+    distributed.solve(time_steps=steps, dft_frequency=None, full_field_dft=False)
+    forward = {
+        shard.rank: {
+            name: getattr(shard.solver, name).detach().clone()
+            for name in field_names + psi_names
+        }
+        for shard in distributed.shards
+    }
+
+    trajectories = replay_distributed_segment(distributed, checkpoint, 0, steps)
+
+    assert len(distributed.shards) == 2
+    field_energy = 0.0
+    psi_energy = 0.0
+    for shard in distributed.shards:
+        replayed = trajectories[shard.rank][steps]
+        for name in field_names:
+            owned = _owned_slice(shard, name)
+            field_energy += float(forward[shard.rank][name][owned].abs().sum().item())
+            torch.testing.assert_close(
+                replayed[name][owned],
+                forward[shard.rank][name][owned],
+                rtol=1e-5,
+                atol=1e-5,
+                msg=f"rank {shard.rank} field {name} owned-state replay mismatch",
+            )
+        for name in psi_names:
+            parent_field = _CPML_MEMORY_SPECS[name][0]
+            owned = _owned_slice(shard, parent_field)
+            forward_owned = forward[shard.rank][name][owned]
+            psi_energy += float(forward_owned.abs().sum().item())
+            torch.testing.assert_close(
+                replayed[name][owned],
+                forward_owned,
+                rtol=1e-4,
+                atol=1e-6,
+                msg=(
+                    f"rank {shard.rank} psi {name} owned-state replay mismatch: "
+                    f"max abs diff {(replayed[name][owned] - forward_owned).abs().max().item():.3e}"
+                ),
+            )
+
+    # Non-vacuity: both the fields and the psi memory must carry real signal, so
+    # the psi comparison is not passing on all-zero tensors.
+    assert field_energy > 0.0
+    assert psi_energy > 0.0
+    # The two Hy families must be numerically distinct so a key swap is detectable.
+    hy_z = max(
+        float(forward[shard.rank]["psi_hy_z"].abs().max()) for shard in distributed.shards
+    )
+    hy_x = max(
+        float(forward[shard.rank]["psi_hy_x"].abs().max()) for shard in distributed.shards
+    )
+    assert hy_z > 3.0 * max(hy_x, 1e-30) or hy_x > 3.0 * max(hy_z, 1e-30), (
+        "psi_hy_z and psi_hy_x are comparable; a swap would be undetectable here"
+    )
+
+
 def test_replay_requires_matching_partition(cuda_p2p_devices, cuda_memory_cleanup):
     scene = _standard_scene("cuda:0")
     distributed = DistributedFDTD(
@@ -205,7 +303,7 @@ def test_distributed_solver_rejects_unsupported_trainable_channel_directly():
         DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_cpu_parallel())
 
 
-def test_checkpoint_rejects_cpml_absorber(cuda_p2p_devices, cuda_memory_cleanup):
+def _pml_scene():
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.4, 0.4), (-0.2, 0.2), (-0.2, 0.2))),
         grid=mw.GridSpec.uniform(0.1),
@@ -221,12 +319,36 @@ def test_checkpoint_rejects_cpml_absorber(cuda_p2p_devices, cuda_memory_cleanup)
             name="drive",
         )
     )
+    return scene
+
+
+def test_checkpoint_accepts_cpml_absorber(cuda_p2p_devices, cuda_memory_cleanup):
+    # The distributed CPML adjoint (S4) is now a supported capability: the
+    # checkpoint/replay/reverse path accepts the CPML absorbing update, with the
+    # x-CPML pinning invariant asserted. capture must succeed and produce a
+    # checkpoint carrying the twelve psi fields.
     distributed = DistributedFDTD(
-        scene,
+        _pml_scene(),
         frequency=_FREQUENCY,
         parallel=_parallel(cuda_p2p_devices),
         absorber_type="cpml",
     )
     distributed.init_field()
-    with pytest.raises(ValueError, match="pure real standard"):
+    checkpoint = capture_distributed_checkpoint(distributed, 0)
+    for shard in distributed.shards:
+        tensors = checkpoint.states[shard.rank].tensors
+        assert "psi_ex_y" in tensors and "psi_hz_y" in tensors
+
+
+def test_checkpoint_rejects_graded_sigma_absorber(cuda_p2p_devices, cuda_memory_cleanup):
+    # The legacy graded-sigma absorbers have no verified distributed reverse core
+    # and stay rejected at the checkpoint entry point.
+    distributed = DistributedFDTD(
+        _pml_scene(),
+        frequency=_FREQUENCY,
+        parallel=_parallel(cuda_p2p_devices),
+        absorber_type="pml",
+    )
+    distributed.init_field()
+    with pytest.raises(ValueError, match="CPML absorbing update"):
         capture_distributed_checkpoint(distributed, 0)

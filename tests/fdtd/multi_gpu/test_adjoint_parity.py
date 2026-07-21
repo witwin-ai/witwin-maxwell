@@ -481,24 +481,23 @@ def test_guard_trainable_material_perturbation_rejected_at_prepare():
 
 @pytest.mark.parametrize(
     "absorber",
-    ("cpml", "stablepml", "pml", "absorber"),
+    ("pml", "absorber"),
 )
-def test_guard_absorbing_boundary_rejected_at_prepare(absorber):
-    """Every absorber family must fail closed at prepare before any allocation.
+def test_guard_graded_sigma_absorber_rejected_at_prepare(absorber):
+    """The legacy graded-sigma absorbers must fail closed at prepare.
 
-    The verified distributed adjoint envelope is the open-boundary update: the
-    parity/FD gates run exclusively on ``BoundarySpec.none()`` scenes. A PML
-    boundary activates the configured absorber (CPML machinery for
-    "cpml"/"stablepml", legacy graded-sigma for "pml"/"absorber"), none of which
-    has a verified distributed reverse core. Regression for the prepare guard
-    previously testing only ``absorber == "cpml"`` -- "stablepml" was rejected
-    late (after allocation) and "pml"/"absorber" ran the distributed reverse
-    outside the envelope (fail-open).
+    The verified distributed adjoint envelope covers the open-boundary standard
+    update and the CPML absorbing update (absorber "cpml"/"stablepml", gated by
+    ``test_adjoint_parity_cpml.py``). The legacy graded-sigma absorbers
+    ("pml"/"absorber") have no verified distributed reverse core and stay rejected
+    at prepare before any allocation. Regression for the prepare guard: "cpml"/
+    "stablepml" are now a supported capability, so this guard must reject the
+    graded-sigma families specifically, not every PML boundary.
     """
 
     scene = _guard_scene(boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0))
     scene.add_material_region(_trainable_density_region())
-    with pytest.raises(ValueError, match="absorbing"):
+    with pytest.raises(ValueError, match="graded-sigma"):
         _prepare_parallel(scene, absorber=absorber)
 
 
