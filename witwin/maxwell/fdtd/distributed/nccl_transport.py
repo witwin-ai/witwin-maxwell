@@ -476,6 +476,65 @@ class NcclHaloTransport:
             )
             engine.magnetic_received.record(engine.compute_stream)
 
+    # -- engine-based forward replay dict halos ----------------------------
+    #
+    # The distributed adjoint replay advances a per-rank state dict (cloned
+    # checkpoint tensors) rather than the live solver fields, so it needs the
+    # forward Yee halos to move between neighbouring ranks' dict tensors. These
+    # are the transpose siblings of the reverse adjoint halos above and mirror
+    # the live-field :meth:`exchange_electric` / :meth:`exchange_magnetic`
+    # semantics exactly, only reading/writing ``current[rank]`` instead of the
+    # solver. In-process the equivalent operations are direct neighbour copies
+    # (:meth:`CudaP2PHaloTransport.forward_electric_halo`); over NCCL they become
+    # collective x-plane sends so the interface mid-step is correct with a single
+    # local shard per rank.
+
+    def forward_electric_halo(self, engines, current) -> None:
+        """Forward electric replay halo over NCCL on a per-rank state dict.
+
+        Ships this rank's first owned Ey/Ez node plane to the left neighbour's
+        high ghost node (data flows right -> left) and receives the right
+        neighbour's first owned node plane into this rank's high ghost node.
+        """
+
+        engine = engines[0]
+        state = current[engine.rank]
+        ns = engine.layout.storage_node_owned
+        with torch.cuda.device(engine.device), torch.cuda.stream(engine.compute_stream):
+            first_owned = None
+            if self.left_rank is not None:
+                first_owned = [state["Ey"][ns.start], state["Ez"][ns.start]]
+            ghost = None
+            if self.right_rank is not None:
+                ghost = [state["Ey"][ns.stop], state["Ez"][ns.stop]]
+            self._electric_halo_planes(
+                first_owned_node_planes=first_owned, ghost_node_planes=ghost
+            )
+            engine.electric_received.record(engine.compute_stream)
+
+    def forward_magnetic_halo(self, engines, current) -> None:
+        """Forward magnetic replay halo over NCCL on a per-rank state dict.
+
+        Ships this rank's last owned Hy/Hz cell plane to the right neighbour's low
+        ghost cell (data flows left -> right) and receives the left neighbour's
+        last owned cell plane into this rank's low ghost cell.
+        """
+
+        engine = engines[0]
+        state = current[engine.rank]
+        cs = engine.layout.storage_cell_owned
+        with torch.cuda.device(engine.device), torch.cuda.stream(engine.compute_stream):
+            last_owned = None
+            if self.right_rank is not None:
+                last_owned = [state["Hy"][cs.stop - 1], state["Hz"][cs.stop - 1]]
+            low_ghost = None
+            if self.left_rank is not None:
+                low_ghost = [state["Hy"][0], state["Hz"][0]]
+            self._magnetic_halo_planes(
+                last_owned_cell_planes=last_owned, low_ghost_planes=low_ghost
+            )
+            engine.magnetic_received.record(engine.compute_stream)
+
     # -- engine-based reverse (adjoint transpose) exchanges -----------------
     #
     # The distributed reverse driver invokes these exactly as the in-process

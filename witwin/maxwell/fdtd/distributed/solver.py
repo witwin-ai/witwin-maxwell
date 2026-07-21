@@ -221,9 +221,17 @@ class DistributedFDTD:
         parallel: FDTDParallelConfig,
         absorber_type: str = "cpml",
         cpml_config: dict[str, Any] | None = None,
+        allow_adjoint: bool = False,
     ):
         if not isinstance(parallel, FDTDParallelConfig):
             raise TypeError("parallel must be an FDTDParallelConfig instance.")
+        # Internal flag: set only by the verified NCCL adjoint driver so it may
+        # construct a per-rank solver for a trainable point-monitor / full-field
+        # objective without tripping the forward-only NCCL monitor / trainable
+        # fences. Every other capability fence stays active. Never exposed on the
+        # public Simulation path -- a plain NCCL forward run keeps allow_adjoint
+        # False and the fences reject a trainable/monitor scene as before.
+        self._allow_adjoint = bool(allow_adjoint)
         self._nccl = parallel.transport == "nccl"
         if self._nccl and not all(
             os.environ.get(key) for key in ("RANK", "WORLD_SIZE", "LOCAL_RANK")
@@ -524,14 +532,36 @@ class DistributedFDTD:
         in-process ``transport="cuda_p2p"`` runtime covers all of them today.
         """
 
+        from ...monitors import FieldTimeMonitor, PointMonitor
         from ...simulation import _scene_trainable_density_parameters
 
+        # The verified NCCL adjoint driver (allow_adjoint=True) seeds a separable
+        # local objective per rank: a point monitor is owned by exactly one rank and
+        # a full-field DFT is gathered slab-wise, so neither needs the cross-rank
+        # per-monitor payload gather the forward path lacks. Point-region monitors
+        # are therefore admitted on the adjoint path; every non-point (tiled) monitor
+        # still needs the unimplemented cotangent scatter and stays rejected.
         if self.logical_scene.monitors:
-            raise ValueError(
-                "Multi-GPU NCCL forward currently gathers full-field DFT output only; "
-                "per-monitor payload gather across ranks is not wired yet. Remove monitors, "
-                "use gather_fields output, or run transport='cuda_p2p'."
-            )
+            non_point = [
+                monitor
+                for monitor in self.logical_scene.monitors
+                if not (
+                    self._allow_adjoint
+                    and (
+                        isinstance(monitor, PointMonitor)
+                        or (
+                            isinstance(monitor, FieldTimeMonitor)
+                            and monitor.region_kind == "point"
+                        )
+                    )
+                )
+            ]
+            if non_point:
+                raise ValueError(
+                    "Multi-GPU NCCL forward currently gathers full-field DFT output only; "
+                    "per-monitor payload gather across ranks is not wired yet. Remove monitors, "
+                    "use gather_fields output, or run transport='cuda_p2p'."
+                )
         if (
             self.logical_scene.circuits
             or self.logical_scene.networks
@@ -542,7 +572,7 @@ class DistributedFDTD:
                 "Multi-GPU NCCL forward does not drive the owner-resident circuit/network/"
                 "wire/port runtimes yet; run transport='cuda_p2p' for coupled scenes."
             )
-        if _scene_trainable_density_parameters(self.logical_scene):
+        if _scene_trainable_density_parameters(self.logical_scene) and not self._allow_adjoint:
             raise ValueError(
                 "Multi-GPU NCCL adjoint (trainable density) is not wired yet; run the "
                 "trainable scene with transport='cuda_p2p'."

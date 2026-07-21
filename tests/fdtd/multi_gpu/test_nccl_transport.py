@@ -23,6 +23,7 @@ _WORKER = Path(__file__).with_name("_nccl_transport_worker.py")
 _FORWARD_WORKER = Path(__file__).with_name("_nccl_forward_worker.py")
 _RANKDEATH_WORKER = Path(__file__).with_name("_nccl_rankdeath_worker.py")
 _TRANSPOSE_WORKER = Path(__file__).with_name("_nccl_transport_adjoint_worker.py")
+_ADJOINT_WORKER = Path(__file__).with_name("_nccl_adjoint_worker.py")
 
 
 def _torchrun(worker: Path, *, nproc: int = 2, timeout: int = 300, env: dict | None = None):
@@ -378,6 +379,101 @@ def test_two_rank_nccl_reverse_transpose_identity_falsification(mode):
         "falsified NCCL transpose identity unexpectedly passed\n"
         f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
     )
+
+
+def _torchrun_adjoint(mode: str, *, timeout: int):
+    env = dict(os.environ)
+    env["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+    env["TORCH_NCCL_SHOW_EAGER_INIT_P2P_SERIALIZATION_WARNING"] = "false"
+    env["WITWIN_NCCL_ADJ_MODE"] = mode
+    return _torchrun(_ADJOINT_WORKER, timeout=timeout, env=env)
+
+
+@pytest.mark.nccl
+@pytest.mark.parametrize(
+    "mode,timeout",
+    (
+        ("standard", 400),
+        ("cpml", 400),
+        ("cpml_psi", 900),
+        ("determinism", 600),
+    ),
+)
+def test_two_rank_nccl_adjoint_parity(mode, timeout):
+    """Per-rank collective NCCL reverse driver matches the single-GPU adjoint.
+
+    The two-rank worker drives ``run_nccl_distributed_reverse`` (per-rank forward
+    with checkpoints, NCCL forward-replay dict halos, local separable point-monitor
+    seed, transposed NCCL adjoint reverse, grad_eps gather to rank 0 + rank-0
+    pullback) and, on rank 0, compares the world-summed objective and the gathered
+    grad_eps material gradient against an independent single-GPU adjoint on the same
+    scene. ``standard`` is an open-boundary cross-seam objective; ``cpml`` an
+    x-CPML interior probe; ``cpml_psi`` drives the probe deep into the high x-PML so
+    the reverse threads the objective back through the CPML psi recursion (the
+    worker asserts the world-max psi cotangent is a significant fraction of the E/H
+    adjoint scale before the parity gate); ``determinism`` reruns the reverse twice
+    and asserts the gathered grad_eps is bitwise identical. Gates mirror
+    ``test_adjoint_parity_cpml.py`` (loss rtol 5e-5/atol 5e-6; grad rtol 1e-4 with
+    an atol floor 1e-6*max|grad|).
+    """
+
+    _skip_without_two_gpu_nccl()
+    completed = _torchrun_adjoint(mode, timeout=timeout)
+    assert completed.returncode == 0, (
+        f"NCCL adjoint driver [{mode}] failed\n"
+        f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+    )
+    assert f"NCCL_ADJOINT_WORKER_OK[{mode}" in completed.stdout, completed.stdout
+
+
+@pytest.mark.nccl
+@pytest.mark.parametrize(
+    "mode,timeout",
+    (
+        ("falsify_mag_halo", 400),
+        ("falsify_elec_halo", 400),
+        ("falsify_psi", 900),
+    ),
+)
+def test_two_rank_nccl_adjoint_falsification(mode, timeout):
+    """No-op'ing a reverse halo or zeroing the psi carry must break parity.
+
+    Each falsification perturbs only the distributed reverse (the single-GPU
+    reference is untouched) and asserts the 2-GPU gradient moves off the reference
+    by >= 1e-3 relative -- well above the ~1e-7 baseline drift and below the smallest
+    real error, so the parity gate is non-vacuous. The worker prints OK only when
+    the perturbed run has genuinely diverged; a clean parity here would fail the
+    worker (nonzero exit), so this test requires exit 0 AND the OK token.
+    """
+
+    _skip_without_two_gpu_nccl()
+    completed = _torchrun_adjoint(mode, timeout=timeout)
+    assert completed.returncode == 0, (
+        f"NCCL adjoint falsification [{mode}] failed\n"
+        f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+    )
+    assert f"NCCL_ADJOINT_WORKER_OK[{mode}" in completed.stdout, completed.stdout
+
+
+@pytest.mark.nccl
+def test_two_rank_nccl_adjoint_unsupported_rejects_without_deadlock():
+    """An unsupported-adjoint scene rejects cleanly on all ranks (no hang).
+
+    The worker drives a trainable-density scene on a legacy graded-sigma absorber,
+    which has no verified distributed reverse core. The reject is symmetric (the
+    scene is identical on every rank) and fires before any halo collective, so both
+    ranks return promptly rather than one blocking in a collective the other
+    abandoned. The subprocess timeout is the deadlock witness: a hang would exceed
+    it. A clean rejection prints the OK token on rank 0.
+    """
+
+    _skip_without_two_gpu_nccl()
+    completed = _torchrun_adjoint("guard_deadlock", timeout=200)
+    assert completed.returncode == 0, (
+        "NCCL adjoint deadlock-freedom guard failed\n"
+        f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+    )
+    assert "NCCL_ADJOINT_WORKER_OK[guard_deadlock]" in completed.stdout, completed.stdout
 
 
 @pytest.mark.nccl
