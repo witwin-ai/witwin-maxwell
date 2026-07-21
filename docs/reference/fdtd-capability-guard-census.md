@@ -170,6 +170,20 @@ and the guard disappears once the recurrence lands. It is counted under
 "Material compilers" (11 -> 12); lower the budget when the lossy recurrence is
 wired into the runtime.
 
+**2026-07-21 update (plan 07 Phase 4, B2 lossy-wire recurrence):** the recurrence
+is now wired. The passive series-impedance ADE is consumed by the wire current
+update (`witwin/maxwell/fdtd/wire_lossy.py`), the `ohmic_loss` monitor emits real
+dissipation, and a finite conductor compiles and runs. The finite-conductor
+deferral guard above is REMOVED (-1, "Material compilers" 12 -> 11). The remaining
+compiler kind check rejects only malformed (non-pec/finite) conductors and is a
+defensive `ValueError`, not a counted capability guard. Two narrower capability
+gaps replace it (+2): the finite-conductor reverse/adjoint replay
+(`fdtd/wire.py::replay_wire_state`, gated until the B3 conductivity adjoint
+transposes the ADE state) and the finite-conductor checkpoint/resume
+(`fdtd/checkpoint.py`, the ADE loss state is not yet in the checkpoint schema).
+Net budget `175 -> 176`; lower it when the lossy reverse and checkpoint schema
+land (B3).
+
 ### Nonlinear-circuit-device reconciliation (2026-07-17)
 
 The plan 05 nonlinear-circuit-device Phase 0 slice adds the Device + Newton

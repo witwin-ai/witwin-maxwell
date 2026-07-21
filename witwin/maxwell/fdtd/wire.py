@@ -7,6 +7,11 @@ from typing import Any
 import torch
 
 from ..thin_wire import WireData
+from .wire_lossy import (
+    LossySegmentModel,
+    build_lossy_segment_model,
+    resolve_lossy_band,
+)
 
 
 @dataclass(frozen=True)
@@ -43,6 +48,8 @@ class WireRuntime:
     maxwell_cfl_limit: float
     dt_adjusted: bool
     state_bytes: int
+    lossy_model: LossySegmentModel | None = None
+    ade_state: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +169,13 @@ def replay_wire_state(
     runtime = getattr(solver, "_wire_runtime", None)
     if runtime is None:
         raise RuntimeError("Wire replay requires an initialized wire runtime.")
+    if runtime.lossy_model is not None:
+        raise NotImplementedError(
+            "Reverse/adjoint replay of a finite-conductor thin wire is not yet "
+            "implemented: the lossy current recurrence carries auxiliary ADE state "
+            "that the reverse pass must transpose (conductivity adjoint, B3). Run a "
+            "PEC wire for differentiable workflows until the lossy reverse lands."
+        )
     coeff = runtime.coefficients
     sampled = _field_vector(
         {name: state[name] for name in ("Ex", "Ey", "Ez")},
@@ -882,7 +896,31 @@ def initialize_wire_runtime(solver) -> WireRuntime | None:
     current = torch.zeros(segment_count, device=device, dtype=dtype)
     charge = torch.zeros(node_count, device=device, dtype=dtype)
     emf = torch.zeros(segment_count, device=device, dtype=dtype)
+
+    # Finite-conductor segments consume a passive series-impedance ADE in the
+    # current recurrence (fdtd/wire_lossy.py). Build it with the FINAL dt (after
+    # the joint Maxwell/wire CFL adjustment above) so the discrete companion and
+    # its stability certificate use the timestep the run actually steps. The
+    # fitting band is derived from the monitored frequencies (fail-closed when a
+    # lossy wire carries no frequency to fit at).
+    lossy_model = None
+    ade_state = None
+    if network.metadata.get("has_finite_conductor"):
+        lossy_model = build_lossy_segment_model(
+            inductance=coefficients["inductance"],
+            radius=network.radius.to(device=device, dtype=dtype),
+            length=network.length.to(device=device, dtype=dtype),
+            segment_wire_ids=network.segment_wire_ids,
+            metadata=network.metadata,
+            band=resolve_lossy_band(_lossy_band_frequencies(solver, monitors)),
+            dt=float(solver.dt),
+        )
+        if lossy_model is not None:
+            ade_state = lossy_model.initial_state()
+
     state_bytes = sum(value.numel() * value.element_size() for value in (current, charge, emf))
+    if ade_state is not None:
+        state_bytes += ade_state.numel() * ade_state.element_size()
     runtime = WireRuntime(
         network=network,
         monitors=monitors,
@@ -903,9 +941,66 @@ def initialize_wire_runtime(solver) -> WireRuntime | None:
         maxwell_cfl_limit=maxwell_cfl_limit,
         dt_adjusted=dt_adjusted,
         state_bytes=state_bytes,
+        lossy_model=lossy_model,
+        ade_state=ade_state,
     )
     solver._wire_runtime = runtime
     return runtime
+
+
+def _lossy_band_frequencies(solver, monitors) -> tuple[float, ...]:
+    """Collect the frequencies that set a lossy wire's fitting band.
+
+    Uses the wire monitors' frequencies (the quantities read out) and anchors to
+    the source frequency so a lossy wire always fits where the run cares.
+    """
+
+    frequencies: list[float] = []
+    for monitor in monitors:
+        frequencies.extend(float(value) for value in getattr(monitor, "frequencies", ()))
+    source_frequency = getattr(solver, "source_frequency", None)
+    if source_frequency is not None:
+        frequencies.append(float(source_frequency))
+    return tuple(frequencies)
+
+
+def _update_wire_state_lossy(solver, runtime) -> None:
+    """Advance I/q for a network with finite-conductor segments (torch path).
+
+    Mirrors the CUDA ``updateWireState1D`` leapfrog ordering (current update with
+    the pre-step charge, then charge update with the new current) but replaces the
+    current update with the passive series-impedance companion. PEC segments in
+    the same network keep G=0 (the lossless leapfrog). The pure-PEC path never
+    reaches here, so it stays byte-identical.
+    """
+
+    coeff = runtime.coefficients
+    model = runtime.lossy_model
+    charge = runtime.charge
+    potential = torch.where(
+        coeff["grounded"],
+        torch.zeros_like(charge),
+        charge / coeff["node_capacitance"],
+    )
+    drive = runtime.emf + potential.index_select(0, coeff["tail"]) - potential.index_select(
+        0, coeff["head"]
+    )
+    current_next, ade_next = model.advance_current(
+        runtime.current, runtime.ade_state, drive
+    )
+    incidence = coeff["node_signs"].to(dtype=current_next.dtype) * current_next.index_select(
+        0, coeff["node_segments"]
+    )
+    flow = _segmented_sum(incidence, coeff["node_offsets"])
+    charge_next = torch.where(
+        coeff["grounded"],
+        torch.zeros_like(charge),
+        charge - float(solver.dt) * flow,
+    )
+    # In-place writes preserve the runtime tensors referenced by monitors/checkpoints.
+    runtime.current.copy_(current_next)
+    runtime.charge.copy_(charge_next)
+    runtime.ade_state.copy_(ade_next)
 
 
 def sample_and_update_wire(solver) -> None:
@@ -923,6 +1018,9 @@ def sample_and_update_wire(solver) -> None:
         weights=coeff["weights"],
         emf=runtime.emf,
     ).launchRaw()
+    if runtime.lossy_model is not None:
+        _update_wire_state_lossy(solver, runtime)
+        return
     solver.fdtd_module.updateWireState1D(
         emf=runtime.emf,
         tail=coeff["tail"],
@@ -1160,16 +1258,45 @@ def finalize_wire_data(solver) -> dict[str, WireData]:
             if state["charge_real"] is not None
             else None
         )
-        ohmic_loss = (
-            torch.zeros(
-                (len(state["entries"]), state["segment_indices"].numel()),
-                device=solver.device,
-                dtype=solver.Ex.dtype,
-            )
-            if "ohmic_loss" in monitor.quantities
-            else None
-        )
         segment_indices = monitor.segment_indices.to(device=network.segment_ids.device, dtype=torch.int64)
+        ohmic_loss = None
+        if "ohmic_loss" in monitor.quantities:
+            # Time-averaged ohmic dissipation per monitored segment at each
+            # frequency: P = 0.5 * Re(Z_series(f)) * |I(f)|^2 with the per-segment
+            # series AC resistance Re(Z'(f)) * length the passive companion realizes
+            # (R_dc + Re(excess_fit)); PEC segments contribute zero. This is the
+            # cycle-averaged dissipation the recurrence removes (the instantaneous
+            # companion dissipation integrates to it), so the monitored channel
+            # closes the wire energy budget.
+            if current is None:
+                raise ValueError(
+                    "A wire ohmic_loss monitor requires the current quantity."
+                )
+            if runtime.lossy_model is None:
+                ohmic_loss = torch.zeros(
+                    (len(state["entries"]), segment_indices.numel()),
+                    device=solver.device,
+                    dtype=solver.Ex.dtype,
+                )
+            else:
+                frequencies = torch.tensor(
+                    [entry["frequency"] for entry in state["entries"]],
+                    dtype=torch.float64,
+                )
+                ac_resistance = runtime.lossy_model.ac_resistance_per_length(
+                    frequencies
+                ).index_select(
+                    1, segment_indices.to(device=solver.device)
+                )
+                seg_length = network.length.index_select(0, segment_indices).to(
+                    device=solver.device, dtype=solver.Ex.dtype
+                )
+                ohmic_loss = (
+                    0.5
+                    * ac_resistance
+                    * seg_length.reshape(1, -1)
+                    * current.abs().square()
+                )
         node_indices = monitor.node_indices.to(device=network.node_ids.device, dtype=torch.int64)
         metadata = {
             "quantities": tuple(monitor.quantities),

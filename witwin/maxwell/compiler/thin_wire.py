@@ -1286,19 +1286,36 @@ def compile_thin_wires(
     wire_source_point_offsets = [0]
     source_point_positions = []
     wire_segment_offsets = [0]
+    wire_conductor_kinds: list[str] = []
+    wire_conductivity: list[float | None] = []
+    wire_permeability: list[float | None] = []
     gap_samples: dict[
         tuple[str, int], list[tuple[int, int, torch.Tensor]]
     ] = {}
 
     for wire_id, wire in enumerate(wires):
-        if _kind_name(wire.conductor) != "pec":
-            raise NotImplementedError(
-                f"ThinWire {wire.name!r} uses a finite conductor. The per-unit-length "
-                "series-impedance model is available via "
-                "witwin.maxwell.compiler.wire_impedance.fit_series_impedance, but the "
-                "lossy current recurrence is not yet wired into the FDTD runtime; use a "
-                "PEC conductor to run a thin-wire FDTD simulation."
+        conductor_kind = _kind_name(wire.conductor)
+        if conductor_kind not in {"pec", "finite"}:
+            # Defensive: WireConductor already restricts kind to pec/finite at
+            # construction, so this is a contract check on malformed input, not a
+            # capability gap (kept out of the guard census).
+            raise ValueError(
+                f"ThinWire {wire.name!r} conductor kind {conductor_kind!r} is not "
+                "supported; use WireConductor.pec() or WireConductor.finite(...)."
             )
+        # A finite round conductor contributes a per-unit-length series impedance
+        # Z'(omega) = R_dc + skin-effect excess. The excess dynamics are fitted to a
+        # passive rational ADE and consumed by the lossy current recurrence in
+        # fdtd/wire_lossy.py; the material parameters travel through metadata so the
+        # compiled topology (and its synchronization-free CUDA ops) stay unchanged
+        # for the PEC path.
+        wire_conductor_kinds.append(conductor_kind)
+        wire_conductivity.append(
+            None if conductor_kind == "pec" else float(wire.conductor.conductivity)
+        )
+        wire_permeability.append(
+            None if conductor_kind == "pec" else float(wire.conductor.permeability)
+        )
         (
             path,
             path_tensors,
@@ -1964,10 +1981,29 @@ def compile_thin_wires(
             "segment_semantics": "physical_polyline_span",
             "fragment_semantics": "cell_local_coupling_without_state",
             "port_bindings": tuple(port_binding_metadata),
+            "conductor": MappingProxyType(
+                {
+                    "wire_names": names,
+                    "kinds": tuple(wire_conductor_kinds),
+                    "conductivity": tuple(wire_conductivity),
+                    "permeability": tuple(wire_permeability),
+                }
+            ),
+            "has_finite_conductor": any(
+                kind == "finite" for kind in wire_conductor_kinds
+            ),
             "validity": MappingProxyType(
                 {
                     "phase": 3,
-                    "conductor": "pec",
+                    "conductor": (
+                        "pec"
+                        if all(kind == "pec" for kind in wire_conductor_kinds)
+                        else (
+                            "finite"
+                            if all(kind == "finite" for kind in wire_conductor_kinds)
+                            else "mixed"
+                        )
+                    ),
                     "topology": "arbitrary_direction_graph",
                     "junction_count": len(public_junction_names),
                     "branch_node_count": branch_node_count,

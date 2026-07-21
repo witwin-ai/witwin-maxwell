@@ -230,7 +230,20 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "witwin"
 # deterministic order. Detached columns / no-contribution now raise ValueError (a
 # usage error, not a capability gap). "Public simulation, result, and network
 # workflows" 24 -> 23; budget lowered in the same change.
-CAPABILITY_GUARD_BUDGET = 175
+# 2026-07-21 (plan 07 Phase 4, lossy-wire current recurrence B2): 175 -> 176 (net +1).
+# The finite-conductor compile-time deferral guard in compiler/thin_wire.py
+# ("...lossy current recurrence is not yet wired into the FDTD runtime; use a PEC
+# conductor...") is REMOVED (-1): the passive series-impedance ADE recurrence is now
+# consumed by the wire current update (fdtd/wire_lossy.py) and the ohmic_loss
+# monitor emits real dissipation, so a finite conductor compiles and runs. The
+# remaining compiler kind check rejects only malformed (non-pec/finite) conductors
+# and is a defensive ValueError (not counted). Two narrower capability gaps replace
+# it (+2): the finite-conductor reverse/adjoint replay (fdtd/wire.py
+# replay_wire_state, the B3 conductivity adjoint carrying the ADE state) and the
+# finite-conductor checkpoint/resume (fdtd/checkpoint.py, the ADE loss state is not
+# yet in the checkpoint schema), both fail closed for a lossy wire. "Material
+# compilers" 12 -> 11 and "Time-domain wire runtime" +2 in the same change.
+CAPABILITY_GUARD_BUDGET = 176
 
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.

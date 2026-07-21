@@ -181,7 +181,10 @@ class LossySegmentModel:
             model = self.models[model_index]
             values = model.ac_resistance(freqs).to(dtype=resistance.dtype)
             resistance[:, segment] = values.to(device=resistance.device)
-        return resistance
+        # The physical series AC resistance is non-negative; clamp the shared fit's
+        # occasional sub-tolerance undershoot so the reported ohmic dissipation
+        # 0.5 Re(Z') |I|^2 stays a valid (non-negative) energy accounting.
+        return resistance.clamp_min(0.0)
 
 
 def _companion_spectral_radius(
@@ -284,6 +287,18 @@ def _fit_stable_order(
             continue
         if model.discrete is None:
             raise RuntimeError("Lossy wire fit did not produce a discrete ADE; dt must be set.")
+        # Physical quality gate: the realized in-band series AC resistance must be
+        # strictly positive (a passive conductor never has negative loss). The
+        # shared vector fit is nondeterministic (B1) and can occasionally dip
+        # non-positive in band; reject such an order so both the recurrence and the
+        # reported ohmic_loss stay physical.
+        band_samples = torch.logspace(
+            math.log10(band[0]), math.log10(band[1]), 24, dtype=torch.float64
+        )
+        min_ac = float(model.ac_resistance(band_samples).min().item())
+        if min_ac <= 0.0:
+            last_error = f"order {order}: in-band AC resistance dipped to {min_ac:.4g} <= 0"
+            continue
         radius_spectral = max(
             _companion_spectral_radius(
                 model.discrete,
