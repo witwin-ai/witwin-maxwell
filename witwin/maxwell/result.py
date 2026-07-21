@@ -12,6 +12,7 @@ from .circuits import CircuitData
 from .monitors import (
     ClosedSurfaceMonitor,
     FinitePlaneMonitor,
+    IncidentPowerDensityMonitor,
     MediumMonitor,
     PermittivityMonitor,
     PowerLossMonitor,
@@ -1870,6 +1871,44 @@ class Result:
             material_ids=material_ids,
             geometry_ids=geometry_ids,
             source_result_fingerprint=f"runtime-result:{id(self):x}",
+        )
+
+    def incident_power_density(
+        self,
+        monitor: str,
+        *,
+        spatial_average=_UNSET,
+    ):
+        """Reduce a declared IncidentPowerDensityMonitor to incident power density.
+
+        Pure result-domain reduction: forms the time-averaged normal Poynting
+        component ``S.n`` per cell, its magnitude ``|S.n|`` (exposure incident
+        power density in W/m^2), the plane-integrated flux, and — when the monitor
+        (or an explicit ``spatial_average`` override) requests a window area — the
+        versioned ``spatial-average-v1`` moving-window average of ``|S.n|``. Fails
+        closed when the named monitor is not an
+        :class:`IncidentPowerDensityMonitor`.
+        """
+
+        from .postprocess.incident_power import compute_incident_power_density
+
+        public_monitor = _find_scene_monitor(self.scene, monitor)
+        if not isinstance(public_monitor, IncidentPowerDensityMonitor):
+            raise KeyError(
+                "Result.incident_power_density requires a declared "
+                f"IncidentPowerDensityMonitor; {monitor!r} is not one."
+            )
+        if spatial_average is _UNSET:
+            area = public_monitor.spatial_average
+        elif spatial_average is None:
+            area = None
+        else:
+            area = float(spatial_average)
+        payload = self.raw_monitor(monitor)
+        return compute_incident_power_density(
+            payload,
+            monitor_name=monitor,
+            spatial_average_area=area,
         )
 
     def sar(

@@ -670,3 +670,16 @@ FDTD antenna validation (plan-01 Phase 4, 2026-07-19). Each row is measured from
 | antenna/patch | wave-level | broadside directivity (in-band max) | -6.974 | 5 | 239.471% | gap | pending-generation (sources=0; see RF/antenna reference section) |
 
 _Section regenerated: 2026-07-21T07:17:39+00:00_
+
+## SAR exposure validation
+
+SAR phantom exposure validation (plan 10 H3, 2026-07-21). Each row is measured from the public `Scene -> Simulation -> Result` path over the canonical phantom family (`benchmark/scenes/sar/`); the per-scene status column is authoritative. `sar/layered_slab` is the binding wave-level gate: the absorbed power measured as the volume conduction-loss integral (`sigma |E|^2`, the SAR basis) agrees with the net surface Poynting balance (`flux_in - flux_out`, E x H on two planes) to ~17% at dx=4 mm and closes monotonically under refinement (0.20 -> 0.17 -> 0.125). Surface E x H is independent of the volume loss, so this is a conservation-law reference. `sar/one_gram_cube` is an `analytic-identity` (a 3x3x3 window weighing exactly 1 g, whose uniform-field average equals the hand-computed point SAR). `sar/uniform_lossy_cube` reports the volume/channel self-consistency closure (`analytic-identity`, supporting only). `sar/antenna_near_phantom` is `blocked` -- the FDTD port machinery fails closed on the conductive tissue background. Gate classes are the verbatim taxonomy (`docs/reference/gate-classification.md`); no external reference-solver run backs this family (every row `analytic-only`). Per-scene JSON artifacts live under `docs/assessments/sar-phantom-validation/`.
+
+| Scene | Gate class | Quantity | Measured | Reference | Rel error | Status | External ref |
+| --- | --- | --- | ---: | ---: | ---: | --- | --- |
+| sar/one_gram_cube | analytic-identity | peak_1g_sar | 0.00594 | 0.00594 | 0.000% | pass | analytic-only |
+| sar/uniform_lossy_cube | analytic-identity | volume/channel_closure | 0.1363 | 0.1363 | 0.000% | pass | analytic-only |
+| sar/layered_slab | wave-level | surface/volume_closure | 0.433 | 0.5197 | 16.686% | pass | analytic-only |
+| sar/antenna_near_phantom | wave-level | see artifact | - | - | - | blocked | analytic-only |
+
+_Section regenerated: 2026-07-21T17:01:00+00:00_

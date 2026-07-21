@@ -1,0 +1,57 @@
+{
+  "name": "sar/layered_slab",
+  "description": "Skin/fat/muscle slab: surface Poynting vs volume-loss conservation",
+  "gate_class": "wave-level",
+  "status": "pass",
+  "reference": "conservation law: surface E x H flux balance vs volume sigma|E|^2 integral",
+  "external_reference": "analytic-only",
+  "target": "surface/volume absorbed-power closure < 0.20 and monotonically converging",
+  "metrics": [
+    {
+      "quantity": "surface/volume_closure",
+      "measured": 0.4329759553074837,
+      "reference": 0.5196918249130249,
+      "rel_error": 0.16686017645179219,
+      "unit": "W",
+      "class": "wave-level"
+    },
+    {
+      "quantity": "closure_residual_finest",
+      "measured": 0.12511305336084624,
+      "reference": 0.0,
+      "rel_error": 0.12511305336084624,
+      "unit": "1",
+      "class": "wave-level"
+    }
+  ],
+  "convergence": [
+    {
+      "dx": 0.005,
+      "volume_absorbed": 0.5746084451675415,
+      "surface_absorbed": 0.4595179334282875,
+      "flux_in": 0.47130316495895386,
+      "flux_out": 0.011785231530666351,
+      "rel_error": 0.2002938047763925
+    },
+    {
+      "dx": 0.004,
+      "volume_absorbed": 0.5196918249130249,
+      "surface_absorbed": 0.4329759553074837,
+      "flux_in": 0.4431139826774597,
+      "flux_out": 0.010138027369976044,
+      "rel_error": 0.16686017645179219
+    },
+    {
+      "dx": 0.003,
+      "volume_absorbed": 0.4600621461868286,
+      "surface_absorbed": 0.4025023663416505,
+      "flux_in": 0.4117146134376526,
+      "flux_out": 0.009212247096002102,
+      "rel_error": 0.12511305336084624
+    }
+  ],
+  "notes": [
+    "Closure residual per grid (coarse->fine): 0.200, 0.167, 0.125 (converges=True)."
+  ],
+  "updated_at": "2026-07-21T17:01:00+00:00"
+}

@@ -1,0 +1,32 @@
+{
+  "name": "sar/uniform_lossy_cube",
+  "description": "Uniform lossy phantom under a normally incident plane wave",
+  "gate_class": "analytic-identity",
+  "status": "pass",
+  "reference": "absorbed-power volume integral vs shared electric-channel total",
+  "external_reference": "analytic-only",
+  "target": "volume/channel closure < 1e-4; positive point SAR",
+  "metrics": [
+    {
+      "quantity": "volume/channel_closure",
+      "measured": 0.13630814850330353,
+      "reference": 0.13630814850330353,
+      "rel_error": 0.0,
+      "unit": "W",
+      "class": "analytic-identity"
+    },
+    {
+      "quantity": "peak_point_sar",
+      "measured": 0.43855148553848267,
+      "reference": NaN,
+      "rel_error": NaN,
+      "unit": "W/kg",
+      "class": "analytic-identity"
+    }
+  ],
+  "convergence": [],
+  "notes": [
+    "Self-consistency closure only (the channel total and the volume integral share the same edge loss). The independent conservation reference is the sar/layered_slab surface-vs-volume balance."
+  ],
+  "updated_at": "2026-07-21T17:00:52+00:00"
+}

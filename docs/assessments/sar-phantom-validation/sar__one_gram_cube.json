@@ -1,0 +1,30 @@
+{
+  "name": "sar/one_gram_cube",
+  "description": "Synthetic golden: a 3x3x3 window weighs exactly 1 g",
+  "gate_class": "analytic-identity",
+  "status": "pass",
+  "reference": "analytic uniform-field 1 g average = 0.5*sigma*3*E0^2/rho",
+  "external_reference": "analytic-only",
+  "target": "1 g averaged SAR within 1e-4 of the hand-computed analytic value",
+  "metrics": [
+    {
+      "quantity": "peak_1g_sar",
+      "measured": 0.0059400200843811035,
+      "reference": 0.005939999999999999,
+      "rel_error": 3.3812089401372834e-06,
+      "unit": "W/kg",
+      "class": "analytic-identity"
+    },
+    {
+      "quantity": "enclosed_mass",
+      "measured": 0.0010000001639127731,
+      "reference": 0.001,
+      "rel_error": 1.6391277311150754e-07,
+      "unit": "kg",
+      "class": "analytic-identity"
+    }
+  ],
+  "convergence": [],
+  "notes": [],
+  "updated_at": "2026-07-21T17:00:41+00:00"
+}
