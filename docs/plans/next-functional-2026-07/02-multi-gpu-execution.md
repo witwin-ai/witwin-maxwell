@@ -6,7 +6,20 @@
 > Depends on: stable `Simulation` / `Result` contracts  
 > Owner modules: `simulation.py`, new execution package, `fdtd/`, compiler and result persistence  
 > Latest architecture decision: 2026-07-14，ensemble execution 与 joint solve 使用显式不同 strategy，共享设备/诊断层但不共享物理状态  
-> Detailed joint-solve precursor: [FDTD multi-GPU implementation plan](../fdtd-multi-gpu-implementation-plan.md)
+> Detailed joint-solve precursor: [FDTD multi-GPU implementation plan](../fdtd-multi-gpu-implementation-plan.md)  
+>
+> **Round-E revision (2026-07-21, master `6b523b8`).** S4 distributed CPML-trainable
+> adjoint landed (`2364533`/`f7e8e9a`): psi-carrying reverse with no psi halo, public
+> validator relaxed to accept `cpml`/`stablepml`, psi-active 1-vs-2-GPU gradient parity
+> rel 5.94e-7 with a ~1.1e5× falsification, after fixing a pre-existing single-GPU CPML
+> psi axis cross-wiring (`a2d2cb7`). Forward monitor gather with a seam-ownership rule +
+> defense-in-depth trainable guard delivered. Exclusive-window timing measured (ensemble
+> 1.98–2.00×; joint-solve forward 128³ 0.544× / 192³ 1.726×; NCCL step-rate
+> not-measurable-by-hooks). Evidence: forward E2, CPML-trainable distributed adjoint E2.
+> **Still open (not completed):** NCCL one-process-per-GPU adjoint + monitor gather and
+> coupled-runtime (circuit/network/wire) joint solve remain fail-closed (blueprint
+> #13/#18); no non-author review. See `docs/assessments/e3-distributed-adjoint-acceptance-2026-07-19.md`,
+> `multi-gpu-timing-2026-07-20.json`, `00-status-and-gaps-2026-07-19.md` §02.
 
 ## 1. 功能定位
 

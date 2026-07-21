@@ -1,6 +1,20 @@
 # RF 端口、网络参数与天线工程闭环开发计划
 
 状态：reopened（2026-07-18 从 archive 移回；契约层已落地，物理验证欠账）
+Round-E 进展（2026-07-21，master `6b523b8`）：S1 keystone landed — the Yee-staggered
+transverse mode operator (`aa866ba`) un-BLOCKED `rectangular_waveguide` (committed
+wave-level PASS + authorized external-reference cross-check, `ead70c0`); the coax-line
+rebuilds lifted `lumped_open_short_match` and `series_parallel_rlc` to wave-level and
+the FDTD `antenna/half_wave_dipole` benchmark passes the real NF2FF path (`a963512`).
+Two scenes now carry wave-level evidence (`coax_thru` + `rectangular_waveguide`), so
+the validated scene set is E2-class. **Remaining gaps:** microstrip/differential_pair
+stay BLOCKED on interior-PEC masking of the staggered operator (operator-level hybrid
+physics validated; production wiring deferred), and the patch broadside `TM010` gate is
+an honest `strict=True` xfail. Not marked `completed`: only `rectangular_waveguide` has
+an external reference and there is no non-author review. Evidence:
+`docs/assessments/round-e-integration-2026-07-20.md`,
+`e1-rf-mode-operator-acceptance-2026-07-19.md`, `e2-rf-scenes-acceptance-2026-07-19.md`,
+`00-status-and-gaps-2026-07-19.md` §01.
 日期：2026-07-14
 初次标记完成：2026-07-15（形式验收；见下方复核结论）
 复核结论：2026-07-18 审计判定实际证据等级为 E0–E1，**不满足声明的 E3**；详见 `docs/assessments/next-functional-audit-2026-07-18.md` 与 `docs/assessments/plan-01-rf-workflow-audit-2026-07-16.md`
