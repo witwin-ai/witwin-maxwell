@@ -4,7 +4,7 @@ This document defines the working rules for coding agents in this repository. Ke
 
 ## Core Rules
 
-- Use the `witwin2` conda environment for all Python commands, tests, and scripts.
+- Use the `maxwell` conda environment for all Python commands, tests, and scripts.
 - Keep the codebase clean. Do not preserve legacy code, compatibility shims, or backward-support paths unless explicitly requested.
 - Write all code comments and commit messages in English.
 - Keep third-party commercial product, service, and solver names out of commit messages, branch names, PR titles, general development documents, comments, and feature descriptions. Describe the behavior with neutral terms such as `external reference solver`, `reference backend`, or `third-party adapter` so commercial brands do not spread through the repository or GitHub history.
@@ -103,7 +103,7 @@ The current codebase is organized as a Python package under `witwin/maxwell/`, w
 Activate the environment first:
 
 ```bash
-conda activate witwin2
+conda activate maxwell
 ```
 
 Common commands:
@@ -133,7 +133,7 @@ If you add or modify Python code, prefer validating with targeted pytest coverag
 ## Windows / Codex Execution Notes
 
 - In this environment, `rg` may exist but fail with `Access is denied`. If that happens, switch immediately to PowerShell-native search with `Get-ChildItem` + `Select-String` instead of retrying `rg`.
-- `conda run -n witwin2` may fail to pass stdin through to `python -` reliably in this Codex/PowerShell setup. Prefer `conda run -n witwin2 python -c ...` for short snippets, or invoke the environment interpreter directly with `C:\Users\Asixa\miniconda3\envs\witwin2\python.exe`.
+- `conda run -n maxwell` may fail to pass stdin through to `python -` reliably in this Codex/PowerShell setup. Prefer `conda run -n maxwell python -c ...` for short snippets, or invoke the environment interpreter directly with `C:\Users\Asixa\miniconda3\envs\maxwell\python.exe`.
 - Windows command-line length limits are easy to hit with `python -c` and large inline scripts. For long scripts, pass the code through an environment variable such as `PYCODE` and execute `python -c "import os; exec(os.environ['PYCODE'])"`, or use the environment interpreter with stdin if that path is reliable.
 - Large single-shot `apply_patch` updates can also hit Windows path/command length limits. If a full-file replacement fails for size reasons, rewrite it in smaller patch chunks instead of retrying the same oversized patch.
 - When checking whether `AGENTS.md` and `CLAUDE.md` match, do not use bare `fc` in PowerShell because it resolves to `Format-Custom`. Call `fc.exe` explicitly if you want the file-compare tool.
