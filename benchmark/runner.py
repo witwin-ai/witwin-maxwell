@@ -223,6 +223,38 @@ def _incident_scene_signature(scene: mw.Scene, frequencies: tuple[float, ...]) -
     return hashlib.sha256(encoded).hexdigest()
 
 
+# Material fields introduced after the reference-cache lineage was last refreshed.
+# They default to ``None`` and no benchmark scene sets them, and they are not part
+# of the external reference-solver export contract (the reference export ignores a
+# null breakdown model / mass density entirely), so serializing them would change
+# the cache key without changing any reference physics -- pointlessly invalidating
+# every existing cache and forcing a full cloud regeneration at credit cost. They
+# are stripped from the key ONLY when null, so a future scene that actually sets one
+# still re-keys and regenerates.
+#
+# NB: this removes the material-field component of the post-generation key drift but
+# does NOT by itself byte-restore the stored keys of the 2026-07-14 cache lineage,
+# which also predate the export contract-version stamps later added to the key
+# (``*_export_contract_version``, all at v1). Both drift sources are physics-neutral
+# key bookkeeping; a full byte-match reconciliation (or a deliberate reference
+# regeneration) is a separate, supervisor-owned cache-lineage task. See
+# docs/assessments/f4-subpixel-lever-acceptance-2026-07-21.md.
+_POST_LINEAGE_NULL_MATERIAL_FIELDS = ("breakdown", "mass_density")
+
+
+def _drop_post_lineage_null_material_fields(serialized):
+    """Recursively drop always-null post-lineage material fields from a payload."""
+    if isinstance(serialized, dict):
+        return {
+            key: _drop_post_lineage_null_material_fields(val)
+            for key, val in serialized.items()
+            if not (key in _POST_LINEAGE_NULL_MATERIAL_FIELDS and val is None)
+        }
+    if isinstance(serialized, list):
+        return [_drop_post_lineage_null_material_fields(item) for item in serialized]
+    return serialized
+
+
 def _benchmark_cache_key(
     scene: mw.Scene,
     frequencies: tuple[float, ...],
@@ -240,7 +272,9 @@ def _benchmark_cache_key(
         "grid": _stable_serialize(tidy_scene.grid),
         "boundary": _stable_serialize(tidy_scene.boundary),
         "symmetry": _stable_serialize(tidy_scene.symmetry),
-        "structures": _stable_serialize(tuple(tidy_scene.structures)),
+        "structures": _drop_post_lineage_null_material_fields(
+            _stable_serialize(tuple(tidy_scene.structures))
+        ),
         "sources": _stable_serialize(tuple(tidy_scene.sources)),
         "monitors": _stable_serialize(tuple(tidy_scene.monitors)),
     }
