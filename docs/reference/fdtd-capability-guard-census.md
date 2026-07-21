@@ -378,6 +378,24 @@ also cover the generic `SurfaceImpedanceMedium` (previously only `LossyMetalMedi
 closing a fail-open gap without changing the count. The interoperability-adapter
 guard for a generic `SurfaceImpedanceMedium` remains until its export mapping lands.
 
+### Surface-impedance staircase generalization G4a reconciliation (2026-07-21)
+
+Stage G4a generalized the surface-impedance boundary from axis-aligned Box plates to
+any voxelized (possibly curved) good conductor: a non-Box conductor is staircased from
+its node occupancy and its axis-aligned voxel faces (all six orientations, mixed
+orientations, cylinder/sphere) compile into masked exposed-face writes
+(`witwin/maxwell/compiler/materials.py::_compile_voxel_surface_metal`,
+`fdtd/runtime/materials.py::_voxel_surface_writes`). The single
+`_reject_surface_impedance` funnel again rejects strictly fewer cases -- curved
+conductors now compile instead of being turned away for being non-Box -- while
+remaining one `raise NotImplementedError` site: it now funnels only the true
+conformal/oblique cases (a rotated Box, whose grid-unaligned normal is not
+staircased), a generic rational surface on a curved conductor (the per-edge ADE stays
+Box-only), the tangential 2x2 model, the contradictory-owner cases, and the
+Bloch-periodic run. No guard was added or removed and the budget is unchanged at
+**176**. The remaining SIBC gap is the true oblique/conformal (non-staircase) surface,
+not the staircased curved conductor, which is now supported.
+
 ## Contract exclusions
 
 `CONTRACT_GUARDS` in the test is the canonical exact-match inventory. Its 24
