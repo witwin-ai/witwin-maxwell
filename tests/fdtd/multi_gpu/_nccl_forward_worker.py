@@ -113,6 +113,43 @@ def _assert_seam_carries_signal(reference_output, shard_layouts) -> None:
     )
 
 
+def _run_timing_pass(distributed) -> None:
+    """Opt-in per-rank step-rate timing pass (no-op unless env-enabled).
+
+    Runs on every rank in lockstep after the parity solve when
+    ``WITWIN_FDTD_STEP_TIMING`` is truthy, so the supervisor's exclusive timing
+    window can flip the env var and collect one machine-readable JSON per rank
+    without contaminated shared-GPU numbers being asserted here. When disabled
+    (the default, and always in CI) the instrument's bracket calls return
+    immediately, so this pass drives no collective and adds zero per-step cost --
+    the parity behavior above is byte-identical to a build without this pass.
+    """
+
+    import os
+
+    from witwin.maxwell.fdtd.distributed.instrumentation import StepRateInstrument
+
+    instrument = StepRateInstrument.from_env(
+        rank=distributed.rank,
+        world_size=distributed.transport.world_size,
+        device=str(distributed.device),
+    )
+    if not instrument.enabled:
+        return
+    steps = int(os.environ.get("WITWIN_FDTD_STEP_TIMING_STEPS", "200"))
+    distributed._prepare_outputs(steps, _DFT_FREQUENCIES, "none", True)
+    overlap_active = distributed._overlap_active()
+    distributed._synchronize_all()
+    instrument.loop_begin()
+    for n in range(steps):
+        instrument.step_begin()
+        distributed._advance_one_step(n, overlap_active=overlap_active)
+        instrument.step_end()
+    instrument.loop_end()
+    distributed._synchronize_all()
+    instrument.finalize()
+
+
 def _parallel() -> FDTDParallelConfig:
     return FDTDParallelConfig(
         devices=("cuda:0", "cuda:1"),
@@ -139,6 +176,12 @@ def main() -> None:
             full_field_dft=True,
             normalize_source=False,
         )
+        distributed.transport.barrier()
+
+        # Opt-in per-rank step-rate timing (collective; runs on every rank). A
+        # no-op when the timing env var is unset, so the default parity run is
+        # untouched.
+        _run_timing_pass(distributed)
         distributed.transport.barrier()
 
         if distributed.rank == 0:

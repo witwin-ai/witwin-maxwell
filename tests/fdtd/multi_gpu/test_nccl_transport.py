@@ -304,6 +304,42 @@ def test_two_rank_nccl_forward_matches_single_gpu():
 
 
 @pytest.mark.nccl
+def test_two_rank_nccl_step_timing_emits_per_rank_json(tmp_path):
+    """Opt-in step-rate instrumentation emits one JSON per rank from the worker.
+
+    Enabling ``WITWIN_FDTD_STEP_TIMING`` runs the forward worker's collective
+    timing pass and writes ``step_timing_rank{r}.json`` on every rank. This guards
+    the worker wiring (the unit test covers the instrument logic); it asserts the
+    per-rank artifact schema only, never a wall-clock number, so it is safe on
+    shared GPUs. The default (env unset) forward run above must stay a no-op pass.
+    """
+
+    _skip_without_two_gpu_nccl()
+    env = dict(os.environ)
+    env["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+    env["WITWIN_FDTD_STEP_TIMING"] = "1"
+    env["WITWIN_FDTD_STEP_TIMING_DIR"] = str(tmp_path)
+    env["WITWIN_FDTD_STEP_TIMING_STEPS"] = "32"
+    completed = _torchrun(_FORWARD_WORKER, timeout=300, env=env)
+    assert completed.returncode == 0, (
+        "timing-enabled NCCL forward worker failed\n"
+        f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+    )
+    assert "NCCL_FORWARD_WORKER_OK" in completed.stdout, completed.stdout
+    import json as _json
+
+    for rank in (0, 1):
+        path = tmp_path / f"step_timing_rank{rank}.json"
+        assert path.exists(), f"missing per-rank timing artifact for rank {rank}"
+        payload = _json.loads(path.read_text(encoding="utf-8"))
+        assert payload["schema"] == "witwin.fdtd.step_timing/1"
+        assert payload["enabled"] is True
+        assert payload["rank"] == rank
+        assert payload["steps"] == 32
+        assert "steps_per_second" in payload
+
+
+@pytest.mark.nccl
 def test_two_rank_nccl_reverse_halo_transpose_identity():
     """The NCCL reverse halos are the discrete transpose of the forward halos.
 
