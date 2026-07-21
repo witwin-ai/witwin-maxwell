@@ -13,10 +13,6 @@ from ...compiler.materials import (
 from ..boundary import BOUNDARY_PERIODIC, has_complex_fields
 
 
-def _any_component_nonzero(components: dict[str, torch.Tensor]) -> bool:
-    return any(torch.any(components[axis] != 0).item() for axis in ("x", "y", "z"))
-
-
 def build_materials(solver, scene):
     material_model = scene.compile_materials()
     # A Bloch-periodic run carries complex phase-shifted field state. The
@@ -57,32 +53,72 @@ def build_materials(solver, scene):
     solver.material_eps_r = evaluate_material_permittivity(material_model, solver.source_frequency)
     solver.material_mu_r = evaluate_material_permeability(material_model, solver.source_frequency)
 
-    eps_x_node = eps_components["x"] * solver.eps0
-    eps_y_node = eps_components["y"] * solver.eps0
-    eps_z_node = eps_components["z"] * solver.eps0
-    mu_x_node = mu_components["x"] * solver.mu0
-    mu_y_node = mu_components["y"] * solver.mu0
-    mu_z_node = mu_components["z"] * solver.mu0
-
-    solver.eps_Ex = average_node_to_component(solver, eps_x_node, "Ex")
-    solver.eps_Ey = average_node_to_component(solver, eps_y_node, "Ey")
-    solver.eps_Ez = average_node_to_component(solver, eps_z_node, "Ez")
     sigma_e_components = material_model["sigma_e_components"]
-    solver.sigma_e_Ex = average_node_to_component(solver, sigma_e_components["x"], "Ex")
-    solver.sigma_e_Ey = average_node_to_component(solver, sigma_e_components["y"], "Ey")
-    solver.sigma_e_Ez = average_node_to_component(solver, sigma_e_components["z"], "Ez")
-    solver.conductive_enabled = bool(_any_component_nonzero(sigma_e_components))
-    solver.mu_Hx = average_node_to_magnetic_component(solver, mu_x_node, "Hx")
-    solver.mu_Hy = average_node_to_magnetic_component(solver, mu_y_node, "Hy")
-    solver.mu_Hz = average_node_to_magnetic_component(solver, mu_z_node, "Hz")
-    # Static magnetic conductivity averaged onto the H components (same node->face
-    # stencil as mu): folds semi-implicitly into the H-update decay/curl exactly as
-    # sigma_e folds into the E-update, giving a magnetic conduction loss on Faraday's law.
     sigma_m_components = material_model["sigma_m_components"]
-    solver.sigma_m_Hx = average_node_to_magnetic_component(solver, sigma_m_components["x"], "Hx")
-    solver.sigma_m_Hy = average_node_to_magnetic_component(solver, sigma_m_components["y"], "Hy")
-    solver.sigma_m_Hz = average_node_to_magnetic_component(solver, sigma_m_components["z"], "Hz")
-    solver.magnetically_conductive_enabled = bool(_any_component_nonzero(sigma_m_components))
+    edge_components = material_model.get("edge_components")
+    if edge_components is not None:
+        # Edge-native path: the compiler evaluated the diagonal permittivity /
+        # permeability and the static conductivities at each Yee component's own
+        # staggered location (SDF occupancy, interface normal and region density
+        # sampled there), so no node->edge average is applied. These fields carry
+        # the interface subpixel blend natively at the edge/face where the update
+        # coefficient consumes it.
+        eps_edge = edge_components["eps"]
+        mu_edge = edge_components["mu"]
+        sigma_e_edge = edge_components["sigma_e"]
+        sigma_m_edge = edge_components["sigma_m"]
+        solver.eps_Ex = (eps_edge["Ex"] * solver.eps0).contiguous()
+        solver.eps_Ey = (eps_edge["Ey"] * solver.eps0).contiguous()
+        solver.eps_Ez = (eps_edge["Ez"] * solver.eps0).contiguous()
+        solver.sigma_e_Ex = sigma_e_edge["Ex"]
+        solver.sigma_e_Ey = sigma_e_edge["Ey"]
+        solver.sigma_e_Ez = sigma_e_edge["Ez"]
+        solver.mu_Hx = (mu_edge["Hx"] * solver.mu0).contiguous()
+        solver.mu_Hy = (mu_edge["Hy"] * solver.mu0).contiguous()
+        solver.mu_Hz = (mu_edge["Hz"] * solver.mu0).contiguous()
+        solver.sigma_m_Hx = sigma_m_edge["Hx"]
+        solver.sigma_m_Hy = sigma_m_edge["Hy"]
+        solver.sigma_m_Hz = sigma_m_edge["Hz"]
+    else:
+        # Node->edge fallback retained for material families whose per-Yee-component
+        # sampling is not yet edge-native (full off-diagonal anisotropy, sheets,
+        # surface-impedance metals): the node-centered Kottke blend is arithmetically
+        # averaged onto the Yee edges/faces. PerturbationMedium is edge-native and
+        # takes the branch above (its eps offset is sampled at the Yee edge).
+        eps_x_node = eps_components["x"] * solver.eps0
+        eps_y_node = eps_components["y"] * solver.eps0
+        eps_z_node = eps_components["z"] * solver.eps0
+        mu_x_node = mu_components["x"] * solver.mu0
+        mu_y_node = mu_components["y"] * solver.mu0
+        mu_z_node = mu_components["z"] * solver.mu0
+        solver.eps_Ex = average_node_to_component(solver, eps_x_node, "Ex")
+        solver.eps_Ey = average_node_to_component(solver, eps_y_node, "Ey")
+        solver.eps_Ez = average_node_to_component(solver, eps_z_node, "Ez")
+        solver.sigma_e_Ex = average_node_to_component(solver, sigma_e_components["x"], "Ex")
+        solver.sigma_e_Ey = average_node_to_component(solver, sigma_e_components["y"], "Ey")
+        solver.sigma_e_Ez = average_node_to_component(solver, sigma_e_components["z"], "Ez")
+        solver.mu_Hx = average_node_to_magnetic_component(solver, mu_x_node, "Hx")
+        solver.mu_Hy = average_node_to_magnetic_component(solver, mu_y_node, "Hy")
+        solver.mu_Hz = average_node_to_magnetic_component(solver, mu_z_node, "Hz")
+        # Static magnetic conductivity averaged onto the H components (same node->face
+        # stencil as mu): folds semi-implicitly into the H-update decay/curl exactly as
+        # sigma_e folds into the E-update, giving a magnetic conduction loss on Faraday's law.
+        solver.sigma_m_Hx = average_node_to_magnetic_component(solver, sigma_m_components["x"], "Hx")
+        solver.sigma_m_Hy = average_node_to_magnetic_component(solver, sigma_m_components["y"], "Hy")
+        solver.sigma_m_Hz = average_node_to_magnetic_component(solver, sigma_m_components["z"], "Hz")
+    # Derive the conduction flags from the per-component fields actually installed
+    # on the solver (edge-native or node->edge averaged), not from the node model,
+    # so the flag provenance matches the coefficients the update kernels consume.
+    solver.conductive_enabled = bool(
+        torch.any(solver.sigma_e_Ex != 0).item()
+        or torch.any(solver.sigma_e_Ey != 0).item()
+        or torch.any(solver.sigma_e_Ez != 0).item()
+    )
+    solver.magnetically_conductive_enabled = bool(
+        torch.any(solver.sigma_m_Hx != 0).item()
+        or torch.any(solver.sigma_m_Hy != 0).item()
+        or torch.any(solver.sigma_m_Hz != 0).item()
+    )
 
     build_nonlinear_channels(solver, material_model)
 

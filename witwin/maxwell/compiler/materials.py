@@ -485,16 +485,24 @@ def _pec_geometry_beta(scene) -> float | torch.Tensor:
     return 0.5 * cell
 
 
-def _wrap_periodic_boundary_planes(scene, occupancy, midpoint_occupancy):
+def _wrap_periodic_boundary_planes(scene, occupancy, midpoint_occupancy, skip_axes=()):
     """Make duplicate periodic endpoint planes carry their union occupancy.
 
     Periodic axes retain both endpoint nodes even though they denote one physical
     plane. Only those endpoint planes need wrap composition. Adding translated
     geometry through the whole volume is incorrect when a structure spans or
     exceeds one period because the base and image overlap away from the seam.
+
+    ``skip_axes`` lists axis indices sampled on the staggered (Yee edge/face)
+    grid: those carry the primal-cell midpoints, which have no duplicated endpoint
+    plane, so the seam composition (and its >=2-node requirement) does not apply --
+    the periodic-image union in :func:`_geometry_occupancy` already resolves any
+    seam-crossing geometry there.
     """
     wrapped = occupancy
     for axis_index, axis in enumerate(("x", "y", "z")):
+        if axis_index in skip_axes:
+            continue
         if scene.boundary.axis_kind(axis) not in ("periodic", "bloch"):
             continue
         axis_size = wrapped.shape[axis_index]
@@ -575,6 +583,7 @@ def _geometry_occupancy(
     *,
     half_weight_boundary=False,
     periodic_shift_options=None,
+    wrap_skip_axes=(),
 ):
     xx, yy, zz = (scene.X, scene.Y, scene.Z) if coords is None else coords
     resolved_beta = _geometry_beta(scene) if beta is None else beta
@@ -650,7 +659,9 @@ def _geometry_occupancy(
         bridge_shape[axis_index] = 1
         return bridge.expand(bridge_shape)
 
-    return _wrap_periodic_boundary_planes(scene, occupancy, _midpoint_occupancy)
+    return _wrap_periodic_boundary_planes(
+        scene, occupancy, _midpoint_occupancy, skip_axes=wrap_skip_axes
+    )
 
 
 def _layout_pole_entry(scene, structure, pole):
@@ -966,6 +977,370 @@ def _sample_offsets(scene, subpixel_samples):
     y_offsets = _axis_sample_offsets(scene, "y", int(subpixel_samples[1]))
     z_offsets = _axis_sample_offsets(scene, "z", int(subpixel_samples[2]))
     return list(product(x_offsets, y_offsets, z_offsets))
+
+
+# --- Edge-native (per-Yee-component) material sampling -----------------------
+#
+# Each Yee field component lives at its own staggered location, not at the node
+# centre. The legacy path Kottke-blended every material at the node grid and then
+# arithmetically averaged the node values onto the Yee edges/faces (a node->edge
+# "smear"): the interface operator was applied at the wrong place and then
+# linearly interpolated, which does not match a reference solver that evaluates
+# the subpixel blend natively at each staggered location. The helpers below
+# evaluate the diagonal background permittivity / permeability and the static
+# conductivities directly at each component's Yee location -- the SDF occupancy,
+# the interface normal, and the region density are all sampled there -- so the
+# polarized (Kottke) or arithmetic subpixel blend is edge-native with no
+# node->edge average. The node model is still produced as the canonical
+# representation consumed by the summaries, monitors, mode solver, SAR and mass
+# models; only the FDTD update-coefficient materials switch to the edge fields.
+
+# The set of grid axes each Yee component is half-shifted along, and the material
+# polarization axis it carries.
+_EDGE_STAGGER_AXES = {
+    "Ex": (0,),
+    "Ey": (1,),
+    "Ez": (2,),
+    "Hx": (1, 2),
+    "Hy": (0, 2),
+    "Hz": (0, 1),
+}
+_EDGE_POLARIZATION_AXIS = {
+    "Ex": "x",
+    "Ey": "y",
+    "Ez": "z",
+    "Hx": "x",
+    "Hy": "y",
+    "Hz": "z",
+}
+_ELECTRIC_EDGE_COMPONENTS = ("Ex", "Ey", "Ez")
+_MAGNETIC_EDGE_COMPONENTS = ("Hx", "Hy", "Hz")
+
+
+def _edge_axis_base_1d(scene, axis, staggered):
+    """Per-axis 1D query coordinates for one Yee component along ``axis``.
+
+    On a staggered axis the samples sit at the primal-cell midpoints
+    ``0.5*(node_i + node_{i+1})`` (length ``N-1``, the Yee edge/face count); on an
+    unstaggered axis they stay on the node coordinates (length ``N``).
+    """
+    coord = getattr(scene, axis)
+    if staggered:
+        return 0.5 * (coord[:-1] + coord[1:])
+    return coord
+
+
+def _edge_axis_offsets(scene, axis, count, staggered):
+    """Mean-zero subpixel offsets spanning one sample's averaging window on ``axis``.
+
+    Mirrors :func:`_axis_sample_offsets` but scales by the primal-cell width on a
+    staggered axis (the extent each Yee edge/face sample represents) and by the
+    node dual-cell width on an unstaggered axis, so the offsets broadcast against
+    the matching 1D base coordinates on both uniform and graded grids.
+    """
+    if count == 1:
+        return [0.0]
+    grid = scene.grid
+    if not (grid.is_custom or grid.is_auto):
+        width = float(getattr(grid, f"d{axis}"))
+    elif staggered:
+        coord = getattr(scene, axis)
+        width = (coord[1:] - coord[:-1]).to(dtype=torch.float32)
+    else:
+        width = torch.as_tensor(
+            getattr(scene, f"d{axis}_dual64"), device=scene.device, dtype=torch.float32
+        )
+    return [((index + 0.5) / count - 0.5) * width for index in range(count)]
+
+
+def _edge_component_coords(bases, offsets):
+    return torch.meshgrid(
+        bases["x"] + offsets[0],
+        bases["y"] + offsets[1],
+        bases["z"] + offsets[2],
+        indexing="ij",
+    )
+
+
+def _blend_edge_component(acc, inverse_acc, occupancy, normal_axis, value, *, polarized_direct):
+    """Blend one structure/region into an edge accumulator.
+
+    ``polarized_direct`` applies the Kottke normal-projection blend in place (the
+    no-subpixel polarized path). Otherwise an arithmetic blend is used and, when
+    ``inverse_acc`` is not None (the polarized-with-subpixel path), the reciprocal
+    is accumulated arithmetically so the harmonic (series) mean can be
+    reconstructed after the subpixel average.
+    """
+    if polarized_direct:
+        return _blend_material_polarized(acc, occupancy, normal_axis, value=value), inverse_acc
+    acc = _blend_material(acc, occupancy, value=value)
+    if inverse_acc is not None:
+        inverse_acc = _blend_material(inverse_acc, occupancy, value=1.0 / (value + _HARMONIC_EPS))
+    return acc, inverse_acc
+
+
+def _reconstruct_edge_polarized(scene, coords, arithmetic, inverse, axis):
+    """Normal-projection reconstruction of one edge component from subcell means.
+
+    The harmonic (series) mean ``1/inverse`` is blended toward the arithmetic
+    (parallel) mean by the squared interface-normal component along ``axis``,
+    estimated from the gradient of the arithmetic permittivity/permeability at the
+    Yee location. This is the per-component edge-native form of
+    :func:`_reconstruct_sampled_polarized_components`; for an isotropic medium it
+    reproduces that node reconstruction exactly (the three per-axis components are
+    identical there, so a single component's gradient carries the same direction).
+    """
+    grads = _field_gradients(scene, arithmetic, coords=coords)
+    squared = {a: grads[a] * grads[a] for a in _AXES}
+    norm = squared["x"] + squared["y"] + squared["z"] + _NORMAL_EPS
+    weight = squared[axis] / norm
+    harmonic = 1.0 / (inverse + _HARMONIC_EPS)
+    return (1.0 - weight) * arithmetic + weight * harmonic
+
+
+def _sample_box_parameter_field(scene, geometry, values, coords):
+    """Trilinearly sample a Box-extent parameter grid at physical query coordinates.
+
+    The edge-native counterpart of :func:`_box_parameter_field`: the grid spans the
+    Box extent with the same convention, and is zero outside the box (border-padded
+    values there are multiplied by a zero occupancy so they never contribute).
+    Differentiable in ``values``.
+    """
+    xx, yy, zz = coords
+    center = torch.as_tensor(geometry.position, device=scene.device, dtype=torch.float32)
+    size = torch.as_tensor(geometry.size, device=scene.device, dtype=torch.float32)
+    normalized = (
+        2.0 * (xx - center[0]) / size[0],
+        2.0 * (yy - center[1]) / size[1],
+        2.0 * (zz - center[2]) / size[2],
+    )
+    query_grid = torch.stack(normalized, dim=-1)[None, ...]
+    texture = values.to(device=scene.device, dtype=torch.float32).permute(2, 1, 0)[None, None, ...]
+    return F.grid_sample(
+        texture,
+        query_grid,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=False,
+    )[0, 0]
+
+
+def _edge_structure_perturbation_delta(scene, structure, material, coords, eps_background):
+    """Edge-sampled ``eps_sensitivity * eps_background * perturbation`` or ``None``."""
+    if not isinstance(material, PerturbationMedium):
+        return None
+    return (
+        float(material.eps_sensitivity)
+        * float(eps_background)
+        * _sample_box_parameter_field(scene, structure.geometry, material.perturbation, coords)
+    )
+
+
+def _compile_edge_component(
+    scene,
+    component,
+    *,
+    eps_background,
+    mu_background,
+    averaging,
+    samples,
+    region_densities,
+    geometry_periodic_shifts,
+):
+    """Edge-native diagonal permittivity/permeability and conductivity for one component.
+
+    Returns ``(material_relative, sigma)`` where ``material_relative`` is the
+    relative eps (electric components) or mu (magnetic components) sampled at the
+    component's Yee location and ``sigma`` is the matching static electric /
+    magnetic conductivity there. Differentiable in geometry / density parameters.
+    """
+    axis = _EDGE_POLARIZATION_AXIS[component]
+    stagger = _EDGE_STAGGER_AXES[component]
+    electric = component[0] == "E"
+    background = float(eps_background if electric else mu_background)
+
+    bases = {}
+    axis_offsets = {}
+    for axis_index, grid_axis in enumerate(_AXES):
+        staggered = axis_index in stagger
+        bases[grid_axis] = _edge_axis_base_1d(scene, grid_axis, staggered)
+        axis_offsets[grid_axis] = _edge_axis_offsets(
+            scene, grid_axis, int(samples[axis_index]), staggered
+        )
+    offset_combos = list(product(axis_offsets["x"], axis_offsets["y"], axis_offsets["z"]))
+    half_weight_boundary = len(offset_combos) > 1
+    polarized = averaging == "polarized"
+    polarized_direct = polarized and len(offset_combos) == 1
+
+    structures = list(_bulk_structures(scene))
+    regions = list(zip(getattr(scene, "material_regions", ()), region_densities))
+
+    material_sum = None
+    sigma_sum = None
+    inverse_sum = None
+    for offsets in offset_combos:
+        coords = _edge_component_coords(bases, offsets)
+        shape = coords[0].shape
+        material_acc = torch.full(shape, background, device=scene.device, dtype=torch.float32)
+        sigma_acc = torch.zeros(shape, device=scene.device, dtype=torch.float32)
+        inverse_acc = (
+            torch.full(shape, 1.0 / (background + _HARMONIC_EPS), device=scene.device, dtype=torch.float32)
+            if (polarized and not polarized_direct)
+            else None
+        )
+        for structure in structures:
+            parts = _static_structure_material(structure)
+            eps_components = parts[1]
+            mu_components = parts[3]
+            sigma_components = parts[4]
+            sigma_m_components = parts[5]
+            occupancy = _geometry_occupancy(
+                scene,
+                structure.geometry,
+                coords=coords,
+                half_weight_boundary=half_weight_boundary,
+                periodic_shift_options=geometry_periodic_shifts.get(id(structure.geometry)),
+                wrap_skip_axes=stagger,
+            )
+            normal_axis = (
+                _interface_normals(scene, structure.geometry, coords=coords)[axis]
+                if polarized_direct
+                else None
+            )
+            if electric:
+                value = eps_components[axis] * float(eps_background)
+                # PerturbationMedium: eps(x) = eps_base + eps_sensitivity *
+                # eps_background * perturbation(x), sampled at this Yee location so
+                # the zero-perturbation limit reduces exactly to the base material.
+                delta = _edge_structure_perturbation_delta(
+                    scene, structure, parts[0], coords, eps_background
+                )
+                if delta is not None:
+                    value = value + delta
+                sigma_value = sigma_components[axis]
+            else:
+                value = mu_components[axis] * float(mu_background)
+                sigma_value = sigma_m_components[axis]
+            material_acc, inverse_acc = _blend_edge_component(
+                material_acc, inverse_acc, occupancy, normal_axis, value, polarized_direct=polarized_direct
+            )
+            sigma_acc = _blend_material(sigma_acc, occupancy, value=sigma_value)
+        for region, density in regions:
+            occupancy = _geometry_occupancy(
+                scene,
+                region.geometry,
+                coords=coords,
+                half_weight_boundary=half_weight_boundary,
+                periodic_shift_options=geometry_periodic_shifts.get(id(region.geometry)),
+                wrap_skip_axes=stagger,
+            )
+            normal_axis = (
+                _interface_normals(scene, region.geometry, coords=coords)[axis]
+                if polarized_direct
+                else None
+            )
+            density_field = _sample_material_region_density(scene, region, density, coords=coords)
+            if electric:
+                lo, hi = region.eps_bounds
+            else:
+                lo, hi = region.mu_bounds
+            value = lo + density_field * (hi - lo)
+            material_acc, inverse_acc = _blend_edge_component(
+                material_acc, inverse_acc, occupancy, normal_axis, value, polarized_direct=polarized_direct
+            )
+            # Regions carry no conductivity (they displace it toward zero).
+            sigma_acc = _blend_material(sigma_acc, occupancy, value=0.0)
+        material_sum = material_acc if material_sum is None else material_sum + material_acc
+        sigma_sum = sigma_acc if sigma_sum is None else sigma_sum + sigma_acc
+        if inverse_acc is not None:
+            inverse_sum = inverse_acc if inverse_sum is None else inverse_sum + inverse_acc
+
+    scale = 1.0 / float(len(offset_combos))
+    material_mean = material_sum * scale
+    sigma_mean = sigma_sum * scale
+    if inverse_sum is not None:
+        base_coords = _edge_component_coords(bases, (0.0, 0.0, 0.0))
+        material_mean = _reconstruct_edge_polarized(
+            scene, base_coords, material_mean, inverse_sum * scale, axis
+        )
+    return material_mean.contiguous(), sigma_mean.contiguous()
+
+
+def _edge_native_eligible(scene, model, surface_layout):
+    """Whether the scene's material families all support edge-native staggering.
+
+    Fails closed (returns False, keeping the node->edge path) for families whose
+    per-Yee-component sampling has not been validated in this step: full
+    off-diagonal anisotropy (handled by the runtime's own per-edge inverse-tensor
+    path), 2D sheets (node-plane conductivity rasterization), and surface-impedance
+    metals (interior-masked good conductors). The dominant curved/misaligned
+    dielectric and diagonal-anisotropic geometry cluster -- including
+    PerturbationMedium, whose eps offset is sampled at the Yee edge -- stays
+    edge-native.
+    """
+    if material_model_has_full_anisotropy(model):
+        return False
+    if _sheet_structures(scene):
+        return False
+    if surface_layout is not None and getattr(surface_layout, "metals", ()):
+        return False
+    return True
+
+
+def compile_edge_material_components(
+    scene,
+    model,
+    surface_layout,
+    *,
+    eps_background,
+    mu_background,
+    samples,
+    averaging,
+    region_densities,
+    geometry_periodic_shifts,
+):
+    """Edge-native diagonal material fields for the six Yee components, or ``None``.
+
+    Returns a dict with per-component relative permittivity (``eps``), relative
+    permeability (``mu``) and static conductivities (``sigma_e`` / ``sigma_m``)
+    sampled at each component's own Yee location, or ``None`` when the scene
+    contains a material family that is not yet edge-native (see
+    :func:`_edge_native_eligible`), in which case the runtime keeps the node->edge
+    average path.
+    """
+    if not _edge_native_eligible(scene, model, surface_layout):
+        return None
+    eps = {}
+    sigma_e = {}
+    for component in _ELECTRIC_EDGE_COMPONENTS:
+        material, sigma = _compile_edge_component(
+            scene,
+            component,
+            eps_background=eps_background,
+            mu_background=mu_background,
+            averaging=averaging,
+            samples=samples,
+            region_densities=region_densities,
+            geometry_periodic_shifts=geometry_periodic_shifts,
+        )
+        eps[component] = material
+        sigma_e[component] = sigma
+    mu = {}
+    sigma_m = {}
+    for component in _MAGNETIC_EDGE_COMPONENTS:
+        material, sigma = _compile_edge_component(
+            scene,
+            component,
+            eps_background=eps_background,
+            mu_background=mu_background,
+            averaging=averaging,
+            samples=samples,
+            region_densities=region_densities,
+            geometry_periodic_shifts=geometry_periodic_shifts,
+        )
+        mu[component] = material
+        sigma_m[component] = sigma
+    return {"eps": eps, "sigma_e": sigma_e, "mu": mu, "sigma_m": sigma_m}
 
 
 def _region_axis_slice(nodes64: np.ndarray, lower: float, upper: float) -> slice | None:
@@ -1828,6 +2203,17 @@ def compile_material_model(
         model["pec_occupancy"] = _pec_occupancy(scene)
         model["pec_mode"] = pec_mode
         model["surface_impedance"] = surface_layout
+        model["edge_components"] = compile_edge_material_components(
+            scene,
+            model,
+            surface_layout,
+            eps_background=eps_background,
+            mu_background=mu_background,
+            samples=samples,
+            averaging=averaging,
+            region_densities=region_densities,
+            geometry_periodic_shifts=geometry_periodic_shifts,
+        )
         return model
 
     collect_inverse = averaging == "polarized"
@@ -1956,6 +2342,17 @@ def compile_material_model(
     model["pec_occupancy"] = _pec_occupancy(scene)
     model["pec_mode"] = pec_mode
     model["surface_impedance"] = surface_layout
+    model["edge_components"] = compile_edge_material_components(
+        scene,
+        model,
+        surface_layout,
+        eps_background=eps_background,
+        mu_background=mu_background,
+        samples=samples,
+        averaging=averaging,
+        region_densities=region_densities,
+        geometry_periodic_shifts=geometry_periodic_shifts,
+    )
     return model
 
 

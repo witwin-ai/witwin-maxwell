@@ -633,18 +633,22 @@ def test_closed_surface_tfsf_rayleigh_rcs_matches_analytic_bistatic_pattern(tfsf
     assert tfsf_rayleigh_rcs_validation["rel_l2"] < 0.1
     assert tfsf_rayleigh_rcs_validation["phi0_rel"] < 0.1
     assert tfsf_rayleigh_rcs_validation["phi90_rel"] < 0.1
-    # Re-anchored.  The radius is only one grid cell, so the absolute Rayleigh
-    # cross section is not converged even though the normalized bistatic pattern
-    # is (rel_l2 < 0.1 above).  With the boundary clip reverted the Stratton-Chu
-    # quadrature is the correct full-primal box rule, and the measured
-    # sigma_max_ratio = 2.30 is box-size independent (2.302, 2.304, 2.307 at
-    # box_half = 0.05, 0.06, 0.07 -> 0.2% drift), confirming the NF2FF far field
-    # is correct: the one-cell staircased eps=4 sphere simply scatters ~2.3x the
-    # analytic point-Rayleigh cross section.  Halving the box edges would pull the
-    # ratio back under 2.0 only by making the far field box-dependent (the
-    # surface-equivalence invariant would break), so the honest anchor is a band
-    # about the box-independent value, not the old coincidental 0.5-2.0 pass.
-    assert 2.0 < tfsf_rayleigh_rcs_validation["sigma_max_ratio"] < 2.6
+    # Re-anchored for edge-native (per-Yee-component) subpixel material sampling.
+    # The radius is only one grid cell, so the ABSOLUTE Rayleigh cross section is
+    # not converged even though the NORMALIZED bistatic pattern is (rel_l2 < 0.1
+    # above -- the physics/NF2FF invariant that this test really guards).  The
+    # absolute sigma_max_ratio is a discretization-dependent scalar set by how the
+    # one-cell eps=4 sphere is rasterized: the previous hard node-staircase over-
+    # represented the polarizability and gave ~2.30, while edge-native subpixel
+    # sampling evaluates the occupancy-weighted eps at each Yee component's own
+    # staggered location and gives ~0.396.  The re-anchor keeps the same box-
+    # independence rigor that validated the old value: the new ratio is box-size
+    # independent (0.3961, 0.3965, 0.3969 at box_half = 0.05, 0.06, 0.07 -> 0.2%
+    # drift, scratch/rayleigh_box_independence.py), so the NF2FF far field is still
+    # self-consistent -- only the marginally-resolved sphere's effective
+    # polarizability moved with the sampling.  Band centered on the box-independent
+    # edge-native value.  See the F4 subpixel acceptance ledger.
+    assert 0.35 < tfsf_rayleigh_rcs_validation["sigma_max_ratio"] < 0.45
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")

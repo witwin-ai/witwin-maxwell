@@ -714,3 +714,32 @@ conductive-path model, not a validated arc or device-failure predictor).
 - `python -m benchmark rf rf/rectangular_waveguide` is now a committed wave-level PASS on the Yee-staggered transverse operator. The terminated hollow-guide TE10 two-port S-matrix is assembled by solving `B = S*A` across the drive columns and gated on extraction conditioning (`cond(A) <= 10`) plus post-solve passivity (max singular value `<= 1.05`), then `beta(omega)` from `arg(S21)/L` is compared against the analytic TE10 dispersion `beta = sqrt(k0^2 - (pi/a)^2)` across 11 frequencies above cutoff. Measured (dx=0.02): `sin(pi y/a)`-correlation 1.0000, `cond(A) ~ 1.09`, max singular value ~1.0007, `|S11|` best ~2e-4, `|S21| ~ 1`, and beta median relative error ~0.05% against a pre-registered 1% tolerance (all three grid tiers pass). The mode-shape correlation check is retained as a fail-closed regression guard (< 0.9 records BLOCKED rather than reporting a spurious S-matrix). Committed gate: `tests/rf/wave_validation/test_waveguide_wave_level.py` (conditioning + passivity + beta, plus a reference-plane-length falsification).
 - The external-reference-solver generation path (`python -m benchmark.rf_tidy3d_references`) gains a runnable `rf/rectangular_waveguide` target: a TE10 `ModeSource`-driven guide with two `ModeMonitor` planes exports through the interoperability adapter with a genuine reference source (`sources=1`), so one cloud job produces an S-parameter cross-reference. The reference forward-mode-amplitude phase constant confirms the analytic TE10 `beta(omega)` to ~1.2% median over the band; the analytic dispersion remains the binding first-line reference. The remaining port/lumped-driven RF/antenna targets still fail-close at the `sources=0` runnable gate (deferred adapter source mapping) and spend no cloud credits.
 <!-- END round-e-integration -->
+
+<!-- BEGIN f4-subpixel-lever (edge-native per-Yee-component material sampling) -->
+## Edge-native per-Yee-component material sampling and conformal-PEC benchmark default (F4)
+
+- FDTD material coefficients are now sampled **edge-native**: the diagonal
+  background permittivity / permeability and the static electric / magnetic
+  conductivities are evaluated directly at each Yee component's own staggered
+  location (`Ex/Ey/Ez` edges, `Hx/Hy/Hz` faces), with the SDF occupancy, the
+  interface normal, and any `MaterialRegion` density sampled there and the
+  polarized (Kottke) or arithmetic subpixel blend formed at that location. This
+  replaces the previous node-centered blend followed by an arithmetic node->edge
+  average (the "smear"), which applied the interface operator at the wrong place
+  and then interpolated it. The node-centered model is still produced as the
+  canonical representation for summaries, monitors, the mode solver, and the
+  SAR / mass models; only the FDTD update coefficients switch to the edge fields.
+  This is the standard path for isotropic, axis-aligned diagonal-anisotropic, and
+  `PerturbationMedium` families (with or without static conductivity, dispersion,
+  nonlinearity, or modulation layered on the edge-native background). Full
+  off-diagonal anisotropy, 2D sheets, and surface-impedance metals fail closed to
+  the node->edge path (unchanged capability scope; no guard added or removed).
+- The differentiable material VJP follows the forward: when edge-native sampling
+  is active the permittivity sensitivity back-propagates directly through the edge
+  fields (no node->edge transpose), so geometry, region-density, and
+  diagonal-anisotropy gradients stay consistent by construction.
+- The benchmark harness default is `pec="conformal"`: partially-filled PEC faces
+  get fractional-fill edge suppression (sub-cell wall placement) rather than a hard
+  staircase edge, matching an external reference solver's curved/oblique metal
+  treatment. Dielectric scenes are unaffected.
+<!-- END f4-subpixel-lever -->
