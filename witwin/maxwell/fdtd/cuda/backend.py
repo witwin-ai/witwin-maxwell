@@ -115,45 +115,51 @@ def get_native_fdtd_module() -> NativeFDTDModule:
     return _NATIVE_MODULE
 
 
-def _magnetic_hx_standard(*, Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz):
-    _COMPILED_EXTENSION.update_magnetic_hx_standard(Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz)
+def _magnetic_hx_standard(*, Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz, uniformDecay=None, uniformCurl=None):
+    _COMPILED_EXTENSION.update_magnetic_hx_standard(Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz, uniformDecay, uniformCurl)
 
 
-def _magnetic_hy_standard(*, Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz):
-    _COMPILED_EXTENSION.update_magnetic_hy_standard(Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz)
+def _magnetic_hy_standard(*, Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz, uniformDecay=None, uniformCurl=None):
+    _COMPILED_EXTENSION.update_magnetic_hy_standard(Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz, uniformDecay, uniformCurl)
 
 
-def _magnetic_hz_standard(*, Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy):
-    _COMPILED_EXTENSION.update_magnetic_hz_standard(Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy)
+def _magnetic_hz_standard(*, Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy, uniformDecay=None, uniformCurl=None):
+    _COMPILED_EXTENSION.update_magnetic_hz_standard(Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy, uniformDecay, uniformCurl)
 
 
 def _magnetic_hx_standard_bounded(
     *, Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz,
     localXBegin, localXEnd, globalXOffset, globalXExtent,
+    uniformDecay=None, uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_magnetic_hx_standard_bounded(
         Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz,
         int(localXBegin), int(localXEnd), int(globalXOffset), int(globalXExtent),
+        uniformDecay, uniformCurl,
     )
 
 
 def _magnetic_hy_standard_bounded(
     *, Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz,
     localXBegin, localXEnd, globalXOffset, globalXExtent,
+    uniformDecay=None, uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_magnetic_hy_standard_bounded(
         Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz,
         int(localXBegin), int(localXEnd), int(globalXOffset), int(globalXExtent),
+        uniformDecay, uniformCurl,
     )
 
 
 def _magnetic_hz_standard_bounded(
     *, Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy,
     localXBegin, localXEnd, globalXOffset, globalXExtent,
+    uniformDecay=None, uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_magnetic_hz_standard_bounded(
         Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy,
         int(localXBegin), int(localXEnd), int(globalXOffset), int(globalXExtent),
+        uniformDecay, uniformCurl,
     )
 
 
@@ -174,6 +180,8 @@ def _magnetic_hx_cpml(
     CyHxZ,
     invDy,
     invDz,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_magnetic_hx_cpml(
                 Hx,
@@ -191,6 +199,8 @@ def _magnetic_hx_cpml(
                 CyHxZ,
                 invDy,
                 invDz,
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -211,6 +221,8 @@ def _magnetic_hy_cpml(
     CyHyZ,
     invDx,
     invDz,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_magnetic_hy_cpml(
                 Hy,
@@ -228,6 +240,8 @@ def _magnetic_hy_cpml(
                 CyHyZ,
                 invDx,
                 invDz,
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -248,6 +262,8 @@ def _magnetic_hz_cpml(
     CyHzY,
     invDx,
     invDy,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_magnetic_hz_cpml(
                 Hz,
@@ -265,6 +281,8 @@ def _magnetic_hz_cpml(
                 CyHzY,
                 invDx,
                 invDy,
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -440,6 +458,8 @@ def _electric_ex_standard(
     yHighBoundaryMode,
     zLowBoundaryMode,
     zHighBoundaryMode,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_electric_ex_standard(
                 Ex,
@@ -453,6 +473,8 @@ def _electric_ex_standard(
                 int(yHighBoundaryMode),
                 int(zLowBoundaryMode),
                 int(zHighBoundaryMode),
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -469,6 +491,8 @@ def _electric_ey_standard(
     xHighBoundaryMode,
     zLowBoundaryMode,
     zHighBoundaryMode,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_electric_ey_standard(
                 Ey,
@@ -482,6 +506,8 @@ def _electric_ey_standard(
                 int(xHighBoundaryMode),
                 int(zLowBoundaryMode),
                 int(zHighBoundaryMode),
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -498,6 +524,8 @@ def _electric_ez_standard(
     xHighBoundaryMode,
     yLowBoundaryMode,
     yHighBoundaryMode,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_electric_ez_standard(
                 Ez,
@@ -511,6 +539,8 @@ def _electric_ez_standard(
                 int(xHighBoundaryMode),
                 int(yLowBoundaryMode),
                 int(yHighBoundaryMode),
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -520,11 +550,13 @@ def _electric_ex_standard_bounded(
     *, Ex, Hy, Hz, ExDecay, ExCurl, invDy, invDz,
     yLowBoundaryMode, yHighBoundaryMode, zLowBoundaryMode, zHighBoundaryMode,
     localXBegin, localXEnd, globalXOffset, globalXExtent,
+    uniformDecay=None, uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_electric_ex_standard_bounded(
         Ex, Hy, Hz, ExDecay, ExCurl, invDy, invDz,
         int(yLowBoundaryMode), int(yHighBoundaryMode), int(zLowBoundaryMode), int(zHighBoundaryMode),
         int(localXBegin), int(localXEnd), int(globalXOffset), int(globalXExtent),
+        uniformDecay, uniformCurl,
     )
 
 
@@ -532,11 +564,13 @@ def _electric_ey_standard_bounded(
     *, Ey, Hx, Hz, EyDecay, EyCurl, invDx, invDz,
     xLowBoundaryMode, xHighBoundaryMode, zLowBoundaryMode, zHighBoundaryMode,
     localXBegin, localXEnd, globalXOffset, globalXExtent,
+    uniformDecay=None, uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_electric_ey_standard_bounded(
         Ey, Hx, Hz, EyDecay, EyCurl, invDx, invDz,
         int(xLowBoundaryMode), int(xHighBoundaryMode), int(zLowBoundaryMode), int(zHighBoundaryMode),
         int(localXBegin), int(localXEnd), int(globalXOffset), int(globalXExtent),
+        uniformDecay, uniformCurl,
     )
 
 
@@ -544,11 +578,13 @@ def _electric_ez_standard_bounded(
     *, Ez, Hx, Hy, EzDecay, EzCurl, invDx, invDy,
     xLowBoundaryMode, xHighBoundaryMode, yLowBoundaryMode, yHighBoundaryMode,
     localXBegin, localXEnd, globalXOffset, globalXExtent,
+    uniformDecay=None, uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_electric_ez_standard_bounded(
         Ez, Hx, Hy, EzDecay, EzCurl, invDx, invDy,
         int(xLowBoundaryMode), int(xHighBoundaryMode), int(yLowBoundaryMode), int(yHighBoundaryMode),
         int(localXBegin), int(localXEnd), int(globalXOffset), int(globalXExtent),
+        uniformDecay, uniformCurl,
     )
 def _electric_ex_modulated(
     *,
@@ -841,6 +877,8 @@ def _electric_ex_cpml(
     yHighBoundaryMode,
     zLowBoundaryMode,
     zHighBoundaryMode,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_electric_ex_cpml(
                 Ex,
@@ -862,6 +900,8 @@ def _electric_ex_cpml(
                 int(yHighBoundaryMode),
                 int(zLowBoundaryMode),
                 int(zHighBoundaryMode),
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -886,6 +926,8 @@ def _electric_ey_cpml(
     xHighBoundaryMode,
     zLowBoundaryMode,
     zHighBoundaryMode,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_electric_ey_cpml(
                 Ey,
@@ -907,6 +949,8 @@ def _electric_ey_cpml(
                 int(xHighBoundaryMode),
                 int(zLowBoundaryMode),
                 int(zHighBoundaryMode),
+                uniformDecay,
+                uniformCurl,
             )
 
 
@@ -931,6 +975,8 @@ def _electric_ez_cpml(
     xHighBoundaryMode,
     yLowBoundaryMode,
     yHighBoundaryMode,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _COMPILED_EXTENSION.update_electric_ez_cpml(
                 Ez,
@@ -952,6 +998,8 @@ def _electric_ez_cpml(
                 int(xHighBoundaryMode),
                 int(yLowBoundaryMode),
                 int(yHighBoundaryMode),
+                uniformDecay,
+                uniformCurl,
             )
 
 

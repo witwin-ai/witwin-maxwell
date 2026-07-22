@@ -8,6 +8,20 @@ struct Index3D {
   unsigned int k;
 };
 
+// Dispatch a kernel templated on a single Uniform flag. The scalar fast path is
+// taken only when BOTH decay and curl are uniform, so the only instantiations
+// ever launched are the all-scalar one and the all-array one; mixed
+// scalar/array reads are avoided because they let the compiler re-associate the
+// FMA contraction of the update and break bit-parity with the array kernel.
+template <typename LaunchFn>
+inline void dispatch_uniform_pair(bool uniform, LaunchFn&& launch) {
+  if (uniform) {
+    launch(std::integral_constant<bool, true>{});
+  } else {
+    launch(std::integral_constant<bool, false>{});
+  }
+}
+
 // Dispatch a kernel templated on <UniformDecay, UniformCurl>. Uniform
 // coefficients skip the full-volume decay/curl tensor reads, which removes up
 // to two of the six global-memory streams of the field update.

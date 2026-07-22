@@ -266,19 +266,19 @@ def _compressed_psi_update(
     return full
 
 
-def _magnetic_hx_standard(*, Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz):
+def _magnetic_hx_standard(*, Hx, Ey, Ez, HxDecay, HxCurl, invDy, invDz, uniformDecay=None, uniformCurl=None):
     _require_cuda_tensors(Hx, Ey, Ez, HxDecay, HxCurl)
     curl = (Ez[:, 1:, :] - Ez[:, :-1, :]) * _spacing_factor(invDy, 1) - (Ey[:, :, 1:] - Ey[:, :, :-1]) * _spacing_factor(invDz, 2)
     Hx.copy_(Hx * HxDecay - HxCurl * curl)
 
 
-def _magnetic_hy_standard(*, Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz):
+def _magnetic_hy_standard(*, Hy, Ex, Ez, HyDecay, HyCurl, invDx, invDz, uniformDecay=None, uniformCurl=None):
     _require_cuda_tensors(Hy, Ex, Ez, HyDecay, HyCurl)
     curl = (Ex[:, :, 1:] - Ex[:, :, :-1]) * _spacing_factor(invDz, 2) - (Ez[1:, :, :] - Ez[:-1, :, :]) * _spacing_factor(invDx, 0)
     Hy.copy_(Hy * HyDecay - HyCurl * curl)
 
 
-def _magnetic_hz_standard(*, Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy):
+def _magnetic_hz_standard(*, Hz, Ex, Ey, HzDecay, HzCurl, invDx, invDy, uniformDecay=None, uniformCurl=None):
     _require_cuda_tensors(Hz, Ex, Ey, HzDecay, HzCurl)
     curl = (Ey[1:, :, :] - Ey[:-1, :, :]) * _spacing_factor(invDx, 0) - (Ex[:, 1:, :] - Ex[:, :-1, :]) * _spacing_factor(invDy, 1)
     Hz.copy_(Hz * HzDecay - HzCurl * curl)
@@ -301,6 +301,8 @@ def _magnetic_hx_cpml(
     CyHxZ,
     invDy,
     invDz,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _require_cuda_tensors(
         Hx,
@@ -344,6 +346,8 @@ def _magnetic_hy_cpml(
     CyHyZ,
     invDx,
     invDz,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _require_cuda_tensors(
         Hy,
@@ -387,6 +391,8 @@ def _magnetic_hz_cpml(
     CyHzY,
     invDx,
     invDy,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _require_cuda_tensors(
         Hz,
@@ -599,6 +605,8 @@ def _electric_ex_standard(
     yHighBoundaryMode,
     zLowBoundaryMode,
     zHighBoundaryMode,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _require_cuda_tensors(Ex, Hy, Hz, ExDecay, ExCurl)
     d_y = _backward_diff(Hz, tuple(Ex.shape), 1, yLowBoundaryMode, yHighBoundaryMode, invDy)
@@ -626,6 +634,8 @@ def _electric_ey_standard(
     xHighBoundaryMode,
     zLowBoundaryMode,
     zHighBoundaryMode,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _require_cuda_tensors(Ey, Hx, Hz, EyDecay, EyCurl)
     d_z = _backward_diff(Hx, tuple(Ey.shape), 2, zLowBoundaryMode, zHighBoundaryMode, invDz)
@@ -653,6 +663,8 @@ def _electric_ez_standard(
     xHighBoundaryMode,
     yLowBoundaryMode,
     yHighBoundaryMode,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _require_cuda_tensors(Ez, Hx, Hy, EzDecay, EzCurl)
     d_x = _backward_diff(Hy, tuple(Ez.shape), 0, xLowBoundaryMode, xHighBoundaryMode, invDx)
@@ -784,6 +796,8 @@ def _electric_ex_cpml(
     yHighBoundaryMode,
     zLowBoundaryMode,
     zHighBoundaryMode,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _require_cuda_tensors(
         Ex,
@@ -843,6 +857,8 @@ def _electric_ey_cpml(
     xHighBoundaryMode,
     zLowBoundaryMode,
     zHighBoundaryMode,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _require_cuda_tensors(
         Ey,
@@ -902,6 +918,8 @@ def _electric_ez_cpml(
     xHighBoundaryMode,
     yLowBoundaryMode,
     yHighBoundaryMode,
+    uniformDecay=None,
+    uniformCurl=None,
 ):
     _require_cuda_tensors(
         Ez,

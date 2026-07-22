@@ -204,7 +204,7 @@ __device__ __forceinline__ ComplexValue bloch_backward_diff_axis2(
   return bloch_backward_diff_axis<2>(real, imag, target_z, 0, source_y, source_z, i, j, k, phase_cos, phase_sin, inv_delta);
 }
 
-template <int Component>
+template <int Component, bool Uniform>
 __global__ void update_electric_standard_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -215,6 +215,8 @@ __global__ void update_electric_standard_kernel(
     const float* __restrict__ second,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    float decay_value,
+    float curl_value,
     const float* __restrict__ inv_a,
     const float* __restrict__ inv_b,
     int a_low_mode,
@@ -254,10 +256,14 @@ __global__ void update_electric_standard_kernel(
     positive = backward_diff_axis0(second, nx, ny, nz, i, j, k, a_low_mode, a_high_mode, inv_a);
     negative = backward_diff_axis1(first, ny - 1, nz, i, j, k, b_low_mode, b_high_mode, inv_b);
   }
-  field[linear] = field[linear] * decay[linear] + curl_coeff[linear] * (positive - negative);
+  if constexpr (Uniform) {
+    field[linear] = field[linear] * decay_value + curl_value * (positive - negative);
+  } else {
+    field[linear] = field[linear] * decay[linear] + curl_coeff[linear] * (positive - negative);
+  }
 }
 
-template <int Component>
+template <int Component, bool Uniform>
 __global__ void update_electric_standard_interior_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -268,6 +274,8 @@ __global__ void update_electric_standard_interior_kernel(
     const float* __restrict__ second,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    float decay_value,
+    float curl_value,
     const float* __restrict__ inv_a,
     const float* __restrict__ inv_b,
     float* __restrict__ field) {
@@ -291,7 +299,11 @@ __global__ void update_electric_standard_interior_kernel(
     positive = (second[offset3d(i, j, k, ny, nz)] - second[offset3d(i - 1, j, k, ny, nz)]) * inv_a[i];
     negative = (first[offset3d(i, j, k, ny - 1, nz)] - first[offset3d(i, j - 1, k, ny - 1, nz)]) * inv_b[j];
   }
-  field[linear] = field[linear] * decay[linear] + curl_coeff[linear] * (positive - negative);
+  if constexpr (Uniform) {
+    field[linear] = field[linear] * decay_value + curl_value * (positive - negative);
+  } else {
+    field[linear] = field[linear] * decay[linear] + curl_coeff[linear] * (positive - negative);
+  }
 }
 
 // Space-time modulated permittivity: eps(x, t) = eps_static(x) * m(x, t) with
@@ -563,7 +575,7 @@ __global__ void update_electric_ez_bloch_kernel(
 // kernel (``second`` feeds the a-axis derivative, ``first`` the b-axis one), and
 // the psi/kappa split-field correction matches the magnetic CPML kernel. Reduces
 // per-component (ex,ey,ez) to a single instantiation.
-template <int Component>
+template <int Component, bool Uniform>
 __global__ void update_electric_cpml_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -572,6 +584,8 @@ __global__ void update_electric_cpml_kernel(
     const float* __restrict__ second,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    float decay_value,
+    float curl_value,
     const float* __restrict__ inv_kappa_a,
     const float* __restrict__ b_a,
     const float* __restrict__ c_a,
@@ -626,13 +640,17 @@ __global__ void update_electric_cpml_kernel(
   const float corrected_a = d_a * inv_kappa_a[coord_a] + psi_a_value;
   const float corrected_b = d_b * inv_kappa_b[coord_b] + psi_b_value;
   const float curl = Component == 1 ? corrected_b - corrected_a : corrected_a - corrected_b;
-  field[linear] = field[linear] * decay[linear] + curl_coeff[linear] * curl;
+  if constexpr (Uniform) {
+    field[linear] = field[linear] * decay_value + curl_value * curl;
+  } else {
+    field[linear] = field[linear] * decay[linear] + curl_coeff[linear] * curl;
+  }
 }
 
 // Branch-free interior fast path for the dense-CPML electric update, templated
 // over the component. Plain backward differences (no boundary-mode logic); the
 // per-component thread-offset scheme matches update_electric_standard_interior_kernel.
-template <int Component>
+template <int Component, bool Uniform>
 __global__ void update_electric_cpml_interior_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -641,6 +659,8 @@ __global__ void update_electric_cpml_interior_kernel(
     const float* __restrict__ second,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    float decay_value,
+    float curl_value,
     const float* __restrict__ inv_kappa_a,
     const float* __restrict__ b_a,
     const float* __restrict__ c_a,
@@ -681,7 +701,11 @@ __global__ void update_electric_cpml_interior_kernel(
   const float corrected_a = d_a * inv_kappa_a[coord_a] + psi_a_value;
   const float corrected_b = d_b * inv_kappa_b[coord_b] + psi_b_value;
   const float curl = Component == 1 ? corrected_b - corrected_a : corrected_a - corrected_b;
-  field[linear] = field[linear] * decay[linear] + curl_coeff[linear] * curl;
+  if constexpr (Uniform) {
+    field[linear] = field[linear] * decay_value + curl_value * curl;
+  } else {
+    field[linear] = field[linear] * decay[linear] + curl_coeff[linear] * curl;
+  }
 }
 
 // Dense-CPML variants of the modulated electric update. Identical psi/kappa
@@ -1065,6 +1089,80 @@ __global__ void update_electric_ez_cpml_compressed_kernel(
   const float decay_factor = UniformDecay ? decay_value : decay[linear];
   const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
   ez[linear] = ez[linear] * decay_factor + curl_factor * curl;
+}
+
+// Branch-free interior fast path for the compressed-(slab-)CPML electric
+// update, templated over the Yee component. Mirrors the dense
+// update_electric_cpml_interior_kernel decomposition: the launch grid drops the
+// outermost plane on each transverse axis, so the per-cell boundary-mode tests
+// of the full compressed kernels disappear and the curl derivatives reduce to
+// plain backward differences. The compact psi work is kept per cell because the
+// psi shell overlaps the interior region; update_compact_electric_psi resolves
+// shell membership and is memory-inactive outside the shell. The curl
+// accumulation order matches the flat per-component expressions of the full
+// compressed kernels exactly to preserve bit-parity.
+template <int Component, bool UniformDecay, bool UniformCurl>
+__global__ void update_electric_cpml_compressed_interior_kernel(
+    unsigned int nx,
+    unsigned int ny,
+    unsigned int nz,
+    const float* __restrict__ first,
+    const float* __restrict__ second,
+    const float* __restrict__ decay,
+    const float* __restrict__ curl_coeff,
+    float decay_value,
+    float curl_value,
+    const float* __restrict__ inv_kappa_a,
+    const float* __restrict__ b_a,
+    const float* __restrict__ c_a,
+    const float* __restrict__ inv_kappa_b,
+    const float* __restrict__ b_b,
+    const float* __restrict__ c_b,
+    const float* __restrict__ inv_a,
+    const float* __restrict__ inv_b,
+    int a_low_length,
+    int a_high_start,
+    int a_high_length,
+    int b_low_length,
+    int b_high_start,
+    int b_high_length,
+    float* __restrict__ psi_a,
+    float* __restrict__ psi_b,
+    float* __restrict__ field) {
+  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x + (Component == 2 ? 0 : 1);
+  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y + (Component == 1 ? 0 : 1);
+  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z + (Component == 0 ? 0 : 1);
+  if (i + (Component == 0 ? 0 : 1) >= nx || j + (Component == 1 ? 0 : 1) >= ny ||
+      k + (Component == 2 ? 0 : 1) >= nz) {
+    return;
+  }
+  const long long linear = offset3d(i, j, k, ny, nz);
+  const unsigned int coord_a = Component == 0 ? j : i;
+  const unsigned int coord_b = Component == 2 ? j : k;
+  float d_a;
+  float d_b;
+  if constexpr (Component == 0) {
+    d_a = (second[offset3d(i, j, k, ny - 1, nz)] - second[offset3d(i, j - 1, k, ny - 1, nz)]) * inv_a[coord_a];
+    d_b = (first[offset3d(i, j, k, ny, nz - 1)] - first[offset3d(i, j, k - 1, ny, nz - 1)]) * inv_b[coord_b];
+  } else if constexpr (Component == 1) {
+    d_a = (second[offset3d(i, j, k, ny, nz)] - second[offset3d(i - 1, j, k, ny, nz)]) * inv_a[coord_a];
+    d_b = (first[offset3d(i, j, k, ny, nz - 1)] - first[offset3d(i, j, k - 1, ny, nz - 1)]) * inv_b[coord_b];
+  } else {
+    d_a = (second[offset3d(i, j, k, ny, nz)] - second[offset3d(i - 1, j, k, ny, nz)]) * inv_a[coord_a];
+    d_b = (first[offset3d(i, j, k, ny - 1, nz)] - first[offset3d(i, j - 1, k, ny - 1, nz)]) * inv_b[coord_b];
+  }
+  constexpr int AxisA = Component == 0 ? 1 : 0;
+  constexpr int AxisB = Component == 2 ? 1 : 2;
+  const float psi_a_value = update_compact_electric_psi<AxisA>(
+      psi_a, b_a, c_a, i, j, k, ny, nz, coord_a, a_low_length, a_high_start, a_high_length, d_a);
+  const float psi_b_value = update_compact_electric_psi<AxisB>(
+      psi_b, b_b, c_b, i, j, k, ny, nz, coord_b, b_low_length, b_high_start, b_high_length, d_b);
+  const float curl = Component == 1
+      ? d_b * inv_kappa_b[coord_b] + psi_b_value - d_a * inv_kappa_a[coord_a] - psi_a_value
+      : d_a * inv_kappa_a[coord_a] + psi_a_value - d_b * inv_kappa_b[coord_b] - psi_b_value;
+  const float decay_factor = UniformDecay ? decay_value : decay[linear];
+  const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
+  field[linear] = field[linear] * decay_factor + curl_factor * curl;
 }
 
 // Compressed-(slab-)CPML variants of the modulated electric update. The compact
@@ -1881,7 +1979,9 @@ void update_electric_ex_standard_bounded_cuda(
     int64_t local_x_begin,
     int64_t local_x_end,
     int64_t global_x_offset,
-    int64_t global_x_extent) {
+    int64_t global_x_extent,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   check_electric_inputs(ex, hy, hz, decay, curl, "ex");
   check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
   check_rank3_shape(hz, "hz", ex.size(0), ex.size(1) - 1, ex.size(2));
@@ -1897,7 +1997,27 @@ void update_electric_ex_standard_bounded_cuda(
   const dim3 block = field_block3d();
   if (inactive_boundary_pair(y_low_mode, y_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
     if (sizes[1] > 2 && sizes[2] > 2) {
-      update_electric_standard_interior_kernel<0><<<field_grid3d(local_x_end - local_x_begin, sizes[1] - 2, sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+      dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+        update_electric_standard_interior_kernel<0, decltype(u_uniform)::value><<<field_grid3d(local_x_end - local_x_begin, sizes[1] - 2, sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+            static_cast<unsigned int>(sizes[0]),
+            static_cast<unsigned int>(sizes[1]),
+            static_cast<unsigned int>(sizes[2]),
+            static_cast<unsigned int>(local_x_begin),
+            static_cast<unsigned int>(local_x_end),
+            hy.mutable_data_ptr<float>(),
+            hz.mutable_data_ptr<float>(),
+            decay.mutable_data_ptr<float>(),
+            curl.mutable_data_ptr<float>(),
+            static_cast<float>(uniform_decay.value_or(0.0)),
+            static_cast<float>(uniform_curl.value_or(0.0)),
+            inv_dy.mutable_data_ptr<float>(),
+            inv_dz.mutable_data_ptr<float>(),
+            ex.mutable_data_ptr<float>());
+      });
+    }
+  } else {
+    dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+      update_electric_standard_kernel<0, decltype(u_uniform)::value><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -1907,28 +2027,16 @@ void update_electric_ex_standard_bounded_cuda(
           hz.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          static_cast<float>(uniform_decay.value_or(0.0)),
+          static_cast<float>(uniform_curl.value_or(0.0)),
           inv_dy.mutable_data_ptr<float>(),
           inv_dz.mutable_data_ptr<float>(),
+          static_cast<int>(y_low_mode),
+          static_cast<int>(y_high_mode),
+          static_cast<int>(z_low_mode),
+          static_cast<int>(z_high_mode),
           ex.mutable_data_ptr<float>());
-    }
-  } else {
-    update_electric_standard_kernel<0><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-        static_cast<unsigned int>(sizes[0]),
-        static_cast<unsigned int>(sizes[1]),
-        static_cast<unsigned int>(sizes[2]),
-        static_cast<unsigned int>(local_x_begin),
-        static_cast<unsigned int>(local_x_end),
-        hy.mutable_data_ptr<float>(),
-        hz.mutable_data_ptr<float>(),
-        decay.mutable_data_ptr<float>(),
-        curl.mutable_data_ptr<float>(),
-        inv_dy.mutable_data_ptr<float>(),
-        inv_dz.mutable_data_ptr<float>(),
-        static_cast<int>(y_low_mode),
-        static_cast<int>(y_high_mode),
-        static_cast<int>(z_low_mode),
-        static_cast<int>(z_high_mode),
-        ex.mutable_data_ptr<float>());
+    });
   }
   WITWIN_CUDA_CHECK();
 }
@@ -1944,12 +2052,14 @@ void update_electric_ex_standard_cuda(
     int64_t y_low_mode,
     int64_t y_high_mode,
     int64_t z_low_mode,
-    int64_t z_high_mode) {
+    int64_t z_high_mode,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   const int64_t x_extent = ex.size(0);
   update_electric_ex_standard_bounded_cuda(
       ex, hy, hz, decay, curl, inv_dy, inv_dz,
       y_low_mode, y_high_mode, z_low_mode, z_high_mode,
-      0, x_extent, 0, x_extent);
+      0, x_extent, 0, x_extent, uniform_decay, uniform_curl);
 }
 
 void update_electric_ey_standard_bounded_cuda(
@@ -1967,7 +2077,9 @@ void update_electric_ey_standard_bounded_cuda(
     int64_t local_x_begin,
     int64_t local_x_end,
     int64_t global_x_offset,
-    int64_t global_x_extent) {
+    int64_t global_x_extent,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   check_electric_inputs(ey, hx, hz, decay, curl, "ey");
   check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
   check_rank3_shape(hz, "hz", ey.size(0) - 1, ey.size(1), ey.size(2));
@@ -1989,38 +2101,46 @@ void update_electric_ey_standard_bounded_cuda(
     const int64_t interior_x_begin = local_x_begin < 1 ? 1 : local_x_begin;
     const int64_t interior_x_end = local_x_end > sizes[0] - 1 ? sizes[0] - 1 : local_x_end;
     if (interior_x_end > interior_x_begin && sizes[2] > 2) {
-      update_electric_standard_interior_kernel<1><<<field_grid3d(interior_x_end - interior_x_begin, sizes[1], sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+      dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+        update_electric_standard_interior_kernel<1, decltype(u_uniform)::value><<<field_grid3d(interior_x_end - interior_x_begin, sizes[1], sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+            static_cast<unsigned int>(sizes[0]),
+            static_cast<unsigned int>(sizes[1]),
+            static_cast<unsigned int>(sizes[2]),
+            static_cast<unsigned int>(interior_x_begin),
+            static_cast<unsigned int>(interior_x_end),
+            hx.mutable_data_ptr<float>(),
+            hz.mutable_data_ptr<float>(),
+            decay.mutable_data_ptr<float>(),
+            curl.mutable_data_ptr<float>(),
+            static_cast<float>(uniform_decay.value_or(0.0)),
+            static_cast<float>(uniform_curl.value_or(0.0)),
+            inv_dx.mutable_data_ptr<float>(),
+            inv_dz.mutable_data_ptr<float>(),
+            ey.mutable_data_ptr<float>());
+      });
+    }
+  } else {
+    dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+      update_electric_standard_kernel<1, decltype(u_uniform)::value><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
-          static_cast<unsigned int>(interior_x_begin),
-          static_cast<unsigned int>(interior_x_end),
+          static_cast<unsigned int>(local_x_begin),
+          static_cast<unsigned int>(local_x_end),
           hx.mutable_data_ptr<float>(),
           hz.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          static_cast<float>(uniform_decay.value_or(0.0)),
+          static_cast<float>(uniform_curl.value_or(0.0)),
           inv_dx.mutable_data_ptr<float>(),
           inv_dz.mutable_data_ptr<float>(),
+          static_cast<int>(effective_x_low_mode),
+          static_cast<int>(effective_x_high_mode),
+          static_cast<int>(z_low_mode),
+          static_cast<int>(z_high_mode),
           ey.mutable_data_ptr<float>());
-    }
-  } else {
-    update_electric_standard_kernel<1><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-        static_cast<unsigned int>(sizes[0]),
-        static_cast<unsigned int>(sizes[1]),
-        static_cast<unsigned int>(sizes[2]),
-        static_cast<unsigned int>(local_x_begin),
-        static_cast<unsigned int>(local_x_end),
-        hx.mutable_data_ptr<float>(),
-        hz.mutable_data_ptr<float>(),
-        decay.mutable_data_ptr<float>(),
-        curl.mutable_data_ptr<float>(),
-        inv_dx.mutable_data_ptr<float>(),
-        inv_dz.mutable_data_ptr<float>(),
-        static_cast<int>(effective_x_low_mode),
-        static_cast<int>(effective_x_high_mode),
-        static_cast<int>(z_low_mode),
-        static_cast<int>(z_high_mode),
-        ey.mutable_data_ptr<float>());
+    });
   }
   WITWIN_CUDA_CHECK();
 }
@@ -2036,12 +2156,14 @@ void update_electric_ey_standard_cuda(
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t z_low_mode,
-    int64_t z_high_mode) {
+    int64_t z_high_mode,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   const int64_t x_extent = ey.size(0);
   update_electric_ey_standard_bounded_cuda(
       ey, hx, hz, decay, curl, inv_dx, inv_dz,
       x_low_mode, x_high_mode, z_low_mode, z_high_mode,
-      0, x_extent, 0, x_extent);
+      0, x_extent, 0, x_extent, uniform_decay, uniform_curl);
 }
 
 void update_electric_ez_standard_bounded_cuda(
@@ -2059,7 +2181,9 @@ void update_electric_ez_standard_bounded_cuda(
     int64_t local_x_begin,
     int64_t local_x_end,
     int64_t global_x_offset,
-    int64_t global_x_extent) {
+    int64_t global_x_extent,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   check_electric_inputs(ez, hx, hy, decay, curl, "ez");
   check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
   check_rank3_shape(hy, "hy", ez.size(0) - 1, ez.size(1), ez.size(2));
@@ -2081,38 +2205,46 @@ void update_electric_ez_standard_bounded_cuda(
     const int64_t interior_x_begin = local_x_begin < 1 ? 1 : local_x_begin;
     const int64_t interior_x_end = local_x_end > sizes[0] - 1 ? sizes[0] - 1 : local_x_end;
     if (interior_x_end > interior_x_begin && sizes[1] > 2) {
-      update_electric_standard_interior_kernel<2><<<field_grid3d(interior_x_end - interior_x_begin, sizes[1] - 2, sizes[2], block), block, 0, current_cuda_stream()>>>(
+      dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+        update_electric_standard_interior_kernel<2, decltype(u_uniform)::value><<<field_grid3d(interior_x_end - interior_x_begin, sizes[1] - 2, sizes[2], block), block, 0, current_cuda_stream()>>>(
+            static_cast<unsigned int>(sizes[0]),
+            static_cast<unsigned int>(sizes[1]),
+            static_cast<unsigned int>(sizes[2]),
+            static_cast<unsigned int>(interior_x_begin),
+            static_cast<unsigned int>(interior_x_end),
+            hx.mutable_data_ptr<float>(),
+            hy.mutable_data_ptr<float>(),
+            decay.mutable_data_ptr<float>(),
+            curl.mutable_data_ptr<float>(),
+            static_cast<float>(uniform_decay.value_or(0.0)),
+            static_cast<float>(uniform_curl.value_or(0.0)),
+            inv_dx.mutable_data_ptr<float>(),
+            inv_dy.mutable_data_ptr<float>(),
+            ez.mutable_data_ptr<float>());
+      });
+    }
+  } else {
+    dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+      update_electric_standard_kernel<2, decltype(u_uniform)::value><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
-          static_cast<unsigned int>(interior_x_begin),
-          static_cast<unsigned int>(interior_x_end),
+          static_cast<unsigned int>(local_x_begin),
+          static_cast<unsigned int>(local_x_end),
           hx.mutable_data_ptr<float>(),
           hy.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          static_cast<float>(uniform_decay.value_or(0.0)),
+          static_cast<float>(uniform_curl.value_or(0.0)),
           inv_dx.mutable_data_ptr<float>(),
           inv_dy.mutable_data_ptr<float>(),
+          static_cast<int>(effective_x_low_mode),
+          static_cast<int>(effective_x_high_mode),
+          static_cast<int>(y_low_mode),
+          static_cast<int>(y_high_mode),
           ez.mutable_data_ptr<float>());
-    }
-  } else {
-    update_electric_standard_kernel<2><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-        static_cast<unsigned int>(sizes[0]),
-        static_cast<unsigned int>(sizes[1]),
-        static_cast<unsigned int>(sizes[2]),
-        static_cast<unsigned int>(local_x_begin),
-        static_cast<unsigned int>(local_x_end),
-        hx.mutable_data_ptr<float>(),
-        hy.mutable_data_ptr<float>(),
-        decay.mutable_data_ptr<float>(),
-        curl.mutable_data_ptr<float>(),
-        inv_dx.mutable_data_ptr<float>(),
-        inv_dy.mutable_data_ptr<float>(),
-        static_cast<int>(effective_x_low_mode),
-        static_cast<int>(effective_x_high_mode),
-        static_cast<int>(y_low_mode),
-        static_cast<int>(y_high_mode),
-        ez.mutable_data_ptr<float>());
+    });
   }
   WITWIN_CUDA_CHECK();
 }
@@ -2128,12 +2260,14 @@ void update_electric_ez_standard_cuda(
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t y_low_mode,
-    int64_t y_high_mode) {
+    int64_t y_high_mode,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   const int64_t x_extent = ez.size(0);
   update_electric_ez_standard_bounded_cuda(
       ez, hx, hy, decay, curl, inv_dx, inv_dy,
       x_low_mode, x_high_mode, y_low_mode, y_high_mode,
-      0, x_extent, 0, x_extent);
+      0, x_extent, 0, x_extent, uniform_decay, uniform_curl);
 }
 
 void update_electric_ex_bloch_cuda(
@@ -2293,7 +2427,9 @@ void update_electric_ex_cpml_cuda(
     int64_t y_low_mode,
     int64_t y_high_mode,
     int64_t z_low_mode,
-    int64_t z_high_mode) {
+    int64_t z_high_mode,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   check_electric_cpml_inputs(
       ex, hy, hz, decay, curl, psi_y, psi_z, inv_kappa_y, b_y, c_y, inv_kappa_z, b_z, c_z, 1, 2, "ex");
   check_rank3_shape(hy, "hy", ex.size(0), ex.size(1), ex.size(2) - 1);
@@ -2305,7 +2441,33 @@ void update_electric_ex_cpml_cuda(
   const dim3 block = field_block3d();
   if (inactive_boundary_pair(y_low_mode, y_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
     if (sizes[1] > 2 && sizes[2] > 2) {
-      update_electric_cpml_interior_kernel<0><<<field_grid3d(sizes[0], sizes[1] - 2, sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+      dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+        update_electric_cpml_interior_kernel<0, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1] - 2, sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+            static_cast<unsigned int>(sizes[0]),
+            static_cast<unsigned int>(sizes[1]),
+            static_cast<unsigned int>(sizes[2]),
+            hy.mutable_data_ptr<float>(),
+            hz.mutable_data_ptr<float>(),
+            decay.mutable_data_ptr<float>(),
+            curl.mutable_data_ptr<float>(),
+            static_cast<float>(uniform_decay.value_or(0.0)),
+            static_cast<float>(uniform_curl.value_or(0.0)),
+            inv_kappa_y.mutable_data_ptr<float>(),
+            b_y.mutable_data_ptr<float>(),
+            c_y.mutable_data_ptr<float>(),
+            inv_kappa_z.mutable_data_ptr<float>(),
+            b_z.mutable_data_ptr<float>(),
+            c_z.mutable_data_ptr<float>(),
+            inv_dy.mutable_data_ptr<float>(),
+            inv_dz.mutable_data_ptr<float>(),
+            psi_y.mutable_data_ptr<float>(),
+            psi_z.mutable_data_ptr<float>(),
+            ex.mutable_data_ptr<float>());
+      });
+    }
+  } else {
+    dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+      update_electric_cpml_kernel<0, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2313,6 +2475,8 @@ void update_electric_ex_cpml_cuda(
           hz.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          static_cast<float>(uniform_decay.value_or(0.0)),
+          static_cast<float>(uniform_curl.value_or(0.0)),
           inv_kappa_y.mutable_data_ptr<float>(),
           b_y.mutable_data_ptr<float>(),
           c_y.mutable_data_ptr<float>(),
@@ -2321,34 +2485,14 @@ void update_electric_ex_cpml_cuda(
           c_z.mutable_data_ptr<float>(),
           inv_dy.mutable_data_ptr<float>(),
           inv_dz.mutable_data_ptr<float>(),
+          static_cast<int>(y_low_mode),
+          static_cast<int>(y_high_mode),
+          static_cast<int>(z_low_mode),
+          static_cast<int>(z_high_mode),
           psi_y.mutable_data_ptr<float>(),
           psi_z.mutable_data_ptr<float>(),
           ex.mutable_data_ptr<float>());
-    }
-  } else {
-    update_electric_cpml_kernel<0><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-        static_cast<unsigned int>(sizes[0]),
-        static_cast<unsigned int>(sizes[1]),
-        static_cast<unsigned int>(sizes[2]),
-        hy.mutable_data_ptr<float>(),
-        hz.mutable_data_ptr<float>(),
-        decay.mutable_data_ptr<float>(),
-        curl.mutable_data_ptr<float>(),
-        inv_kappa_y.mutable_data_ptr<float>(),
-        b_y.mutable_data_ptr<float>(),
-        c_y.mutable_data_ptr<float>(),
-        inv_kappa_z.mutable_data_ptr<float>(),
-        b_z.mutable_data_ptr<float>(),
-        c_z.mutable_data_ptr<float>(),
-        inv_dy.mutable_data_ptr<float>(),
-        inv_dz.mutable_data_ptr<float>(),
-        static_cast<int>(y_low_mode),
-        static_cast<int>(y_high_mode),
-        static_cast<int>(z_low_mode),
-        static_cast<int>(z_high_mode),
-        psi_y.mutable_data_ptr<float>(),
-        psi_z.mutable_data_ptr<float>(),
-        ex.mutable_data_ptr<float>());
+    });
   }
   WITWIN_CUDA_CHECK();
 }
@@ -2372,7 +2516,9 @@ void update_electric_ey_cpml_cuda(
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t z_low_mode,
-    int64_t z_high_mode) {
+    int64_t z_high_mode,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   check_electric_cpml_inputs(
       ey, hx, hz, decay, curl, psi_x, psi_z, inv_kappa_x, b_x, c_x, inv_kappa_z, b_z, c_z, 0, 2, "ey");
   check_rank3_shape(hx, "hx", ey.size(0), ey.size(1), ey.size(2) - 1);
@@ -2384,7 +2530,33 @@ void update_electric_ey_cpml_cuda(
   const dim3 block = field_block3d();
   if (inactive_boundary_pair(x_low_mode, x_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
     if (sizes[0] > 2 && sizes[2] > 2) {
-      update_electric_cpml_interior_kernel<1><<<field_grid3d(sizes[0] - 2, sizes[1], sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+      dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+        update_electric_cpml_interior_kernel<1, decltype(u_uniform)::value><<<field_grid3d(sizes[0] - 2, sizes[1], sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+            static_cast<unsigned int>(sizes[0]),
+            static_cast<unsigned int>(sizes[1]),
+            static_cast<unsigned int>(sizes[2]),
+            hx.mutable_data_ptr<float>(),
+            hz.mutable_data_ptr<float>(),
+            decay.mutable_data_ptr<float>(),
+            curl.mutable_data_ptr<float>(),
+            static_cast<float>(uniform_decay.value_or(0.0)),
+            static_cast<float>(uniform_curl.value_or(0.0)),
+            inv_kappa_x.mutable_data_ptr<float>(),
+            b_x.mutable_data_ptr<float>(),
+            c_x.mutable_data_ptr<float>(),
+            inv_kappa_z.mutable_data_ptr<float>(),
+            b_z.mutable_data_ptr<float>(),
+            c_z.mutable_data_ptr<float>(),
+            inv_dx.mutable_data_ptr<float>(),
+            inv_dz.mutable_data_ptr<float>(),
+            psi_x.mutable_data_ptr<float>(),
+            psi_z.mutable_data_ptr<float>(),
+            ey.mutable_data_ptr<float>());
+      });
+    }
+  } else {
+    dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+      update_electric_cpml_kernel<1, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2392,6 +2564,8 @@ void update_electric_ey_cpml_cuda(
           hz.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          static_cast<float>(uniform_decay.value_or(0.0)),
+          static_cast<float>(uniform_curl.value_or(0.0)),
           inv_kappa_x.mutable_data_ptr<float>(),
           b_x.mutable_data_ptr<float>(),
           c_x.mutable_data_ptr<float>(),
@@ -2400,34 +2574,14 @@ void update_electric_ey_cpml_cuda(
           c_z.mutable_data_ptr<float>(),
           inv_dx.mutable_data_ptr<float>(),
           inv_dz.mutable_data_ptr<float>(),
+          static_cast<int>(x_low_mode),
+          static_cast<int>(x_high_mode),
+          static_cast<int>(z_low_mode),
+          static_cast<int>(z_high_mode),
           psi_x.mutable_data_ptr<float>(),
           psi_z.mutable_data_ptr<float>(),
           ey.mutable_data_ptr<float>());
-    }
-  } else {
-    update_electric_cpml_kernel<1><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-        static_cast<unsigned int>(sizes[0]),
-        static_cast<unsigned int>(sizes[1]),
-        static_cast<unsigned int>(sizes[2]),
-        hx.mutable_data_ptr<float>(),
-        hz.mutable_data_ptr<float>(),
-        decay.mutable_data_ptr<float>(),
-        curl.mutable_data_ptr<float>(),
-        inv_kappa_x.mutable_data_ptr<float>(),
-        b_x.mutable_data_ptr<float>(),
-        c_x.mutable_data_ptr<float>(),
-        inv_kappa_z.mutable_data_ptr<float>(),
-        b_z.mutable_data_ptr<float>(),
-        c_z.mutable_data_ptr<float>(),
-        inv_dx.mutable_data_ptr<float>(),
-        inv_dz.mutable_data_ptr<float>(),
-        static_cast<int>(x_low_mode),
-        static_cast<int>(x_high_mode),
-        static_cast<int>(z_low_mode),
-        static_cast<int>(z_high_mode),
-        psi_x.mutable_data_ptr<float>(),
-        psi_z.mutable_data_ptr<float>(),
-        ey.mutable_data_ptr<float>());
+    });
   }
   WITWIN_CUDA_CHECK();
 }
@@ -2451,7 +2605,9 @@ void update_electric_ez_cpml_cuda(
     int64_t x_low_mode,
     int64_t x_high_mode,
     int64_t y_low_mode,
-    int64_t y_high_mode) {
+    int64_t y_high_mode,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   check_electric_cpml_inputs(
       ez, hx, hy, decay, curl, psi_x, psi_y, inv_kappa_x, b_x, c_x, inv_kappa_y, b_y, c_y, 0, 1, "ez");
   check_rank3_shape(hx, "hx", ez.size(0), ez.size(1) - 1, ez.size(2));
@@ -2463,7 +2619,33 @@ void update_electric_ez_cpml_cuda(
   const dim3 block = field_block3d();
   if (inactive_boundary_pair(x_low_mode, x_high_mode) && inactive_boundary_pair(y_low_mode, y_high_mode)) {
     if (sizes[0] > 2 && sizes[1] > 2) {
-      update_electric_cpml_interior_kernel<2><<<field_grid3d(sizes[0] - 2, sizes[1] - 2, sizes[2], block), block, 0, current_cuda_stream()>>>(
+      dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+        update_electric_cpml_interior_kernel<2, decltype(u_uniform)::value><<<field_grid3d(sizes[0] - 2, sizes[1] - 2, sizes[2], block), block, 0, current_cuda_stream()>>>(
+            static_cast<unsigned int>(sizes[0]),
+            static_cast<unsigned int>(sizes[1]),
+            static_cast<unsigned int>(sizes[2]),
+            hx.mutable_data_ptr<float>(),
+            hy.mutable_data_ptr<float>(),
+            decay.mutable_data_ptr<float>(),
+            curl.mutable_data_ptr<float>(),
+            static_cast<float>(uniform_decay.value_or(0.0)),
+            static_cast<float>(uniform_curl.value_or(0.0)),
+            inv_kappa_x.mutable_data_ptr<float>(),
+            b_x.mutable_data_ptr<float>(),
+            c_x.mutable_data_ptr<float>(),
+            inv_kappa_y.mutable_data_ptr<float>(),
+            b_y.mutable_data_ptr<float>(),
+            c_y.mutable_data_ptr<float>(),
+            inv_dx.mutable_data_ptr<float>(),
+            inv_dy.mutable_data_ptr<float>(),
+            psi_x.mutable_data_ptr<float>(),
+            psi_y.mutable_data_ptr<float>(),
+            ez.mutable_data_ptr<float>());
+      });
+    }
+  } else {
+    dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+      update_electric_cpml_kernel<2, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2471,6 +2653,8 @@ void update_electric_ez_cpml_cuda(
           hy.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          static_cast<float>(uniform_decay.value_or(0.0)),
+          static_cast<float>(uniform_curl.value_or(0.0)),
           inv_kappa_x.mutable_data_ptr<float>(),
           b_x.mutable_data_ptr<float>(),
           c_x.mutable_data_ptr<float>(),
@@ -2479,34 +2663,14 @@ void update_electric_ez_cpml_cuda(
           c_y.mutable_data_ptr<float>(),
           inv_dx.mutable_data_ptr<float>(),
           inv_dy.mutable_data_ptr<float>(),
+          static_cast<int>(x_low_mode),
+          static_cast<int>(x_high_mode),
+          static_cast<int>(y_low_mode),
+          static_cast<int>(y_high_mode),
           psi_x.mutable_data_ptr<float>(),
           psi_y.mutable_data_ptr<float>(),
           ez.mutable_data_ptr<float>());
-    }
-  } else {
-    update_electric_cpml_kernel<2><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-        static_cast<unsigned int>(sizes[0]),
-        static_cast<unsigned int>(sizes[1]),
-        static_cast<unsigned int>(sizes[2]),
-        hx.mutable_data_ptr<float>(),
-        hy.mutable_data_ptr<float>(),
-        decay.mutable_data_ptr<float>(),
-        curl.mutable_data_ptr<float>(),
-        inv_kappa_x.mutable_data_ptr<float>(),
-        b_x.mutable_data_ptr<float>(),
-        c_x.mutable_data_ptr<float>(),
-        inv_kappa_y.mutable_data_ptr<float>(),
-        b_y.mutable_data_ptr<float>(),
-        c_y.mutable_data_ptr<float>(),
-        inv_dx.mutable_data_ptr<float>(),
-        inv_dy.mutable_data_ptr<float>(),
-        static_cast<int>(x_low_mode),
-        static_cast<int>(x_high_mode),
-        static_cast<int>(y_low_mode),
-        static_cast<int>(y_high_mode),
-        psi_x.mutable_data_ptr<float>(),
-        psi_y.mutable_data_ptr<float>(),
-        ez.mutable_data_ptr<float>());
+    });
   }
   WITWIN_CUDA_CHECK();
 }
@@ -2549,39 +2713,73 @@ void update_electric_ex_cpml_compressed_cuda(
   torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
   const auto sizes = ex.sizes();
   const dim3 block = field_block3d();
-  dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
-    update_electric_ex_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-        static_cast<unsigned int>(sizes[0]),
-        static_cast<unsigned int>(sizes[1]),
-        static_cast<unsigned int>(sizes[2]),
-        hy.mutable_data_ptr<float>(),
-        hz.mutable_data_ptr<float>(),
-        decay.mutable_data_ptr<float>(),
-        curl.mutable_data_ptr<float>(),
-        static_cast<float>(uniform_decay.value_or(0.0)),
-        static_cast<float>(uniform_curl.value_or(0.0)),
-        inv_kappa_y.mutable_data_ptr<float>(),
-        b_y.mutable_data_ptr<float>(),
-        c_y.mutable_data_ptr<float>(),
-        inv_kappa_z.mutable_data_ptr<float>(),
-        b_z.mutable_data_ptr<float>(),
-        c_z.mutable_data_ptr<float>(),
-        inv_dy.mutable_data_ptr<float>(),
-        inv_dz.mutable_data_ptr<float>(),
-        static_cast<int>(y_low_mode),
-        static_cast<int>(y_high_mode),
-        static_cast<int>(z_low_mode),
-        static_cast<int>(z_high_mode),
-        static_cast<int>(y_low_length),
-        static_cast<int>(y_high_start),
-        static_cast<int>(y_high_length),
-        static_cast<int>(z_low_length),
-        static_cast<int>(z_high_start),
-        static_cast<int>(z_high_length),
-        psi_y.mutable_data_ptr<float>(),
-        psi_z.mutable_data_ptr<float>(),
-        ex.mutable_data_ptr<float>());
-  });
+  if (inactive_boundary_pair(y_low_mode, y_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
+    if (sizes[1] > 2 && sizes[2] > 2) {
+      dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
+        update_electric_cpml_compressed_interior_kernel<0, decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1] - 2, sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+            static_cast<unsigned int>(sizes[0]),
+            static_cast<unsigned int>(sizes[1]),
+            static_cast<unsigned int>(sizes[2]),
+            hy.mutable_data_ptr<float>(),
+            hz.mutable_data_ptr<float>(),
+            decay.mutable_data_ptr<float>(),
+            curl.mutable_data_ptr<float>(),
+            static_cast<float>(uniform_decay.value_or(0.0)),
+            static_cast<float>(uniform_curl.value_or(0.0)),
+            inv_kappa_y.mutable_data_ptr<float>(),
+            b_y.mutable_data_ptr<float>(),
+            c_y.mutable_data_ptr<float>(),
+            inv_kappa_z.mutable_data_ptr<float>(),
+            b_z.mutable_data_ptr<float>(),
+            c_z.mutable_data_ptr<float>(),
+            inv_dy.mutable_data_ptr<float>(),
+            inv_dz.mutable_data_ptr<float>(),
+            static_cast<int>(y_low_length),
+            static_cast<int>(y_high_start),
+            static_cast<int>(y_high_length),
+            static_cast<int>(z_low_length),
+            static_cast<int>(z_high_start),
+            static_cast<int>(z_high_length),
+            psi_y.mutable_data_ptr<float>(),
+            psi_z.mutable_data_ptr<float>(),
+            ex.mutable_data_ptr<float>());
+      });
+    }
+  } else {
+    dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
+      update_electric_ex_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+          static_cast<unsigned int>(sizes[0]),
+          static_cast<unsigned int>(sizes[1]),
+          static_cast<unsigned int>(sizes[2]),
+          hy.mutable_data_ptr<float>(),
+          hz.mutable_data_ptr<float>(),
+          decay.mutable_data_ptr<float>(),
+          curl.mutable_data_ptr<float>(),
+          static_cast<float>(uniform_decay.value_or(0.0)),
+          static_cast<float>(uniform_curl.value_or(0.0)),
+          inv_kappa_y.mutable_data_ptr<float>(),
+          b_y.mutable_data_ptr<float>(),
+          c_y.mutable_data_ptr<float>(),
+          inv_kappa_z.mutable_data_ptr<float>(),
+          b_z.mutable_data_ptr<float>(),
+          c_z.mutable_data_ptr<float>(),
+          inv_dy.mutable_data_ptr<float>(),
+          inv_dz.mutable_data_ptr<float>(),
+          static_cast<int>(y_low_mode),
+          static_cast<int>(y_high_mode),
+          static_cast<int>(z_low_mode),
+          static_cast<int>(z_high_mode),
+          static_cast<int>(y_low_length),
+          static_cast<int>(y_high_start),
+          static_cast<int>(y_high_length),
+          static_cast<int>(z_low_length),
+          static_cast<int>(z_high_start),
+          static_cast<int>(z_high_length),
+          psi_y.mutable_data_ptr<float>(),
+          psi_z.mutable_data_ptr<float>(),
+          ex.mutable_data_ptr<float>());
+    });
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -2623,39 +2821,73 @@ void update_electric_ey_cpml_compressed_cuda(
   torch::stable::accelerator::DeviceGuard guard(ey.get_device_index());
   const auto sizes = ey.sizes();
   const dim3 block = field_block3d();
-  dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
-    update_electric_ey_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-        static_cast<unsigned int>(sizes[0]),
-        static_cast<unsigned int>(sizes[1]),
-        static_cast<unsigned int>(sizes[2]),
-        hx.mutable_data_ptr<float>(),
-        hz.mutable_data_ptr<float>(),
-        decay.mutable_data_ptr<float>(),
-        curl.mutable_data_ptr<float>(),
-        static_cast<float>(uniform_decay.value_or(0.0)),
-        static_cast<float>(uniform_curl.value_or(0.0)),
-        inv_kappa_x.mutable_data_ptr<float>(),
-        b_x.mutable_data_ptr<float>(),
-        c_x.mutable_data_ptr<float>(),
-        inv_kappa_z.mutable_data_ptr<float>(),
-        b_z.mutable_data_ptr<float>(),
-        c_z.mutable_data_ptr<float>(),
-        inv_dx.mutable_data_ptr<float>(),
-        inv_dz.mutable_data_ptr<float>(),
-        static_cast<int>(x_low_mode),
-        static_cast<int>(x_high_mode),
-        static_cast<int>(z_low_mode),
-        static_cast<int>(z_high_mode),
-        static_cast<int>(x_low_length),
-        static_cast<int>(x_high_start),
-        static_cast<int>(x_high_length),
-        static_cast<int>(z_low_length),
-        static_cast<int>(z_high_start),
-        static_cast<int>(z_high_length),
-        psi_x.mutable_data_ptr<float>(),
-        psi_z.mutable_data_ptr<float>(),
-        ey.mutable_data_ptr<float>());
-  });
+  if (inactive_boundary_pair(x_low_mode, x_high_mode) && inactive_boundary_pair(z_low_mode, z_high_mode)) {
+    if (sizes[0] > 2 && sizes[2] > 2) {
+      dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
+        update_electric_cpml_compressed_interior_kernel<1, decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0] - 2, sizes[1], sizes[2] - 2, block), block, 0, current_cuda_stream()>>>(
+            static_cast<unsigned int>(sizes[0]),
+            static_cast<unsigned int>(sizes[1]),
+            static_cast<unsigned int>(sizes[2]),
+            hx.mutable_data_ptr<float>(),
+            hz.mutable_data_ptr<float>(),
+            decay.mutable_data_ptr<float>(),
+            curl.mutable_data_ptr<float>(),
+            static_cast<float>(uniform_decay.value_or(0.0)),
+            static_cast<float>(uniform_curl.value_or(0.0)),
+            inv_kappa_x.mutable_data_ptr<float>(),
+            b_x.mutable_data_ptr<float>(),
+            c_x.mutable_data_ptr<float>(),
+            inv_kappa_z.mutable_data_ptr<float>(),
+            b_z.mutable_data_ptr<float>(),
+            c_z.mutable_data_ptr<float>(),
+            inv_dx.mutable_data_ptr<float>(),
+            inv_dz.mutable_data_ptr<float>(),
+            static_cast<int>(x_low_length),
+            static_cast<int>(x_high_start),
+            static_cast<int>(x_high_length),
+            static_cast<int>(z_low_length),
+            static_cast<int>(z_high_start),
+            static_cast<int>(z_high_length),
+            psi_x.mutable_data_ptr<float>(),
+            psi_z.mutable_data_ptr<float>(),
+            ey.mutable_data_ptr<float>());
+      });
+    }
+  } else {
+    dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
+      update_electric_ey_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+          static_cast<unsigned int>(sizes[0]),
+          static_cast<unsigned int>(sizes[1]),
+          static_cast<unsigned int>(sizes[2]),
+          hx.mutable_data_ptr<float>(),
+          hz.mutable_data_ptr<float>(),
+          decay.mutable_data_ptr<float>(),
+          curl.mutable_data_ptr<float>(),
+          static_cast<float>(uniform_decay.value_or(0.0)),
+          static_cast<float>(uniform_curl.value_or(0.0)),
+          inv_kappa_x.mutable_data_ptr<float>(),
+          b_x.mutable_data_ptr<float>(),
+          c_x.mutable_data_ptr<float>(),
+          inv_kappa_z.mutable_data_ptr<float>(),
+          b_z.mutable_data_ptr<float>(),
+          c_z.mutable_data_ptr<float>(),
+          inv_dx.mutable_data_ptr<float>(),
+          inv_dz.mutable_data_ptr<float>(),
+          static_cast<int>(x_low_mode),
+          static_cast<int>(x_high_mode),
+          static_cast<int>(z_low_mode),
+          static_cast<int>(z_high_mode),
+          static_cast<int>(x_low_length),
+          static_cast<int>(x_high_start),
+          static_cast<int>(x_high_length),
+          static_cast<int>(z_low_length),
+          static_cast<int>(z_high_start),
+          static_cast<int>(z_high_length),
+          psi_x.mutable_data_ptr<float>(),
+          psi_z.mutable_data_ptr<float>(),
+          ey.mutable_data_ptr<float>());
+    });
+  }
   WITWIN_CUDA_CHECK();
 }
 
@@ -2697,39 +2929,73 @@ void update_electric_ez_cpml_compressed_cuda(
   torch::stable::accelerator::DeviceGuard guard(ez.get_device_index());
   const auto sizes = ez.sizes();
   const dim3 block = field_block3d();
-  dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
-    update_electric_ez_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-        static_cast<unsigned int>(sizes[0]),
-        static_cast<unsigned int>(sizes[1]),
-        static_cast<unsigned int>(sizes[2]),
-        hx.mutable_data_ptr<float>(),
-        hy.mutable_data_ptr<float>(),
-        decay.mutable_data_ptr<float>(),
-        curl.mutable_data_ptr<float>(),
-        static_cast<float>(uniform_decay.value_or(0.0)),
-        static_cast<float>(uniform_curl.value_or(0.0)),
-        inv_kappa_x.mutable_data_ptr<float>(),
-        b_x.mutable_data_ptr<float>(),
-        c_x.mutable_data_ptr<float>(),
-        inv_kappa_y.mutable_data_ptr<float>(),
-        b_y.mutable_data_ptr<float>(),
-        c_y.mutable_data_ptr<float>(),
-        inv_dx.mutable_data_ptr<float>(),
-        inv_dy.mutable_data_ptr<float>(),
-        static_cast<int>(x_low_mode),
-        static_cast<int>(x_high_mode),
-        static_cast<int>(y_low_mode),
-        static_cast<int>(y_high_mode),
-        static_cast<int>(x_low_length),
-        static_cast<int>(x_high_start),
-        static_cast<int>(x_high_length),
-        static_cast<int>(y_low_length),
-        static_cast<int>(y_high_start),
-        static_cast<int>(y_high_length),
-        psi_x.mutable_data_ptr<float>(),
-        psi_y.mutable_data_ptr<float>(),
-        ez.mutable_data_ptr<float>());
-  });
+  if (inactive_boundary_pair(x_low_mode, x_high_mode) && inactive_boundary_pair(y_low_mode, y_high_mode)) {
+    if (sizes[0] > 2 && sizes[1] > 2) {
+      dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
+        update_electric_cpml_compressed_interior_kernel<2, decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0] - 2, sizes[1] - 2, sizes[2], block), block, 0, current_cuda_stream()>>>(
+            static_cast<unsigned int>(sizes[0]),
+            static_cast<unsigned int>(sizes[1]),
+            static_cast<unsigned int>(sizes[2]),
+            hx.mutable_data_ptr<float>(),
+            hy.mutable_data_ptr<float>(),
+            decay.mutable_data_ptr<float>(),
+            curl.mutable_data_ptr<float>(),
+            static_cast<float>(uniform_decay.value_or(0.0)),
+            static_cast<float>(uniform_curl.value_or(0.0)),
+            inv_kappa_x.mutable_data_ptr<float>(),
+            b_x.mutable_data_ptr<float>(),
+            c_x.mutable_data_ptr<float>(),
+            inv_kappa_y.mutable_data_ptr<float>(),
+            b_y.mutable_data_ptr<float>(),
+            c_y.mutable_data_ptr<float>(),
+            inv_dx.mutable_data_ptr<float>(),
+            inv_dy.mutable_data_ptr<float>(),
+            static_cast<int>(x_low_length),
+            static_cast<int>(x_high_start),
+            static_cast<int>(x_high_length),
+            static_cast<int>(y_low_length),
+            static_cast<int>(y_high_start),
+            static_cast<int>(y_high_length),
+            psi_x.mutable_data_ptr<float>(),
+            psi_y.mutable_data_ptr<float>(),
+            ez.mutable_data_ptr<float>());
+      });
+    }
+  } else {
+    dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
+      update_electric_ez_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+          static_cast<unsigned int>(sizes[0]),
+          static_cast<unsigned int>(sizes[1]),
+          static_cast<unsigned int>(sizes[2]),
+          hx.mutable_data_ptr<float>(),
+          hy.mutable_data_ptr<float>(),
+          decay.mutable_data_ptr<float>(),
+          curl.mutable_data_ptr<float>(),
+          static_cast<float>(uniform_decay.value_or(0.0)),
+          static_cast<float>(uniform_curl.value_or(0.0)),
+          inv_kappa_x.mutable_data_ptr<float>(),
+          b_x.mutable_data_ptr<float>(),
+          c_x.mutable_data_ptr<float>(),
+          inv_kappa_y.mutable_data_ptr<float>(),
+          b_y.mutable_data_ptr<float>(),
+          c_y.mutable_data_ptr<float>(),
+          inv_dx.mutable_data_ptr<float>(),
+          inv_dy.mutable_data_ptr<float>(),
+          static_cast<int>(x_low_mode),
+          static_cast<int>(x_high_mode),
+          static_cast<int>(y_low_mode),
+          static_cast<int>(y_high_mode),
+          static_cast<int>(x_low_length),
+          static_cast<int>(x_high_start),
+          static_cast<int>(x_high_length),
+          static_cast<int>(y_low_length),
+          static_cast<int>(y_high_start),
+          static_cast<int>(y_high_length),
+          psi_x.mutable_data_ptr<float>(),
+          psi_y.mutable_data_ptr<float>(),
+          ez.mutable_data_ptr<float>());
+    });
+  }
   WITWIN_CUDA_CHECK();
 }
 

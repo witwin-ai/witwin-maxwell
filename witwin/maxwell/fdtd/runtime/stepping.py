@@ -125,6 +125,8 @@ def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, *, imag=Fa
         CyHxZ=solver.cpml_c_h_z,
         invDy=solver.inv_dy_h,
         invDz=solver.inv_dz_h,
+        uniformDecay=solver._coefficient_uniformity["chx_decay"],
+        uniformCurl=solver._coefficient_uniformity["chx_curl"],
     ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHy3D(
         Hy=hy,
@@ -142,6 +144,8 @@ def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, *, imag=Fa
         CyHyZ=solver.cpml_c_h_z,
         invDx=solver.inv_dx_h,
         invDz=solver.inv_dz_h,
+        uniformDecay=solver._coefficient_uniformity["chy_decay"],
+        uniformCurl=solver._coefficient_uniformity["chy_curl"],
     ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHz3D(
         Hz=hz,
@@ -159,6 +163,8 @@ def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, *, imag=Fa
         CyHzY=solver.cpml_c_h_y,
         invDx=solver.inv_dx_h,
         invDy=solver.inv_dy_h,
+        uniformDecay=solver._coefficient_uniformity["chz_decay"],
+        uniformCurl=solver._coefficient_uniformity["chz_curl"],
     ).launchRaw()
 
 
@@ -269,6 +275,8 @@ def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
         HxCurl=solver.chx_curl,
         invDy=solver.inv_dy_h,
         invDz=solver.inv_dz_h,
+        uniformDecay=solver._coefficient_uniformity["chx_decay"],
+        uniformCurl=solver._coefficient_uniformity["chx_curl"],
     ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHyStandard3D(
         Hy=hy,
@@ -278,6 +286,8 @@ def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
         HyCurl=solver.chy_curl,
         invDx=solver.inv_dx_h,
         invDz=solver.inv_dz_h,
+        uniformDecay=solver._coefficient_uniformity["chy_decay"],
+        uniformCurl=solver._coefficient_uniformity["chy_curl"],
     ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHzStandard3D(
         Hz=hz,
@@ -287,6 +297,8 @@ def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
         HzCurl=solver.chz_curl,
         invDx=solver.inv_dx_h,
         invDy=solver.inv_dy_h,
+        uniformDecay=solver._coefficient_uniformity["chz_decay"],
+        uniformCurl=solver._coefficient_uniformity["chz_curl"],
     ).launchRaw()
 
 
@@ -335,6 +347,8 @@ def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
         yHighBoundaryMode=solver.boundary_y_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
+        uniformDecay=None if ex_decay is not solver.cex_decay else solver._coefficient_uniformity["cex_decay"],
+        uniformCurl=None if ex_curl is not solver.cex_curl else solver._coefficient_uniformity["cex_curl"],
     ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyCpml3D(
         Ey=ey,
@@ -356,6 +370,8 @@ def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
         xHighBoundaryMode=solver.boundary_x_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
+        uniformDecay=None if ey_decay is not solver.cey_decay else solver._coefficient_uniformity["cey_decay"],
+        uniformCurl=None if ey_curl is not solver.cey_curl else solver._coefficient_uniformity["cey_curl"],
     ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzCpml3D(
         Ez=ez,
@@ -377,6 +393,8 @@ def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
         xHighBoundaryMode=solver.boundary_x_high_code,
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
+        uniformDecay=None if ez_decay is not solver.cez_decay else solver._coefficient_uniformity["cez_decay"],
+        uniformCurl=None if ez_curl is not solver.cez_curl else solver._coefficient_uniformity["cez_curl"],
     ).launchRaw()
 
 
@@ -501,6 +519,8 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
         yHighBoundaryMode=solver.boundary_y_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
+        uniformDecay=None if ex_decay is not solver.cex_decay else solver._coefficient_uniformity["cex_decay"],
+        uniformCurl=None if ex_curl is not solver.cex_curl else solver._coefficient_uniformity["cex_curl"],
     ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyStandard3D(
         Ey=ey,
@@ -514,6 +534,8 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
         xHighBoundaryMode=solver.boundary_x_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
+        uniformDecay=None if ey_decay is not solver.cey_decay else solver._coefficient_uniformity["cey_decay"],
+        uniformCurl=None if ey_curl is not solver.cey_curl else solver._coefficient_uniformity["cey_curl"],
     ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzStandard3D(
         Ez=ez,
@@ -527,6 +549,8 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
         xHighBoundaryMode=solver.boundary_x_high_code,
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
+        uniformDecay=None if ez_decay is not solver.cez_decay else solver._coefficient_uniformity["cez_decay"],
+        uniformCurl=None if ez_curl is not solver.cez_curl else solver._coefficient_uniformity["cez_curl"],
     ).launchRaw()
 
 
