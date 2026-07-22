@@ -32,7 +32,12 @@ _DISPERSIVE_STATE_TENSORS = {
     "drude": ("current",),
     "lorentz": ("polarization", "current"),
 }
-_CHECKPOINT_SCHEMA_VERSION = 1
+_WIRE_STATE_NAMES = ("wire_current", "wire_charge")
+# Persistent gyromagnetic (Polder ferrite) magnetization-ADE state carried across
+# a checkpoint/resume boundary. Scratch buffers (drive gather, staged propagator
+# output) are recomputed each step and are not part of the frozen layout.
+_GYROMAGNETIC_STATE_TENSOR_NAMES = ("m_u", "m_v", "dm_u", "dm_v")
+_CHECKPOINT_SCHEMA_VERSION = 2
 
 
 def dispersive_state_name(component_name: str, model_name: str, index: int, tensor_name: str) -> str:
@@ -63,6 +68,26 @@ def iter_magnetic_dispersive_state_specs(solver):
                 yield component_name, model_name, index, tensor_names, entry
 
 
+def gyromagnetic_state_name(tensor_name: str) -> str:
+    return f"gyromagnetic_{tensor_name}"
+
+
+def iter_gyromagnetic_state_specs(solver):
+    """Yield ``(schema_name, tensor)`` for each persistent ferrite ADE buffer.
+
+    Empty unless the solver is a single-device ferrite forward run: the
+    distributed and adjoint paths fail closed on gyromagnetic media, so this
+    state family only ever appears on the single-GPU forward checkpoint layout.
+    """
+    if not getattr(solver, "gyromagnetic_enabled", False):
+        return
+    state = getattr(solver, "_gyromagnetic_state", None)
+    if not state:
+        return
+    for tensor_name in _GYROMAGNETIC_STATE_TENSOR_NAMES:
+        yield gyromagnetic_state_name(tensor_name), state[tensor_name]
+
+
 @dataclass(frozen=True)
 class FDTDCheckpointSchema:
     version: int
@@ -73,6 +98,12 @@ class FDTDCheckpointSchema:
     dispersive_state_names: tuple[str, ...]
     magnetic_dispersive_state_names: tuple[str, ...] = ()
     lumped_state_names: tuple[str, ...] = ()
+    circuit_state_names: tuple[str, ...] = ()
+    network_state_names: tuple[str, ...] = ()
+    network_delay_state_names: tuple[str, ...] = ()
+    wire_state_names: tuple[str, ...] = ()
+    gyromagnetic_state_names: tuple[str, ...] = ()
+    surface_impedance_state_names: tuple[str, ...] = ()
 
     @property
     def state_names(self) -> tuple[str, ...]:
@@ -84,6 +115,12 @@ class FDTDCheckpointSchema:
             + self.dispersive_state_names
             + self.magnetic_dispersive_state_names
             + self.lumped_state_names
+            + self.circuit_state_names
+            + self.network_state_names
+            + self.network_delay_state_names
+            + self.wire_state_names
+            + self.gyromagnetic_state_names
+            + self.surface_impedance_state_names
         )
 
 
@@ -96,9 +133,9 @@ def iter_lumped_state_specs(solver):
 
     for index, port_runtime in enumerate(getattr(solver, "_port_runtimes", ())):
         runtime = getattr(port_runtime, "lumped", None)
-        if runtime is None:
+        if runtime is None or getattr(port_runtime, "embedded_network_name", None) is not None:
             continue
-        for tensor_name in ("inductor_current", "capacitor_voltage"):
+        for tensor_name in ("inductor_current", "capacitor_voltage", "last_voltage_after"):
             yield (
                 lumped_state_name("port", index, tensor_name),
                 runtime,
@@ -110,7 +147,7 @@ def iter_lumped_state_specs(solver):
     for index, (runtime, field_name) in enumerate(
         getattr(solver, "_lumped_element_runtimes", ())
     ):
-        for tensor_name in ("inductor_current", "capacitor_voltage"):
+        for tensor_name in ("inductor_current", "capacitor_voltage", "last_voltage_after"):
             yield (
                 lumped_state_name("element", index, tensor_name),
                 runtime,
@@ -119,6 +156,103 @@ def iter_lumped_state_specs(solver):
                 "element",
                 index,
             )
+
+
+def circuit_state_name(circuit_index: int, tensor_name: str) -> str:
+    return f"circuit_{int(circuit_index)}_{tensor_name}"
+
+
+def iter_circuit_state_specs(solver):
+    """Yield the fixed companion history required by coupled MNA replay/resume."""
+
+    for circuit_index, runtime in enumerate(getattr(solver, "_circuit_runtimes", ())):
+        for tensor_name, tensor in runtime.checkpoint_tensors().items():
+            yield circuit_state_name(circuit_index, tensor_name), tensor
+
+
+def network_state_name(index: int) -> str:
+    return f"network_{int(index)}_state"
+
+
+def network_carried_voltage_name(index: int) -> str:
+    return f"network_{int(index)}_carried_voltage"
+
+
+def iter_network_state_specs(solver):
+    """Yield the dynamic state tensors for each embedded network.
+
+    Slice U2: the trapezoidal network interface carries the previous step's
+    post-step port voltage, so it is dynamic state alongside the state-space
+    vector -- required by the differentiable adjoint replay (and any resume).
+    """
+
+    for index, runtime in enumerate(getattr(solver, "_network_runtimes", ())):
+        yield network_state_name(index), runtime.state
+        yield network_carried_voltage_name(index), runtime.carried_voltage
+
+
+# Persistent bidirectional-delay state carried across a checkpoint/resume
+# boundary for an embedded network with explicit port delay. The Thiran
+# fractional-filter memory (previous_input/previous_output) and the shared ring
+# cursor are dynamic state; the per-step scratch (integer/fractional samples,
+# temporaries, read/write index vectors) is recomputed each step from the cursor
+# and is deliberately excluded from the frozen layout.
+_NETWORK_DELAY_STATE_TENSOR_NAMES = (
+    "forward_ring",
+    "reverse_ring",
+    "forward_previous_input",
+    "forward_previous_output",
+    "reverse_previous_input",
+    "reverse_previous_output",
+    "cursor",
+)
+
+
+def network_delay_state_name(index: int, tensor_name: str) -> str:
+    return f"network_{int(index)}_delay_{tensor_name}"
+
+
+def iter_network_delay_state_specs(solver):
+    """Yield (name, tensor) for each embedded network carrying explicit delay.
+
+    Empty for delay-free networks: only the bidirectional-delay reference-plane
+    runtime holds ring/filter/cursor state that must survive checkpoint/resume.
+    Without this state a resumed delayed network would restart its reference
+    planes from zero and desynchronize from the interrupted run.
+    """
+
+    for index, runtime in enumerate(getattr(solver, "_network_runtimes", ())):
+        delay = getattr(runtime, "delay_runtime", None)
+        if delay is None:
+            continue
+        for tensor_name in _NETWORK_DELAY_STATE_TENSOR_NAMES:
+            yield network_delay_state_name(index, tensor_name), getattr(delay, tensor_name)
+
+
+def surface_impedance_state_name(index: int) -> str:
+    return f"surface_ade_{int(index)}_state"
+
+
+def iter_surface_impedance_state_specs(solver):
+    """Yield (name, state_tensor) for each generic rational surface-impedance write.
+
+    Order-0 (pure-resistance) surface writes are memoryless and carry no auxiliary
+    state; only the generic Z-form ADE writes hold a per-edge state vector that must
+    survive checkpoint/resume. The key is the write's position in the deterministic
+    owner-ordered write list, which is rebuilt identically by
+    ``_configure_surface_impedance`` on the resuming solver, so the per-edge state
+    layout ``[order, edges]`` round-trips exactly (single-GPU only; the distributed
+    solver rejects surface-impedance ownership before this path is reached).
+    """
+
+    surface = getattr(solver, "_surface_impedance", None)
+    if surface is None:
+        return
+    for index, write in enumerate(surface.get("writes", ())):
+        ade = write.get("ade")
+        if ade is None:
+            continue
+        yield surface_impedance_state_name(index), ade["state"]
 
 
 def checkpoint_schema(solver) -> FDTDCheckpointSchema:
@@ -162,6 +296,22 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
     lumped_state_names = tuple(
         name for name, _runtime, _tensor_name, _field_name, _kind, _index in iter_lumped_state_specs(solver)
     )
+    circuit_state_names = tuple(name for name, _tensor in iter_circuit_state_specs(solver))
+    network_state_names = tuple(
+        name for name, _runtime in iter_network_state_specs(solver)
+    )
+    network_delay_state_names = tuple(
+        name for name, _tensor in iter_network_delay_state_specs(solver)
+    )
+    wire_state_names = (
+        _WIRE_STATE_NAMES if getattr(solver, "_wire_runtime", None) is not None else ()
+    )
+    gyromagnetic_state_names = tuple(
+        name for name, _tensor in iter_gyromagnetic_state_specs(solver)
+    )
+    surface_impedance_state_names = tuple(
+        name for name, _tensor in iter_surface_impedance_state_specs(solver)
+    )
 
     return FDTDCheckpointSchema(
         version=_CHECKPOINT_SCHEMA_VERSION,
@@ -172,6 +322,12 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         dispersive_state_names=tuple(dispersive_state_names),
         magnetic_dispersive_state_names=tuple(magnetic_dispersive_state_names),
         lumped_state_names=lumped_state_names,
+        circuit_state_names=circuit_state_names,
+        network_state_names=network_state_names,
+        network_delay_state_names=network_delay_state_names,
+        wire_state_names=tuple(wire_state_names),
+        gyromagnetic_state_names=gyromagnetic_state_names,
+        surface_impedance_state_names=surface_impedance_state_names,
     )
 
 
@@ -256,9 +412,157 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
                 )
     for name, runtime, tensor_name, _field_name, _kind, _index in iter_lumped_state_specs(solver):
         tensors[name] = getattr(runtime, tensor_name).detach().clone()
+    for name, tensor in iter_circuit_state_specs(solver):
+        tensors[name] = tensor.detach().clone()
+    for name, tensor in iter_network_state_specs(solver):
+        tensors[name] = tensor.detach().clone()
+    for name, tensor in iter_network_delay_state_specs(solver):
+        tensors[name] = tensor.detach().clone()
+    wire_runtime = getattr(solver, "_wire_runtime", None)
+    if wire_runtime is not None:
+        if getattr(wire_runtime, "lossy_model", None) is not None:
+            raise NotImplementedError(
+                "Checkpoint/resume of a finite-conductor thin wire is not yet "
+                "implemented: the auxiliary ADE loss state is not part of the "
+                "checkpoint schema (added with the lossy reverse pass, B3). Run a "
+                "PEC wire to checkpoint a thin-wire simulation."
+            )
+        tensors["wire_current"] = wire_runtime.current.detach().clone()
+        tensors["wire_charge"] = wire_runtime.charge.detach().clone()
+    for name, tensor in iter_gyromagnetic_state_specs(solver):
+        tensors[name] = tensor.detach().clone()
+    for name, tensor in iter_surface_impedance_state_specs(solver):
+        tensors[name] = tensor.detach().clone()
     state = FDTDCheckpointState(step=int(step), schema=schema, tensors=tensors)
     validate_checkpoint_state(state)
     return state
+
+
+def _checkpoint_tensor_targets(solver, schema: FDTDCheckpointSchema):
+    for name in _FIELD_STATE_NAMES:
+        yield name, getattr(solver, name), None
+    if bool(getattr(solver, "complex_fields_enabled", False)):
+        for name in _COMPLEX_FIELD_STATE_NAMES:
+            yield name, getattr(solver, name), None
+    if getattr(solver, "uses_cpml", False):
+        for name in schema.cpml_state_names:
+            yield name, getattr(solver, name), getattr(
+                solver, "_cpml_memory_layouts", {}
+            ).get(name)
+    if getattr(solver, "tfsf_enabled", False):
+        auxiliary_grid = getattr(solver, "_tfsf_state", {}).get("auxiliary_grid")
+        if auxiliary_grid is not None:
+            yield "tfsf_aux_electric", auxiliary_grid.electric, None
+            yield "tfsf_aux_magnetic", auxiliary_grid.magnetic, None
+    for component_name, model_name, index, tensor_names, entry in (
+        iter_dispersive_state_specs(solver) or ()
+    ):
+        for tensor_name in tensor_names:
+            name = dispersive_state_name(
+                component_name, model_name, index, tensor_name
+            )
+            yield name, entry[tensor_name], None
+    if bool(getattr(solver, "complex_fields_enabled", False)):
+        for component_name, model_name, index, tensor_names, entry in (
+            iter_dispersive_state_specs(solver) or ()
+        ):
+            for tensor_name in tensor_names:
+                name = (
+                    dispersive_state_name(
+                        component_name, model_name, index, tensor_name
+                    )
+                    + "_imag"
+                )
+                yield name, entry[f"{tensor_name}_imag"], None
+    for component_name, model_name, index, tensor_names, entry in (
+        iter_magnetic_dispersive_state_specs(solver) or ()
+    ):
+        for tensor_name in tensor_names:
+            name = dispersive_state_name(
+                component_name, model_name, index, tensor_name
+            )
+            yield name, entry[tensor_name], None
+    if bool(getattr(solver, "complex_fields_enabled", False)):
+        for component_name, model_name, index, tensor_names, entry in (
+            iter_magnetic_dispersive_state_specs(solver) or ()
+        ):
+            for tensor_name in tensor_names:
+                name = (
+                    dispersive_state_name(
+                        component_name, model_name, index, tensor_name
+                    )
+                    + "_imag"
+                )
+                yield name, entry[f"{tensor_name}_imag"], None
+    for name, runtime, tensor_name, _field_name, _kind, _index in (
+        iter_lumped_state_specs(solver)
+    ):
+        yield name, getattr(runtime, tensor_name), None
+    for name, tensor in iter_circuit_state_specs(solver):
+        yield name, tensor, None
+    for name, tensor in iter_network_state_specs(solver):
+        yield name, tensor, None
+    for name, tensor in iter_network_delay_state_specs(solver):
+        yield name, tensor, None
+    wire_runtime = getattr(solver, "_wire_runtime", None)
+    if wire_runtime is not None:
+        yield "wire_current", wire_runtime.current, None
+        yield "wire_charge", wire_runtime.charge, None
+    for name, tensor in iter_gyromagnetic_state_specs(solver):
+        yield name, tensor, None
+    for name, tensor in iter_surface_impedance_state_specs(solver):
+        yield name, tensor, None
+
+
+def _checkpoint_expected_shape(target: torch.Tensor, layout) -> tuple[int, ...]:
+    if layout is None:
+        return tuple(target.shape)
+    return tuple(layout["field_shape"])
+
+
+def _copy_checkpoint_tensor(target: torch.Tensor, source: torch.Tensor, layout) -> None:
+    if layout is None:
+        target.copy_(source)
+        return
+    axis = int(layout["axis"])
+    for region in layout["regions"]:
+        length = int(region["length"])
+        if length <= 0:
+            continue
+        target.narrow(axis, int(region["local_start"]), length).copy_(
+            source.narrow(axis, int(region["global_start"]), length)
+        )
+
+
+def restore_checkpoint_state(solver, state: FDTDCheckpointState) -> None:
+    """Restore a captured physical FDTD state into an initialized solver.
+
+    The full layout is validated before the first tensor is mutated. Checkpoints
+    loaded on CPU may be restored into a CUDA solver; dtype and shape must still
+    match exactly. CPML slab storage is populated from the dense checkpoint
+    representation without allocating persistent dense memory.
+    """
+
+    expected_schema = checkpoint_schema(solver)
+    validate_checkpoint_state(state, expected_schema=expected_schema)
+    targets = tuple(_checkpoint_tensor_targets(solver, expected_schema))
+    if tuple(name for name, _target, _layout in targets) != expected_schema.state_names:
+        raise RuntimeError("Initialized solver checkpoint targets drifted from its schema.")
+    for name, target, layout in targets:
+        source = state.tensors[name]
+        expected_shape = _checkpoint_expected_shape(target, layout)
+        if tuple(source.shape) != expected_shape:
+            raise ValueError(
+                f"Checkpoint tensor {name!r} has shape {tuple(source.shape)}, "
+                f"expected {expected_shape}."
+            )
+        if source.dtype != target.dtype:
+            raise TypeError(
+                f"Checkpoint tensor {name!r} has dtype {source.dtype}, "
+                f"expected {target.dtype}."
+            )
+    for name, target, layout in targets:
+        _copy_checkpoint_tensor(target, state.tensors[name], layout)
 
 
 def clone_checkpoint_tensors(state: FDTDCheckpointState) -> dict[str, torch.Tensor]:

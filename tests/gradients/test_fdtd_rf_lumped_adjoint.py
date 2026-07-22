@@ -109,12 +109,19 @@ def test_exact_local_series_pullback_matches_cuda_autograd(component, value):
         dtype=torch.float64,
         requires_grad=True,
     )
+    previous_voltage = torch.tensor(
+        0.23,
+        device="cuda",
+        dtype=torch.float64,
+        requires_grad=True,
+    )
     old_i = torch.tensor(0.13, device="cuda", dtype=torch.float64, requires_grad=True)
     old_vc = torch.tensor(-0.17, device="cuda", dtype=torch.float64, requires_grad=True)
     drive = torch.tensor(0.21, device="cuda", dtype=torch.float64, requires_grad=True)
-    corrected, next_i, next_vc, trace = replay_lumped_runtime(
+    corrected, next_i, next_vc, next_previous_voltage, trace = replay_lumped_runtime(
         runtime,
         field,
+        previous_voltage=previous_voltage,
         inductor_current=old_i,
         capacitor_voltage=old_vc,
         drive=drive,
@@ -131,18 +138,20 @@ def test_exact_local_series_pullback_matches_cuda_autograd(component, value):
     ).reshape_as(field)
     bar_i = torch.tensor(0.31, device="cuda", dtype=torch.float64)
     bar_vc = torch.tensor(-0.27, device="cuda", dtype=torch.float64)
+    bar_previous_voltage = torch.tensor(0.37, device="cuda", dtype=torch.float64)
     bar_voltage = torch.tensor(0.19, device="cuda", dtype=torch.float64)
     bar_network_current = torch.tensor(-0.23, device="cuda", dtype=torch.float64)
     objective = (
         torch.sum(corrected * bar_field)
         + next_i * bar_i
         + next_vc * bar_vc
+        + next_previous_voltage * bar_previous_voltage
         + trace.voltage_midpoint * bar_voltage
         - trace.branch_current * bar_network_current
     )
     expected = torch.autograd.grad(
         objective,
-        (field, old_i, old_vc, eps, parameter, drive),
+        (field, previous_voltage, old_i, old_vc, eps, parameter, drive),
     )
 
     actual = pullback_lumped_runtime(
@@ -150,6 +159,7 @@ def test_exact_local_series_pullback_matches_cuda_autograd(component, value):
         bar_field,
         inductor_current_adjoint=bar_i,
         capacitor_voltage_adjoint=bar_vc,
+        previous_voltage_adjoint=bar_previous_voltage,
         voltage_sample_adjoint=bar_voltage,
         network_current_sample_adjoint=bar_network_current,
         eps_edge=eps,
@@ -162,6 +172,7 @@ def test_exact_local_series_pullback_matches_cuda_autograd(component, value):
     for found, reference in zip(
         (
             actual.field_adjoint,
+            actual.previous_voltage_adjoint,
             actual.inductor_current_adjoint,
             actual.capacitor_voltage_adjoint,
             actual.grad_eps,
@@ -207,7 +218,12 @@ def test_lumped_checkpoint_and_three_step_replay_match_forward_state():
     checkpoint = capture_checkpoint_state(solver, step=0)
     inductor_name = lumped_state_name("port", 0, "inductor_current")
     capacitor_name = lumped_state_name("port", 0, "capacitor_voltage")
-    assert checkpoint.schema.lumped_state_names == (inductor_name, capacitor_name)
+    previous_voltage_name = lumped_state_name("port", 0, "last_voltage_after")
+    assert checkpoint.schema.lumped_state_names == (
+        inductor_name,
+        capacitor_name,
+        previous_voltage_name,
+    )
 
     forward_field = initial.clone()
     drives = (
@@ -218,11 +234,13 @@ def test_lumped_checkpoint_and_three_step_replay_match_forward_state():
     replay_field = checkpoint.tensors["Ex"]
     replay_i = checkpoint.tensors[inductor_name]
     replay_vc = checkpoint.tensors[capacitor_name]
+    replay_pv = checkpoint.tensors[previous_voltage_name]
     for drive in drives:
         apply_lumped_runtime(runtime, forward_field, thevenin_voltage=drive)
-        replay_field, replay_i, replay_vc, _trace = replay_lumped_runtime(
+        replay_field, replay_i, replay_vc, replay_pv, _trace = replay_lumped_runtime(
             runtime,
             replay_field,
+            previous_voltage=replay_pv,
             inductor_current=replay_i,
             capacitor_voltage=replay_vc,
             drive=drive,
@@ -233,6 +251,7 @@ def test_lumped_checkpoint_and_three_step_replay_match_forward_state():
     torch.testing.assert_close(replay_field, forward_field, rtol=0.0, atol=0.0)
     torch.testing.assert_close(replay_i, runtime.inductor_current, rtol=0.0, atol=0.0)
     torch.testing.assert_close(replay_vc, runtime.capacitor_voltage, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(replay_pv, runtime.last_voltage_after, rtol=0.0, atol=0.0)
 
 
 def test_zero_internal_lc_flags_are_mirrored_and_open_resistance_is_rejected():
@@ -253,9 +272,10 @@ def test_zero_internal_lc_flags_are_mirrored_and_open_resistance_is_rejected():
     assert not zero_runtime.capacitance_active
 
     field = torch.ones_like(eps)
-    corrected, next_i, next_vc, _trace = replay_lumped_runtime(
+    corrected, next_i, next_vc, _next_pv, _trace = replay_lumped_runtime(
         zero_runtime,
         field,
+        previous_voltage=torch.zeros((), device="cuda", dtype=torch.float64),
         inductor_current=torch.zeros((), device="cuda", dtype=torch.float64),
         capacitor_voltage=torch.zeros((), device="cuda", dtype=torch.float64),
         drive=torch.zeros((), device="cuda", dtype=torch.float64),
@@ -317,24 +337,41 @@ def test_port_voltage_current_and_available_power_dft_seeds_are_exact():
     drive_accumulator = PortDFTAccumulator(frequencies)
     dt = torch.tensor(0.2, device="cuda", dtype=torch.float64)
     weights = torch.ones((4, 2), device="cuda", dtype=torch.float64)
+    # Differentiable DFT oracle for the forward phasors (replaces the retired
+    # ``PortDFTAccumulator.accumulate``). The accumulators are still populated
+    # via the live ``accumulate_precomputed`` path so that seed construction can
+    # read ``_window_weight_sum`` and the drive phasor exactly as production does.
+    voltage_sum = torch.zeros(2, device="cuda", dtype=torch.complex128)
+    current_sum = torch.zeros(2, device="cuda", dtype=torch.complex128)
+    drive_sum = torch.zeros(2, device="cuda", dtype=torch.complex128)
+    unit_weight = torch.ones(2, device="cuda", dtype=torch.float64)
     for index, (voltage, current, drive) in enumerate(
         zip(voltage_samples, current_samples, drive_samples)
     ):
         sample_time = (index + 0.5) * dt
-        accumulator.accumulate(
-            voltage,
-            current,
-            electric_sample_time=sample_time,
-            magnetic_sample_time=sample_time,
+        angle = 2.0 * torch.pi * frequencies * sample_time
+        kernel = torch.complex(torch.cos(angle), torch.sin(angle))
+        voltage_sum = voltage_sum + voltage.to(torch.complex128) * kernel
+        current_sum = current_sum + current.to(torch.complex128) * kernel
+        drive_sum = drive_sum + drive.to(torch.complex128) * kernel
+        accumulator.accumulate_precomputed(
+            voltage.detach(),
+            current.detach(),
+            voltage_kernel=kernel,
+            current_kernel=kernel,
+            window_weight=unit_weight,
         )
-        drive_accumulator.accumulate(
-            drive,
-            torch.zeros_like(drive),
-            electric_sample_time=sample_time,
-            magnetic_sample_time=sample_time,
+        drive_accumulator.accumulate_precomputed(
+            drive.detach(),
+            None,
+            voltage_kernel=kernel,
+            current_kernel=kernel,
+            window_weight=unit_weight,
         )
-    voltage, current = accumulator.phasors(normalization="peak")
-    source_voltage, _ = drive_accumulator.phasors(normalization="peak")
+    scale = 2.0 / accumulator._window_weight_sum
+    voltage = voltage_sum * scale
+    current = current_sum * scale
+    source_voltage = drive_sum * scale
     resistance = torch.tensor(2.5, device="cuda", dtype=torch.float64)
     available_power = source_voltage.abs().square() / (8.0 * resistance)
     data = PortData(
@@ -374,6 +411,11 @@ def test_port_voltage_current_and_available_power_dft_seeds_are_exact():
         accumulator=accumulator,
         drive_accumulator=drive_accumulator,
         lumped=SimpleNamespace(dt=dt, resistance=resistance),
+        # Mirror the merged PreparedPortRuntime contract: an ordinary lumped port
+        # runs one substep per macro step and has no wire provider, which keeps
+        # the electric/magnetic sample times coincident as before.
+        substeps=1,
+        wire_provider=None,
     )
     solver = SimpleNamespace(
         scene=None,
@@ -446,7 +488,13 @@ def _passive_port_objective(scene):
     return voltage.abs().square().sum(), result
 
 
-def _assert_three_step_central_difference(parameter, objective, steps):
+def _assert_three_step_central_difference(
+    parameter,
+    objective,
+    steps,
+    *,
+    max_relative_error=0.02,
+):
     loss, result = objective()
     loss.backward()
     adjoint = float(parameter.grad.detach())
@@ -467,7 +515,7 @@ def _assert_three_step_central_difference(parameter, objective, steps):
         abs(value - adjoint) / max(abs(value), abs(adjoint), 1.0e-30)
         for value in finite_differences
     ]
-    assert min(relative_errors) < 0.02, (
+    assert min(relative_errors) < max_relative_error, (
         f"adjoint={adjoint}, finite_differences={finite_differences}, "
         f"relative_errors={relative_errors}"
     )

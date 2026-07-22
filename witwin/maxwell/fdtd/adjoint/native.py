@@ -45,48 +45,27 @@ def _dispersive_native_qualifies(solver, forward_state) -> bool:
     return _cuda_scene_native_qualifies(solver, forward_state)
 
 
-def _reverse_step_standard_native_core(
+def reverse_phase1_electric_to_h(
     solver,
     forward_state,
     adjoint_state,
     *,
-    time_value,
-    eps_ex,
-    eps_ey,
-    eps_ez,
-    resolved_source_terms,
-    magnetic_fields=None,
+    ex_curl,
+    ey_curl,
+    ez_curl,
 ):
-    """Fused native standard reverse math, without the source-term eps gradient.
+    """Phase 1 of the standard reverse step: electric adjoint -> mid-H adjoint.
 
-    Returns the ``_ReverseStepResult`` the analytic standard reference produces
-    *before* ``_accumulate_source_term_gradients`` runs. The public runner adds
-    that accumulation; the dispersive runner reuses this core as its base reverse
-    and defers the single source-term accumulation to the end of the full step.
+    The three fused ``_reverse_electric_h{x,y,z}_standard`` kernels *assign* into
+    freshly allocated mid-step H adjoint tensors (the ``magnetic_output_adjoint``).
+    Returned as a component dict so the distributed reverse loop can transpose the
+    magnetic halo (accumulate-into-owner, zero-ghost) between this phase and
+    :func:`reverse_phase2_magnetic_to_e`. On a single shard the three kernels are
+    independent, so launch order among them is not load-bearing here; the ordering
+    constraint is that all three complete before Phase 2 reads them.
     """
     import torch
 
-    from . import core as _adjoint
-    from .reverse_common import dynamic_electric_curls
-
-    # Mid-step H the forward electric update consumed (shared Torch replay).
-    if magnetic_fields is None:
-        magnetic_fields = _adjoint._forward_magnetic_fields(
-            solver,
-            forward_state,
-            time_value=time_value,
-            resolved_source_terms=resolved_source_terms,
-        )
-    hx_mid = magnetic_fields["Hx"]
-    hy_mid = magnetic_fields["Hy"]
-    hz_mid = magnetic_fields["Hz"]
-
-    # Dynamic electric curl coefficients (cast base curl by the eps leaf).
-    ex_curl, ey_curl, ez_curl = dynamic_electric_curls(
-        solver, eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez
-    )
-
-    # Phase 1: electric adjoint -> mid-H adjoint (the magnetic_output_adjoint).
     adj_hx_mid = torch.empty_like(forward_state["Hx"])
     adj_hy_mid = torch.empty_like(forward_state["Hy"])
     adj_hz_mid = torch.empty_like(forward_state["Hz"])
@@ -120,10 +99,36 @@ def _reverse_step_standard_native_core(
         invDx=solver.inv_dx_e,
         invDy=solver.inv_dy_e,
     )
+    return {"Hx": adj_hx_mid, "Hy": adj_hy_mid, "Hz": adj_hz_mid}
 
-    # Phase 2: magnetic adjoint -> pre-step E adjoint + eps gradient. Each kernel
-    # reconstructs its own curl(H) from the mid-H fields and assigns the complete
-    # pre-step E adjoint (electric decay pullback + magnetic forward-diff).
+
+def reverse_phase2_magnetic_to_e(
+    solver,
+    forward_state,
+    adjoint_state,
+    adj_h_mid,
+    *,
+    hx_mid,
+    hy_mid,
+    hz_mid,
+    ex_curl,
+    ey_curl,
+    ez_curl,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+):
+    """Phase 2 of the standard reverse step: magnetic adjoint -> pre-step E adjoint.
+
+    Each fused ``_reverse_magnetic_e{x,y,z}_standard`` kernel reconstructs its own
+    curl(H) from the mid-H fields and *assigns* the complete pre-step E adjoint
+    (electric decay pullback + magnetic forward-diff) plus the eps gradient. It
+    reads the mid-step H adjoints ``adj_h_mid`` produced by Phase 1 (and, on the
+    distributed path, refreshed by the transposed magnetic halo). Returns the
+    pre-step E adjoint component dict and the three eps-gradient tensors.
+    """
+    import torch
+
     adj_ex_prev = torch.empty_like(forward_state["Ex"])
     adj_ey_prev = torch.empty_like(forward_state["Ey"])
     adj_ez_prev = torch.empty_like(forward_state["Ez"])
@@ -134,8 +139,8 @@ def _reverse_step_standard_native_core(
         AdjExPrev=adj_ex_prev,
         GradEpsEx=grad_eps_ex,
         AdjExPost=adjoint_state["Ex"],
-        AdjHyMid=adj_hy_mid,
-        AdjHzMid=adj_hz_mid,
+        AdjHyMid=adj_h_mid["Hy"],
+        AdjHzMid=adj_h_mid["Hz"],
         ExDecay=solver.cex_decay,
         ExCurl=ex_curl,
         EpsEx=eps_ex,
@@ -156,8 +161,8 @@ def _reverse_step_standard_native_core(
         AdjEyPrev=adj_ey_prev,
         GradEpsEy=grad_eps_ey,
         AdjEyPost=adjoint_state["Ey"],
-        AdjHxMid=adj_hx_mid,
-        AdjHzMid=adj_hz_mid,
+        AdjHxMid=adj_h_mid["Hx"],
+        AdjHzMid=adj_h_mid["Hz"],
         EyDecay=solver.cey_decay,
         EyCurl=ey_curl,
         EpsEy=eps_ey,
@@ -178,8 +183,8 @@ def _reverse_step_standard_native_core(
         AdjEzPrev=adj_ez_prev,
         GradEpsEz=grad_eps_ez,
         AdjEzPost=adjoint_state["Ez"],
-        AdjHxMid=adj_hx_mid,
-        AdjHyMid=adj_hy_mid,
+        AdjHxMid=adj_h_mid["Hx"],
+        AdjHyMid=adj_h_mid["Hy"],
         EzDecay=solver.cez_decay,
         EzCurl=ez_curl,
         EpsEz=eps_ez,
@@ -196,35 +201,120 @@ def _reverse_step_standard_native_core(
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
     )
+    pre_step_electric = {
+        "Ex": adj_ex_prev,
+        "Ey": adj_ey_prev,
+        "Ez": adj_ez_prev,
+    }
+    return pre_step_electric, grad_eps_ex, grad_eps_ey, grad_eps_ez
 
-    # Phase 3: magnetic decay pullback -> pre-step H adjoint.
+
+def reverse_phase3_decay(solver, adj_h_mid, forward_state):
+    """Phase 3 of the standard reverse step: magnetic decay pullback -> pre-step H.
+
+    Reads the mid-step H adjoints (which must already be fully populated by
+    Phase 1 / the transposed magnetic halo) and *assigns* the pre-step H adjoint.
+    Returns the pre-step H adjoint component dict.
+    """
+    import torch
+
     adj_hx_prev = torch.empty_like(forward_state["Hx"])
     adj_hy_prev = torch.empty_like(forward_state["Hy"])
     adj_hz_prev = torch.empty_like(forward_state["Hz"])
     _cuda_backend._reverse_magnetic_hx_decay(
-        AdjHxPrev=adj_hx_prev, AdjHxMid=adj_hx_mid, HxDecay=solver.chx_decay
+        AdjHxPrev=adj_hx_prev, AdjHxMid=adj_h_mid["Hx"], HxDecay=solver.chx_decay
     )
     _cuda_backend._reverse_magnetic_hy_decay(
-        AdjHyPrev=adj_hy_prev, AdjHyMid=adj_hy_mid, HyDecay=solver.chy_decay
+        AdjHyPrev=adj_hy_prev, AdjHyMid=adj_h_mid["Hy"], HyDecay=solver.chy_decay
     )
     _cuda_backend._reverse_magnetic_hz_decay(
-        AdjHzPrev=adj_hz_prev, AdjHzMid=adj_hz_mid, HzDecay=solver.chz_decay
+        AdjHzPrev=adj_hz_prev, AdjHzMid=adj_h_mid["Hz"], HzDecay=solver.chz_decay
+    )
+    return {"Hx": adj_hx_prev, "Hy": adj_hy_prev, "Hz": adj_hz_prev}
+
+
+def _reverse_step_standard_native_core(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    magnetic_fields=None,
+):
+    """Fused native standard reverse math, without the source-term eps gradient.
+
+    Returns the ``_ReverseStepResult`` the analytic standard reference produces
+    *before* ``_accumulate_source_term_gradients`` runs. The public runner adds
+    that accumulation; the dispersive runner reuses this core as its base reverse
+    and defers the single source-term accumulation to the end of the full step.
+
+    The reverse math is factored into three phase helpers
+    (:func:`reverse_phase1_electric_to_h`, :func:`reverse_phase2_magnetic_to_e`,
+    :func:`reverse_phase3_decay`) so the distributed reverse loop can insert the
+    two transposed halo exchanges between them; the single-GPU sequence below is
+    bit-for-bit identical to the original inline launch order.
+    """
+    from . import core as _adjoint
+    from .reverse_common import dynamic_electric_curls
+
+    # Mid-step H the forward electric update consumed (shared Torch replay).
+    if magnetic_fields is None:
+        magnetic_fields = _adjoint._forward_magnetic_fields(
+            solver,
+            forward_state,
+            time_value=time_value,
+            resolved_source_terms=resolved_source_terms,
+        )
+    hx_mid = magnetic_fields["Hx"]
+    hy_mid = magnetic_fields["Hy"]
+    hz_mid = magnetic_fields["Hz"]
+
+    # Dynamic electric curl coefficients (cast base curl by the eps leaf).
+    ex_curl, ey_curl, ez_curl = dynamic_electric_curls(
+        solver, eps_ex=eps_ex, eps_ey=eps_ey, eps_ez=eps_ez
     )
 
+    # Phase 1: electric adjoint -> mid-H adjoint (the magnetic_output_adjoint).
+    adj_h_mid = reverse_phase1_electric_to_h(
+        solver,
+        forward_state,
+        adjoint_state,
+        ex_curl=ex_curl,
+        ey_curl=ey_curl,
+        ez_curl=ez_curl,
+    )
+
+    # Phase 2: magnetic adjoint -> pre-step E adjoint + eps gradient.
+    pre_step_electric, grad_eps_ex, grad_eps_ey, grad_eps_ez = reverse_phase2_magnetic_to_e(
+        solver,
+        forward_state,
+        adjoint_state,
+        adj_h_mid,
+        hx_mid=hx_mid,
+        hy_mid=hy_mid,
+        hz_mid=hz_mid,
+        ex_curl=ex_curl,
+        ey_curl=ey_curl,
+        ez_curl=ez_curl,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+    )
+
+    # Phase 3: magnetic decay pullback -> pre-step H adjoint.
+    pre_step_magnetic = reverse_phase3_decay(solver, adj_h_mid, forward_state)
+
     step_result = _adjoint._ReverseStepResult(
-        pre_step_adjoint={
-            "Ex": adj_ex_prev,
-            "Ey": adj_ey_prev,
-            "Ez": adj_ez_prev,
-            "Hx": adj_hx_prev,
-            "Hy": adj_hy_prev,
-            "Hz": adj_hz_prev,
-        },
+        pre_step_adjoint={**pre_step_electric, **pre_step_magnetic},
         grad_eps_ex=grad_eps_ex,
         grad_eps_ey=grad_eps_ey,
         grad_eps_ez=grad_eps_ez,
         backend=_NATIVE_REVERSE_LABELS[_ReverseBackend.STANDARD],
-        magnetic_output_adjoint={"Hx": adj_hx_mid, "Hy": adj_hy_mid, "Hz": adj_hz_mid},
+        magnetic_output_adjoint=adj_h_mid,
     )
     return step_result
 
@@ -273,6 +363,227 @@ def _reverse_step_standard_native(
         eps_ez=eps_ez,
         resolved_source_terms=resolved_source_terms,
     )
+
+
+def reverse_cpml_phase_electric(
+    solver,
+    forward_state,
+    adjoint_state,
+    ctx,
+    *,
+    hx_mid,
+    hy_mid,
+    hz_mid,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+):
+    """Phase A of the CPML reverse step: electric adjoint -> pre-step E/psi_e.
+
+    Runs the three fused ``_reverse_electric_cpml_e{x,y,z}`` kernels and their six
+    ``_accumulate_backward_diff_*`` folds. Each electric kernel *assigns* the
+    pre-step E adjoint (electric decay pullback), the pre-step psi_e adjoint, the
+    eps gradient, and the two curl(H)-derivative adjoint seeds; the backward-diff
+    folds then *add* those seeds into the mid-step H adjoint
+    (``ctx.magnetic_output_adjoint``, which :func:`allocate_cpml_reverse_context`
+    pre-seeds with the incoming post-step H adjoint).
+
+    Factored out of :func:`_reverse_step_cpml_native_core` so the distributed
+    reverse loop can insert the transposed magnetic halo (accumulate the Hy/Hz
+    mid-step adjoint into the owner, zero the ghost) between this phase and
+    :func:`reverse_cpml_phase_magnetic`. The launch order below is a line-for-line
+    move of the original inline sequence, so the single-GPU result is bit-for-bit
+    identical. The distributed reverse relies on the S4 audit finding that the
+    interface x-face carries no active x-CPML (PML is pinned to the outer shards),
+    so the cross-interface curl(H) coupling flows entirely through the adj_d folds
+    into ``ctx.magnetic_output_adjoint`` -- exactly the plane the magnetic halo
+    ships -- with no transposed psi halo required.
+    """
+    pre = ctx.pre_step_adjoint
+    adj_h_mid = ctx.magnetic_output_adjoint
+
+    _cuda_backend._reverse_electric_cpml_ex(
+        AdjExPrev=pre["Ex"],
+        GradEpsEx=ctx.grad_eps_ex,
+        AdjPsiPosPrev=pre["psi_ex_y"],
+        AdjPsiNegPrev=pre["psi_ex_z"],
+        AdjDPos=ctx.adj_d_hz_dy,
+        AdjDNeg=ctx.adj_d_hy_dz,
+        AdjExPost=adjoint_state["Ex"],
+        AdjPsiPosPost=adjoint_state["psi_ex_y"],
+        AdjPsiNegPost=adjoint_state["psi_ex_z"],
+        ExDecay=solver.cex_decay,
+        ExCurl=ctx.ex_curl,
+        EpsEx=eps_ex,
+        PsiPos=forward_state["psi_ex_y"],
+        PsiNeg=forward_state["psi_ex_z"],
+        BPos=solver.cpml_b_e_y,
+        CPos=solver.cpml_c_e_y,
+        InvKappaPos=solver.cpml_inv_kappa_e_y,
+        BNeg=solver.cpml_b_e_z,
+        CNeg=solver.cpml_c_e_z,
+        InvKappaNeg=solver.cpml_inv_kappa_e_z,
+        HyMid=hy_mid,
+        HzMid=hz_mid,
+        invDy=solver.inv_dy_e,
+        invDz=solver.inv_dz_e,
+        yLowBoundaryMode=solver.boundary_y_low_code,
+        yHighBoundaryMode=solver.boundary_y_high_code,
+        zLowBoundaryMode=solver.boundary_z_low_code,
+        zHighBoundaryMode=solver.boundary_z_high_code,
+    )
+    _cuda_backend._accumulate_backward_diff_y(FieldGrad=adj_h_mid["Hz"], DiffGrad=ctx.adj_d_hz_dy, invDy=solver.inv_dy_e)
+    _cuda_backend._accumulate_backward_diff_z(FieldGrad=adj_h_mid["Hy"], DiffGrad=ctx.adj_d_hy_dz, invDz=solver.inv_dz_e)
+
+    _cuda_backend._reverse_electric_cpml_ey(
+        AdjEyPrev=pre["Ey"],
+        GradEpsEy=ctx.grad_eps_ey,
+        AdjPsiPosPrev=pre["psi_ey_z"],
+        AdjPsiNegPrev=pre["psi_ey_x"],
+        AdjDPos=ctx.adj_d_hx_dz,
+        AdjDNeg=ctx.adj_d_hz_dx,
+        AdjEyPost=adjoint_state["Ey"],
+        AdjPsiPosPost=adjoint_state["psi_ey_z"],
+        AdjPsiNegPost=adjoint_state["psi_ey_x"],
+        EyDecay=solver.cey_decay,
+        EyCurl=ctx.ey_curl,
+        EpsEy=eps_ey,
+        PsiPos=forward_state["psi_ey_z"],
+        PsiNeg=forward_state["psi_ey_x"],
+        BPos=solver.cpml_b_e_z,
+        CPos=solver.cpml_c_e_z,
+        InvKappaPos=solver.cpml_inv_kappa_e_z,
+        BNeg=solver.cpml_b_e_x,
+        CNeg=solver.cpml_c_e_x,
+        InvKappaNeg=solver.cpml_inv_kappa_e_x,
+        HxMid=hx_mid,
+        HzMid=hz_mid,
+        invDx=solver.inv_dx_e,
+        invDz=solver.inv_dz_e,
+        xLowBoundaryMode=solver.boundary_x_low_code,
+        xHighBoundaryMode=solver.boundary_x_high_code,
+        zLowBoundaryMode=solver.boundary_z_low_code,
+        zHighBoundaryMode=solver.boundary_z_high_code,
+    )
+    _cuda_backend._accumulate_backward_diff_z(FieldGrad=adj_h_mid["Hx"], DiffGrad=ctx.adj_d_hx_dz, invDz=solver.inv_dz_e)
+    _cuda_backend._accumulate_backward_diff_x(FieldGrad=adj_h_mid["Hz"], DiffGrad=ctx.adj_d_hz_dx, invDx=solver.inv_dx_e)
+
+    _cuda_backend._reverse_electric_cpml_ez(
+        AdjEzPrev=pre["Ez"],
+        GradEpsEz=ctx.grad_eps_ez,
+        AdjPsiPosPrev=pre["psi_ez_x"],
+        AdjPsiNegPrev=pre["psi_ez_y"],
+        AdjDPos=ctx.adj_d_hy_dx,
+        AdjDNeg=ctx.adj_d_hx_dy,
+        AdjEzPost=adjoint_state["Ez"],
+        AdjPsiPosPost=adjoint_state["psi_ez_x"],
+        AdjPsiNegPost=adjoint_state["psi_ez_y"],
+        EzDecay=solver.cez_decay,
+        EzCurl=ctx.ez_curl,
+        EpsEz=eps_ez,
+        PsiPos=forward_state["psi_ez_x"],
+        PsiNeg=forward_state["psi_ez_y"],
+        BPos=solver.cpml_b_e_x,
+        CPos=solver.cpml_c_e_x,
+        InvKappaPos=solver.cpml_inv_kappa_e_x,
+        BNeg=solver.cpml_b_e_y,
+        CNeg=solver.cpml_c_e_y,
+        InvKappaNeg=solver.cpml_inv_kappa_e_y,
+        HxMid=hx_mid,
+        HyMid=hy_mid,
+        invDx=solver.inv_dx_e,
+        invDy=solver.inv_dy_e,
+        xLowBoundaryMode=solver.boundary_x_low_code,
+        xHighBoundaryMode=solver.boundary_x_high_code,
+        yLowBoundaryMode=solver.boundary_y_low_code,
+        yHighBoundaryMode=solver.boundary_y_high_code,
+    )
+    _cuda_backend._accumulate_backward_diff_x(FieldGrad=adj_h_mid["Hy"], DiffGrad=ctx.adj_d_hy_dx, invDx=solver.inv_dx_e)
+    _cuda_backend._accumulate_backward_diff_y(FieldGrad=adj_h_mid["Hx"], DiffGrad=ctx.adj_d_hx_dy, invDy=solver.inv_dy_e)
+
+
+def reverse_cpml_phase_magnetic(solver, adjoint_state, ctx):
+    """Phase B of the CPML reverse step: magnetic-decay + psi_h pullback -> pre-H.
+
+    Runs the three fused ``_reverse_magnetic_cpml_h{x,y,z}`` kernels and their six
+    ``_accumulate_forward_diff_*`` folds. Each magnetic kernel reads the mid-step H
+    adjoint (``ctx.magnetic_output_adjoint``, fully populated by
+    :func:`reverse_cpml_phase_electric` and, on the distributed path, refreshed by
+    the transposed magnetic halo), *assigns* the pre-step H/psi_h adjoint, and
+    emits the two curl(E)-derivative adjoint seeds; the forward-diff folds then
+    *add* those seeds into the pre-step E adjoint.
+
+    Factored out of :func:`_reverse_step_cpml_native_core` so the distributed
+    reverse loop can insert the transposed electric halo (accumulate the pre-step
+    Ey/Ez adjoint into the owner, zero the ghost) after this phase. The launch
+    order is a line-for-line move of the original inline sequence, so the
+    single-GPU result is bit-for-bit identical.
+    """
+    pre = ctx.pre_step_adjoint
+    adj_h_mid = ctx.magnetic_output_adjoint
+
+    _cuda_backend._reverse_magnetic_cpml_hx(
+        AdjHxPrev=pre["Hx"],
+        AdjPsiPosPrev=pre["psi_hx_y"],
+        AdjPsiNegPrev=pre["psi_hx_z"],
+        AdjDPos=ctx.adj_d_ez_dy,
+        AdjDNeg=ctx.adj_d_ey_dz,
+        AdjHxPost=adj_h_mid["Hx"],
+        AdjPsiPosPost=adjoint_state["psi_hx_y"],
+        AdjPsiNegPost=adjoint_state["psi_hx_z"],
+        HxDecay=solver.chx_decay,
+        HxCurl=solver.chx_curl,
+        BPos=solver.cpml_b_h_y,
+        CPos=solver.cpml_c_h_y,
+        InvKappaPos=solver.cpml_inv_kappa_h_y,
+        BNeg=solver.cpml_b_h_z,
+        CNeg=solver.cpml_c_h_z,
+        InvKappaNeg=solver.cpml_inv_kappa_h_z,
+    )
+    _cuda_backend._accumulate_forward_diff_y(FieldGrad=pre["Ez"], DiffGrad=ctx.adj_d_ez_dy, invDy=solver.inv_dy_h)
+    _cuda_backend._accumulate_forward_diff_z(FieldGrad=pre["Ey"], DiffGrad=ctx.adj_d_ey_dz, invDz=solver.inv_dz_h)
+
+    _cuda_backend._reverse_magnetic_cpml_hy(
+        AdjHyPrev=pre["Hy"],
+        AdjPsiPosPrev=pre["psi_hy_z"],
+        AdjPsiNegPrev=pre["psi_hy_x"],
+        AdjDPos=ctx.adj_d_ex_dz,
+        AdjDNeg=ctx.adj_d_ez_dx,
+        AdjHyPost=adj_h_mid["Hy"],
+        AdjPsiPosPost=adjoint_state["psi_hy_z"],
+        AdjPsiNegPost=adjoint_state["psi_hy_x"],
+        HyDecay=solver.chy_decay,
+        HyCurl=solver.chy_curl,
+        BPos=solver.cpml_b_h_z,
+        CPos=solver.cpml_c_h_z,
+        InvKappaPos=solver.cpml_inv_kappa_h_z,
+        BNeg=solver.cpml_b_h_x,
+        CNeg=solver.cpml_c_h_x,
+        InvKappaNeg=solver.cpml_inv_kappa_h_x,
+    )
+    _cuda_backend._accumulate_forward_diff_z(FieldGrad=pre["Ex"], DiffGrad=ctx.adj_d_ex_dz, invDz=solver.inv_dz_h)
+    _cuda_backend._accumulate_forward_diff_x(FieldGrad=pre["Ez"], DiffGrad=ctx.adj_d_ez_dx, invDx=solver.inv_dx_h)
+
+    _cuda_backend._reverse_magnetic_cpml_hz(
+        AdjHzPrev=pre["Hz"],
+        AdjPsiPosPrev=pre["psi_hz_x"],
+        AdjPsiNegPrev=pre["psi_hz_y"],
+        AdjDPos=ctx.adj_d_ey_dx,
+        AdjDNeg=ctx.adj_d_ex_dy,
+        AdjHzPost=adj_h_mid["Hz"],
+        AdjPsiPosPost=adjoint_state["psi_hz_x"],
+        AdjPsiNegPost=adjoint_state["psi_hz_y"],
+        HzDecay=solver.chz_decay,
+        HzCurl=solver.chz_curl,
+        BPos=solver.cpml_b_h_x,
+        CPos=solver.cpml_c_h_x,
+        InvKappaPos=solver.cpml_inv_kappa_h_x,
+        BNeg=solver.cpml_b_h_y,
+        CNeg=solver.cpml_c_h_y,
+        InvKappaNeg=solver.cpml_inv_kappa_h_y,
+    )
+    _cuda_backend._accumulate_forward_diff_x(FieldGrad=pre["Ey"], DiffGrad=ctx.adj_d_ey_dx, invDx=solver.inv_dx_h)
+    _cuda_backend._accumulate_forward_diff_y(FieldGrad=pre["Ex"], DiffGrad=ctx.adj_d_ex_dy, invDy=solver.inv_dy_h)
 
 
 def _reverse_step_cpml_native_core(
@@ -341,171 +652,27 @@ def _reverse_step_cpml_native_core(
     pre = ctx.pre_step_adjoint
     adj_h_mid = ctx.magnetic_output_adjoint
 
-    # Phase 1: electric adjoint -> pre-step E/psi_e adjoint + eps gradient, and
-    # fold each curl(H)-derivative adjoint into the mid-step H adjoint.
-    _cuda_backend._reverse_electric_cpml_ex(
-        AdjExPrev=pre["Ex"],
-        GradEpsEx=ctx.grad_eps_ex,
-        AdjPsiPosPrev=pre["psi_ex_y"],
-        AdjPsiNegPrev=pre["psi_ex_z"],
-        AdjDPos=ctx.adj_d_hz_dy,
-        AdjDNeg=ctx.adj_d_hy_dz,
-        AdjExPost=adjoint_state["Ex"],
-        AdjPsiPosPost=adjoint_state["psi_ex_y"],
-        AdjPsiNegPost=adjoint_state["psi_ex_z"],
-        ExDecay=solver.cex_decay,
-        ExCurl=ctx.ex_curl,
-        EpsEx=eps_ex,
-        PsiPos=forward_state["psi_ex_y"],
-        PsiNeg=forward_state["psi_ex_z"],
-        BPos=solver.cpml_b_e_y,
-        CPos=solver.cpml_c_e_y,
-        InvKappaPos=solver.cpml_inv_kappa_e_y,
-        BNeg=solver.cpml_b_e_z,
-        CNeg=solver.cpml_c_e_z,
-        InvKappaNeg=solver.cpml_inv_kappa_e_z,
-        HyMid=hy_mid,
-        HzMid=hz_mid,
-        invDy=solver.inv_dy_e,
-        invDz=solver.inv_dz_e,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
+    # Phase A: electric adjoint -> pre-step E/psi_e adjoint + eps gradient, folding
+    # each curl(H)-derivative adjoint into the mid-step H adjoint. Phase B: the
+    # magnetic-decay + psi_h pullback -> pre-step H/psi_h adjoint, folding each
+    # curl(E)-derivative adjoint into the pre-step E adjoint. Split into two phase
+    # helpers so the distributed reverse loop can insert the transposed halos
+    # between them; the single-GPU sequence here is bit-for-bit identical to the
+    # original inline launch order (all Phase-A launches complete before Phase B
+    # reads ``adj_h_mid``).
+    reverse_cpml_phase_electric(
+        solver,
+        forward_state,
+        adjoint_state,
+        ctx,
+        hx_mid=hx_mid,
+        hy_mid=hy_mid,
+        hz_mid=hz_mid,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
     )
-    _cuda_backend._accumulate_backward_diff_y(FieldGrad=adj_h_mid["Hz"], DiffGrad=ctx.adj_d_hz_dy, invDy=solver.inv_dy_e)
-    _cuda_backend._accumulate_backward_diff_z(FieldGrad=adj_h_mid["Hy"], DiffGrad=ctx.adj_d_hy_dz, invDz=solver.inv_dz_e)
-
-    _cuda_backend._reverse_electric_cpml_ey(
-        AdjEyPrev=pre["Ey"],
-        GradEpsEy=ctx.grad_eps_ey,
-        AdjPsiPosPrev=pre["psi_ey_z"],
-        AdjPsiNegPrev=pre["psi_ey_x"],
-        AdjDPos=ctx.adj_d_hx_dz,
-        AdjDNeg=ctx.adj_d_hz_dx,
-        AdjEyPost=adjoint_state["Ey"],
-        AdjPsiPosPost=adjoint_state["psi_ey_x"],
-        AdjPsiNegPost=adjoint_state["psi_ey_z"],
-        EyDecay=solver.cey_decay,
-        EyCurl=ctx.ey_curl,
-        EpsEy=eps_ey,
-        PsiPos=forward_state["psi_ey_z"],
-        PsiNeg=forward_state["psi_ey_x"],
-        BPos=solver.cpml_b_e_z,
-        CPos=solver.cpml_c_e_z,
-        InvKappaPos=solver.cpml_inv_kappa_e_z,
-        BNeg=solver.cpml_b_e_x,
-        CNeg=solver.cpml_c_e_x,
-        InvKappaNeg=solver.cpml_inv_kappa_e_x,
-        HxMid=hx_mid,
-        HzMid=hz_mid,
-        invDx=solver.inv_dx_e,
-        invDz=solver.inv_dz_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        zLowBoundaryMode=solver.boundary_z_low_code,
-        zHighBoundaryMode=solver.boundary_z_high_code,
-    )
-    _cuda_backend._accumulate_backward_diff_z(FieldGrad=adj_h_mid["Hx"], DiffGrad=ctx.adj_d_hx_dz, invDz=solver.inv_dz_e)
-    _cuda_backend._accumulate_backward_diff_x(FieldGrad=adj_h_mid["Hz"], DiffGrad=ctx.adj_d_hz_dx, invDx=solver.inv_dx_e)
-
-    _cuda_backend._reverse_electric_cpml_ez(
-        AdjEzPrev=pre["Ez"],
-        GradEpsEz=ctx.grad_eps_ez,
-        AdjPsiPosPrev=pre["psi_ez_x"],
-        AdjPsiNegPrev=pre["psi_ez_y"],
-        AdjDPos=ctx.adj_d_hy_dx,
-        AdjDNeg=ctx.adj_d_hx_dy,
-        AdjEzPost=adjoint_state["Ez"],
-        AdjPsiPosPost=adjoint_state["psi_ez_x"],
-        AdjPsiNegPost=adjoint_state["psi_ez_y"],
-        EzDecay=solver.cez_decay,
-        EzCurl=ctx.ez_curl,
-        EpsEz=eps_ez,
-        PsiPos=forward_state["psi_ez_x"],
-        PsiNeg=forward_state["psi_ez_y"],
-        BPos=solver.cpml_b_e_x,
-        CPos=solver.cpml_c_e_x,
-        InvKappaPos=solver.cpml_inv_kappa_e_x,
-        BNeg=solver.cpml_b_e_y,
-        CNeg=solver.cpml_c_e_y,
-        InvKappaNeg=solver.cpml_inv_kappa_e_y,
-        HxMid=hx_mid,
-        HyMid=hy_mid,
-        invDx=solver.inv_dx_e,
-        invDy=solver.inv_dy_e,
-        xLowBoundaryMode=solver.boundary_x_low_code,
-        xHighBoundaryMode=solver.boundary_x_high_code,
-        yLowBoundaryMode=solver.boundary_y_low_code,
-        yHighBoundaryMode=solver.boundary_y_high_code,
-    )
-    _cuda_backend._accumulate_backward_diff_x(FieldGrad=adj_h_mid["Hy"], DiffGrad=ctx.adj_d_hy_dx, invDx=solver.inv_dx_e)
-    _cuda_backend._accumulate_backward_diff_y(FieldGrad=adj_h_mid["Hx"], DiffGrad=ctx.adj_d_hx_dy, invDy=solver.inv_dy_e)
-
-    # Phase 2: magnetic-decay + psi_h pullback -> pre-step H/psi_h adjoint,
-    # folding each curl(E)-derivative adjoint into the pre-step E adjoint.
-    _cuda_backend._reverse_magnetic_cpml_hx(
-        AdjHxPrev=pre["Hx"],
-        AdjPsiPosPrev=pre["psi_hx_y"],
-        AdjPsiNegPrev=pre["psi_hx_z"],
-        AdjDPos=ctx.adj_d_ez_dy,
-        AdjDNeg=ctx.adj_d_ey_dz,
-        AdjHxPost=adj_h_mid["Hx"],
-        AdjPsiPosPost=adjoint_state["psi_hx_y"],
-        AdjPsiNegPost=adjoint_state["psi_hx_z"],
-        HxDecay=solver.chx_decay,
-        HxCurl=solver.chx_curl,
-        BPos=solver.cpml_b_h_y,
-        CPos=solver.cpml_c_h_y,
-        InvKappaPos=solver.cpml_inv_kappa_h_y,
-        BNeg=solver.cpml_b_h_z,
-        CNeg=solver.cpml_c_h_z,
-        InvKappaNeg=solver.cpml_inv_kappa_h_z,
-    )
-    _cuda_backend._accumulate_forward_diff_y(FieldGrad=pre["Ez"], DiffGrad=ctx.adj_d_ez_dy, invDy=solver.inv_dy_h)
-    _cuda_backend._accumulate_forward_diff_z(FieldGrad=pre["Ey"], DiffGrad=ctx.adj_d_ey_dz, invDz=solver.inv_dz_h)
-
-    _cuda_backend._reverse_magnetic_cpml_hy(
-        AdjHyPrev=pre["Hy"],
-        AdjPsiPosPrev=pre["psi_hy_z"],
-        AdjPsiNegPrev=pre["psi_hy_x"],
-        AdjDPos=ctx.adj_d_ex_dz,
-        AdjDNeg=ctx.adj_d_ez_dx,
-        AdjHyPost=adj_h_mid["Hy"],
-        AdjPsiPosPost=adjoint_state["psi_hy_x"],
-        AdjPsiNegPost=adjoint_state["psi_hy_z"],
-        HyDecay=solver.chy_decay,
-        HyCurl=solver.chy_curl,
-        BPos=solver.cpml_b_h_z,
-        CPos=solver.cpml_c_h_z,
-        InvKappaPos=solver.cpml_inv_kappa_h_z,
-        BNeg=solver.cpml_b_h_x,
-        CNeg=solver.cpml_c_h_x,
-        InvKappaNeg=solver.cpml_inv_kappa_h_x,
-    )
-    _cuda_backend._accumulate_forward_diff_z(FieldGrad=pre["Ex"], DiffGrad=ctx.adj_d_ex_dz, invDz=solver.inv_dz_h)
-    _cuda_backend._accumulate_forward_diff_x(FieldGrad=pre["Ez"], DiffGrad=ctx.adj_d_ez_dx, invDx=solver.inv_dx_h)
-
-    _cuda_backend._reverse_magnetic_cpml_hz(
-        AdjHzPrev=pre["Hz"],
-        AdjPsiPosPrev=pre["psi_hz_x"],
-        AdjPsiNegPrev=pre["psi_hz_y"],
-        AdjDPos=ctx.adj_d_ey_dx,
-        AdjDNeg=ctx.adj_d_ex_dy,
-        AdjHzPost=adj_h_mid["Hz"],
-        AdjPsiPosPost=adjoint_state["psi_hz_x"],
-        AdjPsiNegPost=adjoint_state["psi_hz_y"],
-        HzDecay=solver.chz_decay,
-        HzCurl=solver.chz_curl,
-        BPos=solver.cpml_b_h_x,
-        CPos=solver.cpml_c_h_x,
-        InvKappaPos=solver.cpml_inv_kappa_h_x,
-        BNeg=solver.cpml_b_h_y,
-        CNeg=solver.cpml_c_h_y,
-        InvKappaNeg=solver.cpml_inv_kappa_h_y,
-    )
-    _cuda_backend._accumulate_forward_diff_x(FieldGrad=pre["Ey"], DiffGrad=ctx.adj_d_ey_dx, invDx=solver.inv_dx_h)
-    _cuda_backend._accumulate_forward_diff_y(FieldGrad=pre["Ex"], DiffGrad=ctx.adj_d_ex_dy, invDy=solver.inv_dy_h)
+    reverse_cpml_phase_magnetic(solver, adjoint_state, ctx)
 
     step_result = _adjoint._ReverseStepResult(
         pre_step_adjoint=pre,
@@ -660,8 +827,8 @@ def _reverse_step_conductive_native(
         AdjDPos=ctx.adj_d_hx_dz,
         AdjDNeg=ctx.adj_d_hz_dx,
         AdjEyPost=adjoint_state["Ey"],
-        AdjPsiPosPost=adjoint_state["psi_ey_x"],
-        AdjPsiNegPost=adjoint_state["psi_ey_z"],
+        AdjPsiPosPost=adjoint_state["psi_ey_z"],
+        AdjPsiNegPost=adjoint_state["psi_ey_x"],
         EyDecay=decay_ey,
         EyCurl=curl_ey,
         EyHalf=half_ey,
@@ -755,8 +922,8 @@ def _reverse_step_conductive_native(
         AdjDPos=ctx.adj_d_ex_dz,
         AdjDNeg=ctx.adj_d_ez_dx,
         AdjHyPost=adj_h_mid["Hy"],
-        AdjPsiPosPost=adjoint_state["psi_hy_x"],
-        AdjPsiNegPost=adjoint_state["psi_hy_z"],
+        AdjPsiPosPost=adjoint_state["psi_hy_z"],
+        AdjPsiNegPost=adjoint_state["psi_hy_x"],
         HyDecay=solver.chy_decay,
         HyCurl=solver.chy_curl,
         BPos=solver.cpml_b_h_z,
@@ -974,8 +1141,8 @@ def _reverse_step_kerr_native(
         AdjDPos=ctx.adj_d_hx_dz,
         AdjDNeg=ctx.adj_d_hz_dx,
         AdjEyPost=adjoint_state["Ey"],
-        AdjPsiPosPost=adjoint_state["psi_ey_x"],
-        AdjPsiNegPost=adjoint_state["psi_ey_z"],
+        AdjPsiPosPost=adjoint_state["psi_ey_z"],
+        AdjPsiNegPost=adjoint_state["psi_ey_x"],
         EyDecay=solver.cey_decay,
         EpsEy=eps_ey,
         Chi3Ey=solver.kerr_chi3_Ey,
@@ -2497,6 +2664,88 @@ def _reverse_step_full_aniso_native(
     )
 
 
+def _reverse_step_wire_native(
+    solver,
+    forward_state,
+    adjoint_state,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+    profiler,
+    cpml,
+):
+    """Compose the fused Yee reverse with the sparse wire-network transpose."""
+
+    import dataclasses
+
+    from . import core as _adjoint
+    from ..wire import reverse_wire_step
+
+    base_core = (
+        _reverse_step_cpml_native_core if cpml else _reverse_step_standard_native_core
+    )
+    step_result = base_core(
+        solver,
+        forward_state,
+        adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+    wire_result = reverse_wire_step(
+        solver,
+        forward_state,
+        adjoint_state,
+        eps_by_field={"Ex": eps_ex, "Ey": eps_ey, "Ez": eps_ez},
+    )
+    pre_step_adjoint = dict(step_result.pre_step_adjoint)
+    for name in ("Ex", "Ey", "Ez"):
+        pre_step_adjoint[name] = pre_step_adjoint[name] + wire_result.field_adjoint[name]
+    pre_step_adjoint["wire_current"] = wire_result.pre_current
+    pre_step_adjoint["wire_charge"] = wire_result.pre_charge
+    backend = (
+        _ReverseBackend.WIRE_CPML if cpml else _ReverseBackend.WIRE_STANDARD
+    )
+    step_result = dataclasses.replace(
+        step_result,
+        pre_step_adjoint=pre_step_adjoint,
+        grad_eps_ex=step_result.grad_eps_ex + wire_result.grad_eps["Ex"],
+        grad_eps_ey=step_result.grad_eps_ey + wire_result.grad_eps["Ey"],
+        grad_eps_ez=step_result.grad_eps_ez + wire_result.grad_eps["Ez"],
+        grad_wire_inductance=wire_result.grad_inductance,
+        grad_wire_capacitance=wire_result.grad_node_capacitance,
+        grad_wire_weights=wire_result.grad_weights,
+        backend=_NATIVE_REVERSE_LABELS[backend],
+    )
+    return _adjoint._accumulate_source_term_gradients(
+        step_result,
+        solver=solver,
+        adjoint_state=adjoint_state,
+        time_value=time_value,
+        eps_ex=eps_ex,
+        eps_ey=eps_ey,
+        eps_ez=eps_ez,
+        resolved_source_terms=resolved_source_terms,
+    )
+
+
+def _reverse_step_wire_standard_native(solver, forward_state, adjoint_state, **kwargs):
+    return _reverse_step_wire_native(
+        solver, forward_state, adjoint_state, cpml=False, **kwargs
+    )
+
+
+def _reverse_step_wire_cpml_native(solver, forward_state, adjoint_state, **kwargs):
+    return _reverse_step_wire_native(
+        solver, forward_state, adjoint_state, cpml=True, **kwargs
+    )
+
+
 def register_native_reverse_backends() -> None:
     """Register every available native CUDA reverse-step runner."""
     register_native_reverse_backend(
@@ -2522,6 +2771,16 @@ def register_native_reverse_backends() -> None:
     register_native_reverse_backend(
         _ReverseBackend.CPML,
         _reverse_step_cpml_native,
+        qualifier=_cuda_scene_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.WIRE_STANDARD,
+        _reverse_step_wire_standard_native,
+        qualifier=_cuda_scene_native_qualifies,
+    )
+    register_native_reverse_backend(
+        _ReverseBackend.WIRE_CPML,
+        _reverse_step_wire_cpml_native,
         qualifier=_cuda_scene_native_qualifies,
     )
     register_native_reverse_backend(

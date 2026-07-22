@@ -40,6 +40,74 @@ class AxisPath:
         object.__setattr__(self, "axis", resolved_axis)
 
 
+@dataclass(frozen=True)
+class WireNodeRef:
+    """Stable reference to one declared point of a thin-wire polyline."""
+
+    wire: str
+    point: int
+
+    def __init__(self, wire, point):
+        resolved_wire = str(wire).strip()
+        if not resolved_wire:
+            raise ValueError("WireNodeRef wire must not be empty.")
+        if isinstance(point, bool) or not isinstance(point, int):
+            raise TypeError("WireNodeRef point must be an integer source-point index.")
+        object.__setattr__(self, "wire", resolved_wire)
+        object.__setattr__(self, "point", int(point))
+
+
+@dataclass(frozen=True)
+class WirePortBinding:
+    """Bind a standard RF port to thin-wire nodes or a removed feed gap."""
+
+    kind: str
+    negative: WireNodeRef
+    positive: WireNodeRef
+
+    def __init__(
+        self,
+        kind,
+        *,
+        negative=None,
+        positive=None,
+    ):
+        resolved = str(kind).strip().lower()
+        if resolved not in {"nodes", "gap"}:
+            raise ValueError("WirePortBinding kind must be 'nodes' or 'gap'.")
+        if not isinstance(negative, WireNodeRef) or not isinstance(
+            positive, WireNodeRef
+        ):
+            raise TypeError(
+                f"WirePortBinding.{resolved}() requires WireNodeRef negative and positive terminals."
+            )
+        if negative == positive:
+            raise ValueError("WirePortBinding terminals must be distinct.")
+        if resolved == "gap" and negative.wire != positive.wire:
+            raise ValueError("WirePortBinding gap terminals must reference one wire.")
+        object.__setattr__(self, "kind", resolved)
+        object.__setattr__(self, "negative", negative)
+        object.__setattr__(self, "positive", positive)
+
+    @classmethod
+    def nodes(
+        cls,
+        *,
+        negative: WireNodeRef,
+        positive: WireNodeRef,
+    ) -> "WirePortBinding":
+        return cls("nodes", negative=negative, positive=positive)
+
+    @classmethod
+    def gap(
+        cls,
+        *,
+        negative: WireNodeRef,
+        positive: WireNodeRef,
+    ) -> "WirePortBinding":
+        return cls("gap", negative=negative, positive=positive)
+
+
 def _normalize_reference_impedance(reference_impedance):
     if torch.is_tensor(reference_impedance):
         if reference_impedance.numel() != 1:
@@ -80,13 +148,14 @@ class LumpedPort:
     """
 
     name: str
-    positive: tuple[float, float, float]
-    negative: tuple[float, float, float]
-    voltage_path: AxisPath
-    current_surface: Box
+    positive: tuple[float, float, float] | None
+    negative: tuple[float, float, float] | None
+    voltage_path: AxisPath | None
+    current_surface: Box | None
     reference_impedance: complex | float | torch.Tensor
     reference_plane: float | None = None
     termination: SeriesRLC | ParallelRLC | None = None
+    wire_binding: WirePortBinding | None = None
     kind: str = "lumped_port"
     phasor_convention: str = "peak"
     power_convention: str = "0.5*Re(V*conj(I))"
@@ -95,45 +164,61 @@ class LumpedPort:
         self,
         name,
         *,
-        positive,
-        negative,
-        voltage_path,
-        current_surface,
+        positive=None,
+        negative=None,
+        voltage_path=None,
+        current_surface=None,
         reference_impedance=50.0,
         reference_plane=None,
         termination=None,
+        wire_binding=None,
     ):
-        if not isinstance(voltage_path, AxisPath):
-            raise TypeError("voltage_path must be an AxisPath.")
-        if not isinstance(current_surface, Box):
-            raise TypeError("current_surface must be a witwin.core.Box.")
+        if wire_binding is not None and not isinstance(wire_binding, WirePortBinding):
+            raise TypeError("wire_binding must be a WirePortBinding or None.")
+        has_geometry = any(
+            value is not None
+            for value in (positive, negative, voltage_path, current_surface)
+        )
+        if wire_binding is not None:
+            if has_geometry:
+                raise ValueError(
+                    "A wire-bound LumpedPort derives its voltage/current coordinates from "
+                    "wire_binding and must not also specify field geometry."
+                )
+            resolved_positive = None
+            resolved_negative = None
+        else:
+            if not isinstance(voltage_path, AxisPath):
+                raise TypeError("voltage_path must be an AxisPath.")
+            if not isinstance(current_surface, Box):
+                raise TypeError("current_surface must be a witwin.core.Box.")
 
-        resolved_positive = _require_length3("positive", positive)
-        resolved_negative = _require_length3("negative", negative)
-        if resolved_positive == resolved_negative:
-            raise ValueError("LumpedPort positive and negative terminals must be distinct.")
+            resolved_positive = _require_length3("positive", positive)
+            resolved_negative = _require_length3("negative", negative)
+            if resolved_positive == resolved_negative:
+                raise ValueError("LumpedPort positive and negative terminals must be distinct.")
 
-        axis_index = "xyz".index(voltage_path.axis)
-        transverse_indices = tuple(index for index in range(3) if index != axis_index)
-        if any(
-            not math.isclose(
-                resolved_positive[index],
-                resolved_negative[index],
+            axis_index = "xyz".index(voltage_path.axis)
+            transverse_indices = tuple(index for index in range(3) if index != axis_index)
+            if any(
+                not math.isclose(
+                    resolved_positive[index],
+                    resolved_negative[index],
+                    rel_tol=0.0,
+                    abs_tol=1.0e-12,
+                )
+                for index in transverse_indices
+            ):
+                raise ValueError(
+                    "LumpedPort positive and negative terminals must define an axis-aligned voltage path."
+                )
+            if math.isclose(
+                resolved_positive[axis_index],
+                resolved_negative[axis_index],
                 rel_tol=0.0,
                 abs_tol=1.0e-12,
-            )
-            for index in transverse_indices
-        ):
-            raise ValueError(
-                "LumpedPort positive and negative terminals must define an axis-aligned voltage path."
-            )
-        if math.isclose(
-            resolved_positive[axis_index],
-            resolved_negative[axis_index],
-            rel_tol=0.0,
-            abs_tol=1.0e-12,
-        ):
-            raise ValueError("LumpedPort positive and negative terminals must be distinct along voltage_path.axis.")
+            ):
+                raise ValueError("LumpedPort positive and negative terminals must be distinct along voltage_path.axis.")
 
         stored_impedance = _normalize_reference_impedance(reference_impedance)
 
@@ -154,6 +239,7 @@ class LumpedPort:
             None if reference_plane is None else float(reference_plane),
         )
         object.__setattr__(self, "termination", termination)
+        object.__setattr__(self, "wire_binding", wire_binding)
         object.__setattr__(self, "kind", "lumped_port")
         object.__setattr__(self, "phasor_convention", "peak")
         object.__setattr__(self, "power_convention", "0.5*Re(V*conj(I))")
@@ -185,12 +271,13 @@ class TerminalPort:
     """
 
     name: str
-    positive_terminal: TerminalRef
-    negative_terminal: TerminalRef
-    integration_path: AxisPath
-    reference_plane: float
+    positive_terminal: TerminalRef | None
+    negative_terminal: TerminalRef | None
+    integration_path: AxisPath | None
+    reference_plane: float | None
     reference_impedance: complex | float | torch.Tensor
     termination: SeriesRLC | ParallelRLC | None = None
+    wire_binding: WirePortBinding | None = None
     kind: str = "terminal_port"
     phasor_convention: str = "peak"
     power_convention: str = "0.5*Re(V*conj(I))"
@@ -216,42 +303,65 @@ class TerminalPort:
     def __init__(
         self,
         name,
-        positive_terminal,
-        negative_terminal,
-        integration_path,
-        reference_plane,
+        positive_terminal=None,
+        negative_terminal=None,
+        integration_path=None,
+        reference_plane=None,
         reference_impedance=50.0,
         termination=None,
+        wire_binding=None,
     ):
         resolved_name = str(name)
         if not resolved_name:
             raise ValueError("TerminalPort name must not be empty.")
-        if not isinstance(positive_terminal, TerminalRef):
+        if wire_binding is not None and not isinstance(wire_binding, WirePortBinding):
             raise TypeError(
-                f"TerminalPort {resolved_name!r} positive_terminal must be a TerminalRef."
+                f"TerminalPort {resolved_name!r} wire_binding must be a WirePortBinding or None."
             )
-        if not isinstance(negative_terminal, TerminalRef):
-            raise TypeError(
-                f"TerminalPort {resolved_name!r} negative_terminal must be a TerminalRef."
-            )
-        if positive_terminal == negative_terminal:
-            raise ValueError(
-                f"TerminalPort {resolved_name!r} positive and negative terminals must reference distinct structures."
-            )
-        if not isinstance(integration_path, AxisPath):
-            raise TypeError(
-                f"TerminalPort {resolved_name!r} integration_path must be an AxisPath."
-            )
-        try:
-            resolved_reference_plane = float(reference_plane)
-        except (TypeError, ValueError) as error:
-            raise type(error)(
-                f"TerminalPort {resolved_name!r} reference_plane must be a real scalar."
-            ) from error
-        if not math.isfinite(resolved_reference_plane):
-            raise ValueError(
-                f"TerminalPort {resolved_name!r} reference_plane must be finite."
-            )
+        if wire_binding is None:
+            if not isinstance(positive_terminal, TerminalRef):
+                raise TypeError(
+                    f"TerminalPort {resolved_name!r} positive_terminal must be a TerminalRef."
+                )
+            if not isinstance(negative_terminal, TerminalRef):
+                raise TypeError(
+                    f"TerminalPort {resolved_name!r} negative_terminal must be a TerminalRef."
+                )
+            if positive_terminal == negative_terminal:
+                raise ValueError(
+                    f"TerminalPort {resolved_name!r} positive and negative terminals must reference distinct structures."
+                )
+            if not isinstance(integration_path, AxisPath):
+                raise TypeError(
+                    f"TerminalPort {resolved_name!r} integration_path must be an AxisPath."
+                )
+            try:
+                resolved_reference_plane = float(reference_plane)
+            except (TypeError, ValueError) as error:
+                raise type(error)(
+                    f"TerminalPort {resolved_name!r} reference_plane must be a real scalar."
+                ) from error
+            if not math.isfinite(resolved_reference_plane):
+                raise ValueError(
+                    f"TerminalPort {resolved_name!r} reference_plane must be finite."
+                )
+        else:
+            if any(
+                value is not None
+                for value in (positive_terminal, negative_terminal, integration_path)
+            ):
+                raise ValueError(
+                    f"TerminalPort {resolved_name!r} wire binding must not also specify "
+                    "structure terminal geometry."
+                )
+            if reference_plane is None:
+                resolved_reference_plane = None
+            else:
+                resolved_reference_plane = float(reference_plane)
+                if not math.isfinite(resolved_reference_plane):
+                    raise ValueError(
+                        f"TerminalPort {resolved_name!r} reference_plane must be finite."
+                    )
         try:
             stored_impedance = _normalize_reference_impedance(reference_impedance)
             _validate_termination(termination)
@@ -265,6 +375,7 @@ class TerminalPort:
         object.__setattr__(self, "reference_plane", resolved_reference_plane)
         object.__setattr__(self, "reference_impedance", stored_impedance)
         object.__setattr__(self, "termination", termination)
+        object.__setattr__(self, "wire_binding", wire_binding)
         object.__setattr__(self, "kind", "terminal_port")
         object.__setattr__(self, "phasor_convention", "peak")
         object.__setattr__(self, "power_convention", "0.5*Re(V*conj(I))")
@@ -273,7 +384,7 @@ class TerminalPort:
         object.__setattr__(self, "_current_surface", None)
 
     @property
-    def voltage_path(self) -> AxisPath:
+    def voltage_path(self) -> AxisPath | None:
         return self.integration_path
 
     @property
@@ -315,6 +426,7 @@ class TerminalPort:
             reference_plane=self.reference_plane,
             reference_impedance=self.reference_impedance,
             termination=self.termination,
+            wire_binding=self.wire_binding,
         )
         object.__setattr__(resolved, "_positive", positive)
         object.__setattr__(resolved, "_negative", negative)

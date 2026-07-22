@@ -22,7 +22,15 @@ def base_scene() -> mw.Scene:
         ),
         grid=mw.GridSpec.uniform(DX),
         boundary=mw.BoundarySpec.pml(num_layers=PML_LAYERS),
-        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized"),
+        # Staircase PEC edge handling is the benchmark default. Conformal PEC
+        # implements the partial fill as a per-step open-fraction factor on the E
+        # update, i.e. an effective conductivity eps*fill/dt on every cut edge, so a
+        # lossless PEC scatterer picks up spurious absorption (measured: a closed PEC
+        # cavity holding a PEC sphere retains 0.45 of its energy after 5200
+        # source-free steps under conformal versus 1.00 under staircase). Scenes that
+        # want conformal must opt in per scene with an explicit SubpixelSpec.
+        # Dielectric scenes are unaffected either way (no PEC material).
+        subpixel_samples=mw.SubpixelSpec(samples=3, averaging="polarized", pec="staircase"),
         device="cpu",
     )
 

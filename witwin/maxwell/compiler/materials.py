@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from itertools import product
 
 import numpy as np
@@ -10,6 +11,15 @@ from witwin.core import Box
 from witwin.core.material import VACUUM_PERMITTIVITY
 
 from ..media import CustomPole, DiagonalTensor3, DrudePole, LorentzPole, ModulationSpec, PerturbationMedium, Tensor3x3
+from .structures import pec_structures
+from .subpixel import (
+    _HARMONIC_EPS,
+    _NORMAL_EPS,
+    _blend_material_polarized,
+    _field_gradients,
+    _interface_normals,
+    _reconstruct_sampled_polarized_components,
+)
 
 _AXES = ("x", "y", "z")
 _OFFDIAG_AXES = ("xy", "xz", "yz")
@@ -54,10 +64,6 @@ def _bulk_structures(scene):
         for structure in _sorted_structures(scene)
         if not _structure_is_pec(structure) and not _structure_is_sheet(structure)
     ]
-
-
-def _pec_structures(scene):
-    return [structure for structure in _sorted_structures(scene) if _structure_is_pec(structure)]
 
 
 def _sheet_structures(scene):
@@ -148,6 +154,11 @@ def _structure_nonlinearity(material):
 
 def _static_structure_material(structure):
     material = structure.material
+    # A GyromagneticFerrite compiles here only as its diagonal background
+    # (eps_r, mu_infinity, sigma_e); the non-reciprocal off-diagonal permeability
+    # is produced separately by the local magnetization-ADE runtime
+    # (compile_gyromagnetic_layout + the FDTD gyromagnetic forward hooks), never by
+    # widening mu_tensor. See docs/reference/ferrite-physics-contract.md.
     sample = material.evaluate_static()
     try:
         eps_components, eps_offdiag = _eps_values_from_sample(sample.eps_r)
@@ -219,17 +230,6 @@ def _new_material_model(scene, layout, *, eps_fill, mu_fill):
     return _refresh_model_summary_aliases(model)
 
 
-def _material_model_has_dispersion(model) -> bool:
-    return bool(
-        model["debye_poles"]
-        or model["drude_poles"]
-        or model["lorentz_poles"]
-        or model["mu_debye_poles"]
-        or model["mu_drude_poles"]
-        or model["mu_lorentz_poles"]
-    )
-
-
 def _material_model_has_electric_dispersion(model) -> bool:
     return bool(model["debye_poles"] or model["drude_poles"] or model["lorentz_poles"])
 
@@ -240,10 +240,6 @@ def _material_model_has_magnetic_dispersion(model) -> bool:
 
 def _material_model_has_conductivity(model) -> bool:
     return any(torch.any(model["sigma_e_components"][axis] != 0).item() for axis in _AXES)
-
-
-def _material_model_has_magnetic_conductivity(model) -> bool:
-    return any(torch.any(model["sigma_m_components"][axis] != 0).item() for axis in _AXES)
 
 
 def _material_model_has_kerr(model) -> bool:
@@ -278,99 +274,6 @@ def material_model_has_full_anisotropy(model) -> bool:
 def _blend_material(tensor, occupancy, *, value):
     value_tensor = _scalar_tensor(value, device=tensor.device, dtype=tensor.dtype)
     return (1.0 - occupancy) * tensor + occupancy * value_tensor
-
-
-_NORMAL_EPS = 1e-24
-_HARMONIC_EPS = 1e-12
-
-
-def _field_gradients(scene, field, coords=None):
-    xx, yy, zz = (scene.X, scene.Y, scene.Z) if coords is None else coords
-    x = xx[:, 0, 0]
-    y = yy[0, :, 0]
-    z = zz[0, 0, :]
-    grads = []
-    for dim, coord in enumerate((x, y, z)):
-        if field.shape[dim] < 2:
-            grads.append(torch.zeros_like(field))
-        else:
-            grads.append(torch.gradient(field, spacing=(coord,), dim=dim)[0])
-    return dict(zip(_AXES, grads, strict=True))
-
-
-def _normalized_field_gradients(scene, field, coords=None):
-    grads = _field_gradients(scene, field, coords=coords)
-    gx, gy, gz = (grads[axis] for axis in _AXES)
-    # Floor is applied inside the sqrt (squared scale ``_NORMAL_EPS``) so the
-    # sqrt's own backward stays finite at degenerate nodes where the summed
-    # squared gradient is exactly zero (medial-axis / symmetric-center nodes).
-    # A floor added after the sqrt would leave d(sqrt)/d(.) = inf there, and the
-    # vanishing upstream gradient would evaluate 0*inf = NaN, poisoning the whole
-    # geometry-gradient tensor through the sum reduction.
-    mag = torch.sqrt(gx * gx + gy * gy + gz * gz + _NORMAL_EPS)
-    inv = 1.0 / mag
-    return {"x": gx * inv, "y": gy * inv, "z": gz * inv}
-
-
-def _interface_normals(scene, geometry, coords=None):
-    """Unit outward interface normals per node from the signed-distance field.
-
-    The normal is the gradient of the per-structure signed-distance field on the
-    node grid, evaluated with true (possibly graded) spacings via central finite
-    differences. SDFs are eikonal so ``|grad| ~ 1`` on the interface band; deep
-    interior / medial-axis nodes have ``|grad| ~ 0`` and yield ``n ~ 0`` after the
-    floored normalization, which is harmless because the polarized correction there
-    is weighted by the vanishing ``(eps_arith - eps_harm)`` term. Differentiable in
-    geometry parameters through ``signed_distance``.
-    """
-    xx, yy, zz = (scene.X, scene.Y, scene.Z) if coords is None else coords
-    return _normalized_field_gradients(
-        scene,
-        geometry.signed_distance(xx, yy, zz),
-        coords=(xx, yy, zz),
-    )
-
-
-def _blend_material_polarized(tensor, occupancy, normal_axis, *, value):
-    """Normal-projection (Kottke) per-axis blend of a background field with ``value``.
-
-    ``tensor`` is the running per-axis accumulated background permittivity/permeability,
-    ``occupancy`` this structure's soft fill, and ``normal_axis`` the interface-normal
-    component for this axis. The harmonic (series) mean is weighted by ``n_a^2`` along
-    the interface normal and the arithmetic (parallel) mean by ``1 - n_a^2`` tangentially.
-    Reduces exactly to the arithmetic blend when ``n_a = 0``.
-    """
-    value_tensor = _scalar_tensor(value, device=tensor.device, dtype=tensor.dtype)
-    arithmetic = (1.0 - occupancy) * tensor + occupancy * value_tensor
-    harmonic = 1.0 / (
-        (1.0 - occupancy) / (tensor + _HARMONIC_EPS)
-        + occupancy / (value_tensor + _HARMONIC_EPS)
-    )
-    weight = normal_axis * normal_axis
-    return (1.0 - weight) * arithmetic + weight * harmonic
-
-
-def _reconstruct_sampled_polarized_components(scene, arithmetic, inverse):
-    """Combine subcell arithmetic and reciprocal means along the material normal.
-
-    Averaging an already blended harmonic value at every subcell sample collapses
-    toward the arithmetic mean when those samples are nearly binary. Integrating
-    the material and its reciprocal separately preserves the finite-volume series
-    mean before the normal projection is applied.
-    """
-    squared_gradients = {
-        axis: torch.zeros_like(arithmetic[axis]) for axis in _AXES
-    }
-    for component in arithmetic.values():
-        for axis, gradient in _field_gradients(scene, component).items():
-            squared_gradients[axis] += gradient * gradient
-    gradient_norm_squared = sum(squared_gradients.values()) + _NORMAL_EPS
-    components = {}
-    for axis in _AXES:
-        weight = squared_gradients[axis] / gradient_norm_squared
-        harmonic = 1.0 / (inverse[axis] + _HARMONIC_EPS)
-        components[axis] = (1.0 - weight) * arithmetic[axis] + weight * harmonic
-    return components
 
 
 def _resolve_subpixel(subpixel):
@@ -479,16 +382,24 @@ def _pec_geometry_beta(scene) -> float | torch.Tensor:
     return 0.5 * cell
 
 
-def _wrap_periodic_boundary_planes(scene, occupancy, midpoint_occupancy):
+def _wrap_periodic_boundary_planes(scene, occupancy, midpoint_occupancy, skip_axes=()):
     """Make duplicate periodic endpoint planes carry their union occupancy.
 
     Periodic axes retain both endpoint nodes even though they denote one physical
     plane. Only those endpoint planes need wrap composition. Adding translated
     geometry through the whole volume is incorrect when a structure spans or
     exceeds one period because the base and image overlap away from the seam.
+
+    ``skip_axes`` lists axis indices sampled on the staggered (Yee edge/face)
+    grid: those carry the primal-cell midpoints, which have no duplicated endpoint
+    plane, so the seam composition (and its >=2-node requirement) does not apply --
+    the periodic-image union in :func:`_geometry_occupancy` already resolves any
+    seam-crossing geometry there.
     """
     wrapped = occupancy
     for axis_index, axis in enumerate(("x", "y", "z")):
+        if axis_index in skip_axes:
+            continue
         if scene.boundary.axis_kind(axis) not in ("periodic", "bloch"):
             continue
         axis_size = wrapped.shape[axis_index]
@@ -569,6 +480,7 @@ def _geometry_occupancy(
     *,
     half_weight_boundary=False,
     periodic_shift_options=None,
+    wrap_skip_axes=(),
 ):
     xx, yy, zz = (scene.X, scene.Y, scene.Z) if coords is None else coords
     resolved_beta = _geometry_beta(scene) if beta is None else beta
@@ -644,7 +556,9 @@ def _geometry_occupancy(
         bridge_shape[axis_index] = 1
         return bridge.expand(bridge_shape)
 
-    return _wrap_periodic_boundary_planes(scene, occupancy, _midpoint_occupancy)
+    return _wrap_periodic_boundary_planes(
+        scene, occupancy, _midpoint_occupancy, skip_axes=wrap_skip_axes
+    )
 
 
 def _layout_pole_entry(scene, structure, pole):
@@ -962,6 +876,370 @@ def _sample_offsets(scene, subpixel_samples):
     return list(product(x_offsets, y_offsets, z_offsets))
 
 
+# --- Edge-native (per-Yee-component) material sampling -----------------------
+#
+# Each Yee field component lives at its own staggered location, not at the node
+# centre. The legacy path Kottke-blended every material at the node grid and then
+# arithmetically averaged the node values onto the Yee edges/faces (a node->edge
+# "smear"): the interface operator was applied at the wrong place and then
+# linearly interpolated, which does not match a reference solver that evaluates
+# the subpixel blend natively at each staggered location. The helpers below
+# evaluate the diagonal background permittivity / permeability and the static
+# conductivities directly at each component's Yee location -- the SDF occupancy,
+# the interface normal, and the region density are all sampled there -- so the
+# polarized (Kottke) or arithmetic subpixel blend is edge-native with no
+# node->edge average. The node model is still produced as the canonical
+# representation consumed by the summaries, monitors, mode solver, SAR and mass
+# models; only the FDTD update-coefficient materials switch to the edge fields.
+
+# The set of grid axes each Yee component is half-shifted along, and the material
+# polarization axis it carries.
+_EDGE_STAGGER_AXES = {
+    "Ex": (0,),
+    "Ey": (1,),
+    "Ez": (2,),
+    "Hx": (1, 2),
+    "Hy": (0, 2),
+    "Hz": (0, 1),
+}
+_EDGE_POLARIZATION_AXIS = {
+    "Ex": "x",
+    "Ey": "y",
+    "Ez": "z",
+    "Hx": "x",
+    "Hy": "y",
+    "Hz": "z",
+}
+_ELECTRIC_EDGE_COMPONENTS = ("Ex", "Ey", "Ez")
+_MAGNETIC_EDGE_COMPONENTS = ("Hx", "Hy", "Hz")
+
+
+def _edge_axis_base_1d(scene, axis, staggered):
+    """Per-axis 1D query coordinates for one Yee component along ``axis``.
+
+    On a staggered axis the samples sit at the primal-cell midpoints
+    ``0.5*(node_i + node_{i+1})`` (length ``N-1``, the Yee edge/face count); on an
+    unstaggered axis they stay on the node coordinates (length ``N``).
+    """
+    coord = getattr(scene, axis)
+    if staggered:
+        return 0.5 * (coord[:-1] + coord[1:])
+    return coord
+
+
+def _edge_axis_offsets(scene, axis, count, staggered):
+    """Mean-zero subpixel offsets spanning one sample's averaging window on ``axis``.
+
+    Mirrors :func:`_axis_sample_offsets` but scales by the primal-cell width on a
+    staggered axis (the extent each Yee edge/face sample represents) and by the
+    node dual-cell width on an unstaggered axis, so the offsets broadcast against
+    the matching 1D base coordinates on both uniform and graded grids.
+    """
+    if count == 1:
+        return [0.0]
+    grid = scene.grid
+    if not (grid.is_custom or grid.is_auto):
+        width = float(getattr(grid, f"d{axis}"))
+    elif staggered:
+        coord = getattr(scene, axis)
+        width = (coord[1:] - coord[:-1]).to(dtype=torch.float32)
+    else:
+        width = torch.as_tensor(
+            getattr(scene, f"d{axis}_dual64"), device=scene.device, dtype=torch.float32
+        )
+    return [((index + 0.5) / count - 0.5) * width for index in range(count)]
+
+
+def _edge_component_coords(bases, offsets):
+    return torch.meshgrid(
+        bases["x"] + offsets[0],
+        bases["y"] + offsets[1],
+        bases["z"] + offsets[2],
+        indexing="ij",
+    )
+
+
+def _blend_edge_component(acc, inverse_acc, occupancy, normal_axis, value, *, polarized_direct):
+    """Blend one structure/region into an edge accumulator.
+
+    ``polarized_direct`` applies the Kottke normal-projection blend in place (the
+    no-subpixel polarized path). Otherwise an arithmetic blend is used and, when
+    ``inverse_acc`` is not None (the polarized-with-subpixel path), the reciprocal
+    is accumulated arithmetically so the harmonic (series) mean can be
+    reconstructed after the subpixel average.
+    """
+    if polarized_direct:
+        return _blend_material_polarized(acc, occupancy, normal_axis, value=value), inverse_acc
+    acc = _blend_material(acc, occupancy, value=value)
+    if inverse_acc is not None:
+        inverse_acc = _blend_material(inverse_acc, occupancy, value=1.0 / (value + _HARMONIC_EPS))
+    return acc, inverse_acc
+
+
+def _reconstruct_edge_polarized(scene, coords, arithmetic, inverse, axis):
+    """Normal-projection reconstruction of one edge component from subcell means.
+
+    The harmonic (series) mean ``1/inverse`` is blended toward the arithmetic
+    (parallel) mean by the squared interface-normal component along ``axis``,
+    estimated from the gradient of the arithmetic permittivity/permeability at the
+    Yee location. This is the per-component edge-native form of
+    :func:`_reconstruct_sampled_polarized_components`; for an isotropic medium it
+    reproduces that node reconstruction exactly (the three per-axis components are
+    identical there, so a single component's gradient carries the same direction).
+    """
+    grads = _field_gradients(scene, arithmetic, coords=coords)
+    squared = {a: grads[a] * grads[a] for a in _AXES}
+    norm = squared["x"] + squared["y"] + squared["z"] + _NORMAL_EPS
+    weight = squared[axis] / norm
+    harmonic = 1.0 / (inverse + _HARMONIC_EPS)
+    return (1.0 - weight) * arithmetic + weight * harmonic
+
+
+def _sample_box_parameter_field(scene, geometry, values, coords):
+    """Trilinearly sample a Box-extent parameter grid at physical query coordinates.
+
+    The edge-native counterpart of :func:`_box_parameter_field`: the grid spans the
+    Box extent with the same convention, and is zero outside the box (border-padded
+    values there are multiplied by a zero occupancy so they never contribute).
+    Differentiable in ``values``.
+    """
+    xx, yy, zz = coords
+    center = torch.as_tensor(geometry.position, device=scene.device, dtype=torch.float32)
+    size = torch.as_tensor(geometry.size, device=scene.device, dtype=torch.float32)
+    normalized = (
+        2.0 * (xx - center[0]) / size[0],
+        2.0 * (yy - center[1]) / size[1],
+        2.0 * (zz - center[2]) / size[2],
+    )
+    query_grid = torch.stack(normalized, dim=-1)[None, ...]
+    texture = values.to(device=scene.device, dtype=torch.float32).permute(2, 1, 0)[None, None, ...]
+    return F.grid_sample(
+        texture,
+        query_grid,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=False,
+    )[0, 0]
+
+
+def _edge_structure_perturbation_delta(scene, structure, material, coords, eps_background):
+    """Edge-sampled ``eps_sensitivity * eps_background * perturbation`` or ``None``."""
+    if not isinstance(material, PerturbationMedium):
+        return None
+    return (
+        float(material.eps_sensitivity)
+        * float(eps_background)
+        * _sample_box_parameter_field(scene, structure.geometry, material.perturbation, coords)
+    )
+
+
+def _compile_edge_component(
+    scene,
+    component,
+    *,
+    eps_background,
+    mu_background,
+    averaging,
+    samples,
+    region_densities,
+    geometry_periodic_shifts,
+):
+    """Edge-native diagonal permittivity/permeability and conductivity for one component.
+
+    Returns ``(material_relative, sigma)`` where ``material_relative`` is the
+    relative eps (electric components) or mu (magnetic components) sampled at the
+    component's Yee location and ``sigma`` is the matching static electric /
+    magnetic conductivity there. Differentiable in geometry / density parameters.
+    """
+    axis = _EDGE_POLARIZATION_AXIS[component]
+    stagger = _EDGE_STAGGER_AXES[component]
+    electric = component[0] == "E"
+    background = float(eps_background if electric else mu_background)
+
+    bases = {}
+    axis_offsets = {}
+    for axis_index, grid_axis in enumerate(_AXES):
+        staggered = axis_index in stagger
+        bases[grid_axis] = _edge_axis_base_1d(scene, grid_axis, staggered)
+        axis_offsets[grid_axis] = _edge_axis_offsets(
+            scene, grid_axis, int(samples[axis_index]), staggered
+        )
+    offset_combos = list(product(axis_offsets["x"], axis_offsets["y"], axis_offsets["z"]))
+    half_weight_boundary = len(offset_combos) > 1
+    polarized = averaging == "polarized"
+    polarized_direct = polarized and len(offset_combos) == 1
+
+    structures = list(_bulk_structures(scene))
+    regions = list(zip(getattr(scene, "material_regions", ()), region_densities))
+
+    material_sum = None
+    sigma_sum = None
+    inverse_sum = None
+    for offsets in offset_combos:
+        coords = _edge_component_coords(bases, offsets)
+        shape = coords[0].shape
+        material_acc = torch.full(shape, background, device=scene.device, dtype=torch.float32)
+        sigma_acc = torch.zeros(shape, device=scene.device, dtype=torch.float32)
+        inverse_acc = (
+            torch.full(shape, 1.0 / (background + _HARMONIC_EPS), device=scene.device, dtype=torch.float32)
+            if (polarized and not polarized_direct)
+            else None
+        )
+        for structure in structures:
+            parts = _static_structure_material(structure)
+            eps_components = parts[1]
+            mu_components = parts[3]
+            sigma_components = parts[4]
+            sigma_m_components = parts[5]
+            occupancy = _geometry_occupancy(
+                scene,
+                structure.geometry,
+                coords=coords,
+                half_weight_boundary=half_weight_boundary,
+                periodic_shift_options=geometry_periodic_shifts.get(id(structure.geometry)),
+                wrap_skip_axes=stagger,
+            )
+            normal_axis = (
+                _interface_normals(scene, structure.geometry, coords=coords)[axis]
+                if polarized_direct
+                else None
+            )
+            if electric:
+                value = eps_components[axis] * float(eps_background)
+                # PerturbationMedium: eps(x) = eps_base + eps_sensitivity *
+                # eps_background * perturbation(x), sampled at this Yee location so
+                # the zero-perturbation limit reduces exactly to the base material.
+                delta = _edge_structure_perturbation_delta(
+                    scene, structure, parts[0], coords, eps_background
+                )
+                if delta is not None:
+                    value = value + delta
+                sigma_value = sigma_components[axis]
+            else:
+                value = mu_components[axis] * float(mu_background)
+                sigma_value = sigma_m_components[axis]
+            material_acc, inverse_acc = _blend_edge_component(
+                material_acc, inverse_acc, occupancy, normal_axis, value, polarized_direct=polarized_direct
+            )
+            sigma_acc = _blend_material(sigma_acc, occupancy, value=sigma_value)
+        for region, density in regions:
+            occupancy = _geometry_occupancy(
+                scene,
+                region.geometry,
+                coords=coords,
+                half_weight_boundary=half_weight_boundary,
+                periodic_shift_options=geometry_periodic_shifts.get(id(region.geometry)),
+                wrap_skip_axes=stagger,
+            )
+            normal_axis = (
+                _interface_normals(scene, region.geometry, coords=coords)[axis]
+                if polarized_direct
+                else None
+            )
+            density_field = _sample_material_region_density(scene, region, density, coords=coords)
+            if electric:
+                lo, hi = region.eps_bounds
+            else:
+                lo, hi = region.mu_bounds
+            value = lo + density_field * (hi - lo)
+            material_acc, inverse_acc = _blend_edge_component(
+                material_acc, inverse_acc, occupancy, normal_axis, value, polarized_direct=polarized_direct
+            )
+            # Regions carry no conductivity (they displace it toward zero).
+            sigma_acc = _blend_material(sigma_acc, occupancy, value=0.0)
+        material_sum = material_acc if material_sum is None else material_sum + material_acc
+        sigma_sum = sigma_acc if sigma_sum is None else sigma_sum + sigma_acc
+        if inverse_acc is not None:
+            inverse_sum = inverse_acc if inverse_sum is None else inverse_sum + inverse_acc
+
+    scale = 1.0 / float(len(offset_combos))
+    material_mean = material_sum * scale
+    sigma_mean = sigma_sum * scale
+    if inverse_sum is not None:
+        base_coords = _edge_component_coords(bases, (0.0, 0.0, 0.0))
+        material_mean = _reconstruct_edge_polarized(
+            scene, base_coords, material_mean, inverse_sum * scale, axis
+        )
+    return material_mean.contiguous(), sigma_mean.contiguous()
+
+
+def _edge_native_eligible(scene, model, surface_layout):
+    """Whether the scene's material families all support edge-native staggering.
+
+    Fails closed (returns False, keeping the node->edge path) for families whose
+    per-Yee-component sampling has not been validated in this step: full
+    off-diagonal anisotropy (handled by the runtime's own per-edge inverse-tensor
+    path), 2D sheets (node-plane conductivity rasterization), and surface-impedance
+    metals (interior-masked good conductors). The dominant curved/misaligned
+    dielectric and diagonal-anisotropic geometry cluster -- including
+    PerturbationMedium, whose eps offset is sampled at the Yee edge -- stays
+    edge-native.
+    """
+    if material_model_has_full_anisotropy(model):
+        return False
+    if _sheet_structures(scene):
+        return False
+    if surface_layout is not None and getattr(surface_layout, "metals", ()):
+        return False
+    return True
+
+
+def compile_edge_material_components(
+    scene,
+    model,
+    surface_layout,
+    *,
+    eps_background,
+    mu_background,
+    samples,
+    averaging,
+    region_densities,
+    geometry_periodic_shifts,
+):
+    """Edge-native diagonal material fields for the six Yee components, or ``None``.
+
+    Returns a dict with per-component relative permittivity (``eps``), relative
+    permeability (``mu``) and static conductivities (``sigma_e`` / ``sigma_m``)
+    sampled at each component's own Yee location, or ``None`` when the scene
+    contains a material family that is not yet edge-native (see
+    :func:`_edge_native_eligible`), in which case the runtime keeps the node->edge
+    average path.
+    """
+    if not _edge_native_eligible(scene, model, surface_layout):
+        return None
+    eps = {}
+    sigma_e = {}
+    for component in _ELECTRIC_EDGE_COMPONENTS:
+        material, sigma = _compile_edge_component(
+            scene,
+            component,
+            eps_background=eps_background,
+            mu_background=mu_background,
+            averaging=averaging,
+            samples=samples,
+            region_densities=region_densities,
+            geometry_periodic_shifts=geometry_periodic_shifts,
+        )
+        eps[component] = material
+        sigma_e[component] = sigma
+    mu = {}
+    sigma_m = {}
+    for component in _MAGNETIC_EDGE_COMPONENTS:
+        material, sigma = _compile_edge_component(
+            scene,
+            component,
+            eps_background=eps_background,
+            mu_background=mu_background,
+            averaging=averaging,
+            samples=samples,
+            region_densities=region_densities,
+            geometry_periodic_shifts=geometry_periodic_shifts,
+        )
+        mu[component] = material
+        sigma_m[component] = sigma
+    return {"eps": eps, "sigma_e": sigma_e, "mu": mu, "sigma_m": sigma_m}
+
+
 def _region_axis_slice(nodes64: np.ndarray, lower: float, upper: float) -> slice | None:
     # Cells are indexed by their low-side node. The window is lower-inclusive
     # and upper-exclusive so a box whose faces land exactly on grid nodes
@@ -1219,7 +1497,7 @@ def _pec_occupancy(scene, coords=None):
     Returns ``None`` when the scene has no PEC structure so non-PEC scenes stay
     byte-identical. Differentiable in PEC geometry through ``_geometry_occupancy``.
     """
-    structures = _pec_structures(scene)
+    structures = pec_structures(scene)
     if not structures:
         return None
     beta = _pec_geometry_beta(scene)
@@ -1228,6 +1506,80 @@ def _pec_occupancy(scene, coords=None):
         sample = _geometry_occupancy(scene, structure.geometry, coords=coords, beta=beta)
         occupancy = sample if occupancy is None else torch.maximum(occupancy, sample)
     return occupancy
+
+
+def _pec_periodic_shift_options(scene):
+    """Per-axis translation options that bring periodic images of PEC geometry into view."""
+    domain_range = getattr(scene, "physical_domain_range", None)
+    options = []
+    for axis_index, axis in enumerate(("x", "y", "z")):
+        if domain_range is not None and scene.boundary.axis_kind(axis) in ("periodic", "bloch"):
+            span = float(domain_range[2 * axis_index + 1]) - float(domain_range[2 * axis_index])
+            options.append((-span, 0.0, span))
+        else:
+            options.append((0.0,))
+    return tuple(options)
+
+
+def _pec_signed_distance(scene, coords=None):
+    """Union signed distance (min over PEC structures and periodic images) on the node grid.
+
+    Returns ``None`` when the scene has no PEC structure. Differentiable in PEC
+    geometry through ``signed_distance``.
+    """
+    structures = pec_structures(scene)
+    if not structures:
+        return None
+    xx, yy, zz = (scene.X, scene.Y, scene.Z) if coords is None else coords
+    shift_options = _pec_periodic_shift_options(scene)
+    union = None
+    for structure in structures:
+        for shift_x, shift_y, shift_z in product(*shift_options):
+            sample = structure.geometry.signed_distance(
+                xx - shift_x, yy - shift_y, zz - shift_z
+            )
+            union = sample if union is None else torch.minimum(union, sample)
+    return union
+
+
+def _edge_line_coverage(low, high):
+    """Fraction of a Yee edge covered by the conductor, from its endpoint signed distances.
+
+    The signed distance is interpolated linearly along the edge (an SDF is
+    eikonal, so this is exact for a planar cut and second-order for a curved one)
+    and the covered fraction is the part of the segment with ``sd <= 0``. The
+    result has compact support by construction: an edge with both endpoints
+    outside is exactly ``0`` and an edge with both endpoints inside is exactly
+    ``1``, with no tail. That is what makes the conformal treatment collapse onto
+    the exact staircase treatment wherever the conductor surface does not cut the
+    edge -- in particular for every tangential edge of a grid-aligned face.
+    """
+    lower = torch.minimum(low, high)
+    upper = torch.maximum(low, high)
+    span = upper - lower
+    cut = span > 0
+    safe_span = torch.where(cut, span, torch.ones_like(span))
+    fraction = torch.clamp(-lower / safe_span, 0.0, 1.0)
+    # ``span == 0`` means the SDF is constant along the edge (a face parallel to
+    # the edge): the edge is either wholly conductor or wholly open.
+    degenerate = (upper <= 0.0).to(low.dtype)
+    return torch.where(cut, fraction, degenerate)
+
+
+def _pec_edge_fill(scene, coords=None):
+    """Conformal PEC coverage fraction of every Yee E edge, or ``None``.
+
+    Keyed by electric component name with the same shapes the node->edge average
+    produces, so the runtime can consume it in place of that average.
+    """
+    signed_distance = _pec_signed_distance(scene, coords=coords)
+    if signed_distance is None:
+        return None
+    return {
+        "Ex": _edge_line_coverage(signed_distance[:-1, :, :], signed_distance[1:, :, :]),
+        "Ey": _edge_line_coverage(signed_distance[:, :-1, :], signed_distance[:, 1:, :]),
+        "Ez": _edge_line_coverage(signed_distance[:, :, :-1], signed_distance[:, :, 1:]),
+    }
 
 
 def _sheet_plane_layout(scene, structure):
@@ -1362,142 +1714,622 @@ def _apply_sheet_structures(scene, model):
     return _refresh_model_summary_aliases(model)
 
 
-def _sibc_structures(scene):
-    return [
-        structure
-        for structure in _sorted_structures(scene)
-        if _structure_material(structure) is not None
-        and bool(getattr(_structure_material(structure), "is_lossy_metal", False))
-    ]
+def _reject_surface_impedance(reason: str, *, phase: str):
+    """Single physically-worded rejection for unsupported surface-impedance configs.
 
-
-def _reject_sibc(reason: str):
-    """Single physically-worded rejection for unsupported SIBC configurations.
-
-    All the SIBC scope limits funnel through this one ``raise`` so the reason is
-    always contextual (never "not implemented yet") while the guard census counts a
-    single capability guard for the surface-impedance boundary.
+    Every surface-impedance scope limit funnels through this one ``raise`` so the
+    reason is always contextual -- it states the physical or mathematical reason the
+    case is unsupported and names the phase that lifts it -- while the guard census
+    counts a single capability guard for the surface-impedance boundary. Axis-aligned
+    finite blocks, mid-domain double-sided plates, multiple metals, multiple
+    orientations, and the generic rational surface impedance are wired into the runtime;
+    the oblique/curved (conformal) and Bloch-periodic cases are converged in later
+    phases.
     """
     raise NotImplementedError(
-        f"LossyMetalMedium surface-impedance boundary: {reason} "
-        "The scalar normal-incidence Leontovich Z_s only models an axis-aligned planar face; resolve "
-        "the metal volumetrically with Material(sigma_e=...) or use Material.pec() for other cases."
+        f"Surface-impedance boundary: {reason} "
+        f"The runtime is generalized to this case in {phase}; until then resolve the "
+        "metal volumetrically with Material(sigma_e=...) or use Material.pec() for a "
+        "lossless conductor."
     )
 
 
-def _compile_sibc_descriptor(scene):
-    """Build the surface-impedance (Leontovich) descriptor for a ``LossyMetalMedium`` slab.
+def _geometries_coincide(first, second) -> bool:
+    """Whether two axis-aligned ``Box`` geometries occupy the same extent.
 
-    The good-conductor SIBC replaces the resolved skin-depth interior with the
-    first-order Leontovich relation ``E_t = Z_s(omega) * (n x H)`` on the metal
-    surface, where ``Z_s(omega) = (1 - i) * sqrt(omega * mu0 / (2 * sigma))``.
-    The runtime evaluates ``Z_s`` at the operating frequency (a narrowband
-    surface R-L), masks the metal interior, and updates the two tangential E
-    faces from the vacuum-side tangential H each step; see
-    ``fdtd/runtime/materials.py`` (``_configure_sibc``) and
-    ``fdtd/runtime/stepping.py`` (``apply_sibc_surface``).
-
-    v1 is scoped to normal incidence on an axis-aligned planar face: a single
-    metal slab that spans the full transverse cross-section and sits flush
-    against one domain boundary, so exactly one face is illuminated. Returns
-    ``None`` when the scene holds no lossy-metal structure. Non-planar, oblique,
-    laterally finite, or mid-domain slabs raise via ``_reject_sibc`` because the
-    scalar normal-incidence ``Z_s`` does not model their tangential impedance or
-    edge diffraction.
+    A Phase 0 skeleton for surface-ownership overlap detection: it recognizes only the
+    unambiguous case of two boxes sharing a position and size. A PEC or 2D sheet that
+    partially overlaps the metal's illuminated face (different extent, same interface
+    plane) is NOT detected here and passes silently; per-face conformal / partial-overlap
+    ownership resolution is deferred to the Phase 1 surface layout.
     """
-    structures = _sibc_structures(scene)
-    if not structures:
-        return None
-    if len(structures) > 1:
-        _reject_sibc(
-            "supports a single metal slab per scene; multiple lossy-metal surfaces would couple at "
-            "their mutual edges."
+    if not isinstance(first, Box) or not isinstance(second, Box):
+        return False
+    first_center = tuple(float(value) for value in first.position)
+    second_center = tuple(float(value) for value in second.position)
+    first_size = tuple(float(value) for value in first.size)
+    second_size = tuple(float(value) for value in second.size)
+    # Scale the coincidence tolerance to the geometry's own extents (sizes and
+    # positions) rather than clamping at a 1-metre absolute floor: a 1e-9-metre floor
+    # is ~1e-3 relative for micron-scale photonics, which would falsely merge two
+    # genuinely distinct sub-nanometre-offset boxes. Falling back to 1.0 only for the
+    # fully degenerate all-zero geometry keeps the tolerance well defined.
+    extent = max(
+        max(first_size),
+        max(second_size),
+        max(abs(value) for value in first_center + second_center),
+    )
+    scale = extent if extent > 0.0 else 1.0
+    tolerance = 1.0e-9 * scale
+    return all(
+        abs(first_center[axis] - second_center[axis]) <= tolerance
+        and abs(first_size[axis] - second_size[axis]) <= tolerance
+        for axis in range(3)
+    )
+
+
+def _reject_overlapping_surface_ownership(scene, surface_structures):
+    """Fail closed when a surface impedance and a PEC / 2D sheet claim one interface.
+
+    The tangential-E write on a shared interface has exactly one physical owner; a PEC
+    (E_t = 0) and a surface impedance (E_t = Z_s (n x H)) on the same face are two
+    contradictory owners of the same degree of freedom.
+    """
+    others = (*pec_structures(scene), *_sheet_structures(scene))
+    if not others:
+        return
+    for surface in surface_structures:
+        surface_geometry = getattr(surface, "geometry", None)
+        for other in others:
+            if _geometries_coincide(surface_geometry, getattr(other, "geometry", None)):
+                _reject_surface_impedance(
+                    "the same interface is claimed by both a surface impedance and a PEC "
+                    "or 2D sheet, so the tangential-E write on that interface has two "
+                    "contradictory owners.",
+                    phase="Phase 1",
+                )
+
+
+@dataclass(frozen=True)
+class CompiledSurfaceMetal:
+    """One compiled axis-aligned metal volume carrying a surface-impedance boundary.
+
+    ``structure_index`` is the global scene structure index. Metals are enumerated in
+    ascending ``structure_index`` order, so a face's ``metal_index`` (the final key of
+    :attr:`CompiledSurfaceFace.owner_rank`) realizes the deterministic owner tie-break
+    for edges shared by two faces: the minimum-structure-index owner wins, matching the
+    plan-07 minimum-global-edge owner discipline and the reference oracle's
+    ``assemble_surface_dissipation``. ``cell_slices`` is the box's lower-inclusive /
+    upper-exclusive node window per axis (the metal interior masked to a
+    good-conductor termination). ``touches_lower`` / ``touches_upper`` flag whether the
+    box is flush against the physical domain boundary on each axis-side (a flush face is
+    a half-space against the PML, never an illuminated surface). ``material`` is the
+    public surface material; ``conductivity`` is the good-conductor bulk conductivity
+    for the narrowband order-0 path, or ``None`` for a generic rational model.
+    """
+
+    structure_index: int
+    cell_slices: tuple[slice, slice, slice]
+    touches_lower: tuple[bool, bool, bool]
+    touches_upper: tuple[bool, bool, bool]
+    material: object
+    conductivity: float | None
+    # Staircased (voxelized) metals carry a boolean node-occupancy mask instead of a
+    # rectangular ``cell_slices`` window: the runtime zeroes the E-update coefficients on
+    # every edge the occupancy fills (node->edge fill >= 0.5), so an arbitrary voxelized
+    # conductor (a curved cylinder/sphere) terminates as a good conductor. ``None`` for an
+    # axis-aligned Box metal (which uses the analytic ``cell_slices`` interior mask).
+    interior_node_mask: object = None
+
+
+@dataclass(frozen=True)
+class CompiledSurfaceFace:
+    """One axis-aligned exposed metal face (a tangential surface-impedance plane).
+
+    ``metal_index`` indexes into :attr:`CompiledSurfaceImpedanceLayout.metals`.
+    ``axis`` is the outward-normal axis; ``metal_side`` is ``"high"`` when the metal
+    fills the node indices at or above ``surface_node`` (outward normal ``-axis``) and
+    ``"low"`` when it fills below (outward normal ``+axis``). ``surface_node`` is the
+    node plane where the tangential E is written and ``magnetic_index`` the
+    vacuum-side tangential H plane one cell out. ``transverse_slices`` is the face's
+    node window in the two non-normal axes (``(b_slice, c_slice)`` with
+    ``b = (axis + 1) % 3``, ``c = (axis + 2) % 3``); ``full_plane`` is true when it
+    spans the whole transverse cross-section (the fused-kernel fast path). ``area`` is
+    the face's physical area in m^2 (the per-face dual-area sum).
+    """
+
+    metal_index: int
+    axis: int
+    metal_side: str
+    surface_node: int
+    magnetic_index: int
+    transverse_slices: tuple[slice, slice]
+    full_plane: bool
+    area: float
+    # Staircased faces carry a boolean node-plane mask over the ``(b, c)`` transverse
+    # dimensions (``b = (axis + 1) % 3``, ``c = (axis + 2) % 3``) selecting exactly the
+    # exposed voxel faces at ``surface_node``; the runtime reduces it to each tangential
+    # E component's edge grid and writes the Leontovich value only there. ``None`` for an
+    # axis-aligned Box face (which owns a rectangular ``transverse_slices`` window).
+    transverse_mask: object = None
+
+    @property
+    def owner_rank(self) -> tuple[int, int, int, int, int]:
+        """Deterministic total order for shared-edge ownership (lower wins).
+
+        ``metal_index`` is the final tie-break so two coincident same-material faces
+        from distinct abutting metals never tie: because ``metal_index`` is assigned in
+        ascending scene-structure order and ``faces`` is sorted descending (the minimum
+        owner sorts last and last-writer-wins), the minimum-structure-index metal owns a
+        shared edge, matching the plan-07 minimum-global-edge owner discipline instead of
+        relying on enumeration order.
+        """
+        b = (self.axis + 1) % 3
+        return (
+            self.axis,
+            self.surface_node,
+            b,
+            int(self.transverse_slices[0].start),
+            self.metal_index,
         )
-    structure = structures[0]
-    material = _structure_material(structure)
-    geometry = structure.geometry
+
+
+@dataclass(frozen=True)
+class CompiledSurfaceImpedanceLayout:
+    """Axis-aligned exposed-face layout for the surface-impedance boundary.
+
+    Replaces the single-plane v1 SIBC descriptor: it enumerates every illuminated
+    axis-aligned face of every surface-impedance metal in the scene (finite blocks,
+    mid-domain double-sided plates, multiple metals, and multiple orientations), with a
+    deterministic ownership order for edges shared at box corners and overlap rejection
+    for contradictory owners on one interface. ``faces`` is sorted by
+    :attr:`CompiledSurfaceFace.owner_rank`; ``total_area`` is the summed face area.
+    """
+
+    metals: tuple[CompiledSurfaceMetal, ...]
+    faces: tuple[CompiledSurfaceFace, ...]
+    total_area: float
+
+    def __bool__(self) -> bool:
+        return bool(self.faces)
+
+
+def _surface_metal_conductivity(material) -> float | None:
+    """Good-conductor bulk conductivity for the narrowband order-0 path, else ``None``.
+
+    A ``LossyMetalMedium`` without a broadband ``frequency_range`` is realized as an
+    order-0 (pure-resistance) surface evaluated at the operating frequency; a generic
+    ``SurfaceImpedanceMedium`` (or a future broadband metal) uses the rational ADE and
+    reports ``None`` here.
+    """
+    if bool(getattr(material, "is_lossy_metal", False)) and getattr(
+        material, "frequency_range", None
+    ) is None:
+        return float(material.conductivity)
+    return None
+
+
+def _surface_impedance_structures(scene):
+    """Enabled structures carrying any surface-impedance material (metal or rational)."""
+    structures = []
+    for index, structure in enumerate(scene.structures):
+        if not getattr(structure, "enabled", True):
+            continue
+        material = _structure_material(structure)
+        if material is None:
+            continue
+        if bool(getattr(material, "is_lossy_metal", False)) or bool(
+            getattr(material, "is_surface_impedance", False)
+        ):
+            structures.append((index, structure))
+    return structures
+
+
+def _axis_span(nodes, axis_slice: slice) -> float:
+    """Physical extent (m) spanned by a cell-node window, clamped to the node grid.
+
+    A box larger than the domain yields a slice stop equal to the node count, so the
+    span is clamped to the physical grid ends (the face never extends past the domain).
+    """
+    last = len(nodes) - 1
+    start = max(0, min(int(axis_slice.start), last))
+    stop = max(0, min(int(axis_slice.stop), last))
+    return float(nodes[stop] - nodes[start])
+
+
+def _axis_face_area(scene, b_axis: int, b_slice: slice, c_axis: int, c_slice: slice) -> float:
+    """Physical area (m^2) of an axis-aligned face over its transverse node window."""
+    nodes = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)
+    return _axis_span(nodes[b_axis], b_slice) * _axis_span(nodes[c_axis], c_slice)
+
+
+def _transverse_full_plane(scene, b_axis: int, b_slice: slice, c_axis: int, c_slice: slice) -> bool:
+    """Whether a face spans the entire transverse cross-section (fused-kernel path).
+
+    A metal that covers every transverse cell owns the whole surface E plane, so the
+    fused whole-plane kernel is exact. Node counts are ``scene.N*``; the cell count is
+    one fewer, and a box exactly filling the domain (or overflowing it) reaches it.
+    """
+    node_counts = (scene.Nx, scene.Ny, scene.Nz)
+    b_cells = node_counts[b_axis] - 1
+    c_cells = node_counts[c_axis] - 1
+    return (
+        b_slice.start == 0
+        and b_slice.stop >= b_cells
+        and c_slice.start == 0
+        and c_slice.stop >= c_cells
+    )
+
+
+def _is_axis_aligned_box(geometry) -> bool:
+    """Whether a geometry is an unrotated (axis-aligned) Box."""
     if not isinstance(geometry, Box):
-        _reject_sibc(
-            f"requires an axis-aligned Box slab; a {type(geometry).__name__} surface is curved or "
-            "non-planar."
-        )
+        return False
     rotation = getattr(geometry, "rotation", None)
-    if rotation is not None:
-        quaternion = np.asarray(rotation.detach().cpu(), dtype=np.float64)
-        if not np.allclose(np.abs(quaternion), (1.0, 0.0, 0.0, 0.0), atol=1.0e-6):
-            _reject_sibc(
-                "requires an axis-aligned (unrotated) slab; an oblique surface needs the "
-                "angle-dependent tensor impedance."
-            )
-    if scene.boundary.uses_kind("bloch"):
-        _reject_sibc(
-            "uses a real-valued surface update; a Bloch-periodic run carries complex phase-shifted "
-            "fields for which the real Leontovich surface update is undefined."
+    if rotation is None:
+        return True
+    quaternion = np.asarray(rotation.detach().cpu(), dtype=np.float64)
+    return bool(np.allclose(np.abs(quaternion), (1.0, 0.0, 0.0, 0.0), atol=1.0e-6))
+
+
+def _select_node_plane(occupancy, axis: int, index: int):
+    """The 2D node plane of ``occupancy`` at ``index`` along ``axis`` (ascending order)."""
+    return occupancy[_axis_index_tuple(3, axis, index)]
+
+
+def _axis_index_tuple(ndim, axis, index_or_slice):
+    selector = [slice(None)] * ndim
+    selector[axis] = index_or_slice
+    return tuple(selector)
+
+
+def _mean_node_spacing(nodes) -> float:
+    array = np.asarray(nodes, dtype=np.float64)
+    if array.size < 2:
+        return 0.0
+    return float((array[-1] - array[0]) / (array.size - 1))
+
+
+def _compile_voxel_surface_metal(
+    scene, structure_index, geometry, material, metal_index, physical_bounds, tolerances
+):
+    """Staircase a voxelized (possibly curved) good-conductor into exposed faces.
+
+    A node belongs to the metal when its center is inside the geometry
+    (``signed_distance <= 0``): the staircase approximation of an arbitrary conductor.
+    Every axis-aligned voxel face on the metal/vacuum boundary is an exposed
+    surface-impedance face; faces of a given orientation at one node plane are grouped
+    into a boolean transverse node mask. A voxel face is illuminated only when its
+    vacuum-side node lies inside the physical domain (a face backing onto the PML is a
+    half-space, never illuminated), matching the Box path's flush-face exclusion. Only the
+    narrowband good-conductor (order-0 resistance) surface is wired for the staircase; the
+    per-edge rational ADE stays Box-only.
+    """
+    conductivity = _surface_metal_conductivity(material)
+    if conductivity is None:
+        _reject_surface_impedance(
+            "requires a narrowband good-conductor metal for a staircased (voxelized) "
+            "curved surface; the per-edge rational surface ADE is wired only for "
+            "axis-aligned Box faces.",
+            phase="Phase 2",
         )
-    slices = _box_axis_slices(scene, geometry)
-    if slices is None:
-        _reject_sibc("requires the metal slab to lie inside the grid; the descriptor covers no cells.")
-    geometry_center = tuple(float(value) for value in geometry.position)
-    geometry_size = tuple(float(value) for value in geometry.size)
-    geometry_lower = tuple(
-        geometry_center[axis] - 0.5 * geometry_size[axis] for axis in range(3)
+    occupancy = geometry.signed_distance(scene.X, scene.Y, scene.Z) <= 0.0
+    if not bool(occupancy.any().item()):
+        _reject_surface_impedance(
+            "requires the metal to lie inside the grid; the surface covers no cells.",
+            phase="Phase 1",
+        )
+    occ = occupancy.detach().to("cpu")
+    nodes = (scene.x_nodes64, scene.y_nodes64, scene.z_nodes64)
+    physical_node = []
+    for axis in range(3):
+        coords = np.asarray(nodes[axis], dtype=np.float64)
+        lo = float(physical_bounds[axis][0]) - tolerances[axis]
+        hi = float(physical_bounds[axis][1]) + tolerances[axis]
+        physical_node.append((coords >= lo) & (coords <= hi))
+
+    faces: list[CompiledSurfaceFace] = []
+    for axis in range(3):
+        b = (axis + 1) % 3
+        c = (axis + 2) % 3
+        naxes = tuple(a for a in range(3) if a != axis)
+        cell_area = _mean_node_spacing(nodes[naxes[0]]) * _mean_node_spacing(nodes[naxes[1]])
+        n_along = occ.shape[axis]
+        # Half-cell surface-node placement convention (documented asymmetry, not a bug).
+        # The physical metal/vacuum boundary between nodes p-1 and p is a half-cell wide
+        # region on the staggered Yee grid; the tangential-E surface node is written at
+        # node index p in BOTH orientations, but that index sits on OPPOSITE sides of the
+        # boundary depending on the outward normal:
+        #   * -axis-normal (low-side) face: metal at p, vacuum at p-1 -> E written at the
+        #     first metal node p (surface_node=p, paired H at p-1).
+        #   * +axis-normal (high-side) face: metal at p-1, vacuum at p -> E written at the
+        #     first vacuum node p (surface_node=p, paired H at p).
+        # So a face whose normal points toward +axis places the effective surface a half
+        # cell farther into the vacuum than a -axis-facing face at the same physical
+        # interface. On a flat axis-aligned plate this is exact (Yee symmetry); on a
+        # staircased CURVED conductor the two step orientations are offset by up to one
+        # cell relative to the true surface, which is part of the grid- and
+        # R/delta-independent ~18% absorbed-power under-prediction documented in
+        # docs/assessments/g4-sibc-oblique-acceptance-2026-07-21.md (a first-order
+        # boundary-on-a-staircased-curve systematic, not an implementation error; a
+        # curvature-corrected surface impedance is the future refinement).
+        for p in range(1, n_along):
+            plane_metal = _select_node_plane(occ, axis, p)
+            plane_vacuum = _select_node_plane(occ, axis, p - 1)
+            # Low-side face: node p is metal, node p-1 is vacuum (outward normal -axis).
+            if physical_node[axis][p - 1]:
+                mask = plane_metal & (~plane_vacuum)
+                if bool(mask.any().item()):
+                    faces.append(
+                        _make_voxel_face(
+                            metal_index, axis, "high", p, p - 1, mask, naxes, cell_area
+                        )
+                    )
+            # High-side face: node p-1 is metal, node p is vacuum (outward normal +axis).
+            # The paired vacuum-side H sits at index p on the axis-reduced H grid, so the
+            # face is only valid when that index exists (p <= n_along - 2); the boundary
+            # node is otherwise a PML node and is excluded by the physical-node test.
+            if p <= n_along - 2 and physical_node[axis][p]:
+                mask = plane_vacuum & (~plane_metal)
+                if bool(mask.any().item()):
+                    faces.append(
+                        _make_voxel_face(
+                            metal_index, axis, "low", p, p, mask, naxes, cell_area
+                        )
+                    )
+    if not faces:
+        _reject_surface_impedance(
+            "requires a vacuum region in front of the metal; the voxelized conductor "
+            "exposes no illuminated face inside the physical domain.",
+            phase="Phase 1",
+        )
+    metal = CompiledSurfaceMetal(
+        structure_index=int(structure_index),
+        cell_slices=tuple(slice(0, occ.shape[axis]) for axis in range(3)),
+        touches_lower=(False, False, False),
+        touches_upper=(False, False, False),
+        material=material,
+        conductivity=conductivity,
+        interior_node_mask=occupancy.to(torch.float32),
     )
-    geometry_upper = tuple(
-        geometry_center[axis] + 0.5 * geometry_size[axis] for axis in range(3)
+    return metal, faces
+
+
+def _make_voxel_face(metal_index, axis, side, surface_node, magnetic_index, mask, naxes, cell_area):
+    """Build one staircased face from a boolean node-plane mask in ``naxes`` order.
+
+    ``mask`` is indexed by the two non-normal axes in ascending order (``naxes``), the same
+    layout as a field tensor's transverse plane, so the runtime reduces it to each
+    tangential E component's edge grid without any axis reordering. ``transverse_slices`` is
+    a full-plane placeholder used only by the deterministic owner ordering; the boolean
+    ``transverse_mask`` is the true footprint.
+    """
+    mask = mask.contiguous()
+    nb, nc = int(mask.shape[0]), int(mask.shape[1])
+    area = float(mask.sum().item()) * float(cell_area)
+    return CompiledSurfaceFace(
+        metal_index=metal_index,
+        axis=axis,
+        metal_side=side,
+        surface_node=int(surface_node),
+        magnetic_index=int(magnetic_index),
+        transverse_slices=(slice(0, nb), slice(0, nc)),
+        full_plane=False,
+        area=area,
+        transverse_mask=mask,
     )
+
+
+def compile_surface_impedance_layout(scene):
+    """Extract every axis-aligned exposed surface-impedance face in the scene.
+
+    The surface-impedance boundary replaces the resolved skin-depth interior of a metal
+    with the first-order tangential relation ``E_t = Z_s(omega) * (n x H)`` on the
+    metal's illuminated faces. This walks every enabled surface-impedance metal, rejects
+    the cases a later phase owns (rotated/curved geometry, Bloch runs) through the single
+    ``_reject_surface_impedance`` funnel, masks each metal interior to a good-conductor
+    termination, and enumerates the exposed faces: a face on the box's low/high side of
+    an axis is illuminated when the box does not touch the physical domain boundary on
+    that side (a flush face backs onto the PML and is not illuminated). Finite blocks,
+    mid-domain double-sided plates, multiple metals, and multiple orientations are all
+    supported; the runtime consumes the returned :class:`CompiledSurfaceImpedanceLayout`
+    (``fdtd/runtime/materials.py`` and ``fdtd/runtime/stepping.py``). Returns an empty
+    layout when the scene holds no surface-impedance structure.
+    """
+    indexed = _surface_impedance_structures(scene)
+    if not indexed:
+        return CompiledSurfaceImpedanceLayout(metals=(), faces=(), total_area=0.0)
+
+    surface_structures = [structure for _, structure in indexed]
+    _reject_overlapping_surface_ownership(scene, surface_structures)
+
     physical_bounds = scene.domain.bounds
     tolerances = tuple(
         1.0e-6 * max(float(upper) - float(lower), 1.0)
         for lower, upper in physical_bounds
     )
-    # Domain.bounds stays physical when PreparedScene appends PML nodes. SIBC
-    # coverage is a physical geometry contract, so a slab ending at that
-    # boundary is a half-space even though the external PML grid continues.
-    covers_full = tuple(
-        geometry_lower[axis] <= float(physical_bounds[axis][0]) + tolerances[axis]
-        and geometry_upper[axis] >= float(physical_bounds[axis][1]) - tolerances[axis]
-        for axis in range(3)
-    )
-    bounded_axes = [axis for axis in range(3) if not covers_full[axis]]
-    if len(bounded_axes) != 1:
-        _reject_sibc(
-            "requires a metal slab that spans the full transverse cross-section (bounded along "
-            "exactly one axis); a laterally finite block exposes edge faces."
+
+    metals: list[CompiledSurfaceMetal] = []
+    faces: list[CompiledSurfaceFace] = []
+    for structure_index, structure in indexed:
+        material = _structure_material(structure)
+        geometry = structure.geometry
+        if scene.boundary.uses_kind("bloch"):
+            _reject_surface_impedance(
+                "uses a real-valued surface update; a Bloch-periodic run carries complex "
+                "phase-shifted fields for which the real surface update is undefined.",
+                phase="Phase 3",
+            )
+        if not isinstance(geometry, Box):
+            # Any non-Box conductor (a curved cylinder/sphere) is staircased: the
+            # occupancy grid supplies the axis-aligned exposed faces directly. True
+            # oblique/conformal (non-staircase) SIBC remains the deferred gap.
+            metal, voxel_faces = _compile_voxel_surface_metal(
+                scene, structure_index, geometry, material, len(metals),
+                physical_bounds, tolerances,
+            )
+            metals.append(metal)
+            faces.extend(voxel_faces)
+            continue
+        if not _is_axis_aligned_box(geometry):
+            _reject_surface_impedance(
+                "requires an axis-aligned (unrotated) surface; a rotated Box presents an "
+                "oblique face whose local normal is not grid-aligned, which is the deferred "
+                "conformal/oblique case (staircasing a rotated Box is not wired).",
+                phase="Phase 2",
+            )
+        slices = _box_axis_slices(scene, geometry)
+        if slices is None:
+            _reject_surface_impedance(
+                "requires the metal to lie inside the grid; the surface covers no cells.",
+                phase="Phase 1",
+            )
+        center = tuple(float(value) for value in geometry.position)
+        size = tuple(float(value) for value in geometry.size)
+        lower = tuple(center[axis] - 0.5 * size[axis] for axis in range(3))
+        upper = tuple(center[axis] + 0.5 * size[axis] for axis in range(3))
+        # Domain.bounds stays physical when PreparedScene appends PML nodes. Surface
+        # coverage is a physical geometry contract, so a box face flush against the
+        # physical boundary backs onto the PML half-space and is never illuminated.
+        touches_lower = tuple(
+            lower[axis] <= float(physical_bounds[axis][0]) + tolerances[axis]
+            for axis in range(3)
         )
-    axis = bounded_axes[0]
-    axis_slice = slices[axis]
-    touches_low = (
-        geometry_lower[axis]
-        <= float(physical_bounds[axis][0]) + tolerances[axis]
-    )
-    touches_high = (
-        geometry_upper[axis]
-        >= float(physical_bounds[axis][1]) - tolerances[axis]
-    )
-    if touches_low and touches_high:
-        _reject_sibc(
-            "requires a vacuum region in front of the metal; the slab fills the domain along its "
-            "normal axis and exposes no illuminated face."
+        touches_upper = tuple(
+            upper[axis] >= float(physical_bounds[axis][1]) - tolerances[axis]
+            for axis in range(3)
         )
-    if not touches_low and not touches_high:
-        _reject_sibc(
-            "supports a metal slab flush against one domain boundary (a single illuminated face); a "
-            "mid-domain plate exposes two faces."
+        fills_every_axis = all(
+            touches_lower[axis] and touches_upper[axis] for axis in range(3)
         )
-    if touches_high:
-        metal_side = "high"
-        surface_node = int(axis_slice.start)
-    else:
-        metal_side = "low"
-        # The upper geometry face is the first node after the lower-inclusive,
-        # upper-exclusive metal-cell window.
-        surface_node = int(axis_slice.stop)
-    return {
-        "axis": axis,
-        "metal_side": metal_side,
-        "surface_node": int(surface_node),
-        "conductivity": float(material.conductivity),
-    }
+        if fills_every_axis:
+            _reject_surface_impedance(
+                "requires a vacuum region in front of the metal; the box fills the domain "
+                "on every axis and exposes no illuminated face.",
+                phase="Phase 1",
+            )
+        conductivity = _surface_metal_conductivity(material)
+        if conductivity is None:
+            impedance = getattr(material, "impedance", None)
+            if impedance is not None and int(getattr(impedance, "port_count", 1)) != 1:
+                _reject_surface_impedance(
+                    "carries a tangential 2x2 surface response; the per-edge ADE steps a "
+                    "scalar impedance, and the cross-polarized 2x2 tangential coupling is "
+                    "a distinct local update.",
+                    phase="Phase 2",
+                )
+        metal_index = len(metals)
+        metals.append(
+            CompiledSurfaceMetal(
+                structure_index=int(structure_index),
+                cell_slices=slices,
+                touches_lower=touches_lower,
+                touches_upper=touches_upper,
+                material=material,
+                conductivity=conductivity,
+            )
+        )
+        for axis in range(3):
+            b = (axis + 1) % 3
+            c = (axis + 2) % 3
+            b_slice = slices[b]
+            c_slice = slices[c]
+            area = _axis_face_area(scene, b, b_slice, c, c_slice)
+            full_plane = _transverse_full_plane(scene, b, b_slice, c, c_slice)
+            # Low face (metal fills at/above surface_node): illuminated iff the box does
+            # not sit flush against the physical low boundary on this axis.
+            if not touches_lower[axis]:
+                start = int(slices[axis].start)
+                faces.append(
+                    CompiledSurfaceFace(
+                        metal_index=metal_index,
+                        axis=axis,
+                        metal_side="high",
+                        surface_node=start,
+                        magnetic_index=start - 1,
+                        transverse_slices=(b_slice, c_slice),
+                        full_plane=full_plane,
+                        area=area,
+                    )
+                )
+            # High face (metal fills below surface_node): illuminated iff not flush
+            # against the physical high boundary on this axis.
+            if not touches_upper[axis]:
+                stop = int(slices[axis].stop)
+                faces.append(
+                    CompiledSurfaceFace(
+                        metal_index=metal_index,
+                        axis=axis,
+                        metal_side="low",
+                        surface_node=stop,
+                        magnetic_index=stop,
+                        transverse_slices=(b_slice, c_slice),
+                        full_plane=full_plane,
+                        area=area,
+                    )
+                )
+
+    _reject_conflicting_surface_faces(metals, faces)
+    # Sort by deterministic owner rank so a shared corner edge has a single owner: the
+    # minimum-rank face writes last (last-write-wins), making its Leontovich value the
+    # deterministic owner of the shared tangential edge.
+    faces.sort(key=lambda face: face.owner_rank, reverse=True)
+    total_area = float(sum(face.area for face in faces))
+    return CompiledSurfaceImpedanceLayout(
+        metals=tuple(metals), faces=tuple(faces), total_area=total_area
+    )
+
+
+def _reject_conflicting_surface_faces(metals, faces):
+    """Fail closed when two metals with different materials claim one interface plane.
+
+    Two coincident faces (same axis and surface node, overlapping transverse window)
+    from different metals with different surface materials are two contradictory owners
+    of the same tangential-E degree of freedom. Identical materials on a shared corner
+    edge are resolved by the deterministic owner rank, not rejected.
+    """
+    for i in range(len(faces)):
+        for j in range(i + 1, len(faces)):
+            first, second = faces[i], faces[j]
+            if first.axis != second.axis or first.surface_node != second.surface_node:
+                continue
+            if not _faces_transverse_overlap(first, second):
+                continue
+            mat_first = metals[first.metal_index].material
+            mat_second = metals[second.metal_index].material
+            if mat_first is not mat_second:
+                _reject_surface_impedance(
+                    "the same interface plane is claimed by two surface-impedance "
+                    "metals with different materials, so its tangential-E write has "
+                    "two contradictory owners.",
+                    phase="Phase 2",
+                )
+
+
+def _faces_transverse_overlap(first, second) -> bool:
+    """Whether two coincident-plane faces share any transverse footprint.
+
+    Box faces overlap by rectangular slice intersection; staircased faces by boolean
+    mask intersection (both masks are in the same ascending non-normal-axis node order).
+    A mixed Box/staircase pair uses the mask restricted to the Box's slice window, which is
+    conservative (it never misses a genuine overlap) so the fail-closed owner guard holds.
+    """
+    mask_first = getattr(first, "transverse_mask", None)
+    mask_second = getattr(second, "transverse_mask", None)
+    if mask_first is not None and mask_second is not None:
+        return bool((mask_first & mask_second).any().item())
+    if mask_first is None and mask_second is None:
+        b_first, c_first = first.transverse_slices
+        b_second, c_second = second.transverse_slices
+        return (
+            b_first.start < b_second.stop
+            and b_second.start < b_first.stop
+            and c_first.start < c_second.stop
+            and c_second.start < c_first.stop
+        )
+    mask_face, slice_face = (first, second) if mask_first is not None else (second, first)
+    b_slice, c_slice = slice_face.transverse_slices
+    return bool(mask_face.transverse_mask[b_slice, c_slice].any().item())
 
 
 def compile_material_model(
@@ -1506,7 +2338,7 @@ def compile_material_model(
     mu_background=1.0,
     subpixel=None,
 ):
-    sibc = _compile_sibc_descriptor(scene)
+    surface_layout = compile_surface_impedance_layout(scene)
     samples, averaging, pec_mode = _resolve_subpixel(subpixel)
     layout = _build_dispersive_layout(scene)
     region_densities = tuple(
@@ -1534,7 +2366,19 @@ def compile_material_model(
         model = _apply_sheet_structures(scene, model)
         model["pec_occupancy"] = _pec_occupancy(scene)
         model["pec_mode"] = pec_mode
-        model["sibc"] = sibc
+        model["pec_edge_fill"] = _pec_edge_fill(scene) if pec_mode == "conformal" else None
+        model["surface_impedance"] = surface_layout
+        model["edge_components"] = compile_edge_material_components(
+            scene,
+            model,
+            surface_layout,
+            eps_background=eps_background,
+            mu_background=mu_background,
+            samples=samples,
+            averaging=averaging,
+            region_densities=region_densities,
+            geometry_periodic_shifts=geometry_periodic_shifts,
+        )
         return model
 
     collect_inverse = averaging == "polarized"
@@ -1662,7 +2506,19 @@ def compile_material_model(
     model = _apply_sheet_structures(scene, model)
     model["pec_occupancy"] = _pec_occupancy(scene)
     model["pec_mode"] = pec_mode
-    model["sibc"] = sibc
+    model["pec_edge_fill"] = _pec_edge_fill(scene) if pec_mode == "conformal" else None
+    model["surface_impedance"] = surface_layout
+    model["edge_components"] = compile_edge_material_components(
+        scene,
+        model,
+        surface_layout,
+        eps_background=eps_background,
+        mu_background=mu_background,
+        samples=samples,
+        averaging=averaging,
+        region_densities=region_densities,
+        geometry_periodic_shifts=geometry_periodic_shifts,
+    )
     return model
 
 

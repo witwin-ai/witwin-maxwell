@@ -6,6 +6,95 @@ from dataclasses import dataclass
 import torch
 
 
+def _power_normalized_antenna_metrics(
+    *,
+    e_theta: torch.Tensor,
+    e_phi: torch.Tensor,
+    observation_radius: torch.Tensor,
+    wave_impedance: torch.Tensor,
+    solid_angle_weights: torch.Tensor,
+    incident_power: torch.Tensor,
+    accepted_power: torch.Tensor,
+    radiated_power: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    """Shared torch kernel for absolute-power antenna metrics.
+
+    Field tensors use ``[..., F, T, P]`` and power tensors use ``[..., F]``.
+    Undefined directivity/gain quantities carry explicit validity masks and NaNs;
+    realized gain and EIRP remain defined for dark or fully reflected beams when
+    incident power is positive.
+    """
+
+    intensity = (
+        observation_radius.square()
+        * (torch.abs(e_theta).square() + torch.abs(e_phi).square())
+        / (2.0 * wave_impedance)
+    )
+    angular_p_rad = torch.sum(intensity * solid_angle_weights, dim=(-2, -1))
+    p_rad = angular_p_rad if radiated_power is None else radiated_power
+    if p_rad.shape != incident_power.shape:
+        raise ValueError("radiated_power must have the same shape as incident_power.")
+    if p_rad.device != incident_power.device or p_rad.dtype != incident_power.dtype:
+        raise ValueError("radiated_power must share incident_power dtype and device.")
+    radiation_valid = torch.isfinite(p_rad) & (p_rad > 0.0)
+    accepted_valid = torch.isfinite(accepted_power) & (accepted_power > 0.0)
+    incident_valid = torch.isfinite(incident_power) & (incident_power > 0.0)
+    safe_p_rad = torch.where(radiation_valid, p_rad, torch.ones_like(p_rad))
+    safe_accepted = torch.where(
+        accepted_valid, accepted_power, torch.ones_like(accepted_power)
+    )
+    safe_incident = torch.where(
+        incident_valid, incident_power, torch.ones_like(incident_power)
+    )
+    four_pi_intensity = 4.0 * math.pi * intensity
+    real_nan = torch.full_like(intensity, float("nan"))
+    spectral_nan = torch.full_like(p_rad, float("nan"))
+    directivity = torch.where(
+        radiation_valid[..., None, None],
+        four_pi_intensity / safe_p_rad[..., None, None],
+        real_nan,
+    )
+    gain = torch.where(
+        accepted_valid[..., None, None],
+        four_pi_intensity / safe_accepted[..., None, None],
+        real_nan,
+    )
+    realized_gain = torch.where(
+        incident_valid[..., None, None],
+        four_pi_intensity / safe_incident[..., None, None],
+        real_nan,
+    )
+    radiation_efficiency = torch.where(
+        accepted_valid,
+        p_rad / safe_accepted,
+        spectral_nan,
+    )
+    mismatch_efficiency = torch.where(
+        incident_valid,
+        accepted_power / safe_incident,
+        spectral_nan,
+    )
+    system_efficiency = torch.where(
+        incident_valid,
+        p_rad / safe_incident,
+        spectral_nan,
+    )
+    return {
+        "radiation_intensity": intensity,
+        "p_rad": p_rad,
+        "directivity": directivity,
+        "gain": gain,
+        "realized_gain": realized_gain,
+        "radiation_efficiency": radiation_efficiency,
+        "mismatch_efficiency": mismatch_efficiency,
+        "system_efficiency": system_efficiency,
+        "eirp": torch.amax(four_pi_intensity, dim=(-2, -1)),
+        "radiation_valid": radiation_valid,
+        "accepted_power_valid": accepted_valid,
+        "incident_power_valid": incident_valid,
+    }
+
+
 @dataclass(frozen=True)
 class Ludwig3:
     """Ludwig-3 co/cross-polarization basis.

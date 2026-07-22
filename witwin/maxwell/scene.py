@@ -8,8 +8,11 @@ import numpy as np
 import torch
 
 from witwin.core import Structure
+from .circuits import Circuit, CircuitNode
 from .lumped import Capacitor, Inductor, Resistor
+from .network import NetworkBlock
 from .ports import LumpedPort, ModePort, TerminalPort, WavePort, _resolve_terminal_port
+from .thin_wire import ThinWire
 from .compiler.materials import (
     compile_material_model,
     evaluate_material_components,
@@ -752,11 +755,16 @@ class Scene:
         boundary: BoundarySpec | None = None,
         *,
         structures=None,
+        thin_wires=None,
         sources=None,
         monitors=None,
         ports=None,
+        networks=(),
         lumped_elements=(),
+        circuits=(),
         material_regions=None,
+        electrostatic_terminals=None,
+        charge_densities=None,
         metadata=None,
         device="cuda",
         verbose=False,
@@ -768,6 +776,9 @@ class Scene:
         self.structures = list(structures or [])
         if any(not isinstance(structure, Structure) for structure in self.structures):
             raise TypeError("Maxwell Scene structures must be witwin.core.Structure instances.")
+        self._thin_wires = []
+        for wire in thin_wires or ():
+            self.add_thin_wire(wire)
         self.sources = list(sources or [])
         self.monitors = list(monitors or [])
         self.metadata = dict(metadata or {})
@@ -787,12 +798,24 @@ class Scene:
         self.subpixel = _coerce_subpixel(subpixel_samples)
         self.symmetry = _normalize_symmetry(symmetry)
         self.material_regions = list(material_regions or [])
+        self.electrostatic_terminals = []
+        for terminal in electrostatic_terminals or ():
+            self.add_electrostatic_terminal(terminal)
+        self.charge_densities = []
+        for charge_density in charge_densities or ():
+            self.add_charge_density(charge_density)
         self.ports = []
         for port in ports or ():
             self.add_port(port)
+        self.networks = []
+        for network in networks:
+            self.add_network(network)
         self.lumped_elements = []
         for element in lumped_elements:
             self.add_lumped_element(element)
+        self.circuits = []
+        for circuit in circuits:
+            self.add_circuit(circuit)
         self.lazy_meshgrid = bool(lazy_meshgrid)
 
     @property
@@ -891,6 +914,22 @@ class Scene:
         self.structures.append(structure)
         return self
 
+    @property
+    def thin_wires(self) -> tuple[ThinWire, ...]:
+        """Declared subgrid wires, kept separate from volume structures."""
+
+        return tuple(self._thin_wires)
+
+    def add_thin_wire(self, wire: ThinWire):
+        if not isinstance(wire, ThinWire):
+            raise TypeError("Maxwell Scene thin wires must be ThinWire instances.")
+        if any(existing.name == wire.name for existing in self._thin_wires):
+            raise ValueError(
+                f"Thin-wire name {wire.name!r} is already present in the scene."
+            )
+        self._thin_wires.append(wire)
+        return self
+
     def add_source(self, source):
         self.sources.append(source)
         return self
@@ -906,9 +945,9 @@ class Scene:
             )
         if any(existing.name == port.name for existing in self.ports):
             raise ValueError(f"Port name {port.name!r} is already present in the scene.")
-        if isinstance(port, TerminalPort):
+        if isinstance(port, TerminalPort) and port.wire_binding is None:
             port = _resolve_terminal_port(port, self.structures, self.domain.bounds)
-        if isinstance(port, LumpedPort):
+        if isinstance(port, LumpedPort) and port.wire_binding is None:
             for terminal_name, terminal in (
                 ("positive", port.positive),
                 ("negative", port.negative),
@@ -935,6 +974,11 @@ class Scene:
         if any(existing.name == element.name for existing in self.lumped_elements):
             raise ValueError(
                 f"Lumped element name {element.name!r} is already present in the scene."
+            )
+        if isinstance(element.positive, CircuitNode) or isinstance(element.negative, CircuitNode):
+            raise TypeError(
+                "Scene-local lumped elements require 3D coordinate terminals; "
+                "add circuit-node elements through Circuit.add(...)."
             )
 
         for terminal_name, terminal in (
@@ -965,10 +1009,67 @@ class Scene:
         self.lumped_elements.append(element)
         return self
 
+    def add_network(self, network: NetworkBlock):
+        """Attach a passive external network to existing terminal ports."""
+
+        if not isinstance(network, NetworkBlock):
+            raise TypeError("Maxwell Scene networks must be NetworkBlock instances.")
+        if any(existing.name == network.name for existing in self.networks):
+            raise ValueError(f"Network name {network.name!r} is already present in the scene.")
+        ports_by_name = {port.name: port for port in self.ports}
+        already_connected = {
+            port_name
+            for existing in self.networks
+            for port_name in existing.connected_port_names
+        }
+        for port_name in network.connected_port_names:
+            if port_name not in ports_by_name:
+                raise ValueError(
+                    f"Network {network.name!r} references unknown Scene port {port_name!r}."
+                )
+            port = ports_by_name[port_name]
+            if isinstance(port, WavePort):
+                raise ValueError(
+                    f"Network {network.name!r} cannot connect to WavePort {port_name!r}: "
+                    "an embedded state-space network couples through a scalar "
+                    "voltage/current terminal on a single lumped Yee edge "
+                    "(LumpedPort or resolved TerminalPort), but a WavePort is a "
+                    "modal port defined by a cross-sectional mode-overlap field "
+                    "pattern with no scalar time-domain terminal (V, I) contract. "
+                    "This is a missing design contract, not a bug; use a LumpedPort "
+                    "or TerminalPort terminal for embedded-network connections."
+                )
+            if not isinstance(port, (LumpedPort, TerminalPort)):
+                raise TypeError(
+                    f"Network {network.name!r} connections require LumpedPort or TerminalPort "
+                    f"targets; {port_name!r} is {type(port).__name__}."
+                )
+            if port_name in already_connected:
+                raise ValueError(f"Scene port {port_name!r} is already connected to another network.")
+        self.networks.append(network)
+        return self
+
     def compile_ports(self, *, device=None):
         """Compile declared port geometry through the solver preparation layer."""
 
         return prepare_scene(self).compile_ports(device=device)
+
+    def compile_thin_wires(self, *, device=None):
+        """Compile declared thin wires through the solver preparation layer."""
+
+        return prepare_scene(self).compile_thin_wires(device=device)
+
+    def compile_wire_monitors(self, *, device=None):
+        """Compile declared thin-wire monitor sampling through preparation."""
+
+        return prepare_scene(self).compile_wire_monitors(device=device)
+
+    def compile_array_monitors(self, **kwargs):
+        """Compile closed-surface sampling contracts for an array basis sweep."""
+
+        from .compiler.array import compile_array_monitors
+
+        return compile_array_monitors(self, **kwargs)
 
     def compile_waveports(self, *, device=None):
         """Compile RF wave-port cross sections without solving their modes."""
@@ -980,9 +1081,62 @@ class Scene:
 
         return prepare_scene(self).compile_lumped_elements(device=device)
 
+    def add_circuit(self, circuit: Circuit):
+        if not isinstance(circuit, Circuit):
+            raise TypeError("Maxwell Scene circuits must be Circuit instances.")
+        if any(existing.name.casefold() == circuit.name.casefold() for existing in self.circuits):
+            raise ValueError(f"Circuit name {circuit.name!r} is already present in the scene.")
+        self.circuits.append(circuit)
+        return self
+
+    def compile_circuits(self):
+        """Compile declared circuit topology through the preparation layer."""
+
+        return prepare_scene(self).compile_circuits()
+
+    def compile_networks(self, *, dt: float, device=None):
+        """Compile embedded networks for the FDTD preparation layer."""
+
+        return prepare_scene(self).compile_networks(dt=dt, device=device)
+
     def add_material_region(self, material_region: MaterialRegion):
         self.material_regions.append(material_region)
         return self
+
+    def add_electrostatic_terminal(self, terminal):
+        """Register an equipotential conductor for the electrostatic solver.
+
+        Terminals live in a solver-specific collection and never enter the RF
+        ``Scene.ports`` set, so the RF port compiler cannot reinterpret an
+        equipotential constraint as an impedance/power-wave port.
+        """
+        from .electrostatic.api import ElectrostaticTerminal
+
+        if not isinstance(terminal, ElectrostaticTerminal):
+            raise TypeError(
+                "Scene.add_electrostatic_terminal requires an ElectrostaticTerminal."
+            )
+        if any(existing.name == terminal.name for existing in self.electrostatic_terminals):
+            raise ValueError(
+                f"Electrostatic terminal name {terminal.name!r} is already present in the scene."
+            )
+        self.electrostatic_terminals.append(terminal)
+        return self
+
+    def add_charge_density(self, charge_density):
+        """Register a volumetric free-charge source for the electrostatic solver."""
+        from .electrostatic.api import ChargeDensity
+
+        if not isinstance(charge_density, ChargeDensity):
+            raise TypeError("Scene.add_charge_density requires a ChargeDensity.")
+        self.charge_densities.append(charge_density)
+        return self
+
+    def compile_electrostatics(self, boundary=None, *, dtype=torch.float64):
+        """Compile the electrostatic block (epsilon, free charge, terminal masks)."""
+        from .compiler.electrostatic import compile_electrostatics
+
+        return compile_electrostatics(self, boundary, dtype=dtype)
 
     def clone(self, **overrides):
         params = {
@@ -990,11 +1144,16 @@ class Scene:
             "grid": self.grid,
             "boundary": self.boundary,
             "structures": list(self.structures),
+            "thin_wires": list(self.thin_wires),
             "sources": list(self.sources),
             "monitors": list(self.monitors),
             "ports": list(self.ports),
+            "networks": list(self.networks),
             "lumped_elements": list(self.lumped_elements),
+            "circuits": list(self.circuits),
             "material_regions": list(self.material_regions),
+            "electrostatic_terminals": list(self.electrostatic_terminals),
+            "charge_densities": list(self.charge_densities),
             "metadata": dict(self.metadata),
             "device": self.device,
             "verbose": self.verbose,
@@ -1006,7 +1165,15 @@ class Scene:
         return Scene(**params)
 
     def resolved_sources(self):
-        resolved = list(self.sources)
+        resolved = []
+        for source in self.sources:
+            # Declarative sources that lower to a core source (e.g. an ESD
+            # terminal injection) expose ``resolve(scene)``; expand them here so
+            # downstream compilers only see core source primitives.
+            if hasattr(source, "resolve") and callable(getattr(source, "resolve")):
+                resolved.append(source.resolve(self))
+            else:
+                resolved.append(source)
         for port in self.ports:
             if isinstance(port, ModePort):
                 source = port.to_mode_source()
@@ -1124,11 +1291,16 @@ class PreparedScene(Scene):
             grid=scene.grid,
             boundary=scene.boundary,
             structures=list(scene.structures),
+            thin_wires=list(scene.thin_wires),
             sources=list(scene.sources),
             monitors=list(scene.monitors),
             ports=list(scene.ports),
+            networks=list(scene.networks),
             lumped_elements=list(scene.lumped_elements),
+            circuits=list(scene.circuits),
             material_regions=list(scene.material_regions),
+            electrostatic_terminals=list(scene.electrostatic_terminals),
+            charge_densities=list(scene.charge_densities),
             metadata=dict(scene.metadata),
             device=scene.device,
             verbose=scene.verbose,
@@ -1201,6 +1373,7 @@ class PreparedScene(Scene):
         self._yy = None
         self._zz = None
         self._material_model_cache = {}
+        self._gyromagnetic_layout_cache = {}
         self._permittivity_components = None
         self._permeability_components = None
         self._permittivity = None
@@ -1227,6 +1400,7 @@ class PreparedScene(Scene):
 
     def _invalidate_material_cache(self):
         self._material_model_cache = {}
+        self._gyromagnetic_layout_cache = {}
         self._permittivity_components = None
         self._permeability_components = None
         self._permittivity = None
@@ -1323,10 +1497,69 @@ class PreparedScene(Scene):
             self.release_meshgrid()
         return cached
 
+    def compile_mass_density(self):
+        """Compile the tissue mass model (rho_cell, occupancy, tissue_id, cell_volume).
+
+        Shares the EM material compiler's soft-occupancy provenance so the SAR mass
+        model and the loss model agree about tissue placement. Returns a
+        :class:`~witwin.maxwell.compiler.mass_density.CompiledMassDensity`.
+        """
+        from .compiler.mass_density import compile_mass_density
+
+        return compile_mass_density(self)
+
+    def compile_gyromagnetic_materials(self, *, dt=None, device=None):
+        """Compile every gyromagnetic ferrite structure into a layout SoA.
+
+        Returns a
+        :class:`~witwin.maxwell.compiler.gyromagnetic.CompiledGyromagneticLayout`
+        (active-cell indices, occupancy, per-cell bias/local basis, ADE state
+        matrices, and -- when ``dt`` is given -- the implicit-midpoint propagator).
+        Cached per ``(subpixel spec, device)``; the ``dt`` binding is applied on
+        top of the cached dt-independent layout so changing ``dt`` does not
+        re-rasterize.
+        """
+        from .compiler.gyromagnetic import compile_gyromagnetic_layout
+
+        target_device = self.device if device is None else device
+        key = (self.subpixel, str(torch.device(target_device)))
+        if self._has_dynamic_materials() or self._has_trainable_geometry():
+            layout = compile_gyromagnetic_layout(self, device=target_device)
+        else:
+            layout = self._gyromagnetic_layout_cache.get(key)
+            if layout is None:
+                layout = compile_gyromagnetic_layout(self, device=target_device)
+                self._gyromagnetic_layout_cache[key] = layout
+        if dt is not None:
+            layout = layout.with_timestep(dt)
+        return layout
+
     def compile_ports(self, *, device=None):
         from .compiler.ports import compile_ports
 
         return compile_ports(self, device=self.device if device is None else device)
+
+    def compile_thin_wires(self, *, device=None):
+        from .compiler.thin_wire import compile_thin_wires
+
+        return compile_thin_wires(
+            self,
+            device=self.device if device is None else device,
+        )
+
+    def compile_wire_monitors(self, *, device=None):
+        from .compiler.thin_wire import compile_wire_monitors
+
+        network = self.compile_thin_wires(device=device)
+        return compile_wire_monitors(
+            self,
+            network,
+        )
+
+    def compile_array_monitors(self, **kwargs):
+        from .compiler.array import compile_array_monitors
+
+        return compile_array_monitors(self, **kwargs)
 
     def compile_waveports(self, *, device=None):
         from .compiler.waveports import compile_waveports
@@ -1341,6 +1574,20 @@ class PreparedScene(Scene):
 
         return compile_lumped_elements(
             self,
+            device=self.device if device is None else device,
+        )
+
+    def compile_circuits(self):
+        from .compiler.circuits import compile_circuits
+
+        return compile_circuits(self)
+
+    def compile_networks(self, *, dt: float, device=None):
+        from .compiler.networks import compile_networks
+
+        return compile_networks(
+            self,
+            dt=dt,
             device=self.device if device is None else device,
         )
 

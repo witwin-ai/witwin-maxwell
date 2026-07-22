@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 
@@ -11,10 +13,6 @@ from ...compiler.materials import (
     material_model_has_nonlinearity,
 )
 from ..boundary import BOUNDARY_PERIODIC, has_complex_fields
-
-
-def _any_component_nonzero(components: dict[str, torch.Tensor]) -> bool:
-    return any(torch.any(components[axis] != 0).item() for axis in ("x", "y", "z"))
 
 
 def build_materials(solver, scene):
@@ -57,32 +55,72 @@ def build_materials(solver, scene):
     solver.material_eps_r = evaluate_material_permittivity(material_model, solver.source_frequency)
     solver.material_mu_r = evaluate_material_permeability(material_model, solver.source_frequency)
 
-    eps_x_node = eps_components["x"] * solver.eps0
-    eps_y_node = eps_components["y"] * solver.eps0
-    eps_z_node = eps_components["z"] * solver.eps0
-    mu_x_node = mu_components["x"] * solver.mu0
-    mu_y_node = mu_components["y"] * solver.mu0
-    mu_z_node = mu_components["z"] * solver.mu0
-
-    solver.eps_Ex = average_node_to_component(solver, eps_x_node, "Ex")
-    solver.eps_Ey = average_node_to_component(solver, eps_y_node, "Ey")
-    solver.eps_Ez = average_node_to_component(solver, eps_z_node, "Ez")
     sigma_e_components = material_model["sigma_e_components"]
-    solver.sigma_e_Ex = average_node_to_component(solver, sigma_e_components["x"], "Ex")
-    solver.sigma_e_Ey = average_node_to_component(solver, sigma_e_components["y"], "Ey")
-    solver.sigma_e_Ez = average_node_to_component(solver, sigma_e_components["z"], "Ez")
-    solver.conductive_enabled = bool(_any_component_nonzero(sigma_e_components))
-    solver.mu_Hx = average_node_to_magnetic_component(solver, mu_x_node, "Hx")
-    solver.mu_Hy = average_node_to_magnetic_component(solver, mu_y_node, "Hy")
-    solver.mu_Hz = average_node_to_magnetic_component(solver, mu_z_node, "Hz")
-    # Static magnetic conductivity averaged onto the H components (same node->face
-    # stencil as mu): folds semi-implicitly into the H-update decay/curl exactly as
-    # sigma_e folds into the E-update, giving a magnetic conduction loss on Faraday's law.
     sigma_m_components = material_model["sigma_m_components"]
-    solver.sigma_m_Hx = average_node_to_magnetic_component(solver, sigma_m_components["x"], "Hx")
-    solver.sigma_m_Hy = average_node_to_magnetic_component(solver, sigma_m_components["y"], "Hy")
-    solver.sigma_m_Hz = average_node_to_magnetic_component(solver, sigma_m_components["z"], "Hz")
-    solver.magnetically_conductive_enabled = bool(_any_component_nonzero(sigma_m_components))
+    edge_components = material_model.get("edge_components")
+    if edge_components is not None:
+        # Edge-native path: the compiler evaluated the diagonal permittivity /
+        # permeability and the static conductivities at each Yee component's own
+        # staggered location (SDF occupancy, interface normal and region density
+        # sampled there), so no node->edge average is applied. These fields carry
+        # the interface subpixel blend natively at the edge/face where the update
+        # coefficient consumes it.
+        eps_edge = edge_components["eps"]
+        mu_edge = edge_components["mu"]
+        sigma_e_edge = edge_components["sigma_e"]
+        sigma_m_edge = edge_components["sigma_m"]
+        solver.eps_Ex = (eps_edge["Ex"] * solver.eps0).contiguous()
+        solver.eps_Ey = (eps_edge["Ey"] * solver.eps0).contiguous()
+        solver.eps_Ez = (eps_edge["Ez"] * solver.eps0).contiguous()
+        solver.sigma_e_Ex = sigma_e_edge["Ex"]
+        solver.sigma_e_Ey = sigma_e_edge["Ey"]
+        solver.sigma_e_Ez = sigma_e_edge["Ez"]
+        solver.mu_Hx = (mu_edge["Hx"] * solver.mu0).contiguous()
+        solver.mu_Hy = (mu_edge["Hy"] * solver.mu0).contiguous()
+        solver.mu_Hz = (mu_edge["Hz"] * solver.mu0).contiguous()
+        solver.sigma_m_Hx = sigma_m_edge["Hx"]
+        solver.sigma_m_Hy = sigma_m_edge["Hy"]
+        solver.sigma_m_Hz = sigma_m_edge["Hz"]
+    else:
+        # Node->edge fallback retained for material families whose per-Yee-component
+        # sampling is not yet edge-native (full off-diagonal anisotropy, sheets,
+        # surface-impedance metals): the node-centered Kottke blend is arithmetically
+        # averaged onto the Yee edges/faces. PerturbationMedium is edge-native and
+        # takes the branch above (its eps offset is sampled at the Yee edge).
+        eps_x_node = eps_components["x"] * solver.eps0
+        eps_y_node = eps_components["y"] * solver.eps0
+        eps_z_node = eps_components["z"] * solver.eps0
+        mu_x_node = mu_components["x"] * solver.mu0
+        mu_y_node = mu_components["y"] * solver.mu0
+        mu_z_node = mu_components["z"] * solver.mu0
+        solver.eps_Ex = average_node_to_component(solver, eps_x_node, "Ex")
+        solver.eps_Ey = average_node_to_component(solver, eps_y_node, "Ey")
+        solver.eps_Ez = average_node_to_component(solver, eps_z_node, "Ez")
+        solver.sigma_e_Ex = average_node_to_component(solver, sigma_e_components["x"], "Ex")
+        solver.sigma_e_Ey = average_node_to_component(solver, sigma_e_components["y"], "Ey")
+        solver.sigma_e_Ez = average_node_to_component(solver, sigma_e_components["z"], "Ez")
+        solver.mu_Hx = average_node_to_magnetic_component(solver, mu_x_node, "Hx")
+        solver.mu_Hy = average_node_to_magnetic_component(solver, mu_y_node, "Hy")
+        solver.mu_Hz = average_node_to_magnetic_component(solver, mu_z_node, "Hz")
+        # Static magnetic conductivity averaged onto the H components (same node->face
+        # stencil as mu): folds semi-implicitly into the H-update decay/curl exactly as
+        # sigma_e folds into the E-update, giving a magnetic conduction loss on Faraday's law.
+        solver.sigma_m_Hx = average_node_to_magnetic_component(solver, sigma_m_components["x"], "Hx")
+        solver.sigma_m_Hy = average_node_to_magnetic_component(solver, sigma_m_components["y"], "Hy")
+        solver.sigma_m_Hz = average_node_to_magnetic_component(solver, sigma_m_components["z"], "Hz")
+    # Derive the conduction flags from the per-component fields actually installed
+    # on the solver (edge-native or node->edge averaged), not from the node model,
+    # so the flag provenance matches the coefficients the update kernels consume.
+    solver.conductive_enabled = bool(
+        torch.any(solver.sigma_e_Ex != 0).item()
+        or torch.any(solver.sigma_e_Ey != 0).item()
+        or torch.any(solver.sigma_e_Ez != 0).item()
+    )
+    solver.magnetically_conductive_enabled = bool(
+        torch.any(solver.sigma_m_Hx != 0).item()
+        or torch.any(solver.sigma_m_Hy != 0).item()
+        or torch.any(solver.sigma_m_Hz != 0).item()
+    )
 
     build_nonlinear_channels(solver, material_model)
 
@@ -92,6 +130,12 @@ def build_materials(solver, scene):
 
     build_dispersive_templates(solver, material_model)
     build_magnetic_dispersive_templates(solver, material_model)
+    # Gyromagnetic (Polder) ferrite: the background eps/mu_inf/sigma already
+    # compiled through the diagonal path above; this only wires the local
+    # magnetization-ADE state that produces the non-reciprocal off-diagonal mu.
+    from .gyromagnetic import build_gyromagnetic
+
+    build_gyromagnetic(solver, scene)
     solver.dispersive_enabled = solver.electric_dispersive_enabled or solver.magnetic_dispersive_enabled
     # Full (off-diagonal) anisotropic permittivity now composes with dispersion:
     # electric poles enter isotropically and the ADE polarization current is folded
@@ -427,19 +471,82 @@ def _electric_pole_components(entry):
     )
 
 
-def build_dispersive_templates(solver, material_model):
-    templates = {
-        "Ex": {"inv_eps": (1.0 / solver.eps_Ex).contiguous(), "debye": [], "drude": [], "lorentz": []},
-        "Ey": {"inv_eps": (1.0 / solver.eps_Ey).contiguous(), "debye": [], "drude": [], "lorentz": []},
-        "Ez": {"inv_eps": (1.0 / solver.eps_Ez).contiguous(), "debye": [], "drude": [], "lorentz": []},
-    }
+def _magnetic_pole_components(entry):
+    """Magnetic poles always drive all three H components (no sheet restriction)."""
+    del entry
+    return _H_DISPERSIVE_COMPONENTS
 
-    for entry in material_model["debye_poles"]:
+
+@dataclass(frozen=True)
+class _DispersiveFamily:
+    """Descriptor of the E-vs-H differences in the mirrored ADE dispersion helpers.
+
+    The electric (E, eps) and magnetic (H, mu) dispersive channels share the same
+    Debye/Drude/Lorentz ADE discretization and launch the same kernels; a family
+    only selects which solver attributes, compiled pole lists, vacuum constant,
+    and Yee node->component averaging stencil are consumed, plus which components
+    a pole entry drives (electric sheet poles restrict to tangential axes).
+    """
+
+    components: tuple[str, ...]
+    background_prefix: str  # solver attr prefix of the absolute eps/mu per component
+    inverse_key: str  # templates key holding 1/eps or 1/mu
+    pole_prefix: str  # material-model pole list prefix ("" or "mu_")
+    vacuum_attr: str  # solver attr of the vacuum constant (eps0 or mu0)
+    templates_attr: str
+    enabled_attr: str
+    average: object  # node->component averaging function for this family
+    entry_components: object  # pole entry -> driven component names
+
+
+_E_DISPERSIVE_COMPONENTS = ("Ex", "Ey", "Ez")
+_H_DISPERSIVE_COMPONENTS = ("Hx", "Hy", "Hz")
+
+_ELECTRIC_DISPERSIVE_FAMILY = _DispersiveFamily(
+    components=_E_DISPERSIVE_COMPONENTS,
+    background_prefix="eps_",
+    inverse_key="inv_eps",
+    pole_prefix="",
+    vacuum_attr="eps0",
+    templates_attr="_dispersive_templates",
+    enabled_attr="electric_dispersive_enabled",
+    average=average_node_to_component,
+    entry_components=_electric_pole_components,
+)
+
+_MAGNETIC_DISPERSIVE_FAMILY = _DispersiveFamily(
+    components=_H_DISPERSIVE_COMPONENTS,
+    background_prefix="mu_",
+    inverse_key="inv_mu",
+    pole_prefix="mu_",
+    vacuum_attr="mu0",
+    templates_attr="_magnetic_dispersive_templates",
+    enabled_attr="magnetic_dispersive_enabled",
+    average=average_node_to_magnetic_component,
+    entry_components=_magnetic_pole_components,
+)
+
+
+def _build_family_dispersive_templates(solver, material_model, family):
+    templates = {
+        component_name: {
+            family.inverse_key: (
+                1.0 / getattr(solver, f"{family.background_prefix}{component_name}")
+            ).contiguous(),
+            "debye": [],
+            "drude": [],
+            "lorentz": [],
+        }
+        for component_name in family.components
+    }
+    vacuum = getattr(solver, family.vacuum_attr)
+
+    for entry in material_model[f"{family.pole_prefix}debye_poles"]:
         pole = entry["pole"]
         decay = (2.0 * pole.tau - solver.dt) / (2.0 * pole.tau + solver.dt)
-        base_scale = 2.0 * solver.eps0 * pole.delta_eps * solver.dt / (2.0 * pole.tau + solver.dt)
-        for component_name in _electric_pole_components(entry):
-            weight = average_node_to_component(solver, entry["weight"], component_name)
+        base_scale = 2.0 * vacuum * pole.delta_eps * solver.dt / (2.0 * pole.tau + solver.dt)
+        for component_name in family.entry_components(entry):
+            weight = family.average(solver, entry["weight"], component_name)
             templates[component_name]["debye"].append(
                 {
                     "decay": float(decay),
@@ -447,15 +554,15 @@ def build_dispersive_templates(solver, material_model):
                 }
             )
 
-    for entry in material_model["drude_poles"]:
+    for entry in material_model[f"{family.pole_prefix}drude_poles"]:
         pole = entry["pole"]
         omega_p = 2.0 * np.pi * pole.plasma_frequency
         gamma = 2.0 * np.pi * pole.gamma
         denom = 2.0 + gamma * solver.dt
         decay = (2.0 - gamma * solver.dt) / denom
-        base_scale = 2.0 * solver.eps0 * omega_p * omega_p * solver.dt / denom
-        for component_name in _electric_pole_components(entry):
-            weight = average_node_to_component(solver, entry["weight"], component_name)
+        base_scale = 2.0 * vacuum * omega_p * omega_p * solver.dt / denom
+        for component_name in family.entry_components(entry):
+            weight = family.average(solver, entry["weight"], component_name)
             templates[component_name]["drude"].append(
                 {
                     "decay": float(decay),
@@ -463,16 +570,16 @@ def build_dispersive_templates(solver, material_model):
                 }
             )
 
-    for entry in material_model["lorentz_poles"]:
+    for entry in material_model[f"{family.pole_prefix}lorentz_poles"]:
         pole = entry["pole"]
         omega_0 = 2.0 * np.pi * pole.resonance_frequency
         gamma = 2.0 * np.pi * pole.gamma
         denom = 2.0 + gamma * solver.dt
         decay = (2.0 - gamma * solver.dt) / denom
         restoring = 2.0 * omega_0 * omega_0 * solver.dt / denom
-        base_scale = 2.0 * solver.eps0 * pole.delta_eps * omega_0 * omega_0 * solver.dt / denom
-        for component_name in _electric_pole_components(entry):
-            weight = average_node_to_component(solver, entry["weight"], component_name)
+        base_scale = 2.0 * vacuum * pole.delta_eps * omega_0 * omega_0 * solver.dt / denom
+        for component_name in family.entry_components(entry):
+            weight = family.average(solver, entry["weight"], component_name)
             templates[component_name]["lorentz"].append(
                 {
                     "decay": float(decay),
@@ -481,74 +588,57 @@ def build_dispersive_templates(solver, material_model):
                 }
             )
 
-    solver._dispersive_templates = templates
-    solver.electric_dispersive_enabled = any(
-        templates[component_name][model_name]
-        for component_name in ("Ex", "Ey", "Ez")
-        for model_name in ("debye", "drude", "lorentz")
+    setattr(solver, family.templates_attr, templates)
+    setattr(
+        solver,
+        family.enabled_attr,
+        any(
+            templates[component_name][model_name]
+            for component_name in family.components
+            for model_name in ("debye", "drude", "lorentz")
+        ),
     )
+
+
+def build_dispersive_templates(solver, material_model):
+    _build_family_dispersive_templates(solver, material_model, _ELECTRIC_DISPERSIVE_FAMILY)
 
 
 def build_magnetic_dispersive_templates(solver, material_model):
-    templates = {
-        "Hx": {"inv_mu": (1.0 / solver.mu_Hx).contiguous(), "debye": [], "drude": [], "lorentz": []},
-        "Hy": {"inv_mu": (1.0 / solver.mu_Hy).contiguous(), "debye": [], "drude": [], "lorentz": []},
-        "Hz": {"inv_mu": (1.0 / solver.mu_Hz).contiguous(), "debye": [], "drude": [], "lorentz": []},
-    }
+    _build_family_dispersive_templates(solver, material_model, _MAGNETIC_DISPERSIVE_FAMILY)
 
-    for entry in material_model["mu_debye_poles"]:
-        pole = entry["pole"]
-        decay = (2.0 * pole.tau - solver.dt) / (2.0 * pole.tau + solver.dt)
-        base_scale = 2.0 * solver.mu0 * pole.delta_eps * solver.dt / (2.0 * pole.tau + solver.dt)
-        for component_name in ("Hx", "Hy", "Hz"):
-            weight = average_node_to_magnetic_component(solver, entry["weight"], component_name)
-            templates[component_name]["debye"].append(
-                {
-                    "decay": float(decay),
-                    "drive": (weight * base_scale).contiguous(),
-                }
-            )
 
-    for entry in material_model["mu_drude_poles"]:
-        pole = entry["pole"]
-        omega_p = 2.0 * np.pi * pole.plasma_frequency
-        gamma = 2.0 * np.pi * pole.gamma
-        denom = 2.0 + gamma * solver.dt
-        decay = (2.0 - gamma * solver.dt) / denom
-        base_scale = 2.0 * solver.mu0 * omega_p * omega_p * solver.dt / denom
-        for component_name in ("Hx", "Hy", "Hz"):
-            weight = average_node_to_magnetic_component(solver, entry["weight"], component_name)
-            templates[component_name]["drude"].append(
-                {
-                    "decay": float(decay),
-                    "drive": (weight * base_scale).contiguous(),
-                }
-            )
+def _initialize_component_dispersive_entries(solver, component_templates, field):
+    complex_fields = has_complex_fields(solver)
+    for entry in component_templates["debye"]:
+        entry["polarization"] = torch.zeros_like(field)
+        entry["current"] = torch.zeros_like(field)
+        entry["polarization_imag"] = torch.zeros_like(field) if complex_fields else None
+        entry["current_imag"] = torch.zeros_like(field) if complex_fields else None
+    for entry in component_templates["drude"]:
+        entry["current"] = torch.zeros_like(field)
+        entry["current_imag"] = torch.zeros_like(field) if complex_fields else None
+    for entry in component_templates["lorentz"]:
+        entry["polarization"] = torch.zeros_like(field)
+        entry["current"] = torch.zeros_like(field)
+        if complex_fields:
+            entry["polarization_imag"] = torch.zeros_like(field)
+            entry["current_imag"] = torch.zeros_like(field)
+        else:
+            entry["polarization_imag"] = None
+            entry["current_imag"] = None
 
-    for entry in material_model["mu_lorentz_poles"]:
-        pole = entry["pole"]
-        omega_0 = 2.0 * np.pi * pole.resonance_frequency
-        gamma = 2.0 * np.pi * pole.gamma
-        denom = 2.0 + gamma * solver.dt
-        decay = (2.0 - gamma * solver.dt) / denom
-        restoring = 2.0 * omega_0 * omega_0 * solver.dt / denom
-        base_scale = 2.0 * solver.mu0 * pole.delta_eps * omega_0 * omega_0 * solver.dt / denom
-        for component_name in ("Hx", "Hy", "Hz"):
-            weight = average_node_to_magnetic_component(solver, entry["weight"], component_name)
-            templates[component_name]["lorentz"].append(
-                {
-                    "decay": float(decay),
-                    "restoring": float(restoring),
-                    "drive": (weight * base_scale).contiguous(),
-                }
-            )
 
-    solver._magnetic_dispersive_templates = templates
-    solver.magnetic_dispersive_enabled = any(
-        templates[component_name][model_name]
-        for component_name in ("Hx", "Hy", "Hz")
-        for model_name in ("debye", "drude", "lorentz")
-    )
+def _initialize_family_dispersive_state(solver, family):
+    templates = getattr(solver, family.templates_attr)
+    if not templates:
+        setattr(solver, family.enabled_attr, False)
+        return False
+    for component_name in family.components:
+        _initialize_component_dispersive_entries(
+            solver, templates[component_name], getattr(solver, component_name)
+        )
+    return True
 
 
 def initialize_dispersive_state(solver):
@@ -565,61 +655,14 @@ def initialize_dispersive_state(solver):
             "Ez": torch.zeros_like(solver.Ez),
         }
 
-    for component_name, field in (("Ex", solver.Ex), ("Ey", solver.Ey), ("Ez", solver.Ez)):
-        component_templates = solver._dispersive_templates[component_name]
-        for entry in component_templates["debye"]:
-            entry["polarization"] = torch.zeros_like(field)
-            entry["current"] = torch.zeros_like(field)
-            entry["polarization_imag"] = torch.zeros_like(field) if has_complex_fields(solver) else None
-            entry["current_imag"] = torch.zeros_like(field) if has_complex_fields(solver) else None
-        for entry in component_templates["drude"]:
-            entry["current"] = torch.zeros_like(field)
-            entry["current_imag"] = torch.zeros_like(field) if has_complex_fields(solver) else None
-        for entry in component_templates["lorentz"]:
-            entry["polarization"] = torch.zeros_like(field)
-            entry["current"] = torch.zeros_like(field)
-            if has_complex_fields(solver):
-                entry["polarization_imag"] = torch.zeros_like(field)
-                entry["current_imag"] = torch.zeros_like(field)
-            else:
-                entry["polarization_imag"] = None
-                entry["current_imag"] = None
+    _initialize_family_dispersive_state(solver, _ELECTRIC_DISPERSIVE_FAMILY)
 
 
 def initialize_magnetic_dispersive_state(solver):
-    if not solver._magnetic_dispersive_templates:
-        solver.magnetic_dispersive_enabled = False
-        return
-
-    for component_name, field in (("Hx", solver.Hx), ("Hy", solver.Hy), ("Hz", solver.Hz)):
-        component_templates = solver._magnetic_dispersive_templates[component_name]
-        for entry in component_templates["debye"]:
-            entry["polarization"] = torch.zeros_like(field)
-            entry["current"] = torch.zeros_like(field)
-            entry["polarization_imag"] = torch.zeros_like(field) if has_complex_fields(solver) else None
-            entry["current_imag"] = torch.zeros_like(field) if has_complex_fields(solver) else None
-        for entry in component_templates["drude"]:
-            entry["current"] = torch.zeros_like(field)
-            entry["current_imag"] = torch.zeros_like(field) if has_complex_fields(solver) else None
-        for entry in component_templates["lorentz"]:
-            entry["polarization"] = torch.zeros_like(field)
-            entry["current"] = torch.zeros_like(field)
-            if has_complex_fields(solver):
-                entry["polarization_imag"] = torch.zeros_like(field)
-                entry["current_imag"] = torch.zeros_like(field)
-            else:
-                entry["polarization_imag"] = None
-                entry["current_imag"] = None
+    _initialize_family_dispersive_state(solver, _MAGNETIC_DISPERSIVE_FAMILY)
 
 
-def advance_component_dispersive_state(solver, component_name, field, *, imag=False):
-    if not solver.electric_dispersive_enabled:
-        return
-
-    component_templates = solver._dispersive_templates.get(component_name)
-    if not component_templates:
-        return
-
+def _advance_component_dispersive_entries(solver, component_templates, field, *, imag):
     for entry in component_templates["debye"]:
         polarization = entry["polarization_imag"] if imag else entry["polarization"]
         current = entry["current_imag"] if imag else entry["current"]
@@ -653,75 +696,56 @@ def advance_component_dispersive_state(solver, component_name, field, *, imag=Fa
             restoring=entry["restoring"],
             dt=solver.dt,
         ).launchRaw()
+
+
+def _family_component_templates(solver, family, component_name):
+    """The component's templates when the family is active, else ``None``."""
+    if not getattr(solver, family.enabled_attr):
+        return None
+    return getattr(solver, family.templates_attr).get(component_name)
+
+
+def _apply_to_family_fields(solver, family, component_fn):
+    """Run a per-component helper over the family's real (then imaginary) fields."""
+    for component_name in family.components:
+        component_fn(solver, component_name, getattr(solver, component_name), imag=False)
+    if has_complex_fields(solver):
+        for component_name in family.components:
+            component_fn(
+                solver, component_name, getattr(solver, f"{component_name}_imag"), imag=True
+            )
+
+
+def advance_component_dispersive_state(solver, component_name, field, *, imag=False):
+    component_templates = _family_component_templates(
+        solver, _ELECTRIC_DISPERSIVE_FAMILY, component_name
+    )
+    if not component_templates:
+        return
+    _advance_component_dispersive_entries(solver, component_templates, field, imag=imag)
 
 
 def advance_dispersive_state(solver):
     if not solver.electric_dispersive_enabled:
         return
-
-    advance_component_dispersive_state(solver, "Ex", solver.Ex, imag=False)
-    advance_component_dispersive_state(solver, "Ey", solver.Ey, imag=False)
-    advance_component_dispersive_state(solver, "Ez", solver.Ez, imag=False)
-    if has_complex_fields(solver):
-        advance_component_dispersive_state(solver, "Ex", solver.Ex_imag, imag=True)
-        advance_component_dispersive_state(solver, "Ey", solver.Ey_imag, imag=True)
-        advance_component_dispersive_state(solver, "Ez", solver.Ez_imag, imag=True)
+    _apply_to_family_fields(solver, _ELECTRIC_DISPERSIVE_FAMILY, advance_component_dispersive_state)
 
 
 def advance_magnetic_component_dispersive_state(solver, component_name, field, *, imag=False):
-    if not solver.magnetic_dispersive_enabled:
-        return
-
-    component_templates = solver._magnetic_dispersive_templates.get(component_name)
+    component_templates = _family_component_templates(
+        solver, _MAGNETIC_DISPERSIVE_FAMILY, component_name
+    )
     if not component_templates:
         return
-
-    for entry in component_templates["debye"]:
-        polarization = entry["polarization_imag"] if imag else entry["polarization"]
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.updateDebyeCurrent3D(
-            ElectricField=field,
-            Polarization=polarization,
-            PolarizationCurrent=current,
-            DebyeDrive=entry["drive"],
-            decay=entry["decay"],
-            dt=solver.dt,
-        ).launchRaw()
-
-    for entry in component_templates["drude"]:
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.updateDrudeCurrent3D(
-            ElectricField=field,
-            PolarizationCurrent=current,
-            DrudeDrive=entry["drive"],
-            decay=entry["decay"],
-        ).launchRaw()
-
-    for entry in component_templates["lorentz"]:
-        polarization = entry["polarization_imag"] if imag else entry["polarization"]
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.updateLorentzCurrent3D(
-            ElectricField=field,
-            Polarization=polarization,
-            PolarizationCurrent=current,
-            LorentzDrive=entry["drive"],
-            decay=entry["decay"],
-            restoring=entry["restoring"],
-            dt=solver.dt,
-        ).launchRaw()
+    _advance_component_dispersive_entries(solver, component_templates, field, imag=imag)
 
 
 def advance_magnetic_dispersive_state(solver):
     if not solver.magnetic_dispersive_enabled:
         return
-
-    advance_magnetic_component_dispersive_state(solver, "Hx", solver.Hx, imag=False)
-    advance_magnetic_component_dispersive_state(solver, "Hy", solver.Hy, imag=False)
-    advance_magnetic_component_dispersive_state(solver, "Hz", solver.Hz, imag=False)
-    if has_complex_fields(solver):
-        advance_magnetic_component_dispersive_state(solver, "Hx", solver.Hx_imag, imag=True)
-        advance_magnetic_component_dispersive_state(solver, "Hy", solver.Hy_imag, imag=True)
-        advance_magnetic_component_dispersive_state(solver, "Hz", solver.Hz_imag, imag=True)
+    _apply_to_family_fields(
+        solver, _MAGNETIC_DISPERSIVE_FAMILY, advance_magnetic_component_dispersive_state
+    )
 
 
 def _dispersive_current_coefficient(solver, component_name, component_templates):
@@ -756,11 +780,28 @@ _MODULATION_QUADRATURE_FIELDS = {
 }
 
 
-def apply_component_dispersive_currents(solver, component_name, field, *, imag=False):
-    if not solver.electric_dispersive_enabled:
-        return
+def _apply_plain_dispersive_currents(solver, component_templates, field, inverse, apply_dt, *, imag):
+    """Subtract every pole's polarization current with the unmodulated kernel.
 
-    component_templates = solver._dispersive_templates.get(component_name)
+    Shared by both field families: the magnetic channel always takes this path
+    (with ``inverse = 1/mu``), and the electric channel takes it whenever no
+    space-time modulation is active. The kernel's ``ElectricField`` argument is
+    simply the updated field component (E or H).
+    """
+    for model_name in ("debye", "drude", "lorentz"):
+        for entry in component_templates[model_name]:
+            solver.fdtd_module.applyPolarizationCurrent3D(
+                ElectricField=field,
+                PolarizationCurrent=entry["current_imag"] if imag else entry["current"],
+                InvPermittivity=inverse,
+                dt=apply_dt,
+            ).launchRaw()
+
+
+def apply_component_dispersive_currents(solver, component_name, field, *, imag=False):
+    component_templates = _family_component_templates(
+        solver, _ELECTRIC_DISPERSIVE_FAMILY, component_name
+    )
     if not component_templates:
         return
     inv_eps, apply_dt = _dispersive_current_coefficient(solver, component_name, component_templates)
@@ -770,17 +811,21 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
     # the modulated curl(H) term (see apply_polarization_modulated_kernel); in a
     # purely dispersive cell (m_next == 1) this reduces to the plain subtraction.
     modulated = bool(getattr(solver, "modulation_enabled", False)) and not imag
-    if modulated:
-        cos_name, sin_name, omega_name = _MODULATION_QUADRATURE_FIELDS[component_name]
-        mod_cos = getattr(solver, cos_name)
-        mod_sin = getattr(solver, sin_name)
-        mod_omega = getattr(solver, omega_name)
+    if not modulated:
+        _apply_plain_dispersive_currents(
+            solver, component_templates, field, inv_eps, apply_dt, imag=imag
+        )
+        return
 
-    def _subtract(current):
-        if modulated:
+    cos_name, sin_name, omega_name = _MODULATION_QUADRATURE_FIELDS[component_name]
+    mod_cos = getattr(solver, cos_name)
+    mod_sin = getattr(solver, sin_name)
+    mod_omega = getattr(solver, omega_name)
+    for model_name in ("debye", "drude", "lorentz"):
+        for entry in component_templates[model_name]:
             solver.fdtd_module.applyPolarizationCurrentModulated3D(
                 ElectricField=field,
-                PolarizationCurrent=current,
+                PolarizationCurrent=entry["current_imag"] if imag else entry["current"],
                 InvPermittivity=inv_eps,
                 ModCos=mod_cos,
                 ModSin=mod_sin,
@@ -788,17 +833,6 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
                 ModulationTime=solver._modulation_time,
                 dt=apply_dt,
             ).launchRaw()
-        else:
-            solver.fdtd_module.applyPolarizationCurrent3D(
-                ElectricField=field,
-                PolarizationCurrent=current,
-                InvPermittivity=inv_eps,
-                dt=apply_dt,
-            ).launchRaw()
-
-    for model_name in ("debye", "drude", "lorentz"):
-        for entry in component_templates[model_name]:
-            _subtract(entry["current_imag"] if imag else entry["current"])
 
 
 def _aniso_periodic_flags(solver):
@@ -882,63 +916,27 @@ def apply_dispersive_corrections(solver):
         _apply_aniso_dispersive_corrections(solver)
         return
 
-    apply_component_dispersive_currents(solver, "Ex", solver.Ex, imag=False)
-    apply_component_dispersive_currents(solver, "Ey", solver.Ey, imag=False)
-    apply_component_dispersive_currents(solver, "Ez", solver.Ez, imag=False)
-    if has_complex_fields(solver):
-        apply_component_dispersive_currents(solver, "Ex", solver.Ex_imag, imag=True)
-        apply_component_dispersive_currents(solver, "Ey", solver.Ey_imag, imag=True)
-        apply_component_dispersive_currents(solver, "Ez", solver.Ez_imag, imag=True)
+    _apply_to_family_fields(solver, _ELECTRIC_DISPERSIVE_FAMILY, apply_component_dispersive_currents)
 
 
 def apply_magnetic_component_dispersive_currents(solver, component_name, field, *, imag=False):
-    if not solver.magnetic_dispersive_enabled:
-        return
-
-    component_templates = solver._magnetic_dispersive_templates.get(component_name)
+    component_templates = _family_component_templates(
+        solver, _MAGNETIC_DISPERSIVE_FAMILY, component_name
+    )
     if not component_templates:
         return
-    inv_mu = component_templates["inv_mu"]
-
-    for entry in component_templates["debye"]:
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.applyPolarizationCurrent3D(
-            ElectricField=field,
-            PolarizationCurrent=current,
-            InvPermittivity=inv_mu,
-            dt=solver.dt,
-        ).launchRaw()
-
-    for entry in component_templates["drude"]:
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.applyPolarizationCurrent3D(
-            ElectricField=field,
-            PolarizationCurrent=current,
-            InvPermittivity=inv_mu,
-            dt=solver.dt,
-        ).launchRaw()
-
-    for entry in component_templates["lorentz"]:
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.applyPolarizationCurrent3D(
-            ElectricField=field,
-            PolarizationCurrent=current,
-            InvPermittivity=inv_mu,
-            dt=solver.dt,
-        ).launchRaw()
+    _apply_plain_dispersive_currents(
+        solver, component_templates, field, component_templates["inv_mu"], solver.dt, imag=imag
+    )
 
 
 def apply_magnetic_dispersive_corrections(solver):
     if not solver.magnetic_dispersive_enabled:
         return
 
-    apply_magnetic_component_dispersive_currents(solver, "Hx", solver.Hx, imag=False)
-    apply_magnetic_component_dispersive_currents(solver, "Hy", solver.Hy, imag=False)
-    apply_magnetic_component_dispersive_currents(solver, "Hz", solver.Hz, imag=False)
-    if has_complex_fields(solver):
-        apply_magnetic_component_dispersive_currents(solver, "Hx", solver.Hx_imag, imag=True)
-        apply_magnetic_component_dispersive_currents(solver, "Hy", solver.Hy_imag, imag=True)
-        apply_magnetic_component_dispersive_currents(solver, "Hz", solver.Hz_imag, imag=True)
+    _apply_to_family_fields(
+        solver, _MAGNETIC_DISPERSIVE_FAMILY, apply_magnetic_component_dispersive_currents
+    )
 
 
 def _electric_update_coefficients(solver, eps, sigma_e, pml_decay, *, aniso_shifted=False):
@@ -1011,22 +1009,35 @@ def _magnetic_update_coefficients(solver, mu, sigma_m, pml_decay):
 
 
 def _pec_edge_open_fractions(solver):
-    """Per-E-edge open fractions ``1 - fill`` from the PEC occupancy, or ``None``.
+    """Per-E-edge open fractions ``1 - fill``, or ``None`` when the scene has no PEC.
 
-    The PEC fill on each E edge is the two-endpoint node->edge average of the PEC
-    occupancy (same stencil as eps, keeping it consistent and differentiable). In
-    ``staircase`` mode the fill is hard-thresholded at 0.5; in ``conformal`` mode the
-    fractional fill is kept so the effective PEC wall sits at the sub-cell crossing.
+    ``staircase`` mode thresholds the two-endpoint node->edge average of the smoothed
+    PEC occupancy at 0.5, so every edge is either a hard short or fully open.
+
+    ``conformal`` mode consumes the compiler's per-edge coverage fraction
+    (``pec_edge_fill``): the fraction of that Yee edge's length that lies inside the
+    conductor, obtained by interpolating the PEC signed distance along the edge. That
+    quantity has compact support -- exactly 0 for an edge the surface does not reach
+    and exactly 1 for an edge wholly inside -- so a conductor face that is parallel to
+    an edge (every tangential edge of an axis-aligned face) reproduces the staircase
+    result bit for bit, and only genuinely cut edges take a fractional open fraction.
+    The node-average path must not be used here: the smoothed node occupancy has
+    tails several cells wide, and because the open fraction multiplies the E update
+    every step, a tail value ``f`` acts as a spurious conductivity ``eps*f/dt`` on
+    vacuum edges around the conductor.
     """
     model = getattr(solver, "_compiled_material_model", None)
     pec_occupancy = None if model is None else model.get("pec_occupancy")
     if pec_occupancy is None:
         return None
     mode = model.get("pec_mode", "staircase")
+    edge_fill = model.get("pec_edge_fill") if mode == "conformal" else None
     open_fractions = {}
     for component_name in ("Ex", "Ey", "Ez"):
-        fill = average_node_to_component(solver, pec_occupancy, component_name)
-        if mode == "staircase":
+        if edge_fill is not None:
+            fill = edge_fill[component_name]
+        else:
+            fill = average_node_to_component(solver, pec_occupancy, component_name)
             fill = (fill >= 0.5).to(fill.dtype)
         open_fractions[component_name] = 1.0 - fill
     return open_fractions
@@ -1038,8 +1049,13 @@ def _apply_pec_edge_suppression(solver):
     Scaling both ``decay`` and ``curl`` by ``open = 1 - fill`` turns the update into
     ``E_new = open * (decay*E_old + curl*(curlH - J))``, so a fully covered edge
     (``fill = 1``) keeps tangential E exactly zero while a fractional edge acts as a
-    soft short with sub-cell wall placement. Never amplifies (``open <= 1``), so the
-    scheme is unconditionally stable and needs no area floor.
+    soft short. Never amplifies (``open <= 1``), so the scheme is unconditionally
+    stable and needs no cut-area floor.
+
+    The soft short is a per-step multiplicative factor, i.e. an effective
+    conductivity ``eps*fill/dt`` on that edge. It is therefore only meaningful on
+    edges the conductor surface genuinely cuts; see
+    :func:`_pec_edge_open_fractions` for why the fill must have compact support.
     """
     open_fractions = _pec_edge_open_fractions(solver)
     if open_fractions is None:
@@ -1077,100 +1093,290 @@ def _axis_index_tuple(ndim, axis, index_or_slice):
     return tuple(selector)
 
 
-def _configure_sibc(solver):
-    """Set up the surface-impedance (Leontovich) boundary from the compiled descriptor.
+def _surface_box_interior_mask(solver, metal):
+    """Zero the E-update coefficients inside one metal box (a good-conductor fill).
 
-    The good-conductor SIBC is realized by (a) masking the metal interior so its
-    tangential E edges stay zero (a zero open-fraction folded into the update
-    coefficients, exactly as PEC does) and (b) overriding the two tangential E
-    faces on the surface node plane each step from the vacuum-side tangential H,
-    which ``apply_sibc_surface`` in ``stepping.py`` performs. The surface
-    impedance is evaluated at the operating frequency as a narrowband series R-L,
-    ``Zs(omega0) = R + j*omega0*Ls`` with ``R = sqrt(omega0*mu0/(2*sigma))`` and
-    ``Ls = R/omega0``, so ``Zs(omega0)`` reproduces the exact Leontovich value at
-    the source frequency.
+    The surface-impedance boundary masks the metal interior so its E edges stay at
+    their zero initial value (a zero open-fraction folded into the decay/curl
+    coefficients, exactly as PEC does); the exposed-face tangential-E writes then
+    override the surface plane each step. The masked window is the box's node cell
+    region, extended to the tensor end on any axis-side flush against the physical
+    domain boundary so a boundary-backed metal is a full half-space (the same
+    coverage the single-plane path used). Masking the surface-plane tangential edges
+    too is harmless: the per-step write overwrites them before any field reads them.
     """
-    solver.sibc_enabled = False
-    solver._sibc = None
-    model = getattr(solver, "_compiled_material_model", None)
-    descriptor = None if model is None else model.get("sibc")
-    if descriptor is None:
-        return
-    axis = int(descriptor["axis"])
-    metal_side = descriptor["metal_side"]
-    surface_node = int(descriptor["surface_node"])
-    sigma = float(descriptor["conductivity"])
-    omega0 = 2.0 * np.pi * float(solver.source_frequency)
-    if omega0 <= 0.0:
-        raise ValueError("LossyMetalMedium SIBC requires a positive operating frequency.")
-    surface_r = float(np.sqrt(omega0 * solver.mu0 / (2.0 * sigma)))
-    surface_l = surface_r / omega0
-
-    # Mask the metal interior: zero the update coefficients of the tangential
-    # E edges strictly inside the metal (node index on the metal side of the
-    # surface) and the normal E edges from the surface inward, so those edges
-    # stay at their zero initial value and the surface behaves as a termination.
-    if metal_side == "high":
-        tangential_interior = slice(surface_node + 1, None)
-        normal_interior = slice(surface_node, None)
-        vacuum_h_index = surface_node - 1
-    else:
-        tangential_interior = slice(None, surface_node)
-        normal_interior = slice(None, surface_node)
-        vacuum_h_index = surface_node
+    windows = []
+    for axis in range(3):
+        cell_slice = metal.cell_slices[axis]
+        lo = 0 if metal.touches_lower[axis] else int(cell_slice.start)
+        hi = None if metal.touches_upper[axis] else int(cell_slice.stop)
+        windows.append(slice(lo, hi))
     for component in _E_COMPONENTS:
-        component_axis = _E_COMPONENTS.index(component)
-        interior = normal_interior if component_axis == axis else tangential_interior
         decay = getattr(solver, f"c{component.lower()}_decay", None)
         if decay is None:
             continue
-        # Open-fraction mask (1 outside the metal, 0 inside), multiplied into the
-        # decay and curl coefficients out-of-place, mirroring the PEC suppression so
-        # a covered edge keeps E exactly zero without perturbing autograd.
         mask = torch.ones_like(decay)
-        mask[_axis_index_tuple(mask.dim(), axis, interior)] = 0.0
+        index = tuple(
+            slice(w.start, None if w.stop is None else min(w.stop, size))
+            for w, size in zip(windows, mask.shape)
+        )
+        mask[index] = 0.0
         for suffix in ("decay", "curl"):
             name = f"c{component.lower()}_{suffix}"
             setattr(solver, name, (getattr(solver, name) * mask).contiguous())
 
-    # Tangential components (b, c) in cyclic order after the normal axis, each
-    # paired with the transverse H one cell out on the vacuum side. The Leontovich
-    # relation E_t = Zs * (n_hat x H) with the metal outward normal n_hat gives
-    # E_b = +sn*(R*H_c + Ls*dH_c/dt), E_c = -sn*(R*H_b + Ls*dH_b/dt); sn = +1 when
-    # the metal fills the high side of the surface (n_hat = -axis) and -1 for the
-    # low side. This is the passive (energy-absorbing) branch: the opposite sign is
-    # a negative surface resistance and grows without bound.
-    b = (axis + 1) % 3
-    c = (axis + 2) % 3
-    sn = 1.0 if metal_side == "high" else -1.0
-    faces = (
-        (_E_COMPONENTS[b], _H_COMPONENTS[c], +sn),
-        (_E_COMPONENTS[c], _H_COMPONENTS[b], -sn),
+
+def _surface_discrete_state_space(solver, material):
+    """Discretize a generic rational surface impedance into a Z-form ADE at ``dt``.
+
+    The generic per-edge surface update steps the impedance relation
+    ``E_t = Z_s(omega) * (n_hat x H)`` (an E-from-H overwrite), so it needs the
+    impedance (Z) realization. The user model may be fit as an admittance (``Y``,
+    the good-conductor default, whose ``Z_s ~ sqrt(omega)`` is bounded only over the
+    band), so ``Z_s`` is resampled over the declared band and refit as a passive
+    ``Z``-form rational through the shared fitter, then discretized with the bilinear
+    (trapezoidal, ``|z| < 1``) transform. Passivity is a compile exit gate: a fit
+    that is accurate but not certified passive over the band is rejected here, before
+    any step runs -- a non-passive surface injects energy and diverges. Returns the
+    discrete ``(A, B, C, D)`` tensors (real, on the solver device) for a scalar
+    surface.
+
+    The passivity certificate bounds the continuous surface response, not the coupled
+    surface-plus-Yee discrete stability: a certified-passive high-order fit at coarse
+    resolution (e.g. order ~10 near ~40 cells/wavelength) can still diverge. Stability is
+    established in the moderate-order / adequate-resolution regime the acceptance suite
+    covers; use a moderate fit order at adequate cells-per-wavelength.
+    """
+    from ...compiler.surface_impedance import fit_surface_impedance
+
+    impedance = material.impedance
+    band = impedance.frequency_range
+    samples = impedance.sample_frequencies
+    if samples is None:
+        samples = torch.logspace(
+            float(np.log10(band[0])), float(np.log10(band[1])), 200, dtype=torch.float64
+        )
+    else:
+        samples = samples.detach().to(dtype=torch.float64)
+    z_values = impedance.surface_impedance(samples).to(dtype=torch.complex128)
+    order = int(impedance.model.poles.numel())
+    fitted = fit_surface_impedance(
+        (samples, z_values),
+        band=band,
+        order=order,
+        dt=float(solver.dt),
+        device=solver.device,
+        representation="Z",
+        dtype=torch.float32,
     )
-    face_state = []
-    for e_name, h_name, sign in faces:
-        h_tensor = getattr(solver, h_name)
-        h_selector = _axis_index_tuple(h_tensor.dim(), axis, vacuum_h_index)
-        e_selector = _axis_index_tuple(getattr(solver, e_name).dim(), axis, surface_node)
-        face_state.append(
-            {
+    discrete = fitted.discrete
+    return (
+        discrete.A.contiguous(),
+        discrete.B.contiguous(),
+        discrete.C.contiguous(),
+        discrete.D.contiguous(),
+        fitted,
+    )
+
+
+def _configure_surface_impedance(solver):
+    """Set up the generalized surface-impedance boundary from the compiled layout.
+
+    Consumes the ``CompiledSurfaceImpedanceLayout`` (``model["surface_impedance"]``):
+    it masks every metal interior to a good-conductor termination and builds one
+    per-tangential-component surface write for every exposed axis-aligned face
+    (finite blocks, mid-domain double-sided plates, multiple metals, multiple
+    orientations). Each write realizes the Leontovich relation
+    ``E_t = Z_s * (n_hat x H)`` with the metal outward normal ``n_hat`` from the
+    vacuum-side tangential H: ``E_b = +sn * Z_s{H_c}``, ``E_c = -sn * Z_s{H_b}``,
+    ``sn = +1`` for a metal on the high side of the surface (``n_hat = -axis``) and
+    ``-1`` for the low side -- the passive (energy-absorbing) branch.
+
+    Two realizations of the same contract share one code path:
+
+    * a narrowband good-conductor ``LossyMetalMedium`` is order-0 (pure resistance):
+      ``Z_s = R = sqrt(omega0 * mu0 / (2 * sigma))`` at the operating frequency, no
+      auxiliary state. A full-plane order-0 face uses the fused native kernel
+      (``applySibcSurface3D``); its output ``sign * R * H`` is bit-identical to the
+      generic ``D * (sign * H)`` scalar path (multiplication by ``sign = +/-1`` is
+      exact), so the fused path is a pure optimization of the same relation.
+    * a generic rational ``SurfaceImpedanceMedium`` is a passive Z-form ADE
+      discretized at ``dt`` (``_surface_discrete_state_space``); each edge carries a
+      state vector advanced by ``x <- A x + B u`` with output ``E = C x + D u`` and
+      input ``u = sign * H``. ``apply_surface_impedance`` in ``stepping.py`` steps it.
+    """
+    solver.surface_impedance_enabled = False
+    solver._surface_impedance = None
+    model = getattr(solver, "_compiled_material_model", None)
+    layout = None if model is None else model.get("surface_impedance")
+    if not layout:
+        return
+
+    omega0 = 2.0 * np.pi * float(solver.source_frequency)
+    discrete_cache: dict[int, tuple] = {}
+    writes = []
+    for metal in layout.metals:
+        if getattr(metal, "interior_node_mask", None) is not None:
+            _surface_occupancy_interior_mask(solver, metal)
+        else:
+            _surface_box_interior_mask(solver, metal)
+
+    for face in layout.faces:
+        metal = layout.metals[face.metal_index]
+        axis = face.axis
+        b = (axis + 1) % 3
+        c = (axis + 2) % 3
+        sn = 1.0 if face.metal_side == "high" else -1.0
+        if getattr(face, "transverse_mask", None) is not None:
+            writes.extend(_voxel_surface_writes(solver, face, metal, axis, b, c, sn, omega0))
+            continue
+        components = (
+            (_E_COMPONENTS[b], _H_COMPONENTS[c], +sn),
+            (_E_COMPONENTS[c], _H_COMPONENTS[b], -sn),
+        )
+        b_slice, c_slice = face.transverse_slices
+        if face.full_plane:
+            # A full-plane face owns the entire transverse surface E plane. The node-
+            # coverage slices under-cover by one the tangential component whose transverse
+            # dimension is node-length (an exact-fill box gives b_slice.stop == cell_count,
+            # missing the last node row), which would leave a masked-zero PEC seam where
+            # the fused order-0 kernel writes the Leontovich value. Widen to the whole
+            # plane so the generic sliced write and the fused kernel share one footprint.
+            b_slice = slice(None)
+            c_slice = slice(None)
+
+        surface_r = None
+        discrete = None
+        if metal.conductivity is not None:
+            if omega0 <= 0.0:
+                raise ValueError(
+                    "A narrowband good-conductor surface requires a positive operating "
+                    "frequency."
+                )
+            surface_r = float(np.sqrt(omega0 * solver.mu0 / (2.0 * metal.conductivity)))
+        else:
+            key = id(metal.material)
+            if key not in discrete_cache:
+                discrete_cache[key] = _surface_discrete_state_space(solver, metal.material)
+            discrete = discrete_cache[key]
+
+        for e_name, h_name, sign in components:
+            entry = {
                 "e_name": e_name,
                 "h_name": h_name,
                 "sign": float(sign),
                 "axis": axis,
-                "electric_index": surface_node,
-                "magnetic_index": vacuum_h_index,
-                "e_selector": e_selector,
-                "h_selector": h_selector,
-                "h_prev": torch.zeros_like(h_tensor[h_selector]),
+                "electric_index": int(face.surface_node),
+                "magnetic_index": int(face.magnetic_index),
+                "full_plane": bool(face.full_plane),
+                "b_axis": b,
+                "c_axis": c,
+                "b_slice": b_slice,
+                "c_slice": c_slice,
+                "surface_r": surface_r,
+            }
+            if discrete is not None:
+                a_d, b_d, c_d, d_d, _fitted = discrete
+                # One state vector per edge in this face's transverse write window.
+                electric = getattr(solver, e_name)
+                e_index = _surface_write_index(
+                    electric.dim(), axis, int(face.surface_node), b, b_slice, c, c_slice
+                )
+                edge_count = electric[e_index].numel()
+                order = a_d.shape[0]
+                entry["ade"] = {
+                    "A": a_d,
+                    "B": b_d,
+                    "C": c_d,
+                    "D": d_d,
+                    "state": torch.zeros(
+                        (order, edge_count), device=solver.device, dtype=electric.dtype
+                    ),
+                }
+            writes.append(entry)
+
+    solver._surface_impedance = {"writes": writes}
+    solver.surface_impedance_enabled = True
+
+
+def _surface_occupancy_interior_mask(solver, metal):
+    """Zero the E-update coefficients inside a staircased (voxelized) good conductor.
+
+    The node occupancy is averaged onto each Yee E edge (the same node->edge stencil as
+    the permittivity), and an edge whose fill reaches half is treated as inside the metal
+    and clamped to zero (decay and curl scaled by zero), exactly the PEC-staircase
+    treatment. Surface edges are also zeroed here; the per-face Leontovich write overrides
+    the exposed transverse footprint each step before any field reads it.
+    """
+    occupancy = metal.interior_node_mask.to(device=solver.device, dtype=torch.float32)
+    for component in _E_COMPONENTS:
+        decay = getattr(solver, f"c{component.lower()}_decay", None)
+        if decay is None:
+            continue
+        fill = average_node_to_component(solver, occupancy, component)
+        keep = (fill < 0.5).to(fill.dtype)
+        for suffix in ("decay", "curl"):
+            name = f"c{component.lower()}_{suffix}"
+            setattr(solver, name, (getattr(solver, name) * keep).contiguous())
+
+
+def _voxel_surface_writes(solver, face, metal, axis, b, c, sn, omega0):
+    """Build the two tangential-E mask writes for one staircased face.
+
+    The face carries a boolean node-plane mask in ascending non-normal-axis order (the same
+    layout as a field tensor's transverse plane). For each tangential E component the mask
+    is reduced to that component's edge grid (an edge is on the surface when both bounding
+    nodes are), matching the paired vacuum-side H plane's transverse shape. The runtime
+    write is ``E_plane = where(mask, sign * R * H_plane, E_plane)``, static-shape and
+    graph-capturable. Only the narrowband good-conductor (order-0 resistance) surface is
+    supported for the staircase; ``metal.conductivity`` is guaranteed non-None by the
+    compiler.
+    """
+    if omega0 <= 0.0:
+        raise ValueError(
+            "A narrowband good-conductor surface requires a positive operating frequency."
+        )
+    surface_r = float(np.sqrt(omega0 * solver.mu0 / (2.0 * metal.conductivity)))
+    node_mask = face.transverse_mask.to(device=solver.device)
+    naxes = tuple(a for a in range(3) if a != axis)
+    writes = []
+    for e_axis, h_axis, sign in ((b, c, +sn), (c, b, -sn)):
+        # Reduce the node mask along the E component's own (edge) direction.
+        position = naxes.index(e_axis)
+        if position == 0:
+            edge_mask = node_mask[:-1, :] & node_mask[1:, :]
+        else:
+            edge_mask = node_mask[:, :-1] & node_mask[:, 1:]
+        writes.append(
+            {
+                "e_name": _E_COMPONENTS[e_axis],
+                "h_name": _H_COMPONENTS[h_axis],
+                "sign": float(sign),
+                "axis": axis,
+                "electric_index": int(face.surface_node),
+                "magnetic_index": int(face.magnetic_index),
+                "full_plane": False,
+                "surface_r": surface_r,
+                "mask": edge_mask.contiguous(),
             }
         )
-    solver._sibc = {
-        "surface_r": surface_r,
-        "surface_l": surface_l,
-        "faces": tuple(face_state),
-    }
-    solver.sibc_enabled = True
+    return writes
+
+
+def _surface_write_index(ndim, axis, axis_index, b_axis, b_slice, c_axis, c_slice):
+    """Index tuple selecting a face's transverse write window on a field tensor.
+
+    The paired tangential-E and vacuum-side-H tensors have identical sizes on the two
+    transverse (``b_axis``, ``c_axis``) dimensions of a surface plane, so the same node
+    cell window slices both to matching shapes; torch clamps a full-span stop to the
+    tensor size. ``axis_index`` is the (component-specific) plane index along the
+    outward-normal axis.
+    """
+    index = [slice(None)] * ndim
+    index[axis] = int(axis_index)
+    index[b_axis] = b_slice
+    index[c_axis] = c_slice
+    return tuple(index)
 
 
 def _store_nonlinear_external_decay(solver, ex_decay, ey_decay, ez_decay):
@@ -1384,7 +1590,7 @@ def build_update_coefficients(solver):
         _store_nonlinear_external_decay(solver, None, None, None)
         _build_full_aniso_curl_coefficients(solver)
         _apply_pec_edge_suppression(solver)
-        _configure_sibc(solver)
+        _configure_surface_impedance(solver)
         _store_coefficient_uniformity(solver)
         return
 
@@ -1451,7 +1657,7 @@ def build_update_coefficients(solver):
     _store_nonlinear_external_decay(solver, ex_decay, ey_decay, ez_decay)
     _build_full_aniso_curl_coefficients(solver)
     _apply_pec_edge_suppression(solver)
-    _configure_sibc(solver)
+    _configure_surface_impedance(solver)
     _store_coefficient_uniformity(solver)
 
 

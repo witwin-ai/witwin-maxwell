@@ -1,26 +1,37 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
+from .circuits import CircuitData
 from .monitors import (
     ClosedSurfaceMonitor,
     FinitePlaneMonitor,
+    IncidentPowerDensityMonitor,
     MediumMonitor,
     PermittivityMonitor,
     PowerLossMonitor,
 )
-from .network import NetworkData, PortData, _validate_safe_persistence
+from .network import (
+    EmbeddedNetworkData,
+    NetworkData,
+    PortData,
+    _validate_safe_persistence,
+)
+from .rational import FitReport, NetworkFitReport
 from .scene import prepare_scene
+from .thin_wire import WireData
 from .visualization import extract_orthogonal_slice, plot_slice_image
 
 _UNSET = object()
-RESULT_SNAPSHOT_SCHEMA_VERSION = 1
+RESULT_SNAPSHOT_SCHEMA_VERSION = 2
+_EMBEDDED_NETWORK_SNAPSHOT_SCHEMA_VERSION = 1
+_FIT_REPORT_SNAPSHOT_SCHEMA_VERSION = 1
 
 
 def _clone_mapping(data: dict[str, Any]) -> dict[str, Any]:
@@ -30,7 +41,7 @@ def _clone_mapping(data: dict[str, Any]) -> dict[str, Any]:
 def _cpu_serializable(value: Any):
     if isinstance(value, torch.Tensor):
         return value.detach().cpu()
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {key: _cpu_serializable(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_cpu_serializable(item) for item in value]
@@ -57,6 +68,129 @@ def _normalize_port_data_mapping(ports) -> dict[str, PortData]:
             )
         normalized[port_name] = data
     return normalized
+
+
+def _normalize_circuit_data_mapping(circuits) -> dict[str, CircuitData]:
+    if circuits is None:
+        return {}
+    if not isinstance(circuits, Mapping):
+        raise TypeError("circuits must be a mapping from circuit names to CircuitData.")
+    normalized = {}
+    for name, data in circuits.items():
+        circuit_name = str(name)
+        if circuit_name in normalized:
+            raise ValueError(f"Duplicate normalized circuit key {circuit_name!r}.")
+        if not isinstance(data, CircuitData):
+            raise TypeError(
+                f"Result circuit {circuit_name!r} must be a CircuitData instance."
+            )
+        if circuit_name != data.circuit_name:
+            raise ValueError(
+                f"Result circuit key {circuit_name!r} does not match "
+                f"CircuitData.circuit_name {data.circuit_name!r}."
+            )
+        normalized[circuit_name] = data
+    return normalized
+
+
+def _normalize_embedded_network_mapping(networks) -> dict[str, EmbeddedNetworkData]:
+    if networks is None:
+        return {}
+    if not isinstance(networks, Mapping):
+        raise TypeError(
+            "embedded_networks must map network names to EmbeddedNetworkData."
+        )
+    normalized = {}
+    for name, data in networks.items():
+        network_name = str(name)
+        if not isinstance(data, EmbeddedNetworkData):
+            raise TypeError(
+                f"Embedded network {network_name!r} must be EmbeddedNetworkData."
+            )
+        if network_name != data.name:
+            raise ValueError(
+                f"Embedded network key {network_name!r} does not match data name "
+                f"{data.name!r}."
+            )
+        normalized[network_name] = data
+    return normalized
+
+
+def _normalize_monitor_data_mapping(monitors) -> dict[str, Any]:
+    normalized = _clone_mapping(monitors)
+    for name, data in normalized.items():
+        if isinstance(data, WireData) and name != data.monitor_name:
+            raise ValueError(
+                f"Result monitor key {name!r} does not match "
+                f"WireData.monitor_name {data.monitor_name!r}."
+            )
+    return normalized
+
+
+def _wire_data_snapshot(data: WireData) -> dict[str, Any]:
+    _validate_safe_persistence(
+        data.metadata,
+        path=f"monitors[{data.monitor_name!r}].metadata",
+    )
+    return {
+        "schema_version": data.schema_version,
+        "data_type": "WireData",
+        "monitor_name": data.monitor_name,
+        "wire_name": data.wire_name,
+        "frequencies": _cpu_serializable(data.frequencies),
+        "current": _cpu_serializable(data.current),
+        "charge": _cpu_serializable(data.charge),
+        "ohmic_loss": _cpu_serializable(data.ohmic_loss),
+        "metadata": _cpu_serializable(data.metadata),
+    }
+
+
+def _wire_data_from_snapshot(payload: Mapping[str, Any]) -> WireData:
+    if not isinstance(payload, Mapping):
+        raise ValueError("WireData snapshot must contain a mapping payload.")
+    if payload.get("data_type") != "WireData":
+        raise ValueError("WireData snapshot has an invalid data_type.")
+    if payload.get("schema_version") != WireData.schema_version:
+        raise ValueError(
+            f"Unsupported WireData schema_version {payload.get('schema_version')!r}."
+        )
+    return WireData(
+        monitor_name=payload["monitor_name"],
+        wire_name=payload["wire_name"],
+        frequencies=payload["frequencies"],
+        current=payload["current"],
+        charge=payload["charge"],
+        ohmic_loss=payload["ohmic_loss"],
+        metadata=payload.get("metadata", {}),
+    )
+
+
+def _monitor_mapping_snapshot(monitors: Mapping[str, Any]) -> dict[str, Any]:
+    snapshot = {}
+    for name, data in monitors.items():
+        if isinstance(data, WireData):
+            snapshot[name] = {
+                "__witwin_result_monitor_type__": "WireData",
+                "payload": _wire_data_snapshot(data),
+            }
+        else:
+            snapshot[name] = _cpu_serializable(data)
+    return snapshot
+
+
+def _monitor_mapping_from_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise ValueError("Result monitor snapshot must contain a mapping payload.")
+    monitors = {}
+    for name, data in payload.items():
+        if (
+            isinstance(data, Mapping)
+            and data.get("__witwin_result_monitor_type__") == "WireData"
+        ):
+            monitors[name] = _wire_data_from_snapshot(data.get("payload"))
+        else:
+            monitors[name] = data
+    return monitors
 
 
 def _port_data_snapshot(data: PortData) -> dict[str, Any]:
@@ -98,6 +232,51 @@ def _network_data_snapshot(data: NetworkData | None):
         "phasor_convention": data.phasor_convention,
         "power_wave_convention": data.power_wave_convention,
         "matrix_order": "[frequency, output_port, input_port]",
+    }
+
+
+def _circuit_data_snapshot(data: CircuitData) -> dict[str, Any]:
+    return data._snapshot()
+
+
+def _fit_report_snapshot(report: FitReport | None) -> dict[str, Any] | None:
+    if report is None:
+        return None
+    if type(report) not in (FitReport, NetworkFitReport):
+        raise TypeError(
+            "Embedded network fit_report must be a FitReport or NetworkFitReport."
+        )
+    return {
+        "schema_version": _FIT_REPORT_SNAPSHOT_SCHEMA_VERSION,
+        "data_type": type(report).__name__,
+        "values": {
+            field.name: _cpu_serializable(getattr(report, field.name))
+            for field in fields(report)
+        },
+    }
+
+
+def _embedded_network_snapshot(data: EmbeddedNetworkData) -> dict[str, Any]:
+    _validate_safe_persistence(
+        data.metadata,
+        path=f"embedded_networks[{data.name!r}].metadata",
+    )
+    return {
+        "schema_version": _EMBEDDED_NETWORK_SNAPSHOT_SCHEMA_VERSION,
+        "data_type": "EmbeddedNetworkData",
+        "name": data.name,
+        "frequencies": _cpu_serializable(data.frequencies),
+        "port_names": data.port_names,
+        "voltage": _cpu_serializable(data.voltage),
+        "current": _cpu_serializable(data.current),
+        "port_power": _cpu_serializable(data.port_power),
+        "absorbed_power": _cpu_serializable(data.absorbed_power),
+        "generated_power": _cpu_serializable(data.generated_power),
+        "state_norm": _cpu_serializable(data.state_norm),
+        "model_id": data.model_id,
+        "fit_report": _fit_report_snapshot(data.fit_report),
+        "runtime_warnings": data.runtime_warnings,
+        "metadata": _cpu_serializable(data.metadata),
     }
 
 
@@ -150,6 +329,142 @@ def _network_data_from_snapshot(payload: Mapping[str, Any] | None) -> NetworkDat
         phasor_convention=payload["phasor_convention"],
         power_wave_convention=payload["power_wave_convention"],
     )
+
+
+def _circuit_data_from_snapshot(payload: Mapping[str, Any]) -> CircuitData:
+    return CircuitData._from_snapshot(payload)
+
+
+def _validate_result_snapshot_payload(
+    payload: Mapping[str, Any],
+    *,
+    sharded: bool,
+) -> None:
+    label = "Sharded Result metadata" if sharded else "Result checkpoint"
+    if payload.get("data_type") != "ResultSnapshot":
+        raise ValueError(f"{label} has an invalid data_type.")
+    version = payload.get("schema_version")
+    if version != RESULT_SNAPSHOT_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported {label.lower()} schema_version={version!r}.")
+    if "circuits" not in payload:
+        raise ValueError(f"{label} schema v2 is missing required key: circuits.")
+    if not isinstance(payload["circuits"], Mapping):
+        raise ValueError(f"{label} circuits must contain a mapping payload.")
+
+
+def _fit_report_from_snapshot(payload: Mapping[str, Any] | None) -> FitReport | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, Mapping):
+        raise ValueError("Embedded network fit report must contain a mapping payload.")
+    version = payload.get("schema_version")
+    if version != _FIT_REPORT_SNAPSHOT_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported embedded network fit report schema_version {version!r}."
+        )
+    data_type = payload.get("data_type")
+    report_type = {
+        "FitReport": FitReport,
+        "NetworkFitReport": NetworkFitReport,
+    }.get(data_type)
+    if report_type is None:
+        raise ValueError(
+            f"Embedded network fit report has an invalid data_type {data_type!r}."
+        )
+    values = payload.get("values")
+    if not isinstance(values, Mapping):
+        raise ValueError("Embedded network fit report values must be a mapping.")
+    expected = {field.name for field in fields(report_type)}
+    actual = set(values)
+    missing = expected - actual
+    unexpected = actual - expected
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing {', '.join(sorted(missing))}")
+        if unexpected:
+            details.append(f"unexpected {', '.join(sorted(unexpected))}")
+        raise ValueError(
+            "Embedded network fit report fields are invalid: " + "; ".join(details) + "."
+        )
+    try:
+        return report_type(**dict(values))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Embedded network fit report values are invalid.") from exc
+
+
+def _embedded_network_from_snapshot(
+    payload: Mapping[str, Any],
+) -> EmbeddedNetworkData:
+    if not isinstance(payload, Mapping):
+        raise ValueError("Embedded network snapshot must contain a mapping payload.")
+    if payload.get("data_type") != "EmbeddedNetworkData":
+        raise ValueError("Embedded network snapshot has an invalid data_type.")
+    version = payload.get("schema_version")
+    if version != _EMBEDDED_NETWORK_SNAPSHOT_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported EmbeddedNetworkData schema_version {version!r}."
+        )
+    required = {
+        "name",
+        "frequencies",
+        "port_names",
+        "voltage",
+        "current",
+        "port_power",
+        "absorbed_power",
+        "generated_power",
+        "state_norm",
+        "model_id",
+        "fit_report",
+        "runtime_warnings",
+        "metadata",
+    }
+    missing = required.difference(payload)
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise ValueError(f"Embedded network snapshot is missing required keys: {names}.")
+    _validate_safe_persistence(
+        payload["metadata"],
+        path=f"embedded_networks[{payload['name']!r}].metadata",
+    )
+    fit_report = _fit_report_from_snapshot(payload["fit_report"])
+    try:
+        return EmbeddedNetworkData(
+            name=payload["name"],
+            frequencies=payload["frequencies"],
+            port_names=tuple(payload["port_names"]),
+            voltage=payload["voltage"],
+            current=payload["current"],
+            port_power=payload["port_power"],
+            absorbed_power=payload["absorbed_power"],
+            generated_power=payload["generated_power"],
+            state_norm=payload["state_norm"],
+            model_id=payload["model_id"],
+            fit_report=fit_report,
+            runtime_warnings=tuple(payload["runtime_warnings"]),
+            metadata=payload["metadata"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Embedded network snapshot values are invalid.") from exc
+
+
+def _embedded_networks_from_snapshot(payload: Any) -> dict[str, EmbeddedNetworkData]:
+    if payload is None:
+        return {}
+    if not isinstance(payload, Mapping):
+        raise ValueError("Result embedded_networks snapshot must contain a mapping.")
+    restored = {}
+    for key, value in payload.items():
+        name = str(key)
+        data = _embedded_network_from_snapshot(value)
+        if name != data.name:
+            raise ValueError(
+                f"Embedded network snapshot key {name!r} does not match data name "
+                f"{data.name!r}."
+            )
+        restored[name] = data
+    return restored
 
 
 def _resolve_result_frequencies(*, frequency: float | None, frequencies) -> tuple[float, ...]:
@@ -456,6 +771,29 @@ def _crop_plane_monitor_payload(payload: dict[str, Any], monitor: FinitePlaneMon
     selected[coord_u_name] = selected_u
     selected[coord_v_name] = selected_v
     selected["coords"] = (selected_u, selected_v)
+    if "cell_widths" in payload:
+        width_u = payload["cell_widths"][coord_u_name]
+        width_v = payload["cell_widths"][coord_v_name]
+        selected["cell_widths"] = {
+            coord_u_name: (
+                width_u
+                if u_indices is None
+                else (
+                    width_u.index_select(0, u_indices)
+                    if isinstance(width_u, torch.Tensor)
+                    else np.asarray(width_u)[u_indices]
+                )
+            ),
+            coord_v_name: (
+                width_v
+                if v_indices is None
+                else (
+                    width_v.index_select(0, v_indices)
+                    if isinstance(width_v, torch.Tensor)
+                    else np.asarray(width_v)[v_indices]
+                )
+            ),
+        }
     selected["monitor_type"] = "finite_plane"
     selected["center"] = monitor.position
     selected["size"] = monitor.size
@@ -850,10 +1188,14 @@ class Result:
         fields: dict[str, torch.Tensor] | None = None,
         monitors: dict[str, Any] | None = None,
         ports: Mapping[str, PortData] | None = None,
+        circuits: Mapping[str, CircuitData] | None = None,
         network: NetworkData | None = None,
+        embedded_networks: Mapping[str, EmbeddedNetworkData] | None = None,
+        array_run_data=None,
         metadata: dict[str, Any] | None = None,
         solver_stats: dict[str, Any] | None = None,
         raw_output: Any = None,
+        breakdown=None,
     ):
         self.method = method
         self.scene = scene
@@ -862,17 +1204,38 @@ class Result:
         self.frequency = self.frequencies[0]
         self.solver = solver
         self._fields = _clone_mapping(fields)
-        self._monitors = _clone_mapping(monitors)
+        self._monitors = _normalize_monitor_data_mapping(monitors)
         self._ports = _normalize_port_data_mapping(ports)
+        self._circuits = _normalize_circuit_data_mapping(circuits)
+        self._embedded_networks = _normalize_embedded_network_mapping(embedded_networks)
         if network is not None and not isinstance(network, NetworkData):
             raise TypeError("network must be a NetworkData or None.")
         self._network = network
+        self._array_run_data = array_run_data
         self._metadata = _clone_mapping(metadata)
         self._solver_stats = _clone_mapping(solver_stats)
         self._sharded_manifest = None
         self._shard_paths: tuple[Path, ...] = ()
         self.raw_output = raw_output
+        self._breakdown = breakdown
         self.plot = ResultPlotter(self)
+
+    @property
+    def breakdown_data(self):
+        """Deterministic dielectric-breakdown outputs, or ``None`` for scenes with no
+        breakdown material. See :class:`witwin.maxwell.breakdown.BreakdownResultData`.
+
+        Distinct from :meth:`breakdown`, which returns the non-feedback
+        dielectric-stress record of a named :class:`BreakdownMonitor`."""
+        return self._breakdown
+
+    @property
+    def breakdown_events(self):
+        """The typed breakdown event log ordered by ``(step, cell_index)`` (empty tuple
+        when breakdown is inactive)."""
+        if self._breakdown is None:
+            return ()
+        return self._breakdown.events
 
     @property
     def prepared_scene(self):
@@ -906,13 +1269,265 @@ class Result:
     def monitors(self) -> dict[str, Any]:
         return dict(self._monitors)
 
+    def _esd_sources(self):
+        from .esd import ESDCurrentSource
+
+        scene = self.scene
+        sources = getattr(scene, "sources", ()) if scene is not None else ()
+        return {
+            source.name: source
+            for source in sources
+            if isinstance(source, ESDCurrentSource)
+        }
+
+    def esd_waveform_names(self) -> tuple[str, ...]:
+        """Names of ESD current sources declared on the run scene."""
+
+        return tuple(self._esd_sources())
+
+    def esd_waveform(self, name: str):
+        """Return the typed ESD injection record for source ``name``.
+
+        Capability level: stress-only. Exposes the target waveform diagnostics,
+        the charge-conserving projection of the injected current onto the run
+        time grid, and full provenance (standard revision, level voltage,
+        colocation-independent scalar metrics, model version).
+
+        The record also carries a ``measured`` port record recovered from the
+        run when terminal-port voltage/current was recorded for the bound port
+        (the RF ``PortData``), so users can compare the injected/target current
+        against the measured port. For the Phase-1 ideal-current injection path
+        no terminal-port recorder runs (the ESD source lowers to a volumetric
+        current source), so ``measured`` is ``None`` and the injected current on
+        the run grid is the ``resampled`` record; see :class:`ESDPortRecord` for
+        the documented target-vs-measured limitation and workaround.
+        """
+
+        from .esd import ESDPortRecord
+
+        sources = self._esd_sources()
+        if name not in sources:
+            available = ", ".join(sorted(sources)) or "<none>"
+            raise KeyError(
+                f"ESD waveform {name!r} is not present; available ESD sources: {available}."
+            )
+        source = sources[name]
+        waveform = source.waveform
+        diagnostics = waveform.diagnostics()
+        resampled = None
+        dt = None
+        metadata = self._metadata or {}
+        if metadata.get("dt") is not None:
+            dt = float(metadata["dt"])
+        elif self.solver is not None and getattr(self.solver, "dt", None) is not None:
+            dt = float(self.solver.dt)
+        if dt is not None and dt > 0.0:
+            time_steps = metadata.get("time_steps")
+            t_end = None
+            if time_steps is not None:
+                t_end = min(float(time_steps) * dt, float(waveform.support[1]))
+                if t_end <= float(waveform.support[0]):
+                    t_end = float(waveform.support[1])
+            resampled = waveform.resample_to_grid(dt, t_end=t_end)
+        provenance = source.provenance()
+        # Expose a measured terminal-port record if the run recorded one for this
+        # port (RF PortData); None for the ideal-current injection path.
+        measured = self._ports.get(source.port_name)
+        return ESDPortRecord(
+            name=source.name,
+            port_name=source.port_name,
+            diagnostics=diagnostics,
+            resampled=resampled,
+            provenance=provenance,
+            measured=measured,
+        )
+
+    def _esd_generator_circuits(self):
+        scene = self.scene
+        circuits = getattr(scene, "circuits", ()) if scene is not None else ()
+        return {
+            circuit.name: dict(circuit.metadata["esd_generator"])
+            for circuit in circuits
+            if isinstance(getattr(circuit, "metadata", None), dict)
+            and "esd_generator" in circuit.metadata
+        }
+
+    def esd_generator_names(self) -> tuple[str, ...]:
+        """Names of circuit-driven ESD generator networks on the run scene.
+
+        These are the circuits assembled by :meth:`ESDVoltageSource.build_circuit`
+        (the source-impedance-network ESD excitation), identified by the
+        generator provenance stamped on their circuit metadata.
+        """
+
+        return tuple(self._esd_generator_circuits())
+
+    def esd_generator(self, name: str) -> dict[str, Any]:
+        """Return the ESD generator-network provenance for circuit ``name``.
+
+        Capability level: stress-only. The provenance carries the versioned
+        waveform metadata (standard, revision, level voltage, model version) and
+        the source-network element values (330 ohm discharge resistor / 150 pF
+        storage capacitor by default), documenting that this is a circuit
+        approximation of the standard network rather than gun/system
+        certification. The coupled port voltage/current time series lives on the
+        associated :class:`CircuitData` (``result.circuit(name)``).
+        """
+
+        generators = self._esd_generator_circuits()
+        if name not in generators:
+            available = ", ".join(sorted(generators)) or "<none>"
+            raise KeyError(
+                f"ESD generator {name!r} is not present; available: {available}."
+            )
+        return generators[name]
+
+    def breakdown_names(self) -> tuple[str, ...]:
+        """Names of BreakdownMonitor stress records present in the result."""
+
+        from .breakdown_stress import BreakdownStressData
+
+        return tuple(
+            name
+            for name, data in self._monitors.items()
+            if isinstance(data, BreakdownStressData)
+        )
+
+    def breakdown(self, name: str):
+        """Return the typed non-feedback dielectric-stress record for ``name``.
+
+        Capability level: stress-only. Exposes peak field, exceedance duration,
+        longest contiguous exceedance, qualifying sustained-stress locations, and
+        per-cell maps (kept on device), with full threshold/colocation provenance.
+        """
+
+        from .breakdown_stress import BreakdownStressData
+
+        payload = self._monitors.get(name)
+        if not isinstance(payload, BreakdownStressData):
+            available = ", ".join(sorted(self.breakdown_names())) or "<none>"
+            raise KeyError(
+                f"Breakdown stress record {name!r} is not present; available: {available}."
+            )
+        return payload
+
+    def _extract_time_series(self, monitor_name: str):
+        payload = self._monitors.get(monitor_name)
+        if payload is None:
+            raise KeyError(
+                f"Time series {monitor_name!r} is not present in the result monitors."
+            )
+        if not isinstance(payload, Mapping):
+            raise TypeError(
+                f"Monitor {monitor_name!r} does not expose a time-series payload."
+            )
+        time = payload.get("t")
+        if time is None:
+            raise ValueError(f"Monitor {monitor_name!r} has no time axis 't'.")
+        if "flux" in payload:
+            values = payload["flux"]
+        elif "data" in payload:
+            values = payload["data"]
+        elif "field" in payload:
+            values = payload["field"]
+        else:
+            raise ValueError(
+                f"Monitor {monitor_name!r} does not expose a scalar time series "
+                "('data', 'field', or 'flux')."
+            )
+        return time, values
+
+    def component_stress_names(self) -> tuple[str, ...]:
+        """Names of ComponentStressMonitor bindings declared on the run scene."""
+
+        from .monitors import ComponentStressMonitor
+
+        scene = self.scene
+        monitors = getattr(scene, "resolved_monitors", None)
+        monitor_iter = monitors() if callable(monitors) else getattr(scene, "monitors", ())
+        return tuple(
+            monitor.name
+            for monitor in monitor_iter
+            if isinstance(monitor, ComponentStressMonitor)
+        )
+
+    def component_stress(self, name: str):
+        """Return the typed component port-stress and rating-exceedance summary.
+
+        Capability level: stress-only. Reduces the bound voltage/current time
+        series into ``P = V I``, cumulative ``integral P dt`` and an exceedance
+        summary versus the declared :class:`ComponentRating` envelope.
+        """
+
+        from .monitors import ComponentStressMonitor
+        from .breakdown_stress import ComponentStressData
+
+        scene = self.scene
+        monitors = getattr(scene, "resolved_monitors", None)
+        monitor_iter = monitors() if callable(monitors) else getattr(scene, "monitors", ())
+        binding = None
+        for monitor in monitor_iter:
+            if isinstance(monitor, ComponentStressMonitor) and monitor.name == name:
+                binding = monitor
+                break
+        if binding is None:
+            available = ", ".join(sorted(self.component_stress_names())) or "<none>"
+            raise KeyError(
+                f"ComponentStressMonitor {name!r} is not present; available: {available}."
+            )
+        v_time, voltage = self._extract_time_series(binding.voltage_series)
+        i_time, current = self._extract_time_series(binding.current_series)
+        if not isinstance(v_time, torch.Tensor):
+            v_time = torch.as_tensor(v_time)
+        if not isinstance(i_time, torch.Tensor):
+            i_time = torch.as_tensor(i_time)
+        if v_time.numel() != i_time.numel():
+            raise ValueError(
+                f"ComponentStressMonitor {name!r} voltage series "
+                f"{binding.voltage_series!r} and current series "
+                f"{binding.current_series!r} have mismatched sample counts."
+            )
+        i_time_cmp = i_time.to(device=v_time.device, dtype=v_time.dtype)
+        span = torch.abs(v_time[-1] - v_time[0]) if v_time.numel() > 1 else torch.abs(v_time).max()
+        atol = float(span) * 1e-6 if float(span) > 0.0 else 1e-12
+        if not torch.allclose(v_time, i_time_cmp, rtol=1e-6, atol=atol):
+            raise ValueError(
+                f"ComponentStressMonitor {name!r} voltage series "
+                f"{binding.voltage_series!r} and current series "
+                f"{binding.current_series!r} are recorded on different time axes; "
+                "voltage and current must share a common time grid for power and "
+                "energy integration."
+            )
+        voltage = voltage if isinstance(voltage, torch.Tensor) else torch.as_tensor(voltage)
+        current = current if isinstance(current, torch.Tensor) else torch.as_tensor(current)
+        return ComponentStressData.from_time_series(
+            v_time,
+            voltage,
+            current,
+            binding.rating,
+            name=binding.name,
+            port_name=binding.port,
+            provenance_extra={
+                "voltage_series": binding.voltage_series,
+                "current_series": binding.current_series,
+            },
+        )
+
     @property
     def ports(self) -> dict[str, PortData]:
         return dict(self._ports)
 
     @property
+    def circuits(self) -> dict[str, CircuitData]:
+        return dict(self._circuits)
+
+    @property
     def network(self) -> NetworkData | None:
         return self._network
+
+    @property
+    def embedded_networks(self) -> dict[str, EmbeddedNetworkData]:
+        return dict(self._embedded_networks)
 
     @property
     def solver_stats(self) -> dict[str, Any]:
@@ -929,6 +1544,39 @@ class Result:
     @property
     def shard_paths(self) -> tuple[Path, ...]:
         return self._shard_paths
+
+    @property
+    def electrostatic(self):
+        """Typed electrostatic solver output (``ElectrostaticResultData``)."""
+        from .electrostatic.runtime import ElectrostaticResultData
+
+        if self.method != "electrostatic" or not isinstance(self.raw_output, ElectrostaticResultData):
+            raise AttributeError(
+                "result.electrostatic is only available for Simulation.electrostatic(...) runs."
+            )
+        return self.raw_output
+
+    @property
+    def electrostatic_prebias(self):
+        """Provenance of the electrostatic pre-bias initial condition, or ``None``.
+
+        Populated when the FDTD run was seeded with an
+        :class:`~witwin.maxwell.ElectrostaticInitialCondition` (see
+        ``Simulation.fdtd(initial_condition=...)``). Carries the DC solve
+        diagnostics, the mapped-field discrete-Gauss residual, and the tolerance."""
+        metadata = self._metadata or {}
+        return metadata.get("electrostatic_prebias")
+
+    @property
+    def capacitance(self):
+        """Typed capacitance-matrix output (``CapacitanceData``)."""
+        from .electrostatic.capacitance import CapacitanceData
+
+        if self.method != "capacitance" or not isinstance(self.raw_output, CapacitanceData):
+            raise AttributeError(
+                "result.capacitance is only available for Simulation.capacitance(...) runs."
+            )
+        return self.raw_output
 
     @property
     def E(self) -> ResultFieldAccessor:
@@ -999,6 +1647,13 @@ class Result:
             raise KeyError(f"Monitor {name!r} is not available in this result.")
 
         payload = self._monitors[name]
+        if isinstance(payload, WireData):
+            if frequency is not None or freq_index is not None:
+                raise ValueError(
+                    "WireData preserves its explicit frequency axis; retrieve the "
+                    "full typed result and select its tensors explicitly."
+                )
+            return payload
         monitor_frequencies = _monitor_frequencies(payload)
         selected_index = _resolve_frequency_index(
             monitor_frequencies,
@@ -1023,6 +1678,14 @@ class Result:
         freq_index: int | None = None,
         resolve_modal: bool = True,
     ):
+        payload = self._monitors.get(name)
+        if isinstance(payload, WireData):
+            if frequency is not None or freq_index is not None:
+                raise ValueError(
+                    "WireData preserves its explicit frequency axis; retrieve the "
+                    "full typed result and select its tensors explicitly."
+                )
+            return payload
         public_monitor = _find_scene_monitor(self.scene, name)
         if isinstance(public_monitor, PowerLossMonitor):
             if frequency is not None or freq_index is not None:
@@ -1087,6 +1750,26 @@ class Result:
             )
         return self._ports[port_name]
 
+    def circuit(self, name: str) -> CircuitData:
+        circuit_name = str(name)
+        if circuit_name not in self._circuits:
+            choices = tuple(self._circuits)
+            raise KeyError(
+                f"Circuit {circuit_name!r} is not available in this result. "
+                f"Choices: {choices}."
+            )
+        return self._circuits[circuit_name]
+
+    def embedded_network(self, name: str) -> EmbeddedNetworkData:
+        network_name = str(name)
+        if network_name not in self._embedded_networks:
+            choices = tuple(self._embedded_networks)
+            raise KeyError(
+                f"Embedded network {network_name!r} is not available in this result. "
+                f"Choices: {choices}."
+            )
+        return self._embedded_networks[network_name]
+
     def antenna(
         self,
         *,
@@ -1110,6 +1793,38 @@ class Result:
             self,
             surface=surface,
             driven_port=driven_port,
+            polarization=polarization,
+            theta=theta,
+            phi=phi,
+            theta_points=theta_points,
+            phi_points=phi_points,
+            radius=radius,
+            phase_center=phase_center,
+            frame=frame,
+            batch_size=batch_size,
+        )
+
+    def array_basis(
+        self,
+        *,
+        monitor: str,
+        polarization=None,
+        theta=None,
+        phi=None,
+        theta_points: int = 181,
+        phi_points: int = 361,
+        radius=1.0,
+        phase_center=None,
+        frame=None,
+        batch_size: int = 1024,
+    ):
+        """Build a reusable power-wave/embedded-pattern basis from a PortSweep."""
+
+        from .postprocess.array import array_basis_from_result
+
+        return array_basis_from_result(
+            self,
+            monitor=monitor,
             polarization=polarization,
             theta=theta,
             phi=phi,
@@ -1198,6 +1913,103 @@ class Result:
             source_result_fingerprint=f"runtime-result:{id(self):x}",
         )
 
+    def incident_power_density(
+        self,
+        monitor: str,
+        *,
+        spatial_average=_UNSET,
+    ):
+        """Reduce a declared IncidentPowerDensityMonitor to incident power density.
+
+        Pure result-domain reduction: forms the time-averaged normal Poynting
+        component ``S.n`` per cell, its magnitude ``|S.n|`` (exposure incident
+        power density in W/m^2), the plane-integrated flux, and — when the monitor
+        (or an explicit ``spatial_average`` override) requests a window area — the
+        versioned ``spatial-average-v1`` moving-window average of ``|S.n|``. Fails
+        closed when the named monitor is not an
+        :class:`IncidentPowerDensityMonitor`.
+        """
+
+        from .postprocess.incident_power import compute_incident_power_density
+
+        public_monitor = _find_scene_monitor(self.scene, monitor)
+        if not isinstance(public_monitor, IncidentPowerDensityMonitor):
+            raise KeyError(
+                "Result.incident_power_density requires a declared "
+                f"IncidentPowerDensityMonitor; {monitor!r} is not one."
+            )
+        if spatial_average is _UNSET:
+            area = public_monitor.spatial_average
+        elif spatial_average is None:
+            area = None
+        else:
+            area = float(spatial_average)
+        payload = self.raw_monitor(monitor)
+        return compute_incident_power_density(
+            payload,
+            monitor_name=monitor,
+            spatial_average_area=area,
+        )
+
+    def sar(
+        self,
+        monitor: str,
+        *,
+        averaging=None,
+        normalization=None,
+        electric_fields=None,
+        volume_channels=None,
+    ):
+        """Reduce a PowerLossMonitor and the tissue mass model to point SAR.
+
+        Pure result-domain reduction: it never runs a solver. It fails explicitly
+        when the named ``PowerLossMonitor``, the frequency-domain fields, or the
+        tissue mass densities required to form SAR are missing. ``averaging`` (a
+        :class:`~witwin.maxwell.SARAveraging`) is recorded in the result
+        provenance; the mass-averaging computation is delivered by a later stage.
+        ``normalization`` defaults to unit source amplitude.
+        """
+
+        from .compiler.mass_density import compile_mass_density
+        from .compiler.power_loss import compile_power_loss_monitor
+        from .postprocess.sar import compute_sar
+        from .sar import PowerNormalization
+
+        public_monitor = _find_scene_monitor(self.scene, monitor)
+        if not isinstance(public_monitor, PowerLossMonitor):
+            raise KeyError(
+                f"Result.sar requires a declared PowerLossMonitor; {monitor!r} is not one."
+            )
+        if self.method != "fdtd":
+            raise NotImplementedError(
+                "Result.sar currently consumes FDTD PowerLossData only."
+            )
+        resolved_normalization = (
+            PowerNormalization.none() if normalization is None else normalization
+        )
+
+        power_loss = self.power_loss(
+            monitor,
+            electric_fields=electric_fields,
+            volume_channels=volume_channels,
+        )
+        prepared = self.prepared_scene
+        mass = compile_mass_density(prepared)
+        compiled_loss = compile_power_loss_monitor(prepared, public_monitor)
+        power_scale = resolved_normalization.resolve_scale(
+            result=self, frequencies=power_loss.frequencies
+        )
+        return compute_sar(
+            prepared_scene=prepared,
+            monitor=public_monitor,
+            power_loss=power_loss,
+            mass=mass,
+            compiled_loss=compiled_loss,
+            normalization=resolved_normalization,
+            averaging=averaging,
+            power_scale=power_scale,
+        )
+
     def material(self, name: str = "eps_r", *, expand_symmetry: bool = False) -> torch.Tensor:
         prepared_scene = self.prepared_scene
         key = name.lower()
@@ -1232,44 +2044,72 @@ class Result:
         stats["num_fields"] = len(self._fields)
         stats["num_monitors"] = len(self._monitors)
         stats["num_ports"] = len(self._ports)
+        stats["num_circuits"] = len(self._circuits)
         stats["has_network"] = self._network is not None
+        stats["num_embedded_networks"] = len(self._embedded_networks)
         return stats
+
+    def _snapshot_payload(self, *, fields: Mapping[str, torch.Tensor]) -> dict[str, Any]:
+        """Build and validate the detached payload before any I/O side effect."""
+
+        return {
+            "schema_version": RESULT_SNAPSHOT_SCHEMA_VERSION,
+            "data_type": "ResultSnapshot",
+            "format_version": 1,
+            "method": self.method,
+            "frequency": self.frequency,
+            "frequencies": self.frequencies,
+            "fields": {
+                name: tensor.detach().cpu()
+                for name, tensor in fields.items()
+            },
+            "monitors": _monitor_mapping_snapshot(self._monitors),
+            "ports": {
+                name: _port_data_snapshot(data)
+                for name, data in self._ports.items()
+            },
+            "circuits": {
+                name: _circuit_data_snapshot(data)
+                for name, data in self._circuits.items()
+            },
+            "network": _network_data_snapshot(self._network),
+            "embedded_networks": {
+                name: _embedded_network_snapshot(data)
+                for name, data in self._embedded_networks.items()
+            },
+            "metadata": _cpu_serializable(self._metadata),
+            "solver_stats": _cpu_serializable(self._solver_stats),
+        }
 
     def save(self, path: str | Path):
         """Save a detached CPU data snapshot.
 
-        Port payloads use the same versioned schema as ``PortData.save``. The
-        snapshot intentionally omits the declarative Scene, prepared Scene, solver,
-        raw runtime output, and every live autograd graph. Loading therefore requires
-        the caller to supply the corresponding declarative Scene.
+        Port payloads use the same versioned schema as ``PortData.save``. Embedded
+        network diagnostics use a nested schema that preserves the concrete fit
+        report type. The snapshot intentionally omits the declarative Scene,
+        prepared Scene, solver, raw runtime output, and every live autograd graph.
+        Loading therefore requires the caller to supply the corresponding
+        declarative Scene.
+
+        Retained in-memory array sweep columns are also omitted. Call
+        ``result.array_basis(...)`` and save the resulting ``ArrayBasisData`` before
+        saving when delayed embedded-pattern reuse is required.
         """
 
+        payload = self._snapshot_payload(fields=self._fields)
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "schema_version": RESULT_SNAPSHOT_SCHEMA_VERSION,
-                "data_type": "ResultSnapshot",
-                "format_version": 1,
-                "method": self.method,
-                "frequency": self.frequency,
-                "frequencies": self.frequencies,
-                "fields": {name: tensor.detach().cpu() for name, tensor in self._fields.items()},
-                "monitors": _cpu_serializable(self._monitors),
-                "ports": {
-                    name: _port_data_snapshot(data)
-                    for name, data in self._ports.items()
-                },
-                "network": _network_data_snapshot(self._network),
-                "metadata": _cpu_serializable(self._metadata),
-                "solver_stats": _cpu_serializable(self._solver_stats),
-            },
-            output_path,
-        )
+        torch.save(payload, output_path)
 
     def save_sharded(self, directory: str | Path):
         """Persist owned field shards without assembling global field tensors."""
 
+        destination = Path(directory)
+        if destination.exists():
+            raise FileExistsError(
+                "Sharded Result directory already exists; refusing non-atomic overwrite: "
+                f"{destination}."
+            )
         exporter = getattr(self.solver, "export_field_shards", None)
         if not callable(exporter):
             raise RuntimeError(
@@ -1278,27 +2118,12 @@ class Result:
             )
         from .fdtd.distributed.persistence import write_sharded_result
 
-        payload = {
-            "schema_version": RESULT_SNAPSHOT_SCHEMA_VERSION,
-            "data_type": "ResultSnapshot",
-            "format_version": 1,
-            "method": self.method,
-            "frequency": self.frequency,
-            "frequencies": self.frequencies,
-            "fields": {},
-            "monitors": _cpu_serializable(self._monitors),
-            "ports": {
-                name: _port_data_snapshot(data)
-                for name, data in self._ports.items()
-            },
-            "network": _network_data_snapshot(self._network),
-            "metadata": _cpu_serializable(self._metadata),
-            "solver_stats": _cpu_serializable(self._solver_stats),
-        }
+        payload = self._snapshot_payload(fields={})
+        shard_artifacts = exporter()
         return write_sharded_result(
-            directory,
+            destination,
             result_payload=payload,
-            shard_artifacts=exporter(),
+            shard_artifacts=shard_artifacts,
             frequencies=self.frequencies,
         )
 
@@ -1326,11 +2151,7 @@ class Result:
         )
         if not isinstance(payload, dict):
             raise ValueError("Result checkpoint must contain a mapping payload.")
-        if payload.get("data_type") != "ResultSnapshot":
-            raise ValueError("Result checkpoint has an invalid data_type.")
-        version = payload.get("schema_version")
-        if version != RESULT_SNAPSHOT_SCHEMA_VERSION:
-            raise ValueError(f"Unsupported Result schema_version={version!r}.")
+        _validate_result_snapshot_payload(payload, sharded=False)
         missing = {"method", "fields", "monitors"}.difference(payload)
         if missing:
             names = ", ".join(sorted(missing))
@@ -1343,12 +2164,19 @@ class Result:
             frequency=payload.get("frequency"),
             frequencies=payload.get("frequencies"),
             fields=payload["fields"],
-            monitors=payload["monitors"],
+            monitors=_monitor_mapping_from_snapshot(payload["monitors"]),
             ports={
                 name: _port_data_from_snapshot(data)
                 for name, data in payload.get("ports", {}).items()
             },
+            circuits={
+                name: _circuit_data_from_snapshot(data)
+                for name, data in payload["circuits"].items()
+            },
             network=_network_data_from_snapshot(payload.get("network")),
+            embedded_networks=_embedded_networks_from_snapshot(
+                payload.get("embedded_networks")
+            ),
             metadata=payload.get("metadata"),
             solver_stats=payload.get("solver_stats"),
         )
@@ -1375,13 +2203,7 @@ class Result:
             map_location=map_location,
         )
         payload = loaded.result_payload
-        if payload.get("data_type") != "ResultSnapshot":
-            raise ValueError("Sharded Result metadata has an invalid data_type.")
-        version = payload.get("schema_version")
-        if version != RESULT_SNAPSHOT_SCHEMA_VERSION:
-            raise ValueError(
-                f"Unsupported sharded Result schema_version={version!r}."
-            )
+        _validate_result_snapshot_payload(payload, sharded=True)
         missing = {"method", "monitors"}.difference(payload)
         if missing:
             names = ", ".join(sorted(missing))
@@ -1393,12 +2215,19 @@ class Result:
             frequency=payload.get("frequency"),
             frequencies=payload.get("frequencies"),
             fields=loaded.fields,
-            monitors=payload["monitors"],
+            monitors=_monitor_mapping_from_snapshot(payload["monitors"]),
             ports={
                 name: _port_data_from_snapshot(data)
                 for name, data in payload.get("ports", {}).items()
             },
+            circuits={
+                name: _circuit_data_from_snapshot(data)
+                for name, data in payload["circuits"].items()
+            },
             network=_network_data_from_snapshot(payload.get("network")),
+            embedded_networks=_embedded_networks_from_snapshot(
+                payload.get("embedded_networks")
+            ),
             metadata=payload.get("metadata"),
             solver_stats=payload.get("solver_stats"),
         )

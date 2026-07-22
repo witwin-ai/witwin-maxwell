@@ -1,0 +1,33 @@
+{
+  "after_composite": {
+    "allocs_per_step": 0.0,
+    "launches_per_step": 27.0,
+    "memcpy_dtod_per_step": 4.0
+  },
+  "before_sequential_lu": {
+    "allocs_per_step": 0.0,
+    "launches_per_step": 78.0,
+    "memcpy_dtod_per_step": 4.0
+  },
+  "configuration": {
+    "grid_cells_per_axis": 48,
+    "model_order": 32,
+    "path": "eager delay-free connected network feedback block",
+    "ports": 8,
+    "profiled_steps": 40,
+    "state_count": 256,
+    "warmup_steps": 8
+  },
+  "environment": {
+    "cuda_runtime": "13.0",
+    "device_name": "NVIDIA RTX A6000",
+    "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "torch": "2.13.0+cu130"
+  },
+  "kind": "network_coupling_op_stream",
+  "launch_reduction_fraction": 0.6538461538461539,
+  "numerical_equivalence_residual_over_bound": 0.00037396521656773984,
+  "schema_version": 1,
+  "timestamp_utc": "2026-07-19T14:03:08.743054+00:00"
+}

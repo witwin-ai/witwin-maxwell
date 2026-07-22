@@ -27,13 +27,36 @@ from ..excitation import (
     tfsf_incident_is_gpu_driven,
 )
 from ..ports import (
-    accumulate_port_observers,
+    _accumulate_embedded_port_observers_gpu,
     apply_port_runtimes,
+    complete_port_observer_graph,
     complete_port_spectral_normalization,
     finalize_port_data,
+    make_port_observer_runner,
     prepare_port_runtimes,
     prepare_port_spectral_accumulators,
 )
+from ..circuits import (
+    finalize_circuit_data,
+    prepare_circuit_graph_runners,
+    prepare_circuit_time_series,
+)
+from ..networks import (
+    apply_network_runtimes,
+    finalize_embedded_networks,
+    make_network_runner,
+    prepare_network_runtimes,
+)
+from ..wire import (
+    accumulate_wire_monitors,
+    complete_wire_monitor_normalization,
+    deposit_wire_current,
+    finalize_wire_data,
+    initialize_wire_runtime,
+    prepare_wire_monitors,
+    sample_and_update_wire,
+)
+from .breakdown import advance_breakdown_state, initialize_breakdown_runtime
 
 
 def iter_cpml_memory_regions(solver, attr_name):
@@ -102,6 +125,8 @@ def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, *, imag=Fa
         CyHxZ=solver.cpml_c_h_z,
         invDy=solver.inv_dy_h,
         invDz=solver.inv_dz_h,
+        uniformDecay=solver._coefficient_uniformity["chx_decay"],
+        uniformCurl=solver._coefficient_uniformity["chx_curl"],
     ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHy3D(
         Hy=hy,
@@ -119,6 +144,8 @@ def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, *, imag=Fa
         CyHyZ=solver.cpml_c_h_z,
         invDx=solver.inv_dx_h,
         invDz=solver.inv_dz_h,
+        uniformDecay=solver._coefficient_uniformity["chy_decay"],
+        uniformCurl=solver._coefficient_uniformity["chy_curl"],
     ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHz3D(
         Hz=hz,
@@ -136,6 +163,8 @@ def update_magnetic_fields_cpml_dense(solver, hx, hy, hz, ex, ey, ez, *, imag=Fa
         CyHzY=solver.cpml_c_h_y,
         invDx=solver.inv_dx_h,
         invDy=solver.inv_dy_h,
+        uniformDecay=solver._coefficient_uniformity["chz_decay"],
+        uniformCurl=solver._coefficient_uniformity["chz_curl"],
     ).launchRaw()
 
 
@@ -246,6 +275,8 @@ def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
         HxCurl=solver.chx_curl,
         invDy=solver.inv_dy_h,
         invDz=solver.inv_dz_h,
+        uniformDecay=solver._coefficient_uniformity["chx_decay"],
+        uniformCurl=solver._coefficient_uniformity["chx_curl"],
     ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHyStandard3D(
         Hy=hy,
@@ -255,6 +286,8 @@ def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
         HyCurl=solver.chy_curl,
         invDx=solver.inv_dx_h,
         invDz=solver.inv_dz_h,
+        uniformDecay=solver._coefficient_uniformity["chy_decay"],
+        uniformCurl=solver._coefficient_uniformity["chy_curl"],
     ).launchRaw()
     solver.fdtd_module.updateMagneticFieldHzStandard3D(
         Hz=hz,
@@ -264,6 +297,8 @@ def update_magnetic_fields_standard(solver, hx, hy, hz, ex, ey, ez):
         HzCurl=solver.chz_curl,
         invDx=solver.inv_dx_h,
         invDy=solver.inv_dy_h,
+        uniformDecay=solver._coefficient_uniformity["chz_decay"],
+        uniformCurl=solver._coefficient_uniformity["chz_curl"],
     ).launchRaw()
 
 
@@ -312,6 +347,8 @@ def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
         yHighBoundaryMode=solver.boundary_y_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
+        uniformDecay=None if ex_decay is not solver.cex_decay else solver._coefficient_uniformity["cex_decay"],
+        uniformCurl=None if ex_curl is not solver.cex_curl else solver._coefficient_uniformity["cex_curl"],
     ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyCpml3D(
         Ey=ey,
@@ -333,6 +370,8 @@ def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
         xHighBoundaryMode=solver.boundary_x_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
+        uniformDecay=None if ey_decay is not solver.cey_decay else solver._coefficient_uniformity["cey_decay"],
+        uniformCurl=None if ey_curl is not solver.cey_curl else solver._coefficient_uniformity["cey_curl"],
     ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzCpml3D(
         Ez=ez,
@@ -354,6 +393,8 @@ def update_electric_fields_cpml_dense(solver, ex, ey, ez, hx, hy, hz):
         xHighBoundaryMode=solver.boundary_x_high_code,
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
+        uniformDecay=None if ez_decay is not solver.cez_decay else solver._coefficient_uniformity["cez_decay"],
+        uniformCurl=None if ez_curl is not solver.cez_curl else solver._coefficient_uniformity["cez_curl"],
     ).launchRaw()
 
 
@@ -478,6 +519,8 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
         yHighBoundaryMode=solver.boundary_y_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
+        uniformDecay=None if ex_decay is not solver.cex_decay else solver._coefficient_uniformity["cex_decay"],
+        uniformCurl=None if ex_curl is not solver.cex_curl else solver._coefficient_uniformity["cex_curl"],
     ).launchRaw()
     solver.fdtd_module.updateElectricFieldEyStandard3D(
         Ey=ey,
@@ -491,6 +534,8 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
         xHighBoundaryMode=solver.boundary_x_high_code,
         zLowBoundaryMode=solver.boundary_z_low_code,
         zHighBoundaryMode=solver.boundary_z_high_code,
+        uniformDecay=None if ey_decay is not solver.cey_decay else solver._coefficient_uniformity["cey_decay"],
+        uniformCurl=None if ey_curl is not solver.cey_curl else solver._coefficient_uniformity["cey_curl"],
     ).launchRaw()
     solver.fdtd_module.updateElectricFieldEzStandard3D(
         Ez=ez,
@@ -504,6 +549,8 @@ def update_electric_fields_standard(solver, ex, ey, ez, hx, hy, hz):
         xHighBoundaryMode=solver.boundary_x_high_code,
         yLowBoundaryMode=solver.boundary_y_low_code,
         yHighBoundaryMode=solver.boundary_y_high_code,
+        uniformDecay=None if ez_decay is not solver.cez_decay else solver._coefficient_uniformity["cez_decay"],
+        uniformCurl=None if ez_curl is not solver.cez_curl else solver._coefficient_uniformity["cez_curl"],
     ).launchRaw()
 
 
@@ -1449,35 +1496,102 @@ def enforce_pec_boundaries(solver):
             clamp_field_face(solver, getattr(solver, field_name), axis, side)
 
 
-def apply_sibc_surface(solver):
-    """Override the tangential E on a ``LossyMetalMedium`` surface via the Leontovich
-    surface-impedance relation ``E_t = Zs * (n_hat x H)`` (passive/absorbing branch).
+def apply_surface_impedance(solver):
+    """Override the tangential E on every exposed surface-impedance face.
 
-    The surface impedance is a narrowband series R-L, ``Zs(omega0) = R + j*omega0*Ls``,
-    so in the time domain each tangential face reads the vacuum-side tangential H
-    (index-aligned on the Yee grid by ``_configure_sibc``) and forms
-    ``E_surface = sign * (R * H + Ls * dH/dt)``, storing the previous H for the
-    surface-inductance dH/dt term. The metal interior is masked to zero by the
-    coefficient setup, so the surface acts as a semi-infinite good-conductor
-    termination at roughly a skin-depth-free (>=10x coarser) cell size.
+    Each write realizes the Leontovich relation ``E_t = Z_s * (n_hat x H)`` from the
+    vacuum-side tangential H (index-aligned on the Yee grid by
+    ``_configure_surface_impedance``). Two realizations of the same contract share this
+    loop:
+
+    * a narrowband good-conductor face is pure resistance ``Z_s = R``: a full-plane
+      face uses the fused native kernel ``E_surface = sign * R * H`` (bit-identical to
+      the generic ``D * (sign * H)`` scalar path, since ``sign`` is exactly +/-1); a
+      finite (sub-plane) face writes only its transverse window with torch slicing.
+    * a generic rational face is a passive Z-form ADE: per edge, output
+      ``E = C x + D u`` then state advance ``x <- A x + B u`` with input ``u = sign * H``
+      (the trapezoidal ``|z| < 1`` discretization from the shared fitter).
+
+    The metal interior is masked to zero by the coefficient setup, so each surface acts
+    as a good-conductor termination without resolving the skin depth. Writes run in the
+    layout's deterministic owner order (minimum-rank owner writes last), so a corner
+    edge shared by two faces has a single deterministic owner.
     """
-    state = getattr(solver, "_sibc", None)
+    state = getattr(solver, "_surface_impedance", None)
     if state is None:
         return
-    surface_r = state["surface_r"]
-    surface_l_over_dt = state["surface_l"] / solver.dt
-    for face in state["faces"]:
-        solver.fdtd_module.applySibcSurface3D(
-            electric=getattr(solver, face["e_name"]),
-            magnetic=getattr(solver, face["h_name"]),
-            axis=face["axis"],
-            electricIndex=face["electric_index"],
-            magneticIndex=face["magnetic_index"],
-            sign=face["sign"],
-            surfaceR=surface_r,
-            surfaceLOverDt=surface_l_over_dt,
-            hPrev=face["h_prev"],
-        ).launchRaw()
+    for face in state["writes"]:
+        electric = getattr(solver, face["e_name"])
+        magnetic = getattr(solver, face["h_name"])
+        axis = face["axis"]
+        mask = face.get("mask")
+        if mask is not None:
+            # Staircased (voxelized) face: overwrite the exposed transverse footprint of
+            # the surface E plane with the Leontovich value, leaving lateral (interior)
+            # edges at their coefficient-masked zero. ``torch.where`` is static-shape so it
+            # captures into the field-update graph.
+            e_index = _surface_plane_index(electric.dim(), axis, face["electric_index"])
+            h_index = _surface_plane_index(magnetic.dim(), axis, face["magnetic_index"])
+            electric[e_index] = torch.where(
+                mask, face["sign"] * face["surface_r"] * magnetic[h_index], electric[e_index]
+            )
+            continue
+        ade = face.get("ade")
+        if ade is None and face["full_plane"]:
+            solver.fdtd_module.applySibcSurface3D(
+                electric=electric,
+                magnetic=magnetic,
+                axis=axis,
+                electricIndex=face["electric_index"],
+                magneticIndex=face["magnetic_index"],
+                sign=face["sign"],
+                surfaceR=face["surface_r"],
+            ).launchRaw()
+            continue
+        e_index = _surface_face_index(
+            electric.dim(), axis, face["electric_index"], face
+        )
+        h_index = _surface_face_index(
+            magnetic.dim(), axis, face["magnetic_index"], face
+        )
+        h_sub = magnetic[h_index]
+        if ade is None:
+            electric[e_index] = face["sign"] * face["surface_r"] * h_sub
+            continue
+        u = (face["sign"] * h_sub).reshape(-1)
+        electric[e_index] = surface_ade_step(ade, u).reshape(h_sub.shape)
+
+
+def surface_ade_step(ade, u):
+    """Advance a batch of per-edge Z-form surface ADEs and return the tangential E.
+
+    ``ade`` holds the shared discrete state space ``(A, B, C, D)`` (scalar input/output)
+    and a per-edge state ``x`` of shape ``[order, M]``; ``u`` is the length-``M`` input
+    ``sign * H``. Per edge this is exactly the shared
+    ``DiscreteStateSpaceNetwork.step``: output ``E = C x + D u`` uses the pre-update
+    state, then the state advances ``x <- A x + B u`` in place (so the recurrence is
+    captured into the CUDA graph). Returns ``E`` of shape ``[M]``.
+    """
+    x = ade["state"]
+    u_row = u.reshape(1, -1)
+    output = (ade["C"] @ x).reshape(-1) + ade["D"].reshape(()) * u
+    x.copy_(ade["A"] @ x + ade["B"] @ u_row)
+    return output
+
+
+def _surface_face_index(ndim, axis, axis_index, face):
+    index = [slice(None)] * ndim
+    index[axis] = int(axis_index)
+    index[face["b_axis"]] = face["b_slice"]
+    index[face["c_axis"]] = face["c_slice"]
+    return tuple(index)
+
+
+def _surface_plane_index(ndim, axis, axis_index):
+    """Index tuple selecting the whole transverse plane at ``axis_index`` along ``axis``."""
+    index = [slice(None)] * ndim
+    index[axis] = int(axis_index)
+    return tuple(index)
 
 
 def clamp_pec_boundaries(solver):
@@ -1516,10 +1630,20 @@ def init_field(solver):
     solver.Hz = torch.zeros((solver.Nx - 1, solver.Ny - 1, solver.Nz), device=solver.device, dtype=torch.float32)
 
     solver.build_materials(solver.scene)
+    # Wire preparation may conservatively tighten dt using the joint
+    # Maxwell-plus-wire spectral bound. All dt-dependent boundary and field
+    # coefficients must therefore be built after it.
+    initialize_wire_runtime(solver)
     initialize_boundary_state(solver)
     solver._build_update_coefficients()
+    # Compile the deterministic breakdown state machine after the base update
+    # coefficients exist (they seed the exact intact-edge reconstruction). A scene
+    # with no breakdown material leaves solver.breakdown_enabled False and adds no
+    # per-step machinery.
+    initialize_breakdown_runtime(solver)
     solver._initialize_dispersive_state()
     solver._initialize_magnetic_dispersive_state()
+    solver._initialize_gyromagnetic_state()
     initialize_tfsf_state(solver)
     initialize_source_terms(solver)
     prepare_port_runtimes(
@@ -1527,6 +1651,7 @@ def init_field(solver):
         getattr(solver, "_requested_port_frequencies", (solver.source_frequency,)),
         getattr(solver, "_port_excitations", ()),
     )
+    prepare_network_runtimes(solver)
 
 
 def _compute_shutoff_min_step(solver, shutoff_check_interval: int) -> int:
@@ -1629,6 +1754,10 @@ def _field_update_block(solver, time_value):
             dt=solver.dt,
         ).launchRaw()
     solver._advance_magnetic_dispersive_state()
+    # Record the pre-update (leapfrog) transverse H so the post-update coupled step
+    # can form the time-centred magnetization drive (H_pre + H_tmp)/2. The coupled
+    # implicit-midpoint solve + correction runs after the plain magnetic update.
+    solver._snapshot_gyromagnetic_drive()
     update_magnetic_fields(solver, solver.Hx, solver.Hy, solver.Hz, solver.Ex, solver.Ey, solver.Ez)
     if has_complex_fields(solver):
         update_magnetic_fields(
@@ -1647,6 +1776,13 @@ def _field_update_block(solver, time_value):
     if solver._magnetic_source_terms:
         inject_magnetic_surface_source_terms(solver, time_value=time_value)
     solver._apply_magnetic_dispersive_corrections()
+    # Non-reciprocal gyromagnetic step: the coupled implicit-midpoint magnetization
+    # advance plus the correction H -= dM/mu_inf (magnetic mirror of the electric-side
+    # full-anisotropy correction). Passive (discretely non-growing at zero damping),
+    # unlike an explicit pre-update advance / post-update correct split.
+    solver._step_gyromagnetic_coupled()
+    if solver._wire_runtime is not None:
+        sample_and_update_wire(solver)
 
     if has_complex_fields(solver):
         solver._advance_dispersive_state()
@@ -1674,7 +1810,9 @@ def _field_update_block(solver, time_value):
         if getattr(solver, "full_aniso_enabled", False):
             apply_full_aniso_corrections(solver)
             apply_full_aniso_conduction(solver)
-    apply_sibc_surface(solver)
+    if solver._wire_runtime is not None:
+        deposit_wire_current(solver)
+    apply_surface_impedance(solver)
 
 
 def _make_field_update_runner(solver, use_cuda_graph: bool):
@@ -1750,6 +1888,7 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     graphable = (
         use_cuda_graph
         and torch.cuda.is_available()
+        and torch.device(solver.device).type == "cuda"
         # TFSF is capturable only for the reference providers, whose in-block
         # correction reads the device-resident incident line through the
         # bit-reproducible integer-indexed reference kernel and carries no per-step
@@ -1787,10 +1926,35 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         if aux is not None:
             state["_tfsf_aux_electric"] = aux.electric
             state["_tfsf_aux_magnetic"] = aux.magnetic
-    sibc_state = getattr(solver, "_sibc", None)
-    if sibc_state is not None:
-        for index, face in enumerate(sibc_state["faces"]):
-            state[f"_sibc_h_prev_{index}"] = face["h_prev"]
+    wire_runtime = getattr(solver, "_wire_runtime", None)
+    if wire_runtime is not None:
+        state["_wire_current"] = wire_runtime.current
+        state["_wire_charge"] = wire_runtime.charge
+        state["_wire_emf"] = wire_runtime.emf
+    # The gyromagnetic magnetization ADE advances persistent state (m/dm) inside the
+    # captured block. On a zero field it stays at zero through warmup/capture (the ADE
+    # is linear with zero forcing at H = 0), but snapshotting it keeps capture correct
+    # even when the block is captured on a non-zero seeded field; the scratch buffers
+    # (hu/hv/new_u/new_v) are overwritten before they are read every step, so they are
+    # not carried state. It lives on the ``_gyromagnetic_state`` dict, not in
+    # ``vars(solver)``, so the "psi"/field filter above does not reach it.
+    gyro_state = getattr(solver, "_gyromagnetic_state", None)
+    if gyro_state is not None:
+        for gyro_name in ("m_u", "m_v", "dm_u", "dm_v"):
+            state[f"_gyro_{gyro_name}"] = gyro_state[gyro_name]
+    # The resistive SIBC surface overwrite is stateless (it writes only the surface E
+    # plane, already snapshotted above), so it needs no extra capture state.
+    # A resistive surface-impedance write is stateless (it writes only the surface E
+    # plane, already snapshotted above). A generic rational face carries a per-edge ADE
+    # state; snapshot it so warmup/capture on the zero field leave it at zero, which is
+    # a fixed point of the linear ADE with zero forcing, so the physical run is not
+    # perturbed and the state advance stays inside the captured graph.
+    surface_state = getattr(solver, "_surface_impedance", None)
+    if surface_state is not None:
+        for index, write in enumerate(surface_state["writes"]):
+            ade = write.get("ade")
+            if ade is not None:
+                state[("_surface_ade", index)] = ade["state"]
     saved = {k: v.clone() for k, v in state.items()}
 
     def _restore():
@@ -1798,7 +1962,7 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
             state[k].copy_(v)
 
     try:
-        runner = CudaGraphRunner(enabled=True, warmup_steps=3)
+        runner = CudaGraphRunner(device=solver.device, enabled=True, warmup_steps=3)
         replay = runner.capture(lambda: _field_update_block(solver, 0.0))
     except Exception:
         # Any capture failure (e.g. a non-capturable kernel) degrades to the
@@ -1850,13 +2014,139 @@ def _make_tail_runner(solver, use_gpu_dft: bool):
             state[k].copy_(v)
 
     try:
-        replay = CudaGraphRunner(enabled=True, warmup_steps=3).capture(
+        replay = CudaGraphRunner(device=solver.device, enabled=True, warmup_steps=3).capture(
             lambda: _post_source_block(solver)
         )
     except Exception:
         _restore()
         return None
     _restore()
+    return replay
+
+
+def _make_full_embedded_step_runner(solver, *, use_cuda_graph: bool):
+    """Capture a source-free field/network/terminal-observer step as one graph."""
+
+    runtimes = tuple(getattr(solver, "_network_runtimes", ()))
+    port_runtimes = tuple(getattr(solver, "_port_runtimes", ()))
+    graphable = (
+        use_cuda_graph
+        and torch.cuda.is_available()
+        and torch.device(solver.device).type == "cuda"
+        and bool(runtimes)
+        and bool(port_runtimes)
+        and all(runtime.delay_runtime is None for runtime in runtimes)
+        and all(
+            runtime.lumped is not None
+            and runtime.embedded_network_name is not None
+            and runtime.excitation is None
+            and runtime.drive_accumulator is None
+            for runtime in port_runtimes
+        )
+        and all(runtime.window_weights.shape[0] >= 4 for runtime in port_runtimes)
+        and not solver._source_terms
+        and not solver._electric_source_terms
+        and not solver._magnetic_source_terms
+        and not solver.tfsf_enabled
+        and not solver.dft_enabled
+        and not solver.observers
+        and not getattr(solver, "time_observers", ())
+        and not getattr(solver, "dispersive_enabled", False)
+        and not getattr(solver, "nonlinear_enabled", False)
+        and not getattr(solver, "nonlinear_general_enabled", False)
+        and not getattr(solver, "modulation_enabled", False)
+        and not getattr(solver, "has_mur_faces", False)
+        and not getattr(solver, "surface_impedance_enabled", False)
+    )
+    if not graphable:
+        return None
+
+    from ..cuda.runtime.graph import CudaGraphRunner
+
+    def step() -> None:
+        _field_update_block(solver, 0.0)
+        apply_port_runtimes(solver)
+        apply_network_runtimes(solver, native_lu=True)
+        solver._apply_dispersive_corrections()
+        if not solver.tfsf_enabled:
+            enforce_pec_boundaries(solver)
+        apply_mur_boundaries(solver)
+        _accumulate_embedded_port_observers_gpu(solver)
+
+    mutable_tensors = [
+        tensor
+        for name, tensor in vars(solver).items()
+        if isinstance(tensor, torch.Tensor)
+        and (
+            name in {"Ex", "Ey", "Ez", "Hx", "Hy", "Hz"}
+            or name.startswith("psi")
+        )
+    ]
+    for runtime in runtimes:
+        mutable_tensors.extend(
+            (
+                runtime.state,
+                runtime.next_state,
+                runtime.state_drive,
+                runtime.free_voltage,
+                runtime.raw_free_voltage,
+                runtime.carried_voltage,
+                runtime.network_voltage,
+                runtime.voltage_after,
+                runtime.branch_current,
+                runtime.output_buffer,
+                runtime.direct_drive,
+                runtime.net_power,
+                runtime.power_buffer,
+                runtime.port_energy,
+                runtime.absorbed_increment,
+                runtime.generated_increment,
+                runtime.absorbed_energy,
+                runtime.generated_energy,
+            )
+        )
+        for group in runtime.terminal_groups:
+            mutable_tensors.extend((group.edge_buffer, group.correction_buffer))
+    observer_tensors = [solver._port_observer_step]
+    for runtime in port_runtimes:
+        accumulator = runtime.accumulator
+        observer_tensors.extend(
+            (
+                runtime.observer_current_buffer,
+                runtime.observer_window_buffer,
+                runtime.observer_voltage_kernel_buffer,
+                runtime.observer_current_kernel_buffer,
+                runtime.electric_time,
+                runtime.magnetic_time,
+                accumulator._voltage_sum,
+                accumulator._current_sum,
+                accumulator._window_weight_sum,
+                accumulator._voltage_term,
+                accumulator._current_term,
+            )
+        )
+    mutable_tensors.extend(observer_tensors)
+    unique_tensors = []
+    seen = set()
+    for tensor in mutable_tensors:
+        if tensor.data_ptr() not in seen:
+            unique_tensors.append(tensor)
+            seen.add(tensor.data_ptr())
+    saved = [tensor.clone() for tensor in unique_tensors]
+
+    def restore() -> None:
+        for tensor, value in zip(unique_tensors, saved):
+            tensor.copy_(value)
+
+    try:
+        replay = CudaGraphRunner(device=solver.device, enabled=True, warmup_steps=3).capture(step)
+    except Exception:
+        restore()
+        return None
+    restore()
+    solver._cuda_graph_active = True
+    solver._network_cuda_graph_active = True
+    solver._port_observer_graph_active = True
     return replay
 
 
@@ -1871,11 +2161,29 @@ def solve(
     shutoff: float = 0.0,
     shutoff_check_interval: int = 100,
     use_cuda_graph: bool = False,
+    resume_from=None,
+    stop_step: int | None = None,
 ):
     if solver.verbose:
         print(f"Starting 3D FDTD simulation (Yee grid), grid size: {solver.Nx}x{solver.Ny}x{solver.Nz}")
     if normalize_source and len(getattr(solver, "_compiled_sources", ())) != 1:
         raise NotImplementedError("normalize_source currently requires exactly one compiled source.")
+    checkpoint_execution = resume_from is not None or stop_step is not None
+    if checkpoint_execution and (
+        (dft_frequency is not None and full_field_dft)
+        or bool(getattr(solver, "observers", ()))
+        or bool(getattr(solver, "time_observers", ()))
+        or bool(getattr(solver, "breakdown_observers", ()))
+    ):
+        raise NotImplementedError(
+            "FDTD resume currently supports circuit/port workflows without full-field "
+            "DFT or field/time/breakdown observers."
+        )
+    if stop_step is not None:
+        if isinstance(stop_step, bool) or not isinstance(stop_step, int):
+            raise TypeError("stop_step must be an integer when provided.")
+        if not 0 <= stop_step <= time_steps:
+            raise ValueError("stop_step must satisfy 0 <= stop_step <= time_steps.")
     solver._normalize_source = normalize_source
     solver._synchronize_device()
     solve_start = time.perf_counter()
@@ -1892,25 +2200,81 @@ def solve(
         solver._prepare_observers(observer_frequency, dft_window, time_steps)
     if getattr(solver, "time_observers", None):
         solver._prepare_time_observers(time_steps)
+    if getattr(solver, "breakdown_observers", None):
+        solver._prepare_breakdown_observers()
     prepare_port_spectral_accumulators(solver, time_steps, dft_window)
+    prepare_circuit_time_series(solver, time_steps)
+    circuit_runtimes = tuple(getattr(solver, "_circuit_runtimes", ()))
+    if circuit_runtimes:
+        prepare_circuit_graph_runners(solver, use_cuda_graph)
+    prepare_wire_monitors(solver, time_steps, dft_window)
+
+    # Deterministic breakdown mutates the electric update coefficients in place
+    # between steps from an accumulated per-cell state; a captured CUDA graph would
+    # freeze the pre-breakdown coefficient reads, so keep the eager path.
+    if getattr(solver, "breakdown_enabled", False):
+        use_cuda_graph = False
 
     solver._shutoff_triggered = False
     solver._shutoff_step = None
     solver._shutoff_peak = torch.zeros((), device=solver.device, dtype=solver.Ex.dtype)
     shutoff_min_step = _compute_shutoff_min_step(solver, shutoff_check_interval)
 
-    run_field_update = _make_field_update_runner(solver, use_cuda_graph)
+    run_full_embedded_step = _make_full_embedded_step_runner(
+        solver,
+        use_cuda_graph=use_cuda_graph,
+    )
+    if run_full_embedded_step is None:
+        run_field_update = _make_field_update_runner(solver, use_cuda_graph)
+        run_network_updates = make_network_runner(
+            solver,
+            use_cuda_graph=use_cuda_graph,
+        )
+        run_port_observers = make_port_observer_runner(
+            solver,
+            use_cuda_graph=use_cuda_graph,
+        )
+    else:
+        run_field_update = None
+        run_network_updates = None
+        run_port_observers = None
 
-    # When the field-update graph is active, drive the running DFT from a
-    # precomputed GPU weight table indexed by a device step counter, dropping the
-    # per-step host arithmetic and host->device transfer of the DFT weights.
+    # Drive the running DFT from a precomputed GPU weight table indexed by a
+    # device step counter whenever the table can be built, dropping the per-step
+    # host arithmetic and host->device transfer of the DFT weights. This is
+    # independent of graph capture: the table rows are bit-identical to the
+    # per-step host path, so eager runs take the same fast path. The host path
+    # remains only as the fallback for the complex-field (split-field Bloch)
+    # DFT, which the table builder declines.
     use_gpu_dft = False
-    if getattr(solver, "_cuda_graph_active", False) and getattr(solver, "dft_enabled", False):
+    if getattr(solver, "dft_enabled", False):
         use_gpu_dft = solver.build_dft_step_tables(time_steps)
     run_tail = _make_tail_runner(solver, use_gpu_dft)
     solver._tail_graph_active = run_tail is not None
 
-    iterator = range(time_steps)
+    start_step = 0
+    if resume_from is not None:
+        from ..resume import restore_resume_checkpoint
+
+        start_step = restore_resume_checkpoint(
+            solver,
+            resume_from,
+            total_steps=time_steps,
+        )
+    end_step = time_steps if stop_step is None else stop_step
+    if end_step < start_step:
+        raise ValueError(
+            f"stop_step={end_step} precedes resume step {start_step}."
+        )
+
+    measure_step_loop = bool(
+        circuit_runtimes or getattr(solver, "_port_runtimes", ())
+    )
+    step_start_event = torch.cuda.Event(enable_timing=True) if measure_step_loop else None
+    step_end_event = torch.cuda.Event(enable_timing=True) if measure_step_loop else None
+    if step_start_event is not None:
+        step_start_event.record()
+    iterator = range(start_step, end_step)
     pbar = None
     if solver.verbose:
         pbar = tqdm(
@@ -1921,39 +2285,52 @@ def solve(
         )
         iterator = pbar
 
+    steps_run = 0
     for n in iterator:
+        steps_run = n + 1
         time_value = n * solver.dt
-        run_field_update(time_value)
-
-        if solver.tfsf_enabled:
-            apply_tfsf_e_correction(solver, time_value)
-            advance_tfsf_auxiliary_electric(solver)
-        if solver._electric_source_terms:
-            # The electric equivalent current enters the E update through the
-            # incident H field, which lives at the Yee half step.  Sample it at
-            # the same n + 1/2 instant as the TFSF electric correction.
-            inject_electric_surface_source_terms(
-                solver,
-                time_value=time_value + 0.5 * float(solver.dt),
-            )
-
-        if solver._source_terms:
-            solver.add_source(time_value=time_value)
-        apply_port_runtimes(solver)
-        if run_tail is not None:
-            run_tail()
+        if run_full_embedded_step is not None:
+            run_full_embedded_step()
         else:
-            solver._apply_dispersive_corrections()
-            if not solver.tfsf_enabled:
-                enforce_pec_boundaries(solver)
-            apply_mur_boundaries(solver)
-            if use_gpu_dft:
-                solver.accumulate_dft_gpu()
+            run_field_update(time_value)
+
+            if solver.tfsf_enabled:
+                apply_tfsf_e_correction(solver, time_value)
+                advance_tfsf_auxiliary_electric(solver)
+            if solver._electric_source_terms:
+                # The electric equivalent current enters the E update through the
+                # incident H field, which lives at the Yee half step.  Sample it at
+                # the same n + 1/2 instant as the TFSF electric correction.
+                inject_electric_surface_source_terms(
+                    solver,
+                    time_value=time_value + 0.5 * float(solver.dt),
+                )
+
+            if solver._source_terms:
+                solver.add_source(time_value=time_value)
+            apply_port_runtimes(solver)
+            run_network_updates()
+            if run_tail is not None:
+                run_tail()
             else:
-                solver.accumulate_dft(n)
-        accumulate_port_observers(solver)
+                solver._apply_dispersive_corrections()
+                if not solver.tfsf_enabled:
+                    enforce_pec_boundaries(solver)
+                apply_mur_boundaries(solver)
+                if use_gpu_dft:
+                    solver.accumulate_dft_gpu()
+                else:
+                    solver.accumulate_dft(n)
+            run_port_observers()
+        if getattr(solver, "breakdown_enabled", False):
+            # After the full E-update (sources, PEC clamp, and tail applied), run the
+            # per-cell breakdown state machine and scatter the updated conductivity
+            # into the electric coefficients used by the next step.
+            advance_breakdown_state(solver, n)
         solver.accumulate_observers(n)
         solver.accumulate_time_observers(n)
+        solver.accumulate_breakdown_observers(n)
+        accumulate_wire_monitors(solver, n)
 
         if shutoff > 0 and (n + 1) % shutoff_check_interval == 0:
             e_energy = _electric_field_energy(solver)
@@ -1968,7 +2345,7 @@ def solve(
                 break
 
         if pbar is not None:
-            should_update_progress = ((n + 1) % solver.progress_update_interval == 0 or n == time_steps - 1)
+            should_update_progress = ((n + 1) % solver.progress_update_interval == 0 or n == end_step - 1)
             if should_update_progress and solver.dft_enabled and solver.dft_start_step is not None:
                 if n < solver.dft_start_step:
                     pbar.set_postfix({"status": "transient"})
@@ -1978,10 +2355,29 @@ def solve(
         if enable_plot and n % solver.plot_interval == 0:
             visualize_slice(solver, n)
 
+    if step_start_event is not None and step_end_event is not None:
+        step_end_event.record()
+        step_end_event.synchronize()
+        completed_steps = (
+            solver._shutoff_step + 1 - start_step
+            if solver._shutoff_triggered
+            else end_step - start_step
+        )
+        solver.last_step_loop_elapsed_s = (
+            step_start_event.elapsed_time(step_end_event) * 1.0e-3
+        )
+        solver.last_step_loop_steps = completed_steps
+    # steps_run, not n + 1: the loop variable is unbound for time_steps == 0 and
+    # the graph-driven observer step counter must match the steps actually run,
+    # including an early shutoff break.
+    complete_port_observer_graph(solver, steps_run)
     solver._synchronize_device()
     solver.last_solve_elapsed_s = time.perf_counter() - solve_start
+    if end_step < time_steps:
+        return None
     if solver._shutoff_triggered:
         _complete_spectral_normalization(solver, time_steps)
+        complete_wire_monitor_normalization(solver, time_steps)
     if solver.dft_enabled:
         solver._sync_dft_legacy_state()
     if solver.observers_enabled:
@@ -1999,9 +2395,22 @@ def solve(
     if getattr(solver, "time_observers_enabled", False):
         monitors = dict(monitors)
         monitors.update(solver.get_time_observer_results())
+    if getattr(solver, "breakdown_observers_enabled", False):
+        monitors = dict(monitors)
+        monitors.update(solver.get_breakdown_observer_results())
+    wire_monitors = finalize_wire_data(solver)
+    if wire_monitors:
+        monitors = dict(monitors)
+        monitors.update(wire_monitors)
     if monitors:
         output["observers"] = monitors
     ports = finalize_port_data(solver)
     if ports:
         output["ports"] = ports
+    circuits = finalize_circuit_data(solver)
+    if circuits:
+        output["circuits"] = circuits
+    embedded_networks = finalize_embedded_networks(solver, ports)
+    if embedded_networks:
+        output["embedded_networks"] = embedded_networks
     return output or None

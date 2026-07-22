@@ -1,0 +1,78 @@
+{
+  "name": "rf/lossy_waveguide_attenuation",
+  "description": "Lossy-wall TE10 guide (surface impedance): FDTD conductor attenuation alpha from the two-line |S21| ratio vs analytic skin-effect alpha_c.",
+  "gate_class": "wave-level",
+  "status": "pass",
+  "reference": "analytic-TE10 conductor attenuation (Pozar 3.96; R_s=sqrt(w mu0/2 sigma))",
+  "tidy3d_reference": "pending-generation (run benchmark.rf_tidy3d_references to attempt)",
+  "target": "FDTD alpha from two-line |S21| within 5% of analytic TE10 alpha_c, GATED on cond(A) + passivity at both lengths",
+  "tolerance_basis": "Two-stage (terminated two-port precedent): (1) wave-level precondition -- the B=S*A extraction is well conditioned (cond(A) <= 10) and the solved S passive (max singular value <= 1.05) at both guide lengths and every frequency; (2) if met, the two-line conductor attenuation alpha is within the pre-registered 5% of the analytic TE10 alpha_c. The SIBC runtime evaluates the wall surface resistance R_s at the source frequency (narrowband good-conductor order-0 model), so the analytic R_s and the runtime surface resistance are the SAME quantity -- the bench tests that the surface-impedance wall reproduces the skin-effect loss, not a fitted constant.",
+  "falsification": "EXECUTED: the attenuation must come from the WALL LOSS, not the fixture. A PEC-wall guide of identical geometry is lossless -- its two-line |S21| ratio is ~1 and the extracted alpha collapses to 0.0002 Np/m (vs the good-conductor 1.8387 Np/m at 2.4 GHz). The two-line alpha also scales as 1/delta_L, so a 10%-wrong length shifts it 10% (>> the 5% gate).",
+  "metrics": [
+    {
+      "quantity": "fc_cutoff",
+      "reference": 1498962290.0,
+      "unit": "Hz",
+      "class": "wave-level",
+      "note": "TE10 cutoff; band 2.0-2.8 GHz all propagating; sigma=25 S/m walls"
+    },
+    {
+      "quantity": "alpha from two-line |S21| (median rel error over band)",
+      "measured": 0.0004907057499182582,
+      "reference": 0.05,
+      "rel_error": 0.0004907057499182582,
+      "unit": "fraction",
+      "class": "wave-level",
+      "note": "vs analytic TE10 alpha_c; cond(A)=1.02, max sv=0.363, max rel 0.37%"
+    },
+    {
+      "quantity": "alpha at 2.4 GHz",
+      "measured": 1.8386889167689073,
+      "reference": 1.8395916149518656,
+      "rel_error": 0.0004907057499182582,
+      "unit": "Np/m",
+      "class": "wave-level",
+      "note": "= 15.971 dB/m"
+    }
+  ],
+  "supporting": [],
+  "convergence": [],
+  "conservation": {
+    "alpha_np_per_m_by_frequency": {
+      "2.000e+09": 2.217297299437696,
+      "2.400e+09": 1.8386889167689073,
+      "2.800e+09": 1.7010705416566345
+    },
+    "alpha_analytic_np_per_m_by_frequency": {
+      "2.000e+09": 2.225631055885958,
+      "2.400e+09": 1.8395916149518656,
+      "2.800e+09": 1.70043765336046
+    },
+    "alpha_rel_error_by_frequency": {
+      "2.000e+09": 0.003744446513820213,
+      "2.400e+09": 0.0004907057499182582,
+      "2.800e+09": 0.00037219141491241894
+    },
+    "s21_short_by_frequency": {
+      "2.000e+09": 0.2645393750260402,
+      "2.400e+09": 0.3318832064631431,
+      "2.800e+09": 0.3604396813570262
+    },
+    "s21_long_by_frequency": {
+      "2.000e+09": 0.13601986160285925,
+      "2.400e+09": 0.1911725539892732,
+      "2.800e+09": 0.2163729330518105
+    },
+    "s11_max_over_band": 0.017337779934739186,
+    "extraction_cond_a_max": 1.0151982912612152,
+    "max_singular_value": 0.36286628892470274,
+    "pec_alpha_np_per_m": 0.00016510988059303505,
+    "two_line_delta_length_m": 0.30000000000000004
+  },
+  "raw": {},
+  "notes": [
+    "SIBC skin-effect wave-level bench: four PEC waveguide walls replaced by a single shared good-conductor surface-impedance boundary. The terminated two-port S is well conditioned (cond(A) 1.02) and passive (max singular value 0.363); the two-line conductor attenuation agrees with the analytic TE10 alpha_c to 0.05% (median over 3 in-band frequencies, max 0.37%), inside the pre-registered 5% gate. Per-frequency measured/analytic alpha, |S21| at both lengths, and the conditioning/passivity diagnostics are in the artifact conservation block.",
+    "Reference policy: the analytic TE10 conductor attenuation is the binding first-line reference. The external-reference cross-check is recorded separately by benchmark.rf_tidy3d_references (the lossy-metal wall exports through the adapter's dedicated surface path); its runnable/generation status is surfaced in the Tidy3D ref column and the RF/antenna external reference section."
+  ],
+  "updated_at": "2026-07-22T13:47:50+00:00"
+}

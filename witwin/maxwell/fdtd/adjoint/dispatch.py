@@ -27,6 +27,8 @@ class _ReverseBackend(Enum):
     CONDUCTIVE = auto()
     KERR = auto()
     FULL_ANISO = auto()
+    WIRE_STANDARD = auto()
+    WIRE_CPML = auto()
 
 
 # Native CUDA reverse-execution backends mirror the native CUDA
@@ -44,6 +46,8 @@ _NATIVE_REVERSE_LABELS: dict[_ReverseBackend, str] = {
     _ReverseBackend.CONDUCTIVE: "native_conductive",
     _ReverseBackend.KERR: "native_kerr",
     _ReverseBackend.FULL_ANISO: "native_full_aniso",
+    _ReverseBackend.WIRE_STANDARD: "native_wire_standard",
+    _ReverseBackend.WIRE_CPML: "native_wire_cpml",
     _ReverseBackend.BLOCH: "native_bloch",
     _ReverseBackend.BLOCH_DISPERSIVE: "native_bloch_dispersive",
     _ReverseBackend.DISPERSIVE: "native_dispersive",
@@ -286,6 +290,30 @@ def _supports_cpml(runtime, solver, forward_state, resolved_source_terms) -> boo
     return _supports_explicit_source_step(runtime, solver, resolved_source_terms)
 
 
+def _supports_wire(runtime, solver, forward_state, resolved_source_terms, *, cpml: bool) -> bool:
+    if getattr(solver, "_wire_runtime", None) is None:
+        return False
+    if bool(getattr(solver, "uses_cpml", False)) != bool(cpml):
+        return False
+    if any(
+        bool(getattr(solver, name, False))
+        for name in (
+            "nonlinear_enabled",
+            "conductive_enabled",
+            "full_aniso_enabled",
+            "dispersive_enabled",
+            "magnetic_dispersive_enabled",
+            "tfsf_enabled",
+        )
+    ):
+        return False
+    if has_complex_fields(solver) or not _matches_checkpoint_layout(solver, forward_state):
+        return False
+    if _has_open_face_conflicts(_face_codes(solver)):
+        return False
+    return _supports_explicit_source_step(runtime, solver, resolved_source_terms)
+
+
 def _supports_dispersive(runtime, solver, forward_state, resolved_source_terms) -> bool:
     if getattr(solver, "nonlinear_enabled", False):
         return False
@@ -508,21 +536,35 @@ def _select_reverse_backend(
         runtime, solver, forward_state, resolved_source_terms
     )
     supports_full_aniso = _supports_full_aniso(runtime, solver, forward_state, resolved_source_terms)
-
-    decision_table = (
-        (_ReverseBackend.GENERAL_NONLINEAR, supports_general_nonlinear),
-        (_ReverseBackend.GRATING_TFSF, supports_grating_tfsf),
-        (_ReverseBackend.MIXED_BLOCH_CPML, supports_mixed_bloch_cpml),
-        (_ReverseBackend.TFSF, supports_tfsf),
-        (_ReverseBackend.BLOCH_DISPERSIVE, supports_bloch_dispersive),
-        (_ReverseBackend.BLOCH, supports_bloch),
-        (_ReverseBackend.DISPERSIVE, supports_dispersive),
-        (_ReverseBackend.STANDARD, supports_standard),
-        (_ReverseBackend.CPML, supports_cpml),
-        (_ReverseBackend.CONDUCTIVE, supports_conductive),
-        (_ReverseBackend.KERR, supports_kerr),
-        (_ReverseBackend.FULL_ANISO, supports_full_aniso),
+    supports_wire_standard = _supports_wire(
+        runtime, solver, forward_state, resolved_source_terms, cpml=False
     )
+    supports_wire_cpml = _supports_wire(
+        runtime, solver, forward_state, resolved_source_terms, cpml=True
+    )
+
+    if getattr(solver, "_wire_runtime", None) is not None:
+        # A non-wire backend would silently omit I/q and coefficient cotangents.
+        # Unsupported compositions must fail closed instead of falling through.
+        decision_table = (
+            (_ReverseBackend.WIRE_STANDARD, supports_wire_standard),
+            (_ReverseBackend.WIRE_CPML, supports_wire_cpml),
+        )
+    else:
+        decision_table = (
+            (_ReverseBackend.GENERAL_NONLINEAR, supports_general_nonlinear),
+            (_ReverseBackend.GRATING_TFSF, supports_grating_tfsf),
+            (_ReverseBackend.MIXED_BLOCH_CPML, supports_mixed_bloch_cpml),
+            (_ReverseBackend.TFSF, supports_tfsf),
+            (_ReverseBackend.BLOCH_DISPERSIVE, supports_bloch_dispersive),
+            (_ReverseBackend.BLOCH, supports_bloch),
+            (_ReverseBackend.DISPERSIVE, supports_dispersive),
+            (_ReverseBackend.STANDARD, supports_standard),
+            (_ReverseBackend.CPML, supports_cpml),
+            (_ReverseBackend.CONDUCTIVE, supports_conductive),
+            (_ReverseBackend.KERR, supports_kerr),
+            (_ReverseBackend.FULL_ANISO, supports_full_aniso),
+        )
     for backend, enabled in decision_table:
         if enabled:
             return backend
@@ -654,7 +696,8 @@ def reverse_step(
     state_names = tuple(forward_state.keys())
     if tuple(adjoint_state.keys()) != state_names:
         raise RuntimeError(
-            "Reverse step expects forward and adjoint states to share the same frozen checkpoint layout."
+            "Reverse step expects forward and adjoint states to share the same frozen checkpoint "
+            f"layout; forward={state_names!r}, adjoint={tuple(adjoint_state.keys())!r}."
         )
 
     # The FDTD backward bridge resolves the source-term lists once per pass and

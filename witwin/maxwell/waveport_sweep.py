@@ -9,6 +9,7 @@ import torch
 
 from .adjoint_inputs import scene_trainable_material_tensors
 from .compiler.sources import _compile_mode_source
+from .constants import C_0
 from .fdtd.excitation.modes import (
     sample_mode_source_component,
     solve_mode_source_profile,
@@ -17,15 +18,25 @@ from .lumped import PortSweep
 from .monitors import ModeMonitor
 from .network import NetworkData, PortData
 from .ports import WavePort
-from .postprocess.waveports import ModeTrackingResult, track_modes
+from .postprocess.waveports import (
+    ModeTrackingResult,
+    _circuit_characteristic_impedance,
+    _te_characteristic_impedance,
+    _tm_characteristic_impedance,
+    track_modes,
+)
 from .result import Result
 from .scene import prepare_scene
 from .sources import CW, ModeSource
 
 
-_EPS0 = 8.8541878128e-12
-_MU0 = 1.25663706212e-6
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+
+# Prefix stamped on the internal per-port ModeMonitors used to extract the
+# S-matrix. User-declared monitors never carry this prefix, so it is the single
+# discriminator between machinery monitors (dropped from the user-facing Result)
+# and monitors the user attached to the scene (which must ride through).
+WAVEPORT_MONITOR_PREFIX = "__waveport__::"
 
 
 @dataclass(frozen=True)
@@ -60,7 +71,7 @@ def _mode_context(scene):
     return SimpleNamespace(
         scene=prepared,
         Ex=torch.empty((1,), device=prepared.device, dtype=torch.float32),
-        c=299792458.0,
+        c=C_0,
         boundary_kind=prepared.boundary.kind,
         _compiled_material_model=prepared.compile_materials(),
         _mode_source_rebuild_from_fields=False,
@@ -249,9 +260,9 @@ def _characteristic_impedance(
                 dtype=torch.float64,
             )
             if mode.family == "te":
-                impedance = omega * _MU0 * mu_r / beta
+                impedance = _te_characteristic_impedance(omega, beta, mu_r)
             elif mode.family == "tm":
-                impedance = beta / (omega * _EPS0 * eps_r)
+                impedance = _tm_characteristic_impedance(omega, beta, eps_r)
             else:
                 voltage = torch.zeros((), device=beta.device, dtype=torch.complex128)
                 current = torch.zeros_like(voltage)
@@ -266,12 +277,11 @@ def _characteristic_impedance(
                         voltage = voltage + coefficient * raw_voltage.to(torch.complex128)
                     if raw_current is not None:
                         current = current + coefficient * raw_current.to(torch.complex128)
-                if mode.impedance_definition == "voltage_current":
-                    impedance = voltage / current
-                elif mode.impedance_definition == "power_voltage":
-                    impedance = torch.abs(voltage).square() / 2.0
-                else:
-                    impedance = 2.0 / torch.abs(current).square()
+                impedance = _circuit_characteristic_impedance(
+                    mode.impedance_definition,
+                    voltage,
+                    current,
+                )
             if not bool(torch.isfinite(torch.real(impedance))) or not bool(
                 torch.isfinite(torch.imag(impedance))
             ):
@@ -518,7 +528,23 @@ def _coefficient_source_time(frequency: float, coefficient: complex) -> CW:
 
 
 def _monitor_name(port_name: str, raw_index: int) -> str:
-    return f"__waveport__::{port_name}::{raw_index}"
+    return f"{WAVEPORT_MONITOR_PREFIX}{port_name}::{raw_index}"
+
+
+def _user_monitor_payloads(result, scene) -> dict:
+    """Return the user-declared monitor payloads captured on a column run.
+
+    The internal per-port ModeMonitors (``WAVEPORT_MONITOR_PREFIX``) drive the
+    S-matrix extraction and are machinery, not user-facing. Every other monitor
+    payload was requested by the user on the original scene and must survive into
+    the assembled Result instead of being silently dropped.
+    """
+    user_names = {monitor.name for monitor in scene.monitors}
+    return {
+        name: payload
+        for name, payload in result.monitors.items()
+        if name in user_names and not name.startswith(WAVEPORT_MONITOR_PREFIX)
+    }
 
 
 def _column_scene(
@@ -615,11 +641,17 @@ def _execute_columns(
     incident_columns = []
     reflected_columns = []
     column_stats = []
+    column_results = []
     last_result = None
+    first_result = None
+    shared_prepared_scene = None
+    from .array_execution import compact_array_column_result
+
     for active_port_index, active_mode_index in channel_locations:
         incident_frequencies = []
         reflected_frequencies = []
         stats = []
+        results = []
         for frequency_index, frequency in enumerate(manifest.frequencies):
             run_scene = _column_scene(
                 scene,
@@ -643,6 +675,16 @@ def _execute_columns(
             # an unrelated mode-shape eigen-adjoint from each inner simulation.
             sub_simulation._fixed_waveport_mode_sources = True
             last_result = sub_simulation.run()
+            if first_result is None:
+                first_result = last_result
+            if shared_prepared_scene is None:
+                shared_prepared_scene = last_result.prepared_scene
+            results.append(
+                compact_array_column_result(
+                    last_result,
+                    prepared_scene=shared_prepared_scene,
+                )
+            )
             incident, reflected = _extract_tracked_waves(
                 last_result,
                 manifest,
@@ -654,11 +696,14 @@ def _execute_columns(
         incident_columns.append(torch.stack(incident_frequencies))
         reflected_columns.append(torch.stack(reflected_frequencies))
         column_stats.append(tuple(stats))
+        column_results.append(tuple(results))
     return (
         torch.stack(incident_columns),
         torch.stack(reflected_columns),
         tuple(column_stats),
+        tuple(column_results),
         last_result,
+        first_result,
     )
 
 
@@ -669,7 +714,14 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
             (port_index, mode_index)
             for mode_index in range(len(prepared_port.port.modes))
         )
-    incident, reflected, column_stats, last_result = _execute_columns(
+    (
+        incident,
+        reflected,
+        column_stats,
+        column_results,
+        last_result,
+        first_result,
+    ) = _execute_columns(
         simulation,
         scene,
         manifest,
@@ -678,20 +730,31 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
     )
 
     channel_count = len(manifest.channel_names)
-    s_columns = []
-    for input_index in range(channel_count):
-        driven = incident[input_index, :, input_index]
-        threshold = torch.clamp(
-            torch.max(torch.abs(driven)) * 1.0e-6,
-            min=torch.finfo(driven.real.dtype).tiny,
+    # Network S by solving the full system B = S * A across the drive columns
+    # (F3). ``incident``/``reflected`` are indexed ``[drive, frequency, channel]``.
+    # The per-drive ``b/a`` ratio is only correct when the passive channels carry
+    # no incident wave (A diagonal); on a re-illuminated bench A has off-diagonal
+    # incident amplitudes and the ratio is generically wrong. Assembling
+    #   A[f, i, j] = incident[j, f, i]      (incident at channel i under drive j)
+    #   B[f, i, j] = reflected[j, f, i]
+    # and solving S[f] = B[f] @ A[f]^{-1} recovers the physical scattering matrix.
+    # When A is diagonal this reduces to the old b/a extraction bit-for-bit.
+    incident_matrix = incident.permute(1, 2, 0).contiguous()   # [freq, i, j]
+    reflected_matrix = reflected.permute(1, 2, 0).contiguous()  # [freq, i, j]
+    self_incident = torch.diagonal(incident_matrix, dim1=-2, dim2=-1)  # [freq, channel]
+    threshold = torch.clamp(
+        torch.max(torch.abs(self_incident)) * 1.0e-6,
+        min=torch.finfo(self_incident.real.dtype).tiny,
+    )
+    if bool(torch.any(torch.abs(self_incident) < threshold)):
+        raise RuntimeError(
+            "WavePort drive has insufficient self-incident spectrum for the B = S*A extraction."
         )
-        if bool(torch.any(torch.abs(driven) < threshold)):
-            raise RuntimeError(
-                f"WavePort input channel {manifest.channel_names[input_index]!r} has "
-                "insufficient incident spectrum."
-            )
-        s_columns.append(reflected[input_index] / driven[:, None])
-    scattering = torch.stack(s_columns, dim=-1)
+    condition_numbers = torch.linalg.cond(incident_matrix)  # [freq]
+    scattering = torch.linalg.solve(
+        incident_matrix.transpose(-2, -1),
+        reflected_matrix.transpose(-2, -1),
+    ).transpose(-2, -1)  # S = B A^{-1} solved as S^T = (A^T)^{-1} B^T
 
     frequency_tensor = torch.as_tensor(
         manifest.frequencies,
@@ -740,8 +803,31 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
         metadata={
             "run_manifest": manifest.metadata(),
             "propagation_constants": network_beta,
+            # Conditioning of the incident matrix A per frequency (F3). A large
+            # cond(A) means the drive columns are near-collinear (a re-entrant /
+            # under-driven bench) and the extracted S is untrustworthy; this is the
+            # extraction-conditioning precondition that replaces the a_passive gate.
+            "extraction_condition_number": condition_numbers,
         },
     )
+    from .array_execution import ArrayRunData
+
+    basis_incident = torch.stack(
+        [incident[index, :, index] for index in range(channel_count)],
+        dim=-1,
+    )
+    # User-declared monitors ride through the sweep. A PortSweep drives one channel
+    # per column, so a field monitor genuinely has one payload per drive; the flat
+    # top-level Result.monitors carries the FIRST drive channel at the first swept
+    # frequency (recorded in metadata), while per-drive / per-frequency field data
+    # is preserved column-by-column in ``array_run_data.column_results``.
+    user_monitors = _user_monitor_payloads(first_result, scene)
+    monitor_drive_note = {}
+    if user_monitors:
+        monitor_drive_note = {
+            "user_monitor_drive_channel": manifest.channel_names[0],
+            "user_monitor_frequency": manifest.frequencies[0],
+        }
     return Result(
         method="fdtd",
         scene=scene,
@@ -750,10 +836,19 @@ def run_waveport_sweep(simulation, scene, manifest: WavePortRunManifest) -> Resu
         frequencies=manifest.frequencies,
         solver=last_result.solver,
         fields={},
-        monitors={},
+        monitors=user_monitors,
         ports=ports,
         network=network,
-        metadata={**simulation.metadata, "network_run_manifest": manifest.metadata()},
+        array_run_data=ArrayRunData(
+            manifest=manifest,
+            column_results=column_results,
+            incident=basis_incident,
+        ),
+        metadata={
+            **simulation.metadata,
+            "network_run_manifest": manifest.metadata(),
+            **monitor_drive_note,
+        },
         solver_stats={
             "network_sweep": manifest.metadata(),
             "columns": column_stats,
@@ -778,7 +873,7 @@ def run_waveport_excitation(simulation, scene, excitation, manifest: WavePortRun
     else:
         active_mode_index = qualified_names.index(requested_name)
 
-    incident, reflected, column_stats, last_result = _execute_columns(
+    incident, reflected, column_stats, _, last_result, _first_result = _execute_columns(
         simulation,
         scene,
         manifest,
@@ -813,6 +908,9 @@ def run_waveport_excitation(simulation, scene, excitation, manifest: WavePortRun
         "active_channel": qualified_names[active_mode_index],
         "kind": "direct_waveport_excitation",
     }
+    # A direct WavePort excitation is a single drive column, so user-declared
+    # monitors map unambiguously to this excitation and ride through unchanged --
+    # identical to a plain FDTD run of the injected mode source.
     return Result(
         method="fdtd",
         scene=scene,
@@ -821,7 +919,7 @@ def run_waveport_excitation(simulation, scene, excitation, manifest: WavePortRun
         frequencies=manifest.frequencies,
         solver=last_result.solver,
         fields={},
-        monitors={},
+        monitors=_user_monitor_payloads(last_result, scene),
         ports={prepared_port.port.name: port_data},
         network=None,
         metadata={**simulation.metadata, "waveport_run_manifest": run_metadata},

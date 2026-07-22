@@ -7,6 +7,8 @@ from typing import Mapping
 
 import torch
 
+from ..constants import resolve_complex_dtype, resolve_real_dtype
+
 WINDOW_FACTOR = 15.0
 
 _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
@@ -69,29 +71,11 @@ def _resolve_currents_background(
     return _normalize_background(background_eps_r, background_mu_r)
 
 
-def _complex_dtype_for(dtype: torch.dtype) -> torch.dtype:
-    return torch.complex64 if dtype in {torch.float16, torch.bfloat16, torch.float32} else torch.complex128
-
-
 def _resolve_tensor_device(*values) -> torch.device:
     for value in values:
         if isinstance(value, torch.Tensor):
             return value.device
     return torch.device("cpu")
-
-
-def _resolve_real_dtype(*values) -> torch.dtype:
-    for value in values:
-        if isinstance(value, torch.Tensor):
-            return value.real.dtype
-    return torch.float64
-
-
-def _resolve_complex_dtype(*values) -> torch.dtype:
-    for value in values:
-        if isinstance(value, torch.Tensor):
-            return value.dtype if torch.is_complex(value) else _complex_dtype_for(value.dtype)
-    return torch.complex128
 
 
 def _to_real_tensor(values, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -110,8 +94,8 @@ def _as_1d_coords(values, name: str, *, device: torch.device, dtype: torch.dtype
     coords = _to_real_tensor(values, device=device, dtype=dtype)
     if coords.ndim != 1:
         raise ValueError(f"{name} must be a 1D array, got shape={tuple(coords.shape)}.")
-    if coords.numel() < 2:
-        raise ValueError(f"{name} must contain at least two points, got {coords.numel()}.")
+    if coords.numel() < 1:
+        raise ValueError(f"{name} must contain at least one point.")
     return coords
 
 
@@ -129,6 +113,22 @@ def _trapz_weights_1d(points: torch.Tensor) -> torch.Tensor:
     return weights
 
 
+def _cell_center_weights_1d(points: torch.Tensor) -> torch.Tensor:
+    """Control-volume widths for Yee samples located at cell centers."""
+
+    coords = points.to(dtype=points.real.dtype)
+    count = int(coords.numel())
+    if count <= 1:
+        return torch.ones((count,), device=coords.device, dtype=coords.dtype)
+    diffs = coords[1:] - coords[:-1]
+    weights = torch.empty((count,), device=coords.device, dtype=coords.dtype)
+    weights[0] = diffs[0]
+    weights[-1] = diffs[-1]
+    if count > 2:
+        weights[1:-1] = (diffs[:-1] + diffs[1:]) / 2.0
+    return weights
+
+
 def gaussian_window_1d(
     points,
     bound_min: float,
@@ -136,7 +136,7 @@ def gaussian_window_1d(
     window_frac: float,
 ) -> torch.Tensor:
     device = _resolve_tensor_device(points)
-    dtype = _resolve_real_dtype(points)
+    dtype = resolve_real_dtype(points)
     point_tensor = _to_real_tensor(points, device=device, dtype=dtype)
     if window_frac <= 0.0:
         return torch.ones_like(point_tensor)
@@ -322,7 +322,7 @@ def _resolve_device(device: str | torch.device | None) -> torch.device:
 def build_plane_points(axis: str, position: float, u, v) -> torch.Tensor:
     axis_name = _normalize_axis(axis)
     device = _resolve_tensor_device(u, v)
-    dtype = _resolve_real_dtype(u, v)
+    dtype = resolve_real_dtype(u, v)
     u_coords = _as_1d_coords(u, "u", device=device, dtype=dtype)
     v_coords = _as_1d_coords(v, "v", device=device, dtype=dtype)
     shape = (u_coords.numel(), v_coords.numel())
@@ -346,12 +346,15 @@ class PlanarEquivalentCurrents:
     M: torch.Tensor
     background_eps_r: complex | float = 1.0
     background_mu_r: complex | float = 1.0
+    normal_direction: str = "+"
+    quadrature_rule: str = "trapezoidal"
+    area_weights: torch.Tensor | None = None
 
     def __post_init__(self):
         axis_name = _normalize_axis(self.axis)
         device = _resolve_tensor_device(self.u, self.v, self.J, self.M)
-        real_dtype = _resolve_real_dtype(self.u, self.v, self.J, self.M)
-        complex_dtype = _resolve_complex_dtype(self.J, self.M)
+        real_dtype = resolve_real_dtype(self.u, self.v, self.J, self.M)
+        complex_dtype = resolve_complex_dtype(self.J, self.M)
         u_coords = _as_1d_coords(self.u, "u", device=device, dtype=real_dtype)
         v_coords = _as_1d_coords(self.v, "v", device=device, dtype=real_dtype)
         if float(self.frequency) <= 0.0:
@@ -362,6 +365,25 @@ class PlanarEquivalentCurrents:
         background_eps_r, background_mu_r = _normalize_background(
             self.background_eps_r, self.background_mu_r
         )
+        normal_direction = "+" if _normalize_normal_direction(self.normal_direction) > 0.0 else "-"
+        quadrature_rule = str(self.quadrature_rule)
+        if quadrature_rule not in {"trapezoidal", "cell_centered"}:
+            raise ValueError("quadrature_rule must be 'trapezoidal' or 'cell_centered'.")
+        area_weights = self.area_weights
+        if area_weights is not None:
+            if not isinstance(area_weights, torch.Tensor):
+                area_weights = torch.as_tensor(
+                    area_weights, device=device, dtype=real_dtype
+                )
+            if area_weights.shape != shape:
+                raise ValueError("area_weights must match the planar current shape [U, V].")
+            if area_weights.device != device:
+                raise ValueError("area_weights must share the current device.")
+            area_weights = area_weights.to(dtype=real_dtype)
+            if not bool(torch.all(torch.isfinite(area_weights))) or not bool(
+                torch.all(area_weights > 0.0)
+            ):
+                raise ValueError("area_weights must be finite and strictly positive.")
 
         object.__setattr__(self, "axis", axis_name)
         object.__setattr__(self, "position", float(self.position))
@@ -372,6 +394,9 @@ class PlanarEquivalentCurrents:
         object.__setattr__(self, "M", m_field)
         object.__setattr__(self, "background_eps_r", background_eps_r)
         object.__setattr__(self, "background_mu_r", background_mu_r)
+        object.__setattr__(self, "normal_direction", normal_direction)
+        object.__setattr__(self, "quadrature_rule", quadrature_rule)
+        object.__setattr__(self, "area_weights", area_weights)
 
     @property
     def device(self) -> torch.device:
@@ -391,7 +416,21 @@ class PlanarEquivalentCurrents:
         return int(self.u.numel()), int(self.v.numel())
 
     def weights_2d(self) -> torch.Tensor:
-        return _trapz_weights_1d(self.u)[:, None] * _trapz_weights_1d(self.v)[None, :]
+        if self.area_weights is not None:
+            return self.area_weights
+        weights_1d = (
+            _cell_center_weights_1d
+            if self.quadrature_rule == "cell_centered"
+            else _trapz_weights_1d
+        )
+        return weights_1d(self.u)[:, None] * weights_1d(self.v)[None, :]
+
+    @property
+    def normal(self) -> torch.Tensor:
+        normal = torch.zeros((3,), device=self.device, dtype=self.coord_dtype)
+        direction = 1.0 if self.normal_direction == "+" else -1.0
+        normal[_AXIS_TO_INDEX[self.axis]] = direction
+        return normal
 
     def plane_points(self) -> torch.Tensor:
         return build_plane_points(self.axis, self.position, self.u, self.v)
@@ -425,12 +464,17 @@ class PlanarEquivalentCurrents:
         v_coords = self.v if v_indices is None else self.v.index_select(0, v_indices)
         j_field = self.J
         m_field = self.M
+        area_weights = self.area_weights
         if u_indices is not None:
             j_field = j_field.index_select(0, u_indices)
             m_field = m_field.index_select(0, u_indices)
+            if area_weights is not None:
+                area_weights = area_weights.index_select(0, u_indices)
         if v_indices is not None:
             j_field = j_field.index_select(1, v_indices)
             m_field = m_field.index_select(1, v_indices)
+            if area_weights is not None:
+                area_weights = area_weights.index_select(1, v_indices)
 
         return PlanarEquivalentCurrents(
             axis=self.axis,
@@ -442,6 +486,9 @@ class PlanarEquivalentCurrents:
             M=m_field,
             background_eps_r=self.background_eps_r,
             background_mu_r=self.background_mu_r,
+            normal_direction=self.normal_direction,
+            quadrature_rule=self.quadrature_rule,
+            area_weights=area_weights,
         )
 
     def windowed(self, window_size: tuple[float, float] | None) -> "PlanarEquivalentCurrents":
@@ -461,6 +508,9 @@ class PlanarEquivalentCurrents:
             M=self.M * window_2d.to(dtype=self.M.dtype),
             background_eps_r=self.background_eps_r,
             background_mu_r=self.background_mu_r,
+            normal_direction=self.normal_direction,
+            quadrature_rule=self.quadrature_rule,
+            area_weights=self.area_weights,
         )
 
 
@@ -544,8 +594,8 @@ class SurfaceEquivalentCurrents:
 
     def __post_init__(self):
         device = _resolve_tensor_device(self.points, self.weights, self.J, self.M)
-        real_dtype = _resolve_real_dtype(self.points, self.weights, self.J, self.M)
-        complex_dtype = _resolve_complex_dtype(self.J, self.M)
+        real_dtype = resolve_real_dtype(self.points, self.weights, self.J, self.M)
+        complex_dtype = resolve_complex_dtype(self.J, self.M)
         points = _to_real_tensor(self.points, device=device, dtype=real_dtype)
         if points.ndim != 2 or points.shape[1] != 3:
             raise ValueError(f"points must have shape (N, 3), got {tuple(points.shape)}.")
@@ -619,8 +669,8 @@ def equivalent_surface_currents_from_surface_samples(
     Stratton-Chu / near-to-far-field transform as an axis-aligned box.
     """
     device = _resolve_tensor_device(points, normals, areas, E, H)
-    real_dtype = _resolve_real_dtype(points, normals, areas)
-    complex_dtype = _resolve_complex_dtype(E, H)
+    real_dtype = resolve_real_dtype(points, normals, areas)
+    complex_dtype = resolve_complex_dtype(E, H)
 
     point_tensor = _to_real_tensor(points, device=device, dtype=real_dtype)
     if point_tensor.ndim != 2 or point_tensor.shape[1] != 3:
@@ -826,6 +876,25 @@ def _equivalent_surface_currents_from_payload(
 
     resolved_frequency = float(monitor.get("frequency"))
     resolved_normal_direction = monitor.get("normal_direction", "+") if normal_direction is None else normal_direction
+    cell_widths = monitor.get("cell_widths")
+    area_weights = None
+    if cell_widths is not None:
+        field_values = tuple(
+            monitor.get(name) for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+        )
+        device = _resolve_tensor_device(
+            monitor[coord_name_a], monitor[coord_name_b], *field_values
+        )
+        real_dtype = resolve_real_dtype(
+            monitor[coord_name_a], monitor[coord_name_b], *field_values
+        )
+        width_u = torch.as_tensor(
+            cell_widths[coord_name_a], device=device, dtype=real_dtype
+        )
+        width_v = torch.as_tensor(
+            cell_widths[coord_name_b], device=device, dtype=real_dtype
+        )
+        area_weights = width_u[:, None] * width_v[None, :]
     return equivalent_surface_currents_from_fields(
         axis=axis,
         position=float(monitor["position"]),
@@ -837,6 +906,8 @@ def _equivalent_surface_currents_from_payload(
         window_size=None,
         background_eps_r=background[0],
         background_mu_r=background[1],
+        quadrature_rule="cell_centered",
+        area_weights=area_weights,
     ).cropped(tangential_bounds).windowed(window_size)
 
 
@@ -852,12 +923,14 @@ def equivalent_surface_currents_from_fields(
     window_size: tuple[float, float] | None = None,
     background_eps_r: complex | float = 1.0,
     background_mu_r: complex | float = 1.0,
+    quadrature_rule: str = "trapezoidal",
+    area_weights=None,
 ) -> PlanarEquivalentCurrents:
     axis_name = _normalize_axis(axis)
     normalized_fields = {str(name).upper(): values for name, values in fields.items()}
     device = _resolve_tensor_device(u, v, *normalized_fields.values())
-    real_dtype = _resolve_real_dtype(u, v, *normalized_fields.values())
-    complex_dtype = _resolve_complex_dtype(*normalized_fields.values())
+    real_dtype = resolve_real_dtype(u, v, *normalized_fields.values())
+    complex_dtype = resolve_complex_dtype(*normalized_fields.values())
     u_coords = _as_1d_coords(u, "u", device=device, dtype=real_dtype)
     v_coords = _as_1d_coords(v, "v", device=device, dtype=real_dtype)
     shape = (u_coords.numel(), v_coords.numel())
@@ -915,6 +988,9 @@ def equivalent_surface_currents_from_fields(
         M=m_field,
         background_eps_r=background_eps_r,
         background_mu_r=background_mu_r,
+        normal_direction=("+" if _normalize_normal_direction(normal_direction) > 0.0 else "-"),
+        quadrature_rule=quadrature_rule,
+        area_weights=area_weights,
     )
     return currents.windowed(window_size)
 
@@ -1011,7 +1087,7 @@ class StrattonChuPropagator:
         )
         self.frequency = float(self._surfaces[0].frequency)
         self.coord_dtype = self._surfaces[0].coord_dtype
-        self.field_dtype = _resolve_complex_dtype(*(surface.J for surface in self._surfaces), *(surface.M for surface in self._surfaces))
+        self.field_dtype = resolve_complex_dtype(*(surface.J for surface in self._surfaces), *(surface.M for surface in self._surfaces))
         self.omega = 2.0 * math.pi * self.frequency
         self.eta0 = math.sqrt(self.mu0 / self.eps0)
         self.k, self.eta = _background_wavenumber_and_impedance(

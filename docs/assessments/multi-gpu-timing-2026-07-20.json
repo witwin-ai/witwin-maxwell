@@ -1,0 +1,206 @@
+{
+  "environment": {
+    "compute_capability": "8.6",
+    "cpu_governor": "performance",
+    "cuda_runtime": "13.0",
+    "device_count": 2,
+    "device_name": "NVIDIA RTX A6000",
+    "numactl": "--cpunodebind=0 --membind=0",
+    "persistence_mode": "enabled",
+    "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "torch": "2.13.0+cu130"
+  },
+  "exclusive_window": {
+    "clocks_snapshot": [
+      "0, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled",
+      "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled"
+    ],
+    "foreign_compute_apps": [],
+    "note": "single measurement process at a time; both GPUs verified idle before each block",
+    "verified": true
+  },
+  "git_sha": "ead70c06487dac060d03fb4d5e1f9fe9a2127a21",
+  "kind": "multi_gpu_timing_and_no_feature_spotcheck",
+  "schema_version": 1,
+  "task2_ensemble": {
+    "aa_floor_context": "wall-clock (not cuda_graph replay); measurement dispersion reported as makespan_speedup_mad. All configs report mad < 0.4%, so the ~2x figures are well outside noise. A/A floor here is the wall-clock repeat spread, not the sub-0.1% same-session replay floor used for step timing.",
+    "command_template": "numactl --cpunodebind=0 --membind=0 python tests/support/benchmark_ensemble_speedup.py --n <N> --grid-cells <G> --steps 2000 --repeats 5 --devices cuda:0 cuda:1 --output <json>",
+    "configs": {
+      "160_4": {
+        "devices": [
+          "cuda:0",
+          "cuda:1"
+        ],
+        "grid_cells_per_axis": 160,
+        "makespan_speedup_mad": 0.0015063601250095981,
+        "makespan_speedup_median": 1.9969529214543695,
+        "makespan_speedup_samples": [
+          1.99544656132936,
+          2.0008813379895427,
+          1.9956084802394216,
+          1.9969529214543695,
+          2.0044554489979545
+        ],
+        "parallel_device_task_counts": {
+          "cuda:0": 2,
+          "cuda:1": 2
+        },
+        "parallel_median_wall_s": 3.5992807879811153,
+        "repeats": 5,
+        "serial_median_wall_s": 7.1886412259191275,
+        "tasks": 4,
+        "time_steps": 2000,
+        "utilization_note": "parallel places n/2 tasks per GPU; wall-clock ratio approximates 2-GPU throughput/utilization for these GPU-bound tasks"
+      },
+      "160_8": {
+        "devices": [
+          "cuda:0",
+          "cuda:1"
+        ],
+        "grid_cells_per_axis": 160,
+        "makespan_speedup_mad": 0.0007617325070623515,
+        "makespan_speedup_median": 1.9978988107115903,
+        "makespan_speedup_samples": [
+          1.997137078204528,
+          1.9992375625076688,
+          1.9978988107115903,
+          1.9958872968534611,
+          1.9985148584237435
+        ],
+        "parallel_device_task_counts": {
+          "cuda:0": 4,
+          "cuda:1": 4
+        },
+        "parallel_median_wall_s": 7.194747732952237,
+        "repeats": 5,
+        "serial_median_wall_s": 14.374377939035185,
+        "tasks": 8,
+        "time_steps": 2000,
+        "utilization_note": "parallel places n/2 tasks per GPU; wall-clock ratio approximates 2-GPU throughput/utilization for these GPU-bound tasks"
+      },
+      "96_4": {
+        "devices": [
+          "cuda:0",
+          "cuda:1"
+        ],
+        "grid_cells_per_axis": 96,
+        "makespan_speedup_mad": 0.0034165611324898926,
+        "makespan_speedup_median": 1.9896437031955518,
+        "makespan_speedup_samples": [
+          1.984385201678026,
+          1.9896437031955518,
+          1.9964394830372012,
+          1.9917314659149616,
+          1.986227142063062
+        ],
+        "parallel_device_task_counts": {
+          "cuda:0": 2,
+          "cuda:1": 2
+        },
+        "parallel_median_wall_s": 1.6788673950359225,
+        "repeats": 5,
+        "serial_median_wall_s": 3.3355835060356185,
+        "tasks": 4,
+        "time_steps": 2000,
+        "utilization_note": "parallel places n/2 tasks per GPU; wall-clock ratio approximates 2-GPU throughput/utilization for these GPU-bound tasks"
+      },
+      "96_8": {
+        "devices": [
+          "cuda:0",
+          "cuda:1"
+        ],
+        "grid_cells_per_axis": 96,
+        "makespan_speedup_mad": 0.003969376210245068,
+        "makespan_speedup_median": 1.9818387853635675,
+        "makespan_speedup_samples": [
+          1.94242514532335,
+          1.9809513804869123,
+          1.9858081615738126,
+          1.9929718568612917,
+          1.9818387853635675
+        ],
+        "parallel_device_task_counts": {
+          "cuda:0": 4,
+          "cuda:1": 4
+        },
+        "parallel_median_wall_s": 3.3710715050110593,
+        "repeats": 5,
+        "serial_median_wall_s": 6.68802175403107,
+        "tasks": 8,
+        "time_steps": 2000,
+        "utilization_note": "parallel places n/2 tasks per GPU; wall-clock ratio approximates 2-GPU throughput/utilization for these GPU-bound tasks"
+      }
+    },
+    "harness": "tests/support/benchmark_ensemble_speedup.py",
+    "metric": "serial(1 GPU, max_concurrency=1) / parallel(2 GPU) total wall-clock ratio",
+    "tracked_reference": "128^3 makespan speedup 1.96x (docs/assessments/ensemble-speedup-2026-07-17.json)"
+  },
+  "task2_joint_solve": {
+    "command_template": "numactl --cpunodebind=0 --membind=0 python scripts/dev/fdtd/multi_gpu/bench_joint.py --workload vacuum --devices cuda:0 cuda:1 --nodes-x <N> --nodes-y <N> --nodes-z <N> --steps 300 --warmups 1 --repeats 5 --json <json>",
+    "configs": {
+      "128": {
+        "cells_per_axis": 128,
+        "field_parity_max_rel": 0.0,
+        "field_parity_passed": true,
+        "halo_bytes_per_step": 264192,
+        "node_shape": [
+          129,
+          129,
+          129
+        ],
+        "overlap_active": true,
+        "p2p_min_gbps": 52.66579538233453,
+        "repeats": 5,
+        "single_gpu_ms_per_step_median": 0.452228383316348,
+        "single_gpu_step_rate_hz": 2211.272084840523,
+        "steps": 300,
+        "strong_speedup": 0.5437073908966271,
+        "transport": "cuda_p2p",
+        "two_gpu_ms_per_step_median": 0.8317495603114367,
+        "two_gpu_step_rate_hz": 1202.2849758111859
+      },
+      "192": {
+        "cells_per_axis": 192,
+        "field_parity_max_rel": 0.0,
+        "field_parity_passed": true,
+        "halo_bytes_per_step": 592896,
+        "node_shape": [
+          193,
+          193,
+          193
+        ],
+        "overlap_active": true,
+        "p2p_min_gbps": 52.70020377238865,
+        "repeats": 5,
+        "single_gpu_ms_per_step_median": 1.4742466302899022,
+        "single_gpu_step_rate_hz": 678.3125560228384,
+        "steps": 300,
+        "strong_speedup": 1.7262714771587802,
+        "transport": "cuda_p2p",
+        "two_gpu_ms_per_step_median": 0.8540062497680386,
+        "two_gpu_step_rate_hz": 1170.951618060893
+      }
+    },
+    "harness": "scripts/dev/fdtd/multi_gpu/bench_joint.py",
+    "metric": "single-GPU vs 2-GPU x-slab joint-solve ms/step (strong scaling), CUDA-event timed",
+    "nccl_torchrun_step_rate": "not-measurable via existing hooks (correctness-only worker; no timing)",
+    "transport_note": "This is the instrumented in-process cuda_p2p x-slab joint-solve forward path. The NCCL one-process-per-GPU (torchrun) forward path has only a correctness worker (tests/fdtd/multi_gpu/_nccl_forward_worker.py, no step-rate timing); its step-rate is NOT-MEASURABLE via existing hooks without new timing infrastructure -- recorded here as not fabricated."
+  },
+  "task3_no_feature_regression": {
+    "cross_grid_baseline_deltas_vs_grid_sweep": {
+      "note": "fresh Task-1 bare-FDTD baselines vs tracked grid-sweep baselines, cuda_graph",
+      "source": "docs/assessments/network-embedding-gate-d-remeasure-2026-07-20.json sweep[*].baseline_median_ms"
+    },
+    "delta_vs_historical_pct": -0.09804526932556401,
+    "harness": "docs/assessments/exclusive-timing-window-probes/task3_nofeature.py reusing benchmark_network_embedding._scene(dynamic=False)",
+    "historical_median_ms_per_step": 0.4909346666666667,
+    "historical_source": "network-embedding-phase-4-performance-grid-sweep.json baseline grid 128",
+    "host_cross_session_aa_floor_pct": 0.523,
+    "measured_median_ms_per_step": 0.4904533284505208,
+    "same_session_replay_floor_absmax_pct": 0.11859553285744617,
+    "verdict": "no resolvable regression (|delta| within host cross-session A/A floor; delta is negative -> bare step not slower)"
+  },
+  "timestamp_utc": "2026-07-21T07:41:10.126041+00:00",
+  "title": "plan 02 deferred ensemble/joint-solve timing + plan-wide no-feature regression spot-check"
+}

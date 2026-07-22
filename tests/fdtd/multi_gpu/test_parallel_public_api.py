@@ -105,20 +105,31 @@ def test_parallel_builds_distributed_solver_and_initializes(monkeypatch):
 
 
 @pytest.mark.parametrize("entrypoint", ["prepare", "run"])
-def test_trainable_parallel_is_rejected_before_solver_allocation(monkeypatch, entrypoint):
-    simulation = mw.Simulation.fdtd(
-        _scene(),
-        frequency=1.0e9,
-        parallel=_parallel(),
+def test_unsupported_trainable_parallel_channel_rejected_before_solver_allocation(
+    monkeypatch, entrypoint
+):
+    # A trainable structure geometry has no distributed reverse core, so the
+    # capability-scoped validator must reject it before the distributed solver is
+    # built. (Trainable Box densities are the one supported channel and are routed
+    # to the distributed adjoint bridge instead -- covered by the adjoint parity
+    # suite.)
+    scene = _scene()
+    scene.add_structure(
+        mw.Structure(
+            name="dielectric",
+            geometry=mw.Box(position=torch.zeros(3, requires_grad=True), size=(0.2, 0.2, 0.2)),
+            material=mw.Material(eps_r=3.0),
+        )
     )
-    simulation.has_trainable_parameters = True
+    simulation = mw.Simulation.fdtd(scene, frequency=1.0e9, parallel=_parallel())
+    assert simulation.has_trainable_parameters
 
     def unexpected_allocation(*args, **kwargs):
         raise AssertionError("solver allocation must not be reached")
 
     monkeypatch.setattr(simulation, "_build_fdtd_solver", unexpected_allocation)
 
-    with pytest.raises(ValueError, match="does not support trainable"):
+    with pytest.raises(ValueError, match="trainable geometry"):
         getattr(simulation, entrypoint)()
 
 
@@ -146,7 +157,7 @@ def test_gather_fields_false_does_not_fallback_to_shard_fields(monkeypatch):
     monkeypatch.setattr(
         simulation,
         "_execute_fdtd_solve",
-        lambda *args: (None, 2, False, simulation.config.spectral_sampler),
+        lambda *args, **kwargs: (None, 2, False, simulation.config.spectral_sampler),
     )
     monkeypatch.setattr(
         simulation,
@@ -171,7 +182,7 @@ def test_gather_fields_true_requires_distributed_field_output(monkeypatch):
     monkeypatch.setattr(
         simulation,
         "_execute_fdtd_solve",
-        lambda *args: (None, 1, False, simulation.config.spectral_sampler),
+        lambda *args, **kwargs: (None, 1, False, simulation.config.spectral_sampler),
     )
 
     with pytest.raises(RuntimeError, match="did not return any output"):
@@ -188,7 +199,7 @@ def test_gathered_fields_are_normalized_on_explicit_result_device(monkeypatch):
     monkeypatch.setattr(
         simulation,
         "_execute_fdtd_solve",
-        lambda *args: (raw_fields, 1, False, simulation.config.spectral_sampler),
+        lambda *args, **kwargs: (raw_fields, 1, False, simulation.config.spectral_sampler),
     )
 
     def capture_device(fields, device):
@@ -201,6 +212,41 @@ def test_gathered_fields_are_normalized_on_explicit_result_device(monkeypatch):
 
     assert requested_devices == ["cuda:1"]
     assert set(result.fields) == {"EX", "EY", "EZ"}
+
+
+def test_distributed_solver_rejects_surface_impedance_ownership():
+    """The distributed static-capability gate must fail closed on a surface-impedance
+    metal: the tangential surface E write (and its per-edge ADE state) has no distributed
+    owner-shard implementation yet, so it cannot silently run forward-only."""
+    from witwin.core import Box
+    from witwin.maxwell.fdtd.distributed.solver import DistributedFDTD
+    from witwin.maxwell.scene import prepare_scene
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.2, 0.2), (-0.2, 0.2))),
+        grid=mw.GridSpec.uniform(0.05),
+        boundary=mw.BoundarySpec.pml(num_layers=4),
+        device="cpu",
+        structures=[
+            mw.Structure(
+                geometry=Box(position=(0.3, 0.0, 0.0), size=(0.4, 1.0, 1.0)),
+                material=mw.LossyMetalMedium(conductivity=5.8e7),
+            )
+        ],
+    )
+    prepared = prepare_scene(scene)
+
+    # Drive the static-capability gate directly (no GPU transport), the same partial-
+    # construction style the adjoint-bridge guard tests use.
+    solver = object.__new__(DistributedFDTD)
+    solver._nccl = False
+    solver.logical_scene = scene
+    solver.scene = prepared
+    solver.Nx, solver.Ny, solver.Nz = prepared.Nx, prepared.Ny, prepared.Nz
+    solver.devices = (torch.device("cuda:0"), torch.device("cuda:1"))
+
+    with pytest.raises(ValueError, match="distributed surface-impedance ownership"):
+        solver._validate_static_capabilities()
 
 
 def test_result_solver_stats_is_a_read_only_copy_property():

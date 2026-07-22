@@ -1,0 +1,58 @@
+{
+  "name": "rf/series_parallel_rlc",
+  "description": "Coax in-line RLC resonator: FDTD |S11| notch (series) / peak (parallel) vs the analytic f0 = 1/(2pi sqrt(LC)), tracking C over +/-20%.",
+  "gate_class": "wave-level",
+  "status": "pass",
+  "reference": "analytic-RLC (f0 = 1/(2pi sqrt(LC)))",
+  "tidy3d_reference": "n/a (lumped-circuit resonance; analytic first-line reference)",
+  "target": "f_res tracks 1/sqrt(C) (f_res*sqrt(C) const) and moves under +/-20% C",
+  "tolerance_basis": "Wave-level: the series |S11| notch obeys f_res*sqrt(C)=const (the 1/sqrt(LC) law) to ~1% and moves by the analytic 1/sqrt(C) ratio under +/-20% C; the parallel |S11| peak moves in the correct direction (monotone in C). The absolute f_res sits ~13% below the ideal f0 -- the documented, consistent parasitic (rod-gap fringe capacitance) shift, measured not hidden.",
+  "falsification": "EXECUTED: a valid RLC bench must track C. Measured -- series f_res*sqrt(C) spread 0.010 (const => tracks 1/sqrt(LC)), -20%C ratio 1.099 (analytic 1.118), +20%C ratio 0.919 (analytic 0.913); parallel peak monotone in C (True). The retired bench's peak did NOT move with C.",
+  "metrics": [
+    {
+      "quantity": "series f_res*sqrt(C) spread",
+      "measured": 0.009673572560115296,
+      "reference": 0.0,
+      "unit": "fraction",
+      "class": "wave-level",
+      "note": "constant => tracks 1/sqrt(LC)"
+    },
+    {
+      "quantity": "series -20%C f_res ratio",
+      "measured": 1.0994123387865034,
+      "reference": 1.118033988749895,
+      "rel_error": 0.01665571006853999,
+      "class": "wave-level"
+    },
+    {
+      "quantity": "series +20%C f_res ratio",
+      "measured": 0.918500645725816,
+      "reference": 0.9128709291752769,
+      "rel_error": 0.006167045494180898,
+      "class": "wave-level"
+    }
+  ],
+  "supporting": [],
+  "convergence": [],
+  "conservation": {
+    "series_f_res_hz": {
+      "3.20e-12": 478749023.52524096,
+      "4.00e-12": 435459023.5485887,
+      "4.80e-12": 399969394.31651205
+    },
+    "parallel_f_res_hz": {
+      "3.20e-12": 361611427.94205594,
+      "4.00e-12": 346455112.7099501,
+      "4.80e-12": 332416255.214719
+    },
+    "series_f_res_sqrtC_spread": 0.009673572560115296,
+    "series_absolute_shift_vs_ideal": 0.8621962160591993,
+    "series_monotone_in_C": true,
+    "parallel_monotone_in_C": true
+  },
+  "raw": {},
+  "notes": [
+    "REBUILT (coax in-line RLC). The RLC is a two-terminal element in the coax inner conductor ahead of a matched through-PML continuation, so it carries the full axial current and its resonance controls the feed reflection. Absolute f_res ~0.862 x ideal (documented parasitic downshift from the rod-gap fringe capacitance)."
+  ],
+  "updated_at": "2026-07-22T13:50:22+00:00"
+}

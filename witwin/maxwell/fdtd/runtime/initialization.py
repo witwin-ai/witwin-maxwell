@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import torch
 
-from ...compiler.monitors import compile_fdtd_observers, compile_fdtd_time_observers
+from ...constants import C_0, EPSILON_0, MU_0
+from ...compiler.monitors import (
+    compile_fdtd_breakdown_observers,
+    compile_fdtd_observers,
+    compile_fdtd_time_observers,
+)
 from ...compiler.sources import compile_fdtd_sources
 from ..boundary import DEFAULT_CPML_CONFIG
 from .module_cache import get_fdtd_module, require_cuda_scene
@@ -77,9 +80,9 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver.min_dz = float(scene.dz_primal64.min())
     solver.device = torch.device(scene.device)
     solver.verbose = bool(scene.verbose)
-    solver.c = 299792458.0
-    solver.mu0 = 4 * np.pi * 1e-7
-    solver.eps0 = 1 / (solver.mu0 * solver.c**2)
+    solver.c = C_0
+    solver.mu0 = MU_0
+    solver.eps0 = EPSILON_0
     solver.plot_interval = 50
     solver.progress_update_interval = 25
     compiled_sources = compile_fdtd_sources(scene, default_frequency=float(frequency))
@@ -212,6 +215,7 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver._point_observer_groups = {}
     solver._plane_observer_groups = {}
     solver.last_solve_elapsed_s = None
+    solver._wire_runtime = None
     solver.tfsf_enabled = False
     solver._tfsf_state = None
 
@@ -219,6 +223,8 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
     solver.observers_enabled = False
     solver.time_observers = compile_fdtd_time_observers(scene)
     solver.time_observers_enabled = False
+    solver.breakdown_observers = compile_fdtd_breakdown_observers(scene)
+    solver.breakdown_observers_enabled = False
     solver.observer_frequency = None
     solver.observer_frequencies = ()
     solver.observer_window_type = "hanning"

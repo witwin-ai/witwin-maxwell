@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -7,6 +10,11 @@ from witwin.maxwell.fdtd.ports import (
     apply_port_runtimes,
     prepare_port_spectral_accumulators,
 )
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "support"))
+
+from port_hot_path_tally import tally_hot_path_window  # noqa: E402
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
@@ -85,6 +93,40 @@ def test_port_only_gaussian_uses_a_full_pulse_window_by_default():
     assert data.metadata["window"] == "none"
     assert data.metadata["dft_samples"] == 96
     assert torch.all(torch.isfinite(data.voltage))
+
+
+def test_cw_port_remains_stable_for_4096_steps_at_the_base_courant_limit():
+    simulation = mw.Simulation.fdtd(
+        _port_scene(),
+        frequency=3.0e9,
+        excitations=mw.PortExcitation("feed", source_time=mw.CW(3.0e9)),
+        run_time=mw.TimeConfig(time_steps=4096),
+        spectral_sampler=mw.SpectralSampler(window="hanning"),
+    )
+    prepared = simulation.prepare()
+    solver = prepared.solver
+    expected_dt = 1.0 / (
+        solver.c
+        * (
+            1.0 / solver.min_dx**2
+            + 1.0 / solver.min_dy**2
+            + 1.0 / solver.min_dz**2
+        )
+        ** 0.5
+    )
+    assert solver.dt == pytest.approx(expected_dt)
+
+    data = prepared.run().port("feed")
+
+    assert torch.all(torch.isfinite(data.voltage))
+    assert torch.all(torch.isfinite(data.current))
+    assert torch.all(torch.abs(data.voltage) < 2.0)
+    torch.testing.assert_close(
+        data.incident_power,
+        data.available_power,
+        rtol=1.0e-3,
+        atol=1.0e-8,
+    )
 
 
 def test_passive_rlc_port_prepares_device_resident_auxiliary_state():
@@ -184,3 +226,47 @@ def test_port_step_profiler_has_no_scalar_sync_or_host_device_copy():
     assert "aten::item" not in event_names
     assert "aten::_local_scalar_dense" not in event_names
     assert not any("Memcpy HtoD" in name or "Memcpy DtoH" in name for name in event_names)
+
+
+def _passive_hot_path_op_inventory(solver, *, steps: int = 16) -> dict[str, int]:
+    """Deterministic per-window op tallies for the passive port step.
+
+    Routes through the shared :func:`tally_hot_path_window` helper so this
+    per-window ceiling test and the per-step artifact profiler share one
+    implementation of the profiled window and its event classification.
+    """
+
+    def _step() -> None:
+        apply_port_runtimes(solver)
+        accumulate_port_observers(solver)
+
+    return tally_hot_path_window(_step, warmup_steps=8, profiled_steps=steps)
+
+
+def test_passive_series_rlc_port_step_stays_within_op_count_ceiling():
+    # Gate class: perf-opcount (docs/reference/gate-classification.md §5).
+    # Op-count contract for the passive-termination hot path. Deterministic host
+    # tallies only (no timing asserted). A passive SeriesRLC port must add no
+    # per-step allocation, no host<->device transfer, and no scalar sync, and
+    # must keep the launch/DtoD schedule tight. Un-gating the lumped diagnostics
+    # (LumpedRuntime.diagnostics_enabled) or reintroducing per-step allocations
+    # pushes these tallies over the ceiling and turns this red.
+    solver = mw.Simulation.fdtd(
+        _port_scene(termination=mw.SeriesRLC(r=25.0, l=0.5e-9, c=1.0e-12)),
+        frequency=3.0e9,
+        run_time=mw.TimeConfig(time_steps=96),
+        spectral_sampler=mw.SpectralSampler(window="none"),
+    ).prepare().solver
+    prepare_port_spectral_accumulators(solver, 96, "none")
+
+    steps = 16
+    tally = _passive_hot_path_op_inventory(solver, steps=steps)
+
+    assert tally["allocs"] == 0
+    assert tally["device_mem"] == 0
+    assert tally["scalar_sync"] == 0
+    assert tally["memcpy_hostside"] == 0
+    # Measured post-fix schedule: 21 launches, 2 DtoD copies per step. Ceilings
+    # carry small headroom so genuine reductions pass and regressions fail.
+    assert tally["launches"] <= steps * 26
+    assert tally["memcpy_dtod"] <= steps * 4

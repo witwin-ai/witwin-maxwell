@@ -80,6 +80,30 @@ class CompiledPortGeometry:
         return 0.5 * torch.real(voltage * torch.conj(current))
 
 
+@dataclass(frozen=True)
+class CompiledWirePortGeometry:
+    """Sparse generalized coordinate for one port bound to a wire graph."""
+
+    port_name: str
+    binding_kind: str
+    negative_node_id: int
+    positive_node_id: int
+    edge_components: torch.Tensor
+    edge_offsets: torch.Tensor
+    edge_weights: torch.Tensor
+    binding_index: int
+    gap_offset: int
+    reference_impedance: Any
+    reference_plane: float | None = None
+    phasor_convention: str = "peak"
+    power_convention: str = "0.5*Re(V*conj(I))"
+    metadata: Mapping[str, Any] | None = None
+
+    @property
+    def is_wire_bound(self) -> bool:
+        return True
+
+
 def _axis_values(scene, axis: str, *, half: bool) -> np.ndarray:
     suffix = "half64" if half else "nodes64"
     return np.asarray(getattr(scene, f"{axis}_{suffix}"), dtype=np.float64)
@@ -268,10 +292,45 @@ def compile_port_geometry(
     resolved_scene = prepare_scene(scene)
     resolved_port = (
         _resolve_terminal_port(port, resolved_scene.structures, resolved_scene.domain.bounds)
-        if isinstance(port, TerminalPort)
+        if isinstance(port, TerminalPort) and port.wire_binding is None
         else port
     )
     target_device = torch.device(resolved_scene.device if device is None else device)
+    if getattr(resolved_port, "wire_binding", None) is not None:
+        network = resolved_scene.compile_thin_wires(device=target_device)
+        matches = tuple(
+            index
+            for index, name in enumerate(network.port_binding_names)
+            if name == resolved_port.name
+        )
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Wire-bound port {resolved_port.name!r} was not lowered exactly once "
+                "by the thin-wire compiler."
+            )
+        binding_index = matches[0]
+        start = int(network.port_gap_offsets[binding_index])
+        end = int(network.port_gap_offsets[binding_index + 1])
+        negative_node = int(network.port_negative_node_ids[binding_index])
+        positive_node = int(network.port_positive_node_ids[binding_index])
+        records = tuple(network.metadata.get("port_bindings", ()))
+        record = records[binding_index] if binding_index < len(records) else {}
+        return CompiledWirePortGeometry(
+            port_name=resolved_port.name,
+            binding_kind=network.port_binding_kinds[binding_index],
+            negative_node_id=negative_node,
+            positive_node_id=positive_node,
+            edge_components=network.port_gap_edge_components[start:end],
+            edge_offsets=network.port_gap_edge_offsets[start:end],
+            edge_weights=network.port_gap_weights[start:end],
+            binding_index=binding_index,
+            gap_offset=start,
+            reference_impedance=resolved_port.reference_impedance,
+            reference_plane=resolved_port.reference_plane,
+            phasor_convention=resolved_port.phasor_convention,
+            power_convention=resolved_port.power_convention,
+            metadata=dict(record),
+        )
     try:
         direction, voltage_component, voltage_indices, voltage_weights = _compile_voltage(
             resolved_port,
@@ -324,4 +383,9 @@ def compile_ports(
     return tuple(compiled)
 
 
-__all__ = ["CompiledPortGeometry", "compile_port_geometry", "compile_ports"]
+__all__ = [
+    "CompiledPortGeometry",
+    "CompiledWirePortGeometry",
+    "compile_port_geometry",
+    "compile_ports",
+]

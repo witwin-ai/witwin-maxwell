@@ -125,6 +125,37 @@ def _grouped_items(items: dict[str, list[str]] | dict[str, str]):
     return dict(sorted(grouped.items()))
 
 
+def _missing_scenario_lines(merged_rows: dict) -> list[str]:
+    """Markdown for registered scenarios that carry no measured row in this file.
+
+    Imported lazily because ``benchmark.runner`` imports this module.
+    """
+
+    from benchmark.runner import SCENARIOS
+
+    missing = [name for name in SCENARIOS if name not in merged_rows]
+    if not missing:
+        return []
+    lines = [
+        "## Registered scenarios with no measured row",
+        "",
+        "These scenarios are registered in `benchmark/runner.SCENARIOS` but have no row "
+        "in the tables above: the runs that produced this file never scored them. They "
+        "are listed so that a family which cannot execute on the generating host is "
+        "visible as unmeasured rather than silently absent. A row here is **not** a "
+        "pass, a fail, or a tolerance waiver -- it is the absence of evidence.",
+        "",
+        "| Scenario | Solver | Description |",
+        "| --- | --- | --- |",
+    ]
+    for name in missing:
+        scenario = SCENARIOS[name]
+        description = str(scenario.description).replace("|", "\\|")
+        lines.append(f"| {name} | {scenario.solver} | {description} |")
+    lines.append("")
+    return lines
+
+
 def write_results_markdown(results: list[ScenarioMetrics]) -> None:
     existing_rows, existing_plots, existing_scalar_rows, existing_frequency_rows = (
         _parse_existing_results()
@@ -272,6 +303,12 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
         for key in sorted(merged_frequency_rows):
             lines.append("| " + " | ".join(merged_frequency_rows[key]) + " |")
         lines.append("")
+
+    # A registered scenario that produced no row must stay visible. Without this
+    # section a family that cannot run on the current host (a missing optional
+    # dependency, a deliberate deferral, an aborted run) simply disappears from the
+    # table, and the file silently reads as if that family had been validated.
+    lines.extend(_missing_scenario_lines(merged_rows))
 
     # The per-medium validation-coverage table is regenerated from the coverage
     # registry so it stays in sync with media.py even across benchmark reruns.

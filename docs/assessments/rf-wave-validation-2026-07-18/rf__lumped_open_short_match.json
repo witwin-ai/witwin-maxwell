@@ -1,0 +1,70 @@
+{
+  "name": "rf/lumped_open_short_match",
+  "description": "Coax one-port open/short/match (SOL) on the proven air coax line: feed |Gamma| and phase per standard from a real FDTD WavePort excitation.",
+  "gate_class": "wave-level",
+  "status": "pass",
+  "reference": "analytic-Gamma (matched 0, short -1, open +1) at the load plane",
+  "tidy3d_reference": "pending-generation",
+  "target": "matched |Gamma| <= -20 dB; short/open |Gamma| >= -0.5 dB; open/short anti-phase-class discrimination after short-referenced de-embedding",
+  "tolerance_basis": "Wave-level SOL discrimination: matched |Gamma| <= 0.1 (-20 dB) from the reflectionless coax-through-PML termination (presents Z0); short and open |Gamma| >= 0.944 (-0.5 dB); and, with the short as the -1 reference plane, the open lands in the +1 class (Re(Gamma_open^ref) > 0) with the open/short phase separation > 90 deg. The open/short separation departs from an ideal 180 deg by the coax open-end fringe capacitance (measured, documented -- not hidden).",
+  "falsification": "EXECUTED: a coupled feed must DISCRIMINATE the standards. Measured across the band -- matched |Gamma|<= 0.073 (-20 dB gate 0.1), short |Gamma|>= 0.998, open |Gamma|>= 0.986, open/short phase separation >= 114 deg, short-referenced open Re >= 0.403 (+1 class). The retired bench read identical |Gamma| at the SAME phase for all three loads (feed decoupled); this rebuild makes the load control the feed reflection.",
+  "metrics": [
+    {
+      "case": "matched",
+      "gamma_mag_min": 0.07014359929895138,
+      "gamma_mag_max": 0.07280032162809932,
+      "gamma_deg": [
+        -82.91000468420935,
+        -66.60773970666187,
+        -50.107414892036964
+      ],
+      "s11_db_worst": -22.757334039838103,
+      "class": "wave-level"
+    },
+    {
+      "case": "short",
+      "gamma_mag_min": 0.9981776633305678,
+      "gamma_mag_max": 0.9987735398556976,
+      "gamma_deg": [
+        -21.87030905933723,
+        -12.955356124554887,
+        -4.0403574572316
+      ],
+      "s11_db_worst": -0.010659435482269981,
+      "class": "wave-level"
+    },
+    {
+      "case": "open",
+      "gamma_mag_min": 0.9862907855786737,
+      "gamma_mag_max": 1.0015506918791448,
+      "gamma_deg": [
+        -141.82518686706814,
+        -129.86473866968578,
+        -117.74095041770052
+      ],
+      "s11_db_worst": 0.01345870606665696,
+      "class": "wave-level"
+    }
+  ],
+  "supporting": [],
+  "convergence": [],
+  "conservation": {
+    "matched_gamma_mag_max": 0.07280032162809932,
+    "short_gamma_mag_min": 0.9981776633305678,
+    "open_gamma_mag_min": 0.9862907855786737,
+    "open_ref_re_min": 0.4030749201021953,
+    "open_short_phase_sep_deg_min": 113.70059296046892,
+    "analytic_z0_ohm": 83.12011885183587,
+    "tm01_cutoff_hz": 717192819.2478027,
+    "frequencies_hz": [
+      450000000.0,
+      475000000.0,
+      500000000.0
+    ]
+  },
+  "raw": {},
+  "notes": [
+    "REBUILT (coax SOL). Feed WavePort TEM launch -> coax line -> load plane. matched = reflectionless coax-through-PML (Z0); short = PEC plug; open = truncated inner rod (below-TM01-cutoff shield). The open-end fringe capacitance shifts the open reference plane outward (open/short separation ~114 deg, not the ideal 180); measured and documented."
+  ],
+  "updated_at": "2026-07-22T13:50:36+00:00"
+}

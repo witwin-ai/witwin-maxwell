@@ -1,0 +1,54 @@
+{
+  "name": "rf/microstrip_two_port",
+  "description": "Microstrip quasi-TEM two-port (terminated): FDTD S-matrix and beta(omega) vs Hammerstad-Jensen quasi-TEM phase constant beta=k0 sqrt(eps_eff).",
+  "gate_class": "wave-level",
+  "status": "gap",
+  "reference": "analytic-Hammerstad (Z0=57.73 ohm, eps_eff=3.267)",
+  "tidy3d_reference": "pending-generation",
+  "target": "wave-level precondition (cond(A) + passivity) per coax_thru; beta from arg(S21)/L vs Hammerstad beta (resolution-limited quasi-TEM)",
+  "tolerance_basis": "Two-stage (coax_thru precedent): (1) wave-level precondition -- the B=S*A extraction is well conditioned (cond(A) <= 10) and the solved S passive (max singular value <= 1.1); (2) beta from arg(S21)/L is compared to the Hammerstad quasi-TEM phase constant. The absolute beta carries a resolution-limited quasi-static gap (the discrete substrate under-loads the field at feasible dx), recorded not hidden.",
+  "falsification": "EXECUTED (F2b): the quasi-static line-mode engine converges toward Hammerstad with aperture resolution -- for this eps_r=4.4, W/h=1.5 microstrip the standalone quasi-static eps_eff rises 2.31 (h=4 cells) -> 2.58 (8) -> 2.77 (16) -> 2.90 (32) toward the Hammerstad 3.27; dropping the substrate to vacuum collapses eps_eff to 1.0 (tests/rf/wave_validation/test_interior_pec_operator.py microstrip gate). The measured FDTD eps_eff 1.51 sits in this under-resolved band.",
+  "metrics": [
+    {
+      "quantity": "beta from arg(S21)/L (median rel error vs Hammerstad)",
+      "measured": 0.31919667885895214,
+      "reference": 0.0,
+      "unit": "fraction",
+      "class": "wave-level",
+      "note": "cond(A)=1.19, max sv=1.083, a_passive=0.15"
+    },
+    {
+      "quantity": "eps_eff from measured beta (median)",
+      "measured": 1.514996133195789,
+      "reference": 3.2666666666666666,
+      "rel_error": 0.5362256735114931,
+      "unit": "relative",
+      "class": "wave-level",
+      "note": "resolution-limited quasi-static extraction (converges toward Hammerstad)"
+    }
+  ],
+  "supporting": [],
+  "convergence": [],
+  "conservation": {
+    "extraction_cond_a_max": 1.1865395232437224,
+    "max_singular_value": 1.0825154982643024,
+    "a_passive_ratio_bandmax": 0.15061263799237584,
+    "s11_abs_range": [
+      0.06250750190839088,
+      0.19857871176041772
+    ],
+    "s21_abs_range": [
+      0.8161933822456129,
+      0.9085016950048118
+    ],
+    "beta_rel_error_median": 0.31919667885895214,
+    "eps_eff_measured_median": 1.514996133195789,
+    "eps_eff_hammerstad": 3.2666666666666666
+  },
+  "raw": {},
+  "notes": [
+    "UNBLOCKED (F2b, EXECUTED). Was BLOCKED on (1) a single-precision current-contour snap error and (2) TEM inapplicability to the inhomogeneous cross-section. Both are resolved: the ports now sit near the origin (small contour coordinates stay on the Yee half-grid) and the quasi-TEM mode routes to the quasi-static electrostatic engine (eps_eff = C/C0). The terminated two-port yields a well-conditioned (cond(A) 1.19), passive (max sv 1.083) S-matrix with |S11| in [0.063, 0.199], |S21| in [0.816, 0.909], a_passive/a_driven 0.15.",
+    "HONEST GAP: the measured quasi-TEM eps_eff 1.51 is 54% below the Hammerstad 3.27 at dx=5 mm (substrate = 4 cells). This is a first-order finite-difference under-resolution of the thin high-eps substrate (documented convergence, section falsification), NOT an extraction defect -- the S-matrix is passive and well conditioned. Recorded as a resolution gap rather than forced to pass."
+  ],
+  "updated_at": "2026-07-22T13:47:58+00:00"
+}

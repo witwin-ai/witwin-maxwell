@@ -8,10 +8,9 @@ from ..compiler.sources import _compile_mode_source
 from ..fdtd.excitation.modes import sample_mode_source_component, solve_mode_source_profile
 from ..scene import prepare_scene
 from ..sources import CW, ModeSource
+from ..constants import C_0, resolve_complex_dtype, resolve_real_dtype
 from .stratton_chu import (
     _as_1d_coords,
-    _resolve_complex_dtype,
-    _resolve_real_dtype,
     _resolve_tensor_device,
     _to_complex_tensor,
     _trapz_weights_1d,
@@ -81,7 +80,7 @@ def _mode_overlap_context(result):
     return SimpleNamespace(
         scene=scene,
         Ex=torch.empty((1,), device=device, dtype=torch.float32),
-        c=299792458.0,
+        c=C_0,
         boundary_kind=scene.boundary.kind,
         _compiled_material_model=scene.compile_materials(),
     )
@@ -166,8 +165,8 @@ def _reference_mode_fields(context, mode_source: ModeSource, monitor, *, frequen
     mode_data = solve_mode_source_profile(context, compiled)
 
     device = _resolve_tensor_device(coord_a, coord_b, mode_data["profile"])
-    real_dtype = _resolve_real_dtype(coord_a, coord_b, mode_data["profile"])
-    complex_dtype = _resolve_complex_dtype(mode_data["profile"])
+    real_dtype = resolve_real_dtype(coord_a, coord_b, mode_data["profile"])
+    complex_dtype = resolve_complex_dtype(mode_data["profile"])
     coords_a = _as_1d_coords(coord_a, tangential_axes[0], device=device, dtype=real_dtype)
     coords_b = _as_1d_coords(coord_b, tangential_axes[1], device=device, dtype=real_dtype)
     points = build_plane_points(axis, float(monitor["position"]), coords_a, coords_b).to(
@@ -213,8 +212,8 @@ def _compute_mode_overlap_from_payload(
     axis, tangential_axes, coord_a, coord_b = _monitor_coords(monitor)
 
     device = _resolve_tensor_device(coord_a, coord_b, *[monitor.get(name) for name in _FIELD_NAMES])
-    real_dtype = _resolve_real_dtype(coord_a, coord_b)
-    complex_dtype = _resolve_complex_dtype(*[monitor.get(name) for name in _FIELD_NAMES])
+    real_dtype = resolve_real_dtype(coord_a, coord_b)
+    complex_dtype = resolve_complex_dtype(*[monitor.get(name) for name in _FIELD_NAMES])
     coords_a = _as_1d_coords(coord_a, tangential_axes[0], device=device, dtype=real_dtype)
     coords_b = _as_1d_coords(coord_b, tangential_axes[1], device=device, dtype=real_dtype)
     weights = _trapz_weights_1d(coords_a)[:, None] * _trapz_weights_1d(coords_b)[None, :]

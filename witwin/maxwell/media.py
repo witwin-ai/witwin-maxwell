@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import math
 import warnings
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
 import torch
+
+from .rational import FitReport, RationalFitConfig, RationalModel, fit_rational
 
 from witwin.core import (
     FrequencyMaterialSample,
@@ -16,6 +20,8 @@ from witwin.core import (
 from witwin.core.material import VACUUM_PERMITTIVITY
 
 _SPEED_OF_LIGHT = 299_792_458.0
+_DEFAULT_GYROMAGNETIC_RATIO = 1.760859e11  # rad/(s*T), electron gyromagnetic ratio magnitude
+_OERSTED_TO_A_PER_M = 1.0e-4 / (4.0e-7 * np.pi)  # 1 Oe of H -> A/m (= 1000/(4*pi))
 
 
 def _coerce_frequency(value: float, *, name: str) -> float:
@@ -37,6 +43,31 @@ def _coerce_positive(value: float, *, name: str) -> float:
     if number <= 0.0:
         raise ValueError(f"{name} must be > 0.")
     return number
+
+
+def _coerce_mass_density(value):
+    """Validate a tissue mass density (kg/m^3) as a positive scalar or 3D grid.
+
+    ``None`` marks a material excluded from SAR. A scalar must be strictly
+    positive. A tensor is a per-cell mass-density grid spanning the structure Box
+    extent (same node-coverage / trilinear-resampling convention as
+    ``MaterialRegion.density``) and every entry must be finite and > 0.
+    """
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        if value.ndim != 3:
+            raise ValueError(f"mass_density grid must be a 3D tensor, got ndim={value.ndim}.")
+        with torch.no_grad():
+            if not torch.isfinite(value).all():
+                raise ValueError("mass_density grid must be finite everywhere.")
+            if float(value.min()) <= 0.0:
+                raise ValueError("mass_density grid must be strictly positive everywhere.")
+        return value
+    density = float(value)
+    if not np.isfinite(density) or density <= 0.0:
+        raise ValueError("mass_density must be a strictly positive kg/m^3 value.")
+    return density
 
 
 def _normalize_poles(value, pole_types, *, name: str):
@@ -497,6 +528,83 @@ class Tensor3x3:
         object.__setattr__(self, "rows", _normalize_tensor_rows(rows, name="rows"))
 
 
+@dataclass(frozen=True)
+class DielectricBreakdown:
+    """Deterministic field-duration/latching dynamic dielectric breakdown.
+
+    A breakdown-capable cell flips from ``intact`` to ``conducting`` once the
+    energy-consistent cell-center field magnitude ``|E|`` stays at or above
+    ``critical_field`` [V/m] for a contiguous ``minimum_duration`` [s]. On
+    trigger, the cell conductivity ramps linearly from its base value toward
+    ``post_breakdown_conductivity`` [S/m] over ``ramp_time`` (default a small
+    documented multiple of the time step). ``state="latching"`` keeps a triggered
+    cell conducting for the rest of the run.
+
+    This is a deterministic, uncalibrated comparison / conductive-path model, not
+    a validated arc or device-failure predictor. v1 supports exactly
+    ``model="field_duration"`` and ``state="latching"``; ``recovery`` and
+    ``damage_parameters`` are reserved for a later phase and must be left unset.
+    """
+
+    critical_field: float
+    post_breakdown_conductivity: float
+    minimum_duration: float = 0.0
+    model: str = "field_duration"
+    state: str = "latching"
+    recovery: object | None = None
+    damage_parameters: object | None = None
+    ramp_time: float | None = None
+    # Default ramp is 10 time steps, resolved against dt at prepare time when
+    # ``ramp_time`` is None. A finite ramp keeps the semi-implicit lossy update
+    # well-conditioned instead of switching the conductivity in a single step.
+    default_ramp_steps: int = 10
+
+    def __post_init__(self):
+        object.__setattr__(
+            self, "critical_field", _coerce_positive(self.critical_field, name="critical_field")
+        )
+        object.__setattr__(
+            self,
+            "post_breakdown_conductivity",
+            _coerce_positive(
+                self.post_breakdown_conductivity, name="post_breakdown_conductivity"
+            ),
+        )
+        object.__setattr__(
+            self,
+            "minimum_duration",
+            _coerce_nonnegative(self.minimum_duration, name="minimum_duration"),
+        )
+        if self.model != "field_duration":
+            raise NotImplementedError(
+                "DielectricBreakdown v1 supports model='field_duration' only; "
+                f"got {self.model!r}. Other criteria (instantaneous, damage) are a "
+                "later phase."
+            )
+        if self.state != "latching":
+            raise NotImplementedError(
+                "DielectricBreakdown v1 supports state='latching' only; "
+                f"got {self.state!r}. Recovering/failed state machines are a later phase."
+            )
+        if self.recovery is not None:
+            raise NotImplementedError(
+                "DielectricBreakdown.recovery is a reserved field with no v1 behavior; "
+                "leave it unset until the recovery model lands."
+            )
+        if self.damage_parameters is not None:
+            raise NotImplementedError(
+                "DielectricBreakdown.damage_parameters is a reserved field with no v1 "
+                "behavior; leave it unset until the cumulative-damage model lands."
+            )
+        if self.ramp_time is not None:
+            object.__setattr__(
+                self, "ramp_time", _coerce_positive(self.ramp_time, name="ramp_time")
+            )
+        if int(self.default_ramp_steps) <= 0:
+            raise ValueError("DielectricBreakdown.default_ramp_steps must be positive.")
+        object.__setattr__(self, "default_ramp_steps", int(self.default_ramp_steps))
+
+
 def _shift_permittivity_real(value, susceptibility: complex):
     """Add the real part of a homogeneous susceptibility to a permittivity sample.
 
@@ -531,6 +639,8 @@ class Material(CoreMaterial):
     nonlinearity: tuple
     modulation: ModulationSpec | None
     pec: bool
+    breakdown: DielectricBreakdown | None
+    mass_density: float | torch.Tensor | None
 
     def __init__(
         self,
@@ -554,9 +664,18 @@ class Material(CoreMaterial):
         nonlinearity=None,
         modulation: ModulationSpec | None = None,
         pec: bool = False,
+        breakdown: DielectricBreakdown | None = None,
+        mass_density: float | torch.Tensor | None = None,
     ):
         super().__init__(eps_r=eps_r, mu_r=mu_r, sigma_e=sigma_e, name=name)
         object.__setattr__(self, "pec", bool(pec))
+        if breakdown is not None and not isinstance(breakdown, DielectricBreakdown):
+            raise TypeError("Material.breakdown must be a DielectricBreakdown instance.")
+        object.__setattr__(self, "breakdown", breakdown)
+        # Tissue mass density [kg/m^3] for SAR / exposure analysis. ``None`` means
+        # the material is excluded from SAR; a SAR request covering a lossy
+        # material without a density fails closed in the SAR reducer.
+        object.__setattr__(self, "mass_density", _coerce_mass_density(mass_density))
         object.__setattr__(self, "debye_poles", _normalize_poles(debye_poles, (DebyePole, CustomDebyePole), name="debye_poles"))
         object.__setattr__(self, "drude_poles", _normalize_poles(drude_poles, (DrudePole, CustomDrudePole), name="drude_poles"))
         object.__setattr__(self, "lorentz_poles", _normalize_poles(lorentz_poles, (LorentzPole, CustomLorentzPole), name="lorentz_poles"))
@@ -661,6 +780,46 @@ class Material(CoreMaterial):
                     "non-default eps/mu/sigma; its permittivity is not a finite number."
                 )
 
+        if self.breakdown is not None:
+            # v1 deterministic breakdown drives the real-valued semi-implicit lossy
+            # E-update through a scalar per-cell conductivity. It composes with a
+            # scalar base permittivity and scalar static conductivity only: the
+            # anisotropic/dispersive/nonlinear/modulated coefficient paths each own a
+            # different per-edge coefficient representation the breakdown conductivity
+            # scatter does not model yet.
+            if self.pec:
+                raise NotImplementedError(
+                    "A PEC Material cannot carry dielectric breakdown: a perfect conductor "
+                    "has no finite field-duration threshold."
+                )
+            if self.is_anisotropic:
+                raise NotImplementedError(
+                    "Dielectric breakdown requires an isotropic (scalar) Material: the "
+                    "anisotropic tensor update forms a per-edge 3x3 inverse the breakdown "
+                    "conductivity scatter does not model. Use scalar eps_r/sigma_e."
+                )
+            if self.is_dispersive:
+                raise NotImplementedError(
+                    "Dielectric breakdown does not compose with dispersive poles yet: the ADE "
+                    "polarization current shares the same E-update coefficients the breakdown "
+                    "scatter rewrites. Use a non-dispersive scalar Material."
+                )
+            if self.is_nonlinear:
+                raise NotImplementedError(
+                    "Dielectric breakdown does not compose with the instantaneous nonlinear "
+                    "channels yet: both rewrite the per-step E-update coefficients. Use a linear "
+                    "scalar Material."
+                )
+            if self.modulation is not None:
+                raise NotImplementedError(
+                    "Dielectric breakdown does not compose with time modulation yet: both scale "
+                    "the E-update coefficients per step. Drop the modulation."
+                )
+            if getattr(self, "is_medium2d", False):
+                raise NotImplementedError(
+                    "Dielectric breakdown requires a bulk (3D) Material, not a 2D sheet medium."
+                )
+
     @property
     def is_dispersive(self) -> bool:
         return bool(
@@ -744,6 +903,30 @@ class Material(CoreMaterial):
     @property
     def is_pec(self) -> bool:
         return self.pec
+
+    @property
+    def has_mass_density(self) -> bool:
+        """Whether this material carries a tissue mass density for SAR."""
+        return self.mass_density is not None
+
+    @property
+    def is_electrically_lossy(self) -> bool:
+        """Whether the material dissipates electric power (conduction/dispersion/nonlinear).
+
+        A SAR request covering an electrically lossy material without a
+        ``mass_density`` is undefined and must fail closed.
+        """
+        return (
+            float(self.sigma_e) != 0.0
+            or self.sigma_e_tensor is not None
+            or self.is_electric_dispersive
+            or self.is_nonlinear
+        )
+
+    @property
+    def is_gyromagnetic(self) -> bool:
+        """Whether this material carries a non-reciprocal gyromagnetic tensor."""
+        return False
 
     @classmethod
     def pec(cls, name: str | None = None) -> "Material":
@@ -979,6 +1162,436 @@ class Material(CoreMaterial):
             sigma_e=sigma_e,
             name=name,
             lorentz_poles=tuple(poles),
+        )
+
+
+def _gyromagnetic_cross_matrix(bias_unit_vector: torch.Tensor) -> torch.Tensor:
+    bx, by, bz = bias_unit_vector[0], bias_unit_vector[1], bias_unit_vector[2]
+    zero = torch.zeros_like(bx)
+    return torch.stack(
+        [
+            torch.stack([zero, -bz, by]),
+            torch.stack([bz, zero, -bx]),
+            torch.stack([-by, bx, zero]),
+        ]
+    )
+
+
+def gyromagnetic_polder_tensor(
+    omega,
+    *,
+    omega_0,
+    omega_m,
+    gilbert_damping,
+    mu_infinity,
+    bias_unit_vector,
+    dtype=torch.complex128,
+) -> torch.Tensor:
+    """Lab-frame 3x3 complex Polder permeability tensor.
+
+    Frozen convention (``exp(-i*omega*t)``, contract section 2.3/2.4):
+
+    ``W = omega_0 - i*alpha*omega``, ``D = W^2 - omega^2``,
+    ``mu = mu_infinity + omega_m*W/D``, ``kappa = omega_m*omega/D``, and
+
+    ``mu_r = mu*(I - b b^T) + mu_infinity*(b b^T) + i*kappa*[b]_x``.
+
+    Torch-native and differentiable in ``omega`` and any keyword argument that is
+    a leaf tensor (used for material-parameter autograd).
+    """
+    real_dtype = torch.float64 if dtype == torch.complex128 else torch.float32
+
+    def _c(value):
+        if isinstance(value, torch.Tensor):
+            return value.to(dtype)
+        return torch.as_tensor(value, dtype=real_dtype).to(dtype)
+
+    w = _c(omega)
+    w0 = _c(omega_0)
+    wm = _c(omega_m)
+    alpha = _c(gilbert_damping)
+    mu_inf = _c(mu_infinity)
+    i = torch.tensor(1j, dtype=dtype)
+    W = w0 - i * alpha * w
+    D = W * W - w * w
+    mu = mu_inf + wm * W / D
+    kappa = wm * w / D
+
+    if isinstance(bias_unit_vector, torch.Tensor):
+        b = bias_unit_vector.to(real_dtype)
+    else:
+        b = torch.as_tensor(bias_unit_vector, dtype=real_dtype)
+    b = (b / torch.linalg.vector_norm(b)).to(dtype)
+    eye = torch.eye(3, dtype=dtype)
+    bbT = torch.outer(b, b)
+    return mu * (eye - bbT) + mu_inf * bbT + i * kappa * _gyromagnetic_cross_matrix(b)
+
+
+def gyromagnetic_state_space(omega_0, omega_m, gilbert_damping, *, dtype=torch.float64):
+    """Local-frame magnetization-ADE matrices ``P``, ``Q`` (2x2 real tensors).
+
+    ``dm/dt = P m + Q h`` in the transverse local frame ``b = z_hat`` (frozen
+    contract section 2.2). With ``c = 1/(1 + alpha^2)``,
+    ``P = c*omega_0*[[-alpha, -1], [1, -alpha]]`` and
+    ``Q = c*omega_m*[[alpha, 1], [-1, alpha]]``.
+
+    This is the production twin of ``ferrite_reference.state_space_matrices``; the
+    two must agree bit-for-bit (a falsification gate). Torch-native and
+    differentiable in every argument that is a leaf tensor.
+    """
+
+    def _c(value):
+        if isinstance(value, torch.Tensor):
+            return value.to(dtype)
+        return torch.as_tensor(value, dtype=dtype)
+
+    w0 = _c(omega_0)
+    wm = _c(omega_m)
+    alpha = _c(gilbert_damping)
+    c = 1.0 / (1.0 + alpha * alpha)
+    one = torch.ones_like(w0)
+    P = c * w0 * torch.stack(
+        [
+            torch.stack([-alpha, -one]),
+            torch.stack([one, -alpha]),
+        ]
+    )
+    Q = c * wm * torch.stack(
+        [
+            torch.stack([alpha, one]),
+            torch.stack([-one, alpha]),
+        ]
+    )
+    return P, Q
+
+
+def gyromagnetic_update_matrices(omega_0, omega_m, gilbert_damping, dt, *, dtype=torch.float64):
+    """Implicit-midpoint (Cayley) propagator ``Phi`` and drive ``Gamma`` (2x2).
+
+    ``m^{n+1} = Phi m^n + Gamma h^{n+1/2}`` with
+    ``Phi = (I - (dt/2) P)^-1 (I + (dt/2) P)`` and
+    ``Gamma = (I - (dt/2) P)^-1 (dt Q)`` (frozen contract section 3.1). ``Phi`` is
+    orthogonal when ``alpha = 0`` (exact energy conservation) and a strict
+    contraction when ``alpha > 0``; unconditionally stable for every ``dt > 0``
+    (contract section 3.3). The production twin of the Cayley step embedded in
+    ``ferrite_reference.LLGReference``.
+    """
+    P, Q = gyromagnetic_state_space(omega_0, omega_m, gilbert_damping, dtype=dtype)
+    dt_t = torch.as_tensor(dt, dtype=dtype) if not isinstance(dt, torch.Tensor) else dt.to(dtype)
+    eye = torch.eye(2, dtype=dtype)
+    a_inv = torch.linalg.inv(eye - (dt_t / 2.0) * P)
+    phi = a_inv @ (eye + (dt_t / 2.0) * P)
+    gamma = (a_inv * dt_t) @ Q
+    return phi, gamma
+
+
+def gyromagnetic_local_basis(bias_unit_vector, *, dtype=torch.float64, atol=1.0e-9):
+    """Right-handed orthonormal local frame columns ``(u, v, w)`` with ``w = b``.
+
+    Returns a 3x3 rotation matrix ``R = [u | v | w]`` (lab<-local) whose third
+    column is the bias unit vector ``b``. When ``b`` is axis-aligned (``+/-`` a
+    Cartesian axis) the frame is chosen from the remaining Cartesian axes so that
+    ``R`` is a signed permutation with no interpolation -- the axis-aligned
+    fast path (contract 2.4 / slice 1c z/x/y fast paths). ``u``, ``v`` span the
+    transverse plane in which the magnetization ``m = (m_u, m_v)`` precesses.
+    """
+    b = torch.as_tensor(bias_unit_vector, dtype=dtype)
+    b = b / torch.linalg.vector_norm(b)
+    axes = torch.eye(3, dtype=dtype, device=b.device)
+    # Axis-aligned fast path: b == +/- e_k -> pick a canonical right-handed frame.
+    for k in range(3):
+        for sign in (1.0, -1.0):
+            axis = sign * axes[k]
+            if torch.linalg.vector_norm(b - axis) <= atol:
+                w = axis
+                u = axes[(k + 1) % 3]
+                v = torch.linalg.cross(w, u)
+                return torch.stack([u, v, w], dim=1)
+    # General bias: Gram-Schmidt from the least-aligned Cartesian axis.
+    seed_index = int(torch.argmin(torch.abs(b)))
+    seed = axes[seed_index]
+    u = seed - torch.dot(seed, b) * b
+    u = u / torch.linalg.vector_norm(u)
+    v = torch.linalg.cross(b, u)
+    v = v / torch.linalg.vector_norm(v)
+    return torch.stack([u, v, b], dim=1)
+
+
+@dataclass(frozen=True, init=False)
+class GyromagneticFerrite(Material):
+    """DC-biased ferrite with a gyromagnetic (Polder) permeability tensor.
+
+    The first non-reciprocal material in the framework. Its frequency-domain
+    permeability is the tensor
+
+    ``mu_r(omega) = mu*(I - b b^T) + mu_infinity*(b b^T) + i*kappa*[b]_x``
+
+    with the scalar Polder components in
+    :func:`gyromagnetic_polder_tensor`. The gyrotropy is carried by a local
+    linearized Landau-Lifshitz-Gilbert magnetization ADE state (see the FDTD
+    runtime slices), never by widening ``mu_tensor`` -- the off-diagonal
+    ``mu_tensor`` guard stays in force. The full derivation, sign/unit
+    conventions, discretization, and acceptance budget are frozen in
+    ``docs/reference/ferrite-physics-contract.md``.
+
+    All parameters are SI. Datasheet CGS quantities enter only through
+    :meth:`from_cgs`, which records the conversion in :attr:`cgs_conversion`.
+
+    Parameters
+    ----------
+    eps_r:
+        Relative permittivity of the ferrite host (real, ``> 0``).
+    saturation_magnetization:
+        ``Ms`` [A/m], ``> 0``.
+    bias_field:
+        Static internal bias ``H0`` [A/m], a 3-vector (``!= 0``). The user
+        supplies the internal field; there is no magnetostatic solve.
+    gilbert_damping:
+        Gilbert damping ``alpha`` (dimensionless, ``>= 0``).
+    gyromagnetic_ratio:
+        ``gamma`` [rad/(s*T)], ``> 0`` (default the electron value).
+    mu_infinity:
+        High-frequency background permeability (``> 0``, default ``1.0``).
+    sigma_e:
+        Electric conductivity [S/m] (``>= 0``).
+    """
+
+    saturation_magnetization: float
+    bias_field: tuple[float, float, float]
+    gilbert_damping: float
+    gyromagnetic_ratio: float
+    mu_infinity: float
+    cgs_conversion: tuple
+
+    def __init__(
+        self,
+        *,
+        eps_r: float = 1.0,
+        saturation_magnetization: float,
+        bias_field,
+        gilbert_damping: float = 0.0,
+        gyromagnetic_ratio: float = _DEFAULT_GYROMAGNETIC_RATIO,
+        mu_infinity: float = 1.0,
+        sigma_e: float = 0.0,
+        name: str | None = None,
+        cgs_conversion: tuple = (),
+    ):
+        saturation = _coerce_positive(saturation_magnetization, name="saturation_magnetization")
+        damping = _coerce_nonnegative(gilbert_damping, name="gilbert_damping")
+        gamma = _coerce_positive(gyromagnetic_ratio, name="gyromagnetic_ratio")
+        mu_inf = _coerce_positive(mu_infinity, name="mu_infinity")
+        _coerce_positive(eps_r, name="eps_r")
+
+        bias = tuple(_coerce_real_scalar(component, name="bias_field") for component in bias_field)
+        if len(bias) != 3:
+            raise ValueError("bias_field must be a 3-vector [A/m].")
+        bias_norm = float(np.sqrt(sum(component * component for component in bias)))
+        if bias_norm <= 0.0:
+            raise ValueError(
+                "bias_field must be non-zero: a zero-bias ferrite has no gyrotropy and the local "
+                "precession frame is degenerate."
+            )
+
+        super().__init__(eps_r=eps_r, mu_r=mu_inf, sigma_e=sigma_e, name=name)
+        object.__setattr__(self, "saturation_magnetization", saturation)
+        object.__setattr__(self, "bias_field", bias)
+        object.__setattr__(self, "gilbert_damping", damping)
+        object.__setattr__(self, "gyromagnetic_ratio", gamma)
+        object.__setattr__(self, "mu_infinity", mu_inf)
+        object.__setattr__(self, "cgs_conversion", tuple(cgs_conversion))
+
+    # --- Derived physical quantities -----------------------------------------
+
+    @property
+    def bias_magnitude(self) -> float:
+        """Static bias magnitude ``|H0|`` [A/m]."""
+        return float(np.sqrt(sum(component * component for component in self.bias_field)))
+
+    @property
+    def bias_unit_vector(self) -> tuple[float, float, float]:
+        magnitude = self.bias_magnitude
+        return tuple(component / magnitude for component in self.bias_field)
+
+    @property
+    def omega_0(self) -> float:
+        """Larmor precession frequency ``omega_0 = gamma*mu_0*|H0|`` [rad/s]."""
+        return self.gyromagnetic_ratio * _VACUUM_PERMEABILITY * self.bias_magnitude
+
+    @property
+    def omega_m(self) -> float:
+        """Magnetization frequency ``omega_m = gamma*mu_0*Ms`` [rad/s]."""
+        return self.gyromagnetic_ratio * _VACUUM_PERMEABILITY * self.saturation_magnetization
+
+    @property
+    def resonance_frequency(self) -> float:
+        """Gyromagnetic resonance frequency ``omega_0/(2*pi)`` [Hz]."""
+        return self.omega_0 / (2.0 * np.pi)
+
+    # --- Torch-native Polder tensor accessors --------------------------------
+
+    def polder_tensor(self, angular_frequency, *, dtype=torch.complex128) -> torch.Tensor:
+        """Lab-frame complex 3x3 permeability tensor at ``omega`` (angular frequency).
+
+        Torch-native and differentiable in ``angular_frequency``.
+        """
+        return gyromagnetic_polder_tensor(
+            angular_frequency,
+            omega_0=self.omega_0,
+            omega_m=self.omega_m,
+            gilbert_damping=self.gilbert_damping,
+            mu_infinity=self.mu_infinity,
+            bias_unit_vector=self.bias_unit_vector,
+            dtype=dtype,
+        )
+
+    def permeability_tensor_at_freq(self, frequency, *, dtype=torch.complex128) -> torch.Tensor:
+        """Lab-frame complex 3x3 permeability tensor at ordinary ``frequency`` [Hz]."""
+        if isinstance(frequency, torch.Tensor):
+            omega = 2.0 * np.pi * frequency
+        else:
+            omega = 2.0 * np.pi * _coerce_frequency(frequency, name="frequency")
+        return self.polder_tensor(omega, dtype=dtype)
+
+    def scalar_polder_components(self, frequency):
+        """Analytic scalar ``(mu, kappa)`` (complex) at ordinary ``frequency`` [Hz].
+
+        Frame-invariant: valid for any bias orientation, not only ``b = z_hat``.
+        ``mu`` is recovered from the isotropic transverse block via
+        ``trace(mu_r) = 2*mu + mu_infinity`` (since ``tr(I - b b^T) = 2``,
+        ``tr(b b^T) = 1``, ``tr([b]_x) = 0``), and ``kappa`` from the gyrotropic
+        (antisymmetric) part contracted against the bias cross matrix ``[b]_x``,
+        for which ``sum_ij (mu_r)_ij ([b]_x)_ij = 2*i*kappa`` (the symmetric part
+        contracts to zero and ``sum_ij ([b]_x)_ij^2 = 2`` for a unit bias).
+        """
+        tensor = self.permeability_tensor_at_freq(frequency)
+        b = torch.as_tensor(self.bias_unit_vector, dtype=torch.float64)
+        cross = _gyromagnetic_cross_matrix(b).to(tensor.dtype)
+        mu = complex((torch.trace(tensor) - self.mu_infinity) / 2.0)
+        kappa = complex((tensor * cross).sum() / 2.0j)
+        return mu, kappa
+
+    # --- Material-family overrides -------------------------------------------
+
+    @property
+    def is_gyromagnetic(self) -> bool:
+        return True
+
+    def capabilities(self) -> MaterialCapabilities:
+        return MaterialCapabilities(
+            conductive=float(self.sigma_e) != 0.0,
+            magnetic=True,
+            anisotropic=True,
+            dispersive=True,
+        )
+
+    def relative_permeability(self, frequency: float) -> complex:
+        raise NotImplementedError(
+            "relative_permeability() is not defined for a GyromagneticFerrite: its permeability is a "
+            "non-reciprocal complex 3x3 Polder tensor, not a scalar. Use permeability_tensor_at_freq() "
+            "(or polder_tensor() for the angular-frequency form)."
+        )
+
+    def evaluate_at_frequency(self, frequency: float) -> FrequencyMaterialSample:
+        raise NotImplementedError(
+            "evaluate_at_frequency() is not defined for a GyromagneticFerrite: a FrequencyMaterialSample "
+            "carries a scalar/diagonal mu, which cannot represent the off-diagonal gyromagnetic Polder "
+            "tensor. Use permeability_tensor_at_freq() for the full 3x3 permeability."
+        )
+
+    @classmethod
+    def from_cgs(
+        cls,
+        *,
+        saturation_4piMs_gauss: float,
+        bias_Oe: float,
+        bias_direction=(0.0, 0.0, 1.0),
+        eps_r: float = 1.0,
+        gilbert_damping: float = 0.0,
+        gyromagnetic_ratio: float = _DEFAULT_GYROMAGNETIC_RATIO,
+        mu_infinity: float = 1.0,
+        sigma_e: float = 0.0,
+        name: str | None = None,
+    ) -> "GyromagneticFerrite":
+        """Construct from CGS datasheet quantities, recording the SI conversion.
+
+        ``saturation_4piMs_gauss`` is ``4*pi*Ms`` in Gauss and ``bias_Oe`` is the
+        internal bias in Oersted. Both convert as ``x[A/m] = x_cgs * 1e-4 / mu_0``
+        (i.e. ``1000/(4*pi) = 79.57747`` A/m per Gauss / per Oersted). The exact
+        factors are stored in :attr:`cgs_conversion`.
+        """
+        four_pi_ms = _coerce_positive(saturation_4piMs_gauss, name="saturation_4piMs_gauss")
+        bias_oe = _coerce_positive(bias_Oe, name="bias_Oe")
+        saturation = four_pi_ms * _OERSTED_TO_A_PER_M
+        bias_magnitude = bias_oe * _OERSTED_TO_A_PER_M
+        direction = tuple(_coerce_real_scalar(component, name="bias_direction") for component in bias_direction)
+        if len(direction) != 3:
+            raise ValueError("bias_direction must be a 3-vector.")
+        direction_norm = float(np.sqrt(sum(component * component for component in direction)))
+        if direction_norm <= 0.0:
+            raise ValueError("bias_direction must be non-zero.")
+        bias_field = tuple(component / direction_norm * bias_magnitude for component in direction)
+        conversion = (
+            ("saturation_4piMs_gauss", four_pi_ms),
+            ("bias_Oe", bias_oe),
+            ("saturation_magnetization_A_per_m", saturation),
+            ("bias_magnitude_A_per_m", bias_magnitude),
+            ("cgs_to_A_per_m", _OERSTED_TO_A_PER_M),
+        )
+        return cls(
+            eps_r=eps_r,
+            saturation_magnetization=saturation,
+            bias_field=bias_field,
+            gilbert_damping=gilbert_damping,
+            gyromagnetic_ratio=gyromagnetic_ratio,
+            mu_infinity=mu_infinity,
+            sigma_e=sigma_e,
+            name=name,
+            cgs_conversion=conversion,
+        )
+
+    @classmethod
+    def from_resonance(
+        cls,
+        *,
+        resonance_frequency: float,
+        saturation_magnetization: float,
+        linewidth: float = 0.0,
+        bias_direction=(0.0, 0.0, 1.0),
+        eps_r: float = 1.0,
+        gyromagnetic_ratio: float = _DEFAULT_GYROMAGNETIC_RATIO,
+        mu_infinity: float = 1.0,
+        sigma_e: float = 0.0,
+        name: str | None = None,
+    ) -> "GyromagneticFerrite":
+        """Construct from the gyromagnetic resonance frequency and FMR linewidth.
+
+        The bias magnitude is back-computed from ``omega_0 = 2*pi*resonance_frequency
+        = gamma*mu_0*|H0|``. ``linewidth`` is the full-width (FWHM) resonance
+        linewidth in Hz; it maps to Gilbert damping ``alpha = linewidth /
+        (2*resonance_frequency)`` (``Delta_omega = 2*alpha*omega_0``).
+        """
+        f_res = _coerce_frequency(resonance_frequency, name="resonance_frequency")
+        gamma = _coerce_positive(gyromagnetic_ratio, name="gyromagnetic_ratio")
+        width = _coerce_nonnegative(linewidth, name="linewidth")
+        omega_0 = 2.0 * np.pi * f_res
+        bias_magnitude = omega_0 / (gamma * _VACUUM_PERMEABILITY)
+        damping = width / (2.0 * f_res)
+        direction = tuple(_coerce_real_scalar(component, name="bias_direction") for component in bias_direction)
+        if len(direction) != 3:
+            raise ValueError("bias_direction must be a 3-vector.")
+        direction_norm = float(np.sqrt(sum(component * component for component in direction)))
+        if direction_norm <= 0.0:
+            raise ValueError("bias_direction must be non-zero.")
+        bias_field = tuple(component / direction_norm * bias_magnitude for component in direction)
+        return cls(
+            eps_r=eps_r,
+            saturation_magnetization=saturation_magnetization,
+            bias_field=bias_field,
+            gilbert_damping=damping,
+            gyromagnetic_ratio=gamma,
+            mu_infinity=mu_infinity,
+            sigma_e=sigma_e,
+            name=name,
         )
 
 
@@ -1331,20 +1944,23 @@ class LossyMetalMedium(Material):
 
     so the skin-depth interior never needs to be meshed.
 
-    The v1 runtime is scoped to normal incidence on a single axis-aligned planar
-    face: the metal must be a ``Box`` slab that spans the full transverse
-    cross-section and sits flush against one domain boundary. The surface
-    impedance is realized as a narrowband series R-L evaluated at the operating
-    frequency (``Z_s(omega0) = R + i*omega0*L_s`` with ``L_s = R/omega0``), so it
-    reproduces the exact Leontovich value at the source frequency; the metal
-    interior is masked and the two tangential E faces are updated each step from
-    the vacuum-side tangential H (see ``compiler/materials.py`` and
-    ``fdtd/runtime/materials.py``). Laterally finite blocks, oblique/curved
-    surfaces, mid-domain slabs, and Bloch runs raise ``NotImplementedError`` with
-    a physical reason; resolve those metals volumetrically with
-    ``Material(sigma_e=...)`` (or ``Material.pec()`` for a lossless shortcut). The
-    analytic helpers ``surface_impedance`` / ``surface_impedance_at_freq`` /
-    ``skin_depth`` are exposed for validation and design work.
+    The runtime covers axis-aligned metal ``Box`` regions in any orientation:
+    boundary-flush half-spaces, laterally finite blocks, and mid-domain
+    double-sided slabs, with multiple metals in one scene. Every exposed
+    axis-aligned face is realized as a per-edge surface write; a full-plane face
+    uses a fused native kernel and a finite (sub-plane) face writes only its
+    transverse window. The surface impedance is a narrowband series R-L evaluated
+    at the operating frequency (``Z_s(omega0) = R + i*omega0*L_s`` with
+    ``L_s = R/omega0``), so it reproduces the exact Leontovich value at the source
+    frequency; the metal interior is masked and the two tangential E faces are
+    updated each step from the vacuum-side tangential H (see
+    ``compiler/materials.py`` and ``fdtd/runtime/materials.py``). Oblique or
+    curved surfaces, and differentiable/distributed runs through the surface, are
+    not supported and fail closed with a physical reason; resolve those metals
+    volumetrically with ``Material(sigma_e=...)`` (or ``Material.pec()`` for a
+    lossless shortcut). The analytic helpers ``surface_impedance`` /
+    ``surface_impedance_at_freq`` / ``skin_depth`` are exposed for validation and
+    design work.
     """
 
     def __init__(self, *, conductivity: float, name: str | None = None):
@@ -1372,6 +1988,311 @@ class LossyMetalMedium(Material):
 
     def surface_impedance_at_freq(self, frequency: float) -> complex:
         return self.surface_impedance(2.0 * np.pi * _coerce_frequency(frequency, name="frequency"))
+
+
+def _coerce_frequency_range(value, *, name: str) -> tuple[float, float]:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise ValueError(f"{name} must be an increasing (f_min, f_max) pair.")
+    f_min, f_max = float(value[0]), float(value[1])
+    if not (0.0 < f_min < f_max) or not math.isfinite(f_max):
+        raise ValueError(f"{name} must satisfy 0 < f_min < f_max.")
+    return (f_min, f_max)
+
+
+class SurfaceImpedanceModel(ABC):
+    """Read-only contract for a causal surface impedance/admittance model.
+
+    A surface impedance model represents the tangential constitutive relation
+    ``E_t = Z_s(omega) (n x H_t)`` on a metal surface as a causal, passive response
+    over a declared ``frequency_range``. Implementations expose the surface impedance
+    ``Z_s(omega)`` (and its admittance ``Y_s = Z_s^{-1}``) and declare whether the
+    response is scalar (``port_count == 1``) or a tangential 2x2 tensor
+    (``port_count == 2``). The model is a prepare-time object: it is fit or specified
+    once and then discretized for time stepping; it is not a per-step frequency
+    interpolation.
+    """
+
+    is_surface_impedance = True
+
+    @property
+    @abstractmethod
+    def frequency_range(self) -> tuple[float, float]:
+        """Declared validity band ``(f_min, f_max)`` in hertz."""
+
+    @property
+    @abstractmethod
+    def port_count(self) -> int:
+        """1 for a scalar surface response, 2 for a tangential 2x2 response."""
+
+    @abstractmethod
+    def surface_impedance(self, frequencies) -> torch.Tensor:
+        """Surface impedance ``Z_s(omega)`` in ohms, shape ``[F]`` or ``[F, P, P]``."""
+
+
+class RationalSurfaceImpedance(SurfaceImpedanceModel):
+    """Passive rational-model surface impedance over a declared frequency band.
+
+    Wraps a shared :class:`~witwin.maxwell.rational.RationalModel` (the same
+    stable/passive realization the embedded networks and the thin-wire series
+    impedance reuse). Construction is fail-closed: the model must be stable and
+    certified passive over its ``frequency_range`` (a non-passive surface injects
+    energy and diverges), and its transfer matrix must be square and scalar (1x1) or
+    tangential (2x2).
+
+    ``representation`` selects whether the rational fit represents the admittance
+    ``Y_s`` (``"Y"``, the default, preferred for a good conductor whose ``Z_s`` grows
+    like ``sqrt(omega)`` and whose ``Y_s`` is bounded) or the impedance ``Z_s``
+    (``"Z"``). :meth:`surface_impedance` always returns ``Z_s`` regardless of the
+    internal representation.
+
+    Passivity is certified only over ``frequency_range``. Evaluating
+    :meth:`surface_impedance`, :meth:`admittance`, or :meth:`evaluate` outside that
+    band extrapolates the rational model and carries no passivity or accuracy
+    certificate; the Phase 1 compile gate enforces in-band-only use for the stepping
+    runtime, so out-of-band queries are for inspection only.
+    """
+
+    def __init__(
+        self,
+        poles,
+        residues,
+        direct=0.0,
+        *,
+        frequency_range,
+        representation: str | None = None,
+        fit_report: FitReport | None = None,
+        sample_frequencies: torch.Tensor | None = None,
+        passivity_tolerance: float = 1.0e-9,
+        certificate_samples: int = 64,
+    ):
+        if isinstance(poles, RationalModel):
+            model = poles
+            if representation is not None and representation != model.representation:
+                # Fail closed: silently letting the passed model's representation win
+                # would reinterpret Z-samples as admittance (or vice versa) and invert
+                # the physics without any error.
+                raise ValueError(
+                    "representation kwarg "
+                    f"{representation!r} contradicts the passed RationalModel's own "
+                    f"representation {model.representation!r}; omit representation or "
+                    "pass a model already built with the intended representation."
+                )
+        else:
+            model = RationalModel(
+                poles=poles,
+                residues=residues,
+                direct=direct,
+                representation="Y" if representation is None else representation,
+                report=fit_report,
+            )
+        band = _coerce_frequency_range(frequency_range, name="frequency_range")
+        if model.representation not in {"Y", "Z"}:
+            raise ValueError("surface impedance representation must be 'Y' or 'Z'.")
+        if model.output_count != model.input_count:
+            raise ValueError("A surface impedance transfer matrix must be square.")
+        if model.output_count not in (1, 2):
+            raise ValueError(
+                "A surface impedance model must be scalar (1x1) or tangential (2x2); "
+                f"got a {model.output_count}x{model.input_count} transfer matrix."
+            )
+        if not model.is_stable:
+            raise ValueError(
+                "A causal surface impedance requires a stable rational model "
+                "(all poles with Re(pole) < 0)."
+            )
+        tolerance = float(passivity_tolerance)
+        if tolerance < 0.0:
+            raise ValueError("passivity_tolerance must be non-negative.")
+        certificate = self._certificate_frequencies(band, int(certificate_samples), model)
+        passivity = model.check_passivity(certificate, tolerance=tolerance)
+        if not passivity.passive or not passivity.certified:
+            raise ValueError(
+                "A surface impedance model must be certified passive over its "
+                f"frequency_range; maximum violation is {passivity.max_violation:.6g}, "
+                f"certificate={passivity.certified}."
+            )
+        object.__setattr__(self, "_model", model)
+        object.__setattr__(self, "_frequency_range", band)
+        object.__setattr__(self, "_fit_report", fit_report)
+        object.__setattr__(self, "_passivity", passivity)
+        object.__setattr__(
+            self,
+            "_sample_frequencies",
+            None if sample_frequencies is None else sample_frequencies.detach().clone(),
+        )
+
+    @staticmethod
+    def _certificate_frequencies(band, samples: int, model: RationalModel) -> torch.Tensor:
+        if samples < 2:
+            raise ValueError("certificate_samples must be at least 2.")
+        f_min, f_max = band
+        points = torch.logspace(
+            math.log10(f_min), math.log10(f_max), samples, dtype=torch.float64
+        )
+        endpoints = torch.tensor([f_min, f_max], dtype=torch.float64)
+        return torch.unique(torch.cat((points, endpoints)), sorted=True).to(
+            device=model.poles.device
+        )
+
+    @property
+    def model(self) -> RationalModel:
+        return self._model
+
+    @property
+    def representation(self) -> str:
+        return self._model.representation
+
+    @property
+    def frequency_range(self) -> tuple[float, float]:
+        return self._frequency_range
+
+    @property
+    def port_count(self) -> int:
+        return int(self._model.output_count)
+
+    @property
+    def fit_report(self) -> FitReport | None:
+        return self._fit_report
+
+    @property
+    def passivity(self):
+        return self._passivity
+
+    @property
+    def sample_frequencies(self) -> torch.Tensor | None:
+        return self._sample_frequencies
+
+    def evaluate(self, frequencies) -> torch.Tensor:
+        """Return the represented transfer (``Y_s`` or ``Z_s``), shape ``[F, P, P]``."""
+
+        return self._model.evaluate(frequencies)
+
+    def surface_impedance(self, frequencies) -> torch.Tensor:
+        """Return ``Z_s(omega)`` in ohms, shape ``[F]`` (scalar) or ``[F, P, P]``."""
+
+        response = self._model.evaluate(frequencies)
+        if self._model.representation == "Z":
+            impedance = response
+        else:
+            if self.port_count == 1:
+                impedance = 1.0 / response
+            else:
+                impedance = torch.linalg.inv(response)
+        if self.port_count == 1:
+            return impedance.reshape(impedance.shape[0])
+        return impedance
+
+    def admittance(self, frequencies) -> torch.Tensor:
+        """Return ``Y_s(omega)`` in siemens, shape ``[F]`` (scalar) or ``[F, P, P]``."""
+
+        response = self._model.evaluate(frequencies)
+        if self._model.representation == "Y":
+            admittance = response
+        else:
+            if self.port_count == 1:
+                admittance = 1.0 / response
+            else:
+                admittance = torch.linalg.inv(response)
+        if self.port_count == 1:
+            return admittance.reshape(admittance.shape[0])
+        return admittance
+
+    @classmethod
+    def fit(
+        cls,
+        frequencies,
+        values,
+        *,
+        order: int,
+        band: tuple[float, float] | None = None,
+        representation: str = "Y",
+        iterations: int = 20,
+        relative_tolerance: float = 1.0e-3,
+        relative_weighting: bool = True,
+        enforce_passivity: bool = False,
+        passivity_tolerance: float = 1.0e-9,
+        config: RationalFitConfig | None = None,
+    ) -> "RationalSurfaceImpedance":
+        """Fit a passive rational surface model from frequency samples.
+
+        Reuses the shared vector fitter :func:`~witwin.maxwell.rational.fit_rational`
+        on the requested ``representation`` (``"Y"`` fits the admittance ``Y_s``,
+        ``"Z"`` fits the impedance ``Z_s``). ``frequencies`` [Hz] and ``values`` (the
+        matching ``Y_s`` or ``Z_s`` samples) must have shape ``[F]`` for a scalar
+        surface. The returned model is validated passive over ``band`` at construction
+        (fail-closed), and its shared fitter report is exposed as ``fit_report``.
+        """
+
+        freqs = torch.as_tensor(frequencies, dtype=torch.float64)
+        if freqs.ndim != 1 or freqs.numel() == 0:
+            raise ValueError("frequencies must have non-empty shape [F].")
+        if not bool(torch.all(torch.isfinite(freqs))) or not bool(torch.all(freqs > 0.0)):
+            raise ValueError("frequencies must be finite and strictly positive.")
+        sample_values = torch.as_tensor(values).to(dtype=torch.complex128)
+        if sample_values.shape[0] != freqs.numel():
+            raise ValueError("values must have a leading dimension matching frequencies.")
+        if band is None:
+            band = (float(freqs.min()), float(freqs.max()))
+        band = _coerce_frequency_range(band, name="band")
+        if config is None:
+            weights = None
+            if relative_weighting:
+                flat = sample_values.reshape(freqs.numel(), -1)
+                magnitude = flat.abs().amax(dim=1)
+                weights = 1.0 / magnitude.clamp_min(torch.finfo(torch.float64).tiny)
+            config = RationalFitConfig(
+                order=int(order),
+                band=band,
+                iterations=int(iterations),
+                proportional=False,
+                relative_tolerance=float(relative_tolerance),
+                enforce_passivity=bool(enforce_passivity),
+                passivity_tolerance=float(passivity_tolerance),
+                weights=weights,
+            )
+        model = fit_rational(freqs, sample_values, config, representation=representation)
+        return cls(
+            model,
+            None,
+            frequency_range=band,
+            representation=model.representation,
+            fit_report=model.report,
+            sample_frequencies=freqs,
+            passivity_tolerance=float(passivity_tolerance),
+        )
+
+
+class SurfaceImpedanceMedium(Material):
+    """A surface-impedance boundary material carrying a :class:`SurfaceImpedanceModel`.
+
+    Attaching this material to a ``Structure`` declares the structure's exposed metal
+    faces as a causal, passive surface-impedance boundary described by ``impedance``
+    (a good conductor, a user rational model, or a fitted model). The bulk permittivity
+    is vacuum; the surface response replaces the resolved skin-depth interior.
+
+    The generalized surface-impedance runtime is wired into the stepping kernels: the
+    model is refit as a passive Z-form rational and discretized (bilinear, ``|z| < 1``)
+    to a per-edge auxiliary-differential-equation (ADE) that each exposed axis-aligned
+    face advances every step (finite blocks, mid-domain double-sided plates, multiple
+    metals, and multiple orientations). A tangential 2x2 (anisotropic) surface model,
+    and differentiable or distributed runs through the surface, are not supported and
+    fail closed with a physical reason. Checkpoint/resume of a generic surface run
+    captures the per-edge ADE state and fingerprints the discrete coefficients.
+    """
+
+    def __init__(self, *, impedance: SurfaceImpedanceModel, name: str | None = None):
+        if not isinstance(impedance, SurfaceImpedanceModel):
+            raise TypeError("impedance must be a SurfaceImpedanceModel instance.")
+        super().__init__(eps_r=1.0, mu_r=1.0, sigma_e=0.0, name=name)
+        object.__setattr__(self, "impedance", impedance)
+
+    @property
+    def is_surface_impedance(self) -> bool:
+        return True
+
+    @property
+    def frequency_range(self) -> tuple[float, float]:
+        return self.impedance.frequency_range
 
 
 class PerturbationMedium(Material):
@@ -1403,6 +2324,13 @@ class PerturbationMedium(Material):
     ):
         if not isinstance(base, CoreMaterial):
             raise TypeError("PerturbationMedium base must be a Material.")
+        if isinstance(base, GyromagneticFerrite):
+            raise NotImplementedError(
+                "PerturbationMedium cannot wrap a GyromagneticFerrite: it perturbs a scalar permittivity "
+                "background, but a ferrite carries a non-reciprocal gyromagnetic permeability in a local "
+                "magnetization state that this scalar-eps perturbation would silently discard. Perturb the "
+                "ferrite parameters directly instead."
+            )
         if bool(getattr(base, "is_pec", False)):
             raise ValueError("PerturbationMedium cannot wrap a PEC base material.")
         if not torch.is_tensor(perturbation):

@@ -6,14 +6,21 @@ import torch
 from ..monitors import normalize_axis, normalize_component
 from .coords import component_coords
 from .boundary import combine_complex_spectral_components, has_complex_fields
-
-_AXIS_CODES = {"x": 0, "y": 1, "z": 2}
-
-_PLANE_COORD_NAMES = {
-    "x": ("y", "z"),
-    "y": ("x", "z"),
-    "z": ("x", "y"),
-}
+from .quadrature import (
+    _AXIS_CODES,
+    _cell_center_weights_1d,
+    _compute_plane_flux,
+    _exact_cell_center_widths,
+    _infer_tensor_device_and_dtype,
+    _plane_coord_names,
+    _to_torch_scalar_or_tensor,
+    plane_normal_poynting,
+)
+from .runtime.spectral import (
+    advance_observer_entry_phases,
+    build_observer_spectral_entry,
+    observer_stagger_weights,
+)
 
 _PLANE_ALIGNMENT_RULES = {
     "x": {
@@ -41,10 +48,6 @@ _FLUX_KERNEL_COMPONENTS = {
 
 def _field_name(component):
     return normalize_component(component).capitalize()
-
-
-def _plane_coord_names(axis):
-    return _PLANE_COORD_NAMES[normalize_axis(axis)]
 
 
 def _observer_is_point(observer):
@@ -236,144 +239,6 @@ def _spectral_scale(entry):
     if entry["sample_count"] > 0:
         return 2.0 / entry["sample_count"]
     return 0.0
-
-
-def _contains_torch_tensor(value):
-    if isinstance(value, torch.Tensor):
-        return True
-    if isinstance(value, dict):
-        return any(_contains_torch_tensor(item) for item in value.values())
-    if isinstance(value, (list, tuple)):
-        return any(_contains_torch_tensor(item) for item in value)
-    return False
-
-
-def _infer_tensor_device_and_dtype(*values):
-    for value in values:
-        if isinstance(value, torch.Tensor):
-            return value.device, value.real.dtype
-    return None, torch.float32
-
-
-def _to_torch_scalar_or_tensor(value, *, device, dtype):
-    if isinstance(value, torch.Tensor):
-        return value.to(device=device)
-    return torch.as_tensor(value, device=device, dtype=dtype)
-
-
-def _cell_center_weights_1d(points):
-    """Control-volume widths for samples located at Yee cell centers."""
-    if isinstance(points, torch.Tensor):
-        coords = points.to(dtype=points.real.dtype)
-        count = int(coords.numel())
-        if count <= 1:
-            return torch.ones((count,), device=coords.device, dtype=coords.dtype)
-        diffs = coords[1:] - coords[:-1]
-        weights = torch.empty((count,), device=coords.device, dtype=coords.dtype)
-        weights[0] = diffs[0]
-        weights[-1] = diffs[-1]
-        if count > 2:
-            weights[1:-1] = (diffs[:-1] + diffs[1:]) / 2.0
-        return weights
-
-    coords = np.asarray(points, dtype=float)
-    count = coords.size
-    if count <= 1:
-        return np.ones((count,), dtype=float)
-    diffs = np.diff(coords)
-    weights = np.empty((count,), dtype=float)
-    weights[0] = diffs[0]
-    weights[-1] = diffs[-1]
-    if count > 2:
-        weights[1:-1] = (diffs[:-1] + diffs[1:]) / 2.0
-    return weights
-
-
-def _compute_plane_flux(result):
-    axis = normalize_axis(result["axis"])
-    axis_index = _AXIS_CODES[axis]
-    coord_names = _plane_coord_names(axis)
-    frequencies = tuple(float(freq) for freq in result.get("frequencies", (result["frequency"],)))
-    has_multi_frequency = len(frequencies) > 1
-
-    if _contains_torch_tensor(result):
-        device, coord_dtype = _infer_tensor_device_and_dtype(
-            result.get(coord_names[0]),
-            result.get(coord_names[1]),
-            result.get("Ex"),
-            result.get("Ey"),
-            result.get("Ez"),
-            result.get("Hx"),
-            result.get("Hy"),
-            result.get("Hz"),
-        )
-        coord_a = _to_torch_scalar_or_tensor(result[coord_names[0]], device=device, dtype=coord_dtype)
-        coord_b = _to_torch_scalar_or_tensor(result[coord_names[1]], device=device, dtype=coord_dtype)
-        weights = _cell_center_weights_1d(coord_a)[:, None] * _cell_center_weights_1d(coord_b)[None, :]
-        field_shape = ((len(frequencies),) if has_multi_frequency else ()) + (coord_a.numel(), coord_b.numel())
-        complex_dtype = None
-        for component_name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
-            value = result.get(component_name)
-            if isinstance(value, torch.Tensor):
-                complex_dtype = value.dtype
-                break
-        if complex_dtype is None:
-            complex_dtype = torch.complex64
-        e_field = torch.zeros(field_shape + (3,), device=device, dtype=complex_dtype)
-        h_field = torch.zeros(field_shape + (3,), device=device, dtype=complex_dtype)
-        for component_name in ("Ex", "Ey", "Ez"):
-            if component_name not in result:
-                continue
-            component_index = "xyz".index(component_name[1].lower())
-            e_field[..., component_index] = _to_torch_scalar_or_tensor(
-                result[component_name],
-                device=device,
-                dtype=coord_dtype,
-            )
-        for component_name in ("Hx", "Hy", "Hz"):
-            if component_name not in result:
-                continue
-            component_index = "xyz".index(component_name[1].lower())
-            h_field[..., component_index] = _to_torch_scalar_or_tensor(
-                result[component_name],
-                device=device,
-                dtype=coord_dtype,
-            )
-
-        direction = 1.0 if result.get("normal_direction", "+") == "+" else -1.0
-        poynting = 0.5 * torch.real(torch.cross(e_field, torch.conj(h_field), dim=-1)[..., axis_index]) * direction
-        flux = torch.sum(poynting * weights, dim=(-2, -1))
-        if not has_multi_frequency:
-            return flux.reshape(())
-        return flux
-
-    coord_a = np.asarray(result[coord_names[0]], dtype=float)
-    coord_b = np.asarray(result[coord_names[1]], dtype=float)
-    weights = _cell_center_weights_1d(coord_a)[:, None] * _cell_center_weights_1d(coord_b)[None, :]
-    leading_shape = (len(frequencies),) if has_multi_frequency else ()
-    field_shape = leading_shape + (coord_a.size, coord_b.size)
-
-    e_field = np.zeros(field_shape + (3,), dtype=np.complex128)
-    h_field = np.zeros(field_shape + (3,), dtype=np.complex128)
-    for component_name in ("Ex", "Ey", "Ez"):
-        if component_name not in result:
-            continue
-        component_index = "xyz".index(component_name[1].lower())
-        values = np.asarray(result[component_name], dtype=np.complex128)
-        e_field[..., component_index] = values
-    for component_name in ("Hx", "Hy", "Hz"):
-        if component_name not in result:
-            continue
-        component_index = "xyz".index(component_name[1].lower())
-        values = np.asarray(result[component_name], dtype=np.complex128)
-        h_field[..., component_index] = values
-
-    direction = 1.0 if result.get("normal_direction", "+") == "+" else -1.0
-    poynting = 0.5 * np.real(np.cross(e_field, np.conj(h_field), axis=-1)[..., axis_index]) * direction
-    flux = np.sum(poynting * weights, axis=(-2, -1))
-    if not has_multi_frequency:
-        return float(flux)
-    return flux
 
 
 def clear_observers(solver):
@@ -571,27 +436,15 @@ def prepare_observers(solver, frequencies, window_type, time_steps):
             if observer.get("monitor_frequencies") is not None
         ),
     )
-    solver._observer_spectral_entries = []
-    for frequency in requested_frequencies:
-        omega_dt = 2 * np.pi * frequency * solver.dt
-        solver._observer_spectral_entries.append(
-            {
-                "frequency": float(frequency),
-                "start_step": solver._compute_spectral_start_step(
-                    frequency,
-                    window_type=solver.observer_window_type,
-                ),
-                "end_step": time_steps,
-                "window_normalization": 0.0,
-                "sample_count": 0,
-                "phase_cos": 1.0,
-                "phase_sin": 0.0,
-                "phase_step_cos": np.cos(omega_dt),
-                "phase_step_sin": np.sin(omega_dt),
-                "source_dft_real": 0.0,
-                "source_dft_imag": 0.0,
-            }
+    solver._observer_spectral_entries = [
+        build_observer_spectral_entry(
+            solver,
+            frequency,
+            end_step=time_steps,
+            window_type=solver.observer_window_type,
         )
+        for frequency in requested_frequencies
+    ]
     frequency_to_index = {entry["frequency"]: index for index, entry in enumerate(solver._observer_spectral_entries)}
 
     for observer in solver.observers:
@@ -751,7 +604,10 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
             entry["source_dft_real"] += source_signal * weighted_cos
             entry["source_dft_imag"] += source_signal * weighted_sin
 
+        # The E/H half-step retard convention lives in observer_stagger_weights;
+        # the rotation constants are precomputed on the entry at prepare time.
         for group, local_index in solver._observer_point_groups_by_frequency[global_index]:
+            group_cos, group_sin = observer_stagger_weights(entry, group["field_name"], weighted_cos, weighted_sin)
             solver.fdtd_module.accumulatePointObservers3D(
                 field=getattr(solver, group["field_name"]),
                 pointI=group["point_i"],
@@ -759,8 +615,8 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                 pointK=group["point_k"],
                 realAccum=group["real"][local_index],
                 imagAccum=group["imag"][local_index],
-                weightedCos=weighted_cos,
-                weightedSin=weighted_sin,
+                weightedCos=group_cos,
+                weightedSin=group_sin,
             ).launchRaw()
             if has_complex_fields(solver):
                 solver.fdtd_module.accumulatePointObservers3D(
@@ -770,19 +626,20 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     pointK=group["point_k"],
                     realAccum=group["aux_real"][local_index],
                     imagAccum=group["aux_imag"][local_index],
-                    weightedCos=weighted_cos,
-                    weightedSin=weighted_sin,
+                    weightedCos=group_cos,
+                    weightedSin=group_sin,
                 ).launchRaw()
 
         for group, local_index in solver._observer_plane_groups_by_frequency[global_index]:
+            group_cos, group_sin = observer_stagger_weights(entry, group["field_name"], weighted_cos, weighted_sin)
             solver.fdtd_module.accumulatePlaneObserver3D(
                 field=getattr(solver, group["field_name"]),
                 planeRealAccum=group["real"][local_index],
                 planeImagAccum=group["imag"][local_index],
                 axisCode=group["axis_code"],
                 planeIndex=group["plane_index"],
-                weightedCos=weighted_cos,
-                weightedSin=weighted_sin,
+                weightedCos=group_cos,
+                weightedSin=group_sin,
             ).launchRaw()
             if has_complex_fields(solver):
                 solver.fdtd_module.accumulatePlaneObserver3D(
@@ -791,20 +648,14 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                     planeImagAccum=group["aux_imag"][local_index],
                     axisCode=group["axis_code"],
                     planeIndex=group["plane_index"],
-                    weightedCos=weighted_cos,
-                    weightedSin=weighted_sin,
+                    weightedCos=group_cos,
+                    weightedSin=group_sin,
                 ).launchRaw()
 
         entry["window_normalization"] += window_weight
         entry["sample_count"] += 1
 
-    for entry in solver._observer_spectral_entries:
-        entry["phase_cos"], entry["phase_sin"] = solver._advance_phase(
-            entry["phase_cos"],
-            entry["phase_sin"],
-            entry["phase_step_cos"],
-            entry["phase_step_sin"],
-        )
+    advance_observer_entry_phases(solver)
     solver._sync_observer_primary_state()
 
 
@@ -1005,8 +856,8 @@ def accumulate_time_observers(solver, n):
                 field = getattr(solver, _field_name(component))
                 buffer = record["buffers"][component]
                 if region_kind == "point":
-                    i, j, l = meta["field_index"]
-                    buffer[k] = field[i, j, l]
+                    i, j, field_k = meta["field_index"]
+                    buffer[k] = field[i, j, field_k]
                 elif region_kind == "plane":
                     buffer[k] = field[meta["field_slice"]].squeeze(meta["axis_code"])
                 else:
@@ -1387,6 +1238,14 @@ def get_observer_results(solver):
         result[coord_names[0]] = aligned[coord_names[0]]
         result[coord_names[1]] = aligned[coord_names[1]]
         result["coords"] = (aligned[coord_names[0]], aligned[coord_names[1]])
+        result["cell_widths"] = {
+            coord_names[0]: _exact_cell_center_widths(
+                solver, coord_names[0], aligned[coord_names[0]]
+            ),
+            coord_names[1]: _exact_cell_center_widths(
+                solver, coord_names[1], aligned[coord_names[1]]
+            ),
+        }
         for component_name, value in aligned["fields"].items():
             result[component_name] = value
         if result.get("compute_flux"):
@@ -1450,4 +1309,126 @@ def get_observer_results(solver):
                 spectrum = spectrum[0]
             _normalize_monitor_result_inplace(result, spectrum)
 
+    return results
+
+
+# --------------------------------------------------------------------------- #
+# Breakdown (non-feedback dielectric-stress) observers                        #
+# --------------------------------------------------------------------------- #
+
+
+def clear_breakdown_observers(solver):
+    solver.breakdown_observers = []
+    solver.breakdown_observers_enabled = False
+
+
+def _region_cell_slice(centers, lower, upper):
+    """Contiguous cell index range whose centers fall within [lower, upper]."""
+
+    mask = (centers >= lower) & (centers <= upper)
+    hits = np.nonzero(mask)[0]
+    if hits.size == 0:
+        return None
+    return int(hits[0]), int(hits[-1] + 1)
+
+
+def _axis_occupancy(nodes, cell_slice, lower, upper):
+    """Fractional overlap of each cell in the slice with [lower, upper]."""
+
+    i0, i1 = cell_slice
+    left = nodes[i0:i1]
+    right = nodes[i0 + 1 : i1 + 1]
+    widths = right - left
+    overlap = np.clip(np.minimum(right, upper) - np.maximum(left, lower), 0.0, None)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fraction = np.where(widths > 0.0, overlap / widths, 0.0)
+    return np.clip(fraction, 0.0, 1.0)
+
+
+def prepare_breakdown_observers(solver):
+    from ..breakdown_stress import BreakdownStressAccumulator
+
+    records = getattr(solver, "breakdown_observers", None)
+    if not records:
+        solver.breakdown_observers_enabled = False
+        return
+
+    scene = solver.scene
+    x_nodes = np.asarray(scene.x_nodes64, dtype=np.float64)
+    y_nodes = np.asarray(scene.y_nodes64, dtype=np.float64)
+    z_nodes = np.asarray(scene.z_nodes64, dtype=np.float64)
+    x_centers = np.asarray(scene.x_half64, dtype=np.float64)
+    y_centers = np.asarray(scene.y_half64, dtype=np.float64)
+    z_centers = np.asarray(scene.z_half64, dtype=np.float64)
+    dx = np.asarray(scene.dx_primal64, dtype=np.float64)
+    dy = np.asarray(scene.dy_primal64, dtype=np.float64)
+    dz = np.asarray(scene.dz_primal64, dtype=np.float64)
+
+    for record in records:
+        (x_lo, x_hi), (y_lo, y_hi), (z_lo, z_hi) = record["bounds"]
+        x_slice = _region_cell_slice(x_centers, x_lo, x_hi)
+        y_slice = _region_cell_slice(y_centers, y_lo, y_hi)
+        z_slice = _region_cell_slice(z_centers, z_lo, z_hi)
+        if x_slice is None or y_slice is None or z_slice is None:
+            raise ValueError(
+                f"BreakdownMonitor {record['name']!r} selects no interior cells; "
+                "increase its size or refine the grid."
+            )
+        record["cell_slices"] = (x_slice, y_slice, z_slice)
+
+        occ_x = _axis_occupancy(x_nodes, x_slice, x_lo, x_hi)
+        occ_y = _axis_occupancy(y_nodes, y_slice, y_lo, y_hi)
+        occ_z = _axis_occupancy(z_nodes, z_slice, z_lo, z_hi)
+        occupancy = (
+            occ_x[:, None, None] * occ_y[None, :, None] * occ_z[None, None, :]
+        )
+        vol = (
+            dx[x_slice[0] : x_slice[1]][:, None, None]
+            * dy[y_slice[0] : y_slice[1]][None, :, None]
+            * dz[z_slice[0] : z_slice[1]][None, None, :]
+        )
+        shape = occupancy.shape
+        occupancy_t = torch.as_tensor(occupancy, device=solver.device, dtype=solver.Ex.dtype)
+        volume_t = torch.as_tensor(vol, device=solver.device, dtype=solver.Ex.dtype)
+        record["accumulator"] = BreakdownStressAccumulator.allocate(
+            shape=shape,
+            critical_field=record["critical_field"],
+            dt=float(solver.dt),
+            minimum_duration=record["minimum_duration"],
+            damage_exponent=record["damage_exponent"],
+            cell_volume=volume_t,
+            occupancy=occupancy_t,
+            device=solver.device,
+            dtype=solver.Ex.dtype,
+        )
+
+    solver.breakdown_observers_enabled = any(records)
+
+
+def accumulate_breakdown_observers(solver, n):
+    if not getattr(solver, "breakdown_observers_enabled", False):
+        return
+    from ..breakdown_stress import colocate_electric_magnitude
+
+    for record in solver.breakdown_observers:
+        (x0, x1), (y0, y1), (z0, z1) = record["cell_slices"]
+        # Node-overhang sub-blocks so colocation yields exactly the region cells.
+        ex = solver.Ex[x0:x1, y0 : y1 + 1, z0 : z1 + 1]
+        ey = solver.Ey[x0 : x1 + 1, y0:y1, z0 : z1 + 1]
+        ez = solver.Ez[x0 : x1 + 1, y0 : y1 + 1, z0:z1]
+        magnitude = colocate_electric_magnitude(ex, ey, ez)
+        record["accumulator"].update(magnitude)
+
+
+def get_breakdown_observer_results(solver):
+    results = {}
+    for record in getattr(solver, "breakdown_observers", ()):
+        accumulator = record.get("accumulator")
+        if accumulator is None:
+            continue
+        results[record["name"]] = accumulator.finalize(
+            name=record["name"],
+            region_bounds=record["bounds"],
+            provenance_extra={"quantities": tuple(record["quantities"])},
+        )
     return results

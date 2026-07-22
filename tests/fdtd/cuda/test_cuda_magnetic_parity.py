@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import witwin.maxwell as mw
+from witwin.maxwell.fdtd.runtime.materials import _store_coefficient_uniformity
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for native FDTD backend tests.")
@@ -75,6 +76,11 @@ def _seed_standard_state(solver):
         getattr(solver, name).copy_(0.91 + 0.08 * torch.rand(getattr(solver, name).shape, device="cuda", generator=generator))
     for name in ("cex_curl", "cey_curl", "cez_curl", "chx_curl", "chy_curl", "chz_curl"):
         getattr(solver, name).copy_(1.0e-4 * torch.rand(getattr(solver, name).shape, device="cuda", generator=generator))
+    # The coefficient tensors were rewritten in place, so refresh the cached
+    # per-tensor uniformity exactly as any in-run coefficient mutator must
+    # (see ports/breakdown invalidation); otherwise the field kernels would
+    # legally take the uniform-scalar fast path with stale values.
+    _store_coefficient_uniformity(solver)
 
 
 def _standard_python_reference(solver, spacing=None):

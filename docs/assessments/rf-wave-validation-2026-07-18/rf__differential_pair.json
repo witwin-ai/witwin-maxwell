@@ -1,0 +1,37 @@
+{
+  "name": "rf/differential_pair",
+  "description": "Coupled-line four-port (terminated): single-ended FDTD S and its mixed-mode (differential/common) conversion vs the coupled-line model.",
+  "gate_class": "wave-level",
+  "status": "fail",
+  "reference": "analytic coupled-line even/odd-mode model (mixed-mode conversion)",
+  "tidy3d_reference": "pending-generation",
+  "target": "wave-level precondition (cond(A) + passivity); coupled 4-port S with mode conversion",
+  "tolerance_basis": "Wave-level precondition (coax_thru precedent): the 4-port B=S*A extraction is well conditioned (cond(A) 1.30); the passivity max singular value (1.159) exceeds the 1.1 precedent, so the passivity precondition is NOT met. The mixed-mode conversion still exposes the differential/common insertion and the mode-conversion term. Absolute impedances carry the same resolution-limited quasi-TEM gap as the single microstrip.",
+  "falsification": "EXECUTED (F2b): the coupled bench shows genuine line-to-line coupling -- the near-end single-ended coupling |S21| (p1->p2) is non-zero (0.17 bandmax) and the differential vs common insertion differ (|Sdd21| 0.89 != |Scc21| 0.68), i.e. the even and odd modes propagate at different velocities. An uncoupled pair would give zero S21 and Sdd21==Scc21. The mode-conversion |Sdc21| ~ 0.000 is correctly ~0: the pair is mirror-symmetric, so differential and common modes do not convert (a physics check, not a coupling metric).",
+  "metrics": [
+    {
+      "quantity": "differential insertion |Sdd21| (median)",
+      "measured": 0.8852081150521618,
+      "reference": null,
+      "unit": "linear",
+      "class": "wave-level",
+      "note": "cond(A)=1.30, max sv=1.159, a_passive=0.17"
+    }
+  ],
+  "supporting": [],
+  "convergence": [],
+  "conservation": {
+    "extraction_cond_a_max": 1.3035066497607901,
+    "max_singular_value": 1.1587300220707057,
+    "a_passive_ratio_bandmax": 0.16581211454726466,
+    "sdd21_median": 0.8852081150521618,
+    "scc21_median": 0.6844902761060241,
+    "sdc21_median": 0.00021143541603680383
+  },
+  "raw": {},
+  "notes": [
+    "UNBLOCKED (F2b, EXECUTED). Was BLOCKED on the same contour-snap + TEM inapplicability as microstrip. Each single-ended port aperture spans one strip plus the grounded reference, so its quasi-TEM mode routes to the quasi-static engine; the four ports form the coupled 4-port. The terminated sweep yields a well-conditioned (cond(A) 1.30), non-passive (max sv 1.159 > 1.1) single-ended S; mixed-mode |Sdd21| 0.89, |Scc21| 0.68, |Sdc21| 0.000 (median).",
+    "The measured passivity singular value (1.159) EXCEEDS the coax_thru/microstrip passivity precedent (1.1) -- about a 34% apparent power gain -- so the bench does NOT meet the passivity precondition and is recorded as `fail`, not `gap`. The coupling signature (mixed-mode |Sdd21| != |Scc21|, |Sdc21|~0) is correct physics and the extraction is well conditioned; the non-passivity and the absolute even/odd impedance error carry the same resolution-limited quasi-TEM under-loading as the single microstrip at this coarse aperture. A looser pair-specific passivity threshold is a supervisor pre-registration decision, not assumed here."
+  ],
+  "updated_at": "2026-07-22T13:50:47+00:00"
+}

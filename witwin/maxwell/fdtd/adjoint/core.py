@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from ...thin_wire import WireData
 from ...sources import evaluate_source_time
 from ..boundary import (
     BOUNDARY_BLOCH,
@@ -27,14 +28,16 @@ from ..checkpoint import (
 )
 from ..excitation.injection import initialize_source_terms
 from ..excitation.temporal import _resolve_term_source
-from ..excitation.tfsf_specs import reference_sample_axis_code
 from ..observers import (
     _align_plane_monitor_payload,
     _compute_plane_flux,
     _monitor_payload_is_point,
     _plane_coord_names,
 )
+from ..networks import replay_network_runtimes
 from ..ports import replay_port_runtimes
+from .circuits import replay_circuit_runtimes
+from ..wire import deposit_replayed_wire_current, replay_wire_state
 
 _TFSF_REFERENCE_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned"}
 _TFSF_AUXILIARY_PROVIDERS = {"plane_wave_ref_x_ez", "plane_wave_axis_aligned", "plane_wave_aux"}
@@ -114,6 +117,8 @@ def _prepare_forward_pack(raw_output):
     monitor_templates = {}
     next_index = len(output_tensors)
     for monitor_name, payload in raw_output.get("observers", {}).items():
+        if isinstance(payload, WireData):
+            continue
         if _monitor_payload_is_point(payload):
             template, next_index = _prepare_point_monitor_template(payload, next_index)
         else:
@@ -126,6 +131,23 @@ def _prepare_forward_pack(raw_output):
             for component_name in template["fields"]:
                 output_tensors.append(payload["components"][component_name]["data"])
 
+    wire_offset = len(output_tensors)
+    wire_monitor_templates = {}
+    for monitor_name, payload in raw_output.get("observers", {}).items():
+        if not isinstance(payload, WireData):
+            continue
+        quantity_indices = {}
+        for quantity in ("current", "charge", "ohmic_loss"):
+            value = getattr(payload, quantity)
+            if value is None:
+                continue
+            quantity_indices[quantity] = len(output_tensors)
+            output_tensors.append(value)
+        wire_monitor_templates[monitor_name] = {
+            "data": payload,
+            "quantity_indices": quantity_indices,
+        }
+
     port_offset = len(output_tensors)
     port_templates = {}
     for port_name, data in raw_output.get("ports", {}).items():
@@ -134,11 +156,35 @@ def _prepare_forward_pack(raw_output):
         if data.available_power is not None:
             output_tensors.append(data.available_power)
 
+    circuit_offset = len(output_tensors)
+    circuit_templates = {}
+    circuit_diagnostic_names = {}
+    for circuit_name, data in raw_output.get("circuits", {}).items():
+        circuit_templates[circuit_name] = data
+        output_tensors.extend((data.node_voltages, data.branch_currents))
+        output_tensors.extend(data.device_powers.values())
+        if data.energy_balance is not None:
+            output_tensors.append(data.energy_balance)
+        tensor_diagnostics = tuple(
+            (name, value)
+            for name, value in data.diagnostics.items()
+            if isinstance(value, torch.Tensor)
+        )
+        circuit_diagnostic_names[circuit_name] = tuple(
+            name for name, _value in tensor_diagnostics
+        )
+        output_tensors.extend(value for _name, value in tensor_diagnostics)
+
     return _ForwardPack(
         field_names=tuple(field_names),
         monitor_templates=monitor_templates,
+        wire_monitor_templates=wire_monitor_templates,
+        wire_offset=wire_offset,
         port_templates=port_templates,
         port_offset=port_offset,
+        circuit_templates=circuit_templates,
+        circuit_offset=circuit_offset,
+        circuit_diagnostic_names=circuit_diagnostic_names,
         output_tensors=tuple(output_tensors),
     )
 
@@ -248,6 +294,17 @@ def _rebuild_monitors(monitor_templates, output_tensors, field_offset):
     return monitors
 
 
+def _rebuild_wire_monitors(wire_monitor_templates, output_tensors):
+    monitors = {}
+    for monitor_name, template in wire_monitor_templates.items():
+        updates = {
+            quantity: output_tensors[index]
+            for quantity, index in template["quantity_indices"].items()
+        }
+        monitors[monitor_name] = replace(template["data"], **updates)
+    return monitors
+
+
 def _rebuild_ports(port_templates, output_tensors, port_offset):
     ports = {}
     cursor = int(port_offset)
@@ -264,12 +321,39 @@ def _rebuild_ports(port_templates, output_tensors, port_offset):
     return ports
 
 
-def _term_grid_tensor(term):
-    for key in ("patch", "delay_patch", "cw_cos_patch", "cw_sin_patch"):
-        value = term.get(key)
-        if value is not None:
-            return value
-    raise ValueError("source term does not include a tensor payload.")
+def _rebuild_circuits(
+    circuit_templates,
+    circuit_diagnostic_names,
+    output_tensors,
+    circuit_offset,
+):
+    circuits = {}
+    cursor = int(circuit_offset)
+    for circuit_name, template in circuit_templates.items():
+        node_voltages = output_tensors[cursor]
+        branch_currents = output_tensors[cursor + 1]
+        cursor += 2
+        device_powers = {}
+        for device_name in template.device_powers:
+            device_powers[device_name] = output_tensors[cursor]
+            cursor += 1
+        energy_balance = None
+        if template.energy_balance is not None:
+            energy_balance = output_tensors[cursor]
+            cursor += 1
+        diagnostics = dict(template.diagnostics)
+        for diagnostic_name in circuit_diagnostic_names[circuit_name]:
+            diagnostics[diagnostic_name] = output_tensors[cursor]
+            cursor += 1
+        circuits[circuit_name] = replace(
+            template,
+            node_voltages=node_voltages,
+            branch_currents=branch_currents,
+            device_powers=device_powers,
+            energy_balance=energy_balance,
+            diagnostics=diagnostics,
+        )
+    return circuits
 
 
 def _slice_from_offsets_shape(offsets, shape):
@@ -817,6 +901,9 @@ def _accumulate_source_term_gradients(
         grad_tpa_ex=step_result.grad_tpa_ex,
         grad_tpa_ey=step_result.grad_tpa_ey,
         grad_tpa_ez=step_result.grad_tpa_ez,
+        grad_wire_inductance=step_result.grad_wire_inductance,
+        grad_wire_capacitance=step_result.grad_wire_capacitance,
+        grad_wire_weights=step_result.grad_wire_weights,
     )
 
 
@@ -824,8 +911,13 @@ def _accumulate_source_term_gradients(
 class _ForwardPack:
     field_names: tuple[str, ...]
     monitor_templates: dict[str, dict[str, Any]]
+    wire_monitor_templates: dict[str, dict[str, Any]]
+    wire_offset: int
     port_templates: dict[str, Any]
     port_offset: int
+    circuit_templates: dict[str, Any]
+    circuit_offset: int
+    circuit_diagnostic_names: dict[str, tuple[str, ...]]
     output_tensors: tuple[torch.Tensor, ...]
 
 
@@ -1303,120 +1395,6 @@ def _tfsf_magnetic_source_terms(solver, forward_state, *, time_value, resolved_s
     )
 
 
-def _accumulate_tfsf_sample_adjoint_torch(adj_aux, terms, adjoint_fields, *, origin, ds):
-    """Transpose of the per-step TFSF incident injection into ``adj_aux``.
-
-    For every injection term this reads the adjoint of the field the forward step
-    wrote the incident patch into (``adjoint_fields[field_name]`` at the term
-    offsets), contracts it with the term coefficient patch and component scale,
-    and scatters the result back onto the sampled 1D auxiliary grid. This mirrors
-    the native ``accumulateTfsf*SampleAdjoint3D`` kernels: scalar terms fold onto a
-    single index, line terms reduce the two non-sample axes onto their index line,
-    and interpolated terms distribute linearly onto the two straddling indices.
-    """
-    for term in terms:
-        field = adjoint_fields[term["field_name"]]
-        offset_i, offset_j, offset_k = (int(offset) for offset in term["offsets"])
-        coeff_patch = term["coeff_patch"]
-        shape_i, shape_j, shape_k = (int(length) for length in coeff_patch.shape)
-        adj_field_patch = field[
-            offset_i : offset_i + shape_i,
-            offset_j : offset_j + shape_j,
-            offset_k : offset_k + shape_k,
-        ]
-        component_scale = float(term["component_scale"])
-        weighted = component_scale * adj_field_patch * coeff_patch
-        if "sample_positions" in term:
-            last_index = max(adj_aux.numel() - 1, 0)
-            inv_ds = 1.0 / ds if ds > 0.0 else 0.0
-            coord = torch.clamp(
-                (term["sample_positions"] - origin) * inv_ds, min=0.0, max=float(last_index)
-            )
-            lower = torch.floor(coord).to(torch.int64)
-            upper = torch.clamp(lower + 1, max=last_index)
-            frac = coord - lower.to(coord.dtype)
-            value = weighted.reshape(-1)
-            lower_flat = lower.reshape(-1)
-            upper_flat = upper.reshape(-1)
-            frac_flat = frac.reshape(-1)
-            adj_aux.index_add_(0, lower_flat, value * (1.0 - frac_flat))
-            distinct = upper_flat != lower_flat
-            if bool(distinct.any()):
-                adj_aux.index_add_(0, upper_flat[distinct], (value * frac_flat)[distinct])
-            continue
-        if term["scalar_sample_index"] is not None:
-            adj_aux[int(term["scalar_sample_index"])] += torch.sum(weighted)
-            continue
-        axis = int(reference_sample_axis_code(term))
-        reduce_axes = tuple(other for other in (0, 1, 2) if other != axis)
-        per_index = weighted.sum(dim=reduce_axes)
-        sample_indices = term["sample_indices"].to(device=adj_aux.device, dtype=torch.int64).reshape(-1)
-        adj_aux.index_add_(0, sample_indices, per_index)
-
-
-def _reverse_tfsf_auxiliary_electric_state_adjoint(
-    adj_electric_prev,
-    adj_magnetic_after,
-    adj_electric_post,
-    electric_decay,
-    electric_curl,
-    source_index,
-):
-    """Analytic transpose of ``_advance_tfsf_auxiliary_electric_state``.
-
-    Accumulates the pre-step electric adjoint (decay pullback on the interior, an
-    identity passthrough at index 0) and the advanced-magnetic adjoint (the curl-H
-    difference) exactly as ``reverse_tfsf_auxiliary_electric_kernel`` does; the
-    source-driven and clamped-tail entries carry no state dependence.
-    """
-    electric_total = adj_electric_prev.numel()
-    magnetic_total = adj_magnetic_after.numel()
-    index = torch.arange(electric_total, device=adj_electric_prev.device)
-    overwritten = (index == int(source_index)) | (index == electric_total - 1)
-    interior = (index >= 1) & (index + 1 < electric_total) & (~overwritten)
-    passthrough = (index == 0) & (~overwritten)
-    electric_coeff = torch.where(interior, electric_decay, torch.zeros_like(electric_decay))
-    electric_coeff = torch.where(passthrough, torch.ones_like(electric_decay), electric_coeff)
-    adj_electric_prev.add_(electric_coeff * adj_electric_post)
-
-    if magnetic_total == 0:
-        return
-    lower = torch.arange(magnetic_total, device=adj_electric_prev.device)
-    upper = lower + 1
-    lower_valid = (lower > 0) & (lower + 1 < electric_total) & (lower != int(source_index))
-    upper_valid = (upper > 0) & (upper + 1 < electric_total) & (upper != int(source_index))
-    zeros = torch.zeros(magnetic_total, device=adj_electric_prev.device, dtype=adj_electric_prev.dtype)
-    lower_term = torch.where(
-        lower_valid, electric_curl[:magnetic_total] * adj_electric_post[:magnetic_total], zeros
-    )
-    upper_term = torch.where(
-        upper_valid, electric_curl[1 : magnetic_total + 1] * adj_electric_post[1 : magnetic_total + 1], zeros
-    )
-    adj_magnetic_after.add_(upper_term - lower_term)
-
-
-def _reverse_tfsf_auxiliary_magnetic_state_adjoint(
-    adj_electric_prev,
-    adj_magnetic_prev,
-    adj_magnetic_after,
-    magnetic_decay,
-    magnetic_curl,
-):
-    """Analytic transpose of ``_advance_tfsf_auxiliary_magnetic_state``.
-
-    Assigns the pre-step magnetic adjoint (decay pullback) and folds the curl-E
-    difference into the pre-step electric adjoint, matching
-    ``reverse_tfsf_auxiliary_magnetic_kernel``.
-    """
-    magnetic_total = adj_magnetic_after.numel()
-    adj_magnetic_prev.copy_(magnetic_decay * adj_magnetic_after)
-    if magnetic_total == 0:
-        return
-    curl_flux = magnetic_curl * adj_magnetic_after
-    adj_electric_prev[:magnetic_total].add_(curl_flux)
-    adj_electric_prev[1:].add_(-curl_flux)
-
-
 def _bloch_backward_diff(field: torch.Tensor, *, axis: int, inv_delta: torch.Tensor, phase_cos: float, phase_sin: float):
     # inv_delta: 1D dual spacing reciprocals, length == field size + 1 along
     # axis; wrap entries live at [0] and [-1] (equal on a Bloch axis).
@@ -1685,92 +1663,6 @@ def _apply_dispersive_corrections(solver, electric_fields, dispersive_state, *, 
     return updated
 
 
-def _reverse_dispersive_corrections(
-    solver,
-    adjoint_state,
-    dispersive_state,
-    *,
-    eps_ex,
-    eps_ey,
-    eps_ez,
-    suffix="",
-):
-    # ``suffix`` selects the field/current half the ``E -= dt * J / eps``
-    # correction VJP runs on. "" is the real field (unchanged); Bloch runs also
-    # correct the imaginary field with ``suffix="_imag"``. Both halves share the
-    # (real) eps, so both accumulate into the same eps gradient at the call site.
-    electric_source_adjoint = {
-        "Ex": adjoint_state["Ex" + suffix].detach().clone(),
-        "Ey": adjoint_state["Ey" + suffix].detach().clone(),
-        "Ez": adjoint_state["Ez" + suffix].detach().clone(),
-    }
-    dispersive_output_adjoint = {
-        name + suffix: adjoint_state[name + suffix].detach().clone()
-        for name in _electric_dispersive_real_state_names(solver)
-    }
-    grad_eps_by_field = {
-        "Ex": torch.zeros_like(eps_ex),
-        "Ey": torch.zeros_like(eps_ey),
-        "Ez": torch.zeros_like(eps_ez),
-    }
-    eps_by_field = {
-        "Ex": eps_ex,
-        "Ey": eps_ey,
-        "Ez": eps_ez,
-    }
-    dt = float(solver.dt)
-
-    for component_name, model_name, index, _tensor_names, _entry in iter_dispersive_state_specs(solver) or ():
-        current_name = dispersive_state_name(component_name, model_name, index, "current") + suffix
-        electric_adjoint = electric_source_adjoint[component_name]
-        eps_field = eps_by_field[component_name]
-        dispersive_output_adjoint[current_name] = (
-            dispersive_output_adjoint[current_name] - dt * electric_adjoint / eps_field
-        )
-        grad_eps_by_field[component_name] = (
-            grad_eps_by_field[component_name] + dt * dispersive_state[current_name] * electric_adjoint / (eps_field * eps_field)
-        )
-
-    source_adjoint_state = dict(adjoint_state)
-    source_adjoint_state.update({name + suffix: value for name, value in electric_source_adjoint.items()})
-    return electric_source_adjoint, dispersive_output_adjoint, grad_eps_by_field, source_adjoint_state
-
-
-def _electric_dispersive_real_state_names(solver):
-    """Canonical (unsuffixed) electric-dispersive state names, in spec order.
-
-    Bloch runs append ``_imag`` replicas to ``dispersive_state_names``; the
-    suffix-parameterized ADE-state VJP needs the real names alone so it can apply
-    the requested half's suffix without double-suffixing the ``_imag`` copies.
-    """
-    names = []
-    for component_name, model_name, index, tensor_names, _entry in iter_dispersive_state_specs(solver) or ():
-        for tensor_name in tensor_names:
-            names.append(dispersive_state_name(component_name, model_name, index, tensor_name))
-    return tuple(names)
-
-
-def _reverse_magnetic_dispersive_corrections(solver, adjoint_state, magnetic_field_adjoint):
-    """VJP of ``H -= dt * J_m * inv_mu`` given the adjoint of the corrected H.
-
-    ``inv_mu`` is a constant coefficient tensor (there is no magnetic material
-    gradient channel), so the correction only seeds the post-step magnetic
-    dispersive-state adjoint; the field adjoint itself passes through unchanged.
-    """
-    output_adjoint = {
-        name: adjoint_state[name].detach().clone()
-        for name in checkpoint_schema(solver).magnetic_dispersive_state_names
-    }
-    inv_mu = _magnetic_inverse_permeabilities(solver)
-    dt = float(solver.dt)
-    for component_name, model_name, index, _tensor_names, _entry in iter_magnetic_dispersive_state_specs(solver) or ():
-        current_name = dispersive_state_name(component_name, model_name, index, "current")
-        output_adjoint[current_name] = (
-            output_adjoint[current_name] - dt * magnetic_field_adjoint[component_name] * inv_mu[component_name]
-        )
-    return output_adjoint
-
-
 def _broadcast_vector(vector: torch.Tensor, axis: int) -> torch.Tensor:
     shape = [1, 1, 1]
     shape[axis] = int(vector.shape[0])
@@ -1799,47 +1691,6 @@ def _backward_diff(field: torch.Tensor, axis: int, inv_delta: torch.Tensor) -> t
     field_lo[axis] = slice(0, -1)
     diff[tuple(interior)] = (field[tuple(field_hi)] - field[tuple(field_lo)]) * _broadcast_vector(inv_delta[1:-1], axis)
     return diff
-
-
-def _scatter_diff_adjoint(field_grad: torch.Tensor, scaled_grad: torch.Tensor, axis: int):
-    field_lo = [slice(None)] * field_grad.ndim
-    field_hi = [slice(None)] * field_grad.ndim
-    field_lo[axis] = slice(0, -1)
-    field_hi[axis] = slice(1, None)
-    field_grad[tuple(field_lo)] = field_grad[tuple(field_lo)] - scaled_grad
-    field_grad[tuple(field_hi)] = field_grad[tuple(field_hi)] + scaled_grad
-
-
-def _accumulate_forward_diff_adjoint(field_grad: torch.Tensor, diff_grad: torch.Tensor, *, axis: int, inv_delta: torch.Tensor):
-    _scatter_diff_adjoint(field_grad, _broadcast_vector(inv_delta, axis) * diff_grad, axis)
-
-
-def _accumulate_backward_diff_adjoint(field_grad: torch.Tensor, diff_grad: torch.Tensor, *, axis: int, inv_delta: torch.Tensor):
-    interior = [slice(None)] * diff_grad.ndim
-    interior[axis] = slice(1, -1)
-    _scatter_diff_adjoint(field_grad, _broadcast_vector(inv_delta[1:-1], axis) * diff_grad[tuple(interior)], axis)
-
-
-def _accumulate_bloch_backward_diff_adjoint(
-    field_grad: torch.Tensor,
-    diff_grad: torch.Tensor,
-    *,
-    axis: int,
-    inv_delta: torch.Tensor,
-    phase_cos: float,
-    phase_sin: float,
-):
-    _accumulate_backward_diff_adjoint(field_grad, diff_grad, axis=axis, inv_delta=inv_delta)
-    # Wrap terms transpose the forward wrap differences: contributions from the
-    # low diff entry carry inv_delta[0], those from the high entry inv_delta[-1].
-    low_scale = inv_delta[0]
-    high_scale = inv_delta[-1]
-    low_grad = diff_grad.select(axis, 0)
-    high_grad = diff_grad.select(axis, int(diff_grad.shape[axis] - 1))
-    field_grad.select(axis, 0).add_(low_scale * low_grad + high_scale * _complex_phase_negative(high_grad, phase_cos, phase_sin))
-    field_grad.select(axis, int(field_grad.shape[axis] - 1)).add_(
-        -low_scale * _complex_phase_positive(low_grad, phase_cos, phase_sin) - high_scale * high_grad
-    )
 
 
 # The face codes and grid shape are fixed for the whole reverse pass, so the
@@ -1954,157 +1805,6 @@ def _update_electric_component(field, *, d_pos, d_neg, decay, curl_prefactor, ep
     psi_pos_new = torch.where(keep_mask, psi_pos, psi_pos_candidate)
     psi_neg_new = torch.where(keep_mask, psi_neg, psi_neg_candidate)
     return updated, psi_pos_new, psi_neg_new
-
-
-def _reverse_magnetic_component_standard(adj_updated, *, decay, curl):
-    adj_field = adj_updated * decay
-    adj_d_pos = -curl * adj_updated
-    adj_d_neg = curl * adj_updated
-    return adj_field, adj_d_pos, adj_d_neg
-
-
-def _reverse_electric_component_standard(
-    adj_updated,
-    field,
-    *,
-    d_pos,
-    d_neg,
-    decay,
-    curl_prefactor,
-    eps,
-    low_mode_pos,
-    high_mode_pos,
-    low_mode_neg,
-    high_mode_neg,
-    axis_pos,
-    axis_neg,
-):
-    inactive_pos, pec_pos = _boundary_axis_masks(field.shape, axis_pos, low_mode_pos, high_mode_pos, field.device)
-    inactive_neg, pec_neg = _boundary_axis_masks(field.shape, axis_neg, low_mode_neg, high_mode_neg, field.device)
-    pec_mask = pec_pos | pec_neg
-    inactive_mask = (~pec_mask) & (inactive_pos | inactive_neg)
-    active_mask = (~pec_mask) & (~inactive_mask)
-    active = active_mask.to(device=field.device, dtype=field.dtype)
-    inactive = inactive_mask.to(device=field.device, dtype=field.dtype)
-
-    adj_field = inactive * adj_updated + active * (adj_updated * decay)
-    curl_scale = active * (curl_prefactor / eps)
-    adj_curl_term = adj_updated * curl_scale
-    grad_eps = -adj_updated * active * curl_prefactor * (d_pos - d_neg) / (eps * eps)
-    adj_d_pos = adj_curl_term
-    adj_d_neg = -adj_curl_term
-    return adj_field, adj_d_pos, adj_d_neg, grad_eps
-
-
-def _reverse_electric_component_bloch(
-    adj_updated: torch.Tensor,
-    *,
-    d_pos: torch.Tensor,
-    d_neg: torch.Tensor,
-    decay: torch.Tensor,
-    curl_prefactor: torch.Tensor,
-    eps: torch.Tensor,
-):
-    adj_field = adj_updated * decay
-    curl_scale = curl_prefactor / eps
-    adj_curl_term = adj_updated * curl_scale
-    grad_eps = -curl_prefactor * _complex_inner_real(adj_updated, d_pos - d_neg) / (eps * eps)
-    adj_d_pos = adj_curl_term
-    adj_d_neg = -adj_curl_term
-    return adj_field, adj_d_pos, adj_d_neg, grad_eps
-
-
-def _reverse_magnetic_component_cpml(
-    adj_updated,
-    adj_psi_pos_post,
-    adj_psi_neg_post,
-    *,
-    decay,
-    curl,
-    b_pos,
-    c_pos,
-    inv_kappa_pos,
-    b_neg,
-    c_neg,
-    inv_kappa_neg,
-    axis_pos,
-    axis_neg,
-):
-    adj_curl_term = -curl * adj_updated
-    adj_psi_pos_candidate = adj_psi_pos_post + adj_curl_term
-    adj_psi_neg_candidate = adj_psi_neg_post - adj_curl_term
-    adj_field = adj_updated * decay
-    adj_psi_pos = _broadcast_vector(b_pos, axis_pos) * adj_psi_pos_candidate
-    adj_psi_neg = _broadcast_vector(b_neg, axis_neg) * adj_psi_neg_candidate
-    adj_d_pos = (
-        _broadcast_vector(inv_kappa_pos, axis_pos) * adj_curl_term
-        + _broadcast_vector(c_pos, axis_pos) * adj_psi_pos_candidate
-    )
-    adj_d_neg = (
-        -_broadcast_vector(inv_kappa_neg, axis_neg) * adj_curl_term
-        + _broadcast_vector(c_neg, axis_neg) * adj_psi_neg_candidate
-    )
-    return adj_field, adj_d_pos, adj_d_neg, adj_psi_pos, adj_psi_neg
-
-
-def _reverse_electric_component_cpml(
-    adj_updated,
-    adj_psi_pos_post,
-    adj_psi_neg_post,
-    field,
-    *,
-    d_pos,
-    d_neg,
-    decay,
-    curl_prefactor,
-    eps,
-    low_mode_pos,
-    high_mode_pos,
-    low_mode_neg,
-    high_mode_neg,
-    axis_pos,
-    axis_neg,
-    psi_pos,
-    psi_neg,
-    b_pos,
-    c_pos,
-    inv_kappa_pos,
-    b_neg,
-    c_neg,
-    inv_kappa_neg,
-):
-    inactive_pos, pec_pos = _boundary_axis_masks(field.shape, axis_pos, low_mode_pos, high_mode_pos, field.device)
-    inactive_neg, pec_neg = _boundary_axis_masks(field.shape, axis_neg, low_mode_neg, high_mode_neg, field.device)
-    pec_mask = pec_pos | pec_neg
-    inactive_mask = (~pec_mask) & (inactive_pos | inactive_neg)
-    active_mask = (~pec_mask) & (~inactive_mask)
-    keep_mask = inactive_mask | pec_mask
-
-    active = active_mask.to(device=field.device, dtype=field.dtype)
-    inactive = inactive_mask.to(device=field.device, dtype=field.dtype)
-    keep = keep_mask.to(device=field.device, dtype=field.dtype)
-
-    b_pos_term = _broadcast_vector(b_pos, axis_pos)
-    c_pos_term = _broadcast_vector(c_pos, axis_pos)
-    inv_kappa_pos_term = _broadcast_vector(inv_kappa_pos, axis_pos)
-    b_neg_term = _broadcast_vector(b_neg, axis_neg)
-    c_neg_term = _broadcast_vector(c_neg, axis_neg)
-    inv_kappa_neg_term = _broadcast_vector(inv_kappa_neg, axis_neg)
-
-    psi_pos_candidate = b_pos_term * psi_pos + c_pos_term * d_pos
-    psi_neg_candidate = b_neg_term * psi_neg + c_neg_term * d_neg
-    curl_term = (d_pos * inv_kappa_pos_term + psi_pos_candidate) - (d_neg * inv_kappa_neg_term + psi_neg_candidate)
-
-    adj_field = inactive * adj_updated + active * (adj_updated * decay)
-    adj_curl_term = active * adj_updated * (curl_prefactor / eps)
-    grad_eps = -adj_updated * active * curl_prefactor * curl_term / (eps * eps)
-    adj_psi_pos_candidate = active * adj_psi_pos_post + adj_curl_term
-    adj_psi_neg_candidate = active * adj_psi_neg_post - adj_curl_term
-    adj_psi_pos = keep * adj_psi_pos_post + active * (b_pos_term * adj_psi_pos_candidate)
-    adj_psi_neg = keep * adj_psi_neg_post + active * (b_neg_term * adj_psi_neg_candidate)
-    adj_d_pos = inv_kappa_pos_term * adj_curl_term + c_pos_term * adj_psi_pos_candidate
-    adj_d_neg = -inv_kappa_neg_term * adj_curl_term + c_neg_term * adj_psi_neg_candidate
-    return adj_field, adj_d_pos, adj_d_neg, grad_eps, adj_psi_pos, adj_psi_neg
 
 
 def _enforce_pec_boundaries(solver, fields):
@@ -2534,181 +2234,6 @@ def _conductive_reverse_coefficients(solver, *, eps_ex, eps_ey, eps_ez):
     return coeffs
 
 
-def _reverse_electric_component_cpml_conductive(
-    adj_updated,
-    adj_psi_pos_post,
-    adj_psi_neg_post,
-    field,
-    *,
-    d_pos,
-    d_neg,
-    decay,
-    curl,
-    half,
-    eps,
-    dt,
-    low_mode_pos,
-    high_mode_pos,
-    low_mode_neg,
-    high_mode_neg,
-    axis_pos,
-    axis_neg,
-    psi_pos,
-    psi_neg,
-    b_pos,
-    c_pos,
-    inv_kappa_pos,
-    b_neg,
-    c_neg,
-    inv_kappa_neg,
-):
-    """Static-conductive analytic reverse of the semi-implicit CPML electric update.
-
-    Structurally identical to :func:`_reverse_electric_component_cpml` (the psi
-    recursion, ``adj_d_pos``/``adj_d_neg`` folds, and pre-step field pullback all
-    reuse the CPML stretch unchanged, because the conductive update only rescales
-    the ``decay``/``curl`` coefficient pair). The one difference is the eps
-    gradient: the semi-implicit ``decay`` and ``curl`` both depend on ``eps``
-    through the loss denominator, so the linear rule ``-curl*curl_term/eps^2`` is
-    replaced by the exact
-    ``adj_updated*(E_prev*d(decay)/d(eps) + curl_term*d(curl)/d(eps))``."""
-    inactive_pos, pec_pos = _boundary_axis_masks(field.shape, axis_pos, low_mode_pos, high_mode_pos, field.device)
-    inactive_neg, pec_neg = _boundary_axis_masks(field.shape, axis_neg, low_mode_neg, high_mode_neg, field.device)
-    pec_mask = pec_pos | pec_neg
-    inactive_mask = (~pec_mask) & (inactive_pos | inactive_neg)
-    active_mask = (~pec_mask) & (~inactive_mask)
-    keep_mask = inactive_mask | pec_mask
-
-    active = active_mask.to(device=field.device, dtype=field.dtype)
-    inactive = inactive_mask.to(device=field.device, dtype=field.dtype)
-    keep = keep_mask.to(device=field.device, dtype=field.dtype)
-
-    b_pos_term = _broadcast_vector(b_pos, axis_pos)
-    c_pos_term = _broadcast_vector(c_pos, axis_pos)
-    inv_kappa_pos_term = _broadcast_vector(inv_kappa_pos, axis_pos)
-    b_neg_term = _broadcast_vector(b_neg, axis_neg)
-    c_neg_term = _broadcast_vector(c_neg, axis_neg)
-    inv_kappa_neg_term = _broadcast_vector(inv_kappa_neg, axis_neg)
-
-    psi_pos_candidate = b_pos_term * psi_pos + c_pos_term * d_pos
-    psi_neg_candidate = b_neg_term * psi_neg + c_neg_term * d_neg
-    curl_term = (d_pos * inv_kappa_pos_term + psi_pos_candidate) - (d_neg * inv_kappa_neg_term + psi_neg_candidate)
-
-    denom = 1.0 + half
-    d_decay_d_eps = 2.0 * half * curl / (float(dt) * denom)
-    d_curl_d_eps = -curl / (eps * denom)
-
-    adj_field = inactive * adj_updated + active * (adj_updated * decay)
-    adj_curl_term = active * adj_updated * curl
-    grad_eps = active * adj_updated * (field * d_decay_d_eps + curl_term * d_curl_d_eps)
-    adj_psi_pos_candidate = active * adj_psi_pos_post + adj_curl_term
-    adj_psi_neg_candidate = active * adj_psi_neg_post - adj_curl_term
-    adj_psi_pos = keep * adj_psi_pos_post + active * (b_pos_term * adj_psi_pos_candidate)
-    adj_psi_neg = keep * adj_psi_neg_post + active * (b_neg_term * adj_psi_neg_candidate)
-    adj_d_pos = inv_kappa_pos_term * adj_curl_term + c_pos_term * adj_psi_pos_candidate
-    adj_d_neg = -inv_kappa_neg_term * adj_curl_term + c_neg_term * adj_psi_neg_candidate
-    return adj_field, adj_d_pos, adj_d_neg, grad_eps, adj_psi_pos, adj_psi_neg
-
-
-def _reverse_electric_component_cpml_nonlinear(
-    adj_updated,
-    adj_psi_pos_post,
-    adj_psi_neg_post,
-    field,
-    *,
-    d_pos,
-    d_neg,
-    decay,
-    curl,
-    low_mode_pos,
-    high_mode_pos,
-    low_mode_neg,
-    high_mode_neg,
-    axis_pos,
-    axis_neg,
-    psi_pos,
-    psi_neg,
-    b_pos,
-    c_pos,
-    inv_kappa_pos,
-    b_neg,
-    c_neg,
-    inv_kappa_neg,
-):
-    """Reverse of the CPML electric update with GIVEN per-edge decay/curl pair.
-
-    Unlike :func:`_reverse_electric_component_cpml` (which bakes the linear
-    ``curl_prefactor/eps`` rule and returns ``grad_eps``), this returns the raw
-    cotangents ``adj_decay`` and ``adj_curl`` to the field-dependent coefficient
-    pair so a nonlinear coefficient reverse (Kerr / general) can push them onto the
-    ``eps`` / ``chi2`` / ``chi3`` / ``tpa`` leaves and (via the collocation
-    transpose) the pre-step fields. The psi recursion, the ``adj_d_pos``/
-    ``adj_d_neg`` curl(H) folds, and the pre-step field pullback are the CPML
-    machinery unchanged (a field-dependent coefficient only rescales the update)."""
-    inactive_pos, pec_pos = _boundary_axis_masks(field.shape, axis_pos, low_mode_pos, high_mode_pos, field.device)
-    inactive_neg, pec_neg = _boundary_axis_masks(field.shape, axis_neg, low_mode_neg, high_mode_neg, field.device)
-    pec_mask = pec_pos | pec_neg
-    inactive_mask = (~pec_mask) & (inactive_pos | inactive_neg)
-    active_mask = (~pec_mask) & (~inactive_mask)
-    keep_mask = inactive_mask | pec_mask
-
-    active = active_mask.to(device=field.device, dtype=field.dtype)
-    inactive = inactive_mask.to(device=field.device, dtype=field.dtype)
-    keep = keep_mask.to(device=field.device, dtype=field.dtype)
-
-    b_pos_term = _broadcast_vector(b_pos, axis_pos)
-    c_pos_term = _broadcast_vector(c_pos, axis_pos)
-    inv_kappa_pos_term = _broadcast_vector(inv_kappa_pos, axis_pos)
-    b_neg_term = _broadcast_vector(b_neg, axis_neg)
-    c_neg_term = _broadcast_vector(c_neg, axis_neg)
-    inv_kappa_neg_term = _broadcast_vector(inv_kappa_neg, axis_neg)
-
-    psi_pos_candidate = b_pos_term * psi_pos + c_pos_term * d_pos
-    psi_neg_candidate = b_neg_term * psi_neg + c_neg_term * d_neg
-    curl_term = (d_pos * inv_kappa_pos_term + psi_pos_candidate) - (d_neg * inv_kappa_neg_term + psi_neg_candidate)
-
-    adj_field = inactive * adj_updated + active * (adj_updated * decay)
-    adj_decay = active * (adj_updated * field)
-    adj_curl = active * (adj_updated * curl_term)
-    adj_curl_term = active * (adj_updated * curl)
-    adj_psi_pos_candidate = active * adj_psi_pos_post + adj_curl_term
-    adj_psi_neg_candidate = active * adj_psi_neg_post - adj_curl_term
-    adj_psi_pos = keep * adj_psi_pos_post + active * (b_pos_term * adj_psi_pos_candidate)
-    adj_psi_neg = keep * adj_psi_neg_post + active * (b_neg_term * adj_psi_neg_candidate)
-    adj_d_pos = inv_kappa_pos_term * adj_curl_term + c_pos_term * adj_psi_pos_candidate
-    adj_d_neg = -inv_kappa_neg_term * adj_curl_term + c_neg_term * adj_psi_neg_candidate
-    return adj_field, adj_d_pos, adj_d_neg, adj_decay, adj_curl, adj_psi_pos, adj_psi_neg
-
-
-def _kerr_reverse_coefficients(solver, state, *, eps_ex, eps_ey, eps_ez, chi3_ex, chi3_ey, chi3_ez):
-    """Per-component ``(decay, curl, eff, fsq, clamp_mask)`` for the Kerr reverse.
-
-    Mirrors :func:`_kerr_dynamic_electric_curls` (the differentiable forward
-    replica already parity-tested against ``updateKerrElectricField*Curl3D``) but
-    also returns the effective permittivity ``eff``, the collocated ``|E|^2``, and
-    the ``clamp_min`` gradient mask so the reverse can form the analytic coefficient
-    sensitivities without an autograd VJP. ``decay`` is the frozen linear PML decay
-    (constant in the Kerr update); the eps/chi3/field dependence lives entirely in
-    ``curl = (dt / eff) * decay`` through ``eff = eps + eps0 * chi3 * |E|^2``."""
-    field_square = _collocated_field_square(state["Ex"], state["Ey"], state["Ez"])
-    eps0 = float(solver.eps0)
-    floor = 1.0e-12 * eps0
-    dt = float(solver.dt)
-    coeffs = {}
-    for name, eps, chi3, decay in (
-        ("Ex", eps_ex, chi3_ex, solver.cex_decay),
-        ("Ey", eps_ey, chi3_ey, solver.cey_decay),
-        ("Ez", eps_ez, chi3_ez, solver.cez_decay),
-    ):
-        fsq = field_square[name]
-        raw = eps + eps0 * chi3 * fsq
-        eff = torch.clamp_min(raw, floor)
-        clamp_mask = (raw >= floor).to(dtype=eff.dtype)
-        curl = (dt / eff) * decay
-        coeffs[name] = (decay, curl, eff, fsq, clamp_mask)
-    return coeffs
-
-
 def _general_nonlinear_electric_coefficients(
     solver,
     state,
@@ -2844,6 +2369,321 @@ def _forward_magnetic_fields(solver, state, *, time_value, resolved_source_terms
         time_value=time_value,
         resolved_source_terms=resolved_source_terms,
     )
+
+
+def _forward_electric_fields_standard(
+    solver,
+    state,
+    magnetic_fields,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+):
+    """Recompute the post-source real electric fields of one standard forward step.
+
+    Symmetric to :func:`_forward_magnetic_fields`: mirrors the electric half of
+    ``_step_state`` for the pure real *standard* (open-boundary, no CPML/psi,
+    no dispersion/nonlinearity/conduction/full-anisotropy/TFSF/ports) path. Used
+    by the distributed replay, which advances each shard as two explicit halves
+    with a transposed-free forward halo copy inserted between them. The curl and
+    source-term composition are the same primitives ``_step_state`` uses in that
+    regime, so per shard this is bit-identical to a single-GPU ``_step_state``.
+    """
+    source_terms, electric_source_terms, _magnetic_source_terms = resolved_source_terms
+
+    d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy_e)
+    d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz_e)
+    ex, _, _ = _update_electric_component(
+        state["Ex"],
+        d_pos=d_hz_dy,
+        d_neg=d_hy_dz,
+        decay=solver.cex_decay,
+        curl_prefactor=solver.cex_curl * solver.eps_Ex,
+        eps=eps_ex,
+        low_mode_pos=solver.boundary_y_low_code,
+        high_mode_pos=solver.boundary_y_high_code,
+        low_mode_neg=solver.boundary_z_low_code,
+        high_mode_neg=solver.boundary_z_high_code,
+        axis_pos=1,
+        axis_neg=2,
+    )
+
+    d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz_e)
+    d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx_e)
+    ey, _, _ = _update_electric_component(
+        state["Ey"],
+        d_pos=d_hx_dz,
+        d_neg=d_hz_dx,
+        decay=solver.cey_decay,
+        curl_prefactor=solver.cey_curl * solver.eps_Ey,
+        eps=eps_ey,
+        low_mode_pos=solver.boundary_z_low_code,
+        high_mode_pos=solver.boundary_z_high_code,
+        low_mode_neg=solver.boundary_x_low_code,
+        high_mode_neg=solver.boundary_x_high_code,
+        axis_pos=2,
+        axis_neg=0,
+    )
+
+    d_hy_dx = _backward_diff(magnetic_fields["Hy"], axis=0, inv_delta=solver.inv_dx_e)
+    d_hx_dy = _backward_diff(magnetic_fields["Hx"], axis=1, inv_delta=solver.inv_dy_e)
+    ez, _, _ = _update_electric_component(
+        state["Ez"],
+        d_pos=d_hy_dx,
+        d_neg=d_hx_dy,
+        decay=solver.cez_decay,
+        curl_prefactor=solver.cez_curl * solver.eps_Ez,
+        eps=eps_ez,
+        low_mode_pos=solver.boundary_x_low_code,
+        high_mode_pos=solver.boundary_x_high_code,
+        low_mode_neg=solver.boundary_y_low_code,
+        high_mode_neg=solver.boundary_y_high_code,
+        axis_pos=0,
+        axis_neg=1,
+    )
+
+    electric_fields = {"Ex": ex, "Ey": ey, "Ez": ez}
+    electric_fields = _apply_source_term_list(
+        electric_fields,
+        terms=electric_source_terms,
+        source_time=solver._source_time,
+        omega=solver.source_omega,
+        time_value=time_value + 0.5 * float(solver.dt),
+        solver=None,
+    )
+    electric_fields = _apply_source_term_list(
+        electric_fields,
+        terms=source_terms,
+        source_time=solver._source_time,
+        omega=solver.source_omega,
+        time_value=time_value,
+        solver=None,
+    )
+    if getattr(solver, "has_pec_faces", False):
+        electric_fields.update(_enforce_pec_boundaries(solver, electric_fields))
+    return electric_fields
+
+
+def _forward_magnetic_fields_cpml(solver, state, *, time_value, resolved_source_terms):
+    """Magnetic half-step for the real CPML path: post-source H plus advanced psi_h.
+
+    Mirrors the real magnetic half of :func:`_step_state` on the CPML branch
+    exactly -- the same three :func:`_update_magnetic_component` calls with the
+    same per-component psi recurrence and the same resolved magnetic source
+    terms -- but returns the advanced psi_h dict alongside the fields. Used by the
+    distributed CPML replay, which advances each shard as two explicit halves with
+    a transposed-free forward Yee halo copy between them; per shard this is
+    bit-identical to :func:`_step_state`'s magnetic half. The psi recurrence is a
+    same-x-slice update (``b*psi + c*d``) with no x halo, so it is local to each
+    shard, and the audit-pinned x-PML confinement to the outer shards keeps every
+    internal x-face psi inactive (``c==0``).
+    """
+    d_ez_dy = _forward_diff(state["Ez"], axis=1, inv_delta=solver.inv_dy_h)
+    d_ey_dz = _forward_diff(state["Ey"], axis=2, inv_delta=solver.inv_dz_h)
+    hx, psi_hx_y, psi_hx_z = _update_magnetic_component(
+        state["Hx"],
+        d_pos=d_ez_dy,
+        d_neg=d_ey_dz,
+        decay=solver.chx_decay,
+        curl=solver.chx_curl,
+        psi_pos=state["psi_hx_y"],
+        psi_neg=state["psi_hx_z"],
+        b_pos=solver.cpml_b_h_y,
+        c_pos=solver.cpml_c_h_y,
+        inv_kappa_pos=solver.cpml_inv_kappa_h_y,
+        b_neg=solver.cpml_b_h_z,
+        c_neg=solver.cpml_c_h_z,
+        inv_kappa_neg=solver.cpml_inv_kappa_h_z,
+        axis_pos=1,
+        axis_neg=2,
+    )
+
+    d_ex_dz = _forward_diff(state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
+    d_ez_dx = _forward_diff(state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
+    hy, psi_hy_z, psi_hy_x = _update_magnetic_component(
+        state["Hy"],
+        d_pos=d_ex_dz,
+        d_neg=d_ez_dx,
+        decay=solver.chy_decay,
+        curl=solver.chy_curl,
+        psi_pos=state["psi_hy_z"],
+        psi_neg=state["psi_hy_x"],
+        b_pos=solver.cpml_b_h_z,
+        c_pos=solver.cpml_c_h_z,
+        inv_kappa_pos=solver.cpml_inv_kappa_h_z,
+        b_neg=solver.cpml_b_h_x,
+        c_neg=solver.cpml_c_h_x,
+        inv_kappa_neg=solver.cpml_inv_kappa_h_x,
+        axis_pos=2,
+        axis_neg=0,
+    )
+
+    d_ey_dx = _forward_diff(state["Ey"], axis=0, inv_delta=solver.inv_dx_h)
+    d_ex_dy = _forward_diff(state["Ex"], axis=1, inv_delta=solver.inv_dy_h)
+    hz, psi_hz_x, psi_hz_y = _update_magnetic_component(
+        state["Hz"],
+        d_pos=d_ey_dx,
+        d_neg=d_ex_dy,
+        decay=solver.chz_decay,
+        curl=solver.chz_curl,
+        psi_pos=state["psi_hz_x"],
+        psi_neg=state["psi_hz_y"],
+        b_pos=solver.cpml_b_h_x,
+        c_pos=solver.cpml_c_h_x,
+        inv_kappa_pos=solver.cpml_inv_kappa_h_x,
+        b_neg=solver.cpml_b_h_y,
+        c_neg=solver.cpml_c_h_y,
+        inv_kappa_neg=solver.cpml_inv_kappa_h_y,
+        axis_pos=0,
+        axis_neg=1,
+    )
+
+    magnetic_fields = _apply_resolved_magnetic_source_terms(
+        {"Hx": hx, "Hy": hy, "Hz": hz},
+        solver=solver,
+        time_value=time_value,
+        resolved_source_terms=resolved_source_terms,
+    )
+    psi_h = {
+        "psi_hx_y": psi_hx_y,
+        "psi_hx_z": psi_hx_z,
+        "psi_hy_x": psi_hy_x,
+        "psi_hy_z": psi_hy_z,
+        "psi_hz_x": psi_hz_x,
+        "psi_hz_y": psi_hz_y,
+    }
+    return magnetic_fields, psi_h
+
+
+def _forward_electric_fields_cpml(
+    solver,
+    state,
+    magnetic_fields,
+    *,
+    time_value,
+    eps_ex,
+    eps_ey,
+    eps_ez,
+    resolved_source_terms,
+):
+    """Electric half-step for the real CPML path: post-source E plus advanced psi_e.
+
+    Symmetric to :func:`_forward_magnetic_fields_cpml`: mirrors the real electric
+    half of :func:`_step_state` on the linear CPML branch (open/PEC boundary, no
+    dispersion/nonlinearity/conduction/full-anisotropy/TFSF/ports) exactly, with
+    the per-component psi_e recurrence, and returns the advanced psi_e dict
+    alongside the fields. Used by the distributed CPML replay after the transposed
+    Yee magnetic halo has refreshed the mid-step H ghost planes; per shard this is
+    bit-identical to :func:`_step_state`'s electric half.
+    """
+    source_terms, electric_source_terms, _magnetic_source_terms = resolved_source_terms
+
+    d_hz_dy = _backward_diff(magnetic_fields["Hz"], axis=1, inv_delta=solver.inv_dy_e)
+    d_hy_dz = _backward_diff(magnetic_fields["Hy"], axis=2, inv_delta=solver.inv_dz_e)
+    ex, psi_ex_y, psi_ex_z = _update_electric_component(
+        state["Ex"],
+        d_pos=d_hz_dy,
+        d_neg=d_hy_dz,
+        decay=solver.cex_decay,
+        curl_prefactor=solver.cex_curl * solver.eps_Ex,
+        eps=eps_ex,
+        low_mode_pos=solver.boundary_y_low_code,
+        high_mode_pos=solver.boundary_y_high_code,
+        low_mode_neg=solver.boundary_z_low_code,
+        high_mode_neg=solver.boundary_z_high_code,
+        axis_pos=1,
+        axis_neg=2,
+        psi_pos=state["psi_ex_y"],
+        psi_neg=state["psi_ex_z"],
+        b_pos=solver.cpml_b_e_y,
+        c_pos=solver.cpml_c_e_y,
+        inv_kappa_pos=solver.cpml_inv_kappa_e_y,
+        b_neg=solver.cpml_b_e_z,
+        c_neg=solver.cpml_c_e_z,
+        inv_kappa_neg=solver.cpml_inv_kappa_e_z,
+    )
+
+    d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz_e)
+    d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx_e)
+    ey, psi_ey_z, psi_ey_x = _update_electric_component(
+        state["Ey"],
+        d_pos=d_hx_dz,
+        d_neg=d_hz_dx,
+        decay=solver.cey_decay,
+        curl_prefactor=solver.cey_curl * solver.eps_Ey,
+        eps=eps_ey,
+        low_mode_pos=solver.boundary_z_low_code,
+        high_mode_pos=solver.boundary_z_high_code,
+        low_mode_neg=solver.boundary_x_low_code,
+        high_mode_neg=solver.boundary_x_high_code,
+        axis_pos=2,
+        axis_neg=0,
+        psi_pos=state["psi_ey_z"],
+        psi_neg=state["psi_ey_x"],
+        b_pos=solver.cpml_b_e_z,
+        c_pos=solver.cpml_c_e_z,
+        inv_kappa_pos=solver.cpml_inv_kappa_e_z,
+        b_neg=solver.cpml_b_e_x,
+        c_neg=solver.cpml_c_e_x,
+        inv_kappa_neg=solver.cpml_inv_kappa_e_x,
+    )
+
+    d_hy_dx = _backward_diff(magnetic_fields["Hy"], axis=0, inv_delta=solver.inv_dx_e)
+    d_hx_dy = _backward_diff(magnetic_fields["Hx"], axis=1, inv_delta=solver.inv_dy_e)
+    ez, psi_ez_x, psi_ez_y = _update_electric_component(
+        state["Ez"],
+        d_pos=d_hy_dx,
+        d_neg=d_hx_dy,
+        decay=solver.cez_decay,
+        curl_prefactor=solver.cez_curl * solver.eps_Ez,
+        eps=eps_ez,
+        low_mode_pos=solver.boundary_x_low_code,
+        high_mode_pos=solver.boundary_x_high_code,
+        low_mode_neg=solver.boundary_y_low_code,
+        high_mode_neg=solver.boundary_y_high_code,
+        axis_pos=0,
+        axis_neg=1,
+        psi_pos=state["psi_ez_x"],
+        psi_neg=state["psi_ez_y"],
+        b_pos=solver.cpml_b_e_x,
+        c_pos=solver.cpml_c_e_x,
+        inv_kappa_pos=solver.cpml_inv_kappa_e_x,
+        b_neg=solver.cpml_b_e_y,
+        c_neg=solver.cpml_c_e_y,
+        inv_kappa_neg=solver.cpml_inv_kappa_e_y,
+    )
+
+    electric_fields = {"Ex": ex, "Ey": ey, "Ez": ez}
+    electric_fields = _apply_source_term_list(
+        electric_fields,
+        terms=electric_source_terms,
+        source_time=solver._source_time,
+        omega=solver.source_omega,
+        time_value=time_value + 0.5 * float(solver.dt),
+        solver=None,
+    )
+    electric_fields = _apply_source_term_list(
+        electric_fields,
+        terms=source_terms,
+        source_time=solver._source_time,
+        omega=solver.source_omega,
+        time_value=time_value,
+        solver=None,
+    )
+    if getattr(solver, "has_pec_faces", False):
+        electric_fields.update(_enforce_pec_boundaries(solver, electric_fields))
+    psi_e = {
+        "psi_ex_y": psi_ex_y,
+        "psi_ex_z": psi_ex_z,
+        "psi_ey_x": psi_ey_x,
+        "psi_ey_z": psi_ey_z,
+        "psi_ez_x": psi_ez_x,
+        "psi_ez_y": psi_ez_y,
+    }
+    return electric_fields, psi_e
 
 
 def _forward_magnetic_fields_complex(solver, state, *, time_value, resolved_source_terms):
@@ -3002,6 +2842,9 @@ def _step_state(
     tpa_ez=None,
     capture_magnetic=None,
     capture_lumped=None,
+    capture_circuit=None,
+    step_index=None,
+    capture_network=None,
 ):
     if getattr(solver, "modulation_enabled", False):
         raise NotImplementedError("FDTD adjoint replay does not support time-modulated media.")
@@ -3037,7 +2880,7 @@ def _step_state(
 
     d_ex_dz = _forward_diff(state["Ex"], axis=2, inv_delta=solver.inv_dz_h)
     d_ez_dx = _forward_diff(state["Ez"], axis=0, inv_delta=solver.inv_dx_h)
-    hy, psi_hy_x, psi_hy_z = _update_magnetic_component(
+    hy, psi_hy_z, psi_hy_x = _update_magnetic_component(
         state["Hy"],
         d_pos=d_ex_dz,
         d_neg=d_ez_dx,
@@ -3178,6 +3021,13 @@ def _step_state(
             magnetic_dispersive_state,
         )
     dispersive_state = _advance_dispersive_state(solver, state)
+    wire_state = {}
+    if getattr(solver, "_wire_runtime", None) is not None:
+        wire_current, wire_charge = replay_wire_state(solver, state)
+        wire_state = {
+            "wire_current": wire_current,
+            "wire_charge": wire_charge,
+        }
 
     if capture_magnetic is not None:
         # Post-magnetic, post-source real H that the electric update consumes this
@@ -3388,7 +3238,7 @@ def _step_state(
 
         d_hx_dz = _backward_diff(magnetic_fields["Hx"], axis=2, inv_delta=solver.inv_dz_e)
         d_hz_dx = _backward_diff(magnetic_fields["Hz"], axis=0, inv_delta=solver.inv_dx_e)
-        ey, psi_ey_x, psi_ey_z = _update_electric_component(
+        ey, psi_ey_z, psi_ey_x = _update_electric_component(
             state["Ey"],
             d_pos=d_hx_dz,
             d_neg=d_hz_dx,
@@ -3446,6 +3296,13 @@ def _step_state(
             ez = ez + aniso_correction["Ez"]
         electric_fields = {"Ex": ex, "Ey": ey, "Ez": ez}
 
+    if wire_state:
+        electric_fields = deposit_replayed_wire_current(
+            solver,
+            electric_fields,
+            wire_state["wire_current"],
+        )
+
     if getattr(solver, "tfsf_enabled", False):
         electric_fields = _apply_tfsf_terms(
             electric_fields,
@@ -3478,12 +3335,34 @@ def _step_state(
             solver=solver if complex_fields else None,
         )
 
+    port_input_state = state
+    if wire_state:
+        port_input_state = dict(state)
+        port_input_state["wire_charge"] = wire_state["wire_charge"]
     electric_fields, lumped_state = replay_port_runtimes(
         solver,
         electric_fields,
-        state,
+        port_input_state,
         time_value=time_value,
         capture=capture_lumped,
+    )
+    if getattr(solver, "_circuit_runtimes", ()):
+        if step_index is None:
+            raise RuntimeError("Circuit adjoint replay requires an explicit FDTD step index.")
+        electric_fields, circuit_state = replay_circuit_runtimes(
+            solver,
+            electric_fields,
+            state,
+            step_index=step_index,
+            capture=capture_circuit,
+        )
+    else:
+        circuit_state = {}
+    electric_fields, network_state = replay_network_runtimes(
+        solver,
+        electric_fields,
+        state,
+        capture=capture_network,
     )
 
     dispersive_input_fields = {name: electric_fields[name] for name in ("Ex", "Ey", "Ez")}
@@ -3567,7 +3446,13 @@ def _step_state(
         next_state["tfsf_aux_magnetic"] = auxiliary_state["magnetic"]
     next_state.update(dispersive_state)
     next_state.update(magnetic_dispersive_state)
+    corrected_wire_charge = lumped_state.pop("wire_charge", None)
+    if corrected_wire_charge is not None:
+        wire_state["wire_charge"] = corrected_wire_charge
     next_state.update(lumped_state)
+    next_state.update(circuit_state)
+    next_state.update(network_state)
+    next_state.update(wire_state)
     return next_state
 
 
@@ -3647,6 +3532,8 @@ def _replay_segment_states(
     *,
     mid_magnetic_out=None,
     lumped_traces_out=None,
+    circuit_traces_out=None,
+    network_traces_out=None,
 ):
     """Replay the forward field states of one checkpoint segment.
 
@@ -3670,6 +3557,9 @@ def _replay_segment_states(
                 eps_ez=solver.eps_Ez,
                 capture_magnetic=mid_magnetic_out if capture else None,
                 capture_lumped=lumped_traces_out,
+                capture_circuit=circuit_traces_out,
+                step_index=step_index,
+                capture_network=network_traces_out,
             )
             states.append({name: tensor.detach() for name, tensor in current.items()})
     return states

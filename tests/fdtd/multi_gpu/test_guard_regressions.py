@@ -77,6 +77,39 @@ def test_public_prepare_rejects_materials_without_complete_interface_halos(
         simulation.prepare()
 
 
+def test_public_prepare_rejects_gyromagnetic_ferrite(
+    cuda_p2p_devices,
+    cuda_memory_cleanup,
+):
+    """Multi-GPU distributed FDTD must fail closed on a gyromagnetic ferrite.
+
+    The shard phases never run the magnetization-ADE hooks and the shard-local
+    layout has no rank-seam handling, so a joint solve would silently simulate a
+    reciprocal medium (frozen contract boundary 8, rejected until Phase 4).
+    """
+    scene = _scene(device="cuda:0")
+    scene.add_structure(
+        mw.Structure(
+            name="ferrite",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+            material=mw.GyromagneticFerrite(
+                eps_r=14.5,
+                saturation_magnetization=1.40e5,
+                bias_field=(0.0, 0.0, 1.75e5),
+                gilbert_damping=1.0e-2,
+            ),
+        )
+    )
+    simulation = mw.Simulation.fdtd(
+        scene,
+        frequencies=(_FREQUENCY,),
+        parallel=_parallel(devices=cuda_p2p_devices),
+    )
+
+    with pytest.raises(NotImplementedError, match="GyromagneticFerrite"):
+        simulation.prepare()
+
+
 def test_invalid_dipole_emission_source_is_rejected_before_hardware_prepare():
     scene = _scene()
     scene.add_monitor(
@@ -93,6 +126,347 @@ def test_invalid_dipole_emission_source_is_rejected_before_hardware_prepare():
             frequency=_FREQUENCY,
             parallel=_parallel(),
         )
+
+
+def _trainable_circuit_scene() -> mw.Scene:
+    """Two-shard circuit scene whose load resistance is a trainable tensor.
+
+    The trainable resistance is a circuit-parameter channel the public
+    ``_scene_trainable_circuit_parameters`` collector covers but that the
+    solver-level guard's earlier hand-rolled list did not enumerate.
+    """
+
+    circuit = mw.Circuit("trainable_two_shard")
+    left = circuit.node("left")
+    right = circuit.node("right")
+    circuit.add(
+        mw.CurrentSource(
+            "Iexcite",
+            left,
+            circuit.ground,
+            0.0,
+            waveform=mw.SineWaveform(0.0, 1.0e-3, _FREQUENCY),
+        )
+    )
+    circuit.add(mw.Resistor("Rlink", left, right, 75.0))
+    circuit.add(
+        mw.Resistor(
+            "Rload", right, circuit.ground, torch.tensor(50.0, requires_grad=True)
+        )
+    )
+    circuit.bind_port("left_port", positive=left, negative=circuit.ground)
+    circuit.bind_port("right_port", positive=right, negative=circuit.ground)
+
+    def _port(name, x):
+        return mw.LumpedPort(
+            name=name,
+            positive=(x, 0.0, 0.004),
+            negative=(x, 0.0, -0.004),
+            voltage_path=mw.AxisPath("z"),
+            current_surface=mw.Box(position=(x, 0.0, -0.002), size=(0.012, 0.012, 0.0)),
+            reference_impedance=50.0,
+        )
+
+    return mw.Scene(
+        domain=mw.Domain(bounds=((-0.024, 0.024),) * 3),
+        grid=mw.GridSpec.uniform(0.004),
+        boundary=mw.BoundarySpec.none(),
+        ports=(_port("left_port", -0.008), _port("right_port", 0.008)),
+        circuits=(circuit,),
+        device="cpu",
+    )
+
+
+def _absorber_guard_scene():
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
+        grid=mw.GridSpec.uniform(0.1),
+        boundary=mw.BoundarySpec.pml(num_layers=2, strength=1.0),
+        device="cuda:0",
+    )
+    scene.add_source(
+        mw.PointDipole(
+            position=(0.0, 0.0, 0.0),
+            polarization="Ez",
+            profile="ideal",
+            source_time=mw.GaussianPulse(frequency=_FREQUENCY, fwidth=5.0e8),
+            name="drive",
+        )
+    )
+    return scene
+
+
+@pytest.mark.parametrize("absorber", ("cpml", "stablepml"))
+def test_require_distributed_adjoint_support_accepts_cpml_family(
+    absorber, cuda_p2p_devices, cuda_memory_cleanup
+):
+    """The reverse-support guard now accepts the CPML absorbing update (S4).
+
+    ``uses_cpml`` (absorber "cpml"/"stablepml") is a verified distributed adjoint
+    capability: the guard accepts it and asserts the x-CPML pinning invariant. The
+    legacy graded-sigma absorbers stay rejected (companion test below).
+    """
+
+    from witwin.maxwell.fdtd.distributed.adjoint import (
+        require_distributed_adjoint_support,
+    )
+
+    distributed = DistributedFDTD(
+        _absorber_guard_scene(),
+        frequency=_FREQUENCY,
+        parallel=_parallel(devices=cuda_p2p_devices),
+        absorber_type=absorber,
+    )
+    distributed.init_field()
+
+    assert distributed.active_absorber_type == absorber
+    assert all(shard.solver.uses_cpml for shard in distributed.shards)
+    require_distributed_adjoint_support(distributed)  # must not raise
+
+
+@pytest.mark.parametrize("absorber", ("pml", "absorber"))
+def test_require_distributed_adjoint_support_rejects_graded_sigma_absorber(
+    absorber, cuda_p2p_devices, cuda_memory_cleanup
+):
+    """Defense in depth: the reverse-support guard fails closed on graded sigma.
+
+    The legacy graded-sigma absorbers ("pml"/"absorber") have no verified
+    distributed reverse core (they do not set ``uses_cpml``), so the guard must
+    reject them independently of the public ``Simulation`` prepare guard.
+    """
+
+    from witwin.maxwell.fdtd.distributed.adjoint import (
+        require_distributed_adjoint_support,
+    )
+
+    distributed = DistributedFDTD(
+        _absorber_guard_scene(),
+        frequency=_FREQUENCY,
+        parallel=_parallel(devices=cuda_p2p_devices),
+        absorber_type=absorber,
+    )
+    distributed.init_field()
+
+    assert distributed.active_absorber_type == absorber
+    with pytest.raises(ValueError, match="CPML absorbing update"):
+        require_distributed_adjoint_support(distributed)
+
+
+def _objective_guard_scene(monitor) -> mw.Scene:
+    """A bare CPU scene carrying exactly one monitor, for the objective guard.
+
+    ``require_distributed_adjoint_objective_support`` reads only
+    ``distributed._allow_adjoint`` and ``distributed.logical_scene.resolved_monitors()``,
+    so a stub distributed object over a monitor-only scene exercises the exact guard
+    branch without allocating any GPU shard.
+    """
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
+        grid=mw.GridSpec.uniform(0.1),
+        boundary=mw.BoundarySpec.none(),
+        device="cpu",
+    )
+    scene.add_monitor(monitor)
+    return scene
+
+
+def test_objective_guard_rejects_flux_monitor_even_under_allow_adjoint():
+    """A tiled ``FluxMonitor`` is rejected on the NCCL driver (``allow_adjoint``).
+
+    Closes the H1b "confirmed by direct check" gap: a flux plane needs cross-seam
+    tangential-field assembly for the Poynting product, so it is NOT separable per
+    owned strip and stays fail-closed even when the separable-plane relaxation is
+    active. ``is_separable_plane_monitor`` admits only the exact ``PlaneMonitor``
+    class (a ``FluxMonitor`` subclass with ``compute_flux`` is excluded), so the
+    tiled rejection fires.
+    """
+
+    from witwin.maxwell.fdtd.distributed.adjoint import (
+        require_distributed_adjoint_objective_support,
+    )
+
+    scene = _objective_guard_scene(mw.FluxMonitor("flux", axis="y", position=0.0))
+    distributed = SimpleNamespace(_allow_adjoint=True, logical_scene=scene)
+    with pytest.raises(ValueError, match="FluxMonitor"):
+        require_distributed_adjoint_objective_support(distributed)
+
+
+def test_objective_guard_rejects_separable_plane_on_in_process_bridge():
+    """A y-normal ``PlaneMonitor`` stays rejected off the NCCL driver.
+
+    The separable owned-strip relaxation is gated on ``_allow_adjoint``: the
+    in-process cuda_p2p bridge (``allow_adjoint`` False) has no per-owned-strip seed
+    routing, so a tiled plane objective must still fail closed there.
+    """
+
+    from witwin.maxwell.fdtd.distributed.adjoint import (
+        require_distributed_adjoint_objective_support,
+    )
+
+    scene = _objective_guard_scene(
+        mw.PlaneMonitor("plane", axis="y", position=0.0, fields=("Ez",))
+    )
+    distributed = SimpleNamespace(_allow_adjoint=False, logical_scene=scene)
+    with pytest.raises(ValueError, match="PlaneMonitor"):
+        require_distributed_adjoint_objective_support(distributed)
+
+    # Positive control: the same plane is admitted once the driver relaxation is on.
+    admitted = SimpleNamespace(_allow_adjoint=True, logical_scene=scene)
+    require_distributed_adjoint_objective_support(admitted)  # must not raise
+
+
+def test_solver_trainable_guard_covers_circuit_parameter_channel():
+    """Defense in depth: the distributed solver's own trainable guard rejects a
+    trainable circuit parameter even though the public ``Simulation`` guard would
+    have caught it first.
+
+    Regression for the solver-level guard previously enumerating a partial
+    trainable list (density/geometry/perturbation only) that missed the circuit
+    and RF/port channels the public collectors cover. Constructing
+    ``DistributedFDTD`` directly bypasses the public boundary; the assertion that
+    the public ``Simulation`` sees the same parameter pins that this is genuine
+    defense in depth rather than the only guard.
+    """
+
+    scene = _trainable_circuit_scene()
+
+    # The public boundary detects the trainable circuit parameter (and would
+    # reject the parallel run in _reject_trainable_parallel_fdtd).
+    simulation = mw.Simulation.fdtd(
+        scene,
+        frequency=_FREQUENCY,
+        parallel=_parallel(),
+    )
+    assert simulation.has_trainable_parameters
+
+    # Directly constructing the distributed solver bypasses that public guard; the
+    # solver-level guard must still fail closed on the circuit-parameter channel.
+    with pytest.raises(ValueError, match="trainable"):
+        DistributedFDTD(
+            scene,
+            frequency=_FREQUENCY,
+            parallel=_parallel(),
+        )
+
+
+def _trainable_density_pml_scene(*, device="cpu") -> mw.Scene:
+    """Two-shard scene whose Box material-region density is a trainable tensor,
+    on a graded-sigma PML boundary.
+
+    Trainable Box densities are the one distributed adjoint channel, but only on
+    the open/PEC standard core or the CPML absorbing update. A graded-sigma
+    absorber ("pml"/"absorber") has no verified distributed reverse core, so this
+    scene must fail closed -- at the public ``Simulation`` boundary and, as defense
+    in depth, at the ``DistributedFDTD`` constructor itself.
+    """
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.4, 0.4), (-0.3, 0.3), (-0.3, 0.3))),
+        grid=mw.GridSpec.uniform(0.1),
+        boundary=mw.BoundarySpec.pml(num_layers=2),
+        device=device,
+    )
+    scene.add_material_region(
+        mw.MaterialRegion(
+            name="design",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.4, 0.4, 0.4)),
+            density=torch.rand((4, 4, 4), dtype=torch.float64, requires_grad=True),
+            eps_bounds=(1.0, 6.0),
+        )
+    )
+    return scene
+
+
+@pytest.mark.parametrize("absorber", ("pml", "absorber"))
+def test_solver_trainable_density_with_graded_sigma_absorber_rejected_at_construction(
+    absorber,
+):
+    """Defense in depth: constructing ``DistributedFDTD`` directly with a trainable
+    Box density on a graded-sigma absorber fails closed at construction.
+
+    The public ``Simulation`` boundary already rejects this combination
+    (``test_adjoint_parity.py::test_guard_graded_sigma_absorber_rejected_at_prepare``),
+    but a direct construction bypasses it. The one supported trainable channel
+    (Box density) reverses only through the open/PEC or CPML core, so a graded-sigma
+    absorber must not slip through and run a forward whose backward the reverse
+    guard would later refuse -- it fails here, before any hardware allocation.
+    """
+
+    scene = _trainable_density_pml_scene()
+
+    # Layer 1 (public): the boundary detects the trainable density + graded-sigma
+    # absorber and rejects the parallel run before allocation.
+    simulation = mw.Simulation.fdtd(
+        scene,
+        frequency=_FREQUENCY,
+        parallel=_parallel(),
+        absorber=absorber,
+    )
+    with pytest.raises(ValueError, match="graded-sigma"):
+        simulation.prepare()
+
+    # Layer 2 (solver): directly constructing the distributed solver bypasses the
+    # public boundary; the constructor's own static guard must still fail closed.
+    with pytest.raises(ValueError, match="graded-sigma"):
+        DistributedFDTD(
+            scene,
+            frequency=_FREQUENCY,
+            parallel=_parallel(),
+            absorber_type=absorber,
+        )
+
+
+@pytest.mark.parametrize("absorber", ("cpml", "stablepml"))
+def test_solver_trainable_density_with_cpml_constructs(
+    absorber, cuda_p2p_devices, cuda_memory_cleanup
+):
+    """The supported trainable-density channel on a CPML absorber constructs.
+
+    Positive control for the graded-sigma rejection above: the same trainable Box
+    density on absorber "cpml"/"stablepml" is a verified distributed adjoint
+    capability and must pass the constructor's static guard.
+    """
+
+    scene = _trainable_density_pml_scene(device="cuda:0")
+    solver = DistributedFDTD(
+        scene,
+        frequency=_FREQUENCY,
+        parallel=_parallel(devices=cuda_p2p_devices),
+        absorber_type=absorber,
+    )
+    assert solver.logical_scene.material_regions
+
+
+def _wire(scene):
+    scene.add_thin_wire(
+        mw.ThinWire(
+            name="wire",
+            points=((-0.2, 0.0, 0.0), (0.2, 0.0, 0.0)),
+            radius=1.0e-3,
+            conductor=mw.WireConductor.pec(),
+        )
+    )
+    return scene
+
+
+def test_supported_thin_wire_forward_passes_static_distributed_validation():
+    # The distributed PEC thin-wire forward is supported (Phase 4). A plain wire on
+    # a non-absorbing boundary must no longer be rejected at static validation; the
+    # constructor runs the full static capability check without touching hardware.
+    solver = DistributedFDTD(
+        _wire(_scene()),
+        frequency=_FREQUENCY,
+        parallel=_parallel(),
+    )
+    assert getattr(solver.logical_scene, "thin_wires", ())
+
+
+def test_thin_wire_with_distributed_cpml_is_rejected_before_hardware_prepare():
+    scene = _wire(_scene())
+    scene = scene.clone(boundary=mw.BoundarySpec.pml(num_layers=4))
+    with pytest.raises(NotImplementedError, match="distributed CPML"):
+        DistributedFDTD(scene, frequency=_FREQUENCY, parallel=_parallel())
 
 
 @pytest.mark.parametrize(
@@ -166,6 +540,7 @@ def test_active_absorber_type_aggregates_x_high_only_pml_from_last_shard():
 
 def _hardware_probe(monkeypatch, *, missing_pair=None):
     solver = object.__new__(DistributedFDTD)
+    solver._nccl = False
     solver.devices = tuple(torch.device(f"cuda:{index}") for index in range(3))
     solver.device = torch.device("cuda:0")
     solver.transport = SimpleNamespace(preflight=Mock())

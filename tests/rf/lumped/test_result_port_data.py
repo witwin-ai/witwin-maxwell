@@ -114,6 +114,7 @@ def test_result_save_embeds_detached_cpu_port_snapshots(tmp_path):
     assert payload["data_type"] == "ResultSnapshot"
     assert "scene" not in payload
     assert tuple(payload["ports"]) == ("feed",)
+    assert payload["circuits"] == {}
     saved = payload["ports"]["feed"]
     assert saved["schema_version"] == PERSISTENCE_SCHEMA_VERSION
     assert saved["data_type"] == "PortData"

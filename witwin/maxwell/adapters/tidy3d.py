@@ -708,6 +708,43 @@ def _convert_material(material, td, length_scale: float = _M_TO_UM, frequencies=
         return _medium2d(material, td, length_scale)
     if getattr(material, "is_lossy_metal", False):
         return _lossy_metal_medium(material, td, length_scale, frequencies)
+    if getattr(material, "is_surface_impedance", False):
+        # A generic SurfaceImpedanceMedium carries its physics in a broadband causal
+        # rational surface-impedance model, not in a finite bulk permittivity (eps_r
+        # stays at its 1.0 default, sigma_e = 0). Without this branch it would fall
+        # through to the non-dispersive td.Medium(permittivity=1.0) path and silently
+        # export as vacuum, dropping the entire surface response -- the exact trap the
+        # PEC branch documents. The good-conductor LossyMetalMedium is the only surface
+        # with a designed reference-backend mapping (handled above); the generic
+        # rational surface has no reference-backend surface-impedance construct wired
+        # yet, so fail closed rather than export a physically wrong vacuum structure.
+        raise NotImplementedError(
+            "Reference-backend export of a generic SurfaceImpedanceMedium is not yet "
+            "designed: its physics is a broadband causal rational tangential surface "
+            "impedance E_t = Z_s(omega) (n x H), which has no finite bulk-permittivity "
+            "equivalent and no reference-backend surface-impedance construct mapped for "
+            "it. The narrowband good-conductor LossyMetalMedium exports through the "
+            "dedicated lossy-metal surface path; a rational model has no such mapping "
+            "until the surface-impedance adapter is designed. Resolve the metal "
+            "volumetrically with Material(sigma_e=...), use a LossyMetalMedium for a "
+            "good conductor, or use Material.pec() for a lossless conductor."
+        )
+    if getattr(material, "is_gyromagnetic", False):
+        # A gyromagnetic ferrite carries its physics in a non-reciprocal complex 3x3
+        # Polder permeability tensor. Because its scalar mu_r stays at mu_infinity
+        # (= 1 by default) and it exposes no permeability pole, it is neither caught
+        # by the magnetic-dispersive guard nor the mu_r != 1 guard below, and would
+        # fall through to the plain td.Medium(permittivity=eps_r) path -- silently
+        # exporting as a reciprocal isotropic dielectric and dropping the entire
+        # gyrotropy (the same silent-vacuum trap the PEC branch documents). Tidy3D
+        # has no non-reciprocal / gyromagnetic medium construct, so fail closed.
+        raise NotImplementedError(
+            "Tidy3D export for a gyromagnetic ferrite has no equivalent: its permeability is a "
+            "non-reciprocal complex 3x3 Polder tensor, and Tidy3D has no gyromagnetic (magnetic, "
+            "non-reciprocal) material model -- its FDTD solver fixes mu_r = 1 and exposes no "
+            "permeability tensor. Validate the ferrite against the analytic LLG reference oracle "
+            "(tests/materials/ferrite/test_ferrite_reference.py) instead."
+        )
     if getattr(material, "perturbation", None) is not None:
         # Resolve the background shift first: the lowered Material may still carry
         # (custom) poles, which the recursion then handles through the pole path.
@@ -1240,6 +1277,175 @@ def _convert_source(source, scene, td, s, frequencies=None):
     )
 
 
+# ---------------------------------------------------------------------------
+# RF port excitation mapping (WavePort / LumpedPort -> reference constructs)
+# ---------------------------------------------------------------------------
+#
+# Ports declare an aperture (WavePort) or a two-terminal feed (LumpedPort) but no
+# ``source_time``: the internal FDTD runtime supplies the drive through its own
+# port-excitation machinery, and a scattering matrix is assembled by driving one
+# port at a time. A single exported reference simulation therefore adopts one
+# documented drive convention (see ``_convert_ports_for_reference``):
+#
+#   * The FIRST declared WavePort is the driven port. It maps to the reference
+#     solver's modal launch (``ModeSource``) of its fundamental (TEM/lowest)
+#     mode; every WavePort -- driven and receiving alike -- additionally maps to
+#     a receiving ``ModeMonitor`` at its aperture so S-parameters are read from
+#     the directional mode amplitudes (``amp_+`` / ``amp_-``).
+#   * If a scene carries no WavePort, the FIRST declared LumpedPort is the driven
+#     port. A lumped delta-gap feed maps to its equivalent current injection: a
+#     ``UniformCurrentSource`` (electric current filament) spanning the feed gap,
+#     oriented along the voltage-path axis from the negative to the positive
+#     terminal. Amplitude is a unit reference drive; input impedance and radiation
+#     pattern are amplitude-independent ratios so the normalization cancels.
+#
+# A full N-port scattering reference requires one export per driven port; the
+# single-export convention drives port index 0. ``ModePort`` is expanded upstream
+# by ``Scene.resolved_sources`` and is intentionally NOT handled here.
+
+
+def _port_source_time(td, frequencies):
+    """Broadband Gaussian drive covering the requested frequency band."""
+    freqs = [float(freq) for freq in frequencies]
+    if not freqs:
+        raise ValueError("Port export requires at least one frequency for the drive.")
+    fmin, fmax = min(freqs), max(freqs)
+    freq0 = 0.5 * (fmin + fmax)
+    fwidth = max(0.5 * (fmax - fmin), 0.2 * freq0)
+    return td.GaussianPulse(freq0=freq0, fwidth=fwidth)
+
+
+def _wave_port_center_size(port, s):
+    axis_idx = _axis_name_to_index(port.normal_axis)
+    center = list(_scale3(port.position, s))
+    size = list(_scale3(port.size, s))
+    size[axis_idx] = 0.0
+    return tuple(center), tuple(size)
+
+
+def _wave_port_mode_spec(td):
+    """Fundamental-mode window for a TEM / lowest-order aperture launch."""
+    return td.ModeSpec(num_modes=1)
+
+
+def _wave_port_mode_source(port, td, s, source_time):
+    center, size = _wave_port_center_size(port, s)
+    return td.ModeSource(
+        center=center,
+        size=size,
+        source_time=source_time,
+        direction=port.direction,
+        mode_spec=_wave_port_mode_spec(td),
+        mode_index=0,
+        name=f"{port.name}::drive",
+    )
+
+
+def _wave_port_mode_monitor(port, td, s, frequencies):
+    center, size = _wave_port_center_size(port, s)
+    return td.ModeMonitor(
+        center=center,
+        size=size,
+        freqs=list(frequencies),
+        mode_spec=_wave_port_mode_spec(td),
+        name=port.name,
+    )
+
+
+def _resolve_lumped_terminals(port, scene):
+    """Return (negative_xyz, positive_xyz) in metres for a LumpedPort feed."""
+    binding = getattr(port, "wire_binding", None)
+    if binding is not None:
+        wires = {wire.name: wire for wire in getattr(scene, "thin_wires", ())}
+
+        def _node(ref):
+            wire = wires.get(ref.wire)
+            if wire is None:
+                raise ValueError(
+                    f"LumpedPort {port.name!r} wire_binding references unknown wire "
+                    f"{ref.wire!r}."
+                )
+            points = wire.points
+            if not (0 <= ref.point < len(points)):
+                raise ValueError(
+                    f"LumpedPort {port.name!r} wire node index {ref.point} is out of "
+                    f"range for wire {ref.wire!r}."
+                )
+            return tuple(float(value) for value in points[ref.point])
+
+        return _node(binding.negative), _node(binding.positive)
+
+    # A coordinate-bound LumpedPort always carries explicit terminals (enforced
+    # by its constructor), so the negative/positive coordinates are present here.
+    negative = tuple(float(value) for value in port.negative)
+    positive = tuple(float(value) for value in port.positive)
+    return negative, positive
+
+
+def _lumped_port_current_source(port, scene, td, s, source_time):
+    negative, positive = _resolve_lumped_terminals(port, scene)
+    deltas = [positive[axis] - negative[axis] for axis in range(3)]
+    axis_idx = int(np.argmax([abs(value) for value in deltas]))
+    gap = deltas[axis_idx]
+    if abs(gap) < 1e-15:
+        raise ValueError(
+            f"LumpedPort {port.name!r} terminals are coincident; cannot orient the "
+            "equivalent current injection."
+        )
+    center = [0.5 * (negative[axis] + positive[axis]) * s for axis in range(3)]
+    # Filamentary electric-current source spanning the feed gap along the voltage
+    # axis; zero transverse extent keeps it a delta-gap-class injection.
+    size = [0.0, 0.0, 0.0]
+    size[axis_idx] = abs(gap) * s
+    component = "xyz"[axis_idx]
+    return td.UniformCurrentSource(
+        center=tuple(center),
+        size=tuple(size),
+        source_time=source_time,
+        polarization=f"E{component}",
+        # Interpret the unit amplitude as a total feed current (A) across the
+        # zero-area filament rather than a current density (A/m**2), which is
+        # ill-defined for a delta-gap injection.
+        current_amplitude_definition="total",
+        name=f"{port.name}::drive",
+    )
+
+
+def _convert_ports_for_reference(scene, td, s, frequencies):
+    """Map RF ports to (sources, monitors) for a runnable reference export."""
+    from ..ports import LumpedPort, WavePort
+
+    # WavePort and LumpedPort carry drive-mappable geometry directly. TerminalPort
+    # needs structure resolution and stays out of the adapter-drive scope for now;
+    # a TerminalPort-only scene keeps the existing sources=0 runnable-gate fail-close.
+    ports = list(getattr(scene, "ports", ()) or ())
+    wave_ports = [port for port in ports if isinstance(port, WavePort)]
+    lumped_ports = [port for port in ports if isinstance(port, LumpedPort)]
+    if not wave_ports and not lumped_ports:
+        return [], []
+    if frequencies is None:
+        raise ValueError(
+            "Exporting a port-driven Scene requires frequencies for the reference drive."
+        )
+
+    source_time = _port_source_time(td, frequencies)
+    sources = []
+    monitors = []
+
+    # Receive apertures for every wave port.
+    for port in wave_ports:
+        monitors.append(_wave_port_mode_monitor(port, td, s, frequencies))
+
+    # Single documented drive convention: wave ports take precedence.
+    if wave_ports:
+        sources.append(_wave_port_mode_source(wave_ports[0], td, s, source_time))
+    else:
+        sources.append(
+            _lumped_port_current_source(lumped_ports[0], scene, td, s, source_time)
+        )
+    return sources, monitors
+
+
 def _direction_to_angles(direction, dominant_axis, polarization=None):
     """Compute Tidy3D source angles from a propagation and polarization vector.
 
@@ -1751,6 +1957,12 @@ def scene_to_tidy3d(
     for source in sources:
         td_sources.append(_convert_source(source, scene, td, s, frequencies=frequencies))
 
+    # RF ports (WavePort / LumpedPort) carry no ``source_time`` of their own; map
+    # their excitation to reference sources + receive monitors under the single
+    # documented drive convention (see ``_convert_ports_for_reference``).
+    port_sources, port_monitors = _convert_ports_for_reference(scene, td, s, frequencies)
+    td_sources.extend(port_sources)
+
     # -- monitors --------------------------------------------------------------
     td_monitors = []
     monitors = scene.resolved_monitors() if hasattr(scene, "resolved_monitors") else (scene.monitors or [])
@@ -1770,6 +1982,7 @@ def scene_to_tidy3d(
                 time_step=time_step,
             )
         )
+    td_monitors.extend(port_monitors)
 
     # -- symmetry --------------------------------------------------------------
     td_symmetry = (0, 0, 0)

@@ -124,6 +124,50 @@ def test_fdtd_gradient_bridge_accepts_diagonal_anisotropic_epsilon():
     assert _unsupported_adjoint_medium(scene) is None
 
 
+@pytest.mark.parametrize(
+    "material",
+    [
+        mw.LossyMetalMedium(conductivity=5.8e7),
+        mw.SurfaceImpedanceMedium(
+            impedance=mw.RationalSurfaceImpedance(
+                poles=torch.tensor([-2.0 * math.pi * 2.0e9], dtype=torch.complex128),
+                residues=torch.tensor(
+                    [[[1.0 / (math.sqrt(2.0 * math.pi * 2.0e9 * 1.25663706212e-6 / (2.0 * 50.0)) / (2.0 * math.pi * 2.0e9))]]],
+                    dtype=torch.complex128,
+                ),
+                frequency_range=(1.0e9, 5.0e9),
+                representation="Y",
+            )
+        ),
+    ],
+    ids=["lossy_metal", "generic_surface_impedance"],
+)
+def test_fdtd_gradient_bridge_rejects_surface_impedance_media(material):
+    """Both surface-impedance realizations run outside the differentiable material replay
+    and carry no reverse gradient channel, so the adjoint bridge must reject them rather
+    than silently drop the surface sensitivity."""
+    from witwin.maxwell.fdtd.adjoint.bridge import _unsupported_adjoint_medium
+
+    scene = mw.Scene(
+        domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
+        grid=mw.GridSpec.uniform(0.25),
+        device="cpu",
+    )
+    scene.add_structure(
+        mw.Structure(
+            geometry=mw.Box(position=(0.375, 0.0, 0.0), size=(0.25, 2.0, 2.0)),
+            material=material,
+        )
+    )
+
+    message = _unsupported_adjoint_medium(scene)
+    assert message is not None and "surface-impedance boundary media" in message
+
+    bridge = object.__new__(_FDTDGradientBridge)
+    with pytest.raises(NotImplementedError, match="surface-impedance boundary media"):
+        bridge._validate_supported_configuration(SimpleNamespace(scene=scene))
+
+
 def _magnetic_dispersive_material():
     return mw.Material(
         mu_lorentz_poles=(mw.LorentzPole(delta_eps=1.0, resonance_frequency=1.0e9, gamma=1.0e8),)
@@ -956,7 +1000,8 @@ def test_capture_checkpoint_state_freezes_schema_layout():
     state = capture_checkpoint_state(_fake_checkpoint_solver(), step=3)
 
     assert state.step == 3
-    assert state.schema.version == 1
+    assert state.schema.version == 2
+    assert state.schema.wire_state_names == ()
     assert tuple(state.tensors.keys()) == state.schema.state_names
     assert state.schema.field_names == ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
     assert state.schema.complex_field_names == (

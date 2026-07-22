@@ -1,0 +1,33 @@
+{
+  "name": "sar/uniform_lossy_cube",
+  "description": "Uniform lossy phantom under a normally incident plane wave",
+  "gate_class": "tautology",
+  "status": "pass",
+  "reference": "absorbed-power volume integral vs shared electric-channel total (self-comparison)",
+  "external_reference": "analytic-only",
+  "target": "volume/channel closure < 1e-4; positive point SAR",
+  "target_gate_class": "",
+  "metrics": [
+    {
+      "quantity": "volume/channel_closure",
+      "measured": 0.13630814850330353,
+      "reference": 0.13630814850330353,
+      "rel_error": 0.0,
+      "unit": "W",
+      "class": "tautology"
+    },
+    {
+      "quantity": "peak_point_sar",
+      "measured": 0.43855148553848267,
+      "reference": NaN,
+      "rel_error": NaN,
+      "unit": "W/kg",
+      "class": "tautology"
+    }
+  ],
+  "convergence": [],
+  "notes": [
+    "Tautology (self-comparison), supporting only: the volume integral and the channel total are two reductions of the SAME edge loss field data, so their closure is exact by construction and carries no independent physical information. The independent conservation reference is the sar/layered_slab surface-vs-volume balance."
+  ],
+  "updated_at": "2026-07-22T13:52:10+00:00"
+}

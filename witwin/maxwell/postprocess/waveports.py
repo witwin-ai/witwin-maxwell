@@ -5,9 +5,38 @@ from dataclasses import dataclass
 
 import torch
 
+from ..constants import EPSILON_0, MU_0, resolve_real_dtype
+
 
 class ModeTrackingError(RuntimeError):
     """Raised when adjacent-frequency mode identity is not numerically reliable."""
+
+
+def _te_characteristic_impedance(omega, beta, mu_r):
+    """TE wave impedance ``omega * mu / beta`` for a uniformly filled aperture."""
+
+    return omega * MU_0 * mu_r / beta
+
+
+def _tm_characteristic_impedance(omega, beta, eps_r):
+    """TM wave impedance ``beta / (omega * eps)`` for a uniformly filled aperture."""
+
+    return beta / (omega * EPSILON_0 * eps_r)
+
+
+def _circuit_characteristic_impedance(definition, voltage, current):
+    """Characteristic impedance of a tracked one-watt mode from its V/I integrals.
+
+    ``voltage`` and ``current`` are the modal path integrals of the one-watt
+    normalized mode. ``voltage_current`` is ``V/I``; ``power_voltage`` is
+    ``|V|^2 / (2P)`` and ``power_current`` is ``2P / |I|^2`` with ``P = 1`` watt.
+    """
+
+    if definition == "voltage_current":
+        return voltage / current
+    if definition == "power_voltage":
+        return torch.abs(voltage).square() / 2.0
+    return 2.0 / torch.abs(current).square()
 
 
 @dataclass(frozen=True)
@@ -29,10 +58,6 @@ class ModeTrackingResult:
     confidence: torch.Tensor
     degenerate: torch.Tensor
     aligned_basis: torch.Tensor | None = None
-
-
-def _real_dtype(value: torch.Tensor) -> torch.dtype:
-    return value.real.dtype if value.is_complex() else value.dtype
 
 
 def _validate_inputs(
@@ -61,7 +86,7 @@ def _validate_inputs(
             raise ValueError("overlaps must have shape [F - 1, M, M].")
         if overlaps.device != beta.device:
             raise ValueError("beta and overlaps must be on the same device.")
-        if _real_dtype(overlaps) != _real_dtype(beta):
+        if resolve_real_dtype(overlaps) != resolve_real_dtype(beta):
             raise TypeError("beta and overlaps must use matching real precision.")
         if not bool(torch.all(torch.isfinite(overlaps))):
             raise ValueError("overlaps must contain only finite values.")
@@ -82,7 +107,7 @@ def _validate_inputs(
             raise ValueError("modal_basis feature dimensions must be non-empty.")
         if modal_basis.device != beta.device:
             raise ValueError("beta and modal_basis must be on the same device.")
-        if _real_dtype(modal_basis) != _real_dtype(beta):
+        if resolve_real_dtype(modal_basis) != resolve_real_dtype(beta):
             raise TypeError("beta and modal_basis must use matching real precision.")
         if not bool(torch.all(torch.isfinite(modal_basis))):
             raise ValueError("modal_basis must contain only finite values.")

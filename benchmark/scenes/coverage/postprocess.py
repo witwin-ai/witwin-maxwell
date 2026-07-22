@@ -401,6 +401,12 @@ POSTPROCESS_COVERAGE_SCENARIOS = (
         # source-normalize. Disabling it keeps Maxwell and Tidy3D on the same raw
         # spectra; directivity is a scale-invariant ratio, so nothing is lost.
         normalize_source=False,
+        # With source normalization off, the Maxwell fields are raw DFT sums
+        # (O(1e5)) while the reference stores physical phasors (O(1e-5)), so the
+        # amplitude ratio alone inflates field_l2 by ~1e7. Reference both spectra
+        # to the display-monitor RMS at the carrier so the metric measures field
+        # shape; the directivity scalar is a ratio and is unaffected.
+        spectral_reference_index=0,
     ),
     _make(
         "mode_monitor_straight_wg",

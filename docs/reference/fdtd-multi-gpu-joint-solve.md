@@ -72,9 +72,75 @@ devices. `result_device` defaults to the first device and must be one of the
 participants. Only `decomposition_axis="x"` is accepted. Passing `parallel=None`
 continues to use the unchanged single-GPU solver.
 
-`transport="auto"` currently selects CUDA P2P. `transport="nccl"` is reserved but
-raises `RuntimeError`; it does not silently switch to P2P or stage through host
-memory.
+`transport="auto"` currently selects CUDA P2P. `transport="nccl"` requires a
+one-process-per-GPU `torchrun` launch (torch 2.13 binds one device per rank);
+without the `RANK`/`WORLD_SIZE`/`LOCAL_RANK` launcher environment it raises an
+explicit `RuntimeError` from `DistributedFDTD` and never silently switches to P2P
+or stages through host memory. Under `torchrun` the coordinator drives the NCCL
+transport directly: the runtime is split into a rank-local `ShardEngine`
+(`fdtd/distributed/shard_engine.py`) that each rank builds deterministically from
+the shared partition plan, and a coordinator that expresses every cross-rank
+operation through transport primitives, so the same coordinator **per-step time
+loop** runs over both the in-process `CudaP2PHaloTransport` and the
+one-process-per-GPU `NcclHaloTransport` branch-free over the transport
+primitives. The claim is scoped to the per-step field/halo loop, not to all of
+`DistributedFDTD`: construction, validation, and result-gather scope still branch
+on transport kind (`self._nccl` at `solver.py` around lines 227, 272, 575, 657,
+697, 762, and 1024 -- transport selection, rank-local vs. all-shard engine build,
+NCCL-specific hardware preflight, the narrower NCCL capability envelope, the
+overlap gate, and the field-shutoff gate). The NCCL transport
+(`fdtd/distributed/nccl_transport.py`) performs the forward electric/magnetic Yee
+x-plane halos via `torch.distributed.batch_isend_irecv` on the engine's compute
+stream, the transposed reverse-halo accumulations for the adjoint, a scalar
+all-reduce (`reduce_owned_energy`), a sized point-to-point field gather to rank 0
+(`gather_component_slabs`, using the deterministic partition layouts so rank 0
+needs no shape exchange), a cross-rank homogeneity check, and deterministic
+`destroy_process_group` teardown.
+
+An **end-to-end two-rank NCCL forward solve** is qualified: each rank builds its
+own `ShardEngine`, the coordinator runs the serialized time loop over the NCCL
+transport, and rank 0 gathers the global full-field DFT (`Ex/Ey/Ez`) and matches
+an independent single-GPU reference at the same tolerances as the in-process P2P
+leg (rtol 5e-5 / atol 5e-6). This is verified by a two-rank `torchrun`
+conformance worker (`tests/fdtd/multi_gpu/_nccl_forward_worker.py`), and a
+rank-death failure-matrix worker confirms a dead peer surfaces as a bounded
+nonzero exit rather than a hang. The NCCL forward path fails closed on monitors,
+coupled circuit/network/wire/port scenes, trainable density (adjoint), and field
+shutoff (each supported today only on `transport="cuda_p2p"`); NCCL monitor
+gather, NCCL adjoint, and multi-node execution remain deferred.
+
+The pre-existing single-process `transport="nccl"` guard (the `torchrun`
+`RuntimeError` raised from `DistributedFDTD`) is now pinned by explicit
+no-silent-fallback tests rather than being introduced here: the raise is asserted
+both from `DistributedFDTD` directly and through the public `Simulation.prepare()`
+path, and the in-process `CudaP2PHaloTransport` is verified to never be
+constructed as a fallback (monkeypatched to fail if reached). The code
+contribution alongside those tests is adopted-group validation: `preflight()`
+validates an *adopted* process group so that when `torch.distributed` is already
+initialised, the transport verifies the live group's world size, rank, and
+backend match this rank's expectations before adopting it, rather than binding to
+a mismatched group. Backend validation accepts both the plain `nccl` token and a
+composite device->backend spec (for example `cpu:gloo,cuda:nccl`) whose CUDA
+collectives are NCCL, and fails closed otherwise. The matching-group accept path
+is exercised inside the two-rank worker; the mismatch legs (world size, rank,
+non-NCCL backend, and the composite accept/reject parse) are covered by host
+tests. The two-rank worker also asserts the shared-group teardown contract: after
+one adopted handle destroys the default group, a sibling transport that still
+reads connected fails closed via a vanished-group guard instead of driving a
+collective on a destroyed group.
+
+### Operational env contract (`torchrun`)
+
+The one-process-per-GPU launch is `torchrun --standalone --nnodes=1
+--nproc-per-node=<gpus> <entrypoint>`, which populates the `RANK`, `WORLD_SIZE`,
+and `LOCAL_RANK` variables the transport reads via
+`NcclHaloTransport.from_env(...)`; a missing variable raises an actionable error
+naming the required launch. Set `TORCH_NCCL_ASYNC_ERROR_HANDLING=1` so a stalled
+or dead peer surfaces as a `ProcessGroupNCCL` watchdog abort within the collective
+timeout (`timeout_s`, default 1800 s) instead of an indefinite hang; the two-rank
+conformance harness sets it by default. Teardown always calls
+`destroy_process_group()` so the group is released deterministically even on the
+error path.
 
 ## Result placement and gathering
 
@@ -149,6 +215,30 @@ This is spatial domain decomposition, not replicated data parallelism:
 7. Only the first and last slabs apply physical x-face boundary behavior. Internal
    interfaces never apply PML, PEC, PMC, Mur, periodic, or symmetry boundary rules.
    Every shard still owns the global y/z faces.
+8. For a circuit-coupled run, each bound lumped/terminal port has one Yee-edge
+   owner. The circuit owner is the shard owning the lexicographically minimum
+   bound voltage edge, with `Ex`, `Ey`, `Ez` as the deterministic component
+   tie-break. A remote port sends one voltage scalar to that owner and receives
+   one solved current scalar per step; ports already on the circuit owner take a
+   zero-P2P fast path. MNA state, circuit time series, port spectra, and live
+   circuit checkpoint tensors remain on the circuit owner until final results are
+   moved once to `result_device`. Each remote stream acknowledges completion of
+   its current-scalar peer read, and the next owner solve waits for that event
+   before reusing the source buffer; the acknowledgement does not wait for the
+   subsequent shard-local field correction.
+9. An embedded-network-coupled run uses the identical ownership rule and scalar
+   contract as the circuit path, applied to the network's connected terminals: the
+   network owner is the shard owning the lexicographically minimum connected
+   voltage edge with the same `Ex`, `Ey`, `Ez` component tie-break, so a scene
+   carrying both a circuit and a network would place them consistently. Each shard
+   samples one voltage scalar per local connected port; the owner gathers the
+   remote scalars, runs the sole authoritative state-space recurrence and the
+   prepare-time pivoted-LU same-step feedthrough solve, accumulates every port's
+   V/I DFT, and scatters one solved branch-current scalar back per remote port
+   under the same copy-acknowledgement discipline. Network state and the owner
+   `PortData`/`EmbeddedNetworkData` remain on the owner until moved once to
+   `result_device`. The distributed apply is multi-stream and event-driven and is
+   never CUDA-Graph captured.
 
 The steady-state fields and field-sized CPML/ADE/DFT state are shard local. The
 coordinator prepares global grid metadata and a common time step, but does not
@@ -172,6 +262,9 @@ must not be described as independently hardware-qualified.
 | Nonlinearity | Rejected | Additional collocation halos and bounded nonlinear kernels are required. |
 | Absorbers and boundaries | Global-face CPML/PML/StablePML/absorber behavior and mixed `none`/PEC/PMC/Mur; y/z periodic and y/z symmetry are accepted | XYZ CPML plus dielectric, mixed PEC/PMC/Mur, y periodic, and y symmetry have two-GPU parity coverage. x periodic, all Bloch, and x symmetry fail fast. |
 | Sources | `PointDipole(profile="ideal")` and `UniformCurrentSource` | Point sources on/near interfaces and a current volume crossing the interface have A6000 parity coverage. Plane-wave/TFSF, beam, mode, and other surface sources fail fast. |
+| Circuit co-simulation | One linear circuit with one or more bound `LumpedPort`/`TerminalPort` objects; GPU-native owner MNA and P2P scalar exchange | Each individual port must be wholly owned by one x slab. Multiple ports may reside on different shards. Communication is two scalars per remote bound port per step, and no external circuit process is used. The physical two-GPU parity gate passes on 2x RTX A6000 with exact (bitwise, 0.000e+00) single-versus-two-GPU parity on all six fields, port V/I, and circuit node/branch data. |
+| Embedded-network co-simulation | One `NetworkBlock`/`TouchstoneNetwork` connecting one or more `LumpedPort`/resolved `TerminalPort` terminals; GPU-native owner state-space + same-step LU feedthrough solve and P2P scalar exchange | Each connected terminal must be wholly owned by one x slab. Terminals may reside on different shards. Communication is two scalars per remote connected port per step; the owner alone advances the authoritative network state recurrence and accumulates every port V/I DFT. The physical two-GPU parity gate passes on 2x RTX A6000 with exact (bitwise, 0.000e+00) single-versus-two-GPU parity on all six fields, port V/I, network V/I, and network state. A scene mixing an embedded network with a bound circuit, more than one embedded network, and delayed (`delay_seconds=`) network cores are rejected on the distributed path. |
+| Thin-wire co-simulation (forward) | One PEC `ThinWire` network on the shared real standard path with a non-absorbing boundary; distributed fragment ownership with owner-resident `I/q` and monitors | Every cell-local sampling/deposition Yee edge is applied by the shard that owns it; a physical segment may span any number of shards and its fragments split at each partition boundary. Per-segment EMF partials are reduced to the state owner (the shard owning the minimum global sampling edge, declaration-order independent) with a deterministic rank-ordered sum; `I/q` advance owner-only; the advanced current is broadcast back so each owned edge deposits exactly once. The shared joint Maxwell/wire dt is taken from the full-domain single-GPU wire runtime. Two-GPU A6000 gate: a straight wire crossing the x split is bitwise (0.000e+00) single-versus-two-GPU on all six fields and wire current/charge at a short horizon while carrying ~36 A across the split; a closed lossless loop crossing the split preserves the discrete energy invariant to ~2e-9 relative even where individual field phases drift by chaotic float32 halo-curl accumulation over long runs. A trainable wire, a distributed CPML boundary, and a wire mixed with an embedded network or lumped circuit fail closed at prepare. Finite-conductor loss and distributed wire reverse/gradient communication are deferred. |
 | Monitors | Point spectral monitor, point `FieldTimeMonitor`, a valid `DipoleEmissionMonitor`, and spectral `PlaneMonitor`/`FinitePlaneMonitor`/`FluxMonitor`/`ModeMonitor` | y/z-normal planes are tiled across x and stitched from owned component intervals on `result_device`; x-normal planes have exactly one shard owner. Five Plane/Flux/Mode A6000 numerical cases observed exact single/two-GPU parity. Closed-surface, diffraction, flux-time, non-point field-time, and material monitors remain rejected. |
 | Spectral output | One or many requested frequencies; supported point/plane monitor assembly; optional gathered electric fields | Multiple frequencies preserve frequency metadata and leading frequency dimension. |
 | Persistence | Gathered `save`/`load` and distributed `save_sharded`/`load_sharded` | Lazy sharded load leaves `fields` empty and rank tensors unopened; explicit gather validates and stitches owned intervals. Persistence does not restore live solver/transport state. |
@@ -179,8 +272,12 @@ must not be described as independently hardware-qualified.
 | Auto shutoff | Global owned-electric-energy reduction on `result_device` | `steps_run`, halo totals, and normalization reflect early termination. |
 | CUDA Graph | Rejected | Peer communication is not graph captured. |
 | Plotting | Rejected during solve | Run with `gather_fields=True`, then consume the gathered result explicitly. |
-| Trainable scenes / adjoint | Rejected before distributed allocation | The existing differentiable path remains single GPU. No multi-GPU backward or distributed checkpoint/replay claim. |
-| NCCL / multi-process / multi-node | Reserved, not implemented | `transport="nccl"` raises explicitly. |
+| Trainable scenes / adjoint (Box density, standard path) | Accepted with A6000 parity | A trainable `Box` `MaterialRegion` density on the pure real standard (open/PEC boundary) path routes through the distributed joint-solve adjoint bridge: per-shard forward checkpoints, a transposed reverse step per forward step (Phase 1 → transposed magnetic halo → Phase 2 → transposed electric halo → Phase 3 → per-shard source-term eps grad), and a global grad_eps gather feeding the existing single-GPU material pullback once. Two-GPU acceptance: 1-vs-2-GPU objective parity (bit-identical forward) and gradient parity (rtol 1e-4, atol tied to grad magnitude); central finite differences (~1e-5 relative) on density texels on the x-split and interior to each shard, with the source and point-monitor objective on the interface node; 1-vs-2-GPU full-field-DFT objective gradient parity (right-half `EZ` power loss isolating the non-result shard's cotangent scatter leg); a checkpoint-capture ordering contract (every mid-loop capture preceded by a stream sync); and bitwise-reproducible gathered grad_eps. Point-monitor spectra and full-field DFT objectives only. |
+| Trainable scenes / adjoint (other channels) | Rejected before distributed allocation | Trainable geometry, material perturbation, circuit, RF/port, and embedded-network (residue/direct-term) parameters have no verified distributed reverse core; any absorbing (PML) boundary (CPML/stable-PML and the legacy graded-sigma `pml`/`absorber` absorbers), dispersive/conductive/nonlinear/anisotropic/modulated media, field shutoff, and tiled plane/flux/mode-seeded objectives are rejected at prepare before any distributed allocation. Absorbing-boundary-trainable and tiled-monitor seed scatter are the remaining follow-ups (S4/S5). |
+| NCCL transport primitive | Rank-local primitive implemented and conformance-tested | `fdtd/distributed/nccl_transport.py` provides the one-process-per-GPU (`torchrun`) transport surface: forward electric/magnetic Yee x-plane halos via `batch_isend_irecv`, transposed reverse-halo adjoint accumulations, a scalar all-reduce, an env/world-size/non-Linux failure matrix, an adopted-process-group world-size/rank/backend validation (accepting a composite `cuda:nccl` backend spec, failing closed otherwise), a cross-rank homogeneity check, and deterministic teardown with a vanished-group guard. A two-rank `torchrun` worker (`tests/fdtd/multi_gpu/test_nccl_transport.py`) asserts bitwise halo round-trips (including endpoint-ghost negative invariants, the matching-group adopt path, and the shared-group teardown contract) and adjoint accumulation. |
+| NCCL no-silent-fallback guard | Pre-existing guard, now pinned | The single-process `transport="nccl"` `torchrun` `RuntimeError` pre-dates this slice; it is now pinned by tests that assert it from both `DistributedFDTD` and the public `Simulation.prepare()` path, and that the in-process `CudaP2PHaloTransport` is never constructed as a fallback (P2P monkeypatched to fail if reached). |
+| End-to-end NCCL forward solve (2 ranks) | Qualified for the standard forward field solve | Under `torchrun --nproc-per-node=2`, each rank builds its own `ShardEngine` and the coordinator runs the serialized time loop over `NcclHaloTransport`; rank 0 gathers the global full-field DFT via sized point-to-point and matches an independent single-GPU reference at rtol 5e-5 / atol 5e-6 (`tests/fdtd/multi_gpu/_nccl_forward_worker.py`). A rank-death test confirms bounded failure propagation. |
+| NCCL monitors / adjoint / coupled runtimes / shutoff / multi-node | Not landed | The NCCL forward path fails closed on per-monitor payload gather, trainable-density adjoint, coupled circuit/network/wire/port scenes, and field shutoff (each supported on `transport="cuda_p2p"`). Three/four-GPU and cross-node NCCL are out of scope. |
 | Three or four GPUs | Structurally representable by the partition and neighbor transport | Not qualified in the current hardware acceptance record; no validation claim is made here. |
 
 ## Fail-fast conditions
@@ -195,11 +292,18 @@ following cases rather than silently changing the physics or execution model:
   `result_device` and a shard;
 - too few physical x cells for the shard count/halo, or insufficient device memory
   for local DFT state or an explicitly requested gather;
-- trainable scene parameters, `MaterialRegion` density designs, nonlinear media,
-  full off-diagonal electric anisotropy, or lossy-metal/SIBC ownership;
+- trainable geometry, material-perturbation, circuit, or RF/port parameters (a
+  trainable `Box` `MaterialRegion` density on the standard path is accepted and
+  routed to the distributed adjoint bridge; a non-Box density region still fails);
+- for a trainable distributed run: any absorbing (PML) boundary (CPML/stable-PML or
+  the legacy graded-sigma `pml`/`absorber` absorbers), dispersive/conductive/nonlinear/
+  anisotropic/modulated media, field shutoff, or a tiled plane/flux/mode-seeded
+  objective (point-monitor and full-field-DFT objectives only);
+- nonlinear media, full off-diagonal electric anisotropy, or lossy-metal/SIBC ownership;
 - Bloch boundaries, periodic x, or x-axis symmetry;
-- ports, unsupported source classes, non-ideal point-dipole profiles, or an invalid
-  dipole-emission source reference;
+- mode ports, unbound lumped/terminal ports, one bound port whose voltage edges
+  cross an x-slab split, unsupported source classes, non-ideal point-dipole
+  profiles, or an invalid dipole-emission source reference;
 - `ClosedSurfaceMonitor`, `DiffractionMonitor`, `FluxTimeMonitor`, non-point
   `FieldTimeMonitor`, `PermittivityMonitor`, and `MediumMonitor`;
 - an ordinary non-flux x-normal `PlaneMonitor` or `FinitePlaneMonitor` that requests
@@ -226,6 +330,16 @@ Use either `result.solver_stats["parallel_stats"]` or
 - per-device `peak_memory_bytes` before gathering and
   `peak_memory_bytes_including_gather` after output collection;
 - `wall_time_s`.
+
+Circuit-coupled runs additionally expose `parallel_stats["circuit"]`, including
+the circuit and per-port owner ranks, same-shard and remote-port counts, scalar
+transfers, owner copy acknowledgements, bytes per step/total, and the
+circuit-checkpoint owner. Embedded-network-coupled runs expose the same shape
+under `parallel_stats["network"]` (network and per-port owner ranks, connected
+and remote-port counts, scalar transfers, copy acknowledgements, bytes per
+step/total, and `communication_order == "O(connected_ports)"`). These
+statistics count only circuit/network scalar traffic; halo bytes remain in the
+top-level halo counters.
 
 `compute_time_s`, `communication_time_s`, and
 `exposed_communication_time_s` are currently `None`. Per-phase timing would require
@@ -271,6 +385,55 @@ The benchmark's default `gather_fields=False` measures the scalable monitor-firs
 solve. Run an additional `--gather-fields` pass when validating result assembly, but
 do not mix gather allocation/time into the core scaling number.
 
+### Physical two-GPU circuit gate
+
+The circuit-owner acceptance case is a real single-versus-two-GPU solve, not a
+mock transport test. It places two bound ports on different x slabs, exercises the
+same-shard fast path and one bidirectional remote scalar exchange, and compares
+gathered fields, port phasors, circuit time series, result placement, communication
+accounting, and checkpoint ownership:
+
+```bash
+python -m pytest \
+  tests/fdtd/multi_gpu/test_circuit_owner.py::test_physical_two_gpu_circuit_matches_single_gpu_and_reports_scalar_contract \
+  -q
+```
+
+The gate requires two homogeneous GPUs with bidirectional CUDA peer access and uses
+`rtol=2e-5` for field/circuit parity. It skips whenever the run sees fewer than two
+peer-accessible devices, in which case the file reports `6 passed, 1 skipped` and the
+skipped item is exactly this gate. On 2x RTX A6000 with both devices visible the file
+reports `7 passed`, and this gate passes by an exact (bitwise, 0.000e+00) margin on all
+six fields, both bound-port voltages/currents, and the circuit node/branch series. The
+full deviation table and the scalar-transfer contract are recorded in
+`docs/assessments/spice-mna-phase-4-acceptance.md`.
+
+### Physical two-GPU embedded-network gate
+
+The network-owner acceptance case mirrors the circuit gate for a two-port embedded
+network split across x slabs. A `PointDipole(profile="ideal")` excites a scene whose
+two connected `LumpedPort` terminals sit on different shards; the owner runs the sole
+state-space recurrence and same-step LU solve, and the run compares gathered fields,
+port phasors, network V/I, network state, result placement, the scalar-communication
+contract, and checkpoint ownership:
+
+```bash
+python -m pytest \
+  tests/fdtd/multi_gpu/test_network_owner.py::test_physical_two_gpu_network_matches_single_gpu_and_reports_scalar_contract \
+  -q
+```
+
+The gate requires two homogeneous GPUs with bidirectional CUDA peer access and uses
+`rtol=2e-5` for field/port/network parity. It skips whenever fewer than two
+peer-accessible devices are visible. On 2x RTX A6000 with both devices visible this
+gate passes by an exact (bitwise, 0.000e+00) margin on all six fields, both connected
+port voltages/currents, the network V/I, and the network state, and asserts the
+`parallel_stats["network"]` scalar contract (owner rank, per-port owner ranks, two
+scalar transfers per step, one owner copy-acknowledgement, `O(connected_ports)`). The
+file's ownership-unit and fail-closed cases (deterministic owner independent of
+connection order, one terminal spanning a split, overlapping edges, network+circuit
+rejection, and trainable+parallel rejection) run without GPUs.
+
 ### Clean-build test record
 
 The final bounded-operator source was rebuilt cleanly with the CUDA 13 toolchain before
@@ -308,8 +471,16 @@ does not qualify either case. Nsight Systems and Nsight Compute were not availab
 the host; the benchmark therefore supplies no profiler trace or per-kernel roofline
 claim.
 
-This remains an engineering preview. The measurements and tests above do not qualify
-NCCL, multi-process or multi-node execution, distributed adjoint/checkpoint replay,
-peer-aware CUDA Graph capture, advanced plane/beam/mode/TFSF sources, ports, x-periodic
+This remains an engineering preview. The distributed joint-solve adjoint is qualified
+only for a trainable `Box` `MaterialRegion` density on the pure real standard path with
+point-monitor/full-field-DFT objectives (1-vs-2-GPU objective/gradient parity and
+interface finite differences; timing/speedup of the reverse pass is not measured here).
+The measurements and tests above do not qualify
+multi-node execution, the NCCL adjoint or NCCL monitor-payload gather, distributed
+CPML-trainable adjoint or tiled-monitor adjoint seed scatter, peer-aware CUDA Graph
+capture, advanced plane/beam/mode/TFSF sources, ports on the NCCL path, x-periodic
 or Bloch decomposition, x symmetry, nonlinear media, full off-diagonal media, SIBC, or
-any other guarded feature.
+any other guarded feature. The end-to-end one-process-per-GPU NCCL FORWARD solve IS
+qualified on this host at the P2P tolerances (two-rank `torchrun`, seam-crossing
+precondition, rank-death failure matrix; see the transport section above); every
+unimplemented NCCL adjacency fails closed with a pinned test.

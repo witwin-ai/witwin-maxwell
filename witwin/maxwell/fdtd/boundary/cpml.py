@@ -350,28 +350,6 @@ def expand_cpml_memory_tensor(solver, attr_name):
     return dense
 
 
-def _initialize_neutral_cpml_buffers(solver):
-    solver.cpml_kappa_e_x = torch.ones(solver.Nx, device=solver.device, dtype=torch.float32)
-    solver.cpml_kappa_e_y = torch.ones(solver.Ny, device=solver.device, dtype=torch.float32)
-    solver.cpml_kappa_e_z = torch.ones(solver.Nz, device=solver.device, dtype=torch.float32)
-    solver.cpml_b_e_x = torch.zeros(solver.Nx, device=solver.device, dtype=torch.float32)
-    solver.cpml_b_e_y = torch.zeros(solver.Ny, device=solver.device, dtype=torch.float32)
-    solver.cpml_b_e_z = torch.zeros(solver.Nz, device=solver.device, dtype=torch.float32)
-    solver.cpml_c_e_x = torch.zeros(solver.Nx, device=solver.device, dtype=torch.float32)
-    solver.cpml_c_e_y = torch.zeros(solver.Ny, device=solver.device, dtype=torch.float32)
-    solver.cpml_c_e_z = torch.zeros(solver.Nz, device=solver.device, dtype=torch.float32)
-
-    solver.cpml_kappa_h_x = torch.ones(solver.Nx - 1, device=solver.device, dtype=torch.float32)
-    solver.cpml_kappa_h_y = torch.ones(solver.Ny - 1, device=solver.device, dtype=torch.float32)
-    solver.cpml_kappa_h_z = torch.ones(solver.Nz - 1, device=solver.device, dtype=torch.float32)
-    solver.cpml_b_h_x = torch.zeros(solver.Nx - 1, device=solver.device, dtype=torch.float32)
-    solver.cpml_b_h_y = torch.zeros(solver.Ny - 1, device=solver.device, dtype=torch.float32)
-    solver.cpml_b_h_z = torch.zeros(solver.Nz - 1, device=solver.device, dtype=torch.float32)
-    solver.cpml_c_h_x = torch.zeros(solver.Nx - 1, device=solver.device, dtype=torch.float32)
-    solver.cpml_c_h_y = torch.zeros(solver.Ny - 1, device=solver.device, dtype=torch.float32)
-    solver.cpml_c_h_z = torch.zeros(solver.Nz - 1, device=solver.device, dtype=torch.float32)
-
-
 def _allocate_sigma_tensors(solver):
     solver.sigma_x = torch.zeros((solver.Nx, solver.Ny, solver.Nz), device=solver.device, dtype=torch.float32)
     solver.sigma_y = torch.zeros((solver.Nx, solver.Ny, solver.Nz), device=solver.device, dtype=torch.float32)

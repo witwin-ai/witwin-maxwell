@@ -17,7 +17,7 @@ dim3 field_grid3d(int64_t nx, int64_t ny, int64_t nz, dim3 block) {
       static_cast<unsigned int>((nx + block.z - 1) / block.z));
 }
 
-template <int Component>
+template <int Component, bool Uniform>
 __global__ void update_magnetic_standard_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -28,6 +28,8 @@ __global__ void update_magnetic_standard_kernel(
     const float* __restrict__ second,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    float decay_value,
+    float curl_value,
     const float* __restrict__ inv_a,
     const float* __restrict__ inv_b,
     float* __restrict__ field) {
@@ -50,10 +52,14 @@ __global__ void update_magnetic_standard_kernel(
     positive = (second[offset3d(i + 1, j, k, ny, nz)] - second[offset3d(i, j, k, ny, nz)]) * inv_a[i];
     negative = (first[offset3d(i, j + 1, k, ny + 1, nz)] - first[offset3d(i, j, k, ny + 1, nz)]) * inv_b[j];
   }
-  field[linear] = field[linear] * decay[linear] - curl_coeff[linear] * (positive - negative);
+  if constexpr (Uniform) {
+    field[linear] = field[linear] * decay_value - curl_value * (positive - negative);
+  } else {
+    field[linear] = field[linear] * decay[linear] - curl_coeff[linear] * (positive - negative);
+  }
 }
 
-template <int Component>
+template <int Component, bool Uniform>
 __global__ void update_magnetic_cpml_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -62,6 +68,8 @@ __global__ void update_magnetic_cpml_kernel(
     const float* __restrict__ second,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    float decay_value,
+    float curl_value,
     const float* __restrict__ inv_kappa_a,
     const float* __restrict__ b_a,
     const float* __restrict__ c_a,
@@ -101,7 +109,11 @@ __global__ void update_magnetic_cpml_kernel(
   const float corrected_a = d_a * inv_kappa_a[coord_a] + psi_a_value;
   const float corrected_b = d_b * inv_kappa_b[coord_b] + psi_b_value;
   const float curl = Component == 1 ? corrected_b - corrected_a : corrected_a - corrected_b;
-  field[linear] = field[linear] * decay[linear] - curl_coeff[linear] * curl;
+  if constexpr (Uniform) {
+    field[linear] = field[linear] * decay_value - curl_value * curl;
+  } else {
+    field[linear] = field[linear] * decay[linear] - curl_coeff[linear] * curl;
+  }
 }
 
 template <int Axis>
@@ -364,7 +376,9 @@ void update_magnetic_hx_standard_bounded_cuda(
     int64_t local_x_begin,
     int64_t local_x_end,
     int64_t global_x_offset,
-    int64_t global_x_extent) {
+    int64_t global_x_extent,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   check_magnetic_inputs(hx, ey, ez, decay, curl, "hx");
   check_rank3_shape(ey, "ey", hx.size(0), hx.size(1), hx.size(2) + 1);
   check_rank3_shape(ez, "ez", hx.size(0), hx.size(1) + 1, hx.size(2));
@@ -378,19 +392,23 @@ void update_magnetic_hx_standard_bounded_cuda(
   torch::stable::accelerator::DeviceGuard guard(hx.get_device_index());
   const auto sizes = hx.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_standard_kernel<0><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-      static_cast<unsigned int>(sizes[0]),
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      static_cast<unsigned int>(local_x_begin),
-      static_cast<unsigned int>(local_x_end),
-      ey.mutable_data_ptr<float>(),
-      ez.mutable_data_ptr<float>(),
-      decay.mutable_data_ptr<float>(),
-      curl.mutable_data_ptr<float>(),
-      inv_dy.mutable_data_ptr<float>(),
-      inv_dz.mutable_data_ptr<float>(),
-      hx.mutable_data_ptr<float>());
+  dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+    update_magnetic_standard_kernel<0, decltype(u_uniform)::value><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        static_cast<unsigned int>(local_x_begin),
+        static_cast<unsigned int>(local_x_end),
+        ey.mutable_data_ptr<float>(),
+        ez.mutable_data_ptr<float>(),
+        decay.mutable_data_ptr<float>(),
+        curl.mutable_data_ptr<float>(),
+        static_cast<float>(uniform_decay.value_or(0.0)),
+        static_cast<float>(uniform_curl.value_or(0.0)),
+        inv_dy.mutable_data_ptr<float>(),
+        inv_dz.mutable_data_ptr<float>(),
+        hx.mutable_data_ptr<float>());
+  });
   WITWIN_CUDA_CHECK();
 }
 
@@ -401,7 +419,9 @@ void update_magnetic_hx_standard_cuda(
     const torch::stable::Tensor& decay,
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz) {
+    const torch::stable::Tensor& inv_dz,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   const int64_t x_extent = hx.size(0);
   update_magnetic_hx_standard_bounded_cuda(
       hx,
@@ -414,7 +434,9 @@ void update_magnetic_hx_standard_cuda(
       0,
       x_extent,
       0,
-      x_extent);
+      x_extent,
+      uniform_decay,
+      uniform_curl);
 }
 
 void update_magnetic_hy_standard_bounded_cuda(
@@ -428,7 +450,9 @@ void update_magnetic_hy_standard_bounded_cuda(
     int64_t local_x_begin,
     int64_t local_x_end,
     int64_t global_x_offset,
-    int64_t global_x_extent) {
+    int64_t global_x_extent,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   check_magnetic_inputs(hy, ex, ez, decay, curl, "hy");
   check_rank3_shape(ex, "ex", hy.size(0), hy.size(1), hy.size(2) + 1);
   check_rank3_shape(ez, "ez", hy.size(0) + 1, hy.size(1), hy.size(2));
@@ -442,19 +466,23 @@ void update_magnetic_hy_standard_bounded_cuda(
   torch::stable::accelerator::DeviceGuard guard(hy.get_device_index());
   const auto sizes = hy.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_standard_kernel<1><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-      static_cast<unsigned int>(sizes[0]),
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      static_cast<unsigned int>(local_x_begin),
-      static_cast<unsigned int>(local_x_end),
-      ex.mutable_data_ptr<float>(),
-      ez.mutable_data_ptr<float>(),
-      decay.mutable_data_ptr<float>(),
-      curl.mutable_data_ptr<float>(),
-      inv_dx.mutable_data_ptr<float>(),
-      inv_dz.mutable_data_ptr<float>(),
-      hy.mutable_data_ptr<float>());
+  dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+    update_magnetic_standard_kernel<1, decltype(u_uniform)::value><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        static_cast<unsigned int>(local_x_begin),
+        static_cast<unsigned int>(local_x_end),
+        ex.mutable_data_ptr<float>(),
+        ez.mutable_data_ptr<float>(),
+        decay.mutable_data_ptr<float>(),
+        curl.mutable_data_ptr<float>(),
+        static_cast<float>(uniform_decay.value_or(0.0)),
+        static_cast<float>(uniform_curl.value_or(0.0)),
+        inv_dx.mutable_data_ptr<float>(),
+        inv_dz.mutable_data_ptr<float>(),
+        hy.mutable_data_ptr<float>());
+  });
   WITWIN_CUDA_CHECK();
 }
 
@@ -465,10 +493,12 @@ void update_magnetic_hy_standard_cuda(
     const torch::stable::Tensor& decay,
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz) {
+    const torch::stable::Tensor& inv_dz,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   const int64_t x_extent = hy.size(0);
   update_magnetic_hy_standard_bounded_cuda(
-      hy, ex, ez, decay, curl, inv_dx, inv_dz, 0, x_extent, 0, x_extent);
+      hy, ex, ez, decay, curl, inv_dx, inv_dz, 0, x_extent, 0, x_extent, uniform_decay, uniform_curl);
 }
 
 void update_magnetic_hz_standard_bounded_cuda(
@@ -482,7 +512,9 @@ void update_magnetic_hz_standard_bounded_cuda(
     int64_t local_x_begin,
     int64_t local_x_end,
     int64_t global_x_offset,
-    int64_t global_x_extent) {
+    int64_t global_x_extent,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   check_magnetic_inputs(hz, ex, ey, decay, curl, "hz");
   check_rank3_shape(ex, "ex", hz.size(0), hz.size(1) + 1, hz.size(2));
   check_rank3_shape(ey, "ey", hz.size(0) + 1, hz.size(1), hz.size(2));
@@ -496,19 +528,23 @@ void update_magnetic_hz_standard_bounded_cuda(
   torch::stable::accelerator::DeviceGuard guard(hz.get_device_index());
   const auto sizes = hz.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_standard_kernel<2><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-      static_cast<unsigned int>(sizes[0]),
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      static_cast<unsigned int>(local_x_begin),
-      static_cast<unsigned int>(local_x_end),
-      ex.mutable_data_ptr<float>(),
-      ey.mutable_data_ptr<float>(),
-      decay.mutable_data_ptr<float>(),
-      curl.mutable_data_ptr<float>(),
-      inv_dx.mutable_data_ptr<float>(),
-      inv_dy.mutable_data_ptr<float>(),
-      hz.mutable_data_ptr<float>());
+  dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+    update_magnetic_standard_kernel<2, decltype(u_uniform)::value><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        static_cast<unsigned int>(local_x_begin),
+        static_cast<unsigned int>(local_x_end),
+        ex.mutable_data_ptr<float>(),
+        ey.mutable_data_ptr<float>(),
+        decay.mutable_data_ptr<float>(),
+        curl.mutable_data_ptr<float>(),
+        static_cast<float>(uniform_decay.value_or(0.0)),
+        static_cast<float>(uniform_curl.value_or(0.0)),
+        inv_dx.mutable_data_ptr<float>(),
+        inv_dy.mutable_data_ptr<float>(),
+        hz.mutable_data_ptr<float>());
+  });
   WITWIN_CUDA_CHECK();
 }
 
@@ -519,10 +555,12 @@ void update_magnetic_hz_standard_cuda(
     const torch::stable::Tensor& decay,
     const torch::stable::Tensor& curl,
     const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy) {
+    const torch::stable::Tensor& inv_dy,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   const int64_t x_extent = hz.size(0);
   update_magnetic_hz_standard_bounded_cuda(
-      hz, ex, ey, decay, curl, inv_dx, inv_dy, 0, x_extent, 0, x_extent);
+      hz, ex, ey, decay, curl, inv_dx, inv_dy, 0, x_extent, 0, x_extent, uniform_decay, uniform_curl);
 }
 
 void update_magnetic_hx_cpml_cuda(
@@ -540,7 +578,9 @@ void update_magnetic_hx_cpml_cuda(
     const torch::stable::Tensor& b_z,
     const torch::stable::Tensor& c_z,
     const torch::stable::Tensor& inv_dy,
-    const torch::stable::Tensor& inv_dz) {
+    const torch::stable::Tensor& inv_dz,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   check_magnetic_cpml_inputs(
       hx, ey, ez, decay, curl, psi_y, psi_z, inv_kappa_y, b_y, c_y, inv_kappa_z, b_z, c_z, 1, 2, "hx");
   check_rank3_shape(ey, "ey", hx.size(0), hx.size(1), hx.size(2) + 1);
@@ -550,25 +590,29 @@ void update_magnetic_hx_cpml_cuda(
   torch::stable::accelerator::DeviceGuard guard(hx.get_device_index());
   const auto sizes = hx.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_cpml_kernel<0><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-      static_cast<unsigned int>(sizes[0]),
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      ey.mutable_data_ptr<float>(),
-      ez.mutable_data_ptr<float>(),
-      decay.mutable_data_ptr<float>(),
-      curl.mutable_data_ptr<float>(),
-      inv_kappa_y.mutable_data_ptr<float>(),
-      b_y.mutable_data_ptr<float>(),
-      c_y.mutable_data_ptr<float>(),
-      inv_kappa_z.mutable_data_ptr<float>(),
-      b_z.mutable_data_ptr<float>(),
-      c_z.mutable_data_ptr<float>(),
-      inv_dy.mutable_data_ptr<float>(),
-      inv_dz.mutable_data_ptr<float>(),
-      psi_y.mutable_data_ptr<float>(),
-      psi_z.mutable_data_ptr<float>(),
-      hx.mutable_data_ptr<float>());
+  dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+    update_magnetic_cpml_kernel<0, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        ey.mutable_data_ptr<float>(),
+        ez.mutable_data_ptr<float>(),
+        decay.mutable_data_ptr<float>(),
+        curl.mutable_data_ptr<float>(),
+        static_cast<float>(uniform_decay.value_or(0.0)),
+        static_cast<float>(uniform_curl.value_or(0.0)),
+        inv_kappa_y.mutable_data_ptr<float>(),
+        b_y.mutable_data_ptr<float>(),
+        c_y.mutable_data_ptr<float>(),
+        inv_kappa_z.mutable_data_ptr<float>(),
+        b_z.mutable_data_ptr<float>(),
+        c_z.mutable_data_ptr<float>(),
+        inv_dy.mutable_data_ptr<float>(),
+        inv_dz.mutable_data_ptr<float>(),
+        psi_y.mutable_data_ptr<float>(),
+        psi_z.mutable_data_ptr<float>(),
+        hx.mutable_data_ptr<float>());
+  });
   WITWIN_CUDA_CHECK();
 }
 
@@ -587,7 +631,9 @@ void update_magnetic_hy_cpml_cuda(
     const torch::stable::Tensor& b_z,
     const torch::stable::Tensor& c_z,
     const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dz) {
+    const torch::stable::Tensor& inv_dz,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   check_magnetic_cpml_inputs(
       hy, ex, ez, decay, curl, psi_x, psi_z, inv_kappa_x, b_x, c_x, inv_kappa_z, b_z, c_z, 0, 2, "hy");
   check_rank3_shape(ex, "ex", hy.size(0), hy.size(1), hy.size(2) + 1);
@@ -597,25 +643,29 @@ void update_magnetic_hy_cpml_cuda(
   torch::stable::accelerator::DeviceGuard guard(hy.get_device_index());
   const auto sizes = hy.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_cpml_kernel<1><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-      static_cast<unsigned int>(sizes[0]),
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      ex.mutable_data_ptr<float>(),
-      ez.mutable_data_ptr<float>(),
-      decay.mutable_data_ptr<float>(),
-      curl.mutable_data_ptr<float>(),
-      inv_kappa_x.mutable_data_ptr<float>(),
-      b_x.mutable_data_ptr<float>(),
-      c_x.mutable_data_ptr<float>(),
-      inv_kappa_z.mutable_data_ptr<float>(),
-      b_z.mutable_data_ptr<float>(),
-      c_z.mutable_data_ptr<float>(),
-      inv_dx.mutable_data_ptr<float>(),
-      inv_dz.mutable_data_ptr<float>(),
-      psi_x.mutable_data_ptr<float>(),
-      psi_z.mutable_data_ptr<float>(),
-      hy.mutable_data_ptr<float>());
+  dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+    update_magnetic_cpml_kernel<1, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        ex.mutable_data_ptr<float>(),
+        ez.mutable_data_ptr<float>(),
+        decay.mutable_data_ptr<float>(),
+        curl.mutable_data_ptr<float>(),
+        static_cast<float>(uniform_decay.value_or(0.0)),
+        static_cast<float>(uniform_curl.value_or(0.0)),
+        inv_kappa_x.mutable_data_ptr<float>(),
+        b_x.mutable_data_ptr<float>(),
+        c_x.mutable_data_ptr<float>(),
+        inv_kappa_z.mutable_data_ptr<float>(),
+        b_z.mutable_data_ptr<float>(),
+        c_z.mutable_data_ptr<float>(),
+        inv_dx.mutable_data_ptr<float>(),
+        inv_dz.mutable_data_ptr<float>(),
+        psi_x.mutable_data_ptr<float>(),
+        psi_z.mutable_data_ptr<float>(),
+        hy.mutable_data_ptr<float>());
+  });
   WITWIN_CUDA_CHECK();
 }
 
@@ -634,7 +684,9 @@ void update_magnetic_hz_cpml_cuda(
     const torch::stable::Tensor& b_y,
     const torch::stable::Tensor& c_y,
     const torch::stable::Tensor& inv_dx,
-    const torch::stable::Tensor& inv_dy) {
+    const torch::stable::Tensor& inv_dy,
+    std::optional<double> uniform_decay,
+    std::optional<double> uniform_curl) {
   check_magnetic_cpml_inputs(
       hz, ex, ey, decay, curl, psi_x, psi_y, inv_kappa_x, b_x, c_x, inv_kappa_y, b_y, c_y, 0, 1, "hz");
   check_rank3_shape(ex, "ex", hz.size(0), hz.size(1) + 1, hz.size(2));
@@ -644,25 +696,29 @@ void update_magnetic_hz_cpml_cuda(
   torch::stable::accelerator::DeviceGuard guard(hz.get_device_index());
   const auto sizes = hz.sizes();
   const dim3 block = field_block3d();
-  update_magnetic_cpml_kernel<2><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
-      static_cast<unsigned int>(sizes[0]),
-      static_cast<unsigned int>(sizes[1]),
-      static_cast<unsigned int>(sizes[2]),
-      ex.mutable_data_ptr<float>(),
-      ey.mutable_data_ptr<float>(),
-      decay.mutable_data_ptr<float>(),
-      curl.mutable_data_ptr<float>(),
-      inv_kappa_x.mutable_data_ptr<float>(),
-      b_x.mutable_data_ptr<float>(),
-      c_x.mutable_data_ptr<float>(),
-      inv_kappa_y.mutable_data_ptr<float>(),
-      b_y.mutable_data_ptr<float>(),
-      c_y.mutable_data_ptr<float>(),
-      inv_dx.mutable_data_ptr<float>(),
-      inv_dy.mutable_data_ptr<float>(),
-      psi_x.mutable_data_ptr<float>(),
-      psi_y.mutable_data_ptr<float>(),
-      hz.mutable_data_ptr<float>());
+  dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
+    update_magnetic_cpml_kernel<2, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+        static_cast<unsigned int>(sizes[0]),
+        static_cast<unsigned int>(sizes[1]),
+        static_cast<unsigned int>(sizes[2]),
+        ex.mutable_data_ptr<float>(),
+        ey.mutable_data_ptr<float>(),
+        decay.mutable_data_ptr<float>(),
+        curl.mutable_data_ptr<float>(),
+        static_cast<float>(uniform_decay.value_or(0.0)),
+        static_cast<float>(uniform_curl.value_or(0.0)),
+        inv_kappa_x.mutable_data_ptr<float>(),
+        b_x.mutable_data_ptr<float>(),
+        c_x.mutable_data_ptr<float>(),
+        inv_kappa_y.mutable_data_ptr<float>(),
+        b_y.mutable_data_ptr<float>(),
+        c_y.mutable_data_ptr<float>(),
+        inv_dx.mutable_data_ptr<float>(),
+        inv_dy.mutable_data_ptr<float>(),
+        psi_x.mutable_data_ptr<float>(),
+        psi_y.mutable_data_ptr<float>(),
+        hz.mutable_data_ptr<float>());
+  });
   WITWIN_CUDA_CHECK();
 }
 

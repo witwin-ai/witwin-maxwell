@@ -3,19 +3,24 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from ..constants import C_0
 from ..scene import prepare_scene
 from .excitation import inject_source_terms
 from .io import save_frequency_solution as save_frequency_solution_impl
 from .observers import (
+    accumulate_breakdown_observers as accumulate_breakdown_observers_impl,
     accumulate_observers as accumulate_observers_impl,
     accumulate_time_observers as accumulate_time_observers_impl,
     add_plane_observer as add_plane_observer_impl,
     add_point_observer as add_point_observer_impl,
+    clear_breakdown_observers as clear_breakdown_observers_impl,
     clear_observers as clear_observers_impl,
     clear_time_observers as clear_time_observers_impl,
+    get_breakdown_observer_results as get_breakdown_observer_results_impl,
     get_component_coords as get_component_coords_impl,
     get_observer_results as get_observer_results_impl,
     get_time_observer_results as get_time_observer_results_impl,
+    prepare_breakdown_observers as prepare_breakdown_observers_impl,
     prepare_observers as prepare_observers_impl,
     prepare_time_observers as prepare_time_observers_impl,
     resolve_plane_observer as resolve_plane_observer_impl,
@@ -45,6 +50,11 @@ from .runtime import (
     apply_magnetic_dispersive_corrections as apply_magnetic_dispersive_corrections_impl,
     apply_component_dispersive_currents as apply_component_dispersive_currents_impl,
     apply_dispersive_corrections as apply_dispersive_corrections_impl,
+    advance_gyromagnetic_state as advance_gyromagnetic_state_impl,
+    apply_gyromagnetic_correction as apply_gyromagnetic_correction_impl,
+    initialize_gyromagnetic_state as initialize_gyromagnetic_state_impl,
+    snapshot_gyromagnetic_drive as snapshot_gyromagnetic_drive_impl,
+    step_gyromagnetic_coupled as step_gyromagnetic_coupled_impl,
     average_node_to_component as average_node_to_component_impl,
     average_node_to_magnetic_component as average_node_to_magnetic_component_impl,
     build_dispersive_templates as build_dispersive_templates_impl,
@@ -98,7 +108,7 @@ _require_cuda_scene = require_cuda_scene
 def calculate_required_steps(
     frequency,
     dt,
-    c=299792458.0,
+    c=C_0,
     num_cycles=20,
     transient_cycles=15,
     domain_size=None,
@@ -132,7 +142,7 @@ class FDTD:
             cpml_config=cpml_config,
         )
 
-    def auto_dt(self, dx, dy, dz, frequency, source_time=None, c=299792458.0, steps_per_cycle=30):
+    def auto_dt(self, dx, dy, dz, frequency, source_time=None, c=C_0, steps_per_cycle=30):
         # dx/dy/dz are the per-axis MINIMUM primal spacings (identical to the
         # uniform steps on a uniform grid), so the Courant bound holds on
         # nonuniform grids as well.
@@ -241,6 +251,18 @@ class FDTD:
     def get_time_observer_results(self):
         return get_time_observer_results_impl(self)
 
+    def clear_breakdown_observers(self):
+        clear_breakdown_observers_impl(self)
+
+    def _prepare_breakdown_observers(self):
+        prepare_breakdown_observers_impl(self)
+
+    def accumulate_breakdown_observers(self, n):
+        accumulate_breakdown_observers_impl(self, n)
+
+    def get_breakdown_observer_results(self):
+        return get_breakdown_observer_results_impl(self)
+
     def get_frequency_solution(self, *, frequency=None, freq_index=None, all_frequencies=False):
         return get_frequency_solution_impl(
             self,
@@ -296,6 +318,21 @@ class FDTD:
 
     def _apply_magnetic_dispersive_corrections(self):
         apply_magnetic_dispersive_corrections_impl(self)
+
+    def _initialize_gyromagnetic_state(self):
+        initialize_gyromagnetic_state_impl(self)
+
+    def _advance_gyromagnetic_state(self):
+        advance_gyromagnetic_state_impl(self)
+
+    def _apply_gyromagnetic_correction(self):
+        apply_gyromagnetic_correction_impl(self)
+
+    def _snapshot_gyromagnetic_drive(self):
+        snapshot_gyromagnetic_drive_impl(self)
+
+    def _step_gyromagnetic_coupled(self):
+        step_gyromagnetic_coupled_impl(self)
 
     def _build_update_coefficients(self):
         build_update_coefficients_impl(self)
@@ -456,6 +493,8 @@ class FDTD:
         shutoff: float = 0.0,
         shutoff_check_interval: int = 100,
         use_cuda_graph: bool = False,
+        resume_from=None,
+        stop_step: int | None = None,
     ):
         return solve_impl(
             self,
@@ -468,6 +507,8 @@ class FDTD:
             shutoff=shutoff,
             shutoff_check_interval=shutoff_check_interval,
             use_cuda_graph=use_cuda_graph,
+            resume_from=resume_from,
+            stop_step=stop_step,
         )
 
     def _interpolate_yee_to_center(self, freq_solution):

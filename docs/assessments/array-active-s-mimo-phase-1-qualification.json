@@ -1,0 +1,84 @@
+{
+  "qualifying": true,
+  "verdict": "PASS",
+  "verdict_detail": "Frozen 96^3 3-warmup/5-sample/4-round qualification passed end to end under the corrected flux/observer convention (commit 1cc4a71: Yee-staggered E-plain/H-retard observer DFT and full-primal NF2FF quadrature). The physical power closure |P_accepted - P_rad| / P_incident is 6.971e-4 (0.0697%), well inside the 1% frozen gate, restoring the recorded commit 3223e0c value of 6.997e-4 (0.07%) after the plain-plain-convention regression that measured 2.865% on 4b24b60. All numerical gates pass with wide margin. The timing loop was reached and passed: basis+16-combine is 20.55% of 16 direct solves (gate <= 40%) and one combine is 0.0343% of one direct solve (gate < 10%). Combining beams executes zero additional FDTD steps (combine is a pure einsum). The 3/5/4 protocol is exact, so this is a qualifying run.",
+  "protocol": {
+    "warmups": 3,
+    "samples": 5,
+    "alternating_rounds": 4,
+    "note": "Full frozen protocol executed: numerical gates asserted first, then the timing loop."
+  },
+  "host": {
+    "current": "2x NVIDIA RTX A6000 (50899386368 bytes), driver 595.71.05, torch 2.13.0+cu130, CUDA 13.0, run on one GPU (CUDA_VISIBLE_DEVICES=0), numactl --cpunodebind=0 --membind=0, governor performance, no competing compute processes",
+    "previous_recorded": "NVIDIA GeForce RTX 5080 (16303 MiB), driver 596.49, torch 2.10, CUDA 12.8",
+    "re_anchor_reason": "The frozen performance contract host is re-anchored from the retired RTX 5080 to this 2x A6000 host per the plan re-qualification host rule. The re-anchor is authorized because this qualification passed every gate, including the physical power-closure gate that failed under the since-corrected plain-plain observer convention. AcceptanceBudget.local_hardware is updated to name this host."
+  },
+  "hardware": {
+    "device": "NVIDIA RTX A6000",
+    "total_memory_bytes": 50899386368,
+    "driver": "595.71.05",
+    "pci_bus": "00000000:17:00.0",
+    "torch": "2.13.0+cu130",
+    "cuda_runtime": "13.0"
+  },
+  "metrics": {
+    "comparisons": {
+      "broadside": {
+        "weighted_complex_l2": 7.855876798619947e-07,
+        "phase_rms_deg": 4.6047930132814135e-05,
+        "incident_power_wave_relative_error": 1.0402730676872807e-07,
+        "reflected_power_wave_relative_error": 9.952144954943329e-08,
+        "accepted_power_relative_error": 9.993349871014173e-08
+      },
+      "endfire": {
+        "weighted_complex_l2": 8.836660116313102e-07,
+        "phase_rms_deg": 6.524240079281697e-05,
+        "incident_power_wave_relative_error": 1.3341992843862727e-08,
+        "reflected_power_wave_relative_error": 7.030903752428457e-08,
+        "accepted_power_relative_error": 6.718344597740954e-08
+      }
+    },
+    "max_physical_power_residual": 0.0006970792852593055,
+    "radiated_power_min_eigenvalue": 0.45640246308647925,
+    "radiated_power_max_eigenvalue": 0.9546679871217081,
+    "radiated_power_min_eigenvalue_ratio": 0.4780745444942774,
+    "grid_cells": [96, 96, 96],
+    "pml_cells_per_face": 8,
+    "steps": 4096,
+    "angular_shape": [181, 361],
+    "beam_count": 16
+  },
+  "timings": {
+    "warmups": 3,
+    "samples_per_round": 5,
+    "alternating_rounds": 4,
+    "basis_plus_16_combine_seconds_median": 24.526841796875,
+    "sixteen_direct_seconds_median": 119.3613046875,
+    "sixteen_combine_seconds_median": 0.0025614880323410034,
+    "basis_to_direct_ratio": 0.20548402902505766,
+    "combine_to_one_solve_ratio": 0.00034335925386167507
+  },
+  "budget": {
+    "phase1_fdtd_complex_l2": 0.0001,
+    "phase1_fdtd_phase_rms_deg": 0.01,
+    "port_power_relative_error": 0.005,
+    "physical_power_residual": 0.01,
+    "radiated_power_psd_relative_floor": 1e-09,
+    "phase1_basis_direct_time_ratio": 0.4,
+    "phase1_combine_solve_time_ratio": 0.1
+  },
+  "gate_evaluation": {
+    "broadside_weighted_complex_l2": "PASS",
+    "endfire_weighted_complex_l2": "PASS",
+    "broadside_phase_rms_deg": "PASS",
+    "endfire_phase_rms_deg": "PASS",
+    "port_powers": "PASS",
+    "max_physical_power_residual": "PASS",
+    "radiated_power_psd": "PASS",
+    "grid_pml_steps_angular_beams": "PASS",
+    "timing_basis_direct_ratio": "PASS",
+    "timing_combine_solve_ratio": "PASS",
+    "timing_zero_extra_steps": "PASS"
+  },
+  "date": "2026-07-18"
+}

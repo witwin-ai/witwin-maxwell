@@ -202,6 +202,11 @@ def _plane_metadata_template(payload: Mapping[str, Any]) -> dict[str, Any]:
         "component",
         "data",
         "coords",
+        # ``cell_widths`` is a per-shard local quadrature table; the tiled merge
+        # reassembles the global plane coordinates below, so a shard-local copy
+        # here would be stale (wrong length). Dropping it lets the flux
+        # integration derive cell-center weights from the merged coordinates.
+        "cell_widths",
         "x",
         "y",
         "z",

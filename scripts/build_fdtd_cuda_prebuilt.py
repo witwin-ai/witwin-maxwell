@@ -43,7 +43,7 @@ def main() -> None:
     build_dir = Path(
         os.environ.get(
             "WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR",
-            Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda_wheel" / "stable_abi_v2",
+            Path(tempfile.gettempdir()) / "witwin_maxwell_fdtd_cuda_wheel" / "stable_abi_v3",
         )
     )
     os.environ["WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR"] = str(build_dir)

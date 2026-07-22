@@ -10,6 +10,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+.build/
 develop-eggs/
 dist/
 downloads/
@@ -240,3 +241,5 @@ benchmark/
 .codex-tmp/
 .test-tmp/
 .tmp/
+experiments/
+.worktrees/

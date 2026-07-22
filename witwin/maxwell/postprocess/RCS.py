@@ -6,7 +6,8 @@ from collections.abc import Mapping
 import torch
 
 from ..sources import CW, GaussianPulse, PlaneWave, RickerWavelet
-from .stratton_chu import _resolve_real_dtype, _resolve_tensor_device, _to_real_tensor
+from ..constants import resolve_real_dtype
+from .stratton_chu import _resolve_tensor_device, _to_real_tensor
 
 
 def _resolve_frequency(far_field, source=None):
@@ -59,7 +60,7 @@ def infer_incident_plane_wave_amplitude(*, source=None, scene=None, result=None)
 
 def _scattered_field_magnitude_sq(far_field) -> torch.Tensor:
     device = _resolve_tensor_device(far_field.get("E_theta"), far_field.get("E_phi"), far_field.get("E"))
-    dtype = _resolve_real_dtype(far_field.get("E_theta"), far_field.get("E_phi"), far_field.get("E"))
+    dtype = resolve_real_dtype(far_field.get("E_theta"), far_field.get("E_phi"), far_field.get("E"))
     complex_dtype = torch.complex64 if dtype in {torch.float16, torch.bfloat16, torch.float32} else torch.complex128
     if "E_theta" in far_field or "E_phi" in far_field:
         e_theta = torch.as_tensor(far_field.get("E_theta", 0.0), device=device, dtype=complex_dtype)
@@ -93,7 +94,7 @@ def compute_bistatic_rcs(
     c_value = _resolve_c(solver=solver, c=c)
     wavelength = c_value / frequency_value
     device = _resolve_tensor_device(far_field.get("radius"), incident_amplitude)
-    dtype = _resolve_real_dtype(far_field.get("radius"), incident_amplitude)
+    dtype = resolve_real_dtype(far_field.get("radius"), incident_amplitude)
     radius = _to_real_tensor(far_field["radius"], device=device, dtype=dtype)
     incident_amplitude_tensor = _to_real_tensor(incident_amplitude, device=device, dtype=dtype)
     if float(torch.abs(incident_amplitude_tensor).item()) <= 0.0:

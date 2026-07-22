@@ -156,8 +156,19 @@ def _lossy_metal() -> Material:
     return LossyMetalMedium(conductivity=6.0e7)
 
 
+def _gyromagnetic() -> Material:
+    return mw.GyromagneticFerrite(
+        eps_r=14.5, saturation_magnetization=1.40e5, bias_field=(0.0, 0.0, 1.75e5),
+        gilbert_damping=2.0e-3,
+    )
+
+
 def _sigma_e() -> Material:
     return Material(eps_r=2.0, sigma_e=50.0)
+
+
+def _tissue() -> Material:
+    return Material(eps_r=41.4, sigma_e=0.87, mass_density=1100.0)
 
 
 def _sigma_e_dispersive() -> Material:
@@ -251,10 +262,30 @@ MEDIA_VALIDATION: dict[str, MediumValidation] = {
         "SIBC metal exports as td.LossyMetalMedium (needs export frequencies).",
         export_frequencies=(2.0e14,),
     ),
+    "is_gyromagnetic": MediumValidation(
+        "is_gyromagnetic", FDTD_ANALYTIC,
+        "tests/materials/ferrite/test_ferrite_reference.py", _gyromagnetic, False,
+        "Non-reciprocal Polder-tensor ferrite validated against an independent torch LLG "
+        "analytic oracle (Polder tensor, precession handedness, passivity); Tidy3D has no "
+        "gyromagnetic model.",
+    ),
     # --- physically-distinct sub-capabilities (explicit, non-flag keys) ------
     "conductive_sigma_e": MediumValidation(
         "conductive_sigma_e", TIDY3D, _ADAPTER_TEST, _sigma_e, True,
         "Static electric conductivity exports via Medium.conductivity [S/um].",
+    ),
+    "has_mass_density": MediumValidation(
+        "has_mass_density", FDTD_ANALYTIC, "tests/sar/test_point_sar.py", _tissue, True,
+        "SAR-only mass channel: point SAR matches sigma|E|^2/(2 rho) analytically and the "
+        "volume-integrated absorbed power closes against PowerLossData. The probe's EM "
+        "content (eps + sigma_e) exports faithfully; mass_density is postprocess-only "
+        "metadata that never affects exported EM physics, so export need not raise.",
+    ),
+    "is_electrically_lossy": MediumValidation(
+        "is_electrically_lossy", FDTD_ANALYTIC, "tests/sar/test_point_sar.py", _sigma_e, True,
+        "Derived aggregate flag (conduction/dispersion/nonlinear electric loss); the "
+        "conduction case is covered by conductive_sigma_e export plus the SAR "
+        "dissipation-closure gate that consumes the same PowerLossData channels.",
     ),
     "conductive_sigma_e_dispersive": MediumValidation(
         "conductive_sigma_e_dispersive", TIDY3D, "sigma_e_drude_slab", _sigma_e_dispersive, True,

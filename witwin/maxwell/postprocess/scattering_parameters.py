@@ -5,10 +5,10 @@ from collections.abc import Mapping
 import numpy as np
 import torch
 
+from ..constants import C_0, MU_0
 from ..sources import CW, PlaneWave, TFSF, evaluate_source_time
 from .stratton_chu import _trapz_weights_1d
 
-_MU0 = 4.0 * torch.pi * 1e-7
 _POWER_EPS = 1e-30
 _COORD_NAMES = {
     "x": ("y", "z"),
@@ -237,8 +237,8 @@ def _plane_wave_incident_power(result, incident_monitor: str, frequencies: torch
     source_time = source.source_time
 
     solver = getattr(result, "solver", None)
-    c_value = float(getattr(solver, "c", getattr(solver, "c0", 299792458.0)))
-    eta0 = float(_MU0) * c_value
+    c_value = float(getattr(solver, "c", getattr(solver, "c0", C_0)))
+    eta0 = MU_0 * c_value
     area = _incident_beam_area(source, result, incident_monitor)
 
     cw_amplitude = _plane_wave_cw_amplitude(source_time)
@@ -324,6 +324,18 @@ def compute_s_parameters(
             "Check monitor orientation, source spectrum, or the supplied normalization."
         )
 
+    # Reflected power by flux subtraction.  This is exact for the postprocessor
+    # algebra but ill-conditioned as a physical estimator when the reflection is
+    # weak: P_reflected is the difference of two ~equal plane fluxes, so a small
+    # relative error in either flux is amplified in S11.  The plane flux uses the
+    # Yee-staggered E and H (E on the normal node, H a half cell ahead); the
+    # leading spatial-colocation factor cos(k~*dx/2) that a fully co-located
+    # Re(E x H*) would carry is ~1 at a resolved grid and cancels in the
+    # DUT/reference ratio, so it does not bias S11 -- but the residual
+    # standing-wave-phase-dependent cancellation error does not vanish and
+    # oscillates about the analytic value with resolution.  Weak-reflection S11
+    # from a single flux plane should therefore be read at the grid-dispersion
+    # tolerance of that cancellation, not as a converged value.
     reflected_power = torch.abs(incident_flux - incident_power_array)
     s11_mag = torch.sqrt(reflected_power / incident_power_array)
     complex_dtype = torch.complex64 if s11_mag.dtype in {torch.float16, torch.bfloat16, torch.float32} else torch.complex128

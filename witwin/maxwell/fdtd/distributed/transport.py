@@ -7,6 +7,9 @@ from typing import Protocol
 import torch
 
 
+_CELL_COMPONENTS = frozenset(("Ex", "Hy", "Hz"))
+
+
 class _TransportShard(Protocol):
     rank: int
     device: torch.device
@@ -48,6 +51,84 @@ class HaloTransport(ABC):
     def exchange_magnetic(self, shards: tuple[_TransportShard, ...]) -> None:
         ...
 
+    @abstractmethod
+    def exchange_magnetic_adjoint(
+        self,
+        shards: tuple[_TransportShard, ...],
+        adjoint_states: tuple[dict, ...],
+    ) -> None:
+        """Transpose of :meth:`exchange_magnetic`.
+
+        The forward magnetic halo copies each left shard's last owned Hy/Hz cell
+        plane into the right neighbour's low ghost. Its transpose accumulates the
+        right neighbour's ghost adjoint plane back into the left owner's last cell
+        and then zeroes the ghost, so the ghost-adjoint-zero invariant the fused
+        reverse kernels rely on holds at the next phase boundary.
+        """
+        ...
+
+    @abstractmethod
+    def exchange_electric_adjoint(
+        self,
+        shards: tuple[_TransportShard, ...],
+        adjoint_states: tuple[dict, ...],
+    ) -> None:
+        """Transpose of :meth:`exchange_electric`.
+
+        The forward electric halo copies each right shard's first owned Ey/Ez node
+        plane into the left neighbour's ghost node. Its transpose accumulates the
+        left neighbour's ghost adjoint node plane back into the right owner's first
+        node and then zeroes the ghost.
+        """
+        ...
+
+    # -- cross-rank coordinator primitives ---------------------------------
+    #
+    # The time-step coordinator expresses every operation that reaches beyond a
+    # single rank through these primitives, so it never branches on the transport
+    # kind. The in-process transport implements them over its shard tuple; a
+    # one-process-per-GPU transport implements the same contract with collectives.
+
+    @abstractmethod
+    def reduce_owned_energy(self, engines: tuple[_TransportShard, ...]) -> torch.Tensor:
+        """Sum every rank's owned electric energy into one scalar.
+
+        Drives the shutoff-energy reduction. Each engine contributes
+        :meth:`ShardEngine.owned_electric_energy`; the transport returns the
+        global sum on the reduction device.
+        """
+        ...
+
+    @abstractmethod
+    def gather_component_slabs(
+        self,
+        engines: tuple[_TransportShard, ...],
+        component: str,
+        local_values: tuple[torch.Tensor, ...],
+        *,
+        result_device: torch.device,
+        global_nx: int,
+    ) -> torch.Tensor:
+        """Stitch each rank's owned x-slab of ``component`` into a global tensor."""
+        ...
+
+    @abstractmethod
+    def gather_monitor_payloads(self, engines: tuple[_TransportShard, ...]):
+        """Collect every rank's monitor payloads + DFT E fields in rank order.
+
+        Returns ``(shard_monitor_payloads, local_dft_fields, frequencies)`` where
+        ``shard_monitor_payloads`` is a rank-ordered ``[(rank, payload), ...]``,
+        ``local_dft_fields`` maps ``Ex/Ey/Ez`` to a rank-ordered list of owned
+        slabs, and ``frequencies`` is the cross-rank-consistent DFT frequency
+        tuple (or ``None`` when no DFT ran).
+        """
+        ...
+
+    @abstractmethod
+    def gather_stats(self, engines: tuple[_TransportShard, ...]) -> dict:
+        """Gather per-rank partitions, peak memory, and per-step halo bytes."""
+        ...
+
     def teardown(self) -> None:
         return None
 
@@ -57,8 +138,21 @@ class CudaP2PHaloTransport(HaloTransport):
 
     name = "cuda_p2p"
 
-    def __init__(self, devices: tuple[torch.device, ...]):
+    def __init__(
+        self,
+        devices: tuple[torch.device, ...],
+        *,
+        result_device: torch.device | str | None = None,
+    ):
         self.devices = tuple(torch.device(device) for device in devices)
+        self.result_device = (
+            torch.device(result_device) if result_device is not None else self.devices[0]
+        )
+        # Preallocated reverse-halo staging planes on the destination (owner)
+        # device, keyed by (kind, destination_rank). Allocated on first use and
+        # reused for every subsequent reverse step so no per-step allocation is
+        # introduced into the adjoint time loop.
+        self._adjoint_staging: dict[tuple[str, int], tuple[torch.Tensor, torch.Tensor]] = {}
         self.links = tuple(
             PeerLink(
                 source_rank=rank + 1,
@@ -142,6 +236,283 @@ class CudaP2PHaloTransport(HaloTransport):
                     source.solver.Hz[source_last], non_blocking=True
                 )
                 destination.magnetic_received.record(stream)
+
+    def forward_electric_halo(self, shards, current) -> None:
+        """Forward electric replay halo on a per-rank state dict (in-process).
+
+        Transpose sibling of :meth:`exchange_electric_adjoint`, operating on the
+        replay's ``current[rank]`` field-dict tensors rather than the live solver
+        fields: the right shard's first owned Ey/Ez node is copied into the left
+        shard's high ghost node. In-process every shard lives in this process, so
+        the copy iterates neighbour pairs directly; the byte-for-byte behaviour of
+        the previous module-level ``_forward_electric_halo`` is preserved so the
+        validated in-process replay parity is unchanged.
+        """
+
+        for destination, source in zip(shards[:-1], shards[1:]):
+            destination_state = current[destination.rank]
+            source_state = current[source.rank]
+            destination_ghost = destination.layout.storage_node_owned.stop
+            source_node = source.layout.storage_node_owned.start
+            with torch.cuda.device(destination.device):
+                destination_state["Ey"][destination_ghost].copy_(source_state["Ey"][source_node])
+                destination_state["Ez"][destination_ghost].copy_(source_state["Ez"][source_node])
+
+    def forward_magnetic_halo(self, shards, current) -> None:
+        """Forward magnetic replay halo on a per-rank state dict (in-process).
+
+        The left shard's last owned Hy/Hz cell is copied into the right shard's low
+        ghost cell (data flows left -> right), mirroring the forward magnetic halo.
+        Preserves the previous module-level ``_forward_magnetic_halo`` numerics.
+        """
+
+        for source, destination in zip(shards[:-1], shards[1:]):
+            source_state = current[source.rank]
+            destination_state = current[destination.rank]
+            source_last = source.layout.storage_cell_owned.stop - 1
+            with torch.cuda.device(destination.device):
+                destination_state["Hy"][0].copy_(source_state["Hy"][source_last])
+                destination_state["Hz"][0].copy_(source_state["Hz"][source_last])
+
+    def _staging_pair(
+        self,
+        kind: str,
+        destination_rank: int,
+        first: torch.Tensor,
+        second: torch.Tensor,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return preallocated staging planes matching the given ghost planes.
+
+        Allocated once per (kind, destination) and reused; a later call with an
+        incompatible plane shape/dtype is a programming error (the padded layout
+        is fixed at prepare) and rebuilds the buffer rather than silently
+        mismatching.
+        """
+        key = (kind, int(destination_rank))
+        cached = self._adjoint_staging.get(key)
+        if (
+            cached is None
+            or cached[0].shape != first.shape
+            or cached[1].shape != second.shape
+            or cached[0].dtype != first.dtype
+            or cached[1].dtype != second.dtype
+            or cached[0].device != device
+        ):
+            with torch.cuda.device(device):
+                cached = (
+                    torch.empty(first.shape, device=device, dtype=first.dtype),
+                    torch.empty(second.shape, device=device, dtype=second.dtype),
+                )
+            self._adjoint_staging[key] = cached
+        return cached
+
+    def prepare_adjoint_staging(
+        self,
+        shards: tuple[_TransportShard, ...],
+        adjoint_states: tuple[dict, ...],
+    ) -> None:
+        """Preallocate every reverse-halo staging plane before the reverse loop."""
+
+        for destination, source in zip(shards[:-1], shards[1:]):
+            source_state = adjoint_states[source.rank]
+            self._staging_pair(
+                "magnetic",
+                destination.rank,
+                source_state["Hy"][0],
+                source_state["Hz"][0],
+                destination.device,
+            )
+        for source, destination in zip(shards[:-1], shards[1:]):
+            source_state = adjoint_states[source.rank]
+            ghost = source.layout.storage_node_owned.stop
+            self._staging_pair(
+                "electric",
+                destination.rank,
+                source_state["Ey"][ghost],
+                source_state["Ez"][ghost],
+                destination.device,
+            )
+
+    def exchange_magnetic_adjoint(
+        self,
+        shards: tuple[_TransportShard, ...],
+        adjoint_states: tuple[dict, ...],
+    ) -> None:
+        # Producers: both the right shard's ghost adjoint plane and the left
+        # shard's owner plane are produced on the compute stream.
+        for shard in shards:
+            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
+                shard.magnetic_ready.record(shard.compute_stream)
+
+        for destination, source in zip(shards[:-1], shards[1:]):
+            source_state = adjoint_states[source.rank]
+            destination_state = adjoint_states[destination.rank]
+            source_ghost_hy = source_state["Hy"][0]
+            source_ghost_hz = source_state["Hz"][0]
+            staging_hy, staging_hz = self._staging_pair(
+                "magnetic",
+                destination.rank,
+                source_ghost_hy,
+                source_ghost_hz,
+                destination.device,
+            )
+            owner_cell = destination.layout.storage_cell_owned.stop - 1
+            comm = destination.communication_stream
+            with torch.cuda.device(destination.device), torch.cuda.stream(comm):
+                comm.wait_event(source.magnetic_ready)
+                comm.wait_event(destination.magnetic_ready)
+                staging_hy.copy_(source_ghost_hy, non_blocking=True)
+                staging_hz.copy_(source_ghost_hz, non_blocking=True)
+                destination.magnetic_received.record(comm)
+            with torch.cuda.device(destination.device), torch.cuda.stream(destination.compute_stream):
+                destination.compute_stream.wait_event(destination.magnetic_received)
+                destination_state["Hy"][owner_cell].add_(staging_hy)
+                destination_state["Hz"][owner_cell].add_(staging_hz)
+            with torch.cuda.device(source.device), torch.cuda.stream(source.compute_stream):
+                source.compute_stream.wait_event(destination.magnetic_received)
+                source_ghost_hy.zero_()
+                source_ghost_hz.zero_()
+
+    def exchange_electric_adjoint(
+        self,
+        shards: tuple[_TransportShard, ...],
+        adjoint_states: tuple[dict, ...],
+    ) -> None:
+        # Producers: the left shard's ghost node plane and the right shard's owner
+        # node plane are produced on the compute stream.
+        for shard in shards:
+            with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):
+                shard.electric_ready.record(shard.compute_stream)
+
+        for source, destination in zip(shards[:-1], shards[1:]):
+            source_state = adjoint_states[source.rank]
+            destination_state = adjoint_states[destination.rank]
+            source_ghost = source.layout.storage_node_owned.stop
+            owner_node = destination.layout.storage_node_owned.start
+            source_ghost_ey = source_state["Ey"][source_ghost]
+            source_ghost_ez = source_state["Ez"][source_ghost]
+            staging_ey, staging_ez = self._staging_pair(
+                "electric",
+                destination.rank,
+                source_ghost_ey,
+                source_ghost_ez,
+                destination.device,
+            )
+            comm = destination.communication_stream
+            with torch.cuda.device(destination.device), torch.cuda.stream(comm):
+                comm.wait_event(source.electric_ready)
+                comm.wait_event(destination.electric_ready)
+                staging_ey.copy_(source_ghost_ey, non_blocking=True)
+                staging_ez.copy_(source_ghost_ez, non_blocking=True)
+                destination.electric_received.record(comm)
+            with torch.cuda.device(destination.device), torch.cuda.stream(destination.compute_stream):
+                destination.compute_stream.wait_event(destination.electric_received)
+                destination_state["Ey"][owner_node].add_(staging_ey)
+                destination_state["Ez"][owner_node].add_(staging_ez)
+            with torch.cuda.device(source.device), torch.cuda.stream(source.compute_stream):
+                source.compute_stream.wait_event(destination.electric_received)
+                source_ghost_ey.zero_()
+                source_ghost_ez.zero_()
+
+    # -- cross-rank coordinator primitives ---------------------------------
+
+    def reduce_owned_energy(self, engines) -> torch.Tensor:
+        # Each engine computes its owned energy on its own compute stream and
+        # records ``electric_ready``; the reduction then orders its cross-device
+        # reads after those events on the result device before summing.
+        local_energies = [engine.owned_electric_energy() for engine in engines]
+        device = self.result_device
+        with torch.cuda.device(device):
+            result_stream = torch.cuda.current_stream(device)
+            total = torch.zeros((), device=device, dtype=torch.float32)
+            for engine, local in zip(engines, local_energies):
+                result_stream.wait_event(engine.electric_ready)
+                total.add_(local.to(device, non_blocking=True))
+            return total
+
+    def gather_component_slabs(
+        self,
+        engines,
+        component: str,
+        local_values,
+        *,
+        result_device,
+        global_nx: int,
+    ) -> torch.Tensor:
+        is_cell = component.capitalize() in _CELL_COMPONENTS
+        global_x = global_nx - 1 if is_cell else global_nx
+        sample = local_values[0]
+        x_axis = sample.ndim - 3
+        shape = list(sample.shape)
+        shape[x_axis] = global_x
+        destination = torch.empty(tuple(shape), device=result_device, dtype=sample.dtype)
+        for engine, value in zip(engines, local_values):
+            local_slice = (
+                engine.layout.storage_cell_owned if is_cell else engine.layout.storage_node_owned
+            )
+            global_slice = (
+                engine.layout.global_cell_owned if is_cell else engine.layout.global_node_owned
+            )
+            src_index = [slice(None)] * value.ndim
+            dst_index = [slice(None)] * destination.ndim
+            src_index[x_axis] = local_slice
+            dst_index[x_axis] = global_slice
+            destination[tuple(dst_index)].copy_(value[tuple(src_index)], non_blocking=True)
+        return destination
+
+    def gather_monitor_payloads(self, engines):
+        shard_monitor_payloads: list[tuple[int, dict]] = []
+        local_fields: dict[str, list] = {}
+        frequency_metadata: tuple[float, ...] | None = None
+        for engine in engines:
+            shard_monitors, engine_fields, frequencies = engine.collect_local_monitor_payload()
+            for name, tensor in engine_fields.items():
+                local_fields.setdefault(name, []).append(tensor)
+            if frequencies is not None:
+                if frequency_metadata is None:
+                    frequency_metadata = frequencies
+                elif frequency_metadata != frequencies:
+                    raise RuntimeError("Shard-local DFT frequency metadata is inconsistent.")
+            shard_monitor_payloads.append((engine.rank, shard_monitors))
+        return shard_monitor_payloads, local_fields, frequency_metadata
+
+    def gather_stats(self, engines) -> dict:
+        halo_bytes_per_step = 0
+        for left, right in zip(engines[:-1], engines[1:]):
+            halo_bytes_per_step += (
+                left.solver.Ey[-1].numel()
+                + left.solver.Ez[-1].numel()
+                + right.solver.Hy[0].numel()
+                + right.solver.Hz[0].numel()
+            ) * left.solver.Ex.element_size()
+        partitions = tuple(
+            {
+                "rank": engine.rank,
+                "device": str(engine.device),
+                "physical_cells": (
+                    engine.layout.physical_cell_begin,
+                    engine.layout.physical_cell_end,
+                ),
+                "global_cells": (
+                    engine.layout.global_cell_owned.start,
+                    engine.layout.global_cell_owned.stop,
+                ),
+                "global_nodes": (
+                    engine.layout.global_node_owned.start,
+                    engine.layout.global_node_owned.stop,
+                ),
+                "peak_memory_bytes": engine.peak_memory_bytes,
+            }
+            for engine in engines
+        )
+        return {
+            "halo_bytes_per_step": int(halo_bytes_per_step),
+            "partitions": partitions,
+            "peak_memory_bytes": {
+                str(engine.device): engine.peak_memory_bytes for engine in engines
+            },
+        }
 
     @property
     def topology(self) -> dict[str, object]:

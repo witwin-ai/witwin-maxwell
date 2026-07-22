@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from types import SimpleNamespace
 
 import torch
@@ -98,6 +99,25 @@ class _PortSeedBatch:
 
 
 @dataclass(frozen=True)
+class _CircuitSeedBatch:
+    circuit_index: int
+    node_samples: torch.Tensor
+    branch_samples: torch.Tensor
+    device_power_samples: torch.Tensor
+    balance_increment_samples: torch.Tensor
+    port_power_samples: torch.Tensor
+    field_energy_samples: torch.Tensor
+    dc_condition: torch.Tensor
+    last_condition: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _WireSeedBatch:
+    current_samples: torch.Tensor
+    charge_samples: torch.Tensor
+
+
+@dataclass(frozen=True)
 class _SeedRuntime:
     dft_schedule: _ScheduleTensorPack
     observer_schedule: _ScheduleTensorPack
@@ -105,6 +125,8 @@ class _SeedRuntime:
     point_batches: tuple[_PointSeedBatch, ...]
     plane_batches: tuple[_PlaneSeedBatch, ...]
     port_batches: tuple[_PortSeedBatch, ...]
+    circuit_batches: tuple[_CircuitSeedBatch, ...]
+    wire_batches: tuple[_WireSeedBatch, ...] = ()
     backend: str = "device_batched"
 
 
@@ -340,13 +362,13 @@ def _build_output_seeds(
     with torch.enable_grad():
         seed_solver, leaves, field_pairs, point_pairs, plane_pairs = _clone_seed_solver(solver)
         seed_pack = _dense_seed_output_pairs(seed_solver)
-        if len(seed_pack.output_tensors) != pack.port_offset:
+        if len(seed_pack.output_tensors) != pack.wire_offset:
             raise RuntimeError("Adjoint output pack layout changed between forward and backward.")
         output_grads = tuple(
             torch.zeros_like(output) if grad_output is None else grad_output.to(device=output.device, dtype=output.dtype)
             for output, grad_output in zip(
                 seed_pack.output_tensors,
-                grad_outputs[: pack.port_offset],
+                grad_outputs[: pack.wire_offset],
             )
         )
         leaf_grads = (
@@ -400,6 +422,13 @@ def _build_output_seeds(
         )
         entry_indices = torch.tensor(pair.global_indices, device=real_grad.device, dtype=torch.long)
         cos_pack, sin_pack = _schedule_pack_for(observer_schedule, entry_indices)
+        cos_pack, sin_pack = _shift_observer_schedule_for_field(
+            cos_pack,
+            sin_pack,
+            solver=solver,
+            entry_indices=entry_indices,
+            state_field_name=pair.state_field_name,
+        )
         point_i = pair.point_i.to(device=real_grad.device, dtype=torch.long)
         point_j = pair.point_j.to(device=real_grad.device, dtype=torch.long)
         point_k = pair.point_k.to(device=real_grad.device, dtype=torch.long)
@@ -433,6 +462,13 @@ def _build_output_seeds(
         )
         entry_indices = torch.tensor(pair.global_indices, device=real_grad.device, dtype=torch.long)
         cos_pack, sin_pack = _schedule_pack_for(observer_schedule, entry_indices)
+        cos_pack, sin_pack = _shift_observer_schedule_for_field(
+            cos_pack,
+            sin_pack,
+            solver=solver,
+            entry_indices=entry_indices,
+            state_field_name=pair.state_field_name,
+        )
         plane_batches.append(
             _PlaneSeedBatch(
                 state_field_name=pair.state_field_name,
@@ -443,6 +479,96 @@ def _build_output_seeds(
                 grad_imag=imag_grad,
                 cos_pack=cos_pack,
                 sin_pack=sin_pack,
+            )
+        )
+
+    wire_batches = []
+    wire_runtime = getattr(solver, "_wire_runtime", None)
+    if pack.wire_monitor_templates:
+        if wire_runtime is None:
+            raise RuntimeError("Wire output seeds require an initialized wire runtime.")
+        monitor_state = {
+            state["compiled"].name: state for state in wire_runtime.monitor_state
+        }
+        entries = [
+            entry
+            for state in wire_runtime.monitor_state
+            for entry in state["entries"]
+        ]
+        time_steps = max((int(entry["end_step"]) for entry in entries), default=0)
+        current_samples = torch.zeros(
+            (time_steps, wire_runtime.current.numel()),
+            device=solver.device,
+            dtype=solver.Ex.dtype,
+        )
+        charge_samples = torch.zeros(
+            (time_steps, wire_runtime.charge.numel()),
+            device=solver.device,
+            dtype=solver.Ex.dtype,
+        )
+        for monitor_name, template in pack.wire_monitor_templates.items():
+            state = monitor_state[monitor_name]
+            quantity_indices = template["quantity_indices"]
+            for quantity, target, indices_key, shift in (
+                ("current", current_samples, "segment_indices", 0.5),
+                ("charge", charge_samples, "node_indices", 1.0),
+            ):
+                output_index = quantity_indices.get(quantity)
+                if output_index is None:
+                    continue
+                output = pack.output_tensors[output_index]
+                gradient = grad_outputs[output_index]
+                gradient = (
+                    torch.zeros_like(output)
+                    if gradient is None
+                    else gradient.to(device=output.device, dtype=output.dtype)
+                )
+                cos_rows = []
+                sin_rows = []
+                for step_index in range(time_steps):
+                    cos_values = []
+                    sin_values = []
+                    for entry in state["entries"]:
+                        active = int(entry["start_step"]) <= step_index < int(entry["end_step"])
+                        window = (
+                            solver._compute_window_weight(
+                                step_index,
+                                start_step=int(entry["start_step"]),
+                                end_step=int(entry["end_step"]),
+                                window_type=solver.observer_window_type,
+                            )
+                            if active
+                            else 0.0
+                        )
+                        normalization = float(entry["window_normalization"])
+                        scale = 2.0 * window / normalization if normalization > 0.0 else 0.0
+                        omega_dt = (
+                            2.0
+                            * math.pi
+                            * float(entry["frequency"])
+                            * float(solver.dt)
+                        )
+                        angle = omega_dt * (step_index + shift)
+                        cos_values.append(scale * math.cos(angle))
+                        sin_values.append(scale * math.sin(angle))
+                    cos_rows.append(cos_values)
+                    sin_rows.append(sin_values)
+                cos_weights = torch.tensor(
+                    cos_rows, device=solver.device, dtype=solver.Ex.dtype
+                )
+                sin_weights = torch.tensor(
+                    sin_rows, device=solver.device, dtype=solver.Ex.dtype
+                )
+                sample_gradient = (
+                    cos_weights @ gradient.real
+                    + sin_weights @ gradient.imag
+                )
+                indices = state[indices_key].to(device=solver.device, dtype=torch.long)
+                target[:, indices] = target[:, indices] + sample_gradient
+        wire_batches.append(
+            _WireSeedBatch(
+                current_samples=current_samples,
+                charge_samples=charge_samples,
             )
         )
 
@@ -493,28 +619,70 @@ def _build_output_seeds(
             device=weights.device,
             dtype=weights.dtype,
         )
-        sample_times = (steps + 0.5) * port_runtime.lumped.dt.to(dtype=weights.dtype)
-        angles = (
-            2.0
-            * torch.pi
-            * sample_times[:, None]
-            * port_runtime.frequencies[None, :]
-        )
+        if port_runtime.lumped is not None:
+            # Lumped and wire-bound ports: honor the substep macro step and the
+            # Yee E/H stagger. Current samples live on the magnetic half-step;
+            # wire-bound voltage samples advance to the full electric step.
+            macro_dt = port_runtime.lumped.dt * float(port_runtime.substeps)
+            magnetic_times = (steps + 0.5) * macro_dt.to(dtype=weights.dtype)
+            electric_times = (
+                (steps + 1.0) * macro_dt.to(dtype=weights.dtype)
+                if port_runtime.wire_provider is not None
+                else magnetic_times
+            )
+            voltage_angles = (
+                2.0
+                * torch.pi
+                * electric_times[:, None]
+                * port_runtime.frequencies[None, :]
+            )
+            magnetic_angles = (
+                2.0
+                * torch.pi
+                * magnetic_times[:, None]
+                * port_runtime.frequencies[None, :]
+            )
+        else:
+            # Circuit-coupled ports sample voltage and current at the shared
+            # integration midpoint dictated by the circuit runtime.
+            coupling = port_runtime.circuit_port.field
+            circuit_runtime = next(
+                runtime
+                for runtime in getattr(solver, "_circuit_runtimes", ())
+                if port_runtime.circuit_port in runtime.ports
+            )
+            fractions = torch.as_tensor(
+                tuple(
+                    0.5 if integration == "trapezoidal" else 1.0
+                    for integration in circuit_runtime.integration_keys
+                ),
+                device=weights.device,
+                dtype=weights.dtype,
+            )
+            sample_times = (steps + fractions) * coupling.dt.to(dtype=weights.dtype)
+            angles = (
+                2.0
+                * torch.pi
+                * sample_times[:, None]
+                * port_runtime.frequencies[None, :]
+            )
+            voltage_angles = angles
+            magnetic_angles = angles
         scale = 2.0 / port_runtime.accumulator._window_weight_sum
         weighted_scale = weights * scale[None, :]
         voltage_samples = torch.sum(
             weighted_scale
             * (
-                voltage_grad.real[None, :] * torch.cos(angles)
-                + voltage_grad.imag[None, :] * torch.sin(angles)
+                voltage_grad.real[None, :] * torch.cos(voltage_angles)
+                + voltage_grad.imag[None, :] * torch.sin(voltage_angles)
             ),
             dim=1,
         )
         current_samples = torch.sum(
             weighted_scale
             * (
-                current_grad.real[None, :] * torch.cos(angles)
-                + current_grad.imag[None, :] * torch.sin(angles)
+                current_grad.real[None, :] * torch.cos(magnetic_angles)
+                + current_grad.imag[None, :] * torch.sin(magnetic_angles)
             ),
             dim=1,
         )
@@ -533,8 +701,8 @@ def _build_output_seeds(
             drive_samples = torch.sum(
                 weighted_scale
                 * (
-                    source_voltage_grad.real[None, :] * torch.cos(angles)
-                    + source_voltage_grad.imag[None, :] * torch.sin(angles)
+                    source_voltage_grad.real[None, :] * torch.cos(magnetic_angles)
+                    + source_voltage_grad.imag[None, :] * torch.sin(magnetic_angles)
                 ),
                 dim=1,
             )
@@ -547,6 +715,102 @@ def _build_output_seeds(
             )
         )
 
+    circuit_batches = []
+    if cursor != int(pack.circuit_offset):
+        raise RuntimeError("Adjoint port output layout changed before circuit seed construction.")
+    for circuit_index, circuit_name in enumerate(pack.circuit_templates):
+        template = pack.circuit_templates[circuit_name]
+        node_output = pack.output_tensors[cursor]
+        branch_output = pack.output_tensors[cursor + 1]
+        node_grad = (
+            torch.zeros_like(node_output)
+            if grad_outputs[cursor] is None
+            else grad_outputs[cursor].to(device=node_output.device, dtype=node_output.dtype)
+        )
+        branch_grad = (
+            torch.zeros_like(branch_output)
+            if grad_outputs[cursor + 1] is None
+            else grad_outputs[cursor + 1].to(
+                device=branch_output.device,
+                dtype=branch_output.dtype,
+            )
+        )
+        cursor += 2
+        device_power_grads = []
+        for _device_name in template.device_powers:
+            output = pack.output_tensors[cursor]
+            gradient = grad_outputs[cursor]
+            device_power_grads.append(
+                torch.zeros_like(output)
+                if gradient is None
+                else gradient.to(device=output.device, dtype=output.dtype)
+            )
+            cursor += 1
+        device_power_grad = (
+            torch.stack(device_power_grads, dim=1)
+            if device_power_grads
+            else node_output.new_zeros((node_output.shape[0], 0))
+        )
+        if template.energy_balance is None:
+            energy_grad = node_output.new_zeros((node_output.shape[0],))
+        else:
+            energy_output = pack.output_tensors[cursor]
+            energy_grad = (
+                torch.zeros_like(energy_output)
+                if grad_outputs[cursor] is None
+                else grad_outputs[cursor].to(
+                    device=energy_output.device,
+                    dtype=energy_output.dtype,
+                )
+            )
+            cursor += 1
+        diagnostic_grads = {}
+        for diagnostic_name in pack.circuit_diagnostic_names[circuit_name]:
+            output = pack.output_tensors[cursor]
+            gradient = grad_outputs[cursor]
+            diagnostic_grads[diagnostic_name] = (
+                torch.zeros_like(output)
+                if gradient is None
+                else gradient.to(device=output.device, dtype=output.dtype)
+            )
+            cursor += 1
+        port_power_grad = diagnostic_grads["port_powers"]
+        field_energy_grad = diagnostic_grads["field_energy_changes"]
+        field_energy_grad = field_energy_grad + diagnostic_grads[
+            "field_energy_change_total"
+        ].unsqueeze(1)
+        initial_seeds = (
+            node_grad[0],
+            branch_grad[0],
+            device_power_grad[0],
+            energy_grad[0],
+            port_power_grad[0],
+            field_energy_grad[0],
+        )
+        if any(bool(torch.any(seed != 0.0)) for seed in initial_seeds):
+            raise RuntimeError(
+                f"Differentiable CircuitData for {circuit_name!r} does not accept a t=0 "
+                "tensor seed; the coupled adjoint starts from the explicitly zero "
+                "companion state. Slice samples from index 1 or use port/field outputs."
+            )
+        balance_increment_grad = torch.flip(
+            torch.cumsum(torch.flip(energy_grad, dims=(0,)), dim=0),
+            dims=(0,),
+        )
+        circuit_batches.append(
+            _CircuitSeedBatch(
+                circuit_index=circuit_index,
+                node_samples=node_grad,
+                branch_samples=branch_grad,
+                device_power_samples=device_power_grad,
+                balance_increment_samples=balance_increment_grad,
+                port_power_samples=port_power_grad,
+                field_energy_samples=field_energy_grad,
+                dc_condition=diagnostic_grads["dc_condition"],
+                last_condition=diagnostic_grads["last_condition"],
+            )
+        )
+
     return _SeedRuntime(
         dft_schedule=dft_schedule,
         observer_schedule=observer_schedule,
@@ -554,6 +818,8 @@ def _build_output_seeds(
         point_batches=tuple(point_batches),
         plane_batches=tuple(plane_batches),
         port_batches=tuple(port_batches),
+        circuit_batches=tuple(circuit_batches),
+        wire_batches=tuple(wire_batches),
     )
 
 
@@ -565,6 +831,30 @@ def _port_sample_adjoints(seed_runtime: _SeedRuntime, step_index: int):
             batch.drive_samples[step_index],
         )
         for batch in seed_runtime.port_batches
+    }
+
+
+def _circuit_sample_adjoints(seed_runtime: _SeedRuntime, step_index: int):
+    return {
+        batch.circuit_index: (
+            batch.node_samples[step_index + 1],
+            batch.branch_samples[step_index + 1],
+            batch.device_power_samples[step_index + 1],
+            batch.balance_increment_samples[step_index + 1],
+            batch.port_power_samples[step_index + 1],
+            batch.field_energy_samples[step_index + 1],
+            (
+                batch.dc_condition
+                if step_index == 0
+                else torch.zeros_like(batch.dc_condition)
+            ),
+            (
+                batch.last_condition
+                if step_index + 2 == batch.node_samples.shape[0]
+                else torch.zeros_like(batch.last_condition)
+            ),
+        )
+        for batch in seed_runtime.circuit_batches
     }
 
 
@@ -585,6 +875,48 @@ def _schedule_pack_for(
     cos = schedule.cos.index_select(0, entry_indices).contiguous()
     sin = schedule.sin.index_select(0, entry_indices).contiguous()
     return cos, sin
+
+
+def _shift_observer_schedule_for_field(
+    cos_pack: torch.Tensor,
+    sin_pack: torch.Tensor,
+    *,
+    solver,
+    entry_indices: torch.Tensor,
+    state_field_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Adjoint transpose of the forward observer running-DFT schedule.
+
+    The forward pass (observers.py::accumulate_observers) keeps the electric
+    observers on the plain running-DFT step phase (offset 0) and retards the
+    magnetic observers by a half step (an extra ``-0.5*omega*dt`` phase). The
+    exact adjoint transpose reuses the identical per-step weights, so this
+    function is the mirror image: electric fields pass through unshifted, while
+    magnetic (``H*``) fields have their ``(cos, sin)`` schedule rotated by the
+    same ``-0.5*omega*dt`` angle per entry. The rotation commutes with the
+    common window weight, so applying it to the schedule pack reproduces the
+    forward ``group_cos``/``group_sin`` weights column-for-column.
+    """
+
+    if (
+        state_field_name.startswith("E")
+        or entry_indices.numel() == 0
+        or cos_pack.numel() == 0
+    ):
+        return cos_pack, sin_pack
+
+    entries = solver._observer_spectral_entries
+    frequencies = torch.tensor(
+        [float(entries[int(index)]["frequency"]) for index in entry_indices.tolist()],
+        device=cos_pack.device,
+        dtype=cos_pack.dtype,
+    )
+    phase_offset = (-0.5 * 2.0 * math.pi * float(solver.dt)) * frequencies
+    offset_cos = torch.cos(phase_offset).view(-1, 1)
+    offset_sin = torch.sin(phase_offset).view(-1, 1)
+    shifted_cos = cos_pack * offset_cos - sin_pack * offset_sin
+    shifted_sin = sin_pack * offset_cos + cos_pack * offset_sin
+    return shifted_cos, shifted_sin
 
 
 def _apply_dense_seeds_native(_cuda_backend, adj_state, seed_runtime: _SeedRuntime, step_index):
@@ -651,3 +983,12 @@ def _apply_seed_runtime(adj_state, seed_runtime: _SeedRuntime, step_index):
     _apply_dense_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
     _apply_point_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
     _apply_plane_seeds_native(cuda_backend, adj_state, seed_runtime, step_index)
+    for batch in seed_runtime.wire_batches:
+        cuda_backend._accumulate_in_place(
+            dst=adj_state["wire_current"],
+            src=batch.current_samples[step_index].contiguous(),
+        )
+        cuda_backend._accumulate_in_place(
+            dst=adj_state["wire_charge"],
+            src=batch.charge_samples[step_index].contiguous(),
+        )
