@@ -234,3 +234,9 @@ __marimo__/
 docs/
 assets/
 benchmark/
+
+# Repository-local agent and test scratch directories
+.codex_tmp/
+.codex-tmp/
+.test-tmp/
+.tmp/
