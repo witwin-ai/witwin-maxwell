@@ -308,9 +308,44 @@ Scope, so you know what did *not* change:
 
 `Simulation.fdtd(..., cuda_graph=True)` is the default. The per-step field-update
 core is captured into a CUDA graph, with the pre-existing graceful eager fallback
-when capture is not possible. Measured at the commit that flipped the default: +29%
-throughput at 96³, neutral at 288³, +8–14% peak memory. Pass `cuda_graph=False` to
-force eager stepping.
+when capture is not possible. Pass `cuda_graph=False` to force eager stepping.
+
+**What the default actually buys you.** Measured on the shipped tree (2× RTX A6000,
+driver 595.71.05, plain vacuum dipole scene, CPML 8 layers, steady-state ms/step from
+a two-point slope so graph capture is excluded, 7 paired ABBA rounds per point):
+
+| grid | graph ms/step | eager ms/step | throughput gain | one-sided CI95 | A/A floor | peak memory |
+|---|---:|---:|---:|---:|---:|---:|
+| 48³  | 0.0792 | 0.1643 | **+106.8%** | +105.1 … +108.4% | 1.253% | +21.1% |
+| 64³  | 0.1618 | 0.1663 | +2.70% | +2.67 … +2.74% | 0.688% | +20.9% |
+| 96³  | 0.2774 | 0.2818 | +1.60% | +1.53 … +1.68% | 0.051% | +9.4% |
+| 128³ | 0.5681 | 0.5735 | +0.94% | +0.89 … +0.99% | 0.036% | +9.0% |
+| 160³ | 0.9699 | 0.9752 | +0.55% | +0.53 … +0.56% | 0.024% | +8.5% |
+| 288³ | 4.5106 | 4.5159 | +0.12% | +0.10 … +0.13% | 0.009% | +8.1% |
+
+Every point is above its A/A resolution floor, so the graph default is never slower
+on this host — but the win is concentrated entirely at the small-grid end. The
+mechanism is visible in the eager column: eager stepping bottoms out at a **CPU
+launch-bound floor of ~0.165 ms/step** (48³ and 64³ cost eager the same despite a
+2.4× cell-count difference). Below that floor the graph replay is the only way to go
+faster, hence +107% at 48³; from 64³ up the step is GPU-bound and the gain decays
+monotonically from +2.7% to +0.1%. Graph capture itself costs 2.2–16.6 ms once per
+solve.
+
+Peak allocated memory is **+8.1% to +21.1%** for the graph path, largest at the
+smallest grids where the fixed graph-side buffers are not amortized.
+
+Artifact and reproduction command:
+`docs/assessments/cuda-graph-throughput-2026-07-22.json`; driver
+`docs/assessments/cuda-graph-throughput-probes/cuda_graph_throughput.py`.
+
+*This supersedes the "+29% at 96³" figure quoted from the commit that flipped the
+default.* That number was never backed by a tracked measurement and does not
+reproduce on the shipped tree: 96³ measures **+1.6%**. The most likely reason is the
+0.4.0 kernel work itself — the uniform-coefficient scalar fast path and the
+compressed-CPML interior kernels cut the eager path's per-step launch count, which
+moved the launch-bound crossover down to roughly 64³ and left much less for the graph
+to recover. "Neutral at 288³" does hold (+0.12%).
 
 Three consequences:
 
@@ -333,7 +368,11 @@ Three consequences:
    the small-grid graph speedup. Serial plans (`max_concurrency == 1`) keep it.
    Distributed (`parallel=...`) configs force graphs off as before.
 
-Source: `docs/assessments/j1-perf-regression-fixes-2026-07-22.md`.
+Note that consequence 3 gives up a gain that is only material below ~64³ — see the
+throughput table above.
+
+Sources: `docs/assessments/j1-perf-regression-fixes-2026-07-22.md`,
+`docs/assessments/cuda-graph-throughput-2026-07-22.json`.
 
 ### 3.3 `ETA_0` restored to the CODATA literal
 

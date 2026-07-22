@@ -1,0 +1,2953 @@
+{
+  "schema_version": 1,
+  "kind": "cuda_graph_throughput",
+  "title": "CUDA-graph vs eager FDTD stepping throughput (0.4.0 release-notes basis)",
+  "timestamp_utc": "2026-07-22T12:54:41.062518+00:00",
+  "git_sha": "1669b10d3de0b79d464ea55d82ffab11e0f6bbdc",
+  "git_dirty_paths": [
+    "?? scratch/"
+  ],
+  "claim_under_test": "release-notes-0.4.0 section 3.2, inherited unmeasured from commit 9650439: '+29% throughput at 96^3, neutral at 288^3, +8-14% peak memory'",
+  "method": "Public knob Simulation.fdtd(cuda_graph=...) forwarded to solve(use_cuda_graph=...). Steady-state ms/step from a two-point slope (T(2S)-T(S))/S so graph capture and every other one-shot cost cancels. CUDA-event timing with explicit synchronize. N paired ABBA rounds per grid; A/A calibration legs (graph-vs-graph and eager-vs-eager) at every grid give the resolution floor. Peak memory measured in a separate untimed pass with reset_peak_memory_stats + gc + empty_cache.",
+  "scene": "vacuum cube 0.6 m, uniform cell = 0.6/N, CPML 8 layers, one Ez Gaussian point dipole at 1 GHz, one point monitor; no dispersion/ports/networks/wires",
+  "driver": "docs/assessments/cuda-graph-throughput-probes/cuda_graph_throughput.py",
+  "command": "CUDA_VISIBLE_DEVICES=0 numactl --cpunodebind=0 --membind=0 conda run -n maxwell --no-capture-output python docs/assessments/cuda-graph-throughput-probes/cuda_graph_throughput.py --rounds 7 --output docs/assessments/cuda-graph-throughput-2026-07-22.json",
+  "environment": {
+    "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "torch": "2.13.0+cu130",
+    "cuda_runtime": "13.0",
+    "driver": "595.71.05",
+    "device_name": "NVIDIA RTX A6000",
+    "compute_capability": "8.6",
+    "device_count": 1,
+    "numactl": "--cpunodebind=0 --membind=0",
+    "cuda_visible_devices": "0"
+  },
+  "exclusive_window": {
+    "foreign_compute_apps_before": [],
+    "foreign_compute_apps_after": [],
+    "clocks_before": [
+      "0, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled, 58, 28.21 W",
+      "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled, 44, 21.38 W"
+    ],
+    "clocks_after": [
+      "0, NVIDIA RTX A6000, 1740 MHz, 2100 MHz, 7601 MHz, Enabled, 87, 254.42 W",
+      "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled, 45, 21.17 W"
+    ],
+    "verified": true
+  },
+  "rounds": 7,
+  "grids": [
+    {
+      "grid_cells_per_axis": 48,
+      "total_cells": 110592,
+      "base_steps": 2500,
+      "ab": {
+        "label": "A/B graph(A) vs eager(B)",
+        "mode_a_cuda_graph": true,
+        "mode_b_cuda_graph": false,
+        "rounds": 7,
+        "base_steps": 2500,
+        "a_ms_per_step": [
+          0.0790712646484375,
+          0.07923588256835938,
+          0.0792313232421875,
+          0.0791105224609375,
+          0.07936737060546875,
+          0.07926220092773438,
+          0.07923709716796876
+        ],
+        "b_ms_per_step": [
+          0.1636790283203125,
+          0.1642914306640625,
+          0.164493701171875,
+          0.16548414306640624,
+          0.16132796630859375,
+          0.16188779296875,
+          0.165437939453125
+        ],
+        "a_raw": [
+          {
+            "low_ms": 200.20736694335938,
+            "high_ms": 397.8855285644531,
+            "ms_per_step": 0.0790712646484375,
+            "intercept_ms": 2.529205322265625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.2071990966797,
+            "high_ms": 398.2969055175781,
+            "ms_per_step": 0.07923588256835938,
+            "intercept_ms": 2.1174926757812216,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.24832153320312,
+            "high_ms": 398.3266296386719,
+            "ms_per_step": 0.0792313232421875,
+            "intercept_ms": 2.170013427734375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.57186889648438,
+            "high_ms": 398.3481750488281,
+            "ms_per_step": 0.0791105224609375,
+            "intercept_ms": 2.795562744140625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.089599609375,
+            "high_ms": 398.5080261230469,
+            "ms_per_step": 0.07936737060546875,
+            "intercept_ms": 1.671173095703125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.4600372314453,
+            "high_ms": 398.61553955078125,
+            "ms_per_step": 0.07926220092773438,
+            "intercept_ms": 2.304534912109375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.19107055664062,
+            "high_ms": 398.2838134765625,
+            "ms_per_step": 0.07923709716796876,
+            "intercept_ms": 2.0983276367187216,
+            "graph_active": true
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 405.11077880859375,
+            "high_ms": 814.308349609375,
+            "ms_per_step": 0.1636790283203125,
+            "intercept_ms": -4.0867919921875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 404.666259765625,
+            "high_ms": 815.3948364257812,
+            "ms_per_step": 0.1642914306640625,
+            "intercept_ms": -6.062316894531193,
+            "graph_active": false
+          },
+          {
+            "low_ms": 406.60888671875,
+            "high_ms": 817.8431396484375,
+            "ms_per_step": 0.164493701171875,
+            "intercept_ms": -4.6253662109375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 404.2136535644531,
+            "high_ms": 817.9240112304688,
+            "ms_per_step": 0.16548414306640624,
+            "intercept_ms": -9.4967041015625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 405.6596374511719,
+            "high_ms": 808.9795532226562,
+            "ms_per_step": 0.16132796630859375,
+            "intercept_ms": 2.3397216796875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 408.30474853515625,
+            "high_ms": 813.0242309570312,
+            "ms_per_step": 0.16188779296875,
+            "intercept_ms": 3.58526611328125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 410.8062744140625,
+            "high_ms": 824.401123046875,
+            "ms_per_step": 0.165437939453125,
+            "intercept_ms": -2.788574218749943,
+            "graph_active": false
+          }
+        ],
+        "a_median_ms_per_step": 0.07923588256835938,
+        "b_median_ms_per_step": 0.1642914306640625,
+        "a_mad_ms_per_step": 2.6318359374999378e-05,
+        "b_mad_ms_per_step": 0.0011465087890625003,
+        "a_median_intercept_ms": 2.170013427734375,
+        "b_median_intercept_ms": -4.0867919921875,
+        "paired_ratios_b_over_a": [
+          2.0700191029959316,
+          2.0734473490886267,
+          2.0761195754495327,
+          2.091809507997088,
+          2.032673692953078,
+          2.0424337335314187,
+          2.087884909544649
+        ],
+        "ratio_mean": 2.0677696959371894,
+        "ratio_ci95_lower": 2.0514478880265656,
+        "ratio_ci95_upper": 2.084091503847813,
+        "b_slower_than_a_pct": 106.77696959371895,
+        "b_slower_than_a_pct_ci95": [
+          105.14478880265656,
+          108.40915038478131
+        ],
+        "abs_max_delta_pct": 109.1809507997088,
+        "graph_active_a": true,
+        "graph_active_b": false
+      },
+      "aa_graph": {
+        "label": "A/A graph vs graph",
+        "mode_a_cuda_graph": true,
+        "mode_b_cuda_graph": true,
+        "rounds": 7,
+        "base_steps": 2500,
+        "a_ms_per_step": [
+          0.07939481811523437,
+          0.07937996826171875,
+          0.07924127807617187,
+          0.07941693725585937,
+          0.0792175048828125,
+          0.07930142211914062,
+          0.07942194213867187
+        ],
+        "b_ms_per_step": [
+          0.079316064453125,
+          0.07936204223632813,
+          0.07937970581054687,
+          0.07930630493164062,
+          0.0793923583984375,
+          0.07930748291015625,
+          0.07940501098632813
+        ],
+        "a_raw": [
+          {
+            "low_ms": 200.69786071777344,
+            "high_ms": 399.1849060058594,
+            "ms_per_step": 0.07939481811523437,
+            "intercept_ms": 2.2108154296875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 201.14047241210938,
+            "high_ms": 399.59039306640625,
+            "ms_per_step": 0.07937996826171875,
+            "intercept_ms": 2.6905517578125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.4468231201172,
+            "high_ms": 398.5500183105469,
+            "ms_per_step": 0.07924127807617187,
+            "intercept_ms": 2.3436279296875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.36402893066406,
+            "high_ms": 398.9063720703125,
+            "ms_per_step": 0.07941693725585937,
+            "intercept_ms": 1.8216857910156534,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.72332763671875,
+            "high_ms": 398.76708984375,
+            "ms_per_step": 0.0792175048828125,
+            "intercept_ms": 2.6795654296875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.5463104248047,
+            "high_ms": 398.79986572265625,
+            "ms_per_step": 0.07930142211914062,
+            "intercept_ms": 2.292755126953125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.5880584716797,
+            "high_ms": 399.1429138183594,
+            "ms_per_step": 0.07942194213867187,
+            "intercept_ms": 2.033203125,
+            "graph_active": true
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 201.09210205078125,
+            "high_ms": 399.38226318359375,
+            "ms_per_step": 0.079316064453125,
+            "intercept_ms": 2.80194091796875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.82176208496094,
+            "high_ms": 399.22686767578125,
+            "ms_per_step": 0.07936204223632813,
+            "intercept_ms": 2.4166564941405966,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.3177947998047,
+            "high_ms": 398.7670593261719,
+            "ms_per_step": 0.07937970581054687,
+            "intercept_ms": 1.8685302734375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.5524444580078,
+            "high_ms": 398.8182067871094,
+            "ms_per_step": 0.07930630493164062,
+            "intercept_ms": 2.28668212890625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.3978271484375,
+            "high_ms": 398.87872314453125,
+            "ms_per_step": 0.0793923583984375,
+            "intercept_ms": 1.91693115234375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.60488891601562,
+            "high_ms": 398.87359619140625,
+            "ms_per_step": 0.07930748291015625,
+            "intercept_ms": 2.336181640625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 200.4602813720703,
+            "high_ms": 398.9728088378906,
+            "ms_per_step": 0.07940501098632813,
+            "intercept_ms": 1.94775390625,
+            "graph_active": true
+          }
+        ],
+        "a_median_ms_per_step": 0.07937996826171875,
+        "b_median_ms_per_step": 0.07936204223632813,
+        "a_mad_ms_per_step": 4.1973876953121936e-05,
+        "b_mad_ms_per_step": 4.2968749999997e-05,
+        "a_median_intercept_ms": 2.292755126953125,
+        "b_median_intercept_ms": 2.28668212890625,
+        "paired_ratios_b_over_a": [
+          0.9990080755397025,
+          0.9997741744449743,
+          1.0017469144584208,
+          0.9986069429514473,
+          1.0022072585583661,
+          1.000076427267679,
+          0.9997868202175895
+        ],
+        "ratio_mean": 1.0001723733483112,
+        "ratio_ci95_lower": 0.9991896268523754,
+        "ratio_ci95_upper": 1.001155119844247,
+        "b_slower_than_a_pct": 0.017237334831121665,
+        "b_slower_than_a_pct_ci95": [
+          -0.08103731476245546,
+          0.11551198442469879
+        ],
+        "abs_max_delta_pct": 0.22072585583661208,
+        "graph_active_a": true,
+        "graph_active_b": true
+      },
+      "aa_eager": {
+        "label": "A/A eager vs eager",
+        "mode_a_cuda_graph": false,
+        "mode_b_cuda_graph": false,
+        "rounds": 7,
+        "base_steps": 2500,
+        "a_ms_per_step": [
+          0.15830640869140625,
+          0.16082947998046876,
+          0.15962025146484374,
+          0.16142708740234374,
+          0.160169970703125,
+          0.1627894775390625,
+          0.166072314453125
+        ],
+        "b_ms_per_step": [
+          0.1610146240234375,
+          0.16312156982421874,
+          0.15992835693359375,
+          0.16215899658203126,
+          0.15858851318359374,
+          0.1647116455078125,
+          0.1634893798828125
+        ],
+        "a_raw": [
+          {
+            "low_ms": 421.8795471191406,
+            "high_ms": 817.6455688476562,
+            "ms_per_step": 0.15830640869140625,
+            "intercept_ms": 26.113525390625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 407.2192077636719,
+            "high_ms": 809.2929077148438,
+            "ms_per_step": 0.16082947998046876,
+            "intercept_ms": 5.1455078125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 415.4860534667969,
+            "high_ms": 814.5366821289062,
+            "ms_per_step": 0.15962025146484374,
+            "intercept_ms": 16.435424804687557,
+            "graph_active": false
+          },
+          {
+            "low_ms": 404.4615783691406,
+            "high_ms": 808.029296875,
+            "ms_per_step": 0.16142708740234374,
+            "intercept_ms": 0.8938598632813068,
+            "graph_active": false
+          },
+          {
+            "low_ms": 412.7744140625,
+            "high_ms": 813.1993408203125,
+            "ms_per_step": 0.160169970703125,
+            "intercept_ms": 12.3494873046875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 405.855224609375,
+            "high_ms": 812.8289184570312,
+            "ms_per_step": 0.1627894775390625,
+            "intercept_ms": -1.11846923828125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 406.84637451171875,
+            "high_ms": 822.0271606445312,
+            "ms_per_step": 0.166072314453125,
+            "intercept_ms": -8.33441162109375,
+            "graph_active": false
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 410.79705810546875,
+            "high_ms": 813.3336181640625,
+            "ms_per_step": 0.1610146240234375,
+            "intercept_ms": 8.260498046875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 404.2854309082031,
+            "high_ms": 812.08935546875,
+            "ms_per_step": 0.16312156982421874,
+            "intercept_ms": -3.51849365234375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 408.3149719238281,
+            "high_ms": 808.1358642578125,
+            "ms_per_step": 0.15992835693359375,
+            "intercept_ms": 8.49407958984375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 405.2643737792969,
+            "high_ms": 810.661865234375,
+            "ms_per_step": 0.16215899658203126,
+            "intercept_ms": -0.13311767578125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 409.3695983886719,
+            "high_ms": 805.8408813476562,
+            "ms_per_step": 0.15858851318359374,
+            "intercept_ms": 12.898315429687557,
+            "graph_active": false
+          },
+          {
+            "low_ms": 406.3160400390625,
+            "high_ms": 818.0951538085938,
+            "ms_per_step": 0.1647116455078125,
+            "intercept_ms": -5.46307373046875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 410.54925537109375,
+            "high_ms": 819.272705078125,
+            "ms_per_step": 0.1634893798828125,
+            "intercept_ms": 1.8258056640625,
+            "graph_active": false
+          }
+        ],
+        "a_median_ms_per_step": 0.16082947998046876,
+        "b_median_ms_per_step": 0.16215899658203126,
+        "a_mad_ms_per_step": 0.0012092285156250215,
+        "b_mad_ms_per_step": 0.0013303833007812516,
+        "a_median_intercept_ms": 5.1455078125,
+        "b_median_intercept_ms": 1.8258056640625,
+        "paired_ratios_b_over_a": [
+          1.0171074270108071,
+          1.014251677267304,
+          1.0019302404671244,
+          1.0045339923519978,
+          0.9901263794168853,
+          1.0118076917366403,
+          0.9844469285635111
+        ],
+        "ratio_mean": 1.0034577624020387,
+        "ratio_ci95_lower": 0.9943870809823189,
+        "ratio_ci95_upper": 1.0125284438217586,
+        "b_slower_than_a_pct": 0.34577624020386555,
+        "b_slower_than_a_pct_ci95": [
+          -0.5612919017681128,
+          1.252844382175855
+        ],
+        "abs_max_delta_pct": 1.7107427010807141,
+        "graph_active_a": false,
+        "graph_active_b": false
+      },
+      "graph_median_ms_per_step": 0.07923588256835938,
+      "eager_median_ms_per_step": 0.1642914306640625,
+      "graph_throughput_gain_pct": 106.77696959371895,
+      "graph_throughput_gain_pct_ci95": [
+        105.14478880265656,
+        108.40915038478131
+      ],
+      "aa_resolution_floor_abs_max_pct": 1.7107427010807141,
+      "aa_resolution_floor_ci95_pct": 1.252844382175855,
+      "resolvable": true,
+      "verdict": "graph faster",
+      "graph_capture_intercept_ms": 2.170013427734375,
+      "eager_intercept_ms": -4.0867919921875,
+      "peak_memory_bytes_graph": 108081152,
+      "peak_memory_bytes_eager": 89268736,
+      "peak_memory_steps": 200,
+      "peak_memory_graph_over_eager_pct": 21.073913267910505,
+      "clocks_after_grid": [
+        "0, NVIDIA RTX A6000, 1935 MHz, 2100 MHz, 7601 MHz, Enabled, 78, 193.80 W",
+        "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled, 44, 22.33 W"
+      ]
+    },
+    {
+      "grid_cells_per_axis": 64,
+      "total_cells": 262144,
+      "base_steps": 2000,
+      "ab": {
+        "label": "A/B graph(A) vs eager(B)",
+        "mode_a_cuda_graph": true,
+        "mode_b_cuda_graph": false,
+        "rounds": 7,
+        "base_steps": 2000,
+        "a_ms_per_step": [
+          0.16177468872070314,
+          0.16175044250488282,
+          0.16178843688964845,
+          0.16181759643554688,
+          0.16197616577148438,
+          0.1619742889404297,
+          0.16195182800292968
+        ],
+        "b_ms_per_step": [
+          0.16610305786132812,
+          0.16610406494140625,
+          0.16625143432617187,
+          0.1661917266845703,
+          0.16628022766113282,
+          0.16626889038085937,
+          0.1664567413330078
+        ],
+        "a_raw": [
+          {
+            "low_ms": 325.763916015625,
+            "high_ms": 649.3132934570312,
+            "ms_per_step": 0.16177468872070314,
+            "intercept_ms": 2.21453857421875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.1800231933594,
+            "high_ms": 649.680908203125,
+            "ms_per_step": 0.16175044250488282,
+            "intercept_ms": 2.67913818359375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 325.9096984863281,
+            "high_ms": 649.486572265625,
+            "ms_per_step": 0.16178843688964845,
+            "intercept_ms": 2.33282470703125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.0845947265625,
+            "high_ms": 649.7197875976562,
+            "ms_per_step": 0.16181759643554688,
+            "intercept_ms": 2.44940185546875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 325.9556884765625,
+            "high_ms": 649.9080200195312,
+            "ms_per_step": 0.16197616577148438,
+            "intercept_ms": 2.00335693359375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.4767761230469,
+            "high_ms": 650.4253540039062,
+            "ms_per_step": 0.1619742889404297,
+            "intercept_ms": 2.5281982421875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.0447082519531,
+            "high_ms": 649.9483642578125,
+            "ms_per_step": 0.16195182800292968,
+            "intercept_ms": 2.14105224609375,
+            "graph_active": true
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 333.35601806640625,
+            "high_ms": 665.5621337890625,
+            "ms_per_step": 0.16610305786132812,
+            "intercept_ms": 1.14990234375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 333.28741455078125,
+            "high_ms": 665.4955444335938,
+            "ms_per_step": 0.16610406494140625,
+            "intercept_ms": 1.07928466796875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 333.20037841796875,
+            "high_ms": 665.7032470703125,
+            "ms_per_step": 0.16625143432617187,
+            "intercept_ms": 0.697509765625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 333.4410095214844,
+            "high_ms": 665.824462890625,
+            "ms_per_step": 0.1661917266845703,
+            "intercept_ms": 1.05755615234375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 333.4523010253906,
+            "high_ms": 666.0127563476562,
+            "ms_per_step": 0.16628022766113282,
+            "intercept_ms": 0.891845703125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 333.44512939453125,
+            "high_ms": 665.98291015625,
+            "ms_per_step": 0.16626889038085937,
+            "intercept_ms": 0.9073486328125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 333.5118713378906,
+            "high_ms": 666.4253540039062,
+            "ms_per_step": 0.1664567413330078,
+            "intercept_ms": 0.598388671875,
+            "graph_active": false
+          }
+        ],
+        "a_median_ms_per_step": 0.16181759643554688,
+        "b_median_ms_per_step": 0.16625143432617187,
+        "a_mad_ms_per_step": 6.715393066406006e-05,
+        "b_mad_ms_per_step": 5.9707641601569605e-05,
+        "a_median_intercept_ms": 2.33282470703125,
+        "b_median_intercept_ms": 0.9073486328125,
+        "paired_ratios_b_over_a": [
+          1.026755539910806,
+          1.0269156755870514,
+          1.0275853919002105,
+          1.0270312397747525,
+          1.0265721926997617,
+          1.0265140934930057,
+          1.0278163783986225
+        ],
+        "ratio_mean": 1.0270272159663159,
+        "ratio_ci95_lower": 1.0266610996372771,
+        "ratio_ci95_upper": 1.0273933322953546,
+        "b_slower_than_a_pct": 2.7027215966315854,
+        "b_slower_than_a_pct_ci95": [
+          2.666109963727714,
+          2.7393332295354567
+        ],
+        "abs_max_delta_pct": 2.78163783986225,
+        "graph_active_a": true,
+        "graph_active_b": false
+      },
+      "aa_graph": {
+        "label": "A/A graph vs graph",
+        "mode_a_cuda_graph": true,
+        "mode_b_cuda_graph": true,
+        "rounds": 7,
+        "base_steps": 2000,
+        "a_ms_per_step": [
+          0.16209001159667968,
+          0.16205108642578125,
+          0.16218429565429687,
+          0.1618984069824219,
+          0.1621094512939453,
+          0.16232344055175782,
+          0.16209715270996095
+        ],
+        "b_ms_per_step": [
+          0.1620428924560547,
+          0.16203828430175782,
+          0.16199476623535156,
+          0.1621539764404297,
+          0.16192672729492188,
+          0.16217649841308593,
+          0.16242230224609375
+        ],
+        "a_raw": [
+          {
+            "low_ms": 326.3774719238281,
+            "high_ms": 650.5574951171875,
+            "ms_per_step": 0.16209001159667968,
+            "intercept_ms": 2.19744873046875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.26898193359375,
+            "high_ms": 650.3711547851562,
+            "ms_per_step": 0.16205108642578125,
+            "intercept_ms": 2.16680908203125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.1767578125,
+            "high_ms": 650.5453491210938,
+            "ms_per_step": 0.16218429565429687,
+            "intercept_ms": 1.80816650390625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.35614013671875,
+            "high_ms": 650.1529541015625,
+            "ms_per_step": 0.1618984069824219,
+            "intercept_ms": 2.559326171875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.2033996582031,
+            "high_ms": 650.4223022460938,
+            "ms_per_step": 0.1621094512939453,
+            "intercept_ms": 1.9844970703125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.2720031738281,
+            "high_ms": 650.9188842773438,
+            "ms_per_step": 0.16232344055175782,
+            "intercept_ms": 1.6251220703125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.4235534667969,
+            "high_ms": 650.6178588867188,
+            "ms_per_step": 0.16209715270996095,
+            "intercept_ms": 2.229248046875,
+            "graph_active": true
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 326.2043762207031,
+            "high_ms": 650.2901611328125,
+            "ms_per_step": 0.1620428924560547,
+            "intercept_ms": 2.11859130859375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.2853088378906,
+            "high_ms": 650.3618774414062,
+            "ms_per_step": 0.16203828430175782,
+            "intercept_ms": 2.208740234375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.3672180175781,
+            "high_ms": 650.3567504882812,
+            "ms_per_step": 0.16199476623535156,
+            "intercept_ms": 2.377685546875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.1513977050781,
+            "high_ms": 650.4593505859375,
+            "ms_per_step": 0.1621539764404297,
+            "intercept_ms": 1.84344482421875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.48486328125,
+            "high_ms": 650.3383178710938,
+            "ms_per_step": 0.16192672729492188,
+            "intercept_ms": 2.63140869140625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.3129577636719,
+            "high_ms": 650.6659545898438,
+            "ms_per_step": 0.16217649841308593,
+            "intercept_ms": 1.9599609375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 326.40521240234375,
+            "high_ms": 651.2498168945312,
+            "ms_per_step": 0.16242230224609375,
+            "intercept_ms": 1.56060791015625,
+            "graph_active": true
+          }
+        ],
+        "a_median_ms_per_step": 0.16209715270996095,
+        "b_median_ms_per_step": 0.1620428924560547,
+        "a_mad_ms_per_step": 4.606628417969105e-05,
+        "b_mad_ms_per_step": 0.00011108398437500999,
+        "a_median_intercept_ms": 2.16680908203125,
+        "b_median_intercept_ms": 2.11859130859375,
+        "paired_ratios_b_over_a": [
+          0.9997093026266033,
+          0.9999209994557531,
+          0.9988313947526134,
+          1.0015785792014344,
+          0.9988728356208418,
+          0.9990947571208914,
+          1.0020058929518312
+        ],
+        "ratio_mean": 1.000001965961424,
+        "ratio_ci95_lower": 0.9990508638223834,
+        "ratio_ci95_upper": 1.0009530681004648,
+        "b_slower_than_a_pct": 0.00019659614240996603,
+        "b_slower_than_a_pct_ci95": [
+          -0.09491361776166052,
+          0.09530681004648045
+        ],
+        "abs_max_delta_pct": 0.20058929518311786,
+        "graph_active_a": true,
+        "graph_active_b": true
+      },
+      "aa_eager": {
+        "label": "A/A eager vs eager",
+        "mode_a_cuda_graph": false,
+        "mode_b_cuda_graph": false,
+        "rounds": 7,
+        "base_steps": 2000,
+        "a_ms_per_step": [
+          0.16670578002929687,
+          0.16676002502441406,
+          0.16691621398925782,
+          0.16690078735351563,
+          0.16690229797363282,
+          0.1667799072265625,
+          0.16950733947753907
+        ],
+        "b_ms_per_step": [
+          0.16673277282714843,
+          0.16686593627929688,
+          0.1668102264404297,
+          0.1668433837890625,
+          0.1669248809814453,
+          0.16687359619140624,
+          0.16671742248535157
+        ],
+        "a_raw": [
+          {
+            "low_ms": 334.16497802734375,
+            "high_ms": 667.5765380859375,
+            "ms_per_step": 0.16670578002929687,
+            "intercept_ms": 0.75341796875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 334.1105651855469,
+            "high_ms": 667.630615234375,
+            "ms_per_step": 0.16676002502441406,
+            "intercept_ms": 0.59051513671875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 334.1363220214844,
+            "high_ms": 667.96875,
+            "ms_per_step": 0.16691621398925782,
+            "intercept_ms": 0.30389404296875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 334.15667724609375,
+            "high_ms": 667.958251953125,
+            "ms_per_step": 0.16690078735351563,
+            "intercept_ms": 0.3551025390625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 334.2264099121094,
+            "high_ms": 668.031005859375,
+            "ms_per_step": 0.16690229797363282,
+            "intercept_ms": 0.42181396484375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 334.3134765625,
+            "high_ms": 667.873291015625,
+            "ms_per_step": 0.1667799072265625,
+            "intercept_ms": 0.753662109375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 334.1772766113281,
+            "high_ms": 673.1919555664062,
+            "ms_per_step": 0.16950733947753907,
+            "intercept_ms": -4.83740234375,
+            "graph_active": false
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 334.0933532714844,
+            "high_ms": 667.5588989257812,
+            "ms_per_step": 0.16673277282714843,
+            "intercept_ms": 0.6278076171875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 334.00421142578125,
+            "high_ms": 667.736083984375,
+            "ms_per_step": 0.16686593627929688,
+            "intercept_ms": 0.2723388671875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 334.3818664550781,
+            "high_ms": 668.0023193359375,
+            "ms_per_step": 0.1668102264404297,
+            "intercept_ms": 0.76141357421875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 334.31243896484375,
+            "high_ms": 667.9992065429688,
+            "ms_per_step": 0.1668433837890625,
+            "intercept_ms": 0.62567138671875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 334.3000183105469,
+            "high_ms": 668.1497802734375,
+            "ms_per_step": 0.1669248809814453,
+            "intercept_ms": 0.45025634765625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 334.11480712890625,
+            "high_ms": 667.8619995117188,
+            "ms_per_step": 0.16687359619140624,
+            "intercept_ms": 0.36761474609375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 334.7066955566406,
+            "high_ms": 668.1415405273438,
+            "ms_per_step": 0.16671742248535157,
+            "intercept_ms": 1.2718505859375,
+            "graph_active": false
+          }
+        ],
+        "a_median_ms_per_step": 0.16690078735351563,
+        "b_median_ms_per_step": 0.1668433837890625,
+        "a_mad_ms_per_step": 0.00012088012695313233,
+        "b_mad_ms_per_step": 3.315734863279518e-05,
+        "a_median_intercept_ms": 0.42181396484375,
+        "b_median_intercept_ms": 0.62567138671875,
+        "paired_ratios_b_over_a": [
+          1.0001619187879798,
+          1.0006351117713452,
+          0.9993650254442331,
+          0.9996560617516348,
+          1.0001353067518344,
+          1.0005617521103214,
+          0.9835410254164412
+        ],
+        "ratio_mean": 0.9977223145762556,
+        "ratio_ci95_lower": 0.9931173869677609,
+        "ratio_ci95_upper": 1.0023272421847504,
+        "b_slower_than_a_pct": -0.22776854237444022,
+        "b_slower_than_a_pct_ci95": [
+          -0.6882613032239138,
+          0.23272421847504443
+        ],
+        "abs_max_delta_pct": 1.6458974583558827,
+        "graph_active_a": false,
+        "graph_active_b": false
+      },
+      "graph_median_ms_per_step": 0.16181759643554688,
+      "eager_median_ms_per_step": 0.16625143432617187,
+      "graph_throughput_gain_pct": 2.7027215966315854,
+      "graph_throughput_gain_pct_ci95": [
+        2.666109963727714,
+        2.7393332295354567
+      ],
+      "aa_resolution_floor_abs_max_pct": 1.6458974583558827,
+      "aa_resolution_floor_ci95_pct": 0.6882613032239138,
+      "resolvable": true,
+      "verdict": "graph faster",
+      "graph_capture_intercept_ms": 2.33282470703125,
+      "eager_intercept_ms": 0.9073486328125,
+      "peak_memory_bytes_graph": 206143488,
+      "peak_memory_bytes_eager": 170465280,
+      "peak_memory_steps": 200,
+      "peak_memory_graph_over_eager_pct": 20.929897278788978,
+      "clocks_after_grid": [
+        "0, NVIDIA RTX A6000, 1905 MHz, 2100 MHz, 7601 MHz, Enabled, 85, 231.58 W",
+        "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled, 44, 21.24 W"
+      ]
+    },
+    {
+      "grid_cells_per_axis": 96,
+      "total_cells": 884736,
+      "base_steps": 2000,
+      "ab": {
+        "label": "A/B graph(A) vs eager(B)",
+        "mode_a_cuda_graph": true,
+        "mode_b_cuda_graph": false,
+        "rounds": 7,
+        "base_steps": 2000,
+        "a_ms_per_step": [
+          0.2769720458984375,
+          0.27762750244140627,
+          0.27695196533203126,
+          0.27744876098632815,
+          0.2774425354003906,
+          0.27714404296875,
+          0.2775008850097656
+        ],
+        "b_ms_per_step": [
+          0.2816363525390625,
+          0.28168630981445314,
+          0.28178631591796877,
+          0.28172039794921877,
+          0.28182061767578126,
+          0.28179183959960935,
+          0.2817454833984375
+        ],
+        "a_raw": [
+          {
+            "low_ms": 556.7640380859375,
+            "high_ms": 1110.7081298828125,
+            "ms_per_step": 0.2769720458984375,
+            "intercept_ms": 2.8199462890625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 556.8387451171875,
+            "high_ms": 1112.09375,
+            "ms_per_step": 0.27762750244140627,
+            "intercept_ms": 1.583740234375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.3541259765625,
+            "high_ms": 1111.258056640625,
+            "ms_per_step": 0.27695196533203126,
+            "intercept_ms": 3.4501953125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.1891479492188,
+            "high_ms": 1112.086669921875,
+            "ms_per_step": 0.27744876098632815,
+            "intercept_ms": 2.2916259765625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.2157592773438,
+            "high_ms": 1112.100830078125,
+            "ms_per_step": 0.2774425354003906,
+            "intercept_ms": 2.3306884765625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.117431640625,
+            "high_ms": 1111.405517578125,
+            "ms_per_step": 0.27714404296875,
+            "intercept_ms": 2.829345703125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.2423706054688,
+            "high_ms": 1112.244140625,
+            "ms_per_step": 0.2775008850097656,
+            "intercept_ms": 2.2406005859375,
+            "graph_active": true
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 563.57275390625,
+            "high_ms": 1126.845458984375,
+            "ms_per_step": 0.2816363525390625,
+            "intercept_ms": 0.300048828125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.7357788085938,
+            "high_ms": 1127.1083984375,
+            "ms_per_step": 0.28168630981445314,
+            "intercept_ms": 0.3631591796875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.8389892578125,
+            "high_ms": 1127.41162109375,
+            "ms_per_step": 0.28178631591796877,
+            "intercept_ms": 0.266357421875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.8758544921875,
+            "high_ms": 1127.316650390625,
+            "ms_per_step": 0.28172039794921877,
+            "intercept_ms": 0.43505859375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.8553466796875,
+            "high_ms": 1127.49658203125,
+            "ms_per_step": 0.28182061767578126,
+            "intercept_ms": 0.214111328125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.9057006835938,
+            "high_ms": 1127.4893798828125,
+            "ms_per_step": 0.28179183959960935,
+            "intercept_ms": 0.322021484375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.8758544921875,
+            "high_ms": 1127.3668212890625,
+            "ms_per_step": 0.2817454833984375,
+            "intercept_ms": 0.3848876953125,
+            "graph_active": false
+          }
+        ],
+        "a_median_ms_per_step": 0.2774425354003906,
+        "b_median_ms_per_step": 0.2817454833984375,
+        "a_mad_ms_per_step": 0.00018496704101567119,
+        "b_mad_ms_per_step": 4.6356201171826594e-05,
+        "a_median_intercept_ms": 2.3306884765625,
+        "b_median_intercept_ms": 0.322021484375,
+        "paired_ratios_b_over_a": [
+          1.0168403516156117,
+          1.01461961562653,
+          1.0174555561652785,
+          1.015396129172482,
+          1.015780140810321,
+          1.016770328458344,
+          1.015295801267526
+        ],
+        "ratio_mean": 1.0160225604451563,
+        "ratio_ci95_lower": 1.0152742208029786,
+        "ratio_ci95_upper": 1.016770900087334,
+        "b_slower_than_a_pct": 1.6022560445156264,
+        "b_slower_than_a_pct_ci95": [
+          1.5274220802978578,
+          1.677090008733395
+        ],
+        "abs_max_delta_pct": 1.7455556165278496,
+        "graph_active_a": true,
+        "graph_active_b": false
+      },
+      "aa_graph": {
+        "label": "A/A graph vs graph",
+        "mode_a_cuda_graph": true,
+        "mode_b_cuda_graph": true,
+        "rounds": 7,
+        "base_steps": 2000,
+        "a_ms_per_step": [
+          0.2774461669921875,
+          0.2774486999511719,
+          0.27720712280273435,
+          0.2773309326171875,
+          0.2774435729980469,
+          0.27745944213867185,
+          0.27740264892578126
+        ],
+        "b_ms_per_step": [
+          0.2772817687988281,
+          0.2774526672363281,
+          0.27734112548828127,
+          0.27730743408203123,
+          0.27734259033203124,
+          0.27742160034179686,
+          0.27719113159179687
+        ],
+        "a_raw": [
+          {
+            "low_ms": 556.9351806640625,
+            "high_ms": 1111.8275146484375,
+            "ms_per_step": 0.2774461669921875,
+            "intercept_ms": 2.0428466796875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.1665649414062,
+            "high_ms": 1112.06396484375,
+            "ms_per_step": 0.2774486999511719,
+            "intercept_ms": 2.2691650390625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.0979614257812,
+            "high_ms": 1111.51220703125,
+            "ms_per_step": 0.27720712280273435,
+            "intercept_ms": 2.6837158203125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.1973876953125,
+            "high_ms": 1111.8592529296875,
+            "ms_per_step": 0.2773309326171875,
+            "intercept_ms": 2.5355224609375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.3324584960938,
+            "high_ms": 1112.2196044921875,
+            "ms_per_step": 0.2774435729980469,
+            "intercept_ms": 2.4453125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 556.9671020507812,
+            "high_ms": 1111.885986328125,
+            "ms_per_step": 0.27745944213867185,
+            "intercept_ms": 2.0482177734375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 556.943359375,
+            "high_ms": 1111.7486572265625,
+            "ms_per_step": 0.27740264892578126,
+            "intercept_ms": 2.1380615234375,
+            "graph_active": true
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 557.3806762695312,
+            "high_ms": 1111.9442138671875,
+            "ms_per_step": 0.2772817687988281,
+            "intercept_ms": 2.817138671875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.1420288085938,
+            "high_ms": 1112.04736328125,
+            "ms_per_step": 0.2774526672363281,
+            "intercept_ms": 2.2366943359375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.3663330078125,
+            "high_ms": 1112.048583984375,
+            "ms_per_step": 0.27734112548828127,
+            "intercept_ms": 2.68408203125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.2607421875,
+            "high_ms": 1111.8756103515625,
+            "ms_per_step": 0.27730743408203123,
+            "intercept_ms": 2.6458740234375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.127685546875,
+            "high_ms": 1111.8128662109375,
+            "ms_per_step": 0.27734259033203124,
+            "intercept_ms": 2.4425048828125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.2218627929688,
+            "high_ms": 1112.0650634765625,
+            "ms_per_step": 0.27742160034179686,
+            "intercept_ms": 2.378662109375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 557.2874145507812,
+            "high_ms": 1111.669677734375,
+            "ms_per_step": 0.27719113159179687,
+            "intercept_ms": 2.9051513671875,
+            "graph_active": true
+          }
+        ],
+        "a_median_ms_per_step": 0.2774435729980469,
+        "b_median_ms_per_step": 0.27734112548828127,
+        "a_mad_ms_per_step": 1.586914062495781e-05,
+        "b_mad_ms_per_step": 5.935668945317163e-05,
+        "a_median_intercept_ms": 2.2691650390625,
+        "b_median_intercept_ms": 2.6458740234375,
+        "paired_ratios_b_over_a": [
+          0.9994074591293092,
+          1.0000142991665015,
+          1.0004834027502327,
+          0.9999152689714973,
+          0.9996360244898649,
+          0.9998636132308805,
+          0.9992375078795985
+        ],
+        "ratio_mean": 0.9997939393739835,
+        "ratio_ci95_lower": 0.9994900180974278,
+        "ratio_ci95_upper": 1.0000978606505393,
+        "b_slower_than_a_pct": -0.02060606260164688,
+        "b_slower_than_a_pct_ci95": [
+          -0.050998190257223186,
+          0.009786065053929427
+        ],
+        "abs_max_delta_pct": 0.07624921204014701,
+        "graph_active_a": true,
+        "graph_active_b": true
+      },
+      "aa_eager": {
+        "label": "A/A eager vs eager",
+        "mode_a_cuda_graph": false,
+        "mode_b_cuda_graph": false,
+        "rounds": 7,
+        "base_steps": 2000,
+        "a_ms_per_step": [
+          0.2818305053710938,
+          0.28169268798828123,
+          0.28177606201171873,
+          0.28170294189453127,
+          0.28168841552734375,
+          0.2816933288574219,
+          0.2818540344238281
+        ],
+        "b_ms_per_step": [
+          0.28174185180664063,
+          0.2817905578613281,
+          0.28166348266601565,
+          0.28179043579101565,
+          0.281775146484375,
+          0.2815791320800781,
+          0.28181192016601564
+        ],
+        "a_raw": [
+          {
+            "low_ms": 563.6380615234375,
+            "high_ms": 1127.299072265625,
+            "ms_per_step": 0.2818305053710938,
+            "intercept_ms": -0.02294921875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.82568359375,
+            "high_ms": 1127.2110595703125,
+            "ms_per_step": 0.28169268798828123,
+            "intercept_ms": 0.4403076171875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.820556640625,
+            "high_ms": 1127.3726806640625,
+            "ms_per_step": 0.28177606201171873,
+            "intercept_ms": 0.2684326171875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.716064453125,
+            "high_ms": 1127.1219482421875,
+            "ms_per_step": 0.28170294189453127,
+            "intercept_ms": 0.3101806640625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.690673828125,
+            "high_ms": 1127.0675048828125,
+            "ms_per_step": 0.28168841552734375,
+            "intercept_ms": 0.3138427734375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.7557983398438,
+            "high_ms": 1127.1424560546875,
+            "ms_per_step": 0.2816933288574219,
+            "intercept_ms": 0.369140625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.4324340820312,
+            "high_ms": 1127.1405029296875,
+            "ms_per_step": 0.2818540344238281,
+            "intercept_ms": -0.275634765625,
+            "graph_active": false
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 563.8358764648438,
+            "high_ms": 1127.319580078125,
+            "ms_per_step": 0.28174185180664063,
+            "intercept_ms": 0.3521728515625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.8358764648438,
+            "high_ms": 1127.4169921875,
+            "ms_per_step": 0.2817905578613281,
+            "intercept_ms": 0.2547607421875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.8389282226562,
+            "high_ms": 1127.1658935546875,
+            "ms_per_step": 0.28166348266601565,
+            "intercept_ms": 0.511962890625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.5973510742188,
+            "high_ms": 1127.17822265625,
+            "ms_per_step": 0.28179043579101565,
+            "intercept_ms": 0.0164794921875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.63623046875,
+            "high_ms": 1127.1865234375,
+            "ms_per_step": 0.281775146484375,
+            "intercept_ms": 0.0859375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.7969360351562,
+            "high_ms": 1126.9552001953125,
+            "ms_per_step": 0.2815791320800781,
+            "intercept_ms": 0.638671875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 563.6198120117188,
+            "high_ms": 1127.24365234375,
+            "ms_per_step": 0.28181192016601564,
+            "intercept_ms": -0.0040283203125,
+            "graph_active": false
+          }
+        ],
+        "a_median_ms_per_step": 0.28170294189453127,
+        "b_median_ms_per_step": 0.281775146484375,
+        "a_mad_ms_per_step": 1.452636718751732e-05,
+        "b_mad_ms_per_step": 3.329467773438566e-05,
+        "a_median_intercept_ms": 0.3101806640625,
+        "b_median_intercept_ms": 0.2547607421875,
+        "paired_ratios_b_over_a": [
+          0.9996854365912717,
+          1.0003474349076855,
+          0.9996004651889188,
+          1.0003105892181883,
+          1.0003078967832912,
+          0.9995946060284532,
+          0.9998505813198716
+        ],
+        "ratio_mean": 0.9999567157196686,
+        "ratio_ci95_lower": 0.9996980688303151,
+        "ratio_ci95_upper": 1.0002153626090222,
+        "b_slower_than_a_pct": -0.0043284280331401526,
+        "b_slower_than_a_pct_ci95": [
+          -0.03019311696849103,
+          0.021536260902221827
+        ],
+        "abs_max_delta_pct": 0.04053939715468191,
+        "graph_active_a": false,
+        "graph_active_b": false
+      },
+      "graph_median_ms_per_step": 0.2774425354003906,
+      "eager_median_ms_per_step": 0.2817454833984375,
+      "graph_throughput_gain_pct": 1.6022560445156264,
+      "graph_throughput_gain_pct_ci95": [
+        1.5274220802978578,
+        1.677090008733395
+      ],
+      "aa_resolution_floor_abs_max_pct": 0.07624921204014701,
+      "aa_resolution_floor_ci95_pct": 0.050998190257223186,
+      "resolvable": true,
+      "verdict": "graph faster",
+      "graph_capture_intercept_ms": 2.3306884765625,
+      "eager_intercept_ms": 0.322021484375,
+      "peak_memory_bytes_graph": 443006976,
+      "peak_memory_bytes_eager": 404878848,
+      "peak_memory_steps": 200,
+      "peak_memory_graph_over_eager_pct": 9.417169651697876,
+      "clocks_after_grid": [
+        "0, NVIDIA RTX A6000, 1800 MHz, 2100 MHz, 7601 MHz, Enabled, 85, 247.48 W",
+        "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled, 43, 21.38 W"
+      ]
+    },
+    {
+      "grid_cells_per_axis": 128,
+      "total_cells": 2097152,
+      "base_steps": 1500,
+      "ab": {
+        "label": "A/B graph(A) vs eager(B)",
+        "mode_a_cuda_graph": true,
+        "mode_b_cuda_graph": false,
+        "rounds": 7,
+        "base_steps": 1500,
+        "a_ms_per_step": [
+          0.5680721842447917,
+          0.567780029296875,
+          0.5682646077473958,
+          0.568078369140625,
+          0.5685745442708333,
+          0.5684647623697917,
+          0.5681287841796875
+        ],
+        "b_ms_per_step": [
+          0.5734577229817708,
+          0.573607177734375,
+          0.5737540690104167,
+          0.5734980061848959,
+          0.5733130289713542,
+          0.573487060546875,
+          0.5736891682942709
+        ],
+        "a_raw": [
+          {
+            "low_ms": 855.689208984375,
+            "high_ms": 1707.7974853515625,
+            "ms_per_step": 0.5680721842447917,
+            "intercept_ms": 3.5809326171875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.8499755859375,
+            "high_ms": 1707.52001953125,
+            "ms_per_step": 0.567780029296875,
+            "intercept_ms": 4.179931640625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.9779663085938,
+            "high_ms": 1708.3748779296875,
+            "ms_per_step": 0.5682646077473958,
+            "intercept_ms": 3.5810546875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.96875,
+            "high_ms": 1708.0863037109375,
+            "ms_per_step": 0.568078369140625,
+            "intercept_ms": 3.8511962890623863,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.570556640625,
+            "high_ms": 1708.432373046875,
+            "ms_per_step": 0.5685745442708333,
+            "intercept_ms": 2.708740234375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.81103515625,
+            "high_ms": 1708.5081787109375,
+            "ms_per_step": 0.5684647623697917,
+            "intercept_ms": 3.1138916015623863,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.9288940429688,
+            "high_ms": 1708.1220703125,
+            "ms_per_step": 0.5681287841796875,
+            "intercept_ms": 3.7357177734375,
+            "graph_active": true
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 860.4682006835938,
+            "high_ms": 1720.65478515625,
+            "ms_per_step": 0.5734577229817708,
+            "intercept_ms": 0.2816162109376137,
+            "graph_active": false
+          },
+          {
+            "low_ms": 860.3045654296875,
+            "high_ms": 1720.71533203125,
+            "ms_per_step": 0.573607177734375,
+            "intercept_ms": -0.106201171875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 860.170166015625,
+            "high_ms": 1720.80126953125,
+            "ms_per_step": 0.5737540690104167,
+            "intercept_ms": -0.4609375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 860.3064575195312,
+            "high_ms": 1720.553466796875,
+            "ms_per_step": 0.5734980061848959,
+            "intercept_ms": 0.05944824218738631,
+            "graph_active": false
+          },
+          {
+            "low_ms": 860.6730346679688,
+            "high_ms": 1720.642578125,
+            "ms_per_step": 0.5733130289713542,
+            "intercept_ms": 0.7034912109375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 860.61474609375,
+            "high_ms": 1720.8453369140625,
+            "ms_per_step": 0.573487060546875,
+            "intercept_ms": 0.3841552734373863,
+            "graph_active": false
+          },
+          {
+            "low_ms": 860.4548950195312,
+            "high_ms": 1720.9886474609375,
+            "ms_per_step": 0.5736891682942709,
+            "intercept_ms": -0.078857421875,
+            "graph_active": false
+          }
+        ],
+        "a_median_ms_per_step": 0.5681287841796875,
+        "b_median_ms_per_step": 0.5734980061848959,
+        "a_mad_ms_per_step": 0.00013582356770835968,
+        "b_mad_ms_per_step": 0.00010917154947909236,
+        "a_median_intercept_ms": 3.5810546875,
+        "b_median_intercept_ms": 0.05944824218738631,
+        "paired_ratios_b_over_a": [
+          1.0094803774702308,
+          1.0102630387418103,
+          1.0096600442613892,
+          1.0095402982029917,
+          1.0083339726483846,
+          1.008834845199809,
+          1.0097871895764126
+        ],
+        "ratio_mean": 1.0094142523001468,
+        "ratio_ci95_lower": 1.0089456091378743,
+        "ratio_ci95_upper": 1.0098828954624193,
+        "b_slower_than_a_pct": 0.9414252300146808,
+        "b_slower_than_a_pct_ci95": [
+          0.8945609137874344,
+          0.9882895462419272
+        ],
+        "abs_max_delta_pct": 1.0263038741810337,
+        "graph_active_a": true,
+        "graph_active_b": false
+      },
+      "aa_graph": {
+        "label": "A/A graph vs graph",
+        "mode_a_cuda_graph": true,
+        "mode_b_cuda_graph": true,
+        "rounds": 7,
+        "base_steps": 1500,
+        "a_ms_per_step": [
+          0.5682409261067708,
+          0.5680523681640625,
+          0.5683029378255209,
+          0.5681458333333333,
+          0.5681070963541667,
+          0.5681841634114584,
+          0.5677874755859375
+        ],
+        "b_ms_per_step": [
+          0.5682429606119792,
+          0.568227294921875,
+          0.5684701741536459,
+          0.5680925699869792,
+          0.5683494466145833,
+          0.5683848876953125,
+          0.567913818359375
+        ],
+        "a_raw": [
+          {
+            "low_ms": 855.9431762695312,
+            "high_ms": 1708.3045654296875,
+            "ms_per_step": 0.5682409261067708,
+            "intercept_ms": 3.5817871093751137,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.8930053710938,
+            "high_ms": 1707.9715576171875,
+            "ms_per_step": 0.5680523681640625,
+            "intercept_ms": 3.8144531250001137,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.9042358398438,
+            "high_ms": 1708.358642578125,
+            "ms_per_step": 0.5683029378255209,
+            "intercept_ms": 3.4498291015623863,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.6556396484375,
+            "high_ms": 1707.8743896484375,
+            "ms_per_step": 0.5681458333333333,
+            "intercept_ms": 3.4368896484375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.634765625,
+            "high_ms": 1707.79541015625,
+            "ms_per_step": 0.5681070963541667,
+            "intercept_ms": 3.47412109375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.5673828125,
+            "high_ms": 1707.8436279296875,
+            "ms_per_step": 0.5681841634114584,
+            "intercept_ms": 3.2911376953123863,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.7987670898438,
+            "high_ms": 1707.47998046875,
+            "ms_per_step": 0.5677874755859375,
+            "intercept_ms": 4.117553710937614,
+            "graph_active": true
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 855.8981323242188,
+            "high_ms": 1708.2625732421875,
+            "ms_per_step": 0.5682429606119792,
+            "intercept_ms": 3.5336914062498863,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.924560546875,
+            "high_ms": 1708.2655029296875,
+            "ms_per_step": 0.568227294921875,
+            "intercept_ms": 3.5836181640626137,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.4669799804688,
+            "high_ms": 1708.1722412109375,
+            "ms_per_step": 0.5684701741536459,
+            "intercept_ms": 2.76171875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.8837280273438,
+            "high_ms": 1708.0225830078125,
+            "ms_per_step": 0.5680925699869792,
+            "intercept_ms": 3.7448730468748863,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.678955078125,
+            "high_ms": 1708.203125,
+            "ms_per_step": 0.5683494466145833,
+            "intercept_ms": 3.15478515625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.4137573242188,
+            "high_ms": 1707.9910888671875,
+            "ms_per_step": 0.5683848876953125,
+            "intercept_ms": 2.83642578125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 855.462890625,
+            "high_ms": 1707.3336181640625,
+            "ms_per_step": 0.567913818359375,
+            "intercept_ms": 3.5921630859373863,
+            "graph_active": true
+          }
+        ],
+        "a_median_ms_per_step": 0.5681458333333333,
+        "b_median_ms_per_step": 0.5682429606119792,
+        "a_mad_ms_per_step": 9.346516927088988e-05,
+        "b_mad_ms_per_step": 0.00014192708333327086,
+        "a_median_intercept_ms": 3.47412109375,
+        "b_median_intercept_ms": 3.5336914062498863,
+        "paired_ratios_b_over_a": [
+          1.0000035803567024,
+          1.000307941252631,
+          1.0002942732071118,
+          0.999906250572953,
+          1.0004265925596985,
+          1.0003532732814109,
+          1.0002225177181079
+        ],
+        "ratio_mean": 1.0002163469926593,
+        "ratio_ci95_lower": 1.0000760678843899,
+        "ratio_ci95_upper": 1.0003566261009287,
+        "b_slower_than_a_pct": 0.02163469926592665,
+        "b_slower_than_a_pct_ci95": [
+          0.0076067884389852125,
+          0.035662610092868086
+        ],
+        "abs_max_delta_pct": 0.042659255969845766,
+        "graph_active_a": true,
+        "graph_active_b": true
+      },
+      "aa_eager": {
+        "label": "A/A eager vs eager",
+        "mode_a_cuda_graph": false,
+        "mode_b_cuda_graph": false,
+        "rounds": 7,
+        "base_steps": 1500,
+        "a_ms_per_step": [
+          0.5732481282552083,
+          0.5732795003255209,
+          0.5734483642578125,
+          0.57316552734375,
+          0.5733342692057292,
+          0.5732747802734375,
+          0.573146484375
+        ],
+        "b_ms_per_step": [
+          0.5733675130208333,
+          0.573195556640625,
+          0.5733580729166666,
+          0.5732672526041667,
+          0.573145751953125,
+          0.5733416748046875,
+          0.5730209147135417
+        ],
+        "a_raw": [
+          {
+            "low_ms": 860.2347412109375,
+            "high_ms": 1720.10693359375,
+            "ms_per_step": 0.5732481282552083,
+            "intercept_ms": 0.362548828125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 860.1243286132812,
+            "high_ms": 1720.0435791015625,
+            "ms_per_step": 0.5732795003255209,
+            "intercept_ms": 0.2050781249998863,
+            "graph_active": false
+          },
+          {
+            "low_ms": 860.1088256835938,
+            "high_ms": 1720.2813720703125,
+            "ms_per_step": 0.5734483642578125,
+            "intercept_ms": -0.063720703125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 859.9500732421875,
+            "high_ms": 1719.6983642578125,
+            "ms_per_step": 0.57316552734375,
+            "intercept_ms": 0.2017822265625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 859.7985229492188,
+            "high_ms": 1719.7999267578125,
+            "ms_per_step": 0.5733342692057292,
+            "intercept_ms": -0.202880859375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 859.8241577148438,
+            "high_ms": 1719.736328125,
+            "ms_per_step": 0.5732747802734375,
+            "intercept_ms": -0.0880126953125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 859.7923583984375,
+            "high_ms": 1719.5120849609375,
+            "ms_per_step": 0.573146484375,
+            "intercept_ms": 0.07263183593738631,
+            "graph_active": false
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 860.1180419921875,
+            "high_ms": 1720.1693115234375,
+            "ms_per_step": 0.5733675130208333,
+            "intercept_ms": 0.0667724609375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 860.042236328125,
+            "high_ms": 1719.8355712890625,
+            "ms_per_step": 0.573195556640625,
+            "intercept_ms": 0.2489013671873863,
+            "graph_active": false
+          },
+          {
+            "low_ms": 859.915283203125,
+            "high_ms": 1719.952392578125,
+            "ms_per_step": 0.5733580729166666,
+            "intercept_ms": -0.12182617187488631,
+            "graph_active": false
+          },
+          {
+            "low_ms": 859.967529296875,
+            "high_ms": 1719.868408203125,
+            "ms_per_step": 0.5732672526041667,
+            "intercept_ms": 0.066650390625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 859.989990234375,
+            "high_ms": 1719.7086181640625,
+            "ms_per_step": 0.573145751953125,
+            "intercept_ms": 0.2713623046875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 859.9306030273438,
+            "high_ms": 1719.943115234375,
+            "ms_per_step": 0.5733416748046875,
+            "intercept_ms": -0.08190917968738631,
+            "graph_active": false
+          },
+          {
+            "low_ms": 859.92333984375,
+            "high_ms": 1719.4547119140625,
+            "ms_per_step": 0.5730209147135417,
+            "intercept_ms": 0.3919677734375,
+            "graph_active": false
+          }
+        ],
+        "a_median_ms_per_step": 0.5732747802734375,
+        "b_median_ms_per_step": 0.5732672526041667,
+        "a_mad_ms_per_step": 5.9488932291684726e-05,
+        "b_mad_ms_per_step": 9.082031249996181e-05,
+        "a_median_intercept_ms": 0.07263183593738631,
+        "b_median_intercept_ms": 0.0667724609375,
+        "paired_ratios_b_over_a": [
+          1.000208260192647,
+          0.9998535728473664,
+          0.9998425466933492,
+          1.000177479725426,
+          0.9996711913752071,
+          1.0001166884250832,
+          0.9997809117479011
+        ],
+        "ratio_mean": 0.9999500930009971,
+        "ratio_ci95_lower": 0.9997933141200858,
+        "ratio_ci95_upper": 1.0001068718819086,
+        "b_slower_than_a_pct": -0.004990699900286888,
+        "b_slower_than_a_pct_ci95": [
+          -0.02066858799142368,
+          0.010687188190861008
+        ],
+        "abs_max_delta_pct": 0.032880862479289785,
+        "graph_active_a": false,
+        "graph_active_b": false
+      },
+      "graph_median_ms_per_step": 0.5681287841796875,
+      "eager_median_ms_per_step": 0.5734980061848959,
+      "graph_throughput_gain_pct": 0.9414252300146808,
+      "graph_throughput_gain_pct_ci95": [
+        0.8945609137874344,
+        0.9882895462419272
+      ],
+      "aa_resolution_floor_abs_max_pct": 0.042659255969845766,
+      "aa_resolution_floor_ci95_pct": 0.035662610092868086,
+      "resolvable": true,
+      "verdict": "graph faster",
+      "graph_capture_intercept_ms": 3.5810546875,
+      "eager_intercept_ms": 0.05944824218738631,
+      "peak_memory_bytes_graph": 964189184,
+      "peak_memory_bytes_eager": 884381184,
+      "peak_memory_steps": 200,
+      "peak_memory_graph_over_eager_pct": 9.02416304687006,
+      "clocks_after_grid": [
+        "0, NVIDIA RTX A6000, 1770 MHz, 2100 MHz, 7601 MHz, Enabled, 87, 236.12 W",
+        "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled, 44, 21.35 W"
+      ]
+    },
+    {
+      "grid_cells_per_axis": 160,
+      "total_cells": 4096000,
+      "base_steps": 1000,
+      "ab": {
+        "label": "A/B graph(A) vs eager(B)",
+        "mode_a_cuda_graph": true,
+        "mode_b_cuda_graph": false,
+        "rounds": 7,
+        "base_steps": 1000,
+        "a_ms_per_step": [
+          0.9696552124023438,
+          0.969787353515625,
+          0.9701929931640625,
+          0.9700076293945312,
+          0.9699410400390625,
+          0.9696255493164062,
+          0.9700239868164062
+        ],
+        "b_ms_per_step": [
+          0.9752760009765625,
+          0.9752330322265625,
+          0.975167236328125,
+          0.9752246704101563,
+          0.9751644287109374,
+          0.9750425415039062,
+          0.9752393188476562
+        ],
+        "a_raw": [
+          {
+            "low_ms": 974.8213500976562,
+            "high_ms": 1944.4765625,
+            "ms_per_step": 0.9696552124023438,
+            "intercept_ms": 5.1661376953125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.9227294921875,
+            "high_ms": 1944.7100830078125,
+            "ms_per_step": 0.969787353515625,
+            "intercept_ms": 5.1353759765625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.6083984375,
+            "high_ms": 1944.8013916015625,
+            "ms_per_step": 0.9701929931640625,
+            "intercept_ms": 4.4154052734375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.6974487304688,
+            "high_ms": 1944.705078125,
+            "ms_per_step": 0.9700076293945312,
+            "intercept_ms": 4.6898193359375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.8294677734375,
+            "high_ms": 1944.7705078125,
+            "ms_per_step": 0.9699410400390625,
+            "intercept_ms": 4.888427734375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.9402465820312,
+            "high_ms": 1944.5657958984375,
+            "ms_per_step": 0.9696255493164062,
+            "intercept_ms": 5.314697265625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.5653686523438,
+            "high_ms": 1944.58935546875,
+            "ms_per_step": 0.9700239868164062,
+            "intercept_ms": 4.5413818359375,
+            "graph_active": true
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 975.1439208984375,
+            "high_ms": 1950.419921875,
+            "ms_per_step": 0.9752760009765625,
+            "intercept_ms": -0.132080078125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.1593017578125,
+            "high_ms": 1950.392333984375,
+            "ms_per_step": 0.9752330322265625,
+            "intercept_ms": -0.07373046875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.3538818359375,
+            "high_ms": 1950.5211181640625,
+            "ms_per_step": 0.975167236328125,
+            "intercept_ms": 0.1866455078125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.1685180664062,
+            "high_ms": 1950.3931884765625,
+            "ms_per_step": 0.9752246704101563,
+            "intercept_ms": -0.05615234375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.3118896484375,
+            "high_ms": 1950.476318359375,
+            "ms_per_step": 0.9751644287109374,
+            "intercept_ms": 0.1474609375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.1480102539062,
+            "high_ms": 1950.1905517578125,
+            "ms_per_step": 0.9750425415039062,
+            "intercept_ms": 0.10546875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.1685180664062,
+            "high_ms": 1950.4078369140625,
+            "ms_per_step": 0.9752393188476562,
+            "intercept_ms": -0.07080078125,
+            "graph_active": false
+          }
+        ],
+        "a_median_ms_per_step": 0.9699410400390625,
+        "b_median_ms_per_step": 0.9752246704101563,
+        "a_mad_ms_per_step": 0.00015368652343750178,
+        "b_mad_ms_per_step": 5.1330566406271316e-05,
+        "a_median_intercept_ms": 4.888427734375,
+        "b_median_intercept_ms": -0.05615234375,
+        "paired_ratios_b_over_a": [
+          1.0057966878353524,
+          1.0056153327749595,
+          1.0051270656447848,
+          1.0053783504969764,
+          1.0053852641101408,
+          1.0055866846653525,
+          1.0053764980063706
+        ],
+        "ratio_mean": 1.0054665547905624,
+        "ratio_ci95_lower": 1.0053069611041416,
+        "ratio_ci95_upper": 1.005626148476983,
+        "b_slower_than_a_pct": 0.546655479056235,
+        "b_slower_than_a_pct_ci95": [
+          0.5306961104141639,
+          0.5626148476983062
+        ],
+        "abs_max_delta_pct": 0.5796687835352365,
+        "graph_active_a": true,
+        "graph_active_b": false
+      },
+      "aa_graph": {
+        "label": "A/A graph vs graph",
+        "mode_a_cuda_graph": true,
+        "mode_b_cuda_graph": true,
+        "rounds": 7,
+        "base_steps": 1000,
+        "a_ms_per_step": [
+          0.9695794067382812,
+          0.9698292846679688,
+          0.970054443359375,
+          0.96974853515625,
+          0.9699953002929688,
+          0.9698048095703125,
+          0.9695599975585938
+        ],
+        "b_ms_per_step": [
+          0.96958740234375,
+          0.9697116088867187,
+          0.9700382690429687,
+          0.9698518676757812,
+          0.9699307250976562,
+          0.9698611450195312,
+          0.969765625
+        ],
+        "a_raw": [
+          {
+            "low_ms": 974.9053344726562,
+            "high_ms": 1944.4847412109375,
+            "ms_per_step": 0.9695794067382812,
+            "intercept_ms": 5.325927734375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.7518920898438,
+            "high_ms": 1944.5811767578125,
+            "ms_per_step": 0.9698292846679688,
+            "intercept_ms": 4.922607421875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.4896240234375,
+            "high_ms": 1944.5440673828125,
+            "ms_per_step": 0.970054443359375,
+            "intercept_ms": 4.4351806640625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.760986328125,
+            "high_ms": 1944.509521484375,
+            "ms_per_step": 0.96974853515625,
+            "intercept_ms": 5.012451171875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.7496948242188,
+            "high_ms": 1944.7449951171875,
+            "ms_per_step": 0.9699953002929688,
+            "intercept_ms": 4.75439453125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.7528076171875,
+            "high_ms": 1944.5576171875,
+            "ms_per_step": 0.9698048095703125,
+            "intercept_ms": 4.947998046875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.8388061523438,
+            "high_ms": 1944.3988037109375,
+            "ms_per_step": 0.9695599975585938,
+            "intercept_ms": 5.27880859375,
+            "graph_active": true
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 974.80322265625,
+            "high_ms": 1944.390625,
+            "ms_per_step": 0.96958740234375,
+            "intercept_ms": 5.2158203125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.8766479492188,
+            "high_ms": 1944.5882568359375,
+            "ms_per_step": 0.9697116088867187,
+            "intercept_ms": 5.1650390625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.8551635742188,
+            "high_ms": 1944.8934326171875,
+            "ms_per_step": 0.9700382690429687,
+            "intercept_ms": 4.81689453125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.6605834960938,
+            "high_ms": 1944.512451171875,
+            "ms_per_step": 0.9698518676757812,
+            "intercept_ms": 4.8087158203125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.5336303710938,
+            "high_ms": 1944.46435546875,
+            "ms_per_step": 0.9699307250976562,
+            "intercept_ms": 4.6029052734375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.8070678710938,
+            "high_ms": 1944.668212890625,
+            "ms_per_step": 0.9698611450195312,
+            "intercept_ms": 4.9459228515625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 974.688232421875,
+            "high_ms": 1944.453857421875,
+            "ms_per_step": 0.969765625,
+            "intercept_ms": 4.922607421875,
+            "graph_active": true
+          }
+        ],
+        "a_median_ms_per_step": 0.9698048095703125,
+        "b_median_ms_per_step": 0.9698518676757812,
+        "a_mad_ms_per_step": 0.00019049072265631128,
+        "b_mad_ms_per_step": 8.624267578127842e-05,
+        "a_median_intercept_ms": 4.947998046875,
+        "b_median_intercept_ms": 4.922607421875,
+        "paired_ratios_b_over_a": [
+          1.000008246467915,
+          0.9998786634069413,
+          0.9999833263828469,
+          1.0001065559944513,
+          0.9999334273111498,
+          1.0000580894718842,
+          1.000212083256244
+        ],
+        "ratio_mean": 1.0000257703273474,
+        "ratio_ci95_lower": 0.9999438974097393,
+        "ratio_ci95_upper": 1.0001076432449556,
+        "b_slower_than_a_pct": 0.0025770327347407473,
+        "b_slower_than_a_pct_ci95": [
+          -0.005610259026067599,
+          0.010764324495560196
+        ],
+        "abs_max_delta_pct": 0.021208325624400004,
+        "graph_active_a": true,
+        "graph_active_b": true
+      },
+      "aa_eager": {
+        "label": "A/A eager vs eager",
+        "mode_a_cuda_graph": false,
+        "mode_b_cuda_graph": false,
+        "rounds": 7,
+        "base_steps": 1000,
+        "a_ms_per_step": [
+          0.9750765380859375,
+          0.9752177124023438,
+          0.9747999877929687,
+          0.9752156372070313,
+          0.9752593383789062,
+          0.9749248046875,
+          0.9752380981445312
+        ],
+        "b_ms_per_step": [
+          0.9749578247070313,
+          0.9750682373046875,
+          0.9750835571289063,
+          0.9749227294921875,
+          0.9749177856445312,
+          0.9751603393554688,
+          0.9752105712890625
+        ],
+        "a_raw": [
+          {
+            "low_ms": 975.05078125,
+            "high_ms": 1950.1273193359375,
+            "ms_per_step": 0.9750765380859375,
+            "intercept_ms": -0.0257568359375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 974.8397827148438,
+            "high_ms": 1950.0574951171875,
+            "ms_per_step": 0.9752177124023438,
+            "intercept_ms": -0.3779296875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.0947875976562,
+            "high_ms": 1949.894775390625,
+            "ms_per_step": 0.9747999877929687,
+            "intercept_ms": 0.2947998046875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.0128784179688,
+            "high_ms": 1950.228515625,
+            "ms_per_step": 0.9752156372070313,
+            "intercept_ms": -0.2027587890625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 974.9916381835938,
+            "high_ms": 1950.2509765625,
+            "ms_per_step": 0.9752593383789062,
+            "intercept_ms": -0.2677001953125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.14599609375,
+            "high_ms": 1950.07080078125,
+            "ms_per_step": 0.9749248046875,
+            "intercept_ms": 0.22119140625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.0548706054688,
+            "high_ms": 1950.29296875,
+            "ms_per_step": 0.9752380981445312,
+            "intercept_ms": -0.1832275390625,
+            "graph_active": false
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 975.2698364257812,
+            "high_ms": 1950.2276611328125,
+            "ms_per_step": 0.9749578247070313,
+            "intercept_ms": 0.31201171875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.04052734375,
+            "high_ms": 1950.1087646484375,
+            "ms_per_step": 0.9750682373046875,
+            "intercept_ms": -0.0277099609375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 974.8950805664062,
+            "high_ms": 1949.9786376953125,
+            "ms_per_step": 0.9750835571289063,
+            "intercept_ms": -0.1884765625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.014892578125,
+            "high_ms": 1949.9376220703125,
+            "ms_per_step": 0.9749227294921875,
+            "intercept_ms": 0.0921630859375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.0117797851562,
+            "high_ms": 1949.9295654296875,
+            "ms_per_step": 0.9749177856445312,
+            "intercept_ms": 0.093994140625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 975.0497436523438,
+            "high_ms": 1950.2100830078125,
+            "ms_per_step": 0.9751603393554688,
+            "intercept_ms": -0.110595703125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 974.884765625,
+            "high_ms": 1950.0953369140625,
+            "ms_per_step": 0.9752105712890625,
+            "intercept_ms": -0.3258056640625,
+            "graph_active": false
+          }
+        ],
+        "a_median_ms_per_step": 0.9752156372070313,
+        "b_median_ms_per_step": 0.9750682373046875,
+        "a_mad_ms_per_step": 4.3701171874910294e-05,
+        "b_mad_ms_per_step": 0.00011041259765620648,
+        "a_median_intercept_ms": -0.1832275390625,
+        "b_median_intercept_ms": -0.0277099609375,
+        "paired_ratios_b_over_a": [
+          0.9998782522455731,
+          0.9998467264327182,
+          1.0002909000199924,
+          0.9996996482586327,
+          0.9996497826568441,
+          1.0002415926508756,
+          0.9999717742205508
+        ],
+        "ratio_mean": 0.9999398109264553,
+        "ratio_ci95_lower": 0.999757522951174,
+        "ratio_ci95_upper": 1.0001220989017368,
+        "b_slower_than_a_pct": -0.006018907354465863,
+        "b_slower_than_a_pct_ci95": [
+          -0.0242477048825962,
+          0.012209890173675575
+        ],
+        "abs_max_delta_pct": 0.03502173431558786,
+        "graph_active_a": false,
+        "graph_active_b": false
+      },
+      "graph_median_ms_per_step": 0.9699410400390625,
+      "eager_median_ms_per_step": 0.9752246704101563,
+      "graph_throughput_gain_pct": 0.546655479056235,
+      "graph_throughput_gain_pct_ci95": [
+        0.5306961104141639,
+        0.5626148476983062
+      ],
+      "aa_resolution_floor_abs_max_pct": 0.03502173431558786,
+      "aa_resolution_floor_ci95_pct": 0.0242477048825962,
+      "resolvable": true,
+      "verdict": "graph faster",
+      "graph_capture_intercept_ms": 4.888427734375,
+      "eager_intercept_ms": -0.05615234375,
+      "peak_memory_bytes_graph": 1728730624,
+      "peak_memory_bytes_eager": 1592971776,
+      "peak_memory_steps": 200,
+      "peak_memory_graph_over_eager_pct": 8.522363675575884,
+      "clocks_after_grid": [
+        "0, NVIDIA RTX A6000, 1800 MHz, 2100 MHz, 7601 MHz, Enabled, 87, 248.16 W",
+        "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled, 44, 21.33 W"
+      ]
+    },
+    {
+      "grid_cells_per_axis": 288,
+      "total_cells": 23887872,
+      "base_steps": 400,
+      "ab": {
+        "label": "A/B graph(A) vs eager(B)",
+        "mode_a_cuda_graph": true,
+        "mode_b_cuda_graph": false,
+        "rounds": 7,
+        "base_steps": 400,
+        "a_ms_per_step": [
+          4.51093505859375,
+          4.510174255371094,
+          4.510569152832031,
+          4.510323486328125,
+          4.511303405761719,
+          4.5105459594726565,
+          4.511621704101563
+        ],
+        "b_ms_per_step": [
+          4.515200500488281,
+          4.516188049316407,
+          4.516351928710938,
+          4.515881042480469,
+          4.5155126953125,
+          4.515903930664063,
+          4.516758422851563
+        ],
+        "a_raw": [
+          {
+            "low_ms": 1820.874755859375,
+            "high_ms": 3625.248779296875,
+            "ms_per_step": 4.51093505859375,
+            "intercept_ms": 16.500732421875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.9444580078125,
+            "high_ms": 3625.01416015625,
+            "ms_per_step": 4.510174255371094,
+            "intercept_ms": 16.874755859374773,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.8572998046875,
+            "high_ms": 3625.0849609375,
+            "ms_per_step": 4.510569152832031,
+            "intercept_ms": 16.629638671875227,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.832763671875,
+            "high_ms": 3624.962158203125,
+            "ms_per_step": 4.510323486328125,
+            "intercept_ms": 16.703369140625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.4212646484375,
+            "high_ms": 3624.942626953125,
+            "ms_per_step": 4.511303405761719,
+            "intercept_ms": 15.899902343749773,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.9249267578125,
+            "high_ms": 3625.143310546875,
+            "ms_per_step": 4.5105459594726565,
+            "intercept_ms": 16.70654296875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.84912109375,
+            "high_ms": 3625.497802734375,
+            "ms_per_step": 4.511621704101563,
+            "intercept_ms": 16.200439453125,
+            "graph_active": true
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 1803.7113037109375,
+            "high_ms": 3609.79150390625,
+            "ms_per_step": 4.515200500488281,
+            "intercept_ms": -2.368896484375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.6275634765625,
+            "high_ms": 3610.102783203125,
+            "ms_per_step": 4.516188049316407,
+            "intercept_ms": -2.8476562500002274,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.6796875,
+            "high_ms": 3610.220458984375,
+            "ms_per_step": 4.516351928710938,
+            "intercept_ms": -2.861083984375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.5496826171875,
+            "high_ms": 3609.902099609375,
+            "ms_per_step": 4.515881042480469,
+            "intercept_ms": -2.8027343750002274,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.54443359375,
+            "high_ms": 3609.74951171875,
+            "ms_per_step": 4.5155126953125,
+            "intercept_ms": -2.66064453125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.6787109375,
+            "high_ms": 3610.040283203125,
+            "ms_per_step": 4.515903930664063,
+            "intercept_ms": -2.6828613281252274,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.712646484375,
+            "high_ms": 3610.416015625,
+            "ms_per_step": 4.516758422851563,
+            "intercept_ms": -2.9907226562502274,
+            "graph_active": false
+          }
+        ],
+        "a_median_ms_per_step": 4.510569152832031,
+        "b_median_ms_per_step": 4.515903930664063,
+        "a_mad_ms_per_step": 0.00036590576171935396,
+        "b_mad_ms_per_step": 0.00039123535156271316,
+        "a_median_intercept_ms": 16.629638671875227,
+        "b_median_intercept_ms": -2.8027343750002274,
+        "paired_ratios_b_over_a": [
+          1.0009455782092018,
+          1.0013333839458975,
+          1.0012820501544193,
+          1.0012321857111115,
+          1.0009330539695922,
+          1.001187876421069,
+          1.0011385526284995
+        ],
+        "ratio_mean": 1.0011503830056845,
+        "ratio_ci95_lower": 1.0010349391039728,
+        "ratio_ci95_upper": 1.0012658269073962,
+        "b_slower_than_a_pct": 0.11503830056844855,
+        "b_slower_than_a_pct_ci95": [
+          0.10349391039727873,
+          0.12658269073961836
+        ],
+        "abs_max_delta_pct": 0.13333839458975483,
+        "graph_active_a": true,
+        "graph_active_b": false
+      },
+      "aa_graph": {
+        "label": "A/A graph vs graph",
+        "mode_a_cuda_graph": true,
+        "mode_b_cuda_graph": true,
+        "rounds": 7,
+        "base_steps": 400,
+        "a_ms_per_step": [
+          4.5118341064453125,
+          4.511703186035156,
+          4.511598510742187,
+          4.511465148925781,
+          4.511953430175781,
+          4.511879272460938,
+          4.511789855957031
+        ],
+        "b_ms_per_step": [
+          4.511672058105469,
+          4.51099365234375,
+          4.510965576171875,
+          4.511812744140625,
+          4.511990356445312,
+          4.512655334472656,
+          4.51208251953125
+        ],
+        "a_raw": [
+          {
+            "low_ms": 1820.85302734375,
+            "high_ms": 3625.586669921875,
+            "ms_per_step": 4.5118341064453125,
+            "intercept_ms": 16.119384765625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.7210693359375,
+            "high_ms": 3625.40234375,
+            "ms_per_step": 4.511703186035156,
+            "intercept_ms": 16.039794921875,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.781494140625,
+            "high_ms": 3625.4208984375,
+            "ms_per_step": 4.511598510742187,
+            "intercept_ms": 16.14208984375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.6986083984375,
+            "high_ms": 3625.28466796875,
+            "ms_per_step": 4.511465148925781,
+            "intercept_ms": 16.112548828125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.4937744140625,
+            "high_ms": 3625.275146484375,
+            "ms_per_step": 4.511953430175781,
+            "intercept_ms": 15.71240234375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.4365234375,
+            "high_ms": 3625.188232421875,
+            "ms_per_step": 4.511879272460938,
+            "intercept_ms": 15.684814453125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.5706787109375,
+            "high_ms": 3625.28662109375,
+            "ms_per_step": 4.511789855957031,
+            "intercept_ms": 15.854736328125227,
+            "graph_active": true
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 1820.8819580078125,
+            "high_ms": 3625.55078125,
+            "ms_per_step": 4.511672058105469,
+            "intercept_ms": 16.213134765625,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.81640625,
+            "high_ms": 3625.2138671875,
+            "ms_per_step": 4.51099365234375,
+            "intercept_ms": 16.4189453125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.7744140625,
+            "high_ms": 3625.16064453125,
+            "ms_per_step": 4.510965576171875,
+            "intercept_ms": 16.38818359375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.716064453125,
+            "high_ms": 3625.441162109375,
+            "ms_per_step": 4.511812744140625,
+            "intercept_ms": 15.990966796875227,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.516357421875,
+            "high_ms": 3625.3125,
+            "ms_per_step": 4.511990356445312,
+            "intercept_ms": 15.72021484375,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.3934326171875,
+            "high_ms": 3625.45556640625,
+            "ms_per_step": 4.512655334472656,
+            "intercept_ms": 15.331298828125,
+            "graph_active": true
+          },
+          {
+            "low_ms": 1820.422119140625,
+            "high_ms": 3625.255126953125,
+            "ms_per_step": 4.51208251953125,
+            "intercept_ms": 15.589111328124773,
+            "graph_active": true
+          }
+        ],
+        "a_median_ms_per_step": 4.511789855957031,
+        "b_median_ms_per_step": 4.511812744140625,
+        "a_mad_ms_per_step": 8.941650390692502e-05,
+        "b_mad_ms_per_step": 0.0002697753906257816,
+        "a_median_intercept_ms": 16.039794921875,
+        "b_median_intercept_ms": 15.990966796875227,
+        "paired_ratios_b_over_a": [
+          0.999964083710522,
+          0.9998427348470966,
+          0.9998597094646597,
+          1.000077047079689,
+          1.0000081840981079,
+          1.0001720041616484,
+          1.0000648664019298
+        ],
+        "ratio_mean": 0.999998375680522,
+        "ratio_ci95_lower": 0.9999107109830866,
+        "ratio_ci95_upper": 1.0000860403779572,
+        "b_slower_than_a_pct": -0.00016243194780329873,
+        "b_slower_than_a_pct_ci95": [
+          -0.008928901691340752,
+          0.008604037795723052
+        ],
+        "abs_max_delta_pct": 0.017200416164842025,
+        "graph_active_a": true,
+        "graph_active_b": true
+      },
+      "aa_eager": {
+        "label": "A/A eager vs eager",
+        "mode_a_cuda_graph": false,
+        "mode_b_cuda_graph": false,
+        "rounds": 7,
+        "base_steps": 400,
+        "a_ms_per_step": [
+          4.5166928100585935,
+          4.5167935180664065,
+          4.516869201660156,
+          4.516972351074219,
+          4.51662353515625,
+          4.516727905273438,
+          4.516972045898438
+        ],
+        "b_ms_per_step": [
+          4.516370239257813,
+          4.517219543457031,
+          4.517066345214844,
+          4.516932678222656,
+          4.516384887695312,
+          4.517219848632813,
+          4.517008056640625
+        ],
+        "a_raw": [
+          {
+            "low_ms": 1803.4134521484375,
+            "high_ms": 3610.090576171875,
+            "ms_per_step": 4.5166928100585935,
+            "intercept_ms": -3.263671875,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.6605224609375,
+            "high_ms": 3610.3779296875,
+            "ms_per_step": 4.5167935180664065,
+            "intercept_ms": -3.056884765625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.5753173828125,
+            "high_ms": 3610.322998046875,
+            "ms_per_step": 4.516869201660156,
+            "intercept_ms": -3.1723632812497726,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.5260009765625,
+            "high_ms": 3610.31494140625,
+            "ms_per_step": 4.516972351074219,
+            "intercept_ms": -3.262939453125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.577392578125,
+            "high_ms": 3610.226806640625,
+            "ms_per_step": 4.51662353515625,
+            "intercept_ms": -3.072021484375,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.398193359375,
+            "high_ms": 3610.08935546875,
+            "ms_per_step": 4.516727905273438,
+            "intercept_ms": -3.2929687500002274,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.378662109375,
+            "high_ms": 3610.16748046875,
+            "ms_per_step": 4.516972045898438,
+            "intercept_ms": -3.4101562500002274,
+            "graph_active": false
+          }
+        ],
+        "b_raw": [
+          {
+            "low_ms": 1803.49951171875,
+            "high_ms": 3610.047607421875,
+            "ms_per_step": 4.516370239257813,
+            "intercept_ms": -3.0485839843752274,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.5201416015625,
+            "high_ms": 3610.407958984375,
+            "ms_per_step": 4.517219543457031,
+            "intercept_ms": -3.36767578125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.3643798828125,
+            "high_ms": 3610.19091796875,
+            "ms_per_step": 4.517066345214844,
+            "intercept_ms": -3.4621582031252274,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.3685302734375,
+            "high_ms": 3610.1416015625,
+            "ms_per_step": 4.516932678222656,
+            "intercept_ms": -3.404541015625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.872314453125,
+            "high_ms": 3610.42626953125,
+            "ms_per_step": 4.516384887695312,
+            "intercept_ms": -2.681640625,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.557861328125,
+            "high_ms": 3610.44580078125,
+            "ms_per_step": 4.517219848632813,
+            "intercept_ms": -3.330078125,
+            "graph_active": false
+          },
+          {
+            "low_ms": 1803.578125,
+            "high_ms": 3610.38134765625,
+            "ms_per_step": 4.517008056640625,
+            "intercept_ms": -3.22509765625,
+            "graph_active": false
+          }
+        ],
+        "a_median_ms_per_step": 4.5167935180664065,
+        "b_median_ms_per_step": 4.517008056640625,
+        "a_mad_ms_per_step": 0.00010070800781303291,
+        "b_mad_ms_per_step": 0.00021148681640603684,
+        "a_median_intercept_ms": -3.262939453125,
+        "b_median_intercept_ms": -3.330078125,
+        "paired_ratios_b_over_a": [
+          0.9999285825239073,
+          1.0000943203157109,
+          1.0000436460623248,
+          0.9999912169372582,
+          0.9999471624192098,
+          1.000108915872218,
+          1.0000079723190274
+        ],
+        "ratio_mean": 1.0000174023499508,
+        "ratio_ci95_lower": 0.9999667152923597,
+        "ratio_ci95_upper": 1.000068089407542,
+        "b_slower_than_a_pct": 0.0017402349950845775,
+        "b_slower_than_a_pct_ci95": [
+          -0.0033284707640302003,
+          0.006808940754199355
+        ],
+        "abs_max_delta_pct": 0.010891587221806276,
+        "graph_active_a": false,
+        "graph_active_b": false
+      },
+      "graph_median_ms_per_step": 4.510569152832031,
+      "eager_median_ms_per_step": 4.515903930664063,
+      "graph_throughput_gain_pct": 0.11503830056844855,
+      "graph_throughput_gain_pct_ci95": [
+        0.10349391039727873,
+        0.12658269073961836
+      ],
+      "aa_resolution_floor_abs_max_pct": 0.017200416164842025,
+      "aa_resolution_floor_ci95_pct": 0.008928901691340752,
+      "resolvable": true,
+      "verdict": "graph faster",
+      "graph_capture_intercept_ms": 16.629638671875227,
+      "eager_intercept_ms": -2.8027343750002274,
+      "peak_memory_bytes_graph": 8529550848,
+      "peak_memory_bytes_eager": 7891965440,
+      "peak_memory_steps": 200,
+      "peak_memory_graph_over_eager_pct": 8.07891789247368,
+      "clocks_after_grid": [
+        "0, NVIDIA RTX A6000, 1740 MHz, 2100 MHz, 7601 MHz, Enabled, 87, 263.62 W",
+        "1, NVIDIA RTX A6000, 210 MHz, 2100 MHz, 405 MHz, Enabled, 45, 21.15 W"
+      ]
+    }
+  ]
+}

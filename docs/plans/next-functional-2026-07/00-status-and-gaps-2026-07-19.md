@@ -1530,11 +1530,25 @@ Which capabilities carry which grade of reference (gate-classification vocabular
     construction. Benchmark harness default is now `pec="conformal"` (dielectric scenes
     unaffected). Source: FEATURE_LIST `f4-subpixel-lever` block, merge `f0737c5`.
 - **CUDA-graph stepping is the public default (added 2026-07-22).** `afb7a85` flipped
-  `FDTDConfig.cuda_graph` / `Simulation.fdtd(..., cuda_graph=...)` to `True` (measured in
-  that commit: +29% throughput at 96³, neutral at 288³, +8–14% peak memory), keeping the
+  `FDTDConfig.cuda_graph` / `Simulation.fdtd(..., cuda_graph=...)` to `True`, keeping the
   pre-existing graceful eager fallback; distributed (`parallel=...`) configs still force
-  it off (`simulation.py` `FDTDConfig.__post_init__`). Two J1 corrections define the
-  supported envelope:
+  it off (`simulation.py` `FDTDConfig.__post_init__`).
+  **Throughput boundary (measured 2026-07-22, artifact
+  `docs/assessments/cuda-graph-throughput-2026-07-22.json`, driver
+  `docs/assessments/cuda-graph-throughput-probes/cuda_graph_throughput.py`).** Plain
+  vacuum dipole, 2× RTX A6000, steady-state ms/step by two-point slope (capture cost
+  differenced out), 7 paired ABBA rounds, A/A calibration at every grid: graph gain
+  **+106.8% at 48³, +2.70% at 64³, +1.60% at 96³, +0.94% at 128³, +0.55% at 160³,
+  +0.12% at 288³**; peak memory **+8.1% … +21.1%**. Every point clears its A/A floor
+  (1.253% at 48³, ≤0.688% elsewhere), so the default is never slower here — but it is
+  only *material* below ~64³, because eager stepping bottoms out at a CPU launch-bound
+  floor of ~0.165 ms/step and everything at or above 64³ is GPU-bound.
+  **Retraction:** the previously quoted "+29% throughput at 96³ / +8–14% peak memory"
+  came from the `afb7a85` commit message with no tracked artifact and **does not
+  reproduce** — 96³ measures +1.6%. The 0.4.0 kernel work (`f5ae24e` uniform-coefficient
+  scalar fast path and compressed-CPML interior kernels, `9a7332f` template folding) cut
+  the eager launch count and moved the launch-bound crossover down to ~64³. "Neutral at
+  288³" survives (+0.12%). Two J1 corrections define the supported envelope:
   - **Device precondition.** `CudaGraphRunner` now takes a **mandatory** `device`, runs
     warmup/capture/synchronize inside `torch.cuda.device(device)`, and uses an explicit
     per-device capture stream. Before `9b177e3` a solver whose tensors lived on `cuda:1`
@@ -1597,9 +1611,13 @@ Folded from the round-H seed list, **minus the now-closed cuda_p2p item**:
   install). MEMORY `maxwell-fdfd-deferred`.
 - **NCCL flux/mode/x-normal adjoint objectives; monitor gather beyond forward** — fail-closed.
   §02; `h1-…`.
-- **Concurrent-ensemble graph throughput trade (added 2026-07-22)** — a plan running more
-  than one task at a time steps eagerly, forfeiting the +29%-at-96³ graph gain measured in
-  `afb7a85`. Recovering it needs concurrent capture from several threads, which PyTorch
+- **Concurrent-ensemble graph throughput trade (added 2026-07-22; quantified 2026-07-22)** —
+  a plan running more than one task at a time steps eagerly, forfeiting the graph gain.
+  Now measured (`cuda-graph-throughput-2026-07-22.json`) and much smaller than the
+  retracted `afb7a85` claim: the forfeited gain is **+1.6% at 96³** and **+0.55% at 160³**
+  (the two ensemble grids in `multi-gpu-timing-2026-07-20.json`), not +29%. It is only
+  material below ~64³ (+106.8% at 48³), where eager stepping is CPU launch-bound.
+  Recovering it needs concurrent capture from several threads, which PyTorch
   explicitly does not support; a capture mutex plus `capture_error_mode="thread_local"`
   was considered and rejected (that mode scopes only the error check, and the allocator
   interaction across concurrent captures is not a supported configuration).

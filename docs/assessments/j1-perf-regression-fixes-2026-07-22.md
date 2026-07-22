@@ -239,8 +239,13 @@ assertion was weakened.
 ## For the supervisor
 
 1. **Ensemble throughput trade.** Concurrent ensemble tasks now step eagerly.
-   `afb7a85` measured graph stepping at +29% throughput at 96^3 and neutral at
-   288^3, so a small-grid ensemble gives that up. Keeping graphs there would
+   `afb7a85`'s commit message claimed +29% throughput at 96^3 and neutral at
+   288^3, so a small-grid ensemble gives that up. **Superseded:** that claim had
+   no tracked artifact and does not reproduce on the shipped tree. Re-measured in
+   `docs/assessments/cuda-graph-throughput-2026-07-22.json` the forfeited gain is
+   +1.60% at 96^3 and +0.12% at 288^3; it only becomes material below ~64^3
+   (+106.8% at 48^3), where eager stepping is CPU launch-bound at ~0.165 ms/step.
+   Keeping graphs there would
    require concurrent capture from several threads, which PyTorch explicitly
    does not support ("graphs already have the general, explicitly documented
    restriction that only one capture may be underway at a time in the process",
