@@ -1864,6 +1864,7 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     graphable = (
         use_cuda_graph
         and torch.cuda.is_available()
+        and torch.device(solver.device).type == "cuda"
         # TFSF is capturable only for the reference providers, whose in-block
         # correction reads the device-resident incident line through the
         # bit-reproducible integer-indexed reference kernel and carries no per-step
@@ -2214,11 +2215,15 @@ def solve(
         run_network_updates = None
         run_port_observers = None
 
-    # When the field-update graph is active, drive the running DFT from a
-    # precomputed GPU weight table indexed by a device step counter, dropping the
-    # per-step host arithmetic and host->device transfer of the DFT weights.
+    # Drive the running DFT from a precomputed GPU weight table indexed by a
+    # device step counter whenever the table can be built, dropping the per-step
+    # host arithmetic and host->device transfer of the DFT weights. This is
+    # independent of graph capture: the table rows are bit-identical to the
+    # per-step host path, so eager runs take the same fast path. The host path
+    # remains only as the fallback for the complex-field (split-field Bloch)
+    # DFT, which the table builder declines.
     use_gpu_dft = False
-    if getattr(solver, "_cuda_graph_active", False) and getattr(solver, "dft_enabled", False):
+    if getattr(solver, "dft_enabled", False):
         use_gpu_dft = solver.build_dft_step_tables(time_steps)
     run_tail = _make_tail_runner(solver, use_gpu_dft)
     solver._tail_graph_active = run_tail is not None

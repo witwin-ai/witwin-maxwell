@@ -5,6 +5,7 @@ from typing import Literal
 
 import torch
 
+from ..compiler.structures import pec_structures
 from ..lumped import PortExcitation
 from ..network import PortData
 from ..sources import CW, CustomSourceTime, GaussianPulse, RickerWavelet
@@ -469,14 +470,6 @@ def _validate_local_update_coefficient(solver, runtime: LumpedRuntime, field_nam
         )
 
 
-def _pec_structures(scene) -> tuple[object, ...]:
-    return tuple(
-        structure
-        for structure in scene.structures
-        if bool(getattr(structure.material, "is_pec", False))
-    )
-
-
 def _geometry_signed_distance(structure, points: torch.Tensor) -> torch.Tensor:
     geometry = structure.geometry
     reference = torch.as_tensor(geometry.position)
@@ -489,7 +482,7 @@ def _geometry_signed_distance(structure, points: torch.Tensor) -> torch.Tensor:
 
 
 def _validate_explicit_pec_gap(solver, geometry, lumped_object) -> None:
-    structures = _pec_structures(solver.scene)
+    structures = pec_structures(solver.scene)
     if not structures:
         raise ValueError(
             f"Lumped object {geometry.port_name!r} has a PEC-suppressed voltage edge "

@@ -439,13 +439,6 @@ _STANDARD_BACKEND_LABEL = _NATIVE_REVERSE_LABELS[_ReverseBackend.STANDARD]
 _CPML_BACKEND_LABEL = _NATIVE_REVERSE_LABELS[_ReverseBackend.CPML]
 
 
-def _reverse_state_names(distributed) -> tuple:
-    """The Yee (+psi on CPML) state names the distributed reverse carries."""
-    if distributed.shards and bool(getattr(distributed.shards[0].solver, "uses_cpml", False)):
-        return _CPML_STATE_NAMES
-    return _STANDARD_STATE_NAMES
-
-
 def _distributed_uses_cpml(distributed) -> bool:
     return bool(distributed.shards) and bool(
         getattr(distributed.shards[0].solver, "uses_cpml", False)

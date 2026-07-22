@@ -4,6 +4,7 @@ import math
 
 import torch
 
+from ..constants import resolve_complex_dtype, resolve_real_dtype
 from .stratton_chu import (
     EquivalentCurrentsSurface,
     PlanarEquivalentCurrents,
@@ -11,11 +12,9 @@ from .stratton_chu import (
     _as_1d_coords,
     _background_wavenumber_and_impedance,
     _normalize_currents_collection,
-    _resolve_complex_dtype,
     _resolve_currents_background,
     _resolve_device,
     _resolve_physical_constants,
-    _resolve_real_dtype,
     _resolve_tensor_device,
     _to_real_tensor,
 )
@@ -23,7 +22,7 @@ from .stratton_chu import (
 
 def _normalize_directions(directions) -> torch.Tensor:
     device = _resolve_tensor_device(directions)
-    dtype = _resolve_real_dtype(directions)
+    dtype = resolve_real_dtype(directions)
     vectors = _to_real_tensor(directions, device=device, dtype=dtype)
     if vectors.ndim == 1:
         if vectors.shape[0] != 3:
@@ -73,7 +72,7 @@ class NearFieldFarFieldTransformer:
         )
         self.frequency = float(self._surfaces[0].frequency)
         self.coord_dtype = self._surfaces[0].coord_dtype
-        self.field_dtype = _resolve_complex_dtype(*(surface.J for surface in self._surfaces), *(surface.M for surface in self._surfaces))
+        self.field_dtype = resolve_complex_dtype(*(surface.J for surface in self._surfaces), *(surface.M for surface in self._surfaces))
         self.omega = 2.0 * math.pi * self.frequency
         self.eta0 = math.sqrt(self.mu0 / self.eps0)
         # Near-to-far-field radiation uses the homogeneous exterior background's
@@ -191,7 +190,7 @@ class NearFieldFarFieldTransformer:
         batch_size: int = 1024,
     ) -> dict[str, torch.Tensor | float]:
         device = _resolve_tensor_device(theta, phi)
-        dtype = _resolve_real_dtype(theta, phi)
+        dtype = resolve_real_dtype(theta, phi)
         theta_tensor = _to_real_tensor(theta, device=device, dtype=dtype)
         phi_tensor = _to_real_tensor(phi, device=device, dtype=dtype)
         theta_grid, phi_grid = torch.broadcast_tensors(theta_tensor, phi_tensor)

@@ -7,12 +7,12 @@ from typing import Any, ClassVar, Literal
 
 import torch
 
+from .constants import MU_0
+
 
 _SNAP_POLICIES = {"continuous", "nearest", "strict"}
 _WIRE_QUANTITIES = {"current", "charge", "ohmic_loss"}
 
-# Vacuum permeability. A finite conductor defaults to a non-magnetic wire.
-MU_0 = 1.25663706212e-6
 
 
 def _positive_real_scalar(value, *, field_name: str) -> float:

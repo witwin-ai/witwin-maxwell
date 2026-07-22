@@ -6,20 +6,10 @@ from typing import Any, Mapping, Sequence
 
 import torch
 
+from .constants import complex_dtype_for, real_dtype_for
+
 
 _SCHEMA_VERSION = 1
-
-
-def _complex_dtype(dtype: torch.dtype) -> torch.dtype:
-    if dtype in (torch.float16, torch.bfloat16, torch.float32, torch.complex64):
-        return torch.complex64
-    if dtype in (torch.float64, torch.complex128):
-        return torch.complex128
-    raise TypeError("Rational coefficients must use floating-point or complex tensors.")
-
-
-def _real_dtype(dtype: torch.dtype) -> torch.dtype:
-    return torch.float32 if dtype == torch.complex64 else torch.float64
 
 
 def _finite_complex(value: torch.Tensor) -> bool:
@@ -197,7 +187,7 @@ class RationalModel:
     def __post_init__(self) -> None:
         poles = torch.as_tensor(self.poles)
         residues = torch.as_tensor(self.residues, device=poles.device)
-        dtype = _complex_dtype(torch.promote_types(poles.dtype, residues.dtype))
+        dtype = complex_dtype_for(torch.promote_types(poles.dtype, residues.dtype))
         poles = poles.to(dtype=dtype)
         residues = residues.to(dtype=dtype)
         if poles.ndim != 1 or poles.numel() == 0:
@@ -228,7 +218,7 @@ class RationalModel:
         if not _finite_complex(direct) or not _finite_complex(proportional):
             raise ValueError("direct and proportional must contain only finite values.")
         groups = _conjugate_groups(poles)
-        tolerance = 128.0 * torch.finfo(_real_dtype(dtype)).eps
+        tolerance = 128.0 * torch.finfo(real_dtype_for(dtype)).eps
         for first, second in groups:
             if second is None:
                 if float(torch.max(torch.abs(residues[..., first].imag)).item()) > tolerance:
@@ -271,7 +261,7 @@ class RationalModel:
         frequencies = torch.as_tensor(
             frequencies,
             device=self.poles.device,
-            dtype=_real_dtype(self.poles.dtype),
+            dtype=real_dtype_for(self.poles.dtype),
         )
         if frequencies.ndim != 1 or frequencies.numel() == 0:
             raise ValueError("frequencies must have non-empty shape [F].")
@@ -300,7 +290,7 @@ class RationalModel:
             raise ValueError("A stable state-space realization requires Re(pole) < 0.")
 
         groups = _conjugate_groups(self.poles)
-        real_dtype = _real_dtype(self.poles.dtype)
+        real_dtype = real_dtype_for(self.poles.dtype)
         device = self.poles.device
         port_count = self.input_count
         state_per_input = self.order
@@ -521,11 +511,11 @@ class StateSpaceNetwork:
         ):
             raise ValueError("frequencies must be finite and non-negative.")
         if self.state_count == 0:
-            return self.D.to(dtype=_complex_dtype(self.D.dtype))[None, ...].expand(
+            return self.D.to(dtype=complex_dtype_for(self.D.dtype))[None, ...].expand(
                 frequencies.numel(), -1, -1
             )
         s = torch.complex(torch.zeros_like(frequencies), -2.0 * torch.pi * frequencies)
-        complex_dtype = _complex_dtype(self.A.dtype)
+        complex_dtype = complex_dtype_for(self.A.dtype)
         A = self.A.to(dtype=complex_dtype)
         B = self.B.to(dtype=complex_dtype)
         C = self.C.to(dtype=complex_dtype)
@@ -643,7 +633,7 @@ def _check_rational_band_passivity(
 
     if tolerance < 0.0:
         raise ValueError("tolerance must be non-negative.")
-    real_dtype = _real_dtype(model.poles.dtype)
+    real_dtype = real_dtype_for(model.poles.dtype)
     values = torch.as_tensor(frequencies, device=model.poles.device, dtype=real_dtype)
     if values.ndim != 1 or values.numel() == 0:
         raise ValueError("frequencies must have non-empty shape [F].")
@@ -762,7 +752,7 @@ def _state_space_interval_lipschitz_bound(
     midpoint = torch.mean(intervals, dim=1)
     radius_hz = 0.5 * (intervals[:, 1] - intervals[:, 0])
     omega = -2.0 * torch.pi * midpoint
-    complex_dtype = _complex_dtype(model.A.dtype)
+    complex_dtype = complex_dtype_for(model.A.dtype)
     identity = torch.eye(
         model.state_count,
         dtype=complex_dtype,
@@ -1298,7 +1288,7 @@ def fit_rational(
     if fit_frequencies.numel() < config.order + 2:
         raise ValueError("At least order + 2 frequency samples are required.")
 
-    dtype = _complex_dtype(torch.promote_types(values.dtype, frequencies.dtype))
+    dtype = complex_dtype_for(torch.promote_types(values.dtype, frequencies.dtype))
     s = torch.complex(
         torch.zeros_like(fit_frequencies),
         -2.0 * torch.pi * fit_frequencies,

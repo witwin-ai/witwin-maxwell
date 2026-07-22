@@ -10,9 +10,10 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
+from ..constants import EPSILON_0, MU_0
+from .structures import pec_structures
 
-EPSILON_0 = 8.8541878128e-12
-MU_0 = 1.25663706212e-6
+
 _AXES = "xyz"
 _COMPONENTS = ("Ex", "Ey", "Ez")
 _MAX_RADIUS_TO_SPACING = 0.2
@@ -896,15 +897,6 @@ def _empty_tensor(device, dtype, shape) -> torch.Tensor:
     return torch.empty(shape, device=device, dtype=dtype)
 
 
-def _pec_structures(scene) -> tuple[Any, ...]:
-    return tuple(
-        structure
-        for structure in getattr(scene, "structures", ())
-        if bool(getattr(structure, "enabled", True))
-        and bool(getattr(getattr(structure, "material", None), "is_pec", False))
-    )
-
-
 def _signed_distance_value(structure, point) -> float:
     distance = _geometry_signed_distance(structure, tuple(float(value) for value in point))
     if distance.numel() != 1 or not bool(torch.isfinite(distance).all()):
@@ -946,7 +938,7 @@ def _segment_intersects_geometry(structure, start, end, tolerance: float) -> boo
 
 
 def _validate_pec_contacts(scene, wire, path, nodes, endpoint_kinds) -> None:
-    structures = _pec_structures(scene)
+    structures = pec_structures(scene)
     if not structures:
         return
     endpoint_structures = tuple(

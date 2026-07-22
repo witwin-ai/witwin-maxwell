@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from witwin.core import Box
 
+from ...constants import C_0
 from ...monitors import (
     ClosedSurfaceMonitor,
     DiffractionMonitor,
@@ -271,7 +272,7 @@ class DistributedFDTD:
         self._cpml_allocated_memory_bytes = 0
         self._cpml_dense_memory_bytes = 0
         self._cpml_slab_memory_bytes = 0
-        self.c = 299792458.0
+        self.c = C_0
         self.Nx, self.Ny, self.Nz = self.scene.Nx, self.scene.Ny, self.scene.Nz
         self.dt = None
         self.shards: tuple[ShardEngine, ...] = ()

@@ -167,7 +167,7 @@ class FDTDConfig:
     adjoint_checkpoint_stride: int | None = None
     shutoff: float = 0.0  # relative E-energy threshold for auto-shutoff; 0 disables (opt-in)
     shutoff_check_interval: int = 100
-    cuda_graph: bool = False  # capture the field-update core into a CUDA graph (opt-in)
+    cuda_graph: bool = True  # capture the field-update core into a CUDA graph (default; eager fallback)
     parallel: FDTDParallelConfig | None = None
     initial_condition: Any = None  # ElectrostaticInitialCondition pre-bias (opt-in)
 
@@ -189,8 +189,11 @@ class FDTDConfig:
         if self.parallel is not None and not isinstance(self.parallel, FDTDParallelConfig):
             raise TypeError("parallel must be an FDTDParallelConfig instance or None.")
         self.cuda_graph = bool(self.cuda_graph)
-        if self.parallel is not None and self.cuda_graph:
-            raise ValueError("Multi-GPU FDTD does not support CUDA Graph capture.")
+        if self.parallel is not None:
+            # Multi-GPU FDTD does not capture peer communication in CUDA graphs;
+            # keep the distributed path on eager stepping regardless of the
+            # single-GPU default.
+            self.cuda_graph = False
         if self.parallel is not None and self.enable_plot:
             raise ValueError(
                 "Multi-GPU FDTD plotting requires running first and requesting gathered fields."
@@ -520,7 +523,7 @@ class Simulation:
         full_field_dft: bool = False,
         shutoff: float = 0.0,
         shutoff_check_interval: int = 100,
-        cuda_graph: bool = False,
+        cuda_graph: bool = True,
         excitations=None,
         parallel: FDTDParallelConfig | None = None,
         initial_condition=None,

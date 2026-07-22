@@ -5,10 +5,10 @@ from collections.abc import Mapping
 import numpy as np
 import torch
 
+from ..constants import C_0, MU_0
 from ..sources import CW, PlaneWave, TFSF, evaluate_source_time
 from .stratton_chu import _trapz_weights_1d
 
-_MU0 = 4.0 * torch.pi * 1e-7
 _POWER_EPS = 1e-30
 _COORD_NAMES = {
     "x": ("y", "z"),
@@ -237,8 +237,8 @@ def _plane_wave_incident_power(result, incident_monitor: str, frequencies: torch
     source_time = source.source_time
 
     solver = getattr(result, "solver", None)
-    c_value = float(getattr(solver, "c", getattr(solver, "c0", 299792458.0)))
-    eta0 = float(_MU0) * c_value
+    c_value = float(getattr(solver, "c", getattr(solver, "c0", C_0)))
+    eta0 = MU_0 * c_value
     area = _incident_beam_area(source, result, incident_monitor)
 
     cw_amplitude = _plane_wave_cw_amplitude(source_time)

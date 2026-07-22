@@ -9,6 +9,7 @@ from scipy import sparse
 from scipy.sparse import linalg as scipy_sparse_linalg
 from witwin.core.material import VACUUM_PERMITTIVITY
 
+from ...constants import ETA_0
 from ...compiler.materials import evaluate_material_components
 from .spatial import physical_interior_indices
 from .tfsf_common import nearest_index
@@ -16,7 +17,6 @@ from .tfsf_common import nearest_index
 
 _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
 _FIELD_COMPONENTS = ("Ex", "Ey", "Ez")
-_ETA0 = 376.730313668
 _DENSE_EIGEN_LIMIT = 4096
 _FULL_VECTOR_DENSE_LIMIT = 384
 _LOBPCG_REQUEST_PADDING = 4
@@ -363,8 +363,8 @@ def _build_vector_operator_sparse(eps_planes, mu_planes, *, k0: float, du: float
     a_ev_eu = derivative_u_forward @ mu_w_inv @ derivative_v_backward
     a_ev_ev = -derivative_u_forward @ mu_w_inv @ derivative_u_backward - k0_sq * eps_v_diag
 
-    electric_scale = float(k0) / _ETA0
-    magnetic_scale = float(k0) * _ETA0
+    electric_scale = float(k0) / ETA_0
+    magnetic_scale = float(k0) * ETA_0
     operator = sparse.bmat(
         [
             [None, None, a_ev_eu / magnetic_scale, a_ev_ev / magnetic_scale],
@@ -718,7 +718,7 @@ def _yee_reconstruct_node_profiles(eu_stag, ev_stag, *, beta, meta, eps_stag, fi
         # was dropped from the operator); keep the reconstruction consistent.
         ew_node = np.where(np.asarray(pec_ww_mask, dtype=bool).reshape(-1), 0.0, ew_node)
 
-    eta_scale = k0 * _ETA0  # omega * mu0 = k0 * eta0
+    eta_scale = k0 * ETA_0  # omega * mu0 = k0 * eta0
     # Hu shares the Ev grid, Hv shares the Eu grid (standard Yee co-location).
     hu = -(np.real(beta_val) * ev + meta["sv_big"] @ ew_node) / eta_scale
     hv = (np.real(beta_val) * eu + meta["su_big"] @ ew_node) / eta_scale
@@ -1556,7 +1556,7 @@ def _solve_quasistatic_line_modes(
     electric_v[:, 1:-1] = -(phi_eps[:, 2:] - phi_eps[:, :-2]) / (2.0 * dv_f)
     electric_v[:, 0] = -(phi_eps[:, 1] - phi_eps[:, 0]) / dv_f
     electric_v[:, -1] = -(phi_eps[:, -1] - phi_eps[:, -2]) / dv_f
-    impedance = _ETA0 / math.sqrt(eps_eff)
+    impedance = ETA_0 / math.sqrt(eps_eff)
     magnetic_u = -electric_v / impedance
     magnetic_v = electric_u / impedance
 
@@ -1670,8 +1670,8 @@ def _pec_vector_operator_torch(
     a_ev_ev = -derivative_u @ mu_w_inv @ derivative_u - k0_sq * eps_v_diag
 
     zero = torch.zeros_like(a_hu_hu)
-    electric_scale = float(k0) / _ETA0
-    magnetic_scale = float(k0) * _ETA0
+    electric_scale = float(k0) / ETA_0
+    magnetic_scale = float(k0) * ETA_0
     operator = torch.cat(
         (
             torch.cat((zero, zero, a_ev_eu / magnetic_scale, a_ev_ev / magnetic_scale), dim=1),
@@ -2016,11 +2016,11 @@ def _vector_mode_divergence_residuals_numpy(
     derivative_v_backward = sparse.kron(identity_u, d1_v_backward, format="csr")
 
     electric_transverse = derivative_u_forward @ (eps_u * eu) + derivative_v_forward @ (eps_v * ev)
-    electric_longitudinal = (beta / (float(k0) / _ETA0)) * (
+    electric_longitudinal = (beta / (float(k0) / ETA_0)) * (
         derivative_u_forward @ hv - derivative_v_forward @ hu
     )
     magnetic_transverse = derivative_u_backward @ (mu_u * hu) + derivative_v_backward @ (mu_v * hv)
-    magnetic_longitudinal = (beta / (float(k0) * _ETA0)) * (
+    magnetic_longitudinal = (beta / (float(k0) * ETA_0)) * (
         derivative_u_backward @ ev - derivative_v_backward @ eu
     )
     electric_residual = _relative_vector_residual(
@@ -2527,12 +2527,6 @@ def _solve_pec_vector_mode_eigenpair_torch(
         )
     return candidates[int(mode_index)]
 
-
-def _full_field_component_profiles(component_profiles, shape, *, tangential_field_names):
-    profiles = {name: torch.zeros(shape) for name in _FIELD_COMPONENTS + ("Hx", "Hy", "Hz")}
-    for name in tangential_field_names:
-        profiles[name] = component_profiles[name]
-    return profiles
 
 def _build_scalar_operator(index_sq: np.ndarray, du: float, dv: float):
     nu = int(index_sq.shape[0])
@@ -3281,7 +3275,7 @@ def _solve_pec_tem_mode_torch(
     electric_v[:, 0] = -(potential[:, 1] - potential[:, 0]) / float(dv)
     electric_v[:, -1] = -(potential[:, -1] - potential[:, -2]) / float(dv)
 
-    impedance = _ETA0 * torch.sqrt(mu_relative / eps_relative)
+    impedance = ETA_0 * torch.sqrt(mu_relative / eps_relative)
     magnetic_u = -electric_v / impedance
     magnetic_v = electric_u / impedance
     beta = torch.as_tensor(
@@ -3887,9 +3881,9 @@ def solve_mode_source_profile(solver, source) -> dict[str, object]:
     }
     magnetic_tuple = tuple(-value for value in _cross(direction_vector, source["polarization"]))
     magnetic_scale = (
-        effective_index_tensor / _ETA0
+        effective_index_tensor / ETA_0
         if effective_index_tensor is not None
-        else effective_index_value / _ETA0
+        else effective_index_value / ETA_0
     )
 
     lower = [0, 0, 0]

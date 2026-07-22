@@ -48,7 +48,7 @@ from ..rational import (
     StateSpaceNetwork,
     fit_rational,
 )
-from ..thin_wire import MU_0
+from ..constants import MU_0
 
 
 def _as_1d_frequencies(frequencies) -> torch.Tensor:

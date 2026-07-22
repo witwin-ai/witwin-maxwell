@@ -11,6 +11,7 @@ from witwin.core import Box
 from witwin.core.material import VACUUM_PERMITTIVITY
 
 from ..media import CustomPole, DiagonalTensor3, DrudePole, LorentzPole, ModulationSpec, PerturbationMedium, Tensor3x3
+from .structures import pec_structures
 
 _AXES = ("x", "y", "z")
 _OFFDIAG_AXES = ("xy", "xz", "yz")
@@ -55,10 +56,6 @@ def _bulk_structures(scene):
         for structure in _sorted_structures(scene)
         if not _structure_is_pec(structure) and not _structure_is_sheet(structure)
     ]
-
-
-def _pec_structures(scene):
-    return [structure for structure in _sorted_structures(scene) if _structure_is_pec(structure)]
 
 
 def _sheet_structures(scene):
@@ -225,17 +222,6 @@ def _new_material_model(scene, layout, *, eps_fill, mu_fill):
     return _refresh_model_summary_aliases(model)
 
 
-def _material_model_has_dispersion(model) -> bool:
-    return bool(
-        model["debye_poles"]
-        or model["drude_poles"]
-        or model["lorentz_poles"]
-        or model["mu_debye_poles"]
-        or model["mu_drude_poles"]
-        or model["mu_lorentz_poles"]
-    )
-
-
 def _material_model_has_electric_dispersion(model) -> bool:
     return bool(model["debye_poles"] or model["drude_poles"] or model["lorentz_poles"])
 
@@ -246,10 +232,6 @@ def _material_model_has_magnetic_dispersion(model) -> bool:
 
 def _material_model_has_conductivity(model) -> bool:
     return any(torch.any(model["sigma_e_components"][axis] != 0).item() for axis in _AXES)
-
-
-def _material_model_has_magnetic_conductivity(model) -> bool:
-    return any(torch.any(model["sigma_m_components"][axis] != 0).item() for axis in _AXES)
 
 
 def _material_model_has_kerr(model) -> bool:
@@ -1600,7 +1582,7 @@ def _pec_occupancy(scene, coords=None):
     Returns ``None`` when the scene has no PEC structure so non-PEC scenes stay
     byte-identical. Differentiable in PEC geometry through ``_geometry_occupancy``.
     """
-    structures = _pec_structures(scene)
+    structures = pec_structures(scene)
     if not structures:
         return None
     beta = _pec_geometry_beta(scene)
@@ -1804,7 +1786,7 @@ def _reject_overlapping_surface_ownership(scene, surface_structures):
     (E_t = 0) and a surface impedance (E_t = Z_s (n x H)) on the same face are two
     contradictory owners of the same degree of freedom.
     """
-    others = _pec_structures(scene) + _sheet_structures(scene)
+    others = (*pec_structures(scene), *_sheet_structures(scene))
     if not others:
         return
     for surface in surface_structures:

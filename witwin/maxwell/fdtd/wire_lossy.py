@@ -87,7 +87,7 @@ from ..compiler.wire_impedance import (
     internal_impedance,
     internal_impedance_conductivity_gradient,
 )
-from ..thin_wire import MU_0
+from ..constants import MU_0
 
 
 class _AnalyticACResistance(torch.autograd.Function):

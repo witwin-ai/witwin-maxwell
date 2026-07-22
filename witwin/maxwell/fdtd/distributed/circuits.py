@@ -7,7 +7,6 @@ import torch
 
 from ...compiler.ports import CompiledPortGeometry
 from ...fdtd_parallel import FDTDPartitionPlan, FDTDShardLayout
-from ...network import PortData
 from ...ports import TerminalPort, _resolve_terminal_port
 from ..circuits import (
     finalize_circuit_data,
@@ -25,6 +24,7 @@ from ..ports import (
     finalize_port_data,
     prepare_port_spectral_accumulators,
 )
+from ._shared import local_port_geometry, move_port_data
 
 
 @dataclass(frozen=True)
@@ -175,22 +175,6 @@ def compile_distributed_circuit_plan(
     )
 
 
-def _local_geometry(
-    plan: DistributedBoundPortPlan,
-    *,
-    device: torch.device,
-) -> CompiledPortGeometry:
-    return replace(
-        plan.geometry,
-        voltage_indices=torch.as_tensor(
-            plan.local_voltage_indices,
-            device=device,
-            dtype=torch.int64,
-        ),
-        voltage_weights=plan.geometry.voltage_weights.to(device=device),
-    )
-
-
 def _owner_proxy_field(
     local_field: FieldPortCoupling,
     *,
@@ -221,35 +205,6 @@ def _owner_proxy_field(
         last_current=zeros[3],
         last_port_work=zeros[4],
         last_field_energy_change=zeros[5],
-    )
-
-
-def _move_nested(value, device: torch.device):
-    if isinstance(value, torch.Tensor):
-        return value.to(device=device)
-    if isinstance(value, dict):
-        return {key: _move_nested(item, device) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return tuple(_move_nested(item, device) for item in value)
-    if isinstance(value, list):
-        return [_move_nested(item, device) for item in value]
-    return value
-
-
-def _move_port_data(data: PortData, device: torch.device, *, metadata) -> PortData:
-    return replace(
-        data,
-        frequencies=data.frequencies.to(device=device),
-        voltage=data.voltage.to(device=device),
-        current=data.current.to(device=device),
-        z0=_move_nested(data.z0, device),
-        available_power=_move_nested(data.available_power, device),
-        beta=_move_nested(data.beta, device),
-        characteristic_impedance=_move_nested(
-            data.characteristic_impedance, device
-        ),
-        tracking_confidence=_move_nested(data.tracking_confidence, device),
-        metadata=_move_nested(metadata, device),
     )
 
 
@@ -349,7 +304,7 @@ class DistributedCircuitRuntime:
         for port_plan in plan.ports:
             shard = tuple(shards)[port_plan.owner_rank]
             port = ports_by_name[port_plan.port_name]
-            local_geometry = _local_geometry(port_plan, device=shard.device)
+            local_geometry = local_port_geometry(port_plan, device=shard.device)
             with torch.cuda.device(shard.device):
                 _open_declared_pec_terminal_edges(
                     shard.solver,
@@ -604,7 +559,7 @@ class DistributedCircuitRuntime:
                     "distributed_port_owner_rank": self.plan.port_owners[name],
                 }
             )
-            port_output[name] = _move_port_data(
+            port_output[name] = move_port_data(
                 data,
                 result_device,
                 metadata=metadata,

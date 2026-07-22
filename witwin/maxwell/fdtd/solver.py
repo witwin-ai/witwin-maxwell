@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from ..constants import C_0
 from ..scene import prepare_scene
 from .excitation import inject_source_terms
 from .io import save_frequency_solution as save_frequency_solution_impl
@@ -107,7 +108,7 @@ _require_cuda_scene = require_cuda_scene
 def calculate_required_steps(
     frequency,
     dt,
-    c=299792458.0,
+    c=C_0,
     num_cycles=20,
     transient_cycles=15,
     domain_size=None,
@@ -141,7 +142,7 @@ class FDTD:
             cpml_config=cpml_config,
         )
 
-    def auto_dt(self, dx, dy, dz, frequency, source_time=None, c=299792458.0, steps_per_cycle=30):
+    def auto_dt(self, dx, dy, dz, frequency, source_time=None, c=C_0, steps_per_cycle=30):
         # dx/dy/dz are the per-axis MINIMUM primal spacings (identical to the
         # uniform steps on a uniform grid), so the Courant bound holds on
         # nonuniform grids as well.

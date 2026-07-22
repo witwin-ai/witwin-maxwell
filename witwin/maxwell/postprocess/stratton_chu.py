@@ -7,6 +7,8 @@ from typing import Mapping
 
 import torch
 
+from ..constants import resolve_complex_dtype, resolve_real_dtype
+
 WINDOW_FACTOR = 15.0
 
 _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
@@ -69,29 +71,11 @@ def _resolve_currents_background(
     return _normalize_background(background_eps_r, background_mu_r)
 
 
-def _complex_dtype_for(dtype: torch.dtype) -> torch.dtype:
-    return torch.complex64 if dtype in {torch.float16, torch.bfloat16, torch.float32} else torch.complex128
-
-
 def _resolve_tensor_device(*values) -> torch.device:
     for value in values:
         if isinstance(value, torch.Tensor):
             return value.device
     return torch.device("cpu")
-
-
-def _resolve_real_dtype(*values) -> torch.dtype:
-    for value in values:
-        if isinstance(value, torch.Tensor):
-            return value.real.dtype
-    return torch.float64
-
-
-def _resolve_complex_dtype(*values) -> torch.dtype:
-    for value in values:
-        if isinstance(value, torch.Tensor):
-            return value.dtype if torch.is_complex(value) else _complex_dtype_for(value.dtype)
-    return torch.complex128
 
 
 def _to_real_tensor(values, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -152,7 +136,7 @@ def gaussian_window_1d(
     window_frac: float,
 ) -> torch.Tensor:
     device = _resolve_tensor_device(points)
-    dtype = _resolve_real_dtype(points)
+    dtype = resolve_real_dtype(points)
     point_tensor = _to_real_tensor(points, device=device, dtype=dtype)
     if window_frac <= 0.0:
         return torch.ones_like(point_tensor)
@@ -338,7 +322,7 @@ def _resolve_device(device: str | torch.device | None) -> torch.device:
 def build_plane_points(axis: str, position: float, u, v) -> torch.Tensor:
     axis_name = _normalize_axis(axis)
     device = _resolve_tensor_device(u, v)
-    dtype = _resolve_real_dtype(u, v)
+    dtype = resolve_real_dtype(u, v)
     u_coords = _as_1d_coords(u, "u", device=device, dtype=dtype)
     v_coords = _as_1d_coords(v, "v", device=device, dtype=dtype)
     shape = (u_coords.numel(), v_coords.numel())
@@ -369,8 +353,8 @@ class PlanarEquivalentCurrents:
     def __post_init__(self):
         axis_name = _normalize_axis(self.axis)
         device = _resolve_tensor_device(self.u, self.v, self.J, self.M)
-        real_dtype = _resolve_real_dtype(self.u, self.v, self.J, self.M)
-        complex_dtype = _resolve_complex_dtype(self.J, self.M)
+        real_dtype = resolve_real_dtype(self.u, self.v, self.J, self.M)
+        complex_dtype = resolve_complex_dtype(self.J, self.M)
         u_coords = _as_1d_coords(self.u, "u", device=device, dtype=real_dtype)
         v_coords = _as_1d_coords(self.v, "v", device=device, dtype=real_dtype)
         if float(self.frequency) <= 0.0:
@@ -610,8 +594,8 @@ class SurfaceEquivalentCurrents:
 
     def __post_init__(self):
         device = _resolve_tensor_device(self.points, self.weights, self.J, self.M)
-        real_dtype = _resolve_real_dtype(self.points, self.weights, self.J, self.M)
-        complex_dtype = _resolve_complex_dtype(self.J, self.M)
+        real_dtype = resolve_real_dtype(self.points, self.weights, self.J, self.M)
+        complex_dtype = resolve_complex_dtype(self.J, self.M)
         points = _to_real_tensor(self.points, device=device, dtype=real_dtype)
         if points.ndim != 2 or points.shape[1] != 3:
             raise ValueError(f"points must have shape (N, 3), got {tuple(points.shape)}.")
@@ -685,8 +669,8 @@ def equivalent_surface_currents_from_surface_samples(
     Stratton-Chu / near-to-far-field transform as an axis-aligned box.
     """
     device = _resolve_tensor_device(points, normals, areas, E, H)
-    real_dtype = _resolve_real_dtype(points, normals, areas)
-    complex_dtype = _resolve_complex_dtype(E, H)
+    real_dtype = resolve_real_dtype(points, normals, areas)
+    complex_dtype = resolve_complex_dtype(E, H)
 
     point_tensor = _to_real_tensor(points, device=device, dtype=real_dtype)
     if point_tensor.ndim != 2 or point_tensor.shape[1] != 3:
@@ -901,7 +885,7 @@ def _equivalent_surface_currents_from_payload(
         device = _resolve_tensor_device(
             monitor[coord_name_a], monitor[coord_name_b], *field_values
         )
-        real_dtype = _resolve_real_dtype(
+        real_dtype = resolve_real_dtype(
             monitor[coord_name_a], monitor[coord_name_b], *field_values
         )
         width_u = torch.as_tensor(
@@ -945,8 +929,8 @@ def equivalent_surface_currents_from_fields(
     axis_name = _normalize_axis(axis)
     normalized_fields = {str(name).upper(): values for name, values in fields.items()}
     device = _resolve_tensor_device(u, v, *normalized_fields.values())
-    real_dtype = _resolve_real_dtype(u, v, *normalized_fields.values())
-    complex_dtype = _resolve_complex_dtype(*normalized_fields.values())
+    real_dtype = resolve_real_dtype(u, v, *normalized_fields.values())
+    complex_dtype = resolve_complex_dtype(*normalized_fields.values())
     u_coords = _as_1d_coords(u, "u", device=device, dtype=real_dtype)
     v_coords = _as_1d_coords(v, "v", device=device, dtype=real_dtype)
     shape = (u_coords.numel(), v_coords.numel())
@@ -1103,7 +1087,7 @@ class StrattonChuPropagator:
         )
         self.frequency = float(self._surfaces[0].frequency)
         self.coord_dtype = self._surfaces[0].coord_dtype
-        self.field_dtype = _resolve_complex_dtype(*(surface.J for surface in self._surfaces), *(surface.M for surface in self._surfaces))
+        self.field_dtype = resolve_complex_dtype(*(surface.J for surface in self._surfaces), *(surface.M for surface in self._surfaces))
         self.omega = 2.0 * math.pi * self.frequency
         self.eta0 = math.sqrt(self.mu0 / self.eps0)
         self.k, self.eta = _background_wavenumber_and_impedance(

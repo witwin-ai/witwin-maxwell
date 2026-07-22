@@ -9,6 +9,7 @@ import torch
 
 from .adjoint_inputs import scene_trainable_material_tensors
 from .compiler.sources import _compile_mode_source
+from .constants import C_0, EPSILON_0, MU_0
 from .fdtd.excitation.modes import (
     sample_mode_source_component,
     solve_mode_source_profile,
@@ -23,8 +24,6 @@ from .scene import prepare_scene
 from .sources import CW, ModeSource
 
 
-_EPS0 = 8.8541878128e-12
-_MU0 = 1.25663706212e-6
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 
 # Prefix stamped on the internal per-port ModeMonitors used to extract the
@@ -66,7 +65,7 @@ def _mode_context(scene):
     return SimpleNamespace(
         scene=prepared,
         Ex=torch.empty((1,), device=prepared.device, dtype=torch.float32),
-        c=299792458.0,
+        c=C_0,
         boundary_kind=prepared.boundary.kind,
         _compiled_material_model=prepared.compile_materials(),
         _mode_source_rebuild_from_fields=False,
@@ -255,9 +254,9 @@ def _characteristic_impedance(
                 dtype=torch.float64,
             )
             if mode.family == "te":
-                impedance = omega * _MU0 * mu_r / beta
+                impedance = omega * MU_0 * mu_r / beta
             elif mode.family == "tm":
-                impedance = beta / (omega * _EPS0 * eps_r)
+                impedance = beta / (omega * EPSILON_0 * eps_r)
             else:
                 voltage = torch.zeros((), device=beta.device, dtype=torch.complex128)
                 current = torch.zeros_like(voltage)

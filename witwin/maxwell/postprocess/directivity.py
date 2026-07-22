@@ -4,12 +4,13 @@ import math
 
 import torch
 
-from .stratton_chu import _resolve_real_dtype, _resolve_tensor_device, _to_real_tensor, _trapz_weights_1d
+from ..constants import resolve_real_dtype
+from .stratton_chu import _resolve_tensor_device, _to_real_tensor, _trapz_weights_1d
 
 
 def _extract_angular_grid(far_field) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device = _resolve_tensor_device(far_field.get("theta"), far_field.get("phi"))
-    dtype = _resolve_real_dtype(far_field.get("theta"), far_field.get("phi"))
+    dtype = resolve_real_dtype(far_field.get("theta"), far_field.get("phi"))
     theta = _to_real_tensor(far_field["theta"], device=device, dtype=dtype)
     phi = _to_real_tensor(far_field["phi"], device=device, dtype=dtype)
     theta, phi = torch.broadcast_tensors(theta, phi)

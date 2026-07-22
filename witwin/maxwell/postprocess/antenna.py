@@ -6,10 +6,12 @@ from collections.abc import Sequence
 import torch
 
 from ..antenna import AntennaData, Ludwig3, _power_normalized_antenna_metrics
+from ..constants import ETA_0
 from ..network import PortData
 
 
-FREE_SPACE_IMPEDANCE = 376.730313668
+# Public alias for the central vacuum wave impedance constant.
+FREE_SPACE_IMPEDANCE = ETA_0
 
 
 def _validate_real_tensor(

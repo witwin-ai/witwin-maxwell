@@ -10,14 +10,12 @@ from .modal import (
     _monitor_vector_fields,
     _surface_normal,
 )
+from ..constants import C_0, resolve_complex_dtype, resolve_real_dtype
 from .stratton_chu import (
     _as_1d_coords,
-    _resolve_complex_dtype,
-    _resolve_real_dtype,
     _resolve_tensor_device,
 )
 
-_C = 299792458.0
 _FIELD_NAMES = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 _POWER_FLOOR = 1e-30
 
@@ -99,8 +97,8 @@ def compute_diffraction_from_payload(
 
     field_values = [payload.get(name) for name in _FIELD_NAMES]
     device = _resolve_tensor_device(coord_a, coord_b, *field_values)
-    real_dtype = _resolve_real_dtype(coord_a, coord_b)
-    complex_dtype = _resolve_complex_dtype(*field_values)
+    real_dtype = resolve_real_dtype(coord_a, coord_b)
+    complex_dtype = resolve_complex_dtype(*field_values)
     coords_a = _as_1d_coords(coord_a, tangential_axes[0], device=device, dtype=real_dtype)
     coords_b = _as_1d_coords(coord_b, tangential_axes[1], device=device, dtype=real_dtype)
     sample_count_a = int(coords_a.numel())
@@ -123,7 +121,7 @@ def compute_diffraction_from_payload(
         float(bloch[_AXIS_TO_INDEX[tangential_axes[0]]]),
         float(bloch[_AXIS_TO_INDEX[tangential_axes[1]]]),
     )
-    k0 = 2.0 * math.pi * frequency / _C
+    k0 = 2.0 * math.pi * frequency / C_0
     order_specs, reciprocal = enumerate_diffraction_orders(
         periods=(period_a, period_b),
         k_bloch=k_bloch,

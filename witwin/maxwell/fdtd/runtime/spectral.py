@@ -493,12 +493,13 @@ def build_dft_step_tables(solver, time_steps):
     phase recurrence and window, so a GPU-driven accumulation that gathers rows
     by a device step counter is bit-identical to the per-step host path -- but
     with no per-step host arithmetic or host->device transfer (which makes the
-    DFT accumulation capturable and cheaper). Also fixes the final window
-    normalization / sample count / source-DFT to their full-run sums (the values
-    the host path would reach, and what an early shutoff restores anyway).
+    DFT accumulation capturable and cheaper). Eager and graph-captured runs both
+    use it whenever it can be built. Also fixes the final window normalization /
+    sample count / source-DFT to their full-run sums (the values the host path
+    would reach, and what an early shutoff restores anyway).
 
-    Returns False (caller keeps the host path) for the complex-field DFT, which
-    is out of the Option-A/Stage-1 graph scope.
+    Returns False (caller keeps the host path) for the complex-field DFT, whose
+    real/imaginary split accumulation the table path does not express.
     """
     if not solver.dft_enabled or not solver._dft_entries or has_complex_fields(solver):
         return False

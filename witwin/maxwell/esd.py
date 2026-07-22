@@ -704,10 +704,6 @@ class ESDPortRecord:
         return None if self.resampled is None else self.resampled.currents
 
 
-def _resolve_esd_sources(scene) -> tuple[ESDCurrentSource, ...]:
-    return tuple(source for source in scene.sources if isinstance(source, ESDCurrentSource))
-
-
 # Standard IEC 61000-4-2 generator-network element values. These are the classic
 # lumped RC of the ESD generator body (discharge resistor and energy-storage
 # capacitor). Modeling the generator with these elements is a *circuit

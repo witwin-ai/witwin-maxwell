@@ -8,6 +8,7 @@ from typing import Any, ClassVar, Mapping, Sequence
 import torch
 
 from .antenna import Ludwig3, _power_normalized_antenna_metrics
+from .constants import C_0, ETA_0
 from .network import (
     PHASOR_CONVENTION,
     POWER_WAVE_CONVENTION,
@@ -362,7 +363,7 @@ class BeamCodebook:
         theta: torch.Tensor,
         phi: torch.Tensor,
         amplitude: torch.Tensor | float = 1.0,
-        speed_of_light: float = 299792458.0,
+        speed_of_light: float = C_0,
         name_prefix: str = "scan",
     ) -> "BeamCodebook":
         """Build progressive-phase steering weights for a grid of scan angles.
@@ -430,7 +431,7 @@ class EmbeddedElementPatternData:
     phase_center: torch.Tensor
     frame: torch.Tensor
     observation_radius: Any = 1.0
-    wave_impedance: Any = 376.730313668
+    wave_impedance: Any = ETA_0
     polarization_basis: Ludwig3 = field(default_factory=Ludwig3)
     phase_center_source: str = "explicit"
     field_basis: str = ARRAY_FIELD_BASIS

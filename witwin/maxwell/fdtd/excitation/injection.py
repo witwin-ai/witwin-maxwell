@@ -5,6 +5,7 @@ import math
 import numpy as np
 import torch
 
+from ...constants import ETA_0
 from ...sources import POINT_DIPOLE_REFERENCE_WIDTH
 from .spatial import (
     beam_profile_from_source,
@@ -30,7 +31,6 @@ _FACE_SPEC_RANGES = {
     ("z", "high"): slice(10, 12),
 }
 _AXIS_TO_INDEX = {"x": 0, "y": 1, "z": 2}
-_ETA0 = 376.730313668
 
 
 def _normalized_point_dipole_profile(
@@ -759,7 +759,7 @@ def _plane_wave_power_scale(source, aperture_bounds, injection_axis: str) -> flo
     ]
     aperture_area = tangential_extents[0] * tangential_extents[1]
     incidence_cosine = abs(float(source["direction"][axis_index]))
-    unit_power = aperture_area * incidence_cosine / (2.0 * _ETA0)
+    unit_power = aperture_area * incidence_cosine / (2.0 * ETA_0)
     if unit_power <= 0.0:
         raise ValueError("PlaneWave source requires a positive aperture power for normalization.")
     return 1.0 / np.sqrt(unit_power)
@@ -779,7 +779,7 @@ def _beam_power_scale(source, injection_axis: str) -> float:
         waist_u = waist_v = float(source["beam_waist"])
     axis_index = _AXIS_TO_INDEX[injection_axis]
     incidence_cosine = abs(float(source["direction"][axis_index]))
-    unit_power = math.pi * waist_u * waist_v * incidence_cosine / (4.0 * _ETA0)
+    unit_power = math.pi * waist_u * waist_v * incidence_cosine / (4.0 * ETA_0)
     if unit_power <= 0.0:
         raise ValueError("Gaussian beam requires a positive transverse power integral.")
     return 1.0 / math.sqrt(unit_power)
@@ -896,7 +896,7 @@ def _prepare_power_normalized_surface_source(solver, source, *, source_index):
     }
     magnetic_vector = {
         name: power_scale * value
-        for name, value in magnetic_physical_vector(direction, source["polarization"], _ETA0).items()
+        for name, value in magnetic_physical_vector(direction, source["polarization"], ETA_0).items()
     }
 
     plane_coordinate = solver._plane_coordinate(injection_axis, plane_index)

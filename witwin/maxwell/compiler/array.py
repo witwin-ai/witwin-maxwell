@@ -109,31 +109,6 @@ def _resolve_angles(theta, phi, *, device, dtype) -> tuple[torch.Tensor, torch.T
     return _validate_angular_grid(theta_value, phi_value, device=torch.device(device))
 
 
-def _geometry_bounds(geometry):
-    if geometry is None:
-        return None
-    bounds = getattr(geometry, "bounds", None)
-    if callable(bounds):
-        bounds = bounds()
-    if bounds is None:
-        position = getattr(geometry, "position", None)
-        size = getattr(geometry, "size", None)
-        if position is not None and size is not None:
-            center = torch.as_tensor(position).reshape(-1)
-            extent = torch.as_tensor(size).reshape(-1)
-            if center.numel() == 3 and extent.numel() == 3:
-                return tuple(
-                    (float(center[axis] - 0.5 * extent[axis]), float(center[axis] + 0.5 * extent[axis]))
-                    for axis in range(3)
-                )
-        return None
-    try:
-        resolved = tuple((float(axis[0]), float(axis[1])) for axis in bounds)
-    except (TypeError, ValueError, IndexError):
-        return None
-    return resolved if len(resolved) == 3 else None
-
-
 def _port_bounds(port):
     position = getattr(port, "position", None)
     size = getattr(port, "size", None)
