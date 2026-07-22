@@ -3,9 +3,11 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 
 import torch
 
+from ..fdtd.cuda.runtime.graph import suspend_capture
 from .plan import ExecutionPlan, ExecutionTask
 from .pool import DevicePool
 from .records import (
@@ -194,6 +196,12 @@ def execute_plan(plan: ExecutionPlan, pool: DevicePool) -> ResultSequence:
     ``task.run`` is allowed to finish. Fail-fast is cooperative, so a task that
     entered ``task.run`` just before the trip still completes. Nothing is summed
     or reduced across tasks, so no coordinator global synchronization is required.
+
+    When more than one task can be in flight, CUDA-graph capture is suspended for
+    the whole plan: capture is process-global, so one task capturing its step
+    graph would abort every concurrent task on every other GPU with
+    ``cudaErrorStreamCaptureUnsupported``. Plans that run one task at a time keep
+    the graph default.
     """
 
     entries: list[object | None] = [None] * len(plan)
@@ -204,7 +212,8 @@ def execute_plan(plan: ExecutionPlan, pool: DevicePool) -> ResultSequence:
         return ResultSequence((), ())
 
     workers = min(plan.max_concurrency, len(plan))
-    with ThreadPoolExecutor(max_workers=workers) as pool_executor:
+    graph_guard = suspend_capture() if workers > 1 else nullcontext()
+    with graph_guard, ThreadPoolExecutor(max_workers=workers) as pool_executor:
         futures = {
             pool_executor.submit(_run_one, task, pool, cancellation): task.index
             for task in plan.tasks

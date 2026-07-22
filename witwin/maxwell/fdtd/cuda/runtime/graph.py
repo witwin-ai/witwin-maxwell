@@ -1,9 +1,46 @@
 from __future__ import annotations
 
+import contextlib
+import threading
 import warnings
 from collections.abc import Callable
 
 import torch
+
+_suspend_lock = threading.Lock()
+_suspend_depth = 0
+
+
+@contextlib.contextmanager
+def suspend_capture():
+    """Disable CUDA-graph capture process-wide for the duration of the block.
+
+    Graph capture is a process-global operation, not a per-device one. Only one
+    capture may be underway in a process at a time, and PyTorch captures in the
+    default ``cudaStreamCaptureModeGlobal`` mode, which makes an ordinary
+    synchronizing call (``Tensor.item()``, a device-to-host copy, an allocation)
+    in *any* other thread fail with ``cudaErrorStreamCaptureUnsupported`` for as
+    long as the capture is open. Executors that run several independent solves
+    concurrently in worker threads must therefore step eagerly: one task's
+    capture would otherwise abort an unrelated task on a different GPU.
+
+    Reference counted, so nested executors compose.
+    """
+
+    global _suspend_depth
+    with _suspend_lock:
+        _suspend_depth += 1
+    try:
+        yield
+    finally:
+        with _suspend_lock:
+            _suspend_depth -= 1
+
+
+def capture_suspended() -> bool:
+    """True while a concurrent executor owns the process (see suspend_capture)."""
+
+    return _suspend_depth > 0
 
 
 class CudaGraphRunner:
@@ -39,6 +76,15 @@ class CudaGraphRunner:
             return fn
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA Graph capture requires CUDA.")
+        if capture_suspended():
+            # Raised rather than silently returning ``fn`` so the callers' existing
+            # ``except Exception`` fallbacks take the eager path *and* leave their
+            # ``*_graph_active`` flags cleared.
+            raise RuntimeError(
+                "CUDA Graph capture is suspended while a concurrent executor shares "
+                "this process; stepping eagerly."
+            )
+
         with torch.cuda.device(self.device):
             for _ in range(self.warmup_steps):
                 fn()
