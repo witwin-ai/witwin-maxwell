@@ -1,9 +1,15 @@
 """Central physical constants and torch dtype policy for ``witwin.maxwell``.
 
 Vacuum constants follow CODATA 2018. ``EPSILON_0`` is shared with
-``witwin.core`` so material compilation and solver runtimes agree bit-exactly,
-and ``ETA_0`` is derived from ``MU_0`` and ``C_0`` instead of carrying a
-separate literal.
+``witwin.core`` so material compilation and solver runtimes agree bit-exactly.
+
+Every constant here is the CODATA-recommended decimal literal, including
+``ETA_0``. Do not "derive" ``ETA_0`` as ``MU_0 * C_0`` or ``1 / (EPSILON_0 *
+C_0)``: ``MU_0`` and ``EPSILON_0`` are themselves only quoted to twelve
+significant digits, so either product reproduces the recommended impedance only
+to ``376.730313667`` -- a 3e-12 relative shift away from the recommended
+``376.730313668``. That shift silently moves every source normalization,
+modal impedance and far-field constant in the package.
 
 Note: the ``*_reference.py`` oracle modules under ``fdtd/`` intentionally keep
 independently written constant literals and must not import from this module.
@@ -23,8 +29,9 @@ MU_0: float = 1.25663706212e-6
 # Speed of light in vacuum [m/s] (exact by SI definition).
 C_0: float = 299792458.0
 
-# Vacuum wave impedance [ohm], derived for internal consistency.
-ETA_0: float = MU_0 * C_0
+# Vacuum wave impedance [ohm] (CODATA 2018 recommended value, not a product of
+# the truncated MU_0/EPSILON_0 literals -- see the module docstring).
+ETA_0: float = 376.730313668
 
 
 _REAL_FOR_COMPLEX = {

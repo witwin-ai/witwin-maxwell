@@ -1171,7 +1171,7 @@ def make_network_runner(solver, *, use_cuda_graph: bool):
             tensor.copy_(value)
 
     try:
-        replay = CudaGraphRunner(enabled=True, warmup_steps=3).capture(normal)
+        replay = CudaGraphRunner(device=solver.device, enabled=True, warmup_steps=3).capture(normal)
     except Exception:
         restore()
         return normal

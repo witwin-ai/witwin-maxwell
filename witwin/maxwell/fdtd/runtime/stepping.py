@@ -1962,7 +1962,7 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
             state[k].copy_(v)
 
     try:
-        runner = CudaGraphRunner(enabled=True, warmup_steps=3)
+        runner = CudaGraphRunner(device=solver.device, enabled=True, warmup_steps=3)
         replay = runner.capture(lambda: _field_update_block(solver, 0.0))
     except Exception:
         # Any capture failure (e.g. a non-capturable kernel) degrades to the
@@ -2014,7 +2014,7 @@ def _make_tail_runner(solver, use_gpu_dft: bool):
             state[k].copy_(v)
 
     try:
-        replay = CudaGraphRunner(enabled=True, warmup_steps=3).capture(
+        replay = CudaGraphRunner(device=solver.device, enabled=True, warmup_steps=3).capture(
             lambda: _post_source_block(solver)
         )
     except Exception:
@@ -2139,7 +2139,7 @@ def _make_full_embedded_step_runner(solver, *, use_cuda_graph: bool):
             tensor.copy_(value)
 
     try:
-        replay = CudaGraphRunner(enabled=True, warmup_steps=3).capture(step)
+        replay = CudaGraphRunner(device=solver.device, enabled=True, warmup_steps=3).capture(step)
     except Exception:
         restore()
         return None

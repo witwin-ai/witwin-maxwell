@@ -1985,7 +1985,7 @@ def make_port_observer_runner(solver, *, use_cuda_graph: bool):
             tensor.copy_(value)
 
     try:
-        replay = CudaGraphRunner(enabled=True, warmup_steps=3).capture(
+        replay = CudaGraphRunner(device=solver.device, enabled=True, warmup_steps=3).capture(
             lambda: _accumulate_embedded_port_observers_gpu(solver)
         )
     except Exception:
