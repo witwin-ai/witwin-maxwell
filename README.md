@@ -53,9 +53,9 @@ For module-style inverse-design workflows, define a `SceneModule`, implement `to
 | Results | `result.E`, `result.H`, `result.materials`, `Result.monitor(...)`, `Result.save(...)` | Structured field and material access stay torch-native. |
 | Postprocess | Equivalent currents, background-aware/curved-surface Stratton-Chu propagation, near-to-far transform, directivity, bistatic RCS, S-parameters, and modal overlap | Use `witwin.maxwell.postprocess`. |
 | Differentiable workflows | `SceneModule`, `MaterialRegion`, trainable material/geometry/source inputs, native-CUDA FDTD adjoint backward | Native reverse kernels cover standard/CPML/Bloch fields and supported conductive, dispersive, anisotropic, nonlinear, TFSF, and multi-source compositions. Explicit capability guards reject unsupported gradients. |
-| Interoperability | Tidy3D scene export and GDS geometry import | Tidy3D export covers grids, boundaries, common geometry, broad material/source/monitor families, and validated SI/unit-convention conversions. |
+| Interoperability | Scene export to an external reference solver and GDS geometry import | Export covers grids, boundaries, common geometry, broad material/source/monitor families, and validated SI/unit-convention conversions. |
 
-For the exhaustive user-visible capability inventory, see [`FEATURE_LIST.md`](FEATURE_LIST.md). The numerical conventions and lessons from the Maxwell-vs-Tidy3D validation campaign are recorded in [`docs/validation/tidy3d-numerical-alignment-0.3.0.md`](docs/validation/tidy3d-numerical-alignment-0.3.0.md).
+For the exhaustive user-visible capability inventory, see [`FEATURE_LIST.md`](FEATURE_LIST.md). The supported/unsupported boundary of each capability, with the evidence behind it, is recorded in the capability-boundary section of [`docs/plans/next-functional-2026-07/00-status-and-gaps-2026-07-19.md`](docs/plans/next-functional-2026-07/00-status-and-gaps-2026-07-19.md).
 
 ## Minimal Differentiable Example
 
@@ -140,7 +140,7 @@ python -m benchmark planewave_vacuum
 
 Benchmark assets live under `benchmark/scenes/`, `benchmark/cache/`, `benchmark/plots/`, and `benchmark/RESULTS.md`.
 
-The release validation suite combines unit/API tests, native CUDA parity and adjoint tests, and Maxwell-vs-Tidy3D numerical comparisons. Cross-solver comparisons use common physical-domain coordinates, external PML on both sides, coordinate-aligned complex field slices, and solver-independent scalar observables. See the [0.3.0 numerical-alignment notes](docs/validation/tidy3d-numerical-alignment-0.3.0.md) for the conventions, visual diagnosis workflow, and known residuals.
+The release validation suite combines unit/API tests, native CUDA parity and adjoint tests, and numerical comparisons against an external reference solver. Cross-solver comparisons use common physical-domain coordinates, external PML on both sides, coordinate-aligned complex field slices, and solver-independent scalar observables. See [`benchmark/RESULTS.md`](benchmark/RESULTS.md) for the generated comparison table and the validation-status section of the [0.4.0 release notes](docs/reference/release-notes-0.4.0.md) for what the evidence does and does not cover.
 
 ## Current Notes
 
