@@ -1378,7 +1378,8 @@ never downgrade a gate to self-certification for lack of an external run.
 > census test. The prose tables below are a human-readable index over that guard set
 > plus the graded evidence; where a "fail-closed remainder" is named, a census guard
 > backs it. Last recorded full battery: **3076 passed / 16 expected-FDFD (user-deferred)
-> / 3 xfailed / 1 xpassed** at `6f3b0c8` (round-H); the I1 fix (`625baca`) added a
+> / 3 xfailed / 1 xpassed** at `6f3b0c8` (round-H) — **superseded as a release figure,
+> see correction 4 in the 2026-07-22 update below**; the I1 fix (`625baca`) added a
 > stressed parity gate + falsification and left the census at 176
 > (`i1-p2p-race-acceptance-2026-07-21.md`).
 >
@@ -1388,6 +1389,45 @@ never downgrade a gate to self-certification for lack of an external run.
 > a wave-level or convergence/conservation headline gate is present but there is **no
 > external reference-solver cross-check**, so the audit §4 `completed` bar is unmet; **no
 > plan phase is `completed`** anywhere in this program.
+>
+> ---
+>
+> **UPDATED 2026-07-22 at master `19b30a1`** (this section was written at `f9c6bef`,
+> anchored on `625baca`). Audited against every commit landed since. Four corrections;
+> the physics/capability tables in §a–§e are unchanged by the perf/cleanup line.
+>
+> 1. **I1 (cuda_p2p) — no change needed, re-confirmed.** The section was authored
+>    *after* the I1 merge, so it already records the in-process `transport="cuda_p2p"`
+>    distributed adjoint as **load-race-free** (§c, §d) and the hazard as CLOSED (§g
+>    tail). Re-verified against `docs/assessments/i1-p2p-race-acceptance-2026-07-21.md`
+>    (fix `1a579b3`, merged `625baca`; stressed standard/x-CPML 1-vs-2-GPU grad parity
+>    2.175e-7 / 1.522e-7..2.283e-7 over six rounds under a saturating co-tenant, gate
+>    1e-4; falsification returns 8.090e-2). No superseded statement to retract.
+> 2. **CUDA-graph stepping became the public default** (`9650439`, phase A) and was
+>    then bound and guarded by J1 (`494a836`, `55c90e4`, `19b30a1`). This is a
+>    user-visible execution-model change with a device precondition and a concurrency
+>    carve-out; recorded as new §f bullets. Source:
+>    `docs/assessments/j1-perf-regression-fixes-2026-07-22.md` regressions 2 and 3.
+> 3. **`ETA_0` was briefly derived, then restored** to the CODATA 2018 literal
+>    (`9650439` → `365ac45`). Absolute power / impedance / far-field normalizations
+>    moved by ~3e-12 relative for the commits in between; the shipped value is the
+>    pre-phase-A one. Recorded as a new §f bullet. Source: same J1 doc, regression 1.
+> 4. **Battery figure is stale.** The `3076 / 16 / 3 / 1` count above was measured at
+>    `6f3b0c8` (round-H) and predates the whole perf/cleanup line
+>    (`9650439`, `8a1e5bd`, `64df75f`, `2bd33bb`, `bf9c3aa`) plus the J1 fixes. It is
+>    **not** the release number. The only post-J1 measurements on record are slices in
+>    the J1 doc (`tests/fdtd/multi_gpu` 285 passed; a 1157-item sources/multi-GPU/
+>    gradients/materials/monitors/constants/census slice at 3 failed / 1153 passed /
+>    1 skipped / 2 xfailed / 1 xpassed, the three failures all FDFD-`nvmath`;
+>    `tests/rf` 778 passed / 1 xfailed). A full battery must be re-run before release;
+>    do not quote `3076` as the release count.
+>
+> **Unchanged and re-verified at `19b30a1`:** `CAPABILITY_GUARD_BUDGET = 176`
+> (`tests/api/public/test_guard_census.py:303`) — neither the perf/cleanup line nor
+> J1 added or removed a `NotImplementedError` capability guard, so the machine-checked
+> boundary in §a–§d still holds exactly as written. The FDFD disposition (16 expected
+> failures, `nvmath` absent, user-deferred, do NOT triage) is unchanged and was
+> re-confirmed by the J1 verification run.
 
 ### a. Solver runtimes
 
@@ -1475,6 +1515,55 @@ Which capabilities carry which grade of reference (gate-classification vocabular
   flat) — improved vs references, but any pre-F4 per-scene numeric baseline must be
   regenerated. `f4-subpixel-lever-acceptance-2026-07-21.md`,
   `f4-geometry-cluster-{before,after,delta}.json`.
+  - *Scope clarification added 2026-07-22 (no behavior change; the shipped scope was
+    under-described here).* Only the **FDTD update coefficients** switch to the edge
+    fields — the diagonal background `eps`/`mu` and the static `sigma_e`/`sigma_m`. The
+    node-centered model is still produced as the canonical representation for summaries,
+    monitors, the mode solver, and the SAR / mass models, so a consumer reading
+    `Result.material(...)` or a SAR mass model reads the node grid, not the edge grid.
+    The edge-native path covers isotropic, axis-aligned diagonal-anisotropic and
+    `PerturbationMedium` families (with conductivity / dispersion / nonlinearity /
+    modulation layered on top); **full off-diagonal anisotropy, 2D sheets, and
+    surface-impedance metals stay on the node→edge path** (unchanged capability scope,
+    no census guard added or removed). The material VJP follows the forward, so
+    geometry / region-density / diagonal-anisotropy gradients stay consistent by
+    construction. Benchmark harness default is now `pec="conformal"` (dielectric scenes
+    unaffected). Source: FEATURE_LIST `f4-subpixel-lever` block, merge `431bd7f`.
+- **CUDA-graph stepping is the public default (added 2026-07-22).** `9650439` flipped
+  `FDTDConfig.cuda_graph` / `Simulation.fdtd(..., cuda_graph=...)` to `True` (measured in
+  that commit: +29% throughput at 96³, neutral at 288³, +8–14% peak memory), keeping the
+  pre-existing graceful eager fallback; distributed (`parallel=...`) configs still force
+  it off (`simulation.py` `FDTDConfig.__post_init__`). Two J1 corrections define the
+  supported envelope:
+  - **Device precondition.** `CudaGraphRunner` now takes a **mandatory** `device`, runs
+    warmup/capture/synchronize inside `torch.cuda.device(device)`, and uses an explicit
+    per-device capture stream. Before `494a836` a solver whose tensors lived on `cuda:1`
+    while the calling thread had `cuda:0` current recorded an **empty** graph and the run
+    silently stopped integrating after warmup (40-step vacuum dipole, peak |Ez|
+    2.126512e+04 eager vs 7.333388e+04 graphed on `cuda:1`). A capture that records no
+    work is now a hard `RuntimeError`, so the caller's fallback degrades to eager
+    stepping instead of installing a no-op replay.
+  - **Concurrency carve-out.** Graph capture is process-global and PyTorch captures in
+    `cudaStreamCaptureModeGlobal`, so an open capture aborts any synchronizing call in
+    any other thread. `execute_plan` therefore wraps any plan with `workers > 1` in a
+    reference-counted `suspend_capture()` (`55c90e4`): **concurrent ensemble tasks
+    (`run_many`, the ensemble network sweep, the array-gradient plan) step eagerly** and
+    give up the small-grid graph speedup. Serial plans (`max_concurrency == 1`) keep the
+    graph default. `docs/assessments/j1-perf-regression-fixes-2026-07-22.md` §Regression
+    2/3 and §For the supervisor item 1.
+- **`ETA_0` provenance (added 2026-07-22).** `9650439` centralized the vacuum constants
+  into `witwin/maxwell/constants.py` and redefined `ETA_0 = MU_0 * C_0`; `365ac45`
+  restored the CODATA 2018 recommended literal `376.730313668`. `MU_0` and `EPSILON_0`
+  are themselves twelve-significant-digit literals, so both "internally consistent"
+  derivations land at `376.7303136668…` — a **−3.043e-12** (resp. −3.000e-12) relative
+  offset that propagates into every absolute normalization consuming `ETA_0`: soft
+  `PlaneWave`/`GaussianBeam` unit-power scales, TEM and vector-mode impedances,
+  far-field constants, and `array.py`'s default wave impedance. The repo convention is
+  **CODATA recommended literals per constant, not derivation**, now pinned by
+  `tests/core/constants/test_physical_constants.py`. Only the intermediate commits
+  `9650439`…`bf9c3aa` carry the derived value; the shipped value equals the pre-phase-A
+  one, so absolute results are continuous across the release boundary. Same J1 doc,
+  §Regression 1.
 - **Spectral DFT conventions.** Half-step (`dt/2`) H-field colocation in the running DFT
   (the H-DFT colocation fix); consumers reading complex field spectra must honour the
   Yee time stagger. MEMORY `maxwell-validation-audit-2026-07-17`.
@@ -1508,6 +1597,17 @@ Folded from the round-H seed list, **minus the now-closed cuda_p2p item**:
   install). MEMORY `maxwell-fdfd-deferred`.
 - **NCCL flux/mode/x-normal adjoint objectives; monitor gather beyond forward** — fail-closed.
   §02; `h1-…`.
+- **Concurrent-ensemble graph throughput trade (added 2026-07-22)** — a plan running more
+  than one task at a time steps eagerly, forfeiting the +29%-at-96³ graph gain measured in
+  `9650439`. Recovering it needs concurrent capture from several threads, which PyTorch
+  explicitly does not support; a capture mutex plus `capture_error_mode="thread_local"`
+  was considered and rejected (that mode scopes only the error check, and the allocator
+  interaction across concurrent captures is not a supported configuration).
+  `j1-perf-regression-fixes-2026-07-22.md` §For the supervisor item 1.
+- **Release battery not yet re-measured (added 2026-07-22)** — see correction 4 in the
+  header note above: the `3076` figure predates the perf/cleanup line and J1. A full
+  `python -m pytest tests` run and a `python -m benchmark` regeneration are the two
+  outstanding release-evidence items.
 
 **Recently CLOSED (was a stable-release blocker):** in-process `cuda_p2p` distributed-adjoint
 cross-stream load hazard — a *distinct* checkpoint-capture happens-before race (not the NCCL
