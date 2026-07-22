@@ -140,7 +140,14 @@ def _run_one(task: ExecutionTask, pool: DevicePool, cancellation: _Cancellation)
     wall_start = time.perf_counter()
     timer = _device_timer(device)
     try:
-        result = task.run(device)
+        # A worker thread inherits the process-default CUDA device, not the leased
+        # one. Bind it for the whole task so every stream, event, allocation and
+        # graph capture the task opens belongs to the device it leased.
+        if device.type == "cuda":
+            with torch.cuda.device(device):
+                result = task.run(device)
+        else:
+            result = task.run(device)
     except BaseException as exc:  # noqa: BLE001 - re-raised as a structured failure
         wall = time.perf_counter() - wall_start
         cancellation.trip()

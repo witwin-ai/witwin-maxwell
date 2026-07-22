@@ -1145,6 +1145,7 @@ def prepare_circuit_graph_runners(solver, use_cuda_graph: bool) -> None:
                 torch.cuda.synchronize(device=runtime.system.device)
                 restore()
                 runtime_replays[factor_key] = CudaGraphRunner(
+                    device=runtime.system.device,
                     enabled=True,
                     warmup_steps=0,
                 ).capture(
