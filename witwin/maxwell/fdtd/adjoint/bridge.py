@@ -60,6 +60,7 @@ from ..networks import (
     pullback_network_runtimes,
 )
 from .dispatch import reverse_step
+from .reverse_common import _ReverseScratch
 
 
 def _runtime():
@@ -1096,6 +1097,14 @@ class _FDTDGradientBridge:
         # half-step recompute, so capture it once and hand it to the reverse step
         # instead of recomputing it there.
         capture_mid_magnetic = runtime._replay_can_capture_mid_magnetic(solver)
+        # One reuse pool for the whole single-GPU backward sweep: the post-step
+        # adjoint snapshot, the CPML reverse context, and the eps-cast dynamic
+        # electric curls all have shapes fixed across the sweep, so they are
+        # allocated once and refreshed in place per step. Distributed shard
+        # solvers never carry this attribute, so the multi-GPU reverse keeps its
+        # fresh-allocation behavior unchanged.
+        reverse_scratch = _ReverseScratch()
+        solver._reverse_ctx_scratch = reverse_scratch
         try:
             for start_step, end_step in reversed(segment_bounds):
                 mid_magnetic = [] if capture_mid_magnetic else None
@@ -1113,20 +1122,29 @@ class _FDTDGradientBridge:
                         circuit_traces_out=circuit_traces,
                         network_traces_out=network_traces,
                     )
+                rf_active = (
+                    network_traces is not None
+                    or circuit_traces is not None
+                    or lumped_traces is not None
+                )
                 for offset in range(end_step - start_step - 1, -1, -1):
                     step_index = start_step + offset
-                    post_step_adjoint = {
-                        name: value.clone()
-                        for name, value in adjoint_state.items()
-                    }
+                    # Reused value-copy of the carried adjoint; seed injection
+                    # mutates it in place and the reverse kernels read it, both
+                    # within this step, so a persistent buffer set is safe.
+                    post_step_adjoint = reverse_scratch.snapshot(adjoint_state)
                     with profiler.section("seed_injection"):
                         _apply_seed_runtime(post_step_adjoint, seed_runtime, step_index)
 
-                    local_grad_eps = {
-                        "Ex": torch.zeros_like(eps_ex),
-                        "Ey": torch.zeros_like(eps_ey),
-                        "Ez": torch.zeros_like(eps_ez),
-                    }
+                    local_grad_eps = (
+                        {
+                            "Ex": torch.zeros_like(eps_ex),
+                            "Ey": torch.zeros_like(eps_ey),
+                            "Ez": torch.zeros_like(eps_ez),
+                        }
+                        if rf_active
+                        else None
+                    )
                     sample_adjoints = _port_sample_adjoints(
                         seed_runtime,
                         step_index,
@@ -1251,21 +1269,22 @@ class _FDTDGradientBridge:
                             grad_wire_weights,
                             step_result.grad_wire_weights.contiguous(),
                         )
-                    grad_eps_ex = _accumulate_grad(
-                        grad_accumulator_backend,
-                        grad_eps_ex,
-                        local_grad_eps["Ex"].contiguous(),
-                    )
-                    grad_eps_ey = _accumulate_grad(
-                        grad_accumulator_backend,
-                        grad_eps_ey,
-                        local_grad_eps["Ey"].contiguous(),
-                    )
-                    grad_eps_ez = _accumulate_grad(
-                        grad_accumulator_backend,
-                        grad_eps_ez,
-                        local_grad_eps["Ez"].contiguous(),
-                    )
+                    if local_grad_eps is not None:
+                        grad_eps_ex = _accumulate_grad(
+                            grad_accumulator_backend,
+                            grad_eps_ex,
+                            local_grad_eps["Ex"].contiguous(),
+                        )
+                        grad_eps_ey = _accumulate_grad(
+                            grad_accumulator_backend,
+                            grad_eps_ey,
+                            local_grad_eps["Ey"].contiguous(),
+                        )
+                        grad_eps_ez = _accumulate_grad(
+                            grad_accumulator_backend,
+                            grad_eps_ez,
+                            local_grad_eps["Ez"].contiguous(),
+                        )
                     if nonlinear_enabled:
                         if step_result.grad_chi3_ex is None:
                             raise RuntimeError(
@@ -1367,6 +1386,8 @@ class _FDTDGradientBridge:
         finally:
             if hasattr(solver, "_mode_source_cotangent_accum"):
                 delattr(solver, "_mode_source_cotangent_accum")
+            if getattr(solver, "_reverse_ctx_scratch", None) is not None:
+                solver._reverse_ctx_scratch = None
         profiler.record_material_pullback_backend(
             (
                 "autograd_material_and_rf_graph"
