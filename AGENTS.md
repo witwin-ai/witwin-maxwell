@@ -7,6 +7,10 @@ This document defines the working rules for coding agents in this repository. Ke
 - Use the `maxwell` conda environment for all Python commands, tests, and scripts.
 - Keep the codebase clean. Do not preserve legacy code, compatibility shims, or backward-support paths unless explicitly requested.
 - Write all code comments and commit messages in English.
+- Never add AI or agent attribution to git history. Commit messages must not contain
+  `Co-Authored-By` trailers naming an assistant, `Claude-Session` or similar session
+  links, or "generated with" banners, and the author/committer identity is always the
+  human owner. This applies to commits, tags, PR titles and PR bodies.
 - Keep third-party commercial product, service, and solver names out of commit messages, branch names, PR titles, general development documents, comments, and feature descriptions. Describe the behavior with neutral terms such as `external reference solver`, `reference backend`, or `third-party adapter` so commercial brands do not spread through the repository or GitHub history.
 - Use an exact commercial product name only where technically required for an interoperability API, adapter module, executable command, dependency declaration, legal attribution, or a narrowly scoped adapter test/document. Do not repeat that name in unrelated implementation, validation, or numerical-method changes unless the user explicitly requests it.
 - Maintain `FEATURE_LIST.md` as the user-facing feature inventory. Every new user-visible feature, public API capability, or meaningful workflow addition must update that file in the same change.
