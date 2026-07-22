@@ -930,3 +930,37 @@ Capability level: **differentiable-surrogate (non-physical, non-regulatory)**. T
   to the default stream and shows the seam drift return. See
   `docs/assessments/i1-p2p-race-acceptance-2026-07-21.md`.
 <!-- END h1-nccl-driver -->
+
+<!-- BEGIN k1-conformal-pec -->
+## Conformal PEC edge fill with compact support (K1)
+
+- `SubpixelSpec(pec="conformal")` now derives its per-edge fill from the *geometric
+  coverage fraction* of each Yee E edge — the union PEC signed distance interpolated
+  between the edge's two endpoint nodes — instead of the two-node average of the
+  `tanh`-smoothed node occupancy. Because the conformal open fraction multiplies the
+  electric update every step, a fill `f` is an effective conductivity `eps*f/dt` on
+  that edge, so the fill must be zero wherever the conductor is not. The new fill is
+  exactly `0` on an edge the surface does not reach and exactly `1` on an edge wholly
+  inside, which removes the multi-cell lossy shell the smoothed occupancy painted
+  around every conductor (5298 vacuum edges per component on a 0.2 m cube at
+  `dx = 0.02`) and restores the hard short on the face itself (the previous `0.53`
+  fill left a 405 ohm/sq sheet reflecting ~32% instead of ~100%). A grid-aligned PEC
+  slab under `conformal` now reproduces the `staircase` result bit for bit, at both
+  the compiled-mask level and the field level.
+- **Capability change:** `conformal` no longer places a flat, *grid-parallel* wall
+  sub-cell — such a wall cuts no tangential edge, so conformal is exactly staircase
+  there. Sub-cell resolution of genuinely cut (curved / oblique) conductors is
+  retained and improved: the compiled conformal mask reproduces a sphere's volume to
+  0.74% where staircase gives 1.85% (`r = 0.11`, `dx = 0.02`). Placing a flat
+  grid-parallel wall sub-cell requires the area-scaled (Dey–Mittra) magnetic update,
+  which remains future work.
+- **Documented residual:** the soft short is still lossy on genuinely cut edges. A
+  closed PEC cavity holding a PEC sphere retains `0.450` of its energy after 5200
+  source-free steps under `conformal` versus `1.000` under `staircase` (the pre-fix
+  smoothed-occupancy path retained `0.125`). `staircase` is therefore the default
+  everywhere, including the benchmark harness; `conformal` is opt-in per scene.
+- Gates: `tests/materials/compiler/test_pec_conformal_alignment.py` (compiled masks,
+  CPU) and `tests/validation/physics/test_pec_conformal.py` (field level, CUDA).
+  Evidence and falsifications in
+  `docs/assessments/k1-conformal-pec-fix-2026-07-22.md`.
+<!-- END k1-conformal-pec -->
