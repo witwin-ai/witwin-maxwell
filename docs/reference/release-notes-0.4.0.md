@@ -610,11 +610,28 @@ boundary (stable-release reference, 2026-07-21)"* in
 **Benchmark results.** `benchmark/RESULTS.md` is the generated comparison summary
 (`python -m benchmark`). Regenerated summary for this release:
 
-<!-- RESULTS_PLACEHOLDER -->
+- Regenerated 2026-07-22 against the shipped code, cached external references only
+  (all 102 FDTD scenarios validated their reference cache strictly; no cloud run, no
+  trust-hook override).
+- **35 scenarios improved, 11 regressed, 56 unchanged** on `field_l2`. Median
+  `field_l2` 9.892e-02 -> 8.041e-02 (-18.7%); median `field_corr` 0.9959 -> 0.9972;
+  scenarios meeting the `< 1e-1` target 52 -> 61. All 102 also got faster (median
+  ms/step -6.92%, none slower).
+- The improvement is dominated by the edge-native material sampling of section 3.1:
+  the 16 `grid_geometry` scenarios reproduce their recorded post-change values exactly
+  (cluster median `field_l2` 0.083642).
+- Of the 11 regressions, 9 are <= 4.5% and cross no target. The two PEC scenarios that
+  regressed materially in an intermediate build (`pec_box`, `rcs_pec_sphere`) were
+  traced to a conformal-PEC defect, fixed, and now match their pre-change values
+  exactly (section 3.7); no PEC scenario ships regressed.
+- The generated table now carries a `Registered scenarios with no measured row`
+  section, so a family that produced no measurement (FDFD here) is disclosed as
+  absence of evidence rather than silently omitted.
 
 **Test battery.** Full-battery counts for the release tag:
 
-<!-- BATTERY_PLACEHOLDER -->
+- `python -m pytest tests` on the release tree: **`16 failed, 3098 passed, 65 skipped, 3 xfailed, 1 xpassed` (2026-07-22, 2x RTX A6000, CUDA 13 / torch 2.13)**
+- Every failure is in the deferred FDFD family; no other suite fails.
 
 Note when reading the battery: the FDFD family contributes 16 expected failures from
 the missing optional `nvmath` dependency (section 4.1). They are not regressions and
