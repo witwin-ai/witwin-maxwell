@@ -1,14 +1,20 @@
-"""Conformal PEC sub-cell wall placement on nonuniform (custom / auto) Yee grids.
+"""Smoothed PEC node occupancy on nonuniform (custom / auto) Yee grids.
 
-Conformal PEC smooths the metal occupancy over roughly one cell so the node->edge
-fill fraction encodes where inside the cell the wall sits. The smoothing width was
-the single global ``0.5*min(min_spacing)``: on a graded grid a fine feature anywhere
-shrinks that minimum, so a PEC wall sitting in a locally coarse region gets a beta far
-narrower than its own cell and the conformal fill collapses back to staircase there.
+The compiled PEC node occupancy smooths the metal over roughly one cell. The
+smoothing width was the single global ``0.5*min(min_spacing)``: on a graded grid a
+fine feature anywhere shrinks that minimum, so a PEC wall sitting in a locally
+coarse region gets a beta far narrower than its own cell and the occupancy collapses
+to a hard step there.
 
 The width is now a per-node field, half the local Yee dual-cell width (min over
 axes), so it tracks the local cell wherever the wall is. It reduces bit-exactly to
 ``0.5*spacing`` on a uniform grid, which the regression guard locks in.
+
+This node field is what the mode solver, the modal ports, the terminal-contact
+checks and the material summaries read. The FDTD *conformal* edge fill is a separate
+artifact computed directly on each Yee edge from the signed distance (see
+``tests/materials/compiler/test_pec_conformal_alignment.py``); it involves no
+smoothing width and is not exercised here.
 """
 
 from __future__ import annotations
@@ -128,7 +134,7 @@ def test_pec_beta_scalar_on_uniform_tensor_on_custom():
     assert torch.allclose(beta_uc, torch.full_like(beta_uc, 0.05), atol=0.0, rtol=0.0)
 
 
-# --- Centerpiece: conformal PEC now tracks a sub-cell wall in a coarse region ---
+# --- Centerpiece: the node occupancy resolves a sub-cell wall in a coarse region ---
 
 def _graded_nodes():
     # x is coarse (0.04) everywhere except a fine cluster near the low edge that
