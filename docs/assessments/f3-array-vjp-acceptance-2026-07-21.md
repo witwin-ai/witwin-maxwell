@@ -1,6 +1,6 @@
 # Track F3 acceptance — stage F3a (single-device array scene-gradient VJP)
 
-Anchor: worktree `.worktrees/wf3-array-vjp`, branch `fable/array-scene-vjp`, base master `b3d3c77`.
+Anchor: worktree `.worktrees/wf3-array-vjp`, branch `fable/array-scene-vjp`, base master `15b38d3`.
 Env: conda `maxwell`; `CUDA_HOME=.../nvidia/cu13`; `PYTHONPATH=<worktree>`.
 
 ## Delivered

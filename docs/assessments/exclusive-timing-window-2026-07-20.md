@@ -1,6 +1,6 @@
 # Exclusive timing window — plan 02/03 deferred gates (2026-07-20)
 
-Main checkout, master `ead70c0`. Exclusive window: single measurement process at
+Main checkout, master `26a7247`. Exclusive window: single measurement process at
 a time, both GPUs (2× RTX A6000) verified idle before every block. Host state:
 CPU governor `performance`, GPU persistence enabled, every timing process pinned
 with `numactl --cpunodebind=0 --membind=0`. All numbers below are reproducible

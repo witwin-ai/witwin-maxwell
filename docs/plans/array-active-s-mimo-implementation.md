@@ -152,7 +152,7 @@ Phase 1 evidence is maintained in
 
 The frozen `96^3` performance qualification (`benchmark/array_phase1.py`, 3 warmups,
 5 samples, 4 alternating rounds) was rerun after the flux/observer convention was
-corrected (commit `1cc4a71`: Yee-staggered E-plain/H-retard observer DFT and full-primal
+corrected (commit `6500e20`: Yee-staggered E-plain/H-retard observer DFT and full-primal
 NF2FF quadrature) and now **PASSES every gate**, so the performance contract is
 re-anchored from the retired RTX 5080 to this A6000 host.
 
@@ -171,7 +171,7 @@ Outcome: **PASS**. Both numerical and timing gates cleared.
 
 Numerical: physical power closure `|P_accepted - P_rad| / P_incident = 6.971e-4 (0.0697%)`
 against the 1% gate — restored to the recorded `3223e0c` value of `6.997e-4` (0.07%) after
-the plain-plain-convention regression that measured `0.028646` (2.865%) on `4b24b60`.
+the plain-plain-convention regression that measured `0.028646` (2.865%) on `d26e83c`.
 Basis-vs-direct far-field weighted complex L2 `7.856e-7` (broadside) / `8.837e-7`
 (endfire) against `1e-4`; phase RMS `4.605e-5 deg` / `6.524e-5 deg` against `1e-2 deg`;
 port powers `~1e-7` / `~1e-8` against `5e-3`; `Q_rad` spectrum positive definite (min eig
@@ -189,7 +189,7 @@ Interpretation: the closure regression that failed the 2026-07-17 attempt was lo
 at the time to the NF2FF/observer flux machinery, not to superposition or to the host
 (the basis-vs-direct linearity check passed then and passes now, and the external-reference
 refresh showed a systematic flux/Poynting regression across many scenarios). Commit
-`1cc4a71` corrected exactly that machinery, and the closure returned to its golden value,
+`6500e20` corrected exactly that machinery, and the closure returned to its golden value,
 confirming the diagnosis.
 
 Evidence: `docs/assessments/array-active-s-mimo-phase-1-qualification.json`.

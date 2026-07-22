@@ -264,7 +264,7 @@ Exit gate：导线 AC resistance 与解析 skin-effect 曲线一致；多 GPU va
 
 上文 §1-§13 正文保留原样以存档 proposed 阶段决策；本节仅追加完成状态与证据引用，如与正文冲突以本节为准。
 
-### 2026-07-18 完成记录（Phase 0-3 完成、Phase 4 部分完成，master `3f13ff2`）
+### 2026-07-18 完成记录（Phase 0-3 完成、Phase 4 部分完成，master `e0a0877`）
 
 #### Phase 0-3：完成
 
@@ -298,7 +298,7 @@ OPEN 并记录：
   3. 收敛报告 + 相关 benchmark 场景进入 RESULTS。
 - 进入门：本计划为 Wave C 求解器消费，S6 解冻前不启动有损运行时实现（见 S0.2 冻结与 S2 §S6）。
 
-### 2026-07-21 Round-G revision (master `18bc42a`; merge `3884bb7`) — B2 lossy recurrence + B3 conductivity adjoint LANDED (not `completed`)
+### 2026-07-21 Round-G revision (master `589188e`; merge `310a044`) — B2 lossy recurrence + B3 conductivity adjoint LANDED (not `completed`)
 
 S6 unfroze (S1–S3 all passed) and Round G consumed the lossy physics in the solver.
 Evidence per `docs/assessments/g2-lossy-wire-acceptance-2026-07-21.md`; this note only

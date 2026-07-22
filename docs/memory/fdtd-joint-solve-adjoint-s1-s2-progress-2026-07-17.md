@@ -43,7 +43,7 @@ Authoritative spec: `docs/plans/next-functional-2026-07/02-phase-7-8-blueprint-2
   54 passed; `test_fdtd_adjoint_rigorous.py` + `test_fdtd_adjoint_materials.py`
   44 passed, **2 pre-existing failures unrelated to this change** (`conductive` /
   `bloch_dispersive` FD tests fail on their "medium inactive" forward sanity
-  assertion in 3.01s on the untouched base b8c8887 too — they do not route
+  assertion in 3.01s on the untouched base c840f3b too — they do not route
   through the standard core); `p6_acceptance` + `custom_source` + `mode_source`
   13 passed.
 

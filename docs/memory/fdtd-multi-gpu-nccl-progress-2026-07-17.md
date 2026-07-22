@@ -90,11 +90,11 @@ to state the per-step-loop scope explicitly rather than a whole-class claim.
 
 ## Commit-message corrections (auditor-found)
 
-- **809347a** ("end-to-end one-process-per-GPU NCCL forward solve") states
+- **625275d** ("end-to-end one-process-per-GPU NCCL forward solve") states
   "236 passed" for the multi-GPU suite; the actual count is **233 passed**. The
   commit message is immutable history; the correct count is 233 (collected and
   re-verified during this audit closure).
-- **002c749** ("split distributed solver into ShardEngine + coordinator") claimed
+- **51ab446** ("split distributed solver into ShardEngine + coordinator") claimed
   a bitwise baseline but its baseline artifacts were **not retained**. The
   auditors independently re-derived bit-identity via a `git archive` checkout of
   the pre-refactor tree and confirmed the split is bit-identical; the artifacts

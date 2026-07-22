@@ -20,7 +20,7 @@ An audit found that the S4 CPML-trainable adjoint shipped percent-level-wrong
 gradients whenever the psi memory is numerically active (long run, objective
 sensitivity flowing through a PML region). Two independent latent bugs on the
 same `(pos, neg) = (z, x)` axis order of the Hy/Ey components — pre-existing at
-parent `039cead`, made load-bearing by S4 — were fixed:
+parent `663f9aa`, made load-bearing by S4 — were fixed:
 
 1. **Native reverse adjoint-psi carry** (`witwin/maxwell/fdtd/adjoint/native.py`,
    the operative bug): `_reverse_electric_cpml_ey` and `_reverse_magnetic_cpml_hy`

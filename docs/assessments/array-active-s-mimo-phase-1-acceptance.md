@@ -1,9 +1,9 @@
 # Array workflow Phase 1 acceptance
 
 Status: committed as `3223e0c` (checkpoint); functional and numerical gates accepted on
-that commit. The 2026-07-17 attempt on `4b24b60` FAILED the physical-power-closure gate
+that commit. The 2026-07-17 attempt on `d26e83c` FAILED the physical-power-closure gate
 (2.865% vs 1%) under the plain-plain observer convention. That convention was corrected in
-commit `1cc4a71` (Yee-staggered E-plain/H-retard observer DFT, full-primal NF2FF
+commit `6500e20` (Yee-staggered E-plain/H-retard observer DFT, full-primal NF2FF
 quadrature), and the frozen 3/5/4 qualification was **rerun on 2026-07-18 and PASSED every
 gate** (closure `6.971e-4`, basis/direct time ratio `0.2055`, combine/one-solve
 `3.434e-4`). The performance contract is therefore qualified and re-anchored to this A6000
@@ -164,7 +164,7 @@ the frozen 3/5/4 qualification can be rerun.
 
 ## Frozen qualification 2026-07-18 (corrected convention, A6000 host): PASS
 
-The 2026-07-17 attempt on the final tree `4b24b60` FAILED at the physical-power-closure
+The 2026-07-17 attempt on the final tree `d26e83c` FAILED at the physical-power-closure
 gate (`max_physical_power_residual = 0.028646`, 2.865%, against the 1% gate) under the
 plain-plain observer convention; the timing loop was never reached. That failure was
 localized to the NF2FF/observer flux machinery, not to superposition or to the host: the
@@ -172,7 +172,7 @@ basis-vs-direct linearity check passed then, and the same-day external-reference
 showed a systematic flux (Poynting) regression across many scenarios while field
 correlation was unchanged.
 
-Commit `1cc4a71` corrected exactly that machinery (Yee-staggered E-plain/H-retard observer
+Commit `6500e20` corrected exactly that machinery (Yee-staggered E-plain/H-retard observer
 DFT, full-primal NF2FF quadrature). The frozen 3-warmup/5-sample/4-round qualification was
 rerun on 2026-07-18 on the same clean host — 2x NVIDIA RTX A6000 (driver 595.71.05, torch
 2.13.0+cu130, CUDA 13.0), one quiet GPU, `CUDA_VISIBLE_DEVICES=0`,

@@ -5,7 +5,7 @@ Scope: DC-biased ferrite gyromagnetic (Polder) permeability as a linearized
 Landau-Lifshitz-Gilbert (LLG) magnetization ADE advanced locally at each ferrite
 cell. Time-domain (FDTD) only; FDFD is user-deferred.
 
-Base commit: master `4b24b60`.
+Base commit: master `d26e83c`.
 
 This document freezes the sign/unit conventions, the LLG->Polder derivation, the
 implicit-midpoint discretization with its discrete-energy (passivity) proof, the

@@ -11,7 +11,7 @@
 > gradient gates, no external reference solver cross-check); NOT `completed`.
 > See `docs/assessments/a12-electrostatics-acceptance-2026-07-19.md` and
 > `tests/electrostatic/`.  
-> **Round-H revision (2026-07-21, master `6f3b0c8`; merge `4a0555d`).** Phase 4 SPD
+> **Round-H revision (2026-07-21, master `a63dee8`; merge `aa02075`).** Phase 4 SPD
 > tensor-eps + open boundary delivered: a full SPD 3×3 tensor permittivity in the FVM operator
 > (`A = A_diag + A_cross`, `A_cross` = gradient of a discrete quadratic energy → symmetric by
 > construction), gated by dense/random operator symmetry, rotated-frame MMS 2nd-order

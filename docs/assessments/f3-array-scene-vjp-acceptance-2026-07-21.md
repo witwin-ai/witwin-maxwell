@@ -1,6 +1,6 @@
 # Track F3 acceptance — stage F3b (ensemble 2-GPU array scene-gradient aggregation)
 
-Anchor: worktree `.worktrees/wf3-array-vjp`, branch `fable/array-scene-vjp`, base master `b3d3c77`.
+Anchor: worktree `.worktrees/wf3-array-vjp`, branch `fable/array-scene-vjp`, base master `15b38d3`.
 Env: conda `maxwell`; `CUDA_HOME=.../nvidia/cu13`; `PYTHONPATH=<worktree>`. Hardware: 2x RTX A6000 (homogeneous, P2P). Correctness only, no timing claims.
 
 Builds on F3a (single-device `ArrayBasisData.scene_gradient_vjp`, acceptance

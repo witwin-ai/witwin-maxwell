@@ -1,7 +1,7 @@
 # I1 in-process cuda_p2p adjoint race — acceptance
 
 Track: `i1-p2p-race`. Worktree: `.worktrees/wi1-p2p-race`, branch
-`fable/p2p-race`. Base: master `16985a1` (clean). Hardware: 2x RTX A6000. Env:
+`fable/p2p-race`. Base: master `5fda7c5` (clean). Hardware: 2x RTX A6000. Env:
 `maxwell`. All commands export:
 
 ```bash
@@ -83,7 +83,7 @@ producer and consumer are the same device's `compute_stream`.
 `witwin/maxwell/fdtd/distributed/adjoint.py`, `capture_distributed_checkpoint`:
 clone each shard's state inside
 `with torch.cuda.device(shard.device), torch.cuda.stream(shard.compute_stream):`.
-Commit `1a579b3`.
+Commit `e0f6ff7`.
 
 ## Stressed distribution (before / after)
 
@@ -151,7 +151,7 @@ user-deferred FDFD failures (no nvmath), not touched by this change.
 
 ## Census reconciliation
 
-`CAPABILITY_GUARD_BUDGET = 176` against this base (`16985a1`);
+`CAPABILITY_GUARD_BUDGET = 176` against this base (`5fda7c5`);
 `tests/api/public/test_guard_census.py` passes unchanged. The fix adds/removes no
 `NotImplementedError` guard (a stream-context change and a test), so the budget
 stays **176**.

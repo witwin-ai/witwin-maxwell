@@ -165,7 +165,7 @@ evidenced below.
   curved-boundary staircasing floor, so the auto-vs-uniform accuracy-per-cell RATIO
   rises even though BOTH absolute errors fall. Measured before/after on this exact
   scene config (A6000, GPU 1; the "before" run is on base node-smear materials in the
-  b3d3c77 worktree, the "after" on this branch):
+  15b38d3 worktree, the "after" on this branch):
 
   | grid | cells | err before | err after |
   | --- | ---: | ---: | ---: |
@@ -222,7 +222,7 @@ The 3 failures are the pre-existing, user-deferred FDFD adjoint gates
 (`tests/gradients/test_fdfd_adjoint.py::{…density, …geometry_position,
 …reports_solver_stats_and_converges}`), which fail with `No module named 'nvmath'`
 (nvmath is intentionally not installed; FDFD is user-deferred). They are unrelated to
-F4 and fail identically on base `b3d3c77`. Every FDTD material/gradient/breakdown/SAR/
+F4 and fail identically on base `15b38d3`. Every FDTD material/gradient/breakdown/SAR/
 boundary/census/public-API test passes, including the 8 new edge-native unit tests, the
 re-anchored autogrid and Rayleigh gates, and the restructured deterministic dispersive
 gate.
@@ -362,7 +362,7 @@ Reproduce (both columns, identical conditions):
 # after (this branch, edge-native):
 CUDA_VISIBLE_DEVICES=1 python -m benchmark.geometry_cluster_report \
   --out docs/assessments/f4-geometry-cluster-after.json --label after
-# before: a worktree at b3d3c77 with ONLY the cache-key fix + trust hook +
+# before: a worktree at 15b38d3 with ONLY the cache-key fix + trust hook +
 # geometry_cluster_report.py copied in (materials left at base node-smear), then the
 # same command with --label before.
 ```

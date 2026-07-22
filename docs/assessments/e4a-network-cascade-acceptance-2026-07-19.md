@@ -1,7 +1,7 @@
 # E4a acceptance — cascade/termination helpers, raw-sample cross-check, passivity suite
 
 Track: `e4-network-gaps` (Plan 03 E2-evidence gaps), stage E4a.
-Worktree: `.worktrees/we4-network-gaps`, branch `fable/network-e2`, base master `039cead`.
+Worktree: `.worktrees/we4-network-gaps`, branch `fable/network-e2`, base master `663f9aa`.
 GPU: `CUDA_VISIBLE_DEVICES=1` (correctness only; no timing measurements — out of scope this round).
 Env: conda `maxwell`, `CUDA_HOME=.../nvidia/cu13`, `PYTHONPATH=<worktree>`.
 

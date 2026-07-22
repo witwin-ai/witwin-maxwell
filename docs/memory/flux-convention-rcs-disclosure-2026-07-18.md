@@ -1,6 +1,6 @@
 # Flux-convention ruling — per-metric RCS disclosure + broadside_H attribution (2026-07-18)
 
-Branch `codex/flux-convention`, worktree `.worktrees/flux-fix`, code HEAD `0c2aa48`
+Branch `codex/flux-convention`, worktree `.worktrees/flux-fix`, code HEAD `01f5688`
 (`fix(fdtd): restore Yee time-stagger observers, full-primal NF2FF, and honest
 S-parameter gate`). This note discloses the per-metric benchmark deltas the ruling
 produces and closes the one open cell the diagnosis matrix never measured
@@ -57,21 +57,21 @@ one-cell-staircased sphere pattern, where the normalized complex error is inhere
 ill-conditioned (`rcs_broadside_E` is already 6.2e-1 even under master). **Verdict:
 ACCEPTED-with-disclosure.**
 
-## PART B — full three-way per-metric inventory (this tree vs 7932af3 vs ad3427f)
+## PART B — full three-way per-metric inventory (this tree vs 8eced4c vs 3bdff58)
 
 Full `python -m benchmark --solver fdtd` refreshed `benchmark/RESULTS.md` on this tree
-(102 scenarios). Compared against (i) the regressed-master table `7932af3` and (ii) the
-`ad3427f` table. Coverage: 84 scalar observables + 172 per-frequency field-metric cells,
+(102 scenarios). Compared against (i) the regressed-master table `8eced4c` and (ii) the
+`3bdff58` table. Coverage: 84 scalar observables + 172 per-frequency field-metric cells,
 full key overlap in all three tables. Jitter band: 5% relative or 5e-4 absolute.
 
-- **Field-metric cells worsened vs 7932af3: 0.** No field L2 / Shape / Linf / Corr cell
+- **Field-metric cells worsened vs 8eced4c: 0.** No field L2 / Shape / Linf / Corr cell
   regressed. All hard gate columns (L2 <1e-1, Linf <1e-1, Corr >0.99, Flux <5e-2) are
   unaffected.
-- **Scalar cells changed vs 7932af3: 21, and every one matches `ad3427f` exactly**
+- **Scalar cells changed vs 8eced4c: 21, and every one matches `3bdff58` exactly**
   (return-to-before). 14 improved, 7 worsened.
 - **Genuinely-new regressions (worse than BOTH baselines beyond jitter): 0.**
 
-Net improvements (better vs 7932af3, all == ad3427f), notably:
+Net improvements (better vs 8eced4c, all == 3bdff58), notably:
 `rcs_dielectric_box::rcs_back` 1.6868e-1 -> 1.0059e-2, `::rcs_forward` 1.9667e-1 ->
 3.9532e-2, `::rcs_broadside_E` 6.1854e-1 -> 4.6286e-1; `sphere_rcs::rcs_forward`
 2.3904e-1 -> 9.1217e-2, `::rcs_broadside_E` 6.8158e-1 -> 5.5904e-1;
@@ -81,9 +81,9 @@ Net improvements (better vs 7932af3, all == ad3427f), notably:
 `grating_diffraction::eta_+/-3_0` 4.4028e-2 -> 4.1676e-2;
 `mode_monitor_two_planes::forward_amplitude_ratio` 6.0542e-2 -> 5.7482e-2.
 
-The 7 worsened cells (classified `return-to-before(=ad3427f)`; NF2FF-derived scalar cuts):
+The 7 worsened cells (classified `return-to-before(=3bdff58)`; NF2FF-derived scalar cuts):
 
-| cell | 7932af3 (i) | this tree | ad3427f (ii) | class |
+| cell | 8eced4c (i) | this tree | 3bdff58 (ii) | class |
 | --- | ---: | ---: | ---: | --- |
 | rcs_dielectric_box::rcs_broadside_H | 1.2867e-2 | 1.3387e-1 | 1.3387e-1 | return-to-before |
 | sphere_rcs::rcs_broadside_H | 3.0225e-2 | 1.1734e-1 | 1.1734e-1 | return-to-before |
@@ -93,9 +93,9 @@ The 7 worsened cells (classified `return-to-before(=ad3427f)`; NF2FF-derived sca
 | directivity_two_dipoles::D_max | 3.2885e-2 | 3.8672e-2 | 3.8672e-2 | return-to-before |
 | directivity_two_dipoles::beam_width_H | 8.8107e-3 | 1.9244e-2 | 1.9244e-2 | return-to-before |
 
-Interpretation: `7932af3` ("re-anchored host" refresh) carried the clip (variant `a`
-behaviour); `ad3427f` was already on the no-clip lineage. This tree returns the whole
-scalar set to the `ad3427f` values. The clip in `7932af3` locally helped these 7 cuts at
+Interpretation: `8eced4c` ("re-anchored host" refresh) carried the clip (variant `a`
+behaviour); `3bdff58` was already on the no-clip lineage. This tree returns the whole
+scalar set to the `3bdff58` values. The clip in `8eced4c` locally helped these 7 cuts at
 the cost of the 14 it hurt. No scalar RCS complex-err column has a hard benchmark
 acceptance threshold; nothing crosses a gate; the full battery is green. No STOP condition.
 

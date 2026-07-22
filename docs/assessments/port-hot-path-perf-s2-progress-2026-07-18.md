@@ -9,7 +9,7 @@
 ## S2 exit-gate mapping
 
 Explicit mapping of each S2 sub-step to its evidence, landing commit, and status.
-The scope call is: **S2.2's fix already landed pre-branch at `b70ee2a`** (the
+The scope call is: **S2.2's fix already landed pre-branch at `542988c`** (the
 SeriesRLC diagnostics-off fast path), and the audit's conditional weight-table
 rewrite precondition is **false** (per-frequency accumulation does not dominate),
 so no further code fix is owed for S2.2. **S2.3 timing measurement is deferred to
@@ -19,7 +19,7 @@ op-count evidence and the variance-gate machinery it will consume.
 | S2 sub-step | Evidence | Commit | Status |
 |---|---|---|---|
 | S2.1 harness (reproducible baseline artifact) | `tests/rf/performance/profile_port_hot_path.py` + `docs/assessments/port-hot-path-op-inventory-2026-07-18.json`; op-count ceilings in `tests/rf/performance/test_port_hot_path_op_count.py` and `tests/rf/lumped/test_fdtd_port_end_to_end.py` (class `perf-opcount`) | this branch (`codex/port-perf-s2`) | done (op-count only) |
-| S2.2 fix disposition (SeriesRLC fast path; weight-table precondition) | SeriesRLC schedule 62/12/16 → 25/0/3 per step; launches frequency-count independent ⇒ weight-table precondition false; diagnostics default-off pinned by `tests/rf/performance/test_port_energy_diagnostics_default_off.py` | fast path landed pre-branch at `b70ee2a` | landed pre-branch; no new fix owed |
+| S2.2 fix disposition (SeriesRLC fast path; weight-table precondition) | SeriesRLC schedule 62/12/16 → 25/0/3 per step; launches frequency-count independent ⇒ weight-table precondition false; diagnostics default-off pinned by `tests/rf/performance/test_port_energy_diagnostics_default_off.py` | fast path landed pre-branch at `542988c` | landed pre-branch; no new fix owed |
 | S2.3 measurement (timed `<5%` / `<2%` gate) | `tests/rf/performance/measure_port_overhead_s2b.py` + artifact `docs/assessments/port-perf-s2b-measurement-2026-07-18.json`; 22-round variance-aware gate on a representative 27 M-cell grid: single-port CI95-upper **1.57 % < 5 %**, per-extra-passive-port CI95-upper **1.53 % < 2 %**; A/A floor half-width 0.07 %; injected-overhead falsification detected (13.8 %). Machinery `tests/support/perf_variance_gate.py` + `tests/rf/performance/test_perf_variance_gate.py` (class `perf-statistical`) | `codex/port-perf-s2b` | **measured (PASS at representative grid; grid-dependent — see §S2.3 measured)** |
 
 ## S2.1 — reproducible baseline artifact
@@ -27,7 +27,7 @@ op-count evidence and the variance-gate machinery it will consume.
 `tests/rf/performance/profile_port_hot_path.py` turns the audit's 14.4x port
 diagnosis into a machine-readable, reproducible per-step op inventory for the
 §9.4 scenarios. It profiles the checkout in place and reconstructs the
-pre-optimization baseline (default `eb9258b`) with `git archive` in an isolated
+pre-optimization baseline (default `30be904`) with `git archive` in an isolated
 subprocess (its own `PYTHONPATH` and CUDA build dir), then diffs the two.
 
 Committed before/after artifact:
@@ -35,14 +35,14 @@ Committed before/after artifact:
 
 Per-step, per-port dispatch counts (A6000, `profile_memory` + acc events):
 
-| scenario | eb9258b (before) | HEAD (after) |
+| scenario | 30be904 (before) | HEAD (after) |
 |---|---|---|
 | SeriesRLC terminated port | 62 launches / 12 allocs / 16 DtoD | 25 launches / 0 allocs / 3 DtoD |
 | passive field-observation port | 30 launches / 5 allocs / 0 DtoD | 30 launches / 5 allocs / 0 DtoD |
 | marginal per extra passive port | 30 launches / 5 allocs | 30 launches / 5 allocs |
 
 The SeriesRLC reduction (launches 0.40x, allocations eliminated, DtoD 0.19x) is
-the already-landed diagnostics-off fast path (`apply_lumped_runtime`); eb9258b
+the already-landed diagnostics-off fast path (`apply_lumped_runtime`); 30be904
 predates it and always ran the per-step energy/branch bookkeeping. The DtoD=16
 before matches the audit's diagnosed figure.
 
@@ -85,7 +85,7 @@ CI upper bound over target → fail). The existing ABBA orchestrator
 Op-count ceilings for the port hot path are gated by
 `tests/rf/performance/test_port_hot_path_op_count.py` (F-independence, constant
 per-additional-port marginal cost, SeriesRLC fast-path `allocs == 0`), with a
-recorded falsification against the eb9258b schedule.
+recorded falsification against the 30be904 schedule.
 
 ## S2.3 — measured (S2b exclusive window, 2026-07-19)
 

@@ -1,7 +1,7 @@
 # H4 acceptance — circuit-driven ESD through the standard-network MNA topology
 
 Track: `h4-esd-circuit`. Stage: **H4a** (circuit-ESD coupling + gates (a)-(d) +
-falsifications). Worktree base: `18bc42a` (branch `fable/esd-circuit`). GPU:
+falsifications). Worktree base: `589188e` (branch `fable/esd-circuit`). GPU:
 `CUDA_VISIBLE_DEVICES=1`. Env: `maxwell`.
 
 All commands below assume:
@@ -159,7 +159,7 @@ Result: **31 passed**.
 
 ## Census
 
-`CAPABILITY_GUARD_BUDGET = 175` at base `18bc42a` (verified;
+`CAPABILITY_GUARD_BUDGET = 175` at base `589188e` (verified;
 `tests/api/public/test_guard_census.py` -> 3 passed). This stage adds **no**
 `raise NotImplementedError` guards (it adds a capability and reuses an existing
 fail-closed guard), so the budget is unchanged at 175.
@@ -168,7 +168,7 @@ fail-closed guard), so the budget is unchanged at 175.
 
 # H4b — SmoothBreakdownRisk differentiable surrogate (non-physical, non-regulatory)
 
-Base for this stage: `3ad6e53` (H4a). Delivered on branch `fable/esd-circuit`.
+Base for this stage: `bfa0d2e` (H4a). Delivered on branch `fable/esd-circuit`.
 
 ## Delivered
 

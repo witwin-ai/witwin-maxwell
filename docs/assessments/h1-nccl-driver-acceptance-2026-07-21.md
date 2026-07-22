@@ -1,7 +1,7 @@
 # H1 NCCL driver — acceptance (stages H1a / H1b)
 
 Track: `h1-nccl-driver`. Worktree: `.worktrees/wh1-nccl-driver`, branch
-`fable/nccl-driver`. Base: master `18bc42a` (clean). Hardware: 2x RTX A6000.
+`fable/nccl-driver`. Base: master `589188e` (clean). Hardware: 2x RTX A6000.
 Env: `maxwell`. All commands below export:
 
 ```bash
@@ -137,7 +137,7 @@ guard, drop the `compute_stream` context; record the vestigial forward-overlap
 events on the current stream). The reverse driver already fully host-synchronizes
 between phases (`_synchronize(devices)`), so `compute_stream` bought no overlap
 there; matching allocation-stream to use-stream closes the window at zero cost.
-Commit `c233d8b`.
+Commit `82b2f0c`.
 
 **Stressed-gate evidence (honest tolerances, both GPUs saturated by a committed
 co-tenant burner).** Distribution of grad relative error vs the single-GPU
@@ -268,7 +268,7 @@ python -m pytest tests/api/public/test_guard_census.py tests/api/public/test_pub
 `test_objective_guard_rejects_separable_plane_on_in_process_bridge` were added in
 stage H1b and land in this same adjacent suite.)
 
-Commit: `2e99e6c feat(fdtd-distributed): per-rank collective NCCL reverse driver`.
+Commit: `ce13272 feat(fdtd-distributed): per-rank collective NCCL reverse driver`.
 
 ---
 
@@ -283,7 +283,7 @@ single-process full-plane objective with every seam cell counted on exactly one
 rank and each rank seeding only its owned strip. No cross-rank cotangent scatter is
 introduced — the seam ownership is carried entirely by the separable objective.
 
-Commit `b402074 feat(fdtd-distributed): separable tiled-plane monitor adjoint seed
+Commit `459d88a feat(fdtd-distributed): separable tiled-plane monitor adjoint seed
 over NCCL`.
 
 **Code (`witwin/maxwell/fdtd/distributed/`):**
@@ -372,7 +372,7 @@ must reproduce it. Single-GPU plane-monitor adjoint is itself covered by
 
 ### Census reconciliation
 
-Capability-guard census budget verified against THIS base (`18bc42a` lineage):
+Capability-guard census budget verified against THIS base (`589188e` lineage):
 `CAPABILITY_GUARD_BUDGET = 175` (`tests/api/public/test_guard_census.py` passes
 unchanged). S5 added no `raise NotImplementedError` and removed none; the
 `allow_adjoint`-gated relaxations only re-condition existing `ValueError` fences,

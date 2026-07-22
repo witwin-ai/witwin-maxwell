@@ -2,7 +2,7 @@
 
 Durable record for the P09 verdict-closure pass on the surface-impedance Phase 0
 slice (`feat(surface-impedance): freeze Phase 0 contract, rational model, fitter,
-funnel`, HEAD 8a89edf). Records the fixes applied and the deferrals that are real
+funnel`, HEAD 0473c3e). Records the fixes applied and the deferrals that are real
 but out of scope, so they are tracked in a trusted doc rather than only in the
 untrusted dev report.
 

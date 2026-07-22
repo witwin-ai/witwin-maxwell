@@ -1,32 +1,32 @@
 # J1 — perf/cleanup line regression fixes (2026-07-22)
 
-Branch `fable/perf-regress`, based on `bf9c3aa`.
+Branch `fable/perf-regress`, based on `9a7332f`.
 
-Master was last verified green at `16985a1` (3076 passed / 16 failed, all in the
+Master was last verified green at `5fda7c5` (3076 passed / 16 failed, all in the
 user-deferred FDFD family). Three commits then landed on the perf/cleanup line:
 
-- `9650439` refactor: phase A cleanup — dead code removal, CUDA-graph stepping
+- `afb7a85` refactor: phase A cleanup — dead code removal, CUDA-graph stepping
   made the public default, GPU DFT weight tables un-gated, shared helpers, new
   `constants.py`
-- `8a1e5bd` perf(fdtd-adjoint): reuse reverse-step buffers, memoize constant
+- `0a6edc0` perf(fdtd-adjoint): reuse reverse-step buffers, memoize constant
   curls, guard the RF grad path
-- `64df75f` perf(fdtd-cuda): uniform-coefficient scalar fast path, compressed
+- `f5ae24e` perf(fdtd-cuda): uniform-coefficient scalar fast path, compressed
   CPML interior kernels
 
-followed by `2bd33bb` / `bf9c3aa` (behavior-preserving decomposition and kernel
+followed by `4c973b6` / `9a7332f` (behavior-preserving decomposition and kernel
 template fold).
 
 Three regressions were found beyond the deferred FDFD family. **All three
-bisect to `9650439`.** `8a1e5bd` and `64df75f` are clean of these defects.
+bisect to `afb7a85`.** `0a6edc0` and `f5ae24e` are clean of these defects.
 
 | # | Test | First-bad | Mechanism | Fix | Commit |
 |---|------|-----------|-----------|-----|--------|
-| 1 | `tests/sources/incident/test_soft_planewave_absolute_power.py::test_plane_wave_power_scale_is_derived_unit_power_factor` | `9650439` | `ETA_0` redefined as `MU_0 * C_0`; the truncated CODATA literals shift the impedance 3.0e-12 relative | restore the CODATA `ETA_0` literal | `365ac45` |
-| 2 | `tests/fdtd/multi_gpu/test_ensemble_network_sweep.py::test_two_gpu_ensemble_sweep_matches_serial_with_provenance` | `9650439` | graph capture not bound to the solver device → silently empty graph → run stops integrating after warmup | bind the device + explicit capture stream; empty capture now raises | `494a836` |
-| 3 | `tests/fdtd/multi_gpu/test_ensemble_run_many.py::test_run_many_matches_serial_and_respects_lease` (+ `test_run_many_end_to_end_orders_results`, `test_run_many_isolates_a_failing_task`) | `9650439` | process-global capture aborts concurrent worker threads with `cudaErrorStreamCaptureUnsupported` | executor suspends capture for any plan that can run >1 task at a time | `55c90e4` |
+| 1 | `tests/sources/incident/test_soft_planewave_absolute_power.py::test_plane_wave_power_scale_is_derived_unit_power_factor` | `afb7a85` | `ETA_0` redefined as `MU_0 * C_0`; the truncated CODATA literals shift the impedance 3.0e-12 relative | restore the CODATA `ETA_0` literal | `1ca0072` |
+| 2 | `tests/fdtd/multi_gpu/test_ensemble_network_sweep.py::test_two_gpu_ensemble_sweep_matches_serial_with_provenance` | `afb7a85` | graph capture not bound to the solver device → silently empty graph → run stops integrating after warmup | bind the device + explicit capture stream; empty capture now raises | `9b177e3` |
+| 3 | `tests/fdtd/multi_gpu/test_ensemble_run_many.py::test_run_many_matches_serial_and_respects_lease` (+ `test_run_many_end_to_end_orders_results`, `test_run_many_isolates_a_failing_task`) | `afb7a85` | process-global capture aborts concurrent worker threads with `cudaErrorStreamCaptureUnsupported` | executor suspends capture for any plan that can run >1 task at a time | `f2787b0` |
 
 The "third regression" the truncated battery log hid is #2 above. A full
-`tests/fdtd` run at `bf9c3aa` reported `4 failed, 485 passed, 52 skipped`: the
+`tests/fdtd` run at `9a7332f` reported `4 failed, 485 passed, 52 skipped`: the
 network sweep plus the three `test_ensemble_run_many.py` cases. The
 `run_many` failures are a race (see #3), which is why a single battery run
 reported only three regressions rather than four.
@@ -35,10 +35,10 @@ reported only three regressions rather than four.
 
 ## Regression 1 — plane-wave absolute-power calibration
 
-**First-bad commit:** `9650439`. Verified by bisect worktrees: at `f9c6bef` the
-test passes (`1 passed`), at `9650439` it fails.
+**First-bad commit:** `afb7a85`. Verified by bisect worktrees: at `cd0f07a` the
+test passes (`1 passed`), at `afb7a85` it fails.
 
-**Mechanism.** `9650439` introduced `witwin/maxwell/constants.py` and migrated
+**Mechanism.** `afb7a85` introduced `witwin/maxwell/constants.py` and migrated
 ~22 files off their local `_ETA0 = 376.730313668` literals. While doing so it
 redefined the shared value as `ETA_0 = MU_0 * C_0`, described in the module
 docstring as "derived for internal consistency". But `MU_0` and `EPSILON_0` are
@@ -62,7 +62,7 @@ choice of physical constant — no discretization convention changed.
 `1/sqrt(A*cos(theta)/(2*eta0))` for a 0.8 x 0.5 m aperture at normal incidence:
 
 - expected (CODATA `eta0`): `43.40105492197165`
-- observed at `bf9c3aa`: `43.40105492190561`
+- observed at `9a7332f`: `43.40105492190561`
 - test tolerance: `rel=1e-12` (`± 4.3e-11` absolute)
 
 **Fix.** `ETA_0` is the CODATA 2018 recommended literal again, matching the value
@@ -92,9 +92,9 @@ truncated product, so the derivation cannot silently return.
 
 ## Regression 2 — CUDA-graph capture was not bound to the solver device
 
-**First-bad commit:** `9650439`. At `f9c6bef` the network sweep passes
-(`2 passed`); at `9650439` it fails with the empty-graph warning. The capture
-helper was already device-blind before `9650439`; making `cuda_graph=True` the
+**First-bad commit:** `afb7a85`. At `cd0f07a` the network sweep passes
+(`2 passed`); at `afb7a85` it fails with the empty-graph warning. The capture
+helper was already device-blind before `afb7a85`; making `cuda_graph=True` the
 public default is what made every non-default-GPU run reach it.
 
 **Mechanism.** `torch.cuda.graph` opens its capture stream on whatever device is
@@ -156,8 +156,8 @@ against eager stepping — the configuration a `cuda:0`-only test can never reac
 
 ## Regression 3 — process-global capture aborted concurrent ensemble tasks
 
-**First-bad commit:** `9650439`. At `f9c6bef`, `test_ensemble_run_many.py` is
-`12 passed` on 3 of 3 repetitions; at `9650439` it is `12 passed`, then
+**First-bad commit:** `afb7a85`. At `cd0f07a`, `test_ensemble_run_many.py` is
+`12 passed` on 3 of 3 repetitions; at `afb7a85` it is `12 passed`, then
 `1 failed, 11 passed`, then `2 failed, 10 passed`.
 
 **Mechanism.** CUDA-graph capture is process-global, not per-device. Only one
@@ -214,9 +214,9 @@ this defect, since the ensemble failure itself is racy —
 
 ## Verification
 
-Test counts on the fixed tree (`55c90e4`):
+Test counts on the fixed tree (`f2787b0`):
 
-- `tests/fdtd/multi_gpu` — **285 passed** (4 failed at `bf9c3aa`).
+- `tests/fdtd/multi_gpu` — **285 passed** (4 failed at `9a7332f`).
 - `tests/sources tests/fdtd/multi_gpu tests/gradients tests/materials
   tests/monitors tests/core/constants tests/api/public/test_guard_census.py` —
   **3 failed, 1153 passed, 1 skipped, 2 xfailed, 1 xpassed**. The three failures
@@ -228,7 +228,7 @@ Test counts on the fixed tree (`55c90e4`):
   change touched, including the circuit CUDA-graph replay gates) —
   **778 passed, 1 xfailed**.
 
-Baseline for comparison: a full `tests/fdtd` run at `bf9c3aa` reported
+Baseline for comparison: a full `tests/fdtd` run at `9a7332f` reported
 `4 failed, 485 passed, 52 skipped` — the network sweep plus the three
 `test_ensemble_run_many.py` cases, all now green.
 
@@ -239,7 +239,7 @@ assertion was weakened.
 ## For the supervisor
 
 1. **Ensemble throughput trade.** Concurrent ensemble tasks now step eagerly.
-   `9650439` measured graph stepping at +29% throughput at 96^3 and neutral at
+   `afb7a85` measured graph stepping at +29% throughput at 96^3 and neutral at
    288^3, so a small-grid ensemble gives that up. Keeping graphs there would
    require concurrent capture from several threads, which PyTorch explicitly
    does not support ("graphs already have the general, explicitly documented

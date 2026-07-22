@@ -111,7 +111,7 @@ Where it conflicts with the "accepted" claim, this section's grade governs.
   16 direct solves, gate <= 40%; one combine is 0.0343% of one direct solve,
   gate < 10%, zero extra FDTD steps); `local_hardware` re-anchored to this host.
   **Artifact: `docs/assessments/array-active-s-mimo-phase-1-qualification.json`**
-  (`verdict = PASS`, corrected flux/observer convention at commit `1cc4a71`).
+  (`verdict = PASS`, corrected flux/observer convention at commit `6500e20`).
   The audit's data predates this run, so it is not reflected in the audit body.
 - **Evidence required to reach E2/E3 (convergence route, audit S3.3):**
   1. complete `scene_gradient_vjp` aggregated per-column adjoint, close the

@@ -1,7 +1,7 @@
 # G2a acceptance — passive lossy-wire current recurrence (B2) + ohmic_loss
 
 Track: `g2-lossy-wire`. Stage: **G2a** (B2 recurrence + real ohmic_loss + gates + falsifications).
-Worktree: `.worktrees/wg2-lossy-wire` (branch `fable/lossy-wire`), base master `b89a75c`.
+Worktree: `.worktrees/wg2-lossy-wire` (branch `fable/lossy-wire`), base master `406fced`.
 Env: `maxwell`; `CUDA_VISIBLE_DEVICES=0`. Date: 2026-07-21.
 
 ## Delivered
@@ -172,8 +172,8 @@ same commit (`docs/reference/fdtd-capability-guard-census.md`,
 
 ## Commits
 
-- `590aa74` feat(thin-wire): passive lossy-current ADE companion (B2 recurrence)
-- `c1b5205` feat(thin-wire): consume lossy ADE recurrence in the FDTD runtime + real ohmic_loss
+- `c424170` feat(thin-wire): passive lossy-current ADE companion (B2 recurrence)
+- `4313b12` feat(thin-wire): consume lossy ADE recurrence in the FDTD runtime + real ohmic_loss
 
 ## Fix-agent addendum (2026-07-21 review remediation)
 
@@ -183,7 +183,7 @@ commit on `fable/lossy-wire`:
 1. **Zero-impact-when-unused PEC regression (blocking).** `finalize_wire_data`
    raised `A wire ohmic_loss monitor requires the current quantity.` on ANY
    ohmic_loss-only monitor, including PEC wires — a valid public config that
-   returned zeros on base `b89a75c` — and only at end-of-run finalize (whole run
+   returned zeros on base `406fced` — and only at end-of-run finalize (whole run
    wasted). Fixed: the PEC (`lossy_model is None`) branch now emits a zeros channel
    without requiring current; the lossy current requirement is enforced at prepare
    (in `initialize_wire_runtime`, before any stepping), not at finalize. New tests:
@@ -232,7 +232,7 @@ commit on `fable/lossy-wire`:
 - **FEATURE_LIST edit is not purely additive.** It rewrites the tail of the existing
   thin-wire bullet (the now-false "fails closed" sentence) plus appends a new bullet.
   The rewrite is factually necessary; flagged as cross-track merge-conflict surface.
-- **Census budget anchor.** This worktree's base `b89a75c` has
+- **Census budget anchor.** This worktree's base `406fced` has
   `CAPABILITY_GUARD_BUDGET = 175`; the track lands `175 -> 176 -> 177`. The common
   brief cites the Wave-D anchor as 176. Internally consistent with this base; the +1
   divergence must be reconciled against the parallel track that produced the 176
@@ -240,7 +240,7 @@ commit on `fable/lossy-wire`:
 - **`test_pec_wire_bitwise_parity` scope.** The in-tree test checks run-to-run
   determinism, not vs-base bitwise parity. The vs-base claim was independently
   confirmed by the auditor (SHA256-identical DFT current / final Ez / wire current
-  vs base `b89a75c`); recommend keeping that evidence on record.
+  vs base `406fced`); recommend keeping that evidence on record.
 - **Falsification metrics now committed.** The F1/F3 exact numbers in the
   falsification sections originated from throwaway `scratch/` scripts; the driving
   script is now committed at `docs/assessments/g2-lossy-wire-probes/falsify.py`

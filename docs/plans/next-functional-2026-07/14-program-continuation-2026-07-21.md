@@ -3,35 +3,35 @@
 > Status: **delivered (2026-07-21)** — **all three rounds F / G / H of this continuation
 > plan are now DELIVERED & merged to master**
 > Date: 2026-07-21
-> Anchor: master `164c263` (round E merged; final battery 2836 passed / 16 expected-FDFD / 3 xfailed)
-> Round-F merge anchor: master `b89a75c` (F1 `07e8e99`, F2 `0546b0a`, F3 `7ec99c7`,
-> F4 `431bd7f`, hygiene `b89a75c`; full battery **2911 passed / 16 expected-FDFD / 3 xfailed**)
-> Round-G merge anchor: master `18bc42a` (G1 `42ac3f1`, G2 `3884bb7`, G3 `5dd100e`,
-> G4 `c9b4bfc`, audit-minor cleanup `18bc42a`; full battery **2982 passed / 16
+> Anchor: master `1cd64e9` (round E merged; final battery 2836 passed / 16 expected-FDFD / 3 xfailed)
+> Round-F merge anchor: master `406fced` (F1 `df04137`, F2 `8477acc`, F3 `84ae132`,
+> F4 `f0737c5`, hygiene `406fced`; full battery **2911 passed / 16 expected-FDFD / 3 xfailed**)
+> Round-G merge anchor: master `589188e` (G1 `11c59eb`, G2 `310a044`, G3 `85cac0f`,
+> G4 `ac3719b`, audit-minor cleanup `589188e`; full battery **2982 passed / 16
 > expected-FDFD / 3 xfailed / 1 xpassed**)
-> Round-H merge anchor: master `6f3b0c8` (H1 `acea86e`, H2 `4a0555d`, H3 `8ebaec0`,
-> H4 `df8ef96`, audit-minor cleanup `6f3b0c8`; final battery **3076 passed / 16
+> Round-H merge anchor: master `a63dee8` (H1 `0971d42`, H2 `aa02075`, H3 `b24d7ee`,
+> H4 `3f25710`, audit-minor cleanup `a63dee8`; final battery **3076 passed / 16
 > expected-FDFD / 3 xfailed / 1 xpassed**; census reconciled to **176**)
 > Governing status doc: `00-status-and-gaps-2026-07-19.md` (round-E + round-F + round-G + round-H revisions)
 
 ## Delivery status (2026-07-21)
 
-**Round F — DELIVERED & merged to master `b89a75c`** (all four tracks adversarially
+**Round F — DELIVERED & merged to master `406fced`** (all four tracks adversarially
 audited; load-bearing tests falsified; per-track acceptance docs under `docs/assessments/`):
 
-- **F1 — plan 04 E2 evidence (closes S3), merge `07e8e99`.** Multi-scenario coupled
+- **F1 — plan 04 E2 evidence (closes S3), merge `df04137`.** Multi-scenario coupled
   EM+circuit conservation suite (3 two-way-coupled scenarios, honest gate classes) +
   independent offline `scipy` circuit cross-check (port-voltage rel err 1.16e-5, no shared
   runtime code). Acceptance `f1-cosim-e2-acceptance-2026-07-21.md`.
-- **F2 — plan 01 trio, merge `0546b0a`.** Interior-PEC masking on the Yee-staggered
+- **F2 — plan 01 trio, merge `8477acc`.** Interior-PEC masking on the Yee-staggered
   operator + quasi-static line-mode engine (F2a); production quasi-TEM microstrip/diff-pair
   benches un-BLOCKED (F2b, recorded `gap` — resolution-limited, honest); adapter port/lumped
   source mapping + four external caches generated (F2c); patch feed diagnosis (xfail kept
   fail-closed, not flipped). Acceptances `f2a-…`, `f2b-…`, `f2-rf-trio-acceptance-2026-07-21.md`.
-- **F3 — plan 06 scene-gradient VJP + 02 P7 aggregation, merge `7ec99c7`.** Single-device
+- **F3 — plan 06 scene-gradient VJP + 02 P7 aggregation, merge `84ae132`.** Single-device
   `ArrayBasisData.scene_gradient_vjp` (census 176→175) + 2-GPU ensemble aggregation;
   1-vs-2-GPU parity measured **bitwise**. Acceptances `f3-array-vjp-…`, `f3-array-scene-vjp-…`.
-- **F4 — S5 geometry/subpixel lever, merge `431bd7f`.** Edge-native per-Yee-component
+- **F4 — S5 geometry/subpixel lever, merge `f0737c5`.** Edge-native per-Yee-component
   material sampling + conformal-PEC benchmark default; geometry-cluster median field_l2
   0.2072→0.0836 (−59.6%), 11 improved / 0 regressed. Acceptance
   `f4-subpixel-lever-acceptance-2026-07-21.md` + `f4-geometry-cluster-{before,after,delta}.json`.
@@ -41,29 +41,29 @@ audited; load-bearing tests falsified; per-track acceptance docs under `docs/ass
 (audit §4 non-author-review + external-reference bar unmet); rounds record delivery +
 evidence grade only.
 
-**Round G — DELIVERED & merged to master `18bc42a`** (all four tracks adversarially
+**Round G — DELIVERED & merged to master `589188e`** (all four tracks adversarially
 audited; load-bearing tests falsified; per-track acceptance docs under `docs/assessments/`;
 census reconciled to **175**, round-G net ±2):
 
-1. **02 — NCCL reverse-halo adjoint transport primitives, merge `42ac3f1`.**
+1. **02 — NCCL reverse-halo adjoint transport primitives, merge `11c59eb`.**
    `prepare_adjoint_staging` / `exchange_magnetic_adjoint` / `exchange_electric_adjoint`
    gated by a **bitwise** 2-process discrete-transpose identity + an opt-in per-rank
    step-rate instrument (zero-cost-off asserted, resolves the round-E "not-measurable"
    finding). The **end-to-end per-rank reverse driver is honestly deferred, fail-closed**,
    with a written **7-step plan** (the in-process bridge is structurally single-process).
    Acceptance `g1-nccl-adjoint-acceptance-2026-07-21.md`.
-2. **07 — lossy-wire B2 recurrence + B3 conductivity adjoint, merge `3884bb7`.** Passive
+2. **07 — lossy-wire B2 recurrence + B3 conductivity adjoint, merge `310a044`.** Passive
    lossy-current ADE companion consumed by the runtime + real `ohmic_loss`
    (`0.5·Re(Z')·L·|I|²`), analytic-AC (<8%, fit-limited) / DC-exact / bitwise-PEC-parity /
    spectral-stability gates; closed-form `dZ'/dσ` adjoint vs central difference <1e-6.
    Field-coupled `dI/dσ` + distributed lossy stay fail-closed; closed-box field-energy
    closure not performed (companion-level only). Acceptance
    `g2-lossy-wire-acceptance-2026-07-21.md`.
-3. **08 — ferrite arbitrary-bias forward + mixed-bias support, merge `5dd100e`.** Per-cell
+3. **08 — ferrite arbitrary-bias forward + mixed-bias support, merge `85cac0f`.** Per-cell
    coordinate-rotation general path (rotation-equivalence bit-for-bit, oblique-vs-Polder-oracle
    1.197e-13, handedness, per-cell independence, zero-impact, CUDA passivity); contract-doc
    §7 item 6 superseded; census `175 → 173`. Acceptance `g3-ferrite-bias-acceptance-2026-07-21.md`.
-4. **09 — all-orientation staircased SIBC, merge `c9b4bfc`.** Curved conductors staircased
+4. **09 — all-orientation staircased SIBC, merge `ac3719b`.** Curved conductors staircased
    into masked Leontovich exposed-face writes + staircased-cylinder absorbed-power convergence
    gate (documented ~18% first-order-on-curve systematic, grid/R/δ-independent) + wave-level
    skin-effect attenuation bench (alpha median rel err 0.049%) + committed zero-impact gate.
@@ -75,33 +75,33 @@ census reconciled to **175**, round-G net ±2):
 place. No Round-G phase is `completed` (audit §4 non-author-review + external-reference bar
 unmet; 09's external cross-check is a documented adapter-fidelity gap, not a pass).
 
-**Round H — DELIVERED & merged to master `6f3b0c8`** (all four tracks adversarially
+**Round H — DELIVERED & merged to master `a63dee8`** (all four tracks adversarially
 audited; load-bearing tests falsified; per-track acceptance docs under `docs/assessments/`;
 census reconciled to **176**; final battery **3076 passed / 16 expected-FDFD / 3 xfailed /
 1 xpassed**):
 
 1. **02 — per-rank collective NCCL end-to-end reverse DRIVER + S5 tiled-plane seeds, merge
-   `acea86e`.** The written G1 7-step plan executed (guard-relax → per-rank checkpoint
+   `0971d42`.** The written G1 7-step plan executed (guard-relax → per-rank checkpoint
    capture → NCCL forward-replay dict halos → local separable seed → per-rank reverse loop →
    grad_eps gather + rank-0 pullback → parity/determinism/falsification gates): a
    trainable-density scene backpropagates over a one-process-per-GPU NCCL launch with per-rank
    point/plane objective+grad parity ~2e-7 (incl. psi-active) at honest 1e-4-class tolerances,
    plus a separable y/z-plane monitor seed with a seam-ownership falsification. A **cross-stream
-   caching-allocator race** was found and fixed (commit `c233d8b`; honest tolerances restored,
+   caching-allocator race** was found and fixed (commit `82b2f0c`; honest tolerances restored,
    committed stressed-mode gate). Acceptance `h1-nccl-driver-acceptance-2026-07-21.md`.
-2. **12 — electrostatics Phase-4 SPD tensor-eps + open boundary, merge `4a0555d`.** Full SPD
+2. **12 — electrostatics Phase-4 SPD tensor-eps + open boundary, merge `aa02075`.** Full SPD
    3×3 tensor permittivity in the FVM operator (symmetric-by-construction cross term, rotated
    MMS 2nd-order, anisotropic-capacitance reciprocity), `open`-boundary fail-close, and the
    opt-in `truncation_estimate` domain-extension API with a Richardson infinite-domain limit;
    a wall-tangential MMS + boundary-touching-structure confound fail-close added in cleanup.
    Acceptance `h2-es-tensor-acceptance-2026-07-21.md`.
-3. **10 — SAR incident power density + canonical phantom benchmark family, merge `8ebaec0`.**
+3. **10 — SAR incident power density + canonical phantom benchmark family, merge `b24d7ee`.**
    `IncidentPowerDensityMonitor` / `Result.incident_power_density` (was fail-closed), the
    redistributable canonical phantom family, and SAR RESULTS rows (`layered_slab` wave-level
    surface/volume conservation closure). `uniform_lossy_cube` closure honestly reclassified a
    tautology; `antenna_near_phantom` blocked (conductive-media port), recorded with-target-class.
    Acceptance `h3-sar-phantom-acceptance-2026-07-21.md`.
-4. **13 — circuit-driven ESD + smooth breakdown surrogate, merge `df8ef96`.** ESD through the
+4. **13 — circuit-driven ESD + smooth breakdown surrogate, merge `3f25710`.** ESD through the
    standard 330 Ω / 150 pF source-impedance network (independent offline scipy circuit
    cross-check + an EM-load-bearing companion gate from cleanup) + a differentiable
    `SmoothBreakdownRisk` surrogate (typed non-physical / non-regulatory). Phase 3 now

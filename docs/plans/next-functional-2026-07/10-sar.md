@@ -8,7 +8,7 @@
 > golden / brute-force parity / grid-convergence gates, no external reference
 > solver cross-check); NOT `completed`. See
 > `docs/assessments/b10-sar-acceptance-2026-07-19.md` and `tests/sar/`.  
-> **Round-H revision (2026-07-21, master `6f3b0c8`; merge `8ebaec0`).** Delivered:
+> **Round-H revision (2026-07-21, master `a63dee8`; merge `b24d7ee`).** Delivered:
 > `IncidentPowerDensityMonitor` + `Result.incident_power_density` (was fail-closed) with
 > plane-wave `|S|=|E|²/(2·eta)` analytic gates; the redistributable canonical phantom family
 > (`uniform_lossy_cube`, `layered_slab`, `one_gram_cube`, `antenna_near_phantom`) + SAR RESULTS

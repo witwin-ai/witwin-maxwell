@@ -219,7 +219,7 @@ Phase 0-4 exit gates 全通过；用户能把受支持 `.cir` 或 Python Circuit
 
 上文 §1-§12 正文保留原样以存档 proposed 阶段决策；本节仅追加完成状态与证据引用，如与正文冲突以本节为准。
 
-### 2026-07-18 完成记录（Phase 0-4 完成，master `3f13ff2`）
+### 2026-07-18 完成记录（Phase 0-4 完成，master `e0a0877`）
 
 Phase 0-3 已完成并落地。Phase 4 四项 exit gate（§9 Phase 4）全部有证，验收记录为 `docs/assessments/spice-mna-phase-4-acceptance.md`（Status: accepted，4 of 4 exit gates evidenced）。逐项结算：
 
@@ -256,7 +256,7 @@ Phase 4 落地了电路热路径的 op-count 契约与图路径：CUDA Graph 在
 
 ### 2026-07-21 修订（Round F track F1，S3 收敛证据落地；append-only）
 
-依无通胀规则追加；上文完成记录与证据级实测逐条保留存档，本栏只登记 F1 的正向更新与残余欠账，如与上文"缺多场景守恒/独立电路交叉验证"冲突以本栏为准。已由 supervisor 合并至 master，merge `07e8e99`。
+依无通胀规则追加；上文完成记录与证据级实测逐条保留存档，本栏只登记 F1 的正向更新与残余欠账，如与上文"缺多场景守恒/独立电路交叉验证"冲突以本栏为准。已由 supervisor 合并至 master，merge `df04137`。
 
 - **多场景守恒/能量残差门落地（结算 S3.2 第 1 项之守恒部分）**：`tests/rf/circuits/test_circuit_conservation.py`（6 passed）。三条真正双向耦合场景（阻性负载 / 串联 RLC / VCVS 受控源）在闭合 PEC 真空盒内驱动，全局平衡 `S_source = dU_field + dU_circuit + D_circuit` 收敛到有界半步残差（**绝对值随步数恒定** ~1.6–3.1e-14 J；6000 步相对 1.0e-4–6.7e-3，门 1.5e-2）。诚实门类：场耦合项由**双边** field-link 门 `dU_field == -W_port`（原始 Yee E/H 能量 vs MNA 端口 V/I 记录，无共享代码路径；~2.9e-3 峰值场能，门 2e-2）承载；`S_source`/`D_circuit`/`dU_circuit` 在耦合内为 Tellegen/companion **consistency-class**。端口绑定在串联阻抗之后，场才真正反作用（distinctness 守卫）。falsification：+3% 通道失衡被拒；field-link 注入 over-scatter 把残差从 1.5% 推到 44%。
 - **独立离线电路交叉验证落地（结算 S3.2 第 1 项之独立交叉验证部分，原 E2 阻塞项）**：`tests/rf/circuits/test_circuit_independent_crosscheck.py`（4 passed）。手工推导等效电路 ODE 经 `scipy.integrate.solve_ivp` 积分，与 MNA runtime **无共享代码**，以**不同**激励波形与串联电阻预测耦合端口电压，端口电压 rel err **1.16e-5**（门 5e-4，~43× 余量）；端口电流（消去受限）7.02e-3 为佐证。falsification：扰动 MNA 场端口 companion 电导 ×1.05 → 1.16e-5→4.10e-3（~350× 分离）。此项把 `S_source`/`D_circuit` 与阻性端口耦合抬离 consistency-class。验收：`docs/assessments/f1-cosim-e2-acceptance-2026-07-21.md`。

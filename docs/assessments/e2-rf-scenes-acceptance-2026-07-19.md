@@ -12,8 +12,8 @@ cache generation + RESULTS.md rows + cloud task ids) extend it below.
 ## Stage E2a — PlaneMonitor plumbing + open/short/match rebuild + RLC rebuild
 
 Commits:
-- `49ba300` feat(rf): thread user monitors through WavePort/PortSweep Results
-- `923c85a` feat(rf): rebuild open/short/match and RLC benches on the coax line
+- `408667e` feat(rf): thread user monitors through WavePort/PortSweep Results
+- `d642e0d` feat(rf): rebuild open/short/match and RLC benches on the coax line
 
 ### 1. PlaneMonitor passthrough (deliverable 1)
 

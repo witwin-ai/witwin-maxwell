@@ -296,7 +296,7 @@ Exit gate：参数梯度有限差分通过；单/多 GPU value/loss/gradient par
 
 ## 14. 修订记录（append-only，不重写历史）
 
-### 2026-07-21 Round-G revision (master `18bc42a`; merge `c9b4bfc`) — all-orientation staircased SIBC + cylinder physics gate + skin-effect bench LANDED (not `completed`)
+### 2026-07-21 Round-G revision (master `589188e`; merge `ac3719b`) — all-orientation staircased SIBC + cylinder physics gate + skin-effect bench LANDED (not `completed`)
 
 S6 unfroze (S1–S3 passed) and Round G generalized the boundary beyond the axis-aligned
 exposed-face layout. Evidence per `docs/assessments/g4-sibc-oblique-acceptance-2026-07-21.md`;

@@ -7,7 +7,7 @@
 > wave-level benches; update the RF validation doc rows honestly; diagnose and attempt
 > the patch antenna feed redesign; flip the strict xfail if the patch meets the gate.
 > GPU: `CUDA_VISIBLE_DEVICES=1`. Builds on F2a (interior-PEC masking + quasi-static
-> line-mode engine, commit `c873e71`).
+> line-mode engine, commit `f5f71a9`).
 
 ## 0. Environment / reproduction
 

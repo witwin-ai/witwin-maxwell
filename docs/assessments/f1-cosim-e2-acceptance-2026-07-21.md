@@ -1,7 +1,7 @@
 # F1 co-simulation E2 evidence — acceptance (Plan 04, S3)
 
 Track `f1-cosim-e2`, worktree `.worktrees/wf1-cosim-e2`, branch `fable/cosim-e2`,
-base master `b3d3c77`. GPU `CUDA_VISIBLE_DEVICES=0`, conda `maxwell`,
+base master `15b38d3`. GPU `CUDA_VISIBLE_DEVICES=0`, conda `maxwell`,
 `CUDA_HOME=.../nvidia/cu13`, `PYTHONPATH=<worktree>`.
 
 This document is appended per stage. **Stage F1a** (coupled EM+circuit
@@ -407,7 +407,7 @@ code and no fail-closed FDTD capability guard was added or removed.
 
 - **External-reference lumped-load cross-check (stretch).** Still pending: F2's
   adapter lumped mapping has not landed on the merge base (`git -C <main> log`
-  head is `b3d3c77`), so the brief's stretch item is recorded as pending, not
+  head is `15b38d3`), so the brief's stretch item is recorded as pending, not
   attempted.
 - The port-current comparison is cancellation-limited (see gate classes) and is
   corroboration, not an independent gate; the load-bearing content is `v_port(t)`.

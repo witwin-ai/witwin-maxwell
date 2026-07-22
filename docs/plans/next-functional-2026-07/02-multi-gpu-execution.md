@@ -8,11 +8,11 @@
 > Latest architecture decision: 2026-07-14，ensemble execution 与 joint solve 使用显式不同 strategy，共享设备/诊断层但不共享物理状态  
 > Detailed joint-solve precursor: [FDTD multi-GPU implementation plan](../fdtd-multi-gpu-implementation-plan.md)  
 >
-> **Round-E revision (2026-07-21, master `6b523b8`).** S4 distributed CPML-trainable
-> adjoint landed (`2364533`/`f7e8e9a`): psi-carrying reverse with no psi halo, public
+> **Round-E revision (2026-07-21, master `8158014`).** S4 distributed CPML-trainable
+> adjoint landed (`ca05f33`/`18b4aa0`): psi-carrying reverse with no psi halo, public
 > validator relaxed to accept `cpml`/`stablepml`, psi-active 1-vs-2-GPU gradient parity
 > rel 5.94e-7 with a ~1.1e5× falsification, after fixing a pre-existing single-GPU CPML
-> psi axis cross-wiring (`a2d2cb7`). Forward monitor gather with a seam-ownership rule +
+> psi axis cross-wiring (`01d7a73`). Forward monitor gather with a seam-ownership rule +
 > defense-in-depth trainable guard delivered. Exclusive-window timing measured (ensemble
 > 1.98–2.00×; joint-solve forward 128³ 0.544× / 192³ 1.726×; NCCL step-rate
 > not-measurable-by-hooks). Evidence: forward E2, CPML-trainable distributed adjoint E2.
@@ -21,7 +21,7 @@
 > #13/#18); no non-author review. See `docs/assessments/e3-distributed-adjoint-acceptance-2026-07-19.md`,
 > `multi-gpu-timing-2026-07-20.json`, `00-status-and-gaps-2026-07-19.md` §02.
 >
-> **Round-G revision (2026-07-21, master `18bc42a`; merge `42ac3f1`).** NCCL
+> **Round-G revision (2026-07-21, master `589188e`; merge `11c59eb`).** NCCL
 > reverse-halo adjoint **transport primitives** delivered
 > (`fdtd/distributed/nccl_transport.py`: `prepare_adjoint_staging`,
 > `exchange_magnetic_adjoint`, `exchange_electric_adjoint`) — exact transposes of the
@@ -38,7 +38,7 @@
 > review. See `docs/assessments/g1-nccl-adjoint-acceptance-2026-07-21.md`,
 > `00-status-and-gaps-2026-07-19.md` §02. Round H carries the driver.
 >
-> **Round-H revision (2026-07-21, master `6f3b0c8`; merge `acea86e`).** The per-rank
+> **Round-H revision (2026-07-21, master `a63dee8`; merge `0971d42`).** The per-rank
 > collective NCCL **end-to-end reverse driver** is delivered (the G1 7-step plan executed):
 > a trainable-density scene backpropagates over a one-process-per-GPU NCCL launch and matches
 > the single-process single-GPU adjoint, with per-rank point/plane objective+grad parity ~2e-7
@@ -46,7 +46,7 @@
 > `allow_adjoint` entry fence, per-rank LOCAL output + separable seed + rank-0-only pullback,
 > collective-safe capacity reject. The **separable y/z-plane monitor adjoint seed** (S5) landed
 > with a seam-ownership falsification. A **cross-stream caching-allocator race** was found and
-> fixed (commit `c233d8b`): the four reverse/replay halos ran their in-place accumulate on
+> fixed (commit `82b2f0c`): the four reverse/replay halos ran their in-place accumulate on
 > `engine.compute_stream` while the adjoint-state planes are allocated on the default stream, so
 > under load a default-stream reuse could overwrite in-flight halo writes; running the halos on
 > the default stream closes the window at zero cost. Honest tolerances restored (prior grad-gate

@@ -14,7 +14,7 @@
 > `docs/assessments/c13-esd-stress-acceptance-2026-07-19.md`,
 > `docs/assessments/d13-breakdown-acceptance-2026-07-19.md`, `tests/esd/`,
 > and `tests/breakdown/`.  
-> **Round-H revision (2026-07-21, master `6f3b0c8`; merge `df8ef96`).** Phase 3 circuit-driven
+> **Round-H revision (2026-07-21, master `a63dee8`; merge `3f25710`).** Phase 3 circuit-driven
 > ESD delivered: a new `ESDVoltageSource` drives ESD through the standard 330 Ω / 150 pF
 > source-impedance network (a circuit **approximation of the standard network**, not
 > discharge-gun geometry or certification), gated by an independent scipy `solve_ivp` cross-check

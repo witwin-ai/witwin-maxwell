@@ -3,7 +3,7 @@
 Date: 2026-07-19
 Worktree: `.worktrees/we4-network-gaps`, branch `fable/network-e2`
 Env: conda `maxwell`, `CUDA_VISIBLE_DEVICES=1`, torch 2.13.0+cu130, CUDA 13.0, NVIDIA RTX A6000.
-Builds on E4a (commit `3e7b0c4`, cascade/termination helpers + cross-check + passivity suite).
+Builds on E4a (commit `26349db`, cascade/termination helpers + cross-check + passivity suite).
 
 This doc covers E4b deliverables 4 (fixed-cost reduction + op-stream artifacts + no-regression),
 5 (explicit-delay adjoint checkpoint support), and 6 (WavePort disposition), plus census /

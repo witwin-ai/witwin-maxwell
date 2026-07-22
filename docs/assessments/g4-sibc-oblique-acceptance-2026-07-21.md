@@ -1,7 +1,7 @@
 # Track G4 (SIBC orientation generalization) acceptance -- stage G4a (2026-07-21)
 
 Worktree `.worktrees/wg4-sibc`, branch `fable/sibc-oblique`, GPU `CUDA_VISIBLE_DEVICES=0`,
-conda env `maxwell`. Baseline master `b89a75c` (clean).
+conda env `maxwell`. Baseline master `406fced` (clean).
 
 ## Scope delivered (G4a)
 
@@ -10,9 +10,9 @@ orientation-equivalence and mixed-orientation stability gates with recorded
 falsifications.
 
 1. **Orientation-equivalence + stability gates on the existing axis-aligned layout**
-   (commit `8b3ac21`). The multi-orientation Box layout already enumerates all six
+   (commit `62eb215`). The multi-orientation Box layout already enumerates all six
    exposed faces; this stage locks in its correctness with the headline gates.
-2. **Staircase (voxelized) generalization for curved conductors** (commit `8e3665a`).
+2. **Staircase (voxelized) generalization for curved conductors** (commit `2836f6f`).
    A non-`Box` good conductor is staircased from its node occupancy; every axis-aligned
    voxel face becomes a masked Leontovich surface-impedance write. Covers cylinder/sphere,
    all six orientations, and mixed orientations. The narrowband good conductor (order-0
@@ -40,8 +40,8 @@ falsifications.
 
 ## Commits
 
-- `8b3ac21` test(sibc): orientation-equivalence and mixed-orientation stability gates
-- `8e3665a` feat(sibc): staircase voxelized curved conductors into exposed-face surfaces
+- `62eb215` test(sibc): orientation-equivalence and mixed-orientation stability gates
+- `2836f6f` feat(sibc): staircase voxelized curved conductors into exposed-face surfaces
 - (docs commit for this file / census / FEATURE_LIST -- see `git log`)
 
 ## Test inventory (pass counts)
@@ -124,7 +124,7 @@ funnel narrowed (curved conductors now compile) without adding or removing a gua
 
 # Stage G4b -- staircased-cylinder physics gate + wave-level skin-effect attenuation bench
 
-Same worktree / branch / env as G4a. Baseline: G4a tip `6d2f232`.
+Same worktree / branch / env as G4a. Baseline: G4a tip `bf6321f`.
 
 ## Scope delivered (G4b)
 
@@ -170,7 +170,7 @@ Same worktree / branch / env as G4a. Baseline: G4a tip `6d2f232`.
 
 ## Commits
 
-- `fb6bc88` test(sibc): staircased-cylinder absorbed-power physics gate vs resolved conductor
+- `3848588` test(sibc): staircased-cylinder absorbed-power physics gate vs resolved conductor
 - (benchmark + docs commits -- see `git log`)
 
 ## Test inventory (pass counts)

@@ -4,7 +4,7 @@ Stage **H2a**: SPD tensor-eps FVM operator with numerical symmetry / positive-
 definiteness gates, rotated-frame manufactured-solution convergence, diagonal-
 reduction parity, and anisotropic capacitance reciprocity, plus falsifications.
 
-Base: master `18bc42a` (worktree `wh2-es-tensor`, branch `fable/es-tensor-open`).
+Base: master `589188e` (worktree `wh2-es-tensor`, branch `fable/es-tensor-open`).
 Environment: conda `maxwell`, `CUDA_VISIBLE_DEVICES=1`, float64 oracles on GPU.
 
 ## Delivered items
@@ -182,7 +182,7 @@ passes.
 
 ## Stage H2b — open-boundary / domain-extension convergence + `truncation_estimate` API + differentiability disposition
 
-Base for this stage: `70074e7` (the H2a commit on branch `fable/es-tensor-open`).
+Base for this stage: `42c60f6` (the H2a commit on branch `fable/es-tensor-open`).
 Environment: conda `maxwell`, `CUDA_VISIBLE_DEVICES=1`, float64 oracles on GPU.
 
 ### Delivered items
