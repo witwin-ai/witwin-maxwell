@@ -204,7 +204,42 @@ __device__ __forceinline__ ComplexValue bloch_backward_diff_axis2(
   return bloch_backward_diff_axis<2>(real, imag, target_z, 0, source_y, source_z, i, j, k, phase_cos, phase_sin, inv_delta);
 }
 
-template <int Component, bool Uniform>
+// Space-time modulated permittivity: eps(x, t) = eps_static(x) * m(x, t) with
+//   m(x, t) = 1 + mod_cos(x) * cos(W*t) - mod_sin(x) * sin(W*t)
+// where mod_cos = amplitude*cos(phase) and mod_sin = amplitude*sin(phase) are
+// compiled once. The conservative update of d(eps E)/dt = curl H gives
+//   E_new = decay * (m_prev / m_next) * E_old + (curl_coeff / m_next) * curl(H)
+// which reduces bit-exactly to the static update where the modulation depth is
+// zero (m_prev = m_next = 1). The host passes the (cos, sin) phase pairs of the
+// previous and new E time instants as scalars.
+__device__ __forceinline__ float modulation_factor(
+    float mod_cos, float mod_sin, float phase_cos, float phase_sin) {
+  return 1.0f + mod_cos * phase_cos - mod_sin * phase_sin;
+}
+
+// Per-cell modulation phase. The scene may hold several distinct modulation
+// frequencies; each Yee edge carries its OWN angular frequency ``omega`` (0 where
+// unmodulated), so the phase cos/sin of the previous and new E time instants are
+// evaluated per cell here rather than passed as scene-wide host scalars. This is
+// what lets disjoint structures modulate at independent frequencies in one run.
+__device__ __forceinline__ void modulation_phase_from_omega(
+    float omega, const float* __restrict__ modulation_time,
+    float& cos_prev, float& sin_prev, float& cos_next, float& sin_next) {
+  sincosf(omega * modulation_time[0], &sin_prev, &cos_prev);
+  sincosf(omega * modulation_time[1], &sin_next, &cos_next);
+}
+
+__global__ void advance_modulation_time_kernel(float dt, float* __restrict__ modulation_time) {
+  modulation_time[0] = modulation_time[1];
+  modulation_time[1] += dt;
+}
+
+// The ``Modulated`` template flag folds the space-time modulated variants into
+// the same kernel body: the shared boundary/curl work is identical, and the
+// final combine applies the modulation factor to the decay/curl pair. The
+// modulated path always carries per-cell decay/curl coefficients, so it never
+// composes with the uniform-scalar fast path (Uniform stays false).
+template <int Component, bool Uniform, bool Modulated>
 __global__ void update_electric_standard_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -215,6 +250,10 @@ __global__ void update_electric_standard_kernel(
     const float* __restrict__ second,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    const float* __restrict__ mod_cos,
+    const float* __restrict__ mod_sin,
+    const float* __restrict__ mod_omega,
+    const float* __restrict__ modulation_time,
     float decay_value,
     float curl_value,
     const float* __restrict__ inv_a,
@@ -256,7 +295,15 @@ __global__ void update_electric_standard_kernel(
     positive = backward_diff_axis0(second, nx, ny, nz, i, j, k, a_low_mode, a_high_mode, inv_a);
     negative = backward_diff_axis1(first, ny - 1, nz, i, j, k, b_low_mode, b_high_mode, inv_b);
   }
-  if constexpr (Uniform) {
+  if constexpr (Modulated) {
+    const float mc = mod_cos[linear];
+    const float ms = mod_sin[linear];
+    float cos_prev, sin_prev, cos_next, sin_next;
+    modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
+    const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
+    const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
+    field[linear] = field[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * (positive - negative);
+  } else if constexpr (Uniform) {
     field[linear] = field[linear] * decay_value + curl_value * (positive - negative);
   } else {
     field[linear] = field[linear] * decay[linear] + curl_coeff[linear] * (positive - negative);
@@ -304,171 +351,6 @@ __global__ void update_electric_standard_interior_kernel(
   } else {
     field[linear] = field[linear] * decay[linear] + curl_coeff[linear] * (positive - negative);
   }
-}
-
-// Space-time modulated permittivity: eps(x, t) = eps_static(x) * m(x, t) with
-//   m(x, t) = 1 + mod_cos(x) * cos(W*t) - mod_sin(x) * sin(W*t)
-// where mod_cos = amplitude*cos(phase) and mod_sin = amplitude*sin(phase) are
-// compiled once. The conservative update of d(eps E)/dt = curl H gives
-//   E_new = decay * (m_prev / m_next) * E_old + (curl_coeff / m_next) * curl(H)
-// which reduces bit-exactly to the static update where the modulation depth is
-// zero (m_prev = m_next = 1). The host passes the (cos, sin) phase pairs of the
-// previous and new E time instants as scalars.
-__device__ __forceinline__ float modulation_factor(
-    float mod_cos, float mod_sin, float phase_cos, float phase_sin) {
-  return 1.0f + mod_cos * phase_cos - mod_sin * phase_sin;
-}
-
-// Per-cell modulation phase. The scene may hold several distinct modulation
-// frequencies; each Yee edge carries its OWN angular frequency ``omega`` (0 where
-// unmodulated), so the phase cos/sin of the previous and new E time instants are
-// evaluated per cell here rather than passed as scene-wide host scalars. This is
-// what lets disjoint structures modulate at independent frequencies in one run.
-__device__ __forceinline__ void modulation_phase_from_omega(
-    float omega, const float* __restrict__ modulation_time,
-    float& cos_prev, float& sin_prev, float& cos_next, float& sin_next) {
-  sincosf(omega * modulation_time[0], &sin_prev, &cos_prev);
-  sincosf(omega * modulation_time[1], &sin_next, &cos_next);
-}
-
-__global__ void advance_modulation_time_kernel(float dt, float* __restrict__ modulation_time) {
-  modulation_time[0] = modulation_time[1];
-  modulation_time[1] += dt;
-}
-
-__global__ void update_electric_ex_modulated_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ hy,
-    const float* __restrict__ hz,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ mod_cos,
-    const float* __restrict__ mod_sin,
-    const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
-    const float* __restrict__ inv_dy,
-    const float* __restrict__ inv_dz,
-    int y_low_mode,
-    int y_high_mode,
-    int z_low_mode,
-    int z_high_mode,
-    float* __restrict__ ex) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
-  }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  if (boundary_pec(j, ny, y_low_mode, y_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
-    ex[linear] = 0.0f;
-    return;
-  }
-  if (boundary_inactive(j, ny, y_low_mode, y_high_mode) ||
-      boundary_inactive(k, nz, z_low_mode, z_high_mode)) {
-    return;
-  }
-  const float d_y = backward_diff_axis1(hz, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
-  const float d_z = backward_diff_axis2(hy, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
-  const float mc = mod_cos[linear];
-  const float ms = mod_sin[linear];
-  float cos_prev, sin_prev, cos_next, sin_next;
-  modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
-  const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
-  const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
-  ex[linear] = ex[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * (d_y - d_z);
-}
-
-__global__ void update_electric_ey_modulated_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ hx,
-    const float* __restrict__ hz,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ mod_cos,
-    const float* __restrict__ mod_sin,
-    const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
-    const float* __restrict__ inv_dx,
-    const float* __restrict__ inv_dz,
-    int x_low_mode,
-    int x_high_mode,
-    int z_low_mode,
-    int z_high_mode,
-    float* __restrict__ ey) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
-  }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
-    ey[linear] = 0.0f;
-    return;
-  }
-  if (boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
-      boundary_inactive(k, nz, z_low_mode, z_high_mode)) {
-    return;
-  }
-  const float d_z = backward_diff_axis2(hx, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
-  const float d_x = backward_diff_axis0(hz, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
-  const float mc = mod_cos[linear];
-  const float ms = mod_sin[linear];
-  float cos_prev, sin_prev, cos_next, sin_next;
-  modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
-  const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
-  const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
-  ey[linear] = ey[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * (d_z - d_x);
-}
-
-__global__ void update_electric_ez_modulated_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ hx,
-    const float* __restrict__ hy,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ mod_cos,
-    const float* __restrict__ mod_sin,
-    const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
-    const float* __restrict__ inv_dx,
-    const float* __restrict__ inv_dy,
-    int x_low_mode,
-    int x_high_mode,
-    int y_low_mode,
-    int y_high_mode,
-    float* __restrict__ ez) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
-  }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(j, ny, y_low_mode, y_high_mode)) {
-    ez[linear] = 0.0f;
-    return;
-  }
-  if (boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
-      boundary_inactive(j, ny, y_low_mode, y_high_mode)) {
-    return;
-  }
-  const float d_x = backward_diff_axis0(hy, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
-  const float d_y = backward_diff_axis1(hx, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
-  const float mc = mod_cos[linear];
-  const float ms = mod_sin[linear];
-  float cos_prev, sin_prev, cos_next, sin_next;
-  modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
-  const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
-  const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
-  ez[linear] = ez[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * (d_x - d_y);
 }
 
 __global__ void update_electric_ex_bloch_kernel(
@@ -574,8 +456,10 @@ __global__ void update_electric_ez_bloch_kernel(
 // derivatives are the boundary-mode-aware backward differences of the standard
 // kernel (``second`` feeds the a-axis derivative, ``first`` the b-axis one), and
 // the psi/kappa split-field correction matches the magnetic CPML kernel. Reduces
-// per-component (ex,ey,ez) to a single instantiation.
-template <int Component, bool Uniform>
+// per-component (ex,ey,ez) to a single instantiation. ``Modulated`` folds the
+// space-time modulated variant in: identical psi/kappa handling with the
+// modulation factor applied to the decay/curl pair (never uniform).
+template <int Component, bool Uniform, bool Modulated>
 __global__ void update_electric_cpml_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -584,6 +468,10 @@ __global__ void update_electric_cpml_kernel(
     const float* __restrict__ second,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    const float* __restrict__ mod_cos,
+    const float* __restrict__ mod_sin,
+    const float* __restrict__ mod_omega,
+    const float* __restrict__ modulation_time,
     float decay_value,
     float curl_value,
     const float* __restrict__ inv_kappa_a,
@@ -637,13 +525,30 @@ __global__ void update_electric_cpml_kernel(
   const float psi_b_value = b_b[coord_b] * psi_b[linear] + c_b[coord_b] * d_b;
   psi_a[linear] = psi_a_value;
   psi_b[linear] = psi_b_value;
-  const float corrected_a = d_a * inv_kappa_a[coord_a] + psi_a_value;
-  const float corrected_b = d_b * inv_kappa_b[coord_b] + psi_b_value;
-  const float curl = Component == 1 ? corrected_b - corrected_a : corrected_a - corrected_b;
-  if constexpr (Uniform) {
-    field[linear] = field[linear] * decay_value + curl_value * curl;
+  if constexpr (Modulated) {
+    // The historical modulated kernels accumulated the curl as one flat
+    // expression instead of the grouped corrected_a/corrected_b form below.
+    // Both formulations are kept verbatim so each path stays bit-identical to
+    // its pre-fold FMA contraction.
+    const float curl = Component == 1
+        ? d_b * inv_kappa_b[coord_b] + psi_b_value - d_a * inv_kappa_a[coord_a] - psi_a_value
+        : d_a * inv_kappa_a[coord_a] + psi_a_value - d_b * inv_kappa_b[coord_b] - psi_b_value;
+    const float mc = mod_cos[linear];
+    const float ms = mod_sin[linear];
+    float cos_prev, sin_prev, cos_next, sin_next;
+    modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
+    const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
+    const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
+    field[linear] = field[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
   } else {
-    field[linear] = field[linear] * decay[linear] + curl_coeff[linear] * curl;
+    const float corrected_a = d_a * inv_kappa_a[coord_a] + psi_a_value;
+    const float corrected_b = d_b * inv_kappa_b[coord_b] + psi_b_value;
+    const float curl = Component == 1 ? corrected_b - corrected_a : corrected_a - corrected_b;
+    if constexpr (Uniform) {
+      field[linear] = field[linear] * decay_value + curl_value * curl;
+    } else {
+      field[linear] = field[linear] * decay[linear] + curl_coeff[linear] * curl;
+    }
   }
 }
 
@@ -708,183 +613,6 @@ __global__ void update_electric_cpml_interior_kernel(
   }
 }
 
-// Dense-CPML variants of the modulated electric update. Identical psi/kappa
-// handling to the base CPML kernels with the modulation factor applied to the
-// decay/curl pair (see the modulated standard kernels above for the scheme).
-__global__ void update_electric_ex_cpml_modulated_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ hy,
-    const float* __restrict__ hz,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ mod_cos,
-    const float* __restrict__ mod_sin,
-    const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
-    const float* __restrict__ inv_kappa_y,
-    const float* __restrict__ b_y,
-    const float* __restrict__ c_y,
-    const float* __restrict__ inv_kappa_z,
-    const float* __restrict__ b_z,
-    const float* __restrict__ c_z,
-    const float* __restrict__ inv_dy,
-    const float* __restrict__ inv_dz,
-    int y_low_mode,
-    int y_high_mode,
-    int z_low_mode,
-    int z_high_mode,
-    float* __restrict__ psi_y,
-    float* __restrict__ psi_z,
-    float* __restrict__ ex) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
-  }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  if (boundary_pec(j, ny, y_low_mode, y_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
-    ex[linear] = 0.0f;
-    return;
-  }
-  if (boundary_inactive(j, ny, y_low_mode, y_high_mode) ||
-      boundary_inactive(k, nz, z_low_mode, z_high_mode)) {
-    return;
-  }
-  const float d_y = backward_diff_axis1(hz, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
-  const float d_z = backward_diff_axis2(hy, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
-  const float psi_y_value = b_y[j] * psi_y[linear] + c_y[j] * d_y;
-  const float psi_z_value = b_z[k] * psi_z[linear] + c_z[k] * d_z;
-  psi_y[linear] = psi_y_value;
-  psi_z[linear] = psi_z_value;
-  const float curl = d_y * inv_kappa_y[j] + psi_y_value - d_z * inv_kappa_z[k] - psi_z_value;
-  const float mc = mod_cos[linear];
-  const float ms = mod_sin[linear];
-  float cos_prev, sin_prev, cos_next, sin_next;
-  modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
-  const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
-  const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
-  ex[linear] = ex[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
-}
-
-__global__ void update_electric_ey_cpml_modulated_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ hx,
-    const float* __restrict__ hz,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ mod_cos,
-    const float* __restrict__ mod_sin,
-    const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
-    const float* __restrict__ inv_kappa_x,
-    const float* __restrict__ b_x,
-    const float* __restrict__ c_x,
-    const float* __restrict__ inv_kappa_z,
-    const float* __restrict__ b_z,
-    const float* __restrict__ c_z,
-    const float* __restrict__ inv_dx,
-    const float* __restrict__ inv_dz,
-    int x_low_mode,
-    int x_high_mode,
-    int z_low_mode,
-    int z_high_mode,
-    float* __restrict__ psi_x,
-    float* __restrict__ psi_z,
-    float* __restrict__ ey) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
-  }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
-    ey[linear] = 0.0f;
-    return;
-  }
-  if (boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
-      boundary_inactive(k, nz, z_low_mode, z_high_mode)) {
-    return;
-  }
-  const float d_z = backward_diff_axis2(hx, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
-  const float d_x = backward_diff_axis0(hz, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
-  const float psi_x_value = b_x[i] * psi_x[linear] + c_x[i] * d_x;
-  const float psi_z_value = b_z[k] * psi_z[linear] + c_z[k] * d_z;
-  psi_x[linear] = psi_x_value;
-  psi_z[linear] = psi_z_value;
-  const float curl = d_z * inv_kappa_z[k] + psi_z_value - d_x * inv_kappa_x[i] - psi_x_value;
-  const float mc = mod_cos[linear];
-  const float ms = mod_sin[linear];
-  float cos_prev, sin_prev, cos_next, sin_next;
-  modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
-  const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
-  const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
-  ey[linear] = ey[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
-}
-
-__global__ void update_electric_ez_cpml_modulated_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ hx,
-    const float* __restrict__ hy,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ mod_cos,
-    const float* __restrict__ mod_sin,
-    const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
-    const float* __restrict__ inv_kappa_x,
-    const float* __restrict__ b_x,
-    const float* __restrict__ c_x,
-    const float* __restrict__ inv_kappa_y,
-    const float* __restrict__ b_y,
-    const float* __restrict__ c_y,
-    const float* __restrict__ inv_dx,
-    const float* __restrict__ inv_dy,
-    int x_low_mode,
-    int x_high_mode,
-    int y_low_mode,
-    int y_high_mode,
-    float* __restrict__ psi_x,
-    float* __restrict__ psi_y,
-    float* __restrict__ ez) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
-  }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(j, ny, y_low_mode, y_high_mode)) {
-    ez[linear] = 0.0f;
-    return;
-  }
-  if (boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
-      boundary_inactive(j, ny, y_low_mode, y_high_mode)) {
-    return;
-  }
-  const float d_x = backward_diff_axis0(hy, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
-  const float d_y = backward_diff_axis1(hx, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
-  const float psi_x_value = b_x[i] * psi_x[linear] + c_x[i] * d_x;
-  const float psi_y_value = b_y[j] * psi_y[linear] + c_y[j] * d_y;
-  psi_x[linear] = psi_x_value;
-  psi_y[linear] = psi_y_value;
-  const float curl = d_x * inv_kappa_x[i] + psi_x_value - d_y * inv_kappa_y[j] - psi_y_value;
-  const float mc = mod_cos[linear];
-  const float ms = mod_sin[linear];
-  float cos_prev, sin_prev, cos_next, sin_next;
-  modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
-  const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
-  const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
-  ez[linear] = ez[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
-}
-
 template <int Axis>
 __device__ __forceinline__ float update_compact_electric_psi(
     float* __restrict__ psi,
@@ -911,7 +639,12 @@ __device__ __forceinline__ float update_compact_electric_psi(
   return value;
 }
 
-template <bool UniformDecay, bool UniformCurl>
+// Compressed-(slab-)CPML electric updates. ``Modulated`` folds the space-time
+// modulated variant in: the compact psi bookkeeping and flat curl accumulation
+// are identical, with the modulation factor applied to the decay/curl pair. The
+// modulated path always carries per-cell decay/curl coefficients, so it never
+// composes with the uniform-scalar fast path.
+template <bool UniformDecay, bool UniformCurl, bool Modulated>
 __global__ void update_electric_ex_cpml_compressed_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -920,6 +653,10 @@ __global__ void update_electric_ex_cpml_compressed_kernel(
     const float* __restrict__ hz,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    const float* __restrict__ mod_cos,
+    const float* __restrict__ mod_sin,
+    const float* __restrict__ mod_omega,
+    const float* __restrict__ modulation_time,
     float decay_value,
     float curl_value,
     const float* __restrict__ inv_kappa_y,
@@ -966,12 +703,22 @@ __global__ void update_electric_ex_cpml_compressed_kernel(
   const float psi_z_value = update_compact_electric_psi<2>(
       psi_z, b_z, c_z, i, j, k, ny, nz, k, z_low_length, z_high_start, z_high_length, d_z);
   const float curl = d_y * inv_kappa_y[j] + psi_y_value - d_z * inv_kappa_z[k] - psi_z_value;
-  const float decay_factor = UniformDecay ? decay_value : decay[linear];
-  const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
-  ex[linear] = ex[linear] * decay_factor + curl_factor * curl;
+  if constexpr (Modulated) {
+    const float mc = mod_cos[linear];
+    const float ms = mod_sin[linear];
+    float cos_prev, sin_prev, cos_next, sin_next;
+    modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
+    const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
+    const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
+    ex[linear] = ex[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
+  } else {
+    const float decay_factor = UniformDecay ? decay_value : decay[linear];
+    const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
+    ex[linear] = ex[linear] * decay_factor + curl_factor * curl;
+  }
 }
 
-template <bool UniformDecay, bool UniformCurl>
+template <bool UniformDecay, bool UniformCurl, bool Modulated>
 __global__ void update_electric_ey_cpml_compressed_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -980,6 +727,10 @@ __global__ void update_electric_ey_cpml_compressed_kernel(
     const float* __restrict__ hz,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    const float* __restrict__ mod_cos,
+    const float* __restrict__ mod_sin,
+    const float* __restrict__ mod_omega,
+    const float* __restrict__ modulation_time,
     float decay_value,
     float curl_value,
     const float* __restrict__ inv_kappa_x,
@@ -1026,12 +777,22 @@ __global__ void update_electric_ey_cpml_compressed_kernel(
   const float psi_z_value = update_compact_electric_psi<2>(
       psi_z, b_z, c_z, i, j, k, ny, nz, k, z_low_length, z_high_start, z_high_length, d_z);
   const float curl = d_z * inv_kappa_z[k] + psi_z_value - d_x * inv_kappa_x[i] - psi_x_value;
-  const float decay_factor = UniformDecay ? decay_value : decay[linear];
-  const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
-  ey[linear] = ey[linear] * decay_factor + curl_factor * curl;
+  if constexpr (Modulated) {
+    const float mc = mod_cos[linear];
+    const float ms = mod_sin[linear];
+    float cos_prev, sin_prev, cos_next, sin_next;
+    modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
+    const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
+    const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
+    ey[linear] = ey[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
+  } else {
+    const float decay_factor = UniformDecay ? decay_value : decay[linear];
+    const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
+    ey[linear] = ey[linear] * decay_factor + curl_factor * curl;
+  }
 }
 
-template <bool UniformDecay, bool UniformCurl>
+template <bool UniformDecay, bool UniformCurl, bool Modulated>
 __global__ void update_electric_ez_cpml_compressed_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -1040,6 +801,10 @@ __global__ void update_electric_ez_cpml_compressed_kernel(
     const float* __restrict__ hy,
     const float* __restrict__ decay,
     const float* __restrict__ curl_coeff,
+    const float* __restrict__ mod_cos,
+    const float* __restrict__ mod_sin,
+    const float* __restrict__ mod_omega,
+    const float* __restrict__ modulation_time,
     float decay_value,
     float curl_value,
     const float* __restrict__ inv_kappa_x,
@@ -1086,9 +851,19 @@ __global__ void update_electric_ez_cpml_compressed_kernel(
   const float psi_y_value = update_compact_electric_psi<1>(
       psi_y, b_y, c_y, i, j, k, ny, nz, j, y_low_length, y_high_start, y_high_length, d_y);
   const float curl = d_x * inv_kappa_x[i] + psi_x_value - d_y * inv_kappa_y[j] - psi_y_value;
-  const float decay_factor = UniformDecay ? decay_value : decay[linear];
-  const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
-  ez[linear] = ez[linear] * decay_factor + curl_factor * curl;
+  if constexpr (Modulated) {
+    const float mc = mod_cos[linear];
+    const float ms = mod_sin[linear];
+    float cos_prev, sin_prev, cos_next, sin_next;
+    modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
+    const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
+    const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
+    ez[linear] = ez[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
+  } else {
+    const float decay_factor = UniformDecay ? decay_value : decay[linear];
+    const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
+    ez[linear] = ez[linear] * decay_factor + curl_factor * curl;
+  }
 }
 
 // Branch-free interior fast path for the compressed-(slab-)CPML electric
@@ -1163,206 +938,6 @@ __global__ void update_electric_cpml_compressed_interior_kernel(
   const float decay_factor = UniformDecay ? decay_value : decay[linear];
   const float curl_factor = UniformCurl ? curl_value : curl_coeff[linear];
   field[linear] = field[linear] * decay_factor + curl_factor * curl;
-}
-
-// Compressed-(slab-)CPML variants of the modulated electric update. The compact
-// psi bookkeeping is identical to the plain compressed CPML kernels; the
-// modulation factor is applied to the decay/curl pair exactly as in the dense
-// modulated CPML kernels. The modulated path always carries per-cell decay/curl
-// coefficients, so these kernels do not take the uniform-scalar fast path.
-__global__ void update_electric_ex_cpml_modulated_compressed_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ hy,
-    const float* __restrict__ hz,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ mod_cos,
-    const float* __restrict__ mod_sin,
-    const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
-    const float* __restrict__ inv_kappa_y,
-    const float* __restrict__ b_y,
-    const float* __restrict__ c_y,
-    const float* __restrict__ inv_kappa_z,
-    const float* __restrict__ b_z,
-    const float* __restrict__ c_z,
-    const float* __restrict__ inv_dy,
-    const float* __restrict__ inv_dz,
-    int y_low_mode,
-    int y_high_mode,
-    int z_low_mode,
-    int z_high_mode,
-    int y_low_length,
-    int y_high_start,
-    int y_high_length,
-    int z_low_length,
-    int z_high_start,
-    int z_high_length,
-    float* __restrict__ psi_y,
-    float* __restrict__ psi_z,
-    float* __restrict__ ex) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
-  }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  if (boundary_pec(j, ny, y_low_mode, y_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
-    ex[linear] = 0.0f;
-    return;
-  }
-  const bool active = !(boundary_inactive(j, ny, y_low_mode, y_high_mode) ||
-                        boundary_inactive(k, nz, z_low_mode, z_high_mode));
-  if (!active) {
-    return;
-  }
-  const float d_y = backward_diff_axis1(hz, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
-  const float d_z = backward_diff_axis2(hy, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
-  const float psi_y_value = update_compact_electric_psi<1>(
-      psi_y, b_y, c_y, i, j, k, ny, nz, j, y_low_length, y_high_start, y_high_length, d_y);
-  const float psi_z_value = update_compact_electric_psi<2>(
-      psi_z, b_z, c_z, i, j, k, ny, nz, k, z_low_length, z_high_start, z_high_length, d_z);
-  const float curl = d_y * inv_kappa_y[j] + psi_y_value - d_z * inv_kappa_z[k] - psi_z_value;
-  const float mc = mod_cos[linear];
-  const float ms = mod_sin[linear];
-  float cos_prev, sin_prev, cos_next, sin_next;
-  modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
-  const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
-  const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
-  ex[linear] = ex[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
-}
-
-__global__ void update_electric_ey_cpml_modulated_compressed_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ hx,
-    const float* __restrict__ hz,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ mod_cos,
-    const float* __restrict__ mod_sin,
-    const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
-    const float* __restrict__ inv_kappa_x,
-    const float* __restrict__ b_x,
-    const float* __restrict__ c_x,
-    const float* __restrict__ inv_kappa_z,
-    const float* __restrict__ b_z,
-    const float* __restrict__ c_z,
-    const float* __restrict__ inv_dx,
-    const float* __restrict__ inv_dz,
-    int x_low_mode,
-    int x_high_mode,
-    int z_low_mode,
-    int z_high_mode,
-    int x_low_length,
-    int x_high_start,
-    int x_high_length,
-    int z_low_length,
-    int z_high_start,
-    int z_high_length,
-    float* __restrict__ psi_x,
-    float* __restrict__ psi_z,
-    float* __restrict__ ey) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
-  }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(k, nz, z_low_mode, z_high_mode)) {
-    ey[linear] = 0.0f;
-    return;
-  }
-  const bool active = !(boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
-                        boundary_inactive(k, nz, z_low_mode, z_high_mode));
-  if (!active) {
-    return;
-  }
-  const float d_z = backward_diff_axis2(hx, ny, nz - 1, i, j, k, z_low_mode, z_high_mode, inv_dz);
-  const float d_x = backward_diff_axis0(hz, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
-  const float psi_x_value = update_compact_electric_psi<0>(
-      psi_x, b_x, c_x, i, j, k, ny, nz, i, x_low_length, x_high_start, x_high_length, d_x);
-  const float psi_z_value = update_compact_electric_psi<2>(
-      psi_z, b_z, c_z, i, j, k, ny, nz, k, z_low_length, z_high_start, z_high_length, d_z);
-  const float curl = d_z * inv_kappa_z[k] + psi_z_value - d_x * inv_kappa_x[i] - psi_x_value;
-  const float mc = mod_cos[linear];
-  const float ms = mod_sin[linear];
-  float cos_prev, sin_prev, cos_next, sin_next;
-  modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
-  const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
-  const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
-  ey[linear] = ey[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
-}
-
-__global__ void update_electric_ez_cpml_modulated_compressed_kernel(
-    unsigned int nx,
-    unsigned int ny,
-    unsigned int nz,
-    const float* __restrict__ hx,
-    const float* __restrict__ hy,
-    const float* __restrict__ decay,
-    const float* __restrict__ curl_coeff,
-    const float* __restrict__ mod_cos,
-    const float* __restrict__ mod_sin,
-    const float* __restrict__ mod_omega,
-    const float* __restrict__ modulation_time,
-    const float* __restrict__ inv_kappa_x,
-    const float* __restrict__ b_x,
-    const float* __restrict__ c_x,
-    const float* __restrict__ inv_kappa_y,
-    const float* __restrict__ b_y,
-    const float* __restrict__ c_y,
-    const float* __restrict__ inv_dx,
-    const float* __restrict__ inv_dy,
-    int x_low_mode,
-    int x_high_mode,
-    int y_low_mode,
-    int y_high_mode,
-    int x_low_length,
-    int x_high_start,
-    int x_high_length,
-    int y_low_length,
-    int y_high_start,
-    int y_high_length,
-    float* __restrict__ psi_x,
-    float* __restrict__ psi_y,
-    float* __restrict__ ez) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
-  if (i >= nx || j >= ny || k >= nz) {
-    return;
-  }
-  const long long linear = offset3d(i, j, k, ny, nz);
-  if (boundary_pec(i, nx, x_low_mode, x_high_mode) || boundary_pec(j, ny, y_low_mode, y_high_mode)) {
-    ez[linear] = 0.0f;
-    return;
-  }
-  const bool active = !(boundary_inactive(i, nx, x_low_mode, x_high_mode) ||
-                        boundary_inactive(j, ny, y_low_mode, y_high_mode));
-  if (!active) {
-    return;
-  }
-  const float d_x = backward_diff_axis0(hy, nx, ny, nz, i, j, k, x_low_mode, x_high_mode, inv_dx);
-  const float d_y = backward_diff_axis1(hx, ny - 1, nz, i, j, k, y_low_mode, y_high_mode, inv_dy);
-  const float psi_x_value = update_compact_electric_psi<0>(
-      psi_x, b_x, c_x, i, j, k, ny, nz, i, x_low_length, x_high_start, x_high_length, d_x);
-  const float psi_y_value = update_compact_electric_psi<1>(
-      psi_y, b_y, c_y, i, j, k, ny, nz, j, y_low_length, y_high_start, y_high_length, d_y);
-  const float curl = d_x * inv_kappa_x[i] + psi_x_value - d_y * inv_kappa_y[j] - psi_y_value;
-  const float mc = mod_cos[linear];
-  const float ms = mod_sin[linear];
-  float cos_prev, sin_prev, cos_next, sin_next;
-  modulation_phase_from_omega(mod_omega[linear], modulation_time, cos_prev, sin_prev, cos_next, sin_next);
-  const float m_prev = modulation_factor(mc, ms, cos_prev, sin_prev);
-  const float inv_next = 1.0f / fmaxf(modulation_factor(mc, ms, cos_next, sin_next), 1.0e-6f);
-  ez[linear] = ez[linear] * (decay[linear] * m_prev * inv_next) + (curl_coeff[linear] * inv_next) * curl;
 }
 
 void check_electric_inputs(
@@ -2017,7 +1592,7 @@ void update_electric_ex_standard_bounded_cuda(
     }
   } else {
     dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
-      update_electric_standard_kernel<0, decltype(u_uniform)::value><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      update_electric_standard_kernel<0, decltype(u_uniform)::value, false><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2027,6 +1602,10 @@ void update_electric_ex_standard_bounded_cuda(
           hz.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
           static_cast<float>(uniform_decay.value_or(0.0)),
           static_cast<float>(uniform_curl.value_or(0.0)),
           inv_dy.mutable_data_ptr<float>(),
@@ -2121,7 +1700,7 @@ void update_electric_ey_standard_bounded_cuda(
     }
   } else {
     dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
-      update_electric_standard_kernel<1, decltype(u_uniform)::value><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      update_electric_standard_kernel<1, decltype(u_uniform)::value, false><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2131,6 +1710,10 @@ void update_electric_ey_standard_bounded_cuda(
           hz.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
           static_cast<float>(uniform_decay.value_or(0.0)),
           static_cast<float>(uniform_curl.value_or(0.0)),
           inv_dx.mutable_data_ptr<float>(),
@@ -2225,7 +1808,7 @@ void update_electric_ez_standard_bounded_cuda(
     }
   } else {
     dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
-      update_electric_standard_kernel<2, decltype(u_uniform)::value><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      update_electric_standard_kernel<2, decltype(u_uniform)::value, false><<<field_grid3d(local_x_end - local_x_begin, sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2235,6 +1818,10 @@ void update_electric_ez_standard_bounded_cuda(
           hy.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
           static_cast<float>(uniform_decay.value_or(0.0)),
           static_cast<float>(uniform_curl.value_or(0.0)),
           inv_dx.mutable_data_ptr<float>(),
@@ -2467,7 +2054,7 @@ void update_electric_ex_cpml_cuda(
     }
   } else {
     dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
-      update_electric_cpml_kernel<0, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      update_electric_cpml_kernel<0, decltype(u_uniform)::value, false><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2475,6 +2062,10 @@ void update_electric_ex_cpml_cuda(
           hz.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
           static_cast<float>(uniform_decay.value_or(0.0)),
           static_cast<float>(uniform_curl.value_or(0.0)),
           inv_kappa_y.mutable_data_ptr<float>(),
@@ -2556,7 +2147,7 @@ void update_electric_ey_cpml_cuda(
     }
   } else {
     dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
-      update_electric_cpml_kernel<1, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      update_electric_cpml_kernel<1, decltype(u_uniform)::value, false><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2564,6 +2155,10 @@ void update_electric_ey_cpml_cuda(
           hz.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
           static_cast<float>(uniform_decay.value_or(0.0)),
           static_cast<float>(uniform_curl.value_or(0.0)),
           inv_kappa_x.mutable_data_ptr<float>(),
@@ -2645,7 +2240,7 @@ void update_electric_ez_cpml_cuda(
     }
   } else {
     dispatch_uniform_pair(uniform_decay.has_value() && uniform_curl.has_value(), [&](auto u_uniform) {
-      update_electric_cpml_kernel<2, decltype(u_uniform)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      update_electric_cpml_kernel<2, decltype(u_uniform)::value, false><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2653,6 +2248,10 @@ void update_electric_ez_cpml_cuda(
           hy.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
           static_cast<float>(uniform_decay.value_or(0.0)),
           static_cast<float>(uniform_curl.value_or(0.0)),
           inv_kappa_x.mutable_data_ptr<float>(),
@@ -2747,7 +2346,7 @@ void update_electric_ex_cpml_compressed_cuda(
     }
   } else {
     dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
-      update_electric_ex_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      update_electric_ex_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value, false><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2755,6 +2354,10 @@ void update_electric_ex_cpml_compressed_cuda(
           hz.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
           static_cast<float>(uniform_decay.value_or(0.0)),
           static_cast<float>(uniform_curl.value_or(0.0)),
           inv_kappa_y.mutable_data_ptr<float>(),
@@ -2855,7 +2458,7 @@ void update_electric_ey_cpml_compressed_cuda(
     }
   } else {
     dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
-      update_electric_ey_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      update_electric_ey_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value, false><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2863,6 +2466,10 @@ void update_electric_ey_cpml_compressed_cuda(
           hz.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
           static_cast<float>(uniform_decay.value_or(0.0)),
           static_cast<float>(uniform_curl.value_or(0.0)),
           inv_kappa_x.mutable_data_ptr<float>(),
@@ -2963,7 +2570,7 @@ void update_electric_ez_cpml_compressed_cuda(
     }
   } else {
     dispatch_uniform_coefficients(uniform_decay.has_value(), uniform_curl.has_value(), [&](auto u_decay, auto u_curl) {
-      update_electric_ez_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+      update_electric_ez_cpml_compressed_kernel<decltype(u_decay)::value, decltype(u_curl)::value, false><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
           static_cast<unsigned int>(sizes[0]),
           static_cast<unsigned int>(sizes[1]),
           static_cast<unsigned int>(sizes[2]),
@@ -2971,6 +2578,10 @@ void update_electric_ez_cpml_compressed_cuda(
           hy.mutable_data_ptr<float>(),
           decay.mutable_data_ptr<float>(),
           curl.mutable_data_ptr<float>(),
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
           static_cast<float>(uniform_decay.value_or(0.0)),
           static_cast<float>(uniform_curl.value_or(0.0)),
           inv_kappa_x.mutable_data_ptr<float>(),
@@ -3041,7 +2652,7 @@ void update_electric_ex_cpml_modulated_compressed_cuda(
   torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
   const auto sizes = ex.sizes();
   const dim3 block = field_block3d();
-  update_electric_ex_cpml_modulated_compressed_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_electric_ex_cpml_compressed_kernel<false, false, true><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
@@ -3053,6 +2664,8 @@ void update_electric_ex_cpml_modulated_compressed_cuda(
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
       modulation_time.mutable_data_ptr<float>(),
+      0.0f,
+      0.0f,
       inv_kappa_y.mutable_data_ptr<float>(),
       b_y.mutable_data_ptr<float>(),
       c_y.mutable_data_ptr<float>(),
@@ -3119,7 +2732,7 @@ void update_electric_ey_cpml_modulated_compressed_cuda(
   torch::stable::accelerator::DeviceGuard guard(ey.get_device_index());
   const auto sizes = ey.sizes();
   const dim3 block = field_block3d();
-  update_electric_ey_cpml_modulated_compressed_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_electric_ey_cpml_compressed_kernel<false, false, true><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
@@ -3131,6 +2744,8 @@ void update_electric_ey_cpml_modulated_compressed_cuda(
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
       modulation_time.mutable_data_ptr<float>(),
+      0.0f,
+      0.0f,
       inv_kappa_x.mutable_data_ptr<float>(),
       b_x.mutable_data_ptr<float>(),
       c_x.mutable_data_ptr<float>(),
@@ -3197,7 +2812,7 @@ void update_electric_ez_cpml_modulated_compressed_cuda(
   torch::stable::accelerator::DeviceGuard guard(ez.get_device_index());
   const auto sizes = ez.sizes();
   const dim3 block = field_block3d();
-  update_electric_ez_cpml_modulated_compressed_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_electric_ez_cpml_compressed_kernel<false, false, true><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
@@ -3209,6 +2824,8 @@ void update_electric_ez_cpml_modulated_compressed_cuda(
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
       modulation_time.mutable_data_ptr<float>(),
+      0.0f,
+      0.0f,
       inv_kappa_x.mutable_data_ptr<float>(),
       b_x.mutable_data_ptr<float>(),
       c_x.mutable_data_ptr<float>(),
@@ -3677,10 +3294,12 @@ void update_electric_ex_modulated_cuda(
   torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
   const auto sizes = ex.sizes();
   const dim3 block = field_block3d();
-  update_electric_ex_modulated_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_electric_standard_kernel<0, false, true><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
+      0u,
+      static_cast<unsigned int>(sizes[0]),
       hy.mutable_data_ptr<float>(),
       hz.mutable_data_ptr<float>(),
       decay.mutable_data_ptr<float>(),
@@ -3689,6 +3308,8 @@ void update_electric_ex_modulated_cuda(
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
       modulation_time.mutable_data_ptr<float>(),
+      0.0f,
+      0.0f,
       inv_dy.mutable_data_ptr<float>(),
       inv_dz.mutable_data_ptr<float>(),
       static_cast<int>(y_low_mode),
@@ -3725,10 +3346,12 @@ void update_electric_ey_modulated_cuda(
   torch::stable::accelerator::DeviceGuard guard(ey.get_device_index());
   const auto sizes = ey.sizes();
   const dim3 block = field_block3d();
-  update_electric_ey_modulated_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_electric_standard_kernel<1, false, true><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
+      0u,
+      static_cast<unsigned int>(sizes[0]),
       hx.mutable_data_ptr<float>(),
       hz.mutable_data_ptr<float>(),
       decay.mutable_data_ptr<float>(),
@@ -3737,6 +3360,8 @@ void update_electric_ey_modulated_cuda(
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
       modulation_time.mutable_data_ptr<float>(),
+      0.0f,
+      0.0f,
       inv_dx.mutable_data_ptr<float>(),
       inv_dz.mutable_data_ptr<float>(),
       static_cast<int>(x_low_mode),
@@ -3773,10 +3398,12 @@ void update_electric_ez_modulated_cuda(
   torch::stable::accelerator::DeviceGuard guard(ez.get_device_index());
   const auto sizes = ez.sizes();
   const dim3 block = field_block3d();
-  update_electric_ez_modulated_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_electric_standard_kernel<2, false, true><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
+      0u,
+      static_cast<unsigned int>(sizes[0]),
       hx.mutable_data_ptr<float>(),
       hy.mutable_data_ptr<float>(),
       decay.mutable_data_ptr<float>(),
@@ -3785,6 +3412,8 @@ void update_electric_ez_modulated_cuda(
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
       modulation_time.mutable_data_ptr<float>(),
+      0.0f,
+      0.0f,
       inv_dx.mutable_data_ptr<float>(),
       inv_dy.mutable_data_ptr<float>(),
       static_cast<int>(x_low_mode),
@@ -3830,7 +3459,7 @@ void update_electric_ex_cpml_modulated_cuda(
   torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
   const auto sizes = ex.sizes();
   const dim3 block = field_block3d();
-  update_electric_ex_cpml_modulated_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_electric_cpml_kernel<0, false, true><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
@@ -3842,6 +3471,8 @@ void update_electric_ex_cpml_modulated_cuda(
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
       modulation_time.mutable_data_ptr<float>(),
+      0.0f,
+      0.0f,
       inv_kappa_y.mutable_data_ptr<float>(),
       b_y.mutable_data_ptr<float>(),
       c_y.mutable_data_ptr<float>(),
@@ -3895,7 +3526,7 @@ void update_electric_ey_cpml_modulated_cuda(
   torch::stable::accelerator::DeviceGuard guard(ey.get_device_index());
   const auto sizes = ey.sizes();
   const dim3 block = field_block3d();
-  update_electric_ey_cpml_modulated_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_electric_cpml_kernel<1, false, true><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
@@ -3907,6 +3538,8 @@ void update_electric_ey_cpml_modulated_cuda(
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
       modulation_time.mutable_data_ptr<float>(),
+      0.0f,
+      0.0f,
       inv_kappa_x.mutable_data_ptr<float>(),
       b_x.mutable_data_ptr<float>(),
       c_x.mutable_data_ptr<float>(),
@@ -3960,7 +3593,7 @@ void update_electric_ez_cpml_modulated_cuda(
   torch::stable::accelerator::DeviceGuard guard(ez.get_device_index());
   const auto sizes = ez.sizes();
   const dim3 block = field_block3d();
-  update_electric_ez_cpml_modulated_kernel<<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
+  update_electric_cpml_kernel<2, false, true><<<field_grid3d(sizes[0], sizes[1], sizes[2], block), block, 0, current_cuda_stream()>>>(
       static_cast<unsigned int>(sizes[0]),
       static_cast<unsigned int>(sizes[1]),
       static_cast<unsigned int>(sizes[2]),
@@ -3972,6 +3605,8 @@ void update_electric_ez_cpml_modulated_cuda(
       mod_sin.mutable_data_ptr<float>(),
       mod_omega.mutable_data_ptr<float>(),
       modulation_time.mutable_data_ptr<float>(),
+      0.0f,
+      0.0f,
       inv_kappa_x.mutable_data_ptr<float>(),
       b_x.mutable_data_ptr<float>(),
       c_x.mutable_data_ptr<float>(),
