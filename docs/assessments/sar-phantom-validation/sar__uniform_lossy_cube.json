@@ -29,5 +29,5 @@
   "notes": [
     "Tautology (self-comparison), supporting only: the volume integral and the channel total are two reductions of the SAME edge loss field data, so their closure is exact by construction and carries no independent physical information. The independent conservation reference is the sar/layered_slab surface-vs-volume balance."
   ],
-  "updated_at": "2026-07-21T17:00:52+00:00"
+  "updated_at": "2026-07-22T13:52:10+00:00"
 }

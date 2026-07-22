@@ -11,7 +11,7 @@
   "metrics": [
     {
       "quantity": "series f_res*sqrt(C) spread",
-      "measured": 0.009673579144115891,
+      "measured": 0.009673572560115296,
       "reference": 0.0,
       "unit": "fraction",
       "class": "wave-level",
@@ -19,16 +19,16 @@
     },
     {
       "quantity": "series -20%C f_res ratio",
-      "measured": 1.0994123148506136,
+      "measured": 1.0994123387865034,
       "reference": 1.118033988749895,
-      "rel_error": 0.016655731477450593,
+      "rel_error": 0.01665571006853999,
       "class": "wave-level"
     },
     {
       "quantity": "series +20%C f_res ratio",
-      "measured": 0.9185006367604206,
+      "measured": 0.918500645725816,
       "reference": 0.9128709291752769,
-      "rel_error": 0.006167035673082274,
+      "rel_error": 0.006167045494180898,
       "class": "wave-level"
     }
   ],
@@ -36,17 +36,17 @@
   "convergence": [],
   "conservation": {
     "series_f_res_hz": {
-      "3.20e-12": 478749016.63481724,
-      "4.00e-12": 435459026.76182854,
-      "4.80e-12": 399969393.36381257
+      "3.20e-12": 478749023.52524096,
+      "4.00e-12": 435459023.5485887,
+      "4.80e-12": 399969394.31651205
     },
     "parallel_f_res_hz": {
-      "3.20e-12": 361611586.21769345,
-      "4.00e-12": 346454964.5659149,
-      "4.80e-12": 332416239.199409
+      "3.20e-12": 361611427.94205594,
+      "4.00e-12": 346455112.7099501,
+      "4.80e-12": 332416255.214719
     },
-    "series_f_res_sqrtC_spread": 0.009673579144115891,
-    "series_absolute_shift_vs_ideal": 0.8621962134143651,
+    "series_f_res_sqrtC_spread": 0.009673572560115296,
+    "series_absolute_shift_vs_ideal": 0.8621962160591993,
     "series_monotone_in_C": true,
     "parallel_monotone_in_C": true
   },
@@ -54,5 +54,5 @@
   "notes": [
     "REBUILT (coax in-line RLC). The RLC is a two-terminal element in the coax inner conductor ahead of a matched through-PML continuation, so it carries the full axial current and its resonance controls the feed reflection. Absolute f_res ~0.862 x ideal (documented parasitic downshift from the rod-gap fringe capacitance)."
   ],
-  "updated_at": "2026-07-19T15:37:05+00:00"
+  "updated_at": "2026-07-22T13:50:22+00:00"
 }

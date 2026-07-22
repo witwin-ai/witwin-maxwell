@@ -12,5 +12,5 @@
   "notes": [
     "The FDTD port machinery fails closed on a conductive background (a tissue phantom is conductive by construction): the driven end-to-end SAR chain raises NotImplementedError at prepare(). Unblocking needs a conductance-aware lumped-port update coefficient, out of this stage's scope. Pinned as a fail-closed gate in tests/sar/test_phantom_benchmarks.py."
   ],
-  "updated_at": "2026-07-21T17:01:00+00:00"
+  "updated_at": "2026-07-22T13:52:15+00:00"
 }
