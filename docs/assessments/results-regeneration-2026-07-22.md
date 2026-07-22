@@ -124,6 +124,19 @@ faces, or (b) the default is reverted to `pec="staircase"` for the benchmark har
 and the conformal path is opted into per scene. Fixing it inside this task would have
 meant shipping a numerics change under cover of a table regeneration.
 
+**Resolved 2026-07-22 (K1).** Root-caused and fixed; see
+`docs/assessments/k1-conformal-pec-fix-2026-07-22.md`. The conformal PEC edge fill
+was the node average of a `tanh`-smoothed occupancy, so it leaked fractional fill
+(hence, because the open fraction multiplies the E update every step, an effective
+conductivity `eps*fill/dt`) onto vacuum edges up to three cells outside the metal and
+left the face edge itself a 405 ohm/sq sheet instead of a short. The fill is now the
+per-edge geometric coverage fraction, which has compact support and reduces to the
+staircase mask bit for bit on grid-parallel faces (option (a)). The residual — the
+soft short is still lossy on genuinely cut edges — is bounded and documented, and the
+harness default is back to `pec="staircase"` with per-scene opt-in (option (b)). All
+three PEC rows in this table were re-measured against their existing cached references
+and returned to their pre-F4 2026-07-18 values.
+
 ### The other nine regressions
 
 All small and none crossing a metric target:
