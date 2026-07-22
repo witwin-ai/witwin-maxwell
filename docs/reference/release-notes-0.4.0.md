@@ -301,8 +301,11 @@ Scope, so you know what did *not* change:
   surface-impedance metals stay on the node→edge path (unchanged capability scope).
 - The material VJP follows the forward, so geometry, region-density and
   diagonal-anisotropy gradients stay consistent by construction.
-- The benchmark harness default changed to `pec="conformal"`. Dielectric scenes are
-  unaffected.
+- The benchmark harness default stays `pec="staircase"`. F4 briefly switched it to
+  `pec="conformal"`; K1 reverted that after the conformal PEC edge fill was given
+  compact support and its residual spurious absorption on cut edges was measured
+  (see `docs/assessments/k1-conformal-pec-fix-2026-07-22.md`). Scenes opt into
+  conformal per scene. Dielectric scenes are unaffected either way.
 
 ### 3.2 CUDA-graph stepping is now the public default
 
