@@ -9,7 +9,7 @@ import torch
 
 from .adjoint_inputs import scene_trainable_material_tensors
 from .compiler.sources import _compile_mode_source
-from .constants import C_0, EPSILON_0, MU_0
+from .constants import C_0
 from .fdtd.excitation.modes import (
     sample_mode_source_component,
     solve_mode_source_profile,
@@ -18,7 +18,13 @@ from .lumped import PortSweep
 from .monitors import ModeMonitor
 from .network import NetworkData, PortData
 from .ports import WavePort
-from .postprocess.waveports import ModeTrackingResult, track_modes
+from .postprocess.waveports import (
+    ModeTrackingResult,
+    _circuit_characteristic_impedance,
+    _te_characteristic_impedance,
+    _tm_characteristic_impedance,
+    track_modes,
+)
 from .result import Result
 from .scene import prepare_scene
 from .sources import CW, ModeSource
@@ -254,9 +260,9 @@ def _characteristic_impedance(
                 dtype=torch.float64,
             )
             if mode.family == "te":
-                impedance = omega * MU_0 * mu_r / beta
+                impedance = _te_characteristic_impedance(omega, beta, mu_r)
             elif mode.family == "tm":
-                impedance = beta / (omega * EPSILON_0 * eps_r)
+                impedance = _tm_characteristic_impedance(omega, beta, eps_r)
             else:
                 voltage = torch.zeros((), device=beta.device, dtype=torch.complex128)
                 current = torch.zeros_like(voltage)
@@ -271,12 +277,11 @@ def _characteristic_impedance(
                         voltage = voltage + coefficient * raw_voltage.to(torch.complex128)
                     if raw_current is not None:
                         current = current + coefficient * raw_current.to(torch.complex128)
-                if mode.impedance_definition == "voltage_current":
-                    impedance = voltage / current
-                elif mode.impedance_definition == "power_voltage":
-                    impedance = torch.abs(voltage).square() / 2.0
-                else:
-                    impedance = 2.0 / torch.abs(current).square()
+                impedance = _circuit_characteristic_impedance(
+                    mode.impedance_definition,
+                    voltage,
+                    current,
+                )
             if not bool(torch.isfinite(torch.real(impedance))) or not bool(
                 torch.isfinite(torch.imag(impedance))
             ):

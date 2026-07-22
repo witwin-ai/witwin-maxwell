@@ -5,11 +5,38 @@ from dataclasses import dataclass
 
 import torch
 
-from ..constants import resolve_real_dtype
+from ..constants import EPSILON_0, MU_0, resolve_real_dtype
 
 
 class ModeTrackingError(RuntimeError):
     """Raised when adjacent-frequency mode identity is not numerically reliable."""
+
+
+def _te_characteristic_impedance(omega, beta, mu_r):
+    """TE wave impedance ``omega * mu / beta`` for a uniformly filled aperture."""
+
+    return omega * MU_0 * mu_r / beta
+
+
+def _tm_characteristic_impedance(omega, beta, eps_r):
+    """TM wave impedance ``beta / (omega * eps)`` for a uniformly filled aperture."""
+
+    return beta / (omega * EPSILON_0 * eps_r)
+
+
+def _circuit_characteristic_impedance(definition, voltage, current):
+    """Characteristic impedance of a tracked one-watt mode from its V/I integrals.
+
+    ``voltage`` and ``current`` are the modal path integrals of the one-watt
+    normalized mode. ``voltage_current`` is ``V/I``; ``power_voltage`` is
+    ``|V|^2 / (2P)`` and ``power_current`` is ``2P / |I|^2`` with ``P = 1`` watt.
+    """
+
+    if definition == "voltage_current":
+        return voltage / current
+    if definition == "power_voltage":
+        return torch.abs(voltage).square() / 2.0
+    return 2.0 / torch.abs(current).square()
 
 
 @dataclass(frozen=True)

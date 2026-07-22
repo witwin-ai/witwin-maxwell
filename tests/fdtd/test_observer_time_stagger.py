@@ -58,6 +58,8 @@ def test_spectral_observers_apply_the_yee_half_step_stagger():
         "phase_sin": 0.0,
         "phase_step_cos": math.cos(2.0 * math.pi * frequency * dt),
         "phase_step_sin": math.sin(2.0 * math.pi * frequency * dt),
+        "h_offset_cos": math.cos(-0.5 * 2.0 * math.pi * frequency * dt),
+        "h_offset_sin": math.sin(-0.5 * 2.0 * math.pi * frequency * dt),
     }
     groups = []
     for field_name in ("Ex", "Hy"):
@@ -146,6 +148,8 @@ def test_observer_adjoint_schedule_is_exact_transpose_of_forward_yee_dft(
         "phase_sin": 0.0,
         "phase_step_cos": math.cos(phase_step),
         "phase_step_sin": math.sin(phase_step),
+        "h_offset_cos": math.cos(-0.5 * phase_step),
+        "h_offset_sin": math.sin(-0.5 * phase_step),
     }
     group = {
         "field_name": field_name,

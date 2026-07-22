@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 
@@ -469,19 +471,82 @@ def _electric_pole_components(entry):
     )
 
 
-def build_dispersive_templates(solver, material_model):
-    templates = {
-        "Ex": {"inv_eps": (1.0 / solver.eps_Ex).contiguous(), "debye": [], "drude": [], "lorentz": []},
-        "Ey": {"inv_eps": (1.0 / solver.eps_Ey).contiguous(), "debye": [], "drude": [], "lorentz": []},
-        "Ez": {"inv_eps": (1.0 / solver.eps_Ez).contiguous(), "debye": [], "drude": [], "lorentz": []},
-    }
+def _magnetic_pole_components(entry):
+    """Magnetic poles always drive all three H components (no sheet restriction)."""
+    del entry
+    return _H_DISPERSIVE_COMPONENTS
 
-    for entry in material_model["debye_poles"]:
+
+@dataclass(frozen=True)
+class _DispersiveFamily:
+    """Descriptor of the E-vs-H differences in the mirrored ADE dispersion helpers.
+
+    The electric (E, eps) and magnetic (H, mu) dispersive channels share the same
+    Debye/Drude/Lorentz ADE discretization and launch the same kernels; a family
+    only selects which solver attributes, compiled pole lists, vacuum constant,
+    and Yee node->component averaging stencil are consumed, plus which components
+    a pole entry drives (electric sheet poles restrict to tangential axes).
+    """
+
+    components: tuple[str, ...]
+    background_prefix: str  # solver attr prefix of the absolute eps/mu per component
+    inverse_key: str  # templates key holding 1/eps or 1/mu
+    pole_prefix: str  # material-model pole list prefix ("" or "mu_")
+    vacuum_attr: str  # solver attr of the vacuum constant (eps0 or mu0)
+    templates_attr: str
+    enabled_attr: str
+    average: object  # node->component averaging function for this family
+    entry_components: object  # pole entry -> driven component names
+
+
+_E_DISPERSIVE_COMPONENTS = ("Ex", "Ey", "Ez")
+_H_DISPERSIVE_COMPONENTS = ("Hx", "Hy", "Hz")
+
+_ELECTRIC_DISPERSIVE_FAMILY = _DispersiveFamily(
+    components=_E_DISPERSIVE_COMPONENTS,
+    background_prefix="eps_",
+    inverse_key="inv_eps",
+    pole_prefix="",
+    vacuum_attr="eps0",
+    templates_attr="_dispersive_templates",
+    enabled_attr="electric_dispersive_enabled",
+    average=average_node_to_component,
+    entry_components=_electric_pole_components,
+)
+
+_MAGNETIC_DISPERSIVE_FAMILY = _DispersiveFamily(
+    components=_H_DISPERSIVE_COMPONENTS,
+    background_prefix="mu_",
+    inverse_key="inv_mu",
+    pole_prefix="mu_",
+    vacuum_attr="mu0",
+    templates_attr="_magnetic_dispersive_templates",
+    enabled_attr="magnetic_dispersive_enabled",
+    average=average_node_to_magnetic_component,
+    entry_components=_magnetic_pole_components,
+)
+
+
+def _build_family_dispersive_templates(solver, material_model, family):
+    templates = {
+        component_name: {
+            family.inverse_key: (
+                1.0 / getattr(solver, f"{family.background_prefix}{component_name}")
+            ).contiguous(),
+            "debye": [],
+            "drude": [],
+            "lorentz": [],
+        }
+        for component_name in family.components
+    }
+    vacuum = getattr(solver, family.vacuum_attr)
+
+    for entry in material_model[f"{family.pole_prefix}debye_poles"]:
         pole = entry["pole"]
         decay = (2.0 * pole.tau - solver.dt) / (2.0 * pole.tau + solver.dt)
-        base_scale = 2.0 * solver.eps0 * pole.delta_eps * solver.dt / (2.0 * pole.tau + solver.dt)
-        for component_name in _electric_pole_components(entry):
-            weight = average_node_to_component(solver, entry["weight"], component_name)
+        base_scale = 2.0 * vacuum * pole.delta_eps * solver.dt / (2.0 * pole.tau + solver.dt)
+        for component_name in family.entry_components(entry):
+            weight = family.average(solver, entry["weight"], component_name)
             templates[component_name]["debye"].append(
                 {
                     "decay": float(decay),
@@ -489,15 +554,15 @@ def build_dispersive_templates(solver, material_model):
                 }
             )
 
-    for entry in material_model["drude_poles"]:
+    for entry in material_model[f"{family.pole_prefix}drude_poles"]:
         pole = entry["pole"]
         omega_p = 2.0 * np.pi * pole.plasma_frequency
         gamma = 2.0 * np.pi * pole.gamma
         denom = 2.0 + gamma * solver.dt
         decay = (2.0 - gamma * solver.dt) / denom
-        base_scale = 2.0 * solver.eps0 * omega_p * omega_p * solver.dt / denom
-        for component_name in _electric_pole_components(entry):
-            weight = average_node_to_component(solver, entry["weight"], component_name)
+        base_scale = 2.0 * vacuum * omega_p * omega_p * solver.dt / denom
+        for component_name in family.entry_components(entry):
+            weight = family.average(solver, entry["weight"], component_name)
             templates[component_name]["drude"].append(
                 {
                     "decay": float(decay),
@@ -505,16 +570,16 @@ def build_dispersive_templates(solver, material_model):
                 }
             )
 
-    for entry in material_model["lorentz_poles"]:
+    for entry in material_model[f"{family.pole_prefix}lorentz_poles"]:
         pole = entry["pole"]
         omega_0 = 2.0 * np.pi * pole.resonance_frequency
         gamma = 2.0 * np.pi * pole.gamma
         denom = 2.0 + gamma * solver.dt
         decay = (2.0 - gamma * solver.dt) / denom
         restoring = 2.0 * omega_0 * omega_0 * solver.dt / denom
-        base_scale = 2.0 * solver.eps0 * pole.delta_eps * omega_0 * omega_0 * solver.dt / denom
-        for component_name in _electric_pole_components(entry):
-            weight = average_node_to_component(solver, entry["weight"], component_name)
+        base_scale = 2.0 * vacuum * pole.delta_eps * omega_0 * omega_0 * solver.dt / denom
+        for component_name in family.entry_components(entry):
+            weight = family.average(solver, entry["weight"], component_name)
             templates[component_name]["lorentz"].append(
                 {
                     "decay": float(decay),
@@ -523,74 +588,57 @@ def build_dispersive_templates(solver, material_model):
                 }
             )
 
-    solver._dispersive_templates = templates
-    solver.electric_dispersive_enabled = any(
-        templates[component_name][model_name]
-        for component_name in ("Ex", "Ey", "Ez")
-        for model_name in ("debye", "drude", "lorentz")
+    setattr(solver, family.templates_attr, templates)
+    setattr(
+        solver,
+        family.enabled_attr,
+        any(
+            templates[component_name][model_name]
+            for component_name in family.components
+            for model_name in ("debye", "drude", "lorentz")
+        ),
     )
+
+
+def build_dispersive_templates(solver, material_model):
+    _build_family_dispersive_templates(solver, material_model, _ELECTRIC_DISPERSIVE_FAMILY)
 
 
 def build_magnetic_dispersive_templates(solver, material_model):
-    templates = {
-        "Hx": {"inv_mu": (1.0 / solver.mu_Hx).contiguous(), "debye": [], "drude": [], "lorentz": []},
-        "Hy": {"inv_mu": (1.0 / solver.mu_Hy).contiguous(), "debye": [], "drude": [], "lorentz": []},
-        "Hz": {"inv_mu": (1.0 / solver.mu_Hz).contiguous(), "debye": [], "drude": [], "lorentz": []},
-    }
+    _build_family_dispersive_templates(solver, material_model, _MAGNETIC_DISPERSIVE_FAMILY)
 
-    for entry in material_model["mu_debye_poles"]:
-        pole = entry["pole"]
-        decay = (2.0 * pole.tau - solver.dt) / (2.0 * pole.tau + solver.dt)
-        base_scale = 2.0 * solver.mu0 * pole.delta_eps * solver.dt / (2.0 * pole.tau + solver.dt)
-        for component_name in ("Hx", "Hy", "Hz"):
-            weight = average_node_to_magnetic_component(solver, entry["weight"], component_name)
-            templates[component_name]["debye"].append(
-                {
-                    "decay": float(decay),
-                    "drive": (weight * base_scale).contiguous(),
-                }
-            )
 
-    for entry in material_model["mu_drude_poles"]:
-        pole = entry["pole"]
-        omega_p = 2.0 * np.pi * pole.plasma_frequency
-        gamma = 2.0 * np.pi * pole.gamma
-        denom = 2.0 + gamma * solver.dt
-        decay = (2.0 - gamma * solver.dt) / denom
-        base_scale = 2.0 * solver.mu0 * omega_p * omega_p * solver.dt / denom
-        for component_name in ("Hx", "Hy", "Hz"):
-            weight = average_node_to_magnetic_component(solver, entry["weight"], component_name)
-            templates[component_name]["drude"].append(
-                {
-                    "decay": float(decay),
-                    "drive": (weight * base_scale).contiguous(),
-                }
-            )
+def _initialize_component_dispersive_entries(solver, component_templates, field):
+    complex_fields = has_complex_fields(solver)
+    for entry in component_templates["debye"]:
+        entry["polarization"] = torch.zeros_like(field)
+        entry["current"] = torch.zeros_like(field)
+        entry["polarization_imag"] = torch.zeros_like(field) if complex_fields else None
+        entry["current_imag"] = torch.zeros_like(field) if complex_fields else None
+    for entry in component_templates["drude"]:
+        entry["current"] = torch.zeros_like(field)
+        entry["current_imag"] = torch.zeros_like(field) if complex_fields else None
+    for entry in component_templates["lorentz"]:
+        entry["polarization"] = torch.zeros_like(field)
+        entry["current"] = torch.zeros_like(field)
+        if complex_fields:
+            entry["polarization_imag"] = torch.zeros_like(field)
+            entry["current_imag"] = torch.zeros_like(field)
+        else:
+            entry["polarization_imag"] = None
+            entry["current_imag"] = None
 
-    for entry in material_model["mu_lorentz_poles"]:
-        pole = entry["pole"]
-        omega_0 = 2.0 * np.pi * pole.resonance_frequency
-        gamma = 2.0 * np.pi * pole.gamma
-        denom = 2.0 + gamma * solver.dt
-        decay = (2.0 - gamma * solver.dt) / denom
-        restoring = 2.0 * omega_0 * omega_0 * solver.dt / denom
-        base_scale = 2.0 * solver.mu0 * pole.delta_eps * omega_0 * omega_0 * solver.dt / denom
-        for component_name in ("Hx", "Hy", "Hz"):
-            weight = average_node_to_magnetic_component(solver, entry["weight"], component_name)
-            templates[component_name]["lorentz"].append(
-                {
-                    "decay": float(decay),
-                    "restoring": float(restoring),
-                    "drive": (weight * base_scale).contiguous(),
-                }
-            )
 
-    solver._magnetic_dispersive_templates = templates
-    solver.magnetic_dispersive_enabled = any(
-        templates[component_name][model_name]
-        for component_name in ("Hx", "Hy", "Hz")
-        for model_name in ("debye", "drude", "lorentz")
-    )
+def _initialize_family_dispersive_state(solver, family):
+    templates = getattr(solver, family.templates_attr)
+    if not templates:
+        setattr(solver, family.enabled_attr, False)
+        return False
+    for component_name in family.components:
+        _initialize_component_dispersive_entries(
+            solver, templates[component_name], getattr(solver, component_name)
+        )
+    return True
 
 
 def initialize_dispersive_state(solver):
@@ -607,61 +655,14 @@ def initialize_dispersive_state(solver):
             "Ez": torch.zeros_like(solver.Ez),
         }
 
-    for component_name, field in (("Ex", solver.Ex), ("Ey", solver.Ey), ("Ez", solver.Ez)):
-        component_templates = solver._dispersive_templates[component_name]
-        for entry in component_templates["debye"]:
-            entry["polarization"] = torch.zeros_like(field)
-            entry["current"] = torch.zeros_like(field)
-            entry["polarization_imag"] = torch.zeros_like(field) if has_complex_fields(solver) else None
-            entry["current_imag"] = torch.zeros_like(field) if has_complex_fields(solver) else None
-        for entry in component_templates["drude"]:
-            entry["current"] = torch.zeros_like(field)
-            entry["current_imag"] = torch.zeros_like(field) if has_complex_fields(solver) else None
-        for entry in component_templates["lorentz"]:
-            entry["polarization"] = torch.zeros_like(field)
-            entry["current"] = torch.zeros_like(field)
-            if has_complex_fields(solver):
-                entry["polarization_imag"] = torch.zeros_like(field)
-                entry["current_imag"] = torch.zeros_like(field)
-            else:
-                entry["polarization_imag"] = None
-                entry["current_imag"] = None
+    _initialize_family_dispersive_state(solver, _ELECTRIC_DISPERSIVE_FAMILY)
 
 
 def initialize_magnetic_dispersive_state(solver):
-    if not solver._magnetic_dispersive_templates:
-        solver.magnetic_dispersive_enabled = False
-        return
-
-    for component_name, field in (("Hx", solver.Hx), ("Hy", solver.Hy), ("Hz", solver.Hz)):
-        component_templates = solver._magnetic_dispersive_templates[component_name]
-        for entry in component_templates["debye"]:
-            entry["polarization"] = torch.zeros_like(field)
-            entry["current"] = torch.zeros_like(field)
-            entry["polarization_imag"] = torch.zeros_like(field) if has_complex_fields(solver) else None
-            entry["current_imag"] = torch.zeros_like(field) if has_complex_fields(solver) else None
-        for entry in component_templates["drude"]:
-            entry["current"] = torch.zeros_like(field)
-            entry["current_imag"] = torch.zeros_like(field) if has_complex_fields(solver) else None
-        for entry in component_templates["lorentz"]:
-            entry["polarization"] = torch.zeros_like(field)
-            entry["current"] = torch.zeros_like(field)
-            if has_complex_fields(solver):
-                entry["polarization_imag"] = torch.zeros_like(field)
-                entry["current_imag"] = torch.zeros_like(field)
-            else:
-                entry["polarization_imag"] = None
-                entry["current_imag"] = None
+    _initialize_family_dispersive_state(solver, _MAGNETIC_DISPERSIVE_FAMILY)
 
 
-def advance_component_dispersive_state(solver, component_name, field, *, imag=False):
-    if not solver.electric_dispersive_enabled:
-        return
-
-    component_templates = solver._dispersive_templates.get(component_name)
-    if not component_templates:
-        return
-
+def _advance_component_dispersive_entries(solver, component_templates, field, *, imag):
     for entry in component_templates["debye"]:
         polarization = entry["polarization_imag"] if imag else entry["polarization"]
         current = entry["current_imag"] if imag else entry["current"]
@@ -695,75 +696,56 @@ def advance_component_dispersive_state(solver, component_name, field, *, imag=Fa
             restoring=entry["restoring"],
             dt=solver.dt,
         ).launchRaw()
+
+
+def _family_component_templates(solver, family, component_name):
+    """The component's templates when the family is active, else ``None``."""
+    if not getattr(solver, family.enabled_attr):
+        return None
+    return getattr(solver, family.templates_attr).get(component_name)
+
+
+def _apply_to_family_fields(solver, family, component_fn):
+    """Run a per-component helper over the family's real (then imaginary) fields."""
+    for component_name in family.components:
+        component_fn(solver, component_name, getattr(solver, component_name), imag=False)
+    if has_complex_fields(solver):
+        for component_name in family.components:
+            component_fn(
+                solver, component_name, getattr(solver, f"{component_name}_imag"), imag=True
+            )
+
+
+def advance_component_dispersive_state(solver, component_name, field, *, imag=False):
+    component_templates = _family_component_templates(
+        solver, _ELECTRIC_DISPERSIVE_FAMILY, component_name
+    )
+    if not component_templates:
+        return
+    _advance_component_dispersive_entries(solver, component_templates, field, imag=imag)
 
 
 def advance_dispersive_state(solver):
     if not solver.electric_dispersive_enabled:
         return
-
-    advance_component_dispersive_state(solver, "Ex", solver.Ex, imag=False)
-    advance_component_dispersive_state(solver, "Ey", solver.Ey, imag=False)
-    advance_component_dispersive_state(solver, "Ez", solver.Ez, imag=False)
-    if has_complex_fields(solver):
-        advance_component_dispersive_state(solver, "Ex", solver.Ex_imag, imag=True)
-        advance_component_dispersive_state(solver, "Ey", solver.Ey_imag, imag=True)
-        advance_component_dispersive_state(solver, "Ez", solver.Ez_imag, imag=True)
+    _apply_to_family_fields(solver, _ELECTRIC_DISPERSIVE_FAMILY, advance_component_dispersive_state)
 
 
 def advance_magnetic_component_dispersive_state(solver, component_name, field, *, imag=False):
-    if not solver.magnetic_dispersive_enabled:
-        return
-
-    component_templates = solver._magnetic_dispersive_templates.get(component_name)
+    component_templates = _family_component_templates(
+        solver, _MAGNETIC_DISPERSIVE_FAMILY, component_name
+    )
     if not component_templates:
         return
-
-    for entry in component_templates["debye"]:
-        polarization = entry["polarization_imag"] if imag else entry["polarization"]
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.updateDebyeCurrent3D(
-            ElectricField=field,
-            Polarization=polarization,
-            PolarizationCurrent=current,
-            DebyeDrive=entry["drive"],
-            decay=entry["decay"],
-            dt=solver.dt,
-        ).launchRaw()
-
-    for entry in component_templates["drude"]:
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.updateDrudeCurrent3D(
-            ElectricField=field,
-            PolarizationCurrent=current,
-            DrudeDrive=entry["drive"],
-            decay=entry["decay"],
-        ).launchRaw()
-
-    for entry in component_templates["lorentz"]:
-        polarization = entry["polarization_imag"] if imag else entry["polarization"]
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.updateLorentzCurrent3D(
-            ElectricField=field,
-            Polarization=polarization,
-            PolarizationCurrent=current,
-            LorentzDrive=entry["drive"],
-            decay=entry["decay"],
-            restoring=entry["restoring"],
-            dt=solver.dt,
-        ).launchRaw()
+    _advance_component_dispersive_entries(solver, component_templates, field, imag=imag)
 
 
 def advance_magnetic_dispersive_state(solver):
     if not solver.magnetic_dispersive_enabled:
         return
-
-    advance_magnetic_component_dispersive_state(solver, "Hx", solver.Hx, imag=False)
-    advance_magnetic_component_dispersive_state(solver, "Hy", solver.Hy, imag=False)
-    advance_magnetic_component_dispersive_state(solver, "Hz", solver.Hz, imag=False)
-    if has_complex_fields(solver):
-        advance_magnetic_component_dispersive_state(solver, "Hx", solver.Hx_imag, imag=True)
-        advance_magnetic_component_dispersive_state(solver, "Hy", solver.Hy_imag, imag=True)
-        advance_magnetic_component_dispersive_state(solver, "Hz", solver.Hz_imag, imag=True)
+    _apply_to_family_fields(
+        solver, _MAGNETIC_DISPERSIVE_FAMILY, advance_magnetic_component_dispersive_state
+    )
 
 
 def _dispersive_current_coefficient(solver, component_name, component_templates):
@@ -798,11 +780,28 @@ _MODULATION_QUADRATURE_FIELDS = {
 }
 
 
-def apply_component_dispersive_currents(solver, component_name, field, *, imag=False):
-    if not solver.electric_dispersive_enabled:
-        return
+def _apply_plain_dispersive_currents(solver, component_templates, field, inverse, apply_dt, *, imag):
+    """Subtract every pole's polarization current with the unmodulated kernel.
 
-    component_templates = solver._dispersive_templates.get(component_name)
+    Shared by both field families: the magnetic channel always takes this path
+    (with ``inverse = 1/mu``), and the electric channel takes it whenever no
+    space-time modulation is active. The kernel's ``ElectricField`` argument is
+    simply the updated field component (E or H).
+    """
+    for model_name in ("debye", "drude", "lorentz"):
+        for entry in component_templates[model_name]:
+            solver.fdtd_module.applyPolarizationCurrent3D(
+                ElectricField=field,
+                PolarizationCurrent=entry["current_imag"] if imag else entry["current"],
+                InvPermittivity=inverse,
+                dt=apply_dt,
+            ).launchRaw()
+
+
+def apply_component_dispersive_currents(solver, component_name, field, *, imag=False):
+    component_templates = _family_component_templates(
+        solver, _ELECTRIC_DISPERSIVE_FAMILY, component_name
+    )
     if not component_templates:
         return
     inv_eps, apply_dt = _dispersive_current_coefficient(solver, component_name, component_templates)
@@ -812,17 +811,21 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
     # the modulated curl(H) term (see apply_polarization_modulated_kernel); in a
     # purely dispersive cell (m_next == 1) this reduces to the plain subtraction.
     modulated = bool(getattr(solver, "modulation_enabled", False)) and not imag
-    if modulated:
-        cos_name, sin_name, omega_name = _MODULATION_QUADRATURE_FIELDS[component_name]
-        mod_cos = getattr(solver, cos_name)
-        mod_sin = getattr(solver, sin_name)
-        mod_omega = getattr(solver, omega_name)
+    if not modulated:
+        _apply_plain_dispersive_currents(
+            solver, component_templates, field, inv_eps, apply_dt, imag=imag
+        )
+        return
 
-    def _subtract(current):
-        if modulated:
+    cos_name, sin_name, omega_name = _MODULATION_QUADRATURE_FIELDS[component_name]
+    mod_cos = getattr(solver, cos_name)
+    mod_sin = getattr(solver, sin_name)
+    mod_omega = getattr(solver, omega_name)
+    for model_name in ("debye", "drude", "lorentz"):
+        for entry in component_templates[model_name]:
             solver.fdtd_module.applyPolarizationCurrentModulated3D(
                 ElectricField=field,
-                PolarizationCurrent=current,
+                PolarizationCurrent=entry["current_imag"] if imag else entry["current"],
                 InvPermittivity=inv_eps,
                 ModCos=mod_cos,
                 ModSin=mod_sin,
@@ -830,17 +833,6 @@ def apply_component_dispersive_currents(solver, component_name, field, *, imag=F
                 ModulationTime=solver._modulation_time,
                 dt=apply_dt,
             ).launchRaw()
-        else:
-            solver.fdtd_module.applyPolarizationCurrent3D(
-                ElectricField=field,
-                PolarizationCurrent=current,
-                InvPermittivity=inv_eps,
-                dt=apply_dt,
-            ).launchRaw()
-
-    for model_name in ("debye", "drude", "lorentz"):
-        for entry in component_templates[model_name]:
-            _subtract(entry["current_imag"] if imag else entry["current"])
 
 
 def _aniso_periodic_flags(solver):
@@ -924,63 +916,27 @@ def apply_dispersive_corrections(solver):
         _apply_aniso_dispersive_corrections(solver)
         return
 
-    apply_component_dispersive_currents(solver, "Ex", solver.Ex, imag=False)
-    apply_component_dispersive_currents(solver, "Ey", solver.Ey, imag=False)
-    apply_component_dispersive_currents(solver, "Ez", solver.Ez, imag=False)
-    if has_complex_fields(solver):
-        apply_component_dispersive_currents(solver, "Ex", solver.Ex_imag, imag=True)
-        apply_component_dispersive_currents(solver, "Ey", solver.Ey_imag, imag=True)
-        apply_component_dispersive_currents(solver, "Ez", solver.Ez_imag, imag=True)
+    _apply_to_family_fields(solver, _ELECTRIC_DISPERSIVE_FAMILY, apply_component_dispersive_currents)
 
 
 def apply_magnetic_component_dispersive_currents(solver, component_name, field, *, imag=False):
-    if not solver.magnetic_dispersive_enabled:
-        return
-
-    component_templates = solver._magnetic_dispersive_templates.get(component_name)
+    component_templates = _family_component_templates(
+        solver, _MAGNETIC_DISPERSIVE_FAMILY, component_name
+    )
     if not component_templates:
         return
-    inv_mu = component_templates["inv_mu"]
-
-    for entry in component_templates["debye"]:
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.applyPolarizationCurrent3D(
-            ElectricField=field,
-            PolarizationCurrent=current,
-            InvPermittivity=inv_mu,
-            dt=solver.dt,
-        ).launchRaw()
-
-    for entry in component_templates["drude"]:
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.applyPolarizationCurrent3D(
-            ElectricField=field,
-            PolarizationCurrent=current,
-            InvPermittivity=inv_mu,
-            dt=solver.dt,
-        ).launchRaw()
-
-    for entry in component_templates["lorentz"]:
-        current = entry["current_imag"] if imag else entry["current"]
-        solver.fdtd_module.applyPolarizationCurrent3D(
-            ElectricField=field,
-            PolarizationCurrent=current,
-            InvPermittivity=inv_mu,
-            dt=solver.dt,
-        ).launchRaw()
+    _apply_plain_dispersive_currents(
+        solver, component_templates, field, component_templates["inv_mu"], solver.dt, imag=imag
+    )
 
 
 def apply_magnetic_dispersive_corrections(solver):
     if not solver.magnetic_dispersive_enabled:
         return
 
-    apply_magnetic_component_dispersive_currents(solver, "Hx", solver.Hx, imag=False)
-    apply_magnetic_component_dispersive_currents(solver, "Hy", solver.Hy, imag=False)
-    apply_magnetic_component_dispersive_currents(solver, "Hz", solver.Hz, imag=False)
-    if has_complex_fields(solver):
-        apply_magnetic_component_dispersive_currents(solver, "Hx", solver.Hx_imag, imag=True)
-        apply_magnetic_component_dispersive_currents(solver, "Hy", solver.Hy_imag, imag=True)
-        apply_magnetic_component_dispersive_currents(solver, "Hz", solver.Hz_imag, imag=True)
+    _apply_to_family_fields(
+        solver, _MAGNETIC_DISPERSIVE_FAMILY, apply_magnetic_component_dispersive_currents
+    )
 
 
 def _electric_update_coefficients(solver, eps, sigma_e, pml_decay, *, aniso_shifted=False):

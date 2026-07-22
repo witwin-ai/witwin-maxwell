@@ -5,11 +5,19 @@ import math
 
 import numpy as np
 
+from .waveforms import (
+    SOURCE_TIME_KIND_CW,
+    SOURCE_TIME_KIND_GAUSSIAN_PULSE,
+    SOURCE_TIME_KIND_RICKER_WAVELET,
+    SOURCE_TIME_KIND_CUSTOM,
+    cw_signal,
+    gaussian_pulse_signal,
+    gaussian_sigma_t,
+    interpolate_waveform_table,
+    ricker_wavelet_signal,
+    table_characteristic_frequency,
+)
 
-SOURCE_TIME_KIND_CW = 0
-SOURCE_TIME_KIND_GAUSSIAN_PULSE = 1
-SOURCE_TIME_KIND_RICKER_WAVELET = 2
-SOURCE_TIME_KIND_CUSTOM = 3
 POINT_DIPOLE_REFERENCE_WIDTH = 0.02
 
 
@@ -183,7 +191,7 @@ class CW:
         object.__setattr__(self, "kind", "cw")
 
     def evaluate(self, t: float) -> float:
-        return self.amplitude * math.cos(2.0 * math.pi * self.frequency * float(t) + self.phase)
+        return cw_signal(t, frequency=self.frequency, amplitude=self.amplitude, phase=self.phase)
 
     @property
     def characteristic_frequency(self) -> float:
@@ -210,7 +218,7 @@ class GaussianPulse:
     def __post_init__(self):
         frequency = _validate_frequency("frequency", self.frequency)
         fwidth = _validate_frequency("fwidth", self.fwidth)
-        sigma_t = 1.0 / (2.0 * math.pi * fwidth)
+        sigma_t = gaussian_sigma_t(fwidth)
         delay = 6.0 * sigma_t if self.delay is None else float(self.delay)
         object.__setattr__(self, "frequency", frequency)
         object.__setattr__(self, "fwidth", fwidth)
@@ -221,12 +229,17 @@ class GaussianPulse:
 
     @property
     def sigma_t(self) -> float:
-        return 1.0 / (2.0 * math.pi * self.fwidth)
+        return gaussian_sigma_t(self.fwidth)
 
     def evaluate(self, t: float) -> float:
-        tau = float(t) - float(self.delay)
-        envelope = math.exp(-0.5 * (tau / self.sigma_t) ** 2)
-        return self.amplitude * envelope * math.cos(2.0 * math.pi * self.frequency * tau + self.phase)
+        return gaussian_pulse_signal(
+            t,
+            frequency=self.frequency,
+            fwidth=self.fwidth,
+            amplitude=self.amplitude,
+            phase=self.phase,
+            delay=self.delay,
+        )
 
     @property
     def characteristic_frequency(self) -> float:
@@ -253,10 +266,7 @@ class RickerWavelet:
         object.__setattr__(self, "kind", "ricker_wavelet")
 
     def evaluate(self, t: float) -> float:
-        tau = float(t) - float(self.delay)
-        alpha = math.pi * self.frequency * tau
-        alpha_sq = alpha * alpha
-        return self.amplitude * (1.0 - 2.0 * alpha_sq) * math.exp(-alpha_sq)
+        return ricker_wavelet_signal(t, frequency=self.frequency, amplitude=self.amplitude, delay=self.delay)
 
     @property
     def phase(self) -> float:
@@ -273,19 +283,6 @@ class RickerWavelet:
     @property
     def settling_time(self) -> float:
         return float(self.delay) + 4.0 / max(self.frequency, 1e-30)
-
-
-def _table_characteristic_frequency(times: np.ndarray, amplitudes: np.ndarray) -> float:
-    spacing = np.diff(times)
-    mean_dt = float(np.mean(spacing))
-    if mean_dt <= 0.0:
-        return 0.0
-    spectrum = np.abs(np.fft.rfft(amplitudes))
-    freqs = np.fft.rfftfreq(times.size, d=mean_dt)
-    if spectrum.size <= 1:
-        return 0.0
-    peak_index = int(np.argmax(spectrum[1:]) + 1)
-    return float(freqs[peak_index])
 
 
 @dataclass(frozen=True)
@@ -331,7 +328,7 @@ class CustomSourceTime:
             table_times = np.ascontiguousarray(table_times[order])
             table_amplitudes = np.ascontiguousarray(table_amplitudes[order])
             if characteristic_frequency is None:
-                char_freq = _table_characteristic_frequency(table_times, table_amplitudes)
+                char_freq = table_characteristic_frequency(table_times, table_amplitudes)
             else:
                 char_freq = float(characteristic_frequency)
             delay = float(table_times[0])
@@ -357,8 +354,7 @@ class CustomSourceTime:
     def evaluate(self, t: float) -> float:
         if self._fn is not None:
             return float(self.amplitude) * float(self._fn(float(t)))
-        value = np.interp(float(t), self._table_times, self._table_amplitudes, left=0.0, right=0.0)
-        return float(self.amplitude) * float(value)
+        return float(self.amplitude) * interpolate_waveform_table(t, self._table_times, self._table_amplitudes)
 
     @property
     def frequency(self) -> float:
@@ -509,21 +505,19 @@ def evaluate_source_time(source_time: SourceTime | dict[str, float | int | str],
             fn = source_time.get("fn")
             if fn is not None:
                 return amplitude * float(fn(float(t)))
-            table_times = source_time["times"]
-            table_amplitudes = source_time["amplitudes"]
-            value = np.interp(float(t), table_times, table_amplitudes, left=0.0, right=0.0)
-            return amplitude * float(value)
+            return amplitude * interpolate_waveform_table(t, source_time["times"], source_time["amplitudes"])
         if kind == "cw":
-            return amplitude * math.cos(2.0 * math.pi * frequency * float(t) + phase)
+            return cw_signal(t, frequency=frequency, amplitude=amplitude, phase=phase)
         if kind == "gaussian_pulse":
-            fwidth = float(source_time["fwidth"])
-            sigma_t = 1.0 / (2.0 * math.pi * fwidth)
-            tau = float(t) - delay
-            envelope = math.exp(-0.5 * (tau / sigma_t) ** 2)
-            return amplitude * envelope * math.cos(2.0 * math.pi * frequency * tau + phase)
-        alpha = math.pi * frequency * (float(t) - delay)
-        alpha_sq = alpha * alpha
-        return amplitude * (1.0 - 2.0 * alpha_sq) * math.exp(-alpha_sq)
+            return gaussian_pulse_signal(
+                t,
+                frequency=frequency,
+                fwidth=float(source_time["fwidth"]),
+                amplitude=amplitude,
+                phase=phase,
+                delay=delay,
+            )
+        return ricker_wavelet_signal(t, frequency=frequency, amplitude=amplitude, delay=delay)
     return float(source_time.evaluate(float(t)))
 
 
@@ -544,7 +538,7 @@ def evaluate_source_time_normalization(
     if isinstance(source_time, CustomSourceTime):
         if source_time.fn is not None:
             return float(source_time.fn(float(t)))
-        return float(np.interp(float(t), source_time.times, source_time.amplitudes, left=0.0, right=0.0))
+        return interpolate_waveform_table(t, source_time.times, source_time.amplitudes)
     updates = {"amplitude": 1.0}
     if hasattr(source_time, "phase"):
         updates["phase"] = 0.0

@@ -6,14 +6,21 @@ import torch
 from ..monitors import normalize_axis, normalize_component
 from .coords import component_coords
 from .boundary import combine_complex_spectral_components, has_complex_fields
-
-_AXIS_CODES = {"x": 0, "y": 1, "z": 2}
-
-_PLANE_COORD_NAMES = {
-    "x": ("y", "z"),
-    "y": ("x", "z"),
-    "z": ("x", "y"),
-}
+from .quadrature import (
+    _AXIS_CODES,
+    _cell_center_weights_1d,
+    _compute_plane_flux,
+    _exact_cell_center_widths,
+    _infer_tensor_device_and_dtype,
+    _plane_coord_names,
+    _to_torch_scalar_or_tensor,
+    plane_normal_poynting,
+)
+from .runtime.spectral import (
+    advance_observer_entry_phases,
+    build_observer_spectral_entry,
+    observer_stagger_weights,
+)
 
 _PLANE_ALIGNMENT_RULES = {
     "x": {
@@ -41,10 +48,6 @@ _FLUX_KERNEL_COMPONENTS = {
 
 def _field_name(component):
     return normalize_component(component).capitalize()
-
-
-def _plane_coord_names(axis):
-    return _PLANE_COORD_NAMES[normalize_axis(axis)]
 
 
 def _observer_is_point(observer):
@@ -236,215 +239,6 @@ def _spectral_scale(entry):
     if entry["sample_count"] > 0:
         return 2.0 / entry["sample_count"]
     return 0.0
-
-
-def _contains_torch_tensor(value):
-    if isinstance(value, torch.Tensor):
-        return True
-    if isinstance(value, dict):
-        return any(_contains_torch_tensor(item) for item in value.values())
-    if isinstance(value, (list, tuple)):
-        return any(_contains_torch_tensor(item) for item in value)
-    return False
-
-
-def _infer_tensor_device_and_dtype(*values):
-    for value in values:
-        if isinstance(value, torch.Tensor):
-            return value.device, value.real.dtype
-    return None, torch.float32
-
-
-def _to_torch_scalar_or_tensor(value, *, device, dtype):
-    if isinstance(value, torch.Tensor):
-        return value.to(device=device)
-    return torch.as_tensor(value, device=device, dtype=dtype)
-
-
-def _cell_center_weights_1d(points):
-    """Control-volume widths for samples located at Yee cell centers."""
-    if isinstance(points, torch.Tensor):
-        coords = points.to(dtype=points.real.dtype)
-        count = int(coords.numel())
-        if count <= 1:
-            return torch.ones((count,), device=coords.device, dtype=coords.dtype)
-        diffs = coords[1:] - coords[:-1]
-        weights = torch.empty((count,), device=coords.device, dtype=coords.dtype)
-        weights[0] = diffs[0]
-        weights[-1] = diffs[-1]
-        if count > 2:
-            weights[1:-1] = (diffs[:-1] + diffs[1:]) / 2.0
-        return weights
-
-    coords = np.asarray(points, dtype=float)
-    count = coords.size
-    if count <= 1:
-        return np.ones((count,), dtype=float)
-    diffs = np.diff(coords)
-    weights = np.empty((count,), dtype=float)
-    weights[0] = diffs[0]
-    weights[-1] = diffs[-1]
-    if count > 2:
-        weights[1:-1] = (diffs[:-1] + diffs[1:]) / 2.0
-    return weights
-
-
-def _exact_cell_center_widths(solver, axis, points):
-    """Resolve aligned Yee center samples to their exact primal cell widths."""
-
-    axis_name = normalize_axis(axis)
-    centers = np.asarray(
-        {
-            "x": solver.scene.x_half64,
-            "y": solver.scene.y_half64,
-            "z": solver.scene.z_half64,
-        }[axis_name],
-        dtype=np.float64,
-    )
-    widths = np.asarray(
-        {
-            "x": solver.scene.dx_primal64,
-            "y": solver.scene.dy_primal64,
-            "z": solver.scene.dz_primal64,
-        }[axis_name],
-        dtype=np.float64,
-    )
-    requested = np.asarray(points, dtype=np.float64).reshape(-1)
-    indices = np.asarray(
-        [int(np.argmin(np.abs(centers - value))) for value in requested],
-        dtype=np.int64,
-    )
-    matched = centers[indices]
-    tolerance = 1.0e-7 * np.maximum.reduce(
-        (np.ones_like(requested), np.abs(requested), np.abs(matched))
-    )
-    if not np.all(np.abs(requested - matched) <= tolerance):
-        raise ValueError("Aligned plane coordinates do not lie on Yee cell centers.")
-    return widths[indices]
-
-
-def plane_normal_poynting(result):
-    """Per-cell time-averaged normal Poynting ``S.n`` and cell-area weights.
-
-    ``S.n = 0.5 * Re((E x conj(H)) . n_hat)`` in W/m^2, oriented by the payload's
-    ``normal_direction`` (``"+"`` -> ``+axis``, ``"-"`` -> ``-axis``). The returned
-    ``poynting`` carries a leading frequency axis only when the payload is
-    multi-frequency; ``weights`` is the ``(nu, nv)`` cell-area map. Returns torch
-    tensors when the payload holds tensors, else NumPy arrays. This is the single
-    source of truth shared by plane-flux integration and incident power density so
-    both stay exactly consistent (``flux == sum(poynting * weights)``).
-    """
-
-    axis = normalize_axis(result["axis"])
-    axis_index = _AXIS_CODES[axis]
-    coord_names = _plane_coord_names(axis)
-    frequencies = tuple(float(freq) for freq in result.get("frequencies", (result["frequency"],)))
-    has_multi_frequency = len(frequencies) > 1
-
-    if _contains_torch_tensor(result):
-        device, coord_dtype = _infer_tensor_device_and_dtype(
-            result.get(coord_names[0]),
-            result.get(coord_names[1]),
-            result.get("Ex"),
-            result.get("Ey"),
-            result.get("Ez"),
-            result.get("Hx"),
-            result.get("Hy"),
-            result.get("Hz"),
-        )
-        coord_a = _to_torch_scalar_or_tensor(result[coord_names[0]], device=device, dtype=coord_dtype)
-        coord_b = _to_torch_scalar_or_tensor(result[coord_names[1]], device=device, dtype=coord_dtype)
-        exact_widths = result.get("cell_widths")
-        if exact_widths is None:
-            weights = _cell_center_weights_1d(coord_a)[:, None] * _cell_center_weights_1d(coord_b)[None, :]
-        else:
-            width_a = _to_torch_scalar_or_tensor(
-                exact_widths[coord_names[0]], device=device, dtype=coord_dtype
-            )
-            width_b = _to_torch_scalar_or_tensor(
-                exact_widths[coord_names[1]], device=device, dtype=coord_dtype
-            )
-            weights = width_a[:, None] * width_b[None, :]
-        field_shape = ((len(frequencies),) if has_multi_frequency else ()) + (coord_a.numel(), coord_b.numel())
-        complex_dtype = None
-        for component_name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
-            value = result.get(component_name)
-            if isinstance(value, torch.Tensor):
-                complex_dtype = value.dtype
-                break
-        if complex_dtype is None:
-            complex_dtype = torch.complex64
-        e_field = torch.zeros(field_shape + (3,), device=device, dtype=complex_dtype)
-        h_field = torch.zeros(field_shape + (3,), device=device, dtype=complex_dtype)
-        for component_name in ("Ex", "Ey", "Ez"):
-            if component_name not in result:
-                continue
-            component_index = "xyz".index(component_name[1].lower())
-            e_field[..., component_index] = _to_torch_scalar_or_tensor(
-                result[component_name],
-                device=device,
-                dtype=coord_dtype,
-            )
-        for component_name in ("Hx", "Hy", "Hz"):
-            if component_name not in result:
-                continue
-            component_index = "xyz".index(component_name[1].lower())
-            h_field[..., component_index] = _to_torch_scalar_or_tensor(
-                result[component_name],
-                device=device,
-                dtype=coord_dtype,
-            )
-
-        direction = 1.0 if result.get("normal_direction", "+") == "+" else -1.0
-        poynting = 0.5 * torch.real(torch.cross(e_field, torch.conj(h_field), dim=-1)[..., axis_index]) * direction
-        return poynting, weights
-
-    coord_a = np.asarray(result[coord_names[0]], dtype=float)
-    coord_b = np.asarray(result[coord_names[1]], dtype=float)
-    exact_widths = result.get("cell_widths")
-    if exact_widths is None:
-        weights = _cell_center_weights_1d(coord_a)[:, None] * _cell_center_weights_1d(coord_b)[None, :]
-    else:
-        weights = (
-            np.asarray(exact_widths[coord_names[0]], dtype=float)[:, None]
-            * np.asarray(exact_widths[coord_names[1]], dtype=float)[None, :]
-        )
-    leading_shape = (len(frequencies),) if has_multi_frequency else ()
-    field_shape = leading_shape + (coord_a.size, coord_b.size)
-
-    e_field = np.zeros(field_shape + (3,), dtype=np.complex128)
-    h_field = np.zeros(field_shape + (3,), dtype=np.complex128)
-    for component_name in ("Ex", "Ey", "Ez"):
-        if component_name not in result:
-            continue
-        component_index = "xyz".index(component_name[1].lower())
-        values = np.asarray(result[component_name], dtype=np.complex128)
-        e_field[..., component_index] = values
-    for component_name in ("Hx", "Hy", "Hz"):
-        if component_name not in result:
-            continue
-        component_index = "xyz".index(component_name[1].lower())
-        values = np.asarray(result[component_name], dtype=np.complex128)
-        h_field[..., component_index] = values
-
-    direction = 1.0 if result.get("normal_direction", "+") == "+" else -1.0
-    poynting = 0.5 * np.real(np.cross(e_field, np.conj(h_field), axis=-1)[..., axis_index]) * direction
-    return poynting, weights
-
-
-def _compute_plane_flux(result):
-    frequencies = tuple(float(freq) for freq in result.get("frequencies", (result["frequency"],)))
-    has_multi_frequency = len(frequencies) > 1
-    poynting, weights = plane_normal_poynting(result)
-    if isinstance(poynting, torch.Tensor):
-        flux = torch.sum(poynting * weights, dim=(-2, -1))
-        if not has_multi_frequency:
-            return flux.reshape(())
-        return flux
-    flux = np.sum(poynting * weights, axis=(-2, -1))
-    if not has_multi_frequency:
-        return float(flux)
-    return flux
 
 
 def clear_observers(solver):
@@ -642,27 +436,15 @@ def prepare_observers(solver, frequencies, window_type, time_steps):
             if observer.get("monitor_frequencies") is not None
         ),
     )
-    solver._observer_spectral_entries = []
-    for frequency in requested_frequencies:
-        omega_dt = 2 * np.pi * frequency * solver.dt
-        solver._observer_spectral_entries.append(
-            {
-                "frequency": float(frequency),
-                "start_step": solver._compute_spectral_start_step(
-                    frequency,
-                    window_type=solver.observer_window_type,
-                ),
-                "end_step": time_steps,
-                "window_normalization": 0.0,
-                "sample_count": 0,
-                "phase_cos": 1.0,
-                "phase_sin": 0.0,
-                "phase_step_cos": np.cos(omega_dt),
-                "phase_step_sin": np.sin(omega_dt),
-                "source_dft_real": 0.0,
-                "source_dft_imag": 0.0,
-            }
+    solver._observer_spectral_entries = [
+        build_observer_spectral_entry(
+            solver,
+            frequency,
+            end_step=time_steps,
+            window_type=solver.observer_window_type,
         )
+        for frequency in requested_frequencies
+    ]
     frequency_to_index = {entry["frequency"]: index for index, entry in enumerate(solver._observer_spectral_entries)}
 
     for observer in solver.observers:
@@ -822,31 +604,10 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
             entry["source_dft_real"] += source_signal * weighted_cos
             entry["source_dft_imag"] += source_signal * weighted_sin
 
-        # Yee time-stagger convention for spectral observers.
-        #
-        # The electric observers accumulate at the plain running-DFT step phase
-        # (offset 0), colocated with the full-field DFT accumulator and the
-        # source-current DFT: E^(n+1) is labelled at (n+1)dt. The magnetic
-        # observers carry an extra -0.5*omega*dt phase (a half-step retard), so
-        # H^(n+1/2) is labelled at (n+1/2)dt. The E-H *relative* label offset is
-        # therefore exactly +1/2 step -- the physical Yee stagger the
-        # time-averaged Poynting cross term S = 1/2 Re(E x H*) requires. The
-        # common step-phase cancels in S, so only the +1/2 relative offset is
-        # observable; retarding H (rather than advancing E) keeps E colocated
-        # with the plain DFT slices used everywhere else.
-        def _h_offset_weights(field_name):
-            if field_name.startswith("E"):
-                return weighted_cos, weighted_sin
-            phase_offset = -0.5 * 2.0 * np.pi * entry["frequency"] * solver.dt
-            offset_cos = np.cos(phase_offset)
-            offset_sin = np.sin(phase_offset)
-            return (
-                weighted_cos * offset_cos - weighted_sin * offset_sin,
-                weighted_sin * offset_cos + weighted_cos * offset_sin,
-            )
-
+        # The E/H half-step retard convention lives in observer_stagger_weights;
+        # the rotation constants are precomputed on the entry at prepare time.
         for group, local_index in solver._observer_point_groups_by_frequency[global_index]:
-            group_cos, group_sin = _h_offset_weights(group["field_name"])
+            group_cos, group_sin = observer_stagger_weights(entry, group["field_name"], weighted_cos, weighted_sin)
             solver.fdtd_module.accumulatePointObservers3D(
                 field=getattr(solver, group["field_name"]),
                 pointI=group["point_i"],
@@ -870,7 +631,7 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
                 ).launchRaw()
 
         for group, local_index in solver._observer_plane_groups_by_frequency[global_index]:
-            group_cos, group_sin = _h_offset_weights(group["field_name"])
+            group_cos, group_sin = observer_stagger_weights(entry, group["field_name"], weighted_cos, weighted_sin)
             solver.fdtd_module.accumulatePlaneObserver3D(
                 field=getattr(solver, group["field_name"]),
                 planeRealAccum=group["real"][local_index],
@@ -894,13 +655,7 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
         entry["window_normalization"] += window_weight
         entry["sample_count"] += 1
 
-    for entry in solver._observer_spectral_entries:
-        entry["phase_cos"], entry["phase_sin"] = solver._advance_phase(
-            entry["phase_cos"],
-            entry["phase_sin"],
-            entry["phase_step_cos"],
-            entry["phase_step_sin"],
-        )
+    advance_observer_entry_phases(solver)
     solver._sync_observer_primary_state()
 
 

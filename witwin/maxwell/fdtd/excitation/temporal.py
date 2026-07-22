@@ -3,11 +3,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from ...sources import (
-    SOURCE_TIME_KIND_CW,
-    SOURCE_TIME_KIND_GAUSSIAN_PULSE,
-    evaluate_source_time,
-)
+from ...sources import evaluate_source_time
+from ...waveforms import evaluate_time_shifted_waveform_torch
 
 
 def build_source_term(
@@ -243,30 +240,6 @@ def _launch_time_shifted_patch(solver, *, field_name, term, source_time, time_va
     ).launchRaw()
 
 
-def _evaluate_time_shifted_signal_tensor(source_time, sample_time):
-    # Per-cell source-time waveform for a time-shifted patch, matching the
-    # ``evaluate_source_time`` device kernel branch-for-branch (kind 0 = CW,
-    # kind 1 = Gaussian pulse, anything else = Ricker) so a Bloch pulse injected
-    # through this Torch path is numerically identical to the non-Bloch kernel.
-    kind_code = int(source_time["kind_code"])
-    amplitude = float(source_time["amplitude"])
-    frequency = float(source_time["frequency"])
-    phase = float(source_time.get("phase", 0.0))
-    delay = float(source_time.get("delay", 0.0))
-    two_pi = 2.0 * np.pi
-    if kind_code == SOURCE_TIME_KIND_CW:
-        return amplitude * torch.cos(two_pi * frequency * sample_time + phase)
-    if kind_code == SOURCE_TIME_KIND_GAUSSIAN_PULSE:
-        inv_sigma = max(two_pi * float(source_time["fwidth"]), 1.0e-30)
-        tau = sample_time - delay
-        envelope = torch.exp(-0.5 * (tau * inv_sigma) ** 2)
-        return amplitude * envelope * torch.cos(two_pi * frequency * tau + phase)
-    tau = sample_time - delay
-    alpha = np.pi * frequency * tau
-    alpha_sq = alpha * alpha
-    return amplitude * (1.0 - 2.0 * alpha_sq) * torch.exp(-alpha_sq)
-
-
 def _time_shifted_signal_patch(term, source_time, time_value):
     # Collapse the delayed pulse to a real per-cell amplitude patch on-device.
     # The scatter into the split real/imag Bloch field (interior injection plus
@@ -274,7 +247,7 @@ def _time_shifted_signal_patch(term, source_time, time_value):
     # kernel; only the envelope evaluation is Torch, exactly as the CW-phased
     # Bloch path already precomputes its cos/sin combination before scattering.
     sample_time = float(time_value) - term["delay_patch"]
-    signal_patch = _evaluate_time_shifted_signal_tensor(source_time, sample_time) * term["patch"]
+    signal_patch = evaluate_time_shifted_waveform_torch(source_time, sample_time) * term["patch"]
     activation_delay_patch = term.get("activation_delay_patch")
     if activation_delay_patch is not None:
         signal_patch = torch.where(

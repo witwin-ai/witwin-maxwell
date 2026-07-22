@@ -162,6 +162,76 @@ def sync_observer_primary_state(solver):
     solver.observer_phase_step_sin = primary["phase_sin"]
 
 
+def build_observer_spectral_entry(solver, frequency, *, end_step, window_type):
+    """Running-DFT state for one observer frequency.
+
+    Carries the per-step phase recurrence step ``(cos, sin)(omega*dt)`` and the
+    constant magnetic half-step retard rotation ``(cos, sin)(-0.5*omega*dt)``
+    (see :func:`observer_stagger_weights`), both precomputed once here so the
+    per-step accumulation performs no trigonometric evaluation.
+    """
+    frequency = float(frequency)
+    omega_dt = 2 * np.pi * frequency * solver.dt
+    h_phase_offset = -0.5 * 2.0 * np.pi * frequency * solver.dt
+    return {
+        "frequency": frequency,
+        "start_step": compute_spectral_start_step(
+            solver,
+            frequency,
+            window_type=window_type,
+        ),
+        "end_step": end_step,
+        "window_normalization": 0.0,
+        "sample_count": 0,
+        "phase_cos": 1.0,
+        "phase_sin": 0.0,
+        "phase_step_cos": np.cos(omega_dt),
+        "phase_step_sin": np.sin(omega_dt),
+        "h_offset_cos": np.cos(h_phase_offset),
+        "h_offset_sin": np.sin(h_phase_offset),
+        "source_dft_real": 0.0,
+        "source_dft_imag": 0.0,
+    }
+
+
+def observer_stagger_weights(entry, field_name, weighted_cos, weighted_sin):
+    """Yee time-stagger convention for spectral observers.
+
+    The electric observers accumulate at the plain running-DFT step phase
+    (offset 0), colocated with the full-field DFT accumulator and the
+    source-current DFT: E^(n+1) is labelled at (n+1)dt. The magnetic
+    observers carry an extra -0.5*omega*dt phase (a half-step retard), so
+    H^(n+1/2) is labelled at (n+1/2)dt. The E-H *relative* label offset is
+    therefore exactly +1/2 step -- the physical Yee stagger the
+    time-averaged Poynting cross term S = 1/2 Re(E x H*) requires. The
+    common step-phase cancels in S, so only the +1/2 relative offset is
+    observable; retarding H (rather than advancing E) keeps E colocated
+    with the plain DFT slices used everywhere else. The retard rotation
+    ``(h_offset_cos, h_offset_sin)`` is an entry constant precomputed by
+    :func:`build_observer_spectral_entry`.
+    """
+    if field_name.startswith("E"):
+        return weighted_cos, weighted_sin
+    offset_cos = entry["h_offset_cos"]
+    offset_sin = entry["h_offset_sin"]
+    return (
+        weighted_cos * offset_cos - weighted_sin * offset_sin,
+        weighted_sin * offset_cos + weighted_cos * offset_sin,
+    )
+
+
+def advance_observer_entry_phases(solver):
+    """Advance every observer entry's running-DFT phase by one time step."""
+    for entry in solver._observer_spectral_entries:
+        entry["phase_cos"], entry["phase_sin"] = advance_phase(
+            solver,
+            entry["phase_cos"],
+            entry["phase_sin"],
+            entry["phase_step_cos"],
+            entry["phase_step_sin"],
+        )
+
+
 def source_time_kind(solver):
     source_time = getattr(solver, "_source_time", None)
     if source_time is None:
