@@ -1009,22 +1009,35 @@ def _magnetic_update_coefficients(solver, mu, sigma_m, pml_decay):
 
 
 def _pec_edge_open_fractions(solver):
-    """Per-E-edge open fractions ``1 - fill`` from the PEC occupancy, or ``None``.
+    """Per-E-edge open fractions ``1 - fill``, or ``None`` when the scene has no PEC.
 
-    The PEC fill on each E edge is the two-endpoint node->edge average of the PEC
-    occupancy (same stencil as eps, keeping it consistent and differentiable). In
-    ``staircase`` mode the fill is hard-thresholded at 0.5; in ``conformal`` mode the
-    fractional fill is kept so the effective PEC wall sits at the sub-cell crossing.
+    ``staircase`` mode thresholds the two-endpoint node->edge average of the smoothed
+    PEC occupancy at 0.5, so every edge is either a hard short or fully open.
+
+    ``conformal`` mode consumes the compiler's per-edge coverage fraction
+    (``pec_edge_fill``): the fraction of that Yee edge's length that lies inside the
+    conductor, obtained by interpolating the PEC signed distance along the edge. That
+    quantity has compact support -- exactly 0 for an edge the surface does not reach
+    and exactly 1 for an edge wholly inside -- so a conductor face that is parallel to
+    an edge (every tangential edge of an axis-aligned face) reproduces the staircase
+    result bit for bit, and only genuinely cut edges take a fractional open fraction.
+    The node-average path must not be used here: the smoothed node occupancy has
+    tails several cells wide, and because the open fraction multiplies the E update
+    every step, a tail value ``f`` acts as a spurious conductivity ``eps*f/dt`` on
+    vacuum edges around the conductor.
     """
     model = getattr(solver, "_compiled_material_model", None)
     pec_occupancy = None if model is None else model.get("pec_occupancy")
     if pec_occupancy is None:
         return None
     mode = model.get("pec_mode", "staircase")
+    edge_fill = model.get("pec_edge_fill") if mode == "conformal" else None
     open_fractions = {}
     for component_name in ("Ex", "Ey", "Ez"):
-        fill = average_node_to_component(solver, pec_occupancy, component_name)
-        if mode == "staircase":
+        if edge_fill is not None:
+            fill = edge_fill[component_name]
+        else:
+            fill = average_node_to_component(solver, pec_occupancy, component_name)
             fill = (fill >= 0.5).to(fill.dtype)
         open_fractions[component_name] = 1.0 - fill
     return open_fractions
@@ -1036,8 +1049,13 @@ def _apply_pec_edge_suppression(solver):
     Scaling both ``decay`` and ``curl`` by ``open = 1 - fill`` turns the update into
     ``E_new = open * (decay*E_old + curl*(curlH - J))``, so a fully covered edge
     (``fill = 1``) keeps tangential E exactly zero while a fractional edge acts as a
-    soft short with sub-cell wall placement. Never amplifies (``open <= 1``), so the
-    scheme is unconditionally stable and needs no area floor.
+    soft short. Never amplifies (``open <= 1``), so the scheme is unconditionally
+    stable and needs no cut-area floor.
+
+    The soft short is a per-step multiplicative factor, i.e. an effective
+    conductivity ``eps*fill/dt`` on that edge. It is therefore only meaningful on
+    edges the conductor surface genuinely cuts; see
+    :func:`_pec_edge_open_fractions` for why the fill must have compact support.
     """
     open_fractions = _pec_edge_open_fractions(solver)
     if open_fractions is None:

@@ -1508,6 +1508,80 @@ def _pec_occupancy(scene, coords=None):
     return occupancy
 
 
+def _pec_periodic_shift_options(scene):
+    """Per-axis translation options that bring periodic images of PEC geometry into view."""
+    domain_range = getattr(scene, "physical_domain_range", None)
+    options = []
+    for axis_index, axis in enumerate(("x", "y", "z")):
+        if domain_range is not None and scene.boundary.axis_kind(axis) in ("periodic", "bloch"):
+            span = float(domain_range[2 * axis_index + 1]) - float(domain_range[2 * axis_index])
+            options.append((-span, 0.0, span))
+        else:
+            options.append((0.0,))
+    return tuple(options)
+
+
+def _pec_signed_distance(scene, coords=None):
+    """Union signed distance (min over PEC structures and periodic images) on the node grid.
+
+    Returns ``None`` when the scene has no PEC structure. Differentiable in PEC
+    geometry through ``signed_distance``.
+    """
+    structures = pec_structures(scene)
+    if not structures:
+        return None
+    xx, yy, zz = (scene.X, scene.Y, scene.Z) if coords is None else coords
+    shift_options = _pec_periodic_shift_options(scene)
+    union = None
+    for structure in structures:
+        for shift_x, shift_y, shift_z in product(*shift_options):
+            sample = structure.geometry.signed_distance(
+                xx - shift_x, yy - shift_y, zz - shift_z
+            )
+            union = sample if union is None else torch.minimum(union, sample)
+    return union
+
+
+def _edge_line_coverage(low, high):
+    """Fraction of a Yee edge covered by the conductor, from its endpoint signed distances.
+
+    The signed distance is interpolated linearly along the edge (an SDF is
+    eikonal, so this is exact for a planar cut and second-order for a curved one)
+    and the covered fraction is the part of the segment with ``sd <= 0``. The
+    result has compact support by construction: an edge with both endpoints
+    outside is exactly ``0`` and an edge with both endpoints inside is exactly
+    ``1``, with no tail. That is what makes the conformal treatment collapse onto
+    the exact staircase treatment wherever the conductor surface does not cut the
+    edge -- in particular for every tangential edge of a grid-aligned face.
+    """
+    lower = torch.minimum(low, high)
+    upper = torch.maximum(low, high)
+    span = upper - lower
+    cut = span > 0
+    safe_span = torch.where(cut, span, torch.ones_like(span))
+    fraction = torch.clamp(-lower / safe_span, 0.0, 1.0)
+    # ``span == 0`` means the SDF is constant along the edge (a face parallel to
+    # the edge): the edge is either wholly conductor or wholly open.
+    degenerate = (upper <= 0.0).to(low.dtype)
+    return torch.where(cut, fraction, degenerate)
+
+
+def _pec_edge_fill(scene, coords=None):
+    """Conformal PEC coverage fraction of every Yee E edge, or ``None``.
+
+    Keyed by electric component name with the same shapes the node->edge average
+    produces, so the runtime can consume it in place of that average.
+    """
+    signed_distance = _pec_signed_distance(scene, coords=coords)
+    if signed_distance is None:
+        return None
+    return {
+        "Ex": _edge_line_coverage(signed_distance[:-1, :, :], signed_distance[1:, :, :]),
+        "Ey": _edge_line_coverage(signed_distance[:, :-1, :], signed_distance[:, 1:, :]),
+        "Ez": _edge_line_coverage(signed_distance[:, :, :-1], signed_distance[:, :, 1:]),
+    }
+
+
 def _sheet_plane_layout(scene, structure):
     """Resolve the Yee-plane placement of a 2D-sheet structure.
 
@@ -2292,6 +2366,7 @@ def compile_material_model(
         model = _apply_sheet_structures(scene, model)
         model["pec_occupancy"] = _pec_occupancy(scene)
         model["pec_mode"] = pec_mode
+        model["pec_edge_fill"] = _pec_edge_fill(scene) if pec_mode == "conformal" else None
         model["surface_impedance"] = surface_layout
         model["edge_components"] = compile_edge_material_components(
             scene,
@@ -2431,6 +2506,7 @@ def compile_material_model(
     model = _apply_sheet_structures(scene, model)
     model["pec_occupancy"] = _pec_occupancy(scene)
     model["pec_mode"] = pec_mode
+    model["pec_edge_fill"] = _pec_edge_fill(scene) if pec_mode == "conformal" else None
     model["surface_impedance"] = surface_layout
     model["edge_components"] = compile_edge_material_components(
         scene,
