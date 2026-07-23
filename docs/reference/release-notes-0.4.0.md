@@ -633,6 +633,12 @@ boundary (stable-release reference, 2026-07-21)"* in
 - `python -m pytest tests` on the release tree: **`16 failed, 3098 passed, 65 skipped, 3 xfailed, 1 xpassed` (2026-07-22, 2x RTX A6000, CUDA 13 / torch 2.13)**
 - Every failure is in the deferred FDFD family; no other suite fails.
 
+**Distribution matrix.** The release workflow builds Linux
+`manylinux_2_28_x86_64` and Windows x86_64 CUDA 12.8 wheels from the same
+PyTorch 2.10 Stable ABI source. The packaged binary is load-tested across CPython
+3.10-3.14 and PyTorch 2.10-2.13. Both platform fat binaries are checked for the
+maintained native architecture set, including SM87 SASS.
+
 Note when reading the battery: the FDFD family contributes 16 expected failures from
 the missing optional `nvmath` dependency (section 4.1). They are not regressions and
 must not be triaged away by installing that dependency.

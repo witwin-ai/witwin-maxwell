@@ -20,9 +20,9 @@ pip install witwin-maxwell
 
 ## Prebuilt CUDA Support
 
-Release wheels are built for Linux x86_64 and Windows x86_64 with CUDA 12.8. Each wheel carries one Python-independent native FDTD library using the LibTorch Stable ABI introduced for this surface in PyTorch 2.10. The same wheel and native binary are CI load-tested with PyTorch 2.10/cu128, 2.11/cu128, and 2.12/cu126 across CPython 3.10-3.14; no Torch-minor-specific binary selection or JIT rebuild is required. The fat binaries contain native code for compute capabilities 7.0, 7.5, 8.0, 8.6, 8.9, 9.0, 10.0, 10.1, and 12.0, plus compute 12.0 PTX. This includes native coverage for RTX 2080-class Turing GPUs and current data-center and RTX/RTX PRO Blackwell families.
+Release wheels are built for Linux x86_64 and Windows x86_64 with CUDA 12.8. Each wheel carries one Python-independent native FDTD library using the LibTorch Stable ABI introduced for this surface in PyTorch 2.10. The same wheel and native binary are CI load-tested with PyTorch 2.10/cu128, 2.11/cu128, 2.12/cu126, and 2.13/cu126 across CPython 3.10-3.14; no Torch-minor-specific binary selection or JIT rebuild is required. The fat binaries contain native code for compute capabilities 7.0, 7.5, 8.0, 8.6, 8.7, 8.9, 9.0, 10.0, 10.1, and 12.0, plus compute 12.0 PTX. This includes native SM87 coverage alongside RTX 2080-class Turing GPUs and current data-center and RTX/RTX PRO Blackwell families.
 
-Linux wheels target `manylinux_2_35_x86_64`. The installed NVIDIA driver must support the CUDA 12.x runtime supplied by PyTorch; the CUDA toolkit is only needed for source/JIT builds.
+Linux wheels target `manylinux_2_28_x86_64`. The installed NVIDIA driver must support the CUDA 12.x runtime supplied by PyTorch; the CUDA toolkit is only needed for source/JIT builds.
 
 For full CUDA 12.8 and Blackwell support, use at least driver 570.26 on Linux or 570.65 on Windows. Pre-Blackwell systems can use NVIDIA's CUDA 12.x minor-version compatibility floor (525.60.13 on Linux or 528.33 on Windows), subject to NVIDIA's compatibility-mode feature limits.
 
