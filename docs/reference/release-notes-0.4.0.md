@@ -637,7 +637,9 @@ boundary (stable-release reference, 2026-07-21)"* in
 `manylinux_2_28_x86_64` and Windows x86_64 CUDA 12.8 wheels from the same
 PyTorch 2.10 Stable ABI source. The packaged binary is load-tested across CPython
 3.10-3.14 and PyTorch 2.10-2.13. Both platform fat binaries are checked for the
-maintained native architecture set, including SM87 SASS.
+maintained native architecture set, including SM87 SASS. A version tag publishes
+only after the full matrix succeeds, then creates the release with the verified
+wheels and source distribution attached.
 
 Note when reading the battery: the FDFD family contributes 16 expected failures from
 the missing optional `nvmath` dependency (section 4.1). They are not regressions and

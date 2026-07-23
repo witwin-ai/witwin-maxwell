@@ -970,3 +970,6 @@ Capability level: **differentiable-surrogate (non-physical, non-regulatory)**. T
 - GitHub Actions builds Linux CUDA wheels inside manylinux_2_28 and Windows
   wheels on Windows Server 2022. Release fatbins include native SM87 SASS
   alongside the maintained CUDA 12.8 architecture set.
+- A `witwin-maxwell-v*` tag runs the complete Stable ABI compatibility matrix,
+  publishes the verified wheel and source artifacts through trusted publishing,
+  and creates the corresponding release with those artifacts attached.

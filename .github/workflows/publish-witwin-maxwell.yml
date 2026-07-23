@@ -5,14 +5,13 @@ on:
     branches:
       - master
       - "codex/**"
+    tags:
+      - "witwin-maxwell-v*"
   pull_request:
-  release:
-    types: [published]
   workflow_dispatch:
 
 jobs:
   validate_release:
-    if: github.event_name != 'release' || (startsWith(github.event.release.tag_name, 'witwin-maxwell-v') && !github.event.release.prerelease)
     name: Validate release
     runs-on: ubuntu-latest
     outputs:
@@ -41,11 +40,11 @@ jobs:
           fi
 
       - name: Validate release tag and package version
-        if: github.event_name == 'release'
+        if: startsWith(github.ref, 'refs/tags/witwin-maxwell-v')
         shell: bash
         env:
           PACKAGE_DIR: ${{ steps.package_dir.outputs.path }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python - <<'PY'
           import os
@@ -378,7 +377,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    if: github.event_name == 'release'
+    if: startsWith(github.ref, 'refs/tags/witwin-maxwell-v')
     needs:
       - build_cuda_wheels
       - test_torch_compatibility
@@ -410,3 +409,42 @@ jobs:
         with:
           packages-dir: dist
           skip-existing: true
+
+  create_release:
+    name: Create release
+    if: startsWith(github.ref, 'refs/tags/witwin-maxwell-v')
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Download source distribution artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - name: Create release with distribution artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#witwin-maxwell-v}"
+          notes="docs/reference/release-notes-${version}.md"
+          test -f "$notes"
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "witwin-maxwell ${version}" \
+            --notes-file "$notes" \
+            dist/*

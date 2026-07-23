@@ -16,6 +16,7 @@ All notable user-visible changes to WiTwin Maxwell are documented here. The proj
 - Moved material sampling to native Yee-component locations, improving the geometry validation cluster while changing geometry-resolved numerical baselines.
 - Published one PyTorch Stable ABI CUDA binary per platform for PyTorch 2.10 and newer, load-tested through PyTorch 2.13 and CPython 3.10-3.14.
 - Built Linux wheels against `manylinux_2_28`; Linux and Windows CUDA fat binaries include native SM87 SASS.
+- Made version tags drive the gated package publication and release-artifact workflow.
 
 ### Fixed
 
