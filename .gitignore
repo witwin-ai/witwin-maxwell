@@ -241,5 +241,15 @@ benchmark/
 .codex-tmp/
 .test-tmp/
 .tmp/
-experiments/
+# Experiment outputs are enormous (90+ GB of generated datasets) and stay local. The generator
+# *source* is not an output: it defines the dataset contract that downstream consumers depend on,
+# so it is tracked explicitly. Add a file here rather than relaxing the rule -- `experiments/*`
+# keeps every other directory excluded while still letting git descend far enough for these
+# negations to apply.
+experiments/*
+!experiments/fdtd_data_generator/
+experiments/fdtd_data_generator/*
+!experiments/fdtd_data_generator/generate.py
+!experiments/fdtd_data_generator/README.md
+!experiments/fdtd_data_generator/REPORT.md
 .worktrees/
