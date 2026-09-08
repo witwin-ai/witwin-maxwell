@@ -217,3 +217,21 @@ matrix. Driver peaks use 20 ms sampling and may miss short transients.
 Raw evidence: `benchmark/plots/batch/launch-n10-native-eager.json`.
 `benchmark/RESULTS.md` retains both the historical independent baseline and this
 new comparison. The CLI/report workflow has **11 passing tests**.
+
+## Correctness audit follow-up
+
+An adversarial audit reproduced stale source parameters after Python object-ID
+reuse, premature slot-lock release when another thread closed an active iterator,
+and iterator creation racing with prepared-context closure. These are corrected
+with input identity retention, iterator-operation ownership, and a closed-state
+check under the prepared lock. Inference tensors now bypass compilation reuse
+because they have no version counter. Structure variation envelopes fail before
+execution until compiled influence validation exists; full-scene compilation
+without envelope declarations remains supported.
+
+The five new cache/concurrency/envelope regressions and existing public Batch
+suites pass together: **65 passed**. Additional numerical audit coverage checks
+graded grids, PEC/PMC/CPML boundaries, normalized windowed multifrequency fields,
+plane/flux spectra, retained full-field outputs, and independently terminating
+lanes. Ordinary-solver parity is a compatibility check, not independent physical
+validation or batch-adjoint acceptance.

@@ -56,6 +56,11 @@ class PreparedBatch:
         if batch.outputs.result_device not in ("local", "cpu", policy.devices[0]):
             raise NotImplementedError("Cross-device batch result export requires the pending multi-GPU scheduler.")
         self._validate_inputs(batch.parameters)
+        if batch.variation is not None and batch.variation.structures:
+            raise NotImplementedError(
+                "Structure variation envelopes require compiled influence validation. "
+                "Omit the envelope declaration to use full-scene cohort compilation."
+            )
         self.device = policy.devices[0]
         if not torch.cuda.is_available():
             raise RuntimeError("PreparedBatch requires an accessible CUDA device.")
@@ -68,6 +73,7 @@ class PreparedBatch:
         self._cohort = None
         self._models = ()
         self._loaded_key = None
+        self._loaded_parameters = ()
         self._records = ()
         self._groups = batch.plan().groups
         self._stream = torch.cuda.Stream(device=self.device)
@@ -136,12 +142,17 @@ class PreparedBatch:
 
     def _load(self, indices, parameters, group_id):
         from ..fdtd.runtime.batch import NativeFieldSlot
+        inputs = () if parameters is None else tuple(
+            value for kind in ("region_densities", "source_scales")
+            for value in getattr(parameters, kind).values())
         key = (tuple(indices), None if parameters is None else tuple(
-            (kind, name, id(value), value._version)
+            (kind, name, id(value), object() if torch.is_inference(value) else value._version)
             for kind in ("region_densities", "source_scales")
             for name, value in getattr(parameters, kind).items()))
         if key == self._loaded_key:
             return
+        self._loaded_key = None
+        self._loaded_parameters = ()
         materializer = copy.copy(self.batch)
         materializer.parameters = parameters
         models, solvers = [], []
@@ -173,6 +184,11 @@ class PreparedBatch:
             self._slot = NativeFieldSlot(self.capacity, self.device)
         self._slot.bind(solvers)
         self._models = tuple(models)
+        # Keep identities alive for as long as the cached cohort uses them.
+        # Source amplitudes materialize to Python floats, so the compiled Scene
+        # alone does not retain their original tensors. Inference tensors lack
+        # version counters and deliberately never reuse a cached compilation.
+        self._loaded_parameters = inputs
         self._loaded_key = key
         self._cohort = group_id
 
@@ -241,9 +257,16 @@ class PreparedBatch:
         self._validate_inputs(parameters)
         if not self._gate.acquire(blocking=False):
             raise RuntimeError("PreparedBatch does not allow concurrent run or iteration.")
-        self._cancel.clear()
-        self._records = ()
-        return BatchResultIterator(self, parameters, order=order)
+        try:
+            # close() may have completed while input validation was running.
+            if self._closed:
+                raise RuntimeError("PreparedBatch is closed.")
+            self._cancel.clear()
+            self._records = ()
+            return BatchResultIterator(self, parameters, order=order)
+        except BaseException:
+            self._gate.release()
+            raise
 
     def _iterate(self, parameters, order):
         records = {}
@@ -350,6 +373,7 @@ class PreparedBatch:
             self._slot = None
             self._models = ()
             self._loaded_key = None
+            self._loaded_parameters = ()
             self._closed = True
         finally:
             self._gate.release()
@@ -372,35 +396,48 @@ class BatchResultIterator:
         self._closed = False
         self._owns_prepared = False
         self._final_records = ()
+        self._iteration_gate = threading.Lock()
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        if self._closed:
-            raise StopIteration
+        if not self._iteration_gate.acquire(blocking=False):
+            raise RuntimeError("BatchResultIterator.next() is already active.")
         try:
-            return next(self._generator)
-        except BaseException:
-            self.close()
-            raise
+            if self._closed:
+                raise StopIteration
+            try:
+                return next(self._generator)
+            except BaseException:
+                self._close_idle_generator()
+                raise
+        finally:
+            self._iteration_gate.release()
 
     @property
     def records(self):
         return self._final_records if self._closed else self.prepared.records
 
     def close(self):
+        if not self._iteration_gate.acquire(blocking=False):
+            raise RuntimeError("Cannot close while next() is active; request_cancel(), then close after it returns.")
+        try:
+            self._close_idle_generator()
+        finally:
+            self._iteration_gate.release()
+
+    def _close_idle_generator(self):
         if self._closed:
             return
-        try:
-            self._generator.close()
-        finally:
-            self._closed = True
-            self.prepared._finish_records({r.index: r for r in self.prepared.records})
-            self._final_records = self.prepared.records
-            self.prepared._gate.release()
-            if self._owns_prepared:
-                self.prepared.close()
+        # Release ownership only after the generator has actually stopped.
+        self._generator.close()
+        self.prepared._finish_records({r.index: r for r in self.prepared.records})
+        self._final_records = self.prepared.records
+        self._closed = True
+        self.prepared._gate.release()
+        if self._owns_prepared:
+            self.prepared.close()
 
     def __enter__(self):
         return self

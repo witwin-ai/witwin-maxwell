@@ -56,6 +56,12 @@ with submission.prepare() as prepared:
 输入列表若还改变源幅度，应显式声明 `BatchVariation(sources=("drive",))`；
 模板方式用 `BatchParameters` 的 density/source scale 张量，
 `prepared.run(parameters=updated)` 必须保留相同 schema 与 N。
+缓存保留输入张量身份；普通 PyTorch 原位操作通过版本计数触发更新，
+inference tensor 每次保守重新编译。外部共享存储或 `.data` 的未跟踪写入
+必须通过新张量提交。当前声明 `BatchVariation.structures` 包络会明确拒绝执行，
+因为编译后影响范围证明尚未实现；省略包络仍可使用完整场景编译。
+迭代器 `next()` 活跃时不允许另一线程再次 `next()` 或 `close()`；
+使用 `request_cancel()`，待调用返回后再关闭。
 默认 `batch_size="auto"` 暂时保守选择 1，并不执行吞吐调优。
 `graph="auto"` 暂时选择 eager；explicit `required`、`graph_steps`、
 `tune=True`、严格 `memory_limit_bytes`、多 GPU/Q=2 和可训练输入均明确拒绝。
