@@ -13,7 +13,7 @@ from .rational import FitReport, RationalFitConfig, RationalModel, fit_rational
 
 from witwin.core import (
     FrequencyMaterialSample,
-    Material as CoreMaterial,
+    PhysicalMaterial as CoreMaterial,
     MaterialCapabilities,
     StaticMaterialSample,
 )

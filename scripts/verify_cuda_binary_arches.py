@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 
 
-EXPECTED_SASS = ("70", "75", "80", "86", "89", "90", "100", "101", "120")
+EXPECTED_SASS = ("70", "75", "80", "86", "87", "89", "90", "100", "101", "120")
 EXPECTED_PTX_TARGET = "sm_120"
 
 

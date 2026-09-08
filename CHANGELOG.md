@@ -26,7 +26,23 @@ All notable user-visible changes to WiTwin Maxwell are documented here. The proj
 
 ## [0.4.0] - 2026-07-23
 
-- Added RF/circuit, array, and distributed FDTD workflows and expanded numerical validation. See the [0.4.0 release notes](docs/reference/release-notes-0.4.0.md) for the full historical scope and limitations.
+### Added
+
+- RF port, network, antenna, phased-array, thin-wire, electrostatic, capacitance, SAR, exposure, ESD, dielectric-breakdown, gyromagnetic, and generalized surface-impedance workflows.
+- Distributed forward and adjoint execution, including CPML-trainable reverse paths and deterministic multi-device scene-gradient aggregation.
+
+### Changed
+
+- Moved material sampling to native Yee-component locations, improving the geometry validation cluster while changing geometry-resolved numerical baselines.
+- Published one PyTorch Stable ABI CUDA binary per platform for PyTorch 2.10 and newer, load-tested through PyTorch 2.13 and CPython 3.10-3.14.
+- Built Linux wheels against `manylinux_2_28`; Linux and Windows CUDA fat binaries include native SM87 SASS.
+- Made version tags drive the gated package publication and release-artifact workflow.
+
+### Fixed
+
+- Closed release-blocking CUDA graph, distributed checkpoint, conformal PEC, observer staggering, near-to-far quadrature, modal selection, and surface-impedance correctness gaps.
+
+Complete capability boundaries, validation evidence, behavior changes, and known limitations are documented in the [0.4.0 release notes](docs/reference/release-notes-0.4.0.md).
 
 ## [0.3.0] - 2026-07-13
 
