@@ -21,6 +21,24 @@ def test_auto_slots_require_repeatable_gain_and_near_ties_prefer_less_memory():
     assert _select_candidate([one, faster], auto_slots=True) is faster
     near = measurement(1, [.98, .99, 1.], 30)
     assert _select_candidate([one, near], auto_slots=False) is one
+    with pytest.raises(RuntimeError, match="single-slot baseline"):
+        _select_candidate([faster], auto_slots=True)
+
+
+def test_candidate_search_includes_balanced_cohorts_and_skips_idle_slots():
+    from types import SimpleNamespace
+    from witwin.maxwell.execution.tuning import _candidate_policies
+    class Batch:
+        execution = mw.BatchExecution(devices=("cuda:0", "cuda:1"), batch_size="auto",
+            max_batch_size=10, slots_per_device="auto", tune=True, graph_steps=32)
+        def __len__(self):
+            return 10
+        def plan(self):
+            return SimpleNamespace(groups=[dict(variant_indices=list(range(10)))])
+    policies = _candidate_policies(Batch())
+    assert dict(batch_size=5, slots_per_device=1, graph_steps=32) in policies
+    assert dict(batch_size=3, slots_per_device=2, graph_steps=32) in policies
+    assert not any(p["batch_size"] >= 5 and p["slots_per_device"] == 2 for p in policies)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")

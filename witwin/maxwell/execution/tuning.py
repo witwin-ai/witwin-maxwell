@@ -14,7 +14,8 @@ from .plan import BatchPlanReport
 
 def _candidate_policies(batch):
     policy = batch.execution
-    maximum = min(len(batch), policy.max_batch_size)
+    group_sizes = [len(group["variant_indices"]) for group in batch.plan().groups]
+    maximum = min(max(group_sizes), policy.max_batch_size)
     capacities = {min(len(batch), policy.batch_size)} if policy.batch_size != "auto" else {maximum}
     if policy.batch_size == "auto":
         size = 1
@@ -23,8 +24,20 @@ def _candidate_policies(batch):
             size *= 2
     slots = (1, 2) if policy.slots_per_device == "auto" else (policy.slots_per_device,)
     chunks = (16, 32, 64) if policy.graph_steps == "auto" and policy.graph != "off" else (policy.graph_steps,)
-    return [dict(batch_size=b, slots_per_device=q, graph_steps=k)
-            for b in sorted(capacities) for q in slots for k in chunks]
+    candidates = []
+    for q in slots:
+        sizes = set(capacities)
+        if policy.batch_size == "auto":
+            workers = len(policy.devices) * q
+            sizes.add(min(maximum, (max(group_sizes) + workers - 1) // workers))
+        for b in sorted(sizes):
+            # Extra slots cannot overlap work when there are no additional
+            # independent cohorts. Explicit Q remains an explicit user policy.
+            cohorts = sum((count + b - 1) // b for count in group_sizes)
+            if policy.slots_per_device == "auto" and q == 2 and cohorts <= len(policy.devices):
+                continue
+            candidates.extend(dict(batch_size=b, slots_per_device=q, graph_steps=k) for k in chunks)
+    return candidates
 
 
 def _synchronize(devices):
@@ -54,6 +67,8 @@ def _select_candidate(measurements, *, auto_slots):
     eligible = measurements
     if auto_slots:
         singles = [m for m in measurements if m["policy"]["slots_per_device"] == 1]
+        if not singles:
+            raise RuntimeError("Automatic slots require a successful single-slot baseline; retry tuning or set slots_per_device explicitly.")
         if singles:
             best_single = min(singles, key=lambda m: m["median_s"])
             # Require a repeatable >=5% gain, including the observed spread.

@@ -7,6 +7,26 @@ from tests.fdtd.cuda.test_batch_runtime import simulation
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
 
+@pytest.mark.parametrize("slots,devices", [(2, ("cuda:0",)), (1, ("cuda:0", "cuda:1"))])
+def test_automatic_capacity_leaves_work_for_each_worker(slots, devices):
+    if len(devices) > torch.cuda.device_count():
+        pytest.skip("Requires two CUDA devices")
+    sims = [simulation(i, steps=16) for i in range(6)]
+    batch = mw.Simulation.batch(sims, variation=mw.BatchVariation(sources=("drive",)),
+        execution=mw.BatchExecution(devices=devices, slots_per_device=slots, batch_size="auto",
+            scheduling="static", graph="required", memory_limit_bytes=128 * 1024**2))
+    with batch.prepare() as prepared:
+        assert all(child.capacity <= 3 for child in prepared._children)
+        result = prepared.run()
+        result.results()
+        assert all(child._models for child in prepared._children)
+        assert all(child._last_graph_replays > 0 for child in prepared._children)
+        assert {record.device for record in result.records} == set(devices)
+    for i, sim in enumerate(sims):
+        torch.testing.assert_close(result[i].raw_monitor("probe")["components"]["Ez"].to("cuda:0"),
+            sim.run().raw_monitor("probe")["components"]["Ez"], rtol=1e-4, atol=1e-6)
+
+
 @pytest.mark.parametrize("graph", ["off", "required"])
 @pytest.mark.parametrize("order,scheduling", [("completion", "throughput"), ("input", "static")])
 def test_two_slots_share_budget_and_preserve_results(graph, order, scheduling):

@@ -129,7 +129,8 @@ class PreparedBatch:
                     # Calibrate from a real prepared lane. The native pool is
                     # the hard bound; this conservative ratio only selects B.
                     lane_peak = max(1, self._budget.stats()["peak_charged_bytes"])
-                    selected = min(policy.max_batch_size, len(batch),
+                    selected = min(policy.max_batch_size,
+                                   getattr(batch, "_max_cohort_capacity", max(len(g["variant_indices"]) for g in self._groups)),
                                    max(1, self._budget.limit_bytes // (2 * lane_peak * getattr(batch, "_budget_slots", 1))))
                     if selected > 1:
                         self.capacity = selected
@@ -803,6 +804,9 @@ class ParallelPreparedBatch(PreparedBatch):
                         memory_limit_bytes=self._accounts[device].limit_bytes)
                     child_batch._memory_account = self._accounts[device]
                     child_batch._budget_slots = slots
+                    workers = len(batch.execution.devices) * slots
+                    largest_group = max(len(group["variant_indices"]) for group in self._groups)
+                    child_batch._max_cohort_capacity = (largest_group + workers - 1) // workers
                     child_batch._export_pools = {}
                     target = batch.outputs.result_device
                     if target not in ("local", "cpu", device):
