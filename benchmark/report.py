@@ -157,6 +157,12 @@ def _missing_scenario_lines(merged_rows: dict) -> list[str]:
 
 
 def write_results_markdown(results: list[ScenarioMetrics]) -> None:
+    import re
+
+    previous = RESULTS_MD.read_text(encoding="utf-8") if RESULTS_MD.exists() else ""
+    batch_sections = [match.group(0) for match in re.finditer(
+        r"<!-- (batch-[\w-]+):begin -->.*?<!-- \1:end -->", previous, flags=re.DOTALL
+    )]
     existing_rows, existing_plots, existing_scalar_rows, existing_frequency_rows = (
         _parse_existing_results()
     )
@@ -321,6 +327,8 @@ def write_results_markdown(results: list[ScenarioMetrics]) -> None:
             "",
         ]
     )
+    if batch_sections:
+        lines.extend(["", *batch_sections, ""])
     RESULTS_MD.write_text("\n".join(lines), encoding="utf-8")
 
 

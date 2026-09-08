@@ -104,3 +104,7 @@ def test_report_update_preserves_other_results_and_replaces_its_section(monkeypa
     assert text.startswith("Existing solver results")
     assert text.count("## Independent execution baseline") == 1
     assert "raw.json" in text
+    report.write_results_markdown([])
+    regenerated = target.read_text()
+    assert regenerated.count("## Independent execution baseline") == 1
+    assert "raw.json" in regenerated

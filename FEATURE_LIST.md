@@ -6,6 +6,8 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 
 - Experimental batch baseline instrumentation: `python -m benchmark batch --inventory` lists three fixed workloads; `--audit WORKLOAD --device cuda:0` records single-run tensor storage ownership, prepare/completed manifests, allocator peaks and sampled driver memory under `benchmark/plots/batch/`. `--compare WORKLOAD --variants N` measures independent sequential, spawned-process and `run_many` baselines with cold startup, interleaved warm rounds, per-worker allocator peaks, sampled total device memory and per-variant complex spectrum comparisons. Reports record different internal Result lifetimes and idle-session context/cache memory; these raw totals are not isolated per-mode memory measurements. Shared-state batch solver execution is not yet available.
 
+- Batch baseline sections in `benchmark/RESULTS.md` survive ordinary benchmark report regeneration.
+
 ## Maintenance Rule
 
 - Update this file whenever a new user-visible feature, public API capability, or meaningful workflow is added, removed, or materially changed.

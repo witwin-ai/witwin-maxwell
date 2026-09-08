@@ -44,6 +44,9 @@ The skipped legs required multiple visible devices in that invocation.
 
 ## Subphase P0.2: concurrent benchmark tooling and first measurement
 
+Commit: `82d6467`. Ten benchmark instrumentation/report tests pass. Ordinary
+benchmark report regeneration preserves the tagged Batch baseline sections.
+
 Three modes use identical per-variant scenes and exported complex probe spectra:
 independent sequential runs, persistent spawned worker processes, and existing
 `run_many`. Cold timing includes worker startup and final export readiness;
@@ -91,7 +94,7 @@ python -m benchmark batch --compare launch --device cuda:1 --variants 10 --updat
 
 ## Remaining execution work
 
-P3.1 adds private native batch field-update operators using the existing E/H
+P3.1 (`6150023`) adds private native batch field-update operators using the existing E/H
 and electric interior kernels, with 64-bit lane offsets, shared or per-lane
 coefficients and an int32 active mask. The private operators reject invalid
 Yee shapes, overlapping writable/read buffers, unsupported boundary modes and
@@ -107,7 +110,7 @@ The earlier 15 opt-in skips were subsequently enabled and exercised in this
 regression run. This is not complete-batch throughput, memory-sanitizer,
 cross-architecture, CPML-batch or native-batch-adjoint acceptance.
 
-The P2.1 material-sampling foundation extends the existing edge compiler with
+The P2.1 (`115f522`) material-sampling foundation extends the existing edge compiler with
 contiguous component selections and a radius-one differentiation halo. It uses
 the same numerical formulas as full-component compilation. Six Yee components,
 uniform and graded grids, arithmetic/polarized subpixel sampling, filtered and
