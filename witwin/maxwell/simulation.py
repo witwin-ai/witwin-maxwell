@@ -450,7 +450,7 @@ class Simulation:
     @staticmethod
     def batch(simulations, *, execution, parameters=None, variant_ids=None,
               variation=None, outputs=None):
-        """Validate and plan same-scene variants; native execution is pending."""
+        """Plan and execute supported same-scene variants through native CUDA cohorts."""
         from .execution.batch import BatchSimulation
 
         return BatchSimulation(

@@ -142,3 +142,103 @@ __all__ = [
     "FailureKind",
     "ResultSequence",
 ]
+
+
+@dataclass(frozen=True)
+class BatchItem:
+    """One completed, failed, or cancelled variant, retaining its input identity."""
+
+    index: int
+    variant_id: str
+    result: Any | None
+    failure: DistributedFailure | None
+    record: ExecutionRecord
+
+    def __post_init__(self):
+        if (self.result is None) == (self.failure is None):
+            raise ValueError("Exactly one of result and failure must be present.")
+        if self.index != self.record.index:
+            raise ValueError("BatchItem index must match its execution record.")
+
+    def raise_for_error(self):
+        if self.failure is not None:
+            raise self.failure
+
+
+class BatchResult(ResultSequence):
+    """Ordinary Results with stable variant IDs and explicit tensor stacking."""
+
+    def __init__(self, entries, records, variant_ids):
+        super().__init__(entries, records)
+        self.variant_ids = tuple(variant_ids)
+        if (len(self.variant_ids) != len(self) or len(set(self.variant_ids)) != len(self)
+                or any(not isinstance(v, str) or not v for v in self.variant_ids)):
+            raise ValueError("BatchResult requires one unique nonempty variant ID per entry.")
+
+    def stack(self, selector, *, device=None):
+        import torch
+        values = [selector(result) for result in self]
+        if not all(isinstance(value, torch.Tensor) for value in values):
+            raise TypeError("BatchResult.stack selector must return tensors.")
+        if not values:
+            raise ValueError("Cannot stack an empty BatchResult.")
+        if any(value.shape != values[0].shape or value.dtype != values[0].dtype for value in values[1:]):
+            raise ValueError("Selected batch tensors must have identical shapes and dtypes.")
+        if device is None and any(v.device != values[0].device for v in values[1:]):
+            raise ValueError("Mixed-device results require an explicit stack device.")
+        return torch.stack(values if device is None else [v.to(device) for v in values])
+
+    def save(self, directory):
+        import json
+        from pathlib import Path
+        path = Path(directory)
+        path.mkdir(parents=True, exist_ok=True)
+        if any(path.iterdir()):
+            raise FileExistsError("BatchResult.save requires an empty output directory.")
+        items = []
+        for index, (entry, record) in enumerate(zip(self.entries, self.records)):
+            item = {"index": index, "variant_id": self.variant_ids[index],
+                    "device": record.device, "status": record.status,
+                    "estimated_bytes": record.estimated_bytes, "wall_time_s": record.wall_time_s,
+                    "device_time_s": record.device_time_s}
+            if isinstance(entry, DistributedFailure):
+                item["failure"] = {"kind": entry.kind.value, "detail": entry.detail}
+            else:
+                entry.save(path / f"result-{index}.pt")
+            items.append(item)
+        temporary = path / "manifest.json.tmp"
+        temporary.write_text(json.dumps({"schema_version": 1, "items": items}, indent=2), encoding="utf-8")
+        temporary.replace(path / "manifest.json")
+
+    @classmethod
+    def load(cls, directory, *, scenes, map_location="cpu"):
+        import json
+        from pathlib import Path
+        from ..result import Result
+        path = Path(directory)
+        payload = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+        if payload.get("schema_version") != 1:
+            raise ValueError("Unsupported batch result schema version.")
+        items = payload["items"]
+        if len(scenes) != len(items):
+            raise ValueError("One Scene must be supplied for each saved batch variant.")
+        entries, records, ids = [], [], []
+        for index, item in enumerate(items):
+            if item["index"] != index:
+                raise ValueError("Batch result manifest indices must be contiguous and ordered.")
+            failure = None
+            if "failure" in item:
+                failure = DistributedFailure(index=index, device=item["device"],
+                    kind=item["failure"]["kind"], message=item["failure"]["detail"])
+                entry = failure
+            else:
+                entry = Result.load(path / f"result-{index}.pt", scene=scenes[index], map_location=map_location)
+            entries.append(entry)
+            ids.append(item["variant_id"])
+            records.append(ExecutionRecord(index=index, device=item["device"], status=item["status"],
+                estimated_bytes=item["estimated_bytes"], wall_time_s=item["wall_time_s"],
+                device_time_s=item["device_time_s"], failure=failure))
+        return cls(entries, records, ids)
+
+
+__all__ += ["BatchItem", "BatchResult"]

@@ -213,6 +213,8 @@ from .simulation import (
 from .fdtd_parallel import FDTDParallelConfig
 from .execution.batch import BatchExecution, BatchOutput, BatchParameters, BatchSimulation, BatchVariation
 from .execution.plan import BatchPlanReport
+from .execution.batch_runtime import PreparedBatch, BatchResultIterator
+from .execution.records import BatchItem, BatchResult
 from .execution import (
     DistributedFailure,
     ExecutionRecord,
@@ -235,6 +237,10 @@ __all__ = [
     "BatchSimulation",
     "BatchVariation",
     "BatchPlanReport",
+    "PreparedBatch",
+    "BatchResultIterator",
+    "BatchItem",
+    "BatchResult",
     "AstigmaticGaussianBeam",
     "AntennaData",
     "AggregatedSceneGradient",

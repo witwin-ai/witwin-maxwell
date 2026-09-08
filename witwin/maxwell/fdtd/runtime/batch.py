@@ -31,7 +31,7 @@ def validate_native_solver(solver):
         if getattr(solver, name, False):
             raise NotImplementedError(f"Native batch field execution does not yet support {name}.")
     for name in ("_magnetic_source_terms", "_electric_source_terms", "_wire_runtime",
-                 "_surface_impedance_runtimes", "_circuit_runtimes", "_network_runtimes"):
+                 "_surface_impedance", "_circuit_runtimes", "_network_runtimes", "_mur_state"):
         if getattr(solver, name, None):
             raise NotImplementedError(f"Native batch field execution does not yet support {name}.")
     for name in FIELDS:

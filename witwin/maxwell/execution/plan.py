@@ -182,7 +182,7 @@ def build_batch_plan(batch):
     declarations = []
     by_digest = {}
     warnings = [
-        "Planning only: native shared-state Batch execution is not implemented.",
+        "Dry planning performs no solver allocation; prepare validates the available native forward tier.",
         "Declarative groups are provisional; compiled equality and memory admission remain unresolved.",
         "BatchExecution.graph owns batch capture policy; child cuda_graph flags are not used.",
     ]
@@ -254,7 +254,8 @@ def build_batch_plan(batch):
         "schema_version": 1, "resolved": False, "variant_count": len(batch),
         "variant_ids": list(batch.variant_ids), "groups": groups, "devices": devices,
         "input_copy_bytes": None, "output_bytes": None, "retained_tape_bytes": None,
-        "warnings": warnings, "unsupported_features": ["native_batch_execution"],
+        "warnings": warnings, "unsupported_features": ["batch_adjoint", "coordinated_batch_graph",
+            "batch_byte_admission", "batch_multi_gpu"],
         "configuration_digest": digest({"declarations": declarations, "execution": execution,
                                          "ids": batch.variant_ids,
                                          "variation": _batch_declaration(batch.variation, "variation", []),

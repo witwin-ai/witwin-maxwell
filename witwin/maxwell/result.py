@@ -1218,7 +1218,12 @@ class Result:
         self._shard_paths: tuple[Path, ...] = ()
         self.raw_output = raw_output
         self._breakdown = breakdown
-        self.plot = ResultPlotter(self)
+
+    @property
+    def plot(self):
+        # Construct the facade on demand: storing it on Result creates a cycle
+        # that delays releasing streamed GPU results until cyclic GC runs.
+        return ResultPlotter(self)
 
     @property
     def breakdown_data(self):

@@ -1,7 +1,6 @@
-"""Declarative batch configuration and planning over ordinary Simulations.
+"""Declarative batch configuration and native execution over ordinary Simulations.
 
-Execution is enabled only as native runtime capabilities become available. A
-plan never treats declarative agreement as proof of compiled storage sharing.
+A dry plan never treats declarative agreement as proof of compiled storage sharing.
 """
 from __future__ import annotations
 
@@ -313,11 +312,9 @@ class BatchSimulation:
         return build_batch_plan(self)
 
     def prepare(self):
+        from .batch_runtime import PreparedBatch
         self.plan()
-        raise NotImplementedError(
-            "Native shared-state Batch execution is not implemented yet (P2-P4). "
-            "Simulation.batch currently provides validation and planning only."
-        )
+        return PreparedBatch(self)
 
     def run(self):
         with self.prepare() as prepared:
@@ -326,4 +323,11 @@ class BatchSimulation:
     def iter_results(self, *, order="completion"):
         if order not in ("completion", "input"):
             raise ValueError("order must be 'completion' or 'input'.")
-        return self.prepare().iter_results(order=order)
+        prepared = self.prepare()
+        try:
+            iterator = prepared.iter_results(order=order)
+        except BaseException:
+            prepared.close()
+            raise
+        iterator._owns_prepared = True
+        return iterator

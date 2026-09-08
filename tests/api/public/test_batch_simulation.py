@@ -201,11 +201,24 @@ def test_plan_never_prepares_or_queries_gpu_and_does_not_infer_full_field_dft(mo
     assert report.devices[0]["estimated_peak_bytes"] is None
 
 
-def test_unimplemented_execution_is_not_an_independent_solver_fallback():
-    batch = mw.Simulation.batch([simulation()], execution=execution())
-    for operation in (batch.prepare, batch.run, batch.iter_results):
-        with pytest.raises(NotImplementedError, match="planning only"):
-            operation()
+@pytest.mark.parametrize("policy,match", [
+    ({"graph": "required"}, "graph capture"),
+    ({"tune": True}, "autotuning"),
+    ({"slots_per_device": 2}, "one execution slot"),
+    ({"memory_limit_bytes": 1000000}, "admission controller"),
+])
+def test_pending_execution_policies_fail_before_gpu_allocation(policy, match):
+    batch = mw.Simulation.batch([simulation()], execution=execution(**policy))
+    with pytest.raises(NotImplementedError, match=match):
+        batch.prepare()
+
+
+def test_trainable_batch_forward_is_not_silently_detached():
+    sim = simulation()
+    parameters = mw.BatchParameters(region_densities={"design": torch.ones(2, 2, 3, 1, requires_grad=True)})
+    batch = mw.Simulation.batch(sim, parameters=parameters, execution=execution())
+    with pytest.raises(NotImplementedError, match="adjoint"):
+        batch.prepare()
 
 
 def test_scene_module_still_materializes_to_the_standard_scene():

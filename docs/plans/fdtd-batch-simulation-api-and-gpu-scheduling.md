@@ -5,7 +5,7 @@
 源码核对基线：`8deaf46`。  
 交付目标：在固定背景中批量评估局部变化的场景，降低重复显存占用和准备开销，提高 GPU 吞吐，并保持 PyTorch 原生求导与 `Scene -> Simulation -> Result` 契约。
 
-本文定义目标 API、运行时协议、分阶段范围和发布门槛。下文标为“新增”的接口均不是当前可调用接口。阶段完成必须有代码、测试和测量证据，不能仅依据此文声称功能已提供。
+本文定义目标 API、运行时协议、分阶段范围和发布门槛。目标契约尚未全部交付；当前可执行范围以下表和紧随其后的使用说明为准。阶段完成必须有代码、测试和测量证据，不能仅依据此文声称功能已提供。
 
 ### 实施进度（2026-09-08）
 
@@ -19,12 +19,53 @@
 | P2.1 局部 Yee 材料采样基础 | 完成 | 同一材料函数支持局部裁剪和差分 halo；六分量、均匀/非均匀网格、偏振子像素和密度梯度对照；相关 GPU 测试共 85 passed |
 | P3.1 原生 batch 场寻址基础 | 完成 | 复用原 E/H 更新与 interior fast path；共享/逐 lane 系数、64 位偏移、active mask；94 项专项 GPU 测试逐位对照通过，86 项原有原生/CPML/Graph/伴随/调制回归通过 |
 | P3.2 原生 CPML 与协同时间推进 | 完成 | dense/slab CPML 复用原公式；固定容量场槽、尾批、重置与换入；复用普通 solve 生命周期的协同推进；167 项 GPU 专项/回归通过 |
-| P2/P3 其余、P4–P7 | 未完成 | 原生 CPML 已接入内部持久场槽；公共执行生命周期、源/观察器批处理、协调调度与伴随仍待后续子阶段验收 |
+| 公共前向执行与结果生命周期子阶段 | 完成 | `prepare/run` 可执行；原生 B-lane 场/CPML、重复运行、A/B/A 参数、尾批、31 频点 monitor-only、独立 Result、流式关闭/取消和保存/加载；公共 Batch/单场景/Graph 回归 89 passed |
+| P2/P3 其余、P4–P7 | 未完成 | 背景/局部编译复用、源/观察器向量化、精确 output allocation、byte admission、协调 Graph、多 GPU/Q=2、调优和 Batch 伴随仍待实现；不视为全方案或性能验收完成 |
 | P8 | 未开始 | 独立研究门，依赖 P4 实测 |
 
 环境检查：沙箱内 GPU 不可见；获准在沙箱外检查后发现两张 A6000。
 GPU 0 存在其它计算任务。原生扩展需显式设置当前环境内的 `nvidia/cu13` 为 `CUDA_HOME`。
 硬件可用性与独占性能测量窗口分别记录；不修改其它任务或系统驱动。
+
+### 当前可执行范围
+
+`Batch.prepare/run` 已不再是不可执行的占位接口。当前执行层为
+`native_field_cohort_eager`：一张 GPU、一个固定容量 B 的执行槽，E/H 与
+dense/slab CPML 使用原生批量 kernel；每个 lane 仍通过现有流程注入点源、
+累积点/面/通量监视器并完成归一化。返回的每一项都是普通 `Result`，
+不引用活的 solver 或场槽。关闭 context 或复用场槽不会改写旧结果。
+
+```python
+import witwin.maxwell as mw
+
+# simulations contains ordinary mw.Simulation.fdtd(...) objects.
+submission = mw.Simulation.batch(
+    simulations,
+    execution=mw.BatchExecution(
+        devices=("cuda:0",), batch_size=2, graph="off",
+    ),
+    outputs=mw.BatchOutput(monitors=("probe",), fields=()),
+)
+with submission.prepare() as prepared:
+    results = prepared.run()
+    spectra = results.stack(lambda r: r.raw_monitor("probe")["components"]["Ez"])
+    repeated = prepared.run()
+```
+
+输入列表若还改变源幅度，应显式声明 `BatchVariation(sources=("drive",))`；
+模板方式用 `BatchParameters` 的 density/source scale 张量，
+`prepared.run(parameters=updated)` 必须保留相同 schema 与 N。
+默认 `batch_size="auto"` 暂时保守选择 1，并不执行吞吐调优。
+`graph="auto"` 暂时选择 eager；explicit `required`、`graph_steps`、
+`tune=True`、严格 `memory_limit_bytes`、多 GPU/Q=2 和可训练输入均明确拒绝。
+这些限制不能解读为完整调度器已经实现。
+
+当前每个换入的 cohort 仍全域编译材料，密集系数按 lane 存储；只对实际相等的
+spacing/CPML profile 共享存储。并未获得“背景只编译一次”的验收。
+监视器频谱请求不会自动启用全域 DFT；显式请求 E 场时，原有累积器仍内部保存
+全部 E 分量，再导出所选分量，精确子集分配仍待实现。`plan()` 仍为 unresolved，
+`prepared.report` 记录实际执行层和已知限制。显存与耗时优势必须经后续实测，
+不能直接套用原始截图中的数字。
 
 ## 1. 需求、设计决策与收益边界
 

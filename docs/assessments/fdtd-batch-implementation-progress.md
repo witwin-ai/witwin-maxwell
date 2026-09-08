@@ -35,8 +35,8 @@ Commit: `1caa879`.
 The public Batch descriptors, list/template entrypoints, named target checks,
 output conflicts, density tensor views, and provisional declaration grouping
 are implemented. Reports always remain unresolved until compiled material,
-layout, capacity and runtime proofs are implemented. `prepare/run` reject;
-there is no hidden independent-solver execution inside the Batch API.
+layout, capacity and runtime proofs are implemented. At this historical commit,
+`prepare/run` rejected; the executable forward subphase below supersedes that limitation.
 
 Validation: 43 new public Batch tests passed. The public API, simulation smoke,
 Batch and ensemble guard suite produced **79 passed, 3 skipped** on GPU 1.
@@ -66,7 +66,7 @@ rounds, one local material change per variant, eager stepping for all modes.
 All exported probe comparisons were exactly equal to the sequential reference.
 These measurements show that the independent-process baseline is already strong
 on this launch-heavy workload. They establish no claim about the new Batch
-runtime, which is still unavailable.
+runtime, which had not been connected when those measurements were collected.
 
 Raw repeated-run data: `benchmark/plots/batch/launch-n10-varied.json`.
 This file predates the added isolated-memory leg; its driver totals include idle
@@ -144,3 +144,38 @@ and observers, coordinated graph execution, byte-level admission, multi-GPU
 scheduling, public result/tape lifetimes and batch adjoints are not accepted yet.
 Advanced physics and the response-bank research gate remain open.
 The active plan must not be archived or marked complete based on this evidence.
+
+## Public forward execution and result lifetime subphase
+
+`BatchSimulation.prepare/run` now execute supported real static-material FDTD
+through `PreparedBatch`, one GPU, one persistent field slot and native resident
+lanes. Source and monitor loops remain per lane; the time-marching field block is
+one native update per component across B lanes. The implementation never launches
+B independent `Simulation.run()` calls to represent a native field batch.
+
+The public tier provides repeated runs, density/source-scale template updates,
+tail cohorts, compatible-group input/completion order, cancellation, failure
+records, independent Result storage, explicit stacking and directory persistence.
+Top-level iterators own their prepared contexts and must be closed on early exit.
+The demand-driven iterator has no background completed-result queue. Result's
+plotting facade is now created on demand to avoid a Result/facade reference cycle;
+GPU outputs release without waiting for cyclic collection.
+
+Validation: **89 public Batch, ordinary public API/smoke and graph tests passed**.
+The execution tests cover B=1/2/3/4, N=1/2/3/5/7, density updates, source A/B/A,
+in-place parameter version changes, repeated buffer addresses, old results after
+close, incomplete tails, 31-frequency monitor-only execution without full-field
+DFT, CPU export, persistence, early/unstarted iterator close, cancellation,
+injected runtime failure and post-construction trainable Scene detection. With
+cyclic GC disabled, released Results disappear immediately and 25 repeated runs
+remain within a 1 MiB live-allocation growth bound. This small check does not
+replace the N=1000, full-output or business-memory acceptance matrix.
+
+The report truthfully retains unresolved full capacity/compiler proofs and names
+the available tier `native_field_cohort_eager`. Automatic B selects one lane;
+automatic graph policy selects eager. Strict byte limits, required graph capture,
+explicit graph chunks, tuning, multiple GPUs/slots, RF ports, unsupported physics,
+magnetic full-field/material export and trainable batch execution reject rather
+than silently falling back. Complete material compilation still occurs when a
+cohort is changed. Regional/background caching, vectorized source/observer work,
+precise output allocations, full GPU scheduling and the batch adjoint remain open.
