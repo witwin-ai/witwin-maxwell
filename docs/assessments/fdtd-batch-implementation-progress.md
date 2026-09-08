@@ -119,8 +119,28 @@ projected density gradients, corner crops and invalid selections were verified:
 periodic-axis selection fails explicitly pending opposite-face routing. This
 does not establish compact influence support or a shared-background cache.
 
-Compiled sharing proofs, reusable execution slots, regional coefficient updates,
-native batched sources/CPML/observers, coordinated graph execution, byte-level
-admission, multi-GPU scheduling, result/tape lifetimes and adjoints are not
-accepted yet. Advanced physics and the response-bank research gate remain open.
+The native CPML/cooperative-timestep subphase adds dense and slab batch kernels
+by extending the original kernels with lane addressing, including the dense
+electric interior path. Keeping the original dense arithmetic matters: replacing
+it with the algebraically equivalent flat slab expression changed a weak CPML
+component's relative norm by approximately 1.9e-4 after 80 steps. The final
+implementation preserves each storage mode's original expressions.
+
+`NativeFieldSlot` retains fixed-capacity field, CPML and coefficient buffers;
+compiled inverse spacing and CPML profiles share storage only after value equality
+checks. `solve_steps(cooperative=True)` suspends before each complete field block,
+while source injection, observation and normalization reuse ordinary `solve`.
+Tail lanes are inactive and independently indexed. Reloading a compatible cohort
+preserves buffer pointers, and repeated runs reset field and CPML state.
+
+Validation: **167 GPU tests passed** across native field tests, complete batch
+cohorts, CPML regressions and the existing adjoint bridge. Cohort checks cover
+B=1/3/4, incomplete tails, none/periodic/CPML boundaries, material and source
+changes, repeated resets, slab storage and 31-frequency observation. This does
+not establish throughput, allocation-budget or batch-gradient acceptance.
+
+Compiled sharing proofs, regional coefficient updates, native batched sources
+and observers, coordinated graph execution, byte-level admission, multi-GPU
+scheduling, public result/tape lifetimes and batch adjoints are not accepted yet.
+Advanced physics and the response-bank research gate remain open.
 The active plan must not be archived or marked complete based on this evidence.

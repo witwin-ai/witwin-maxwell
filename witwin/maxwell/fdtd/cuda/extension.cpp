@@ -6,6 +6,29 @@
 #include <vector>
 
 void synchronize_noop_cuda();
+void update_magnetic_cpml_batch_cuda(torch::stable::Tensor field, const torch::stable::Tensor& first,
+    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
+    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active, int64_t component,
+    torch::stable::Tensor psi_a, torch::stable::Tensor psi_b,
+    const torch::stable::Tensor& kappa_a, const torch::stable::Tensor& b_a,
+    const torch::stable::Tensor& c_a, const torch::stable::Tensor& kappa_b,
+    const torch::stable::Tensor& b_b, const torch::stable::Tensor& c_b,
+    int64_t a_low_length, int64_t a_high_start, int64_t a_high_length,
+    int64_t b_low_length, int64_t b_high_start, int64_t b_high_length, bool dense);
+
+void update_electric_cpml_batch_cuda(torch::stable::Tensor field, const torch::stable::Tensor& first,
+    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
+    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active, int64_t component,
+    torch::stable::Tensor psi_a, torch::stable::Tensor psi_b,
+    const torch::stable::Tensor& kappa_a, const torch::stable::Tensor& b_a,
+    const torch::stable::Tensor& c_a, const torch::stable::Tensor& kappa_b,
+    const torch::stable::Tensor& b_b, const torch::stable::Tensor& c_b,
+    int64_t a_low_length, int64_t a_high_start, int64_t a_high_length,
+    int64_t b_low_length, int64_t b_high_start, int64_t b_high_length,
+    int64_t a_low, int64_t a_high, int64_t b_low, int64_t b_high, bool dense);
+
 void update_magnetic_batch_cuda(
     torch::stable::Tensor field, const torch::stable::Tensor& first,
     const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
@@ -2068,6 +2091,8 @@ void add_source_patch_ez_periodic_cuda(
 }
 
 #define WITWIN_CUDA_OPS(_) \
+  _(update_magnetic_cpml_batch, "update_magnetic_cpml_batch(Tensor(a!) field, Tensor first, Tensor second, Tensor decay, Tensor curl, Tensor inv_a, Tensor inv_b, Tensor active, int component, Tensor(b!) psi_a, Tensor(c!) psi_b, Tensor kappa_a, Tensor b_a, Tensor c_a, Tensor kappa_b, Tensor b_b, Tensor c_b, int a_low_length, int a_high_start, int a_high_length, int b_low_length, int b_high_start, int b_high_length, bool dense) -> ()", update_magnetic_cpml_batch_cuda) \
+  _(update_electric_cpml_batch, "update_electric_cpml_batch(Tensor(a!) field, Tensor first, Tensor second, Tensor decay, Tensor curl, Tensor inv_a, Tensor inv_b, Tensor active, int component, Tensor(b!) psi_a, Tensor(c!) psi_b, Tensor kappa_a, Tensor b_a, Tensor c_a, Tensor kappa_b, Tensor b_b, Tensor c_b, int a_low_length, int a_high_start, int a_high_length, int b_low_length, int b_high_start, int b_high_length, int a_low, int a_high, int b_low, int b_high, bool dense) -> ()", update_electric_cpml_batch_cuda) \
   _(update_magnetic_batch, "update_magnetic_batch(Tensor(a!) field, Tensor first, Tensor second, Tensor decay, Tensor curl, Tensor inv_a, Tensor inv_b, Tensor active, int component) -> ()", update_magnetic_batch_cuda) \
   _(update_electric_batch, "update_electric_batch(Tensor(a!) field, Tensor first, Tensor second, Tensor decay, Tensor curl, Tensor inv_a, Tensor inv_b, Tensor active, int component, int a_low, int a_high, int b_low, int b_high) -> ()", update_electric_batch_cuda) \
   _(sample_wire_emf, "sample_wire_emf(Tensor ex, Tensor ey, Tensor ez, Tensor segment_offsets, Tensor edge_components, Tensor edge_offsets, Tensor weights, Tensor(a!) emf) -> ()", sample_wire_emf_cuda) \

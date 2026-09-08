@@ -81,6 +81,58 @@ inline FieldBatchLayout check_field_batch_inputs(
           coefficient_stride(decay, "decay"), coefficient_stride(curl, "curl"), active.mutable_data_ptr<int>()};
 }
 
+inline void check_cpml_batch_inputs(
+    const torch::stable::Tensor& field, const torch::stable::Tensor& first,
+    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
+    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active,
+    const torch::stable::Tensor& psi_a, const torch::stable::Tensor& psi_b,
+    const torch::stable::Tensor& kappa_a, const torch::stable::Tensor& b_a,
+    const torch::stable::Tensor& c_a, const torch::stable::Tensor& kappa_b,
+    const torch::stable::Tensor& b_b, const torch::stable::Tensor& c_b,
+    int64_t component, int64_t a_low, int64_t a_start, int64_t a_high,
+    int64_t b_low, int64_t b_start, int64_t b_high) {
+  const int axis_a = component == 0 ? 1 : 0;
+  const int axis_b = component == 2 ? 1 : 2;
+  const auto disjoint = [](const torch::stable::Tensor& x, const torch::stable::Tensor& y) {
+    if (x.numel() == 0 || y.numel() == 0) return;
+    const auto px = reinterpret_cast<uintptr_t>(x.data_ptr());
+    const auto py = reinterpret_cast<uintptr_t>(y.data_ptr());
+    STD_TORCH_CHECK(px + x.numel() * 4 <= py || py + y.numel() * 4 <= px,
+                    "batch CPML writable storage must not overlap another input");
+  };
+  const auto profile = [&](const torch::stable::Tensor& v, int axis) {
+    check_float32_tensor(v, "CPML profile");
+    check_contiguous_tensor(v, "CPML profile");
+    check_same_cuda_device(field, v, "CPML profile");
+    STD_TORCH_CHECK(v.dim() == 1 && v.size(0) == field.size(axis + 1), "CPML profile shape mismatch");
+    disjoint(field, v);
+  };
+  for (const auto& v : {kappa_a, b_a, c_a}) profile(v, axis_a);
+  for (const auto& v : {kappa_b, b_b, c_b}) profile(v, axis_b);
+  const auto memory = [&](const torch::stable::Tensor& psi, int axis,
+                          int64_t low, int64_t start, int64_t high) {
+    const auto extent = field.size(axis + 1);
+    STD_TORCH_CHECK(low >= 0 && low <= extent && high >= 0 && high <= extent &&
+                    start >= 0 && start <= extent && start + high <= extent &&
+                    (high == 0 || start >= low), "invalid batch CPML slab layout");
+    STD_TORCH_CHECK(extent <= std::numeric_limits<int>::max(), "CPML axis exceeds signed indexing range");
+    check_float32_tensor(psi, "psi");
+    check_contiguous_tensor(psi, "psi");
+    check_same_cuda_device(field, psi, "psi");
+    STD_TORCH_CHECK(psi.dim() == 4 && psi.size(0) == field.size(0), "psi must have shape [B, ...]");
+    for (int d = 0; d < 3; ++d) {
+      STD_TORCH_CHECK(psi.size(d + 1) == (d == axis ? low + high : field.size(d + 1)),
+                      "batch CPML memory shape mismatch");
+    }
+    for (const auto& v : {field, first, second, decay, curl, inv_a, inv_b, active,
+                          kappa_a, b_a, c_a, kappa_b, b_b, c_b}) disjoint(psi, v);
+  };
+  memory(psi_a, axis_a, a_low, a_start, a_high);
+  memory(psi_b, axis_b, b_low, b_start, b_high);
+  disjoint(psi_a, psi_b);
+}
+
 __device__ __forceinline__ bool batch_field_index(
     const FieldBatchLayout& batch, unsigned int nx, unsigned int ny, unsigned int nz,
     unsigned int& i, unsigned int& j, unsigned int& k, int64_t& lane) {

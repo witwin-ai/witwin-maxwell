@@ -2100,7 +2100,17 @@ def _make_full_embedded_step_runner(solver, *, use_cuda_graph: bool):
     return replay
 
 
-def solve(
+def solve(solver, *args, **kwargs):
+    """Execute the ordinary solve without suspending between field updates."""
+    iterator = solve_steps(solver, *args, **kwargs)
+    try:
+        next(iterator)
+    except StopIteration as done:
+        return done.value
+    raise RuntimeError("An ordinary FDTD solve unexpectedly suspended.")
+
+
+def solve_steps(
     solver,
     time_steps: int,
     dft_frequency: float = None,
@@ -2113,7 +2123,17 @@ def solve(
     use_cuda_graph: bool = False,
     resume_from=None,
     stop_step: int | None = None,
+    cooperative: bool = False,
 ):
+    """Shared solve lifecycle, optionally yielding before each field update.
+
+    A cooperative caller performs the complete field block before resuming the
+    generator. Source injection, boundary clamps, observation and normalization
+    remain identical to the ordinary solve. The caller must validate that its
+    field block supports every enabled physical capability.
+    """
+    if cooperative and use_cuda_graph:
+        raise ValueError("Cooperative execution owns its field graph policy.")
     if solver.verbose:
         print(f"Starting 3D FDTD simulation (Yee grid), grid size: {solver.Nx}x{solver.Ny}x{solver.Nz}")
     from .timeplan import sources_share_spectrum
@@ -2176,7 +2196,7 @@ def solve(
         use_cuda_graph=use_cuda_graph,
     )
     if run_full_embedded_step is None:
-        run_field_update = _make_field_update_runner(solver, use_cuda_graph)
+        run_field_update = None if cooperative else _make_field_update_runner(solver, use_cuda_graph)
         run_network_updates = make_network_runner(
             solver,
             use_cuda_graph=use_cuda_graph,
@@ -2243,7 +2263,10 @@ def solve(
         if run_full_embedded_step is not None:
             run_full_embedded_step()
         else:
-            run_field_update(time_value)
+            if cooperative:
+                yield n
+            else:
+                run_field_update(time_value)
 
             if solver.tfsf_enabled:
                 apply_tfsf_e_correction(solver, time_value)

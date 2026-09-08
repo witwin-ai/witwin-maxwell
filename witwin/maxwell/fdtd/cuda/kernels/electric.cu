@@ -484,7 +484,7 @@ __global__ void update_electric_ez_bloch_kernel(
 // per-component (ex,ey,ez) to a single instantiation. ``Modulated`` folds the
 // space-time modulated variant in: identical psi/kappa handling with the
 // modulation factor applied to the decay/curl pair (never uniform).
-template <int Component, bool Uniform, bool Modulated>
+template <int Component, bool Uniform, bool Modulated, bool Batched = false>
 __global__ void update_electric_cpml_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -513,10 +513,24 @@ __global__ void update_electric_cpml_kernel(
     int b_high_mode,
     float* __restrict__ psi_a,
     float* __restrict__ psi_b,
-    float* __restrict__ field) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+    float* __restrict__ field, FieldBatchLayout batch = {}) {
+  unsigned int i, j, k;
+  if constexpr (Batched) {
+    int64_t lane;
+    if (!batch_field_index(batch, nx, ny, nz, i, j, k, lane)) return;
+    const int64_t stride = static_cast<int64_t>(nx) * ny * nz;
+    field += lane * stride;
+    psi_a += lane * stride;
+    psi_b += lane * stride;
+    first += lane * batch.first_stride;
+    second += lane * batch.second_stride;
+    decay += lane * batch.decay_stride;
+    curl_coeff += lane * batch.curl_stride;
+  } else {
+    k = blockIdx.x * blockDim.x + threadIdx.x;
+    j = blockIdx.y * blockDim.y + threadIdx.y;
+    i = blockIdx.z * blockDim.z + threadIdx.z;
+  }
   if (i >= nx || j >= ny || k >= nz) {
     return;
   }
@@ -580,7 +594,7 @@ __global__ void update_electric_cpml_kernel(
 // Branch-free interior fast path for the dense-CPML electric update, templated
 // over the component. Plain backward differences (no boundary-mode logic); the
 // per-component thread-offset scheme matches update_electric_standard_interior_kernel.
-template <int Component, bool Uniform>
+template <int Component, bool Uniform, bool Batched = false>
 __global__ void update_electric_cpml_interior_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -601,10 +615,25 @@ __global__ void update_electric_cpml_interior_kernel(
     const float* __restrict__ inv_b,
     float* __restrict__ psi_a,
     float* __restrict__ psi_b,
-    float* __restrict__ field) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x + (Component == 2 ? 0 : 1);
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y + (Component == 1 ? 0 : 1);
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z + (Component == 0 ? 0 : 1);
+    float* __restrict__ field, FieldBatchLayout batch = {}) {
+  unsigned int i, j, k;
+  if constexpr (Batched) {
+    int64_t lane;
+    if (!batch_field_index(batch, nx, ny, nz, i, j, k, lane)) return;
+    const int64_t stride = static_cast<int64_t>(nx) * ny * nz;
+    field += lane * stride;
+    psi_a += lane * stride;
+    psi_b += lane * stride;
+    first += lane * batch.first_stride;
+    second += lane * batch.second_stride;
+    decay += lane * batch.decay_stride;
+    curl_coeff += lane * batch.curl_stride;
+    if (i < (Component == 0 ? 0 : 1) || j < (Component == 1 ? 0 : 1) || k < (Component == 2 ? 0 : 1)) return;
+  } else {
+    k = blockIdx.x * blockDim.x + threadIdx.x + (Component == 2 ? 0 : 1);
+    j = blockIdx.y * blockDim.y + threadIdx.y + (Component == 1 ? 0 : 1);
+    i = blockIdx.z * blockDim.z + threadIdx.z + (Component == 0 ? 0 : 1);
+  }
   if (i + (Component == 0 ? 0 : 1) >= nx || j + (Component == 1 ? 0 : 1) >= ny ||
       k + (Component == 2 ? 0 : 1) >= nz) {
     return;
@@ -669,7 +698,7 @@ __device__ __forceinline__ float update_compact_electric_psi(
 // are identical, with the modulation factor applied to the decay/curl pair. The
 // modulated path always carries per-cell decay/curl coefficients, so it never
 // composes with the uniform-scalar fast path.
-template <bool UniformDecay, bool UniformCurl, bool Modulated>
+template <bool UniformDecay, bool UniformCurl, bool Modulated, bool Batched = false>
 __global__ void update_electric_ex_cpml_compressed_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -704,10 +733,24 @@ __global__ void update_electric_ex_cpml_compressed_kernel(
     int z_high_length,
     float* __restrict__ psi_y,
     float* __restrict__ psi_z,
-    float* __restrict__ ex) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+    float* __restrict__ ex, FieldBatchLayout batch = {},
+    int64_t psi_a_stride = 0, int64_t psi_b_stride = 0) {
+  unsigned int i, j, k;
+  if constexpr (Batched) {
+    int64_t lane;
+    if (!batch_field_index(batch, nx, ny, nz, i, j, k, lane)) return;
+    ex += lane * static_cast<int64_t>(nx) * ny * nz;
+    hy += lane * batch.first_stride;
+    hz += lane * batch.second_stride;
+    decay += lane * batch.decay_stride;
+    curl_coeff += lane * batch.curl_stride;
+    psi_y += lane * psi_a_stride;
+    psi_z += lane * psi_b_stride;
+  } else {
+    k = blockIdx.x * blockDim.x + threadIdx.x;
+    j = blockIdx.y * blockDim.y + threadIdx.y;
+    i = blockIdx.z * blockDim.z + threadIdx.z;
+  }
   if (i >= nx || j >= ny || k >= nz) {
     return;
   }
@@ -743,7 +786,7 @@ __global__ void update_electric_ex_cpml_compressed_kernel(
   }
 }
 
-template <bool UniformDecay, bool UniformCurl, bool Modulated>
+template <bool UniformDecay, bool UniformCurl, bool Modulated, bool Batched = false>
 __global__ void update_electric_ey_cpml_compressed_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -778,10 +821,24 @@ __global__ void update_electric_ey_cpml_compressed_kernel(
     int z_high_length,
     float* __restrict__ psi_x,
     float* __restrict__ psi_z,
-    float* __restrict__ ey) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+    float* __restrict__ ey, FieldBatchLayout batch = {},
+    int64_t psi_a_stride = 0, int64_t psi_b_stride = 0) {
+  unsigned int i, j, k;
+  if constexpr (Batched) {
+    int64_t lane;
+    if (!batch_field_index(batch, nx, ny, nz, i, j, k, lane)) return;
+    ey += lane * static_cast<int64_t>(nx) * ny * nz;
+    hx += lane * batch.first_stride;
+    hz += lane * batch.second_stride;
+    decay += lane * batch.decay_stride;
+    curl_coeff += lane * batch.curl_stride;
+    psi_x += lane * psi_a_stride;
+    psi_z += lane * psi_b_stride;
+  } else {
+    k = blockIdx.x * blockDim.x + threadIdx.x;
+    j = blockIdx.y * blockDim.y + threadIdx.y;
+    i = blockIdx.z * blockDim.z + threadIdx.z;
+  }
   if (i >= nx || j >= ny || k >= nz) {
     return;
   }
@@ -817,7 +874,7 @@ __global__ void update_electric_ey_cpml_compressed_kernel(
   }
 }
 
-template <bool UniformDecay, bool UniformCurl, bool Modulated>
+template <bool UniformDecay, bool UniformCurl, bool Modulated, bool Batched = false>
 __global__ void update_electric_ez_cpml_compressed_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -852,10 +909,24 @@ __global__ void update_electric_ez_cpml_compressed_kernel(
     int y_high_length,
     float* __restrict__ psi_x,
     float* __restrict__ psi_y,
-    float* __restrict__ ez) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = blockIdx.z * blockDim.z + threadIdx.z;
+    float* __restrict__ ez, FieldBatchLayout batch = {},
+    int64_t psi_a_stride = 0, int64_t psi_b_stride = 0) {
+  unsigned int i, j, k;
+  if constexpr (Batched) {
+    int64_t lane;
+    if (!batch_field_index(batch, nx, ny, nz, i, j, k, lane)) return;
+    ez += lane * static_cast<int64_t>(nx) * ny * nz;
+    hx += lane * batch.first_stride;
+    hy += lane * batch.second_stride;
+    decay += lane * batch.decay_stride;
+    curl_coeff += lane * batch.curl_stride;
+    psi_x += lane * psi_a_stride;
+    psi_y += lane * psi_b_stride;
+  } else {
+    k = blockIdx.x * blockDim.x + threadIdx.x;
+    j = blockIdx.y * blockDim.y + threadIdx.y;
+    i = blockIdx.z * blockDim.z + threadIdx.z;
+  }
   if (i >= nx || j >= ny || k >= nz) {
     return;
   }
@@ -3685,5 +3756,95 @@ void update_electric_batch_cuda(
   if (component == 0) launch(std::integral_constant<int, 0>{});
   else if (component == 1) launch(std::integral_constant<int, 1>{});
   else launch(std::integral_constant<int, 2>{});
+  WITWIN_CUDA_CHECK();
+}
+
+void update_electric_cpml_batch_cuda(torch::stable::Tensor field, const torch::stable::Tensor& first,
+    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
+    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active, int64_t component,
+    torch::stable::Tensor psi_a, torch::stable::Tensor psi_b,
+    const torch::stable::Tensor& kappa_a, const torch::stable::Tensor& b_a,
+    const torch::stable::Tensor& c_a, const torch::stable::Tensor& kappa_b,
+    const torch::stable::Tensor& b_b, const torch::stable::Tensor& c_b,
+    int64_t a_low_length, int64_t a_high_start, int64_t a_high_length,
+    int64_t b_low_length, int64_t b_high_start, int64_t b_high_length,
+    int64_t a_low, int64_t a_high, int64_t b_low, int64_t b_high, bool dense) {
+  const auto batch = check_field_batch_inputs(field, first, second, decay, curl, inv_a, inv_b, active, component, true);
+  check_cpml_batch_inputs(field, first, second, decay, curl, inv_a, inv_b, active,
+      psi_a, psi_b, kappa_a, b_a, c_a, kappa_b, b_b, c_b, component,
+      a_low_length, a_high_start, a_high_length, b_low_length, b_high_start, b_high_length);
+  for (const auto mode : {a_low, a_high, b_low, b_high}) {
+    STD_TORCH_CHECK(mode >= 0 && mode <= 5 && mode != 3, "batch CPML does not support Bloch boundaries");
+  }
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
+  if (dense) {
+    const int axis_a = component == 0 ? 1 : 0;
+    const int axis_b = component == 2 ? 1 : 2;
+    STD_TORCH_CHECK(a_low_length == field.size(axis_a + 1) && a_high_length == 0 &&
+                    b_low_length == field.size(axis_b + 1) && b_high_length == 0,
+                    "dense batch CPML requires full-axis memory layouts");
+    const auto launch_dense = [&](auto axis) {
+      if (inactive_boundary_pair(a_low, a_high) && inactive_boundary_pair(b_low, b_high)) {
+        update_electric_cpml_interior_kernel<decltype(axis)::value, false, true><<<linear_grid(field.numel()), 256, 0, current_cuda_stream()>>>(field.size(1), field.size(2), field.size(3),
+          first.mutable_data_ptr<float>(), second.mutable_data_ptr<float>(),
+          decay.mutable_data_ptr<float>(), curl.mutable_data_ptr<float>(),0.0f, 0.0f,
+          kappa_a.mutable_data_ptr<float>(), b_a.mutable_data_ptr<float>(), c_a.mutable_data_ptr<float>(),
+          kappa_b.mutable_data_ptr<float>(), b_b.mutable_data_ptr<float>(), c_b.mutable_data_ptr<float>(),
+          inv_a.mutable_data_ptr<float>(), inv_b.mutable_data_ptr<float>(),psi_a.mutable_data_ptr<float>(), psi_b.mutable_data_ptr<float>(), field.mutable_data_ptr<float>(), batch);
+      } else {
+        update_electric_cpml_kernel<decltype(axis)::value, false, false, true><<<linear_grid(field.numel()), 256, 0, current_cuda_stream()>>>(field.size(1), field.size(2), field.size(3),
+          first.mutable_data_ptr<float>(), second.mutable_data_ptr<float>(),
+          decay.mutable_data_ptr<float>(), curl.mutable_data_ptr<float>(),nullptr, nullptr, nullptr, nullptr, 0.0f, 0.0f,
+          kappa_a.mutable_data_ptr<float>(), b_a.mutable_data_ptr<float>(), c_a.mutable_data_ptr<float>(),
+          kappa_b.mutable_data_ptr<float>(), b_b.mutable_data_ptr<float>(), c_b.mutable_data_ptr<float>(),
+          inv_a.mutable_data_ptr<float>(), inv_b.mutable_data_ptr<float>(),a_low, a_high, b_low, b_high, psi_a.mutable_data_ptr<float>(), psi_b.mutable_data_ptr<float>(), field.mutable_data_ptr<float>(), batch);
+      }
+    };
+    if (component == 0) launch_dense(std::integral_constant<int, 0>{});
+    else if (component == 1) launch_dense(std::integral_constant<int, 1>{});
+    else launch_dense(std::integral_constant<int, 2>{});
+    WITWIN_CUDA_CHECK();
+    return;
+  }
+  if (component == 0) {
+    update_electric_ex_cpml_compressed_kernel<false, false, false, true><<<linear_grid(field.numel()), 256, 0, current_cuda_stream()>>>(field.size(1), field.size(2), field.size(3),
+      first.mutable_data_ptr<float>(), second.mutable_data_ptr<float>(),
+      decay.mutable_data_ptr<float>(), curl.mutable_data_ptr<float>(),
+      nullptr, nullptr, nullptr, nullptr, 0.0f, 0.0f,
+      kappa_a.mutable_data_ptr<float>(), b_a.mutable_data_ptr<float>(), c_a.mutable_data_ptr<float>(),
+      kappa_b.mutable_data_ptr<float>(), b_b.mutable_data_ptr<float>(), c_b.mutable_data_ptr<float>(),
+      inv_a.mutable_data_ptr<float>(), inv_b.mutable_data_ptr<float>(),
+      a_low, a_high, b_low, b_high,
+      a_low_length, a_high_start, a_high_length, b_low_length, b_high_start, b_high_length,
+      psi_a.mutable_data_ptr<float>(), psi_b.mutable_data_ptr<float>(), field.mutable_data_ptr<float>(),
+      batch, psi_a.numel() / batch.count, psi_b.numel() / batch.count);
+  }
+  else if (component == 1) {
+    update_electric_ey_cpml_compressed_kernel<false, false, false, true><<<linear_grid(field.numel()), 256, 0, current_cuda_stream()>>>(field.size(1), field.size(2), field.size(3),
+      first.mutable_data_ptr<float>(), second.mutable_data_ptr<float>(),
+      decay.mutable_data_ptr<float>(), curl.mutable_data_ptr<float>(),
+      nullptr, nullptr, nullptr, nullptr, 0.0f, 0.0f,
+      kappa_a.mutable_data_ptr<float>(), b_a.mutable_data_ptr<float>(), c_a.mutable_data_ptr<float>(),
+      kappa_b.mutable_data_ptr<float>(), b_b.mutable_data_ptr<float>(), c_b.mutable_data_ptr<float>(),
+      inv_a.mutable_data_ptr<float>(), inv_b.mutable_data_ptr<float>(),
+      a_low, a_high, b_low, b_high,
+      a_low_length, a_high_start, a_high_length, b_low_length, b_high_start, b_high_length,
+      psi_a.mutable_data_ptr<float>(), psi_b.mutable_data_ptr<float>(), field.mutable_data_ptr<float>(),
+      batch, psi_a.numel() / batch.count, psi_b.numel() / batch.count);
+  }
+  else if (component == 2) {
+    update_electric_ez_cpml_compressed_kernel<false, false, false, true><<<linear_grid(field.numel()), 256, 0, current_cuda_stream()>>>(field.size(1), field.size(2), field.size(3),
+      first.mutable_data_ptr<float>(), second.mutable_data_ptr<float>(),
+      decay.mutable_data_ptr<float>(), curl.mutable_data_ptr<float>(),
+      nullptr, nullptr, nullptr, nullptr, 0.0f, 0.0f,
+      kappa_a.mutable_data_ptr<float>(), b_a.mutable_data_ptr<float>(), c_a.mutable_data_ptr<float>(),
+      kappa_b.mutable_data_ptr<float>(), b_b.mutable_data_ptr<float>(), c_b.mutable_data_ptr<float>(),
+      inv_a.mutable_data_ptr<float>(), inv_b.mutable_data_ptr<float>(),
+      a_low, a_high, b_low, b_high,
+      a_low_length, a_high_start, a_high_length, b_low_length, b_high_start, b_high_length,
+      psi_a.mutable_data_ptr<float>(), psi_b.mutable_data_ptr<float>(), field.mutable_data_ptr<float>(),
+      batch, psi_a.numel() / batch.count, psi_b.numel() / batch.count);
+  }
   WITWIN_CUDA_CHECK();
 }
