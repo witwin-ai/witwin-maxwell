@@ -105,15 +105,14 @@ def test_noncontiguous_and_broadcast_parameter_views_are_not_copied():
     assert parameters.variant_count == 4
 
 
-def test_source_scale_materialization_is_independent_and_trainable_scale_fails_closed():
+def test_source_scale_materialization_is_independent_for_trainable_scales():
     sim = simulation()
     scales = torch.tensor([1.0, 2.0])
     batch = mw.Simulation.batch(sim, parameters=mw.BatchParameters(source_scales={"drive": scales}), execution=execution())
     assert batch.scene(1).sources[0].source_time.amplitude == 2.0
     assert sim.scene.sources[0].source_time.amplitude == 1.0
     scales.requires_grad_()
-    with pytest.raises(NotImplementedError, match="P6"):
-        batch.scene(0)
+    assert batch.scene(0).sources[0].source_time.amplitude == 1.0
 
 
 def test_list_and_template_input_guards():
@@ -210,12 +209,15 @@ def test_pending_execution_policies_fail_before_gpu_allocation(policy, match):
         batch.prepare()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_trainable_batch_forward_is_not_silently_detached():
     sim = simulation()
+    sim.config.spectral_sampler = mw.SpectralSampler(window="none")
     parameters = mw.BatchParameters(region_densities={"design": torch.ones(2, 2, 3, 1, requires_grad=True)})
     batch = mw.Simulation.batch(sim, parameters=parameters, execution=execution())
-    with pytest.raises(NotImplementedError, match="adjoint"):
-        batch.prepare()
+    results = batch.run()
+    results.results()
+    assert results[0].raw_monitor("probe")["components"]["Ez"].requires_grad
 
 
 def test_scene_module_still_materializes_to_the_standard_scene():

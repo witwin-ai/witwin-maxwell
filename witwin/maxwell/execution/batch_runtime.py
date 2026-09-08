@@ -173,15 +173,13 @@ class PreparedBatch:
             if batch.template is None or parameters.schema != batch.parameters.schema:
                 raise ValueError("PreparedBatch parameters must preserve the template schema and variant count.")
             batch._validate_parameters(parameters)
-            if parameters.requires_grad:
-                raise NotImplementedError("Batch adjoint execution is not implemented yet; trainable inputs are rejected.")
         from ..sources import PointDipole
         from ..monitors import PointMonitor, PlaneMonitor, FluxMonitor
         for model in batch.simulations:
             checked = copy.copy(model)
             checked._refresh_trainable_parameters()
-            if checked.has_trainable_parameters:
-                raise NotImplementedError("Batch adjoint execution is not implemented yet; trainable inputs are rejected.")
+            if (checked.has_trainable_parameters or parameters is not None and parameters.requires_grad) and model.config.shutoff > 0:
+                raise ValueError("Batch adjoint requires a fixed time horizon: set shutoff=0.")
             scene = model.scene
             for name in ("ports", "thin_wires", "networks", "lumped_elements", "circuits"):
                 if getattr(scene, name, ()):
@@ -202,13 +200,21 @@ class PreparedBatch:
 
     def _load(self, indices, parameters, group_id):
         from ..fdtd.runtime.batch import NativeFieldSlot, _share_static_materials, validate_native_solver
+        from ..adjoint_inputs import scene_trainable_material_tensors
         inputs = () if parameters is None else tuple(
             value for kind in ("region_densities", "source_scales")
             for value in getattr(parameters, kind).values())
-        key = (tuple(indices), None if parameters is None else tuple(
-            (kind, name, id(value), object() if torch.is_inference(value) else value._version)
-            for kind in ("region_densities", "source_scales")
-            for name, value in getattr(parameters, kind).items()))
+        models = (self.batch.template,) if self.batch.template is not None else tuple(
+            self.batch.simulations[i] for i in indices)
+        inputs += tuple(value for model in models for value in (
+            model.scene_module.parameters() if model.scene_module is not None
+            else scene_trainable_material_tensors(model.scene)))
+        key = (tuple(indices), tuple((id(value), object() if torch.is_inference(value) else value._version)
+                                    for value in inputs))
+        if any(model.scene_module is not None for model in models):
+            # Module-generated material graphs must be fresh after a previous
+            # backward has consumed their saved intermediates.
+            key += (object(),)
         if key == self._loaded_key:
             return
         self._loaded_key = None
@@ -232,13 +238,30 @@ class PreparedBatch:
                 raise torch.cuda.OutOfMemoryError("Insufficient free device memory above BatchExecution.reserve_bytes.")
             model = copy.copy(self.batch.template or self.batch.simulations[index])
             model.config = copy.deepcopy(model.config)
-            scene = materializer.scene(index).clone(device=self.device)
+            with torch.enable_grad():
+                scene = materializer.scene(index).clone(device=self.device)
             if self.batch.outputs.monitors != "all":
                 selected = set(self.batch.outputs.monitors)
                 scene.monitors = [m for m in scene.monitors if m.name in selected]
             model.scene = scene
             model.scene_input = scene
             model.scene_module = None
+            with torch.enable_grad():
+                model._batch_source_scales = {}
+                if parameters is not None:
+                    for source_index, source in enumerate(self.batch.template.scene.resolved_sources()):
+                        value = parameters.source_scales.get(source.name)
+                        if value is not None and value.requires_grad:
+                            scale = value[index].to(self.device)
+                            model._batch_source_scales[source_index] = (scale, source.source_time.amplitude)
+                model._refresh_trainable_parameters()
+                if model.has_trainable_parameters or model._batch_source_scales:
+                    from ..fdtd.adjoint.bridge import _FDTDGradientBridge
+                    bridge = _FDTDGradientBridge(model)
+                else:
+                    bridge = None
+                model._batch_differentiable = bridge is not None
+                model._batch_input_guards = inputs
             from ..scene import prepare_scene
             compiled_scene = prepare_scene(scene)
             # Template source scales cannot alter geometry, material sampling,
@@ -250,7 +273,7 @@ class PreparedBatch:
                                and not compiled_scene._has_trainable_geometry())
             if fixed_materials:
                 compiled_scene._material_model_cache = self._fixed_material_cache
-            elif self.batch.template is not None and parameters.region_densities:
+            elif self.batch.template is not None and parameters.region_densities and not model.has_trainable_parameters:
                 from ..compiler.materials import LocalMaterialCache, PerturbationMedium
                 if not any(isinstance(s.material, PerturbationMedium) for s in compiled_scene.structures):
                     if self._local_material_cache is None:
@@ -260,8 +283,14 @@ class PreparedBatch:
                         material_model = self._local_material_cache.compile(compiled_scene)
                     compiled_scene._material_model_override = material_model
             solver = model._build_fdtd_solver_for_scene(compiled_scene, initialize=True)
+            solver._batch_source_scale_amplitudes = {
+                i: amplitude for i, (_, amplitude) in model._batch_source_scales.items()}
             solver.verbose = False
             validate_native_solver(solver)
+            if model._batch_differentiable:
+                from ..fdtd.adjoint.dispatch import validate_native_adjoint_preparation
+                bridge._validate_supported_configuration(solver)
+                validate_native_adjoint_preparation(solver)
             if solvers:
                 # Deduplicate before constructing the next lane so the peak
                 # does not include a whole cohort of redundant material banks.
@@ -303,7 +332,7 @@ class PreparedBatch:
             self._sources = BatchSourceEngine(slot, max(
                 model._resolve_fdtd_time_steps(solver, model.scene)
                 for model, solver in zip(self._models, slot.solvers)))
-        generators, pending, outputs = [], {}, {}
+        generators, pending, outputs, checkpoints, strides = [], {}, {}, {}, {}
         try:
             for lane, (model, solver) in enumerate(zip(self._models, slot.solvers)):
                 cfg = model.config
@@ -320,6 +349,12 @@ class PreparedBatch:
                     raise NotImplementedError("Batch full-field spectra require GPU-driven accumulation.")
                 pending[lane] = (steps, descriptor["shutoff_min_step"])
             observers.bind()
+            from ..fdtd.checkpoint import capture_checkpoint_state
+            from ..fdtd.adjoint.core import _checkpoint_stride
+            for lane, model in enumerate(self._models):
+                if model._batch_differentiable and self._record_grad:
+                    checkpoints[lane] = [capture_checkpoint_state(slot.solvers[lane], step=0)]
+                    strides[lane] = _checkpoint_stride(model, pending[lane][0])
             yield
             from ..fdtd.cuda.runtime.graph import CudaGraphRunner
             policy = self.batch.execution
@@ -337,6 +372,8 @@ class PreparedBatch:
                     raise _BatchCancelled("Batch cancellation requested.")
                 deadline = min(value[0] for value in pending.values())
                 for lane in pending:
+                    if lane in strides:
+                        deadline = min(deadline, (completed//strides[lane]+1)*strides[lane])
                     cfg = self._models[lane].config
                     if cfg.shutoff > 0:
                         deadline = min(deadline, (completed//cfg.shutoff_check_interval+1)*cfg.shutoff_check_interval)
@@ -387,11 +424,22 @@ class PreparedBatch:
                             solver._shutoff_triggered = True
                             solver._shutoff_step = completed - 1
                     if completed < steps and not solver._shutoff_triggered:
+                        if lane in strides and completed % strides[lane] == 0:
+                            checkpoints[lane].append(capture_checkpoint_state(solver, step=completed))
                         continue
                     try:
                         generators[lane].send(completed)
                     except StopIteration as done:
                         outputs[lane] = done.value or {}
+                        if lane in checkpoints:
+                            from .adjoint import BatchAdjointTape
+                            # A new bridge is required for every run, even when
+                            # the compiled cohort itself is unchanged.
+                            from ..fdtd.adjoint.bridge import _FDTDGradientBridge
+                            with torch.enable_grad():
+                                bridge = _FDTDGradientBridge(self._models[lane])
+                            outputs[lane] = BatchAdjointTape(bridge, solver, outputs[lane],
+                                checkpoints[lane], steps, bool(self.batch.outputs.fields), self._budget)
                         del pending[lane]
                         slot.active[lane] = 0
                     else:
@@ -415,6 +463,10 @@ class PreparedBatch:
 
     def _export(self, lane, raw, index):
         from ..result import Result
+        from .adjoint import BatchAdjointTape
+        differentiable = isinstance(raw, BatchAdjointTape)
+        if differentiable:
+            raw = raw.attach()
         model = self._models[lane]
         solver = self._slot.solvers[lane]
         device = self.device if self.batch.outputs.result_device == "local" else self.batch.outputs.result_device
@@ -423,7 +475,7 @@ class PreparedBatch:
         if set(fields) != set(self.batch.outputs.fields):
             raise RuntimeError("Batch output plan requested unavailable field spectra.")
         destination = getattr(self.batch, "_export_pools", {}).get(device)
-        with destination.activate() if destination is not None else contextlib.nullcontext():
+        with (destination.activate() if destination is not None else contextlib.nullcontext()), torch.set_grad_enabled(differentiable):
             exported_fields = _owned(fields, device, memo)
             exported_monitors = _owned(raw.get("observers", {}), device, memo)
         result = Result(method="fdtd", scene=model.scene, frequencies=model.frequencies,
@@ -434,6 +486,8 @@ class PreparedBatch:
                 use_full_field_dft=bool(self.batch.outputs.fields), dft_cfg=model.config.spectral_sampler))
         result._solver_stats["batch_execution_tier"] = f"native_pipeline_{self._last_graph_mode}"
         result._solver_stats["batch_graph_replays"] = self._last_graph_replays
+        if differentiable:
+            result._solver_stats["batch_adjoint"] = "native_checkpoint_per_lane"
         return result
 
     @capture_participant
@@ -452,6 +506,7 @@ class PreparedBatch:
                 raise RuntimeError("PreparedBatch is closed.")
             self._cancel.clear()
             self._records = ()
+            self._record_grad = torch.is_grad_enabled()
             return BatchResultIterator(self, parameters, order=order)
         except BaseException:
             self._gate.release()
@@ -757,6 +812,7 @@ class ParallelPreparedBatch(PreparedBatch):
             for event in events:
                 event.synchronize()
             for child in self._children:
+                child._record_grad = torch.is_grad_enabled()
                 child._cancel.clear()
                 child._enter_stream()
                 for event in events:

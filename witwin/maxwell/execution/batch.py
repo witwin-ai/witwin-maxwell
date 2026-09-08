@@ -289,20 +289,20 @@ class BatchSimulation:
         if not 0 <= index < len(self):
             raise IndexError(index)
         if self.template is None:
-            return self.simulations[index].scene.clone()
-        scene = self.template.scene.clone()
+            model = self.simulations[index]
+            return (model.scene_module.to_scene() if model.scene_module is not None else model.scene).clone()
+        scene = (self.template.scene_module.to_scene() if self.template.scene_module is not None
+                 else self.template.scene).clone()
         for name, value in self.parameters.region_densities.items():
             region = _named(scene.material_regions, name, path="material_regions")
             slot = next(i for i, obj in enumerate(scene.material_regions) if obj is region)
             scene.material_regions[slot] = replace(region, density=value[index])
         for name, value in self.parameters.source_scales.items():
-            if value.requires_grad:
-                raise NotImplementedError("Trainable source scale materialization requires the native source-amplitude contract (P6).")
             source = _named(scene.sources, name, path="sources")
             slot = next(i for i, obj in enumerate(scene.sources) if obj is source)
             scaled = copy.copy(source)
             object.__setattr__(scaled, "source_time", replace(
-                source.source_time, amplitude=source.source_time.amplitude * float(value[index]),
+                source.source_time, amplitude=source.source_time.amplitude * float(value[index].detach()),
             ))
             scene.sources[slot] = scaled
         return scene

@@ -917,6 +917,16 @@ def _accumulate_source_term_gradients(
                     pec_mask[region], torch.zeros_like(adjoint_patch), adjoint_patch
                 )
             eps_patch = eps_by_field[field_name][region]
+            source_index = term.get("source_index")
+            scale_gradients = getattr(solver, "_batch_source_scale_gradients", {})
+            if source_index in scale_gradients:
+                unit_term = dict(term)
+                unit_time = dict(term.get("source_time") or solver._source_time)
+                unit_time["amplitude"] = solver._batch_source_scale_amplitudes[source_index]
+                unit_term["source_time"] = unit_time
+                unit_payload = _source_term_signal_patch(unit_term, source_time=unit_time,
+                    omega=solver.source_omega, time_value=term_time)
+                scale_gradients[source_index].add_((adjoint_patch * unit_payload).sum())
             grad_eps_by_field[field_name][region] = (
                 grad_eps_by_field[field_name][region] - (adjoint_patch * payload) / eps_patch
             )

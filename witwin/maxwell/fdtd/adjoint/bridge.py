@@ -305,6 +305,7 @@ class _FDTDGradientBridge:
         self.material_inputs = self._resolve_material_inputs()
         self.rf_scene_inputs = self._resolve_rf_scene_inputs()
         self.wire_inputs = self._resolve_wire_inputs()
+        self.source_scale_inputs = tuple(value[0] for value in getattr(simulation, "_batch_source_scales", {}).values())
         self.excitation_inputs = _unique_trainable_tensors(
             value
             for excitation in getattr(simulation, "excitations", ())
@@ -315,6 +316,7 @@ class _FDTDGradientBridge:
             + self.rf_scene_inputs
             + self.wire_inputs
             + self.excitation_inputs
+            + self.source_scale_inputs
         )
         if not self.trainable_inputs:
             raise NotImplementedError(
@@ -866,6 +868,13 @@ class _FDTDGradientBridge:
                 full_field_dft=use_full_field_dft,
                 normalize_source=dft_cfg.normalize_source,
             )
+        return self.accept_forward(solver, raw_output, checkpoints, time_steps=time_steps,
+                                   use_full_field_dft=use_full_field_dft)
+
+    def accept_forward(self, solver, raw_output, checkpoints, *, time_steps, use_full_field_dft):
+        """Bind an already executed native forward and its owned checkpoints."""
+        runtime = _runtime()
+        dft_cfg = self.simulation.config.spectral_sampler
         if raw_output is None:
             raise RuntimeError("FDTD solve did not return any output.")
 
@@ -904,6 +913,7 @@ class _FDTDGradientBridge:
         )
         self._last_backward_profile = None
         self._last_circuits = dict(raw_output.get("circuits", {}))
+        self._last_time_monitors = dict(raw_output.get("time_observers", {}))
         return pack.output_tensors
 
     def rebuild_forward_outputs(self, output_tensors):
@@ -1012,6 +1022,9 @@ class _FDTDGradientBridge:
         grad_eps_ex = torch.zeros_like(solver.eps_Ex)
         grad_eps_ey = torch.zeros_like(solver.eps_Ey)
         grad_eps_ez = torch.zeros_like(solver.eps_Ez)
+        solver._batch_source_scale_gradients = {
+            index: torch.zeros((), device=solver.device, dtype=solver.eps_Ex.dtype)
+            for index in getattr(solver, "_batch_source_scale_amplitudes", {})}
         grad_aniso_inverse = None
         aniso_gather_weights = None
         if getattr(solver, "full_aniso_enabled", False):
@@ -1348,6 +1361,10 @@ class _FDTDGradientBridge:
                         if value is not None:
                             grad_aniso_inverse[pair].add_(value.detach())
                 with torch.enable_grad():
+                    source_outputs = None
+                    if self.source_scale_inputs:
+                        from ...execution.adjoint import source_scale_pullback
+                        source_outputs = source_scale_pullback(self, base_inputs, grad_outputs)
                     material_outputs = tuple(
                         torch.zeros_like(tensor) for tensor in base_inputs
                     )
@@ -1396,6 +1413,8 @@ class _FDTDGradientBridge:
                             material_outputs,
                         )
                     )
+                    if source_outputs is not None:
+                        outputs = tuple(a + b for a, b in zip(outputs, source_outputs))
         finally:
             if hasattr(solver, "_mode_source_cotangent_accum"):
                 delattr(solver, "_mode_source_cotangent_accum")

@@ -28,7 +28,40 @@ R2 公共预算/Graph/缓存/生命周期组合 65 项通过，包含保留全�
 顺序/完成顺序、关闭取消和按 GPU 共享的严格分配账户。Graph 捕获与 host 提交
 通过协调区间排他，已入队 GPU 工作仍可重叠。真实双卡及公共/预算/场景回归
 118 项通过，覆盖本地/CPU/跨卡输出、调用流更新和嵌套几何迁移的梯度保留。
-GPU 0 有其他任务，未据此验收多卡吞吐比；自动 Q 调优与 Batch 伴随仍待完成。
+GPU 0 有其他任务，未据此验收多卡吞吐比；自动 Q 调优与批量反向 kernel 性能验收仍待完成。
+
+继续开发 R4：Batch 已接通 PyTorch checkpoint 伴随。原生 B-lane 前向按检查点
+边界推进；每个结果拥有独立的场/系数/观察器快照，反向复用既有逐 lane 原生
+GPU 伴随，尚未融合为 B-lane reverse kernel。密度、支持范围内的场景几何、
+source scale 和共享参数均通过 autograd 回到原输入；零/负幅度受支持，单位幅度
+波形归一化保留物理源幅度。跨卡参数版本 guard、关闭后延迟反向、禁用循环 GC
+释放和 no_grad/重新训练均覆盖。SceneModule 每次重建计算图；模板及列表输入
+的版本变化触发重新编译。检查点、快照与反向 workspace 沿用同一预算账户；
+保留多次前向的 tape 会持续占用该预算，不等于无成本保留训练历史。
+必须固定时间步（shutoff=0），边界/材料限制沿用原生伴随能力检查。
+R4 最终专项/公共 API/缓存矩阵 80 passed；此前原有伴随与调度组合
+139 passed，另一个短时 CW 测试补齐采样窗口后单独通过。双槽旧图共享叶子
+可能触发 PyTorch 的 AccumulateGrad stream mismatch 提示，数值对照通过；
+这表示潜在额外同步，不掩盖为无同步的反向扩展性验收。
+
+```python
+# rho is a CUDA tensor with shape [N, nx, ny, nz].
+rho = torch.nn.Parameter(initial_density)
+submission = mw.Simulation.batch(
+    template, parameters=mw.BatchParameters(region_densities={"design": rho}),
+    execution=mw.BatchExecution(devices=("cuda:0", "cuda:1"),
+        batch_size=2, slots_per_device=2, graph="required",
+        memory_limit_bytes=8 * 1024**3),
+    outputs=mw.BatchOutput(monitors=("probe",), result_device="cuda:0"),
+)
+with submission.prepare() as prepared:
+    results = prepared.run()
+# Forward tapes own everything required after prepared.close().
+loss = results.stack(lambda r: r.raw_monitor("probe")["components"]["Ez"]).abs().square().sum()
+loss.backward()
+# Call optimizer.step() after backward; do not mutate inputs between them.
+```
+
 
 | 子阶段 | 状态 | 证据与剩余工作 |
 | --- | --- | --- |
@@ -36,7 +69,7 @@ GPU 0 有其他任务，未据此验收多卡吞吐比；自动 Q 调优与 Batc
 | P0.2 并发基准工具 | 完成 | 顺序/进程/run_many 的冷/热执行、有序频谱对照、隔离显存测量、CLI 和报告更新；N=3 GPU 冒烟通过，N=10 小网格 2 次预热/5 次正式测量通过 |
 | P0.3 完整基线矩阵验收 | 未完成 | 其它负载、N=1/100、完全相同输入、N=10 隔离显存以及原业务几何仍待测；[已保存证据](../assessments/fdtd-batch-implementation-progress.md) |
 | P1.1 描述对象与只读声明规划 | 完成 | 43 项公共 Batch 测试；公共 API/单场景/ensemble 回归共 79 passed、3 skipped；两种入口、梯度视图、输出冲突、明确物理差异与稳定分组已覆盖 |
-| P1.2 编译证明、精确 output allocation 与运行时对接 | 未完成 | P1.1 report 始终 unresolved，不依据声明摘要共享张量或伪报显存预算；源尺度求导的场景物化仍明确拒绝 |
+| P1.2 编译证明、精确 output allocation 与运行时对接 | 未完成 | P1.1 report 始终 unresolved，不依据声明摘要共享张量或伪报显存预算；源尺度求导已通过 R4 的显式源幅度 VJP 接通 |
 | P2.1 局部 Yee 材料采样基础 | 完成 | 同一材料函数支持局部裁剪和差分 halo；六分量、均匀/非均匀网格、偏振子像素和密度梯度对照；相关 GPU 测试共 85 passed |
 | P3.1 原生 batch 场寻址基础 | 完成 | 复用原 E/H 更新与 interior fast path；共享/逐 lane 系数、64 位偏移、active mask；94 项专项 GPU 测试逐位对照通过，86 项原有原生/CPML/Graph/伴随/调制回归通过 |
 | P3.2 原生 CPML 与协同时间推进 | 完成 | dense/slab CPML 复用原公式；固定容量场槽、尾批、重置与换入；复用普通 solve 生命周期的协同推进；167 项 GPU 专项/回归通过 |
@@ -44,7 +77,7 @@ GPU 0 有其他任务，未据此验收多卡吞吐比；自动 Q 调优与 Batc
 | 原生 eager 与既有基线对照 | 工具/测量完成，组合性能门未通过 | launch、N=B=10、2000 步、2 预热/5 正式；原生 2.342 s，十进程 0.903 s；隔离驱动显存增量 411.6/3175.6 MiB；频谱误差为 0。不能据此声称耗时不退化或完整业务验收 |
 | 性能与正确性审计 | 修复与分项诊断完成 | `d232245` 修复参数身份缓存和迭代所有权；三负载 CPU/CUDA profiling、field-only Graph 消融、N>B 构建次数及扩展数值对照，见 [审计报告](../assessments/fdtd-batch-performance-and-correctness-audit.md)；不替代完整性能矩阵 |
 | P3 源/观察器与完整时间步 Graph | 完成基础前向子集 | 原生批量源/频谱、固定缓冲、精确尾块、capture 复用和线程协调；54 项 Graph/公共 API 回归通过。N=B=10 的 Graph 中位 0.127 s、十进程 0.557 s，显存增量 402/3158 MiB，探针误差为零 |
-| P2/P3 其余、P4–P7 | 未完成 | 背景/局部编译复用、精确 output allocation、byte admission、多 GPU/Q=2、调优和 Batch 伴随仍待实现；不视为全方案或性能验收完成 |
+| P2/P3 其余、P4–P7 | 未完成 | R1/R2/R3/R4 已交付基础局部编译、byte admission、多 GPU/Q=2 和逐 lane 伴随；精确 output allocation、结构影响证明、调优及融合反向 kernel 仍需推进；不视为全方案或性能验收完成 |
 | P8 | 未开始 | 独立研究门，依赖 P4 实测 |
 
 环境检查：沙箱内 GPU 不可见；获准在沙箱外检查后发现两张 A6000。
@@ -102,7 +135,7 @@ inference tensor 每次保守重新编译。外部共享存储或 `.data` 的未
 迭代器 `next()` 活跃时不允许另一线程再次 `next()` 或 `close()`；
 使用 `request_cancel()`，待调用返回后再关闭。
 默认 `batch_size="auto"` 基于单 lane 准备实测保守选择容量，并不执行吞吐调优。
-`tune=True`、自动 Q 和可训练输入仍明确拒绝；严格内存上限使用 R2 的私有分配池。
+`tune=True` 和自动 Q 仍明确拒绝；可训练输入已接通 R4 原生伴随；严格内存上限使用 R2 的私有分配池。
 这些限制不能解读为完整调度器已经实现。
 
 源幅度模板在无密度参数、无动态/可训练材料时，共用一次材料编译结果，

@@ -178,10 +178,11 @@ def test_result_lifetime_does_not_depend_on_cyclic_gc():
                 gc.enable()
 
 
-def test_trainable_scene_changed_after_simulation_construction_fails_before_running():
+def test_trainable_scene_added_after_simulation_construction_is_detected():
     sim = simulation()
     sim.scene.add_material_region(mw.MaterialRegion(name="rho",
         geometry=mw.Box(size=(0.05, 0.05, 0.05), device="cuda:0"),
         density=torch.zeros(2, 2, 2, device="cuda:0", requires_grad=True), eps_bounds=(1., 5.)))
-    with pytest.raises(NotImplementedError, match="adjoint"):
-        batch([sim]).prepare()
+    results = batch([sim]).run()
+    results.results()
+    assert results[0].raw_monitor("probe")["components"]["Ez"].requires_grad
