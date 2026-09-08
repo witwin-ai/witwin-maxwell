@@ -2,6 +2,8 @@
 
 This document tracks the current user-visible capabilities of the `maxwell` package.
 
+- Experimental batch baseline instrumentation: `python -m benchmark batch --inventory` lists three fixed workloads; `--audit WORKLOAD --device cuda:0` records single-run tensor storage ownership, prepare/completed manifests, allocator peaks and sampled driver memory under `benchmark/plots/batch/`. This is instrumentation only; concurrent comparisons and batch solver execution are not yet available.
+
 ## Maintenance Rule
 
 - Update this file whenever a new user-visible feature, public API capability, or meaningful workflow is added, removed, or materially changed.

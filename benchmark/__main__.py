@@ -6,6 +6,12 @@ from benchmark.validation_catalog import inventory_markdown
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "batch":
+        from benchmark.batch import main as batch_main
+
+        batch_main(sys.argv[2:])
+        sys.exit(0)
+
     # `python -m benchmark rf [scenes...]` dispatches to the RF wave-level
     # validation harness; everything else keeps the field-vs-reference runner.
     if len(sys.argv) > 1 and sys.argv[1] == "rf":

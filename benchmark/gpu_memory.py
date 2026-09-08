@@ -8,23 +8,26 @@ import torch
 class GpuMemorySampler(threading.Thread):
     """Sample driver-level GPU usage and report the peak above baseline."""
 
-    def __init__(self, interval_s: float = 0.02):
+    def __init__(self, interval_s: float = 0.02, *, device=None):
         super().__init__(daemon=True)
         self._interval_s = float(interval_s)
+        if self._interval_s <= 0:
+            raise ValueError("interval_s must be positive.")
+        self._device = torch.device(device or f"cuda:{torch.cuda.current_device()}")
         self._stop_event = threading.Event()
-        free, total = torch.cuda.mem_get_info()
+        free, total = torch.cuda.mem_get_info(self._device)
         self._total_bytes = int(total)
         self._baseline_used = self._total_bytes - int(free)
         self._peak_used = self._baseline_used
 
     def run(self) -> None:
         while not self._stop_event.is_set():
-            free, _ = torch.cuda.mem_get_info()
+            free, _ = torch.cuda.mem_get_info(self._device)
             self._peak_used = max(self._peak_used, self._total_bytes - int(free))
             self._stop_event.wait(self._interval_s)
 
     def stop(self) -> int:
-        free, _ = torch.cuda.mem_get_info()
+        free, _ = torch.cuda.mem_get_info(self._device)
         self._peak_used = max(self._peak_used, self._total_bytes - int(free))
         self._stop_event.set()
         self.join()

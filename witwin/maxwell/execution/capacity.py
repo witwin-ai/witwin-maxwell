@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import torch
+from collections.abc import Mapping
+from dataclasses import dataclass, asdict
 
 from ..fdtd.distributed.capacity import local_dft_working_set_bytes
 from ..fdtd.distributed.output import electric_field_output_bytes
@@ -12,6 +14,85 @@ from ..scene import Scene
 # CPML/auxiliary buffers all scale with the same cell count. This is a placement
 # preflight heuristic (fail before OOM), not an exact allocator accounting.
 _FIELD_STATE_MULTIPLIER = 8
+
+
+@dataclass(frozen=True)
+class TensorAllocation:
+    """A unique live storage and the tensor views reachable from audit roots."""
+
+    device: str
+    storage_bytes: int
+    owners: tuple[str, ...]
+    views: tuple[dict, ...]
+
+
+def tensor_memory_manifest(roots: Mapping[str, object]) -> dict:
+    """Audit reachable tensor storage without reading tensor values.
+
+    This measures storage, not allocator reservations, graph-private pools or
+    opaque native allocations. Attributes are read from instance dictionaries;
+    properties, callables and autograd graphs are deliberately not traversed.
+    Shared containers are visited once, with their aliases reported separately.
+    """
+    storages = {}
+    visited = {}
+    aliases = {}
+    unsupported = []
+
+    def visit(value, path):
+        if isinstance(value, torch.Tensor):
+            if value.layout != torch.strided or value.device.type == "meta":
+                unsupported.append(path)
+                return
+            storage = value.untyped_storage()
+            key = (str(value.device), storage.data_ptr(), storage.nbytes())
+            # Empty allocations carry no bytes and need no unique pointer.
+            record = storages.setdefault(key, {
+                "device": str(value.device), "storage_bytes": storage.nbytes(),
+                "owners": [], "views": [],
+            })
+            record["owners"].append(path)
+            record["views"].append({
+                "path": path, "shape": list(value.shape),
+                "stride": list(value.stride()), "dtype": str(value.dtype),
+                "offset_elements": value.storage_offset(),
+                "logical_bytes": value.numel() * value.element_size(),
+                "requires_grad": value.requires_grad,
+            })
+            return
+        if value is None or isinstance(value, (str, bytes, int, float, bool, type)) or callable(value):
+            return
+        if id(value) in visited:
+            aliases[path] = visited[id(value)]
+            return
+        visited[id(value)] = path
+        if isinstance(value, Mapping):
+            children = value.items()
+        elif isinstance(value, (list, tuple)):
+            children = enumerate(value)
+        elif type(value).__module__.startswith(("witwin.", "types")):
+            children = vars(value).items() if hasattr(value, "__dict__") else ()
+        else:
+            return
+        for name, child in children:
+            visit(child, f"{path}.{name}")
+
+    for name, value in roots.items():
+        visit(value, str(name))
+    allocations = [asdict(TensorAllocation(
+        device=r["device"], storage_bytes=r["storage_bytes"],
+        owners=tuple(r["owners"]), views=tuple(r["views"]),
+    )) for r in storages.values()]
+    totals = {}
+    for allocation in allocations:
+        device = allocation["device"]
+        totals[device] = totals.get(device, 0) + allocation["storage_bytes"]
+    return {
+        "schema_version": 1, "storage_bytes_by_device": totals,
+        "allocations": allocations, "container_aliases": aliases,
+        "unsupported_tensors": unsupported,
+        "excludes": ["allocator_reserved", "opaque_native_allocations", "autograd_saved_tensors"],
+    }
 
 
 def _node_counts(scene: Scene) -> tuple[int, int, int] | None:
@@ -79,6 +160,7 @@ def estimate_simulation_footprint_bytes(simulation) -> int | None:
 
 
 __all__ = [
+    "tensor_memory_manifest",
     "estimate_scene_footprint_bytes",
     "estimate_simulation_footprint_bytes",
 ]
