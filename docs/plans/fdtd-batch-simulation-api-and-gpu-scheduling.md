@@ -33,6 +33,8 @@ GPU 0 存在其它计算任务。原生扩展需显式设置当前环境内的 `
 
 后续优化进度：已接入跨 lane/频点的点、面和通量频谱累积，GPU 维护相位、窗和源归一化状态；场 kernel 的固定调用参数在 bind 时建立。源注入仍逐 lane。该子阶段 35 项专项/监视器/生命周期测试通过，原始测量见 `benchmark/plots/batch/optimized-observer-spectrum.json`。后续源、材料、编译和调度工作继续实施。
 
+材料分配子阶段：未启用的非对角、非线性、调制通道改为标量存储的只读广播张量；激活通道时才物化。子像素平均保留紧凑零，trainable occupancy 仍保留原求导依赖。没有色散极点时不分配电/磁色散模板的整域逆材料张量。材料编译/色散/梯度/Batch 数值矩阵 175 passed、1 skipped，紧凑存储及零导数专项 4 项通过；高级非线性、调制和非对角材料对照已执行。
+
 `Batch.prepare/run` 已不再是不可执行的占位接口。当前执行层为
 `native_field_cohort_eager`：一张 GPU、一个固定容量 B 的执行槽，E/H 与
 dense/slab CPML 使用原生批量 kernel；每个 lane 仍通过现有流程注入点源、

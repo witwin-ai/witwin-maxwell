@@ -552,6 +552,11 @@ _MAGNETIC_DISPERSIVE_FAMILY = _DispersiveFamily(
 
 
 def _build_family_dispersive_templates(solver, material_model, family):
+    if not any(material_model[f"{family.pole_prefix}{kind}_poles"]
+               for kind in ("debye", "drude", "lorentz")):
+        setattr(solver, family.templates_attr, {})
+        setattr(solver, family.enabled_attr, False)
+        return
     templates = {
         component_name: {
             family.inverse_key: (

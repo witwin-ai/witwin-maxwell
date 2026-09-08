@@ -185,31 +185,53 @@ def _static_structure_material(structure):
     )
 
 
+def _constant_zero_field(shape, device):
+    """Read-only broadcast storage until a material blend activates this channel."""
+    value = torch.zeros((), device=device, dtype=torch.float32).expand(shape)
+    value._material_constant_zero_version = None if torch.is_inference(value) else value._version
+    return value
+
+
+def _is_constant_zero(value):
+    version = getattr(value, "_material_constant_zero_version", None)
+    return version is not None and not torch.is_inference(value) and value._version == version
+
+
+def _add_material_samples(first, second):
+    if _is_constant_zero(first) and _is_constant_zero(second):
+        return first
+    return first + second
+
+
+def _scale_material_sample(value, scale):
+    return value if _is_constant_zero(value) else value * scale
+
+
 def _new_material_model(scene, layout, *, eps_fill, mu_fill):
     shape = (scene.Nx, scene.Ny, scene.Nz)
     device = scene.device
     model = {
         "eps_components": _new_component_field(shape, fill_value=eps_fill, device=device),
         "eps_offdiag_components": {
-            pair: torch.zeros(shape, device=device, dtype=torch.float32)
+            pair: _constant_zero_field(shape, device)
             for pair in _OFFDIAG_AXES
         },
         "mu_components": _new_component_field(shape, fill_value=mu_fill, device=device),
         "sigma_e_components": _new_component_field(shape, fill_value=0.0, device=device),
         "sigma_m_components": _new_component_field(shape, fill_value=0.0, device=device),
-        "kerr_chi3": torch.zeros(shape, device=device, dtype=torch.float32),
-        "chi2": torch.zeros(shape, device=device, dtype=torch.float32),
-        "tpa_sigma": torch.zeros(shape, device=device, dtype=torch.float32),
+        "kerr_chi3": _constant_zero_field(shape, device),
+        "chi2": _constant_zero_field(shape, device),
+        "tpa_sigma": _constant_zero_field(shape, device),
         # Space-time modulation quadrature fields: amplitude * cos(phase) and
         # amplitude * sin(phase). This basis blends linearly across overlapping
         # structures, unlike the raw phase itself.
-        "modulation_cos": torch.zeros(shape, device=device, dtype=torch.float32),
-        "modulation_sin": torch.zeros(shape, device=device, dtype=torch.float32),
+        "modulation_cos": _constant_zero_field(shape, device),
+        "modulation_sin": _constant_zero_field(shape, device),
         # Per-node modulation angular frequency (0 where unmodulated). A Scene may
         # hold several distinct modulation frequencies at once; each modulated
         # structure stamps its own frequency onto the cells it covers, so the
         # single-frequency-per-scene restriction no longer applies.
-        "modulation_omega": torch.zeros(shape, device=device, dtype=torch.float32),
+        "modulation_omega": _constant_zero_field(shape, device),
     }
     for key in (
         "debye_poles",
@@ -272,6 +294,11 @@ def material_model_has_full_anisotropy(model) -> bool:
 
 
 def _blend_material(tensor, occupancy, *, value):
+    # Preserve the ordinary graph when occupancy is trainable, even when the
+    # derivative happens to be zero. Active channels always materialize normally.
+    if (_is_constant_zero(tensor) and isinstance(value, (int, float)) and value == 0
+            and not occupancy.requires_grad):
+        return tensor
     value_tensor = _scalar_tensor(value, device=tensor.device, dtype=tensor.dtype)
     return (1.0 - occupancy) * tensor + occupancy * value_tensor
 
@@ -2461,12 +2488,10 @@ def compile_material_model(
                 inverse_accum["eps_components"][axis] += inverse_sample["eps_components"][axis]
                 inverse_accum["mu_components"][axis] += inverse_sample["mu_components"][axis]
         for pair in _OFFDIAG_AXES:
-            accum["eps_offdiag_components"][pair] += sample["eps_offdiag_components"][pair]
-        accum["kerr_chi3"] += sample["kerr_chi3"]
-        accum["chi2"] += sample["chi2"]
-        accum["tpa_sigma"] += sample["tpa_sigma"]
-        accum["modulation_cos"] += sample["modulation_cos"]
-        accum["modulation_sin"] += sample["modulation_sin"]
+            accum["eps_offdiag_components"][pair] = _add_material_samples(
+                accum["eps_offdiag_components"][pair], sample["eps_offdiag_components"][pair])
+        for key in ("kerr_chi3", "chi2", "tpa_sigma", "modulation_cos", "modulation_sin"):
+            accum[key] = _add_material_samples(accum[key], sample[key])
         if region_densities:
             accum["eps_r_base"] += sample["eps_r_base"]
             accum["mu_r_base"] += sample["mu_r_base"]
@@ -2475,9 +2500,8 @@ def compile_material_model(
         # Frequency is a per-cell label, not an amplitude: take the max over
         # sub-samples so a cell the structure touches in any sub-sample keeps the
         # structure's angular frequency (arithmetic averaging would dilute it).
-        accum["modulation_omega"] = torch.maximum(
-            accum["modulation_omega"], sample["modulation_omega"]
-        )
+        if not (_is_constant_zero(accum["modulation_omega"]) and _is_constant_zero(sample["modulation_omega"])):
+            accum["modulation_omega"] = torch.maximum(accum["modulation_omega"], sample["modulation_omega"])
         for slot_index, entry in enumerate(sample["debye_poles"]):
             accum["debye_poles"][slot_index]["weight"] += entry["weight"]
         for slot_index, entry in enumerate(sample["drude_poles"]):
@@ -2512,12 +2536,9 @@ def compile_material_model(
             inverse_accum["mu_components"],
         )
     for pair in _OFFDIAG_AXES:
-        accum["eps_offdiag_components"][pair] *= scale
-    accum["kerr_chi3"] *= scale
-    accum["chi2"] *= scale
-    accum["tpa_sigma"] *= scale
-    accum["modulation_cos"] *= scale
-    accum["modulation_sin"] *= scale
+        accum["eps_offdiag_components"][pair] = _scale_material_sample(accum["eps_offdiag_components"][pair], scale)
+    for key in ("kerr_chi3", "chi2", "tpa_sigma", "modulation_cos", "modulation_sin"):
+        accum[key] = _scale_material_sample(accum[key], scale)
     if region_densities:
         accum["eps_r_base"] *= scale
         accum["mu_r_base"] *= scale
