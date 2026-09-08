@@ -246,17 +246,17 @@ def test_fdtd_uniform_custom_drude_matches_scalar_drude_run():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA for FDTD")
 def test_fdtd_graded_custom_lorentz_matches_piecewise_uniform_run():
-    def run(*structures):
+    def run(*structures, dt=None):
         scene = _build_scene(*structures, device="cuda", sources=(_plane_wave(),))
         scene.add_monitor(mw.PointMonitor("probe", (0.5, 0.0, 0.0), fields=("Ez",)))
         result = mw.Simulation.fdtd(
             scene,
             frequencies=[_FREQUENCY],
-            run_time=mw.TimeConfig.auto(steady_cycles=8, transient_cycles=18),
+            run_time=mw.TimeConfig(steady_cycles=8, transient_cycles=18, dt=dt),
             spectral_sampler=mw.SpectralSampler(window="hanning"),
             full_field_dft=False,
         ).run()
-        return result.monitor("probe")["data"]
+        return result.monitor("probe")["data"], result.solver.dt
 
     graded = mw.Material(
         eps_r=2.0,
@@ -270,11 +270,13 @@ def test_fdtd_graded_custom_lorentz_matches_piecewise_uniform_run():
     left = mw.Material.lorentz(eps_inf=2.0, delta_eps=2.0, resonance_frequency=2.0e9, gamma=2.0e8)
     right = mw.Material.lorentz(eps_inf=2.0, delta_eps=0.5, resonance_frequency=2.0e9, gamma=2.0e8)
 
-    graded_probe = run(mw.Structure(geometry=_SLAB_BOX, material=graded))
-    reference_probe = run(
+    reference_probe, dt = run(
         mw.Structure(geometry=left_box, material=left),
         mw.Structure(geometry=right_box, material=right),
     )
+    # Distinct pole decompositions can have different conservative rate bounds;
+    # compare their spatial discretizations on one identical temporal grid.
+    graded_probe, _ = run(mw.Structure(geometry=_SLAB_BOX, material=graded), dt=dt)
 
     # The graded slab and its two-box piecewise tiling are the SAME physics. The
     # reference tiles the slab with two boxes whose shared face sits at the mid-cell

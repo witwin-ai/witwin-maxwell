@@ -396,7 +396,7 @@ def test_simulation_fdtd_wraps_solver(monkeypatch):
             }
             return {"observers": {"center": {"data": np.complex64(1.0 + 2.0j)}}}
 
-    monkeypatch.setattr("witwin.maxwell.simulation.FDTD", FakeFDTD, raising=False)
+    monkeypatch.setattr("witwin.maxwell.simulation._resolve_fdtd_backend", lambda: (FakeFDTD, None))
     monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda scene, method: None)
 
     scene = mw.Scene(
@@ -508,7 +508,7 @@ def test_simulation_fdtd_multi_frequency_wraps_solver(monkeypatch):
                 },
             }
 
-    monkeypatch.setattr("witwin.maxwell.simulation.FDTD", FakeFDTD, raising=False)
+    monkeypatch.setattr("witwin.maxwell.simulation._resolve_fdtd_backend", lambda: (FakeFDTD, None))
     monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda scene, method: None)
 
     scene = mw.Scene(

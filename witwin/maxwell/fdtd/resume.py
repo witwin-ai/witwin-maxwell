@@ -232,6 +232,8 @@ def _configuration_fingerprint(solver) -> str:
     )
     _hash_value(hasher, "compiled_sources", getattr(solver, "_compiled_sources", ()))
     _hash_value(hasher, "port_excitations", getattr(solver, "_port_excitations", ()))
+    _hash_value(hasher, "material_model", getattr(solver, "_compiled_material_model", None))
+    _hash_value(hasher, "boundary", solver.scene.boundary)
     static_tensor_prefixes = (
         "eps_",
         "mu_",
@@ -245,8 +247,16 @@ def _configuration_fingerprint(solver) -> str:
         "modulation_",
     )
     for name, value in sorted(vars(solver).items()):
-        if isinstance(value, torch.Tensor) and name.startswith(static_tensor_prefixes):
+        if isinstance(value, torch.Tensor) and name.startswith(static_tensor_prefixes) and not name.endswith("_dynamic"):
             _hash_tensor(hasher, f"solver.{name}", value)
+    for index, runtime in enumerate(getattr(solver, "_network_runtimes", ())):
+        _hash_value(hasher, f"network[{index}].compiled", runtime.compiled)
+        for name in ("A", "B", "C", "D", "gain_state", "gain_voltage", "reference_impedance"):
+            _hash_value(hasher, f"network[{index}].{name}", getattr(runtime, name))
+    wire = getattr(solver, "_wire_runtime", None)
+    if wire is not None:
+        _hash_value(hasher, "wire.network", wire.network)
+        _hash_value(hasher, "wire.coefficients", wire.coefficients)
     surface = getattr(solver, "_surface_impedance", None)
     if surface is not None:
         for index, write in enumerate(surface["writes"]):

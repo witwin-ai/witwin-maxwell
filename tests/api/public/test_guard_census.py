@@ -305,6 +305,10 @@ CAPABILITY_GUARD_BUDGET = 176
 # (posix path relative to the repo root, distinctive message substring).
 # Keep in sync with docs/reference/fdtd-capability-guard-census.md.
 CONTRACT_GUARDS = (
+    # A quotient by an absent or ambiguous incident waveform is undefined.
+    ("witwin/maxwell/fdtd/runtime/timeplan.py", "normalize_source requires an incident source spectrum"),
+    ("witwin/maxwell/fdtd/runtime/timeplan.py", "normalize_source requires a single incident source spectrum"),
+    ("witwin/maxwell/fdtd/runtime/timeplan.py", "normalize_source has no unique incident spectrum for circuit-driven fields"),
     ("witwin/maxwell/circuit_devices.py", "Transistor device BJT is gated behind the independent Phase 5"),
     ("witwin/maxwell/circuit_devices.py", "Transistor device MOSFET is gated behind the independent Phase 5"),
     ("witwin/maxwell/media.py", "Nonlinear Material frequency evaluation is not defined without a field amplitude"),

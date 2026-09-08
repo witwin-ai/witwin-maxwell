@@ -23,6 +23,37 @@ def test_explicit_time_step_must_be_positive_finite(dt):
         mw.TimeConfig(dt=dt)
 
 
+def test_tensor_norm_bound_is_below_independent_eigenvalues():
+    from witwin.maxwell.fdtd.runtime.timestep import _tensor_lower_bound
+
+    generator = torch.Generator().manual_seed(781)
+    basis = torch.randn((256, 3, 3), generator=generator, dtype=torch.float64)
+    matrix = basis @ basis.transpose(-1, -2) + 0.2 * torch.eye(3, dtype=torch.float64)
+    diagonal = {axis: matrix[:, i, i] for i, axis in enumerate("xyz")}
+    offdiagonal = {pair: matrix[:, i, j] for pair, i, j in (("xy", 0, 1), ("xz", 0, 2), ("yz", 1, 2))}
+    bound = _tensor_lower_bound(diagonal, offdiagonal)
+    eigenvalue = float(torch.linalg.eigvalsh(matrix)[:, 0].min())
+    assert eigenvalue / math.sqrt(3) - 1e-12 <= bound <= eigenvalue
+
+    # Positive diagonal and determinant alone do not imply positive definiteness.
+    indefinite_diagonal = {axis: torch.ones(1) for axis in "xyz"}
+    indefinite_offdiagonal = {pair: torch.full((1,), 2.) for pair in ("xy", "xz", "yz")}
+    assert _tensor_lower_bound(indefinite_diagonal, indefinite_offdiagonal) == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_large_tensor_bound_has_linear_memory():
+    from witwin.maxwell.fdtd.runtime.timestep import _tensor_lower_bound
+
+    diagonal = {axis: torch.full((20000,), 2., device="cuda") for axis in "xyz"}
+    offdiagonal = {pair: torch.full((20000,), 0.4, device="cuda") for pair in ("xy", "xz", "yz")}
+    torch.cuda.reset_peak_memory_stats()
+    allocated = torch.cuda.memory_allocated()
+    bound = _tensor_lower_bound(diagonal, offdiagonal)
+    assert 1.6 / math.sqrt(3) < bound <= 1.6
+    assert torch.cuda.max_memory_allocated() - allocated < 64 * 1024**2
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("eps,mu", [(0.25, 1.), (1., 0.25), (0.4, 0.6)])
 def test_material_wave_speed_limits_automatic_and_explicit_step(eps, mu):

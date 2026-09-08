@@ -7,20 +7,37 @@ import torch
 
 
 def _minimum(value):
-    return float(torch.as_tensor(value).detach().amin())
+    result = float(torch.as_tensor(value).detach().amin())
+    if not math.isfinite(result):
+        raise ValueError("FDTD material bounds must be finite.")
+    return result
 
 
 def _maximum(value):
-    return float(torch.as_tensor(value).detach().abs().amax())
+    result = float(torch.as_tensor(value).detach().abs().amax())
+    if not math.isfinite(result):
+        raise ValueError("FDTD material bounds must be finite.")
+    return result
 
 
 def _tensor_lower_bound(diagonal, offdiagonal):
     if not any(bool(torch.any(value != 0)) for value in offdiagonal.values()):
         return min(_minimum(value) for value in diagonal.values())
-    xx, yy, zz = (diagonal[axis] for axis in "xyz")
-    xy, xz, yz = (offdiagonal[pair] for pair in ("xy", "xz", "yz"))
-    matrix = torch.stack((xx, xy, xz, xy, yy, yz, xz, yz, zz), dim=-1).reshape(*xx.shape, 3, 3)
-    return _minimum(torch.linalg.eigvalsh(matrix.double())[..., 0])
+    xx, yy, zz = (diagonal[axis].double() for axis in "xyz")
+    xy, xz, yz = (offdiagonal[pair].double() for pair in ("xy", "xz", "yz"))
+    # For SPD A, lambda_min(A) >= 1 / ||A^-1||_infinity. Cofactors
+    # evaluate this bound with linear storage, avoiding a batched eigensolver's
+    # potentially quadratic workspace for millions of independent 3x3 cells.
+    cxx, cyy, czz = yy * zz - yz.square(), xx * zz - xz.square(), xx * yy - xy.square()
+    cxy, cxz, cyz = xz * yz - xy * zz, xy * yz - xz * yy, xy * xz - xx * yz
+    determinant = xx * cxx + xy * cxy + xz * cxz
+    roundoff = 64 * torch.finfo(torch.float64).eps
+    determinant = determinant - roundoff * (abs(xx * cxx) + abs(xy * cxy) + abs(xz * cxz))
+    row_norm = torch.maximum(torch.maximum(abs(cxx) + abs(cxy) + abs(cxz),
+        abs(cxy) + abs(cyy) + abs(cyz)), abs(cxz) + abs(cyz) + abs(czz))
+    positive = (xx > 0) & (czz > 0) & (determinant > 0)
+    lower = determinant / (row_norm * (1 + roundoff))
+    return _minimum(torch.where(positive, lower, torch.zeros_like(lower)))
 
 
 def _pole_rate(entries, background, kind):
@@ -76,6 +93,7 @@ def compile_fdtd_time_step(solver, material_model):
     negative_chi3 = max(0.0, -_minimum(material_model["kerr_chi3"]))
     solver._nonlinear_peak = None
     solver._nonlinear_field_limit = None
+    solver._nonlinear_envelope_indices = None
     if chi2 or negative_chi3:
         amplitude = getattr(solver, "_max_electric_field", None)
         if amplitude is None:
@@ -86,6 +104,14 @@ def compile_fdtd_time_step(solver, material_model):
         nonlinear_floor -= (chi2 * amplitude + 3 * negative_chi3 * amplitude**2) * (1 + modulation)
         solver._nonlinear_field_limit = float(amplitude)
         solver._nonlinear_peak = solver.eps_Ex.new_zeros(())
+        if not negative_chi3:
+            # chi2 depends only on the component at the occupied nonlinear edge.
+            # A strong field in a separate linear source cell cannot lower eps.
+            solver._nonlinear_envelope_indices = {
+                name: torch.nonzero(getattr(solver, "nonlinear_chi2_" + name).flatten() != 0,
+                                    as_tuple=True)[0]
+                for name in ("Ex", "Ey", "Ez")
+            }
     epsilon = nonlinear_floor
     if not math.isfinite(epsilon * permeability) or min(epsilon, permeability) <= 0:
         raise ValueError("FDTD requires positive finite high-frequency material bounds throughout the update.")
@@ -128,8 +154,14 @@ def compile_fdtd_time_step(solver, material_model):
 def record_nonlinear_field_envelope(solver):
     peak = getattr(solver, "_nonlinear_peak", None)
     if peak is not None:
+        indices = getattr(solver, "_nonlinear_envelope_indices", None)
         for name in ("Ex", "Ey", "Ez"):
-            torch.maximum(peak, getattr(solver, name).abs().amax(), out=peak)
+            values = getattr(solver, name)
+            if indices is not None:
+                if not indices[name].numel():
+                    continue
+                values = values.flatten().index_select(0, indices[name])
+            torch.maximum(peak, values.abs().amax(), out=peak)
 
 
 def validate_nonlinear_field_envelope(solver):

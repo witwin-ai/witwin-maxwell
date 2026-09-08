@@ -79,7 +79,7 @@ def test_fdtd_smoke_scene_simulation_result(monkeypatch):
                 }
             }
 
-    monkeypatch.setattr("witwin.maxwell.simulation.FDTD", FakeFDTD, raising=False)
+    monkeypatch.setattr("witwin.maxwell.simulation._resolve_fdtd_backend", lambda: (FakeFDTD, None))
     monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda scene, method: None)
     sim = mw.Simulation.fdtd(_scene(), frequency=1e9, run_time=mw.TimeConfig(time_steps=12),
         spectral_sampler=mw.SpectralSampler(window="none"))

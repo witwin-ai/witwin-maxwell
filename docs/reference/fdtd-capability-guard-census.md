@@ -743,3 +743,11 @@ grid-identity mismatch, the discrete-Gauss tolerance gate, the negative-toleranc
 check, and the non-electrostatic-`Result` / wrong-type rejections in
 `electrostatic/initial_condition.py` raise `ValueError` / `TypeError` and are not
 counted against the capability budget.
+
+## 2026-09-08 normalization contract
+
+The unified time planner adds three permanent normalization contracts: an incident
+waveform must exist, every participating drive must share that waveform, and a
+circuit-driven field has no implicit single incident waveform. These reject an
+undefined quotient and do not change the capability budget. The matching entries
+are recorded in `tests/api/public/test_guard_census.py`.

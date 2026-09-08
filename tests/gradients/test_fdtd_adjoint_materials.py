@@ -30,11 +30,11 @@ def _abs2(z):
     return z * z
 
 
-def _build_sim(model, *, time_steps):
+def _build_sim(model, *, time_steps, dt=None, max_electric_field=None):
     return mw.Simulation.fdtd(
         model,
         frequencies=[1e9],
-        run_time=mw.TimeConfig(time_steps=time_steps),
+        run_time=mw.TimeConfig(time_steps=time_steps, dt=dt, max_electric_field=max_electric_field),
         spectral_sampler=mw.SpectralSampler(window="none"),
         full_field_dft=False,
     )
@@ -751,17 +751,14 @@ def _chi2_scene(chi2, *, density=None, boundary="pml"):
         ),
         device="cuda",
     )
-    if chi2 != 0.0:
-        scene.add_structure(
-            mw.Structure(
-                name="chi2_slab",
-                geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
-                material=mw.Material(
-                    eps_r=2.0,
-                    nonlinearity=[mw.NonlinearSusceptibility(chi2=chi2)],
-                ),
-            )
+    scene.add_structure(
+        mw.Structure(
+            name="chi2_slab",
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(0.60, 0.60, 0.12)),
+            material=mw.Material(eps_r=2.0,
+                nonlinearity=[mw.NonlinearSusceptibility(chi2=chi2)] if chi2 else []),
         )
+    )
     if density is not None:
         scene.add_material_region(
             mw.MaterialRegion(
@@ -777,7 +774,8 @@ def _chi2_scene(chi2, *, density=None, boundary="pml"):
             position=(0.0, 0.0, -0.18),
             polarization="Ez",
             width=0.04,
-            source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=50.0),
+            # Keep the active nonlinear field inside the certified envelope.
+            source_time=mw.GaussianPulse(frequency=1e9, fwidth=0.25e9, amplitude=5.0),
         )
     )
     scene.add_monitor(mw.PointMonitor("probe", (0.0, 0.0, 0.18), fields=("Ez",)))
@@ -934,9 +932,10 @@ def test_scene_with_chi2_medium_gradient_matches_fd(boundary):
     """Per-element FD validation of design gradients in a scene containing a
     static chi2 slab (previously rejected by the bridge)."""
     model = _Chi2DensityScene(init=0.0, boundary=boundary)
+    simulation = _build_sim(model, time_steps=200, max_electric_field=9000.)
 
     def loss_fn():
-        result = _build_sim(model, time_steps=200).run()
+        result = simulation.run()
         return _abs2(result.monitor("probe")["data"])
 
     # The chi2 nonlinearity must actually shape the solution, otherwise this
@@ -1592,7 +1591,7 @@ def test_scene_with_bloch_dispersive_medium_gradient_matches_fd():
     side (see ``_bloch_dispersive_scene``), so the dominant design gradient is
     dominated by the adjoint transported *backward through the dispersive slab*.
 
-    Measured sensitivity of this gate (single GPU, 200 steps, seed-free scene):
+    Historical sensitivity before material-aware dt (single GPU, 200 steps):
       * forward dispersion shift (delta_eps 3.5 vs 0): objective changes ~79%, so
         the transmitted field is genuinely dispersion-shaped;
       * unmodified reverse: dominant-element rel err ~1.1e-4 (< 1e-3 bar);
@@ -1624,21 +1623,23 @@ def test_scene_with_bloch_dispersive_medium_gradient_matches_fd():
     respects the scene's pair symmetry exactly; only the FD *reference* needs the
     conditioning.
 
-    The run must be long enough for the dispersive polarization response to
-    propagate through the slab and reach the probe; 200 steps captures the
-    propagated dispersive response.
+    Use a fixed four-nanosecond horizon so tightening the material step cannot
+    shorten the propagated response. All perturbed and control runs share dt.
     """
     model = _BlochDispersiveDensityScene(init=0.0).cuda()
+    dt = _build_sim(model, time_steps=1).prepare().solver.dt
+    time_steps = math.ceil(4e-9 / dt)
+    simulation = _build_sim(model, time_steps=time_steps, dt=dt)
 
     def loss_fn():
-        result = _build_sim(model, time_steps=200).run()
-        return _abs2(result.monitor("probe")["data"])
+        result = simulation.run()
+        return _abs2(result.monitor("probe")["data"].to(torch.complex128))
 
     # Dispersion must actually reshape the solution versus a nondispersive slab of
     # the same eps_inf, otherwise this would only re-validate the nondispersive
     # Bloch path (which the earlier Bloch adjoint already covers).
     nondispersive = _abs2(
-        _build_sim(_BlochDispersiveDensityScene(init=0.0, delta_eps=0.0), time_steps=200)
+        _build_sim(_BlochDispersiveDensityScene(init=0.0, delta_eps=0.0), time_steps=time_steps, dt=dt)
         .run()
         .monitor("probe")["data"]
     ).item()

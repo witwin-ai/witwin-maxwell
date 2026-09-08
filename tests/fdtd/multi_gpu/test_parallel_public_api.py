@@ -44,6 +44,8 @@ def test_parallel_none_keeps_single_gpu_backend_path(monkeypatch):
         def __init__(self, prepared, **kwargs):
             calls.append((prepared, kwargs))
             self.initialized = False
+            self.dt, self.c = 1e-11, 299792458.
+            self._compiled_sources = ()
 
         def init_field(self):
             self.initialized = True
@@ -79,6 +81,8 @@ def test_parallel_builds_distributed_solver_and_initializes(monkeypatch):
         def __init__(self, logical_scene, **kwargs):
             calls.append((logical_scene, kwargs))
             self.initialized = False
+            self.dt, self.c = 1e-11, 299792458.
+            self._compiled_sources = ()
 
         def init_field(self):
             self.initialized = True
