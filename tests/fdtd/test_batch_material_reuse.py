@@ -1,5 +1,7 @@
 """Only a source-scale template proves material reuse across cohorts."""
 import importlib
+import gc
+import weakref
 
 import pytest
 import torch
@@ -50,3 +52,51 @@ def test_template_material_compilation_count_and_updated_spectra(monkeypatch, de
             cuda_graph=False).run()
         torch.testing.assert_close(second[index].raw_monitor("probe")["components"]["Ez"],
             reference.raw_monitor("probe")["components"]["Ez"], rtol=1e-4, atol=1e-6)
+
+
+def test_different_material_lanes_share_only_equal_static_arrays():
+    sims = [simulation(index, steps=31) for index in range(3)]
+    for index, sim in enumerate(sims):
+        sim.scene.add_structure(mw.Structure(name="dielectric",
+            geometry=mw.Box(size=(.08, .08, .08), device="cuda:0"),
+            material=mw.Material(eps_r=2. + index)))
+    batch = mw.Simulation.batch(sims, variation=mw.BatchVariation(sources=("drive",)),
+        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=3, graph="required"))
+    with batch.prepare() as prepared:
+        a, b, c = prepared._slot.solvers
+        assert a.mu_Hx.data_ptr() == b.mu_Hx.data_ptr() == c.mu_Hx.data_ptr()
+        assert a.material_mu_r.data_ptr() == b.material_mu_r.data_ptr()
+        assert a.eps_Ex.data_ptr() != b.eps_Ex.data_ptr()
+        assert not torch.equal(a.eps_Ex, b.eps_Ex)
+        for solver in (b, c):
+            assert solver.scene.compile_materials() is solver._compiled_material_model
+            assert solver.mu_r is a.mu_r
+            assert solver.mu_r_components["x"] is a.mu_r_components["x"]
+        first = prepared.run()
+        again = prepared.run()
+        first.results()
+        again.results()
+    for index, sim in enumerate(sims):
+        expected = sim.run().raw_monitor("probe")["components"]["Ez"]
+        for result in (first[index], again[index]):
+            torch.testing.assert_close(result.raw_monitor("probe")["components"]["Ez"],
+                                       expected, rtol=1e-4, atol=1e-6)
+
+
+def test_evicted_cohort_releases_without_cyclic_collection():
+    batch = mw.Simulation.batch([simulation(i, steps=8) for i in range(5)],
+        variation=mw.BatchVariation(sources=("drive",)),
+        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        with batch.prepare() as prepared:
+            evicted = [weakref.ref(solver) for solver in prepared._slot.solvers]
+            results = prepared.run()
+            results.results()
+            assert all(reference() is None for reference in evicted)
+            resident = [weakref.ref(solver) for solver in prepared._slot.solvers]
+        assert all(reference() is None for reference in resident)
+    finally:
+        if was_enabled:
+            gc.enable()

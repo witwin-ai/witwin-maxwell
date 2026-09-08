@@ -44,7 +44,7 @@ sessions as a controlled before/after timing comparison.
 Strict byte admission, throughput tuning, multi-GPU/two-slot scheduling, regional
 background compilation and Batch adjoints remain separate unaccepted capabilities.
 
-## Environment
+## Material reuse follow-up
 
 Source-only template follow-up: one shared compiled material model is retained
 across all cohorts and source-scale updates. The proof is restricted to a fixed
@@ -55,6 +55,22 @@ source and observer owners now release before replacement solver construction.
 once, density templates compiling five times per run, ordinary-solver spectrum
 parity and existing cache/lifecycle regressions. Ordinary solver construction
 still occurs per replaced variant; this is not regional compilation acceptance.
+
+Static material storage follow-up: verified equal compiler/runtime arrays share
+storage across resident lanes, even when dielectric regions differ. Each new
+lane deduplicates before the next solver is built, reducing preparation overlap.
+Dynamic fields and CPML histories remain independent. **27 tests passed**,
+including unequal dielectrics, graded grids, PEC/PMC/CPML, normalized full-field
+and plane/flux spectra, shutoff, cache races and evicted-cohort release with cyclic
+garbage collection disabled. A module-level recursive helper avoids closure
+cycles retaining old material/solver owners.
+
+The B=4, 128-cell bandwidth workload's reachable slot storage dropped from the
+historical 2677.4 MiB to 1128.1 MiB (about 58%). Its eager 64-step warm median
+remains about 0.146 seconds; approximately 98.5% of profiled GPU time still belongs
+to field updates. This is a storage comparison, not a peak-driver-memory claim.
+
+## Environment
 
 - Python commands run in the `maxwell` conda environment, with PyTorch `2.13.0+cu130`.
 - Sandbox GPU access fails; approved execution outside the sandbox sees two CUDA GPUs.

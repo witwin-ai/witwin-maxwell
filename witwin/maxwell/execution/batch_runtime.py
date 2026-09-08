@@ -146,7 +146,7 @@ class PreparedBatch:
             self._stream.wait_event(self._caller_ready)
 
     def _load(self, indices, parameters, group_id):
-        from ..fdtd.runtime.batch import NativeFieldSlot
+        from ..fdtd.runtime.batch import NativeFieldSlot, _share_static_materials, validate_native_solver
         inputs = () if parameters is None else tuple(
             value for kind in ("region_densities", "source_scales")
             for value in getattr(parameters, kind).values())
@@ -197,6 +197,11 @@ class PreparedBatch:
                 compiled_scene._material_model_cache = self._fixed_material_cache
             solver = model._build_fdtd_solver_for_scene(compiled_scene, initialize=True)
             solver.verbose = False
+            validate_native_solver(solver)
+            if solvers:
+                # Deduplicate before constructing the next lane so the peak
+                # does not include a whole cohort of redundant material banks.
+                _share_static_materials((solvers[0], solver))
             solvers.append(solver)
             models.append(model)
         if self._slot is None:

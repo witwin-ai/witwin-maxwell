@@ -11,6 +11,39 @@ COEFFICIENTS = tuple(f"c{f.lower()}_{kind}" for f in FIELDS for kind in ("decay"
 SPACING = tuple(f"inv_d{a}_{kind}" for kind in ("e", "h") for a in "xyz")
 CPML_PROFILES = tuple(f"cpml_{p}_{kind}_{a}" for p in ("inv_kappa", "b", "c")
                       for kind in ("e", "h") for a in "xyz")
+MATERIAL_ARRAYS = ("epsilon_r", "mu_r", "material_eps_r", "material_mu_r") + tuple(
+    f"{prefix}_{component}" for prefix, components in (
+        ("eps", FIELDS[:3]), ("sigma_e", FIELDS[:3]),
+        ("mu", FIELDS[3:]), ("sigma_m", FIELDS[3:])) for component in components)
+
+
+def _share_material_tree(value, base, aliases):
+    if value is base:
+        return value
+    if isinstance(value, torch.Tensor) and isinstance(base, torch.Tensor):
+        if id(value) in aliases:
+            return aliases[id(value)]
+        if (not value.requires_grad and not base.requires_grad
+                and value.dtype == base.dtype and value.device == base.device
+                and value.shape == base.shape and torch.equal(value, base)):
+            aliases[id(value)] = base
+            return base
+    elif isinstance(value, dict) and isinstance(base, dict):
+        for name in value.keys() & base.keys():
+            value[name] = _share_material_tree(value[name], base[name], aliases)
+    return value
+
+
+def _share_static_materials(solvers):
+    """Deduplicate proven equal read-only material arrays, never evolving state."""
+    reference = solvers[0]
+    for solver in solvers[1:]:
+        aliases = {}
+        _share_material_tree(solver._compiled_material_model, reference._compiled_material_model, aliases)
+        # Direct runtime aliases must follow the replacements inside the model;
+        # the PreparedScene cache already owns that same model dictionary.
+        for name in MATERIAL_ARRAYS:
+            setattr(solver, name, _share_material_tree(getattr(solver, name), getattr(reference, name), aliases))
 
 
 def _psi_layout(solver, name):
@@ -131,6 +164,7 @@ class NativeFieldSlot:
             for lane, solver in enumerate(solvers):
                 setattr(solver, name, target[lane])
         self.solvers = tuple(solvers)
+        _share_static_materials(self.solvers)
         self.active.zero_()
         self.active[:len(solvers)].fill_(1)
         self._bind_operations()
