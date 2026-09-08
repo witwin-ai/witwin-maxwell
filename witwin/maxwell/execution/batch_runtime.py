@@ -49,6 +49,7 @@ class PreparedBatch:
     @capture_participant
     def __init__(self, batch):
         self.batch = batch
+        self._record_grad = torch.is_grad_enabled()
         policy = batch.execution
         if len(policy.devices) != 1 or policy.slots_per_device != 1:
             raise NotImplementedError("PreparedBatch currently requires one GPU and one execution slot.")
@@ -173,7 +174,10 @@ class PreparedBatch:
         for model in batch.simulations:
             checked = copy.copy(model)
             checked._refresh_trainable_parameters()
-            if (checked.has_trainable_parameters or parameters is not None and parameters.requires_grad) and model.config.shutoff > 0:
+            if batch.outputs.result_device == "cpu" and (
+                    checked.has_trainable_parameters or parameters is not None and parameters.requires_grad):
+                raise ValueError("CPU result export requires a detached forward input.")
+            if torch.is_grad_enabled() and (checked.has_trainable_parameters or parameters is not None and parameters.requires_grad) and model.config.shutoff > 0:
                 raise ValueError("Batch adjoint requires a fixed time horizon: set shutoff=0.")
             scene = model.scene
             for name in ("ports", "thin_wires", "networks", "lumped_elements", "circuits"):
@@ -204,8 +208,12 @@ class PreparedBatch:
         inputs += tuple(value for model in models for value in (
             model.scene_module.parameters() if model.scene_module is not None
             else scene_trainable_material_tensors(model.scene)))
-        key = (tuple(indices), tuple((id(value), object() if torch.is_inference(value) else value._version)
+        key = (tuple(indices), self._record_grad, tuple((id(value), value.requires_grad,
+                                    object() if torch.is_inference(value) else value._version)
                                     for value in inputs))
+        if parameters is not None:
+            key += (tuple((kind, name, id(value)) for kind in ("region_densities", "source_scales")
+                          for name, value in getattr(parameters, kind).items()),)
         if any(model.scene_module is not None for model in models):
             # Module-generated material graphs must be fresh after a previous
             # backward has consumed their saved intermediates.
@@ -243,6 +251,9 @@ class PreparedBatch:
             model.scene_input = scene
             model.scene_module = None
             with torch.enable_grad():
+                from .adjoint import validate_material_channels
+                if self._record_grad:
+                    validate_material_channels(scene)
                 model._batch_source_scales = {}
                 if parameters is not None:
                     for source_index, source in enumerate(self.batch.template.scene.resolved_sources()):
@@ -251,7 +262,7 @@ class PreparedBatch:
                             scale = value[index].to(self.device)
                             model._batch_source_scales[source_index] = (scale, source.source_time.amplitude)
                 model._refresh_trainable_parameters()
-                if model.has_trainable_parameters or model._batch_source_scales:
+                if self._record_grad and (model.has_trainable_parameters or model._batch_source_scales):
                     from ..fdtd.adjoint.bridge import _FDTDGradientBridge
                     bridge = _FDTDGradientBridge(model)
                 else:
@@ -402,7 +413,7 @@ class PreparedBatch:
                             # All kernels and buffers are initialized before this
                             # point; no warmup may consume source/observer steps.
                             replay = CudaGraphRunner(device=self.device, warmup_steps=0,
-                                                     memory_pool=self._budget).capture(advance_chunk)
+                                memory_pool=self._budget, capture_error_mode="thread_local").capture(advance_chunk)
                             self._graphs[key] = replay
                         except Exception as error:
                             if policy.graph == "required":
@@ -472,6 +483,7 @@ class PreparedBatch:
         from ..result import Result
         from .adjoint import BatchAdjointTape
         differentiable = isinstance(raw, BatchAdjointTape)
+        tape = raw if differentiable else None
         if differentiable:
             raw = raw.attach()
         model = self._models[lane]
@@ -495,6 +507,9 @@ class PreparedBatch:
         result._solver_stats["batch_graph_replays"] = self._last_graph_replays
         if differentiable:
             result._solver_stats["batch_adjoint"] = "native_checkpoint_per_lane"
+            result._solver_stats["batch_adjoint_checkpoint_bytes"] = tape.checkpoint_bytes
+            result._solver_stats["batch_adjoint_checkpoints"] = len(tape.bridge._last_checkpoints)
+            tape.stats = result._solver_stats
         return result
 
     @capture_participant
@@ -883,6 +898,10 @@ class ParallelBatchResultIterator(BatchResultIterator):
                     if self.prepared._cancel.is_set() or not self._tasks:
                         return None
                     self._condition.wait(.05)
+                # The previous worker may have consumed the last task while
+                # this worker slept, including when its turn now matches.
+                if self.prepared._cancel.is_set() or not self._tasks:
+                    return None
                 self._assignment = getattr(self, "_assignment", 0) + 1
             group, pending = self._tasks[0]
             indices = [pending.popleft() for _ in range(min(child.capacity, len(pending)))]
@@ -1028,8 +1047,11 @@ class ParallelBatchResultIterator(BatchResultIterator):
                     self._delivered.add(item.index)
                     return item
                 except queue.Empty:
-                    if self._running:
-                        continue
+                    with self._condition:
+                        # A producer can publish its final item and retire
+                        # between get() timing out and this completion check.
+                        if self._running or not self._queue.empty():
+                            continue
                     for index in range(len(self.prepared.batch)):
                         if index not in self._delivered:
                             record = self._records.get(index)

@@ -121,3 +121,25 @@ def test_structure_outside_its_envelope_fails_before_execution():
             position=(-.15, 0, 0), size=(.001, .001, .001), device="cuda:0")}))
     with pytest.raises(ValueError, match="influence envelope"):
         batch.prepare()
+
+
+def test_parameter_cache_keeps_target_names_when_mapping_order_changes():
+    sim = simulation(steps=35)
+    sim.scene.add_source(mw.PointDipole(name="second", position=(0., -.05, 0.), polarization="Ez",
+        source_time=mw.GaussianPulse(frequency=1e9, fwidth=1e9)))
+    first = torch.tensor([.3], device="cuda:0")
+    second = torch.tensor([1.2], device="cuda:0")
+    batch = mw.Simulation.batch(sim,
+        parameters=mw.BatchParameters(source_scales={"drive": first, "second": second}),
+        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1, graph="required"))
+    updated = mw.BatchParameters(source_scales={"second": first, "drive": second})
+    with batch.prepare() as prepared:
+        original = prepared.run()
+        original.results()
+        swapped = prepared.run(parameters=updated)
+        swapped.results()
+    fresh = mw.Simulation.batch(sim, parameters=updated, execution=batch.execution).run()
+    fresh.results()
+    actual = swapped[0].raw_monitor("probe")["components"]["Ez"]
+    torch.testing.assert_close(actual, fresh[0].raw_monitor("probe")["components"]["Ez"], rtol=0, atol=0)
+    assert not torch.equal(actual, original[0].raw_monitor("probe")["components"]["Ez"])

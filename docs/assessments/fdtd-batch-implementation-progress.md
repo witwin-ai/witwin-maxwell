@@ -8,6 +8,18 @@ Final optimization regression baseline `8b65420`: **353 passed**, no failures or
 skips, in 204.77 seconds; one existing sparse-invariant warning. This combines
 Batch, CUDA, CPML, observer, compiler, ordinary adjoint and benchmark coverage.
 
+## Regional compilation, budgets, multiple devices and adjoints
+
+The later R1–R6 work delivers density and proven Box/Sphere influence-region reuse,
+measured automatic capacity, private CUDA backing-segment budget enforcement,
+persistent multi-GPU/dual-slot scheduling and owned native checkpoint adjoints.
+The final integration matrix passed 115 tests; subsequent scheduling and Graph
+isolation matrices passed 13 and 22 tests respectively. Counts overlap. Native
+reverse currently runs per lane, with explicit guards for missing material gradient
+channels. Automatic throughput tuning, exact all-output preplanning, fused reverse
+kernels and dedicated multi-GPU throughput acceptance remain open. See the active
+plan and optimization results above for measured compiler timings and qualifications.
+
 ## Optimization follow-up: full native pipeline and coordinated graphs
 
 The historical eager limitations below are superseded for the supported single

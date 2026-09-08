@@ -77,6 +77,21 @@ Box 包络内切球内，以保守证明任意旋转的影响范围。超出包�
 原始数据与汇总见 benchmark/plots/batch/regional-material-reuse*.json
 及 benchmark/RESULTS.md。
 
+继续开发 R6：最终跨设备/预算/梯度/缓存集成回归 115 passed。修复静态
+调度等待者醒来后未重新检查队列，导致最后任务被误取消的竞态；消费端超时
+与最后结果入队的竞态也加入确定性覆盖。随后真实双卡调度专项 13 passed，
+Graph 隔离及原有 Graph 回归 22 passed。Batch 只对自身独立场槽使用
+thread_local capture error checking，消费线程可以操作独立 GPU 张量；
+注册的 solver 提交仍经过协调锁，禁止修改 capture 输入和执行槽。
+
+梯度审计明确拒绝缺失通道：训练密度改变磁导率、训练几何改变磁性/导电/PEC
+分布，以及材料区域几何输入。no_grad 可进行前向，重新启用训练时复查。
+缓存键包括参数目标名称、张量身份、版本、requires_grad 与当前求导模式；
+SceneModule 重建计算图。Result.solver_stats 新增 batch_adjoint_checkpoints、
+batch_adjoint_checkpoint_bytes 和反向后的 batch_backward_memory；后者仍是
+分配账户的 backing-segment 口径，不是完整驱动显存。双槽共享叶子的
+AccumulateGrad 流提示表示潜在额外同步，不影响已通过的数值对照。
+
 | 子阶段 | 状态 | 证据与剩余工作 |
 | --- | --- | --- |
 | P0.1 固定负载与 storage 审计工具 | 完成 | `python -m benchmark batch --inventory/--audit`；7 项测试通过；GPU 1 的 launch audit 完成，原生扩展构建与运行通过；单次审计不代表性能验收 |
@@ -118,8 +133,8 @@ GPU 0 存在其它计算任务。原生扩展需显式设置当前环境内的 `
 dense/slab CPML、点源及点/面/通量观察器使用批量推进。`graph="auto"`
 尝试完整时间步捕获，`required` 强制捕获，`graph_steps` 控制 chunk；
 尾块和提前停止检查点不越界。monitor-only 重复运行复用 capture，全场谱因
-普通 DFT 缓冲重新分配而重新捕获。协调器保护已注册 Batch 线程；外部自定义
-GPU 线程仍需在 capture 时保持静止。返回的每一项都是普通 `Result`，
+普通 DFT 缓冲重新分配而重新捕获。协调器保护已注册 Batch 线程；Batch 捕获采用线程局部错误检查，
+其它线程可处理独立 GPU 张量，但不能修改 capture 输入或执行槽。返回的每一项都是普通 `Result`，
 不引用活的 solver 或场槽。关闭 context 或复用场槽不会改写旧结果。
 
 ```python

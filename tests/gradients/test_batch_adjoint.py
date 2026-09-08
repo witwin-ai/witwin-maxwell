@@ -37,6 +37,10 @@ def test_batch_density_adjoint_matches_independent_after_reuse_and_close(slots, 
     assert all(result.solver_stats["batch_adjoint"] == "native_checkpoint_per_lane" for result in first)
     actual, = torch.autograd.grad(objective(first), density)
     repeated, = torch.autograd.grad(objective(second), density)
+    for result in (*first, *second):
+        assert result.solver_stats["batch_adjoint_checkpoint_bytes"] > 0
+        memory = result.solver_stats["batch_backward_memory"]
+        assert memory["peak_charged_bytes"] <= memory["limit_bytes"]
     reference_density = density.detach().clone().requires_grad_()
     reference_batch = density_batch(reference_density)
     results = []
@@ -205,3 +209,94 @@ def test_scene_module_optimizer_updates_recompile_current_parameters():
     reference = sim.run()
     torch.testing.assert_close(after[0].raw_monitor("probe")["components"]["Ez"],
         reference.raw_monitor("probe")["components"]["Ez"], rtol=1e-4, atol=1e-6)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires two CUDA devices")
+def test_gathered_training_outputs_survive_close_and_preserve_source_gradients():
+    scales = torch.tensor([.4, -.7, 1.2, 0.], device="cuda:0", requires_grad=True)
+    batch = mw.Simulation.batch(simulation(steps=29),
+        parameters=mw.BatchParameters(source_scales={"drive": scales}),
+        execution=mw.BatchExecution(devices=("cuda:0", "cuda:1"), slots_per_device=2,
+            batch_size=1, scheduling="static", graph="required", memory_limit_bytes=128*1024**2, reserve_bytes=0),
+        outputs=mw.BatchOutput(result_device="cuda:0"))
+    result = batch.run()
+    result.results()
+    assert {record.device for record in result.records} == {"cuda:0", "cuda:1"}
+    values = result.stack(lambda r: r.raw_monitor("probe")["components"]["Ez"])
+    values.real.sum().backward()
+    assert scales.grad.abs().min() > 0
+    torch.testing.assert_close(scales.grad, scales.grad[0].expand_as(scales), rtol=2e-3, atol=1e-6)
+
+
+@pytest.mark.parametrize("channel", ["permeability", "conductivity", "region_geometry"])
+def test_unsupported_material_gradient_channels_fail_explicitly(channel):
+    from dataclasses import replace
+    density = torch.full((1, 2, 2, 2), .4, device="cuda:0", requires_grad=True)
+    batch = density_batch(density)
+    if channel == "permeability":
+        region = batch.template.scene.material_regions[0]
+        batch.template.scene.material_regions[0] = replace(region, mu_bounds=(1., 2.))
+    elif channel == "conductivity":
+        structure = batch.template.scene.structures[0]
+        structure.geometry.size.requires_grad_(True)
+        batch.template.scene.structures[0] = mw.Structure(name=structure.name, geometry=structure.geometry,
+            material=mw.Material(eps_r=2., sigma_e=.01))
+    else:
+        batch.template.scene.material_regions[0].geometry.size.requires_grad_(True)
+    with pytest.raises(NotImplementedError, match="gradient channel|region geometry"):
+        batch.prepare()
+    with torch.no_grad(), batch.prepare() as prepared:
+        result = prepared.run()
+        result.results()
+        assert not objective(result).requires_grad
+        with torch.enable_grad():
+            rejected = prepared.run()
+            assert rejected.failed
+            assert any(text in str(rejected.records[0].failure) for text in ("gradient channel", "region geometry"))
+
+
+def test_dielectric_geometry_batch_gradient_matches_finite_difference():
+    width = torch.tensor([.1, .08, .09], device="cuda:0", requires_grad=True)
+    def run(size):
+        sim = simulation(steps=35)
+        sim.scene.structures = [mw.Structure(name="design",
+            geometry=mw.Box(position=(.05, 0., 0.), size=size, device="cuda:0"), material=mw.Material(eps_r=2.))]
+        result = mw.Simulation.batch([sim], execution=mw.BatchExecution(devices=("cuda:0",),
+            batch_size=1, graph="required")).run()
+        result.results()
+        return objective(result)
+    gradient, = torch.autograd.grad(run(width), width)
+    delta = torch.tensor([.00005, 0., 0.], device="cuda:0")
+    finite = (run(width.detach()+delta)-run(width.detach()-delta))/(2*delta[0])
+    assert finite.abs() > 0
+    torch.testing.assert_close(gradient[0], finite, rtol=1e-2, atol=1e-5)
+
+
+def test_requires_grad_changes_invalidate_cached_source_materialization():
+    scales = torch.tensor([.4], device="cuda:0")
+    batch = mw.Simulation.batch(simulation(steps=27),
+        parameters=mw.BatchParameters(source_scales={"drive": scales}),
+        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1, graph="required"))
+    with batch.prepare() as prepared:
+        first = prepared.run()
+        assert not objective(first).requires_grad
+        scales.requires_grad_(True)
+        second = prepared.run()
+        objective(second).backward()
+        assert scales.grad.abs().max() > 0
+        scales.requires_grad_(False)
+        last = prepared.run()
+        assert not objective(last).requires_grad
+
+
+def test_cpu_output_revalidates_new_trainable_parameters():
+    scales = torch.tensor([.4], device="cuda:0")
+    batch = mw.Simulation.batch(simulation(steps=27),
+        parameters=mw.BatchParameters(source_scales={"drive": scales}),
+        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1, graph="off"),
+        outputs=mw.BatchOutput(result_device="cpu"))
+    with batch.prepare() as prepared:
+        prepared.run().results()
+        scales.requires_grad_(True)
+        with pytest.raises(ValueError, match="detached forward"):
+            prepared.run()

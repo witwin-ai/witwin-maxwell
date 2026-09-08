@@ -106,11 +106,15 @@ class CudaGraphRunner:
     fallback degrades to eager stepping instead of replaying a no-op.
     """
 
-    def __init__(self, *, device, enabled: bool = True, warmup_steps: int = 1, memory_pool=None):
+    def __init__(self, *, device, enabled: bool = True, warmup_steps: int = 1, memory_pool=None,
+                 capture_error_mode="global"):
         self.enabled = bool(enabled)
         self.warmup_steps = max(0, int(warmup_steps))
         self.device = torch.device(device)
         self.memory_pool = memory_pool
+        if capture_error_mode not in ("global", "thread_local"):
+            raise ValueError("capture_error_mode must be global or thread_local.")
+        self.capture_error_mode = capture_error_mode
         if self.device.type != "cuda":
             raise ValueError(
                 f"CUDA Graph capture requires a CUDA device, got {self.device}."
@@ -145,7 +149,8 @@ class CudaGraphRunner:
             with warnings.catch_warnings(record=True) as recorded:
                 warnings.simplefilter("always")
                 scope = self.memory_pool.capture_scope() if self.memory_pool is not None else contextlib.nullcontext(None)
-                with scope as pool_id, torch.cuda.graph(graph, stream=capture_stream, pool=pool_id):
+                with scope as pool_id, torch.cuda.graph(graph, stream=capture_stream, pool=pool_id,
+                                                       capture_error_mode=self.capture_error_mode):
                     fn()
             torch.cuda.synchronize(self.device)
 

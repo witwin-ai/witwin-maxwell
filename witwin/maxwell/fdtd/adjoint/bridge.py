@@ -1364,7 +1364,7 @@ class _FDTDGradientBridge:
                     source_outputs = None
                     if self.source_scale_inputs:
                         from ...execution.adjoint import source_scale_pullback
-                        source_outputs = source_scale_pullback(self, base_inputs, grad_outputs)
+                        source_outputs = source_scale_pullback(self, base_inputs)
                     material_outputs = tuple(
                         torch.zeros_like(tensor) for tensor in base_inputs
                     )

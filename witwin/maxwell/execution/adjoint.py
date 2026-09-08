@@ -7,7 +7,31 @@ import copy
 import torch
 
 
-def source_scale_pullback(bridge, inputs, grad_outputs):
+def validate_material_channels(scene):
+    """Reject trainable channels absent from the native material pullback."""
+    def trainable_geometry(geometry):
+        return any(isinstance(value, torch.Tensor) and value.requires_grad
+                   for value in vars(geometry).values())
+    for region in scene.material_regions:
+        if trainable_geometry(region.geometry):
+            raise NotImplementedError("Batch adjoint does not register material-region geometry inputs; use density parameters.")
+        if region.density.requires_grad and region.mu_bounds[0] != region.mu_bounds[1]:
+            raise NotImplementedError("Batch adjoint has no material magnetic-permeability gradient channel.")
+    if any(trainable_geometry(structure.geometry) for structure in scene.structures):
+        for structure in scene.structures:
+            material = structure.material
+            if (float(getattr(material, "mu_r", 1.)) != 1.
+                    or float(getattr(material, "sigma_e", 0.)) != 0.
+                    or float(getattr(material, "sigma_m", 0.)) != 0.
+                    or getattr(material, "mu_tensor", None) is not None
+                    or getattr(material, "sigma_e_tensor", None) is not None
+                    or getattr(material, "is_pec", False)):
+                raise NotImplementedError(
+                    "Batch geometry adjoint requires nonmagnetic, nonconductive dielectric structures; "
+                    "magnetic, conductivity and PEC occupancy gradient channels are not available.")
+
+
+def source_scale_pullback(bridge, inputs):
     """Pull accumulated source injection cotangents to the input frontier."""
     solver = bridge._last_solver
     values = bridge.simulation._batch_source_scales
@@ -66,6 +90,9 @@ class BatchAdjointTape:
         self.bridge = bridge
         self.pool = pool
         self.device = solver.device
+        self.stats = None
+        self.checkpoint_bytes = sum(value.numel()*value.element_size()
+                                    for checkpoint in checkpoints for value in checkpoint.tensors.values())
         self.outputs = bridge.accept_forward(freeze_solver(solver), raw, tuple(checkpoints),
             time_steps=steps, use_full_field_dft=fields)
         self.ready = torch.cuda.Event()
@@ -97,5 +124,9 @@ class _BatchAdjointFunction(torch.autograd.Function):
         with coordinated_cuda_work(), torch.cuda.device(tape.device), (
                 tape.pool.activate() if tape.pool is not None else contextlib.nullcontext()):
             torch.cuda.current_stream(tape.device).wait_event(tape.ready)
-            gradients = tape.bridge.backward(inputs, grad_outputs)
+            try:
+                gradients = tape.bridge.backward(inputs, grad_outputs)
+            finally:
+                if tape.stats is not None and tape.pool is not None:
+                    tape.stats["batch_backward_memory"] = tape.pool.stats()
         return (None, *gradients)

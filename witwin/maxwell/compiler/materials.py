@@ -2647,8 +2647,9 @@ class LocalMaterialCache:
     """
 
     def __init__(self, scene, changing_regions=(), *, structure_envelopes=None):
+        from ..scene import _place_scene_value
         self.changing = tuple(changing_regions)
-        self.structure_envelopes = dict(structure_envelopes or {})
+        self.structure_envelopes = _place_scene_value(dict(structure_envelopes or {}), scene.device, {})
         self._envelope_definition = _material_definition(self.structure_envelopes, snapshot=True)
         self.full_compilations = 1
         self.patch_compilations = 0
