@@ -76,6 +76,7 @@ class PreparedBatch:
         self._sources = None
         self._observers = None
         self._graphs = {}
+        self._fixed_material_cache = {}
         self._records = ()
         self._groups = batch.plan().groups
         self._stream = torch.cuda.Stream(device=self.device)
@@ -163,6 +164,9 @@ class PreparedBatch:
         # Release the old compiler objects before compiling the next cohort.
         # The slot retains only its persistent fields, coefficients and profiles.
         self._models = ()
+        self._sources = None
+        self._observers = None
+        self._graphs.clear()
         if self._slot is not None:
             self._slot.solvers = ()
         if self._cohort != group_id:
@@ -180,16 +184,24 @@ class PreparedBatch:
             model.scene = scene
             model.scene_input = scene
             model.scene_module = None
-            solver = model._build_fdtd_solver_for_scene(scene, initialize=True)
+            from ..scene import prepare_scene
+            compiled_scene = prepare_scene(scene)
+            # Template source scales cannot alter geometry, material sampling,
+            # or the grid. Retain one material bank across all such cohorts.
+            # Density templates and independent Scene lists have no such proof.
+            fixed_materials = (self.batch.template is not None
+                               and not parameters.region_densities
+                               and not compiled_scene._has_dynamic_materials()
+                               and not compiled_scene._has_trainable_geometry())
+            if fixed_materials:
+                compiled_scene._material_model_cache = self._fixed_material_cache
+            solver = model._build_fdtd_solver_for_scene(compiled_scene, initialize=True)
             solver.verbose = False
             solvers.append(solver)
             models.append(model)
         if self._slot is None:
             self._slot = NativeFieldSlot(self.capacity, self.device)
         self._slot.bind(solvers)
-        self._sources = None
-        self._observers = None
-        self._graphs.clear()
         self._models = tuple(models)
         # Keep identities alive for as long as the cached cohort uses them.
         # Source amplitudes materialize to Python floats, so the compiled Scene
@@ -462,6 +474,7 @@ class PreparedBatch:
             self._stream.synchronize()
             self._slot = None
             self._models = ()
+            self._fixed_material_cache.clear()
             self._loaded_key = None
             self._loaded_parameters = ()
             self._sources = None

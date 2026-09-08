@@ -46,6 +46,16 @@ background compilation and Batch adjoints remain separate unaccepted capabilitie
 
 ## Environment
 
+Source-only template follow-up: one shared compiled material model is retained
+across all cohorts and source-scale updates. The proof is restricted to a fixed
+template with no density parameters or dynamic/trainable material geometry.
+Independent Scene lists and density changes do not use this cache. Old graph,
+source and observer owners now release before replacement solver construction.
+**20 tests passed**, including N=5/B=2 repeated source updates compiling materials
+once, density templates compiling five times per run, ordinary-solver spectrum
+parity and existing cache/lifecycle regressions. Ordinary solver construction
+still occurs per replaced variant; this is not regional compilation acceptance.
+
 - Python commands run in the `maxwell` conda environment, with PyTorch `2.13.0+cu130`.
 - Sandbox GPU access fails; approved execution outside the sandbox sees two CUDA GPUs.
 - GPU 1 was used for these tests. GPU 0 carried another user's existing compute workload and was not modified.
