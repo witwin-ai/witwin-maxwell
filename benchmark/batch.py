@@ -5,7 +5,7 @@ import argparse
 import json
 import platform
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import torch
@@ -107,21 +107,300 @@ def main(argv=None):
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--inventory", action="store_true", help="Print workloads without solver allocation")
     group.add_argument("--audit", choices=tuple(BATCH_WORKLOADS), help="Audit one independent GPU simulation")
+    group.add_argument("--compare", choices=tuple(BATCH_WORKLOADS), help="Compare sequential/process/run_many baselines")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--variants", type=int, default=10)
+    parser.add_argument("--concurrency", type=int, default=10)
+    parser.add_argument("--warmups", type=int, default=2)
+    parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--steps", type=int, help="Explicit step override; retained in the report")
+    parser.add_argument("--identical", action="store_true", help="Use distinct copies of one physical design")
+    parser.add_argument("--update-report", action="store_true", help="Also update the baseline section of benchmark/RESULTS.md")
     args = parser.parse_args(argv)
+    if args.update_report and not args.compare:
+        parser.error("--update-report requires --compare.")
     if args.inventory:
         payload = {"schema_version": 1, "workloads": [asdict(w) for w in BATCH_WORKLOADS.values()],
                    "planned_variant_counts": [1, 10, 100], "deduplication": False,
                    "status": "baseline_instrumentation_only"}
     else:
-        payload = audit(BATCH_WORKLOADS[args.audit], device=args.device)
+        workload = BATCH_WORKLOADS[args.audit or args.compare]
+        if args.steps is not None:
+            if args.steps <= 0:
+                parser.error("--steps must be positive.")
+            workload = replace(workload, time_steps=args.steps)
+        if args.audit:
+            payload = audit(workload, device=args.device)
+        else:
+            payload = benchmark_baselines(workload, device=args.device, variants=args.variants,
+                concurrency=args.concurrency, identical=args.identical,
+                warmups=args.warmups, repeats=args.repeats)
     encoded = json.dumps(payload, indent=2) + "\n"
-    if args.audit or args.output:
-        path = args.output or PLOTS_DIR / "batch" / f"{args.audit}-audit.json"
+    if args.audit or args.compare or args.output:
+        suffix = "audit" if args.audit else f"n{args.variants}-{'identical' if args.identical else 'varied'}"
+        path = args.output or PLOTS_DIR / "batch" / f"{args.audit or args.compare}-{suffix}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(encoded, encoding="utf-8")
+        if args.update_report:
+            from benchmark.report import record_batch_baseline
+            record_batch_baseline(payload, path.resolve())
     print(encoded, end="")
+
+
+def _probe_snapshot(result):
+    value = result.raw_monitor("probe")["components"]["Ez"].detach().to("cpu")
+    return {"shape": list(value.shape), "real": value.real.reshape(-1).tolist(),
+            "imag": value.imag.reshape(-1).tolist() if value.is_complex() else [0.0] * value.numel()}
+
+
+def _baseline_worker(connection, workload, device, mode, concurrency):
+    """Persistent spawned worker; no CUDA context is inherited through fork."""
+    try:
+        torch.cuda.set_device(device)
+        connection.send({"kind": "ready"})
+        while True:
+            command = connection.recv()
+            if command["kind"] == "close":
+                return
+            indices, identical = command["indices"], command["identical"]
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+            started = time.perf_counter()
+            if mode == "run_many":
+                simulations = [build_simulation(workload, index=i, identical=identical, device=device) for i in indices]
+                sequence = mw.run_many(simulations, execution=mw.MultiGPUExecution.ensemble(
+                    devices=(device,), max_concurrency=concurrency,
+                    per_device_concurrency=concurrency,
+                ))
+                for index, result in zip(indices, sequence):
+                    connection.send({"kind": "result", "index": index, "probe": _probe_snapshot(result)})
+                del result, sequence, simulations
+            else:
+                for index in indices:
+                    simulation = build_simulation(workload, index=index, identical=identical, device=device)
+                    result = simulation.run()
+                    connection.send({"kind": "result", "index": index, "probe": _probe_snapshot(result)})
+                    del result, simulation
+            torch.cuda.synchronize(device)
+            connection.send({
+                "kind": "done", "worker_wall_s": time.perf_counter() - started,
+                "peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
+                "peak_reserved_bytes": torch.cuda.max_memory_reserved(device),
+                "live_allocated_bytes": torch.cuda.memory_allocated(device),
+            })
+    except BaseException as exc:
+        import traceback
+        connection.send({"kind": "error", "error": f"{type(exc).__name__}: {exc}",
+                         "traceback": traceback.format_exc()})
+    finally:
+        connection.close()
+
+
+class BaselineSession:
+    """One mode's workers, reused across warmups and timed repetitions."""
+
+    def __init__(self, workload, *, device, mode, variants, concurrency, timeout_s=1800):
+        import multiprocessing as mp
+        from multiprocessing.connection import wait
+        self.mode, self.variants = mode, variants
+        self.device, self.timeout_s = device, timeout_s
+        self.processes, self.connections = [], []
+        self._cold_sampler = None
+        self._startup_wall_s = None
+        self._startup_started = time.perf_counter()
+        self._cold_sampler = GpuMemorySampler(device=device)
+        self._cold_sampler.start()
+        context = mp.get_context("spawn")
+        workers = min(variants, concurrency) if mode == "processes" else 1
+        try:
+            for _ in range(workers):
+                parent, child = context.Pipe()
+                process = context.Process(target=_baseline_worker,
+                    args=(child, workload, device, mode, concurrency))
+                process.start()
+                child.close()
+                self.connections.append(parent)
+                self.processes.append(process)
+            remaining = set(self.connections)
+            deadline = time.perf_counter() + timeout_s
+            while remaining:
+                ready = wait(remaining, timeout=max(0, deadline - time.perf_counter()))
+                if not ready:
+                    raise TimeoutError("Baseline workers did not initialize before the deadline.")
+                for connection in ready:
+                    message = connection.recv()
+                    if message["kind"] != "ready":
+                        raise RuntimeError(message)
+                    remaining.remove(connection)
+            self._startup_wall_s = time.perf_counter() - self._startup_started
+        except BaseException:
+            self.close()
+            raise
+
+    def run(self, *, identical):
+        from multiprocessing.connection import wait
+        sampler = self._cold_sampler
+        cold = sampler is not None
+        self._cold_sampler = None
+        if sampler is None:
+            sampler = GpuMemorySampler(device=self.device)
+            sampler.start()
+        started = self._startup_started if cold else time.perf_counter()
+        outputs, records = {}, []
+        first_result_s = None
+        try:
+            for rank, connection in enumerate(self.connections):
+                connection.send({"kind": "run", "indices": list(range(rank, self.variants, len(self.connections))),
+                                 "identical": identical})
+            pending = set(self.connections)
+            deadline = time.perf_counter() + self.timeout_s
+            while pending:
+                ready = wait(pending, timeout=max(0, deadline - time.perf_counter()))
+                if not ready:
+                    raise TimeoutError("Baseline round exceeded its deadline.")
+                for connection in ready:
+                    message = connection.recv()
+                    if message["kind"] == "error":
+                        raise RuntimeError(message["traceback"])
+                    if message["kind"] == "done":
+                        records.append(message)
+                        pending.remove(connection)
+                    elif message["kind"] == "result":
+                        if message["index"] in outputs:
+                            raise RuntimeError("A baseline worker published a duplicate result.")
+                        outputs[message["index"]] = message["probe"]
+                        if first_result_s is None:
+                            first_result_s = time.perf_counter() - started
+            elapsed = time.perf_counter() - started
+        finally:
+            driver_peak = sampler.stop()
+        if set(outputs) != set(range(self.variants)):
+            raise RuntimeError("Baseline round returned an incomplete result set.")
+        return {
+            "mode": self.mode, "cold": cold, "wall_time_s": elapsed,
+            "first_result_s": first_result_s, "variants_per_second": self.variants / elapsed,
+            "startup_wall_s": self._startup_wall_s if cold else 0.0,
+            "driver_peak_increment_bytes": driver_peak,
+            "driver_peak_total_bytes": sampler.peak_total_bytes,
+            "driver_baseline_total_bytes": sampler.baseline_total_bytes,
+            "workers": records, "probes": [outputs[i] for i in range(self.variants)],
+        }
+
+    def close(self):
+        if self._cold_sampler is not None:
+            self._cold_sampler.stop()
+            self._cold_sampler = None
+        for connection in self.connections:
+            try:
+                connection.send({"kind": "close"})
+            except (OSError, EOFError, BrokenPipeError):
+                pass
+        for process in self.processes:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        for connection in self.connections:
+            connection.close()
+        self.connections.clear()
+        self.processes.clear()
+
+
+def compare_probes(reference, actual):
+    """Check exported spectra against the independent sequential baseline."""
+    import math
+    if not reference or len(reference) != len(actual):
+        raise ValueError("Reference and actual variant counts differ.")
+    metrics = []
+    for expected, observed in zip(reference, actual):
+        if expected["shape"] != observed["shape"]:
+            raise ValueError("Reference and actual probe shapes differ.")
+        count = math.prod(expected["shape"])
+        if count == 0 or any(len(p[part]) != count for p in (expected, observed) for part in ("real", "imag")):
+            raise ValueError("Probe values must match their nonempty declared shape.")
+        a = torch.complex(torch.tensor(expected["real"], dtype=torch.float64),
+                          torch.tensor(expected["imag"], dtype=torch.float64))
+        b = torch.complex(torch.tensor(observed["real"], dtype=torch.float64),
+                          torch.tensor(observed["imag"], dtype=torch.float64))
+        floor = 1e-20
+        relative = float(torch.linalg.vector_norm(a - b) / torch.linalg.vector_norm(a).clamp_min(floor))
+        maximum = float((a - b).abs().max() / a.abs().max().clamp_min(floor))
+        if not torch.isfinite(a).all() or not torch.isfinite(b).all() or relative > 1e-4 or maximum > 1e-4:
+            raise AssertionError(f"Baseline spectrum mismatch: rel_l2={relative}, relative_linf={maximum}.")
+        metrics.append({"rel_l2": relative, "relative_linf": maximum})
+    return metrics
+
+
+def benchmark_baselines(workload, *, device, variants, concurrency, identical, warmups, repeats):
+    import statistics
+    if not torch.cuda.is_available():
+        raise RuntimeError("Baseline comparisons require CUDA.")
+    if min(variants, concurrency, repeats) < 1 or warmups < 0:
+        raise ValueError("variants/concurrency/repeats must be positive and warmups nonnegative.")
+    records = []
+    sessions = {}
+    reference = None
+    modes = ("sequential", "processes", "run_many")
+    try:
+        # Separate mode sessions persist across interleaved rounds. Their idle
+        # allocator reservations remain visible in driver-level measurements.
+        for mode in modes:
+            session = BaselineSession(workload, device=device, mode=mode,
+                                      variants=variants, concurrency=concurrency)
+            sessions[mode] = session
+            cold = session.run(identical=identical)
+            reference = cold["probes"] if reference is None else reference
+            cold["correctness"] = compare_probes(reference, cold["probes"])
+            records.append(cold)
+        for iteration in range(warmups + repeats):
+            order = modes if iteration % 2 == 0 else tuple(reversed(modes))
+            for mode in order:
+                record = sessions[mode].run(identical=identical)
+                record["correctness"] = compare_probes(reference, record["probes"])
+                record["warmup"] = iteration < warmups
+                record["iteration"] = iteration
+                records.append(record)
+    finally:
+        for session in sessions.values():
+            session.close()
+    isolated_memory = []
+    # Peak memory comparisons get fresh, exclusive mode sessions. Keeping idle
+    # sessions during interleaved timing is useful for fair warm latency, but
+    # those sessions' contexts and caches must not inflate a mode's memory cost.
+    for mode in modes:
+        session = BaselineSession(workload, device=device, mode=mode,
+                                  variants=variants, concurrency=concurrency)
+        try:
+            record = session.run(identical=identical)
+            record["correctness"] = compare_probes(reference, record["probes"])
+            isolated_memory.append(record)
+        finally:
+            session.close()
+    summary = {}
+    for mode in modes:
+        values = [r["wall_time_s"] for r in records if r["mode"] == mode and not r["cold"] and not r["warmup"]]
+        summary[mode] = {"median_wall_s": statistics.median(values), "min_wall_s": min(values),
+                         "max_wall_s": max(values)}
+    return {
+        "schema_version": 1, "kind": "batch_independent_baselines", "workload": asdict(workload),
+        "device": device, "variants": variants, "concurrency": concurrency,
+        "identical": identical, "deduplication": False, "warmups": warmups, "repeats": repeats,
+        "acceptance_protocol": warmups >= 2 and repeats >= 5,
+        "environment": {"torch": torch.__version__, "cuda": torch.version.cuda,
+                        "gpu": torch.cuda.get_device_name(device)},
+        "output_contract": "probe complex spectra exported to CPU; no user-retained GPU results",
+        "notes": ["All modes use eager stepping and identical physical inputs.",
+                  "Cold timing includes worker startup, preparation, solve, export and readiness.",
+                  "Warm timing reuses processes and extension caches, not PreparedSimulation or field state.",
+                  "run_many naturally retains its complete ResultSequence until export.",
+                  "Interleaved sessions keep idle CUDA contexts and allocator caches alive; total driver peaks include them.",
+                  "isolated_memory uses one fresh mode session at a time, including startup and CUDA context overhead.",
+                  "Per-worker allocator peaks are not summed to infer simultaneous device usage.",
+                  "Device peaks are sampled at 20 ms and can miss shorter transients.",
+                  "Business geometry and historical memory values have not been reproduced."],
+        "summary": summary, "records": records, "isolated_memory": isolated_memory,
+    }
 
 
 if __name__ == "__main__":

@@ -642,3 +642,19 @@ Per-medium validation path enforced by `tests/validation/benchmark/test_media_va
 **Reference-cache closure.** The 2026-07-15 Stage-E audit validated the current cache key for all 102 Tidy3D-reference scenarios (zero stale and zero missing); the remaining four registered FDFD scenarios intentionally use a local FDTD reference. This is a report snapshot: any later scene, adapter, or cache-contract change must rerun the key audit and refresh affected references.
 
 _Last regenerated: 2026-09-08T03:26:46-07:00_
+
+<!-- batch-launch-10-varied:begin -->
+## Independent execution baseline: launch, N=10, varied
+
+Device: cuda:1; steps: 2000; warmups/repeats: 2/5.
+
+| Mode | Warm median (s) | Range (s) |
+| --- | ---: | ---: |
+| sequential | 4.881813 | 3.818385–4.943592 |
+| processes | 0.611841 | 0.534666–0.845338 |
+| run_many | 11.372335 | 9.990380–16.252934 |
+
+[Raw measurements and memory/lifetime qualifications](plots/batch/launch-n10-varied.json)
+
+These are independent-solver baselines, not shared-state Batch performance or business acceptance.
+<!-- batch-launch-10-varied:end -->

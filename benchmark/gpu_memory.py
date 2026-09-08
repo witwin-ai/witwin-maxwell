@@ -33,6 +33,14 @@ class GpuMemorySampler(threading.Thread):
         self.join()
         return max(self._peak_used - self._baseline_used, 0)
 
+    @property
+    def peak_total_bytes(self) -> int:
+        return self._peak_used
+
+    @property
+    def baseline_total_bytes(self) -> int:
+        return self._baseline_used
+
 
 def release_gpu_caches() -> None:
     """Release Torch and CuPy cache blocks before an isolated benchmark run."""

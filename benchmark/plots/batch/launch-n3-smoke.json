@@ -1,0 +1,652 @@
+{
+  "schema_version": 1,
+  "kind": "batch_independent_baselines",
+  "workload": {
+    "name": "launch",
+    "grid_cells": 16,
+    "frequencies": [
+      1000000000.0
+    ],
+    "time_steps": 32
+  },
+  "device": "cuda:1",
+  "variants": 3,
+  "concurrency": 2,
+  "identical": false,
+  "deduplication": false,
+  "warmups": 0,
+  "repeats": 1,
+  "acceptance_protocol": false,
+  "environment": {
+    "torch": "2.13.0+cu130",
+    "cuda": "13.0",
+    "gpu": "NVIDIA RTX A6000"
+  },
+  "output_contract": "probe complex spectra exported to CPU; no user-retained GPU results",
+  "notes": [
+    "All modes use eager stepping and identical physical inputs.",
+    "Cold timing includes worker startup, preparation, solve, export and readiness.",
+    "Warm timing reuses processes and extension caches, not PreparedSimulation or field state.",
+    "run_many naturally retains its complete ResultSequence until export.",
+    "Interleaved sessions keep idle CUDA contexts and allocator caches alive; total driver peaks include them.",
+    "isolated_memory uses one fresh mode session at a time, including startup and CUDA context overhead.",
+    "Per-worker allocator peaks are not summed to infer simultaneous device usage.",
+    "Device peaks are sampled at 20 ms and can miss shorter transients.",
+    "Business geometry and historical memory values have not been reproduced."
+  ],
+  "summary": {
+    "sequential": {
+      "median_wall_s": 0.08558867685496807,
+      "min_wall_s": 0.08558867685496807,
+      "max_wall_s": 0.08558867685496807
+    },
+    "processes": {
+      "median_wall_s": 0.07275582104921341,
+      "min_wall_s": 0.07275582104921341,
+      "max_wall_s": 0.07275582104921341
+    },
+    "run_many": {
+      "median_wall_s": 0.08575537707656622,
+      "min_wall_s": 0.08575537707656622,
+      "max_wall_s": 0.08575537707656622
+    }
+  },
+  "records": [
+    {
+      "mode": "sequential",
+      "cold": true,
+      "wall_time_s": 3.5103132547810674,
+      "first_result_s": 3.3354669772088528,
+      "variants_per_second": 0.854624582553703,
+      "startup_wall_s": 2.9959803400561213,
+      "driver_peak_increment_bytes": 337182720,
+      "driver_peak_total_bytes": 1077542912,
+      "driver_baseline_total_bytes": 740360192,
+      "workers": [
+        {
+          "kind": "done",
+          "worker_wall_s": 0.5136597286909819,
+          "peak_allocated_bytes": 10082304,
+          "peak_reserved_bytes": 10485760,
+          "live_allocated_bytes": 4859904
+        }
+      ],
+      "probes": [
+        {
+          "shape": [],
+          "real": [
+            17.622085571289062
+          ],
+          "imag": [
+            -17.684843063354492
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.612546920776367
+          ],
+          "imag": [
+            -17.665027618408203
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.603008270263672
+          ],
+          "imag": [
+            -17.645286560058594
+          ]
+        }
+      ],
+      "correctness": [
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        }
+      ]
+    },
+    {
+      "mode": "processes",
+      "cold": true,
+      "wall_time_s": 3.4273919370025396,
+      "first_result_s": 3.3346723271533847,
+      "variants_per_second": 0.8753011196681756,
+      "startup_wall_s": 2.997137364000082,
+      "driver_peak_increment_bytes": 670171136,
+      "driver_peak_total_bytes": 1747714048,
+      "driver_baseline_total_bytes": 1077542912,
+      "workers": [
+        {
+          "kind": "done",
+          "worker_wall_s": 0.363057816401124,
+          "peak_allocated_bytes": 9793536,
+          "peak_reserved_bytes": 10485760,
+          "live_allocated_bytes": 0
+        },
+        {
+          "kind": "done",
+          "worker_wall_s": 0.4295795587822795,
+          "peak_allocated_bytes": 4933632,
+          "peak_reserved_bytes": 6291456,
+          "live_allocated_bytes": 4859904
+        }
+      ],
+      "probes": [
+        {
+          "shape": [],
+          "real": [
+            17.622085571289062
+          ],
+          "imag": [
+            -17.684843063354492
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.612546920776367
+          ],
+          "imag": [
+            -17.665027618408203
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.603008270263672
+          ],
+          "imag": [
+            -17.645286560058594
+          ]
+        }
+      ],
+      "correctness": [
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        }
+      ]
+    },
+    {
+      "mode": "run_many",
+      "cold": true,
+      "wall_time_s": 4.103360192850232,
+      "first_result_s": 4.102436074987054,
+      "variants_per_second": 0.7311081306552746,
+      "startup_wall_s": 3.6857698634266853,
+      "driver_peak_increment_bytes": 343474176,
+      "driver_peak_total_bytes": 2091188224,
+      "driver_baseline_total_bytes": 1747714048,
+      "workers": [
+        {
+          "kind": "done",
+          "worker_wall_s": 0.4165476206690073,
+          "peak_allocated_bytes": 14653440,
+          "peak_reserved_bytes": 16777216,
+          "live_allocated_bytes": 14579712
+        }
+      ],
+      "probes": [
+        {
+          "shape": [],
+          "real": [
+            17.622085571289062
+          ],
+          "imag": [
+            -17.684843063354492
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.612546920776367
+          ],
+          "imag": [
+            -17.665027618408203
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.603008270263672
+          ],
+          "imag": [
+            -17.645286560058594
+          ]
+        }
+      ],
+      "correctness": [
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        }
+      ]
+    },
+    {
+      "mode": "sequential",
+      "cold": false,
+      "wall_time_s": 0.08558867685496807,
+      "first_result_s": 0.02867926750332117,
+      "variants_per_second": 35.05136555719359,
+      "startup_wall_s": 0.0,
+      "driver_peak_increment_bytes": 4194304,
+      "driver_peak_total_bytes": 2095382528,
+      "driver_baseline_total_bytes": 2091188224,
+      "workers": [
+        {
+          "kind": "done",
+          "worker_wall_s": 0.08482564147561789,
+          "peak_allocated_bytes": 13196800,
+          "peak_reserved_bytes": 14680064,
+          "live_allocated_bytes": 4859904
+        }
+      ],
+      "probes": [
+        {
+          "shape": [],
+          "real": [
+            17.622085571289062
+          ],
+          "imag": [
+            -17.684843063354492
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.612546920776367
+          ],
+          "imag": [
+            -17.665027618408203
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.603008270263672
+          ],
+          "imag": [
+            -17.645286560058594
+          ]
+        }
+      ],
+      "correctness": [
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        }
+      ],
+      "warmup": false,
+      "iteration": 0
+    },
+    {
+      "mode": "processes",
+      "cold": false,
+      "wall_time_s": 0.07275582104921341,
+      "first_result_s": 0.044966794550418854,
+      "variants_per_second": 41.23381410225229,
+      "startup_wall_s": 0.0,
+      "driver_peak_increment_bytes": 0,
+      "driver_peak_total_bytes": 2095382528,
+      "driver_baseline_total_bytes": 2095382528,
+      "workers": [
+        {
+          "kind": "done",
+          "worker_wall_s": 0.045729270204901695,
+          "peak_allocated_bytes": 4933632,
+          "peak_reserved_bytes": 6291456,
+          "live_allocated_bytes": 4859904
+        },
+        {
+          "kind": "done",
+          "worker_wall_s": 0.07204317580908537,
+          "peak_allocated_bytes": 7112704,
+          "peak_reserved_bytes": 10485760,
+          "live_allocated_bytes": 4859904
+        }
+      ],
+      "probes": [
+        {
+          "shape": [],
+          "real": [
+            17.622085571289062
+          ],
+          "imag": [
+            -17.684843063354492
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.612546920776367
+          ],
+          "imag": [
+            -17.665027618408203
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.603008270263672
+          ],
+          "imag": [
+            -17.645286560058594
+          ]
+        }
+      ],
+      "correctness": [
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        }
+      ],
+      "warmup": false,
+      "iteration": 0
+    },
+    {
+      "mode": "run_many",
+      "cold": false,
+      "wall_time_s": 0.08575537707656622,
+      "first_result_s": 0.08485313411802053,
+      "variants_per_second": 34.98322906704109,
+      "startup_wall_s": 0.0,
+      "driver_peak_increment_bytes": 4194304,
+      "driver_peak_total_bytes": 2099576832,
+      "driver_baseline_total_bytes": 2095382528,
+      "workers": [
+        {
+          "kind": "done",
+          "worker_wall_s": 0.08479676675051451,
+          "peak_allocated_bytes": 19513344,
+          "peak_reserved_bytes": 20971520,
+          "live_allocated_bytes": 19439616
+        }
+      ],
+      "probes": [
+        {
+          "shape": [],
+          "real": [
+            17.622085571289062
+          ],
+          "imag": [
+            -17.684843063354492
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.612546920776367
+          ],
+          "imag": [
+            -17.665027618408203
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.603008270263672
+          ],
+          "imag": [
+            -17.645286560058594
+          ]
+        }
+      ],
+      "correctness": [
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        }
+      ],
+      "warmup": false,
+      "iteration": 0
+    }
+  ],
+  "isolated_memory": [
+    {
+      "mode": "sequential",
+      "cold": true,
+      "wall_time_s": 3.3241203809157014,
+      "first_result_s": 3.274998690932989,
+      "variants_per_second": 0.9024943913654488,
+      "startup_wall_s": 2.9440171997994184,
+      "driver_peak_increment_bytes": 337182720,
+      "driver_peak_total_bytes": 1077542912,
+      "driver_baseline_total_bytes": 740360192,
+      "workers": [
+        {
+          "kind": "done",
+          "worker_wall_s": 0.3794214120134711,
+          "peak_allocated_bytes": 10082304,
+          "peak_reserved_bytes": 10485760,
+          "live_allocated_bytes": 4859904
+        }
+      ],
+      "probes": [
+        {
+          "shape": [],
+          "real": [
+            17.622085571289062
+          ],
+          "imag": [
+            -17.684843063354492
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.612546920776367
+          ],
+          "imag": [
+            -17.665027618408203
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.603008270263672
+          ],
+          "imag": [
+            -17.645286560058594
+          ]
+        }
+      ],
+      "correctness": [
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        }
+      ]
+    },
+    {
+      "mode": "processes",
+      "cold": true,
+      "wall_time_s": 3.6194787779822946,
+      "first_result_s": 3.5010590413585305,
+      "variants_per_second": 0.8288486226937826,
+      "startup_wall_s": 3.0283869486302137,
+      "driver_peak_increment_bytes": 670171136,
+      "driver_peak_total_bytes": 1410531328,
+      "driver_baseline_total_bytes": 740360192,
+      "workers": [
+        {
+          "kind": "done",
+          "worker_wall_s": 0.5078859245404601,
+          "peak_allocated_bytes": 9793536,
+          "peak_reserved_bytes": 10485760,
+          "live_allocated_bytes": 0
+        },
+        {
+          "kind": "done",
+          "worker_wall_s": 0.5899723982438445,
+          "peak_allocated_bytes": 4933632,
+          "peak_reserved_bytes": 6291456,
+          "live_allocated_bytes": 4859904
+        }
+      ],
+      "probes": [
+        {
+          "shape": [],
+          "real": [
+            17.622085571289062
+          ],
+          "imag": [
+            -17.684843063354492
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.612546920776367
+          ],
+          "imag": [
+            -17.665027618408203
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.603008270263672
+          ],
+          "imag": [
+            -17.645286560058594
+          ]
+        }
+      ],
+      "correctness": [
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        }
+      ]
+    },
+    {
+      "mode": "run_many",
+      "cold": true,
+      "wall_time_s": 3.8834255915135145,
+      "first_result_s": 3.882876911200583,
+      "variants_per_second": 0.772513835865924,
+      "startup_wall_s": 3.4767921874299645,
+      "driver_peak_increment_bytes": 343474176,
+      "driver_peak_total_bytes": 1083834368,
+      "driver_baseline_total_bytes": 740360192,
+      "workers": [
+        {
+          "kind": "done",
+          "worker_wall_s": 0.40592210460454226,
+          "peak_allocated_bytes": 14653440,
+          "peak_reserved_bytes": 16777216,
+          "live_allocated_bytes": 14579712
+        }
+      ],
+      "probes": [
+        {
+          "shape": [],
+          "real": [
+            17.622085571289062
+          ],
+          "imag": [
+            -17.684843063354492
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.612546920776367
+          ],
+          "imag": [
+            -17.665027618408203
+          ]
+        },
+        {
+          "shape": [],
+          "real": [
+            17.603008270263672
+          ],
+          "imag": [
+            -17.645286560058594
+          ]
+        }
+      ],
+      "correctness": [
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        },
+        {
+          "rel_l2": 0.0,
+          "relative_linf": 0.0
+        }
+      ]
+    }
+  ]
+}
