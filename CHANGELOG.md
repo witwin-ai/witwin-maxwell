@@ -4,6 +4,30 @@ All notable user-visible changes to WiTwin Maxwell are documented here. The proj
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-08
+
+### Added
+
+- Experimental `Simulation.batch(...)` execution with reusable capacity-limited CUDA slots, batched field/CPML/source/observer updates, and ordinary owned `Result` objects.
+- Local material compilation reuse, automatic resident capacity, private per-device CUDA allocation budgets, multi-GPU and dual-slot scheduling, and opt-in measured throughput tuning.
+- PyTorch-native Batch checkpoint adjoints for supported density, dielectric geometry, and named source-scale inputs, including delayed backward after slot reuse or close.
+- Reproducible Batch performance, memory, material-compilation, and device-scaling audits with numerical controls and process-contention records.
+
+### Fixed
+
+- Material-aware time-step stability, source timing, complex CPML and Mur boundary histories, and capture/resume state consistency in FDTD.
+- Batch parameter cache identity, iterator ownership, result scene snapshots, selected electric spectra, and redundant spectral allocations in retained adjoint state.
+- Automatic worker capacity distribution and isolation of tuning RNG, module state, and cross-device tensor copies.
+
+### Limitations
+
+- Batch remains experimental with a narrower capability set than ordinary FDTD. Fused batch reverse kernels, exact preplanning of all retained outputs, and exclusive multi-GPU throughput acceptance remain pending.
+- See [0.5.0 release notes](docs/reference/release-notes-0.5.0.md) for validation evidence and the supported execution contract.
+
+## [0.4.0] - 2026-07-23
+
+- Added RF/circuit, array, and distributed FDTD workflows and expanded numerical validation. See the [0.4.0 release notes](docs/reference/release-notes-0.4.0.md) for the full historical scope and limitations.
+
 ## [0.3.0] - 2026-07-13
 
 ### Added
@@ -46,6 +70,8 @@ Detailed numerical conventions, pitfalls, final comparison values, and intention
 
 - Previous public release.
 
-[Unreleased]: https://github.com/witwin-ai/witwin-maxwell/compare/witwin-maxwell-v0.3.0...HEAD
+[Unreleased]: https://github.com/witwin-ai/witwin-maxwell/compare/witwin-maxwell-v0.5.0...HEAD
+[0.5.0]: https://github.com/witwin-ai/witwin-maxwell/compare/witwin-maxwell-v0.4.0...witwin-maxwell-v0.5.0
+[0.4.0]: https://github.com/witwin-ai/witwin-maxwell/compare/witwin-maxwell-v0.3.0...witwin-maxwell-v0.4.0
 [0.3.0]: https://github.com/witwin-ai/witwin-maxwell/compare/witwin-maxwell-v0.2.0...witwin-maxwell-v0.3.0
 [0.2.0]: https://github.com/witwin-ai/witwin-maxwell/releases/tag/witwin-maxwell-v0.2.0

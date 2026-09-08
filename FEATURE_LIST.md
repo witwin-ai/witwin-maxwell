@@ -2,6 +2,8 @@
 
 This document tracks the current user-visible capabilities of the `maxwell` package.
 
+Release 0.5.0 introduces the experimental Batch execution tier and FDTD correctness repairs described in [the release notes](docs/reference/release-notes-0.5.0.md). Existing ordinary-simulation capabilities retain their documented scope; Batch support is specified separately below.
+
 - Batch tuning isolates copyable `SceneModule` parameters, buffers and Python attributes per trial, preserves shared tensor storage, and starts each candidate from the same CPU/CUDA RNG state. Only the final ordinary preparation updates the caller's module state. Trial copies and scene materialization on another execution device use that device's private memory account. Arbitrary external side effects and allocations on producer devices outside the execution policy are outside this isolation/accounting contract.
 
 - `python -m benchmark batch --scaling-audit WORKLOAD --devices cuda:0 cuda:1 --variants N --concurrency B --update-report` interleaves complete streamed runs on each GPU and all GPUs, including CPU output readiness, and checks spectra against independent simulations. Raw artifacts retain all timing samples and competing compute-process observations. The matching two-device 1.7x gate requires numerical agreement and observed exclusive compute access; foreign processes or sampler errors prevent acceptance. Periodic sampling cannot prove complete exclusivity or exclude display activity. Idle prepared comparison modes remain resident, so this workflow does not measure isolated memory use.
