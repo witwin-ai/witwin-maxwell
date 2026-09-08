@@ -211,6 +211,8 @@ from .simulation import (
     run,
 )
 from .fdtd_parallel import FDTDParallelConfig
+from .execution.batch import BatchExecution, BatchOutput, BatchParameters, BatchSimulation, BatchVariation
+from .execution.plan import BatchPlanReport
 from .execution import (
     DistributedFailure,
     ExecutionRecord,
@@ -227,6 +229,12 @@ from .array_gradient import (
 from .fdtd.resume import FDTDResumeCheckpoint
 
 __all__ = [
+    "BatchExecution",
+    "BatchOutput",
+    "BatchParameters",
+    "BatchSimulation",
+    "BatchVariation",
+    "BatchPlanReport",
     "AstigmaticGaussianBeam",
     "AntennaData",
     "AggregatedSceneGradient",

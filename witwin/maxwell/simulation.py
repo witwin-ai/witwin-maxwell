@@ -447,6 +447,17 @@ def _require_cuda_scene(scene: Scene, *, method: str) -> None:
 
 
 class Simulation:
+    @staticmethod
+    def batch(simulations, *, execution, parameters=None, variant_ids=None,
+              variation=None, outputs=None):
+        """Validate and plan same-scene variants; native execution is pending."""
+        from .execution.batch import BatchSimulation
+
+        return BatchSimulation(
+            simulations, execution=execution, parameters=parameters,
+            variant_ids=variant_ids, variation=variation, outputs=outputs,
+        )
+
     def __init__(
         self,
         *,
