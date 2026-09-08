@@ -16,19 +16,8 @@ from .checkpoint import (
 )
 
 
-_RESUME_SCHEMA_VERSION = 1
-_SCHEMA_TUPLE_FIELDS = (
-    "field_names",
-    "complex_field_names",
-    "cpml_state_names",
-    "tfsf_auxiliary_state_names",
-    "dispersive_state_names",
-    "magnetic_dispersive_state_names",
-    "lumped_state_names",
-    "circuit_state_names",
-    "gyromagnetic_state_names",
-    "surface_impedance_state_names",
-)
+_RESUME_SCHEMA_VERSION = 2
+_SCHEMA_TUPLE_FIELDS = tuple(field.name for field in fields(FDTDCheckpointSchema) if field.name != "version")
 
 
 def _detach_to_cpu(value):
@@ -63,6 +52,12 @@ def _schema_from_snapshot(payload: Mapping[str, Any]) -> FDTDCheckpointSchema:
             "FDTD resume physics schema is missing keys: "
             + ", ".join(sorted(missing))
         )
+    unexpected = set(payload).difference({"version", *_SCHEMA_TUPLE_FIELDS})
+    if unexpected:
+        raise ValueError(f"FDTD resume physics schema has unexpected keys: {sorted(unexpected)}.")
+    for name in _SCHEMA_TUPLE_FIELDS:
+        if not isinstance(payload[name], (tuple, list)) or not all(isinstance(value, str) for value in payload[name]):
+            raise ValueError(f"FDTD resume physics schema {name!r} must be a sequence of names.")
     return FDTDCheckpointSchema(
         version=int(payload["version"]),
         **{name: tuple(payload[name]) for name in _SCHEMA_TUPLE_FIELDS},
@@ -422,6 +417,9 @@ def capture_resume_checkpoint(
         "modulation_time": (
             None if modulation_time is None else modulation_time.detach().clone()
         ),
+        "nonlinear_peak": (
+            None if getattr(solver, "_nonlinear_peak", None) is None else solver._nonlinear_peak.detach().clone()
+        ),
         "shutoff_peak": solver._shutoff_peak.detach().clone(),
         "shutoff_triggered": bool(solver._shutoff_triggered),
         "shutoff_step": solver._shutoff_step,
@@ -645,6 +643,14 @@ def _preflight_auxiliary(solver, checkpoint: FDTDResumeCheckpoint):
             "modulation_time", modulation_source, modulation_target
         )
         copy_ops.append((modulation_target, modulation_source))
+
+    nonlinear_source = auxiliary.get("nonlinear_peak")
+    nonlinear_target = getattr(solver, "_nonlinear_peak", None)
+    if (nonlinear_source is None) != (nonlinear_target is None):
+        raise ValueError("FDTD resume nonlinear stability envelope changed.")
+    if nonlinear_target is not None:
+        _require_tensor_compatible("nonlinear_peak", nonlinear_source, nonlinear_target)
+        copy_ops.append((nonlinear_target, nonlinear_source))
 
     shutoff_peak = auxiliary.get("shutoff_peak")
     _require_tensor_compatible("shutoff_peak", shutoff_peak, solver._shutoff_peak)

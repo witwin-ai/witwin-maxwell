@@ -520,6 +520,31 @@ def _checkpoint_expected_shape(target: torch.Tensor, layout) -> tuple[int, ...]:
     return tuple(layout["field_shape"])
 
 
+def graph_state_tensors(solver, *, tail=False):
+    """Live tensors mutated by capture, preserving compressed layouts and pointers.
+
+    Reuse the checkpoint target enumeration without its dense CPML conversion.
+    Capture-only scratch and validation state is deliberately separate from the
+    physical adjoint schema; it is overwritten or accumulated outside replay.
+    """
+    if tail:
+        names = _FIELD_STATE_NAMES + _COMPLEX_FIELD_STATE_NAMES
+        state = {name: getattr(solver, name) for name in names if hasattr(solver, name)}
+    else:
+        state = {name: tensor for name, tensor, _layout in _checkpoint_tensor_targets(solver, checkpoint_schema(solver))}
+        state.update({name: value for name, value in vars(solver).items()
+            if torch.is_tensor(value) and (name.startswith("psi") or name in ("_modulation_time", "_nonlinear_peak"))})
+        wire = getattr(solver, "_wire_runtime", None)
+        if wire is not None:
+            state["wire_emf"] = wire.emf
+            if getattr(wire, "ade_state", None) is not None:
+                state["wire_loss_ade"] = wire.ade_state
+    for index, entry in enumerate(getattr(solver, "_mur_state", ())):
+        for name in ("prev_boundary", "prev_adjacent"):
+            state[f"mur_{index}_{name}"] = entry[name]
+    return state
+
+
 def _copy_checkpoint_tensor(target: torch.Tensor, source: torch.Tensor, layout) -> None:
     if layout is None:
         target.copy_(source)

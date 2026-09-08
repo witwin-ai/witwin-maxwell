@@ -1823,8 +1823,8 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
     """Return ``run(time_value)`` for the field-update block, capturing it into a
     CUDA graph when requested and safe. Falls back to the direct call for TFSF /
     magnetic-source scenes (whose block carries per-step host input) or if capture
-    is unavailable. Capture happens on the zero initial field, a fixed point of
-    the source-free block, so it does not perturb the physical run.
+    is unavailable. All carried state is restored after capture or failure,
+    including material memory when the initial field is nonzero.
     """
     solver._cuda_graph_active = False
 
@@ -1906,59 +1906,9 @@ def _make_field_update_runner(solver, use_cuda_graph: bool):
         return normal
     from ..cuda.runtime.graph import CudaGraphRunner
 
-    # Snapshot the state this block mutates (real + imaginary fields, CPML psi) so
-    # warmup/capture do not perturb the physical run, then restore before stepping
-    # begins. The imaginary split fields exist only on the complex Bloch path; on
-    # the real path they are absent from ``vars(solver)`` and drop out naturally.
-    snapshot_field_names = (
-        "Ex", "Ey", "Ez", "Hx", "Hy", "Hz",
-        "Ex_imag", "Ey_imag", "Ez_imag", "Hx_imag", "Hy_imag", "Hz_imag",
-    )
-    state = {
-        k: v
-        for k, v in vars(solver).items()
-        if isinstance(v, torch.Tensor)
-        and (k in snapshot_field_names or k.startswith("psi") or k == "_modulation_time")
-    }
-    # The TFSF field-update block advances the auxiliary 1D magnetic grid in place
-    # (and reads the auxiliary electric grid). Snapshot both auxiliary tensors so
-    # warmup/capture on the zero field leave the incident line exactly as the
-    # physical run expects; the "psi" / field filter above does not reach them
-    # because they live on the auxiliary-grid object, not on ``vars(solver)``.
-    if getattr(solver, "tfsf_enabled", False) and getattr(solver, "_tfsf_state", None):
-        aux = solver._tfsf_state.get("auxiliary_grid")
-        if aux is not None:
-            state["_tfsf_aux_electric"] = aux.electric
-            state["_tfsf_aux_magnetic"] = aux.magnetic
-    wire_runtime = getattr(solver, "_wire_runtime", None)
-    if wire_runtime is not None:
-        state["_wire_current"] = wire_runtime.current
-        state["_wire_charge"] = wire_runtime.charge
-        state["_wire_emf"] = wire_runtime.emf
-    # The gyromagnetic magnetization ADE advances persistent state (m/dm) inside the
-    # captured block. On a zero field it stays at zero through warmup/capture (the ADE
-    # is linear with zero forcing at H = 0), but snapshotting it keeps capture correct
-    # even when the block is captured on a non-zero seeded field; the scratch buffers
-    # (hu/hv/new_u/new_v) are overwritten before they are read every step, so they are
-    # not carried state. It lives on the ``_gyromagnetic_state`` dict, not in
-    # ``vars(solver)``, so the "psi"/field filter above does not reach it.
-    gyro_state = getattr(solver, "_gyromagnetic_state", None)
-    if gyro_state is not None:
-        for gyro_name in ("m_u", "m_v", "dm_u", "dm_v"):
-            state[f"_gyro_{gyro_name}"] = gyro_state[gyro_name]
-    # The resistive SIBC surface overwrite is stateless (it writes only the surface E
-    # plane, already snapshotted above), so it needs no extra capture state.
-    # A resistive surface-impedance write is stateless (it writes only the surface E
-    # plane, already snapshotted above). A generic rational face carries a per-edge ADE
-    # state; snapshot it so warmup/capture on the zero field leave it at zero, which is
-    # a fixed point of the linear ADE with zero forcing, so the physical run is not
-    # perturbed and the state advance stays inside the captured graph.
-    surface_state = getattr(solver, "_surface_impedance", None)
-    if surface_state is not None:
-        for index, write in enumerate(surface_state["writes"]):
-            ade = write.get("ade")
-            if ade is not None:
-                state[("_surface_ade", index)] = ade["state"]
+    from ..checkpoint import graph_state_tensors
+
+    state = graph_state_tensors(solver)
     saved = {k: v.clone() for k, v in state.items()}
 
     def _restore():
@@ -1993,17 +1943,15 @@ def _post_source_block(solver):
 def _make_tail_runner(solver, use_gpu_dft: bool):
     """Capture the post-source tail (PEC + Mur + GPU-DFT) into a graph. Returns a
     replay callable, or ``None`` to keep the inline tail. Snapshots the state the
-    tail mutates (fields, the device step counter, the DFT accumulators) around
-    capture so warmup/capture on the zero field do not perturb the run."""
+    tail mutates (fields, Mur history, device counters and DFT accumulators)
+    around capture so nonzero initial states are preserved too."""
     if not (use_gpu_dft and getattr(solver, "_cuda_graph_active", False)):
         return None
     from ..cuda.runtime.graph import CudaGraphRunner
 
-    state = {}
-    for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
-        tensor = getattr(solver, name, None)
-        if isinstance(tensor, torch.Tensor):
-            state[("field", name)] = tensor
+    from ..checkpoint import graph_state_tensors
+
+    state = graph_state_tensors(solver, tail=True)
     if isinstance(getattr(solver, "_dft_step", None), torch.Tensor):
         state[("step",)] = solver._dft_step
     for comp, buffers in getattr(solver, "_dft_batched_fields", {}).items():

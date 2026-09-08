@@ -110,9 +110,12 @@ def _delay_state_keys(checkpoint) -> list[str]:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_delayed_network_resume_matches_uninterrupted_run() -> None:
+def test_delayed_network_resume_matches_uninterrupted_run(tmp_path) -> None:
     reference = _simulation().run()
     checkpoint = _simulation().prepare().run_until(24)
+    path = tmp_path / "delayed-network.pt"
+    checkpoint.save(path)
+    checkpoint = mw.FDTDResumeCheckpoint.load(path)
 
     keys = _delay_state_keys(checkpoint)
     assert keys, "bidirectional-delay state was not captured into the checkpoint"
