@@ -22,7 +22,8 @@
 | 公共前向执行与结果生命周期子阶段 | 完成 | `prepare/run` 可执行；原生 B-lane 场/CPML、重复运行、A/B/A 参数、尾批、31 频点 monitor-only、独立 Result、流式关闭/取消和保存/加载；公共 Batch/单场景/Graph 回归 89 passed |
 | 原生 eager 与既有基线对照 | 工具/测量完成，组合性能门未通过 | launch、N=B=10、2000 步、2 预热/5 正式；原生 2.342 s，十进程 0.903 s；隔离驱动显存增量 411.6/3175.6 MiB；频谱误差为 0。不能据此声称耗时不退化或完整业务验收 |
 | 性能与正确性审计 | 修复与分项诊断完成 | `d232245` 修复参数身份缓存和迭代所有权；三负载 CPU/CUDA profiling、field-only Graph 消融、N>B 构建次数及扩展数值对照，见 [审计报告](../assessments/fdtd-batch-performance-and-correctness-audit.md)；不替代完整性能矩阵 |
-| P2/P3 其余、P4–P7 | 未完成 | 背景/局部编译复用、源/观察器向量化、精确 output allocation、byte admission、协调 Graph、多 GPU/Q=2、调优和 Batch 伴随仍待实现；不视为全方案或性能验收完成 |
+| P3 源/观察器与完整时间步 Graph | 完成基础前向子集 | 原生批量源/频谱、固定缓冲、精确尾块、capture 复用和线程协调；54 项 Graph/公共 API 回归通过。N=B=10 的 Graph 中位 0.127 s、十进程 0.557 s，显存增量 402/3158 MiB，探针误差为零 |
+| P2/P3 其余、P4–P7 | 未完成 | 背景/局部编译复用、精确 output allocation、byte admission、多 GPU/Q=2、调优和 Batch 伴随仍待实现；不视为全方案或性能验收完成 |
 | P8 | 未开始 | 独立研究门，依赖 P4 实测 |
 
 环境检查：沙箱内 GPU 不可见；获准在沙箱外检查后发现两张 A6000。
@@ -31,7 +32,7 @@ GPU 0 存在其它计算任务。原生扩展需显式设置当前环境内的 `
 
 ### 当前可执行范围
 
-后续优化进度：已接入跨 lane/频点的点、面和通量频谱累积，GPU 维护相位、窗和源归一化状态；场 kernel 的固定调用参数在 bind 时建立。源注入仍逐 lane。该子阶段 35 项专项/监视器/生命周期测试通过，原始测量见 `benchmark/plots/batch/optimized-observer-spectrum.json`。后续源、材料、编译和调度工作继续实施。
+后续优化进度：已接入跨 lane/频点的点、面和通量频谱累积，GPU 维护相位、窗和源归一化状态；场 kernel 的固定调用参数在 bind 时建立。该子阶段 35 项专项/监视器/生命周期测试通过，原始测量见 `benchmark/plots/batch/optimized-observer-spectrum.json`。源与 Graph 的后续实现见下文。
 
 材料分配子阶段：未启用的非对角、非线性、调制通道改为标量存储的只读广播张量；激活通道时才物化。子像素平均保留紧凑零，trainable occupancy 仍保留原求导依赖。没有色散极点时不分配电/磁色散模板的整域逆材料张量。材料编译/色散/梯度/Batch 数值矩阵 175 passed、1 skipped，紧凑存储及零导数专项 4 项通过；高级非线性、调制和非对角材料对照已执行。
 
@@ -40,9 +41,12 @@ GPU 0 存在其它计算任务。原生扩展需显式设置当前环境内的 `
 系数共享子阶段：逐分量对编译结果做实际相等性检查，共用相等的系数张量；后续 cohort 出现差异时单向升级为逐 lane 存储，保持场/CPML 地址稳定。共享、升级、重复换入和独立场对照专项通过；原有 cohort/公共前向/完整场谱矩阵亦通过。这不等价于背景区域编译复用。
 
 `Batch.prepare/run` 已不再是不可执行的占位接口。当前执行层为
-`native_field_cohort_eager`：一张 GPU、一个固定容量 B 的执行槽，E/H 与
-dense/slab CPML 使用原生批量 kernel；每个 lane 仍通过现有流程注入点源、
-累积点/面/通量监视器并完成归一化。返回的每一项都是普通 `Result`，
+`native_pipeline_eager/graph`：一张 GPU、一个固定容量 B 的执行槽，E/H、
+dense/slab CPML、点源及点/面/通量观察器使用批量推进。`graph="auto"`
+尝试完整时间步捕获，`required` 强制捕获，`graph_steps` 控制 chunk；
+尾块和提前停止检查点不越界。monitor-only 重复运行复用 capture，全场谱因
+普通 DFT 缓冲重新分配而重新捕获。协调器保护已注册 Batch 线程；外部自定义
+GPU 线程仍需在 capture 时保持静止。返回的每一项都是普通 `Result`，
 不引用活的 solver 或场槽。关闭 context 或复用场槽不会改写旧结果。
 
 ```python
@@ -72,11 +76,10 @@ inference tensor 每次保守重新编译。外部共享存储或 `.data` 的未
 迭代器 `next()` 活跃时不允许另一线程再次 `next()` 或 `close()`；
 使用 `request_cancel()`，待调用返回后再关闭。
 默认 `batch_size="auto"` 暂时保守选择 1，并不执行吞吐调优。
-`graph="auto"` 暂时选择 eager；explicit `required`、`graph_steps`、
 `tune=True`、严格 `memory_limit_bytes`、多 GPU/Q=2 和可训练输入均明确拒绝。
 这些限制不能解读为完整调度器已经实现。
 
-当前每个换入的 cohort 仍全域编译材料，密集系数按 lane 存储；只对实际相等的
+当前每个换入的 cohort 仍全域编译材料；只对实际相等的材料系数、
 spacing/CPML profile 共享存储。并未获得“背景只编译一次”的验收。
 监视器频谱请求不会自动启用全域 DFT；显式请求 E 场时，原有累积器仍内部保存
 全部 E 分量，再导出所选分量，精确子集分配仍待实现。`plan()` 仍为 unresolved，

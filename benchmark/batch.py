@@ -120,12 +120,16 @@ def main(argv=None):
     parser.add_argument("--steps", type=int, help="Explicit step override; retained in the report")
     parser.add_argument("--identical", action="store_true", help="Use distinct copies of one physical design")
     parser.add_argument("--include-native", action="store_true", help="Also measure reusable native Batch with B=concurrency")
+    parser.add_argument("--native-graph", choices=("off", "auto", "required"), default="off",
+                        help="Graph policy for the native comparison tier")
     parser.add_argument("--update-report", action="store_true", help="Also update the baseline section of benchmark/RESULTS.md")
     args = parser.parse_args(argv)
     if args.update_report and not args.compare:
         parser.error("--update-report requires --compare.")
     if args.include_native and not args.compare:
         parser.error("--include-native requires --compare.")
+    if args.native_graph != "off" and not (args.compare and args.include_native):
+        parser.error("--native-graph requires --compare and --include-native.")
     if args.inventory:
         payload = {"schema_version": 1, "workloads": [asdict(w) for w in BATCH_WORKLOADS.values()],
                    "planned_variant_counts": [1, 10, 100], "deduplication": False,
@@ -149,7 +153,8 @@ def main(argv=None):
         else:
             payload = benchmark_baselines(workload, device=args.device, variants=args.variants,
                 concurrency=args.concurrency, identical=args.identical,
-                warmups=args.warmups, repeats=args.repeats, include_native=args.include_native)
+                warmups=args.warmups, repeats=args.repeats, include_native=args.include_native,
+                native_graph=args.native_graph)
     encoded = json.dumps(payload, indent=2) + "\n"
     if args.audit or args.compare or args.profile or args.capacity_audit or args.output:
         suffix = "audit" if args.audit else f"n{args.variants}-{'identical' if args.identical else 'varied'}"
@@ -173,7 +178,7 @@ def _probe_snapshot(result):
             "imag": value.imag.reshape(-1).tolist() if value.is_complex() else [0.0] * value.numel()}
 
 
-def _baseline_worker(connection, workload, device, mode, concurrency):
+def _baseline_worker(connection, workload, device, mode, concurrency, native_graph="off"):
     """Persistent spawned worker; no CUDA context is inherited through fork."""
     prepared_batch = None
     prepared_key = None
@@ -196,7 +201,7 @@ def _baseline_worker(connection, workload, device, mode, concurrency):
                     simulations = [build_simulation(workload, index=i, identical=identical, device=device) for i in indices]
                     prepared_batch = mw.Simulation.batch(simulations, execution=mw.BatchExecution(
                         devices=(device,), batch_size=min(concurrency, len(indices)),
-                        max_batch_size=concurrency, graph="off")).prepare()
+                        max_batch_size=concurrency, graph=native_graph)).prepare()
                     prepared_key = key
                     del simulations
                 with prepared_batch.iter_results() as iterator:
@@ -240,7 +245,7 @@ def _baseline_worker(connection, workload, device, mode, concurrency):
 class BaselineSession:
     """One mode's workers, reused across warmups and timed repetitions."""
 
-    def __init__(self, workload, *, device, mode, variants, concurrency, timeout_s=1800):
+    def __init__(self, workload, *, device, mode, variants, concurrency, timeout_s=1800, native_graph="off"):
         import multiprocessing as mp
         from multiprocessing.connection import wait
         self.mode, self.variants = mode, variants
@@ -257,7 +262,7 @@ class BaselineSession:
             for _ in range(workers):
                 parent, child = context.Pipe()
                 process = context.Process(target=_baseline_worker,
-                    args=(child, workload, device, mode, concurrency))
+                    args=(child, workload, device, mode, concurrency, native_graph))
                 process.start()
                 child.close()
                 self.connections.append(parent)
@@ -372,7 +377,7 @@ def compare_probes(reference, actual):
     return metrics
 
 
-def benchmark_baselines(workload, *, device, variants, concurrency, identical, warmups, repeats, include_native=False):
+def benchmark_baselines(workload, *, device, variants, concurrency, identical, warmups, repeats, include_native=False, native_graph="off"):
     import statistics
     if not torch.cuda.is_available():
         raise RuntimeError("Baseline comparisons require CUDA.")
@@ -387,7 +392,7 @@ def benchmark_baselines(workload, *, device, variants, concurrency, identical, w
         # allocator reservations remain visible in driver-level measurements.
         for mode in modes:
             session = BaselineSession(workload, device=device, mode=mode,
-                                      variants=variants, concurrency=concurrency)
+                                      variants=variants, concurrency=concurrency, native_graph=native_graph)
             sessions[mode] = session
             cold = session.run(identical=identical)
             reference = cold["probes"] if reference is None else reference
@@ -410,7 +415,7 @@ def benchmark_baselines(workload, *, device, variants, concurrency, identical, w
     # those sessions' contexts and caches must not inflate a mode's memory cost.
     for mode in modes:
         session = BaselineSession(workload, device=device, mode=mode,
-                                  variants=variants, concurrency=concurrency)
+                                  variants=variants, concurrency=concurrency, native_graph=native_graph)
         try:
             record = session.run(identical=identical)
             record["correctness"] = compare_probes(reference, record["probes"])
@@ -426,6 +431,7 @@ def benchmark_baselines(workload, *, device, variants, concurrency, identical, w
         "schema_version": 1, "kind": "batch_independent_baselines", "workload": asdict(workload),
         "device": device, "variants": variants, "concurrency": concurrency,
         "include_native": include_native,
+        "native_graph": native_graph,
         "identical": identical, "deduplication": False, "warmups": warmups, "repeats": repeats,
         "acceptance_protocol": warmups >= 2 and repeats >= 5,
         "environment": {"torch": torch.__version__, "cuda": torch.version.cuda,

@@ -3,12 +3,43 @@ from __future__ import annotations
 import contextlib
 import threading
 import warnings
+import functools
 from collections.abc import Callable
 
 import torch
 
-_suspend_lock = threading.Lock()
+_suspend_lock = threading.RLock()
 _suspend_depth = 0
+_participants = {}
+
+
+def capture_participant(function):
+    """Register framework GPU activity before another thread can start capture."""
+    @functools.wraps(function)
+    def call(*args, **kwargs):
+        owner = threading.get_ident()
+        with _suspend_lock:
+            _participants[owner] = _participants.get(owner, 0) + 1
+        try:
+            return function(*args, **kwargs)
+        finally:
+            with _suspend_lock:
+                _participants[owner] -= 1
+                if not _participants[owner]:
+                    del _participants[owner]
+    return call
+
+
+def _exclusive_capture(function):
+    @functools.wraps(function)
+    def call(*args, **kwargs):
+        # Captures exclude admission of new framework GPU work. Existing
+        # concurrent participants force auto policy to execute eagerly.
+        with _suspend_lock:
+            if any(owner != threading.get_ident() for owner in _participants):
+                raise RuntimeError("CUDA Graph capture is suspended while another batch thread is active.")
+            return function(*args, **kwargs)
+    return call
 
 
 @contextlib.contextmanager
@@ -71,6 +102,7 @@ class CudaGraphRunner:
             )
         self.graph: torch.cuda.CUDAGraph | None = None
 
+    @_exclusive_capture
     def capture(self, fn: Callable[[], None]) -> Callable[[], None]:
         if not self.enabled:
             return fn

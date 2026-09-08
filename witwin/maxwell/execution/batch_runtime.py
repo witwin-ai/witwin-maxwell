@@ -7,6 +7,7 @@ import time
 from collections.abc import Mapping
 
 import torch
+from ..fdtd.cuda.runtime.graph import capture_participant
 
 from .batch import BatchParameters
 from .plan import BatchPlanReport
@@ -35,18 +36,16 @@ def _owned(value, device, memo):
 class PreparedBatch:
     """Reusable forward context with one persistent native CUDA field slot.
 
-    The current execution tier has one device, one slot, and eager native field
-    launches. Compilation and source/observer dispatch still operate per lane;
-    this is exposed in the report rather than described as a fully tuned batch.
+    The current execution tier has one device and one slot. Complete native
+    timesteps support eager dispatch or coordinated CUDA graph replay.
     """
 
+    @capture_participant
     def __init__(self, batch):
         self.batch = batch
         policy = batch.execution
         if len(policy.devices) != 1 or policy.slots_per_device != 1:
             raise NotImplementedError("PreparedBatch currently requires one GPU and one execution slot.")
-        if policy.graph == "required" or policy.graph_steps != "auto":
-            raise NotImplementedError("Coordinated batch graph capture and graph_steps are not implemented yet.")
         if policy.tune:
             raise NotImplementedError("Measured batch autotuning is not implemented yet.")
         if policy.memory_limit_bytes is not None:
@@ -75,6 +74,8 @@ class PreparedBatch:
         self._loaded_key = None
         self._loaded_parameters = ()
         self._sources = None
+        self._observers = None
+        self._graphs = {}
         self._records = ()
         self._groups = batch.plan().groups
         self._stream = torch.cuda.Stream(device=self.device)
@@ -90,18 +91,20 @@ class PreparedBatch:
             self.close()
             raise
         declaration = batch.plan().to_dict()
-        declaration.update(execution_tier="native_field_cohort_eager", batch_size=self.capacity,
-                           graph="off", slots_per_device=1)
+        graph_mode = "pending" if policy.graph != "off" else "off"
+        declaration.update(execution_tier="native_pipeline_prepared", batch_size=self.capacity,
+                           graph=graph_mode, slots_per_device=1)
         declaration["warnings"] = [
-            "Native field and CPML execution is available; compilation, sources and observers still dispatch per lane.",
+            "Fields, CPML, source patches and spectra use the native batch pipeline; scene compilation remains per variant.",
             "Automatic batch size conservatively selects one lane; throughput tuning and strict byte admission are pending.",
+            "Graph capture is attempted at run time and deferred while another registered batch thread is active.",
             "Only the resident cohort is compiled at prepare; later cohorts are checked before execution.",
             "Input Scene objects must not be mutated during the PreparedBatch lifetime.",
         ]
         for group in declaration["groups"]:
             group["capability_status"] = "native_forward_cohort_validation"
         for device in declaration["devices"]:
-            device.update(batch_size=self.capacity, slots=1, graph_mode="off", graph_steps=0)
+            device.update(batch_size=self.capacity, slots=1, graph_mode=graph_mode, graph_steps=0)
         # The execution tier is usable; the complete capacity/share plan is not
         # resolved until every compiled group and allocation has been certified.
         self.report = BatchPlanReport.from_dict(declaration)
@@ -185,6 +188,8 @@ class PreparedBatch:
             self._slot = NativeFieldSlot(self.capacity, self.device)
         self._slot.bind(solvers)
         self._sources = None
+        self._observers = None
+        self._graphs.clear()
         self._models = tuple(models)
         # Keep identities alive for as long as the cached cohort uses them.
         # Source amplitudes materialize to Python floats, so the compiled Scene
@@ -200,7 +205,9 @@ class PreparedBatch:
         from ..fdtd.excitation.temporal import BatchSourceEngine
         slot = self._slot
         slot.reset()
-        observers = BatchObserverEngine(slot)
+        if self._observers is None:
+            self._observers = BatchObserverEngine(slot)
+        observers = self._observers
         if self._sources is None:
             self._sources = BatchSourceEngine(slot, max(
                 model._resolve_fdtd_time_steps(solver, model.scene)
@@ -222,16 +229,59 @@ class PreparedBatch:
                     raise NotImplementedError("Batch full-field spectra require GPU-driven accumulation.")
                 pending[lane] = (steps, descriptor["shutoff_min_step"])
             observers.bind()
+            from ..fdtd.cuda.runtime.graph import CudaGraphRunner
+            policy = self.batch.execution
+            graph_enabled = policy.graph != "off"
+            chunk_limit = 32 if policy.graph_steps == "auto" else policy.graph_steps
+            # Ordinary full-field preparation owns fresh DFT buffers each run.
+            # Monitor-only storage is persistent and can reuse captures.
+            if self.batch.outputs.fields:
+                self._graphs.clear()
+            self._last_graph_replays = 0
+            self._last_graph_error = None
             completed = 0
             while pending:
                 if self._cancel.is_set():
                     raise _BatchCancelled("Batch cancellation requested.")
-                slot.advance()
-                self._sources.advance(observers.step)
+                deadline = min(value[0] for value in pending.values())
                 for lane in pending:
-                    _post_source_block(slot.solvers[lane])
-                observers.advance()
-                completed += 1
+                    cfg = self._models[lane].config
+                    if cfg.shutoff > 0:
+                        deadline = min(deadline, (completed//cfg.shutoff_check_interval+1)*cfg.shutoff_check_interval)
+                count = min(chunk_limit if graph_enabled else 1, deadline-completed)
+                lanes = tuple(pending)
+                def advance_chunk():
+                    for _ in range(count):
+                        slot.advance()
+                        self._sources.advance(observers.step)
+                        for lane in lanes:
+                            _post_source_block(slot.solvers[lane])
+                        observers.advance()
+                if graph_enabled:
+                    key = (lanes, count)
+                    replay = self._graphs.get(key)
+                    if replay is None:
+                        try:
+                            # Capture records GPU work without executing it.
+                            # All kernels and buffers are initialized before this
+                            # point; no warmup may consume source/observer steps.
+                            replay = CudaGraphRunner(device=self.device, warmup_steps=0).capture(advance_chunk)
+                            self._graphs[key] = replay
+                        except Exception as error:
+                            if policy.graph == "required":
+                                raise
+                            graph_enabled = False
+                            self._last_graph_error = str(error)
+                    if replay is not None:
+                        replay()
+                        self._last_graph_replays += 1
+                        for lane in lanes:
+                            slot.solvers[lane]._cuda_graph_active = True
+                    else:
+                        advance_chunk()
+                else:
+                    advance_chunk()
+                completed += count
                 for lane in tuple(pending):
                     solver = slot.solvers[lane]
                     cfg = self._models[lane].config
@@ -253,6 +303,15 @@ class PreparedBatch:
                         slot.active[lane] = 0
                     else:
                         raise RuntimeError("Batch lifecycle did not finalize after external stepping.")
+            self._last_graph_mode = ("mixed" if self._last_graph_error else "graph") if self._last_graph_replays else "eager"
+            report = self.report.to_dict()
+            report.update(execution_tier=f"native_pipeline_{self._last_graph_mode}",
+                          graph=self._last_graph_mode, graph_replays=self._last_graph_replays,
+                          graph_fallback_reason=self._last_graph_error)
+            for device in report["devices"]:
+                device.update(graph_mode=self._last_graph_mode,
+                              graph_steps=chunk_limit if self._last_graph_replays else 0)
+            self.report = BatchPlanReport.from_dict(report)
             return outputs
         finally:
             for iterator in generators:
@@ -273,9 +332,11 @@ class PreparedBatch:
             solver_stats=model._build_fdtd_solver_stats(solver,
                 time_steps=model._resolve_fdtd_time_steps(solver, model.scene),
                 use_full_field_dft=bool(self.batch.outputs.fields), dft_cfg=model.config.spectral_sampler))
-        result._solver_stats["batch_execution_tier"] = "native_field_cohort_eager"
+        result._solver_stats["batch_execution_tier"] = f"native_pipeline_{self._last_graph_mode}"
+        result._solver_stats["batch_graph_replays"] = self._last_graph_replays
         return result
 
+    @capture_participant
     def iter_results(self, *, parameters=None, order="completion"):
         if order not in ("completion", "input"):
             raise ValueError("order must be 'completion' or 'input'.")
@@ -391,6 +452,7 @@ class PreparedBatch:
     def request_cancel(self):
         self._cancel.set()
 
+    @capture_participant
     def close(self):
         if self._closed:
             return
@@ -403,6 +465,8 @@ class PreparedBatch:
             self._loaded_key = None
             self._loaded_parameters = ()
             self._sources = None
+            self._observers = None
+            self._graphs.clear()
             self._closed = True
         finally:
             self._gate.release()
@@ -430,6 +494,7 @@ class BatchResultIterator:
     def __iter__(self):
         return self
 
+    @capture_participant
     def __next__(self):
         if not self._iteration_gate.acquire(blocking=False):
             raise RuntimeError("BatchResultIterator.next() is already active.")

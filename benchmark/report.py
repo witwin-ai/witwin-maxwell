@@ -338,12 +338,15 @@ def record_batch_baseline(payload, artifact):
     count = payload["variants"]
     control = "identical" if payload["identical"] else "varied"
     native = payload.get("include_native", False)
+    graph = payload.get("native_graph", "off")
     key = f"batch-{name}-{count}-{control}" + ("-native" if native else "")
+    if native and graph != "off":
+        key += f"-graph-{graph}"
     begin, end = f"<!-- {key}:begin -->", f"<!-- {key}:end -->"
     title = "Execution comparison including native Batch" if native else "Independent execution baseline"
     lines = [begin, f"## {title}: {name}, N={count}, {control}", "",
              f"Device: {payload['device']}; steps: {payload['workload']['time_steps']}; "
-             f"warmups/repeats: {payload['warmups']}/{payload['repeats']}.", "",
+             f"warmups/repeats: {payload['warmups']}/{payload['repeats']}; native graph policy: {graph}.", "",
              "| Mode | Warm median (s) | Range (s) |",
              "| --- | ---: | ---: |"]
     for mode, values in payload["summary"].items():
@@ -355,7 +358,7 @@ def record_batch_baseline(payload, artifact):
         for record in payload["isolated_memory"]:
             lines.append(f"| {record['mode']} | {record['driver_peak_increment_bytes'] / 1024**2:.2f} |")
     qualification = (
-        "The native eager tier reuses a PreparedBatch; sources and observers still dispatch per lane. "
+        "The native tier reuses a PreparedBatch under the recorded graph policy. "
         "This fixed workload does not establish business or complete scheduler acceptance."
         if native else "These independent-solver baselines do not establish native Batch or business acceptance.")
     lines.extend(["", f"[Raw measurements and memory/lifetime qualifications]({_display_path(artifact)})", "",

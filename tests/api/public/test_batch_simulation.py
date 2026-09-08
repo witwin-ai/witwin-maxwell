@@ -202,7 +202,6 @@ def test_plan_never_prepares_or_queries_gpu_and_does_not_infer_full_field_dft(mo
 
 
 @pytest.mark.parametrize("policy,match", [
-    ({"graph": "required"}, "graph capture"),
     ({"tune": True}, "autotuning"),
     ({"slots_per_device": 2}, "one execution slot"),
     ({"memory_limit_bytes": 1000000}, "admission controller"),

@@ -3,6 +3,47 @@
 Date: 2026-09-08. The complete Batch implementation is **not finished**.
 The active plan is [the batch implementation plan](../plans/fdtd-batch-simulation-api-and-gpu-scheduling.md).
 
+## Optimization follow-up: full native pipeline and coordinated graphs
+
+The historical eager limitations below are superseded for the supported single
+GPU forward subset. Native source injection and observer accumulation batch lanes
+and frequencies. Persistent buffers support complete timestep capture, exact tail
+chunks, independently stopping lanes and monitor-only capture reuse. Full-field
+DFT buffers currently require recapture on repeated runs. Registered Batch work
+and existing capture suspension cooperate under a capture lock; arbitrary external
+GPU threads still require a quiescent capture window. Reports record actual eager,
+graph or mixed execution and any automatic fallback reason.
+
+Graph/public regression coverage: **54 passed**; final focused rerun after report
+changes: **51 passed**. Benchmark CLI/report coverage: **11 passed**. Source tests
+include bitwise periodic corner and overlapping injection parity; explicit native
+floating-point contraction preserves ordinary solver rounding. Equal compiled
+coefficients share storage and promote to per-lane storage when needed. Inactive
+material channels and empty dispersion templates no longer allocate full volumes.
+
+Fresh comparison: N=B=10, 2000 steps, two warmups, five formal repeats, physical
+GPU 1. Command: `python -m benchmark batch --compare launch --variants 10
+--concurrency 10 --include-native --native-graph required --warmups 2 --repeats 5
+--output benchmark/plots/batch/optimized-launch-n10-graph.json --update-report`.
+
+| Mode | Warm median (s) | Range (s) | Isolated driver increment (MiB) |
+| --- | ---: | ---: | ---: |
+| sequential | 3.615720 | 3.607710–3.646495 | 315.5625 |
+| processes | 0.556994 | 0.507809–0.609569 | 3157.6250 |
+| run_many | 10.742862 | 9.617411–13.272421 | 351.5625 |
+| native_batch, required graph | 0.126706 | 0.125081–0.129508 | 401.5625 |
+
+All probe comparisons have zero error. Native graph is **4.40 times faster than
+ten processes**, with **87.3% less sampled driver increment** in this workload.
+The combined throughput/memory gate passes for this measured small-grid workload.
+It does not certify the large-grid, original business geometry or complete N/B
+matrix. Driver memory uses 20 ms sampling. This fresh comparison supersedes the
+earlier small-grid gate failure without treating measurements from different
+sessions as a controlled before/after timing comparison.
+
+Strict byte admission, throughput tuning, multi-GPU/two-slot scheduling, regional
+background compilation and Batch adjoints remain separate unaccepted capabilities.
+
 ## Environment
 
 - Python commands run in the `maxwell` conda environment, with PyTorch `2.13.0+cu130`.

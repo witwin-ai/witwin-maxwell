@@ -674,6 +674,18 @@ class BatchObserverEngine:
         self.slot = slot
         self.step = torch.zeros(1, dtype=torch.int64, device=slot.device)
         self.groups = []
+        self._storage = {}
+        self._group_storage = {}
+
+    def _upload(self, name, array):
+        source = torch.as_tensor(array)
+        target = self._storage.get(name)
+        if target is None or target.shape != source.shape or target.dtype != source.dtype:
+            target = source.to(self.slot.device)
+            self._storage[name] = target
+        else:
+            target.copy_(source)
+        return target
 
     def bind(self):
         from ..sources import evaluate_source_time_normalization
@@ -712,15 +724,26 @@ class BatchObserverEngine:
         signals = np.zeros((max((len(v) for v in source_signals.values()), default=1), b), dtype=np.float64)
         for lane, values in source_signals.items():
             signals[:len(values), lane] = values
-        self.state = torch.as_tensor(state, device=slot.device)
-        self.schedule = torch.as_tensor(schedule, device=slot.device)
-        self.signals = torch.as_tensor(signals, device=slot.device)
-        self.weights = torch.zeros((b, f, 4), dtype=torch.float32, device=slot.device)
+        self.state = self._upload("state", state)
+        self.schedule = self._upload("schedule", schedule)
+        self.signals = self._upload("signals", signals)
+        self.weights = self._upload("weights", np.zeros((b, f, 4), dtype=np.float32))
         for (kind, key, shape), members in collected.items():
             field_name = members[0][1]["field_name"]
             field = slot.buffers[field_name]
             ny, nz = field.shape[-2:]
             p = int(np.prod(shape[1:]))
+            signature = (kind, key, shape)
+            if signature in self._group_storage:
+                offsets, frequency_map, real, imag = self._group_storage[signature]
+                real.zero_()
+                imag.zero_()
+                for lane, group in members:
+                    group["real"] = real[lane].view(shape)
+                    group["imag"] = imag[lane].view(shape)
+                self.groups.append((field, offsets, frequency_map, self.weights, slot.active,
+                                    real, imag, field_name.startswith("H")))
+                continue
             offsets = torch.full((b, p), -1, dtype=torch.int64, device=slot.device)
             frequency_map = torch.full((b, shape[0]), -1, dtype=torch.int64, device=slot.device)
             real = torch.zeros((b, shape[0], p), device=slot.device, dtype=field.dtype)
@@ -739,6 +762,7 @@ class BatchObserverEngine:
                 group["imag"] = imag[lane].view(shape)
             self.groups.append((field, offsets, frequency_map, self.weights, slot.active,
                                 real, imag, field_name.startswith("H")))
+            self._group_storage[signature] = (offsets, frequency_map, real, imag)
 
     def advance(self):
         if self.state is not None:

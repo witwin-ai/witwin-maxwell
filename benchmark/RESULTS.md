@@ -682,3 +682,27 @@ Device: cuda:0; steps: 2000; warmups/repeats: 2/5.
 
 The native eager tier reuses a PreparedBatch; sources and observers still dispatch per lane. This fixed workload does not establish business or complete scheduler acceptance.
 <!-- batch-launch-10-varied-native:end -->
+
+<!-- batch-launch-10-varied-native-graph-required:begin -->
+## Execution comparison including native Batch: launch, N=10, varied
+
+Device: cuda:0; steps: 2000; warmups/repeats: 2/5; native graph policy: required.
+
+| Mode | Warm median (s) | Range (s) |
+| --- | ---: | ---: |
+| sequential | 3.615720 | 3.607710–3.646495 |
+| processes | 0.556994 | 0.507809–0.609569 |
+| run_many | 10.742862 | 9.617411–13.272421 |
+| native_batch | 0.126706 | 0.125081–0.129508 |
+
+| Mode | Sampled isolated driver increment (MiB) |
+| --- | ---: |
+| sequential | 315.56 |
+| processes | 3157.62 |
+| run_many | 351.56 |
+| native_batch | 401.56 |
+
+[Raw measurements and memory/lifetime qualifications](plots/batch/optimized-launch-n10-graph.json)
+
+The native tier reuses a PreparedBatch under the recorded graph policy. This fixed workload does not establish business or complete scheduler acceptance.
+<!-- batch-launch-10-varied-native-graph-required:end -->
