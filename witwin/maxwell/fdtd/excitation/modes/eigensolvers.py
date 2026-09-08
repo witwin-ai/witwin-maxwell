@@ -35,8 +35,8 @@ def _build_scalar_operator(index_sq: np.ndarray, du: float, dv: float):
     off_v = np.full((max(interior_v - 1, 0),), 1.0 / (dv * dv), dtype=np.float64)
     d2_v = sparse.diags((off_v, main_v, off_v), offsets=(-1, 0, 1), format="csr")
 
-    laplacian = sparse.kron(sparse.eye(interior_v, format="csr"), d2_u, format="csr")
-    laplacian = laplacian + sparse.kron(d2_v, sparse.eye(interior_u, format="csr"), format="csr")
+    laplacian = sparse.kron(d2_u, sparse.eye(interior_v, format="csr"), format="csr")
+    laplacian = laplacian + sparse.kron(sparse.eye(interior_u, format="csr"), d2_v, format="csr")
     potential = sparse.diags(index_sq[1:-1, 1:-1].reshape(-1), offsets=0, format="csr")
     return laplacian + potential, interior_u, interior_v
 
@@ -69,7 +69,7 @@ def _build_scalar_operator_torch_dense(index_sq: torch.Tensor, du: float, dv: fl
 
     identity_u = torch.eye(interior_u, device=device, dtype=dtype)
     identity_v = torch.eye(interior_v, device=device, dtype=dtype)
-    laplacian = torch.kron(identity_v, d2_u) + torch.kron(d2_v, identity_u)
+    laplacian = torch.kron(d2_u, identity_v) + torch.kron(identity_u, d2_v)
     potential = torch.diag(index_sq[1:-1, 1:-1].reshape(-1))
     return laplacian + potential, interior_u, interior_v
 
@@ -87,7 +87,7 @@ def _build_scalar_operator_torch_sparse(index_sq: torch.Tensor, du: float, dv: f
 
     device = index_sq.device
     dtype = index_sq.dtype
-    flat_indices = torch.arange(unknowns, device=device, dtype=torch.int64).reshape((interior_v, interior_u))
+    flat_indices = torch.arange(unknowns, device=device, dtype=torch.int64).reshape((interior_u, interior_v))
     center = flat_indices.reshape(-1)
 
     row_chunks = [center]
@@ -100,16 +100,16 @@ def _build_scalar_operator_torch_sparse(index_sq: torch.Tensor, du: float, dv: f
     ]
 
     if interior_u > 1:
-        lower = flat_indices[:, :-1].reshape(-1)
-        upper = flat_indices[:, 1:].reshape(-1)
+        lower = flat_indices[:-1, :].reshape(-1)
+        upper = flat_indices[1:, :].reshape(-1)
         coupling = torch.full((lower.numel(),), 1.0 / (du * du), device=device, dtype=dtype)
         row_chunks.extend((lower, upper))
         col_chunks.extend((upper, lower))
         value_chunks.extend((coupling, coupling))
 
     if interior_v > 1:
-        lower = flat_indices[:-1, :].reshape(-1)
-        upper = flat_indices[1:, :].reshape(-1)
+        lower = flat_indices[:, :-1].reshape(-1)
+        upper = flat_indices[:, 1:].reshape(-1)
         coupling = torch.full((lower.numel(),), 1.0 / (dv * dv), device=device, dtype=dtype)
         row_chunks.extend((lower, upper))
         col_chunks.extend((upper, lower))
@@ -207,8 +207,8 @@ def _lobpcg_initial_guess(interior_u: int, interior_v: int, *, k: int, device, d
 
     vectors = []
     for order_u, order_v in basis_pairs:
-        candidate = torch.sin(math.pi * float(order_v) * coord_v / float(interior_v + 1))[:, None]
-        candidate = candidate * torch.sin(math.pi * float(order_u) * coord_u / float(interior_u + 1))[None, :]
+        candidate = torch.sin(math.pi * float(order_u) * coord_u / float(interior_u + 1))[:, None]
+        candidate = candidate * torch.sin(math.pi * float(order_v) * coord_v / float(interior_v + 1))[None, :]
         vectors.append(candidate.reshape(-1))
     return torch.stack(vectors, dim=1).contiguous()
 

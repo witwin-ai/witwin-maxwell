@@ -265,6 +265,8 @@ result = mw.Simulation.fdtd(scene, frequencies=[200e12]).run()
 
 ## FDTD Solver Workflow
 
+- Mixed Bloch/CPML differentiable forward stepping uses independent real and imaginary magnetic absorption memory. Scalar mode operators, material potentials, and sparse eigenvector seeds use the same row-major aperture layout for rectangular grids and unequal transverse spacings.
+
 - Time-domain simulation through `Simulation.fdtd(...)`
 - CUDA-only solver execution; `Simulation.fdtd(...)` requires `Scene(device="cuda")`
 - Compiled native CUDA kernels are the only FDTD runtime backend; the Torch reference path has been retired from the runtime and relocated to the CUDA parity tests

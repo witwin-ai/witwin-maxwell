@@ -775,6 +775,7 @@ class _FDTDGradientBridge:
                     solver.Ex_imag,
                     solver.Ey_imag,
                     solver.Ez_imag,
+                    imag=True,
                 )
             if getattr(solver, "tfsf_enabled", False):
                 apply_tfsf_h_correction(solver, time_value)

@@ -446,8 +446,8 @@ class FDTD:
     def _update_magnetic_fields_standard(self, hx, hy, hz, ex, ey, ez):
         update_magnetic_fields_standard_impl(self, hx, hy, hz, ex, ey, ez)
 
-    def _update_magnetic_fields(self, hx, hy, hz, ex, ey, ez):
-        update_magnetic_fields_impl(self, hx, hy, hz, ex, ey, ez)
+    def _update_magnetic_fields(self, hx, hy, hz, ex, ey, ez, *, imag=False):
+        update_magnetic_fields_impl(self, hx, hy, hz, ex, ey, ez, imag=imag)
 
     def _update_electric_fields_cpml_dense(self, ex, ey, ez, hx, hy, hz):
         update_electric_fields_cpml_dense_impl(self, ex, ey, ez, hx, hy, hz)
