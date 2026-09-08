@@ -371,6 +371,7 @@ class BatchResultIterator:
         self._generator = prepared._iterate(parameters, order)
         self._closed = False
         self._owns_prepared = False
+        self._final_records = ()
 
     def __iter__(self):
         return self
@@ -386,7 +387,7 @@ class BatchResultIterator:
 
     @property
     def records(self):
-        return self.prepared.records
+        return self._final_records if self._closed else self.prepared.records
 
     def close(self):
         if self._closed:
@@ -396,6 +397,7 @@ class BatchResultIterator:
         finally:
             self._closed = True
             self.prepared._finish_records({r.index: r for r in self.prepared.records})
+            self._final_records = self.prepared.records
             self.prepared._gate.release()
             if self._owns_prepared:
                 self.prepared.close()

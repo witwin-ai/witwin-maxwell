@@ -103,6 +103,7 @@ def test_iteration_close_cancel_nonreentrancy_and_output_ownership():
         assert iterator.records[0].completed
         assert all(r.status == "cancelled" for r in iterator.records[1:])
         prepared.run()
+        assert all(r.status == "cancelled" for r in iterator.records[1:])
         torch.testing.assert_close(probe(first.result), saved, rtol=0, atol=0)
         never_started = prepared.iter_results()
         never_started.close()
