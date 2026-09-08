@@ -15,6 +15,15 @@
 严格预算、自动容量、多设备/双槽和 Batch 伴随继续实现，不据此提前关闭阶段。
 补充 9 项专项通过：包含 100 次密度更新只编译一次背景以及 A/B/A 逐位对照。
 
+继续开发 R2：`batch_size="auto"` 已改为单 lane 实测后保守选 B，容量不足时
+有界缩小并重试，重试发生在该 cohort 发布结果前。`memory_limit_bytes` 通过
+私有 CUDA 分配池在 backing segment 扩容入口强制限制，缓存、Graph 池张量、
+保留 GPU Result 均持续计费；不替换进程默认 allocator。此口径比 live tensor
+预算更保守，segment 粒度可能导致提前拒绝；驱动 context/库的非 allocator
+开销不在此池内。已实现硬限制不等于完成精确全输出提前规划或吞吐调优。
+R2 公共预算/Graph/缓存/生命周期组合 65 项通过，包含保留全场结果持续计费、
+预算内多 lane 自动选择、超小预算提前失败和注入容量竞争时不重复发布结果。
+
 | 子阶段 | 状态 | 证据与剩余工作 |
 | --- | --- | --- |
 | P0.1 固定负载与 storage 审计工具 | 完成 | `python -m benchmark batch --inventory/--audit`；7 项测试通过；GPU 1 的 launch audit 完成，原生扩展构建与运行通过；单次审计不代表性能验收 |
@@ -86,8 +95,8 @@ inference tensor 每次保守重新编译。外部共享存储或 `.data` 的未
 因为编译后影响范围证明尚未实现；省略包络仍可使用完整场景编译。
 迭代器 `next()` 活跃时不允许另一线程再次 `next()` 或 `close()`；
 使用 `request_cancel()`，待调用返回后再关闭。
-默认 `batch_size="auto"` 暂时保守选择 1，并不执行吞吐调优。
-`tune=True`、严格 `memory_limit_bytes`、多 GPU/Q=2 和可训练输入均明确拒绝。
+默认 `batch_size="auto"` 基于单 lane 准备实测保守选择容量，并不执行吞吐调优。
+`tune=True`、多 GPU/Q=2 和可训练输入仍明确拒绝；严格内存上限使用 R2 的私有分配池。
 这些限制不能解读为完整调度器已经实现。
 
 源幅度模板在无密度参数、无动态/可训练材料时，共用一次材料编译结果，

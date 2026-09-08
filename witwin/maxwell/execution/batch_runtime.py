@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import threading
 import time
 from collections.abc import Mapping
@@ -48,8 +49,6 @@ class PreparedBatch:
             raise NotImplementedError("PreparedBatch currently requires one GPU and one execution slot.")
         if policy.tune:
             raise NotImplementedError("Measured batch autotuning is not implemented yet.")
-        if policy.memory_limit_bytes is not None:
-            raise NotImplementedError("Strict batch memory budgets require the pending allocation admission controller.")
         if batch.outputs.materials or any(name.startswith("H") for name in batch.outputs.fields):
             raise NotImplementedError("Batch material export and magnetic full-field spectra are not implemented yet.")
         if batch.outputs.result_device not in ("local", "cpu", policy.devices[0]):
@@ -78,16 +77,47 @@ class PreparedBatch:
         self._graphs = {}
         self._fixed_material_cache = {}
         self._local_material_cache = None
+        self._budget = None
+        self._capacity_retries = []
         self._records = ()
         self._groups = batch.plan().groups
         self._stream = torch.cuda.Stream(device=self.device)
         self._caller_ready = torch.cuda.Event()
         self._output_ready = torch.cuda.Event()
+        if policy.memory_limit_bytes is not None or policy.batch_size == "auto":
+            from .pool import BatchMemoryPool
+            free, _ = torch.cuda.mem_get_info(self.device)
+            requested = policy.memory_limit_bytes
+            if isinstance(requested, Mapping):
+                requested = requested[self.device]
+            limit = max(0, int(free) - policy.reserve_bytes)
+            if requested is not None:
+                limit = min(limit, requested)
+            self._budget = BatchMemoryPool(self.device, limit, policy.reserve_bytes)
         self._enter_stream()
         try:
-            with torch.cuda.device(self.device), torch.cuda.stream(self._stream), torch.no_grad():
+            with torch.cuda.device(self.device), torch.cuda.stream(self._stream), self._allocation_scope(), torch.no_grad():
                 first = self._groups[0]["variant_indices"][:self.capacity]
                 self._load(first, batch.parameters, self._groups[0]["group_id"])
+                if policy.batch_size == "auto":
+                    # Calibrate from a real prepared lane. The native pool is
+                    # the hard bound; this conservative ratio only selects B.
+                    lane_peak = max(1, self._budget.stats()["peak_charged_bytes"])
+                    selected = min(policy.max_batch_size, len(batch),
+                                   max(1, self._budget.limit_bytes // (2 * lane_peak)))
+                    if selected > 1:
+                        self.capacity = selected
+                        self._slot = None
+                        self._loaded_key = None
+                        while True:
+                            try:
+                                first = self._groups[0]["variant_indices"][:self.capacity]
+                                self._load(first, batch.parameters, self._groups[0]["group_id"])
+                                break
+                            except torch.cuda.OutOfMemoryError:
+                                if self.capacity == 1:
+                                    raise
+                                self._reduce_capacity()
                 self._stream.synchronize()
         except BaseException:
             self.close()
@@ -95,10 +125,13 @@ class PreparedBatch:
         declaration = batch.plan().to_dict()
         graph_mode = "pending" if policy.graph != "off" else "off"
         declaration.update(execution_tier="native_pipeline_prepared", batch_size=self.capacity,
-                           graph=graph_mode, slots_per_device=1)
+                           graph=graph_mode, slots_per_device=1,
+                           memory={} if self._budget is None else self._budget.stats(),
+                           capacity_retries=list(self._capacity_retries))
         declaration["warnings"] = [
             "Fields, CPML, source patches and spectra use the native batch pipeline; scene compilation remains per variant.",
-            "Automatic batch size conservatively selects one lane; throughput tuning and strict byte admission are pending.",
+            "Automatic capacity uses a prepared-lane measurement and bounded OOM reduction; throughput tuning is separate.",
+            "Byte limits conservatively charge private allocator backing segments, including cached and retained output storage.",
             "Graph capture is attempted at run time and deferred while another registered batch thread is active.",
             "Only the resident cohort is compiled at prepare; later cohorts are checked before execution.",
             "Input Scene objects must not be mutated during the PreparedBatch lifetime.",
@@ -110,6 +143,17 @@ class PreparedBatch:
         # The execution tier is usable; the complete capacity/share plan is not
         # resolved until every compiled group and allocation has been certified.
         self.report = BatchPlanReport.from_dict(declaration)
+
+    def _allocation_scope(self):
+        return self._budget.activate() if self._budget is not None else contextlib.nullcontext()
+
+    def _reduce_capacity(self):
+        self._capacity_retries.append(self.capacity)
+        self.capacity = max(1, self.capacity // 2)
+        self._models = ()
+        self._sources = self._observers = self._slot = None
+        self._graphs.clear()
+        self._loaded_key = None
 
     def _validate_inputs(self, parameters):
         batch = self.batch
@@ -292,7 +336,8 @@ class PreparedBatch:
                             # Capture records GPU work without executing it.
                             # All kernels and buffers are initialized before this
                             # point; no warmup may consume source/observer steps.
-                            replay = CudaGraphRunner(device=self.device, warmup_steps=0).capture(advance_chunk)
+                            replay = CudaGraphRunner(device=self.device, warmup_steps=0,
+                                                     memory_pool=self._budget).capture(advance_chunk)
                             self._graphs[key] = replay
                         except Exception as error:
                             if policy.graph == "required":
@@ -335,8 +380,10 @@ class PreparedBatch:
             report.update(execution_tier=f"native_pipeline_{self._last_graph_mode}",
                           graph=self._last_graph_mode, graph_replays=self._last_graph_replays,
                           graph_fallback_reason=self._last_graph_error)
+            report.update(batch_size=self.capacity, capacity_retries=list(self._capacity_retries),
+                          memory={} if self._budget is None else self._budget.stats())
             for device in report["devices"]:
-                device.update(graph_mode=self._last_graph_mode,
+                device.update(batch_size=self.capacity, graph_mode=self._last_graph_mode,
                               graph_steps=chunk_limit if self._last_graph_replays else 0)
             self.report = BatchPlanReport.from_dict(report)
             return outputs
@@ -399,17 +446,22 @@ class PreparedBatch:
                 groups = [(g["group_id"], g["variant_indices"]) for g in self._groups]
             self._enter_stream()
             for group_id, indices in groups:
-                for start in range(0, len(indices), self.capacity):
+                start = 0
+                while start < len(indices):
                     cohort = indices[start:start + self.capacity]
                     began = time.perf_counter()
                     failure = None
                     try:
                         if self._cancel.is_set():
                             raise _BatchCancelled("Batch cancellation requested.")
-                        with torch.cuda.device(self.device), torch.cuda.stream(self._stream), torch.no_grad():
+                        with torch.cuda.device(self.device), torch.cuda.stream(self._stream), self._allocation_scope(), torch.no_grad():
                             self._load(cohort, parameters, group_id)
                             outputs = self._solve_cohort()
                     except Exception as exc:
+                        if (isinstance(exc, torch.cuda.OutOfMemoryError)
+                                and self.batch.execution.batch_size == "auto" and self.capacity > 1):
+                            self._reduce_capacity()
+                            continue
                         failure = exc
                         fatal_cuda = any(message in str(exc).lower() for message in (
                             "illegal memory access", "device-side assert", "unspecified launch failure"))
@@ -422,7 +474,7 @@ class PreparedBatch:
                         result = None
                         if item_failure is None:
                             try:
-                                with torch.cuda.device(self.device), torch.cuda.stream(self._stream), torch.no_grad():
+                                with torch.cuda.device(self.device), torch.cuda.stream(self._stream), self._allocation_scope(), torch.no_grad():
                                     result = self._export(lane, outputs.pop(lane), index)
                                     self._output_ready.record(self._stream)
                                 torch.cuda.current_stream(self.device).wait_event(self._output_ready)
@@ -454,6 +506,7 @@ class PreparedBatch:
                         yield BatchItem(index=index, variant_id=self.batch.variant_ids[index],
                                         result=result, failure=failed, record=record)
                         del result
+                    start += len(cohort)
         finally:
             self._finish_records(records)
 
@@ -464,6 +517,11 @@ class PreparedBatch:
                                              message="Batch iterator closed before this variant completed.")
                 records[index] = ExecutionRecord(index=index, device=self.device, status="cancelled", failure=failure)
         self._records = tuple(records[i] for i in sorted(records))
+
+        if self._budget is not None:
+            report = self.report.to_dict()
+            report.update(memory=self._budget.stats(), capacity_retries=list(self._capacity_retries))
+            self.report = BatchPlanReport.from_dict(report)
 
     def run(self, *, parameters=None):
         entries = [None] * len(self.batch)
@@ -496,6 +554,7 @@ class PreparedBatch:
             self._sources = None
             self._observers = None
             self._graphs.clear()
+            self._budget = None
             self._closed = True
         finally:
             self._gate.release()

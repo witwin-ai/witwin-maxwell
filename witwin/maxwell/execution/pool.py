@@ -1,9 +1,85 @@
 from __future__ import annotations
 
 import threading
+import ctypes
+import contextlib
+import weakref
 from dataclasses import dataclass
 
 import torch
+
+_batch_pool_context = threading.local()
+
+
+class BatchMemoryPool:
+    """A private caching pool with a native hard cap on backing CUDA segments.
+
+    Segment charging is conservative: live tensor bytes cannot exceed charged
+    bytes. Cached segments and retained outputs remain charged until released.
+    The process default allocator and unrelated user tensors are untouched.
+    """
+
+    def __init__(self, device, limit_bytes, reserve_bytes):
+        if torch.cuda.memory.get_allocator_backend() != "native":
+            raise NotImplementedError("Batch hard budgets require the native PyTorch caching allocator.")
+        from ..fdtd.cuda.backend import get_compiled_extension
+        library_path = get_compiled_extension().__file__
+        self.device = torch.device(device)
+        self.limit_bytes = int(limit_bytes)
+        self.native = ctypes.CDLL(library_path)
+        self.native.mw_batch_budget_create.argtypes = [ctypes.c_size_t, ctypes.c_size_t, ctypes.c_int]
+        self.native.mw_batch_budget_create.restype = ctypes.c_uint64
+        self.native.mw_batch_budget_exchange.argtypes = [ctypes.c_uint64]
+        self.native.mw_batch_budget_exchange.restype = ctypes.c_uint64
+        self.native.mw_batch_budget_bytes.argtypes = [ctypes.c_uint64, ctypes.c_bool]
+        self.native.mw_batch_budget_bytes.restype = ctypes.c_size_t
+        self.native.mw_batch_budget_close.argtypes = [ctypes.c_uint64]
+        self.native.mw_batch_budget_close.restype = None
+        self.owner = self.native.mw_batch_budget_create(self.limit_bytes, int(reserve_bytes), self.device.index)
+        self._allocator = torch.cuda.memory.CUDAPluggableAllocator(library_path, "mw_batch_malloc", "mw_batch_free")
+        self.pool = torch.cuda.MemPool(self._allocator.allocator())
+        self._finalizer = weakref.finalize(self, self.native.mw_batch_budget_close, self.owner)
+
+    @contextlib.contextmanager
+    def activate(self):
+        active = getattr(_batch_pool_context, "active", None)
+        if active is not None:
+            active[1].__exit__(None, None, None)
+        previous = self.native.mw_batch_budget_exchange(self.owner)
+        record = [self, torch.cuda.use_mem_pool(self.pool, device=self.device)]
+        entered = False
+        try:
+            record[1].__enter__()
+            entered = True
+            _batch_pool_context.active = record
+            yield self
+        finally:
+            if entered:
+                record[1].__exit__(None, None, None)
+            self.native.mw_batch_budget_exchange(previous)
+            _batch_pool_context.active = active
+            if active is not None:
+                active[1] = torch.cuda.use_mem_pool(active[0].pool, device=active[0].device)
+                active[1].__enter__()
+
+    @contextlib.contextmanager
+    def capture_scope(self):
+        """Let capture route to this pool while retaining native budget ownership."""
+        record = getattr(_batch_pool_context, "active", None)
+        if record is None or record[0] is not self:
+            raise RuntimeError("Budgeted graph capture requires the active Batch pool.")
+        record[1].__exit__(None, None, None)
+        try:
+            yield self.pool.id
+        finally:
+            record[1] = torch.cuda.use_mem_pool(self.pool, device=self.device)
+            record[1].__enter__()
+
+    def stats(self):
+        return {"limit_bytes": self.limit_bytes,
+                "charged_bytes": self.native.mw_batch_budget_bytes(self.owner, False),
+                "peak_charged_bytes": self.native.mw_batch_budget_bytes(self.owner, True),
+                "accounting": "private_cuda_backing_segments"}
 
 
 def _normalize_pool_device(value, *, name: str, require_cuda: bool) -> str:
