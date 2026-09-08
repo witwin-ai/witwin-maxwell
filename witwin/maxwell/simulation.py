@@ -128,6 +128,12 @@ class TimeConfig:
     max_electric_field: float | None = None
 
     def __post_init__(self):
+        if self.time_steps is not None and (isinstance(self.time_steps, bool) or not isinstance(self.time_steps, int) or self.time_steps < 1):
+            raise ValueError("TimeConfig.time_steps must be a positive integer.")
+        for name in ("transient_cycles", "steady_cycles"):
+            value = getattr(self, name)
+            if not math.isfinite(float(value)) or value < 0:
+                raise ValueError(f"TimeConfig.{name} must be nonnegative and finite.")
         if self.dt is not None and (not math.isfinite(float(self.dt)) or float(self.dt) <= 0):
             raise ValueError("TimeConfig.dt must be positive and finite.")
         if self.max_electric_field is not None and (not math.isfinite(float(self.max_electric_field)) or float(self.max_electric_field) <= 0):
@@ -1468,6 +1474,7 @@ class Simulation:
                 solver.init_field()
                 if self.has_trainable_parameters and self.config.run_time.dt is None:
                     self._fdtd_optimization_dt = float(solver.dt)
+                self._resolve_fdtd_time_steps(solver, scene)
             return solver
 
         prepared_scene = prepare_scene(scene)
@@ -1500,6 +1507,7 @@ class Simulation:
             if self.has_trainable_parameters and self.config.run_time.dt is None:
                 self._fdtd_optimization_dt = float(solver.dt)
             self._apply_initial_condition(solver)
+            self._resolve_fdtd_time_steps(solver, scene)
         if getattr(self, "_fixed_waveport_mode_sources", False):
             compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())
             frozen_sources = []
@@ -1537,43 +1545,14 @@ class Simulation:
         return tuple(ordered)
 
     def _resolve_fdtd_time_steps(self, solver, scene=None) -> int:
-        _, steps_helper = _resolve_fdtd_backend()
-        resolved_scene = self.scene if scene is None else scene
-        runtime_cfg = self.config.run_time
-        if runtime_cfg.time_steps is not None:
-            return runtime_cfg.time_steps
+        from .fdtd.runtime.timeplan import compile_fdtd_time_plan
 
-        domain_size = max(
-            float(resolved_scene.domain.bounds[0][1] - resolved_scene.domain.bounds[0][0]),
-            float(resolved_scene.domain.bounds[1][1] - resolved_scene.domain.bounds[1][0]),
-            float(resolved_scene.domain.bounds[2][1] - resolved_scene.domain.bounds[2][0]),
-        )
-        requested_frequencies = self._collect_fdtd_requested_frequencies(resolved_scene)
-        source_time = getattr(solver, "_source_time", None)
-        port_source_times = tuple(
-            excitation.source_time
-            for excitation in getattr(solver, "_port_excitations", self.excitations)
-            if excitation.source_time is not None
-        )
-        if port_source_times:
-            candidates = ((source_time,) if source_time is not None else ()) + port_source_times
-            source_time = max(
-                candidates,
-                key=lambda value: float(
-                    value.get("settling_time", 0.0)
-                    if isinstance(value, dict)
-                    else getattr(value, "settling_time", 0.0)
-                ),
-            )
-        return steps_helper(
-            frequency=min(requested_frequencies),
-            dt=solver.dt,
-            c=solver.c,
-            num_cycles=runtime_cfg.steady_cycles,
-            transient_cycles=runtime_cfg.transient_cycles,
-            domain_size=domain_size,
-            source_time=source_time,
-        )
+        resolved_scene = self.scene if scene is None else scene
+        return compile_fdtd_time_plan(solver, resolved_scene, self.config.run_time,
+            self._collect_fdtd_requested_frequencies(resolved_scene),
+            excitations=getattr(solver, "_port_excitations", self.excitations),
+            normalize_source=self.config.spectral_sampler.normalize_source,
+            window=str(self.config.spectral_sampler.window))["total_steps"]
 
     def _execute_fdtd_solve(
         self,
@@ -1728,6 +1707,7 @@ class Simulation:
             "steps_run": (shutoff_step + 1) if shutoff_triggered else time_steps,
             "dt": solver.dt,
             "time_step": dict(getattr(solver, "_time_step_metadata", {})),
+            "time_plan": dict(getattr(solver, "_time_plan", {})),
             "cuda_graph_active": bool(getattr(solver, "_cuda_graph_active", False)),
             "circuit_cuda_graph_active": bool(
                 getattr(solver, "_circuit_graph_active", False)

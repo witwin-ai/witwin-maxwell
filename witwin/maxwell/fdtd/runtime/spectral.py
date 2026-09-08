@@ -233,6 +233,9 @@ def advance_observer_entry_phases(solver):
 
 
 def source_time_kind(solver):
+    plan = getattr(solver, "_time_plan", None)
+    if plan is not None:
+        return "cw" if plan["response"] == "cw_steady_state" else "full_response"
     source_time = getattr(solver, "_source_time", None)
     if source_time is None:
         return ""
@@ -254,6 +257,10 @@ def compute_spectral_start_step(solver, frequency, *, window_type=None):
         window_type = getattr(solver, "dft_window_type", "hanning")
     if str(window_type).lower() == "none":
         return 0
+
+    plan = getattr(solver, "_time_plan", None)
+    if plan is not None:
+        return plan["spectral_start_step"]
 
     period = 1.0 / frequency
     domain_range = getattr(solver.scene, "physical_domain_range", solver.scene.domain_range)

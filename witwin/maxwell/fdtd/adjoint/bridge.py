@@ -109,29 +109,7 @@ def _structure_has_trainable_geometry(structure) -> bool:
     )
 
 
-def _source_spectrum_key(source_time):
-    if source_time is None:
-        return None
-    if source_time.get("times") is not None:
-        # Sampled custom waveforms are only spectrum-equivalent when they share
-        # the same table object; identity keeps the comparison conservative.
-        return ("custom", id(source_time))
-    fields = ("kind_code", "frequency", "amplitude", "phase", "delay", "fwidth")
-    return tuple(
-        None if source_time.get(field) is None else float(source_time.get(field))
-        for field in fields
-    )
-
-
-def _sources_share_spectrum(compiled_sources) -> bool:
-    """Whether every compiled source carries the same source-time spectrum.
-
-    Source normalization divides monitor spectra by one incident spectrum, which
-    is only well-defined when all sources share it (a single source, or several
-    driven by an identical waveform).
-    """
-    keys = {_source_spectrum_key(source.get("source_time")) for source in (compiled_sources or ())}
-    return len(keys) <= 1
+from ..runtime.timeplan import sources_share_spectrum as _sources_share_spectrum
 
 
 def _unsupported_adjoint_medium(scene, *, trainable_geometry_indices=()):
@@ -749,6 +727,7 @@ class _FDTDGradientBridge:
         observer_frequency = dft_frequency if dft_frequency is not None else solver.source_frequency
         if solver.observers:
             solver._prepare_observers(observer_frequency, dft_window, time_steps)
+        solver._prepare_time_observers(time_steps)
         prepare_port_spectral_accumulators(solver, time_steps, dft_window)
         prepare_circuit_time_series(solver, time_steps)
         for circuit_runtime in getattr(solver, "_circuit_runtimes", ()):
@@ -825,6 +804,7 @@ class _FDTDGradientBridge:
             solver.accumulate_dft(step_index)
             accumulate_port_observers(solver)
             solver.accumulate_observers(step_index)
+            solver.accumulate_time_observers(step_index)
             accumulate_wire_monitors(solver, step_index)
 
         solver._synchronize_device()
@@ -844,6 +824,9 @@ class _FDTDGradientBridge:
             raw_output.update(solver.get_frequency_solution(all_frequencies=True))
         if solver.observers_enabled:
             raw_output["observers"] = solver.get_observer_results()
+        self._last_time_monitors = solver.get_time_observer_results()
+        if self._last_time_monitors:
+            raw_output["time_observers"] = self._last_time_monitors
         wire_monitors = finalize_wire_data(solver)
         if wire_monitors:
             observers = dict(raw_output.get("observers", {}))
@@ -931,6 +914,7 @@ class _FDTDGradientBridge:
             for index, field_name in enumerate(pack.field_names)
         }
         monitors = runtime._rebuild_monitors(pack.monitor_templates, output_tensors, len(pack.field_names))
+        monitors.update(self._last_time_monitors)
         monitors.update(
             runtime._rebuild_wire_monitors(
                 pack.wire_monitor_templates,

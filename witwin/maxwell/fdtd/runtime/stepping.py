@@ -1661,6 +1661,12 @@ def init_field(solver):
 def _compute_shutoff_min_step(solver, shutoff_check_interval: int) -> int:
     import math
 
+    plan = getattr(solver, "_time_plan", None)
+    if plan is not None:
+        if not plan["shutoff_allowed"]:
+            return math.inf
+        return max(plan["shutoff_min_step"], plan["spectral_start_step"]) + 2 * shutoff_check_interval
+
     source_time = getattr(solver, "_source_time", None)
     settling_time = 0.0
     if source_time is not None:
@@ -2118,8 +2124,9 @@ def solve(
 ):
     if solver.verbose:
         print(f"Starting 3D FDTD simulation (Yee grid), grid size: {solver.Nx}x{solver.Ny}x{solver.Nz}")
-    if normalize_source and len(getattr(solver, "_compiled_sources", ())) != 1:
-        raise NotImplementedError("normalize_source currently requires exactly one compiled source.")
+    from .timeplan import sources_share_spectrum
+    if normalize_source and not sources_share_spectrum(getattr(solver, "_compiled_sources", ())):
+        raise NotImplementedError("normalize_source requires all sources to share one source-time spectrum.")
     checkpoint_execution = resume_from is not None or stop_step is not None
     if checkpoint_execution and (
         (dft_frequency is not None and full_field_dft)

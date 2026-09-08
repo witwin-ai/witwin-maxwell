@@ -854,6 +854,7 @@ def _validate_time_sampling(start, stop, interval) -> tuple[int, int | None, int
 
 @dataclass(frozen=True)
 class FieldTimeMonitor:
+    """Record detached raw Yee fields; use spectral monitors for adjoint objectives."""
     name: str
     components: tuple[str, ...]
     position: tuple[float, float, float]
@@ -912,6 +913,7 @@ class FieldTimeMonitor:
 
 @dataclass(frozen=True)
 class FluxTimeMonitor:
+    """Record detached instantaneous flux, including in differentiable simulations."""
     name: str
     axis: str
     position: float

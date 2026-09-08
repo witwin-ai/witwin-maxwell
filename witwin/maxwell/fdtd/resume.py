@@ -224,6 +224,7 @@ def _configuration_fingerprint(solver) -> str:
 
     hasher = hashlib.sha256()
     _hash_value(hasher, "dt", float(solver.dt))
+    _hash_value(hasher, "time_plan", getattr(solver, "_time_plan", None))
     _hash_value(
         hasher,
         "requested_port_frequencies",

@@ -396,18 +396,8 @@ def test_simulation_fdtd_wraps_solver(monkeypatch):
             }
             return {"observers": {"center": {"data": np.complex64(1.0 + 2.0j)}}}
 
-    def fake_required_steps(**kwargs):
-        assert kwargs["num_cycles"] == 6
-        assert kwargs["transient_cycles"] == 4
-        return 21
-
     monkeypatch.setattr("witwin.maxwell.simulation.FDTD", FakeFDTD, raising=False)
     monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda scene, method: None)
-    monkeypatch.setattr(
-        "witwin.maxwell.simulation.calculate_required_steps",
-        fake_required_steps,
-        raising=False,
-    )
 
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
@@ -417,7 +407,7 @@ def test_simulation_fdtd_wraps_solver(monkeypatch):
     sim = mw.Simulation.fdtd(
         scene,
         frequency=1e9,
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=4),
+        run_time=mw.TimeConfig(time_steps=21, steady_cycles=6, transient_cycles=4),
         spectral_sampler=mw.SpectralSampler(window="none"),
         absorber="cpml",
     )
@@ -520,11 +510,6 @@ def test_simulation_fdtd_multi_frequency_wraps_solver(monkeypatch):
 
     monkeypatch.setattr("witwin.maxwell.simulation.FDTD", FakeFDTD, raising=False)
     monkeypatch.setattr("witwin.maxwell.simulation._require_cuda_scene", lambda scene, method: None)
-    monkeypatch.setattr(
-        "witwin.maxwell.simulation.calculate_required_steps",
-        lambda **kwargs: 24,
-        raising=False,
-    )
 
     scene = mw.Scene(
         domain=mw.Domain(bounds=((-0.5, 0.5), (-0.5, 0.5), (-0.5, 0.5))),
@@ -534,7 +519,7 @@ def test_simulation_fdtd_multi_frequency_wraps_solver(monkeypatch):
     sim = mw.Simulation.fdtd(
         scene,
         frequencies=[0.9e9, 1.1e9],
-        run_time=mw.TimeConfig.auto(steady_cycles=6, transient_cycles=4),
+        run_time=mw.TimeConfig(time_steps=24, steady_cycles=6, transient_cycles=4),
         spectral_sampler=mw.SpectralSampler(window="none"),
         absorber="cpml",
     )

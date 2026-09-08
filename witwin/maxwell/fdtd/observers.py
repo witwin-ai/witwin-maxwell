@@ -900,6 +900,7 @@ def get_time_observer_results(solver):
             components = {name: buffer[:count] for name, buffer in record["buffers"].items()}
             payload = {
                 "kind": "field_time",
+                "differentiable": False,
                 "name": record["name"],
                 "t": t,
                 "components": dict(components),
@@ -924,6 +925,7 @@ def get_time_observer_results(solver):
         else:
             payload = {
                 "kind": "flux_time",
+                "differentiable": False,
                 "name": record["name"],
                 "t": t,
                 "flux": record["buffer"][:count],
