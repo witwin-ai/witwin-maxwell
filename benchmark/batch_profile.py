@@ -17,6 +17,7 @@ from witwin.maxwell.fdtd.cuda.runtime.graph import CudaGraphRunner
 from witwin.maxwell.fdtd.runtime.batch import NativeFieldSlot
 from witwin.maxwell.fdtd.solver import FDTD
 from witwin.maxwell.fdtd.observers import BatchObserverEngine
+from witwin.maxwell.fdtd.excitation.temporal import BatchSourceEngine
 
 
 def _environment(device):
@@ -93,7 +94,7 @@ def profile_batch(workload, *, device, capacity, warmups=2, repeats=5):
                       "self_s": value[2], "cumulative_s": value[3]}
                      for key, value in pstats.Stats(profiler).stats.items()]
         manifest = tensor_memory_manifest({"slot": prepared._slot})
-        wrappers = [(NativeFieldSlot, "advance", "fields"), (FDTD, "add_source", "source"),
+        wrappers = [(NativeFieldSlot, "advance", "fields"), (BatchSourceEngine, "advance", "source"),
                     (BatchObserverEngine, "advance", "observers"),
                     (FDTD, "_prepare_observers", "observer_prepare"),
                     (FDTD, "_synchronize_device", "synchronize"),

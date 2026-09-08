@@ -489,3 +489,65 @@ def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value
         )
 
     solver._clamp_pec_boundaries()
+
+
+class BatchSourceEngine:
+    """Fixed source patches with reusable GPU waveform tables across lanes.
+
+    Patch ordinals execute in the original order, so overlapping sources never
+    depend on atomic-add ordering. Each launch contains at most one patch per
+    lane; rectangular patch points therefore have unique writable offsets.
+    """
+
+    def __init__(self, slot, time_steps):
+        self.slot = slot
+        self.groups = []
+        b = slot.capacity
+        solvers = slot.solvers
+        count = max((len(s._source_terms) for s in solvers), default=0)
+        for ordinal in range(count):
+            by_field = {}
+            for lane, solver in enumerate(solvers):
+                if ordinal < len(solver._source_terms):
+                    term = solver._source_terms[ordinal]
+                    if term["delay_patch"] is not None:
+                        raise NotImplementedError("Batch source tables require undelayed point patches.")
+                    cw = term["cw_cos_patch"] is not None
+                    wrap = 0
+                    if not cw and not term.get("periodic_compiled", False):
+                        for axis in _COMPONENT_TANGENTIAL_AXES[_component_name(term["field_name"])]:
+                            if solver.scene.boundary.axis_kind(axis) == "periodic":
+                                wrap |= 1 << "xyz".index(axis)
+                    by_field.setdefault((term["field_name"], cw, wrap), []).append((lane, solver, term))
+            for (name, cw, wrap), terms in by_field.items():
+                field = slot.buffers[name]
+                signals = np.zeros((time_steps, b, 2), dtype=np.float32)
+                offsets, lanes, patches_a, patches_b = [], [], [], []
+                for lane, solver, term in terms:
+                    waveform, omega = _resolve_term_source(term, solver._source_time, solver.source_omega)
+                    cw = term["cw_cos_patch"] is not None
+                    first = term["cw_cos_patch"] if cw else term["patch"]
+                    second = term["cw_sin_patch"] if cw else torch.zeros_like(first)
+                    for n in range(time_steps):
+                        if cw:
+                            signals[n, lane] = _resolve_cw_signal(omega, waveform, n * solver.dt)
+                        else:
+                            signals[n, lane, 0] = float(evaluate_source_time(waveform, n * solver.dt)) * float(term["phase_real"])
+                    axes = [torch.arange(size, device=slot.device) + int(offset)
+                            for size, offset in zip(first.shape, term["offsets"])]
+                    i, j, k = torch.meshgrid(*axes, indexing="ij")
+                    nx, ny, nz = field.shape[1:]
+                    valid = (i >= 0) & (i < nx) & (j >= 0) & (j < ny) & (k >= 0) & (k < nz)
+                    index = ((i * ny + j) * nz + k + lane * field[0].numel())[valid]
+                    offsets.append(index)
+                    lanes.append(torch.full_like(index, lane, dtype=torch.int32))
+                    patches_a.append(first[valid])
+                    patches_b.append(second[valid])
+                self.groups.append((field, torch.cat(offsets), torch.cat(lanes), torch.cat(patches_a),
+                                    torch.cat(patches_b), torch.as_tensor(signals, device=slot.device), slot.active, cw, wrap))
+
+    def advance(self, step):
+        for args in self.groups:
+            self.slot.native.batch_source_patch(*args[:-2], step, *args[-2:])
+        for solver in self.slot.solvers:
+            solver._clamp_pec_boundaries()

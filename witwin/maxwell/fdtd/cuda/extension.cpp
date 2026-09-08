@@ -6,6 +6,10 @@
 #include <vector>
 
 void synchronize_noop_cuda();
+void batch_source_patch_cuda(torch::stable::Tensor field, const torch::stable::Tensor& offsets,
+    const torch::stable::Tensor& lanes, const torch::stable::Tensor& first,
+    const torch::stable::Tensor& second, const torch::stable::Tensor& signals,
+    const torch::stable::Tensor& active, const torch::stable::Tensor& step, bool cw, int64_t wrap);
 void batch_observer_weights_cuda(torch::stable::Tensor state, const torch::stable::Tensor& schedule,
     const torch::stable::Tensor& signals, const torch::stable::Tensor& active,
     const torch::stable::Tensor& step, torch::stable::Tensor weights);
@@ -2142,6 +2146,7 @@ void add_source_patch_ez_periodic_cuda(
   _(update_electric_ey_cpml_modulated_compressed, "update_electric_ey_cpml_modulated_compressed(Tensor(a!) ey, Tensor hx, Tensor hz, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, Tensor modulation_time, Tensor(b!) psi_x, Tensor(c!) psi_z, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_z, Tensor b_z, Tensor c_z, Tensor inv_dx, Tensor inv_dz, int x_low_mode, int x_high_mode, int z_low_mode, int z_high_mode, int x_low_length, int x_high_start, int x_high_length, int z_low_length, int z_high_start, int z_high_length) -> ()", update_electric_ey_cpml_modulated_compressed_cuda) \
   _(update_electric_ez_cpml_modulated_compressed, "update_electric_ez_cpml_modulated_compressed(Tensor(a!) ez, Tensor hx, Tensor hy, Tensor decay, Tensor curl, Tensor mod_cos, Tensor mod_sin, Tensor mod_omega, Tensor modulation_time, Tensor(b!) psi_x, Tensor(c!) psi_y, Tensor inv_kappa_x, Tensor b_x, Tensor c_x, Tensor inv_kappa_y, Tensor b_y, Tensor c_y, Tensor inv_dx, Tensor inv_dy, int x_low_mode, int x_high_mode, int y_low_mode, int y_high_mode, int x_low_length, int x_high_start, int x_high_length, int y_low_length, int y_high_start, int y_high_length) -> ()", update_electric_ez_cpml_modulated_compressed_cuda) \
   _(accumulate_dft_batched, "accumulate_dft_batched(Tensor ex, Tensor ey, Tensor ez, Tensor(a!) ex_real, Tensor(b!) ex_imag, Tensor(c!) ey_real, Tensor(d!) ey_imag, Tensor(e!) ez_real, Tensor(f!) ez_imag, Tensor weighted_cos, Tensor weighted_sin) -> ()", accumulate_dft_batched_cuda) \
+  _(batch_source_patch, "batch_source_patch(Tensor(a!) field, Tensor offsets, Tensor lanes, Tensor first, Tensor second, Tensor signals, Tensor active, Tensor step, bool cw, int wrap) -> ()", batch_source_patch_cuda) \
   _(batch_observer_weights, "batch_observer_weights(Tensor(a!) state, Tensor schedule, Tensor signals, Tensor active, Tensor step, Tensor(b!) weights) -> ()", batch_observer_weights_cuda) \
   _(batch_observer_gather, "batch_observer_gather(Tensor field, Tensor offsets, Tensor frequency_map, Tensor weights, Tensor active, Tensor(a!) real, Tensor(b!) imag, bool magnetic) -> ()", batch_observer_gather_cuda) \
   _(accumulate_point_observers, "accumulate_point_observers(Tensor field, Tensor point_i, Tensor point_j, Tensor point_k, Tensor(a!) real_accum, Tensor(b!) imag_accum, float weighted_cos, float weighted_sin) -> ()", accumulate_point_observers_cuda) \

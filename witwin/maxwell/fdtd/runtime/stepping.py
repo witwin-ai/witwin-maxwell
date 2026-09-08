@@ -2125,6 +2125,7 @@ def solve_steps(
     stop_step: int | None = None,
     cooperative: bool = False,
     cooperative_observer=None,
+    cooperative_driver: bool = False,
 ):
     """Shared solve lifecycle, optionally yielding before each field update.
 
@@ -2258,6 +2259,9 @@ def solve_steps(
         iterator = pbar
 
     steps_run = 0
+    if cooperative_driver:
+        steps_run = yield {"gpu_dft": use_gpu_dft, "shutoff_min_step": shutoff_min_step}
+        iterator = ()
     for n in iterator:
         steps_run = n + 1
         time_value = n * solver.dt
@@ -2281,7 +2285,7 @@ def solve_steps(
                     time_value=time_value + 0.5 * float(solver.dt),
                 )
 
-            if solver._source_terms:
+            if solver._source_terms and cooperative_observer is None:
                 solver.add_source(time_value=time_value)
             apply_port_runtimes(solver)
             run_network_updates()

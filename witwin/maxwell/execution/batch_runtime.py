@@ -74,6 +74,7 @@ class PreparedBatch:
         self._models = ()
         self._loaded_key = None
         self._loaded_parameters = ()
+        self._sources = None
         self._records = ()
         self._groups = batch.plan().groups
         self._stream = torch.cuda.Stream(device=self.device)
@@ -183,6 +184,7 @@ class PreparedBatch:
         if self._slot is None:
             self._slot = NativeFieldSlot(self.capacity, self.device)
         self._slot.bind(solvers)
+        self._sources = None
         self._models = tuple(models)
         # Keep identities alive for as long as the cached cohort uses them.
         # Source amplitudes materialize to Python floats, so the compiled Scene
@@ -193,11 +195,16 @@ class PreparedBatch:
         self._cohort = group_id
 
     def _solve_cohort(self):
-        from ..fdtd.runtime.stepping import solve_steps
+        from ..fdtd.runtime.stepping import solve_steps, _post_source_block, _electric_field_energy
         from ..fdtd.observers import BatchObserverEngine
+        from ..fdtd.excitation.temporal import BatchSourceEngine
         slot = self._slot
         slot.reset()
         observers = BatchObserverEngine(slot)
+        if self._sources is None:
+            self._sources = BatchSourceEngine(slot, max(
+                model._resolve_fdtd_time_steps(solver, model.scene)
+                for model, solver in zip(self._models, slot.solvers)))
         generators, pending, outputs = [], {}, {}
         try:
             for lane, (model, solver) in enumerate(zip(self._models, slot.solvers)):
@@ -208,31 +215,44 @@ class PreparedBatch:
                     dft_window=cfg.spectral_sampler.window, full_field_dft=bool(self.batch.outputs.fields),
                     normalize_source=cfg.spectral_sampler.normalize_source, shutoff=cfg.shutoff,
                     shutoff_check_interval=cfg.shutoff_check_interval, cooperative=True,
-                    cooperative_observer=(observers, lane))
+                    cooperative_observer=(observers, lane), cooperative_driver=True)
                 generators.append(iterator)
-                try:
-                    pending[lane] = next(iterator)
-                except StopIteration as done:
-                    outputs[lane] = done.value or {}
-                    slot.active[lane] = 0
+                descriptor = next(iterator)
+                if solver.dft_enabled and not descriptor["gpu_dft"]:
+                    raise NotImplementedError("Batch full-field spectra require GPU-driven accumulation.")
+                pending[lane] = (steps, descriptor["shutoff_min_step"])
             observers.bind()
+            completed = 0
             while pending:
                 if self._cancel.is_set():
                     raise _BatchCancelled("Batch cancellation requested.")
-                if len(set(pending.values())) != 1:
-                    raise RuntimeError("Cooperative batch lanes reached inconsistent timestep barriers.")
                 slot.advance()
+                self._sources.advance(observers.step)
                 for lane in pending:
-                    if next(generators[lane]) != ("observers", pending[lane]):
-                        raise RuntimeError("Batch observer barrier is inconsistent.")
+                    _post_source_block(slot.solvers[lane])
                 observers.advance()
+                completed += 1
                 for lane in tuple(pending):
+                    solver = slot.solvers[lane]
+                    cfg = self._models[lane].config
+                    steps, minimum = pending[lane]
+                    if cfg.shutoff > 0 and completed % cfg.shutoff_check_interval == 0:
+                        energy = _electric_field_energy(solver)
+                        solver._shutoff_peak = torch.maximum(solver._shutoff_peak, energy)
+                        if completed - 1 >= minimum and bool((
+                                (solver._shutoff_peak > 0) & (energy < cfg.shutoff*solver._shutoff_peak)).item()):
+                            solver._shutoff_triggered = True
+                            solver._shutoff_step = completed - 1
+                    if completed < steps and not solver._shutoff_triggered:
+                        continue
                     try:
-                        pending[lane] = next(generators[lane])
+                        generators[lane].send(completed)
                     except StopIteration as done:
                         outputs[lane] = done.value or {}
                         del pending[lane]
                         slot.active[lane] = 0
+                    else:
+                        raise RuntimeError("Batch lifecycle did not finalize after external stepping.")
             return outputs
         finally:
             for iterator in generators:
@@ -382,6 +402,7 @@ class PreparedBatch:
             self._models = ()
             self._loaded_key = None
             self._loaded_parameters = ()
+            self._sources = None
             self._closed = True
         finally:
             self._gate.release()

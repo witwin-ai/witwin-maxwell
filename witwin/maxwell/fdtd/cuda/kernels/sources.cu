@@ -6,6 +6,89 @@
 #include "common.cuh"
 
 namespace {
+__global__ void batch_source_patch_kernel(int64_t count, int64_t field_size, int64_t b,
+    int64_t steps, float* field, const int64_t* offsets, const int* lanes,
+    const float* first, const float* second, const float* signals,
+    const int* active, const int64_t* step, bool cw, int wrap, int64_t nx, int64_t ny, int64_t nz) {
+  const int64_t q = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (q >= count) return;
+  const int lane = lanes[q];
+  const int64_t n = step[0], offset = offsets[q];
+  if (lane < 0 || lane >= b || !active[lane] || n < 0 || n >= steps || offset < 0 || offset >= field_size ||
+      offset / (nx*ny*nz) != lane) return;
+  const int64_t signal = (n*b+lane)*2;
+  if (cw) {
+    const float value = signals[signal]*first[q] + signals[signal+1]*second[q];
+    field[offset] += value;
+  } else {
+    const int64_t local = offset % (nx*ny*nz);
+    const int64_t coords[3] = {local/(ny*nz), (local/nz)%ny, local%nz};
+    const int64_t sizes[3] = {nx, ny, nz};
+    int boundary = 0;
+    for (int axis = 0; axis < 3; ++axis)
+      if ((wrap & (1<<axis)) && (coords[axis] == 0 || coords[axis] == sizes[axis]-1)) boundary |= 1<<axis;
+    if (!boundary) {
+      // The ordinary periodic kernel rounds delta before its atomic branch;
+      // the uniform kernel contracts multiply/add. Preserve both paths.
+      if (wrap) field[offset] += __fmul_rn(signals[signal], first[q]);
+      else field[offset] = __fmaf_rn(signals[signal], first[q], field[offset]);
+    } else {
+      const float delta = __fmul_rn(signals[signal], first[q]);
+      atomicAdd(field+offset, delta);
+      for (int subset = 1; subset < 8; ++subset) {
+        if (subset & ~boundary) continue;
+        int64_t target[3] = {coords[0], coords[1], coords[2]};
+        for (int axis = 0; axis < 3; ++axis)
+          if (subset & (1<<axis)) target[axis] = coords[axis] == 0 ? sizes[axis]-1 : 0;
+        atomicAdd(field + lane*nx*ny*nz + (target[0]*ny+target[1])*nz+target[2], delta);
+      }
+    }
+  }
+}
+}  // namespace
+
+void batch_source_patch_cuda(torch::stable::Tensor field, const torch::stable::Tensor& offsets,
+    const torch::stable::Tensor& lanes, const torch::stable::Tensor& first,
+    const torch::stable::Tensor& second, const torch::stable::Tensor& signals,
+    const torch::stable::Tensor& active, const torch::stable::Tensor& step, bool cw, int64_t wrap) {
+  check_float32_tensor(field, "field");
+  check_contiguous_tensor(field, "field");
+  STD_TORCH_CHECK(field.dim() == 4, "field must be [B,X,Y,Z]");
+  for (const auto& value : {first, second, signals}) {
+    check_float32_tensor(value, "source values");
+    check_contiguous_tensor(value, "source values");
+    check_same_cuda_device(field, value, "source values");
+  }
+  for (const auto& value : {offsets, lanes, active, step}) {
+    check_cuda_tensor(value, "source indices");
+    check_contiguous_tensor(value, "source indices");
+    check_same_cuda_device(field, value, "source indices");
+  }
+  using torch::headeronly::ScalarType;
+  STD_TORCH_CHECK(offsets.scalar_type() == ScalarType::Long && step.scalar_type() == ScalarType::Long &&
+      lanes.scalar_type() == ScalarType::Int && active.scalar_type() == ScalarType::Int, "invalid source index dtype");
+  const int64_t count = offsets.numel(), b = field.size(0);
+  STD_TORCH_CHECK(wrap >= 0 && wrap < 8, "invalid periodic source axes");
+  STD_TORCH_CHECK(offsets.dim() == 1 && lanes.numel() == count && first.numel() == count &&
+      second.numel() == count && active.numel() == b && step.numel() == 1 && signals.dim() == 3 &&
+      signals.size(1) == b && signals.size(2) == 2, "invalid source patch or signal shape");
+  const auto x = reinterpret_cast<uintptr_t>(field.data_ptr());
+  for (const auto& value : {offsets, lanes, first, second, signals, active, step}) {
+    const auto y = reinterpret_cast<uintptr_t>(value.data_ptr());
+    STD_TORCH_CHECK(!value.numel() || x + field.numel()*4 <= y || y + value.numel()*value.element_size() <= x,
+        "source inputs must not overlap writable fields");
+  }
+  if (!count) return;
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
+  batch_source_patch_kernel<<<linear_grid(count, 256), 256, 0, current_cuda_stream()>>>(
+      count, field.numel(), b, signals.size(0), field.mutable_data_ptr<float>(), offsets.mutable_data_ptr<int64_t>(),
+      lanes.mutable_data_ptr<int>(), first.mutable_data_ptr<float>(), second.mutable_data_ptr<float>(),
+      signals.mutable_data_ptr<float>(), active.mutable_data_ptr<int>(), step.mutable_data_ptr<int64_t>(), cw,
+      static_cast<int>(wrap), field.size(1), field.size(2), field.size(3));
+  WITWIN_CUDA_CHECK();
+}
+
+namespace {
 
 struct Shape3D {
   int x;
