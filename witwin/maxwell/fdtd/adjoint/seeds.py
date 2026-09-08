@@ -210,8 +210,7 @@ def _clone_seed_solver(solver):
     for entry_index, entry in enumerate(getattr(solver, "_dft_entries", ())):
         cloned_entry = dict(entry)
         cloned_fields = {}
-        for field_name in ("Ex", "Ey", "Ez"):
-            payload = entry["fields"][field_name]
+        for field_name, payload in entry["fields"].items():
             real = payload["real"].detach().clone().requires_grad_(True)
             imag = payload["imag"].detach().clone().requires_grad_(True)
             real_index = len(leaves)

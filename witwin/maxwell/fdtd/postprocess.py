@@ -15,7 +15,7 @@ def _build_frequency_solution_from_fields(fields, *, sample_count, window_normal
         scale = 2.0 / sample_count
 
     result = {}
-    for component_name in ("Ex", "Ey", "Ez"):
+    for component_name in fields:
         payload = fields[component_name]
         result[component_name] = combine_complex_spectral_components(
             payload["real"],
@@ -27,7 +27,7 @@ def _build_frequency_solution_from_fields(fields, *, sample_count, window_normal
         abs_s = np.abs(source_spectrum)
         floor = max(1e-10 * abs_s, 1e-30) if np.isscalar(abs_s) else 1e-30
         safe = source_spectrum if abs_s > floor else floor
-        for comp in ("Ex", "Ey", "Ez"):
+        for comp in result:
             result[comp] = result[comp] / safe
     return result
 
@@ -140,12 +140,9 @@ def get_frequency_solution(solver, *, frequency=None, freq_index=None, all_frequ
             )
             for entry in entries
         ]
-        result = {
-            "Ex": torch.stack([solution["Ex"] for solution in solutions], dim=0),
-            "Ey": torch.stack([solution["Ey"] for solution in solutions], dim=0),
-            "Ez": torch.stack([solution["Ez"] for solution in solutions], dim=0),
-            "frequencies": tuple(float(entry["frequency"]) for entry in entries),
-        }
+        result = {component: torch.stack([solution[component] for solution in solutions], dim=0)
+                  for component in entries[0]["fields"]}
+        result["frequencies"] = tuple(float(entry["frequency"]) for entry in entries)
         if getattr(solver, "verbose", False):
             print(f"DFT complete, accumulated {len(entries)} frequency solutions, window: {solver.dft_window_type}")
         return result

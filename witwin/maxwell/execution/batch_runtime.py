@@ -360,7 +360,8 @@ class PreparedBatch:
                     dft_window=cfg.spectral_sampler.window, full_field_dft=bool(self.batch.outputs.fields),
                     normalize_source=cfg.spectral_sampler.normalize_source, shutoff=cfg.shutoff,
                     shutoff_check_interval=cfg.shutoff_check_interval, cooperative=True,
-                    cooperative_observer=(observers, lane), cooperative_driver=True)
+                    cooperative_observer=(observers, lane), cooperative_driver=True,
+                    dft_components=self.batch.outputs.fields)
                 generators.append(iterator)
                 descriptor = next(iterator)
                 if solver.dft_enabled and not descriptor["gpu_dft"]:
@@ -505,6 +506,10 @@ class PreparedBatch:
                 use_full_field_dft=bool(self.batch.outputs.fields), dft_cfg=model.config.spectral_sampler))
         result._solver_stats["batch_execution_tier"] = f"native_pipeline_{self._last_graph_mode}"
         result._solver_stats["batch_graph_replays"] = self._last_graph_replays
+        result._solver_stats["batch_dft_accumulator_bytes"] = sum(
+            value.numel() * value.element_size()
+            for buffers in solver._dft_batched_fields.values()
+            for value in buffers.values() if isinstance(value, torch.Tensor))
         if differentiable:
             result._solver_stats["batch_adjoint"] = "native_checkpoint_per_lane"
             result._solver_stats["batch_adjoint_checkpoint_bytes"] = tape.checkpoint_bytes

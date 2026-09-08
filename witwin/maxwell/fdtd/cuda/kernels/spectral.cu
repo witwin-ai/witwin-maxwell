@@ -251,27 +251,33 @@ void accumulate_dft_batched_cuda(
         static_cast<unsigned int>((ez.numel() + block_size - 1) / block_size),
         static_cast<unsigned int>(frequency_count),
         1);
-    accumulate_dft_component_kernel<<<ex_grid, block_size, 0, current_cuda_stream()>>>(
-        ex.numel(),
-        ex.mutable_data_ptr<float>(),
-        weighted_cos.mutable_data_ptr<float>(),
-        weighted_sin.mutable_data_ptr<float>(),
-        ex_real.mutable_data_ptr<float>(),
-        ex_imag.mutable_data_ptr<float>());
-    accumulate_dft_component_kernel<<<ey_grid, block_size, 0, current_cuda_stream()>>>(
-        ey.numel(),
-        ey.mutable_data_ptr<float>(),
-        weighted_cos.mutable_data_ptr<float>(),
-        weighted_sin.mutable_data_ptr<float>(),
-        ey_real.mutable_data_ptr<float>(),
-        ey_imag.mutable_data_ptr<float>());
-    accumulate_dft_component_kernel<<<ez_grid, block_size, 0, current_cuda_stream()>>>(
-        ez.numel(),
-        ez.mutable_data_ptr<float>(),
-        weighted_cos.mutable_data_ptr<float>(),
-        weighted_sin.mutable_data_ptr<float>(),
-        ez_real.mutable_data_ptr<float>(),
-        ez_imag.mutable_data_ptr<float>());
+    if (ex.numel() > 0) {
+      accumulate_dft_component_kernel<<<ex_grid, block_size, 0, current_cuda_stream()>>>(
+          ex.numel(),
+          ex.mutable_data_ptr<float>(),
+          weighted_cos.mutable_data_ptr<float>(),
+          weighted_sin.mutable_data_ptr<float>(),
+          ex_real.mutable_data_ptr<float>(),
+          ex_imag.mutable_data_ptr<float>());
+    }
+    if (ey.numel() > 0) {
+      accumulate_dft_component_kernel<<<ey_grid, block_size, 0, current_cuda_stream()>>>(
+          ey.numel(),
+          ey.mutable_data_ptr<float>(),
+          weighted_cos.mutable_data_ptr<float>(),
+          weighted_sin.mutable_data_ptr<float>(),
+          ey_real.mutable_data_ptr<float>(),
+          ey_imag.mutable_data_ptr<float>());
+    }
+    if (ez.numel() > 0) {
+      accumulate_dft_component_kernel<<<ez_grid, block_size, 0, current_cuda_stream()>>>(
+          ez.numel(),
+          ez.mutable_data_ptr<float>(),
+          weighted_cos.mutable_data_ptr<float>(),
+          weighted_sin.mutable_data_ptr<float>(),
+          ez_real.mutable_data_ptr<float>(),
+          ez_imag.mutable_data_ptr<float>());
+    }
   } else {
     const dim3 grid(
         static_cast<unsigned int>((max_field_numel + block_size - 1) / block_size),

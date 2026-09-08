@@ -2126,6 +2126,7 @@ def solve_steps(
     cooperative: bool = False,
     cooperative_observer=None,
     cooperative_driver: bool = False,
+    dft_components=("Ex", "Ey", "Ez"),
 ):
     """Shared solve lifecycle, optionally yielding before each field update.
 
@@ -2162,7 +2163,7 @@ def solve_steps(
     solve_start = time.perf_counter()
 
     if dft_frequency is not None and full_field_dft:
-        solver.enable_dft(dft_frequency, window_type=dft_window, end_step=time_steps)
+        solver.enable_dft(dft_frequency, window_type=dft_window, end_step=time_steps, components=dft_components)
     else:
         solver.dft_enabled = False
         solver._dft_entries = []
