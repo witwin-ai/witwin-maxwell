@@ -815,7 +815,7 @@ def test_wire_checkpoint_v2_round_trip_and_segment_replay_match_native_forward()
         torch.linspace(5.0e-15, -4.0e-15, runtime.charge.numel(), device=solver.device)
     )
     checkpoint = capture_checkpoint_state(solver, step=0)
-    assert checkpoint.schema.version == 2
+    assert checkpoint.schema.version == 3
     assert checkpoint.schema.wire_state_names == ("wire_current", "wire_charge")
     assert tuple(checkpoint.tensors)[-2:] == checkpoint.schema.wire_state_names
     assert checkpoint.tensors["wire_current"].data_ptr() != runtime.current.data_ptr()

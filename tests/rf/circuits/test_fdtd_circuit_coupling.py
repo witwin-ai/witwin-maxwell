@@ -329,7 +329,7 @@ def test_circuit_run_returns_cuda_data_and_checkpointed_companion_history():
     assert torch.any(torch.abs(data.node_voltage("input")) > 0.0)
     assert result.stats()["num_circuits"] == 1
     assert data.diagnostics["factorization_count"] == 2
-    assert checkpoint.schema.version == 2
+    assert checkpoint.schema.version == 3
     assert checkpoint.schema.circuit_state_names == (
         "circuit_0_step",
         "circuit_0_inductor_current",

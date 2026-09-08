@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from enum import Enum, auto
 
 
@@ -126,6 +127,15 @@ def _matches_checkpoint_layout(solver, forward_state) -> bool:
 
 def _has_open_face_conflicts(face_codes: tuple[int, int, int, int, int, int]) -> bool:
     return any(code in {BOUNDARY_PERIODIC, BOUNDARY_PMC, BOUNDARY_BLOCH} for code in face_codes)
+
+
+def _only_bloch_or_mur_faces(solver):
+    mur_faces = set(getattr(solver, "mur_faces", ()))
+    faces = tuple((axis, side) for axis in "xyz" for side in ("low", "high"))
+    # The periodic core's outer tangential writes are discarded by Mur. Their
+    # cotangents are zeroed by the Mur transpose before that core is reversed.
+    return all(code == BOUNDARY_BLOCH or (code == BOUNDARY_NONE and face in mur_faces)
+               for face, code in zip(faces, _face_codes(solver)))
 
 
 def _supports_explicit_source_step(runtime, solver, resolved_source_terms) -> bool:
@@ -351,7 +361,7 @@ def _supports_bloch(runtime, solver, forward_state, resolved_source_terms) -> bo
         return False
     if getattr(solver, "tfsf_enabled", False):
         return False
-    if not all(code == BOUNDARY_BLOCH for code in _face_codes(solver)):
+    if not _only_bloch_or_mur_faces(solver):
         return False
     return _supports_explicit_source_step(runtime, solver, resolved_source_terms)
 
@@ -384,7 +394,7 @@ def _supports_bloch_dispersive(runtime, solver, forward_state, resolved_source_t
         return False
     if not _matches_checkpoint_layout(solver, forward_state):
         return False
-    if not all(code == BOUNDARY_BLOCH for code in _face_codes(solver)):
+    if not _only_bloch_or_mur_faces(solver):
         return False
     return _supports_explicit_source_step(runtime, solver, resolved_source_terms)
 
@@ -690,6 +700,7 @@ def reverse_step(
     forward_magnetic_fields=None,
     resolved_source_terms=None,
     profiler=None,
+    mur_transposed=False,
 ):
     runtime = _runtime()
 
@@ -717,7 +728,11 @@ def reverse_step(
             "The prepared differentiable FDTD scene lost its native CUDA adjoint "
             f"variant {analytic_backend.name}; backward cannot continue."
         )
-    return _with_profile_sections(
+    if not mur_transposed:
+        from ..boundary.mur import pullback_mur_boundaries
+
+        adjoint_state = pullback_mur_boundaries(solver, adjoint_state)
+    result = _with_profile_sections(
         profiler,
         lambda: _run_native_reverse_step(
             analytic_backend, solver, forward_state, adjoint_state,
@@ -725,3 +740,8 @@ def reverse_step(
             resolved_source_terms=resolved_source_terms, profiler=profiler,
         ),
     )
+    mur_names = checkpoint_schema(solver).mur_state_names
+    if mur_names:
+        carried = {**result.pre_step_adjoint, **{name: adjoint_state[name] for name in mur_names}}
+        result = replace(result, pre_step_adjoint={name: carried[name] for name in state_names})
+    return result

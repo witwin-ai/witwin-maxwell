@@ -575,7 +575,8 @@ def _can_use_explicit_source_term_reverse_step(solver, resolved_source_terms) ->
             sum(pair == (BOUNDARY_PML, BOUNDARY_PML) for pair in codes.values()) == 1
             and sum(pair == (BOUNDARY_BLOCH, BOUNDARY_BLOCH) for pair in codes.values()) == 2
         )
-        if getattr(solver, "boundary_kind", None) != "bloch" and not mixed_bloch_cpml:
+        from .dispatch import _only_bloch_or_mur_faces
+        if not _only_bloch_or_mur_faces(solver) and not mixed_bloch_cpml:
             return False
         if electric_source_terms or magnetic_source_terms:
             return False
@@ -3453,7 +3454,9 @@ def _step_state(
     next_state.update(circuit_state)
     next_state.update(network_state)
     next_state.update(wire_state)
-    return next_state
+    from ..boundary.mur import replay_mur_boundaries
+
+    return replay_mur_boundaries(solver, next_state, state)
 
 
 def _build_spectral_weight_schedule(entries, *, time_steps, window_type):

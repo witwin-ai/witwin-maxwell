@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 
 from .boundary import expand_cpml_memory_tensor
+from .boundary.mur import iter_mur_state_tensors
 
 _FIELD_STATE_NAMES = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 _COMPLEX_FIELD_STATE_NAMES = ("Ex_imag", "Ey_imag", "Ez_imag", "Hx_imag", "Hy_imag", "Hz_imag")
@@ -37,7 +38,7 @@ _WIRE_STATE_NAMES = ("wire_current", "wire_charge")
 # a checkpoint/resume boundary. Scratch buffers (drive gather, staged propagator
 # output) are recomputed each step and are not part of the frozen layout.
 _GYROMAGNETIC_STATE_TENSOR_NAMES = ("m_u", "m_v", "dm_u", "dm_v")
-_CHECKPOINT_SCHEMA_VERSION = 2
+_CHECKPOINT_SCHEMA_VERSION = 3
 
 
 def dispersive_state_name(component_name: str, model_name: str, index: int, tensor_name: str) -> str:
@@ -104,6 +105,7 @@ class FDTDCheckpointSchema:
     wire_state_names: tuple[str, ...] = ()
     gyromagnetic_state_names: tuple[str, ...] = ()
     surface_impedance_state_names: tuple[str, ...] = ()
+    mur_state_names: tuple[str, ...] = ()
 
     @property
     def state_names(self) -> tuple[str, ...]:
@@ -121,6 +123,7 @@ class FDTDCheckpointSchema:
             + self.wire_state_names
             + self.gyromagnetic_state_names
             + self.surface_impedance_state_names
+            + self.mur_state_names
         )
 
 
@@ -328,6 +331,7 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         wire_state_names=tuple(wire_state_names),
         gyromagnetic_state_names=gyromagnetic_state_names,
         surface_impedance_state_names=surface_impedance_state_names,
+        mur_state_names=tuple(name for name, _tensor in iter_mur_state_tensors(solver)),
     )
 
 
@@ -433,6 +437,8 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
         tensors[name] = tensor.detach().clone()
     for name, tensor in iter_surface_impedance_state_specs(solver):
         tensors[name] = tensor.detach().clone()
+    for name, tensor in iter_mur_state_tensors(solver):
+        tensors[name] = tensor.detach().clone()
     state = FDTDCheckpointState(step=int(step), schema=schema, tensors=tensors)
     validate_checkpoint_state(state)
     return state
@@ -512,6 +518,8 @@ def _checkpoint_tensor_targets(solver, schema: FDTDCheckpointSchema):
         yield name, tensor, None
     for name, tensor in iter_surface_impedance_state_specs(solver):
         yield name, tensor, None
+    for name, tensor in iter_mur_state_tensors(solver):
+        yield name, tensor, None
 
 
 def _checkpoint_expected_shape(target: torch.Tensor, layout) -> tuple[int, ...]:
@@ -539,9 +547,8 @@ def graph_state_tensors(solver, *, tail=False):
             state["wire_emf"] = wire.emf
             if getattr(wire, "ade_state", None) is not None:
                 state["wire_loss_ade"] = wire.ade_state
-    for index, entry in enumerate(getattr(solver, "_mur_state", ())):
-        for name in ("prev_boundary", "prev_adjacent"):
-            state[f"mur_{index}_{name}"] = entry[name]
+    if tail:
+        state.update(iter_mur_state_tensors(solver))
     return state
 
 

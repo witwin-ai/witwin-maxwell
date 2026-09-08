@@ -27,7 +27,8 @@ from ..excitation import (
     apply_tfsf_e_correction,
     apply_tfsf_h_correction,
 )
-from ..runtime.stepping import apply_full_aniso_corrections, update_electric_fields_bloch_cpml
+from ..runtime.stepping import apply_full_aniso_corrections, apply_mur_boundaries, update_electric_fields_bloch_cpml
+from ..boundary.mur import pullback_mur_boundaries
 from ..ports import (
     accumulate_port_observers,
     apply_port_runtimes,
@@ -820,6 +821,7 @@ class _FDTDGradientBridge:
             solver._apply_dispersive_corrections()
             if not getattr(solver, "tfsf_enabled", False):
                 solver._enforce_pec_boundaries()
+            apply_mur_boundaries(solver)
             solver.accumulate_dft(step_index)
             accumulate_port_observers(solver)
             solver.accumulate_observers(step_index)
@@ -1139,6 +1141,7 @@ class _FDTDGradientBridge:
                     post_step_adjoint = reverse_scratch.snapshot(adjoint_state)
                     with profiler.section("seed_injection"):
                         _apply_seed_runtime(post_step_adjoint, seed_runtime, step_index)
+                    post_step_adjoint = pullback_mur_boundaries(solver, post_step_adjoint)
 
                     local_grad_eps = (
                         {
@@ -1244,6 +1247,7 @@ class _FDTDGradientBridge:
                         tpa_ey=tpa_ey,
                         tpa_ez=tpa_ez,
                         profiler=profiler,
+                        mur_transposed=True,
                     )
                     profiler.record_reverse_backend(step_result.backend)
                     grad_eps_ex = _accumulate_grad(grad_accumulator_backend, grad_eps_ex, step_result.grad_eps_ex)

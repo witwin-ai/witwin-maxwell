@@ -16,7 +16,7 @@ from .checkpoint import (
 )
 
 
-_RESUME_SCHEMA_VERSION = 2
+_RESUME_SCHEMA_VERSION = 3
 _SCHEMA_TUPLE_FIELDS = tuple(field.name for field in fields(FDTDCheckpointSchema) if field.name != "version")
 
 
@@ -404,8 +404,6 @@ def capture_resume_checkpoint(
             "axis": entry["axis"],
             "boundary_index": entry["boundary_index"],
             "adjacent_index": entry["adjacent_index"],
-            "prev_boundary": entry["prev_boundary"].detach().clone(),
-            "prev_adjacent": entry["prev_adjacent"].detach().clone(),
         }
         for entry in getattr(solver, "_mur_state", ())
     ]
@@ -628,11 +626,6 @@ def _preflight_auxiliary(solver, checkpoint: FDTDResumeCheckpoint):
         identity = ("field", "axis", "boundary_index", "adjacent_index")
         if not isinstance(payload, Mapping) or any(payload.get(key) != entry[key] for key in identity):
             raise ValueError(f"FDTD resume Mur boundary ordering mismatch at index {index}.")
-        for key in ("prev_boundary", "prev_adjacent"):
-            source = payload.get(key)
-            target = entry[key]
-            _require_tensor_compatible(f"mur.{index}.{key}", source, target)
-            copy_ops.append((target, source))
 
     modulation_source = auxiliary.get("modulation_time")
     modulation_target = getattr(solver, "_modulation_time", None)
