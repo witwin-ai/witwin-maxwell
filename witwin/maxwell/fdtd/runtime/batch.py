@@ -47,9 +47,9 @@ def validate_native_solver(solver):
 class NativeFieldSlot:
     """One capacity-B allocation, reusable across compatible compiled cohorts.
 
-    Coefficients remain dense per lane until a stronger cross-cohort value proof
-    is available. Grid and CPML profiles share storage only after tensor equality
-    has been checked on the compiled device values.
+    Coefficients share storage only after compiled value equality across lanes.
+    A later cohort can promote a coefficient to dense lane storage. Grid and
+    CPML profiles share storage only after compiled tensor equality checks.
     """
 
     def __init__(self, capacity, device):
@@ -101,12 +101,26 @@ class NativeFieldSlot:
         self.state_names = FIELDS + psi_names
         for name in self.state_names + COEFFICIENTS:
             values = [getattr(solver, name) for solver in solvers]
-            shape = (self.capacity, *values[0].shape)
+            shared_coefficient = name in COEFFICIENTS and (
+                name not in self.buffers or self.buffers[name].ndim == 3) and all(
+                    torch.equal(values[0], value) for value in values[1:])
+            shape = tuple(values[0].shape) if shared_coefficient else (self.capacity, *values[0].shape)
             if name not in self.buffers:
                 self.buffers[name] = torch.empty(shape, dtype=values[0].dtype, device=self.device)
             target = self.buffers[name]
             if tuple(target.shape) != shape:
-                raise ValueError(f"Compiled cohort changed {name} shape.")
+                if name in COEFFICIENTS and target.ndim == 3 and not shared_coefficient:
+                    # A later cohort may invalidate a sharing proof. Promote
+                    # once to per-lane storage; never demote or alias states.
+                    target = torch.empty(shape, dtype=values[0].dtype, device=self.device)
+                    self.buffers[name] = target
+                else:
+                    raise ValueError(f"Compiled cohort changed {name} shape.")
+            if shared_coefficient:
+                target.copy_(values[0])
+                for solver in solvers:
+                    setattr(solver, name, target)
+                continue
             # Copy before rebinding, including when reloading a previous cohort.
             for lane, value in enumerate(values):
                 target[lane].copy_(value)
