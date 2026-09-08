@@ -804,3 +804,20 @@ Independent hot median: 0.130684 s. Maximum probe absolute error: 0.
 Backward, all-result retention and exclusive multi-device scaling are outside this timing scope.
 Raw artifact: `benchmark/plots/batch/tuned-launch-n10.json`
 <!-- batch-tuning-launch-n10-d1:end -->
+
+<!-- batch-scaling-bandwidth-n8-d2:begin -->
+## Batch device scaling: bandwidth
+
+Interleaved complete streamed forward including CPU output readiness; prepare excluded; idle prepared modes remain resident.
+
+| Devices | Prepare s | Hot median s |
+| --- | ---: | ---: |
+| cuda:0 | 0.503343 | 4.821623 |
+| cuda:1 | 0.629821 | 11.442635 |
+| cuda:0, cuda:1 | 0.567766 | 5.121099 |
+
+Best single-device / parallel speedup: 0.942. Matching dual-device 1.7x gate: False.
+Maximum probe absolute error: 0. Exclusive compute observed: False.
+Periodic process sampling can miss activity between samples; display workloads are not excluded.
+[Raw measurements](plots/batch/scaling-bandwidth-n8.json)
+<!-- batch-scaling-bandwidth-n8-d2:end -->

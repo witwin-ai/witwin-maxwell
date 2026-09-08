@@ -1128,3 +1128,13 @@ R11 验收：最终持久频谱/非均匀网格/原生谱内核/普通伴随组�
 R13 验收结果：调优隔离、结果快照及 Batch 伴随组合在真实双卡上 35 passed；保留一条已有 AccumulateGrad 流同步提示，未放宽已有梯度容差。
 
 最终集成：多 GPU/双槽、严格预算和持久频谱组合另有 24 passed。
+
+## R14：可复现多 GPU 扩展性测量与竞争审计
+
+开发交付：`python -m benchmark batch --scaling-audit bandwidth --devices cuda:0 cuda:1 --variants 8 --concurrency 4 --steps 1024 --warmups 2 --repeats 5 --update-report`。每张单卡和双卡运行相同 N、B、物理场景与输出，轮换测量顺序，时间覆盖完整流式前向和 CPU 输出就绪；准备单独记录。额外单场景参考验证每个变体的复数探针谱。定期采样 GPU UUID/PID，过滤本进程和未参与设备，发现竞争或采样错误均不通过独占性能门。
+
+验收标准：CLI 保留协议参数；JSON 保留全部热样本、各设备报告和进程采样；RESULTS.md 可重复更新并在报告重建后保留；单卡/多卡均满足谱容差；相同型号双卡在观测无竞争时达到 1.7x 才关闭该数值门。采样间隙和显示负载不能由此排除，多个闲置 prepared 模式驻留，因此该工具也不证明独占显存峰值。
+
+本轮实测：两张相同型号 GPU，N=8、B=4、1024 步、2 次预热/5 次测量。单卡中位 4.821623 s 和 11.442635 s，双卡 5.121099 s，相对更快单卡为 0.942x；独立单场景探针最大绝对误差 0。331 次进程采样记录到另一个计算进程，`exclusive_compute_observed=false`，1.7x 门未通过，不能用这轮竞争数据判定独占扩展性。未干预其它进程。原始证据：`benchmark/plots/batch/scaling-bandwidth-n8.json`，汇总已由统一入口写入 `benchmark/RESULTS.md`。
+
+工作流验收：CLI、进程过滤/采样错误拒绝、协议负例、报告保留及 benchmark 系统组合 119 passed、3 skipped。融合 B-lane reverse、全 N 保留输出的精确预规划及独占多 GPU 吞吐门仍未关闭。

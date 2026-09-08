@@ -112,8 +112,9 @@ def main(argv=None):
     group.add_argument("--capacity-audit", choices=tuple(BATCH_WORKLOADS), help="Measure compilation while rotating cohorts")
     group.add_argument("--regional-audit", choices=tuple(BATCH_WORKLOADS), help="Compare full and regional material compilation")
     group.add_argument("--tune-audit", choices=tuple(BATCH_WORKLOADS), help="Measure public B/Q/K tuning and independent hot repeats")
+    group.add_argument("--scaling-audit", choices=tuple(BATCH_WORKLOADS), help="Compare each single GPU with the same multi-GPU Batch workload")
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--devices", nargs="+", help="Execution devices for --tune-audit (defaults to --device)")
+    parser.add_argument("--devices", nargs="+", help="Execution devices for --tune-audit or --scaling-audit")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--variants", type=int, default=10)
     parser.add_argument("--concurrency", type=int, default=10)
@@ -127,10 +128,10 @@ def main(argv=None):
                         help="Graph policy for the native comparison tier")
     parser.add_argument("--update-report", action="store_true", help="Also update the baseline section of benchmark/RESULTS.md")
     args = parser.parse_args(argv)
-    if args.update_report and not (args.compare or args.regional_audit or args.tune_audit):
-        parser.error("--update-report requires --compare, --regional-audit or --tune-audit.")
-    if args.devices and not args.tune_audit:
-        parser.error("--devices requires --tune-audit.")
+    if args.update_report and not (args.compare or args.regional_audit or args.tune_audit or args.scaling_audit):
+        parser.error("--update-report requires --compare, --regional-audit, --tune-audit or --scaling-audit.")
+    if args.devices and not (args.tune_audit or args.scaling_audit):
+        parser.error("--devices requires --tune-audit or --scaling-audit.")
     if args.include_native and not args.compare:
         parser.error("--include-native requires --compare.")
     if args.native_graph != "off" and not (args.compare and args.include_native):
@@ -140,7 +141,7 @@ def main(argv=None):
                    "planned_variant_counts": [1, 10, 100], "deduplication": False,
                    "status": "baseline_instrumentation_only"}
     else:
-        workload = BATCH_WORKLOADS[args.audit or args.compare or args.profile or args.capacity_audit or args.regional_audit or args.tune_audit]
+        workload = BATCH_WORKLOADS[args.audit or args.compare or args.profile or args.capacity_audit or args.regional_audit or args.tune_audit or args.scaling_audit]
         if args.steps is not None:
             if args.steps <= 0:
                 parser.error("--steps must be positive.")
@@ -159,6 +160,10 @@ def main(argv=None):
             from benchmark.batch_profile import audit_regional_materials
             payload = audit_regional_materials(workload, device=args.device,
                                               warmups=args.warmups, repeats=args.repeats)
+        elif args.scaling_audit:
+            from benchmark.batch_profile import audit_scaling
+            payload = audit_scaling(workload, devices=tuple(args.devices or (args.device,)),
+                variants=args.variants, capacity=args.concurrency, warmups=args.warmups, repeats=args.repeats)
         elif args.tune_audit:
             from benchmark.batch_profile import audit_tuning
             payload = audit_tuning(workload, devices=tuple(args.devices or (args.device,)),
@@ -169,7 +174,7 @@ def main(argv=None):
                 warmups=args.warmups, repeats=args.repeats, include_native=args.include_native,
                 native_graph=args.native_graph)
     encoded = json.dumps(payload, indent=2) + "\n"
-    if args.audit or args.compare or args.profile or args.capacity_audit or args.regional_audit or args.tune_audit or args.output:
+    if args.audit or args.compare or args.profile or args.capacity_audit or args.regional_audit or args.tune_audit or args.scaling_audit or args.output:
         suffix = "audit" if args.audit else f"n{args.variants}-{'identical' if args.identical else 'varied'}"
         if args.profile:
             suffix = f"b{args.concurrency}-profile"
@@ -179,13 +184,16 @@ def main(argv=None):
             suffix = "regional-materials"
         if args.tune_audit:
             suffix = f"n{args.variants}-tuning"
-        name = args.audit or args.compare or args.profile or args.capacity_audit or args.regional_audit or args.tune_audit
+        if args.scaling_audit:
+            suffix = f"n{args.variants}-d{len(args.devices or ())}-scaling"
+        name = args.audit or args.compare or args.profile or args.capacity_audit or args.regional_audit or args.tune_audit or args.scaling_audit
         path = args.output or PLOTS_DIR / "batch" / f"{name}-{suffix}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(encoded, encoding="utf-8")
         if args.update_report:
-            from benchmark.report import record_batch_baseline, record_regional_material_audit, record_batch_tuning_audit
-            record = (record_batch_tuning_audit if args.tune_audit else
+            from benchmark.report import record_batch_baseline, record_regional_material_audit, record_batch_tuning_audit, record_batch_scaling_audit
+            record = (record_batch_scaling_audit if args.scaling_audit else
+                      record_batch_tuning_audit if args.tune_audit else
                       record_regional_material_audit if args.regional_audit else record_batch_baseline)
             record(payload, path.resolve())
     print(encoded, end="")

@@ -403,6 +403,23 @@ def record_batch_tuning_audit(payload, artifact):
     _write_batch_section(lines, begin, end)
 
 
+def record_batch_scaling_audit(payload, artifact):
+    key = f"batch-scaling-{payload['workload']['name']}-n{payload['variants']}-d{len(payload['devices'])}"
+    begin, end = f"<!-- {key}:begin -->", f"<!-- {key}:end -->"
+    lines = [begin, f"## Batch device scaling: {payload['workload']['name']}", "", payload["scope"], "",
+        "| Devices | Prepare s | Hot median s |",
+        "| --- | ---: | ---: |"]
+    for row in payload["rows"]:
+        lines.append(f"| {', '.join(row['devices'])} | {row['prepare_s']:.6f} | {row['median_s']:.6f} |")
+    lines.extend(["", f"Best single-device / parallel speedup: {payload['best_single_to_parallel_speedup']:.3f}. "
+        f"Matching dual-device 1.7x gate: {payload['matching_dual_device_gate_passed']}.",
+        f"Maximum probe absolute error: {payload['max_probe_absolute_error']:.3g}. "
+        f"Exclusive compute observed: {payload['compute_occupancy']['exclusive_compute_observed']}.",
+        payload["compute_occupancy"]["limitation"],
+        f"[Raw measurements]({_display_path(artifact)})", end])
+    _write_batch_section(lines, begin, end)
+
+
 def _write_batch_section(lines, begin, end):
     section = "\n".join(lines) + "\n"
     current = RESULTS_MD.read_text(encoding="utf-8") if RESULTS_MD.exists() else ""

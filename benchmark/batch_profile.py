@@ -25,6 +25,72 @@ def _environment(device):
                         "python": platform.python_version(), "gpu": torch.cuda.get_device_name(device)}
 
 
+def audit_scaling(workload, *, devices, variants, capacity, warmups=2, repeats=5):
+    """Interleave each single device and their ensemble under identical outputs."""
+    from dataclasses import asdict
+    from benchmark.gpu_memory import GpuComputeSampler
+    from witwin.maxwell.execution.tuning import _consume
+    if len(devices) < 2 or len(set(devices)) != len(devices):
+        raise ValueError("Scaling audits require at least two distinct CUDA devices.")
+    if variants < len(devices) or capacity < 1 or warmups < 1 or repeats < 3:
+        raise ValueError("Scaling audits require enough variants, positive capacity/warmups and at least three repeats.")
+    rows = []
+    sampler = GpuComputeSampler(devices)
+    sampler.start()
+    try:
+        with torch.no_grad(), ExitStack() as contexts:
+            sims = [build_simulation(workload, index=i, device=devices[0]) for i in range(variants)]
+            modes = [(device,) for device in devices] + [tuple(devices)]
+            for assigned in modes:
+                batch = mw.Simulation.batch(sims, execution=mw.BatchExecution(devices=assigned,
+                    batch_size=capacity, graph="required", scheduling="static"),
+                    outputs=mw.BatchOutput(result_device="cpu"))
+                started = time.perf_counter()
+                prepared = contexts.enter_context(batch.prepare())
+                rows.append(dict(devices=list(assigned), prepared=prepared,
+                    prepare_s=time.perf_counter()-started, samples_s=[]))
+            for repeat in range(warmups + repeats):
+                # Rotate the first mode to distribute clock and temperature drift.
+                order = rows[repeat % len(rows):] + rows[:repeat % len(rows)]
+                for row in order:
+                    started = time.perf_counter()
+                    _consume(row["prepared"])
+                    elapsed = time.perf_counter()-started
+                    if repeat >= warmups:
+                        row["samples_s"].append(elapsed)
+            probes = []
+            for row in rows:
+                prepared = row.pop("prepared")
+                values = [None] * variants
+                with prepared.iter_results() as iterator:
+                    for item in iterator:
+                        if item.failure is not None:
+                            raise item.failure
+                        values[item.index] = item.result.raw_monitor("probe")["components"]["Ez"].clone()
+                probes.append(values)
+                row.update(median_s=statistics.median(row["samples_s"]), report=prepared.report.to_dict())
+            references = [sim.run().raw_monitor("probe")["components"]["Ez"].cpu() for sim in sims]
+            error = 0.
+            for values in probes:
+                for value, expected in zip(values, references):
+                    torch.testing.assert_close(value, expected, rtol=1e-4, atol=1e-6)
+                    error = max(error, float((value-expected).abs().max()))
+    finally:
+        occupancy = sampler.stop()
+    best_single = min(row["median_s"] for row in rows[:-1])
+    speedup = best_single / rows[-1]["median_s"]
+    same_model = len({torch.cuda.get_device_name(d) for d in devices}) == 1
+    # The numerical 1.7x gate is specifically for two matching devices.
+    passed = (len(devices) == 2 and same_model and occupancy["exclusive_compute_observed"] and speedup >= 1.7)
+    return dict(schema_version=1, kind="batch_scaling_audit", workload=asdict(workload),
+        variants=variants, capacity_per_slot=capacity, devices=list(devices),
+        environment=[_environment(device) for device in devices], rows=rows,
+        warmups=warmups, repeats=repeats, best_single_to_parallel_speedup=speedup,
+        max_probe_absolute_error=error, compute_occupancy=occupancy,
+        matching_dual_device_gate_passed=passed,
+        scope="Interleaved complete streamed forward including CPU output readiness; prepare excluded; idle prepared modes remain resident.")
+
+
 def audit_tuning(workload, *, devices, variants, capacity, warmups=2, repeats=5):
     """Record public tuning trials, independent hot repeats and spectrum parity."""
     from dataclasses import asdict

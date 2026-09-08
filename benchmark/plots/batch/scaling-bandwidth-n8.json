@@ -1,0 +1,647 @@
+{
+  "schema_version": 1,
+  "kind": "batch_scaling_audit",
+  "workload": {
+    "name": "bandwidth",
+    "grid_cells": 128,
+    "frequencies": [
+      1000000000.0
+    ],
+    "time_steps": 1024
+  },
+  "variants": 8,
+  "capacity_per_slot": 4,
+  "devices": [
+    "cuda:0",
+    "cuda:1"
+  ],
+  "environment": [
+    {
+      "torch": "2.13.0+cu130",
+      "cuda": "13.0",
+      "python": "3.11.15",
+      "gpu": "NVIDIA RTX A6000"
+    },
+    {
+      "torch": "2.13.0+cu130",
+      "cuda": "13.0",
+      "python": "3.11.15",
+      "gpu": "NVIDIA RTX A6000"
+    }
+  ],
+  "rows": [
+    {
+      "devices": [
+        "cuda:0"
+      ],
+      "prepare_s": 0.503342685289681,
+      "samples_s": [
+        4.815813516266644,
+        4.817067505791783,
+        4.945161448791623,
+        4.827195279300213,
+        4.821622893214226
+      ],
+      "median_s": 4.821622893214226,
+      "report": {
+        "batch_size": 4,
+        "capacity_retries": [],
+        "configuration_digest": "261df60c5aaea776286c15bad029ed67efa75bff6735407b48ee5522e2defdb3",
+        "devices": [
+          {
+            "batch_size": 4,
+            "candidate_measurements": [],
+            "device": "cuda:0",
+            "estimated_peak_bytes": null,
+            "graph_mode": "graph",
+            "graph_steps": 32,
+            "group_id": 0,
+            "memory_breakdown": {},
+            "rejected_candidates": [],
+            "reserved_headroom_bytes": 536870912,
+            "slots": 1,
+            "tuned": false
+          }
+        ],
+        "execution_tier": "native_pipeline_graph",
+        "graph": "graph",
+        "graph_fallback_reason": null,
+        "graph_replays": 32,
+        "groups": [
+          {
+            "capability_status": "native_forward_cohort_validation",
+            "group_id": 0,
+            "output_plan": {
+              "allocation_status": "requires_compilation",
+              "fields": [],
+              "frequencies": [
+                1000000000.0
+              ],
+              "full_field_dft": false,
+              "materials": false,
+              "max_pending_results": 2,
+              "monitors": [
+                {
+                  "components": [
+                    "Ez"
+                  ],
+                  "frequencies": [
+                    1000000000.0
+                  ],
+                  "name": "probe",
+                  "sample_count": 1,
+                  "type": "PointMonitor"
+                }
+              ],
+              "ports": [],
+              "result_device": "cpu"
+            },
+            "shared_artifacts": [],
+            "signature_digest": "ae64a04fa280c5fb59d27c12c2b2647a97c092701cc0d4f4c0e8ce0e127663ac",
+            "signature_kind": "provisional_declaration",
+            "unresolved_reasons": [
+              "compiled material equality and variation envelope/halo proof",
+              "resolved Yee layout, stability bound and native capability validation",
+              "slot, workspace, graph pool and retained output allocation sizes"
+            ],
+            "variant_indices": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7
+            ]
+          }
+        ],
+        "input_copy_bytes": null,
+        "memory": {},
+        "output_bytes": null,
+        "resolved": false,
+        "retained_tape_bytes": null,
+        "schema_version": 1,
+        "slots_per_device": 1,
+        "unsupported_features": [
+          "batch_autotuning",
+          "fused_batch_reverse",
+          "exact_all_output_preplanning",
+          "batch_rf_ports",
+          "batch_advanced_material_dynamics"
+        ],
+        "variant_count": 8,
+        "variant_ids": [
+          "0",
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7"
+        ],
+        "warnings": [
+          "Native field/source/observer pipelines reuse proven local material banks; undeclared geometry changes compile full scenes.",
+          "Automatic capacity uses a prepared-lane measurement and bounded OOM reduction; throughput tuning is separate.",
+          "Byte limits conservatively charge private allocator backing segments, including cached and retained output storage.",
+          "Graph capture is attempted at run time and deferred while another registered batch thread is active.",
+          "Only the resident cohort is compiled at prepare; later cohorts are checked before execution.",
+          "Input Scene objects must not be mutated during the PreparedBatch lifetime."
+        ]
+      }
+    },
+    {
+      "devices": [
+        "cuda:1"
+      ],
+      "prepare_s": 0.6298209875822067,
+      "samples_s": [
+        11.85749873612076,
+        12.178461306728423,
+        11.189509105868638,
+        11.442635016515851,
+        11.429092387668788
+      ],
+      "median_s": 11.442635016515851,
+      "report": {
+        "batch_size": 4,
+        "capacity_retries": [],
+        "configuration_digest": "d933a18a55d3dc8082bb85be25d4868a30477611c6f40e03dd1d333d73764649",
+        "devices": [
+          {
+            "batch_size": 4,
+            "candidate_measurements": [],
+            "device": "cuda:1",
+            "estimated_peak_bytes": null,
+            "graph_mode": "graph",
+            "graph_steps": 32,
+            "group_id": 0,
+            "memory_breakdown": {},
+            "rejected_candidates": [],
+            "reserved_headroom_bytes": 536870912,
+            "slots": 1,
+            "tuned": false
+          }
+        ],
+        "execution_tier": "native_pipeline_graph",
+        "graph": "graph",
+        "graph_fallback_reason": null,
+        "graph_replays": 32,
+        "groups": [
+          {
+            "capability_status": "native_forward_cohort_validation",
+            "group_id": 0,
+            "output_plan": {
+              "allocation_status": "requires_compilation",
+              "fields": [],
+              "frequencies": [
+                1000000000.0
+              ],
+              "full_field_dft": false,
+              "materials": false,
+              "max_pending_results": 2,
+              "monitors": [
+                {
+                  "components": [
+                    "Ez"
+                  ],
+                  "frequencies": [
+                    1000000000.0
+                  ],
+                  "name": "probe",
+                  "sample_count": 1,
+                  "type": "PointMonitor"
+                }
+              ],
+              "ports": [],
+              "result_device": "cpu"
+            },
+            "shared_artifacts": [],
+            "signature_digest": "ae64a04fa280c5fb59d27c12c2b2647a97c092701cc0d4f4c0e8ce0e127663ac",
+            "signature_kind": "provisional_declaration",
+            "unresolved_reasons": [
+              "compiled material equality and variation envelope/halo proof",
+              "resolved Yee layout, stability bound and native capability validation",
+              "slot, workspace, graph pool and retained output allocation sizes"
+            ],
+            "variant_indices": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7
+            ]
+          }
+        ],
+        "input_copy_bytes": null,
+        "memory": {},
+        "output_bytes": null,
+        "resolved": false,
+        "retained_tape_bytes": null,
+        "schema_version": 1,
+        "slots_per_device": 1,
+        "unsupported_features": [
+          "batch_autotuning",
+          "fused_batch_reverse",
+          "exact_all_output_preplanning",
+          "batch_rf_ports",
+          "batch_advanced_material_dynamics"
+        ],
+        "variant_count": 8,
+        "variant_ids": [
+          "0",
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7"
+        ],
+        "warnings": [
+          "Native field/source/observer pipelines reuse proven local material banks; undeclared geometry changes compile full scenes.",
+          "Automatic capacity uses a prepared-lane measurement and bounded OOM reduction; throughput tuning is separate.",
+          "Byte limits conservatively charge private allocator backing segments, including cached and retained output storage.",
+          "Graph capture is attempted at run time and deferred while another registered batch thread is active.",
+          "Only the resident cohort is compiled at prepare; later cohorts are checked before execution.",
+          "Input Scene objects must not be mutated during the PreparedBatch lifetime."
+        ]
+      }
+    },
+    {
+      "devices": [
+        "cuda:0",
+        "cuda:1"
+      ],
+      "prepare_s": 0.5677655693143606,
+      "samples_s": [
+        5.5285521456971765,
+        4.030034468509257,
+        4.841932963579893,
+        5.121098907664418,
+        5.517439183779061
+      ],
+      "median_s": 5.121098907664418,
+      "report": {
+        "configuration_digest": "a820ea5086b7ef7c6302e8a39e6a1865906aa668c88567f654e7317e548b680f",
+        "devices": [
+          {
+            "batch_sizes": [
+              4
+            ],
+            "device": "cuda:0",
+            "memory": {
+              "accounting": "private_cuda_backing_segments",
+              "charged_bytes": 2176843776,
+              "limit_bytes": 47366668288,
+              "peak_charged_bytes": 2176843776
+            },
+            "slots": 1
+          },
+          {
+            "batch_sizes": [
+              4
+            ],
+            "device": "cuda:1",
+            "memory": {
+              "accounting": "private_cuda_backing_segments",
+              "charged_bytes": 2353004544,
+              "limit_bytes": 41811509248,
+              "peak_charged_bytes": 2353004544
+            },
+            "slots": 1
+          }
+        ],
+        "execution_tier": "native_parallel_pipeline",
+        "groups": [
+          {
+            "capability_status": "planning_only",
+            "group_id": 0,
+            "output_plan": {
+              "allocation_status": "requires_compilation",
+              "fields": [],
+              "frequencies": [
+                1000000000.0
+              ],
+              "full_field_dft": false,
+              "materials": false,
+              "max_pending_results": 2,
+              "monitors": [
+                {
+                  "components": [
+                    "Ez"
+                  ],
+                  "frequencies": [
+                    1000000000.0
+                  ],
+                  "name": "probe",
+                  "sample_count": 1,
+                  "type": "PointMonitor"
+                }
+              ],
+              "ports": [],
+              "result_device": "cpu"
+            },
+            "shared_artifacts": [],
+            "signature_digest": "ae64a04fa280c5fb59d27c12c2b2647a97c092701cc0d4f4c0e8ce0e127663ac",
+            "signature_kind": "provisional_declaration",
+            "unresolved_reasons": [
+              "compiled material equality and variation envelope/halo proof",
+              "resolved Yee layout, stability bound and native capability validation",
+              "slot, workspace, graph pool and retained output allocation sizes"
+            ],
+            "variant_indices": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7
+            ]
+          }
+        ],
+        "input_copy_bytes": null,
+        "output_bytes": null,
+        "resolved": false,
+        "retained_tape_bytes": null,
+        "schema_version": 1,
+        "slots_per_device": 1,
+        "total_capacity": 8,
+        "unsupported_features": [
+          "batch_autotuning",
+          "fused_batch_reverse",
+          "exact_all_output_preplanning",
+          "batch_rf_ports",
+          "batch_advanced_material_dynamics"
+        ],
+        "variant_count": 8,
+        "variant_ids": [
+          "0",
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7"
+        ],
+        "warnings": [
+          "Dry planning performs no solver allocation; prepare validates the available native forward tier.",
+          "Declarative groups are provisional; compiled equality and memory admission remain unresolved.",
+          "BatchExecution.graph owns batch capture policy; child cuda_graph flags are not used."
+        ],
+        "workers": [
+          {
+            "batch_size": 4,
+            "capacity_retries": [],
+            "configuration_digest": "e1bbc6587e80435ee667b5f6bd23ffebec4342f87605cee1738a05cb8c928b0d",
+            "devices": [
+              {
+                "batch_size": 4,
+                "candidate_measurements": [],
+                "device": "cuda:0",
+                "estimated_peak_bytes": null,
+                "graph_mode": "graph",
+                "graph_steps": 32,
+                "group_id": 0,
+                "memory_breakdown": {},
+                "rejected_candidates": [],
+                "reserved_headroom_bytes": 536870912,
+                "slots": 1,
+                "tuned": false
+              }
+            ],
+            "execution_tier": "native_pipeline_graph",
+            "graph": "graph",
+            "graph_fallback_reason": null,
+            "graph_replays": 32,
+            "groups": [
+              {
+                "capability_status": "native_forward_cohort_validation",
+                "group_id": 0,
+                "output_plan": {
+                  "allocation_status": "requires_compilation",
+                  "fields": [],
+                  "frequencies": [
+                    1000000000.0
+                  ],
+                  "full_field_dft": false,
+                  "materials": false,
+                  "max_pending_results": 2,
+                  "monitors": [
+                    {
+                      "components": [
+                        "Ez"
+                      ],
+                      "frequencies": [
+                        1000000000.0
+                      ],
+                      "name": "probe",
+                      "sample_count": 1,
+                      "type": "PointMonitor"
+                    }
+                  ],
+                  "ports": [],
+                  "result_device": "cpu"
+                },
+                "shared_artifacts": [],
+                "signature_digest": "ae64a04fa280c5fb59d27c12c2b2647a97c092701cc0d4f4c0e8ce0e127663ac",
+                "signature_kind": "provisional_declaration",
+                "unresolved_reasons": [
+                  "compiled material equality and variation envelope/halo proof",
+                  "resolved Yee layout, stability bound and native capability validation",
+                  "slot, workspace, graph pool and retained output allocation sizes"
+                ],
+                "variant_indices": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7
+                ]
+              }
+            ],
+            "input_copy_bytes": null,
+            "memory": {
+              "accounting": "private_cuda_backing_segments",
+              "charged_bytes": 2176843776,
+              "limit_bytes": 47366668288,
+              "peak_charged_bytes": 2176843776
+            },
+            "output_bytes": null,
+            "resolved": false,
+            "retained_tape_bytes": null,
+            "schema_version": 1,
+            "slots_per_device": 1,
+            "unsupported_features": [
+              "batch_autotuning",
+              "fused_batch_reverse",
+              "exact_all_output_preplanning",
+              "batch_rf_ports",
+              "batch_advanced_material_dynamics"
+            ],
+            "variant_count": 8,
+            "variant_ids": [
+              "0",
+              "1",
+              "2",
+              "3",
+              "4",
+              "5",
+              "6",
+              "7"
+            ],
+            "warnings": [
+              "Native field/source/observer pipelines reuse proven local material banks; undeclared geometry changes compile full scenes.",
+              "Automatic capacity uses a prepared-lane measurement and bounded OOM reduction; throughput tuning is separate.",
+              "Byte limits conservatively charge private allocator backing segments, including cached and retained output storage.",
+              "Graph capture is attempted at run time and deferred while another registered batch thread is active.",
+              "Only the resident cohort is compiled at prepare; later cohorts are checked before execution.",
+              "Input Scene objects must not be mutated during the PreparedBatch lifetime."
+            ]
+          },
+          {
+            "batch_size": 4,
+            "capacity_retries": [],
+            "configuration_digest": "1996ba0ece9d8ea87df3a473fba1bd01dd375a6ebf3aff9afb0891d603f99c4b",
+            "devices": [
+              {
+                "batch_size": 4,
+                "candidate_measurements": [],
+                "device": "cuda:1",
+                "estimated_peak_bytes": null,
+                "graph_mode": "graph",
+                "graph_steps": 32,
+                "group_id": 0,
+                "memory_breakdown": {},
+                "rejected_candidates": [],
+                "reserved_headroom_bytes": 536870912,
+                "slots": 1,
+                "tuned": false
+              }
+            ],
+            "execution_tier": "native_pipeline_graph",
+            "graph": "graph",
+            "graph_fallback_reason": null,
+            "graph_replays": 32,
+            "groups": [
+              {
+                "capability_status": "native_forward_cohort_validation",
+                "group_id": 0,
+                "output_plan": {
+                  "allocation_status": "requires_compilation",
+                  "fields": [],
+                  "frequencies": [
+                    1000000000.0
+                  ],
+                  "full_field_dft": false,
+                  "materials": false,
+                  "max_pending_results": 2,
+                  "monitors": [
+                    {
+                      "components": [
+                        "Ez"
+                      ],
+                      "frequencies": [
+                        1000000000.0
+                      ],
+                      "name": "probe",
+                      "sample_count": 1,
+                      "type": "PointMonitor"
+                    }
+                  ],
+                  "ports": [],
+                  "result_device": "cpu"
+                },
+                "shared_artifacts": [],
+                "signature_digest": "ae64a04fa280c5fb59d27c12c2b2647a97c092701cc0d4f4c0e8ce0e127663ac",
+                "signature_kind": "provisional_declaration",
+                "unresolved_reasons": [
+                  "compiled material equality and variation envelope/halo proof",
+                  "resolved Yee layout, stability bound and native capability validation",
+                  "slot, workspace, graph pool and retained output allocation sizes"
+                ],
+                "variant_indices": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7
+                ]
+              }
+            ],
+            "input_copy_bytes": null,
+            "memory": {
+              "accounting": "private_cuda_backing_segments",
+              "charged_bytes": 2353004544,
+              "limit_bytes": 41811509248,
+              "peak_charged_bytes": 2353004544
+            },
+            "output_bytes": null,
+            "resolved": false,
+            "retained_tape_bytes": null,
+            "schema_version": 1,
+            "slots_per_device": 1,
+            "unsupported_features": [
+              "batch_autotuning",
+              "fused_batch_reverse",
+              "exact_all_output_preplanning",
+              "batch_rf_ports",
+              "batch_advanced_material_dynamics"
+            ],
+            "variant_count": 8,
+            "variant_ids": [
+              "0",
+              "1",
+              "2",
+              "3",
+              "4",
+              "5",
+              "6",
+              "7"
+            ],
+            "warnings": [
+              "Native field/source/observer pipelines reuse proven local material banks; undeclared geometry changes compile full scenes.",
+              "Automatic capacity uses a prepared-lane measurement and bounded OOM reduction; throughput tuning is separate.",
+              "Byte limits conservatively charge private allocator backing segments, including cached and retained output storage.",
+              "Graph capture is attempted at run time and deferred while another registered batch thread is active.",
+              "Only the resident cohort is compiled at prepare; later cohorts are checked before execution.",
+              "Input Scene objects must not be mutated during the PreparedBatch lifetime."
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "warmups": 2,
+  "repeats": 5,
+  "best_single_to_parallel_speedup": 0.9415211422685108,
+  "max_probe_absolute_error": 0.0,
+  "compute_occupancy": {
+    "interval_s": 0.5,
+    "samples": 331,
+    "foreign_compute_processes": [
+      [
+        "GPU-318b57c4-2442-e42f-8cb3-7c521bc98006",
+        3758242
+      ]
+    ],
+    "errors": [],
+    "exclusive_compute_observed": false,
+    "limitation": "Periodic process sampling can miss activity between samples; display workloads are not excluded."
+  },
+  "matching_dual_device_gate_passed": false,
+  "scope": "Interleaved complete streamed forward including CPU output readiness; prepare excluded; idle prepared modes remain resident."
+}

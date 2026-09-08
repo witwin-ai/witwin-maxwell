@@ -94,6 +94,61 @@ def test_tuning_report_survives_regeneration(monkeypatch, tmp_path):
     assert original.strip() in target.read_text()
 
 
+def test_scaling_cli_and_report_preserve_protocol_and_contended_gate(monkeypatch, tmp_path, capsys):
+    import benchmark.batch_profile as profile
+    from benchmark import report
+    captured = {}
+    payload = dict(workload=dict(name="bandwidth"), variants=8, devices=["cuda:0", "cuda:1"],
+        rows=[dict(devices=["cuda:0"], prepare_s=1., median_s=2.)],
+        best_single_to_parallel_speedup=.94, matching_dual_device_gate_passed=False,
+        max_probe_absolute_error=0., scope="Complete streamed forward",
+        compute_occupancy=dict(exclusive_compute_observed=False, limitation="Periodic sampling"))
+    def scaling(workload, **kwargs):
+        captured.update(kwargs, steps=workload.time_steps)
+        return payload
+    monkeypatch.setattr(profile, "audit_scaling", scaling)
+    monkeypatch.setattr(report, "RESULTS_MD", tmp_path / "RESULTS.md")
+    target = tmp_path / "scaling.json"
+    main(["--scaling-audit", "bandwidth", "--devices", "cuda:0", "cuda:1", "--variants", "8",
+        "--concurrency", "4", "--steps", "1024", "--output", str(target), "--update-report"])
+    assert captured == dict(devices=("cuda:0", "cuda:1"), variants=8, capacity=4,
+                            steps=1024, warmups=2, repeats=5)
+    assert json.loads(target.read_text()) == json.loads(capsys.readouterr().out)
+    original = report.RESULTS_MD.read_text()
+    report.record_batch_scaling_audit(payload, target)
+    assert report.RESULTS_MD.read_text() == original
+    report.write_results_markdown([])
+    assert original.strip() in report.RESULTS_MD.read_text()
+    assert "gate: False" in original and "observed: False" in original
+
+
+@pytest.mark.parametrize("foreign,error,expected", [(False, False, True), (True, False, False), (False, True, False)])
+def test_compute_sampler_filters_own_and_unselected_devices_and_fails_closed(monkeypatch, foreign, error, expected):
+    from benchmark import gpu_memory
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda d: SimpleNamespace(uuid="selected"))
+    sampler = gpu_memory.GpuComputeSampler(("cuda:0",))
+    def query(*args, **kwargs):
+        if error:
+            raise OSError("process query unavailable")
+        return f"GPU-selected, {sampler.pid}\nGPU-other, {sampler.pid + 1}\n" + (
+            f"GPU-selected, {sampler.pid + 2}\n" if foreign else "")
+    monkeypatch.setattr(gpu_memory.subprocess, "check_output", query)
+    sampler.start()
+    result = sampler.stop()
+    assert result["exclusive_compute_observed"] is expected
+    assert bool(result["errors"]) is error
+    assert result["foreign_compute_processes"] == ([("GPU-selected", sampler.pid + 2)] if foreign else [])
+
+
+@pytest.mark.parametrize("devices,kwargs", [(("cuda:0",), {}), (("cuda:0", "cuda:0"), {}),
+    (("cuda:0", "cuda:1"), dict(repeats=2)), (("cuda:0", "cuda:1"), dict(variants=1))])
+def test_scaling_rejects_invalid_protocol_before_accessing_gpu(devices, kwargs):
+    from benchmark.batch_profile import audit_scaling
+    with pytest.raises(ValueError, match="Scaling audits require"):
+        audit_scaling(BATCH_WORKLOADS["launch"], devices=devices,
+                      **(dict(variants=2, capacity=1, warmups=1, repeats=3) | kwargs))
+
+
 def test_probe_comparison_detects_phase_and_lane_errors():
     probe = {"shape": [2], "real": [1.0, 2.0], "imag": [0.0, 0.5]}
     assert compare_probes([probe], [probe])[0]["rel_l2"] == 0
