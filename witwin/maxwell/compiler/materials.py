@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
+import copy
+from enum import Enum
 from itertools import product
 
 import numpy as np
@@ -1259,6 +1261,7 @@ def compile_edge_material_components(
     averaging,
     region_densities,
     geometry_periodic_shifts,
+    enabled=True,
 ):
     """Edge-native diagonal material fields for the six Yee components, or ``None``.
 
@@ -1269,7 +1272,7 @@ def compile_edge_material_components(
     :func:`_edge_native_eligible`), in which case the runtime keeps the node->edge
     average path.
     """
-    if not _edge_native_eligible(scene, model, surface_layout):
+    if not enabled or not _edge_native_eligible(scene, model, surface_layout):
         return None
     eps = {}
     sigma_e = {}
@@ -2401,6 +2404,7 @@ def compile_material_model(
     eps_background=1.0,
     mu_background=1.0,
     subpixel=None,
+    include_edges=True,
 ):
     surface_layout = compile_surface_impedance_layout(scene)
     samples, averaging, pec_mode = _resolve_subpixel(subpixel)
@@ -2442,6 +2446,7 @@ def compile_material_model(
             averaging=averaging,
             region_densities=region_densities,
             geometry_periodic_shifts=geometry_periodic_shifts,
+            enabled=include_edges,
         )
         return model
 
@@ -2576,8 +2581,159 @@ def compile_material_model(
         averaging=averaging,
         region_densities=region_densities,
         geometry_periodic_shifts=geometry_periodic_shifts,
+        enabled=include_edges,
     )
     return model
+
+
+def _material_definition(value, *, changing=(), snapshot=False):
+    """Retain actual fixed material values, not declaration-only shape hashes."""
+    if value is None or isinstance(value, (str, bytes, int, float, bool, type, Enum)):
+        return value
+    if isinstance(value, torch.Tensor):
+        return value.detach().clone() if snapshot else value
+    if isinstance(value, np.ndarray):
+        return value.copy() if snapshot else value
+    if isinstance(value, (tuple, list)):
+        return tuple(_material_definition(v, changing=changing, snapshot=snapshot) for v in value)
+    if isinstance(value, dict):
+        return {k: _material_definition(v, changing=changing, snapshot=snapshot) for k, v in value.items()}
+    if is_dataclass(value) or hasattr(value, "__dict__"):
+        names = [f.name for f in fields(value)] if is_dataclass(value) else vars(value)
+        return {"type": type(value), **{name: _material_definition(getattr(value, name), snapshot=snapshot)
+            for name in names if not (name == "density" and getattr(value, "name", None) in changing)}}
+    return value
+
+
+def _same_material_definition(a, b):
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, torch.Tensor):
+        return a.dtype == b.dtype and a.device == b.device and a.shape == b.shape and torch.equal(a, b)
+    if isinstance(a, np.ndarray):
+        return np.array_equal(a, b)
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_same_material_definition(a[k], b[k]) for k in a)
+    if isinstance(a, tuple):
+        return len(a) == len(b) and all(_same_material_definition(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def _crop_material_scene(scene, selection):
+    """Sample a node patch with global coordinates and global averaging widths."""
+    local = copy.copy(scene)
+    local._xx = local._yy = local._zz = None
+    for axis, selected in zip(_AXES, selection):
+        setattr(local, axis, getattr(scene, axis)[selected])
+        setattr(local, f"{axis}_nodes64", getattr(scene, f"{axis}_nodes64")[selected])
+        setattr(local, f"d{axis}_dual64", getattr(scene, f"d{axis}_dual64")[selected])
+        half = slice(selected.start, selected.stop - 1)
+        for name in (f"{axis}_half", f"{axis}_half64", f"d{axis}_primal64"):
+            setattr(local, name, getattr(scene, name)[half])
+        setattr(local, f"N{axis}", selected.stop - selected.start)
+    local.N_total = local.N_total_nodes = local.Nx * local.Ny * local.Nz
+    return local
+
+
+class LocalMaterialCache:
+    """One immutable material bank plus proven density-region patch compilation.
+
+    Fixed geometry permits finite support in the float32 occupancy evaluation.
+    Periodic axes remain whole so opposite endpoint composition is unchanged.
+    Full dense tensors are materialized only where the runtime requires them;
+    unchanged channels retain the immutable bank's storage.
+    """
+
+    def __init__(self, scene, changing_regions):
+        self.changing = tuple(changing_regions)
+        self.full_compilations = 1
+        self.patch_compilations = 0
+        self.base = scene.compile_materials()
+        if (self.base.get("edge_components") is None or scene._has_trainable_geometry()
+                or any(r.density.requires_grad for r in scene.material_regions)
+                or any(v.requires_grad for r in scene.material_regions for v in vars(r.geometry).values()
+                       if isinstance(v, torch.Tensor))
+                or material_model_has_nonlinearity(self.base) or material_model_has_modulation(self.base)
+                or _material_model_has_electric_dispersion(self.base) or _material_model_has_magnetic_dispersion(self.base)):
+            raise NotImplementedError("Local material reuse requires fixed static edge-native materials.")
+        if any(isinstance(s.material, PerturbationMedium) for s in scene.structures):
+            raise NotImplementedError("Local node sampling for perturbation grids requires a physical-coordinate sampler.")
+        self.definition = self._definition(scene, snapshot=True)
+        geometries = [r.geometry for r in scene.material_regions if r.name in self.changing]
+        if len(geometries) != len(self.changing) or any(type(g) is not Box for g in geometries):
+            raise ValueError("Local density compilation requires named Box material regions.")
+        # Tanh is exactly saturated far outside this conservative float32 band.
+        # The box circumsphere covers every rotation; subpixel offsets and a
+        # further reconstruction halo are retained on each coordinate axis.
+        bounds = [(g.position.detach().cpu().numpy(), float(torch.linalg.vector_norm(g.size).item()) / 2)
+                  for g in geometries]
+        margin = 64 * _geometry_beta(scene) + max(float(np.max(getattr(scene, f"d{a}_dual64"))) for a in _AXES)
+        self.bounds = tuple((min(p[i] - r for p, r in bounds) - margin,
+                             max(p[i] + r for p, r in bounds) + margin) for i in range(3))
+        self.node_selection = self._selection(scene, tuple(getattr(scene, a) for a in _AXES))
+        self.edge_selections = {c: self._selection(scene, tuple(_edge_axis_base_1d(
+            scene, a, i in _EDGE_STAGGER_AXES[c]) for i, a in enumerate(_AXES)))
+            for c in (*_ELECTRIC_EDGE_COMPONENTS, *_MAGNETIC_EDGE_COMPONENTS)}
+
+    def _definition(self, scene, *, snapshot=False):
+        return _material_definition((scene.domain, scene.grid, scene.boundary, scene.subpixel,
+            scene.structures, scene.material_regions), changing=self.changing, snapshot=snapshot)
+
+    def _selection(self, scene, axes):
+        result = []
+        for axis, coordinates, (lo, hi) in zip(_AXES, axes, self.bounds):
+            if scene.boundary.axis_kind(axis) in ("periodic", "bloch"):
+                result.append(slice(0, len(coordinates)))
+                continue
+            selected = torch.nonzero((coordinates >= lo) & (coordinates <= hi)).flatten()
+            if not selected.numel():
+                # An exterior design still gets a bounded empty-influence probe.
+                start = min(len(coordinates) - 1, int(torch.searchsorted(coordinates, lo).item()))
+                stop = start + 1
+            else:
+                start, stop = int(selected[0].item()), int(selected[-1].item()) + 1
+            result.append(slice(max(0, start - 2), min(len(coordinates), stop + 2)))
+        return tuple(result)
+
+    @staticmethod
+    def _replace(base, patch, selection):
+        if torch.equal(base[selection], patch):
+            return base
+        result = base.clone()
+        result[selection] = patch
+        return result
+
+    def compile(self, scene):
+        if not _same_material_definition(self.definition, self._definition(scene)):
+            raise ValueError("Fixed material definition changed during local Batch compilation.")
+        if any(not bool(torch.isfinite(r.density).all()) for r in scene.material_regions):
+            raise ValueError("Local material compilation requires finite density values.")
+        selected = self.node_selection
+        halo = tuple(slice(max(0, s.start - 2), min(n, s.stop + 2))
+                     for s, n in zip(selected, (scene.Nx, scene.Ny, scene.Nz)))
+        crop = tuple(slice(s.start - h.start, s.stop - h.start) for s, h in zip(selected, halo))
+        local = _crop_material_scene(scene, halo)
+        patch = compile_material_model(local, subpixel=scene.subpixel, include_edges=False)
+        model = dict(self.base)
+        for key in ("eps_components", "mu_components", "sigma_e_components", "sigma_m_components"):
+            model[key] = {a: self._replace(self.base[key][a], patch[key][a][crop], selected) for a in _AXES}
+        for key in ("eps_r", "mu_r", "sigma_e", "eps_r_base", "mu_r_base", "eps_r_design", "mu_r_design"):
+            if key in patch:
+                model[key] = self._replace(self.base[key], patch[key][crop], selected)
+        densities = tuple(_prepare_material_region_density(scene, r) for r in scene.material_regions)
+        geometries = [s.geometry for s in _bulk_structures(scene)] + [r.geometry for r in scene.material_regions]
+        shifts = {id(g): _static_periodic_shift_options(scene, g) for g in geometries}
+        model["edge_components"] = {k: dict(v) for k, v in self.base["edge_components"].items()}
+        for component, selection in self.edge_selections.items():
+            material, sigma = _compile_edge_component(scene, component, eps_background=1., mu_background=1.,
+                samples=scene.subpixel.samples, averaging=scene.subpixel.averaging,
+                region_densities=densities, geometry_periodic_shifts=shifts, selection=selection)
+            for key, value in (("eps" if component[0] == "E" else "mu", material),
+                               ("sigma_e" if component[0] == "E" else "sigma_m", sigma)):
+                model["edge_components"][key][component] = self._replace(
+                    self.base["edge_components"][key][component], value, selection)
+        self.patch_compilations += 1
+        return model
 
 
 def _evaluate_electric_components(model, frequency: float | None):

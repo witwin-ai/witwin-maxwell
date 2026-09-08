@@ -77,6 +77,7 @@ class PreparedBatch:
         self._observers = None
         self._graphs = {}
         self._fixed_material_cache = {}
+        self._local_material_cache = None
         self._records = ()
         self._groups = batch.plan().groups
         self._stream = torch.cuda.Stream(device=self.device)
@@ -195,6 +196,15 @@ class PreparedBatch:
                                and not compiled_scene._has_trainable_geometry())
             if fixed_materials:
                 compiled_scene._material_model_cache = self._fixed_material_cache
+            elif self.batch.template is not None and parameters.region_densities:
+                from ..compiler.materials import LocalMaterialCache, PerturbationMedium
+                if not any(isinstance(s.material, PerturbationMedium) for s in compiled_scene.structures):
+                    if self._local_material_cache is None:
+                        self._local_material_cache = LocalMaterialCache(compiled_scene, parameters.region_densities)
+                        material_model = self._local_material_cache.base
+                    else:
+                        material_model = self._local_material_cache.compile(compiled_scene)
+                    compiled_scene._material_model_override = material_model
             solver = model._build_fdtd_solver_for_scene(compiled_scene, initialize=True)
             solver.verbose = False
             validate_native_solver(solver)
@@ -480,6 +490,7 @@ class PreparedBatch:
             self._slot = None
             self._models = ()
             self._fixed_material_cache.clear()
+            self._local_material_cache = None
             self._loaded_key = None
             self._loaded_parameters = ()
             self._sources = None

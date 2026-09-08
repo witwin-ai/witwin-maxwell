@@ -1475,6 +1475,9 @@ class PreparedScene(Scene):
             else _coerce_subpixel(subpixel_samples)
         )
         key = spec
+        override = getattr(self, "_material_model_override", None)
+        if override is not None and spec == self.subpixel:
+            return override
         if self._has_dynamic_materials() or self._has_trainable_geometry():
             model = compile_material_model(
                 self,

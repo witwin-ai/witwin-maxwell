@@ -34,13 +34,17 @@ def test_template_material_compilation_count_and_updated_spectra(monkeypatch, de
     with batch.prepare() as prepared:
         first = prepared.run()
         first.results()
-        assert len(calls) == (5 if density_changes else 1)
+        assert len(calls) == 1
+        if density_changes:
+            assert prepared._local_material_cache.patch_compilations == 4
         if not density_changes:
             assert len(prepared._fixed_material_cache) == 1
         scales.mul_(2)
         second = prepared.run()
         second.results()
-        assert len(calls) == (10 if density_changes else 1)
+        assert len(calls) == 1
+        if density_changes:
+            assert prepared._local_material_cache.patch_compilations == 9
         for a, b in zip(first, second):
             torch.testing.assert_close(b.raw_monitor("probe")["components"]["Ez"],
                 2 * a.raw_monitor("probe")["components"]["Ez"], rtol=1e-4, atol=1e-6)
@@ -100,3 +104,25 @@ def test_evicted_cohort_releases_without_cyclic_collection():
     finally:
         if was_enabled:
             gc.enable()
+
+
+def test_one_background_compilation_across_one_hundred_density_updates():
+    sim = simulation(steps=8)
+    sim.scene.add_material_region(mw.MaterialRegion(name="rho",
+        geometry=mw.Box(size=(.03, .03, .03), device="cuda:0"),
+        density=torch.zeros(2, 2, 2, device="cuda:0"), eps_bounds=(1., 3.)))
+    density = torch.zeros(1, 2, 2, 2, device="cuda:0")
+    batch = mw.Simulation.batch(sim, parameters=mw.BatchParameters(region_densities={"rho": density}),
+        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1, graph="off"))
+    with batch.prepare() as prepared:
+        saved = None
+        for index in range(100):
+            density.fill_((index % 3) * .5)
+            result = prepared.run()
+            actual = result[0].raw_monitor("probe")["components"]["Ez"]
+            if index == 0:
+                saved = actual.clone()
+            if index == 99:
+                torch.testing.assert_close(actual, saved, rtol=0, atol=0)
+        assert prepared._local_material_cache.full_compilations == 1
+        assert prepared._local_material_cache.patch_compilations == 100
