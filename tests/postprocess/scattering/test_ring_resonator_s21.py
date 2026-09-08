@@ -77,8 +77,10 @@ def _mode_scene(device: str = "cpu"):
         device=device,
     )
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, 0.0), size=_GUIDE_SIZE).with_material(
-            mw.Material(eps_r=12.0), name="core"
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=_GUIDE_SIZE),
+            material=mw.Material(eps_r=12.0),
+            name='core',
         )
     )
     scene.add_source(
@@ -234,8 +236,10 @@ def test_two_port_fdtd_modeport_reports_guided_forward_dominated_s21():
         device="cuda",
     )
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, 0.0), size=(1.44, 0.24, 0.32)).with_material(
-            mw.Material(eps_r=12.0), name="core"
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.44, 0.24, 0.32)),
+            material=mw.Material(eps_r=12.0),
+            name='core',
         )
     )
     scene.add_port(

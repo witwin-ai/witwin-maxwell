@@ -25,9 +25,10 @@ def _mode_scene():
         # entries tie within float64 noise, making the peak-normalization
         # argmax (and hence the implicit sparse gradient) a knife-edge function
         # of the grid-derived transverse spacing.
-        mw.Box(position=(0.0, 0.0, 0.02), size=(1.28, 0.24, 0.32)).with_material(
-            mw.Material(eps_r=12.0),
-            name="core",
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.02), size=(1.28, 0.24, 0.32)),
+            material=mw.Material(eps_r=12.0),
+            name='core',
         )
     )
     scene.add_source(
@@ -53,9 +54,10 @@ def _multimode_scene(mode_index=1):
         device="cpu",
     )
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, 0.0), size=(1.6, 0.48, 0.48)).with_material(
-            mw.Material(eps_r=12.0),
-            name="core",
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.6, 0.48, 0.48)),
+            material=mw.Material(eps_r=12.0),
+            name='core',
         )
     )
     scene.add_source(
@@ -343,9 +345,10 @@ def test_full_vector_mode_solver_supports_mu_not_unity():
         device="cpu",
     )
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)).with_material(
-            mw.Material(eps_r=12.0, mu_r=2.0),
-            name="core",
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
+            material=mw.Material(eps_r=12.0, mu_r=2.0),
+            name='core',
         )
     )
     source = mw.ModeSource(

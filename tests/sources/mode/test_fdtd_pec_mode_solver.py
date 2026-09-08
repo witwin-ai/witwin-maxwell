@@ -44,12 +44,11 @@ def _square_aperture_scene(*, device, with_pec):
     )
     if with_pec:
         scene.add_structure(
-            mw.Cylinder(
-                position=(0.0, 0.0, 0.0),
-                radius=0.13,
-                height=0.8,
-                axis="x",
-            ).with_material(mw.Material.pec(), name="inner_conductor")
+            mw.Structure(
+                geometry=mw.Cylinder(position=(0.0, 0.0, 0.0), radius=0.13, height=0.8, axis='x'),
+                material=mw.Material.pec(),
+                name='inner_conductor',
+            )
         )
     return scene
 

@@ -56,9 +56,10 @@ def test_top_level_exports_are_available():
 
 
 def test_geometry_with_material_builds_core_structure():
-    structure = mw.Box(position=(0.0, 0.0, 0.0), size=(1.0, 1.0, 1.0)).with_material(
-        mw.Material(eps_r=3.0, sigma_e=0.25),
-        name="target",
+    structure = mw.Structure(
+        geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.0, 1.0, 1.0)),
+        material=mw.Material(eps_r=3.0, sigma_e=0.25),
+        name='target',
         priority=7,
     )
 

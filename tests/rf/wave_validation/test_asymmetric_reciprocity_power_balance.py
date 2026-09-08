@@ -82,8 +82,10 @@ def _asymmetric_scene() -> mw.Scene:
     # but the two ports now see different surroundings, forcing S11 != S22 by
     # physics rather than by port normalization (M6).
     scene.add_structure(
-        mw.Box(position=(2 * _DX, 0.0, 0.0), size=(2 * _DX, 4 * _DX, 4 * _DX)).with_material(
-            mw.Material(eps_r=9.0), name="p2_dielectric_load"
+        mw.Structure(
+            geometry=mw.Box(position=(2 * _DX, 0.0, 0.0), size=(2 * _DX, 4 * _DX, 4 * _DX)),
+            material=mw.Material(eps_r=9.0),
+            name='p2_dielectric_load',
         )
     )
     return scene

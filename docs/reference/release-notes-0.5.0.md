@@ -2,6 +2,10 @@
 
 Previous release: 0.4.0. Release date: 2026-09-08.
 
+This release requires `witwin>=0.4,<0.5`, whose `PhysicalMaterial` export is used by the material model. The previous dependency range referenced unpublished versions and could prevent clean installation. Older editable base-package checkouts must be updated to the published 0.4 contract.
+
+Construct geometry/material pairs with `mw.Structure(geometry=..., material=...)`. The base package's `Geometry.with_material(...)` convenience method is broken in its published 0.4.0 build and is not part of this release's supported workflow.
+
 ## Batch simulation
 
 `Simulation.batch(...)` adds an experimental execution tier for variants of a common FDTD scene. The public architecture remains `Scene -> Simulation -> Result`. A prepared batch reuses a bounded number of resident field slots; variants retain independent dynamic fields even when fixed geometry, material coefficients, or source declarations can share storage.
@@ -27,7 +31,7 @@ The recent audit recorded the following targeted test groups on the release sour
 - Parallel scheduling, strict capacity budgets, and spectral reuse: 24 passed.
 - Benchmark command, process sampling, report preservation, and benchmark system: 119 passed, 3 skipped.
 
-Release preparation additionally passed 89 public API, simulation smoke, Batch API, and prebuilt ABI checks with CUDA enabled. Local source and wheel builds passed, with Batch modules and native kernel sources verified in the archives. Release platform binaries are built and load-tested by the publishing workflow before upload. These checks are targeted regression evidence, not a new claim that the entire historical test suite passes. Existing adjoint stream-synchronization warnings remain visible.
+Final release preparation against the published `witwin 0.4.0` dependency passed 180 tests: public API/simulation smoke, prebuilt ABI guards, material compilation/identity, Batch tuning, two-GPU scheduling, and Batch adjoints. This also caught and fixed local material reuse incorrectly treating automatically generated identity tokens as physical changes. Local source and wheel builds passed, with Batch modules and native kernel sources verified in the archives. Release platform binaries are built and load-tested by the publishing workflow before upload. These checks are targeted regression evidence, not a new claim that the entire historical test suite passes. One existing adjoint stream-synchronization warning remained visible.
 
 A two-device bandwidth measurement produced zero maximum absolute probe error against independent simulations. Another compute process was observed during timing, so its 0.942x measured ratio does not establish exclusive-device scaling. The 1.7x performance acceptance criterion remains open.
 

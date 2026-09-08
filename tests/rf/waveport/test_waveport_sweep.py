@@ -224,20 +224,18 @@ def test_axis_aligned_coax_tem_impedance_matches_analytic_value():
         device="cuda",
     )
     scene.add_structure(
-        mw.Cylinder(
-            position=(0.0, 0.0, 0.0),
-            radius=inner_radius,
-            height=0.02,
-            axis="x",
-        ).with_material(mw.Material.pec(), name="inner_conductor")
+        mw.Structure(
+            geometry=mw.Cylinder(position=(0.0, 0.0, 0.0), radius=inner_radius, height=0.02, axis='x'),
+            material=mw.Material.pec(),
+            name='inner_conductor',
+        )
     )
     scene.add_structure(
-        _HollowCylinder(
-            position=(0.0, 0.0, 0.0),
-            inner_radius=outer_radius,
-            outer_radius=0.20,
-            length=0.02,
-        ).with_material(mw.Material.pec(), name="outer_conductor")
+        mw.Structure(
+            geometry=_HollowCylinder(position=(0.0, 0.0, 0.0), inner_radius=outer_radius, outer_radius=0.2, length=0.02),
+            material=mw.Material.pec(),
+            name='outer_conductor',
+        )
     )
 
     prepared_scene = prepare_scene(scene)
@@ -270,8 +268,9 @@ def _hollow_guide_scene():
     )
     for position, size, name in wall_specs:
         scene.add_structure(
-            mw.Box(position=position, size=size).with_material(
-                mw.Material.pec(),
+            mw.Structure(
+                geometry=mw.Box(position=position, size=size),
+                material=mw.Material.pec(),
                 name=name,
             )
         )

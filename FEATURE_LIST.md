@@ -4,6 +4,9 @@ This document tracks the current user-visible capabilities of the `maxwell` pack
 
 Release 0.5.0 introduces the experimental Batch execution tier and FDTD correctness repairs described in [the release notes](docs/reference/release-notes-0.5.0.md). Existing ordinary-simulation capabilities retain their documented scope; Batch support is specified separately below.
 
+- Package installation requires `witwin>=0.4,<0.5` and uses its public `PhysicalMaterial` contract; the dependency range resolves against published base-package versions.
+- Release wheels declare their plotting/progress import dependencies. Publishing validates package imports outside the checkout and the native Batch allocator symbols across the platform/ABI matrix.
+
 - Batch tuning isolates copyable `SceneModule` parameters, buffers and Python attributes per trial, preserves shared tensor storage, and starts each candidate from the same CPU/CUDA RNG state. Only the final ordinary preparation updates the caller's module state. Trial copies and scene materialization on another execution device use that device's private memory account. Arbitrary external side effects and allocations on producer devices outside the execution policy are outside this isolation/accounting contract.
 
 - `python -m benchmark batch --scaling-audit WORKLOAD --devices cuda:0 cuda:1 --variants N --concurrency B --update-report` interleaves complete streamed runs on each GPU and all GPUs, including CPU output readiness, and checks spectra against independent simulations. Raw artifacts retain all timing samples and competing compute-process observations. The matching two-device 1.7x gate requires numerical agreement and observed exclusive compute access; foreign processes or sampler errors prevent acceptance. Periodic sampling cannot prove complete exclusivity or exclude display activity. Idle prepared comparison modes remain resident, so this workflow does not measure isolated memory use.
@@ -74,7 +77,7 @@ Release 0.5.0 introduces the experimental Batch execution tier and FDTD correctn
 - `BoundarySpec.bloch_wavevector="auto"` marker for solver-resolved Bloch phase workflows during FDTD preparation
 - Public `BoundaryKind` literal type for boundary-mode selection across declarative scene APIs
 - Shared `witwin.core.Structure` records pairing geometry and material, with `priority`, `enabled`, and `tags`
-- `Geometry.with_material(...)` convenience path returns a shared `Structure`
+- Declarative `Structure(geometry=..., material=...)` construction uses the shared structure contract
 - `MaterialRegion` for density-based PyTorch-native material overlays: Box occupancy participates in the same per-subsample arithmetic or polarized interface averaging as an equivalent `Structure`, each Yee axis blends from its own current background toward the density-defined scalar `eps/mu`, density textures are sampled differentiably on-device, and the compiled model retains base/design tensors plus the nominal design mask
 - Scene assembly with `Scene.add_structure(...)`, `Scene.add_source(...)`, `Scene.add_monitor(...)`, and `Scene.add_material_region(...)`
 - Experimental linear-circuit declarations through `Scene.add_circuit(...)` and `Scene.compile_circuits()`: a `Circuit` owns deterministic node/device order with a unique ground node, reuses the public `Resistor` / `Capacitor` / `Inductor` types with circuit-node terminals, binds only existing lumped/terminal EM ports, and performs explicit floating-network, source-loop, branch-dependency, and dense-size diagnostics without a CPU solver fallback

@@ -2602,7 +2602,10 @@ def _material_definition(value, *, changing=(), structures=(), snapshot=False):
         names = [f.name for f in fields(value)] if is_dataclass(value) else vars(value)
         return {"type": type(value), **{name: _material_definition(getattr(value, name), snapshot=snapshot)
             for name in names if not (name == "density" and getattr(value, "name", None) in changing)
-            and not (isinstance(value, Structure) and name in ("geometry", "material")
+            # Declared design replacements acquire new core identity tokens;
+            # these do not change the material field outside the proven envelope.
+            and not (isinstance(value, Structure) and name in (
+                "geometry", "material", "structure_id", "material_id", "assignment_id", "surface_id")
                      and getattr(value, "name", None) in structures)}}
     return value
 

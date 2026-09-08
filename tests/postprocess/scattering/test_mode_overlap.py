@@ -23,9 +23,10 @@ def _mode_scene():
         # A rectangular core: a square cross-section makes the fundamental
         # Ey/Ez vector-mode pair exactly degenerate, so the eigensolver returns
         # an arbitrary member of the pair under any floating-point perturbation.
-        mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.32)).with_material(
-            mw.Material(eps_r=12.0),
-            name="core",
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.32)),
+            material=mw.Material(eps_r=12.0),
+            name='core',
         )
     )
     scene.add_source(
@@ -116,9 +117,10 @@ def _fdtd_mode_overlap_scene():
         device="cuda",
     )
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)).with_material(
-            mw.Material(eps_r=12.0),
-            name="core",
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
+            material=mw.Material(eps_r=12.0),
+            name='core',
         )
     )
     scene.add_source(
@@ -218,9 +220,10 @@ def test_mode_port_materializes_first_class_source_and_monitor_results():
         device="cuda",
     )
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)).with_material(
-            mw.Material(eps_r=12.0),
-            name="core",
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
+            material=mw.Material(eps_r=12.0),
+            name='core',
         )
     )
     scene.add_port(

@@ -120,8 +120,10 @@ def _build_slab_scene(core_material, grid):
         device="cuda",
     )
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, 0.0), size=(6.0 * grid["dx"], grid["d"], 2.0 * grid["lz"])).with_material(
-            core_material, name="slab"
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(6.0 * grid['dx'], grid['d'], 2.0 * grid['lz'])),
+            material=core_material,
+            name='slab',
         )
     )
     scene.add_source(

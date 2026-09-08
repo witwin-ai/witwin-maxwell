@@ -113,7 +113,11 @@ def test_fdtd_lossy_slab_complex_effective_index_matches_transcendental_solver()
         device="cuda",
     )
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, 0.0), size=(6.0 * dx, d, 2.0 * lz)).with_material(core, name="slab")
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(6.0 * dx, d, 2.0 * lz)),
+            material=core,
+            name='slab',
+        )
     )
     scene.add_source(
         mw.ModeSource(

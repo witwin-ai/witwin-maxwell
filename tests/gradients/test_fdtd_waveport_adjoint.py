@@ -37,7 +37,11 @@ def _guide_scene(*, device, density=None, region_position=(0.05, 0.0, 0.0), mode
     )
     for position, size, name in wall_specs:
         scene.add_structure(
-            mw.Box(position=position, size=size).with_material(mw.Material.pec(), name=name)
+            mw.Structure(
+                geometry=mw.Box(position=position, size=size),
+                material=mw.Material.pec(),
+                name=name,
+            )
         )
     if density is not None:
         scene.add_material_region(

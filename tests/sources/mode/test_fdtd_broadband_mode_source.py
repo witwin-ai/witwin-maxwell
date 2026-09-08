@@ -61,9 +61,10 @@ def _guide_scene(source_time):
     # fundamental profile is nearly frequency independent across the narrow band, so the
     # single center-frequency injection profile reproduces the per-frequency guided mode.
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, 0.0), size=(1.6, 0.16, 0.16)).with_material(
-            mw.Material(eps_r=12.0),
-            name="core",
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.6, 0.16, 0.16)),
+            material=mw.Material(eps_r=12.0),
+            name='core',
         )
     )
     scene.add_source(

@@ -17,8 +17,10 @@ def _build_wire_scene():
         device="cuda",
     )
     scene.add_structure(
-        mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)).with_material(
-            mw.Material(eps_r=12.0), name="core"
+        mw.Structure(
+            geometry=mw.Box(position=(0.0, 0.0, 0.0), size=(1.28, 0.24, 0.24)),
+            material=mw.Material(eps_r=12.0),
+            name='core',
         )
     )
     return scene

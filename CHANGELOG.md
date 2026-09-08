@@ -18,6 +18,9 @@ All notable user-visible changes to WiTwin Maxwell are documented here. The proj
 - Material-aware time-step stability, source timing, complex CPML and Mur boundary histories, and capture/resume state consistency in FDTD.
 - Batch parameter cache identity, iterator ownership, result scene snapshots, selected electric spectra, and redundant spectral allocations in retained adjoint state.
 - Automatic worker capacity distribution and isolation of tuning RNG, module state, and cross-device tensor copies.
+- Corrected the base dependency range to `witwin>=0.4,<0.5`, matching the published `PhysicalMaterial` contract instead of an unavailable version range.
+- Preserved local compilation reuse when declared design replacements acquire new base-package structure/material identity tokens.
+- Declared plotting/progress import dependencies and extended release checks to installed-package imports and native Batch allocator exports.
 
 ### Limitations
 

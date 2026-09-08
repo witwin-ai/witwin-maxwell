@@ -234,6 +234,7 @@ jobs:
         run: |
           python -m pip uninstall -y witwin-maxwell || true
           python -m pip install --no-deps "$PACKAGE_DIR"/dist/*.whl
+          python -m pip install "witwin>=0.4,<0.5" scipy matplotlib tqdm
           python - <<'PY'
           import importlib.util
           import os
@@ -263,6 +264,17 @@ jobs:
           assert path.parent.name == "prebuilt"
           extension = module.build_extension()
           print(f"Loaded packaged FDTD CUDA extension from {extension.__file__}")
+
+          # Import outside the checkout so missing runtime dependencies cannot
+          # be hidden by source-tree imports or the build-only ABI smoke test.
+          import subprocess
+          import tempfile
+          subprocess.run([
+              os.sys.executable, "-c",
+              "import witwin.maxwell as mw; from importlib.metadata import version; "
+              "assert mw.BatchExecution and mw.Scene and mw.Simulation; "
+              "print('Installed package:', version('witwin-maxwell'))",
+          ], cwd=tempfile.gettempdir(), check=True)
           PY
 
       - name: Upload wheel artifact
@@ -343,6 +355,12 @@ jobs:
           extension = module.build_extension()
           assert Path(extension.__file__).resolve() == native_path.resolve()
           assert extension.update_magnetic_hx_standard is not None
+          import ctypes
+          library = ctypes.CDLL(str(native_path))
+          for name in ("mw_batch_budget_create", "mw_batch_budget_exchange",
+                       "mw_batch_budget_bytes", "mw_batch_budget_close",
+                       "mw_batch_malloc", "mw_batch_free"):
+              assert getattr(library, name) is not None, name
           print(f"Loaded {native_path.name} with torch {torch.__version__} on Python {os.sys.version.split()[0]}")
           PY
 
