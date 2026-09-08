@@ -898,20 +898,15 @@ def _spectral_weights(
     frequencies: torch.Tensor,
     time_steps: int,
     window_type: str,
-    *,
-    start_at_zero: bool = False,
 ) -> torch.Tensor:
-    if start_at_zero:
-        starts = torch.zeros_like(frequencies)
-    else:
-        starts = torch.as_tensor(
-            [
-                solver._compute_spectral_start_step(float(frequency), window_type=window_type)
-                for frequency in frequencies.detach().cpu()
-            ],
-            device=frequencies.device,
-            dtype=frequencies.dtype,
-        )
+    starts = torch.as_tensor(
+        [
+            solver._compute_spectral_start_step(float(frequency), window_type=window_type)
+            for frequency in frequencies.detach().cpu()
+        ],
+        device=frequencies.device,
+        dtype=frequencies.dtype,
+    )
     steps = torch.arange(time_steps, device=frequencies.device, dtype=frequencies.dtype)[:, None]
     end = torch.as_tensor(float(time_steps), device=frequencies.device, dtype=frequencies.dtype)
     active = (steps >= starts[None, :]) & (steps < end)
@@ -941,18 +936,15 @@ def _weighted_phase_table(
 
 def prepare_port_spectral_accumulators(solver, time_steps: int, window_type: str) -> None:
     runtimes = getattr(solver, "_port_runtimes", ())
-    port_pulse = any(
-        runtime.source_kind is not None and runtime.source_kind != "cw"
-        for runtime in runtimes
-    )
+    if not runtimes:
+        return
+    effective_window = solver._resolve_spectral_window_type(window_type)
     for runtime in runtimes:
-        effective_window = "none" if port_pulse else window_type
         runtime.window_weights = _spectral_weights(
             solver,
             runtime.frequencies,
             time_steps,
             effective_window,
-            start_at_zero=port_pulse,
         )
         runtime.window_type = effective_window
         runtime.accumulator = PortDFTAccumulator(runtime.frequencies)
@@ -971,8 +963,10 @@ def prepare_port_spectral_accumulators(solver, time_steps: int, window_type: str
             device=runtime.frequencies.device,
             dtype=runtime.frequencies.dtype,
         )
-        electric_times = (step + 1.0) * dt
-        magnetic_times = (step + 0.5) * dt
+        # Observation phasors share the public field monitor time origin. The
+        # separate drive/circuit clocks retain their integration coordinates.
+        electric_times = step * dt
+        magnetic_times = (step - 0.5) * dt
         # Non-wire lumped ports sample voltage at the magnetic half-step (shared
         # with the current). Wire-bound ports and pure field ports keep the
         # electric full-step voltage stagger.

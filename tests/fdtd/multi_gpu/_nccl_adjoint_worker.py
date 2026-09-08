@@ -247,6 +247,11 @@ def _parallel():
 
 
 def _build_scene(kind, density, device):
+    if kind == "time_record":
+        scene = _standard_scene(density, source_x=-0.3, monitor_x=0.1, device=device)
+        scene.add_monitor(mw.FieldTimeMonitor("trace", components=("Ez", "Hy"),
+            position=(-0.1, 0., 0.), interval=3))
+        return scene
     if kind == "standard":
         return _standard_scene(density, source_x=-0.3, monitor_x=0.1, device=device)
     if kind in ("plane", "plane_seam"):
@@ -263,6 +268,9 @@ def _build_scene(kind, density, device):
 
 
 def _kwargs(kind):
+    if kind == "time_record":
+        return dict(frequency=_FREQUENCY, run_time=mw.TimeConfig(time_steps=100, dt=2e-11),
+            spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False)
     if kind in ("standard", "plane", "plane_seam"):
         return dict(
             frequency=_FREQUENCY,
@@ -395,6 +403,30 @@ def _run_parity(kind):
         single_loss, single_grad = _reference_solve(kind, base)
         _assert_parity(kind, dist_loss, dist_grad, single_loss, single_grad)
         print(f"NCCL_ADJOINT_WORKER_OK[{kind}]")
+
+
+def _run_time_record():
+    base = _base_density()
+    dist_loss, dist_grad, bridge = _distributed_solve("time_record", base)
+    assert bridge._distributed.dt == 2e-11
+    assert "trace" not in bridge._pack.monitor_templates
+    torch.distributed.barrier()
+    if torch.distributed.get_rank() == 0:
+        trace = bridge._raw_output["time_observers"]["trace"]
+        assert trace["differentiable"] is False
+        assert all(not value.requires_grad for value in trace["components"].values())
+        density = base.to("cuda:0").requires_grad_(True)
+        reference = mw.Simulation.fdtd(_build_scene("time_record", density, "cuda:0"),
+            **_kwargs("time_record")).run()
+        loss = reference.monitor("probe")["data"].abs().square().sum()
+        loss.backward()
+        _assert_parity("time_record", dist_loss, dist_grad, float(loss.detach()), density.grad.cpu())
+        expected = reference.monitor("trace")
+        torch.testing.assert_close(trace["t"], expected["t"], rtol=0, atol=0)
+        for component in trace["fields"]:
+            torch.testing.assert_close(trace["components"][component], expected["components"][component],
+                rtol=1e-5, atol=1e-6)
+        print("NCCL_ADJOINT_WORKER_OK[time_record]")
 
 
 def _plane_full_leaf_objective(pack, leaves, layout):
@@ -641,6 +673,7 @@ def _run_capacity_deadlock():
 
 
 _MODES = {
+    "time_record": _run_time_record,
     "standard": lambda: _run_parity("standard"),
     "plane": lambda: _run_parity("plane"),
     "plane_seam": _run_plane_seam,

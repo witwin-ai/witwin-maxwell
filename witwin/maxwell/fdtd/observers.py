@@ -580,10 +580,13 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
 
     source_signal = None
     accumulate_source = getattr(solver, '_normalize_source', False) or getattr(solver, '_accumulate_source_spectrum', False)
-    if accumulate_source and getattr(solver, '_source_time', None) is not None:
+    reference_time = (getattr(solver, '_normalization_source_time', None)
+                      if getattr(solver, '_normalize_source', False)
+                      else getattr(solver, '_source_time', None))
+    if accumulate_source and reference_time is not None:
         from ..sources import evaluate_source_time_normalization
 
-        source_signal = evaluate_source_time_normalization(solver._source_time, n * solver.dt)
+        source_signal = evaluate_source_time_normalization(reference_time, n * solver.dt)
 
     for global_index, entry in enumerate(solver._observer_spectral_entries):
         if n < entry["start_step"]:
@@ -742,6 +745,19 @@ def prepare_time_observers(solver, time_steps):
         solver.time_observers_enabled = False
         return
 
+    complex_fields = has_complex_fields(solver)
+    if complex_fields and any(record["kind"] == "flux_time" for record in records):
+        raise ValueError(
+            "FluxTimeMonitor requires real time-domain fields; complex Bloch fields "
+            "have no unique instantaneous real Poynting flux. Use FluxMonitor "
+            "for their spectral power flux."
+        )
+
+    def recording_dtype(field):
+        if not complex_fields:
+            return field.dtype
+        return torch.complex64 if field.dtype == torch.float32 else torch.complex128
+
     for record in records:
         sample_steps = _time_sample_steps(record, time_steps)
         record["sample_steps"] = sample_steps
@@ -761,7 +777,7 @@ def prepare_time_observers(solver, time_steps):
                     )
                     record["component_meta"][component] = {"field_index": index}
                     record["buffers"][component] = torch.zeros(
-                        (num_samples,), device=solver.device, dtype=field.dtype
+                        (num_samples,), device=solver.device, dtype=recording_dtype(field)
                     )
             elif region_kind == "plane":
                 for component in record["components"]:
@@ -774,7 +790,7 @@ def prepare_time_observers(solver, time_steps):
                     record["component_meta"][component] = meta
                     field = getattr(solver, meta["field_name"])
                     record["buffers"][component] = torch.zeros(
-                        (num_samples,) + meta["plane_shape"], device=solver.device, dtype=field.dtype
+                        (num_samples,) + meta["plane_shape"], device=solver.device, dtype=recording_dtype(field)
                     )
             else:
                 warnings.warn(
@@ -794,7 +810,7 @@ def prepare_time_observers(solver, time_steps):
                         "coords": coords,
                     }
                     record["buffers"][component] = torch.zeros(
-                        (num_samples,) + sub_shape, device=solver.device, dtype=field.dtype
+                        (num_samples,) + sub_shape, device=solver.device, dtype=recording_dtype(field)
                     )
         else:
             record["flux_components"] = {
@@ -857,11 +873,22 @@ def accumulate_time_observers(solver, n):
                 buffer = record["buffers"][component]
                 if region_kind == "point":
                     i, j, field_k = meta["field_index"]
-                    buffer[k] = field[i, j, field_k]
+                    selection = (i, j, field_k)
                 elif region_kind == "plane":
-                    buffer[k] = field[meta["field_slice"]].squeeze(meta["axis_code"])
+                    selection = meta["field_slice"]
                 else:
-                    buffer[k] = field[meta["slices"]]
+                    selection = meta["slices"]
+                sample = field[selection]
+                if region_kind == "plane":
+                    sample = sample.squeeze(meta["axis_code"])
+                if buffer.is_complex():
+                    imaginary = getattr(solver, _field_name(component) + "_imag")[selection]
+                    if region_kind == "plane":
+                        imaginary = imaginary.squeeze(meta["axis_code"])
+                    buffer[k].real.copy_(sample)
+                    buffer[k].imag.copy_(imaginary)
+                else:
+                    buffer[k].copy_(sample)
             continue
 
         axis = record["axis"]
@@ -897,7 +924,7 @@ def get_time_observer_results(solver):
         count = int(record.get("next_index", len(sample_steps)))
         t = torch.tensor(sample_steps[:count], device=solver.device, dtype=torch.float64) * solver.dt
         if record["kind"] == "field_time":
-            components = {name: buffer[:count] for name, buffer in record["buffers"].items()}
+            components = {name: buffer[:count].detach() for name, buffer in record["buffers"].items()}
             payload = {
                 "kind": "field_time",
                 "differentiable": False,
@@ -928,7 +955,7 @@ def get_time_observer_results(solver):
                 "differentiable": False,
                 "name": record["name"],
                 "t": t,
-                "flux": record["buffer"][:count],
+                "flux": record["buffer"][:count].detach(),
                 "axis": record["axis"],
                 "position": record["position"],
                 "normal_direction": record["normal_direction"],
@@ -1297,7 +1324,7 @@ def get_observer_results(solver):
         result["current_spectrum"] = current_spectrum
 
     # Source-spectrum normalization pass
-    if getattr(solver, '_normalize_source', False) and getattr(solver, '_source_time', None) is not None:
+    if getattr(solver, '_normalize_source', False) and getattr(solver, '_normalization_source_time', None) is not None:
         for monitor_name, global_freq_indices in monitor_source_indices.items():
             result = results.get(monitor_name)
             if result is None:

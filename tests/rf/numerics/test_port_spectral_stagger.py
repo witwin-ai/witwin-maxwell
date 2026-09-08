@@ -5,9 +5,8 @@ production actually uses (``accumulate_precomputed`` /
 ``_accumulate_embedded_port_observers_gpu``). The older
 ``tests/rf/numerics/test_port_dft_stagger.py`` only exercises
 ``PortDFTAccumulator.accumulate`` / ``._scalar``, which have no production caller
-anymore, and it even encodes a different sample-time convention
-(``electric_time = step * dt``) than the live path
-(``electric_times = (step + 1) * dt``). This test pins the live E/H stagger and
+anymore. Both now use the public field time origin
+(``electric_time = step * dt``). This test pins the live E/H stagger and
 the lumped-port voltage-at-magnetic-half-step choice against an independent
 DFT-kernel oracle, so a sign flip or half-step error in ``_weighted_phase_table``
 can no longer pass the whole suite.
@@ -29,8 +28,7 @@ _TIME_STEPS = 6
 def _runtime(field_name: str, *, lumped: object | None) -> SimpleNamespace:
     frequencies = torch.tensor([1.0e9, 2.5e9], dtype=torch.float64)
     return SimpleNamespace(
-        # A pulse source forces window="none" with start_at_zero, giving unit
-        # window weights so the assertion isolates the phase-time stagger.
+        # Unit window weights isolate the phase-time stagger.
         source_kind="gaussian_pulse",
         frequencies=frequencies,
         excitation=None,
@@ -56,6 +54,7 @@ def _solver(runtimes: tuple[SimpleNamespace, ...]) -> SimpleNamespace:
         device=torch.device("cpu"),
         Ez=torch.zeros(1, dtype=torch.float32),
         _compute_spectral_start_step=lambda frequency, window_type: 0,
+        _resolve_spectral_window_type=lambda window_type: window_type,
     )
 
 
@@ -67,8 +66,8 @@ def test_live_phase_tables_encode_the_e_h_stagger_and_lumped_voltage_half_step()
     prepare_port_spectral_accumulators(solver, _TIME_STEPS, window_type="none")
 
     step = torch.arange(_TIME_STEPS, dtype=torch.float64)
-    electric_times = (step + 1.0) * _DT
-    magnetic_times = (step + 0.5) * _DT
+    electric_times = step * _DT
+    magnetic_times = (step - 0.5) * _DT
 
     # Window weights are unit for a pulse source, so the phase tables must equal
     # the bare kernel at the staggered sample times.

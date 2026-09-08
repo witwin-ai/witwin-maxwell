@@ -835,10 +835,9 @@ def _full_aniso_periodic_flags(solver):
 def apply_full_aniso_corrections(solver):
     """Add the off-diagonal anisotropic coupling terms to the E update.
 
-    Each kernel neighbor-averages the two off-axis curl(H) components onto the
-    target Yee edge and accumulates ``coeff * <curlH>``; the coefficients are the
-    off-diagonal entries of the per-edge inverse permittivity tensor scaled by
-    ``dt/eps0`` and vanish outside the anisotropic structures. Periodic axes
+    Each kernel sums the four independently weighted off-axis curl(H) samples.
+    The weights scatter a shared node inverse tensor through reciprocal Yee
+    gathers, scaled by ``dt/eps0``, and vanish outside anisotropic structures. Periodic axes
     wrap the collocation stencil; other boundaries skip out-of-range samples.
     Under CPML the coordinate-stretched variant is used so the coupling is
     absorbed consistently where an anisotropic structure reaches the boundary.
@@ -1015,9 +1014,8 @@ def capture_aniso_conduction_currents(solver):
 def apply_full_aniso_conduction(solver):
     """Subtract the off-diagonal conduction current through the inverse tensor.
 
-    Applies ``E_i -= 0.25 * (B_ij <sigma_j E_j^n> + B_ik <sigma_k E_k^n>)`` with the
-    same off-diagonal coefficients (``c*_aniso_*`` == ``B_ij``) and four-neighbor
-    collocation used for the curl(H) coupling. The conduction current is pointwise
+    Applies the same four reciprocal cross-component weights to ``sigma E^n``
+    as to curl(H). The conduction current is pointwise
     (no spatial derivative), so it needs no CPML coordinate stretch and reuses the
     plain off-diagonal current kernels for every boundary configuration.
     """
@@ -2031,15 +2029,9 @@ def _make_full_embedded_step_runner(solver, *, use_cuda_graph: bool):
         apply_mur_boundaries(solver)
         _accumulate_embedded_port_observers_gpu(solver)
 
-    mutable_tensors = [
-        tensor
-        for name, tensor in vars(solver).items()
-        if isinstance(tensor, torch.Tensor)
-        and (
-            name in {"Ex", "Ey", "Ez", "Hx", "Hy", "Hz"}
-            or name.startswith("psi")
-        )
-    ]
+    from ..checkpoint import graph_state_tensors
+
+    mutable_tensors = list(graph_state_tensors(solver).values())
     for runtime in runtimes:
         mutable_tensors.extend(
             (

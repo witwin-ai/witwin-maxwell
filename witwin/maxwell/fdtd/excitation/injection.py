@@ -1085,6 +1085,97 @@ def inject_electric_surface_source_terms(solver, *, time_value):
     )
 
 
+_ELECTRIC_CURRENT_SOURCE_KINDS = frozenset({"point_dipole", "uniform_current", "custom_current"})
+
+
+def _append_full_aniso_current_terms(solver, compiled_sources):
+    """Compile transverse responses to impressed J through the Yee material map.
+
+    Source patches already contain the diagonal response -dt J / eps_eff.
+    Recover their material-independent current and contract the two remaining
+    inverse-tensor rows once, retaining the original temporal envelope. Field
+    corrections and magnetic currents are not electric constitutive drives.
+    """
+    if not getattr(solver, "full_aniso_enabled", False):
+        return
+    import torch.nn.functional as functional
+
+    for term in tuple(solver._source_terms):
+        source_index = term.get("source_index")
+        if source_index is None or compiled_sources[source_index]["kind"] not in _ELECTRIC_CURRENT_SOURCE_KINDS:
+            continue
+        source_name = term["field_name"]
+        source_axis = "xyz".index(source_name[-1].lower())
+        patch = term["patch"]
+        region = tuple(slice(start, start + size) for start, size in zip(term["offsets"], patch.shape))
+        current_patch = -patch * getattr(solver, "eps_" + source_name)[region] / solver.dt
+        shape = getattr(solver, source_name).shape
+        periodic = tuple(solver.scene.boundary.axis_kind(axis) == "periodic" for axis in "xyz")
+        if not any(periodic):
+            # A local current couples only to adjacent transverse edges. Compile
+            # bounded patches without allocating full-domain source arrays.
+            for target_axis, target_name in enumerate(("Ex", "Ey", "Ez")):
+                if target_axis == source_axis:
+                    continue
+                coefficients = getattr(solver, f"ce{'xyz'[target_axis]}_aniso_{'xyz'[source_axis]}")
+                starts = list(term["offsets"])
+                ends = [start + size for start, size in zip(starts, patch.shape)]
+                starts[target_axis] = max(0, starts[target_axis] - 1)
+                ends[target_axis] = min(coefficients.shape[target_axis], ends[target_axis])
+                ends[source_axis] = min(coefficients.shape[source_axis], ends[source_axis] + 1)
+                target_region = tuple(slice(start, end) for start, end in zip(starts, ends))
+                local_coefficients = coefficients[target_region]
+                response = torch.zeros_like(local_coefficients[..., 0])
+                for target_side in range(2):
+                    for source_side in range(2):
+                        indices, masks = [], []
+                        for axis in range(3):
+                            offset = target_side if axis == target_axis else source_side - 1 if axis == source_axis else 0
+                            index = torch.arange(starts[axis], ends[axis], device=patch.device) + offset - term["offsets"][axis]
+                            view = [1, 1, 1]
+                            view[axis] = -1
+                            masks.append(((index >= 0) & (index < patch.shape[axis])).reshape(view))
+                            indices.append(index.clamp(0, patch.shape[axis] - 1).reshape(view))
+                        sample = current_patch[tuple(indices)] * (masks[0] & masks[1] & masks[2])
+                        slot = 2 * target_side + source_side if target_axis < source_axis else 2 * source_side + target_side
+                        response = response - local_coefficients[..., slot] * sample
+                transverse = dict(term)
+                transverse.update(field_name=target_name, offsets=tuple(starts), patch=response.contiguous(), periodic_compiled=True)
+                solver._source_terms.append(transverse)
+            continue
+        padding = tuple(value for axis in (2, 1, 0) for value in (
+            term["offsets"][axis], shape[axis] - term["offsets"][axis] - patch.shape[axis]))
+        current = functional.pad(current_patch, padding)
+        # The source kernel copies tangential node endpoints to their periodic
+        # partners. Compile those same copies before the cross-component gather.
+        for axis in range(3):
+            if periodic[axis] and axis != source_axis:
+                boundary = current.narrow(axis, 0, 1) + current.narrow(axis, shape[axis] - 1, 1)
+                current = torch.cat((boundary, current.narrow(axis, 1, shape[axis] - 2), boundary), dim=axis)
+        zero_shape = list(current.shape)
+        zero_shape[source_axis] = 1
+        zero = current.new_zeros(zero_shape)
+        previous = current.narrow(source_axis, shape[source_axis] - 1, 1) if periodic[source_axis] else zero
+        following = current.narrow(source_axis, 0, 1) if periodic[source_axis] else zero
+        neighbors = (torch.cat((previous, current), dim=source_axis),
+                     torch.cat((current, following), dim=source_axis))
+        for target_axis, target_name in enumerate(("Ex", "Ey", "Ez")):
+            if target_axis == source_axis:
+                continue
+            coefficients = getattr(solver, f"ce{'xyz'[target_axis]}_aniso_{'xyz'[source_axis]}")
+            response = torch.zeros_like(coefficients[..., 0])
+            for target_side in range(2):
+                selector = [slice(None)] * 3
+                selector[target_axis] = slice(target_side, shape[target_axis] - 1 + target_side)
+                for source_side in range(2):
+                    slot = 2 * target_side + source_side if target_axis < source_axis else 2 * source_side + target_side
+                    response = response - coefficients[..., slot] * neighbors[source_side][tuple(selector)]
+            transverse = dict(term)
+            transverse.update(field_name=target_name, offsets=(0, 0, 0),
+                              patch=response.contiguous(), periodic_compiled=True)
+            solver._source_terms.append(transverse)
+
+
 def initialize_source_terms(solver):
     solver._source_terms = []
     solver._magnetic_source_terms = []
@@ -1117,6 +1208,7 @@ def initialize_source_terms(solver):
             _prepare_custom_field_source(solver, source, source_index=source_index)
             continue
         _prepare_surface_source(solver, source, source_index=source_index)
+    _append_full_aniso_current_terms(solver, compiled_sources)
 
 
 def inject_source_terms(solver, n=None, signal=None, time_value=None):

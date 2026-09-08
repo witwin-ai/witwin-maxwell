@@ -1,15 +1,12 @@
 // Off-diagonal (full-tensor) anisotropic permittivity correction kernels.
 //
-// The base electric update already applies the diagonal entry of the per-edge
-// inverse permittivity tensor through the standard curl coefficient. These
-// kernels add the off-diagonal coupling terms
-//     E_i += coeff_ij * <curlH_j>_i
-// where <curlH_j>_i is the four-neighbor average of the off-axis curl(H)
-// component evaluated at its own Yee edges and collocated onto the target
-// edge. Periodic axes wrap both the neighbor sites and the finite-difference
-// stencils; on non-periodic axes, samples whose stencil would leave the grid
-// are skipped (the off-diagonal coefficients vanish near PML/absorber faces by
-// construction, so the fixed 1/4 weight stays exact where it matters).
+// The diagonal update uses the endpoint average of the node inverse tensor.
+// Each cross-component coefficient stores four independent source-edge weights:
+// the shared node inverse times reciprocal Yee gather/scatter volume factors.
+// Keeping the material inside this stencil makes spatially varying tensors
+// self-adjoint in the Yee volume inner product. Periodic axes wrap the neighbor
+// sites and finite differences; other faces use zero extension. Separate CPML
+// variants stretch the weighted derivative terms when the material meets PML.
 //
 // The kernels are launched only when the solver's full-anisotropy feature flag
 // is set, so the base field-update path keeps its memory traffic untouched.
@@ -389,8 +386,8 @@ __global__ void update_electric_ex_full_aniso_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  const float c_y = coeff_y[linear];
-  const float c_z = coeff_z[linear];
+  const bool c_y = coeff_y[4 * linear] != 0.0f || coeff_y[4 * linear + 1] != 0.0f || coeff_y[4 * linear + 2] != 0.0f || coeff_y[4 * linear + 3] != 0.0f;
+  const bool c_z = coeff_z[4 * linear] != 0.0f || coeff_z[4 * linear + 1] != 0.0f || coeff_z[4 * linear + 2] != 0.0f || coeff_z[4 * linear + 3] != 0.0f;
   if (c_y == 0.0f && c_z == 0.0f) {
     return;
   }
@@ -412,7 +409,7 @@ __global__ void update_electric_ex_full_aniso_kernel(
         float sample;
         if (curl_h_y_at(hx, hz, sx, sy, kk, nx_nodes, ny_nodes, nz_nodes,
                         per_x, per_y, per_z, inv_dx, inv_dz, sample)) {
-          acc_y += sample;
+          acc_y += coeff_y[4 * linear + (sx - ii) * 2 + (sy - jj + 1)] * sample;
         }
       }
     }
@@ -426,13 +423,13 @@ __global__ void update_electric_ex_full_aniso_kernel(
         float sample;
         if (curl_h_z_at(hx, hy, sx, jj, sz, nx_nodes, ny_nodes, nz_nodes,
                         per_x, per_y, per_z, inv_dx, inv_dy, sample)) {
-          acc_z += sample;
+          acc_z += coeff_z[4 * linear + (sx - ii) * 2 + (sz - kk + 1)] * sample;
         }
       }
     }
   }
 
-  ex[linear] += 0.25f * (c_y * acc_y + c_z * acc_z);
+  ex[linear] += (acc_y + acc_z);
 }
 
 // Ey(i, j, k) lives at (i, (j+1/2), k); field shape is (Nx, Ny-1, Nz).
@@ -459,8 +456,8 @@ __global__ void update_electric_ey_full_aniso_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  const float c_x = coeff_x[linear];
-  const float c_z = coeff_z[linear];
+  const bool c_x = coeff_x[4 * linear] != 0.0f || coeff_x[4 * linear + 1] != 0.0f || coeff_x[4 * linear + 2] != 0.0f || coeff_x[4 * linear + 3] != 0.0f;
+  const bool c_z = coeff_z[4 * linear] != 0.0f || coeff_z[4 * linear + 1] != 0.0f || coeff_z[4 * linear + 2] != 0.0f || coeff_z[4 * linear + 3] != 0.0f;
   if (c_x == 0.0f && c_z == 0.0f) {
     return;
   }
@@ -482,7 +479,7 @@ __global__ void update_electric_ey_full_aniso_kernel(
         float sample;
         if (curl_h_x_at(hy, hz, sx, sy, kk, nx_nodes, ny_nodes, nz_nodes,
                         per_x, per_y, per_z, inv_dy, inv_dz, sample)) {
-          acc_x += sample;
+          acc_x += coeff_x[4 * linear + (sx - ii + 1) * 2 + (sy - jj)] * sample;
         }
       }
     }
@@ -496,13 +493,13 @@ __global__ void update_electric_ey_full_aniso_kernel(
         float sample;
         if (curl_h_z_at(hx, hy, ii, sy, sz, nx_nodes, ny_nodes, nz_nodes,
                         per_x, per_y, per_z, inv_dx, inv_dy, sample)) {
-          acc_z += sample;
+          acc_z += coeff_z[4 * linear + (sy - jj) * 2 + (sz - kk + 1)] * sample;
         }
       }
     }
   }
 
-  ey[linear] += 0.25f * (c_x * acc_x + c_z * acc_z);
+  ey[linear] += (acc_x + acc_z);
 }
 
 // Ez(i, j, k) lives at (i, j, (k+1/2)); field shape is (Nx, Ny, Nz-1).
@@ -529,8 +526,8 @@ __global__ void update_electric_ez_full_aniso_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  const float c_x = coeff_x[linear];
-  const float c_y = coeff_y[linear];
+  const bool c_x = coeff_x[4 * linear] != 0.0f || coeff_x[4 * linear + 1] != 0.0f || coeff_x[4 * linear + 2] != 0.0f || coeff_x[4 * linear + 3] != 0.0f;
+  const bool c_y = coeff_y[4 * linear] != 0.0f || coeff_y[4 * linear + 1] != 0.0f || coeff_y[4 * linear + 2] != 0.0f || coeff_y[4 * linear + 3] != 0.0f;
   if (c_x == 0.0f && c_y == 0.0f) {
     return;
   }
@@ -552,7 +549,7 @@ __global__ void update_electric_ez_full_aniso_kernel(
         float sample;
         if (curl_h_x_at(hy, hz, sx, jj, sz, nx_nodes, ny_nodes, nz_nodes,
                         per_x, per_y, per_z, inv_dy, inv_dz, sample)) {
-          acc_x += sample;
+          acc_x += coeff_x[4 * linear + (sx - ii + 1) * 2 + (sz - kk)] * sample;
         }
       }
     }
@@ -566,13 +563,13 @@ __global__ void update_electric_ez_full_aniso_kernel(
         float sample;
         if (curl_h_y_at(hx, hz, ii, sy, sz, nx_nodes, ny_nodes, nz_nodes,
                         per_x, per_y, per_z, inv_dx, inv_dz, sample)) {
-          acc_y += sample;
+          acc_y += coeff_y[4 * linear + (sy - jj + 1) * 2 + (sz - kk)] * sample;
         }
       }
     }
   }
 
-  ez[linear] += 0.25f * (c_x * acc_x + c_y * acc_y);
+  ez[linear] += (acc_x + acc_y);
 }
 
 // --- CPML-consistent off-diagonal correction (structure overlapping the PML) -
@@ -624,8 +621,8 @@ __global__ void update_electric_ex_full_aniso_cpml_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  const float c_y = coeff_y[linear];
-  const float c_z = coeff_z[linear];
+  const bool c_y = coeff_y[4 * linear] != 0.0f || coeff_y[4 * linear + 1] != 0.0f || coeff_y[4 * linear + 2] != 0.0f || coeff_y[4 * linear + 3] != 0.0f;
+  const bool c_z = coeff_z[4 * linear] != 0.0f || coeff_z[4 * linear + 1] != 0.0f || coeff_z[4 * linear + 2] != 0.0f || coeff_z[4 * linear + 3] != 0.0f;
   if (c_y == 0.0f && c_z == 0.0f) {
     return;
   }
@@ -649,8 +646,8 @@ __global__ void update_electric_ex_full_aniso_cpml_kernel(
         float d_dx;
         if (curl_h_y_parts(hx, hz, sx, sy, kk, nx_nodes, ny_nodes, nz_nodes,
                            per_x, per_y, per_z, inv_dx, inv_dz, d_dz, d_dx)) {
-          acc_yz += d_dz;
-          acc_yx += d_dx;
+          acc_yz += coeff_y[4 * linear + (sx - ii) * 2 + (sy - jj + 1)] * d_dz;
+          acc_yx += coeff_y[4 * linear + (sx - ii) * 2 + (sy - jj + 1)] * d_dx;
         }
       }
     }
@@ -666,16 +663,16 @@ __global__ void update_electric_ex_full_aniso_cpml_kernel(
         float d_dy;
         if (curl_h_z_parts(hx, hy, sx, jj, sz, nx_nodes, ny_nodes, nz_nodes,
                            per_x, per_y, per_z, inv_dx, inv_dy, d_dx, d_dy)) {
-          acc_zx += d_dx;
-          acc_zy += d_dy;
+          acc_zx += coeff_z[4 * linear + (sx - ii) * 2 + (sz - kk + 1)] * d_dx;
+          acc_zy += coeff_z[4 * linear + (sx - ii) * 2 + (sz - kk + 1)] * d_dy;
         }
       }
     }
   }
 
-  const float driver_x = 0.25f * (-c_y * acc_yx + c_z * acc_zx);
-  const float driver_y = 0.25f * (-c_z * acc_zy);
-  const float driver_z = 0.25f * (c_y * acc_yz);
+  const float driver_x = (-acc_yx + acc_zx);
+  const float driver_y = (-acc_zy);
+  const float driver_z = (acc_yz);
 
   const float out_x = aniso_cpml_stretch(driver_x, psi_x, linear, cpml_b_x[i], cpml_c_x[i], inv_kappa_x[i]);
   const float out_y = aniso_cpml_stretch(driver_y, psi_y, linear, cpml_b_y[j], cpml_c_y[j], inv_kappa_y[j]);
@@ -718,8 +715,8 @@ __global__ void update_electric_ey_full_aniso_cpml_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  const float c_x = coeff_x[linear];
-  const float c_z = coeff_z[linear];
+  const bool c_x = coeff_x[4 * linear] != 0.0f || coeff_x[4 * linear + 1] != 0.0f || coeff_x[4 * linear + 2] != 0.0f || coeff_x[4 * linear + 3] != 0.0f;
+  const bool c_z = coeff_z[4 * linear] != 0.0f || coeff_z[4 * linear + 1] != 0.0f || coeff_z[4 * linear + 2] != 0.0f || coeff_z[4 * linear + 3] != 0.0f;
   if (c_x == 0.0f && c_z == 0.0f) {
     return;
   }
@@ -743,8 +740,8 @@ __global__ void update_electric_ey_full_aniso_cpml_kernel(
         float d_dz;
         if (curl_h_x_parts(hy, hz, sx, sy, kk, nx_nodes, ny_nodes, nz_nodes,
                            per_x, per_y, per_z, inv_dy, inv_dz, d_dy, d_dz)) {
-          acc_xy += d_dy;
-          acc_xz += d_dz;
+          acc_xy += coeff_x[4 * linear + (sx - ii + 1) * 2 + (sy - jj)] * d_dy;
+          acc_xz += coeff_x[4 * linear + (sx - ii + 1) * 2 + (sy - jj)] * d_dz;
         }
       }
     }
@@ -760,16 +757,16 @@ __global__ void update_electric_ey_full_aniso_cpml_kernel(
         float d_dy;
         if (curl_h_z_parts(hx, hy, ii, sy, sz, nx_nodes, ny_nodes, nz_nodes,
                            per_x, per_y, per_z, inv_dx, inv_dy, d_dx, d_dy)) {
-          acc_zx += d_dx;
-          acc_zy += d_dy;
+          acc_zx += coeff_z[4 * linear + (sy - jj) * 2 + (sz - kk + 1)] * d_dx;
+          acc_zy += coeff_z[4 * linear + (sy - jj) * 2 + (sz - kk + 1)] * d_dy;
         }
       }
     }
   }
 
-  const float driver_x = 0.25f * (c_z * acc_zx);
-  const float driver_y = 0.25f * (c_x * acc_xy - c_z * acc_zy);
-  const float driver_z = 0.25f * (-c_x * acc_xz);
+  const float driver_x = (acc_zx);
+  const float driver_y = (acc_xy - acc_zy);
+  const float driver_z = (-acc_xz);
 
   const float out_x = aniso_cpml_stretch(driver_x, psi_x, linear, cpml_b_x[i], cpml_c_x[i], inv_kappa_x[i]);
   const float out_y = aniso_cpml_stretch(driver_y, psi_y, linear, cpml_b_y[j], cpml_c_y[j], inv_kappa_y[j]);
@@ -812,8 +809,8 @@ __global__ void update_electric_ez_full_aniso_cpml_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  const float c_x = coeff_x[linear];
-  const float c_y = coeff_y[linear];
+  const bool c_x = coeff_x[4 * linear] != 0.0f || coeff_x[4 * linear + 1] != 0.0f || coeff_x[4 * linear + 2] != 0.0f || coeff_x[4 * linear + 3] != 0.0f;
+  const bool c_y = coeff_y[4 * linear] != 0.0f || coeff_y[4 * linear + 1] != 0.0f || coeff_y[4 * linear + 2] != 0.0f || coeff_y[4 * linear + 3] != 0.0f;
   if (c_x == 0.0f && c_y == 0.0f) {
     return;
   }
@@ -837,8 +834,8 @@ __global__ void update_electric_ez_full_aniso_cpml_kernel(
         float d_dz;
         if (curl_h_x_parts(hy, hz, sx, jj, sz, nx_nodes, ny_nodes, nz_nodes,
                            per_x, per_y, per_z, inv_dy, inv_dz, d_dy, d_dz)) {
-          acc_xy += d_dy;
-          acc_xz += d_dz;
+          acc_xy += coeff_x[4 * linear + (sx - ii + 1) * 2 + (sz - kk)] * d_dy;
+          acc_xz += coeff_x[4 * linear + (sx - ii + 1) * 2 + (sz - kk)] * d_dz;
         }
       }
     }
@@ -854,16 +851,16 @@ __global__ void update_electric_ez_full_aniso_cpml_kernel(
         float d_dx;
         if (curl_h_y_parts(hx, hz, ii, sy, sz, nx_nodes, ny_nodes, nz_nodes,
                            per_x, per_y, per_z, inv_dx, inv_dz, d_dz, d_dx)) {
-          acc_yz += d_dz;
-          acc_yx += d_dx;
+          acc_yz += coeff_y[4 * linear + (sy - jj + 1) * 2 + (sz - kk)] * d_dz;
+          acc_yx += coeff_y[4 * linear + (sy - jj + 1) * 2 + (sz - kk)] * d_dx;
         }
       }
     }
   }
 
-  const float driver_x = 0.25f * (-c_y * acc_yx);
-  const float driver_y = 0.25f * (c_x * acc_xy);
-  const float driver_z = 0.25f * (-c_x * acc_xz + c_y * acc_yz);
+  const float driver_x = (-acc_yx);
+  const float driver_y = (acc_xy);
+  const float driver_z = (-acc_xz + acc_yz);
 
   const float out_x = aniso_cpml_stretch(driver_x, psi_x, linear, cpml_b_x[i], cpml_c_x[i], inv_kappa_x[i]);
   const float out_y = aniso_cpml_stretch(driver_y, psi_y, linear, cpml_b_y[j], cpml_c_y[j], inv_kappa_y[j]);
@@ -972,8 +969,8 @@ __global__ void apply_aniso_offdiag_current_ex_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  const float c_y = coeff_y[linear];
-  const float c_z = coeff_z[linear];
+  const bool c_y = coeff_y[4 * linear] != 0.0f || coeff_y[4 * linear + 1] != 0.0f || coeff_y[4 * linear + 2] != 0.0f || coeff_y[4 * linear + 3] != 0.0f;
+  const bool c_z = coeff_z[4 * linear] != 0.0f || coeff_z[4 * linear + 1] != 0.0f || coeff_z[4 * linear + 2] != 0.0f || coeff_z[4 * linear + 3] != 0.0f;
   if (c_y == 0.0f && c_z == 0.0f) {
     return;
   }
@@ -994,7 +991,7 @@ __global__ void apply_aniso_offdiag_current_ex_kernel(
         float sample;
         if (read_ey_edge_value(jy, sx, sy, kk, nx_nodes, ny_nodes, nz_nodes,
                                per_x, per_y, per_z, sample)) {
-          acc_y += sample;
+          acc_y += coeff_y[4 * linear + (sx - ii) * 2 + (sy - jj + 1)] * sample;
         }
       }
     }
@@ -1007,13 +1004,13 @@ __global__ void apply_aniso_offdiag_current_ex_kernel(
         float sample;
         if (read_ez_edge_value(jz, sx, jj, sz, nx_nodes, ny_nodes, nz_nodes,
                                per_x, per_y, per_z, sample)) {
-          acc_z += sample;
+          acc_z += coeff_z[4 * linear + (sx - ii) * 2 + (sz - kk + 1)] * sample;
         }
       }
     }
   }
 
-  ex[linear] -= 0.25f * (c_y * acc_y + c_z * acc_z);
+  ex[linear] -= (acc_y + acc_z);
 }
 
 __global__ void apply_aniso_offdiag_current_ey_kernel(
@@ -1035,8 +1032,8 @@ __global__ void apply_aniso_offdiag_current_ey_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  const float c_x = coeff_x[linear];
-  const float c_z = coeff_z[linear];
+  const bool c_x = coeff_x[4 * linear] != 0.0f || coeff_x[4 * linear + 1] != 0.0f || coeff_x[4 * linear + 2] != 0.0f || coeff_x[4 * linear + 3] != 0.0f;
+  const bool c_z = coeff_z[4 * linear] != 0.0f || coeff_z[4 * linear + 1] != 0.0f || coeff_z[4 * linear + 2] != 0.0f || coeff_z[4 * linear + 3] != 0.0f;
   if (c_x == 0.0f && c_z == 0.0f) {
     return;
   }
@@ -1057,7 +1054,7 @@ __global__ void apply_aniso_offdiag_current_ey_kernel(
         float sample;
         if (read_ex_edge_value(jx, sx, sy, kk, nx_nodes, ny_nodes, nz_nodes,
                                per_x, per_y, per_z, sample)) {
-          acc_x += sample;
+          acc_x += coeff_x[4 * linear + (sx - ii + 1) * 2 + (sy - jj)] * sample;
         }
       }
     }
@@ -1070,13 +1067,13 @@ __global__ void apply_aniso_offdiag_current_ey_kernel(
         float sample;
         if (read_ez_edge_value(jz, ii, sy, sz, nx_nodes, ny_nodes, nz_nodes,
                                per_x, per_y, per_z, sample)) {
-          acc_z += sample;
+          acc_z += coeff_z[4 * linear + (sy - jj) * 2 + (sz - kk + 1)] * sample;
         }
       }
     }
   }
 
-  ey[linear] -= 0.25f * (c_x * acc_x + c_z * acc_z);
+  ey[linear] -= (acc_x + acc_z);
 }
 
 __global__ void apply_aniso_offdiag_current_ez_kernel(
@@ -1098,8 +1095,8 @@ __global__ void apply_aniso_offdiag_current_ez_kernel(
     return;
   }
   const long long linear = offset3d(i, j, k, ny, nz);
-  const float c_x = coeff_x[linear];
-  const float c_y = coeff_y[linear];
+  const bool c_x = coeff_x[4 * linear] != 0.0f || coeff_x[4 * linear + 1] != 0.0f || coeff_x[4 * linear + 2] != 0.0f || coeff_x[4 * linear + 3] != 0.0f;
+  const bool c_y = coeff_y[4 * linear] != 0.0f || coeff_y[4 * linear + 1] != 0.0f || coeff_y[4 * linear + 2] != 0.0f || coeff_y[4 * linear + 3] != 0.0f;
   if (c_x == 0.0f && c_y == 0.0f) {
     return;
   }
@@ -1120,7 +1117,7 @@ __global__ void apply_aniso_offdiag_current_ez_kernel(
         float sample;
         if (read_ex_edge_value(jx, sx, jj, sz, nx_nodes, ny_nodes, nz_nodes,
                                per_x, per_y, per_z, sample)) {
-          acc_x += sample;
+          acc_x += coeff_x[4 * linear + (sx - ii + 1) * 2 + (sz - kk)] * sample;
         }
       }
     }
@@ -1133,13 +1130,13 @@ __global__ void apply_aniso_offdiag_current_ez_kernel(
         float sample;
         if (read_ey_edge_value(jy, ii, sy, sz, nx_nodes, ny_nodes, nz_nodes,
                                per_x, per_y, per_z, sample)) {
-          acc_y += sample;
+          acc_y += coeff_y[4 * linear + (sy - jj + 1) * 2 + (sz - kk)] * sample;
         }
       }
     }
   }
 
-  ez[linear] -= 0.25f * (c_x * acc_x + c_y * acc_y);
+  ez[linear] -= (acc_x + acc_y);
 }
 
 void check_full_aniso_inputs(
@@ -1163,8 +1160,8 @@ void check_full_aniso_inputs(
     check_same_cuda_device(field, *tensor, name);
   }
   STD_TORCH_CHECK(field.dim() == 3, name, " must be rank 3");
-  STD_TORCH_CHECK(coeff_a.sizes().equals(field.sizes()), name, " coeff must match field shape");
-  STD_TORCH_CHECK(coeff_b.sizes().equals(field.sizes()), name, " coeff must match field shape");
+  STD_TORCH_CHECK(coeff_a.dim() == 4 && coeff_a.size(0) == field.size(0) && coeff_a.size(1) == field.size(1) && coeff_a.size(2) == field.size(2) && coeff_a.size(3) == 4, name, " coeff must contain four weights per field edge");
+  STD_TORCH_CHECK(coeff_b.dim() == 4 && coeff_b.size(0) == field.size(0) && coeff_b.size(1) == field.size(1) && coeff_b.size(2) == field.size(2) && coeff_b.size(3) == 4, name, " coeff must contain four weights per field edge");
   STD_TORCH_CHECK(
       hx.dim() == 3 && hx.size(0) == nx_nodes && hx.size(1) == ny_nodes - 1 && hx.size(2) == nz_nodes - 1,
       name, " hx has an incompatible Yee-grid shape");
@@ -1236,8 +1233,8 @@ void check_aniso_offdiag_current_inputs(
     check_same_cuda_device(field, *tensor, name);
   }
   STD_TORCH_CHECK(field.dim() == 3, name, " must be rank 3");
-  STD_TORCH_CHECK(coeff_a.sizes().equals(field.sizes()), name, " coeff must match field shape");
-  STD_TORCH_CHECK(coeff_b.sizes().equals(field.sizes()), name, " coeff must match field shape");
+  STD_TORCH_CHECK(coeff_a.dim() == 4 && coeff_a.size(0) == field.size(0) && coeff_a.size(1) == field.size(1) && coeff_a.size(2) == field.size(2) && coeff_a.size(3) == 4, name, " coeff must contain four weights per field edge");
+  STD_TORCH_CHECK(coeff_b.dim() == 4 && coeff_b.size(0) == field.size(0) && coeff_b.size(1) == field.size(1) && coeff_b.size(2) == field.size(2) && coeff_b.size(3) == 4, name, " coeff must contain four weights per field edge");
 }
 
 }  // namespace

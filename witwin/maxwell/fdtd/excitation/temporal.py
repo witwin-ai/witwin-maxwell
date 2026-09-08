@@ -330,7 +330,7 @@ def apply_generic_source_terms(solver, terms, *, source_time, omega, time_value,
                 signal=signal_cache[cache_key],
             )
             continue
-        if solver.scene.boundary.uses_kind("periodic"):
+        if solver.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
             _launch_periodic_patch(
                 solver,
                 field_name=field_name,
@@ -472,7 +472,7 @@ def apply_compiled_source_terms(solver, terms, *, source_time, omega, time_value
                 signal=signal_cache[cache_key],
             )
             continue
-        if solver.scene.boundary.uses_kind("periodic"):
+        if solver.scene.boundary.uses_kind("periodic") and not term.get("periodic_compiled", False):
             _launch_periodic_patch(
                 solver,
                 field_name=field_name,

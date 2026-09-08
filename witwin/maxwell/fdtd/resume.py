@@ -16,7 +16,7 @@ from .checkpoint import (
 )
 
 
-_RESUME_SCHEMA_VERSION = 3
+_RESUME_SCHEMA_VERSION = 4
 _SCHEMA_TUPLE_FIELDS = tuple(field.name for field in fields(FDTDCheckpointSchema) if field.name != "version")
 
 
@@ -233,7 +233,12 @@ def _configuration_fingerprint(solver) -> str:
     _hash_value(hasher, "compiled_sources", getattr(solver, "_compiled_sources", ()))
     _hash_value(hasher, "port_excitations", getattr(solver, "_port_excitations", ()))
     _hash_value(hasher, "material_model", getattr(solver, "_compiled_material_model", None))
+    _hash_value(hasher, "gyromagnetic_layout", getattr(solver, "_gyromagnetic_layout", None))
     _hash_value(hasher, "boundary", solver.scene.boundary)
+    breakdown = getattr(solver, "breakdown_runtime", None)
+    if breakdown is not None:
+        _hash_value(hasher, "breakdown.layout", breakdown["layout"])
+        _hash_value(hasher, "breakdown.edge_sets", breakdown["edge_sets"])
     static_tensor_prefixes = (
         "eps_",
         "mu_",
@@ -248,6 +253,15 @@ def _configuration_fingerprint(solver) -> str:
     )
     for name, value in sorted(vars(solver).items()):
         if isinstance(value, torch.Tensor) and name.startswith(static_tensor_prefixes) and not name.endswith("_dynamic"):
+            if breakdown is not None and name in {
+                "cex_decay", "cex_curl", "cey_decay", "cey_curl", "cez_decay", "cez_curl"
+            }:
+                # Conductivity history rewrites only capable edges. Hash their
+                # original coefficients while preserving every other edge value.
+                data = breakdown["edge_sets"].get("E" + name[2])
+                if data is not None:
+                    value = value.clone()
+                    value.reshape(-1).index_copy_(0, data["edge_flat"], data["base_" + name[4:]])
             _hash_tensor(hasher, f"solver.{name}", value)
     for index, runtime in enumerate(getattr(solver, "_network_runtimes", ())):
         _hash_value(hasher, f"network[{index}].compiled", runtime.compiled)

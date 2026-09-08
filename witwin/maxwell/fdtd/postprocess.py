@@ -71,7 +71,7 @@ def _solver_source_spectrum(solver, entry):
     """Return source spectrum for an entry if normalize_source is active, else None."""
     if not getattr(solver, '_normalize_source', False):
         return None
-    if getattr(solver, '_source_time', None) is None:
+    if getattr(solver, '_normalization_source_time', None) is None:
         return None
     wn = entry.get("window_normalization", 0.0)
     sc = entry.get("sample_count", 0)

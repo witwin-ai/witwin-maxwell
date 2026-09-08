@@ -1012,6 +1012,19 @@ class _FDTDGradientBridge:
         grad_eps_ex = torch.zeros_like(solver.eps_Ex)
         grad_eps_ey = torch.zeros_like(solver.eps_Ey)
         grad_eps_ez = torch.zeros_like(solver.eps_Ez)
+        grad_aniso_inverse = None
+        aniso_gather_weights = None
+        if getattr(solver, "full_aniso_enabled", False):
+            from ..runtime.materials import _aniso_node_gather_weights
+
+            reference = solver._compiled_material_model["eps_components"]["x"]
+            grad_aniso_inverse = {pair: torch.zeros_like(reference) for pair in ("xy", "xz", "yz")}
+            aniso_gather_weights = {}
+            for axis in range(3):
+                view = [1, 1, 1]
+                view[axis] = -1
+                aniso_gather_weights[axis] = tuple(weight.reshape(view) for weight in
+                    _aniso_node_gather_weights(solver.scene, axis, reference))
         semantic_rf_grads = {}
         wire_runtime = getattr(solver, "_wire_runtime", None)
         grad_wire_inductance = (
@@ -1211,6 +1224,9 @@ class _FDTDGradientBridge:
                                 port_grad_wire_gap_weights.contiguous(),
                             )
 
+                    if grad_aniso_inverse is not None:
+                        runtime._accumulate_aniso_inverse_gradients(solver, states[offset + 1],
+                            post_step_adjoint, grad_aniso_inverse, aniso_gather_weights)
                     step_result = reverse_step(
                         solver,
                         states[offset],
@@ -1312,7 +1328,7 @@ class _FDTDGradientBridge:
                     }
 
             with profiler.section("material_pullback"):
-                # Mode-source profile terms deferred their eigensolve VJP to keep
+                # Material-dependent source terms deferred their graph VJP to keep
                 # torch.autograd.grad off the per-step hot path; apply the single
                 # accumulated pullback here (over the retained source-term graph)
                 # before the material pullback consumes grad_eps.
@@ -1327,6 +1343,10 @@ class _FDTDGradientBridge:
                         grad_eps_ey = _accumulate_grad(grad_accumulator_backend, grad_eps_ey, grad_profile_ey.detach())
                     if grad_profile_ez is not None:
                         grad_eps_ez = _accumulate_grad(grad_accumulator_backend, grad_eps_ez, grad_profile_ez.detach())
+                if grad_aniso_inverse is not None:
+                    for pair, value in (getattr(solver, "_source_aniso_inverse_gradients", None) or {}).items():
+                        if value is not None:
+                            grad_aniso_inverse[pair].add_(value.detach())
                 with torch.enable_grad():
                     material_outputs = tuple(
                         torch.zeros_like(tensor) for tensor in base_inputs
@@ -1345,6 +1365,7 @@ class _FDTDGradientBridge:
                             grad_eps_ey=grad_eps_ey,
                             grad_eps_ez=grad_eps_ez,
                             eps0=solver.eps0,
+                            grad_aniso_inverse=grad_aniso_inverse,
                             grad_chi3_ex=grad_chi3_ex,
                             grad_chi3_ey=grad_chi3_ey,
                             grad_chi3_ez=grad_chi3_ez,
@@ -1378,6 +1399,9 @@ class _FDTDGradientBridge:
         finally:
             if hasattr(solver, "_mode_source_cotangent_accum"):
                 delattr(solver, "_mode_source_cotangent_accum")
+            for name in ("_source_aniso_inverse_leaves", "_source_aniso_inverse_gradients"):
+                if hasattr(solver, name):
+                    delattr(solver, name)
             if getattr(solver, "_reverse_ctx_scratch", None) is not None:
                 solver._reverse_ctx_scratch = None
         profiler.record_material_pullback_backend(

@@ -228,44 +228,26 @@ def _reference_corrections(solver):
     # Ex: average curl_y over (ii in {i, i+1}, jy in {j-1, j}) and curl_z over
     # (ii in {i, i+1}, kz in {k-1, k}).
     p_y = _pad(curl_y, (0, 0, 1, 1))
-    acc_y = 0.25 * (
-        p_y[0 : nx - 1, 0:ny, :] + p_y[0 : nx - 1, 1 : ny + 1, :]
-        + p_y[1:nx, 0:ny, :] + p_y[1:nx, 1 : ny + 1, :]
-    )
+    acc_y = torch.stack((p_y[0 : nx - 1, 0:ny, :], p_y[0 : nx - 1, 1 : ny + 1, :], p_y[1:nx, 0:ny, :], p_y[1:nx, 1 : ny + 1, :]), dim=-1)
     p_z = _pad(curl_z, (1, 1))
-    acc_z = 0.25 * (
-        p_z[0 : nx - 1, :, 0:nz] + p_z[0 : nx - 1, :, 1 : nz + 1]
-        + p_z[1:nx, :, 0:nz] + p_z[1:nx, :, 1 : nz + 1]
-    )
-    delta_ex = solver.cex_aniso_y.double() * acc_y + solver.cex_aniso_z.double() * acc_z
+    acc_z = torch.stack((p_z[0 : nx - 1, :, 0:nz], p_z[0 : nx - 1, :, 1 : nz + 1], p_z[1:nx, :, 0:nz], p_z[1:nx, :, 1 : nz + 1]), dim=-1)
+    delta_ex = (solver.cex_aniso_y.double() * acc_y + solver.cex_aniso_z.double() * acc_z).sum(dim=-1)
 
     # Ey: average curl_x over (ix in {i-1, i}, jy in {j, j+1}) and curl_z over
     # (jy in {j, j+1}, kz in {k-1, k}).
     p_x = _pad(curl_x, (0, 0, 0, 0, 1, 1))
-    acc_x = 0.25 * (
-        p_x[0:nx, 0 : ny - 1, :] + p_x[0:nx, 1:ny, :]
-        + p_x[1 : nx + 1, 0 : ny - 1, :] + p_x[1 : nx + 1, 1:ny, :]
-    )
+    acc_x = torch.stack((p_x[0:nx, 0 : ny - 1, :], p_x[0:nx, 1:ny, :], p_x[1 : nx + 1, 0 : ny - 1, :], p_x[1 : nx + 1, 1:ny, :]), dim=-1)
     p_z = _pad(curl_z, (1, 1))
-    acc_z = 0.25 * (
-        p_z[:, 0 : ny - 1, 0:nz] + p_z[:, 1:ny, 0:nz]
-        + p_z[:, 0 : ny - 1, 1 : nz + 1] + p_z[:, 1:ny, 1 : nz + 1]
-    )
-    delta_ey = solver.cey_aniso_x.double() * acc_x + solver.cey_aniso_z.double() * acc_z
+    acc_z = torch.stack((p_z[:, 0 : ny - 1, 0:nz], p_z[:, 0 : ny - 1, 1 : nz + 1], p_z[:, 1:ny, 0:nz], p_z[:, 1:ny, 1 : nz + 1]), dim=-1)
+    delta_ey = (solver.cey_aniso_x.double() * acc_x + solver.cey_aniso_z.double() * acc_z).sum(dim=-1)
 
     # Ez: average curl_x over (ix in {i-1, i}, kz in {k, k+1}) and curl_y over
     # (jy in {j-1, j}, kz in {k, k+1}).
     p_x = _pad(curl_x, (0, 0, 0, 0, 1, 1))
-    acc_x = 0.25 * (
-        p_x[0:nx, :, 0 : nz - 1] + p_x[0:nx, :, 1:nz]
-        + p_x[1 : nx + 1, :, 0 : nz - 1] + p_x[1 : nx + 1, :, 1:nz]
-    )
+    acc_x = torch.stack((p_x[0:nx, :, 0 : nz - 1], p_x[0:nx, :, 1:nz], p_x[1 : nx + 1, :, 0 : nz - 1], p_x[1 : nx + 1, :, 1:nz]), dim=-1)
     p_y = _pad(curl_y, (0, 0, 1, 1))
-    acc_y = 0.25 * (
-        p_y[:, 0:ny, 0 : nz - 1] + p_y[:, 1 : ny + 1, 0 : nz - 1]
-        + p_y[:, 0:ny, 1:nz] + p_y[:, 1 : ny + 1, 1:nz]
-    )
-    delta_ez = solver.cez_aniso_x.double() * acc_x + solver.cez_aniso_y.double() * acc_y
+    acc_y = torch.stack((p_y[:, 0:ny, 0 : nz - 1], p_y[:, 0:ny, 1:nz], p_y[:, 1 : ny + 1, 0 : nz - 1], p_y[:, 1 : ny + 1, 1:nz]), dim=-1)
+    delta_ez = (solver.cez_aniso_x.double() * acc_x + solver.cez_aniso_y.double() * acc_y).sum(dim=-1)
 
     return delta_ex, delta_ey, delta_ez
 

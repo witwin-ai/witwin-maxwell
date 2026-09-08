@@ -463,6 +463,9 @@ def _build_source_replay_solver(solver, compiled_sources, eps_ex, eps_ey, eps_ez
         Hx=solver.Hx,
         Hy=solver.Hy,
         Hz=solver.Hz,
+        mu_Hx=solver.mu_Hx,
+        mu_Hy=solver.mu_Hy,
+        mu_Hz=solver.mu_Hz,
         dt=solver.dt,
         c=solver.c,
         eps0=solver.eps0,
@@ -487,15 +490,17 @@ def _build_source_replay_solver(solver, compiled_sources, eps_ex, eps_ey, eps_ez
         _iter_source_images=solver._iter_source_images,
         _component_plane_spec=solver._component_plane_spec,
         _component_positions=solver._component_positions,
+        _COMPONENT_HALF_OFFSET_AXES=solver._COMPONENT_HALF_OFFSET_AXES,
         _plane_coordinate=solver._plane_coordinate,
     )
 
 
 # Source kinds whose eps-leaf-dependent patches are re-derived on the replay
-# solver so the mode-source objective and the torch-VJP reverse can flow
-# gradients into eps. Other kinds keep their forward-built terms.
+# solver so material-dependent profiles and current contractions retain their
+# material graph. Other kinds keep their forward-built terms.
 _SOURCE_REPLAY_REBUILD_KINDS = frozenset(
-    {"point_dipole", "plane_wave", "gaussian_beam", "mode_source"}
+    {"point_dipole", "plane_wave", "gaussian_beam", "mode_source", "uniform_current", "custom_current",
+     "custom_field", "astigmatic_gaussian_beam"}
 )
 
 
@@ -514,14 +519,32 @@ def _scene_has_mode_source(solver) -> bool:
     )
 
 
+def _source_patches_need_material_graph(solver):
+    from ..excitation.injection import _ELECTRIC_CURRENT_SOURCE_KINDS
+
+    return _scene_has_mode_source(solver) or (
+        getattr(solver, "full_aniso_enabled", False)
+        and any(source.get("kind") in _ELECTRIC_CURRENT_SOURCE_KINDS
+                for source in _compiled_sources_for_replay(solver))
+    )
+
+
 def _resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez):
     default_source_terms = getattr(solver, "_source_terms", ())
     default_electric_source_terms = getattr(solver, "_electric_source_terms", ())
     default_magnetic_source_terms = getattr(solver, "_magnetic_source_terms", ())
+    if getattr(solver, "full_aniso_enabled", False) and all(
+        value is getattr(solver, name)
+        for value, name in ((eps_ex, "eps_Ex"), (eps_ey, "eps_Ey"), (eps_ez, "eps_Ez"))
+    ):
+        # State replay uses the frozen forward material, hence its compiled
+        # patches. Rebuilding here would replace the inverse leaves retained by
+        # the backward source graph, as well as redo source compilation each step.
+        return default_source_terms, default_electric_source_terms, default_magnetic_source_terms
     compiled_sources = _compiled_sources_for_replay(solver)
     if not compiled_sources:
         return default_source_terms, default_electric_source_terms, default_magnetic_source_terms
-    # A kind outside the rebuild set (e.g. astigmatic beams) keeps the exact
+    # A kind outside the rebuild set keeps the exact
     # forward-built terms, which already reproduce the injection for the explicit
     # reverse path; if any source in the scene is such a kind, fall back to the
     # forward terms for the whole scene so the per-source term indexing stays
@@ -529,12 +552,29 @@ def _resolved_source_term_lists(solver, eps_ex, eps_ey, eps_ez):
     if not all(source.get("kind") in _SOURCE_REPLAY_REBUILD_KINDS for source in compiled_sources):
         return default_source_terms, default_electric_source_terms, default_magnetic_source_terms
 
-    has_mode_source = any(source.get("kind") == "mode_source" for source in compiled_sources)
     temp_solver = _build_source_replay_solver(solver, compiled_sources, eps_ex, eps_ey, eps_ez)
-    if has_mode_source:
-        # Build the mode-source patches under grad tracking so the eigensolve
-        # profile keeps its eps-graph; the FDTD backward runs under no_grad, and
-        # _mode_source_profile_pullback needs that graph for its once-per-pass VJP.
+    if getattr(solver, "full_aniso_enabled", False):
+        from ..runtime.materials import _aniso_cross_weights
+
+        temp_solver.full_aniso_enabled = True
+        with torch.enable_grad():
+            inverse = {pair: solver._aniso_inverse_nodes[pair].detach().clone().requires_grad_(True)
+                       for pair in ("xy", "xz", "yz")}
+            solver._source_aniso_inverse_leaves = inverse
+            solver._source_aniso_inverse_gradients = None
+            for i, target in enumerate("xyz"):
+                for j, source in enumerate("xyz"):
+                    if i == j:
+                        continue
+                    value = _aniso_cross_weights(solver, inverse["".join(sorted((target, source)))], i, j)
+                    value = value * (solver.dt / solver.eps0)
+                    edge_open = getattr(solver, "_aniso_edge_open", None)
+                    if edge_open is not None:
+                        value = value * edge_open["E" + target][..., None]
+                    setattr(temp_solver, f"ce{target}_aniso_{source}", value.contiguous())
+    if _source_patches_need_material_graph(solver):
+        # Preserve the mode-profile and inverse-tensor current graphs for the
+        # once-per-pass source VJP; the time-stepping backward uses no_grad.
         with torch.enable_grad():
             initialize_source_terms(temp_solver)
     else:
@@ -697,12 +737,11 @@ def _accumulate_mode_source_cotangents(
 ) -> None:
     """Accumulate the time-weighted adjoint cotangent for profile source terms.
 
-    Mode-source patches carry an eigensolve eps-graph: the aperture mode profile
-    (and its normalization) depends on the source-plane permittivity. The per-step
+    Mode profiles and tensor-current contractions depend on permittivity. The per-step
     source objective ``sum_t sum_k <patch_k, signal_k(t) * adjoint(t)>`` is linear
     in the detached adjoint, and grad_eps is summed over the backward sweep anyway,
     so accumulate ``sum_t signal_k(t) * adjoint(t)`` per patch here with a native
-    scatter-add and defer the single eigensolve VJP to
+    scatter-add and defer the single material-dependent source VJP to
     :func:`_mode_source_profile_pullback`. This keeps ``torch.autograd.grad`` off
     the per-step hot path while reproducing the exact profile eps-dependence.
     """
@@ -743,7 +782,7 @@ def _accumulate_mode_source_cotangents(
 
 
 def _mode_source_profile_pullback(solver, resolved_source_terms, eps_ex, eps_ey, eps_ez):
-    """Apply the accumulated profile cotangent through the eigensolve eps-graph once.
+    """Apply the accumulated source cotangent through its material graph once.
 
     Runs a single ``torch.autograd.grad`` over the retained source-term graph at the
     end of the backward pass (once-per-run material-pullback stage), returning the
@@ -771,9 +810,13 @@ def _mode_source_profile_pullback(solver, resolved_source_terms, eps_ex, eps_ey,
                         patch * cotangent.to(device=patch.device, dtype=patch.dtype)
                     )
                     objective = contribution if objective is None else objective + contribution
-        if objective is None:
+        if objective is None or not objective.requires_grad:
             return None
-        return torch.autograd.grad(objective, (eps_ex, eps_ey, eps_ez), allow_unused=True)
+        inverse = getattr(solver, "_source_aniso_inverse_leaves", {})
+        gradients = torch.autograd.grad(objective, (eps_ex, eps_ey, eps_ez, *inverse.values()), allow_unused=True)
+        if inverse:
+            solver._source_aniso_inverse_gradients = dict(zip(inverse, gradients[3:]))
+        return gradients[:3]
 
 
 def _accumulate_source_term_gradients(
@@ -794,13 +837,10 @@ def _accumulate_source_term_gradients(
 
     source_terms, electric_source_terms, magnetic_source_terms = resolved_source_terms
     source_adjoint_state = step_result.source_adjoint_state or adjoint_state
-    if _scene_has_mode_source(solver):
-        # Mode-source patches (and any other rebuilt patches sharing the scene)
-        # carry an eigensolve eps-graph. Instead of running torch.autograd.grad on
-        # the per-step hot path, accumulate the time-weighted adjoint cotangent with
-        # a native scatter-add here; the single eigensolve VJP is applied once per
-        # backward pass by _mode_source_profile_pullback (bridge material-pullback
-        # stage). The per-step step_result eps-grad is returned unchanged.
+    if _source_patches_need_material_graph(solver):
+        # Accumulate the cotangents of material-dependent source patches on the
+        # GPU. Their mode-profile or inverse-tensor graph is differentiated once
+        # at the final material pullback, outside the per-step hot path.
         _accumulate_mode_source_cotangents(
             solver,
             electric_terms=tuple(electric_source_terms),
@@ -2756,23 +2796,8 @@ def _forward_magnetic_fields_complex(solver, state, *, time_value, resolved_sour
     )
 
 
-def _sum_adjacent(field: torch.Tensor, axis: int) -> torch.Tensor:
-    """Sum of each adjacent pair along ``axis`` (length shrinks by one)."""
-    lo = [slice(None)] * field.ndim
-    hi = [slice(None)] * field.ndim
-    lo[axis] = slice(0, -1)
-    hi[axis] = slice(1, None)
-    return field[tuple(lo)] + field[tuple(hi)]
-
-
 def _spread_to_nodes(edge: torch.Tensor, axis: int) -> torch.Tensor:
-    """Transpose of two-point averaging along ``axis`` (length grows by one).
-
-    Scatters each edge value onto its two bounding node positions with zero-fill
-    at the ends, matching the four-neighbor collocation the full-anisotropy
-    kernel performs when it maps an off-axis curl(H) sample onto the target edge
-    (out-of-range neighbours contribute zero while the fixed 1/4 weight stays).
-    """
+    """Sum incident edge values at nodes, using zero extension at domain faces."""
     zero_shape = [1 if i == axis else size for i, size in enumerate(edge.shape)]
     zero = edge.new_zeros(zero_shape)
     below = torch.cat((edge, zero), dim=axis)
@@ -2780,14 +2805,20 @@ def _spread_to_nodes(edge: torch.Tensor, axis: int) -> torch.Tensor:
     return below + above
 
 
-def _collocate_curl(curl: torch.Tensor, *, edge_axis: int, curl_axis: int) -> torch.Tensor:
-    """Neighbor-average an off-axis curl(H) component onto a target E edge.
-
-    ``edge_axis`` is the Yee-edge axis of the *target* E component (summed over
-    the two straddling cells) and ``curl_axis`` is the edge axis of the source
-    curl component (spread onto the target's two bounding nodes).
-    """
-    return _spread_to_nodes(_sum_adjacent(curl, edge_axis), curl_axis)
+def _collocate_curl(curl: torch.Tensor, coefficients: torch.Tensor, *, edge_axis: int, curl_axis: int) -> torch.Tensor:
+    """Apply the four reciprocal node weights used by the native stencil."""
+    zero_shape = list(curl.shape)
+    zero_shape[curl_axis] = 1
+    zero = curl.new_zeros(zero_shape)
+    neighbors = (torch.cat((zero, curl), dim=curl_axis), torch.cat((curl, zero), dim=curl_axis))
+    result = torch.zeros_like(coefficients[..., 0])
+    for target_side in range(2):
+        selector = [slice(None)] * 3
+        selector[edge_axis] = slice(target_side, curl.shape[edge_axis] - 1 + target_side)
+        for source_side in range(2):
+            slot = 2 * target_side + source_side if edge_axis < curl_axis else 2 * source_side + target_side
+            result = result + coefficients[..., slot] * neighbors[source_side][tuple(selector)]
+    return result
 
 
 def _full_aniso_electric_correction(solver, magnetic_fields):
@@ -2795,8 +2826,8 @@ def _full_aniso_electric_correction(solver, magnetic_fields):
 
     Differentiable Torch replica of ``apply_full_aniso_corrections`` (the native
     ``updateElectricFieldE{x,y,z}FullAniso3D`` kernels): each off-axis curl(H)
-    component is four-neighbor-averaged onto the target Yee edge and scaled by
-    the off-diagonal inverse-permittivity coefficient. It consumes the same
+    component is contracted with four independently precompiled reciprocal
+    weights on the target Yee edge. It consumes the same
     post-source magnetic fields the diagonal update used, so the adjoint VJP
     flows the cotangent through the coupling into the H (and thence E) fields.
     """
@@ -2809,19 +2840,52 @@ def _full_aniso_electric_correction(solver, magnetic_fields):
     curl_y = _backward_diff(hx, axis=2, inv_delta=solver.inv_dz_e) - _backward_diff(hz, axis=0, inv_delta=solver.inv_dx_e)
     curl_z = _backward_diff(hy, axis=0, inv_delta=solver.inv_dx_e) - _backward_diff(hx, axis=1, inv_delta=solver.inv_dy_e)
 
-    ex = 0.25 * (
-        solver.cex_aniso_y * _collocate_curl(curl_y, edge_axis=0, curl_axis=1)
-        + solver.cex_aniso_z * _collocate_curl(curl_z, edge_axis=0, curl_axis=2)
+    ex = (
+        _collocate_curl(curl_y, solver.cex_aniso_y, edge_axis=0, curl_axis=1)
+        + _collocate_curl(curl_z, solver.cex_aniso_z, edge_axis=0, curl_axis=2)
     )
-    ey = 0.25 * (
-        solver.cey_aniso_x * _collocate_curl(curl_x, edge_axis=1, curl_axis=0)
-        + solver.cey_aniso_z * _collocate_curl(curl_z, edge_axis=1, curl_axis=2)
+    ey = (
+        _collocate_curl(curl_x, solver.cey_aniso_x, edge_axis=1, curl_axis=0)
+        + _collocate_curl(curl_z, solver.cey_aniso_z, edge_axis=1, curl_axis=2)
     )
-    ez = 0.25 * (
-        solver.cez_aniso_x * _collocate_curl(curl_x, edge_axis=2, curl_axis=0)
-        + solver.cez_aniso_y * _collocate_curl(curl_y, edge_axis=2, curl_axis=1)
+    ez = (
+        _collocate_curl(curl_x, solver.cez_aniso_x, edge_axis=2, curl_axis=0)
+        + _collocate_curl(curl_y, solver.cez_aniso_y, edge_axis=2, curl_axis=1)
     )
     return {"Ex": ex, "Ey": ey, "Ez": ez}
+
+
+def _accumulate_aniso_inverse_gradients(solver, magnetic_fields, adjoint_fields, gradients, gather_weights):
+    """Accumulate node-tensor sensitivities with explicit CUDA tensor operations.
+
+    The adjoint only supports real full tensors outside the absorbing layer.
+    The derivative of C_i* A_ij C_j is the product of the target-edge cotangent
+    scattered to nodes and the source curl gathered with its Yee-volume weights.
+    One material autograd pullback consumes these accumulated node gradients.
+    """
+    hx, hy, hz = (magnetic_fields[name] for name in ("Hx", "Hy", "Hz"))
+    curls = (
+        _backward_diff(hz, axis=1, inv_delta=solver.inv_dy_e) - _backward_diff(hy, axis=2, inv_delta=solver.inv_dz_e),
+        _backward_diff(hx, axis=2, inv_delta=solver.inv_dz_e) - _backward_diff(hz, axis=0, inv_delta=solver.inv_dx_e),
+        _backward_diff(hy, axis=0, inv_delta=solver.inv_dx_e) - _backward_diff(hx, axis=1, inv_delta=solver.inv_dy_e),
+    )
+    gathered, scattered = [], []
+    edge_open = getattr(solver, "_aniso_edge_open", None)
+    for axis, name in enumerate(("Ex", "Ey", "Ez")):
+        curl = curls[axis]
+        shape = list(curl.shape)
+        shape[axis] = 1
+        zero = curl.new_zeros(shape)
+        previous, following = gather_weights[axis]
+        gathered.append(torch.cat((zero, curl), dim=axis) * previous
+                        + torch.cat((curl, zero), dim=axis) * following)
+        adjoint = adjoint_fields[name]
+        if edge_open is not None:
+            adjoint = adjoint * edge_open[name]
+        scattered.append(0.5 * _spread_to_nodes(adjoint, axis))
+    for pair, i, j in (("xy", 0, 1), ("xz", 0, 2), ("yz", 1, 2)):
+        gradients[pair].addcmul_(scattered[i], gathered[j], value=solver.dt / solver.eps0)
+        gradients[pair].addcmul_(scattered[j], gathered[i], value=solver.dt / solver.eps0)
 
 
 def _step_state(

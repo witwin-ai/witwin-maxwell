@@ -69,6 +69,40 @@ def _scene_material_characteristic_frequency(scene) -> float:
     return characteristic
 
 
+def maximum_declared_frequency(scene, base_frequency, excitations=()) -> float:
+    """Carrier and finite temporal-scale bound used only for automatic sampling.
+
+    A finite ramp, pulse plateau, PWL segment or exponential envelope receives
+    the same samples-per-scale budget as a carrier period. Zero-duration ideal
+    jumps do not impose an infinite sampling frequency.
+    """
+    from ...circuits import (
+        CurrentSource, VoltageSource, SineWaveform, PulseWaveform, PiecewiseLinearWaveform,
+    )
+
+    frequency = float(base_frequency)
+    for drive in (*getattr(scene, "sources", ()), *excitations):
+        waveform = getattr(drive, "source_time", None)
+        if waveform is not None:
+            frequency = max(frequency, float(waveform.characteristic_frequency))
+    for circuit in getattr(scene, "circuits", ()):
+        for device in circuit.devices:
+            if not isinstance(device, (CurrentSource, VoltageSource)):
+                continue
+            waveform = device.waveform
+            if isinstance(waveform, SineWaveform):
+                frequency = max(frequency, float(waveform.frequency), float(waveform.damping))
+            elif isinstance(waveform, PulseWaveform):
+                for name in ("rise", "width", "fall", "period"):
+                    duration = float(getattr(waveform, name))
+                    if duration > 0:
+                        frequency = max(frequency, 1.0 / duration)
+            elif isinstance(waveform, PiecewiseLinearWaveform):
+                shortest_segment = float(torch.diff(waveform.times.detach()).amin())
+                frequency = max(frequency, 1.0 / shortest_segment)
+    return frequency
+
+
 def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_config=None):
     require_cuda_scene(scene)
     solver.scene = scene
@@ -95,13 +129,13 @@ def initialize_solver(solver, scene, frequency=1e9, absorber_type="cpml", cpml_c
         solver._compiled_sources[0] if solver._compiled_sources else None
     )
     solver._source_time = None if solver._compiled_source is None else solver._compiled_source["source_time"]
-    time_step_frequency = (
-        max(
+    solver._normalization_source_time = solver._source_time
+    time_step_frequency = max(
+        maximum_declared_frequency(scene, frequency),
+        max((
             float(source["source_time"].get("characteristic_frequency", source["source_time"]["frequency"]))
             for source in solver._compiled_sources
-        )
-        if solver._compiled_sources
-        else float(frequency)
+        ), default=0.0),
     )
     time_step_frequency = max(time_step_frequency, _scene_material_characteristic_frequency(scene))
     solver.source_frequency = (

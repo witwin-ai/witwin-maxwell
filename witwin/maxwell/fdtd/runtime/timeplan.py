@@ -54,19 +54,22 @@ def _circuit_times(scene):
     return times
 
 
-def compile_fdtd_time_plan(solver, scene, config, frequencies, *, excitations=(), normalize_source=False, window="hanning"):
+def compile_fdtd_time_plan(solver, scene, config, frequencies, *, default_source_frequency, excitations=(), normalize_source=False, window="hanning"):
     compiled = getattr(solver, "_compiled_sources", None)
     if compiled is None:
         from ...compiler.sources import compile_fdtd_sources
-        compiled = compile_fdtd_sources(scene, default_frequency=min(frequencies))
+        compiled = compile_fdtd_sources(scene, default_frequency=default_source_frequency)
     times = [source["source_time"] for source in compiled]
-    times.extend(compile_source_time(excitation.source_time, default_frequency=min(frequencies))
+    times.extend(compile_source_time(excitation.source_time, default_frequency=default_source_frequency)
                  for excitation in excitations)
     if normalize_source and not times:
         raise NotImplementedError("normalize_source requires an incident source spectrum.")
     if normalize_source and len({source_spectrum_key(value) for value in times}) > 1:
         raise NotImplementedError("normalize_source requires a single incident source spectrum; "
                                   "give all sources a common source_time or disable normalize_source.")
+    # Keep the incident normalization reference independent of the field source
+    # used to initialize injection. A terminal-only drive has no field source.
+    normalization_source_time = times[0] if times else None
     circuit_times = _circuit_times(scene)
     if normalize_source and circuit_times:
         raise NotImplementedError("normalize_source has no unique incident spectrum for circuit-driven fields.")
@@ -99,6 +102,8 @@ def compile_fdtd_time_plan(solver, scene, config, frequencies, *, excitations=()
         transient_cycles=config.transient_cycles, steady_cycles=config.steady_cycles,
         reference_frequency=slow_frequency)
     solver._time_plan = plan
+    solver._normalization_source_time = normalization_source_time
     for shard in getattr(solver, "shards", ()):
         shard.solver._time_plan = dict(plan)
+        shard.solver._normalization_source_time = normalization_source_time
     return plan

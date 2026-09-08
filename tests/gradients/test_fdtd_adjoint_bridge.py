@@ -564,12 +564,12 @@ def _fake_full_aniso_cpml_reverse_solver():
     values["kerr_enabled"] = False
     values["dispersive_enabled"] = False
     values["magnetic_dispersive_enabled"] = False
-    values["cex_aniso_y"] = torch.full_like(values["eps_Ex"], 0.031)
-    values["cex_aniso_z"] = torch.full_like(values["eps_Ex"], -0.024)
-    values["cey_aniso_x"] = torch.full_like(values["eps_Ey"], 0.027)
-    values["cey_aniso_z"] = torch.full_like(values["eps_Ey"], 0.019)
-    values["cez_aniso_x"] = torch.full_like(values["eps_Ez"], -0.022)
-    values["cez_aniso_y"] = torch.full_like(values["eps_Ez"], 0.035)
+    values["cex_aniso_y"] = torch.full((*values["eps_Ex"].shape, 4), 0.031 / 4, dtype=values["eps_Ex"].dtype)
+    values["cex_aniso_z"] = torch.full((*values["eps_Ex"].shape, 4), -0.024 / 4, dtype=values["eps_Ex"].dtype)
+    values["cey_aniso_x"] = torch.full((*values["eps_Ey"].shape, 4), 0.027 / 4, dtype=values["eps_Ey"].dtype)
+    values["cey_aniso_z"] = torch.full((*values["eps_Ey"].shape, 4), 0.019 / 4, dtype=values["eps_Ey"].dtype)
+    values["cez_aniso_x"] = torch.full((*values["eps_Ez"].shape, 4), -0.022 / 4, dtype=values["eps_Ez"].dtype)
+    values["cez_aniso_y"] = torch.full((*values["eps_Ez"].shape, 4), 0.035 / 4, dtype=values["eps_Ez"].dtype)
     return SimpleNamespace(**values)
 
 
@@ -1000,7 +1000,7 @@ def test_capture_checkpoint_state_freezes_schema_layout():
     state = capture_checkpoint_state(_fake_checkpoint_solver(), step=3)
 
     assert state.step == 3
-    assert state.schema.version == 3
+    assert state.schema.version == 4
     assert state.schema.wire_state_names == ()
     assert tuple(state.tensors.keys()) == state.schema.state_names
     assert state.schema.field_names == ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")

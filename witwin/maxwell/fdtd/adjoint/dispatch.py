@@ -489,9 +489,9 @@ def _supports_full_aniso(runtime, solver, forward_state, resolved_source_terms) 
     on top of the diagonal CPML electric update. The reverse reuses the linear CPML
     reverse for the diagonal step and folds the transpose of the off-diagonal
     collocated curl(H) into the mid-step H adjoint, so the extra coupling flows the
-    cotangent through the field (H) path; the off-diagonal coefficients themselves
-    carry no material gradient channel (trainable geometry on a full-anisotropic
-    structure is guarded). Gated to the pure real, CPML class with the anisotropic
+    cotangent through the field (H) path. Node inverse-tensor cotangents also feed
+    the final material pullback for supported density regions; trainable geometry
+    on a full-anisotropic structure remains guarded. Gated to the pure real, CPML class with the anisotropic
     structure clear of the absorber (enforced by the bridge ``_full_aniso_cpml_overlap``
     guard, so the un-stretched collocation matches the forward). Full anisotropy on
     an open boundary, or unsupported combinations with conduction, dispersion,
@@ -742,6 +742,8 @@ def reverse_step(
     )
     mur_names = checkpoint_schema(solver).mur_state_names
     if mur_names:
+        # Native backends return Maxwell state; the outer bridge carries RF
+        # histories after their separate pullbacks. Preserve that partial layout.
         carried = {**result.pre_step_adjoint, **{name: adjoint_state[name] for name in mur_names}}
-        result = replace(result, pre_step_adjoint={name: carried[name] for name in state_names})
+        result = replace(result, pre_step_adjoint={name: carried[name] for name in state_names if name in carried})
     return result

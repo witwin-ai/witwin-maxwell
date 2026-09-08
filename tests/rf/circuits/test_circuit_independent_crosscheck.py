@@ -167,7 +167,9 @@ def _run(circuit: mw.Circuit, *, steps: int):
     return mw.Simulation.fdtd(
         _scene(circuit),
         frequencies=tuple(float(f) for f in _BAND),
-        run_time=mw.TimeConfig(time_steps=steps),
+        # The frozen ODE comparison uses this spatial-CFL sampling and physical
+        # horizon; dense waveform-table knots do not redefine that experiment.
+        run_time=mw.TimeConfig(time_steps=steps, dt=8e-12),
         spectral_sampler=mw.SpectralSampler(window="none"),
         full_field_dft=False,
     ).run()

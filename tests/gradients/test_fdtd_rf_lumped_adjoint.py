@@ -345,12 +345,14 @@ def test_port_voltage_current_and_available_power_dft_seeds_are_exact():
     current_sum = torch.zeros(2, device="cuda", dtype=torch.complex128)
     drive_sum = torch.zeros(2, device="cuda", dtype=torch.complex128)
     unit_weight = torch.ones(2, device="cuda", dtype=torch.float64)
+    phase_kernels = []
     for index, (voltage, current, drive) in enumerate(
         zip(voltage_samples, current_samples, drive_samples)
     ):
-        sample_time = (index + 0.5) * dt
+        sample_time = (index - 0.5) * dt
         angle = 2.0 * torch.pi * frequencies * sample_time
         kernel = torch.complex(torch.cos(angle), torch.sin(angle))
+        phase_kernels.append(kernel)
         voltage_sum = voltage_sum + voltage.to(torch.complex128) * kernel
         current_sum = current_sum + current.to(torch.complex128) * kernel
         drive_sum = drive_sum + drive.to(torch.complex128) * kernel
@@ -410,6 +412,9 @@ def test_port_voltage_current_and_available_power_dft_seeds_are_exact():
         window_weights=weights,
         accumulator=accumulator,
         drive_accumulator=drive_accumulator,
+        voltage_phase_weights=torch.stack(phase_kernels),
+        current_phase_weights=torch.stack(phase_kernels),
+        circuit_port=None,
         lumped=SimpleNamespace(dt=dt, resistance=resistance),
         # Mirror the merged PreparedPortRuntime contract: an ordinary lumped port
         # runs one substep per macro step and has no wire provider, which keeps

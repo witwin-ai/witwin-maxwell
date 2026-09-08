@@ -193,6 +193,7 @@ def _clone_seed_solver(solver):
     seed_solver.complex_fields_enabled = has_complex_fields(solver)
     seed_solver._normalize_source = getattr(solver, "_normalize_source", False)
     seed_solver._source_time = getattr(solver, "_source_time", None)
+    seed_solver._normalization_source_time = getattr(solver, "_normalization_source_time", None)
     seed_solver.dft_window_type = getattr(solver, "dft_window_type", "none")
     seed_solver.observer_window_type = getattr(solver, "observer_window_type", "none")
     seed_solver.observers_enabled = bool(getattr(solver, "observers_enabled", False))
@@ -614,75 +615,37 @@ def _build_output_seeds(
         weights = port_runtime.window_weights
         if weights is None or port_runtime.accumulator is None:
             raise RuntimeError("Port DFT seed construction requires a completed forward accumulator.")
-        steps = torch.arange(
-            weights.shape[0],
-            device=weights.device,
-            dtype=weights.dtype,
-        )
-        if port_runtime.lumped is not None:
-            # Lumped and wire-bound ports: honor the substep macro step and the
-            # Yee E/H stagger. Current samples live on the magnetic half-step;
-            # wire-bound voltage samples advance to the full electric step.
-            macro_dt = port_runtime.lumped.dt * float(port_runtime.substeps)
-            magnetic_times = (steps + 0.5) * macro_dt.to(dtype=weights.dtype)
-            electric_times = (
-                (steps + 1.0) * macro_dt.to(dtype=weights.dtype)
-                if port_runtime.wire_provider is not None
-                else magnetic_times
-            )
-            voltage_angles = (
-                2.0
-                * torch.pi
-                * electric_times[:, None]
-                * port_runtime.frequencies[None, :]
-            )
-            magnetic_angles = (
-                2.0
-                * torch.pi
-                * magnetic_times[:, None]
-                * port_runtime.frequencies[None, :]
-            )
-        else:
-            # Circuit-coupled ports sample voltage and current at the shared
-            # integration midpoint dictated by the circuit runtime.
-            coupling = port_runtime.circuit_port.field
+        # Transpose the exact phase tables used by forward observation instead
+        # of reconstructing a second clock from circuit integration coordinates.
+        voltage_kernel = port_runtime.voltage_phase_weights
+        current_kernel = port_runtime.current_phase_weights
+        if port_runtime.circuit_port is not None:
             circuit_runtime = next(
                 runtime
                 for runtime in getattr(solver, "_circuit_runtimes", ())
                 if port_runtime.circuit_port in runtime.ports
             )
-            fractions = torch.as_tensor(
-                tuple(
-                    0.5 if integration == "trapezoidal" else 1.0
-                    for integration in circuit_runtime.integration_keys
-                ),
+            midpoint = torch.as_tensor(
+                tuple(integration == "trapezoidal" for integration in circuit_runtime.integration_keys),
                 device=weights.device,
-                dtype=weights.dtype,
+                dtype=torch.bool,
             )
-            sample_times = (steps + fractions) * coupling.dt.to(dtype=weights.dtype)
-            angles = (
-                2.0
-                * torch.pi
-                * sample_times[:, None]
-                * port_runtime.frequencies[None, :]
-            )
-            voltage_angles = angles
-            magnetic_angles = angles
+            voltage_kernel = torch.where(midpoint[:, None], current_kernel, voltage_kernel)
+            current_kernel = voltage_kernel
         scale = 2.0 / port_runtime.accumulator._window_weight_sum
-        weighted_scale = weights * scale[None, :]
         voltage_samples = torch.sum(
-            weighted_scale
+            scale[None, :]
             * (
-                voltage_grad.real[None, :] * torch.cos(voltage_angles)
-                + voltage_grad.imag[None, :] * torch.sin(voltage_angles)
+                voltage_grad.real[None, :] * voltage_kernel.real
+                + voltage_grad.imag[None, :] * voltage_kernel.imag
             ),
             dim=1,
         )
         current_samples = torch.sum(
-            weighted_scale
+            scale[None, :]
             * (
-                current_grad.real[None, :] * torch.cos(magnetic_angles)
-                + current_grad.imag[None, :] * torch.sin(magnetic_angles)
+                current_grad.real[None, :] * current_kernel.real
+                + current_grad.imag[None, :] * current_kernel.imag
             ),
             dim=1,
         )
@@ -699,10 +662,10 @@ def _build_output_seeds(
                 / (4.0 * port_runtime.lumped.resistance)
             )
             drive_samples = torch.sum(
-                weighted_scale
+                scale[None, :]
                 * (
-                    source_voltage_grad.real[None, :] * torch.cos(magnetic_angles)
-                    + source_voltage_grad.imag[None, :] * torch.sin(magnetic_angles)
+                    source_voltage_grad.real[None, :] * current_kernel.real
+                    + source_voltage_grad.imag[None, :] * current_kernel.imag
                 ),
                 dim=1,
             )

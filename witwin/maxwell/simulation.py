@@ -1445,6 +1445,32 @@ class Simulation:
                 f"full-field DFT only; {tiled_reason}."
             )
 
+    def _configure_fdtd_solver_time(self, solver) -> None:
+        """Bind explicit or optimization-stable timing before material initialization."""
+        solver._requested_dt = (
+            self.config.run_time.dt
+            if self.config.run_time.dt is not None
+            else getattr(self, "_fdtd_optimization_dt", None)
+        )
+        solver._max_electric_field = self.config.run_time.max_electric_field
+        solver._requested_source_frequency = self._fdtd_time_step_frequency(
+            getattr(solver, "logical_scene", solver.scene),
+            excitations=getattr(solver, "_port_excitations", self.excitations),
+        )
+
+    def _remember_fdtd_solver_time(self, solver) -> None:
+        if self.has_trainable_parameters and self.config.run_time.dt is None:
+            self._fdtd_optimization_dt = float(solver.dt)
+
+    def _fdtd_time_step_frequency(self, scene=None, *, excitations=None) -> float:
+        from .fdtd.runtime.initialization import maximum_declared_frequency
+
+        return maximum_declared_frequency(
+            self.scene if scene is None else scene,
+            self.frequency,
+            self.excitations if excitations is None else excitations,
+        )
+
     def _build_fdtd_solver_for_scene(
         self,
         scene,
@@ -1453,6 +1479,9 @@ class Simulation:
         port_excitations=None,
         termination_overrides=None,
     ):
+        resolved_excitations = (
+            self.excitations if port_excitations is None else tuple(port_excitations)
+        )
         if self.config.parallel is not None:
             _require_cuda_scene(scene, method="fdtd")
             from .fdtd.distributed import DistributedFDTD
@@ -1468,44 +1497,30 @@ class Simulation:
             # embedded-network fitted-band 'reject' contract on the full set of
             # requested output frequencies, not just the time-stepping frequency.
             solver._requested_port_frequencies = self.frequencies
-            solver._requested_dt = self.config.run_time.dt or getattr(self, "_fdtd_optimization_dt", None)
-            solver._max_electric_field = self.config.run_time.max_electric_field
+            solver._port_excitations = resolved_excitations
+            self._configure_fdtd_solver_time(solver)
             if initialize:
                 solver.init_field()
-                if self.has_trainable_parameters and self.config.run_time.dt is None:
-                    self._fdtd_optimization_dt = float(solver.dt)
+                self._remember_fdtd_solver_time(solver)
                 self._resolve_fdtd_time_steps(solver, scene)
             return solver
 
         prepared_scene = prepare_scene(scene)
         _require_cuda_scene(prepared_scene, method="fdtd")
         fdtd_backend, _ = _resolve_fdtd_backend()
-        resolved_excitations = (
-            self.excitations if port_excitations is None else tuple(port_excitations)
-        )
-        time_step_frequency = self.frequency
-        for excitation in resolved_excitations:
-            source_time = excitation.source_time
-            if source_time is not None:
-                time_step_frequency = max(
-                    time_step_frequency,
-                    float(source_time.characteristic_frequency),
-                )
         solver = fdtd_backend(
             prepared_scene,
-            frequency=time_step_frequency,
+            frequency=self.frequency,
             absorber_type=self.config.absorber,
             cpml_config=self.config.cpml_config,
         )
         solver._requested_port_frequencies = self.frequencies
-        solver._requested_dt = self.config.run_time.dt or getattr(self, "_fdtd_optimization_dt", None)
-        solver._max_electric_field = self.config.run_time.max_electric_field
         solver._port_excitations = resolved_excitations
+        self._configure_fdtd_solver_time(solver)
         solver._port_termination_overrides = dict(termination_overrides or {})
         if initialize:
             solver.init_field()
-            if self.has_trainable_parameters and self.config.run_time.dt is None:
-                self._fdtd_optimization_dt = float(solver.dt)
+            self._remember_fdtd_solver_time(solver)
             self._apply_initial_condition(solver)
             self._resolve_fdtd_time_steps(solver, scene)
         if getattr(self, "_fixed_waveport_mode_sources", False):
@@ -1550,6 +1565,7 @@ class Simulation:
         resolved_scene = self.scene if scene is None else scene
         return compile_fdtd_time_plan(solver, resolved_scene, self.config.run_time,
             self._collect_fdtd_requested_frequencies(resolved_scene),
+            default_source_frequency=self.frequency,
             excitations=getattr(solver, "_port_excitations", self.excitations),
             normalize_source=self.config.spectral_sampler.normalize_source,
             window=str(self.config.spectral_sampler.window))["total_steps"]

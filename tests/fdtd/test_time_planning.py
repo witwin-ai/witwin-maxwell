@@ -14,7 +14,7 @@ def _plan(waveforms, config, **kwargs):
     solver = SimpleNamespace(dt=1e-11, c=299792458., _compiled_sources=[
         {"source_time": compile_source_time(source, default_frequency=1e9)} for source in waveforms])
     scene = SimpleNamespace(domain=SimpleNamespace(bounds=((-0.1, 0.1),) * 3), circuits=())
-    return compile_fdtd_time_plan(solver, scene, config, [1e9], **kwargs)
+    return compile_fdtd_time_plan(solver, scene, config, [1e9], default_source_frequency=1e9, **kwargs)
 
 
 def test_late_pulse_and_cw_plan_is_order_independent():

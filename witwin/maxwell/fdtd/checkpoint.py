@@ -24,6 +24,9 @@ _CPML_STATE_NAMES = (
     "psi_hz_y",
 )
 _CPML_COMPLEX_STATE_NAMES = tuple(f"{name}_imag" for name in _CPML_STATE_NAMES)
+_CPML_ANISOTROPIC_STATE_NAMES = tuple(
+    f"psi_{component}_aniso_{axis}" for component in ("ex", "ey", "ez") for axis in "xyz"
+)
 _TFSF_AUXILIARY_STATE_NAMES = (
     "tfsf_aux_electric",
     "tfsf_aux_magnetic",
@@ -38,7 +41,11 @@ _WIRE_STATE_NAMES = ("wire_current", "wire_charge")
 # a checkpoint/resume boundary. Scratch buffers (drive gather, staged propagator
 # output) are recomputed each step and are not part of the frozen layout.
 _GYROMAGNETIC_STATE_TENSOR_NAMES = ("m_u", "m_v", "dm_u", "dm_v")
-_CHECKPOINT_SCHEMA_VERSION = 3
+_CHECKPOINT_SCHEMA_VERSION = 4
+_BREAKDOWN_STATE_NAMES = (
+    "state", "timer", "trigger_step", "field_before", "deposited_at_trigger",
+    "dissipated_energy", "total_dissipated",
+)
 
 
 def dispersive_state_name(component_name: str, model_name: str, index: int, tensor_name: str) -> str:
@@ -106,6 +113,7 @@ class FDTDCheckpointSchema:
     gyromagnetic_state_names: tuple[str, ...] = ()
     surface_impedance_state_names: tuple[str, ...] = ()
     mur_state_names: tuple[str, ...] = ()
+    breakdown_state_names: tuple[str, ...] = ()
 
     @property
     def state_names(self) -> tuple[str, ...]:
@@ -124,6 +132,7 @@ class FDTDCheckpointSchema:
             + self.gyromagnetic_state_names
             + self.surface_impedance_state_names
             + self.mur_state_names
+            + self.breakdown_state_names
         )
 
 
@@ -258,6 +267,13 @@ def iter_surface_impedance_state_specs(solver):
         yield surface_impedance_state_name(index), ade["state"]
 
 
+def iter_breakdown_state_tensors(solver):
+    runtime = getattr(solver, "breakdown_runtime", None)
+    if runtime is not None:
+        for name in _BREAKDOWN_STATE_NAMES:
+            yield f"breakdown_{name}", runtime[name]
+
+
 def checkpoint_schema(solver) -> FDTDCheckpointSchema:
     complex_field_names = _COMPLEX_FIELD_STATE_NAMES if bool(getattr(solver, "complex_fields_enabled", False)) else ()
     cpml_state_names = ()
@@ -265,6 +281,8 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         cpml_state_names = _CPML_STATE_NAMES
         if bool(getattr(solver, "complex_fields_enabled", False)):
             cpml_state_names = cpml_state_names + _CPML_COMPLEX_STATE_NAMES
+        if getattr(solver, "_full_aniso_cpml_overlap", False):
+            cpml_state_names = cpml_state_names + _CPML_ANISOTROPIC_STATE_NAMES
 
     tfsf_auxiliary_state_names = ()
     if getattr(solver, "tfsf_enabled", False):
@@ -332,6 +350,7 @@ def checkpoint_schema(solver) -> FDTDCheckpointSchema:
         gyromagnetic_state_names=gyromagnetic_state_names,
         surface_impedance_state_names=surface_impedance_state_names,
         mur_state_names=tuple(name for name, _tensor in iter_mur_state_tensors(solver)),
+        breakdown_state_names=tuple(name for name, _tensor in iter_breakdown_state_tensors(solver)),
     )
 
 
@@ -439,6 +458,8 @@ def capture_checkpoint_state(solver, step: int) -> FDTDCheckpointState:
         tensors[name] = tensor.detach().clone()
     for name, tensor in iter_mur_state_tensors(solver):
         tensors[name] = tensor.detach().clone()
+    for name, tensor in iter_breakdown_state_tensors(solver):
+        tensors[name] = tensor.detach().clone()
     state = FDTDCheckpointState(step=int(step), schema=schema, tensors=tensors)
     validate_checkpoint_state(state)
     return state
@@ -520,6 +541,8 @@ def _checkpoint_tensor_targets(solver, schema: FDTDCheckpointSchema):
         yield name, tensor, None
     for name, tensor in iter_mur_state_tensors(solver):
         yield name, tensor, None
+    for name, tensor in iter_breakdown_state_tensors(solver):
+        yield name, tensor, None
 
 
 def _checkpoint_expected_shape(target: torch.Tensor, layout) -> tuple[int, ...]:
@@ -595,6 +618,10 @@ def restore_checkpoint_state(solver, state: FDTDCheckpointState) -> None:
             )
     for name, target, layout in targets:
         _copy_checkpoint_tensor(target, state.tensors[name], layout)
+    if expected_schema.breakdown_state_names:
+        from .runtime.breakdown import restore_breakdown_coefficients
+
+        restore_breakdown_coefficients(solver, state.step)
 
 
 def clone_checkpoint_tensors(state: FDTDCheckpointState) -> dict[str, torch.Tensor]:

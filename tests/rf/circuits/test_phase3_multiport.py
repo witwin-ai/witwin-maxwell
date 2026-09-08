@@ -404,7 +404,12 @@ def test_reversing_em_and_circuit_terminals_flips_vi_but_preserves_power_and_s()
     forward_port = forward.port("feed")
     reverse_port = reverse.port("feed")
     data = forward.circuit("orientation")
-    times = data.times[1:]
+    # Circuit traces retain their integration clock. Public port spectra use
+    # the field-observation origin, one step earlier for these midpoint samples.
+    # Read a settled interval: the startup backward-Euler sample is followed
+    # by a trapezoidal midpoint, so the first interval is only half a step.
+    dt = data.times[-1] - data.times[-2]
+    times = data.times[1:] - dt
     phase = torch.exp(2j * torch.pi * 3.0e9 * times)
 
     def phasor(values):

@@ -70,7 +70,9 @@ def _simulation(
     return mw.Simulation.fdtd(
         scene,
         frequency=frequency,
-        run_time=mw.TimeConfig(time_steps=steps),
+        # Pin the physical checkpoint schedule so the selected step indices
+        # continue to straddle the PWL and switch breakpoints.
+        run_time=mw.TimeConfig(time_steps=steps, dt=8e-12),
         spectral_sampler=mw.SpectralSampler(window="none"),
         cpml_config={} if cpml_config is None else cpml_config,
         cuda_graph=cuda_graph,

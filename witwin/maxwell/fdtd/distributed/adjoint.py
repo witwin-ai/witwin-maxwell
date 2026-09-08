@@ -673,7 +673,9 @@ class _DistributedFDTDGradientBridge:
                 absorber_type=config.absorber,
                 cpml_config=config.cpml_config,
             )
+            simulation._configure_fdtd_solver_time(distributed)
             distributed.init_field()
+            simulation._remember_fdtd_solver_time(distributed)
             require_distributed_adjoint_support(distributed)
             require_distributed_adjoint_objective_support(distributed)
 
@@ -708,6 +710,17 @@ class _DistributedFDTDGradientBridge:
 
         if raw_output is None:
             raise RuntimeError("Distributed FDTD solve did not return any output.")
+        # Gathered raw recordings travel with monitor payloads, but must never
+        # enter the spectral output pack or acquire a material-gradient edge.
+        raw_output = dict(raw_output)
+        raw_output["time_observers"] = {
+            name: payload for name, payload in raw_output.get("observers", {}).items()
+            if isinstance(payload, dict) and payload.get("kind") in {"field_time", "flux_time"}
+        }
+        raw_output["observers"] = {
+            name: payload for name, payload in raw_output.get("observers", {}).items()
+            if name not in raw_output["time_observers"]
+        }
         pack = _prepare_forward_pack(raw_output)
         # Expose the bridge on the distributed solver so a caller holding the Result
         # (whose ``solver`` is the DistributedFDTD) can inspect the reverse product.
@@ -961,6 +974,8 @@ class _DistributedFDTDGradientBridge:
                     raw[name] = tensor
         if solver.observers_enabled:
             raw["observers"] = solver.get_observer_results()
+        if solver.time_observers_enabled:
+            raw["time_observers"] = solver.get_time_observer_results()
         return raw
 
     def _reverse_one_step(
@@ -1391,7 +1406,9 @@ class _NcclDistributedFDTDGradientBridge(_DistributedFDTDGradientBridge):
                 cpml_config=config.cpml_config,
                 allow_adjoint=True,
             )
+            simulation._configure_fdtd_solver_time(distributed)
             distributed.init_field()
+            simulation._remember_fdtd_solver_time(distributed)
             require_distributed_adjoint_support(distributed)
             require_distributed_adjoint_objective_support(distributed)
 
@@ -1623,6 +1640,7 @@ def run_distributed_fdtd_with_gradient_bridge(simulation):
         for index, field_name in enumerate(pack.field_names)
     }
     monitors = _rebuild_monitors(pack.monitor_templates, output_tensors, len(pack.field_names))
+    monitors.update(bridge._raw_output.get("time_observers", {}))
     raw_output = {
         field_name: fields[field_name.upper()] for field_name in pack.field_names
     }

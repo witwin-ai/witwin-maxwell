@@ -280,6 +280,7 @@ def pullback_material_input_gradients(
     grad_tpa_ex: torch.Tensor | None = None,
     grad_tpa_ey: torch.Tensor | None = None,
     grad_tpa_ez: torch.Tensor | None = None,
+    grad_aniso_inverse: dict[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, ...]:
     if not inputs:
         return ()
@@ -289,7 +290,24 @@ def pullback_material_input_gradients(
     edge_components = model.get("edge_components")
     outputs = []
     grad_outputs = []
-    if edge_components is not None:
+    from ..compiler.materials import material_model_has_full_anisotropy
+
+    if material_model_has_full_anisotropy(model):
+        from .runtime.materials import _symmetric3_inverse, average_node_to_component
+
+        diagonal, offdiagonal = model["eps_components"], model["eps_offdiag_components"]
+        inverse, _ = _symmetric3_inverse(diagonal["x"], diagonal["y"], diagonal["z"],
+                                        offdiagonal["xy"], offdiagonal["xz"], offdiagonal["yz"])
+        for name, axis, grad_edge in (("Ex", "xx", grad_eps_ex), ("Ey", "yy", grad_eps_ey), ("Ez", "zz", grad_eps_ez)):
+            component = average_node_to_component(None, inverse[axis], name).reciprocal()
+            if component.requires_grad:
+                outputs.append(component)
+                grad_outputs.append((grad_edge * eps0).to(component))
+        for pair, gradient in (grad_aniso_inverse or {}).items():
+            if inverse[pair].requires_grad:
+                outputs.append(inverse[pair])
+                grad_outputs.append(gradient.to(inverse[pair]))
+    elif edge_components is not None:
         # Edge-native forward: the relative permittivity was evaluated directly at
         # each Yee edge, so the sensitivity flows through the edge fields with no
         # node->edge transpose. ``eps_E<c> = eps_edge<c> * eps0`` gives the relative

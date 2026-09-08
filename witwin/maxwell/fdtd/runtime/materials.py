@@ -153,7 +153,7 @@ def build_material_update_coefficients(solver):
     solver.dispersive_enabled = solver.electric_dispersive_enabled or solver.magnetic_dispersive_enabled
     # Full (off-diagonal) anisotropic permittivity now composes with dispersion:
     # electric poles enter isotropically and the ADE polarization current is folded
-    # through the same per-edge inverse permittivity tensor as curl(H) (see
+    # through the same reciprocal inverse-material operator as curl(H) (see
     # _apply_aniso_dispersive_corrections); magnetic dispersion is an independent
     # H-side channel and does not touch the electric tensor.
     # Space-time modulation now composes with electric/magnetic dispersion and with
@@ -277,16 +277,6 @@ def build_modulation(solver, material_model):
     solver.mod_omega_Ez = _max_node_to_electric_component(modulation_omega, "Ez")
 
 
-_ANISO_ROW_PAIRS = {
-    # Inverse-tensor row entries coupling each E component to the two off-axis
-    # curl(H) components, in (first, second) order matching the update
-    # E_i += dt/eps0 * (inv_ij * <curlH_j> + inv_ik * <curlH_k>).
-    "Ex": ("xy", "xz"),
-    "Ey": ("xy", "yz"),
-    "Ez": ("xz", "yz"),
-}
-
-
 def _symmetric3_inverse(a, b, c, d, e, f):
     """Closed-form inverse of the symmetric 3x3 tensor [[a,d,e],[d,b,f],[e,f,c]].
 
@@ -306,19 +296,18 @@ def _symmetric3_inverse(a, b, c, d, e, f):
 
 
 def build_full_anisotropy(solver, material_model):
-    """Precompute per-edge inverse-permittivity tensor rows for full anisotropy.
+    """Assemble an energy-symmetric positive inverse material operator.
 
-    For each E component the six relative-permittivity node grids (diagonal +
-    off-diagonal) are averaged onto that component's Yee edges, the symmetric
-    3x3 tensor is inverted per edge in closed form, and the row belonging to the
-    component is stored: the diagonal entry as an effective scalar permittivity
-    (consumed by ``build_update_coefficients`` for the base curl coefficient)
-    and the two off-diagonal entries as coupling coefficients for the
-    neighbor-averaged off-axis curl(H) correction kernel.
+    Invert the tensor at nodes before scattering to Yee edges. With the weighted
+    edge-to-node gather C and its volume-weighted transpose C*, the operator is
+    C* A C plus each component's positive local weighted-variance term. Its
+    diagonal is the endpoint average of A_ii; cross terms are C_i* A_ij C_j.
+    Thus node bounds a I <= A <= b I also bound the assembled edge operator,
+    including spatially varying tensors and nonuniform grids.
     """
     solver.full_aniso_enabled = bool(material_model_has_full_anisotropy(material_model))
     solver._aniso_eps_eff = None
-    solver._aniso_inverse_rows = None
+    solver._aniso_inverse_nodes = None
     # Effective inverse permittivity (1/eps_eff) reused for the diagonal ADE
     # polarization-current subtraction, and the accumulated per-component
     # polarization current buffers used by the off-diagonal tensor subtraction.
@@ -328,6 +317,7 @@ def build_full_anisotropy(solver, material_model):
     # subtracted through the off-diagonal inverse tensor when the anisotropic
     # medium is also conductive; None otherwise.
     solver._aniso_cond_current = None
+    solver._aniso_edge_open = None
     solver.cex_aniso_y = None
     solver.cex_aniso_z = None
     solver.cey_aniso_x = None
@@ -361,28 +351,21 @@ def build_full_anisotropy(solver, material_model):
         "yz": offdiag["yz"],
     }
     diagonal_key = {"Ex": "xx", "Ey": "yy", "Ez": "zz"}
-    # Semi-implicit conductive fold: invert (eps_inf + dt/2 * diag(sigma)) instead of
-    # eps_inf so the same per-edge inverse tensor B = dt * (...)^-1 that couples
-    # curl(H) also carries the exact tensor conduction damping. In relative units
-    # the diagonal shift is (dt / (2 eps0)) * sigma_abs; adding a nonnegative
-    # diagonal to an SPD tensor keeps it SPD, so the inverse stays well defined.
+    # The local conductive shift preserves node positive definiteness. Scattering
+    # these local inverses is not a global implicit conduction solve; the joint
+    # time-step bound also includes the explicit edge-current feedback rate.
     conductive = solver.conductive_enabled
     conductive_shift = solver.dt / (2.0 * solver.eps0)
+    if conductive:
+        for diag_key, axis in (("xx", "x"), ("yy", "y"), ("zz", "z")):
+            node[diag_key] = node[diag_key] + conductive_shift * sigma_components[axis]
+    inverse, det = _symmetric3_inverse(
+        node["xx"], node["yy"], node["zz"], node["xy"], node["xz"], node["yz"]
+    )
+    solver._aniso_inverse_nodes = inverse
     solver._aniso_eps_eff = {}
-    solver._aniso_inverse_rows = {}
-    for component_name in ("Ex", "Ey", "Ez"):
-        edge = {
-            key: average_node_to_component(solver, tensor, component_name)
-            for key, tensor in node.items()
-        }
-        if conductive:
-            for diag_key, axis in (("xx", "x"), ("yy", "y"), ("zz", "z")):
-                sigma_edge = average_node_to_component(solver, sigma_components[axis], component_name)
-                edge[diag_key] = edge[diag_key] + conductive_shift * sigma_edge
-        inverse, det = _symmetric3_inverse(
-            edge["xx"], edge["yy"], edge["zz"], edge["xy"], edge["xz"], edge["yz"]
-        )
-        diagonal_inverse = inverse[diagonal_key[component_name]]
+    for target_axis, component_name in enumerate(("Ex", "Ey", "Ez")):
+        diagonal_inverse = average_node_to_component(solver, inverse[diagonal_key[component_name]], component_name)
         if bool(torch.any(det <= 0).item()) or bool(torch.any(diagonal_inverse <= 0).item()):
             raise ValueError(
                 "The blended anisotropic permittivity tensor is not positive-definite on the "
@@ -393,11 +376,10 @@ def build_full_anisotropy(solver, material_model):
         # (when conductive) the diagonal decay 1 - sigma * B_ii is folded in by
         # _electric_update_coefficients through the aniso_shifted branch.
         solver._aniso_eps_eff[component_name] = (solver.eps0 / diagonal_inverse).contiguous()
-        first_pair, second_pair = _ANISO_ROW_PAIRS[component_name]
-        solver._aniso_inverse_rows[component_name] = (
-            inverse[first_pair].contiguous(),
-            inverse[second_pair].contiguous(),
-        )
+        # Source injection, ADE templates and adjoint material leaves must use
+        # the same diagonal inverse as the electric update. Physical tensors
+        # remain in the compiled material model and public material diagnostics.
+        setattr(solver, "eps_" + component_name, solver._aniso_eps_eff[component_name])
 
     if conductive:
         # Buffers for the pre-update conduction current sigma . E^n, subtracted
@@ -408,6 +390,34 @@ def build_full_anisotropy(solver, material_model):
             "Ey": torch.zeros_like(solver.Ey),
             "Ez": torch.zeros_like(solver.Ez),
         }
+
+
+def _aniso_cross_weights(solver, inverse_node, target_axis, source_axis):
+    """Four reciprocal, volume-weighted node contributions per target Yee edge."""
+    previous, following = _aniso_node_gather_weights(solver.scene, source_axis, inverse_node)
+    view = [1, 1, 1]
+    view[source_axis] = -1
+    pieces = {}
+    for target_side in range(2):
+        selector = [slice(None)] * 3
+        selector[target_axis] = slice(target_side, inverse_node.shape[target_axis] - 1 + target_side)
+        for source_side, weight in enumerate((previous, following)):
+            pieces[target_side, source_side] = 0.5 * (inverse_node * weight.reshape(view))[tuple(selector)]
+    # Native loops visit the two transverse axes in ascending coordinate order.
+    order = ((t, s) for t in range(2) for s in range(2)) if target_axis < source_axis else (
+        (t, s) for s in range(2) for t in range(2))
+    return torch.stack([pieces[key] for key in order], dim=-1).contiguous()
+
+
+def _aniso_node_gather_weights(scene, source_axis, reference):
+    """Yee-volume weights from the two incident edges into their common node."""
+    axis = "xyz"[source_axis]
+    primal = torch.as_tensor(getattr(scene, f"d{axis}_primal64"), device=reference.device, dtype=reference.dtype)
+    dual = torch.as_tensor(getattr(scene, f"d{axis}_dual64"), device=reference.device, dtype=reference.dtype)
+    periodic = scene.boundary.axis_kind(axis) == "periodic"
+    previous = torch.cat((primal[-1:] if periodic else primal[:1], primal)) / (2 * dual)
+    following = torch.cat((primal, primal[:1] if periodic else primal[-1:])) / (2 * dual)
+    return previous, following
 
 
 def average_node_to_component(solver, node_tensor, component_name):
@@ -1089,12 +1099,13 @@ def _apply_pec_edge_suppression(solver):
     if getattr(solver, "full_aniso_enabled", False):
         # The off-diagonal coupling terms are additive corrections to the same
         # E edges, so PEC-covered edges must suppress them identically.
-        solver.cex_aniso_y = (solver.cex_aniso_y * open_fractions["Ex"]).contiguous()
-        solver.cex_aniso_z = (solver.cex_aniso_z * open_fractions["Ex"]).contiguous()
-        solver.cey_aniso_x = (solver.cey_aniso_x * open_fractions["Ey"]).contiguous()
-        solver.cey_aniso_z = (solver.cey_aniso_z * open_fractions["Ey"]).contiguous()
-        solver.cez_aniso_x = (solver.cez_aniso_x * open_fractions["Ez"]).contiguous()
-        solver.cez_aniso_y = (solver.cez_aniso_y * open_fractions["Ez"]).contiguous()
+        solver._aniso_edge_open = open_fractions
+        solver.cex_aniso_y = (solver.cex_aniso_y * open_fractions["Ex"][..., None]).contiguous()
+        solver.cex_aniso_z = (solver.cex_aniso_z * open_fractions["Ex"][..., None]).contiguous()
+        solver.cey_aniso_x = (solver.cey_aniso_x * open_fractions["Ey"][..., None]).contiguous()
+        solver.cey_aniso_z = (solver.cey_aniso_z * open_fractions["Ey"][..., None]).contiguous()
+        solver.cez_aniso_x = (solver.cez_aniso_x * open_fractions["Ez"][..., None]).contiguous()
+        solver.cez_aniso_y = (solver.cez_aniso_y * open_fractions["Ez"][..., None]).contiguous()
 
 
 _E_COMPONENTS = ("Ex", "Ey", "Ez")
@@ -1422,9 +1433,8 @@ def _store_nonlinear_external_decay(solver, ex_decay, ey_decay, ez_decay):
 def _electric_epsilon_tensors(solver):
     """The absolute permittivity tensors feeding the electric curl coefficients.
 
-    Full anisotropy swaps in the effective scalar permittivity that reproduces
-    the diagonal entry of the per-edge inverse tensor; the plain per-axis
-    average is kept otherwise (byte-identical to the base path).
+    Full anisotropy uses the reciprocal endpoint-average of the node inverse;
+    other materials retain their compiled diagonal Yee permittivity.
     """
     if getattr(solver, "full_aniso_enabled", False):
         eps_eff = solver._aniso_eps_eff
@@ -1435,20 +1445,21 @@ def _electric_epsilon_tensors(solver):
 def _build_full_aniso_curl_coefficients(solver):
     """Materialize the off-diagonal coupling coefficient tensors.
 
-    ``coeff = dt * inv_ij / eps0`` multiplies the neighbor-averaged off-axis
-    curl(H) component in the correction kernel. The coefficients are zero
-    outside the anisotropic structures, so the correction is a no-op there.
+    Four ``dt / eps0``-scaled node-inverse and Yee-volume weights multiply the
+    four source edges separately. This placement keeps spatially varying
+    cross-component contributions reciprocal in the Yee volume inner product.
     """
     if not getattr(solver, "full_aniso_enabled", False):
         return
     scale = solver.dt / solver.eps0
-    rows = solver._aniso_inverse_rows
-    solver.cex_aniso_y = (scale * rows["Ex"][0]).contiguous()
-    solver.cex_aniso_z = (scale * rows["Ex"][1]).contiguous()
-    solver.cey_aniso_x = (scale * rows["Ey"][0]).contiguous()
-    solver.cey_aniso_z = (scale * rows["Ey"][1]).contiguous()
-    solver.cez_aniso_x = (scale * rows["Ez"][0]).contiguous()
-    solver.cez_aniso_y = (scale * rows["Ez"][1]).contiguous()
+    inverse = solver._aniso_inverse_nodes
+    for target_axis, target in enumerate("xyz"):
+        for source_axis, source in enumerate("xyz"):
+            if target_axis == source_axis:
+                continue
+            pair = "".join(sorted((target, source)))
+            weights = _aniso_cross_weights(solver, inverse[pair], target_axis, source_axis)
+            setattr(solver, f"ce{target}_aniso_{source}", weights.mul_(scale))
     # The diagonal ADE polarization-current subtraction must divide by the same
     # effective permittivity the base curl coefficient uses (dt/eps_eff), not the
     # plain per-axis average, so the dispersive response and the tensor curl stay
@@ -1516,7 +1527,7 @@ def _full_aniso_offdiag_overlaps_absorber(solver):
     for component_name, coefficients in component_coefficients:
         edge_mask = average_node_to_component(solver, mask, component_name) > 0
         for coefficient in coefficients:
-            if bool(torch.any(edge_mask & (coefficient.abs() > threshold)).item()):
+            if bool(torch.any(edge_mask & (coefficient.abs().amax(dim=-1) > threshold)).item()):
                 return True
     return False
 

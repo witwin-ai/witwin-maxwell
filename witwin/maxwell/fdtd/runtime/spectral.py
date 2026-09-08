@@ -458,10 +458,10 @@ def accumulate_dft(solver, n, phase_cos=None, phase_sin=None):
         return
 
     source_signal = None
-    if getattr(solver, "_normalize_source", False) and solver._source_time is not None:
+    if getattr(solver, "_normalize_source", False) and solver._normalization_source_time is not None:
         from ...sources import evaluate_source_time_normalization
 
-        source_signal = evaluate_source_time_normalization(solver._source_time, n * solver.dt)
+        source_signal = evaluate_source_time_normalization(solver._normalization_source_time, n * solver.dt)
     active = n >= solver._dft_start_steps
     active &= (solver._dft_end_steps < 0) | (n < solver._dft_end_steps)
     if solver.dft_window_type == "none":
@@ -588,7 +588,7 @@ def build_dft_step_tables(solver, time_steps):
     sample_count = np.zeros(frequency_count, dtype=np.int64)
     src_real = np.zeros(frequency_count, dtype=np.float64)
     src_imag = np.zeros(frequency_count, dtype=np.float64)
-    normalize = bool(getattr(solver, "_normalize_source", False)) and solver._source_time is not None
+    normalize = bool(getattr(solver, "_normalize_source", False)) and solver._normalization_source_time is not None
 
     phase_cos = np.ones(frequency_count, dtype=np.float32)
     phase_sin = np.zeros(frequency_count, dtype=np.float32)
@@ -609,7 +609,7 @@ def build_dft_step_tables(solver, time_steps):
         if normalize:
             from ...sources import evaluate_source_time_normalization
 
-            signal = float(evaluate_source_time_normalization(solver._source_time, n * solver.dt))
+            signal = float(evaluate_source_time_normalization(solver._normalization_source_time, n * solver.dt))
             src_real += signal * wc
             src_imag += signal * ws
         next_cos = phase_cos * step_cos - phase_sin * step_sin

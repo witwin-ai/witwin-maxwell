@@ -43,6 +43,7 @@ def test_parallel_none_keeps_single_gpu_backend_path(monkeypatch):
     class FakeFDTD:
         def __init__(self, prepared, **kwargs):
             calls.append((prepared, kwargs))
+            self.scene = prepared
             self.initialized = False
             self.dt, self.c = 1e-11, 299792458.
             self._compiled_sources = ()
@@ -80,6 +81,7 @@ def test_parallel_builds_distributed_solver_and_initializes(monkeypatch):
     class FakeDistributedFDTD:
         def __init__(self, logical_scene, **kwargs):
             calls.append((logical_scene, kwargs))
+            self.scene = self.logical_scene = logical_scene
             self.initialized = False
             self.dt, self.c = 1e-11, 299792458.
             self._compiled_sources = ()

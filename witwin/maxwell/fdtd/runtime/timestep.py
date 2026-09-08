@@ -119,7 +119,14 @@ def compile_fdtd_time_step(solver, material_model):
     spacings = [min(float(getattr(solver.scene, f"d{axis}_primal64").min()),
                     float(getattr(solver.scene, f"d{axis}_dual64").min())) for axis in "xyz"]
     curl_rate = 2 * solver.c * math.sqrt(sum(1 / spacing**2 for spacing in spacings) / (epsilon * permeability))
-    material_rate = 0.0
+    # A spatial full-tensor conduction update applies the assembled inverse to
+    # the edge current explicitly. Include its feedback in the joint norm bound;
+    # the local conductive shift alone is not a global implicit inverse.
+    conductivity_rate = 0.0
+    if getattr(solver, "full_aniso_enabled", False):
+        conductivity_rate = max(_maximum(getattr(solver, "sigma_e_" + name))
+                                for name in ("Ex", "Ey", "Ez")) / (solver.eps0 * epsilon)
+    material_rate = conductivity_rate
     passive = True
     for prefix, background in (("", epsilon), ("mu_", permeability)):
         for kind in ("debye", "drude", "lorentz"):
@@ -137,7 +144,9 @@ def compile_fdtd_time_step(solver, material_model):
         limiting = "explicit"
     else:
         material_resolution = 2 * math.pi / (30 * material_rate) if material_rate else math.inf
-        dt = min(float(solver.dt), allowed, material_resolution)
+        frequency = getattr(solver, "_requested_source_frequency", 0.0)
+        source_resolution = 1 / (30 * frequency) if frequency else math.inf
+        dt = min(float(solver.dt), allowed, material_resolution, source_resolution)
         limiting = "material_cfl" if dt == allowed else "frequency_resolution"
     solver.dt = dt
     solver._maxwell_cfl_limit = 2.0 / curl_rate

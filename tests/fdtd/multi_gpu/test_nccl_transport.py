@@ -395,6 +395,7 @@ def _torchrun_adjoint(mode: str, *, timeout: int, stress: bool = False):
 @pytest.mark.parametrize(
     "mode,timeout",
     (
+        ("time_record", 400),
         ("standard", 400),
         ("plane", 400),
         ("cpml", 400),

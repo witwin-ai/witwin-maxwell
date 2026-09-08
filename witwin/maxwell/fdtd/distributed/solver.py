@@ -700,6 +700,9 @@ class DistributedFDTD:
         )
         reference_solver._requested_dt = getattr(self, "_requested_dt", None)
         reference_solver._max_electric_field = getattr(self, "_max_electric_field", None)
+        reference_solver._requested_source_frequency = getattr(
+            self, "_requested_source_frequency", self.frequency
+        )
         if getattr(self.logical_scene, "thin_wires", ()):
             # Build the full-domain single-GPU wire runtime once so the shared dt is
             # the exact joint Maxwell+wire CFL step used by the single-GPU solver;

@@ -356,7 +356,7 @@ def _node_extra_conductivity(runtime, step):
     return torch.clamp(extra, min=0.0)
 
 
-def _scatter_edge_coefficients(solver, runtime, node_extra):
+def _scatter_edge_coefficients(solver, runtime, node_extra, *, accumulate_energy=True):
     """Rewrite the capable-edge decay/curl coefficients from the current node
     conductivity, and accumulate the breakdown dissipation on those edges."""
     dt = runtime["dt"]
@@ -386,6 +386,9 @@ def _scatter_edge_coefficients(solver, runtime, node_extra):
         decay_tensor.reshape(-1).index_copy_(0, data["edge_flat"], final_decay)
         curl_tensor.reshape(-1).index_copy_(0, data["edge_flat"], final_curl)
 
+        if not accumulate_energy:
+            continue
+
         # Breakdown dissipation on this edge: sigma_breakdown * E^2 * volume * dt.
         e_edge = field.reshape(-1)[data["edge_flat"]]
         energy_edge = edge_extra * e_edge.square() * data["volume"] * dt
@@ -397,7 +400,16 @@ def _scatter_edge_coefficients(solver, runtime, node_extra):
         dissip = runtime["dissipated_energy"]
         dissip.index_add_(0, data["left_nodes"], share[data["left_sel"]])
         dissip.index_add_(0, data["right_nodes"], share[data["right_sel"]])
-    runtime["total_dissipated"] += step_dissipation
+    if accumulate_energy:
+        runtime["total_dissipated"] += step_dissipation
+
+
+def restore_breakdown_coefficients(solver, completed_steps):
+    """Rebuild the next-step coefficients without advancing or charging history."""
+    runtime = getattr(solver, "breakdown_runtime", None)
+    if runtime is not None:
+        extra = _node_extra_conductivity(runtime, int(completed_steps) - 1)
+        _scatter_edge_coefficients(solver, runtime, extra, accumulate_energy=False)
 
 
 def advance_breakdown_state(solver, step):
