@@ -1,0 +1,14 @@
+{
+  "source": "audit-bandwidth-storage-profile.json",
+  "storage_bytes_by_first_owner": {
+    "field_cpml_coefficient_slot": 761079936,
+    "other": 93584,
+    "compiled_node_material_cache": 987399552,
+    "compiled_edge_material_cache": 488307456,
+    "runtime_node_materials": 82283296,
+    "dispersion_templates": 244153728,
+    "runtime_edge_materials": 244153728
+  },
+  "disabled_offdiag_nonlinearity_modulation_bytes": 370274832,
+  "note": "Disjoint storage attribution by first reachable owner; disabled-property subset overlaps the node material cache."
+}

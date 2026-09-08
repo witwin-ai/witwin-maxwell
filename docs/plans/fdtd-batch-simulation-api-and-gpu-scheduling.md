@@ -21,6 +21,7 @@
 | P3.2 原生 CPML 与协同时间推进 | 完成 | dense/slab CPML 复用原公式；固定容量场槽、尾批、重置与换入；复用普通 solve 生命周期的协同推进；167 项 GPU 专项/回归通过 |
 | 公共前向执行与结果生命周期子阶段 | 完成 | `prepare/run` 可执行；原生 B-lane 场/CPML、重复运行、A/B/A 参数、尾批、31 频点 monitor-only、独立 Result、流式关闭/取消和保存/加载；公共 Batch/单场景/Graph 回归 89 passed |
 | 原生 eager 与既有基线对照 | 工具/测量完成，组合性能门未通过 | launch、N=B=10、2000 步、2 预热/5 正式；原生 2.342 s，十进程 0.903 s；隔离驱动显存增量 411.6/3175.6 MiB；频谱误差为 0。不能据此声称耗时不退化或完整业务验收 |
+| 性能与正确性审计 | 修复与分项诊断完成 | `d232245` 修复参数身份缓存和迭代所有权；三负载 CPU/CUDA profiling、field-only Graph 消融、N>B 构建次数及扩展数值对照，见 [审计报告](../assessments/fdtd-batch-performance-and-correctness-audit.md)；不替代完整性能矩阵 |
 | P2/P3 其余、P4–P7 | 未完成 | 背景/局部编译复用、源/观察器向量化、精确 output allocation、byte admission、协调 Graph、多 GPU/Q=2、调优和 Batch 伴随仍待实现；不视为全方案或性能验收完成 |
 | P8 | 未开始 | 独立研究门，依赖 P4 实测 |
 

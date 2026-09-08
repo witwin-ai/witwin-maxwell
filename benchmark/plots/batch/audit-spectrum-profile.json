@@ -1,0 +1,720 @@
+{
+  "schema_version": 1,
+  "kind": "batch_dispatch_profile",
+  "environment": {
+    "torch": "2.13.0+cu130",
+    "cuda": "13.0",
+    "python": "3.11.15",
+    "gpu": "NVIDIA RTX A6000"
+  },
+  "device": "cuda:0",
+  "workload": "local_spectrum",
+  "cells": 48,
+  "frequencies": 31,
+  "batch": 10,
+  "steps": 64,
+  "warmups": 2,
+  "repeats": 5,
+  "prepare_s": 0.9003172880038619,
+  "warm_s": [
+    0.8377517182379961,
+    0.6100746709853411,
+    0.5328241065144539,
+    0.815571628510952,
+    0.8619674704968929
+  ],
+  "warm_median_s": 0.815571628510952,
+  "cprofile": [
+    {
+      "file": "witwin/maxwell/fdtd/observers.py",
+      "line": 577,
+      "function": "accumulate_observers",
+      "calls": 640,
+      "self_s": 0.352847947,
+      "cumulative_s": 1.241714161
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "function": "<built-in method torch._ops.witwin_maxwell_fdtd_cuda.accumulate_point_observers>",
+      "calls": 19840,
+      "self_s": 0.352359982,
+      "cumulative_s": 0.352359982
+    },
+    {
+      "file": "witwin/maxwell/fdtd/cuda/backend.py",
+      "line": 54,
+      "function": "_call_with_contiguous",
+      "calls": 19840,
+      "self_s": 0.151131426,
+      "cumulative_s": 0.700659543
+    },
+    {
+      "file": "witwin/maxwell/fdtd/cuda/backend.py",
+      "line": 2124,
+      "function": "_accumulate_point_observers",
+      "calls": 19840,
+      "self_s": 0.08894725,
+      "cumulative_s": 0.505520523
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "function": "<method 'is_contiguous' of 'torch._C.TensorBase' objects>",
+      "calls": 119040,
+      "self_s": 0.040114189,
+      "cumulative_s": 0.040114189
+    },
+    {
+      "file": "witwin/maxwell/fdtd/cuda/backend.py",
+      "line": 99,
+      "function": "bind",
+      "calls": 20480,
+      "self_s": 0.025827066000000003,
+      "cumulative_s": 0.036360774000000005
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "function": "<built-in method builtins.getattr>",
+      "calls": 73050,
+      "self_s": 0.022208649,
+      "cumulative_s": 0.0222181
+    },
+    {
+      "file": "witwin/maxwell/fdtd/runtime/spectral.py",
+      "line": 223,
+      "function": "advance_observer_entry_phases",
+      "calls": 640,
+      "self_s": 0.022115176,
+      "cumulative_s": 0.043676604
+    },
+    {
+      "file": "witwin/maxwell/fdtd/runtime/spectral.py",
+      "line": 304,
+      "function": "advance_phase",
+      "calls": 19840,
+      "self_s": 0.021561428,
+      "cumulative_s": 0.021561428
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "function": "<method 'contiguous' of 'torch._C.TensorBase' objects>",
+      "calls": 59520,
+      "self_s": 0.021147633000000002,
+      "cumulative_s": 0.021147633000000002
+    },
+    {
+      "file": "witwin/maxwell/fdtd/cuda/backend.py",
+      "line": 81,
+      "function": "launchRaw",
+      "calls": 20480,
+      "self_s": 0.020787138,
+      "cumulative_s": 0.73833705
+    },
+    {
+      "file": "witwin/maxwell/fdtd/solver.py",
+      "line": 197,
+      "function": "_compute_window_weight",
+      "calls": 19840,
+      "self_s": 0.020179424,
+      "cumulative_s": 0.039877334
+    },
+    {
+      "file": "witwin/maxwell/fdtd/cuda/build.py",
+      "line": 255,
+      "function": "__getattr__",
+      "calls": 20864,
+      "self_s": 0.019767333,
+      "cumulative_s": 0.027607284000000003
+    },
+    {
+      "file": "witwin/maxwell/fdtd/runtime/spectral.py",
+      "line": 277,
+      "function": "compute_window_weight",
+      "calls": 19840,
+      "self_s": 0.019697910000000003,
+      "cumulative_s": 0.019697910000000003
+    },
+    {
+      "file": "/home/xingyu/miniconda3/envs/maxwell/lib/python3.11/site-packages/torch/_ops.py",
+      "line": 1267,
+      "function": "__call__",
+      "calls": 20864,
+      "self_s": 0.018214384,
+      "cumulative_s": 0.39937411500000003
+    },
+    {
+      "file": "witwin/maxwell/fdtd/runtime/spectral.py",
+      "line": 197,
+      "function": "observer_stagger_weights",
+      "calls": 19840,
+      "self_s": 0.014533891,
+      "cumulative_s": 0.023803400000000002
+    },
+    {
+      "file": "witwin/maxwell/fdtd/boundary/common.py",
+      "line": 25,
+      "function": "has_complex_fields",
+      "calls": 19850,
+      "self_s": 0.014016559000000001,
+      "cumulative_s": 0.019153956
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "function": "<built-in method torch._ops.witwin_maxwell_fdtd_cuda.add_source_patch>",
+      "calls": 640,
+      "self_s": 0.012327668,
+      "cumulative_s": 0.012327668
+    },
+    {
+      "file": "witwin/maxwell/fdtd/cuda/backend.py",
+      "line": 76,
+      "function": "__init__",
+      "calls": 20480,
+      "self_s": 0.010533708000000001,
+      "cumulative_s": 0.010533708000000001
+    },
+    {
+      "file": "witwin/maxwell/fdtd/runtime/stepping.py",
+      "line": 2113,
+      "function": "solve_steps",
+      "calls": 650,
+      "self_s": 0.010116657000000001,
+      "cumulative_s": 1.33434187
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "function": "<method 'startswith' of 'str' objects>",
+      "calls": 19860,
+      "self_s": 0.009284898,
+      "cumulative_s": 0.009284898
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "function": "<built-in method torch._ops.witwin_maxwell_fdtd_cuda.update_magnetic_cpml_batch>",
+      "calls": 192,
+      "self_s": 0.008401076,
+      "cumulative_s": 0.008401076
+    },
+    {
+      "file": "witwin/maxwell/fdtd/runtime/batch.py",
+      "line": 132,
+      "function": "advance",
+      "calls": 64,
+      "self_s": 0.008340791,
+      "cumulative_s": 0.035180291
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "function": "<built-in method torch._ops.witwin_maxwell_fdtd_cuda.update_electric_cpml_batch>",
+      "calls": 192,
+      "self_s": 0.008071005000000001,
+      "cumulative_s": 0.008071005000000001
+    },
+    {
+      "file": "witwin/maxwell/fdtd/excitation/temporal.py",
+      "line": 408,
+      "function": "apply_compiled_source_terms",
+      "calls": 640,
+      "self_s": 0.007374319000000001,
+      "cumulative_s": 0.05389447000000001
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "function": "<method 'items' of 'dict' objects>",
+      "calls": 19920,
+      "self_s": 0.003912079000000001,
+      "cumulative_s": 0.003912079000000001
+    },
+    {
+      "file": "witwin/maxwell/scene.py",
+      "line": 507,
+      "function": "<genexpr>",
+      "calls": 8960,
+      "self_s": 0.003423755,
+      "cumulative_s": 0.003423755
+    },
+    {
+      "file": "witwin/maxwell/sources.py",
+      "line": 497,
+      "function": "evaluate_source_time",
+      "calls": 640,
+      "self_s": 0.0033333160000000002,
+      "cumulative_s": 0.007697113
+    },
+    {
+      "file": "witwin/maxwell/fdtd/cuda/backend.py",
+      "line": 1693,
+      "function": "_add_source_patch",
+      "calls": 640,
+      "self_s": 0.002859102,
+      "cumulative_s": 0.016890369000000002
+    },
+    {
+      "file": "witwin/maxwell/fdtd/excitation/temporal.py",
+      "line": 90,
+      "function": "_launch_uniform_patch",
+      "calls": 640,
+      "self_s": 0.0028454210000000003,
+      "cumulative_s": 0.022598841
+    },
+    {
+      "file": "~",
+      "line": 0,
+      "function": "<built-in method builtins.any>",
+      "calls": 1371,
+      "self_s": 0.0026699500000000004,
+      "cumulative_s": 0.006224864
+    },
+    {
+      "file": "witwin/maxwell/waveforms.py",
+      "line": 40,
+      "function": "gaussian_pulse_signal",
+      "calls": 640,
+      "self_s": 0.002609307,
+      "cumulative_s": 0.0038580290000000002
+    },
+    {
+      "file": "witwin/maxwell/scene.py",
+      "line": 505,
+      "function": "uses_kind",
+      "calls": 1280,
+      "self_s": 0.0026037440000000003,
+      "cumulative_s": 0.010777464
+    },
+    {
+      "file": "witwin/maxwell/fdtd/runtime/batch.py",
+      "line": 149,
+      "function": "<genexpr>",
+      "calls": 2688,
+      "self_s": 0.0022066200000000003,
+      "cumulative_s": 0.0022066200000000003
+    },
+    {
+      "file": "witwin/maxwell/execution/batch_runtime.py",
+      "line": 195,
+      "function": "_solve_cohort",
+      "calls": 1,
+      "self_s": 0.002130963,
+      "cumulative_s": 1.374250851
+    }
+  ],
+  "profiler_scopes": [
+    {
+      "name": "audit.run",
+      "count": 1,
+      "cpu_total_us": 1465630.006,
+      "self_cpu_us": 33301.11000000173,
+      "device_total_us": 73793.66099999874,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "audit.load",
+      "count": 1,
+      "cpu_total_us": 104.65200000000004,
+      "self_cpu_us": 104.65200000000004,
+      "device_total_us": 0,
+      "self_device_us": 0
+    },
+    {
+      "name": "audit.synchronize",
+      "count": 20,
+      "cpu_total_us": 1794.587000000187,
+      "self_cpu_us": 1402.7990000003674,
+      "device_total_us": 2.6239999999997963,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "audit.observer_prepare",
+      "count": 10,
+      "cpu_total_us": 7345.226000000001,
+      "self_cpu_us": 4690.580999999999,
+      "device_total_us": 35.874999999991815,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "audit.fields",
+      "count": 64,
+      "cpu_total_us": 32865.74399999981,
+      "self_cpu_us": 17950.93100000008,
+      "device_total_us": 40614.47900000005,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "audit.source",
+      "count": 640,
+      "cpu_total_us": 53283.27100000046,
+      "self_cpu_us": 37190.847000002366,
+      "device_total_us": 1021.1089999990545,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "audit.observers",
+      "count": 640,
+      "cpu_total_us": 1323313.0640000007,
+      "self_cpu_us": 714086.4739999986,
+      "device_total_us": 31754.45300000009,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "audit.export",
+      "count": 10,
+      "cpu_total_us": 3518.20199999935,
+      "self_cpu_us": 2930.3909999988973,
+      "device_total_us": 13.696000000229105,
+      "self_device_us": 0.0
+    }
+  ],
+  "profiler_cpu_top": [
+    {
+      "name": "audit.observers",
+      "count": 640,
+      "cpu_total_us": 1323313.0640000007,
+      "self_cpu_us": 714086.4739999986,
+      "device_total_us": 31754.45300000009,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "witwin_maxwell_fdtd_cuda::accumulate_point_observers",
+      "count": 19840,
+      "cpu_total_us": 433817.97800001,
+      "self_cpu_us": 247330.0510000019,
+      "device_total_us": 31770.23099999979,
+      "self_device_us": 31767.095999999896
+    },
+    {
+      "name": "cudaLaunchKernel",
+      "count": 20954,
+      "cpu_total_us": 193741.08900001214,
+      "self_cpu_us": 193741.08900001214,
+      "device_total_us": 0,
+      "self_device_us": 0
+    },
+    {
+      "name": "aten::select",
+      "count": 39710,
+      "cpu_total_us": 175692.77999999287,
+      "self_cpu_us": 145844.53300001056,
+      "device_total_us": 0,
+      "self_device_us": 0
+    },
+    {
+      "name": "audit.source",
+      "count": 640,
+      "cpu_total_us": 53283.27100000046,
+      "self_cpu_us": 37190.847000002366,
+      "device_total_us": 1021.1089999990545,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "audit.run",
+      "count": 1,
+      "cpu_total_us": 1465630.006,
+      "self_cpu_us": 33301.11000000173,
+      "device_total_us": 73793.66099999874,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "aten::as_strided",
+      "count": 39721,
+      "cpu_total_us": 29868.673999981806,
+      "self_cpu_us": 29868.673999981806,
+      "device_total_us": 0,
+      "self_device_us": 0
+    },
+    {
+      "name": "audit.fields",
+      "count": 64,
+      "cpu_total_us": 32865.74399999981,
+      "self_cpu_us": 17950.93100000008,
+      "device_total_us": 40614.47900000005,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "Activity Buffer Request",
+      "count": 4,
+      "cpu_total_us": 11447.083000000057,
+      "self_cpu_us": 11054.276999999609,
+      "device_total_us": 20.41799999959767,
+      "self_device_us": 3.134999999892898
+    },
+    {
+      "name": "witwin_maxwell_fdtd_cuda::add_source_patch",
+      "count": 640,
+      "cpu_total_us": 16092.423999998096,
+      "self_cpu_us": 8862.630999997364,
+      "device_total_us": 1021.1089999990545,
+      "self_device_us": 1021.1089999990545
+    },
+    {
+      "name": "witwin_maxwell_fdtd_cuda::update_magnetic_cpml_batch",
+      "count": 192,
+      "cpu_total_us": 7822.105999999036,
+      "self_cpu_us": 5289.43599999891,
+      "device_total_us": 20567.570000000207,
+      "self_device_us": 20567.570000000207
+    },
+    {
+      "name": "witwin_maxwell_fdtd_cuda::update_electric_cpml_batch",
+      "count": 192,
+      "cpu_total_us": 7092.707000000693,
+      "self_cpu_us": 4788.4009999980335,
+      "device_total_us": 20046.908999999847,
+      "self_device_us": 20046.908999999847
+    },
+    {
+      "name": "audit.observer_prepare",
+      "count": 10,
+      "cpu_total_us": 7345.226000000001,
+      "self_cpu_us": 4690.580999999999,
+      "device_total_us": 35.874999999991815,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "audit.export",
+      "count": 10,
+      "cpu_total_us": 3518.20199999935,
+      "self_cpu_us": 2930.3909999988973,
+      "device_total_us": 13.696000000229105,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "audit.synchronize",
+      "count": 20,
+      "cpu_total_us": 1794.587000000187,
+      "self_cpu_us": 1402.7990000003674,
+      "device_total_us": 2.6239999999997963,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "cudaMemcpyAsync",
+      "count": 70,
+      "cpu_total_us": 1007.6180000009363,
+      "self_cpu_us": 1007.6180000009363,
+      "device_total_us": 0,
+      "self_device_us": 0
+    },
+    {
+      "name": "aten::copy_",
+      "count": 70,
+      "cpu_total_us": 2204.039999998942,
+      "self_cpu_us": 899.4069999995199,
+      "device_total_us": 41.21999999975378,
+      "self_device_us": 41.21999999975378
+    },
+    {
+      "name": "aten::empty_strided",
+      "count": 60,
+      "cpu_total_us": 816.1520000000673,
+      "self_cpu_us": 798.360000000067,
+      "device_total_us": 0,
+      "self_device_us": 0
+    },
+    {
+      "name": "aten::_to_copy",
+      "count": 60,
+      "cpu_total_us": 3479.870000000138,
+      "self_cpu_us": 714.1600000007393,
+      "device_total_us": 36.708000000347965,
+      "self_device_us": 0.0
+    },
+    {
+      "name": "aten::empty",
+      "count": 80,
+      "cpu_total_us": 540.3119999998198,
+      "self_cpu_us": 540.3119999998198,
+      "device_total_us": 0,
+      "self_device_us": 0
+    },
+    {
+      "name": "aten::fill_",
+      "count": 50,
+      "cpu_total_us": 1048.1359999999968,
+      "self_cpu_us": 460.90800000000763,
+      "device_total_us": 236.9599999999964,
+      "self_device_us": 236.9599999999964
+    },
+    {
+      "name": "cudaDeviceSynchronize",
+      "count": 22,
+      "cpu_total_us": 414.8399999997282,
+      "self_cpu_us": 414.8399999997282,
+      "device_total_us": 2.6239999999997963,
+      "self_device_us": 2.6239999999997963
+    },
+    {
+      "name": "aten::mul",
+      "count": 20,
+      "cpu_total_us": 676.2890000001062,
+      "self_cpu_us": 396.59599999990314,
+      "device_total_us": 37.15200000000186,
+      "self_device_us": 37.15200000000186
+    },
+    {
+      "name": "aten::index",
+      "count": 10,
+      "cpu_total_us": 484.5029999995604,
+      "self_cpu_us": 302.8939999991562,
+      "device_total_us": 27.071999999927357,
+      "self_device_us": 27.071999999927357
+    },
+    {
+      "name": "aten::zero_",
+      "count": 49,
+      "cpu_total_us": 1284.9930000000095,
+      "self_cpu_us": 256.9350000000122,
+      "device_total_us": 235.55199999999604,
+      "self_device_us": 0.0
+    }
+  ],
+  "gpu_events": [
+    {
+      "name": "void (anonymous namespace)::accumulate_point_observer_kernel<int>(long, unsigned int, unsigned int, float const*, int const*, int const*, int const*, float, float, float*, float*)",
+      "count": 19840,
+      "sum_us": 31767.095999999896
+    },
+    {
+      "name": "void (anonymous namespace)::update_magnetic_cpml_kernel<2, false, true>(unsigned int, unsigned int, unsigned int, float const*, float const*, float const*, float const*, float, float, float const*, float const*, float const*, float const*, float const*, float const*, float const*, float const*, float*, float*, float*, FieldBatchLayout)",
+      "count": 64,
+      "sum_us": 6879.284000000363
+    },
+    {
+      "name": "void (anonymous namespace)::update_magnetic_cpml_kernel<1, false, true>(unsigned int, unsigned int, unsigned int, float const*, float const*, float const*, float const*, float, float, float const*, float const*, float const*, float const*, float const*, float const*, float const*, float const*, float*, float*, float*, FieldBatchLayout)",
+      "count": 64,
+      "sum_us": 6878.863999999841
+    },
+    {
+      "name": "void (anonymous namespace)::update_magnetic_cpml_kernel<0, false, true>(unsigned int, unsigned int, unsigned int, float const*, float const*, float const*, float const*, float, float, float const*, float const*, float const*, float const*, float const*, float const*, float const*, float const*, float*, float*, float*, FieldBatchLayout)",
+      "count": 64,
+      "sum_us": 6809.422000000002
+    },
+    {
+      "name": "void (anonymous namespace)::update_electric_cpml_interior_kernel<0, false, true>(unsigned int, unsigned int, unsigned int, float const*, float const*, float const*, float const*, float, float, float const*, float const*, float const*, float const*, float const*, float const*, float const*, float const*, float*, float*, float*, FieldBatchLayout)",
+      "count": 64,
+      "sum_us": 6742.439999999886
+    },
+    {
+      "name": "void (anonymous namespace)::update_electric_cpml_interior_kernel<1, false, true>(unsigned int, unsigned int, unsigned int, float const*, float const*, float const*, float const*, float, float, float const*, float const*, float const*, float const*, float const*, float const*, float const*, float const*, float*, float*, float*, FieldBatchLayout)",
+      "count": 64,
+      "sum_us": 6732.810999999809
+    },
+    {
+      "name": "void (anonymous namespace)::update_electric_cpml_interior_kernel<2, false, true>(unsigned int, unsigned int, unsigned int, float const*, float const*, float const*, float const*, float, float, float const*, float const*, float const*, float const*, float const*, float const*, float const*, float const*, float*, float*, float*, FieldBatchLayout)",
+      "count": 64,
+      "sum_us": 6571.658000000152
+    },
+    {
+      "name": "void (anonymous namespace)::add_source_patch_kernel<false>((anonymous namespace)::Shape3D, (anonymous namespace)::Shape3D, int, int, int, float, float*, float const*)",
+      "count": 640,
+      "sum_us": 1021.1089999990545
+    },
+    {
+      "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+      "count": 48,
+      "sum_us": 234.11199999999553
+    },
+    {
+      "name": "Memcpy HtoD (Pageable -> Device)",
+      "count": 60,
+      "sum_us": 27.523999999524676
+    },
+    {
+      "name": "void at::native::index_elementwise_kernel<128, 4, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<8> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1}>(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>, at::native::index_kernel_impl<at::native::OpaqueType<8> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1} const&, bool)::{lambda(int)#1}>(long, at::native::gpu_index_kernel<at::native::index_kernel_impl<at::native::OpaqueType<8> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1}>(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>, at::native::index_kernel_impl<at::native::OpaqueType<8> >(at::TensorIteratorBase&, c10::ArrayRef<long>, c10::ArrayRef<long>)::{lambda(char*, char const*, long)#1} const&, bool)::{lambda(int)#1})",
+      "count": 10,
+      "sum_us": 27.071999999927357
+    },
+    {
+      "name": "void at::native::unrolled_elementwise_kernel<at::native::CUDAFunctor_add<c10::complex<float> >, std::array<char*, 3ul>, 4, TrivialOffsetCalculator<2, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<2>, at::native::memory::StoreWithCast<1> >(int, at::native::CUDAFunctor_add<c10::complex<float> >, std::array<char*, 3ul>, TrivialOffsetCalculator<2, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<2>, at::native::memory::StoreWithCast<1>)",
+      "count": 10,
+      "sum_us": 20.511000000173226
+    },
+    {
+      "name": "void at::native::unrolled_elementwise_kernel<at::native::BinaryFunctor<c10::complex<float>, c10::complex<float>, c10::complex<float>, at::native::binary_internal::MulFunctor<c10::complex<float> > >, std::array<char*, 3ul>, 4, TrivialOffsetCalculator<2, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<2>, at::native::memory::StoreWithCast<1> >(int, at::native::BinaryFunctor<c10::complex<float>, c10::complex<float>, c10::complex<float>, at::native::binary_internal::MulFunctor<c10::complex<float> > >, std::array<char*, 3ul>, TrivialOffsetCalculator<2, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<2>, at::native::memory::StoreWithCast<1>)",
+      "count": 10,
+      "sum_us": 20.030999999959022
+    },
+    {
+      "name": "void at::native::unrolled_elementwise_kernel<at::native::AUnaryFunctor<c10::complex<float>, c10::complex<float>, c10::complex<float>, at::native::binary_internal::MulFunctor<c10::complex<float> > >, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::AUnaryFunctor<c10::complex<float>, c10::complex<float>, c10::complex<float>, at::native::binary_internal::MulFunctor<c10::complex<float> > >, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+      "count": 10,
+      "sum_us": 17.12100000004284
+    },
+    {
+      "name": "Memcpy DtoD (Device -> Device)",
+      "count": 10,
+      "sum_us": 13.696000000229105
+    },
+    {
+      "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+      "count": 2,
+      "sum_us": 2.848000000000866
+    }
+  ],
+  "gpu_busy_union_us": 73765.59899999885,
+  "gpu_span_us": 1459512.541,
+  "storage_bytes": {
+    "cuda:0": 582241264
+  },
+  "buffer_bytes": {
+    "Ex": 7277760,
+    "Ey": 7277760,
+    "Ez": 7277760,
+    "Hx": 7150080,
+    "Hy": 7150080,
+    "Hz": 7150080,
+    "psi_ex_y": 7277760,
+    "psi_ex_z": 7277760,
+    "psi_ey_x": 7277760,
+    "psi_ey_z": 7277760,
+    "psi_ez_x": 7277760,
+    "psi_ez_y": 7277760,
+    "psi_hx_y": 7150080,
+    "psi_hx_z": 7150080,
+    "psi_hy_x": 7150080,
+    "psi_hy_z": 7150080,
+    "psi_hz_x": 7150080,
+    "psi_hz_y": 7150080,
+    "cex_decay": 7277760,
+    "cex_curl": 7277760,
+    "cey_decay": 7277760,
+    "cey_curl": 7277760,
+    "cez_decay": 7277760,
+    "cez_curl": 7277760,
+    "chx_decay": 7150080,
+    "chx_curl": 7150080,
+    "chy_decay": 7150080,
+    "chy_curl": 7150080,
+    "chz_decay": 7150080,
+    "chz_curl": 7150080
+  },
+  "notes": [
+    "Profiler adds overhead; use separate uninstrumented timings for latency.",
+    "GPU busy union is timeline activity, not SM occupancy or memory bandwidth."
+  ],
+  "field_graph_ablation": {
+    "control_s": [
+      1.053886297158897,
+      1.0597323281690478,
+      1.0858173929154873,
+      0.6209536576643586,
+      0.6957400469109416
+    ],
+    "field_graph_s": [
+      1.0412485739216208,
+      1.0407128455117345,
+      0.8048165012151003,
+      0.9562422251328826,
+      0.9254378275945783
+    ],
+    "control_median_s": 1.053886297158897,
+    "field_graph_median_s": 0.9562422251328826,
+    "relative_probe_error": 0.0,
+    "scope": "field block only; diagnostic capture in a quiescent process; not the public graph scheduler"
+  }
+}

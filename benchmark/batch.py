@@ -108,10 +108,13 @@ def main(argv=None):
     group.add_argument("--inventory", action="store_true", help="Print workloads without solver allocation")
     group.add_argument("--audit", choices=tuple(BATCH_WORKLOADS), help="Audit one independent GPU simulation")
     group.add_argument("--compare", choices=tuple(BATCH_WORKLOADS), help="Compare sequential/process/run_many baselines")
+    group.add_argument("--profile", choices=tuple(BATCH_WORKLOADS), help="Profile native dispatch and diagnostic field capture")
+    group.add_argument("--capacity-audit", choices=tuple(BATCH_WORKLOADS), help="Measure compilation while rotating cohorts")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--variants", type=int, default=10)
     parser.add_argument("--concurrency", type=int, default=10)
+    parser.add_argument("--capacities", type=int, nargs="+", default=[1, 2, 4, 10], help="Resident capacities for --capacity-audit")
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--steps", type=int, help="Explicit step override; retained in the report")
@@ -128,21 +131,34 @@ def main(argv=None):
                    "planned_variant_counts": [1, 10, 100], "deduplication": False,
                    "status": "baseline_instrumentation_only"}
     else:
-        workload = BATCH_WORKLOADS[args.audit or args.compare]
+        workload = BATCH_WORKLOADS[args.audit or args.compare or args.profile or args.capacity_audit]
         if args.steps is not None:
             if args.steps <= 0:
                 parser.error("--steps must be positive.")
             workload = replace(workload, time_steps=args.steps)
         if args.audit:
             payload = audit(workload, device=args.device)
+        elif args.profile:
+            from benchmark.batch_profile import profile_batch
+            payload = profile_batch(workload, device=args.device, capacity=args.concurrency,
+                                    warmups=args.warmups, repeats=args.repeats)
+        elif args.capacity_audit:
+            from benchmark.batch_profile import audit_capacity
+            payload = audit_capacity(workload, device=args.device, variants=args.variants,
+                                     capacities=args.capacities, repeats=args.repeats)
         else:
             payload = benchmark_baselines(workload, device=args.device, variants=args.variants,
                 concurrency=args.concurrency, identical=args.identical,
                 warmups=args.warmups, repeats=args.repeats, include_native=args.include_native)
     encoded = json.dumps(payload, indent=2) + "\n"
-    if args.audit or args.compare or args.output:
+    if args.audit or args.compare or args.profile or args.capacity_audit or args.output:
         suffix = "audit" if args.audit else f"n{args.variants}-{'identical' if args.identical else 'varied'}"
-        path = args.output or PLOTS_DIR / "batch" / f"{args.audit or args.compare}-{suffix}.json"
+        if args.profile:
+            suffix = f"b{args.concurrency}-profile"
+        elif args.capacity_audit:
+            suffix = f"n{args.variants}-capacity"
+        name = args.audit or args.compare or args.profile or args.capacity_audit
+        path = args.output or PLOTS_DIR / "batch" / f"{name}-{suffix}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(encoded, encoding="utf-8")
         if args.update_report:

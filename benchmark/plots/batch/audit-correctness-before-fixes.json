@@ -1,0 +1,182 @@
+{
+  "inference_mode": {
+    "accepted": false,
+    "error": "Inference tensors do not track version counter."
+  },
+  "temporary_source_parameters": {
+    "unique_ids": 27,
+    "mismatches": [
+      {
+        "iteration": 3,
+        "tensor_id": 133940103098880,
+        "previous_value_for_id": 2,
+        "relative_error": 0.3333333134651184
+      },
+      {
+        "iteration": 4,
+        "tensor_id": 133940103098880,
+        "previous_value_for_id": 3,
+        "relative_error": 0.5
+      },
+      {
+        "iteration": 5,
+        "tensor_id": 133940103098880,
+        "previous_value_for_id": 4,
+        "relative_error": 0.5999999642372131
+      },
+      {
+        "iteration": 6,
+        "tensor_id": 133940103098880,
+        "previous_value_for_id": 5,
+        "relative_error": 0.6666666269302368
+      },
+      {
+        "iteration": 7,
+        "tensor_id": 133940103098880,
+        "previous_value_for_id": 6,
+        "relative_error": 0.7142857313156128
+      },
+      {
+        "iteration": 8,
+        "tensor_id": 133940103098880,
+        "previous_value_for_id": 7,
+        "relative_error": 0.75
+      },
+      {
+        "iteration": 9,
+        "tensor_id": 133940103098880,
+        "previous_value_for_id": 8,
+        "relative_error": 0.7777777314186096
+      },
+      {
+        "iteration": 10,
+        "tensor_id": 133940103098880,
+        "previous_value_for_id": 9,
+        "relative_error": 0.800000011920929
+      },
+      {
+        "iteration": 11,
+        "tensor_id": 133940103098880,
+        "previous_value_for_id": 10,
+        "relative_error": 0.8181818127632141
+      },
+      {
+        "iteration": 12,
+        "tensor_id": 133940103098880,
+        "previous_value_for_id": 11,
+        "relative_error": 0.8333332538604736
+      },
+      {
+        "iteration": 13,
+        "tensor_id": 133940103098880,
+        "previous_value_for_id": 12,
+        "relative_error": 0.8461537957191467
+      },
+      {
+        "iteration": 19,
+        "tensor_id": 133940103282384,
+        "previous_value_for_id": 18,
+        "relative_error": 0.05263151973485947
+      },
+      {
+        "iteration": 20,
+        "tensor_id": 133940103282384,
+        "previous_value_for_id": 19,
+        "relative_error": 0.09999995678663254
+      },
+      {
+        "iteration": 25,
+        "tensor_id": 133940103246256,
+        "previous_value_for_id": 24,
+        "relative_error": 0.03999990224838257
+      },
+      {
+        "iteration": 26,
+        "tensor_id": 133940103246256,
+        "previous_value_for_id": 25,
+        "relative_error": 0.07692299038171768
+      },
+      {
+        "iteration": 27,
+        "tensor_id": 133940103246256,
+        "previous_value_for_id": 26,
+        "relative_error": 0.11111103743314743
+      },
+      {
+        "iteration": 28,
+        "tensor_id": 133940103246256,
+        "previous_value_for_id": 27,
+        "relative_error": 0.14285707473754883
+      },
+      {
+        "iteration": 35,
+        "tensor_id": 133940103326416,
+        "previous_value_for_id": 34,
+        "relative_error": 0.028571436181664467
+      },
+      {
+        "iteration": 36,
+        "tensor_id": 133940103326416,
+        "previous_value_for_id": 35,
+        "relative_error": 0.055555570870637894
+      },
+      {
+        "iteration": 37,
+        "tensor_id": 133940103326416,
+        "previous_value_for_id": 36,
+        "relative_error": 0.08108110725879669
+      },
+      {
+        "iteration": 38,
+        "tensor_id": 133940103326416,
+        "previous_value_for_id": 37,
+        "relative_error": 0.10526318848133087
+      },
+      {
+        "iteration": 39,
+        "tensor_id": 133940103326416,
+        "previous_value_for_id": 38,
+        "relative_error": 0.12820515036582947
+      },
+      {
+        "iteration": 46,
+        "tensor_id": 133940331967136,
+        "previous_value_for_id": 45,
+        "relative_error": 0.021739017218351364
+      },
+      {
+        "iteration": 51,
+        "tensor_id": 133940103316656,
+        "previous_value_for_id": 50,
+        "relative_error": 0.01960776560008526
+      },
+      {
+        "iteration": 55,
+        "tensor_id": 133940103087280,
+        "previous_value_for_id": 54,
+        "relative_error": 0.01818179525434971
+      },
+      {
+        "iteration": 60,
+        "tensor_id": 133940103368768,
+        "previous_value_for_id": 59,
+        "relative_error": 0.01666669175028801
+      }
+    ]
+  },
+  "concurrent_iterator_close": {
+    "close_error": "generator already executing",
+    "execution_gate_unlocked_while_running": true,
+    "worker_errors": [],
+    "worker_alive": false,
+    "iterator_closed_flag": true
+  },
+  "close_during_validation": {
+    "iterator_created_on_closed_context": true,
+    "errors": []
+  },
+  "out_of_envelope": {
+    "accepted": true,
+    "failures": []
+  }
+}

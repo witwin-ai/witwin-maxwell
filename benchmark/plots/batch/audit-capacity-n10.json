@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "kind": "batch_capacity_compilation_audit",
+  "environment": {
+    "torch": "2.13.0+cu130",
+    "cuda": "13.0",
+    "python": "3.11.15",
+    "gpu": "NVIDIA RTX A6000"
+  },
+  "device": "cuda:0",
+  "workload": "launch",
+  "steps": 128,
+  "variants": 10,
+  "rows": [
+    {
+      "capacity": 1,
+      "rounds": [
+        {
+          "run_s": 0.8617513664066792,
+          "solver_builds": 10,
+          "solver_build_s": 0.25906246341764927
+        },
+        {
+          "run_s": 0.7811312256380916,
+          "solver_builds": 10,
+          "solver_build_s": 0.24034369364380836
+        },
+        {
+          "run_s": 0.5572389457374811,
+          "solver_builds": 10,
+          "solver_build_s": 0.18053109012544155
+        }
+      ],
+      "median_s": 0.7811312256380916
+    },
+    {
+      "capacity": 2,
+      "rounds": [
+        {
+          "run_s": 0.4191158600151539,
+          "solver_builds": 10,
+          "solver_build_s": 0.1713570449501276
+        },
+        {
+          "run_s": 0.5965877799317241,
+          "solver_builds": 10,
+          "solver_build_s": 0.24461766332387924
+        },
+        {
+          "run_s": 0.5891033094376326,
+          "solver_builds": 10,
+          "solver_build_s": 0.23748879600316286
+        }
+      ],
+      "median_s": 0.5891033094376326
+    },
+    {
+      "capacity": 4,
+      "rounds": [
+        {
+          "run_s": 0.5482344012707472,
+          "solver_builds": 10,
+          "solver_build_s": 0.2558068251237273
+        },
+        {
+          "run_s": 0.5477610845118761,
+          "solver_builds": 10,
+          "solver_build_s": 0.2563202837482095
+        },
+        {
+          "run_s": 0.5397143084555864,
+          "solver_builds": 10,
+          "solver_build_s": 0.2520906412974
+        }
+      ],
+      "median_s": 0.5477610845118761
+    },
+    {
+      "capacity": 10,
+      "rounds": [
+        {
+          "run_s": 0.17265234608203173,
+          "solver_builds": 0,
+          "solver_build_s": 0.0
+        },
+        {
+          "run_s": 0.1727215861901641,
+          "solver_builds": 0,
+          "solver_build_s": 0.0
+        },
+        {
+          "run_s": 0.17213329393416643,
+          "solver_builds": 0,
+          "solver_build_s": 0.0
+        }
+      ],
+      "median_s": 0.17265234608203173
+    }
+  ],
+  "notes": [
+    "Solver-build time includes material compilation and solver construction.",
+    "One warmup per capacity; diagnostic sweep, not a throughput acceptance gate."
+  ]
+}

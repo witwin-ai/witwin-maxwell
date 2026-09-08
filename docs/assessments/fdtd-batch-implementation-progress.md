@@ -235,3 +235,14 @@ graded grids, PEC/PMC/CPML boundaries, normalized windowed multifrequency fields
 plane/flux spectra, retained full-field outputs, and independently terminating
 lanes. Ordinary-solver parity is a compatibility check, not independent physical
 validation or batch-adjoint acceptance.
+
+The detailed [performance and correctness audit](fdtd-batch-performance-and-correctness-audit.md)
+records both exploratory and CLI profiling runs. It separates host dispatch from
+device work, measures field-only capture without claiming a public graph scheduler,
+and confirms that N=10 with B=1/2/4 rebuilds ten solvers on every repeated run.
+The unified benchmark entrypoint now supports `--profile` and `--capacity-audit`;
+the raw evidence is retained under `benchmark/plots/batch/audit-*`.
+The final combined audit/native/CPML/ordinary-adjoint/benchmark regression run
+completed with **247 passed**, no failures or skips, and one existing sparse
+tensor invariant warning. This extends compatibility evidence only; pending
+batch-gradient and business-performance gates remain open.
