@@ -2124,6 +2124,7 @@ def solve_steps(
     resume_from=None,
     stop_step: int | None = None,
     cooperative: bool = False,
+    cooperative_observer=None,
 ):
     """Shared solve lifecycle, optionally yielding before each field update.
 
@@ -2301,7 +2302,10 @@ def solve_steps(
             # per-cell breakdown state machine and scatter the updated conductivity
             # into the electric coefficients used by the next step.
             advance_breakdown_state(solver, n)
-        solver.accumulate_observers(n)
+        if cooperative_observer is None:
+            solver.accumulate_observers(n)
+        else:
+            yield ("observers", n)
         solver.accumulate_time_observers(n)
         solver.accumulate_breakdown_observers(n)
         accumulate_wire_monitors(solver, n)
@@ -2344,6 +2348,9 @@ def solve_steps(
     # steps_run, not n + 1: the loop variable is unbound for time_steps == 0 and
     # the graph-driven observer step counter must match the steps actually run,
     # including an early shutoff break.
+    if cooperative_observer is not None:
+        engine, lane = cooperative_observer
+        engine.finalize(lane)
     complete_port_observer_graph(solver, steps_run)
     solver._synchronize_device()
     from .timestep import validate_nonlinear_field_envelope

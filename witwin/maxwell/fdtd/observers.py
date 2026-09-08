@@ -662,6 +662,103 @@ def accumulate_observers(solver, n, phase_cos=None, phase_sin=None):
     solver._sync_observer_primary_state()
 
 
+class BatchObserverEngine:
+    """GPU frequency recurrences and grouped sampling across resident lanes.
+
+    Ordinary preparation and export own the monitor schema and interpolation.
+    The engine replaces only running accumulation and writes the same group
+    buffers. Inactive lanes preserve their final spectra and normalization.
+    """
+
+    def __init__(self, slot):
+        self.slot = slot
+        self.step = torch.zeros(1, dtype=torch.int64, device=slot.device)
+        self.groups = []
+
+    def bind(self):
+        from ..sources import evaluate_source_time_normalization
+        slot = self.slot
+        solvers = slot.solvers
+        b = slot.capacity
+        f = max((len(s._observer_spectral_entries) for s in solvers), default=0)
+        self.groups = []
+        self.step.zero_()
+        self.state = self.weights = self.schedule = self.signals = None
+        if not f:
+            return
+        state = np.zeros((b, f, 10), dtype=np.float64)
+        schedule = np.zeros((b, f, 3), dtype=np.int64)
+        source_signals = {}
+        collected = {}
+        for lane, solver in enumerate(solvers):
+            entries = solver._observer_spectral_entries
+            window = {"none": 0, "hanning": 1, "ramp": 2}[solver.observer_window_type]
+            for index, entry in enumerate(entries):
+                state[lane, index, :6] = [entry[name] for name in (
+                    "phase_cos", "phase_sin", "phase_step_cos", "phase_step_sin", "h_offset_cos", "h_offset_sin")]
+                schedule[lane, index] = (entry["start_step"], entry["end_step"], window)
+            reference = (getattr(solver, "_normalization_source_time", None)
+                         if solver._normalize_source else None)
+            if reference is not None:
+                steps = max(entry["end_step"] for entry in entries)
+                source_signals[lane] = [evaluate_source_time_normalization(reference, n * solver.dt)
+                                        for n in range(steps)]
+            for kind, groups in (("point", solver._point_observer_groups),
+                                 ("plane", solver._plane_observer_groups)):
+                for key, group in groups.items():
+                    shape = tuple(group["real"].shape)
+                    signature = (kind, key, shape)
+                    collected.setdefault(signature, []).append((lane, group))
+        signals = np.zeros((max((len(v) for v in source_signals.values()), default=1), b), dtype=np.float64)
+        for lane, values in source_signals.items():
+            signals[:len(values), lane] = values
+        self.state = torch.as_tensor(state, device=slot.device)
+        self.schedule = torch.as_tensor(schedule, device=slot.device)
+        self.signals = torch.as_tensor(signals, device=slot.device)
+        self.weights = torch.zeros((b, f, 4), dtype=torch.float32, device=slot.device)
+        for (kind, key, shape), members in collected.items():
+            field_name = members[0][1]["field_name"]
+            field = slot.buffers[field_name]
+            ny, nz = field.shape[-2:]
+            p = int(np.prod(shape[1:]))
+            offsets = torch.full((b, p), -1, dtype=torch.int64, device=slot.device)
+            frequency_map = torch.full((b, shape[0]), -1, dtype=torch.int64, device=slot.device)
+            real = torch.zeros((b, shape[0], p), device=slot.device, dtype=field.dtype)
+            imag = torch.zeros_like(real)
+            for lane, group in members:
+                if kind == "point":
+                    indices = (group["point_i"].long() * ny + group["point_j"].long()) * nz + group["point_k"]
+                else:
+                    axes = [torch.arange(size, device=slot.device) for size in field.shape[1:]]
+                    axes[group["axis_code"]] = torch.tensor([group["plane_index"]], device=slot.device)
+                    i, j, k = torch.meshgrid(*axes, indexing="ij")
+                    indices = ((i * ny + j) * nz + k).reshape(-1)
+                offsets[lane].copy_(indices + lane * field[0].numel())
+                frequency_map[lane] = torch.tensor(group["global_freq_indices"], device=slot.device) + lane * f
+                group["real"] = real[lane].view(shape)
+                group["imag"] = imag[lane].view(shape)
+            self.groups.append((field, offsets, frequency_map, self.weights, slot.active,
+                                real, imag, field_name.startswith("H")))
+
+    def advance(self):
+        if self.state is not None:
+            self.slot.native.batch_observer_weights(self.state, self.schedule, self.signals,
+                                                    self.slot.active, self.step, self.weights)
+            for args in self.groups:
+                self.slot.native.batch_observer_gather(*args)
+        self.step.add_(1)
+
+    def finalize(self, lane):
+        solver = self.slot.solvers[lane]
+        if self.state is None or not solver._observer_spectral_entries:
+            return
+        values = self.state[lane].cpu().tolist()
+        for entry, row in zip(solver._observer_spectral_entries, values):
+            entry.update(phase_cos=row[0], phase_sin=row[1], window_normalization=row[6],
+                         sample_count=int(row[7]), source_dft_real=row[8], source_dft_imag=row[9])
+        solver._sync_observer_primary_state()
+
+
 # ---------------------------------------------------------------------------
 # Time-domain observers (raw time-series fields and instantaneous flux).
 #

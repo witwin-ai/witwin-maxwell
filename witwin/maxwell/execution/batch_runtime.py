@@ -194,8 +194,10 @@ class PreparedBatch:
 
     def _solve_cohort(self):
         from ..fdtd.runtime.stepping import solve_steps
+        from ..fdtd.observers import BatchObserverEngine
         slot = self._slot
         slot.reset()
+        observers = BatchObserverEngine(slot)
         generators, pending, outputs = [], {}, {}
         try:
             for lane, (model, solver) in enumerate(zip(self._models, slot.solvers)):
@@ -205,19 +207,25 @@ class PreparedBatch:
                 iterator = solve_steps(solver, time_steps=steps, dft_frequency=model.frequencies,
                     dft_window=cfg.spectral_sampler.window, full_field_dft=bool(self.batch.outputs.fields),
                     normalize_source=cfg.spectral_sampler.normalize_source, shutoff=cfg.shutoff,
-                    shutoff_check_interval=cfg.shutoff_check_interval, cooperative=True)
+                    shutoff_check_interval=cfg.shutoff_check_interval, cooperative=True,
+                    cooperative_observer=(observers, lane))
                 generators.append(iterator)
                 try:
                     pending[lane] = next(iterator)
                 except StopIteration as done:
                     outputs[lane] = done.value or {}
                     slot.active[lane] = 0
+            observers.bind()
             while pending:
                 if self._cancel.is_set():
                     raise _BatchCancelled("Batch cancellation requested.")
                 if len(set(pending.values())) != 1:
                     raise RuntimeError("Cooperative batch lanes reached inconsistent timestep barriers.")
                 slot.advance()
+                for lane in pending:
+                    if next(generators[lane]) != ("observers", pending[lane]):
+                        raise RuntimeError("Batch observer barrier is inconsistent.")
+                observers.advance()
                 for lane in tuple(pending):
                     try:
                         pending[lane] = next(generators[lane])

@@ -3,6 +3,137 @@
 #include "common.cuh"
 
 namespace {
+// One thread owns one lane/frequency recurrence. Double precision preserves the
+// ordinary host recurrence and normalization; field weights are rounded once.
+__global__ void batch_observer_weights_kernel(int64_t count, int64_t frequencies,
+    int64_t lanes, int64_t signal_steps, double* state, const int64_t* schedule,
+    const double* signals, const int* active, const int64_t* step, float* weights) {
+  const int64_t q = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (q >= count) return;
+  const int64_t lane = q / frequencies;
+  if (!active[lane]) return;
+  const int64_t n = step[0], start = schedule[3*q], end = schedule[3*q+1];
+  const int64_t window = schedule[3*q+2];
+  double* s = state + 10*q;
+  double w = 0.;
+  if (n >= start && n < end) {
+    const double pos = static_cast<double>(n-start) / static_cast<double>(end-start);
+    w = window == 1 ? .5 * (1. - cos(6.2831853071795864769 * pos)) :
+        (window == 2 && pos < .1 ? .5 * (1. - cos(3.14159265358979323846 * pos / .1)) : 1.);
+    s[6] += w;
+    s[7] += 1.;
+  }
+  const double c = w*s[0], si = w*s[1];
+  weights[4*q] = static_cast<float>(c);
+  weights[4*q+1] = static_cast<float>(si);
+  weights[4*q+2] = static_cast<float>(c*s[4] - si*s[5]);
+  weights[4*q+3] = static_cast<float>(si*s[4] + c*s[5]);
+  const double signal = n >= 0 && n < signal_steps ? signals[n*lanes+lane] : 0.;
+  s[8] += signal*c;
+  s[9] += signal*si;
+  const double next_c = s[0]*s[2] - s[1]*s[3];
+  s[1] = s[1]*s[2] + s[0]*s[3];
+  s[0] = next_c;
+}
+
+__global__ void batch_observer_gather_kernel(int64_t count, int64_t points,
+    int64_t frequencies, int64_t field_size, int64_t weight_count, int retard,
+    const float* field, const int64_t* offsets, const int64_t* frequency_map,
+    const float* weights, const int* active, float* real, float* imag) {
+  const int64_t q = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (q >= count) return;
+  const int64_t row = q / points, lane = row / frequencies;
+  if (!active[lane]) return;
+  const int64_t offset = offsets[lane*points+q%points], f = frequency_map[row];
+  if (offset < 0 || offset >= field_size || f < 0 || f >= weight_count) return;
+  const float value = field[offset];
+  real[q] += value * weights[4*f+retard];
+  imag[q] += value * weights[4*f+retard+1];
+}
+
+void batch_check(const torch::stable::Tensor& reference, const torch::stable::Tensor& tensor,
+    torch::headeronly::ScalarType dtype, const char* name) {
+  check_cuda_tensor(tensor, name);
+  check_contiguous_tensor(tensor, name);
+  check_same_cuda_device(reference, tensor, name);
+  STD_TORCH_CHECK(tensor.scalar_type() == dtype, name, " has incorrect dtype");
+}
+
+void batch_disjoint(const torch::stable::Tensor& a, const torch::stable::Tensor& b) {
+  const auto x = reinterpret_cast<uintptr_t>(a.data_ptr());
+  const auto y = reinterpret_cast<uintptr_t>(b.data_ptr());
+  STD_TORCH_CHECK(x + a.numel()*a.element_size() <= y || y + b.numel()*b.element_size() <= x,
+      "batch observer writable storage must not overlap another input");
+}
+}  // namespace
+
+void batch_observer_weights_cuda(torch::stable::Tensor state,
+    const torch::stable::Tensor& schedule, const torch::stable::Tensor& signals,
+    const torch::stable::Tensor& active, const torch::stable::Tensor& step,
+    torch::stable::Tensor weights) {
+  using torch::headeronly::ScalarType;
+  batch_check(state, state, ScalarType::Double, "state");
+  batch_check(state, schedule, ScalarType::Long, "schedule");
+  batch_check(state, signals, ScalarType::Double, "signals");
+  batch_check(state, active, ScalarType::Int, "active");
+  batch_check(state, step, ScalarType::Long, "step");
+  batch_check(state, weights, ScalarType::Float, "weights");
+  STD_TORCH_CHECK(state.dim() == 3 && state.size(2) == 10, "state must be [B,F,10]");
+  const int64_t b = state.size(0), f = state.size(1);
+  STD_TORCH_CHECK(b > 0 && f > 0 && schedule.dim() == 3 && schedule.size(0) == b &&
+      schedule.size(1) == f && schedule.size(2) == 3, "schedule must be [B,F,3]");
+  STD_TORCH_CHECK(weights.dim() == 3 && weights.size(0) == b && weights.size(1) == f &&
+      weights.size(2) == 4, "weights must be [B,F,4]");
+  STD_TORCH_CHECK(signals.dim() == 2 && signals.size(1) == b && active.numel() == b &&
+      step.numel() == 1, "invalid signals, active mask or step");
+  for (const auto& input : {schedule, signals, active, step}) {
+    batch_disjoint(state, input);
+    batch_disjoint(weights, input);
+  }
+  batch_disjoint(state, weights);
+  torch::stable::accelerator::DeviceGuard guard(state.get_device_index());
+  batch_observer_weights_kernel<<<linear_grid(b*f, 128), 128, 0, current_cuda_stream()>>>(
+      b*f, f, b, signals.size(0), state.mutable_data_ptr<double>(), schedule.mutable_data_ptr<int64_t>(),
+      signals.mutable_data_ptr<double>(), active.mutable_data_ptr<int>(), step.mutable_data_ptr<int64_t>(),
+      weights.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void batch_observer_gather_cuda(const torch::stable::Tensor& field,
+    const torch::stable::Tensor& offsets, const torch::stable::Tensor& frequency_map,
+    const torch::stable::Tensor& weights, const torch::stable::Tensor& active,
+    torch::stable::Tensor real, torch::stable::Tensor imag, bool magnetic) {
+  using torch::headeronly::ScalarType;
+  batch_check(field, field, ScalarType::Float, "field");
+  batch_check(field, offsets, ScalarType::Long, "offsets");
+  batch_check(field, frequency_map, ScalarType::Long, "frequency_map");
+  batch_check(field, weights, ScalarType::Float, "weights");
+  batch_check(field, active, ScalarType::Int, "active");
+  batch_check(field, real, ScalarType::Float, "real");
+  batch_check(field, imag, ScalarType::Float, "imag");
+  STD_TORCH_CHECK(real.dim() == 3 && real.sizes().equals(imag.sizes()), "accumulators must match [B,F,P]");
+  const int64_t b = real.size(0), f = real.size(1), p = real.size(2);
+  STD_TORCH_CHECK(b > 0 && f > 0 && p > 0 && field.dim() == 4 && field.size(0) == b,
+      "invalid batch field or accumulator dimensions");
+  STD_TORCH_CHECK(offsets.dim() == 2 && offsets.size(0) == b && offsets.size(1) == p &&
+      frequency_map.dim() == 2 && frequency_map.size(0) == b && frequency_map.size(1) == f &&
+      weights.dim() == 3 && weights.size(0) == b && weights.size(2) == 4 && active.numel() == b,
+      "invalid offsets, frequency map, weights or active mask");
+  for (const auto& input : {field, offsets, frequency_map, weights, active}) {
+    batch_disjoint(real, input);
+    batch_disjoint(imag, input);
+  }
+  batch_disjoint(real, imag);
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
+  batch_observer_gather_kernel<<<linear_grid(real.numel(), 256), 256, 0, current_cuda_stream()>>>(
+      real.numel(), p, f, field.numel(), weights.numel()/4, magnetic ? 2 : 0,
+      field.mutable_data_ptr<float>(), offsets.mutable_data_ptr<int64_t>(),
+      frequency_map.mutable_data_ptr<int64_t>(), weights.mutable_data_ptr<float>(), active.mutable_data_ptr<int>(),
+      real.mutable_data_ptr<float>(), imag.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+namespace {
 
 template <typename IndexT>
 __global__ void accumulate_point_observer_kernel(

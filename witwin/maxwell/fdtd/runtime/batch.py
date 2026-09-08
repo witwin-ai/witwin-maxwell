@@ -119,6 +119,7 @@ class NativeFieldSlot:
         self.solvers = tuple(solvers)
         self.active.zero_()
         self.active[:len(solvers)].fill_(1)
+        self._bind_operations()
 
     def reset(self):
         for name in self.state_names:
@@ -130,6 +131,11 @@ class NativeFieldSlot:
         self.active[:len(self.solvers)].fill_(1)
 
     def advance(self):
+        for operation, args in self._operations:
+            operation(*args)
+
+    def _bind_operations(self):
+        self._operations = []
         reference = self.solvers[0]
         for kind in ("h", "e"):
             for component, axis in enumerate("xyz"):
@@ -159,4 +165,4 @@ class NativeFieldSlot:
                                 for a in (axis_a, axis_b) for f in ("low", "high"))
                 if reference.uses_cpml:
                     args.append(reference._cpml_memory_mode == "dense")
-                operation(*args)
+                self._operations.append((operation, tuple(args)))
