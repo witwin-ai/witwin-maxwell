@@ -17,7 +17,7 @@ dim3 field_grid3d(int64_t nx, int64_t ny, int64_t nz, dim3 block) {
       static_cast<unsigned int>((nx + block.z - 1) / block.z));
 }
 
-template <int Component, bool Uniform>
+template <int Component, bool Uniform, bool Batched = false>
 __global__ void update_magnetic_standard_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -32,10 +32,22 @@ __global__ void update_magnetic_standard_kernel(
     float curl_value,
     const float* __restrict__ inv_a,
     const float* __restrict__ inv_b,
-    float* __restrict__ field) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = local_x_begin + blockIdx.z * blockDim.z + threadIdx.z;
+    float* __restrict__ field,
+    FieldBatchLayout batch = {}) {
+  unsigned int k, j, i;
+  if constexpr (Batched) {
+    int64_t lane;
+    if (!batch_field_index(batch, nx, ny, nz, i, j, k, lane)) return;
+    field += lane * static_cast<int64_t>(nx) * ny * nz;
+    first += lane * batch.first_stride;
+    second += lane * batch.second_stride;
+    decay += lane * batch.decay_stride;
+    curl_coeff += lane * batch.curl_stride;
+  } else {
+    k = blockIdx.x * blockDim.x + threadIdx.x;
+    j = blockIdx.y * blockDim.y + threadIdx.y;
+    i = local_x_begin + blockIdx.z * blockDim.z + threadIdx.z;
+  }
   if (i >= local_x_end || i >= nx || j >= ny || k >= nz) {
     return;
   }
@@ -917,5 +929,25 @@ void update_magnetic_hz_cpml_compressed_cuda(
         psi_y.mutable_data_ptr<float>(),
         hz.mutable_data_ptr<float>());
   });
+  WITWIN_CUDA_CHECK();
+}
+
+void update_magnetic_batch_cuda(
+    torch::stable::Tensor field, const torch::stable::Tensor& first,
+    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
+    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active, int64_t component) {
+  const auto batch = check_field_batch_inputs(field, first, second, decay, curl, inv_a, inv_b, active, component, false);
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
+  const auto launch = [&](auto axis) {
+    update_magnetic_standard_kernel<decltype(axis)::value, false, true><<<linear_grid(field.numel()), 256, 0, current_cuda_stream()>>>(
+        field.size(1), field.size(2), field.size(3), 0, field.size(1),
+        first.mutable_data_ptr<float>(), second.mutable_data_ptr<float>(),
+        decay.mutable_data_ptr<float>(), curl.mutable_data_ptr<float>(), 0.0f, 0.0f,
+        inv_a.mutable_data_ptr<float>(), inv_b.mutable_data_ptr<float>(), field.mutable_data_ptr<float>(), batch);
+  };
+  if (component == 0) launch(std::integral_constant<int, 0>{});
+  else if (component == 1) launch(std::integral_constant<int, 1>{});
+  else launch(std::integral_constant<int, 2>{});
   WITWIN_CUDA_CHECK();
 }

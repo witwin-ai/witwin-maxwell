@@ -1,6 +1,101 @@
 #pragma once
 
 #include <type_traits>
+#include <cstdint>
+#include <limits>
+#include "../tensors.h"
+
+struct FieldBatchLayout {
+  int64_t count = 1;
+  int64_t first_stride = 0;
+  int64_t second_stride = 0;
+  int64_t decay_stride = 0;
+  int64_t curl_stride = 0;
+  const int* active = nullptr;
+};
+
+inline FieldBatchLayout check_field_batch_inputs(
+    const torch::stable::Tensor& field, const torch::stable::Tensor& first,
+    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
+    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active,
+    int64_t component, bool electric) {
+  STD_TORCH_CHECK(component >= 0 && component < 3, "component must be 0, 1 or 2");
+  check_float32_tensor(field, "field");
+  check_contiguous_tensor(field, "field");
+  STD_TORCH_CHECK(field.dim() == 4 && field.size(0) > 0, "field must have shape [B, nx, ny, nz]");
+  for (int axis = 1; axis < 4; ++axis) {
+    STD_TORCH_CHECK(field.size(axis) >= 2 && field.size(axis) <= std::numeric_limits<unsigned int>::max(),
+                    "batch spatial extents must be in [2, UINT_MAX]");
+  }
+  STD_TORCH_CHECK((field.numel() - 1) / 256 + 1 <= 2147483647LL, "batch launch exceeds CUDA grid.x limit");
+  const auto check_read = [&](const torch::stable::Tensor& value, const char* name) {
+    check_float32_tensor(value, name);
+    check_contiguous_tensor(value, name);
+    check_same_cuda_device(field, value, name);
+    const auto begin = reinterpret_cast<uintptr_t>(field.mutable_data_ptr<float>());
+    const auto other = reinterpret_cast<uintptr_t>(value.mutable_data_ptr<float>());
+    STD_TORCH_CHECK(begin + field.numel() * sizeof(float) <= other ||
+                    other + value.numel() * sizeof(float) <= begin,
+                    name, " must not overlap the writable field");
+  };
+  const int direction = electric ? -1 : 1;
+  const int first_axis = component == 2 ? 1 : 2;
+  const int second_axis = component == 0 ? 1 : 0;
+  const auto check_source = [&](const torch::stable::Tensor& value, int changed_axis, const char* name) {
+    check_read(value, name);
+    STD_TORCH_CHECK(value.dim() == 4 && value.size(0) == field.size(0), name, " batch size mismatch");
+    for (int axis = 0; axis < 3; ++axis) {
+      STD_TORCH_CHECK(value.size(axis + 1) == field.size(axis + 1) + (axis == changed_axis ? direction : 0),
+                      name, " does not match its Yee component shape");
+    }
+  };
+  check_source(first, first_axis, "first");
+  check_source(second, second_axis, "second");
+  const auto coefficient_stride = [&](const torch::stable::Tensor& value, const char* name) -> int64_t {
+    check_read(value, name);
+    STD_TORCH_CHECK(value.dim() == 3 || value.dim() == 4, name, " must be shared [nx,ny,nz] or per-lane [B,nx,ny,nz]");
+    const int offset = value.dim() == 4 ? 1 : 0;
+    if (offset) STD_TORCH_CHECK(value.size(0) == field.size(0), name, " batch size mismatch");
+    for (int axis = 0; axis < 3; ++axis) {
+      STD_TORCH_CHECK(value.size(axis + offset) == field.size(axis + 1), name, " spatial shape mismatch");
+    }
+    return offset ? value.numel() / field.size(0) : 0;
+  };
+  const int axis_a = component == 0 ? 1 : 0;
+  const int axis_b = component == 2 ? 1 : 2;
+  check_read(inv_a, "inv_a");
+  check_read(inv_b, "inv_b");
+  STD_TORCH_CHECK(inv_a.dim() == 1 && inv_a.size(0) == field.size(axis_a + 1), "inv_a shape mismatch");
+  STD_TORCH_CHECK(inv_b.dim() == 1 && inv_b.size(0) == field.size(axis_b + 1), "inv_b shape mismatch");
+  check_same_cuda_device(field, active, "active");
+  check_contiguous_tensor(active, "active");
+  STD_TORCH_CHECK(active.scalar_type() == torch::headeronly::ScalarType::Int &&
+                  active.dim() == 1 && active.size(0) == field.size(0), "active must be int32 [B]");
+  const auto field_address = reinterpret_cast<uintptr_t>(field.mutable_data_ptr<float>());
+  const auto mask_address = reinterpret_cast<uintptr_t>(active.mutable_data_ptr<int>());
+  STD_TORCH_CHECK(field_address + field.numel() * sizeof(float) <= mask_address ||
+                  mask_address + active.numel() * sizeof(int) <= field_address,
+                  "active must not overlap the writable field");
+  return {field.size(0), first.numel() / field.size(0), second.numel() / field.size(0),
+          coefficient_stride(decay, "decay"), coefficient_stride(curl, "curl"), active.mutable_data_ptr<int>()};
+}
+
+__device__ __forceinline__ bool batch_field_index(
+    const FieldBatchLayout& batch, unsigned int nx, unsigned int ny, unsigned int nz,
+    unsigned int& i, unsigned int& j, unsigned int& k, int64_t& lane) {
+  const int64_t volume = static_cast<int64_t>(nx) * ny * nz;
+  const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  lane = index / volume;
+  if (lane >= batch.count || batch.active[lane] == 0) {
+    return false;
+  }
+  const int64_t local = index - lane * volume;
+  k = static_cast<unsigned int>(local % nz);
+  j = static_cast<unsigned int>((local / nz) % ny);
+  i = static_cast<unsigned int>(local / (static_cast<int64_t>(ny) * nz));
+  return true;
+}
 
 struct Index3D {
   unsigned int i;

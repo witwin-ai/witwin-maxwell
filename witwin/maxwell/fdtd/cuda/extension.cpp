@@ -6,6 +6,17 @@
 #include <vector>
 
 void synchronize_noop_cuda();
+void update_magnetic_batch_cuda(
+    torch::stable::Tensor field, const torch::stable::Tensor& first,
+    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
+    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active, int64_t component);
+void update_electric_batch_cuda(
+    torch::stable::Tensor field, const torch::stable::Tensor& first,
+    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
+    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active, int64_t component,
+    int64_t a_low, int64_t a_high, int64_t b_low, int64_t b_high);
 std::tuple<
     torch::stable::Tensor,
     torch::stable::Tensor,
@@ -2057,6 +2068,8 @@ void add_source_patch_ez_periodic_cuda(
 }
 
 #define WITWIN_CUDA_OPS(_) \
+  _(update_magnetic_batch, "update_magnetic_batch(Tensor(a!) field, Tensor first, Tensor second, Tensor decay, Tensor curl, Tensor inv_a, Tensor inv_b, Tensor active, int component) -> ()", update_magnetic_batch_cuda) \
+  _(update_electric_batch, "update_electric_batch(Tensor(a!) field, Tensor first, Tensor second, Tensor decay, Tensor curl, Tensor inv_a, Tensor inv_b, Tensor active, int component, int a_low, int a_high, int b_low, int b_high) -> ()", update_electric_batch_cuda) \
   _(sample_wire_emf, "sample_wire_emf(Tensor ex, Tensor ey, Tensor ez, Tensor segment_offsets, Tensor edge_components, Tensor edge_offsets, Tensor weights, Tensor(a!) emf) -> ()", sample_wire_emf_cuda) \
   _(update_wire_state, "update_wire_state(Tensor emf, Tensor tail, Tensor head, Tensor inductance, Tensor node_capacitance, Tensor grounded, Tensor node_offsets, Tensor node_segments, Tensor node_signs, float dt, Tensor(a!) current, Tensor(b!) charge) -> ()", update_wire_state_cuda) \
   _(deposit_wire_current, "deposit_wire_current(Tensor(a!) ex, Tensor(b!) ey, Tensor(c!) ez, Tensor edge_group_offsets, Tensor target_components, Tensor target_offsets, Tensor contribution_segments, Tensor contribution_scales, Tensor current) -> ()", deposit_wire_current_cuda) \

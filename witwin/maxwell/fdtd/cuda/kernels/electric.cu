@@ -239,7 +239,7 @@ __global__ void advance_modulation_time_kernel(float dt, float* __restrict__ mod
 // final combine applies the modulation factor to the decay/curl pair. The
 // modulated path always carries per-cell decay/curl coefficients, so it never
 // composes with the uniform-scalar fast path (Uniform stays false).
-template <int Component, bool Uniform, bool Modulated>
+template <int Component, bool Uniform, bool Modulated, bool Batched = false>
 __global__ void update_electric_standard_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -262,10 +262,22 @@ __global__ void update_electric_standard_kernel(
     int a_high_mode,
     int b_low_mode,
     int b_high_mode,
-    float* __restrict__ field) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x;
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y;
-  const unsigned int i = local_x_begin + blockIdx.z * blockDim.z + threadIdx.z;
+    float* __restrict__ field,
+    FieldBatchLayout batch = {}) {
+  unsigned int k, j, i;
+  if constexpr (Batched) {
+    int64_t lane;
+    if (!batch_field_index(batch, nx, ny, nz, i, j, k, lane)) return;
+    field += lane * static_cast<int64_t>(nx) * ny * nz;
+    first += lane * batch.first_stride;
+    second += lane * batch.second_stride;
+    decay += lane * batch.decay_stride;
+    curl_coeff += lane * batch.curl_stride;
+  } else {
+    k = blockIdx.x * blockDim.x + threadIdx.x;
+    j = blockIdx.y * blockDim.y + threadIdx.y;
+    i = local_x_begin + blockIdx.z * blockDim.z + threadIdx.z;
+  }
   if (i >= local_x_end || i >= nx || j >= ny || k >= nz) {
     return;
   }
@@ -310,7 +322,7 @@ __global__ void update_electric_standard_kernel(
   }
 }
 
-template <int Component, bool Uniform>
+template <int Component, bool Uniform, bool Batched = false>
 __global__ void update_electric_standard_interior_kernel(
     unsigned int nx,
     unsigned int ny,
@@ -325,10 +337,23 @@ __global__ void update_electric_standard_interior_kernel(
     float curl_value,
     const float* __restrict__ inv_a,
     const float* __restrict__ inv_b,
-    float* __restrict__ field) {
-  const unsigned int k = blockIdx.x * blockDim.x + threadIdx.x + (Component == 2 ? 0 : 1);
-  const unsigned int j = blockIdx.y * blockDim.y + threadIdx.y + (Component == 1 ? 0 : 1);
-  const unsigned int i = local_x_begin + blockIdx.z * blockDim.z + threadIdx.z;
+    float* __restrict__ field,
+    FieldBatchLayout batch = {}) {
+  unsigned int k, j, i;
+  if constexpr (Batched) {
+    int64_t lane;
+    if (!batch_field_index(batch, nx, ny, nz, i, j, k, lane)) return;
+    if (i < local_x_begin || (Component != 1 && j == 0) || (Component != 2 && k == 0)) return;
+    field += lane * static_cast<int64_t>(nx) * ny * nz;
+    first += lane * batch.first_stride;
+    second += lane * batch.second_stride;
+    decay += lane * batch.decay_stride;
+    curl_coeff += lane * batch.curl_stride;
+  } else {
+    k = blockIdx.x * blockDim.x + threadIdx.x + (Component == 2 ? 0 : 1);
+    j = blockIdx.y * blockDim.y + threadIdx.y + (Component == 1 ? 0 : 1);
+    i = local_x_begin + blockIdx.z * blockDim.z + threadIdx.z;
+  }
   if (i >= local_x_end || i >= nx || j + (Component == 1 ? 0 : 1) >= ny ||
       k + (Component == 2 ? 0 : 1) >= nz) {
     return;
@@ -3622,5 +3647,43 @@ void update_electric_ez_cpml_modulated_cuda(
       psi_x.mutable_data_ptr<float>(),
       psi_y.mutable_data_ptr<float>(),
       ez.mutable_data_ptr<float>());
+  WITWIN_CUDA_CHECK();
+}
+
+void update_electric_batch_cuda(
+    torch::stable::Tensor field, const torch::stable::Tensor& first,
+    const torch::stable::Tensor& second, const torch::stable::Tensor& decay,
+    const torch::stable::Tensor& curl, const torch::stable::Tensor& inv_a,
+    const torch::stable::Tensor& inv_b, const torch::stable::Tensor& active, int64_t component,
+    int64_t a_low, int64_t a_high, int64_t b_low, int64_t b_high) {
+  const auto batch = check_field_batch_inputs(field, first, second, decay, curl, inv_a, inv_b, active, component, true);
+  for (const auto mode : {a_low, a_high, b_low, b_high}) {
+    STD_TORCH_CHECK(mode == BOUNDARY_NONE || mode == BOUNDARY_PERIODIC ||
+                    mode == BOUNDARY_PEC || mode == BOUNDARY_PMC,
+                    "batch standard update supports only none, periodic, PEC and PMC boundaries");
+  }
+  torch::stable::accelerator::DeviceGuard guard(field.get_device_index());
+  const auto launch = [&](auto axis) {
+    if (inactive_boundary_pair(a_low, a_high) && inactive_boundary_pair(b_low, b_high)) {
+      constexpr int c = decltype(axis)::value;
+      update_electric_standard_interior_kernel<c, false, true><<<linear_grid(field.numel()), 256, 0, current_cuda_stream()>>>(
+          field.size(1), field.size(2), field.size(3), c == 0 ? 0 : 1,
+          c == 0 ? field.size(1) : field.size(1) - 1,
+          first.mutable_data_ptr<float>(), second.mutable_data_ptr<float>(),
+          decay.mutable_data_ptr<float>(), curl.mutable_data_ptr<float>(), 0.0f, 0.0f,
+          inv_a.mutable_data_ptr<float>(), inv_b.mutable_data_ptr<float>(), field.mutable_data_ptr<float>(), batch);
+      return;
+    }
+    update_electric_standard_kernel<decltype(axis)::value, false, false, true><<<linear_grid(field.numel()), 256, 0, current_cuda_stream()>>>(
+        field.size(1), field.size(2), field.size(3), 0, field.size(1),
+        first.mutable_data_ptr<float>(), second.mutable_data_ptr<float>(),
+        decay.mutable_data_ptr<float>(), curl.mutable_data_ptr<float>(),
+        nullptr, nullptr, nullptr, nullptr, 0.0f, 0.0f,
+        inv_a.mutable_data_ptr<float>(), inv_b.mutable_data_ptr<float>(),
+        a_low, a_high, b_low, b_high, field.mutable_data_ptr<float>(), batch);
+  };
+  if (component == 0) launch(std::integral_constant<int, 0>{});
+  else if (component == 1) launch(std::integral_constant<int, 1>{});
+  else launch(std::integral_constant<int, 2>{});
   WITWIN_CUDA_CHECK();
 }

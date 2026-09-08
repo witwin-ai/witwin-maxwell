@@ -91,6 +91,22 @@ python -m benchmark batch --compare launch --device cuda:1 --variants 10 --updat
 
 ## Remaining execution work
 
+P3.1 adds private native batch field-update operators using the existing E/H
+and electric interior kernels, with 64-bit lane offsets, shared or per-lane
+coefficients and an int32 active mask. The private operators reject invalid
+Yee shapes, overlapping writable/read buffers, unsupported boundary modes and
+spatial extents below two. They use the caller's current CUDA stream.
+
+Validation: **94 batch GPU tests passed**, including B=1/2/3/4/8/10,
+all six components, real periodic/PEC/PMC/none boundaries, inactive poisoned
+lanes and CUDA Graph replay after mask updates. All per-component comparisons
+were bitwise equal to independent native calls. **86 existing regressions
+passed** with native-extension gates enabled, covering field/CPML kernels,
+Graph replay, CPML solves, the existing adjoint bridge and modulated slabs.
+The earlier 15 opt-in skips were subsequently enabled and exercised in this
+regression run. This is not complete-batch throughput, memory-sanitizer,
+cross-architecture, CPML-batch or native-batch-adjoint acceptance.
+
 The P2.1 material-sampling foundation extends the existing edge compiler with
 contiguous component selections and a radius-one differentiation halo. It uses
 the same numerical formulas as full-component compilation. Six Yee components,
