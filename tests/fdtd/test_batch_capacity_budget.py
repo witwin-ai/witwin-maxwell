@@ -64,10 +64,10 @@ def test_budget_accounts_for_retained_full_field_results_and_graph_pool():
     with batch.prepare() as prepared:
         first = prepared.run()
         first.results()
-        saved = first[0]._fields["Ez"].clone()
+        saved = first[0].tensor("Ez").clone()
         second = prepared.run()
         second.results()
         stats = prepared._budget.stats()
         assert stats["peak_charged_bytes"] <= stats["limit_bytes"]
         assert prepared.report.memory == stats
-    torch.testing.assert_close(first[0]._fields["Ez"], saved, rtol=0, atol=0)
+    torch.testing.assert_close(first[0].tensor("Ez"), saved, rtol=0, atol=0)

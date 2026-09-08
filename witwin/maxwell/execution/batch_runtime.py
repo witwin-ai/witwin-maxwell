@@ -25,16 +25,36 @@ class _BatchCancelled(Exception):
 
 def _owned(value, device, memo):
     """Export tensors independently while preserving aliases inside one Result."""
+    if id(value) in memo:
+        return memo[id(value)]
     if isinstance(value, torch.Tensor):
-        if id(value) not in memo:
-            memo[id(value)] = value.to(device=device, copy=True)
+        memo[id(value)] = value.to(device=device, copy=True)
         return memo[id(value)]
     if isinstance(value, Mapping):
-        return {key: _owned(item, device, memo) for key, item in value.items()}
+        result = {}
+        memo[id(value)] = result
+        result.update((key, _owned(item, device, memo)) for key, item in value.items())
+        return result
     if isinstance(value, tuple):
-        return tuple(_owned(item, device, memo) for item in value)
+        result = tuple(_owned(item, device, memo) for item in value)
+        memo[id(value)] = result
+        return result
     if isinstance(value, list):
-        return [_owned(item, device, memo) for item in value]
+        result = []
+        memo[id(value)] = result
+        result.extend(_owned(item, device, memo) for item in value)
+        return result
+    if type(value).__module__.startswith("witwin.") and hasattr(value, "__dict__") and not isinstance(value, type):
+        result = copy.copy(value)
+        memo[id(value)] = result
+        for name, item in vars(value).items():
+            object.__setattr__(result, name, _owned(item, device, memo))
+        return result
+    # Host coordinate masters and declarative metadata are snapshots too.
+    import numpy as np
+    if isinstance(value, np.ndarray):
+        memo[id(value)] = value.copy()
+        return memo[id(value)]
     return value
 
 
@@ -496,9 +516,11 @@ class PreparedBatch:
             raise RuntimeError("Batch output plan requested unavailable field spectra.")
         destination = getattr(self.batch, "_export_pools", {}).get(device)
         with (destination.activate() if destination is not None else contextlib.nullcontext()), torch.set_grad_enabled(differentiable):
-            exported_fields = _owned(fields, device, memo)
+            exported_fields = _owned({name.upper(): value for name, value in fields.items()}, device, memo)
             exported_monitors = _owned(raw.get("observers", {}), device, memo)
-        result = Result(method="fdtd", scene=model.scene, frequencies=model.frequencies,
+        with torch.no_grad():
+            scene_snapshot = _owned(model.scene, self.device, {})
+        result = Result(method="fdtd", scene=scene_snapshot, frequencies=model.frequencies,
             fields=exported_fields, monitors=exported_monitors,
             metadata={**model.metadata, "batch_index": index, "variant_id": self.batch.variant_ids[index]},
             solver_stats=model._build_fdtd_solver_stats(solver,

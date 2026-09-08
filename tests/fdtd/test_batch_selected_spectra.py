@@ -48,10 +48,10 @@ def test_selected_spectrum_storage_and_values_match_full_dft(components, frequen
     for i, sim in enumerate(sims):
         sim.config.full_field_dft = True
         reference = sim.run()
-        assert set(results[i]._fields) == set(components)
+        assert set(results[i].field("E")) == {c.upper() for c in components}
         for component in components:
-            torch.testing.assert_close(results[i]._fields[component], reference._fields[component.upper()], rtol=1e-4, atol=1e-6)
-            torch.testing.assert_close(repeated[i]._fields[component], results[i]._fields[component], rtol=0, atol=0)
+            torch.testing.assert_close(results[i].tensor(component), reference.tensor(component), rtol=1e-4, atol=1e-6)
+            torch.testing.assert_close(repeated[i].tensor(component), results[i].tensor(component), rtol=0, atol=0)
 
 
 def test_selected_spectrum_gradient_matches_source_scale_finite_difference():
@@ -62,13 +62,13 @@ def test_selected_spectrum_gradient_matches_source_scale_finite_difference():
             devices=("cuda:0",), batch_size=2, graph="required", memory_limit_bytes=128 * 1024**2))
     with batch.prepare() as prepared:
         results = prepared.run()
-        loss = sum(r._fields["Ez"].abs().square().sum() for r in results)
+        loss = sum(r.tensor("Ez").abs().square().sum() for r in results)
         loss.backward()
         actual = scales.grad.clone()
         def objective(value):
             with torch.no_grad():
                 output = prepared.run(parameters=mw.BatchParameters(source_scales={"drive": value}))
-                return sum(r._fields["Ez"].abs().square().sum() for r in output)
+                return sum(r.tensor("Ez").abs().square().sum() for r in output)
         for i in range(2):
             delta = torch.zeros_like(scales)
             delta[i] = .002

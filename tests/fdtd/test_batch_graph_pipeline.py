@@ -38,8 +38,8 @@ def test_required_graph_chunks_match_eager_and_reuse_monitor_captures(monkeypatc
         torch.testing.assert_close(first[i].raw_monitor("probe")["components"]["Ez"],
                                    eager[i].raw_monitor("probe")["components"]["Ez"], rtol=0, atol=0)
         for name in fields:
-            torch.testing.assert_close(first[i]._fields[name], eager[i]._fields[name], rtol=0, atol=0)
-            torch.testing.assert_close(second[i]._fields[name], first[i]._fields[name], rtol=0, atol=0)
+            torch.testing.assert_close(first[i].tensor(name), eager[i].tensor(name), rtol=0, atol=0)
+            torch.testing.assert_close(second[i].tensor(name), first[i].tensor(name), rtol=0, atol=0)
 
 
 def test_concurrent_capture_participant_forces_auto_eager_and_required_failure():

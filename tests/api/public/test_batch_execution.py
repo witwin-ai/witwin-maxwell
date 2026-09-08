@@ -122,11 +122,13 @@ def test_result_persistence_cpu_export_and_explicit_field_selection(tmp_path):
     output = mw.BatchOutput(fields=("Ez",), result_device="cpu")
     result = batch(sims, outputs=output).run()
     assert not result.failed
-    assert set(result[0]._fields) == {"Ez"}
+    assert set(result[0].field("E")) == {"EZ"}
+    assert result[0].tensor("Ez").device.type == "cpu"
     assert probe(result[0]).device.type == "cpu"
     result.save(tmp_path)
     loaded = mw.BatchResult.load(tmp_path, scenes=[s.scene for s in sims])
     torch.testing.assert_close(loaded.stack(probe), result.stack(probe), rtol=0, atol=0)
+    torch.testing.assert_close(loaded[0].tensor("Ez"), result[0].tensor("Ez"), rtol=0, atol=0)
     assert loaded.variant_ids == result.variant_ids
     with pytest.raises(FileExistsError, match="empty"):
         result.save(tmp_path)
