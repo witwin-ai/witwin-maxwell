@@ -22,7 +22,43 @@ from witwin.maxwell.fdtd.excitation.temporal import BatchSourceEngine
 
 def _environment(device):
     return {"torch": torch.__version__, "cuda": torch.version.cuda,
-            "python": platform.python_version(), "gpu": torch.cuda.get_device_name(device)}
+                        "python": platform.python_version(), "gpu": torch.cuda.get_device_name(device)}
+
+
+def audit_tuning(workload, *, devices, variants, capacity, warmups=2, repeats=5):
+    """Record public tuning trials, independent hot repeats and spectrum parity."""
+    from dataclasses import asdict
+    from witwin.maxwell.execution.tuning import _consume
+    if variants < 1 or capacity < 1 or warmups < 0 or repeats < 1:
+        raise ValueError("Tuning audits require positive counts and nonnegative warmups.")
+    sims = [build_simulation(workload, index=i, device=devices[0]) for i in range(variants)]
+    batch = mw.Simulation.batch(sims, execution=mw.BatchExecution(
+        devices=devices, batch_size="auto", max_batch_size=capacity,
+        slots_per_device="auto", graph="required", tune=True))
+    with torch.no_grad(), batch.prepare() as prepared:
+        for _ in range(warmups):
+            _consume(prepared)
+        samples = []
+        for _ in range(repeats):
+            started = time.perf_counter()
+            _consume(prepared)
+            samples.append(time.perf_counter() - started)
+        report = prepared.report.to_dict()
+        actual = prepared.run()
+        actual.results()
+    errors = []
+    for i, sim in enumerate(sims):
+        reference = sim.run().raw_monitor("probe")["components"]["Ez"]
+        value = actual[i].raw_monitor("probe")["components"]["Ez"].to(reference.device)
+        torch.testing.assert_close(value, reference, rtol=1e-4, atol=1e-6)
+        errors.append(float((value - reference).abs().max()))
+    return dict(schema_version=1, kind="batch_tuning_audit", workload=asdict(workload),
+        variants=variants, devices=list(devices), environment=_environment(devices[0]),
+        plan=report, holdout_samples_s=samples, holdout_median_s=statistics.median(samples),
+        max_probe_absolute_error=max(errors),
+        measured_candidate_threshold_passed=report["tuning"]["selected_relative_throughput"] >= .9,
+        timing_scope="complete_forward_streamed_results_after_prepare",
+        multi_gpu_scaling_acceptance="not_measured_requires_exclusive_device_comparison")
 
 
 def audit_regional_materials(workload, *, device, warmups=2, repeats=5):

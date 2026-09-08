@@ -74,7 +74,7 @@ class PreparedBatch:
         if len(policy.devices) != 1 or policy.slots_per_device != 1:
             raise NotImplementedError("PreparedBatch currently requires one GPU and one execution slot.")
         if policy.tune:
-            raise NotImplementedError("Measured batch autotuning is not implemented yet.")
+            raise ValueError("Resolve measured tuning through BatchSimulation.prepare().")
         if batch.outputs.materials or any(name.startswith("H") for name in batch.outputs.fields):
             raise NotImplementedError("Batch material export and magnetic full-field spectra are not implemented yet.")
         if batch.outputs.result_device not in ("local", "cpu", policy.devices[0]):
@@ -767,7 +767,7 @@ class ParallelPreparedBatch(PreparedBatch):
         from .pool import BatchMemoryPool
         self.batch = batch
         if batch.execution.tune:
-            raise NotImplementedError("Measured batch autotuning is not implemented yet.")
+            raise ValueError("Resolve measured tuning through BatchSimulation.prepare().")
         self._validate_inputs(batch.parameters)
         self.device = batch.execution.devices[0]
         self._gate = threading.Lock()

@@ -59,6 +59,41 @@ def test_audit_has_no_cpu_solver_fallback(monkeypatch):
         audit(BATCH_WORKLOADS["launch"], device="cuda:0")
 
 
+def test_tuning_cli_routes_devices_and_preserves_measurements(monkeypatch, tmp_path, capsys):
+    import benchmark.batch_profile as profile
+    captured = {}
+    def tune(workload, **kwargs):
+        captured.update(kwargs)
+        return dict(workload=workload.name, measurements=[.1, .2, .3])
+    monkeypatch.setattr(profile, "audit_tuning", tune)
+    target = tmp_path / "tune.json"
+    main(["--tune-audit", "launch", "--devices", "cuda:0", "cuda:1", "--variants", "5",
+          "--concurrency", "3", "--output", str(target)])
+    assert captured["devices"] == ("cuda:0", "cuda:1")
+    assert captured["variants"] == 5 and captured["capacity"] == 3
+    assert json.loads(target.read_text()) == json.loads(capsys.readouterr().out)
+    with pytest.raises(SystemExit):
+        main(["--inventory", "--devices", "cuda:0"])
+
+
+def test_tuning_report_survives_regeneration(monkeypatch, tmp_path):
+    from benchmark import report
+    target = tmp_path / "RESULTS.md"
+    monkeypatch.setattr(report, "RESULTS_MD", target)
+    payload = dict(workload=dict(name="launch"), variants=3, devices=["cuda:0"],
+        plan=dict(candidate_measurements=[dict(policy=dict(batch_size=3, slots_per_device=1, graph_steps=32),
+            median_s=.1, peak_bytes={"cuda:0": 1024**2})], selected_policy=dict(batch_size=3),
+            tuning=dict(elapsed_s=2., selected_relative_throughput=.97)),
+        holdout_median_s=.11, max_probe_absolute_error=0.)
+    report.record_batch_tuning_audit(payload, tmp_path / "raw.json")
+    original = target.read_text()
+    report.record_batch_tuning_audit(payload, tmp_path / "raw.json")
+    assert target.read_text() == original
+    assert "0.9700" in original and "| 3 | 1 | 32 |" in original
+    report.write_results_markdown([])
+    assert original.strip() in target.read_text()
+
+
 def test_probe_comparison_detects_phase_and_lane_errors():
     probe = {"shape": [2], "real": [1.0, 2.0], "imag": [0.0, 0.5]}
     assert compare_probes([probe], [probe])[0]["rel_l2"] == 0

@@ -12,6 +12,7 @@
 | R2 容量与字节预算 | `c5af623` | 单 lane 校准、有界降 B、私有 backing-segment 硬限制与 Graph/保留结果计费 |
 | R3 多 GPU/双槽 | `4c8f159` | 有界队列、静态/吞吐调度、取消、跨卡输出和调用流同步；118 项组合通过 |
 | R4 Batch 伴随 | `829db6a` | 原生批量前向及逐 lane GPU 反向；密度/源/共享参数、双卡和延迟反向；80 项组合通过 |
+| R9 Result 契约 | `d12e001` | 场景声明快照、原始梯度版本保护、公开 tensor/field 和保存/加载；80 passed |
 | R7 吞吐调优 | `b902bf5` | 完整流式前向候选测量、B/Q/K 选择、结果/RNG 隔离、正式上下文重建；双卡组合 25 passed |
 | R8 按需频谱 | `c4a71a7` | 只分配请求分量、独立全场对照、有限差分；数值/普通伴随 96 passed、4 skipped，后续显式启用原生专项 22 passed |
 | R5 结构区域复用 | `96eab31` | Box/Sphere 包络、材料变化与失效检查；区域/benchmark 回归 114 项通过 |
@@ -236,3 +237,9 @@ python -m benchmark batch --profile local_spectrum --concurrency 10 \
 结果场景现在保存独立的无梯度声明快照，修复输入密度或几何更新后旧 Result.scene 跟着变化的问题；快照存储进入执行设备的 Batch 分配账户。伴随仍使用原始输入及版本保护。另修复全场导出大小写不符合普通 Result.tensor/field 查询规则的问题，专项改用公开接口验收。快照与前向/梯度/真实双卡等组合 61 passed，有一个已知流同步提示。
 
 R9 最终公开契约回归：80 passed，1 个已知 AccumulateGrad 流提示。覆盖 CPU 导出及保存/加载后通过 tensor("Ez") 访问；未保留旧的非规范字段键。
+
+## R10：十设计实测与调优成本
+
+统一 benchmark 的 launch 调优审计（N=10、2000 步）记录 30 个候选。选中 B=10/Q=1/K=16，为候选中最快，中位 0.124765 s；额外 5 次热测量中位 0.130684 s，独立探针误差 0。候选私有池峰值 58 MiB，不能当作驱动显存。调优总成本 77.096 s；默认步长 K=32 的同容量候选 0.131157 s，因此这次测量不支持“调优优于默认配置”的结论。一次性短任务应考虑直接保留 tune=False。Q=2 自动选择门未触发。
+
+JSON：benchmark/plots/batch/tuned-launch-n10.json；所有样本和环境写入其中。报告/CLI/benchmark 系统组合 111 passed、3 skipped。实际 GPU 0 仍运行其它工作，未提交独占多 GPU 的吞吐倍数结论。

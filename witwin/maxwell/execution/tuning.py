@@ -82,8 +82,15 @@ def prepare_tuned_batch(batch):
     limits = batch.execution.memory_limit_bytes
     if limits is None:
         limits = {d: max(0, int(torch.cuda.mem_get_info(d)[0]) - batch.execution.reserve_bytes) for d in devices}
+    rng_devices = {torch.device(d).index for d in devices}
+    for model in batch.simulations:
+        device = torch.device(model.scene.device)
+        if device.type == "cuda":
+            rng_devices.add(device.index if device.index is not None else torch.cuda.current_device())
+        if model.scene_module is not None:
+            rng_devices.update(value.device.index for value in model.scene_module.parameters() if value.is_cuda)
     # Preserve caller randomness even if a SceneModule draws during materialization.
-    with torch.random.fork_rng(devices=[torch.device(d).index for d in devices]):
+    with torch.random.fork_rng(devices=sorted(rng_devices)):
         for candidate in _candidate_policies(batch):
             trial = copy.copy(batch)
             trial.execution = replace(batch.execution, **candidate, tune=False, memory_limit_bytes=limits)

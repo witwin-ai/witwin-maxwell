@@ -760,3 +760,47 @@ Material compiler wall time; excludes solver construction, field stepping and in
 
 [Raw measurements](plots/batch/regional-material-reuse.json)
 <!-- batch-regional-materials-local_spectrum:end -->
+
+<!-- batch-tuning-launch-n10-d1:begin -->
+## Batch tuning: launch, N=10
+
+Complete streamed forward trials; one warmup and three timed repeats per candidate.
+
+| B | Q | Graph steps | Median s | Peak backing MiB (sum of devices) |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1 | 16 | 0.921982 | 6.00 |
+| 1 | 1 | 32 | 1.015194 | 6.00 |
+| 1 | 1 | 64 | 0.954207 | 6.00 |
+| 1 | 2 | 16 | 0.601367 | 12.00 |
+| 1 | 2 | 32 | 0.911877 | 12.00 |
+| 1 | 2 | 64 | 1.062848 | 12.00 |
+| 2 | 1 | 16 | 0.667176 | 12.00 |
+| 2 | 1 | 32 | 0.710190 | 12.00 |
+| 2 | 1 | 64 | 0.778695 | 12.00 |
+| 2 | 2 | 16 | 0.685498 | 24.00 |
+| 2 | 2 | 32 | 0.752117 | 24.00 |
+| 2 | 2 | 64 | 0.794641 | 24.00 |
+| 4 | 1 | 16 | 0.565760 | 20.00 |
+| 4 | 1 | 32 | 0.591572 | 20.00 |
+| 4 | 1 | 64 | 0.462438 | 20.00 |
+| 4 | 2 | 16 | 0.367117 | 40.00 |
+| 4 | 2 | 32 | 0.476955 | 40.00 |
+| 4 | 2 | 64 | 0.396247 | 40.00 |
+| 8 | 1 | 16 | 0.532601 | 34.00 |
+| 8 | 1 | 32 | 0.569622 | 34.00 |
+| 8 | 1 | 64 | 0.596714 | 34.00 |
+| 8 | 2 | 16 | 0.203068 | 60.00 |
+| 8 | 2 | 32 | 0.195928 | 60.00 |
+| 8 | 2 | 64 | 0.206461 | 60.00 |
+| 10 | 1 | 16 | 0.124765 | 58.00 |
+| 10 | 1 | 32 | 0.131157 | 58.00 |
+| 10 | 1 | 64 | 0.130048 | 58.00 |
+| 10 | 2 | 16 | 0.195787 | 116.00 |
+| 10 | 2 | 32 | 0.185544 | 116.00 |
+| 10 | 2 | 64 | 0.199556 | 116.00 |
+
+Selected policy: `{'batch_size': 10, 'graph_steps': 16, 'slots_per_device': 1}`. Tuning cost: 77.096 s. Selected/best measured candidate throughput: 1.0000.
+Independent hot median: 0.130684 s. Maximum probe absolute error: 0.
+Backward, all-result retention and exclusive multi-device scaling are outside this timing scope.
+Raw artifact: `benchmark/plots/batch/tuned-launch-n10.json`
+<!-- batch-tuning-launch-n10-d1:end -->

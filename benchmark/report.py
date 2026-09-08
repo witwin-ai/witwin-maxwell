@@ -381,6 +381,28 @@ def record_regional_material_audit(payload, artifact):
     _write_batch_section(lines, begin, end)
 
 
+def record_batch_tuning_audit(payload, artifact):
+    key = f"batch-tuning-{payload['workload']['name']}-n{payload['variants']}-d{len(payload['devices'])}"
+    begin, end = f"<!-- {key}:begin -->", f"<!-- {key}:end -->"
+    plan = payload["plan"]
+    lines = [begin, f"## Batch tuning: {payload['workload']['name']}, N={payload['variants']}", "",
+             "Complete streamed forward trials; one warmup and three timed repeats per candidate.", "",
+             "| B | Q | Graph steps | Median s | Peak backing MiB (sum of devices) |",
+             "| ---: | ---: | ---: | ---: | ---: |"]
+    for row in plan["candidate_measurements"]:
+        policy = row["policy"]
+        lines.append(f"| {policy['batch_size']} | {policy['slots_per_device']} | {policy['graph_steps']} | "
+                     f"{row['median_s']:.6f} | {sum(row['peak_bytes'].values()) / 1024**2:.2f} |")
+    lines.extend(["", f"Selected policy: `{plan['selected_policy']}`. "
+        f"Tuning cost: {plan['tuning']['elapsed_s']:.3f} s. "
+        f"Selected/best measured candidate throughput: {plan['tuning']['selected_relative_throughput']:.4f}.",
+        f"Independent hot median: {payload['holdout_median_s']:.6f} s. "
+        f"Maximum probe absolute error: {payload['max_probe_absolute_error']:.3g}.",
+        "Backward, all-result retention and exclusive multi-device scaling are outside this timing scope.",
+        f"Raw artifact: `{artifact}`", end])
+    _write_batch_section(lines, begin, end)
+
+
 def _write_batch_section(lines, begin, end):
     section = "\n".join(lines) + "\n"
     current = RESULTS_MD.read_text(encoding="utf-8") if RESULTS_MD.exists() else ""

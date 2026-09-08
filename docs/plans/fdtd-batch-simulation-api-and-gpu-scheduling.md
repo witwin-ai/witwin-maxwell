@@ -1090,3 +1090,15 @@ P4 完成可发布“实验性单 GPU Batch 前向”，必须附支持能力矩
 快照/伴随/调优/真实双卡/预算/频谱组合 61 passed，有一个已知 AccumulateGrad stream mismatch 提示；后续公开字段访问回归单独记录。这不改变待完成的全 N 输出提前容量证明和融合反向范围。
 
 R9 最终公开契约回归：80 passed，1 个已知 AccumulateGrad 流提示。覆盖 CPU 导出及保存/加载后通过 tensor("Ez") 访问；未保留旧的非规范字段键。
+
+## R10：调优的可复现性能验收
+
+统一入口新增 `python -m benchmark batch --tune-audit launch --variants 10 --concurrency 10 --warmups 2 --repeats 5 --update-report`。可用 `--devices cuda:0 cuda:1` 测多设备候选，但它本身不构成独占单/双卡吞吐对照。JSON 与 benchmark/RESULTS.md 保留全部候选、选中策略、峰值 backing bytes、独立热测量及谱误差。报告重建与 CLI/benchmark 系统组合 111 passed、3 skipped。
+
+空闲物理 GPU 1，16-cell、N=10、2000 步：30 个 B/Q/K 候选，选中 B=10/Q=1/K=16。候选中位 0.124765 s，为本轮实测最快；额外 2 次预热/5 次测量中位 0.130684 s。选中候选私有分配池峰值 58 MiB，不包含驱动上下文。独立单场景探针最大绝对误差 0。该负载通过“达到候选最好热吞吐的 90%”门；不外推到其它工作负载。
+
+调优耗时 77.096 s。B=10/Q=1/K=32 候选为 0.131157 s，和选中策略的独立热测量相近，不能宣称调优优于默认配置；一次性的短任务应保留 tune=False。Q=2 未被选中。原始证据为 benchmark/plots/batch/tuned-launch-n10.json。
+
+附加隔离修复：调优保存并恢复 SceneModule 所在的非执行 GPU 的 RNG 状态；最终正常 prepare 的随机数消耗保持与不调优时一致。精确全 N 输出提前容量证明、融合 B-lane reverse 和独占多卡吞吐门仍未关闭。
+
+R10 调优隔离最终专项：真实双卡 7 passed，包含非执行 GPU 的 SceneModule RNG 对照。

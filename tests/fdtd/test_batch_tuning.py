@@ -82,6 +82,28 @@ def test_tuning_selects_graph_chunks_on_two_real_devices():
         assert prepared.report.tuned
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires two CUDA devices")
+def test_tuning_restores_scene_module_rng_on_nonexecution_device():
+    class Module(mw.SceneModule):
+        def to_scene(self):
+            scene = simulation(steps=8).scene.clone(device="cuda:1")
+            scene.metadata["draw"] = float(torch.rand((), device="cuda:1"))
+            return scene
+    sim = mw.Simulation.fdtd(Module(), frequencies=(1e9,),
+        run_time=mw.TimeConfig(time_steps=8, dt=2e-11),
+        spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False)
+    batch = mw.Simulation.batch([sim], execution=mw.BatchExecution(
+        devices=("cuda:0",), batch_size=1, graph="off", tune=True))
+    state = torch.cuda.get_rng_state("cuda:1")
+    with batch.prepare():
+        tuned_state = torch.cuda.get_rng_state("cuda:1")
+    torch.cuda.set_rng_state(state, "cuda:1")
+    batch.execution = replace(batch.execution, tune=False)
+    with batch.prepare():
+        expected_state = torch.cuda.get_rng_state("cuda:1")
+    torch.testing.assert_close(tuned_state, expected_state, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_tuning_rejects_capacity_and_propagates_physics_errors():
     sim = simulation(steps=8)
