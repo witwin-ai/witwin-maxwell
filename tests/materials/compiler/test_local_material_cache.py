@@ -63,3 +63,27 @@ def test_local_material_bank_matches_full_recompilation(samples, averaging, peri
                                       material=mw.Material(eps_r=3.))]
     with pytest.raises(ValueError, match="Fixed material definition"):
         cache.compile(prepare_scene(changed))
+
+
+@pytest.mark.parametrize("periodic,graded", [(False, False), (False, True), (True, True)])
+def test_structure_influence_envelopes_match_full_materials(periodic, graded):
+    public = scene(samples=2, averaging="polarized", periodic=periodic, graded=graded)
+    envelope = mw.Box(size=(.32, .32, .32), device="cuda:0")
+    public.add_structure(mw.Structure(name="moving", priority=2,
+        geometry=mw.Box(size=(.04, .05, .03), device="cuda:0"), material=mw.Material(eps_r=3.)))
+    cache = LocalMaterialCache(prepare_scene(public), structure_envelopes={"moving": envelope})
+    for position, radius, epsilon in ((.05, .025, 4.), (-.06, .035, 1.2), (0., .02, 3.)):
+        changed = public.clone()
+        changed.structures[-1] = mw.Structure(name="moving", priority=2,
+            geometry=mw.Sphere(position=(position, 0., 0.), radius=radius, device="cuda:0"),
+            material=mw.Material(eps_r=epsilon, sigma_e=.02, mu_r=1.1))
+        compiled = prepare_scene(changed)
+        assert_model(cache.compile(compiled), compile_material_model(compiled, subpixel=compiled.subpixel))
+    changed.structures[-1] = mw.Structure(name="moving", priority=2,
+        geometry=mw.Sphere(position=(.2, 0., 0.), radius=.02, device="cuda:0"),
+        material=mw.Material(eps_r=3.))
+    with pytest.raises(ValueError, match="envelope"):
+        cache.compile(prepare_scene(changed))
+    envelope.size.mul_(2)
+    with pytest.raises(ValueError, match="envelopes must remain unchanged"):
+        cache.compile(prepare_scene(public))

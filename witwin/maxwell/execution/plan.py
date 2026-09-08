@@ -240,7 +240,7 @@ def build_batch_plan(batch):
         group["variant_indices"].extend(range(len(batch)) if batch.template is not None else (index,))
     execution = _batch_declaration(batch.execution, "execution", [])
     if batch.parameters is not None and batch.parameters.requires_grad:
-        warnings.append("Trainable parameters retain their PyTorch graph; native batch backward is pending P6.")
+        warnings.append("Trainable parameters use owned native checkpoint tapes; retained tapes and backward workspace consume the device budget.")
     devices = [{
         "device": device, "group_id": group["group_id"],
         "batch_size": None if batch.execution.batch_size == "auto" else batch.execution.batch_size,
@@ -254,8 +254,8 @@ def build_batch_plan(batch):
         "schema_version": 1, "resolved": False, "variant_count": len(batch),
         "variant_ids": list(batch.variant_ids), "groups": groups, "devices": devices,
         "input_copy_bytes": None, "output_bytes": None, "retained_tape_bytes": None,
-        "warnings": warnings, "unsupported_features": ["batch_adjoint", "coordinated_batch_graph",
-            "batch_byte_admission", "batch_multi_gpu"],
+        "warnings": warnings, "unsupported_features": ["batch_autotuning", "fused_batch_reverse",
+            "exact_all_output_preplanning", "batch_rf_ports", "batch_advanced_material_dynamics"],
         "configuration_digest": digest({"declarations": declarations, "execution": execution,
                                          "ids": batch.variant_ids,
                                          "variation": _batch_declaration(batch.variation, "variation", []),

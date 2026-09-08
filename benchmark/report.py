@@ -363,6 +363,25 @@ def record_batch_baseline(payload, artifact):
         if native else "These independent-solver baselines do not establish native Batch or business acceptance.")
     lines.extend(["", f"[Raw measurements and memory/lifetime qualifications]({_display_path(artifact)})", "",
                   qualification, end])
+    _write_batch_section(lines, begin, end)
+
+
+def record_regional_material_audit(payload, artifact):
+    """Retain isolated regional compiler measurements in the benchmark report."""
+    key = f"batch-regional-materials-{payload['workload']}"
+    begin, end = f"<!-- {key}:begin -->", f"<!-- {key}:end -->"
+    lines = [begin, f"## Regional material compilation: {payload['workload']}", "",
+             f"Warmups/repeats: {payload['warmups']}/{payload['repeats']}.", "",
+             "| Change | Full median (s) | Local median (s) | Speedup | Maximum absolute error |",
+             "| --- | ---: | ---: | ---: | ---: |"]
+    for row in payload["rows"]:
+        lines.append(f"| {row['mode']} | {row['median_seconds']['full']:.6f} | "
+                     f"{row['median_seconds']['local']:.6f} | {row['speedup']:.3f} | {row['max_absolute_error']:.3g} |")
+    lines.extend(["", payload["scope"], "", f"[Raw measurements]({_display_path(artifact)})", end])
+    _write_batch_section(lines, begin, end)
+
+
+def _write_batch_section(lines, begin, end):
     section = "\n".join(lines) + "\n"
     current = RESULTS_MD.read_text(encoding="utf-8") if RESULTS_MD.exists() else ""
     if begin in current and end in current:

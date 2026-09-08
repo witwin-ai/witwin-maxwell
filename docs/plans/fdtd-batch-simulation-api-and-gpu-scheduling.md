@@ -11,8 +11,8 @@
 
 继续开发 R1：密度模板已接入背景 bank 与局部 node/Yee 编译，保留全局坐标、
 子像素/法向 halo，周期轴保守覆盖整轴。固定背景的实际张量值与元数据参与
-复用验证。局部编译/完整场谱/生命周期组合 68 项通过；结构移动的影响证明、
-严格预算、自动容量、多设备/双槽和 Batch 伴随继续实现，不据此提前关闭阶段。
+复用验证。局部编译/完整场谱/生命周期组合 68 项通过；后续严格预算、自动容量、多设备/双槽、Batch 伴随与结构包络的
+交付范围见 R2–R5，不据此提前关闭完整性能验收阶段。
 补充 9 项专项通过：包含 100 次密度更新只编译一次背景以及 A/B/A 逐位对照。
 
 继续开发 R2：`batch_size="auto"` 已改为单 lane 实测后保守选 B，容量不足时
@@ -63,6 +63,20 @@ loss.backward()
 ```
 
 
+继续开发 R5：独立 Scene 列表可声明 material_regions 或 structures 以复用局部
+编译。Box/Sphere 结构支持移动、尺寸及静态材料变化；设计外接球必须落在
+Box 包络内切球内，以保守证明任意旋转的影响范围。超出包络、固定对象变化
+或切换到不支持的材料族均明确拒绝。动态/训练材料不使用这一静态缓存。
+局部 node/六分量 Yee 的非均匀、周期、偏振子像素和真实前向对照通过；
+最终区域/公共/伴随组合 30 passed、1 skipped（单卡轮次跳过双卡用例，
+双卡伴随已在 R4 实际执行）。追加区域/benchmark 系统回归 114 passed。性能证据由 --regional-audit 单独记录：137³ 节点、2³ 偏振子像素，
+2 次预热/5 次交错正式测量，密度完整/局部编译中位 0.594244/0.270486 s
+（2.197×），结构变化 0.293651/0.142700 s（2.058×），所有张量误差为零。
+57³ 的对应比值仅 0.994×/0.980×，小网格受 host dispatch 限制。
+测量排除初始 bank 构建、solver 构建和时间推进；不作为整次仿真加速比。
+原始数据与汇总见 benchmark/plots/batch/regional-material-reuse*.json
+及 benchmark/RESULTS.md。
+
 | 子阶段 | 状态 | 证据与剩余工作 |
 | --- | --- | --- |
 | P0.1 固定负载与 storage 审计工具 | 完成 | `python -m benchmark batch --inventory/--audit`；7 项测试通过；GPU 1 的 launch audit 完成，原生扩展构建与运行通过；单次审计不代表性能验收 |
@@ -77,7 +91,7 @@ loss.backward()
 | 原生 eager 与既有基线对照 | 工具/测量完成，组合性能门未通过 | launch、N=B=10、2000 步、2 预热/5 正式；原生 2.342 s，十进程 0.903 s；隔离驱动显存增量 411.6/3175.6 MiB；频谱误差为 0。不能据此声称耗时不退化或完整业务验收 |
 | 性能与正确性审计 | 修复与分项诊断完成 | `d232245` 修复参数身份缓存和迭代所有权；三负载 CPU/CUDA profiling、field-only Graph 消融、N>B 构建次数及扩展数值对照，见 [审计报告](../assessments/fdtd-batch-performance-and-correctness-audit.md)；不替代完整性能矩阵 |
 | P3 源/观察器与完整时间步 Graph | 完成基础前向子集 | 原生批量源/频谱、固定缓冲、精确尾块、capture 复用和线程协调；54 项 Graph/公共 API 回归通过。N=B=10 的 Graph 中位 0.127 s、十进程 0.557 s，显存增量 402/3158 MiB，探针误差为零 |
-| P2/P3 其余、P4–P7 | 未完成 | R1/R2/R3/R4 已交付基础局部编译、byte admission、多 GPU/Q=2 和逐 lane 伴随；精确 output allocation、结构影响证明、调优及融合反向 kernel 仍需推进；不视为全方案或性能验收完成 |
+| P2/P3 其余、P4–P7 | 未完成 | R1/R2/R3/R4 已交付基础局部编译、byte admission、多 GPU/Q=2 和逐 lane 伴随；精确 output allocation、复杂几何影响证明、调优及融合反向 kernel 仍需推进；不视为全方案或性能验收完成 |
 | P8 | 未开始 | 独立研究门，依赖 P4 实测 |
 
 环境检查：沙箱内 GPU 不可见；获准在沙箱外检查后发现两张 A6000。
@@ -130,8 +144,8 @@ with submission.prepare() as prepared:
 `prepared.run(parameters=updated)` 必须保留相同 schema 与 N。
 缓存保留输入张量身份；普通 PyTorch 原位操作通过版本计数触发更新，
 inference tensor 每次保守重新编译。外部共享存储或 `.data` 的未跟踪写入
-必须通过新张量提交。当前声明 `BatchVariation.structures` 包络会明确拒绝执行，
-因为编译后影响范围证明尚未实现；省略包络仍可使用完整场景编译。
+必须通过新张量提交。`BatchVariation.structures` 已支持 R5 的 Box/Sphere 保守包络证明；
+超出包络或不支持的材料族会拒绝执行。省略包络仍可使用完整场景编译。
 迭代器 `next()` 活跃时不允许另一线程再次 `next()` 或 `close()`；
 使用 `request_cancel()`，待调用返回后再关闭。
 默认 `batch_size="auto"` 基于单 lane 准备实测保守选择容量，并不执行吞吐调优。
@@ -140,8 +154,8 @@ inference tensor 每次保守重新编译。外部共享存储或 `.data` 的未
 
 源幅度模板在无密度参数、无动态/可训练材料时，共用一次材料编译结果，
 跨 lane、cohort 和源参数更新复用；N=5/B=2 更新及密度隔离回归通过。
-独立 Scene 列表仍全域编译材料，固定 Box 密度模板已复用局部编译；只对实际相等的材料系数、
-spacing/CPML profile 共享存储。独立几何变化的局部背景复用尚未验收。
+未声明区域的独立 Scene 列表仍全域编译材料，密度模板和声明包络已复用局部编译；只对实际相等的材料系数、
+spacing/CPML profile 共享存储。独立 Box/Sphere 几何变化的局部背景复用已通过 R5 数值对照。
 监视器频谱请求不会自动启用全域 DFT；显式请求 E 场时，原有累积器仍内部保存
 全部 E 分量，再导出所选分量，精确子集分配仍待实现。`plan()` 仍为 unresolved，
 `prepared.report` 记录实际执行层和已知限制。显存与耗时优势必须经后续实测，

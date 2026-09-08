@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from witwin.core import Box
+from witwin.core import Box, Sphere, Structure
 from witwin.core.material import VACUUM_PERMITTIVITY
 
 from ..media import CustomPole, DiagonalTensor3, DrudePole, LorentzPole, ModulationSpec, PerturbationMedium, Tensor3x3
@@ -2586,7 +2586,7 @@ def compile_material_model(
     return model
 
 
-def _material_definition(value, *, changing=(), snapshot=False):
+def _material_definition(value, *, changing=(), structures=(), snapshot=False):
     """Retain actual fixed material values, not declaration-only shape hashes."""
     if value is None or isinstance(value, (str, bytes, int, float, bool, type, Enum)):
         return value
@@ -2595,13 +2595,15 @@ def _material_definition(value, *, changing=(), snapshot=False):
     if isinstance(value, np.ndarray):
         return value.copy() if snapshot else value
     if isinstance(value, (tuple, list)):
-        return tuple(_material_definition(v, changing=changing, snapshot=snapshot) for v in value)
+        return tuple(_material_definition(v, changing=changing, structures=structures, snapshot=snapshot) for v in value)
     if isinstance(value, dict):
-        return {k: _material_definition(v, changing=changing, snapshot=snapshot) for k, v in value.items()}
+        return {k: _material_definition(v, changing=changing, structures=structures, snapshot=snapshot) for k, v in value.items()}
     if is_dataclass(value) or hasattr(value, "__dict__"):
         names = [f.name for f in fields(value)] if is_dataclass(value) else vars(value)
         return {"type": type(value), **{name: _material_definition(getattr(value, name), snapshot=snapshot)
-            for name in names if not (name == "density" and getattr(value, "name", None) in changing)}}
+            for name in names if not (name == "density" and getattr(value, "name", None) in changing)
+            and not (isinstance(value, Structure) and name in ("geometry", "material")
+                     and getattr(value, "name", None) in structures)}}
     return value
 
 
@@ -2644,8 +2646,10 @@ class LocalMaterialCache:
     unchanged channels retain the immutable bank's storage.
     """
 
-    def __init__(self, scene, changing_regions):
+    def __init__(self, scene, changing_regions=(), *, structure_envelopes=None):
         self.changing = tuple(changing_regions)
+        self.structure_envelopes = dict(structure_envelopes or {})
+        self._envelope_definition = _material_definition(self.structure_envelopes, snapshot=True)
         self.full_compilations = 1
         self.patch_compilations = 0
         self.base = scene.compile_materials()
@@ -2662,6 +2666,10 @@ class LocalMaterialCache:
         geometries = [r.geometry for r in scene.material_regions if r.name in self.changing]
         if len(geometries) != len(self.changing) or any(type(g) is not Box for g in geometries):
             raise ValueError("Local density compilation requires named Box material regions.")
+        self._validate_structures(scene)
+        geometries.extend(self.structure_envelopes.values())
+        if not geometries:
+            raise ValueError("Local compilation requires at least one changing region or structure.")
         # Tanh is exactly saturated far outside this conservative float32 band.
         # The box circumsphere covers every rotation; subpixel offsets and a
         # further reconstruction halo are retained on each coordinate axis.
@@ -2677,7 +2685,36 @@ class LocalMaterialCache:
 
     def _definition(self, scene, *, snapshot=False):
         return _material_definition((scene.domain, scene.grid, scene.boundary, scene.subpixel,
-            scene.structures, scene.material_regions), changing=self.changing, snapshot=snapshot)
+            scene.structures, scene.material_regions), changing=self.changing,
+            structures=self.structure_envelopes, snapshot=snapshot)
+
+    def _validate_structures(self, scene):
+        if not _same_material_definition(self._envelope_definition, _material_definition(self.structure_envelopes)):
+            raise ValueError("Batch influence envelopes must remain unchanged while their material bank is retained.")
+        for name, envelope in self.structure_envelopes.items():
+            matches = [s for s in scene.structures if s.name == name]
+            if len(matches) != 1 or type(envelope) is not Box:
+                raise ValueError("Local structure reuse requires unique named structures and Box envelopes.")
+            structure = matches[0]
+            geometry = structure.geometry
+            if type(geometry) not in (Box, Sphere):
+                raise NotImplementedError("Local structure support is proven for Box and Sphere geometry.")
+            # A circumsphere of the design must fit inside the envelope's
+            # inscribed sphere. This proof is conservative for every rotation.
+            radius = (float(torch.linalg.vector_norm(geometry.size).item()) / 2
+                      if type(geometry) is Box else float(geometry.radius))
+            distance = float(torch.linalg.vector_norm(geometry.position.detach().to(envelope.position.device)
+                                                       - envelope.position).item())
+            if not np.isfinite(radius + distance) or radius < 0 or radius + distance > float(envelope.size.min()) / 2:
+                raise ValueError(f"Structure {name!r} exceeds its conservative Batch influence envelope.")
+            material = structure.material
+            if (isinstance(material, PerturbationMedium)
+                    or any(getattr(material, flag, False) for flag in (
+                        "is_nonlinear", "is_electric_dispersive", "is_magnetic_dispersive",
+                        "is_medium2d", "is_surface_impedance", "is_lossy_metal", "is_pec"))
+                    or getattr(material, "modulation", None) is not None
+                    or isinstance(getattr(material, "epsilon_tensor", None), Tensor3x3)):
+                raise NotImplementedError("Local structure changes require static edge-native volume materials.")
 
     def _selection(self, scene, axes):
         result = []
@@ -2704,6 +2741,7 @@ class LocalMaterialCache:
         return result
 
     def compile(self, scene):
+        self._validate_structures(scene)
         if not _same_material_definition(self.definition, self._definition(scene)):
             raise ValueError("Fixed material definition changed during local Batch compilation.")
         if any(not bool(torch.isfinite(r.density).all()) for r in scene.material_regions):

@@ -1,0 +1,97 @@
+{
+  "kind": "batch_regional_material_audit",
+  "environment": {
+    "torch": "2.13.0+cu130",
+    "cuda": "13.0",
+    "python": "3.11.15",
+    "gpu": "NVIDIA RTX A6000"
+  },
+  "workload": "local_spectrum",
+  "warmups": 2,
+  "repeats": 5,
+  "rows": [
+    {
+      "mode": "density",
+      "wall_seconds": {
+        "full": [
+          0.2973130187019706,
+          0.2870726054534316,
+          0.2791323596611619,
+          0.286664130166173,
+          0.2774503454566002
+        ],
+        "local": [
+          0.2975129811093211,
+          0.2822500476613641,
+          0.283956122584641,
+          0.2883839262649417,
+          0.29757901560515165
+        ]
+      },
+      "median_seconds": {
+        "full": 0.286664130166173,
+        "local": 0.2883839262649417
+      },
+      "subpixel_samples": [
+        2,
+        2,
+        2
+      ],
+      "averaging": "polarized",
+      "speedup": 0.994036435660465,
+      "max_absolute_error": 0.0,
+      "node_shape": [
+        57,
+        57,
+        57
+      ],
+      "patch_shape": [
+        17,
+        17,
+        17
+      ]
+    },
+    {
+      "mode": "structure",
+      "wall_seconds": {
+        "full": [
+          0.14251125045120716,
+          0.1450442224740982,
+          0.1428154595196247,
+          0.1443386310711503,
+          0.14270664751529694
+        ],
+        "local": [
+          0.14570046681910753,
+          0.1453377390280366,
+          0.14558835979551077,
+          0.15828657057136297,
+          0.14595176745206118
+        ]
+      },
+      "median_seconds": {
+        "full": 0.1428154595196247,
+        "local": 0.14570046681910753
+      },
+      "subpixel_samples": [
+        2,
+        2,
+        2
+      ],
+      "averaging": "polarized",
+      "speedup": 0.9801990524638149,
+      "max_absolute_error": 0.0,
+      "node_shape": [
+        57,
+        57,
+        57
+      ],
+      "patch_shape": [
+        38,
+        37,
+        37
+      ]
+    }
+  ],
+  "scope": "Material compiler wall time; excludes solver construction, field stepping and initial bank creation."
+}

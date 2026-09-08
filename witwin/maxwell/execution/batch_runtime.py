@@ -60,11 +60,6 @@ class PreparedBatch:
             if batch.outputs.result_device not in getattr(batch, "_export_pools", {}):
                 raise NotImplementedError("Cross-device batch result export requires a destination allocation pool.")
         self._validate_inputs(batch.parameters)
-        if batch.variation is not None and batch.variation.structures:
-            raise NotImplementedError(
-                "Structure variation envelopes require compiled influence validation. "
-                "Omit the envelope declaration to use full-scene cohort compilation."
-            )
         self.device = policy.devices[0]
         if not torch.cuda.is_available():
             raise RuntimeError("PreparedBatch requires an accessible CUDA device.")
@@ -139,7 +134,7 @@ class PreparedBatch:
                            memory={} if self._budget is None else self._budget.stats(),
                            capacity_retries=list(self._capacity_retries))
         declaration["warnings"] = [
-            "Fields, CPML, source patches and spectra use the native batch pipeline; scene compilation remains per variant.",
+            "Native field/source/observer pipelines reuse proven local material banks; undeclared geometry changes compile full scenes.",
             "Automatic capacity uses a prepared-lane measurement and bounded OOM reduction; throughput tuning is separate.",
             "Byte limits conservatively charge private allocator backing segments, including cached and retained output storage.",
             "Graph capture is attempted at run time and deferred while another registered batch thread is active.",
@@ -232,6 +227,7 @@ class PreparedBatch:
             self._slot.solvers = ()
         if self._cohort != group_id:
             self._slot = None
+            self._local_material_cache = None
         for index in indices:
             free, _ = torch.cuda.mem_get_info(self.device)
             if free <= self.batch.execution.reserve_bytes:
@@ -273,6 +269,17 @@ class PreparedBatch:
                                and not compiled_scene._has_trainable_geometry())
             if fixed_materials:
                 compiled_scene._material_model_cache = self._fixed_material_cache
+            elif self.batch.template is None and self.batch.variation is not None and (
+                    self.batch.variation.structures or self.batch.variation.material_regions):
+                from ..compiler.materials import LocalMaterialCache
+                if self._local_material_cache is None:
+                    self._local_material_cache = LocalMaterialCache(compiled_scene,
+                        self.batch.variation.material_regions,
+                        structure_envelopes=self.batch.variation.structures)
+                    material_model = self._local_material_cache.base
+                else:
+                    material_model = self._local_material_cache.compile(compiled_scene)
+                compiled_scene._material_model_override = material_model
             elif self.batch.template is not None and parameters.region_densities and not model.has_trainable_parameters:
                 from ..compiler.materials import LocalMaterialCache, PerturbationMedium
                 if not any(isinstance(s.material, PerturbationMedium) for s in compiled_scene.structures):

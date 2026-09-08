@@ -114,10 +114,10 @@ def test_close_during_validation_cannot_revive_prepared_context(monkeypatch):
     assert not prepared._gate.locked() and prepared._slot is None
 
 
-def test_unvalidated_structure_envelope_fails_before_execution():
+def test_structure_outside_its_envelope_fails_before_execution():
     sim = simulation(steps=8)
     batch = mw.Simulation.batch([sim], execution=mw.BatchExecution(devices=("cuda:0",), batch_size=1),
         variation=mw.BatchVariation(structures={"design": mw.Box(
             position=(-.15, 0, 0), size=(.001, .001, .001), device="cuda:0")}))
-    with pytest.raises(NotImplementedError, match="influence validation"):
+    with pytest.raises(ValueError, match="influence envelope"):
         batch.prepare()

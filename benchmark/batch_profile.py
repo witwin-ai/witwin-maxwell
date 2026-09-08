@@ -25,6 +25,69 @@ def _environment(device):
             "python": platform.python_version(), "gpu": torch.cuda.get_device_name(device)}
 
 
+def audit_regional_materials(workload, *, device, warmups=2, repeats=5):
+    """Interleave full/local compilation with numerical checks outside timing."""
+    from dataclasses import replace
+    from witwin.maxwell.scene import prepare_scene
+    from witwin.maxwell.compiler.materials import LocalMaterialCache, compile_material_model
+    if warmups < 0 or repeats < 1:
+        raise ValueError("Regional audits require nonnegative warmups and positive repeats.")
+    rows = []
+    with torch.cuda.device(device), torch.no_grad():
+        for mode in ("density", "structure"):
+            scene = build_simulation(workload, device=device).scene
+            scene = scene.clone(subpixel_samples=mw.SubpixelSpec(samples=2, averaging="polarized"))
+            if mode == "density":
+                scene.add_material_region(mw.MaterialRegion(name="rho",
+                    geometry=mw.Box(size=(.03, .03, .03), device=device),
+                    density=torch.full((4, 4, 4), .2, device=device), eps_bounds=(1., 4.)))
+                cache = LocalMaterialCache(prepare_scene(scene), ("rho",))
+                changed = scene.clone()
+                changed.material_regions[0] = replace(changed.material_regions[0],
+                    density=torch.full((4, 4, 4), .7, device=device))
+            else:
+                cache = LocalMaterialCache(prepare_scene(scene), structure_envelopes={
+                    "design": mw.Box(position=(.08, 0., 0.), size=(.18, .18, .18), device=device)})
+                changed = scene.clone()
+                changed.structures[0] = mw.Structure(name="design",
+                    geometry=mw.Box(position=(.09, 0., 0.), size=(.06, .06, .06), device=device),
+                    material=mw.Material(eps_r=3.))
+            prepared = prepare_scene(changed)
+            times = {"full": [], "local": []}
+            def compile(kind):
+                return cache.compile(prepared) if kind == "local" else compile_material_model(
+                    prepared, subpixel=prepared.subpixel)
+            for round_index in range(warmups + repeats):
+                for kind in (("full", "local") if round_index % 2 == 0 else ("local", "full")):
+                    torch.cuda.synchronize(device)
+                    began = time.perf_counter()
+                    model = compile(kind)
+                    torch.cuda.synchronize(device)
+                    elapsed = time.perf_counter() - began
+                    del model
+                    if round_index >= warmups:
+                        times[kind].append(elapsed)
+            expected, actual = compile("full"), compile("local")
+            errors = []
+            def compare(a, b):
+                if isinstance(b, torch.Tensor):
+                    torch.testing.assert_close(a, b, rtol=1e-6, atol=1e-6)
+                    errors.append(float((a != b).any()) if b.dtype == torch.bool else float((a-b).abs().max()))
+                elif isinstance(b, dict):
+                    for key in b:
+                        compare(a[key], b[key])
+            compare(actual, expected)
+            medians = {name: statistics.median(values) for name, values in times.items()}
+            rows.append({"mode": mode, "wall_seconds": times, "median_seconds": medians,
+                "subpixel_samples": list(prepared.subpixel.samples), "averaging": prepared.subpixel.averaging,
+                "speedup": medians["full"]/medians["local"], "max_absolute_error": max(errors),
+                "node_shape": [prepared.Nx, prepared.Ny, prepared.Nz],
+                "patch_shape": [s.stop-s.start for s in cache.node_selection]})
+    return {"kind": "batch_regional_material_audit", "environment": _environment(device),
+            "workload": workload.name, "warmups": warmups, "repeats": repeats, "rows": rows,
+            "scope": "Material compiler wall time; excludes solver construction, field stepping and initial bank creation."}
+
+
 def _completed_run(prepared):
     result = prepared.run()
     result.results()

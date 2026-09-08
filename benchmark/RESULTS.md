@@ -730,3 +730,33 @@ Device: cuda:0; steps: 256; warmups/repeats: 2/3; native graph policy: required.
 
 The native tier reuses a PreparedBatch under the recorded graph policy. This fixed workload does not establish business or complete scheduler acceptance.
 <!-- batch-bandwidth-4-varied-native-graph-required:end -->
+
+<!-- batch-regional-materials-bandwidth:begin -->
+## Regional material compilation: bandwidth
+
+Warmups/repeats: 2/5.
+
+| Change | Full median (s) | Local median (s) | Speedup | Maximum absolute error |
+| --- | ---: | ---: | ---: | ---: |
+| density | 0.594244 | 0.270486 | 2.197 | 0 |
+| structure | 0.293651 | 0.142700 | 2.058 | 0 |
+
+Material compiler wall time; excludes solver construction, field stepping and initial bank creation.
+
+[Raw measurements](plots/batch/regional-material-reuse-large.json)
+<!-- batch-regional-materials-bandwidth:end -->
+
+<!-- batch-regional-materials-local_spectrum:begin -->
+## Regional material compilation: local_spectrum
+
+Warmups/repeats: 2/5.
+
+| Change | Full median (s) | Local median (s) | Speedup | Maximum absolute error |
+| --- | ---: | ---: | ---: | ---: |
+| density | 0.286664 | 0.288384 | 0.994 | 0 |
+| structure | 0.142815 | 0.145700 | 0.980 | 0 |
+
+Material compiler wall time; excludes solver construction, field stepping and initial bank creation.
+
+[Raw measurements](plots/batch/regional-material-reuse.json)
+<!-- batch-regional-materials-local_spectrum:end -->

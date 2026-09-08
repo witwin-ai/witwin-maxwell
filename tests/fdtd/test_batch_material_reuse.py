@@ -126,3 +126,26 @@ def test_one_background_compilation_across_one_hundred_density_updates():
                 torch.testing.assert_close(actual, saved, rtol=0, atol=0)
         assert prepared._local_material_cache.full_compilations == 1
         assert prepared._local_material_cache.patch_compilations == 100
+
+
+def test_declared_moving_structures_reuse_one_bank_across_cohorts():
+    sims = [simulation(steps=31) for _ in range(5)]
+    for index, sim in enumerate(sims):
+        sim.scene.structures = [mw.Structure(name="design",
+            geometry=mw.Sphere(radius=.025, position=(.02*index-.04, 0., 0.), device="cuda:0"),
+            material=mw.Material(eps_r=2. + .2*index))]
+    batch = mw.Simulation.batch(sims,
+        variation=mw.BatchVariation(structures={"design": mw.Box(size=(.25, .25, .25), device="cuda:0")}),
+        execution=mw.BatchExecution(devices=("cuda:0",), batch_size=2, graph="required"))
+    with batch.prepare() as prepared:
+        results = prepared.run()
+        results.results()
+        assert prepared._local_material_cache.full_compilations == 1
+        assert prepared._local_material_cache.patch_compilations == 4
+        repeated = prepared.run()
+        repeated.results()
+        assert prepared._local_material_cache.full_compilations == 1
+    for actual, repeated_result, sim in zip(results, repeated, sims):
+        reference = sim.run().raw_monitor("probe")["components"]["Ez"]
+        torch.testing.assert_close(actual.raw_monitor("probe")["components"]["Ez"], reference, rtol=1e-4, atol=1e-6)
+        torch.testing.assert_close(repeated_result.raw_monitor("probe")["components"]["Ez"], reference, rtol=1e-4, atol=1e-6)
