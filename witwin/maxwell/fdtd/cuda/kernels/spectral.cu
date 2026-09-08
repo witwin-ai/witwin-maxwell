@@ -188,6 +188,8 @@ void accumulate_dft_batched_cuda(
   STD_TORCH_CHECK(weighted_cos.dim() == 1, "weighted_cos must be rank 1");
   STD_TORCH_CHECK(weighted_sin.sizes().equals(weighted_cos.sizes()), "weighted_sin must match weighted_cos");
   const int64_t frequency_count = weighted_cos.size(0);
+  STD_TORCH_CHECK(frequency_count > 0 && frequency_count <= 65535,
+                  "DFT frequency count must be between 1 and 65535");
   check_dft_component(ex, ex_real, ex_imag, frequency_count, "ex");
   check_dft_component(ey, ey_real, ey_imag, frequency_count, "ey");
   check_dft_component(ez, ez_real, ez_imag, frequency_count, "ez");
@@ -201,6 +203,7 @@ void accumulate_dft_batched_cuda(
   check_same_cuda_device(ex, ez_imag, "ez_imag");
   torch::stable::accelerator::DeviceGuard guard(ex.get_device_index());
   const int64_t max_field_numel = std::max(ex.numel(), std::max(ey.numel(), ez.numel()));
+  STD_TORCH_CHECK(max_field_numel > 0, "DFT requires at least one nonempty field component");
   constexpr int block_size = 256;
   if (frequency_count == 1) {
     accumulate_dft_single_frequency_kernel<<<linear_grid(max_field_numel, block_size), block_size, 0, current_cuda_stream()>>>(

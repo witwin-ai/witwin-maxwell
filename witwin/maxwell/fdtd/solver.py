@@ -182,8 +182,9 @@ class FDTD:
     def _sync_observer_primary_state(self):
         sync_observer_primary_state_impl(self)
 
-    def enable_dft(self, frequencies, window_type="hanning", end_step=None, components=("Ex", "Ey", "Ez")):
-        enable_dft_impl(self, frequencies, window_type=window_type, end_step=end_step, components=components)
+    def enable_dft(self, frequencies, window_type="hanning", end_step=None, components=("Ex", "Ey", "Ez"), reuse_buffers=False):
+        enable_dft_impl(self, frequencies, window_type=window_type, end_step=end_step,
+                        components=components, reuse_buffers=reuse_buffers)
 
     def _source_time_kind(self):
         return source_time_kind_impl(self)

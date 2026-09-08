@@ -130,8 +130,8 @@ Batch 比四进程快约 **1.28 倍**，采样驱动增量少约 **29.9%**，
   没有放宽原有数值容差来掩盖差异。
 - Graph 在 planned end 和 shutoff 检查点切块，尾块不越界；lane 停止后
   active mask 阻止继续写入其状态。重复运行重置波形、相位、窗及累积状态。
-- monitor-only 重复运行保留缓冲地址并复用 capture；全场 DFT 当前仍新建
-  普通累积器，因此每次运行重新捕获。Result 使用独立存储，close/下一轮
+- R11 使 monitor-only 和所选全场 DFT 都在同一驻留 cohort 中复用缓冲和 capture；
+  标量波形的固定采样表也复用。Result 使用独立存储，close/下一轮
   不会改写旧结果。
 - 源幅度模板的材料复用只适用于固定模板、无密度参数和动态/可训练材料。
   密度变化仍独立编译。输入身份/version/inference tensor 的既有缓存保护保留。

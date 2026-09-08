@@ -32,7 +32,7 @@ def test_required_graph_chunks_match_eager_and_reuse_monitor_captures(monkeypatc
         saved = first.stack(lambda r: r.raw_monitor("probe")["components"]["Ez"]).clone()
         second = prepared.run()
         second.results()
-        assert len(calls) == captures * (2 if fields else 1)
+        assert len(calls) == captures
     torch.testing.assert_close(first.stack(lambda r: r.raw_monitor("probe")["components"]["Ez"]), saved, rtol=0, atol=0)
     for i in range(3):
         torch.testing.assert_close(first[i].raw_monitor("probe")["components"]["Ez"],

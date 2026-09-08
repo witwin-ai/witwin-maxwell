@@ -2163,7 +2163,8 @@ def solve_steps(
     solve_start = time.perf_counter()
 
     if dft_frequency is not None and full_field_dft:
-        solver.enable_dft(dft_frequency, window_type=dft_window, end_step=time_steps, components=dft_components)
+        solver.enable_dft(dft_frequency, window_type=dft_window, end_step=time_steps,
+                          components=dft_components, reuse_buffers=cooperative_driver)
     else:
         solver.dft_enabled = False
         solver._dft_entries = []

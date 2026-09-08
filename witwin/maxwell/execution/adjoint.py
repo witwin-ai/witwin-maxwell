@@ -58,6 +58,17 @@ def freeze_solver(solver):
             for item in value:
                 share_material(item)
     share_material(solver._compiled_material_model)
+    # Entries and primary DFT attributes are views of the frequency banks.
+    # Clone each bank once and rebuild its views, rather than retaining a
+    # second complete spectrum in the tape through per-frequency clones.
+    for component, buffers in getattr(solver, "_dft_batched_fields", {}).items():
+        for part, bank in buffers.items():
+            if bank is None:
+                continue
+            frozen_bank = bank.detach().clone()
+            memo[id(bank)] = frozen_bank
+            for index, entry in enumerate(solver._dft_entries):
+                memo[id(entry["fields"][component][part])] = frozen_bank[index]
 
     def freeze(value):
         if id(value) in memo:

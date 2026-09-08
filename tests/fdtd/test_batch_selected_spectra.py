@@ -7,6 +7,20 @@ from tests.fdtd.cuda.test_batch_runtime import simulation
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 
 
+@pytest.mark.parametrize("frequencies,match", [(0, "frequency count"), (1, "nonempty field"), (65536, "frequency count")])
+def test_empty_native_dft_launch_is_rejected_without_poisoning_cuda(frequencies, match):
+    from witwin.maxwell.fdtd.cuda.backend import _accumulate_dft_batched, get_compiled_extension
+    get_compiled_extension()
+    empty = torch.empty(0, device="cuda:0")
+    accum = empty.view(1, 0).expand(frequencies, 0)
+    weights = torch.zeros(frequencies, device="cuda:0")
+    with pytest.raises(RuntimeError, match=match):
+        _accumulate_dft_batched(Ex=empty, Ey=empty, Ez=empty,
+            ExRealAccum=accum, ExImagAccum=accum, EyRealAccum=accum, EyImagAccum=accum,
+            EzRealAccum=accum, EzImagAccum=accum, weightedCos=weights, weightedSin=weights)
+    assert float(torch.ones(1, device="cuda:0").sum()) == 1.
+
+
 @pytest.mark.parametrize("frequencies,shape", [(4, (80, 80, 80)), (3, (80, 80, 80)), (4, (128, 128, 64))])
 def test_omitted_components_cover_coarsened_and_split_native_launches(frequencies, shape):
     from witwin.maxwell.fdtd.cuda.backend import _accumulate_dft_batched, get_compiled_extension

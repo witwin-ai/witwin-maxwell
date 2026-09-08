@@ -304,7 +304,22 @@ def synchronize_device(solver):
         torch.cuda.synchronize()
 
 
-def enable_dft(solver, frequencies, window_type="hanning", end_step=None, components=("Ex", "Ey", "Ez")):
+def _dft_buffer(solver, previous, shape, dtype, *, value=None):
+    if (getattr(solver, "_dft_reuse_buffers", False) and isinstance(previous, torch.Tensor)
+            and tuple(previous.shape) == tuple(shape) and previous.dtype == dtype
+            and previous.device == solver.Ex.device):
+        target = previous
+    else:
+        target = torch.empty(shape, device=solver.device, dtype=dtype)
+        solver._dft_buffer_generation = getattr(solver, "_dft_buffer_generation", 0) + 1
+    if value is None:
+        target.zero_()
+    else:
+        target.copy_(value)
+    return target
+
+
+def enable_dft(solver, frequencies, window_type="hanning", end_step=None, components=("Ex", "Ey", "Ez"), reuse_buffers=False):
     frequency_values = normalize_target_frequencies(solver, frequencies)
     resolved_window_type = resolve_spectral_window_type(solver, window_type)
     solver.dft_enabled = True
@@ -315,10 +330,13 @@ def enable_dft(solver, frequencies, window_type="hanning", end_step=None, compon
     components = tuple(components)
     if not components or len(set(components)) != len(components) or any(c not in ("Ex", "Ey", "Ez") for c in components):
         raise ValueError("DFT components must be a nonempty unique selection of Ex, Ey, Ez.")
+    solver._dft_reuse_buffers = reuse_buffers
+    previous = solver._dft_batched_fields
     solver._dft_batched_fields = {
         component: {
-            part: (torch.zeros((frequency_count,) + tuple(getattr(solver, component).shape),
-                               device=solver.device, dtype=getattr(solver, component).dtype)
+            part: (_dft_buffer(solver, previous.get(component, {}).get(part),
+                              (frequency_count,) + tuple(getattr(solver, component).shape),
+                              getattr(solver, component).dtype)
                    if not part.startswith("aux_") or complex_enabled else None)
             for part in ("real", "imag", "aux_real", "aux_imag")
         } for component in components
@@ -478,13 +496,31 @@ def build_dft_step_tables(solver, time_steps):
         return False
     frequency_count = len(solver._dft_entries)
     steps = int(time_steps)
+    # Cache only scalar waveform declarations. Arbitrary tensor-valued
+    # waveforms rebuild through the existing table compiler.
+    normalize = bool(getattr(solver, "_normalize_source", False)) and solver._normalization_source_time is not None
+    waveform = getattr(solver._normalization_source_time, "__dict__", None) if normalize else {}
+    scalar_waveform = waveform is not None and all(
+        value is None or isinstance(value, (str, int, float, bool)) for value in waveform.values())
+    key = (steps, tuple(entry["frequency"] for entry in solver._dft_entries), solver.dt,
+           solver.dft_window_type, tuple(solver._dft_start_steps), tuple(solver._dft_end_steps),
+           type(solver._normalization_source_time) if normalize else None,
+           tuple(sorted(waveform.items()))) if scalar_waveform else None
+    cached = getattr(solver, "_dft_table_cache", None)
+    if getattr(solver, "_dft_reuse_buffers", False) and key is not None and cached is not None and cached[0] == key:
+        solver._dft_step.zero_()
+        solver._dft_weighted_cos.zero_()
+        solver._dft_weighted_sin.zero_()
+        for name, value in cached[1].items():
+            setattr(solver, name, value.copy())
+        sync_dft_primary_runtime_state(solver)
+        return True
     weighted_cos = np.zeros((steps, frequency_count), dtype=np.float32)
     weighted_sin = np.zeros((steps, frequency_count), dtype=np.float32)
     window_norm = np.zeros(frequency_count, dtype=np.float32)
     sample_count = np.zeros(frequency_count, dtype=np.int64)
     src_real = np.zeros(frequency_count, dtype=np.float64)
     src_imag = np.zeros(frequency_count, dtype=np.float64)
-    normalize = bool(getattr(solver, "_normalize_source", False)) and solver._normalization_source_time is not None
 
     phase_cos = np.ones(frequency_count, dtype=np.float32)
     phase_sin = np.zeros(frequency_count, dtype=np.float32)
@@ -513,16 +549,21 @@ def build_dft_step_tables(solver, time_steps):
         phase_cos = next_cos.astype(np.float32, copy=False)
         phase_sin = next_sin.astype(np.float32, copy=False)
 
-    solver._dft_weighted_cos_table = torch.as_tensor(weighted_cos, device=solver.device)
-    solver._dft_weighted_sin_table = torch.as_tensor(weighted_sin, device=solver.device)
-    solver._dft_weighted_cos = torch.zeros(frequency_count, device=solver.device, dtype=torch.float32)
-    solver._dft_weighted_sin = torch.zeros(frequency_count, device=solver.device, dtype=torch.float32)
-    solver._dft_step = torch.zeros(1, device=solver.device, dtype=torch.int64)
+    for name, values in (("_dft_weighted_cos_table", weighted_cos), ("_dft_weighted_sin_table", weighted_sin)):
+        setattr(solver, name, _dft_buffer(solver, getattr(solver, name, None), values.shape,
+                                        torch.float32, value=torch.from_numpy(values)))
+    for name, shape, dtype in (("_dft_weighted_cos", (frequency_count,), torch.float32),
+                               ("_dft_weighted_sin", (frequency_count,), torch.float32),
+                               ("_dft_step", (1,), torch.int64)):
+        setattr(solver, name, _dft_buffer(solver, getattr(solver, name, None), shape, dtype))
     solver._dft_window_normalization_values = window_norm
     solver._dft_sample_count_values = sample_count
     if normalize:
         solver._dft_source_dft_real_values = src_real
         solver._dft_source_dft_imag_values = src_imag
+    solver._dft_table_cache = (key, {name: getattr(solver, name).copy() for name in (
+        "_dft_window_normalization_values", "_dft_sample_count_values",
+        "_dft_source_dft_real_values", "_dft_source_dft_imag_values")})
     sync_dft_primary_runtime_state(solver)
     return True
 

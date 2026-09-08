@@ -399,10 +399,10 @@ class PreparedBatch:
             policy = self.batch.execution
             graph_enabled = policy.graph != "off"
             chunk_limit = 32 if policy.graph_steps == "auto" else policy.graph_steps
-            # Ordinary full-field preparation owns fresh DFT buffers each run.
-            # Monitor-only storage is persistent and can reuse captures.
-            if self.batch.outputs.fields:
+            spectral_signature = tuple(getattr(solver, "_dft_buffer_generation", 0) for solver in slot.solvers)
+            if spectral_signature != getattr(self, "_graph_spectral_signature", None):
                 self._graphs.clear()
+                self._graph_spectral_signature = spectral_signature
             self._last_graph_replays = 0
             self._last_graph_error = None
             completed = 0
