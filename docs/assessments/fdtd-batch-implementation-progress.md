@@ -179,3 +179,41 @@ magnetic full-field/material export and trainable batch execution reject rather
 than silently falling back. Complete material compilation still occurs when a
 cohort is changed. Regional/background caching, vectorized source/observer work,
 precise output allocations, full GPU scheduling and the batch adjoint remain open.
+
+## Native eager execution comparison
+
+Runtime baseline: `c8ccb48`. Command: `python -m benchmark batch --compare launch
+--variants 10 --concurrency 10 --include-native --warmups 2 --repeats 5`, on physical
+GPU 1 (mapped to `cuda:0` in this invocation), using the same toolkit environment
+as above. Every variant ran 2000 timesteps. The benchmark coordinator retains
+separate sessions during interleaved timing, then measures memory with fresh
+isolated sessions. Native warm rounds reuse a PreparedBatch; independent modes
+reuse their processes and extension caches. CPU spectra are ready before timing
+ends, and no user retains GPU results.
+
+| Mode | Warm median (s) | Range (s) | Isolated driver increment (MiB) |
+| --- | ---: | ---: | ---: |
+| sequential | 5.216941 | 4.735446–5.954700 | 317.5625 |
+| processes | 0.902762 | 0.794191–0.957207 | 3175.6250 |
+| run_many | 19.657694 | 17.604438–22.929485 | 359.5625 |
+| native_batch | 2.342167 | 1.980125–2.541879 | 411.5625 |
+
+Every cold, warmup, formal and isolated-memory probe comparison has zero error.
+Cold makespans were 11.369580, 8.120045, 28.798055 and 8.050688 seconds respectively.
+Native eager is about 2.23 times faster than sequential execution on this workload,
+but about 2.59 times slower than ten independent processes. Its sampled driver
+increment is about 87% lower than ten processes. This demonstrates context-memory
+reduction, not acceptance of shared-background tensor savings: the native worker's
+allocator peak is 48.069824 MiB, versus 46.468262 MiB for run_many, while each
+independent process peaks at 4.705078 MiB (per-process peaks must not be treated as
+a measurement of simultaneous summed usage).
+
+The combined memory/throughput gate is **not passed**: native warm makespan exceeds
+1.05 times the ten-process baseline. Source/observer dispatch and coordinated GPU
+scheduling still require optimization. These are small-grid, single-frequency
+measurements, not the unavailable original business geometry or the full baseline
+matrix. Driver peaks use 20 ms sampling and may miss short transients.
+
+Raw evidence: `benchmark/plots/batch/launch-n10-native-eager.json`.
+`benchmark/RESULTS.md` retains both the historical independent baseline and this
+new comparison. The CLI/report workflow has **11 passing tests**.

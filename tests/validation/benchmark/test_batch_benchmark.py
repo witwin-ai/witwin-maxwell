@@ -108,3 +108,31 @@ def test_report_update_preserves_other_results_and_replaces_its_section(monkeypa
     regenerated = target.read_text()
     assert regenerated.count("## Independent execution baseline") == 1
     assert "raw.json" in regenerated
+
+
+def test_native_cli_and_report_keep_historical_baselines(monkeypatch, tmp_path, capsys):
+    import benchmark.batch as module
+    from benchmark import report
+    captured = {}
+    def compare(workload, **kwargs):
+        captured.update(kwargs)
+        return {"workload": {"name": workload.name, "time_steps": workload.time_steps},
+                "variants": kwargs["variants"], "identical": kwargs["identical"],
+                "device": kwargs["device"], "warmups": kwargs["warmups"], "repeats": kwargs["repeats"],
+                "include_native": kwargs["include_native"],
+                "summary": {"native_batch": {"median_wall_s": 1., "min_wall_s": .9, "max_wall_s": 1.1}},
+                "isolated_memory": [{"mode": "native_batch", "driver_peak_increment_bytes": 1024**2}]}
+    monkeypatch.setattr(module, "benchmark_baselines", compare)
+    target = tmp_path / "native.json"
+    module.main(["--compare", "launch", "--include-native", "--output", str(target)])
+    assert captured["include_native"] is True
+    payload = json.loads(capsys.readouterr().out)
+    monkeypatch.setattr(report, "RESULTS_MD", tmp_path / "RESULTS.md")
+    report.record_batch_baseline(dict(payload, include_native=False), tmp_path / "old.json")
+    report.record_batch_baseline(payload, target)
+    report.write_results_markdown([])
+    text = report.RESULTS_MD.read_text()
+    assert "Independent execution baseline" in text
+    assert "Execution comparison including native Batch" in text
+    assert "| native_batch | 1.00 |" in text
+    assert "old.json" in text and "native.json" in text

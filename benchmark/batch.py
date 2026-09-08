@@ -116,10 +116,13 @@ def main(argv=None):
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--steps", type=int, help="Explicit step override; retained in the report")
     parser.add_argument("--identical", action="store_true", help="Use distinct copies of one physical design")
+    parser.add_argument("--include-native", action="store_true", help="Also measure reusable native Batch with B=concurrency")
     parser.add_argument("--update-report", action="store_true", help="Also update the baseline section of benchmark/RESULTS.md")
     args = parser.parse_args(argv)
     if args.update_report and not args.compare:
         parser.error("--update-report requires --compare.")
+    if args.include_native and not args.compare:
+        parser.error("--include-native requires --compare.")
     if args.inventory:
         payload = {"schema_version": 1, "workloads": [asdict(w) for w in BATCH_WORKLOADS.values()],
                    "planned_variant_counts": [1, 10, 100], "deduplication": False,
@@ -135,7 +138,7 @@ def main(argv=None):
         else:
             payload = benchmark_baselines(workload, device=args.device, variants=args.variants,
                 concurrency=args.concurrency, identical=args.identical,
-                warmups=args.warmups, repeats=args.repeats)
+                warmups=args.warmups, repeats=args.repeats, include_native=args.include_native)
     encoded = json.dumps(payload, indent=2) + "\n"
     if args.audit or args.compare or args.output:
         suffix = "audit" if args.audit else f"n{args.variants}-{'identical' if args.identical else 'varied'}"
@@ -156,6 +159,8 @@ def _probe_snapshot(result):
 
 def _baseline_worker(connection, workload, device, mode, concurrency):
     """Persistent spawned worker; no CUDA context is inherited through fork."""
+    prepared_batch = None
+    prepared_key = None
     try:
         torch.cuda.set_device(device)
         connection.send({"kind": "ready"})
@@ -167,7 +172,24 @@ def _baseline_worker(connection, workload, device, mode, concurrency):
             torch.cuda.synchronize(device)
             torch.cuda.reset_peak_memory_stats(device)
             started = time.perf_counter()
-            if mode == "run_many":
+            if mode == "native_batch":
+                key = (tuple(indices), identical)
+                if key != prepared_key:
+                    if prepared_batch is not None:
+                        prepared_batch.close()
+                    simulations = [build_simulation(workload, index=i, identical=identical, device=device) for i in indices]
+                    prepared_batch = mw.Simulation.batch(simulations, execution=mw.BatchExecution(
+                        devices=(device,), batch_size=min(concurrency, len(indices)),
+                        max_batch_size=concurrency, graph="off")).prepare()
+                    prepared_key = key
+                    del simulations
+                with prepared_batch.iter_results() as iterator:
+                    for item in iterator:
+                        item.raise_for_error()
+                        connection.send({"kind": "result", "index": indices[item.index],
+                                         "probe": _probe_snapshot(item.result)})
+                    del item
+            elif mode == "run_many":
                 simulations = [build_simulation(workload, index=i, identical=identical, device=device) for i in indices]
                 sequence = mw.run_many(simulations, execution=mw.MultiGPUExecution.ensemble(
                     devices=(device,), max_concurrency=concurrency,
@@ -194,6 +216,8 @@ def _baseline_worker(connection, workload, device, mode, concurrency):
         connection.send({"kind": "error", "error": f"{type(exc).__name__}: {exc}",
                          "traceback": traceback.format_exc()})
     finally:
+        if prepared_batch is not None:
+            prepared_batch.close()
         connection.close()
 
 
@@ -332,7 +356,7 @@ def compare_probes(reference, actual):
     return metrics
 
 
-def benchmark_baselines(workload, *, device, variants, concurrency, identical, warmups, repeats):
+def benchmark_baselines(workload, *, device, variants, concurrency, identical, warmups, repeats, include_native=False):
     import statistics
     if not torch.cuda.is_available():
         raise RuntimeError("Baseline comparisons require CUDA.")
@@ -341,7 +365,7 @@ def benchmark_baselines(workload, *, device, variants, concurrency, identical, w
     records = []
     sessions = {}
     reference = None
-    modes = ("sequential", "processes", "run_many")
+    modes = ("sequential", "processes", "run_many") + (("native_batch",) if include_native else ())
     try:
         # Separate mode sessions persist across interleaved rounds. Their idle
         # allocator reservations remain visible in driver-level measurements.
@@ -385,6 +409,7 @@ def benchmark_baselines(workload, *, device, variants, concurrency, identical, w
     return {
         "schema_version": 1, "kind": "batch_independent_baselines", "workload": asdict(workload),
         "device": device, "variants": variants, "concurrency": concurrency,
+        "include_native": include_native,
         "identical": identical, "deduplication": False, "warmups": warmups, "repeats": repeats,
         "acceptance_protocol": warmups >= 2 and repeats >= 5,
         "environment": {"torch": torch.__version__, "cuda": torch.version.cuda,
@@ -392,7 +417,8 @@ def benchmark_baselines(workload, *, device, variants, concurrency, identical, w
         "output_contract": "probe complex spectra exported to CPU; no user-retained GPU results",
         "notes": ["All modes use eager stepping and identical physical inputs.",
                   "Cold timing includes worker startup, preparation, solve, export and readiness.",
-                  "Warm timing reuses processes and extension caches, not PreparedSimulation or field state.",
+                  "Independent warm timing reuses processes and extension caches, not PreparedSimulation or field state.",
+                  "When included, native_batch warm timing also reuses PreparedBatch fields and the resident compiled cohort.",
                   "run_many naturally retains its complete ResultSequence until export.",
                   "Interleaved sessions keep idle CUDA contexts and allocator caches alive; total driver peaks include them.",
                   "isolated_memory uses one fresh mode session at a time, including startup and CUDA context overhead.",

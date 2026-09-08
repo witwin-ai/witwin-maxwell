@@ -658,3 +658,27 @@ Device: cuda:1; steps: 2000; warmups/repeats: 2/5.
 
 These are independent-solver baselines, not shared-state Batch performance or business acceptance.
 <!-- batch-launch-10-varied:end -->
+
+<!-- batch-launch-10-varied-native:begin -->
+## Execution comparison including native Batch: launch, N=10, varied
+
+Device: cuda:0; steps: 2000; warmups/repeats: 2/5.
+
+| Mode | Warm median (s) | Range (s) |
+| --- | ---: | ---: |
+| sequential | 5.216941 | 4.735446–5.954700 |
+| processes | 0.902762 | 0.794191–0.957207 |
+| run_many | 19.657694 | 17.604438–22.929485 |
+| native_batch | 2.342167 | 1.980125–2.541879 |
+
+| Mode | Sampled isolated driver increment (MiB) |
+| --- | ---: |
+| sequential | 317.56 |
+| processes | 3175.62 |
+| run_many | 359.56 |
+| native_batch | 411.56 |
+
+[Raw measurements and memory/lifetime qualifications](plots/batch/launch-n10-native-eager.json)
+
+The native eager tier reuses a PreparedBatch; sources and observers still dispatch per lane. This fixed workload does not establish business or complete scheduler acceptance.
+<!-- batch-launch-10-varied-native:end -->

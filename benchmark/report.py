@@ -337,9 +337,11 @@ def record_batch_baseline(payload, artifact):
     name = payload["workload"]["name"]
     count = payload["variants"]
     control = "identical" if payload["identical"] else "varied"
-    key = f"batch-{name}-{count}-{control}"
+    native = payload.get("include_native", False)
+    key = f"batch-{name}-{count}-{control}" + ("-native" if native else "")
     begin, end = f"<!-- {key}:begin -->", f"<!-- {key}:end -->"
-    lines = [begin, f"## Independent execution baseline: {name}, N={count}, {control}", "",
+    title = "Execution comparison including native Batch" if native else "Independent execution baseline"
+    lines = [begin, f"## {title}: {name}, N={count}, {control}", "",
              f"Device: {payload['device']}; steps: {payload['workload']['time_steps']}; "
              f"warmups/repeats: {payload['warmups']}/{payload['repeats']}.", "",
              "| Mode | Warm median (s) | Range (s) |",
@@ -347,8 +349,17 @@ def record_batch_baseline(payload, artifact):
     for mode, values in payload["summary"].items():
         lines.append(f"| {mode} | {values['median_wall_s']:.6f} | "
                      f"{values['min_wall_s']:.6f}–{values['max_wall_s']:.6f} |")
+    if payload.get("isolated_memory"):
+        lines.extend(["", "| Mode | Sampled isolated driver increment (MiB) |",
+                      "| --- | ---: |"])
+        for record in payload["isolated_memory"]:
+            lines.append(f"| {record['mode']} | {record['driver_peak_increment_bytes'] / 1024**2:.2f} |")
+    qualification = (
+        "The native eager tier reuses a PreparedBatch; sources and observers still dispatch per lane. "
+        "This fixed workload does not establish business or complete scheduler acceptance."
+        if native else "These independent-solver baselines do not establish native Batch or business acceptance.")
     lines.extend(["", f"[Raw measurements and memory/lifetime qualifications]({_display_path(artifact)})", "",
-                  "These are independent-solver baselines, not shared-state Batch performance or business acceptance.", end])
+                  qualification, end])
     section = "\n".join(lines) + "\n"
     current = RESULTS_MD.read_text(encoding="utf-8") if RESULTS_MD.exists() else ""
     if begin in current and end in current:
