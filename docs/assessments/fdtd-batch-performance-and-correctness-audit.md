@@ -1,5 +1,9 @@
 # FDTD Batch 性能瓶颈与正确性审计
 
+本文保留优化前的审计基线。随后完成的源/观察器批处理、完整 Graph、
+材料分配与共享优化及其新测量，见 [优化结果与验收](fdtd-batch-optimization-results.md)。
+下文“当前”指审计时实现，不能作为最新功能状态。
+
 日期：2026-09-08。审计起点：`1c1dc67`；确定性正确性修复：`d232245`。
 范围：当前 `native_field_cohort_eager` 单 GPU、单执行槽前向实现。
 完整项目状态仍是实施中，见 [开发方案](../plans/fdtd-batch-simulation-api-and-gpu-scheduling.md) 和 [已有验收证据](fdtd-batch-implementation-progress.md)。

@@ -2,6 +2,11 @@
 
 Date: 2026-09-08. The complete Batch implementation is **not finished**.
 The active plan is [the batch implementation plan](../plans/fdtd-batch-simulation-api-and-gpu-scheduling.md).
+The latest optimization commits, measured acceptance and remaining bottlenecks
+are consolidated in [the optimization results](fdtd-batch-optimization-results.md).
+Final optimization regression baseline `8b65420`: **353 passed**, no failures or
+skips, in 204.77 seconds; one existing sparse-invariant warning. This combines
+Batch, CUDA, CPML, observer, compiler, ordinary adjoint and benchmark coverage.
 
 ## Optimization follow-up: full native pipeline and coordinated graphs
 

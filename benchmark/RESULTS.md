@@ -706,3 +706,27 @@ Device: cuda:0; steps: 2000; warmups/repeats: 2/5; native graph policy: required
 
 The native tier reuses a PreparedBatch under the recorded graph policy. This fixed workload does not establish business or complete scheduler acceptance.
 <!-- batch-launch-10-varied-native-graph-required:end -->
+
+<!-- batch-bandwidth-4-varied-native-graph-required:begin -->
+## Execution comparison including native Batch: bandwidth, N=4, varied
+
+Device: cuda:0; steps: 256; warmups/repeats: 2/3; native graph policy: required.
+
+| Mode | Warm median (s) | Range (s) |
+| --- | ---: | ---: |
+| sequential | 0.637905 | 0.635989–0.656635 |
+| processes | 0.729172 | 0.728328–0.730637 |
+| run_many | 0.656874 | 0.633802–0.699799 |
+| native_batch | 0.571042 | 0.568417–0.574656 |
+
+| Mode | Sampled isolated driver increment (MiB) |
+| --- | ---: |
+| sequential | 859.56 |
+| processes | 3438.25 |
+| run_many | 2513.56 |
+| native_batch | 2409.56 |
+
+[Raw measurements and memory/lifetime qualifications](plots/batch/optimized-bandwidth-incremental-n4-graph.json)
+
+The native tier reuses a PreparedBatch under the recorded graph policy. This fixed workload does not establish business or complete scheduler acceptance.
+<!-- batch-bandwidth-4-varied-native-graph-required:end -->
