@@ -5,6 +5,10 @@ import copy
 import contextlib
 import threading
 import time
+import queue
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from collections.abc import Mapping
 
 import torch
@@ -35,11 +39,12 @@ def _owned(value, device, memo):
 
 
 class PreparedBatch:
-    """Reusable forward context with one persistent native CUDA field slot.
+    """Reusable native CUDA context, dispatched to a slot coordinator as needed."""
 
-    The current execution tier has one device and one slot. Complete native
-    timesteps support eager dispatch or coordinated CUDA graph replay.
-    """
+    def __new__(cls, batch):
+        if cls is PreparedBatch and (len(batch.execution.devices) > 1 or batch.execution.slots_per_device == 2):
+            return object.__new__(ParallelPreparedBatch)
+        return object.__new__(cls)
 
     @capture_participant
     def __init__(self, batch):
@@ -52,7 +57,8 @@ class PreparedBatch:
         if batch.outputs.materials or any(name.startswith("H") for name in batch.outputs.fields):
             raise NotImplementedError("Batch material export and magnetic full-field spectra are not implemented yet.")
         if batch.outputs.result_device not in ("local", "cpu", policy.devices[0]):
-            raise NotImplementedError("Cross-device batch result export requires the pending multi-GPU scheduler.")
+            if batch.outputs.result_device not in getattr(batch, "_export_pools", {}):
+                raise NotImplementedError("Cross-device batch result export requires a destination allocation pool.")
         self._validate_inputs(batch.parameters)
         if batch.variation is not None and batch.variation.structures:
             raise NotImplementedError(
@@ -84,7 +90,11 @@ class PreparedBatch:
         self._stream = torch.cuda.Stream(device=self.device)
         self._caller_ready = torch.cuda.Event()
         self._output_ready = torch.cuda.Event()
-        if policy.memory_limit_bytes is not None or policy.batch_size == "auto":
+        account = getattr(batch, "_memory_account", None)
+        if account is not None:
+            from .pool import BatchMemoryPool
+            self._budget = BatchMemoryPool(self.device, account.limit_bytes, policy.reserve_bytes, account=account)
+        elif policy.memory_limit_bytes is not None or policy.batch_size == "auto":
             from .pool import BatchMemoryPool
             free, _ = torch.cuda.mem_get_info(self.device)
             requested = policy.memory_limit_bytes
@@ -104,7 +114,7 @@ class PreparedBatch:
                     # the hard bound; this conservative ratio only selects B.
                     lane_peak = max(1, self._budget.stats()["peak_charged_bytes"])
                     selected = min(policy.max_batch_size, len(batch),
-                                   max(1, self._budget.limit_bytes // (2 * lane_peak)))
+                                   max(1, self._budget.limit_bytes // (2 * lane_peak * getattr(batch, "_budget_slots", 1))))
                     if selected > 1:
                         self.capacity = selected
                         self._slot = None
@@ -271,6 +281,16 @@ class PreparedBatch:
         self._cohort = group_id
 
     def _solve_cohort(self):
+        lifecycle = self._cohort_steps()
+        try:
+            while True:
+                next(lifecycle)
+        except StopIteration as done:
+            return done.value
+        finally:
+            lifecycle.close()
+
+    def _cohort_steps(self):
         from ..fdtd.runtime.stepping import solve_steps, _post_source_block, _electric_field_energy
         from ..fdtd.observers import BatchObserverEngine
         from ..fdtd.excitation.temporal import BatchSourceEngine
@@ -300,6 +320,7 @@ class PreparedBatch:
                     raise NotImplementedError("Batch full-field spectra require GPU-driven accumulation.")
                 pending[lane] = (steps, descriptor["shutoff_min_step"])
             observers.bind()
+            yield
             from ..fdtd.cuda.runtime.graph import CudaGraphRunner
             policy = self.batch.execution
             graph_enabled = policy.graph != "off"
@@ -375,6 +396,7 @@ class PreparedBatch:
                         slot.active[lane] = 0
                     else:
                         raise RuntimeError("Batch lifecycle did not finalize after external stepping.")
+                yield
             self._last_graph_mode = ("mixed" if self._last_graph_error else "graph") if self._last_graph_replays else "eager"
             report = self.report.to_dict()
             report.update(execution_tier=f"native_pipeline_{self._last_graph_mode}",
@@ -400,8 +422,12 @@ class PreparedBatch:
         fields = {name: raw[name] for name in self.batch.outputs.fields if name in raw}
         if set(fields) != set(self.batch.outputs.fields):
             raise RuntimeError("Batch output plan requested unavailable field spectra.")
+        destination = getattr(self.batch, "_export_pools", {}).get(device)
+        with destination.activate() if destination is not None else contextlib.nullcontext():
+            exported_fields = _owned(fields, device, memo)
+            exported_monitors = _owned(raw.get("observers", {}), device, memo)
         result = Result(method="fdtd", scene=model.scene, frequencies=model.frequencies,
-            fields=_owned(fields, device, memo), monitors=_owned(raw.get("observers", {}), device, memo),
+            fields=exported_fields, monitors=exported_monitors,
             metadata={**model.metadata, "batch_index": index, "variant_id": self.batch.variant_ids[index]},
             solver_stats=model._build_fdtd_solver_stats(solver,
                 time_steps=model._resolve_fdtd_time_steps(solver, model.scene),
@@ -626,6 +652,354 @@ class BatchResultIterator:
 
     def __exit__(self, *exc):
         self.close()
+
+
+class ParallelPreparedBatch(PreparedBatch):
+    """Persistent per-device slots with shared budgets and bounded output delivery."""
+
+    @capture_participant
+    def __init__(self, batch):
+        from .pool import BatchMemoryPool
+        self.batch = batch
+        if batch.execution.tune:
+            raise NotImplementedError("Measured batch autotuning is not implemented yet.")
+        self._validate_inputs(batch.parameters)
+        self.device = batch.execution.devices[0]
+        self._gate = threading.Lock()
+        self._cancel = threading.Event()
+        self._closed = False
+        self._records = ()
+        self._groups = batch.plan().groups
+        self._children = []
+        self._accounts = {}
+        self._budget = None
+        self._capacity_retries = []
+        slots = batch.execution.slots_per_device
+        if slots not in (1, 2):
+            raise NotImplementedError("Automatic slot selection requires measured throughput tuning.")
+        if batch.outputs.result_device not in ("local", "cpu", *batch.execution.devices):
+            raise ValueError("A parallel Batch export device must belong to its execution devices.")
+        try:
+            for event in self._input_events(batch.parameters):
+                event.synchronize()
+            for device in batch.execution.devices:
+                free, _ = torch.cuda.mem_get_info(device)
+                requested = batch.execution.memory_limit_bytes
+                if isinstance(requested, Mapping):
+                    requested = requested[device]
+                limit = max(0, int(free) - batch.execution.reserve_bytes)
+                if requested is not None:
+                    limit = min(limit, requested)
+                self._accounts[device] = BatchMemoryPool(device, limit, batch.execution.reserve_bytes)
+            for device in batch.execution.devices:
+                for _ in range(slots):
+                    child_batch = copy.copy(batch)
+                    child_batch.execution = replace(batch.execution, devices=(device,), slots_per_device=1,
+                        memory_limit_bytes=self._accounts[device].limit_bytes)
+                    child_batch._memory_account = self._accounts[device]
+                    child_batch._budget_slots = slots
+                    child_batch._export_pools = {}
+                    target = batch.outputs.result_device
+                    if target not in ("local", "cpu", device):
+                        account = self._accounts[target]
+                        child_batch._export_pools[target] = BatchMemoryPool(target, account.limit_bytes,
+                            batch.execution.reserve_bytes, account=account)
+                    self._children.append(PreparedBatch(child_batch))
+            self.capacity = sum(child.capacity for child in self._children)
+            self._refresh_report()
+        except BaseException:
+            self.close()
+            raise
+
+    def _input_events(self, parameters):
+        devices = {str(model.scene.device) for model in self.batch.simulations}
+        devices.update(self.batch.execution.devices)
+        if parameters is not None:
+            devices.update(str(value.device) for kind in ("region_densities", "source_scales")
+                           for value in getattr(parameters, kind).values() if value.is_cuda)
+        events = []
+        for device in sorted(devices):
+            if torch.device(device).type == "cuda":
+                with torch.cuda.device(device):
+                    event = torch.cuda.Event()
+                    event.record(torch.cuda.current_stream(device))
+                    events.append(event)
+        return events
+
+    def _refresh_report(self):
+        report = self.batch.plan().to_dict()
+        report.update(execution_tier="native_parallel_pipeline", slots_per_device=self.batch.execution.slots_per_device,
+                      total_capacity=sum(child.capacity for child in self._children))
+        report["devices"] = [{"device": device, "slots": sum(c.device == device for c in self._children),
+            "batch_sizes": [c.capacity for c in self._children if c.device == device],
+            "memory": account.stats()} for device, account in self._accounts.items()]
+        report["workers"] = [child.report.to_dict() for child in self._children]
+        self.report = BatchPlanReport.from_dict(report)
+
+    @capture_participant
+    def iter_results(self, *, parameters=None, order="completion"):
+        if order not in ("completion", "input"):
+            raise ValueError("order must be 'completion' or 'input'.")
+        if self._closed:
+            raise RuntimeError("PreparedBatch is closed.")
+        parameters = self.batch.parameters if parameters is None else parameters
+        self._validate_inputs(parameters)
+        if not self._gate.acquire(blocking=False):
+            raise RuntimeError("PreparedBatch does not allow concurrent run or iteration.")
+        try:
+            if self._closed:
+                raise RuntimeError("PreparedBatch is closed.")
+            self._cancel.clear()
+            self._records = ()
+            events = self._input_events(parameters)
+            # Source-scale materialization reads scalar values on the host.
+            # Complete caller writes before a different worker thread reads them.
+            for event in events:
+                event.synchronize()
+            for child in self._children:
+                child._cancel.clear()
+                child._enter_stream()
+                for event in events:
+                    child._stream.wait_event(event)
+            return ParallelBatchResultIterator(self, parameters, order=order)
+        except BaseException:
+            self._gate.release()
+            raise
+
+    def request_cancel(self):
+        self._cancel.set()
+        for child in self._children:
+            child.request_cancel()
+
+    def close(self):
+        if self._closed:
+            return
+        if not self._gate.acquire(blocking=False):
+            raise RuntimeError("Close the active batch iterator before closing PreparedBatch.")
+        try:
+            for child in self._children:
+                child.close()
+            self._children.clear()
+            self._accounts.clear()
+            self._closed = True
+        finally:
+            self._gate.release()
+
+
+class ParallelBatchResultIterator(BatchResultIterator):
+    def __init__(self, prepared, parameters, *, order):
+        self.prepared, self.parameters, self.order = prepared, parameters, order
+        self._closed = self._owns_prepared = False
+        self._iteration_gate = threading.Lock()
+        self._condition = threading.Condition()
+        self._queue = queue.Queue(maxsize=prepared.batch.outputs.max_pending_results)
+        self._permits = threading.Semaphore(prepared.batch.outputs.max_pending_results)
+        self._delivered = set()
+        self._records = {}
+        self._next_export = 0
+        self._running = len(prepared._children)
+        membership = {i: g["group_id"] for g in prepared._groups for i in g["variant_indices"]}
+        groups = []
+        sequence = (list(range(len(prepared.batch))) if order == "input" else
+                    [i for group in prepared._groups for i in group["variant_indices"]])
+        for index in sequence:
+            if not groups or groups[-1][0] != membership[index]:
+                groups.append((membership[index], deque()))
+            groups[-1][1].append(index)
+        self._tasks = deque(groups)
+        self._executor = ThreadPoolExecutor(max_workers=self._running, thread_name_prefix="maxwell-batch")
+        self._futures = None
+
+    def _take_task(self, child, worker):
+        with self._condition:
+            if self.prepared._cancel.is_set() or not self._tasks:
+                return None
+            # Static scheduling advances the assignment cursor in worker order.
+            if self.prepared.batch.execution.scheduling == "static":
+                while getattr(self, "_assignment", 0) % len(self.prepared._children) != worker:
+                    if self.prepared._cancel.is_set() or not self._tasks:
+                        return None
+                    self._condition.wait(.05)
+                self._assignment = getattr(self, "_assignment", 0) + 1
+            group, pending = self._tasks[0]
+            indices = [pending.popleft() for _ in range(min(child.capacity, len(pending)))]
+            if not pending:
+                self._tasks.popleft()
+            self._condition.notify_all()
+            return group, indices
+
+    @contextlib.contextmanager
+    def _phase(self, child):
+        from ..fdtd.cuda.runtime.graph import coordinated_cuda_work
+        with coordinated_cuda_work(), torch.cuda.device(child.device), torch.cuda.stream(child._stream), child._allocation_scope(), torch.no_grad():
+            yield
+
+    def _permission(self, index):
+        with self._condition:
+            while self.order == "input" and index != self._next_export:
+                if self.prepared._cancel.is_set():
+                    return False
+                self._condition.wait(.05)
+        while not self.prepared._cancel.is_set():
+            if self._permits.acquire(timeout=.05):
+                return True
+        return False
+
+    def _failure(self, child, index, error, began):
+        kind = (FailureKind.CAPACITY if isinstance(error, torch.cuda.OutOfMemoryError) else
+                FailureKind.CANCELLED if isinstance(error, _BatchCancelled) else FailureKind.RUNTIME)
+        error = error.with_traceback(None)
+        error.__context__ = None
+        failure = DistributedFailure(index=index, device=child.device, kind=kind,
+            exception=error, message=f"variant {self.prepared.batch.variant_ids[index]!r}: {error}")
+        record = ExecutionRecord(index=index, device=child.device,
+            status="cancelled" if kind == FailureKind.CANCELLED else "failed",
+            wall_time_s=time.perf_counter() - began, failure=failure)
+        return BatchItem(index=index, variant_id=self.prepared.batch.variant_ids[index], result=None, failure=failure, record=record)
+
+    def _worker(self, child, worker):
+        assigned = []
+        began = time.perf_counter()
+        try:
+            while (task := self._take_task(child, worker)) is not None:
+                group, assigned = task
+                start = 0
+                while start < len(assigned) and not self.prepared._cancel.is_set():
+                    indices = assigned[start:start + child.capacity]
+                    began = time.perf_counter()
+                    lifecycle = None
+                    error = None
+                    try:
+                        with self._phase(child):
+                            child._load(indices, self.parameters, group)
+                            lifecycle = child._cohort_steps()
+                        while True:
+                            with self._phase(child):
+                                try:
+                                    next(lifecycle)
+                                except StopIteration as done:
+                                    outputs = done.value
+                                    break
+                    except Exception as exc:
+                        if isinstance(exc, torch.cuda.OutOfMemoryError) and child.batch.execution.batch_size == "auto" and child.capacity > 1:
+                            with self._phase(child):
+                                if lifecycle is not None:
+                                    lifecycle.close()
+                                child._reduce_capacity()
+                            continue
+                        error = exc
+                        child._loaded_key = None
+                    finally:
+                        if lifecycle is not None:
+                            with self._phase(child):
+                                lifecycle.close()
+                    for lane, index in enumerate(indices):
+                        if error is not None:
+                            item = self._failure(child, index, error, began)
+                            with self._condition:
+                                self._records[index] = item.record
+                            if self.prepared.batch.execution.fail_fast:
+                                self.prepared.request_cancel()
+                                break
+                        if not self._permission(index):
+                            break
+                        events = []
+                        try:
+                            if error is None:
+                                with self._phase(child):
+                                    result = child._export(lane, outputs.pop(lane), index)
+                                    devices = {str(t.device) for t in memo_tensors(result._fields, result._monitors) if t.is_cuda}
+                                    for device in devices:
+                                        event = torch.cuda.Event()
+                                        event.record(torch.cuda.current_stream(device))
+                                        events.append((device, event))
+                                    record = ExecutionRecord(index=index, device=child.device, status="completed",
+                                        wall_time_s=time.perf_counter() - began)
+                                    item = BatchItem(index=index, variant_id=self.prepared.batch.variant_ids[index], result=result, failure=None, record=record)
+                        except Exception as exc:
+                            item = self._failure(child, index, exc, began)
+                        with self._condition:
+                            self._records[index] = item.record
+                            self._queue.put((item, events))
+                            if self.order == "input":
+                                self._next_export += 1
+                            self._condition.notify_all()
+                        if item.failure is not None and self.prepared.batch.execution.fail_fast:
+                            self.prepared.request_cancel()
+                    with self._phase(child):
+                        if error is None:
+                            outputs.clear()
+                    start += len(indices)
+        except BaseException as exc:
+            with self._condition:
+                for index in assigned:
+                    if index not in self._records:
+                        self._records[index] = self._failure(child, index, exc, began).record
+            self.prepared.request_cancel()
+        finally:
+            with self._condition:
+                self._running -= 1
+                self._condition.notify_all()
+
+    def __next__(self):
+        from ..fdtd.cuda.runtime.graph import coordinated_cuda_work
+        if not self._iteration_gate.acquire(blocking=False):
+            raise RuntimeError("BatchResultIterator.next() is already active.")
+        try:
+            if self._closed:
+                raise StopIteration
+            if self._futures is None:
+                self._futures = [self._executor.submit(self._worker, child, worker)
+                                 for worker, child in enumerate(self.prepared._children)]
+            while True:
+                try:
+                    item, events = self._queue.get(timeout=.05)
+                    self._permits.release()
+                    with coordinated_cuda_work():
+                        for device, event in events:
+                            torch.cuda.current_stream(device).wait_event(event)
+                        if item.result is not None:
+                            for value in memo_tensors(item.result._fields, item.result._monitors):
+                                if value.is_cuda:
+                                    value.record_stream(torch.cuda.current_stream(value.device))
+                    self._delivered.add(item.index)
+                    return item
+                except queue.Empty:
+                    if self._running:
+                        continue
+                    for index in range(len(self.prepared.batch)):
+                        if index not in self._delivered:
+                            record = self._records.get(index)
+                            if record is None:
+                                failure = DistributedFailure(index=index, device=self.prepared.device,
+                                    kind=FailureKind.CANCELLED, message="Batch cancelled before publication.")
+                                record = ExecutionRecord(index=index, device=self.prepared.device, status="cancelled", failure=failure)
+                                self._records[index] = record
+                            self._delivered.add(index)
+                            return BatchItem(index=index, variant_id=self.prepared.batch.variant_ids[index], result=None, failure=record.failure, record=record)
+                    self._close_idle_generator()
+                    raise StopIteration
+        finally:
+            self._iteration_gate.release()
+
+    @property
+    def records(self):
+        return self._final_records if self._closed else tuple(self._records[i] for i in sorted(self._records))
+
+    def _close_idle_generator(self):
+        if self._closed:
+            return
+        self.prepared.request_cancel()
+        self._executor.shutdown(wait=True, cancel_futures=True)
+        while not self._queue.empty():
+            self._queue.get_nowait()
+        self.prepared._finish_records(dict(self._records))
+        self.prepared._refresh_report()
+        self._final_records = self.prepared.records
+        self._closed = True
+        self.prepared._gate.release()
+        if self._owns_prepared:
+            self.prepared.close()
 
 
 def memo_tensors(*values):

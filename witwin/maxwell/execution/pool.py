@@ -19,7 +19,7 @@ class BatchMemoryPool:
     The process default allocator and unrelated user tensors are untouched.
     """
 
-    def __init__(self, device, limit_bytes, reserve_bytes):
+    def __init__(self, device, limit_bytes, reserve_bytes, *, account=None):
         if torch.cuda.memory.get_allocator_backend() != "native":
             raise NotImplementedError("Batch hard budgets require the native PyTorch caching allocator.")
         from ..fdtd.cuda.backend import get_compiled_extension
@@ -35,10 +35,14 @@ class BatchMemoryPool:
         self.native.mw_batch_budget_bytes.restype = ctypes.c_size_t
         self.native.mw_batch_budget_close.argtypes = [ctypes.c_uint64]
         self.native.mw_batch_budget_close.restype = None
-        self.owner = self.native.mw_batch_budget_create(self.limit_bytes, int(reserve_bytes), self.device.index)
+        self._account = account
+        self.owner = (account.owner if account is not None else
+                      self.native.mw_batch_budget_create(self.limit_bytes, int(reserve_bytes), self.device.index))
         self._allocator = torch.cuda.memory.CUDAPluggableAllocator(library_path, "mw_batch_malloc", "mw_batch_free")
-        self.pool = torch.cuda.MemPool(self._allocator.allocator())
-        self._finalizer = weakref.finalize(self, self.native.mw_batch_budget_close, self.owner)
+        with torch.cuda.device(self.device):
+            self.pool = torch.cuda.MemPool(self._allocator.allocator())
+        if account is None:
+            self._finalizer = weakref.finalize(self, self.native.mw_batch_budget_close, self.owner)
 
     @contextlib.contextmanager
     def activate(self):

@@ -13,6 +13,20 @@ _suspend_depth = 0
 _participants = {}
 
 
+@contextlib.contextmanager
+def coordinated_cuda_work():
+    """Serialize framework host submission epochs while GPUs execute asynchronously."""
+    owner = threading.get_ident()
+    with _suspend_lock:
+        _participants[owner] = _participants.get(owner, 0) + 1
+        try:
+            yield
+        finally:
+            _participants[owner] -= 1
+            if not _participants[owner]:
+                del _participants[owner]
+
+
 def capture_participant(function):
     """Register framework GPU activity before another thread can start capture."""
     @functools.wraps(function)

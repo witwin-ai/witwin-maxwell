@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
@@ -721,6 +722,37 @@ def _clone_component_map(components: dict[str, torch.Tensor]) -> dict[str, torch
     return {axis: tensor.clone() for axis, tensor in components.items()}
 
 
+def _place_scene_value(value, device, memo):
+    """Move nested declarative tensors without mutating the source scene."""
+    if id(value) in memo:
+        return memo[id(value)]
+    if isinstance(value, torch.Tensor):
+        moved = value.to(device=device)
+        memo[id(value)] = moved
+        return moved
+    if isinstance(value, list):
+        moved = []
+        memo[id(value)] = moved
+        moved.extend(_place_scene_value(v, device, memo) for v in value)
+        return moved
+    if isinstance(value, tuple):
+        moved = tuple(_place_scene_value(v, device, memo) for v in value)
+        memo[id(value)] = moved
+        return moved
+    if isinstance(value, dict):
+        moved = {}
+        memo[id(value)] = moved
+        moved.update((k, _place_scene_value(v, device, memo)) for k, v in value.items())
+        return moved
+    if type(value).__module__.startswith("witwin.") and hasattr(value, "__dict__") and not isinstance(value, type):
+        moved = copy.copy(value)
+        memo[id(value)] = moved
+        for name, child in vars(value).items():
+            object.__setattr__(moved, name, _place_scene_value(child, device, memo))
+        return moved
+    return value
+
+
 def _resolve_scene_device(device) -> str:
     requested = "cuda" if device is None else device
     resolved = torch.device(requested)
@@ -1162,6 +1194,9 @@ class Scene:
             "symmetry": self.symmetry,
         }
         params.update(overrides)
+        destination = _resolve_scene_device(params["device"])
+        if destination != self.device:
+            params = _place_scene_value(params, destination, {})
         return Scene(**params)
 
     def resolved_sources(self):
