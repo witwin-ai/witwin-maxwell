@@ -562,7 +562,8 @@ class PreparedBatch:
                             outputs = self._solve_cohort()
                     except Exception as exc:
                         if (isinstance(exc, torch.cuda.OutOfMemoryError)
-                                and self.batch.execution.batch_size == "auto" and self.capacity > 1):
+                                and (self.batch.execution.batch_size == "auto" or getattr(self.batch, "_auto_capacity", False))
+                                and self.capacity > 1):
                             self._reduce_capacity()
                             continue
                         failure = exc
@@ -811,6 +812,7 @@ class ParallelPreparedBatch(PreparedBatch):
             "batch_sizes": [c.capacity for c in self._children if c.device == device],
             "memory": account.stats()} for device, account in self._accounts.items()]
         report["workers"] = [child.report.to_dict() for child in self._children]
+        report.update(getattr(self, "_tuning_report", {}))
         self.report = BatchPlanReport.from_dict(report)
 
     @capture_participant
@@ -963,7 +965,9 @@ class ParallelBatchResultIterator(BatchResultIterator):
                                     outputs = done.value
                                     break
                     except Exception as exc:
-                        if isinstance(exc, torch.cuda.OutOfMemoryError) and child.batch.execution.batch_size == "auto" and child.capacity > 1:
+                        if (isinstance(exc, torch.cuda.OutOfMemoryError)
+                                and (child.batch.execution.batch_size == "auto" or getattr(child.batch, "_auto_capacity", False))
+                                and child.capacity > 1):
                             with self._phase(child):
                                 if lifecycle is not None:
                                     lifecycle.close()

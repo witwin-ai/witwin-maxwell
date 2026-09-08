@@ -220,3 +220,7 @@ python -m benchmark batch --profile local_spectrum --concurrency 10 \
 
 实际硬件映射与 toolkit 环境变量见
 [实施证据](fdtd-batch-implementation-progress.md)。未请求修改其它设备或系统配置。
+
+## R7：完整前向吞吐调优
+
+已实现 `tune=True` 的 B/Q/K 有限候选实测，隔离预热一次、计时三次，选择时考虑显存和测量波动。真实双 GPU 调优/容量/调度组合 25 passed；公共 API/调优组合 48 passed。测量包含全部前向与输出导出、训练模式的 tape 创建，排除 backward 和用户保留全部结果。它提供当前运行环境下的候选证据，不承诺消除其他进程造成的噪声；物理 GPU 0 仍有其他工作，本轮未据此验收双卡 1.7 倍吞吐门槛。

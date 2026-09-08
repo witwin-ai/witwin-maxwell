@@ -200,15 +200,6 @@ def test_plan_never_prepares_or_queries_gpu_and_does_not_infer_full_field_dft(mo
     assert report.devices[0]["estimated_peak_bytes"] is None
 
 
-@pytest.mark.parametrize("policy,match", [
-    ({"tune": True}, "autotuning"),
-])
-def test_pending_execution_policies_fail_before_gpu_allocation(policy, match):
-    batch = mw.Simulation.batch([simulation()], execution=execution(**policy))
-    with pytest.raises(NotImplementedError, match=match):
-        batch.prepare()
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 def test_trainable_batch_forward_is_not_silently_detached():
     sim = simulation()

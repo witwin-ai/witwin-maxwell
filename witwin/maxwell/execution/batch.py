@@ -314,6 +314,9 @@ class BatchSimulation:
     def prepare(self):
         from .batch_runtime import PreparedBatch
         self.plan()
+        if self.execution.tune:
+            from .tuning import prepare_tuned_batch
+            return prepare_tuned_batch(self)
         return PreparedBatch(self)
 
     def run(self):
