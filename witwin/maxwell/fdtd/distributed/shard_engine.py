@@ -241,6 +241,7 @@ class ShardEngine:
                 cpml_config=cpml_config,
             )
             local_solver.dt = dt
+            local_solver._requested_dt = dt
             local_solver.init_field()
             if local_solver.nonlinear_enabled:
                 raise ValueError(

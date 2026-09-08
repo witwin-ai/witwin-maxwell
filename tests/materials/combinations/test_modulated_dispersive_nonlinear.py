@@ -181,12 +181,12 @@ def _slab_scene(*, material, amplitude=80.0, time_steps):
     return scene
 
 
-def _run(material, *, amplitude=80.0, time_steps):
+def _run(material, *, amplitude=80.0, time_steps, dt=None):
     scene = _slab_scene(material=material, amplitude=amplitude, time_steps=time_steps)
     result = mw.Simulation.fdtd(
         scene,
         frequencies=[_CARRIER],
-        run_time=mw.TimeConfig(time_steps=time_steps),
+        run_time=mw.TimeConfig(time_steps=time_steps, dt=dt),
         full_field_dft=False,
     ).run()
     trace = _to_numpy(result.monitor("probe")["field"]).astype(np.float64)
@@ -232,9 +232,10 @@ def test_modulated_dispersive_reduces_to_pure_dispersive_at_zero_depth():
     reference, dt_r = _run(
         mw.Material(eps_r=_EPS_INF, lorentz_poles=_lorentz_poles()),
         time_steps=time_steps,
+        dt=dt_m,
     )
-    # Same material apart from the modulation -> identical Courant dt, so a direct
-    # time-trace comparison is well posed.
+    # Pin the reference to the modulated run's safe step so the trace samples
+    # coincide even when modulation tightens the material stability bound.
     assert dt_m == dt_r
     denom = float(np.max(np.abs(reference)))
     assert denom > 0.0
@@ -260,6 +261,7 @@ def test_modulated_dispersive_slab_generates_sidebands():
     reference, dt_ref = _run(
         mw.Material(eps_r=_EPS_INF, lorentz_poles=_lorentz_poles()),
         time_steps=time_steps,
+        dt=dt,
     )
     assert dt == dt_ref
 

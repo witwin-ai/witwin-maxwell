@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterable
@@ -123,6 +124,14 @@ class TimeConfig:
     time_steps: int | None = None
     steady_cycles: int = 20
     transient_cycles: int = 15
+    dt: float | None = None
+    max_electric_field: float | None = None
+
+    def __post_init__(self):
+        if self.dt is not None and (not math.isfinite(float(self.dt)) or float(self.dt) <= 0):
+            raise ValueError("TimeConfig.dt must be positive and finite.")
+        if self.max_electric_field is not None and (not math.isfinite(float(self.max_electric_field)) or float(self.max_electric_field) <= 0):
+            raise ValueError("TimeConfig.max_electric_field must be positive and finite.")
 
     @classmethod
     def auto(cls, steady_cycles: int = 20, transient_cycles: int = 15) -> "TimeConfig":
@@ -1453,8 +1462,12 @@ class Simulation:
             # embedded-network fitted-band 'reject' contract on the full set of
             # requested output frequencies, not just the time-stepping frequency.
             solver._requested_port_frequencies = self.frequencies
+            solver._requested_dt = self.config.run_time.dt or getattr(self, "_fdtd_optimization_dt", None)
+            solver._max_electric_field = self.config.run_time.max_electric_field
             if initialize:
                 solver.init_field()
+                if self.has_trainable_parameters and self.config.run_time.dt is None:
+                    self._fdtd_optimization_dt = float(solver.dt)
             return solver
 
         prepared_scene = prepare_scene(scene)
@@ -1478,10 +1491,14 @@ class Simulation:
             cpml_config=self.config.cpml_config,
         )
         solver._requested_port_frequencies = self.frequencies
+        solver._requested_dt = self.config.run_time.dt or getattr(self, "_fdtd_optimization_dt", None)
+        solver._max_electric_field = self.config.run_time.max_electric_field
         solver._port_excitations = resolved_excitations
         solver._port_termination_overrides = dict(termination_overrides or {})
         if initialize:
             solver.init_field()
+            if self.has_trainable_parameters and self.config.run_time.dt is None:
+                self._fdtd_optimization_dt = float(solver.dt)
             self._apply_initial_condition(solver)
         if getattr(self, "_fixed_waveport_mode_sources", False):
             compiled_sources = tuple(getattr(solver, "_compiled_sources", ()) or ())
@@ -1710,6 +1727,7 @@ class Simulation:
             "shutoff_step": shutoff_step,
             "steps_run": (shutoff_step + 1) if shutoff_triggered else time_steps,
             "dt": solver.dt,
+            "time_step": dict(getattr(solver, "_time_step_metadata", {})),
             "cuda_graph_active": bool(getattr(solver, "_cuda_graph_active", False)),
             "circuit_cuda_graph_active": bool(
                 getattr(solver, "_circuit_graph_active", False)

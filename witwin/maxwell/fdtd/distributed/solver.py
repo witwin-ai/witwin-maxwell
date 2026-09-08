@@ -698,6 +698,8 @@ class DistributedFDTD:
             absorber_type=self.absorber_type,
             cpml_config=self.cpml_config,
         )
+        reference_solver._requested_dt = getattr(self, "_requested_dt", None)
+        reference_solver._max_electric_field = getattr(self, "_max_electric_field", None)
         if getattr(self.logical_scene, "thin_wires", ()):
             # Build the full-domain single-GPU wire runtime once so the shared dt is
             # the exact joint Maxwell+wire CFL step used by the single-GPU solver;
@@ -719,7 +721,11 @@ class DistributedFDTD:
                 "maxwell_cfl_limit": reference_runtime.maxwell_cfl_limit,
                 "dt_adjusted": reference_runtime.dt_adjusted,
             }
+        else:
+            # Resolve global material bounds without allocating global E/H or CPML.
+            reference_solver.build_materials(timing_scene)
         self.dt = float(reference_solver.dt)
+        self._time_step_metadata = dict(reference_solver._time_step_metadata)
         del reference_solver
         low_pml = int(self.scene.pml_thickness_for_face("x", "low"))
         high_pml = int(self.scene.pml_thickness_for_face("x", "high"))

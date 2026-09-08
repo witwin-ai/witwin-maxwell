@@ -425,10 +425,8 @@ class TwoPhotonAbsorption:
 
 _NONLINEAR_SPEC_TYPES = (NonlinearSusceptibility, TwoPhotonAbsorption)
 
-# Harmonic modulation depth cap. The FDTD time step is sized against the static
-# permittivity, and a modulated cell momentarily speeds the wave up by
-# 1/sqrt(1 - amplitude); capping the amplitude at 0.5 keeps that inflation below
-# sqrt(2), well inside the 2x headroom of the default Courant factor.
+# Harmonic modulation depth cap. FDTD time-step preparation includes the lowest
+# instantaneous permittivity; the depth cap alone is not a Courant guarantee.
 _MODULATION_AMPLITUDE_LIMIT = 0.5
 
 

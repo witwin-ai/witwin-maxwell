@@ -803,6 +803,8 @@ def _reject_unsupported_composition(solver) -> None:
 
 
 def _maxwell_cfl_limit(solver) -> float:
+    if hasattr(solver, "_maxwell_cfl_limit"):
+        return float(solver._maxwell_cfl_limit)
     return 1.0 / (
         float(solver.c)
         * math.sqrt(
@@ -875,12 +877,16 @@ def initialize_wire_runtime(solver) -> WireRuntime | None:
     )
     dt_adjusted = float(solver.dt) >= cfl_limit
     if dt_adjusted:
+        if getattr(solver, "_requested_dt", None) is not None:
+            raise ValueError(f"TimeConfig.dt exceeds the joint Maxwell/wire CFL limit {cfl_limit:.12g} s.")
         # The Maxwell curl and reciprocal wire coupling act in the same
         # leapfrog step. Adding their positive-semidefinite spectral bounds is
         # conservative and avoids treating two individually stable limits as
         # a stable composition. The remaining one-percent margin also keeps
         # float32 coefficient rounding away from the equality boundary.
         solver.dt = 0.99 * cfl_limit
+        if hasattr(solver, "_time_step_metadata"):
+            solver._time_step_metadata["limiting_factor"] = "joint_wire_cfl"
 
     edge_groups = _group_indices(coefficients["edge_group_offsets"])
     coefficients["contribution_scales"] = (

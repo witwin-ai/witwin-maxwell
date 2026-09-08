@@ -827,6 +827,9 @@ class _FDTDGradientBridge:
 
         solver._synchronize_device()
         solver.last_solve_elapsed_s = time.perf_counter() - solve_start
+        from ..runtime.timestep import validate_nonlinear_field_envelope
+
+        validate_nonlinear_field_envelope(solver)
 
         if solver.dft_enabled:
             solver._sync_dft_legacy_state()

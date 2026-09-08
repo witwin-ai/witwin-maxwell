@@ -1634,6 +1634,10 @@ def init_field(solver):
     # Maxwell-plus-wire spectral bound. All dt-dependent boundary and field
     # coefficients must therefore be built after it.
     initialize_wire_runtime(solver)
+    from .materials import build_material_update_coefficients
+
+    build_material_update_coefficients(solver)
+    solver._time_step_metadata["dt"] = float(solver.dt)
     initialize_boundary_state(solver)
     solver._build_update_coefficients()
     # Compile the deterministic breakdown state machine after the base update
@@ -2372,6 +2376,9 @@ def solve(
     # including an early shutoff break.
     complete_port_observer_graph(solver, steps_run)
     solver._synchronize_device()
+    from .timestep import validate_nonlinear_field_envelope
+
+    validate_nonlinear_field_envelope(solver)
     solver.last_solve_elapsed_s = time.perf_counter() - solve_start
     if end_step < time_steps:
         return None

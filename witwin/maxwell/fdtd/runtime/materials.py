@@ -124,6 +124,20 @@ def build_materials(solver, scene):
 
     build_nonlinear_channels(solver, material_model)
 
+    solver.full_aniso_enabled = bool(material_model_has_full_anisotropy(material_model))
+    solver.modulation_enabled = bool(material_model_has_modulation(material_model))
+    solver.dispersive_enabled = any(material_model.get(prefix + kind + "_poles")
+        for prefix in ("", "mu_") for kind in ("debye", "drude", "lorentz"))
+
+    from .timestep import compile_fdtd_time_step
+
+    compile_fdtd_time_step(solver, material_model)
+
+
+def build_material_update_coefficients(solver):
+    """Bind every material recurrence only after the joint step is final."""
+    material_model = solver._compiled_material_model
+
     build_full_anisotropy(solver, material_model)
 
     build_modulation(solver, material_model)
@@ -135,7 +149,7 @@ def build_materials(solver, scene):
     # magnetization-ADE state that produces the non-reciprocal off-diagonal mu.
     from .gyromagnetic import build_gyromagnetic
 
-    build_gyromagnetic(solver, scene)
+    build_gyromagnetic(solver, solver.scene)
     solver.dispersive_enabled = solver.electric_dispersive_enabled or solver.magnetic_dispersive_enabled
     # Full (off-diagonal) anisotropic permittivity now composes with dispersion:
     # electric poles enter isotropically and the ADE polarization current is folded
@@ -1668,6 +1682,9 @@ def update_nonlinear_electric_coefficients(solver):
     chi2 channel or field-dependent conductivity use the general nonlinear
     kernel that rewrites both the decay and curl coefficients.
     """
+    from .timestep import record_nonlinear_field_envelope
+
+    record_nonlinear_field_envelope(solver)
     if not getattr(solver, "nonlinear_enabled", False):
         return
     if getattr(solver, "nonlinear_general_enabled", False):
