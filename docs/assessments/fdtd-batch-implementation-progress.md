@@ -91,6 +91,15 @@ python -m benchmark batch --compare launch --device cuda:1 --variants 10 --updat
 
 ## Remaining execution work
 
+The P2.1 material-sampling foundation extends the existing edge compiler with
+contiguous component selections and a radius-one differentiation halo. It uses
+the same numerical formulas as full-component compilation. Six Yee components,
+uniform and graded grids, arithmetic/polarized subpixel sampling, filtered and
+projected density gradients, corner crops and invalid selections were verified:
+43 new GPU checks plus 42 existing compiler checks, **85 passed**. Partial
+periodic-axis selection fails explicitly pending opposite-face routing. This
+does not establish compact influence support or a shared-background cache.
+
 Compiled sharing proofs, reusable execution slots, regional coefficient updates,
 native batched sources/CPML/observers, coordinated graph execution, byte-level
 admission, multi-GPU scheduling, result/tape lifetimes and adjoints are not

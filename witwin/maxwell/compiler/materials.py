@@ -1043,6 +1043,7 @@ def _compile_edge_component(
     samples,
     region_densities,
     geometry_periodic_shifts,
+    selection=None,
 ):
     """Edge-native diagonal permittivity/permeability and conductivity for one component.
 
@@ -1050,6 +1051,11 @@ def _compile_edge_component(
     relative eps (electric components) or mu (magnetic components) sampled at the
     component's Yee location and ``sigma`` is the matching static electric /
     magnetic conductivity there. Differentiable in geometry / density parameters.
+
+    ``selection`` samples a component-index patch through the same formulas,
+    retaining a one-cell differentiation halo. It does not prove that changing
+    a geometry or density has compact support outside that patch. Partial
+    periodic-axis selections require a separate opposite-face halo plan.
     """
     axis = _EDGE_POLARIZATION_AXIS[component]
     stagger = _EDGE_STAGGER_AXES[component]
@@ -1064,6 +1070,34 @@ def _compile_edge_component(
         axis_offsets[grid_axis] = _edge_axis_offsets(
             scene, grid_axis, int(samples[axis_index]), staggered
         )
+    crop = None
+    if selection is not None:
+        if len(selection) != 3:
+            raise ValueError("An edge material selection must contain three slices.")
+        crop = []
+        for grid_axis, selected in zip(_AXES, selection):
+            size = len(bases[grid_axis])
+            if not isinstance(selected, slice) or selected.step not in (None, 1):
+                raise ValueError("Edge material selections require contiguous slices.")
+            start = 0 if selected.start is None else selected.start
+            stop = size if selected.stop is None else selected.stop
+            if (isinstance(start, bool) or isinstance(stop, bool)
+                    or not isinstance(start, int) or not isinstance(stop, int)
+                    or not 0 <= start < stop <= size):
+                raise ValueError(f"Invalid edge material selection on {grid_axis}: {selected} for size {size}.")
+            if scene.boundary.axis_kind(grid_axis) in ("periodic", "bloch") and (start != 0 or stop != size):
+                raise NotImplementedError(
+                    "Partial sampling along periodic axes requires opposite-face halo routing."
+                )
+            # Both signed-distance normals and subpixel normal reconstruction
+            # use a radius-one finite difference. Retain global-edge one-sided
+            # differences, and discard the artificial local boundary after sampling.
+            lower, upper = max(0, start - 1), min(size, stop + 1)
+            bases[grid_axis] = bases[grid_axis][lower:upper]
+            axis_offsets[grid_axis] = [offset[lower:upper] if torch.is_tensor(offset) and offset.ndim else offset
+                                       for offset in axis_offsets[grid_axis]]
+            crop.append(slice(start - lower, stop - lower))
+        crop = tuple(crop)
     offset_combos = list(product(axis_offsets["x"], axis_offsets["y"], axis_offsets["z"]))
     half_weight_boundary = len(offset_combos) > 1
     polarized = averaging == "polarized"
@@ -1160,6 +1194,9 @@ def _compile_edge_component(
         material_mean = _reconstruct_edge_polarized(
             scene, base_coords, material_mean, inverse_sum * scale, axis
         )
+    if crop is not None:
+        material_mean = material_mean[crop]
+        sigma_mean = sigma_mean[crop]
     return material_mean.contiguous(), sigma_mean.contiguous()
 
 
