@@ -4,13 +4,30 @@ from dataclasses import replace
 import pytest
 import torch
 import witwin.maxwell as mw
-from witwin.maxwell.execution.tuning import _select_candidate
+from witwin.maxwell.execution.tuning import _select_candidate, isolate_scene_module
 from tests.fdtd.cuda.test_batch_runtime import simulation
 
 
 def measurement(q, samples, memory):
     return dict(policy=dict(slots_per_device=q), samples_s=samples,
                 median_s=sorted(samples)[1], peak_bytes={"cuda:0": memory})
+
+
+def test_trial_module_copy_preserves_storage_aliases_and_nonleaf_values():
+    module = torch.nn.Module()
+    module.weight = torch.nn.Parameter(torch.arange(8.))
+    module.alias = module.weight
+    module.register_buffer("tail", module.weight.detach()[2::2])
+    module.derived = module.weight.square()
+    private = isolate_scene_module(module, {}, {})
+    assert private.weight is private.alias
+    assert private.tail.untyped_storage().data_ptr() == private.weight.untyped_storage().data_ptr()
+    assert private.weight.data_ptr() != module.weight.data_ptr()
+    assert private.derived.is_leaf and private.derived.requires_grad
+    with torch.no_grad():
+        private.tail.add_(10)
+    torch.testing.assert_close(private.weight[2::2], module.weight[2::2] + 10)
+    torch.testing.assert_close(private.derived, module.derived)
 
 
 def test_auto_slots_require_repeatable_gain_and_near_ties_prefer_less_memory():
@@ -133,3 +150,51 @@ def test_tuning_rejects_capacity_and_propagates_physics_errors():
     batch.outputs = mw.BatchOutput(materials=True)
     with pytest.raises(NotImplementedError, match="material export"):
         batch.prepare()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.parametrize("devices", [("cuda:0",), ("cuda:0", "cuda:1")])
+def test_tuning_does_not_publish_scene_module_buffer_or_python_state_updates(devices):
+    if torch.cuda.device_count() < len(devices):
+        pytest.skip("Requires two CUDA devices")
+    class Module(mw.SceneModule):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("calls", torch.zeros((), device="cuda:0"))
+            self.python_calls = 0
+        def to_scene(self):
+            self.calls.add_(1)
+            self.python_calls += 1
+            scene = simulation(steps=8).scene
+            scene.metadata["calls"] = self.python_calls
+            return scene
+    module = Module()
+    sim = mw.Simulation.fdtd(module, frequencies=(1e9,),
+        run_time=mw.TimeConfig(time_steps=8, dt=2e-11),
+        spectral_sampler=mw.SpectralSampler(window="none"), cuda_graph=False)
+    batch = mw.Simulation.batch([sim], execution=mw.BatchExecution(
+        devices=devices, batch_size=1, graph="required", tune=True))
+    calls = module.python_calls
+    with batch.prepare() as prepared:
+        # Only the final ordinary prepare is observable; all three K trials
+        # and their repeated forwards operated on private module copies.
+        assert module.python_calls == calls + len(devices)
+        assert float(module.calls) == calls + len(devices)
+        for child in getattr(prepared, "_children", (prepared,)):
+            assert child.batch.simulations[0].scene_module is module
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires two CUDA devices")
+def test_trial_module_tensor_copies_use_their_source_device_budget():
+    from witwin.maxwell.execution.pool import BatchMemoryPool
+    module = torch.nn.Module()
+    for i in range(2):
+        module.register_buffer(f"state_{i}", torch.ones(2 * 1024**2, device=f"cuda:{i}"))
+    pools = {f"cuda:{i}": BatchMemoryPool(f"cuda:{i}", 32 * 1024**2, 0) for i in range(2)}
+    with torch.cuda.device(1), pools["cuda:1"].activate():
+        private = isolate_scene_module(module, pools, {})
+    for i in range(2):
+        original, copied = getattr(module, f"state_{i}"), getattr(private, f"state_{i}")
+        assert copied.device == original.device and copied.data_ptr() != original.data_ptr()
+        torch.testing.assert_close(copied, original)
+        assert 8 * 1024**2 <= pools[f"cuda:{i}"].stats()["peak_charged_bytes"] <= 32 * 1024**2

@@ -2,14 +2,47 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import gc
 import statistics
 import time
+from collections.abc import Mapping
 from dataclasses import replace
+from itertools import chain
 
 import torch
 
 from .plan import BatchPlanReport
+
+
+def isolate_scene_module(module, pools, memo):
+    """Deep-copy trial state, charging CUDA tensors to their device accounts."""
+    visited = set()
+    def seed(value):
+        if id(value) in memo or id(value) in visited:
+            return
+        visited.add(id(value))
+        if isinstance(value, torch.Tensor):
+            pool = pools.get(str(value.device))
+            with (torch.cuda.device(value.device) if value.is_cuda else contextlib.nullcontext()), (
+                    pool.activate() if pool is not None else contextlib.nullcontext()):
+                # Tensor deepcopy preserves storage aliases and strided views;
+                # detaching also supports derived non-leaf module attributes.
+                copied = copy.deepcopy(value.detach(), memo).requires_grad_(value.requires_grad)
+                if isinstance(value, torch.nn.Parameter):
+                    copied = torch.nn.Parameter(copied, requires_grad=value.requires_grad)
+            memo[id(value)] = copied
+        elif isinstance(value, Mapping):
+            for child in value.values():
+                seed(child)
+        elif isinstance(value, (tuple, list)):
+            for child in value:
+                seed(child)
+        elif (isinstance(value, torch.nn.Module) or type(value).__module__.startswith("witwin.")) and hasattr(value, "__dict__"):
+            for child in vars(value).values():
+                seed(child)
+    seed(module)
+    return copy.deepcopy(module, memo)
 
 
 def _candidate_policies(batch):
@@ -103,12 +136,15 @@ def prepare_tuned_batch(batch):
         if device.type == "cuda":
             rng_devices.add(device.index if device.index is not None else torch.cuda.current_device())
         if model.scene_module is not None:
-            rng_devices.update(value.device.index for value in model.scene_module.parameters() if value.is_cuda)
-    # Preserve caller randomness even if a SceneModule draws during materialization.
-    with torch.random.fork_rng(devices=sorted(rng_devices)):
-        for candidate in _candidate_policies(batch):
+            rng_devices.update(value.device.index for value in chain(
+                model.scene_module.parameters(), model.scene_module.buffers()) if value.is_cuda)
+    # Each policy starts from the same random state, and unpublished trial
+    # materializations must not update the caller's module buffers or counters.
+    for candidate in _candidate_policies(batch):
+        with torch.random.fork_rng(devices=sorted(rng_devices)):
             trial = copy.copy(batch)
             trial.execution = replace(batch.execution, **candidate, tune=False, memory_limit_bytes=limits)
+            trial._isolate_scene_modules = True
             prepared = None
             try:
                 began = time.perf_counter()

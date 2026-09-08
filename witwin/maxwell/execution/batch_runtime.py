@@ -123,6 +123,21 @@ class PreparedBatch:
         self._enter_stream()
         try:
             with torch.cuda.device(self.device), torch.cuda.stream(self._stream), self._allocation_scope(), torch.no_grad():
+                if getattr(batch, "_isolate_scene_modules", False):
+                    from .tuning import isolate_scene_module
+                    # Trial module state belongs to this slot and its allocator.
+                    # Preserve sharing when multiple Simulations name one module.
+                    isolated = copy.copy(batch)
+                    memo = {}
+                    pools = dict(getattr(batch, "_device_accounts", {}))
+                    pools[self.device] = self._budget
+                    isolated.simulations = tuple(copy.copy(model) for model in batch.simulations)
+                    for model in isolated.simulations:
+                        if model.scene_module is not None:
+                            model.scene_module = isolate_scene_module(model.scene_module, pools, memo)
+                    if batch.template is not None:
+                        isolated.template = isolated.simulations[0]
+                    self.batch = isolated
                 first = self._groups[0]["variant_indices"][:self.capacity]
                 self._load(first, batch.parameters, self._groups[0]["group_id"])
                 if policy.batch_size == "auto":
@@ -264,7 +279,14 @@ class PreparedBatch:
             model = copy.copy(self.batch.template or self.batch.simulations[index])
             model.config = copy.deepcopy(model.config)
             with torch.enable_grad():
-                scene = materializer.scene(index).clone(device=self.device)
+                source_device = str(torch.device(model.scene.device))
+                account = getattr(self.batch, "_device_accounts", {}).get(source_device)
+                if model.scene_module is not None and source_device != self.device and account is not None:
+                    with torch.cuda.device(source_device), account.activate():
+                        scene = materializer.scene(index)
+                else:
+                    scene = materializer.scene(index)
+                scene = scene.clone(device=self.device)
             if self.batch.outputs.monitors != "all":
                 selected = set(self.batch.outputs.monitors)
                 scene.monitors = [m for m in scene.monitors if m.name in selected]
@@ -803,6 +825,7 @@ class ParallelPreparedBatch(PreparedBatch):
                     child_batch.execution = replace(batch.execution, devices=(device,), slots_per_device=1,
                         memory_limit_bytes=self._accounts[device].limit_bytes)
                     child_batch._memory_account = self._accounts[device]
+                    child_batch._device_accounts = self._accounts
                     child_batch._budget_slots = slots
                     workers = len(batch.execution.devices) * slots
                     largest_group = max(len(group["variant_indices"]) for group in self._groups)
