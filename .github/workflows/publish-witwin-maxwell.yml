@@ -233,8 +233,7 @@ jobs:
           WITWIN_MAXWELL_FDTD_CUDA_BUILD_DIR: ${{ runner.temp }}/missing_prebuilt_build_dir
         run: |
           python -m pip uninstall -y witwin-maxwell || true
-          python -m pip install --no-deps "$PACKAGE_DIR"/dist/*.whl
-          python -m pip install "witwin>=0.4,<0.5" scipy matplotlib tqdm
+          python -m pip install "$PACKAGE_DIR"/dist/*.whl
           python - <<'PY'
           import importlib.util
           import os

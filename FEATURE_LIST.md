@@ -2,10 +2,10 @@
 
 This document tracks the current user-visible capabilities of the `maxwell` package.
 
-Release 0.5.0 introduces the experimental Batch execution tier and FDTD correctness repairs described in [the release notes](docs/reference/release-notes-0.5.0.md). Existing ordinary-simulation capabilities retain their documented scope; Batch support is specified separately below.
+Release 0.5.1 introduces the experimental Batch execution tier and FDTD correctness repairs described in [the release notes](docs/reference/release-notes-0.5.1.md). Existing ordinary-simulation capabilities retain their documented scope; Batch support is specified separately below.
 
 - Package installation requires `witwin>=0.4,<0.5` and uses its public `PhysicalMaterial` contract; the dependency range resolves against published base-package versions.
-- Release wheels declare their plotting/progress import dependencies. Publishing validates package imports outside the checkout and the native Batch allocator symbols across the platform/ABI matrix.
+- Release wheels declare their plotting/progress/notebook display import dependencies. Publishing validates package imports outside the checkout and the native Batch allocator symbols across the platform/ABI matrix.
 
 - Batch tuning isolates copyable `SceneModule` parameters, buffers and Python attributes per trial, preserves shared tensor storage, and starts each candidate from the same CPU/CUDA RNG state. Only the final ordinary preparation updates the caller's module state. Trial copies and scene materialization on another execution device use that device's private memory account. Arbitrary external side effects and allocations on producer devices outside the execution policy are outside this isolation/accounting contract.
 

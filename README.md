@@ -140,7 +140,7 @@ python -m benchmark planewave_vacuum
 
 Benchmark assets live under `benchmark/scenes/`, `benchmark/cache/`, `benchmark/plots/`, and `benchmark/RESULTS.md`.
 
-The release validation suite combines unit/API tests, native CUDA parity and adjoint tests, and numerical comparisons against an external reference solver. Cross-solver comparisons use common physical-domain coordinates, external PML on both sides, coordinate-aligned complex field slices, and solver-independent scalar observables. See [`benchmark/RESULTS.md`](benchmark/RESULTS.md) for the generated comparison table and the validation-status section of the [0.5.0 release notes](docs/reference/release-notes-0.5.0.md) for what the evidence does and does not cover.
+The release validation suite combines unit/API tests, native CUDA parity and adjoint tests, and numerical comparisons against an external reference solver. Cross-solver comparisons use common physical-domain coordinates, external PML on both sides, coordinate-aligned complex field slices, and solver-independent scalar observables. See [`benchmark/RESULTS.md`](benchmark/RESULTS.md) for the generated comparison table and the validation-status section of the [0.5.1 release notes](docs/reference/release-notes-0.5.1.md) for what the evidence does and does not cover.
 
 ## Current Notes
 

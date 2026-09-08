@@ -4,7 +4,7 @@ All notable user-visible changes to WiTwin Maxwell are documented here. The proj
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-09-08
+## [0.5.1] - 2026-09-08
 
 ### Added
 
@@ -20,12 +20,16 @@ All notable user-visible changes to WiTwin Maxwell are documented here. The proj
 - Automatic worker capacity distribution and isolation of tuning RNG, module state, and cross-device tensor copies.
 - Corrected the base dependency range to `witwin>=0.4,<0.5`, matching the published `PhysicalMaterial` contract instead of an unavailable version range.
 - Preserved local compilation reuse when declared design replacements acquire new base-package structure/material identity tokens.
-- Declared plotting/progress import dependencies and extended release checks to installed-package imports and native Batch allocator exports.
+- Declared plotting/progress/notebook display import dependencies and extended release checks to installed-package imports and native Batch allocator exports.
 
 ### Limitations
 
 - Batch remains experimental with a narrower capability set than ordinary FDTD. Fused batch reverse kernels, exact preplanning of all retained outputs, and exclusive multi-GPU throughput acceptance remain pending.
-- See [0.5.0 release notes](docs/reference/release-notes-0.5.0.md) for validation evidence and the supported execution contract.
+- See [0.5.1 release notes](docs/reference/release-notes-0.5.1.md) for validation evidence and the supported execution contract.
+
+## [0.5.0] - Unpublished
+
+- The version tag built CUDA wheels but failed the installed-package import gate because `IPython` was undeclared. No distributions were uploaded to PyPI.
 
 ## [0.4.0] - 2026-07-23
 
@@ -89,8 +93,8 @@ Detailed numerical conventions, pitfalls, final comparison values, and intention
 
 - Previous public release.
 
-[Unreleased]: https://github.com/witwin-ai/witwin-maxwell/compare/witwin-maxwell-v0.5.0...HEAD
-[0.5.0]: https://github.com/witwin-ai/witwin-maxwell/compare/witwin-maxwell-v0.4.0...witwin-maxwell-v0.5.0
+[Unreleased]: https://github.com/witwin-ai/witwin-maxwell/compare/witwin-maxwell-v0.5.1...HEAD
+[0.5.1]: https://github.com/witwin-ai/witwin-maxwell/compare/witwin-maxwell-v0.4.0...witwin-maxwell-v0.5.1
 [0.4.0]: https://github.com/witwin-ai/witwin-maxwell/compare/witwin-maxwell-v0.3.0...witwin-maxwell-v0.4.0
 [0.3.0]: https://github.com/witwin-ai/witwin-maxwell/compare/witwin-maxwell-v0.2.0...witwin-maxwell-v0.3.0
 [0.2.0]: https://github.com/witwin-ai/witwin-maxwell/releases/tag/witwin-maxwell-v0.2.0

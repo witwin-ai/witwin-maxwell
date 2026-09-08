@@ -1,6 +1,8 @@
-# WiTwin Maxwell 0.5.0
+# WiTwin Maxwell 0.5.1
 
-Previous release: 0.4.0. Release date: 2026-09-08.
+Previous published release: 0.4.0. Release date: 2026-09-08.
+
+The 0.5.0 tag failed the newly added installed-package import check because the notebook display dependency was undeclared; it was not published to PyPI. Version 0.5.1 includes that dependency and preserves the failed tag history. The following feature changes are relative to the previous published version, 0.4.0.
 
 This release requires `witwin>=0.4,<0.5`, whose `PhysicalMaterial` export is used by the material model. The previous dependency range referenced unpublished versions and could prevent clean installation. Older editable base-package checkouts must be updated to the published 0.4 contract.
 
