@@ -28,4 +28,8 @@ def require_cuda_scene(scene):
     if device.type != "cuda":
         raise ValueError(f"FDTD requires scene.device to be CUDA, got {device}.")
     if not torch.cuda.is_available():
-        raise RuntimeError("FDTD requires CUDA, but torch.cuda.is_available() is False.")
+        raise RuntimeError(
+            "FDTD requires CUDA, but torch.cuda.is_available() is False in this process. "
+            "Check CUDA_VISIBLE_DEVICES and container or sandbox device access as well "
+            "as the host driver."
+        )

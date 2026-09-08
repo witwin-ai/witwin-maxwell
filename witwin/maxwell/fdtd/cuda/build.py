@@ -146,13 +146,24 @@ def _ensure_windows_build_tools_on_path() -> None:
 
 
 def _ensure_cuda_home_from_nvcc() -> None:
-    if os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH"):
-        return
-    nvcc = shutil.which("nvcc")
-    if nvcc is None:
-        return
-    cuda_home = Path(nvcc).resolve().parents[1]
+    from torch.utils import cpp_extension
+
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if not cuda_home:
+        nvcc = shutil.which("nvcc")
+        if nvcc is not None:
+            cuda_home = str(Path(nvcc).resolve().parents[1])
+        else:
+            cuda_home = cpp_extension.CUDA_HOME
+    if not cuda_home:
+        raise RuntimeError(
+            "FDTD native extension compilation needs a CUDA toolkit. Set CUDA_HOME "
+            "to its directory before starting Python, or put nvcc on PATH. "
+            "Toolkit discovery is separate from CUDA device access."
+        )
     os.environ["CUDA_HOME"] = str(cuda_home)
+    # The extension module caches this path at import, before late environment setup.
+    cpp_extension.CUDA_HOME = str(cuda_home)
     if os.name == "nt":
         os.environ["CUDA_PATH"] = str(cuda_home)
 
