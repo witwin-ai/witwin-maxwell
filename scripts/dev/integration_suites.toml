@@ -35,6 +35,12 @@ pin_files = [
 known_failures = []
 
 [[merge_declarations]]
+branch = "fix/windows-m-pi"
+pytest = ["tests/materials/surface_impedance/test_copper_foil_execution.py", "tests/materials/thin_sheet/test_thin_sheet_fused_copper.py"]
+benchmark = "none"
+note = "T0 portability fix: copper.cu used M_PI, which MSVC defines only with _USE_MATH_DEFINES, so the Windows wheel build failed. A local constexpr double with the same literal replaces it; the sm_86 PTX of copper.cu is identical before and after (compiled at the same path with the extension's flags). No numerical change."
+
+[[merge_declarations]]
 branch = "release/snapshot-scrub"
 pytest = ["tests/validation/benchmark/test_integration_batch.py", "tests/api/public/test_guard_census.py", "benchmark/test_sie_combined_full_acceptance_v1.py", "tests/mom/test_single_buffer_assembly.py", "tests/mom/test_provider_epoch_v3.py", "tests/mom/layered/"]
 benchmark = "none"

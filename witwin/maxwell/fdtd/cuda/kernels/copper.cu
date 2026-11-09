@@ -3,6 +3,8 @@
 
 namespace {
 constexpr int threads = 128;
+// MSVC defines M_PI only with _USE_MATH_DEFINES; this is the same double constant.
+constexpr double pi = 3.14159265358979323846;
 
 struct CopperStep {
   int64_t faces, modes, inverse_row, inverse_col;
@@ -130,10 +132,10 @@ __device__ double spectral_weight(CopperAuxiliary p, int64_t frequency, double s
                                     fmax(__dsub_rn(double(p.end), start), 1.));
   double weight = 1.;
   if (p.window == 1)
-    weight = __dmul_rn(.5, __dsub_rn(1., cos(__dmul_rn(2. * M_PI, fraction))));
+    weight = __dmul_rn(.5, __dsub_rn(1., cos(__dmul_rn(2. * pi, fraction))));
   // Tensor/scalar division in torch multiplies by the scalar reciprocal.
   if (p.window == 2 && fraction < .1)
-    weight = __dmul_rn(.5, __dsub_rn(1., cos(__dmul_rn(__dmul_rn(M_PI, fraction), 10.))));
+    weight = __dmul_rn(.5, __dsub_rn(1., cos(__dmul_rn(__dmul_rn(pi, fraction), 10.))));
   return __dmul_rn(__dmul_rn(weight, double(valid)), activity);
 }
 
@@ -177,7 +179,7 @@ __global__ void copper_auxiliary_kernel(
   if (i < p.frequencies * 2 * n) {
     const int64_t frequency = i / (2 * n), trace = (i / n) % 2, face = i % n;
     const double weight = spectral_weight(p, frequency, step, activity);
-    const double angle = __dmul_rn(__dmul_rn(__dmul_rn(2. * M_PI, p.frequencies_hz[frequency]), p.dt), step + 1);
+    const double angle = __dmul_rn(__dmul_rn(__dmul_rn(2. * pi, p.frequencies_hz[frequency]), p.dt), step + 1);
     const double field = trace ? double(right_e[face]) : double(electric[p.offsets[face]]);
     p.real[i] = __dadd_rn(p.real[i], __dmul_rn(__dmul_rn(weight, cos(angle)), field));
     p.imag[i] = __dadd_rn(p.imag[i], __dmul_rn(__dmul_rn(weight, sin(angle)), field));
